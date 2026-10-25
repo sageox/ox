@@ -63,7 +63,7 @@ func draftReaperFixture(t *testing.T) (projectRoot, ledgerPath string) {
 }
 
 // agedDraft writes a draft whose updated_at is `age` in the past.
-// Ages are passed explicitly and far from the 24h threshold rather than nudged
+// Ages are passed explicitly and far from the 72h threshold rather than nudged
 // by a few seconds, so a slow CI machine can never flip a boundary.
 func agedDraft(t *testing.T, ledgerPath, sessionName string, age time.Duration) string {
 	t.Helper()
@@ -93,7 +93,7 @@ func TestFindOrphanedDrafts_OnlyReapsTrulyAbandoned(t *testing.T) {
 		{
 			name: "stale draft with no local data anywhere",
 			setup: func(t *testing.T, _, ledgerPath, name string) {
-				agedDraft(t, ledgerPath, name, 72*time.Hour)
+				agedDraft(t, ledgerPath, name, 120*time.Hour)
 			},
 			wantOrphan: true,
 			why:        "nothing else will ever reclaim this",
@@ -108,7 +108,7 @@ func TestFindOrphanedDrafts_OnlyReapsTrulyAbandoned(t *testing.T) {
 		{
 			name: "stale draft whose recording is still in the ledger cache",
 			setup: func(t *testing.T, _, ledgerPath, name string) {
-				agedDraft(t, ledgerPath, name, 72*time.Hour)
+				agedDraft(t, ledgerPath, name, 120*time.Hour)
 				cache := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", name)
 				require.NoError(t, os.MkdirAll(cache, 0755))
 				require.NoError(t, os.WriteFile(filepath.Join(cache, "raw.jsonl"),
@@ -119,7 +119,7 @@ func TestFindOrphanedDrafts_OnlyReapsTrulyAbandoned(t *testing.T) {
 		{
 			name: "stale draft with an active recording marker in the cache",
 			setup: func(t *testing.T, _, ledgerPath, name string) {
-				agedDraft(t, ledgerPath, name, 72*time.Hour)
+				agedDraft(t, ledgerPath, name, 120*time.Hour)
 				cache := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", name)
 				require.NoError(t, os.MkdirAll(cache, 0755))
 				require.NoError(t, os.WriteFile(filepath.Join(cache, ".recording.json"),
@@ -130,7 +130,7 @@ func TestFindOrphanedDrafts_OnlyReapsTrulyAbandoned(t *testing.T) {
 		{
 			name: "stale draft whose recording is in the XDG cache",
 			setup: func(t *testing.T, projectRoot, ledgerPath, name string) {
-				agedDraft(t, ledgerPath, name, 72*time.Hour)
+				agedDraft(t, ledgerPath, name, 120*time.Hour)
 				makeXDGCacheSession(t, projectRoot, name)
 			},
 			why: "the XDG cache is a real session location and must be searched too",
@@ -142,7 +142,7 @@ func TestFindOrphanedDrafts_OnlyReapsTrulyAbandoned(t *testing.T) {
 				require.NoError(t, os.MkdirAll(dir, 0755))
 				require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
 					Version: "1.0", SessionName: name, SessionID: draftTestSessionID,
-					CreatedAt: time.Now().Add(-72 * time.Hour), Draft: true,
+					CreatedAt: time.Now().Add(-120 * time.Hour), Draft: true,
 					Files: map[string]lfs.FileRef{},
 				}))
 			},
@@ -190,7 +190,7 @@ func TestFindOrphanedDrafts_OrdersOldestFirst(t *testing.T) {
 	setTestCfg(t)
 	projectRoot, ledgerPath := draftReaperFixture(t)
 
-	agedDraft(t, ledgerPath, "2026-01-01T00-00-testuser-OxNewer", 30*time.Hour)
+	agedDraft(t, ledgerPath, "2026-01-01T00-00-testuser-OxNewer", 96*time.Hour)
 	agedDraft(t, ledgerPath, "2026-01-01T00-00-testuser-OxOldst", 200*time.Hour)
 	agedDraft(t, ledgerPath, "2026-01-01T00-00-testuser-OxMiddl", 100*time.Hour)
 
@@ -223,7 +223,7 @@ func TestCheckSessionDraftOrphan_ReportsWithoutMutating(t *testing.T) {
 	projectRoot, ledgerPath := setupLedgerProject(t)
 	t.Chdir(projectRoot)
 
-	agedDraft(t, ledgerPath, "2026-01-01T00-00-testuser-OxRept", 72*time.Hour)
+	agedDraft(t, ledgerPath, "2026-01-01T00-00-testuser-OxRept", 120*time.Hour)
 	before := treeHash(t, ledgerPath)
 
 	res := checkSessionDraftOrphan(false)
@@ -269,7 +269,7 @@ func TestCheckSessionDraftOrphan_FixRemovesFromRemote(t *testing.T) {
 	f.publish(t, orphan, 2)
 	f.publish(t, live, 2)
 	// Age only the orphan. The live draft keeps its fresh updated_at.
-	agedDraft(t, f.ledgerPath, orphan, 72*time.Hour)
+	agedDraft(t, f.ledgerPath, orphan, 120*time.Hour)
 	runGit(t, f.ledgerPath, "add", "--sparse", "--", "sessions/"+orphan+"/meta.json")
 	runGit(t, f.ledgerPath, "commit", "--no-verify", "-m", "session-draft: age "+orphan)
 	f.push(t)

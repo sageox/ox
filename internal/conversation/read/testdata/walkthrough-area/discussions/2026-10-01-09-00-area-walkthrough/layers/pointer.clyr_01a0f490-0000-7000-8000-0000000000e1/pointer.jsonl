@@ -1,0 +1,4 @@
+{"t_utc":"2026-10-01T09:00:01.000Z","t_ms":1000,"x":10,"y":20,"vis":true,"dwell_ms":0,"v":200,"ax_ref":null,"btn":null}
+{"t_utc":"2026-10-01T09:00:04.000Z","t_ms":4000,"x":620,"y":540,"vis":true,"dwell_ms":0,"v":300,"ax_ref":"axn_pay","btn":{"button":"left","phase":"down"}}
+{"t_utc":"2026-10-01T09:00:04.200Z","t_ms":4200,"x":620,"y":540,"vis":true,"dwell_ms":200,"v":0,"ax_ref":"axn_pay","btn":{"button":"left","phase":"up"}}
+{"t_utc":"2026-10-01T09:00:06.000Z","t_ms":6000,"vis":false,"ax_ref":null,"btn":null}

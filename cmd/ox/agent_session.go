@@ -10,26 +10,32 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/runtime"
+	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/session/claudesource"
 	"github.com/sageox/ox/internal/session/pipeline"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/useragent"
@@ -94,7 +100,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	// verify SageOx is initialized in this project
 	if !config.IsInitialized(projectRoot) {
-		return fmt.Errorf("SageOx not initialized in this project\nRun 'ox init' first to set up session recording")
+		return errkind.Errorf(errkind.NotInitialized, "SageOx not initialized in this project\nRun 'ox init' first to set up session recording")
 	}
 
 	// NOTE: No OAuth gate here. Session recording only needs a Git PAT for upload
@@ -122,11 +128,51 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	title := parseTitle(args)
 
 	agentType := canonicalAgentType(inst.AgentType)
+	var agentSessionID string
+	if agent, ok := agentx.DefaultRegistry.Get(agentx.AgentType(agentType)); ok && agent.SupportsSession() {
+		agentSessionID = agent.SessionID(agentx.NewSystemEnvironment())
+	}
 	adapterName := ""          // canonical adapter name for GetAdapter() lookup
 	agentTypeName := agentType // original type for metadata
 	sessionFile := ""
+	var startOffset int64
+	var startOffsetKnown bool
+	var sourcePrefixSHA256 string
 
-	if isManualSessionAgent(agentType) {
+	if agentType == string(agentx.AgentTypeCursor) {
+		// Cursor does not expose its native conversation ID through environment
+		// variables. Resolve only the marker belonging to this exact AI coworker;
+		// never infer a chat from Cursor's shared desktop PID.
+		marker := FindUnambiguousSessionMarkerByAgentID(inst.AgentID)
+		if marker == nil || marker.AgentSessionID == "" {
+			return fmt.Errorf("missing-native-identity: Cursor manual recording requires a completed Cursor prime for this AI coworker")
+		}
+		if marker.CursorSourceBoundary == nil {
+			return session.ErrCursorBoundaryUnavailable
+		}
+		workspace, workspaceErr := canonicalCursorWorkspace(projectRoot)
+		if workspaceErr != nil {
+			return workspaceErr
+		}
+		markerWorkspace, workspaceErr := canonicalCursorWorkspace(marker.CursorSourceBoundary.WorkspacePath)
+		if workspaceErr != nil || markerWorkspace != workspace {
+			return fmt.Errorf("workspace-mismatch: Cursor conversation is bound to another workspace")
+		}
+		agentSessionID = marker.AgentSessionID
+		if _, adapterErr := adapters.GetAdapter(string(agentx.AgentTypeCursor)); adapterErr != nil {
+			return fmt.Errorf("adapter-missing: Cursor adapter unavailable: %w", adapterErr)
+		}
+		var boundaryErr error
+		sessionFile, startOffset, sourcePrefixSHA256, boundaryErr = cursorManualStartBoundary(projectRoot, agentSessionID)
+		if boundaryErr != nil {
+			return boundaryErr
+		}
+		if marker.CursorSourceBoundary.SourcePath != sessionFile {
+			return fmt.Errorf("invalid-source-path: Cursor marker does not match the conversation export")
+		}
+		startOffsetKnown = true
+		adapterName = string(agentx.AgentTypeCursor)
+	} else if isManualSessionAgent(agentType) {
 		// Codex: use the codex adapter to find its session file.
 		// Codex stores plans inline in session files (no separate plan.md).
 		adapterName = string(agentx.AgentTypeCodex)
@@ -136,9 +182,10 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		}
 		since := time.Now().Add(-5 * time.Minute)
 		sf, findErr := codexAdapter.FindSessionFile(adapters.SessionLookup{
-			RepoRoot: projectRoot,
-			AgentID:  inst.AgentID,
-			Since:    since,
+			RepoRoot:       projectRoot,
+			AgentID:        inst.AgentID,
+			AgentSessionID: agentSessionID,
+			Since:          since,
 		})
 		if findErr != nil {
 			if errors.Is(findErr, adapters.ErrSessionNotFound) {
@@ -191,6 +238,10 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		}
 		sessionsBase := filepath.Join(contextPath, "sessions")
 		sessionPath := filepath.Join(sessionsBase, sessionName)
+		// never write into, or clean up, a held session's folder
+		if session.IsHeld(sessionPath) {
+			return fmt.Errorf("%w: %s", session.ErrHeldSessionPath, sessionPath)
+		}
 
 		if err := os.MkdirAll(sessionPath, 0755); err != nil {
 			return fmt.Errorf("create session dir: %w", err)
@@ -206,40 +257,65 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	useragent.SetAgentType(adapterName)
 
 	// capture file size before recording starts — entries before this offset are pre-session
-	// (e.g., buffered messages from before /ox-session-start was called)
-	var startOffset int64
-	if sessionFile != "" {
+	// (e.g., buffered messages from before ox agent session start was called)
+	if sessionFile != "" && !startOffsetKnown {
 		if fi, err := os.Stat(sessionFile); err == nil {
 			startOffset = fi.Size()
+			startOffsetKnown = true
 		}
 	}
 
 	// determine parent PID for liveness detection.
 	// prefer OX_PARENT_PID env (set by prime, stable) over FindAgentAncestorPID()
 	// which can return a transient shell PID if the process tree walk fails.
-	parentPID := proc.FindAgentAncestorPID()
-	if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
-		if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
-			parentPID = parsed
+	parentPID := 0
+	if agentType != "cursor" {
+		parentPID = proc.FindAgentAncestorPID()
+		if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
+			if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
+				parentPID = parsed
+			}
 		}
 	}
 
 	// start recording with agent ID from session
+	attribution := identity.ResolveAttribution(endpoint.GetForProject(projectRoot), config.GetDisplayName())
 	opts := session.StartRecordingOptions{
-		AgentID:       inst.AgentID,
-		AdapterName:   adapterName,
-		AgentType:     agentTypeName,
-		SessionFile:   sessionFile,
-		Title:         title,
-		Username:      identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName()),
-		WorkspacePath: projectRoot,
-		Branch:        repotools.GetCurrentBranch(projectRoot),
-		ParentPID:     parentPID,
-		StartOffset:   startOffset,
-		WatchMode:     "hook", // CLI-started sessions use hook mode (CLI hooks drive recording)
+		AgentID:            inst.AgentID,
+		AgentSessionID:     agentSessionID,
+		AdapterName:        adapterName,
+		AgentType:          agentTypeName,
+		SessionFile:        sessionFile,
+		Title:              title,
+		Username:           attribution.Username,
+		WorkspacePath:      projectRoot,
+		Branch:             repotools.GetCurrentBranch(projectRoot),
+		ParentPID:          parentPID,
+		StartOffset:        startOffset,
+		StartOffsetKnown:   startOffsetKnown,
+		SourcePrefixSHA256: sourcePrefixSHA256,
+		WatchMode:          sessionWatchMode(adapterName),
 	}
 
-	state, err := session.StartRecording(projectRoot, opts)
+	var state *session.RecordingState
+	if adapterName == "cursor" {
+		opts.PreparedIdentity, err = session.PrepareRecordingIdentity(projectRoot)
+		if err != nil {
+			return fmt.Errorf("prepare Cursor recording identity: %w", err)
+		}
+		opts.BeforePublish = func(s *session.RecordingState) error {
+			return writeRawHeaderWithAttribution(projectRoot, s, &attribution)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err = fileutil.WithFileLock(ctx, markerPath(agentSessionID)+".recording-start", func() error {
+			var startErr error
+			state, startErr = session.StartRecording(projectRoot, opts)
+			return startErr
+		})
+	} else {
+		state, err = session.StartRecording(projectRoot, opts)
+	}
 	if err != nil {
 		if errors.Is(err, session.ErrAlreadyRecording) {
 			return fmt.Errorf("a session is already being recorded\nRun 'ox agent %s session stop' first, then start a new session", inst.AgentID)
@@ -250,13 +326,18 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		return fmt.Errorf("failed to start recording: %w", err)
 	}
 	// write raw.jsonl header immediately so incremental hooks can append entries
-	if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
-		slog.Warn("failed to write raw.jsonl header at start", "error", writeErr)
-		// non-fatal: processAgentSession will write header at stop time as fallback
+	if adapterName != "cursor" {
+		if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
+			slog.Warn("failed to write raw.jsonl header at start", "error", writeErr)
+			// non-fatal: processAgentSession will write header at stop time as fallback
+		}
 	}
 
 	// register-at-start so /c/<session_id> resolves from t=0 (fire-and-forget)
 	notifySessionStartedAsync(projectRoot, state)
+	if state.WatchMode == "tail" {
+		sendSessionWatchStart(state, projectRoot)
+	}
 
 	// build output once, render based on mode
 	output := buildSessionStartOutput(inst.AgentID, adapterName, sessionFile, title, notice, state.StartedAt)
@@ -271,13 +352,12 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		fmt.Println("--- Machine Output ---")
 	}
 
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
+	jsonOut, err := cli.MarshalJSONIndent(output)
 	if err != nil {
 		return fmt.Errorf("format start JSON: %w", err)
 	}
 	trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.WriteJSONBytes(os.Stdout, jsonOut)
 }
 
 // buildSessionStartOutput constructs the JSON output for session start.
@@ -289,7 +369,7 @@ func buildSessionStartOutput(agentID, adapterName, sessionFile, title, notice st
 		Title:    title,
 		Adapter:  adapterName,
 		Started:  startedAt.Format(time.RFC3339),
-		Hint:     "Run /ox-session-stop to end recording",
+		Hint:     "Run ox agent session stop to end recording",
 		Notice:   notice,
 		Guidance: sessionStartGuidance,
 	}
@@ -299,7 +379,7 @@ func buildSessionStartOutput(agentID, adapterName, sessionFile, title, notice st
 		output.NextActions = []string{
 			fmt.Sprintf("Use 'ox agent %s session log --role user --content \"...\"' to record conversation turns", agentID),
 			"Or write JSONL directly to session_file (see format_hint)",
-			"Run /ox-session-stop when done",
+			"Run ox agent session stop when done",
 		}
 	}
 	return output
@@ -317,13 +397,14 @@ func printSessionStartText(agentID, adapterName, title, notice string, startedAt
 	}
 	fmt.Printf("  Agent: %s (%s)\n", agentID, adapterName)
 	fmt.Printf("  Started: %s\n", startedAt.Format("15:04:05"))
-	fmt.Printf("  Run %s to end recording\n", cli.StyleCommand.Render("/ox-session-stop"))
+	fmt.Printf("  Run %s to end recording\n", cli.StyleCommand.Render("ox agent session stop"))
 }
 
 // isManualSessionAgent returns true for agent types that require explicit
 // adapter selection instead of generic/deep autodetection.
 func isManualSessionAgent(agentType string) bool {
-	return canonicalAgentType(agentType) == string(agentx.AgentTypeCodex)
+	canonical := canonicalAgentType(agentType)
+	return canonical == string(agentx.AgentTypeCodex) || canonical == string(agentx.AgentTypeCursor)
 }
 
 // ensurePrimeBeforeSession checks if `ox agent prime` has run for the current
@@ -357,9 +438,21 @@ func ensurePrimeBeforeSession(agentID string) {
 	}
 
 	// prime hasn't run — execute it inline
+	//
+	// Guard against test binaries: os.Executable() below resolves to the
+	// compiled `go test` binary when this runs inside a test process, not
+	// the real ox CLI. exec'ing it with args "agent prime" doesn't hit any
+	// -test.* flag, so the test binary just reruns its entire suite from
+	// scratch — which reaches this same code path again, recursing without
+	// bound until the package's test deadline kills it. See #846.
+	if testing.Testing() {
+		slog.Debug("session start: skipping inline prime (running under go test)")
+		return
+	}
+
 	slog.Info("session start: prime not detected, running inline", "agent_session_id", agentSessionID)
 
-	oxPath, err := os.Executable()
+	oxPath, err := selfexec.Path()
 	if err != nil {
 		slog.Warn("session start: cannot find ox executable for inline prime", "error", err)
 		return
@@ -382,6 +475,7 @@ func ensurePrimeBeforeSession(agentID string) {
 // Usage: ox agent <id> session stop
 func runAgentSessionStop(inst *agentinstance.Instance) error {
 	stopStart := time.Now()
+	stopRequestedAt := stopStart.UTC() // the recording's stop time, folded into meta.json
 	timing := make(map[string]int64)
 
 	// verify redaction signature before stopping - warn if tampered
@@ -393,8 +487,13 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		return fmt.Errorf("could not find project root: %w", err)
 	}
 
-	// check if actually recording
+	// check if actually recording. A quarantined recording is held for review,
+	// not recording: stop never finalizes it, since that would publish a session
+	// already known to span repositories.
 	if !session.IsRecordingForAgent(projectRoot, inst.AgentID) {
+		if held, heldErr := session.LoadQuarantinedRecordingsForAgent(projectRoot, inst.AgentID); heldErr == nil && len(held) > 0 {
+			return fmt.Errorf("not currently recording; a recording is held back for ownership review and was not finalized\nrun 'ox doctor' to see how to release or discard it")
+		}
 		return fmt.Errorf("not currently recording\nRun 'ox agent %s session start' to begin recording", inst.AgentID)
 	}
 
@@ -427,21 +526,49 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 			Type:          "session_stop_retry",
 			AgentID:       inst.AgentID,
 			SessionFile:   state.SessionFile,
-			RetryGuidance: fmt.Sprintf("No session data captured. Use 'ox agent %s session log --stdin' to write your conversation, then re-run this command.", inst.AgentID),
+			RetryGuidance: fmt.Sprintf("No session data captured. Record your conversation with 'ox agent %s session log --role user --content \"...\"' (one entry per call) or pipe a JSON array of entries to 'ox agent %s session record', then re-run this command.", inst.AgentID, inst.AgentID),
 			NextActions: []string{
-				fmt.Sprintf("Dump conversation as JSONL: ox agent %s session log --role user --stdin", inst.AgentID),
+				// session log requires --role and writes ONE entry per call; the
+				// batch form is session record, which takes a JSON array.
+				fmt.Sprintf("Record many entries at once: echo '[{\"type\":\"user\",\"content\":\"...\"}]' | ox agent %s session record", inst.AgentID),
 				fmt.Sprintf("Re-run: ox agent %s session stop", inst.AgentID),
 			},
 		}
-		jsonOut, _ := json.MarshalIndent(retry, "", "  ")
+		jsonOut, _ := cli.MarshalJSONIndent(retry)
 		trackContextBytes(int64(len(jsonOut)))
-		fmt.Println(string(jsonOut))
-		return nil
+		return cli.WriteJSONBytes(os.Stdout, jsonOut)
 	}
 
 	// mark explicit stop BEFORE daemon RPC so anti-entropy cannot restart
 	// the watcher in the window between RPC and mark
-	_ = session.MarkExplicitStop(projectRoot, inst.AgentID)
+	if state.Trace != nil {
+		if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
+			s.RecordTraceBoundary("stop", stopRequestedAt)
+			state.Trace = s.Trace
+		}); err != nil {
+			slog.Warn("persist trace stop boundary failed", "error", err)
+			state.Trace = nil // uncertainty must omit traces, never broaden their window
+		}
+	}
+	traceAtStop := state.Trace
+	if state.AdapterName == "cursor" {
+		held := stopHoldsSession(projectRoot, state)
+		now := time.Now().UTC()
+		if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(current *session.RecordingState) {
+			if current.StoppedAt == nil {
+				current.StoppedAt = &now
+			}
+			current.CursorFinalDrainPending = true
+			if held {
+				current.PublishingMode = config.SessionPublishingManual
+			}
+		}); err != nil {
+			return fmt.Errorf("preserve pending Cursor final drain: %w", err)
+		}
+	}
+	if err := session.MarkExplicitStop(projectRoot, inst.AgentID); err != nil {
+		return fmt.Errorf("mark session stopped: %w", err)
+	}
 
 	// for tail-mode sessions: tell the daemon to stop tailing before we process
 	if state.WatchMode == "tail" {
@@ -456,7 +583,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// re-discover session file if it was empty at start time
 	// (Claude Code session JSONL may not have existed yet when recording started)
-	if state.SessionFile == "" && state.AdapterName != "" && state.AdapterName != "generic" {
+	if state.SessionFile == "" && state.AdapterName != "" && state.AdapterName != "generic" && state.AdapterName != "cursor" {
 		if adapter, adapterErr := adapters.GetAdapter(state.AdapterName); adapterErr == nil {
 			// use state.WorkspacePath (persisted at start) as the single source of truth
 			// for repoRoot -- never derive from ambient cwd/env at stop time
@@ -465,9 +592,10 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 				repoRoot = projectRoot // fallback for legacy states without WorkspacePath
 			}
 			lookup := adapters.SessionLookup{
-				RepoRoot: repoRoot,
-				AgentID:  state.AgentID,
-				Since:    state.StartedAt,
+				RepoRoot:       repoRoot,
+				AgentID:        state.AgentID,
+				AgentSessionID: state.AgentSessionID,
+				Since:          state.StartedAt.Add(-5 * time.Minute),
 			}
 			if sf, findErr := adapter.FindSessionFile(lookup); findErr == nil {
 				slog.Info("session file discovered at stop time", "file", sf, "adapter", state.AdapterName)
@@ -479,9 +607,10 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 				pathVariants := sessionPathVariants(repoRoot)
 				for _, variant := range pathVariants {
 					retryLookup := adapters.SessionLookup{
-						RepoRoot: variant,
-						AgentID:  state.AgentID,
-						Since:    state.StartedAt,
+						RepoRoot:       variant,
+						AgentID:        state.AgentID,
+						AgentSessionID: state.AgentSessionID,
+						Since:          state.StartedAt.Add(-5 * time.Minute),
 					}
 					if sf, retryErr := adapter.FindSessionFile(retryLookup); retryErr == nil {
 						slog.Info("session file discovered via path variant", "file", sf, "original_root", repoRoot, "variant", variant)
@@ -489,14 +618,8 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 						break
 					}
 				}
-
-				// last resort: time-window scan across all Claude project directories
-				if state.SessionFile == "" && state.AdapterName == "claude-code" {
-					if sf := scanClaudeProjectsForSession(state.AgentID, state.StartedAt); sf != "" {
-						slog.Info("session file discovered via time-window scan", "file", sf)
-						state.SessionFile = sf
-					}
-				}
+				// Do not scan other project buckets by time/agent ID here: that
+				// bypasses the adapter's native session ID and repo checks.
 			}
 
 			// if still not found after all retries, set rich recovery marker
@@ -517,11 +640,47 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// process session: read, redact secrets, extract events, save
 	var processResult *agentSessionResult
-	if state.SessionFile != "" {
+	if state.SessionFile != "" || state.AdapterName == "cursor" {
 		processStart := time.Now()
-		processResult, err = processAgentSession(projectRoot, state)
+		// Serialize with the raw.jsonl writer's file lock so processAgentSession
+		// (RecoverRawAppend + drain) never runs concurrently with a hook or
+		// watcher still appending a batch under the same lock — stop is
+		// advisory and a capture can be in flight when it fires. Every capture
+		// mode appends under this lock, so every mode waits for it here. A lock
+		// failure preserves the recording for retry.
+		err = fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
+			latest, loadErr := reloadRecordingForFinalDrain(projectRoot, state)
+			if loadErr != nil {
+				return loadErr
+			}
+			state = latest
+			state.Trace = traceAtStop
+			// in-memory only: the stop was requested at stopStart, and every
+			// meta.json/header writer below reads state.StoppedAt through
+			// session.ResolveStoppedAt. Never persisted — a saved StoppedAt
+			// is the daemon's "owner gone, reclaim me" signal.
+			state.StoppedAt = &stopRequestedAt
+			var processErr error
+			if processResult, processErr = processAgentSession(projectRoot, state); processErr != nil {
+				return processErr
+			}
+			// Clear before releasing the lock, and clear THIS recording: a hook
+			// queued on the lock re-reads the state once it gets in. Left in
+			// place, it would append a batch after the final drain that nothing
+			// will ever upload. See ClearRecordingStateAt.
+			if clearErr := session.ClearRecordingStateAt(state.SessionPath, state.SessionID); clearErr != nil {
+				return fmt.Errorf("finalize recording stop: %w", clearErr)
+			}
+			return nil
+		})
 		timing["process_ms"] = time.Since(processStart).Milliseconds()
 		if err != nil {
+			if errors.Is(err, claudesource.ErrUntrustedSource) {
+				if markErr := session.SetSourceRejectedAt(state.SessionPath, state.SessionID, true); markErr != nil {
+					return fmt.Errorf("quarantine untrusted source: %w", errors.Join(err, markErr))
+				}
+				return fmt.Errorf("claude source has untrusted repository ownership; recording preserved for manual review: %w", err)
+			}
 			// set marker so future ox agent prime knows doctor is needed
 			_ = doctor.SetNeedsDoctorAgent(projectRoot) // best effort
 			return fmt.Errorf("failed to process session: %w\nrecording state preserved; run 'ox agent %s session recover' or retry stop", err, inst.AgentID)
@@ -548,10 +707,15 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// with no data. Preserve state when session file discovery failed — it contains
 	// breadcrumbs (WorkspacePath, AdapterName, StartedAt) needed for recovery.
 	if processResult != nil || state.SessionFile == "" && state.AdapterName == "" {
-		if err := session.ClearRecordingStateForAgent(projectRoot, inst.AgentID); err != nil {
-			_ = doctor.SetNeedsDoctorAgent(projectRoot)
-			return fmt.Errorf("failed to finalize recording stop: %w", err)
+		// A processed recording was already cleared under the capture lock
+		// above; only the explicit no-data stop still has state to clear here.
+		if processResult == nil {
+			if err := session.ClearRecordingStateAt(state.SessionPath, state.SessionID); err != nil {
+				_ = doctor.SetNeedsDoctorAgent(projectRoot)
+				return fmt.Errorf("failed to finalize recording stop: %w", err)
+			}
 		}
+		convergeAfterSessionBoundary(projectRoot)
 	} else if state.SessionFile == "" {
 		// session file not found — recording state preserved for recovery
 		slog.Info("recording state preserved for recovery", "agent_id", inst.AgentID, "adapter", state.AdapterName)
@@ -582,20 +746,20 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// output format selection (priority: review > text > json default)
 	if cfg.Review {
 		// security audit mode: human summary first, then JSON
-		outputTextSummary(state, duration, processResult)
+		outputTextSummary(projectRoot, state, duration, processResult)
 		fmt.Println()
 		fmt.Println("--- Machine Output ---")
-		return outputSessionStopJSON(inst, state, duration, processResult, timing)
+		return outputSessionStopJSON(projectRoot, inst, state, duration, processResult, timing)
 	}
 
 	if cfg.Text {
 		// human-readable text output
-		outputTextSummary(state, duration, processResult)
+		outputTextSummary(projectRoot, state, duration, processResult)
 		return nil
 	}
 
 	// default: JSON output
-	return outputSessionStopJSON(inst, state, duration, processResult, timing)
+	return outputSessionStopJSON(projectRoot, inst, state, duration, processResult, timing)
 }
 
 // sessionPathVariants returns alternate path forms that may produce different
@@ -625,97 +789,14 @@ func sessionPathVariants(repoRoot string) []string {
 	return variants
 }
 
-// scanClaudeProjectsForSession is a last-resort recovery that scans all
-// ~/.claude/projects/ directories for JSONL files modified within the session's
-// time window. This catches cases where the project hash doesn't match due to
-// path normalization differences (trailing slash, case, mount points).
-func scanClaudeProjectsForSession(agentID string, startedAt time.Time) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	projectsDir := filepath.Join(home, ".claude", "projects")
-	projectDirs, err := os.ReadDir(projectsDir)
-	if err != nil {
-		return ""
-	}
-
-	// allow 30s buffer before session start for timing drift
-	searchStart := startedAt.Add(-30 * time.Second)
-
-	type candidate struct {
-		path    string
-		modTime time.Time
-	}
-	var candidates []candidate
-
-	for _, dir := range projectDirs {
-		if !dir.IsDir() {
-			continue
-		}
-		dirPath := filepath.Join(projectsDir, dir.Name())
-		files, err := os.ReadDir(dirPath)
-		if err != nil {
-			continue
-		}
-		for _, f := range files {
-			if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
-				continue
-			}
-			info, err := f.Info()
-			if err != nil {
-				continue
-			}
-			if info.ModTime().Before(searchStart) {
-				continue
-			}
-			candidates = append(candidates, candidate{
-				path:    filepath.Join(dirPath, f.Name()),
-				modTime: info.ModTime(),
-			})
-		}
-	}
-
-	if len(candidates) == 0 {
-		return ""
-	}
-
-	// sort most recently modified first
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].modTime.After(candidates[j].modTime)
-	})
-
-	// check up to 10 candidates for the agent ID (avoid scanning thousands of files)
-	limit := 10
-	if len(candidates) < limit {
-		limit = len(candidates)
-	}
-	for _, c := range candidates[:limit] {
-		if fileContainsString(c.path, agentID) {
-			return c.path
-		}
-	}
-	return ""
-}
-
-// fileContainsString checks if a file contains the given string, reading at most 64KB.
-func fileContainsString(path, needle string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	buf := make([]byte, 64*1024)
-	n, _ := f.Read(buf)
-	return strings.Contains(string(buf[:n]), needle)
-}
-
 // recordSessionObservation writes a session summary observation to team memory.
 // Best-effort only — failures are logged but never block session stop.
 func recordSessionObservation(projectRoot string, result *agentSessionResult, duration string) {
 	if result == nil || result.EntryCount == 0 {
 		return // nothing interesting to record
+	}
+	if result.Held {
+		return // a held session leaves nothing on the team's side, not even a snippet
 	}
 
 	tc := config.FindRepoTeamContext(projectRoot)
@@ -744,7 +825,7 @@ func recordSessionObservation(projectRoot string, result *agentSessionResult, du
 }
 
 // outputTextSummary renders the human-readable text summary for session stop.
-func outputTextSummary(state *session.RecordingState, duration string, processResult *agentSessionResult) {
+func outputTextSummary(projectRoot string, state *session.RecordingState, duration string, processResult *agentSessionResult) {
 	if state.Title != "" {
 		cli.PrintSuccess(fmt.Sprintf("Recording stopped: %q", state.Title))
 	} else {
@@ -757,6 +838,9 @@ func outputTextSummary(state *session.RecordingState, duration string, processRe
 	if processResult != nil {
 		if processResult.Model != "" {
 			fmt.Printf("  Model: %s\n", processResult.Model)
+		}
+		if processResult.Held {
+			fmt.Printf("  %s\n", processResult.UploadWarning)
 		}
 
 		// show generated files with descriptions
@@ -776,6 +860,21 @@ func outputTextSummary(state *session.RecordingState, duration string, processRe
 			}
 		}
 
+		// Where did this session go? Without this, a coworker who recorded
+		// successfully has no way to discover a wrong-team mismatch or find
+		// the session's durable URL — see sessionStopLocation.
+		loc := sessionStopLocation(projectRoot, state)
+		if loc.TeamName != "" || loc.TeamID != "" {
+			teamLabel := loc.TeamName
+			if teamLabel == "" {
+				teamLabel = loc.TeamID
+			}
+			fmt.Printf("  %-13s%s / %s\n", "Recorded to", teamLabel, loc.RepoDisplayName)
+		}
+		if loc.SessionURL != "" {
+			fmt.Printf("  %-13s%s\n", "View at", loc.SessionURL)
+		}
+
 		if processResult.SecretsRedacted > 0 {
 			fmt.Printf("\n  Redacted: %d secrets\n", processResult.SecretsRedacted)
 		}
@@ -785,8 +884,40 @@ func outputTextSummary(state *session.RecordingState, duration string, processRe
 	}
 }
 
+// sessionStopLocationInfo carries where a stopped session landed, for
+// rendering in both the human text summary and the JSON StopOutput
+// (contract D8). Fields are independently optional: a caller must check
+// each before using it rather than assuming they arrive together.
+type sessionStopLocationInfo struct {
+	TeamID          string
+	TeamName        string
+	RepoID          string
+	RepoDisplayName string
+	SessionURL      string // durable <endpoint>/c/<ses_id> link; "" when unavailable
+}
+
+// sessionStopLocation resolves the team/repo/URL a session was recorded
+// under. SessionURL is "" when attribution is off or the session's
+// server-side registration is still pending (see sessionLinkOutputs) —
+// callers must omit rather than print an empty or half-built URL.
+func sessionStopLocation(projectRoot string, state *session.RecordingState) sessionStopLocationInfo {
+	var info sessionStopLocationInfo
+	info.RepoDisplayName = filepath.Base(projectRoot)
+
+	projCfg, _ := config.LoadProjectConfig(projectRoot)
+	if projCfg != nil {
+		info.TeamID = projCfg.TeamID
+		info.TeamName = projCfg.TeamName
+		info.RepoID = projCfg.RepoID
+	}
+
+	attribution := loadResolvedAttributionFor(projectRoot)
+	info.SessionURL, _ = sessionLinkOutputs(projectRoot, projCfg, state, attribution.Session)
+	return info
+}
+
 // outputSessionStopJSON renders JSON output for session stop.
-func outputSessionStopJSON(inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult, timing map[string]int64) error {
+func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult, timing map[string]int64) error {
 	output := sessionStopOutput{
 		Success:  true,
 		Type:     "session_stop",
@@ -799,6 +930,11 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 	if state.Title != "" {
 		output.Title = state.Title
 	}
+	loc := sessionStopLocation(projectRoot, state)
+	output.SessionURL = loc.SessionURL
+	output.TeamID = loc.TeamID
+	output.TeamName = loc.TeamName
+	output.RepoID = loc.RepoID
 	if processResult != nil {
 		output.RawPath = processResult.RawPath
 		output.SummaryMDPath = processResult.SummaryMDPath
@@ -828,17 +964,20 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 		if processResult.SummaryPrompt == "" {
 			output.Guidance = "Session stopped and saved. Upload and summary generation happen automatically in the background."
 		}
+		output.Held = processResult.Held
+		if processResult.Held {
+			output.Guidance = heldSessionGuidance
+		}
 	} else {
 		output.UploadWarning = "no session file found — session data was not uploaded to ledger"
 		output.Guidance = "Session stopped but no conversation data was found. The session recording may be empty. Run 'ox doctor' to check for recoverable sessions."
 	}
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
+	jsonOut, err := cli.MarshalJSONIndent(output)
 	if err != nil {
 		return fmt.Errorf("format stop JSON: %w", err)
 	}
 	trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.WriteJSONBytes(os.Stdout, jsonOut)
 }
 
 // sessionStopOutput aliases pipeline.StopOutput for backward compat within package main.
@@ -880,7 +1019,40 @@ type agentSessionResult = pipeline.Result
 // Summary generation is agent-driven (via summary_prompt in session stop output),
 // and push-summary writes it to the ledger. Doctor detects missing summaries
 // by scanning the ledger directly.
+// rawEntryMap is the flat WriteRaw shape for one reconstructed entry. Shared by
+// the two reconstruct paths (processAgentSession, processSession) so a field
+// added to SessionEntry cannot reach one file and not the other — call_id was
+// exactly such a drop before this helper existed.
+func rawEntryMap(entry session.Entry) map[string]any {
+	data := map[string]any{
+		"type":      string(entry.Type),
+		"content":   entry.Content,
+		"timestamp": entry.Timestamp,
+	}
+	if entry.ToolName != "" {
+		data["tool_name"] = entry.ToolName
+	}
+	if entry.ToolInput != "" {
+		data["tool_input"] = entry.ToolInput
+	}
+	if entry.ToolOutput != "" {
+		data["tool_output"] = entry.ToolOutput
+	}
+	if entry.IsError {
+		data["is_error"] = true
+	}
+	if entry.CallID != "" {
+		data["call_id"] = entry.CallID
+	}
+	return data
+}
+
 func processAgentSession(projectRoot string, state *session.RecordingState) (*agentSessionResult, error) {
+	// Stop reloads state under the capture lock; a watcher can quarantine the
+	// source after the caller's initial check. Never process that newer state.
+	if state.SourceRejected {
+		return nil, fmt.Errorf("claude source has untrusted repository ownership; recording preserved for manual review")
+	}
 	result := &agentSessionResult{}
 
 	// resolve project endpoint for auth lookups
@@ -890,6 +1062,12 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	adapter, err := adapters.GetAdapter(state.AdapterName)
 	if err != nil {
 		return nil, fmt.Errorf("adapter not found: %w", err)
+	}
+	if state.AdapterName == "cursor" {
+		// Even a header-only pending session uses its saved byte boundary.
+		// Full Read plus timestamp filtering would replay old JSONL and drop
+		// Cursor's entries, whose timestamps are explicitly unknown.
+		return finalizeIncrementalSession(projectRoot, state, filepath.Join(state.SessionPath, "raw.jsonl"), adapter, result)
 	}
 
 	// read session metadata (agent version, model)
@@ -923,23 +1101,62 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// resulting commit will break LFS linkage and the daemon's anti-entropy
 	// will start clobbering. See the 2026-04-25 post-mortem (bd ox-4ncz).
 	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
-	hasIncrementalEntries := rawJSONLHasEntries(rawPath)
+	if err := session.RecoverRawAppend(rawPath, state.SourceOffset); err != nil {
+		return nil, err
+	}
+	hasIncrementalEntries := session.HasSubstantiveEntries(rawPath)
 
 	if hasIncrementalEntries {
 		// incremental hooks already wrote entries -- do final drain, write footer, and generate artifacts
 		return finalizeIncrementalSession(projectRoot, state, rawPath, adapter, result)
 	}
 
-	// read entries from session file
-	rawEntries, err := adapter.Read(state.SessionFile)
+	// Snapshot before the adapter opens the path: validation must apply to
+	// the same file whose entries we are about to import.
+	var sourceSnapshot os.FileInfo
+	if state.AdapterName == "claude-code" {
+		sourceSnapshot, err = claudesource.Snapshot(state.SessionFile)
+		if err != nil {
+			return nil, fmt.Errorf("stat native session before read: %w", err)
+		}
+	}
+	// read entries from session file. A Claude source is read from the same
+	// offset it is validated from: entries before it are never imported, so a
+	// foreign turn in that window can neither condemn nor ride along.
+	var rawEntries []adapters.RawEntry
+	reader, incremental := adapter.(adapters.IncrementalReader)
+	// An Amp recording's offset is the line of the prompt that began it, which
+	// ox-bridge.ts wrote before the prime: the offset alone bounds it.
+	startsAtPrompt := incremental && state.AmpStartsAtPrompt()
+	if incremental && (startsAtPrompt || (state.AdapterName == "claude-code" && state.StartOffset > 0)) {
+		rawEntries, _, err = reader.ReadFromOffset(state.SessionFile, state.StartOffset)
+	} else {
+		rawEntries, err = adapter.Read(state.SessionFile)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to read session: %w", err)
+	}
+	if state.AdapterName == "claude-code" {
+		repoRoot := state.WorkspacePath
+		if repoRoot == "" {
+			repoRoot = projectRoot
+		}
+		// A native turn can be appended while Read runs. Check everything this
+		// recording could import before using any returned entries, even when
+		// it read none. Turns from before the recording began are filtered out
+		// below and never published, so they do not decide ownership.
+		if err := claudesource.ValidateRecorded(state.SessionFile, repoRoot, state.AgentSessionID, state.StartOffset, sourceSnapshot); err != nil {
+			if errors.Is(err, claudesource.ErrUntrustedSource) {
+				return nil, fmt.Errorf("claude source no longer belongs to repository: %w", err)
+			}
+			return nil, fmt.Errorf("cannot verify claude source ownership right now: %w", err)
+		}
 	}
 
 	// filter out entries from before session recording started.
 	// the adapter reads ALL entries from the JSONL file, but we only want
 	// entries created after ox session start was called.
-	if !state.StartedAt.IsZero() {
+	if !state.StartedAt.IsZero() && !startsAtPrompt {
 		rawEntries = pipeline.FilterEntriesAfterStart(rawEntries, state.StartedAt)
 	}
 
@@ -970,9 +1187,8 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// create redactor for secret scrubbing
 	redactor, parseErrs := session.NewRedactorWithCustomRules(projectRoot)
 	if len(parseErrs) > 0 {
-		for _, pe := range parseErrs {
-			slog.Warn("redaction rule parse error", "file", pe.Path, "line", pe.Line, "error", pe.Message)
-		}
+		// A partial policy cannot authorize publishing any reconstructed session.
+		return nil, fmt.Errorf("invalid redaction policy (%d errors)", len(parseErrs))
 	}
 
 	// convert raw entries to session entries and redact secrets
@@ -1008,7 +1224,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	}
 
 	// write raw session (with secrets redacted)
-	rawWriter, err := store.CreateRaw(filename)
+	rawWriter, err := store.CreateRawForProject(filename, projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create raw session: %w", err)
 	}
@@ -1029,16 +1245,20 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// carrier of the start-minted ID on the reconstruct path too (daemon
 	// orphan-finalize recovers it from here when meta.json was never written)
 	meta := &session.StoreMeta{
-		Version:      "1.0",
-		SessionID:    state.SessionID,
-		CreatedAt:    state.StartedAt,
-		AgentID:      state.AgentID,
-		AgentType:    agentTypeForMeta,
-		AgentVersion: result.AgentVersion,
-		Model:        result.Model,
-		Username:     identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
-		RepoID:       repoID,
-		OxVersion:    version.Version,
+		Version:                "1.0",
+		SessionID:              state.SessionID,
+		ContinuedFromSessionID: state.ContinuedFromSessionID,
+		CreatedAt:              state.StartedAt,
+		AgentID:                state.AgentID,
+		AgentType:              agentTypeForMeta,
+		AgentVersion:           result.AgentVersion,
+		Model:                  result.Model,
+		Username:               identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
+		RepoID:                 repoID,
+		OxVersion:              version.Version,
+		NativeSessions:         state.NativeSessions,
+		StoppedAt:              state.StoppedAt,
+		TraceCapture:           state.Trace,
 	}
 	if err := rawWriter.WriteHeader(meta); err != nil {
 		rawWriter.Close()
@@ -1047,21 +1267,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 
 	// write entries
 	for _, entry := range entries {
-		data := map[string]any{
-			"type":      string(entry.Type),
-			"content":   entry.Content,
-			"timestamp": entry.Timestamp,
-		}
-		if entry.ToolName != "" {
-			data["tool_name"] = entry.ToolName
-		}
-		if entry.ToolInput != "" {
-			data["tool_input"] = entry.ToolInput
-		}
-		if entry.ToolOutput != "" {
-			data["tool_output"] = entry.ToolOutput
-		}
-		if err := rawWriter.WriteRaw(data); err != nil {
+		if err := rawWriter.WriteRaw(rawEntryMap(entry)); err != nil {
 			rawWriter.Close()
 			return nil, fmt.Errorf("failed to write entry: %w", err)
 		}
@@ -1078,7 +1284,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		Summary: localSummary,
 	}
 
-	result.Summary = localSummary
+	result.Summary = publishableSummary(localSummary)
 
 	// use the session name from recording state (generated at start time)
 	// to ensure cache and ledger directories always match
@@ -1100,6 +1306,16 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	summarizerMode := config.GetAgentSummarizer(projectRoot)
 	summarizerOff := summarizerMode == config.AgentSummarizerOff
 
+	// A held session gets its hold before anything the daemon reacts to, and
+	// no summary prompt: push-summary publishes (GH #1093). If the hold cannot
+	// be recorded, the stop fails and the recording state is kept.
+	held := stopHoldsSession(projectRoot, state)
+	if held {
+		if err := holdStoppedSession(result, state, filepath.Dir(result.RawPath), "session_stop"); err != nil {
+			return nil, err
+		}
+	}
+
 	// Compress raw.jsonl into the ledger cache (.sageox/cache/summary-input/)
 	// before the summarizer reads it. ConversationOnly mode keeps user+assistant
 	// turns verbatim, tool entries become compact markers, system entries are
@@ -1109,7 +1325,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	//
 	// Skip compression entirely when summarizer is off — no summarizer will
 	// ever read the optimized file, so the work is pure waste.
-	if !summarizerOff {
+	if !summarizerOff && !held {
 		summaryInputPath := writeOptimizedJSONLForSummary(result.RawPath, ledgerPath, sessionName)
 		if summaryInputPath == "" {
 			summaryInputPath = result.RawPath
@@ -1151,13 +1367,10 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		}
 	}
 
-	// check session publishing mode before attempting upload
-	publishMode := config.GetSessionPublishing(projectRoot)
-	if publishMode == config.SessionPublishingManual {
-		// manual mode: save locally, skip upload
-		slog.Info("session publishing mode is manual, skipping upload", "session", sessionName)
+	if held {
+		slog.Info("session held on this machine, skipping upload", "session", sessionName)
 		result.LedgerSessionDir = ""
-		result.UploadWarning = "Session saved locally (publishing mode: manual). Use 'ox session upload' to publish."
+		result.UploadWarning = heldSessionWarning(sessionName)
 		return result, nil
 	}
 
@@ -1205,7 +1418,8 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// `agent.summarizer` user-config key, and finally the inline default.
 	// Route sync-vs-async through the capability-aware dispatcher in
 	// internal/session. When the daemon isn't viable (sandbox / ephemeral
-	// / OX_NO_DAEMON), the dispatcher forces sync even if the user opted
+	// / OX_NO_DAEMON) or won't outlive the agent (an Amp orb, which pauses
+	// once the agent is idle), the dispatcher forces sync even if the user opted
 	// into `delegated` — otherwise the daemon RPC silently no-ops and
 	// the session sits in the cache until `ox doctor` sweeps it. Prior
 	// to this dispatcher, `delegated` + no daemon = lost upload
@@ -1228,7 +1442,8 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		// async mode: copy files to ledger dir locally, signal daemon to upload+finalize
 		if result.EntryCount == 0 {
 			// nothing to upload — skip copy and daemon signal entirely.
-			// the 1-line header-only raw.jsonl written at session start is not worth committing.
+			// the header-only raw.jsonl written at session start (plus any footer a
+			// finalize door stamped) is not worth committing.
 			slog.Info("async upload skipped: session has no entries", "session", sessionName)
 		} else if copyErr := copySessionCacheToLedger(result, ledgerPath, sessionName); copyErr != nil {
 			slog.Warn("async copy to ledger failed", "error", copyErr)
@@ -1255,7 +1470,9 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		}
 	} else {
 		uploadStart := time.Now()
-		uploadErr := uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
+		uploadErr := uploadSessionBeforeHostEnds(sessionName, daemonOutlivesSession(), func() error {
+			return uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
+		}, time.Sleep)
 		result.UploadMs = time.Since(uploadStart).Milliseconds()
 		if uploadErr != nil {
 			if errors.Is(uploadErr, api.ErrReadOnly) {
@@ -1268,8 +1485,8 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 				errMsg := uploadErr.Error()
 				if pipeline.IsAuthRelatedError(errMsg) {
 					fmt.Fprintf(os.Stderr, "warning: session upload failed — credentials expired or revoked\n")
-					fmt.Fprintf(os.Stderr, "  session saved locally, run: ox login && ox doctor\n")
-					result.UploadWarning = "Session saved locally. Credentials expired — run 'ox login' then 'ox doctor' to retry upload."
+					result.UploadWarning = "Session saved locally. " + auth.ReauthenticationRemedy(endpoint.GetForProject(projectRoot)) + " Then run 'ox doctor' to retry upload."
+					fmt.Fprintf(os.Stderr, "  %s\n", result.UploadWarning)
 				} else {
 					fmt.Fprintf(os.Stderr, "warning: LFS upload failed (session saved locally): %v\n", uploadErr)
 					fmt.Fprintf(os.Stderr, "  troubleshoot: ox status, ox doctor, ox daemon logs\n")
@@ -1296,18 +1513,43 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 // runtime capability probe catches sandboxes / OX_NO_DAEMON, while the
 // historical SAGEOX_DAEMON=false off-switch is enforced in daemon.IsDaemonDisabled.
 func finalizeModeForSessionStop(userPrefersAsync bool) session.FinalizeDispatchMode {
-	return session.ChooseFinalizeMode(!daemon.IsDaemonDisabled(), userPrefersAsync)
+	return session.ChooseFinalizeMode(daemonOutlivesSession(), userPrefersAsync)
 }
 
-// uploadSessionToLedger copies content files from cache to ledger, uploads to LFS,
-// writes meta.json, and commits+pushes. This is phase 2 of the two-phase design:
+// daemonOutlivesSession reports whether work handed to the daemon at session
+// end gets to run: the daemon must be enabled, and the machine must keep
+// running after the coding agent finishes. An Amp orb passes the first test
+// and fails the second — its daemon is frozen when the orb pauses, minutes
+// after the agent goes idle — so session end there uploads before returning
+// (sageox/ox#1314).
+func daemonOutlivesSession() bool {
+	return !daemon.IsDaemonDisabled() && !runtime.Caps().HostEndsWithAgent
+}
 
-// content files are uploaded to LFS blob storage first, then meta.json (containing
-// LFS OIDs) is committed to git. Content files themselves are .gitignore'd in the
-// ledger repo -- only meta.json is tracked by git. Other machines fetch content via LFS.
+// publishableSummary drops a local summary that is only a stats line. With no
+// user message to name a topic, session.LocalSummary returns just "0 user
+// messages, 1 assistant responses. ...", which meta.json's writer rejects as
+// a leaked failure stub (ox-qqka). That failed every upload of an Amp orb
+// session, whose recording starts after the thread's first prompt
+// (sageox/ox#1318, #1425). The stop result carries the normalized value, so
+// the stop's JSON and the team-memory observation don't repeat the stub
+// either. An empty summary is legal, and the summarizer fills it later.
+func publishableSummary(summary string) string {
+	if lfs.IsLeakySummaryString(summary) {
+		return ""
+	}
+	return summary
+}
+
+// uploadSessionToLedger uploads cached blobs to LFS, then commits and pushes
+// their pointers together with session metadata.
 // If this fails, the session data is safe in the local cache and doctor can retry.
 // ledgerPath and sessionName are pre-computed by the caller.
 func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string) error {
+	return uploadSessionToLedgerWithEffects(projectRoot, result, state, ledgerPath, sessionName, productionSessionUploadEffects())
+}
+
+func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string, effects sessionUploadEffects) error {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
 
@@ -1352,6 +1594,11 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	}
 
 	sessionID := session.ResolveOrMintSessionID(preservedID, state.SessionID)
+	traceCache, traceMeta, traceErr := session.MaterializeTraces(ledgerPath, sessionName, state.Trace)
+	if traceErr != nil {
+		slog.Warn("trace materialization skipped", "error", traceErr)
+		traceMeta = nil
+	}
 
 	// write meta.json first (before LFS upload) to preserve session metadata even if LFS fails
 	projectEndpoint := endpoint.GetForProject(projectRoot)
@@ -1362,10 +1609,13 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		EntryCount(result.EntryCount).
 		Summary(result.Summary).
 		StopReason(session.StopReasonStopped).
+		ContinuedFromSessionID(state.ContinuedFromSessionID).
 		ProducedCommits(state.ProducedCommits).
 		ProducedPlans(state.ProducedPlans).
 		LinkedPRs(state.LinkedPRs).
 		LinkedIssues(state.LinkedIssues).
+		NativeSessions(state.NativeSessions).
+		StoppedAt(session.ResolveStoppedAt(requestedStopTime(state, sessionDir), result.RawPath, time.Now())).
 		// staged: meta.json is being written here, BEFORE the LFS upload +
 		// git push below. The transition to uploaded (and the notify) happens
 		// only after commitAndPushLedger succeeds — see the M5 block at the
@@ -1373,32 +1623,66 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		// session that may never reach the remote.
 		LinkageStatus(lfs.LinkageStatusStaged)
 
-	// inject sageox contribution score from cache file into meta.json,
-	// then clean up the score file to prevent stale scores leaking into future sessions
-	if scoreFile, _ := session.ReadSageoxScore(state.AgentID); scoreFile != nil {
-		metaBuilder.SageoxScore(scoreFile.Score, string(scoreFile.Category), scoreFile.Reason)
+	// Record retry ownership before the ledger gains a final meta.json: once
+	// that file exists, findOrphanedSessionsInDir skips this session unless
+	// the marker is present, so every failure below must leave it behind.
+	sourceCacheDir := filepath.Dir(result.RawPath)
+	if err := writeSessionUploadRetryPending(sourceCacheDir); err != nil {
+		return fmt.Errorf("record pending session upload: %w", err)
 	}
-	_ = session.CleanupSageoxScore(state.AgentID)
 
-	meta := metaBuilder.Build()
-	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {
+	meta, err := writeInitialSessionMeta(sessionDir, state.AgentID, metaBuilder)
+	if err != nil {
 		return fmt.Errorf("write meta.json: %w", err)
 	}
 
+	if err := prepareSessionUpload(context.Background(), ledgerPath, sessionName); err != nil {
+		return fmt.Errorf("prepare session upload: %w", err)
+	}
+
 	// upload content files to LFS blob storage
-	fileRefs, err := uploadSessionLFS(projectRoot, sessionDir)
+	fileRefs, err := effects.uploadLFS(projectRoot, sessionDir)
 	if err != nil {
 		if errors.Is(err, api.ErrReadOnly) {
+			// Read-only access is not retryable; a marker would only hand doctor
+			// a retry that fails the same way.
+			_ = os.Remove(filepath.Join(sourceCacheDir, sessionUploadRetryPendingFile))
 			return err // don't wrap, don't set doctor marker
 		}
 		return fmt.Errorf("LFS upload: %w", err)
 	}
+	if traceMeta != nil && effects.uploadTraces != nil {
+		traceRefs, traceErr := effects.uploadTraces(projectRoot, traceCache, sessionDir)
+		if traceErr != nil {
+			slog.Warn("trace upload skipped", "error", traceErr)
+		}
+		if traceErr == nil && len(traceRefs) == 2 {
+			if fileRefs == nil {
+				fileRefs = make(map[string]lfs.FileRef)
+			}
+			for name, ref := range traceRefs {
+				fileRefs[name] = ref
+			}
+		} else {
+			traceMeta = nil
+		}
+	} else {
+		traceMeta = nil
+	}
 
-	// update meta.json with LFS file references; use WriteSessionMetaOnly so
-	// content files remain intact on disk until after the push — this prevents
-	// data loss if the push fails (pointer stubs + no remote = unrecoverable)
-	meta.Files = fileRefs
-	if err := lfs.WriteSessionMetaOnly(sessionDir, meta); err != nil {
+	// Persist the uploaded refs before preparing the ledger copy for git.
+	// The source cache retains the real content through any push failure.
+	if err := lfs.MutateSessionMeta(context.Background(), sessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+		if current == nil {
+			return nil, fmt.Errorf("session metadata disappeared during upload")
+		}
+		current.Files = fileRefs
+		if traceMeta != nil {
+			current.Trace = traceMeta
+		}
+		meta = current // retain the redaction audit written before upload
+		return current, nil
+	}); err != nil {
 		return fmt.Errorf("update meta.json with LFS refs: %w", err)
 	}
 
@@ -1407,43 +1691,40 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		return fmt.Errorf("ensure .gitignore: %w", err)
 	}
 
-	// commit meta.json + .gitignore and push
-	if err := commitAndPushLedger(ledgerPath, sessionName); err != nil {
+	store, err := session.NewStore(ledgerPath)
+	if err != nil {
+		return fmt.Errorf("open session recovery store: %w", err)
+	}
+	recoveryCacheDir, err := store.PreserveSessionCache(sessionDir, sourceCacheDir)
+	if err != nil {
+		return err
+	}
+
+	// Publish pointers in the first commit. A raw-only intermediate push can
+	// trigger GitLab GC before the pointers arrive, unlinking uploaded objects.
+	// AssertUploaded: uploadLFS succeeded above; the source cache is untouched.
+	if _, err := lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(fileRefs)); err != nil {
+		return fmt.Errorf("write LFS pointer files: %w", err)
+	}
+
+	// commit the pointers, meta.json, and .gitignore together and push
+	if err := effects.commitInitial(ledgerPath, sessionName); err != nil {
 		// set marker - session saved locally but not synced to remote
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("commit and push: %w", err)
 	}
-
-	// reverse-link reconciliation: the session now has a canonical ses_ id and
-	// is committed, so backfill it + outcome=stopped onto every plan this
-	// session produced (slugs in hand — no directory scan), then commit those
-	// plan dirs. Best-effort; any miss falls to `ox doctor`.
-	reconcileProducedPlansAtStop(projectRoot, state.ProducedPlans, sessionName, meta.EffectiveSessionID())
-
-	// push succeeded — now safe to replace content files with LFS pointer stubs
-	if len(meta.Files) > 0 {
-		// WritePointerFiles can return both a partial `written` slice AND a
-		// non-nil error (internal/lfs/pointer.go:100 returns paths-so-far on
-		// the first failure). Always commit whatever pointers DID land — any
-		// rewritten pointer left uncommitted re-opens the autostash race for
-		// that file, even if other files in the same call failed.
-		written, writeErr := lfs.WritePointerFiles(sessionDir, meta.Files)
-		if len(written) > 0 {
-			// Commit the pointer rewrite so it doesn't sit dirty in the worktree.
-			// A dirty worktree here races against the daemon's sync-timer pull:
-			// `git pull --rebase --autostash` would stash the pointer, and if a
-			// peer pushed an incompatible change to the same file in the meantime,
-			// the stash-pop yields conflict markers that ox doctor's auto-commit
-			// will eventually freeze into a permanent commit on main.
-			// (Tactical fix; pointer-first commit ordering is a separate discussion.)
-			if err := commitPointerRewriteAndPush(ledgerPath, sessionName, written); err != nil {
-				slog.Warn("LFS pointer rewrite commit failed", "error", err, "session", sessionName)
-			}
-		}
-		if writeErr != nil {
-			slog.Warn("LFS pointer file write failed after push", "error", writeErr, "session", sessionName)
+	if recoveryCacheDir != "" {
+		if err := os.RemoveAll(recoveryCacheDir); err != nil {
+			slog.Debug("prune session recovery copy", "dir", recoveryCacheDir, "error", err)
 		}
 	}
+	_ = os.Remove(filepath.Join(sourceCacheDir, sessionUploadRetryPendingFile))
+
+	// reverse-link reconciliation: the session is committed, so record its
+	// ses_ id + outcome=stopped in the meta.json of every plan it produced
+	// (slugs in hand — no directory scan), then commit those plan dirs.
+	// Best-effort; see reconcileProducedPlansAtStop.
+	effects.reconcilePlans(projectRoot, state.ProducedPlans, meta.EffectiveSessionID())
 
 	// M5: the push succeeded — the session URL is now viewable. Transition
 	// LinkageStatus to uploaded and best-effort notify the SageOx server so
@@ -1453,7 +1734,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	// already-successful upload. Server-reported PR-link misses become
 	// repair tasks in the stop output — the agent still holds the session
 	// context and can fix the PR bodies with its own tooling.
-	for _, miss := range finalizeLinkageAfterPush(projectRoot, sessionDir, meta, sessionName) {
+	for _, miss := range effects.finalizeLinkage(projectRoot, sessionDir, meta, sessionName) {
 		result.PRLinkMisses = append(result.PRLinkMisses, fmt.Sprintf(
 			"PR %s is missing its session link — append this exact final line to its body: %s",
 			miss.PRURL, miss.ExpectedLine))
@@ -1462,14 +1743,52 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	return nil
 }
 
-// reconcileProducedPlansAtStop backfills the canonical session id + a
-// "stopped" outcome onto every plan a just-stopped session produced — both
-// on meta.json's Provenance (plan.ReconcileSessionOutcome) AND on any of the
-// session's own events.jsonl lines that still carry an empty session_id
-// (plan.BackfillSessionID) — then commits each updated plan dir (data/plans/
-// is not covered by the session commit). Slug-driven — no directory scan —
-// and fully best-effort: any miss is reconciled later by `ox doctor`.
-func reconcileProducedPlansAtStop(projectRoot string, slugs []string, sessionName, sessionID string) {
+// writeInitialSessionMeta persists the first durable metadata snapshot before
+// consuming the per-agent contribution score. If the write fails, the score
+// remains available for a retry instead of being silently lost alongside the
+// failed meta.json write.
+func writeInitialSessionMeta(sessionDir, agentID string, builder *lfs.SessionMetaBuilder) (*lfs.SessionMeta, error) {
+	scoreFile, err := session.ReadSageoxScore(agentID)
+	if err != nil {
+		return nil, fmt.Errorf("read SageOx score: %w", err)
+	}
+	if scoreFile != nil {
+		builder.SageoxScore(scoreFile.Score, string(scoreFile.Category), scoreFile.Reason)
+	} else {
+		// A prior attempt may have persisted metadata and consumed the score
+		// carrier before a later LFS/push failure. Preserve that durable score on
+		// retry instead of overwriting meta.json with an unscored rebuild.
+		existing, readErr := lfs.ReadSessionMeta(sessionDir)
+		if readErr == nil && existing.SageoxScore != nil {
+			builder.SageoxScore(*existing.SageoxScore, existing.SageoxScoreCategory, existing.SageoxScoreReason)
+		} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("read existing session metadata: %w", readErr)
+		}
+	}
+
+	meta := builder.Build()
+	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {
+		return nil, err
+	}
+
+	// Cleanup remains best-effort, but only after a successfully read score has
+	// a durable carrier. Missing scores need no cleanup; unreadable scores are
+	// preserved above for diagnosis and retry rather than silently discarded.
+	if scoreFile != nil {
+		_ = session.CleanupSageoxScore(agentID)
+	}
+	return meta, nil
+}
+
+// reconcileProducedPlansAtStop records the session id + a "stopped" outcome
+// in the meta.json Provenance of every plan a just-stopped session produced
+// (plan.ReconcileSessionOutcome), then commits each plan's events.jsonl and
+// meta.json, never the rest of its dir (commitPlanToLedger; data/plans/ is not
+// covered by the session commit). It leaves events.jsonl alone: those lines
+// are never edited (internal/plan/events.go). Slug-driven — no directory scan
+// — and best-effort: a meta.json write that fails is logged at debug and
+// skipped; a commit that fails is retried by the next `ox agent prime`.
+func reconcileProducedPlansAtStop(projectRoot string, slugs []string, sessionID string) {
 	for _, slug := range slugs {
 		if err := plan.ReconcileSessionOutcome(projectRoot, slug, sessionID, plan.SessionOutcomeStopped); err != nil {
 			slog.Debug("plan reconcile at stop failed", "slug", slug, "error", err)
@@ -1479,16 +1798,6 @@ func reconcileProducedPlansAtStop(projectRoot string, slugs []string, sessionNam
 		if err != nil {
 			slog.Debug("plan reconcile load failed", "slug", slug, "error", err)
 			continue
-		}
-		// event-log backfill: this session's earlier events (created/worked/
-		// etc.) were appended before the canonical ses_ id existed, so they
-		// still carry only session_name. sessionID is only known now.
-		if sessionID != "" {
-			if n, berr := plan.BackfillSessionID(context.Background(), info.Dir, sessionName, sessionID); berr != nil {
-				slog.Debug("plan event session_id backfill failed", "slug", slug, "error", berr)
-			} else if n > 0 {
-				slog.Debug("plan event session_id backfilled", "slug", slug, "count", n)
-			}
 		}
 		if cerr := commitPlanToLedger(projectRoot, info.Dir); cerr != nil {
 			slog.Debug("plan reconcile commit failed", "slug", slug, "error", cerr)
@@ -1559,13 +1868,12 @@ func runAgentSessionRemind(inst *agentinstance.Instance) error {
 			AgentID: inst.AgentID,
 			Message: message,
 		}
-		jsonOut, err := json.MarshalIndent(output, "", "  ")
+		jsonOut, err := cli.MarshalJSONIndent(output)
 		if err != nil {
 			return fmt.Errorf("format remind JSON: %w", err)
 		}
 		trackContextBytes(int64(len(jsonOut)))
-		fmt.Println(string(jsonOut))
-		return nil
+		return cli.WriteJSONBytes(os.Stdout, jsonOut)
 	}
 
 	if cfg.Text {
@@ -1581,13 +1889,12 @@ func runAgentSessionRemind(inst *agentinstance.Instance) error {
 		AgentID: inst.AgentID,
 		Message: message,
 	}
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
+	jsonOut, err := cli.MarshalJSONIndent(output)
 	if err != nil {
 		return fmt.Errorf("format remind JSON: %w", err)
 	}
 	trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.WriteJSONBytes(os.Stdout, jsonOut)
 }
 
 // sessionSummarizeOutput aliases pipeline.SummarizeOutput for backward compat within package main.
@@ -1657,12 +1964,20 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 			if err != nil {
 				return fmt.Errorf("adapter not found: %w", err)
 			}
-			rawEntries, err := adapter.Read(state.SessionFile)
+			// an Amp recording reads from its prompt's line, as the stop does
+			var rawEntries []adapters.RawEntry
+			reader, incremental := adapter.(adapters.IncrementalReader)
+			startsAtPrompt := incremental && state.AmpStartsAtPrompt()
+			if startsAtPrompt {
+				rawEntries, _, err = reader.ReadFromOffset(state.SessionFile, state.StartOffset)
+			} else {
+				rawEntries, err = adapter.Read(state.SessionFile)
+			}
 			if err != nil {
 				return fmt.Errorf("failed to read session: %w", err)
 			}
 			// filter out entries from before session recording started
-			if !state.StartedAt.IsZero() {
+			if !state.StartedAt.IsZero() && !startsAtPrompt {
 				rawEntries = pipeline.FilterEntriesAfterStart(rawEntries, state.StartedAt)
 			}
 			entries = convertRawEntries(rawEntries)
@@ -1726,13 +2041,12 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 			FilePath:      filePath,
 			SummaryPrompt: summaryPrompt,
 		}
-		jsonOut, err := json.MarshalIndent(output, "", "  ")
+		jsonOut, err := cli.MarshalJSONIndent(output)
 		if err != nil {
 			return fmt.Errorf("format summarize JSON: %w", err)
 		}
 		trackContextBytes(int64(len(jsonOut)))
-		fmt.Println(string(jsonOut))
-		return nil
+		return cli.WriteJSONBytes(os.Stdout, jsonOut)
 	}
 
 	if cfg.Text {
@@ -1756,13 +2070,12 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 		FilePath:      filePath,
 		SummaryPrompt: summaryPrompt,
 	}
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
+	jsonOut, err := cli.MarshalJSONIndent(output)
 	if err != nil {
 		return fmt.Errorf("format summarize JSON: %w", err)
 	}
 	trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.WriteJSONBytes(os.Stdout, jsonOut)
 }
 
 // mapRoleToEntryType delegates to session.MapRoleToEntryType.
@@ -1897,13 +2210,12 @@ func runAgentSessionRecord(inst *agentinstance.Instance, args []string) error {
 			TotalCount: totalCount,
 			SessionID:  session.GetSessionName(state.SessionPath),
 		}
-		jsonOut, err := json.MarshalIndent(output, "", "  ")
+		jsonOut, err := cli.MarshalJSONIndent(output)
 		if err != nil {
 			return fmt.Errorf("format record JSON: %w", err)
 		}
 		trackContextBytes(int64(len(jsonOut)))
-		fmt.Println(string(jsonOut))
-		return nil
+		return cli.WriteJSONBytes(os.Stdout, jsonOut)
 	}
 
 	if cfg.Text {
@@ -1922,13 +2234,12 @@ func runAgentSessionRecord(inst *agentinstance.Instance, args []string) error {
 		TotalCount: totalCount,
 		SessionID:  session.GetSessionName(state.SessionPath),
 	}
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
+	jsonOut, err := cli.MarshalJSONIndent(output)
 	if err != nil {
 		return fmt.Errorf("format record JSON: %w", err)
 	}
 	trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.WriteJSONBytes(os.Stdout, jsonOut)
 }
 
 // sessionPlanOutput is the JSON output for the plan command.
@@ -2022,10 +2333,9 @@ func runAgentSessionPlan(inst *agentinstance.Instance) error {
 			DiagramCount: len(diagrams),
 			Diagrams:     diagrams,
 		}
-		jsonOut, _ := json.MarshalIndent(output, "", "  ")
+		jsonOut, _ := cli.MarshalJSONIndent(output)
 		trackContextBytes(int64(len(jsonOut)))
-		fmt.Println(string(jsonOut))
-		return nil
+		return cli.WriteJSONBytes(os.Stdout, jsonOut)
 	}
 
 	if cfg.Text {
@@ -2045,10 +2355,9 @@ func runAgentSessionPlan(inst *agentinstance.Instance) error {
 		DiagramCount: len(diagrams),
 		Diagrams:     diagrams,
 	}
-	jsonOut, _ := json.MarshalIndent(output, "", "  ")
+	jsonOut, _ := cli.MarshalJSONIndent(output)
 	trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.WriteJSONBytes(os.Stdout, jsonOut)
 }
 
 // readPlanFromStdin reads all content from stdin.
@@ -2157,6 +2466,9 @@ func recordEntriesToSession(projectRoot string, state *session.RecordingState, e
 	if state == nil || state.SessionPath == "" {
 		return 0, fmt.Errorf("invalid recording state")
 	}
+	if state.AdapterName == "cursor" {
+		return 0, fmt.Errorf("unsupported-scope: session record cannot add entries to a native Cursor recording")
+	}
 
 	rawPath := filepath.Join(state.SessionPath, ledgerFileRaw)
 	w, err := session.NewRawWriter(rawPath, projectRoot)
@@ -2261,26 +2573,6 @@ func getSessionTermsNotice() string {
 	return sessionTermsNotice
 }
 
-// rawJSONLHasEntries returns true if raw.jsonl exists and contains more than
-// just a header line, indicating incremental hooks have appended entries.
-func rawJSONLHasEntries(rawPath string) bool {
-	f, err := os.Open(rawPath)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	lineCount := 0
-	for scanner.Scan() {
-		lineCount++
-		if lineCount > 1 {
-			return true // more than just the header
-		}
-	}
-	return false
-}
-
 // needsGenericDropFile returns true when a generic adapter session needs a drop
 // file created (no session file provided and adapter is generic).
 func needsGenericDropFile(sessionFile, adapterName string) bool {
@@ -2317,4 +2609,39 @@ func isGenericDropFileEmpty(state *session.RecordingState) bool {
 		return errors.Is(err, os.ErrNotExist)
 	}
 	return info.Size() == 0
+}
+
+// reloadRecordingForFinalDrain must run under the expected session's raw lock.
+// Hooks, like watchers, may commit a batch while stop waits for that lock.
+//
+// The recording is read from its own folder, not found by agent: an agent can
+// hold a newer active recording beside a quarantined one it is finalizing, and
+// an agent lookup would answer with the wrong one.
+func reloadRecordingForFinalDrain(projectRoot string, expected *session.RecordingState) (*session.RecordingState, error) {
+	var latest *session.RecordingState
+	var err error
+	if expected.SessionPath != "" {
+		latest, err = session.ReadRecordingStateFile(expected.SessionPath)
+	} else {
+		latest, err = session.LoadRecordingStateForAgent(projectRoot, expected.AgentID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if latest == nil {
+		return nil, session.ErrNotRecording
+	}
+	if latest.SessionPath != expected.SessionPath || latest.SessionID != expected.SessionID {
+		return nil, fmt.Errorf("recording changed while waiting to finalize")
+	}
+	// Stop may just have discovered a file that did not exist at recording
+	// start; nothing is persisted for it yet, so carry it over. A PERSISTED file
+	// is different: SourceOffset is a byte cursor into it, and a hook that
+	// rediscovered the source while we waited committed the two together.
+	// Overwriting only the file would aim that cursor at the wrong transcript
+	// and the drain would skip or tear entries -- the persisted pair wins.
+	if latest.SessionFile == "" {
+		latest.SessionFile = expected.SessionFile
+	}
+	return latest, nil
 }

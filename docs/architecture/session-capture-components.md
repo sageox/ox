@@ -446,27 +446,7 @@ data/, memory/, docs/              # team context (separate subsystem)
 
 ---
 
-## K. `cmd/ox/distill*` — downstream consumer
-
-**Purpose:** scan finalized sessions and extract structured facts for team memory.
-Not part of capture proper, but reads the same `summary.json` the capture pipeline
-produces.
-
-**Key files:**
-- [cmd/ox/distill.go](../../cmd/ox/distill.go), [distill_sessions.go](../../cmd/ox/distill_sessions.go) —
-  CLI entry.
-- [internal/distill/](../../internal/distill/) — pipeline.
-
-**Contract with capture:** distillation reads `summary.json` via the Store interface.
-Anything that changes `summary.json`'s schema must update the distill consumer
-(`pkg/facts/`) in the same PR.
-
-**Non-obvious:** minimum-quality gate (`minSessionQuality = 0.2`) drops noisy
-sessions from distillation. A session can be published but not distilled.
-
----
-
-## L. Test patterns worth knowing
+## K. Test patterns worth knowing
 
 - **`t.TempDir()` + explicit `projectRoot`.** Never rely on cwd. Session tests that
   don't pass an explicit repo root expose the `projectRoot/sessions/` leak bug.
@@ -483,7 +463,7 @@ sessions from distillation. A session can be published but not distilled.
 
 ---
 
-## M. Where to ask for help
+## L. Where to ask for help
 
 - **Recording state, lifecycle questions:** load the `tooling-engineer` coworker —
   `ox coworker load tooling-engineer`.

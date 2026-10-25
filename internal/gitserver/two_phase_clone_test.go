@@ -71,6 +71,11 @@ func TestCloneHost(t *testing.T) {
 	}{
 		{"https with path", "https://git.sageox.ai/team/ctx.git", "git.sageox.ai"},
 		{"https with port", "https://git.sageox.ai:443/team/ctx.git", "git.sageox.ai"},
+		{"loopback http localhost keeps port", "http://localhost:8080/team/ctx.git", "localhost:8080"},
+		{"loopback http 127.0.0.1 keeps port", "http://127.0.0.1:3000/team/ctx.git", "127.0.0.1:3000"},
+		{"loopback http ipv6", "http://[::1]:3000/team/ctx.git", "[::1]:3000"},
+		{"non-loopback http is refused", "http://example.com/team/ctx.git", ""},
+		{"non-loopback http with port is refused", "http://git.sageox.ai:80/team/ctx.git", ""},
 		{"file scheme has no host", "file:///tmp/bare.git", ""},
 		{"ssh scheme ignored", "git@git.sageox.ai:team/ctx.git", ""},
 		{"garbage", "::not-a-url::", ""},

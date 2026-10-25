@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -21,51 +20,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// skipIntegration skips the test when running with -short flag
-func skipIntegration(t *testing.T) {
-	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-}
-
-// testGitRepo initializes a temporary git repository for testing.
-// It calls skipIntegration to skip with -short flag.
-func testGitRepo(t *testing.T) string {
-	t.Helper()
-	skipIntegration(t)
-
-	tmpDir := t.TempDir()
-
-	// initialize git repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	require.NoError(t, cmd.Run(), "failed to init git repo")
-
-	// configure git user for commits
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = tmpDir
-	require.NoError(t, cmd.Run(), "failed to set git user.name")
-
-	cmd = exec.Command("git", "config", "user.email", "test@example.com")
-	cmd.Dir = tmpDir
-	require.NoError(t, cmd.Run(), "failed to set git user.email")
-
-	// create initial commit (required for GetInitialCommitHash)
-	readmePath := filepath.Join(tmpDir, "README.md")
-	require.NoError(t, os.WriteFile(readmePath, []byte("# Test\n"), 0644), "failed to create README")
-
-	cmd = exec.Command("git", "add", "README.md")
-	cmd.Dir = tmpDir
-	require.NoError(t, cmd.Run(), "failed to git add")
-
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
-	cmd.Dir = tmpDir
-	require.NoError(t, cmd.Run(), "failed to git commit")
-
-	return tmpDir
-}
 
 func TestCreateSageoxReadme(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -419,31 +373,114 @@ esac`, counter)
 func TestSelectTeam_NoTeams(t *testing.T) {
 	teams := []api.TeamMembership{}
 
-	_, _, err := selectTeam(teams)
+	_, _, err := selectTeam(teams, "")
 	assert.Error(t, err, "expected error when no teams available")
 	assert.Contains(t, err.Error(), "no teams available")
 }
 
-func TestSelectTeam_SingleTeam(t *testing.T) {
+// TestSelectTeam_SingleTeam_NoInteractiveInput is the red-first proof for
+// fix H item 3 (contract D8): before selectTeam used cli.SelectOneRequired,
+// a non-TTY call with nothing on stdin (piped, CI, or an agent harness)
+// silently returned (defaultIdx, nil) — indistinguishable from a human
+// explicitly confirming the only team. That let `ox init` bind a repo to a
+// team with zero human confirmation and zero error. It must now refuse.
+func TestSelectTeam_SingleTeam_NoInteractiveInput(t *testing.T) {
 	teams := []api.TeamMembership{
 		{ID: "team_abc123", Name: "My Team", Role: "owner"},
 	}
 
-	selectedID, selectedName, err := selectTeam(teams)
-	require.NoError(t, err, "expected no error with single team")
-	assert.Equal(t, "team_abc123", selectedID, "expected single team to be auto-selected")
+	var err error
+	withStdin(t, "", func() {
+		_, _, err = selectTeam(teams, "")
+	})
+	require.Error(t, err, "must not silently auto-select when no one is there to confirm")
+	assert.Contains(t, err.Error(), "--team", "must tell the user how to proceed non-interactively")
+}
+
+func TestSelectTeam_SingleTeam_ExplicitAccept(t *testing.T) {
+	teams := []api.TeamMembership{
+		{ID: "team_abc123", Name: "My Team", Role: "owner"},
+	}
+
+	var selectedID, selectedName string
+	var err error
+	withStdin(t, "\n", func() {
+		selectedID, selectedName, err = selectTeam(teams, "")
+	})
+	require.NoError(t, err, "expected no error when a human explicitly presses Enter")
+	assert.Equal(t, "team_abc123", selectedID, "expected single team to be selected")
 	assert.Equal(t, "My Team", selectedName, "expected team name to be returned")
 }
 
-func TestSelectTeam_SingleTeamNoName(t *testing.T) {
+func TestSelectTeam_SingleTeamNoName_ExplicitAccept(t *testing.T) {
 	teams := []api.TeamMembership{
 		{ID: "team_xyz789", Name: "", Role: "member"},
 	}
 
-	selectedID, selectedName, err := selectTeam(teams)
-	require.NoError(t, err, "expected no error with single team")
-	assert.Equal(t, "team_xyz789", selectedID, "expected single team to be auto-selected")
+	var selectedID, selectedName string
+	var err error
+	withStdin(t, "\n", func() {
+		selectedID, selectedName, err = selectTeam(teams, "")
+	})
+	require.NoError(t, err, "expected no error when a human explicitly presses Enter")
+	assert.Equal(t, "team_xyz789", selectedID, "expected single team to be selected")
 	assert.Equal(t, "", selectedName, "expected empty name when not provided")
+}
+
+// TestSelectTeam_DeterministicOrderAndPersonalMarker is the proof for fix H
+// item 1 (Personal flag rendered) and half of item 2 (deterministic order):
+// teams are handed in reverse-alphabetical order — the printed menu must
+// still list them alphabetically, and the personal team's row must carry a
+// visible marker distinguishing it from a shared team.
+func TestSelectTeam_DeterministicOrderAndPersonalMarker(t *testing.T) {
+	teams := []api.TeamMembership{
+		{ID: "team_zeta", Name: "Zeta Corp", Role: "member"},
+		{ID: "team_personal", Name: "Ryan's Private Team", Role: "owner", Personal: true},
+		{ID: "team_acme", Name: "Acme Corp", Role: "member"},
+	}
+
+	var err error
+	out := captureRealStdout(t, func() {
+		withStdin(t, "\n", func() {
+			_, _, err = selectTeam(teams, "")
+		})
+	})
+	require.NoError(t, err)
+
+	menu := string(out)
+	acmeIdx := strings.Index(menu, "Acme Corp")
+	personalIdx := strings.Index(menu, "Ryan's Private Team")
+	zetaIdx := strings.Index(menu, "Zeta Corp")
+	require.True(t, acmeIdx >= 0 && personalIdx >= 0 && zetaIdx >= 0, "all three teams must be listed: %s", menu)
+	assert.True(t, acmeIdx < personalIdx && personalIdx < zetaIdx,
+		"menu must list teams alphabetically regardless of input order: %s", menu)
+
+	personalLine := menu[personalIdx : personalIdx+80]
+	assert.Contains(t, personalLine, "(personal team)", "personal team row must be visibly marked")
+}
+
+// TestSelectTeam_PreSelectsCurrentTeam is the proof for the other half of
+// fix H item 2: on a re-init, the row matching the repo's already-bound
+// team must be both marked "(current)" and pre-selected, so pressing Enter
+// re-confirms the existing binding instead of silently picking whatever
+// sorts first alphabetically.
+func TestSelectTeam_PreSelectsCurrentTeam(t *testing.T) {
+	teams := []api.TeamMembership{
+		{ID: "team_acme", Name: "Acme Corp", Role: "member"}, // sorts first
+		{ID: "team_zeta", Name: "Zeta Corp", Role: "owner"},  // the repo's current team
+	}
+
+	var selectedID string
+	var err error
+	out := captureRealStdout(t, func() {
+		withStdin(t, "\n", func() { // blank Enter: accept whatever is pre-selected
+			selectedID, _, err = selectTeam(teams, "team_zeta")
+		})
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "team_zeta", selectedID,
+		"blank Enter must re-confirm the current team, not fall through to the alphabetically-first row")
+	assert.Contains(t, string(out), "(current)", "the current team's row must be marked")
 }
 
 // TestSelectTeam_MultipleTeams_RequiresInteraction verifies that multiple teams

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -12,9 +13,18 @@ var configCmd = &cobra.Command{
 	Short: "Manage ox configuration",
 	Long: `View and modify ox configuration settings.
 
+Without a subcommand, opens the editor when stdin and stdout are terminals.
+With --no-interactive, in CI, or with redirected input/output, lists settings
+instead. With --json, prints the settings as JSON.
+
+Use --config <file> to select an existing user preferences file for reads and
+user-level writes. It overrides OX_USER_CONFIG and normal user config discovery.
+Repo and team files are still selected by the current project and --repo/--team.
+
 Commands:
   ox config                            Interactive config editor (TUI)
   ox config list                       List all settings with values
+  ox config schema --json              Describe every setting (for apps)
   ox config get <key>                  Show setting with override chain
   ox config set <key> <value>          Set at user level (default)
   ox config set <key> <value> --repo   Set at repo level
@@ -22,30 +32,16 @@ Commands:
   ox config unset <key>                Clear override at user level
   ox config unset <key> --repo         Clear override at repo level
 
-Available settings:
-  session_recording        disabled | manual | auto
-  github_sync              enabled | disabled
-  github_sync_prs          enabled | disabled
-  github_sync_issues       enabled | disabled
-  murmuring                manual | auto
-  telemetry                on | off
-  tips                     on | off
-  context_git.auto_commit  on | off
-  context_git.auto_push    on | off
-  pr_visuals.rich          on | off
-  pr_visuals.theme         light | dark
-  attribution.commit       (any text, "" to disable)
-  attribution.pr           (any text, "" to disable)
+` + configAvailableSettingsHelp() + `
 
 Priority: user > repo > team > default. User-level preferences apply even in
 repositories that have not run ox init; install the user-level integration
 for your AI coworker to receive the guidance everywhere.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// if terminal is interactive, launch TUI
-		if term.IsTerminal(int(os.Stdout.Fd())) && len(args) == 0 {
+		jsonOutput := cfg != nil && cfg.JSON
+		if !jsonOutput && cli.IsInteractive() && term.IsTerminal(int(os.Stdout.Fd())) && len(args) == 0 {
 			return runConfigTUI()
 		}
-		// otherwise show list
 		return runConfigList(cmd, args)
 	},
 }

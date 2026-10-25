@@ -1,0 +1,268 @@
+package skillmanager
+
+import (
+	"fmt"
+	"log/slog"
+	"os"
+	"path"
+	"path/filepath"
+
+	"github.com/sageox/ox/internal/sageoxignore"
+)
+
+// ScopedIgnoreFile is one agent directory ox writes into, plus the ignore rules
+// that keep ox's own files out of the customer's pull requests.
+//
+// The rules live in a .gitignore INSIDE each agent directory rather than in the
+// repository root. Two constraints force that:
+//
+//   - A .gitignore under .sageox/ cannot reach .claude/ — a gitignore only governs
+//     its own subtree — so the existing ox-owned ignore file is not an option.
+//   - GH #732 ruled that ox must not write into the developer's root .gitignore.
+//     "Don't pollute developers repos" was the words; the remedy was "put it in a
+//     file ox owns". A four-line file inside a directory ox already populates is
+//     the nearest thing to that which can actually reach these paths.
+//
+// The file is committed, deliberately: a teammate's fresh clone must inherit the
+// rule BEFORE any ox file can appear there, or the first person to run ox in that
+// clone commits vendor files by accident.
+type ScopedIgnoreFile struct {
+	// dir is repo-relative, e.g. ".claude".
+	Dir string
+	// entries are relative to dir, as gitignore patterns always are.
+	Entries []string
+}
+
+// ScopedIgnoreFiles returns the ignore files for the agent directories ox writes.
+//
+// The *-team globs protect Team Skill and Team Rule projections. They are present
+// before reconciliation writes any derived file, so an ox-managed cache can never
+// appear in the customer's pull request.
+func ScopedIgnoreFiles() []ScopedIgnoreFile {
+	return scopedIgnoreFiles()
+}
+
+// teamRuleGlob is the ignore pattern for Team Rule projections under root, whose
+// files are named <slug>-<hash>-team<ext>.
+//
+// The extension is part of the pattern, which it did not have to be under the old
+// prefix: `sageox-team-*` matched a projection whatever it was called, but the
+// namespace marker now sits BEFORE the extension, so `*-team` alone would miss
+// every file. Cursor's `.mdc` is the one that makes this concrete — a pattern
+// hard-coded to `.md` would leave every Cursor Team Rule visible in git.
+func teamRuleGlob(dir, ext string) string {
+	return dir + "*" + TeamSuffix + ext
+}
+
+// scopedIgnoreFiles lists the ignore rules for every agent directory ox writes
+// into. Every entry is a stable glob or the one exact ox-cli.md rule name — never
+// a per-skill name — so the set never depends on what a repository selected, and
+// the committed .gitignore never changes when a team adds or drops a skill.
+//
+// Each root also keeps its legacy `sageox-team-*` pattern for one release. A
+// repository that upgrades mid-reconcile holds files under both schemes for a few
+// seconds, and the window in which an old projection is visible to git is exactly
+// the window in which someone runs `git add -A`.
+func scopedIgnoreFiles() []ScopedIgnoreFile {
+	skillGlob := "skills/" + CLIPrefix + "*/"
+	teamSkillGlob := "skills/*" + TeamSuffix + "/"
+	legacyTeamSkillGlob := "skills/" + LegacyTeamPrefix + "*/"
+	legacyTeamRuleGlob := "rules/" + LegacyTeamPrefix + "*"
+	// Two rule patterns, not one. The primary rule is named exactly "ox-cli.md",
+	// which "ox-cli-*" does NOT match — and the miss would be silent, leaving that
+	// one file visible in every pull request. A bare "ox-cli*" would match, but it
+	// would also claim a user's "ox-client-notes.md", so the exact name is listed
+	// explicitly instead of widening the glob.
+	ruleExact := "rules/" + CLIBase + ".md"
+	ruleGlob := "rules/" + CLIPrefix + "*"
+
+	return []ScopedIgnoreFile{
+		{Dir: ".claude", Entries: []string{
+			skillGlob, ruleExact, ruleGlob,
+			// The command surface folded into skills in 0.15.0; the glob stays so a
+			// repository still holding pre-fold files keeps them out of diffs until
+			// the retirement sweep reaches it.
+			"commands/" + CLIPrefix + "*",
+			teamSkillGlob, teamRuleGlob("rules/", ".md"),
+			legacyTeamSkillGlob, legacyTeamRuleGlob,
+		}},
+		{Dir: ".agents", Entries: []string{skillGlob, teamSkillGlob, legacyTeamSkillGlob}},
+		{Dir: ".factory", Entries: []string{
+			ruleExact, ruleGlob, teamRuleGlob("rules/", ".md"), legacyTeamRuleGlob,
+		}},
+		// Team Rules use each tool's native rule root only when the format can
+		// preserve semantics. These entries are existence-gated like the original
+		// three, so supporting a tool never creates its directory in an unrelated
+		// repository.
+		{Dir: ".cursor", Entries: []string{
+			teamRuleGlob("rules/", ".mdc"), legacyTeamRuleGlob,
+		}},
+		{Dir: ".github/instructions", Entries: []string{
+			teamRuleGlob("", ".md"), LegacyTeamPrefix + "*",
+		}},
+		{Dir: ".clinerules", Entries: []string{
+			teamRuleGlob("", ".md"), LegacyTeamPrefix + "*",
+		}},
+		{Dir: ".kiro", Entries: []string{
+			teamRuleGlob("steering/", ".md"), "steering/" + LegacyTeamPrefix + "*",
+		}},
+		{Dir: ".windsurf", Entries: []string{
+			teamRuleGlob("rules/", ".md"), legacyTeamRuleGlob,
+		}},
+	}
+}
+
+// EnsureScopedIgnoreFiles writes the ox-managed ignore block into every agent
+// directory that EXISTS in the repository, and returns the repo-relative paths it
+// created or changed.
+//
+// Existence is the gate on purpose. Writing .agents/.gitignore into a repository
+// that has no .agents/ directory would add vendor footprint to a project that
+// never asked for that agent — the same complaint this whole rework answers.
+// IgnoreFileResult is one ignore file ox wrote, and whether ox created it.
+//
+// The distinction is load-bearing for rollback: a file ox CREATED is removed on
+// rollback, while a file that already existed must be restored to its previous
+// contents. Treating an existing file as created would delete a file the user
+// wrote, which is strictly worse than the failure being rolled back.
+type IgnoreFileResult struct {
+	Rel     string
+	Created bool
+}
+
+func EnsureScopedIgnoreFiles(repoRoot string) ([]IgnoreFileResult, error) {
+	written, _, err := ensureScopedIgnoreFilesIn(repoRoot, nil, ScopedIgnoreFiles())
+	return written, err
+}
+
+// EnsureScopedIgnoreFilesForDirs also writes the block into agent directories
+// that do NOT exist yet, named by force.
+//
+// Apply needs this because it writes the rule BEFORE materializing the files:
+// at that moment `.claude/` or `.agents/` may not exist, and an existence gate
+// would skip exactly the directory about to be filled with reserved-prefix
+// files. The gate still applies everywhere else, so a repository never sprouts
+// an agent directory it does not use.
+//
+// The second return value names the agent directories ox could NOT protect: a
+// symlinked directory, a symlinked .gitignore, or one it could not create. A
+// caller about to materialize reserved-prefix files into such a directory MUST
+// NOT proceed — the files would land visible to git with no rule hiding them,
+// which is the exact state that puts vendor files in a customer's pull request.
+func EnsureScopedIgnoreFilesForDirs(repoRoot string, force map[string]bool) ([]IgnoreFileResult, []string, error) {
+	return ensureScopedIgnoreFilesIn(repoRoot, force, ScopedIgnoreFiles())
+}
+
+func ensureScopedIgnoreFilesIn(repoRoot string, force map[string]bool, files []ScopedIgnoreFile) ([]IgnoreFileResult, []string, error) {
+	// Anchor every operation to the repository root.
+	//
+	// Checking a path with Lstat and then writing it by path leaves a window in
+	// which the directory or the .gitignore can be swapped for a symlink, which
+	// would redirect the write outside the repository. Root-relative operations
+	// resolve each component against the held root, so that swap cannot escape.
+	root, err := os.OpenRoot(repoRoot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open repository root: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	var written []IgnoreFileResult
+	var unprotected []string
+	for _, f := range files {
+		// Lstat, not Stat: Stat follows symlinks, so a repository that makes an
+		// agent directory a symlink could steer ox into writing outside repoRoot.
+		info, err := root.Lstat(f.Dir)
+		switch {
+		case err == nil && info.Mode()&os.ModeSymlink != 0:
+			unprotected = append(unprotected, f.Dir)
+			continue
+		case err == nil && !info.IsDir():
+			unprotected = append(unprotected, f.Dir)
+			continue
+		case err != nil:
+			if !force[f.Dir] {
+				continue // ox writes nothing here, so there is nothing to protect
+			}
+			if mkErr := root.MkdirAll(f.Dir, 0o755); mkErr != nil {
+				unprotected = append(unprotected, f.Dir)
+				continue
+			}
+		}
+		name := path.Join(f.Dir, ".gitignore")
+		// Any NON-REGULAR .gitignore, not just a symlink. A symlink would have ox
+		// edit whatever it points at; a directory (a bad merge, an interrupted
+		// extraction, a stray mkdir) makes every read and write fail. Both mean ox
+		// cannot own the rule here, and both must reach the caller as "unprotected"
+		// so Apply refuses to materialize into this directory.
+		if fi, err := root.Lstat(name); err == nil && !fi.Mode().IsRegular() {
+			unprotected = append(unprotected, f.Dir)
+			continue
+		}
+		changed, created, err := sageoxignore.EnsureBlockInRoot(root, name, f.Entries)
+		if err != nil {
+			// Record and keep going. Returning here abandoned every remaining agent
+			// directory, so one unusable .claude/.gitignore silently left .agents and
+			// .factory with no rule either — one broken directory disarming the
+			// protection for the whole repository.
+			slog.Debug("skills: could not write ox ignore block", "dir", f.Dir, "error", err)
+			unprotected = append(unprotected, f.Dir)
+			continue
+		}
+		if changed {
+			written = append(written, IgnoreFileResult{Rel: filepath.Join(f.Dir, ".gitignore"), Created: created})
+		}
+	}
+	return written, unprotected, nil
+}
+
+// unprotectedScopedIgnoreDirs inspects, but never repairs, the managed ignore
+// policy for required agent directories. It is intentionally used by automatic
+// reconciliation: session start and daemon ticks may update machine-local,
+// gitignored projections, but they must never create a tracked repository diff.
+func unprotectedScopedIgnoreDirs(repoRoot string, required map[string]bool, files []ScopedIgnoreFile) ([]string, error) {
+	root, err := os.OpenRoot(repoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("open repository root: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	var unprotected []string
+	for _, f := range files {
+		if !required[f.Dir] {
+			continue
+		}
+		info, statErr := root.Lstat(f.Dir)
+		if statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			unprotected = append(unprotected, f.Dir)
+			continue
+		}
+		name := path.Join(f.Dir, ".gitignore")
+		info, statErr = root.Lstat(name)
+		if statErr != nil || !info.Mode().IsRegular() {
+			unprotected = append(unprotected, f.Dir)
+			continue
+		}
+		data, readErr := root.ReadFile(name)
+		if readErr != nil || !sageoxignore.HasManagedBlock(data, f.Entries) {
+			unprotected = append(unprotected, f.Dir)
+		}
+	}
+	return unprotected, nil
+}
+
+// IsManagedOnlyScopedIgnore reports whether rel names one of the scoped ignore
+// files and its bytes are exactly the ox-generated block. A valid managed block
+// surrounded by other rules is not enough: those other bytes belong to the user
+// and an untracked file containing them must never be adopted automatically.
+func IsManagedOnlyScopedIgnore(repoRoot, rel string) bool {
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	for _, f := range ScopedIgnoreFiles() {
+		wantRel := filepath.ToSlash(filepath.Join(f.Dir, ".gitignore"))
+		if rel != wantRel {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+		return err == nil && sageoxignore.IsManagedOnly(data, f.Entries)
+	}
+	return false
+}

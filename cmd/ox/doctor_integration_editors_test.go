@@ -183,15 +183,34 @@ func TestDetectOtherAIEditors_MultipleEditors(t *testing.T) {
 	}
 }
 
+// TestDetectOtherAIEditors_NoEditors verifies a project-level editor directory
+// is what gets detected, distinguishing it from the empty case above.
 func TestDetectOtherAIEditors_NoEditors(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
 	gitRoot, cleanup := setupTempGitRepo(t)
 	defer cleanup()
 
 	restoreCwd := changeToDir(t, gitRoot)
 	defer restoreCwd()
 
-	// just verify function doesn't panic (may detect user-level editors)
-	_ = detectOtherAIEditors()
+	before := detectOtherAIEditors()
+	if len(before) != 0 {
+		t.Fatalf("precondition: expected no editors, got %v", before)
+	}
+
+	// Planting one known editor's project path must move the result, otherwise
+	// the empty answer above is indistinguishable from a detector that is off.
+	if len(knownEditors) == 0 || len(knownEditors[0].paths) == 0 {
+		t.Skip("no known editors compiled in")
+	}
+	plant := filepath.Join(gitRoot, knownEditors[0].paths[0])
+	if err := os.MkdirAll(plant, 0o755); err != nil {
+		t.Fatalf("plant %q: %v", plant, err)
+	}
+	if after := detectOtherAIEditors(); len(after) == 0 {
+		t.Errorf("detectOtherAIEditors() found nothing after planting %q", plant)
+	}
 }
 
 // TestCheckCodexIntegration_ProjectWithHooks verifies passed when hooks installed
@@ -382,7 +401,7 @@ func TestCheckOpenCodeHooks_ProjectConfigNoHooks(t *testing.T) {
 	if result.passed {
 		t.Error("expected passed=false when project config exists but hooks not installed")
 	}
-	if !strings.Contains(result.detail, "ox hooks install") {
+	if !strings.Contains(result.detail, "`ox integrate install --opencode`") {
 		t.Errorf("expected detail to suggest installation, got: %s", result.detail)
 	}
 }
@@ -404,7 +423,7 @@ func TestCheckGeminiHooks_ProjectConfigNoHooks(t *testing.T) {
 	if result.passed {
 		t.Error("expected passed=false when project config exists but hooks not installed")
 	}
-	if !strings.Contains(result.detail, "ox hooks install") {
+	if !strings.Contains(result.detail, "`ox integrate install --gemini`") {
 		t.Errorf("expected detail to suggest installation, got: %s", result.detail)
 	}
 }
@@ -513,17 +532,49 @@ func TestDetectOtherAIEditors_NoDuplicates(t *testing.T) {
 	}
 }
 
+// TestDetectOtherAIEditors_EmptyRepo pins the empty result with HOME controlled,
+// so the assertion holds on a developer machine that has editors installed.
+//
+// Failure prevented: the detector scans project-relative AND user-level paths.
+// Without pinning HOME the expected value was unknowable, so the result was
+// discarded and a detector reporting every known editor would have passed.
 func TestDetectOtherAIEditors_EmptyRepo(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
 	gitRoot, cleanup := setupTempGitRepo(t)
 	defer cleanup()
 
 	restoreCwd := changeToDir(t, gitRoot)
 	defer restoreCwd()
 
-	// no editor directories
-	detected := detectOtherAIEditors()
+	if detected := detectOtherAIEditors(); len(detected) != 0 {
+		t.Errorf("detectOtherAIEditors() = %v, want none in an empty repo with an empty home", detected)
+	}
+}
 
-	// should return empty or only user-level editors (not error)
-	// just verify it doesn't panic
-	_ = detected
+// TestCheckAmpHooks_ProjectConfigNoHooks covers the #1257 field case: a repo with
+// .amp/ but no ox integration must fail with a hint naming a real command.
+func TestCheckAmpHooks_ProjectConfigNoHooks(t *testing.T) {
+	gitRoot, cleanup := setupTempGitRepo(t)
+	defer cleanup()
+
+	restoreCwd := changeToDir(t, gitRoot)
+	defer restoreCwd()
+
+	// set after the repo exists: a real ~/.config/amp/plugins/ox-bridge.ts on the
+	// machine running the test would otherwise read as "installed (user)"
+	t.Setenv("HOME", t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(gitRoot, ".amp"), 0755); err != nil {
+		t.Fatalf("failed to create .amp: %v", err)
+	}
+
+	result := checkAmpHooks(false)
+
+	if result.passed {
+		t.Error("expected passed=false when project config exists but hooks not installed")
+	}
+	if !strings.Contains(result.detail, "`ox integrate install --amp`") {
+		t.Errorf("expected detail to name `ox integrate install --amp`, got: %s", result.detail)
+	}
 }

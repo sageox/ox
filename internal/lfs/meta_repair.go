@@ -1,13 +1,18 @@
 package lfs
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+
+	"github.com/sageox/ox/internal/fileutil"
 )
 
 // MetaRepairOutcome reports what RecoverEmptyTitleMeta did to a single
@@ -16,104 +21,214 @@ import (
 // caller can ignore the rest.
 type MetaRepairOutcome struct {
 	SessionName       string
-	Skipped           bool   // meta.json was already healthy or terminal
+	Skipped           bool   // meta.json needs no repair or is still in flight
 	RecoveredFromJSON bool   // pulled a clean title out of summary.json
-	BumpedAttempts    bool   // no recovery available; SummaryAttempts incremented
-	FlippedTerminal   bool   // hit MaxSummaryAttempts; status set to unrecoverable
+	MovedDiagnostic   bool   // moved leaked error prose from summary to validation_error
 	Error             string // non-fatal; meta.json was not modified
 }
 
 // RecoverEmptyTitleMeta inspects one session's meta.json for the
-// post-Apr-27 empty-title failure shape (meta.title=="" with status !=
-// unrecoverable). When summary.json carries a real title, promotes it
-// back into meta and stamps SummaryStatus=ok. Otherwise increments
-// SummaryAttempts and, at MaxSummaryAttempts, flips status to
-// unrecoverable so future calls early-exit.
+// post-Apr-27 empty-title failure shape. Draft and pending sessions still
+// legitimately lack a title and are skipped. When summary.json carries a real
+// title, promotes it back into meta and stamps SummaryStatus=ok. Otherwise it
+// leaves the session for the summarizer.
 //
-// This is the daemon-safe core of the empty-title repair flow. Both
-// the CLI `ox session repair-meta-summary` tool and the autofix
-// scheduler delegate to this so the on-disk behavior is identical.
+// It never touches summary_attempts except to reset it on a recovered title.
+// The counter means "real LLM attempts" and only the finalize worker counts
+// them. This check runs every 30 minutes and on every `ox doctor`, on every
+// clone, so counting here turned one real failure into "unrecoverable" about
+// an hour later, as uncommitted edits on each machine (GH #1107).
+//
+// This is the daemon-safe empty-title repair. The explicit CLI
+// `ox session repair-meta-summary` also repairs non-empty leaky titles.
+// Automatic repair preserves healthy titles and patches only its five
+// fields under the shared metadata lock, retaining all other JSON data.
 //
 // Idempotency contract: running this repeatedly on a healthy meta is a
-// no-op (Skipped=true, no write). Running it repeatedly on an
-// unrecoverable meta is also a no-op. Running it on a fixable meta
-// applies the fix once and then early-exits on subsequent calls.
+// no-op (Skipped=true, no write). The same holds for draft, pending, and
+// unrecoverable metadata, and for an empty title with nothing to recover.
+// Running it on a fixable meta applies the fix once and then early-exits on
+// subsequent calls.
 //
 // dryRun=true returns the outcome without writing meta.json.
 func RecoverEmptyTitleMeta(sessionDir string, dryRun bool) MetaRepairOutcome {
 	name := filepath.Base(sessionDir)
 	out := MetaRepairOutcome{SessionName: name}
+	metaPath := filepath.Join(sessionDir, metaFilename)
 
-	meta, err := ReadSessionMeta(sessionDir)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+	repair := func(meta *SessionMeta) (*SessionMeta, error) {
+		if meta == nil {
 			out.Skipped = true
-			return out
+			return nil, nil
 		}
-		out.Error = err.Error()
-		return out
-	}
 
-	// A draft placeholder legitimately has no title (ADR-029): it is a
-	// meta.json-only marker for a LIVE recording, not a session whose
-	// summarization failed. Without this skip, every autofix tick would treat
-	// the empty title as a fault, bump SummaryAttempts, and at
-	// MaxSummaryAttempts stamp summary_status="unrecoverable" into a session
-	// that is still being recorded — which the daemon's finalize (a
-	// preserve-unowned-fields RMW) would then carry into the finished session,
-	// permanently marking real work as unsummarizable. It would also dirty the
-	// ledger worktree mid-recording for a file the CLI is about to purge.
-	if meta.IsDraft() {
-		out.Skipped = true
-		return out
-	}
-
-	// Healthy or terminal — nothing to do. We treat any non-empty
-	// trimmed title as "healthy" because that's what the web UI will
-	// render; we don't second-guess whether the title is good.
-	if strings.TrimSpace(meta.Title) != "" {
-		out.Skipped = true
-		return out
-	}
-	// Terminal failure — daemon already exhausted MaxSummaryAttempts on
-	// this session. Stop trying. The session is teammate-visible (LFS
-	// upload happened) and the row title falls back to the session-name
-	// slug in the UI.
-	if meta.SummaryStatus == "unrecoverable" {
-		out.Skipped = true
-		return out
-	}
-
-	// Try to recover a clean title from summary.json. The daemon may
-	// have written a failure-stub summary.json with title="" too — in
-	// which case readSummaryJSONTitle returns "" and we fall through to
-	// the bump-attempts path.
-	if cleanTitle := readSummaryJSONTitle(sessionDir); cleanTitle != "" {
-		meta.Title = cleanTitle
-		// Mirror title into summary if summary.json doesn't carry a
-		// distinct one. Keeps the two fields consistent for older
-		// readers that prefer Summary over Title.
-		if strings.TrimSpace(meta.Summary) == "" {
-			meta.Summary = cleanTitle
+		// A draft placeholder legitimately has no title (ADR-029): it is a
+		// meta.json-only marker for a LIVE recording, not a session whose
+		// summarization failed. Any write here would dirty the ledger worktree
+		// mid-recording for a file the CLI is about to purge, and the daemon's
+		// finalize (a preserve-unowned-fields RMW) would carry whatever it wrote
+		// into the finished session.
+		if meta.IsDraft() {
+			out.Skipped = true
+			return nil, nil
 		}
-		meta.SummaryStatus = "ok"
-		meta.ValidationError = ""
-		meta.SummaryAttempts = 0
-		out.RecoveredFromJSON = true
-	} else {
-		meta.SummaryAttempts++
-		out.BumpedAttempts = true
-		if meta.SummaryAttempts >= MaxSummaryAttempts {
-			meta.SummaryStatus = "unrecoverable"
-			out.FlippedTerminal = true
+		// Raw publication marks a session pending before summarization runs.
+		// Even an existing summary.json does not make this metadata-repair pass
+		// responsible for completion; only the summarization path may settle it.
+		if meta.SummaryStatus == "pending" {
+			out.Skipped = true
+			return nil, nil
 		}
+
+		// Healthy or terminal — nothing to do. We treat any non-empty
+		// trimmed title as "healthy" because that's what the web UI will
+		// render; we don't second-guess whether the title is good.
+		if strings.TrimSpace(meta.Title) != "" {
+			out.Skipped = true
+			return nil, nil
+		}
+		// Terminal failure — daemon already exhausted MaxSummaryAttempts on
+		// this session. Stop trying. The session is teammate-visible (LFS
+		// upload happened) and the row title falls back to the session-name
+		// slug in the UI.
+		if meta.SummaryStatus == "unrecoverable" {
+			out.Skipped = true
+			return nil, nil
+		}
+
+		// Older CLIs persisted error prose in Summary. Move it to the diagnostic
+		// field before writing: otherwise validation rejects every repair attempt.
+		// Preserve both diagnostics when a different one is already present.
+		leakySummary := IsLeakySummaryString(meta.Summary)
+		if leakySummary {
+			if meta.ValidationError == "" {
+				meta.ValidationError = meta.Summary
+			} else if !strings.Contains(meta.ValidationError, meta.Summary) {
+				meta.ValidationError += "\n" + meta.Summary
+			}
+			meta.Summary = ""
+		}
+
+		// Try to recover a clean title from summary.json. The daemon may
+		// have written a failure-stub summary.json with title="" too — in
+		// which case there is nothing to recover and only a summarizer can
+		// produce a title.
+		if cleanTitle := readSummaryJSONTitle(sessionDir); cleanTitle != "" {
+			meta.Title = cleanTitle
+			// Mirror title into summary if summary.json doesn't carry a
+			// distinct one. Keeps the two fields consistent for older
+			// readers that prefer Summary over Title.
+			if strings.TrimSpace(meta.Summary) == "" {
+				meta.Summary = cleanTitle
+			}
+			meta.SummaryStatus = "ok"
+			// Repairing a display title is not a new summary generation;
+			// retain diagnostics, including ones moved by an earlier pass.
+			meta.SummaryAttempts = 0
+			out.RecoveredFromJSON = true
+		} else if leakySummary {
+			out.MovedDiagnostic = true
+		} else {
+			out.Skipped = true
+			return nil, nil
+		}
+
+		if err := meta.Validate(); err != nil {
+			return nil, fmt.Errorf("repaired session meta failed invariant: %w", err)
+		}
+		info, err := os.Lstat(metaPath)
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("refusing to repair non-regular meta.json")
+		}
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			return nil, err
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			return nil, err
+		}
+		if fields == nil {
+			return nil, fmt.Errorf("meta.json must contain a JSON object")
+		}
+		if dryRun {
+			return nil, nil
+		}
+		// Patch only the repair-owned fields. Rewriting the typed manifest would
+		// drop fields from older/newer producers, including nested file metadata.
+		for key, value := range map[string]any{
+			"title": meta.Title, "summary": meta.Summary,
+			"summary_status": meta.SummaryStatus, "summary_attempts": meta.SummaryAttempts,
+			"validation_error": meta.ValidationError,
+		} {
+			// These optional fields use omitempty in the normal writer. A reset
+			// retry count must disappear on both replicas; retain real diagnostics.
+			if value == "" || value == 0 {
+				delete(fields, key)
+				continue
+			}
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				return nil, err
+			}
+			fields[key] = encoded
+		}
+		// A map sorts keys alphabetically, unlike WriteSessionMetaOnly. That
+		// whole-file reorder conflicts with an identical remote title repair.
+		// Use the schema's order, but keep raw values so unknown nested fields
+		// survive. Append any unknown top-level fields in deterministic order.
+		var ordered bytes.Buffer
+		ordered.WriteByte('{')
+		schema := reflect.TypeFor[SessionMeta]()
+		for i := range schema.NumField() {
+			key := strings.Split(schema.Field(i).Tag.Get("json"), ",")[0]
+			if value, exists := fields[key]; exists {
+				if ordered.Len() > 1 {
+					ordered.WriteByte(',')
+				}
+				fmt.Fprintf(&ordered, "%q:%s", key, value)
+				delete(fields, key)
+			}
+		}
+		if len(fields) > 0 {
+			extra, err := json.Marshal(fields)
+			if err != nil {
+				return nil, err
+			}
+			if ordered.Len() > 1 {
+				ordered.WriteByte(',')
+			}
+			ordered.Write(extra[1 : len(extra)-1])
+		}
+		ordered.WriteByte('}')
+		var formatted bytes.Buffer
+		err = json.Indent(&formatted, ordered.Bytes(), "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		// MutateSessionMeta holds the shared metadata lock; return nil so it
+		// does not replace this lossless patch with a typed-manifest rewrite.
+		return nil, fileutil.AtomicWriteBytes(metaPath, formatted.Bytes(), info.Mode().Perm())
 	}
 
+	var err error
 	if dryRun {
-		return out
+		var meta *SessionMeta
+		meta, err = ReadSessionMeta(sessionDir)
+		if errors.Is(err, fs.ErrNotExist) {
+			err = nil
+		}
+		if err == nil {
+			_, err = repair(meta)
+		}
+	} else {
+		err = MutateSessionMeta(context.Background(), sessionDir, repair)
 	}
-	if err := WriteSessionMetaOnly(sessionDir, meta); err != nil {
-		out.Error = "write meta.json: " + err.Error()
+	if err != nil {
+		return MetaRepairOutcome{SessionName: name, Error: err.Error()}
 	}
 	return out
 }

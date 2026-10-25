@@ -20,7 +20,7 @@ NC='\033[0m' # No Color
 REPO="sageox/ox"
 BINARY="ox"
 # bundled adapter binaries shipped alongside ox in the release tarball
-ADAPTER_BINARIES="ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode ox-adapter-pi ox-adapter-omp ox-adapter-aider ox-adapter-droid ox-adapter-goose"
+ADAPTER_BINARIES="ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode ox-adapter-pi ox-adapter-omp ox-adapter-aider ox-adapter-droid ox-adapter-goose ox-adapter-cursor"
 LAST_INSTALL_PATH=""
 
 log_info() {
@@ -37,6 +37,156 @@ log_warning() {
 
 log_error() {
     echo -e "${RED}Error:${NC} $1" >&2
+}
+
+# Single-quote a string for pasting into a shell: the line must land in the
+# rc file verbatim, with $PATH unexpanded.
+shell_quote() {
+    local q="'\\''"
+    printf "'%s'" "${1//\'/$q}"
+}
+
+# Escape a path for the inside of a double-quoted string in the startup file,
+# so a directory named with $, ` or " is read as text, never run. POSIX
+# shells expand all three plus backslash; fish expands only $, " and \.
+dq_escape_posix() {
+    local s=${1//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//\$/\\\$}
+    s=${s//\`/\\\`}
+    printf '%s' "$s"
+}
+
+dq_escape_fish() {
+    local s=${1//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//\$/\\\$}
+    printf '%s' "$s"
+}
+
+# Name the startup file the bash in a new terminal reads, which is the
+# environment an AI coding tool started from that terminal inherits
+# (issue #1162). macOS terminals open login shells, which read the first of
+# ~/.bash_profile, ~/.bash_login and ~/.profile that exists and never read
+# ~/.bashrc on their own. Naming the one that already exists matters: a new
+# ~/.bash_profile would stop bash from reading an existing ~/.profile. Linux
+# terminals open non-login shells, which read ~/.bashrc.
+# The name is display text with an unexpanded tilde.
+# shellcheck disable=SC2088
+bash_startup_file() {
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        local f
+        for f in .bash_profile .bash_login .profile; do
+            if [[ -n "${HOME:-}" && -f "$HOME/$f" ]]; then
+                printf '~/%s' "$f"
+                return 0
+            fi
+        done
+        printf '~/.bash_profile'
+        return 0
+    fi
+    printf '~/.bashrc'
+}
+
+# Print PATH guidance for AI coding tool hooks, naming the shell startup
+# file that a non-interactive hook shell actually reads. No-op if the
+# binary's directory is already on PATH.
+#
+# AI coding tools run hooks in a non-interactive shell (e.g. `zsh -c
+# '...'`), which sources ~/.zshenv but never ~/.zshrc/~/.bash_profile/etc.
+# A binary that only ends up on PATH via an interactive rc file works fine
+# at the terminal but stays invisible to those hooks.
+#
+# zsh is the only shell here with a startup file a non-interactive `-c`
+# invocation always reads (~/.zshenv). bash has no such file by default —
+# non-interactive, non-login bash sources nothing unless $BASH_ENV is set,
+# and we deliberately don't tell users to set that: it's obscure and it
+# would affect every non-interactive bash invocation on the machine, not
+# just hooks. So for bash/fish/unknown we give the honest explanation
+# instead of the zsh-specific one, plus a restart reminder: the hook tool
+# inherits the environment of the terminal that launched it, so adding the
+# export to the interactive rc file and then restarting the tool from a
+# fresh terminal works, even though the file itself is never read directly
+# by the hook shell. Mirrors internal/constants/agent.go's
+# oxNotOnPathFallback, cmd/ox/hooks_git.go's
+# oxGitHookNotOnPathFallback, internal/doctor/checks/ox_in_path.go's
+# explanationFor/shellRCFor, and the Makefile's install target — keep the
+# wording identical across all five.
+print_path_warning() {
+    local binary_path=$1
+    local install_dir
+    install_dir=$(dirname "$binary_path")
+
+    if [[ ":$PATH:" == *":$install_dir:"* ]]; then
+        return 0
+    fi
+
+    local shell_name rc_file path_line restart_line explanation one_liner posix_dir fish_dir
+    posix_dir=$(dq_escape_posix "$install_dir")
+    fish_dir=$(dq_escape_fish "$install_dir")
+    shell_name=$(basename "${SHELL:-}")
+    restart_line=""
+    one_liner=""
+    # rc_file is never sourced or written to by this script: it is display
+    # text, and for bash also the target the printed one-liner names, so the
+    # tilde is intentionally left unexpanded (bash_startup_file only ever
+    # returns a fixed ~/.name). The one-liner starts with a newline so the
+    # line never glues onto an existing file's unterminated last line.
+    # shellcheck disable=SC2088
+    case "$shell_name" in
+        zsh)
+            rc_file="~/.zshenv"
+            path_line="export PATH=\"\$PATH:$posix_dir\""
+            explanation="AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc."
+            one_liner="printf '\\n%s\\n' $(shell_quote "$path_line") >> ~/.zshenv"
+            ;;
+        bash)
+            rc_file=$(bash_startup_file)
+            path_line="export PATH=\"\$PATH:$posix_dir\""
+            one_liner="printf '\\n%s\\n' $(shell_quote "$path_line") >> $rc_file"
+            restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
+            explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
+            ;;
+        fish)
+            rc_file="~/.config/fish/config.fish"
+            path_line="fish_add_path -- \"$fish_dir\""
+            one_liner="mkdir -p ~/.config/fish && printf '\\n%s\\n' $(shell_quote "$path_line") >> ~/.config/fish/config.fish"
+            restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
+            explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
+            ;;
+        *)
+            rc_file="the startup file for your shell"
+            path_line="export PATH=\"\$PATH:$posix_dir\""
+            restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
+            explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
+            ;;
+    esac
+
+    echo ""
+    log_warning "$BINARY is installed at $binary_path but is not on PATH for non-interactive shells."
+    echo "$explanation"
+    echo "Add this line to $rc_file:"
+    echo "    $path_line"
+    if [[ -n "$one_liner" ]]; then
+        echo "Or paste this into your terminal to add it for you:"
+        echo "    $one_liner"
+    fi
+    if [[ -n "$restart_line" ]]; then
+        echo "$restart_line"
+    fi
+    echo ""
+}
+
+# Point users at `ox doctor` unconditionally on every successful install —
+# not just when print_path_warning fires. The PATH check above only sees
+# THIS shell's PATH; it can't catch a fix that only touched an interactive
+# rc file (e.g. ~/.zshrc), which looks fine here and still leaves a hook
+# shell unable to find ox. `ox doctor` spawns a scrubbed, non-interactive
+# shell to check for exactly that gap, so it's the one thing in this flow
+# that can actually confirm the install worked for AI coworker hooks.
+print_doctor_hint() {
+    echo "Next: run \`$BINARY doctor\` to confirm your AI coworker can actually see this install."
+    echo ""
 }
 
 release_has_asset() {
@@ -65,12 +215,15 @@ resign_for_macos() {
         return 0
     fi
 
-    log_info "Re-signing binary for macOS..."
+    # A release ships ox plus a dozen adapter binaries; announce the step
+    # once and stay quiet per binary unless one fails.
+    if [[ -z "${RESIGN_ANNOUNCED:-}" ]]; then
+        log_info "Re-signing binaries for this Mac..."
+        RESIGN_ANNOUNCED=1
+    fi
     codesign --remove-signature "$binary_path" 2>/dev/null || true
-    if codesign --force --sign - "$binary_path"; then
-        log_success "Binary re-signed for this machine"
-    else
-        log_warning "Failed to re-sign binary (non-fatal)"
+    if ! codesign --force --sign - "$binary_path" 2>/dev/null; then
+        log_warning "Failed to re-sign $(basename "$binary_path") (non-fatal)"
     fi
 }
 
@@ -257,15 +410,6 @@ install_from_release() {
     LAST_INSTALL_PATH="$install_dir/$BINARY"
     log_success "$BINARY installed to $install_dir/$BINARY"
 
-    # Check if install_dir is in PATH
-    if [[ ":$PATH:" != *":$install_dir:"* ]]; then
-        log_warning "$install_dir is not in your PATH"
-        echo ""
-        echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
-        echo "  export PATH=\"\$PATH:$install_dir\""
-        echo ""
-    fi
-
     cd - > /dev/null || cd "$HOME"
     rm -rf "$tmp_dir"
     return 0
@@ -314,7 +458,10 @@ install_with_go() {
         if [ -n "$gobin" ]; then
             bin_dir="$gobin"
         else
-            bin_dir="$(go env GOPATH)/bin"
+            # GOPATH can list several directories; go install uses the first.
+            local gopath
+            gopath=$(go env GOPATH)
+            bin_dir="${gopath%%:*}/bin"
         fi
         LAST_INSTALL_PATH="$bin_dir/$BINARY"
 
@@ -323,15 +470,6 @@ install_with_go() {
         for adapter in $ADAPTER_BINARIES; do
             resign_for_macos "$bin_dir/$adapter"
         done
-
-        # Check if GOPATH/bin (or GOBIN) is in PATH
-        if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
-            log_warning "$bin_dir is not in your PATH"
-            echo ""
-            echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
-            echo "  export PATH=\"\$PATH:$bin_dir\""
-            echo ""
-        fi
 
         return 0
     else
@@ -360,7 +498,9 @@ build_from_source() {
             build_targets="$build_targets ./cmd/${adapter}"
         done
 
-        if go build $build_targets; then
+        # Without -o, building several packages compiles them and discards
+        # the binaries.
+        if go build -o . $build_targets && [[ -f "$BINARY" ]]; then
             # Determine install location
             local install_dir
             if [[ -w /usr/local/bin ]]; then
@@ -386,15 +526,6 @@ build_from_source() {
             log_success "$BINARY installed to $install_dir/$BINARY"
             LAST_INSTALL_PATH="$install_dir/$BINARY"
 
-            # Check if install_dir is in PATH
-            if [[ ":$PATH:" != *":$install_dir:"* ]]; then
-                log_warning "$install_dir is not in your PATH"
-                echo ""
-                echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
-                echo "  export PATH=\"\$PATH:$install_dir\""
-                echo ""
-            fi
-
             cd - > /dev/null || cd "$HOME"
             rm -rf "$tmp_dir"
             return 0
@@ -411,23 +542,41 @@ build_from_source() {
     fi
 }
 
-# Verify installation
-verify_installation() {
-    if command -v "$BINARY" &> /dev/null; then
-        log_success "$BINARY is installed and ready!"
-        echo ""
-        $BINARY version 2>/dev/null || echo "$BINARY (development build)"
-        echo ""
-        echo "Get started:"
-        echo "  cd your-project"
-        echo "  $BINARY login"
-        echo "  $BINARY init"
-        echo ""
-        return 0
-    else
-        log_error "$BINARY was installed but is not in PATH"
-        return 1
+# Report the install and exit. Succeeds only when running `ox` starts the
+# binary just installed: an ox earlier on PATH would otherwise keep running
+# while this script reports success.
+finish_install() {
+    local on_path
+    on_path=$(command -v "$BINARY" 2>/dev/null) || true
+
+    if [[ -z "$on_path" ]]; then
+        log_error "$BINARY was installed to $LAST_INSTALL_PATH but is not in PATH"
+        print_path_warning "$LAST_INSTALL_PATH"
+        exit 1
     fi
+    if [[ ! "$on_path" -ef "$LAST_INSTALL_PATH" ]]; then
+        log_error "Running '$BINARY' starts $on_path, not the $BINARY just installed at $LAST_INSTALL_PATH"
+        echo "Remove that other $BINARY, or put $(dirname "$LAST_INSTALL_PATH") ahead of $(dirname "$on_path") on PATH."
+        exit 1
+    fi
+
+    local version_output
+    if ! version_output=$("$LAST_INSTALL_PATH" version 2>&1); then
+        log_error "$LAST_INSTALL_PATH was installed but does not run: $version_output"
+        exit 1
+    fi
+
+    log_success "$BINARY is installed and ready!"
+    echo ""
+    echo "$version_output"
+    echo ""
+    echo "Get started:"
+    echo "  cd your-project"
+    echo "  $BINARY login"
+    echo "  $BINARY init"
+    echo ""
+    print_doctor_hint
+    exit 0
 }
 
 # Main installation flow
@@ -443,8 +592,7 @@ main() {
 
     # Try downloading from GitHub releases first
     if install_from_release "$platform"; then
-        verify_installation
-        exit 0
+        finish_install
     fi
 
     log_warning "Failed to install from releases, trying alternative methods..."
@@ -452,8 +600,7 @@ main() {
     # Try go install as fallback
     if check_go; then
         if install_with_go; then
-            verify_installation
-            exit 0
+            finish_install
         fi
     fi
 
@@ -475,8 +622,7 @@ main() {
     fi
 
     if build_from_source; then
-        verify_installation
-        exit 0
+        finish_install
     fi
 
     # All methods failed

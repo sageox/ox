@@ -1,0 +1,52 @@
+---
+title: "ox skills"
+description: "CLI reference for ox skills"
+sidebar_position: 105
+---
+
+## ox skills
+
+Inspect the skills your AI coworkers have
+
+### Synopsis
+
+Inspect and manage the skills your AI coworkers have here.
+
+Skills reach a repository from three places: the ones ox itself ships, the ones
+your team publishes to its Team Context, and the ones you wrote yourself. "list"
+shows all three. "status" answers the harder question — when a team skill is
+missing, which of the several possible reasons is the actual one. "approve" and
+"revoke" are the trust boundary for runnable team-skill content; "publish" sends
+a skill you wrote the other way, into your team's Team Context.
+
+```
+ox skills [flags]
+```
+
+### Options
+
+```
+  -h, --help   help for skills
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
+      --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
+```
+
+### SEE ALSO
+
+* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox skills approve](/skills/approve)	 - Approve runnable team-skill content for this repository
+* [ox skills list](/skills/list)	 - List every skill installed in this repository
+* [ox skills publish](/skills/publish)	 - Publish repository skills to your Team Context
+* [ox skills revoke](/skills/revoke)	 - Revoke approvals for runnable Team Skill content
+* [ox skills status](/skills/status)	 - Show which team skills reached this repository, and why the rest did not

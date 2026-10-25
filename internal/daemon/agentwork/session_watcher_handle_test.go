@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 )
 
@@ -47,8 +48,15 @@ func piSessionsRoot(t *testing.T) (home, sessions string) {
 func startWatch(t *testing.T, m *SessionWatcherManager, sessionFile, adapter string) error {
 	t.Helper()
 	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache")
+	if err := os.MkdirAll(cachePath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeRecordingState(t, filepath.Join(cachePath, recordingMarker), session.RecordingState{
+		WatchMode: "tail", AdapterName: adapter, SessionFile: sessionFile, ParentPID: os.Getpid(),
+	})
 	return m.StartWatch("sess", sessionFile, adapter,
-		filepath.Join(dir, "ledger"), filepath.Join(dir, "cache"))
+		filepath.Join(dir, "ledger"), cachePath)
 }
 
 // TestStartWatch_AcceptsOpaqueHandles: opencode and goose read from a SQLite

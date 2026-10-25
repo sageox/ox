@@ -12,12 +12,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
+
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/index"
 	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/config"
+	gh "github.com/sageox/ox/internal/github"
+	"github.com/sageox/ox/internal/githubmirror"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/repotools"
 )
 
 // CodeDBManager manages CodeDB indexing in the daemon.
@@ -56,17 +62,40 @@ type CodeDBManager struct {
 	ledgerDataDir  string // cached ledger index dir; resolved once on first use
 	// ledgerTestHook is called at the start of BuildLedgerIndex; nil in production.
 	ledgerTestHook func()
+	// ledgerIndexRepoFn replaces db.IndexLocalRepo in tests so a build can be made
+	// to fail the way a mid-walk repack does; nil in production.
+	ledgerIndexRepoFn func(ctx context.Context, db *codedb.DB, repoPath string, opts index.IndexOptions) error
 
 	// lastIndexedHead caches the HEAD ref + commit hash after successful doIndex.
 	// Used by CheckFreshness to skip the expensive doIndex pipeline when nothing changed.
 	// Empty on daemon startup → first CheckFreshness always runs (catches offline changes).
 	lastIndexedHead string // format: "refs/heads/main:abc123..."
 
+	// lastIndexedBoard is index.BoardFingerprint of this repo's posts on the team
+	// bulletin board's github board at the last doIndex that covered them.
+	// CheckFreshness treats a moved board like a moved HEAD: teammates' PRs reach
+	// the board through the Team Context pull without touching this repo's git
+	// state. Other repos' posts are not part of it.
+	lastIndexedBoard string
+	// boardFailedFingerprint and boardFailedAttempts count consecutive board
+	// stages that left posts unindexed for one board state, so a persistent
+	// failure is retried maxBoardIndexAttempts times and then left alone.
+	boardFailedFingerprint string
+	boardFailedAttempts    int
+	// githubRepo caches "owner/name" of the project's GitHub remote, used to pick
+	// this repo's posts off the shared board. Cleared when the project root moves.
+	githubRepo string
+
 	// dirty-only refresh state (separate lifecycle from full indexing)
 	dirtyRefreshing  bool
 	lastDirtyRefresh time.Time
 	// dirtyTestHook is called at the start of RefreshDirtyOverlay; nil in production.
 	dirtyTestHook func()
+	// dirtyOpenHook is called immediately before codedb.Open in RefreshDirtyOverlay;
+	// nil in production. It exists so a test can assert that a canceled refresh
+	// never reaches the uncancellable open/teardown, which no observable side
+	// effect of a skipped open otherwise reveals.
+	dirtyOpenHook func()
 }
 
 // CodeDBStats tracks index statistics.
@@ -229,15 +258,28 @@ func (m *CodeDBManager) resolveLedgerDataDir() string {
 // This is independent of the worktree index — the ledger index provides committed content search
 // even when no worktree is active.
 // Non-blocking: if a ledger index build is already in progress, returns immediately.
-func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string) {
+//
+// The returned error classifies the outcome for the scheduler:
+//   - nil: built, or nothing to do (no ledger, alternates, build already running).
+//   - ErrLedgerBuildYielded: a worktree index owns the codedb right now; no work was done.
+//   - ErrLedgerRepoChanged: the ledger's git objects (or the codedb lock) changed
+//     under the walk; the fingerprint is stale, not wrong, so a retry is expected to succeed.
+//   - any other error: a real failure; callers keep the cooldown.
+func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string) error {
 	if ledgerPath == "" {
-		return
+		return nil
 	}
 
 	m.mu.Lock()
 	if m.ledgerIndexing {
 		m.mu.Unlock()
-		return
+		return nil
+	}
+	// a worktree index writes the same sqlite files; starting now would lose the
+	// write lock (SQLITE_BUSY) after minutes of walking, so yield up front.
+	if m.indexing {
+		m.mu.Unlock()
+		return ErrLedgerBuildYielded
 	}
 	m.ledgerIndexing = true
 	m.mu.Unlock()
@@ -258,17 +300,17 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 	ledgerDir := m.resolveLedgerDataDir()
 	if ledgerDir == "" {
 		m.logger.Debug("codedb ledger: no ledger index dir available")
-		return
+		return nil
 	}
 
 	if _, err := os.Stat(ledgerPath); os.IsNotExist(err) {
 		m.logger.Debug("codedb ledger: ledger path gone", "path", ledgerPath)
-		return
+		return nil
 	}
 
+	start := time.Now()
 	if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
-		m.logger.Warn("codedb ledger: create dir failed", "error", err)
-		return
+		return m.ledgerBuildFailed(start, fmt.Errorf("create ledger index dir: %w", err))
 	}
 
 	// one-time cleanup: remove legacy "baseline" sibling dir (renamed to "ledger")
@@ -284,40 +326,67 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 	indexCtx, cancel := context.WithTimeout(ctx, maxIndexDuration)
 	defer cancel()
 
-	start := time.Now()
 	m.logger.Info("codedb ledger index build started", "ledger", ledgerPath, "dir", ledgerDir)
 
 	db, err := codedb.Open(ledgerDir)
 	if err != nil {
-		m.logger.Warn("codedb ledger: open failed", "error", err)
-		return
+		return m.ledgerBuildFailed(start, fmt.Errorf("open ledger codedb: %w", err))
 	}
 	defer db.Close()
 
+	// Open no longer scans the database, so damage is first met as SQLITE_CORRUPT
+	// from whichever stage reads the bad page. Without this the ledger index would
+	// fail the same way on every build instead of being rebuilt.
+	discardIfCorrupt := func(err error) bool {
+		if !index.IsCorruptionError(err) {
+			return false
+		}
+		_ = db.Close()
+		m.discardCorruptIndex(ledgerDir, err)
+		return true
+	}
+
 	opts := index.IndexOptions{}
 
-	if err := db.IndexLocalRepo(indexCtx, ledgerPath, opts); err != nil {
+	indexRepo := func(ctx context.Context, db *codedb.DB, repoPath string, opts index.IndexOptions) error {
+		return db.IndexLocalRepo(ctx, repoPath, opts)
+	}
+	if m.ledgerIndexRepoFn != nil {
+		indexRepo = m.ledgerIndexRepoFn
+	}
+
+	if err := indexRepo(indexCtx, db, ledgerPath, opts); err != nil {
 		if errors.Is(err, index.ErrAlternatesUnsupported) {
 			m.logger.Info("codedb ledger: skipped (alternates configured)", "path", ledgerPath)
-			return
+			return nil
 		}
-		m.logger.Warn("codedb ledger: index failed", "error", err)
-		return
+		discardIfCorrupt(err)
+		return m.ledgerBuildFailed(start, fmt.Errorf("index ledger repo: %w", err))
 	}
 
-	if _, err := db.ParseSymbols(indexCtx, nil); err != nil {
-		m.logger.Warn("codedb ledger: parse symbols failed", "error", err)
-		// non-fatal: committed content is already indexed
+	// later stages are non-fatal for the content already indexed, except when
+	// they prove the index damaged and it has to be discarded for a rebuild.
+	stages := []struct {
+		name string
+		run  func() error
+	}{
+		{"parse symbols", func() error { _, err := db.ParseSymbols(indexCtx, nil); return err }},
+		{"parse comments", func() error { _, err := db.ParseComments(indexCtx, nil); return err }},
+		// ADR-019 edge backfill (idempotent)
+		{"edge backfill", func() error { _, err := db.BackfillSymbolEdges(indexCtx, nil); return err }},
 	}
-
-	if _, err := db.ParseComments(indexCtx, nil); err != nil {
-		m.logger.Warn("codedb ledger: parse comments failed", "error", err)
-		// non-fatal
-	}
-
-	// ADR-019 edge backfill for ledger codedb (non-fatal, idempotent).
-	if _, err := db.BackfillSymbolEdges(indexCtx, nil); err != nil {
-		m.logger.Warn("codedb ledger: edge backfill failed", "error", err)
+	for _, stage := range stages {
+		if err := stage.run(); err != nil {
+			m.logger.Warn("codedb ledger: stage failed", "stage", stage.name, "error", err)
+			if discardIfCorrupt(err) {
+				return m.ledgerBuildFailed(start, fmt.Errorf("ledger index discarded as corrupt in %s: %w", stage.name, err))
+			}
+			// lock contention is "try again", not "symbols are optional": without this
+			// the scheduler would record the fingerprint over a half-parsed index
+			if store.IsSQLiteBusy(err) {
+				return m.ledgerBuildFailed(start, fmt.Errorf("%s: %w", stage.name, err))
+			}
+		}
 	}
 
 	cached := queryStatsFromDB(db, ledgerDir)
@@ -326,6 +395,48 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 	m.mu.Unlock()
 
 	m.logger.Info("codedb ledger index build complete", "duration", time.Since(start).Round(time.Millisecond), "commits", cached.Commits, "symbols", cached.Symbols)
+	return nil
+}
+
+// ledgerBuildFailed logs the failure next to the "complete" line, with how long
+// the doomed build ran, and classifies it for the scheduler.
+func (m *CodeDBManager) ledgerBuildFailed(start time.Time, err error) error {
+	if isLedgerRepoChanged(err) {
+		err = fmt.Errorf("%w: %w", ErrLedgerRepoChanged, err)
+	}
+	m.logger.Warn("codedb ledger index build failed", "elapsed", time.Since(start).Round(time.Millisecond), "reason", err.Error(), "retryable", errors.Is(err, ErrLedgerRepoChanged))
+	return err
+}
+
+// ErrLedgerBuildYielded means a worktree code index was running, so the ledger
+// build did not start. Nothing was attempted and no cooldown applies.
+var ErrLedgerBuildYielded = errors.New("ledger index build yielded to worktree index")
+
+// ErrLedgerRepoChanged means the ledger's objects, or the codedb's sqlite lock,
+// changed under a running build (pull/rebase/repack replaced pack files, or a
+// worktree index took the write lock). The failure says nothing about the ledger
+// itself, so the scheduler retries soon instead of charging the full cooldown.
+var ErrLedgerRepoChanged = errors.New("ledger repository changed during index build")
+
+// isLedgerRepoChanged reports whether err is the signature of a concurrent
+// repack/rebase or codedb lock contention rather than a real indexing failure.
+//
+// go-git's tree differ flattens errors with %s ("from: packfile not found"),
+// which drops the sentinel from the chain, so errors.Is alone misses that
+// shape. Matching the sentinels' messages covers wrapped and flattened errors.
+func isLedgerRepoChanged(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	// The mmap sentinel has the same message as plumbing.ErrObjectNotFound,
+	// but is only defined on Darwin and Linux. The shared message covers both.
+	for _, sentinel := range []error{plumbing.ErrObjectNotFound, dotgit.ErrPackfileNotFound} {
+		if strings.Contains(text, sentinel.Error()) {
+			return true
+		}
+	}
+	return store.IsSQLiteBusy(err)
 }
 
 // maxIndexDuration caps how long a single indexing run may take before being
@@ -455,12 +566,6 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 		return nil, fmt.Errorf("create codedb dir: %w", err)
 	}
 
-	db, err := codedb.Open(dataDir)
-	if err != nil {
-		return nil, fmt.Errorf("open codedb: %w", err)
-	}
-	defer db.Close()
-
 	totalStart := time.Now()
 
 	// periodic progress logging for long-running indexing
@@ -487,32 +592,40 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 		},
 	}
 
-	// stage 1: git indexing (committed content only)
+	// stage 1: git indexing (committed content only). OpenIndexWithHeal discards
+	// the cache and rebuilds once if the pass fails on a corrupt/interrupted
+	// cache — otherwise a half-written cache makes every subsequent index fail
+	// identically (a permanent crash loop the daemon's next-pass marker recovery
+	// can't break when the whole process is being restarted from scratch).
 	indexStart := time.Now()
-	if payload.URL != "" {
-		if pw != nil {
-			_ = pw.WriteStage("indexing", fmt.Sprintf("Indexing %s...", payload.URL))
+	indexFn := func(ctx context.Context, db *codedb.DB) error {
+		if payload.URL != "" {
+			if pw != nil {
+				_ = pw.WriteStage("indexing", fmt.Sprintf("Indexing %s...", payload.URL))
+			}
+			return db.IndexRepo(ctx, payload.URL, opts)
 		}
-		if err := db.IndexRepo(ctx, payload.URL, opts); err != nil {
-			m.setError(err)
-			return nil, fmt.Errorf("index: %w", err)
-		}
-	} else {
 		if pw != nil {
 			_ = pw.WriteStage("indexing", fmt.Sprintf("Indexing local repo %s...", projectRoot))
 		}
-		if err := db.IndexLocalRepo(ctx, projectRoot, opts); err != nil {
-			if errors.Is(err, index.ErrAlternatesUnsupported) {
-				m.logger.Info("codedb local: skipped (alternates configured)", "path", projectRoot)
-				if pw != nil {
-					_ = pw.WriteStage("indexing", "codedb: skipped (git alternates not supported)")
-				}
-				return nil, nil
-			}
-			m.setError(err)
-			return nil, fmt.Errorf("index local: %w", err)
-		}
+		return db.IndexLocalRepo(ctx, projectRoot, opts)
 	}
+	db, err := codedb.OpenIndexWithHeal(ctx, dataDir, indexFn)
+	if err != nil {
+		if errors.Is(err, index.ErrAlternatesUnsupported) {
+			m.logger.Info("codedb local: skipped (alternates configured)", "path", projectRoot)
+			if pw != nil {
+				_ = pw.WriteStage("indexing", "codedb: skipped (git alternates not supported)")
+			}
+			return nil, nil
+		}
+		m.setError(err)
+		if payload.URL != "" {
+			return nil, fmt.Errorf("index: %w", err)
+		}
+		return nil, fmt.Errorf("index local: %w", err)
+	}
+	defer db.Close()
 	indexDuration := time.Since(indexStart)
 	m.logger.Info("codedb stage complete", "stage", "git-index", "duration", indexDuration.Round(time.Millisecond))
 
@@ -528,6 +641,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	})
 	if err != nil {
 		m.setError(err)
+		m.discardIfCorrupt(db, dataDir, err)
 		return nil, fmt.Errorf("parse symbols: %w", err)
 	}
 	symbolDuration := time.Since(symbolStart)
@@ -545,6 +659,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	})
 	if err != nil {
 		m.setError(err)
+		m.discardIfCorrupt(db, dataDir, err)
 		return nil, fmt.Errorf("parse comments: %w", err)
 	}
 	commentDuration := time.Since(commentStart)
@@ -571,12 +686,14 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	// is a full tear-down-and-rebuild (git status + re-read all files + new Bleve index),
 	// so running it again here is pure waste when the overlay is already fresh.
 	var dirtyDuration time.Duration
+	dirtyOverlaySucceeded := false
 	if payload.URL == "" {
 		m.mu.Lock()
 		dirtyFresh := !m.lastDirtyRefresh.IsZero() && time.Since(m.lastDirtyRefresh) < 2*time.Minute
 		m.mu.Unlock()
 
 		if dirtyFresh {
+			dirtyOverlaySucceeded = true
 			m.logger.Debug("codedb skipping dirty overlay in doIndex, poll-built overlay is fresh")
 		} else {
 			dirtyStart := time.Now()
@@ -586,8 +703,11 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 			dirtyCount, dirtyErr := db.BuildDirtyIndex(ctx, projectRoot, opts)
 			if dirtyErr != nil {
 				m.logger.Warn("dirty index build failed", "error", dirtyErr)
-			} else if dirtyCount > 0 {
-				m.logger.Debug("dirty index built", "files", dirtyCount)
+			} else {
+				dirtyOverlaySucceeded = true
+				if dirtyCount > 0 {
+					m.logger.Debug("dirty index built", "files", dirtyCount)
+				}
 			}
 			dirtyDuration = time.Since(dirtyStart)
 
@@ -595,7 +715,9 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 			if baseDir := m.resolveLedgerDataDir(); baseDir != "" && baseDir != dataDir {
 				baseDB, bErr := codedb.Open(baseDir)
 				if bErr == nil {
-					baseDB.BuildDirtyIndex(ctx, projectRoot, opts)
+					if _, dErr := baseDB.BuildDirtyIndex(ctx, projectRoot, opts); dErr != nil {
+						m.logger.Warn("ledger dirty overlay build failed", "error", dErr)
+					}
 					baseDB.Close()
 				}
 			}
@@ -626,6 +748,14 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 		}
 	}
 
+	// index the team bulletin board's mirrored GitHub posts. Must run after the
+	// Ledger stage: a board post wins over a Ledger snapshot for the same number.
+	// Local indexing only — payload.URL indexes some other repo, whose PRs these
+	// are not.
+	if payload.URL == "" {
+		m.indexGitHubBoard(ctx, db, pw)
+	}
+
 	// cache stats from the still-open DB connection so Stats() never has to reopen
 	cachedStats := queryStatsFromDB(db, dataDir)
 
@@ -633,7 +763,16 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	m.lastIndex = time.Now()
 	m.lastErr = nil
 	m.stats = cachedStats
+	tracker := m.issues
 	m.mu.Unlock()
+
+	// A completed normal or full index includes the dirty-overlay stage and
+	// supersedes any failure recorded by an earlier standalone refresh. Clear
+	// it here so explicit `ox code index --full` repairs status immediately,
+	// without waiting for an unrelated worktree edit to trigger another refresh.
+	if tracker != nil && dirtyOverlaySucceeded {
+		tracker.ClearIssue(IssueTypeDirtyOverlayFailed, "")
+	}
 
 	// indexing succeeded — clear any self-heal markers so the next freshness
 	// check doesn't re-force --full. (The dataDir wipe above would have removed
@@ -672,6 +811,177 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 		CommentDurationMs: commentDuration.Milliseconds(),
 		TotalDurationMs:   totalDuration.Milliseconds(),
 	}, nil
+}
+
+// maxBoardIndexAttempts bounds how many times the board stage runs for one
+// board state while posts keep failing to index. The retries cost a pass of
+// doIndex each (incident #1144 was an index rebuild storm), so a failure that
+// will not clear must not keep re-running it.
+const maxBoardIndexAttempts = 3
+
+// indexGitHubBoard is the board stage of doIndex. It is non-fatal like the
+// Ledger stage: the mirror is an enrichment, and a bad post must not fail a
+// code index.
+func (m *CodeDBManager) indexGitHubBoard(ctx context.Context, db *codedb.DB, pw *ProgressWriter) {
+	postsDir := m.boardPostsDir()
+	if postsDir == "" {
+		return
+	}
+	// a project without a GitHub remote has no posts on the board to find
+	repos := m.boardRepoNames()
+	// taken before indexing: a post that lands mid-stage then reads as "changed"
+	// on the next CheckFreshness instead of being recorded as already indexed
+	fingerprint := index.BoardFingerprint(postsDir, boardSlugPrefixes(repos)...)
+
+	failed := false
+	if len(repos) > 0 {
+		if pw != nil {
+			_ = pw.WriteStage("github-board", "Indexing GitHub board posts...")
+		}
+		start := time.Now()
+		stats, err := db.IndexGitHubBoard(ctx, postsDir, repos[0], func(msg string) {
+			if pw != nil {
+				_ = pw.WriteMessage(msg)
+			}
+		}, repos[1:]...)
+		switch {
+		case err != nil:
+			m.logger.Warn("github board indexing failed", "error", err)
+			failed = true
+		case stats.PRsIndexed > 0 || stats.IssuesIndexed > 0:
+			m.logger.Info("codedb stage complete", "stage", "github-board", "duration", time.Since(start).Round(time.Millisecond), "prs", stats.PRsIndexed, "issues", stats.IssuesIndexed)
+		}
+	}
+
+	// A canceled or timed-out stage may have skipped posts, so leave the
+	// fingerprint stale and let the next check retry.
+	if ctx.Err() != nil {
+		return
+	}
+	m.recordBoardStage(fingerprint, failed)
+}
+
+// recordBoardStage records the outcome of a board stage that ran to the end.
+//
+// A clean run records the fingerprint. A run that left posts unindexed leaves
+// the board marked changed, so the next freshness check retries, but only
+// maxBoardIndexAttempts times for the same fingerprint; after that the
+// fingerprint is recorded anyway, because a failure that persists would
+// otherwise re-run the whole pipeline on every check. The count survives that
+// give-up, so a later run for the same unchanged board does not start the
+// retries over. A clean run or a different fingerprint resets it.
+func (m *CodeDBManager) recordBoardStage(fingerprint string, failed bool) {
+	m.mu.Lock()
+	if !failed {
+		m.boardFailedFingerprint, m.boardFailedAttempts = "", 0
+		m.lastIndexedBoard = fingerprint
+		m.mu.Unlock()
+		return
+	}
+	if m.boardFailedFingerprint != fingerprint {
+		m.boardFailedFingerprint, m.boardFailedAttempts = fingerprint, 0
+	}
+	m.boardFailedAttempts++
+	attempts := m.boardFailedAttempts
+	retry := attempts < maxBoardIndexAttempts
+	if retry {
+		// not just "leave it": the fingerprint may already be the recorded one
+		// when HEAD, not the board, triggered this run. Posts that failed to
+		// index mean the board directory was read, so its fingerprint is
+		// non-empty and "" always reads as changed.
+		m.lastIndexedBoard = ""
+	} else {
+		m.lastIndexedBoard = fingerprint
+	}
+	m.mu.Unlock()
+
+	if retry {
+		m.logger.Warn("github board posts failed to index, will retry on the next freshness check", "attempt", attempts, "max_attempts", maxBoardIndexAttempts)
+		return
+	}
+	m.logger.Warn("github board posts still failing to index, not retrying until the board changes", "attempts", attempts)
+}
+
+// boardPostsDir returns the directory holding the team bulletin board's github
+// posts for this project, or "" when the project has no Team Context checkout.
+// The directory may not exist yet; the mirror creates it with the first post.
+func (m *CodeDBManager) boardPostsDir() string {
+	m.mu.Lock()
+	projectRoot := m.projectRoot
+	m.mu.Unlock()
+
+	teamContext := config.FindRepoTeamContext(projectRoot)
+	if teamContext == nil || teamContext.Path == "" {
+		return ""
+	}
+	return githubmirror.PostsDir(teamContext.Path)
+}
+
+// githubRepoFullName returns "owner/name" for the project's GitHub remote, or
+// "" when there is none. It resolves the remote the same way the GitHub sync
+// does, so the board is read for the repo the mirror writes for. Only a
+// successful resolution is cached, so adding a remote later is picked up.
+func (m *CodeDBManager) githubRepoFullName() string {
+	m.mu.Lock()
+	if m.githubRepo != "" {
+		repo := m.githubRepo
+		m.mu.Unlock()
+		return repo
+	}
+	projectRoot := m.projectRoot
+	m.mu.Unlock()
+
+	urls, err := repotools.GetRemoteURLsForDir(projectRoot)
+	if err != nil {
+		m.logger.Debug("codedb board: no git remotes", "error", err)
+		return ""
+	}
+	for _, url := range urls {
+		if owner, name, ok := gh.ParseGitHubRemote(url); ok {
+			repo := owner + "/" + name
+			m.mu.Lock()
+			m.githubRepo = repo
+			m.mu.Unlock()
+			return repo
+		}
+	}
+	return ""
+}
+
+// boardRepoNames returns the spellings of this project's repo ("owner/name")
+// that posts on the board may carry: the git remote's first, then GitHub's
+// current name when the relay recorded one that differs. The relay publishes
+// under GitHub's name, which after a rename or transfer is not what the remote
+// says, and posts written before the rename keep the old name until they
+// expire. It reads a local file only. nil means the project has no GitHub
+// remote.
+func (m *CodeDBManager) boardRepoNames() []string {
+	remote := m.githubRepoFullName()
+	if remote == "" {
+		return nil
+	}
+	names := []string{remote}
+
+	m.mu.Lock()
+	ledgerPath := m.ledgerPath
+	m.mu.Unlock()
+	owner, name, _ := strings.Cut(remote, "/")
+	canonicalOwner, canonicalName := githubmirror.CanonicalRepo(ledgerPath, owner, name)
+	if canonical := canonicalOwner + "/" + canonicalName; !strings.EqualFold(canonical, remote) {
+		names = append(names, canonical)
+	}
+	return names
+}
+
+// boardSlugPrefixes maps repo names ("owner/name") to the file-name prefixes
+// their posts start with.
+func boardSlugPrefixes(repos []string) []string {
+	prefixes := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		owner, name, _ := strings.Cut(repo, "/")
+		prefixes = append(prefixes, githubmirror.SlugPrefix(owner, name))
+	}
+	return prefixes
 }
 
 // readHeadFingerprint returns a cheap fingerprint of the current git HEAD state.
@@ -758,6 +1068,24 @@ func readHeadFingerprintGit(ctx context.Context, repoPath string) string {
 	return refName + ":" + hashOut
 }
 
+// boardChanged reports whether this repo's posts on the team bulletin board's
+// github board differ from what the last index covered. A teammate's PR reaches
+// the board through the Team Context pull, which never moves this repo's HEAD,
+// so without this the HEAD pre-check would leave board posts unindexed until the
+// next commit. Posts for the team's other repos do not count: they cannot change
+// what this project indexes, and each one would otherwise cost a pass of the
+// whole pipeline.
+func (m *CodeDBManager) boardChanged() bool {
+	postsDir := m.boardPostsDir()
+	if postsDir == "" {
+		return false
+	}
+	current := index.BoardFingerprint(postsDir, boardSlugPrefixes(m.boardRepoNames())...)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return current != m.lastIndexedBoard
+}
+
 // CheckFreshness checks if the index needs refreshing and triggers a background
 // re-index if needed. If no index exists yet, creates the initial index.
 // This is non-blocking and safe to call from the scheduler or daemon startup.
@@ -779,7 +1107,7 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 		m.mu.Lock()
 		cached := m.lastIndexedHead
 		m.mu.Unlock()
-		if cached != "" && cached == fingerprint {
+		if cached != "" && cached == fingerprint && !m.boardChanged() {
 			dataDir := m.resolveSharedDataDir()
 			if _, err := os.Stat(dataDir); err == nil {
 				m.logger.Debug("codedb freshness check skipped, HEAD unchanged")
@@ -894,6 +1222,73 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 	}()
 }
 
+// discardIfCorrupt discards the cache at dir when err proves the database
+// damaged, closing db first. OpenIndexWithHeal covers the git-index stage; this
+// covers the stages after it, which the open-time scan used to cover too: they
+// would otherwise hit the same damaged page on every pass and never recover.
+func (m *CodeDBManager) discardIfCorrupt(db *codedb.DB, dir string, err error) {
+	if !index.IsCorruptionError(err) {
+		return
+	}
+	_ = db.Close() // safe to repeat: the caller's deferred Close becomes a no-op
+	m.discardCorruptIndex(dir, err)
+}
+
+// discardCorruptIndex removes a codedb cache that a real statement or a
+// maintenance scan proved damaged, and forgets the freshness fingerprint so the
+// next CheckFreshness rebuilds instead of trusting the HEAD it last indexed.
+// Callers must not hold the database open: the files are about to disappear.
+//
+// The ledger index lives inside the shared index's directory
+// (<shared>/ledger), and has a health of its own: a damaged shared index must
+// not cost a 5 GB ledger rebuild, so that subdirectory is left alone.
+func (m *CodeDBManager) discardCorruptIndex(dir string, cause error) {
+	m.logger.Warn("codedb index is damaged; discarding it for a clean rebuild", "data_dir", dir, "error", cause)
+	ledger := m.resolveLedgerDataDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		m.logger.Warn("codedb discard of damaged index failed", "data_dir", dir, "error", err)
+		return
+	}
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		if path == ledger {
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			m.logger.Warn("codedb discard of damaged index failed", "data_dir", dir, "path", path, "error", err)
+			return
+		}
+	}
+	if dir == m.resolveSharedDataDir() {
+		m.mu.Lock()
+		m.lastIndexedHead = ""
+		m.mu.Unlock()
+	}
+}
+
+// buildActiveFor reports whether an index build or overlay refresh is writing
+// the codedb at dir right now. Maintenance defers to it: a VACUUM or a prune
+// would take write locks the build is holding for minutes.
+func (m *CodeDBManager) buildActiveFor(dir string) bool {
+	shared := m.resolveSharedDataDir()
+	ledger := m.resolveLedgerDataDir()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return (dir == shared && (m.indexing || m.dirtyRefreshing)) || (dir == ledger && m.ledgerIndexing)
+}
+
+// maintenanceDirs lists the codedb directories maintenance covers: the shared
+// index and the ledger index. The ledger index is reached through the same
+// resolver BuildLedgerIndex uses, so the two never disagree about its location.
+func (m *CodeDBManager) maintenanceDirs() []string {
+	dirs := []string{m.resolveSharedDataDir()}
+	if ledger := m.resolveLedgerDataDir(); ledger != "" && ledger != dirs[0] {
+		dirs = append(dirs, ledger)
+	}
+	return dirs
+}
+
 // gcDirtyIndexes removes stale dirty overlay directories and logs the result.
 func (m *CodeDBManager) gcDirtyIndexes(dataDir string) {
 	db, err := codedb.Open(dataDir)
@@ -908,6 +1303,24 @@ func (m *CodeDBManager) gcDirtyIndexes(dataDir string) {
 	}
 	if removed > 0 {
 		m.logger.Info("codedb dirty index GC: removed stale overlays", "count", removed)
+	}
+}
+
+// failDirtyOverlay records a dirty overlay failure. Zeroing lastDirtyRefresh is
+// what stops a later staleness check from trusting the earlier success this
+// failure superseded.
+func (m *CodeDBManager) failDirtyOverlay(summary string) {
+	m.mu.Lock()
+	m.lastDirtyRefresh = time.Time{}
+	tracker := m.issues
+	m.mu.Unlock()
+	if tracker != nil {
+		tracker.SetIssue(DaemonIssue{
+			Type:     IssueTypeDirtyOverlayFailed,
+			Severity: SeverityWarning,
+			Summary:  summary,
+			Since:    time.Now(),
+		})
 	}
 }
 
@@ -935,6 +1348,15 @@ func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 			m.dirtyTestHook()
 		}
 
+		// codedb.Open and the deferred db.Close take no context and are disk-bound,
+		// so entering the build with an already-canceled context pays a full Bleve
+		// open and teardown before BuildDirtyIndex reports the cancellation and the
+		// result is thrown away. Daemon shutdown is the caller that cancels.
+		if err := ctx.Err(); err != nil {
+			m.failDirtyOverlay(fmt.Sprintf("dirty overlay refresh canceled: %v", err))
+			return
+		}
+
 		m.mu.Lock()
 		projectRoot := m.projectRoot
 		m.mu.Unlock()
@@ -950,20 +1372,13 @@ func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 		}
 
 		start := time.Now()
+		if m.dirtyOpenHook != nil {
+			m.dirtyOpenHook()
+		}
 		db, err := codedb.Open(dataDir)
 		if err != nil {
 			m.logger.Warn("dirty overlay refresh: open failed", "error", err)
-			m.mu.Lock()
-			tracker := m.issues
-			m.mu.Unlock()
-			if tracker != nil {
-				tracker.SetIssue(DaemonIssue{
-					Type:     IssueTypeDirtyOverlayFailed,
-					Severity: SeverityWarning,
-					Summary:  fmt.Sprintf("dirty overlay refresh failed: %v", err),
-					Since:    time.Now(),
-				})
-			}
+			m.failDirtyOverlay(fmt.Sprintf("dirty overlay refresh failed: %v", err))
 			return
 		}
 		defer db.Close()
@@ -972,17 +1387,7 @@ func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 		dirtyCount, dirtyErr := db.BuildDirtyIndex(ctx, projectRoot, opts)
 		if dirtyErr != nil {
 			m.logger.Warn("dirty overlay refresh failed", "error", dirtyErr)
-			m.mu.Lock()
-			tracker := m.issues
-			m.mu.Unlock()
-			if tracker != nil {
-				tracker.SetIssue(DaemonIssue{
-					Type:     IssueTypeDirtyOverlayFailed,
-					Severity: SeverityWarning,
-					Summary:  fmt.Sprintf("dirty overlay refresh failed: %v", dirtyErr),
-					Since:    time.Now(),
-				})
-			}
+			m.failDirtyOverlay(fmt.Sprintf("dirty overlay refresh failed: %v", dirtyErr))
 			return
 		}
 
@@ -998,7 +1403,9 @@ func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 		if baseDir := m.resolveLedgerDataDir(); baseDir != "" && baseDir != dataDir {
 			baseDB, bErr := codedb.Open(baseDir)
 			if bErr == nil {
-				baseDB.BuildDirtyIndex(ctx, projectRoot, opts)
+				if _, dErr := baseDB.BuildDirtyIndex(ctx, projectRoot, opts); dErr != nil {
+					m.logger.Warn("ledger dirty overlay build failed", "error", dErr)
+				}
 				baseDB.Close()
 			}
 		}
@@ -1014,82 +1421,29 @@ func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 }
 
 // Stats returns current index statistics.
-// Returns cached stats from the last index run to avoid blocking on SQLite
-// during active indexing. Only queries the DB on cold start (no cached stats
-// and not currently indexing).
+// Counts come from the last successful index run. Never open the database here:
+// cold starts and failed indexing can leave SQLite or Bleve unavailable, and
+// status IPC requests must remain responsive in those states.
 func (m *CodeDBManager) Stats() CodeDBStats {
 	m.mu.Lock()
-	indexing := m.indexing
-	lastIndex := m.lastIndex
-	lastErr := m.lastErr
-	cached := m.stats
-	ledgerIndexing := m.ledgerIndexing
-	ledgerStats := m.ledgerStats
+	result := m.stats
+	result.IndexingNow = m.indexing
+	result.LastIndexed = m.lastIndex
+	result.LastError = ""
+	if m.lastErr != nil {
+		result.LastError = m.lastErr.Error()
+	}
+	result.LedgerIndexingNow = m.ledgerIndexing
+	result.LedgerExists = m.ledgerStats.IndexExists
+	result.LedgerCommits = m.ledgerStats.Commits
 	m.mu.Unlock()
 
-	dataDir := m.resolveSharedDataDir()
-
-	// merge ledger index fields into result
-	mergeLedger := func(s *CodeDBStats) {
-		s.LedgerIndexingNow = ledgerIndexing
-		s.LedgerExists = ledgerStats.IndexExists
-		s.LedgerCommits = ledgerStats.Commits
+	result.DataDir = m.resolveSharedDataDir()
+	if !result.IndexExists {
+		_, err := os.Stat(result.DataDir)
+		result.IndexExists = err == nil
 	}
 
-	// if we have cached stats, return them with live metadata
-	if cached.IndexExists {
-		cached.IndexingNow = indexing
-		cached.LastIndexed = lastIndex
-		cached.DataDir = dataDir
-		cached.LastError = ""
-		if lastErr != nil {
-			cached.LastError = lastErr.Error()
-		}
-		mergeLedger(&cached)
-		return cached
-	}
-
-	// no cached stats yet — cold start before first index completes
-	result := CodeDBStats{
-		DataDir:     dataDir,
-		IndexingNow: indexing,
-		LastIndexed: lastIndex,
-	}
-	if lastErr != nil {
-		result.LastError = lastErr.Error()
-	}
-
-	// if indexing is active, don't try to open the DB (it will block)
-	if indexing {
-		if _, err := os.Stat(dataDir); err == nil {
-			result.IndexExists = true
-		}
-		mergeLedger(&result)
-		return result
-	}
-
-	// not indexing and no cache: try a quick read to populate initial stats
-	if _, err := os.Stat(dataDir); err == nil {
-		result.IndexExists = true
-
-		db, err := codedb.Open(dataDir)
-		if err == nil {
-			defer db.Close()
-			result = queryStatsFromDB(db, dataDir)
-			result.IndexingNow = indexing
-			result.LastIndexed = lastIndex
-			if lastErr != nil {
-				result.LastError = lastErr.Error()
-			}
-
-			// cache for future calls
-			m.mu.Lock()
-			m.stats = result
-			m.mu.Unlock()
-		}
-	}
-
-	mergeLedger(&result)
 	return result
 }
 
@@ -1152,6 +1506,7 @@ func (m *CodeDBManager) UpdateProjectRoot(path string) {
 	}
 	old := m.projectRoot
 	m.projectRoot = path
+	m.githubRepo = "" // the new root may have different remotes
 	m.logger.Info("codedb project root updated", "old", old, "new", path)
 }
 

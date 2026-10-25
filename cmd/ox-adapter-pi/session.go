@@ -33,6 +33,8 @@ type piRecord struct {
 	Type      string     `json:"type"`
 	Timestamp string     `json:"timestamp,omitempty"`
 	Version   int        `json:"version,omitempty"` // session header
+	ID        string     `json:"id,omitempty"`
+	Cwd       string     `json:"cwd,omitempty"`
 	ModelID   string     `json:"modelId,omitempty"` // model_change
 	Provider  string     `json:"provider,omitempty"`
 	Message   *piMessage `json:"message,omitempty"`
@@ -210,42 +212,54 @@ func cwdToDirName(cwd string) string {
 	return "--" + strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "--")
 }
 
+// Pi's current writer uses single dashes between path components and a trailing --.
+// Keep the older encoding as a read-only compatibility path.
+func piProjectDirs(baseDir, cwd string) []string {
+	current := "--" + strings.ReplaceAll(strings.Trim(cwd, "/"), "/", "-") + "--"
+	return []string{filepath.Join(baseDir, current), filepath.Join(baseDir, cwdToDirName(cwd))}
+}
+
+func piSessionMatches(path, repoRoot, sessionID string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+	if !scanner.Scan() {
+		return false
+	}
+	var header piRecord
+	if json.Unmarshal(scanner.Bytes(), &header) != nil || header.Type != "session" || header.Cwd == "" || header.ID == "" {
+		return false
+	}
+	if sessionID != "" && header.ID != sessionID {
+		return false
+	}
+	if resolved, err := filepath.EvalSymlinks(repoRoot); err == nil {
+		repoRoot = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(header.Cwd); err == nil {
+		header.Cwd = resolved
+	}
+	return filepath.Clean(header.Cwd) == filepath.Clean(repoRoot)
+}
+
+func piSessionIDFilename(name, sessionID string) bool {
+	return name == sessionID+".jsonl" || strings.HasSuffix(name, "_"+sessionID+".jsonl")
+}
+
 func findPiSession(repoRoot, agentID, since, agentSessionID string) (string, error) {
 	baseDir, err := piSessionsDir()
 	if err != nil {
 		return "", err
 	}
 
-	// direct lookup by session ID
 	if agentSessionID != "" {
 		if err := adapterruntime.ValidateSessionID(agentSessionID); err != nil {
 			return "", err
-		}
-
-		if repoRoot != "" {
-			// Same project-scoping rule as the fallback search below: a
-			// project-scoped query must never reach into another project's
-			// directory, even when the caller also supplies a session ID.
-			// Ledgers are shared with teammates, so returning another
-			// repo's session here would upload its conversation into the
-			// wrong Ledger.
-			direct := filepath.Join(baseDir, cwdToDirName(repoRoot), agentSessionID+".jsonl")
-			if _, err := os.Stat(direct); err == nil {
-				return direct, nil
-			}
-		} else {
-			// unscoped query: search across all subdirectories for this
-			// session ID
-			subdirs, _ := os.ReadDir(baseDir)
-			for _, d := range subdirs {
-				if !d.IsDir() {
-					continue
-				}
-				direct := filepath.Join(baseDir, d.Name(), agentSessionID+".jsonl")
-				if _, err := os.Stat(direct); err == nil {
-					return direct, nil
-				}
-			}
 		}
 	}
 
@@ -264,11 +278,14 @@ func findPiSession(repoRoot, agentID, since, agentSessionID string) (string, err
 	// searches every subdirectory.
 	var searchDirs []string
 	if repoRoot != "" {
-		projectDir := filepath.Join(baseDir, cwdToDirName(repoRoot))
-		if info, err := os.Stat(projectDir); err != nil || !info.IsDir() {
+		for _, projectDir := range piProjectDirs(baseDir, repoRoot) {
+			if info, err := os.Stat(projectDir); err == nil && info.IsDir() {
+				searchDirs = append(searchDirs, projectDir)
+			}
+		}
+		if len(searchDirs) == 0 {
 			return "", fmt.Errorf("no pi sessions found for %s", repoRoot)
 		}
-		searchDirs = append(searchDirs, projectDir)
 	} else {
 		subdirs, err := os.ReadDir(baseDir)
 		if err != nil {
@@ -288,18 +305,28 @@ func findPiSession(repoRoot, agentID, since, agentSessionID string) (string, err
 			continue
 		}
 		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+				continue
+			}
+			path := filepath.Join(dir, entry.Name())
+			if agentSessionID != "" && !piSessionIDFilename(entry.Name(), agentSessionID) {
 				continue
 			}
 			info, err := entry.Info()
 			if err != nil {
 				continue
 			}
-			if !sinceTime.IsZero() && !info.ModTime().After(sinceTime) {
+			// An exact ID is authoritative even for long-running sessions whose
+			// last write predates the lookup window. Without one, avoid opening
+			// headers for stale sessions on every discovery retry.
+			if agentSessionID == "" && !sinceTime.IsZero() && !info.ModTime().After(sinceTime) {
+				continue
+			}
+			if repoRoot != "" && !piSessionMatches(path, repoRoot, agentSessionID) {
 				continue
 			}
 			candidates = append(candidates, sessionCandidate{
-				path:    filepath.Join(dir, entry.Name()),
+				path:    path,
 				modTime: info.ModTime(),
 			})
 		}
@@ -316,12 +343,18 @@ func findPiSession(repoRoot, agentID, since, agentSessionID string) (string, err
 		return candidates[i].modTime.After(candidates[j].modTime)
 	})
 
+	if agentSessionID != "" {
+		return candidates[0].path, nil // exact native ID also matches the header for scoped lookups
+	}
 	if agentID != "" {
 		for _, c := range candidates {
 			if sessionContainsText(c.path, agentID) {
 				return c.path, nil
 			}
 		}
+		// The repo header proves ownership, not which concurrent Pi session
+		// belongs to this AI coworker. Wait for an exact ID or an agent-ID hit.
+		return "", fmt.Errorf("no pi session for agent %s in %s", agentID, repoRoot)
 	}
 
 	return candidates[0].path, nil

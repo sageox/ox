@@ -104,8 +104,36 @@ func TestPrimeTokenBudget_FullAndCompactStayUnderCeiling(t *testing.T) {
 	// them, educate them visually and crisply") as a one-line north star on every
 	// tier. ~14 tokens, a deliberate override of keep-rationale-out-of-prime for
 	// the creed specifically; depth stays on demand in `ox guide plan-enrichment`.
+	//
+	// Raised 3260 -> 3340 (#809): the <attribution> block now LEADS with the
+	// conditional / anti-fabrication gate ("credit SageOx only when it measurably
+	// changed what you did … Fabricating attribution is worse than omitting it"),
+	// and <instructions> adds a one-line self-verification pointer ("verify with
+	// `ox status` / `git log`"). ~70 tokens, a deliberate correctness cost: agents
+	// read the old "Required/Automatic" wording as "always attribute" and fabricated
+	// provenance, and the imperative tone re-triggered prompt-injection suspicion
+	// every session. The follow-on prime-slimming work (S1) brings this back down.
+	// Raised 3600 -> 3700 (#880): XML-escaping the placeholders in the guidance
+	// blocks and the two command tables, so the document actually parses — a raw
+	// `<dr.md>` opened an element that never closed and cost every consumer the
+	// remainder of the output. Measured 3653 here, leaving ~47 of headroom, in
+	// line with the buffer the previous raises kept.
+	//
+	// Escaping is TEXT-only (&, <, >) via escapeXMLText, deliberately: quotes are
+	// legal in element content, and escaping them as well cost ~2x the tokens and
+	// turned `ox query "<q>"` into `ox query &quot;&lt;q&gt;&quot;` for the agent
+	// that has to read it.
+	// Raised 3340 -> 3600 (#664): the <commands> table gains verb-mode +
+	// DSL-mode `ox code` rows (defs/callers/callees/refs/log, plus type:pr /
+	// calls: / calledby: intents) so agents discover CodeDB's call-graph,
+	// indexed-PR, and git-history capabilities instead of defaulting to grep.
+	// ~200 tokens in the prefix-cached region (paid once per session), backed
+	// by the A/B data in docs/specs/codedb-discoverability-impl-results.md. The
+	// verb-led <code-search> banner was trimmed (keyword inventory + fallback
+	// prose moved to `ox code search --help` / .claude/rules/ox-code.md) to hold
+	// the real-usage cost down; this fixture measures the banner-off path.
 	const (
-		fullCeiling    = 3260
+		fullCeiling    = 3700
 		compactCeiling = 400
 	)
 
@@ -141,7 +169,12 @@ func TestRequiredFullPrimeDirectives_PresentInFullOutput(t *testing.T) {
 	xml := renderXML(t, out)
 
 	for _, d := range prime.RequiredFullPrimeDirectives() {
-		if !strings.Contains(xml, d.Marker) {
+		// The manifest marker is the RAW command text, because
+		// TestRequiredFullPrimeDirectives_ConsultFirstReachable matches it
+		// against the capability table. The emitted document escapes
+		// placeholders, so compare against the escaped form rather than
+		// weakening either side to a substring that survives both.
+		if !strings.Contains(xml, escapeXMLText(d.Marker)) {
 			t.Errorf("FULL prime output missing required directive %q (marker %q)", d.Name, d.Marker)
 		}
 	}
@@ -211,7 +244,12 @@ func assertFullRePrime(t *testing.T, xml string) {
 		t.Error("expected FULL prime output, but found mode=\"compact\"")
 	}
 	for _, d := range prime.RequiredFullPrimeDirectives() {
-		if !strings.Contains(xml, d.Marker) {
+		// The manifest marker is the RAW command text, because
+		// TestRequiredFullPrimeDirectives_ConsultFirstReachable matches it
+		// against the capability table. The emitted document escapes
+		// placeholders, so compare against the escaped form rather than
+		// weakening either side to a substring that survives both.
+		if !strings.Contains(xml, escapeXMLText(d.Marker)) {
 			t.Errorf("FULL prime output missing required directive %q (marker %q)", d.Name, d.Marker)
 		}
 	}
@@ -284,5 +322,28 @@ func assertCompactRePrime(t *testing.T, xml, fullXML string) {
 	if len(xml)*minReductionFactor > len(fullXML) {
 		t.Errorf("compact re-prime (%d chars) is not materially smaller than full (%d chars) — expected at least %dx reduction",
 			len(xml), len(fullXML), minReductionFactor)
+	}
+}
+
+// TestCompactReprime_RendersNewlyWithheldTeamSkills: a team publishes a skill after
+// the coworker's first prime and a routine re-prime reconciles it. The reconcile
+// records the revision, so this is the only prime that will ever report it.
+// Without it, the compact path drops the report and the coworker never learns the
+// skill was held back.
+func TestCompactReprime_RendersNewlyWithheldTeamSkills(t *testing.T) {
+	out := fullyLoadedPrimeFixture()
+	out.PrimeCallCount = 2
+	out.CompactReprime = true
+	out.WithheldTeamSkills = []prime.WithheldSkill{{Name: "deploy-helper", Reason: "bundled script awaits approval"}}
+
+	xml := renderXML(t, out)
+
+	if got := strings.Count(xml, "<team-skills-held"); got != 1 || !strings.Contains(xml, "deploy-helper") {
+		t.Errorf("compact re-prime must report the held skill exactly once; found %d report(s)", got)
+	}
+
+	out.CompactReprime = false
+	if got := strings.Count(renderXML(t, out), "<team-skills-held"); got != 1 {
+		t.Errorf("a full prime must report the held skill exactly once; found %d", got)
 	}
 }

@@ -8,14 +8,14 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/extensions/skills"
+	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // pickSkill returns a default-installed skill name, failing the test if none
-// ship. Attest playbooks are opt-in, so lifecycle tests must not accidentally
-// select a skill the default installer intentionally leaves absent.
+// ship. Lifecycle tests must use a skill supplied by the default installer.
 func pickSkill(t *testing.T) string {
 	t.Helper()
 	skills, err := skills.Selected("0.8.0", nil)
@@ -96,38 +96,92 @@ func TestHandleInstallSkills_NoOpReportsNothingWritten(t *testing.T) {
 			"FilesWritten drives init's honest 'already up to date' message")
 }
 
-// TestHandleInstallSkills_OptInAttestSkillsStayOutOfDefaultInstall keeps a
-// team that uses normal ox integration from receiving Attest playbooks it did
-// not choose. An explicit capability install is the only path that writes them.
-func TestHandleInstallSkills_OptInAttestSkillsStayOutOfDefaultInstall(t *testing.T) {
+// Explicit selections must be saved even when their skills also belong to defaults.
+func TestHandleInstallSkills_ExplicitSelection(t *testing.T) {
 	dir := t.TempDir()
-	defaultInstall, err := handleInstallSkills(adapterprotocol.SkillsParams{
-		RepoRoot: dir,
-		Version:  "0.8.0",
+	installed, err := handleInstallSkills(adapterprotocol.SkillsParams{
+		RepoRoot: dir, Version: "0.8.0", Names: []string{"ox-cli-consult", "ox-cli-recap"},
 	})
 	require.NoError(t, err)
-	assert.NotContains(t, defaultInstall.FilesWritten,
-		filepath.Join(".claude", "skills", "ox-attest-goal", skillFileName))
-
-	optIn, err := handleInstallSkills(adapterprotocol.SkillsParams{
-		RepoRoot: dir,
-		Version:  "0.8.0",
-		Names:    []string{"ox-attest-goal", "ox-attest-create"},
-	})
+	assert.Contains(t, installed.FilesWritten, filepath.Join(".claude", "skills", "ox-cli-consult", skillFileName))
+	assert.Contains(t, installed.FilesWritten, filepath.Join(".claude", "skills", "ox-cli-recap", skillFileName))
+	desired, _, err := skillmanager.LoadDesired(dir)
 	require.NoError(t, err)
-	assert.Contains(t, optIn.FilesWritten,
-		filepath.Join(".claude", "skills", "ox-attest-goal", skillFileName))
-	assert.Contains(t, optIn.FilesWritten,
-		filepath.Join(".claude", "skills", "ox-attest-create", skillFileName))
+	assert.ElementsMatch(t, []string{"ox-cli-consult", "ox-cli-recap"}, desired.Names)
 }
 
-func TestHandleInstallSkills_RejectsUnknownOptInSkill(t *testing.T) {
-	_, err := handleInstallSkills(adapterprotocol.SkillsParams{
-		RepoRoot: t.TempDir(),
-		Version:  "0.8.0",
-		Names:    []string{"does-not-exist"},
-	})
-	require.EqualError(t, err, "unknown ox skill(s): [does-not-exist]")
+// Retired opt-ins must not make the Claude-only cleanup fail after installation
+// succeeds, or expand an explicitly empty selection into cleanup of every skill.
+func TestHandleInstallSkills_RetiredSelectionsDoNotBreakLegacyCleanup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: multiple complete skill installations and command migrations")
+	}
+	tests := []struct {
+		name          string
+		names         []string
+		bundles       []string
+		removeConsult bool
+	}{
+		{name: "retired bundle", bundles: []string{"attest"}},
+		{name: "retired skill names", names: []string{"ox-cli-attest-goal", "ox-cli-attest-create"}},
+		{name: "older retired skill names", names: []string{"ox-attest-goal", "ox-attest-create"}},
+		{name: "retired and active bundles", bundles: []string{"attest", "core"}, removeConsult: true},
+		{name: "retired and active names", names: []string{"ox-cli-attest-goal", "ox-cli-consult"}, bundles: []string{"attest"}, removeConsult: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			commandsDir := filepath.Join(dir, ".claude", "commands")
+			require.NoError(t, os.MkdirAll(commandsDir, 0o755))
+			for _, name := range []string{"ox-cli-consult", "ox-cli-prime"} {
+				content := agentx.StampedContent([]byte("# legacy "+name+"\n"), "0.8.0", oxSkillStampPrefix)
+				require.NoError(t, os.WriteFile(filepath.Join(commandsDir, name+".md"), content, 0o644))
+			}
+
+			result, err := handleInstallSkills(adapterprotocol.SkillsParams{
+				RepoRoot: dir, Version: "0.8.0", Names: tt.names, Bundles: tt.bundles,
+			})
+			require.NoError(t, err)
+			require.True(t, result.Installed)
+			assert.FileExists(t, filepath.Join(skillsDir(dir), "ox-cli-consult", skillFileName))
+			assert.NoDirExists(t, filepath.Join(skillsDir(dir), "ox-cli-attest-goal"))
+			assert.NoDirExists(t, filepath.Join(skillsDir(dir), "ox-cli-attest-create"))
+			if tt.removeConsult {
+				assert.NoFileExists(t, filepath.Join(commandsDir, "ox-cli-consult.md"))
+			} else {
+				assert.FileExists(t, filepath.Join(commandsDir, "ox-cli-consult.md"))
+			}
+			assert.FileExists(t, filepath.Join(commandsDir, "ox-cli-prime.md"),
+				"explicit selections must not clean up unrelated default commands")
+		})
+	}
+}
+
+// Ignoring known retired selections must not hide unknown requests or partially
+// install skills before reporting their validation error.
+func TestHandleInstallSkills_RejectsUnknownOptInSelection(t *testing.T) {
+	tests := []struct {
+		name    string
+		names   []string
+		bundles []string
+		want    string
+	}{
+		{name: "unknown name", names: []string{"does-not-exist"}, want: "unknown ox skill(s): [does-not-exist]"},
+		{name: "unknown bundle", bundles: []string{"does-not-exist"}, want: `unknown ox skill bundle "does-not-exist"`},
+		{name: "retired and unknown name", names: []string{"ox-cli-attest-goal", "does-not-exist"}, want: "unknown ox skill(s): [does-not-exist]"},
+		{name: "retired and unknown bundle", bundles: []string{"attest", "does-not-exist"}, want: `unknown ox skill bundle "does-not-exist"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			_, err := handleInstallSkills(adapterprotocol.SkillsParams{
+				RepoRoot: dir, Version: "0.8.0", Names: tt.names, Bundles: tt.bundles,
+			})
+			require.EqualError(t, err, tt.want)
+			assert.NoFileExists(t, filepath.Join(dir, ".sageox", "skills.lock.json"))
+			assert.NoFileExists(t, filepath.Join(skillsDir(dir), "ox-cli-consult", skillFileName))
+		})
+	}
 }
 
 // --- B. Check lifecycle ---
@@ -156,13 +210,20 @@ func TestHandleCheckSkills_FreshInstall(t *testing.T) {
 	assert.Empty(t, post.Stale)
 }
 
-// TestHandleCheckSkills_BodyEditedBelowStamp_ReportsStale is the core drift test:
-// editing the body BELOW the stamp (leaving frontmatter and stamp line intact)
-// must be detected as stale, because the stamp hash covers only the body. A
-// first-line-only check would miss this entirely. --fix (reinstall) must restore.
-// Failure prevented: a tampered SKILL.md drifts from the live binary forever with
-// no detection, teaching the agent stale guidance.
-func TestHandleCheckSkills_BodyEditedBelowStamp_ReportsStale(t *testing.T) {
+// TestHandleCheckSkills_BodyEditIsRestored pins the 0.15.0 ownership inversion.
+//
+// A managed skill in a RESERVED namespace is ox's unconditionally: a local edit is
+// restored on the next reconcile rather than preserved as a conflict.
+//
+// The old behavior was correct while these files were TRACKED — an edit appeared
+// in git diff, so it was visible and plausibly deliberate. Once they are
+// gitignored, a preserved edit is permanent SILENT drift: one machine quietly
+// running a different playbook, invisible to git, unrepairable by ox, and
+// undiagnosable by a teammate reading the same repository.
+//
+// Editing one of these files to experiment is fine and expected; customizing means
+// forking to a name of your own OUTSIDE the reserved prefixes.
+func TestHandleCheckSkills_BodyEditIsRestored(t *testing.T) {
 	dir := t.TempDir()
 	name := pickSkill(t)
 	params := adapterprotocol.SkillsParams{RepoRoot: dir, Version: "0.8.0"}
@@ -170,45 +231,33 @@ func TestHandleCheckSkills_BodyEditedBelowStamp_ReportsStale(t *testing.T) {
 	_, err := handleInstallSkills(params)
 	require.NoError(t, err)
 
-	clean, err := handleCheckSkills(params)
-	require.NoError(t, err)
-	require.NotContains(t, clean.Stale, name, "precondition: fresh install must not be stale")
-
 	skillPath := filepath.Join(dir, ".claude", "skills", name, skillFileName)
 	orig, err := os.ReadFile(skillPath)
 	require.NoError(t, err)
-	// append below the stamp — the stamp line and frontmatter stay byte-identical.
 	require.NoError(t, os.WriteFile(skillPath, append(orig, []byte("\n\nhand-edited drift\n")...), 0o644))
 
-	stale, err := handleCheckSkills(params)
+	_, err = handleInstallSkills(params)
 	require.NoError(t, err)
-	assert.Contains(t, stale.Conflicts, name, "a user-modified managed body must be reported as a conflict")
-	assert.False(t, stale.Installed, "Installed must be false when a skill has drifted")
-
-	// Reinstall preserves the edit instead of silently destroying user work.
-	reinstall, err := handleInstallSkills(params)
-	require.NoError(t, err)
-	assert.False(t, reinstall.Installed)
-	assert.NotEmpty(t, reinstall.Conflicts)
-	fixed, err := handleCheckSkills(params)
-	require.NoError(t, err)
-	assert.Contains(t, fixed.Conflicts, name)
-	assert.False(t, fixed.Installed)
 
 	restored, err := os.ReadFile(skillPath)
 	require.NoError(t, err)
-	assert.Contains(t, string(restored), "hand-edited drift", "reinstall must preserve a user edit")
+	assert.Equal(t, string(orig), string(restored),
+		"a reserved-namespace skill must be restored to the shipped content, not left drifted")
+	assert.NotContains(t, string(restored), "hand-edited drift")
 }
 
-// TestHandleCheckSkills_FrontmatterEdited_ReportsStale guards the gap CodeRabbit
-// flagged: the drift stamp's hash covers ONLY the body below it, so editing the
-// YAML frontmatter (name/description) of a stamped skill leaves the body hash and
-// stamp line byte-identical — a body-only staleness check sees nothing wrong and
-// the agent silently reads tampered metadata forever. The check must catch a
-// frontmatter-only edit and --fix (reinstall) must restore the original.
-// Failure prevented: a hand-edited skill description drifts from the live binary
-// undetected because the stamp doesn't cover the frontmatter.
-func TestHandleCheckSkills_FrontmatterEdited_ReportsStale(t *testing.T) {
+// TestHandleCheckSkills_FrontmatterEditIsRestored keeps the gap CodeRabbit found
+// covered under the new ownership rule.
+//
+// The drift stamp's hash covers ONLY the body below it, so editing the YAML
+// frontmatter (name/description) leaves the body hash and stamp line
+// byte-identical — a body-only staleness check sees nothing wrong and the agent
+// reads tampered metadata forever. The description is the skill's activation
+// surface, so tampering with it silently changes when the skill fires.
+//
+// What changed in 0.15.0 is the remedy, not the detection: the edit is now
+// RESTORED rather than reported and preserved.
+func TestHandleCheckSkills_FrontmatterEditIsRestored(t *testing.T) {
 	dir := t.TempDir()
 	name := pickSkill(t)
 	params := adapterprotocol.SkillsParams{RepoRoot: dir, Version: "0.8.0"}
@@ -216,17 +265,10 @@ func TestHandleCheckSkills_FrontmatterEdited_ReportsStale(t *testing.T) {
 	_, err := handleInstallSkills(params)
 	require.NoError(t, err)
 
-	clean, err := handleCheckSkills(params)
-	require.NoError(t, err)
-	require.NotContains(t, clean.Stale, name, "precondition: fresh install must not be stale")
-
 	skillPath := filepath.Join(dir, ".claude", "skills", name, skillFileName)
 	orig, err := os.ReadFile(skillPath)
 	require.NoError(t, err)
 
-	// edit ONLY the frontmatter: inject a description line into the YAML block
-	// above the closing fence, leaving the stamp line and body untouched. The
-	// frontmatter ends at the first "\n---\n" (closing fence) of the file.
 	fence := "\n---\n"
 	fenceIdx := strings.Index(string(orig), fence)
 	require.GreaterOrEqual(t, fenceIdx, 0, "installed skill must have a closing frontmatter fence")
@@ -234,71 +276,68 @@ func TestHandleCheckSkills_FrontmatterEdited_ReportsStale(t *testing.T) {
 	require.NotEqual(t, string(orig), tampered, "the edit must actually change the frontmatter")
 	require.NoError(t, os.WriteFile(skillPath, []byte(tampered), 0o644))
 
-	stale, err := handleCheckSkills(params)
+	_, err = handleInstallSkills(params)
 	require.NoError(t, err)
-	assert.Contains(t, stale.Conflicts, name, "a frontmatter-only edit must be reported as a conflict")
-	assert.False(t, stale.Installed, "Installed must be false when a skill's frontmatter drifted")
-
-	// reinstall (the --fix path) must rewrite the file and clear staleness.
-	resp, err := handleInstallSkills(params)
-	require.NoError(t, err)
-	assert.False(t, resp.Installed)
-	assert.NotEmpty(t, resp.Conflicts)
-	assert.NotContains(t, resp.FilesWritten, filepath.Join(".claude", "skills", name, skillFileName),
-		"--fix must preserve a user-edited skill")
-
-	fixed, err := handleCheckSkills(params)
-	require.NoError(t, err)
-	assert.Contains(t, fixed.Conflicts, name)
-	assert.False(t, fixed.Installed)
 
 	restored, err := os.ReadFile(skillPath)
 	require.NoError(t, err)
-	assert.Contains(t, string(restored), "hand-edited frontmatter drift",
-		"reinstall must preserve the tampered frontmatter for manual resolution")
+	assert.Equal(t, string(orig), string(restored),
+		"a frontmatter-only edit must be restored; the description decides when the skill activates")
 }
 
-// TestHandleCheckSkills_UnstampedFrontmatterDiff_NotOverwritten verifies the
-// frontmatter check is gated on the file being ox-stamped: a user-authored
-// (unstamped) SKILL.md whose frontmatter differs from the embedded skill must
-// NEVER be flagged stale or overwritten. Without the stamp gate, the frontmatter
-// diff would clobber a user's own skill.
-// Failure prevented: install destroys a user's unstamped skill because its
-// frontmatter happens to differ from the shipped one.
-func TestHandleCheckSkills_UnstampedFrontmatterDiff_NotOverwritten(t *testing.T) {
+// TestHandleInstallSkills_ReclaimsASquattedReservedName covers the case that used
+// to be preserved forever: a file sitting at a RESERVED name that ox never wrote.
+//
+// The prefix is the contract. Reclaiming is safe precisely because the namespace
+// is reserved and gitignored — and it is bounded: a skill OUTSIDE the prefixes is
+// never touched, which the companion assertion here pins.
+func TestHandleInstallSkills_ReclaimsASquattedReservedName(t *testing.T) {
 	dir := t.TempDir()
 	name := pickSkill(t)
 	params := adapterprotocol.SkillsParams{RepoRoot: dir, Version: "0.8.0"}
 
 	skillDir := filepath.Join(dir, ".claude", "skills", name)
 	require.NoError(t, os.MkdirAll(skillDir, 0o755))
-	// deliberately different frontmatter (and no ox stamp) from the shipped skill.
-	userContent := "---\nname: " + name + "\ndescription: totally different, user-owned, no stamp\n---\nuser body\n"
+	squatted := "---\nname: " + name + "\ndescription: totally different, user-owned, no stamp\n---\nuser body\n"
 	skillPath := filepath.Join(skillDir, skillFileName)
-	require.NoError(t, os.WriteFile(skillPath, []byte(userContent), 0o644))
+	require.NoError(t, os.WriteFile(skillPath, []byte(squatted), 0o644))
 
-	resp, err := handleCheckSkills(params)
-	require.NoError(t, err)
-	assert.NotContains(t, resp.Stale, name,
-		"an unstamped user skill must not be flagged stale even when its frontmatter differs")
+	// A skill the user owns, outside the reserved prefixes, in the same directory.
+	mineDir := filepath.Join(dir, ".claude", "skills", "my-own-skill")
+	require.NoError(t, os.MkdirAll(mineDir, 0o755))
+	mine := "---\nname: my-own-skill\ndescription: mine\n---\nmy body\n"
+	minePath := filepath.Join(mineDir, skillFileName)
+	require.NoError(t, os.WriteFile(minePath, []byte(mine), 0o644))
 
-	_, err = handleInstallSkills(params)
+	_, err := handleInstallSkills(params)
 	require.NoError(t, err)
+
 	after, err := os.ReadFile(skillPath)
 	require.NoError(t, err)
-	assert.Equal(t, userContent, string(after),
-		"install must not overwrite a user-authored skill on a frontmatter diff alone")
+	assert.NotEqual(t, squatted, string(after),
+		"a reserved name must be reclaimed; leaving it means the agent reads content ox cannot update")
+
+	untouched, err := os.ReadFile(minePath)
+	require.NoError(t, err)
+	assert.Equal(t, mine, string(untouched),
+		"a skill outside the reserved prefixes must never be touched")
 }
 
-// TestHandleCheckSkills_UnstampedSkillNotStale verifies a user-authored SKILL.md
-// (no ox stamp) is never flagged stale — ox only manages files it stamped.
-// Failure prevented: doctor flags a user-owned skill forever and --fix never
-// converges, or worse overwrites the user's content.
-func TestHandleCheckSkills_UnstampedSkillNotStale(t *testing.T) {
+// TestHandleCheckSkills_UserAuthoredSkillIsNeverTouched verifies ox leaves skills
+// it does not own completely alone — never flagged, never rewritten.
+//
+// The fixture deliberately uses a name OUTSIDE the reserved prefixes. That is the
+// whole boundary: inside ox-cli-* / sageox-team-* ox owns the bytes absolutely,
+// and everywhere else the directory belongs to the user. Testing this with a
+// reserved name would assert the opposite of the contract.
+//
+// Failure prevented: ox flags or overwrites a user's own skill, either nagging
+// forever or destroying their work.
+func TestHandleCheckSkills_UserAuthoredSkillIsNeverTouched(t *testing.T) {
 	dir := t.TempDir()
-	name := pickSkill(t)
 	params := adapterprotocol.SkillsParams{RepoRoot: dir, Version: "0.8.0"}
 
+	const name = "my-own-skill"
 	skillDir := filepath.Join(dir, ".claude", "skills", name)
 	require.NoError(t, os.MkdirAll(skillDir, 0o755))
 	userContent := "---\nname: " + name + "\ndescription: my own skill, no stamp\n---\nuser body\n"
@@ -306,14 +345,13 @@ func TestHandleCheckSkills_UnstampedSkillNotStale(t *testing.T) {
 
 	resp, err := handleCheckSkills(params)
 	require.NoError(t, err)
-	assert.NotContains(t, resp.Stale, name, "unstamped user-authored skill must never be flagged stale")
+	assert.NotContains(t, resp.Stale, name, "a user-authored skill must never be flagged stale")
 
-	// install must not clobber the user's unstamped file.
 	_, err = handleInstallSkills(params)
 	require.NoError(t, err)
 	after, err := os.ReadFile(filepath.Join(skillDir, skillFileName))
 	require.NoError(t, err)
-	assert.Equal(t, userContent, string(after), "install must not overwrite a user-authored skill")
+	assert.Equal(t, userContent, string(after), "install must never overwrite a user-authored skill")
 }
 
 // --- C. Uninstall lifecycle ---
@@ -373,7 +411,7 @@ func TestHandleUninstallSkills_PreservesUnstampedSkill(t *testing.T) {
 // migration: when a surface moves from a slash command to a skill, an existing
 // install's stale ox-stamped .claude/commands/<id>.md is pruned on skill install
 // so the agent isn't left with a duplicate slash-invocable Layer-2 surface.
-// Failure prevented: ox-plan / ox-session-review remain slash-invocable as stale
+// Failure prevented: ox-cli-plan / ox-cli-session-review remain slash-invocable as stale
 // commands alongside the new skill after a command→skill migration.
 func TestHandleInstallSkills_RemovesStampedLegacyCommand(t *testing.T) {
 	dir := t.TempDir()

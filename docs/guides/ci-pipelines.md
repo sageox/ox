@@ -50,6 +50,22 @@ Points to a user config file directly. Useful when there's no home directory (co
 export OX_USER_CONFIG=/etc/sageox/pipeline-config.yaml
 ```
 
+For a single invocation, `--config <file>` (or `-c <file>`) takes precedence
+over `OX_USER_CONFIG` and the default user config location:
+
+```bash
+ox --config /etc/sageox/pipeline-config.yaml config get session_recording
+ox --config /etc/sageox/pipeline-config.yaml config set session_recording disabled
+```
+
+The flag requires an existing, readable YAML file and fails on missing or malformed
+files before running the command. User-level reads and writes use that file;
+`config set/unset --repo` and `--team` still target the current project's repo and
+team files. Setting-specific environment overrides such as `OX_SESSION_RECORDING`
+keep their existing priority over stored preferences.
+Hosted Ledger reads reject `--config`; they use the explicit endpoint and token
+contract described in [Ledger read sync](../specs/ledger-read-sync.md).
+
 The config file uses the same YAML format as `~/.config/sageox/config.yaml`:
 
 ```yaml
@@ -76,6 +92,25 @@ ox agent prime
 ```
 
 > **Future:** Service account and token-based auth (`ox login --token`) is planned but not yet implemented. Once available, this pattern will work in true headless CI/CD environments.
+
+### Check repository health
+
+`ox doctor` exits **1** when checks fail or required setup is missing, and
+**0** when there are no failed checks. Warnings and skipped checks alone do not
+fail the command. This applies to text output and `--json` (including `OX_JSON=1`).
+
+```bash
+if ox doctor --json > doctor.json; then
+  echo "Checks passed"
+else
+  echo "Doctor failed; inspect doctor.json and stderr" >&2
+fi
+```
+
+The JSON report is still written on check failures, with `summary.has_failed`
+and individual check details. Invocation errors or interruption can stop the
+command before a complete report is available. Scripts that previously relied
+on JSON mode always exiting 0 should handle its exit status explicitly.
 
 ---
 

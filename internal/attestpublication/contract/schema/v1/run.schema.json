@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sageox.ai/schemas/attest/v1/run.schema.json",
+  "title": "SageOx Attest semantic run",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_run_id", "producer", "source", "timing", "corpus", "outcomes", "extensions"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "source_run_id": {"$ref": "#/$defs/label"},
+    "producer": {"$ref": "#/$defs/producer"},
+    "source": {"$ref": "#/$defs/source"},
+    "timing": {"$ref": "#/$defs/timing"},
+    "corpus": {"$ref": "#/$defs/corpus"},
+    "outcomes": {"type": "array", "items": {"$ref": "#/$defs/outcome"}},
+    "extensions": {
+      "type": "object",
+      "maxProperties": 32,
+      "additionalProperties": {"$ref": "#/$defs/extensionValue"}
+    }
+  },
+  "$defs": {
+    "label": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\x00-\\x1f\\x7f]+$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "relativePath": {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^(?:[^./\\\\%?#:\u0000-\u001f\u007f-\u009f]|\\.[^./\\\\%?#:\u0000-\u001f\u007f-\u009f]|\\.\\.[^./\\\\%?#:\u0000-\u001f\u007f-\u009f]|\\.{3,})[^/\\\\%?#:\u0000-\u001f\u007f-\u009f]*(?:/(?:[^./\\\\%?#:\u0000-\u001f\u007f-\u009f]|\\.[^./\\\\%?#:\u0000-\u001f\u007f-\u009f]|\\.\\.[^./\\\\%?#:\u0000-\u001f\u007f-\u009f]|\\.{3,})[^/\\\\%?#:\u0000-\u001f\u007f-\u009f]*)*$"},
+    "tagList": {"type": "array", "items": {"$ref": "#/$defs/label"}},
+    "producer": {
+      "type": "object", "additionalProperties": false, "required": ["name", "version"],
+      "properties": {"name": {"$ref": "#/$defs/label"}, "version": {"$ref": "#/$defs/label"}}
+    },
+    "source": {
+      "type": "object", "additionalProperties": false, "required": ["git"],
+      "properties": {"git": {"$ref": "#/$defs/git"}}
+    },
+    "git": {
+      "type": "object", "additionalProperties": false, "required": ["branch", "commit_sha", "dirty"],
+      "properties": {
+        "branch": {"anyOf": [{"$ref": "#/$defs/label"}, {"type": "null"}]},
+        "commit_sha": {"anyOf": [{"type": "string", "pattern": "^[0-9a-f]{7,64}$"}, {"type": "null"}]},
+        "dirty": {"type": ["boolean", "null"]}
+      }
+    },
+    "timing": {
+      "type": "object", "additionalProperties": false, "required": ["started_at", "finished_at", "duration_ms"],
+      "properties": {
+        "started_at": {"type": "string", "format": "date-time"},
+        "finished_at": {"type": "string", "format": "date-time"},
+        "duration_ms": {"type": "integer", "minimum": 0}
+      }
+    },
+    "corpus": {
+      "type": "object", "additionalProperties": false, "required": ["key", "capabilities"],
+      "properties": {
+        "key": {"$ref": "#/$defs/label"},
+        "capabilities": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/capability"}}
+      }
+    },
+    "capability": {
+      "type": "object", "additionalProperties": false,
+      "required": ["key", "title", "tags", "source", "features"],
+      "properties": {
+        "key": {"$ref": "#/$defs/label"}, "title": {"$ref": "#/$defs/label"},
+        "description": {"type": "string"}, "tags": {"$ref": "#/$defs/tagList"},
+        "source": {"enum": ["declared", "fallback"]},
+        "features": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/feature"}}
+      },
+      "allOf": [{"if": {"properties": {"source": {"const": "fallback"}}}, "then": {"properties": {"features": {"maxItems": 1}}}}]
+    },
+    "feature": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "title", "tags", "scenarios", "rules"],
+      "properties": {
+        "path": {"allOf": [{"$ref": "#/$defs/relativePath"}, {"pattern": "\\.feature$"}]},
+        "title": {"$ref": "#/$defs/label"}, "description": {"type": "string"}, "tags": {"$ref": "#/$defs/tagList"},
+        "scenarios": {"type": "array", "items": {"$ref": "#/$defs/scenario"}},
+        "rules": {"type": "array", "items": {"$ref": "#/$defs/rule"}}
+      }
+    },
+    "rule": {
+      "type": "object", "additionalProperties": false, "required": ["title", "tags", "scenarios"],
+      "properties": {
+        "title": {"type": "string", "pattern": "^[^\\x00-\\x1f\\x7f]*$"}, "description": {"type": "string"}, "tags": {"$ref": "#/$defs/tagList"},
+        "scenarios": {"type": "array", "items": {"$ref": "#/$defs/scenario"}}
+      }
+    },
+    "scenario": {
+      "type": "object", "additionalProperties": false,
+      "required": ["key", "title", "tags", "kind", "examples"],
+      "properties": {
+        "key": {"$ref": "#/$defs/sha256"}, "title": {"$ref": "#/$defs/label"},
+        "description": {"type": "string"}, "tags": {"$ref": "#/$defs/tagList"},
+        "line": {"type": "integer", "minimum": 1}, "kind": {"enum": ["scenario", "outline"]},
+        "examples": {"type": "array", "items": {"$ref": "#/$defs/examplesBlock"}}
+      },
+      "allOf": [{"if": {"properties": {"kind": {"const": "scenario"}}}, "then": {"properties": {"examples": {"maxItems": 0}}}}]
+    },
+    "examplesBlock": {
+      "type": "object", "additionalProperties": false, "required": ["tags", "columns", "rows"],
+      "properties": {
+        "name": {"type": "string"}, "tags": {"$ref": "#/$defs/tagList"},
+        "columns": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "rows": {"type": "array", "items": {"$ref": "#/$defs/exampleRow"}}
+      }
+    },
+    "exampleRow": {
+      "type": "object", "additionalProperties": false, "required": ["values"],
+      "properties": {"values": {"type": "array", "items": {"type": "string"}}}
+    },
+    "instance": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["scenario_key"], "properties": {"scenario_key": {"$ref": "#/$defs/sha256"}}},
+        {"type": "object", "additionalProperties": false, "required": ["scenario_key", "examples_block_ordinal", "row_ordinal"], "properties": {"scenario_key": {"$ref": "#/$defs/sha256"}, "examples_block_ordinal": {"type": "integer", "minimum": 0}, "row_ordinal": {"type": "integer", "minimum": 0}}}
+      ]
+    },
+    "failure": {
+      "type": "object", "additionalProperties": false, "required": ["message"],
+      "properties": {"message": {"$ref": "#/$defs/label"}, "location": {"type": "string"}}
+    },
+    "outcome": {
+      "type": "object", "additionalProperties": false, "required": ["instance", "status"],
+      "properties": {
+        "instance": {"$ref": "#/$defs/instance"}, "status": {"enum": ["passed", "failed", "pending", "not_run"]},
+        "reason": {"$ref": "#/$defs/label"}, "duration_ms": {"type": "integer", "minimum": 0},
+        "failure": {"$ref": "#/$defs/failure"}, "evidence_entrypoint": {"$ref": "#/$defs/relativePath"}
+      },
+      "allOf": [
+        {"if": {"properties": {"status": {"const": "failed"}}}, "then": {"required": ["failure"]}},
+        {"if": {"properties": {"status": {"enum": ["pending", "not_run"]}}}, "then": {"required": ["reason"]}}
+      ]
+    },
+    "extensionScalar": {"anyOf": [{"type": "null"}, {"type": "boolean"}, {"type": "number"}, {"type": "string", "maxLength": 1024}]},
+    "extensionValue": {"anyOf": [{"$ref": "#/$defs/extensionScalar"}, {"type": "array", "items": {"$ref": "#/$defs/extensionScalar"}}]}
+  }
+}

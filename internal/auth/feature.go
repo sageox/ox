@@ -72,3 +72,12 @@ func IsCartsEnabled() bool {
 	value := strings.ToLower(os.Getenv("FEATURE_CARTS"))
 	return value == "true" || value == "1" || value == "yes"
 }
+
+// IsScoutEnabled checks if the scout feature (ox scout) is enabled.
+// Scout is experimental, calls the third-party Perplexity Agent API (and so
+// also requires PERPLEXITY_API_KEY), and is disabled by default. Set
+// FEATURE_SCOUT=true to enable.
+func IsScoutEnabled() bool {
+	value := strings.ToLower(os.Getenv("FEATURE_SCOUT"))
+	return value == "true" || value == "1" || value == "yes"
+}

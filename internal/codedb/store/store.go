@@ -17,14 +17,27 @@ import (
 
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/mapping"
+	"github.com/gofrs/flock"
 	lru "github.com/hashicorp/golang-lru/v2"
 	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
+	"github.com/sageox/ox/internal/sqliteerr"
 	"go.etcd.io/bbolt"
-	_ "modernc.org/sqlite"
+	bbolterrors "go.etcd.io/bbolt/errors"
 )
 
 // ErrCorrupt indicates the index is corrupted and needs re-indexing.
 var ErrCorrupt = fmt.Errorf("codedb index is corrupt")
+
+// ErrIntegrityUnknown reports that a SQLite health check (the open-time header
+// probe or the PRAGMA quick_check run by maintenance) could not run.
+// SQLite examined nothing, so it has said nothing about the database contents.
+//
+// Kept distinct from ErrCorrupt because the two license opposite actions. A
+// corruption verdict is what lets callers destroy the index — openSQLite
+// removes metadata.db and its sidecars, `ox doctor --fix` removes the whole
+// dataDir — and doing that on a check that never happened throws away an index
+// that may be perfectly healthy, at a cost of minutes to rebuild.
+var ErrIntegrityUnknown = errors.New("codedb integrity could not be checked")
 
 // ErrFullReindexRequired is returned by RebuildBleveSubIndex when the
 // requested sub-index (code/diff) cannot be repopulated from existing SQL
@@ -145,6 +158,11 @@ type Store struct {
 	Root         string
 	closeOnce    sync.Once
 
+	// ReadOnly is set when the store was opened from media this process cannot
+	// write (read-only mount, container layer, chmod). Reads are served; every
+	// write, self-heal and mapping upgrade is refused rather than attempted.
+	ReadOnly bool
+
 	// dirty overlays for uncommitted worktree files (keyed by worktree ID)
 	dirtyCodeIndexes  map[string]bleve.Index
 	CombinedCodeIndex bleve.Index // alias of CodeIndex + all dirty indexes, or just CodeIndex
@@ -164,8 +182,14 @@ type Store struct {
 
 // Open opens (or creates) a Store at the given root directory.
 // It creates the directory structure, initializes SQLite and Bleve indexes.
-// If SQLite corruption is detected, the database is removed and ErrCorrupt is returned
-// so the caller can trigger a full re-index.
+// If opening proves the SQLite file damaged (SQLITE_CORRUPT or SQLITE_NOTADB from
+// the header probe or the schema migration), the database is removed and
+// ErrCorrupt is returned so the caller can trigger a full re-index. Open does
+// not scan the database for damage: PRAGMA integrity_check is O(size), minutes
+// on a multi-GB index, and every pass of the daemon opens the index several
+// times. Damage deeper in the file surfaces as SQLITE_CORRUPT from the first
+// statement that reads it (see IsSQLiteDamage) and from the daily quick_check
+// in Maintain.
 //
 // Bleve self-heal: when a sub-index has a structurally broken `_mapping` doc
 // (kill-9 mid-flush, partial scorch snapshot), Open nukes the sub-index dir,
@@ -175,13 +199,16 @@ type Store struct {
 // that need bleve (e.g. `ox code search`) just see empty results until the
 // daemon repopulates; callers that don't need bleve (e.g. `ox code insights`)
 // should use OpenSQLOnly to skip bleve entirely.
+//
+// Read-only media: a store the process cannot write is opened read-only (see
+// ErrReadOnly) with Store.ReadOnly set, not diagnosed as corrupt and deleted.
 func Open(root string) (*Store, error) {
-	db, err := openSQLite(root)
+	db, readOnly, err := openSQLite(root)
 	if err != nil {
 		return nil, err
 	}
 
-	codeIndex, diffIndex, commentIndex, err := openBleveIndexes(root)
+	codeIndex, diffIndex, commentIndex, err := openBleveIndexes(root, readOnly)
 	if err != nil {
 		_ = db.Close()
 		return nil, err
@@ -194,6 +221,7 @@ func Open(root string) (*Store, error) {
 		DiffIndex:        diffIndex,
 		CommentIndex:     commentIndex,
 		Root:             root,
+		ReadOnly:         readOnly,
 		dirtyCodeIndexes: make(map[string]bleve.Index),
 	}
 	s.CombinedCodeIndex = s.CodeIndex // default: no overlay
@@ -209,7 +237,7 @@ func Open(root string) (*Store, error) {
 // or otherwise unavailable. SQLite's WAL mode makes concurrent reads safe
 // even while the daemon is actively writing.
 func OpenSQLOnly(root string) (*Store, error) {
-	db, err := openSQLite(root)
+	db, readOnly, err := openSQLite(root)
 	if err != nil {
 		return nil, err
 	}
@@ -217,23 +245,64 @@ func OpenSQLOnly(root string) (*Store, error) {
 		db:               db,
 		queries:          codedbsqlc.New(db),
 		Root:             root,
+		ReadOnly:         readOnly,
+		dirtyCodeIndexes: make(map[string]bleve.Index),
+	}, nil
+}
+
+// OpenSQLReadOnly opens the SQLite half of a Store for queries only, through
+// the same read-only open used for read-only media (openSQLiteReadOnly). It
+// never probes the database, never migrates, and never deletes.
+//
+// For advisory read paths that open the index on a latency-sensitive command.
+// A full integrity scan is O(database size): on a large team index it cost ~22s
+// per open, and `ox plan enrich` opened the index twice (collision + expert
+// detectors), which is most of why `ox plan save` took ~55s. Damage is still
+// diagnosed by the writable paths (the daemon, `ox index`), the only ones whose
+// remedy — delete and rebuild — is appropriate anyway.
+//
+// Tradeoff: when no WAL sidecar exists the open is `immutable=1`, so a writer
+// that starts mid-read can make a query fail or read slightly stale rows.
+// Callers must treat errors as "no signal" (fail-open), never as corruption.
+func OpenSQLReadOnly(root string) (*Store, error) {
+	db, err := openSQLiteReadOnly(filepath.Join(root, MetadataDBFile))
+	if err != nil {
+		return nil, err
+	}
+	return &Store{
+		db:               db,
+		queries:          codedbsqlc.New(db),
+		Root:             root,
+		ReadOnly:         true,
 		dirtyCodeIndexes: make(map[string]bleve.Index),
 	}, nil
 }
 
 // openSQLite handles the SQLite half of store construction. Shared by Open
-// and OpenSQLOnly so the SQLite pragma string and integrity check live in one
-// place.
-func openSQLite(root string) (*sql.DB, error) {
+// and OpenSQLOnly so the SQLite pragma string and open-time probe live in one
+// place. The bool reports whether the store had to be opened read-only.
+func openSQLite(root string) (*sql.DB, bool, error) {
+	dbPath := filepath.Join(root, MetadataDBFile)
+
+	// Settle writability before anything diagnoses the store. On read-only
+	// media SQLite fails with SQLITE_READONLY_DIRECTORY — WAL mode has to
+	// create the `-shm` wal-index before it can read anything — and at the
+	// probe call site below that is indistinguishable from corruption, whose
+	// remedy is deleting the database. A store we cannot write is not a store
+	// that is damaged (#871).
+	if _, err := os.Stat(dbPath); err == nil && !storeIsWritable(root) {
+		db, roErr := openSQLiteReadOnly(dbPath)
+		return db, true, roErr
+	}
+
 	reposDir := filepath.Join(root, "repos")
 	bleveDir := filepath.Join(root, "bleve")
 	for _, dir := range []string{root, reposDir, bleveDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return nil, fmt.Errorf("create dir %s: %w", dir, err)
+			return nil, false, fmt.Errorf("create dir %s: %w", dir, err)
 		}
 	}
 
-	dbPath := filepath.Join(root, MetadataDBFile)
 	// WAL: concurrent readers + one writer. busy_timeout: wait up to 5s for
 	// write locks instead of failing immediately. This matters when multiple
 	// daemons (one per worktree) share the same index. Long-term fix is
@@ -243,21 +312,68 @@ func openSQLite(root string) (*sql.DB, error) {
 	// to normal I/O for pages beyond the mmap region or on unsupported systems.
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)&_pragma=mmap_size(268435456)&_pragma=temp_store(MEMORY)")
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
+		return nil, false, fmt.Errorf("open sqlite: %w", err)
 	}
 
-	if err := checkSQLiteIntegrity(db); err != nil {
+	// The open path used to run PRAGMA integrity_check here. It reads every page
+	// and does an index lookup per row — minutes on a multi-GB index — and the
+	// daemon opens the index several times per pass. A header read answers the
+	// only question open has to settle (is this a database at all, and can it be
+	// reached?) and keeps what the full scan was incidentally providing: the BUSY
+	// retry for the concurrent fresh-open race (#758) and the ran-vs-could-not-run
+	// verdict (#875). Damage deeper in the file is caught where it is read, by
+	// the SQLITE_CORRUPT that statement returns, and by the daily quick_check in
+	// Maintain.
+	//
+	// No caller context exists on this path (Open takes none), and the probe is
+	// bounded: one page read plus a 3-attempt BUSY retry.
+	if err := probeSQLiteHeader(context.Background(), db); err != nil {
 		_ = db.Close()
-		slog.Error("sqlite corruption detected, removing database", "path", dbPath, "err", err)
-		removeSQLiteFiles(dbPath)
-		return nil, fmt.Errorf("sqlite integrity check failed: %w", ErrCorrupt)
+		readOnly, failure := resolveOpenFailure(root, dbPath, err)
+		return nil, readOnly, failure
 	}
 
 	if err := CreateSchema(db); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("create schema: %w", err)
+		// An unwritable database file inside a writable directory reaches here
+		// rather than the read-only branch above: the directory probe passed,
+		// and SQLite could create the WAL sidecars, so nothing objected until a
+		// migration tried to write. Same physical condition, so same error
+		// class — which side of the store is unwritable should not decide how
+		// callers classify it.
+		if !fileIsWritable(dbPath) {
+			return nil, true, fmt.Errorf("%w: %s needs a schema migration that cannot be applied: %w", ErrReadOnly, dbPath, err)
+		}
+		// The migration reads the schema pages, so damage there surfaces here
+		// rather than in the header probe. Same evidence, same verdict.
+		if IsSQLiteDamage(err) {
+			readOnly, failure := resolveOpenFailure(root, dbPath, fmt.Errorf("%w: create schema: %w", ErrCorrupt, err))
+			return nil, readOnly, failure
+		}
+		return nil, false, fmt.Errorf("create schema: %w", err)
 	}
-	return db, nil
+	return db, false, nil
+}
+
+// resolveOpenFailure decides what a failed open-time probe means to the caller
+// and, only when the evidence licenses it, removes the damaged database.
+func resolveOpenFailure(root, dbPath string, err error) (readOnly bool, failure error) {
+	// Re-probe. The check at the top of openSQLite is skipped when no
+	// metadata.db existed yet, and media can turn read-only in between (a
+	// remount, a revoked ACL). Deleting the index over either is
+	// unrecoverable — a cold rebuild costs minutes.
+	if !storeIsWritable(root) {
+		return true, fmt.Errorf("%w: %w", ErrReadOnly, err)
+	}
+	// Only a probe that actually met damage licenses destroying the data. An
+	// inconclusive one names a condition of this process or this moment, not of
+	// the index.
+	if !errors.Is(err, ErrCorrupt) {
+		return false, err
+	}
+	slog.Error("sqlite corruption detected, removing database", "path", dbPath, "err", err)
+	removeSQLiteFiles(dbPath)
+	return false, fmt.Errorf("sqlite corruption detected while opening: %w", ErrCorrupt)
 }
 
 // bleveMappingFor returns the bleve index mapping for a sub-index.
@@ -363,36 +479,41 @@ func createBleveSubIndex(path, name string) (bleve.Index, error) {
 func upgradeBleveSubIndex(root, path, name string, fromVersion int) (bleve.Index, error) {
 	slog.Info("bleve mapping version upgrade, rebuilding",
 		"name", name, "from", fromVersion, "to", bleveMappingVersion(name))
-	if err := os.RemoveAll(path); err != nil {
-		return nil, fmt.Errorf("remove out-of-date bleve sub-index %s: %w", path, err)
-	}
-	idx, err := createBleveSubIndex(path, name)
-	if err != nil {
-		return nil, fmt.Errorf("recreate bleve sub-index %s: %w", path, err)
-	}
-	if err := WriteNeedsReindexMarker(root, name); err != nil {
-		slog.Warn("failed to write needs_reindex marker after mapping upgrade",
-			"name", name, "err", err)
-	}
-	return idx, nil
+	// Serialize with the same per-sub-index heal lock the corruption path uses,
+	// with requireVersion=true so the recheck adopts only a replacement whose
+	// mapping is already current — a concurrent process that beat us to the
+	// upgrade is respected instead of racing to re-nuke its result (#828).
+	return rebuildSubIndexLocked(root, path, name, true,
+		fmt.Errorf("mapping version %d below current %d", fromVersion, bleveMappingVersion(name)))
 }
 
 // openBleveIndexes opens (or self-heals + recreates) the three bleve
 // sub-indexes. Returns all three on success; closes any successfully opened
 // indexes if a later one fails.
-func openBleveIndexes(root string) (codeIdx, diffIdx, commentIdx bleve.Index, err error) {
+//
+// A read-only store gets neither self-heal nor mapping-version upgrade: both
+// are nuke-and-recreate, and both need a writable directory. It opens what is
+// on disk or reports why it could not.
+func openBleveIndexes(root string, readOnly bool) (codeIdx, diffIdx, commentIdx bleve.Index, err error) {
 	bleveDir := filepath.Join(root, "bleve")
+	open := func(name string) (bleve.Index, error) {
+		path := filepath.Join(bleveDir, name)
+		if readOnly {
+			return openBleveReadOnly(path, name)
+		}
+		return openOrCreateBleveIndex(root, path, name)
+	}
 
-	codeIdx, err = openOrCreateBleveIndex(root, filepath.Join(bleveDir, "code"), "code")
+	codeIdx, err = open("code")
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("open code index: %w", err)
 	}
-	diffIdx, err = openOrCreateBleveIndex(root, filepath.Join(bleveDir, "diff"), "diff")
+	diffIdx, err = open("diff")
 	if err != nil {
 		_ = codeIdx.Close()
 		return nil, nil, nil, fmt.Errorf("open diff index: %w", err)
 	}
-	commentIdx, err = openOrCreateBleveIndex(root, filepath.Join(bleveDir, "comment"), "comment")
+	commentIdx, err = open("comment")
 	if err != nil {
 		_ = codeIdx.Close()
 		_ = diffIdx.Close()
@@ -521,12 +642,28 @@ func (s *Store) rebuildCombinedIndex() {
 // CheckIntegrity validates that the SQLite database and all Bleve indexes
 // are healthy. Returns nil if everything is fine, ErrCorrupt otherwise.
 //
+// The SQLite half is PRAGMA quick_check, which walks every page like
+// integrity_check but skips the per-row index cross-check. It cannot be
+// interrupted: callers that hold a context use CheckIntegrityContext.
+//
 // On a SQL-only store (constructed via OpenSQLOnly), the bleve indexes are
 // nil by design — those checks are skipped, not treated as a failure.
 // Callers that genuinely need bleve integrity must use Open, not OpenSQLOnly.
 func (s *Store) CheckIntegrity() error {
-	if err := checkSQLiteIntegrity(s.db); err != nil {
-		return fmt.Errorf("sqlite: %w", ErrCorrupt)
+	// kept for `ox doctor`, which has no context to thread through
+	return s.CheckIntegrityContext(context.Background())
+}
+
+// CheckIntegrityContext is CheckIntegrity with the SQLite scan bound to ctx, so
+// cancellation (daemon shutdown, a deadline) interrupts it instead of waiting
+// out a multi-minute page walk. A canceled check is ErrIntegrityUnknown, never
+// ErrCorrupt.
+func (s *Store) CheckIntegrityContext(ctx context.Context) error {
+	if err := checkSQLiteIntegrity(ctx, s.db); err != nil {
+		// Pass the verdict through rather than relabelling every failure
+		// ErrCorrupt: `ox doctor --fix` responds to that label by removing the
+		// whole dataDir, so a check that could not run must not wear it.
+		return fmt.Errorf("sqlite: %w", err)
 	}
 
 	// Probe each bleve sub-index with the FST-touching field walk from PR #607.
@@ -621,21 +758,109 @@ func runBleveProbe(name string, probe func() error) (err error) {
 	return nil
 }
 
-// checkSQLiteIntegrity runs PRAGMA integrity_check and returns an error if the database is corrupt.
-func checkSQLiteIntegrity(db *sql.DB) error {
-	var result string
-	if err := db.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
-		return fmt.Errorf("integrity_check query failed: %w", err)
-	}
-	if result != "ok" {
-		return fmt.Errorf("integrity_check returned: %s", result)
-	}
-	return nil
+// integrityBusyAttempts bounds the SQLITE_BUSY retry below. Three tries 20ms
+// apart covers the WAL-conversion window seen in the concurrent-fresh-open race
+// without adding measurable latency to a healthy open.
+const (
+	integrityBusyAttempts = 3
+	integrityBusyBackoff  = 20 * time.Millisecond
+)
+
+// probeSQLiteHeader reads the database header (PRAGMA schema_version) — the
+// cheapest statement that must open the file and read page 1 — and classifies
+// the outcome like checkSQLiteIntegrity. It is the open-time check: constant
+// cost whatever the size of the index.
+func probeSQLiteHeader(ctx context.Context, db *sql.DB) error {
+	return runSQLiteCheck(ctx, db, "PRAGMA schema_version", func(string) bool { return true })
 }
 
-// removeSQLiteFiles removes the database file and its WAL/SHM sidecars.
+// checkSQLiteIntegrity runs PRAGMA quick_check on db and classifies the outcome.
+// It walks every page, so it belongs in maintenance and `ox doctor`, never on
+// the open path; the context interrupts it mid-scan.
+//
+// See runSQLiteCheck for the classification.
+func checkSQLiteIntegrity(ctx context.Context, db *sql.DB) error {
+	return runSQLiteCheck(ctx, db, "PRAGMA quick_check", func(result string) bool { return result == "ok" })
+}
+
+// runSQLiteCheck runs a one-row pragma and classifies the outcome.
+//
+// It separates two results that a single error return conflated:
+//
+//   - The check RAN and found damage — the statement reported something other
+//     than the accepted result, or failed with SQLITE_CORRUPT / SQLITE_NOTADB
+//     because the file is damaged. Returned as ErrCorrupt, the verdict that
+//     licenses callers to delete and rebuild.
+//   - The check could not run — ErrIntegrityUnknown. SQLite read nothing, so it
+//     has reported nothing about the data; an I/O error, an exhausted fd table,
+//     an out-of-memory or a canceled context is not a statement that the index
+//     is broken.
+//
+// SQLITE_BUSY is retried rather than reported. busy_timeout does not cover the
+// exclusive lock taken while a brand-new database is converted to WAL, so
+// openers racing to create one codedb (the #758 scenario) can get an immediate
+// BUSY — which reached the corruption branch and deleted the zero-byte file the
+// winning opener was still initializing.
+func runSQLiteCheck(ctx context.Context, db *sql.DB, pragma string, accept func(result string) bool) error {
+	var lastErr error
+	for attempt := range integrityBusyAttempts {
+		var result string
+		lastErr = db.QueryRowContext(ctx, pragma).Scan(&result)
+		if lastErr == nil {
+			if accept(result) {
+				return nil
+			}
+			return fmt.Errorf("%w: %s returned: %s", ErrCorrupt, pragma, result)
+		}
+		if ctx.Err() != nil || !IsSQLiteBusy(lastErr) {
+			break
+		}
+		if attempt < integrityBusyAttempts-1 {
+			if sleepErr := sleepContext(ctx, integrityBusyBackoff); sleepErr != nil {
+				break
+			}
+		}
+	}
+	// A canceled check names this process, not the data, even when SQLite
+	// reported the interrupt with a code of its own.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("%w: %s: %w", ErrIntegrityUnknown, pragma, errors.Join(ctxErr, lastErr))
+	}
+	if IsSQLiteDamage(lastErr) {
+		return fmt.Errorf("%w: %s: %w", ErrCorrupt, pragma, lastErr)
+	}
+	return fmt.Errorf("%w: %s: %w", ErrIntegrityUnknown, pragma, lastErr)
+}
+
+// sleepContext waits for d or until ctx is done, returning ctx's error in the
+// latter case.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// IsSQLiteDamage reports whether err carries SQLITE_CORRUPT or SQLITE_NOTADB,
+// the evidence that licenses discarding an index (see sqliteerr.IsDamage).
+func IsSQLiteDamage(err error) bool {
+	return sqliteerr.IsDamage(err)
+}
+
+// IsSQLiteBusy reports whether err is SQLITE_BUSY or SQLITE_LOCKED: another
+// connection holds the lock right now (see sqliteerr.IsBusy).
+func IsSQLiteBusy(err error) bool {
+	return sqliteerr.IsBusy(err)
+}
+
+// removeSQLiteFiles removes the database file, its WAL/SHM sidecars, and the
+// maintenance sidecar: a rebuilt database has not been verified or vacuumed yet.
 func removeSQLiteFiles(dbPath string) {
-	for _, suffix := range []string{"", "-wal", "-shm"} {
+	for _, suffix := range []string{"", "-wal", "-shm", maintStateSuffix} {
 		p := dbPath + suffix
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			slog.Warn("failed to remove sqlite file", "path", p, "err", err)
@@ -653,13 +878,13 @@ func removeSQLiteFiles(dbPath string) {
 // daemon indexing pass does a full rebuild. Returns the empty index with no
 // error — callers see a working but empty bleve, not a typed error.
 //
-// True lock contention (another writer holds bbolt's exclusive flock) is
-// preserved as the pre-existing "lock contention" error: the corruption peek
-// retries a read-only open (100ms timeout per attempt) a few times before
-// giving up, so a live exclusive lock blocks the peek and we stay in the safe
-// wait-and-retry path — but a transient hold that clears within the retry
-// budget no longer permanently masks provable corruption (see
-// isBleveIndexCorrupt).
+// True lock contention (another writer holds bbolt's exclusive flock) remains
+// non-destructive: the corruption peek retries a read-only open (100ms timeout
+// per attempt) a few times before giving up. If Bleve already proved its
+// mapping is invalid, the locked self-heal path rechecks and reports a distinct
+// deferral while the writer remains; other open errors retain the direct
+// "lock contention" diagnosis. A transient hold that clears within the retry
+// budget no longer permanently masks provable corruption.
 //
 // path is the bleve sub-index dir (e.g. <root>/bleve/code); root is the
 // codedb dataDir (needed to locate the marker file).
@@ -689,7 +914,7 @@ func openOrCreateBleveIndex(root, path, name string) (bleve.Index, error) {
 		return idx, nil
 	}
 	if errors.Is(err, bleve.ErrorIndexPathDoesNotExist) {
-		return createBleveSubIndex(path, name)
+		return createBleveSubIndexLocked(root, path, name)
 	}
 
 	// Before treating as corruption, check if the bbolt file exists.
@@ -713,18 +938,52 @@ func openOrCreateBleveIndex(root, path, name string) (bleve.Index, error) {
 		if isBleveIndexCorrupt(boltPath) {
 			return selfHealBleveSubIndex(root, path, name, err)
 		}
+		// isBleveIndexCorrupt only proves the corruption it can SEE through a
+		// read-only peek. A bolt torn so badly bbolt cannot open it at all (a
+		// kill-9 mid-write, "invalid database") reads identically to a live
+		// exclusive lock here — both made bleve.Open fail and both defeat the
+		// read-only peek. Disambiguate with a bounded exclusive open so the
+		// unopenable-corrupt case self-heals instead of crash-looping, while a
+		// genuinely locked index is still left untouched.
+		if boltCorruptOnExclusiveOpen(boltPath) {
+			return selfHealBleveSubIndex(root, path, name, err)
+		}
+		// Bleve reached the persisted mapping and proved it cannot parse it.
+		// The narrower bbolt peek above can be inconclusive when it encounters
+		// an entry Bleve skips while selecting a usable snapshot. Route the
+		// definitive Bleve error through the locked recheck instead of relabeling
+		// it as contention; the recheck still refuses to nuke a live-held index.
+		// Missing metadata also needs that locked check: a healthy Bolt alone
+		// does not establish a complete, reopenable Bleve index.
+		if IsBleveMappingParseError(err) || errors.Is(err, bleve.ErrorIndexMetaMissing) {
+			return selfHealBleveSubIndex(root, path, name, err)
+		}
 		return nil, fmt.Errorf("bleve index appears to be in use (lock contention): %w", err)
 	} else if !os.IsNotExist(statErr) && !errors.Is(statErr, syscall.ENOTDIR) {
 		// permission/IO errors are transient — nuking would cause data loss
 		return nil, fmt.Errorf("stat bleve bolt file %s: %w", boltPath, statErr)
 	}
 
-	// bolt file absent or path structure broken — nuke and recreate
-	slog.Error("bleve index corrupt, recreating", "path", path, "err", err)
-	if removeErr := os.RemoveAll(path); removeErr != nil {
-		return nil, fmt.Errorf("remove corrupt bleve index %s: %w", path, removeErr)
+	// A healer may be recreating this directory. Recheck under its lock before
+	// treating absent metadata or a broken store path as our own repair.
+	return selfHealBleveSubIndex(root, path, name, err)
+}
+
+// createBleveSubIndexLocked shares the healer's lock, including its temporary
+// absent-directory window. Recheck after acquiring it: another opener may have
+// finished creating or repairing the index while we waited.
+func createBleveSubIndexLocked(root, path, name string) (bleve.Index, error) {
+	fl, locked, lockErr := acquireSubIndexHealLockFn(path)
+	if !locked {
+		return nil, fmt.Errorf("bleve sub-index %s creation deferred (heal lock unavailable): %w", name, errors.Join(bleve.ErrorIndexPathDoesNotExist, lockErr))
 	}
-	return createBleveSubIndex(path, name)
+	defer func() { _ = fl.Unlock() }()
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		return createBleveSubIndex(path, name)
+	} else if err != nil {
+		return nil, fmt.Errorf("stat bleve sub-index %s: %w", path, err)
+	}
+	return applyRebuildVerdict(root, path, name, false, bleve.ErrorIndexPathDoesNotExist)
 }
 
 // selfHealBleveSubIndex recovers from proven mapping/snapshot corruption by
@@ -732,28 +991,316 @@ func openOrCreateBleveIndex(root, path, name string) (bleve.Index, error) {
 // `.needs_reindex_<name>` marker so the next daemon pass does a full rebuild.
 // Logs a single warn line so the recovery is visible in daemon logs.
 //
-// The marker is best-effort: if the marker write fails (disk full, permission
-// denied) the function still returns the empty index — the daemon will see
-// the empty bleve on its next freshness check via different signals (empty
-// search results) but the explicit signal is preferred. Marker failure is
-// logged at warn level.
+// The destructive rebuild is serialized across processes by a per-sub-index
+// filesystem lock (see rebuildSubIndexLocked) so two concurrent codedb.Open
+// callers cannot race to delete each other's freshly-created replacement — the
+// nuke+recreate race in issue #828. requireVersion is false: any bleve that now
+// opens cleanly is an acceptable replacement (the healed index is empty and
+// carries the current mapping version).
+//
+// The reindex marker is written before removal so interrupted/failed recreation
+// cannot lose the rebuild signal. If it cannot be written, keep the old index.
 func selfHealBleveSubIndex(root, path, name string, openErr error) (bleve.Index, error) {
-	slog.Warn("bleve sub-index structurally corrupt, self-healing (nuke + recreate)",
-		"name", name, "path", path, "open_err", openErr)
+	return rebuildSubIndexLocked(root, path, name, false, openErr)
+}
 
+// healVerdict is the decision reclassifyUnderLock reaches once the per-sub-index
+// heal lock is held: adopt a replacement a concurrent process already produced,
+// nuke a still-corrupt/stale index ourselves, or defer to a live writer that
+// holds an otherwise-healthy index open.
+type healVerdict int
+
+const (
+	// healAdopt: the on-disk index now opens cleanly under the current mapping —
+	// a concurrent process already repaired it. Return that index; do not nuke.
+	healAdopt healVerdict = iota
+	// healNuke: the index is still provably corrupt (self-heal) or still stale
+	// (upgrade). We hold the lock; rebuild it.
+	healNuke
+	// healDefer: the index cannot be reopened but is NOT provably corrupt — a
+	// live writer holds its exclusive bbolt lock. Never nuke a healthy-but-held
+	// index; surface a distinct retryable self-heal deferral.
+	healDefer
+)
+
+var (
+	// subIndexHealLockTimeout bounds how long a caller waits for the per-sub-index
+	// heal lock before conceding another process holds it. The lock is held only
+	// for the brief nuke+recreate critical section (not the store's lifetime), so
+	// this is generous. Overridable in tests.
+	subIndexHealLockTimeout = 10 * time.Second
+	subIndexHealLockPoll    = 50 * time.Millisecond
+	// subIndexHealLockAcquiredHook fires immediately after the heal lock is
+	// acquired (never on a failed acquisition). Overridable so a concurrency test
+	// can deterministically interleave a second healer instead of racing on
+	// wall-clock timing (see .claude/rules/testing.md).
+	subIndexHealLockAcquiredHook = func(path string) {}
+	// subIndexRebuildActionHook fires with the verdict actually taken
+	// ("adopt"/"nuke"/"defer") so race tests can assert exact counts rather than
+	// inferring the loser's behavior from side effects.
+	subIndexRebuildActionHook = func(action string) {}
+	// acquireSubIndexHealLockFn is the seam rebuildSubIndexLocked uses to take the
+	// heal lock. Overridable so a test can simulate a flock-hostile filesystem —
+	// a setup error, distinct from a timeout — without an actual unsupported FS.
+	acquireSubIndexHealLockFn = acquireSubIndexHealLock
+)
+
+// subIndexHealLockPath returns the lock-file path serializing destructive
+// self-heal / upgrade of one bleve sub-index across processes. It is a SIBLING
+// of the sub-index dir (path + ".heal.lock"), never a child, so os.RemoveAll(path)
+// cannot delete the lock file out from under a healer mid-nuke — which would
+// hand a second healer a fresh, uncontended lock and reopen the race.
+func subIndexHealLockPath(path string) string {
+	return path + ".heal.lock"
+}
+
+// acquireSubIndexHealLock takes the exclusive cross-process heal lock for one
+// sub-index. It reports three distinct outcomes the caller must handle
+// differently — a timeout and a setup failure are NOT the same:
+//
+//   - (fl, true, nil):  lock held; caller must Unlock.
+//   - (nil, false, nil): TIMEOUT — a live process holds the lock (flock is
+//     released on process death, so a timeout is never a dead holder). The
+//     caller should defer to that peer, never nuke.
+//   - (nil, false, err): SETUP FAILURE — the lock file could not be created or
+//     the filesystem does not support flock. There is no peer to defer to, so
+//     the caller must fall back to healing without the lock.
+//
+// flock.TryLockContext returns (false, context.DeadlineExceeded) when our own
+// deadline expires (see gofrs/flock tryCtx), so a plain timeout arrives here as
+// an error. We translate that back into the (nil, false, nil) timeout outcome
+// and surface only genuine setup errors — otherwise a healthy peer holding the
+// lock would be misread as a broken filesystem.
+func acquireSubIndexHealLock(path string) (*flock.Flock, bool, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, false, fmt.Errorf("create dir for heal lock: %w", err)
+	}
+	fl := flock.New(subIndexHealLockPath(path))
+	ctx, cancel := context.WithTimeout(context.Background(), subIndexHealLockTimeout)
+	defer cancel()
+	locked, err := fl.TryLockContext(ctx, subIndexHealLockPoll)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, false, nil // normal timeout: a live peer holds the lock
+		}
+		return nil, false, err // genuine flock-setup failure (hostile FS)
+	}
+	if !locked {
+		return nil, false, nil
+	}
+	subIndexHealLockAcquiredHook(path)
+	return fl, true, nil
+}
+
+// reclassifyUnderLock re-runs the corruption/staleness decision after the heal
+// lock is held, so a concurrent process's repair is adopted rather than
+// clobbered.
+//
+// It must NEVER block on bleve.Open against an index a live writer may hold:
+// bleve.Open takes bbolt's exclusive lock with no timeout and would hang forever.
+// So the classification uses only BOUNDED bbolt probes — the same non-blocking
+// primitives openOrCreateBleveIndex uses — and adopts only once it has PROVEN the
+// index is free (we briefly held the exclusive lock ourselves), via
+// boundedAdoptOpen so even a writer that races into the post-probe window caps
+// the wait rather than hanging. A healthy index held open by the winning process
+// therefore resolves to healDefer, never to a hang and never to a nuke (the #828
+// data-loss path).
+//
+// requireVersion additionally treats a clean, free-but-stale index as healNuke
+// (the mapping-version upgrade path); for plain self-heal it is false.
+func reclassifyUnderLock(path, name string, requireVersion bool) (bleve.Index, healVerdict) {
+	boltPath := filepath.Join(path, "store", "root.bolt")
+	if _, statErr := os.Stat(boltPath); statErr != nil {
+		if errors.Is(statErr, os.ErrNotExist) || errors.Is(statErr, syscall.ENOTDIR) {
+			// bolt genuinely absent / path structure broken → needs a (re)build.
+			return nil, healNuke
+		}
+		// A transient stat failure (permission, I/O) on a bolt that may well exist
+		// must NOT be read as "rebuild": that would let a retryable error destroy a
+		// healthy index. Defer and let a later pass reclassify.
+		return nil, healDefer
+	}
+	// Provable structural corruption via the read-only peek (100ms per attempt).
+	if isBleveIndexCorrupt(boltPath) {
+		return nil, healNuke
+	}
+	// Bounded EXCLUSIVE probe: distinguishes free / held / corrupt without ever
+	// blocking. A live writer (the winner holding its fresh index open) yields
+	// ErrTimeout → healDefer.
+	db, err := bbolt.Open(boltPath, 0o600, &bbolt.Options{Timeout: bleveExclusiveProbeTimeout})
+	if err != nil {
+		if errors.Is(err, bbolterrors.ErrInvalid) ||
+			errors.Is(err, bbolterrors.ErrVersionMismatch) ||
+			errors.Is(err, bbolterrors.ErrChecksum) {
+			return nil, healNuke // proven on-disk corruption
+		}
+		return nil, healDefer // held by a live writer, or transient — never nuke
+	}
+	// Bleve cannot reopen without its metadata even if Bolt is healthy. Only an
+	// actually absent entry licenses repair: unreadable metadata or a dangling
+	// symlink remains an uncertain state. Check while holding the Bolt lock so
+	// a live writer's partially written metadata cannot be destroyed.
+	if _, metaErr := os.Lstat(filepath.Join(path, "index_meta.json")); os.IsNotExist(metaErr) {
+		_ = db.Close()
+		return nil, healNuke
+	} else if metaErr != nil {
+		_ = db.Close()
+		return nil, healDefer
+	}
+	// We hold the exclusive lock: the index is healthy AND free. Release it and
+	// hand back a real bleve handle to adopt. There is a narrow window between the
+	// Close here and the adopt open below in which an ordinary codedb.Open could
+	// grab bbolt's exclusive lock; because bleve.Open has no deadline, a naked
+	// open would then block for that store's whole lifetime. boundedAdoptOpen caps
+	// the wait and maps that contention to healDefer instead of a hang.
+	_ = db.Close()
+	idx, openErr := boundedAdoptOpen(path, bleveExclusiveProbeTimeout)
+	if openErr != nil {
+		// This is a fresh error from the index currently on disk, after the
+		// bounded exclusive probe proved no writer held root.bolt. Bleve's own
+		// mapping parser is authoritative when the lightweight bbolt inspection
+		// could not identify the snapshot Bleve ultimately selected.
+		if IsBleveMappingParseError(openErr) {
+			return nil, healNuke
+		}
+		// Raced away between probe and open, timed out on a late writer, or a
+		// non-corruption open failure — defer rather than nuke a possibly-healthy
+		// index.
+		return nil, healDefer
+	}
+	if requireVersion {
+		got, verErr := readMappingVersion(path)
+		if verErr != nil {
+			// Staleness was already established at the top-level upgrade call; if we
+			// cannot re-confirm the version under the lock, adopting would silently
+			// return a maybe-stale index and skip both the upgrade and the marker.
+			// Defer instead so a later pass makes the call on solid ground.
+			_ = idx.Close()
+			return nil, healDefer
+		}
+		if got < bleveMappingVersion(name) {
+			_ = idx.Close()
+			return nil, healNuke // clean + free but still stale → upgrade it
+		}
+	}
+	return idx, healAdopt
+}
+
+// boundedAdoptOpen opens a bleve index but never blocks longer than timeout.
+// bleve.Open takes bbolt's exclusive lock with no deadline, so if an ordinary
+// codedb.Open races in and grabs the lock between reclassifyUnderLock's freedom
+// probe and this open, a naked open would hang until that store closes. We cap
+// it: on timeout we return an error (the caller maps it to healDefer) and, if
+// the abandoned open later succeeds, close the handle so it cannot leak.
+func boundedAdoptOpen(path string, timeout time.Duration) (bleve.Index, error) {
+	type openResult struct {
+		idx bleve.Index
+		err error
+	}
+	ch := make(chan openResult, 1)
+	go func() {
+		idx, err := safeOpenBleve(path)
+		ch <- openResult{idx, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.idx, r.err
+	case <-time.After(timeout):
+		// Reap a late success so the orphaned handle can't leak. Guard defensively:
+		// the abandoned open may resolve after the index dir has been torn down,
+		// where Close can hit a typed-nil handle or panic — neither may crash us.
+		go func() {
+			r := <-ch
+			if r.err != nil || r.idx == nil {
+				return
+			}
+			defer func() { _ = recover() }()
+			_ = r.idx.Close()
+		}()
+		return nil, fmt.Errorf("adopt open of %s timed out after %s (index became busy)", path, timeout)
+	}
+}
+
+// rebuildSubIndexLocked serializes a destructive sub-index rebuild across
+// processes and skips it when a concurrent process already produced an
+// acceptable replacement. It is the shared core of self-heal and mapping-version
+// upgrade — the two nuke+recreate+marker sites that raced in #828.
+//
+// Flow: acquire the per-sub-index heal lock, then reclassify under it:
+//   - healAdopt → return the replacement the winner created; never nuke it.
+//   - healDefer → return a retryable self-heal deferral; a healthy index is
+//     being held open or the current state could not be confirmed.
+//   - healNuke  → we hold the lock and it is still corrupt/stale: write the
+//     .needs_reindex marker, then RemoveAll + recreate empty.
+//
+// A destructive rebuild (RemoveAll + recreate) runs ONLY while the heal lock is
+// held. When the lock cannot be acquired — for EITHER reason — we never nuke,
+// because a lockless nuke lets two processes RemoveAll each other's fresh
+// replacement (REMOVE CREATE REMOVE CREATE). The two no-lock cases:
+//   - TIMEOUT (a live peer holds a working lock): the peer will complete the
+//     rebuild; adopt a ready replacement, else return a retryable deferral.
+//   - SETUP FAILURE (flock-hostile FS, no peer): we cannot serialize at all, so
+//     we still refuse to nuke. Adopt an already-healthy index; otherwise defer.
+//     A genuinely corrupt sub-index on a flock-less filesystem is recovered by a
+//     full reindex (which wipes the whole dataDir), not by a racy per-sub-index
+//     nuke — the codedb is a rebuildable derived cache, so this trades an exotic-
+//     FS repair for the stronger no-racy-nuke guarantee.
+func rebuildSubIndexLocked(root, path, name string, requireVersion bool, openErrForLog error) (bleve.Index, error) {
+	fl, locked, lockErr := acquireSubIndexHealLockFn(path)
+	if !locked {
+		if lockErr != nil {
+			// flock is unusable on this filesystem: no peer, and no safe way to
+			// serialize a destructive rebuild. Refuse to nuke without the lock.
+			slog.Warn("bleve self-heal lock unavailable on this filesystem; deferring (no lockless nuke)",
+				"name", name, "path", path, "err", lockErr)
+		}
+		// No lock held (timeout or setup failure): adopt an already-repaired index,
+		// otherwise return a retryable deferral. Never nuke here.
+		if idx, verdict := reclassifyUnderLock(path, name, requireVersion); verdict == healAdopt {
+			subIndexRebuildActionHook("adopt")
+			return idx, nil
+		}
+		subIndexRebuildActionHook("defer")
+		return nil, fmt.Errorf("bleve sub-index %s self-heal deferred (heal lock unavailable): %w", name, openErrForLog)
+	}
+	defer func() { _ = fl.Unlock() }()
+	return applyRebuildVerdict(root, path, name, requireVersion, openErrForLog)
+}
+
+// applyRebuildVerdict reclassifies the sub-index and acts on the verdict:
+// adopt a concurrent repair, defer to a live writer, or nuke+recreate+marker a
+// still-corrupt/stale index. Callers MUST hold the heal lock — the healNuke path
+// first records the reindex marker, then does a destructive RemoveAll under
+// cross-process serialization (the no-lock paths never reach here).
+func applyRebuildVerdict(root, path, name string, requireVersion bool, openErrForLog error) (bleve.Index, error) {
+	idx, verdict := reclassifyUnderLock(path, name, requireVersion)
+	switch verdict {
+	case healAdopt:
+		slog.Info("bleve sub-index already repaired by a concurrent process; adopting replacement",
+			"name", name, "path", path)
+		subIndexRebuildActionHook("adopt")
+		return idx, nil
+	case healDefer:
+		subIndexRebuildActionHook("defer")
+		return nil, fmt.Errorf("bleve sub-index %s self-heal deferred (index busy or state unconfirmed): %w", name, openErrForLog)
+	}
+
+	// healNuke: the index is still provably corrupt/stale. The specific trigger
+	// (parse error vs stale mapping version) is in open_err.
+	if markerErr := WriteNeedsReindexMarker(root, name); markerErr != nil {
+		return nil, fmt.Errorf("write reindex marker before rebuilding bleve sub-index %s: %w", name, markerErr)
+	}
+	slog.Warn("bleve sub-index rebuild (nuke + recreate)",
+		"name", name, "path", path, "open_err", openErrForLog)
 	if removeErr := os.RemoveAll(path); removeErr != nil {
 		return nil, fmt.Errorf("remove corrupt bleve sub-index %s: %w", path, removeErr)
 	}
-	idx, err := createBleveSubIndex(path, name)
+	newIdx, err := createBleveSubIndex(path, name)
 	if err != nil {
 		return nil, fmt.Errorf("recreate empty bleve sub-index %s: %w", path, err)
 	}
-
-	if markerErr := WriteNeedsReindexMarker(root, name); markerErr != nil {
-		slog.Warn("failed to write needs_reindex marker; daemon may not auto-rebuild",
-			"name", name, "root", root, "err", markerErr)
-	}
-	return idx, nil
+	subIndexRebuildActionHook("nuke")
+	return newIdx, nil
 }
 
 // WriteNeedsReindexMarker creates the marker file that signals to the daemon's
@@ -918,6 +1465,61 @@ func isBleveIndexCorrupt(boltPath string) bool {
 	return corrupt
 }
 
+// bleveExclusiveProbeTimeout bounds how long boltCorruptOnExclusiveOpen waits
+// to take bbolt's exclusive flock before conceding a live writer holds it.
+// Overridable in tests. A timeout only ever biases toward the safe "assume
+// locked, do not nuke" verdict, so shrinking it in tests cannot manufacture a
+// false corruption verdict.
+var bleveExclusiveProbeTimeout = 2 * time.Second
+
+// boltCorruptOnExclusiveOpen disambiguates the states that surface as a
+// bbolt-open failure the read-only peek (isBleveIndexCorrupt) cannot classify:
+// a bolt torn so badly bbolt rejects it (kill-9 mid-write) versus a bolt held
+// under another writer's exclusive flock versus a transient/environmental
+// failure. It attempts a bounded EXCLUSIVE open and returns true (self-heal)
+// ONLY on proven on-disk structural corruption:
+//
+//   - ErrInvalid / ErrVersionMismatch / ErrChecksum: bbolt opened the file and
+//     took the exclusive flock, then failed validating the meta pages. The
+//     file itself is structurally broken — proven corruption. Return true.
+//   - ErrTimeout: a live writer holds the exclusive lock. Return false — never
+//     nuke an index that is actively being written.
+//   - any OTHER error (permission denied, I/O error, mmap/ENOMEM resource
+//     exhaustion): these occur BEFORE meta validation and are transient or
+//     environmental, NOT corruption. Return false — nuking a possibly-healthy
+//     index on a permission blip would be destructive data loss.
+//   - opened cleanly: the bolt is fine. Close and return false.
+//
+// A nuke only ever follows a *validation* failure (ErrInvalid/version/checksum)
+// on a flock we took ourselves, so neither a live-locked index nor a
+// transiently-unreadable one is ever destroyed — the same "never nuke without
+// proof" guarantee isBleveIndexCorrupt provides, extended to the
+// unopenable-bolt class the read-only peek structurally cannot reach.
+func boltCorruptOnExclusiveOpen(boltPath string) bool {
+	db, err := bbolt.Open(boltPath, 0600, &bbolt.Options{Timeout: bleveExclusiveProbeTimeout})
+	if err == nil {
+		_ = db.Close()
+		return false
+	}
+	// Proven on-disk corruption: bbolt validated the meta pages and rejected
+	// them. These are the only failures that justify a destructive discard.
+	if errors.Is(err, bbolterrors.ErrInvalid) ||
+		errors.Is(err, bbolterrors.ErrVersionMismatch) ||
+		errors.Is(err, bbolterrors.ErrChecksum) {
+		slog.Error("bleve bolt failed structural validation; treating as corruption",
+			"path", boltPath, "err", err)
+		return true
+	}
+	// ErrTimeout is a live writer; anything else (permission/I/O/resource) is
+	// transient or environmental. Neither proves corruption — preserve the
+	// index and let the caller fall through to the safe lock-contention path.
+	if !errors.Is(err, bbolterrors.ErrTimeout) {
+		slog.Warn("bleve bolt open failed without proving corruption; preserving index",
+			"path", boltPath, "err", err)
+	}
+	return false
+}
+
 // zapFilesInDir returns a set of *.zap filenames in dir for fast lookup.
 // On any os.ReadDir error returns the error so the caller can refuse to
 // flag corruption based on incomplete information — a transient read
@@ -1014,6 +1616,14 @@ func safeOpenBleve(path string) (idx bleve.Index, err error) {
 		}
 	}()
 	return bleve.Open(path)
+}
+
+// IsBleveMappingParseError reports whether Bleve opened an index far enough to
+// read its persisted mapping but could not decode that mapping. Bleve exposes
+// no typed error for this condition, so matching its stable error prefix is the
+// only way to distinguish proven mapping corruption from a generic open error.
+func IsBleveMappingParseError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "error parsing mapping JSON:")
 }
 
 // --- SQL convenience methods ---

@@ -2,6 +2,7 @@ package agentwork
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,12 @@ import (
 )
 
 const defaultTimeout = 5 * time.Minute
+
+const (
+	claudeStdoutLimit = 1024 * 1024
+	claudeStderrLimit = 64 * 1024
+	claudePipeWait    = 500 * time.Millisecond
+)
 
 // claudeMessage represents a single JSONL message from `claude --output-format stream-json`.
 type claudeMessage struct {
@@ -63,11 +70,58 @@ func (r *ClaudeRunner) Available() bool {
 	return err == nil
 }
 
-// parseResult holds the output of the async JSONL parser.
-type parseResult struct {
-	msg *claudeMessage
-	err error
+// cappedBuffer drains all subprocess output while retaining only the prefix
+// needed for parsing or diagnostics. Returning len(p) even after the cap keeps
+// a verbose child from blocking on a full pipe.
+type cappedBuffer struct {
+	buf   bytes.Buffer
+	limit int
 }
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	written := len(p)
+	remaining := b.limit - b.buf.Len()
+	if remaining <= 0 {
+		return written, nil
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	_, _ = b.buf.Write(p)
+	return written, nil
+}
+
+func (b *cappedBuffer) Bytes() []byte { return b.buf.Bytes() }
+
+func (b *cappedBuffer) String() string { return b.buf.String() }
+
+// tailBuffer drains all writes while retaining the most recent bytes. Claude's
+// stream-json result is the final line, so a prefix cap would discard the only
+// message the runner needs after a verbose invocation.
+type tailBuffer struct {
+	buf   []byte
+	limit int
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	written := len(p)
+	if b.limit <= 0 {
+		return written, nil
+	}
+	if len(p) >= b.limit {
+		b.buf = append(b.buf[:0], p[len(p)-b.limit:]...)
+		return written, nil
+	}
+	overflow := len(b.buf) + len(p) - b.limit
+	if overflow > 0 {
+		copy(b.buf, b.buf[overflow:])
+		b.buf = b.buf[:len(b.buf)-overflow]
+	}
+	b.buf = append(b.buf, p...)
+	return written, nil
+}
+
+func (b *tailBuffer) Bytes() []byte { return b.buf }
 
 // Run executes a claude invocation with the given request.
 func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
@@ -84,12 +138,29 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	defer cancel()
 
 	// --permission-mode bypassPermissions: see the equivalent comment in
-	// pkg/sessionsummary/claude.go. The daemon ALSO runs claude in `-p`
-	// mode for session summarization; without this flag the LLM hits a
-	// permission prompt and produces narration that fails validation,
-	// resulting in the failure-marker-stub output that clobbered 31
-	// Phase 2 sessions on 2026-04-25 (bd ox-5cc9, ox-91sl).
-	args := []string{"--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"}
+	// pkg/sessionsummary/claude.go. In `-p` mode a permission prompt has no
+	// one to answer it, so the LLM narrates the block instead of answering;
+	// that produced the failure-marker stubs that clobbered 31 Phase 2
+	// sessions on 2026-04-25 (bd ox-5cc9, ox-91sl). An isolated run has no
+	// tools, so it never reaches a prompt and does not get the bypass.
+	args := []string{"--output-format", "stream-json", "--verbose"}
+	isolated := false
+	if req.Isolated || req.IsolateIfSupported {
+		err := checkClaudeIsolation(ctx, r.binaryPath)
+		switch {
+		case err == nil:
+			isolated = true
+		case req.Isolated || !errors.As(err, new(isolationUnsupported)):
+			return nil, err
+		default:
+			r.logger.Warn("running claude without isolation; update Claude Code", "error", err)
+		}
+	}
+	if isolated {
+		args = append(args, claudeIsolatedArgs()...)
+	} else {
+		args = append(args, "--permission-mode", "bypassPermissions")
+	}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
 	}
@@ -101,20 +172,24 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	args = append(args, "-p")
 
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
-	cmd.Stdin = strings.NewReader(req.Prompt)
+	// Claude Code reads any file an @-mention in a -p prompt names and gives it
+	// to the model, whatever --tools says. A worker prompt carries untrusted
+	// text and needs no file, so each @ goes in as its XML entity, which the
+	// model reads as @.
+	cmd.Stdin = strings.NewReader(strings.ReplaceAll(req.Prompt, "@", "&#64;"))
+	cmd.Env = workerEnv(claudeEnvPrefixes()...)
 	if req.WorkDir != "" {
 		cmd.Dir = req.WorkDir
 	}
 	setProcAttr(cmd)
-
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("stdout pipe: %w", err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("stderr pipe: %w", err)
-	}
+	// Let os/exec own the pipes and copy into always-draining capped writers.
+	// WaitDelay closes those pipes if an orphaned descendant inherits them,
+	// keeping TimeoutOverride a real upper bound instead of waiting for EOF.
+	stdoutBuf := tailBuffer{limit: claudeStdoutLimit}
+	stderrBuf := cappedBuffer{limit: claudeStderrLimit}
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+	cmd.WaitDelay = claudePipeWait
 
 	start := time.Now()
 
@@ -124,31 +199,11 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 
 	r.logger.Debug("claude process started", "pid", cmd.Process.Pid)
 
-	// read stderr in background
-	var stderrBuf []byte
-	stderrDone := make(chan struct{})
-	go func() {
-		defer close(stderrDone)
-		stderrBuf, _ = io.ReadAll(io.LimitReader(stderrPipe, 64*1024))
-	}()
-
-	// parse stdout JSONL in background so pipe reads don't block Wait
-	parseCh := make(chan parseResult, 1)
-	go func() {
-		msg, parseErr := parseClaudeOutput(stdoutPipe)
-		parseCh <- parseResult{msg: msg, err: parseErr}
-	}()
-
-	// wait for process to exit (also closes pipes, unblocking readers)
 	waitErr := cmd.Wait()
 	elapsed := time.Since(start)
 
-	// collect background readers
-	<-stderrDone
-	pr := <-parseCh
-
-	if len(stderrBuf) > 0 {
-		r.logger.Debug("claude stderr", "output", string(stderrBuf))
+	if len(stderrBuf.Bytes()) > 0 {
+		r.logger.Debug("claude stderr", "output", stderrBuf.String())
 	}
 
 	// context cancellation or timeout
@@ -161,15 +216,26 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	}
 
 	exitCode := 0
+	failure := ""
 	if waitErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
 			exitCode = exitErr.ExitCode()
-			r.logger.Warn("claude exited with non-zero status", "exit_code", exitCode, "stderr", string(stderrBuf))
+			failure = failureDetail(stderrBuf.String(), string(stdoutBuf.Bytes()))
+			r.logger.Warn("claude exited with non-zero status", "exit_code", exitCode, "output", failure)
 		} else {
 			return nil, fmt.Errorf("wait claude: %w", waitErr)
 		}
 	}
+
+	msg, parseErr := parseClaudeOutput(bytes.NewReader(stdoutBuf.Bytes()))
+	if msg == nil && parseErr == nil {
+		parseErr = fmt.Errorf("result message not found")
+	}
+	pr := struct {
+		msg *claudeMessage
+		err error
+	}{msg: msg, err: parseErr}
 
 	// Family-level attribution is the floor. The stream-json result
 	// message carries the concrete model id (e.g., claude-sonnet-4-6);
@@ -178,11 +244,15 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	const claudeFamily = "claude"
 
 	if pr.err != nil && pr.msg == nil {
-		return &RunResult{
+		result := &RunResult{
 			Duration:  elapsed,
 			ExitCode:  exitCode,
 			ModelUsed: claudeFamily,
-		}, fmt.Errorf("parse claude output: %w", pr.err)
+		}
+		if exitCode != 0 {
+			return result, fmt.Errorf("parse claude output (exit_code=%d output=%q): %w", exitCode, failure, pr.err)
+		}
+		return result, fmt.Errorf("parse claude output: %w", pr.err)
 	}
 
 	res := &RunResult{

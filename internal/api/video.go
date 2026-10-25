@@ -275,13 +275,3 @@ func (c *RepoClient) ListVideos(contextType, contextID string, limit, offset int
 
 	return &listResp, nil
 }
-
-// httpStatusError formats a non-2xx response into the same error shape the
-// other video methods produce.
-func httpStatusError(status int, reqURL string, body []byte) error {
-	errMsg := strings.TrimSpace(string(body))
-	if errMsg == "" {
-		return fmt.Errorf("HTTP %d from %s", status, reqURL)
-	}
-	return fmt.Errorf("HTTP %d from %s: %s", status, reqURL, errMsg)
-}

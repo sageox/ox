@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/errkind"
+
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/identity"
@@ -19,7 +21,7 @@ import (
 func requireProjectRoot() (string, error) {
 	root := config.FindProjectRoot()
 	if root == "" {
-		return "", fmt.Errorf("not in a SageOx project (no .sageox directory found)\nRun this command from a git project directory where SageOx has been initialized")
+		return "", errkind.Errorf(errkind.NotInitialized, "not in a SageOx project (no .sageox directory found)\nRun this command from a git project directory where SageOx has been initialized")
 	}
 	return root, nil
 }
@@ -126,13 +128,18 @@ func getDisplayName(ep string) string {
 	return p.DisplayName
 }
 
+// verifyRedactionSignature is a test seam. A dev build embeds no signature, so
+// the real verifier only ever reports StatusNotConfigured and the tamper
+// warning below could never be exercised.
+var verifyRedactionSignature = session.VerifyRedactionSignature
+
 // warnIfRedactionSignatureInvalid checks the redaction policy signature and prints
 // a warning to stderr if it's invalid. This is called at the start of session
 // operations to alert users of potential tampering.
 //
 // Returns true if signature is valid or not configured (dev build), false if invalid.
 func warnIfRedactionSignatureInvalid() bool {
-	result := session.VerifyRedactionSignature()
+	result := verifyRedactionSignature()
 
 	switch result.Status {
 	case signing.StatusNotConfigured:
@@ -155,7 +162,7 @@ func warnIfRedactionSignatureInvalid() bool {
 		fmt.Fprintln(os.Stderr, "    2. Verify the checksum matches")
 		fmt.Fprintln(os.Stderr, "    3. Report this issue if you downloaded from official sources")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "  Run 'ox redaction verify' for details.")
+		fmt.Fprintln(os.Stderr, "  Run 'ox session redaction verify' for details.")
 		fmt.Fprintln(os.Stderr, "")
 		return false
 

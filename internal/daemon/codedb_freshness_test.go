@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -108,7 +109,7 @@ func TestCheckFreshness_NoDoubleGoroutine(t *testing.T) {
 		mgr.mu.Lock()
 		defer mgr.mu.Unlock()
 		return !mgr.indexing
-	}, 5*time.Second, 10*time.Millisecond, "indexing flag must be released after goroutine exits")
+	}, codedbBuildWait, 10*time.Millisecond, "indexing flag must be released after goroutine exits")
 	assert.Equal(t, int64(1), maxConcurrent.Load(), "exactly one goroutine ran doIndex in total")
 }
 
@@ -131,7 +132,7 @@ func TestCheckFreshness_FlagReleasedOnFailure(t *testing.T) {
 		mgr.mu.Lock()
 		defer mgr.mu.Unlock()
 		return !mgr.indexing
-	}, 5*time.Second, 10*time.Millisecond, "indexing flag must be released after failure")
+	}, codedbBuildWait, 10*time.Millisecond, "indexing flag must be released after failure")
 }
 
 // --- IssueTracker integration ---
@@ -200,7 +201,9 @@ func TestCheckFreshness_NonENOENT_NoIssue(t *testing.T) {
 // recovery path: sparse-checkout is fixed, codedb rebuilds, and the warning
 // disappears from ox status.
 func TestCheckFreshness_IssueCleared_AfterRecovery(t *testing.T) {
-	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: exercises a real git + SQLite + Bleve recovery pass")
+	}
 
 	tracker := NewIssueTracker()
 	// pre-set the issue as if a prior cache wipe occurred
@@ -212,22 +215,34 @@ func TestCheckFreshness_IssueCleared_AfterRecovery(t *testing.T) {
 	})
 	require.Equal(t, 1, tracker.Count(), "precondition: issue must be set")
 
-	// doIndex clears the issue only on err == nil. We can't easily make doIndex
-	// succeed without a real git repo, but we CAN verify the complementary
-	// invariant: non-ENOENT failure does NOT clear the issue.
-	// This ensures stale issues persist until genuine recovery.
+	// First pass: a real failure. The directory exists but is not a git repo,
+	// so the stale issue must remain and the indexing claim must be released.
 	dir := t.TempDir()
 	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+	mgr.dataDir = t.TempDir()
 	mgr.SetIssueTracker(tracker)
 
 	ctx := context.Background()
 	mgr.CheckFreshness(ctx)
 	waitForIndexingDone(t, mgr)
 
-	// issue persists: doIndex failed (no git repo) but NOT with ENOENT,
-	// so the issue is neither re-emitted nor cleared
 	assert.Equal(t, 1, tracker.Count(),
 		"cache-wipe issue must persist until a successful index — non-ENOENT failure must not clear it")
+	failedStats := mgr.Stats()
+	require.NotEmpty(t, failedStats.LastError, "failed pass must remain visible in status")
+
+	// Repair the boundary and retry using the same manager. This is the
+	// lifecycle the daemon runs after a transient checkout/configuration fault.
+	seedGitRepo(t, dir)
+	mgr.CheckFreshness(ctx)
+	require.Eventually(t, func() bool { return !mgr.IsIndexing() },
+		30*time.Second, 20*time.Millisecond, "recovery index did not finish")
+
+	assert.Zero(t, tracker.Count(), "successful retry must clear the stale cache-wipe issue")
+	recoveredStats := mgr.Stats()
+	assert.True(t, recoveredStats.IndexExists)
+	assert.Greater(t, recoveredStats.Commits, 0, "successful retry must make indexing progress")
+	assert.Empty(t, recoveredStats.LastError, "successful retry must clear the prior error")
 }
 
 // --- B. CheckFreshness worktree guard ---
@@ -297,6 +312,14 @@ func TestCheckFreshness_SkipsWorktreeGone_LedgerIndexUnaffected(t *testing.T) {
 // triggers the skip — permission errors should still attempt indexing.
 // Failure prevented: overly aggressive guard skips indexing on transient permission issues.
 func TestCheckFreshness_PermissionError_StillProceeds(t *testing.T) {
+	// Chmod(0o000) is the isolation mechanism here, and Go's Chmod maps only the
+	// read-only bit on Windows — the target stays readable and this test would pass
+	// while asserting nothing. See .claude/rules/testing.md, "Failure Paths That
+	// Render Identically To Success".
+	if runtime.GOOS == "windows" {
+		t.Skip("windows: chmod cannot remove read permission")
+	}
+
 	t.Parallel()
 
 	if os.Getuid() == 0 {

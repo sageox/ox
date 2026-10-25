@@ -1,6 +1,8 @@
 package plan
 
 import (
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -258,6 +260,7 @@ func TestRenderViz_ChartsAreArtifactSafe(t *testing.T) {
 		"sankey":     `{"nodes":[{"name":"a"},{"name":"b"}],"links":[{"from":"a","to":"b","value":1}]}`,
 		"chord":      `{"labels":["a","b"],"matrix":[[0,1],[1,0]]}`,
 		"line-chart": `{"series":[{"label":"a","points":[{"x":0,"y":0},{"x":1,"y":1}]}]}`,
+		"waterfall":  `{"rows":[{"id":"a","label":"a","start":0,"dur":10}]}`,
 	}
 	for id, data := range cases {
 		out, err := RenderViz(id, []byte(data))
@@ -312,5 +315,242 @@ func TestComputeVizHints_CarriesParamSkeleton(t *testing.T) {
 	}
 	if !strings.Contains(fh.Param, "files") {
 		t.Errorf("param skeleton should name the data shape: %s", fh.Param)
+	}
+}
+
+// waterfallSample is a three-stage pipeline with one off-path branch: `slow`
+// finishes last and depends on `mid`, which depends on `first`; `branch` also
+// depends on `first` but finishes early, so it must NOT be on the critical path.
+// Total span is 1000.
+const waterfallSample = `{"unit":"ms","rows":[
+ {"id":"first","label":"first","start":0,"dur":200},
+ {"id":"branch","label":"branch","start":200,"after":"first","dur":100},
+ {"id":"mid","label":"mid","start":300,"after":"first","dur":200},
+ {"id":"slow","label":"slow","start":600,"after":"mid","dur":400}]}`
+
+// TestRenderViz_WaterfallGeometry verifies a bar maps to the COMPUTED pixel.
+// With wfGutter=214, wfRight=66, wfW=760 the plot is 480 wide, so a row starting
+// at 600/1000 of the span begins at 214+0.6*480 = 502.00 and a 400/1000 duration
+// is 192.00 wide. Rows are placed at wfTop=30 + i*15 + (15-8)/2, and `slow` sorts
+// last of four, so y = 30+45+3.5 = 78.50.
+//
+// Failure prevented: the bars stop tracking the clock — a waterfall whose
+// geometry drifts is worse than no chart, because it still looks authoritative.
+func TestRenderViz_WaterfallGeometry(t *testing.T) {
+	out, err := RenderViz("waterfall", []byte(waterfallSample))
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(out, `x="502.00" y="78.50" width="192.00" height="8.00"`) {
+		t.Errorf("expected the slow row at x=502.00 y=78.50 w=192.00; got:\n%s", out)
+	}
+}
+
+// TestRenderViz_WaterfallCriticalPath verifies the lit path is DERIVED from the
+// `after` edges, not from bar width: `branch` is off the path even though it is
+// a perfectly ordinary bar, and `slow` (the longest row on the path) carries the
+// long-pole marker.
+//
+// Failure prevented: dimming every row, or none — either way the chart's whole
+// claim ("this chain set the total") silently stops being made.
+func TestRenderViz_WaterfallCriticalPath(t *testing.T) {
+	out, err := RenderViz("waterfall", []byte(waterfallSample))
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	// branch is off-path: its bar carries the dim class.
+	if !strings.Contains(out, `class="wfall-bar wfall-off"`) {
+		t.Errorf("expected an off-critical-path bar for `branch`; got:\n%s", out)
+	}
+	// The on-path bars must NOT be dimmed. first/mid/slow = 3 undimmed bars.
+	if n := strings.Count(out, `class="wfall-bar"`); n != 3 {
+		t.Errorf("expected 3 on-path bars (first, mid, slow), got %d", n)
+	}
+	if !strings.Contains(out, `class="wfall-pole"`) {
+		t.Errorf("expected a long-pole marker on `slow`; got:\n%s", out)
+	}
+	if !strings.Contains(out, "longest stage slow at 400 ms") {
+		t.Errorf("aria-label must name the long pole in words for a screen reader; got:\n%s", out)
+	}
+}
+
+// TestRenderViz_WaterfallWaitGap verifies idle time between a dependency
+// finishing and its dependent starting is drawn. `b` starts 300 after `a` ends,
+// which is 30% of the span — well over both the draw and the label thresholds.
+//
+// Failure prevented: silently swallowing dead time. Queue/poll latency is
+// invisible in a bar-only chart and is usually the cheapest thing to delete, so
+// a waterfall that hides it removes its own best finding.
+func TestRenderViz_WaterfallWaitGap(t *testing.T) {
+	out, err := RenderViz("waterfall", []byte(`{"unit":"ms","rows":[
+	 {"id":"a","label":"a","start":0,"dur":200},
+	 {"id":"b","label":"b","start":500,"after":"a","dur":500}]}`))
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(out, `class="wfall-gap"`) {
+		t.Errorf("expected a wait-gap hairline; got:\n%s", out)
+	}
+	if !strings.Contains(out, "wait 300 ms") {
+		t.Errorf("expected the gap labeled with its duration; got:\n%s", out)
+	}
+}
+
+// TestRenderViz_WaterfallDurationSuffix verifies a duration reads "400 ms", not
+// "ms400". fmtUnit prefixes any single-character unit because that is right for
+// currency ($12); "s" and "m" are single characters and are not currency.
+//
+// Failure prevented: the regression this test was written for — every tick and
+// every bar label rendered as `s75.8` the first time this chart met real data.
+func TestRenderViz_WaterfallDurationSuffix(t *testing.T) {
+	out, err := RenderViz("waterfall", []byte(`{"unit":"s","scale":1000,"rows":[{"id":"a","label":"a","start":0,"dur":75800}]}`))
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(out, ">75.8 s<") {
+		t.Errorf("expected a value-then-unit duration label; got:\n%s", out)
+	}
+	if strings.Contains(out, ">s75.8<") {
+		t.Errorf("duration label prefixed the unit like a currency symbol; got:\n%s", out)
+	}
+}
+
+// TestRenderViz_WaterfallValidates verifies malformed input fails loudly rather
+// than rendering a plausible-looking wrong chart.
+//
+// Failure prevented: a negative duration silently drawing a zero-width bar, so a
+// broken upstream measurement reads as a fast stage.
+func TestRenderViz_WaterfallValidates(t *testing.T) {
+	bad := map[string]string{
+		"no rows":          `{"rows":[]}`,
+		"negative start":   `{"rows":[{"label":"a","start":-1,"dur":5}]}`,
+		"negative dur":     `{"rows":[{"label":"a","start":0,"dur":-5}]}`,
+		"negative segment": `{"rows":[{"label":"a","start":0,"segments":[{"phase":"x","dur":-5}]}]}`,
+	}
+	for name, data := range bad {
+		if _, err := RenderViz("waterfall", []byte(data)); err == nil {
+			t.Errorf("%s: expected an error, got none", name)
+		}
+	}
+}
+
+// waterfallFanOut has a critical path (first → mid → slow) and one off-path
+// branch that is the LONGEST single row in the chart. `branch` ends at 700,
+// `slow` ends at 750, so `slow` finishes last and sets the total.
+const waterfallFanOut = `{"unit":"ms","rows":[
+ {"id":"first","label":"first","start":0,"dur":200},
+ {"id":"branch","label":"branch","start":200,"after":"first","dur":500},
+ {"id":"mid","label":"mid","start":200,"after":"first","dur":100},
+ {"id":"slow","label":"slow","start":300,"after":"mid","dur":450}]}`
+
+// TestRenderViz_WaterfallNoEdgesIsNotDimmed verifies that rows carrying ids but
+// no `after` edges render as a plain timeline: nothing dimmed, no long pole.
+//
+// Failure prevented: with no edges the critical-path walk stops at the
+// last-FINISHING row, so the chart lights exactly one row and dims the rest —
+// and the row it lights can be the shortest one in the chart. That asserts
+// "this stage set the total" about a stage that merely happened to end last,
+// which is a confident, wrong answer to the only question the chart is asked.
+func TestRenderViz_WaterfallNoEdgesIsNotDimmed(t *testing.T) {
+	out, err := RenderViz("waterfall", []byte(`{"unit":"ms","rows":[
+	 {"id":"a","label":"a","start":0,"dur":100},
+	 {"id":"b","label":"b","start":100,"dur":200},
+	 {"id":"c","label":"c","start":300,"dur":50}]}`))
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if n := strings.Count(out, "wfall-off"); n != 0 {
+		t.Errorf("no `after` edges means no derived critical path, so nothing may be dimmed; got %d dimmed elements:\n%s", n, out)
+	}
+	if strings.Contains(out, "wfall-pole") {
+		t.Errorf("a long pole must not be claimed without a derived critical path; got:\n%s", out)
+	}
+}
+
+// TestRenderViz_WaterfallNoIDsRenderFullOpacity verifies the simplest possible
+// input — rows with no ids at all — renders as a readable timeline.
+//
+// Failure prevented: an id-less row can never be a member of the derived path,
+// so EVERY row picks up the off-path class and the whole chart renders as a
+// 34%-opacity ghost, with no legend entry to explain why it looks broken.
+func TestRenderViz_WaterfallNoIDsRenderFullOpacity(t *testing.T) {
+	out, err := RenderViz("waterfall", []byte(`{"unit":"ms","rows":[
+	 {"label":"a","start":0,"dur":100},
+	 {"label":"b","start":100,"dur":200},
+	 {"label":"c","start":300,"dur":50}]}`))
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if n := strings.Count(out, "wfall-off"); n != 0 {
+		t.Errorf("rows without ids carry no path information, so none may be dimmed; got %d dimmed elements:\n%s", n, out)
+	}
+}
+
+// TestRenderViz_WaterfallAriaNamesThePathPole verifies the spoken conclusion and
+// the drawn conclusion name the SAME row. On waterfallFanOut the marker sits on
+// `slow` (longest row on the critical path) while `branch` is the longest row
+// overall but off the path.
+//
+// Failure prevented: a screen-reader user being told to attack the one row the
+// chart is explicitly dimming as irrelevant — in exactly the wide-fan-out case
+// this chart exists to expose.
+func TestRenderViz_WaterfallAriaNamesThePathPole(t *testing.T) {
+	out, err := RenderViz("waterfall", []byte(waterfallFanOut))
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(out, "longest stage slow at 450 ms") {
+		t.Errorf("aria-label must name the on-path long pole (`slow`); got:\n%s", out)
+	}
+	if strings.Contains(out, "longest stage branch") {
+		t.Errorf("aria-label named `branch`, an off-critical-path row the chart dims; got:\n%s", out)
+	}
+}
+
+// TestRenderViz_WaterfallTicksStayOnCanvas verifies no gridline or tick label is
+// placed past the plot's right edge. A span of 350 lands on a step of 100, and
+// the old loop ran while `t <= span+step/2` — emitting a 400 tick at x=762.6 on
+// a 760-wide viewBox, where it is clipped.
+//
+// Failure prevented: the chart silently losing its last tick to a half-drawn one
+// outside the canvas, so the axis appears to stop early and every bar looks
+// shorter relative to the clock than it is.
+func TestRenderViz_WaterfallTicksStayOnCanvas(t *testing.T) {
+	out, err := RenderViz("waterfall", []byte(`{"unit":"ms","rows":[
+	 {"id":"a","label":"a","start":0,"dur":100},
+	 {"id":"b","label":"b","start":100,"after":"a","dur":250}]}`))
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	for _, m := range regexp.MustCompile(`x="(\d+\.\d\d)"`).FindAllStringSubmatch(out, -1) {
+		x, _ := strconv.ParseFloat(m[1], 64)
+		if x > 760 {
+			t.Errorf("element at x=%s is outside the 760-wide viewBox and will be clipped:\n%s", m[1], out)
+		}
+	}
+	if strings.Contains(out, ">400 ms<") {
+		t.Errorf("emitted a 400 ms tick for a 350 ms span; ticks must stop at the span:\n%s", out)
+	}
+}
+
+// TestRenderViz_WaterfallNoteRidesItsOwnRow verifies a row's note sits on that
+// row's baseline rather than one line below the bar.
+//
+// Failure prevented: the note offset (bar top + 15) is exactly the row pitch, so
+// hanging notes under bars put every note on the NEXT row's baseline — and the
+// last row's note on top of the bottom axis labels.
+func TestRenderViz_WaterfallNoteRidesItsOwnRow(t *testing.T) {
+	out, err := RenderViz("waterfall", []byte(`{"unit":"ms","rows":[
+	 {"id":"a","label":"a","start":0,"dur":100,"note":"first note"},
+	 {"id":"b","label":"b","start":100,"after":"a","dur":250,"note":"second note"}]}`))
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	// Row 0's bar baseline is wfTop+((wfRowH-wfBarH)/2)+wfBarH-1 = 30+3.5+7 = 40.50.
+	if !strings.Contains(out, `class="wfall-note" x="758.00" y="40.50"`) {
+		t.Errorf("the first row's note must share its own bar baseline (y=40.50); got:\n%s", out)
+	}
+	if !strings.Contains(out, "second note") {
+		t.Errorf("the last row's note must survive: its bar ends at the span, and notes have a reserved column; got:\n%s", out)
 	}
 }

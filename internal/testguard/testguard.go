@@ -17,6 +17,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +32,20 @@ var allowedBaseEnv = []string{
 	// git needs these for commits
 	"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
 	"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+	// keeps ox's git credentials out of the OS keychain, which is not under HOME
+	// and so not isolated by a test's home sandbox
+	"OX_GIT_CREDENTIALS_FILE",
 }
+
+// TestOxBinaryEnv selects a prebuilt ox binary for compiled-binary tests.
+// It is intentionally test-only: Make builds the binary from the current
+// checkout immediately before invoking the acceptance suite.
+const TestOxBinaryEnv = "OX_TEST_OX_BINARY"
+
+// TestGoCoverDirEnv selects where a spawned instrumented ox binary flushes
+// counters. It must be distinct from GOCOVERDIR: go test -coverprofile replaces
+// GOCOVERDIR with an internal $WORK path before tests execute.
+const TestGoCoverDirEnv = "OX_TEST_GOCOVERDIR"
 
 // productionHostPatterns are substrings that must NEVER appear in test
 // env values or mock server responses unless exempted by allowedTestHostPatterns.
@@ -104,6 +119,9 @@ func MinimalEnv(testVars []string) []string {
 	}
 	env = append(env, "OX_NO_DAEMON=1")
 	env = append(env, "DO_NOT_TRACK=1") // prevent friction telemetry hitting production
+	if coverDir := os.Getenv(TestGoCoverDirEnv); coverDir != "" {
+		env = append(env, "GOCOVERDIR="+coverDir)
+	}
 	env = append(env, testVars...)
 	return env
 }
@@ -217,6 +235,14 @@ func StopDaemonCleanup(t *testing.T, oxBin, repoDir string, envVars []string) {
 func BuildOxBinary(t *testing.T, projectRoot string) string {
 	t.Helper()
 
+	if configured := os.Getenv(TestOxBinaryEnv); configured != "" {
+		binPath, err := resolveTestOxBinary(configured)
+		if err != nil {
+			t.Fatalf("invalid %s: %v", TestOxBinaryEnv, err)
+		}
+		return binPath
+	}
+
 	binDir := t.TempDir()
 	binPath := fmt.Sprintf("%s/ox", binDir)
 
@@ -229,4 +255,22 @@ func BuildOxBinary(t *testing.T, projectRoot string) string {
 	}
 
 	return binPath
+}
+
+func resolveTestOxBinary(configured string) (string, error) {
+	binPath, err := filepath.Abs(configured)
+	if err != nil {
+		return "", fmt.Errorf("resolve %q: %w", configured, err)
+	}
+	info, err := os.Stat(binPath)
+	if err != nil {
+		return "", fmt.Errorf("stat %q: %w", binPath, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%q is not a regular file", binPath)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0111 == 0 {
+		return "", fmt.Errorf("%q is not executable", binPath)
+	}
+	return binPath, nil
 }

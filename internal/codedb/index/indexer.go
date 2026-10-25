@@ -29,6 +29,7 @@ import (
 
 	"github.com/sageox/ox/internal/codedb/comments"
 	"github.com/sageox/ox/internal/codedb/diffformat"
+	"github.com/sageox/ox/internal/codedb/gitopen"
 	"github.com/sageox/ox/internal/codedb/language"
 	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
 	"github.com/sageox/ox/internal/codedb/store"
@@ -488,7 +489,10 @@ func BuildDirtyIndex(ctx context.Context, localPath, dirtyPath string, opts Inde
 			continue
 		}
 
-		batch.Index("dirty_"+relPath, BleveCodeDoc{Content: string(content)})
+		if err := batch.Index("dirty_"+relPath, BleveCodeDoc{Content: string(content)}); err != nil {
+			slog.Warn("dirty index: batch index failed", "path", relPath, "err", err)
+			continue
+		}
 		indexed++
 	}
 
@@ -759,44 +763,11 @@ func resolveDefaultBranchGit(repoPath string) (refInfo, error) {
 }
 
 // resolveGitDir returns the path to open with go-git and whether it's a linked
-// worktree. For linked worktrees (where .git is a file containing "gitdir: ..."),
-// it follows the pointer to the main repo's .git directory so go-git can access
-// the shared object store. For normal repos, returns the path unchanged.
+// worktree. Thin alias over gitopen.ResolveGitDir, which is the single source of
+// truth (shared with the store package's guarded blob-repo open). See there for
+// the linked-worktree/commondir resolution.
 func resolveGitDir(repoPath string) (string, bool) {
-	dotGit := filepath.Join(repoPath, ".git")
-	info, err := os.Lstat(dotGit)
-	if err != nil || info.IsDir() {
-		return repoPath, false // normal repo or no .git
-	}
-
-	// .git is a file → linked worktree, read "gitdir: <path>"
-	content, err := os.ReadFile(dotGit)
-	if err != nil {
-		return repoPath, false
-	}
-	line := strings.TrimSpace(string(content))
-	if !strings.HasPrefix(line, "gitdir: ") {
-		return repoPath, false
-	}
-	worktreeGitDir := strings.TrimPrefix(line, "gitdir: ")
-	if !filepath.IsAbs(worktreeGitDir) {
-		worktreeGitDir = filepath.Join(repoPath, worktreeGitDir)
-	}
-
-	// read commondir to find the shared .git (e.g., "../.." → main .git)
-	commondirFile := filepath.Join(worktreeGitDir, "commondir")
-	commondirBytes, err := os.ReadFile(commondirFile)
-	if err != nil {
-		return repoPath, false
-	}
-	commondir := strings.TrimSpace(string(commondirBytes))
-	if !filepath.IsAbs(commondir) {
-		commondir = filepath.Join(worktreeGitDir, commondir)
-	}
-
-	// commondir points to the main .git dir; the repo root is its parent
-	mainRepoRoot := filepath.Dir(commondir)
-	return mainRepoRoot, true
+	return gitopen.ResolveGitDir(repoPath)
 }
 
 // walkNewCommits discovers commits reachable from tip that aren't in knownCommits.
@@ -886,7 +857,7 @@ func (st *indexState) processRef(ctx context.Context, ri refInfo, refIdx, totalR
 	}
 
 	// Build file_revs for tip
-	return st.buildTipFileRevs(ri)
+	return st.buildTipFileRevs(ctx, ri)
 }
 
 // indexCommit inserts a single commit and its diffs into the database and Bleve.
@@ -1078,7 +1049,9 @@ func (st *indexState) insertDiff(commitDBID int64, path string, oldBlobDBID sql.
 
 	diffText := generateDiffText(st.repo, path, oldOID, newOID, hasOld, hasNew, oldText, newText)
 	if diffText != "" {
-		st.diffBatch.Index("diff_"+strconv.FormatInt(diffDBID, 10), BleveDiffDoc{Content: diffText})
+		if err := st.diffBatch.Index("diff_"+strconv.FormatInt(diffDBID, 10), BleveDiffDoc{Content: diffText}); err != nil {
+			return fmt.Errorf("index diff: %w", err)
+		}
 		st.diffBatchN++
 		if err := st.flushDiffBatch(false); err != nil {
 			return err
@@ -1087,9 +1060,16 @@ func (st *indexState) insertDiff(commitDBID int64, path string, oldBlobDBID sql.
 	return nil
 }
 
-// buildTipFileRevs rebuilds the file_revs table for a ref's tip commit.
-func (st *indexState) buildTipFileRevs(ri refInfo) error {
-	ctx := context.Background()
+// maxSnapshotsPrunedPerBuild bounds the dead-snapshot prune that runs inside the
+// build's single transaction. Steady state needs one (the snapshot the ref just
+// left); the cap only matters for a legacy index carrying hundreds, which
+// Store.Maintain drains in separate transactions instead of one multi-GB WAL.
+const maxSnapshotsPrunedPerBuild = 8
+
+// buildTipFileRevs rebuilds the file_revs table for a ref's tip commit, then
+// drops the snapshots no ref points at any more — chiefly the one this ref just
+// moved away from — so file_revs stays at one snapshot per live ref.
+func (st *indexState) buildTipFileRevs(ctx context.Context, ri refInfo) error {
 	q := codedbsqlc.New(st.tx)
 
 	tipHex := ri.tipOID.String()
@@ -1098,7 +1078,7 @@ func (st *indexState) buildTipFileRevs(ri refInfo) error {
 		return nil // skip if tip not indexed
 	}
 
-	if err := q.DeleteFileRevsByCommit(ctx, tipCommitDBID); err != nil {
+	if _, err := q.DeleteFileRevsByCommit(ctx, tipCommitDBID); err != nil {
 		return fmt.Errorf("delete file_revs: %w", err)
 	}
 
@@ -1135,6 +1115,12 @@ func (st *indexState) buildTipFileRevs(ri refInfo) error {
 		CommitID: tipCommitDBID,
 	}); err != nil {
 		return fmt.Errorf("upsert ref: %w", err)
+	}
+
+	// Only after the ref moved: until the upsert the old snapshot is still the
+	// one this ref points at.
+	if _, err := store.PruneDeadFileRevsForRepo(ctx, q, st.repoID, maxSnapshotsPrunedPerBuild); err != nil {
+		return fmt.Errorf("prune dead file_revs: %w", err)
 	}
 
 	return nil
@@ -1182,10 +1168,12 @@ func getTreeEntries(repo *git.Repository, treeHash plumbing.Hash, cache map[plum
 	}
 
 	entries := make(map[string]plumbing.Hash)
-	tree.Files().ForEach(func(f *object.File) error {
+	if err := tree.Files().ForEach(func(f *object.File) error {
 		entries[f.Name] = f.Hash
 		return nil
-	})
+	}); err != nil {
+		return nil, fmt.Errorf("iterate tree files: %w", err)
+	}
 
 	cache[treeHash] = entries
 	return entries, nil
@@ -1240,7 +1228,9 @@ func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, str
 			reader.Close()
 			if readErr == nil && utf8.Valid(content) && len(content) > 0 {
 				blobText = string(content)
-				st.codeBatch.Index("blob_"+strconv.FormatInt(blobDBID, 10), BleveCodeDoc{Content: blobText})
+				if err := st.codeBatch.Index("blob_"+strconv.FormatInt(blobDBID, 10), BleveCodeDoc{Content: blobText}); err != nil {
+					return 0, "", false, fmt.Errorf("index blob: %w", err)
+				}
 				st.codeBatchN++
 				indexed = true
 				if err := st.flushCodeBatch(false); err != nil {
@@ -2063,7 +2053,10 @@ sendLoop2:
 					return 0, 0, fmt.Errorf("scan inserted comment id: %w", err)
 				}
 				if cmIdx < len(batch) {
-					commentBatch.Index("comment_"+strconv.FormatInt(commentID, 10), BleveCommentDoc{Content: batch[cmIdx].Text})
+					if err := commentBatch.Index("comment_"+strconv.FormatInt(commentID, 10), BleveCommentDoc{Content: batch[cmIdx].Text}); err != nil {
+						rows.Close()
+						return 0, 0, fmt.Errorf("index comment: %w", err)
+					}
 				}
 				cmIdx++
 				commentBatchN++

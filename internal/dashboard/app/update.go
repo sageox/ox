@@ -1,6 +1,8 @@
 package app
 
 import (
+	"sort"
+
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
@@ -24,9 +26,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Stage 2: Overlays consume input first
 	if !m.overlays.IsEmpty() {
-		m, cmd = m.reduceOverlays(msg)
+		var consumed bool
+		m, cmd, consumed = m.reduceOverlays(msg)
 		if cmd != nil {
 			cmds = append(cmds, cmd)
+		}
+		if consumed {
+			return m, tea.Batch(cmds...)
 		}
 	}
 
@@ -197,8 +203,14 @@ func (m Model) syncTargetAtCursor(cursor int) *domain.InspectorTarget {
 	if ds == nil {
 		return nil
 	}
+	repoIDs := make([]string, 0, len(ds.Workspaces))
+	for repoID := range ds.Workspaces {
+		repoIDs = append(repoIDs, repoID)
+	}
+	sort.Strings(repoIDs)
 	idx := 0
-	for _, wsList := range ds.Workspaces {
+	for _, repoID := range repoIDs {
+		wsList := ds.Workspaces[repoID]
 		for i := range wsList {
 			if idx == cursor {
 				ws := wsList[i]
@@ -277,15 +289,15 @@ func (m Model) feedTargetAtCursor(cursor int) *domain.InspectorTarget {
 }
 
 // reduceOverlays forwards the message to the topmost overlay.
-func (m Model) reduceOverlays(msg tea.Msg) (Model, tea.Cmd) {
+func (m Model) reduceOverlays(msg tea.Msg) (Model, tea.Cmd, bool) {
 	top := m.overlays.Top()
 	if top == nil {
-		return m, nil
+		return m, nil, false
 	}
 
 	updated, cmd, consumed := top.Update(msg)
 	if !consumed {
-		return m, nil
+		return m, nil, false
 	}
 
 	m.overlays.Pop()
@@ -293,7 +305,7 @@ func (m Model) reduceOverlays(msg tea.Msg) (Model, tea.Cmd) {
 		m.overlays.Push(updated)
 	}
 
-	return m, cmd
+	return m, cmd, true
 }
 
 // reduceEffects processes async data-load completions.

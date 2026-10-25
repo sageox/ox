@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,7 +16,7 @@ func TestOxHookCommandForEvent_AllEvents(t *testing.T) {
 		t.Run(event, func(t *testing.T) {
 			t.Parallel()
 			got := oxHookCommandForEvent(event)
-			expected := fmt.Sprintf(constants.OxHookCommandClaudeCodeTemplate, event)
+			expected := constants.HookCommand(constants.OxHookCommandClaudeCodeTemplate, event)
 			if got != expected {
 				t.Errorf("oxHookCommandForEvent(%q) = %q, want %q", event, got, expected)
 			}

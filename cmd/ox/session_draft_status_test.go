@@ -100,6 +100,25 @@ func TestDraftStateFor_DistinguishesEveryLifecycleState(t *testing.T) {
 			state:    &session.RecordingState{TurnCount: 9},
 			want:     "disabled",
 		},
+		{
+			name:     "recorded manual publishing under an enabled repo policy",
+			resolved: draftEnabled(),
+			state: &session.RecordingState{
+				TurnCount: 5, PublishingMode: config.SessionPublishingManual,
+			},
+			want: "disabled",
+			why: "the Stop hook never drafts a session held on this machine, " +
+				"so 'pending' would promise a placeholder that cannot arrive",
+		},
+		{
+			name:     "recorded auto publishing keeps the repo policy",
+			resolved: draftEnabled(),
+			state: &session.RecordingState{
+				TurnCount: 1, PublishingMode: config.SessionPublishingAuto,
+			},
+			want: "pending",
+			why:  "only a recorded manual choice overrides the repo policy",
+		},
 	}
 
 	for _, tc := range tests {
@@ -239,7 +258,7 @@ func TestDraftViewNotice_ExplainsInsteadOfNotFound(t *testing.T) {
 	require.NotEmpty(t, msg, "a published draft must explain itself, not fall through to 'not found'")
 	assert.Contains(t, msg, "still recording")
 	assert.Contains(t, msg, draftName)
-	assert.Contains(t, msg, "ox-session-stop", "the message must say what to do next")
+	assert.Contains(t, msg, "ox agent session stop", "the message must say what to do next")
 
 	// Negative controls: neither a finalized session nor an absent one gets the
 	// draft message, or `session view` would swallow a real not-found error.
@@ -258,7 +277,7 @@ func TestNewDraftStatusContext_LoadsOncePerInvocation(t *testing.T) {
 	projectRoot, _ := draftReaperFixture(t)
 	t.Chdir(projectRoot)
 
-	ctx := newDraftStatusContext()
+	ctx := newDraftStatusContext(projectRoot)
 	require.NotNil(t, ctx.resolved, "a resolved policy must always be present")
 	assert.Positive(t, ctx.resolved.PublishTurn)
 

@@ -127,6 +127,62 @@ func TestResolveGitDir_LinkedWorktree(t *testing.T) {
 	assert.Equal(t, expectedDir, actualDir, "should resolve to main repo root")
 }
 
+// createBareHubWorktree builds the #819 recurrence layout: a BARE hub repo
+// (git init --bare) with core.bare manually set false and the worktreeConfig
+// extension, plus one linked worktree added from it. Returns the hub git dir and
+// the worktree path. In this layout commondir resolves directly to the hub (no
+// ".git" wrapper), so filepath.Dir(commondir) points one level too high — the
+// shape that slipped past the codedb config guard.
+func createBareHubWorktree(t *testing.T) (hubDir, worktreeDir string) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("short: bare-hub git worktree operations")
+	}
+	runGit := gitRunner(t)
+	base := t.TempDir()
+
+	hubDir = filepath.Join(base, "hub.git")
+	runGit(base, "init", "--bare", hubDir)
+
+	// seed a commit so `git worktree add` has a ref to check out
+	seed := filepath.Join(base, "seed")
+	runGit(base, "clone", hubDir, seed)
+	runGit(seed, "commit", "--allow-empty", "-m", "init")
+	runGit(seed, "push", "origin", "HEAD:refs/heads/main")
+
+	// add the linked worktree while the hub is still bare (main is free); a
+	// non-bare hub would "occupy" main and reject the add.
+	worktreeDir = filepath.Join(base, "wt")
+	runGit(hubDir, "worktree", "add", worktreeDir, "main")
+
+	// now apply the bare-hub-as-worktree-hub trick on the shared config:
+	// core.bare=false + worktreeConfig extension (requires format version 1).
+	runGit(hubDir, "config", "core.repositoryformatversion", "1")
+	runGit(hubDir, "config", "core.bare", "false")
+	runGit(hubDir, "config", "extensions.worktreeConfig", "true")
+	return hubDir, worktreeDir
+}
+
+// TestResolveGitDir_BareHubWorktree pins the #819 recurrence root cause: a
+// worktree off a bare hub must resolve to the hub git dir itself, not to
+// filepath.Dir(commondir). Before the fix this returned the hub's parent, which
+// dropped GuardedPlainOpen onto its unguarded fallback.
+func TestResolveGitDir_BareHubWorktree(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git worktree operations")
+	}
+	hubDir, worktreeDir := createBareHubWorktree(t)
+
+	path, isWorktree := resolveGitDir(worktreeDir)
+	assert.True(t, isWorktree, "bare-hub worktree must be detected as a linked worktree")
+
+	expected, _ := filepath.EvalSymlinks(hubDir)
+	actual, _ := filepath.EvalSymlinks(path)
+	assert.Equal(t, expected, actual,
+		"bare-hub worktree must resolve to the hub git dir, not filepath.Dir(commondir)")
+}
+
 func TestResolveGitDir_NoGit(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {

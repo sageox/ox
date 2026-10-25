@@ -1,21 +1,43 @@
 package auth
 
 import (
+	"context"
 	"encoding/binary"
 	"hash/crc32"
 	"log/slog"
 	"math/big"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
+	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/repotools"
 )
 
 // EnvVarToken is the environment variable for supplying a SageOx access token
 // out-of-band (CI/CD, headless agents, ephemeral containers). When set, it takes
 // precedence over any token stored on disk.
 const EnvVarToken = "SAGEOX_TOKEN"
+
+var ErrReadTokenUnavailable = gitserver.ErrReadTokenUnavailable
+
+// CurrentReadToken never consults a disk login or GitLab credential store.
+// Re-read it for every operation so a reused client observes token rotation.
+// Callers supply the selected canonical origin; normalizing a requested sibling
+// host here would broaden the authority allowed to receive this credential.
+func CurrentReadToken(endpointURL string) (string, error) {
+	if strings.TrimSuffix(endpointURL, "/") != strings.TrimSuffix(EnvTokenEndpoint(), "/") {
+		return "", ErrReadTokenUnavailable
+	}
+	tok, state := EnvTokenFor(endpointURL)
+	if state != EnvTokenValid || tok == nil || !strings.HasPrefix(tok.AccessToken, TeamTokenPrefix) || strings.ContainsAny(tok.AccessToken, "\r\n") {
+		return "", ErrReadTokenUnavailable
+	}
+	return tok.AccessToken, nil
+}
 
 // envTokenTTL is the synthetic rolling expiry stamped on env-sourced tokens.
 // Env tokens have no refresh credential — the server returning 401 is the source
@@ -187,6 +209,101 @@ func EnvTokenFor(ep string) (*StoredToken, EnvTokenState) {
 // requiring a parsed StoredToken (a malformed token never produces one).
 func EnvTokenIsTeamFamily(ep string) bool {
 	return strings.HasPrefix(envTokenBoundValue(ep), TeamTokenPrefix)
+}
+
+// ReauthenticationRemedy names the recovery for the selected credential.
+// A personal login cannot replace a team token supplied by a CI secret store.
+func ReauthenticationRemedy(ep string) string {
+	if EnvTokenIsTeamFamily(ep) {
+		return "Rotate or re-mint the team token, then update SAGEOX_TOKEN in your CI secret store."
+	}
+	return "Run 'ox login' to re-authenticate."
+}
+
+// Coworker is the AI coworker a team token acts as, as introspection names it.
+type Coworker struct {
+	ID          string `json:"id"`           // agt_…
+	DisplayName string `json:"display_name"` // the coworker's name in SageOx; may be empty
+}
+
+// Name is the coworker's display name, or its agt_ id when it has none.
+func (c *Coworker) Name() string {
+	if c.DisplayName != "" {
+		return c.DisplayName
+	}
+	return c.ID
+}
+
+// Username is the coworker's slug. Slugify keeps only ASCII letters and
+// digits, so an empty name, or one with neither, falls back to the agt_ id.
+func (c *Coworker) Username() string {
+	if slug := repotools.Slugify(c.DisplayName); slug != "" {
+		return slug
+	}
+	return strings.ToLower(c.ID)
+}
+
+// coworkerIDPattern admits only characters a session name may hold, because
+// Username falls back to the id and session names embed Username.
+var coworkerIDPattern = regexp.MustCompile(`^agt_[A-Za-z0-9_-]+$`)
+
+func isCoworkerID(id string) bool {
+	return coworkerIDPattern.MatchString(id)
+}
+
+// ErrNoCoworker reports that the server says the team token in SAGEOX_TOKEN has
+// no AI coworker attached. Recording and murmurs refuse it rather than file
+// the work under the git identity of whatever machine runs ox.
+var ErrNoCoworker = errkind.Errorf(errkind.Auth, "SAGEOX_TOKEN is a team token with no AI coworker attached: attach an AI coworker to the token in SageOx, or unset SAGEOX_TOKEN to use your own login")
+
+// TeamCoworker returns the AI coworker that the team token in SAGEOX_TOKEN acts
+// as for ep. identity.ResolveAttribution, GetUserID and GetUsername attribute
+// work to it.
+//
+// It returns nil, nil when ep's credential is not a team token, or when the
+// server has not named a coworker: it predates the field, or it was not
+// reachable and nothing is cached. Callers then attribute work as before. It
+// returns ErrNoCoworker when the server answers that none is attached.
+func TeamCoworker(ep string) (*Coworker, error) {
+	// Checked before EnvTokenFor so a person's command never pays for the
+	// checksum check or repeats its warning about a mistyped SAGEOX_TOKEN.
+	if !EnvTokenIsTeamFamily(ep) {
+		return nil, nil
+	}
+	tok, state := EnvTokenFor(ep)
+	if state != EnvTokenValid {
+		return nil, nil
+	}
+	meta, _ := FetchTokenMetaCached(context.Background(), ep, tok.AccessToken)
+	if meta == nil {
+		return nil, nil
+	}
+	if meta.NoCoworker {
+		return nil, ErrNoCoworker
+	}
+	return meta.Coworker, nil
+}
+
+// PersonalTokenUser returns the person a personal SAGEOX_TOKEN belongs to, as
+// the server's /auth/me names them. An env token carries no UserInfo (there
+// was no login to learn it from), so without this, work done where git's
+// identity isn't the person's is filed under git's: an Amp project orb commits
+// as "Amp" and credited every session to "Amp" (sageox/ox#1425). Nil when
+// SAGEOX_TOKEN isn't a valid personal token for ep, or the server can't be
+// reached and nothing is cached.
+func PersonalTokenUser(ep string) *TokenUser {
+	if EnvTokenIsTeamFamily(ep) {
+		return nil
+	}
+	tok, state := EnvTokenFor(ep)
+	if state != EnvTokenValid || tok == nil {
+		return nil
+	}
+	meta, _ := FetchTokenMetaCached(context.Background(), ep, tok.AccessToken)
+	if meta == nil || meta.User == nil || (meta.User.Email == "" && meta.User.Name == "") {
+		return nil
+	}
+	return meta.User
 }
 
 // tokenFromEnv returns a StoredToken populated from SAGEOX_TOKEN when the

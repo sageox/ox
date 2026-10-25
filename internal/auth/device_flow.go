@@ -189,7 +189,7 @@ func Login(ctx context.Context, deviceCode *DeviceCodeResponse, statusCallback f
 				"scope", token.Scope)
 
 			// exchange opaque token for JWT
-			jwtToken, err := exchangeForJWT(client, apiURL, token.AccessToken)
+			jwtToken, err := exchangeForJWT(ctx, client, apiURL, token.AccessToken)
 			if err != nil {
 				return fmt.Errorf("failed to exchange token for JWT: %w", err)
 			}
@@ -212,8 +212,9 @@ func Login(ctx context.Context, deviceCode *DeviceCodeResponse, statusCallback f
 				refreshToken = jwtToken.RefreshToken
 			}
 
-			// fetch user info using JWT
-			userInfo, err := fetchUserInfo(client, apiURL, accessToken)
+			// Userinfo is part of the device flow and authenticates with the opaque
+			// session credential. The exchanged JWT is for SageOx API requests.
+			userInfo, err := fetchUserInfo(client, apiURL, token.AccessToken)
 			if err != nil {
 				return fmt.Errorf("failed to fetch user info: %w", err)
 			}
@@ -335,10 +336,10 @@ type JWTExchangeResponse struct {
 }
 
 // exchangeForJWT exchanges an opaque session token for a JWT
-func exchangeForJWT(client *http.Client, apiURL, opaqueToken string) (*JWTExchangeResponse, error) {
+func exchangeForJWT(ctx context.Context, client *http.Client, apiURL, opaqueToken string) (*JWTExchangeResponse, error) {
 	endpoint := strings.TrimSuffix(apiURL, "/") + "/api/v1/cli/auth/token"
 
-	req, err := useragent.NewRequest(context.Background(), "GET", endpoint, nil)
+	req, err := useragent.NewRequest(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -555,7 +556,7 @@ func (c *AuthClient) Login(ctx context.Context, deviceCode *DeviceCodeResponse, 
 				"scope", token.Scope)
 
 			// exchange opaque token for JWT
-			jwtToken, err := exchangeForJWT(httpClient, apiURL, token.AccessToken)
+			jwtToken, err := exchangeForJWT(ctx, httpClient, apiURL, token.AccessToken)
 			if err != nil {
 				return fmt.Errorf("failed to exchange token for JWT: %w", err)
 			}
@@ -578,8 +579,9 @@ func (c *AuthClient) Login(ctx context.Context, deviceCode *DeviceCodeResponse, 
 				refreshToken = jwtToken.RefreshToken
 			}
 
-			// fetch user info using JWT
-			userInfo, err := fetchUserInfo(httpClient, apiURL, accessToken)
+			// Userinfo is part of the device flow and authenticates with the opaque
+			// session credential. The exchanged JWT is for SageOx API requests.
+			userInfo, err := fetchUserInfo(httpClient, apiURL, token.AccessToken)
 			if err != nil {
 				return fmt.Errorf("failed to fetch user info: %w", err)
 			}

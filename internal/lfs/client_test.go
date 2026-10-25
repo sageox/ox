@@ -1,21 +1,35 @@
 package lfs
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestNewClient(t *testing.T) {
-	c := NewClient("https://git.sageox.io/sageox/ledger.git", "oauth2", "test-token")
+	c := NewClient("https://git.sageox.io/sageox/ledger.git", "", "test-token")
 	assert.Equal(t, "https://git.sageox.io/sageox/ledger.git/info/lfs/objects/batch", c.batchURL)
-	assert.Contains(t, c.authHeader, "Basic ")
+	assert.Equal(t, "Basic b2F1dGgyOnRlc3QtdG9rZW4=", c.authHeader)
 	assert.Equal(t, 2*time.Minute, c.httpClient.Timeout, "batch API timeout should be 2 minutes")
+
 }
 
 func TestNewClient_TrailingSlash(t *testing.T) {
@@ -131,6 +145,51 @@ func TestBatch_ServerError(t *testing.T) {
 	assert.Contains(t, err.Error(), "HTTP 500")
 }
 
+// Failure prevented: a batch response, including an error or chunked body,
+// consumes unbounded memory before decoding or returning the HTTP failure.
+func TestReadLFS_BatchResponseSizeBound(t *testing.T) {
+	const limit = 1 << 20
+	for _, tc := range []struct {
+		name    string
+		size    int
+		status  int
+		chunked bool
+	}{
+		{name: "exact limit", size: limit, status: http.StatusOK},
+		{name: "oversized", size: limit + 1, status: http.StatusOK},
+		{name: "chunked exact limit", size: limit, status: http.StatusOK, chunked: true},
+		{name: "chunked oversized", size: limit + 1, status: http.StatusOK, chunked: true},
+		{name: "oversized error", size: limit + 1, status: http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const body = `{"objects":[]}`
+			c, _ := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if !tc.chunked {
+					w.Header().Set("Content-Length", fmt.Sprint(tc.size))
+				}
+				w.WriteHeader(tc.status)
+				if tc.chunked {
+					w.(http.Flusher).Flush()
+				}
+				io.WriteString(w, body+strings.Repeat(" ", tc.size-len(body)))
+			})
+			response, err := c.BatchDownload(nil)
+			if tc.status != http.StatusOK {
+				var httpErr *HTTPError
+				require.ErrorAs(t, err, &httpErr)
+				require.Equal(t, tc.status, httpErr.StatusCode)
+				require.Nil(t, response)
+			} else if tc.size > limit {
+				require.ErrorContains(t, err, "batch response exceeds")
+				require.Nil(t, response)
+			} else {
+				require.NoError(t, err)
+				require.Empty(t, response.Objects)
+			}
+		})
+	}
+}
+
 // TestBatch_RejectsPlaintextHTTP confirms doBatch refuses to send
 // Authorization to a non-loopback http URL. Without this guard, a
 // misconfigured or attacker-rewritten remote (http://example.com/...)
@@ -193,4 +252,602 @@ func TestBatch_ObjectError(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.NotNil(t, resp.Objects[0].Error)
 	assert.Equal(t, 404, resp.Objects[0].Error.Code)
+}
+
+const (
+	readTestRepoID = "repo_01936d5a-0000-7abc-8def-0123456789ab"
+	readTestToken  = "oxt_test_1ljPfr"
+	rotatedToken   = "oxt_rotated_1lKvCA"
+)
+
+func readLFSFixture(t *testing.T, handler http.HandlerFunc) (*Client, *httptest.Server) {
+	t.Helper()
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv("SAGEOX_ENDPOINT", server.URL)
+	t.Setenv("SAGEOX_TOKEN", readTestToken)
+	c, err := NewReadClient(server.URL, readTestRepoID, server.URL+"/api/v1/cli/repos/"+readTestRepoID+"/ledger.git")
+	require.NoError(t, err)
+	c.httpClient.Transport = server.Client().Transport
+	previous := lfsHTTPClient
+	local := *previous
+	local.Transport = server.Client().Transport
+	lfsHTTPClient = &local
+	t.Cleanup(func() { lfsHTTPClient = previous })
+	return c, server
+}
+
+// Failure prevented: a client or saved action retains an old identity after rotation.
+func TestReadLFS_RotationAndDownloadOnly(t *testing.T) {
+	content := []byte("authorized session content")
+	oid := ComputeOID(content)
+	wantToken := readTestToken
+	var hits atomic.Int32
+	c, _ := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		username, token, ok := r.BasicAuth()
+		assert.True(t, ok)
+		assert.Equal(t, "ox", username)
+		assert.Equal(t, wantToken, token)
+		assert.Empty(t, r.Header.Get("X-Upstream-Token"))
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			var request batchRequest
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			assert.Equal(t, "download", request.Operation)
+			json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{
+				OID: oid, Size: int64(len(content)), Actions: &Actions{
+					Download: &Action{Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + oid,
+						Header: map[string]string{"Authorization": "Bearer stale-token", "X-Upstream-Token": "secret"}},
+					Upload: &Action{Href: "https://" + r.Host + "/upload"}, Verify: &Action{Href: "https://" + r.Host + "/verify"},
+				},
+			}}})
+			return
+		}
+		assert.Equal(t, http.MethodGet, r.Method)
+		w.Write(content)
+	})
+	resp, err := c.BatchDownload([]BatchObject{{OID: oid, Size: int64(len(content))}})
+	require.NoError(t, err)
+	actions := resp.Objects[0].Actions
+	require.NotNil(t, actions.Download)
+	assert.Nil(t, actions.Upload)
+	assert.Nil(t, actions.Verify)
+	assert.Empty(t, c.authHeader, "read clients must not retain a token")
+
+	wantToken = rotatedToken
+	t.Setenv("SAGEOX_TOKEN", rotatedToken)
+	var out bytes.Buffer
+	require.NoError(t, DownloadToFileContext(context.Background(), actions.Download, &out, true, oid))
+	assert.Equal(t, content, out.Bytes())
+	_, err = c.BatchDownload([]BatchObject{{OID: oid, Size: int64(len(content))}})
+	require.NoError(t, err)
+
+	_, err = c.BatchUpload([]BatchObject{{OID: oid}})
+	require.Error(t, err)
+	require.Error(t, UploadObject(actions.Download, content))
+	require.Error(t, VerifyObject(actions.Download, oid, int64(len(content))))
+	assert.Equal(t, int32(3), hits.Load(), "read clients and actions cannot perform upload/verify requests")
+
+	t.Setenv("SAGEOX_TOKEN", "")
+	_, err = c.BatchDownload([]BatchObject{{OID: oid}})
+	require.ErrorIs(t, err, auth.ErrReadTokenUnavailable)
+	_, err = DownloadObject(actions.Download)
+	require.ErrorIs(t, err, auth.ErrReadTokenUnavailable)
+	assert.Equal(t, int32(3), hits.Load(), "missing current credential must stop remote requests")
+}
+
+// Failure prevented: grant denial is treated as an empty ledger or leaks a reflected token.
+func TestReadLFS_DeniedAndMissingRemainDistinct(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			c, _ := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+				w.Write([]byte(readTestToken))
+			})
+			_, err := c.BatchDownload(nil)
+			var httpErr *HTTPError
+			require.ErrorAs(t, err, &httpErr)
+			assert.Equal(t, status, httpErr.StatusCode)
+			assert.NotContains(t, err.Error(), readTestToken)
+		})
+	}
+	t.Run("missing object", func(t *testing.T) {
+		c, _ := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{OID: "missing", Error: &ObjectError{Code: 404, Message: readTestToken}}}})
+		})
+		resp, err := c.BatchDownload([]BatchObject{{OID: "missing"}})
+		require.NoError(t, err)
+		require.Len(t, resp.Objects, 1)
+		require.NotNil(t, resp.Objects[0].Error)
+		assert.Equal(t, 404, resp.Objects[0].Error.Code)
+		assert.NotContains(t, resp.Objects[0].Error.Message, readTestToken)
+	})
+}
+
+// Failure prevented: a read route's Retry-After never reaches the caller, so
+// read sync retries a refused request on its own schedule instead of the one
+// the server asked for (ox #982).
+func TestReadLFS_RefusalCarriesRetryAfter(t *testing.T) {
+	content := []byte("object behind a refusal")
+	oid := ComputeOID(content)
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var refuseBatch atomic.Bool
+			c, _ := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/batch") && !refuseBatch.Load() {
+					json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{OID: oid, Size: int64(len(content)),
+						Actions: &Actions{Download: &Action{Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + oid}}}}})
+					return
+				}
+				w.Header().Set("Retry-After", "7")
+				w.WriteHeader(status)
+				w.Write([]byte(readTestToken))
+			})
+			resp, err := c.BatchDownload([]BatchObject{{OID: oid, Size: int64(len(content))}})
+			require.NoError(t, err)
+			action := resp.Objects[0].Actions.Download
+			refuseBatch.Store(true)
+			_, batchErr := c.BatchDownload([]BatchObject{{OID: oid, Size: int64(len(content))}})
+			_, downloadErr := DownloadObject(action)
+			streamErr := DownloadToFileContext(context.Background(), action, io.Discard, true, oid)
+			for name, err := range map[string]error{"batch": batchErr, "download": downloadErr, "streamed download": streamErr} {
+				var httpErr *HTTPError
+				require.ErrorAs(t, err, &httpErr, name)
+				assert.Equal(t, &HTTPError{StatusCode: status, RetryAfter: 7 * time.Second}, httpErr, name)
+				assert.NotContains(t, err.Error(), readTestToken, name)
+			}
+		})
+	}
+}
+
+// Failure prevented: a Retry-After is misread, so a caller retries sooner than
+// the server asked, waits on a value it should have discarded, or — for a delay
+// too long for a Duration — overflows into a negative wait.
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	longest := math.MaxInt64 / time.Second * time.Second
+	for _, tc := range []struct {
+		name, value string
+		want        time.Duration
+	}{
+		{"absent", "", 0},
+		{"delay-seconds", "1", time.Second},
+		{"longer delay-seconds", "120", 2 * time.Minute},
+		{"zero names no wait", "0", 0},
+		{"negative", "-1", 0},
+		{"signed", "+1", 0},
+		{"fractional", "1.5", 0},
+		{"not a number", "soon", 0},
+		// Parsing reports what the server asked for; clamping is the caller's.
+		{"absurd but representable", "86400", 24 * time.Hour},
+		{"too long for a Duration saturates", "9999999999999", longest},
+		{"too long for any integer saturates", "99999999999999999999999", longest},
+		{"HTTP-date ahead", now.Add(90 * time.Second).Format(http.TimeFormat), 90 * time.Second},
+		{"HTTP-date already past", now.Add(-time.Minute).Format(http.TimeFormat), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, parseRetryAfter(tc.value, now))
+		})
+	}
+}
+
+// Failure prevented: upstream action headers or TAT escape to signed object storage.
+func TestReadLFS_SignedStorageIsCredentialFreeAndVerified(t *testing.T) {
+	content := []byte("plan from signed storage")
+	oid := ComputeOID(content)
+	corrupt := false
+	var hits atomic.Int32
+	storage := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		for _, header := range []string{"Authorization", "Proxy-Authorization", "Cookie", "X-Upstream-Token"} {
+			assert.Empty(t, r.Header.Get(header), header)
+		}
+		assert.Equal(t, "storage-signature", r.URL.Query().Get("signature"))
+		if corrupt {
+			w.Write([]byte("corrupt"))
+			return
+		}
+		w.Write(content)
+	}))
+	defer storage.Close()
+	c, _ := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{OID: oid, Actions: &Actions{Download: &Action{
+			Href:   storage.URL + "/object?signature=storage-signature",
+			Header: map[string]string{"Authorization": "Bearer " + readTestToken, "Cookie": "session=secret", "X-Upstream-Token": "secret"},
+		}}}}})
+	})
+	resp, err := c.BatchDownload([]BatchObject{{OID: oid}})
+	require.NoError(t, err)
+	action := resp.Objects[0].Actions.Download
+	data, err := DownloadObject(action)
+	require.NoError(t, err)
+	assert.Equal(t, content, data)
+	corrupt = true
+	_, err = DownloadObject(action)
+	require.ErrorContains(t, err, "OID mismatch")
+	var out bytes.Buffer
+	err = DownloadToFileContext(context.Background(), action, &out, false, "")
+	require.ErrorContains(t, err, "OID mismatch", "verification cannot be disabled for read actions")
+	assert.Equal(t, int32(3), hits.Load())
+}
+
+// Failure prevented: a malicious action broadens same-origin TAT authority or leaks it in URLs.
+func TestReadLFS_UnsafeActionsNeverReachNetwork(t *testing.T) {
+	var actionHref string
+	var hits atomic.Int32
+	oid := ComputeOID([]byte("content"))
+	c, server := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{OID: oid, Actions: &Actions{Download: &Action{Href: actionHref}}}}})
+	})
+	for _, href := range []string{
+		server.URL + "/api/v1/cli/repos/foreign/ledger.git/info/lfs/objects/" + oid,
+		c.readURL + "/info/lfs/objects/" + strings.Repeat("0", 64),
+		c.readURL + "/git-upload-pack",
+		strings.Replace(server.URL, "https://", "http://", 1) + "/object",
+		"https://username:password@storage.example/object",
+		"https://storage.example/object?token=" + readTestToken,
+		"https://storage.example/object?token=" + strings.ReplaceAll(readTestToken, "_", "%5f"),
+		"https://storage.example/object?token=" + readTestToken + "&invalid=%zz",
+	} {
+		t.Run(href, func(t *testing.T) {
+			actionHref = href
+			before := hits.Load()
+			resp, err := c.BatchDownload([]BatchObject{{OID: oid}})
+			require.NoError(t, err)
+			_, err = DownloadObject(resp.Objects[0].Actions.Download)
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), readTestToken)
+			assert.Equal(t, before+1, hits.Load(), "only batch discovery should reach network")
+		})
+	}
+}
+
+// Failure prevented: redirects replay same-origin Authorization on unrelated routes.
+func TestReadLFS_BatchAndObjectRedirectsRefused(t *testing.T) {
+	for _, redirectBatch := range []bool{true, false} {
+		t.Run(map[bool]string{true: "batch", false: "object"}[redirectBatch], func(t *testing.T) {
+			var hits atomic.Int32
+			oid := ComputeOID([]byte("content"))
+			c, _ := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				if !redirectBatch && strings.HasSuffix(r.URL.Path, "/batch") {
+					json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{OID: oid, Actions: &Actions{Download: &Action{
+						Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + oid,
+					}}}}})
+					return
+				}
+				if strings.HasSuffix(r.URL.Path, "/leak") {
+					t.Error("redirect must never be followed")
+					return
+				}
+				http.Redirect(w, r, "/leak", http.StatusTemporaryRedirect)
+			})
+			resp, err := c.BatchDownload([]BatchObject{{OID: oid}})
+			wantHits := int32(1)
+			if !redirectBatch {
+				require.NoError(t, err)
+				_, err = DownloadObject(resp.Objects[0].Actions.Download)
+				wantHits++
+			}
+			var httpErr *HTTPError
+			require.ErrorAs(t, err, &httpErr)
+			assert.Equal(t, http.StatusTemporaryRedirect, httpErr.StatusCode)
+			assert.Equal(t, wantHits, hits.Load())
+		})
+	}
+}
+
+// Failure prevented: a canceled refresh keeps downloading LFS content past its budget.
+func TestReadLFS_ContextCancellation(t *testing.T) {
+	for _, cancelBatch := range []bool{true, false} {
+		t.Run(map[bool]string{true: "batch", false: "object"}[cancelBatch], func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			release := make(chan struct{})
+			defer close(release)
+			oid := ComputeOID([]byte("content"))
+			c, _ := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if !cancelBatch && strings.HasSuffix(r.URL.Path, "/batch") {
+					json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{OID: oid, Actions: &Actions{Download: &Action{
+						Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + oid,
+					}}}}})
+					return
+				}
+				cancel()
+				<-release
+			})
+			resp, err := c.BatchDownloadContext(ctx, nil)
+			if !cancelBatch {
+				require.NoError(t, err)
+				var out bytes.Buffer
+				err = DownloadToFileContext(ctx, resp.Objects[0].Actions.Download, &out, true, oid)
+			}
+			require.True(t, errors.Is(err, context.Canceled), "%v", err)
+		})
+	}
+}
+
+// Streaming must reject changed object identity, local write failures, oversized
+// responses, and lost authorization without publishing unchecked bytes.
+func TestReadLFS_StreamingFailureBoundaries(t *testing.T) {
+	content := []byte(strings.Repeat("verified-content", 8))
+	oid := ComputeOID(content)
+	var status atomic.Int32
+	status.Store(http.StatusOK)
+	var hits atomic.Int32
+	c, server := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{OID: oid, Actions: &Actions{Download: &Action{
+				Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + oid,
+			}}}}})
+			return
+		}
+		w.WriteHeader(int(status.Load()))
+		w.Write(content)
+	})
+	resp, err := c.BatchDownload([]BatchObject{{OID: oid}})
+	require.NoError(t, err)
+	action := resp.Objects[0].Actions.Download
+	t.Run("invalid constructor authority", func(t *testing.T) {
+		_, err := NewReadClient(c.readEndpoint, c.readRepoID, "https://foreign.example/ledger.git")
+		require.Error(t, err)
+	})
+	t.Run("missing current token", func(t *testing.T) {
+		t.Setenv("SAGEOX_TOKEN", "")
+		_, err := NewReadClient(c.readEndpoint, c.readRepoID, c.readURL)
+		require.ErrorIs(t, err, auth.ErrReadTokenUnavailable)
+		err = DownloadToFileContext(context.Background(), action, io.Discard, true, oid)
+		require.ErrorIs(t, err, auth.ErrReadTokenUnavailable)
+	})
+	t.Run("invalid destination or action", func(t *testing.T) {
+		require.Error(t, DownloadToFile(action, nil, true, oid))
+		require.Error(t, DownloadToFile(nil, io.Discard, true, oid))
+		invalid := *action
+		invalid.Href = "https://%zz"
+		require.Error(t, DownloadToFile(&invalid, io.Discard, true, oid))
+	})
+	t.Run("mismatched grant", func(t *testing.T) {
+		before := hits.Load()
+		err := DownloadToFileContext(context.Background(), action, io.Discard, true, strings.Repeat("0", 64))
+		require.ErrorContains(t, err, "does not match expected OID")
+		require.Equal(t, before, hits.Load())
+	})
+	t.Run("destination failure", func(t *testing.T) {
+		r, w := io.Pipe()
+		require.NoError(t, r.CloseWithError(io.ErrClosedPipe))
+		defer w.Close()
+		err := DownloadToFileContext(context.Background(), action, w, true, oid)
+		require.ErrorIs(t, err, io.ErrClosedPipe)
+	})
+	t.Run("oversized object", func(t *testing.T) {
+		t.Setenv("OX_LFS_MAX_OBJECT_SIZE", "8")
+		err := DownloadToFile(action, io.Discard, true, oid)
+		require.ErrorContains(t, err, "exceeded maximum size")
+	})
+	t.Run("revoked between grant and download", func(t *testing.T) {
+		status.Store(http.StatusUnauthorized)
+		defer status.Store(http.StatusOK)
+		err := DownloadToFileContext(context.Background(), action, io.Discard, true, oid)
+		var httpErr *HTTPError
+		require.ErrorAs(t, err, &httpErr)
+		require.Equal(t, http.StatusUnauthorized, httpErr.StatusCode)
+	})
+	t.Run("lost connection", func(t *testing.T) {
+		server.Close()
+		err := DownloadToFileContext(context.Background(), action, io.Discard, true, oid)
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), action.Href)
+	})
+}
+
+// TestBatch_HTTPFailureKind files a rejected batch request for usage
+// telemetry.
+// Failure prevented: an LFS upload or download refused for its credentials
+// counted as an unexplained failure instead of an auth one.
+func TestBatch_HTTPFailureKind(t *testing.T) {
+	tests := []struct {
+		status int
+		kind   errkind.Kind
+	}{
+		{http.StatusUnauthorized, errkind.Auth},
+		{http.StatusForbidden, errkind.Auth},
+		{http.StatusInternalServerError, errkind.Other},
+	}
+	for _, tt := range tests {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(tt.status)
+			_, _ = w.Write([]byte("refused for user@example.com"))
+		}))
+		c := &Client{batchURL: server.URL, httpClient: server.Client(), authHeader: "Basic dGVzdDp0b2tlbg=="}
+		_, err := c.BatchDownload([]BatchObject{{OID: "abc", Size: 10}})
+		server.Close()
+		require.Error(t, err)
+		assert.Equal(t, tt.kind, errkind.Of(err), "HTTP %d", tt.status)
+		assert.Equal(t, fmt.Sprintf("LFS batch API HTTP %d", tt.status), errkind.DetailOf(err))
+		assert.Contains(t, err.Error(), "refused for user@example.com", "the message a person sees is unchanged")
+	}
+}
+
+// A revoked PAT triggers one forced refresh; a revoked bearer returns the operator's remedy.
+func TestLFSRefreshesRejectedCredentials(t *testing.T) {
+	for _, outcome := range []string{"repaired", "bearer rejected", "empty PAT"} {
+		t.Run(outcome, func(t *testing.T) {
+			prevDir := gitserver.TestSetConfigDirOverride(t.TempDir())
+			prevFile := gitserver.TestSetForceFileStorage(true)
+			t.Cleanup(func() {
+				gitserver.TestSetConfigDirOverride(prevDir)
+				gitserver.TestSetForceFileStorage(prevFile)
+			})
+			var refreshCalls, batchCalls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/cli/repos" {
+					refreshCalls.Add(1)
+					assert.Equal(t, "Bearer oxt_test_1ljPfr", r.Header.Get("Authorization"))
+					if outcome == "bearer rejected" {
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+					if outcome == "empty PAT" {
+						io.WriteString(w, `{}`)
+						return
+					}
+					json.NewEncoder(w).Encode(api.ReposResponse{Token: "fresh-pat", ExpiresAt: time.Now().Add(24 * time.Hour)})
+					return
+				}
+				batchCalls.Add(1)
+				username, token, _ := r.BasicAuth()
+				assert.Equal(t, "oauth2", username)
+				if token == "old-pat" {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				assert.Equal(t, "fresh-pat", token)
+				var request batchRequest
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+				assert.Equal(t, "upload", request.Operation, "retry retains the request body")
+				assert.Equal(t, []BatchObject{{OID: "abc", Size: 3}}, request.Objects)
+				io.WriteString(w, `{"objects":[]}`)
+			}))
+			defer srv.Close()
+			t.Setenv(endpoint.EnvVar, srv.URL)
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			t.Setenv(auth.EnvVarToken, "oxt_test_1ljPfr")
+			require.NoError(t, gitserver.SaveCredentialsForEndpoint(srv.URL, gitserver.GitCredentials{
+				Token: "old-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
+				BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
+			}))
+			client, err := NewClientForEndpoint(context.Background(), srv.URL+"/ledger.git", srv.URL)
+			require.NoError(t, err)
+			_, err = client.BatchUpload([]BatchObject{{OID: "abc", Size: 3}})
+			assert.EqualValues(t, 1, refreshCalls.Load())
+			switch outcome {
+			case "bearer rejected":
+				require.ErrorIs(t, err, api.ErrUnauthorized)
+				assert.Contains(t, err.Error(), "rotate or re-mint")
+				assert.NotContains(t, err.Error(), "ox login")
+				assert.EqualValues(t, 1, batchCalls.Load())
+			case "empty PAT":
+				require.ErrorContains(t, err, "empty token")
+				assert.EqualValues(t, 1, batchCalls.Load(), "an invalid PAT must never be retried")
+			case "repaired":
+				require.NoError(t, err)
+				assert.EqualValues(t, 2, batchCalls.Load())
+				// A reused client must also handle logout without dereferencing a missing cache.
+				t.Setenv(auth.EnvVarToken, "")
+				require.NoError(t, gitserver.RemoveCredentialsForEndpoint(srv.URL))
+				_, err = client.BatchUpload(nil)
+				require.ErrorContains(t, err, "no git credentials found")
+				for _, emptyCache := range []bool{false, true} {
+					if emptyCache {
+						require.NoError(t, gitserver.SaveCredentialsForEndpoint(srv.URL, gitserver.GitCredentials{}))
+					}
+					_, err = NewClientForEndpoint(context.Background(), srv.URL+"/ledger.git", srv.URL)
+					require.Error(t, err)
+					assert.Equal(t, errkind.NotLoggedIn, errkind.Of(err))
+				}
+				t.Setenv(auth.EnvVarToken, "oxt_invalid")
+				_, err = NewClientForEndpoint(context.Background(), srv.URL+"/ledger.git", srv.URL)
+				require.ErrorContains(t, err, "SAGEOX_TOKEN")
+			}
+			if outcome != "repaired" {
+				creds, loadErr := gitserver.LoadCredentialsForEndpoint(srv.URL)
+				require.NoError(t, loadErr)
+				assert.Equal(t, "old-pat", creds.Token, "failed refresh must preserve cached credentials")
+			}
+		})
+	}
+}
+
+// Failure prevented: an endpoint's Git PAT is sent for a repo on another host,
+// or refused for the git server the SageOx API named for it.
+func TestNewClientForEndpointOnlyTrustsItsGitServer(t *testing.T) {
+	prevDir := gitserver.TestSetConfigDirOverride(t.TempDir())
+	prevFile := gitserver.TestSetForceFileStorage(true)
+	t.Cleanup(func() {
+		gitserver.TestSetConfigDirOverride(prevDir)
+		gitserver.TestSetForceFileStorage(prevFile)
+	})
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv(auth.EnvVarToken, "")
+	const ep = "https://sageox.ai"
+	require.NoError(t, gitserver.SaveCredentialsForEndpoint(ep, gitserver.GitCredentials{
+		Token: "pat", ExpiresAt: time.Now().Add(time.Hour), ServerURL: "http://10.0.0.5:8929",
+	}))
+
+	_, err := NewClientForEndpoint(context.Background(), "http://10.0.0.5:8929/team/ledger.git", ep)
+	require.NoError(t, err, "the server the API named is the PAT's git server")
+
+	_, err = NewClientForEndpoint(context.Background(), "https://github.com/acme/app.git", ep)
+	require.ErrorContains(t, err, "github.com, which is not its git server")
+}
+
+// Failure prevented: OAuth or JWT refresh ignores cancellation or saves fallback credentials.
+func TestLFSBatchCancelsCredentialRefresh(t *testing.T) {
+	for _, stage := range []string{"OAuth", "JWT"} {
+		t.Run(stage, func(t *testing.T) {
+			prevDir := gitserver.TestSetConfigDirOverride(t.TempDir())
+			prevFile := gitserver.TestSetForceFileStorage(true)
+			t.Cleanup(func() {
+				gitserver.TestSetConfigDirOverride(prevDir)
+				gitserver.TestSetForceFileStorage(prevFile)
+			})
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			t.Setenv(auth.EnvVarToken, "oxt_test_1ljPfr")
+			blockedPath := auth.TokenEndpoint
+			if stage == "JWT" {
+				blockedPath = "/api/v1/cli/auth/token"
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			var batchCalls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == blockedPath {
+					_, _ = io.Copy(io.Discard, r.Body)
+					cancel()
+					select {
+					case <-r.Context().Done():
+					case <-time.After(time.Second):
+						t.Error("credential refresh ignored caller cancellation")
+					}
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				if r.URL.Path == auth.TokenEndpoint {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"access_token": "refreshed-opaque", "expires_in": 3600,
+					})
+					return
+				}
+				batchCalls.Add(1)
+				w.WriteHeader(http.StatusUnauthorized)
+			}))
+			t.Cleanup(srv.Close)
+			t.Setenv(endpoint.EnvVar, srv.URL)
+			require.NoError(t, gitserver.SaveCredentialsForEndpoint(srv.URL, gitserver.GitCredentials{
+				Token: "old-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
+				BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
+			}))
+			client, err := NewClientForEndpoint(context.Background(), srv.URL+"/ledger.git", srv.URL)
+			require.NoError(t, err)
+			t.Setenv(auth.EnvVarToken, "")
+			require.NoError(t, auth.SaveTokenForEndpoint(srv.URL, &auth.StoredToken{
+				AccessToken: "expired-jwt", RefreshToken: "valid-refresh",
+				ExpiresAt: time.Now().Add(-time.Hour),
+			}))
+
+			_, err = client.BatchUploadContext(ctx, []BatchObject{{OID: "abc", Size: 3}})
+			require.ErrorIs(t, err, context.Canceled)
+			require.Zero(t, batchCalls.Load())
+			creds, err := gitserver.LoadCredentialsForEndpoint(srv.URL)
+			require.NoError(t, err)
+			require.Equal(t, "old-pat", creds.Token, "cancellation must preserve the PAT cache")
+			token, err := auth.GetTokenForEndpoint(srv.URL)
+			require.NoError(t, err)
+			require.Equal(t, "expired-jwt", token.AccessToken, "canceled JWT exchange must not save an opaque fallback")
+		})
+	}
 }

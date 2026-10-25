@@ -99,14 +99,23 @@ func (r *SubagentRegistry) Register(session *SubagentSession) error {
 	}
 
 	// append to JSONL file
-	f, err := os.OpenFile(r.registryPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	f, err := os.OpenFile(r.registryPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return fmt.Errorf("open subagents registry file=%s: %w", r.registryPath, err)
 	}
 	defer f.Close()
 
-	encoder := json.NewEncoder(f)
-	if err := encoder.Encode(session); err != nil {
+	// Completion summaries are free-form session content, so metadata framing
+	// cannot bypass the same mandatory guard used for recorded turns.
+	if err := f.Chmod(0600); err != nil {
+		return fmt.Errorf("secure subagent registry: %w", err)
+	}
+	writer, err := NewRawStreamWriter(f, "")
+	if err != nil {
+		return fmt.Errorf("subagent redaction policy: %w", err)
+	}
+	defer writer.Close()
+	if err := writer.WriteValue(session); err != nil {
 		return fmt.Errorf("encode subagent session: %w", err)
 	}
 

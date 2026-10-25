@@ -1,0 +1,169 @@
+package main
+
+import (
+	"fmt"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+// checkOxIgnoreRules keeps the ox-managed ignore block present and effective.
+//
+// It verifies with `git check-ignore` rather than by searching the file for a
+// pattern, because only git knows the answer: a later negation, a nested ignore
+// file, or a different pattern spelling all change the outcome, and a string
+// search sees none of them.
+// checkOxIgnoreRules resolves the repository from the process working directory and
+// delegates. The split exists so the logic can be driven against a scratch
+// repository in tests: the cwd binding is untestable AND hazardous — a test that
+// ran the cwd form once operated on the developer's own checkout and removed
+// tracked files from it.
+func checkOxIgnoreRules(fix bool) checkResult {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return SkippedCheck("ox ignore rules", "not in git repo", "")
+	}
+	return checkOxIgnoreRulesIn(gitRoot, fix)
+}
+
+func checkOxIgnoreRulesIn(gitRoot string, fix bool) checkResult {
+
+	// Representative paths for every reserved namespace ox projects into each
+	// agent directory. Checking only ox-cli-* lets a broken team rule report
+	// healthy while Team Skills and Team Rules leak into git status.
+	//
+	// Both namespace shapes are probed. Team content projects under the "-team"
+	// SUFFIX now, and a repository upgrading from the "sageox-team-" prefix still
+	// holds files under the old one until reconcile sweeps them — a check that
+	// probed only the new shape would call that repository healthy while its old
+	// files sat visible in `git status`.
+	probes := map[string][]string{
+		".claude": {
+			".claude/skills/ox-cli-probe/SKILL.md",
+			".claude/skills/probe-team/SKILL.md",
+			".claude/rules/probe-team.md",
+			".claude/skills/sageox-team-probe/SKILL.md",
+			".claude/rules/sageox-team-probe.md",
+		},
+		".agents": {
+			".agents/skills/ox-cli-probe/SKILL.md",
+			".agents/skills/probe-team/SKILL.md",
+			".agents/skills/sageox-team-probe/SKILL.md",
+		},
+		".factory": {
+			".factory/rules/ox-cli.md",
+			".factory/rules/probe-team.md",
+			".factory/rules/sageox-team-probe.md",
+		},
+		".cursor": {".cursor/rules/probe-team.mdc", ".cursor/rules/sageox-team-probe.mdc"},
+		".github/instructions": {
+			".github/instructions/probe-team.md",
+			".github/instructions/sageox-team-probe.md",
+		},
+		".clinerules": {".clinerules/probe-team.md", ".clinerules/sageox-team-probe.md"},
+		".kiro":       {".kiro/steering/probe-team.md", ".kiro/steering/sageox-team-probe.md"},
+		".windsurf":   {".windsurf/rules/probe-team.md", ".windsurf/rules/sageox-team-probe.md"},
+	}
+
+	var broken []string
+	for _, f := range scopedIgnoreFiles() {
+		dirProbes, ok := probes[f.Dir]
+		if !ok {
+			continue
+		}
+		if !dirExists(filepath.Join(gitRoot, f.Dir)) {
+			continue
+		}
+		for _, probe := range dirProbes {
+			if !gitPathIsIgnored(gitRoot, probe) {
+				broken = append(broken, f.Dir)
+				break
+			}
+		}
+	}
+	if len(broken) == 0 {
+		return PassedCheck("ox ignore rules", "ox-managed files are ignored")
+	}
+
+	summary := fmt.Sprintf("ox files are not ignored in %s", strings.Join(broken, ", "))
+	if !fix {
+		return FailedCheck("ox ignore rules", summary, "Run `ox doctor --fix` to restore the ox-managed ignore block")
+	}
+	if _, err := ensureScopedIgnoreFiles(gitRoot); err != nil {
+		return FailedCheck("ox ignore rules", summary, fmt.Sprintf("Fix failed: %v", err))
+	}
+
+	var stillBroken []string
+	for _, dir := range broken {
+		for _, probe := range probes[dir] {
+			if !gitPathIsIgnored(gitRoot, probe) {
+				stillBroken = append(stillBroken, dir)
+				break
+			}
+		}
+	}
+	if len(stillBroken) > 0 {
+		// The block is present but something else overrides it — most often a
+		// negation the user wrote. ox reports that; it does not fight the user's
+		// own rules.
+		return WarningCheck("ox ignore rules",
+			fmt.Sprintf("ox files are still not ignored in %s", strings.Join(stillBroken, ", ")),
+			"A rule in your own .gitignore may be overriding the ox-managed block; ox will not edit your rules")
+	}
+	return PassedCheck("ox ignore rules", "restored the ox-managed ignore block")
+}
+
+// checkOxFilesNotTracked reports reserved-prefix paths that are in the index.
+//
+// Reported, never auto-fixed: removing a path from the index is a commit-shaped
+// act, and the one commit ox is willing to write is the guarded migration.
+func checkOxFilesNotTracked(fix bool) checkResult {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return SkippedCheck("ox files untracked", "not in git repo", "")
+	}
+	return checkOxFilesNotTrackedIn(gitRoot, fix)
+}
+
+func checkOxFilesNotTrackedIn(gitRoot string, fix bool) checkResult {
+	_ = fix
+	migration, err := planLegacyMigration(gitRoot)
+	if err != nil {
+		return WarningCheck("ox files untracked", "cannot inspect tracked ox files", err.Error())
+	}
+	n := len(migration.uncache) + len(migration.remove)
+	if n == 0 {
+		return PassedCheck("ox files untracked", "no ox-managed files are tracked")
+	}
+	return WarningCheck("ox files untracked",
+		fmt.Sprintf("%d ox-managed file(s) are tracked in git", n),
+		"Run `ox doctor --fix` — the `Legacy ox files` check untracks them in one revertable commit")
+}
+
+func gitPathIsIgnored(repoRoot, rel string) bool {
+	// --no-index matters: without it git reports a TRACKED path as not-ignored no
+	// matter what the rules say, so during the migration window — exactly when this
+	// check is most useful — it would report the rules broken.
+	cmd := exec.Command("git", "check-ignore", "--no-index", "-q", "--", rel)
+	cmd.Dir = repoRoot
+	return cmd.Run() == nil
+}
+
+func init() {
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugOxIgnoreRules,
+		Name:        "ox ignore rules",
+		Category:    "Integration",
+		FixLevel:    FixLevelAuto,
+		Description: "Keeps ox-managed skills and rules out of git",
+		Run:         checkOxIgnoreRules,
+	})
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugOxFilesUntracked,
+		Name:        "ox files untracked",
+		Category:    "Integration",
+		FixLevel:    FixLevelCheckOnly,
+		Description: "Reports ox-managed files still tracked in git",
+		Run:         checkOxFilesNotTracked,
+	})
+}

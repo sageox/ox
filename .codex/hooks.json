@@ -1,0 +1,77 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=codex ox agent hook PostToolUse 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=codex ox agent hook PreToolUse 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=codex ox agent hook SessionEnd 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=codex ox agent hook SessionStart 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi",
+            "statusMessage": "Loading SageOx context",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=codex ox agent hook Stop 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=codex ox agent hook UserPromptSubmit 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

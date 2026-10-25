@@ -359,9 +359,9 @@ func TestImportDedup_SameContentDifferentFilename(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(docDir, "metadata.json"), metaData, 0o644))
 
 	// dedup should find existing doc by OID regardless of original filename
-	docID, found := findExistingDocByOID(dir, ref.OID)
+	metaPath, found := findExistingDocByOID(dir, ref.OID)
 	assert.True(t, found, "should find existing doc by OID")
-	assert.Equal(t, existingID, docID)
+	assert.Equal(t, filepath.Join(docDir, "metadata.json"), metaPath)
 }
 
 // --- LFS FileRef tests ---

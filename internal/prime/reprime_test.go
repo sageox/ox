@@ -115,3 +115,61 @@ func TestShouldCompactReprime(t *testing.T) {
 		})
 	}
 }
+
+// TestPreCompactForcesFullReprime pins the regression that shipped a PR with a
+// SageOx-Session trailer but no `ox pr header` credit line and no saved plan.
+//
+// Claude Code fires PreCompact as its own event and leaves `source` empty
+// (agentx.HookInput: "Source only for session start/end"). Reading source alone
+// answered "not a force signal" at the exact moment the context window was
+// about to be wiped, so ox emitted the compact delta — which deliberately omits
+// the static-instructions block where the PR-header guidance and the hidden
+// `ox plan save` command are taught. The trailer survived because it rides
+// session state, re-emitted every prime; its top-of-body counterpart did not.
+func TestPreCompactForcesFullReprime(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name          string
+		primeCalls    int
+		hookEventName string
+		hookSource    string
+		wantCompact   bool
+	}{
+		{"precompact with empty source still forces full", 4, "PreCompact", "", false},
+		{"precompact ignores a stale source value", 4, "PreCompact", "resume", false},
+		{"sessionstart compact forces full", 4, "SessionStart", "compact", false},
+		{"sessionstart clear forces full", 4, "SessionStart", "clear", false},
+		{"first prime is always full", 1, "PreCompact", "", false},
+		// The tier still exists: a redundant same-window re-invocation is the
+		// case it was built for, and must keep getting the delta.
+		{"redundant direct re-invocation stays compact", 4, "", "", true},
+		{"routine sessionstart resume stays compact", 4, "SessionStart", "resume", true},
+		{"userpromptsubmit stays compact", 4, "UserPromptSubmit", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ShouldCompactReprimeForEvent(tc.primeCalls, tc.hookEventName, tc.hookSource)
+			if got != tc.wantCompact {
+				t.Errorf("ShouldCompactReprimeForEvent(%d, %q, %q) = %v, want %v",
+					tc.primeCalls, tc.hookEventName, tc.hookSource, got, tc.wantCompact)
+			}
+		})
+	}
+}
+
+// TestShouldCompactReprimeKeepsTwoArgBehaviour pins the legacy wrapper: a caller
+// with only a source must behave exactly as before.
+func TestShouldCompactReprimeKeepsTwoArgBehaviour(t *testing.T) {
+	t.Parallel()
+
+	if ShouldCompactReprime(4, "compact") {
+		t.Error("source=compact must still force a full preamble")
+	}
+	if !ShouldCompactReprime(4, "resume") {
+		t.Error("source=resume must still take the compact tier")
+	}
+	if ShouldCompactReprime(1, "") {
+		t.Error("a first prime must still be full")
+	}
+}

@@ -1,13 +1,18 @@
 package auth
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -435,6 +440,274 @@ func TestRevokeTokenStatus_ServerFailed(t *testing.T) {
 	tok, err := client.GetToken()
 	assert.NoError(t, err)
 	assert.Nil(t, tok)
+}
+
+// TestRevokeTokenStatus_LocalRemovalFailureKeepsServerAnswer verifies a failure
+// to remove the local copy is told apart from a failure to revoke.
+// Failure prevented: with an unreadable auth.json, a revocation the server
+// confirmed came back as a bare error, so `ox logout` said "Failed to logout"
+// and "server-side sessions may still be active" about a revoked token.
+// The negative control: when the token cannot even be loaded, nothing reached
+// the server, and the error must not claim otherwise.
+func TestRevokeTokenStatus_LocalRemovalFailureKeepsServerAnswer(t *testing.T) {
+	var revocations atomic.Int32
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		revocations.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockServer.Close()
+	t.Setenv("SAGEOX_ENDPOINT", mockServer.URL)
+
+	for _, tt := range []struct {
+		name            string
+		envToken        string
+		wantStatus      RevocationStatus
+		wantLocalOnly   bool
+		wantRevocations int32
+	}{
+		{name: "server confirmed, local copy could not be removed", envToken: "oxp_test_4bDZfN", wantStatus: RevocationSuccess, wantLocalOnly: true, wantRevocations: 1},
+		{name: "token could not be loaded, nothing was revoked", wantStatus: RevocationServerFailed},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			revocations.Store(0)
+			t.Setenv(EnvVarToken, tt.envToken)
+			tmpDir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "auth.json"), []byte("not-json"), 0o600))
+
+			client := NewAuthClientWithDir(tmpDir)
+			client.endpoint = mockServer.URL
+
+			status, err := client.RevokeTokenStatus()
+			require.Error(t, err, "an unreadable auth.json must be reported")
+			assert.Equal(t, tt.wantStatus, status)
+			assert.Equal(t, tt.wantLocalOnly, errors.Is(err, ErrLocalTokenNotRemoved), "error: %v", err)
+			assert.Equal(t, tt.wantRevocations, revocations.Load())
+		})
+	}
+}
+
+// TestRevokeTokenStatus_PreservesStoredLoginWhenLookupFails verifies a stored
+// login that could not be read is kept, not deleted unrevoked.
+// Failure prevented: the lookup of the login SAGEOX_TOKEN shadows timed out on
+// the auth lock and was skipped, then RemoveToken got the lock and deleted that
+// login, leaving its refresh token live on the server with nothing to retry.
+func TestRevokeTokenStatus_PreservesStoredLoginWhenLookupFails(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits out the auth file lock timeout")
+	}
+	const envToken, storedToken = "oxp_test_4bDZfN", "stored-refresh"
+	var mu sync.Mutex
+	var revoked []string
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		mu.Lock()
+		revoked = append(revoked, r.PostForm.Get("token"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockServer.Close()
+	t.Setenv(EnvVarToken, envToken)
+	t.Setenv("SAGEOX_ENDPOINT", mockServer.URL)
+
+	client := NewAuthClientWithDir(t.TempDir())
+	client.endpoint = mockServer.URL
+	require.NoError(t, client.SaveToken(&StoredToken{
+		AccessToken: "stored-access", RefreshToken: storedToken, ExpiresAt: time.Now().Add(time.Hour),
+	}))
+
+	authPath, err := client.GetAuthFilePath()
+	require.NoError(t, err)
+	lock := flock.New(authPath + ".lock")
+	locked, err := lock.TryLock()
+	require.NoError(t, err)
+	require.True(t, locked)
+
+	unlock := make(chan error, 1)
+	go func() {
+		// Hold beyond authLockTimeout so the stored-token lookup fails, then
+		// release before RemoveToken's next lock attempt can run.
+		time.Sleep(authLockTimeout + 250*time.Millisecond)
+		unlock <- lock.Unlock()
+	}()
+
+	status, revokeErr := client.RevokeTokenStatus()
+	require.NoError(t, <-unlock)
+
+	assert.Equal(t, RevocationSuccess, status)
+	require.ErrorIs(t, revokeErr, ErrLocalTokenNotRemoved, "lookup failure must stop local removal")
+	mu.Lock()
+	assert.Equal(t, []string{envToken}, revoked, "the stored token could not be read and must not be silently discarded")
+	mu.Unlock()
+
+	t.Setenv(EnvVarToken, "")
+	stored, err := client.GetToken()
+	require.NoError(t, err)
+	assert.Equal(t, storedToken, stored.RefreshToken, "the stored login must remain available for retry")
+}
+
+// TestRevokeTokenStatus_SharedEndpointRevokesEveryCredential verifies logout
+// revokes a stored login that SAGEOX_TOKEN shadows on the same endpoint.
+// Failure prevented: only the env token was revoked, then the stored login was
+// deleted from disk unrevoked, so its refresh token stayed live on the server
+// with no local copy left to retry, while logout reported success.
+// The negative control: a single credential is revoked once, not twice.
+func TestRevokeTokenStatus_SharedEndpointRevokesEveryCredential(t *testing.T) {
+	const envToken, storedRefresh = "oxp_test_4bDZfN", "stored-refresh"
+	var mu sync.Mutex
+	var revoked []string
+	rejectStored := false
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		mu.Lock()
+		revoked = append(revoked, r.PostForm.Get("token"))
+		reject := rejectStored && r.PostForm.Get("token") == storedRefresh
+		mu.Unlock()
+		if reject {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockServer.Close()
+	t.Setenv("SAGEOX_ENDPOINT", mockServer.URL)
+
+	for _, tt := range []struct {
+		name         string
+		envToken     string
+		rejectStored bool
+		wantRevoked  []string
+		wantStatus   RevocationStatus
+	}{
+		{name: "env token and stored login are both revoked", envToken: envToken, wantRevoked: []string{envToken, storedRefresh}, wantStatus: RevocationSuccess},
+		{name: "a stored login the server rejects is reported unconfirmed", envToken: envToken, rejectStored: true, wantRevoked: []string{envToken, storedRefresh}, wantStatus: RevocationServerFailed},
+		{name: "a single credential is revoked once", wantRevoked: []string{storedRefresh}, wantStatus: RevocationSuccess},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mu.Lock()
+			revoked, rejectStored = nil, tt.rejectStored
+			mu.Unlock()
+			t.Setenv(EnvVarToken, tt.envToken)
+
+			client := NewAuthClientWithDir(t.TempDir())
+			client.endpoint = mockServer.URL
+			require.NoError(t, client.SaveToken(&StoredToken{
+				AccessToken: "stored-access", RefreshToken: storedRefresh, ExpiresAt: time.Now().Add(time.Hour),
+			}))
+
+			status, err := client.RevokeTokenStatus()
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantStatus, status)
+			mu.Lock()
+			assert.ElementsMatch(t, tt.wantRevoked, revoked, "every distinct credential on the endpoint must reach the server once")
+			mu.Unlock()
+
+			t.Setenv(EnvVarToken, "")
+			stored, err := client.GetToken()
+			require.NoError(t, err)
+			assert.Nil(t, stored, "the stored login must be removed after revocation")
+		})
+	}
+}
+
+// TestRevokeTokenStatus_KeepsLoginSavedDuringRevocation verifies logout deletes
+// only the stored login it revoked.
+// Failure prevented: a concurrent `ox login` or daemon token refresh saved a new
+// login while logout waited on the server, then logout deleted it unrevoked, so
+// its refresh token stayed live on the server with no local copy left to revoke.
+// The negative controls: an unchanged login is still deleted, a login refreshed
+// before the re-read is revoked too, and a login another process already
+// removed is not reported as changed.
+func TestRevokeTokenStatus_KeepsLoginSavedDuringRevocation(t *testing.T) {
+	const envToken = "oxp_test_4bDZfN"
+	login := func(name string) *StoredToken {
+		return &StoredToken{AccessToken: name + "-access", RefreshToken: name + "-refresh", ExpiresAt: time.Now().Add(time.Hour)}
+	}
+	saveLogin := func(name string) func(*AuthClient) error {
+		return func(c *AuthClient) error { return c.SaveToken(login(name)) }
+	}
+	removeLogin := func(c *AuthClient) error { return c.RemoveToken() }
+
+	var mu sync.Mutex
+	var revoked []string
+	var client *AuthClient
+	var onRevoke map[string]func(*AuthClient) error
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, r.ParseForm())
+		tok := r.PostForm.Get("token")
+		mu.Lock()
+		revoked = append(revoked, tok)
+		change, c := onRevoke[tok], client
+		mu.Unlock()
+		// Change auth.json while this revocation is in flight, as a concurrent
+		// `ox login` or daemon token refresh would.
+		if change != nil {
+			assert.NoError(t, change(c))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockServer.Close()
+	t.Setenv("SAGEOX_ENDPOINT", mockServer.URL)
+
+	for _, tt := range []struct {
+		name        string
+		envToken    string
+		onRevoke    map[string]func(*AuthClient) error
+		wantRevoked []string
+		wantKept    string // refresh token of the login left on disk; "" for none
+		wantChanged bool
+	}{
+		{
+			name: "login saved while the shadowed login is revoked is kept", envToken: envToken,
+			onRevoke:    map[string]func(*AuthClient) error{"s1-refresh": saveLogin("s2")},
+			wantRevoked: []string{envToken, "s1-refresh"}, wantKept: "s2-refresh", wantChanged: true,
+		},
+		{
+			name:        "login refreshed while its refreshed copy is revoked is kept",
+			onRevoke:    map[string]func(*AuthClient) error{"s1-refresh": saveLogin("s2"), "s2-refresh": saveLogin("s3")},
+			wantRevoked: []string{"s1-refresh", "s2-refresh"}, wantKept: "s3-refresh", wantChanged: true,
+		},
+		{
+			name:        "login refreshed before the re-read is revoked and deleted",
+			onRevoke:    map[string]func(*AuthClient) error{"s1-refresh": saveLogin("s2")},
+			wantRevoked: []string{"s1-refresh", "s2-refresh"},
+		},
+		{name: "unchanged login is deleted", envToken: envToken, wantRevoked: []string{envToken, "s1-refresh"}},
+		{
+			name: "login removed meanwhile is not a change", envToken: envToken,
+			onRevoke:    map[string]func(*AuthClient) error{"s1-refresh": removeLogin},
+			wantRevoked: []string{envToken, "s1-refresh"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(EnvVarToken, tt.envToken)
+			c := NewAuthClientWithDir(t.TempDir())
+			c.endpoint = mockServer.URL
+			require.NoError(t, c.SaveToken(login("s1")))
+			mu.Lock()
+			revoked, client, onRevoke = nil, c, tt.onRevoke
+			mu.Unlock()
+
+			status, err := c.RevokeTokenStatus()
+
+			t.Setenv(EnvVarToken, "")
+			stored, getErr := c.GetToken()
+			require.NoError(t, getErr)
+			if tt.wantKept == "" {
+				assert.Nil(t, stored, "the revoked login must be removed")
+			} else if assert.NotNil(t, stored, "a login saved during logout was deleted without being revoked") {
+				assert.Equal(t, tt.wantKept, stored.RefreshToken, "the login saved during logout must survive")
+			}
+			assert.Equal(t, RevocationSuccess, status, "the server's answer must survive a kept login")
+			mu.Lock()
+			assert.Equal(t, tt.wantRevoked, revoked)
+			mu.Unlock()
+			assert.Equal(t, tt.wantChanged, errors.Is(err, ErrLoginChanged), "error: %v", err)
+			assert.Equal(t, tt.wantChanged, errors.Is(err, ErrLocalTokenNotRemoved), "error: %v", err)
+			if !tt.wantChanged {
+				assert.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestRevokeTokenStatus_NetworkError(t *testing.T) {

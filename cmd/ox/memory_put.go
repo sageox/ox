@@ -31,7 +31,8 @@ var memoryPutCmd = &cobra.Command{
 	Short: "Record an observation into team memory",
 	Long: `Record an observation into the team context memory pipeline.
 
-Observations are written locally and synced to the server by the daemon.
+Observations are committed to the team context on this machine;
+` + "`ox memory distill`" + ` sends them to SageOx.
 Each observation must have a "content" field.
 
 Input formats:
@@ -121,8 +122,9 @@ func runMemoryPut(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// writeObservation writes observations to a team context's memory directory.
-// Used by both `ox memory put` and session-end auto-observation.
+// writeObservation writes observations to a team context's memory directory
+// and commits them. Used by both `ox memory put` and session-end
+// auto-observation.
 func writeObservation(teamContextPath string, observations []observation) error {
 	now := time.Now().UTC()
 	dateDir := now.Format("2006-01-02")
@@ -151,34 +153,76 @@ func writeObservation(teamContextPath string, observations []observation) error 
 		}
 	}
 
-	if err := facts.WriteFacts(filePath, header, factSlice); err != nil {
-		return fmt.Errorf("write observation file: %w", err)
-	}
-
-	// git add + commit
-	gitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	relPath := filepath.Join("memory", observationDirName, dateDir, filename)
-
-	// --sparse: team context repos use sparse-checkout; without this flag
-	// git refuses to stage files outside the sparse definition
-	if _, err := gitutil.RunGit(gitCtx, teamContextPath, "add", "--sparse", relPath); err != nil {
-		return fmt.Errorf("git add: %w", err)
-	}
-
 	summary := observations[0].Content
 	if len(summary) > 50 {
 		summary = summary[:50] + "..."
 	}
 	commitMsg := fmt.Sprintf("observation: %s", summary)
+	relPath := filepath.Join("memory", observationDirName, dateDir, filename)
+	pending := "memory/" + observationDirName
 
-	if _, err := gitutil.RunGit(gitCtx, teamContextPath, "commit", "-m", commitMsg); err != nil {
-		return fmt.Errorf("git commit: %w", err)
+	if err := writeObservationFile(teamContextPath, filePath, header, factSlice); err != nil {
+		return fmt.Errorf("write observation file: %w", err)
+	}
+
+	gitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Under the repo lock the daemon's team-context pull and `ox import` hold
+	// (ADR-030). The commit takes every pending observation, so one an earlier
+	// failed put left is committed by the next.
+	err = gitutil.WithRepoLock(gitCtx, teamContextPath, func() error {
+		// git run outside a checkout finds any enclosing repository
+		if !gitutil.IsGitRepo(teamContextPath) {
+			return fmt.Errorf("git add: team context %s is not a git checkout", teamContextPath)
+		}
+		// mid-rebase, a staged file is deleted by the daemon's `rebase --abort`;
+		// left unstaged it survives for the next put to commit
+		if err := gitutil.IsSafeForGitOps(teamContextPath); err != nil {
+			return fmt.Errorf("git add: team context not safe to commit: %w", err)
+		}
+		// --sparse: team context repos use sparse-checkout; without this flag
+		// git refuses to stage files outside the sparse definition
+		if _, err := gitutil.RunGit(gitCtx, teamContextPath, "add", "--sparse", "--", pending); err != nil {
+			return fmt.Errorf("git add: %w", err)
+		}
+		if _, err := gitutil.CommitLedgerSnapshot(gitCtx, teamContextPath, commitMsg, pending); err != nil {
+			return fmt.Errorf("git commit: %w", err)
+		}
+		return nil
+	})
+	if gitutil.IsRepoLockBusy(err) {
+		return fmt.Errorf("observation saved but not committed, team context busy: %w", err)
+	}
+	if err != nil {
+		return err
 	}
 
 	slog.Info("observation recorded", "file", relPath, "count", len(observations))
 	return nil
+}
+
+// writeObservationFile writes the observation complete inside .git/ and then
+// renames it into place, so a commit taking all of memory/.observations never
+// stages one half written. Outside a checkout nothing commits it, and it is
+// written in place.
+func writeObservationFile(teamContextPath, filePath string, header facts.FileHeader, fs []facts.Fact) error {
+	gitDir := filepath.Join(teamContextPath, ".git")
+	if info, err := os.Stat(gitDir); err != nil || !info.IsDir() {
+		return facts.WriteFacts(filePath, header, fs)
+	}
+	tmp := filepath.Join(gitDir, "ox-observation-"+filepath.Base(filePath))
+	if err := facts.WriteFacts(tmp, header, fs); err != nil {
+		return err
+	}
+	err := os.MkdirAll(filepath.Dir(filePath), 0o755)
+	if err == nil {
+		err = os.Rename(tmp, filePath)
+	}
+	if err != nil {
+		_ = os.Remove(tmp) // no later put would find it in .git/
+	}
+	return err
 }
 
 // parseObservations parses JSON (single object) or JSONL (one object per line).

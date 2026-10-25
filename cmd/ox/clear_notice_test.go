@@ -100,6 +100,8 @@ func TestRenderClearNotice_Suspended(t *testing.T) {
 	assert.Contains(t, got, "Paused range excluded from upload")
 	assert.Contains(t, got, "RECORDING SUSPENDED")
 	assert.Contains(t, got, "carried from previous")
+	assert.Contains(t, got, "ox agent session resume")
+	assert.Contains(t, got, "ox agent session stop")
 	assert.NotContains(t, got, "OxOxb3x9",
 		"newAgentID already carries the Ox prefix; renderer must not re-prefix")
 }

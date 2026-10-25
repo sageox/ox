@@ -1,50 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
 )
-
-func TestParseDuration(t *testing.T) {
-	tests := []struct {
-		input string
-		want  time.Duration
-		err   bool
-	}{
-		{"30m", 30 * time.Minute, false},
-		{"2h", 2 * time.Hour, false},
-		{"1d", 24 * time.Hour, false},
-		{"7d", 7 * 24 * time.Hour, false},
-		{"500ms", 500 * time.Millisecond, false},
-		{"0d", 0, true},
-		{"bad", 0, true},
-		{"d", 0, true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got, err := parseDuration(tt.input)
-			if tt.err {
-				if err == nil {
-					t.Errorf("parseDuration(%q) expected error", tt.input)
-				}
-				return
-			}
-			if err != nil {
-				t.Errorf("parseDuration(%q) error: %v", tt.input, err)
-				return
-			}
-			if got != tt.want {
-				t.Errorf("parseDuration(%q) = %v, want %v", tt.input, got, tt.want)
-			}
-		})
-	}
-}
 
 func TestMurmurListJSONOutput(t *testing.T) {
 	// set up a temp ledger with murmur files
@@ -400,5 +371,170 @@ func TestMurmurFileRoundTrip(t *testing.T) {
 	}
 	if read[0].Content != original.Content {
 		t.Errorf("Content mismatch: got %q, want %q", read[0].Content, original.Content)
+	}
+}
+
+// murmurListProject stages an initialized git project whose ledger holds one
+// murmur per age, ids m1..mN in the order given. The test chdirs into the
+// project so the command resolves it the way a user's shell would.
+func murmurListProject(t *testing.T, ages ...time.Duration) {
+	t.Helper()
+	projectRoot := t.TempDir()
+	ledgerPath := t.TempDir()
+
+	gitInit := exec.Command("git", "init", "-q")
+	gitInit.Dir = projectRoot // never touch the real repo or its identity
+	require.NoError(t, gitInit.Run(), "git init")
+
+	sageoxDir := filepath.Join(projectRoot, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"),
+		[]byte(`{"config_version":"2","repo_id":"repo_test_murmur_list"}`), 0o644))
+	require.NoError(t, config.SaveLocalConfig(projectRoot, &config.LocalConfig{
+		Ledger: &config.LedgerConfig{Path: ledgerPath},
+	}))
+
+	now := time.Now().UTC()
+	for i, age := range ages {
+		_, err := ledger.WriteMurmur(ledgerPath, ledger.MurmurFile{
+			ID:         "m" + string(rune('1'+i)),
+			Timestamp:  now.Add(-age),
+			AgentID:    "OxAbc1",
+			Topic:      "wip",
+			Importance: "normal",
+			Content:    "working on item " + string(rune('1'+i)),
+			Scope:      "ledger",
+		})
+		require.NoError(t, err)
+	}
+
+	t.Setenv(config.EnvProjectRoot, "")
+	t.Chdir(projectRoot)
+}
+
+// runMurmurListJSON drives the production flag surface and RunE under a root
+// that carries the persistent --json flag, and returns the decoded output.
+func runMurmurListJSON(t *testing.T, args ...string) (murmurListOutput, error) {
+	t.Helper()
+	root := &cobra.Command{Use: "ox", SilenceUsage: true, SilenceErrors: true}
+	root.PersistentFlags().Bool("json", false, "")
+	cmd := &cobra.Command{Use: "list [topic]", Args: cobra.MaximumNArgs(1), RunE: runMurmurList}
+	registerMurmurListFlags(cmd)
+	root.AddCommand(cmd)
+
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs(append([]string{"list", "--json"}, args...))
+	if err := root.Execute(); err != nil {
+		return murmurListOutput{}, err
+	}
+	var out murmurListOutput
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &out), "stdout must be one JSON document: %q", buf.String())
+	return out, nil
+}
+
+func murmurIDs(out murmurListOutput) []string {
+	ids := make([]string, 0, len(out.Murmurs))
+	for _, m := range out.Murmurs {
+		ids = append(ids, m.ID)
+	}
+	return ids
+}
+
+// TestMurmurList_LimitVocabulary: --limit is the canonical cap, --last the
+// hidden legacy spelling, and --limit wins when both are given.
+// Failure prevented: an agent that learned `session list --limit` types
+// `murmur list --limit 3` and gets "unknown flag", or an old script's
+// `--last` stops working.
+func TestMurmurList_LimitVocabulary(t *testing.T) {
+	// five murmurs, newest first: m1 is the most recent
+	murmurListProject(t, 10*time.Minute, 20*time.Minute, 30*time.Minute, 3*time.Hour, 5*time.Hour)
+
+	tests := []struct {
+		name      string
+		args      []string
+		wantIDs   []string
+		wantTotal int
+	}{
+		{"default cap is 10", nil, []string{"m1", "m2", "m3", "m4", "m5"}, 5},
+		{"limit caps newest first", []string{"--limit", "3"}, []string{"m1", "m2", "m3"}, 5},
+		{"last is the same cap", []string{"--last", "3"}, []string{"m1", "m2", "m3"}, 5},
+		{"limit wins over last", []string{"--limit", "2", "--last", "4"}, []string{"m1", "m2"}, 5},
+		{"limit wins whichever is typed first", []string{"--last", "2", "--limit", "4"}, []string{"m1", "m2", "m3", "m4"}, 5},
+		{"limit 0 means no limit", []string{"--limit", "0"}, []string{"m1", "m2", "m3", "m4", "m5"}, 5},
+		{"last 0 means no limit", []string{"--last", "0"}, []string{"m1", "m2", "m3", "m4", "m5"}, 5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := runMurmurListJSON(t, tt.args...)
+			require.NoError(t, err)
+			if got := murmurIDs(out); !slices.Equal(got, tt.wantIDs) {
+				t.Errorf("murmur ids = %v, want %v", got, tt.wantIDs)
+			}
+			if out.Total != tt.wantTotal {
+				t.Errorf("total = %d, want %d (the matched count, not the page size)", out.Total, tt.wantTotal)
+			}
+		})
+	}
+}
+
+// TestMurmurList_SinceUntilWindow: --since and --until bound the listing from
+// both ends with the grammar the other lists use.
+// Failure prevented: `murmur list --until 1h` is "unknown flag", or a window
+// silently ignores one of its ends.
+func TestMurmurList_SinceUntilWindow(t *testing.T) {
+	murmurListProject(t, 10*time.Minute, 20*time.Minute, 30*time.Minute, 3*time.Hour, 5*time.Hour)
+
+	tests := []struct {
+		name      string
+		args      []string
+		wantIDs   []string
+		wantTotal int
+	}{
+		{"since keeps the newer end", []string{"--since", "4h"}, []string{"m1", "m2", "m3", "m4"}, 4},
+		{"until keeps the older end, past the 12h default", []string{"--until", "1h"}, []string{"m4", "m5"}, 2},
+		{"since and until bound both ends", []string{"--since", "6h", "--until", "1h"}, []string{"m4", "m5"}, 2},
+		{"window excludes both neighbors", []string{"--since", "4h", "--until", "1h"}, []string{"m4"}, 1},
+		{"limit applies inside the window", []string{"--since", "6h", "--until", "1h", "--limit", "1"}, []string{"m4"}, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := runMurmurListJSON(t, tt.args...)
+			require.NoError(t, err)
+			if got := murmurIDs(out); !slices.Equal(got, tt.wantIDs) {
+				t.Errorf("murmur ids = %v, want %v", got, tt.wantIDs)
+			}
+			if out.Total != tt.wantTotal {
+				t.Errorf("total = %d, want %d", out.Total, tt.wantTotal)
+			}
+		})
+	}
+}
+
+// TestMurmurList_InvalidWindowIsAUsageError: a bad value names its flag and an
+// example, and an inverted window is refused rather than answered with nothing.
+func TestMurmurList_InvalidWindowIsAUsageError(t *testing.T) {
+	murmurListProject(t, 10*time.Minute)
+
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{"bad since", []string{"--since", "lately"}, []string{"--since", "lately", "2026-10-01"}},
+		{"bad until", []string{"--until", "soon"}, []string{"--until", "soon", "2026-10-01"}},
+		{"inverted window", []string{"--since", "1h", "--until", "6h"}, []string{"--since", "--until"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := runMurmurListJSON(t, tt.args...)
+			require.Error(t, err)
+			for _, want := range tt.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q lacks %q", err, want)
+				}
+			}
+		})
 	}
 }

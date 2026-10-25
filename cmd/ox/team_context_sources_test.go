@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,18 +8,6 @@ import (
 
 	"github.com/sageox/ox/internal/prime"
 )
-
-// writeTeamFile creates rel under root with content, making parents as needed.
-func writeTeamFile(t *testing.T, root, rel, content string) {
-	t.Helper()
-	path := filepath.Join(root, rel)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
 
 // doc renders a team doc with the frontmatter DiscoverDocs reads.
 func doc(title string) string {
@@ -336,5 +323,18 @@ func TestFirstRootWithPrefersTheCheckout(t *testing.T) {
 	sources.checkout = filepath.Join(t.TempDir(), "never-cloned")
 	if root, ok := firstRootWith(sources, filepath.Join("capabilities", "team", "index.md")); !ok || root != mount {
 		t.Fatalf("root = %q (found=%v), want the mount to fill the gap", root, ok)
+	}
+}
+
+// With the flag off there is one source, and the reads must be exactly what
+// the single-root code returned: no dedupe, no dropped entries, no reordering.
+func TestMergeByKeyPassesASingleSourceThroughUntouched(t *testing.T) {
+	only := []string{"b", "", "a", "b"}
+	merged, fromSecondary := mergeByKey([][]string{only}, func(s string) string { return s })
+	if fromSecondary != 0 {
+		t.Errorf("fromSecondary = %d, want 0", fromSecondary)
+	}
+	if strings.Join(merged, ",") != strings.Join(only, ",") {
+		t.Errorf("merged = %q, want %q unchanged", merged, only)
 	}
 }

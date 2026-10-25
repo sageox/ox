@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "evidence": [
+    {
+      "path": "evidence/report.html",
+      "status": "available",
+      "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "observed_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size_bytes": -1
+    }
+  ],
+  "counts": {
+    "referenced": 1,
+    "available": 1,
+    "missing": 0,
+    "invalid": 0
+  }
+}

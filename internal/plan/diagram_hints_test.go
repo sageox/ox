@@ -281,3 +281,92 @@ func TestBuildGuidance_FoldsVizHints(t *testing.T) {
 		t.Errorf("no viz hints should omit the clause: %s", g2)
 	}
 }
+
+// TestMockupExpectation_IgnoresDetailsAppendix pins the rule interaction that
+// the human-attention lint creates: it REQUIRES a collapsed <details>
+// Implementation notes appendix, that appendix carries no heading of its own so
+// its prose lands in the preceding section, and its regeneration commands
+// unavoidably say "screenshot" and "screen". Two distinct body cues is exactly
+// minVizScore, so before stripDetails the mockup expectation fired on a section
+// that changes no user-facing surface.
+//
+// Red without the fix: computeMockupExpectation returns the heading.
+func TestMockupExpectation_IgnoresDetailsAppendix(t *testing.T) {
+	in := Input{Sections: []Section{{
+		Heading: "What this does not establish",
+		Body: "Physical size and viewing distance are not reproduced here.\n" +
+			"<details><summary>Implementation notes</summary>\n" +
+			"python tools/arc-lab/device_review.py --host IP  # one screenshot per screen\n" +
+			"</details>",
+	}}}
+	if got := computeMockupExpectation(in); got != "" {
+		t.Fatalf("appendix prose drove a mockup expectation: got %q, want none", got)
+	}
+}
+
+// TestMockupExpectation_ScoresVisibleDetailsOnly pins the other half of the
+// same rule: stripDetails hides the COLLAPSED appendix, but a <details open>
+// block is content the reader can already see, so its cues must still score.
+// `open` is a boolean HTML attribute — presence is the whole test, and the
+// value is ignored — so open="" and even open="false" are expanded.
+//
+// Red without the fix: every variant returns "" because stripDetails removed
+// the block regardless of its open attribute.
+func TestMockupExpectation_ScoresVisibleDetailsOnly(t *testing.T) {
+	tests := []struct {
+		name       string
+		detailsTag string
+		want       string
+	}{
+		{"collapsed appendix is hidden detail", "<details>", ""},
+		{"open block is visible prose", "<details open>", "Rollout"},
+		{"open with empty value", `<details open="">`, "Rollout"},
+		{`open="false" is still open`, `<details open="false">`, "Rollout"},
+		// Guards a naive /\bopen\b/ over the tag text: "open" appearing inside
+		// an attribute VALUE is not the boolean attribute, so this block is
+		// still collapsed and must stay stripped.
+		{"open only inside a class value stays collapsed", `<details class="open-panel">`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			in := Input{Sections: []Section{{
+				Heading: "Rollout",
+				Body: "Rollout is staged.\n" + tt.detailsTag +
+					"<summary>Implementation notes</summary>\n" +
+					"one screenshot per screen\n</details>",
+			}}}
+			if got := computeMockupExpectation(in); got != tt.want {
+				t.Errorf("computeMockupExpectation = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMockupExpectation_SurvivesExtractForOpenDetails walks the whole seam the
+// two-file fix spans: an authored page's visible <details open> prose goes
+// through ExtractMarkdown, then Parse, then scoring. Both halves must hold —
+// extract.go must not fence it and stripDetails must not strip it — or a plan
+// that genuinely changes a user-facing surface is never told to draw a mockup.
+func TestMockupExpectation_SurvivesExtractForOpenDetails(t *testing.T) {
+	t.Parallel()
+	const page = `<html><body><h2>Rollout</h2>` +
+		`<details open><p>the onboarding screen gets a new empty state</p></details>` +
+		`</body></html>`
+
+	md := ExtractMarkdown([]byte(page))
+	if got := computeMockupExpectation(Parse(md)); got != "Rollout" {
+		t.Fatalf("visible <details open> surface lost its mockup expectation: got %q, want %q\n--- derived markdown ---\n%s", got, "Rollout", md)
+	}
+}
+
+// A genuine user-facing section must still fire — the fix must not blunt the rule.
+func TestMockupExpectation_StillFiresOnRealSurface(t *testing.T) {
+	in := Input{Sections: []Section{{
+		Heading: "Onboarding screen",
+		Body:    "The empty state needs microcopy.",
+	}}}
+	if got := computeMockupExpectation(in); got != "Onboarding screen" {
+		t.Fatalf("real surface stopped firing: got %q", got)
+	}
+}

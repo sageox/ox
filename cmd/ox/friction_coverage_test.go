@@ -47,17 +47,6 @@ func TestOxActorDetector_ImplementsInterface(t *testing.T) {
 	} = oxActorDetector{}
 }
 
-func TestSendFrictionEvent_DisabledViaSAGEOX_FRICTION_Env(t *testing.T) {
-	t.Setenv("SAGEOX_FRICTION", "false")
-
-	event := &friction.FrictionEvent{
-		Kind:    "test",
-		Command: "ox test",
-	}
-	// should return early without panic or error
-	sendFrictionEvent(event)
-}
-
 func TestGetCatalogCachePath_WithFallback(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)

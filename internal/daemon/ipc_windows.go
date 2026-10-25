@@ -60,9 +60,3 @@ func dial(path string) (net.Conn, error) {
 func cleanupSocket(path string) {
 	// no-op: Windows named pipes are automatically cleaned up when closed
 }
-
-// pipeName converts a socket path to a pipe name.
-func pipeName(path string) string {
-	// use a fixed name for simplicity
-	return "sageox-daemon"
-}

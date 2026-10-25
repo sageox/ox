@@ -72,7 +72,7 @@ func init() {
 		Check: func() bool {
 			return !hasOpenCodeHooks(false) && !hasOpenCodeHooks(true)
 		},
-		FixTip: "OpenCode detected but hooks not installed. Run `ox hooks install --opencode`.",
+		FixTip: "OpenCode detected but hooks not installed. Run `" + integrateInstallHint("opencode") + "`.",
 	})
 
 	// LOWER VALUE: Gemini CLI hooks not installed (weight 3)
@@ -84,7 +84,7 @@ func init() {
 		Check: func() bool {
 			return !hasGeminiHooks(false) && !hasGeminiHooks(true)
 		},
-		FixTip: "Gemini CLI detected but hooks not installed. Run `ox hooks install --gemini`.",
+		FixTip: "Gemini CLI detected but hooks not installed. Run `" + integrateInstallHint("gemini") + "`.",
 	})
 
 	// MEDIUM VALUE: doctor --fix hasn't been run recently (weight 5)

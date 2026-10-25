@@ -267,12 +267,12 @@ const inlineCSS = `
   --fg: #1a1d1a;
   --fg-dim: #6b7580;
   --border: #d9d3c5;
-  --primary: #4F6A48;
-  --secondary: #B87D3A;
-  --accent: #3D5437;
-  --success: #4F6A48;
-  --warning: #B87D3A;
-  --error: #A03030;
+  --primary: #3D643B;
+  --secondary: #324F31;
+  --accent: #4E7D4C;
+  --success: #3D643B;
+  --warning: #A5842F;
+  --error: #9F4838;
   --info: #5580A0;
   --mono: ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, Consolas, monospace;
   --sans: Inter, -apple-system, "Segoe UI", system-ui, sans-serif;
@@ -283,12 +283,12 @@ html[data-mode="dark"] {
   --fg: #e8e6df;
   --fg-dim: #8F99A3;
   --border: #2a2f33;
-  --primary: #7A8F78;
-  --secondary: #E0A56A;
-  --accent: #8FA888;
-  --success: #7A8F78;
-  --warning: #E0A56A;
-  --error: #E07070;
+  --primary: #7AAA77;
+  --secondary: #ADCFA3;
+  --accent: #99C693;
+  --success: #7AAA77;
+  --warning: #D9B654;
+  --error: #D77E6C;
   --info: #7FA7C8;
 }
 html[data-calm="on"] .component { border-color: transparent; box-shadow: none; }

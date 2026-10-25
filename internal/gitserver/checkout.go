@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/logger"
@@ -47,7 +49,18 @@ type CheckoutOptions struct {
 
 	// NoCheckout enables --no-checkout (skip working tree creation after clone)
 	NoCheckout bool
+
+	// Quiet enables --quiet (no progress or "Cloning into" line; errors only)
+	Quiet bool
+
+	// Output receives git's stderr: its progress and error messages. Nil
+	// streams them to os.Stderr.
+	Output io.Writer
 }
+
+// cloneInterruptGrace is how long git gets, once the clone's context ends,
+// to delete its half-written clone before it is killed.
+const cloneInterruptGrace = 5 * time.Second
 
 // DefaultCheckoutPath returns the default checkout path for a repo.
 // For ledger repos, defaults to sibling directory of the working directory.
@@ -134,11 +147,14 @@ func cloneRepo(ctx context.Context, repoURL, path string, creds *GitCredentials,
 	//     them. The auth flow already pins https://, but this is belt-and-suspenders.
 	//   - "--" before the URL stops option parsing so a hostile URL starting with
 	//     "-" is treated as positional, never as a flag.
-	args := []string{
+	//   - GitHTTPTimeoutFlags make curl abort a transfer that stops making
+	//     progress, so a dead link fails in seconds instead of holding the
+	//     clone until the caller's deadline.
+	args := append(gitutil.GitHTTPTimeoutFlags(),
 		"-c", "protocol.file.allow=never",
 		"-c", "protocol.ext.allow=never",
 		"clone",
-	}
+	)
 
 	if opts != nil {
 		if opts.PartialClone {
@@ -152,6 +168,9 @@ func cloneRepo(ctx context.Context, repoURL, path string, creds *GitCredentials,
 		}
 		if opts.NoCheckout {
 			args = append(args, "--no-checkout")
+		}
+		if opts.Quiet {
+			args = append(args, "--quiet")
 		}
 		if opts.SingleBranch {
 			args = append(args, "--single-branch")
@@ -168,6 +187,16 @@ func cloneRepo(ctx context.Context, repoURL, path string, creds *GitCredentials,
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Stderr = os.Stderr // show git progress/errors
+	if opts != nil && opts.Output != nil {
+		cmd.Stderr = opts.Output
+	}
+	// When ctx ends, interrupt git rather than kill it: on SIGINT it deletes
+	// the clone it was writing, the way it does on Ctrl-C. Killed outright,
+	// it would leave a half-written .git at path, whose HEAD points at
+	// refs/heads/.invalid. Where interrupting is unsupported (Windows) or
+	// git does not exit, WaitDelay kills it.
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = cloneInterruptGrace
 
 	if err := cmd.Run(); err != nil {
 		// sanitize args to prevent credential leaks in error messages

@@ -1,5 +1,9 @@
 name: Coverage
 
+# PRs are covered by the CI workflow's test job, which runs these same suites
+# once, instrumented. This workflow is the main-branch baseline: CI on a push to
+# main runs only the fast tier, so without a scheduled run nothing would measure
+# coverage of main itself.
 on:
   schedule:
     - cron: '0 11 * * *'  # daily at 3am Pacific / 11am UTC
@@ -10,11 +14,14 @@ permissions:
 
 jobs:
   coverage:
-    runs-on: ubuntu-latest
+    # 8 vCPU: nightly full -race suite with coverage, ~1200s on 4 vCPU
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -24,23 +31,34 @@ jobs:
           git config --global user.name "CI"
 
       - name: Install gotestsum
-        run: go install gotest.tools/gotestsum@latest
+        run: go install gotest.tools/gotestsum@v1.13.0
 
-      - name: Test with coverage
-        run: gotestsum --junitfile junit.xml --format pkgname-and-test-fails -- -short -race -coverprofile=coverage.out -covermode=atomic ./...
+      - name: Full and compiled-binary suites with coverage
+        run: TEST_JUNIT=junit.xml make coverage-integration
+
+      - name: Require requested test artifact
+        run: |
+          test -s junit.xml
+          python3 -c 'import xml.etree.ElementTree as ET; root = ET.parse("junit.xml").getroot(); assert next(root.iter("testcase"), None) is not None, "JUnit artifact has no test cases"'
+
+      - name: Enforce risk-package coverage ratchets
+        run: python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json
 
       - name: Upload coverage
         if: always()
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
-          files: coverage.out
+          files: coverage-all.out
           flags: ox-cli
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+      # Codecov deprecated test-results-action in favor of this action with
+      # report_type: test_results; test-results-action has no node24 release.
       - name: Upload test results to Codecov
         if: ${{ !cancelled() }}
-        uses: codecov/test-results-action@v1
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: junit.xml
+          report_type: test_results
           token: ${{ secrets.CODECOV_TOKEN }}

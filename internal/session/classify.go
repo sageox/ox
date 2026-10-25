@@ -2,12 +2,16 @@ package session
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/proc"
 )
 
 // SessionStatus represents the lifecycle state of a session.
@@ -58,6 +62,7 @@ const (
 	StatusLocal     SessionStatus = "local"     // exists locally, not uploaded (may have been recovered from orphan)
 	StatusUploaded  SessionStatus = "uploaded"  // committed to ledger
 	StatusCanceled  SessionStatus = "canceled"  // user explicitly discarded session (terminal — data deleted)
+	StatusHeld      SessionStatus = "held"      // kept on this machine (session_publishing: manual) until 'ox session upload'
 
 	// StatusDraft: the ledger holds a meta.json-only placeholder published
 	// early so /c/<session_id> resolves for links already circulating in PR
@@ -77,8 +82,8 @@ const ghostHeuristicAge = 5 * time.Minute
 
 // StopReason constants for how a session ended.
 const (
-	StopReasonStopped       = "stopped"        // user explicitly stopped via /ox-session-stop
-	StopReasonCanceled      = "canceled"       // user explicitly canceled via /ox-session-abort
+	StopReasonStopped       = "stopped"        // user explicitly stopped via ox agent session stop
+	StopReasonCanceled      = "canceled"       // user explicitly canceled via ox agent session abort
 	StopReasonRecovered     = "recovered"      // recovered from orphan by daemon anti-entropy
 	StopReasonRateLimited   = "rate_limited"   // adapter detected agent hit a usage / rate limit
 	StopReasonQuotaExceeded = "quota_exceeded" // adapter detected agent quota exhausted
@@ -153,6 +158,12 @@ func ClassifySession(info SessionInfo, isUploaded bool) SessionStatus {
 		if info.StopReason == StopReasonCanceled {
 			return StatusCanceled
 		}
+		// Held on this machine. Checked before draft and uploaded: a draft
+		// placeholder published before the hold makes the session look
+		// uploaded, and it is not (GH #1093).
+		if info.Held {
+			return StatusHeld
+		}
 		// A ledger directory holding only a draft placeholder is NOT an
 		// uploaded session — no turn data has been committed. Checked before
 		// isUploaded because callers derive isUploaded from "a directory
@@ -171,7 +182,13 @@ func ClassifySession(info SessionInfo, isUploaded bool) SessionStatus {
 	}
 
 	// recording is active — check if the parent process is still alive
-	if isAbandoned(info.ParentPID, info.CreatedAt) {
+	if isAbandoned(info.ParentPID, info.ParentStartTime, info.CreatedAt) {
+		// A held folder can keep its recording marker: recovery writes the
+		// hold first, and a failed clear leaves both. Orphan and ghost are
+		// what prune deletes, and a hold is removed only by name.
+		if info.Held {
+			return StatusHeld
+		}
 		if info.HasRawData || info.EntryCount > 0 {
 			return StatusOrphan
 		}
@@ -189,11 +206,12 @@ func ClassifySession(info SessionInfo, isUploaded bool) SessionStatus {
 }
 
 // isAbandoned checks whether a recording session's parent process is dead.
-// If PID is known, uses kill(pid, 0) for instant liveness detection.
+// If PID is known, uses kill(pid, 0) for instant liveness detection, and
+// parentStart (RecordingState.ParentStartTime) to catch a reused PID.
 // If PID is unknown, falls back to age heuristic.
-func isAbandoned(parentPID int, createdAt time.Time) bool {
+func isAbandoned(parentPID int, parentStart int64, createdAt time.Time) bool {
 	if parentPID > 0 {
-		return !isPIDAlive(parentPID)
+		return !isPIDAlive(parentPID) || proc.IsReused(parentPID, parentStart)
 	}
 	// no PID recorded — fall back to heuristic: old enough to be suspicious
 	return time.Since(createdAt) > ghostHeuristicAge
@@ -225,8 +243,9 @@ type RawKind int
 const (
 	// RawMissing: the file does not exist or cannot be read.
 	RawMissing RawKind = iota
-	// RawHeaderOnly: exists, but holds only the metadata header line —
-	// a recording that never captured anything.
+	// RawHeaderOnly: exists, but holds no content line — only the metadata
+	// header and framing (isFramingLine). A recording that never captured
+	// anything.
 	RawHeaderOnly
 	// RawSubstantive: real transcript content, safe to summarize.
 	RawSubstantive
@@ -251,26 +270,119 @@ func ClassifyRawFile(rawPath string) RawKind {
 
 	f, err := os.Open(rawPath)
 	if err != nil {
-		return RawMissing
+		if errors.Is(err, os.ErrNotExist) {
+			return RawMissing
+		}
+		// Present but unreadable (permission / transient I/O). Fail SAFE — never
+		// let a cleanup path delete a raw.jsonl we simply could not open; only a
+		// genuinely absent file is RawMissing.
+		return RawSubstantive
 	}
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 
-	lineCount := 0
-	for scanner.Scan() {
-		lineCount++
-		if lineCount >= 2 {
-			return RawSubstantive // at least one line beyond header
+	// The SessionEnd and /clear doors (stampRecordingCarrierAtStop) append a
+	// footer before the daemon classifies the file, so header + footer must
+	// still read as header-only. A PostToolUse hook can append a turn before
+	// any header exists (handleAfterTool tolerates a failed header write), so
+	// line 1 is skipped only when it is a header.
+	for i := 0; scanner.Scan(); i++ {
+		if !isFramingLine(scanner.Bytes(), i == 0) {
+			return RawSubstantive
 		}
+	}
+	// Fail SAFE on an incomplete read. A line exceeding the 256 KiB scanner
+	// buffer (a large paste or tool payload) stops the scan with an error; a
+	// too-long line is itself evidence of substantial content, and reporting
+	// RawHeaderOnly here would let the cleanup paths os.RemoveAll a real
+	// session. Never classify what we could not read as a deletable phantom.
+	if scanner.Err() != nil {
+		return RawSubstantive
 	}
 	return RawHeaderOnly
 }
 
+// isFramingLine reports whether a raw.jsonl line is framing rather than
+// content: blank, a header or footer record, or an untyped record that is an
+// import's _meta line or — on the first line only — a legacy metadata header.
+// Every content entry carries a type, so a typed record is content unless its
+// type says header or footer. Keys match exactly, as in ReadSessionFromPath.
+// A line that is not JSON is content: a torn footer costs one empty summary,
+// a misread turn would cost the recording.
+func isFramingLine(line []byte, first bool) bool {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		return true
+	}
+	var rec map[string]json.RawMessage
+	if json.Unmarshal(line, &rec) != nil {
+		return false
+	}
+	rawType, typed := rec["type"]
+	if !typed {
+		_, hasMeta := rec["_meta"]
+		return first || hasMeta
+	}
+	var typ string
+	if json.Unmarshal(rawType, &typ) != nil {
+		return false // typed, but not a string: content
+	}
+	return typ == "footer" || typ == "header"
+}
+
+// HasUserTurn reports whether a raw.jsonl file contains at least one user turn
+// (an entry of type "user") — i.e. a real coworker prompt was recorded. The
+// metadata header and machine-generated entries (assistant/tool/system) do NOT
+// count: a recording with no user turn never happened from the coworker's point
+// of view, and must not be git-committed as a draft nor registered with the
+// server. This is the floor that keeps phantom sessions off the ledger and out
+// of the team's session count.
+//
+// A content-store pointer stub reports true: its transcript is real and already
+// passed this gate when it was finalized.
+func HasUserTurn(rawPath string) bool {
+	if lfs.IsPointerFile(rawPath) {
+		return true
+	}
+
+	f, err := os.Open(rawPath)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var entry struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(line, &entry) != nil {
+			continue
+		}
+		if entry.Type == "user" {
+			return true
+		}
+	}
+	// Fail safe on an incomplete read: a user entry larger than the 256 KiB
+	// scanner buffer stops the scan with an error, and reporting "no user turn"
+	// would suppress registration and draft publication for a real session with
+	// a large prompt. When we could not read the file fully, assume a user turn.
+	if scanner.Err() != nil {
+		return true
+	}
+	return false
+}
+
 // HasSubstantiveEntries returns true if a raw.jsonl file holds at least one
-// entry beyond the metadata header line. A header-only file (1 line) has no
-// real session content and should not be uploaded or finalized.
+// content line past the metadata header and framing (isFramingLine). A file
+// with none has no real session content and should not be uploaded or finalized.
 //
 // A content-store pointer stub is NOT substantive: the bytes present are a
 // reference, not a transcript. Callers that need to distinguish "no data"
@@ -279,30 +391,6 @@ func ClassifyRawFile(rawPath string) RawKind {
 // This is the canonical check — use it everywhere instead of inline line counting.
 func HasSubstantiveEntries(rawPath string) bool {
 	return ClassifyRawFile(rawPath) == RawSubstantive
-}
-
-// CountSubstantiveEntries counts lines in a raw.jsonl that are actual session
-// entries, excluding the metadata header (first line). Returns 0 for header-only
-// files or files that don't exist.
-func CountSubstantiveEntries(rawPath string) int {
-	f, err := os.Open(rawPath)
-	if err != nil {
-		return 0
-	}
-	defer f.Close()
-
-	count := 0
-	isFirst := true
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
-	for scanner.Scan() {
-		if isFirst {
-			isFirst = false
-			continue // skip metadata header
-		}
-		count++
-	}
-	return count
 }
 
 // RawJSONLHasData checks if a raw.jsonl file exists on disk and has content.

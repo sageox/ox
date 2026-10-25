@@ -1,0 +1,6 @@
+{
+  "repo_id": "repo_01990000-0000-7000-8000-000000000001",
+  "run_id": "bdd_01990000-0000-7000-8000-000000000001",
+  "lifecycle_key": "attest/control/lifecycle.json",
+  "upload_key": "attest/uploads/archive.zip"
+}

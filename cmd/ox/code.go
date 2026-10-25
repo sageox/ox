@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/search"
 	"github.com/sageox/ox/internal/codedb/store"
@@ -86,8 +85,23 @@ var isCodeDBIndexing = func(useLedger bool) bool {
 
 var codeCmd = &cobra.Command{
 	Use:   "code",
-	Short: "Search code in this repo",
-	Long:  "Search git history and current code of this repo using queries.",
+	Short: "Search code, symbols, history, PRs, and comments in this repo",
+	Long: `Search the indexed CodeDB for this repo.
+
+CodeDB indexes more than text: symbols, resolved call edges (ADR-019), git
+history, diffs, PR/issue bodies and comments, and source comments. Queries
+use a Sourcegraph-style DSL with filters that grep cannot match.
+
+Examples:
+  ox code search "ResolveSession" type:symbol
+  ox code search "" calledby:authenticate
+  ox code search "" calls:Handler depth:2
+  ox code search "rate limit" type:pr state:open
+  ox code search "TODO" type:comment ckind:todo
+  ox code prs --sort stalled
+  ox code insights
+
+Run 'ox code search --help' for the full DSL grammar and more examples.`,
 }
 
 // codeIndexCmd is an alias for 'ox index code' — kept for back-compat and discoverability
@@ -100,95 +114,240 @@ var codeIndexCmd = &cobra.Command{
 
 var codeSearchCmd = &cobra.Command{
 	Use:   "search <query>",
-	Short: "Search indexed code using queries",
-	Args:  cobra.MinimumNArgs(1),
+	Short: "Search the CodeDB index using a query DSL",
+	Long: `Search the indexed CodeDB for symbols, code, diffs, commits, comments, PRs, and issues.
+
+DSL grammar:
+  type:{code,symbol,diff,commit,comment,pr,issue}   what kind of record to match
+  repo:<name>[@<rev>]    file:<glob>    lang:<id>
+  author:<name>          message:<text>
+  before:<date>          after:<date>                ISO 8601 or relative
+  calls:<name>           calledby:<name>             resolved call graph (ADR-019)
+  returns:<type>         depth:1..10                 transitive call depth
+  confidence:{extracted,inferred,ambiguous}          ADR-019 edge confidence
+  ckind:<kind>           state:<pr_state>
+  select:{repo,file,symbol,symbol.<kind>}
+  count:<N>              case:yes
+  patterntype:{literal,keyword,regexp}
+  OR                                                 boolean across groups
+  /pattern/                                          forced regex
+  -<filter>                                          negate any filter
+
+Examples:
+  # symbol definition (what grep usually misses among text matches)
+  ox code search "ResolveSession" type:symbol
+
+  # resolved call graph — who calls authenticate()?
+  ox code search "" calledby:authenticate
+
+  # what does Handler call, two hops deep?
+  ox code search "" calls:Handler depth:2
+
+  # indexed PR titles + bodies + review comments
+  ox code search "rate limit" type:pr state:open
+
+  # source comments tagged TODO
+  ox code search "TODO" type:comment ckind:todo
+
+  # git log + content match together
+  ox code search "migration" author:rupak after:2026-04-01
+
+  # cross-language regex via /pattern/
+  ox code search "/Resolve[A-Z]\w+Recording/"
+
+When the index is unavailable (still building, not yet created), agent-context
+invocations emit a structured JSON status instead of erroring — callers should
+parse the status field before treating output as results.`,
+	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		root, err := repotools.FindRepoRoot(repotools.VCSGit)
-		if err != nil {
-			return fmt.Errorf("not in a git repository")
-		}
-
-		query := strings.Join(args, " ")
-		dataDir, useLedger := resolvePreferredCodeDBDir(root)
-
-		if isCodeDBIndexing(useLedger) {
-			return fmt.Errorf("code index is currently being built — search is unavailable until indexing completes. Run 'ox code status' to check progress")
-		}
-
-		db, err := codedb.Open(dataDir)
-		if err != nil {
-			return fmt.Errorf("open codedb: %w", err)
-		}
-		defer db.Close()
-
-		// attach all daemon-built dirty overlays for uncommitted file search
-		// (supports multiple simultaneous worktrees)
-		if n := db.AttachAllDirtyIndexes(); n > 0 {
-			slog.Debug("attached dirty overlays", "count", n)
-		}
-
-		decisionsOnly, _ := cmd.Flags().GetBool("decisions")
-		isDecision := decision.PathMatcher(root)
-		var results []search.Result
-		if decisionsOnly {
-			patterns := decision.SearchPathPatterns(root)
-			if len(patterns) > 0 {
-				results, err = db.SearchRestrictedFiles(context.Background(), query, patterns)
-			}
-		} else {
-			results, err = db.Search(context.Background(), query)
-		}
-		if err != nil {
-			return fmt.Errorf("search: %w", err)
-		}
-		if decisionsOnly {
-			// Keep the exact corpus predicate as a precision guard for configured
-			// doublestar globs; the DB filter above is the pre-limit recall gate.
-			filtered := results[:0]
-			for _, r := range results {
-				if isDecision(r.FilePath) {
-					filtered = append(filtered, r)
-				}
-			}
-			results = filtered
-		}
-
-		// Attach result count to the root span. We record the *raw* count
-		// from the index, not the count after --limit truncation, so the
-		// metric reflects index recall and not display preferences.
-		observability.SetResultCount(len(results))
-
-		fullJSON, _ := cmd.Flags().GetBool("full-json")
-		limit, _ := cmd.Flags().GetInt("limit")
-
-		var buf bytes.Buffer
-		enc := json.NewEncoder(&buf)
-		enc.SetIndent("", "  ")
-
-		if fullJSON {
-			resp := &combinedQueryResponse{CodeResults: results}
-			if err := enc.Encode(resp); err != nil {
-				return fmt.Errorf("encode: %w", err)
-			}
-		} else {
-			compact := compactSearchResults(results, limit, isDecision)
-			if err := enc.Encode(compact); err != nil {
-				return fmt.Errorf("encode: %w", err)
-			}
-		}
-
-		outputBytes := buf.Len()
-		if _, err := buf.WriteTo(os.Stdout); err != nil {
-			return err
-		}
-
-		agentID, _ := detectAgentContext()
-		if agentID != "" {
-			slog.Debug("code search context cost", "agent_id", agentID, "bytes", outputBytes)
-			trackContextBytes(int64(outputBytes))
-		}
-		return nil
+		return runCodeSearch(cmd, strings.Join(args, " "))
 	},
+}
+
+// runCodeSearch is the shared executor used by `ox code search` and the verb
+// wrappers (`ox code callers`, `callees`, `defs`, `refs`, `log`). All callers
+// build a DSL query string; this function does the index check, dirty-overlay
+// attach, search, output formatting, and stats one-liner.
+//
+// The verb wrappers must inherit the same flags as codeSearchCmd
+// (`--limit`, `--snippet`, `--full-json`) so they read identically.
+func runCodeSearch(cmd *cobra.Command, query string) error {
+	root, err := repotools.FindRepoRoot(repotools.VCSGit)
+	if err != nil {
+		return fmt.Errorf("not in a git repository")
+	}
+
+	dataDir, useLedger := resolvePreferredCodeDBDir(root)
+	agentID, _ := detectAgentContext()
+
+	// No index has ever been built: emit the structured not_indexed contract
+	// for agents (mirrors code_activity/prs/insights) instead of surfacing a
+	// raw codedb.Open error, which trains agents to abandon the tool. Every
+	// verb (callers/callees/defs/refs/log) routes through here, so this is the
+	// single place that closes the never-indexed gap for all of them.
+	if _, statErr := os.Stat(filepath.Join(dataDir, store.MetadataDBFile)); os.IsNotExist(statErr) {
+		if agentID != "" {
+			return emitIndexNotReadyJSON(cmd, indexStatusNotIndexed,
+				"No code index found for this repo.",
+				"Run 'ox code index' to build the index, then rerun.")
+		}
+		return fmt.Errorf("no code index found for this repo — run 'ox code index' first")
+	}
+
+	// Index-not-ready paths: emit structured JSON when an agent is calling
+	// so it can branch on `status` instead of treating an error as terminal.
+	if isCodeDBIndexing(useLedger) {
+		if agentID != "" {
+			return emitIndexNotReadyJSON(cmd, indexStatusIndexing,
+				"Code index is currently being built. Search will be available once indexing completes.",
+				"Use Grep/Glob until indexing completes; rerun 'ox code search' afterward.")
+		}
+		return fmt.Errorf("code index is currently being built — search is unavailable until indexing completes. Run 'ox code status' to check progress")
+	}
+
+	db, err := codedb.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open codedb: %w", err)
+	}
+	defer db.Close()
+
+	dirtyCount := db.AttachAllDirtyIndexes()
+	if dirtyCount > 0 {
+		slog.Debug("attached dirty overlays", "count", dirtyCount)
+	}
+
+	searchStart := time.Now()
+	decisionsOnly, _ := cmd.Flags().GetBool("decisions")
+	isDecision := decision.PathMatcher(root)
+	var results []search.Result
+	if decisionsOnly {
+		patterns := decision.SearchPathPatterns(root)
+		if len(patterns) > 0 {
+			results, err = db.SearchRestrictedFiles(context.Background(), query, patterns)
+		}
+	} else {
+		results, err = db.Search(context.Background(), query)
+	}
+	searchElapsed := time.Since(searchStart)
+	if err != nil {
+		return fmt.Errorf("search: %w", err)
+	}
+	if decisionsOnly {
+		// Keep the exact corpus predicate as a precision guard for configured
+		// doublestar globs; the DB filter above is the pre-limit recall gate.
+		filtered := results[:0]
+		for _, r := range results {
+			if isDecision(r.FilePath) {
+				filtered = append(filtered, r)
+			}
+		}
+		results = filtered
+	}
+
+	observability.SetResultCount(len(results))
+
+	fullJSON, _ := cmd.Flags().GetBool("full-json")
+	limit, _ := cmd.Flags().GetInt("limit")
+	snippetLen, _ := cmd.Flags().GetInt("snippet")
+	if snippetLen <= 0 {
+		snippetLen = defaultSnippetLen
+	}
+
+	var jsonOut []byte
+	if fullJSON {
+		resp := &combinedQueryResponse{CodeResults: results}
+		jsonOut, err = cli.MarshalJSONIndent(resp)
+		if err != nil {
+			return fmt.Errorf("encode: %w", err)
+		}
+	} else {
+		compact := compactSearchResults(results, limit, snippetLen, isDecision)
+		// JIT DSL hint — only when caller issued a bare term, so verb wrappers
+		// (which always pass DSL-shaped queries) never re-teach the DSL.
+		if isBareQuery(query) && len(compact.Results) > 0 {
+			if compact.Guidance != "" {
+				compact.Guidance += " "
+			}
+			compact.Guidance += "Tip: refine with `type:symbol` for defs, `calledby:<name>`/`calls:<name>` for the resolved call graph, `type:pr`/`type:issue` for indexed GitHub records, or `before:`/`after:` to scope by time."
+		}
+		jsonOut, err = cli.MarshalJSONIndent(compact)
+		if err != nil {
+			return fmt.Errorf("encode: %w", err)
+		}
+	}
+
+	quiet, _ := cmd.Flags().GetBool("quiet")
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "codedb: %d results in %s (dirty overlays: %d)\n",
+			len(results), formatSearchLatency(searchElapsed), dirtyCount)
+	}
+
+	outputBytes := len(jsonOut)
+	if err := cli.WriteJSONBytes(os.Stdout, jsonOut); err != nil {
+		return err
+	}
+
+	if agentID != "" {
+		slog.Debug("code search context cost", "agent_id", agentID, "bytes", outputBytes)
+		trackContextBytes(int64(outputBytes))
+	}
+	return nil
+}
+
+// defaultSnippetLen bounds the per-result snippet returned in compact mode.
+// Bumped from 120 → 200 to better cover typical Go signatures + brief context;
+// override via --snippet N for narrower or wider snippets.
+const defaultSnippetLen = 200
+
+// indexStatusIndexing / indexStatusNotIndexed are the canonical `status`
+// values emitted by emitIndexNotReadyJSON so agent-context consumers can
+// branch on a stable string.
+const (
+	indexStatusIndexing   = "indexing"
+	indexStatusNotIndexed = "not_indexed"
+)
+
+// indexNotReadyResponse is the structured payload emitted on stdout when an
+// agent-context invocation hits an index that is mid-build or missing. Agents
+// branch on `status` rather than parsing stderr — this turns a hard error into
+// a recoverable signal that includes the recommended fallback.
+type indexNotReadyResponse struct {
+	Status       string `json:"status"` // "indexing" | "not_indexed"
+	Message      string `json:"message"`
+	FallbackHint string `json:"fallback_hint"`
+}
+
+// emitIndexNotReadyJSON writes a structured status response to stdout and
+// returns nil so the command exits 0. Callers should ONLY invoke this when
+// they have already confirmed an agent context — humans get a plain error
+// instead so the terminal output remains readable.
+func emitIndexNotReadyJSON(cmd *cobra.Command, status, message, fallback string) error {
+	resp := indexNotReadyResponse{
+		Status:       status,
+		Message:      message,
+		FallbackHint: fallback,
+	}
+	return cli.PrintJSONTo(cmd.OutOrStdout(), resp)
+}
+
+// isBareQuery returns true when the query string carries no DSL filters and
+// is essentially "one search term." Used to decide whether to append a JIT
+// DSL hint to the compact response — agents using `ox code` like a grep get
+// a one-line nudge toward the unique-value filters.
+func isBareQuery(q string) bool {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return false
+	}
+	// any DSL filter syntax (`key:value`) disqualifies — already non-bare
+	if strings.Contains(q, ":") {
+		return false
+	}
+	// boolean operators or forced regex also count as non-bare
+	if strings.Contains(q, " OR ") || (strings.HasPrefix(q, "/") && strings.HasSuffix(q, "/")) {
+		return false
+	}
+	return true
 }
 
 // compactSearchResult is a minimal search result optimized for agent context.
@@ -203,6 +362,12 @@ type compactSearchResult struct {
 	// corpus (docs/adr etc.) — the special tag that lets agents filter or
 	// recognize DRs in mixed results.
 	DocType string `json:"doc_type,omitempty"`
+
+	// Commit fields — populated for type:commit (e.g. `ox code log <path>`).
+	// Empty for code/symbol/comment results.
+	CommitHash    string `json:"commit_hash,omitempty"`
+	Author        string `json:"author,omitempty"`
+	CommitMessage string `json:"commit_message,omitempty"`
 
 	// PR/issue fields
 	Number int    `json:"number,omitempty"`
@@ -219,27 +384,35 @@ type compactSearchResponse struct {
 }
 
 // compactSearchResults converts full results into a compact format for agents.
-func compactSearchResults(results []search.Result, limit int, isDecision func(string) bool) compactSearchResponse {
+// snippetLen caps per-result snippet length; pass 0 to use defaultSnippetLen.
+// isDecision, when non-nil, tags hits under the repo's decision-record globs.
+func compactSearchResults(results []search.Result, limit, snippetLen int, isDecision func(string) bool) compactSearchResponse {
 	total := len(results)
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
+	}
+	if snippetLen <= 0 {
+		snippetLen = defaultSnippetLen
 	}
 
 	compact := make([]compactSearchResult, 0, len(results))
 	for _, r := range results {
 		snippet := stripANSIEscapes(r.Content)
-		snippet = compactSnippet(snippet, 120)
+		snippet = compactSnippet(snippet, snippetLen)
 		cr := compactSearchResult{
-			File:        r.FilePath,
-			Line:        r.Line,
-			Lang:        r.Language,
-			Snippet:     snippet,
-			Symbol:      r.SymbolName,
-			CommentKind: r.CommentKind,
-			Number:      r.Number,
-			Title:       r.Title,
-			State:       r.State,
-			URL:         r.URL,
+			File:          r.FilePath,
+			Line:          r.Line,
+			Lang:          r.Language,
+			Snippet:       snippet,
+			Symbol:        r.SymbolName,
+			CommentKind:   r.CommentKind,
+			CommitHash:    r.CommitHash,
+			Author:        r.Author,
+			CommitMessage: compactSnippet(r.Message, snippetLen),
+			Number:        r.Number,
+			Title:         r.Title,
+			State:         r.State,
+			URL:           r.URL,
 		}
 		if isDecision != nil && isDecision(r.FilePath) {
 			cr.DocType = "decision"
@@ -259,7 +432,12 @@ func compactSearchResults(results []search.Result, limit int, isDecision func(st
 	return resp
 }
 
-// compactSnippet collapses whitespace and truncates to maxLen chars.
+// compactSnippet collapses whitespace and truncates to maxLen runes.
+//
+// Truncation is rune-aware (not byte-aware) — slicing a UTF-8 string mid-rune
+// produces invalid output and breaks JSON encoding for any non-ASCII content
+// (Greek identifiers, emoji in comments, CJK in PR titles, etc.). maxLen is
+// counted in runes so the output is bounded by visual width, not bytes.
 func compactSnippet(s string, maxLen int) string {
 	// collapse newlines and tabs into single spaces
 	var b strings.Builder
@@ -279,8 +457,21 @@ func compactSnippet(s string, maxLen int) string {
 	// strip leading ellipsis from bleve fragments
 	result = strings.TrimPrefix(result, "…")
 	result = strings.TrimSpace(result)
-	if len(result) > maxLen {
-		result = result[:maxLen] + "…"
+
+	// Rune-aware truncation: count runes, find the byte offset of the
+	// (maxLen+1)-th rune, cut there. Pure ASCII falls through with the same
+	// behavior as the original byte slice (1 rune == 1 byte).
+	runeCount := 0
+	cutAt := -1
+	for byteIdx := range result {
+		if runeCount == maxLen {
+			cutAt = byteIdx
+			break
+		}
+		runeCount++
+	}
+	if cutAt >= 0 {
+		result = result[:cutAt] + "…"
 	}
 	return result
 }
@@ -464,10 +655,21 @@ var codeStatusCmd = &cobra.Command{
 		}
 		var repos []repoRow
 
+		// openErr records why the counts below are missing. Without it the
+		// output of an index that could not be opened is byte-identical to a
+		// warm index holding nothing — zeros under index_exists: true — and a
+		// caller searching that store gets no results and reports none.
+		var openErr string
+		var readOnly bool
+
 		daemonIndexing := codeStats != nil && ((useLedger && codeStats.LedgerIndexingNow) || (!useLedger && codeStats.IndexingNow))
 		if indexExists && !daemonIndexing {
 			db, err := codedb.Open(dataDir)
+			if err != nil {
+				openErr = err.Error()
+			}
 			if err == nil {
+				readOnly = db.ReadOnly()
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM commits").Scan(&totalCommits)
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM blobs").Scan(&totalBlobs)
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM symbols").Scan(&totalSymbols)
@@ -527,6 +729,12 @@ var codeStatusCmd = &cobra.Command{
 				IndexingNow bool            `json:"indexing_now"`
 				LastIndexed *time.Time      `json:"last_indexed,omitempty"`
 				LastError   string          `json:"last_error,omitempty"`
+				// OpenError is set when the index directory exists but could not
+				// be opened. When present the counts above are unknown, not zero.
+				OpenError string `json:"open_error,omitempty"`
+				// ReadOnly reports an index served from media ox cannot write:
+				// searchable, but never re-indexed or self-healed in place.
+				ReadOnly bool `json:"read_only,omitempty"`
 			}
 			out := jsonStats{
 				Commits:     totalCommits,
@@ -537,9 +745,16 @@ var codeStatusCmd = &cobra.Command{
 				DiskBytes:   dirSize(dataDir),
 				DataDir:     dataDir,
 				IndexExists: indexExists,
+				OpenError:   openErr,
+				ReadOnly:    readOnly,
 			}
 			if codeStats != nil {
-				out.IndexingNow = codeStats.IndexingNow
+				// daemonIndexing, not codeStats.IndexingNow: when this repo
+				// reads the ledger index, LedgerIndexingNow is the flag that
+				// gated the direct open above. Reporting the shared index's
+				// flag here says "not indexing" while the counts came from the
+				// daemon's cache precisely because it is.
+				out.IndexingNow = daemonIndexing
 				if !codeStats.LastIndexed.IsZero() {
 					t := codeStats.LastIndexed
 					out.LastIndexed = &t
@@ -552,9 +767,7 @@ var codeStatusCmd = &cobra.Command{
 					Commits: r.commits, Blobs: r.blobs,
 				})
 			}
-			enc := json.NewEncoder(cmd.OutOrStdout())
-			enc.SetIndent("", "  ")
-			return enc.Encode(out)
+			return cli.PrintJSONTo(cmd.OutOrStdout(), out)
 		}
 
 		// detect GitHub remote for repo identity
@@ -598,7 +811,7 @@ var codeStatusCmd = &cobra.Command{
 		// status line — health signal first
 		b.WriteString(statusLabelStyle.Render("Status"))
 		switch {
-		case !indexExists && (codeStats == nil || !codeStats.IndexingNow):
+		case !indexExists && !daemonIndexing:
 			b.WriteString(statusWarningStyle.Render("⚠ not indexed"))
 			b.WriteString("\n")
 			b.WriteString(statusLabelStyle.Render(""))
@@ -608,7 +821,15 @@ var codeStatusCmd = &cobra.Command{
 			b.WriteString("\n")
 			fmt.Print(b.String())
 			return nil
-		case codeStats != nil && codeStats.IndexingNow:
+		case openErr != "":
+			// Ranked above every daemon-derived state: the daemon's cached
+			// counts describe an index this machine just failed to open, and
+			// reporting them would hide that failure behind a healthy number.
+			b.WriteString(statusErrorStyle.Render("✗ unreadable"))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render(openErr))
+		case daemonIndexing:
 			b.WriteString(statusWarningStyle.Render("◐ indexing…"))
 		case codeStats != nil && codeStats.LastError != "" && totalCommits == 0:
 			b.WriteString(statusWarningStyle.Render("⚠ pending"))
@@ -631,6 +852,17 @@ var codeStatusCmd = &cobra.Command{
 			b.WriteString(statusSuccessStyle.Render("✓ indexed"))
 		}
 		b.WriteString("\n")
+
+		if readOnly {
+			b.WriteString(statusLabelStyle.Render("Mode"))
+			b.WriteString(statusWarningStyle.Render("read-only"))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("Served from media ox cannot write — searchable, but "))
+			b.WriteString(statusHighlightStyle.Render("ox code index"))
+			b.WriteString(statusMutedStyle.Render(" will refuse"))
+			b.WriteString("\n")
+		}
 
 		// repo identity — show GitHub remote name if detected
 		if ghOwner != "" && ghRepo != "" {
@@ -799,7 +1031,7 @@ var codeStatusCmd = &cobra.Command{
 		b.WriteString("\n")
 
 		// next check — only when daemon is running and index exists
-		if codeStats != nil && !codeStats.IndexingNow && indexExists && syncInterval > 0 && !codeStats.LastIndexed.IsZero() {
+		if codeStats != nil && !daemonIndexing && indexExists && syncInterval > 0 && !codeStats.LastIndexed.IsZero() {
 			nextCheck := codeStats.LastIndexed.Add(syncInterval)
 			remaining := time.Until(nextCheck)
 			b.WriteString(statusLabelStyle.Render("Next check"))
@@ -814,6 +1046,24 @@ var codeStatusCmd = &cobra.Command{
 		fmt.Print(b.String())
 		return nil
 	},
+}
+
+// formatSearchLatency formats a per-query latency for the agent-facing stderr
+// stats line. Sub-second precision matters here so the agent learns ox code is
+// fast (formatDurationBrief floors to "<1s", which hides the signal). Uses
+// microsecond/millisecond resolution under one second, then falls back to the
+// human-friendly brief format for anything slower.
+func formatSearchLatency(d time.Duration) string {
+	switch {
+	case d < time.Microsecond:
+		return "<1µs"
+	case d < time.Millisecond:
+		return fmt.Sprintf("%dµs", d.Microseconds())
+	case d < time.Second:
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	default:
+		return formatDurationBrief(d)
+	}
 }
 
 // formatDurationBrief formats a duration as a compact human string (e.g., "4m 30s").
@@ -872,12 +1122,14 @@ func formatIndexTiming(r *daemon.CodeIndexResult) string {
 }
 
 func init() {
-	codeSearchCmd.Flags().Bool("full-json", false, "full uncompacted JSON output (~6x more context tokens)")
+	codeSearchCmd.Flags().Bool("full-json", false, "full uncompacted JSON output (~4x more context tokens)")
 	codeSearchCmd.Flags().Int("limit", 10, "max results to return")
 	codeSearchCmd.Flags().Bool("decisions", false, "only results from this repo's decision records (ADRs/DDRs)")
+	codeSearchCmd.Flags().Int("snippet", defaultSnippetLen, "max snippet length per result, in characters")
 
-	codeQueryCmd.Flags().Bool("full-json", false, "full uncompacted JSON output (~6x more context tokens)")
+	codeQueryCmd.Flags().Bool("full-json", false, "full uncompacted JSON output (~4x more context tokens)")
 	codeQueryCmd.Flags().Int("limit", 10, "max results to return")
+	codeQueryCmd.Flags().Int("snippet", defaultSnippetLen, "max snippet length per result, in characters")
 
 	// mirror indexCodeCmd flags so the alias works correctly
 	codeIndexCmd.Flags().Bool("full", false, "wipe index and rebuild from scratch")

@@ -17,12 +17,12 @@
 
 RUST='\033[38;2;199;122;80m'
 RB='\033[1;38;2;199;122;80m'
-GOLD='\033[38;2;224;165;106m'
-GB='\033[1;38;2;224;165;106m'
+HILITE='\033[38;2;173;207;163m'
+HB='\033[1;38;2;173;207;163m'
 DM='\033[38;2;143;153;163m'
 B='\033[1m'
 R='\033[0m'
-SAGE='\033[38;2;122;143;120m'
+SAGE='\033[38;2;122;170;119m'
 
 while [[ "${1:-}" == --* ]]; do shift; done
 
@@ -32,7 +32,7 @@ printf "${RB}✻ Claude Code${R}   ${DM}sonnet · /Users/oxy/code/myproject${R}\
 printf "${RUST}────────────────────────────────────────────────────────────${R}\n"
 printf "  ${B}Welcome back, Oxy!${R}  🐮\n"
 echo ""
-printf "${DM}Running ${R}${GOLD}ox agent prime${R}${DM}…${R}\n"
+printf "${DM}Running ${R}${HILITE}ox agent prime${R}${DM}…${R}\n"
 sleep 0.7
 printf "${SAGE}✓${R} Team context loaded · ${DM}14 prior sessions${R} · ${SAGE}recording this session${R}\n"
 echo ""
@@ -44,8 +44,8 @@ echo ""
 sleep 1.2
 printf "Live from your coworkers — ${B}in-flight work, before anything's pushed${R}:\n"
 echo ""
-printf "  ${SAGE}●${R} ${B}Ravi${R}   ${GOLD}Codex${R}        rate limiting on the gateway     ${DM}murmured 8m ago${R}\n"
-printf "  ${SAGE}●${R} ${B}Mira${R}   ${GOLD}Claude Code${R}  refactoring internal/auth/session.go  ${DM}3m ago${R}\n"
+printf "  ${SAGE}●${R} ${B}Ravi${R}   ${HILITE}Codex${R}        rate limiting on the gateway     ${DM}murmured 8m ago${R}\n"
+printf "  ${SAGE}●${R} ${B}Mira${R}   ${HILITE}Claude Code${R}  refactoring internal/auth/session.go  ${DM}3m ago${R}\n"
 printf "  ${DM}●${R} ${B}you${R}    ${DM}—${R}            this session\n"
 echo ""
 printf "Nobody's committed, merged, or opened a PR — ${B}yet you can already see it${R}.\n"
@@ -58,8 +58,8 @@ echo ""
 sleep 1.2
 printf "SageOx surfaced prior work — ${B}across agents, machines, and teammates${R}:\n"
 echo ""
-printf "  ${DM}session${R}     rate-limiter-spike     ${GOLD}Codex${R} · Ravi's laptop · ${DM}4 days ago${R}\n"
-printf "  ${DM}session${R}     rl-followup            ${GOLD}Claude Code${R} · your session · ${DM}2 days ago${R}\n"
+printf "  ${DM}session${R}     rate-limiter-spike     ${HILITE}Codex${R} · Ravi's laptop · ${DM}4 days ago${R}\n"
+printf "  ${DM}session${R}     rl-followup            ${HILITE}Claude Code${R} · your session · ${DM}2 days ago${R}\n"
 printf "  ${DM}discussion${R}  \"Rate Limiting Approach\"   ${DM}Ravi + you · recorded at sageox.ai${R}\n"
 echo ""
 printf "You and Ravi landed on a ${B}token-bucket backed by Redis${R} — Ravi's Codex\n"
@@ -75,7 +75,7 @@ printf "On it — letting the team know I'm in here.\n"
 printf "${SAGE}✓${R} ${DM}Murmured:${R} \"adding rate limiting to the auth endpoints\"\n"
 echo ""
 sleep 1.8
-printf "  ${GOLD}↩ Mira just murmured${R} ${DM}— \"refactoring internal/auth/session.go right now\"${R}\n"
+printf "  ${HILITE}↩ Mira just murmured${R} ${DM}— \"refactoring internal/auth/session.go right now\"${R}\n"
 echo ""
 sleep 1.5
 printf "${B}Heads up from SageOx:${R} Mira's live in that file. I'll stay clear and\n"
@@ -84,11 +84,11 @@ echo ""
 sleep 1.5
 printf "${DM}Plan ready — SageOx enriched it from team context:${R}\n"
 echo ""
-printf "  ${GB}⚡${R} ${B}2 collisions${R} in open PRs   ${DM}handler.go (PR #1847 · Ravi), session.go (Mira)${R}\n"
-printf "  ${GB}↺${R} ${B}prior art${R}            ${DM}\"Rate Limiting Approach\" — token-bucket spec${R}\n"
-printf "  ${GB}◆${R} ${B}expert${R}               ${DM}Ravi owns rate limiting${R}\n"
+printf "  ${HB}⚡${R} ${B}2 collisions${R} in open PRs   ${DM}handler.go (PR #1847 · Ravi), session.go (Mira)${R}\n"
+printf "  ${HB}↺${R} ${B}prior art${R}            ${DM}\"Rate Limiting Approach\" — token-bucket spec${R}\n"
+printf "  ${HB}◆${R} ${B}expert${R}               ${DM}Ravi owns rate limiting${R}\n"
 echo ""
-printf "  ${DM}Review it:${R} ${GOLD}ox plan render --open${R}\n"
+printf "  ${DM}Review it:${R} ${HILITE}ox plan render --open${R}\n"
 echo ""
 
 printf " ${RUST}❯${R} "

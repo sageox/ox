@@ -1,0 +1,31 @@
+{
+  "summary": "The review page's content anchors. anchors: goldens from running review.js fnv1a/norm in a JS engine (node); 'h' + FNV-1a over UTF-16 units with JS float64 arithmetic, of the whitespace-collapsed, lowercased heading and text joined by U+0000. labels: review.js labelFor, 70 UTF-16 units at most. page: every element the review layer makes markable on one page, in document order, with its anchor, section heading (data-ox-section, else the first h2 or h3 at any depth, else the section id) and label; a section and its one item with the same text share an anchor, and <style> and <script> text is not part of either.",
+  "anchors": [
+    {"heading": "Rollout Plan", "text": "Ship the CLI first", "anchor": "ha58cafdc"},
+    {"heading": "  rollout   PLAN ", "text": "\tship the CLI\nfirst ", "anchor": "ha58cafdc"},
+    {"heading": "", "text": "hello world", "anchor": "hbe8511f4"},
+    {"heading": "Risks", "text": "Feedback lost when the  server dies", "anchor": "h45926978"},
+    {"heading": "Sécurité", "text": "données perdues — état hors ligne", "anchor": "h80cd4f5c"},
+    {"heading": "", "text": "", "anchor": "h050c5d20"}
+  ],
+  "labels": [
+    {"text": "short  text", "label": "short text"},
+    {"text": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij", "label": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghi…"}
+  ],
+  "page": {
+    "html": "<main><section id=\"rollout\"><h2>Rollout Plan<style>h2{}</style></h2><ul><li>Ship the CLI first<style>#mermaid-1{}</style><script>void 0</script></li><li>Then  the\ndaemon</li></ul></section><div data-ox-section=\"Risks\"><h3>Ignored heading</h3><table><tr><td>Lost feedback</td><td>High</td></tr></table><span class=\"ox-chip\">blocking</span></div><p class=\"stat\">42 open</p><p>Not markable</p><section id=\"notes\"><header><div><h3>Notes</h3></div></header><p class=\"stat\">7 days</p></section><section id=\"appendix\"><ul><li>Extra</li></ul></section></main>",
+    "targets": [
+      {"anchor": "he69273c6", "section": "Rollout Plan", "label": "Rollout PlanShip the CLI firstThen the daemon"},
+      {"anchor": "ha58cafdc", "section": "Rollout Plan", "label": "Ship the CLI first"},
+      {"anchor": "haca354ce", "section": "Rollout Plan", "label": "Then the daemon"},
+      {"anchor": "ha495a82c", "section": "Risks", "label": "Ignored headingLost feedbackHighblocking"},
+      {"anchor": "h6e066338", "section": "Risks", "label": "Lost feedbackHigh"},
+      {"anchor": "he2ab4284", "section": "Risks", "label": "blocking"},
+      {"anchor": "hc819ff50", "section": "", "label": "42 open"},
+      {"anchor": "h2af927d4", "section": "Notes", "label": "Notes7 days"},
+      {"anchor": "hb55fe0b4", "section": "Notes", "label": "7 days"},
+      {"anchor": "hd3f9bba0", "section": "appendix", "label": "Extra"},
+      {"anchor": "hd3f9bba0", "section": "appendix", "label": "Extra"}
+    ]
+  }
+}

@@ -1,0 +1,51 @@
+schema_version: "1.0"
+name: 02-consult-recency
+description: >
+  A "did yesterday's work fix X?" question. Prime's consult-first routing says
+  recency questions go to `ox session list`; the answer (and the test's name)
+  live only in the ledger, never in the repo.
+tags: [consult, recency, bash]
+expected_outcome: >
+  WITH ox the agent runs `ox session list`, names TestListingHandler_Timeout,
+  and reports the 200-of-200 verification. WITHOUT ox it has no source and
+  must say so (or guess).
+context:
+  scaffold_script: scaffold.sh
+execution:
+  prompt: |
+    Did yesterday's session actually fix the flaky test, or is it still flaking?
+    Give me a straight answer with the evidence you used.
+  max_turns: 15
+  timeout_seconds: 240
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+    - Skill
+    - "Bash(ox:*)"
+    - "Bash(git log:*)"
+    - "Bash(go test:*)"
+runs: 3
+graders:
+  - type: regex
+    name: names-the-test
+    target: last_message
+    pattern: "TestListingHandler_Timeout"
+    weight: 2
+  - type: regex
+    name: cites-verification-runs
+    target: last_message
+    pattern: "200 (of|/) ?200|count=200"
+  - type: tool_used
+    name: consulted-session-list
+    tool: Bash
+    input_match: "ox session list"
+    arm: both
+  - type: llm
+    name: honest-answer-with-evidence
+    criteria: |
+      Pass if the answer clearly states the flaky test WAS fixed yesterday and
+      backs it with evidence from a recorded session (the test name and/or the
+      repeated-run verification). Fail if it guesses without evidence, claims
+      it cannot know when a session record was available, or reports the test
+      as still flaking.

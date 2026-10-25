@@ -5,6 +5,7 @@ import (
 	"os"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -139,23 +140,26 @@ func TestAccumulator_MultipleFiles(t *testing.T) {
 	assert.Equal(t, ChangeDeleted, byPath["src/c.go"])
 }
 
+// Virtual time prevents scheduler delays from settling the first event before
+// the second is added, and checks the exact reset boundary.
 func TestAccumulator_SettleResetsOnNewEvent(t *testing.T) {
-	acc := NewChangeAccumulator(100 * time.Millisecond)
-	defer acc.Stop()
-
-	acc.AddChange("src/foo.go", ChangeModified, false)
-	time.Sleep(60 * time.Millisecond)                  // 60ms < 100ms settle
-	acc.AddChange("src/bar.go", ChangeModified, false) // resets timer
-
-	// at 60ms after first event, timer was reset — should not have settled yet
-	changes := acc.DrainSettled()
-	assert.Nil(t, changes)
-
-	// wait for full settle period from last event
-	require.Eventually(t, func() bool {
-		changes = acc.DrainSettled()
-		return len(changes) == 2
-	}, 2*time.Second, 10*time.Millisecond)
+	synctest.Test(t, func(t *testing.T) {
+		acc := NewChangeAccumulator(100 * time.Millisecond)
+		defer acc.Stop()
+		acc.AddChange("src/foo.go", ChangeModified, false)
+		time.Sleep(60 * time.Millisecond)
+		acc.AddChange("src/bar.go", ChangeModified, false)
+		require.Nil(t, acc.DrainSettled())
+		time.Sleep(99 * time.Millisecond)
+		synctest.Wait()
+		require.Nil(t, acc.DrainSettled(), "a new event must restart the full settle period")
+		time.Sleep(time.Millisecond)
+		synctest.Wait()
+		changes := acc.DrainSettled()
+		require.Len(t, changes, 2)
+		paths := []string{changes[0].Path, changes[1].Path}
+		require.ElementsMatch(t, []string{"src/foo.go", "src/bar.go"}, paths)
+	})
 }
 
 // --- OnSettled callback tests ---
@@ -193,22 +197,37 @@ func TestChangeAccumulator_OnSettledCallback(t *testing.T) {
 func TestChangeAccumulator_OnSettledNotCalledAfterStop(t *testing.T) {
 	t.Parallel()
 
-	acc := NewChangeAccumulator(100 * time.Millisecond)
+	for _, lateSettle := range []bool{false, true} {
+		name := "timer canceled"
+		if lateSettle {
+			name = "late settle after stop"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				acc := NewChangeAccumulator(100 * time.Millisecond)
+				defer acc.Stop()
 
-	var count int64
-	acc.SetOnSettled(func() {
-		atomic.AddInt64(&count, 1)
-	})
+				var count int64
+				acc.SetOnSettled(func() {
+					atomic.AddInt64(&count, 1)
+				})
+				acc.AddChange("src/main.go", ChangeModified, false)
+				acc.Stop()
 
-	acc.AddChange("src/main.go", ChangeModified, false)
-	// stop before settle fires
-	time.Sleep(20 * time.Millisecond)
-	acc.Stop()
+				if lateSettle {
+					// Model a timer callback already dispatched before Stop:
+					// Timer.Stop cannot prevent it from entering settle later.
+					acc.settle()
+				}
+				// Virtual time cannot overrun the stop ordering on a busy runner.
+				time.Sleep(200 * time.Millisecond)
+				synctest.Wait()
 
-	// wait past settle window
-	time.Sleep(200 * time.Millisecond)
-
-	assert.Equal(t, int64(0), atomic.LoadInt64(&count), "callback should not fire after Stop()")
+				assert.Equal(t, int64(0), atomic.LoadInt64(&count), "callback should not fire after Stop()")
+				assert.Empty(t, acc.DrainSettled(), "stopped changes should not be published")
+			})
+		})
+	}
 }
 
 // TestChangeAccumulator_OnSettledNotCalledWhenEmpty verifies that the callback

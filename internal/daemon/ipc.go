@@ -26,7 +26,61 @@ const maxIPCMessageSize = 1 * 1024 * 1024 // 1MB
 
 // maxConcurrentConnections limits the number of concurrent IPC connections.
 // Prevents file descriptor or memory exhaustion from connection floods.
-const maxConcurrentConnections = 100
+//
+// Sizing: one `ox agent hook PostToolUse` dials the daemon 5 times (two
+// liveness pings, heartbeat, settings fetch, whispers). A fan-out agent session
+// spawns ~5 hooks/s with up to 40 alive at once (each 1-2 s under load), so a
+// burst can hold 40 hooks x 5 dials = 200 connections. 512 gives ~2.5x headroom
+// over that; unix sockets are cheap (one fd + one goroutine each).
+const maxConcurrentConnections = 512
+
+// connectionWaitTimeout bounds how long the accept loop waits for a free slot
+// before rejecting a connection. A burst queues for a moment instead of being
+// dropped; only a genuinely stuck daemon (no slot frees in this window) rejects.
+const connectionWaitTimeout = 2 * time.Second
+
+// rejectionLogInterval is the minimum spacing between "connection limit
+// reached" warnings. Rejections inside the window are counted and summarized.
+const rejectionLogInterval = 5 * time.Second
+
+// rejectionLog coalesces per-connection rejection warnings into one line per
+// burst plus one summary count. The zero value is ready to use.
+type rejectionLog struct {
+	mu         sync.Mutex
+	suppressed int
+	timer      *time.Timer
+}
+
+// note records one rejection. The first rejection in a burst logs immediately;
+// later ones are counted and reported by a single summary when the window ends.
+func (r *rejectionLog) note(logger *slog.Logger, limit int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.timer == nil {
+		logger.Warn("connection limit reached, rejecting", "limit", limit)
+		r.timer = time.AfterFunc(rejectionLogInterval, func() { r.flush(logger, limit) })
+		return
+	}
+	r.suppressed++
+}
+
+func (r *rejectionLog) flush(logger *slog.Logger, limit int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.suppressed > 0 {
+		logger.Warn("connection limit reached, rejected more connections",
+			"limit", limit, "additional_rejected", r.suppressed, "window", rejectionLogInterval)
+	}
+	r.suppressed = 0
+	r.timer = nil
+}
+
+// finalResponseWriteTimeout bounds delivery of the authoritative response after
+// a long-running handler. ProgressWriter deliberately installs a very short
+// best-effort deadline; sendResponse must replace that stale deadline or a
+// handler that does work after its last progress update can complete
+// successfully while the client sees an EOF/timeout instead of the result.
+const finalResponseWriteTimeout = 5 * time.Second
 
 // Message types for IPC communication.
 const (
@@ -48,6 +102,7 @@ const (
 	MsgTypeDoctor            = "doctor"              // trigger daemon health checks (anti-entropy, etc.)
 	MsgTypeTriggerGC         = "trigger_gc"          // force GC reclone for team contexts (synchronous)
 	MsgTypeTriggerGCAsync    = "trigger_gc_async"    // force GC reclone for team contexts (background, returns immediately)
+	MsgTypeTriggerKBGC       = "trigger_kb_gc"       // run the knowledge-bubble GC pass now (synchronous, no reclone)
 	MsgTypeCodeIndex         = "code_index"          // index local code with progress
 	MsgTypeCodeStatus        = "code_status"         // get code index status/stats
 	MsgTypeWhispers          = "whispers"            // query whisper entries for an agent
@@ -286,6 +341,9 @@ type CheckoutResult struct {
 	Path          string `json:"path"`           // actual path where repo exists
 	AlreadyExists bool   `json:"already_exists"` // true if repo already existed
 	Cloned        bool   `json:"cloned"`         // true if we performed a clone
+	// InProgress is true when another clone of this path was already running,
+	// so none was started. That clone lands on its own.
+	InProgress bool `json:"in_progress,omitempty"`
 }
 
 // TeamSyncResult is the per-team outcome of a team-context sync, returned as the
@@ -301,9 +359,13 @@ type TeamSyncResult struct {
 	Error    string `json:"error,omitempty"`
 }
 
+// CheckoutStageDownloading is the CheckoutProgress stage a Ledger clone
+// reports while it downloads.
+const CheckoutStageDownloading = "downloading"
+
 // CheckoutProgress is sent during long-running checkout operations.
 type CheckoutProgress struct {
-	Stage   string `json:"stage"`             // "connecting", "cloning", "verifying"
+	Stage   string `json:"stage"`             // "connecting", "cloning", "downloading", "verifying"
 	Percent *int   `json:"percent,omitempty"` // 0-100, nil if unknown
 	Message string `json:"message"`           // human-readable progress message
 }
@@ -352,6 +414,9 @@ type FrictionPayload struct {
 
 	// ErrorMsg is the redacted, truncated error message (max 200 chars).
 	ErrorMsg string `json:"error_msg"`
+
+	// Suggestion is the redacted corrected command the CLI proposed, when it had one.
+	Suggestion string `json:"suggestion,omitempty"`
 }
 
 // SessionFinalizeIPCPayload carries the minimum info needed for the daemon
@@ -702,6 +767,7 @@ type DaemonService interface {
 	MarkErrors(ids []string)
 	TriggerGC() *TriggerGCResponse
 	TriggerGCAsync() *TriggerGCResponse
+	TriggerKBGC()
 	CodeIndex(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error)
 	Doctor() *DoctorResponse
 	SessionFinalize(payload SessionFinalizeIPCPayload)
@@ -924,6 +990,10 @@ func (c *CallbackService) TriggerGCAsync() *TriggerGCResponse {
 	return nil
 }
 
+// TriggerKBGC is a no-op: nothing wires a kb GC handler into CallbackService.
+// The daemon serves trigger_kb_gc through daemonServiceImpl.
+func (c *CallbackService) TriggerKBGC() {}
+
 func (c *CallbackService) CodeIndex(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) {
 	c.mu.Lock()
 	fn := c.onCodeIndex
@@ -1048,6 +1118,9 @@ type Server struct {
 	mu       sync.Mutex
 	connWg   sync.WaitGroup // tracks active connection handler goroutines
 	connSem  chan struct{}  // semaphore for connection limit
+	connWait time.Duration  // how long accept waits for a free slot before rejecting
+
+	rejections rejectionLog // coalesces connection-limit warnings per burst
 
 	startTime time.Time
 
@@ -1059,6 +1132,11 @@ type Server struct {
 	lastCallerVersion     string
 	lastCallerVersionAt   time.Time
 	skewWarnLoggedVersion string // de-dup warn log per skewing version
+
+	// workspaceMismatchWarned records caller IDs already warned about for a
+	// workspace-ID mismatch, so each caller warns once per daemon lifetime.
+	// Bounded by the number of clones/worktrees that talk to this daemon.
+	workspaceMismatchWarned sync.Map // caller ID -> struct{}
 
 	// peerCredDisabled, when true, skips the SO_PEERCRED / LOCAL_PEERCRED
 	// check in handleConnection. Test-only — exercised by in-process IPC
@@ -1103,6 +1181,32 @@ func (s *Server) recordCallerVersion(v string) {
 	s.logger.Warn("CLI version skew detected — please upgrade `ox`",
 		"caller_version", v,
 		"daemon_version", Version())
+}
+
+// recordWorkspaceMismatch logs a request whose workspace ID differs from the
+// daemon's. The first mismatch from each caller is a warning; every later one
+// from the same caller drops to debug.
+//
+// A mismatch is routine, not a fault: the CLI stamps the ID derived from its
+// cwd, which for a subdirectory differs from the repo-root ID the daemon runs
+// under, and resolveSocketPath still routes the request to the right daemon.
+// Warning on every request turned that into ~39k log lines a day. One warning
+// per caller keeps the signal (a caller is configured oddly) without the flood.
+func (s *Server) recordWorkspaceMismatch(msg Message) {
+	// older clients send no caller ID; their workspace ID is the next best key
+	key := msg.CallerID
+	if key == "" {
+		key = msg.WorkspaceID
+	}
+	level := slog.LevelDebug
+	if _, seen := s.workspaceMismatchWarned.LoadOrStore(key, struct{}{}); !seen {
+		level = slog.LevelWarn
+	}
+	s.logger.Log(context.Background(), level, "workspace mismatch",
+		"msg_type", msg.Type,
+		"expected", CurrentWorkspaceID(),
+		"got", msg.WorkspaceID,
+		"caller_id", msg.CallerID)
 }
 
 // LastCallerVersion returns the most recent CLI version observed via
@@ -1180,6 +1284,7 @@ func NewServer(logger *slog.Logger) *Server {
 		service:   svc,
 		startTime: time.Now(),
 		connSem:   make(chan struct{}, maxConcurrentConnections),
+		connWait:  connectionWaitTimeout,
 	}
 	s.router = s.buildRouter()
 	return s
@@ -1193,6 +1298,7 @@ func NewServerWithService(logger *slog.Logger, service DaemonService) *Server {
 		service:   service,
 		startTime: time.Now(),
 		connSem:   make(chan struct{}, maxConcurrentConnections),
+		connWait:  connectionWaitTimeout,
 	}
 	s.router = s.buildRouter()
 	return s
@@ -1221,6 +1327,7 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeDoctor, handleDoctor)
 	router.Register(MsgTypeTriggerGC, handleTriggerGC)
 	router.Register(MsgTypeTriggerGCAsync, handleTriggerGCAsync)
+	router.Register(MsgTypeTriggerKBGC, handleTriggerKBGC)
 	router.Register(MsgTypeCodeIndex, handleCodeIndex)
 	router.Register(MsgTypeCodeStatus, handleCodeStatus)
 	router.Register(MsgTypeWhispers, handleWhispers)
@@ -1506,23 +1613,21 @@ func (s *Server) Start(ctx context.Context) error {
 			}
 			backoff = 100 * time.Millisecond // reset on success
 
-			// rate limit: try to acquire a slot from the semaphore
-			select {
-			case s.connSem <- struct{}{}:
-				// got slot, proceed with connection
-				s.connWg.Add(1)
-				go func(c net.Conn) {
-					defer func() {
-						<-s.connSem // release slot
-						s.connWg.Done()
-					}()
-					s.handleConnection(ctx, c)
-				}(conn)
-			default:
-				// at connection limit, reject
-				s.logger.Warn("connection limit reached, rejecting", "limit", maxConcurrentConnections)
+			// rate limit: acquire a slot, waiting briefly so a burst queues
+			// instead of dropping hook events
+			if !s.acquireConnSlot(ctx) {
+				s.rejections.note(s.logger, cap(s.connSem))
 				conn.Close()
+				continue
 			}
+			s.connWg.Add(1)
+			go func(c net.Conn) {
+				defer func() {
+					<-s.connSem // release slot
+					s.connWg.Done()
+				}()
+				s.handleConnection(ctx, c)
+			}(conn)
 		}
 	}()
 
@@ -1548,6 +1653,26 @@ func (s *Server) Start(ctx context.Context) error {
 	return ctx.Err()
 }
 
+// acquireConnSlot takes a connection slot, waiting up to s.connWait when the
+// semaphore is full. Returns false if no slot freed in time or ctx was canceled.
+func (s *Server) acquireConnSlot(ctx context.Context) bool {
+	select {
+	case s.connSem <- struct{}{}:
+		return true
+	default:
+	}
+	timer := time.NewTimer(s.connWait)
+	defer timer.Stop()
+	select {
+	case s.connSem <- struct{}{}:
+		return true
+	case <-timer.C:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // handleConnection handles a single client connection.
 func (s *Server) handleConnection(_ context.Context, conn net.Conn) {
 	defer conn.Close()
@@ -1561,7 +1686,7 @@ func (s *Server) handleConnection(_ context.Context, conn net.Conn) {
 	// Tests can opt out via DisablePeerCred (set during test setup) — real
 	// production code paths never set this.
 	if !s.peerCredDisabled {
-		ownerUID := uint32(os.Geteuid())
+		ownerUID := currentProcessUID()
 		peer, err := peerUID(conn)
 		if err != nil {
 			s.logger.Warn("ipc: rejecting connection — peercred lookup failed",
@@ -1599,9 +1724,9 @@ func (s *Server) handleConnection(_ context.Context, conn net.Conn) {
 
 	s.logger.Debug("received message", "type", msg.Type, "workspace_id", msg.WorkspaceID, "caller_id", msg.CallerID)
 
-	// validate workspace ID if provided (warn on mismatch, still process for backward compatibility)
+	// validate workspace ID if provided (warn once per caller on mismatch, still process for backward compatibility)
 	if msg.WorkspaceID != "" && msg.WorkspaceID != CurrentWorkspaceID() {
-		s.logger.Warn("workspace mismatch", "expected", CurrentWorkspaceID(), "got", msg.WorkspaceID, "caller_id", msg.CallerID)
+		s.recordWorkspaceMismatch(msg)
 	}
 
 	// record CLI version skew (ox-mt3k) — track the most recent caller
@@ -1622,6 +1747,12 @@ func (s *Server) handleConnection(_ context.Context, conn net.Conn) {
 
 // sendResponse sends a response to the client.
 func (s *Server) sendResponse(conn net.Conn, resp Response) {
+	// A progress write leaves a 100ms deadline on the shared connection. Reset
+	// it for the final response, which is authoritative rather than best-effort.
+	// This also keeps a disconnected/non-reading client from blocking shutdown.
+	if err := conn.SetWriteDeadline(time.Now().Add(finalResponseWriteTimeout)); err != nil {
+		s.logger.Debug("failed to set IPC response write deadline", "error", err)
+	}
 	data, err := json.Marshal(resp)
 	if err != nil {
 		s.logger.Error("failed to marshal IPC response", "error", err)
@@ -1963,6 +2094,23 @@ func (c *Client) TriggerGCAsync() (*TriggerGCResponse, error) {
 	return &gcResp, nil
 }
 
+// TriggerKBGC asks the daemon to run its knowledge-bubble GC pass (orphan
+// triage into .trash/, then the trash reaper) and blocks until it finishes.
+// The pass reports nothing back; callers recheck disk. Unlike TriggerGC it
+// reclones nothing: apart from the kb API list, which kbGCTriage caps at 30s,
+// it only moves and deletes local directories. A daemon that predates this
+// message returns an "unknown message type" error.
+func (c *Client) TriggerKBGC() error {
+	resp, err := c.sendMessage(Message{Type: MsgTypeTriggerKBGC})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
 // Whispers queries whisper entries for an agent from the daemon.
 // Returns entries since the agent last checked, filtered by attention and topics.
 func (c *Client) Whispers(agentID string, attention string, topics []string) (*WhispersResponse, error) {
@@ -2177,9 +2325,27 @@ func (c *Client) Stop() error {
 // Percent is nil when unknown.
 type ProgressCallback func(stage string, percent *int, message string)
 
+// ErrCheckoutInProgress means the client stopped waiting on a checkout the
+// daemon had not finished: nothing came back within the client's idle window.
+// It is not a clone failure. The daemon does not cancel a checkout when its
+// caller leaves, so the clone goes on in the background.
+var ErrCheckoutInProgress = errors.New("clone still in progress in the daemon")
+
+// ErrCloneAlreadyRunning means the daemon started no clone because another
+// clone of the same path was already running: its background clone, or an
+// earlier `ox doctor --fix`. It wraps ErrCheckoutInProgress, since that clone
+// lands on its own, and unlike a quiet idle window it says nothing about how
+// the running clone is doing.
+var ErrCloneAlreadyRunning = fmt.Errorf("%w: another clone of this path is already running", ErrCheckoutInProgress)
+
 // Checkout requests the daemon to clone a repository.
 // The onProgress callback is called for each progress update (may be nil).
-// Uses a long timeout (60s) since clones can take time.
+// Uses an idle timeout: the deadline resets on each progress message, so the
+// client waits for as long as the daemon keeps reporting. A Ledger clone
+// reports every few seconds while it downloads, and can download for many
+// minutes. When the daemon stays quiet for the whole window, the error wraps
+// ErrCheckoutInProgress. When another clone of the path is already running,
+// the daemon says so at once and the error is ErrCloneAlreadyRunning.
 func (c *Client) Checkout(payload CheckoutPayload, onProgress ProgressCallback) (*CheckoutResult, error) {
 	conn, err := c.Connect()
 	if err != nil {
@@ -2187,12 +2353,12 @@ func (c *Client) Checkout(payload CheckoutPayload, onProgress ProgressCallback) 
 	}
 	defer conn.Close()
 
-	// use configured timeout, with minimum floor for clone operations
-	checkoutTimeout := 60 * time.Second
-	if c.timeout > 0 && c.timeout < checkoutTimeout {
-		checkoutTimeout = c.timeout
+	// idle timeout — reset on each progress message
+	idleTimeout := 60 * time.Second
+	if c.timeout > 0 && c.timeout < idleTimeout {
+		idleTimeout = c.timeout
 	}
-	conn.SetDeadline(time.Now().Add(checkoutTimeout))
+	conn.SetDeadline(time.Now().Add(idleTimeout))
 
 	// marshal payload
 	payloadData, _ := json.Marshal(payload)
@@ -2213,6 +2379,12 @@ func (c *Client) Checkout(payload CheckoutPayload, onProgress ProgressCallback) 
 	reader := bufio.NewReader(conn)
 	for {
 		line, err := reader.ReadBytes('\n')
+		// net.Error, not os.ErrDeadlineExceeded: a Windows named pipe
+		// (go-winio) times out with its own error that only says Timeout().
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			return nil, fmt.Errorf("%w: no progress reported for %s", ErrCheckoutInProgress, idleTimeout)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("read: %w", err)
 		}
@@ -2224,6 +2396,7 @@ func (c *Client) Checkout(payload CheckoutPayload, onProgress ProgressCallback) 
 
 		// check for progress update
 		if resp.Progress != nil {
+			conn.SetDeadline(time.Now().Add(idleTimeout))
 			if onProgress != nil {
 				onProgress(resp.Progress.Stage, resp.Progress.Percent, resp.Progress.Message)
 			}
@@ -2238,6 +2411,9 @@ func (c *Client) Checkout(payload CheckoutPayload, onProgress ProgressCallback) 
 		var result CheckoutResult
 		if err := json.Unmarshal(resp.Data, &result); err != nil {
 			return nil, fmt.Errorf("unmarshal result: %w", err)
+		}
+		if result.InProgress {
+			return nil, ErrCloneAlreadyRunning
 		}
 		return &result, nil
 	}

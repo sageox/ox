@@ -1,0 +1,55 @@
+---
+title: "ox session wait"
+description: "CLI reference for ox session wait"
+sidebar_position: 104
+---
+
+## ox session wait
+
+Wait until this machine's sessions reach the Ledger, and report what did
+
+### Synopsis
+
+Make sure every session recorded on this machine is in the Ledger before the
+machine goes away, such as a CI-like pod. Run it after the AI coworkers exit.
+
+Where the daemon uploads sessions, as on a laptop or a pod, wait hands it every
+session that has ended and waits up to --timeout for the daemon to upload them.
+A crashed AI coworker's session is the daemon's to finish. Elsewhere session end
+has already uploaded, and wait only reports. wait never uploads anything itself.
+
+The report counts the sessions finished since --since and how many of them are
+in the Ledger, lists older pending sessions, and names every session that is
+not in the Ledger with the reason. wait exits 0 only when all are in the Ledger.
+
+Examples:
+  ox session wait --since 2026-10-12T19:00:00Z --json
+
+```
+ox session wait --since <time> [flags]
+```
+
+### Options
+
+```
+  -h, --help               help for wait
+      --since string       count sessions that finished at or after this time: a duration back from now (2h), RFC3339, or YYYY-MM-DD; required
+      --timeout duration   how long to wait for the daemon to upload this machine's sessions (default 20m0s)
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
+      --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
+```
+
+### SEE ALSO
+
+* [ox session](/session)	 - Manage AI coworker sessions

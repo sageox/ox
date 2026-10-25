@@ -1,0 +1,15 @@
+{
+  "summary": "Immutable records (round-<time>-<id>.<digest>.json, resolutions/ and remaps/ alike). accept-0001 retried after the reviewer reopened h1 counts once, at its first acceptance, so h1 stays open. r-v2-0002 holds the same request bytes accepted for Ana and for Ben: a conflict, since a stored operation belongs to the reviewer stamped on it. A per-entry remap moves hold to hnew. r-v2-0004 was edited after it was named: altered, still assembled, review incomplete. The CLI's v1 reader shows h1 resolved and the third risk at hold.",
+  "items": [
+    {"anchor": "h1", "reviewer": "Ana", "status": "request-change", "label": "The first risk", "note": "Still unnamed.", "open": true, "resolution": "verified"},
+    {"anchor": "h2", "reviewer": "Ana", "status": "flag", "label": "The second risk", "note": "Is this still true?", "open": true},
+    {"anchor": "hnew", "reviewer": "Ana", "status": "comment", "label": "The third risk", "note": "Worth a diagram.", "open": true, "remapped_from": "hold"},
+    {"anchor": "h4", "reviewer": "Ben", "status": "comment", "label": "The fourth risk", "note": "Edited after it was named.", "open": true}
+  ],
+  "failures": [
+    {"path": "feedback/round-20261001-060000.000000000-r-v2-0004.0a582c88b624f281.json", "reason": "altered"}
+  ],
+  "conflicts": [
+    {"kind": "round", "id": "r-v2-0002", "paths": ["feedback/round-20261001-010000.000000000-r-v2-0002.1f978e62ad5bd112.json", "feedback/round-20261001-050000.000000000-r-v2-0002.29b9c7ba2594a30b.json"]}
+  ]
+}

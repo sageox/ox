@@ -1,0 +1,53 @@
+schema_version: "1.0"
+name: 09-prime-warning-resilience
+description: >
+  The sandbox has no cloud, so prime's KB fetch fails with "connection
+  refused" on every WITH run. Before payload-mode logging, that WARN rode the
+  hook's 2>&1 in front of the full <ox-prime> bundle and the model concluded
+  no team context had loaded (pilot 2026-09-11, case 04: 0.25 vs 1.00). This
+  case asks the model directly whether the context arrived.
+tags: [uptake, resilience, no-bash, smoke]
+expected_outcome: >
+  WITH the plugin the model says team context is loaded and names the
+  retry-policy rule from prime. WITHOUT it there is nothing to name; the
+  W/OUT arm scoring 0 is expected and the Δ is the whole point.
+context:
+  scaffold_script: scaffold.sh
+execution:
+  prompt: |
+    Quick check before I start: is this team's shared context loaded in your
+    session right now? Answer yes or no in the first line, then list the names
+    of any team rules you can see. Do not run any commands or read any files.
+  max_turns: 3
+  timeout_seconds: 120
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+    - Skill
+runs: 3
+graders:
+  - type: regex
+    name: names-the-inlined-rule
+    target: last_message
+    pattern: "retry-policy"
+    weight: 2
+  - type: regex
+    name: says-yes-first
+    target: last_message
+    flags: "i"
+    pattern: "^\\s*[*_]*yes"
+  # Only claims that the CONTEXT itself did not arrive count. An honest
+  # "indexed rule body not loaded until read" is correct and must pass.
+  - type: regex
+    name: does-not-declare-context-missing
+    target: last_message
+    match: not_contains
+    flags: "i"
+    pattern: "(team |shared )?context (is |was )?(not|never) (loaded|available|present)|no team context|too large|truncated|unreachable|rules i can see:? *none"
+  - type: tool_used
+    name: answered-from-prime-alone
+    tool: Read
+    min: 0
+    max: 0
+    arm: both

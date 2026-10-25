@@ -80,3 +80,79 @@ Feature: The Browser Review Round-Trip
       When his connection to the review loop drops and then comes back
       Then Quinn's in-progress marks are still on the page
       And he can submit them once he is back
+
+  Rule: A reviewer can comment on exactly the words they highlight
+
+    Scenario: Devon highlights a phrase and Avery receives those exact words
+      Given Devon is reviewing one of Avery's plans on the served review page
+      When Devon highlights a phrase in a section, writes a note, and submits
+      Then Avery receives the item with the highlighted words, the section, and the note
+      And Devon's page shows the phrase highlighted
+
+    Scenario: Devon still marks a whole section with a plain click
+      Given Devon highlighted a phrase in a section
+      When Devon clicks elsewhere in that section and leaves a note
+      Then that note is about the whole section, not the phrase
+      And Avery receives the highlight and the section note as separate items
+
+    Scenario: Devon highlights a word the section repeats
+      Given a word appears twice in one section of Avery's plan
+      When Devon highlights just that word
+      Then ox asks Devon to highlight a longer phrase
+      And no comment is left on an ambiguous spot
+
+    Scenario: Avery addresses a highlight and Devon's page shows it resolved
+      Given Devon left a highlight on Avery's plan and is still on the page
+      When Avery addresses the highlight and marks it resolved
+      Then Devon's page shows the highlighted words as addressed without Devon reopening it
+
+    Scenario: Avery rewrites the highlighted words and Devon can still accept the fix
+      Given Avery addressed Devon's highlight by rewriting the words it covered
+      When Devon looks at the comments on the page
+      Then the highlight is still listed, marked addressed with its text changed
+      And Devon can accept or reopen it from there
+
+    Scenario: Devon reopens a highlight and Avery gets the words back
+      Given Avery marked Devon's highlight addressed but Devon is not satisfied
+      When Devon reopens it on the page
+      Then the item that returns to Avery still quotes the highlighted words
+
+    Scenario: Quinn's unsent highlight survives the review server restarting
+      Given Quinn highlighted a phrase and saved a note but has not submitted it
+      When the review server stops and is started again
+      Then Quinn's page reconnects on its own with the phrase still highlighted and the note intact
+      And Quinn can submit it once the page is back
+
+    Scenario: Quinn reloads the page while the review server is down
+      Given Quinn opened the review page and left an unsent highlight
+      When the review server stops and Quinn reloads the page
+      Then the plan still shows, marked offline, with the phrase still highlighted
+
+  Rule: A reviewer's feedback is sent once, as theirs, whatever happens on the way
+
+    Scenario: Devon's answer is lost and his feedback still arrives once
+      Given Devon submitted his marks and the answer never reached his page
+      When his page reconnects to the review loop
+      Then Avery receives Devon's marks once, as one round
+
+    Scenario: Devon edits a note while his feedback is on its way
+      Given Devon submitted his marks and they have not been confirmed yet
+      When Devon edits one of the notes
+      Then the edit stays on his page as unsent, for his next Submit
+
+    Scenario: Devon's browser cannot store his feedback
+      Given Devon's browser refuses to store anything more
+      When Devon saves a note and submits
+      Then the page says the note is not saved and that nothing was sent
+      And once his browser can store it again, his Submit sends it
+
+    Scenario: Devon reviews in two tabs
+      Given Devon has the plan open in two tabs and marks it up in both
+      When he submits in one tab and then in the other before the first is confirmed
+      Then Avery receives the marks from both tabs once, as one round
+
+    Scenario: Riley signs in on a browser where Devon's feedback is still waiting
+      Given Devon submitted feedback in a viewer where reviewers sign in, and it has not reached the server
+      When Riley signs in on the same browser
+      Then Riley sees none of Devon's feedback and sends none of it
+      And when Devon is back his feedback goes out once, as his

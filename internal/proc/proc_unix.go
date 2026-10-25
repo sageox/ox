@@ -11,6 +11,12 @@ import (
 	"syscall"
 )
 
+// Detach gives a background command its own session so tool-runner cleanup
+// cannot kill it along with the caller's process group.
+func Detach(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+}
+
 // parentPID returns the parent PID of the given PID using ps.
 func parentPID(pid int) (int, error) {
 	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "ppid=").Output()

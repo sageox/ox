@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
@@ -123,7 +124,9 @@ Safety:
     actionable here. They require the gated history-rewrite tool. The
     correct response is: rotate the leaked credential, mark the finding
     as known, and follow up via the team comms process.
-  - Per-finding human approval. There is no bulk-approve flag.
+  - Per-file human approval. There is no bulk-approve flag, and the global
+    ` + "`--yes`" + ` does NOT approve redactions: every file is asked about
+    individually, and ` + "`q`" + ` quits the pass with the snapshot intact.
   - Each redaction pass appends a RedactionPass entry to the session's
     meta.json (ox-8bfh) recording WHO redacted, WHEN, with WHICH catalog
     version+hash, and WHAT was caught — never the matched bytes.`,
@@ -209,6 +212,9 @@ func runSessionAudit(cmd *cobra.Command, args []string) error {
 // runSessionRedact is the cobra entrypoint for the destructive
 // interactive surface. Pins DryRun=false; rewrite proceeds.
 func runSessionRedact(cmd *cobra.Command, args []string) error {
+	if cli.NoInput() {
+		return fmt.Errorf("session redact requires interactive input; omit --no-input or use 'ox session audit' to scan without changes")
+	}
 	ledgerPath, err := resolveLedgerPathForSessionCmd(redactLedgerPath)
 	if err != nil {
 		return err
@@ -528,8 +534,11 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	}
 
 	// Stage + amend in a single holding commit. The operator can review
-	// the amended diff before running `ox session push`.
-	if err := stageAndAmendRedactedFiles(opts.LedgerPath, byPath); err != nil {
+	// the amended diff before running `ox session push`. The amend moves the
+	// branch, so it runs under the repo lock (sageox/ox#1541).
+	if err := gitutil.WithRepoLock(context.Background(), opts.LedgerPath, func() error {
+		return stageAndAmendRedactedFiles(opts.LedgerPath, byPath)
+	}); err != nil {
 		return fmt.Errorf("stage/amend: %w", err)
 	}
 
@@ -926,7 +935,9 @@ func redactFileInPlace(abs string, _ *session.Redactor) error {
 	}
 
 	scanner := bufio.NewScanner(src)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	// Match scanFileForSecrets: a line the scanner accepted must be redactable
+	// here, or the file falls through to quarantine instead of being cleaned.
+	scanner.Buffer(make([]byte, 64*1024), rawJSONLMaxLineBytes)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {

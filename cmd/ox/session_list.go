@@ -55,7 +55,8 @@ Shows date, time, user, and hydration status for each session.
 Sessions are sorted by date with newest first.
 
 By default, only shows sessions from the last 7 days for performance.
-Use --all to show all sessions regardless of age.
+Use --all to show all sessions regardless of age, or --since/--until to pick
+your own window (an explicit window replaces the 7-day default).
 
 Use --repo to list another repo's sessions by filesystem path instead of
 the current directory. The path must be the repo root (.sageox/config.json
@@ -64,19 +65,41 @@ session data reflects the --repo target, but ledger-merged sessions still
 come from the CURRENT directory's configured ledger — this only matters
 if the two repos use different team ledgers.
 
+Pass a canonical ` + "`repo_<uuid>`" + ` to --repo instead to read a hosted ledger kept
+by 'ox sync --read-only'. That form needs no checkout and no project: it
+selects the ledger with SAGEOX_ENDPOINT and XDG_DATA_HOME, and reads it
+while holding the same lock the refresh takes, so a concurrent refresh
+cannot show a half-written checkout. See docs/specs/ledger-read-sync.md.
+
 Examples:
   ox session list              # show last 10 from past 7 days
   ox session list --limit 20   # show last 20 from past 7 days
+  ox session list --since 2d   # sessions from the last 2 days
+  ox session list --since 14d --until 7d  # sessions from 14 days ago to 7 days ago
   ox session list --all        # show all sessions (may be slow)
-  ox session list --repo /path/to/other/repo  # list a different repo's sessions`,
-	RunE: runSessionList,
+  ox session list --repo /path/to/other/repo  # list a different repo's sessions
+  ox session list --repo repo_019ff2f5-2079-7be1-b05e-8caad2772e61 --json  # hosted ledger`,
+	Annotations: map[string]string{annotationTimeOrdered: "true"},
+	RunE:        runSessionList,
 }
 
 func init() {
 	sessionCmd.AddCommand(sessionListCmd)
-	sessionListCmd.Flags().Int("limit", 10, "maximum sessions to show (0 for no limit)")
-	sessionListCmd.Flags().Bool("all", false, "show all sessions regardless of age (may be slow)")
-	sessionListCmd.Flags().String("repo", "", "list sessions for a different repo by filesystem path (must be the repo root; default: current repo)")
+	registerSessionListFlags(sessionListCmd)
+}
+
+// registerSessionListFlags binds the list flags in one place so the command
+// and its tests share the exact production surface.
+func registerSessionListFlags(cmd *cobra.Command) {
+	cmd.Flags().Int("limit", 10, "maximum sessions to show (0 for no limit)")
+	cmd.Flags().Bool("all", false, "show all sessions regardless of age (may be slow)")
+	cmd.Flags().String("since", "", "only sessions started at or after this time: a duration (30m, 2h, 7d, 1w), RFC3339, or YYYY-MM-DD (replaces the 7-day default window)")
+	cmd.Flags().String("until", "", "only sessions started before this time (same forms as --since; a bare date includes that whole day)")
+	// --window is the spelling agents reach for after seeing a "window" field in
+	// other list output; it is --since by another name, hidden so help teaches one.
+	cmd.Flags().String("window", "", "alias of --since")
+	_ = cmd.Flags().MarkHidden("window")
+	cmd.Flags().String("repo", "", "another repo's sessions: a filesystem path (must be the repo root), or a canonical repo_<uuid> to read a hosted ledger (default: current repo)")
 }
 
 // sessionListOutput is the JSON output format for session list.
@@ -112,9 +135,91 @@ type sessionListEntry struct {
 // is an agent. Keep terse — it ships to every agent invocation.
 const sessionListAgentGuidance = "Pick sessions by title/summary; run 'ox session view <name>' to dig in. If hydration_status='dehydrated', run 'ox session download <name>' first."
 
+// sessionWindow is the --since/--until selection of a session list. An
+// explicit window replaces the 7-day default: asking for "until 3 weeks ago"
+// must not be silently answered from the last week only.
+type sessionWindow struct {
+	since, until       time.Time
+	sinceRaw, untilRaw string
+}
+
+// parseSessionWindow reads --since (or its hidden --window alias, with --since
+// winning when both are set) and --until.
+func parseSessionWindow(cmd *cobra.Command) (sessionWindow, error) {
+	sinceRaw, _ := cmd.Flags().GetString("since")
+	if sinceRaw == "" {
+		sinceRaw, _ = cmd.Flags().GetString("window")
+	}
+	untilRaw, _ := cmd.Flags().GetString("until")
+	since, until, err := resolveTimeWindow(sinceRaw, untilRaw)
+	if err != nil {
+		return sessionWindow{}, err
+	}
+	return sessionWindow{since: since, until: until, sinceRaw: sinceRaw, untilRaw: untilRaw}, nil
+}
+
+func (w sessionWindow) explicit() bool {
+	return !w.since.IsZero() || !w.until.IsZero()
+}
+
+// list reads one store with the narrowest scan that covers the window. The
+// store's directory-name filter makes a bounded --since cheap; only a window
+// open at the old end (--all, or --until alone) pays for a full scan.
+func (w sessionWindow) list(store *session.Store, showAll bool) ([]session.SessionInfo, error) {
+	switch {
+	case !w.since.IsZero():
+		return store.ListSessionsSince(w.since)
+	case showAll || !w.until.IsZero():
+		return store.ListAllSessions()
+	}
+	return store.ListSessions()
+}
+
+// filter keeps the sessions started inside the window, preserving order.
+func (w sessionWindow) filter(sessions []session.SessionInfo) []session.SessionInfo {
+	if !w.explicit() {
+		return sessions
+	}
+	kept := make([]session.SessionInfo, 0, len(sessions))
+	for _, s := range sessions {
+		if inTimeWindow(s.CreatedAt, w.since, w.until) {
+			kept = append(kept, s)
+		}
+	}
+	return kept
+}
+
+// label is the JSON "window" value: the default 7d, all, or the bounds asked for.
+func (w sessionWindow) label(showAll bool) string {
+	switch {
+	case w.explicit():
+		parts := make([]string, 0, 2)
+		if w.sinceRaw != "" {
+			parts = append(parts, "since="+w.sinceRaw)
+		}
+		if w.untilRaw != "" {
+			parts = append(parts, "until="+w.untilRaw)
+		}
+		return strings.Join(parts, " ")
+	case showAll:
+		return "all"
+	}
+	return "7d"
+}
+
 func runSessionList(cmd *cobra.Command, args []string) error {
+	// A canonical repo_<uuid> selects a hosted ledger that the caller has no
+	// checkout of; a path selects another local project. Nothing a caller would
+	// pass as a path can spell a repo ID, so the two never collide.
+	if repoID, _ := cmd.Flags().GetString("repo"); hostedLedgerSelected(repoID) {
+		return runHostedSessionList(cmd, repoID)
+	}
 	limit, _ := cmd.Flags().GetInt("limit")
 	showAll, _ := cmd.Flags().GetBool("all")
+	window, windowErr := parseSessionWindow(cmd)
+	if windowErr != nil {
+		return windowErr
+	}
 	repoPath, _ := cmd.Flags().GetString("repo")
 	jsonOutput, _ := cmd.Root().PersistentFlags().GetBool("json")
 
@@ -176,12 +281,9 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 	var sessions []session.SessionInfo
 
 	// --all: scan all sessions (may be slow with many sessions)
+	// --since/--until: scan only what the window needs
 	// default: only scan sessions from last 7 days for performance
-	if showAll {
-		sessions, err = store.ListAllSessions()
-	} else {
-		sessions, err = store.ListSessions()
-	}
+	sessions, err = window.list(store, showAll)
 	if err != nil {
 		return fmt.Errorf("list sessions: %w", err)
 	}
@@ -203,12 +305,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 	if ledgerAvailable {
 		ledgerStore, storeErr := session.NewStore(ledgerPath)
 		if storeErr == nil {
-			var ledgerSessions []session.SessionInfo
-			if showAll {
-				ledgerSessions, _ = ledgerStore.ListAllSessions()
-			} else {
-				ledgerSessions, _ = ledgerStore.ListSessions()
-			}
+			ledgerSessions, _ := window.list(ledgerStore, showAll)
 
 			// mark ledger sessions as uploaded using merge key.
 			// Drafts are excluded: a meta.json-only placeholder means the
@@ -223,17 +320,15 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 			// merge local sessions with ledger sessions (local wins on duplicates)
 			sessions = mergeSessionSources(sessions, ledgerSessions)
 
-			// scan ledger cache for in-progress or unuploaded sessions
-			// recordings are initially written to {ledger}/.sageox/cache/sessions/ before upload
-			ledgerCachePath := filepath.Join(ledgerPath, ".sageox", "cache")
-			cacheStore, cacheErr := session.NewStore(ledgerCachePath)
-			if cacheErr == nil {
-				var cacheSessions []session.SessionInfo
-				if showAll {
-					cacheSessions, _ = cacheStore.ListAllSessions()
-				} else {
-					cacheSessions, _ = cacheStore.ListSessions()
+			// scan every cache location for in-progress or unuploaded sessions:
+			// recordings are written to {ledger}/.sageox/cache/sessions/ before
+			// upload, and a held session may sit in any XDG cache (GH #1095)
+			for _, cacheSessionsDir := range session.HeldSessionDirs(ledgerPath) {
+				cacheStore, cacheErr := session.NewStore(filepath.Dir(cacheSessionsDir))
+				if cacheErr != nil {
+					continue
 				}
+				cacheSessions, _ := window.list(cacheStore, showAll)
 
 				// merge cache sessions (lowest priority)
 				sessions = mergeSessionSources(sessions, cacheSessions)
@@ -246,19 +341,18 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 		slog.Debug("ledger not available for session list", "err", ledgerErr)
 	}
 
+	// the store scans are coarse (directory-name time); the window is exact
+	sessions = window.filter(sessions)
+
 	// handle empty case
 	if len(sessions) == 0 {
 		if jsonOutput {
-			window := "7d"
-			if showAll {
-				window = "all"
-			}
 			out := sessionListOutput{
 				Sessions:        []sessionListEntry{},
 				RepoName:        repoName,
 				RepoID:          repoID,
 				LedgerAvailable: ledgerAvailable,
-				Window:          window,
+				Window:          window.label(showAll),
 			}
 			if inAgent {
 				out.Guidance = sessionListAgentGuidance
@@ -291,51 +385,11 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 
 	// JSON output
 	if jsonOutput {
-		window := "7d"
-		if showAll {
-			window = "all"
-		}
-		entries := make([]sessionListEntry, 0, len(sessions))
-		for _, t := range sessions {
-			uploaded := uploadedSessions[sessionMergeKey(t)]
-			status := string(session.ClassifySession(t, uploaded))
-			user := t.Username
-			if user == "" {
-				user = localUser
-			}
-			// legacy sessions leave SessionName empty — fall back to the filename so
-			// agents always have a usable identifier for the 'ox session view <name>'
-			// follow-up step described in the guidance hint.
-			name := t.SessionName
-			if name == "" {
-				name = t.Filename
-			}
-			entries = append(entries, sessionListEntry{
-				Name:      name,
-				Date:      t.CreatedAt.Format("2006-01-02"),
-				Time:      t.CreatedAt.Format("15:04"),
-				User:      user,
-				Status:    status,
-				Recording: t.Recording,
-				// Filter leaky strings out of JSON output too — agents
-				// (claude-code, codex, etc.) consume this as context and
-				// would otherwise see "Summary failed content validation:..."
-				// as if it were the session's real title. Same invariant the
-				// human-readable sessionBlurb enforces.
-				Title:           sanitizedNonLeakySessionText(t.Title),
-				Summary:         sanitizedNonLeakySessionText(t.Summary),
-				EntryCount:      t.EntryCount,
-				IsSubagent:      t.IsSubagent,
-				Origin:          t.Origin,
-				HydrationStatus: string(t.HydrationStatus),
-				StopReason:      t.StopReason,
-				HasRawData:      t.HasRawData,
-			})
-		}
+		entries := sessionListEntries(sessions, uploadedSessions, localUser)
 		out := sessionListOutput{
 			Sessions:        entries,
 			Total:           len(entries),
-			Window:          window,
+			Window:          window.label(showAll),
 			RepoName:        repoName,
 			RepoID:          repoID,
 			LedgerAvailable: ledgerAvailable,
@@ -370,7 +424,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 		cli.StyleDim.Render("Total:"),
 		len(sessions))
 
-	if !showAll {
+	if !showAll && !window.explicit() {
 		fmt.Printf(" %s", cli.StyleDim.Render("(last 7 days; use --all for older)"))
 	} else if limit > 0 && len(sessions) >= limit {
 		fmt.Printf(" %s", cli.StyleDim.Render("(use --limit 0 to show all)"))
@@ -446,6 +500,11 @@ func printSessionRow(t session.SessionInfo, uploaded bool, localUser string) {
 	case session.StatusCanceled:
 		statusStr = "✗ canceled"
 		statusStyle = "ghost" // dim — discarded
+	case session.StatusHeld:
+		// Kept on this machine by choice (session_publishing: manual), not
+		// stranded: distinct from "local only", which reads as a failure.
+		statusStr = "◆ held · local"
+		statusStyle = "local"
 	default:
 		statusStr = "✗ local only"
 		statusStyle = "local"
@@ -691,7 +750,9 @@ func sessionMergeKey(s session.SessionInfo) string {
 }
 
 // mergeSessionSources deduplicates sessions by merge key.
-// Primary sessions take precedence over additional sessions.
+// Primary sessions take precedence over additional sessions, except that a
+// hold on any copy holds the session by name: the kept row carries it, or a
+// published Ledger row would hide a held cache copy as uploaded.
 // Returns merged sessions sorted newest-first by CreatedAt.
 //
 // One exception to primary-wins: a DRAFT placeholder loses to any non-draft
@@ -705,7 +766,8 @@ func mergeSessionSources(primary, additional []session.SessionInfo) []session.Se
 	result := make([]session.SessionInfo, 0, len(primary)+len(additional))
 	for _, s := range primary {
 		k := sessionMergeKey(s)
-		if _, dup := index[k]; dup {
+		if at, dup := index[k]; dup {
+			result[at].Held = result[at].Held || s.Held
 			continue
 		}
 		index[k] = len(result)
@@ -719,12 +781,139 @@ func mergeSessionSources(primary, additional []session.SessionInfo) []session.Se
 			result = append(result, s)
 			continue
 		}
+		held := result[at].Held || s.Held
 		if result[at].Draft && !s.Draft {
 			result[at] = s
 		}
+		result[at].Held = held
 	}
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].CreatedAt.After(result[j].CreatedAt)
 	})
 	return result
+}
+
+// sessionListEntries renders the JSON rows for sessions. uploaded reports which
+// of them are known to have reached the ledger, and localUser names the author
+// for legacy sessions recorded before meta.json carried one.
+func sessionListEntries(sessions []session.SessionInfo, uploaded map[string]bool, localUser string) []sessionListEntry {
+	entries := make([]sessionListEntry, 0, len(sessions))
+	for _, t := range sessions {
+		status := string(session.ClassifySession(t, uploaded[sessionMergeKey(t)]))
+		user := t.Username
+		if user == "" {
+			user = localUser
+		}
+		// legacy sessions leave SessionName empty — fall back to the filename so
+		// agents always have a usable identifier for the 'ox session view <name>'
+		// follow-up step described in the guidance hint.
+		name := t.SessionName
+		if name == "" {
+			name = t.Filename
+		}
+		entries = append(entries, sessionListEntry{
+			Name:      name,
+			Date:      t.CreatedAt.Format("2006-01-02"),
+			Time:      t.CreatedAt.Format("15:04"),
+			User:      user,
+			Status:    status,
+			Recording: t.Recording,
+			// Filter leaky strings out of JSON output too — agents
+			// (claude-code, codex, etc.) consume this as context and
+			// would otherwise see "Summary failed content validation:..."
+			// as if it were the session's real title. Same invariant the
+			// human-readable sessionBlurb enforces.
+			Title:           sanitizedNonLeakySessionText(t.Title),
+			Summary:         sanitizedNonLeakySessionText(t.Summary),
+			EntryCount:      t.EntryCount,
+			IsSubagent:      t.IsSubagent,
+			Origin:          t.Origin,
+			HydrationStatus: string(t.HydrationStatus),
+			StopReason:      t.StopReason,
+			HasRawData:      t.HasRawData,
+		})
+	}
+	return entries
+}
+
+// runHostedSessionList lists a hosted ledger's sessions under the shared
+// checkout lock, for a caller that has no source checkout and selects the
+// ledger by its canonical identity instead. See docs/specs/ledger-read-sync.md.
+//
+// Only the ledger is read. There is no local recording cache to merge, and no
+// local identity to attribute an author-less session to — guessing one would
+// name whichever account happens to own the hosted process.
+func runHostedSessionList(cmd *cobra.Command, repoID string) error {
+	limit, _ := cmd.Flags().GetInt("limit")
+	showAll, _ := cmd.Flags().GetBool("all")
+	if showAll {
+		limit = 0
+	}
+	window, windowErr := parseSessionWindow(cmd)
+	if windowErr != nil {
+		return windowErr
+	}
+	jsonOutput, _ := cmd.Root().PersistentFlags().GetBool("json")
+	inAgent := agentx.IsAgentContext()
+	if inAgent && !cmd.Root().PersistentFlags().Changed("json") {
+		jsonOutput = true
+	}
+
+	var sessions []session.SessionInfo
+	if err := withHostedLedger(cmd, repoID, func(path string) error {
+		store, err := session.NewStore(path)
+		if err == nil {
+			sessions, err = window.list(store, showAll)
+		}
+		if err != nil {
+			slog.Debug("hosted session list", "repo_id", repoID, "err", err)
+			return hostedReadFailed(cmd, "unavailable", 1)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	sessions = window.filter(sessions)
+	if limit > 0 && len(sessions) > limit {
+		sessions = sessions[:limit]
+	}
+	// Everything here came out of the ledger, so every finalized session is by
+	// definition uploaded. Drafts are not: a meta.json-only placeholder means
+	// the session is still recording, not that its turn data landed.
+	uploaded := make(map[string]bool, len(sessions))
+	for _, t := range sessions {
+		if !t.Draft {
+			uploaded[sessionMergeKey(t)] = true
+		}
+	}
+
+	if jsonOutput {
+		entries := sessionListEntries(sessions, uploaded, "")
+		out := sessionListOutput{
+			Sessions:        entries,
+			Total:           len(entries),
+			Window:          window.label(showAll),
+			RepoName:        repoID,
+			RepoID:          repoID,
+			LedgerAvailable: true,
+		}
+		if inAgent {
+			out.Guidance = sessionListAgentGuidance
+		}
+		return outputJSON(cmd.OutOrStdout(), out)
+	}
+
+	fmt.Println()
+	if len(sessions) == 0 {
+		fmt.Println(sessionEmptyStyle.Render(fmt.Sprintf("  No sessions found for %s.", repoID)))
+		fmt.Println()
+		return nil
+	}
+	printSessionTableHeader(inAgent)
+	for _, t := range sessions {
+		printSessionRow(t, uploaded[sessionMergeKey(t)], "")
+	}
+	fmt.Println()
+	return nil
 }

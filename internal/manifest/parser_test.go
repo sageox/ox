@@ -313,7 +313,7 @@ func TestFallbackConfig(t *testing.T) {
 		t.Errorf("gc_interval = %d, want %d", cfg.GCIntervalDays, DefaultGCIntervalDays)
 	}
 
-	expectedPaths := []string{".sageox/", "SOUL.md", "TEAM.md", "MEMORY.md", "AGENTS.md", "memory/", "docs/", "coworkers/", "discussions/", "agent-context/"}
+	expectedPaths := []string{".sageox/", "SOUL.md", "TEAM.md", "MEMORY.md", "AGENTS.md", "memory/", "docs/", "agents/", "coworkers/", "discussions/", "agent-context/"}
 	for _, p := range expectedPaths {
 		assertContains(t, "fallback includes", cfg.Includes, p)
 	}

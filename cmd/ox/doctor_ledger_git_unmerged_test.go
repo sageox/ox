@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -234,35 +236,6 @@ func TestUnmergedPathsFailure_LoudAndActionable(t *testing.T) {
 // `git config --global` — the helper above shows the canonical isolation
 // pattern.
 
-// runIsolatedGit is a test-local git runner that always pins cmd.Dir to the
-// supplied repo and never touches the global config. Tests must not
-// modify the host's git identity.
-func runIsolatedGit(t *testing.T, dir string, args ...string) (string, error) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	// scrub HOME/XDG_CONFIG_HOME so per-user gitconfig (including merge.tool
-	// hooks that could open an editor) can't interfere with the test.
-	cmd.Env = append(os.Environ(), // safe: isolated git subprocess in temp dir, HOME/XDG/GIT_CONFIG_* scrubbed
-		"HOME="+dir,
-		"XDG_CONFIG_HOME="+filepath.Join(dir, ".config"),
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_AUTHOR_NAME=Test",
-		"GIT_AUTHOR_EMAIL=test@example.com",
-		"GIT_COMMITTER_NAME=Test",
-		"GIT_COMMITTER_EMAIL=test@example.com",
-	)
-	out, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(out)), err
-}
-
-func mustRunGit(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	out, err := runIsolatedGit(t, dir, args...)
-	require.NoErrorf(t, err, "git %s: %s", strings.Join(args, " "), out)
-}
-
 // buildStuckMergeRepo creates a real git repo with a live MERGE_HEAD + UU
 // conflict. Returns the repo path. The returned repo is in EXACTLY the
 // state the ox-8zd3 incident left the ledger in.
@@ -338,6 +311,52 @@ func TestFixLedgerUnmergedPaths_ClearsMergeHead(t *testing.T) {
 	require.NoError(t, err)
 	postUnmerged := parseUnmergedPaths(postStatus + "\n")
 	assert.Empty(t, postUnmerged, "no UU files may survive the abort; got: %q", postStatus)
+}
+
+// Doctor must repair the autostash state its own diagnostic tells users to fix.
+func TestFixLedgerUnmergedPaths_RepairsAgreeingAutostash(t *testing.T) {
+	skipIntegration(t)
+	repo := t.TempDir()
+	const rel = "sessions/test/meta.json"
+	path := filepath.Join(repo, rel)
+	mustRunGit(t, repo, "init", "--initial-branch=main")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(`{"title":""}`+"\n"), 0o644))
+	mustRunGit(t, repo, "add", "--sparse", rel)
+	mustRunGit(t, repo, "commit", "-m", "base")
+	const local = `{"summary_attempts":0,"title":"Recovered"}`
+	require.NoError(t, os.WriteFile(path, []byte(local+"\n"), 0o644))
+	mustRunGit(t, repo, "stash", "push", "-m", "autostash")
+	require.NoError(t, os.WriteFile(path, []byte(`{"title":"Recovered"}`+"\n"), 0o644))
+	mustRunGit(t, repo, "commit", "-am", "remote repair")
+	out, err := runIsolatedGit(t, repo, "stash", "apply")
+	require.Error(t, err, out)
+	op, _ := detectInProgressGitOp(repo)
+	require.Empty(t, op)
+	status, err := runIsolatedGit(t, repo, "status", "--porcelain=v1")
+	require.NoError(t, err)
+	// A concurrent sync must yield retry guidance without touching the conflict;
+	// releasing its lock must let the same doctor recovery succeed below.
+	require.NoError(t, gitutil.WithRepoLock(context.Background(), repo, func() error {
+		result := fixLedgerUnmergedPaths(repo, parseUnmergedPaths(status))
+		assert.True(t, result.warning, "%+v", result)
+		assert.Contains(t, result.message, "busy")
+		assert.Contains(t, result.detail, "retry")
+		assert.NotContains(t, result.detail, "checkout --ours")
+		assert.Equal(t, CheckSlugLedgerUnmergedPaths, result.slug)
+		return nil
+	}))
+	unchanged, err := runIsolatedGit(t, repo, "status", "--porcelain=v1")
+	require.NoError(t, err)
+	assert.Equal(t, status, unchanged)
+	result := fixLedgerUnmergedPaths(repo, parseUnmergedPaths(status))
+	require.True(t, result.passed, "%+v", result)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.JSONEq(t, local, string(data))
+	out, err = runIsolatedGit(t, repo, "ls-files", "--unmerged")
+	require.NoError(t, err)
+	assert.Empty(t, out)
 }
 
 // TestFixLedgerUnmergedPaths_NoStateMarkers_NoAutoResolve covers the rare
@@ -424,4 +443,137 @@ func TestCheckLedgerUnmergedPaths_ReportsCriticalWithoutFix(t *testing.T) {
 	assert.False(t, r.passed)
 	assert.Equal(t, "critical", r.priority)
 	assert.Equal(t, CheckSlugLedgerUnmergedPaths, r.slug)
+}
+
+// --- E. fixLedgerDirtyWorkdir must not sweep a conflict into a commit ---
+//
+// Real-git integration test reproducing #749: a `git stash pop` conflict
+// leaves UU files with NO MERGE_HEAD/rebase-merge marker (a stash pop isn't
+// a resumable operation), so detectInProgressGitOp can't see it and
+// checkLedgerCleanWorkdir's own dirty-count excludes U-state entries from
+// what triggers the fix. But that exclusion never reached the actual
+// `git add -A` inside the fix — so once an UNRELATED dirty file tripped the
+// auto-commit, `-A` swept the conflicted file in too and committed the
+// literal conflict markers into the ledger.
+//
+// buildAutostashConflictRepo reproduces that exact shape: a conflicted
+// meta.json (UU, real conflict markers, no state-directory marker) sitting
+// alongside a genuinely dirty, unrelated untracked file.
+func buildAutostashConflictRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+
+	mustRunGit(t, repo, "init", "--initial-branch=main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(`{"attempts": 1}`+"\n"), 0644))
+	mustRunGit(t, repo, "add", "meta.json")
+	mustRunGit(t, repo, "commit", "-m", "base")
+
+	// local uncommitted change to meta.json — this is what autostash stashes
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(`{"attempts": 2}`+"\n"), 0644))
+	mustRunGit(t, repo, "stash", "push", "-m", "autostash", "--", "meta.json")
+
+	// a conflicting change lands on main in the meantime (the daemon's pull)
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(`{"attempts": 99}`+"\n"), 0644))
+	mustRunGit(t, repo, "commit", "-am", "conflicting upstream change")
+
+	// an unrelated, genuinely dirty file — this is what trips
+	// checkLedgerCleanWorkdir's dirty count and triggers the auto-commit
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "unrelated.txt"), []byte("wip\n"), 0644))
+
+	// popping the stash now conflicts on meta.json
+	out, err := runIsolatedGit(t, repo, "stash", "pop")
+	require.Error(t, err, "stash pop must conflict; got success: %s", out)
+
+	status, err := runIsolatedGit(t, repo, "status", "--porcelain=v1")
+	require.NoError(t, err)
+	require.Contains(t, status, "UU meta.json",
+		"test setup did not produce the UU wedge; cannot validate fix")
+	require.Contains(t, status, "unrelated.txt",
+		"test setup did not produce the unrelated dirty file; cannot validate fix")
+
+	// sanity: NO state-directory marker exists for a stash-pop conflict —
+	// this is the whole reason detectInProgressGitOp can't see it
+	op, _ := detectInProgressGitOp(repo)
+	require.Equal(t, "", op,
+		"a stash-pop conflict must have no in-progress op marker; got %q", op)
+
+	return repo
+}
+
+// TestFixLedgerDirtyWorkdir_RefusesUnrelatedDirtyFileWithConflictPresent is
+// the load-bearing regression for #749. Without the fix, this test commits
+// the literal conflict markers into the ledger's history — permanently.
+func TestFixLedgerDirtyWorkdir_RefusesUnrelatedDirtyFileWithConflictPresent(t *testing.T) {
+	skipIntegration(t)
+	repo := buildAutostashConflictRepo(t)
+
+	beforeLog, err := runIsolatedGit(t, repo, "log", "--oneline")
+	require.NoError(t, err)
+
+	r := fixLedgerDirtyWorkdir(repo, 1)
+
+	assert.False(t, r.passed,
+		"must refuse to auto-commit while a conflict is present: %+v", r)
+
+	// no new commit — especially not one containing the markers
+	afterLog, err := runIsolatedGit(t, repo, "log", "--oneline")
+	require.NoError(t, err)
+	assert.Equal(t, beforeLog, afterLog,
+		"no commit should have been created")
+
+	// the conflict must still be sitting there, unresolved, for
+	// checkLedgerUnmergedPaths to pick up next
+	status, err := runIsolatedGit(t, repo, "status", "--porcelain=v1")
+	require.NoError(t, err)
+	assert.Contains(t, status, "UU meta.json",
+		"conflict must survive the refusal, not be silently resolved")
+
+	// and the working-tree file must still literally contain the markers —
+	// proof nothing quietly rewrote it
+	content, err := os.ReadFile(filepath.Join(repo, "meta.json"))
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "<<<<<<<",
+		"conflict markers must still be present in the untouched file")
+}
+
+// TestFixLedgerDirtyWorkdir_RefusesPlainModifiedFileWithMarkers covers the
+// doctor/session-upload parity gap flagged in review: the pre-add U-state
+// check above only sees a LIVE conflict. A file that carries marker text but
+// was never U-state at all — plain-modified, never went through a real git
+// conflict — is invisible to that check both before AND after `git add -A`
+// (add just stages it as an ordinary change; there's no U-state to clear).
+// firstUnstageableFileInIndex's post-add blob scan is what has to catch this.
+func TestFixLedgerDirtyWorkdir_RefusesPlainModifiedFileWithMarkers(t *testing.T) {
+	skipIntegration(t)
+	repo := t.TempDir()
+
+	mustRunGit(t, repo, "init", "--initial-branch=main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(`{"attempts": 1}`+"\n"), 0644))
+	mustRunGit(t, repo, "add", "meta.json")
+	mustRunGit(t, repo, "commit", "-m", "base")
+
+	// plain, uncommitted modification carrying marker text — never went
+	// through a real git conflict, so git status reports it as ordinary " M",
+	// never "UU".
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(
+		"{\n<<<<<<< Updated upstream\n\"attempts\": 3,\n=======\n\"attempts\": 2,\n>>>>>>> Stashed changes\n}\n"),
+		0644))
+
+	status, err := runIsolatedGit(t, repo, "status", "--porcelain=v1")
+	require.NoError(t, err)
+	require.Empty(t, parseUnmergedPaths(status+"\n"),
+		"test setup must produce a plain modification, not a real U-state conflict")
+	require.Contains(t, status, "M meta.json",
+		"test setup did not produce the expected plain-modified shape")
+
+	beforeLog, err := runIsolatedGit(t, repo, "log", "--oneline")
+	require.NoError(t, err)
+
+	r := fixLedgerDirtyWorkdir(repo, 1)
+	assert.False(t, r.passed,
+		"must refuse to auto-commit a plain-modified file that still carries conflict markers: %+v", r)
+
+	afterLog, err := runIsolatedGit(t, repo, "log", "--oneline")
+	require.NoError(t, err)
+	assert.Equal(t, beforeLog, afterLog, "no commit should have been created")
 }

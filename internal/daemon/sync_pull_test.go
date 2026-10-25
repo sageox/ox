@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -132,48 +133,6 @@ path = "/nonexistent/path/to/team/context"
 	assert.Equal(t, "path does not exist and no clone URL available", status[0].LastErr)
 }
 
-func TestSyncScheduler_PullTeamContext_FetchHeadDeduplication(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
-
-	// check if git is available
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-
-	// isolate from real credentials
-	prevConfigDir := gitserver.TestSetConfigDirOverride(t.TempDir())
-	prevForceFile := gitserver.TestSetForceFileStorage(true)
-	t.Cleanup(func() {
-		gitserver.TestSetConfigDirOverride(prevConfigDir)
-		gitserver.TestSetForceFileStorage(prevForceFile)
-	})
-
-	// create temp git repo for team context
-	teamDir := t.TempDir()
-	setupGitRepo(t, teamDir)
-
-	cfg := DefaultConfig()
-	cfg.TeamContextSyncInterval = 10 * time.Minute // long interval
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-
-	scheduler := NewSyncScheduler(cfg, logger)
-
-	// first pull should succeed
-	err := scheduler.pullTeamContext(context.Background(), teamDir)
-	assert.NoError(t, err)
-
-	// simulate recent FETCH_HEAD by touching the file
-	fetchHead := filepath.Join(teamDir, ".git", "FETCH_HEAD")
-	// the file already exists from the first fetch, but let's make sure it's recent
-	require.NoError(t, os.WriteFile(fetchHead, []byte("fake-sha1\t\trefs/heads/main\n"), 0644))
-
-	// second pull should be skipped due to recent fetch
-	err = scheduler.pullTeamContext(context.Background(), teamDir)
-	assert.NoError(t, err) // returns nil when skipped
-}
-
 func TestSyncScheduler_PullTeamContext_NotGitRepo(t *testing.T) {
 	// create temp directory that is NOT a git repo
 	tmpDir := t.TempDir()
@@ -189,12 +148,46 @@ func TestSyncScheduler_PullTeamContext_NotGitRepo(t *testing.T) {
 	// pull should handle gracefully: detect invalid repo, move aside for re-clone.
 	// It returns an error so callers report the team context as not-usable (the
 	// path is gone until the next cycle re-clones it) rather than "synced".
-	err := scheduler.pullTeamContext(context.Background(), tcPath)
+	_, err := scheduler.pullTeamContext(context.Background(), tcPath)
 	assert.Error(t, err, "moving a corrupt repo aside must surface as not-usable, not success")
 	// original path should be gone (moved to .bak)
 	assert.NoDirExists(t, tcPath)
 }
 
+// The move-aside can itself fail, and when it does the clone is still corrupt
+// AND still in place — the one outcome a caller must never read as "synced".
+// Worth pinning separately from the happy path above: a corrupt clone that
+// reported success would be served to agents as team context indefinitely,
+// since nothing else re-examines it.
+func TestSyncScheduler_PullTeamContext_CorruptRepoRenameFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory write permissions, so rename cannot be made to fail")
+	}
+	tmpDir := t.TempDir()
+	tcPath := filepath.Join(tmpDir, "team-ctx")
+	require.NoError(t, os.MkdirAll(tcPath, 0o755))
+
+	// Read+execute only: the directory can still be traversed and listed, so
+	// isValidGitRepo still reports "corrupt", but creating the .bak entry
+	// alongside it fails with EACCES. Restored in cleanup or t.TempDir cannot
+	// remove the tree.
+	require.NoError(t, os.Chmod(tmpDir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(tmpDir, 0o755) })
+
+	cfg := DefaultConfig()
+	cfg.TeamContextSyncInterval = 10 * time.Minute
+	scheduler := NewSyncScheduler(cfg, slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})))
+
+	_, err := scheduler.pullTeamContext(context.Background(), tcPath)
+
+	require.Error(t, err, "a failed move-aside must never be reported as a successful sync")
+	assert.ErrorContains(t, err, "rename failed")
+	assert.DirExists(t, tcPath, "the corrupt clone is still there for the next cycle to retry")
+}
+
+// A configured local Team Context must produce successful sync status. Isolate
+// auth and shared team data too: a real bearer can refresh credentials and add
+// unrelated teams even when the test's refresh timestamp is recent.
 func TestSyncScheduler_TeamContextIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
@@ -204,6 +197,10 @@ func TestSyncScheduler_TeamContextIntegration(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
+
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 
 	// isolate from real credentials
 	prevConfigDir := gitserver.TestSetConfigDirOverride(t.TempDir())
@@ -230,6 +227,8 @@ team_name = "Test Team"
 path = %q
 `, teamDir)
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.local.toml"), []byte(configContent), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"),
+		[]byte(`{"endpoint":"https://fake.test.invalid"}`), 0644))
 
 	cfg := DefaultConfig()
 	cfg.ProjectRoot = projectDir

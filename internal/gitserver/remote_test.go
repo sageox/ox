@@ -457,6 +457,30 @@ func TestEndpointFromRemoteURL(t *testing.T) {
 	}
 }
 
+// Failure prevented: an endpoint's Git PAT goes to a host that is not its git
+// server, or is refused for the server the SageOx API named.
+func TestRemoteOnGitServer(t *testing.T) {
+	tests := []struct {
+		name, remoteURL, endpointURL, serverURL string
+		want                                    bool
+	}{
+		{"git prefix", "https://git.sageox.ai/team/ledger.git", "https://sageox.ai", "", true},
+		{"another port on the endpoint's host", "http://127.0.0.1:8929/ledger.git", "http://127.0.0.1:3000", "", false},
+		{"server the API named", "http://10.0.0.5:8929/team/ledger.git", "http://localhost:3000", "http://10.0.0.5:8929", true},
+		{"default port spelled out", "https://git.sageox.ai:443/team/ledger.git", "https://sageox.ai", "https://git.sageox.ai", true},
+		{"another port on the server the API named", "http://10.0.0.5:9000/x.git", "http://localhost:3000", "http://10.0.0.5:8929", false},
+		{"endpoint host when the API named another server", "https://git.sageox.ai/x.git", "https://sageox.ai", "https://gitlab.example.com", false},
+		{"foreign host", "https://github.com/acme/app.git", "https://sageox.ai", "https://git.sageox.ai", false},
+		{"lookalike suffix", "https://git.sageox.ai.evil.com/x.git", "https://sageox.ai", "https://git.sageox.ai", false},
+		{"no host", "file:///tmp/ledger.git", "https://sageox.ai", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, RemoteOnGitServer(tt.remoteURL, tt.endpointURL, tt.serverURL))
+		})
+	}
+}
+
 func TestExtractHost(t *testing.T) {
 	tests := []struct {
 		input string

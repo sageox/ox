@@ -3,12 +3,93 @@ package daemon
 import (
 	"encoding/json"
 	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	projectconfig "github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon/agentwork"
+	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestSessionWatchStart_CapturesInRecordingCache reproduces Conductor's IPC
+// startup with the real Codex reader and StartRecording's directory layout.
+// Previously the service opened ledger/sessions/raw.jsonl, either failing to
+// record anything or writing conversation bytes into a published session folder.
+func TestSessionWatchStart_CapturesInRecordingCache(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: builds Codex adapter and waits for session polling")
+	}
+	binaryPath := filepath.Join(t.TempDir(), "ox-adapter-codex")
+	build := exec.Command("go", "build", "-o", binaryPath, "./cmd/ox-adapter-codex")
+	build.Dir = supFindRepoRoot(t)
+	out, err := build.CombinedOutput()
+	require.NoError(t, err, "build Codex adapter: %s", out)
+	adapter, err := adapters.NewExternalAdapter(binaryPath)
+	require.NoError(t, err)
+	adapters.Register(adapter)
+	t.Cleanup(func() { adapters.Unregister("codex") })
+
+	for _, publishedDirExists := range []bool{false, true} {
+		name := "before publication"
+		if publishedDirExists {
+			name = "published folder exists"
+		}
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+			t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+			t.Setenv("OX_XDG_DISABLE", "")
+			projectRoot := t.TempDir()
+			cfg := &projectconfig.ProjectConfig{RepoID: "repo_ipc_watch", Endpoint: "https://test.sageox.ai"}
+			require.NoError(t, projectconfig.SaveProjectConfig(projectRoot, cfg))
+			ledgerPath := paths.LedgersDataDir(cfg.RepoID, cfg.Endpoint)
+			source := filepath.Join(home, ".codex", "sessions", "session.jsonl")
+			require.NoError(t, os.MkdirAll(filepath.Dir(source), 0o755))
+			require.NoError(t, os.WriteFile(source, []byte(`{"timestamp":"2026-09-07T16:50:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Capture this Codex session through IPC."}]}}`+"\n"), 0o600))
+			state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+				AgentID: "OxIPC1", AdapterName: "codex", SessionFile: source,
+				WorkspacePath: projectRoot, ParentPID: os.Getpid(), WatchMode: "tail",
+			})
+			require.NoError(t, err)
+			sessionName := filepath.Base(state.SessionPath)
+			require.Equal(t, filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName), state.SessionPath)
+			rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+			writer, err := session.NewRawWriter(rawPath, projectRoot)
+			require.NoError(t, err)
+			require.NoError(t, writer.WriteRaw(map[string]any{"type": "header", "metadata": map[string]any{"agent_id": state.AgentID}}))
+			require.NoError(t, writer.Close())
+			publishedPath := filepath.Join(ledgerPath, "sessions", sessionName)
+			if publishedDirExists {
+				require.NoError(t, os.MkdirAll(publishedPath, 0o755))
+			}
+			publishedRaw := filepath.Join(publishedPath, "raw.jsonl")
+
+			logger := slog.New(slog.NewTextHandler(testWriter{t}, nil))
+			d := New(&Config{LedgerPath: ledgerPath}, logger)
+			d.sessionWatcher = agentwork.NewSessionWatcherManager(logger)
+			defer d.sessionWatcher.StopAll()
+			svc := &daemonServiceImpl{d: d}
+			svc.SessionWatchStart(SessionWatchStartPayload{
+				SessionName: sessionName, SessionFile: source, AdapterName: "codex",
+			})
+			require.Eventually(t, func() bool {
+				return session.HasSubstantiveEntries(rawPath) || session.RawJSONLHasData(publishedPath) || len(d.sessionWatcher.ActiveSessions()) == 0
+			}, 5*time.Second, 10*time.Millisecond, "watcher did not capture the source")
+			assert.True(t, session.HasSubstantiveEntries(rawPath), "IPC must write into the active recording cache")
+			assert.NoFileExists(t, publishedRaw, "live capture must not write hydrated bytes into tracked ledger sessions")
+		})
+	}
+}
 
 // --- A. session_watch_start handler ---
 

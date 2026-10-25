@@ -2,14 +2,200 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	projectconfig "github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon/agentwork"
+	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDaemon_DeadAgentQuiescesCaptureBeforeFinalizing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: builds the Codex adapter")
+	}
+	binaryPath := filepath.Join(t.TempDir(), "ox-adapter-codex")
+	build := exec.Command("go", "build", "-o", binaryPath, "./cmd/ox-adapter-codex")
+	build.Dir = supFindRepoRoot(t)
+	out, err := build.CombinedOutput()
+	require.NoError(t, err, "build Codex adapter: %s", out)
+	adapter, err := adapters.NewExternalAdapter(binaryPath)
+	require.NoError(t, err)
+	adapters.Register(adapter)
+	t.Cleanup(func() {
+		adapters.Unregister("codex")
+		_ = adapter.Close()
+	})
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("OX_XDG_DISABLE", "")
+	projectRoot := t.TempDir()
+	cfg := &projectconfig.ProjectConfig{RepoID: "repo_dead_capture", Endpoint: "https://test.sageox.ai"}
+	require.NoError(t, projectconfig.SaveProjectConfig(projectRoot, cfg))
+	ledgerPath := paths.LedgersDataDir(cfg.RepoID, cfg.Endpoint)
+	source := filepath.Join(home, ".codex", "sessions", "session.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(source), 0700))
+	first := `{"timestamp":"2026-09-07T16:50:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Remember the initial Codex request."}]}}` + "\n"
+	last := `{"timestamp":"2026-09-07T16:51:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Preserve the final Codex response."}]}}` + "\n"
+	require.NoError(t, os.WriteFile(source, []byte(first), 0600))
+	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+		AgentID: "OxDeadCapture", AdapterName: "codex", SessionFile: source,
+		WorkspacePath: projectRoot, ParentPID: os.Getpid(), WatchMode: "tail",
+	})
+	require.NoError(t, err)
+	state.StartedAt = time.Date(2026, time.September, 7, 16, 49, 0, 0, time.UTC)
+	require.NoError(t, session.SaveRecordingState(projectRoot, state))
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	writer, err := session.NewRawWriter(rawPath, projectRoot)
+	require.NoError(t, err)
+	require.NoError(t, writer.WriteRaw(map[string]any{"type": "header", "metadata": map[string]any{"agent_id": state.AgentID}}))
+	require.NoError(t, writer.Close())
+
+	d := New(&Config{LedgerPath: ledgerPath}, nil)
+	d.heartbeat = NewHeartbeatHandler(d.logger)
+	d.agentWorker = agentwork.NewManager(agentwork.NewMockRunner(false), d.logger, func() *projectconfig.AgentWorkerConfig {
+		return &projectconfig.AgentWorkerConfig{Agent: "none"}
+	}, nil, ledgerPath, projectRoot)
+	d.sessionFinalizeHandler = agentwork.NewSessionFinalizeHandlerForTest(d.logger)
+	d.sessionWatcher = agentwork.NewSessionWatcherManager(d.logger)
+	t.Cleanup(d.sessionWatcher.StopAll)
+	require.NoError(t, d.sessionWatcher.StartWatch(filepath.Base(state.SessionPath), source, "codex", ledgerPath, state.SessionPath))
+	recPath := filepath.Join(state.SessionPath, ".recording.json")
+	require.Eventually(t, func() bool {
+		data, readErr := os.ReadFile(recPath)
+		var current session.RecordingState
+		return readErr == nil && json.Unmarshal(data, &current) == nil && current.SourceOffset == int64(len(first))
+	}, 5*time.Second, 10*time.Millisecond, "capture must own the raw writer before process death")
+	data, err := os.ReadFile(recPath)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, state))
+	state.ParentPID = 99999999
+	require.NoError(t, session.SaveRecordingState(projectRoot, state))
+	f, err := os.OpenFile(source, os.O_APPEND|os.O_WRONLY, 0600)
+	require.NoError(t, err)
+	_, err = f.WriteString(last)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	d.heartbeat.agentPID[state.AgentID] = state.ParentPID
+	d.heartbeat.GetAgentActivity().RecordAt(state.AgentID, time.Now().Add(-IdleThreshold-time.Second))
+
+	done := make(chan struct{})
+	go func() {
+		d.checkDeadAgentsAndFinalize()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		d.sessionWatcher.StopAll()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("dead-agent finalization did not finish after releasing capture")
+		}
+	})
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("finalization must stop the watcher before waiting for its raw writer lock")
+	}
+
+	assert.Empty(t, d.sessionWatcher.ActiveSessions())
+	assert.Equal(t, 1, d.agentWorker.Status().QueueDepth, "the complete session must be queued for summary and upload")
+	assert.NoFileExists(t, recPath)
+	assert.Zero(t, d.heartbeat.GetAgentPID(state.AgentID))
+	assert.NotContains(t, d.heartbeat.GetAgentActivity().Keys(), state.AgentID)
+	data, err = os.ReadFile(rawPath)
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(string(data), "Remember the initial Codex request."))
+	assert.Equal(t, 1, strings.Count(string(data), "Preserve the final Codex response."))
+}
+
+// A follower must observe successful syncs by the shared owner without rewriting
+// config or the owner's cache, including after an upgrade with no usable cache.
+func TestDaemonStatus_SharedTeamContextSync(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("SAGEOX_ENDPOINT", "https://status.test.invalid")
+	older := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	newer := older.Add(30 * time.Minute)
+	cases := []struct {
+		name       string
+		configSync time.Time
+		sharedSync time.Time
+		corrupt    bool
+		want       time.Time
+	}{
+		{name: "never synced"},
+		{name: "missing cache", configSync: older, want: older},
+		{name: "corrupt cache", configSync: older, corrupt: true, want: older},
+		{name: "shared owner synced", sharedSync: newer, want: newer},
+		{name: "shared cache newer", configSync: older, sharedSync: newer, want: newer},
+		{name: "config newer", configSync: newer, sharedSync: older, want: newer},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.ProjectRoot = t.TempDir()
+			d := New(cfg, nil)
+			d.scheduler = NewSyncScheduler(cfg, d.logger)
+			d.scheduler.SetGlobalSyncLease("", nil)
+			teamPath := t.TempDir()
+			ws := &WorkspaceState{
+				ID: "team_1", Type: WorkspaceTypeTeamContext, Path: teamPath,
+				TeamID: "team_1", TeamName: "Test Team", Exists: true,
+				ConfigLastSync: tc.configSync, LastErr: "local sync failed",
+			}
+			d.scheduler.WorkspaceRegistry().workspaces[ws.ID] = ws
+			statePath := filepath.Join(teamPath, ".sageox", "cache", "sync-state.json")
+			if !tc.sharedSync.IsZero() {
+				require.NoError(t, SaveSyncState(teamPath, &SyncState{LastSync: tc.sharedSync}))
+			}
+			if tc.corrupt {
+				require.NoError(t, os.MkdirAll(filepath.Dir(statePath), 0755))
+				require.NoError(t, os.WriteFile(statePath, []byte("{incomplete"), 0600))
+			}
+			before, beforeErr := os.ReadFile(statePath)
+			svc := &daemonServiceImpl{d: d}
+			status := svc.Status()
+			require.False(t, status.GlobalSyncOwner)
+			require.Len(t, status.Workspaces["team-context"], 1)
+			require.Len(t, status.TeamContexts, 1)
+			assert.Equal(t, tc.want, status.Workspaces["team-context"][0].LastSync)
+			assert.Equal(t, tc.want, status.TeamContexts[0].LastSync)
+			assert.Equal(t, ws.LastErr, status.Workspaces["team-context"][0].LastErr)
+			assert.Equal(t, ws.LastErr, status.TeamContexts[0].LastErr)
+			assert.Equal(t, tc.configSync, ws.ConfigLastSync, "status must not mutate registry state")
+			after, afterErr := os.ReadFile(statePath)
+			assert.Equal(t, before, after, "status must not rewrite shared sync state")
+			if os.IsNotExist(beforeErr) {
+				assert.True(t, os.IsNotExist(afterErr), "status must not create shared sync state")
+			} else {
+				require.NoError(t, afterErr)
+			}
+
+			// The owner updates the shared cache while this follower keeps running.
+			advanced := newer.Add(time.Minute)
+			require.NoError(t, SaveSyncState(teamPath, &SyncState{LastSync: advanced}))
+			status = svc.Status()
+			assert.Equal(t, advanced, status.Workspaces["team-context"][0].LastSync)
+			assert.Equal(t, advanced, status.TeamContexts[0].LastSync)
+			assert.Equal(t, tc.configSync, ws.ConfigLastSync)
+		})
+	}
+}
 
 func TestNew(t *testing.T) {
 	t.Run("with nil config uses defaults", func(t *testing.T) {

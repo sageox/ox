@@ -1,9 +1,9 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/daemon/hooks"
 	"github.com/spf13/cobra"
 )
@@ -22,12 +22,10 @@ var hooksEventsListCmd = &cobra.Command{
 		out := cmd.OutOrStdout()
 
 		if jsonOut {
-			enc := json.NewEncoder(out)
-			enc.SetIndent("", "  ")
 			if cfgs == nil {
 				cfgs = []hooks.HookConfig{}
 			}
-			return enc.Encode(cfgs)
+			return cli.PrintJSONTo(out, cfgs)
 		}
 
 		if len(cfgs) == 0 {

@@ -109,25 +109,13 @@ func WithProjectRoot(projectRoot string) ClientOption {
 //     daemon-side collector).
 //  3. UserConfig.TelemetryEnabled (persisted setting).
 func NewClient(sessionID string, opts ...ClientOption) *Client {
-	enabled := true
-	switch {
-	case os.Getenv("DO_NOT_TRACK") == "1":
-		enabled = false
-	case strings.EqualFold(os.Getenv("SAGEOX_TELEMETRY"), "false"):
-		enabled = false
-	default:
-		if cfg, err := config.LoadUserConfig(); err == nil {
-			enabled = cfg.IsTelemetryEnabled()
-		}
-	}
-
 	client := &Client{
 		httpClient: &http.Client{
 			Timeout: sendTimeout,
 		},
 		baseURL:     endpoint.Get(),
 		version:     version.Version,
-		enabled:     enabled,
+		enabled:     Enabled(),
 		apiEndpoint: endpoint.Get(), // capture endpoint at client creation time
 		queue:       make([]Event, 0, maxQueueSize),
 		stats:       NewStats(sessionID),
@@ -139,6 +127,22 @@ func NewClient(sessionID string, opts ...ClientOption) *Client {
 	}
 
 	return client
+}
+
+// Enabled reports the user's telemetry choice as it stands now, in the order
+// NewClient documents: DO_NOT_TRACK=1, then SAGEOX_TELEMETRY=false, then the
+// saved telemetry setting.
+func Enabled() bool {
+	switch {
+	case os.Getenv("DO_NOT_TRACK") == "1":
+		return false
+	case strings.EqualFold(os.Getenv("SAGEOX_TELEMETRY"), "false"):
+		return false
+	}
+	if cfg, err := config.LoadUserConfig(); err == nil {
+		return cfg.IsTelemetryEnabled()
+	}
+	return true
 }
 
 // Start begins background processing of telemetry events.

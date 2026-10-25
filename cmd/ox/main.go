@@ -6,15 +6,24 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
+	"syscall"
+	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/joho/godotenv"
 	"github.com/mattn/go-isatty"
 	"github.com/sageox/agentx"
+	friction "github.com/sageox/frictionax"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/observability"
+	"github.com/sageox/ox/internal/telemetry"
+	"github.com/spf13/cobra"
 
 	// registers all supported agents for detection
 	_ "github.com/sageox/agentx/setup"
@@ -34,8 +43,11 @@ func (s *ansiStripper) Write(p []byte) (int, error) {
 	return len(p), err // report original length to caller
 }
 
-// stripWg is signaled when the ANSI-stripping goroutine finishes flushing.
-var stripWg sync.WaitGroup
+// stdoutDone reports the copy result so main can fail if output was lost.
+var stdoutDone chan error
+
+// stderrWg waits for diagnostics after stdout's result has been reported.
+var stderrWg sync.WaitGroup
 
 func init() {
 	// Agent UX Decision: Auto-disable terminal colors in agent context.
@@ -49,7 +61,7 @@ func init() {
 	//
 	// Override: Set NO_COLOR=0 to force colors even in agent context.
 	if agentx.IsAgentContext() && os.Getenv("NO_COLOR") == "" {
-		os.Setenv("NO_COLOR", "1")
+		_ = os.Setenv("NO_COLOR", "1") // Setenv fails only on an invalid name
 	}
 
 	// Escape hatch: CLICOLOR_FORCE=1 disables the global ANSI stripper below
@@ -66,17 +78,21 @@ func init() {
 	// fmt.Print(style.Render(...)) which bypasses it. These pipes catch
 	// everything globally for both streams.
 	if !forceColor && !isatty.IsTerminal(os.Stdout.Fd()) && !isatty.IsCygwinTerminal(os.Stdout.Fd()) {
-		os.Setenv("NO_COLOR", "1") // keep for libraries that do check it
+		_ = os.Setenv("NO_COLOR", "1") // keep for libraries that do check it; Setenv fails only on an invalid name
 
 		pr, pw, err := os.Pipe()
 		if err == nil {
 			realStdout := os.Stdout
 			os.Stdout = pw
 
-			stripWg.Add(1)
+			stdoutDone = make(chan error, 1)
 			go func() {
-				defer stripWg.Done()
-				io.Copy(&ansiStripper{realStdout}, pr) //nolint:errcheck // best-effort
+				// Keep Go's default SIGPIPE behavior for early-closing consumers
+				// such as head; other write errors are reported by main.
+				_, err := io.Copy(&ansiStripper{realStdout}, pr)
+				// Unblock a producer still writing after the destination failed.
+				_ = pr.Close()
+				stdoutDone <- err
 			}()
 		}
 	}
@@ -86,9 +102,10 @@ func init() {
 			realStderr := os.Stderr
 			os.Stderr = pw
 
-			stripWg.Add(1)
+			stderrWg.Add(1)
 			go func() {
-				defer stripWg.Done()
+				defer stderrWg.Done()
+				defer pr.Close()
 				io.Copy(&ansiStripper{realStderr}, pr) //nolint:errcheck // best-effort
 			}()
 		}
@@ -100,14 +117,47 @@ func init() {
 }
 
 func main() {
+	// A detached sender started by telemetry.CapturePostHog: post the event on
+	// stdin and exit before any command setup.
+	if len(os.Args) == 2 && os.Args[1] == telemetry.PostHogSenderArg {
+		telemetry.RunPostHogSender(os.Stdin)
+		return
+	}
+
+	// Read before setting: this process was started by another ox only if
+	// the marker was already there.
+	startedByOx = os.Getenv(envStartedByOx) != ""
+	_ = os.Setenv(envStartedByOx, "1") // Setenv fails only on an invalid name
+
 	// load .env files if present (silently ignore if not found)
 	// order: .env.local (highest priority), .env (base config)
 	// supports FEATURE_CLOUD, FEATURE_AUTH, SAGEOX_API, etc.
-	_ = godotenv.Load(".env.local")
-	_ = godotenv.Load(".env")
+	// A hosted read must not inherit endpoint or credential selection from
+	// whichever source checkout happens to be the working directory.
+	if !headlessLedgerReadRequested(os.Args[1:]) {
+		_ = godotenv.Load(".env.local")
+		_ = godotenv.Load(".env")
+	}
 
-	args := applyCatalogTokenRewrites(os.Args[1:], loadFlagAliases(defaultCatalogJSON))
-	exitCode := executeWithFrictionRecovery(args, 0)
+	exitCode := executeWithSignalContext(os.Args[1:])
+	// Flush the result before deciding success, while stderr can still report
+	// a failed destination. Preserve an existing command failure's exit code.
+	os.Stdout.Close()
+	if stdoutDone != nil {
+		if err := <-stdoutDone; err != nil {
+			err = fmt.Errorf("write stdout: %w", err)
+			printError(err)
+			if exitCode == 0 {
+				exitCode = 1
+				if cliCtx != nil {
+					cliCtx.Err = err
+				}
+			}
+		}
+	}
+	// Before the trace flush below, which can take seconds and must not count
+	// toward the command's reported duration.
+	capturePostHogCommand(exitCode, os.Stderr)
 
 	// Record cli.exit_code on the root OTel span and flush. This runs on
 	// both success and error paths so failed commands appear in traces
@@ -116,18 +166,53 @@ func main() {
 	observability.SetExitCode(exitCode)
 	observability.Shutdown(context.Background())
 
-	// close pipe writers so ANSI-stripping goroutines see EOF and flush
-	os.Stdout.Close()
+	// Flush diagnostics after reporting any stdout failure.
 	os.Stderr.Close()
-	stripWg.Wait()
+	stderrWg.Wait()
 
 	os.Exit(exitCode)
+}
+
+// executeWithSignalContext runs the CLI under a context that cancels on
+// SIGINT/SIGTERM. Subprocesses run in their own process group (see
+// internal/gitutil), so a terminal Ctrl-C no longer reaches them directly;
+// they die only when this context is canceled.
+func executeWithSignalContext(args []string) int {
+	ctx, cancel := context.WithCancel(context.Background())
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt, syscall.SIGTERM)
+	stop := func() {
+		signal.Stop(interrupts)
+		cancel()
+	}
+	defer stop()
+	go func() {
+		select {
+		case <-interrupts:
+			// Restore default handling before cleanup can start, so a second
+			// Ctrl-C terminates even when cleanup ignores cancellation.
+			stop()
+		case <-ctx.Done():
+		}
+	}()
+	return executeWithFrictionRecovery(ctx, args, 0)
+}
+
+// commandExitError carries the exit status for a command that has already
+// handled its output, bypassing friction recovery and duplicate error output.
+type commandExitError struct {
+	ExitCode int
+	Message  string
+}
+
+func (e *commandExitError) Error() string {
+	return e.Message
 }
 
 // executeWithFrictionRecovery runs the command with friction recovery support.
 // If the command fails and we can auto-correct with high confidence, we retry
 // with the corrected args. Returns the exit code.
-func executeWithFrictionRecovery(args []string, attempt int) int {
+func executeWithFrictionRecovery(ctx context.Context, args []string, attempt int) int {
 	// CRITICAL: Reset Cobra state before re-execution to prevent flag pollution
 	// from the previous attempt. Without this, flags may carry over incorrectly.
 	rootCmd.ResetFlags()
@@ -136,28 +221,95 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 	// Resolve cached/env feature flags before Cobra parses the command. This is
 	// required for default-off commands: help and command lookup both happen
 	// before PersistentPreRunE.
-	initFeatureFlags(rootCmd)
-	syncFeatureGatedCommands(rootCmd)
+	if !headlessLedgerReadRequested(args) {
+		initFeatureFlags(rootCmd)
+		syncFeatureGatedCommands(rootCmd)
+	}
+	// the first attempt gets the pre-cobra rewrites: a one-word command line or
+	// a subcommand typed as a flag is fixed before flag aliases look at the
+	// argv. Both run after the feature-gate sync so an enabled gated command
+	// resolves like any other.
+	if attempt == 0 {
+		args = applyCatalogTokenRewrites(normalizeInvocation(args), loadFlagAliases(defaultCatalogJSON))
+	}
 	rootCmd.SetArgs(args)
+	preRunReached = false
+	start := time.Now()
 
 	// mark retry attempts to avoid telemetry double-counting
 	if attempt > 0 {
-		os.Setenv("OX_FRICTION_RETRY", "1")
+		_ = os.Setenv("OX_FRICTION_RETRY", "1") // Setenv fails only on an invalid name
 	}
 
-	err := rootCmd.Execute()
+	// Cobra shows help for non-runnable groups before validating arguments.
+	// Validate those groups explicitly, using Cobra's flag parser so values
+	// and arguments after -- retain their normal meaning. Leave explicit help
+	// and runnable commands to Cobra, including the custom agent dispatcher.
+	cmd, groupArgs, findErr := rootCmd.Find(args)
+	var err error
+	if findErr == nil && cmd.HasParent() && !cmd.Runnable() {
+		cmd.InitDefaultHelpFlag()
+		if flagErr := cmd.ParseFlags(groupArgs); flagErr == nil {
+			help, _ := cmd.Flags().GetBool("help")
+			if !help {
+				err = cobra.NoArgs(cmd, cmd.Flags().Args())
+			}
+		}
+	}
+	if err == nil {
+		cmd, err = rootCmd.ExecuteContextC(ctx)
+	}
+	unknownCommand := err != nil && strings.HasPrefix(err.Error(), `unknown command "`)
+	if unknownCommand {
+		err = fmt.Errorf("%w\n\nRun '%s --help' for usage", err, cmd.CommandPath())
+	}
+	if err != nil && !headlessLedgerReadRequested(args) {
+		switch {
+		case !preRunReached:
+			// Cobra rejected the invocation before ox built its context. Give
+			// usage telemetry one, so the mistake is counted like any failure.
+			err = errkind.WithDetail(errkind.Usage, cobraRejection(err), err)
+			if !isFeedbackCommand(cmd) {
+				cliCtx = &cli.Context{Cmd: cmd, CommandStartTime: start, Ctx: context.Background()}
+			}
+		case cobraFlagValidation(err):
+			// Required flags and flag groups are checked after
+			// PersistentPreRunE, so the context exists; only the kind is missing.
+			err = errkind.WithDetail(errkind.Usage, cobraRejection(err), err)
+		}
+	}
+	if cliCtx != nil {
+		cliCtx.Err = err
+	}
 	if err == nil {
 		return 0
 	}
 
-	// Commands may return a typed exit-code error that already carries a
-	// rendered envelope (ox distill history list/show/since use this path to
+	// Commands that have already rendered an error envelope may return a
+	// typed exit-code error (conversation and ledger read commands use this path to
 	// surface usage_error as exit 2 without going through the default
 	// error printer or friction recovery). RunE writes the envelope to
 	// stdout before returning; here we only need to honor the code.
-	var jexit *distillHistoryExitError
-	if errors.As(err, &jexit) {
-		return jexit.ExitCode
+	var commandExit *commandExitError
+	if errors.As(err, &commandExit) {
+		return commandExit.ExitCode
+	}
+	if errors.Is(err, tea.ErrInterrupted) || ctx.Err() != nil {
+		fmt.Fprintln(os.Stderr, "Interrupted.")
+		return 130
+	}
+	if isFeedbackCommand(cmd) {
+		// Feedback failures must not trigger analytics or automatic resubmission.
+		printError(err)
+		return 1
+	}
+	if headlessLedgerReadRequested(args) {
+		// Cobra flag parsing can fail before RunE. Keep even that path out
+		// of friction recovery, which sends daemon events and can retry.
+		if cmd, _, _ := rootCmd.Find(args); cmd == gitCredentialHelperCmd {
+			return 2 // Git helpers must keep their protocol output silent.
+		}
+		return writeReadSyncUsageError(rootCmd, args)
 	}
 
 	// try friction recovery
@@ -166,24 +318,50 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 		return 1
 	}
 
-	result := frictionEngine.Handle(args, err)
+	// plan the correction without running anything: catalog match on the whole
+	// input, then on its leading words, then a plausibility-guarded fuzzy guess.
+	// Auto-execution is already downgraded to a suggestion here when the
+	// corrected argv would not parse.
+	plan := planCorrection(args, err)
+	result := plan.Result
 	if result == nil {
 		printError(err)
 		return 1
 	}
 
+	// record what we offered next to what was typed, so the catalog can learn
+	// which corrections agents actually needed
+	attachSuggestion(result)
+
 	// send friction event to daemon for analytics (fire-and-forget)
 	sendFrictionEvent(result.Event)
 
+	// Friction's fuzzy candidates are full command paths, so a nested typo
+	// such as "session lsit" can suggest an unrelated root command. Use the
+	// group's own subcommands for guesses, retaining curated catalog remaps.
+	if unknownCommand && cmd.HasParent() && (!cmd.Runnable() || cmd.HasSubCommands()) &&
+		(result.Suggestion == nil || result.Suggestion.Type == friction.SuggestionLevenshtein) {
+		printError(err)
+		if cmd.SuggestionsMinimumDistance <= 0 {
+			cmd.SuggestionsMinimumDistance = 2 // Cobra's default edit distance
+		}
+		for _, suggestion := range cmd.SuggestionsFor(cmd.Flags().Arg(0)) {
+			fmt.Fprintf(os.Stderr, "Did you mean '%s %s'?\n", cmd.CommandPath(), suggestion)
+		}
+		return 1
+	}
+
 	// determine output mode
-	jsonMode := cfg != nil && cfg.JSON
+	// cfg is nil when cobra rejected the invocation before the command's setup
+	// ran, so a --json typed on the failing command line is read from args
+	jsonMode := (cfg != nil && cfg.JSON) || argsRequestJSON(args)
 
 	// emit correction/suggestion for learning
-	result.Emit(jsonMode || agentx.IsAgentContext())
+	emitCorrection(plan, jsonMode || agentx.IsAgentContext())
 
 	// auto-execute if high confidence and within retry limit
 	if result.AutoExecute && attempt < maxFrictionRetries {
-		return executeWithFrictionRecovery(result.CorrectedArgs, attempt+1)
+		return executeWithFrictionRecovery(ctx, result.CorrectedArgs, attempt+1)
 	}
 
 	// no auto-execute - show the original error

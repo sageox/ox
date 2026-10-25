@@ -69,6 +69,6 @@ func DefaultPaneKeys() PaneKeyMap {
 		Up:     key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("k/↑", "up")),
 		Down:   key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/↓", "down")),
 		Select: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
-		Expand: key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "expand")),
+		Expand: key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "expand")),
 	}
 }

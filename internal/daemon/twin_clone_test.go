@@ -91,7 +91,7 @@ func TestTwoPhaseClone_BasicTeamContext(t *testing.T) {
 	require.Contains(t, result.ManifestConfig.Denies, "secrets/")
 
 	// sparse paths include expected entries
-	require.Contains(t, result.SparsePaths, ".sageox/")
+	require.Contains(t, result.SparsePaths, "/.sageox/")
 }
 
 // --- B. Unshallow enables pull --rebase ---

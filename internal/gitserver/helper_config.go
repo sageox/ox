@@ -3,6 +3,8 @@ package gitserver
 import (
 	"errors"
 	"fmt"
+	"log/slog"
+	"net"
 	"net/url"
 	"os/exec"
 	"strings"
@@ -64,6 +66,11 @@ func CredentialHelperArgs() []string {
 // and threaded down here so internal/gitserver doesn't have to know the path
 // to the running ox binary.
 type HelperConfig struct {
+	// Scheme is the credential scope scheme: "https" (default when empty) or
+	// "http" for loopback remotes. Git matches the scope against the remote's
+	// scheme, so an https scope never fires for an http remote.
+	Scheme string
+
 	// Host is the git server host (e.g. "git.sageox.ai"). The credential
 	// scope is set to "https://<host>" so the helper only fires for that
 	// exact host — never for third-party remotes that may live in the
@@ -97,7 +104,14 @@ func InstallCredentialHelper(repoPath string, cfg HelperConfig) error {
 	if cfg.Command == "" {
 		return fmt.Errorf("helper config: command is empty")
 	}
-	scope := "credential.https://" + cfg.Host + ".helper"
+	scheme := cfg.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	if scheme != "https" && scheme != "http" {
+		return fmt.Errorf("helper config: unsupported scheme %q", scheme)
+	}
+	scope := "credential." + scheme + "://" + cfg.Host + ".helper"
 
 	// Read current value so we can skip the write if it already matches.
 	if current, err := readGitConfig(repoPath, scope); err == nil && current == cfg.Command {
@@ -185,10 +199,72 @@ func DisableCommitSigning(repoPath string) (changed bool, err error) {
 	return changed, nil
 }
 
+// TeamCoworkerGetter reports the endpoint SAGEOX_TOKEN is bound to and, when
+// that token is a team token acting as an AI coworker, the coworker's name and
+// agt_ id; id is "" otherwise. Set by the auth package to avoid circular
+// imports. Nil reads as no coworker.
+var TeamCoworkerGetter func() (ep, name, id string)
+
+// coworkerEmailDomain ends the user.email stampCoworkerAuthor writes, and is
+// how it recognizes its own stamp. ".invalid" (RFC 2606) never resolves, so
+// the address belongs to no one.
+const coworkerEmailDomain = "@ai-coworker.invalid"
+
+// stampCoworkerAuthor makes the AI coworker a team token acts as the git
+// identity of the clone at repoPath. ox's Ledger writers commit through several
+// git paths, and all of them take author and committer from user.name and
+// user.email, which git reads from the clone's own config ahead of the
+// machine's global one (GIT_AUTHOR_* and GIT_COMMITTER_* still override both).
+// It stamps a clone only when its origin is on the server the token is bound
+// to. Otherwise it removes an identity it stamped earlier, such as one a team
+// token left on a person's machine, and leaves any other alone.
+func stampCoworkerAuthor(repoPath, remoteURL string) error {
+	var name, email string
+	if TeamCoworkerGetter != nil {
+		if ep, n, id := TeamCoworkerGetter(); id != "" && endpointHostsEqual(ep, endpointFromRemoteURL(remoteURL)) {
+			name, email = n, id+coworkerEmailDomain
+		}
+	}
+	// A failed read counts as unset: removal waits for the next call, and a
+	// write reports its own failure.
+	current, _ := readGitConfigLocal(repoPath, "user.email")
+
+	if email == "" {
+		if !strings.HasSuffix(current, coworkerEmailDomain) {
+			return nil
+		}
+		// user.email goes last because it marks the stamp: if removing
+		// user.name fails, the next call still finds the stamp and finishes.
+		for _, key := range []string{"user.name", "user.email"} {
+			out, err := exec.Command("git", "-C", repoPath, "config", "--local", "--unset-all", key).CombinedOutput()
+			var exitErr *exec.ExitError
+			if asErr(err, &exitErr) && exitErr.ExitCode() == 5 {
+				continue // already unset
+			}
+			if err != nil {
+				return fmt.Errorf("git config --unset-all %s: %s: %w", key, strings.TrimSpace(string(out)), err)
+			}
+		}
+		return nil
+	}
+
+	if currentName, _ := readGitConfigLocal(repoPath, "user.name"); current == email && currentName == name {
+		return nil
+	}
+	for _, kv := range [][2]string{{"user.name", name}, {"user.email", email}} {
+		out, err := exec.Command("git", "-C", repoPath, "config", "--local", "--replace-all", kv[0], kv[1]).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git config %s: %s: %w", kv[0], strings.TrimSpace(string(out)), err)
+		}
+	}
+	return nil
+}
+
 // MigrateLedgerCredentials performs the one-shot migration for a single
 // ledger: disable commit signing, strip any embedded oauth2:TOKEN from the
 // origin URL, then install the ox credential helper for the resulting bare
-// host. Idempotent — safe to invoke on every daemon startup.
+// host. It also sets who authors the clone's commits (stampCoworkerAuthor).
+// Idempotent — safe to invoke on every daemon startup.
 //
 // Returns ok=true if the migration ran (signing disabled, stripped, or
 // installed); ok=false if there was nothing to do. The error result is
@@ -216,6 +292,12 @@ func MigrateLedgerCredentials(repoPath string, helperCmd string) (changed bool, 
 		return changed, nil
 	}
 
+	// Logged, not returned: RefreshRemoteCredentials runs this before Ledger
+	// pushes, and a push must not fail over who authored it.
+	if err := stampCoworkerAuthor(repoPath, remoteURL); err != nil {
+		slog.Warn("set AI coworker as commit author failed", "repo", repoPath, "error", err)
+	}
+
 	// Only migrate https:// remotes with the ox-managed oauth2 prefix. A
 	// malformed origin URL is genuine misconfig worth surfacing (per the
 	// "genuine failures" contract above) — don't fold it into the non-HTTPS
@@ -224,7 +306,8 @@ func MigrateLedgerCredentials(repoPath string, helperCmd string) (changed bool, 
 	if err != nil {
 		return changed, fmt.Errorf("parse origin URL %q: %w", remoteURL, err)
 	}
-	if parsed.Scheme != "https" {
+	scheme, host := helperTarget(parsed)
+	if host == "" {
 		return changed, nil
 	}
 
@@ -239,11 +322,8 @@ func MigrateLedgerCredentials(repoPath string, helperCmd string) (changed bool, 
 	// 3. Install (or refresh) the credential helper for this host. We do
 	// this even when no PAT was embedded so brand-new ledgers also get
 	// the helper configured during normal sync.
-	host := parsed.Hostname()
-	if host == "" {
-		return changed, nil
-	}
 	if err := InstallCredentialHelper(repoPath, HelperConfig{
+		Scheme:  scheme,
 		Host:    host,
 		Command: helperCmd,
 	}); err != nil {
@@ -257,4 +337,35 @@ func MigrateLedgerCredentials(repoPath string, helperCmd string) (changed bool, 
 // asErr is a tiny shim around errors.As to keep call sites readable.
 func asErr(err error, target **exec.ExitError) bool {
 	return errors.As(err, target)
+}
+
+// IsLoopbackHost reports whether h (a bare host, no port) names the local
+// machine: an IP loopback literal or the well-known name "localhost". It is the
+// single definition of "loopback" shared by the LFS client and the credential
+// helper, so plain http is allowed in exactly the same places.
+func IsLoopbackHost(h string) bool {
+	if h == "" {
+		return false
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(h, "localhost")
+}
+
+// helperTarget returns the credential scope scheme and host for a remote URL,
+// or ("", "") when ox installs no helper for it. https remotes scope to the
+// bare hostname (any port). Plain http is accepted only for loopback hosts and
+// scopes to host:port, since git matches the port for non-default ports.
+// Non-loopback http, file://, and ssh remotes get no helper.
+func helperTarget(u *url.URL) (scheme, host string) {
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return "https", u.Hostname()
+	case "http":
+		if IsLoopbackHost(u.Hostname()) {
+			return "http", u.Host
+		}
+	}
+	return "", ""
 }

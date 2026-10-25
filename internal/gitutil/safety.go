@@ -3,8 +3,10 @@
 package gitutil
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -25,6 +27,21 @@ var knownLockFiles = []string{
 	"shallow.lock",
 	"config.lock",
 	"HEAD.lock",
+	"info/sparse-checkout.lock",
+}
+
+// SparseCheckoutLockAge is how old info/sparse-checkout.lock must be before it
+// counts as abandoned. The lock has no owner PID, and a sparse-checkout on a
+// very large checkout can legitimately hold it for many minutes while it rewrites
+// the working tree, so the five-minute StaleLockAge would displace a live writer.
+// It is still far shorter than AbandonedLockAge: the holder never waits on the
+// network, so a lock this old is a crash.
+const SparseCheckoutLockAge = 30 * time.Minute
+
+// lockMinAge overrides the ownerless-lock age threshold for locks whose holder
+// has a known, bounded lifetime shorter than AbandonedLockAge.
+var lockMinAge = map[string]time.Duration{
+	"info/sparse-checkout.lock": SparseCheckoutLockAge,
 }
 
 // knownLockGlobs are lock-file patterns whose exact name isn't predictable.
@@ -67,6 +84,36 @@ func lockFilesIn(gitDir string) []string {
 // Returns the names of lock files found (empty slice = safe to proceed).
 func HasLockFiles(gitDir string) []string {
 	return lockFilesIn(gitDir)
+}
+
+// WaitForLockFiles polls until gitDir holds no lock files, the budget elapses,
+// or ctx ends, and returns whatever lock files remain (nil when clear). It never
+// removes anything: a lock held by a live git is not ours to touch.
+func WaitForLockFiles(ctx context.Context, gitDir string, budget time.Duration) []string {
+	deadline := time.NewTimer(budget)
+	defer deadline.Stop()
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		locks := lockFilesIn(gitDir)
+		if len(locks) == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return locks
+		case <-deadline.C:
+			return lockFilesIn(gitDir)
+		case <-tick.C:
+		}
+	}
+}
+
+// IsIndexLockContention reports whether git output says another process holds
+// a lock file ("Unable to create '.../index.lock': File exists"). It marks a
+// busy repo, never a conflict.
+func IsIndexLockContention(output string) bool {
+	return strings.Contains(output, "Unable to create") && strings.Contains(output, ".lock': File exists")
 }
 
 // lockOwnerPID extracts the owning process ID from a lock filename that encodes
@@ -137,6 +184,10 @@ const StaleLockAge = 5 * time.Minute
 // next-index-<pid>.lock plus an index.lock sitting untouched for three months.
 const AbandonedLockAge = 1 * time.Hour
 
+// beforeLockRemoveHook runs between inspecting a lock and re-checking its identity
+// for removal. Tests use it to replace the lock the way a live writer would.
+var beforeLockRemoveHook func(path string)
+
 // RemoveStaleLockFiles removes git lock files older than StaleLockAge.
 // Safe to call at daemon startup or before pull operations — only removes
 // files that no running git process could still be holding.
@@ -163,6 +214,10 @@ func RemoveStaleLockFiles(gitDir string) (removed []string, errs []error) {
 			if age < StaleLockAge {
 				continue // owner is gone, but give a just-exited process room
 			}
+		} else if minAge, ok := lockMinAge[lock]; ok {
+			if age < minAge {
+				continue
+			}
 		} else if age < AbandonedLockAge {
 			// Ownerless lock. git's index.lock IS the lock — no PID to probe —
 			// so age is the only available signal, and it is a weak one: a slow
@@ -171,12 +226,58 @@ func RemoveStaleLockFiles(gitDir string) (removed []string, errs []error) {
 			// abandonment, so a live writer is never displaced.
 			continue
 		}
+		// A live writer may have replaced the lock since it was inspected (unlink
+		// plus recreate under the same name). Re-stat and remove only the exact
+		// file judged abandoned: same inode, same mtime, same size.
+		if beforeLockRemoveHook != nil {
+			beforeLockRemoveHook(path)
+		}
+		current, err := os.Stat(path)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("re-stat %s: %w", lock, err))
+			}
+			continue
+		}
+		if !os.SameFile(info, current) || !current.ModTime().Equal(info.ModTime()) || current.Size() != info.Size() {
+			continue // replaced by a live writer; leave it alone
+		}
 		if err := os.Remove(path); err != nil {
 			errs = append(errs, fmt.Errorf("remove %s: %w", lock, err))
 		} else {
 			removed = append(removed, lock)
 		}
 	}
+	return removed, errs
+}
+
+// RemoveAllLockFiles removes every *.lock file under gitDir, whatever its age
+// or the PID it names, including the ref and packed-refs locks
+// RemoveStaleLockFiles never touches. Call it only when no git process can
+// hold one: the locks were left by a machine that has gone away, and no ox
+// process on this machine runs git in the clone yet.
+func RemoveAllLockFiles(gitDir string) (removed []string, errs []error) {
+	root, err := os.OpenRoot(gitDir)
+	if err != nil {
+		return nil, []error{err}
+	}
+	defer root.Close()
+	// The callback never returns an error, so WalkDir's own result is nil.
+	_ = fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			errs = append(errs, err)
+			return nil
+		}
+		if !d.Type().IsRegular() || !strings.HasSuffix(d.Name(), ".lock") {
+			return nil
+		}
+		if err := root.Remove(filepath.FromSlash(path)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("remove %s: %w", path, err))
+		} else if err == nil {
+			removed = append(removed, path)
+		}
+		return nil
+	})
 	return removed, errs
 }
 
@@ -306,12 +407,27 @@ func StripLFSConfig(repoPath string) {
 	}
 }
 
-// FetchHeadAge returns how long ago FETCH_HEAD was last modified.
-// Returns (0, false) if FETCH_HEAD doesn't exist or can't be read.
+// FetchHeadAge returns how long ago a SUCCESSFUL fetch last wrote FETCH_HEAD.
+// Returns (0, false) if FETCH_HEAD doesn't exist, can't be read, or is empty.
+//
+// The empty case is not a corner case, it is the failure case: git truncates
+// FETCH_HEAD before contacting the remote, so a fetch that fails — DNS down,
+// remote gone — leaves a zero-byte file with a fresh mtime. Callers use this
+// age to skip a "recent" fetch, so counting that file made a failed fetch
+// suppress the retry that would have recovered, and the resulting skip is
+// reported to the caller as a successful sync.
+//
+// A successful fetch always writes at least one ref line, including when the
+// repo is already up to date, so non-empty is a sound success signal. Treating
+// empty as "no fetch" errs toward fetching again, which is the safe direction:
+// a redundant fetch costs one round trip, a false skip costs correctness.
 func FetchHeadAge(repoPath string) (time.Duration, bool) {
 	fetchHead := filepath.Join(repoPath, ".git", "FETCH_HEAD")
 	info, err := os.Stat(fetchHead)
 	if err != nil {
+		return 0, false
+	}
+	if info.Size() == 0 {
 		return 0, false
 	}
 	return time.Since(info.ModTime()), true

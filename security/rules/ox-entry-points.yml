@@ -32,15 +32,15 @@ rules:
     pattern-either:
       - pattern: |
           &cobra.Command{
-            ...
+            ...,
             RunE: $RUN,
-            ...
+            ...,
           }
       - pattern: |
           &cobra.Command{
-            ...
+            ...,
             Run: $RUN,
-            ...
+            ...,
           }
     paths:
       exclude:
@@ -320,7 +320,11 @@ rules:
       - patterns:
           - pattern: args[$I]
           - pattern-inside: |
-              func $F($CMD *cobra.Command, args []string) ... { ... }
+              func $F($CMD *cobra.Command, args []string) error { ... }
+      - patterns:
+          - pattern: args[$I]
+          - pattern-inside: |
+              func $F($CMD *cobra.Command, args []string) { ... }
     pattern-sinks:
       - pattern: exec.Command($CMD, ...)
       - pattern: exec.CommandContext($CTX, $CMD, ...)

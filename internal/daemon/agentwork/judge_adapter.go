@@ -21,9 +21,11 @@ func NewRunnerCompleter(r Runner) summaryeval.Completer {
 	return func(ctx context.Context, prompt string) (summaryeval.CompletionResult, error) {
 		// Judging a summary is a short, bounded task — cap the timeout
 		// conservatively so a stuck judge never blocks the finalize path.
+		// The summary under judgment comes from an untrusted transcript.
 		res, err := r.Run(ctx, RunRequest{
-			Prompt:          prompt,
-			TimeoutOverride: 2 * time.Minute,
+			Prompt:             prompt,
+			TimeoutOverride:    2 * time.Minute,
+			IsolateIfSupported: true,
 		})
 		if err != nil {
 			return summaryeval.CompletionResult{}, err

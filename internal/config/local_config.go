@@ -119,6 +119,13 @@ func LoadLocalConfig(projectRoot string) (*LocalConfig, error) {
 // whole sequence under MutateLocalConfig so two daemons / a daemon + CLI
 // can't lose each other's team_contexts rows or ledger.last_sync updates.
 // See ox-dfy4 for the failure mode.
+// ErrProjectNotInitialized is returned when a write is attempted against a
+// directory that has no .sageox/. Callers that legitimately run outside an
+// initialized project (the daemon's GC bookkeeping, for one) use errors.Is to
+// tell "nothing to do here" apart from a genuine write failure, rather than
+// re-deriving the precondition with a predicate that can drift from this check.
+var ErrProjectNotInitialized = errors.New("project not initialized: run 'ox init' first")
+
 func SaveLocalConfig(projectRoot string, cfg *LocalConfig) error {
 	if projectRoot == "" {
 		return errors.New("project root cannot be empty")
@@ -132,7 +139,7 @@ func SaveLocalConfig(projectRoot string, cfg *LocalConfig) error {
 	// this prevents commands like ox status from creating artifacts in uninitialized projects
 	sageoxPath := filepath.Join(projectRoot, sageoxDir)
 	if _, err := os.Stat(sageoxPath); os.IsNotExist(err) {
-		return fmt.Errorf("project not initialized: run 'ox init' first")
+		return ErrProjectNotInitialized
 	}
 
 	// ensure .sageox directory exists (should already exist from check above, but be defensive)
@@ -476,13 +483,30 @@ func (c *LocalConfig) SetTeamContext(teamID, teamName, path string) {
 
 // UpdateTeamContextLastSync updates the last sync time for a team context.
 func (c *LocalConfig) UpdateTeamContextLastSync(teamID string) {
+	if teamID == "" {
+		return
+	}
 	for i := range c.TeamContexts {
 		if c.TeamContexts[i].TeamID == teamID {
 			c.TeamContexts[i].LastSync = time.Now().UTC()
 			return
 		}
 	}
+	// Deliberately no append: this caller has only an ID, and an entry with an
+	// empty name and path is worse than no entry — it persists a team context
+	// config block that cannot be resolved. Callers that hold the identity
+	// should use UpsertTeamContextLastSync.
 }
+
+// A team context discovered from the repo-detail API
+// (RegisterTeamContextsFromAPI) is deliberately NOT added to config here, so
+// this stays a no-op for one. Writing it would give a revoked team a way back:
+// CleanupRevokedTeamContexts removes the in-memory workspace and the on-disk
+// checkout but never edits config.local.toml, and LoadFromConfig recreates a
+// workspace from any entry it finds — so the team would reappear and resume
+// syncing on the next reload. Its last-sync time is carried by
+// .sageox/cache/sync-state.json in the checkout instead, which survives a GC
+// reclone and is what a non-owner daemon reads anyway.
 
 // UpdateTeamContextLastGC records when the daemon last GC-recloned a team context.
 func (c *LocalConfig) UpdateTeamContextLastGC(teamID string) {
@@ -610,7 +634,7 @@ func FindAllTeamContexts(projectRoot string) []TeamContext {
 
 	var result []TeamContext
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir() || paths.IsHiddenTeamsEntry(entry.Name()) {
 			continue
 		}
 		teamPath := filepath.Join(teamsDir, entry.Name())

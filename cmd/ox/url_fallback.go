@@ -7,6 +7,7 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 )
 
 // GetLedgerURLWithFallback fetches the ledger git URL from the cloud API,
@@ -113,7 +114,7 @@ func FetchLedgerURLWithFallback(sageoxDir, ep string) (url string, fromCache boo
 		return "", false, fmt.Errorf("get auth token for %s: %w", ep, tokenErr)
 	}
 	if token == nil || token.AccessToken == "" {
-		return "", false, fmt.Errorf("not authenticated to %s - run 'ox login' first", ep)
+		return "", false, errkind.Errorf(errkind.NotLoggedIn, "not authenticated to %s - run 'ox login' first", ep)
 	}
 	return "", false, fmt.Errorf("no ledger URL available from API or cache")
 }
@@ -150,7 +151,7 @@ func FetchTeamURLWithFallback(sageoxDir, teamID, ep string) (url string, fromCac
 		return "", false, fmt.Errorf("get auth token for %s: %w", ep, tokenErr)
 	}
 	if token == nil || token.AccessToken == "" {
-		return "", false, fmt.Errorf("not authenticated to %s - run 'ox login' first", ep)
+		return "", false, errkind.Errorf(errkind.NotLoggedIn, "not authenticated to %s - run 'ox login' first", ep)
 	}
 	return "", false, fmt.Errorf("no team context URL available from API or cache for team %s", teamID)
 }

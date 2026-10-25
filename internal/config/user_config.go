@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sageox/ox/internal/ephemeral"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
 	"gopkg.in/yaml.v3"
 )
@@ -43,32 +45,17 @@ func ValidateDisplayName(name string) error {
 	return nil
 }
 
-// ContextGitConfig holds settings for context git repo operations.
-// These control automatic commit/push behavior during session operations.
+// ContextGitConfig holds the deprecated context_git.auto_commit /
+// context_git.auto_push settings. DEPRECATED (bead ox-6p5y.11): these were
+// never wired to any behavior — see cmd/ox/config_settings.go's catalog
+// entries for the deprecation notice. The struct exists only so the
+// key stays resolvable/settable (backward compatibility + an honest "this
+// never took effect" message) via cmd/ox/config_settings.go's
+// ResolveConfigValue/setUserConfig/unsetUserConfig, which read and write
+// these fields directly. Do not add new callers; do not wire this to sync.
 type ContextGitConfig struct {
-	// AutoCommit controls whether to commit on session stop / session end.
-	// Default: true
 	AutoCommit *bool `yaml:"auto_commit,omitempty"`
-
-	// AutoPush controls whether to push after commit.
-	// Default: true
-	AutoPush *bool `yaml:"auto_push,omitempty"`
-}
-
-// IsAutoCommitEnabled returns true if auto-commit is enabled (default: true)
-func (c *ContextGitConfig) IsAutoCommitEnabled() bool {
-	if c == nil || c.AutoCommit == nil {
-		return true
-	}
-	return *c.AutoCommit
-}
-
-// IsAutoPushEnabled returns true if auto-push is enabled (default: true)
-func (c *ContextGitConfig) IsAutoPushEnabled() bool {
-	if c == nil || c.AutoPush == nil {
-		return true
-	}
-	return *c.AutoPush
+	AutoPush   *bool `yaml:"auto_push,omitempty"`
 }
 
 // SessionsConfig holds settings for session recording.
@@ -317,12 +304,15 @@ func (c *AgentWorkerConfig) WithDefaults() *AgentWorkerConfig {
 
 // UserConfig holds user-level configuration from config.yaml
 type UserConfig struct {
-	DisplayName       string             `yaml:"display_name,omitempty"`
-	TipsEnabled       *bool              `yaml:"tips_enabled,omitempty"`
-	TelemetryEnabled  *bool              `yaml:"telemetry_enabled,omitempty"`
-	SessionTermsShown *bool              `yaml:"session_terms_shown,omitempty"`
-	Attribution       *Attribution       `yaml:"attribution,omitempty"`
-	Badge             *BadgeConfig       `yaml:"badge,omitempty"`
+	// Trace is a persistent, machine-local receiver opt-in. It does not configure Claude Code.
+	Trace             *TraceConfig `yaml:"trace,omitempty"`
+	DisplayName       string       `yaml:"display_name,omitempty"`
+	TipsEnabled       *bool        `yaml:"tips_enabled,omitempty"`
+	TelemetryEnabled  *bool        `yaml:"telemetry_enabled,omitempty"`
+	SessionTermsShown *bool        `yaml:"session_terms_shown,omitempty"`
+	Attribution       *Attribution `yaml:"attribution,omitempty"`
+	Badge             *BadgeConfig `yaml:"badge,omitempty"`
+	// ContextGit is DEPRECATED (bead ox-6p5y.11) — see ContextGitConfig.
 	ContextGit        *ContextGitConfig  `yaml:"context_git,omitempty"`
 	Sessions          *SessionsConfig    `yaml:"sessions,omitempty"`
 	AgentWorker       *AgentWorkerConfig `yaml:"agent_worker,omitempty"`
@@ -346,6 +336,14 @@ type UserConfig struct {
 	// "off". See internal/config/session_draft.go and ADR-029.
 	SessionDraft string `yaml:"session_draft,omitempty"`
 
+	// SessionPublishing controls what happens to a recording when the
+	// session stops: "auto" (default) uploads it to the ledger; "manual"
+	// saves it locally only, so the user must run 'ox session upload'
+	// explicitly. This is the user-level override — it takes precedence
+	// over the repo's .sageox/config.json session_publishing setting. See
+	// internal/config/session_recording.go and ResolveSessionPublishing.
+	SessionPublishing string `yaml:"session_publishing,omitempty"`
+
 	// Hooks holds per-hook-event policy switches. Today only carries the
 	// UserPromptSubmit cloud_query opt-in; see HooksConfig for rationale.
 	Hooks *HooksConfig `yaml:"hooks,omitempty"`
@@ -358,6 +356,10 @@ type UserConfig struct {
 	// pull-request visuals. Pointer preserves inheritance from repo/team.
 	PRVisuals *PRVisualsConfig `yaml:"pr_visuals,omitempty"`
 
+	// Skills holds the user-level `skills.*` settings. Pointer so an absent
+	// block stays distinct from explicit values.
+	Skills *SkillsConfig `yaml:"skills,omitempty"`
+
 	// Ephemeral is the persisted user preference for ephemeral mode (no
 	// daemon, no local ledger clone, HTTP-only reads). Pointer so we can
 	// distinguish unset (nil) from explicit false. When non-nil, the value
@@ -366,6 +368,13 @@ type UserConfig struct {
 	// lowest-precedence signal — any env var, venue marker, or CI
 	// signal still overrides it. See docs/adr/adr-ephemeral-mode.md.
 	Ephemeral *bool `yaml:"ephemeral,omitempty"`
+
+	// DisposableMachine marks a machine that runs ox for one job and then
+	// goes away, keeping only the home directory, such as a pod with a
+	// persistent home volume. Unlike Ephemeral, the daemon runs and the Ledger
+	// is cloned. Read through DisposableMachineEnabled. Pointer so unset stays
+	// distinct from an explicit false.
+	DisposableMachine *bool `yaml:"disposable_machine,omitempty"`
 
 	// PATExpiryWarningThresholdPct is the fraction of token lifetime remaining
 	// at which to emit a single-line stderr warning during interactive
@@ -379,6 +388,25 @@ type UserConfig struct {
 	// warning threshold (default 1). Combined with PATExpiryWarningThresholdPct
 	// via max(). Set to 0 with pct==0 to disable warnings entirely.
 	PATExpiryWarningMinDays *int `yaml:"pat_expiry_warning_min_days,omitempty"`
+
+	// TelemetryNoticeShown records that the one-time telemetry notice was shown.
+	TelemetryNoticeShown *bool `yaml:"telemetry_notice_shown,omitempty"`
+}
+
+// SkillsConfig holds the user-level `skills.*` settings.
+type SkillsConfig struct {
+	// ClaudeOrgDedupe lets ox skip copying a team skill into .claude/skills
+	// when this machine's Claude Code already gets it from the team's Claude
+	// organization plugin. Unset means on. Per user, because whether Claude
+	// Code loads org plugins depends on how THIS coworker signs in: off is for
+	// sessions ox cannot see from disk, such as an API key or Bedrock exported
+	// only in the shell.
+	ClaudeOrgDedupe *bool `yaml:"claude_org_dedupe,omitempty"`
+}
+
+// ClaudeOrgDedupeEnabled reports skills.claude_org_dedupe: on unless set off.
+func (c *UserConfig) ClaudeOrgDedupeEnabled() bool {
+	return c == nil || c.Skills == nil || c.Skills.ClaudeOrgDedupe == nil || *c.Skills.ClaudeOrgDedupe
 }
 
 // PATExpiryWarningDefaults returns the default warning threshold (5%) and
@@ -448,6 +476,16 @@ func (c *UserConfig) SetSessionTermsShown(shown bool) {
 	c.SessionTermsShown = &shown
 }
 
+// HasSeenTelemetryNotice returns true if the one-time telemetry notice has been shown.
+func (c *UserConfig) HasSeenTelemetryNotice() bool {
+	return c.TelemetryNoticeShown != nil && *c.TelemetryNoticeShown
+}
+
+// SetTelemetryNoticeShown records whether the one-time telemetry notice has been shown.
+func (c *UserConfig) SetTelemetryNoticeShown(shown bool) {
+	c.TelemetryNoticeShown = &shown
+}
+
 // IsTelemetryEnabled returns true if telemetry is enabled (default: true)
 func (c *UserConfig) IsTelemetryEnabled() bool {
 	if c.TelemetryEnabled == nil {
@@ -461,38 +499,11 @@ func (c *UserConfig) SetTelemetryEnabled(enabled bool) {
 	c.TelemetryEnabled = &enabled
 }
 
-// GetContextGitAutoCommit returns whether auto-commit is enabled for context git.
-// Default: true
-func (c *UserConfig) GetContextGitAutoCommit() bool {
-	if c.ContextGit == nil {
-		return true
-	}
-	return c.ContextGit.IsAutoCommitEnabled()
-}
-
-// GetContextGitAutoPush returns whether auto-push is enabled for context git.
-// Default: true
-func (c *UserConfig) GetContextGitAutoPush() bool {
-	if c.ContextGit == nil {
-		return true
-	}
-	return c.ContextGit.IsAutoPushEnabled()
-}
-
-// SetContextGitAutoCommit sets the auto-commit preference for context git.
-func (c *UserConfig) SetContextGitAutoCommit(enabled bool) {
-	if c.ContextGit == nil {
-		c.ContextGit = &ContextGitConfig{}
-	}
-	c.ContextGit.AutoCommit = &enabled
-}
-
-// SetContextGitAutoPush sets the auto-push preference for context git.
-func (c *UserConfig) SetContextGitAutoPush(enabled bool) {
-	if c.ContextGit == nil {
-		c.ContextGit = &ContextGitConfig{}
-	}
-	c.ContextGit.AutoPush = &enabled
+// DisposableMachineEnabled reports the user's disposable_machine setting. It
+// is off unless set, and an unreadable user config reads as off.
+func DisposableMachineEnabled() bool {
+	cfg, err := LoadUserConfig()
+	return err == nil && cfg != nil && cfg.DisposableMachine != nil && *cfg.DisposableMachine
 }
 
 // AreSessionsEnabled returns whether session recording is enabled.
@@ -599,7 +610,10 @@ func (c *UserConfig) SetMurmurReceive(mode string) {
 func LoadUserConfig() (*UserConfig, error) {
 	// OX_USER_CONFIG overrides all path discovery — for CI/ephemeral environments
 	if envPath := os.Getenv(EnvUserConfig); envPath != "" {
-		cfg, err := loadUserConfigFromFile(envPath)
+		cfg, err := LoadUserConfigFile(envPath)
+		if errors.Is(err, os.ErrNotExist) {
+			err = nil // an absent environment-selected file still means defaults
+		}
 		publishEphemeralPreference(cfg)
 		return cfg, err
 	}
@@ -649,19 +663,17 @@ func LoadUserConfigFrom(configDir string) (*UserConfig, error) {
 	return &cfg, nil
 }
 
-// loadUserConfigFromFile loads user config from an explicit file path.
-func loadUserConfigFromFile(path string) (*UserConfig, error) {
+// LoadUserConfigFile loads an explicitly selected user config file.
+// Unlike default path discovery, a missing file is an error.
+func LoadUserConfigFile(path string) (*UserConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return &UserConfig{}, nil
-		}
-		return &UserConfig{}, fmt.Errorf("reading config from OX_USER_CONFIG=%s: %w", path, err)
+		return &UserConfig{}, fmt.Errorf("reading user config %q: %w", path, err)
 	}
 
 	var cfg UserConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return &UserConfig{}, fmt.Errorf("parsing config from OX_USER_CONFIG=%s: %w", path, err)
+		return &UserConfig{}, fmt.Errorf("parsing user config %q: %w", path, err)
 	}
 
 	return &cfg, nil
@@ -716,62 +728,13 @@ func SaveUserConfig(cfg *UserConfig) error {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
 
-	tempPath := configPath + ".tmp"
-
-	if err := os.WriteFile(tempPath, data, 0600); err != nil {
-		return fmt.Errorf("writing temp config: %w", err)
-	}
-
-	if err := os.Rename(tempPath, configPath); err != nil {
-		os.Remove(tempPath)
-		return fmt.Errorf("renaming temp config: %w", err)
+	// Unique temporary files let independent CLI invocations save atomically
+	// without renaming or removing each other's in-flight writes.
+	if err := fileutil.AtomicWriteBytes(configPath, data, 0600); err != nil {
+		return fmt.Errorf("writing user config: %w", err)
 	}
 
 	return nil
-}
-
-// GetContextGitAutoCommit loads user config and returns the auto-commit setting.
-// This is a convenience function for use without loading the full config.
-// Default: true
-func GetContextGitAutoCommit() bool {
-	cfg, err := LoadUserConfig()
-	if err != nil {
-		return true
-	}
-	return cfg.GetContextGitAutoCommit()
-}
-
-// GetContextGitAutoPush loads user config and returns the auto-push setting.
-// This is a convenience function for use without loading the full config.
-// Default: false
-func GetContextGitAutoPush() bool {
-	cfg, err := LoadUserConfig()
-	if err != nil {
-		return false
-	}
-	return cfg.GetContextGitAutoPush()
-}
-
-// SetContextGitAutoCommit loads user config, sets auto-commit, and saves.
-// This is a convenience function for setting a single value.
-func SetContextGitAutoCommit(value bool) error {
-	cfg, err := LoadUserConfig()
-	if err != nil {
-		cfg = &UserConfig{}
-	}
-	cfg.SetContextGitAutoCommit(value)
-	return SaveUserConfig(cfg)
-}
-
-// SetContextGitAutoPush loads user config, sets auto-push, and saves.
-// This is a convenience function for setting a single value.
-func SetContextGitAutoPush(value bool) error {
-	cfg, err := LoadUserConfig()
-	if err != nil {
-		cfg = &UserConfig{}
-	}
-	cfg.SetContextGitAutoPush(value)
-	return SaveUserConfig(cfg)
 }
 
 // AreSessionsEnabled loads user config and returns the sessions.enabled setting.

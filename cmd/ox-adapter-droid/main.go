@@ -45,9 +45,6 @@ var adapterConfig = adapterruntime.Config{
 	Read:           handleRead,
 	ReadMetadata:   handleReadMetadata,
 	Diagnose:       handleDiagnose,
-	InstallRules:   handleInstallRules,
-	CheckRules:     handleCheckRules,
-	UninstallRules: handleUninstallRules,
 	FindSession:    handleFindSession,
 	ReadFromOffset: handleReadFromOffset,
 	ImportSession:  handleImportSession,
@@ -74,15 +71,22 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		DisplayName:     adapterDisplay,
 		Version:         adapterVersion,
 		Type:            adapterprotocol.TypeSession,
-		Capabilities: []string{
-			adapterprotocol.CapSessionReader,
-			adapterprotocol.CapHookInstaller,
-			adapterprotocol.CapRulesInstaller,
-			adapterprotocol.CapIncrementalReader,
-			adapterprotocol.CapFileWatcher,
-			adapterprotocol.CapServeMode,
-			adapterprotocol.CapSessionImporter,
-		},
+		Capabilities:    adapterprotocol.DroidCapabilities,
+		// Factory Droid reads .factory/skills natively plus .agents/skills as an alias.
+		// One root, never a fan-out: a skill copied into several of an agent's
+		// discovery paths is several files to keep in sync and several answers
+		// when they drift. CanonicalizeTargets folds this key across adapters, so
+		// selecting Codex and Amp together still yields one directory.
+		SkillTargets: []adapterprotocol.SkillTarget{{
+			Key: "agents-project", Root: ".agents/skills",
+			Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject,
+			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+		}},
+		RuleTargets: []adapterprotocol.SkillTarget{{
+			Key: "droid-rules", Root: ".factory/rules",
+			Format: adapterprotocol.RuleFormatMarkdownV1, Scope: adapterprotocol.SkillScopeProject,
+			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+		}},
 		HookEnvValues: []string{"droid"},
 		ServeMode:     true,
 	}, nil

@@ -392,7 +392,7 @@ func TestCheckAgentHooks_NotDetected(t *testing.T) {
 		detectCLI:     false,
 	}
 
-	result := checkAgentHooks(agent, "TestAgent", false)
+	result := checkAgentHooks(agent, "TestAgent", "testagent", false)
 
 	if !result.skipped {
 		t.Error("expected skipped=true when agent not detected")
@@ -417,7 +417,7 @@ func TestCheckAgentHooks_ProjectInstalled(t *testing.T) {
 		hasHooks:      true,
 	}
 
-	result := checkAgentHooks(agent, "TestAgent", false)
+	result := checkAgentHooks(agent, "TestAgent", "testagent", false)
 
 	if !result.passed {
 		t.Errorf("expected passed=true when hooks are installed, got: %+v", result)
@@ -443,7 +443,7 @@ func TestCheckAgentHooks_UserInstalled(t *testing.T) {
 		hasUserHooks:  true,
 	}
 
-	result := checkAgentHooks(agent, "TestAgent", false)
+	result := checkAgentHooks(agent, "TestAgent", "testagent", false)
 
 	if !result.passed {
 		t.Errorf("expected passed=true when user-level hooks are installed, got: %+v", result)
@@ -468,7 +468,7 @@ func TestCheckAgentHooks_ProjectDetectedNotInstalled(t *testing.T) {
 		hasHooks:      false,
 	}
 
-	result := checkAgentHooks(agent, "TestAgent", false)
+	result := checkAgentHooks(agent, "TestAgent", "testagent", false)
 
 	if result.passed {
 		t.Error("expected passed=false when project detected but hooks not installed")
@@ -476,7 +476,7 @@ func TestCheckAgentHooks_ProjectDetectedNotInstalled(t *testing.T) {
 	if result.message != "not installed" {
 		t.Errorf("expected message='not installed', got: %s", result.message)
 	}
-	if !strings.Contains(result.detail, "ox hooks install") {
+	if !strings.Contains(result.detail, "`ox integrate install --testagent`") {
 		t.Errorf("expected detail to suggest installation command, got: %s", result.detail)
 	}
 	if !strings.Contains(result.detail, "ox doctor --fix") {
@@ -497,7 +497,7 @@ func TestCheckAgentHooks_CLIOnlyDetected(t *testing.T) {
 		hasHooks:      false,
 	}
 
-	result := checkAgentHooks(agent, "TestAgent", false)
+	result := checkAgentHooks(agent, "TestAgent", "testagent", false)
 
 	if !result.skipped {
 		t.Error("expected skipped=true when only CLI detected (no project config)")
@@ -508,7 +508,7 @@ func TestCheckAgentHooks_CLIOnlyDetected(t *testing.T) {
 	if !strings.Contains(result.message, "no project config") {
 		t.Errorf("expected message to mention no project config, got: %s", result.message)
 	}
-	if !strings.Contains(result.detail, "ox hooks install") {
+	if !strings.Contains(result.detail, "`ox integrate install --testagent`") {
 		t.Errorf("expected detail to suggest installation, got: %s", result.detail)
 	}
 }
@@ -526,7 +526,7 @@ func TestCheckAgentHooks_FixInstalls(t *testing.T) {
 		installCalled: false,
 	}
 
-	result := checkAgentHooks(agent, "TestAgent", true)
+	result := checkAgentHooks(agent, "TestAgent", "testagent", true)
 
 	if !result.passed {
 		t.Errorf("expected passed=true after fix, got: %+v", result)
@@ -820,7 +820,7 @@ func TestCheckAgentHooks_BothProjectAndUserInstalled(t *testing.T) {
 		hasUserHooks:  true,
 	}
 
-	result := checkAgentHooks(agent, "TestAgent", false)
+	result := checkAgentHooks(agent, "TestAgent", "testagent", false)
 
 	if !result.passed {
 		t.Errorf("expected passed=true when both project and user hooks installed, got: %+v", result)
@@ -844,7 +844,7 @@ func TestCheckAgentHooks_ProjectDetectedUserInstalled(t *testing.T) {
 		hasUserHooks:  true,
 	}
 
-	result := checkAgentHooks(agent, "TestAgent", false)
+	result := checkAgentHooks(agent, "TestAgent", "testagent", false)
 
 	if !result.passed {
 		t.Errorf("expected passed=true when user hooks installed, got: %+v", result)
@@ -865,7 +865,7 @@ func TestCheckAgentHooks_FixErrorHandling(t *testing.T) {
 		detectProject: true,
 	}
 
-	result := checkAgentHooks(agent, "TestAgent", true)
+	result := checkAgentHooks(agent, "TestAgent", "testagent", true)
 
 	if result.passed {
 		t.Error("expected passed=false when install fails")
@@ -887,7 +887,7 @@ func TestCheckAgentHooks_CLIDetectedNoProjectConfig(t *testing.T) {
 		detectCLI:     true,
 	}
 
-	result := checkAgentHooks(agent, "TestAgent", false)
+	result := checkAgentHooks(agent, "TestAgent", "testagent", false)
 
 	// CLI-only detection should be skipped (info), not error
 	if !result.skipped {

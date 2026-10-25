@@ -1,0 +1,30 @@
+{
+  "created_at": "2026-10-01T01:00:00Z",
+  "id": "round-resolutions-0001",
+  "items": [
+    {
+      "anchor": "hretry",
+      "label": "Retry remains reopened",
+      "note": "Check the fix.",
+      "reviewer": "Ana",
+      "status": "request-change"
+    },
+    {
+      "anchor": "hpayload",
+      "label": "Keep the original disposition",
+      "note": "Name the owner.",
+      "reviewer": "Ana",
+      "status": "flag"
+    },
+    {
+      "anchor": "hreviewer",
+      "label": "Preserve the accepting reviewer",
+      "note": "Verify the change.",
+      "reviewer": "Ana",
+      "status": "comment"
+    }
+  ],
+  "request_sha256": "cf31d39492e53c1fcc77bf719dec6513ae0ea01c84343d97dbc4bd6443980d16",
+  "reviewer": "Ana",
+  "slug": "rc-resolution-ids"
+}

@@ -419,7 +419,7 @@ func (m *MockDaemon) handleConn(conn net.Conn) {
 
 	data, _ := json.Marshal(resp)
 	data = append(data, '\n')
-	conn.Write(data)
+	_, _ = conn.Write(data) // best-effort test transport
 }
 
 // sendError sends an error response.
@@ -427,7 +427,7 @@ func (m *MockDaemon) sendError(conn net.Conn, errMsg string) {
 	resp := daemon.Response{Success: false, Error: errMsg}
 	data, _ := json.Marshal(resp)
 	data = append(data, '\n')
-	conn.Write(data)
+	_, _ = conn.Write(data) // best-effort test transport
 }
 
 // WithStatus configures the status response.

@@ -4,6 +4,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 )
 
 func TestComputeOID(t *testing.T) {
+	useBundledSessionRules(t)
 	// SHA256 of empty string
 	oid := ComputeOID([]byte(""))
 	assert.Equal(t, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", oid)
@@ -22,6 +25,7 @@ func TestComputeOID(t *testing.T) {
 }
 
 func TestUploadObject(t *testing.T) {
+	useBundledSessionRules(t)
 	content := []byte("test upload data")
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -48,12 +52,14 @@ func TestUploadObject(t *testing.T) {
 }
 
 func TestUploadObject_NilAction(t *testing.T) {
+	useBundledSessionRules(t)
 	err := UploadObject(nil, []byte("data"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no upload action")
 }
 
 func TestUploadObject_ServerError(t *testing.T) {
+	useBundledSessionRules(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		w.Write([]byte("forbidden"))
@@ -66,6 +72,7 @@ func TestUploadObject_ServerError(t *testing.T) {
 }
 
 func TestDownloadObject(t *testing.T) {
+	useBundledSessionRules(t)
 	expected := []byte("downloaded content")
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -80,12 +87,14 @@ func TestDownloadObject(t *testing.T) {
 }
 
 func TestDownloadObject_NilAction(t *testing.T) {
+	useBundledSessionRules(t)
 	_, err := DownloadObject(nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no download action")
 }
 
 func TestDownloadAndVerifyObject_OIDMatch(t *testing.T) {
+	useBundledSessionRules(t)
 	content := []byte("verified content")
 	bareOID := ComputeOID(content)
 
@@ -108,6 +117,7 @@ func TestDownloadAndVerifyObject_OIDMatch(t *testing.T) {
 }
 
 func TestDownloadAndVerifyObject_OIDMismatch(t *testing.T) {
+	useBundledSessionRules(t)
 	content := []byte("actual content")
 	wrongOID := ComputeOID([]byte("different content"))
 
@@ -130,6 +140,7 @@ func TestDownloadAndVerifyObject_OIDMismatch(t *testing.T) {
 }
 
 func TestUploadAll(t *testing.T) {
+	useBundledSessionRules(t)
 	oid := ComputeOID([]byte("test data"))
 	content := []byte("test data")
 
@@ -158,6 +169,7 @@ func TestUploadAll(t *testing.T) {
 }
 
 func TestUploadAll_AlreadyExists(t *testing.T) {
+	useBundledSessionRules(t)
 	// When the server returns no upload action, the object already exists
 	resp := &BatchResponse{
 		Objects: []BatchResponseObject{
@@ -175,6 +187,7 @@ func TestUploadAll_AlreadyExists(t *testing.T) {
 }
 
 func TestUploadAll_ObjectError(t *testing.T) {
+	useBundledSessionRules(t)
 	resp := &BatchResponse{
 		Objects: []BatchResponseObject{
 			{
@@ -195,6 +208,7 @@ func TestUploadAll_ObjectError(t *testing.T) {
 }
 
 func TestDownloadAll(t *testing.T) {
+	useBundledSessionRules(t)
 	expected := []byte("file content")
 	oid := ComputeOID(expected)
 
@@ -223,6 +237,7 @@ func TestDownloadAll(t *testing.T) {
 }
 
 func TestDownloadAll_NoAction(t *testing.T) {
+	useBundledSessionRules(t)
 	resp := &BatchResponse{
 		Objects: []BatchResponseObject{
 			{
@@ -240,6 +255,7 @@ func TestDownloadAll_NoAction(t *testing.T) {
 }
 
 func TestDownloadAll_ServerError(t *testing.T) {
+	useBundledSessionRules(t)
 	resp := &BatchResponse{
 		Objects: []BatchResponseObject{
 			{
@@ -261,6 +277,7 @@ func TestDownloadAll_ServerError(t *testing.T) {
 }
 
 func TestDownloadAll_PartialFailure(t *testing.T) {
+	useBundledSessionRules(t)
 	goodContent := []byte("good file")
 	goodOID := ComputeOID(goodContent)
 
@@ -314,6 +331,7 @@ func TestDownloadAll_PartialFailure(t *testing.T) {
 }
 
 func TestDownloadAll_MixedErrors(t *testing.T) {
+	useBundledSessionRules(t)
 	// One server error object, one missing-action object, one OK
 	goodContent := []byte("content")
 	goodOID := ComputeOID(goodContent)
@@ -361,6 +379,7 @@ func TestDownloadAll_MixedErrors(t *testing.T) {
 }
 
 func TestUploadAll_PartialFailure(t *testing.T) {
+	useBundledSessionRules(t)
 	goodOID := ComputeOID([]byte("good"))
 	badOID := ComputeOID([]byte("bad"))
 
@@ -415,6 +434,7 @@ func TestUploadAll_PartialFailure(t *testing.T) {
 }
 
 func TestUploadAll_MissingContent(t *testing.T) {
+	useBundledSessionRules(t)
 	resp := &BatchResponse{
 		Objects: []BatchResponseObject{
 			{
@@ -433,7 +453,67 @@ func TestUploadAll_MissingContent(t *testing.T) {
 	assert.Contains(t, results[0].Error.Error(), "no content for OID")
 }
 
+// Failure prevented: bytes that are themselves an LFS pointer are stored as an
+// object's content, so the pointer committed for them resolves to another
+// pointer instead of the file (ox #767, #1000). The server's answer cannot
+// matter: it may already hold the object — every empty file stored this way
+// is the same one — or leave it out of its response, and either reads as
+// uploaded.
+func TestUploadAll_RefusesPointerContent(t *testing.T) {
+	useBundledSessionRules(t)
+	plain := []byte("session content\n")
+	plainOID := ComputeOID(plain)
+	for _, shape := range []struct {
+		name    string
+		content []byte
+	}{
+		{"pointer to the empty object", []byte(FormatPointer("sha256:"+ComputeOID(nil), 0))},
+		// ParsePointer refuses this one, so IsPointerFile does not see a pointer.
+		{"pointer to an object above the size limit", []byte(FormatPointer("sha256:"+plainOID, DefaultMaxObjectSize+1))},
+		{"malformed pointer", []byte("version https://git-lfs.github.com/spec/v1\noid sha256:" + plainOID + "\n")},
+		// A pointer checked out with CRLF line endings, which ParsePointer reads.
+		{"pointer with CRLF line endings", []byte(strings.ReplaceAll(FormatPointer("sha256:"+ComputeOID(nil), 0), "\n", "\r\n"))},
+	} {
+		for _, answer := range []string{"upload requested", "already stored", "left out"} {
+			t.Run(shape.name+"/"+answer, func(t *testing.T) {
+				var mu sync.Mutex
+				put := map[string]bool{}
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					mu.Lock()
+					put[r.URL.Path[1:]] = true
+					mu.Unlock()
+				}))
+				defer server.Close()
+				pointerOID := ComputeOID(shape.content)
+				granted := func(oid string, size int) BatchResponseObject {
+					return BatchResponseObject{OID: oid, Size: int64(size), Actions: &Actions{Upload: &Action{Href: server.URL + "/" + oid}}}
+				}
+				resp := &BatchResponse{Objects: []BatchResponseObject{granted(plainOID, len(plain))}}
+				switch answer {
+				case "upload requested":
+					resp.Objects = append(resp.Objects, granted(pointerOID, len(shape.content)))
+				case "already stored":
+					resp.Objects = append(resp.Objects, BatchResponseObject{OID: pointerOID, Size: int64(len(shape.content))})
+				}
+
+				results := UploadAll(resp, map[string][]byte{plainOID: plain, pointerOID: shape.content}, 2)
+				outcome := map[string]error{}
+				for _, r := range results {
+					outcome[r.OID] = r.Error
+				}
+				require.ErrorIs(t, outcome[pointerOID], ErrPointerContent)
+				require.NoError(t, outcome[plainOID])
+				mu.Lock()
+				defer mu.Unlock()
+				require.False(t, put[pointerOID], "pointer content never reaches the server")
+				require.True(t, put[plainOID], "the rest of the upload still goes ahead")
+			})
+		}
+	}
+}
+
 func TestSharedHTTPClient_ConnectionReuse(t *testing.T) {
+	useBundledSessionRules(t)
 	// verify that upload and download use the shared client (connection reuse)
 	// by checking that multiple sequential operations to the same server reuse connections
 	var requestCount int
@@ -466,27 +546,7 @@ func TestSharedHTTPClient_ConnectionReuse(t *testing.T) {
 }
 
 func TestSharedHTTPClient_Timeout(t *testing.T) {
+	useBundledSessionRules(t)
 	// verify the shared client has the expected timeout
 	assert.Equal(t, 5*time.Minute, lfsHTTPClient.Timeout, "shared LFS client should have 5-minute timeout")
-}
-
-func TestBytesReaderAt(t *testing.T) {
-	data := []byte("hello world")
-	r := newBytesReaderAt(data)
-
-	buf := make([]byte, 5)
-	n, err := r.ReadAt(buf, 0)
-	assert.NoError(t, err)
-	assert.Equal(t, 5, n)
-	assert.Equal(t, "hello", string(buf))
-
-	n, err = r.ReadAt(buf, 6)
-	assert.NoError(t, err)
-	assert.Equal(t, 5, n)
-	assert.Equal(t, "world", string(buf))
-
-	// read past end
-	n, err = r.ReadAt(buf, int64(len(data)))
-	assert.Equal(t, io.EOF, err)
-	assert.Equal(t, 0, n)
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/index"
 	"github.com/sageox/ox/internal/config"
@@ -82,56 +83,77 @@ func indexCodeInProcess(cmd *cobra.Command, args []string, full bool) error {
 	}
 
 	dataDir := resolveCodeDBDir(gitRoot)
-
-	if full {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Full reindex (in-process)...\n")
-		if err := os.RemoveAll(dataDir); err != nil {
-			return fmt.Errorf("wipe index for full reindex: %w", err)
-		}
-	} else {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Indexing local repo (in-process)...\n")
-	}
-
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return fmt.Errorf("create codedb dir: %w", err)
-	}
-
-	db, err := codedb.Open(dataDir)
-	if err != nil {
-		return fmt.Errorf("open codedb: %w", err)
-	}
-	defer db.Close()
-
 	ctx := cmd.Context()
 	opts := index.IndexOptions{}
 
-	if len(args) > 0 {
-		if err := db.IndexRepo(ctx, args[0], opts); err != nil {
-			return fmt.Errorf("index: %w", err)
-		}
-	} else {
-		if err := db.IndexLocalRepo(ctx, gitRoot, opts); err != nil {
-			if errors.Is(err, index.ErrAlternatesUnsupported) {
-				fmt.Fprintf(cmd.ErrOrStderr(),
-					"codedb: skipping local index — repo uses git alternates (go-git v6 limitation).\n"+
-						"  Remediation: `git repack -a -d --local` to copy objects locally, or\n"+
-						"  re-clone without --shared / --reference. See `ox doctor` (git-alternates check).\n")
-				return nil
+	// build performs the COMPLETE codedb build against db: git index + symbol and
+	// comment parse. Both the atomic from-scratch path and the incremental
+	// self-heal path run this exact closure, so they stay behaviorally identical.
+	var symbolsExtracted uint64
+	build := func(ctx context.Context, db *codedb.DB) error {
+		if len(args) > 0 {
+			if err := db.IndexRepo(ctx, args[0], opts); err != nil {
+				return fmt.Errorf("index: %w", err)
 			}
-			return fmt.Errorf("index local: %w", err)
+		} else {
+			if err := db.IndexLocalRepo(ctx, gitRoot, opts); err != nil {
+				return fmt.Errorf("index local: %w", err)
+			}
+		}
+		stats, err := db.ParseSymbols(ctx, nil)
+		if err != nil {
+			// Cache corruption must abort the build so the recovery paths can
+			// react (OpenIndexWithHeal discards + retries; BuildCodeDBAtomic
+			// refuses to swap a partial index into place). Ordinary parse
+			// failures stay non-fatal.
+			if index.IsCorruptionError(err) {
+				return fmt.Errorf("parse symbols: %w", err)
+			}
+			slog.Warn("symbol parsing failed (non-fatal)", "error", err)
+		}
+		symbolsExtracted = stats.SymbolsExtracted
+		if _, err := db.ParseComments(ctx, nil); err != nil {
+			if index.IsCorruptionError(err) {
+				return fmt.Errorf("parse comments: %w", err)
+			}
+			slog.Warn("comment parsing failed (non-fatal)", "error", err)
+		}
+		return nil
+	}
+
+	var runErr error
+	if full {
+		// Prevent tier: build into a sibling temp dir and atomically swap it into
+		// place, so a kill mid-build never leaves a half-written cache that would
+		// crash-loop every subsequent run.
+		fmt.Fprintf(cmd.ErrOrStderr(), "Full reindex (in-process)...\n")
+		runErr = codedb.BuildCodeDBAtomic(ctx, dataDir, build)
+	} else {
+		// Recover tier: index in place. OpenIndexWithHeal escalates to a
+		// from-scratch rebuild when Open self-healed a corrupt sub-index (marker
+		// present), and discards + retries once if the pass itself fails on a
+		// corrupt cache — so a half-written cache neither crash-loops the caller
+		// nor silently leaves search empty.
+		fmt.Fprintf(cmd.ErrOrStderr(), "Indexing local repo (in-process)...\n")
+		var db *codedb.DB
+		db, runErr = codedb.OpenIndexWithHeal(ctx, dataDir, build)
+		if db != nil {
+			defer db.Close()
 		}
 	}
 
-	stats, err := db.ParseSymbols(ctx, nil)
-	if err != nil {
-		slog.Warn("symbol parsing failed (non-fatal)", "error", err)
+	if runErr != nil {
+		if errors.Is(runErr, index.ErrAlternatesUnsupported) {
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"codedb: skipping local index — repo uses git alternates (go-git v6 limitation).\n"+
+					"  Remediation: `git repack -a -d --local` to copy objects locally, or\n"+
+					"  re-clone without --shared / --reference. See `ox doctor` (git-alternates check).\n")
+			return nil
+		}
+		return fmt.Errorf("index (in-process): %w", runErr)
 	}
 
-	if _, err := db.ParseComments(ctx, nil); err != nil {
-		slog.Warn("comment parsing failed (non-fatal)", "error", err)
-	}
-
-	fmt.Fprintf(cmd.ErrOrStderr(), "Done (in-process). %d symbols extracted\n", stats.SymbolsExtracted)
+	fmt.Fprintf(cmd.ErrOrStderr(), "Done (in-process). %d symbols extracted\n", symbolsExtracted)
 	return nil
 }
 
@@ -233,44 +255,138 @@ func runIndexGitHub(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fetcher := gh.NewFetcher(gh.NewClient(token))
+	return syncGitHubIndex(cmd.Context(), githubIndexRun{
+		Fetcher:    gh.NewFetcher(gh.NewClient(token)),
+		LedgerPath: ledgerPath,
+		CodeDBDir:  githubFallbackCodeDBDir(gitRoot),
+		Owner:      owner,
+		Repo:       repo,
+		MaxDays:    maxDays,
+		SyncPRs:    syncPRs,
+		SyncIssues: syncIssues,
+		NoPush:     noPush,
+	})
+}
+
+// githubFallbackCodeDBDir returns where the in-process fallback may index
+// GitHub data: the shared CodeDB, where the daemon indexes it. Until that index
+// is built, search reads the Ledger index instead, and a shared index holding
+// only GitHub data would take its place and hide code results — so it returns
+// "" then, leaving the build to `ox index code`.
+func githubFallbackCodeDBDir(gitRoot string) string {
+	if _, useLedger := resolvePreferredCodeDBDir(gitRoot); useLedger {
+		return ""
+	}
+	return resolveCodeDBDir(gitRoot)
+}
+
+// githubIndexRun is one resolved `ox index github` run: everything the command
+// derives from flags, config, remotes and credentials.
+type githubIndexRun struct {
+	Fetcher    ledger.GitHubFetcher
+	LedgerPath string
+	// CodeDBDir is where the in-process fallback indexes; the daemon resolves
+	// its own (the same directory). Empty disables the fallback.
+	CodeDBDir  string
+	Owner      string
+	Repo       string
+	MaxDays    int
+	SyncPRs    bool
+	SyncIssues bool
+	NoPush     bool
+}
+
+// indexGitHubViaDaemon asks the daemon to run its index pass, which ends with
+// the same GitHub-data stage the daemon runs after its own syncs (plus the team
+// board's mirrored posts). A variable so tests can take the daemon away.
+var indexGitHubViaDaemon = func() error {
+	if err := daemon.EnsureDaemon(); err != nil {
+		return err
+	}
+	client := daemon.NewClientForCurrentRepoWithTimeout(5 * time.Minute)
+	_, err := client.CodeIndex(daemon.CodeIndexPayload{}, nil)
+	return err
+}
+
+// indexGitHubCodeDB makes freshly synced PRs and issues searchable, the way the
+// daemon does after each of its syncs: through the daemon when one answers,
+// otherwise by indexing the Ledger's GitHub data into CodeDB in-process.
+func indexGitHubCodeDB(ctx context.Context, run githubIndexRun) error {
+	err := indexGitHubViaDaemon()
+	if err == nil {
+		return nil
+	}
+	slog.Debug("daemon github indexing failed, falling back to in-process", "error", err)
+	if run.CodeDBDir == "" {
+		return errors.New("the code search index is not built yet; run `ox index code`, then `ox index github --no-push`")
+	}
+
+	db, err := codedb.Open(run.CodeDBDir)
+	if err != nil {
+		return fmt.Errorf("open codedb: %w", err)
+	}
+	defer db.Close()
+	if db.ReadOnly() {
+		return fmt.Errorf("cannot index into %s: read-only", run.CodeDBDir)
+	}
+	if _, err := db.IndexGitHubData(ctx, run.LedgerPath, nil); err != nil {
+		return fmt.Errorf("index github data: %w", err)
+	}
+	return nil
+}
+
+// syncGitHubIndex syncs PRs and issues into the Ledger and pushes them.
+func syncGitHubIndex(ctx context.Context, run githubIndexRun) error {
 	logger := slog.Default()
 	combined := &ledger.SyncResult{}
 
-	if syncPRs {
-		prResult, prErr := ledger.SyncPRs(cmd.Context(), fetcher, ledgerPath, owner, repo, maxDays, logger)
+	if run.SyncPRs {
+		prResult, prErr := ledger.SyncPRs(ctx, run.Fetcher, run.LedgerPath, run.Owner, run.Repo, run.MaxDays, logger)
 		if prErr != nil {
 			return fmt.Errorf("sync PRs: %w", prErr)
 		}
 		combined.PRTotal = prResult.PRTotal
 		combined.PRCreated = prResult.PRCreated
 		combined.PRUpdated = prResult.PRUpdated
+		combined.PRFailed = prResult.PRFailed
 	}
 
-	if syncIssues {
-		issueResult, issueErr := ledger.SyncIssues(cmd.Context(), fetcher, ledgerPath, owner, repo, maxDays, logger)
+	if run.SyncIssues {
+		issueResult, issueErr := ledger.SyncIssues(ctx, run.Fetcher, run.LedgerPath, run.Owner, run.Repo, run.MaxDays, logger)
 		if issueErr != nil {
 			return fmt.Errorf("sync issues: %w", issueErr)
 		}
 		combined.IssueTotal = issueResult.IssueTotal
 		combined.IssueCreated = issueResult.IssueCreated
 		combined.IssueUpdated = issueResult.IssueUpdated
+		combined.IssueFailed = issueResult.IssueFailed
 	}
 
-	if syncPRs {
+	if run.SyncPRs {
 		fmt.Printf("Synced %d PRs (%d new, %d updated) from %s/%s\n",
-			combined.PRTotal, combined.PRCreated, combined.PRUpdated, owner, repo)
+			combined.PRTotal, combined.PRCreated, combined.PRUpdated, run.Owner, run.Repo)
 	}
-	if syncIssues {
+	if run.SyncIssues {
 		fmt.Printf("Synced %d issues (%d new, %d updated) from %s/%s\n",
-			combined.IssueTotal, combined.IssueCreated, combined.IssueUpdated, owner, repo)
+			combined.IssueTotal, combined.IssueCreated, combined.IssueUpdated, run.Owner, run.Repo)
 	}
 
-	if noPush {
+	if failed := combined.PRFailed + combined.IssueFailed; failed > 0 {
+		cli.PrintWarning(fmt.Sprintf("%d item(s) skipped because their comments could not be fetched; they are retried on the next sync", failed))
+	}
+
+	// Index what is now in the Ledger, pushed or not: --no-push skips the
+	// push, not the extract.
+	fmt.Fprintln(os.Stderr, "Indexing GitHub data for search...")
+	if err := indexGitHubCodeDB(ctx, run); err != nil {
+		cli.PrintWarning(fmt.Sprintf("GitHub data synced but not indexed for search: %v", err))
+	}
+
+	if run.NoPush {
 		return nil
 	}
 
-	if err := ledger.CommitAndPushGitHubData(context.Background(), ledgerPath, owner, repo, combined, pushLedger); err != nil {
+	if err := ledger.CommitAndPushGitHubData(context.Background(), run.LedgerPath, run.Owner, run.Repo, combined, pushLedger); err != nil {
 		return fmt.Errorf("push to ledger: %w", err)
 	}
 

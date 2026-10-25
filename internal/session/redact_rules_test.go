@@ -232,7 +232,7 @@ func TestNewRedactorWithCustomRules_NoCustomFiles(t *testing.T) {
 	require.NotNil(t, redactor)
 
 	// should still have all built-in patterns
-	assert.Equal(t, len(DefaultPatterns()), len(redactor.patterns))
+	assert.Equal(t, len(DefaultPatterns())+len(DefaultExtraDetectors()), len(redactor.patterns))
 }
 
 func TestNewRedactorWithCustomRules_WithRepoRedact(t *testing.T) {
@@ -250,7 +250,7 @@ func TestNewRedactorWithCustomRules_WithRepoRedact(t *testing.T) {
 	require.NotNil(t, redactor)
 
 	// should have built-in + 1 custom
-	assert.Equal(t, len(DefaultPatterns())+1, len(redactor.patterns))
+	assert.Equal(t, len(DefaultPatterns())+len(DefaultExtraDetectors())+1, len(redactor.patterns))
 
 	// custom rule should work
 	output, found := redactor.RedactString("connecting to my-secret-host:5432")

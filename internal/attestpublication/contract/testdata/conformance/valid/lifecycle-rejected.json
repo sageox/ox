@@ -1,0 +1,16 @@
+{
+  "version": "1",
+  "state": "rejected",
+  "repo_id": "repo_01990000-0000-7000-8000-000000000001",
+  "run_id": "bdd_01990000-0000-7000-8000-000000000001",
+  "source_identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source_run_id": "local-run-2026-09-10",
+  "corpus_key": "payments",
+  "creator_principal_kind": "human",
+  "creator_principal_id": "usr_fixture",
+  "binding": {"manifest_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","archive_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","archive_size_bytes":4096},
+  "upload_key": "attest/v2/uploads/repo_fixture/bdd_fixture/bundle.zip",
+  "intent_expires_at": "2026-09-11T20:00:00Z",
+  "rejected": {"code":"invalid_run_document","message":"The semantic document was invalid."},
+  "rejected_at": "2026-09-10T20:01:00Z"
+}

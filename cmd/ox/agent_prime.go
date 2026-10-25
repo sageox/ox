@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,9 +30,14 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ephemeral"
+	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/flags"
+	gh "github.com/sageox/ox/internal/github"
+	"github.com/sageox/ox/internal/githubmirror"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/proc"
@@ -36,10 +45,13 @@ import (
 	"github.com/sageox/ox/internal/runtime"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/sessionid"
+	"github.com/sageox/ox/internal/teamrules"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/tokens"
 	"github.com/sageox/ox/internal/ui"
+	"github.com/sageox/ox/internal/updatenotice"
 	"github.com/sageox/ox/internal/useragent"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 	"github.com/spf13/cobra"
@@ -75,6 +87,36 @@ func uniqueNonEmpty(vals ...string) []string {
 		out = append(out, v)
 	}
 	return out
+}
+
+// currentUserIdentity returns the name, aliases and kind prime reports as you=,
+// you_aliases= and you_kind=. A person's aliases collect ALL name forms from
+// ALL sources (OAuth, git config, derived) because sessions use DisplayName,
+// murmurs use Username, discussions use full Name, and git commits use git
+// config user.name/user.email — each may differ. The AI coworker a team token
+// acts as goes by its name and slug only: the git identity on its machine is
+// not its own. kind is "ai" for that coworker and "" for a person.
+func currentUserIdentity(ep string) (name string, aliases []string, kind string) {
+	attr := identity.ResolveAttribution(ep, config.GetDisplayName())
+	if attr.AI {
+		return attr.DisplayName, uniqueNonEmpty(attr.DisplayName, attr.Username), "ai"
+	}
+	aliasInputs := []string{
+		attr.DisplayName,
+		attr.Name,
+		attr.Username,
+		attr.Email,
+		identity.FirstNameFromSlug(attr.Username),
+	}
+	if gitIdent, err := repotools.DetectGitIdentity(); err == nil && gitIdent != nil {
+		aliasInputs = append(aliasInputs, gitIdent.Name, gitIdent.Email)
+	}
+	if ep != "" {
+		if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil {
+			aliasInputs = append(aliasInputs, token.UserInfo.Name, token.UserInfo.Email)
+		}
+	}
+	return attr.DisplayName, uniqueNonEmpty(aliasInputs...), ""
 }
 
 // withAttributionGuidance delegates to prime.WithAttributionGuidance.
@@ -200,6 +242,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// stdout is the coworker's context and hooks pipe stderr into it too:
+	// fence WARN-level diagnostics off to a file (ERROR still surfaces).
+	verbose, _ := cmd.Flags().GetBool("verbose")
+	logger.InitPayloadMode(verbose, paths.AgentPayloadLogFile())
+
 	primeStart := time.Now()
 	timing := make(map[string]int64)
 
@@ -220,9 +267,49 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	hookInput := ReadAgentHookInput()
 	var agentSessionID string
 	var hookSource string // "" when invoked directly (no piped hook stdin), else startup/resume/clear/compact
+	// The EVENT name as well as the source field: agentx documents Source as
+	// populated "only for session start/end", so a PreCompact payload carries an
+	// empty Source and the compact-vs-full decision cannot be made from it alone.
+	var hookEventName string
 	if hookInput != nil {
 		agentSessionID = hookInput.SessionID
 		hookSource = hookInput.Source
+		hookEventName = hookInput.HookEventName
+	}
+
+	// Resolve the type before marker lookup. Cursor's native conversation ID is
+	// required to key markers, and a GUI process can host several chats, so its
+	// PID is never a safe identity fallback.
+	if agentType == "" {
+		if agent := agentx.CurrentAgent(); agent != nil {
+			agentType = string(agent.Type())
+		}
+	}
+	agentType = canonicalAgentType(agentType)
+	isCursor := agentType == string(agentx.AgentTypeCursor)
+
+	var projectRoot string
+	var err error
+	if isCursor {
+		projectRoot, err = findProjectRoot()
+		if err != nil {
+			return fmt.Errorf("could not find project root: %w", err)
+		}
+	}
+
+	var cursorInput *cursorNativeInput
+	if isCursor && hookInput != nil {
+		homeDir, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			return fmt.Errorf("missing-native-identity: resolve Cursor home directory")
+		}
+		cursorInput, err = normalizeCursorHookInput(hookInput.RawBytes, projectRoot, homeDir)
+		if err != nil {
+			return err
+		}
+		agentSessionID = cursorInput.ConversationID
+		hookInput.SessionID = cursorInput.ConversationID
+		hookInput.RawBytes = cursorInput.NormalizedRaw
 	}
 
 	// fallback: if no session ID from hook stdin, try agent's native env var
@@ -238,6 +325,15 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	if agentSessionID != "" {
 		existingMarker, _ = ReadSessionMarker(agentSessionID)
 	}
+	if cursorInput != nil && (hookEventName == string(agentx.CursorEventBeforeSubmitPrompt) || hookEventName == string(agentx.CursorEventSessionStart)) {
+		existingMarker, err = prepareCursorHookBoundary(cursorInput, hookEventName)
+		if err != nil {
+			return fmt.Errorf("persist Cursor source boundary: %w", err)
+		}
+		if hookEventName == string(agentx.CursorEventBeforeSubmitPrompt) {
+			return nil // this native channel cannot deliver prime context
+		}
+	}
 	// PID-based fallback: a second prime inside the same agent process
 	// (e.g. CLAUDE.md BLOCKING instruction running after the SessionStart
 	// hook already primed) typically has no hook stdin JSON, so the
@@ -251,9 +347,16 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// match a stale marker from an unrelated prior session and silently
 	// cross-link identities. Requiring a live agent detection keeps the
 	// fallback limited to the scenario it was designed for.
-	if existingMarker == nil && agentx.CurrentAgent() != nil {
+	//
+	// markerIsThisSession: identity may be shared across native sessions under
+	// one agent process, but "this session already received a full prime" is a
+	// per-native-session fact. A PID-matched marker only speaks for this call
+	// when the call carries no session ID of its own.
+	markerIsThisSession := existingMarker != nil
+	if !isCursor && existingMarker == nil && agentx.CurrentAgent() != nil {
 		if agentPID := proc.FindAgentAncestorPID(); agentPID > 0 {
 			existingMarker = FindSessionMarkerByPID(agentPID)
+			markerIsThisSession = existingMarker != nil && agentSessionID == ""
 			if existingMarker != nil && agentSessionID == "" {
 				// promote the marker's native session ID so downstream
 				// marker writes reuse the same key
@@ -261,19 +364,20 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
-	if existingMarker != nil && idempotent {
+	if existingMarker != nil && existingMarker.IsPrimed() && idempotent {
 		// idempotent mode: session already primed, output nothing
 		// this saves ~1k tokens on redundant prime calls
 		return nil
 	}
 
-	// use detected agent as fallback when --agent not provided
-	if agentType == "" {
-		if agent := agentx.CurrentAgent(); agent != nil {
-			agentType = string(agent.Type())
+	// Keep legacy idempotent primes outside a repository working as before.
+	// Cursor resolved its root above because native workspace validation needs it.
+	if projectRoot == "" {
+		projectRoot, err = findProjectRoot()
+		if err != nil {
+			return fmt.Errorf("could not find project root: %w", err)
 		}
 	}
-	agentType = canonicalAgentType(agentType)
 
 	// enrich User-Agent for all subsequent API calls in this process
 	if agentType != "" {
@@ -304,12 +408,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	// load attribution from user and project configs
-	attribution := loadResolvedAttribution()
-
-	projectRoot, err := findProjectRoot()
-	if err != nil {
-		return fmt.Errorf("could not find project root: %w", err)
-	}
+	attribution := loadResolvedAttributionFor(projectRoot)
 
 	// check if project is initialized (.sageox/ exists)
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
@@ -331,32 +430,18 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// anti-entropy: ensure Claude Code hooks are installed
 	hooksInstalled := ensureClaudeHooks(projectRoot)
 
+	// anti-entropy: retry plan commits/pushes a review session could not land
+	// (detached; a no-op ReadDir when nothing is pending — plan_push_pending.go)
+	if config.IsInitialized(projectRoot) {
+		kickPendingPlanPushes(projectRoot)
+	}
+
 	// get project-specific endpoint (single source of truth)
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 
 	// resolve current user's identity early so all output paths (fresh, degraded, unavailable)
 	// can include it. Agents use this to distinguish self vs teammate in attribution.
-	// collect ALL name forms from ALL sources (OAuth, git config, derived) because
-	// sessions use DisplayName, murmurs use Username, discussions use full Name,
-	// and git commits use git config user.name/user.email — each may differ.
-	userAttribution := identity.ResolveAttribution(projectEndpoint, config.GetDisplayName())
-	currentUserName := userAttribution.DisplayName
-	aliasInputs := []string{
-		userAttribution.DisplayName,
-		userAttribution.Name,
-		userAttribution.Username,
-		userAttribution.Email,
-		identity.FirstNameFromSlug(userAttribution.Username),
-	}
-	if gitIdent, err := repotools.DetectGitIdentity(); err == nil && gitIdent != nil {
-		aliasInputs = append(aliasInputs, gitIdent.Name, gitIdent.Email)
-	}
-	if projectEndpoint != "" {
-		if token, err := auth.GetTokenForEndpoint(projectEndpoint); err == nil && token != nil {
-			aliasInputs = append(aliasInputs, token.UserInfo.Name, token.UserInfo.Email)
-		}
-	}
-	currentUserAliases := uniqueNonEmpty(aliasInputs...)
+	currentUserName, currentUserAliases, currentUserKind := currentUserIdentity(projectEndpoint)
 
 	// generate agentID and start recording BEFORE auth check — recording is local,
 	// auth is only needed for upload and cloud features
@@ -375,13 +460,15 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		// reuse that recording's agent ID so prime stays idempotent.
 		// This handles the case where CLAUDE.md's BLOCKING instruction triggers
 		// a second prime call after the SessionStart hook already created a session.
-		if currentPID := proc.FindAgentAncestorPID(); currentPID > 0 {
-			if states, loadErr := session.LoadAllRecordingStates(projectRoot); loadErr == nil {
-				for _, s := range states {
-					if s.IsAgentAlive() && s.ParentPID > 0 && s.ParentPID == currentPID {
-						agentID = s.AgentID
-						slog.Debug("prime: reusing agent ID from active recording", "agent_id", agentID, "parent_pid", currentPID)
-						break
+		if !isCursor {
+			if currentPID := proc.FindAgentAncestorPID(); currentPID > 0 {
+				if states, loadErr := session.LoadAllRecordingStates(projectRoot); loadErr == nil {
+					for _, s := range states {
+						if s.IsAgentAlive() && s.ParentPID > 0 && s.ParentPID == currentPID {
+							agentID = s.AgentID
+							slog.Debug("prime: reusing agent ID from active recording", "agent_id", agentID, "parent_pid", currentPID)
+							break
+						}
 					}
 				}
 			}
@@ -392,7 +479,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// Covers: (a) prime called from CLAUDE.md BLOCKING instruction after /clear
 	// (CLAUDE_ENV_FILE persists the var), (b) prime subprocess called from hook
 	// with the env var passed explicitly by runPrimeForHook.
-	if agentID == "" {
+	if agentID == "" && !isCursor {
 		if states, loadErr := session.LoadAllRecordingStates(projectRoot); loadErr == nil {
 			envID := os.Getenv("SAGEOX_AGENT_ID")
 			agentID = resolveAgentIDFromStates(states, envID)
@@ -415,6 +502,22 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to generate agent ID: %w", err)
 		}
 	}
+	if isCursor && agentSessionID != "" {
+		// Reserve identity before recording or network work. A bounded hook
+		// can kill prime before context delivery; its retry must reuse the
+		// first recording even though PrimedAt is still unset.
+		existingMarker, err = UpdateSessionMarker(agentSessionID, func(marker *SessionMarker) error {
+			if marker.AgentID == "" {
+				marker.AgentID = agentID
+			}
+			agentID = marker.AgentID
+			marker.ParentPID = 0
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("persist Cursor prime identity: %w", err)
+		}
+	}
 
 	// detect parent agent early: if SAGEOX_AGENT_ID is already set, this is a subagent
 	// and the existing value identifies the parent (orchestrator inherits env vars).
@@ -433,7 +536,14 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	// attempt to start session recording if enabled (local, no auth needed)
 	phaseStart = time.Now()
-	sessionStat := startSessionRecording(projectRoot, agentID, agentType, parentAgentID)
+	continuedFromSessionID := recordingSessionIDFromMarker(existingMarker)
+	var cursorBoundary *CursorSourceBoundary
+	if existingMarker != nil {
+		cursorBoundary = existingMarker.CursorSourceBoundary
+	}
+	sessionStat := startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, cursorBoundary)
+	recordNativeSessionForRecording(projectRoot, agentID, agentSessionID, hookSource)
+	recordingSessionID := recordingSessionIDForMarker(projectRoot, agentID, continuedFromSessionID)
 	timing["session_start"] = time.Since(phaseStart).Milliseconds()
 
 	// check if user is authenticated — degraded mode if not (recording continues locally)
@@ -445,10 +555,15 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			// write session marker so hooks can discover session file and continue recording
 			if agentSessionID != "" {
 				marker := &SessionMarker{
-					AgentID:        agentID,
-					AgentSessionID: agentSessionID,
-					PrimedAt:       time.Now(),
-					ParentPID:      proc.FindAgentAncestorPID(),
+					AgentID:            agentID,
+					RecordingSessionID: recordingSessionID,
+					AgentSessionID:     agentSessionID,
+					PrimedAt:           time.Now(),
+					ParentPID:          proc.FindAgentAncestorPID(),
+				}
+				if isCursor && hookInput != nil {
+					marker.PrimedAt = time.Time{} // completed by the successful hook parent
+					marker.ParentPID = 0
 				}
 				if writeErr := WriteSessionMarker(marker); writeErr != nil {
 					slog.Warn("failed to write session marker in degraded mode", "error", writeErr)
@@ -463,7 +578,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			msg := fmt.Sprintf("Not logged in. Run 'ox login' to authenticate with %s.", endpointSlug)
 			switch {
 			case errors.Is(authErr, auth.ErrEnvTokenMalformed):
-				msg = fmt.Sprintf("SAGEOX_TOKEN is set but its value failed a local format check, so it was refused for %s. Re-copy the token (a truncated paste is the usual cause), or unset SAGEOX_TOKEN to use a stored login.", endpointSlug)
+				msg = fmt.Sprintf("SAGEOX_TOKEN was refused for %s. %s", endpointSlug, malformedEnvTokenRemedy(projectEndpoint))
+			case auth.EnvTokenIsTeamFamily(projectEndpoint):
+				msg = "Authentication failed. " + auth.ReauthenticationRemedy(projectEndpoint)
 			case authErr != nil:
 				msg = fmt.Sprintf("Authentication expired. Run 'ox login' to authenticate with %s.", endpointSlug)
 			}
@@ -473,6 +590,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 				Session:            sessionStat,
 				CurrentUserName:    currentUserName,
 				CurrentUserAliases: currentUserAliases,
+				CurrentUserKind:    currentUserKind,
 				Message:            msg + " Session recording is active locally — data will be uploaded after authentication.",
 			}
 			if sessionStat != nil && sessionStat.UserNotification != "" {
@@ -485,7 +603,18 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// discover team context if configured
 	phaseStart = time.Now()
 	repoSlug := repoSlugFromRemoteOrDir(projectRoot)
-	teamCtx := discoverTeamContext(projectRoot, repoSlug)
+	// The directory-name fallback is useful display context, but it is not an
+	// authoritative identity for repos: filters. With no canonical origin, pass
+	// an unknown slug so targeted rules stay out instead of being misclassified
+	// against an unrelated local directory name.
+	ruleRepoSlug, _ := repotools.RepoSlugFromRemote(projectRoot)
+	teamCtx := discoverTeamContext(projectRoot, ruleRepoSlug)
+	if teamCtx != nil {
+		// A rule current in this agent's native rule root is omitted here; every
+		// other rule retains its prime fallback. This is the exactly-once seam
+		// between background projection and session-start delivery.
+		teamCtx.TeamRules = teamrules.ForPrime(projectRoot, agentType, teamCtx.TeamRules)
+	}
 
 	// check team context staleness
 	checkTeamContextStaleness(teamCtx, projectRoot)
@@ -520,6 +649,20 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	// check auth status for attribution warning
 	isLoggedIn, _ := auth.IsAuthCredentialValidForEndpoint(projectEndpoint)
+
+	// Bring the managed skill inventory in line with this binary before the agent
+	// reads it. The healthy path is a lockfile read and two comparisons; a plan is
+	// only built once a mismatch is proven. Failures never reach the session.
+	skillReconcileStart := time.Now()
+	reconciled, withheldDecisions := reconcileSkillInventoryIfStale(projectRoot)
+	if reconciled > 0 {
+		timing["skills_reconciled"] = int64(reconciled)
+	}
+	withheldTeamSkills := make([]prime.WithheldSkill, 0, len(withheldDecisions))
+	for _, d := range withheldDecisions {
+		withheldTeamSkills = append(withheldTeamSkills, prime.WithheldSkill{Name: d.Name, Reason: d.Reason})
+	}
+	timing["skills_reconcile"] = time.Since(skillReconcileStart).Milliseconds()
 
 	// check for .needs-doctor-agent marker
 	needsDoctorAgent := doctor.NeedsDoctorAgent(projectRoot)
@@ -627,13 +770,21 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// (primeCallCount==1, set above), always yields compactReprime=false
 	// (full preamble). See prime.ShouldCompactReprime for the full
 	// belt-and-suspenders rationale.
-	compactReprime := prime.ShouldCompactReprime(primeCallCount, hookSource)
+	//
+	// Compact additionally requires proof that THIS native session already
+	// received a full prime through its hook. primeCallCount counts invocations
+	// per shared agent identity, not deliveries: a bare prime piped through
+	// head, or a second Claude Code session under the same parent process, would
+	// otherwise be told "you were already primed" and never see team knowledge.
+	fullPrimeDelivered := existingMarker != nil && markerIsThisSession && existingMarker.FullPrimeViaHook
+	compactReprime := fullPrimeDelivered && prime.ShouldCompactReprimeForEvent(primeCallCount, hookEventName, hookSource)
 
 	contentWithAttribution := withAttributionGuidance("", isLoggedIn, attribution)
 
 	output := agentPrimeOutput{
 		Status:             "fresh",
 		AgentID:            agentID,
+		WithheldTeamSkills: withheldTeamSkills,
 		Guidance:           guidance,
 		SessionID:          inst.ServerSessionID,
 		AgentType:          agentType,
@@ -661,6 +812,17 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		HooksInstalled:     hooksInstalled,
 		CurrentUserName:    currentUserName,
 		CurrentUserAliases: currentUserAliases,
+		CurrentUserKind:    currentUserKind,
+	}
+
+	// Hook cap: Claude Code injects at most claudeHookOutputCap characters
+	// of hook output; anything longer is persisted to a file and the model
+	// sees a 2 KB preview. Only hook-driven primes (stdin carried the hook
+	// payload) are capped — a prime the agent ran itself lands in a tool
+	// result with its own, larger limit. Other hosts are not known to cap.
+	if hookInput != nil && canonicalAgentType(agentType) == string(agentx.AgentTypeClaudeCode) {
+		output.HookOutputBudget = primeHookBudget
+		output.HookFullBundlePath = primeFullBundlePath(agentID)
 	}
 
 	// MCP routing hint: emit the cloud MCP endpoint + suggested tools
@@ -715,13 +877,16 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 				// parent session not found; fall back to own session
 				state, _ = session.LoadRecordingStateForAgent(projectRoot, agentID)
 			}
-			if state != nil && state.LifecycleRegistrationState == "pending" {
+			if state != nil && (state.LifecycleRegistrationState == "pending" || state.LifecycleRegistrationState == "deferred") {
 				// Prime is the first reliable post-start interaction for many
 				// short-lived CLI invocations. Retrying here makes an expired or
 				// offline start recover without ever blocking the local recorder.
+				// "deferred" means start-time registration was withheld until a
+				// user turn existed; a re-prime after compaction/clear is exactly
+				// when that turn has since landed, so registration fires here too.
 				notifySessionStartedAsync(projectRoot, state)
 			}
-			output.Session.SessionURL, output.Session.PRDirective = sessionLinkOutputs(projCfg, state, attribution.Session)
+			output.Session.SessionURL, output.Session.PRDirective = sessionLinkOutputs(projectRoot, projCfg, state, attribution.Session)
 		}
 	}
 
@@ -793,7 +958,14 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		output.MurmurDirective = "Murmuring is ENABLED. Proactively publish WIP to teammates:\n" +
 			"  • At START of significant work — say what you're about to do\n" +
 			"  • After architectural decisions — what you decided and why\n" +
-			"  • Command: ox murmur --topic=wip \"concise description (≤500 bytes)\"\n" +
+			// Say WHERE the write lands, not that there isn't one. A murmur is
+			// written — to the Ledger or Team Context checkout, which the daemon then
+			// commits — so calling it read-only would be false. What matters to an
+			// agent deciding whether it may run: your project is untouched. Agents in
+			// plan mode classify any unfamiliar command as a mutation and skip it, so
+			// the signal goes missing in exactly the sessions that are planning work
+			// other people need to know about.
+			"  • Command: ox murmur --topic=wip \"concise description (≤500 bytes)\" — the note goes to the Ledger, never your project's files or git history, so it is safe in plan mode\n" +
 			fmt.Sprintf("  • Stay in sync: run `ox agent %s heartbeat` every ~20 tool calls during long tasks\n", agentID) +
 			"Run your first murmur NOW: describe what the user asked and which code areas you expect to touch."
 	}
@@ -829,7 +1001,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	if output.Session != nil && output.Session.Recording {
 		notifParts = append(notifParts, "Session recording: active — discussions may be shared with teammates")
 	} else {
-		notifParts = append(notifParts, "Session recording: available (/ox-session-start)")
+		notifParts = append(notifParts, "Session recording: available (ox agent session start)")
 	}
 	if len(notifParts) > 0 {
 		output.UserNotification = "This session is enhanced by team context via SageOx. " + strings.Join(notifParts, ". ") + "."
@@ -847,7 +1019,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// when a subagent's parent was paused; without this, the message lives only
 	// in the nested Session struct and the top-level prime output derives its
 	// "Session recording" hint from Session.Recording alone, so the agent ends
-	// up advertising "Session recording: available (/ox-session-start)" while
+	// up advertising "Session recording: available (ox agent session start)" while
 	// the recording was just intentionally skipped. Lift the message into the
 	// canonical UserNotices channel so both --json and --text consumers see it.
 	if sessionStat != nil && !sessionStat.Recording && sessionStat.UserNotification != "" {
@@ -891,19 +1063,32 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	// check for version updates from daemon cache (pure file read, ~0ms)
+	// Check for version updates from the daemon cache (pure file read, ~0ms).
+	//
+	// UpdateAvailable/LatestVersion are DATA — always present, because anything
+	// parsing prime's output asked for them. UpdateHint and the UserNotices
+	// entry are the NOTICE: they instruct the AI coworker to raise the upgrade
+	// with the human out loud, so they go through the same ledger that caps the
+	// terminal tiers. Prime is where the calm tier lands when stderr belongs to
+	// an agent, so it carries the fact once per release line per day instead of
+	// on every prime.
 	if vResult := checkVersionFromCache(); vResult != nil {
 		output.UpdateAvailable = true
 		output.LatestVersion = vResult.LatestVersion
-		output.UpdateHint = fmt.Sprintf(
-			"ox v%s -> v%s is available. Offer to run 'ox upgrade' for the coworker — "+
-				"it upgrades in place for Homebrew, go install, and direct (install.sh) installs.",
-			vResult.CurrentVersion, vResult.LatestVersion,
-		)
-		output.UserNotices = append(output.UserNotices, UserNotice{
-			Type:    "upgrade",
-			Message: output.UpdateHint,
-		})
+
+		now := time.Now()
+		if line, due := updateNoticeDue(now); due {
+			output.UpdateHint = fmt.Sprintf(
+				"ox v%s -> v%s is available. Offer to run 'ox upgrade' for the coworker — "+
+					"it upgrades in place for Homebrew, go install, and direct (install.sh) installs.",
+				vResult.CurrentVersion, vResult.LatestVersion,
+			)
+			output.UserNotices = append(output.UserNotices, UserNotice{
+				Type:    "upgrade",
+				Message: output.UpdateHint,
+			})
+			updatenotice.RecordNotified(line, now)
+		}
 	}
 
 	// add support notice to user notices if present
@@ -917,11 +1102,17 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// write session marker for idempotent behavior (graceful failure)
 	if agentSessionID != "" {
 		marker := &SessionMarker{
-			AgentID:        agentID,
-			SessionID:      inst.ServerSessionID,
-			AgentSessionID: agentSessionID,
-			PrimedAt:       time.Now(),
-			ParentPID:      proc.FindAgentAncestorPID(),
+			AgentID:            agentID,
+			SessionID:          inst.ServerSessionID,
+			RecordingSessionID: recordingSessionID,
+			AgentSessionID:     agentSessionID,
+			PrimedAt:           time.Now(),
+			ParentPID:          proc.FindAgentAncestorPID(),
+			FullPrimeViaHook:   fullPrimeDelivered || (hookInput != nil && !compactReprime),
+		}
+		if isCursor && hookInput != nil {
+			marker.PrimedAt = time.Time{} // completed by the successful hook parent
+			marker.ParentPID = 0
 		}
 		if err := WriteSessionMarker(marker); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to write session marker: %v\n", err)
@@ -958,15 +1149,37 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			}
 			teamLabel = tn + " "
 		}
-		output.CodeSearchTip = fmt.Sprintf("'ox code search' is available for %s, PREFER over grep for code search (it indexes symbols, git history, diffs). Use 'ox query' only for %steam context (discussions) and ledger session recordings.", repoSlug, teamLabel)
+		output.CodeSearchTip = fmt.Sprintf("'ox code search' is indexed for %s — DSL filters (type:symbol, calls:, calledby:, type:pr, type:comment, before:/after:) unlock things grep cannot do. Use 'ox query' for %steam context (discussions) and ledger session recordings.", repoSlug, teamLabel)
 	} else {
-		output.CodeSearchTip = fmt.Sprintf("Run 'ox code index' to enable local code search (symbols, diffs, git history) for %s.", repoSlug)
+		output.CodeSearchTip = fmt.Sprintf("Run 'ox code index' to enable CodeDB (symbols, resolved call graph, diffs, git history, indexed PRs/issues/comments) for %s.", repoSlug)
 	}
 
 	output.ElapsedMs = time.Since(primeStart).Milliseconds()
 	output.Timing = timing
 
+	// A capped hook prime reaches the model as a trimmed preview with sections
+	// deferred to a file, so it must not license a later compact prime. The
+	// marker above optimistically records delivery; revoke it unless the output
+	// path confirms the full prime went out untrimmed.
+	var emitted bytes.Buffer
+	revokeCandidate := agentSessionID != "" && hookInput != nil && output.HookOutputBudget > 0
+	if revokeCandidate {
+		origOut := cmd.OutOrStdout()
+		cmd.SetOut(io.MultiWriter(origOut, &emitted))
+		defer cmd.SetOut(origOut)
+	}
+
 	err = outputAgentPrime(cmd, textMode, reviewMode, output)
+
+	if revokeCandidate && (err != nil || strings.Contains(emitted.String(), hookCapDeferredOpen)) {
+		_, revokeErr := UpdateSessionMarker(agentSessionID, func(m *SessionMarker) error {
+			m.FullPrimeViaHook = false
+			return nil
+		})
+		if revokeErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to update session marker: %v\n", revokeErr)
+		}
+	}
 
 	// Emit PAT expiry warning to stderr (post-output so structured stdout is
 	// never polluted). Internally skipped in ephemeral mode and when stderr
@@ -1001,6 +1214,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	return err
 }
 
+// hookCapDeferredOpen is the start of the pointer fitPrimeToHookCap appends when
+// it trims a hook prime; its presence in emitted output means the model got a
+// partial prime.
+const hookCapDeferredOpen = `<deferred path="`
+
 // resolveAgentIDFromStates returns envID if it matches an alive recording, otherwise "".
 // Intentionally does not fall back to a sole active recording: two concurrent Claude Code
 // sessions in different worktrees must not collide on agent_id (#528).
@@ -1030,9 +1248,17 @@ func hasAliveRecordingForID(states []*session.RecordingState, agentID string) bo
 	return false
 }
 
-// loadResolvedAttribution loads and merges attribution from user and project configs.
-// Project config takes precedence over user config, which takes precedence over defaults.
-func loadResolvedAttribution() config.ResolvedAttribution {
+// loadResolvedAttributionFor loads and merges attribution from the user config
+// and projectRoot's project config. Project config takes precedence over user
+// config, which takes precedence over defaults.
+//
+// It takes the project the caller already resolved rather than finding one from
+// the working directory: that is another repo when OX_PROJECT_ROOT selects one,
+// so a gate decided for projectRoot must read projectRoot's setting.
+func loadResolvedAttributionFor(projectRoot string) config.ResolvedAttribution {
+	// load project config (ignore errors, use defaults)
+	projectCfg, _ := config.LoadProjectConfig(projectRoot)
+
 	// load user config (ignore errors, use defaults)
 	userCfg, _ := config.LoadUserConfig()
 	var userAttr *config.Attribution
@@ -1040,8 +1266,6 @@ func loadResolvedAttribution() config.ResolvedAttribution {
 		userAttr = userCfg.Attribution
 	}
 
-	// load project config (ignore errors, use defaults)
-	projectCfg, _, _ := config.GetProjectContext()
 	var projectAttr *config.Attribution
 	if projectCfg != nil {
 		projectAttr = projectCfg.Attribution
@@ -1130,6 +1354,7 @@ func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger
 		CodeDBExists:     statErr == nil,
 		MemoryEnabled:    auth.IsMemoryEnabled(),
 		MurmuringEnabled: config.MurmuringEnabled(projectRoot),
+		BulletinEnabled:  flags.Get().BulletinEnabled,
 		AgentType:        agentType,
 		HasKB:            hasKB,
 	})
@@ -1139,30 +1364,24 @@ func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger
 // falling back to the directory name if the remote is unavailable.
 // Examples: "sageox/ox", "my-project"
 // offline-safe: falls back to directory name for local-only repos
+//
+// The implementation moved to repotools so the skill reconciler resolves the
+// slug the same way prime does — both feed it to the same `repos:` frontmatter
+// filter, and a second implementation would let a team document apply to rules
+// but not to skills.
 func repoSlugFromRemoteOrDir(projectRoot string) string {
-	cmd := exec.Command("git", "remote", "get-url", "origin")
-	cmd.Dir = projectRoot
-	out, err := cmd.Output()
-	if err == nil {
-		url := strings.TrimSpace(string(out))
-		// handle SSH: git@github.com:owner/repo.git
-		if idx := strings.Index(url, ":"); idx != -1 && !strings.Contains(url[:idx], "/") {
-			url = url[idx+1:]
-		}
-		// handle HTTPS: https://github.com/owner/repo.git
-		url = strings.TrimSuffix(url, ".git")
-		parts := strings.Split(url, "/")
-		if len(parts) >= 2 {
-			return parts[len(parts)-2] + "/" + parts[len(parts)-1]
-		}
-	}
-	return filepath.Base(projectRoot)
+	return repotools.RepoSlug(projectRoot)
 }
 
 // startSessionRecording attempts to start session recording if enabled.
 // Returns the session status for inclusion in prime output.
 // Errors are logged but not fatal - session recording is optional.
 func sessionWatchMode(agentType string) string {
+	if canonicalAgentType(agentType) == string(agentx.AgentTypeCursor) {
+		// Cursor's hook channels deliver model context, while daemon polling owns
+		// JSONL capture and final drains.
+		return "tail"
+	}
 	agent := GetAgent(agentType)
 	if agent == nil {
 		return "hook"
@@ -1173,7 +1392,173 @@ func sessionWatchMode(agentType string) string {
 	return "hook"
 }
 
-func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string) *sessionStatus {
+// recordingSessionIDFromMarker returns the prior durable recording identity
+// carried by a native coding-agent session marker. Marker files are local,
+// long-lived inputs, so only a structurally valid ses_ ID is trusted.
+func recordingSessionIDFromMarker(marker *SessionMarker) string {
+	if marker == nil || !sessionid.IsValidSessionID(marker.RecordingSessionID) {
+		return ""
+	}
+	return marker.RecordingSessionID
+}
+
+// recordingSessionIDForMarker prefers the active recording's identity and
+// otherwise preserves the prior valid identity. The fallback matters when a
+// resume cannot start recording immediately (for example, before its ledger
+// clone arrives): a later prime can still establish the continuation link.
+func recordingSessionIDForMarker(projectRoot, agentID, prior string) string {
+	if state, err := session.LoadRecordingStateForAgent(projectRoot, agentID); err == nil && state != nil && sessionid.IsValidSessionID(state.SessionID) {
+		return state.SessionID
+	}
+	if sessionid.IsValidSessionID(prior) {
+		return prior
+	}
+	return ""
+}
+
+func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
+	if canonicalAgentType(agentType) != "cursor" {
+		return startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, nil, cursorBoundaries...)
+	}
+	if agentSessionID == "" {
+		return startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, nil, cursorBoundaries...)
+	}
+	return startCursorSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, nil, cursorBoundaries...)
+}
+
+type cursorRecordingStartup struct {
+	username         string
+	branch           string
+	ledgerExists     bool
+	preparedIdentity *session.PreparedRecordingIdentity
+	writeHeader      func(string, *session.RecordingState) error
+	startedState     *session.RecordingState
+	watchState       *session.RecordingState
+	// A successful header is the last fallible step before marker publication.
+	// Preserve its identity when a later save error may leave a visible marker.
+	publicationCandidate *session.RecordingState
+	publicationErr       error
+}
+
+func startCursorSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string, writeHeader func(string, *session.RecordingState) error, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
+	// These best-effort metadata lookups can run Git commands. Resolve them
+	// before taking prompt admission's lock; only local publication belongs in
+	// that transaction. Header injection is per-call for publication tests.
+	preparedIdentity, err := session.PrepareRecordingIdentity(projectRoot)
+	if err != nil {
+		slog.Warn("Cursor recording startup deferred", "error", err)
+		return nil
+	}
+	attribution := identity.ResolveAttribution(endpoint.GetForProject(projectRoot), config.GetDisplayName())
+	startup := &cursorRecordingStartup{
+		username: attribution.Username, branch: repotools.GetCurrentBranch(projectRoot),
+		ledgerExists: ledger.Exists(""), preparedIdentity: preparedIdentity, writeHeader: writeHeader,
+	}
+	if startup.writeHeader == nil {
+		startup.writeHeader = func(root string, state *session.RecordingState) error {
+			return writeRawHeaderWithAttribution(root, state, &attribution)
+		}
+	}
+	var status *sessionStatus
+	publicationPossible := false
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = fileutil.WithFileLock(ctx, markerPath(agentSessionID)+".recording-start", func() error {
+		// Reload after acquiring prompt admission's lock: the caller's copy
+		// may predate one or more queued beforeSubmitPrompt hooks. Hold the
+		// marker through publication so that handoff cannot split again.
+		_, err := UpdateSessionMarker(agentSessionID, func(marker *SessionMarker) error {
+			if marker.AgentID != "" && marker.AgentID != agentID {
+				return fmt.Errorf("identity-conflict: Cursor startup belongs to another AI coworker")
+			}
+			if marker.CursorSourceBoundary == nil && len(cursorBoundaries) > 0 && cursorBoundaries[0] != nil {
+				boundary := *cursorBoundaries[0]
+				boundary.PromptGenerations = slices.Clone(boundary.PromptGenerations)
+				marker.CursorSourceBoundary = &boundary
+			}
+			marker.AgentID = agentID
+			status = startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, startup, marker.CursorSourceBoundary)
+			publicationPossible = (status != nil && status.Recording) || startup.publicationErr != nil
+			if publicationPossible && marker.CursorSourceBoundary != nil {
+				return associateCursorStartupRecording(projectRoot, agentID, agentSessionID, startup, marker)
+			}
+			if startup.publicationErr != nil {
+				return startup.publicationErr
+			}
+			return nil
+		})
+		if err != nil && publicationPossible {
+			// The recording can finish before another prompt repairs its source
+			// association. Block automatic restart before releasing admission's
+			// lock so that an unconsumed boundary cannot replay completed rows.
+			if stopErr := session.MarkExplicitStop(projectRoot, agentID); stopErr != nil {
+				return fmt.Errorf("cursor recording association failed (%w); could not block automatic restart: %w", err, stopErr)
+			}
+			return fmt.Errorf("cursor recording association failed; automatic recording stopped, run 'ox agent %s session start' after recovery: %w", agentID, err)
+		}
+		return err
+	})
+	if err != nil {
+		// Publication may already have succeeded; surface any recovery guard
+		// failure as well as the association error instead of reporting success.
+		slog.Warn("Cursor recording startup deferred", "error", err)
+		return nil
+	}
+	// Notifications and daemon IPC are optional and can outlive admission's
+	// two-second deadline. The complete recording is already visible here.
+	if startup.startedState != nil {
+		notifySessionStartedAsync(projectRoot, startup.startedState)
+	}
+	if startup.watchState != nil {
+		sendSessionWatchStart(startup.watchState, projectRoot)
+	}
+	return status
+}
+
+// associateCursorStartupRecording consumes the source boundary while admission
+// is locked. A daemon can finish and clear a recording before this runs, so a
+// successful start's known identity is stronger evidence than a later reload.
+func associateCursorStartupRecording(projectRoot, agentID, agentSessionID string, startup *cursorRecordingStartup, marker *SessionMarker) error {
+	state := startup.startedState
+	if state == nil {
+		var err error
+		state, err = session.LoadRecordingStateForAgent(projectRoot, agentID)
+		if err != nil {
+			return err
+		}
+	}
+	if state != nil && state.AgentID == agentID && state.AdapterName == "cursor" && state.AgentSessionID == agentSessionID &&
+		(startup.publicationErr == nil || state.SessionID == startup.publicationCandidate.SessionID) {
+		marker.CursorSourceBoundary.RecordingSessionID = state.SessionID
+		marker.RecordingSessionID = state.SessionID
+		return nil
+	}
+	// Missing state cannot prove a post-header save never landed. Preserve its
+	// error so the outer transaction installs the automatic-restart guard.
+	if startup.publicationErr != nil {
+		return startup.publicationErr
+	}
+	return fmt.Errorf("published Cursor recording is unavailable for source association")
+}
+
+// recordBeforeLedgerClone reports whether recording may start before the
+// Ledger is cloned. On a host that ends with the agent (an Amp orb), the first
+// prime always runs before the clone: prime starts the daemon only after its
+// output, and that daemon does the cloning. The agent usually primes once per
+// thread, so waiting for a later prime records nothing (seen in a real orb,
+// sageox/ox#1425). Starting now is safe: the recording lives under the
+// Ledger's .sageox/cache, which the clone adopts (gitserver.AdoptCacheOnlyTarget),
+// and the upload at session end comes minutes later, after the clone. With the
+// daemon disabled nothing would ever clone, so keep the old answer there.
+func recordBeforeLedgerClone() bool {
+	return runtime.Caps().HostEndsWithAgent && !daemon.IsDaemonDisabled()
+}
+
+func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string, cursorStartup *cursorRecordingStartup, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
+	var cursorBoundary *CursorSourceBoundary
+	if len(cursorBoundaries) > 0 {
+		cursorBoundary = cursorBoundaries[0]
+	}
 	// resolve session mode from the config hierarchy. Sessions record into
 	// the project ledger; Knowledge Bubbles play no part (ox ADR-028).
 	resolved := config.ResolveSessionRecording(projectRoot)
@@ -1184,9 +1569,23 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 	if !resolved.IsAuto() {
 		return nil
 	}
+	if canonicalAgentType(agentType) == string(agentx.AgentTypeCursor) && agentSessionID == "" {
+		return &sessionStatus{
+			Recording:        false,
+			Mode:             resolved.Mode,
+			Source:           string(resolved.Source),
+			UserNotification: "[ox] Cursor recording needs a native conversation identity. Run from the Cursor Agents Window hook.",
+		}
+	}
 
 	// check if ledger is provisioned and cloned (required for session storage)
-	if !ledger.Exists("") {
+	ledgerExists := false
+	if cursorStartup != nil {
+		ledgerExists = cursorStartup.ledgerExists
+	} else {
+		ledgerExists = ledger.Exists("")
+	}
+	if !ledgerExists && !recordBeforeLedgerClone() {
 		// return status indicating ledger needed
 		return &sessionStatus{
 			Recording:    false,
@@ -1196,8 +1595,13 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 		}
 	}
 
-	// respect explicit session stop — user ran /ox-session-stop, don't auto-restart
-	if session.ConsumeExplicitStop(projectRoot, agentID) {
+	// respect explicit session stop — user ran ox agent session stop, don't auto-restart
+	if session.HasExplicitStop(projectRoot, agentID) {
+		// A stop in progress or awaiting retry still owns the recording.
+		// Keep its signal until processing clears the state.
+		if state, err := session.LoadRecordingStateForAgent(projectRoot, agentID); agentType != "cursor" && err == nil && state == nil {
+			session.ConsumeExplicitStop(projectRoot, agentID)
+		}
 		return nil
 	}
 
@@ -1228,12 +1632,66 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 
 	// check if already recording
 	if existing, err := session.LoadRecordingStateForAgent(projectRoot, agentID); err == nil && existing != nil {
+		if agentType == "cursor" && (existing.AgentSessionID != agentSessionID || existing.AdapterName != "cursor" || existing.StoppedAt != nil) {
+			return nil
+		}
+		if existing.WatchMode == "tail" && existing.SessionFile == "" {
+			if canonicalAgentType(agentType) == string(agentx.AgentTypeCursor) {
+				if existing.AgentSessionID != agentSessionID {
+					slog.Warn("Cursor recording identity conflict", "agent_id", agentID)
+					return &sessionStatus{Recording: true, Mode: existing.FilterMode, Source: string(resolved.Source)}
+				}
+				if cursorBoundary != nil && !cursorBoundary.SourcePending {
+					bound, bindErr := session.BindInitialRecordingSource(projectRoot, agentID, session.InitialSourceBinding{
+						AgentSessionID:     agentSessionID,
+						SessionFile:        cursorBoundary.SourcePath,
+						StartOffset:        cursorBoundary.Offset,
+						StartOffsetKnown:   true,
+						SourcePrefixSHA256: cursorBoundary.SourcePrefixSHA256,
+					})
+					if bindErr != nil {
+						slog.Warn("failed to bind Cursor source boundary", "agent_id", agentID, "error", bindErr)
+					} else {
+						existing = bound
+					}
+				}
+			} else if agentSessionID != "" && existing.AgentSessionID != agentSessionID {
+				if err := session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
+					s.AgentSessionID = agentSessionID
+				}); err != nil {
+					slog.Warn("failed to persist native session identity", "agent_id", agentID, "error", err)
+				}
+				existing.AgentSessionID = agentSessionID
+			}
+			if cursorStartup != nil {
+				cursorStartup.watchState = existing
+			} else {
+				sendSessionWatchStart(existing, projectRoot)
+			}
+		}
 		return &sessionStatus{
 			Recording: true,
 			File:      existing.SessionFile,
 			Mode:      existing.FilterMode,
 			Source:    string(resolved.Source),
 		}
+	}
+	if agentType == "cursor" && cursorBoundary == nil {
+		return &sessionStatus{Recording: false, Mode: resolved.Mode, Source: string(resolved.Source),
+			UserNotification: "[ox] Cursor recording is waiting for the next prompt to establish its source boundary."}
+	}
+
+	// A coworker who aborted ox's recording of this native conversation
+	// discarded it; resuming the conversation must not quietly record and
+	// publish it again. An explicit session start still can. An unreadable
+	// record fails closed, as import does.
+	if aborted, ok, err := abortedNativeSession(projectRoot, agentSessionID); err != nil || ok {
+		notice := "[ox] Not recording: the record of conversations you aborted cannot be read. Run 'ox doctor' to repair it."
+		if err == nil {
+			notice = fmt.Sprintf("[ox] Not recording: you aborted ox's recording of this conversation on %s. To record it anyway, run 'ox agent %s session start'.",
+				aborted.AbortedAt.Local().Format("2006-01-02"), agentID)
+		}
+		return &sessionStatus{Recording: false, Mode: resolved.Mode, Source: string(resolved.Source), UserNotification: notice}
 	}
 
 	// generate session file path
@@ -1245,25 +1703,67 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 	// PID which dies immediately after the hook. OX_PARENT_PID is set by the hook
 	// to proc.FindAgentAncestorPID(), which walks the tree to find the agent process.
 	// If OX_PARENT_PID is missing (direct invocation), walk the tree ourselves.
-	parentPID := proc.FindAgentAncestorPID()
-	if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
-		if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
-			parentPID = parsed
+	parentPID := 0
+	if agentType != "cursor" {
+		parentPID = proc.FindAgentAncestorPID()
+		if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
+			if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
+				parentPID = parsed
+			}
 		}
 	}
+	// A transient Cursor hook shell is not the native conversation owner.
 
 	watchMode := sessionWatchMode(agentType)
+	username, branch := "", ""
+	if cursorStartup != nil {
+		username, branch = cursorStartup.username, cursorStartup.branch
+	} else {
+		username = identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName())
+		branch = repotools.GetCurrentBranch(projectRoot)
+	}
 
 	opts := session.StartRecordingOptions{
-		AgentID:       agentID,
-		AdapterName:   agentType,
-		OutputFile:    outputFile,
-		FilterMode:    resolved.Mode,
-		ParentPID:     parentPID,
-		Username:      identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName()),
-		WorkspacePath: projectRoot,
-		Branch:        repotools.GetCurrentBranch(projectRoot),
-		WatchMode:     watchMode,
+		AgentID:                agentID,
+		AgentSessionID:         agentSessionID,
+		AdapterName:            agentType,
+		OutputFile:             outputFile,
+		FilterMode:             resolved.Mode,
+		ParentPID:              parentPID,
+		Username:               username,
+		WorkspacePath:          projectRoot,
+		Branch:                 branch,
+		WatchMode:              watchMode,
+		ContinuedFromSessionID: continuedFromSessionID,
+	}
+	if cursorStartup != nil {
+		opts.PreparedIdentity = cursorStartup.preparedIdentity
+	}
+	if canonicalAgentType(agentType) == string(agentx.AgentTypeAmp) {
+		if sidecar, offset, ok := ampRecordingStart(projectRoot, agentID, agentSessionID); ok {
+			opts.SessionFile = sidecar
+			opts.StartOffset = offset
+			opts.StartOffsetKnown = true
+		}
+	}
+	if canonicalAgentType(agentType) == string(agentx.AgentTypeCursor) && cursorBoundary != nil {
+		opts.StartOffset = cursorBoundary.Offset
+		opts.StartOffsetKnown = true
+		opts.SourcePrefixSHA256 = cursorBoundary.SourcePrefixSHA256
+		if !cursorBoundary.SourcePending {
+			opts.SessionFile = cursorBoundary.SourcePath
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil
+		}
+		candidate := &session.RecordingState{AdapterName: "cursor", AgentSessionID: agentSessionID, WorkspacePath: projectRoot,
+			SessionFile: opts.SessionFile, StartOffset: opts.StartOffset, SourceOffset: opts.StartOffset,
+			StartOffsetKnown: true, SourcePrefixSHA256: opts.SourcePrefixSHA256}
+		if expected, err := session.ValidateCursorRecordingSource(home, candidate); err != nil || expected != cursorBoundary.SourcePath {
+			slog.Warn("Cursor startup source refused", "error", err)
+			return nil
+		}
 	}
 
 	// propagate parent agent info so the recording state knows this is a subagent
@@ -1280,6 +1780,41 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 	// marker can outlive the StartRecording call; the marker itself is only
 	// cleared by explicit resume/stop/abort or daemon expiration.
 	inheritedPauseSeq, inheritedPauseAt, inheritedPause := session.PeekExplicitPause(projectRoot, agentID)
+	if agentType == "cursor" {
+		opts.BeforePublish = func(state *session.RecordingState) error {
+			if cursorBoundary != nil {
+				if err := session.InitializeCursorTurnBoundary(state, cursorBoundary.SourcePath, cursorBoundary.GenerationID); err != nil {
+					return err
+				}
+				for _, generation := range cursorBoundary.PromptGenerations {
+					if generation == "" || slices.Contains(state.CursorPromptGenerations, generation) {
+						continue
+					}
+					if len(state.CursorPromptGenerations) > 0 {
+						state.CursorExpectedTurns++
+					}
+					state.CursorPromptGenerations = append(state.CursorPromptGenerations, generation)
+				}
+			}
+			if inheritedPause {
+				now := time.Now().UTC()
+				state.SuspendedAt = &now
+				state.InheritedPause = true
+				state.PauseCount++
+				reason := "inherited"
+				if clearInfo := parseClearNoticeEnv(); clearInfo != nil {
+					state.InheritedFromSession = clearInfo.SessionName
+					reason = "inherited-from-clear"
+				}
+				state.Lifecycle = append(state.Lifecycle, session.LifecycleEvent{Action: session.LifecycleActionPause, At: now, Seq: 0, Reason: reason})
+			}
+			if err := cursorStartup.writeHeader(projectRoot, state); err != nil {
+				return err
+			}
+			cursorStartup.publicationCandidate = state
+			return nil
+		}
+	}
 
 	state, err := session.StartRecording(projectRoot, opts)
 	if err != nil {
@@ -1300,6 +1835,9 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 				Source:    string(resolved.Source),
 			}
 		}
+		if cursorStartup != nil && cursorStartup.publicationCandidate != nil {
+			cursorStartup.publicationErr = err
+		}
 		// non-fatal but visible — agent sees stderr and can surface it
 		fmt.Fprintf(os.Stderr, "warning: session recording failed to start: %v\n", err)
 		return nil
@@ -1309,7 +1847,7 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 	// Done before writeRawHeader so the header reflects the suspended lifecycle
 	// from entry 0. The marker survives — it is cleared only by explicit
 	// resume/stop/abort or daemon expiration.
-	if inheritedPause {
+	if inheritedPause && agentType != "cursor" {
 		clearInfo := parseClearNoticeEnv()
 		priorSession := ""
 		// "inherited-from-clear" is only accurate when we actually saw a /clear
@@ -1328,6 +1866,7 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 			s.InheritedPause = true
 			s.InheritedFromSession = priorSession
 			s.PauseCount++
+			s.RecordTraceBoundary("pause", now)
 			s.Lifecycle = append(s.Lifecycle, session.LifecycleEvent{
 				Action: session.LifecycleActionPause,
 				At:     now,
@@ -1346,12 +1885,18 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 	}
 
 	// write raw.jsonl header immediately so incremental hooks can append entries
-	if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
-		slog.Warn("failed to write raw.jsonl header at auto-start", "error", writeErr)
+	if agentType != "cursor" {
+		if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
+			slog.Warn("failed to write raw.jsonl header at auto-start", "error", writeErr)
+		}
 	}
 
 	// register-at-start so /c/<session_id> resolves from t=0 (fire-and-forget)
-	notifySessionStartedAsync(projectRoot, state)
+	if cursorStartup != nil {
+		cursorStartup.startedState = state
+	} else {
+		notifySessionStartedAsync(projectRoot, state)
+	}
 
 	// for tail-mode sessions: try to find the agent's session file and tell
 	// the daemon to start tailing it. If TryConnect returns nil (daemon not
@@ -1359,13 +1904,22 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 	// SourceOffset=0, catching up from the beginning of the file once the
 	// daemon starts and discovers the active recording.
 	if state.WatchMode == "tail" {
-		sendSessionWatchStart(state, projectRoot)
+		if cursorStartup != nil {
+			cursorStartup.watchState = state
+		} else {
+			sendSessionWatchStart(state, projectRoot)
+		}
 	}
 
 	// build user notification message
-	notificationMsg := "Recording session. Discussions may be shared with your team. Run /ox-session-stop to end recording."
+	notificationMsg := "Recording session. Discussions may be shared with your team. Run ox agent session stop to end recording."
 	if resolved.IsAuto() {
 		notificationMsg += " (Tip: Disable auto-start with 'ox config set session_recording manual')"
+	}
+	// say so when an earlier recording from this agent is being held back, so a
+	// missing session does not look like a recording that never happened
+	if held, heldErr := session.LoadQuarantinedRecordingsForAgent(projectRoot, agentID); heldErr == nil && len(held) > 0 {
+		notificationMsg += " An earlier recording from this session is held back because its session file also covers another repository; run 'ox doctor' to review it."
 	}
 
 	return &sessionStatus{
@@ -1384,7 +1938,16 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 func sendSessionWatchStart(state *session.RecordingState, projectRoot string) {
 	// try to discover the agent's native session file
 	sessionFile := state.SessionFile
-	if sessionFile == "" {
+	if state.AdapterName == "cursor" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return
+		}
+		sessionFile, err = session.ValidateCursorRecordingSource(home, state)
+		if err != nil {
+			return
+		}
+	} else if sessionFile == "" {
 		adapter, err := adapters.GetAdapter(state.AdapterName)
 		if err != nil {
 			return
@@ -1394,9 +1957,10 @@ func sendSessionWatchStart(state *session.RecordingState, projectRoot string) {
 			repoRoot = projectRoot
 		}
 		sf, err := adapter.FindSessionFile(adapters.SessionLookup{
-			RepoRoot: repoRoot,
-			AgentID:  state.AgentID,
-			Since:    state.StartedAt,
+			RepoRoot:       repoRoot,
+			AgentID:        state.AgentID,
+			AgentSessionID: state.AgentSessionID,
+			Since:          state.StartedAt.Add(-5 * time.Minute),
 		})
 		if err != nil {
 			slog.Debug("tail-mode: session file not found yet, daemon will discover later",
@@ -1406,7 +1970,9 @@ func sendSessionWatchStart(state *session.RecordingState, projectRoot string) {
 		sessionFile = sf
 		// persist the discovered session file so daemon can find it via DetectAndRestart
 		state.SessionFile = sf
-		if saveErr := session.SaveRecordingState(projectRoot, state); saveErr != nil {
+		if saveErr := session.UpdateRecordingStateForAgent(projectRoot, state.AgentID, func(s *session.RecordingState) {
+			s.SessionFile = sf
+		}); saveErr != nil {
 			slog.Warn("failed to save session file to recording state", "error", saveErr)
 		}
 	}
@@ -1490,14 +2056,15 @@ func outputAgentPrime(cmd *cobra.Command, textMode, reviewMode bool, output agen
 	switch formatFlag {
 	case "json":
 		// legacy JSON output for debugging and programmatic consumers
-		cw := agentinstance.NewCountingWriter(cmd.OutOrStdout())
-		encoder := json.NewEncoder(cw)
-		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(output); err != nil {
+		jsonOut, err := cli.MarshalJSONIndent(output)
+		if err != nil {
+			return err
+		}
+		if err := cli.WriteJSONBytes(cmd.OutOrStdout(), jsonOut); err != nil {
 			return err
 		}
 		// prime is not dispatched via runWithAgentID, send heartbeat directly
-		if bytes := cw.BytesWritten(); bytes > 0 && output.AgentID != "" {
+		if bytes := int64(len(jsonOut)); bytes > 0 && output.AgentID != "" {
 			sendContextHeartbeat(output.AgentID, bytes, "prime")
 		}
 		return nil
@@ -1547,7 +2114,7 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 	if output.Session != nil && output.Session.Recording {
 		fmt.Fprintf(cmd.OutOrStdout(), "- Session recording: active\n")
 	} else {
-		fmt.Fprintln(cmd.OutOrStdout(), "- Session recording: available (`/ox-session-start`)")
+		fmt.Fprintln(cmd.OutOrStdout(), "- Session recording: available (`ox agent session start`)")
 	}
 
 	// quick reference: intent-to-command lookup
@@ -1640,7 +2207,7 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 				"Ledger Required for Sessions",
 				fmt.Sprintf("Session recording is set to %q (from %s) but the ledger has not been provisioned by cloud.\nRun 'ox doctor --fix' to clone repos from cloud.",
 					output.Session.Mode, output.Session.Source),
-				"ox ledger sync",
+				"ox doctor --fix",
 			)
 		} else if output.Session.Recording {
 			fmt.Fprintln(cmd.OutOrStdout())
@@ -1732,6 +2299,10 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 		fmt.Fprintln(cmd.OutOrStdout())
 		fmt.Fprintln(cmd.OutOrStdout(), "---TEAM_CONTEXT---")
 		teamJSON, _ := json.Marshal(output.TeamContext)
+		// Deliberately NOT themed: this is a compact machine payload between
+		// parse markers, read by the adapter, not a document a human scans.
+		// Color would buy nothing and risks feeding escape bytes to the parser
+		// if this ever runs on a pty. See .claude/rules/json-output.md.
 		fmt.Fprintln(cmd.OutOrStdout(), string(teamJSON))
 		fmt.Fprintln(cmd.OutOrStdout(), "---END_TEAM_CONTEXT---")
 
@@ -1794,17 +2365,20 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 			fmt.Fprintln(cmd.OutOrStdout())
 			fmt.Fprintln(cmd.OutOrStdout(), "## Team Commands")
 			fmt.Fprintln(cmd.OutOrStdout())
-			fmt.Fprintln(cmd.OutOrStdout(), "| Command | Trigger | Description |")
-			fmt.Fprintln(cmd.OutOrStdout(), "|---------|---------|-------------|")
+			fmt.Fprintln(cmd.OutOrStdout(), "| Command | Trigger | Description | Path |")
+			fmt.Fprintln(cmd.OutOrStdout(), "|---------|---------|-------------|------|")
 			for _, tcmd := range output.TeamContext.CoworkerCommands {
 				desc := tcmd.Description
 				if desc == "" {
 					desc = "(no description)"
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "| %s | %s | %s |\n", tcmd.Name, tcmd.Trigger, desc)
+				fmt.Fprintf(cmd.OutOrStdout(), "| %s | %s | %s | %s |\n", tcmd.Name, tcmd.Trigger, desc, tcmd.Path)
 			}
 			fmt.Fprintln(cmd.OutOrStdout())
-			fmt.Fprintln(cmd.OutOrStdout(), "Invoke commands via slash prefix (e.g., /deploy).")
+			// ox installs no host slash command for team commands, so telling the
+			// agent to "invoke /deploy" sent it after something that does not
+			// exist. The path is the only thing it can actually act on.
+			fmt.Fprintln(cmd.OutOrStdout(), "ox does not install these as slash commands — read the file at Path on demand.")
 		}
 
 		// emit team docs catalog if any indexed docs exist
@@ -1821,7 +2395,32 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 				if doc.When != "" {
 					fmt.Fprintf(cmd.OutOrStdout(), "    When: %s\n", doc.When)
 				}
+				if doc.Path != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "    Path: %s\n", doc.Path)
+				}
 			}
+		}
+
+		// team bulletin board — a pointer plus the reading rules. Post bodies
+		// are never read or printed here; the coworker lists the directory
+		// and opens a post on demand.
+		if output.TeamContext.BulletinHint != "" {
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintln(cmd.OutOrStdout(), "## Team Bulletin Board (read on demand — not preloaded)")
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintf(cmd.OutOrStdout(), "  Dir: %s\n", output.TeamContext.BulletinHint)
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", prime.BulletinReadingHint)
+		}
+
+		// github mirror board — only when this repo has live posts. Pointer
+		// only, like the general board above.
+		if gb := output.TeamContext.GitHubBoard; gb != nil && gb.Live > 0 {
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintln(cmd.OutOrStdout(), "## GitHub Mirror Board (read on demand — not preloaded)")
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintf(cmd.OutOrStdout(), "  Dir: %s\n", gb.Dir)
+			fmt.Fprintf(cmd.OutOrStdout(), "  This repo: %s (%d live)\n", gb.ThisRepo, gb.Live)
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", prime.GitHubBoardReadingHint)
 		}
 
 		// always emit team context guidance — may sync after prime runs
@@ -2029,8 +2628,9 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 		info.Escalation = "capabilities/team/index.md"
 	}
 
-	// discover coworker customizations from coworkers/
-	// agents in coworkers/agents/, commands in coworkers/commands/
+	// discover coworker customizations
+	// profiles in agents/profiles/, commands in agents/commands/
+	// (legacy coworkers/agents/ and coworkers/commands/ are still read)
 	customizations, mountAgents, mountCommands := discoverCustomizationsAcross(sources)
 	if mount != nil {
 		mount.Agents, mount.Commands = mountAgents, mountCommands
@@ -2046,7 +2646,7 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 			}
 		}
 
-		// populate discovered agents/commands
+		// populate discovered coworker profiles and team commands
 		info.Coworkers = customizations.Agents
 		info.CoworkerCommands = customizations.Commands
 
@@ -2111,6 +2711,9 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 		mount.Memory = fillTeamMemoryGapsFromMount(info, sources)
 	}
 
+	// github mirror board — a pointer, only when this repo has live posts
+	loadGitHubBoard(info, tc.Path, projectRoot, getLedgerPath, time.Now())
+
 	// sync health: check staleness
 	syncState := daemon.LoadSyncState(tc.Path)
 	if syncState.IsStale(daemon.DefaultStalenessThreshold) && !syncState.LastSync.IsZero() {
@@ -2164,10 +2767,194 @@ func loadTeamMemory(info *teamContextInfo, teamDir string) {
 		info.ObservationGuideHint = guidePath
 	}
 
+	// bulletin/<board>/posts — team bulletin board, reference pointer only.
+	// Post bodies are teammates' unreviewed, time-limited notes and are never
+	// read here. The gate is the board folder itself: the posts dir may be
+	// absent after every post expired, and the hint still points there so a
+	// coworker knows where the next post will land. Not gated on the publish
+	// flag — reads continue when publishing is off.
+	if st, err := os.Stat(filepath.Join(teamDir, "bulletin")); err == nil && st.IsDir() {
+		info.BulletinHint = filepath.Join(teamDir, filepath.FromSlash(prime.BulletinPostsRelDir(prime.BulletinDefaultBoard)))
+	}
+
 	// discover memory timeline files for progressive disclosure
 	info.MemoryDaily = discoverMemoryFiles(filepath.Join(teamDir, "memory", "daily"))
 	info.MemoryWeekly = discoverMemoryFiles(filepath.Join(teamDir, "memory", "weekly"))
 	info.MemoryMonthly = discoverMemoryFiles(filepath.Join(teamDir, "memory", "monthly"))
+}
+
+// loadGitHubBoard sets info.GitHubBoard when the team's github mirror board
+// holds at least one unexpired post for the repo at projectRoot.
+//
+// Prime is a hot path, so the order is cheapest-first: one directory read, and
+// only if that finds post metadata one `git remote -v` to learn which repo this
+// is, and then one local read of the relay's state file to learn what GitHub
+// currently calls it. No network, and post bodies are never opened — only the
+// small .meta.json sidecars that carry the expiry. ledgerPath is called at most
+// once, and only once the first two steps found something to resolve. Any
+// failure leaves the pointer unset: a missing pointer costs the coworker one
+// `ls`, a wrong one points it at nothing.
+func loadGitHubBoard(info *teamContextInfo, teamDir, projectRoot string, ledgerPath func() string, now time.Time) {
+	if info == nil || teamDir == "" || projectRoot == "" {
+		return
+	}
+
+	postsDir := githubmirror.PostsDir(teamDir)
+	entries, err := os.ReadDir(postsDir)
+	if err != nil {
+		return
+	}
+	hasMeta := false
+	for _, entry := range entries {
+		if isGitHubPostMeta(entry) {
+			hasMeta = true
+			break
+		}
+	}
+	if !hasMeta {
+		return // an empty or pruned board: skip the git call too
+	}
+
+	owner, name, ok := githubRemoteOf(projectRoot)
+	if !ok {
+		return
+	}
+
+	// The relay publishes under GitHub's current name, which after a rename or
+	// transfer is not what the remote says. Posts from before the rename keep
+	// the old name until they expire, so both spellings are this repo. The
+	// canonical one goes first: it is what new posts are filed under.
+	spellings := [][2]string{{owner, name}}
+	var ledger string
+	if ledgerPath != nil {
+		ledger = ledgerPath()
+	}
+	if canonicalOwner, canonicalName := githubmirror.CanonicalRepo(ledger, owner, name); !strings.EqualFold(canonicalOwner+"/"+canonicalName, owner+"/"+name) {
+		spellings = [][2]string{{canonicalOwner, canonicalName}, {owner, name}}
+	}
+
+	var slugPrefixes, keyPrefixes []string
+	for _, spelling := range spellings {
+		slugPrefix := githubmirror.SlugPrefix(spelling[0], spelling[1])
+		if slugPrefix == "" {
+			continue // nothing slug-worthy: an empty prefix would match every post
+		}
+		slugPrefixes = append(slugPrefixes, slugPrefix)
+		keyPrefixes = append(keyPrefixes, githubRepoKeyPrefix(spelling[0], spelling[1]))
+	}
+	if len(slugPrefixes) == 0 {
+		return
+	}
+
+	live, spellingLive := countLiveGitHubPosts(postsDir, entries, slugPrefixes, keyPrefixes, now)
+	if live == 0 {
+		return
+	}
+	// one glob per spelling that has live posts, so the pointer reaches every
+	// post it counts: after a rename both the new and the old name's posts
+	var globs []string
+	for i, prefix := range slugPrefixes {
+		if spellingLive[i] {
+			globs = append(globs, prefix+"*")
+		}
+	}
+	info.GitHubBoard = &prime.GitHubBoardInfo{
+		Dir:      postsDir,
+		ThisRepo: strings.Join(globs, " "),
+		Live:     live,
+	}
+}
+
+// isGitHubPostMeta reports whether a directory entry is a post's .meta.json.
+func isGitHubPostMeta(entry os.DirEntry) bool {
+	return !entry.IsDir() && strings.HasSuffix(entry.Name(), ".meta.json")
+}
+
+// githubRemoteOf returns the GitHub owner and repo of projectRoot, resolved the
+// way the daemon's GitHub sync resolves them so prime and the relay agree on
+// which repo "this repo" is.
+func githubRemoteOf(projectRoot string) (owner, name string, ok bool) {
+	urls, err := repotools.GetRemoteURLsForDir(projectRoot)
+	if err != nil {
+		return "", "", false
+	}
+	for _, url := range urls {
+		if o, n, found := gh.ParseGitHubRemote(url); found {
+			return o, n, true
+		}
+	}
+	return "", "", false
+}
+
+// githubRepoKeyPrefix is the part of a post's source_key shared by every item
+// of one repo ("github.com/{owner}/{name}/"), derived from the one function that
+// builds source keys so the two cannot drift.
+func githubRepoKeyPrefix(owner, name string) string {
+	itemKey := githubmirror.SourceKey(owner, name, githubmirror.KindPullRequest, 0)
+	return path.Dir(path.Dir(itemKey)) + "/"
+}
+
+// hasAnyPrefix reports whether s starts with any of prefixes.
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// countLiveGitHubPosts counts the posts in entries that belong to one repo and
+// have not expired. slugPrefixes and keyPrefixes list every spelling of the
+// repo (see loadGitHubBoard); a post matching any of them is this repo's.
+// spellingLive[i] reports whether any live post was filed under spelling i.
+// Everything is read from the server-written sidecar, never from the post. The
+// file name is only a cheap prefilter (a post file is <slug>-<sha>.meta.json,
+// so a repo's posts all start with its slug prefix). The sidecar's slug and
+// expires_at decide — plus its source_key when it has one, because a slug
+// prefix cannot tell "acme/api" from "acme/api-gateway" and the source key can.
+// A sidecar that cannot be read or decoded is skipped, not counted.
+func countLiveGitHubPosts(postsDir string, entries []os.DirEntry, slugPrefixes, keyPrefixes []string, now time.Time) (live int, spellingLive []bool) {
+	spellingLive = make([]bool, len(slugPrefixes))
+	for _, entry := range entries {
+		if !isGitHubPostMeta(entry) || !hasAnyPrefix(entry.Name(), slugPrefixes) {
+			continue
+		}
+		meta, err := githubmirror.ReadPostMeta(filepath.Join(postsDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		if !hasAnyPrefix(meta.Slug, slugPrefixes) || !meta.ExpiresAt.After(now) {
+			continue
+		}
+		spelling := postSpelling(meta, slugPrefixes, keyPrefixes)
+		if spelling < 0 {
+			continue
+		}
+		spellingLive[spelling] = true
+		live++
+	}
+	return live, spellingLive
+}
+
+// postSpelling returns the index of the repo spelling a post was filed under,
+// or -1 when it is another repo's. The source_key decides when the post has
+// one; otherwise the slug does, first match winning — spellings are ordered
+// canonical first, and a shorter old name ("acme-api-") is also a prefix of a
+// longer new one ("acme-api-v2-").
+func postSpelling(meta *githubmirror.PostMeta, slugPrefixes, keyPrefixes []string) int {
+	for i := range slugPrefixes {
+		if meta.SourceKey != "" {
+			if strings.HasPrefix(meta.SourceKey, keyPrefixes[i]) {
+				return i
+			}
+			continue
+		}
+		if strings.HasPrefix(meta.Slug, slugPrefixes[i]) {
+			return i
+		}
+	}
+	return -1
 }
 
 // discoverMemoryFiles lists .md files in a directory, sorted reverse-chronologically.

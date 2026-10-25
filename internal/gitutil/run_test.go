@@ -110,6 +110,75 @@ func TestRunGit(t *testing.T) {
 		assert.Contains(t, output, "oauth2:***@")
 	})
 
+	t.Run("insulated from a global git-lfs install (ox-baz5.4)", func(t *testing.T) {
+		// Simulates a machine with git-lfs installed globally: filter.lfs.*
+		// configured in the GLOBAL gitconfig (not this repo's), the way
+		// `git lfs install --global` leaves it. GIT_CONFIG_GLOBAL (git
+		// 2.32+) redirects git's notion of "global config" to this fixture
+		// file, isolated from the real user running the test.
+		globalConfig := filepath.Join(t.TempDir(), "gitconfig")
+		// git already runs a filter command through the shell itself, so the
+		// config value is the raw shell command — no extra `sh -c` wrapper.
+		// Double-quoted: gitconfig(5) treats an unquoted `;` as a trailing
+		// comment marker, which would silently truncate this value.
+		require.NoError(t, os.WriteFile(globalConfig, []byte(
+			"[filter \"lfs\"]\n"+
+				"\tsmudge = \"cat >/dev/null; printf SMUDGED\"\n"+
+				"\tclean = cat\n"+
+				"\trequired = true\n"), 0o644))
+		t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+		// GIT_CONFIG_GLOBAL redirects only the GLOBAL file — the RAW
+		// checkout below (the fixture-sanity step, run without RunGit's
+		// insulation) still reads whatever SYSTEM config the host actually
+		// has. filter.<driver>.process (a long-running filter protocol)
+		// takes precedence over smudge/clean when set, so a host with a
+		// real system-level git-lfs config could silently override this
+		// fixture's smudge and break the sanity check. GIT_CONFIG_NOSYSTEM
+		// makes the raw checkout hermetic regardless of host state.
+		t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+		repo := t.TempDir()
+		run := func(args ...string) {
+			cmd := exec.Command("git", args...)
+			cmd.Dir = repo
+			out, err := cmd.CombinedOutput()
+			require.NoErrorf(t, err, "git %v: %s", args, out)
+		}
+		run("init", "--quiet")
+		run("config", "--local", "user.name", "Test")
+		run("config", "--local", "user.email", "test@example.com")
+		require.NoError(t, os.WriteFile(filepath.Join(repo, ".gitattributes"), []byte("test.bin filter=lfs\n"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(repo, "test.bin"), []byte("REAL-CONTENT"), 0o644))
+		run("add", "-A")
+		run("commit", "--quiet", "-m", "init")
+
+		// Fixture sanity: a RAW checkout (no insulation) IS smudged by the
+		// global filter — proves this fixture actually exercises the bug
+		// this test guards, not a no-op.
+		require.NoError(t, os.Remove(filepath.Join(repo, "test.bin")))
+		run("checkout", "--", "test.bin")
+		raw, err := os.ReadFile(filepath.Join(repo, "test.bin"))
+		require.NoError(t, err)
+		require.Equal(t, "SMUDGED", string(raw), "fixture sanity: raw checkout must be smudged by the global filter")
+
+		// The fix: a checkout run through RunGit must NOT be smudged, and
+		// the worktree must stay clean afterward. Without RunGit's
+		// filter.lfs.* overrides this is the ox-baz5.4 wedge: a nested LFS
+		// pointer can never equal HEAD, autostash leaks one entry per pull
+		// cycle, and `ox doctor --fix` cannot help.
+		require.NoError(t, os.Remove(filepath.Join(repo, "test.bin")))
+		_, err = RunGit(context.Background(), repo, "checkout", "--", "test.bin")
+		assert.NoError(t, err)
+		insulated, err := os.ReadFile(filepath.Join(repo, "test.bin"))
+		require.NoError(t, err)
+		assert.Equal(t, "REAL-CONTENT", string(insulated),
+			"RunGit must insulate checkout from the global git-lfs smudge filter")
+
+		status, err := RunGit(context.Background(), repo, "status", "--porcelain")
+		assert.NoError(t, err)
+		assert.Empty(t, status, "worktree must be clean after an insulated checkout — this is what 'daemon pull succeeds and stays clean' means")
+	})
+
 	t.Run("error output is also sanitized", func(t *testing.T) {
 		// create a repo pointing to a nonexistent remote with credentials
 		repo := t.TempDir()

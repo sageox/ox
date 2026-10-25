@@ -1,10 +1,14 @@
 package prime
 
 import (
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sageox/ox/extensions/skills"
 )
 
 // repoRoot resolves the repository root from this test file's package dir
@@ -95,7 +99,8 @@ func TestOxCapabilitiesIDResolves(t *testing.T) {
 
 // TestOxCapabilitiesClassInvariants asserts the per-class support invariants:
 // floor entries are non-invokable but carry a Layer-1 home; commands are
-// slash-only; skills both slash and auto-activate.
+// slash-only; skills always support slash, and their auto-activation must agree
+// with the `disable-model-invocation` frontmatter of the SKILL.md on disk.
 func TestOxCapabilitiesClassInvariants(t *testing.T) {
 	for _, c := range OxCapabilities() {
 		c := c
@@ -116,8 +121,26 @@ func TestOxCapabilitiesClassInvariants(t *testing.T) {
 					t.Errorf("command capability %q must not auto-activate", c.ID)
 				}
 			case MechanismSkill:
-				if !c.Supports.Slash || !c.Supports.AutoActivate {
-					t.Errorf("skill capability %q must support slash AND auto-activate, got %+v", c.ID, c.Supports)
+				if !c.Supports.Slash {
+					t.Errorf("skill capability %q must support slash, got %+v", c.ID, c.Supports)
+				}
+				// A skill that does not auto-activate is only legitimate when its
+				// SKILL.md actually says so. Checking the table against DISK is the
+				// point: `disable-model-invocation` is what keeps a side-effecting
+				// lifecycle surface (ox-cli-session-stop, ox-cli-doctor) from being
+				// fired by the model, and what keeps its description out of context.
+				// A row that claims slash-only while the file omits the key would
+				// hand the model a destructive command; the reverse would silently
+				// drop a playbook out of auto-activation.
+				body, err := fs.ReadFile(skills.FS, path.Join(c.ID, skills.SkillFileName))
+				if err != nil {
+					t.Fatalf("skill capability %q has no SKILL.md on disk: %v", c.ID, err)
+				}
+				declaredSlashOnly := strings.Contains(string(body), "disable-model-invocation: true")
+				if declaredSlashOnly == c.Supports.AutoActivate {
+					t.Errorf("skill %q: table says auto_activate=%v but SKILL.md %s disable-model-invocation",
+						c.ID, c.Supports.AutoActivate,
+						map[bool]string{true: "declares", false: "omits"}[declaredSlashOnly])
 				}
 			}
 		})
@@ -125,25 +148,30 @@ func TestOxCapabilitiesClassInvariants(t *testing.T) {
 }
 
 // TestOxCapabilitiesCountsByClass pins the expected entry counts so the table
-// stays in sync with the documented surface inventory (5 floor, 14 command,
-// 4 skill = 23 total). Update deliberately when surfaces change.
+// stays in sync with the documented surface inventory (5 floor, 0 command,
+// 19 skill = 24 total). Update deliberately when surfaces change.
 func TestOxCapabilitiesCountsByClass(t *testing.T) {
 	counts := map[MechanismClass]int{}
 	for _, c := range OxCapabilities() {
 		counts[c.MechanismClass]++
 	}
 	want := map[MechanismClass]int{
-		MechanismFloor:   5, // consult-first, rule-promotion, plan-enrichment, visualization, decision-record
-		MechanismCommand: 14,
-		MechanismSkill:   4, // ox-plan, ox-session-review, ox-recap, ox-conversation
+		MechanismFloor: 5, // consult-first, rule-promotion, plan-enrichment, visualization, decision-record
+		// The command class is deliberately EMPTY since the 0.15.0 fold: the
+		// Claude-only .claude/commands surface became skills, so the same
+		// lifecycle affordances now reach every adapter with a skills root.
+		MechanismCommand: 0,
+		// 5 auto-activating playbooks + the committed `sageox` on-ramp
+		// + 13 slash-only lifecycle surfaces folded in from commands.
+		MechanismSkill: 19,
 	}
 	for class, n := range want {
 		if counts[class] != n {
 			t.Errorf("mechanism_class %q: got %d entries, want %d", class, counts[class], n)
 		}
 	}
-	if total := len(OxCapabilities()); total != 23 {
-		t.Errorf("total capabilities: got %d, want 23", total)
+	if total := len(OxCapabilities()); total != 24 {
+		t.Errorf("total capabilities: got %d, want 24", total)
 	}
 }
 
@@ -153,7 +181,7 @@ func TestOxCapabilitiesCountsByClass(t *testing.T) {
 // on-disk command (extensions/claude/commands/*.md) and skill
 // (extensions/skills/*/SKILL.md) is EITHER an OxCapabilities() row OR an
 // explicitly documented additive skill (additiveSkills). Without this, a skill
-// like ox-consult — or any future skill/command the installer ships — could
+// like ox-cli-consult — or any future skill/command the installer ships — could
 // silently escape the conformance contract.
 func TestEveryOnDiskSurfaceIsAccounted(t *testing.T) {
 	root := repoRoot(t)
@@ -215,16 +243,16 @@ func TestAdditiveSkillsAreNotTableRows(t *testing.T) {
 		}
 	}
 
-	// ox-consult specifically must be present and additive (its floor is the
+	// ox-cli-consult specifically must be present and additive (its floor is the
 	// consult-first ConsultRoutes), never a table row. This pins the special
 	// status the review called out.
-	if _, ok := additiveSkills["ox-consult"]; !ok {
-		t.Errorf("ox-consult must be in additiveSkills (additive; floor is the consult-first entry)")
+	if _, ok := additiveSkills["ox-cli-consult"]; !ok {
+		t.Errorf("ox-cli-consult must be in additiveSkills (additive; floor is the consult-first entry)")
 	}
 }
 
 func TestOxVizSkillActivatesForMaterialPRWriting(t *testing.T) {
-	path := filepath.Join(repoRoot(t), "extensions", "skills", "ox-viz", "SKILL.md")
+	path := filepath.Join(repoRoot(t), "extensions", "skills", "ox-cli-viz", "SKILL.md")
 	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -237,7 +265,37 @@ func TestOxVizSkillActivatesForMaterialPRWriting(t *testing.T) {
 		"ox viz pr --intent",
 	} {
 		if !strings.Contains(string(content), want) {
-			t.Errorf("ox-viz activation description missing %q", want)
+			t.Errorf("ox-cli-viz activation description missing %q", want)
 		}
+	}
+}
+
+// TestAdditiveSkillsAllExistOnDisk closes the table→disk direction that
+// TestEveryOnDiskSurfaceIsAccounted leaves open.
+//
+// That test asks "is every on-disk surface accounted for?" — it cannot notice an
+// allowlist entry for a surface that no longer exists. `post-cutoff` was exactly
+// that: it moved out of extensions/skills/ into the Add-on Catalog
+// (extensions/addons/, ADR-032 D6) and its additiveSkills entry stayed behind,
+// still excusing it from the conformance table. Nothing failed, because nothing
+// looked in this direction.
+//
+// Failure prevented: a dead exemption outliving the thing it exempted, so a
+// later skill reusing that name inherits an excuse nobody granted it.
+func TestAdditiveSkillsAllExistOnDisk(t *testing.T) {
+	root := repoRoot(t)
+
+	for id, reason := range additiveSkills {
+		skill := filepath.Join(root, "extensions", "skills", id, "SKILL.md")
+		command := filepath.Join(root, "extensions", "claude", "commands", id+".md")
+
+		_, skillErr := os.Stat(skill)
+		_, commandErr := os.Stat(command)
+		if skillErr == nil || commandErr == nil {
+			continue
+		}
+		t.Errorf("additiveSkills excuses %q from the conformance table, but no such surface is on disk "+
+			"(looked for %s and %s) — remove the entry, or restore the surface (reason on file: %q)",
+			id, skill, command, reason)
 	}
 }

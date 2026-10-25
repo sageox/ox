@@ -9,13 +9,16 @@ import (
 	"context"
 )
 
-const deleteFileRevsByCommit = `-- name: DeleteFileRevsByCommit :exec
+const deleteFileRevsByCommit = `-- name: DeleteFileRevsByCommit :execrows
 DELETE FROM file_revs WHERE commit_id = ?
 `
 
-func (q *Queries) DeleteFileRevsByCommit(ctx context.Context, commitID int64) error {
-	_, err := q.db.ExecContext(ctx, deleteFileRevsByCommit, commitID)
-	return err
+func (q *Queries) DeleteFileRevsByCommit(ctx context.Context, commitID int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteFileRevsByCommit, commitID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const insertFileRev = `-- name: InsertFileRev :exec
@@ -31,4 +34,77 @@ type InsertFileRevParams struct {
 func (q *Queries) InsertFileRev(ctx context.Context, arg InsertFileRevParams) error {
 	_, err := q.db.ExecContext(ctx, insertFileRev, arg.CommitID, arg.Path, arg.BlobID)
 	return err
+}
+
+const listDeadSnapshotCommits = `-- name: ListDeadSnapshotCommits :many
+SELECT c.id FROM commits c
+WHERE c.id NOT IN (SELECT r.commit_id FROM refs r)
+  AND EXISTS (SELECT 1 FROM file_revs fr WHERE fr.commit_id = c.id)
+ORDER BY c.id
+LIMIT ?
+`
+
+// Same as ListDeadSnapshotCommitsByRepo, across every repo, for index-wide maintenance.
+func (q *Queries) ListDeadSnapshotCommits(ctx context.Context, limit int64) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listDeadSnapshotCommits, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDeadSnapshotCommitsByRepo = `-- name: ListDeadSnapshotCommitsByRepo :many
+SELECT c.id FROM commits c
+WHERE c.repo_id = ?
+  AND c.id NOT IN (SELECT r.commit_id FROM refs r)
+  AND EXISTS (SELECT 1 FROM file_revs fr WHERE fr.commit_id = c.id)
+ORDER BY c.id
+LIMIT ?
+`
+
+type ListDeadSnapshotCommitsByRepoParams struct {
+	RepoID int64 `json:"repo_id"`
+	Limit  int64 `json:"limit"`
+}
+
+// Commits of one repo that still own file_revs rows although no ref points at
+// them. Search reaches file_revs only through a refs join, so such a snapshot is
+// unreachable weight. The EXISTS probe rides idx_file_revs_commit: cost scales
+// with commits, not with file_revs rows.
+func (q *Queries) ListDeadSnapshotCommitsByRepo(ctx context.Context, arg ListDeadSnapshotCommitsByRepoParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listDeadSnapshotCommitsByRepo, arg.RepoID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

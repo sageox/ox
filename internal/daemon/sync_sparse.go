@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/manifest"
@@ -26,11 +27,11 @@ import (
 // callers can propagate if they need to, but the typical pattern is to
 // ignore the return value because losing sparse on one pass is recoverable
 // on the next.
-func applySparseFromManifest(ctx context.Context, repoPath string, cfg *manifest.ManifestConfig, logger *slog.Logger) error {
+func applySparseFromManifest(ctx context.Context, repoPath string, cfg *manifest.ManifestConfig, kind manifest.RepoKind, logger *slog.Logger) error {
 	if cfg == nil {
 		return nil
 	}
-	paths := manifest.ComputeSparseSet(cfg)
+	paths := manifest.SparseSetFor(cfg, kind)
 	if len(paths) == 0 {
 		if logger != nil {
 			logger.Debug("sparse-checkout: no paths computed, skipping", "path", repoPath)
@@ -38,7 +39,23 @@ func applySparseFromManifest(ctx context.Context, repoPath string, cfg *manifest
 		return nil
 	}
 	args := append([]string{"sparse-checkout", "set", "--no-cone"}, paths...)
-	if _, err := gitutil.RunGit(ctx, repoPath, args...); err != nil {
+	// under the repo lock: `git sparse-checkout set` rewrites the index, so a
+	// run outside it can fail an ox commit to this clone on index.lock
+	err := gitutil.WithRepoLock(ctx, repoPath, func() error {
+		_, err := gitutil.RunGit(ctx, repoPath, args...)
+		if err != nil && gitutil.IsIndexLockContention(err.Error()) {
+			// clear only locks eligible for automatic recovery and retry once;
+			// ownerless sparse-checkout locks are preserved regardless of age
+			if removed, _ := gitutil.RemoveStaleLockFiles(filepath.Join(repoPath, ".git")); len(removed) > 0 {
+				if logger != nil {
+					logger.Warn("sparse-checkout: removed stale lock files, retrying", "path", repoPath, "removed", removed)
+				}
+				_, err = gitutil.RunGit(ctx, repoPath, args...)
+			}
+		}
+		return err
+	})
+	if err != nil {
 		if logger != nil {
 			logger.Warn("sparse-checkout set failed", "path", repoPath, "error", err)
 		}

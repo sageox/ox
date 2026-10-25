@@ -322,5 +322,5 @@ func NewRedactorWithCustomRules(projectRoot string) (*Redactor, []RedactParseErr
 	patterns := DefaultPatterns()
 	customPatterns, parseErrors := LoadCustomPatterns(projectRoot)
 	patterns = append(patterns, customPatterns...)
-	return &Redactor{patterns: patterns}, parseErrors
+	return NewRedactorWithPatterns(patterns), parseErrors
 }

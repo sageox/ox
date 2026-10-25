@@ -33,17 +33,18 @@ func TestNewRedactorWithPatterns(t *testing.T) {
 		{Name: "custom", Pattern: regexp.MustCompile(`CUSTOM_[A-Z]+`), Redact: "[CUSTOM]"},
 	}
 	r := NewRedactorWithPatterns(customPatterns)
-	assert.Len(t, r.patterns, 1)
+	assert.Len(t, r.patterns, len(customPatterns)+len(DefaultExtraDetectors()))
 }
 
 func TestAddPattern(t *testing.T) {
 	r := NewRedactorWithPatterns(nil)
+	before := len(r.patterns)
 	r.AddPattern(SecretPattern{
 		Name:    "test",
 		Pattern: regexp.MustCompile(`TEST_SECRET`),
 		Redact:  "[TEST]",
 	})
-	assert.Len(t, r.patterns, 1)
+	assert.Len(t, r.patterns, before+1)
 }
 
 func TestRedactString_AWSAccessKey(t *testing.T) {
@@ -818,15 +819,15 @@ func TestScanForSecrets(t *testing.T) {
 func TestRedactWithAllowlist(t *testing.T) {
 	r := NewRedactor()
 
-	t.Run("allowlist preserves known values", func(t *testing.T) {
+	t.Run("allowlist cannot bypass mandatory credential context", func(t *testing.T) {
 		// this looks like a secret pattern but is actually a known-safe value
 		input := "api_key=test_placeholder_value123"
 		allowlist := []string{"test_placeholder_value123"}
 
 		output, _ := r.RedactWithAllowlist(input, allowlist)
 
-		// the allowlisted value should be preserved
-		assert.Contains(t, output, "test_placeholder_value123")
+		// allowlisting an opaque credential cannot disable the publication guard
+		assert.NotContains(t, output, "test_placeholder_value123")
 	})
 
 	t.Run("non-allowlisted secrets still redacted", func(t *testing.T) {
@@ -1570,5 +1571,33 @@ func BenchmarkContainsSecrets(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		r.ContainsSecrets(input)
+	}
+}
+
+// Both secret-scanning hot paths read whole raw.jsonl lines, and a single
+// tool-output line runs to megabytes — the size class that decides how long
+// `ox session stop` blocks and what every entry write costs. Measure at that
+// scale rather than the sentence scale the benchmarks above use, and measure
+// both catalogs: they differ by ~190 detectors, so a keyword regression in the
+// gitleaks tiers would be invisible to the pre-push catalog alone.
+func BenchmarkScanForSecrets_MegabyteLine(b *testing.B) {
+	input := strings.Repeat("x", 1024*1024)
+
+	for _, tc := range []struct {
+		name     string
+		redactor *Redactor
+	}{
+		// What scanPaths builds in cmd/ox/prepush_scan.go.
+		{"prepush_catalog", NewRedactor()},
+		// What RawWriter applies to every session entry write.
+		{"production_catalog", NewRedactorWithPatterns(productionCatalog())},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.SetBytes(int64(len(input)))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				tc.redactor.ScanForSecrets(input)
+			}
+		})
 	}
 }

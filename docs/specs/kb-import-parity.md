@@ -6,8 +6,11 @@
 > context (a conversation store), never in a bubble. `ox import --kb` and the
 > `/kb/{id}/recordings` client paths were removed under epic `ox-nsf7`.
 > Retained below for historical context on the import mechanisms and their
-> storage asymmetry; the `--team` document-LFS path described here is
-> unaffected and remains current.
+> storage asymmetry. The `--team` document-LFS path described here remains
+> current for documents only: since 2026-10, team audio and video imports go
+> through `POST …/recordings/upload` → presigned PUT (multipart for large
+> files) → `POST …/recordings/{id}/confirm`, falling back to document-LFS
+> only when the server has no upload route.
 
 **Status:** ~~implemented~~ superseded — CLI surface removed (epic `ox-nsf7`)
 **Audience:** SageOx engineers working on `ox import`, the recordings API client, or Knowledge Bubble ingestion
@@ -20,8 +23,8 @@ Everything from here down is the original (pre-ADR-028) design, preserved
 verbatim as a record of the import mechanisms and their storage asymmetry.
 The `--kb` flag, the recording-file import flow, and the `/kb/{id}/recordings`
 client paths described below **no longer exist**. The only part that remains
-current is the `--team` document-LFS path, whose live documentation is
-`docs/reference/import.mdx`.
+current is the `--team` document-LFS path for non-media files; live
+documentation for `ox import` is `docs/reference/import.mdx`.
 
 ---
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/store"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/bbolt"
 )
@@ -79,6 +80,94 @@ func TestDoIndex_HonorsSelfHealMarker_ForcesFullReindex(t *testing.T) {
 	// the marker clear).
 	commitsAfterSecond := countCommits(t, dataDir)
 	require.Greater(t, commitsAfterSecond, 0, "second index must repopulate commits after wipe")
+}
+
+// TestDoIndex_SuccessClearsDirtyOverlayFailure verifies that either successful
+// indexing mode retires an earlier overlay warning. Both modes rebuild the
+// dirty overlay as part of the completed pipeline, so leaving the old issue in
+// daemon status misreports a healthy index until an unrelated file edit.
+//
+// Failure prevented: a successful `ox code index --full` still leaves
+// dirty_overlay_failed in the status panel indefinitely.
+func TestDoIndex_SuccessClearsDirtyOverlayFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: exercises real git + SQLite + Bleve indexing passes")
+	}
+
+	repoDir := t.TempDir()
+	seedGitRepo(t, repoDir)
+
+	tracker := NewIssueTracker()
+	mgr := NewCodeDBManager(repoDir, codedbTestLogger(), nil)
+	mgr.dataDir = t.TempDir()
+	mgr.SetIssueTracker(tracker)
+
+	initialCtx, initialCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	_, err := mgr.Index(initialCtx, CodeIndexPayload{}, nil)
+	initialCancel()
+	require.NoError(t, err, "initial index must succeed before testing reindex modes")
+
+	t.Run("recent successful overlay", func(t *testing.T) {
+		mgr.mu.Lock()
+		mgr.lastDirtyRefresh = time.Now()
+		mgr.mu.Unlock()
+		tracker.SetIssue(DaemonIssue{
+			Type:     IssueTypeDirtyOverlayFailed,
+			Severity: SeverityWarning,
+			Summary:  "stale dirty overlay failure",
+		})
+
+		indexCtx, indexCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		_, err := mgr.Index(indexCtx, CodeIndexPayload{}, nil)
+		indexCancel()
+		require.NoError(t, err)
+
+		_, found := tracker.GetIssue(IssueTypeDirtyOverlayFailed, "")
+		assert.False(t, found, "recent successful overlay must retire an older failure")
+	})
+
+	mgr.mu.Lock()
+	mgr.lastDirtyRefresh = time.Time{}
+	mgr.mu.Unlock()
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "hello.go"), []byte("package main\nfunc Dirty() {}\n"), 0o600))
+
+	for _, full := range []bool{false, true} {
+		name := "incremental"
+		if full {
+			name = "full"
+		}
+		t.Run(name, func(t *testing.T) {
+			tracker.SetIssue(DaemonIssue{
+				Type:     IssueTypeDirtyOverlayFailed,
+				Severity: SeverityWarning,
+				Summary:  "stale dirty overlay failure",
+			})
+
+			indexCtx, indexCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			_, err := mgr.Index(indexCtx, CodeIndexPayload{Full: full}, nil)
+			indexCancel()
+			require.NoError(t, err)
+
+			_, found := tracker.GetIssue(IssueTypeDirtyOverlayFailed, "")
+			assert.False(t, found, "successful %s index must clear the stale overlay issue", name)
+		})
+	}
+
+	t.Run("remote does not clear local overlay issue", func(t *testing.T) {
+		tracker.SetIssue(DaemonIssue{
+			Type:     IssueTypeDirtyOverlayFailed,
+			Severity: SeverityWarning,
+			Summary:  "local dirty overlay still needs recovery",
+		})
+
+		indexCtx, indexCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		_, err := mgr.Index(indexCtx, CodeIndexPayload{URL: repoDir}, nil)
+		indexCancel()
+		require.NoError(t, err)
+
+		_, found := tracker.GetIssue(IssueTypeDirtyOverlayFailed, "")
+		assert.True(t, found, "remote indexing must not clear a local overlay failure")
+	})
 }
 
 // TestStoreOpen_SelfHealsTransparently_NoDaemonRetryNeeded verifies the
@@ -200,6 +289,42 @@ func TestDoIndex_RestoresMarkersWhenMarkerForcedReindexFails(t *testing.T) {
 	// Marker must still be present so the NEXT freshness pass re-forces --full.
 	require.True(t, store.HasNeedsReindexMarker(dataDir, "code"),
 		"self-heal marker must be restored after failed marker-forced reindex")
+}
+
+// TestDoIndex_MarkerRecoverySurvivesManagerRestart closes the other half of
+// marker restoration: a failed full rebuild is not useful unless a fresh daemon
+// instance can consume the restored marker, repopulate the index, and clear it.
+// A canceled context is the deterministic stand-in for shutdown/network loss
+// during the first pass; the second manager models daemon restart.
+func TestDoIndex_MarkerRecoverySurvivesManagerRestart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: exercises two real git + SQLite + Bleve indexing passes")
+	}
+
+	repoDir := t.TempDir()
+	seedGitRepo(t, repoDir)
+	dataDir := t.TempDir()
+	require.NoError(t, writeMarkerForTest(dataDir, "code"))
+
+	first := NewCodeDBManager(repoDir, codedbTestLogger(), nil)
+	first.dataDir = dataDir
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := first.Index(canceled, CodeIndexPayload{}, nil)
+	require.Error(t, err, "canceled rebuild must not report success")
+	require.True(t, store.HasNeedsReindexMarker(dataDir, "code"),
+		"failed pass must restore the durable retry marker")
+
+	second := NewCodeDBManager(repoDir, codedbTestLogger(), nil)
+	second.dataDir = dataDir
+	ctx, stop := context.WithTimeout(context.Background(), 60*time.Second)
+	defer stop()
+	_, err = second.Index(ctx, CodeIndexPayload{}, nil)
+	require.NoError(t, err, "fresh manager must recover on retry")
+	require.False(t, store.HasNeedsReindexMarker(dataDir, "code"),
+		"successful recovery must consume the retry marker")
+	assert.Greater(t, countCommits(t, dataDir), 0,
+		"restarted manager must repopulate the index, not merely clear the marker")
 }
 
 // TestIsIndexing_ReflectsFlag verifies the IsIndexing accessor used by

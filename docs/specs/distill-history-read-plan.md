@@ -1,6 +1,8 @@
 # `ox distill history` Read Commands — Implementation Plan
 
-Status: plan
+> **Superseded — 2026-09-09:** `ox distill history` and its implementation have been removed. This plan is retained as historical context; its commands, file paths, and implementation steps no longer apply.
+
+Status: superseded
 Owner: tooling-engineer
 Scope: `ox distill history list`, `ox distill history show`, `ox distill history since`
 Spec: [`team-memory-journal.md`](team-memory-journal.md) §§3–6

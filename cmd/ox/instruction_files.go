@@ -40,11 +40,33 @@ const (
 
 // Plaintext equivalents of the markdown markers for files that don't support HTML comments.
 const (
-	PlaintextPrimeCheckBlock  = "# ox:prime-check\n# BLOCKING: Run `ox agent prime` NOW before ANY other action.\n"
+	PlaintextPrimeCheckBlock  = "# ox:prime-check\n# Run `ox agent prime` at session start (and after a compaction or context clear) to load SageOx team context; it's fine to read the user's request first.\n"
 	PlaintextPrimeLine        = "# ox:prime — Run SageOx `ox agent prime` on session start, after compaction, or clear. (DO NOT REMOVE)"
 	PlaintextPrimeMarker      = "# ox:prime —"
 	PlaintextPrimeCheckMarker = "# ox:prime-check"
 )
+
+// legacyPlaintextPrimeCheckBodies are prior PlaintextPrimeCheckBlock body lines (the line
+// following PlaintextPrimeCheckMarker) that the self-heal refreshes in place on existing files.
+var legacyPlaintextPrimeCheckBodies = []string{
+	"# BLOCKING: Run `ox agent prime` NOW before ANY other action.",
+}
+
+// currentPlaintextPrimeCheckBody returns the current PlaintextPrimeCheckBlock body line
+// (without the marker line or the trailing newline).
+func currentPlaintextPrimeCheckBody() string {
+	body := strings.TrimPrefix(PlaintextPrimeCheckBlock, PlaintextPrimeCheckMarker+"\n")
+	return strings.TrimRight(body, "\n")
+}
+
+// bodiesForFormat returns the current check-block body and the legacy bodies to refresh for a
+// marker format — the inputs to refreshStaleCheckBody.
+func bodiesForFormat(format string) (newBody string, legacy []string) {
+	if format == markerFormatPlaintext {
+		return currentPlaintextPrimeCheckBody(), legacyPlaintextPrimeCheckBodies
+	}
+	return currentPrimeCheckBody(), legacyPrimeCheckBodies
+}
 
 // InstructionFileSpec describes how a coding agent reads project-level instructions.
 type InstructionFileSpec struct {
@@ -342,11 +364,17 @@ func ensureInstructionFileMarker(filePath, format string, exists bool) (injectSt
 
 		hasHeader := strings.Contains(s, checkMarker)
 		hasFooter := strings.Contains(s, primeMarker)
-		if hasHeader && hasFooter {
-			return alreadyPresent, nil
-		}
 
 		modified := s
+
+		// refresh a stale check-block body in place (anchored to checkMarker), so existing
+		// files migrate off the old imperative wording — not just newly-created ones.
+		if hasHeader {
+			newBody, legacy := bodiesForFormat(format)
+			if refreshed, ok := refreshStaleCheckBody(s, checkMarker, newBody, legacy); ok {
+				modified = refreshed
+			}
+		}
 
 		if !hasHeader {
 			modified = headerBlock + "\n" + modified
@@ -356,9 +384,19 @@ func ensureInstructionFileMarker(filePath, format string, exists bool) (injectSt
 			modified = strings.TrimRight(modified, "\n\t ") + "\n\n" + footerLine + "\n"
 		}
 
+		if modified == s {
+			return alreadyPresent, nil // both markers present and the body already current
+		}
+
 		// safety: modified content must be >= 50% of original (only meaningful for large files)
 		if len(modified) < len(s)/2 && len(s) > 100 {
 			return 0, fmt.Errorf("safety check failed: modified content (%d bytes) is less than half of original (%d bytes)", len(modified), len(s))
+		}
+
+		// guard against a lost update: if the file changed since we read it (a concurrent
+		// editor save), skip rather than clobber the newer content — the next reconcile retries.
+		if cur, rerr := os.ReadFile(filePath); rerr != nil || string(cur) != s {
+			return alreadyPresent, nil
 		}
 
 		// preserve the existing file's permission bits — atomic rename would

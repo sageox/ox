@@ -211,6 +211,48 @@ func TestExtractMarkdown_DropsUnsafeLinkSchemes(t *testing.T) {
 	}
 }
 
+// TestExtractMarkdown_FencesOnlyCollapsedDetails pins the boolean-attribute
+// rule for <details>. Only a COLLAPSED block is hidden implementation detail
+// worth fencing; an expanded one is prose the reader can see on the authored
+// page, so it must reach derived markdown unfenced and keep counting as the
+// plan's own content. Failure prevented: a plan whose visible <details open>
+// content is fenced, then stripped by stripDetails before cue scoring, so a
+// real mockup/diagram expectation is silently missed.
+func TestExtractMarkdown_FencesOnlyCollapsedDetails(t *testing.T) {
+	tests := []struct {
+		name      string
+		openAttr  string
+		wantFence bool
+	}{
+		{"collapsed appendix is fenced", "", true},
+		{"open block is not fenced", " open", false},
+		{"open with empty value is not fenced", ` open=""`, false},
+		// HTML boolean attributes have no false form: the VALUE is ignored and
+		// only presence counts, so open="false" still renders expanded.
+		{`open="false" is still open`, ` open="false"`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			page := `<html><body><h1>Plan</h1><p>Body prose.</p>` +
+				`<details` + tt.openAttr + `><summary>Implementation notes</summary>` +
+				`<p>one screenshot per screen</p></details></body></html>`
+
+			md := ExtractMarkdown([]byte(page))
+
+			// Fencing labels content, it never deletes it — the prose must
+			// survive on both branches.
+			if !strings.Contains(md, "one screenshot per screen") {
+				t.Fatalf("details prose lost from derived markdown\n--- output ---\n%s", md)
+			}
+			gotFence := strings.Contains(md, DetailsOpenMarker) && strings.Contains(md, DetailsCloseMarker)
+			if gotFence != tt.wantFence {
+				t.Errorf("fenced = %v, want %v\n--- output ---\n%s", gotFence, tt.wantFence, md)
+			}
+		})
+	}
+}
+
 // hasBlock reports whether md contains a block (a "\n\n"-delimited unit)
 // whose trimmed content equals want exactly — stronger than strings.Contains
 // alone, which would also pass if want only ever showed up as a substring of

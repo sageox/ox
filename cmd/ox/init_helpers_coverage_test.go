@@ -188,15 +188,31 @@ func TestInitTracker_TrackForceStage(t *testing.T) {
 	assert.Len(t, tracker.forceStage, 2)
 }
 
+// TestInitTracker_RollbackEmpty verifies a rollback that tracked nothing removes
+// nothing, including on a fresh init where directory removal is armed.
+//
+// Failure prevented: rollback deletes createdDirs when isFreshInit is set. If
+// an empty tracker fell through to removing its root, a failed init would take
+// the user's existing directory contents with it.
 func TestInitTracker_RollbackEmpty(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "pre-existing.txt")
+	if err := os.WriteFile(sentinel, []byte("keep me\n"), 0o644); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
 	tracker := newInitTracker(dir)
 	tracker.isFreshInit = true
-
-	// rollback with nothing tracked should not panic
 	tracker.rollback(true)
+
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Errorf("rollback removed an untracked file: %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("rollback removed the tracker root: %v", err)
+	}
 }
 
 func TestDetectRepoMarkersForEndpoint_Coverage_NonexistentDir(t *testing.T) {

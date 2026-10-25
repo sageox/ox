@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sageox.ai/schemas/attest/v1/observations.schema.json",
+  "title": "SageOx Attest evidence observations",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "evidence", "counts"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "evidence": {"type": "array", "items": {"$ref": "#/$defs/observation"}},
+    "counts": {"$ref": "#/$defs/counts"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "observation": {
+      "type": "object", "additionalProperties": false, "required": ["path", "status"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1}, "status": {"enum": ["available", "missing", "invalid"]},
+        "reason": {"type": "string", "minLength": 1}, "expected_sha256": {"$ref": "#/$defs/sha256"},
+        "observed_sha256": {"$ref": "#/$defs/sha256"}, "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "counts": {
+      "$comment": "Semantic validation must recompute each status count from evidence and require referenced to equal evidence.length; JSON Schema cannot compare these aggregate values.",
+      "type": "object", "additionalProperties": false, "required": ["referenced", "available", "missing", "invalid"],
+      "properties": {
+        "referenced": {"type": "integer", "minimum": 0}, "available": {"type": "integer", "minimum": 0},
+        "missing": {"type": "integer", "minimum": 0}, "invalid": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

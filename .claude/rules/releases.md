@@ -23,8 +23,9 @@ make bump-version NEW_VERSION=0.10.0
 
 1. **Agent prepares release notes** — update `CHANGELOG.md`. Follow Release Notes Guidelines below. NO commit hashes. NO auto-generated changelogs.
 2. **Agent asks human for version confirmation** — always ask. Default: bump middle number.
-3. **Human creates draft release** at github.com/sageox/ox/releases/new (tag: `v0.X.0`)
-4. **Human publishes** — automation handles binaries and signing
+3. **Agent creates and pushes the approved tag, then the human creates and reviews its draft release** at github.com/sageox/ox/releases/new (tag: `v0.X.0`). Raw tag creation does not publish.
+4. **Agent explicitly dispatches `release.yml` for the reviewed draft** — the workflow verifies required tiers, signs and uploads binaries, then publishes the existing draft. Never publish it manually; tag creation alone does not authorize publication. A draft published by hand starts no build and, being immutable once published, can never get binaries (v0.17.1).
+5. **Agent publishes the same notes to https://sageox.ai/changelog** under the CLI surface, authored with the internal marketing repo's `changelog-entry` skill. Last, because the entry links the published release. A GitHub release alone reaches only people watching the repo; omit anything gated off by default.
 
 ## Release Notes Guidelines
 
@@ -95,10 +96,13 @@ internal architecture, or create tags without approval.
 
 ALL test tiers must pass before release:
 ```bash
-make test-all          # all unit tests including expensive ones
-make test-slow         # tests requiring real ox binary
-make test-integration  # sageox/ox-test-harness repo
+make lint
+make test-release  # full + ratchet + slow + acceptance + digital twins
 ```
+
+The external `sageox/ox-test-harness` supplies compatibility evidence, but is
+not an enforceable gate until it attests current-source binary provenance
+(`ox-ilrr.4`).
 
 E2E tests MUST use real agent CLI instances. Never simulate agent entries or use fake JSONL.
 

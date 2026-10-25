@@ -134,7 +134,7 @@ func TestRunPlanStatusOnDir_JSONShape(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	if err := runPlanStatusOnDir(cmd, dir, "Test Topic", "test-slug", true); err != nil {
+	if err := runPlanStatusOnDir(cmd, dir, "Test Topic", "test-slug", "", true); err != nil {
 		t.Fatalf("runPlanStatusOnDir: %v", err)
 	}
 
@@ -165,7 +165,7 @@ func TestRunPlanStatusOnDir_HumanTimeline(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	if err := runPlanStatusOnDir(cmd, dir, "Test Topic", "test-slug", false); err != nil {
+	if err := runPlanStatusOnDir(cmd, dir, "Test Topic", "test-slug", "", false); err != nil {
 		t.Fatalf("runPlanStatusOnDir: %v", err)
 	}
 

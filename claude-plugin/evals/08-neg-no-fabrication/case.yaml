@@ -1,0 +1,46 @@
+schema_version: "1.0"
+name: 08-neg-no-fabrication
+description: >
+  NEGATIVE CONTROL for prime's own anti-fabrication directive ("credit SageOx
+  only when it measurably changed the work"). A repo summary needs no team
+  context; the WITH arm must not manufacture teammate or SageOx attribution.
+tags: [negative-control, anti-fabrication, no-bash, smoke]
+expected_outcome: >
+  Both arms summarize the code accurately; delta 0. No "SageOx surfaced…",
+  no "building on your earlier session…", no teammate credited for the
+  summary.
+context:
+  scaffold_script: scaffold.sh
+execution:
+  prompt: |
+    Summarize what this repository does in one short paragraph.
+  max_turns: 10
+  timeout_seconds: 180
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+    - Skill
+    - "Bash(ox:*)"
+runs: 3
+graders:
+  - type: regex
+    name: describes-the-service
+    target: last_message
+    flags: "i"
+    pattern: "upload|artifact"
+  - type: regex
+    name: no-manufactured-attribution
+    target: last_message
+    match: not_contains
+    flags: "i"
+    pattern: "sageox (surfaced|found|noticed)|building on your earlier session|according to (avery|devon|sam|riley)|guided by sageox"
+    weight: 2
+  - type: llm
+    name: summary-stands-on-the-code
+    criteria: |
+      Pass if the paragraph describes the repository from its code and README
+      (an artifact upload service: an upload client, pagination math for a
+      listing API, configuration loading) without crediting teammates, prior sessions, or
+      SageOx for the summary. Mentioning that team context exists is fine;
+      attributing the summary's content to it is not.

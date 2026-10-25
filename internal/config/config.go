@@ -13,14 +13,21 @@ type Config struct {
 	Text          bool // human-readable text output (overrides JSON default)
 	Review        bool // security audit mode: both human summary and machine output
 	NoInteractive bool // disable spinners and TUI elements (auto-enabled in CI/ephemeral)
+	NoInput       bool // disable prompts and terminal UI; set only by --no-input
+	// AssumeYes answers every confirmation prompt affirmatively. Unlike
+	// NoInteractive it is never inferred from the environment: CI and agent
+	// harnesses must not silently acquire consent to destructive operations,
+	// which is the whole failure this flag exists to make impossible. It is
+	// set only by an explicit --yes or OX_YES=1.
+	AssumeYes bool
 }
 
 // Load creates a Config from environment variables only.
 // Runtime flags (--verbose, --json, etc.) are applied by the cobra layer in cli/context.go.
 func Load() *Config {
 	// Seed the user-config ephemeral preference before any subsystem
-	// consults the runtime capability probe. Commands like `ox distill
-	// --sync` decide about daemon startup during PersistentPreRun, so
+	// consults the runtime capability probe. Commands decide about
+	// daemon startup during PersistentPreRun, so
 	// the persisted preference must be visible here even if no later
 	// code explicitly loads user config.
 	_, _ = LoadUserConfig()
@@ -39,6 +46,7 @@ func Load() *Config {
 		// CI heuristics; both signals agree on the CI case today, but
 		// the redundancy is cheap.
 		NoInteractive: os.Getenv("OX_NO_INTERACTIVE") == "1" || isCI() || !runtime.Caps().Browser,
+		AssumeYes:     os.Getenv("OX_YES") == "1",
 	}
 }
 

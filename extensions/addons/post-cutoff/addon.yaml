@@ -1,0 +1,18 @@
+# Add-on manifest — the small set of facts internal/addons/catalog.go cannot
+# derive from the tree on disk. YAML, not JSON: internal/adapter/registry.yaml
+# already embeds and parses YAML in this binary via gopkg.in/yaml.v3, so this
+# format adds no new dependency and no second parser to maintain.
+#
+# Deliberately NOT listed here: skills, rules, kinds, has_scripts. Those are
+# derived by walking this add-on's skills/ and rules/ subtrees at resolve
+# time — a second hand-maintained list of the same fact is the exact defect
+# class ADR-032 removed when it deleted Bundle.SkillIDs-style duplication.
+name: post-cutoff
+version: 1.0.0
+summary: >-
+  What THIS TEAM has adopted or ruled on that postdates your training
+  cutoff — a small, human-curated set, not a watchlist. Read BEFORE
+  choosing an approach, picking a model, designing a
+  classifier/router/gate, or evaluating a vendor. Also the procedure
+  for proposing and retiring entries. Individual briefs ship as their
+  own add-ons — see post-cutoff-jev.

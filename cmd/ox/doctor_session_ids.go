@@ -7,10 +7,12 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 )
 
@@ -200,30 +202,30 @@ func fixLegacySessionIDs(ledgerPath string, sessionNames []string) checkResult {
 	return PassedCheck("Legacy session IDs", msg)
 }
 
-// commitAndPushSessionIDBackfill stages every backfilled meta.json in one
-// commit. Uses --sparse to satisfy git's sparse-checkout invariant per
-// .claude/rules/daemon-git.md.
+// commitAndPushSessionIDBackfill commits the backfilled meta.json files and
+// nothing else, so a staged plan edit stays staged (#1442). Uses --sparse to
+// satisfy git's sparse-checkout invariant per .claude/rules/daemon-git.md.
 func commitAndPushSessionIDBackfill(ledgerPath string, sessionNames []string) error {
 	if len(sessionNames) == 0 {
 		return nil
 	}
 
-	sessionsDir := filepath.Join(ledgerPath, "sessions")
-	addArgs := []string{"-C", ledgerPath, "add", "--sparse"}
+	metaPaths := make([]string, 0, len(sessionNames))
 	for _, name := range sessionNames {
-		addArgs = append(addArgs, filepath.Join(sessionsDir, name, "meta.json"))
+		metaPaths = append(metaPaths, path.Join("sessions", name, "meta.json"))
 	}
-	if output, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
-		return fmt.Errorf("git add: %s: %w", string(output), err)
-	}
-
+	// CommitLedgerSnapshot requires the repo lock from the add through the
+	// commit; pushLedger takes it again itself (sageox/ox#1541)
 	commitMsg := fmt.Sprintf("session: backfill stable session_id for %d legacy session(s)", len(sessionNames))
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(output), "nothing to commit") {
-			return nil
+	if err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		addArgs := append([]string{"-C", ledgerPath, "add", "--sparse", "--"}, metaPaths...)
+		if output, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
+			return fmt.Errorf("git add: %s: %w", string(output), err)
 		}
-		return fmt.Errorf("git commit: %s: %w", string(output), err)
+		_, err := gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, commitMsg, metaPaths...)
+		return err
+	}); err != nil {
+		return err
 	}
 
 	return pushLedger(context.Background(), ledgerPath)

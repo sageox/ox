@@ -1,18 +1,30 @@
 package session
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/sageox/agentx"
+	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/sessionid"
+	"github.com/sageox/ox/internal/trace/model"
 )
 
 var (
@@ -22,11 +34,52 @@ var (
 	// ErrAlreadyRecording is returned when start is called but already recording
 	ErrAlreadyRecording = errors.New("already recording a session")
 
+	// ErrQuarantinedSessionPath is returned when a new recording would land in
+	// the session folder of a quarantined one (session names are minute-granular).
+	// The quarantined recording is left untouched and the start is refused.
+	ErrQuarantinedSessionPath = errors.New("a quarantined recording occupies this session folder")
+
+	// ErrHeldSessionPath is returned when a new recording would land in the
+	// folder of a session held on this machine (session_publishing: manual;
+	// names are minute-granular, so a /clear in the same minute collides).
+	// Starting there would truncate the held transcript and publish the result.
+	ErrHeldSessionPath = errors.New("a held session occupies this session folder")
+
 	// ErrNoLedger is returned when session recording is attempted but no ledger is configured
 	ErrNoLedger = errors.New("no ledger configured for this project")
+
+	// ErrRecordingChanged is returned when the recording at a session path is no
+	// longer the one the caller loaded. Session names are minute-granular, so a
+	// recording restarted within the minute reuses the path of the one it replaced.
+	ErrRecordingChanged = errors.New("recording changed")
 )
 
 const recordingFile = ".recording.json"
+
+// writeRecordingStateAtomically is a seam for the state persistence failure
+// contract. It is deliberately kept beside the state writer rather than the
+// callers: a failed checkpoint must be observable by every capture path.
+var writeRecordingStateAtomically = fileutil.AtomicWriteJSON
+
+// syncRecordingStateDirectory makes a renamed Cursor checkpoint durable before
+// its raw append journal can be removed. Keep errors observable to capture.
+var syncRecordingStateDirectory = func(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
+func syncCursorRecordingDirectory(state *RecordingState) error {
+	if state.AdapterName == "cursor" {
+		if err := syncRecordingStateDirectory(state.SessionPath); err != nil {
+			return fmt.Errorf("sync Cursor recording directory: %w", err)
+		}
+	}
+	return nil
+}
 
 // LifecycleAction is the durable timeline action recorded in RecordingState.Lifecycle.
 // See ADR-019 (session entity lifecycle).
@@ -61,7 +114,21 @@ type LifecycleEvent struct {
 // RecordingState tracks an active recording session.
 // Stored in sessions/<session-name>/.recording.json
 type RecordingState struct {
-	AgentID string `json:"agent_id"`
+	// Trace freezes consent and byte windows at recording start; nil preserves
+	// legacy and non-Claude sessions without opting them into trace uploads.
+	Trace   *model.Capture `json:"trace_capture,omitempty"`
+	AgentID string         `json:"agent_id"`
+	// AgentSessionID identifies the native session independently of its file's
+	// modification time, including when the daemon retries discovery later.
+	// It is the CURRENT native id (the one adapters look up by); the full
+	// history of ids this recording has seen lives in NativeSessions.
+	AgentSessionID string `json:"agent_session_id,omitempty"`
+	// NativeSessions is every native coding-agent session id this recording
+	// has observed, appended on each SessionStart via RecordNativeSession and
+	// folded into meta.json at finalize. See lfs.SessionMeta.NativeSessions
+	// for why it is a list. omitempty so older .recording.json files
+	// round-trip unchanged.
+	NativeSessions []NativeSession `json:"native_sessions,omitempty"`
 	// SessionID is the durable ses_<UUIDv7> recording identity, minted once at
 	// StartRecording and reused verbatim by every finalize path (stop, recover,
 	// daemon). It exists from t=0 so conversation URLs (/c/<ses_id>) circulated
@@ -69,19 +136,23 @@ type RecordingState struct {
 	// keep resolving after upload. omitempty: recordings started under an
 	// older binary round-trip with an empty ID and fall back to name-based
 	// URLs.
-	SessionID        string    `json:"session_id,omitempty"`
-	StartedAt        time.Time `json:"started_at"`
-	AdapterName      string    `json:"adapter_name"`
-	SessionFile      string    `json:"session_file"` // source file from adapter (Claude Code JSONL)
-	OutputFile       string    `json:"output_file"`  // output file being recorded
-	SessionPath      string    `json:"session_path"` // path to session folder
-	Title            string    `json:"title,omitempty"`
-	EntryCount       int       `json:"entry_count"`
-	LastReminderSeq  int       `json:"last_reminder_seq"`
-	ReminderInterval int       `json:"reminder_interval"`
-	FilterMode       string    `json:"filter_mode,omitempty"`    // "infra" or "all" - controls event filtering
-	WorkspacePath    string    `json:"workspace_path,omitempty"` // git root / project directory
-	Branch           string    `json:"branch,omitempty"`         // git branch at recording start
+	SessionID string `json:"session_id,omitempty"`
+	// ContinuedFromSessionID links this recording to the prior recording made
+	// for the same native coding-agent session after SessionEnd finalized it.
+	// It is a durable ses_<UUID> identity, not a path or agent-instance ID.
+	ContinuedFromSessionID string    `json:"continued_from_session_id,omitempty"`
+	StartedAt              time.Time `json:"started_at"`
+	AdapterName            string    `json:"adapter_name"`
+	SessionFile            string    `json:"session_file"` // source file from adapter (Claude Code JSONL)
+	OutputFile             string    `json:"output_file"`  // output file being recorded
+	SessionPath            string    `json:"session_path"` // path to session folder
+	Title                  string    `json:"title,omitempty"`
+	EntryCount             int       `json:"entry_count"`
+	LastReminderSeq        int       `json:"last_reminder_seq"`
+	ReminderInterval       int       `json:"reminder_interval"`
+	FilterMode             string    `json:"filter_mode,omitempty"`    // "infra" or "all" - controls event filtering
+	WorkspacePath          string    `json:"workspace_path,omitempty"` // git root / project directory
+	Branch                 string    `json:"branch,omitempty"`         // git branch at recording start
 
 	// Parent-child session tracking for subagent workflows
 	// When a parent spawns subagents, each subagent can report its session
@@ -93,13 +164,43 @@ type RecordingState struct {
 	StopIncomplete bool   `json:"stop_incomplete,omitempty"` // set when stop returned retry guidance (empty file)
 	Model          string `json:"model,omitempty"`           // LLM model for generic adapters where ReadMetadata returns nil
 	ParentPID      int    `json:"parent_pid,omitempty"`      // parent agent process ID for liveness detection
-	SourceOffset   int64  `json:"source_offset,omitempty"`   // byte offset in source file for incremental reading
-	StartOffset    int64  `json:"start_offset,omitempty"`    // source file byte offset when recording started (entries before this are pre-session)
-	Origin         string `json:"origin,omitempty"`          // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
-	CacheDir       string `json:"cache_dir,omitempty"`       // cache directory when recording was created (diagnostic breadcrumb)
+	// ParentStartTime is proc.StartTime(ParentPID), stored only under the
+	// disposable_machine setting (see ParentStartTimeOf); 0 otherwise. This
+	// file outlives the machine, and on the next one ParentPID can name an
+	// unrelated process.
+	ParentStartTime int64 `json:"parent_start_time,omitempty"`
+	SourceOffset    int64 `json:"source_offset,omitempty"` // byte offset in source file for incremental reading
+	// Preserve a rejected native source and captured prefix for manual ownership
+	// review, but do not keep retrying or publish a mixed-repository session.
+	SourceRejected bool `json:"source_rejected,omitempty"`
+	// Committed with SourceOffset, so crash replay restores the same privacy state.
+	CommandRedactionVersion  int               `json:"command_redaction_version,omitempty"`
+	PendingCommandRedactions map[string]string `json:"pending_command_redactions,omitempty"`
+	StartOffset              int64             `json:"start_offset,omitempty"` // source file byte offset when recording started (entries before this are pre-session)
+	// StartOffsetKnown distinguishes an intentional byte-zero boundary from
+	// older recordings whose zero offset was never bound to a source.
+	StartOffsetKnown bool `json:"start_offset_known,omitempty"`
+	// SourcePrefixSHA256 is the caller-validated hash of source bytes through
+	// SourceOffset. A known-zero pending source carries SHA-256 of empty bytes.
+	SourcePrefixSHA256 string `json:"source_prefix_sha256,omitempty"`
+	Origin             string `json:"origin,omitempty"`    // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
+	CacheDir           string `json:"cache_dir,omitempty"` // cache directory when recording was created (diagnostic breadcrumb)
+
+	// PublishingMode is session_publishing as the CLI resolved it at start
+	// (env > user > project > team, contract D13). Crash recovery reads it to
+	// hold a manual-mode session, because the process that recovers it — the
+	// daemon, doctor, or a later recover — cannot see the CLI's environment.
+	PublishingMode string `json:"publishing_mode,omitempty"`
 
 	WatchMode string     `json:"watch_mode,omitempty"` // how entries are captured: "hook" (CLI-driven) or "tail" (daemon-driven)
 	StoppedAt *time.Time `json:"stopped_at,omitempty"` // set by ox session stop to signal daemon to finalize
+	// CursorFinalDrainPending keeps an ended native recording recoverable until
+	// its exported final turn is complete. It never permits automatic restart.
+	CursorFinalDrainPending bool `json:"cursor_final_drain_pending,omitempty"`
+	// Cursor prompt hooks can precede JSONL export. Count unique submissions
+	// against native terminal rows so an older terminal cannot finalize them.
+	CursorPromptGenerations []string `json:"cursor_prompt_generations,omitempty"`
+	CursorExpectedTurns     int      `json:"cursor_expected_turns,omitempty"`
 
 	// ADR-020 session pause/resume fields. Lifecycle is the durable timeline of
 	// session-entity transitions and is the source of truth for which raw.jsonl
@@ -203,11 +304,39 @@ func (r *RecordingState) Duration() time.Duration {
 // IsAgentAlive checks if the recording agent's parent process is still running.
 // Uses kill(pid, 0) for instant liveness detection.
 // Returns true if no PID is recorded (assume alive for backward compat).
+//
+// This is the OPTIMISTIC predicate — when it cannot tell, it assumes alive.
+// isAbandoned (classify.go) is its pessimistic twin: a PID-less marker older
+// than ghostHeuristicAge counts as abandoned. Reach for isAbandoned anywhere
+// treating a crash tombstone as live would disable a repair forever; reach for
+// IsAgentAlive where acting on a session that is actually alive costs more than
+// waiting one more cycle.
 func (r *RecordingState) IsAgentAlive() bool {
 	if r == nil || r.ParentPID <= 0 {
 		return true // no PID recorded — assume alive
 	}
-	return isPIDAlive(r.ParentPID)
+	return isPIDAlive(r.ParentPID) && !proc.IsReused(r.ParentPID, r.ParentStartTime)
+}
+
+// ParentStartTimeOf returns the value to store as ParentStartTime for pid: its
+// start time under the disposable_machine setting, otherwise 0, which leaves
+// liveness checks on the PID alone.
+func ParentStartTimeOf(pid int) int64 {
+	if !config.DisposableMachineEnabled() {
+		return 0
+	}
+	start, _ := proc.StartTime(pid)
+	return start
+}
+
+// AmpStartsAtPrompt reports whether an Amp recording starts at the sidecar
+// line of the prompt that began it (sageox/ox#1318). The ox-bridge plugin
+// writes that prompt before the model runs `ox agent prime`, so StartOffset
+// alone bounds such a recording: dropping its entries older than StartedAt
+// would drop the prompt. Amp recordings from before prime set the boundary
+// keep the StartedAt filter.
+func (r *RecordingState) AmpStartsAtPrompt() bool {
+	return r.AdapterName == "amp" && r.StartOffsetKnown && r.SessionFile != ""
 }
 
 // IsSubagent returns true if this session was spawned by a parent agent.
@@ -219,12 +348,117 @@ func (r *RecordingState) IsSubagent() bool {
 	return r.ParentSessionPath != "" || r.Origin == "subagent"
 }
 
+// NativeSession is the per-recording native session id record. Defined in
+// lfs so meta.json and the raw.jsonl header share one type; aliased here so
+// recording-side code reads naturally.
+type NativeSession = lfs.NativeSession
+
+// RecordNativeSession notes that the agent reported native session id at
+// time at (source is the agent's SessionStart reason, or "" when it gave
+// none). Dedups by id — a repeat sighting advances LastSeen — and makes id
+// the current AgentSessionID so adapter lookups follow the agent across a
+// /clear that re-primes into this same recording. Empty ids are a no-op:
+// agents without a native id record an empty list, never an error.
+func (r *RecordingState) RecordNativeSession(id, source string, at time.Time) {
+	if r == nil || id == "" {
+		return
+	}
+	previousCount := len(r.NativeSessions)
+	r.NativeSessions = lfs.RecordNativeSession(r.NativeSessions, id, source, at)
+	r.AgentSessionID = id
+	if len(r.NativeSessions) > previousCount {
+		r.RecordTraceBoundary("native-session", at)
+	}
+}
+
+// ReadRecordingStateFile reads the .recording.json inside sessionDir. Unlike
+// LoadRecordingState* it does not search — it is for callers that already
+// hold a session directory (the daemon's finalize path) and want the state
+// only if it is still there. Returns nil, nil when the file does not exist.
+func ReadRecordingStateFile(sessionDir string) (*RecordingState, error) {
+	statePath := recordingStatePath(sessionDir)
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read recording state file=%s: %w", statePath, err)
+	}
+	state, err := ParseRecordingState(statePath, data)
+	if err != nil {
+		return nil, fmt.Errorf("parse recording state file=%s: %w", statePath, err)
+	}
+	return state, nil
+}
+
+// recordingRepairLockTimeout bounds how long a reader waits to self-repair a
+// marker; repair is best effort, so a busy writer just means the next read retries.
+const recordingRepairLockTimeout = 250 * time.Millisecond
+
+// decodeRecordingState decodes the first complete JSON object in data and
+// reports whether non-whitespace bytes follow it. Older ox versions overwrote
+// the marker in place, leaving the tail of a longer document after a shorter one.
+func decodeRecordingState(data []byte) (state *RecordingState, hasTrailing bool, err error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	state = &RecordingState{}
+	if err := dec.Decode(state); err != nil {
+		return nil, false, err
+	}
+	return state, len(bytes.TrimSpace(data[dec.InputOffset():])) > 0, nil
+}
+
+// ParseRecordingState parses the contents of the .recording.json at path.
+// Trailing bytes after the first complete object are ignored, and the file is
+// rewritten atomically so the next read is clean. Repair never fails the read.
+func ParseRecordingState(path string, data []byte) (*RecordingState, error) {
+	state, hasTrailing, err := decodeRecordingState(data)
+	if err != nil {
+		return nil, err
+	}
+	if hasTrailing {
+		repairRecordingState(path)
+	}
+	return state, nil
+}
+
+// repairRecordingState rewrites a marker that carries a stale tail. It re-reads
+// under the state lock so a concurrent writer's newer state is never replaced.
+func repairRecordingState(path string) {
+	err := fileutil.WithFileLockTimeout(context.Background(), path, recordingRepairLockTimeout, func() error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		state, hasTrailing, err := decodeRecordingState(data)
+		if err != nil || !hasTrailing {
+			return err
+		}
+		if err := fileutil.AtomicWriteJSON(path, state, 0600); err != nil {
+			return err
+		}
+		slog.Info("repaired recording state with trailing bytes", "path", path)
+		return nil
+	})
+	if err != nil {
+		slog.Debug("could not repair recording state", "path", path, "err", err)
+	}
+}
+
 // recordingStatePath returns the path to .recording.json for the given session folder.
 func recordingStatePath(sessionPath string) string {
 	return filepath.Join(sessionPath, recordingFile)
 }
 
 // SaveRecordingState persists recording state to the session folder.
+//
+// This is a whole-file write of the caller's copy and takes no lock, so it is
+// for creating a recording or writing a fresh copy under its already-held
+// state lock only. Once a recording is live, hooks and the watcher commit the
+// capture cursor and the pending credential-redaction checkpoint
+// under the state lock; saving a copy loaded before such a commit silently
+// reverts both -- the cursor regresses and a pending redaction is forgotten, so
+// the matching credential output is written unredacted. Change a live recording
+// through UpdateRecordingStateAt / UpdateRecordingStateForAgent instead.
 func SaveRecordingState(projectRoot string, state *RecordingState) error {
 	if projectRoot == "" {
 		return fmt.Errorf("%w: project root", ErrEmptyPath)
@@ -241,18 +475,15 @@ func SaveRecordingState(projectRoot string, state *RecordingState) error {
 		return fmt.Errorf("create session dir=%s: %w", state.SessionPath, err)
 	}
 
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal recording state: %w", err)
-	}
-
 	// TODO(server-side): move to server-side for MVP+1; client should not write to ledger directly.
 	statePath := recordingStatePath(state.SessionPath)
-	if err := os.WriteFile(statePath, data, 0600); err != nil {
+	// Publish a complete snapshot on a new inode. Concurrent in-place writes
+	// can otherwise leave the tail of a longer JSON object after a shorter one.
+	if err := writeRecordingStateAtomically(statePath, state, 0600); err != nil {
 		return fmt.Errorf("write recording state file=%s: %w", statePath, err)
 	}
 
-	return nil
+	return syncCursorRecordingDirectory(state)
 }
 
 // LoadRecordingState loads active recording state by searching for .recording.json
@@ -280,33 +511,45 @@ func LoadRecordingState(projectRoot string) (*RecordingState, error) {
 				continue // no .recording.json in this session folder
 			}
 
-			var state RecordingState
-			if err := json.Unmarshal(data, &state); err != nil {
+			state, err := ParseRecordingState(recordingPath, data)
+			if err != nil {
 				continue // invalid JSON, skip
 			}
+			if state.SourceRejected {
+				continue // held for review, not recording
+			}
 
-			return &state, nil
+			return state, nil
 		}
 	}
 
 	return nil, nil // no recording state found
 }
 
-// LoadAllRecordingStates returns all active recording states by searching for
-// .recording.json in session folders. Unlike LoadRecordingState which returns
-// only the first match, this returns all concurrent recordings (e.g., from
-// multiple worktrees or agents).
-func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
+// walkRecordingStates decodes every .recording.json under the project's session
+// search paths, deduplicating by canonical file path, and hands each decoded
+// state to visit. Returning false from visit stops the walk immediately.
+//
+// strict decides what an unreadable or unparseable marker means, and the two
+// answers are both correct for their caller. A lenient walk is enumerating
+// sessions to report on, so one corrupt file must never hide every other
+// recording. A strict walk is answering "does a live coworker own this
+// repository right now", and has to fail closed: a marker it cannot read might
+// belong to a session that is reading these very files, and converging
+// underneath one is the exact failure the question exists to prevent.
+func walkRecordingStates(projectRoot string, strict bool, visit func(*RecordingState) bool) error {
 	if projectRoot == "" {
-		return nil, fmt.Errorf("%w: project root", ErrEmptyPath)
+		return fmt.Errorf("%w: project root", ErrEmptyPath)
 	}
 
 	seen := make(map[string]struct{}) // deduplicate by canonical recording file path
-	var states []*RecordingState
 
 	for _, sessionsDir := range sessionsSearchPaths(projectRoot) {
 		entries, err := os.ReadDir(sessionsDir)
 		if err != nil {
+			if strict && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("inspect recording directory %s: %w", sessionsDir, err)
+			}
 			continue
 		}
 
@@ -317,28 +560,51 @@ func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
 
 			recordingPath := filepath.Join(sessionsDir, entry.Name(), recordingFile)
 			canonicalKey := recordingPath
-			if resolved, err := filepath.EvalSymlinks(recordingPath); err == nil {
+			if resolved, resolveErr := filepath.EvalSymlinks(recordingPath); resolveErr == nil {
 				canonicalKey = resolved
 			}
 			if _, ok := seen[canonicalKey]; ok {
 				continue
 			}
 
-			data, err := os.ReadFile(recordingPath)
-			if err != nil {
+			data, readErr := os.ReadFile(recordingPath)
+			if readErr != nil {
+				if strict && !errors.Is(readErr, os.ErrNotExist) {
+					return fmt.Errorf("read recording state %s: %w", recordingPath, readErr)
+				}
 				continue
 			}
 
-			var state RecordingState
-			if err := json.Unmarshal(data, &state); err != nil {
+			state, unmarshalErr := ParseRecordingState(recordingPath, data)
+			if unmarshalErr != nil {
+				if strict {
+					return fmt.Errorf("parse recording state %s: %w", recordingPath, unmarshalErr)
+				}
 				continue
 			}
 
 			seen[canonicalKey] = struct{}{}
-			states = append(states, &state)
+			if !visit(state) {
+				return nil
+			}
 		}
 	}
 
+	return nil
+}
+
+// LoadAllRecordingStates returns all active recording states by searching for
+// .recording.json in session folders. Unlike LoadRecordingState which returns
+// only the first match, this returns all concurrent recordings (e.g., from
+// multiple worktrees or agents). Markers it cannot read or parse are skipped.
+func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
+	var states []*RecordingState
+	if err := walkRecordingStates(projectRoot, false, func(state *RecordingState) bool {
+		states = append(states, state)
+		return true
+	}); err != nil {
+		return nil, err
+	}
 	return states, nil
 }
 
@@ -346,6 +612,11 @@ func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
 // Returns nil, nil if no recording for that agent exists.
 // Use this instead of LoadRecordingState when you have an agent ID to avoid
 // accidentally operating on another concurrent agent's recording.
+//
+// A quarantined recording (SourceRejected) is quarantined for ownership review and is
+// not the agent's active recording: it neither captures nor blocks a new one,
+// so the agent's next recording can start while it waits. Use
+// LoadQuarantinedRecordingsForAgent to find it.
 func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, error) {
 	if agentID == "" {
 		return nil, fmt.Errorf("%w: agent ID", ErrEmptyPath)
@@ -355,7 +626,7 @@ func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, e
 		return nil, err
 	}
 	for _, s := range states {
-		if s.AgentID == agentID {
+		if s.AgentID == agentID && !s.SourceRejected {
 			if s.CacheDir != "" && s.CacheDir != paths.CacheDir() {
 				slog.Debug("recording found in different cache dir",
 					"agent_id", agentID,
@@ -367,6 +638,26 @@ func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, e
 		}
 	}
 	return nil, nil
+}
+
+// LoadQuarantinedRecordingsForAgent returns the agent's recordings held back for
+// ownership review, newest first. They keep their captured data and marker.
+func LoadQuarantinedRecordingsForAgent(projectRoot, agentID string) ([]*RecordingState, error) {
+	if agentID == "" {
+		return nil, fmt.Errorf("%w: agent ID", ErrEmptyPath)
+	}
+	states, err := LoadAllRecordingStates(projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	var held []*RecordingState
+	for _, s := range states {
+		if s.AgentID == agentID && s.SourceRejected {
+			held = append(held, s)
+		}
+	}
+	sort.SliceStable(held, func(i, j int) bool { return held[i].StartedAt.After(held[j].StartedAt) })
+	return held, nil
 }
 
 // LoadRecordingStateForWorkspace finds the recording whose WorkspacePath
@@ -389,6 +680,9 @@ func LoadRecordingStateForWorkspace(projectRoot, workspace string) (*RecordingSt
 		return nil, err
 	}
 	for _, s := range states {
+		if s.SourceRejected {
+			continue // held for review, not recording
+		}
 		candidate := s.WorkspacePath
 		if r, err := filepath.EvalSymlinks(candidate); err == nil {
 			candidate = r
@@ -416,11 +710,43 @@ func ClearRecordingStateForAgent(projectRoot, agentID string) error {
 	if state == nil {
 		return nil // idempotent: nothing to clear
 	}
-	statePath := recordingStatePath(state.SessionPath)
-	if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove recording state file=%s: %w", statePath, err)
+	return ClearRecordingStateAt(state.SessionPath, state.SessionID)
+}
+
+// ClearRecordingStateAt removes the recording sessionID stored under sessionPath
+// and no other. Finalizers call it while still holding the capture lock, naming
+// the recording they just processed: an agent lookup made after the lock is
+// released can find -- and delete -- a recording that replaced it in the
+// meantime. The path alone is not an identity either: session names are
+// minute-granular, so a recording restarted within the minute reuses it.
+//
+// The remove runs under the state lock so it cannot land between a concurrent
+// updater's read and its atomic write, which would bring the file straight back
+// as a ghost recording. Idempotent.
+func ClearRecordingStateAt(sessionPath, sessionID string) error {
+	if sessionPath == "" {
+		return fmt.Errorf("%w: session path", ErrEmptyPath)
 	}
-	return nil
+	statePath := recordingStatePath(sessionPath)
+	return fileutil.WithFileLock(context.Background(), statePath, func() error {
+		data, err := os.ReadFile(statePath)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read recording state file=%s: %w", statePath, err)
+		}
+		// An unparseable state identifies nothing and is cleared as before; a
+		// readable one naming another recording is not ours to remove.
+		var current RecordingState
+		if json.Unmarshal(data, &current) == nil && current.SessionID != sessionID {
+			return nil
+		}
+		if err := os.Remove(statePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove recording state file=%s: %w", statePath, err)
+		}
+		return nil
+	})
 }
 
 // AppendProducedPlan records a plan slug on the recording at sessionPath — the
@@ -459,27 +785,26 @@ func AppendProducedPlan(projectRoot, sessionPath, slug string) error {
 		return nil
 	}
 
+	// Read-modify-write under the state lock. "Reload right before writing"
+	// only narrows the window; a capture batch that commits its cursor and
+	// redaction checkpoint inside it would still be reverted.
 	statePath := recordingStatePath(sessionPath)
-	data, err := os.ReadFile(statePath)
+	err := MutateRecordingStateFile(statePath, func(state *RecordingState) error {
+		for _, existing := range state.ProducedPlans {
+			if existing == slug {
+				return nil // already recorded
+			}
+		}
+		state.ProducedPlans = append(state.ProducedPlans, slug)
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return nil // recording already stopped — do NOT recreate it
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // recording already stopped — do NOT recreate it
-		}
-		return fmt.Errorf("read recording state file=%s: %w", statePath, err)
+		return fmt.Errorf("update recording state file=%s: %w", statePath, err)
 	}
-
-	var state RecordingState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return fmt.Errorf("parse recording state file=%s: %w", statePath, err)
-	}
-
-	for _, existing := range state.ProducedPlans {
-		if existing == slug {
-			return nil // already recorded
-		}
-	}
-	state.ProducedPlans = append(state.ProducedPlans, slug)
-	return SaveRecordingState(projectRoot, &state)
+	return nil
 }
 
 // ClearRecordingState removes the recording state file from the session folder.
@@ -502,8 +827,13 @@ func ClearRecordingState(projectRoot string) error {
 	// remove .recording.json from session folder
 	if state.SessionPath != "" {
 		statePath := recordingStatePath(state.SessionPath)
-		if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove recording state file=%s: %w", statePath, err)
+		if err := WithRecordingStateLock(context.Background(), state.SessionPath, func() error {
+			if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove recording state file=%s: %w", statePath, err)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 
 		// clean up any stale .lock files left by crashed session log processes
@@ -520,6 +850,20 @@ func ClearRecordingState(projectRoot string) error {
 func IsRecording(projectRoot string) bool {
 	state, err := LoadRecordingState(projectRoot)
 	return err == nil && state != nil
+}
+
+// HasLiveRecording reports whether any active recording for the repository is
+// still owned by a live AI coworker process. A stale recording marker is not a
+// live session and must not defer convergence forever.
+func HasLiveRecording(projectRoot string) (bool, error) {
+	live := false
+	if err := walkRecordingStates(projectRoot, true, func(state *RecordingState) bool {
+		live = !isAbandoned(state.ParentPID, state.ParentStartTime, state.StartedAt)
+		return !live // the first live owner answers the question
+	}); err != nil {
+		return false, err
+	}
+	return live, nil
 }
 
 // resolveSessionsWritePath returns the single canonical directory for writing
@@ -546,6 +890,20 @@ func resolveSessionsWritePath(projectRoot string) string {
 }
 
 const explicitStopMarker = ".session_stopped"
+
+// HasExplicitStop checks the stop breadcrumb without consuming it. Tail watchers
+// use it to stop even when the CLI cannot reach the daemon over IPC.
+func HasExplicitStop(projectRoot, agentID string) bool {
+	if projectRoot == "" || agentID == "" {
+		return false
+	}
+	for _, dir := range sessionsSearchPaths(projectRoot) {
+		if _, err := os.Stat(filepath.Join(dir, explicitStopMarker+"."+agentID)); !os.IsNotExist(err) {
+			return true
+		}
+	}
+	return false
+}
 
 // MarkExplicitStop writes a per-agent breadcrumb indicating the user explicitly
 // stopped recording. This prevents the next auto-start cycle (e.g. from /clear
@@ -672,6 +1030,15 @@ const staleEmptyThreshold = 48 * time.Hour
 // a transient shell PID that dies immediately after session start.
 const GhostGracePeriod = 10 * time.Minute
 
+// orphanStubGracePeriod is how long a header-only session dir must exist before
+// the marker-independent orphan sweep (CleanupOrphanedStubsInDir) will remove
+// it. Longer than GhostGracePeriod because the sweep runs WITHOUT a live
+// .recording.json marker to consult — the dir age is the only guard against
+// reaping a session that was just primed and has not yet captured its first
+// turn. One hour is comfortably longer than the gap between prime and the first
+// user prompt, while still reclaiming abandoned stubs the same day.
+const orphanStubGracePeriod = 1 * time.Hour
+
 // cleanupStaleEmptyRecordings removes stale recording stubs that have no session
 // content (no raw.jsonl). These accumulate when agents start sessions but exit
 // without calling session stop. Best-effort: errors are logged but not returned.
@@ -682,28 +1049,44 @@ func cleanupStaleEmptyRecordings(projectRoot string) {
 	}
 
 	for _, state := range states {
+		if state.SourceRejected {
+			continue // a quarantined source is not a disposable empty stub
+		}
 		if time.Since(state.StartedAt) < staleEmptyThreshold {
 			continue
 		}
 		if state.SessionPath == "" {
 			continue
 		}
-		// only clean empty stubs (no raw.jsonl)
-		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
-		if _, err := os.Stat(rawPath); err == nil {
-			continue // has content, don't auto-delete
-		} else if !os.IsNotExist(err) {
-			slog.Debug("cleanup stale empty recording: stat error", "path", rawPath, "error", err)
-			continue // transient/permission error, skip
+		if IsHeld(state.SessionPath) {
+			continue // a held session is the coworker's to remove, by name
 		}
-		// remove .recording.json
-		recPath := recordingStatePath(state.SessionPath)
-		if err := os.Remove(recPath); err != nil && !os.IsNotExist(err) {
-			slog.Debug("cleanup stale empty recording", "path", recPath, "error", err)
+		// A native log can hold the session even when the watcher never wrote
+		// an entry. Claude hook discovery can fail with an unverifiable cwd,
+		// leaving SessionFile empty despite a real native conversation.
+		if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail" || state.AdapterName == "claude-code") {
 			continue
 		}
-		// remove empty session directory
-		removeEmptyDir(state.SessionPath)
+		// only clean phantom stubs — a header-only or missing raw.jsonl. Since
+		// eager writes at recording start (ses_/c link, header, context-trace),
+		// an abandoned session leaves a dir with content, so a plain os.Stat
+		// "has raw.jsonl" test kept every phantom alive. Classify instead:
+		// substantive content is a recoverable orphan and a content-store
+		// pointer's transcript lives elsewhere — never delete those.
+		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+		switch ClassifyRawFile(rawPath) {
+		case RawSubstantive, RawPointerStub:
+			continue // real or recoverable data — don't auto-delete
+		case RawMissing, RawHeaderOnly:
+			// phantom — fall through to removal
+		}
+		// remove the whole stub dir (header raw.jsonl + context-trace.jsonl +
+		// .recording.json). os.RemoveAll, not removeEmptyDir: the dir is not
+		// empty, which is exactly why these accumulated.
+		if err := os.RemoveAll(state.SessionPath); err != nil {
+			slog.Debug("cleanup stale empty recording", "path", state.SessionPath, "error", err)
+			continue
+		}
 		slog.Debug("cleaned stale empty recording", "session", filepath.Base(state.SessionPath))
 	}
 }
@@ -747,7 +1130,7 @@ func cleanupGhosts(states []*RecordingState) GhostCleanupResult {
 	var result GhostCleanupResult
 
 	for _, state := range states {
-		if state.SessionPath == "" {
+		if state.SessionPath == "" || state.SourceRejected {
 			continue
 		}
 
@@ -767,6 +1150,9 @@ func cleanupGhosts(states []*RecordingState) GhostCleanupResult {
 		if !state.StartedAt.IsZero() && time.Since(state.StartedAt) < GhostGracePeriod {
 			continue
 		}
+		if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail" || state.AdapterName == "claude-code") {
+			continue // native source may exist even before hook discovery succeeds
+		}
 
 		// parent is dead — check if there's any recoverable data. Classify
 		// rather than calling HasSubstantiveEntries, because "no substantive
@@ -774,8 +1160,8 @@ func cleanupGhosts(states []*RecordingState) GhostCleanupResult {
 		//
 		// Only a header-only or missing raw.jsonl is a ghost. A pointer stub
 		// is a session whose transcript lives in the content store, so it has
-		// very much got recoverable data — deleting it (and, via
-		// removeEmptyDir below, its whole session directory) would destroy a
+		// very much got recoverable data — deleting it (and, via the
+		// os.RemoveAll below, its whole session directory) would destroy a
 		// synced session. HasSubstantiveEntries reports false for pointers as
 		// of GH #710, so this must not be collapsed back into that call.
 		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
@@ -791,20 +1177,139 @@ func cleanupGhosts(states []*RecordingState) GhostCleanupResult {
 			// fall through to ghost cleanup
 		}
 
-		// ghost confirmed: dead PID, no meaningful data
+		// ghost confirmed: dead PID, no meaningful data. Remove the whole dir
+		// (marker + header raw.jsonl + context-trace.jsonl). os.RemoveAll, not
+		// removeEmptyDir: eager writes at recording start mean the dir is never
+		// empty, so removeEmptyDir left the marker gone but the stub behind —
+		// invisible to every later pass and the source of the accumulation.
 		sessionName := filepath.Base(state.SessionPath)
-		recPath := recordingStatePath(state.SessionPath)
-		if err := os.Remove(recPath); err != nil && !os.IsNotExist(err) {
-			slog.Debug("ghost cleanup: failed to remove recording marker", "session", sessionName, "error", err)
+		if err := os.RemoveAll(state.SessionPath); err != nil {
+			slog.Debug("ghost cleanup: failed to remove stub dir", "session", sessionName, "error", err)
 			continue
 		}
-
-		// remove empty session directory
-		removeEmptyDir(state.SessionPath)
 
 		result.Removed++
 		result.Names = append(result.Names, sessionName)
 		slog.Debug("ghost cleanup: removed", "session", sessionName, "parent_pid", state.ParentPID)
+	}
+
+	return result
+}
+
+// CleanupOrphanedStubs sweeps a project's LOCAL CACHE session dirs for
+// header-only phantom stubs and removes them. It resolves cache paths from repo
+// identity and deliberately excludes the legacy in-repo sessions dir, so it can
+// never RemoveAll from the user's own project tree.
+func CleanupOrphanedStubs(projectRoot string) GhostCleanupResult {
+	var result GhostCleanupResult
+	for _, dir := range cacheSessionsDirs(projectRoot) {
+		r := CleanupOrphanedStubsInDir(dir)
+		result.Removed += r.Removed
+		result.Names = append(result.Names, r.Names...)
+	}
+	return result
+}
+
+// cacheSessionsDirs returns the LOCAL CACHE session directories for a project —
+// the ledger cache and XDG cache locations — excluding the legacy in-repo
+// sessions dir (projectRoot/sessions). The exclusion is load-bearing:
+// CleanupOrphanedStubsInDir uses os.RemoveAll, and the legacy path is the user's
+// own repo, never safe to reap.
+func cacheSessionsDirs(projectRoot string) []string {
+	legacy := filepath.Join(projectRoot, "sessions")
+	var out []string
+	for _, p := range sessionsSearchPaths(projectRoot) {
+		if p == legacy {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// CleanupOrphanedStubsInDir removes header-only / empty phantom session stubs
+// from a LOCAL CACHE sessions directory, whether or not they still carry a
+// .recording.json marker. This is the reclaimer for the accumulation that the
+// marker-based ghost cleanup structurally cannot see: once a header-only
+// session's marker is removed at finalize, loadRecordingStatesFromDir skips the
+// dir forever, and removeEmptyDir cannot delete it because the dir still holds
+// raw.jsonl (the header) plus context-trace.jsonl.
+//
+// MUST be called only with a cache sessions dir
+// (<ledger>/.sageox/cache/sessions or an XDG cache path), NEVER the git-tracked
+// <ledger>/sessions dir: a draft placeholder there is meta.json-only (classified
+// RawMissing), and deleting it would destroy a shared /c/ link and a session
+// another machine may still finalize. See .claude/rules/cache-only-design.md.
+//
+// A dir is removed only when ALL hold:
+//   - no meta.json present (a finalized or draft session is never a phantom);
+//   - raw.jsonl classifies RawHeaderOnly or RawMissing (never RawSubstantive,
+//     a recoverable orphan; never RawPointerStub, whose transcript is in the
+//     content store);
+//   - no live recording: .recording.json absent, or present with a dead PID;
+//   - the dir is older than orphanStubGracePeriod, so a just-primed session that
+//     has not yet captured its first turn survives.
+func CleanupOrphanedStubsInDir(cacheSessionsDir string) GhostCleanupResult {
+	var result GhostCleanupResult
+
+	entries, err := os.ReadDir(cacheSessionsDir)
+	if err != nil {
+		return result
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		sessionPath := filepath.Join(cacheSessionsDir, entry.Name())
+
+		// a finalized or draft session (meta.json present) is never a phantom,
+		// and a held one is the coworker's to remove, by name.
+		if _, statErr := os.Stat(filepath.Join(sessionPath, "meta.json")); statErr == nil || IsHeld(sessionPath) {
+			continue
+		}
+
+		switch ClassifyRawFile(filepath.Join(sessionPath, "raw.jsonl")) {
+		case RawSubstantive, RawPointerStub:
+			continue // real or content-store-backed data
+		case RawMissing, RawHeaderOnly:
+			// phantom candidate — fall through
+		}
+
+		// A live OR unverifiable recording is never a phantom. Fail CLOSED when a
+		// .recording.json marker exists but cannot be read or parsed: an
+		// incomplete/concurrent write is exactly what an ACTIVE recording looks
+		// like mid-flight, and deleting it would destroy a live session's
+		// identity and recovery data. Only reap when the marker is ABSENT, or
+		// present-parseable-and-PID-dead.
+		if data, readErr := os.ReadFile(recordingStatePath(sessionPath)); readErr == nil {
+			state, parseErr := ParseRecordingState(recordingStatePath(sessionPath), data)
+			if parseErr != nil || state.IsAgentAlive() || state.SourceRejected {
+				continue // unreadable-as-JSON, still alive, or quarantined for ownership review → keep
+			}
+			if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail") {
+				continue // native source must be checked by finalization first
+			}
+			// parsed cleanly and the PID is dead → eligible; fall through.
+		} else if !os.IsNotExist(readErr) {
+			// marker present but the read itself failed (permission/transient) → keep.
+			continue
+		}
+
+		// age guard: only reap dirs older than the grace period, so a session
+		// primed moments ago that has not captured its first turn is spared.
+		info, statErr := os.Stat(sessionPath)
+		if statErr != nil || time.Since(info.ModTime()) < orphanStubGracePeriod {
+			continue
+		}
+
+		if rmErr := os.RemoveAll(sessionPath); rmErr != nil {
+			slog.Debug("orphan stub cleanup: remove failed", "session", entry.Name(), "error", rmErr)
+			continue
+		}
+		result.Removed++
+		result.Names = append(result.Names, entry.Name())
+		slog.Debug("orphan stub cleanup: removed", "session", entry.Name())
 	}
 
 	return result
@@ -827,42 +1332,62 @@ func loadRecordingStatesFromDir(sessionsDir string) ([]*RecordingState, error) {
 		if readErr != nil {
 			continue
 		}
-		var state RecordingState
-		if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
+		state, jsonErr := ParseRecordingState(recordingPath, data)
+		if jsonErr != nil {
 			continue
 		}
 		if state.SessionPath == "" {
 			state.SessionPath = filepath.Join(sessionsDir, entry.Name())
 		}
-		states = append(states, &state)
+		states = append(states, state)
 	}
 	return states, nil
 }
 
-// removeEmptyDir removes a directory only if it's empty.
-func removeEmptyDir(dir string) {
-	entries, err := os.ReadDir(dir)
+// PreparedRecordingIdentity holds a project-scoped identity check performed
+// before acquiring a recording startup lock. Its zero value is not valid.
+type PreparedRecordingIdentity struct {
+	projectRoot string
+	coworker    *auth.Coworker
+}
+
+// PrepareRecordingIdentity resolves the canonical team-token identity before
+// startup enters a critical section. The result is only for the ensuing start
+// in this project, and does not depend on the auth cache being writable.
+func PrepareRecordingIdentity(projectRoot string) (*PreparedRecordingIdentity, error) {
+	if projectRoot == "" {
+		return nil, fmt.Errorf("%w: project root", ErrEmptyPath)
+	}
+	coworker, err := auth.TeamCoworker(endpoint.GetForProject(projectRoot))
 	if err != nil {
-		return
+		return nil, err
 	}
-	if len(entries) == 0 {
-		_ = os.Remove(dir)
-	}
+	return &PreparedRecordingIdentity{projectRoot: projectRoot, coworker: coworker}, nil
 }
 
 // StartRecordingOptions contains options for starting a recording.
 type StartRecordingOptions struct {
-	AgentID          string
-	AdapterName      string
-	SessionFile      string // source file from adapter (Claude Code JSONL)
-	OutputFile       string // output file being recorded
-	Title            string
-	Username         string // attribution slug for paths — via identity.AttributionUsername(). NOT an email.
-	RepoContextPath  string // path to repo context directory (for storing sessions)
-	ReminderInterval int    // defaults to DefaultReminderInterval if 0
-	FilterMode       string // "infra" or "all" - controls event filtering on stop
-	WorkspacePath    string // git root / project directory
-	Branch           string // git branch at recording start
+	// PreparedIdentity avoids repeating network identity lookup under a caller's
+	// startup lock. Obtain it through PrepareRecordingIdentity for this project.
+	PreparedIdentity *PreparedRecordingIdentity
+	// BeforePublish initializes adapter metadata before capture can discover the marker.
+	BeforePublish  func(*RecordingState) error
+	AgentID        string
+	AgentSessionID string
+	// AgentSessionSource is the agent's reason for the SessionStart that
+	// supplied AgentSessionID (Claude Code: startup, resume, clear, compact).
+	// Recorded alongside the id in NativeSessions; "" when unknown.
+	AgentSessionSource string
+	AdapterName        string
+	SessionFile        string // source file from adapter (Claude Code JSONL)
+	OutputFile         string // output file being recorded
+	Title              string
+	Username           string // attribution slug for paths — via identity.AttributionUsername(). NOT an email.
+	RepoContextPath    string // path to repo context directory (for storing sessions)
+	ReminderInterval   int    // defaults to DefaultReminderInterval if 0
+	FilterMode         string // "infra" or "all" - controls event filtering on stop
+	WorkspacePath      string // git root / project directory
+	Branch             string // git branch at recording start
 
 	// Parent session tracking for subagent workflows
 	ParentSessionPath string // path to parent's session folder (optional)
@@ -873,7 +1398,16 @@ type StartRecordingOptions struct {
 	ParentPID   int    // parent agent process ID for liveness detection
 	Origin      string // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
 	StartOffset int64  // byte offset of SessionFile at recording start; entries before this are pre-session
-	WatchMode   string // "hook" or "tail" — how entries are captured
+	// StartOffsetKnown distinguishes an intentional zero start from legacy,
+	// unbound state. SourcePrefixSHA256 is calculated by the source validator.
+	StartOffsetKnown   bool
+	SourcePrefixSHA256 string
+	WatchMode          string // "hook" or "tail" — how entries are captured
+
+	// ContinuedFromSessionID is the prior durable recording identity when a
+	// native coding-agent session is reopened after its previous recording was
+	// finalized. Invalid values are ignored rather than persisted.
+	ContinuedFromSessionID string
 }
 
 // StartRecording begins a new recording session.
@@ -882,6 +1416,24 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 	if projectRoot == "" {
 		return nil, fmt.Errorf("%w: project root", ErrEmptyPath)
 	}
+	if opts.StartOffsetKnown && opts.StartOffset < 0 {
+		return nil, fmt.Errorf("known start offset must not be negative")
+	}
+
+	// A team token with no AI coworker attached would record the session under
+	// the git identity of the machine running it. Cursor prepares this check
+	// outside its startup lock so auth cannot block prompt admission.
+	prepared := opts.PreparedIdentity
+	if prepared == nil {
+		var err error
+		prepared, err = PrepareRecordingIdentity(projectRoot)
+		if err != nil {
+			return nil, err
+		}
+	} else if prepared.projectRoot != projectRoot {
+		return nil, fmt.Errorf("prepared recording identity belongs to another project")
+	}
+	coworker := prepared.coworker
 
 	// clean up stale empty recording stubs to prevent accumulation
 	cleanupStaleEmptyRecordings(projectRoot)
@@ -962,6 +1514,18 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 	// create session folder path
 	sessionPath := filepath.Join(sessionsBasePath, sessionName)
 
+	// A quarantined recording is evidence for manual review. If it holds this
+	// minute's folder, writing a new state there would overwrite the quarantine.
+	if data, readErr := os.ReadFile(recordingStatePath(sessionPath)); readErr == nil {
+		var occupant RecordingState
+		if json.Unmarshal(data, &occupant) == nil && occupant.SourceRejected {
+			return nil, fmt.Errorf("%w: agent_id=%s path=%s", ErrQuarantinedSessionPath, opts.AgentID, sessionPath)
+		}
+	}
+	if IsHeld(sessionPath) {
+		return nil, fmt.Errorf("%w: agent_id=%s path=%s", ErrHeldSessionPath, opts.AgentID, sessionPath)
+	}
+
 	// create the session directory
 	if err := os.MkdirAll(sessionPath, 0755); err != nil {
 		return nil, fmt.Errorf("create session dir=%s: %w", sessionPath, err)
@@ -973,48 +1537,194 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		sessionFile = filepath.Join(sessionPath, "raw.jsonl")
 	}
 
-	// auto-detect session origin if not explicitly provided
+	// auto-detect session origin if not explicitly provided; an AI coworker's
+	// session has no human in the loop
 	origin := opts.Origin
 	if origin == "" {
-		origin = string(agentx.DetectOriginFromOS(""))
+		var explicit agentx.SessionOrigin
+		if coworker != nil {
+			explicit = agentx.OriginAgent
+		}
+		origin = string(agentx.DetectOriginFromOS(explicit))
+	}
+
+	continuedFromSessionID := opts.ContinuedFromSessionID
+	if !sessionid.IsValidSessionID(continuedFromSessionID) {
+		continuedFromSessionID = ""
 	}
 
 	state := &RecordingState{
-		AgentID:           opts.AgentID,
-		SessionID:         sessionid.GenerateSessionID(),
-		AdapterName:       opts.AdapterName,
-		SessionFile:       opts.SessionFile,
-		OutputFile:        sessionFile,
-		SessionPath:       sessionPath,
-		Title:             opts.Title,
-		StartedAt:         time.Now().UTC(),
-		EntryCount:        0,
-		LastReminderSeq:   0,
-		ReminderInterval:  reminderInterval,
-		FilterMode:        opts.FilterMode,
-		WorkspacePath:     opts.WorkspacePath,
-		Branch:            opts.Branch,
-		ParentSessionPath: opts.ParentSessionPath,
-		ParentAgentID:     opts.ParentAgentID,
-		AgentType:         opts.AgentType,
-		Model:             opts.Model,
-		ParentPID:         opts.ParentPID,
-		Origin:            origin,
-		CacheDir:          paths.CacheDir(),
-		StartOffset:       opts.StartOffset,
-		WatchMode:         opts.WatchMode,
+		AgentID:                opts.AgentID,
+		AgentSessionID:         opts.AgentSessionID,
+		SessionID:              sessionid.GenerateSessionID(),
+		ContinuedFromSessionID: continuedFromSessionID,
+		AdapterName:            opts.AdapterName,
+		SessionFile:            opts.SessionFile,
+		OutputFile:             sessionFile,
+		SessionPath:            sessionPath,
+		Title:                  opts.Title,
+		StartedAt:              time.Now().UTC(),
+		EntryCount:             0,
+		LastReminderSeq:        0,
+		ReminderInterval:       reminderInterval,
+		FilterMode:             opts.FilterMode,
+		WorkspacePath:          opts.WorkspacePath,
+		Branch:                 opts.Branch,
+		ParentSessionPath:      opts.ParentSessionPath,
+		ParentAgentID:          opts.ParentAgentID,
+		AgentType:              opts.AgentType,
+		Model:                  opts.Model,
+		ParentPID:              opts.ParentPID,
+		Origin:                 origin,
+		CacheDir:               paths.CacheDir(),
+		SourceOffset:           opts.StartOffset,
+		PublishingMode:         config.GetSessionPublishing(projectRoot),
+		StartOffset:            opts.StartOffset,
+		StartOffsetKnown:       opts.StartOffsetKnown,
+		SourcePrefixSHA256:     opts.SourcePrefixSHA256,
+		WatchMode:              opts.WatchMode,
 	}
 
 	// always capture parent PID for liveness detection and ghost cleanup
-	if state.ParentPID <= 0 {
+	if state.ParentPID <= 0 && state.AdapterName != "cursor" {
 		state.ParentPID = os.Getppid()
 	}
+	state.ParentStartTime = ParentStartTimeOf(state.ParentPID)
+	if opts.BeforePublish != nil {
+		if err := opts.BeforePublish(state); err != nil {
+			return nil, fmt.Errorf("initialize recording before publication: %w", err)
+		}
+	}
+
+	// the native id that started this recording is its first observed
+	// session; later SessionStarts (resume, clear, compact) append via
+	// RecordNativeSession in the hook.
+	state.RecordNativeSession(opts.AgentSessionID, opts.AgentSessionSource, state.StartedAt)
+	state.initializeTraceCapture()
 
 	if err := SaveRecordingState(projectRoot, state); err != nil {
 		return nil, err
 	}
 
 	return state, nil
+}
+
+// UpdateRecordingStateAt applies updateFn to the recording sessionID stored under
+// sessionPath, as one read-modify-write under the state lock. Use it when the
+// caller already holds a loaded state, and pass that state's identity: the caller
+// may have been away for a while (a network signal, a prompt), and neither an
+// agent lookup nor the path alone says the recording is still the same one.
+//
+// A recording that has stopped returns an error satisfying
+// errors.Is(err, os.ErrNotExist) and is never recreated; one that was replaced
+// returns ErrRecordingChanged and is left untouched.
+func UpdateRecordingStateAt(sessionPath, sessionID string, updateFn func(*RecordingState)) error {
+	if sessionPath == "" {
+		return fmt.Errorf("%w: session path", ErrEmptyPath)
+	}
+	return MutateRecordingStateFile(recordingStatePath(sessionPath), func(current *RecordingState) error {
+		if current.SessionID != sessionID {
+			return ErrRecordingChanged
+		}
+		updateFn(current)
+		return nil
+	})
+}
+
+// InitialSourceBinding is the validated native source boundary selected before
+// capture begins. It is deliberately small: source authorization and prefix
+// hashing belong to the adapter-specific caller, while this helper makes the
+// recording-state transition atomic and idempotent.
+//
+// A known zero boundary is valid. SessionFile must name an existing regular
+// source when binding; a pending source is represented by StartRecording with
+// an empty SessionFile and is bound only once it appears.
+type InitialSourceBinding struct {
+	AgentSessionID     string
+	SessionFile        string
+	StartOffset        int64
+	StartOffsetKnown   bool
+	SourcePrefixSHA256 string
+}
+
+// BindInitialRecordingSource atomically associates an active, as-yet-uncaptured
+// recording with its validated native source. Repeating the identical binding
+// is harmless; a different identity, path, or boundary is refused so an
+// overlapping hook cannot replace the pre-prompt decision with a later EOF.
+func BindInitialRecordingSource(projectRoot, agentID string, binding InitialSourceBinding) (*RecordingState, error) {
+	if agentID == "" {
+		return nil, fmt.Errorf("%w: agent ID", ErrEmptyPath)
+	}
+	if binding.AgentSessionID == "" {
+		return nil, fmt.Errorf("native agent session ID is required")
+	}
+	if binding.SessionFile == "" {
+		return nil, fmt.Errorf("source session file is required")
+	}
+	if !binding.StartOffsetKnown {
+		return nil, fmt.Errorf("source start offset must be known")
+	}
+	if binding.StartOffset < 0 {
+		return nil, fmt.Errorf("source start offset must not be negative")
+	}
+	info, err := os.Stat(binding.SessionFile)
+	if err != nil {
+		return nil, fmt.Errorf("source session file not accessible: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("source session file is not a regular file: %s", binding.SessionFile)
+	}
+
+	state, err := LoadRecordingStateForAgent(projectRoot, agentID)
+	if err != nil {
+		return nil, fmt.Errorf("load recording state: %w", err)
+	}
+	if state == nil {
+		return nil, ErrNotRecording
+	}
+
+	statePath := recordingStatePath(state.SessionPath)
+	var bindingErr error
+	if err := updateRecordingStateAtPath(projectRoot, statePath, func(current *RecordingState) {
+		if current.AgentSessionID == "" || current.AgentSessionID != binding.AgentSessionID {
+			bindingErr = fmt.Errorf("native agent session identity conflict")
+			return
+		}
+		if current.SessionFile != "" {
+			if current.SessionFile != binding.SessionFile ||
+				current.StartOffset != binding.StartOffset ||
+				!current.StartOffsetKnown ||
+				current.SourcePrefixSHA256 != binding.SourcePrefixSHA256 {
+				bindingErr = fmt.Errorf("source boundary conflict")
+			}
+			return
+		}
+		if current.EntryCount != 0 || current.SourceOffset != 0 {
+			bindingErr = fmt.Errorf("cannot bind source after capture has begun")
+			return
+		}
+		// A pending known-zero state is already a durable boundary. A later
+		// source appearance may attach its path at that exact boundary, but
+		// must never replace it with a later EOF. Older states without an
+		// explicit boundary retain the legacy initialization path below.
+		if current.StartOffsetKnown &&
+			(current.StartOffset != binding.StartOffset ||
+				current.SourcePrefixSHA256 != binding.SourcePrefixSHA256) {
+			bindingErr = fmt.Errorf("source boundary conflict")
+			return
+		}
+		current.SessionFile = binding.SessionFile
+		current.StartOffset = binding.StartOffset
+		current.StartOffsetKnown = true
+		current.SourcePrefixSHA256 = binding.SourcePrefixSHA256
+		current.SourceOffset = binding.StartOffset
+	}); err != nil {
+		return nil, err
+	}
+	if bindingErr != nil {
+		return nil, bindingErr
+	}
+	return LoadRecordingStateForAgent(projectRoot, agentID)
 }
 
 // UpdateRecordingStateForAgent updates recording state for a specific agent.
@@ -1027,11 +1737,26 @@ func UpdateRecordingStateForAgent(projectRoot, agentID string, updateFn func(*Re
 	if state == nil {
 		return ErrNotRecording
 	}
-	updateFn(state)
-	if err := SaveRecordingState(projectRoot, state); err != nil {
-		return fmt.Errorf("save recording state: %w", err)
-	}
-	return nil
+	return updateRecordingStateAtPath(projectRoot, recordingStatePath(state.SessionPath), updateFn)
+}
+
+// MarkSourceRejected quarantines an ambiguous recording without deleting the
+// native source or captured prefix. Only a confirmed ownership violation should
+// use this; transient discovery failures must remain retryable.
+func MarkSourceRejected(projectRoot, agentID string) error {
+	return UpdateRecordingStateForAgent(projectRoot, agentID, func(s *RecordingState) {
+		s.SourceRejected = true
+	})
+}
+
+// SetSourceRejectedAt sets or clears the quarantine on the recording sessionID
+// stored under sessionPath. Callers that already hold a loaded state use it
+// instead of the agent-keyed form: once a quarantined recording leaves the
+// agent's active slot, an agent lookup would find a newer recording.
+func SetSourceRejectedAt(sessionPath, sessionID string, rejected bool) error {
+	return UpdateRecordingStateAt(sessionPath, sessionID, func(s *RecordingState) {
+		s.SourceRejected = rejected
+	})
 }
 
 // UpdateRecordingState updates and persists the recording state.
@@ -1046,12 +1771,99 @@ func UpdateRecordingState(projectRoot string, updateFn func(*RecordingState)) er
 		return ErrNotRecording
 	}
 
-	updateFn(state)
+	return updateRecordingStateAtPath(projectRoot, recordingStatePath(state.SessionPath), updateFn)
+}
 
-	if err := SaveRecordingState(projectRoot, state); err != nil {
-		return fmt.Errorf("save recording state: %w", err)
+// CheckpointRecordingState commits capture progress without replacing any
+// concurrent lifecycle state. The source offset is acknowledged only after the
+// caller has durably written the corresponding redacted raw entries.
+//
+// Callers must stop capture when this returns an error. Advancing an in-memory
+// cursor after a failed checkpoint would make a restart skip unacknowledged
+// source bytes.
+func CheckpointRecordingState(projectRoot, sessionPath string, sourceOffset int64, entryDelta int) error {
+	if sessionPath == "" {
+		return fmt.Errorf("%w: session path", ErrEmptyPath)
+	}
+	if sourceOffset < 0 {
+		return fmt.Errorf("source offset must not be negative")
+	}
+	if entryDelta < 0 {
+		return fmt.Errorf("entry delta must not be negative")
+	}
+	return updateRecordingStateAtPath(projectRoot, recordingStatePath(sessionPath), func(state *RecordingState) {
+		// A stale watcher must never move a good checkpoint backwards. A
+		// no-op offset is valid for adapters whose first complete entry ends at
+		// byte zero only when no entries are being acknowledged.
+		if sourceOffset <= state.SourceOffset {
+			return
+		}
+		state.SourceOffset = sourceOffset
+		state.EntryCount += entryDelta
+	})
+}
+
+// updateRecordingStateAtPath serializes every cooperative state read-modify-
+// write. Lifecycle commands and capture checkpoints use the same lock so a
+// checkpoint cannot write an old struct over a pause, resume, or end marker.
+func updateRecordingStateAtPath(projectRoot, statePath string, updateFn func(*RecordingState)) error {
+	if statePath == "" {
+		return fmt.Errorf("%w: recording state path", ErrEmptyPath)
+	}
+	err := MutateRecordingStateFile(statePath, func(state *RecordingState) error {
+		updateFn(state)
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return ErrNotRecording
+	}
+	return err
+}
+
+// validateCursorLifecycleChange runs under the shared marker lock, including
+// identity-bound updates from newer host paths.
+func validateCursorLifecycleChange(before, state *RecordingState) error {
+	if state.AdapterName != "cursor" || (reflect.DeepEqual(before.Lifecycle, state.Lifecycle) && reflect.DeepEqual(before.SuspendedAt, state.SuspendedAt)) {
+		return nil
+	}
+	if state.StoppedAt != nil {
+		return ErrNotRecording
+	}
+	if _, finalized, err := cursorCaptureHeader(filepath.Join(state.SessionPath, "raw.jsonl")); err != nil {
+		return err
+	} else if finalized {
+		return ErrNotRecording
+	}
+	// An unacknowledged raw suffix has no safe sequence for a pause/resume.
+	raw, err := os.ReadFile(filepath.Join(state.SessionPath, "raw.jsonl"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("validate Cursor lifecycle boundary: %w", err)
+	}
+	entries, complete, err := completeRawRecords(raw)
+	if err != nil || complete != len(raw) || len(entries) != state.EntryCount {
+		return fmt.Errorf("checkpoint-pending: Cursor capture checkpoint is pending; retry the recording control after capture recovers")
+	}
+	if before.SuspendedAt != nil && state.SuspendedAt == nil {
+		// Generic marker writers must also fail closed: durable raw entries
+		// alone do not prove that all paused native rows have been captured.
+		snapshot, err := readCursorSourceSnapshot(state.SessionFile)
+		if err != nil || state.SourceOffset != int64(len(snapshot.data)) ||
+			cursorSourceHash(snapshot.data) != state.SourcePrefixSHA256 || !cursorSourceReady(state, snapshot.data) {
+			return ErrCursorFinalDrainPending
+		}
 	}
 	return nil
+}
+
+// WithRecordingStateLock serializes a recording marker transaction with
+// lifecycle writers. Capture recovery holds it from marker read through raw
+// replacement, so a pause/end update cannot land between a byte comparison and
+// rename and then be silently reverted by stale recovery work.
+func WithRecordingStateLock(ctx context.Context, sessionPath string, fn func() error) error {
+	if sessionPath == "" {
+		return fmt.Errorf("%w: session path", ErrEmptyPath)
+	}
+	return fileutil.WithFileLock(ctx, recordingStatePath(sessionPath), fn)
 }
 
 // StopRecording ends an active recording session for a specific agent.
@@ -1104,4 +1916,33 @@ func FindParentSessionPath(projectRoot string) string {
 		return ""
 	}
 	return state.SessionPath
+}
+
+// MutateRecordingStateFile serializes lifecycle changes with batch appends.
+// Without this lock a resume can select a sequence while a paused batch is
+// being written, or a cursor update can erase a concurrently persisted pause.
+func MutateRecordingStateFile(path string, update func(*RecordingState) error) error {
+	return fileutil.WithFileLock(context.Background(), path, func() error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		// already under the state lock: decode leniently, and the write below drops any stale tail
+		state, _, err := decodeRecordingState(data)
+		if err != nil {
+			return err
+		}
+		before := *state
+		before.Lifecycle = slices.Clone(state.Lifecycle)
+		if err = update(state); err != nil {
+			return err
+		}
+		if err = validateCursorLifecycleChange(&before, state); err != nil {
+			return err
+		}
+		if err := writeRecordingStateAtomically(path, state, 0600); err != nil {
+			return err
+		}
+		return syncCursorRecordingDirectory(state)
+	})
 }

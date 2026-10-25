@@ -1,0 +1,10 @@
+{
+  "schema_version": "1.0",
+  "source_run_id": "missing-outcome",
+  "producer": {"name": "fixture", "version": "1"},
+  "source": {"git": {"branch": null, "commit_sha": null, "dirty": null}},
+  "timing": {"started_at": "2026-09-10T20:00:00Z", "finished_at": "2026-09-10T20:00:00Z", "duration_ms": 0},
+  "corpus": {"key": "bare", "capabilities": [{"key": "bare", "title": "Bare", "tags": [], "source": "declared", "features": [{"path": "features/bare.feature", "title": "Bare feature", "tags": [], "scenarios": [], "rules": [{"title": "", "tags": [], "scenarios": [{"key": "af7f83bb349ab8f7377618e1f4b3e6c1fd51c00e374a6b089ee2e85d9423345d", "title": "Inside", "tags": [], "kind": "scenario", "examples": []}]}]}]}]},
+  "outcomes": [],
+  "extensions": {}
+}

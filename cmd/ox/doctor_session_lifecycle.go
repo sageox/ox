@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 
+	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/session"
 )
 
@@ -39,6 +41,6 @@ func checkSessionLifecycleRegistrationRetry(projectRoot string) checkResult {
 	return WarningCheck(
 		"Session link registration",
 		fmt.Sprintf("confirmed %d of %d pending registration(s)", confirmed, pending),
-		"Run `ox login` if authentication expired, then re-run `ox doctor`",
+		auth.ReauthenticationRemedy(endpoint.GetForProject(projectRoot))+" Then re-run `ox doctor`.",
 	)
 }

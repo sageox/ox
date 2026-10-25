@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -18,7 +19,7 @@ import (
 // errors.Is: "the credential you named is unusable" and "you have no
 // credential" call for different advice, and conflating them sends a CI
 // operator to `ox login` when the fix is to re-copy a service token.
-var ErrEnvTokenMalformed = errors.New("SAGEOX_TOKEN is set but its value failed a local format check")
+var ErrEnvTokenMalformed = errkind.Errorf(errkind.Auth, "SAGEOX_TOKEN is set but its value failed a local format check")
 
 // UserInfo contains user information from the authentication provider
 type UserInfo struct {
@@ -135,6 +136,10 @@ func envTokenOrError(ep string) (*StoredToken, error) {
 		// Never interpolate the value: this error is printed to terminals and
 		// carried into logs, and a value that failed a checksum is still a
 		// secret (it may be a correct token with one character lost).
+		if EnvTokenIsTeamFamily(ep) {
+			return nil, fmt.Errorf("%w (endpoint %s): re-copy the team token (a truncated paste is the usual cause). %s",
+				ErrEnvTokenMalformed, ep, ReauthenticationRemedy(ep))
+		}
 		return nil, fmt.Errorf("%w (endpoint %s): refusing to fall back to a stored login — re-copy the token (a truncated paste is the usual cause), or unset %s to use your `ox login` credential",
 			ErrEnvTokenMalformed, ep, EnvVarToken)
 	}
@@ -180,16 +185,17 @@ func GetTokenForEndpoint(ep string) (*StoredToken, error) {
 	return token, nil
 }
 
-// GetUserID returns the authenticated user's unique ID for the given endpoint.
+// GetUserID returns the authenticated user's unique ID for the given endpoint,
+// or the agt_ id of the AI coworker a team token acts as (see TeamCoworker).
 // Returns empty string if not authenticated or on error.
 func GetUserID(ep string) string {
-	var token *StoredToken
-	var err error
-	if ep != "" {
-		token, err = GetTokenForEndpoint(ep)
-	} else {
-		token, err = GetToken()
+	if ep == "" {
+		ep = endpoint.Get()
 	}
+	if c, _ := TeamCoworker(ep); c != nil {
+		return c.ID
+	}
+	token, err := GetTokenForEndpoint(ep)
 	if err != nil || token == nil {
 		return ""
 	}
@@ -197,15 +203,16 @@ func GetUserID(ep string) string {
 }
 
 // GetUsername returns the authenticated user's display name for a given endpoint.
-// Prefers email, falls back to name, then empty string.
+// Prefers email, falls back to name, then empty string. For the AI coworker a
+// team token acts as, it returns the coworker's slug (Coworker.Username).
 func GetUsername(ep string) string {
-	var token *StoredToken
-	var err error
-	if ep != "" {
-		token, err = GetTokenForEndpoint(ep)
-	} else {
-		token, err = GetToken()
+	if ep == "" {
+		ep = endpoint.Get()
 	}
+	if c, _ := TeamCoworker(ep); c != nil {
+		return c.Username()
+	}
+	token, err := GetTokenForEndpoint(ep)
 	if err != nil || token == nil {
 		return ""
 	}
@@ -357,7 +364,12 @@ func (t *StoredToken) IsExpired(bufferSeconds int) bool {
 		bufferSeconds = 0
 	}
 	threshold := time.Now().Add(time.Duration(bufferSeconds) * time.Second)
-	return threshold.After(t.ExpiresAt)
+	// !Before, not After: a token whose expiry instant equals the threshold is
+	// EXPIRED. Strict After() treated the exact-expiry instant as still valid,
+	// which is the wrong direction for a credential check — and it made the
+	// boundary test fail whenever both time.Now() calls landed inside one clock
+	// tick, which is exactly when the equality case arises.
+	return !threshold.Before(t.ExpiresAt)
 }
 
 // Auth validation functions (IsAuthenticated, IsAuthenticatedForEndpoint,
@@ -399,7 +411,14 @@ func (c *AuthClient) GetTokenForEndpoint(ep string) (*StoredToken, error) {
 	if envTok != nil {
 		return envTok, nil
 	}
+	return c.storedTokenForEndpoint(ep)
+}
 
+// storedTokenForEndpoint loads the token saved in auth.json for ep, ignoring
+// SAGEOX_TOKEN. Only revocation needs it: an env token shadows a stored login
+// on the same endpoint, and that login must still be revoked before it is
+// deleted. ep must already be normalized.
+func (c *AuthClient) storedTokenForEndpoint(ep string) (*StoredToken, error) {
 	authPath, err := c.GetAuthFilePath()
 	if err != nil {
 		return nil, err
@@ -490,6 +509,91 @@ func (c *AuthClient) RemoveTokenForEndpoint(ep string) error {
 		delete(store.Tokens, ep)
 		return h.save(store)
 	}, legacyOpt, trackerOpt)
+}
+
+// removeTokenIfUnchanged deletes ep's stored login only if it is still want,
+// the login the caller revoked (nil if none was stored). Checking and deleting
+// under one write lock keeps a login saved meanwhile, by a concurrent `ox login`
+// or a daemon token refresh, from being deleted without ever being revoked: it
+// is kept and ErrLoginChanged is returned. A login already removed is not a
+// change. ep must already be normalized.
+func (c *AuthClient) removeTokenIfUnchanged(ep string, want *StoredToken) error {
+	authPath, err := c.GetAuthFilePath()
+	if err != nil {
+		return err
+	}
+
+	legacyOpt := withLegacyMigrationEndpoint(c.endpoint)
+	trackerOpt := withEndpointTracker(c)
+	return withAuthFileLocked(authPath, func(h *authFileHandle) error {
+		store, loadErr := h.load()
+		if loadErr != nil {
+			return loadErr
+		}
+		cur, exists := store.Tokens[ep]
+		if !exists {
+			return nil // nothing to remove
+		}
+		if cur != nil && (want == nil || !sameCredential(cur, want)) {
+			return ErrLoginChanged
+		}
+		delete(store.Tokens, ep)
+		return h.save(store)
+	}, legacyOpt, trackerOpt)
+}
+
+// saveTokenIfUnchanged stores to as ep's login only if the entry still holds
+// from, the login a token refresh started from. A refresh waits seconds on the
+// server; saving blindly afterwards would bring back a login `ox logout`
+// deleted meanwhile, or overwrite one a concurrent `ox login` or refresh saved.
+// Checking and saving under one write lock leaves both alone.
+//
+// It returns the login stored for ep when it is done: to if it was saved, the
+// login that replaced from if the entry changed, or nil if the entry is gone.
+// ep must already be normalized.
+func (c *AuthClient) saveTokenIfUnchanged(ep string, from, to *StoredToken) (*StoredToken, error) {
+	authPath, err := c.GetAuthFilePath()
+	if err != nil {
+		return nil, err
+	}
+	return saveTokenIfUnchangedAt(authPath, ep, from, to, withLegacyMigrationEndpoint(c.endpoint), withEndpointTracker(c))
+}
+
+// saveTokenForEndpointIfUnchanged is saveTokenIfUnchanged for the package-level
+// refresh, which has no AuthClient.
+func saveTokenForEndpointIfUnchanged(ep string, from, to *StoredToken) (*StoredToken, error) {
+	authPath, err := GetAuthFilePath()
+	if err != nil {
+		return nil, err
+	}
+	return saveTokenIfUnchangedAt(authPath, endpoint.NormalizeEndpoint(ep), from, to)
+}
+
+// saveTokenIfUnchangedAt implements saveTokenIfUnchanged for the auth file at
+// authPath.
+func saveTokenIfUnchangedAt(authPath, ep string, from, to *StoredToken, opts ...authFileOption) (*StoredToken, error) {
+	var stored *StoredToken
+	err := withAuthFileLocked(authPath, func(h *authFileHandle) error {
+		store, loadErr := h.load()
+		if loadErr != nil {
+			return loadErr
+		}
+		cur := store.Tokens[ep]
+		if cur == nil || !sameCredential(cur, from) {
+			stored = cur
+			return nil
+		}
+		store.Tokens[ep] = to
+		if err := h.save(store); err != nil {
+			return err
+		}
+		stored = to
+		return nil
+	}, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return stored, nil
 }
 
 // IsAuthenticated checks if a locally valid token exists for this client's endpoint.

@@ -1,5 +1,7 @@
 # GitHub Activity Assembly — Discussion Summary & Decisions
 
+> **Distill integration superseded — 2026-09-09:** `ox distill` has been removed. The activity assembly design remains relevant to `ox code activity`; descriptions of the distill pipeline below record the former integration and are not current CLI guidance.
+
 ## Goal
 
 Construct preprocessed GitHub event clusters from CodeDB that feed into the

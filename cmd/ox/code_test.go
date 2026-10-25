@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/codedb/search"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFormatIndexTiming(t *testing.T) {
@@ -175,11 +181,14 @@ func TestCodeStatusDisplay_EmptyIndex(t *testing.T) {
 	var codeStats *daemon.CodeDBStats // nil = no daemon running
 
 	// Evaluate the switch conditions in order, matching codeStatusCmd logic.
+	// daemonIndexing folds in the ledger index's flag; codeStats is nil here,
+	// so it is false and the branch order is what is under test.
+	daemonIndexing := codeStats != nil && codeStats.IndexingNow
 	var statusCase string
 	switch {
-	case !indexExists && (codeStats == nil || !codeStats.IndexingNow):
+	case !indexExists && !daemonIndexing:
 		statusCase = "not-indexed"
-	case codeStats != nil && codeStats.IndexingNow:
+	case daemonIndexing:
 		statusCase = "indexing"
 	case codeStats != nil && codeStats.LastError != "" && totalCommits == 0:
 		statusCase = "pending"
@@ -195,6 +204,222 @@ func TestCodeStatusDisplay_EmptyIndex(t *testing.T) {
 
 	assert.Equal(t, "empty-index", statusCase,
 		"index dir exists with 0 commits and no daemon must show 'empty index', not 'indexed'")
+}
+
+// --- Batch 2 ergonomic surfaces (R6/R7/R9) ---
+// Tests guard agent-facing behavior: snippet width, JIT DSL hint, and the
+// structured index-not-ready response. Failure of any of these regresses the
+// signal agents use to decide between ox code and grep.
+
+func TestIsBareQuery(t *testing.T) {
+	tests := []struct {
+		q    string
+		want bool
+	}{
+		// bare — single search term, no DSL
+		{"authenticate", true},
+		{"ResolveSession", true},
+		{"  spaces-trimmed  ", true},
+
+		// non-bare — DSL filter present
+		{"authenticate type:symbol", false},
+		{"calls:Handler", false},
+		{`message:"fix bug"`, false},
+
+		// non-bare — boolean / regex
+		{"foo OR bar", false},
+		{"/Resolve[A-Z]\\w+/", false},
+
+		// empty / whitespace — explicitly NOT bare (no useful hint to give)
+		{"", false},
+		{"   ", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.q, func(t *testing.T) {
+			assert.Equal(t, tt.want, isBareQuery(tt.q))
+		})
+	}
+}
+
+func TestCompactSearchResults_SnippetDefaultIs200(t *testing.T) {
+	long := strings.Repeat("a", 400)
+	results := []search.Result{{FilePath: "f.go", Line: 1, Content: long}}
+	resp := compactSearchResults(results, 10, 0, nil)
+	require.Len(t, resp.Results, 1)
+	// 200 chars + ellipsis
+	assert.True(t, strings.HasSuffix(resp.Results[0].Snippet, "…"),
+		"snippet must be truncated with ellipsis")
+	// runes, not bytes — but ASCII so equivalent here
+	assert.Equal(t, defaultSnippetLen+len("…"), len(resp.Results[0].Snippet),
+		"default snippet length must be defaultSnippetLen (%d)", defaultSnippetLen)
+}
+
+func TestCompactSearchResults_SnippetOverride(t *testing.T) {
+	long := strings.Repeat("b", 400)
+	results := []search.Result{{FilePath: "f.go", Line: 1, Content: long}}
+	resp := compactSearchResults(results, 10, 80, nil)
+	require.Len(t, resp.Results, 1)
+	assert.Equal(t, 80+len("…"), len(resp.Results[0].Snippet),
+		"--snippet override must apply per-call")
+}
+
+func TestCompactSearchResults_NoJITHintInResponse(t *testing.T) {
+	// compactSearchResults itself does not append the JIT hint — the RunE
+	// caller does, because it has access to the raw query. We document the
+	// boundary here so future refactors don't accidentally double-append.
+	results := []search.Result{{FilePath: "f.go", Line: 1, Content: "anything"}}
+	resp := compactSearchResults(results, 10, 0, nil)
+	assert.Empty(t, resp.Guidance, "compactSearchResults must not add JIT hint on its own")
+}
+
+func TestCompactSearchResults_PagingGuidance(t *testing.T) {
+	// 12 results, limit 10 — guidance must explain how to see the rest.
+	var results []search.Result
+	for i := 0; i < 12; i++ {
+		results = append(results, search.Result{FilePath: "f.go", Line: i + 1, Content: "x"})
+	}
+	resp := compactSearchResults(results, 10, 0, nil)
+	assert.Len(t, resp.Results, 10)
+	assert.Equal(t, 12, resp.Total)
+	assert.Contains(t, resp.Guidance, "Showing 10 of 12")
+	assert.Contains(t, resp.Guidance, "--limit")
+}
+
+func TestEmitIndexNotReadyJSON_Indexing(t *testing.T) {
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+
+	err := emitIndexNotReadyJSON(cmd, indexStatusIndexing,
+		"Code index is currently being built.",
+		"Use grep until ready.")
+	require.NoError(t, err)
+
+	var got indexNotReadyResponse
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+	assert.Equal(t, "indexing", got.Status)
+	assert.Contains(t, got.Message, "Code index")
+	assert.Contains(t, got.FallbackHint, "grep")
+}
+
+func TestEmitIndexNotReadyJSON_NotIndexed(t *testing.T) {
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+
+	err := emitIndexNotReadyJSON(cmd, indexStatusNotIndexed,
+		"No code index found.",
+		"Run 'ox code index' first.")
+	require.NoError(t, err)
+
+	var got indexNotReadyResponse
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+	assert.Equal(t, "not_indexed", got.Status)
+	assert.Contains(t, got.FallbackHint, "ox code index")
+}
+
+// --- compactSnippet rune-aware truncation (UTF-8 safety) ---
+
+func TestCompactSnippet_RuneAware_ASCII(t *testing.T) {
+	// Pure ASCII falls through with the same behavior as the original
+	// byte-slice path; 1 byte == 1 rune.
+	got := compactSnippet(strings.Repeat("a", 250), 200)
+	require.True(t, strings.HasSuffix(got, "…"))
+	assert.Equal(t, 200+len("…"), len(got), "ASCII: byte length tracks rune count")
+}
+
+func TestCompactSnippet_RuneAware_MultibyteUTF8(t *testing.T) {
+	// "λ" is 2 bytes per rune; 100 λ-runes is 200 bytes.
+	in := strings.Repeat("λ", 250)
+	got := compactSnippet(in, 100)
+
+	// Must end at a valid rune boundary — never produce invalid UTF-8.
+	assert.True(t, strings.HasSuffix(got, "…"), "must append ellipsis when truncated")
+	stripped := strings.TrimSuffix(got, "…")
+	// Each λ is exactly 2 bytes
+	assert.Equal(t, 200, len(stripped), "100 runes × 2 bytes/rune = 200 bytes")
+	// And rune count is exactly 100
+	count := 0
+	for range stripped {
+		count++
+	}
+	assert.Equal(t, 100, count, "must hold exactly maxLen runes")
+}
+
+func TestCompactSnippet_RuneAware_Emoji(t *testing.T) {
+	// "🤖" is 4 bytes per rune. Byte truncation at an odd offset would
+	// produce invalid UTF-8 and break JSON encoding downstream.
+	in := strings.Repeat("🤖", 50)
+	got := compactSnippet(in, 10)
+	// Strip ellipsis (3 bytes), expect 10 runes × 4 bytes = 40 bytes.
+	stripped := strings.TrimSuffix(got, "…")
+	assert.Equal(t, 40, len(stripped))
+	// And valid UTF-8 (rune iteration completes without invalid bytes).
+	count := 0
+	for range stripped {
+		count++
+	}
+	assert.Equal(t, 10, count)
+}
+
+func TestCompactSnippet_RuneAware_NoTruncationNeeded(t *testing.T) {
+	// Under the limit — should pass through unchanged, no ellipsis.
+	got := compactSnippet("short", 100)
+	assert.Equal(t, "short", got)
+	got = compactSnippet(strings.Repeat("λ", 10), 100)
+	assert.Equal(t, strings.Repeat("λ", 10), got)
+}
+
+// --- verb-arg validation (DSL-injection defense) ---
+
+func TestValidateSymbolArg_AcceptsCleanIdentifiers(t *testing.T) {
+	for _, ok := range []string{"authenticate", "ResolveSession", "foo_bar", "func123", "x"} {
+		assert.NoError(t, validateSymbolArg("test", ok), "must accept %q", ok)
+	}
+}
+
+func TestValidateSymbolArg_RejectsDSLInjection(t *testing.T) {
+	bad := []string{
+		"foo calledby:bar", // whitespace + colon — would inject second filter
+		"foo bar",          // whitespace — would re-tokenize
+		"foo:bar",          // colon — would be parsed as filter
+		`"quoted"`,         // quote — would short-circuit tokenizer
+		"foo\ttab",         // tab — whitespace variant
+		"foo\nnewline",     // newline — whitespace variant
+		"foo'apostrophe",   // single quote — DSL delimiter
+	}
+	for _, b := range bad {
+		assert.Error(t, validateSymbolArg("test", b), "must reject %q", b)
+	}
+}
+
+func TestValidateSymbolArg_RejectsEmpty(t *testing.T) {
+	assert.Error(t, validateSymbolArg("test", ""))
+}
+
+func TestValidatePathArg_AcceptsPaths(t *testing.T) {
+	for _, ok := range []string{"cmd/ox/code.go", "internal/", ".", "a/b/c-d.go", "internal/codedb/store/schema.go"} {
+		assert.NoError(t, validatePathArg("log", ok), "must accept %q", ok)
+	}
+}
+
+func TestValidatePathArg_RejectsDSLInjection(t *testing.T) {
+	bad := []string{
+		"cmd/ox/code.go author:foo",
+		"path with spaces",
+		`path"quote`,
+		"path:colon",
+	}
+	for _, b := range bad {
+		assert.Error(t, validatePathArg("log", b), "must reject %q", b)
+	}
+}
+
+func TestIndexStatusConstants_AreStable(t *testing.T) {
+	// Agent-side consumers branch on these strings; lock them in so a future
+	// rename doesn't silently break callers parsing the JSON.
+	assert.Equal(t, "indexing", indexStatusIndexing)
+	assert.Equal(t, "not_indexed", indexStatusNotIndexed)
 }
 
 func TestFormatDurationBrief(t *testing.T) {

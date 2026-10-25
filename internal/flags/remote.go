@@ -34,6 +34,15 @@ type CLIFeatures struct {
 	AutoDistill *bool `json:"auto_distill,omitempty"`
 	TUI         *bool `json:"tui,omitempty"`
 	Attest      *bool `json:"attest,omitempty"`
+	Trace       *bool `json:"trace,omitempty"`
+	// Bulletin is the server-enrolled pilot gate for `ox bulletin`. The server
+	// evaluates it per person. JSON null (a team service token has no person to
+	// evaluate) and an absent key both decode to nil ("no opinion"), so either
+	// one falls through to the default-off value.
+	Bulletin *bool `json:"bulletin,omitempty"`
+	// GitHubMirror gates the daemon's GitHub mirror relay (epic ox-zjuv).
+	// Server-evaluated, default off, no env override — same shape as Bulletin.
+	GitHubMirror *bool `json:"github_mirror,omitempty"`
 }
 
 // CLIKillswitches contains server-evaluated kill switch values.
@@ -65,6 +74,9 @@ func RemoteSettingsToPatch(r *CLISettingsResponse) *Patch {
 		AutoDistill:            r.Features.AutoDistill,
 		TUIEnabled:             r.Features.TUI,
 		AttestEnabled:          r.Features.Attest,
+		TraceEnabled:           r.Features.Trace,
+		BulletinEnabled:        r.Features.Bulletin,
+		GitHubMirrorEnabled:    r.Features.GitHubMirror,
 		DisableFileDeleteTools: boolPtr(r.Killswitches.DisableFileDeleteTools),
 		DisableShellExecTools:  boolPtr(r.Killswitches.DisableShellExecTools),
 		PrimeAppend:            strPtr(r.PrimeAppend),

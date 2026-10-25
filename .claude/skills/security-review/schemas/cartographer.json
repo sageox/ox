@@ -1,0 +1,39 @@
+{
+  "type": "object",
+  "properties": {
+    "entry_points": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {"type": "string", "enum": ["cobra-command", "daemon-ipc", "daemon-task", "http", "filesystem", "stdin", "hook", "other"]},
+          "name": {"type": "string"},
+          "file": {"type": "string"},
+          "line": {"type": "integer"},
+          "gate": {"type": "string"},
+          "intent": {"type": "string"},
+          "reaches_changed": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["kind", "name", "file"]
+      }
+    },
+    "sinks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "class": {"type": "string"},
+          "file": {"type": "string"},
+          "line": {"type": "integer"},
+          "detail": {"type": "string"},
+          "reached_from": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["class", "file"]
+      }
+    },
+    "trust_boundaries": {"type": "array", "items": {"type": "string"}},
+    "high_value_paths": {"type": "array", "items": {"type": "string"}},
+    "notes": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["entry_points", "sinks"]
+}

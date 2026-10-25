@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/spf13/cobra"
 )
@@ -121,10 +124,36 @@ func runSessionCommit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// stage session files
-	addCmd := exec.Command("git", "-C", projectRoot, "add", sessionsDir)
-	if err := addCmd.Run(); err != nil {
+	// refuse before `git add`, which would mark a conflict resolved with its markers (#1055)
+	if unmerged := parseUnmergedPaths(string(output)); len(unmerged) > 0 {
+		return fmt.Errorf("refusing to commit: %d unresolved conflict(s) in %s, e.g. %s; resolve them by hand (git status, then git checkout --ours/--theirs <file>) and rerun",
+			len(unmerged), sessionsDir, unmerged[0].Path)
+	}
+	// a conflict already `git add`ed by hand is stage-0 but still carries its markers
+	marked, err := sessionFileWithConflictMarkers(projectRoot, sessionsDir)
+	if err != nil {
+		return fmt.Errorf("failed to check session files for conflict markers: %w", err)
+	}
+	if marked != "" {
+		return fmt.Errorf("refusing to commit: %s still contains conflict markers; remove them by hand and rerun", marked)
+	}
+
+	// stage session files one by one: hydrated artifacts must never reach the commit as raw
+	// content where the Ledger expects an LFS pointer (#1174)
+	guard := newSessionStageGuard(projectRoot, sessionsDir)
+	staged, err := guard.stage(context.Background())
+	if err != nil {
 		return fmt.Errorf("failed to stage sessions: %w", err)
+	}
+	if len(staged.Restored) > 0 {
+		fmt.Printf("  %s\n", cli.StyleDim.Render(fmt.Sprintf("%d hydrated session file(s) restored to LFS pointers (local copies kept in the cache)", len(staged.Restored))))
+	}
+	if len(staged.Skipped) > 0 {
+		cli.PrintWarning(fmt.Sprintf("%d session file(s) hold raw content with no known LFS OID and were not committed, e.g. %s", len(staged.Skipped), staged.Skipped[0]))
+	}
+	if len(staged.Stage) == 0 {
+		fmt.Println(cli.StyleDim.Render("No session changes are safe to commit."))
+		return nil
 	}
 
 	// build commit message
@@ -144,8 +173,15 @@ func runSessionCommit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// commit
-	commitCmd := exec.Command("git", "-C", projectRoot, "commit", "-m", commitMsg)
+	// commit only the vetted session paths, so the user's other staged files stay staged
+	// and a skipped hydrated file is not swept in by a directory pathspec
+	var pathspec bytes.Buffer
+	for _, rel := range staged.Stage {
+		pathspec.WriteString(rel)
+		pathspec.WriteByte(0)
+	}
+	commitCmd := exec.Command("git", "-C", projectRoot, "commit", "-m", commitMsg, "--pathspec-from-file=-", "--pathspec-file-nul")
+	commitCmd.Stdin = &pathspec
 	commitOutput, err := commitCmd.CombinedOutput()
 	if err != nil {
 		// check if nothing to commit
@@ -174,6 +210,42 @@ func runSessionCommit(cmd *cobra.Command, args []string) error {
 	cli.PrintHint("Run 'ox sync' to push changes to remote")
 
 	return nil
+}
+
+// sessionFileWithConflictMarkers returns the first session file `git add` would stage whose
+// working-tree content has conflict markers: changed and untracked files, plus files already
+// staged by hand. git lists them relative to projectRoot, which need not be the repo root,
+// and -z keeps unusual names unquoted.
+func sessionFileWithConflictMarkers(projectRoot, sessionsDir string) (string, error) {
+	listings := [][]string{
+		{"ls-files", "-z", "--modified", "--others", "--exclude-standard", "--", sessionsDir},
+		{"diff", "--cached", "--name-only", "-z", "--relative", "--diff-filter=d", "--", sessionsDir},
+	}
+	for _, args := range listings {
+		out, err := exec.Command("git", append([]string{"-C", projectRoot}, args...)...).Output()
+		if err != nil {
+			return "", fmt.Errorf("git %s: %w", args[0], err)
+		}
+		for _, rel := range strings.Split(string(out), "\x00") {
+			if rel == "" {
+				continue
+			}
+			path := filepath.Join(projectRoot, rel)
+			// regular files only: a deleted file has nothing to scan, git commits a symlink as
+			// the link itself, and a FIFO or device must never be read
+			if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			has, err := gitutil.HasConflictMarkers(path)
+			if err != nil {
+				return "", err
+			}
+			if has {
+				return path, nil
+			}
+		}
+	}
+	return "", nil
 }
 
 // contains checks if a string slice contains a value

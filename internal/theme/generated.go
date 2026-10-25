@@ -2,7 +2,7 @@
 //
 // Source: https://github.com/sageox/sageox-design
 // Token file: tokens/colors.yaml
-// Generated: 2026-01-10
+// Generated: 2026-08-25
 // Regenerate: cd ../sageox-design && npm run sync
 //
 // This file provides the unified SageOx brand color palette for CLI output.
@@ -17,36 +17,36 @@ import (
 
 // Brand colors
 const (
-	BrandPrimary   = "#7a8f78"
-	BrandSecondary = "#c47a4a"
+	BrandPrimary   = "#7aaa77"
+	BrandSecondary = "#adcfa3"
 	BrandNeutral   = "#111518"
 )
 
 // Adaptive colors for light/dark terminal detection
 var (
 	ColorPrimary = compat.AdaptiveColor{
-		Light: lipgloss.Color("#4F6A48"),
-		Dark:  lipgloss.Color("#7A8F78"),
+		Light: lipgloss.Color("#3D643B"),
+		Dark:  lipgloss.Color("#7AAA77"),
 	}
 	ColorSecondary = compat.AdaptiveColor{
-		Light: lipgloss.Color("#B87D3A"),
-		Dark:  lipgloss.Color("#E0A56A"),
+		Light: lipgloss.Color("#324F31"),
+		Dark:  lipgloss.Color("#ADCFA3"),
 	}
 	ColorAccent = compat.AdaptiveColor{
-		Light: lipgloss.Color("#3D5437"),
-		Dark:  lipgloss.Color("#8FA888"),
+		Light: lipgloss.Color("#4E7D4C"),
+		Dark:  lipgloss.Color("#99C693"),
 	}
 	ColorSuccess = compat.AdaptiveColor{
-		Light: lipgloss.Color("#4F6A48"),
-		Dark:  lipgloss.Color("#7A8F78"),
+		Light: lipgloss.Color("#3D643B"),
+		Dark:  lipgloss.Color("#7AAA77"),
 	}
 	ColorWarning = compat.AdaptiveColor{
-		Light: lipgloss.Color("#B87D3A"),
-		Dark:  lipgloss.Color("#E0A56A"),
+		Light: lipgloss.Color("#A5842F"),
+		Dark:  lipgloss.Color("#D9B654"),
 	}
 	ColorError = compat.AdaptiveColor{
-		Light: lipgloss.Color("#A03030"),
-		Dark:  lipgloss.Color("#E07070"),
+		Light: lipgloss.Color("#9F4838"),
+		Dark:  lipgloss.Color("#D77E6C"),
 	}
 	ColorInfo = compat.AdaptiveColor{
 		Light: lipgloss.Color("#5580A0"),
@@ -92,14 +92,14 @@ const (
 
 // Hex color constants (dark terminal/theme optimized)
 const (
-	HexPrimary   = "#7A8F78"
-	HexSecondary = "#E0A56A"
-	HexAccent    = "#8FA888"
+	HexPrimary   = "#7AAA77"
+	HexSecondary = "#ADCFA3"
+	HexAccent    = "#99C693"
 	HexInfo      = "#7FA7C8"
-	HexPass      = "#7A8F78"
-	HexWarn      = "#E0A56A"
-	HexFail      = "#C44747"
-	HexError     = "#E07070"
+	HexPass      = "#7AAA77"
+	HexWarn      = "#D9B654"
+	HexFail      = "#D77E6C"
+	HexError     = "#D77E6C"
 	HexMuted     = "#6F767C"
 	HexText      = "#E6E8E6"
 	HexTextDim   = "#7E8784"
@@ -115,14 +115,14 @@ const (
 
 // Hex color constants (light terminal/theme optimized)
 const (
-	HexLightPrimary   = "#5A7558"
-	HexLightSecondary = "#B8824A"
-	HexLightAccent    = "#4A7A9C"
-	HexLightInfo      = "#4A7A9C"
-	HexLightPass      = "#5A7558"
-	HexLightWarn      = "#B8824A"
-	HexLightFail      = "#A33636"
-	HexLightError     = "#A33636"
+	HexLightPrimary   = "#3D643B"
+	HexLightSecondary = "#324F31"
+	HexLightAccent    = "#4E7D4C"
+	HexLightInfo      = "#5580A0"
+	HexLightPass      = "#3D643B"
+	HexLightWarn      = "#A5842F"
+	HexLightFail      = "#9F4838"
+	HexLightError     = "#9F4838"
 	HexLightMuted     = "#5A6066"
 	HexLightText      = "#1A1A1A"
 	HexLightTextDim   = "#5A6066"

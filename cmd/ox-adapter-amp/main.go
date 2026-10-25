@@ -5,10 +5,12 @@
 //
 //  1. an AGENTS.md "ox prime" marker block so the model knows to run
 //     `ox agent prime` at session start, and
-//  2. a Bun plugin at ~/.config/amp/plugins/ox-bridge.ts (embedded via
-//     Go's embed package, installed user-globally so one plugin serves
-//     every project) that subscribes to Amp's plugin events and writes a
-//     per-thread JSONL sidecar to ~/.cache/amp/ox-sessions/<thread-id>.jsonl.
+//  2. a Bun plugin, ox-bridge.ts, in Amp's system plugin dir
+//     ($XDG_CONFIG_HOME/amp/plugins/, else ~/.config/amp/plugins/; see
+//     userBridgePluginPath). It is embedded via Go's embed package and
+//     installed user-globally so one plugin serves every project; it
+//     subscribes to Amp's plugin events and writes a per-thread JSONL
+//     sidecar to ~/.cache/amp/ox-sessions/<thread-id>.jsonl.
 //
 // The adapter discovers and tails those sidecar files via FindSession +
 // Serve. For pre-2026 Amp installs that wrote ~/.amp/sessions/*.jsonl
@@ -84,14 +86,17 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		DisplayName:     adapterDisplay,
 		Version:         adapterVersion,
 		Type:            adapterprotocol.TypeSession,
-		Capabilities: []string{
-			adapterprotocol.CapSessionReader,
-			adapterprotocol.CapSessionImporter,
-			adapterprotocol.CapHookInstaller,
-			adapterprotocol.CapIncrementalReader,
-			adapterprotocol.CapFileWatcher,
-			adapterprotocol.CapServeMode,
-		},
+		Capabilities:    adapterprotocol.AmpCapabilities,
+		// Amp reads .agents/skills and .claude/skills; the canonical root is the one we write.
+		// One root, never a fan-out: a skill copied into several of an agent's
+		// discovery paths is several files to keep in sync and several answers
+		// when they drift. CanonicalizeTargets folds this key across adapters, so
+		// selecting Codex and Amp together still yields one directory.
+		SkillTargets: []adapterprotocol.SkillTarget{{
+			Key: "agents-project", Root: ".agents/skills",
+			Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject,
+			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+		}},
 		HookEnvValues: []string{"amp"},
 		ServeMode:     true,
 	}, nil

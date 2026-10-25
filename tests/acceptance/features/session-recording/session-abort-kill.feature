@@ -45,3 +45,12 @@ Feature: Aborting a Session is a Total Kill
       When Avery aborts using only a partial name that matches it
       Then ox refuses and asks for the exact session name
       And the teammate's finalized session is left untouched
+
+  Rule: A name that is not a single session never deletes anything
+
+    Scenario: Avery passes ".." as the session name
+      Given a teammate's finalized session exists in the shared Ledger
+      And Devon has sessions recorded on his machine
+      When Avery aborts or deletes the session named ".." with --force
+      Then ox refuses the name
+      And every session in the Ledger and on Devon's machine is left untouched

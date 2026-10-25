@@ -1,0 +1,56 @@
+{
+  "module": "github.com/sageox/ox/",
+  "changed_line_coverage": {
+    "minimum": 90.0,
+    "excluded_paths": [
+      "**/*_generated.go",
+      "tests/**",
+      "**/testdata/**"
+    ],
+    "exceptions": []
+  },
+  "packages": [
+    {
+      "path": "cmd/ox/",
+      "recursive": false,
+      "minimum": 49.0,
+      "reason": "Primary CLI orchestration and user-facing failure handling"
+    },
+    {
+      "path": "internal/daemon/",
+      "recursive": false,
+      "minimum": 63.5,
+      "reason": "Sync, IPC, retry, and recovery orchestration"
+    },
+    {
+      "path": "internal/codedb/index/",
+      "recursive": false,
+      "minimum": 68.0,
+      "reason": "Repository indexing and recovery boundary"
+    },
+    {
+      "path": "internal/dashboard/state/",
+      "recursive": false,
+      "minimum": 54.0,
+      "reason": "Pure dashboard state and reducer invariants"
+    },
+    {
+      "path": "internal/session/",
+      "recursive": false,
+      "minimum": 81.5,
+      "reason": "Session recording, finalization, redaction, and recovery"
+    },
+    {
+      "path": "internal/daemon/agentwork/",
+      "recursive": false,
+      "minimum": 72.0,
+      "reason": "External AI coworker process, timeout, and output boundary"
+    },
+    {
+      "path": "internal/session/pipeline/",
+      "recursive": false,
+      "minimum": 98.0,
+      "reason": "Durable session copy and upload orchestration"
+    }
+  ]
+}

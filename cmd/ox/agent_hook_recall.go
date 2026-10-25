@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/promptintent"
+	"github.com/sageox/ox/internal/selfexec"
 )
 
 // LocalQueryRunner runs a recall query against the *local* ledger / cache
@@ -213,7 +213,7 @@ func extractPromptText(raw []byte) string {
 type shellLocalQueryRunner struct{}
 
 func (s *shellLocalQueryRunner) Query(ctx context.Context, prompt string, limit int) ([]LocalQueryResult, error) {
-	oxPath, err := os.Executable()
+	oxPath, err := selfexec.Path()
 	if err != nil {
 		return nil, fmt.Errorf("locate ox executable: %w", err)
 	}

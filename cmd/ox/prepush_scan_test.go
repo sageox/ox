@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,59 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSessionSecretGateCannotBypassFailedVerification(t *testing.T) {
+	t.Setenv("OX_ALLOW_SECRETS", "1")
+	for _, amend := range []bool{false, true} {
+		for _, failOn := range []int{1, 2} {
+			ledger := t.TempDir()
+			calls := 0
+			failure := errors.New("synthetic scanner failure")
+			err := runSessionSecretGate(context.Background(), ledger, func() (*PrePushScanResult, error) {
+				calls++
+				if calls == failOn {
+					return nil, failure
+				}
+				return &PrePushScanResult{Findings: []PrePushFinding{{Detector: "synthetic", Path: "sessions/unrecoverable.txt", Line: 1}}}, nil
+			}, amend)
+			if !errors.Is(err, failure) {
+				t.Error("failed scan did not block publication despite override environment")
+			}
+		}
+	}
+}
+
+func TestSessionSecretGateRequiresVerifiedCleanAfterQuarantine(t *testing.T) {
+	t.Setenv("OX_ALLOW_SECRETS", "")
+	calls := 0
+	err := runSessionSecretGate(context.Background(), t.TempDir(), func() (*PrePushScanResult, error) {
+		calls++
+		return &PrePushScanResult{Findings: []PrePushFinding{{Detector: "synthetic", Path: "sessions/unrecoverable.txt", Line: 1}}}, nil
+	}, false)
+	if err == nil {
+		t.Error("publication accepted without a verified clean final scan")
+	}
+	if calls != 3 {
+		t.Errorf("scanner calls = %d, want final post-quarantine verification", calls)
+	}
+}
+
+func TestScanPathsRefusesUninspectableSessionContent(t *testing.T) {
+	t.Run("stat failure", func(t *testing.T) {
+		ledger := t.TempDir()
+		path := filepath.Join(ledger, "sessions", "unreadable.jsonl")
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0700))
+		require.NoError(t, os.Symlink("unreadable.jsonl", path))
+		_, err := scanPaths(ledger, []string{"sessions/unreadable.jsonl"})
+		if err == nil {
+			t.Fatal("uninspectable session path was silently accepted")
+		}
+	})
+	t.Run("legitimate deletion", func(t *testing.T) {
+		_, err := scanPaths(t.TempDir(), []string{"sessions/deleted.jsonl"})
+		require.NoError(t, err)
+	})
+}
 
 // makeLedgerWithCommit creates a git repo, makes an initial commit on main,
 // configures origin to point at a bare clone (so origin/main resolves), then
@@ -22,10 +76,9 @@ func makeLedgerWithCommit(t *testing.T, files map[string]string) string {
 	tmp := t.TempDir()
 	bare := filepath.Join(tmp, "bare.git")
 	work := filepath.Join(tmp, "work")
-	require.NoError(t, os.MkdirAll(bare, 0755))
 	require.NoError(t, os.MkdirAll(work, 0755))
 
-	mustGit(t, bare, "init", "--bare", "--initial-branch=main")
+	initBareRemote(t, bare, "--initial-branch=main")
 	mustGit(t, work, "init", "--initial-branch=main")
 	mustGit(t, work, "config", "user.email", "test@example.com")
 	mustGit(t, work, "config", "user.name", "test")
@@ -54,6 +107,53 @@ func mustGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
 	require.NoErrorf(t, err, "git %s: %s", strings.Join(args, " "), string(out))
+}
+
+// A read failure must keep both session uploads and ledger pushes pending.
+func TestSessionSecretGate_ScanErrorsKeepUploadsPending(t *testing.T) {
+	t.Setenv("OX_ALLOW_SECRETS", "")
+	for _, mode := range []struct {
+		name        string
+		amendCommit bool
+	}{
+		{name: "upload"},
+		{name: "existing_push", amendCommit: true},
+	} {
+		for _, phase := range []struct {
+			name   string
+			failOn int
+		}{
+			{name: "initial_scan", failOn: 1},
+			{name: "rescan", failOn: 2},
+		} {
+			t.Run(mode.name+"/"+phase.name, func(t *testing.T) {
+				ledger := t.TempDir()
+				const rel = "sessions/scan-error/summary.md"
+				path := filepath.Join(ledger, filepath.FromSlash(rel))
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+				require.NoError(t, os.WriteFile(path, []byte("AKIAIOSFODNN7EXAMPLE\n"), 0o600))
+				calls := 0
+				var scanErr error
+				err := runSessionSecretGate(context.Background(), ledger, func() (*PrePushScanResult, error) {
+					calls++
+					if calls == phase.failOn {
+						// Simulate a filesystem change between preparation and reading.
+						// A directory fails to scan on every supported platform.
+						require.NoError(t, os.Remove(path))
+						require.NoError(t, os.Mkdir(path, 0o700))
+					}
+					result, err := scanPaths(ledger, []string{rel})
+					if err != nil {
+						scanErr = err
+					}
+					return result, err
+				}, mode.amendCommit)
+				require.Error(t, scanErr, "the filesystem failure must reach the scanner")
+				assert.Equal(t, phase.failOn, calls)
+				require.ErrorIs(t, err, scanErr, "uninspected content must not reach publication")
+			})
+		}
+	}
 }
 
 // TestScanPrePushForSecrets_FindsAwsKey is the load-bearing test: a planted
@@ -118,56 +218,29 @@ func TestScanPrePushForSecrets_ScansOnlyDiffFiles(t *testing.T) {
 	}
 }
 
-// TestRunPrePushSecretGate_NeverBlocks_FlatPathNoOpsRecovery covers the
-// degenerate-path case (file directly under sessions/ with no session
-// subdir). After ox-y3ok, neither auto-redact nor quarantine recognize
-// that shape (splitSessionPath returns ok=false), but the gate still
-// MUST return nil — that's the load-bearing "never block" invariant.
-//
-// Failure prevented: a malformed session path causes the gate to error
-// and block routine pushes because the recovery path can't run.
-func TestRunPrePushSecretGate_NeverBlocks_FlatPathNoOpsRecovery(t *testing.T) {
+// Malformed paths that recovery cannot recognize still block publication.
+func TestRunPrePushSecretGate_BlocksUnrecoverableFlatPath(t *testing.T) {
 	t.Setenv("OX_ALLOW_SECRETS", "")
 	work := makeLedgerWithCommit(t, map[string]string{
 		"sessions/leak.jsonl": "token=ghp_alphabetabcdefghijklmnopqrstuvwxyz12\n",
 	})
-
-	err := runPrePushSecretGate(context.Background(), work)
-	assert.NoError(t, err, "gate must NEVER return an error; recovery may no-op but push proceeds")
+	require.Error(t, runPrePushSecretGate(context.Background(), work))
 }
 
-// TestRunPrePushSecretGate_AllowSecretsOverride verifies the env-var
-// override still short-circuits the recovery pipeline. Under the
-// never-block policy this is just a faster path: no scan, no
-// auto-redact, no quarantine — publish as-is per user request.
-func TestRunPrePushSecretGate_AllowSecretsOverride(t *testing.T) {
+func TestRunPrePushSecretGate_OverrideCannotBypassVerification(t *testing.T) {
 	t.Setenv("OX_ALLOW_SECRETS", "1")
 	work := makeLedgerWithCommit(t, map[string]string{
 		"sessions/leak.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
 	})
-
-	err := runPrePushSecretGate(context.Background(), work)
-	assert.NoError(t, err, "OX_ALLOW_SECRETS=1 must allow push")
+	require.Error(t, runPrePushSecretGate(context.Background(), work), "legacy environment override must not publish credentials")
 }
 
-// TestPrePushScanner_SkipsBinaryExtensions verifies binary blobs are skipped.
-// Without this, the scanner spends time running regexes against PNG bytes
-// — high cost, zero signal. Worse, by random luck a PNG could trip a
-// detector and false-positive a Ledger.
-func TestPrePushScanner_SkipsBinaryExtensions(t *testing.T) {
-	// Use bytes that contain a substring matching an AWS key on plain regex —
-	// proves the skip works (otherwise this PNG would be flagged).
+func TestPrePushScanner_InspectsBinaryExtensions(t *testing.T) {
 	bin := []byte("\x89PNG\r\n\x1a\nAKIAIOSFODNN7EXAMPLE")
-	work := makeLedgerWithCommit(t, map[string]string{
-		"sessions/img.png": string(bin),
-	})
-
+	work := makeLedgerWithCommit(t, map[string]string{"sessions/img.png": string(bin)})
 	result, err := scanPrePushForSecrets(context.Background(), work)
 	require.NoError(t, err)
-	for _, f := range result.Findings {
-		assert.NotEqual(t, "sessions/img.png", f.Path,
-			"PNG should be skipped, but detector %s fired", f.Detector)
-	}
+	require.NotEmpty(t, result.Findings, "renaming session content must not bypass inspection")
 }
 
 // TestPrePushScanner_NoUpstreamFallsBackToHead verifies the case where the
@@ -206,27 +279,7 @@ func TestFormatPrePushFindings_DoesNotLeakBytes(t *testing.T) {
 	assert.Contains(t, msg, "aws_access_key")
 	assert.Contains(t, msg, "leak.jsonl:42")
 	assert.Contains(t, msg, "ox session audit")
-	assert.Contains(t, msg, "OX_ALLOW_SECRETS=1")
-}
-
-func TestPrePushSecretsAllowed_Truthy(t *testing.T) {
-	cases := map[string]bool{
-		"":      false,
-		"0":     false,
-		"false": false,
-		"no":    false,
-		"OFF":   false,
-		"1":     true,
-		"true":  true,
-		"yes":   true,
-		"y":     true,
-	}
-	for v, want := range cases {
-		t.Run("v="+v, func(t *testing.T) {
-			t.Setenv("OX_ALLOW_SECRETS", v)
-			assert.Equal(t, want, prePushSecretsAllowed())
-		})
-	}
+	assert.NotContains(t, msg, "OX_ALLOW_SECRETS")
 }
 
 // TestScanPrePushForSecrets_OnlyScansSessionsScope is the scope contract.
@@ -321,27 +374,4 @@ func TestFormatPrePushFindings_RecoveryMatchesScannerScope(t *testing.T) {
 	// Today only "sessions/" is in scope.
 	assert.Equal(t, []string{"sessions/"}, prePushScannerScopePrefixes,
 		"scope widened without updating recovery message; see ox-cqdo")
-}
-
-// TestPrePushScanner_LargeFileExceedsCap verifies that files over the size
-// cap are skipped (not scanned and not flagged). Performance budget.
-func TestPrePushScanner_LargeFileExceedsCap(t *testing.T) {
-	// Build a file just past the cap, with the canary at the end so a naive
-	// scanner would catch it.
-	const sz = prePushScannerSizeCap + 1024
-	buf := make([]byte, sz)
-	for i := range buf {
-		buf[i] = 'A'
-	}
-	copy(buf[sz-len("AKIAIOSFODNN7EXAMPLE"):], []byte("AKIAIOSFODNN7EXAMPLE"))
-	work := makeLedgerWithCommit(t, map[string]string{
-		"sessions/huge.txt": string(buf),
-	})
-
-	result, err := scanPrePushForSecrets(context.Background(), work)
-	require.NoError(t, err)
-	for _, f := range result.Findings {
-		assert.NotEqual(t, "sessions/huge.txt", f.Path,
-			"over-cap file should be skipped, but %s fired", f.Detector)
-	}
 }

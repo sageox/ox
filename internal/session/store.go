@@ -27,9 +27,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/sessionid"
+	"github.com/sageox/ox/internal/trace/model"
 )
 
 const (
@@ -131,12 +133,12 @@ func sanitizeFilename(s string) string {
 // Uses session-folder structure: <session>/raw.jsonl
 // The sessionName should be generated using GenerateSessionName().
 func (s *Store) CreateRaw(sessionName string) (*SessionWriter, error) {
-	return s.createSessionSession(sessionName, rawFilename)
+	return s.CreateRawForProject(sessionName, "")
 }
 
-// createSessionSession creates a session file in a session folder.
-// TODO(server-side): move to server-side for MVP+1; client should not write to ledger directly.
-func (s *Store) createSessionSession(sessionName, filename string) (*SessionWriter, error) {
+// CreateRawForProject enforces the project redaction policy at the storage boundary.
+// Callers with workspace context must pass it so malformed custom rules fail closed.
+func (s *Store) CreateRawForProject(sessionName, projectRoot string) (*SessionWriter, error) {
 	if sessionName == "" {
 		return nil, ErrEmptyFilename
 	}
@@ -151,26 +153,24 @@ func (s *Store) createSessionSession(sessionName, filename string) (*SessionWrit
 		return nil, fmt.Errorf("create session dir=%s: %w", sessionPath, err)
 	}
 
-	filePath := filepath.Join(sessionPath, filename)
+	filePath := filepath.Join(sessionPath, rawFilename)
 
-	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	raw, err := NewRawWriter(filePath, projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("create session file=%s: %w", filePath, err)
 	}
 
 	return &SessionWriter{
-		file:        f,
+		raw:         raw,
 		filePath:    filePath,
-		encoder:     json.NewEncoder(f),
 		sessionName: sessionName,
 	}, nil
 }
 
 // SessionWriter handles JSONL writing with proper header/footer semantics.
 type SessionWriter struct {
-	file        *os.File
+	raw         *RawWriter
 	filePath    string
-	encoder     *json.Encoder
 	storeMeta   *StoreMeta
 	count       int
 	sessionName string // session folder name (empty for legacy files)
@@ -188,13 +188,30 @@ type StoreMeta struct {
 	// NOTE: the alternative header format overloads the "session_id" key as
 	// an agent identifier — ParseStoreMeta only accepts ses_-prefixed values
 	// into this field to keep the two meanings apart.
-	SessionID    string `json:"session_id,omitempty"`
-	AgentType    string `json:"agent_type,omitempty"`
-	AgentVersion string `json:"agent_version,omitempty"` // version of the coding agent (e.g., "1.0.3")
-	Model        string `json:"model,omitempty"`         // LLM model used (e.g., "claude-sonnet-4-20250514")
-	Username     string `json:"username,omitempty"`      // privacy-safe display name — via identity.AttributionDisplayName(). NOT an email.
-	RepoID       string `json:"repo_id,omitempty"`
-	OxVersion    string `json:"ox_version,omitempty"` // version of ox that created this session
+	SessionID string `json:"session_id,omitempty"`
+	// ContinuedFromSessionID is the prior durable recording identity when
+	// this raw session continues a reopened native coding-agent session.
+	ContinuedFromSessionID string `json:"continued_from_session_id,omitempty"`
+	AgentType              string `json:"agent_type,omitempty"`
+	AgentVersion           string `json:"agent_version,omitempty"` // version of the coding agent (e.g., "1.0.3")
+	Model                  string `json:"model,omitempty"`         // LLM model used (e.g., "claude-sonnet-4-20250514")
+	Username               string `json:"username,omitempty"`      // privacy-safe display name — via identity.AttributionDisplayName(). NOT an email.
+	RepoID                 string `json:"repo_id,omitempty"`
+	OxVersion              string `json:"ox_version,omitempty"` // version of ox that created this session
+
+	// NativeSessions and StoppedAt make raw.jsonl a crash-safe carrier for
+	// the two recording fields that only exist in .recording.json while a
+	// session is live. The SessionEnd hook, /clear, and the daemon's orphan
+	// sweep all finalize AFTER that state file is gone, so they append these
+	// on a footer record (StampRawCarrier) before clearing it — a live file
+	// is never rewritten, its appenders may still be open — and the reader
+	// folds the footer's values in here (foldFooterCarrier), where the
+	// daemon's meta.json writer picks them up. A file written whole at stop
+	// carries them on the header directly. Both omitempty: recordings
+	// started under an older binary carry neither.
+	NativeSessions []lfs.NativeSession `json:"native_sessions,omitempty"`
+	TraceCapture   *model.Capture      `json:"trace_capture,omitempty"`
+	StoppedAt      *time.Time          `json:"stopped_at,omitempty"`
 }
 
 // Writable is an interface for entries that can be written to a session.
@@ -219,10 +236,10 @@ func (w *SessionWriter) WriteHeader(meta *StoreMeta) error {
 		"metadata": meta,
 	}
 
-	if err := w.encoder.Encode(header); err != nil {
+	if err := w.raw.WriteRaw(header); err != nil {
 		return fmt.Errorf("write header file=%s: %w", w.filePath, err)
 	}
-	if err := w.file.Sync(); err != nil {
+	if err := w.raw.Sync(); err != nil {
 		return fmt.Errorf("sync header file=%s: %w", w.filePath, err)
 	}
 	return nil
@@ -242,7 +259,7 @@ func (w *SessionWriter) WriteEntry(entry Writable) error {
 		"data":      entry,
 	}
 
-	if err := w.encoder.Encode(record); err != nil {
+	if err := w.raw.WriteRaw(record); err != nil {
 		return fmt.Errorf("write entry seq=%d file=%s: %w", w.count, w.filePath, err)
 	}
 
@@ -267,7 +284,7 @@ func (w *SessionWriter) WriteRaw(data map[string]any) error {
 		data["eid"] = GenerateEntryID()
 	}
 
-	if err := w.encoder.Encode(data); err != nil {
+	if err := w.raw.WriteRaw(data); err != nil {
 		return fmt.Errorf("write raw entry seq=%d file=%s: %w", w.count, w.filePath, err)
 	}
 
@@ -298,17 +315,17 @@ func (w *SessionWriter) Close() error {
 		"entry_count": w.count,
 	}
 
-	if err := w.encoder.Encode(footer); err != nil {
-		w.file.Close()
+	if err := w.raw.WriteRaw(footer); err != nil {
+		w.raw.Close()
 		return fmt.Errorf("write footer file=%s: %w", w.filePath, err)
 	}
 
-	if err := w.file.Sync(); err != nil {
-		w.file.Close()
+	if err := w.raw.Sync(); err != nil {
+		w.raw.Close()
 		return fmt.Errorf("sync file=%s: %w", w.filePath, err)
 	}
 
-	return w.file.Close()
+	return w.raw.Close()
 }
 
 // SessionInfo contains metadata about a stored session.
@@ -325,10 +342,12 @@ type SessionInfo struct {
 	Title           string              `json:"title,omitempty"`              // from meta.json
 	Summary         string              `json:"summary,omitempty"`            // from meta.json
 	Recording       bool                `json:"recording,omitempty"`          // true if session is actively being recorded
+	Held            bool                `json:"held,omitempty"`               // kept on this machine until 'ox session upload' (.held marker)
 	AgentID         string              `json:"agent_id,omitempty"`           // from .recording.json when recording
 	EntryCount      int                 `json:"entry_count,omitempty"`        // from .recording.json or meta.json
 	IsSubagent      bool                `json:"is_subagent,omitempty"`        // true if spawned by a parent session
 	ParentPID       int                 `json:"parent_pid,omitempty"`         // from .recording.json for liveness detection
+	ParentStartTime int64               `json:"parent_start_time,omitempty"`  // from .recording.json; see RecordingState.ParentStartTime
 	Origin          string              `json:"origin,omitempty"`             // session origin: "human", "subagent", "agent"
 	HasRawData      bool                `json:"has_raw_data,omitempty"`       // true if raw.jsonl exists with content on disk
 	StopReason      string              `json:"stop_reason,omitempty"`        // how session ended (StopReason* constants)
@@ -438,6 +457,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		var recordingEntryCount int
 		var isSubagent bool
 		var parentPID int
+		var parentStartTime int64
 		var origin string
 		var suspendedAt *time.Time
 		recPath := filepath.Join(sessionPath, recordingFile)
@@ -450,6 +470,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 				recordingEntryCount = recState.EntryCount
 				isSubagent = recState.IsSubagent()
 				parentPID = recState.ParentPID
+				parentStartTime = recState.ParentStartTime
 				origin = recState.Origin
 				// ADR-020: ClassifySession branches on SessionInfo.SuspendedAt to
 				// return StatusSuspended; without this propagation, suspended
@@ -544,6 +565,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			EntryCount:      entryCount(isRecording, recordingEntryCount, meta),
 			IsSubagent:      isSubagent,
 			ParentPID:       parentPID,
+			ParentStartTime: parentStartTime,
 			Origin:          origin,
 			HasRawData:      hasRawData,
 			StopReason:      stopReason(meta),
@@ -554,6 +576,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			StopResetsAtRaw: stopMetaString(meta, func(m *lfs.SessionMeta) string { return m.StopResetsAtRaw }),
 			StopResetsAt:    stopMetaTime(meta),
 			Draft:           isDraft,
+			Held:            IsHeld(sessionPath),
 		})
 	}
 
@@ -703,6 +726,44 @@ func (s *Store) ResolveContentFile(sessionName, filename string) string {
 // CacheSessionPath returns the cache path for a session's content files.
 func (s *Store) CacheSessionPath(sessionName string) string {
 	return filepath.Join(s.cacheBasePath, sessionName)
+}
+
+// PreserveSessionCache saves prepared session content in the canonical recovery
+// cache before pointer conversion. It returns the extra copy to prune after a
+// successful push, or an empty path when the original cache is already canonical.
+// The original recording cache is left intact, including through symlink aliases.
+func (s *Store) PreserveSessionCache(sessionDir, originalCacheDir string) (string, error) {
+	cacheDir := s.CacheSessionPath(filepath.Base(sessionDir))
+	originalInfo, originalErr := os.Stat(originalCacheDir)
+	cacheInfo, cacheErr := os.Stat(cacheDir)
+	if originalErr == nil && cacheErr == nil && os.SameFile(originalInfo, cacheInfo) {
+		return "", nil
+	}
+
+	entries, err := os.ReadDir(sessionDir)
+	if err != nil {
+		return "", fmt.Errorf("read prepared session: %w", err)
+	}
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		return "", fmt.Errorf("create session recovery cache: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		src := filepath.Join(sessionDir, entry.Name())
+		if lfs.IsPointerFile(src) {
+			continue // retain existing real content, never replace it with a stub
+		}
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return "", fmt.Errorf("read session artifact %s: %w", entry.Name(), err)
+		}
+		if err := fileutil.AtomicWriteBytes(filepath.Join(cacheDir, entry.Name()), data, 0o600); err != nil {
+			return "", fmt.Errorf("preserve session artifact %s: %w", entry.Name(), err)
+		}
+	}
+	return cacheDir, nil
 }
 
 // IsSessionHydrated checks if content files exist locally for a session.
@@ -871,7 +932,8 @@ func (s *Store) readSessionFile(filePath, sessionType, sessionName string) (*Sto
 				session.Meta = ParseStoreMeta(metadata)
 			}
 		case "footer":
-			session.Footer = entry
+			session.Footer = mergeFooter(session.Footer, entry)
+			foldFooterCarrier(session.Meta, entry)
 		default:
 			// check for _meta header format (alternative header style)
 			if meta, ok := entry["_meta"].(map[string]any); ok {
@@ -943,7 +1005,8 @@ func ReadSessionFromPath(filePath string) (*StoredSession, error) {
 				session.Meta = ParseStoreMeta(metadata)
 			}
 		case "footer":
-			session.Footer = entry
+			session.Footer = mergeFooter(session.Footer, entry)
+			foldFooterCarrier(session.Meta, entry)
 		default:
 			// check for _meta header format (alternative header style)
 			if meta, ok := entry["_meta"].(map[string]any); ok {
@@ -1021,6 +1084,69 @@ func ReadHeaderSessionID(path string) string {
 	return meta.SessionID
 }
 
+// mergeFooter folds a footer record into the footer accumulated so far. A
+// file can carry more than one footer — the close-time footer with
+// entry_count or exit_reason, then a carrier footer a finalize door appended
+// (StampRawCarrier) — and the documented rule is last value per FIELD, so a
+// later footer must never erase fields it does not itself carry.
+func mergeFooter(acc, footer map[string]any) map[string]any {
+	if acc == nil {
+		acc = make(map[string]any, len(footer))
+	}
+	for k, v := range footer {
+		acc[k] = v
+	}
+	return acc
+}
+
+// foldFooterCarrier copies the recording-carrier fields a finalize door
+// appended on a footer record (StampRawCarrier) into meta: native_sessions
+// and stopped_at. A later footer wins per field; a footer without them
+// leaves meta untouched. Presence is what counts, not length: a footer that
+// carries an explicit empty list is a statement that the recording observed
+// no ids and overrides an earlier list, while a footer that omits the key —
+// or carries one that does not decode — leaves the earlier list alone.
+// Nothing is folded into a nil meta — a raw.jsonl with no header is already
+// unusable to every consumer of these fields.
+func foldFooterCarrier(meta *StoreMeta, footer map[string]any) {
+	if meta == nil {
+		return
+	}
+	if sessions, present := decodeNativeSessions(footer); present {
+		meta.NativeSessions = sessions
+	}
+	carrier := ParseStoreMeta(footer)
+	if carrier.TraceCapture != nil {
+		meta.TraceCapture = carrier.TraceCapture
+	}
+	if carrier.StoppedAt != nil {
+		meta.StoppedAt = carrier.StoppedAt
+	}
+}
+
+// decodeNativeSessions returns the native_sessions list carried by m and
+// whether the key was present AND decoded. Decoding goes through JSON so the
+// same struct tags that wrote the list read it back; a malformed list reports
+// absent so the rest of the metadata is still usable.
+func decodeNativeSessions(m map[string]any) ([]lfs.NativeSession, bool) {
+	raw, ok := m["native_sessions"]
+	if !ok || raw == nil {
+		return nil, false
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil, false
+	}
+	var sessions []lfs.NativeSession
+	if err := json.Unmarshal(data, &sessions); err != nil {
+		return nil, false
+	}
+	if sessions == nil {
+		sessions = []lfs.NativeSession{}
+	}
+	return sessions, true
+}
+
 // ParseStoreMeta converts a map to StoreMeta struct.
 // Supports both standard format (version, agent_id, created_at) and
 // alternative format (schema_version, session_id, started_at).
@@ -1048,6 +1174,9 @@ func ParseStoreMeta(m map[string]any) *StoreMeta {
 	if v, ok := m["session_id"].(string); ok && sessionid.IsValidSessionID(v) {
 		meta.SessionID = v
 	}
+	if v, ok := m["continued_from_session_id"].(string); ok && sessionid.IsValidSessionID(v) {
+		meta.ContinuedFromSessionID = v
+	}
 
 	if v, ok := m["agent_type"].(string); ok {
 		meta.AgentType = v
@@ -1071,6 +1200,29 @@ func ParseStoreMeta(m map[string]any) *StoreMeta {
 	}
 	if v, ok := m["ox_version"].(string); ok {
 		meta.OxVersion = v
+	}
+
+	// native_sessions / stopped_at: decode through JSON so the same struct
+	// tags that wrote them read them back (no hand-rolled field mapping to
+	// drift). A malformed list is dropped rather than failing the whole
+	// header — the rest of the metadata is still worth having.
+	if sessions, present := decodeNativeSessions(m); present && len(sessions) > 0 {
+		meta.NativeSessions = sessions
+	}
+	if raw, ok := m["trace_capture"]; ok && raw != nil {
+		if data, err := json.Marshal(raw); err == nil {
+			var capture model.Capture
+			if json.Unmarshal(data, &capture) == nil {
+				meta.TraceCapture = &capture
+			}
+		}
+	}
+	// RFC3339Nano also accepts a plain RFC3339 value, so one parse covers
+	// both the nanosecond form ox writes and a hand-written second-precision one.
+	if v, ok := m["stopped_at"].(string); ok && v != "" {
+		if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+			meta.StoppedAt = &t
+		}
 	}
 
 	// created_at (or started_at)

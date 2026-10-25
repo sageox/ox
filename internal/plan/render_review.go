@@ -3,6 +3,8 @@ package plan
 import (
 	"encoding/json"
 	"html/template"
+
+	"github.com/sageox/ox/pkg/planreview"
 )
 
 // render_review.go projects the merged review state (rounds + resolutions) into
@@ -21,28 +23,29 @@ func buildReviewState(items []MergedItem) (template.JS, reviewSummary) {
 	sum.HasReview = true
 	slim := make([]reviewStateItem, 0, len(items))
 	for _, it := range items {
-		state := "open"
+		state, resolutionNote := "open", ""
 		if !it.Open && it.Resolution != nil {
-			state = string(it.Resolution.State)
+			state, resolutionNote = string(it.Resolution.State), it.Resolution.Note
 		}
 		switch {
-		case it.Open && it.Status == FeedbackApprove:
+		case it.Open && it.Status == planreview.StatusApprove:
 			// an approval is not actionable; don't inflate the open count
 		case it.Open:
 			sum.Open++
 		default:
 			switch it.Resolution.State {
-			case ResolutionAddressed:
+			case planreview.StateAddressed:
 				sum.Addressed++
-			case ResolutionVerified:
+			case planreview.StateVerified:
 				sum.Verified++
-			case ResolutionWontfix:
+			case planreview.StateWontfix:
 				sum.Wontfix++
 			}
 		}
 		slim = append(slim, reviewStateItem{
-			Anchor: it.Anchor, Section: it.Section, Label: it.Label,
+			Anchor: it.Anchor, Section: it.Section, Label: it.Label, Quote: it.Quote,
 			Status: string(it.Status), State: state, Note: it.Note, Reviewer: it.Reviewer,
+			ResolutionNote: resolutionNote, Region: it.Region,
 		})
 	}
 	b, err := json.Marshal(slim)

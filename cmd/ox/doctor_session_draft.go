@@ -3,13 +3,9 @@ package main
 import (
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
-	"sort"
-	"time"
 
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 )
 
@@ -24,15 +20,10 @@ func init() {
 	})
 }
 
-// orphanedDraftAge is how long a draft must have gone without a refresh before
-// it is considered abandoned.
-//
-// Comfortably longer than the refresh cadence (10 turns) takes in practice, so
-// a slow but live session — a user thinking, or an agent on a long tool call —
-// is never mistaken for a dead one. The cost of waiting is a stale "in
-// progress" page; the cost of being wrong is deleting a live session's
-// placeholder, so the asymmetry says wait.
-const orphanedDraftAge = 24 * time.Hour
+// orphanedDraftAge is the abandonment threshold; the canonical value and
+// rationale live on session.OrphanedDraftAge, shared with the daemon's periodic
+// retraction so both agree on what "orphaned" means.
+const orphanedDraftAge = session.OrphanedDraftAge
 
 // checkSessionDraftOrphan finds draft placeholders in the ledger whose
 // recording no longer exists anywhere.
@@ -108,81 +99,24 @@ func checkSessionDraftOrphan(fix bool) checkResult {
 	return PassedCheck(name, fmt.Sprintf("retracted %d orphaned draft(s)", removed))
 }
 
-// findOrphanedDrafts returns the names of ledger drafts that have no live or
-// recoverable recording behind them, oldest first.
-//
-// Three conditions must ALL hold, and each one is deliberately conservative —
-// a false positive here deletes a live session's placeholder:
-//
-//  1. The ledger directory is a draft (never a finalized session).
-//  2. Its updated_at is older than orphanedDraftAge. This is the whole reason
-//     drafts refresh their counters: without a heartbeat there is no way to
-//     tell a live session from a dead one.
-//  3. No recording state exists for it in any cache location, and no cached
-//     transcript is waiting to be uploaded. If either exists, the session is
-//     alive or recoverable and the upload-retry check owns it, not this one.
+// findOrphanedDrafts resolves this project's local cache dirs and delegates to
+// session.FindOrphanedDrafts (the shared source of truth). Thin wrapper: the
+// detection logic lives in internal/session so the daemon shares it verbatim.
 func findOrphanedDrafts(projectRoot, ledgerPath string) ([]string, error) {
-	sessionsDir := filepath.Join(ledgerPath, "sessions")
-	entries, err := os.ReadDir(sessionsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read ledger sessions: %w", err)
-	}
-
-	cacheDirs := []string{filepath.Join(ledgerPath, ".sageox", "cache", "sessions")}
-	if contextPath := session.GetContextPath(getRepoIDOrDefault(projectRoot)); contextPath != "" {
-		cacheDirs = append(cacheDirs, filepath.Join(contextPath, "sessions"))
-	}
-
-	type candidate struct {
-		name      string
-		updatedAt time.Time
-	}
-	var found []candidate
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		meta, metaErr := lfs.ReadSessionMeta(filepath.Join(sessionsDir, name))
-		// Fail safe: an unreadable meta.json is not a draft we are willing to
-		// delete. Some other check owns diagnosing it.
-		if metaErr != nil || !meta.IsDraft() {
-			continue
-		}
-		// No updated_at means we cannot age it. Refuse rather than guess —
-		// deleting a placeholder for a session that might be live is worse
-		// than leaving a stale page.
-		if meta.UpdatedAt == nil || time.Since(*meta.UpdatedAt) < orphanedDraftAge {
-			continue
-		}
-		if hasLocalSessionData(cacheDirs, name) {
-			continue
-		}
-		found = append(found, candidate{name: name, updatedAt: *meta.UpdatedAt})
-	}
-
-	sort.Slice(found, func(i, j int) bool { return found[i].updatedAt.Before(found[j].updatedAt) })
-	names := make([]string, 0, len(found))
-	for _, c := range found {
-		names = append(names, c.name)
-	}
-	return names, nil
+	return session.FindOrphanedDrafts(ledgerPath, draftCacheDirs(projectRoot, ledgerPath))
 }
 
-// hasLocalSessionData reports whether any cache location still holds this
-// session, either as an active recording or as a transcript awaiting upload.
-func hasLocalSessionData(cacheDirs []string, sessionName string) bool {
-	for _, dir := range cacheDirs {
-		sessionDir := filepath.Join(dir, sessionName)
-		for _, marker := range []string{".recording.json", "raw.jsonl"} {
-			if _, err := os.Stat(filepath.Join(sessionDir, marker)); err == nil {
-				return true
-			}
-		}
+// draftCacheDirs returns the local cache session directories a draft's recording
+// could live in: the ledger cache and this process's XDG cache.
+func draftCacheDirs(projectRoot, ledgerPath string) []string {
+	dirs := []string{filepath.Join(ledgerPath, ".sageox", "cache", "sessions")}
+	if contextPath := session.GetContextPath(getRepoIDOrDefault(projectRoot)); contextPath != "" {
+		dirs = append(dirs, filepath.Join(contextPath, "sessions"))
 	}
-	return false
+	return dirs
+}
+
+// hasLocalSessionData delegates to the shared detector.
+func hasLocalSessionData(cacheDirs []string, sessionName string) bool {
+	return session.DraftHasLocalSessionData(cacheDirs, sessionName)
 }

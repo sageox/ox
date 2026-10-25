@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,12 +17,20 @@ import (
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/session/claudesource"
 	"github.com/sageox/ox/internal/version"
 )
 
 // writeRawHeader writes the metadata header line to raw.jsonl so that
 // incremental hooks can append entries after it. Called at session start.
 func writeRawHeader(projectRoot string, state *session.RecordingState) error {
+	return writeRawHeaderWithAttribution(projectRoot, state, nil)
+}
+
+// Cursor prepares attribution before prompt admission's lock: resolving the
+// local Git identity can run a subprocess, while header publication must stay
+// within the native prompt hook's short deadline.
+func writeRawHeaderWithAttribution(projectRoot string, state *session.RecordingState, attribution *identity.Attribution) error {
 	if state.SessionPath == "" {
 		return fmt.Errorf("session path is empty")
 	}
@@ -29,6 +39,12 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 	repoID := getRepoIDOrDefault(projectRoot)
+	username := ""
+	if attribution != nil {
+		username = attribution.DisplayName
+	} else {
+		username = identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName())
+	}
 
 	agentTypeForMeta := adapters.CanonicalAdapterName(state.AgentType)
 	if agentTypeForMeta == "" {
@@ -36,19 +52,25 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 	}
 
 	meta := &session.StoreMeta{
-		Version:   "1.0",
-		CreatedAt: state.StartedAt,
-		AgentID:   state.AgentID,
-		SessionID: state.SessionID,
-		AgentType: agentTypeForMeta,
-		Model:     state.Model,
-		Username:  identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
-		RepoID:    repoID,
-		OxVersion: version.Version,
+		Version:                "1.0",
+		CreatedAt:              state.StartedAt,
+		AgentID:                state.AgentID,
+		SessionID:              state.SessionID,
+		ContinuedFromSessionID: state.ContinuedFromSessionID,
+		AgentType:              agentTypeForMeta,
+		Model:                  state.Model,
+		Username:               username,
+		RepoID:                 repoID,
+		OxVersion:              version.Version,
+		NativeSessions:         state.NativeSessions,
+		TraceCapture:           state.Trace,
 	}
 
-	// enrich with adapter metadata if available
-	if state.SessionFile != "" {
+	// Cursor's supported JSONL export has no model/version metadata. Its
+	// external ReadMetadata only parses the source and returns empty fields;
+	// spawning it here can exceed prompt admission's deadline for no metadata.
+	// Cursor startup already validates its native source before publication.
+	if state.SessionFile != "" && adapters.CanonicalAdapterName(state.AdapterName) != "cursor" {
 		adapter, err := adapters.GetAdapter(state.AdapterName)
 		if err == nil {
 			if sessionMeta, _ := adapter.ReadMetadata(state.SessionFile); sessionMeta != nil {
@@ -92,8 +114,31 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 // by hooks. Does a final drain from the source file, then generates events,
 // and summary artifacts from the already-written raw.jsonl.
 func finalizeIncrementalSession(projectRoot string, state *session.RecordingState, rawPath string, adapter adapters.Adapter, result *agentSessionResult) (*agentSessionResult, error) {
+	if state.AdapterName == "cursor" {
+		reader, ok := adapter.(adapters.IncrementalReader)
+		if !ok {
+			return nil, fmt.Errorf("adapter-missing: Cursor incremental reader is unavailable")
+		}
+		// The stop path owns these in-memory values. Its best-effort marker
+		// checkpoint may have failed, while FinalizeCursorCapture necessarily
+		// reloads the older marker to advance Cursor's durable source cursor.
+		// Keep the authoritative stop boundary across that refresh.
+		stopTrace := state.Trace
+		stopRequestedAt := state.StoppedAt
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		latest, err := session.FinalizeCursorCapture(context.Background(), projectRoot, state.SessionPath, home, reader)
+		if err != nil {
+			return nil, err
+		}
+		latest.Trace = stopTrace
+		latest.StoppedAt = stopRequestedAt
+		state = latest
+	}
 	// final drain: read any remaining entries since last hook
-	if reader, ok := adapter.(adapters.IncrementalReader); ok && state.SessionFile != "" {
+	if reader, ok := adapter.(adapters.IncrementalReader); ok && state.SessionFile != "" && state.AdapterName != "cursor" {
 		// use StartOffset as minimum read position to skip pre-session content
 		readOffset := state.SourceOffset
 		if state.StartOffset > 0 && readOffset < state.StartOffset {
@@ -105,10 +150,45 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 			slog.Info("finalize: final drain", "source", state.SessionFile, "file_size", fi.Size(), "read_offset", readOffset, "start_offset", state.StartOffset)
 		}
 
-		entries, newOffset, readErr := reader.ReadFromOffset(state.SessionFile, readOffset)
-		if readErr != nil {
-			slog.Debug("finalize: incremental read failed", "error", readErr)
-		} else if len(entries) > 0 {
+		var sourceSnapshot os.FileInfo
+		// A native transcript or workspace that no longer exists cannot be
+		// drained or rechecked, but raw.jsonl was ownership-checked batch by
+		// batch as it was written. Finalize that capture rather than fail
+		// every stop and recover on a source that will never come back.
+		skipDrain := false
+		if state.AdapterName == "claude-code" {
+			var snapshotErr error
+			sourceSnapshot, snapshotErr = claudesource.Snapshot(state.SessionFile)
+			if errors.Is(snapshotErr, fs.ErrNotExist) {
+				slog.Warn("finalize: native session is gone; finalizing the captured recording", "source", state.SessionFile)
+				skipDrain = true
+			} else if snapshotErr != nil {
+				return nil, fmt.Errorf("stat native session before final drain: %w", snapshotErr)
+			}
+		}
+		var entries []adapters.RawEntry
+		var newOffset int64
+		if !skipDrain {
+			var readErr error
+			entries, newOffset, readErr = reader.ReadFromOffset(state.SessionFile, readOffset)
+			if readErr != nil {
+				return nil, fmt.Errorf("read final session entries: %w", readErr)
+			}
+		}
+		if state.AdapterName == "claude-code" && !skipDrain {
+			repoRoot := state.WorkspacePath
+			if repoRoot == "" {
+				repoRoot = projectRoot
+			}
+			if err := claudesource.ValidateRecorded(state.SessionFile, repoRoot, state.AgentSessionID, state.StartOffset, sourceSnapshot); errors.Is(err, claudesource.ErrSourceGone) {
+				// the transcript itself vanished mid-check: nothing read can be vouched for
+				slog.Warn("finalize: native session cannot be rechecked; finalizing the captured recording", "source", state.SessionFile, "error", err)
+				entries = nil
+			} else if err != nil {
+				return nil, fmt.Errorf("claude source changed repository during final drain: %w", err)
+			}
+		}
+		if len(entries) > 0 {
 			slog.Info("finalize: drain result", "entries_read", len(entries), "new_offset", newOffset)
 
 			// filter entries by timestamp — strict After() to prevent boundary leaks
@@ -130,18 +210,39 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 				// gitleaks layers in order before encoding.
 				drainEntries := session.ConvertRawEntries(entries)
 
-				if appendErr := appendRedactedEntries(rawPath, drainEntries); appendErr != nil {
-					slog.Debug("finalize: append entries failed", "error", appendErr)
-				} else {
-					// only advance offset/count after successful append;
-					// leaving them unchanged lets the next drain retry these entries
-					_ = session.UpdateRecordingStateForAgent(projectRoot, state.AgentID, func(s *session.RecordingState) {
-						s.SourceOffset = newOffset
-						s.EntryCount += len(entries)
-					})
+				writer, err := session.NewRawWriter(rawPath, projectRoot)
+				if err != nil {
+					return nil, err
 				}
+				appendErr := writer.AppendRecordingBatch(filepath.Join(state.SessionPath, ".recording.json"), drainEntries, newOffset)
+				closeErr := writer.Close()
+				if appendErr != nil {
+					return nil, appendErr
+				}
+				if closeErr != nil {
+					return nil, closeErr
+				}
+				state.SourceOffset = newOffset
+				state.EntryCount += len(entries)
+
 			}
 		}
+	}
+
+	// The header was written at start, before any /clear or resume could add
+	// a native session id and before the stop time existed. Append both now
+	// as the footer so the ledger copy of raw.jsonl is self-describing on its
+	// own (a daemon retry of this upload has no .recording.json to consult).
+	// Appended rather than rewritten: a parallel PostToolUse hook may still
+	// hold the file open. Best-effort: meta.json gets the same values from
+	// state regardless.
+	stoppedAt := session.ResolveStoppedAt(state.StoppedAt, rawPath, time.Now())
+	if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
+		NativeSessions: state.NativeSessions,
+		TraceCapture:   state.Trace,
+		StoppedAt:      stoppedAt,
+	}); err != nil {
+		slog.Warn("finalize: could not stamp raw.jsonl carrier", "session", state.SessionPath, "error", err)
 	}
 
 	// read back the completed raw.jsonl to generate artifacts
@@ -190,6 +291,12 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		if toolOutput, ok := rawMap["tool_output"].(string); ok {
 			entry.ToolOutput = toolOutput
 		}
+		if callID, ok := rawMap["call_id"].(string); ok {
+			entry.CallID = callID
+		}
+		if isError, ok := rawMap["is_error"].(bool); ok {
+			entry.IsError = isError
+		}
 		sessionEntries = append(sessionEntries, entry)
 	}
 
@@ -223,16 +330,26 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	summaryResp := &session.SummarizeResponse{
 		Summary: localSummary,
 	}
-	result.Summary = localSummary
+	result.Summary = publishableSummary(localSummary)
 
 	ledgerPath, ledgerErr := resolveLedgerPath()
 	if ledgerErr == nil {
 		result.LedgerSessionDir = filepath.Join(ledgerPath, "sessions", sessionName)
 	}
-	result.SummaryPrompt = session.BuildSummaryPrompt(sessionEntries, result.RawPath, result.LedgerSessionDir)
 
+	// A held session gets its hold before anything the daemon reacts to, and
+	// no summary prompt: push-summary publishes (GH #1093). If the hold cannot
+	// be recorded, the stop fails and the recording state is kept.
 	sessionCacheDir := filepath.Dir(result.RawPath)
-	_ = session.WriteNeedsSummaryMarker(sessionCacheDir, result.RawPath, result.LedgerSessionDir)
+	held := stopHoldsSession(projectRoot, state)
+	if held {
+		if err := holdStoppedSession(result, state, sessionCacheDir, "session_stop"); err != nil {
+			return nil, err
+		}
+	} else {
+		result.SummaryPrompt = session.BuildSummaryPrompt(sessionEntries, result.RawPath, result.LedgerSessionDir)
+		_ = session.WriteNeedsSummaryMarker(sessionCacheDir, result.RawPath, result.LedgerSessionDir)
+	}
 
 	// generate all session artifacts via shared path
 	artifactPaths, artifactErr := session.WriteSessionArtifacts(filepath.Dir(result.RawPath), storedSession, summaryResp)
@@ -260,11 +377,10 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	}
 
 	// ledger upload
-	publishMode := config.GetSessionPublishing(projectRoot)
-	if publishMode == config.SessionPublishingManual {
-		slog.Info("session publishing mode is manual, skipping upload", "session", sessionName)
+	if held {
+		slog.Info("session held on this machine, skipping upload", "session", sessionName)
 		result.LedgerSessionDir = ""
-		result.UploadWarning = "Session saved locally (publishing mode: manual). Use 'ox session upload' to publish."
+		result.UploadWarning = heldSessionWarning(sessionName)
 		return result, nil
 	}
 
@@ -275,7 +391,9 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		result.UploadWarning = "Session saved locally but ledger upload skipped (no ledger). Run 'ox doctor' to retry."
 	} else {
 		uploadStart := time.Now()
-		uploadErr := uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
+		uploadErr := uploadSessionBeforeHostEnds(sessionName, daemonOutlivesSession(), func() error {
+			return uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
+		}, time.Sleep)
 		result.UploadMs = time.Since(uploadStart).Milliseconds()
 		if uploadErr != nil {
 			if errors.Is(uploadErr, api.ErrReadOnly) {

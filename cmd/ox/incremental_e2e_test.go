@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -22,6 +23,8 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/daemon/agentwork"
+	"github.com/sageox/ox/internal/session/pipeline"
+	"github.com/sageox/ox/internal/testguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -41,14 +44,14 @@ import (
 //
 // Run with: go test -tags=slow -timeout=5m -run TestIncrementalE2E ./cmd/ox/ -v
 func TestIncrementalE2E_SingleAgent(t *testing.T) {
-	oxBin := buildOxBinary(t)
-	env := setupE2EWorkspace(t, oxBin)
+	oxBin, adapterDir := buildIncrementalE2EBinaries(t)
+	env := setupE2EWorkspace(t, adapterDir)
 
 	agentID := "OxE2E1"
 	claudeSessionID := "test-e2e-session-001"
 
 	// create Claude Code source JSONL in the expected location
-	sourceFile := createClaudeSourceFile(t, env)
+	sourceFile := createClaudeSourceFileNamed(t, env, claudeSessionID+".jsonl")
 
 	// write session marker (simulates what ox agent prime does)
 	writeE2ESessionMarker(t, env, agentID, claudeSessionID)
@@ -57,7 +60,7 @@ func TestIncrementalE2E_SingleAgent(t *testing.T) {
 	createE2EAgentInstance(t, env.workspace, agentID)
 
 	// write initial user entry BEFORE session start (should be filtered out)
-	writeClaudeEntry(t, sourceFile, claudeUserEntry(time.Now().Add(-1*time.Minute).UTC().Format(time.RFC3339Nano), "Hello, fix the bug"))
+	writeClaudeEntry(t, sourceFile, claudeUserEntry(time.Now().Add(-1*time.Minute).UTC().Format(time.RFC3339Nano), "Agent "+agentID+": hello, fix the bug"))
 
 	// --- session start ---
 	out := runOx(t, oxBin, env, agentID, "session", "start")
@@ -66,9 +69,8 @@ func TestIncrementalE2E_SingleAgent(t *testing.T) {
 
 	// find the raw.jsonl path from recording state
 	rawPath := findRawJSONL(t, env)
-	if rawPath != "" {
-		t.Logf("raw.jsonl at: %s", rawPath)
-	}
+	require.NotEmpty(t, rawPath, "session start must create a durable raw.jsonl")
+	t.Logf("raw.jsonl at: %s", rawPath)
 
 	// timestamps must be AFTER session start for the filter to pass
 	now := time.Now().Add(1 * time.Second)
@@ -81,11 +83,9 @@ func TestIncrementalE2E_SingleAgent(t *testing.T) {
 	t.Logf("hook 1 output: %s", truncateStr(hookOut, 500))
 
 	// check raw.jsonl has entries now
-	if rawPath != "" {
-		lines := e2eCountLines(t, rawPath)
-		t.Logf("after hook 1: %d lines in raw.jsonl", lines)
-		assert.GreaterOrEqual(t, lines, 2, "should have header + entries after first hook")
-	}
+	lines := e2eCountLines(t, rawPath)
+	t.Logf("after hook 1: %d lines in raw.jsonl", lines)
+	assert.GreaterOrEqual(t, lines, 2, "should have header + entries after first hook")
 
 	// --- simulate turn 2: more conversation ---
 	now2 := now.Add(2 * time.Second)
@@ -97,28 +97,37 @@ func TestIncrementalE2E_SingleAgent(t *testing.T) {
 	hookOut2 := runOxHook(t, oxBin, env, agentID, "PostToolUse", claudeSessionID)
 	t.Logf("hook 2 output: %s", truncateStr(hookOut2, 2000))
 
-	if rawPath != "" {
-		lines := e2eCountLines(t, rawPath)
-		t.Logf("after hook 2: %d lines in raw.jsonl", lines)
-		assert.GreaterOrEqual(t, lines, 4, "should have more entries after second hook")
-	}
+	lines = e2eCountLines(t, rawPath)
+	t.Logf("after hook 2: %d lines in raw.jsonl", lines)
+	assert.GreaterOrEqual(t, lines, 4, "should have more entries after second hook")
 
 	// --- session stop ---
 	stopOut := runOx(t, oxBin, env, agentID, "session", "stop")
 	t.Logf("session stop output: %s", truncateStr(stopOut, 500))
 
-	// verify stop completed (may have upload warnings, that's ok)
-	if !strings.Contains(stopOut, `"success"`) {
-		t.Logf("stop output (no success field): %s", stopOut)
-	}
+	// Upload may be deferred while offline, but local finalization must return a
+	// valid structured result and preserve the captured conversation for retry.
+	var stop pipeline.StopOutput
+	jsonStart := strings.Index(stopOut, "{")
+	require.NotEqual(t, -1, jsonStart, "session stop must contain a JSON result: %s", stopOut)
+	require.NoError(t, json.Unmarshal([]byte(stopOut[jsonStart:]), &stop), "session stop must emit valid JSON: %s", stopOut)
+	require.True(t, stop.Success, "session stop must report success: %+v", stop)
+	require.Equal(t, "session_stop", stop.Type)
+	require.Greater(t, stop.EntryCount, 0)
+	require.NotEmpty(t, stop.RawPath)
+	require.Contains(t, stop.UploadWarning, "ledger", "offline finalization must explain deferred upload")
+	finalRaw, err := os.ReadFile(rawPath)
+	require.NoError(t, err, "session stop must preserve raw capture until upload succeeds")
+	assert.Contains(t, string(finalRaw), "Now add tests", "finalized capture must retain the user turn")
+	assert.Contains(t, string(finalRaw), "I'll add tests", "finalized capture must retain the assistant turn")
 }
 
 // TestIncrementalE2E_MultiAgent tests Conductor scenario with 2 agents
 // on the same worktree, verifying no cross-contamination.
 // Component test with simulated data — not a real Claude E2E test.
 func TestIncrementalE2E_MultiAgent(t *testing.T) {
-	oxBin := buildOxBinary(t)
-	env := setupE2EWorkspace(t, oxBin)
+	oxBin, adapterDir := buildIncrementalE2EBinaries(t)
+	env := setupE2EWorkspace(t, adapterDir)
 
 	agentA := "OxCdA1"
 	agentB := "OxCdB2"
@@ -213,18 +222,24 @@ func TestIncrementalE2E_MultiAgent(t *testing.T) {
 // This is the core anti-entropy guarantee: no session data is lost even if the
 // CLI crashes or the user interrupts the process.
 func TestIncrementalE2E_CtrlC_AntiEntropy(t *testing.T) {
-	oxBin := buildOxBinary(t)
-	env := setupE2EWorkspace(t, oxBin)
+	oxBin, adapterDir := buildIncrementalE2EBinaries(t)
+	env := setupE2EWorkspace(t, adapterDir)
 
 	agentID := "OxCtC1"
 	claudeSessionID := "test-ctrlc-session-001"
 
 	// create Claude Code source JSONL
-	sourceFile := createClaudeSourceFile(t, env)
+	sourceFile := createClaudeSourceFileNamed(t, env, claudeSessionID+".jsonl")
 
 	// write session marker and agent instance
 	writeE2ESessionMarker(t, env, agentID, claudeSessionID)
 	createE2EAgentInstance(t, env.workspace, agentID)
+
+	// Give adapter discovery an agent-specific pre-session entry. Session start
+	// routes Claude files by agent ID before hooks can supply the native session
+	// ID; the old empty fixture left recording attached to no source file.
+	writeClaudeEntry(t, sourceFile, claudeUserEntry(
+		time.Now().Add(-1*time.Minute).UTC().Format(time.RFC3339Nano), "Agent "+agentID+": start"))
 
 	// --- session start ---
 	out := runOx(t, oxBin, env, agentID, "session", "start")
@@ -243,7 +258,8 @@ func TestIncrementalE2E_CtrlC_AntiEntropy(t *testing.T) {
 	runOxHook(t, oxBin, env, agentID, "PostToolUse", claudeSessionID)
 
 	writeClaudeEntry(t, sourceFile, claudeUserEntry(
-		now.Add(2*time.Second).UTC().Format(time.RFC3339Nano), "Now fix the validation"))
+		now.Add(2*time.Second).UTC().Format(time.RFC3339Nano),
+		"Now fix validation so malformed configuration is rejected clearly, and add regression coverage for every failure path."))
 	writeClaudeEntry(t, sourceFile, claudeAssistantEntry(
 		now.Add(4*time.Second).UTC().Format(time.RFC3339Nano),
 		"Fixing validation logic.", "Edit", `{"file_path":"/src/validate.go"}`))
@@ -372,18 +388,47 @@ func findFilesRecursive(root, name string) []string {
 // --- E2E test infrastructure ---
 
 type e2eEnv struct {
-	workspace string // git repo with .sageox/
-	home      string // fake HOME for isolation
-	cacheDir  string // XDG_CACHE_HOME
-	username  string // synthetic username for test isolation
+	workspace  string // git repo with .sageox/
+	home       string // fake HOME for isolation
+	cacheDir   string // XDG_CACHE_HOME
+	username   string // synthetic username for test isolation
+	adapterDir string // test-owned external adapter directory
 }
 
 func buildOxBinary(t *testing.T) string {
 	t.Helper()
+	return testguard.BuildOxBinary(t, slowTestProjectRoot(t))
+}
 
-	// find project root
-	dir, err := os.Getwd()
-	require.NoError(t, err)
+func buildIncrementalE2EBinaries(t *testing.T) (string, string) {
+	t.Helper()
+	dir := slowTestProjectRoot(t)
+	oxBin := testguard.BuildOxBinary(t, dir)
+	adapterDir := t.TempDir()
+
+	// Also build the claude-code adapter binary in a test-owned directory and
+	// expose that directory through OX_ADAPTER_PATH.
+	// Without this the deep adapter detect fails silently, the session
+	// falls through to the generic adapter, and PostToolUse hooks never
+	// parse the fake Claude JSONL source file. In particular, do not write
+	// beside OX_TEST_OX_BINARY: callers may provide a read-only shared artifact.
+	adapterBin := filepath.Join(adapterDir, "ox-adapter-claude-code")
+	adapterCmd := exec.Command("go", "build", "-o", adapterBin, "./cmd/ox-adapter-claude-code")
+	adapterCmd.Dir = dir
+	adapterOut, adapterErr := adapterCmd.CombinedOutput()
+	require.NoError(t, adapterErr, "failed to build ox-adapter-claude-code: %s", adapterOut)
+
+	return oxBin, adapterDir
+}
+
+func slowTestProjectRoot(t *testing.T) string {
+	t.Helper()
+
+	// Walk up from the SOURCE directory, not the process working directory:
+	// TestMain deliberately moves the process out of the ox repository (see
+	// cmd/ox/main_test.go), so os.Getwd() here is an empty sandbox under
+	// /tmp with no go.mod above it.
+	dir := packageDir
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 			content, _ := os.ReadFile(filepath.Join(dir, "go.mod"))
@@ -395,30 +440,10 @@ func buildOxBinary(t *testing.T) string {
 		require.NotEqual(t, parent, dir, "could not find project root")
 		dir = parent
 	}
-
-	binDir := t.TempDir()
-	oxBin := filepath.Join(binDir, "ox")
-
-	cmd := exec.Command("go", "build", "-o", oxBin, "./cmd/ox")
-	cmd.Dir = dir
-	output, err := cmd.CombinedOutput()
-	require.NoError(t, err, "failed to build ox: %s", output)
-
-	// Also build the claude-code adapter binary next to ox so adapter
-	// discovery (AdapterDirs() includes filepath.Dir(exe)) finds it.
-	// Without this the deep adapter detect fails silently, the session
-	// falls through to the generic adapter, and PostToolUse hooks never
-	// parse the fake Claude JSONL source file.
-	adapterBin := filepath.Join(binDir, "ox-adapter-claude-code")
-	adapterCmd := exec.Command("go", "build", "-o", adapterBin, "./cmd/ox-adapter-claude-code")
-	adapterCmd.Dir = dir
-	adapterOut, adapterErr := adapterCmd.CombinedOutput()
-	require.NoError(t, adapterErr, "failed to build ox-adapter-claude-code: %s", adapterOut)
-
-	return oxBin
+	return dir
 }
 
-func setupE2EWorkspace(t *testing.T, oxBin string) e2eEnv {
+func setupE2EWorkspace(t *testing.T, adapterDir string) e2eEnv {
 	t.Helper()
 
 	workspace := t.TempDir()
@@ -453,59 +478,66 @@ func setupE2EWorkspace(t *testing.T, oxBin string) e2eEnv {
 	// create .sageox/config.json
 	sageoxDir := filepath.Join(workspace, ".sageox")
 	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
-	cfg := `{"config_version":"2","repo_id":"e2e-test-repo","endpoint":"https://sageox.ai"}`
+	const endpointURL = "http://127.0.0.1:1"
+	cfg := `{"config_version":"2","repo_id":"e2e-test-repo","endpoint":"` + endpointURL + `"}`
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(cfg), 0644))
 
 	// create fake auth so session start doesn't fail on auth check
 	authDir := filepath.Join(home, ".config", "sageox")
 	require.NoError(t, os.MkdirAll(authDir, 0700))
-	authJSON := fmt.Sprintf(`{"tokens":{"sageox.ai":{"access_token":"fake-pat-for-e2e-test","token_type":"bearer","expires_at":"%s"}}}`,
-		time.Now().Add(24*time.Hour).Format(time.RFC3339))
+	authJSON := fmt.Sprintf(`{"tokens":{%q:{"access_token":"fake-pat-for-e2e-test","token_type":"bearer","expires_at":"%s"}}}`,
+		endpointURL, time.Now().Add(24*time.Hour).Format(time.RFC3339))
 	require.NoError(t, os.WriteFile(filepath.Join(authDir, "auth.json"), []byte(authJSON), 0644))
 
 	// synthetic username prevents colliding with developer's real session markers
 	username := "oxtest-" + strings.ReplaceAll(t.Name(), "/", "-")
 
 	return e2eEnv{
-		workspace: workspace,
-		home:      home,
-		cacheDir:  cacheDir,
-		username:  username,
+		workspace:  workspace,
+		home:       home,
+		cacheDir:   cacheDir,
+		username:   username,
+		adapterDir: adapterDir,
 	}
 }
 
 func oxEnv(env e2eEnv) []string {
-	return []string{
+	result := []string{
 		"HOME=" + env.home,
 		"XDG_CACHE_HOME=" + env.cacheDir,
 		"XDG_CONFIG_HOME=" + filepath.Join(env.home, ".config"),
 		"OX_XDG_ENABLE=1",
 		"PATH=" + os.Getenv("PATH"),
 		"AGENT_ENV=claude-code",
+		"OX_ADAPTER_PATH=" + env.adapterDir,
 		"USER=" + env.username,
 		// prevent real daemon IPC
 		"OX_NO_DAEMON=1",
-		// prevent real network calls
-		"OX_OFFLINE=1",
 	}
+	return result
 }
 
+// runOx returns stdout so stderr warnings cannot contaminate JSON results.
 func runOx(t *testing.T, oxBin string, env e2eEnv, agentID string, args ...string) string {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
 	fullArgs := append([]string{"agent", agentID}, args...)
-	cmd := exec.Command(oxBin, fullArgs...)
-	cmd.Dir = env.workspace
-	cmd.Env = oxEnv(env)
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "ox agent %s %v failed:\n%s", agentID, args, string(out))
+	cmd := testguard.OxCmdContext(t, ctx, oxBin, env.workspace, oxEnv(env), fullArgs...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if stderr.Len() > 0 {
+		t.Logf("ox agent %s %v stderr:\n%s", agentID, args, stderr.String())
+	}
+	require.NoError(t, err, "ox agent %s %v failed:\n%s", agentID, args, out)
 	return string(out)
 }
 
 func runOxHook(t *testing.T, oxBin string, env e2eEnv, agentID, event, sessionID string) string {
 	t.Helper()
-	cmd := exec.Command(oxBin, "agent", agentID, "hook", event)
-	cmd.Dir = env.workspace
-	cmd.Env = oxEnv(env)
+	cmd := testguard.OxCmd(t, oxBin, env.workspace, oxEnv(env), "agent", agentID, "hook", event)
 
 	// pipe hook input via stdin
 	hookInput := fmt.Sprintf(`{"session_id":"%s","hook_event_name":"%s"}`, sessionID, event)
@@ -516,14 +548,20 @@ func runOxHook(t *testing.T, oxBin string, env e2eEnv, agentID, event, sessionID
 	return string(out)
 }
 
+type claudeE2ESource struct {
+	path      string
+	repoRoot  string
+	sessionID string
+}
+
 // createClaudeSourceFile creates a fake Claude Code JSONL file at the path
 // the claude-code adapter's FindSessionFile would look for it.
-func createClaudeSourceFile(t *testing.T, env e2eEnv) string {
+func createClaudeSourceFile(t *testing.T, env e2eEnv) claudeE2ESource {
 	t.Helper()
 	return createClaudeSourceFileNamed(t, env, "session.jsonl")
 }
 
-func createClaudeSourceFileNamed(t *testing.T, env e2eEnv, filename string) string {
+func createClaudeSourceFileNamed(t *testing.T, env e2eEnv, filename string) claudeE2ESource {
 	t.Helper()
 
 	// Claude Code stores files at ~/.claude/projects/<hash>/<session>.jsonl
@@ -541,7 +579,7 @@ func createClaudeSourceFileNamed(t *testing.T, env e2eEnv, filename string) stri
 	sourceFile := filepath.Join(projectDir, filename)
 	require.NoError(t, os.WriteFile(sourceFile, []byte(""), 0644))
 
-	return sourceFile
+	return claudeE2ESource{path: sourceFile, repoRoot: realWorkspace, sessionID: strings.TrimSuffix(filename, ".jsonl")}
 }
 
 func writeE2ESessionMarker(t *testing.T, env e2eEnv, agentID, sessionID string) {
@@ -569,13 +607,23 @@ func writeE2ESessionMarker(t *testing.T, env e2eEnv, agentID, sessionID string) 
 	})
 }
 
-func writeClaudeEntry(t *testing.T, sourceFile, jsonLine string) {
+func writeClaudeEntry(t *testing.T, source claudeE2ESource, jsonLine string) {
 	t.Helper()
-	f, err := os.OpenFile(sourceFile, os.O_WRONLY|os.O_APPEND, 0644)
+	var entry map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(jsonLine), &entry))
+	// Each turn needs its own identity: a valid header cannot prove later turns stayed in this repo.
+	cwd, err := json.Marshal(source.repoRoot)
 	require.NoError(t, err)
-	_, err = f.WriteString(jsonLine + "\n")
+	id, err := json.Marshal(source.sessionID)
 	require.NoError(t, err)
-	f.Close()
+	entry["cwd"], entry["sessionId"] = cwd, id
+	data, err := json.Marshal(entry)
+	require.NoError(t, err)
+	f, err := os.OpenFile(source.path, os.O_WRONLY|os.O_APPEND, 0644)
+	require.NoError(t, err)
+	_, err = f.Write(append(data, '\n'))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
 }
 
 func claudeUserEntry(ts, content string) string {

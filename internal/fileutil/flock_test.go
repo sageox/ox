@@ -6,10 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestWithFileLock_SerializesGoroutines proves the in-process side of
@@ -136,6 +140,11 @@ func TestWithFileLock_RespectsContext(t *testing.T) {
 // actually cross-process-serializes. Skips the cross-process test on
 // platforms where tryFlock is a no-op (Windows).
 func crossProcessFlockAvailable() bool {
+	// tryFlock is a no-op on Windows, so the probe below would succeed there
+	// without proving any cross-process exclusion.
+	if runtime.GOOS == "windows" {
+		return false
+	}
 	dir, _ := os.MkdirTemp("", "ox-flock-probe-")
 	defer os.RemoveAll(dir)
 	target := filepath.Join(dir, "probe")
@@ -221,5 +230,245 @@ func TestHelperFlockHolder(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("helper acquire failed: %v", err)
+	}
+}
+
+// TestErrLockTimeout_Error covers the Timeout field this PR added: the
+// zero-value fallback to the package default, and reporting the actual
+// caller-supplied timeout (gitutil.WithRepoLock passes its own 2-minute
+// budget here, not the 10s package default — a bare zero check would have
+// let that regress silently).
+func TestErrLockTimeout_Error(t *testing.T) {
+	zero := &ErrLockTimeout{Path: "/tmp/x.lock"}
+	assert.Contains(t, zero.Error(), LockTimeout.String(), "Timeout: 0 must fall back to the package default, not report a bogus 0s")
+
+	custom := &ErrLockTimeout{Path: "/tmp/x.lock", Timeout: 2 * time.Minute}
+	assert.Contains(t, custom.Error(), "2m0s", "a caller-supplied timeout must be reported as given, not the package default")
+	assert.NotContains(t, custom.Error(), LockTimeout.String())
+}
+
+// TestWithFileLockTimeout_ReportsRequestedTimeout is the regression for the
+// exact bug this PR fixed: acquireInProcess used to compute
+// time.Until(deadline) AFTER its timer fired, which is ~0 (sometimes
+// negative) by construction, not the timeout the caller actually asked for.
+func TestWithFileLockTimeout_ReportsRequestedTimeout(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "contended.dat")
+
+	release := make(chan struct{})
+	held := make(chan struct{})
+	go func() {
+		_ = WithFileLock(context.Background(), target, func() error { close(held); <-release; return nil })
+	}()
+	<-held
+	defer close(release)
+
+	const requested = 150 * time.Millisecond
+	err := WithFileLockTimeout(context.Background(), target, requested, func() error {
+		return errors.New("must not run")
+	})
+
+	var timeoutErr *ErrLockTimeout
+	require.ErrorAs(t, err, &timeoutErr)
+	// Within a few ms of what was asked for (clock-read jitter between the
+	// two time.Now() calls), not ~0s — which is what
+	// time.Until(deadline) computed AFTER the timer fires would report.
+	assert.InDelta(t, requested, timeoutErr.Timeout, float64(5*time.Millisecond),
+		"must report the timeout actually requested, not ~0s from time.Until(deadline) computed after the timer already fired")
+	assert.Greater(t, timeoutErr.Timeout, 100*time.Millisecond,
+		"the bug this regresses to reports a near-zero duration; anything under 100ms means it's back")
+}
+
+// TestWithFileLockTimeout_AlreadyPastDeadline covers acquireInProcess's
+// negative-duration clamp: a caller whose deadline has already passed by
+// the time it calls in (a slow caller building the deadline earlier, then
+// getting delayed before the actual lock call) must fail fast, not panic
+// or block on a negative-duration timer.
+func TestWithFileLockTimeout_AlreadyPastDeadline(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "past-deadline.dat")
+
+	release := make(chan struct{})
+	held := make(chan struct{})
+	go func() {
+		_ = WithFileLock(context.Background(), target, func() error { close(held); <-release; return nil })
+	}()
+	<-held
+	defer close(release)
+
+	start := time.Now()
+	err := WithFileLockTimeout(context.Background(), target, -1*time.Second, func() error {
+		return errors.New("must not run")
+	})
+	elapsed := time.Since(start)
+
+	var timeoutErr *ErrLockTimeout
+	require.ErrorAs(t, err, &timeoutErr)
+	assert.Equal(t, time.Duration(0), timeoutErr.Timeout, "an already-past deadline clamps to zero, not a negative duration")
+	assert.Less(t, elapsed, time.Second, "must fail immediately, not block on a negative-duration timer")
+}
+
+// TestWithFileLockTimeout_InProcessContextCancel covers acquireInProcess's
+// OWN ctx.Done() branch specifically — contention from another goroutine in
+// the SAME process, not the cross-process flock's separate ctx check
+// (TestWithFileLock_RespectsContext exercises that one, via a child process
+// whose lock never contends the in-process gate at all). This is exactly
+// the path two of ADR-030's four WithRepoLock sites depend on: the daemon's
+// sync scheduler and its GC/wedge probe are goroutines in the same process,
+// not separate ones.
+func TestWithFileLockTimeout_InProcessContextCancel(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "inprocess-cancel.dat")
+
+	release := make(chan struct{})
+	held := make(chan struct{})
+	go func() {
+		_ = WithFileLock(context.Background(), target, func() error { close(held); <-release; return nil })
+	}()
+	<-held
+	defer close(release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	doneCh := make(chan error, 1)
+	go func() {
+		doneCh <- WithFileLockTimeout(ctx, target, LockTimeout, func() error { return nil })
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-doneCh:
+		assert.ErrorIs(t, err, context.Canceled, "in-process contention must respect ctx cancellation, not just the timeout")
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not return after context cancel — in-process gate ignored ctx.Done()")
+	}
+}
+
+// TestWithFileLockTimeout_CrossProcessGenuineTimeout exercises the
+// cross-process flock polling loop's OWN deadline check — distinct from
+// every other timeout test here, which all contend at the in-process gate
+// and never reach this loop at all. A child-process holder bypasses the
+// in-process map entirely, so this is the only way to prove the flock-level
+// ErrLockTimeout actually fires when the lock is genuinely still held.
+func TestWithFileLockTimeout_CrossProcessGenuineTimeout(t *testing.T) {
+	if !crossProcessFlockAvailable() {
+		t.Skip("cross-process flock not available on this platform")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "genuine-timeout.dat")
+
+	holder, release := startLockHolder(t, target)
+	defer release()
+	<-holder.acquired
+
+	start := time.Now()
+	err := WithFileLockTimeout(context.Background(), target, 100*time.Millisecond, func() error {
+		return errors.New("must not run — the child process still holds the lock")
+	})
+	elapsed := time.Since(start)
+
+	var timeoutErr *ErrLockTimeout
+	require.ErrorAs(t, err, &timeoutErr)
+	assert.GreaterOrEqual(t, elapsed, 100*time.Millisecond, "must actually wait out the requested timeout, not return early")
+	assert.Less(t, elapsed, 2*time.Second, "must not wait past the requested timeout")
+}
+
+// TestWithFileLockTimeout_OpenFileFails covers the os.OpenFile error path:
+// if the lock directory can't be created or opened, WithFileLockTimeout
+// must return a wrapped error, not panic or silently proceed as if
+// unlocked. Forced by pointing TMPDIR at a regular file instead of a
+// directory — portable and root-safe, unlike chmod-based permission
+// denial, which CI often runs privileged enough to ignore.
+func TestWithFileLockTimeout_OpenFileFails(t *testing.T) {
+	notADir := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(notADir, []byte("x"), 0o644))
+	pointTempDirAt(t, notADir)
+
+	err := WithFileLockTimeout(context.Background(), "/some/target", LockTimeout, func() error {
+		return errors.New("must not run — the lock could not have been acquired")
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "open lock file")
+}
+
+// TestTryWithFileLock_HeldLockReturnsAtOnce verifies a held lock is reported
+// as held, immediately and without running fn, whether the holder is another
+// goroutine or another process; and that a free lock runs fn and is released.
+// Failure prevented: a caller that only needs to know "is someone already on
+// this" waits out a holder that may run for many minutes (a Ledger clone),
+// tying up whatever it holds meanwhile.
+func TestTryWithFileLock_HeldLockReturnsAtOnce(t *testing.T) {
+	mustNotRun := func() error { t.Error("fn ran while another holder had the lock"); return nil }
+
+	t.Run("held by a goroutine in this process", func(t *testing.T) {
+		target := filepath.Join(t.TempDir(), "in-process.dat")
+		release, held := make(chan struct{}), make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = WithFileLock(context.Background(), target, func() error { close(held); <-release; return nil })
+		}()
+		<-held
+		defer func() { close(release); <-done }()
+
+		start := time.Now()
+		acquired, err := TryWithFileLock(target, mustNotRun)
+		require.NoError(t, err)
+		assert.False(t, acquired)
+		assert.Less(t, time.Since(start), time.Second, "a held lock must be reported at once, not waited out")
+	})
+
+	t.Run("held by another process", func(t *testing.T) {
+		if !crossProcessFlockAvailable() {
+			t.Skip("cross-process flock not available on this platform")
+		}
+		target := filepath.Join(t.TempDir(), "cross-process.dat")
+		holder, release := startLockHolder(t, target)
+		defer release()
+		<-holder.acquired
+
+		acquired, err := TryWithFileLock(target, mustNotRun)
+		require.NoError(t, err, "contention is not a lock failure")
+		assert.False(t, acquired)
+	})
+
+	t.Run("free lock runs fn and releases it", func(t *testing.T) {
+		target := filepath.Join(t.TempDir(), "free.dat")
+		fnErr := errors.New("fn's own error")
+		acquired, err := TryWithFileLock(target, func() error { return fnErr })
+		assert.True(t, acquired)
+		require.ErrorIs(t, err, fnErr, "fn's error is returned as is")
+
+		err = WithFileLockTimeout(context.Background(), target, 100*time.Millisecond, func() error { return nil })
+		require.NoError(t, err, "the lock must be released once fn returns")
+	})
+}
+
+// TestTryWithFileLock_OpenFailureIsAnError verifies a lock that cannot be
+// tried is reported as an error, not as held.
+// Failure prevented: a broken lock directory renders as "someone else is on
+// it", so the work is skipped forever and nothing announces why.
+func TestTryWithFileLock_OpenFailureIsAnError(t *testing.T) {
+	notADir := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(notADir, []byte("x"), 0o644))
+	pointTempDirAt(t, notADir)
+
+	acquired, err := TryWithFileLock("/some/target", func() error {
+		return errors.New("must not run — the lock could not have been acquired")
+	})
+	assert.False(t, acquired)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "open lock file")
+}
+
+// pointTempDirAt points os.TempDir, and with it LockPath's lock directory, at
+// dir. It skips the test where TMPDIR does not steer os.TempDir (Windows reads
+// TMP and TEMP), rather than run it against the real temp dir.
+func pointTempDirAt(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("TMPDIR", dir)
+	if os.TempDir() != dir {
+		t.Skip("TMPDIR does not set os.TempDir on this platform")
 	}
 }

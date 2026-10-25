@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"slices"
 	"testing"
 
 	"github.com/sageox/ox/internal/config"
@@ -194,6 +195,12 @@ func TestGetAvailableSlugs_Coverage(t *testing.T) {
 		if slugs[i] < slugs[i-1] {
 			t.Errorf("slugs not sorted: %q before %q", slugs[i-1], slugs[i])
 		}
+	}
+	if !slices.Contains(slugs, CheckSlugAdapterRules) {
+		t.Errorf("deprecated compatibility alias %q is not advertised", CheckSlugAdapterRules)
+	}
+	if got := GetDoctorCheck(CheckSlugAdapterRules); got != GetDoctorCheck(CheckSlugClaudeSkills) {
+		t.Errorf("compatibility alias %q does not resolve to %q", CheckSlugAdapterRules, CheckSlugClaudeSkills)
 	}
 }
 

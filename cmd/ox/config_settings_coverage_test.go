@@ -21,6 +21,7 @@ func TestGetSetting_KnownKeys(t *testing.T) {
 		{"session_recording", false, "Sessions"},
 		{"telemetry", false, "Privacy"},
 		{"tips", false, "Display"},
+		{"session_publishing", false, "Sessions"},
 		{"context_git.auto_commit", false, "Sessions"},
 		{"context_git.auto_push", false, "Sessions"},
 		{"view_format", false, "Display"},
@@ -249,7 +250,7 @@ func TestResolveConfigValue_WithFakeProjectRoot(t *testing.T) {
 func TestResolveConfigValue_AllKnownKeys(t *testing.T) {
 	t.Parallel()
 
-	keys := []string{"session_recording", "telemetry", "tips", "context_git.auto_commit", "context_git.auto_push", "view_format", "agent_worker"}
+	keys := []string{"session_recording", "telemetry", "tips", "session_publishing", "context_git.auto_commit", "context_git.auto_push", "view_format", "agent_worker"}
 	for _, key := range keys {
 		t.Run(key, func(t *testing.T) {
 			t.Parallel()
@@ -346,4 +347,36 @@ func TestSetConfigValue_PRVisualsRoundTripsThroughResolver(t *testing.T) {
 	require.NoError(t, UnsetConfigValue("pr_visuals.theme", ConfigLevelUser, ""))
 	assert.True(t, config.PRVisualsRich(""))
 	assert.Equal(t, config.PRVisualsThemeLight, config.PRVisualsTheme(""))
+}
+
+// TestSetConfigValue_ClaudeOrgDedupe_RoundTrips: `ox config set
+// skills.claude_org_dedupe off` must reach the value the skill planner reads,
+// and unsetting it must restore the default (on), not leave it off.
+// Failure prevented: a coworker whose sessions never load org plugins turns
+// the dedupe off, the registry drops the write, and ox keeps removing their
+// only copy of every portable team skill.
+func TestSetConfigValue_ClaudeOrgDedupe_RoundTrips(t *testing.T) {
+	t.Setenv("OX_USER_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
+	planner := func() bool {
+		cfg, err := config.LoadUserConfig()
+		require.NoError(t, err)
+		return cfg.ClaudeOrgDedupeEnabled()
+	}
+	require.True(t, planner(), "default must be on")
+
+	require.NoError(t, SetConfigValue("skills.claude_org_dedupe", "off", ConfigLevelUser, ""))
+	assert.False(t, planner())
+	value, err := ResolveConfigValue("skills.claude_org_dedupe", "")
+	require.NoError(t, err)
+	assert.Equal(t, "off", value.UserVal)
+	assert.Equal(t, ConfigLevelUser, value.Source)
+
+	require.NoError(t, UnsetConfigValue("skills.claude_org_dedupe", ConfigLevelUser, ""))
+	assert.True(t, planner(), "unsetting must fall back to on")
+	cfg, err := config.LoadUserConfig()
+	require.NoError(t, err)
+	assert.Nil(t, cfg.Skills, "an emptied skills block must not linger in config.yaml")
+
+	assert.Error(t, SetConfigValue("skills.claude_org_dedupe", "off", ConfigLevelRepo, t.TempDir()),
+		"per-user by design: a repo cannot decide how each coworker's Claude Code signs in")
 }

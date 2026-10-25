@@ -1,7 +1,8 @@
 # Makefile for ox CLI tool
 
-.PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw
-.PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-cover test-timings test-all test-slow test-browser test-integration test-agents test-preflight test-digital-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
+.PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open check-test-tiers test-tiers
+.PHONY: test-all-split test-split-slots test-split-slot coverage-merge-unit warm-test-cache coverage-integration-profile coverage-merge
+.PHONY: help build build-ox build-adapters build-acceptance install install-adapters uninstall uninstall-ox uninstall-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-release-coverage release-stages test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish plan-review plan-review-check refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
 GO := go
@@ -11,6 +12,25 @@ VERSION := $(shell grep 'Version.*=' internal/version/version.go | head -1 | sed
 BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GOPATH := $(shell go env GOPATH)
+# sq: $(1) with each ' written as '\'' so it can sit inside single quotes in
+# a recipe and reach the shell as plain text, never as code.
+sq = $(subst ','\'',$(1))
+# go install writes to GOBIN when set, overriding GOPATH/bin — resolve the
+# same way here so PATH guidance and the `ox doctor` hint below point at
+# where the binary actually landed, not always GOPATH/bin.
+GOBIN := $(shell go env GOBIN)
+GOPATH_FIRST := $(shell ox_gopath='$(call sq,$(GOPATH))'; printf '%s' "$${ox_gopath%%:*}")
+INSTALL_BIN := $(if $(strip $(GOBIN)),$(GOBIN),$(GOPATH_FIRST)/bin)
+# Canonicalize once per recipe and use that exact directory for all writes.
+# Uninstalling a directory that no longer exists is an idempotent no-op.
+define resolve-install-bin
+ox_bin='$(call sq,$(INSTALL_BIN))'; \
+test -n "$$ox_bin" || { echo "Refusing empty install directory" >&2; exit 1; }; \
+$(if $(filter install,$(1)),mkdir -p -- "$$ox_bin" || exit $$?;,if [ ! -e "$$ox_bin" ] && [ ! -L "$$ox_bin" ]; then exit 0; fi;) \
+ox_bin=$$(CDPATH= cd -- "$$ox_bin" && pwd -P) || exit $$?; \
+while [ "$${ox_bin#//}" != "$$ox_bin" ]; do ox_bin=$${ox_bin#/}; done; \
+case "$$ox_bin" in /|/bin|/sbin|/usr/bin|/usr/sbin) echo "Refusing unsafe install directory: $$ox_bin" >&2; exit 1;; esac
+endef
 LDFLAGS := -ldflags "-X github.com/sageox/ox/internal/version.Version=$(VERSION) -X github.com/sageox/ox/internal/version.BuildDate=$(BUILD_TIME) -X github.com/sageox/ox/internal/version.GitCommit=$(GIT_COMMIT)"
 ADAPTER_LDFLAGS := -ldflags "-s -w"
 
@@ -32,7 +52,33 @@ GOTESTSUM_LEAN = $(if $(filter 1,$(V)),,--hide-summary skipped --format-hide-emp
 TIME_CMD = $(if $(filter 1,$(V)),time,)
 
 # Bundled adapters (shipped in release tarballs alongside ox)
-ADAPTERS := ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode ox-adapter-pi ox-adapter-omp ox-adapter-aider ox-adapter-droid ox-adapter-goose
+ADAPTERS := ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode ox-adapter-pi ox-adapter-omp ox-adapter-aider ox-adapter-droid ox-adapter-goose ox-adapter-cursor
+empty :=
+space := $(empty) $(empty)
+comma := ,
+ACCEPTANCE_DIR := $(abspath tmp/acceptance)
+# Coverage-instrumented acceptance binary + its adapter set, isolated from bin/
+# for the reason documented on build-cover.
+COVER_BIN_DIR := $(abspath tmp/acceptance-cover)
+COVER_OX_BIN := $(COVER_BIN_DIR)/$(BINARY_NAME)
+ACCEPTANCE_OX_BIN ?= $(ACCEPTANCE_DIR)/$(BINARY_NAME)
+ACCEPTANCE_GO_COVER_DIR ?=
+ACCEPTANCE_INTEGRATION_COVER_FLAGS = $(if $(strip $(ACCEPTANCE_GO_COVER_DIR)),-coverprofile=$(ACCEPTANCE_GO_COVER_DIR)/integration-test.out -covermode=atomic,)
+ACCEPTANCE_SLOW_COVER_FLAGS = $(if $(strip $(ACCEPTANCE_GO_COVER_DIR)),-coverprofile=$(ACCEPTANCE_GO_COVER_DIR)/slow-test.out -covermode=atomic,)
+ACCEPTANCE_INTEGRATION_TESTS := TestCodeActivityE2E TestFreshInstall_MockServer_InitThenDoctor TestFreshInstall_MockServer_SyncUnavailableThenDoctorStillWorks TestNoInputCLI TestUnexpectedArgumentsCLI TestUpgradeCLI TestDoctorExitCLI TestJSONOutputModesCLI TestCLIOutputWriteFailures TestCLIInvalidSubcommands
+ifneq ($(filter darwin linux freebsd,$(shell $(GO) env GOOS)),)
+ACCEPTANCE_INTEGRATION_TESTS += TestBackgroundDaemonSurvivesCommandCleanup TestDaemonUpgradeRetainsProject
+endif
+ifneq ($(filter darwin linux,$(shell $(GO) env GOOS)),)
+# Exercise terminal output modes against the instrumented binary in CI.
+ACCEPTANCE_INTEGRATION_TESTS += TestConfigCLIOutputModes
+ACCEPTANCE_INTEGRATION_TESTS += TestSpinnerCLIInterrupt
+endif
+ACCEPTANCE_SLOW_TESTS := TestIncrementalE2E_SingleAgent TestIncrementalE2E_CtrlC_AntiEntropy
+TWIN_COVER_DIR ?=
+CLOUD_TWIN_COVER_FLAGS = $(if $(strip $(TWIN_COVER_DIR)),-coverpkg=github.com/sageox/ox/internal/auth -coverprofile=$(TWIN_COVER_DIR)/cloud.out -covermode=atomic,)
+LEDGER_TWIN_COVER_FLAGS = $(if $(strip $(TWIN_COVER_DIR)),-coverpkg=github.com/sageox/ox/internal/glance$(comma)github.com/sageox/ox/internal/ledger$(comma)github.com/sageox/ox/internal/carts -coverprofile=$(TWIN_COVER_DIR)/ledger.out -covermode=atomic,)
+KB_TWIN_COVER_FLAGS = $(if $(strip $(TWIN_COVER_DIR)),-coverpkg=github.com/sageox/ox/internal/daemon$(comma)github.com/sageox/ox/internal/kb$(comma)github.com/sageox/ox/internal/gitserver -coverprofile=$(TWIN_COVER_DIR)/kb.out -covermode=atomic,)
 
 # Build targets
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
@@ -53,25 +99,83 @@ build-adapters: ## Build all bundled adapter binaries to bin/
 	done
 	$(call say,"Adapters built: $(ADAPTERS)")
 
+build-acceptance: ## Build the exact ox + adapter binaries used by acceptance tests
+	@rm -rf "$(ACCEPTANCE_DIR)"
+	@mkdir -p "$(ACCEPTANCE_DIR)"
+	@$(GO) build $(LDFLAGS) -o "$(ACCEPTANCE_OX_BIN)" ./cmd/ox
+	@$(GO) build $(ADAPTER_LDFLAGS) -o "$(ACCEPTANCE_DIR)/ox-adapter-claude-code" ./cmd/ox-adapter-claude-code
+
 install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
+	@echo ""
+	@echo "─────────────────────────────────────────────────────────────────────"
+	@echo "  This is a developer build of bleeding-edge HEAD — less tested than"
+	@echo "  a release, and it will not self-update."
+	@echo ""
+	@echo "  For everyday use, install a release instead:"
+	@echo ""
+	@echo "    brew install sageox/tap/ox        # recommended"
+	@echo "    Versioned downloads: https://github.com/sageox/ox/releases/latest"
+	@echo ""
+	@echo "  Releases self-update via \`ox upgrade\` and keep ox and its 11 adapter"
+	@echo "  binaries together on PATH."
+	@echo "─────────────────────────────────────────────────────────────────────"
+	@$(call resolve-install-bin); \
+	case ":$$PATH:" in \
+		*":$$ox_bin:"*) ;; \
+		*) \
+			ox_q=$$(printf '%s' "$$ox_bin" | sed 's/[\\"$$`]/\\&/g'); \
+			ox_fq=$$(printf '%s' "$$ox_bin" | sed 's/[\\"$$]/\\&/g'); \
+			shell_name=$$(basename "$${SHELL:-}"); \
+			restart_line=""; \
+			case "$$shell_name" in \
+				zsh) rc_file="~/.zshenv"; path_line="export PATH=\"\$$PATH:$$ox_q\""; explanation="AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc." ;; \
+				bash) rc_file="~/.bashrc"; if [ "$$(uname -s 2>/dev/null)" = Darwin ]; then rc_file="~/.bash_profile"; for f in .bash_profile .bash_login .profile; do if [ -f "$$HOME/$$f" ]; then rc_file="~/$$f"; break; fi; done; fi; path_line="export PATH=\"\$$PATH:$$ox_q\""; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."; explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." ;; \
+				fish) rc_file="~/.config/fish/config.fish"; path_line="fish_add_path -- \"$$ox_fq\""; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."; explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." ;; \
+				*) rc_file="the startup file for your shell"; path_line="export PATH=\"\$$PATH:$$ox_q\""; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."; explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." ;; \
+			esac; \
+			echo ""; \
+			echo "ox is installed at $$ox_bin/$(BINARY_NAME) but is not on PATH for non-interactive shells."; \
+			echo "$$explanation"; \
+			echo "Add this line to $$rc_file:"; \
+			printf '%s\n' "    $$path_line"; \
+			[ -n "$$restart_line" ] && echo "$$restart_line"; \
+			echo ""; \
+			;; \
+	esac; \
+	ox_cmd="'$$(printf '%s' "$$ox_bin/$(BINARY_NAME)" | sed "s/'/'\\\\''/g")'"; \
+	printf 'Next: run `%s doctor` to confirm your AI coworker can actually see this install.\n' "$$ox_cmd"
 
 install-ox: ## Install ox to $GOPATH/bin
-	@echo "Installing $(BINARY_NAME) to $(GOPATH)/bin..."
-	$(GO) install $(LDFLAGS) ./cmd/ox
-	@echo "Installed $(BINARY_NAME) to $(GOPATH)/bin/$(BINARY_NAME)"
+	@$(call resolve-install-bin,install); \
+	echo "Installing $(BINARY_NAME) to $$ox_bin..."; \
+	GOBIN="$$ox_bin" $(GO) install $(LDFLAGS) ./cmd/ox || exit $$?; \
+	echo "Installed $(BINARY_NAME) to $$ox_bin/$(BINARY_NAME)"
 
 install-adapters: ## Install bundled adapters to $GOPATH/bin
-	@echo "Installing adapters to $(GOPATH)/bin..."
-	@for adapter in $(ADAPTERS); do \
-		$(GO) install $(ADAPTER_LDFLAGS) ./cmd/$$adapter; \
+	@$(call resolve-install-bin,install); \
+	echo "Installing adapters to $$ox_bin..."; \
+	for adapter in $(ADAPTERS); do \
+		GOBIN="$$ox_bin" $(GO) install $(ADAPTER_LDFLAGS) ./cmd/$$adapter || exit $$?; \
 		echo "  Installed $$adapter"; \
+	done
+
+uninstall: uninstall-ox uninstall-adapters ## Remove ox-owned binaries from the install directory
+
+uninstall-ox:
+	@$(call resolve-install-bin); \
+	rm -f "$$ox_bin/$(BINARY_NAME)"
+
+uninstall-adapters:
+	@$(call resolve-install-bin); \
+	for adapter in $(ADAPTERS); do \
+		rm -f "$$ox_bin/$$adapter" || exit $$?; \
 	done
 
 clean: ## Remove build artifacts
 	@echo "Cleaning build artifacts..."
 	@rm -rf bin/ dist/ tmp/
 	@rm -f $(BINARY_NAME)
-	@rm -f coverage.out coverage.html coverage-all.out .coverage-baseline.out
+	@rm -f coverage.out coverage.out.provenance.json coverage.html coverage-all.out coverage-all.out.provenance.json .coverage-baseline.out
 	@echo "Clean complete"
 
 # Development
@@ -86,7 +190,8 @@ run: build ## Build and run ox
 #
 # Test Tiers:
 #   fast  (make test)             — Unit tests <500ms. No git clone, no network, NO coverage instrumentation.
-#                                   Runs on every commit. Target: <60s wall.
+#                                   Uses both testing.Short and the `short` build tag so files marked
+#                                   `//go:build !short` are excluded. Runs on every commit. Target: <60s wall.
 #   fast+cov (make test-cover)    — Same as fast but with coverage (~15-20% slower). Local use.
 #   full  (make test-all)         — All unit tests including expensive ones (git clone, SQLite, LFS).
 #                                   Coverage collection lives here. Target: <5min wall.
@@ -94,7 +199,8 @@ run: build ## Build and run ox
 #   integration — E2E with real Claude sessions. Lives in sageox/ox-test-harness (private).
 #
 # Tier criteria for `make test` (fast):
-#   - No exec.Command (git or otherwise) except via an in-process fake.
+#   - No network or external services. Hermetic local subprocesses (for
+#     example git in t.TempDir) are allowed when bounded and <500ms.
 #   - No time.Sleep > 5ms on the success path.
 #   - No real SQLite/Bleve file I/O.
 #   - No os.Setenv (use t.Setenv); tests should call t.Parallel().
@@ -108,11 +214,30 @@ run: build ## Build and run ox
 #
 # Output: quiet by default (agent-friendly). V=1 for verbose.
 #
-GOTESTSUM := $(shell which gotestsum 2>/dev/null || echo "go run gotest.tools/gotestsum@latest")
+GOTESTSUM_VERSION := v1.13.0
+GOTESTSUM := $(shell which gotestsum 2>/dev/null || echo "go run gotest.tools/gotestsum@$(GOTESTSUM_VERSION)")
 # Leave empty to create a unique artifact per local invocation. Set explicitly
 # when a caller needs a stable path (for example, CI uploads its artifact).
 TEST_TIMINGS ?=
+TEST_JUNIT ?=
 TEST_METRICS := scripts/test_metrics.py
+TEST_TIER_TOOL := python3 scripts/test_tiers.py
+FAST_TEST_FLAGS = $(shell $(TEST_TIER_TOOL) flags fast)
+FULL_TEST_FLAGS = $(shell $(TEST_TIER_TOOL) flags full)
+SLOW_TEST_FLAGS = $(shell $(TEST_TIER_TOOL) flags slow)
+# Same full tier, dialed down for a machine that is NOT dedicated to this run.
+# Overridable per-invocation: make test-calm CALM_P=1 CALM_PARALLEL=4
+# Deliberately NOT a $(shell ...) variable: these two values come from the
+# operator, so the tier tool can legitimately reject them (CALM_P=0,
+# CALM_PARALLEL=many). Make does not stop for a failed $(shell ...) — it
+# substitutes the empty output — which would run the suite with no -race, no
+# -timeout and no -count while still printing "full tier". The recipe below
+# generates the flags itself so a rejection is fatal.
+CALM_P ?= 2
+CALM_PARALLEL ?= 8
+SLOW_TEST_PACKAGES := ./cmd/ox ./internal/daemon ./internal/session ./tests/adapters
+GOTESTSUM_JUNIT = $(if $(strip $(TEST_JUNIT)),--junitfile "$(TEST_JUNIT)",)
+GOTESTSUM_TIMINGS = $(if $(strip $(TEST_TIMINGS)),--jsonfile-timing-events "$(TEST_TIMINGS)",)
 
 # Isolate test `git` invocations from the developer's global config.
 # Many tests build scratch repos in t.TempDir() and run `git init` +
@@ -132,6 +257,35 @@ TEST_METRICS := scripts/test_metrics.py
 # GIT_CONFIG_NOSYSTEM=1        → ignore /etc/gitconfig
 # GIT_TERMINAL_PROMPT=0        → never prompt; fail fast on missing creds
 # GIT_AUTHOR_*  / GIT_COMMITTER_*  → identity without needing config
+#
+# GIT_CONFIG_COUNT / GIT_CONFIG_KEY_N / GIT_CONFIG_VALUE_N below prevent a
+# background `git gc --auto` from racing t.TempDir() cleanup. git forks
+# `gc --auto` (and `receive-pack` forks one after a push) and returns
+# without waiting for the child; if that child is still writing
+# .git/objects when the test's t.TempDir() runs RemoveAll, cleanup fails
+# with "directory not empty". This only bites under CI load — gc has
+# nothing to trigger on the small scratch repos these tests build locally.
+# gc.autoDetach=false is the load-bearing setting: it forces any gc that
+# *does* run to run synchronously instead of forking, so the race cannot
+# exist even if something re-enables auto-gc. gc.auto=0 / maintenance.auto
+# / receive.autogc stop it from triggering at all in the common case. Keep
+# all four — collapsing this back to just gc.auto=0 quietly reopens the
+# fork-and-return race for any path that doesn't honor gc.auto.
+#
+# None of these reach a bare origin's receive-pack. For a push to a local
+# path, git starts receive-pack with GIT_CONFIG_COUNT and
+# GIT_CONFIG_PARAMETERS removed from its environment, so receive-pack runs
+# with git's defaults and forks a detached `git maintenance run --auto` into
+# the origin. A test origin must carry these settings in its own config — in
+# cmd/ox, create it with initBareRemote (cmd/ox/test_helpers_test.go).
+#
+# Known, acceptable interaction: a handful of tests build their own
+# GIT_CONFIG_COUNT env for a specific git invocation (e.g.
+# cmd/ox/doctor_ledger_git_test.go, internal/kb/multiwriter_test.go,
+# internal/gitutil/rebase_resolve_integration_test.go). Env vars are
+# replaced, not merged, so their GIT_CONFIG_COUNT wins for that command and
+# it simply doesn't get these settings — same behavior as before this
+# change. Do not try to merge counts dynamically; that's fragile.
 TEST_GIT_ISOLATION := \
 	GIT_CONFIG_GLOBAL=/dev/null \
 	GIT_CONFIG_NOSYSTEM=1 \
@@ -139,46 +293,210 @@ TEST_GIT_ISOLATION := \
 	GIT_AUTHOR_NAME=ox-test \
 	GIT_AUTHOR_EMAIL=test@test.sageox.ai \
 	GIT_COMMITTER_NAME=ox-test \
-	GIT_COMMITTER_EMAIL=test@test.sageox.ai
+	GIT_COMMITTER_EMAIL=test@test.sageox.ai \
+	GIT_CONFIG_COUNT=4 \
+	GIT_CONFIG_KEY_0=gc.auto GIT_CONFIG_VALUE_0=0 \
+	GIT_CONFIG_KEY_1=gc.autoDetach GIT_CONFIG_VALUE_1=false \
+	GIT_CONFIG_KEY_2=maintenance.auto GIT_CONFIG_VALUE_2=false \
+	GIT_CONFIG_KEY_3=receive.autogc GIT_CONFIG_VALUE_3=false
 
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
-test: ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)
+check-test-tiers: ## Validate the machine-readable test-tier contract
+	@$(TEST_TIER_TOOL) validate
+
+test-tiers: check-test-tiers ## Print the executable test-tier contract
+	@for tier in fast full slow acceptance digital_twin integration release; do $(TEST_TIER_TOOL) describe $$tier; echo; done
+
+# Root ./... deliberately excludes nested public modules, so their coverage is
+# collected here and appended into coverage.out by each coverage tier below
+# before the ratchet reads it. Otherwise every change to a public module fails
+# the changed-line gate as "no coverage data".
+PUBLIC_MODULES := pkg/sessionprovenance pkg/planreview
+PUBLIC_MODULES_COVER := tmp/public-modules-coverage.out
+.PHONY: test-public-modules
+test-public-modules: ## Validate the public contract modules under pkg/
+	@mkdir -p tmp
+	@echo "mode: atomic" > $(PUBLIC_MODULES_COVER)
+	@for m in $(PUBLIC_MODULES); do \
+	  $(GO) -C $$m test -race -coverprofile=$(CURDIR)/tmp/public-module-coverage.out -covermode=atomic ./... || exit 1; \
+	  tail -n +2 tmp/public-module-coverage.out >> $(PUBLIC_MODULES_COVER); \
+	done
+
+test: check-test-tiers test-public-modules ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)
 	$(call say,"Running fast tests (skipping >500ms, no coverage)...")
 	@timings='$(TEST_TIMINGS)'; \
 	if [ -z "$$timings" ]; then mkdir -p tmp; timings=$$(mktemp -p tmp test-timings.XXXXXX); else mkdir -p "$$(dirname "$$timings")"; fi; \
-	$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) --jsonfile-timing-events "$$timings" -- -short -race -p 8 -parallel 32 ./...; \
+	test_status=0; \
+	$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) --jsonfile-timing-events "$$timings" -- $(FAST_TEST_FLAGS) ./... || test_status=$$?; \
 	echo "TEST_TIMING_ARTIFACT path=$$timings"; \
-	python3 $(TEST_METRICS) "$$timings"
+	metrics_status=0; \
+	python3 $(TEST_METRICS) "$$timings" || metrics_status=$$?; \
+	if [ "$$test_status" -ne 0 ]; then exit "$$test_status"; fi; \
+	exit "$$metrics_status"
 
-test-cover: ## Run fast tests with coverage collection (~15-20% slower than `make test`)
+test-cover: check-test-tiers test-public-modules ## Run fast tests with coverage collection (~15-20% slower than `make test`)
 	$(call say,"Running fast tests with coverage...")
-	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -short -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(FAST_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
+	@tail -n +2 $(PUBLIC_MODULES_COVER) >> coverage.out
+	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
 test-timings: ## Reprint metrics from the latest fast-test timing artifact
 	@test -n "$(TEST_TIMINGS)" || (echo "Set TEST_TIMINGS to an artifact printed by 'make test'." && exit 1)
 	@test -f $(TEST_TIMINGS) || (echo "No fast-test timing artifact at $(TEST_TIMINGS)." && exit 1)
 	@python3 $(TEST_METRICS) $(TEST_TIMINGS)
 
-test-all: ## Run all unit tests including expensive ones (git clone, SQLite, LFS) with coverage
+test-all: check-test-tiers test-public-modules ## Run all unit tests including expensive ones (git clone, SQLite, LFS) with coverage
 	$(call say,"Running all tests including expensive tests...")
-	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(FULL_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
+	@tail -n +2 $(PUBLIC_MODULES_COVER) >> coverage.out
+	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
-test-slow: ## Run slow tests (build tag: slow) — requires real ox binary, no Claude needed
+# Same tests, flags, and coverage as test-all, cut into slots
+# (scripts/test_split.py): cmd/ox and internal/daemon — long chains of tests
+# that mostly run one at a time — become contiguous slices of their own test
+# order, the next-heaviest packages share a group, and everything else is the
+# `rest` slot. Locally `test-all-split` runs every slot at once; CI runs each
+# slot on its own runner (`test-split-slot`), because on a 4-vCPU runner the
+# tests are CPU-bound and processes sharing it only slow each other down.
+# Refresh .config/test-split-weights.json from CI test-timing-events artifacts
+# with `scripts/test_split.py update-weights`.
+TEST_SPLIT_LAYOUT := --split ./cmd/ox=4 --split ./internal/daemon=2 \
+	--group heavy=./internal/daemon/agentwork,./internal/ledger
+TEST_SPLIT_ONLY ?=
+TEST_SPLIT_PARTS := tmp/unit-parts
+TEST_SPLIT_RUN = python3 scripts/test_split.py run $(TEST_SPLIT_LAYOUT) \
+		--go "$(GO)" \
+		--gotestsum "$(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN)" \
+		--weights .config/test-split-weights.json \
+		$(if $(strip $(TEST_JUNIT)),--junit "$(TEST_JUNIT)",) \
+		$(if $(strip $(TEST_TIMINGS)),--timings "$(TEST_TIMINGS)",)
+
+test-all-split: check-test-tiers test-public-modules ## Full tier (same as test-all) with every split slot running at once
+	$(call say,"Running all tests split into slots...")
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(TEST_SPLIT_RUN) --work-dir tmp/test-split --coverprofile coverage.out \
+		-- $(FULL_TEST_FLAGS) -covermode=atomic
+	@tail -n +2 $(PUBLIC_MODULES_COVER) >> coverage.out
+	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
+
+test-split-slots: ## Print the full tier's slots as a JSON array (the CI unit matrix)
+	@python3 scripts/test_split.py slots $(TEST_SPLIT_LAYOUT)
+
+test-split-slot: check-test-tiers ## Run one slot of the full tier: make test-split-slot TEST_SPLIT_ONLY=<slot>
+	@test -n "$(TEST_SPLIT_ONLY)" || { echo "Set TEST_SPLIT_ONLY to one of: $$($(MAKE) -s test-split-slots)"; exit 1; }
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(TEST_SPLIT_RUN) --only "$(TEST_SPLIT_ONLY)" --work-dir tmp/test-split \
+		--coverprofile $(TEST_SPLIT_PARTS)/coverage-$(TEST_SPLIT_ONLY).out \
+		-- $(FULL_TEST_FLAGS) -covermode=atomic
+	@# The nested public modules ride with `rest`, as they do in test-all.
+	@if [ "$(TEST_SPLIT_ONLY)" = rest ]; then \
+	  $(MAKE) --no-print-directory test-public-modules && \
+	  tail -n +2 $(PUBLIC_MODULES_COVER) >> $(TEST_SPLIT_PARTS)/coverage-rest.out; \
+	 fi
+
+coverage-merge-unit: ## Merge one coverage part per slot ($(TEST_SPLIT_PARTS)) into coverage.out; fails if a slot is missing
+	@python3 scripts/test_split.py merge-slots $(TEST_SPLIT_LAYOUT) --parts $(TEST_SPLIT_PARTS) --out coverage.out
+
+# Compile, without running, what the PR jobs compile, so a push to main can
+# save a build cache that PRs restore. A stale cache costs a PR run minutes of
+# race-instrumented recompiling; a drifted flag here only costs cache hits.
+warm-test-cache: build-cover ## Compile the full, acceptance, and twin test binaries into the Go build cache
+	@# testguard.BuildOxBinary: about 18 cmd/ox tests build a plain ox this way.
+	@CGO_ENABLED=0 $(GO) build -o /dev/null ./cmd/ox
+	@$(GO) test $(FULL_TEST_FLAGS) -covermode=atomic -run '^$$' ./... >/dev/null
+	@$(GO) test -tags=integration -race -covermode=atomic -run '^$$' ./cmd/ox >/dev/null
+	@$(GO) test -tags=slow -race -covermode=atomic -run '^$$' ./cmd/ox >/dev/null
+	@$(GO) test -tags=ledger_twin -run '^$$' ./tests/ledger_twin/... >/dev/null
+	@$(GO) test -tags=kb_twin -run '^$$' ./tests/kb_twin/... >/dev/null
+
+test-calm: check-test-tiers test-public-modules ## Run the full test tier at reduced concurrency (shared or already-loaded machine)
+	@# The tier contract's -p 8 -parallel 32 assumes the runner owns the machine.
+	@# Locally it runs once per agent session per worktree: two concurrent
+	@# `make test-all` runs on an 18-core workstation measured load average 37
+	@# and ~50% system time, at which point everything (including the tests)
+	@# gets slower. Same coverage, same race detector, a quarter of the fan-out.
+	$(call say,"Running full tests at reduced concurrency (-p $(CALM_P) -parallel $(CALM_PARALLEL))...")
+	@calm_flags="$$(OX_TEST_P=$(CALM_P) OX_TEST_PARALLEL=$(CALM_PARALLEL) $(TEST_TIER_TOOL) flags full)" || exit $$?; \
+		$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $$calm_flags -coverprofile=coverage.out -covermode=atomic ./...
+	@tail -n +2 $(PUBLIC_MODULES_COVER) >> coverage.out
+	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
+
+test-slow: check-test-tiers ## Run slow tests (build tag: slow) — requires real ox binary, no Claude needed
 	$(call say,"Running slow tests (requires built ox binary)...")
-	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -tags=slow -race -timeout=10m ./...
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- $(SLOW_TEST_FLAGS) $(SLOW_TEST_PACKAGES)
+
+test-fuzz: ## Run bounded fuzz smoke gates over untrusted parsers
+	@$(GO) test -race -run '^$$' -fuzz '^FuzzParseLayerName$$' -fuzztime=5s ./internal/conversation/format
+	@$(GO) test -race -run '^$$' -fuzz '^FuzzFolderName$$' -fuzztime=5s ./internal/conversation/read
+	@$(GO) test -race -run '^$$' -fuzz '^FuzzParseHistoryEntry$$' -fuzztime=5s ./internal/session
+	@$(GO) test -race -run '^$$' -fuzz '^FuzzRedactString_ScreenIsTransparent$$' -fuzztime=5s ./internal/session
 
 test-browser: ## Run real-browser E2E (build tag: browser) — drives headless Chrome; skips if no Chrome installed
 	$(call say,"Running real-browser E2E (requires Chrome/Chromium)...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -tags=browser -run TestBrowser -count=1 -timeout=5m ./cmd/ox/...
 
 test-integration: ## Integration tests live in sageox/ox-test-harness
-	@echo "Coding agent integration tests are in sageox/ox-test-harness."
+	@$(TEST_TIER_TOOL) describe integration
 	@echo "For an in-repo real-agent smoke gate, run: make test-agents"
 	@exit 1
 
+test-acceptance: check-test-tiers build-acceptance ## Deterministic current-source compiled-binary acceptance journeys
+	$(call say,"Running deterministic compiled-binary acceptance tests...")
+	@$(MAKE) --no-print-directory test-acceptance-run "ACCEPTANCE_OX_BIN=$(ACCEPTANCE_OX_BIN)"
+
+test-acceptance-cover: check-test-tiers build-cover ## Acceptance journeys through a coverage-instrumented current binary
+	@rm -rf $(COVERDIR)/integration
+	@mkdir -p $(COVERDIR)/integration
+	@OX_TEST_GOCOVERDIR="$(abspath $(COVERDIR)/integration)" \
+		$(MAKE) --no-print-directory test-acceptance-run \
+			"ACCEPTANCE_OX_BIN=$(COVER_OX_BIN)" \
+			"ACCEPTANCE_GO_COVER_DIR=$(COVERDIR)"
+	@test -s $(COVERDIR)/integration-test.out || { echo "ERROR: integration acceptance produced no Go coverage profile"; exit 1; }
+	@test -s $(COVERDIR)/slow-test.out || { echo "ERROR: session acceptance produced no Go coverage profile"; exit 1; }
+
+# Internal runner shared by ordinary and coverage-instrumented acceptance. It
+# asserts every required journey exists before execution so renames/deletions
+# cannot turn the tier green with "no tests to run".
+test-acceptance-run:
+	@test -x "$(ACCEPTANCE_OX_BIN)" || { echo "ERROR: acceptance binary missing: $(ACCEPTANCE_OX_BIN)"; exit 1; }
+	@listed=$$($(GO) test -tags=integration -race ./cmd/ox -list '.'); \
+	 for required in $(ACCEPTANCE_INTEGRATION_TESTS); do \
+	   printf '%s\n' "$$listed" | grep -Fx "$$required" >/dev/null || { echo "ERROR: required acceptance test missing: $$required"; exit 1; }; \
+	 done
+	@listed=$$($(GO) test -tags=slow -race ./cmd/ox -list '.'); \
+	 for required in $(ACCEPTANCE_SLOW_TESTS); do \
+	   printf '%s\n' "$$listed" | grep -Fx "$$required" >/dev/null || { echo "ERROR: required acceptance test missing: $$required"; exit 1; }; \
+	 done
+	@OX_TEST_OX_BINARY="$(ACCEPTANCE_OX_BIN)" $(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- \
+		-tags=integration -race -count=1 -p 1 -parallel 1 -timeout=10m \
+		$(ACCEPTANCE_INTEGRATION_COVER_FLAGS) \
+		-run '^($(subst $(space),|,$(strip $(ACCEPTANCE_INTEGRATION_TESTS))))$$' \
+		./cmd/ox
+	@OX_TEST_OX_BINARY="$(ACCEPTANCE_OX_BIN)" $(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- \
+		-tags=slow -race -count=1 -p 1 -parallel 1 -timeout=10m \
+		$(ACCEPTANCE_SLOW_COVER_FLAGS) \
+		-run '^($(subst $(space),|,$(strip $(ACCEPTANCE_SLOW_TESTS))))$$' \
+		./cmd/ox
+
+# The release gate's independent stages. `make test-release` runs them in order;
+# release.yml reads this list with `make release-stages` and runs each stage as
+# its own parallel job, so CI cannot skip a stage that `make test-release` runs.
+RELEASE_STAGES := test-release-coverage test-slow test-fuzz
+
+test-release: check-test-tiers ## Run every enforceable in-repo release tier sequentially
+	@for stage in $(RELEASE_STAGES); do $(MAKE) $$stage || exit 1; done
+
+# One stage, not three: the ratchet reads the profile merged from the full,
+# acceptance, and digital-twin runs.
+test-release-coverage: check-test-tiers ## Release stage: full, acceptance, and digital-twin tiers under the merged coverage ratchets
+	@$(MAKE) coverage-ratchet-test
+	@$(MAKE) coverage-integration
+	@python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json
+
+release-stages: ## Print the release gate's stages as a JSON array (the release workflow's job matrix)
+	@python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' $(RELEASE_STAGES)
+
 test-agents: ## Drive real coding agents and read their transcripts back through ox (opt-in, costs API calls)
 	$(call say,"Driving real coding agents — requires each agent installed and authenticated...")
-	@OX_TEST_REAL_AGENTS=1 $(GO) test -tags=agents -count=1 -v -timeout=20m ./tests/agents/
+	@OX_TEST_REAL_AGENTS=1 $(GO) test -tags=agents -count=1 -v -timeout=20m ./internal/daemon/agentwork ./tests/agents/
 
 check-no-git-lfs-shell: ## Ensure no code shells out to git-lfs binary (see .claude/rules/lfs-no-git-lfs-binary.md)
 	@if grep -r --include='*.go' -nE 'exec\.(Command|CommandContext)\("git",\s*"lfs"|exec\.(Command|CommandContext)\("git-lfs"|LookPath\("git-lfs"\)' . 2>/dev/null \
@@ -218,20 +536,18 @@ check-session-meta-rmw: ## Ensure sessions/*/meta.json is only rewritten via lfs
 		exit 1; \
 	fi
 
-sync-gitleaks-rules: ## Regenerate the gitleaks-derived detector catalog from a pinned gitleaks.toml
-	@echo "Regenerating internal/session/gitleaks_generated.go..."
-	@cd internal/session/cmd/gitleaks-port && go run . \
-		-in gitleaks-v8.30.1.toml \
-		-out ../../gitleaks_generated.go \
-		-gitleaks-version v8.30.1
+sync-gitleaks-rules: ## Refresh the complete latest upstream Gitleaks offline fallback
+	@go run ./internal/secretguard/cmd/update
+	@go test ./internal/secretguard
 
-check-raw-writer-chokepoint: ## Ensure raw.jsonl is only opened via session.RawWriter (ox-h20u)
+check-raw-writer-chokepoint: ## Enforce session encoder ownership and reject raw-file bypasses
+	@go test ./internal/session -run '^TestSessionRedactionArchitecture' -count=1
 	@# Any os.OpenFile/Create/WriteFile of a raw.jsonl path outside the
 	@# canonical chokepoint (internal/session/raw_writer.go) is a redaction
 	@# bypass risk. Test files and the chokepoint itself are allowed.
 	@# Pass 1: literal raw.jsonl path passed straight to a writer call.
 	@violations=$$(grep -rnE '(os\.OpenFile|os\.Create|os\.WriteFile)\([^)]*raw[._]?jsonl' \
-		--include='*.go' . 2>/dev/null \
+		--include='*.go' cmd internal pkg 2>/dev/null \
 		| grep -v '_test\.go:' \
 		| grep -v 'vendor/' \
 		| grep -v 'internal/session/raw_writer\.go:' \
@@ -259,7 +575,40 @@ check-raw-writer-chokepoint: ## Ensure raw.jsonl is only opened via session.RawW
 		exit 1; \
 	fi
 
-test-preflight: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw ## Pre-PR quality gate: lint + all unit tests + slow tests (lint/test-all/test-slow run concurrently)
+check-codedb-guarded-open: ## Ensure codedb opens user repos only via internal/codedb/gitopen (issue #819)
+	@# codedb indexes the managed SOURCE checkout in place. A raw git.PlainOpen /
+	@# unwrapped git.Open lets go-git rewrite that repo's .git/config (flips
+	@# core.bare, drops extensions.worktreeConfig) and break every work-tree git
+	@# command. All source-repo opens must route through gitopen.GuardedPlainOpen
+	@# or gitopen.WrapReadOnlyConfig, which deny the config write. gitopen.go
+	@# itself and tests are exempt. Fail CLOSED on a scanner error (grep >1).
+	@# The sed strips ONLY the exact guarded form git.Open(gitopen.WrapReadOnlyConfig(
+	@# (per-call, not line-wide) then flags any surviving raw open — so a raw
+	@# git.Open sharing a line with a wrapper reference cannot slip through.
+	@raw=$$(grep -rnE 'git\.(PlainOpen|Open)\(' --include='*.go' internal/codedb); rc=$$?; \
+	if [ $$rc -gt 1 ]; then \
+		echo "ERROR: check-codedb-guarded-open scan failed (grep exit $$rc) — refusing to report success"; \
+		exit 1; \
+	fi; \
+	violations=$$(printf '%s\n' "$$raw" | grep -v '^$$' \
+		| grep -v '_test\.go:' \
+		| grep -v 'internal/codedb/gitopen/gitopen\.go:' \
+		| grep -vE ':[0-9]+:[[:space:]]*//' \
+		| sed 's/git\.Open(gitopen\.WrapReadOnlyConfig(/GUARDED_OPEN(/g' \
+		| grep -E 'git\.(PlainOpen|Open)\('); \
+	if [ -n "$$violations" ]; then \
+		echo "$$violations"; \
+		echo "ERROR: open user repos via internal/codedb/gitopen (GuardedPlainOpen / WrapReadOnlyConfig), not raw go-git — see issue #819."; \
+		exit 1; \
+	fi
+
+test-preflight: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open docs-check ## Pre-PR quality gate: lint + all unit tests + slow tests + generated-doc freshness (lint/test-all/test-slow run concurrently)
+	@# docs-check is a PREREQUISITE, not part of the -j group below: it is seconds
+	@# of work, and running it first means a stale reference doc fails in the time
+	@# it takes to read the error rather than after a 20-minute test run. It landed
+	@# here because it was CI-only — every author discovered stale generated docs
+	@# from a red check on a merged PR, which is the exact feedback loop a pre-PR
+	@# gate exists to remove.
 	$(call say,"Running lint, full tests, and slow tests concurrently...")
 	@# lint and the test binaries don't share any output file (test-all writes
 	@# coverage.out; test-slow and lint don't touch it), so running them
@@ -272,7 +621,30 @@ test-preflight: check-no-git-lfs-shell check-raw-writer-chokepoint check-session
 	@# `--output-sync=target` if that's confusing.
 	@$(MAKE) -j 3 lint test-all test-slow
 
-test-digital-twin: test-ledger-twin test-kb-twin ## Digital twin tests (team_context_twin pending, see ox-au5)
+test-digital-twin: test-cloud-api-twin test-ledger-twin test-kb-twin ## Deterministic cloud-auth, ledger, and KB twins
+
+test-digital-twin-cover: ## Run every deterministic twin with distinct mergeable coverage profiles
+	@rm -rf $(COVERDIR)/twins
+	@mkdir -p $(COVERDIR)/twins
+	@$(MAKE) --no-print-directory test-digital-twin "TWIN_COVER_DIR=$(COVERDIR)/twins"
+	@for profile in cloud ledger kb; do \
+	  test -s $(COVERDIR)/twins/$$profile.out || { echo "ERROR: $$profile twin produced no coverage profile"; exit 1; }; \
+	 done
+	@grep -q '^github.com/sageox/ox/internal/auth/' $(COVERDIR)/twins/cloud.out || { echo "ERROR: cloud twin profile contains no product auth coverage"; exit 1; }
+	@grep -q '^github.com/sageox/ox/internal/glance/' $(COVERDIR)/twins/ledger.out || { echo "ERROR: ledger twin profile contains no product glance coverage"; exit 1; }
+	@grep -q '^github.com/sageox/ox/internal/daemon/' $(COVERDIR)/twins/kb.out || { echo "ERROR: KB twin profile contains no product daemon coverage"; exit 1; }
+	@if grep -q '^github.com/sageox/ox/tests/' $(COVERDIR)/twins/*.out; then \
+	  echo "ERROR: twin coverage must measure product packages, not harness packages"; exit 1; \
+	 fi
+
+test-cloud-api-twin: ## Product auth client against in-process SageOx API twin
+	@echo "Running cloud auth API digital twin tests..."
+	@listed=$$($(GO) test ./internal/twinapi ./internal/auth -list '^Test'); \
+	 for required in TestDeviceFlow_HappyPath TestIntrospect_FaultInjectionIsPathGeneric TestClockAdvance_JWTExpiry \
+	   TestValidateTokenServerSide_ExpiredJWT TestValidateTokenServerSide_FaultInjection TestValidateTokenServerSide_UserNotFoundError; do \
+	   printf '%s\n' "$$listed" | grep -Fx "$$required" >/dev/null || { echo "ERROR: required cloud twin test missing: $$required"; exit 1; }; \
+	 done
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -race -count=1 -timeout=2m $(CLOUD_TWIN_COVER_FLAGS) ./internal/auth/... ./internal/twinapi/...
 
 test-team-context-twin: ## Digital twin tests (generates fake team context for inspection)
 	@echo "Running team context digital twin tests..."
@@ -280,15 +652,64 @@ test-team-context-twin: ## Digital twin tests (generates fake team context for i
 
 test-ledger-twin: ## Digital twin ledger tests (generates fake ledger for inspection)
 	@echo "Running ledger digital twin tests..."
-	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=ledger_twin -v -count=1 -timeout=2m ./tests/ledger_twin/...
+	@listed=$$($(GO) test -tags=ledger_twin ./tests/ledger_twin -list '^Test'); \
+	 for required in TestCartAnalyzeWindows TestPreCrimePositive_HotZone TestSessionConflicts_MergedWithMurmurs TestFullEnrich; do \
+	   printf '%s\n' "$$listed" | grep -Fx "$$required" >/dev/null || { echo "ERROR: required ledger twin test missing: $$required"; exit 1; }; \
+	 done
+	@$(TEST_GIT_ISOLATION) time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=ledger_twin -v -count=1 -timeout=2m $(LEDGER_TWIN_COVER_FLAGS) ./tests/ledger_twin/...
 
 test-kb-twin: ## Digital twin kb tests (drives syncBubbles + GC against real bare repos)
+	@command -v git >/dev/null 2>&1 || { echo "ERROR: git is required for the KB digital twin"; exit 1; }
 	@echo "Running kb digital twin tests..."
-	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=kb_twin -v -count=1 -timeout=5m ./tests/kb_twin/...
+	@listed=$$($(GO) test -tags=kb_twin ./tests/kb_twin -list '^Test'); \
+	 for required in TestKBTwin TestKBTwin_MultiEndpoint TestKBTwin_APIUnavailable_NoSideEffects TestKBTwin_MetaJSONShape; do \
+	   printf '%s\n' "$$listed" | grep -Fx "$$required" >/dev/null || { echo "ERROR: required KB twin test missing: $$required"; exit 1; }; \
+	 done
+	@$(TEST_GIT_ISOLATION) time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=kb_twin -v -count=1 -timeout=5m $(KB_TWIN_COVER_FLAGS) ./tests/kb_twin/...
 
-test-benchmark: ## Run prime efficiency benchmarks (requires claude CLI) - ~80 min, ~40 API calls
-	@echo "Running prime efficiency benchmarks..."
-	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=integration -run TestPrimeEfficiency -timeout=90m ./tests/integration/agents/benchmark/...
+# ---------------------------------------------------------------------------
+# Agent-behavior evals (with-ox vs without-ox). See docs/specs/agent-evals.md.
+#
+# Every other tier proves ox DELIVERED context (prime emitted the XML, the
+# ledger committed). These prove the model TOOK IT UP: the same coding task
+# runs with the ox plugin and without it, and the delta is the score.
+# Opt-in and paid (Claude API calls); never chained from build/test/lint.
+# `claude plugin eval` is early access — see the doc for enablement.
+# ---------------------------------------------------------------------------
+EVAL_PLUGIN     := ./claude-plugin
+EVAL_RUNS       ?= 3
+EVAL_MAX_COST   ?= 15
+EVAL_ARGS       ?=
+# The sandbox gets the ox binary built from THIS checkout, never the one in
+# PATH, and every ox invocation inside it is daemon-less, offline, and
+# non-recording — the scaffold points it at a loopback port with nothing
+# listening, so no fixture token ever reaches a real SageOx host.
+# The KB fetch is left ON so every WITH run exercises prime's offline path:
+# its "connection refused" used to reach the model as a WARN on stderr and
+# (pilot 2026-09-11) convinced it no team context had loaded. Prime now keeps
+# WARN off stderr in payload mode; scaffold/check.sh guards that stays true.
+EVAL_ENV := PATH="$(CURDIR)/bin:$$PATH" OX_NO_DAEMON=1 OX_SESSION_RECORDING=disabled SAGEOX_TELEMETRY=false DO_NOT_TRACK=1
+EVAL_FLAGS := --ablation with-without --scaffold --no-publish --threshold 0 --judge-model sonnet \
+	--allow-tools "Bash(ox:*)" "Bash(go:*)" "Bash(git log:*)" Edit Write \
+	--max-cost-usd $(EVAL_MAX_COST)
+
+eval: build-ox ## Full agent-behavior eval suite, with-vs-without ox (paid; ~$$1-2/case/run)
+	$(call say,"Running agent-behavior evals ($(EVAL_RUNS) runs/case, cap $$$(EVAL_MAX_COST))...")
+	@$(EVAL_ENV) claude plugin eval $(EVAL_PLUGIN) --runs $(EVAL_RUNS) $(EVAL_FLAGS) $(EVAL_ARGS)
+
+eval-smoke: build-ox ## One run of the cheapest cases (tag: smoke) — before touching prime, guidance, or skills
+	$(call say,"Running eval smoke (1 run, --tag smoke)...")
+	@$(EVAL_ENV) claude plugin eval $(EVAL_PLUGIN) --runs 1 --tag smoke $(EVAL_FLAGS) $(EVAL_ARGS)
+
+# The runner refuses a Bash grant when ~/.ssh holds symlinks or other
+# credential stores it cannot fence (stow-managed dotfiles trip this). The
+# no-bash cases still exercise prime uptake through the SessionStart hook.
+eval-no-bash: build-ox ## Cases that need no Bash grant (tag: no-bash) — for machines the runner cannot sandbox
+	$(call say,"Running no-bash evals ($(EVAL_RUNS) runs/case)...")
+	@$(EVAL_ENV) claude plugin eval $(EVAL_PLUGIN) --runs $(EVAL_RUNS) --tag no-bash --ablation with-without --scaffold --no-publish --threshold 0 --judge-model sonnet --allow-tools Edit Write --max-cost-usd $(EVAL_MAX_COST) $(EVAL_ARGS)
+
+eval-scaffold-check: build-ox ## Prove the eval sandbox seeds and `ox agent prime` runs offline in it (free)
+	@bash claude-plugin/evals/scaffold/check.sh "$(CURDIR)/bin/ox"
 
 test-sequential: ## Run tests sequentially (for debugging race conditions)
 	$(call say,"Running tests sequentially...")
@@ -301,12 +722,13 @@ test-profile: ## Visualize test execution timeline (requires vgt)
 	@echo "Profile complete"
 
 test-watch: ## Run tests in watch mode (requires gotestsum)
-	@which gotestsum > /dev/null || (echo "gotestsum not found. Install with: go install gotest.tools/gotestsum@latest" && exit 1)
+	@which gotestsum > /dev/null || (echo "gotestsum not found. Install with: go install gotest.tools/gotestsum@$(GOTESTSUM_VERSION)" && exit 1)
 	gotestsum --watch
 
 # Coverage
 COVERDIR := tmp/coverage
 COVERAGE_THRESHOLD ?= 50
+COVERAGE_BASE ?= origin/main
 
 coverage: test-cover ## Run fast tests with coverage and open report
 	@$(GO) tool cover -func=coverage.out | tail -1
@@ -345,22 +767,64 @@ coverage-check: ## Fail if coverage is below threshold (default: 50%)
 	   echo "FAIL: coverage below threshold"; exit 1; \
 	 fi
 
-build-cover: ## Build ox binary with coverage instrumentation
-	@mkdir -p bin $(COVERDIR)/integration
-	@GOCOVERDIR=$(COVERDIR)/integration $(GO) build -cover $(LDFLAGS) -o bin/$(BINARY_NAME)-cover ./cmd/ox
-	@echo "Instrumented binary: bin/$(BINARY_NAME)-cover"
-	@echo "Run with: GOCOVERDIR=$(COVERDIR)/integration bin/$(BINARY_NAME)-cover ..."
+coverage-ratchet: test-all ## Fail if protected risk-package coverage regresses
+	@python3 scripts/coverage_ratchet.py coverage.out --require-provenance coverage.out.provenance.json
 
-coverage-integration: build-cover test ## Merge unit + integration coverage
+coverage-ratchet-diff: test-all ## Enforce package + changed-line coverage vs COVERAGE_BASE
+	@python3 scripts/coverage_ratchet.py coverage.out --require-provenance coverage.out.provenance.json --diff-base $(COVERAGE_BASE)
+
+coverage-ratchet-test: ## Test the coverage ratchet parser and failure semantics
+	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py test_split_test.py session_import_testbed_test.py session_import_fixture_test.py make_install_test.py
+
+# The instrumented binary lands in its OWN directory, not shared bin/, because
+# ox discovers adapters as siblings of the running binary. In bin/ it saw every
+# adapter a previous `make build` left behind (all ten), while
+# build-acceptance's tmp/acceptance/ holds exactly two — so the same acceptance
+# journeys ran against a different adapter set depending on which target
+# invoked them, and the coverage run failed on a Pi prime block the plain run
+# never produced. Mirroring build-acceptance keeps instrumentation the only
+# difference between the two.
+build-cover: ## Build ox binary with coverage instrumentation
+	@rm -rf $(COVERDIR)/integration $(COVERDIR)/merged "$(COVER_BIN_DIR)"
+	@mkdir -p "$(COVER_BIN_DIR)" $(COVERDIR)/integration
+	@$(GO) build -cover -covermode=atomic $(LDFLAGS) -o "$(COVER_OX_BIN)" ./cmd/ox
+	@$(GO) build $(ADAPTER_LDFLAGS) -o "$(COVER_BIN_DIR)/ox-adapter-claude-code" ./cmd/ox-adapter-claude-code
+	@echo "Instrumented binary: $(COVER_OX_BIN)"
+	@echo "Run with: GOCOVERDIR=$(COVERDIR)/integration $(COVER_OX_BIN) ..."
+
+coverage-integration: ## Run acceptance through instrumented ox and merge full + binary coverage
+	@rm -f coverage-all.out coverage-all.out.provenance.json
+	@$(MAKE) --no-print-directory test-all-split
+	@$(MAKE) --no-print-directory test-acceptance-cover
+	@$(MAKE) --no-print-directory coverage-integration-profile
+	@$(MAKE) --no-print-directory test-digital-twin-cover
+	@$(MAKE) --no-print-directory coverage-merge
+
+# CI runs the three suites as separate jobs and merges in a final one, so the
+# two halves of the merge are targets of their own: the profile conversion
+# needs the acceptance job's raw counters, the merge needs only text profiles.
+coverage-integration-profile: ## Convert the instrumented binary's raw counters to $(COVERDIR)/integration.out
+	@count=$$(find $(COVERDIR)/integration -type f -name 'covcounters.*' | wc -l | tr -d ' '); \
+	 if [ "$$count" -eq 0 ]; then \
+	   echo "ERROR: instrumented ox produced no fresh coverage counters"; exit 1; \
+	 fi; \
+	 echo "Fresh integration coverage fragments: $$count"
 	@echo "Converting integration profile..."
-	@$(GO) tool covdata textfmt -i=$(COVERDIR)/integration -o=$(COVERDIR)/integration.out 2>/dev/null || true
+	@$(GO) tool covdata textfmt -i=$(COVERDIR)/integration -o=$(COVERDIR)/integration.out
+
+COVERAGE_MERGE_INPUTS := coverage.out $(COVERDIR)/integration.out $(COVERDIR)/integration-test.out $(COVERDIR)/slow-test.out \
+	$(COVERDIR)/twins/cloud.out $(COVERDIR)/twins/ledger.out $(COVERDIR)/twins/kb.out
+
+coverage-merge: ## Merge full-tier, acceptance, and twin profiles into coverage-all.out
+	@for profile in $(COVERAGE_MERGE_INPUTS); do \
+	  test -s "$$profile" || { echo "ERROR: missing coverage profile $$profile"; exit 1; }; \
+	 done
 	@echo "Merging profiles..."
-	@if [ -f $(COVERDIR)/integration.out ]; then \
-	  $(GO) tool covdata merge -i=$(COVERDIR)/integration -o=$(COVERDIR)/merged 2>/dev/null && \
-	  $(GO) tool covdata textfmt -i=$(COVERDIR)/merged -o=coverage-all.out; \
-	else \
-	  cp coverage.out coverage-all.out; \
-	fi
+	@awk 'FNR == 1 { next } /\/kb_twin_export\.go:/ { next } { counts[$$1 " " $$2] += $$3 } END { for (block in counts) print block, counts[block] }' \
+	  $(COVERAGE_MERGE_INPUTS) \
+	  | LC_ALL=C sort > $(COVERDIR)/merged-body.out
+	@{ echo 'mode: atomic'; sed -n '1,$$p' $(COVERDIR)/merged-body.out; } > coverage-all.out
+	@python3 scripts/coverage_ratchet.py coverage-all.out --write-provenance coverage-all.out.provenance.json
 	@$(GO) tool cover -func=coverage-all.out | tail -1
 	@echo "Combined profile: coverage-all.out"
 
@@ -370,14 +834,21 @@ smoke-test: build ## Run smoke tests against SageOx cloud (requires SAGEOX_CI_PA
 
 # Code quality
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
-lint: lint-test-env ## Run golangci-lint
-	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/usage/install/" && exit 1)
+lint: lint-test-env lint-public-modules ## Run golangci-lint
+	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/docs/welcome/install/" && exit 1)
 	@# --allow-parallel-runners: multiple AI coding agent sessions routinely run
 	@# `make lint` at the same time in this repo. golangci-lint's default file
 	@# lock turns that into a hard failure ("parallel golangci-lint is running")
 	@# instead of just queuing or racing harmlessly — each invocation has its
 	@# own in-memory analysis, so concurrent runs don't corrupt shared state.
 	@golangci-lint run -c .config/golangci.yml --allow-parallel-runners ./...
+
+# Root ./... cannot reach a nested module: golangci-lint resolves packages
+# against the main module, so a public module would ship unlinted.
+.PHONY: lint-public-modules
+lint-public-modules: ## Lint the public contract modules under pkg/
+	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/docs/welcome/install/" && exit 1)
+	@for m in $(PUBLIC_MODULES); do (cd $$m && golangci-lint run -c $(CURDIR)/.config/golangci.yml --allow-parallel-runners ./...) || exit 1; done
 
 lint-test-env: ## Check that test files use testguard instead of os.Environ()
 	$(call say,"Checking for os.Environ() in test files...")
@@ -405,7 +876,7 @@ install-hooks: ## Install git pre-commit hooks
 	@echo "Git hooks installed"
 
 # Distribution
-release: ## Create release with goreleaser (requires GITHUB_TOKEN)
+release: test-release ## Create release with goreleaser after enforceable test tiers (requires GITHUB_TOKEN)
 	@which goreleaser > /dev/null || (echo "goreleaser not found. Install from https://goreleaser.com/install/" && exit 1)
 	goreleaser release -f .config/goreleaser.yml --clean
 
@@ -435,6 +906,29 @@ docs: ## Generate CLI reference docs
 	@echo "Generating CLI reference documentation..."
 	$(GO) run ./cmd/ox docs --output docs/reference
 	@echo "Documentation generated: docs/reference/"
+
+docs-check: ## Fail when committed CLI reference docs differ from Cobra
+	@docs_tmp=$$(mktemp -d); \
+		trap 'rm -rf "$$docs_tmp"' EXIT; \
+		cp docs/package.json "$$docs_tmp/package.json"; \
+		$(GO) run ./cmd/ox docs --output "$$docs_tmp/reference"; \
+		if ! diff -ru -x .gitkeep docs/reference "$$docs_tmp/reference"; then \
+			echo "Generated CLI docs are stale. Run 'make docs' and commit the result."; \
+			exit 1; \
+		fi; \
+		if ! cmp -s docs/package.json "$$docs_tmp/package.json"; then \
+			echo "docs/package.json is stale. Run 'make docs' and commit the result."; \
+			exit 1; \
+		fi
+
+# @sageox/plan-review (packages/plan-review) builds the review page's
+# internal/plan/assets/review.{js,css} from its TypeScript source. The built
+# assets are committed so that building ox never needs node.
+plan-review: ## Build packages/plan-review and regenerate internal/plan/assets/review.*
+	cd packages/plan-review && npm ci --ignore-scripts && npm run build
+
+plan-review-check: ## Fail when internal/plan/assets/review.* is stale; test and clean-install the package
+	cd packages/plan-review && npm ci --ignore-scripts && npm run check && npm run build && npm test && node pack-check.mjs
 
 docs-publish: docs ## Publish docs to GitHub Packages
 	@echo "Publishing docs to GitHub Packages..."
@@ -632,6 +1126,9 @@ sec-fast: ## Run only the deterministic OSS-tool tier (no AI cost)
 
 sec-install: ## Install all security-review tool binaries to bin/ (no root)
 	@bash security/scripts/install-bins.sh
+
+sec-test: ## Test the security-review pipeline itself (fake claude + scanners; no network, no AI cost)
+	@python3 -m unittest discover -s security/scripts/tests -p 'test_*.py'
 
 sec-install-hook: ## Install opt-in pre-commit fast tier (run with SEC_PRECOMMIT=1 git commit)
 	@mkdir -p .git/hooks

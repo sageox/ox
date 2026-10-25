@@ -7,6 +7,8 @@ import (
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
+
+	"github.com/sageox/ox/internal/codedb/gitopen"
 )
 
 // maxReadBlobBytes caps blob reads at the search read path. Files larger than
@@ -92,7 +94,9 @@ func (s *Store) initBlobRepos() {
 	_ = rows.Close()
 
 	for _, p := range paths {
-		repo, err := git.PlainOpen(p)
+		// GuardedPlainOpen: the repos table holds source-checkout paths too, and
+		// go-git must never rewrite a managed source repo's .git/config (#819).
+		repo, err := gitopen.GuardedPlainOpen(p)
 		if err != nil {
 			slog.Warn("blob reader: open repo failed", "path", p, "err", err)
 			continue

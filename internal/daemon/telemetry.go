@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -36,9 +35,6 @@ const (
 	// Prevents thundering herd: without this, every Record() call above the batch
 	// threshold spawns a new flush goroutine, creating unbounded HTTP POSTs.
 	telemetryFlushCooldown = 15 * time.Minute
-
-	// telemetryEndpoint is the default telemetry API endpoint
-	telemetryEndpoint = "https://telemetry.sageox.ai/tevents"
 )
 
 // TelemetryEvent matches the spec format for telemetry events.
@@ -81,19 +77,23 @@ type TelemetryCollector struct {
 // NewTelemetryCollector creates a new telemetry collector.
 // It loads or generates a persistent client ID and checks opt-out settings.
 func NewTelemetryCollector(logger *slog.Logger) *TelemetryCollector {
-	enabled := isTelemetryEnabled()
-
+	// No baked default: the old https://telemetry.sageox.ai/tevents never
+	// existed server-side, so every event silently vanished (retired — beads
+	// desktop-yx0h.5). Post only when an endpoint is explicitly configured via
+	// SAGEOX_TELEMETRY_ENDPOINT (the telemetry migration points this at the
+	// client OTLP ingress / Sentry); with none set the collector stays inert
+	// rather than POSTing into a 404.
 	endpoint := os.Getenv("SAGEOX_TELEMETRY_ENDPOINT")
-	if endpoint == "" {
-		endpoint = telemetryEndpoint
-	}
+	enabled := isTelemetryEnabled()
+	// An unsaved ID still labels this daemon's traces for its lifetime.
+	clientID, _ := config.InstallID()
 
 	return &TelemetryCollector{
 		buffer:       make([]TelemetryEvent, telemetryBufferSize),
 		bufferSize:   telemetryBufferSize,
 		throttle:     NewFlushThrottle(telemetryFlushCooldown),
 		sendInterval: telemetryDefaultInterval,
-		clientID:     getOrCreateClientID(),
+		clientID:     clientID,
 		appType:      "ox-daemon",
 		appVersion:   version.Version,
 		httpClient: &http.Client{
@@ -121,36 +121,6 @@ func isTelemetryEnabled() bool {
 		return cfg.IsTelemetryEnabled()
 	}
 	return true
-}
-
-// getOrCreateClientID returns a persistent client ID.
-// Checks SAGEOX_CLIENT_ID env, then ~/.sageox/config/client_id file.
-func getOrCreateClientID() string {
-	// check env first
-	if id := os.Getenv("SAGEOX_CLIENT_ID"); id != "" {
-		return id
-	}
-
-	// check file
-	configDir := config.GetUserConfigDir()
-	path := filepath.Join(configDir, "client_id")
-
-	if data, err := os.ReadFile(path); err == nil {
-		id := strings.TrimSpace(string(data))
-		if id != "" {
-			return id
-		}
-	}
-
-	// generate new UUIDv4
-	id := uuid.NewString()
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		slog.Debug("failed to create config directory for telemetry client ID", "error", err)
-	} else if err := os.WriteFile(path, []byte(id+"\n"), 0600); err != nil {
-		slog.Debug("failed to persist telemetry client ID", "error", err)
-	}
-
-	return id
 }
 
 // Start begins background processing of telemetry events.
@@ -275,6 +245,16 @@ func (c *TelemetryCollector) backgroundSender() {
 
 // flush sends buffered events to the server.
 func (c *TelemetryCollector) flush() {
+	// No endpoint configured -> do not POST. The baked default
+	// (https://telemetry.sageox.ai/tevents) never existed server-side and every
+	// send silently 404'd (retired — beads desktop-yx0h.5). Leave events in the
+	// bounded ring buffer for a later-configured endpoint (the migration points
+	// SAGEOX_TELEMETRY_ENDPOINT at the client OTLP ingress) instead of draining
+	// them into a dead URL.
+	if c.endpoint == "" {
+		return
+	}
+
 	events := c.drainBuffer()
 	if len(events) == 0 {
 		return

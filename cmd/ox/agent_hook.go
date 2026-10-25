@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,11 +15,15 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/proc"
+	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/session/claudesource"
 )
 
 // ReadHookInput reads hook input from stdin.
@@ -85,6 +90,10 @@ func runAgentHook(args []string) error {
 	}
 	eventName := args[0]
 
+	// hook stdout is injected into the coworker's context and the hook
+	// templates run us with 2>&1 — keep WARN-level diagnostics off stderr.
+	logger.InitPayloadMode(false, paths.AgentPayloadLogFile())
+
 	// 1. fast check: is ox initialized?
 	projectRoot, err := findProjectRoot()
 	if err != nil {
@@ -104,6 +113,9 @@ func runAgentHook(args []string) error {
 
 	// 3. read stdin
 	input := ReadHookInput()
+	if agentType == "cursor" {
+		return runCursorAgentHook(eventName, input, projectRoot)
+	}
 
 	// 4. map event to phase
 	phase := resolvePhase(agentType, eventName)
@@ -136,45 +148,60 @@ func runAgentHook(args []string) error {
 	return dispatchPhase(ctx)
 }
 
-// localEventPhases supplements agentx registry with phase mappings for agents
-// not yet defined in agentx (pending module release).
+// localEventPhases supplements the agentx registry with phase mappings for
+// agents whose agentx definition does not implement LifecycleEventMapper yet,
+// or maps only some of the events ox delivers. Without an entry here such an
+// agent resolves through the "try all maps" fallback in resolvePhase, which
+// works only while every agent spells its events the same way.
 var localEventPhases = map[string]map[agentx.HookEvent]agentx.Phase{
+	// Amp has no session-end event of its own. The ox-bridge plugin sends
+	// SessionEnd once a thread in an orb goes idle (sageox/ox#1314); agentx
+	// maps only Amp's tool events.
+	"amp": {
+		"SessionEnd": agentx.PhaseEnd,
+	},
 	"gemini": {
 		"SessionStart": agentx.PhaseStart,
 		"BeforeAgent":  agentx.PhasePrompt,
 		"AfterTool":    agentx.PhaseAfterTool,
 		"SessionEnd":   agentx.PhaseEnd,
 	},
+	// the six events cmd/ox-adapter-codex installs (codexHookEvents)
+	"codex": {
+		"SessionStart":     agentx.PhaseStart,
+		"PreToolUse":       agentx.PhaseBeforeTool,
+		"PostToolUse":      agentx.PhaseAfterTool,
+		"UserPromptSubmit": agentx.PhasePrompt,
+		"Stop":             agentx.PhaseStop,
+		"SessionEnd":       agentx.PhaseEnd,
+	},
 }
 
 // resolvePhase maps an agent's native event name to a canonical lifecycle phase.
 // Uses agentx registry to discover event mappings from each agent's definition,
-// with local fallbacks for agents not yet in agentx.
+// with local supplements for events agentx does not map.
 // Returns empty string for unknown events.
 func resolvePhase(agentType, eventName string) string {
+	event := agentx.HookEvent(eventName)
 	eventPhases := agentx.BuildEventPhaseMap()
 
-	agentMap, ok := eventPhases[agentType]
-	if !ok {
-		// check local fallback mappings
-		if localMap, ok := localEventPhases[agentType]; ok {
-			if phase, ok := localMap[agentx.HookEvent(eventName)]; ok {
-				return string(phase)
-			}
-		}
-		// unknown agent type — try all maps as fallback
-		for _, m := range eventPhases {
-			if phase, ok := m[agentx.HookEvent(eventName)]; ok {
-				return string(phase)
-			}
-		}
+	agentMap, known := eventPhases[agentType]
+	if phase, ok := agentMap[event]; ok {
+		return string(phase)
+	}
+	if phase, ok := localEventPhases[agentType][event]; ok {
+		return string(phase)
+	}
+	if known {
 		return ""
 	}
-	phase, ok := agentMap[agentx.HookEvent(eventName)]
-	if !ok {
-		return ""
+	// unknown agent type — try all maps as fallback
+	for _, m := range eventPhases {
+		if phase, ok := m[event]; ok {
+			return string(phase)
+		}
 	}
-	return string(phase)
+	return ""
 }
 
 // hookAgentID returns the agent ID for heartbeat purposes.
@@ -249,6 +276,7 @@ func emitStartupBanner(w io.Writer, ctx *HookContext) {
 // (covering agents without hooks), and we call it again here as a safety net.
 // startSessionRecording is idempotent (checks session.IsRecording first).
 func handleStart(ctx *HookContext) error {
+	startTraceReceiverForHook(ctx)
 	emitStartupBanner(os.Stdout, ctx)
 
 	source := ""
@@ -317,28 +345,34 @@ func stopSessionForClear(ctx *HookContext, agentID string) {
 	// done before we mutate state so SessionPath is still accurate.
 	ctx.ClearNotice = buildClearNoticeFromState(state)
 
-	// set StoppedAt to signal this session is complete
+	// set StoppedAt to signal this session is complete. A held stop saves
+	// the manual choice in the same write: StoppedAt is what daemon recovery
+	// reclaims, and it must never find a stopped recording that says auto.
+	held := stopHoldsSession(ctx.ProjectRoot, state)
 	now := time.Now()
 	if updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+		s.RecordTraceBoundary("stop", now)
 		s.StoppedAt = &now
+		if held {
+			s.PublishingMode = config.SessionPublishingManual
+		}
+		state = s
 	}); updateErr != nil {
 		slog.Debug("hook: clear could not set StoppedAt", "agent_id", agentID, "error", updateErr)
 	}
 
-	// fire-and-forget IPC to daemon to finalize the stopped session
-	if state.SessionPath != "" {
-		if ledgerPath := deriveLedgerPath(state.SessionPath); ledgerPath != "" {
-			client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
-			sessionName := filepath.Base(state.SessionPath)
-			if ipcErr := client.SessionFinalize(daemon.SessionFinalizeIPCPayload{
-				SessionName: sessionName,
-				LedgerPath:  ledgerPath,
-				CachePath:   state.SessionPath,
-				ProjectRoot: ctx.ProjectRoot,
-			}); ipcErr != nil {
-				slog.Debug("hook: clear finalize IPC failed", "error", ipcErr)
-			}
-		}
+	// the daemon finalizes this recording after the state file below is
+	// gone; hand it the native session ids and the stop time on a footer
+	_ = stampRecordingCarrierAtStop(state, now)
+
+	// fire-and-forget IPC to daemon to finalize the stopped session, or hold it.
+	// A hold that could not be recorded keeps .recording.json: StoppedAt ends
+	// capture, and daemon recovery re-holds a recording started in manual mode.
+	// Cleared, the folder would look like an orphan the daemon publishes.
+	if holdErr := finalizeOrHoldOnHookStop(ctx, state, "clear"); holdErr != nil {
+		ctx.ClearNotice = nil // the previous session was not finalized
+		slog.Warn("hook: clear kept the recording, its hold could not be recorded", "agent_id", agentID, "error", holdErr)
+		return
 	}
 
 	// clear recording state so prime starts a fresh session
@@ -364,17 +398,17 @@ func stopSessionForClear(ctx *HookContext, agentID string) {
 // `agent.summarizer` setting: at this point the calling agent process is
 // being torn down, so `inline` (which whispers a prompt back to the agent
 // for it to run the LLM in its warm cache) has no agent left to whisper to.
-// The daemon IPC dispatch below is the only viable path in this window.
+// The daemon IPC dispatch below is the only viable path in this window —
+// unless the daemon will not outlive the agent (an Amp orb, Claude Code
+// Cloud, Devin, or no daemon at all). Then the hook uploads the session
+// itself before returning; see session_end_sync.go.
 //
 // Idempotency: SessionEnd can fire multiple times (window close, debugger
 // reattach, IDE reload). The handler is safe to call repeatedly — the
 // first call sets StoppedAt and clears recording state; subsequent calls
 // see no state and return immediately.
 func handleEnd(ctx *HookContext) error {
-	agentID := ""
-	if ctx.Marker != nil {
-		agentID = ctx.Marker.AgentID
-	}
+	agentID := sessionEndAgentID(ctx)
 	if agentID == "" {
 		slog.Debug("hook: end skipped, no agent ID")
 		return nil
@@ -391,29 +425,52 @@ func handleEnd(ctx *HookContext) error {
 		return nil
 	}
 
+	if !daemonOutlivesSession() {
+		err := finishRecordingAtEnd(ctx.ProjectRoot, agentID)
+		switch {
+		case err == nil:
+			slog.Info("hook: uploaded session at agent end", "agent_id", agentID)
+			return nil
+		case errors.Is(err, errSessionHeld):
+			// session_publishing: manual — the stop kept it on this machine
+			slog.Info("hook: held session kept on this machine at agent end", "agent_id", agentID)
+			return nil
+		case errors.Is(err, errSessionUploadFailed):
+			// the stop kept the session and flagged it for `ox doctor`
+			slog.Warn("hook: session upload at agent end failed, kept for ox doctor", "agent_id", agentID, "error", err)
+			return nil
+		case !stopLeftRecordingUntouched(err, ctx.ProjectRoot, agentID):
+			slog.Warn("hook: session stop at agent end did not finish", "agent_id", agentID, "error", err)
+			return nil
+		}
+		slog.Debug("hook: session stop at agent end did not run, handing off to the daemon", "agent_id", agentID, "error", err)
+	}
+
+	// a held stop saves the manual choice with StoppedAt (see stopSessionForClear)
+	held := stopHoldsSession(ctx.ProjectRoot, state)
 	now := time.Now()
 	if updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+		s.RecordTraceBoundary("stop", now)
 		s.StoppedAt = &now
+		if held {
+			s.PublishingMode = config.SessionPublishingManual
+		}
+		state = s
 	}); updateErr != nil {
 		slog.Debug("hook: end could not set StoppedAt", "agent_id", agentID, "error", updateErr)
 	}
 
+	// the daemon finalizes this recording after the state file below is
+	// gone; hand it the native session ids and the stop time on a footer
+	_ = stampRecordingCarrierAtStop(state, now)
+
 	// dispatch delegated finalization via daemon IPC. Best-effort: if the
 	// daemon is unreachable, the daemon's anti-entropy sweep will still
 	// pick up the StoppedAt-marked recording within the 24h stale window.
-	if state.SessionPath != "" {
-		if ledgerPath := deriveLedgerPath(state.SessionPath); ledgerPath != "" {
-			client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
-			sessionName := filepath.Base(state.SessionPath)
-			if ipcErr := client.SessionFinalize(daemon.SessionFinalizeIPCPayload{
-				SessionName: sessionName,
-				LedgerPath:  ledgerPath,
-				CachePath:   state.SessionPath,
-				ProjectRoot: ctx.ProjectRoot,
-			}); ipcErr != nil {
-				slog.Debug("hook: end finalize IPC failed", "error", ipcErr)
-			}
-		}
+	// A hold that could not be recorded keeps .recording.json for recovery
+	// (see stopSessionForClear) and fails the hook so the coworker hears of it.
+	if holdErr := finalizeOrHoldOnHookStop(ctx, state, "end"); holdErr != nil {
+		return fmt.Errorf("session end: %w", holdErr)
 	}
 
 	if clearErr := session.ClearRecordingStateForAgent(ctx.ProjectRoot, agentID); clearErr != nil {
@@ -500,6 +557,16 @@ func handlePrompt(ctx *HookContext) error {
 	// begins right after the plan was approved.
 	emitPlanNudge(os.Stdout, ctx.ProjectRoot, agentID)
 
+	// Tell the agent, once, when a plan was enriched this session and never
+	// saved. Covers every route the ExitPlanMode nudge above cannot see: Codex
+	// plan mode (which leaves no artifact ox can find) and any session where
+	// plan mode was never entered. Fail-open.
+	emitUnsavedPlanNudge(os.Stdout, ctx.ProjectRoot, agentID)
+	// The plan nudge above only fires when `ox plan enrich` armed it. An agent
+	// that authored a page without ever running enrich arms nothing, so the
+	// artifact itself is the second, independent signal.
+	emitUnsavedArtifactNudge(os.Stdout, ctx.ProjectRoot, agentID, ctx.Marker.PrimedAt)
+
 	// Steer the agent toward `ox plan enrich`/`ox plan render` at the planning
 	// moment — fired when the agent is in plan mode (permission_mode == "plan")
 	// OR the prompt asks to render an HTML plan, once per planning episode.
@@ -509,6 +576,14 @@ func handlePrompt(ctx *HookContext) error {
 		rawPrompt = ctx.Input.RawBytes
 	}
 	emitPlanHint(os.Stdout, ctx.ProjectRoot, agentID, rawPrompt)
+	// Codex never runs `ox plan enrich` on its own and has no ExitPlanMode, so
+	// the enrich-armed unsaved-plan stamp is never set for it. Arm it from the
+	// planning prompt itself; the Stop-hook capture clears it if the plan is
+	// saved. Armed AFTER emitUnsavedPlanNudge above, so it speaks on a later
+	// prompt — once the plan exists — never on the request that armed it.
+	if ctx.AgentType == "codex" {
+		armUnsavedPlanFromPrompt(ctx.ProjectRoot, agentID, rawPrompt)
+	}
 
 	emitWhispers(os.Stdout, agentID)
 
@@ -531,7 +606,7 @@ func emitSuspendedNudge(w io.Writer, projectRoot, agentID string) {
 		return
 	}
 	dur := formatPausedDuration(time.Since(*state.SuspendedAt))
-	fmt.Fprintf(w, "<system-reminder>[ox] ⏸ Recording SUSPENDED (%s ago). Resume: /ox-session-resume · Stop: /ox-session-stop</system-reminder>\n", dur)
+	fmt.Fprintf(w, "<system-reminder>[ox] ⏸ Recording SUSPENDED (%s ago). Resume: ox agent session resume · Stop: ox agent session stop</system-reminder>\n", dur)
 }
 
 // handleCompact handles the compact phase.
@@ -579,13 +654,67 @@ func handleAfterTool(ctx *HookContext) error {
 		handlePlanExit(ctx, agentID)
 	}
 
-	// emit pending whispers (fallback — primary delivery is handlePrompt)
-	emitWhispers(os.Stdout, agentID)
+	// Same-turn nudge for an authored page the agent just wrote. Claude Code
+	// only: it is the agent whose PostToolUse honors the JSON additionalContext
+	// envelope. When it fires, stdout must be that JSON alone, so the plain-text
+	// whisper fallback is skipped for this call — for Claude Code that fallback
+	// is discarded anyway, and handlePrompt remains its primary delivery.
+	pageNudged := ctx.AgentType == "claude-code" && ctx.Input != nil &&
+		emitWrittenPageNudge(os.Stdout, ctx.ProjectRoot, agentID, ctx.Input.ToolName, ctx.Input.ToolInput)
+	if !pageNudged {
+		// emit pending whispers (fallback — primary delivery is handlePrompt)
+		emitWhispers(os.Stdout, agentID)
+	}
 
 	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
 	if err != nil || state == nil {
 		slog.Debug("hook: afterTool no recording state", "agentID", agentID, "err", err)
 		return nil // not recording for this agent, silent noop
+	}
+
+	// Serialize the read cursor and append transaction with the watcher and
+	// recovery. Reload after locking so concurrent hooks cannot replay a batch.
+	return fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
+		return captureHookEntries(ctx, agentID, state.SessionPath, state.SessionID)
+	})
+}
+
+// captureHookEntries drains new entries under the raw.jsonl lock acquired by
+// the caller for expectedSessionPath. It reloads recording state itself, but
+// a stop/start cycle for this agent can swap in a new SessionPath between the
+// caller's read and this reload (StartRecording can immediately mint a fresh
+// session after a stale, incomplete stop). If that happens, the lock we're
+// holding is for the wrong raw.jsonl -- writing here would race whatever
+// legitimately holds the new session's lock. Skip this invocation instead;
+// the next hook call reloads state and locks the current session correctly.
+//
+// SessionPath alone is not a reliable generation check: it's minute-granular
+// (GenerateSessionName), so a stop immediately followed by a restart for the
+// same agent within the same minute mints an IDENTICAL path. expectedSessionID
+// is the durable per-recording identity minted once at StartRecording, so it
+// still distinguishes the two generations when the path collides; fall back
+// to the path comparison only for a pre-SessionID recording (empty on both
+// sides).
+func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expectedSessionID string) error {
+	// The stop command sets this before waiting for the raw lock. A hook
+	// queued behind its final drain must never append to finalized content.
+	if session.HasExplicitStop(ctx.ProjectRoot, agentID) {
+		return nil
+	}
+	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
+	if err != nil || state == nil || state.StoppedAt != nil {
+		return err
+	}
+	changed := state.SessionPath != expectedSessionPath
+	if expectedSessionID != "" || state.SessionID != "" {
+		changed = state.SessionID != expectedSessionID
+	}
+	if changed {
+		slog.Debug("hook: afterTool session changed since lock acquired, skipping", "agentID", agentID, "lockedPath", expectedSessionPath, "currentPath", state.SessionPath, "lockedSessionID", expectedSessionID, "currentSessionID", state.SessionID)
+		return nil
+	}
+	if err := session.RecoverRawAppend(filepath.Join(state.SessionPath, "raw.jsonl"), state.SourceOffset); err != nil {
+		return err
 	}
 
 	// Track every afterTool invocation + its terminal reason so `ox session status`
@@ -619,9 +748,10 @@ func handleAfterTool(ctx *HookContext) error {
 			repoRoot = ctx.ProjectRoot
 		}
 		sf, findErr := adapter.FindSessionFile(adapters.SessionLookup{
-			RepoRoot: repoRoot,
-			AgentID:  agentID,
-			Since:    state.StartedAt,
+			RepoRoot:       repoRoot,
+			AgentID:        agentID,
+			AgentSessionID: state.AgentSessionID,
+			Since:          state.StartedAt.Add(-5 * time.Minute),
 		})
 		if findErr != nil || sf == "" {
 			slog.Info("hook: session file not found", "agentID", agentID, "adapter", state.AdapterName, "repo", repoRoot, "err", findErr)
@@ -648,18 +778,24 @@ func handleAfterTool(ctx *HookContext) error {
 			repoRoot = ctx.ProjectRoot
 		}
 		sf, findErr := adapter.FindSessionFile(adapters.SessionLookup{
-			RepoRoot: repoRoot,
-			AgentID:  agentID,
-			Since:    state.StartedAt,
+			RepoRoot:       repoRoot,
+			AgentID:        agentID,
+			AgentSessionID: state.AgentSessionID,
+			Since:          state.StartedAt.Add(-5 * time.Minute),
 		})
 		if findErr == nil && sf != "" && sf != state.SessionFile {
 			slog.Info("hook: rediscovered session file", "old", state.SessionFile, "new", sf)
 			state.SessionFile = sf
+			// both offsets belong to the old file: a StartOffset left behind would
+			// make every read skip the first bytes of the new transcript, and
+			// every ownership check start mid-record
 			_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
 				s.SessionFile = sf
 				s.SourceOffset = 0 // reset offset for new file
+				s.StartOffset = 0
 			})
 			state.SourceOffset = 0
+			state.StartOffset = 0
 		}
 	}
 
@@ -669,16 +805,44 @@ func handleAfterTool(ctx *HookContext) error {
 		readOffset = state.StartOffset
 	}
 
+	var sourceSnapshot os.FileInfo
+	if state.AdapterName == "claude-code" {
+		var snapshotErr error
+		sourceSnapshot, snapshotErr = claudesource.Snapshot(state.SessionFile)
+		if snapshotErr != nil {
+			recordHookStatus("read-error")
+			return nil
+		}
+	}
 	entries, newOffset, readErr := reader.ReadFromOffset(state.SessionFile, readOffset)
 	if readErr != nil {
 		slog.Info("hook: incremental read failed", "agentID", agentID, "adapter", state.AdapterName, "file", state.SessionFile, "offset", readOffset, "error", readErr)
 		recordHookStatus("read-error")
 		return nil // non-fatal, will catch up at stop
 	}
-
 	if len(entries) == 0 {
 		recordHookStatus("no-new-entries")
 		return nil
+	}
+	if state.AdapterName == "claude-code" {
+		repoRoot := state.WorkspacePath
+		if repoRoot == "" {
+			repoRoot = ctx.ProjectRoot
+		}
+		// Only the newly read records can be appended by this hook. Require
+		// ownership on each captured turn; finalization rechecks the whole file.
+		if err := claudesource.ValidateRead(state.SessionFile, repoRoot, state.AgentSessionID, readOffset, false, sourceSnapshot); err != nil {
+			slog.Info("hook: Claude source crossed repository boundary", "agentID", agentID, "error", err)
+			// record the status first: once quarantined the recording leaves the
+			// agent's active slot, which recordHookStatus looks it up by
+			recordHookStatus("source-repo-mismatch")
+			if errors.Is(err, claudesource.ErrUntrustedSource) {
+				if markErr := session.SetSourceRejectedAt(state.SessionPath, state.SessionID, true); markErr != nil {
+					slog.Warn("hook: failed to quarantine source", "agentID", agentID, "error", markErr)
+				}
+			}
+			return nil
+		}
 	}
 
 	// filter entries by timestamp — strict After() to prevent boundary leaks
@@ -734,7 +898,16 @@ func handleAfterTool(ctx *HookContext) error {
 		}
 	}
 
-	if appendErr := appendRedactedEntries(rawPath, sessionEntries); appendErr != nil {
+	writer, writeErr := session.NewRawWriter(rawPath, ctx.ProjectRoot)
+	if writeErr != nil {
+		return writeErr
+	}
+	appendErr := writer.AppendRecordingBatch(filepath.Join(state.SessionPath, ".recording.json"), sessionEntries, newOffset)
+	closeErr := writer.Close()
+	if appendErr == nil {
+		appendErr = closeErr
+	}
+	if appendErr != nil {
 		slog.Info("hook: append entries failed", "agentID", agentID, "path", rawPath, "error", appendErr)
 		recordHookStatus("append-failed")
 		return nil // non-fatal
@@ -742,17 +915,16 @@ func handleAfterTool(ctx *HookContext) error {
 
 	now := time.Now().UTC()
 	_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
-		s.SourceOffset = newOffset
-		s.EntryCount += len(sessionEntries)
 		s.HookInvocations++
 		s.LastHookStatus = "ok"
 		s.LastHookAt = &now
 		// Refresh parent_pid only if the stored PID is dead — each hook call runs in a
 		// new transient shell, so blindly overwriting with os.Getppid() would store a dead
 		// PID. FindAgentAncestorPID walks the tree to find the long-lived agent process.
-		if !proc.IsAlive(s.ParentPID) {
+		if !proc.IsAlive(s.ParentPID) || proc.IsReused(s.ParentPID, s.ParentStartTime) {
 			if agentPID := proc.FindAgentAncestorPID(); agentPID > 0 {
 				s.ParentPID = agentPID
+				s.ParentStartTime = session.ParentStartTimeOf(agentPID)
 			}
 		}
 	})
@@ -778,6 +950,10 @@ func handleStop(ctx *HookContext) error {
 	// Best-effort by contract — it never returns an error and never fails the
 	// turn.
 	maybePublishSessionDraft(ctx)
+	// Codex's only plan-exit signal is a <proposed_plan> block at turn end.
+	if ctx.AgentType == "codex" && ctx.Marker != nil {
+		maybeCaptureCodexPlan(ctx, ctx.Marker.AgentID)
+	}
 	return nil
 }
 
@@ -825,7 +1001,15 @@ func appendRedactedEntries(rawPath string, entries []session.Entry) error {
 // Reuses all existing prime logic cleanly via subprocess invocation.
 // Passes the original raw stdin bytes to prime to preserve unknown/agent-specific fields.
 func runPrimeForHook(agentID string, ctx *HookContext) error {
-	oxPath, err := os.Executable()
+	oxPath, err := selfexec.Path()
+	if errors.Is(err, selfexec.ErrUnderTest) {
+		// Not a failure: selfexec refuses to hand out the test binary's path
+		// (see internal/selfexec). Skipping the subprocess is the whole point,
+		// so the hook phases that call this — start and compact — must carry on
+		// rather than surface an error the coworker can do nothing about.
+		slog.Debug("hook: skipping prime subprocess under go test", "agent_id", agentID)
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("hook: cannot find ox executable: %w", err)
 	}
@@ -878,9 +1062,25 @@ func startSessionRecordingIfConfigured(ctx *HookContext) {
 	}
 
 	agentID := ""
+	agentSessionID := ""
 	if ctx.Marker != nil {
 		agentID = ctx.Marker.AgentID
+		agentSessionID = ctx.Marker.AgentSessionID
+	}
+	source := ""
+	if ctx.Input != nil {
+		if ctx.Input.SessionID != "" {
+			agentSessionID = ctx.Input.SessionID
+		}
+		source = ctx.Input.Source
 	}
 
-	startSessionRecording(ctx.ProjectRoot, agentID, ctx.AgentType, "")
+	var boundary *CursorSourceBoundary
+	if ctx.Marker != nil {
+		boundary = ctx.Marker.CursorSourceBoundary
+	}
+	startSessionRecording(ctx.ProjectRoot, agentID, ctx.AgentType, "", recordingSessionIDFromMarker(ctx.Marker), agentSessionID, boundary)
+
+	// Preserve native-session provenance for every observed startup.
+	recordNativeSessionForRecording(ctx.ProjectRoot, agentID, agentSessionID, source)
 }

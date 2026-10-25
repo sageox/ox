@@ -22,8 +22,21 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 
 	var results []checkResult
 
-	// retry failed session uploads first (auto-fix: creates ledger files
-	// that downstream auto-stage/commit/push checks operate on)
+	// a damaged record of aborted sessions stops import and auto-recording;
+	// shown only when it needed repair
+	if abortRecord := checkAbortRecord(opts.shouldFix(CheckSlugSessionAbortRecord)); !abortRecord.skipped && abortRecord.message != "readable" {
+		results = append(results, abortRecord)
+	}
+
+	// sessions kept on this machine, or waiting in the cache (GH #1095, #1077).
+	// First: in manual mode it holds unmarked cache sessions, and the upload
+	// retry below would otherwise publish them in this same run.
+	if heldResult, show := checkHeldSessions(gitRoot, getLedgerPath()); show {
+		results = append(results, heldResult)
+	}
+
+	// retry failed session uploads (auto-fix: creates ledger files that
+	// downstream auto-stage/commit/push checks operate on)
 	uploadRetryResult := checkSessionUploadRetry()
 	if !uploadRetryResult.passed || uploadRetryResult.message != "no pending uploads" {
 		results = append(results, uploadRetryResult)
@@ -56,6 +69,7 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 		doctor.NewSessionStaleCheck(gitRoot),
 		doctor.NewSessionOrphanedCheck(gitRoot, opts.shouldFix(CheckSlugSessionOrphaned)), // detect orphaned recordings
 		doctor.NewSessionStopIncompleteCheck(gitRoot),                                     // detect stuck stop-incomplete recordings
+		doctor.NewSessionQuarantineCheck(gitRoot),                                         // recordings held back for crossing repositories
 		doctor.NewSessionPendingCheck(gitRoot),
 		doctor.NewSessionSyncCheck(gitRoot),
 		doctor.NewSessionAutoStageCheck(gitRoot), // auto-stage session files (FixLevelAuto)
@@ -89,6 +103,16 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 		results = append(results, sessionCommitResult)
 	}
 
+	// session files written but never committed (a partial session stop)
+	uncommittedResult := checkSessionUncommittedViaRegistry(opts)
+	if !uncommittedResult.skipped && (!uncommittedResult.passed || uncommittedResult.message != "no uncommitted session files") {
+		results = append(results, uncommittedResult)
+	}
+
+	// session repairs normally already ran before the Ledger branch-status push (see
+	// runSessionRepairs); this returns their recorded results
+	results = append(results, opts.runSessionRepairs()...)
+
 	// add session push check (runs after commit, supports --fix)
 	// this check pushes committed session data to remote when local is ahead
 	sessionPushCheck := doctor.NewSessionPushCheck(gitRoot, opts.shouldFix(CheckSlugSessionPush))
@@ -108,6 +132,12 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 		results = append(results, incompleteResult)
 	}
 
+	// draft placeholders whose recording is gone
+	orphanResult := checkSessionDraftOrphanViaRegistry(opts)
+	if !orphanResult.skipped && (!orphanResult.passed || orphanResult.message != "no orphaned drafts") {
+		results = append(results, orphanResult)
+	}
+
 	// identity integrity: meta.json session_id vs raw.jsonl header
 	// session_id. Detect-only (see checkSessionIDDivergence doc comment
 	// for why); always shown rather than filtered on a boring-pass
@@ -121,7 +151,71 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 	results = append(results, checkSessionProducedCommitsStaleness())
 	results = append(results, checkPRAttributionCoverage())
 
+	// native session ids: report-only, so a SessionStart path that stopped
+	// recording the agent's own session id is visible instead of silently
+	// producing recordings that cannot be matched to the agent's transcript.
+	results = append(results, checkSessionNativeSessions())
+
 	return results
+}
+
+// sessionRepairState records the session repair results of one doctor run so the
+// repairs execute once, at the earliest point that matters, and the Sessions
+// category still reports them.
+type sessionRepairState struct {
+	ran     bool
+	results []checkResult
+}
+
+// runSessionRepairs runs the repairs that must precede any phase that pushes the
+// Ledger: committed conflict markers, then hydrated content where LFS pointers
+// belong. The Ledger branch-status auto-fix pushes unpushed commits, and without
+// this order it publishes markers the next phase was about to fix. Within one
+// doctor run the work happens once; later calls return the recorded results.
+func (opts doctorOptions) runSessionRepairs() []checkResult {
+	if opts.sessionRepairs != nil && opts.sessionRepairs.ran {
+		return opts.sessionRepairs.results
+	}
+	var results []checkResult
+
+	// committed conflict markers in session files block every push and make the pointer-restore
+	// validator below refuse the tip, so they are resolved first
+	conflictMarkersResult := checkSessionConflictMarkers(opts.shouldFix(CheckSlugSessionConflictMarkers))
+	if !conflictMarkersResult.skipped && (!conflictMarkersResult.passed || conflictMarkersResult.message != "no conflict markers in unpushed session files") {
+		results = append(results, conflictMarkersResult)
+	}
+
+	// hydrated session content committed where LFS pointers belong blocks every push (#1174);
+	// repair runs before the push check so a fix here lets that push proceed
+	pointerRestoreResult := checkSessionPointerRestore(opts.shouldFix(CheckSlugSessionPointerRestore))
+	if !pointerRestoreResult.skipped && (!pointerRestoreResult.passed || pointerRestoreResult.message != "no raw session content in unpushed commits") {
+		results = append(results, pointerRestoreResult)
+	}
+
+	if opts.sessionRepairs != nil {
+		opts.sessionRepairs.ran = true
+		opts.sessionRepairs.results = results
+	}
+	return results
+}
+
+// checkSessionUncommittedViaRegistry and checkSessionDraftOrphanViaRegistry run
+// the registered checks, so the registry entry is the one thing --fix-slug
+// validates and the one thing the Sessions phase runs.
+func checkSessionUncommittedViaRegistry(opts doctorOptions) checkResult {
+	check := GetDoctorCheck(CheckSlugSessionUncommitted)
+	if check == nil {
+		return SkippedCheck("session uncommitted", "check not registered", "")
+	}
+	return check.Run(opts.shouldFix(CheckSlugSessionUncommitted))
+}
+
+func checkSessionDraftOrphanViaRegistry(opts doctorOptions) checkResult {
+	check := GetDoctorCheck(CheckSlugSessionDraftOrphan)
+	if check == nil {
+		return SkippedCheck("session draft orphan", "check not registered", "")
+	}
+	return check.Run(opts.shouldFix(CheckSlugSessionDraftOrphan))
 }
 
 // convertDoctorResult converts a doctor.CheckResult to the CLI's checkResult format.

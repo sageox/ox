@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,6 +20,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/repotools"
@@ -183,8 +187,17 @@ func checkGitRepoState() checkResult {
 		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 		hasUnstaged := false
 		count := 0
+		var perMachine []string
 		for _, line := range lines {
 			if line == "" {
+				continue
+			}
+			// a staged deletion falls through: committing it is how the file leaves the repo
+			if path, ok := perMachineStatusPath(line); ok && line[0] != 'D' {
+				// untracked waits on the .gitignore check; anything else is in the index and must come out
+				if line[:2] != "??" {
+					perMachine = append(perMachine, path)
+				}
 				continue
 			}
 			count++
@@ -192,6 +205,11 @@ func checkGitRepoState() checkResult {
 			if len(line) >= 2 && line[1] != ' ' {
 				hasUnstaged = true
 			}
+		}
+		if len(perMachine) > 0 {
+			return WarningCheck("Repo state",
+				fmt.Sprintf("%d per-machine file(s) in the index under .sageox/", len(perMachine)),
+				"Do not commit these; unstage with 'git rm --cached "+strings.Join(perMachine, " ")+"'")
 		}
 		if count > 0 {
 			if hasUnstaged {
@@ -207,6 +225,22 @@ func checkGitRepoState() checkResult {
 	}
 
 	return PassedCheck("Repo state", "committed and up to date")
+}
+
+// perMachineStatusPath returns the path from a `git status --porcelain` line when it names
+// a file ox's own .gitignore excludes: per-machine state, not config to commit (#1062).
+// ox writes these only directly under .sageox/, which also keeps the path in the doctor hint
+// a fixed name rather than arbitrary text from the working tree.
+func perMachineStatusPath(line string) (string, bool) {
+	if len(line) <= 3 {
+		return "", false
+	}
+	path := line[3:]
+	// a staged rename reads "old -> new"; the destination is what sits in the index
+	if _, dest, ok := strings.Cut(path, " -> "); ok {
+		path = dest
+	}
+	return path, filepath.Dir(path) == ".sageox" && slices.Contains(requiredGitignoreEntries, filepath.Base(path))
 }
 
 // checkGitRemotes validates configured git remotes.
@@ -383,6 +417,13 @@ func checkMergeConflicts() checkResult {
 // Uses --connectivity-only for speed (skips blob content checks).
 // Detects corrupted objects that can cause silent failures.
 // Has a 5s timeout to avoid blocking on very large repos.
+//
+// git fsck also exits non-zero for harmless broken/dangling refs (e.g. a
+// stale refs/remotes/<remote>/HEAD left behind after the remote's default
+// branch was deleted or renamed) — that is a ref-repair issue, not object
+// database corruption, and does NOT warrant a "re-clone the repository"
+// remedy. classifyFsckOutput() distinguishes the two so only genuine object
+// corruption is reported as FAILED.
 func checkGitFsck() checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
@@ -390,7 +431,10 @@ func checkGitFsck() checkResult {
 	}
 
 	// run fsck with connectivity-only for speed and a timeout
-	cmd := exec.Command("git", "fsck", "--connectivity-only", "--no-progress")
+	// --no-dangling: a dangling (unreferenced) object is normal git state,
+	// not corruption, so suppress it at the source rather than let it reach
+	// classifyFsckOutput and get mistaken for an object error.
+	cmd := exec.Command("git", "fsck", "--connectivity-only", "--no-progress", "--no-dangling")
 	cmd.Dir = gitRoot
 
 	type fsckResult struct {
@@ -406,18 +450,39 @@ func checkGitFsck() checkResult {
 	select {
 	case result := <-done:
 		if result.err != nil {
-			// fsck found issues - provide actionable guidance
-			lines := strings.Split(strings.TrimSpace(string(result.output)), "\n")
-			summary := "corruption detected"
-			if len(lines) > 0 && lines[0] != "" {
-				firstLine := lines[0]
-				if len(firstLine) > 50 {
-					firstLine = firstLine[:47] + "..."
-				}
-				summary = firstLine
+			output := strings.TrimSpace(string(result.output))
+			if output == "" {
+				// non-zero exit with no output to classify — stay conservative,
+				// this is the pre-existing "unexplained failure" behavior.
+				return FailedCheck("git integrity", "corruption detected", fsckCorruptionDetail)
 			}
 
-			detail := `Git repository has corrupted objects. This can happen after:
+			severity, summary, detail := classifyFsckOutput(output)
+			if severity == fsckSeverityWarn {
+				return WarningCheck("git integrity", summary, detail)
+			}
+			return FailedCheck("git integrity", summary, detail)
+		}
+		return PassedCheck("git integrity", "object database OK")
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		return PassedCheck("git integrity", "skipped (large repo)")
+	}
+}
+
+// fsckSeverity classifies the result of parsing git fsck output.
+type fsckSeverity string
+
+const (
+	fsckSeverityOK   fsckSeverity = "ok"   // no problems found
+	fsckSeverityWarn fsckSeverity = "warn" // broken/dangling refs only — not object corruption
+	fsckSeverityFail fsckSeverity = "fail" // genuine object-database corruption (or unclassifiable output)
+)
+
+// fsckCorruptionDetail is the remedy shown for genuine object-database
+// corruption. Re-cloning is only ever appropriate here — never for a
+// broken-ref-only finding.
+const fsckCorruptionDetail = `Git repository has corrupted objects. This can happen after:
   • Disk errors or power loss during git operations
   • Incomplete clones or interrupted fetches
 
@@ -428,13 +493,134 @@ To fix:
 
 Run 'git fsck' for detailed error information.`
 
-			return FailedCheck("git integrity", summary, detail)
-		}
-		return PassedCheck("git integrity", "object database OK")
-	case <-time.After(5 * time.Second):
-		_ = cmd.Process.Kill()
-		return PassedCheck("git integrity", "skipped (large repo)")
+// fsckRefErrorRe matches a git fsck line reporting a broken/dangling ref,
+// e.g. `error: refs/remotes/belgrade/HEAD: invalid sha1 pointer 000...`.
+// Group 1 captures the ref path (refs/remotes/belgrade/HEAD).
+var fsckRefErrorRe = regexp.MustCompile(`^error: (refs/\S+):`)
+
+// fsckRemoteHeadRe extracts the remote name from a remote-tracking HEAD ref
+// path (refs/remotes/<remote>/HEAD), so the remedy can name the exact
+// `git remote set-head <remote> -a` command to run.
+var fsckRemoteHeadRe = regexp.MustCompile(`^refs/remotes/([^/]+)/HEAD$`)
+
+// fsckObjectErrorRe matches git fsck lines that indicate genuine
+// object-database corruption (as opposed to a broken ref).
+var fsckObjectErrorRe = regexp.MustCompile(`(?i)(missing (blob|tree|commit|tag)|broken link|error in (tree|commit|blob|tag)|bad object|bad sha1 file|sha1 mismatch)`)
+
+// fsckDanglingRe matches a git fsck "dangling <type> <sha>" line. A dangling
+// object is unreferenced but the object DB is intact — normal state after a
+// rebase/amend/branch-delete, not corruption. git fsck is invoked with
+// --no-dangling so these are usually suppressed at the source; this is the
+// belt-and-suspenders guard for a git that predates the flag.
+var fsckDanglingRe = regexp.MustCompile(`(?i)^dangling (blob|tree|commit|tag)\b`)
+
+// classifyFsckOutput parses the (non-empty, trimmed) combined stdout+stderr
+// of `git fsck --connectivity-only --no-progress` and classifies it as:
+//
+//   - fsckSeverityOK:   no problem lines at all (empty output)
+//   - fsckSeverityWarn: every problem line is a broken/dangling ref — a
+//     ref-repair issue, never object corruption
+//   - fsckSeverityFail: at least one line indicates genuine object-database
+//     corruption, OR a line could not be positively classified as a
+//     harmless ref issue (stay conservative — never silently downgrade
+//     output we don't recognize)
+//
+// It is a pure function (no git invocation) so it can be unit tested
+// against captured fsck output without a real corrupted repository.
+func classifyFsckOutput(output string) (severity fsckSeverity, summary string, detail string) {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return fsckSeverityOK, "object database OK", ""
 	}
+
+	lines := strings.Split(trimmed, "\n")
+
+	var refIssues []string    // ref paths reported broken/dangling, e.g. refs/remotes/belgrade/HEAD
+	var unclassified []string // lines that are neither a recognized ref issue nor object corruption
+
+	hasObjectError := false
+	sawDangling := false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if m := fsckRefErrorRe.FindStringSubmatch(line); m != nil {
+			refIssues = append(refIssues, m[1])
+			continue
+		}
+		if fsckDanglingRe.MatchString(line) {
+			// dangling object — benign, not corruption and not a ref issue.
+			sawDangling = true
+			continue
+		}
+		if fsckObjectErrorRe.MatchString(line) {
+			hasObjectError = true
+			continue
+		}
+		unclassified = append(unclassified, line)
+	}
+
+	switch {
+	case hasObjectError || len(unclassified) > 0:
+		// Genuine object corruption, or a line we can't positively classify
+		// as harmless. Mixed output (ref issues + object corruption) lands
+		// here too — object corruption dominates.
+		return fsckSeverityFail, fsckFailSummary(lines), fsckCorruptionDetail
+	case len(refIssues) > 0:
+		// Broken/dangling refs only (possibly alongside benign dangling
+		// objects) — a ref-repair issue, not corruption.
+		return fsckSeverityWarn, fsckWarnSummary(refIssues), fsckWarnDetail(refIssues)
+	case sawDangling:
+		// Nothing but benign dangling-object lines — the object DB is intact.
+		return fsckSeverityOK, "object database OK (dangling objects only)", ""
+	default:
+		// Non-zero exit but nothing classifiable survived. Stay conservative.
+		return fsckSeverityFail, fsckFailSummary(lines), fsckCorruptionDetail
+	}
+}
+
+// fsckFailSummary mirrors the original checkGitFsck behavior: use the first
+// non-empty line of fsck's output, truncated, as the one-line summary.
+func fsckFailSummary(lines []string) string {
+	summary := "corruption detected"
+	if len(lines) > 0 && lines[0] != "" {
+		firstLine := lines[0]
+		if len(firstLine) > 50 {
+			firstLine = firstLine[:47] + "..."
+		}
+		summary = firstLine
+	}
+	return summary
+}
+
+// fsckWarnSummary produces the one-line summary for a broken-ref-only finding.
+func fsckWarnSummary(refs []string) string {
+	if len(refs) == 1 {
+		return fmt.Sprintf("broken ref: %s", refs[0])
+	}
+	return fmt.Sprintf("%d broken ref(s)", len(refs))
+}
+
+// fsckWarnDetail builds the ref-repair remedy. For a remote-tracking HEAD
+// ref it names the exact `git remote set-head <remote> -a` command; for any
+// other ref path it falls back to a generic delete-the-stale-ref remedy.
+func fsckWarnDetail(refs []string) string {
+	var b strings.Builder
+	b.WriteString("Git repository has one or more broken/dangling refs (not object corruption). This can happen after:\n")
+	b.WriteString("  • The upstream branch a remote-tracking HEAD pointed to was deleted or renamed\n")
+	b.WriteString("  • A remote's default branch changed (e.g. master -> main)\n\n")
+	b.WriteString("To fix:\n")
+	for _, ref := range refs {
+		if m := fsckRemoteHeadRe.FindStringSubmatch(ref); m != nil {
+			remote := m[1]
+			fmt.Fprintf(&b, "  • %s: run `git remote set-head %s -a` to repoint it at the remote's current default branch\n", ref, remote)
+		} else {
+			fmt.Fprintf(&b, "  • %s: this ref no longer resolves; remove it with `git update-ref -d %s`\n", ref, ref)
+		}
+	}
+	b.WriteString("\nThis is a ref-repair issue, not object-database corruption — re-cloning is not necessary.")
+	return b.String()
 }
 
 // checkGitLockFiles checks for stale git lock files from crashed processes.
@@ -444,48 +630,83 @@ func checkGitLockFiles() checkResult {
 	if gitRoot == "" {
 		return SkippedCheck("git locks", "not in git repo", "")
 	}
+	return gitLockFilesResult("git locks", filepath.Join(gitRoot, ".git"), time.Now())
+}
 
-	gitDir := filepath.Join(gitRoot, ".git")
-	lockFiles := []string{
-		"index.lock",
-		"shallow.lock",
-		"config.lock",
-		"HEAD.lock",
+// checkLedgerGitLockFiles runs the same lock check against the ledger. A stale
+// ledger index.lock blocks every ledger write — including doctor's own
+// `git rebase --abort` — and the project-repo check never looked there.
+// Report-only: an ownerless index.lock carries no PID, so whether a git process
+// still holds it is the user's call (gitutil.AbandonedLockAge explains why age
+// alone is not proof).
+func checkLedgerGitLockFiles() checkResult {
+	const name = "ledger git locks"
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return SkippedCheck(name, "not in git repo", "")
 	}
+	ledgerPath := resolveLocalLedgerPath(gitRoot)
+	if ledgerPath == "" {
+		return SkippedCheck(name, "no ledger configured", "")
+	}
+	return ledgerGitLockFilesResult(name, filepath.Join(ledgerPath, ".git"), time.Now())
+}
 
-	var found []string
-	var oldLocks []string
-	oneHourAgo := time.Now().UTC().Add(-1 * time.Hour)
+// ledgerGitLockFilesResult skips only a ledger that is genuinely not cloned.
+// A permission or I/O error on .git is reported, not skipped: "could not look"
+// must not read as "nothing to see" on the check meant to explain a stuck ledger.
+func ledgerGitLockFilesResult(name, gitDir string, now time.Time) checkResult {
+	info, err := os.Stat(gitDir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return SkippedCheck(name, "ledger not cloned", "")
+	case err != nil:
+		return FailedCheck(name, "cannot inspect ledger git dir", fmt.Sprintf("stat %s: %v", gitDir, err))
+	case !info.IsDir():
+		return SkippedCheck(name, "ledger not cloned", "")
+	}
+	return gitLockFilesResult(name, gitDir, now)
+}
 
-	for _, lock := range lockFiles {
+// gitLockFilesResult reports git lock files in gitDir. Locks older than an hour
+// fail; younger ones warn, since a live git may still hold them. The remove
+// command lists each full path, shell-quoted: a one-element brace expansion
+// ({index.lock}) is not expanded by the shell, so the old form named a file that
+// does not exist, and an unquoted path with a space would split into two targets.
+func gitLockFilesResult(name, gitDir string, now time.Time) checkResult {
+	var found, paths, oldLocks []string
+	oneHourAgo := now.Add(-1 * time.Hour)
+	for _, lock := range gitutil.HasLockFiles(gitDir) {
 		path := filepath.Join(gitDir, lock)
-		if info, err := os.Stat(path); err == nil {
-			found = append(found, lock)
-			if info.ModTime().UTC().Before(oneHourAgo) {
-				oldLocks = append(oldLocks, lock)
-			}
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		found = append(found, lock)
+		paths = append(paths, shellQuote(path))
+		if info.ModTime().Before(oneHourAgo) {
+			oldLocks = append(oldLocks, lock)
 		}
 	}
 
 	if len(found) == 0 {
-		return PassedCheck("git locks", "no stale lock files")
+		return PassedCheck(name, "no stale lock files")
 	}
 
 	detail := fmt.Sprintf(
 		"Lock files found: %s\n"+
 			"If no git commands are running, remove with:\n"+
-			"  rm %s/{%s}",
+			"  rm -- %s",
 		strings.Join(found, ", "),
-		gitDir,
-		strings.Join(found, ","))
+		strings.Join(paths, " "))
 
 	if len(oldLocks) > 0 {
-		return FailedCheck("git locks",
+		return FailedCheck(name,
 			fmt.Sprintf("%d stale lock file(s) > 1 hour old", len(oldLocks)),
 			detail).WithFixInfo(CheckSlugGitLock, FixLevelSuggested)
 	}
 
-	return WarningCheck("git locks",
+	return WarningCheck(name,
 		"lock files present (may be from active git process)",
 		detail)
 }
@@ -634,7 +855,7 @@ func checkGitRepoPaths(fix bool) checkResult {
 				}
 				// not authenticated - suggest login first
 				return WarningCheck("git repo paths", "no repos configured",
-					"Run `ox login` to authenticate, then `ox doctor --fix` to clone repos")
+					auth.ReauthenticationRemedy(endpoint.GetForProject(gitRoot))+" Then run `ox doctor --fix` to clone repos.")
 			}
 			// no .sageox - skip silently
 			return SkippedCheck("git repo paths", "no repos configured", "")
@@ -835,37 +1056,76 @@ func checkProjectSymlinks(fix bool) checkResult {
 		teamTarget = paths.TeamContextDir(projectCfg.TeamID, ep)
 	}
 
-	// checkSymlink returns true if the symlink exists and points to the expected target
-	checkSymlink := func(rel, expectedTarget string) bool {
+	// checkSymlink classifies one project symlink.
+	//
+	// The dangling case is the one that used to escape: os.Readlink succeeds on a
+	// symlink whose target no longer exists, so a link left pointing at a deleted
+	// ledger or team-context clone reported "ok" and doctor moved on. Resolving the
+	// link with os.Stat — which follows it — is what separates "the link is right"
+	// from "the thing it names is actually there".
+	//
+	// Dangling is reported apart from missing/wrong because it is not repairable by
+	// relinking: createOrUpdateSymlink (internal/config/local_config.go) returns nil
+	// when the link already points at the requested target, so re-running the fix
+	// would change nothing while claiming a repair. The missing thing is the target.
+	checkSymlink := func(rel, expectedTarget string) (ok bool, state string) {
 		if expectedTarget == "" {
-			return true // nothing to check
+			return true, "" // nothing to check
 		}
 		abs := filepath.Join(gitRoot, rel)
 		target, err := os.Readlink(abs)
 		if err != nil {
-			return false // missing or not a symlink
+			return false, "missing" // absent, or present but not a symlink
 		}
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(abs), target)
 		}
-		return filepath.Clean(target) == filepath.Clean(expectedTarget)
+		if filepath.Clean(target) != filepath.Clean(expectedTarget) {
+			return false, "wrong target"
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return false, "dangling"
+		}
+		return true, ""
 	}
 
-	var issues []string
-	if ledgerTarget != "" && !checkSymlink(".sageox/ledger", ledgerTarget) {
-		issues = append(issues, ".sageox/ledger")
-	}
-	if teamTarget != "" && !checkSymlink(".sageox/teams/primary", teamTarget) {
-		issues = append(issues, ".sageox/teams/primary")
+	// relinkable holds links a fix can actually repair; dangling holds links whose
+	// target is gone, which needs the owning subsystem (ledger clone, team sync),
+	// not another symlink.
+	var relinkable, dangling []string
+	for _, c := range []struct {
+		rel    string
+		target string
+	}{
+		{".sageox/ledger", ledgerTarget},
+		{".sageox/teams/primary", teamTarget},
+	} {
+		ok, state := checkSymlink(c.rel, c.target)
+		if ok {
+			continue
+		}
+		if state == "dangling" {
+			dangling = append(dangling, fmt.Sprintf("%s -> %s (target missing)", c.rel, c.target))
+			continue
+		}
+		relinkable = append(relinkable, fmt.Sprintf("%s (%s)", c.rel, state))
 	}
 
-	if len(issues) == 0 {
+	if len(relinkable) == 0 && len(dangling) == 0 {
 		return PassedCheck("Project symlinks", "ok")
 	}
 
-	if !fix {
+	// A dangling link is never silently "fixed" — report it whether or not --fix ran.
+	if len(dangling) > 0 && len(relinkable) == 0 {
 		return WarningCheck("Project symlinks",
-			fmt.Sprintf("%d need repair: %s", len(issues), strings.Join(issues, ", ")),
+			fmt.Sprintf("%d dangling: %s", len(dangling), strings.Join(dangling, ", ")),
+			"The symlink is correct but its target does not exist. Run `ox doctor` and address the ledger/team-context clone it points at")
+	}
+
+	if !fix {
+		all := append(append([]string{}, relinkable...), dangling...)
+		return WarningCheck("Project symlinks",
+			fmt.Sprintf("%d need repair: %s", len(all), strings.Join(all, ", ")),
 			"Run `ox doctor --fix` to create project symlinks")
 	}
 
@@ -882,6 +1142,11 @@ func checkProjectSymlinks(fix bool) checkResult {
 		}
 	}
 
+	if len(dangling) > 0 {
+		return WarningCheck("Project symlinks",
+			fmt.Sprintf("relinked %d, but %d dangling: %s", fixed, len(dangling), strings.Join(dangling, ", ")),
+			"The dangling symlink's target does not exist; relinking cannot create it")
+	}
 	if fixed > 0 {
 		return PassedCheck("Project symlinks", fmt.Sprintf("fixed %d symlinks", fixed))
 	}
@@ -1131,7 +1396,7 @@ func checkLedgerPathMismatch(fix bool) checkResult {
 				fmt.Printf("    Default path: %s\n", defaultPath)
 				fmt.Println()
 
-				if cli.ConfirmYesNo("Add this ledger path to config.local.toml?", true) {
+				if cli.AssumeYes() || cli.ConfirmYesNo("Add this ledger path to config.local.toml?", true) {
 					if localCfg.Ledger == nil {
 						localCfg.Ledger = &config.LedgerConfig{}
 					}
@@ -1188,7 +1453,7 @@ func checkLedgerPathMismatch(fix bool) checkResult {
 		// decide what to offer based on what exists
 		if defaultExists && !configuredExists {
 			// default exists, configured does not - suggest using default
-			if cli.ConfirmYesNo("Update config to use the default path (where ledger exists)?", true) {
+			if cli.AssumeYes() || cli.ConfirmYesNo("Update config to use the default path (where ledger exists)?", true) {
 				localCfg.Ledger.Path = defaultPath
 				if err := config.SaveLocalConfig(gitRoot, localCfg); err != nil {
 					return FailedCheck("Ledger path config", "save failed", err.Error())
@@ -1208,7 +1473,7 @@ func checkLedgerPathMismatch(fix bool) checkResult {
 				"Review and remove duplicate ledger, then update config")
 		} else {
 			// neither exists - offer to update config to default (for future clone)
-			if cli.ConfirmYesNo("Neither path exists. Update config to use default path?", true) {
+			if cli.AssumeYes() || cli.ConfirmYesNo("Neither path exists. Update config to use default path?", true) {
 				localCfg.Ledger.Path = defaultPath
 				if err := config.SaveLocalConfig(gitRoot, localCfg); err != nil {
 					return FailedCheck("Ledger path config", "save failed", err.Error())
@@ -1240,34 +1505,43 @@ func checkLedgerPathMismatch(fix bool) checkResult {
 }
 
 // checkTeamContextCloneStrategy detects team context clones that are full clones
-// (not partial). Partial clones use --filter=blob:none which sets
-// extensions.partialClone in the git config. Full clones download all blobs upfront
-// and waste disk/bandwidth. This is informational only — blue-green reclone will
+// (not partial). Full clones download all blobs upfront and waste
+// disk/bandwidth. This is informational only — blue-green reclone will
 // eventually replace full clones with partial ones.
+//
+// Detection goes through gitutil.InspectRepo (promisor-remote first). Checking
+// `extensions.partialClone` alone reported every ox clone as a full clone: git
+// 2.50 records `clone --filter` as remote.<name>.promisor and never sets that
+// extension key.
 func checkTeamContextCloneStrategy() []checkResult {
-	var results []checkResult
-
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
-		return results
+		return nil
 	}
 
 	localCfg, err := config.LoadLocalConfig(gitRoot)
 	if err != nil || localCfg == nil {
-		return results
+		return nil
 	}
 
-	for _, tc := range localCfg.TeamContexts {
+	return teamContextCloneStrategyResults(localCfg.TeamContexts)
+}
+
+// teamContextCloneStrategyResults is the decision half, split from the
+// cwd-dependent lookup above so it can be exercised against real clones
+// without chdir'ing the test process into a fixture.
+func teamContextCloneStrategyResults(teamContexts []config.TeamContext) []checkResult {
+	var results []checkResult
+	for _, tc := range teamContexts {
 		if tc.Path == "" || !isGitRepo(tc.Path) {
 			continue
 		}
 
-		cmd := exec.Command("git", "-C", tc.Path, "config", "--get", "extensions.partialClone")
-		output, err := cmd.Output()
+		state, err := gitutil.InspectRepo(tc.Path)
 
 		name := fmt.Sprintf("Team %s clone strategy", tc.TeamName)
 
-		if err != nil || strings.TrimSpace(string(output)) == "" {
+		if err != nil || !state.Partial {
 			results = append(results, InfoCheck(name,
 				"full clone (not partial)",
 				"Will be upgraded to partial clone on next reclone"))

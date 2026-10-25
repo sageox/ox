@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/auth"
@@ -16,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/perf"
 	"github.com/sageox/ox/internal/signature"
 	"github.com/sageox/ox/internal/telemetry"
+	"github.com/sageox/ox/internal/updatenotice"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
@@ -47,6 +49,27 @@ type Context struct {
 	// OTel root span — is suppressed for these, because it would report the
 	// service lifetime as command latency. See IsLongRunning.
 	LongRunning bool
+
+	// Cmd is the command cobra resolved for this invocation.
+	Cmd *cobra.Command
+
+	// ProjectRoot is what config.FindProjectRoot returned when the command
+	// started: the working directory or its nearest parent holding .sageox/,
+	// or "". A .sageox/ directory alone does not make a project initialized;
+	// see config.IsInitialized.
+	ProjectRoot string
+
+	// Err is what the command returned, set by cmd/ox's
+	// executeWithFrictionRecovery after Execute so usage telemetry can report
+	// how it failed.
+	Err error
+
+	// commandPath overrides the path derived from the command; see
+	// SetCommandPath.
+	commandPath string
+
+	// outcome is how the command ended, for usage telemetry; see SetOutcome.
+	outcome map[string]any
 }
 
 // NewContext creates a new CLI context from a Cobra command.
@@ -57,6 +80,7 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 		CommandStartTime: time.Now(),
 		Ctx:              cmd.Context(),
 		LongRunning:      IsLongRunning(cmd),
+		Cmd:              cmd,
 	}
 
 	// if no context set, use background
@@ -87,6 +111,14 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	if cmd.Flags().Changed("no-interactive") {
 		cfg.NoInteractive, _ = cmd.Flags().GetBool("no-interactive")
 	}
+	if cmd.Flags().Changed("no-input") {
+		cfg.NoInput, _ = cmd.Flags().GetBool("no-input")
+	}
+	// Picks up either the root persistent --yes or a command's own --yes/-y
+	// (doctor, team invite): cmd.Flags() merges both, local winning.
+	if cmd.Flags().Changed("yes") {
+		cfg.AssumeYes, _ = cmd.Flags().GetBool("yes")
+	}
 
 	// initialize logger
 	logger.Init(cfg.Verbose)
@@ -96,6 +128,7 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	// uses auth.NewServerSessionID() for a per-invocation session ID
 	// if in a project context, uses disk-based queue for persistence
 	projectRoot := config.FindProjectRoot()
+	cliCtx.ProjectRoot = projectRoot
 	if projectRoot != "" {
 		cliCtx.TelemetryClient = telemetry.NewClient(auth.NewServerSessionID(), telemetry.WithProjectRoot(projectRoot))
 	} else {
@@ -121,6 +154,12 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	// set global output mode
 	SetJSONMode(cfg.JSON)
 	SetNoInteractive(cfg.NoInteractive)
+	SetNoInput(cfg.NoInput)
+	SetAssumeYes(cfg.AssumeYes)
+	// Update notices are human-facing prose; either machine-output mode turns
+	// one into a parse error for whatever is reading the stream. Wired here so
+	// every command inherits it rather than each notice site re-deriving it.
+	updatenotice.SetMachineOutput(cfg.JSON || cfg.Text)
 
 	// A long-running service process (`ox daemon start --foreground`) is not a
 	// command invocation. Cobra's post-run hooks fire at service *shutdown*, so
@@ -166,14 +205,13 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	}
 	// The OTLP proxy is JWT-gated; closure resolves the token at export
 	// time so the per-command exporter always uses the latest value on disk
-	// (refreshed by other code paths).
-	tokenFunc := func() string {
-		tok, err := auth.GetTokenForEndpoint(apiEndpoint)
-		if err != nil || tok == nil {
-			return ""
-		}
-		return tok.AccessToken
-	}
+	// (refreshed by other code paths). Gated on the same opt-out
+	// TelemetryClient already computed (DO_NOT_TRACK, SAGEOX_TELEMETRY=false,
+	// then the persisted telemetry setting — see telemetry.NewClient) so a
+	// user who turns telemetry off gets zero network export, not just zero
+	// product-event telemetry. See otlpTokenFunc for why this doesn't touch
+	// local tracing.
+	tokenFunc := otlpTokenFunc(cliCtx.TelemetryClient.IsEnabled(), apiEndpoint, auth.ExportBearerForEndpoint)
 	// Install perf TreeCollectorProcessor BEFORE Init so the next
 	// NewTracerProvider call sees it alongside the OTLP batch exporter.
 	// Spans produced anywhere in the CLI feed both backends — OTLP for
@@ -188,11 +226,7 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	}
 
 	// create root span for this command
-	cmdPath := cmd.Name()
-	if cmd.Parent() != nil && cmd.Parent().Name() != "ox" {
-		cmdPath = cmd.Parent().Name() + " " + cmdPath
-	}
-	cliCtx.Ctx, _ = observability.StartCommand(cliCtx.Ctx, observability.CommandName(cmdPath))
+	cliCtx.Ctx, _ = observability.StartCommand(cliCtx.Ctx, observability.CommandName(cliCtx.CommandPath(cmd)))
 	// Propagate the traced context onto the cobra command so
 	// downstream cmd.Context() callers inherit the OTel root span.
 	// Without this, perf.Start(cmd.Context(), ...) creates a NEW
@@ -209,6 +243,40 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	observability.SetCommandAttrs(version.Version, os.Args[1:])
 
 	return cliCtx, nil
+}
+
+// otlpTokenFunc builds the TokenFunc passed to observability.Init.
+//
+// When telemetryEnabled is false, the returned func always yields "".
+// observability's bearerRoundTripper treats an empty token exactly like a
+// logged-out user: it drops the batch client-side (a synthetic 2xx, nothing
+// sent over the wire) instead of calling the OTLP endpoint — see
+// internal/observability/otel.go's dropped(). That is the mechanism this
+// gate relies on: it stops network export without touching observability.Init
+// itself, so the TracerProvider and the perf.TreeCollectorProcessor wired via
+// AddSpanProcessor still get built and still receive every span. Local
+// tracing (OX_TRACE=1, --verbose, slow-op rendering) therefore keeps working
+// with telemetry off — only the outbound OTLP request stops. Passing an
+// empty apiEndpoint to Init instead would have skipped TracerProvider
+// construction entirely and silently broken that local path too.
+//
+// telemetryEnabled should be the same opt-out decision telemetry.Client
+// already computed (DO_NOT_TRACK, SAGEOX_TELEMETRY=false, then the
+// persisted user config setting) via Client.IsEnabled(), so this never
+// re-derives that precedence.
+//
+// resolveBearer is auth.ExportBearerForEndpoint at the real call site; it's
+// a parameter (not a direct call) so tests can inject a resolver that
+// returns an obviously-fake, non-empty token — proving the disabled branch
+// truly short-circuits instead of merely agreeing with a resolver that
+// happens to return "" for an unauthenticated test environment anyway.
+func otlpTokenFunc(telemetryEnabled bool, apiEndpoint string, resolveBearer func(string) string) func() string {
+	return func() string {
+		if !telemetryEnabled {
+			return ""
+		}
+		return resolveBearer(apiEndpoint)
+	}
 }
 
 // IsVerbose returns true if verbose logging is enabled
@@ -255,14 +323,47 @@ func (c *Context) TrackCommandCompletion(cmd *cobra.Command) {
 	}
 
 	duration := time.Since(c.CommandStartTime)
+	c.TelemetryClient.TrackCommand(c.CommandPath(cmd), duration, true, "")
+}
 
-	// build full command path (e.g., "agent prime" not just "prime")
-	cmdPath := cmd.Name()
-	if cmd.Parent() != nil && cmd.Parent().Name() != "ox" {
-		cmdPath = cmd.Parent().Name() + " " + cmdPath
+// CommandPath names the invoked command for telemetry: the full path below
+// the root ("plan viz lint", not "viz lint", which is also a top-level
+// command), or the path set by SetCommandPath.
+func (c *Context) CommandPath(cmd *cobra.Command) string {
+	if c.commandPath != "" {
+		return c.commandPath
 	}
+	return strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" ")
+}
 
-	c.TelemetryClient.TrackCommand(cmdPath, duration, true, "")
+// SetCommandPath records the path for a command that dispatches its own
+// subcommands, which cobra sees only as the dispatcher: `ox agent <id>
+// session stop` is "agent session stop", not "agent".
+func (c *Context) SetCommandPath(path string) {
+	c.commandPath = path
+}
+
+// SetOutcome records how a command ended, for its usage event, when the exit
+// code cannot say (a review session exits 0 whether it was approved or
+// abandoned). Counts and fixed words only: ADR-008's PostHog addendum lists
+// each key, and no value may carry anything a person wrote. A nil Context
+// records nothing.
+func (c *Context) SetOutcome(key string, value any) {
+	if c == nil {
+		return
+	}
+	if c.outcome == nil {
+		c.outcome = map[string]any{}
+	}
+	c.outcome[key] = value
+}
+
+// Outcome returns what SetOutcome recorded; nil for a nil Context.
+func (c *Context) Outcome() map[string]any {
+	if c == nil {
+		return nil
+	}
+	return c.outcome
 }
 
 // TrackCommandError tracks a command error via telemetry
@@ -279,12 +380,6 @@ func (c *Context) TrackCommandError(cmd *cobra.Command, err error) {
 
 	duration := time.Since(c.CommandStartTime)
 
-	// build full command path
-	cmdPath := cmd.Name()
-	if cmd.Parent() != nil && cmd.Parent().Name() != "ox" {
-		cmdPath = cmd.Parent().Name() + " " + cmdPath
-	}
-
 	// extract error code if available
 	errorCode := "ERR_UNKNOWN"
 	if err != nil {
@@ -296,7 +391,7 @@ func (c *Context) TrackCommandError(cmd *cobra.Command, err error) {
 		errorCode = errStr
 	}
 
-	c.TelemetryClient.TrackCommand(cmdPath, duration, false, errorCode)
+	c.TelemetryClient.TrackCommand(c.CommandPath(cmd), duration, false, errorCode)
 }
 
 // Shutdown performs cleanup operations.

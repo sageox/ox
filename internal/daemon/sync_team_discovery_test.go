@@ -409,7 +409,7 @@ func TestTeamSync_PropagatesSetupFailure(t *testing.T) {
 // TestTeamSync_CorruptRepoReportedAsError verifies that when a team context repo
 // is corrupt and the daemon moves it aside for re-clone, the sync is reported as
 // an error rather than "synced". The local path is gone after the move, so
-// reporting success would let targeted sync / distill proceed against a team
+// reporting success would let targeted sync proceed against a team
 // context that is no longer present.
 func TestTeamSync_CorruptRepoReportedAsError(t *testing.T) {
 	if testing.Short() {
@@ -619,10 +619,10 @@ func TestDiscoverTeams_RespectsDedup(t *testing.T) {
 	})
 
 	// first call should run (sets lastTeamDiscovery)
-	scheduler.discoverTeams()
+	scheduler.discoverTeams(context.Background())
 
 	// second immediate call should be deduped (no-op)
-	scheduler.discoverTeams()
+	scheduler.discoverTeams(context.Background())
 
 	// verify lastTeamDiscovery was set
 	scheduler.mu.Lock()
@@ -641,7 +641,7 @@ func TestDiscoverTeams_SkipsWithNoCredentials(t *testing.T) {
 	scheduler := newTestScheduler(projectDir)
 
 	// call without any credentials file — should return without error
-	scheduler.discoverTeams()
+	scheduler.discoverTeams(context.Background())
 
 	scheduler.mu.Lock()
 	assert.False(t, scheduler.lastTeamDiscovery.IsZero(), "lastTeamDiscovery should still be stamped")

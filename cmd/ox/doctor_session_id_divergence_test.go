@@ -368,9 +368,9 @@ func TestScanSessionIDDivergence_DehydratedRawSkipped(t *testing.T) {
 	dir := filepath.Join(sessionsDir, "dehydrated")
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	writeTestSessionMeta(t, sessionsDir, "dehydrated", sessionid.GenerateSessionID())
-	require.NoError(t, lfs.WritePointerFile(filepath.Join(dir, "raw.jsonl"), lfs.FileRef{
+	require.NoError(t, lfs.WritePointerFile(filepath.Join(dir, "raw.jsonl"), lfs.AssertUploaded(lfs.FileRef{
 		OID: "sha256:" + strings.Repeat("a", 64), Size: 4096,
-	}))
+	})))
 
 	result, err := scanSessionIDDivergence(sessionsDir)
 	require.NoError(t, err)

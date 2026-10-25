@@ -3,6 +3,8 @@ package pipeline
 import (
 	"io/fs"
 	"os"
+
+	"github.com/sageox/ox/internal/fileutil"
 )
 
 // FileSystem abstracts file operations for testability.
@@ -24,7 +26,7 @@ func (OSFileSystem) ReadFile(path string) ([]byte, error) {
 }
 
 func (OSFileSystem) WriteFile(path string, data []byte, perm os.FileMode) error {
-	return os.WriteFile(path, data, perm)
+	return fileutil.AtomicWriteBytes(path, data, perm)
 }
 
 func (OSFileSystem) MkdirAll(path string, perm os.FileMode) error {

@@ -176,9 +176,17 @@ func TestPrefilter_ManyPromptsEchoFirst(t *testing.T) {
 // (nil, false). The empty case is handled by the caller (it has its
 // own existing path); we don't claim it.
 func TestPrefilter_EmptySession(t *testing.T) {
-	resp, skip := MaybeBuildSkipSummary(nil)
-	if skip || resp != nil {
-		t.Errorf("expected (nil, false) for empty session, got resp=%+v skip=%v", resp, skip)
+	// Zero entries is the thinnest session there is and takes the same stub.
+	// Failure prevented (2026-10-08): the prefilter returned "not our case"
+	// for zero entries, BuildPrompt sent the LLM a prompt with no transcript,
+	// the LLM replied "I don't see a session transcript in your message", and
+	// every anti-entropy pass repeated the paid call and wrote a fallback stub.
+	resp, ok := MaybeBuildSkipSummary(nil)
+	if !ok || resp == nil {
+		t.Fatalf("zero entries must be handled by the prefilter, got ok=%v resp=%v", ok, resp)
+	}
+	if resp.Title != "Brief session" || resp.QualityCategory != QualityCategorySkip {
+		t.Fatalf("unexpected stub: %+v", resp)
 	}
 }
 

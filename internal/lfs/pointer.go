@@ -1,12 +1,16 @@
 package lfs
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
+
+	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/lfs/pointer"
 )
 
 // pointerVersion is the Git LFS pointer spec version string.
@@ -30,40 +34,7 @@ func FormatPointer(oid string, size int64) string {
 // are in alphabetical order. Unknown keys (e.g. "ext-0-*") are silently
 // ignored, allowing forward compatibility with spec extensions.
 func ParsePointer(content string) (oid string, size int64, err error) {
-	lines := strings.Split(strings.TrimSpace(content), "\n")
-
-	if len(lines) < 3 {
-		return "", 0, fmt.Errorf("not an LFS pointer: expected at least 3 lines, got %d", len(lines))
-	}
-
-	if !strings.HasPrefix(lines[0], "version ") || !strings.Contains(lines[0], "git-lfs") {
-		return "", 0, fmt.Errorf("not an LFS pointer: missing version line")
-	}
-
-	for _, line := range lines[1:] {
-		switch {
-		case strings.HasPrefix(line, "oid "):
-			oid = strings.TrimPrefix(line, "oid ")
-		case strings.HasPrefix(line, "size "):
-			if _, err := fmt.Sscanf(line, "size %d", &size); err != nil {
-				return "", 0, fmt.Errorf("parse size: %w", err)
-			}
-		}
-	}
-
-	if oid == "" {
-		return "", 0, fmt.Errorf("not an LFS pointer: missing oid")
-	}
-	if size <= 0 {
-		return "", 0, fmt.Errorf("not an LFS pointer: missing or invalid size")
-	}
-
-	maxSize := MaxObjectSize()
-	if size > maxSize {
-		return "", 0, fmt.Errorf("LFS object size %d exceeds maximum %d (set OX_LFS_MAX_OBJECT_SIZE to override)", size, maxSize)
-	}
-
-	return oid, size, nil
+	return pointer.Parse(content)
 }
 
 // NestedPointer reports whether content is a valid LFS pointer stored as the
@@ -95,14 +66,27 @@ func NestedPointer(outer FileRef, content []byte) (FileRef, bool) {
 // auto-hydrate these files — hydration is handled by our own download path.
 
 // WritePointerFile writes a standard LFS pointer file at path.
-// Refuses to replace real content that does not match ref.OID — see
-// guardPointerOverwrite.
-func WritePointerFile(path string, ref FileRef) error {
+//
+// It takes an UploadedRef, not a bare FileRef: a pointer may only be written for
+// a blob whose upload is proven (see uploaded.go). This makes GH #810 — a
+// pointer minted for content that was never uploaded — a compile error.
+//
+// Refuses to replace real content that does not match the ref OID — see
+// guardPointerOverwrite. Replacement is atomic and preserves an existing
+// file's permissions; new pointer files are owner-only.
+func WritePointerFile(path string, uploaded UploadedRef) error {
+	ref := uploaded.ref
 	if err := guardPointerOverwrite(path, ref); err != nil {
 		return err
 	}
+	perm := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		perm = info.Mode().Perm()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	content := FormatPointer(ref.OID, ref.Size)
-	return os.WriteFile(path, []byte(content), 0644)
+	return fileutil.AtomicWriteBytes(path, []byte(content), perm)
 }
 
 // guardPointerOverwrite refuses to replace real on-disk content with a pointer
@@ -121,7 +105,10 @@ func WritePointerFile(path string, ref FileRef) error {
 // bytes. Refusing here converts unrecoverable data loss into a loud error.
 func guardPointerOverwrite(path string, ref FileRef) error {
 	existing, err := os.ReadFile(path)
-	if err != nil || len(existing) == 0 {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read pointer destination: %w", err)
+	}
+	if len(existing) == 0 {
 		return nil // nothing on disk to lose
 	}
 	if _, _, perr := ParsePointer(string(existing)); perr == nil {
@@ -147,23 +134,94 @@ func guardPointerOverwrite(path string, ref FileRef) error {
 // are skipped — writing a pointer file there would clobber the real content
 // with empty bytes. Legacy entries (no Storage field) are treated as LFS
 // per FileRef.EffectiveStorage().
-func WritePointerFiles(dir string, files map[string]FileRef) ([]string, error) {
+// On failure, restore the batch's original bytes, modes, and absent files so
+// earlier rewrites cannot be swept into an unrelated commit or autostash.
+// If restoration itself fails, return those paths and include the errors.
+func WritePointerFiles(dir string, files map[string]UploadedRef) (paths []string, err error) {
 	if len(files) == 0 {
 		return nil, nil
 	}
 
-	var paths []string
-	for name, ref := range files {
-		if !ref.IsLFS() {
+	type originalFile struct {
+		path    string
+		content []byte
+		pointer []byte
+		mode    os.FileMode
+		exists  bool
+	}
+	var originals []originalFile
+	defer func() {
+		if err == nil {
+			return
+		}
+		paths = nil
+		for i := len(originals) - 1; i >= 0; i-- {
+			original := originals[i]
+			current, readErr := os.ReadFile(original.path)
+			if errors.Is(readErr, os.ErrNotExist) && !original.exists {
+				continue // already restored to its original absence
+			}
+			var restoreErr error
+			switch {
+			case readErr != nil:
+				restoreErr = readErr
+			case !bytes.Equal(current, original.pointer):
+				// Never overwrite a later writer's content.
+				restoreErr = fmt.Errorf("destination changed during pointer preparation")
+			case original.exists:
+				restoreErr = fileutil.AtomicWriteBytes(original.path, original.content, original.mode)
+			default:
+				restoreErr = os.Remove(original.path)
+				if errors.Is(restoreErr, os.ErrNotExist) {
+					restoreErr = nil
+				}
+			}
+			if restoreErr != nil {
+				paths = append(paths, original.path)
+				err = errors.Join(err, fmt.Errorf("restore %s: %w", original.path, restoreErr))
+			}
+		}
+		sort.Strings(paths)
+	}()
+
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		uploaded := files[name]
+		if !uploaded.ref.IsLFS() {
 			continue // Storage=git: real content stays in place
 		}
 		if err := ValidateRelativePath(name); err != nil {
 			return paths, fmt.Errorf("unsafe pointer filename: %w", err)
 		}
 		p := filepath.Join(dir, name)
-		if err := WritePointerFile(p, ref); err != nil {
+		original := originalFile{path: p, pointer: []byte(FormatPointer(uploaded.ref.OID, uploaded.ref.Size))}
+		info, statErr := os.Lstat(p)
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return paths, fmt.Errorf("inspect pointer destination %s: %w", name, statErr)
+		}
+		if info != nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				info, statErr = os.Stat(p)
+				if statErr != nil {
+					return paths, fmt.Errorf("inspect pointer target %s: %w", name, statErr)
+				}
+			}
+			content, readErr := os.ReadFile(p)
+			if readErr != nil {
+				return paths, fmt.Errorf("read pointer destination %s: %w", name, readErr)
+			}
+			original.content, original.mode, original.exists = content, info.Mode().Perm(), true
+		}
+		if err := WritePointerFile(p, uploaded); err != nil {
 			return paths, fmt.Errorf("write pointer %s: %w", name, err)
 		}
+		// A failed atomic write leaves this destination untouched. Only the
+		// replacements that succeeded belong to this batch's rollback.
+		originals = append(originals, original)
 		paths = append(paths, p)
 	}
 
@@ -177,21 +235,11 @@ func WritePointerFiles(dir string, files map[string]FileRef) ([]string, error) {
 // for long OIDs while skipping content files without reading them.
 const maxPointerSize = 200
 
-// DefaultMaxObjectSize is the upper bound for LFS objects we accept. Prevents
-// malicious pointers from triggering unbounded disk writes. Override
-// with OX_LFS_MAX_OBJECT_SIZE env var for legitimate large files.
-const DefaultMaxObjectSize int64 = 5 * 1024 * 1024 * 1024 // 5 GiB
+// DefaultMaxObjectSize is the default accepted LFS object size limit.
+const DefaultMaxObjectSize = pointer.DefaultMaxObjectSize
 
 // MaxObjectSize returns the configured maximum LFS object size.
-// Reads OX_LFS_MAX_OBJECT_SIZE env var, falling back to DefaultMaxObjectSize.
-func MaxObjectSize() int64 {
-	if v := os.Getenv("OX_LFS_MAX_OBJECT_SIZE"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			return n
-		}
-	}
-	return DefaultMaxObjectSize
-}
+func MaxObjectSize() int64 { return pointer.MaxObjectSize() }
 
 // IsPointerFile reports whether the file at path is an LFS pointer.
 // Returns false for missing files, content files, or read errors.
@@ -208,6 +256,24 @@ func IsPointerFile(path string) bool {
 	}
 	_, _, err = ParsePointer(string(data))
 	return err == nil
+}
+
+// isVersionLine reports whether line is an LFS pointer's version line, as
+// ParsePointer reads one: a line split on LF may still end in CR.
+func isVersionLine(line string) bool {
+	return pointer.IsVersionLine(line)
+}
+
+// pointerShaped reports whether content has the shape of an LFS pointer: a
+// version line first, in under the 1024 bytes the spec requires a pointer to
+// be. Whether it parses is not asked. A pointer ParsePointer refuses, such as
+// one naming an object above MaxObjectSize, is still no file's content.
+func pointerShaped(content []byte) bool {
+	if len(content) >= 1024 {
+		return false
+	}
+	first, _, _ := strings.Cut(strings.TrimSpace(string(content)), "\n")
+	return isVersionLine(first)
 }
 
 // ReadPointerFile reads and parses an LFS pointer file, returning the FileRef.

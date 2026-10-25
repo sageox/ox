@@ -1,0 +1,79 @@
+{
+  "schema_version": "1.0",
+  "source_run_id": "bare-rule",
+  "producer": {
+    "name": "sageox-attest",
+    "version": "0.1.0"
+  },
+  "source": {
+    "git": {
+      "branch": null,
+      "commit_sha": null,
+      "dirty": null
+    }
+  },
+  "timing": {
+    "started_at": "2026-09-10T20:00:00Z",
+    "finished_at": "2026-09-10T20:00:01Z",
+    "duration_ms": 1000
+  },
+  "corpus": {
+    "key": "bare",
+    "capabilities": [
+      {
+        "key": "bare",
+        "title": "Bare",
+        "tags": [],
+        "source": "declared",
+        "features": [
+          {
+            "path": "../secret.feature",
+            "title": "Bare feature",
+            "tags": [],
+            "scenarios": [
+              {
+                "key": "0b3ed52d223ef0f66170cf23d645eae636bdf74b56a5f01059d0471d43a2e0ef",
+                "title": "Inside",
+                "tags": [],
+                "kind": "scenario",
+                "examples": []
+              }
+            ],
+            "rules": [
+              {
+                "title": "",
+                "tags": [],
+                "scenarios": [
+                  {
+                    "key": "0e001f7de74475242a3cbda6f79330f8682e9677d540f1c52bfe48fc787cffd4",
+                    "title": "Inside",
+                    "tags": [],
+                    "kind": "scenario",
+                    "examples": []
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "outcomes": [
+    {
+      "instance": {
+        "scenario_key": "0b3ed52d223ef0f66170cf23d645eae636bdf74b56a5f01059d0471d43a2e0ef"
+      },
+      "status": "passed",
+      "duration_ms": 500
+    },
+    {
+      "instance": {
+        "scenario_key": "0e001f7de74475242a3cbda6f79330f8682e9677d540f1c52bfe48fc787cffd4"
+      },
+      "status": "passed",
+      "duration_ms": 500
+    }
+  ],
+  "extensions": {}
+}

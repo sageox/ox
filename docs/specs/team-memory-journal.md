@@ -1,6 +1,8 @@
 # `ox distill history` — Team Memory Journal
 
-Status: spec
+> **Superseded — 2026-09-09:** `ox distill` and its entire `history` command tree have been removed. This document records a historical proposal, including unshipped `ox journal` commands; do not use it as current CLI guidance. See the [generated CLI reference](../reference/index.mdx) for supported commands.
+
+Status: superseded
 Owner: agent-ux
 Supersedes (in spirit): the `ox distill` pipeline shape, not its on-disk artifacts.
 

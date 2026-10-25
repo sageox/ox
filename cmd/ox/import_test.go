@@ -75,9 +75,9 @@ func TestFindExistingDocByOID(t *testing.T) {
 		data, _ := json.Marshal(meta)
 		require.NoError(t, os.WriteFile(filepath.Join(docDir, "metadata.json"), data, 0o644))
 
-		docID, found := findExistingDocByOID(dir, "sha256:deadbeef")
+		metaPath, found := findExistingDocByOID(dir, "sha256:deadbeef")
 		assert.True(t, found)
-		assert.Equal(t, "q1-report", docID)
+		assert.Equal(t, filepath.Join(docDir, "metadata.json"), metaPath)
 	})
 
 	t.Run("not found", func(t *testing.T) {

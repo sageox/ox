@@ -53,7 +53,7 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 		switch {
 		case err == nil && strings.Contains(string(data), ompPrimeMarkerStart):
 		case err == nil, errors.Is(err, os.ErrNotExist):
-			detail := ".omp/AGENTS.md does not contain the OMP-specific ox prime marker."
+			detail := ".omp/AGENTS.md does not contain the OMP-specific ox agent prime marker."
 			if err != nil {
 				detail = ".omp/AGENTS.md not found at " + agentsPath + "."
 			}

@@ -2,6 +2,7 @@ package session
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -156,15 +157,56 @@ func TestGenerateEntryID_Format(t *testing.T) {
 	}
 }
 
-// TestGenerateEntryID_Uniqueness verifies no collisions in a realistic batch.
+// TestGenerateEntryID_Uniqueness verifies the generator is drawing from the full
+// 62^5 space rather than a broken or collapsed one.
+//
 // Failure prevented: broken randomness producing duplicate IDs within a session.
+//
+// It deliberately does NOT demand zero collisions. With 916M possible IDs, the
+// birthday probability of at least one collision in 1000 draws is ~0.055% — so a
+// zero-collision assertion fails roughly one CI run in 1800 for a generator that
+// is working perfectly, which is what it did. Two or more collisions in the same
+// batch is ~1 in 7 million, so that threshold still catches genuinely broken
+// randomness (a stuck RNG or a collapsed alphabet collides constantly) without
+// failing on correct behavior.
 func TestGenerateEntryID_Uniqueness(t *testing.T) {
-	seen := make(map[string]bool, 1000)
-	for i := 0; i < 1000; i++ {
+	const draws = 1000
+	seen := make(map[string]bool, draws)
+	collisions := 0
+	for i := 0; i < draws; i++ {
 		eid := GenerateEntryID()
-		require.False(t, seen[eid], "duplicate entry ID %q at iteration %d", eid, i)
+		if seen[eid] {
+			collisions++
+		}
 		seen[eid] = true
 	}
+	require.LessOrEqual(t, collisions, 1,
+		"%d duplicate IDs in %d draws: randomness is broken, not merely unlucky", collisions, draws)
+}
+
+// TestGenerateEntryID_Unbiased catches the modulo bias the generator used to have.
+//
+// `rand byte % 62` over-represents the first 8 characters of the alphabet by
+// ~1.6%. Failure prevented: a silently shrunken ID space and a raised collision
+// rate. The bound is loose enough never to flake but far tighter than the ~1.29x
+// ratio a biased generator produces at this sample size.
+func TestGenerateEntryID_Unbiased(t *testing.T) {
+	const draws = 20000
+	biased, rest := 0, 0
+	for i := 0; i < draws; i++ {
+		for _, c := range GenerateEntryID() {
+			if strings.IndexRune(entryIDCharset, c) < 8 {
+				biased++
+			} else {
+				rest++
+			}
+		}
+	}
+	// 8 of 62 characters: expected share is 8/62 ~= 0.129.
+	share := float64(biased) / float64(biased+rest)
+	require.InDelta(t, 8.0/62.0, share, 0.015,
+		"first 8 charset characters appear %.4f of the time, expected ~%.4f: modulo bias is back",
+		share, 8.0/62.0)
 }
 
 // TestExtractEntryID verifies extraction from entry maps.

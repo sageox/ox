@@ -326,9 +326,18 @@ func checkSyncStatus(path string, status *Status) {
 	if age, ok := gitutil.FetchHeadAge(path); ok && age < gitutil.MinFetchHeadAge {
 		// use cached state — daemon keeps ledger current via its sync loop
 	} else {
-		// fetch with timeout to avoid hanging on network issues
+		// fetch with timeout to avoid hanging on network issues. Locked
+		// (ADR-030 D1): this is the CLI side of the FETCH_HEAD race — `ox
+		// status` fetching concurrently with the daemon's own pull cycle
+		// corrupted FETCH_HEAD in the 2026-09-02 incident. The existing
+		// 10s ctx already bounds the wait if the daemon holds the lock for
+		// a longer pull; on timeout we just fall through to cached state,
+		// same as a fetch failure always did.
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, _ = gitutil.RunGit(ctx, path, "fetch", "--quiet")
+		_ = gitutil.WithRepoLock(ctx, path, func() error {
+			_, err := gitutil.RunGit(ctx, path, "fetch", "--quiet")
+			return err
+		})
 		cancel()
 	}
 
@@ -495,7 +504,7 @@ func CloneWithSparseCheckout(path, remoteURL string) error {
 // data/plans is deliberately unwindowed. Plans are durable artifacts every
 // local read path needs (`ox plan list/view/render/backfill-titles`), and they
 // are tiny: plan.md + annotations.json + events.jsonl, with the only large
-// member (plan.html) LFS-gated above 256 KB. Omitting it made plans
+// member (plan.html) LFS-gated above 1 MiB. Omitting it made plans
 // effectively WRITE-ONLY — `ox plan save` wrote and pushed a plan directory,
 // then the sync scheduler's ~60s ConfigureSparseCheckout refresh deleted it
 // from the working tree again, leaving ledgers with dozens of plans on
@@ -509,19 +518,40 @@ var baseSparseDirs = []string{
 	"data/plans",
 }
 
+// sparseCheckoutDirs is the canonical ledger coverage, including activity windows.
+func sparseCheckoutDirs() []string {
+	dirs := append([]string{}, baseSparseDirs...)
+	dirs = append(dirs, ComputeGitHubDataPaths(DefaultGitHubDataWindowDays)...)
+	return append(dirs, ComputeMurmurDataPaths(DefaultMurmurWindowHours)...)
+}
+
 // ConfigureSparseCheckout sets up sparse checkout for the ledger.
 // Includes: baseSparseDirs, a sliding window of recent GitHub data,
 // and a rolling window of recent murmur data (hourly granularity).
 // Excludes: assets/ (large files), older data outside the windows.
 //
 // Called during initial clone (CloneWithSparseCheckout) and by EnableSparseCheckout.
+// The daemon and doctor run it on a live clone through RefreshSparseCheckout.
 // Future: daemon GC reclone will also call this to reconfigure the sliding window
 // on fresh clones, pruning old data/github/ directories outside the 30-day window.
+//
+// It also turns off symlink checkout first (DisableSymlinks), so every path it
+// materializes, and every later pull, arrives as a plain file.
 //
 // TODO: consolidate with team context sparse checkout (gitserver). Both use similar
 // clone/sparse/pull plumbing but different implementations. See team context's
 // ComputeSparseSet() and manifest-driven approach vs this static list + sliding window.
 func ConfigureSparseCheckout(path string) error {
+	return configureSparseCheckout(context.Background(), path)
+}
+
+// configureSparseCheckout is ConfigureSparseCheckout with ctx bounding the
+// git commands that can fetch.
+func configureSparseCheckout(ctx context.Context, path string) error {
+	if err := DisableSymlinks(path); err != nil {
+		return err
+	}
+
 	// Only run sparse-checkout init on repos that don't have it yet.
 	// Re-running "init --cone" is destructive: it reapplies the cone rules,
 	// which deletes untracked files in directories outside the cone (e.g.
@@ -531,23 +561,13 @@ func ConfigureSparseCheckout(path string) error {
 	// is sufficient for that.
 	checkCmd := exec.Command("git", "-C", path, "config", "--type=bool", "--get", "core.sparseCheckout")
 	if out, err := checkCmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "true" {
-		initCmd := exec.Command("git", "-C", path, "sparse-checkout", "init", "--cone")
-		if output, err := initCmd.CombinedOutput(); err != nil {
+		if output, err := gitutil.RunGit(ctx, path, append(gitutil.GitHTTPTimeoutFlags(), "sparse-checkout", "init", "--cone")...); err != nil {
 			return fmt.Errorf("sparse-checkout init: %w: %s", err, output)
 		}
 	}
 
 	// base directories always included
-	dirs := append([]string{}, baseSparseDirs...)
-
-	// add sliding window of recent GitHub data (last N days, default 30)
-	// keeps local disk usage small; older data lives in git history
-	dirs = append(dirs, ComputeGitHubDataPaths(DefaultGitHubDataWindowDays)...)
-
-	// add rolling window of recent murmur data (last N hours, default 12)
-	// hourly granularity keeps the checkout tight while ensuring the daemon
-	// can read murmur files after git pull
-	dirs = append(dirs, ComputeMurmurDataPaths(DefaultMurmurWindowHours)...)
+	dirs := sparseCheckoutDirs()
 
 	// protect staged/dirty files: "sparse-checkout set" removes tracked files
 	// outside the cone from the working tree. If the CLI has staged files in a
@@ -562,10 +582,12 @@ func ConfigureSparseCheckout(path string) error {
 		return err
 	}
 
-	// set directories to include (excludes everything else like assets/)
-	args := append([]string{"-C", path, "sparse-checkout", "set"}, dirs...)
-	setCmd := exec.Command("git", args...)
-	if output, err := setCmd.CombinedOutput(); err != nil {
+	// set directories to include (excludes everything else like assets/).
+	// In a blobless clone, checking out the paths a cone adds fetches their
+	// blobs, and RefreshSparseCheckout holds the repo lock for this, so a
+	// stalled fetch must fail (GitHTTPTimeoutFlags) rather than hold it.
+	args := append(gitutil.GitHTTPTimeoutFlags(), "sparse-checkout", "set")
+	if output, err := gitutil.RunGit(ctx, path, append(args, dirs...)...); err != nil {
 		return fmt.Errorf("sparse-checkout set: %w: %s", err, output)
 	}
 
@@ -576,6 +598,93 @@ func ConfigureSparseCheckout(path string) error {
 	}
 
 	return nil
+}
+
+// RefreshSparseCheckout runs ConfigureSparseCheckout under gitutil.WithRepoLock,
+// which CommitLedgerSnapshot callers hold from their first git add through the
+// commit. `git sparse-checkout` rewrites the index, so a refresh outside the
+// lock can fail such a commit on index.lock and leave its files uncommitted.
+func RefreshSparseCheckout(ctx context.Context, path string) error {
+	return gitutil.WithRepoLock(ctx, path, func() error {
+		// its own bound, not ctx's: the daemon gives a pull cycle 60s, which
+		// would end a first fetch of a large cone on every cycle
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sparseRefreshTimeout)
+		defer cancel()
+		return configureSparseCheckout(ctx, path)
+	})
+}
+
+// sparseRefreshTimeout ends a refresh whose fetch never finishes but never
+// stalls either, which GitHTTPTimeoutFlags cannot catch: every Ledger write
+// waits on the repo lock the refresh holds. A variable so a test can shorten
+// it.
+var sparseRefreshTimeout = 10 * time.Minute
+
+// DisableSymlinks saves core.symlinks=false so git checks Ledger symlinks out
+// as plain files holding the link text. Teammates write this repo, and ox's
+// writes into it (plan saves, review records, AGENTS.md) follow a symlink at
+// the path they write, so a committed link could aim them outside the Ledger.
+// ox never writes a symlink here itself.
+//
+// Links an older clone already checked out become files holding their
+// current link text, so an unchanged one reads as clean and a local retarget
+// stays an uncommitted change. The setting is saved last: a failed run
+// repeats on the next call.
+func DisableSymlinks(path string) error {
+	// --local: a global or system core.symlinks=false says nothing about links
+	// this clone already checked out, and can be removed later.
+	if out, _ := exec.Command("git", "-C", path, "config", "--local", "--type=bool", "--get", "core.symlinks").Output(); strings.TrimSpace(string(out)) == "false" {
+		return nil
+	}
+	tracked, err := exec.Command("git", "-C", path, "ls-files", "-s", "-z").Output()
+	if err != nil {
+		return fmt.Errorf("list tracked files: %w", err)
+	}
+	for _, rec := range strings.Split(string(tracked), "\x00") {
+		meta, rel, ok := strings.Cut(rec, "\t") // "<mode> <object> <stage>\t<path>"
+		if !ok || !strings.HasPrefix(meta, "120000 ") {
+			continue
+		}
+		full := filepath.Join(path, filepath.FromSlash(rel))
+		info, err := os.Lstat(full)
+		if errors.Is(err, os.ErrNotExist) || err == nil && info.Mode()&os.ModeSymlink == 0 {
+			continue // outside the sparse cone, deleted, or already a plain file
+		}
+		// A path Lstat could not inspect still goes to Readlink, which either
+		// converts it or fails the run. Skipping it could save the setting with
+		// a live link that no later call would look at again.
+		target, err := os.Readlink(full)
+		if err != nil {
+			return fmt.Errorf("read symlink %s: %w", rel, err)
+		}
+		if err := replaceLinkWithFile(full, target); err != nil {
+			return fmt.Errorf("convert symlink %s: %w", rel, err)
+		}
+	}
+	if output, err := exec.Command("git", "-C", path, "config", "core.symlinks", "false").CombinedOutput(); err != nil {
+		return fmt.Errorf("config core.symlinks: %w: %s", err, output)
+	}
+	return nil
+}
+
+// replaceLinkWithFile swaps the symlink at full for a file holding text.
+// rename(2) replaces the link itself; it never writes through it.
+func replaceLinkWithFile(full, text string) error {
+	tmp, err := os.CreateTemp(filepath.Dir(full), ".ox-symlink-*")
+	if err != nil {
+		return err
+	}
+	_, err = tmp.WriteString(text)
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), full)
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+	}
+	return err
 }
 
 // validateSparseCheckoutDirs returns an error if required directories are missing

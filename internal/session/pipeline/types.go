@@ -19,6 +19,8 @@ const (
 	LedgerFileSessionMD    = "session.md"
 	LedgerFilePlan         = "plan.md"             // may contain multiple plans as separate Markdown sections
 	LedgerFileContextTrace = "context-trace.jsonl" // context influence trace (what context was provided and what influenced decisions)
+	LedgerFileTraceSpans   = "trace-spans.jsonl.gz"
+	LedgerFileTraceEvents  = "trace-events.jsonl.gz"
 )
 
 // LedgerContentFiles is the canonical ordered list of session artifact
@@ -40,6 +42,14 @@ var LedgerContentFiles = []string{
 	LedgerFileSessionMD,
 	LedgerFilePlan,
 	LedgerFileContextTrace,
+	LedgerFileTraceSpans,
+	LedgerFileTraceEvents,
+}
+
+// IsTraceFile identifies cache-only artifacts. They must be uploaded before a
+// pointer is written to the Ledger; generic content-copy paths must skip them.
+func IsTraceFile(name string) bool {
+	return name == LedgerFileTraceSpans || name == LedgerFileTraceEvents
 }
 
 // Result contains outcomes from session processing.
@@ -60,6 +70,7 @@ type Result struct {
 	SessionName      string   // ledger session folder name (e.g. 2026-02-06T14-32-ryan-Ox7f3a)
 	LedgerSessionDir string   // full path to session dir in ledger (empty if upload failed)
 	UploadWarning    string   // non-empty when ledger upload failed (explains recovery)
+	Held             bool     // held on this machine (session_publishing: manual): never summarized, uploaded, or deleted automatically
 	DataWarnings     []string // data quality warnings from validation (reported to agent)
 	PRLinkMisses     []string // server-reported repair tasks: linked PRs missing the SageOx-Session trailer, pre-formatted for the agent
 	UploadMs         int64    // time spent on LFS upload + git push (ms)
@@ -113,11 +124,21 @@ type StopOutput struct {
 	AgentVersion     string           `json:"agent_version,omitempty"`
 	LedgerSessionDir string           `json:"ledger_session_dir,omitempty"` // path to session dir in ledger
 	UploadWarning    string           `json:"upload_warning,omitempty"`     // set when ledger upload failed
+	Held             bool             `json:"held,omitempty"`               // held on this machine until 'ox session upload'
 	DataWarnings     []string         `json:"data_warnings,omitempty"`      // data quality warnings from validation
 	PRLinkMisses     []string         `json:"pr_link_misses,omitempty"`     // repair tasks: linked PRs missing the SageOx-Session trailer
 	Guidance         string           `json:"guidance,omitempty"`           // behavioral guidance for the agent
 	TotalMs          int64            `json:"total_ms,omitempty"`           // wall clock for entire session stop
 	Timing           map[string]int64 `json:"timing,omitempty"`             // per-phase breakdown (ms)
+
+	// Where the session landed — without these, a JSON consumer has no way
+	// to learn which team/repo a session was recorded under, or its durable
+	// view URL. SessionURL is empty when attribution is off or the session's
+	// server-side registration is still pending (see sessionLinkOutputs).
+	SessionURL string `json:"session_url,omitempty"`
+	TeamID     string `json:"team_id,omitempty"`
+	TeamName   string `json:"team_name,omitempty"`
+	RepoID     string `json:"repo_id,omitempty"`
 
 	// Terminal-stop metadata. Populated only when the session was
 	// finalized by the adapter terminal-error path (rate limit etc.),

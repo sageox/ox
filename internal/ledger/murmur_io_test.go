@@ -354,3 +354,29 @@ func TestWriteMurmur_MultipleInSameHour(t *testing.T) {
 		t.Errorf("expected 3 murmurs, got %d", len(murmurs))
 	}
 }
+
+func TestReadMurmursInWindowStrict_ReportsCorruptFile(t *testing.T) {
+	baseDir := t.TempDir()
+	now := time.Now().UTC()
+	dir := filepath.Join(baseDir, MurmurDateHourDir(now))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteMurmur(baseDir, MurmurFile{ID: "a-valid", Timestamp: now, Content: "valid"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "z-broken.json"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ReadMurmursInWindow(baseDir, 1); err != nil {
+		t.Fatalf("default read must remain fail-open: %v", err)
+	}
+	murmurs, err := ReadMurmursInWindowStrict(baseDir, 1)
+	if err == nil {
+		t.Fatal("strict read must report corrupt source data")
+	}
+	if len(murmurs) != 1 || murmurs[0].ID != "a-valid" {
+		t.Fatalf("strict read must preserve valid partial murmurs: %+v", murmurs)
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/sageox/ox/internal/api"
@@ -29,42 +30,113 @@ func notifySessionStartedAsync(projectRoot string, state *session.RecordingState
 	if state == nil || state.SessionID == "" {
 		return
 	}
-	attr := loadResolvedAttribution()
+	attr := loadResolvedAttributionFor(projectRoot)
 	if attr.Session == "" {
 		return
 	}
-	err := runSessionSignal("started", func(client *api.RepoClient, repoID string) error {
-		return client.NotifySessionStarted(api.SessionStartedNotification{
-			SessionID:   state.SessionID,
-			RepoID:      repoID,
-			SessionName: session.GetSessionName(state.SessionPath),
-			AgentID:     state.AgentID,
-			AgentType:   state.AgentType,
-			Branch:      state.Branch,
-			StartedAt:   state.StartedAt.Format(time.RFC3339),
-		})
-	}, projectRoot)
-	if err != nil {
-		state.LifecycleRegistrationState = "pending"
-		state.LifecycleRegistrationError = err.Error()
-		slog.Debug("session registration pending", "session_id", state.SessionID, "error", err)
-	} else {
-		state.LifecycleRegistrationState = "confirmed"
-		state.LifecycleRegistrationError = ""
+	notifySessionStarted(projectRoot, state, func(notification api.SessionStartedNotification) error {
+		return runSessionSignal("started", func(client *api.RepoClient, repoID string) error {
+			notification.RepoID = repoID
+			return client.NotifySessionStarted(notification)
+		}, projectRoot)
+	})
+}
+
+// notifySessionStarted contains the state transition around the network request.
+// The injected sender keeps the persistence behavior testable without auth or a
+// live server.
+func notifySessionStarted(projectRoot string, state *session.RecordingState, send func(api.SessionStartedNotification) error) {
+	if state == nil || state.SessionID == "" {
+		return
 	}
-	if saveErr := session.SaveRecordingState(projectRoot, state); saveErr != nil {
-		slog.Debug("session registration status save failed", "session_id", state.SessionID, "error", saveErr)
+
+	// Don't register a session the coworker never actually used. At recording
+	// start (and on subagent primes) there is no user turn yet — registering
+	// then is what tells the server "a session started" for the ~majority of
+	// recordings that stay header-only, inflating the team's session count with
+	// sessions that never happened. Defer: mark the state so the prime retry and
+	// the per-turn draft path re-fire this exactly once a real turn exists.
+	if !session.HasUserTurn(filepath.Join(state.SessionPath, "raw.jsonl")) {
+		persistSessionRegistrationState(state, "deferred", "")
+		return
+	}
+
+	// session_publishing: manual promises that nothing about this session
+	// reaches the cloud until the user explicitly uploads it. This POST would
+	// send session_id, repo_id, session_name, agent id/type, and the BRANCH
+	// NAME — exactly the kind of implicit publish manual mode exists to
+	// prevent. Deliberately checked AFTER the no-user-turn branch above,
+	// leaving registration state unchanged: every retry site (prime, doctor,
+	// the per-turn draft path) re-runs this same check.
+	// A saved manual choice also survives a later auto environment; only an
+	// explicit upload may publish that held recording.
+	if state.RecordedManualPublishing() || config.GetSessionPublishing(projectRoot) == config.SessionPublishingManual {
+		slog.Debug("session registration suppressed: session_publishing is manual", "session_id", state.SessionID)
+		return
+	}
+	err := send(api.SessionStartedNotification{
+		SessionID:   state.SessionID,
+		SessionName: session.GetSessionName(state.SessionPath),
+		AgentID:     state.AgentID,
+		AgentType:   state.AgentType,
+		Branch:      state.Branch,
+		StartedAt:   state.StartedAt.Format(time.RFC3339),
+	})
+	if err != nil {
+		slog.Debug("session registration pending", "session_id", state.SessionID, "error", err)
+		persistSessionRegistrationState(state, "pending", err.Error())
+	} else {
+		persistSessionRegistrationState(state, "confirmed", "")
+	}
+}
+
+// persistSessionRegistrationState merges the notification outcome into the
+// latest durable state. A network response may arrive after the recording was
+// paused, checkpointed, stopped, removed, or replaced by a new session using
+// the same agent ID, so the caller's pre-request snapshot must never be saved
+// wholesale.
+func persistSessionRegistrationState(state *session.RecordingState, status, statusErr string) {
+	// Current callers inspect this snapshot after registration, so retain the
+	// existing in-memory outcome while treating durable state as authoritative
+	// for every other field.
+	state.LifecycleRegistrationState = status
+	state.LifecycleRegistrationError = statusErr
+	persistLifecycleRegistration(state)
+}
+
+// persistLifecycleRegistration writes only the registration outcome under the
+// state lock. The state identity prevents a late network response from
+// recreating a stopped recording or updating its replacement.
+func persistLifecycleRegistration(state *session.RecordingState) {
+	err := session.UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(current *session.RecordingState) {
+		current.LifecycleRegistrationState = state.LifecycleRegistrationState
+		current.LifecycleRegistrationError = state.LifecycleRegistrationError
+	})
+	if err != nil {
+		slog.Debug("session registration status save failed", "session_id", state.SessionID, "error", err)
 	}
 }
 
 // notifySessionAbortedAsync flips a registered recording to "discarded" so
 // its /c/ page stops claiming "in progress" and the server drops pending
 // PR-link repair tasks. Same fire-and-forget contract as started.
-func notifySessionAbortedAsync(projectRoot, sessionID string) {
+// everRegistered reports whether the server was ever told this session exists.
+// Manual publishing suppresses start-registration, so a purely manual session is
+// unknown to the server and an abort signal would be the FIRST thing it hears
+// about it — a leak of exactly the kind manual mode promises to prevent.
+//
+// A session that DID register (started under auto, flipped to manual later) must
+// still be tombstoned: leaving a stale "in progress" /c/ page up, for a session
+// the user explicitly discarded, is a worse privacy outcome than the two opaque
+// ids the abort call carries.
+func notifySessionAbortedAsync(projectRoot, sessionID string, everRegistered bool) {
 	if sessionID == "" {
 		return
 	}
-	runSessionSignal("aborted", func(client *api.RepoClient, repoID string) error {
+	if !everRegistered {
+		return
+	}
+	_ = runSessionSignal("aborted", func(client *api.RepoClient, repoID string) error { // fire-and-forget
 		return client.NotifySessionAborted(api.SessionAbortedNotification{
 			SessionID: sessionID,
 			RepoID:    repoID,

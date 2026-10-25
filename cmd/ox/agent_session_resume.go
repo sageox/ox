@@ -1,13 +1,13 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session"
 )
 
@@ -54,7 +54,7 @@ func runAgentSessionResume(inst *agentinstance.Instance, _ []string) error {
 			SessionName: session.GetSessionName(state.SessionPath),
 			Status:      "not_suspended",
 			Message:     "session is not suspended; nothing to resume",
-			Guidance:    "Already recording. Pause with `ox session pause` to suspend.",
+			Guidance:    "Already recording. Pause with `ox agent session pause` to suspend.",
 		})
 	}
 
@@ -73,11 +73,12 @@ func runAgentSessionResume(inst *agentinstance.Instance, _ []string) error {
 		excluded    int
 		sessionName string
 	)
-	if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
+	if err := updateRecordingControl(projectRoot, state, session.LifecycleActionResume, func(s *session.RecordingState) {
 		resumeSeq = s.EntryCount
 		excluded = computeExcludedSinceLastPause(s.Lifecycle, resumeSeq)
 		sessionName = session.GetSessionName(s.SessionPath)
 		s.SuspendedAt = nil
+		s.RecordTraceBoundary("resume", now)
 		s.Lifecycle = append(s.Lifecycle, session.LifecycleEvent{
 			Action: session.LifecycleActionResume,
 			At:     now,
@@ -163,10 +164,5 @@ func emitResumeOutput(w io.Writer, output *sessionResumeOutput) error {
 			return nil
 		}
 	}
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
-		return fmt.Errorf("format resume JSON: %w", err)
-	}
-	fmt.Fprintln(w, string(jsonOut))
-	return nil
+	return cli.PrintJSONTo(w, output)
 }

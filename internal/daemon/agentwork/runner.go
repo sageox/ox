@@ -2,8 +2,30 @@ package agentwork
 
 import (
 	"context"
+	"strings"
 	"time"
+
+	"github.com/sageox/ox/internal/logger"
 )
+
+// failureDetailLimit bounds how much of a failed CLI's output is carried into
+// errors and logs; the CLI's own error line is short, anything longer is noise.
+const failureDetailLimit = 2048
+
+// failureDetail returns the first failureDetailLimit bytes of stderr (stdout
+// when stderr is empty), redacted. The claude CLI often reports its failure
+// (rate limit, not logged in) as one short line on stdout with an empty stderr.
+func failureDetail(stderr, stdout string) string {
+	detail := strings.TrimSpace(stderr)
+	if detail == "" {
+		detail = strings.TrimSpace(stdout)
+	}
+	detail = logger.RedactSecrets(detail)
+	if len(detail) > failureDetailLimit {
+		detail = detail[:failureDetailLimit] + "...(truncated)"
+	}
+	return detail
+}
 
 // Runner spawns and manages agent CLI processes.
 type Runner interface {
@@ -28,6 +50,14 @@ type RunRequest struct {
 	// the work item has all the information it needs to proceed without
 	// generating a prompt (e.g., upload-only session recovery).
 	SkipLLM bool
+	// Isolated runs the CLI for untrusted input, such as an imported native
+	// transcript: no tools, hooks, plugins, MCP servers, project instructions
+	// or user config, no persisted session, and recording off. A CLI too old
+	// to isolate fails the run; it is never retried with broader permissions.
+	Isolated bool
+	// IsolateIfSupported isolates the run when this CLI can, and otherwise runs
+	// it as the daemon always has, so a CLI too old to isolate keeps working.
+	IsolateIfSupported bool
 }
 
 // RunResult captures the outcome of an agent invocation.

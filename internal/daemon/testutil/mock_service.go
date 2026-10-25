@@ -39,6 +39,7 @@ type MockService struct {
 	MarkErrorsFunc        func(ids []string)
 	TriggerGCFunc         func() *daemon.TriggerGCResponse
 	TriggerGCAsyncFunc    func() *daemon.TriggerGCResponse
+	TriggerKBGCFunc       func()
 	CodeIndexFunc         func(payload daemon.CodeIndexPayload, progress *daemon.ProgressWriter) (*daemon.CodeIndexResult, error)
 	DoctorFunc            func() *daemon.DoctorResponse
 	SessionFinalizeFunc   func(payload daemon.SessionFinalizeIPCPayload)
@@ -182,6 +183,12 @@ func (m *MockService) TriggerGCAsync() *daemon.TriggerGCResponse {
 		return m.TriggerGCAsyncFunc()
 	}
 	return nil
+}
+
+func (m *MockService) TriggerKBGC() {
+	if m.TriggerKBGCFunc != nil {
+		m.TriggerKBGCFunc()
+	}
 }
 
 func (m *MockService) CodeIndex(payload daemon.CodeIndexPayload, progress *daemon.ProgressWriter) (*daemon.CodeIndexResult, error) {

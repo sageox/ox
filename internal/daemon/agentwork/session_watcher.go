@@ -2,17 +2,19 @@ package agentwork
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/session/claudesource"
 )
 
 // ErrSessionFileShape is returned when a session file is neither an absolute
@@ -46,10 +48,14 @@ type SessionWatcherManager struct {
 // activeWatcher tracks a running TailWatcher goroutine.
 type activeWatcher struct {
 	cancel      context.CancelFunc
+	done        chan struct{}
+	drain       chan struct{} // coalesced best-effort drain requests
 	sessionName string
 	adapterName string
 	sessionFile string
 	cachePath   string
+	projectRoot string
+	agentID     string
 	ledgerPath  string
 	startOffset int64 // byte offset in source file to resume from (0 for fresh start)
 	startedAt   time.Time
@@ -92,7 +98,7 @@ func (m *SessionWatcherManager) StartWatch(
 }
 
 // startWatchAt is the internal start method that accepts a starting offset.
-// offset=0 means start from current EOF (fresh start from IPC).
+// offset=0 means catch up from the beginning of the native session.
 // offset>0 means catch up from that position first (daemon restart recovery).
 func (m *SessionWatcherManager) startWatchAt(
 	sessionName, sessionFile, adapterName, ledgerPath, cachePath string, offset int64,
@@ -104,7 +110,13 @@ func (m *SessionWatcherManager) startWatchAt(
 		return fmt.Errorf("session watcher manager is stopped")
 	}
 
-	if _, ok := m.watchers[sessionName]; ok {
+	if existing, ok := m.watchers[sessionName]; ok {
+		if existing.drain != nil {
+			select {
+			case existing.drain <- struct{}{}:
+			default:
+			}
+		}
 		m.logger.Debug("session watcher already active", "session", sessionName)
 		return nil
 	}
@@ -127,11 +139,13 @@ func (m *SessionWatcherManager) startWatchAt(
 	// reads. Resolve before trusting.
 	// keep the requested path for the error message — SafeSessionFilePath
 	// returns "" on refusal, and "refusing to watch \"\"" tells nobody anything
-	safePath, err := adapters.SafeSessionFilePath(adapterName, sessionFile, m.homeDir())
-	if err != nil {
-		return fmt.Errorf("refusing to watch %q for %s: %w", sessionFile, adapterName, err)
+	if adapterName != "cursor" {
+		safePath, err := adapters.SafeSessionFilePath(adapterName, sessionFile, m.homeDir())
+		if err != nil {
+			return fmt.Errorf("refusing to watch %q for %s: %w", sessionFile, adapterName, err)
+		}
+		sessionFile = safePath
 	}
-	sessionFile = safePath
 
 	adapter, err := resolveAdapter(adapterName)
 	if err != nil {
@@ -139,14 +153,52 @@ func (m *SessionWatcherManager) startWatchAt(
 	}
 
 	rawPath := filepath.Join(cachePath, "raw.jsonl")
+	recPath := filepath.Join(cachePath, recordingMarker)
+	data, err := os.ReadFile(recPath)
+	if err != nil {
+		return fmt.Errorf("read recording state: %w", err)
+	}
+	state, err := session.ParseRecordingState(recPath, data)
+	if err != nil {
+		return fmt.Errorf("read recording state: %w", err)
+	}
+	if state.SourceRejected {
+		return fmt.Errorf("native source quarantined for manual ownership review")
+	}
+	if adapterName == "cursor" {
+		expected, err := session.ValidateCursorRecordingSource(m.homeDir(), state)
+		if err != nil {
+			return err
+		}
+		if expected != sessionFile {
+			return fmt.Errorf("invalid-source-path: Cursor watch request does not match the recording")
+		}
+	}
+	if state.StoppedAt != nil || session.HasExplicitStop(state.WorkspacePath, state.AgentID) {
+		return fmt.Errorf("session recording has stopped")
+	}
+	if state.AdapterName == "cursor" && m.cursorRecordingInactive(recPath) {
+		return fmt.Errorf("recording is inactive and awaiting Cursor finalization")
+	}
+	// Cursor counts native rows exclusively. Other adapters also allow manual
+	// batches, which increase EntryCount without moving their native cursor.
+	if state.AdapterName == "cursor" && state.EntryCount > 0 && state.SourceOffset <= state.StartOffset {
+		return fmt.Errorf("recording has acknowledged entries without a source cursor: entries=%d source_offset=%d start_offset=%d",
+			state.EntryCount, state.SourceOffset, state.StartOffset)
+	}
+	offset = max(offset, state.SourceOffset, state.StartOffset)
 
 	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // G118: cancel is stored in activeWatcher.cancel, called by StopWatch/StopAll
 	aw := &activeWatcher{
 		cancel:      cancel,
+		done:        make(chan struct{}),
+		drain:       make(chan struct{}, 1),
 		sessionName: sessionName,
 		adapterName: adapterName,
 		sessionFile: sessionFile,
 		cachePath:   cachePath,
+		projectRoot: state.WorkspacePath,
+		agentID:     state.AgentID,
 		ledgerPath:  ledgerPath,
 		startOffset: offset,
 		startedAt:   time.Now(),
@@ -168,13 +220,11 @@ func (m *SessionWatcherManager) startWatchAt(
 func (m *SessionWatcherManager) StopWatch(sessionName string) {
 	m.mu.Lock()
 	aw, ok := m.watchers[sessionName]
-	if ok {
-		delete(m.watchers, sessionName)
-	}
 	m.mu.Unlock()
 
 	if ok {
 		aw.cancel()
+		<-aw.done
 		m.logger.Info("session watcher stopped", "session", sessionName)
 	}
 }
@@ -215,7 +265,7 @@ func (m *SessionWatcherManager) ActiveSessions() []string {
 // On restart, reads the persisted SourceOffset from .recording.json so the
 // catch-up read recovers entries written while the daemon was down.
 func (m *SessionWatcherManager) DetectAndRestart(ledgerPath string) int {
-	sessionsDir := filepath.Join(ledgerPath, "sessions")
+	sessionsDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions")
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		return 0
@@ -244,19 +294,63 @@ func (m *SessionWatcherManager) DetectAndRestart(ledgerPath string) int {
 			continue
 		}
 
-		var state session.RecordingState
-		if err := json.Unmarshal(data, &state); err != nil {
+		state, err := session.ParseRecordingState(recPath, data)
+		if err != nil {
 			continue
 		}
-		if state.WatchMode != "tail" || state.StoppedAt != nil {
+		if state.WatchMode != "tail" || state.StoppedAt != nil || state.SourceRejected || session.HasExplicitStop(state.WorkspacePath, state.AgentID) {
 			continue
 		}
-		if state.SessionFile == "" || state.AdapterName == "" {
+		if state.AdapterName == "" || ((state.AdapterName == "claude-code" || state.AdapterName == "pi") && state.WorkspacePath == "") {
+			// These adapters cannot validate repository ownership without a root.
 			continue
 		}
 		// don't restart watchers for dead agents — let session_finalize handle them
 		if !state.IsAgentAlive() {
 			continue
+		}
+		if state.AdapterName == "cursor" && m.cursorRecordingInactive(recPath) {
+			continue
+		}
+		if state.SessionFile == "" {
+			if state.AdapterName == "cursor" {
+				// A pending known-zero conversation can be watched before its
+				// directory exists. The shared transaction binds it only once
+				// the exact export appears, without selecting a new EOF.
+				source, err := session.ValidateCursorRecordingSource(m.homeDir(), state)
+				if err != nil {
+					continue
+				}
+				if err := m.startWatchAt(sessionName, source, state.AdapterName, ledgerPath, filepath.Join(sessionsDir, sessionName), state.SourceOffset); err == nil {
+					started++
+				}
+				continue
+			}
+			adapter, err := resolveAdapter(state.AdapterName)
+			if err != nil {
+				continue
+			}
+			source, err := adapter.FindSessionFile(adapters.SessionLookup{
+				RepoRoot:       state.WorkspacePath,
+				AgentID:        state.AgentID,
+				AgentSessionID: state.AgentSessionID,
+				Since:          state.StartedAt.Add(-5 * time.Minute),
+			})
+			if err != nil {
+				m.logger.Debug("session source not available yet", "session", sessionName, "error", err)
+				continue
+			}
+			if _, err := adapters.SafeSessionFilePath(state.AdapterName, source, m.homeDir()); err != nil {
+				m.logger.Warn("refusing discovered session source", "session", sessionName, "error", err)
+				continue
+			}
+			if err := session.UpdateRecordingStateForAgent(state.WorkspacePath, state.AgentID, func(s *session.RecordingState) {
+				s.SessionFile = source
+			}); err != nil {
+				m.logger.Warn("failed to persist discovered session source", "session", sessionName, "error", err)
+				continue
+			}
+			state.SessionFile = source
 		}
 
 		cachePath := filepath.Join(sessionsDir, sessionName)
@@ -272,7 +366,9 @@ func (m *SessionWatcherManager) DetectAndRestart(ledgerPath string) int {
 }
 
 // Cleanup stops watchers for sessions that have been stopped, whose
-// .recording.json has been removed, or whose agent PID has died.
+// .recording.json has been removed, whose agent PID has died, or whose Cursor
+// inactivity window has elapsed. StopWatch joins the writer before returning,
+// releasing raw ownership so the finalizer can drain and settle the recording.
 func (m *SessionWatcherManager) Cleanup() {
 	m.mu.Lock()
 	var toStop []string
@@ -283,11 +379,12 @@ func (m *SessionWatcherManager) Cleanup() {
 			toStop = append(toStop, name)
 			continue
 		}
-		var state session.RecordingState
-		if err := json.Unmarshal(data, &state); err != nil {
+		state, err := session.ParseRecordingState(recPath, data)
+		if err != nil {
 			continue
 		}
-		if state.StoppedAt != nil || !state.IsAgentAlive() {
+		if state.StoppedAt != nil || state.SourceRejected || !state.IsAgentAlive() ||
+			(state.AdapterName == "cursor" && m.cursorRecordingInactive(recPath)) {
 			toStop = append(toStop, name)
 		}
 	}
@@ -296,6 +393,17 @@ func (m *SessionWatcherManager) Cleanup() {
 	for _, name := range toStop {
 		m.StopWatch(name)
 	}
+}
+
+// Use exactly the finalizer's inactivity decision. Cursor has no unique parent
+// PID, and a stale watcher must not reacquire ownership ahead of finalization.
+func (m *SessionWatcherManager) cursorRecordingInactive(recPath string) bool {
+	info, err := os.Stat(recPath)
+	if err != nil {
+		return false
+	}
+	stale, _, method := isStaleRecording(recPath, info, nil, m.logger)
+	return stale && method == "cursor_inactivity"
 }
 
 // runWatcher tails the session file and appends entries to raw.jsonl.
@@ -308,6 +416,7 @@ func (m *SessionWatcherManager) runWatcher(
 	adapter adapters.Adapter, rawPath string,
 ) {
 	defer m.wg.Done()
+	defer close(aw.done)
 	defer func() {
 		m.mu.Lock()
 		// skip cleanup if StopAll already ran (prevents re-inserting into cleared map)
@@ -319,100 +428,226 @@ func (m *SessionWatcherManager) runWatcher(
 		m.mu.Unlock()
 	}()
 
-	// Per ox-h20u: ALL raw.jsonl writes go through session.RawWriter. The
-	// writer constructs and applies the three-layer redaction stack
-	// (CommandRedactor → built-in Redactor → gitleaks extras). There is no
-	// way to call WriteEntry without redaction running first. Adapters can
-	// only emit RawEntry JSON on stdout — they have no write access to
-	// raw.jsonl.
-	rw, err := session.NewRawWriter(rawPath, "")
-	if err != nil {
-		m.logger.Error("failed to open raw.jsonl for writing",
-			"session", aw.sessionName, "path", rawPath, "error", err)
-		return
-	}
-	defer rw.Close()
-
-	// cursor is where recording resumes from. It starts at the persisted
-	// offset and must be carried through catch-up into the poll loop —
-	// re-deriving it from aw.startOffset later would re-read and duplicate
-	// everything catch-up just recovered.
-	cursor := aw.startOffset
-
-	// catch-up: read entries between the persisted offset and now
-	if reader, ok := adapter.(adapters.IncrementalReader); ok && cursor > 0 {
-		entries, newOffset, readErr := reader.ReadFromOffset(aw.sessionFile, cursor)
-		switch {
-		case readErr != nil:
-			m.logger.Warn("catch-up read failed; continuing from the persisted offset",
-				"session", aw.sessionName, "offset", cursor, "error", readErr)
-		case len(entries) > 0:
-			converted := session.ConvertRawEntries(entries)
-			if writeErr := writeEntries(rw, converted); writeErr != nil {
-				// the cursor must NOT advance past entries that never reached
-				// the ledger: doing so marks them consumed and they are gone
-				// for good. Leaving it where it is costs a re-read.
-				m.logger.Error("catch-up write failed; leaving the cursor in place so the entries can be recovered",
-					"session", aw.sessionName, "offset", cursor, "error", writeErr)
-				return
+	// Serialize with CLI stop independently of IPC. The stop breadcrumb makes
+	// the poll loop release this lock; the CLI then reloads the final cursor.
+	err := fileutil.WithFileLock(ctx, rawPath, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		recPath := filepath.Join(aw.cachePath, recordingMarker)
+		data, err := os.ReadFile(recPath)
+		if err != nil {
+			return err
+		}
+		state, err := session.ParseRecordingState(recPath, data)
+		if err != nil {
+			return err
+		}
+		if state.StoppedAt != nil || state.SourceRejected || session.HasExplicitStop(state.WorkspacePath, state.AgentID) {
+			return nil
+		}
+		// A restarted watcher may inherit an unverified cached path/offset. Check
+		// its entire source once before trusting only appended ranges in this run.
+		if err := validateWatcherSource(aw, state.StartOffset); err != nil {
+			m.rejectWatcherSource(aw, err)
+			return nil
+		}
+		if aw.adapterName == "cursor" {
+			reader, ok := adapter.(adapters.IncrementalReader)
+			if !ok {
+				return fmt.Errorf("adapter-missing: Cursor adapter requires incremental reading")
 			}
-			cursor = newOffset
-			m.persistOffset(aw, cursor, len(converted))
-			m.logger.Info("catch-up read recovered entries",
-				"session", aw.sessionName,
-				"entries", len(entries),
-				"from_offset", aw.startOffset,
-				"to_offset", cursor,
-			)
+			return m.pollCursorSession(ctx, aw, reader)
+		}
+
+		// Per ox-h20u: ALL raw.jsonl writes go through session.RawWriter. The
+		// writer constructs and applies the three-layer redaction stack
+		// (CommandRedactor → built-in Redactor → gitleaks extras). There is no
+		// way to call WriteEntry without redaction running first. Adapters can
+		// only emit RawEntry JSON on stdout — they have no write access to
+		// raw.jsonl.
+		if err := session.RecoverRawAppend(rawPath, state.SourceOffset); err != nil {
+			return err
+		}
+		rw, err := session.NewRawWriter(rawPath, aw.projectRoot)
+		if err != nil {
+			m.logger.Error("failed to open raw.jsonl for writing",
+				"session", aw.sessionName, "path", rawPath, "error", err)
+			return nil
+		}
+		defer rw.Close()
+
+		// cursor is where recording resumes from. It starts at the persisted
+		// offset and must be carried through catch-up into the poll loop —
+		// re-deriving it from aw.startOffset later would re-read and duplicate
+		// everything catch-up just recovered.
+		cursor := max(aw.startOffset, state.SourceOffset, state.StartOffset)
+
+		// catch-up: read entries between the persisted offset and now
+		if reader, ok := adapter.(adapters.IncrementalReader); ok && cursor > 0 {
+			var sourceSnapshot os.FileInfo
+			if aw.adapterName == "claude-code" {
+				var snapshotErr error
+				sourceSnapshot, snapshotErr = claudesource.Snapshot(aw.sessionFile)
+				if snapshotErr != nil {
+					m.logger.Warn("catch-up source not available", "session", aw.sessionName, "error", snapshotErr)
+					return nil
+				}
+			}
+			entries, newOffset, readErr := reader.ReadFromOffset(aw.sessionFile, cursor)
+			switch {
+			case readErr != nil:
+				m.logger.Warn("catch-up read failed; continuing from the persisted offset",
+					"session", aw.sessionName, "offset", cursor, "error", readErr)
+			case len(entries) > 0:
+				if err := validateWatcherSourceFrom(aw, cursor, sourceSnapshot); err != nil {
+					m.rejectWatcherSource(aw, err)
+					if errors.Is(err, claudesource.ErrUntrustedSource) {
+						return nil
+					}
+					// Retryable, as in pollSession: keep the cursor so the poll loop
+					// below reads these entries again. Returning here would end
+					// capture until the daemon's slow restart pass.
+					break
+				}
+				if newOffset <= cursor {
+					return fmt.Errorf("catch-up entries do not advance source cursor: %d <= %d", newOffset, cursor)
+				}
+				converted := session.ConvertRawEntries(entries)
+				if writeErr := m.appendBatch(aw, rw, converted, newOffset); writeErr != nil {
+					// the cursor must NOT advance past entries that never reached
+					// the ledger: doing so marks them consumed and they are gone
+					// for good. Leaving it where it is costs a re-read.
+					m.logger.Error("catch-up write failed; leaving the cursor in place so the entries can be recovered",
+						"session", aw.sessionName, "offset", cursor, "error", writeErr)
+					return nil
+				}
+				cursor = newOffset
+				m.logger.Info("catch-up read recovered entries",
+					"session", aw.sessionName,
+					"entries", len(entries),
+					"from_offset", aw.startOffset,
+					"to_offset", cursor,
+				)
+			}
+		}
+
+		// Record through the adapter's own incremental reader whenever it has one.
+		//
+		// The alternative, adapter.Watch, delivers entries with NO cursor, so any
+		// resume offset has to be inferred from the file afterwards — and both
+		// ways of being wrong lose data. Infer high (file size, or a boundary
+		// scanned after the write) and a record the agent appended in between is
+		// marked consumed but never written. Infer low and a restart re-reads and
+		// duplicates. Database-backed adapters cannot even infer: their offset is
+		// a row count nothing outside the adapter can compute.
+		//
+		// ReadFromOffset returns the cursor it actually consumed to, so there is
+		// nothing to infer.
+		if reader, ok := adapter.(adapters.IncrementalReader); ok {
+			m.pollSession(ctx, aw, reader, rw, cursor)
+			return nil
+		}
+
+		// Fallback for an adapter with no incremental reader: tail for entries and
+		// accept that the session cannot be resumed. Every shipped adapter now
+		// implements ReadFromOffset (enforced by tests/adapters), so this path is
+		// for third-party adapters only.
+		ch, err := adapter.Watch(ctx, aw.sessionFile)
+		if err != nil {
+			m.logger.Error("failed to start tail watcher",
+				"session", aw.sessionName, "error", err)
+			return nil
+		}
+		m.logger.Warn("adapter has no incremental reader; this session cannot resume after a daemon restart",
+			"session", aw.sessionName, "adapter", aw.adapterName)
+
+		ticker := time.NewTicker(pollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-ticker.C:
+				if session.HasExplicitStop(aw.projectRoot, aw.agentID) {
+					return nil
+				}
+			case entry, ok := <-ch:
+				if !ok || session.HasExplicitStop(aw.projectRoot, aw.agentID) {
+					return nil
+				}
+				converted := session.ConvertRawEntries([]adapters.RawEntry{entry})
+				if err := writeEntries(rw, converted); err != nil {
+					return err
+				}
+				// Watch has no cursor to persist; see pollSession.
+			}
+		}
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		m.logger.Warn("session watcher ended", "session", aw.sessionName, "error", err)
+	}
+}
+
+func (m *SessionWatcherManager) rejectWatcherSource(aw *activeWatcher, err error) {
+	m.logger.Warn("session source failed ownership check; leaving cursor unchanged", "session", aw.sessionName, "error", err)
+	if errors.Is(err, claudesource.ErrUntrustedSource) {
+		// by the watched recording's own folder: once quarantined it leaves the
+		// agent's active slot, and an agent lookup could find a newer recording
+		markErr := session.MutateRecordingStateFile(filepath.Join(aw.cachePath, recordingMarker), func(state *session.RecordingState) error {
+			state.SourceRejected = true
+			return nil
+		})
+		if markErr != nil {
+			m.logger.Warn("failed to quarantine session source", "session", aw.sessionName, "error", markErr)
 		}
 	}
+}
 
-	// Record through the adapter's own incremental reader whenever it has one.
-	//
-	// The alternative, adapter.Watch, delivers entries with NO cursor, so any
-	// resume offset has to be inferred from the file afterwards — and both
-	// ways of being wrong lose data. Infer high (file size, or a boundary
-	// scanned after the write) and a record the agent appended in between is
-	// marked consumed but never written. Infer low and a restart re-reads and
-	// duplicates. Database-backed adapters cannot even infer: their offset is
-	// a row count nothing outside the adapter can compute.
-	//
-	// ReadFromOffset returns the cursor it actually consumed to, so there is
-	// nothing to infer.
-	if reader, ok := adapter.(adapters.IncrementalReader); ok {
-		m.pollSession(ctx, aw, reader, rw, cursor)
-		return
+// validateWatcherSource checks what the recording can have captured. Turns
+// before startOffset predate the recording and are never imported.
+func validateWatcherSource(aw *activeWatcher, startOffset int64) error {
+	if aw.adapterName != "claude-code" {
+		return nil
 	}
+	if startOffset > 0 {
+		return claudesource.ValidateFrom(aw.sessionFile, aw.projectRoot, "", startOffset)
+	}
+	return claudesource.Validate(aw.sessionFile, aw.projectRoot, "")
+}
 
-	// Fallback for an adapter with no incremental reader: tail for entries and
-	// accept that the session cannot be resumed. Every shipped adapter now
-	// implements ReadFromOffset (enforced by tests/adapters), so this path is
-	// for third-party adapters only.
-	ch, err := adapter.Watch(ctx, aw.sessionFile)
-	if err != nil {
-		m.logger.Error("failed to start tail watcher",
-			"session", aw.sessionName, "error", err)
-		return
+func validateWatcherSourceFrom(aw *activeWatcher, offset int64, snapshot os.FileInfo) error {
+	if aw.adapterName != "claude-code" {
+		return nil
 	}
-	m.logger.Warn("adapter has no incremental reader; this session cannot resume after a daemon restart",
-		"session", aw.sessionName, "adapter", aw.adapterName)
-
-	for entry := range ch {
-		converted := session.ConvertRawEntries([]adapters.RawEntry{entry})
-		for i := range converted {
-			if encErr := rw.WriteEntry(&converted[i]); encErr != nil {
-				m.logger.Warn("failed to write entry to raw.jsonl",
-					"session", aw.sessionName, "error", encErr)
-			}
-		}
-		// no offset is persisted: Watch delivers entries with no cursor, and
-		// every way of guessing one from the file loses data in one direction
-		// or the other — see pollSession
-	}
+	return claudesource.ValidateRead(aw.sessionFile, aw.projectRoot, "", offset, false, snapshot)
 }
 
 // pollInterval is how often a session is re-read to advance its resume cursor.
 const pollInterval = 2 * time.Second
+
+// pollCursorSession retains raw-file ownership across polls. Each transaction
+// reloads its durable checkpoint; failed appends/checkpoints therefore take the
+// same reconciliation path on retry and never advance an in-memory-only cursor.
+func (m *SessionWatcherManager) pollCursorSession(ctx context.Context, aw *activeWatcher, reader adapters.IncrementalReader) error {
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		_, err := session.DrainCursorSource(ctx, aw.projectRoot, aw.cachePath, m.homeDir(), reader, false)
+		if errors.Is(err, session.ErrNotRecording) || errors.Is(err, context.Canceled) {
+			return nil
+		}
+		if err != nil && !errors.Is(err, session.ErrCursorSourcePending) {
+			m.logger.Warn("Cursor capture deferred", "session", aw.sessionName, "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		case <-aw.drain:
+		}
+	}
+}
 
 // pollSession records a session by repeatedly asking the adapter for
 // everything after the cursor it last returned.
@@ -428,6 +663,7 @@ func (m *SessionWatcherManager) pollSession(
 	offset := startCursor
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
+	var lastDeferred string // dedupes the log of a source that stays uncheckable
 
 	for {
 		select {
@@ -435,11 +671,24 @@ func (m *SessionWatcherManager) pollSession(
 			return
 		case <-ticker.C:
 		}
+		if session.HasExplicitStop(aw.projectRoot, aw.agentID) {
+			return
+		}
 
+		var sourceSnapshot os.FileInfo
+		if aw.adapterName == "claude-code" {
+			var snapshotErr error
+			sourceSnapshot, snapshotErr = claudesource.Snapshot(aw.sessionFile)
+			if snapshotErr != nil {
+				m.logger.Warn("session source not available", "session", aw.sessionName, "error", snapshotErr)
+				continue
+			}
+		}
 		entries, newOffset, err := reader.ReadFromOffset(aw.sessionFile, offset)
 		if err != nil {
 			m.logger.Warn("handle-based session read failed",
-				"session", aw.sessionName, "adapter", aw.adapterName, "offset", offset, "error", err)
+				"session", aw.sessionName, "adapter", aw.adapterName, "offset", offset, "error", err,
+				"transient", isPipeDrainTimeout(err))
 			continue
 		}
 		if len(entries) == 0 {
@@ -447,6 +696,22 @@ func (m *SessionWatcherManager) pollSession(
 			// stalled cannot be written over a good one
 			continue
 		}
+		if err := validateWatcherSourceFrom(aw, offset, sourceSnapshot); err != nil {
+			if errors.Is(err, claudesource.ErrUntrustedSource) {
+				m.rejectWatcherSource(aw, err)
+				return
+			}
+			// Anything else (the source was swapped mid-read, a directory
+			// cannot be checked yet) is retryable: keep the cursor where it is
+			// and look again next tick instead of ending capture until the
+			// daemon's slow restart pass.
+			if msg := err.Error(); msg != lastDeferred {
+				lastDeferred = msg
+				m.rejectWatcherSource(aw, err)
+			}
+			continue
+		}
+		lastDeferred = ""
 
 		// Check the cursor BEFORE writing. An adapter that returns rows without
 		// advancing would otherwise have those rows appended to raw.jsonl on
@@ -462,7 +727,7 @@ func (m *SessionWatcherManager) pollSession(
 		}
 
 		converted := session.ConvertRawEntries(entries)
-		if writeErr := writeEntries(rw, converted); writeErr != nil {
+		if writeErr := m.appendBatch(aw, rw, converted, newOffset); writeErr != nil {
 			// Advancing here would mark entries consumed that never reached
 			// the ledger, and the adapter would resume past them — they are
 			// unrecoverable. Stop with the cursor where it is so a restart
@@ -474,7 +739,6 @@ func (m *SessionWatcherManager) pollSession(
 		}
 
 		offset = newOffset
-		m.persistOffset(aw, offset, len(converted))
 	}
 }
 
@@ -492,34 +756,17 @@ func writeEntries(rw *session.RawWriter, entries []session.Entry) error {
 
 // persistOffset updates SourceOffset and EntryCount in .recording.json.
 // Uses atomic write (temp file + rename) to avoid races with CLI writes.
-// Best-effort: errors are logged but don't stop the watcher.
-func (m *SessionWatcherManager) persistOffset(aw *activeWatcher, offset int64, entryDelta int) {
-	recPath := filepath.Join(aw.cachePath, recordingMarker)
-	data, err := os.ReadFile(recPath)
-	if err != nil {
-		return
-	}
-	var state session.RecordingState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return
-	}
-	state.SourceOffset = offset
-	state.EntryCount += entryDelta
-	updated, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return
-	}
-	// atomic write: write to temp file then rename to avoid partial writes
-	// and reduce the race window with CLI writes to the same file
-	tmpPath := recPath + ".tmp"
-	if err := os.WriteFile(tmpPath, updated, 0600); err != nil {
-		m.logger.Debug("failed to write temp offset file", "session", aw.sessionName, "error", err)
-		return
-	}
-	if err := os.Rename(tmpPath, recPath); err != nil {
-		m.logger.Debug("failed to rename temp offset file", "session", aw.sessionName, "error", err)
-		_ = os.Remove(tmpPath)
-	}
+// Errors stop the watcher, preserving its append journal for recovery.
+func (m *SessionWatcherManager) persistOffset(aw *activeWatcher, offset int64, entryDelta int) error {
+	return session.MutateRecordingStateFile(filepath.Join(aw.cachePath, recordingMarker), func(state *session.RecordingState) error {
+		state.SourceOffset = offset
+		state.EntryCount += entryDelta
+		return nil
+	})
+}
+
+func (m *SessionWatcherManager) appendBatch(aw *activeWatcher, rw *session.RawWriter, entries []session.Entry, newOffset int64) error {
+	return rw.AppendRecordingBatch(filepath.Join(aw.cachePath, recordingMarker), entries, newOffset)
 }
 
 // resolveAdapter returns the adapter for the given name.
@@ -530,4 +777,11 @@ func resolveAdapter(name string) (adapters.Adapter, error) {
 		return nil, fmt.Errorf("unknown adapter: %q", name)
 	}
 	return adapter, nil
+}
+
+// isPipeDrainTimeout reports whether err is the os/exec WaitDelay expiry. The
+// adapter already answered; the host was too loaded to drain its pipes in
+// time, so the next poll retries with the cursor unchanged.
+func isPipeDrainTimeout(err error) bool {
+	return errors.Is(err, exec.ErrWaitDelay)
 }

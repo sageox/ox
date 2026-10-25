@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/spf13/cobra"
 )
 
 // flagAlias is the wire shape we read out of default_catalog.json's `tokens`
@@ -12,13 +14,18 @@ type flagAlias struct {
 	Pattern string `json:"pattern"`
 	Target  string `json:"target"`
 	Kind    string `json:"kind"`
+	// Rewrite opts a bare boolean flag ("--text") into the runtime rewrite.
+	// Bare names are otherwise suggestion-only because most of them take a
+	// value we cannot guess; a boolean has none, so the whole token is replaced.
+	Rewrite bool `json:"rewrite,omitempty"`
 }
 
 // loadFlagAliases parses the embedded friction catalog and returns the subset
 // of `unknown-flag` token mappings whose pattern is a fully-qualified flag
-// expression (e.g. "--format=json"). Bare flag-name patterns ("--format") are
-// skipped — those drive the friction *suggestion* path after cobra rejects an
-// unknown flag, not the runtime rewrite.
+// expression (e.g. "--format=json") or a bare boolean flag explicitly marked
+// `"rewrite": true` (e.g. "--text"). Other bare flag-name patterns ("--format")
+// are skipped — those drive the friction *suggestion* path after cobra rejects
+// an unknown flag, not the runtime rewrite.
 //
 // We read the embedded JSON rather than the live frictionax engine because
 // frictionax v0.1.2 doesn't expose its catalog tokens. When upstream adds an
@@ -41,8 +48,9 @@ func loadFlagAliases(catalogJSON []byte) map[string]string {
 			continue
 		}
 		// only fully-qualified patterns drive runtime rewrites; bare flag
-		// names like "--format" are suggestion-only.
-		if !strings.Contains(t.Pattern, "=") {
+		// names like "--format" are suggestion-only unless the entry opts in
+		// with "rewrite": true (a boolean, so there is no value to consume).
+		if !strings.Contains(t.Pattern, "=") && (!t.Rewrite || !strings.HasPrefix(t.Pattern, "--")) {
 			continue
 		}
 		out[t.Pattern] = t.Target
@@ -58,6 +66,9 @@ func loadFlagAliases(catalogJSON []byte) map[string]string {
 // and split ("--foo", "bar", two args) forms — the catalog stores the joined
 // form as canonical and this function synthesizes the split form to match.
 //
+// A bare rewrite token ("--text") is a joined-form match that consumes nothing
+// beyond itself, so the argument after it is never swallowed.
+//
 // Unknown flag values pass through untouched so cobra still produces an
 // unknown-flag error and the friction-suggestion path can teach the agent
 // the canonical name.
@@ -65,9 +76,19 @@ func applyCatalogTokenRewrites(args []string, aliases map[string]string) []strin
 	if len(aliases) == 0 {
 		return args
 	}
+	target, _, _ := rootCmd.Find(args)
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		// everything after "--" is a literal positional, never a flag
+		if a == "--" {
+			out = append(out, args[i:]...)
+			break
+		}
+		if commandAcceptsLongFlag(target, a) {
+			out = append(out, a)
+			continue
+		}
 
 		// joined form: arg literally equals a catalog pattern.
 		if target, ok := aliases[a]; ok {
@@ -90,4 +111,16 @@ func applyCatalogTokenRewrites(args []string, aliases map[string]string) []strin
 		out = append(out, a)
 	}
 	return out
+}
+
+// commandAcceptsLongFlag reports whether arg names a flag owned by the target
+// command. Catalog rewrites are fallbacks for unknown flags; applying one to a
+// command that intentionally defines the same spelling changes valid behavior
+// by replacing the command-specific flag with a global output flag.
+func commandAcceptsLongFlag(cmd *cobra.Command, arg string) bool {
+	if cmd == nil || !strings.HasPrefix(arg, "--") {
+		return false
+	}
+	name := strings.TrimPrefix(strings.SplitN(arg, "=", 2)[0], "--")
+	return name != "" && cmd.Flags().Lookup(name) != nil
 }

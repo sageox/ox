@@ -3,15 +3,73 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestCheckLedgerRemoteReachable_AccessDeniedOnlyForHTTP403 runs the doctor
+// check against a real `git ls-remote`. A 401 from a server whose URL
+// contains 403 must read as a sign-in failure, not "not a member of this team".
+// The remote carries dummy credentials so git's 401 message prints the full
+// URL, /403/ path included; without them it prints only scheme://host:port.
+func TestCheckLedgerRemoteReachable_AccessDeniedOnlyForHTTP403(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		want   string
+	}{
+		{"401 with a URL containing 403", http.StatusUnauthorized, "auth failed"},
+		{"real 403", http.StatusForbidden, "access denied"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gitRoot, cleanup := setupTempGitRepo(t)
+			defer cleanup()
+			t.Setenv("GIT_ALLOW_PROTOCOL", "file:http")
+			t.Setenv("GIT_TERMINAL_PROMPT", "0")
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
+				http.Error(w, http.StatusText(tt.status), tt.status)
+			}))
+			t.Cleanup(server.Close)
+			remote := strings.Replace(server.URL, "http://", "http://user:wrong@", 1) + "/403/ledger.git"
+
+			ledgerPath := t.TempDir()
+			for _, args := range [][]string{
+				{"init", "--quiet"},
+				{"remote", "add", "origin", remote},
+				{"config", "credential.helper", ""},
+				{"config", "http.proxy", ""},
+			} {
+				out, err := exec.Command("git", append([]string{"-C", ledgerPath}, args...)...).CombinedOutput()
+				require.NoError(t, err, "git %v: %s", args, out)
+			}
+			requireSageoxDir(t, gitRoot)
+			require.NoError(t, config.SaveLocalConfig(gitRoot, &config.LocalConfig{
+				Ledger: &config.LedgerConfig{Path: ledgerPath},
+			}))
+			restoreCwd := changeToDir(t, gitRoot)
+			defer restoreCwd()
+
+			res := checkLedgerRemoteReachable()
+
+			assert.Equal(t, tt.want, res.message)
+		})
+	}
+}
 
 func TestCheckLedgerURLAPIMatch_Skip_NoLedger(t *testing.T) {
 	// run in a temp dir with no ledger configured
@@ -327,7 +385,7 @@ func TestCheckLedgerBranchStatus_UnbornHead(t *testing.T) {
 		root := t.TempDir()
 		bare := filepath.Join(root, "bare.git")
 		repo := filepath.Join(root, "ledger")
-		gitRun(t, root, "init", "--bare", "--initial-branch=main", bare)
+		initBareRemote(t, bare, "--initial-branch=main")
 		gitRun(t, root, "clone", bare, repo)
 		// content on disk, zero commits — exactly the production shape
 		require.NoError(t, os.MkdirAll(filepath.Join(repo, "sessions", "s1"), 0o755))
@@ -349,7 +407,7 @@ func TestCheckLedgerBranchStatus_UnbornHead(t *testing.T) {
 		bare := filepath.Join(root, "bare.git")
 		seed := filepath.Join(root, "seed")
 		repo := filepath.Join(root, "ledger")
-		gitRun(t, root, "init", "--bare", "--initial-branch=main", bare)
+		initBareRemote(t, bare, "--initial-branch=main")
 		gitRun(t, root, "clone", bare, seed)
 		require.NoError(t, os.WriteFile(filepath.Join(seed, "AGENTS.md"), []byte("# Ledger\n"), 0o644))
 		gitRun(t, seed, "add", "-A")
@@ -416,7 +474,7 @@ func TestUnbornLedger_UnreachableRemoteNeverSuggestsSeeding(t *testing.T) {
 		root := t.TempDir()
 		bare := filepath.Join(root, "bare.git")
 		repo := filepath.Join(root, "ledger")
-		gitInit(t, root, "init", "--bare", "--initial-branch=main", bare)
+		initBareRemote(t, bare, "--initial-branch=main")
 		gitInit(t, root, "clone", bare, repo)
 		require.NoError(t, os.WriteFile(filepath.Join(repo, "note.txt"), []byte("x"), 0o644))
 
@@ -454,7 +512,7 @@ func TestUnbornLedger_FailedRepairStaysCritical(t *testing.T) {
 		// let the test run against a repo in an unintended state and "pass".
 		require.NoError(t, err, "fixture git %v failed: %s", args, out)
 	}
-	run(root, "init", "--bare", "--initial-branch=main", bare)
+	initBareRemote(t, bare, "--initial-branch=main")
 	run(root, "clone", bare, repo)
 	run(root, "clone", bare, seed)
 	require.NoError(t, os.WriteFile(filepath.Join(seed, "a.txt"), []byte("a"), 0o644))
@@ -474,4 +532,178 @@ func TestUnbornLedger_FailedRepairStaysCritical(t *testing.T) {
 		"a failed repair must stay critical, not be demoted to the attention bucket")
 	assert.Equal(t, CheckSlugLedgerBranchStatus, res.slug,
 		"slug must survive so the failure correlates with the original check")
+}
+
+// TestFixLedgerBranchBehind_LockBusy_FailsFastInsteadOfRacing proves the
+// bd ox-baz5.1/CodeRabbit finding is fixed: fixLedgerBranchBehind used to run
+// `git pull --rebase --autostash` (plus LLM conflict resolution and abort)
+// completely outside gitutil.WithRepoLock, so it could interleave FETCH_HEAD
+// writes with a concurrent daemon sync cycle on the same clone — the exact
+// 2026-09-02 incident shape. With the lock in place, a peer holding it makes
+// this fail fast and cleanly instead of racing the peer's git operations.
+func TestFixLedgerBranchBehind_LockBusy_FailsFastInsteadOfRacing(t *testing.T) {
+	_, machineB := createBareAndClone(t)
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		_ = gitutil.WithRepoLock(context.Background(), machineB, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	defer close(release)
+
+	start := time.Now()
+	result := fixLedgerBranchBehind(machineB, 1)
+	elapsed := time.Since(start)
+
+	assert.False(t, result.passed, "must not report success when the pull never ran")
+	assert.Contains(t, result.detail, "concurrent ox process",
+		"failure must explain it's lock contention, not a real git error, so a user isn't sent chasing a phantom conflict")
+	assert.Less(t, elapsed, 35*time.Second,
+		"must fail within the lock's own acquire budget (30s), not hang past it")
+}
+
+// TestFixLedgerBranchBehind_ForeignRebase_NeverTouched proves the ADR-030 D3
+// guard applies here too, not just in the daemon's pull path: a rebase that
+// already existed before this call's own `git pull --rebase` — a human
+// running raw git, since nothing else can be mid-rebase against this clone
+// once the lock is held — is not this call's to resolve or abort.
+func TestFixLedgerBranchBehind_ForeignRebase_NeverTouched(t *testing.T) {
+	barePath, machineA := createBareAndClone(t)
+	machineB := cloneBare(t, barePath)
+
+	// machineA pushes, AND machineB has an unpushed local commit: a pure
+	// fast-forward (behind but not diverged) never invokes the rebase
+	// machinery at all, so an empty rebase-merge/ would go unnoticed — git
+	// only refuses on it once there's a real rebase to attempt.
+	require.NoError(t, os.WriteFile(filepath.Join(machineA, "notes.txt"), []byte("from A"), 0644))
+	runGit(t, machineA, "add", "notes.txt")
+	runGit(t, machineA, "commit", "--no-verify", "-m", "notes from A")
+	runGit(t, machineA, "push")
+	runGit(t, machineB, "fetch")
+	require.NoError(t, os.WriteFile(filepath.Join(machineB, "local.txt"), []byte("from B"), 0644))
+	runGit(t, machineB, "add", "local.txt")
+	runGit(t, machineB, "commit", "--no-verify", "-m", "local change on B")
+
+	// Fake a foreign rebase-in-progress: enough for gitutil.IsRebaseInProgress
+	// to see it, and for git itself to refuse the pull with its own
+	// "already a rebase-merge directory" error — no real conflict needed.
+	require.NoError(t, os.MkdirAll(filepath.Join(machineB, ".git", "rebase-merge"), 0o755))
+
+	result := fixLedgerBranchBehind(machineB, 1)
+
+	assert.False(t, result.passed, "must not report success while a foreign rebase sits untouched")
+	assert.Contains(t, result.detail, "not touching it",
+		"failure must say the rebase predates this call, not read like a real conflict")
+
+	_, err := os.Stat(filepath.Join(machineB, ".git", "rebase-merge"))
+	assert.NoError(t, err, "the foreign rebase-merge directory must survive untouched — proves neither resolve nor AuditAndAbort ran")
+}
+
+// TestFixLedgerBranchBehind_AutostashConflicts prevents doctor from reporting a
+// completed pull or discarding fields when an autostash leaves metadata conflicts.
+func TestFixLedgerBranchBehind_AutostashConflicts(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		localTitle       string
+		rebaseConflict   bool
+		existingConflict bool
+		wantPassed       bool
+	}{
+		{name: "agreeing metadata", localTitle: "Ready", wantPassed: true},
+		{name: "after resolving rebase", localTitle: "Ready", rebaseConflict: true, wantPassed: true},
+		{name: "differing metadata", localTitle: "Local"},
+		{name: "existing agreeing metadata", localTitle: "Ready", existingConflict: true, wantPassed: true},
+		{name: "existing differing metadata", localTitle: "Local", existingConflict: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bare, writer := createBareAndClone(t)
+			const rel = "sessions/test/meta.json"
+			require.NoError(t, os.MkdirAll(filepath.Join(writer, "sessions/test"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(writer, rel), []byte(`{"title":"","keep":"yes"}`+"\n"), 0o644))
+			if tc.rebaseConflict {
+				require.NoError(t, os.MkdirAll(filepath.Join(writer, "data"), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(writer, "data/shared.txt"), []byte("base"), 0o644))
+				runGit(t, writer, "add", "data/shared.txt")
+			}
+			runGit(t, writer, "add", "--sparse", rel)
+			runGit(t, writer, "commit", "--no-verify", "-m", "seed metadata")
+			runGit(t, writer, "push")
+			repo := cloneBare(t, bare)
+			if tc.rebaseConflict {
+				require.NoError(t, os.WriteFile(filepath.Join(writer, "data/shared.txt"), []byte("remote"), 0o644))
+				require.NoError(t, os.WriteFile(filepath.Join(repo, "data/shared.txt"), []byte("local"), 0o644))
+				runGit(t, repo, "commit", "--no-verify", "-am", "local data change")
+			}
+			const remoteMeta = `{"title":"Ready","keep":"yes","remote_only":true}`
+			require.NoError(t, os.WriteFile(filepath.Join(writer, rel), []byte(remoteMeta+"\n"), 0o644))
+			runGit(t, writer, "commit", "--no-verify", "-am", "remote title")
+			runGit(t, writer, "push")
+			localMeta := `{"keep":"yes","title":"` + tc.localTitle + `","summary_attempts":0,"local_only":true}` + "\n"
+			mergedMeta := `{"keep":"yes","title":"` + tc.localTitle + `","summary_attempts":0,"local_only":true,"remote_only":true}`
+			require.NoError(t, os.WriteFile(filepath.Join(repo, rel), []byte(localMeta), 0o644))
+			var conflictsBefore, headBefore, stashBefore string
+			var worktreeBefore, indexBefore []byte
+			if tc.existingConflict {
+				// A prior successful pull left an autostash conflict. New
+				// upstream work must not route it through the rebase resolver.
+				runGit(t, repo, "pull", "--rebase", "--autostash")
+				conflictsBefore = runGit(t, repo, "ls-files", "--unmerged")
+				require.NotEmpty(t, conflictsBefore)
+				require.False(t, gitutil.IsRebaseInProgress(repo))
+				var err error
+				worktreeBefore, err = os.ReadFile(filepath.Join(repo, rel))
+				require.NoError(t, err)
+				indexBefore, err = os.ReadFile(filepath.Join(repo, ".git/index"))
+				require.NoError(t, err)
+				headBefore = runGit(t, repo, "rev-parse", "HEAD")
+				stashBefore = runGit(t, repo, "stash", "list")
+				require.NoError(t, os.WriteFile(filepath.Join(writer, "remote.txt"), []byte("next remote change"), 0o644))
+				runGit(t, writer, "add", "remote.txt")
+				runGit(t, writer, "commit", "--no-verify", "-m", "advance remote")
+				runGit(t, writer, "push")
+			}
+			remoteBefore := runGit(t, writer, "rev-parse", "HEAD")
+			result := fixLedgerBranchBehind(repo, 1)
+			assert.Equal(t, tc.wantPassed, result.passed, result.detail)
+			assert.False(t, gitutil.IsRebaseInProgress(repo))
+			if tc.rebaseConflict {
+				assert.Equal(t, "1", runGit(t, repo, "rev-list", "--count", "@{upstream}..HEAD"), "only the existing local commit may be rebased")
+			} else {
+				wantHead := remoteBefore
+				if tc.existingConflict && !tc.wantPassed {
+					wantHead = headBefore
+				}
+				assert.Equal(t, wantHead, runGit(t, repo, "rev-parse", "HEAD"), "recovery must not create a commit or pull past a disagreement")
+			}
+			assert.JSONEq(t, remoteMeta, runGit(t, repo, "show", "HEAD:"+rel), "dirty metadata must stay uncommitted")
+			assert.Equal(t, remoteBefore, runGit(t, bare, "rev-parse", "HEAD"), "doctor pull must not push")
+			assert.NotEmpty(t, runGit(t, repo, "stash", "list"), "retain the original dirty metadata")
+			assert.JSONEq(t, localMeta, runGit(t, repo, "show", "stash@{0}:"+rel))
+			conflicts := runGit(t, repo, "ls-files", "--unmerged")
+			if tc.wantPassed {
+				assert.Empty(t, conflicts)
+				data, err := os.ReadFile(filepath.Join(repo, rel))
+				require.NoError(t, err)
+				assert.JSONEq(t, mergedMeta, string(data))
+			} else {
+				assert.NotEmpty(t, conflicts)
+				assert.Contains(t, result.detail, "title differs")
+				if tc.existingConflict {
+					assert.Equal(t, conflictsBefore, conflicts, "preserve all conflict stages")
+					data, err := os.ReadFile(filepath.Join(repo, rel))
+					require.NoError(t, err)
+					assert.Equal(t, worktreeBefore, data, "leave disagreements untouched")
+					index, err := os.ReadFile(filepath.Join(repo, ".git/index"))
+					require.NoError(t, err)
+					assert.Equal(t, indexBefore, index, "leave the index untouched")
+					assert.Equal(t, stashBefore, runGit(t, repo, "stash", "list"))
+				}
+			}
+		})
+	}
 }

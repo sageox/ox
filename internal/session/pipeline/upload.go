@@ -16,6 +16,9 @@ func CopySessionToLedger(fs FileSystem, result *Result, ledgerPath, sessionName 
 		slog.Info("skipping copy: zero entries", "session", sessionName)
 		return nil
 	}
+	if result.RawPath == "" {
+		return fmt.Errorf("copy %s to ledger: source path is empty", LedgerFileRaw)
+	}
 
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
@@ -24,15 +27,13 @@ func CopySessionToLedger(fs FileSystem, result *Result, ledgerPath, sessionName 
 	}
 
 	// raw.jsonl is critical — must succeed
-	if result.RawPath != "" {
-		dstPath := filepath.Join(sessionDir, LedgerFileRaw)
-		data, err := fs.ReadFile(result.RawPath)
-		if err != nil {
-			return fmt.Errorf("read %s: %w", LedgerFileRaw, err)
-		}
-		if err := fs.WriteFile(dstPath, data, 0644); err != nil {
-			return fmt.Errorf("copy %s to ledger: %w", LedgerFileRaw, err)
-		}
+	dstPath := filepath.Join(sessionDir, LedgerFileRaw)
+	data, err := fs.ReadFile(result.RawPath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", LedgerFileRaw, err)
+	}
+	if err := fs.WriteFile(dstPath, data, 0644); err != nil {
+		return fmt.Errorf("copy %s to ledger: %w", LedgerFileRaw, err)
 	}
 
 	// secondary artifacts — best-effort

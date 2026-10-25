@@ -191,7 +191,11 @@ func regenerateAllSessionsArtifacts(store *session.Store, projectRoot string, fo
 	}
 
 	if !force {
-		if !cli.ConfirmYesNo(fmt.Sprintf("Regenerate artifacts for %d session(s)?", len(sessions)), false) {
+		confirmed, confirmErr := cli.ConfirmYesNoRequired(fmt.Sprintf("Regenerate artifacts for %d session(s)?", len(sessions)), false, false)
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if !confirmed {
 			fmt.Println("Canceled.")
 			return nil
 		}
@@ -474,7 +478,11 @@ func runSessionRegenerateRedact(cmd *cobra.Command, args []string) error {
 		} else {
 			prompt = fmt.Sprintf("This will re-redact session %q and re-upload to LFS. Continue?", args[0])
 		}
-		if !cli.ConfirmYesNo(prompt, false) {
+		confirmed, confirmErr := cli.ConfirmYesNoRequired(prompt, false, false)
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if !confirmed {
 			fmt.Println("Canceled.")
 			return nil
 		}
@@ -866,6 +874,12 @@ func mapEntriesToTyped(mapEntries []map[string]any) []session.Entry {
 		}
 		if to, ok := m["tool_output"].(string); ok {
 			entry.ToolOutput = to
+		}
+		if id, ok := m["call_id"].(string); ok {
+			entry.CallID = id
+		}
+		if isError, ok := m["is_error"].(bool); ok {
+			entry.IsError = isError
 		}
 
 		entries = append(entries, entry)

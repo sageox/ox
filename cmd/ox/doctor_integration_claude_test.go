@@ -86,11 +86,19 @@ func TestDetectClaudeCode_ProjectCLAUDEMd(t *testing.T) {
 	}
 }
 
+// TestDetectClaudeCode_NotDetected pins the negative case by controlling both
+// inputs the detector reads: the working directory and HOME.
+//
+// Failure prevented: the test asserted nothing because the real HOME decided
+// the answer — on any machine that has ever run Claude Code, the user-level
+// config makes detection true no matter what the project contains, so a
+// detector that always returned true would have passed.
 func TestDetectClaudeCode_NotDetected(t *testing.T) {
-	tmpDir := t.TempDir()
-	restoreCwd := changeToDir(t, tmpDir)
+	t.Setenv("HOME", t.TempDir())
+	restoreCwd := changeToDir(t, t.TempDir())
 	defer restoreCwd()
 
-	// just verify function doesn't panic (result depends on user environment)
-	_ = detectClaudeCode()
+	if detectClaudeCode() {
+		t.Error("detectClaudeCode() = true with no project markers and an empty home, want false")
+	}
 }

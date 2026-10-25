@@ -126,7 +126,7 @@ func (f *fx) WritePointerTrace(name string) {
 	dir := filepath.Join(f.Ledger, "sessions", name)
 	require.NoError(f.t, os.MkdirAll(dir, 0o755))
 	ref := lfs.NewFileRef([]byte(`{"fake":"trace content, never hydrated in this test"}`))
-	require.NoError(f.t, lfs.WritePointerFile(filepath.Join(dir, contexttrace.FileName), ref))
+	require.NoError(f.t, lfs.WritePointerFile(filepath.Join(dir, contexttrace.FileName), lfs.AssertUploaded(ref)))
 }
 
 // WriteSummary writes summary.json for session `name`.

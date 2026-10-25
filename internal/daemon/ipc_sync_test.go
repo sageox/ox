@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -528,7 +529,15 @@ func TestServerClient_TeamSyncWithProgress_EmptyResults(t *testing.T) {
 // success despite the failure (regression: malformed config hidden behind a
 // successful-looking all-teams sync).
 func TestServerClient_TeamSyncWithProgress_SetupFailure(t *testing.T) {
-	tmpDir := "/tmp"
+	// Unix-domain socket paths have a small fixed limit. Use the bounded
+	// conventional Unix temp root; Windows uses its platform temp directory.
+	tempRoot := os.TempDir()
+	if runtime.GOOS != "windows" {
+		tempRoot = "/tmp"
+	}
+	tmpDir, err := os.MkdirTemp(tempRoot, "ox-ipc-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
 
@@ -545,14 +554,15 @@ func TestServerClient_TeamSyncWithProgress_SetupFailure(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	serverDone := make(chan struct{})
+	defer cancel()
+	serverDone := make(chan error, 1)
 	go func() {
-		server.Start(ctx)
-		close(serverDone)
+		serverDone <- server.Start(ctx)
 	}()
-	time.Sleep(100 * time.Millisecond)
-
 	client := &Client{socketPath: SocketPath(), timeout: 5 * time.Second}
+	require.Eventually(t, func() bool {
+		return client.Ping() == nil
+	}, 2*time.Second, 10*time.Millisecond, "server socket was not ready")
 
 	results, err := client.TeamSyncWithProgress(nil)
 	require.Error(t, err, "setup failure must surface as an error")
@@ -560,7 +570,7 @@ func TestServerClient_TeamSyncWithProgress_SetupFailure(t *testing.T) {
 	assert.Nil(t, results, "setup failure must leave results nil (not coerced to []), so the CLI can't mistake it for success")
 
 	cancel()
-	<-serverDone
+	assert.ErrorIs(t, <-serverDone, context.Canceled)
 }
 
 // Test team sync when handler not set

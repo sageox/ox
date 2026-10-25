@@ -138,14 +138,20 @@ pkg/
 | **fast** | `make test` | Every commit | Unit tests <500ms. No git clone, no network. |
 | **full** | `make test-all` | Pre-PR (`make test-preflight`) | All unit tests including expensive ones (git clone, SQLite concurrent, LFS). |
 | **slow** | `make test-slow` | Pre-PR | Tests requiring real ox binary (build tag: `slow`). No Claude needed. |
-| **integration** | `make test-integration` | Release gate | E2E with real Claude sessions (build tag: `integration`). |
+| **acceptance** | `make test-acceptance` | PR/release gate | Deterministic journeys through a freshly compiled ox binary. |
+| **digital twin** | `make test-digital-twin` | PR/release gate | Hermetic auth API, ledger, and KB behavior. |
+| **integration** | `make test-integration` | Compatibility evidence | E2E with real Claude sessions; attested gating is tracked by `ox-ilrr.4`. |
+| **release** | `make test-release` | Version tag | Enforceable full + ratchet + slow + acceptance + twin gate. |
 
 ```bash
 make test             # Fast tests — coding feedback loop (<30s)
 make test-preflight   # Pre-PR gate: lint + full + slow (~3-5min)
 make test-all         # All unit tests without build tags
 make test-slow        # Real ox binary tests (build tag: slow)
-make test-integration # Real Claude sessions (build tag: integration)
+make test-acceptance  # Deterministic current-source compiled-binary journeys
+make test-digital-twin # Hermetic auth, ledger, and KB twins
+make test-integration # Print external ox-test-harness guidance, then exit non-zero
+make test-release     # Enforceable in-repo release tiers
 make coverage         # Fast tests with coverage report
 ```
 

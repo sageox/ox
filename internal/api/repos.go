@@ -3,13 +3,17 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/useragent"
 )
 
@@ -61,6 +65,15 @@ type TeamMembership struct {
 	// "insufficient_role". Empty when CanInvite is true, and also empty on
 	// servers that predate this field.
 	InviteBlockedReason string `json:"invite_blocked_reason,omitempty"`
+
+	// ClaudeOrgSyncedSkills names the team skills this team's Claude
+	// organization already delivers as a plugin. The server sends it only once
+	// org sync is enabled AND Claude has actually pulled; ox then stops copying
+	// those skills into .claude/skills so Claude Code does not list them twice.
+	//
+	// Absent (an older server, or org sync not connected) and empty mean the
+	// same thing: ox copies every skill, exactly as before the field existed.
+	ClaudeOrgSyncedSkills []string `json:"claude_org_synced_skills,omitempty"`
 }
 
 // Invite-capability reasons reported by the server.
@@ -94,6 +107,13 @@ type ReposResponse struct {
 // TeamMembershipsFromRepos derives team memberships from the repos map.
 // Each repo with type "team-context" represents a team the user belongs to.
 // Falls back to the Teams array if populated.
+//
+// The derived list is sorted; the declared Teams array is returned in server order.
+// Repos is a map, and Go randomizes map iteration order per process, so an unsorted
+// derived list has no stable order at all. Callers that take the first match — ox
+// init --team resolves a slug or name against this list — would otherwise resolve
+// the same string to a different team on a different run, with identical input and
+// no way to tell from the output.
 func (r *ReposResponse) TeamMembershipsFromRepos() []TeamMembership {
 	if len(r.Teams) > 0 {
 		return r.Teams
@@ -109,6 +129,12 @@ func (r *ReposResponse) TeamMembershipsFromRepos() []TeamMembership {
 			Slug: repo.Slug,
 		})
 	}
+	sort.Slice(teams, func(i, j int) bool {
+		if teams[i].ID != teams[j].ID {
+			return teams[i].ID < teams[j].ID
+		}
+		return teams[i].Name < teams[j].Name
+	})
 	return teams
 }
 
@@ -133,9 +159,71 @@ type RepoDetailResponse struct {
 
 // RepoDetailLedger is the ledger section of the repo detail response.
 type RepoDetailLedger struct {
-	Status  string `json:"status"`            // "ready", "pending", "error"
-	RepoURL string `json:"repo_url"`          // git clone URL (empty if not ready)
-	Message string `json:"message,omitempty"` // status message for pending/error
+	Status  string `json:"status"`             // "ready", "pending", "error"
+	RepoURL string `json:"repo_url"`           // git clone URL (empty if not ready)
+	ReadURL string `json:"read_url,omitempty"` // authorized TAT read URL; absent on unsupported servers
+	Message string `json:"message,omitempty"`  // status message for pending/error
+}
+
+var (
+	ErrLedgerReadUnavailable = errors.New("the selected endpoint does not provide ledger read access")
+	ErrLedgerReadMissing     = errors.New("the selected repository has no available ledger")
+)
+
+// GetLedgerReadURL uses the existing repo-scoped discovery endpoint with the
+// current selected TAT, independently of any human token installed on c. It
+// never provisions a ledger, follows redirects, or substitutes another URL.
+// The caller must freshly resolve token via auth.CurrentReadToken before each call.
+func (c *RepoClient) GetLedgerReadURL(ctx context.Context, repoID, token string) (string, error) {
+	if !repotools.IsValidRepoID(repoID) {
+		return "", gitserver.ErrUnsafeReadTransport
+	}
+	baseURL := strings.TrimSuffix(c.baseURL, "/")
+	// Validate the selected authority before sending any credential.
+	if err := gitserver.ValidateReadURL(baseURL, repoID, baseURL+fmt.Sprintf(repoDetailPath, repoID)+"/ledger.git"); err != nil {
+		return "", err
+	}
+	if token == "" || !strings.HasPrefix(token, "oxt_") || strings.ContainsAny(token, "\r\n") {
+		return "", gitserver.ErrReadTokenUnavailable
+	}
+	req, err := useragent.NewRequest(ctx, http.MethodGet, baseURL+fmt.Sprintf(repoDetailPath, repoID), nil)
+	if err != nil {
+		return "", ErrLedgerReadUnavailable
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := *c.httpClient
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", ErrLedgerReadUnavailable
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return "", ErrUnauthorized
+	case http.StatusForbidden:
+		return "", ErrForbidden
+	case http.StatusOK:
+	default:
+		return "", ErrLedgerReadUnavailable
+	}
+	var detail RepoDetailResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&detail); err != nil {
+		return "", ErrLedgerReadUnavailable
+	}
+	if detail.Ledger == nil || detail.Ledger.Status != "ready" {
+		return "", ErrLedgerReadMissing
+	}
+	if detail.Ledger.ReadURL == "" {
+		return "", ErrLedgerReadUnavailable
+	}
+	if err := gitserver.ValidateReadURL(baseURL, repoID, detail.Ledger.ReadURL); err != nil {
+		return "", err
+	}
+	return detail.Ledger.ReadURL, nil
 }
 
 // RepoDetailTeamContext is a team context in the repo detail response.
@@ -177,12 +265,16 @@ func DeriveSlug(name string) string {
 // For ledger URLs, use GetLedgerStatus() which is project-scoped.
 // Requires authentication. Returns PAT, repo URLs, and token expiration.
 func (c *RepoClient) GetRepos() (*ReposResponse, error) {
+	return c.getRepos(context.Background())
+}
+
+func (c *RepoClient) getRepos(ctx context.Context) (*ReposResponse, error) {
 	reqURL := strings.TrimSuffix(c.baseURL, "/") + reposPath
 
 	logger.LogHTTPRequest("GET", reqURL)
 	start := time.Now()
 
-	httpReq, err := useragent.NewRequest(context.Background(), "GET", reqURL, nil)
+	httpReq, err := useragent.NewRequest(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -217,6 +309,9 @@ func (c *RepoClient) GetRepos() (*ReposResponse, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		errMsg := strings.TrimSpace(string(bodyBytes))
 		if resp.StatusCode == http.StatusUnauthorized {
+			if strings.HasPrefix(c.authToken, "oxt_") {
+				return nil, &teamTokenUnauthorizedError{}
+			}
 			return nil, ErrUnauthorized
 		}
 		if errMsg == "" {
@@ -235,6 +330,44 @@ func (c *RepoClient) GetRepos() (*ReposResponse, error) {
 	}
 
 	return &reposResp, nil
+}
+
+// GetGitCredentials binds the Git PAT returned by discovery to this client's bearer.
+func (c *RepoClient) GetGitCredentials(ctx context.Context) (*gitserver.GitCredentials, error) {
+	_, creds, err := c.GetReposAndGitCredentials(ctx)
+	return creds, err
+}
+
+// GetReposAndGitCredentials is GetGitCredentials that also returns the
+// discovery response it was derived from, so a caller that needs the team list
+// too (the daemon's team discovery records each team's Claude org sync) makes
+// one request instead of two.
+func (c *RepoClient) GetReposAndGitCredentials(ctx context.Context) (*ReposResponse, *gitserver.GitCredentials, error) {
+	resp, err := c.getRepos(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if resp.Token == "" {
+		return nil, nil, fmt.Errorf("git credential discovery returned an empty token")
+	}
+	creds := &gitserver.GitCredentials{
+		BearerTokenHash: gitserver.BearerTokenFingerprint(c.authToken),
+		Token:           resp.Token,
+		ServerURL:       resp.ServerURL,
+		Username:        resp.Username,
+		ExpiresAt:       resp.ExpiresAt,
+		Repos:           make(map[string]gitserver.RepoEntry),
+	}
+	for _, repo := range resp.Repos {
+		creds.AddRepo(gitserver.RepoEntry{
+			Name:   repo.Name,
+			Type:   repo.Type,
+			URL:    repo.URL,
+			TeamID: repo.StableID(),
+			Slug:   repo.Slug,
+		})
+	}
+	return resp, creds, nil
 }
 
 // GetTeamInfo calls GET /api/v1/teams/{id} to fetch team information
@@ -318,12 +451,18 @@ func (c *RepoClient) GetTeamInfo(teamID string) (*TeamInfoResponse, error) {
 // Returns ErrUnauthorized if authentication fails.
 // Returns nil, nil if the endpoint returns 404 (server hasn't implemented this endpoint yet).
 func (c *RepoClient) GetRepoDetail(repoID string) (*RepoDetailResponse, error) {
+	return c.GetRepoDetailContext(context.Background(), repoID)
+}
+
+// GetRepoDetailContext fetches repo detail with caller cancellation while
+// preserving the client's HTTP timeout and GetRepoDetail's response contract.
+func (c *RepoClient) GetRepoDetailContext(ctx context.Context, repoID string) (*RepoDetailResponse, error) {
 	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(repoDetailPath, repoID)
 
 	logger.LogHTTPRequest("GET", reqURL)
 	start := time.Now()
 
-	httpReq, err := useragent.NewRequest(context.Background(), "GET", reqURL, nil)
+	httpReq, err := useragent.NewRequest(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

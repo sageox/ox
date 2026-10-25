@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,11 +15,46 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/perf"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
+
+// Team sync budgets. A pull gets its own timeout so one slow team cannot
+// expire the others; the cycle bound only guarantees the scheduler never hangs.
+// Vars (not consts) so tests can shrink them.
+var (
+	// teamPullTimeout bounds a single team's git pull. Matches the old
+	// shared 60s budget, now applied per team.
+	teamPullTimeout = 60 * time.Second
+
+	// teamCycleTimeout bounds one whole sync cycle: with 3 pulls in flight it
+	// leaves room for several slow teams while still capping a hung network.
+	teamCycleTimeout = 5 * time.Minute
+
+	// runTeamPull is the per-team pull; tests replace it to avoid real git.
+	runTeamPull = (*SyncScheduler).pullTeamContext
+)
+
+// teamPullConcurrency caps simultaneous team pulls. Each is a `git pull
+// --rebase`; fanning out one per team made a loaded host slower, which is what
+// made the pulls time out in the first place.
+const teamPullConcurrency = 3
+
+// teamPullSemaphore returns the scheduler-wide pull slots, creating them on
+// first use.
+func (s *SyncScheduler) teamPullSemaphore() chan struct{} {
+	s.teamPullSlotsOnce.Do(func() {
+		s.teamPullSlots = make(chan struct{}, teamPullConcurrency)
+	})
+	return s.teamPullSlots
+}
+
+// teamBudgetExhaustedMsg is the skip reason reported for teams the cycle
+// budget ran out before reaching. It is not a sync failure.
+const teamBudgetExhaustedMsg = "sync budget exhausted before this team started"
 
 // pullTeamContexts syncs all team context repos from workspace registry (used by scheduler).
 // For repos that exist locally: pulls latest changes.
@@ -33,11 +70,11 @@ func (s *SyncScheduler) pullTeamContexts(ctx context.Context) {
 	defer span.End()
 
 	// anti-entropy: ensure missing workspaces get cloned
-	s.triggerMissingClones()
+	s.triggerMissingClones(ctx)
 
-	// bound background sync to 60s so a DNS/network hang doesn't block
-	// the scheduler for minutes (the caller ctx has no deadline)
-	teamCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	// bound the whole cycle so a DNS/network hang can't block the scheduler
+	// (the caller ctx has no deadline); each pull has its own, shorter budget
+	teamCtx, cancel := context.WithTimeout(ctx, teamCycleTimeout)
 	defer cancel()
 	// background scheduler path: per-team outcomes and setup errors are
 	// recorded on the workspace registry / logged inside doTeamSync, so the
@@ -52,8 +89,11 @@ func (s *SyncScheduler) pullTeamContexts(ctx context.Context) {
 // per-team status instead of inferring "synced" from the bare success of the
 // IPC round-trip.
 func (s *SyncScheduler) TeamSync(progress *ProgressWriter) ([]TeamSyncResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), teamCycleTimeout)
 	defer cancel()
+
+	// a manual sync means the user wants a retry now; lift kb scope backoff
+	s.clearKBScopeParks()
 
 	results, err := s.doTeamSync(ctx, progress, true)
 	if err != nil {
@@ -95,11 +135,11 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 	defer span.End()
 
 	// refresh credentials if expired or near expiry
-	s.refreshCredentialsIfNeeded()
+	s.refreshCredentialsIfNeeded(ctx)
 
 	// discover new teams independently of token refresh — ensures new teams
 	// are found even when the credential token is still fresh
-	s.discoverTeams()
+	s.discoverTeams(ctx)
 
 	if s.config.ProjectRoot == "" {
 		if progress != nil {
@@ -185,7 +225,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 					_ = progress.WriteStage("cloning", fmt.Sprintf("Cloning team %s in background...", ws.TeamName))
 				}
 				if s.addClone() {
-					go s.cloneInBackground(ws.CloneURL, ws.Path, "team-context", ws.ID) //nolint:gosec // G118 - intentionally uses background context; goroutine outlives request scope
+					go s.cloneInBackground(s.backgroundCloneContext(), ws.CloneURL, ws.Path, "team-context", ws.ID)
 					cloningCount++
 				}
 				addResult(ws, "cloning", "")
@@ -210,45 +250,106 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		targets = append(targets, syncTarget{ws: ws})
 	}
 
-	// sync eligible repos in parallel — each operates on its own repo path,
-	// and the network I/O (ls-remote, fetch, pull) dominates wall time
+	// sync eligible repos in parallel, at most teamPullConcurrency at a time —
+	// each operates on its own repo path, and the network I/O (ls-remote,
+	// fetch, pull) dominates wall time
 	type syncResult struct {
 		ws         WorkspaceState
 		err        error
+		pullRan    bool
+		skipped    bool // cycle budget ran out before this team started
 		duration   time.Duration
 		prePullSHA string
 	}
 	results := make([]syncResult, len(targets))
+	sem := s.teamPullSemaphore()
 	var wg sync.WaitGroup
 
-	for i, t := range targets {
-		s.workspaceRegistry.SetSyncInProgress(t.ws.ID, true)
-		if progress != nil {
-			_ = progress.WriteStage("syncing", fmt.Sprintf("Syncing team: %s", t.ws.TeamName))
+	// pulls finish out of order from several goroutines; serialize writes and
+	// report each completion so the client's idle timer sees steady progress
+	// while later teams wait for a slot
+	var progressMu sync.Mutex
+	reportProgress := func(stage, msg string) {
+		if progress == nil {
+			return
 		}
+		progressMu.Lock()
+		defer progressMu.Unlock()
+		_ = progress.WriteStage(stage, msg)
+	}
+
+	for i, t := range targets {
+		// waiting for a slot is bounded by the cycle budget: once it is gone
+		// the team is skipped, never started, and never marked as failed
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			results[i] = syncResult{ws: t.ws, skipped: true}
+			continue
+		}
+		// select picks at random when a freed slot and an expired budget are
+		// both ready; never start a pull on a context that is already done
+		if ctx.Err() != nil {
+			<-sem
+			results[i] = syncResult{ws: t.ws, skipped: true}
+			continue
+		}
+
+		s.workspaceRegistry.SetSyncInProgress(t.ws.ID, true)
+		reportProgress("syncing", fmt.Sprintf("Syncing team: %s", t.ws.TeamName))
 
 		wg.Add(1)
 		go func(idx int, ws WorkspaceState) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			preSHA := s.captureHEAD(ws.Path)
 			start := time.Now()
-			pullErr := s.pullTeamContext(ctx, ws.Path)
-			results[idx] = syncResult{ws: ws, err: pullErr, duration: time.Since(start), prePullSHA: preSHA}
+			// own budget per team, still bounded by the cycle context
+			pullCtx, cancelPull := context.WithTimeout(ctx, teamPullTimeout)
+			defer cancelPull()
+			outcome, pullErr := runTeamPull(s, pullCtx, ws.Path)
+			results[idx] = syncResult{ws: ws, err: pullErr, pullRan: outcome.PullRan, duration: time.Since(start), prePullSHA: preSHA}
+			reportProgress("syncing", fmt.Sprintf("Pulled team: %s", ws.TeamName))
 		}(i, t.ws)
 	}
 	wg.Wait()
 
+	// one line per cycle instead of one WARN per untried team
+	var budgetSkipped int
+	for _, r := range results {
+		if r.skipped {
+			budgetSkipped++
+		}
+	}
+	if budgetSkipped > 0 {
+		s.logger.Warn("team sync budget exhausted", "skipped", budgetSkipped, "total", len(targets), "cycle_budget", teamCycleTimeout)
+	}
+
 	// process results sequentially (registry updates, progress messages)
 	var syncedCount int
 	for _, r := range results {
+		if r.skipped {
+			// never tried: no failure, no workspace error, no backoff
+			addResult(r.ws, "skipped", teamBudgetExhaustedMsg)
+			skippedCount++
+			continue
+		}
 		s.workspaceRegistry.SetSyncInProgress(r.ws.ID, false)
 
 		if r.err != nil {
+			s.refreshAfterAuthFailure(ctx, r.err)
 			s.workspaceRegistry.SetWorkspaceError(r.ws.ID, r.err.Error())
-			fingerprint, fpErr := worktreeFingerprint(ctx, r.ws.Path)
-			suspended := fpErr == nil && s.workspaceRegistry.RecordSyncFailureFingerprint(r.ws.ID, fingerprint)
-			if fpErr != nil {
+			// See teamFailureTakesBackoff for why this is a two-input
+			// decision and not an error-shape test.
+			var suspended bool
+			if teamFailureTakesBackoff(r.err, r.pullRan) {
 				s.workspaceRegistry.RecordSyncFailure(r.ws.ID)
+			} else {
+				fingerprint, fpErr := worktreeFingerprint(ctx, r.ws.Path)
+				suspended = fpErr == nil && s.workspaceRegistry.RecordSyncFailureFingerprint(r.ws.ID, fingerprint)
+				if fpErr != nil {
+					s.workspaceRegistry.RecordSyncFailure(r.ws.ID)
+				}
 			}
 			s.recordSyncStateFailure(r.ws.Path)
 			s.logger.Debug("team context pull failed", "team", r.ws.TeamName, "error", r.err, "suspended", suspended)
@@ -263,7 +364,17 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		s.workspaceRegistry.ClearWorkspaceError(r.ws.ID)
 		s.workspaceRegistry.ClearSyncFailures(r.ws.ID)
 		if s.issues != nil {
+			// Keyed on ws.ID because that's what shouldSyncOrBypass(ws.ID,
+			// ...) actually set it with — NOT the same key pullTeamContext
+			// uses for its own repo-scoped issues (repoName :=
+			// filepath.Base(path)). The two read alike but are set by
+			// different code with different keys; pullManagedRepo-raised
+			// issues (GitLock, MergeConflict, Diverged, RebaseStuck) are
+			// cleared inside pullTeamContext instead, next to where they're
+			// raised, so the key is never re-derived or guessed here.
 			s.issues.ClearIssue(IssueTypeSyncBackoff, r.ws.ID)
+			// the clone-failure issue is also keyed on the workspace ID
+			s.issues.ClearIssue(IssueTypeCloneFailed, r.ws.ID)
 		}
 
 		mCfg := s.applySparseCheckout(ctx, r.ws.Path)
@@ -319,15 +430,25 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		s.metrics.RecordTeamSync()
 		s.recordActivity()
 
+		// What this pull actually changed, computed once for the two consumers
+		// below. Primary team only — it avoids whisper noise from secondary team
+		// contexts, and it is also the correct scope for skills:
+		// config.FindRepoTeamContext resolves THIS repo's own team and never a
+		// cross-team context, so a secondary team's skills could not materialize
+		// here even if they changed.
+		var changedFiles []string
+		if r.ws.TeamID == s.workspaceRegistry.ProjectTeamID() {
+			changedFiles = s.detectChangedFiles(r.ws.Path, r.prePullSHA)
+		}
+
 		// emit trigger whispers for team context file changes
-		// Primary team only for now — avoids noise from secondary team contexts.
-		if s.whisperRegistry != nil && r.ws.TeamID == s.workspaceRegistry.ProjectTeamID() {
-			if changedFiles := s.detectChangedFiles(r.ws.Path, r.prePullSHA); len(changedFiles) > 0 {
+		if s.whisperRegistry != nil {
+			if len(changedFiles) > 0 {
 				s.logger.Debug("team context changes detected",
 					"team", r.ws.TeamName, "count", len(changedFiles))
 				for _, cf := range changedFiles {
 					id, _ := uuid.NewV7()
-					s.whisperRegistry.Add("ledger", whisperstore.WhisperEntry{
+					if err := s.whisperRegistry.Add("ledger", whisperstore.WhisperEntry{
 						ID:         id.String(),
 						Scope:      "ledger",
 						Type:       whisperstore.WhisperTrigger,
@@ -336,10 +457,17 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 						Content:    fmt.Sprintf("Team context updated: %s", cf),
 						Importance: whisperstore.ImportanceNormal,
 						CreatedAt:  time.Now(),
-					})
+					}); err != nil {
+						s.logger.Warn("failed to add team context trigger whisper", "team", r.ws.TeamName, "file", cf, "error", err)
+					}
 				}
 			}
 		}
+
+		// A team skill that changed in the remote is still not in any repository
+		// until something reconciles it. This is that something.
+		s.reconcileTeamSkills(changedFiles)
+
 		s.logger.Debug("team context synced", "team", r.ws.TeamName, "duration", r.duration)
 		if progress != nil {
 			_ = progress.WriteStage("synced", fmt.Sprintf("Team %s synced", r.ws.TeamName))
@@ -381,41 +509,154 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 // worktreeFingerprint returns a content-independent identifier for the
 // worktree state that caused a failed sync. It deliberately hashes porcelain
 // output so logs and status never expose local filenames or data.
+//
+// Returns "" for a CLEAN worktree. A clean tree hashes to sha256("") — the
+// same constant on every repo, every time — so "the fingerprint repeated"
+// would carry no evidence that the checkout caused the failure.
+// RecordSyncFailureFingerprint skips suspension on an empty fingerprint, so
+// this routes clean-tree failures to ordinary backoff. Nothing is lost: the
+// unbounded-autostash harm that motivated suspension needs local changes to
+// stash, which a clean tree does not have.
 func worktreeFingerprint(ctx context.Context, repoPath string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "status", "--porcelain=v1", "--untracked-files=all")
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
 	}
+	if len(bytes.TrimSpace(out)) == 0 {
+		return "", nil
+	}
 	sum := sha256.Sum256(out)
 	return fmt.Sprintf("%x", sum), nil
 }
 
+// teamFailureTakesBackoff decides how one failed team-context sync cycle is
+// recorded: true for the ordinary bounded exponential backoff, false for the
+// permanent worktree-fingerprint suspension.
+//
+// Permanent suspension is reserved for failures the LOCAL checkout causes
+// deterministically (ADR-024 / issue #767: an LFS double-encode that no pull
+// could ever settle, whose retries piled up autostash entries without bound).
+// A network failure repeats identically too, but resolves on its own —
+// suspending it stopped team-context sync for hours after a laptop sleep while
+// getErrorHint still promised "Will retry automatically" (#906).
+//
+// A PRE-pull index-probe failure joins the transient failures, even though it
+// is local. "git could not read the index" is produced identically by a corrupt
+// .git/index and by a momentary fork/IO/timeout blip, so nothing in the error
+// separates settled from unclassifiable and this codebase's retry rule makes it
+// retryable. It is also not the failure the fingerprint guard was built for:
+// #767's unbounded autostash pile needs a pull that RAN, and a probe that
+// aborted the cycle before any fetch leaves nothing to accumulate. The durable
+// case is not hidden by that — it is already loud as IssueTypeRepoIntegrity,
+// which a silent permanent suspension would only bury.
+//
+// pullRan is what makes that reasoning sound, and the sentinel alone is NOT
+// enough: classifyAutostashFailure JOINS gitutil.ErrConflictProbeFailed onto an
+// existing pull error, so a pull that ran, failed deterministically (a dirty
+// worktree it can never settle), and was then followed by a failed index read
+// carries the very same sentinel — and that is precisely the #767 case that
+// must reach suspension. The bool is a structural fact about the cycle that no
+// joined error chain can report.
+func teamFailureTakesBackoff(err error, pullRan bool) bool {
+	if isTransientSyncError(err) {
+		return true
+	}
+	return !pullRan && errors.Is(err, gitutil.ErrConflictProbeFailed)
+}
+
+// isTransientSyncError reports whether a failed pull is environmental —
+// network, DNS, or a server that was unreachable — rather than caused by the
+// local checkout. Transient failures must never trigger the permanent
+// fingerprint suspension: they clear on their own, and bounded exponential
+// backoff already paces the retries.
+//
+// The matched substrings are git/curl transport wording, deliberately kept in
+// sync with humanizeError's network cases in status_display.go — that function
+// renders these same errors to users as "network may be offline".
+func isTransientSyncError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"could not resolve host",
+		"resolving timed out",
+		"no such host",
+		"connection timed out",
+		"operation timed out",
+		"connection refused",
+		"connection reset",
+		"network is unreachable",
+		"network is down",
+		"temporary failure in name resolution",
+		"ssl connect error",
+		"gnutls_handshake() failed",
+		"empty reply from server",
+		"failed to connect to",
+		"unexpected disconnect",
+		"the remote end hung up unexpectedly",
+		"early eof",
+		"context deadline exceeded",
+		"i/o timeout",
+		"502 bad gateway",
+		"503 service unavailable",
+		"504 gateway",
+		// Git's OWN wording for an HTTP error, which is what actually reaches
+		// this function. git-remote-https reports
+		//   "The requested URL returned error: 503"
+		// and never the reason phrase, so the three markers above — written
+		// from how a browser or proxy phrases it — matched nothing. A real
+		// sageox.ai 503 was therefore classified as a HARD failure: no retry,
+		// and the operator told their sync "failed" for an outage that would
+		// have cleared itself.
+		"returned error: 500",
+		"returned error: 502",
+		"returned error: 503",
+		"returned error: 504",
+		// A 5xx often returns an HTML error page where git expects the smart-HTTP
+		// protocol, and git reports the parse failure rather than the status.
+		// Same cause, same retryable answer.
+		"expected flush after ref listing",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// teamPullOutcome carries the structural facts about one team-context pull
+// that its error value cannot express. doTeamSync's retry routing needs to know
+// whether the cycle actually ran a pull, and no error chain can say so:
+// classifyAutostashFailure JOINS a failed index probe onto whatever the pull
+// already reported, so the same gitutil.ErrConflictProbeFailed sentinel turns
+// up both when nothing ran and when a pull ran and failed deterministically.
+type teamPullOutcome struct {
+	// PullRan mirrors ManagedRepoPullResult.PullRan for this cycle. False for
+	// every path that returns before the fetch+pull — including a corrupt-repo
+	// move-aside and every skip.
+	PullRan bool
+}
+
 // pullTeamContext performs a git pull on a single team context repo.
-// Returns nil if skipped due to recent fetch (by another daemon).
+// Returns a nil error if the remote is unchanged.
 //
 // Multi-daemon deduplication: Users often work on multiple repos that share
 // the same team context (e.g., 5-6 project repos all pointing to one team
 // context directory). Each repo has its own daemon, so without coordination,
 // they'd all try to git pull the same team context simultaneously.
 //
-// We solve this by checking .git/FETCH_HEAD mtime before fetching. Git updates
-// this file on every fetch, so if it was recently modified (by any process),
-// we skip the pull. This naturally deduplicates without locks - whichever
-// daemon fetches first "wins" and others skip for that interval.
+// The endpoint ownership lease selects one background sync daemon, and the
+// per-repository lock serializes it with on-demand syncs. Under that lock,
+// ls-remote skips unchanged repos. A recent fetch must not delay a new commit.
 //
 // Change Detection: After a successful pull, this function compares file states
 // before and after to detect changes in key team context files (distilled discussions,
 // agent definitions, etc.). When changes are detected, a notification marker is written
 // so that CLI commands can "whisper" updates to agents.
-func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error {
+func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamPullOutcome, error) {
 	repoName := filepath.Base(path)
-
-	// compute FETCH_HEAD min age from manifest if available
-	minFetchAge := minTeamContextFetchAge
-	if intervalMin := s.workspaceRegistry.GetSyncIntervalMin(path); intervalMin > 0 {
-		minFetchAge = time.Duration(intervalMin) * time.Minute
-	}
 
 	// read manifest before pull to get auto-resolve prefixes. The manifest
 	// is already on disk from the previous clone/pull. If missing, ParseFile
@@ -425,17 +666,27 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 	mCfg := manifest.ParseFile(manifestPath, manifest.RepoKindTeamContext)
 
 	result := s.pullManagedRepo(ctx, ManagedRepoPullOpts{
+		// Discussion dirs are ID-named and full of near-identical JSON, so when
+		// upstream deletes one discussion and adds another, rename detection
+		// pairs them and any local change to the deleted one becomes a false
+		// rename/delete conflict that suspends sync. Cost: a real upstream
+		// rename racing a local edit of that same file now surfaces as
+		// modify/delete instead of following the rename, which suspends sync
+		// the same way until it is resolved. The local edit is kept (in the
+		// worktree and the autostash), never discarded.
+		ImmutablePaths:     true,
 		RepoPath:           path,
 		RepoName:           repoName,
 		ProjectRoot:        s.config.ProjectRoot,
 		SyncInterval:       s.config.TeamContextSyncInterval,
-		MinFetchAge:        minFetchAge,
+		SkipFetchAgeCheck:  true,
 		ValidateIntegrity:  true,
 		DetectDivergence:   true,
 		ResolveRules:       mCfg.ResolveRules,
 		EnsureKBMergeAttrs: true, // shared kb resilience for team-context wedges
 		Logger:             s.logger,
 	})
+	outcome := teamPullOutcome{PullRan: result.PullRan}
 
 	// corrupt repo: move aside so background clone picks it up next cycle.
 	// The local path is now GONE, so this sync did not produce usable context —
@@ -448,9 +699,18 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 			"path", path, "backup", backupPath)
 		if err := os.Rename(path, backupPath); err != nil {
 			s.logger.Error("failed to move corrupt team context aside", "error", err)
-			return fmt.Errorf("corrupt team context at %s but rename failed: %w", path, err)
+			return outcome, fmt.Errorf("corrupt team context at %s but rename failed: %w", path, err)
 		}
-		return fmt.Errorf("team context repo was corrupt and moved aside for re-clone; re-run after the daemon re-clones it (path: %s)", path)
+		return outcome, fmt.Errorf("team context repo was corrupt and moved aside for re-clone; re-run after the daemon re-clones it (path: %s)", path)
+	}
+
+	// The repo exists and is not corrupt, so it is cloned: drop a clone_failed
+	// issue left by an earlier attempt. `ox doctor --fix` repairs a clone
+	// without going through the daemon's clone path, which is the only other
+	// place that clears it, so the warning would otherwise print every session.
+	// Before the skip branch: an unchanged remote skips every cycle.
+	if s.issues != nil {
+		s.issues.ClearIssue(IssueTypeCloneFailed, repoName)
 	}
 
 	// handle skip
@@ -460,6 +720,7 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 		} else if s.issues != nil {
 			s.issues.ClearIssue(IssueTypeGitLock, repoName)
 		}
+		s.clearDisprovedBySkip(repoName, result.SkipReason)
 		// A rebase in progress leaves the working tree in a partial, possibly
 		// inconsistent state — the team context is NOT safely usable, so return an
 		// error rather than letting the caller report it as "synced". The other
@@ -468,9 +729,16 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 		// present" means another live daemon is actively syncing this shared
 		// context (ox's multi-daemon dedup) while the files stay consistent.
 		if result.SkipReason == skipReasonRebaseInProgress {
-			return fmt.Errorf("team context not synced: rebase in progress (resolve the rebase, then re-run)")
+			return outcome, fmt.Errorf("team context not synced: rebase in progress (resolve the rebase, then re-run)")
 		}
-		return nil
+		// "Remote unchanged" is also how a clone AHEAD of its remote reads
+		// (remoteRefCheck accepts a remote tip that is an ancestor of HEAD), so
+		// this skip is exactly where an unpushed publish waits. The busy and
+		// lock-file skips are not: something else holds the clone.
+		if result.SkipReason == skipReasonRemoteUnchanged || result.SkipReason == skipReasonRecentlyFetched {
+			s.pushTeamPublishCommits(ctx, path)
+		}
+		return outcome, nil
 	}
 
 	// handle errors
@@ -483,7 +751,7 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 				s.issues.SetIssue(*result.Issue)
 			}
 		}
-		return result.Err
+		return outcome, result.Err
 	}
 
 	// clear lock issue on success
@@ -491,13 +759,27 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 		s.issues.ClearIssue(IssueTypeGitLock, repoName)
 	}
 
-	// sync succeeded - clear merge conflict and diverged issues
+	// sync succeeded - clear merge conflict, diverged, and stuck-rebase issues
 	if s.issues != nil {
 		s.issues.ClearIssue(IssueTypeMergeConflict, repoName)
 		s.issues.ClearIssue(IssueTypeDiverged, repoName)
+		// bd ox-baz5.3: team-context clones go through the same
+		// pullManagedRepo recovery ladder as the ledger and can raise the
+		// same stuck-rebase issue, keyed on this same repoName
+		// (ManagedRepoPullOpts.RepoName above). See sync.go's doPull.
+		s.issues.ClearIssue(IssueTypeRebaseStuck, repoName)
+		// Same reasoning as doPull: a completed pull proves the index is
+		// readable again, so the repo-integrity issue must not persist.
+		s.issues.ClearIssue(IssueTypeRepoIntegrity, repoName)
 	}
+	s.clearErrors(repoName)
 
-	return nil
+	// The one push leg a team context has on the daemon side, deliberately
+	// narrow: only `ox skills publish` commits, and only when nothing else is
+	// ahead (see ShouldPushTeamPublishes). Best-effort; it never fails the pull.
+	s.pushTeamPublishCommits(ctx, path)
+
+	return outcome, nil
 }
 
 // applySparseCheckout reads the manifest from a team context repo and applies
@@ -506,7 +788,13 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 // so kb sync and team-context sync share the same sparse application logic.
 func (s *SyncScheduler) applySparseCheckout(ctx context.Context, tcPath string) *manifest.ManifestConfig {
 	cfg := manifest.ParseFile(filepath.Join(tcPath, ".sageox", "sync.manifest"), manifest.RepoKindTeamContext)
-	_ = applySparseFromManifest(ctx, tcPath, cfg, s.logger)
+	// a done context fails every git call; the refresh retries next cycle and
+	// the pull error (if any) already explains why
+	if ctx.Err() != nil {
+		s.logger.Debug("skipping sparse-checkout refresh, context done", "path", tcPath, "error", ctx.Err())
+		return cfg
+	}
+	_ = applySparseFromManifest(ctx, tcPath, cfg, manifest.RepoKindTeamContext, s.logger)
 	return cfg
 }
 

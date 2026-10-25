@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -352,6 +353,9 @@ func TestSyncScheduler_PullTeamContexts_NoTeamContextsConfigured(t *testing.T) {
 	assert.Empty(t, scheduler.TeamContextStatus())
 }
 
+// Two configured local Team Contexts must retain independent successful status.
+// Isolate auth and shared team data: real credentials can discover extra teams
+// and contaminate the registry despite a recent refresh timestamp.
 func TestSyncScheduler_TeamContextMultiple(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
@@ -361,6 +365,10 @@ func TestSyncScheduler_TeamContextMultiple(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
+
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 
 	// isolate from real credentials
 	prevConfigDir := gitserver.TestSetConfigDirOverride(t.TempDir())
@@ -395,6 +403,8 @@ team_name = "Team Beta"
 path = %q
 `, teamDir1, teamDir2)
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.local.toml"), []byte(configContent), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"),
+		[]byte(`{"endpoint":"https://fake.test.invalid"}`), 0644))
 
 	cfg := DefaultConfig()
 	cfg.ProjectRoot = projectDir
@@ -505,4 +515,39 @@ func TestSyncScheduler_Start_TeamContextTicker(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("scheduler should stop when context canceled")
 	}
+}
+
+// A stopped scheduler must not wake later and sync using another test's state.
+func TestSyncScheduler_Start_CancelsDelayedTeamSync(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: observes the five-second initial team-sync delay")
+	}
+
+	scheduler, _, logs := newTeamBudgetScheduler(t, 0)
+	scheduler.config.SyncIntervalRead = time.Hour
+	scheduler.config.TeamContextSyncInterval = time.Hour
+	scheduler.config.VersionCheckInterval = 0
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		scheduler.Start(ctx)
+	}()
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), "sync scheduler started")
+	}, 5*time.Second, time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("scheduler did not stop after cancellation")
+	}
+
+	// The empty fixture logs this only if a team sync actually runs. Stay
+	// beyond the startup delay so the old detached goroutine is observed.
+	assert.Never(t, func() bool {
+		return strings.Contains(logs.String(), "no team contexts configured")
+	}, 6*time.Second, 10*time.Millisecond, "team sync ran after the scheduler stopped")
 }

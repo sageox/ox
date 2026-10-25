@@ -1,8 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
@@ -21,74 +25,27 @@ var (
 
 var logoutCmd = &cobra.Command{
 	Use:   "logout",
+	Args:  cobra.NoArgs,
 	Short: "Log out of SageOx",
 	Long:  "Remove local authentication token and log out of SageOx.",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// get all logged-in endpoints
-		loggedInEndpoints := auth.GetLoggedInEndpoints()
+		// Logout must see expired disk tokens too: they may still have a
+		// refresh token that keeps the login usable, and leaving it on disk
+		// makes a reported logout a false promise. Preserve env-only logins,
+		// which ListEndpoints cannot see because they are not stored in auth.json.
+		loggedInEndpoints, listErr := collectLogoutEndpoints()
 		if len(loggedInEndpoints) == 0 {
+			if listErr != nil {
+				return fmt.Errorf("failed to list stored authentication endpoints: %w", listErr)
+			}
 			fmt.Println("You are not currently logged in to any endpoints.")
 			return nil
 		}
 
 		// determine which endpoint(s) to logout from
-		var endpointsToLogout []string
-
-		if logoutAll {
-			// logout from all endpoints
-			endpointsToLogout = loggedInEndpoints
-		} else if logoutEndpoint != "" {
-			// use specified endpoint
-			found := false
-			for _, ep := range loggedInEndpoints {
-				if ep == logoutEndpoint || endpoint.NormalizeSlug(ep) == endpoint.NormalizeSlug(logoutEndpoint) {
-					endpointsToLogout = []string{ep}
-					found = true
-					break
-				}
-			}
-			if !found {
-				return fmt.Errorf("not logged in to endpoint: %s", logoutEndpoint)
-			}
-		} else if len(loggedInEndpoints) == 1 {
-			// only one endpoint, use it
-			endpointsToLogout = loggedInEndpoints
-		} else if logoutForce {
-			// --force with multiple endpoints: log out from all (non-interactive)
-			endpointsToLogout = loggedInEndpoints
-		} else {
-			// multiple endpoints - prompt for selection
-			fmt.Println()
-			fmt.Println(cli.StyleDim.Render("You are logged into multiple SageOx endpoints."))
-			fmt.Println()
-
-			// display options
-			for i, ep := range loggedInEndpoints {
-				fmt.Printf("  %d. %s\n", i+1, ep)
-			}
-			fmt.Printf("  %d. All endpoints\n", len(loggedInEndpoints)+1)
-			fmt.Println()
-
-			// prompt for selection
-			var selection int
-			maxSelection := len(loggedInEndpoints) + 1
-			for {
-				fmt.Print("Select endpoint to logout (1-", maxSelection, "): ")
-				var input string
-				fmt.Scanln(&input)
-				n, err := fmt.Sscanf(input, "%d", &selection)
-				if err == nil && n == 1 && selection >= 1 && selection <= maxSelection {
-					break
-				}
-				fmt.Println(cli.StyleDim.Render("Invalid selection. Please enter a number."))
-			}
-
-			if selection == len(loggedInEndpoints)+1 {
-				// all endpoints selected
-				endpointsToLogout = loggedInEndpoints
-			} else {
-				endpointsToLogout = []string{loggedInEndpoints[selection-1]}
-			}
+		endpointsToLogout, selErr := selectLogoutEndpoints(loggedInEndpoints, logoutAll, logoutEndpoint, logoutForce)
+		if selErr != nil {
+			return selErr
 		}
 
 		// confirm before logging out (skip if --force)
@@ -99,32 +56,30 @@ var logoutCmd = &cobra.Command{
 			} else {
 				confirmMsg = fmt.Sprintf("Log out from %d endpoints?", len(endpointsToLogout))
 			}
-			if !cli.ConfirmYesNo(confirmMsg, false) {
+			confirmed, confirmErr := cli.ConfirmYesNoRequired(confirmMsg, false, false)
+			if confirmErr != nil {
+				return confirmErr
+			}
+			if !confirmed {
 				fmt.Println("Logout canceled.")
 				return nil
 			}
 		}
 
 		// logout from each endpoint
-		var anyServerFailed bool
+		var anyServerFailed, anyLoginChanged bool
 		for _, ep := range endpointsToLogout {
 			client := auth.NewAuthClient().WithEndpoint(ep)
 			status, err := client.RevokeTokenStatus()
-			if err != nil {
+			if err != nil && !errors.Is(err, auth.ErrLocalTokenNotRemoved) {
 				fmt.Printf("Failed to logout from %s: %v\n", ep, err)
 				anyServerFailed = true
 				continue
 			}
-			switch status {
-			case auth.RevocationSuccess, auth.RevocationNoToken:
-				fmt.Printf("Logged out from %s\n", ep)
-			case auth.RevocationNetworkError:
-				anyServerFailed = true
-				fmt.Printf("Logged out locally from %s (could not reach server)\n", ep)
-			case auth.RevocationServerFailed:
-				anyServerFailed = true
-				fmt.Printf("Logged out locally from %s (server did not confirm revocation)\n", ep)
-			}
+			line, serverUnconfirmed := logoutOutcome(ep, status, err)
+			fmt.Println(line)
+			anyServerFailed = anyServerFailed || serverUnconfirmed
+			anyLoginChanged = anyLoginChanged || errors.Is(err, auth.ErrLoginChanged)
 		}
 
 		if anyServerFailed {
@@ -146,8 +101,65 @@ var logoutCmd = &cobra.Command{
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("logout", tips.AlwaysShow, false, !userCfg.AreTipsEnabled(), false)
 
+		if listErr != nil {
+			return fmt.Errorf("failed to list stored authentication endpoints: %w", listErr)
+		}
+		// The kept login was never revoked, so it is still live: a script must
+		// not read this logout as done.
+		if anyLoginChanged {
+			return errors.New("login changed during logout; run `ox logout` again")
+		}
 		return nil
 	},
+}
+
+// logoutOutcome words one endpoint's logout from the server's answer. localErr
+// (wrapping auth.ErrLocalTokenNotRemoved, or nil) means the local copy stayed
+// behind; it changes what is said about the local token, never the server's
+// answer, so a revocation the server confirmed is not reported as failed.
+// serverUnconfirmed is true when the server-side session may still be active.
+func logoutOutcome(ep string, status auth.RevocationStatus, localErr error) (line string, serverUnconfirmed bool) {
+	if errors.Is(localErr, auth.ErrLoginChanged) {
+		// Not a failure to remove: a login saved during logout was kept on purpose.
+		localErr = errors.New("the login changed during logout and was kept")
+	}
+	switch status {
+	case auth.RevocationSuccess, auth.RevocationNoToken:
+		if localErr != nil {
+			return fmt.Sprintf("Revoked on the server for %s, but %v", ep, localErr), false
+		}
+		return fmt.Sprintf("Logged out from %s", ep), false
+	case auth.RevocationNetworkError:
+		if localErr != nil {
+			return fmt.Sprintf("Could not reach the server for %s, and %v", ep, localErr), true
+		}
+		return fmt.Sprintf("Logged out locally from %s (could not reach server)", ep), true
+	default: // auth.RevocationServerFailed
+		if localErr != nil {
+			return fmt.Sprintf("Server did not confirm revocation for %s, and %v", ep, localErr), true
+		}
+		return fmt.Sprintf("Logged out locally from %s (server did not confirm revocation)", ep), true
+	}
+}
+
+// collectLogoutEndpoints retains usable environment credentials even if auth.json
+// cannot be read, so a storage error does not prevent revoking credentials we can still identify.
+// The result is sorted: auth.json is a map, and an unsorted list numbered the
+// selection prompt and ordered the logouts differently on every run.
+func collectLogoutEndpoints() ([]string, error) {
+	endpoints, listErr := auth.ListEndpoints()
+	known := make(map[string]struct{}, len(endpoints))
+	for _, ep := range endpoints {
+		known[ep] = struct{}{}
+	}
+	for _, ep := range auth.GetLoggedInEndpoints() {
+		if _, ok := known[ep]; !ok {
+			endpoints = append(endpoints, ep)
+			known[ep] = struct{}{}
+		}
+	}
+	slices.Sort(endpoints)
+	return endpoints, listErr
 }
 
 func init() {
@@ -182,5 +194,71 @@ func stripExistingRemotes(ep string) {
 		if err := gitserver.StripRemoteCredentials(tc.Path); err != nil {
 			slog.Debug("failed to strip team context remote credentials", "team", tc.TeamName, "error", err)
 		}
+	}
+}
+
+// selectLogoutEndpoints resolves which endpoint(s) `ox logout` should act on.
+//
+// When several endpoints are logged in and none was named, this asks. If the
+// answer cannot be read it returns an error rather than canceling: canceling
+// exited 0 having revoked nothing and removed no local credentials, which is a
+// logout that silently did not happen. Which endpoint to log out of is a
+// selection, not a yes/no, so --yes cannot answer it either — the error names
+// the deterministic alternatives instead of guessing one.
+func selectLogoutEndpoints(loggedInEndpoints []string, all bool, specified string, force bool) ([]string, error) {
+	switch {
+	case all:
+		return loggedInEndpoints, nil
+
+	case specified != "":
+		for _, ep := range loggedInEndpoints {
+			if ep == specified || endpoint.NormalizeSlug(ep) == endpoint.NormalizeSlug(specified) {
+				return []string{ep}, nil
+			}
+		}
+		return nil, fmt.Errorf("not logged in to endpoint: %s", specified)
+
+	case len(loggedInEndpoints) == 1:
+		return loggedInEndpoints, nil
+
+	case force:
+		// --force with multiple endpoints: log out from all (non-interactive)
+		return loggedInEndpoints, nil
+	}
+	if cli.NoInput() {
+		return nil, fmt.Errorf("--no-input requires --endpoint <endpoint> or --all when logged into multiple endpoints")
+	}
+
+	// multiple endpoints - prompt for selection
+	fmt.Println()
+	fmt.Println(cli.StyleDim.Render("You are logged into multiple SageOx endpoints."))
+	fmt.Println()
+
+	for i, ep := range loggedInEndpoints {
+		fmt.Printf("  %d. %s\n", i+1, ep)
+	}
+	fmt.Printf("  %d. All endpoints\n", len(loggedInEndpoints)+1)
+	fmt.Println()
+
+	maxSelection := len(loggedInEndpoints) + 1
+	for {
+		fmt.Print("Select endpoint to logout (1-", maxSelection, "): ")
+		var input string
+		if _, err := fmt.Scanln(&input); err != nil {
+			return nil, fmt.Errorf("logged into %d endpoints and no selection could be read from stdin; "+
+				"pass --endpoint <endpoint> to choose one, or --all to log out of every endpoint",
+				len(loggedInEndpoints))
+		}
+		// strconv.Atoi, not fmt.Sscanf("%d"): Sscanf stops at the first
+		// non-digit, so "1abc" would parse as 1 and silently log out of an
+		// endpoint the operator never typed.
+		selection, err := strconv.Atoi(strings.TrimSpace(input))
+		if err == nil && selection >= 1 && selection <= maxSelection {
+			if selection == maxSelection {
+				return loggedInEndpoints, nil
+			}
+			return []string{loggedInEndpoints[selection-1]}, nil
+		}
+		fmt.Println(cli.StyleDim.Render("Invalid selection. Please enter a number."))
 	}
 }

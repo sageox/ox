@@ -1,17 +1,13 @@
 /* ox plan — injected chrome for an AUTHORED HTML plan (developer-hand-built,
-   no scaffold.css). Two parts:
-   1. .ox-chrome-* — the SageOx enrichment overlay + footer credit (new here).
-   2. .rev-* — a self-contained copy of the review-loop styles review.js needs
-      (scaffold.css owns the canonical copy for ox-generated renders; an
-      authored page never loads that file, so review.js would otherwise run
-      unstyled).
+   no scaffold.css): the SageOx enrichment overlay and the footer credit. The
+   review layer's styles are assets/review.css, which the bundle carries too.
    Every color is var(--x, fallback): a page that already defines --sage/--panel/
    etc. (e.g. one that reused the SageOx token names) themes the chrome for
    free; everything else gets the SageOx green-black palette as a fallback.
-   z-index is pinned near the top of the 32-bit range (2147483xxx, not
-   scaffold.css's 55-80): an authored page's own stacking context is unknown
-   and often deliberately tall (modals, sticky tab bars), so ox-owned chrome
-   must out-rank anything the author wrote to stay clickable. */
+   z-index is pinned near the top of the 32-bit range (2147483xxx): an authored
+   page's own stacking context is unknown and often deliberately tall (modals,
+   sticky tab bars), so ox-owned chrome must out-rank anything the author wrote
+   to stay clickable. */
 
 /* --- enrichment overlay (collision / prior-art / expert-routing chips) --- */
 .ox-chrome-btn{position:fixed;left:16px;bottom:64px;z-index:2147483000;width:38px;height:38px;border-radius:50%;background:var(--panel, #111411);border:1px solid var(--hair, #212620);color:var(--sage, #99c693);font:600 11px/1 "Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.02em;cursor:pointer;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35));display:flex;align-items:center;justify-content:center;transition:transform .15s,border-color .15s}
@@ -40,105 +36,5 @@
 .ox-chrome-foot a{color:var(--sage, #99c693);text-decoration:none}
 .ox-chrome-foot a:hover{text-decoration:underline}
 
-/* --- in-document review layer (ox plan review / feedback) ---
-   copied from assets/scaffold.css; keep the two in sync by hand when the
-   review-loop markup changes (review.js is the shared source of truth for
-   which classes exist; this file only supplies their paint). */
-.rev-status{background:var(--panel2, #171b17);border:1px solid var(--hair, #212620);border-left:3px solid var(--gold, #d9b654);border-radius:9px;padding:10px 14px;margin:12px 0 6px;font-size:13.5px;color:var(--dim, #b7b6a3)}
-.rev-status-tag{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--gold, #d9b654);margin-right:8px}
-.rev-status strong{color:var(--ink, #f4f2ef)}
-.rev-bar{position:fixed;left:16px;bottom:16px;z-index:2147483000;display:flex;align-items:center;gap:8px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:9px;padding:6px 8px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
-.rev-bar button{background:var(--panel2, #171b17);border:1px solid var(--hair, #212620);color:var(--dim, #b7b6a3);border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
-.rev-bar button:hover{color:var(--ink, #f4f2ef)}
-.rev-bar .rev-toggle.on{background:var(--sage, #99c693);border-color:var(--sage, #99c693);color:#111411}
-.rev-bar .rev-submit{border-color:var(--sage, #99c693);color:var(--sage, #99c693)}
-.rev-bar .rev-count{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--faint, #8c8e7e)}
-.rev-bar .rev-who{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--faint, #8c8e7e)}
-.rev-bar .rev-who:hover{color:var(--sage, #99c693);border-color:var(--sage, #99c693)}
-body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.rev-on tr:hover,body.rev-on .ox-chip:hover,body.rev-on .stat:hover,body.rev-on .bar-row:hover,body.rev-on [data-ox-section]:hover{outline:1px dashed var(--sage, #99c693);outline-offset:2px;cursor:crosshair}
-/* inline mark glyph — redundant encoding: distinct GLYPH per status, color reinforces (never color alone) */
-.rev-marked,.rev-committed{position:relative;box-shadow:inset 3px 0 0 var(--hair, #212620)}
-.rev-glyph{position:absolute;left:-1.25em;top:0;font-size:12px;line-height:1.5;color:var(--dim, #b7b6a3)}
-.rev-marked[data-rev="approve"]{box-shadow:inset 3px 0 0 var(--sage, #99c693)} .rev-marked[data-rev="approve"] .rev-glyph{color:var(--sage, #99c693)}
-.rev-marked[data-rev="request-change"]{box-shadow:inset 3px 0 0 var(--amber, #c6a23c)} .rev-marked[data-rev="request-change"] .rev-glyph{color:var(--amber, #c6a23c)}
-.rev-marked[data-rev="flag"]{box-shadow:inset 3px 0 0 var(--red, #d77e6c)} .rev-marked[data-rev="flag"] .rev-glyph{color:var(--red, #d77e6c)}
-.rev-marked[data-rev="comment"]{box-shadow:inset 3px 0 0 var(--gold, #d9b654)} .rev-marked[data-rev="comment"] .rev-glyph{color:var(--gold, #d9b654)}
-/* committed states: addressed/verified struck + green-check; open keeps status; wontfix muted */
-.rev-committed[data-revstate="addressed"],.rev-committed[data-revstate="verified"]{box-shadow:inset 3px 0 0 var(--sage, #99c693)}
-.rev-committed[data-revstate="addressed"] .rev-glyph,.rev-committed[data-revstate="verified"] .rev-glyph{color:var(--sage, #99c693)}
-.rev-committed[data-revstate="open"]{box-shadow:inset 3px 0 0 var(--amber, #c6a23c)} .rev-committed[data-revstate="open"] .rev-glyph{color:var(--amber, #c6a23c)}
-.rev-committed[data-revstate="wontfix"] .rev-glyph{color:var(--faint, #8c8e7e)}
-.rev-pop{position:absolute;z-index:2147483001;width:280px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:9px;padding:10px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
-.rev-pop .rev-row{display:flex;flex-wrap:wrap;gap:5px;margin:4px 0}
-.rev-pop .rev-s{flex:1 1 auto;background:var(--panel2, #171b17);border:1px solid var(--hair, #212620);color:var(--dim, #b7b6a3);border-radius:5px;padding:3px 6px;font-size:10.5px;cursor:pointer;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
-/* control color PREDICTS the resulting mark color */
-.rev-pop .rev-s[data-s="approve"].on{background:var(--sage, #99c693);border-color:var(--sage, #99c693);color:#111411}
-.rev-pop .rev-s[data-s="request-change"].on{background:var(--amber, #c6a23c);border-color:var(--amber, #c6a23c);color:#111411}
-.rev-pop .rev-s[data-s="flag"].on{background:var(--red, #d77e6c);border-color:var(--red, #d77e6c);color:#fff}
-.rev-pop .rev-s[data-s="comment"].on{background:var(--gold, #d9b654);border-color:var(--gold, #d9b654);color:#111411}
-.rev-pop .rev-note{width:100%;min-height:54px;background:var(--bg, #0b0d0b);border:1px solid var(--hair, #212620);border-radius:5px;color:var(--ink, #f4f2ef);font-family:Inter,system-ui,sans-serif;font-size:12.5px;padding:6px;resize:vertical}
-.rev-pop .rev-save{flex:1;background:var(--sage, #99c693);border:1px solid var(--sage, #99c693);color:#111411;border-radius:5px;padding:4px;font-size:11px;cursor:pointer}
-.rev-pop .rev-del{background:var(--panel2, #171b17);border:1px solid var(--hair, #212620);color:var(--dim, #b7b6a3);border-radius:5px;padding:4px 8px;font-size:11px;cursor:pointer}
-.rev-pop .rev-cap{font-size:11.5px;color:var(--dim, #b7b6a3);margin-bottom:6px}
-.rev-pop .rev-accept{flex:1;background:var(--sage, #99c693);border:1px solid var(--sage, #99c693);color:#111411;border-radius:5px;padding:4px;font-size:11px;cursor:pointer}
-.rev-pop .rev-reopen{background:var(--panel2, #171b17);border:1px solid var(--amber, #c6a23c);color:var(--amber, #c6a23c);border-radius:5px;padding:4px 8px;font-size:11px;cursor:pointer}
-/* top-level Approve (closes the loop) */
-.rev-bar .rev-approve{border-color:var(--sage, #99c693);color:var(--sage, #99c693)}
-.rev-bar .rev-approve:hover{background:var(--sage, #99c693);color:#111411}
-/* orphaned-note banner — feedback whose anchored text changed */
-.rev-orphans{position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:2147482998;max-width:680px;background:var(--panel, #111411);border:1px solid var(--amber, #c6a23c);border-left:3px solid var(--amber, #c6a23c);border-radius:9px;padding:10px 14px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35));font-size:13px;color:var(--dim, #b7b6a3)}
-.rev-orphans-h{color:var(--amber, #c6a23c);font-weight:600;margin-bottom:4px}
-.rev-orphans ul{margin:.3em 0;padding-left:1.1em}
-.rev-orphans .rev-orphans-x{margin-top:6px;background:var(--panel2, #171b17);border:1px solid var(--hair, #212620);color:var(--dim, #b7b6a3);border-radius:5px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
-/* first-visit discoverability bubble near the Review toggle */
-/* A quiet outlined chip, not a filled shout: this sits over the plan's own
-   bottom-left corner, and a saturated pill there competes with the document for
-   the reader's first fixation. The infinite 1.4s bob it used to run was motion
-   that repeated forever without ever communicating anything new — replaced by a
-   single settle on entry, which says "I just appeared" once and then stops. */
-.rev-hint{position:fixed;left:96px;bottom:20px;z-index:2147482997;background:var(--panel, #111411);border:1px solid var(--sage, #99c693);color:var(--sage, #99c693);border-radius:7px;padding:6px 10px;font-size:12px;font-weight:500;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35));animation:rev-hint-in .25s ease-out both}
-@keyframes rev-hint-in{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:none}}
-@media (prefers-reduced-motion:reduce){.rev-hint{animation:none}}
-/* review comments rail — surfaces the note TEXT (not just a margin glyph) in the
-   right gutter; each row scroll-jumps to its anchored element. */
-.rev-rail{position:fixed;top:64px;right:18px;z-index:2147482996;width:266px;max-height:calc(100vh - 100px);overflow-y:auto;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:10px;padding:10px 12px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
-.rev-rail-h{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim, #b7b6a3);margin-bottom:8px;display:flex;align-items:center;gap:6px}
-.rev-rail-n{background:var(--panel2, #171b17);border:1px solid var(--hair, #212620);border-radius:8px;padding:0 6px;font-size:10.5px;color:var(--faint, #8c8e7e)}
-.rev-rail-empty{color:var(--faint, #8c8e7e);font-size:12px;line-height:1.5}
-.rev-rail-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
-.rev-rail-item{display:flex;gap:8px;padding:7px 8px;background:var(--bg, #0b0d0b);border:1px solid var(--hair, #212620);border-left:3px solid var(--hair, #212620);border-radius:7px;cursor:pointer}
-.rev-rail-item:hover{border-color:var(--hair, #212620);background:var(--panel2, #171b17)}
-.rev-rail-item[data-status="approve"]{border-left-color:var(--sage, #99c693)} .rev-rail-item[data-status="approve"] .rev-rail-glyph{color:var(--sage, #99c693)}
-.rev-rail-item[data-status="request-change"]{border-left-color:var(--amber, #c6a23c)} .rev-rail-item[data-status="request-change"] .rev-rail-glyph{color:var(--amber, #c6a23c)}
-.rev-rail-item[data-status="flag"]{border-left-color:var(--red, #d77e6c)} .rev-rail-item[data-status="flag"] .rev-rail-glyph{color:var(--red, #d77e6c)}
-.rev-rail-item[data-status="comment"]{border-left-color:var(--gold, #d9b654)} .rev-rail-item[data-status="comment"] .rev-rail-glyph{color:var(--gold, #d9b654)}
-.rev-rail-glyph{flex:none;font-size:12px;line-height:1.4;color:var(--dim, #b7b6a3)}
-.rev-rail-body{min-width:0;flex:1}
-.rev-rail-sec{display:flex;align-items:center;gap:6px;margin-bottom:3px}
-.rev-rail-sec-t{flex:1;min-width:0;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;color:var(--faint, #8c8e7e);text-transform:uppercase;letter-spacing:.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.rev-rail-who{flex:none;font-size:9px;border-radius:6px;padding:0 5px;border:1px solid var(--hair, #212620);color:var(--sage, #99c693);text-transform:none;letter-spacing:0;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.rev-rail-note{font-size:12.5px;color:var(--ink, #f4f2ef);line-height:1.45;overflow-wrap:anywhere}
-.rev-rail-note.muted{color:var(--dim, #b7b6a3)}
-.rev-rail-tag{flex:none;font-size:9px;border-radius:6px;padding:0 5px;border:1px solid var(--hair, #212620);color:var(--dim, #b7b6a3);text-transform:uppercase;letter-spacing:.02em}
-.rev-rail-tag.unsent{color:var(--gold, #d9b654);border-color:var(--gold, #d9b654)}
-.rev-rail-tag.addressed,.rev-rail-tag.verified{color:var(--sage, #99c693);border-color:var(--sage, #99c693)}
-.rev-rail-tag.wontfix{color:var(--faint, #8c8e7e)}
-.rev-flash{animation:rev-flash 1.2s ease-out}
-@keyframes rev-flash{0%{background:var(--amber, #c6a23c)}100%{background:transparent}}
-/* narrow viewports: the fixed rail would cover the prose, so drop it into flow */
-@media(max-width:1400px){.rev-rail{position:static;width:auto;max-height:none;margin:24px 16px 0;right:auto;top:auto}}
-@media print{.rev-bar,.toggle,.rev-orphans,.rev-hint,.rev-rail,.ox-chrome-btn,.ox-chrome-panel{display:none}}
-/* review connection state — the page must never look live when the server is gone */
-.rev-conn{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
-.rev-conn.ok{color:var(--sage, #99c693)}
-.rev-conn.off{color:var(--red, #d77e6c);animation:rev-conn-pulse 1.6s ease-in-out infinite}
-@keyframes rev-conn-pulse{50%{opacity:.45}}
-.rev-offline-bar{position:fixed;top:0;left:0;right:0;z-index:2147483002;background:var(--panel, #111411);border-bottom:2px solid var(--red, #d77e6c);color:var(--ink, #f4f2ef);padding:9px 14px;font-size:13px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
-.rev-offline-bar code{background:var(--panel2, #171b17);border:1px solid var(--hair, #212620);border-radius:5px;padding:2px 7px;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;user-select:all}
-.rev-offline-bar .rev-offline-copy{margin-left:6px;background:var(--panel2, #171b17);border:1px solid var(--hair, #212620);color:var(--dim, #b7b6a3);border-radius:5px;padding:2px 8px;font-size:11px;cursor:pointer}
-.rev-offline-bar .rev-offline-copy:hover{color:var(--ink, #f4f2ef)}
-body.rev-offline .rev-bar .rev-submit,body.rev-offline .rev-bar .rev-approve{opacity:.45;cursor:not-allowed}
-.rev-toast{position:fixed;left:16px;bottom:64px;z-index:2147483000;background:var(--panel, #111411);border:1px solid var(--sage, #99c693);color:var(--ink, #f4f2ef);border-radius:9px;padding:8px 12px;font-size:12.5px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
-
-/* print: the chrome is a review surface, never part of the printed plan */
-@media print{.ox-chrome-btn,.ox-chrome-panel,.rev-bar,.rev-rail,.rev-orphans,.rev-hint,.rev-pop,.rev-offline-bar,.rev-toast,.ox-chrome-foot{display:none!important}}
+/* print: ox's chrome is never part of the printed plan */
+@media print{.ox-chrome-btn,.ox-chrome-panel,.ox-chrome-foot{display:none!important}}

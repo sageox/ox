@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
 )
@@ -87,8 +88,7 @@ func runAgentSessionContextTrace(inst *agentinstance.Instance, _ []string) error
 		TracePath:  writer.Path(),
 		EventCount: eventCount,
 	}
-	jsonOut, _ := json.MarshalIndent(output, "", "  ")
+	jsonOut, _ := cli.MarshalJSONIndent(output)
 	trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.WriteJSONBytes(os.Stdout, jsonOut)
 }

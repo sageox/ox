@@ -48,7 +48,7 @@ func parseFrontmatter(path string) docFrontmatter {
 
 		// frontmatter must start on line 1 with ---
 		if lineCount == 1 {
-			if line == "---" {
+			if IsFrontmatterFence(trimBOM(line)) {
 				inFrontmatter = true
 				continue
 			}
@@ -56,7 +56,7 @@ func parseFrontmatter(path string) docFrontmatter {
 		}
 
 		// closing delimiter
-		if inFrontmatter && line == "---" {
+		if inFrontmatter && IsFrontmatterFence(line) {
 			break
 		}
 
@@ -109,9 +109,123 @@ func parseFrontmatter(path string) docFrontmatter {
 	return fm
 }
 
+// trimBOM drops one leading UTF-8 byte-order mark.
+//
+// Every frontmatter reader here applies it to the first line, because editors,
+// YAML loaders and coding agents all do: a reader that did not would see "no
+// frontmatter" in a file every consumer reads WITH frontmatter, silently
+// dropping repos:, audience:, status: and requires: — widening where a skill
+// lands, and publishing drafts. Mirrors teamskills normalizeManifest, which
+// closes the same gap on the trust side.
+func trimBOM(s string) string {
+	return strings.TrimPrefix(s, "\ufeff")
+}
+
+// IsFrontmatterFence reports whether line opens or closes YAML frontmatter:
+// `---` once trailing spaces and tabs are removed, with nothing before it
+// (trust contract v2, R2). YAML loaders accept "--- ", so a reader demanding
+// the exact bytes saw no frontmatter where every consumer sees one — which hid
+// an allowed-tools grant from the trust check and dropped repos:/status: here.
+//
+// The ONE definition: teamskills' trust check and every reader in this package
+// call it, so they cannot disagree about where a manifest's frontmatter is.
+// line excludes its newline; a stray "\r" counts as trailing whitespace.
+func IsFrontmatterFence(line string) bool {
+	return strings.TrimRight(line, " \t\r") == "---"
+}
+
 // extractValue gets the trimmed value after a "key:" prefix, stripping quotes.
 func extractValue(line, prefix string) string {
-	val := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	val := stripYAMLComment(strings.TrimSpace(strings.TrimPrefix(line, prefix)))
 	val = strings.Trim(val, `"'`)
 	return val
+}
+
+// stripYAMLComment removes a trailing ` #` comment from a scalar value.
+//
+// Without this, `globs: **/*.go,**/*.mod   # matches Cursor` parsed the comment
+// as part of the value and produced glob entries named "Cursor" and "Copilot" —
+// a rule scoped to files that do not exist, which silently never applies. The
+// guide's own examples carried such comments, so anyone copying them got a rule
+// that looked scoped and was not.
+//
+// A value that OPENS with a quote is returned through its closing quote, because
+// inside quotes a `#` is literal YAML and truncating there would corrupt a
+// description that legitimately contains one.
+func stripYAMLComment(v string) string {
+	if len(v) > 0 && (v[0] == '"' || v[0] == '\'') {
+		if end := closingQuote(v); end > 0 {
+			return v[:end+1]
+		}
+		return v // unterminated quote: leave it alone rather than guess
+	}
+	// A flow sequence has to be scanned to its matching bracket before any
+	// comment can be found, because a # inside one of its quoted entries is
+	// literal. Cutting at the first " #" turned globs: ["**/*.go # generated"]
+	// into the unparseable ["**/*.go — telling the agent a scope that does not
+	// match the files the author meant.
+	if len(v) > 0 && v[0] == '[' {
+		if end := closingBracket(v); end > 0 {
+			return v[:end+1]
+		}
+		return v // unterminated sequence: leave it alone rather than guess
+	}
+	if idx := strings.Index(v, " #"); idx >= 0 {
+		return strings.TrimSpace(v[:idx])
+	}
+	if strings.HasPrefix(v, "#") {
+		return "" // the whole value is a comment
+	}
+	return v
+}
+
+// closingBracket returns the index of the ] that closes the flow sequence
+// opened at v[0], or -1 when it is unterminated. Brackets inside quoted entries
+// do not count, and nesting is tracked so a sequence of sequences survives.
+func closingBracket(v string) int {
+	depth := 0
+	for i := 0; i < len(v); i++ {
+		switch v[i] {
+		case '\'', '"':
+			end := closingQuote(v[i:])
+			if end < 0 {
+				return -1 // unterminated quote inside the sequence
+			}
+			i += end
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// closingQuote returns the index of the quote that ends the scalar opened at
+// v[0], or -1 when it is unterminated.
+//
+// Both escape forms have to be honored or the value is silently truncated at
+// its first inner quote: YAML doubles a single quote ('It”s') and backslash-
+// escapes a double quote ("say \"hi\""). Truncating there turns a description
+// into a fragment, and the reader has no way to tell it happened.
+func closingQuote(v string) int {
+	quote := v[0]
+	for i := 1; i < len(v); i++ {
+		switch {
+		case quote == '\'' && v[i] == '\'':
+			if i+1 < len(v) && v[i+1] == '\'' {
+				i++ // '' is one literal quote, not the end
+				continue
+			}
+			return i
+		case quote == '"' && v[i] == '\\':
+			i++ // skip whatever this escapes, including \"
+		case quote == '"' && v[i] == '"':
+			return i
+		}
+	}
+	return -1
 }

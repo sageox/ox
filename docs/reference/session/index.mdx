@@ -1,7 +1,7 @@
 ---
 title: "ox session"
 description: "CLI reference for ox session"
-sidebar_position: 76
+sidebar_position: 90
 ---
 
 ## ox session
@@ -22,6 +22,10 @@ Commands:
   ox session status    Check recording status
   ox session score     Report SageOx contribution score
 
+```
+ox session [flags]
+```
+
 ### Options
 
 ```
@@ -31,18 +35,21 @@ Commands:
 ### Options inherited from parent commands
 
 ```
-  -c, --config string    config file path (default: .sageox/config.yaml)
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
       --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
   -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
 ```
 
 ### SEE ALSO
 
 * [ox](/)	 - Shared team context that makes agentic engineering multiplayer
 * [ox session audit](/session/audit)	 - Audit session recordings for credential patterns (read-only; expensive)
+* [ox session import](/session/import)	 - Upload past Claude Code and Codex sessions from this repo to the Ledger
 * [ox session lint](/session/lint)	 - Validate session raw.jsonl for web viewer compatibility
 * [ox session list](/session/list)	 - List sessions
 * [ox session prune](/session/prune)	 - Remove local-only sessions
@@ -54,4 +61,4 @@ Commands:
 * [ox session stop](/session/stop)	 - Stop a recording session
 * [ox session token-optimize](/session/token-optimize)	 - Compress a session raw.jsonl for summarization (streaming, deterministic)
 * [ox session view](/session/view)	 - View a session
-
+* [ox session wait](/session/wait)	 - Wait until this machine's sessions reach the Ledger, and report what did

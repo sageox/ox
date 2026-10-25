@@ -4,14 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os/exec"
 	"strings"
 	"time"
 )
-
-// abortTimeout is the timeout for git --abort operations. Matches the
-// 10s timeout used at existing abort call sites (internal/daemon/sync_managed.go).
-const abortTimeout = 10 * time.Second
 
 // AuditableOp is a git operation whose --abort behavior is audited.
 type AuditableOp string
@@ -31,6 +26,12 @@ const (
 // unmerged_count, unmerged_sample (first 3 paths, comma-joined), stash_count.
 // Post-abort log fields: op=<op>_abort_post, repo, head_sha_after,
 // success=true. On failure: op=<op>_abort_failed, repo, error.
+//
+// A rebase abort never rewinds a branch another writer moved mid-rebase; see
+// reanchorMovedRebase. git's abort resets the branch without a compare-and-
+// swap, so the caller MUST hold WithRepoLock(repoPath) from before this call
+// through its return: that is what keeps every ox writer from moving the
+// branch between the re-anchor and the reset.
 //
 // Returns nil if the abort succeeded, or the abort error otherwise. Logger
 // MUST be non-nil. Reason is a free-form string describing why the abort
@@ -58,11 +59,24 @@ func AuditAndAbort(ctx context.Context, repoPath string, op AuditableOp, reason 
 		"stash_count", stashCount,
 	)
 
-	// run abort in a fresh, bounded context — parent ctx may be canceled.
-	abortCtx, cancel := context.WithTimeout(context.Background(), abortTimeout)
+	// A rebase abort rewinds the branch to orig-head. If another writer moved
+	// the branch mid-rebase, that rewind would drop its commit, so re-anchor
+	// first — and refuse to abort when the branch tip cannot be read, since a
+	// wedge the next cycle retries beats a commit lost to the reflog.
+	if op == AuditOpRebase {
+		if err := reanchorMovedRebase(ctx, repoPath, logger); err != nil {
+			logger.Error("git_abort_refused",
+				"op", "rebase_abort_refused", "repo", repoName, "error", err, "head_sha", headSHA)
+			return fmt.Errorf("git rebase --abort refused: %w", err)
+		}
+	}
+
+	// the abort is local and a killed abort leaves the repo mid-rebase, so it
+	// outlives the caller's deadline and is bounded only against a true hang
+	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pullMaxTimeout)
 	defer cancel()
 
-	abortCmd := exec.CommandContext(abortCtx, "git", "-C", repoPath, string(op), "--abort")
+	abortCmd := commandContext(abortCtx, "git", "-C", repoPath, string(op), "--abort")
 	output, abortErr := abortCmd.CombinedOutput()
 	if abortErr != nil {
 		logger.Error("git_abort_failed",
@@ -92,7 +106,7 @@ func AuditAndAbort(ctx context.Context, repoPath string, op AuditableOp, reason 
 func captureHeadSHA(ctx context.Context, repoPath string) string {
 	subCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(subCtx, "git", "-C", repoPath, "rev-parse", "HEAD")
+	cmd := commandContext(subCtx, "git", "-C", repoPath, "rev-parse", "HEAD")
 	out, err := cmd.Output()
 	if err != nil {
 		return "unknown"
@@ -106,7 +120,7 @@ func captureHeadSHA(ctx context.Context, repoPath string) string {
 func captureUnmergedFiles(ctx context.Context, repoPath string) []string {
 	subCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(subCtx, "git", "-C", repoPath, "diff", "--name-only", "--diff-filter=U")
+	cmd := commandContext(subCtx, "git", "-C", repoPath, "diff", "--name-only", "--diff-filter=U")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil
@@ -125,7 +139,7 @@ func captureUnmergedFiles(ctx context.Context, repoPath string) []string {
 func captureStashCount(ctx context.Context, repoPath string) int {
 	subCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(subCtx, "git", "-C", repoPath, "stash", "list")
+	cmd := commandContext(subCtx, "git", "-C", repoPath, "stash", "list")
 	out, err := cmd.Output()
 	if err != nil {
 		return 0

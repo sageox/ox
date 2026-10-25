@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/pkg/sessionsummary"
 )
 
@@ -181,8 +182,17 @@ func hydrateStrandedSessions(stranded []dehydratedSession, ledgerPath string) ch
 			remaining = append(remaining, s)
 			continue
 		}
-		_, hydrateErr := lfs.HydrateRawToCacheErr(client, s.Dir, ledgerPath)
+		cachePath, hydrateErr := lfs.HydrateRawToCacheErr(client, s.Dir, ledgerPath)
 		if hydrateErr == nil {
+			// Ask for the summary explicitly. The daemon's finalize scan treats
+			// a transcript in the cache whose ledger entry already records a
+			// failed attempt as a read-only download (GH #1107), so without
+			// the request this download would never be summarized.
+			if err := session.WriteNeedsSummaryMarker(filepath.Dir(cachePath), cachePath, s.Dir); err != nil {
+				s.Reason = fmt.Sprintf("downloaded, but could not request a summary: %v", err)
+				remaining = append(remaining, s)
+				continue
+			}
 			recovered++
 			continue
 		}

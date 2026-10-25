@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -136,6 +137,53 @@ func TestCheckCodeIndexAtDir_CorruptMapping_TargetedRebuild(t *testing.T) {
 	require.NoError(t, db2.Close())
 }
 
+// TestCheckCodeIndexAtDir_MappingOpenErrorRecommendsFullReindex verifies that
+// doctor turns Bleve's otherwise opaque mapping-parse failure into the recovery
+// command known to work. The blocked heal-lock fixture keeps the open error
+// visible long enough for doctor to report it instead of repairing it inline.
+//
+// Failure prevented: doctor reports only a misleading lock-contention warning,
+// leaving users to discover `ox code index --full` from daemon logs.
+func TestCheckCodeIndexAtDir_MappingOpenErrorRecommendsFullReindex(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
+
+	dataDir := t.TempDir()
+	db, err := codedb.Open(dataDir)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	boltPath := filepath.Join(dataDir, "bleve", "comment", "store", "root.bolt")
+	corruptCommentMapping(t, boltPath)
+
+	// Put an unknown entry after the real snapshot. Bleve skips it and reaches
+	// the empty mapping; the lightweight corruption peek remains inconclusive.
+	bolt, err := bbolt.Open(boltPath, 0o600, &bbolt.Options{Timeout: time.Second})
+	require.NoError(t, err)
+	require.NoError(t, bolt.Update(func(tx *bbolt.Tx) error {
+		snapshots := tx.Bucket([]byte{'s'})
+		require.NotNil(t, snapshots, "snapshots bucket missing — Bleve layout changed")
+		return snapshots.Put([]byte{0xff}, []byte("unknown snapshot entry"))
+	}))
+	require.NoError(t, bolt.Close())
+
+	// Point the heal lock through a regular file so opening the lock fails with
+	// ENOTDIR. The store correctly refuses a lockless destructive repair,
+	// allowing doctor to exercise its open-error remediation path.
+	notDir := filepath.Join(dataDir, "not-a-directory")
+	require.NoError(t, os.WriteFile(notDir, []byte("block lock creation"), 0o600))
+	healLock := filepath.Join(dataDir, "bleve", "comment.heal.lock")
+	if err := os.Symlink(filepath.Join(notDir, "lock"), healLock); err != nil {
+		t.Skipf("symlink unavailable; cannot isolate heal-lock setup failure: %v", err)
+	}
+
+	result := checkCodeIndexAtDir(dataDir, false)
+	assert.True(t, result.warning, "an unhealed mapping error must be visible")
+	assert.Contains(t, result.message, "error parsing mapping JSON")
+	assert.Contains(t, result.detail, "ox code index --full")
+}
+
 // corruptCommentMapping zeroes the latest snapshot's mapping doc in the
 // comment sub-index — same on-disk state observed in production.
 func corruptCommentMapping(t *testing.T, boltPath string) {
@@ -171,4 +219,40 @@ func mustStatSize(t *testing.T, path string) int64 {
 func mustHasMarker(t *testing.T, dataDir, name string) bool {
 	t.Helper()
 	return store.HasNeedsReindexMarker(dataDir, name)
+}
+
+// `ox doctor --fix` removes the entire codedb directory on a corruption
+// verdict. That verdict must come from a check that actually inspected the
+// data: an index this process merely cannot read — locked by another writer,
+// on read-only media, permissions revoked — is not a damaged one, and removing
+// it costs minutes of rebuild for a condition that may clear on its own.
+func TestCheckCodeIndexAtDir_UnreadableIndexIsNotRemovedByFix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod does not deny reads on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod does not deny reads")
+	}
+
+	tmp := t.TempDir()
+	indexDir := filepath.Join(tmp, "codedb")
+	db, err := codedb.Open(indexDir)
+	require.NoError(t, err)
+	_, err = db.Store().Exec(`INSERT INTO repos (name, path) VALUES ('demo','/tmp/demo')`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	// Unreadable database file, writable directory — so the removal below WOULD
+	// succeed if it were attempted, which is what makes the survival assertion
+	// meaningful.
+	dbPath := filepath.Join(indexDir, store.MetadataDBFile)
+	require.NoError(t, os.Chmod(dbPath, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(dbPath, 0o600) })
+
+	result := checkCodeIndexAtDir(indexDir, true)
+
+	assert.True(t, result.warning, "an index that could not be read must be flagged, not reported clean")
+	assert.Contains(t, result.message, "could not open index")
+	_, statErr := os.Stat(dbPath)
+	assert.NoError(t, statErr, "--fix removed an index it never proved was damaged")
 }

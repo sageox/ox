@@ -25,7 +25,7 @@ import (
 // Terminal.app; anything reporting TERM=xterm-256color with no COLORTERM) does
 // not ignore an unrecognized "38;2;..." — it parses the parameters as
 // independent SGR codes. Any channel landing in 100-107 therefore becomes a
-// *background* color: brand copper #E0A56A ends in 0x6A = 106 = bright-cyan
+// *background* color: a prior brand hex ended in 0x6A = 106 = bright-cyan
 // background, which painted the `ox --help` command column and the login
 // disclaimer as unreadable grey-on-cyan blocks. Several other palette entries
 // sit one token away from the same trap (#2DD4BF starts 0x2D = 45 = magenta
@@ -124,7 +124,22 @@ func Adapt(c color.Color) color.Color {
 	return Profile.Convert(c)
 }
 
-// Color parses a hex ("#7A8F78") or ANSI index ("214") color and adapts it to
+// ColorEnabled reports whether the resolved profile can carry color at all —
+// false under NO_COLOR, `OX_COLOR_PROFILE=ascii`, and any non-TTY stdout
+// (a pipe, a redirect, an AI coworker's capture buffer).
+//
+// It asks Adapt rather than comparing Profile against an enum so it stays
+// correct if colorprofile renumbers its constants: Adapt's documented contract
+// is that ASCII and NoTTY return nil, and that contract is the whole question.
+//
+// Callers use this to choose an entirely different rendering path, not just a
+// different color — see cli.PrintJSON, which must emit byte-exact JSON when the
+// answer is false.
+func ColorEnabled() bool {
+	return Adapt(lipgloss.Color("#ffffff")) != nil
+}
+
+// Color parses a hex ("#7AAA77") or ANSI index ("214") color and adapts it to
 // the terminal's profile. Use this anywhere lipgloss.Color would be reached for
 // in non-TUI code.
 func Color(s string) color.Color {

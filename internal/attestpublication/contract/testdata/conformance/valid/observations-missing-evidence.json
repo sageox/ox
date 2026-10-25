@@ -1,0 +1,1 @@
+{"schema_version":"1.0","evidence":[{"path":"evidence/card/index.html","status":"missing","reason":"not_listed_in_manifest"},{"path":"evidence/decline/index.html","status":"missing","reason":"listed_file_missing","expected_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"counts":{"referenced":2,"available":0,"missing":2,"invalid":0}}

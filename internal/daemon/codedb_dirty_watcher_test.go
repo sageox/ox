@@ -380,19 +380,101 @@ func TestRefreshDirtyOverlay_RunsConcurrentlyWithLedgerIndex(t *testing.T) {
 	}
 }
 
+// TestRefreshDirtyOverlay_BuildFailureIsReported verifies that a refresh which
+// reaches the index and then fails to build is reported as a failure and gives
+// up its earlier success timestamp.
+// Failure prevented: a failed rebuild leaves a stale overlay looking current,
+// so a search silently answers from an index that no longer matches the tree.
+func TestRefreshDirtyOverlay_BuildFailureIsReported(t *testing.T) {
+	t.Parallel()
+
+	// projectRoot is deliberately not a git repository, so BuildDirtyIndex fails
+	// at `git status` -- after codedb.Open has already succeeded. That is the
+	// only ordering that reaches the build-failure branch.
+	projectRoot := t.TempDir()
+	dataDir := filepath.Join(t.TempDir(), "codedb")
+	db, err := codedb.Open(dataDir)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	mgr := NewCodeDBManager(projectRoot, codedbTestLogger(), nil)
+	mgr.mu.Lock()
+	mgr.dataDir = dataDir
+	mgr.lastDirtyRefresh = time.Now()
+	mgr.mu.Unlock()
+
+	tracker := NewIssueTracker()
+	mgr.SetIssueTracker(tracker)
+
+	opened := make(chan struct{}, 1)
+	mgr.dirtyOpenHook = func() {
+		select {
+		case opened <- struct{}{}:
+		default:
+		}
+	}
+
+	mgr.RefreshDirtyOverlay(context.Background())
+
+	// Generous ceiling on purpose: this refresh is meant to reach the
+	// uncancellable Bleve open, so the wait is real work rather than the
+	// skipped-open case next door. Eventually returns as soon as it holds.
+	require.Eventually(t, func() bool {
+		mgr.mu.Lock()
+		defer mgr.mu.Unlock()
+		return !mgr.dirtyRefreshing
+	}, 30*time.Second, 10*time.Millisecond, "dirtyRefreshing flag not released after a failed build")
+
+	select {
+	case <-opened:
+	default:
+		t.Fatal("a live refresh must reach codedb.Open")
+	}
+
+	mgr.mu.Lock()
+	lastDirtyRefresh := mgr.lastDirtyRefresh
+	mgr.mu.Unlock()
+	assert.True(t, lastDirtyRefresh.IsZero(), "a failed build must invalidate an earlier success timestamp")
+
+	issue, found := tracker.GetIssue(IssueTypeDirtyOverlayFailed, "")
+	require.True(t, found, "a failed dirty overlay build must report a failure")
+	assert.Contains(t, issue.Summary, "refresh failed",
+		"a build failure must be reported as a failure, not as a cancellation")
+}
+
 // TestRefreshDirtyOverlay_ContextCanceled verifies that a canceled context
 // prevents the refresh from starting.
 // Failure prevented: stale refresh fires during daemon shutdown.
 func TestRefreshDirtyOverlay_ContextCanceled(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+	repoDir := initDirtyTestRepo(t)
+	dataDir := filepath.Join(t.TempDir(), "codedb")
+	db, err := codedb.Open(dataDir)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	mgr := NewCodeDBManager(repoDir, codedbTestLogger(), nil)
+	mgr.mu.Lock()
+	mgr.dataDir = dataDir
+	mgr.lastDirtyRefresh = time.Now()
+	mgr.mu.Unlock()
+
+	tracker := NewIssueTracker()
+	mgr.SetIssueTracker(tracker)
 
 	fires := make(chan struct{}, 1)
 	mgr.dirtyTestHook = func() {
 		select {
 		case fires <- struct{}{}:
+		default:
+		}
+	}
+
+	opened := make(chan struct{}, 1)
+	mgr.dirtyOpenHook = func() {
+		select {
+		case opened <- struct{}{}:
 		default:
 		}
 	}
@@ -418,6 +500,32 @@ func TestRefreshDirtyOverlay_ContextCanceled(t *testing.T) {
 		defer mgr.mu.Unlock()
 		return !mgr.dirtyRefreshing
 	}, 2*time.Second, 10*time.Millisecond, "dirtyRefreshing flag not released after context cancellation")
+
+	mgr.mu.Lock()
+	lastDirtyRefresh := mgr.lastDirtyRefresh
+	mgr.mu.Unlock()
+	assert.True(t, lastDirtyRefresh.IsZero(), "canceled refresh must invalidate an earlier success timestamp")
+	issue, found := tracker.GetIssue(IssueTypeDirtyOverlayFailed, "")
+	require.True(t, found, "canceled dirty overlay build must report a failure")
+
+	// Distinguishes "never started" from "started, then noticed". A summary of
+	// "refresh failed" means the goroutine reached codedb.Open and only learned
+	// of the cancellation inside BuildDirtyIndex -- the path whose uncancellable
+	// Bleve open and teardown is what the budget above cannot survive on a
+	// loaded runner. This assertion does not depend on timing.
+	assert.Contains(t, issue.Summary, "refresh canceled",
+		"a canceled refresh must be reported as canceled, not as a build failure")
+
+	// The flag is released above, so the goroutine has finished: if the open
+	// boundary was not reached by now it never will be. This is the assertion
+	// that pins the behavior -- moving the cancellation check to any point after
+	// codedb.Open reintroduces the uncancellable open and teardown during
+	// shutdown, and only this fires on it.
+	select {
+	case <-opened:
+		t.Fatal("a canceled refresh reached codedb.Open; its open and deferred Close take no context, so shutdown waits on Bleve teardown")
+	default:
+	}
 }
 
 // --- C. Deterministic concurrency: verify no double goroutine ---
@@ -778,6 +886,7 @@ func TestRefreshDirtyOverlay_EmitsIssueOnOpenFailure(t *testing.T) {
 	mgr := NewCodeDBManager(repoDir, codedbTestLogger(), nil)
 	mgr.mu.Lock()
 	mgr.dataDir = dataDir
+	mgr.lastDirtyRefresh = time.Now()
 	mgr.mu.Unlock()
 
 	tracker := NewIssueTracker()
@@ -819,6 +928,11 @@ func TestRefreshDirtyOverlay_EmitsIssueOnOpenFailure(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "should emit %s issue on codedb.Open failure, got: %v", IssueTypeDirtyOverlayFailed, issues)
+
+	mgr.mu.Lock()
+	lastDirtyRefresh := mgr.lastDirtyRefresh
+	mgr.mu.Unlock()
+	assert.True(t, lastDirtyRefresh.IsZero(), "failed refresh must invalidate an earlier success timestamp")
 }
 
 // TestRefreshDirtyOverlay_ClearsIssueOnSuccess verifies that a successful

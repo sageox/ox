@@ -1,5 +1,9 @@
 # Discussion Artifacts: Progressive Disclosure Model
 
+> **Local extraction removed — 2026-09-09:** The `ox distill` pipeline has been removed.
+> Artifact formats and discussion listing remain supported; descriptions of local
+> fact extraction below are historical.
+
 ## Overview
 
 Recorded discussions (audio and video) produce artifacts that AI coworkers consume through progressive disclosure — loading more detail only when relevant. This spec defines what each artifact contains, when to use it, and how to extend it.
@@ -105,8 +109,8 @@ Agents decide at each layer whether to go deeper. Most discussions stop at L0 or
 | Extraction with timestamp anchor | `annotations.json` |
 | Visual frame with description | `keyframes.json` |
 | Human-written prose | `summary.md` (not server-generated) |
-| New fact category | Add to `DiscussionSummary` struct AND `DiscussionFactsPrompt` categories |
-| New annotation type | Add constant to `pkg/discussion/types.go`, update `categorizeAnnotations()` in `distill_discussions.go` |
+| New fact category | Add to the `DiscussionSummary` struct |
+| New annotation type | Add a constant to `pkg/discussion/types.go` |
 
 ## Keyframe Enrichment
 
@@ -160,8 +164,6 @@ All four enrichment fields are `omitempty`. CLI consumers gate on non-empty valu
 |---|---|
 | Types + package doc | `pkg/discussion/types.go` |
 | Loaders (LoadSummary, LoadKeyframes, LoadAnnotations) | `pkg/discussion/loader.go` |
-| Fact extraction (LLM bypass) | `cmd/ox/distill_discussions.go:extractFactsFromSummaryJSON` |
-| Annotation categorization | `cmd/ox/distill_discussions.go:categorizeAnnotations` |
 | Discussion listing with visual tags | `cmd/ox/agent_team_ctx.go:listRecentDiscussions` |
 | Sparse checkout includes | `internal/manifest/fallback.go` |
 | Query result visual fields | `internal/api/query.go:QueryResult` |

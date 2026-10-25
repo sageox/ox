@@ -68,13 +68,9 @@ func CapturePrior(reader io.Reader, opts CaptureOptions) (*CaptureResult, error)
 		return nil, fmt.Errorf("validate input: %w", err)
 	}
 
-	// apply agent ID from options if not in metadata
-	agentID := opts.AgentID
-	if history.Meta != nil && history.Meta.AgentID != "" {
-		agentID = history.Meta.AgentID
-	}
-	if agentID == "" {
-		return nil, fmt.Errorf("agent_id required: provide in metadata or options")
+	agentID, err := resolveCaptureAgentID(history, opts)
+	if err != nil {
+		return nil, err
 	}
 
 	// apply title from options if provided
@@ -124,13 +120,9 @@ func CapturePriorFromHistory(history *CapturedHistory, opts CaptureOptions) (*Ca
 		return nil, fmt.Errorf("capture-prior requires at least one entry")
 	}
 
-	// apply agent ID from options if not in metadata
-	agentID := opts.AgentID
-	if history.Meta != nil && history.Meta.AgentID != "" {
-		agentID = history.Meta.AgentID
-	}
-	if agentID == "" {
-		return nil, fmt.Errorf("agent_id required: provide in metadata or options")
+	agentID, err := resolveCaptureAgentID(history, opts)
+	if err != nil {
+		return nil, err
 	}
 
 	// apply title from options if provided
@@ -240,4 +232,24 @@ func CreateCapturedHistoryMeta(agentID, agentType, source, title string) *Histor
 	meta.SessionTitle = title
 	meta.CapturedAt = time.Now()
 	return meta
+}
+
+// resolveCaptureAgentID picks the agent ID a capture is stored under: the header's agent_id, else
+// the one from the command line. It writes the result, and a default source, back into the header,
+// because StoreCapturedHistory and every later reader validate the stored history strictly.
+func resolveCaptureAgentID(history *CapturedHistory, opts CaptureOptions) (string, error) {
+	agentID := opts.AgentID
+	if history.Meta != nil && history.Meta.AgentID != "" {
+		agentID = history.Meta.AgentID
+	}
+	if agentID == "" {
+		return "", fmt.Errorf("agent_id required: provide in metadata or options")
+	}
+	if history.Meta != nil {
+		history.Meta.AgentID = agentID
+		if history.Meta.Source == "" {
+			history.Meta.Source = HistorySourceAgentReconstruction
+		}
+	}
+	return agentID, nil
 }

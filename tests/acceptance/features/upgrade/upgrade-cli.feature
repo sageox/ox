@@ -34,3 +34,13 @@ Feature: Upgrading the ox CLI
       Given Devon is scripting an upgrade
       When he runs `ox upgrade` requesting JSON output
       Then ox emits the upgrade outcome as structured JSON
+
+  Rule: Upgrade reports success only when `ox` now runs the new version
+
+    Scenario: Devon upgrades before Homebrew has the new release
+      Given Devon installed ox via Homebrew
+      And a newer ox is released but Homebrew does not offer it yet
+      When Devon runs `ox upgrade`
+      Then ox reports that the upgrade did not take effect
+      And ox names the ox on Devon's PATH and the version it still reports
+      And ox keeps telling Devon that a newer version is available

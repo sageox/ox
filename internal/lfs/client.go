@@ -7,25 +7,96 @@ package lfs
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/errkind"
+
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/useragent"
 )
 
 // Client communicates with a Git LFS Batch API server (e.g., GitLab).
 type Client struct {
-	batchURL   string // e.g., https://git.sageox.io/sageox/ledger.git/info/lfs/objects/batch
-	httpClient *http.Client
-	authHeader string // "Basic <base64(username:token)>"
+	batchURL           string // e.g., https://git.sageox.io/sageox/ledger.git/info/lfs/objects/batch
+	httpClient         *http.Client
+	authHeader         string // "Basic <base64(username:token)>"
+	credentialEndpoint string // refresh the Git PAT for this endpoint on rotation or 401
+	// Read clients resolve the selected credential for every request, never cache it.
+	readEndpoint string
+	readRepoID   string
+	readURL      string
 }
+
+// NewReadClient creates a download-only client for an authorized SageOx ledger.
+// readURL must be the canonical URL returned by discovery for this repository.
+func NewReadClient(endpointURL, repoID, readURL string) (*Client, error) {
+	if err := gitserver.ValidateReadURL(endpointURL, repoID, readURL); err != nil {
+		return nil, err
+	}
+	if _, err := auth.CurrentReadToken(endpointURL); err != nil {
+		return nil, err
+	}
+	c := NewClient(readURL, "", "")
+	c.authHeader = ""
+	c.readEndpoint, c.readRepoID, c.readURL = endpointURL, repoID, readURL
+	c.httpClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return c, nil
+}
+
+// HTTPError exposes status without reflecting response bodies or signed URLs.
+// RetryAfter is the wait the response's Retry-After header asked for, zero
+// when it names none that parses.
+type HTTPError struct {
+	StatusCode int
+	RetryAfter time.Duration
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("LFS request returned HTTP %d", e.StatusCode)
+}
+
+func newHTTPError(resp *http.Response) *HTTPError {
+	return &HTTPError{StatusCode: resp.StatusCode, RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())}
+}
+
+// parseRetryAfter reads a Retry-After value in either form RFC 9110 allows,
+// delay-seconds or an HTTP-date. A missing or malformed value and a date
+// already past are zero. A delay too long for a Duration saturates rather than
+// overflowing: how much of it to honor is the caller's decision.
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil || errors.Is(err, strconv.ErrRange) {
+		const longest = math.MaxInt64 / time.Second // whole seconds a Duration can hold
+		if seconds > uint64(longest) {
+			return longest * time.Second
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if date, err := http.ParseTime(value); err == nil && date.After(now) {
+		return date.Sub(now)
+	}
+	return 0
+}
+
+// ErrBatchResponseUnusable reports a batch response the server delivered in
+// full but that cannot be used — past the size a read route accepts, or not
+// valid JSON. A body cut short by the transport fails earlier, while it is
+// read, so a caller can treat this as the server's settled answer and not as
+// something a second request could get past.
+var ErrBatchResponseUnusable = errors.New("unusable batch response")
 
 // NewClient creates an LFS client for the given git repo URL.
 // repoURL should be the git clone URL (e.g., https://git.sageox.io/sageox/ledger.git).
@@ -35,6 +106,9 @@ func NewClient(repoURL, username, token string) *Client {
 	batchURL := strings.TrimSuffix(repoURL, "/") + "/info/lfs/objects/batch"
 
 	// HTTP Basic auth header
+	if username == "" {
+		username = "oauth2"
+	}
 	creds := username + ":" + token
 	authHeader := "Basic " + base64.StdEncoding.EncodeToString([]byte(creds))
 
@@ -105,6 +179,9 @@ type Action struct {
 	// TrustedHost is the host:port of the batch URL the action came from.
 	// Lowercased so comparisons are case-insensitive.
 	TrustedHost string `json:"-"`
+
+	readClient *Client // non-nil only for actions from a selected read-only client
+	readOID    string
 }
 
 // ObjectError is returned when the server cannot process an object.
@@ -115,16 +192,29 @@ type ObjectError struct {
 
 // BatchUpload requests upload URLs for the given objects.
 func (c *Client) BatchUpload(objects []BatchObject) (*BatchResponse, error) {
-	return c.doBatch("upload", objects)
+	return c.BatchUploadContext(context.Background(), objects)
+}
+
+// BatchUploadContext requests upload URLs within the caller's deadline.
+func (c *Client) BatchUploadContext(ctx context.Context, objects []BatchObject) (*BatchResponse, error) {
+	return c.doBatch(ctx, "upload", objects)
 }
 
 // BatchDownload requests download URLs for the given objects.
 func (c *Client) BatchDownload(objects []BatchObject) (*BatchResponse, error) {
-	return c.doBatch("download", objects)
+	return c.BatchDownloadContext(context.Background(), objects)
+}
+
+// BatchDownloadContext requests download URLs within the caller's deadline.
+func (c *Client) BatchDownloadContext(ctx context.Context, objects []BatchObject) (*BatchResponse, error) {
+	return c.doBatch(ctx, "download", objects)
 }
 
 // doBatch sends a batch request and returns the response.
-func (c *Client) doBatch(operation string, objects []BatchObject) (*BatchResponse, error) {
+func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchObject) (*BatchResponse, error) {
+	if c.readURL != "" && operation != "download" {
+		return nil, fmt.Errorf("read-only LFS client cannot upload")
+	}
 	// Fail closed before sending Authorization. The batch URL is built
 	// from the git remote URL in NewClient; if someone misconfigures or
 	// MITM-rewrites the remote to plaintext http://example.com, this
@@ -150,7 +240,7 @@ func (c *Client) doBatch(operation string, objects []BatchObject) (*BatchRespons
 		return nil, fmt.Errorf("marshal batch request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", c.batchURL, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.batchURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("create batch request: %w", err)
 	}
@@ -160,25 +250,80 @@ func (c *Client) doBatch(operation string, objects []BatchObject) (*BatchRespons
 	// only User-Agent for external Git host; no X-Orchestrator
 	req.Header.Set("User-Agent", useragent.String())
 	req.Header.Set("Authorization", c.authHeader)
+	if c.credentialEndpoint != "" {
+		creds, err := auth.RefreshGitCredentialsForEndpoint(ctx, c.credentialEndpoint, false)
+		if err != nil {
+			return nil, fmt.Errorf("refresh LFS credentials: %w", err)
+		}
+		if creds == nil || creds.Token == "" {
+			return nil, fmt.Errorf("no git credentials found. %s", auth.ReauthenticationRemedy(c.credentialEndpoint))
+		}
+		username := creds.Username
+		if username == "" {
+			username = "oauth2"
+		}
+		req.SetBasicAuth(username, creds.Token)
+	}
+	if c.readURL != "" {
+		if err := gitserver.ValidateReadRequestURL(c.readEndpoint, c.readRepoID, c.readURL, req.URL.String()); err != nil {
+			return nil, err
+		}
+		token, err := auth.CurrentReadToken(c.readEndpoint)
+		if err != nil {
+			return nil, err
+		}
+		req.SetBasicAuth("ox", token)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("batch request failed: %w", err)
 	}
+	if resp.StatusCode == http.StatusUnauthorized && c.credentialEndpoint != "" {
+		resp.Body.Close()
+		creds, err := auth.RefreshGitCredentialsForEndpoint(ctx, c.credentialEndpoint, true)
+		if err != nil {
+			return nil, fmt.Errorf("refresh rejected LFS credentials: %w", err)
+		}
+		username := creds.Username
+		if username == "" {
+			username = "oauth2"
+		}
+		req.SetBasicAuth(username, creds.Token)
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		resp, err = c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("batch retry failed: %w", err)
+		}
+	}
 	defer resp.Body.Close()
+	if c.readURL != "" && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
+		return nil, newHTTPError(resp)
+	}
 
-	respBody, err := io.ReadAll(resp.Body)
+	// Read-route batch metadata is bounded independently of the request deadline,
+	// including chunked bodies. Read one extra byte to detect overflow before decoding.
+	const maxBatchResponseBytes = 1 << 20
+	var body io.Reader = resp.Body
+	if c.readURL != "" {
+		body = io.LimitReader(body, maxBatchResponseBytes+1)
+	}
+	respBody, err := io.ReadAll(body)
 	if err != nil {
 		return nil, fmt.Errorf("read batch response: %w", err)
 	}
+	if c.readURL != "" && len(respBody) > maxBatchResponseBytes {
+		return nil, fmt.Errorf("%w: LFS batch response exceeds %d bytes", ErrBatchResponseUnusable, maxBatchResponseBytes)
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("LFS batch API returned HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, errkind.WithDetail(errkind.HTTPStatus(resp.StatusCode), fmt.Sprintf("LFS batch API HTTP %d", resp.StatusCode),
+			fmt.Errorf("LFS batch API returned HTTP %d: %s", resp.StatusCode, string(respBody)))
 	}
 
 	var batchResp BatchResponse
 	if err := json.Unmarshal(respBody, &batchResp); err != nil {
-		return nil, fmt.Errorf("decode batch response: %w", err)
+		return nil, fmt.Errorf("%w: decode batch response: %w", ErrBatchResponseUnusable, err)
 	}
 
 	// Stamp every action in the response with the trusted host derived
@@ -195,12 +340,25 @@ func (c *Client) doBatch(operation string, objects []BatchObject) (*BatchRespons
 		a.TrustedHost = host
 	}
 	for i := range batchResp.Objects {
+		if c.readURL != "" && batchResp.Objects[i].Error != nil {
+			batchResp.Objects[i].Error.Message = http.StatusText(batchResp.Objects[i].Error.Code)
+		}
 		if batchResp.Objects[i].Actions == nil {
 			continue
 		}
 		stamp(batchResp.Objects[i].Actions.Upload)
 		stamp(batchResp.Objects[i].Actions.Download)
 		stamp(batchResp.Objects[i].Actions.Verify)
+		if c.readURL != "" {
+			actions := batchResp.Objects[i].Actions
+			actions.Upload, actions.Verify = nil, nil
+			if actions.Download != nil {
+				actions.Download.readClient = c
+				actions.Download.readOID = batchResp.Objects[i].OID
+				// Upstream credentials never belong on the client download request.
+				actions.Download.Header = nil
+			}
+		}
 	}
 
 	return &batchResp, nil
@@ -210,17 +368,11 @@ func (c *Client) doBatch(operation string, objects []BatchObject) (*BatchRespons
 // and credentials loaded for the given endpoint. This is a convenience constructor
 // for callers that already have the ledger path (e.g., daemon session finalization).
 func NewClientFromLedger(ledgerPath, endpointURL string) (*Client, error) {
-	creds, err := gitserver.LoadCredentialsForEndpoint(endpointURL)
-	if err != nil {
-		return nil, fmt.Errorf("load credentials: %w", err)
-	}
-	if creds == nil {
-		return nil, fmt.Errorf("no git credentials found (run 'ox login' first)")
-	}
-	if creds.Token == "" {
-		return nil, fmt.Errorf("git credentials have empty token")
-	}
+	return NewClientFromLedgerContext(context.Background(), ledgerPath, endpointURL)
+}
 
+// NewClientFromLedgerContext creates an LFS client with cancelable credential setup.
+func NewClientFromLedgerContext(ctx context.Context, ledgerPath, endpointURL string) (*Client, error) {
 	repoURL, err := gitserver.GetBareRemoteURL(ledgerPath)
 	if err != nil {
 		return nil, fmt.Errorf("get ledger remote URL: %w", err)
@@ -228,6 +380,36 @@ func NewClientFromLedger(ledgerPath, endpointURL string) (*Client, error) {
 	if repoURL == "" {
 		return nil, fmt.Errorf("ledger has no remote URL configured")
 	}
+	return NewClientForEndpoint(ctx, repoURL, endpointURL)
+}
 
-	return NewClient(repoURL, creds.Username, creds.Token), nil
+// NewClientForEndpoint follows token rotation and refreshes a rejected Git PAT.
+func NewClientForEndpoint(ctx context.Context, repoURL, endpointURL string) (*Client, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	creds, err := auth.RefreshGitCredentialsForEndpoint(ctx, endpointURL, false)
+	if err != nil {
+		return nil, fmt.Errorf("load credentials: %w", err)
+	}
+	if creds == nil {
+		return nil, errkind.Errorf(errkind.NotLoggedIn, "no git credentials found. %s", auth.ReauthenticationRemedy(endpointURL))
+	}
+	if creds.Token == "" {
+		return nil, errkind.Errorf(errkind.NotLoggedIn, "git credentials have empty token")
+	}
+	// The PAT is only for the endpoint's git server. `ox fetch` on a stub in a
+	// third-party clone would otherwise send it to that clone's origin, and a
+	// 401 from there would mint a fresh one. Loading it above talks only to
+	// the SageOx API.
+	if !gitserver.RemoteOnGitServer(repoURL, endpointURL, creds.ServerURL) {
+		host := "a remote"
+		if u, err := url.Parse(repoURL); err == nil && u.Hostname() != "" {
+			host = u.Hostname()
+		}
+		return nil, errkind.Errorf(errkind.Usage, "refusing to send %s Git credentials to %s, which is not its git server", endpointURL, host)
+	}
+
+	c := NewClient(repoURL, creds.Username, creds.Token)
+	c.credentialEndpoint = endpointURL
+	return c, nil
 }

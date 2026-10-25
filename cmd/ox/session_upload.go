@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/errkind"
+
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
@@ -30,6 +32,7 @@ import (
 	"github.com/sageox/ox/internal/ledger/automerge"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/perf"
+	"github.com/sageox/ox/internal/session"
 )
 
 // gcSwapWaitBound is how long the CLI will wait for a daemon-side blue-green
@@ -131,30 +134,64 @@ func checkUploadAccess(projectRoot string) error {
 // No OAuth needed — LFS upload uses the Git PAT (HTTP Basic auth).
 // Access control is enforced at push time by the PAT, not by a pre-check.
 func uploadSessionLFS(projectRoot, sessionPath string) (map[string]lfs.FileRef, error) {
-	client, err := getLFSClient(projectRoot)
+	return uploadSessionLFSContext(context.Background(), projectRoot, sessionPath)
+}
+
+func uploadSessionLFSContext(ctx context.Context, projectRoot, sessionPath string) (map[string]lfs.FileRef, error) {
+	// Every automatic caller (regenerate, migrate, recover, retry) ends here, so
+	// this is the one place that keeps a held session's content out of the
+	// Ledger (GH #1093). The explicit publish goes through publishSessionLFS.
+	if sessionHeldByName(sessionPath) {
+		name := filepath.Base(sessionPath)
+		return nil, fmt.Errorf("session %s is held on this machine (session_publishing: manual) and was not uploaded; publish it with 'ox session upload %s'", name, name)
+	}
+	return publishSessionLFSContext(ctx, projectRoot, sessionPath)
+}
+
+// publishSessionLFS uploads session content for an explicit publish. It honors
+// the quarantine but not the hold: 'ox session upload' is how a coworker
+// releases a hold.
+func publishSessionLFS(projectRoot, sessionPath string) (map[string]lfs.FileRef, error) {
+	return publishSessionLFSContext(context.Background(), projectRoot, sessionPath)
+}
+
+func publishSessionLFSContext(ctx context.Context, projectRoot, sessionPath string) (map[string]lfs.FileRef, error) {
+	// Every caller ends here, so this is the one place that keeps a
+	// quarantined recording's content out of the Ledger.
+	if recording, readErr := session.ReadRecordingStateFile(sessionPath); readErr == nil && recording != nil && recording.SourceRejected {
+		return nil, fmt.Errorf("session %s is held back for ownership review and was not uploaded; run 'ox agent %s session recover --release-quarantine' to re-check it", filepath.Base(sessionPath), recording.AgentID)
+	}
+	client, err := getLFSClientContext(ctx, projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("create LFS client: %w", err)
 	}
 
-	return lfs.UploadSessionFiles(client, sessionPath, slog.Default())
+	return lfs.UploadSessionFilesContext(ctx, client, sessionPath, slog.Default())
 }
 
 // getLFSClient creates an LFS client using project credentials.
-// Derives the LFS batch URL from the ledger's local git remote, avoiding any
-// dependency on the OAuth API token. Only the Git PAT is needed for LFS auth.
+// Uses the ledger's Git remote and refreshes credentials when the bearer
+// rotates or the server rejects the PAT.
 func getLFSClient(projectRoot string) (*lfs.Client, error) {
-	ep := endpoint.GetForProject(projectRoot)
+	return getLFSClientContext(context.Background(), projectRoot)
+}
 
-	// load git credentials (PAT) for LFS HTTP Basic auth
-	creds, err := gitserver.LoadCredentialsForEndpoint(ep)
+func getLFSClientContext(ctx context.Context, projectRoot string) (*lfs.Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ep := endpoint.GetForProject(projectRoot)
+	creds, err := auth.RefreshGitCredentialsForEndpoint(ctx, ep, false)
 	if err != nil {
 		return nil, fmt.Errorf("load credentials: %w", err)
 	}
 	if creds == nil {
-		return nil, fmt.Errorf("no git credentials found (run 'ox login' first)")
+		return nil, errkind.Errorf(errkind.NotLoggedIn, "no git credentials found. %s", auth.ReauthenticationRemedy(ep))
 	}
 	if creds.Token == "" {
-		return nil, fmt.Errorf("git credentials have empty token")
+		return nil, errkind.Errorf(errkind.NotLoggedIn, "git credentials have empty token")
 	}
 
 	// derive LFS repo URL from the ledger's local git remote (no API call needed)
@@ -171,7 +208,7 @@ func getLFSClient(projectRoot string) (*lfs.Client, error) {
 		return nil, fmt.Errorf("ledger has no remote URL configured")
 	}
 
-	return lfs.NewClient(repoURL, creds.Username, creds.Token), nil
+	return lfs.NewClientForEndpoint(ctx, repoURL, ep)
 }
 
 // ensureSessionsGitignore delegates to lfs.EnsureSessionsGitignore.
@@ -202,11 +239,96 @@ func ensureSessionsGitignore(sessionsDir string) error {
 // Uses exec.Command("git") rather than go-git for the same reasons as the daemon
 // (see daemon/sync.go doPull): rebase support, process isolation, and lock safety.
 // This is a low-volume path (once per session stop), so subprocess overhead is negligible.
+// firstUnstageableFileInIndex scans the ledger for anything that must not
+// be committed, immediately before a `git commit` with no pathspec — which
+// commits the WHOLE staged index, not just the files this call explicitly
+// staged. Three things a content-only, caller's-own-files-only check misses:
+//
+//  1. A conflict shaped as UD/DU (one side deleted the path) carries no
+//     "<<<<<<<" text at all — there is no content to scan. Only `git
+//     status` reveals it.
+//  2. Content already staged by something ELSE before this call ran — e.g.
+//     leftover from an interrupted prior operation, or (harmlessly) the
+//     root .gitignore / *.rej / *.needs-summary stage-and-untrack side
+//     effects EnsureGitignoreBeforeCommit performs outside this call's own
+//     file list. Scoping the commit itself to a narrow pathspec instead
+//     would silently drop those legitimate side effects rather than catch
+//     a real problem, so the check runs against the actual staged diff
+//     instead of restricting what gets committed.
+//  3. A staged blob whose content has since diverged from the working-tree
+//     file at the same path — `git commit` persists the INDEX content, not
+//     whatever currently happens to be on disk. Reading the working-tree
+//     file here (as an earlier version of this guard did) would miss
+//     markers that are still staged if the working-tree copy was cleaned
+//     or overwritten afterward. Each staged path is therefore read via
+//     `git show :<path>`, the actual blob about to be committed.
+//
+// Returns the first offending path, or "" if the index is clean. Inspection
+// failures on a staged blob are returned as errors (fail closed) rather
+// than treated as clean — an unreadable blob is not proof it's safe.
+func firstUnstageableFileInIndex(ledgerPath string) (string, error) {
+	statusOut, err := exec.Command("git", "-C", ledgerPath, "status", "--porcelain=v1").Output()
+	if err != nil {
+		return "", fmt.Errorf("git status: %w", err)
+	}
+	if unmerged := parseUnmergedPaths(string(statusOut)); len(unmerged) > 0 {
+		return unmerged[0].Path, nil
+	}
+
+	// -z (NUL-delimited) is required, not cosmetic: a tab-delimited rename or
+	// copy record is status\tsource\tdest — three fields, not two — so a
+	// naive line/tab split leaves "source\tdest" glued together as one bogus
+	// path and every staged rename/copy makes this function error out on an
+	// otherwise-clean commit. -z instead emits a flat NUL-separated token
+	// stream per git-diff(1): one status token, then one path token for an
+	// ordinary entry or two (source, dest) for R*/C*, with no ambiguity.
+	diffOut, err := exec.Command("git", "-C", ledgerPath, "diff", "--cached", "--name-status", "-z").Output()
+	if err != nil {
+		return "", fmt.Errorf("git diff --cached: %w", err)
+	}
+	tokens := strings.Split(strings.Trim(string(diffOut), "\x00"), "\x00")
+	if len(tokens) == 1 && tokens[0] == "" {
+		tokens = nil // nothing staged
+	}
+	for i := 0; i < len(tokens); {
+		status := tokens[i]
+		i++
+		if i >= len(tokens) {
+			break // truncated record; nothing more to read
+		}
+		rel := tokens[i]
+		i++
+		if strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C") {
+			// rename/copy: the token just consumed was the SOURCE path;
+			// the destination — what will actually exist post-commit — is
+			// the next one.
+			if i >= len(tokens) {
+				break
+			}
+			rel = tokens[i]
+			i++
+		}
+		if strings.HasPrefix(status, "D") {
+			continue // deleted from the index — no blob left to inspect
+		}
+		// ":./" + path (not a bare ":" + path) is required: git's `:path`
+		// colon-syntax is ambiguous with the `:<n>:path` stage-lookup form,
+		// so a literal path starting with digits-then-colon (e.g. "1:foo")
+		// gets misparsed as "stage 1 of foo" instead of the real path.
+		// ":./" pins it as a pathname relative to cwd, never a stage number.
+		blob, err := exec.Command("git", "-C", ledgerPath, "show", ":./"+rel).Output()
+		if err != nil {
+			return "", fmt.Errorf("inspect staged blob %s: %w", rel, err)
+		}
+		if gitutil.HasConflictMarkersBytes(blob) {
+			return rel, nil
+		}
+	}
+	return "", nil
+}
+
 func commitAndPushLedger(ledgerPath, sessionName string) error {
 	waitForGCSwap(ledgerPath)
-
-	// ensure .gitignore is in place before any commit to prevent cache file leakage
-	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
 
 	// stage meta.json and .gitignore
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
@@ -217,70 +339,47 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 
 	filesToAdd := append([]string{metaPath, gitignorePath}, sessionArtifactsToStage(sessionDir)...)
 
-	// --sparse: ledger repos use sparse-checkout (cone mode); this flag
-	// prevents git from blocking adds if sparse rules change or edge cases arise
-	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, filesToAdd...)
-	addCmd := exec.Command("git", addArgs...)
-	if output, err := addCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git add failed: %s: %w", string(output), err)
-	}
-
-	// commit
-	commitMsg := fmt.Sprintf("session: %s", sessionName)
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		// check if nothing to commit
-		if strings.Contains(string(output), "nothing to commit") {
-			return nil
+	// Hold the repo lock from the first index write through commit, as
+	// commitLedgerSnapshot requires: a daemon sync rebase then cannot run under
+	// this commit, and this commit cannot move main under the rebase
+	// (sageox/ox#1541). pushLedger takes the same non-reentrant lock itself, so
+	// it stays outside.
+	err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		// under the lock a rebase in progress is a wedge, and staging into it
+		// would mark its conflicts resolved
+		if gitutil.IsRebaseInProgress(ledgerPath) {
+			return errors.New("committing ledger: repo in broken rebase state (run 'ox doctor --fix')")
 		}
-		return fmt.Errorf("%s: %w", wrapCommitError(string(output), err), err)
-	}
 
-	// push with pull --rebase retry (up to 3 attempts)
-	return pushLedger(context.Background(), ledgerPath)
-}
+		// ensure .gitignore is in place before any commit to prevent cache file leakage
+		gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
 
-// commitPointerRewriteAndPush commits the post-upload LFS pointer rewrite and
-// pushes it. Called immediately after lfs.WritePointerFiles in the session-stop
-// pipeline to close the dirty-worktree window that would otherwise race against
-// the daemon's sync-timer pull (`git pull --rebase --autostash`).
-//
-// Stages only the explicit pointer paths returned by WritePointerFiles — does
-// not re-glob the manifest — so any concurrent unrelated change to the session
-// dir between the initial commit and this one cannot be silently folded into
-// the "lfs: pointerize <name>" commit.
-//
-// Returns nil if pointerPaths is empty (nothing to commit) or if git reports
-// "nothing to commit" (idempotent).
-func commitPointerRewriteAndPush(ledgerPath, sessionName string, pointerPaths []string) error {
-	if len(pointerPaths) == 0 {
+		// --sparse: ledger repos use sparse-checkout (cone mode); this flag
+		// prevents git from blocking adds if sparse rules change or edge cases arise
+		addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, filesToAdd...)
+		addCmd := exec.Command("git", addArgs...)
+		if output, err := addCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("git add failed: %s: %w", string(output), err)
+		}
+
+		// Commit the index as an immutable, pre-validated tree snapshot. The old
+		// shape (validate the index, then a no-pathspec `git commit` that re-reads the
+		// WHOLE index at commit time) left a window where a concurrent daemon
+		// `pull --rebase --autostash` could stage an unchecked conflict blob between
+		// the check and the commit. commitLedgerSnapshot writes the index to an
+		// immutable tree, scans that snapshot, and commits exactly it — so a blob
+		// staged after the snapshot is neither vetted-away nor swept in. See #749 and
+		// the PR #811 review (validation↔commit TOCTOU).
+		if _, err := commitLedgerSnapshot(context.Background(), ledgerPath, fmt.Sprintf("session: %s", sessionName)); err != nil {
+			return fmt.Errorf("committing ledger: %w", err)
+		}
 		return nil
+	})
+	if err != nil {
+		return err
 	}
-
-	waitForGCSwap(ledgerPath)
-
-	// --sparse: ledger repos use sparse-checkout (cone mode)
-	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, pointerPaths...)
-	addCmd := exec.Command("git", addArgs...)
-	if output, err := addCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git add failed: %s: %w", string(output), err)
-	}
-
-	// commit under a distinct subject so it doesn't shadow the canonical
-	// "session: <name>" commit in git log
-	commitMsg := fmt.Sprintf("lfs: pointerize %s", sessionName)
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(output), "nothing to commit") {
-			return nil
-		}
-		return fmt.Errorf("%s: %w", wrapCommitError(string(output), err), err)
-	}
-
-	// push with pull --rebase retry. If the remote has independently modified
-	// the same path (the very race this guards against), PushWithRetry will
-	// abort the rebase cleanly (internal/gitutil/push.go:191) — no conflict
-	// markers can survive into a commit. Caller (slog.Warn) handles the error.
+	// An identical retry may have no new commit but still owe the remote the
+	// pointer commit from a failed push. Always retry publication.
 	return pushLedger(context.Background(), ledgerPath)
 }
 
@@ -385,12 +484,12 @@ func backfillGitArtifactInMeta(sessionDir, filename string, size int64) bool {
 func resolveLedgerPath() (string, error) {
 	path := getLedgerPath()
 	if path == "" {
-		return "", fmt.Errorf("no ledger path found (run 'ox doctor --fix' or wait for daemon to clone)")
+		return "", errkind.Errorf(errkind.NotInitialized, "no ledger path found (run 'ox doctor --fix' or wait for daemon to clone)")
 	}
 
 	// verify ledger exists on disk
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("ledger not found at %s (run 'ox doctor --fix')", path)
+		return "", errkind.Errorf(errkind.NotInitialized, "ledger not found at %s (run 'ox doctor --fix')", path)
 	}
 
 	return path, nil
@@ -407,7 +506,13 @@ var ledgerAutoResolvePrefixes = ledger.AutoResolvePrefixes
 // Per-phase timing is captured as nested spans so OX_TRACE=1 / -v shows
 // which segment of the push dominates — the secret scan, credential
 // refresh, the push itself, or LFS reconcile.
+//
+// The push ignores its caller's cancellation (a Ctrl-C, a closed review
+// page): PushWithRetry's pull rebases the Ledger, and a cancel mid-rebase
+// kills git and skips the abort, leaving the clone mid-rebase. Its own
+// per-step timeouts still bound it.
 func pushLedger(ctx context.Context, ledgerPath string) error {
+	ctx = context.WithoutCancel(ctx)
 	ctx, span := perf.Start(ctx, "pre-push total")
 	defer span.End()
 
@@ -442,8 +547,13 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 	// refresh / merge-attribute healing so failures from those don't get
 	// confused with a secret-gate refusal; runs BEFORE PushWithRetry so we
 	// never send bytes containing detected credentials.
+	// The gate can amend the commit it redacts, which moves the branch, so it
+	// runs under the repo lock (sageox/ox#1541). PushWithRetry takes the same
+	// non-reentrant lock itself, so it stays outside.
 	gateCtx, gateSpan := perf.Start(ctx, "secret_gate")
-	if err := runPrePushSecretGate(gateCtx, ledgerPath); err != nil {
+	if err := gitutil.WithRepoLock(gateCtx, ledgerPath, func() error {
+		return runPrePushSecretGate(gateCtx, ledgerPath)
+	}); err != nil {
 		perf.RecordError(gateSpan, err)
 		gateSpan.End()
 		perf.RecordError(span, err)
@@ -453,6 +563,7 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 
 	pushCtx, pushSpan := perf.Start(ctx, "git_push")
 	err := gitutil.PushWithRetry(pushCtx, ledgerPath, gitutil.PushOpts{
+		ImmutablePaths:      true, // the Ledger never renames paths
 		AutoResolvePrefixes: ledgerAutoResolvePrefixes,
 		PrePush: func(repoPath string) error {
 			if ep != "" {
@@ -524,6 +635,6 @@ func makeLFSReconciler(ep string) func(string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		return result.Replaced > 0, nil
+		return result.Changed(), nil
 	}
 }

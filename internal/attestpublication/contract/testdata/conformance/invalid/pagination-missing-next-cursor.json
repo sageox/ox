@@ -1,0 +1,19 @@
+{
+  "items": [
+    {
+      "run_id": "bdd_01990000-0000-7000-8000-000000000001",
+      "status": "published",
+      "source_run_id": "local-run-2026-09-10",
+      "corpus_key": "payments",
+      "created_at": "2026-09-10T20:00:00Z",
+      "published_at": "2026-09-10T20:01:00Z",
+      "evidence_expires_at": "2026-10-10T20:01:00Z",
+      "url": "https://test.sageox.ai/runs/bdd_01990000-0000-7000-8000-000000000001",
+      "diagnostics": []
+    }
+  ],
+  "pagination": {
+    "limit": 20,
+    "has_more": true
+  }
+}

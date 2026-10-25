@@ -52,6 +52,22 @@ func maybePublishSessionDraft(ctx *HookContext) {
 		slog.Debug("draft: no recording state for turn count", "agent_id", agentID, "error", err)
 		return
 	}
+	// A start-time or pending-stop hold survives the environment that set it.
+	// Keep counting locally, but publish neither registration nor draft metadata
+	// when a later native Stop runs with auto publishing restored.
+	if state.RecordedManualPublishing() {
+		return
+	}
+
+	// Register the /c/ link now that a real turn exists. Start-time registration
+	// is deferred (see notifySessionStartedAsync) so no-user-turn phantoms never
+	// reach the server; the Stop hook is the first reliable signal that a real
+	// turn landed. Fires at most once — only from the "deferred" state, so a
+	// failed attempt drops to "pending" and is left to the prime retry rather
+	// than re-attempted every turn.
+	if state.LifecycleRegistrationState == "deferred" {
+		notifySessionStartedAsync(ctx.ProjectRoot, state)
+	}
 
 	// Cheapest possible early-out before touching config: below the publish
 	// threshold nothing can happen regardless of how the feature is configured.
@@ -60,14 +76,13 @@ func maybePublishSessionDraft(ctx *HookContext) {
 		return
 	}
 
-	resolved := config.ResolveSessionDraft()
-
-	// Same gate as notifySessionStartedAsync. If session attribution is off
-	// there is no /c/ page to make resolvable, so publishing a draft would be
-	// pure ledger noise. Every session-link surface stays on one switch.
-	if attr := loadResolvedAttribution(); attr.Session == "" {
-		resolved = &config.ResolvedSessionDraft{Enabled: false}
-	}
+	// Resolved here, after the cheap turn-count early-out above, rather than at
+	// the top of the function: the turn counter must still increment for every
+	// session regardless of policy — see the comment on the
+	// UpdateRecordingStateForAgent call above. `ox session status` resolves the
+	// same policy (draftStateFor), so it never reports a draft this hook will
+	// not publish.
+	resolved := repoDraftPolicy(ctx.ProjectRoot)
 
 	action := draftDecision(state.TurnCount, state.DraftPublishedTurn, state.DraftPublishedAt != nil, resolved)
 	if action == draftActionNone {
@@ -98,6 +113,29 @@ func maybePublishSessionDraft(ctx *HookContext) {
 	})
 }
 
+// repoDraftPolicy is the draft policy for every recording in projectRoot: the
+// session.draft setting, turned off where no draft may be published at all.
+// A recording that saved session_publishing: manual is excluded before this
+// runs, by maybePublishSessionDraft's early return and by draftStateFor.
+//
+// Attribution off is the same gate as notifySessionStartedAsync: there is no
+// /c/ page to make resolvable, so a draft would be pure ledger noise. Every
+// session-link surface stays on one switch. It is read for projectRoot, not the
+// working directory, which is another repo when OX_PROJECT_ROOT selects one.
+//
+// session_publishing: manual means nothing about a session leaves the machine
+// until the user explicitly uploads it. A draft is a real ledger commit
+// (session name, agent id/type, model, repo id, username, title) that the
+// daemon's sync cycle pushes to the remote ~60s later — exactly the implicit
+// publish manual mode promises will not happen.
+func repoDraftPolicy(projectRoot string) *config.ResolvedSessionDraft {
+	if loadResolvedAttributionFor(projectRoot).Session == "" ||
+		config.GetSessionPublishing(projectRoot) == config.SessionPublishingManual {
+		return &config.ResolvedSessionDraft{Enabled: false}
+	}
+	return config.ResolveSessionDraft()
+}
+
 // resolveDraftLedgerPath returns the ledger this recording belongs to, or ""
 // when it cannot be established with certainty.
 //
@@ -119,22 +157,26 @@ func resolveDraftLedgerPath(projectRoot, sessionPath string) string {
 	}
 	// The project's CONFIGURED ledger, read from its local config rather than
 	// from the process CWD — the hook may run from anywhere in the worktree.
-	configured := ""
-	if localCfg, err := config.LoadLocalConfig(projectRoot); err == nil &&
-		localCfg != nil && localCfg.Ledger != nil {
-		configured = localCfg.Ledger.Path
-	}
-	if configured == "" {
-		if ctx, err := config.LoadProjectContext(projectRoot); err == nil && ctx != nil {
-			configured = ctx.DefaultLedgerPath()
-		}
-	}
+	configured := configuredLedgerPath(projectRoot)
 	if configured == "" || filepath.Clean(configured) != filepath.Clean(derived) {
 		slog.Debug("draft: derived path is not this project's ledger",
 			"derived", derived, "configured", configured)
 		return ""
 	}
 	return derived
+}
+
+// configuredLedgerPath is the project's configured Ledger: its local config's
+// path, else the project's default. It never consults the process CWD.
+func configuredLedgerPath(projectRoot string) string {
+	if localCfg, err := config.LoadLocalConfig(projectRoot); err == nil &&
+		localCfg != nil && localCfg.Ledger != nil && localCfg.Ledger.Path != "" {
+		return localCfg.Ledger.Path
+	}
+	if ctx, err := config.LoadProjectContext(projectRoot); err == nil && ctx != nil {
+		return ctx.DefaultLedgerPath()
+	}
+	return ""
 }
 
 // publishDraftPlaceholder writes the draft meta.json into the ledger and
@@ -152,22 +194,33 @@ func publishDraftPlaceholder(projectRoot, ledgerPath, sessionName string, state 
 		return false
 	}
 
+	// Never git-commit a placeholder for a session with no user turn. TurnCount
+	// gates the turn count; this gates on a real coworker prompt actually
+	// existing in the transcript. A header-only recording is a phantom, and a
+	// committed draft for one is exactly the ledger/dashboard noise this guards
+	// against — the /c/ link would resolve to a session that never happened.
+	if !session.HasUserTurn(filepath.Join(state.SessionPath, "raw.jsonl")) {
+		slog.Debug("draft: skipped, no user turn", "session", sessionName)
+		return false
+	}
+
 	ep := endpoint.GetForProject(projectRoot)
 	sessionDir := draftLedgerSessionDir(ledgerPath, sessionName)
 
 	input := lfs.DraftInput{
-		SessionName: sessionName,
-		SessionID:   state.SessionID,
-		Username:    identity.AttributionDisplayName(ep, config.GetDisplayName()),
-		UserID:      auth.GetUserID(ep),
-		RepoID:      getRepoIDOrDefault(projectRoot),
-		AgentID:     state.AgentID,
-		AgentType:   state.AdapterName,
-		Model:       state.Model,
-		CreatedAt:   state.StartedAt,
-		TurnCount:   state.TurnCount,
-		EntryCount:  state.EntryCount,
-		Now:         time.Now(),
+		SessionName:            sessionName,
+		SessionID:              state.SessionID,
+		ContinuedFromSessionID: state.ContinuedFromSessionID,
+		Username:               identity.AttributionDisplayName(ep, config.GetDisplayName()),
+		UserID:                 auth.GetUserID(ep),
+		RepoID:                 getRepoIDOrDefault(projectRoot),
+		AgentID:                state.AgentID,
+		AgentType:              state.AdapterName,
+		Model:                  state.Model,
+		CreatedAt:              state.StartedAt,
+		TurnCount:              state.TurnCount,
+		EntryCount:             state.EntryCount,
+		Now:                    time.Now(),
 	}
 
 	// Bounded so a wedged flock on meta.json (a concurrent finalize holding it)

@@ -35,10 +35,15 @@ var (
 	tipCommandStyle = lipgloss.NewStyle().Foreground(ColorPrimary)   // sage green for commands
 )
 
-var backtickRegex = regexp.MustCompile("`([^`]+)`")
+// backtickRegex matches a backtick-wrapped command, or an escaped backtick
+// (\`), which is literal text in a shell line such as an escaped PATH
+// export and must not open or close a command span.
+var backtickRegex = regexp.MustCompile("\\\\`|`([^`]+)`")
 
 var jsonMode bool
 var noInteractive bool
+var noInput bool
+var assumeYes bool
 
 func SetJSONMode(enabled bool) {
 	jsonMode = enabled
@@ -50,11 +55,34 @@ func SetNoInteractive(enabled bool) {
 	noInteractive = enabled
 }
 
+// SetNoInput disables prompts without treating missing input as consent.
+func SetNoInput(enabled bool) {
+	noInput = enabled
+}
+
+// NoInput reports whether --no-input forbids reading prompt answers from stdin.
+// Commands may still read data explicitly supplied through stdin.
+func NoInput() bool {
+	return noInput
+}
+
+// SetAssumeYes sets the global "answer yes to every confirmation" flag,
+// from --yes or OX_YES=1. Deliberately separate from SetNoInteractive:
+// "there is no human watching" must never imply "the absent human agrees."
+func SetAssumeYes(enabled bool) {
+	assumeYes = enabled
+}
+
+// AssumeYes reports whether confirmations should be auto-approved.
+func AssumeYes() bool {
+	return assumeYes
+}
+
 // IsInteractive returns true if interactive mode is enabled.
-// Interactive mode is disabled when --no-interactive flag is set, CI=true,
-// or stdin is not a terminal (e.g., running inside an AI agent).
+// Interactive mode is disabled by --no-input, --no-interactive, CI=true,
+// or stdin not being a terminal (e.g., running inside an AI coworker).
 func IsInteractive() bool {
-	if noInteractive {
+	if noInteractive || noInput {
 		return false
 	}
 	return isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
@@ -81,14 +109,6 @@ func IsHeadless() bool {
 	}
 
 	return false
-}
-
-func PrintJSON(v any) {
-	encoder := json.NewEncoder(os.Stdout)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(v); err != nil {
-		fmt.Fprintf(os.Stderr, "error encoding JSON: %v\n", err)
-	}
 }
 
 func PrintSuccess(msg string) {
@@ -131,21 +151,12 @@ func PrintPreservedTo(w io.Writer, msg string) {
 	fmt.Fprintf(w, "%s %s\n", preservedStyle.Render("✓"), msg)
 }
 
+// PrintError writes an error to stderr in both text and JSON modes.
 func PrintError(msg string) {
-	// Preserves historical split: JSON to stdout, text to stderr.
-	if jsonMode {
-		PrintJSON(map[string]any{
-			"status":  "error",
-			"message": msg,
-		})
-		return
-	}
 	PrintErrorTo(os.Stderr, msg)
 }
 
-// PrintErrorTo writes an error message to w. Parallel-safe. Always writes
-// the formatted text (or JSON in jsonMode) to w — does not split between
-// stdout/stderr like the package-level PrintError does.
+// PrintErrorTo writes an error to w as formatted text or JSON. Parallel-safe.
 func PrintErrorTo(w io.Writer, msg string) {
 	if jsonMode {
 		enc := json.NewEncoder(w)
@@ -159,19 +170,12 @@ func PrintErrorTo(w io.Writer, msg string) {
 	fmt.Fprintf(w, "%s %s\n", errorStyle.Render("✗"), msg)
 }
 
+// PrintWarning writes a warning to stderr in both text and JSON modes.
 func PrintWarning(msg string) {
-	if jsonMode {
-		PrintJSON(map[string]any{
-			"status":  "warning",
-			"message": msg,
-		})
-		return
-	}
 	PrintWarningTo(os.Stderr, msg)
 }
 
-// PrintWarningTo writes a warning to w. Parallel-safe. Always writes to w
-// (does not split between stdout/stderr like the package-level PrintWarning).
+// PrintWarningTo writes a warning to w as formatted text or JSON. Parallel-safe.
 func PrintWarningTo(w io.Writer, msg string) {
 	if jsonMode {
 		enc := json.NewEncoder(w)
@@ -282,6 +286,9 @@ func PrintTip(tip string) {
 // FormatTipText formats tip text by highlighting backtick-wrapped commands
 func FormatTipText(tip string) string {
 	return backtickRegex.ReplaceAllStringFunc(tip, func(match string) string {
+		if match == "\\`" {
+			return match
+		}
 		// match is "`command`", so extract without backticks
 		command := match[1 : len(match)-1]
 		return tipCommandStyle.Render(command)
@@ -382,6 +389,24 @@ func (e SilentError) Error() string { return "" }
 
 // ErrSilent is a sentinel error indicating output was already printed.
 var ErrSilent = SilentError{}
+
+// Silent marks a failure whose output was already displayed, like ErrSilent,
+// and keeps err in the chain so errors.Is and errors.As (and usage telemetry)
+// still see what failed. Its message is empty, exactly like ErrSilent's, so
+// nothing that prints or parses error text behaves differently. Use it, not
+// errors.Join(ErrSilent, err), whose message is err's. Silent(nil) is ErrSilent.
+func Silent(err error) error {
+	if err == nil {
+		return ErrSilent
+	}
+	return silentCause{err: err}
+}
+
+type silentCause struct{ err error }
+
+func (silentCause) Error() string { return "" }
+
+func (s silentCause) Unwrap() []error { return []error{ErrSilent, s.err} }
 
 // IsSilent checks if an error is a silent error (already displayed).
 func IsSilent(err error) bool {

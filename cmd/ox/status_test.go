@@ -288,6 +288,184 @@ func TestBuildStatusJSON_VisibilityAccessLevelCombinations(t *testing.T) {
 	}
 }
 
+// TestBuildStatusJSON_ProjectTeamIdentity is the red-first proof for fix J
+// item 1 (contract D8/J): before ProjectJSON carried RepoID/TeamID/TeamName,
+// a JSON consumer of `ox status --json` had no way to learn which team or
+// repo a project was bound to at all — the human renderer buried it five
+// sections deep, and JSON exposed nothing.
+func TestBuildStatusJSON_ProjectTeamIdentity(t *testing.T) {
+	t.Parallel()
+
+	gitRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(gitRoot, ".sageox"), 0755))
+	require.NoError(t, config.SaveProjectConfig(gitRoot, &config.ProjectConfig{
+		RepoID:   "repo_abc123",
+		TeamID:   "team_xyz789",
+		TeamName: "Acme Corp",
+	}))
+
+	output := buildStatusJSON(
+		false, nil, nil, "test.sageox.ai", "/tmp/auth.json", false,
+		"/tmp/config", gitRoot, filepath.Join(gitRoot, ".sageox"), true,
+		nil, gitRoot, nil, nil,
+		nil, nil,
+		statusBubblesSummary{},
+	)
+
+	require.NotNil(t, output.Project)
+	assert.Equal(t, "repo_abc123", output.Project.RepoID)
+	assert.Equal(t, "team_xyz789", output.Project.TeamID)
+	assert.Equal(t, "Acme Corp", output.Project.TeamName)
+}
+
+// TestBuildStatusJSON_TeamContextMarksRepoTeam is the proof for fix J item 1's
+// IsRepoTeam flag: a JSON consumer must be able to identify WHICH entry in
+// team_contexts (if any) is this repo's own bound team, and detect a
+// mismatch (project.team_id set but no entry has is_repo_team=true) without
+// re-deriving the comparison itself.
+func TestBuildStatusJSON_TeamContextMarksRepoTeam(t *testing.T) {
+	t.Parallel()
+
+	gitRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(gitRoot, ".sageox"), 0755))
+	require.NoError(t, config.SaveProjectConfig(gitRoot, &config.ProjectConfig{
+		TeamID: "team_repo_owner",
+	}))
+
+	otherTCPath := t.TempDir()
+	repoTCPath := t.TempDir()
+	localCfg := &config.LocalConfig{
+		TeamContexts: []config.TeamContext{
+			{TeamID: "team_other", TeamName: "Other Team", Path: otherTCPath},
+			{TeamID: "team_repo_owner", TeamName: "Repo's Team", Path: repoTCPath},
+		},
+	}
+
+	output := buildStatusJSON(
+		false, nil, nil, "test.sageox.ai", "/tmp/auth.json", false,
+		"/tmp/config", gitRoot, filepath.Join(gitRoot, ".sageox"), true,
+		localCfg, gitRoot, nil, nil,
+		nil, nil,
+		statusBubblesSummary{},
+	)
+
+	require.Len(t, output.TeamContexts, 2)
+	byID := make(map[string]status.TeamContextJSON)
+	for _, tc := range output.TeamContexts {
+		byID[tc.TeamID] = tc
+	}
+	assert.True(t, byID["team_repo_owner"].IsRepoTeam, "the repo's own bound team must be marked")
+	assert.False(t, byID["team_other"].IsRepoTeam, "an unrelated team context must not be marked as this repo's team")
+}
+
+// isolateStatusTestAuth points every auth/config lookup at empty temp
+// directories, so renderGitReposSection's real auth.IsAuthenticatedForEndpoint
+// call deterministically resolves to "not authenticated" instead of
+// depending on whatever happens to be logged in on the machine running the
+// test.
+func isolateStatusTestAuth(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	t.Setenv("OX_XDG_ENABLE", "1")
+}
+
+// TestRenderGitReposSection_TeamBoundButNotVisible is the red-first proof
+// for fix J item 2 (contract D8/J): a repo whose config.json names a team_id
+// that this account cannot see (wrong account, revoked access, or simply
+// never fetched) rendered identically to a repo that was NEVER bound to any
+// team — both said "Status: not configured". A coworker who successfully
+// recorded sessions to a team status can't see would get no signal at all
+// that anything was different about their setup.
+func TestRenderGitReposSection_TeamBoundButNotVisible(t *testing.T) {
+	isolateStatusTestAuth(t)
+
+	gitRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(gitRoot, ".sageox"), 0755))
+	require.NoError(t, config.SaveProjectConfig(gitRoot, &config.ProjectConfig{
+		TeamID:   "team_ghost",
+		Endpoint: "http://127.0.0.1:1", // deliberately unreachable — never actually dialed while unauthenticated
+	}))
+
+	out := renderGitReposSection(nil, gitRoot, nil, statusBubblesSummary{}, false)
+
+	assert.Contains(t, out, "team_ghost", "the bound team id must be surfaced even when this account can't see the team")
+	assert.Contains(t, out, "not visible to this account", "must name the mismatch explicitly")
+	assert.NotContains(t, out, "not configured", "must not render identically to a repo that was never bound to a team")
+}
+
+// TestRenderGitReposSection_TeamBoundButAPIFailure_ShowsUnavailableNotDenied
+// is the red-first proof that a transient API failure must never render
+// identically to a real permission denial. Before this fix, GetRepoDetail's
+// and GetRepos' errors were discarded (`repoDetail, _ = ...`), so a 5xx from
+// either endpoint fell through to the exact same "⚠ not visible to this
+// account" text as a genuine "your account can't see this team" -- "we
+// couldn't check" and "you don't have access" have different fixes, and
+// collapsing them trains a coworker to distrust the warning the next time
+// it's real.
+func TestRenderGitReposSection_TeamBoundButAPIFailure_ShowsUnavailableNotDenied(t *testing.T) {
+	isolateStatusTestAuth(t)
+	t.Setenv("SAGEOX_TOKEN", "")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == auth.IntrospectEndpoint {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"active": true,
+				"principal_kind": "user",
+				"scope": "full-access",
+				"token_type": "Bearer",
+				"expires_at": null,
+				"user": {"id": "u_1", "email": "person@example.test", "name": "Person A"},
+				"team": null,
+				"token": null
+			}`))
+			return
+		}
+		// Every repo-data endpoint (repos list, repo detail, ledger status)
+		// is down -- the transient-outage scenario this test proves must
+		// not render as a permission denial.
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	gitRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(gitRoot, ".sageox"), 0755))
+	require.NoError(t, config.SaveProjectConfig(gitRoot, &config.ProjectConfig{
+		TeamID:   "team_ghost",
+		RepoID:   "repo_ghost",
+		Endpoint: srv.URL,
+	}))
+	writeDiskLogin(t, srv.URL, "Person A", "person@example.test")
+
+	out := renderGitReposSection(nil, gitRoot, nil, statusBubblesSummary{}, false)
+
+	assert.Contains(t, out, "team_ghost", "the bound team id must still be surfaced")
+	assert.Contains(t, out, "visibility unavailable", "must name the real failure mode: we could not check")
+	assert.NotContains(t, out, "not visible to this account", "a transient API failure must not render as a permission denial")
+}
+
+// TestRenderGitReposSection_NeverConfigured is the negative control for the
+// above: a repo with no team_id at all must still say "not configured", and
+// must NOT claim a mismatch that doesn't exist.
+func TestRenderGitReposSection_NeverConfigured(t *testing.T) {
+	isolateStatusTestAuth(t)
+
+	gitRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(gitRoot, ".sageox"), 0755))
+	require.NoError(t, config.SaveProjectConfig(gitRoot, &config.ProjectConfig{
+		Endpoint: "http://127.0.0.1:1",
+	}))
+
+	out := renderGitReposSection(nil, gitRoot, nil, statusBubblesSummary{}, false)
+
+	assert.Contains(t, out, "not configured")
+	assert.NotContains(t, out, "not visible to this account", "a repo never bound to a team must not claim a mismatch")
+}
+
 func TestShortenPathViaSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlinks require Developer Mode on Windows")
@@ -654,7 +832,6 @@ func TestFormatGitRepoStatus(t *testing.T) {
 				Exists:           true,
 				UncommittedCount: 0,
 				HasLastSync:      true,
-				LastSync:         time.Now().Add(-30 * time.Second),
 			},
 			"synced (just now)", "success",
 		},
@@ -673,7 +850,11 @@ func TestFormatGitRepoStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			text, semantic := status.FormatGitRepoStatus(tt.status)
+			input := tt.status
+			if input.HasLastSync {
+				input.LastSync = time.Now().Add(-30 * time.Second)
+			}
+			text, semantic := status.FormatGitRepoStatus(input)
 			assert.Contains(t, text, tt.wantText)
 			assert.Equal(t, tt.wantSemantic, semantic)
 		})
@@ -683,27 +864,26 @@ func TestFormatGitRepoStatus(t *testing.T) {
 func TestFormatTimeAgo(t *testing.T) {
 	t.Parallel()
 
-	now := time.Now()
 	tests := []struct {
-		name string
-		t    time.Time
-		want string
+		name   string
+		offset time.Duration
+		want   string
 	}{
-		{"just now", now.Add(-5 * time.Second), "just now"},
-		{"1 minute ago", now.Add(-1 * time.Minute), "1 minute ago"},
-		{"multiple minutes", now.Add(-15 * time.Minute), "15 minutes ago"},
-		{"1 hour ago", now.Add(-1 * time.Hour), "1 hour ago"},
-		{"multiple hours", now.Add(-5 * time.Hour), "5 hours ago"},
-		{"1 day ago", now.Add(-25 * time.Hour), "1 day ago"},
-		{"multiple days", now.Add(-72 * time.Hour), "3 days ago"},
-		{"1 week ago", now.Add(-8 * 24 * time.Hour), "1 week ago"},
-		{"multiple weeks", now.Add(-21 * 24 * time.Hour), "3 weeks ago"},
+		{"just now", -5 * time.Second, "just now"},
+		{"1 minute ago", -1 * time.Minute, "1 minute ago"},
+		{"multiple minutes", -15 * time.Minute, "15 minutes ago"},
+		{"1 hour ago", -1 * time.Hour, "1 hour ago"},
+		{"multiple hours", -5 * time.Hour, "5 hours ago"},
+		{"1 day ago", -25 * time.Hour, "1 day ago"},
+		{"multiple days", -72 * time.Hour, "3 days ago"},
+		{"1 week ago", -8 * 24 * time.Hour, "1 week ago"},
+		{"multiple weeks", -21 * 24 * time.Hour, "3 weeks ago"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := status.FormatTimeAgo(tt.t)
+			got := status.FormatTimeAgo(time.Now().Add(tt.offset))
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -863,6 +1043,9 @@ func TestRenderAuthStatus_MalformedEnvTokenIsReported(t *testing.T) {
 	setupAuthRenderEnv(t, "http://127.0.0.1:1", malformedTeamToken)
 
 	out := renderAuthStatus("/tmp/auth.json")
+
+	assert.NotContains(t, out, "ox login")
+	assert.Contains(t, out, "Rotate or re-mint")
 
 	if !strings.Contains(out, auth.EnvVarToken) {
 		t.Errorf("output must name %s so the operator knows which credential was refused, got:\n%s", auth.EnvVarToken, out)
@@ -1177,8 +1360,12 @@ func TestRenderAuthStatus_RejectedTokenGetsFamilyAwareHint(t *testing.T) {
 			if strings.Contains(out, tt.denyPhrase) {
 				t.Errorf("must not get the other family's hint (%q), got:\n%s", tt.denyPhrase, out)
 			}
-			if !strings.Contains(out, "ox login") {
-				t.Errorf("expected the hint to mention `ox login`, got:\n%s", out)
+			if tt.envToken == validTeamToken {
+				assert.NotContains(t, out, "ox login")
+				assert.Contains(t, out, "Rotate or re-mint")
+				assert.Contains(t, checkAuthentication().detail, "Rotate or re-mint")
+			} else {
+				assert.Contains(t, out, "ox login")
 			}
 			// The verdict line, asserted in both directions: a mutation
 			// flipping it passed this test before.
@@ -1414,6 +1601,11 @@ func TestDoctorAuth_MalformedEnvTokenIsNotReportedAsNotLoggedIn(t *testing.T) {
 			if !strings.Contains(res.detail, tt.wantPhrase) {
 				t.Errorf("expected family-aware remedy containing %q, got %q", tt.wantPhrase, res.detail)
 			}
+			if tt.envToken == malformedTeamToken {
+				assert.NotContains(t, res.detail, "ox login")
+				assert.Contains(t, res.detail, "Rotate or re-mint")
+			}
+
 			if res.passed {
 				t.Errorf("a refused credential must not pass the check: %+v", res)
 			}

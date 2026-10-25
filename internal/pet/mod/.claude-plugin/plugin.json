@@ -1,0 +1,7 @@
+{
+  "name": "ox-cli-oxy",
+  "version": "{{VERSION}}",
+  "description": "Oxy, SageOx's mascot, in Claude Code's thinking line, reacting to what Claude is doing. /hatch-pet shows, hides, and sizes him.",
+  "author": { "name": "SageOx", "url": "https://sageox.ai" },
+  "types": "./types/index.d.ts"
+}

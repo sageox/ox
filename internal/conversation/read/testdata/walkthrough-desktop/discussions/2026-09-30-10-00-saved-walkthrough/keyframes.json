@@ -1,0 +1,10 @@
+{
+  "recording_id": "rec_01a0f488-0000-7000-8000-0000000000b1",
+  "duration": 25.2,
+  "keyframe_count": 3,
+  "keyframes": [
+    {"timestamp_seconds": 12.0, "extraction_method": "periodic", "content_type": "live-ui", "description": "The Saved page with the team mural image.", "filename": "keyframes/002-cccc.jpg"},
+    {"timestamp_seconds": 0, "extraction_method": "periodic", "content_type": "live-ui", "description": "The team home page.", "filename": "keyframes/000-aaaa.jpg"},
+    {"timestamp_seconds": 6.5, "extraction_method": "scene-change", "filename": "keyframes/001-bbbb.jpg"}
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "created_at": "2026-10-01T03:00:00Z",
+  "id": "r-plan-0002",
+  "items": [
+    {
+      "anchor": "plan",
+      "label": "Whole plan",
+      "note": "Agree with the split.",
+      "reviewer": "Avery",
+      "section": "",
+      "status": "comment"
+    }
+  ],
+  "request_sha256": "7b67c2708cb30e0d62acaa83b8d75c570ccdaac51a4de181eb13e1dd7e8926f4",
+  "reviewer": "Avery",
+  "slug": "rc-whole-plan"
+}

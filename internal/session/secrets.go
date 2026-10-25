@@ -1,9 +1,12 @@
 package session
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/sageox/ox/internal/secretguard"
 )
 
 // SecretPattern defines a pattern for detecting secrets
@@ -53,9 +56,10 @@ func DefaultPatterns() []SecretPattern {
 	return []SecretPattern{
 		// AWS Access Keys (AKIA... format, exactly 20 chars) — long-lived IAM access keys.
 		{
-			Name:    "aws_access_key",
-			Pattern: regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
-			Redact:  "[REDACTED_AWS_KEY]",
+			Name:     "aws_access_key",
+			Pattern:  regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
+			Redact:   "[REDACTED_AWS_KEY]",
+			Keywords: []string{"akia"},
 		},
 
 		// AWS STS session access key id (ASIA... format, exactly 20 chars) — short-lived
@@ -65,16 +69,18 @@ func DefaultPatterns() []SecretPattern {
 		// Forensic scan 2026-05-10 found 194 occurrences in committed raw.jsonl files that
 		// slipped past the AKIA-only regex; this closes that gap.
 		{
-			Name:    "aws_sts_session_key",
-			Pattern: regexp.MustCompile(`ASIA[0-9A-Z]{16}`),
-			Redact:  "[REDACTED_AWS_STS_KEY]",
+			Name:     "aws_sts_session_key",
+			Pattern:  regexp.MustCompile(`ASIA[0-9A-Z]{16}`),
+			Redact:   "[REDACTED_AWS_STS_KEY]",
+			Keywords: []string{"asia"},
 		},
 
 		// AWS Secret Keys (40 char base64, usually after key= or similar)
 		{
-			Name:    "aws_secret_key",
-			Pattern: regexp.MustCompile(`(?i)(aws_secret_access_key|aws_secret_key|secret_access_key)\s*[=:]\s*['"]?([A-Za-z0-9/+=]{40})['"]?`),
-			Redact:  "[REDACTED_AWS_SECRET]",
+			Name:     "aws_secret_key",
+			Pattern:  regexp.MustCompile(`(?i)(aws_secret_access_key|aws_secret_key|secret_access_key)\s*[=:]\s*['"]?([A-Za-z0-9/+=]{40})['"]?`),
+			Redact:   "[REDACTED_AWS_SECRET]",
+			Keywords: []string{"aws_secret_key", "secret_access_key"},
 		},
 
 		// GitHub tokens. Split per-prefix so the report identifies WHICH
@@ -153,51 +159,58 @@ func DefaultPatterns() []SecretPattern {
 
 		// GitLab personal access tokens (glpat- prefix)
 		{
-			Name:    "gitlab_token",
-			Pattern: regexp.MustCompile(`glpat-[A-Za-z0-9\-_]{20,}`),
-			Redact:  "[REDACTED_GITLAB_TOKEN]",
+			Name:     "gitlab_token",
+			Pattern:  regexp.MustCompile(`glpat-[A-Za-z0-9\-_]{20,}`),
+			Redact:   "[REDACTED_GITLAB_TOKEN]",
+			Keywords: []string{"glpat-"},
 		},
 
 		// GitLab OAuth access tokens (gloas- prefix)
 		{
-			Name:    "gitlab_oauth_token",
-			Pattern: regexp.MustCompile(`gloas-[A-Za-z0-9\-_]{15,}`),
-			Redact:  "[REDACTED_GITLAB_OAUTH]",
+			Name:     "gitlab_oauth_token",
+			Pattern:  regexp.MustCompile(`gloas-[A-Za-z0-9\-_]{15,}`),
+			Redact:   "[REDACTED_GITLAB_OAUTH]",
+			Keywords: []string{"gloas-"},
 		},
 
 		// GitLab deploy tokens (gldt- prefix)
 		{
-			Name:    "gitlab_deploy_token",
-			Pattern: regexp.MustCompile(`gldt-[A-Za-z0-9\-_]{15,}`),
-			Redact:  "[REDACTED_GITLAB_DEPLOY_TOKEN]",
+			Name:     "gitlab_deploy_token",
+			Pattern:  regexp.MustCompile(`gldt-[A-Za-z0-9\-_]{15,}`),
+			Redact:   "[REDACTED_GITLAB_DEPLOY_TOKEN]",
+			Keywords: []string{"gldt-"},
 		},
 
 		// GitLab runner tokens (glrt- prefix)
 		{
-			Name:    "gitlab_runner_token",
-			Pattern: regexp.MustCompile(`glrt-[A-Za-z0-9\-_]{15,}`),
-			Redact:  "[REDACTED_GITLAB_RUNNER_TOKEN]",
+			Name:     "gitlab_runner_token",
+			Pattern:  regexp.MustCompile(`glrt-[A-Za-z0-9\-_]{15,}`),
+			Redact:   "[REDACTED_GITLAB_RUNNER_TOKEN]",
+			Keywords: []string{"glrt-"},
 		},
 
 		// GitLab feed tokens (glft- prefix)
 		{
-			Name:    "gitlab_feed_token",
-			Pattern: regexp.MustCompile(`glft-[A-Za-z0-9\-_]{15,}`),
-			Redact:  "[REDACTED_GITLAB_FEED_TOKEN]",
+			Name:     "gitlab_feed_token",
+			Pattern:  regexp.MustCompile(`glft-[A-Za-z0-9\-_]{15,}`),
+			Redact:   "[REDACTED_GITLAB_FEED_TOKEN]",
+			Keywords: []string{"glft-"},
 		},
 
 		// SageOx share-session cookies
 		{
-			Name:    "sox_share_session",
-			Pattern: regexp.MustCompile(`sox_share_session=[A-Za-z0-9_\-]{15,}`),
-			Redact:  "sox_share_session=[REDACTED_SOX_SHARE_SESSION]",
+			Name:     "sox_share_session",
+			Pattern:  regexp.MustCompile(`sox_share_session=[A-Za-z0-9_\-]{15,}`),
+			Redact:   "sox_share_session=[REDACTED_SOX_SHARE_SESSION]",
+			Keywords: []string{"sox_share_session="},
 		},
 
 		// SageOx API keys (mk_ prefix)
 		{
-			Name:    "sageox_api_key",
-			Pattern: regexp.MustCompile(`\bmk_[A-Za-z0-9]{20,}`),
-			Redact:  "[REDACTED_SAGEOX_API_KEY]",
+			Name:     "sageox_api_key",
+			Pattern:  regexp.MustCompile(`\bmk_[A-Za-z0-9]{20,}`),
+			Redact:   "[REDACTED_SAGEOX_API_KEY]",
+			Keywords: []string{"mk_"},
 		},
 
 		// SageOx bearer tokens — the whole ox<letter>_ family generically
@@ -217,65 +230,74 @@ func DefaultPatterns() []SecretPattern {
 		// inside proxy_, so "proxy_endpoint_override" in a captured shell
 		// transcript would be silently rewritten.
 		{
-			Name:    "sageox_bearer_token",
-			Pattern: regexp.MustCompile(`\box[a-z]_[A-Za-z0-9_\-]{8,}`),
-			Redact:  "[REDACTED_SAGEOX_TOKEN]",
+			Name:     "sageox_bearer_token",
+			Pattern:  regexp.MustCompile(`\box[a-z]_[A-Za-z0-9_\-]{8,}`),
+			Redact:   "[REDACTED_SAGEOX_TOKEN]",
+			Keywords: []string{"ox"},
 		},
 
 		// AgentX keys (axk_ prefix, exactly 32 chars after prefix)
 		{
-			Name:    "agentx_key",
-			Pattern: regexp.MustCompile(`\baxk_[A-Za-z0-9_]{32}\b`),
-			Redact:  "[REDACTED_AGENTX_KEY]",
+			Name:     "agentx_key",
+			Pattern:  regexp.MustCompile(`\baxk_[A-Za-z0-9_]{32}\b`),
+			Redact:   "[REDACTED_AGENTX_KEY]",
+			Keywords: []string{"axk_"},
 		},
 
 		// Slack tokens (xoxb-, xoxp-, xoxa-, xoxs-, xoxr-)
 		{
-			Name:    "slack_token",
-			Pattern: regexp.MustCompile(`xox[abpsr]-[A-Za-z0-9\-]{10,}`),
-			Redact:  "[REDACTED_SLACK_TOKEN]",
+			Name:     "slack_token",
+			Pattern:  regexp.MustCompile(`xox[abpsr]-[A-Za-z0-9\-]{10,}`),
+			Redact:   "[REDACTED_SLACK_TOKEN]",
+			Keywords: []string{"xox"},
 		},
 
 		// Stripe API keys (sk_live_, sk_test_, pk_live_, pk_test_)
 		{
-			Name:    "stripe_key",
-			Pattern: regexp.MustCompile(`[sr]k_(live|test)_[A-Za-z0-9]{24,}`),
-			Redact:  "[REDACTED_STRIPE_KEY]",
+			Name:     "stripe_key",
+			Pattern:  regexp.MustCompile(`[sr]k_(live|test)_[A-Za-z0-9]{24,}`),
+			Redact:   "[REDACTED_STRIPE_KEY]",
+			Keywords: []string{"k_live_", "k_test_"},
 		},
 
 		// Twilio API keys and auth tokens
 		{
-			Name:    "twilio_key",
-			Pattern: regexp.MustCompile(`SK[a-f0-9]{32}`),
-			Redact:  "[REDACTED_TWILIO_KEY]",
+			Name:     "twilio_key",
+			Pattern:  regexp.MustCompile(`SK[a-f0-9]{32}`),
+			Redact:   "[REDACTED_TWILIO_KEY]",
+			Keywords: []string{"sk"},
 		},
 
 		// SendGrid API keys
 		{
-			Name:    "sendgrid_key",
-			Pattern: regexp.MustCompile(`SG\.[A-Za-z0-9_\-]{22}\.[A-Za-z0-9_\-]{43}`),
-			Redact:  "[REDACTED_SENDGRID_KEY]",
+			Name:     "sendgrid_key",
+			Pattern:  regexp.MustCompile(`SG\.[A-Za-z0-9_\-]{22}\.[A-Za-z0-9_\-]{43}`),
+			Redact:   "[REDACTED_SENDGRID_KEY]",
+			Keywords: []string{"sg."},
 		},
 
 		// Mailchimp API keys
 		{
-			Name:    "mailchimp_key",
-			Pattern: regexp.MustCompile(`[a-f0-9]{32}-us[0-9]{1,2}`),
-			Redact:  "[REDACTED_MAILCHIMP_KEY]",
+			Name:     "mailchimp_key",
+			Pattern:  regexp.MustCompile(`[a-f0-9]{32}-us[0-9]{1,2}`),
+			Redact:   "[REDACTED_MAILCHIMP_KEY]",
+			Keywords: []string{"-us"},
 		},
 
 		// NPM tokens
 		{
-			Name:    "npm_token",
-			Pattern: regexp.MustCompile(`npm_[A-Za-z0-9]{36}`),
-			Redact:  "[REDACTED_NPM_TOKEN]",
+			Name:     "npm_token",
+			Pattern:  regexp.MustCompile(`npm_[A-Za-z0-9]{36}`),
+			Redact:   "[REDACTED_NPM_TOKEN]",
+			Keywords: []string{"npm_"},
 		},
 
 		// PyPI tokens
 		{
-			Name:    "pypi_token",
-			Pattern: regexp.MustCompile(`pypi-[A-Za-z0-9_\-]{50,}`),
-			Redact:  "[REDACTED_PYPI_TOKEN]",
+			Name:     "pypi_token",
+			Pattern:  regexp.MustCompile(`pypi-[A-Za-z0-9_\-]{50,}`),
+			Redact:   "[REDACTED_PYPI_TOKEN]",
+			Keywords: []string{"pypi-"},
 		},
 
 		// Heroku API keys (UUIDs - careful with false positives).
@@ -294,45 +316,51 @@ func DefaultPatterns() []SecretPattern {
 
 		// Private keys (RSA, DSA, EC, OPENSSH)
 		{
-			Name:    "private_key_header",
-			Pattern: regexp.MustCompile(`-----BEGIN\s+(RSA|DSA|EC|OPENSSH|PGP)?\s*PRIVATE KEY-----`),
-			Redact:  "[REDACTED_PRIVATE_KEY]",
+			Name:     "private_key_header",
+			Pattern:  regexp.MustCompile(`-----BEGIN\s+(RSA|DSA|EC|OPENSSH|PGP)?\s*PRIVATE KEY-----`),
+			Redact:   "[REDACTED_PRIVATE_KEY]",
+			Keywords: []string{"private key-----"},
 		},
 
 		// Generic private key (fallback)
 		{
-			Name:    "private_key_generic",
-			Pattern: regexp.MustCompile(`-----BEGIN PRIVATE KEY-----`),
-			Redact:  "[REDACTED_PRIVATE_KEY]",
+			Name:     "private_key_generic",
+			Pattern:  regexp.MustCompile(`-----BEGIN PRIVATE KEY-----`),
+			Redact:   "[REDACTED_PRIVATE_KEY]",
+			Keywords: []string{"-----begin private key-----"},
 		},
 
 		// Base64-encoded secrets in environment variables
 		{
-			Name:    "export_aws_secret",
-			Pattern: regexp.MustCompile(`(?i)export\s+(AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)\s*=\s*['"]?[A-Za-z0-9/+=]{20,}['"]?`),
-			Redact:  "[REDACTED_EXPORT]",
+			Name:     "export_aws_secret",
+			Pattern:  regexp.MustCompile(`(?i)export\s+(AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)\s*=\s*['"]?[A-Za-z0-9/+=]{20,}['"]?`),
+			Redact:   "[REDACTED_EXPORT]",
+			Keywords: []string{"aws_secret_access_key", "aws_session_token"},
 		},
 
 		// Generic export of sensitive env vars
 		{
-			Name:    "export_secret",
-			Pattern: regexp.MustCompile(`(?i)export\s+(GITHUB_TOKEN|GITLAB_TOKEN|API_KEY|SECRET_KEY|AUTH_TOKEN|ACCESS_TOKEN|PRIVATE_KEY|PASSWORD|PASSWD|DB_PASSWORD|DATABASE_PASSWORD|MYSQL_PASSWORD|POSTGRES_PASSWORD|REDIS_PASSWORD|MONGO_PASSWORD)\s*=\s*['"]?[^'"\s]+['"]?`),
-			Redact:  "[REDACTED_EXPORT]",
+			Name:     "export_secret",
+			Pattern:  regexp.MustCompile(`(?i)export\s+(GITHUB_TOKEN|GITLAB_TOKEN|API_KEY|SECRET_KEY|AUTH_TOKEN|ACCESS_TOKEN|PRIVATE_KEY|PASSWORD|PASSWD|DB_PASSWORD|DATABASE_PASSWORD|MYSQL_PASSWORD|POSTGRES_PASSWORD|REDIS_PASSWORD|MONGO_PASSWORD)\s*=\s*['"]?[^'"\s]+['"]?`),
+			Redact:   "[REDACTED_EXPORT]",
+			Keywords: []string{"export"},
 		},
 
 		// Connection strings with embedded credentials (DB protocols)
 		{
-			Name:    "connection_string",
-			Pattern: regexp.MustCompile(`(?i)(mongodb|postgres|postgresql|mysql|redis|amqp|mssql):\/\/[^:]+:[^@]+@[^\s'"]+`),
-			Redact:  "[REDACTED_CONNECTION_STRING]",
+			Name:     "connection_string",
+			Pattern:  regexp.MustCompile(`(?i)(mongodb|postgres|postgresql|mysql|redis|amqp|mssql):\/\/[^:]+:[^@]+@[^\s'"]+`),
+			Redact:   "[REDACTED_CONNECTION_STRING]",
+			Keywords: []string{"mongodb", "postgres", "mysql", "redis", "amqp", "mssql"},
 		},
 
 		// HTTP(S) URLs with embedded userinfo (PAT in clone URL, etc.)
 		// SkipIf whitelists already-masked or GitHub-style sentinel passwords.
 		{
-			Name:    "url_with_password",
-			Pattern: regexp.MustCompile(`https?://[^\s/:@]+:[^\s/:@]{6,}@[^\s'"]+`),
-			Redact:  "[REDACTED_URL_WITH_CREDENTIALS]",
+			Name:     "url_with_password",
+			Pattern:  regexp.MustCompile(`https?://[^\s/:@]+:[^\s/:@]{6,}@[^\s'"]+`),
+			Redact:   "[REDACTED_URL_WITH_CREDENTIALS]",
+			Keywords: []string{"://"},
 			SkipIf: []string{
 				":x-oauth-basic@",
 				":x-access-token@",
@@ -343,66 +371,75 @@ func DefaultPatterns() []SecretPattern {
 
 		// Bearer tokens in HTTP headers â clean shape: "Authorization: Bearer <token>"
 		{
-			Name:    "authorization_bearer",
-			Pattern: regexp.MustCompile(`(?i)Authorization:\s*Bearer\s+[A-Za-z0-9._=/+\-]{20,}`),
-			Redact:  "Authorization: Bearer [REDACTED_BEARER_TOKEN]",
+			Name:     "authorization_bearer",
+			Pattern:  regexp.MustCompile(`(?i)Authorization:\s*Bearer\s+[A-Za-z0-9._=/+\-]{20,}`),
+			Redact:   "Authorization: Bearer [REDACTED_BEARER_TOKEN]",
+			Keywords: []string{"authorization:"},
 		},
 
 		// Basic auth headers â clean shape: "Authorization: Basic <b64>"
 		{
-			Name:    "authorization_basic",
-			Pattern: regexp.MustCompile(`(?i)Authorization:\s*Basic\s+[A-Za-z0-9+/=]{20,}`),
-			Redact:  "Authorization: Basic [REDACTED_BASIC_AUTH]",
+			Name:     "authorization_basic",
+			Pattern:  regexp.MustCompile(`(?i)Authorization:\s*Basic\s+[A-Za-z0-9+/=]{20,}`),
+			Redact:   "Authorization: Basic [REDACTED_BASIC_AUTH]",
+			Keywords: []string{"authorization:"},
 		},
 
 		// Legacy bearer pattern retained for backward compatibility (covers
 		// looser shapes like "bearer=<token>" without the Authorization prefix).
 		{
-			Name:    "bearer_token",
-			Pattern: regexp.MustCompile(`(?i)(authorization|bearer)\s*[:=]\s*['"]?bearer\s+[A-Za-z0-9_\-\.]{20,}['"]?`),
-			Redact:  "[REDACTED_BEARER_TOKEN]",
+			Name:     "bearer_token",
+			Pattern:  regexp.MustCompile(`(?i)(authorization|bearer)\s*[:=]\s*['"]?bearer\s+[A-Za-z0-9_\-\.]{20,}['"]?`),
+			Redact:   "[REDACTED_BEARER_TOKEN]",
+			Keywords: []string{"bearer"},
 		},
 
 		// Legacy basic auth pattern retained for backward compatibility.
 		{
-			Name:    "basic_auth",
-			Pattern: regexp.MustCompile(`(?i)authorization\s*[:=]\s*['"]?basic\s+[A-Za-z0-9+/=]{10,}['"]?`),
-			Redact:  "[REDACTED_BASIC_AUTH]",
+			Name:     "basic_auth",
+			Pattern:  regexp.MustCompile(`(?i)authorization\s*[:=]\s*['"]?basic\s+[A-Za-z0-9+/=]{10,}['"]?`),
+			Redact:   "[REDACTED_BASIC_AUTH]",
+			Keywords: []string{"authorization"},
 		},
 
 		// Generic API key patterns (must be after more specific patterns)
 		{
-			Name:    "generic_api_key",
-			Pattern: regexp.MustCompile(`(?i)(api[_-]?key|apikey)\s*[=:]\s*['"]?([A-Za-z0-9_\-]{20,})['"]?`),
-			Redact:  "[REDACTED_API_KEY]",
+			Name:     "generic_api_key",
+			Pattern:  regexp.MustCompile(`(?i)(api[_-]?key|apikey)\s*[=:]\s*['"]?([A-Za-z0-9_\-]{20,})['"]?`),
+			Redact:   "[REDACTED_API_KEY]",
+			Keywords: []string{"api"},
 		},
 
 		// Generic token patterns
 		{
-			Name:    "generic_token",
-			Pattern: regexp.MustCompile(`(?i)(access[_-]?token|auth[_-]?token|secret[_-]?token)\s*[=:]\s*['"]?([A-Za-z0-9_\-]{20,})['"]?`),
-			Redact:  "[REDACTED_TOKEN]",
+			Name:     "generic_token",
+			Pattern:  regexp.MustCompile(`(?i)(access[_-]?token|auth[_-]?token|secret[_-]?token)\s*[=:]\s*['"]?([A-Za-z0-9_\-]{20,})['"]?`),
+			Redact:   "[REDACTED_TOKEN]",
+			Keywords: []string{"token"},
 		},
 
 		// Generic password patterns (careful: may have false positives)
 		{
-			Name:    "generic_password",
-			Pattern: regexp.MustCompile(`(?i)(password|passwd|pwd)\s*[=:]\s*['"]([^'"]{8,})['"]`),
-			Redact:  "[REDACTED_PASSWORD]",
+			Name:     "generic_password",
+			Pattern:  regexp.MustCompile(`(?i)(password|passwd|pwd)\s*[=:]\s*['"]([^'"]{8,})['"]`),
+			Redact:   "[REDACTED_PASSWORD]",
+			Keywords: []string{"password", "passwd", "pwd"},
 		},
 
 		// Generic secret patterns
 		{
-			Name:    "generic_secret",
-			Pattern: regexp.MustCompile(`(?i)(secret|secret_key|client_secret)\s*[=:]\s*['"]?([A-Za-z0-9_\-/+=]{16,})['"]?`),
-			Redact:  "[REDACTED_SECRET]",
+			Name:     "generic_secret",
+			Pattern:  regexp.MustCompile(`(?i)(secret|secret_key|client_secret)\s*[=:]\s*['"]?([A-Za-z0-9_\-/+=]{16,})['"]?`),
+			Redact:   "[REDACTED_SECRET]",
+			Keywords: []string{"secret"},
 		},
 
 		// JWT tokens (header.payload.signature format)
 		{
-			Name:    "jwt_token",
-			Pattern: regexp.MustCompile(`eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*`),
-			Redact:  "[REDACTED_JWT]",
+			Name:     "jwt_token",
+			Pattern:  regexp.MustCompile(`eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*`),
+			Redact:   "[REDACTED_JWT]",
+			Keywords: []string{"eyj"},
 		},
 
 		// .env-style sensitive assignments â fallback for cases the more
@@ -410,9 +447,10 @@ func DefaultPatterns() []SecretPattern {
 		// generic_api_key / generic_token / generic_password so the more
 		// specific [REDACTED_*] slugs win when they apply.
 		{
-			Name:    "env_assignment",
-			Pattern: regexp.MustCompile(`(?i)\b(GITHUB_TOKEN|GITLAB_TOKEN|DATABASE_PASSWORD|DB_PASSWORD|MYSQL_PASSWORD|POSTGRES_PASSWORD|REDIS_PASSWORD|MONGO_PASSWORD)\s*=\s*['"]?[A-Za-z0-9_\-\.=/+]{12,}['"]?`),
-			Redact:  "[REDACTED_ENV_ASSIGNMENT]",
+			Name:     "env_assignment",
+			Pattern:  regexp.MustCompile(`(?i)\b(GITHUB_TOKEN|GITLAB_TOKEN|DATABASE_PASSWORD|DB_PASSWORD|MYSQL_PASSWORD|POSTGRES_PASSWORD|REDIS_PASSWORD|MONGO_PASSWORD)\s*=\s*['"]?[A-Za-z0-9_\-\.=/+]{12,}['"]?`),
+			Redact:   "[REDACTED_ENV_ASSIGNMENT]",
+			Keywords: []string{"_token", "_password"},
 		},
 	}
 }
@@ -429,14 +467,14 @@ type Redactor struct {
 
 // NewRedactor creates a new Redactor with default patterns
 func NewRedactor() *Redactor {
-	r := &Redactor{patterns: DefaultPatterns()}
+	r := &Redactor{patterns: append(DefaultPatterns(), DefaultExtraDetectors()...)}
 	r.catalogVersion, r.catalogHash = computeCatalogIdentity(r.patterns)
 	return r
 }
 
 // NewRedactorWithPatterns creates a Redactor with custom patterns
 func NewRedactorWithPatterns(patterns []SecretPattern) *Redactor {
-	r := &Redactor{patterns: patterns}
+	r := &Redactor{patterns: append(append([]SecretPattern(nil), patterns...), DefaultExtraDetectors()...)}
 	r.catalogVersion, r.catalogHash = computeCatalogIdentity(r.patterns)
 	return r
 }
@@ -502,7 +540,33 @@ func (r *Redactor) RedactString(input string) (output string, found []string) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	output = input
+	guarded, foundMap, _ := r.guardWithLegacy(input)
+	output = guarded
+	var additive map[string]bool
+	output, additive = r.redactPatterns(output)
+	for name := range additive {
+		foundMap[name] = true
+	}
+	var mandatory []string
+
+	// Replacement text is configuration too; it cannot reintroduce credentials.
+	output, mandatory = secretguard.RedactText(output)
+	for _, name := range mandatory {
+		foundMap[name] = true
+	}
+
+	// convert map to slice
+	for name := range foundMap {
+		found = append(found, name)
+	}
+
+	return output, found
+}
+
+// redactPatterns requires the caller's read lock and applies additive rules.
+func (r *Redactor) redactPatterns(input string) (string, map[string]bool) {
+
+	output := input
 	lowerInput := strings.ToLower(input)
 	foundMap := make(map[string]bool)
 
@@ -527,12 +591,7 @@ func (r *Redactor) RedactString(input string) (output string, found []string) {
 		}
 	}
 
-	// convert map to slice
-	for name := range foundMap {
-		found = append(found, name)
-	}
-
-	return output, found
+	return output, foundMap
 }
 
 // RedactStringWithDetails provides detailed redaction results.
@@ -542,8 +601,9 @@ func (r *Redactor) RedactStringWithDetails(input string) (output string, results
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	output = input
-	lowerInput := strings.ToLower(input)
+	output, _, results = r.guardWithLegacy(input)
+
+	lowerInput := strings.ToLower(output)
 
 	for _, p := range r.patterns {
 		if p.Pattern == nil {
@@ -575,61 +635,40 @@ func (r *Redactor) RedactStringWithDetails(input string) (output string, results
 		})
 	}
 
+	var mandatory []string
+	output, mandatory = secretguard.RedactText(output)
+	for _, name := range mandatory {
+		results = append(results, RedactionResult{PatternName: name})
+	}
 	return output, results
 }
 
-// RedactEntry redacts secrets from an Entry's content.
+// RedactEntry redacts secrets from an Entry's Content, ToolInput and ToolOutput.
 // Returns true if any secrets were found and redacted.
 func (r *Redactor) RedactEntry(entry *Entry) (redacted bool) {
 	if entry == nil {
 		return false
 	}
-
-	output, found := r.RedactString(entry.Content)
-	if len(found) > 0 {
-		entry.Content = output
-		return true
+	for _, field := range []*string{&entry.Content, &entry.ToolInput, &entry.ToolOutput} {
+		if *field == "" {
+			continue
+		}
+		if output, found := r.RedactString(*field); len(found) > 0 {
+			*field = output
+			redacted = true
+		}
 	}
-
-	return false
+	return redacted
 }
 
 // RedactEntries redacts all entries in a slice.
 // Returns the count of entries that contained secrets (in any field).
 func (r *Redactor) RedactEntries(entries []Entry) (count int) {
 	for i := range entries {
-		hadSecrets := false
-
-		// redact Content
-		output, found := r.RedactString(entries[i].Content)
-		if len(found) > 0 {
-			entries[i].Content = output
-			hadSecrets = true
-		}
-
-		// redact ToolInput if present
-		if entries[i].ToolInput != "" {
-			inputOut, inputFound := r.RedactString(entries[i].ToolInput)
-			if len(inputFound) > 0 {
-				entries[i].ToolInput = inputOut
-				hadSecrets = true
-			}
-		}
-
-		// redact ToolOutput if present
-		if entries[i].ToolOutput != "" {
-			outputOut, outputFound := r.RedactString(entries[i].ToolOutput)
-			if len(outputFound) > 0 {
-				entries[i].ToolOutput = outputOut
-				hadSecrets = true
-			}
-		}
-
-		if hadSecrets {
+		if r.RedactEntry(&entries[i]) {
 			count++
 		}
 	}
-
 	return count
 }
 
@@ -685,6 +724,9 @@ func (r *Redactor) RedactCapturedHistory(history *CapturedHistory) (count int) {
 // Applies the SecretPattern.Keywords pre-screen so a bare-UUID pattern
 // gated only by Keywords doesn't fire on every UUID-shaped input.
 func (r *Redactor) ContainsSecrets(input string) bool {
+	if _, found := secretguard.RedactText(input); len(found) > 0 {
+		return true
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -728,7 +770,7 @@ func (r *Redactor) ScanForSecrets(input string) []string {
 
 	lowerInput := strings.ToLower(input)
 
-	var found []string
+	_, found := secretguard.RedactText(input)
 	for _, p := range r.patterns {
 		if p.Pattern == nil {
 			continue
@@ -758,7 +800,8 @@ func (r *Redactor) ScanForSecrets(input string) []string {
 func (r *Redactor) RedactWithAllowlist(input string, allowlist []string) (output string, found []string) {
 	// create placeholder map for allowlist items
 	placeholders := make(map[string]string)
-	output = input
+	output, found = r.RedactString(input)
+	initialFound := append([]string(nil), found...)
 
 	// replace allowlist items with unique placeholders
 	for i, allowed := range allowlist {
@@ -769,12 +812,17 @@ func (r *Redactor) RedactWithAllowlist(input string, allowlist []string) (output
 
 	// perform normal redaction
 	output, found = r.RedactString(output)
+	found = append(found, initialFound...)
 
 	// restore allowlist items
 	for placeholder, original := range placeholders {
 		output = strings.ReplaceAll(output, placeholder, original)
 	}
 
+	// An allowlist may relax additive custom rules, never mandatory protection.
+	var mandatory []string
+	output, mandatory = secretguard.RedactText(output)
+	found = append(found, mandatory...)
 	return output, found
 }
 
@@ -787,26 +835,44 @@ func generatePlaceholder(index int) string {
 // Useful for redacting raw JSON entries before storage.
 // Returns true if any secrets were found and redacted.
 func (r *Redactor) RedactMap(data map[string]any) bool {
-	redacted := false
-	for key, value := range data {
-		switch v := value.(type) {
-		case string:
-			output, found := r.RedactString(v)
-			if len(found) > 0 {
-				data[key] = output
-				redacted = true
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	// One full mandatory scan per serialized object retains sibling context and
+	// avoids running the upstream catalog again for every already-scanned leaf.
+	changed := r.redactStructuredMapWithLegacy(data)
+	additiveChanged := r.redactMapPatterns(data)
+	finalChanged := redactStructuredMap(data)
+	return changed || additiveChanged || finalChanged
+}
+func (r *Redactor) redactMapPatterns(value any) bool {
+	changed := false
+	switch data := value.(type) {
+	case map[string]any:
+		for key, val := range data {
+			if text, ok := val.(string); ok {
+				out, found := r.redactPatterns(text)
+				if len(found) > 0 {
+					data[key] = out
+					changed = true
+				}
+			} else {
+				changed = r.redactMapPatterns(val) || changed
 			}
-		case map[string]any:
-			if r.RedactMap(v) {
-				redacted = true
-			}
-		case []any:
-			if r.RedactSlice(v) {
-				redacted = true
+		}
+	case []any:
+		for i, val := range data {
+			if text, ok := val.(string); ok {
+				out, found := r.redactPatterns(text)
+				if len(found) > 0 {
+					data[i] = out
+					changed = true
+				}
+			} else {
+				changed = r.redactMapPatterns(val) || changed
 			}
 		}
 	}
-	return redacted
+	return changed
 }
 
 // RedactSlice redacts secrets from string values in a slice.
@@ -843,4 +909,105 @@ func RedactHistorySecrets(history *CapturedHistory) int {
 	}
 	redactor := NewRedactor()
 	return redactor.RedactCapturedHistory(history)
+}
+
+// redactStructuredMap preserves sibling name/value context before leaf rules.
+func redactStructuredMap(data map[string]any) bool {
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return false
+	}
+	out, found := secretguard.RedactText(string(encoded))
+	if len(found) == 0 {
+		return false
+	}
+	var normalized map[string]any
+	decoder := json.NewDecoder(strings.NewReader(out))
+	decoder.UseNumber()
+	if decoder.Decode(&normalized) != nil {
+		return false
+	}
+	for key := range data {
+		delete(data, key)
+	}
+	for key, value := range normalized {
+		data[key] = value
+	}
+	return true
+}
+
+// guardWithLegacy preserves fixed markers only after the mandatory guard
+// proves their removal spans cover every detected original value. Pattern
+// names and sources cannot confer trust or suppress that original scan.
+func (r *Redactor) guardWithLegacy(input string) (string, map[string]bool, []RedactionResult) {
+	var edits []secretguard.TextReplacement
+	var legacy []RedactionResult
+	lower := strings.ToLower(input)
+	for _, pattern := range r.patterns {
+		if pattern.Pattern == nil || !pattern.MatchesKeyword(lower) || !secretguard.IsFixedRedactionMarker(pattern.Redact) {
+			continue
+		}
+		for _, span := range pattern.Pattern.FindAllStringIndex(input, -1) {
+			if span[0] == span[1] || matchSkipped(input[span[0]:span[1]], pattern.SkipIf) {
+				continue
+			}
+			overlap := false
+			for _, edit := range edits {
+				if span[0] < edit.End && span[1] > edit.Start {
+					overlap = true
+					break
+				}
+			}
+			if overlap {
+				continue
+			}
+			edits = append(edits, secretguard.TextReplacement{Start: span[0], End: span[1], Marker: pattern.Redact})
+			legacy = append(legacy, RedactionResult{PatternName: pattern.Name, Original: input[span[0]:span[1]], Position: span[0]})
+		}
+	}
+	output, mandatory, used := secretguard.RedactTextWithReplacements(input, edits)
+	found := map[string]bool{}
+	var details []RedactionResult
+	if used {
+		details = legacy
+		for _, result := range legacy {
+			found[result.PatternName] = true
+		}
+	}
+	for _, name := range mandatory {
+		found[name] = true
+		details = append(details, RedactionResult{PatternName: name})
+	}
+	return output, found, details
+}
+func (r *Redactor) redactStructuredMapWithLegacy(data map[string]any) bool {
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return false
+	}
+	out, _, _ := r.guardWithLegacy(string(encoded))
+	if out == string(encoded) {
+		return false
+	}
+	var normalized map[string]any
+	decode := func(text string) error {
+		decoder := json.NewDecoder(strings.NewReader(text))
+		decoder.UseNumber()
+		return decoder.Decode(&normalized)
+	}
+	if decode(out) != nil {
+		// A legacy whole-match marker can include surrounding JSON punctuation.
+		// Keep valid framing by using the mandatory serializer in that case.
+		out, _ = secretguard.RedactText(string(encoded))
+		if decode(out) != nil {
+			return false
+		}
+	}
+	for key := range data {
+		delete(data, key)
+	}
+	for key, value := range normalized {
+		data[key] = value
+	}
+	return true
 }

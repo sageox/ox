@@ -7,12 +7,19 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
 // --- Sparse checkout integration tests ---
 
 func TestConfigureSparseCheckout_IncludesMurmurPaths(t *testing.T) {
+	// Freeze the rolling window while git runs: an hour/day rollover changes
+	// the correct sparse paths independently of the behavior under test.
+	synctest.Test(t, testConfigureSparseCheckoutIncludesMurmurPaths)
+}
+
+func testConfigureSparseCheckoutIncludesMurmurPaths(t *testing.T) {
 	tempDir := t.TempDir()
 
 	initCmd := exec.Command("git", "init", tempDir)
@@ -228,6 +235,12 @@ func TestConfigureSparseCheckout_PreservesAllLocalFileCategories(t *testing.T) {
 // init guard inadvertently changes sparse behavior.
 func TestConfigureSparseCheckout_IdempotentSparseSet(t *testing.T) {
 	t.Parallel()
+	// Freeze the rolling window while git runs: an hour/day rollover changes
+	// the correct sparse paths independently of the behavior under test.
+	synctest.Test(t, testConfigureSparseCheckoutIdempotentSparseSet)
+}
+
+func testConfigureSparseCheckoutIdempotentSparseSet(t *testing.T) {
 	tempDir := t.TempDir()
 
 	if err := exec.Command("git", "init", tempDir).Run(); err != nil {

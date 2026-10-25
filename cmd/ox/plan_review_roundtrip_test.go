@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/plan"
+	"github.com/sageox/ox/pkg/planreview"
 )
 
 // plan_review_roundtrip_test.go proves the browser review ROUND-TRIP end to end,
@@ -20,7 +21,7 @@ import (
 //
 // It drives the SAME server + routes review.js POSTs to (the real
 // liveReviewHandler, via newTestReviewServer) and the SAME agent-side read the
-// `ox plan review await` command uses (awaitSnapshot / plan.AssembleReview), so
+// `ox plan review await` command uses (awaitSnapshot / plan.ReadReview), so
 // the thing under test is the customer's real path, not a mock of it. The
 // browser leg with a real Chrome driving review.js is proven separately, behind
 // the `browser` build tag, in plan_review_browser_test.go.
@@ -81,7 +82,7 @@ func awaitWatcherReady(t *testing.T, bc *broadcaster, feedbackDir string) {
 // Failure prevented: a browser submit that persists but never surfaces to the
 // authoring coworker — feedback that silently strands in the ledger.
 func TestBrowserRoundTrip_FeedbackReachesAuthoringAgent(t *testing.T) {
-	dir := t.TempDir()
+	dir := reviewTestPlanDir(t)
 	srv, rounds, _ := newTestReviewServer(t, dir)
 
 	if code := browserSubmit(t, srv.URL, "Devon", "h1a2b3c4", "Risks", "request-change", "bound the blast radius"); code != http.StatusOK {
@@ -96,7 +97,7 @@ func TestBrowserRoundTrip_FeedbackReachesAuthoringAgent(t *testing.T) {
 	}
 
 	// the submit is durable as a round the ledger carries
-	if sets, _ := plan.LoadAllFeedback(dir); len(sets) != 1 {
+	if sets := plan.ReadReview(dir).Rounds; len(sets) != 1 {
 		t.Fatalf("submit must persist exactly one round, got %d", len(sets))
 	}
 
@@ -110,7 +111,7 @@ func TestBrowserRoundTrip_FeedbackReachesAuthoringAgent(t *testing.T) {
 	}
 	item := res.Open[0]
 	if item.Anchor != "h1a2b3c4" || item.Section != "Risks" || item.Note != "bound the blast radius" {
-		t.Errorf("item lost its context in transit: %+v", item.FeedbackItem)
+		t.Errorf("item lost its context in transit: %+v", item.Item)
 	}
 	if item.Reviewer != "Devon" {
 		t.Errorf("item lost its reviewer attribution, got %q", item.Reviewer)
@@ -120,7 +121,7 @@ func TestBrowserRoundTrip_FeedbackReachesAuthoringAgent(t *testing.T) {
 // TestBrowserRoundTrip_MultiMarkRoundArrivesIntact proves that several marks in
 // one submit reach the agent as one round, each still tied to its own section.
 func TestBrowserRoundTrip_MultiMarkRoundArrivesIntact(t *testing.T) {
-	dir := t.TempDir()
+	dir := reviewTestPlanDir(t)
 	srv, _, _ := newTestReviewServer(t, dir)
 
 	body := `{"reviewer":"Devon","items":[` +
@@ -131,7 +132,7 @@ func TestBrowserRoundTrip_MultiMarkRoundArrivesIntact(t *testing.T) {
 		t.Fatalf("multi-mark submit should be accepted, got %d", code)
 	}
 
-	if sets, _ := plan.LoadAllFeedback(dir); len(sets) != 1 || len(sets[0].Items) != 3 {
+	if sets := plan.ReadReview(dir).Rounds; len(sets) != 1 || len(sets[0].Items) != 3 {
 		t.Fatalf("three marks must arrive as one round of three items, got %+v", sets)
 	}
 
@@ -157,7 +158,7 @@ func TestBrowserRoundTrip_MultiMarkRoundArrivesIntact(t *testing.T) {
 // Failure prevented: the agent resolves an item but the reviewer's open page
 // never learns, or still shows it unresolved.
 func TestBrowserRoundTrip_AgentResolveShowsAddressedAndBroadcasts(t *testing.T) {
-	dir := t.TempDir()
+	dir := reviewTestPlanDir(t)
 	bc := newBroadcaster()
 	h := liveReviewHandler("", "p", dir, "http://x", "secret", bc, make(chan int, 8), make(chan struct{}, 1))
 	srv := httptest.NewServer(h)
@@ -195,7 +196,7 @@ func TestBrowserRoundTrip_AgentResolveShowsAddressedAndBroadcasts(t *testing.T) 
 	}
 
 	// the item is open until the agent acts
-	before, _ := plan.AssembleReview(dir)
+	before := plan.ReadReview(dir).Items
 	if len(before) != 1 || !before[0].Open {
 		t.Fatalf("item must be open before the agent addresses it, got %+v", before)
 	}
@@ -209,11 +210,7 @@ func TestBrowserRoundTrip_AgentResolveShowsAddressedAndBroadcasts(t *testing.T) 
 
 	// Avery addresses it and records the disposition, exactly as
 	// `ox plan feedback resolve … --state addressed` does
-	if err := plan.AppendResolution(dir, plan.Resolution{
-		Anchor: "hopen1", State: plan.ResolutionAddressed, Commit: "abc1234", Note: "handled",
-	}, time.Now()); err != nil {
-		t.Fatalf("agent resolve: %v", err)
-	}
+	resolveForTest(t, dir, "hopen1", planreview.StateAddressed, "handled")
 
 	// the running watcher sees the resolution and tells the reviewer's page to
 	// reload — the "reviewer sees it resolve live" beat, driven end to end
@@ -224,11 +221,11 @@ func TestBrowserRoundTrip_AgentResolveShowsAddressedAndBroadcasts(t *testing.T) 
 	}
 
 	// the state the reloaded page reads now shows it addressed, not open
-	after, _ := plan.AssembleReview(dir)
+	after := plan.ReadReview(dir).Items
 	if len(after) != 1 || after[0].Open {
 		t.Fatalf("item must show resolved after the agent addresses it, got %+v", after)
 	}
-	if after[0].Resolution == nil || after[0].Resolution.State != plan.ResolutionAddressed {
+	if after[0].Resolution == nil || after[0].Resolution.State != planreview.StateAddressed {
 		t.Errorf("resolved item must carry the agent's addressed disposition, got %+v", after[0].Resolution)
 	}
 
@@ -249,32 +246,24 @@ func TestBrowserRoundTrip_AcceptClearsAndReopenReturnsToAgent(t *testing.T) {
 	if code := browserSubmit(t, srv.URL, "Devon", "hitem1", "Risks", "request-change", "fix"); code != http.StatusOK {
 		t.Fatalf("submit: %d", code)
 	}
-	if err := plan.AppendResolution(planDir, plan.Resolution{Anchor: "hitem1", State: plan.ResolutionAddressed, Note: "done"}, time.Now()); err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
+	resolveForTest(t, planDir, "hitem1", planreview.StateAddressed, "done")
 
 	// Devon accepts the fix — a verified resolution is recorded (asserted first and
 	// unconditionally: the addressed resolution above already cleared open, so an
 	// open-count check alone would pass even if /accept persisted nothing).
-	if code := reviewPOST(t, srv.URL+"/accept", "secret", `{"anchor":"hitem1"}`); code != http.StatusOK {
+	accept := `{"id":"accept-0001","reviewer":"Devon","anchor":"hitem1","state":"verified","note":"accepted by reviewer"}`
+	if code := reviewPOST(t, srv.URL+"/accept", "secret", accept); code != http.StatusOK {
 		t.Fatalf("accept: %d", code)
 	}
-	resns, _ := plan.LoadResolutions(planDir)
-	verified := false
-	for _, r := range resns {
-		if r.Anchor == "hitem1" && r.State == plan.ResolutionVerified {
-			verified = true
-		}
-	}
-	if !verified {
-		t.Fatalf("accept must record a verified resolution for the item, got %+v", resns)
+	if items := plan.ReadReview(planDir).Items; len(items) != 1 || items[0].Resolution == nil || items[0].Resolution.State != planreview.StateVerified {
+		t.Fatalf("accept must record a verified resolution for the item, got %+v", items)
 	}
 	if _, done := awaitSnapshot(planDir); done {
 		t.Error("an accepted item must not remain open work for the agent")
 	}
 
-	// Devon changes his mind and reopens it — it returns to Avery as work to do
-	if code := reviewPOST(t, srv.URL+"/reopen", "secret", `{"anchor":"hitem1","note":"still wrong"}`); code != http.StatusOK {
+	// Devon changes his mind and reopens it — a round that returns it to Avery as work to do
+	if code := browserSubmit(t, srv.URL, "Devon", "hitem1", "Risks", "request-change", "still wrong"); code != http.StatusOK {
 		t.Fatalf("reopen: %d", code)
 	}
 	res, done := awaitSnapshot(planDir)
@@ -340,7 +329,7 @@ func TestBrowserRoundTrip_UntrustedSubmissionRejected(t *testing.T) {
 	if code := reviewPOST(t, srv.URL+"/feedback", "", payload); code != http.StatusForbidden {
 		t.Fatalf("a submit without the page token must be refused (403), got %d", code)
 	}
-	if sets, _ := plan.LoadAllFeedback(dir); len(sets) != 0 {
+	if sets := plan.ReadReview(dir).Rounds; len(sets) != 0 {
 		t.Error("a refused submit must not persist any feedback")
 	}
 	if _, done := awaitSnapshot(dir); done {
@@ -355,7 +344,7 @@ func TestBrowserRoundTrip_UntrustedSubmissionRejected(t *testing.T) {
 // Failure prevented: a second reviewer's mark clobbering the first, or a
 // reviewer disagreement disappearing before a human can reconcile it.
 func TestBrowserRoundTrip_TwoReviewersAttributedAndContested(t *testing.T) {
-	dir := t.TempDir()
+	dir := reviewTestPlanDir(t)
 	srv, _, _ := newTestReviewServer(t, dir)
 
 	if code := browserSubmit(t, srv.URL, "Devon", "hspot", "Rollout", "request-change", "not ready"); code != http.StatusOK {
@@ -365,7 +354,7 @@ func TestBrowserRoundTrip_TwoReviewersAttributedAndContested(t *testing.T) {
 		t.Fatalf("Riley submit: %d", code)
 	}
 
-	items, _ := plan.AssembleReview(dir)
+	items := plan.ReadReview(dir).Items
 	if len(items) != 2 {
 		t.Fatalf("both reviewers' marks on the same spot must be kept, got %d", len(items))
 	}

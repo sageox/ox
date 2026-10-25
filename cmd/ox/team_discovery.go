@@ -1,11 +1,16 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
@@ -170,6 +175,150 @@ func discoverTeamsGlobal() []enrichedTeam {
 	return teams
 }
 
+// errNoServerLogin means there was no usable login to ask the server with. It is
+// not a lookup failure: a logged-out coworker legitimately has nothing to report,
+// and the right guidance is "ox login", not "check your connection".
+var errNoServerLogin = errors.New("no usable login")
+
+// serverEndpointTeams is one endpoint's membership list, kept with the endpoint
+// that produced it so team paths are built from the same endpoint as the request.
+type serverEndpointTeams struct {
+	endpoint string
+	teams    []api.TeamMembership
+}
+
+// serverLookupEndpoints picks the endpoints to ask. Inside a project that is the
+// project's endpoint. Outside one (findProjectRoot falls back to the cwd, so a
+// non-empty root is not proof of a project) there is no project config to
+// consult, and endpoint.GetForProject would return the production default even when the
+// coworker is logged in only to another endpoint, so every stored login is asked
+// (SAGEOX_ENDPOINT still wins as the explicit override).
+func serverLookupEndpoints(projectRoot string) ([]string, error) {
+	if os.Getenv(endpoint.EnvVar) != "" || (projectRoot != "" && config.IsInitialized(projectRoot)) {
+		return []string{endpoint.GetForProject(projectRoot)}, nil
+	}
+	stored, err := auth.ListEndpoints()
+	if err != nil {
+		return nil, fmt.Errorf("list logged-in endpoints: %w", err)
+	}
+	// SAGEOX_TOKEN logs in without anything on disk (CI, containers), so its
+	// endpoint is a candidate even when no login is stored.
+	if envEp := auth.EnvTokenEndpoint(); auth.IsEnvTokenEndpoint(envEp) && !containsEndpoint(stored, envEp) {
+		stored = append(stored, envEp)
+	}
+	if len(stored) == 0 {
+		return nil, errNoServerLogin
+	}
+	return stored, nil
+}
+
+func containsEndpoint(endpoints []string, ep string) bool {
+	want := endpoint.NormalizeEndpoint(ep)
+	for _, candidate := range endpoints {
+		if endpoint.NormalizeEndpoint(candidate) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// lookupServerTeams asks the server which teams the logged-in coworker belongs
+// to. It is the fallback for a machine where no team context has been synced yet.
+//
+// The error is kept apart from an empty list so callers can tell "the account has
+// no teams" from "could not check". errNoServerLogin (wrapped) means no endpoint
+// had a usable login; any other error is a real lookup failure. Endpoints that
+// answered are still returned alongside the joined errors of those that did not.
+func lookupServerTeams(projectRoot string) ([]serverEndpointTeams, error) {
+	endpoints, err := serverLookupEndpoints(projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	var found []serverEndpointTeams
+	var errs []error
+	loggedOut := 0
+	for _, ep := range endpoints {
+		token, tokenErr := auth.EnsureValidTokenForEndpoint(ep, 300)
+		if tokenErr != nil {
+			// a login exists but could not be refreshed: the account was not checked
+			slog.Debug("team lookup on server failed: token refresh", "endpoint", ep, "error", tokenErr)
+			errs = append(errs, fmt.Errorf("%s: refresh login: %w", endpoint.NormalizeSlug(ep), tokenErr))
+			continue
+		}
+		if token == nil || token.AccessToken == "" {
+			slog.Debug("team lookup on server skipped: no usable login", "endpoint", ep)
+			loggedOut++
+			continue
+		}
+		// one resolved endpoint for token, client, and (later) team paths
+		client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(token.AccessToken)
+		resp, getErr := client.GetRepos()
+		if getErr != nil {
+			slog.Debug("team lookup on server failed", "endpoint", ep, "error", getErr)
+			errs = append(errs, fmt.Errorf("%s: %w", endpoint.NormalizeSlug(ep), getErr))
+			continue
+		}
+		found = append(found, serverEndpointTeams{endpoint: ep, teams: usableTeams(resp.TeamMembershipsFromRepos())})
+	}
+	if loggedOut == len(endpoints) {
+		return nil, errNoServerLogin
+	}
+	return found, errors.Join(errs...)
+}
+
+// serverTeamMemberships flattens lookupServerTeams for callers that only need to
+// resolve a reference. A failed lookup yields no memberships and is logged by
+// lookupServerTeams; the caller falls back to the server-validated passthrough.
+func serverTeamMemberships(projectRoot string) []api.TeamMembership {
+	found, err := lookupServerTeams(projectRoot)
+	if err != nil {
+		slog.Debug("team memberships unavailable", "error", err)
+	}
+	var all []api.TeamMembership
+	for _, f := range found {
+		all = append(all, f.teams...)
+	}
+	return all
+}
+
+// teamsFromServer lists the coworker's teams from the server for `ox team list`
+// when nothing is synced locally. Paths point where the team context will land
+// once synced; LastSync stays zero because nothing has synced.
+//
+// The error is non-nil when any endpoint could not be checked (teams from the
+// endpoints that did answer are still returned) and wraps errNoServerLogin when
+// there was no login to check with.
+func teamsFromServer(projectRoot string) ([]enrichedTeam, error) {
+	found, err := lookupServerTeams(projectRoot)
+	var primaryTeamID string
+	if cfg, _ := config.LoadProjectConfig(projectRoot); cfg != nil {
+		primaryTeamID = cfg.TeamID
+	}
+	var teams []enrichedTeam
+	for _, f := range found {
+		for _, m := range f.teams {
+			name := m.Name
+			if name == "" {
+				name = m.ID
+			}
+			// show only a reference `ox team show` can resolve: the server slug,
+			// else the membership ID. resolveTeamMembership never derives slugs.
+			slug := m.Slug
+			if slug == "" {
+				slug = m.ID
+			}
+			teams = append(teams, enrichedTeam{
+				TeamID:  m.ID,
+				Name:    name,
+				Slug:    slug,
+				Path:    paths.TeamContextDir(m.ID, f.endpoint),
+				Primary: primaryTeamID != "" && m.ID == primaryTeamID,
+			})
+		}
+	}
+	return teams, err
+}
+
 // resolveTeamByQuery finds a team by slug, team ID, or name.
 // Resolution order: exact slug -> exact team ID -> case-insensitive name.
 func resolveTeamByQuery(projectRoot, query string) *enrichedTeam {
@@ -202,6 +351,214 @@ func resolveTeamByQuery(projectRoot, query string) *enrichedTeam {
 	}
 
 	return nil
+}
+
+// maxTeamCandidates caps how many teams an error message will name. A mistyped
+// --team in CI should point at the fix, not print the whole org chart.
+const maxTeamCandidates = 10
+
+// usableTeams returns the memberships that ox init can actually register against.
+//
+// A membership with an empty ID cannot be one. RepoInfo.TeamID is
+// `json:"team_id,omitempty"`, so the derived path in TeamMembershipsFromRepos can
+// produce a team whose ID is "" — and init drops an empty team ID from the
+// registration request while still writing the team NAME into .sageox/config.json
+// and printing it on the success line. Matching such a team would name a team the
+// repo was never registered to, in two places that ox status and ox doctor later
+// read back as fact.
+func usableTeams(teams []api.TeamMembership) []api.TeamMembership {
+	usable := make([]api.TeamMembership, 0, len(teams))
+	for _, t := range teams {
+		if t.ID == "" {
+			slog.Debug("dropping team membership with no ID", "name", t.Name, "slug", t.Slug)
+			continue
+		}
+		usable = append(usable, t)
+	}
+	return usable
+}
+
+// resolveTeamMembership finds teams in an API-supplied membership list by slug,
+// team ID, or name, using the same resolution order as resolveTeamByQuery above.
+// It returns every match from the FIRST pass that hits anything, so a caller can
+// tell "no match" from "the query does not identify one team".
+//
+// Returning all matches rather than the first is deliberate. The membership list
+// is not guaranteed unique on any of these fields: one person can belong to two
+// orgs that each named a team "Platform". Returning the first would resolve that
+// silently, and — before TeamMembershipsFromRepos sorted its derived path —
+// differently on different runs.
+//
+// The two resolvers sit next to each other on purpose. resolveTeamByQuery answers
+// from locally cloned team contexts, which is right for `ox team show` but wrong for
+// `ox init`: at init time the repo may have no local team data at all. This one
+// answers from the authoritative membership list the API returns, and keeping the
+// pass order identical means the same string resolves to the same team on either path.
+func resolveTeamMembership(teams []api.TeamMembership, query string) []api.TeamMembership {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
+		return nil
+	}
+	candidates := usableTeams(teams)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// Every pass compares with EqualFold. Slugs are server-derived lowercase ASCII
+	// and IDs are opaque generated tokens, so an exact comparison would be defensible
+	// for both — but an asymmetry between passes is not: a case-variant of a real ID
+	// would fall THROUGH the ID pass and be picked up by the case-insensitive name
+	// pass below, matching a different team than the one the user typed.
+	matchers := []func(api.TeamMembership) bool{
+		// pass 1: slug. Skip empty slugs, or an empty-slug team would swallow
+		// queries that should have fallen through to ID or name.
+		func(t api.TeamMembership) bool { return t.Slug != "" && strings.EqualFold(t.Slug, trimmed) },
+		// pass 2: team ID
+		func(t api.TeamMembership) bool { return strings.EqualFold(t.ID, trimmed) },
+		// pass 3: name
+		func(t api.TeamMembership) bool { return t.Name != "" && strings.EqualFold(t.Name, trimmed) },
+	}
+
+	for _, matches := range matchers {
+		var hits []api.TeamMembership
+		for _, t := range candidates {
+			if matches(t) {
+				hits = append(hits, t)
+			}
+		}
+		if len(hits) > 0 {
+			return hits
+		}
+	}
+
+	return nil
+}
+
+// fetchTeamMemberships returns the teams the API reports for the current user.
+//
+// An unusable token is not fatal here: the request goes out unauthenticated, the
+// server rejects it, and resolveTeamFlag falls back to passing --team through. It is
+// not silent either. The auth gate in runInit has already passed by this point, so a
+// token that cannot be used here is a real degradation, and the picker path ten lines
+// away reports the same condition rather than swallowing it.
+func fetchTeamMemberships() ([]api.TeamMembership, error) {
+	teamClient := api.NewRepoClient()
+
+	token, tokenErr := auth.EnsureValidToken(300)
+	if token != nil && token.AccessToken != "" {
+		teamClient.WithAuthToken(token.AccessToken)
+	} else {
+		slog.Warn("no usable token for team fetch despite passing auth gate",
+			"endpoint", endpoint.Get(), "token_err", tokenErr)
+		cli.PrintWarning("Could not authenticate to check --team locally; the server will decide.")
+	}
+
+	reposResp, err := teamClient.GetRepos()
+	if err != nil {
+		return nil, err
+	}
+	return reposResp.TeamMembershipsFromRepos(), nil
+}
+
+// formatTeamCandidates renders the user's teams for an error message, so a failed
+// --team lookup can show what would have worked rather than only what did not.
+//
+// Every field here is server-supplied and lands on a terminal, so it goes through
+// cli.SanitizeTerminalText — the same guard renderTeamShow and the invite path apply
+// to these exact three fields. This message fires on a typo, which means untrusted
+// text reaches the screen on the path a user is least expecting output from.
+func formatTeamCandidates(teams []api.TeamMembership) string {
+	shown := teams
+	if len(shown) > maxTeamCandidates {
+		shown = shown[:maxTeamCandidates]
+	}
+
+	parts := make([]string, 0, len(shown)+1)
+	for _, t := range shown {
+		name := cli.SanitizeTerminalText(t.Name)
+		id := cli.SanitizeTerminalText(t.ID)
+		if t.Slug != "" {
+			parts = append(parts, fmt.Sprintf("%s (%s, %s)", name, cli.SanitizeTerminalText(t.Slug), id))
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s (%s)", name, id))
+	}
+	if len(teams) > len(shown) {
+		parts = append(parts, fmt.Sprintf("and %d more — run 'ox team list'", len(teams)-len(shown)))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// unmatchedTeamWarning tells the user a --team value matched none of the teams in
+// their list and is being handed to the server as typed. It is a warning, not an
+// error: the list is this machine's view of the account, and the server — which
+// owns team uniqueness and who may register into what — rules on the value.
+func unmatchedTeamWarning(query string, teams []api.TeamMembership) string {
+	return fmt.Sprintf("--team %q does not match a team in your list (%s); the server will decide whether to accept it",
+		query, formatTeamCandidates(teams))
+}
+
+// ambiguousTeamError reports a --team value that identifies more than one team.
+// The membership list is unique on none of slug, ID or name — two orgs can each
+// have a team named "Platform" — and picking one of them silently would bind the
+// repo to a tenant the user never chose.
+func ambiguousTeamError(query string, matches []api.TeamMembership) error {
+	return fmt.Errorf("ambiguous team %q matches %d teams: %s\n\nUse the team ID to pick one",
+		query, len(matches), formatTeamCandidates(matches))
+}
+
+// resolveTeamFlag decides what --team resolves to, given the outcome of fetching the
+// user's memberships.
+//
+// The membership list is a convenience, not the authority. The server decides which
+// teams a token may register into, and this machine's list can lag it: a team whose
+// context is still provisioning, or a token authorized for a team that
+// /api/v1/cli/repos does not report. `ox invite --team` makes the same call ("unknown
+// locally is not an error"), so a value the list does not contain is passed through
+// rather than rejected. The outcomes:
+//
+//	fetchErr != nil    the API could not be reached: pass the value through.
+//	no usable teams    nothing to compare against: pass the value through. ox treats
+//	                   "no teams" as continuable everywhere else — on the picker path
+//	                   promptNoTeams offers "Continue (a new team will be created)".
+//	one match          resolved to that team's ID and name.
+//	no match           warn, then pass the trimmed value through unresolved. The name
+//	                   stays empty, so init never writes a team name into config for a
+//	                   team it did not resolve.
+//	several matches    ERROR. This is the one outcome that fails locally: the list shows
+//	                   two teams answering to the value, and choosing between them is a
+//	                   decision about which tenant the repo lands in, which ox must not
+//	                   make for the user.
+//
+// "Usable" excludes memberships with an empty ID, which cannot be registered against
+// at all; see usableTeams.
+//
+// The no-match outcome prints a warning itself, so it is visible however the caller
+// reaches it.
+func resolveTeamFlag(flag string, teams []api.TeamMembership, fetchErr error) (teamID, teamName string, err error) {
+	trimmed := strings.TrimSpace(flag)
+
+	if fetchErr != nil {
+		slog.Debug("could not fetch teams to resolve --team; passing the value through", "error", fetchErr)
+		return trimmed, "", nil
+	}
+	candidates := usableTeams(teams)
+	if len(candidates) == 0 {
+		slog.Debug("no usable team memberships reported; passing --team through unresolved", "team", trimmed)
+		return trimmed, "", nil
+	}
+
+	matches := resolveTeamMembership(candidates, trimmed)
+	switch len(matches) {
+	case 0:
+		slog.Debug("--team matches no team in the membership list; passing it through", "team", trimmed, "teams", len(candidates))
+		cli.PrintWarning(unmatchedTeamWarning(trimmed, candidates))
+		return trimmed, "", nil
+	case 1:
+		return matches[0].ID, matches[0].Name, nil
+	default:
+		return "", "", ambiguousTeamError(trimmed, matches)
+	}
 }
 
 // teamsFromDaemonStatus queries the running daemon for team context workspaces.

@@ -1,12 +1,17 @@
 package agentwork
 
 import (
+	"bytes"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
+
+	"github.com/sageox/ox/internal/lfs"
+	"github.com/stretchr/testify/require"
 )
 
 // rawContent is a minimal valid session with substantive entries.
@@ -173,7 +178,7 @@ func TestStageSessionInLedger_CopiesFiles(t *testing.T) {
 		LedgerPath: ledgerPath,
 	}
 
-	if err := handler.stageSessionInLedger(payload); err != nil {
+	if _, err := handler.stageSessionInLedger(payload); err != nil {
 		t.Fatalf("stageSessionInLedger failed: %v", err)
 	}
 
@@ -195,28 +200,60 @@ func TestStageSessionInLedger_CopiesFiles(t *testing.T) {
 	}
 }
 
-// TestStageSessionInLedger_NoopIfAlreadyInLedger verifies that stageSessionInLedger
-// is a no-op when the session is already in ledger/sessions/.
-func TestStageSessionInLedger_NoopIfAlreadyInLedger(t *testing.T) {
-	handler := NewSessionFinalizeHandler(slog.Default())
-	ledgerPath := t.TempDir()
+// A session finalized in place needs a cache copy before pointer preparation.
+func TestStageSessionInLedger_BacksUpTrackedSession(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing bool
+	}{
+		{name: "new backup"},
+		{name: "existing private backup", existing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := NewSessionFinalizeHandler(slog.Default())
+			ledgerPath := t.TempDir()
+			sessionName := "2026-01-10T14-30-testuser-OxNOOP"
+			sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+			if err := os.MkdirAll(sessionDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(testRawContent), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.existing {
+				cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
+				if err := os.MkdirAll(cacheDir, 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"), []byte("previous recording"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 
-	sessionName := "2026-01-10T14-30-testuser-OxNOOP"
-	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
-	if err := os.MkdirAll(sessionDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	payload := &SessionFinalizePayload{
-		SessionDir: sessionDir,
-		LedgerPath: ledgerPath,
-	}
-
-	if err := handler.stageSessionInLedger(payload); err != nil {
-		t.Fatalf("stageSessionInLedger failed: %v", err)
-	}
-	if payload.SessionDir != sessionDir {
-		t.Errorf("payload.SessionDir should not change: got %q", payload.SessionDir)
+			payload := &SessionFinalizePayload{SessionDir: sessionDir, LedgerPath: ledgerPath}
+			cacheDir, err := handler.stageSessionInLedger(payload)
+			if err != nil {
+				t.Fatalf("stageSessionInLedger failed: %v", err)
+			}
+			if payload.SessionDir != sessionDir {
+				t.Errorf("payload.SessionDir should not change: got %q", payload.SessionDir)
+			}
+			backupPath := filepath.Join(cacheDir, "raw.jsonl")
+			backup, err := os.ReadFile(backupPath)
+			if err != nil || string(backup) != testRawContent {
+				t.Fatalf("tracked session must retain its raw content in cache: %v", err)
+			}
+			// Windows file modes do not express POSIX owner/group permissions.
+			if runtime.GOOS != "windows" {
+				info, err := os.Stat(backupPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mode := info.Mode().Perm(); mode != 0600 {
+					t.Errorf("recording backup must remain owner-only: got %04o, want 0600", mode)
+				}
+			}
+		})
 	}
 }
 
@@ -277,6 +314,7 @@ func TestProcessResult_UploadOnly_CommitsToGit(t *testing.T) {
 	handler.skipLFS = true
 	handler.skipGit = false
 	handler.ledgerMu = &sync.Mutex{}
+	enableLocalFinalizeLFS(t, handler, clonePath)
 
 	item := &WorkItem{
 		ID:   "test-upload-only-git",
@@ -336,6 +374,7 @@ func TestProcessResult_RegularFinalize_StagesToLedger(t *testing.T) {
 	handler.skipLFS = true
 	handler.skipGit = false
 	handler.ledgerMu = &sync.Mutex{}
+	enableLocalFinalizeLFS(t, handler, clonePath)
 
 	llmOutput := `{"title":"Test Session","summary":"A test session.","quality_score":0.8,"score_reason":"fine","outcome":"success","key_actions":["did something"]}`
 
@@ -402,6 +441,7 @@ func TestProcessResult_RegularFinalize_CachePreservedOnPushFail(t *testing.T) {
 	handler.skipLFS = true
 	handler.skipGit = false
 	handler.ledgerMu = &sync.Mutex{}
+	enableLocalFinalizeLFS(t, handler, clonePath)
 
 	llmOutput := `{"title":"Test","summary":"A test.","quality_score":0.8,"score_reason":"fine","outcome":"success","key_actions":["did something"]}`
 	item := &WorkItem{
@@ -462,6 +502,7 @@ func TestProcessResult_UploadOnly_CachePreservedOnPushFail(t *testing.T) {
 	handler.skipLFS = true
 	handler.skipGit = false
 	handler.ledgerMu = &sync.Mutex{}
+	enableLocalFinalizeLFS(t, handler, clonePath)
 
 	item := &WorkItem{
 		ID:   "test-upload-push-fail",
@@ -579,4 +620,175 @@ func TestProcessResult_UploadOnly_AlreadyCommitted_PrunesCache(t *testing.T) {
 	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
 		t.Error("cache dir survived an already-committed session — Detect() will re-queue it forever")
 	}
+}
+
+// A session whose content lives outside the ledger cannot be committed: an XDG
+// cache dir that stageSessionInLedger left in place, a symlink under sessions/
+// that points at one, or a sessions/ root that is itself a symlink. Either way
+// the only copy must keep real content, not pointers.
+func TestGitCommitAndPush_LeavesOutOfLedgerSessionIntact(t *testing.T) {
+	for _, mode := range []string{"xdg dir", "symlink under sessions", "symlinked sessions root"} {
+		t.Run(mode, func(t *testing.T) {
+			ledgerPath := t.TempDir()
+			runGitCmd(t, ledgerPath, "init", "--quiet")
+			externalDir := filepath.Join(t.TempDir(), "sessions", "2026-01-10T14-30-testuser-OxXDG")
+			if err := os.MkdirAll(externalDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			raw := []byte(testRawContent)
+			rawPath := filepath.Join(externalDir, "raw.jsonl")
+			if err := os.WriteFile(rawPath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sessionDir := externalDir
+			link := func(target, name string) {
+				if err := os.Symlink(target, name); err != nil {
+					t.Skipf("symlinks unsupported: %v", err)
+				}
+			}
+			switch mode {
+			case "symlink under sessions":
+				if err := os.MkdirAll(filepath.Join(ledgerPath, "sessions"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				sessionDir = filepath.Join(ledgerPath, "sessions", filepath.Base(externalDir))
+				link(externalDir, sessionDir)
+			case "symlinked sessions root":
+				link(filepath.Dir(externalDir), filepath.Join(ledgerPath, "sessions"))
+				sessionDir = filepath.Join(ledgerPath, "sessions", filepath.Base(externalDir))
+			}
+
+			handler := NewSessionFinalizeHandler(slog.Default())
+			payload := &SessionFinalizePayload{SessionDir: sessionDir, RawPath: filepath.Join(sessionDir, "raw.jsonl"), LedgerPath: ledgerPath}
+			if pushed, _ := handler.gitCommitAndPush(payload, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef(raw)}); pushed {
+				t.Fatal("a session outside the ledger must not report a successful push")
+			}
+
+			got, err := os.ReadFile(rawPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lfs.IsPointerFile(rawPath) || !bytes.Equal(got, raw) {
+				t.Fatalf("external raw.jsonl must keep its content, got %d bytes", len(got))
+			}
+		})
+	}
+}
+
+// A stash-pop conflict can exist as an ordinary stage-0 file after git add.
+// Finalization must refuse it before commit, even though Git itself considers
+// that index entry resolved and would happily publish the marker bytes.
+func TestGitCommitAndPush_RefusesConflictMarkers(t *testing.T) {
+	ledgerPath := t.TempDir()
+	runGitCmd(t, ledgerPath, "init", "--initial-branch=main")
+	if err := os.WriteFile(filepath.Join(ledgerPath, "README.md"), []byte("ledger\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCmd(t, ledgerPath, "add", "README.md")
+	runGitCmd(t, ledgerPath, "commit", "-m", "initial")
+
+	const sessionName = "2026-09-10T12-00-test-Oxguard"
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	markers := []byte("{\n<<<<<<< Updated upstream\n  \"title\": \"remote\"\n=======\n  \"title\": \"local\"\n>>>>>>> Stashed changes\n}\n")
+	if err := os.WriteFile(filepath.Join(sessionDir, "meta.json"), markers, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(testRawContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewSessionFinalizeHandler(slog.Default())
+	handler.skipLFS = true
+	handler.ledgerMu = &sync.Mutex{}
+	headBefore := gitOutput(t, ledgerPath, "rev-parse", "HEAD")
+	pushed, _ := handler.gitCommitAndPush(&SessionFinalizePayload{
+		SessionDir: sessionDir,
+		RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
+		LedgerPath: ledgerPath,
+	}, nil)
+	if pushed {
+		t.Fatal("marker-laden metadata must not report a successful publication")
+	}
+	if headAfter := gitOutput(t, ledgerPath, "rev-parse", "HEAD"); headAfter != headBefore {
+		t.Fatalf("validation failure advanced HEAD: before=%s after=%s", headBefore, headAfter)
+	}
+	if got, err := os.ReadFile(filepath.Join(sessionDir, "meta.json")); err != nil || !bytes.Equal(got, markers) {
+		t.Fatalf("failed commit must preserve the conflicted file for recovery: %q, %v", got, err)
+	}
+}
+
+// TestGitCommitAndPush_CommitsStagedBytesNotWorktree verifies the commit
+// publishes the bytes `git add` staged, not whatever the worktree holds by the
+// time the commit actually runs. A manual git process (or any concurrent
+// writer) that rewrites meta.json between staging and commit must not have
+// those bytes ride into the published commit — CommitLedgerSnapshot builds
+// the committed tree from the INDEX, never the worktree.
+func TestGitCommitAndPush_CommitsStagedBytesNotWorktree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	_, ledgerPath := setupBareAndCloneLedger(t)
+
+	const sessionName = "2026-09-10T12-00-test-OxTOCTOU"
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cleanMeta := []byte(`{"title":"clean"}`)
+	if err := os.WriteFile(filepath.Join(sessionDir, "meta.json"), cleanMeta, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(testRawContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newGitBackedHandler()
+	// Simulate a manual Git process rewriting meta.json in the worktree AFTER
+	// this finalize has already staged the clean bytes.
+	handler.afterStageTestHook = func() {
+		conflicted := []byte("{\n<<<<<<< Updated upstream\n  \"title\": \"remote\"\n=======\n  \"title\": \"local\"\n>>>>>>> Stashed changes\n}\n")
+		if err := os.WriteFile(filepath.Join(sessionDir, "meta.json"), conflicted, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pushed, _ := handler.gitCommitAndPush(&SessionFinalizePayload{
+		SessionDir: sessionDir,
+		RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
+		LedgerPath: ledgerPath,
+	}, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef([]byte(testRawContent))})
+	if !pushed {
+		t.Fatal("a clean staged session must commit and push")
+	}
+
+	got := gitOutput(t, ledgerPath, "show", "HEAD:sessions/"+sessionName+"/meta.json")
+	if got != string(cleanMeta) {
+		t.Fatalf("commit must publish the STAGED bytes, not the worktree's post-stage rewrite: got %q, want %q", got, cleanMeta)
+	}
+	subject := gitOutput(t, ledgerPath, "log", "-1", "--format=%s")
+	if subject != "finalize session "+sessionName {
+		t.Fatalf("unexpected commit subject: %q", subject)
+	}
+}
+
+// A failed/skipped LFS upload must leave the recording recoverable locally;
+// the daemon must never publish real raw bytes as a fallback git artifact.
+func TestGitCommitAndPush_RefusesUnuploadedArtifacts(t *testing.T) {
+	_, ledgerPath := setupBareAndCloneLedger(t)
+	sessionDir := filepath.Join(ledgerPath, "sessions", "unuploaded")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "meta.json"), []byte(`{"title":"Pending upload"}`), 0o644))
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+	require.NoError(t, os.WriteFile(rawPath, []byte(testRawContent), 0o644))
+	before := gitOutput(t, ledgerPath, "rev-parse", "HEAD")
+	handler := newGitBackedHandler()
+	pushed, _ := handler.gitCommitAndPush(&SessionFinalizePayload{SessionDir: sessionDir, RawPath: rawPath, LedgerPath: ledgerPath}, nil)
+	require.False(t, pushed)
+	require.Equal(t, before, gitOutput(t, ledgerPath, "rev-parse", "HEAD"))
+	content, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	require.Equal(t, testRawContent, string(content))
 }

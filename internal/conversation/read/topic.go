@@ -62,7 +62,7 @@ func (r *Reader) Topic(rawID, topicID string, includeSuperseded bool) *Envelope 
 	if tpErr := ValidateTopicID(topicID); tpErr != nil {
 		return r.finishError(start, tpErr, nil)
 	}
-	_, droot, lookErr := r.lookup(id.RecordingID)
+	_, droot, lookErr := r.lookup(id)
 	if lookErr != nil {
 		return r.finishError(start, lookErr, nil)
 	}

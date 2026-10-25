@@ -55,9 +55,20 @@ const (
 //   - Self-contained: every input is on the receiver path or
 //     environment; no reliance on cmd/ox CLI globals.
 //
-// `repoPath` is the workspace the check should operate on. Empty
-// string when the check is global (rare; prefer per-workspace).
-type CheckFunc func(ctx context.Context, repoPath string) CheckResult
+// `targetPath` is a source workspace or canonical Ledger checkout according to
+// Check.Scope. Empty string is reserved for rare global checks.
+type CheckFunc func(ctx context.Context, targetPath string) CheckResult
+
+// Scope selects which kind of local checkout a check receives. Workspace
+// checks operate on source repositories. Ledger checks operate directly on
+// canonical Ledger checkouts and may therefore cover Ledgers whose source
+// repository is not currently open.
+type Scope uint8
+
+const (
+	ScopeWorkspace Scope = iota
+	ScopeLedger
+)
 
 // Check is a registry entry. Slug is the canonical identifier and
 // matches cmd/ox/doctor_types.go's CheckSlug* constants where the
@@ -65,6 +76,7 @@ type CheckFunc func(ctx context.Context, repoPath string) CheckResult
 type Check struct {
 	Slug        string
 	Description string
+	Scope       Scope
 	Run         CheckFunc
 	MinInterval time.Duration // throttle: don't run more often than this
 	BlastRadius string        // human-readable: "single workspace", "single file", etc. — for ops review

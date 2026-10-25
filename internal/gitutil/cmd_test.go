@@ -47,19 +47,37 @@ func TestNewNetworkCmd_DisablesCommitSigning(t *testing.T) {
 	}{
 		{
 			args: []string{"pull", "--rebase", "--autostash"},
-			want: []string{"git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "pull", "--rebase", "--autostash"},
+			want: []string{"git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "filter.lfs.smudge=cat", "-c", "filter.lfs.clean=cat", "-c", "filter.lfs.process=", "-c", "filter.lfs.required=false", "pull", "--rebase", "--autostash"},
 		},
 		{
 			args: []string{"-C", "/tmp/example", "fetch", "--quiet"},
-			want: []string{"git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-C", "/tmp/example", "fetch", "--quiet"},
+			want: []string{"git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "filter.lfs.smudge=cat", "-c", "filter.lfs.clean=cat", "-c", "filter.lfs.process=", "-c", "filter.lfs.required=false", "-C", "/tmp/example", "fetch", "--quiet"},
 		},
 		{
 			args: []string{"ls-remote", "origin"},
-			want: []string{"git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "ls-remote", "origin"},
+			want: []string{"git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "filter.lfs.smudge=cat", "-c", "filter.lfs.clean=cat", "-c", "filter.lfs.process=", "-c", "filter.lfs.required=false", "ls-remote", "origin"},
 		},
 	} {
 		cmd := NewNetworkCmd(context.Background(), tc.args...)
 		assert.Equal(t, tc.want, cmd.Args,
 			"signing must be disabled ahead of the caller's verbatim args for %v", tc.args)
 	}
+}
+
+// TestNewNetworkCmd_InsulatesFromGlobalLFSFilters covers ox-baz5.4: a network
+// git command must carry its own filter.lfs.* overrides so a user's global
+// git-lfs config (filter.lfs.required=true and friends) can never smudge or
+// clean content ox checks out. ox never depends on git-lfs
+// (.claude/rules/lfs-no-git-lfs-binary.md) — this is what makes that true
+// even on a machine that happens to have git-lfs installed globally.
+func TestNewNetworkCmd_InsulatesFromGlobalLFSFilters(t *testing.T) {
+	cmd := NewNetworkCmd(context.Background(), "fetch", "--quiet")
+	want := []string{
+		"git",
+		"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
+		"-c", "filter.lfs.smudge=cat", "-c", "filter.lfs.clean=cat",
+		"-c", "filter.lfs.process=", "-c", "filter.lfs.required=false",
+		"fetch", "--quiet",
+	}
+	assert.Equal(t, want, cmd.Args)
 }

@@ -87,6 +87,9 @@ def main() -> int:
 
     counts, wall_seconds, elapsed_sum, slowest = load_metrics(lines)
     total = sum(counts.values())
+    if total == 0:
+        print("test metrics: no final test-case events found", file=sys.stderr)
+        return 1
 
     if args.markdown:
         print("### Test timing metrics")

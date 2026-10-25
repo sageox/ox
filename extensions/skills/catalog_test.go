@@ -1,6 +1,8 @@
 package skills
 
 import (
+	"io/fs"
+	"path"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -10,11 +12,11 @@ func TestCanonicalCatalogValidAndDeterministic(t *testing.T) {
 	if err := Validate(); err != nil {
 		t.Fatalf("Validate() = %v", err)
 	}
-	first, err := SelectedBundles("1.0.0", nil, []string{"core", "attest"})
+	first, err := SelectedBundles("1.0.0", nil, []string{"core", "onramp"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := SelectedBundles("1.0.0", nil, []string{"core", "attest"})
+	second, err := SelectedBundles("1.0.0", nil, []string{"core", "onramp"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,9 +36,26 @@ func TestCanonicalCatalogValidAndDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// No RETIRED name may reappear in the default selection. A retired skill
+	// that leaks back gets reinstalled on every reconcile, which is how a file
+	// ox promised to remove survives forever.
+	//
+	// This used to be `strings.Contains(skill.Name, "attest")`, which was too
+	// blunt in a way that mattered: the Attest CLI removal retired
+	// ox-cli-attest-goal and ox-cli-attest-create, because `ox attest goal` and
+	// `ox attest create` were deleted. `ox attest publish` SURVIVED, so a skill
+	// documenting it is legitimate — and the substring guard refused it purely
+	// for sharing five letters with two unrelated retired names.
+	//
+	// Checking the actual Retired list is both narrower and stronger: it now
+	// covers every retired name rather than one hand-picked substring.
+	retired := make(map[string]bool, len(Retired))
+	for _, name := range Retired {
+		retired[name] = true
+	}
 	for _, skill := range defaults {
-		if strings.HasPrefix(skill.Name, "ox-attest-") {
-			t.Fatalf("opt-in skill %s leaked into default bundle", skill.Name)
+		if retired[skill.Name] {
+			t.Fatalf("retired skill %s leaked back into the default catalog — it would be reinstalled on every reconcile", skill.Name)
 		}
 	}
 }
@@ -65,7 +84,7 @@ func TestValidateRejectsUnsafeAndMalformedSources(t *testing.T) {
 }
 
 func TestPortableSkillsAvoidHostSpecificActivationSyntax(t *testing.T) {
-	selected, err := SelectedBundles("1.0.0", nil, []string{"core", "attest"})
+	selected, err := SelectedBundles("1.0.0", nil, []string{"core", "onramp", "lifecycle"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +101,121 @@ func TestPortableSkillsAvoidHostSpecificActivationSyntax(t *testing.T) {
 			if strings.Contains(body, phrase) {
 				t.Errorf("portable skill %s contains host-specific activation phrase %q", skill.Name, phrase)
 			}
+		}
+	}
+}
+
+func TestValidateFrontmatterRejectsUnmatchedHTMLCommentFence(t *testing.T) {
+	for _, body := range []string{
+		"---\nname: ox-cli-demo\ndescription: demo\n---\nbody\n-->\n",
+		"---\nname: ox-cli-demo\ndescription: demo\n---\n<!-- body\n",
+	} {
+		if err := validateFrontmatter("ox-cli-demo", body); err == nil {
+			t.Errorf("validateFrontmatter accepted unmatched HTML comment fence in %q", body)
+		}
+	}
+}
+
+// TestSlashOnlySkillsCarryAnAgentNeutralGuard closes a gap that depends on
+// UNVERIFIED vendor behavior.
+//
+// `disable-model-invocation: true` is a Claude Code frontmatter key. Codex,
+// Gemini, and OMP all read the SAME .agents/skills projection, and whether any of
+// them honors that key is unknown. If they do not, every lifecycle and diagnostic
+// skill — ox-cli-session-stop, ox-cli-session-abort, ox-cli-doctor, ox-cli-init —
+// enters their context with a description and becomes model-invocable, so
+// ADR-023's ruling that lifecycle surfaces stay EXPLICIT would silently fail on
+// exactly the agents the command fold was meant to help.
+//
+// The body-level guard does not depend on any vendor honoring anything: it is
+// instruction text every agent reads. Belt and braces, deliberately.
+func TestSlashOnlySkillsCarryAnAgentNeutralGuard(t *testing.T) {
+	entries, err := fs.ReadDir(FS, ".")
+	if err != nil {
+		t.Fatalf("read skills: %v", err)
+	}
+	var checked int
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		body, err := fs.ReadFile(FS, path.Join(e.Name(), SkillFileName))
+		if err != nil {
+			continue
+		}
+		if !strings.Contains(string(body), "disable-model-invocation: true") {
+			continue
+		}
+		checked++
+		if !strings.Contains(string(body), "Explicit invocation only") {
+			t.Errorf("%s declares disable-model-invocation but carries no agent-neutral guard; "+
+				"on an agent that ignores the frontmatter key the model could fire it unprompted", e.Name())
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no slash-only skills found; the fold or the frontmatter key regressed")
+	}
+}
+
+// TestCatalogValidatesWithCRLFCheckout is the portability regression the new
+// Windows CI job caught on its first run.
+//
+// The catalog is embedded from the checkout at BUILD time, and git on Windows
+// checks .md files out with CRLF by default. validateFrontmatter looks for a
+// literal "---\n" prefix, so a Windows-built ox embedded "---\r\n…", rejected
+// every skill in its own catalog, and could install nothing at all — with an
+// error message ("must start with YAML frontmatter") that points at the file
+// rather than at the line endings.
+//
+// Failure prevented: ox is completely non-functional on Windows, and the cause
+// is invisible to anyone reading the source on macOS or Linux.
+func TestCatalogValidatesWithCRLFCheckout(t *testing.T) {
+	crlf := func(s string) string { return strings.ReplaceAll(s, "\n", "\r\n") }
+	body := "---\nname: ox-cli-demo\ndescription: a demo skill\n---\n\nbody\n"
+
+	source := fstest.MapFS{
+		"ox-cli-demo/" + SkillFileName: &fstest.MapFile{Data: []byte(crlf(body))},
+	}
+	catalog := []Bundle{{
+		ID: "core", Description: "d", Default: true, SkillIDs: []string{"ox-cli-demo"},
+	}}
+
+	if err := validateSource(source, catalog); err != nil {
+		t.Fatalf("a CRLF checkout must validate; ox would be unusable on Windows: %v", err)
+	}
+}
+
+// TestNormalizeEOLKeepsTheDigestPlatformIndependent: normalizing at read time
+// rather than only in the validator is what stops a Windows machine and a Linux
+// machine from disagreeing about which catalog revision is installed — which
+// would make each of them reconcile the other's work forever.
+func TestNormalizeEOLKeepsTheDigestPlatformIndependent(t *testing.T) {
+	lf := []byte("---\nname: x\n---\nbody\n")
+	crlf := []byte("---\r\nname: x\r\n---\r\nbody\r\n")
+
+	if got, want := string(normalizeEOL(crlf)), string(lf); got != want {
+		t.Errorf("normalizeEOL(CRLF) = %q, want %q", got, want)
+	}
+	if got := string(normalizeEOL(lf)); got != string(lf) {
+		t.Errorf("normalizeEOL must leave LF content byte-identical, got %q", got)
+	}
+}
+
+// TestFrontmatterRejectsWhitespacePaddedComment: trimming the quotes off
+// `description: " <!-- ..."` leaves a leading space, and a bare HasPrefix check
+// sails straight past it — so the conversion accident this guard exists to catch
+// would still ship, with the stray comment as the skill's activation metadata.
+func TestFrontmatterRejectsWhitespacePaddedComment(t *testing.T) {
+	for _, desc := range []string{
+		`"<!-- Keep this file thin."`,
+		`" <!-- Keep this file thin."`,
+		`"   <!-- padded harder"`,
+	} {
+		body := "---\nname: ox-cli-demo\ndescription: " + desc + "\n---\n\nbody\n"
+		source := fstest.MapFS{"ox-cli-demo/" + SkillFileName: &fstest.MapFile{Data: []byte(body)}}
+		catalog := []Bundle{{ID: "core", Description: "d", Default: true, SkillIDs: []string{"ox-cli-demo"}}}
+		if err := validateSource(source, catalog); err == nil {
+			t.Errorf("description %s was accepted; the skill would ship with a comment as its activation metadata", desc)
 		}
 	}
 }

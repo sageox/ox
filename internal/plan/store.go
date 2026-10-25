@@ -13,21 +13,27 @@ package plan
 //	plan.md          # always plain git (Input.Raw)
 //	annotations.json # always plain git (the Result — searchable badge data)
 //	meta.json        # always plain git (topic, slug, authors, timestamps, …)
-//	plan.html        # only if a render was passed in; plain git if small,
-//	                 # LFS pointer (internal/lfs.WritePointerFile) if large.
+//	plan.html        # only if a render was passed in. Save writes it PLAIN;
+//	                 # a large render is dehydrated to an LFS pointer by the CLI
+//	                 # caller (PointerizeHTML) AFTER its blob is uploaded, never
+//	                 # before — see the GH #810 note at the plan.html write below.
 //
 // CLI WRITES files into the ledger working tree (daemon-git split): we never
 // commit inline and never discard uncommitted changes — same as session
 // capture, which writes meta.json + content and lets a later push carry it.
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -46,10 +52,14 @@ const (
 	planHTMLFile    = "plan.html"
 
 	// htmlLFSThreshold is the size above which a passed-in plan.html is stored
-	// as an LFS pointer rather than committed plain. ~256KB: base64 imagery and
-	// large rendered plans cross this; a normal text-only render stays well
-	// under it and is kept plain so a dehydrated clone reads it directly.
-	htmlLFSThreshold = 256 * 1024
+	// as an LFS pointer rather than committed plain. 1MiB: a plan is a decision
+	// record read far more often than it is written, and reading it should never
+	// require network — so word-heavy and diagram-heavy HTML plans (up to 1MiB,
+	// which covers essentially every authored plan including inline SVG/Mermaid
+	// and modest base64 imagery) are kept plain so a dehydrated clone reads them
+	// directly. Only genuinely large renders past 1MiB cross to LFS to keep the
+	// git tree from bloating.
+	htmlLFSThreshold = 1024 * 1024
 )
 
 // PlanStatus is the plan's own lifecycle, independent of the producing
@@ -81,18 +91,14 @@ const (
 // without the session present. Duplication is the feature, not a smell.
 type Provenance struct {
 	// Join keys (may dangle if the session was aborted / never uploaded).
-	//
-	// Two-phase population, because the canonical ses_ SessionID is minted
-	// fresh at session-STOP and is NOT knowable mid-recording:
-	//   - SessionName is the durable identifier available at plan-save time
-	//     (the recording's folder name, what `ox session view <name>` resolves).
-	//     It is the primary join key and is always set when a recording is live.
-	//   - SessionID (ses_<UUIDv7>) is BACKFILLED at session-stop, in the same
-	//     reconciliation that sets SessionOutcome=stopped — we have the real id
-	//     and the produced-plan slugs in hand there. Empty for aborted sessions
-	//     (no stop) and for plans saved outside a recording.
+	// Both are set at save time when a recording is live:
+	//   - SessionName is the recording's folder name, what `ox session view
+	//     <name>` resolves.
+	//   - SessionID (ses_<UUIDv7>) is minted when the recording starts. Session
+	//     stop (ReconcileSessionOutcome) fills it for a recording an older ox
+	//     started without one. Empty for plans saved outside a recording.
 	SessionName string `json:"session_name,omitempty"`
-	SessionID   string `json:"session_id,omitempty"` // ses_<UUIDv7>, backfilled at stop
+	SessionID   string `json:"session_id,omitempty"` // ses_<UUIDv7>, minted at recording start
 	AgentID     string `json:"agent_id,omitempty"`   // Ox#### stable agent instance
 	RepoID      string `json:"repo_id,omitempty"`
 
@@ -133,6 +139,15 @@ type Meta struct {
 	CreatedAt      time.Time `json:"created_at"`
 	SourcePlanPath string    `json:"source_plan_path,omitempty"`
 
+	// Kind names WHAT this artifact is. "plan" (the zero value) means the
+	// pre-work document; the others are artifacts that arrive at different
+	// moments in the same work and were, before this existed, simply never
+	// saved. The guidance said "for a material PLAN, author a plan.html", so
+	// an agent holding a finished device-capture review sheet classified it as
+	// not-a-plan and left a 168 KB page in .context/ until a human asked for
+	// it. Naming the kinds is what makes the guidance match what people build.
+	Kind ArtifactKind `json:"kind,omitempty"`
+
 	// Status is the plan's lifecycle. Missing == "draft" for legacy plans.
 	Status PlanStatus `json:"status,omitempty"`
 	// Primary records which stored artifact is the plan of record: "html"
@@ -151,6 +166,11 @@ type Meta struct {
 	Provenance *Provenance `json:"provenance,omitempty"`
 	// Collaboration holds the deterministic collaboration-effort counts.
 	Collaboration *CollabSignals `json:"collaboration,omitempty"`
+
+	// NewPlanID is the pln_ id Save gives a plan this save creates; Save mints
+	// one when it is empty, and a revision keeps the plan's own id. Never
+	// stored in meta.json: the id lives in events.jsonl. See SavedHTML.
+	NewPlanID string `json:"-"`
 }
 
 // PlanInfo is the listing-level view of a captured plan, assembled from
@@ -159,6 +179,9 @@ type Meta struct {
 // projection when the plan has recorded lifecycle events, else meta.json's
 // Status for legacy plans saved before the event log existed.
 type PlanInfo struct {
+	// PlanID is the stable pln_ id from events.jsonl ("" for a legacy plan
+	// saved before the event log) — the id in the plan's share link.
+	PlanID    string
 	Slug      string
 	Topic     string
 	Dir       string
@@ -166,6 +189,7 @@ type PlanInfo struct {
 	Authors   []string
 	HasHTML   bool
 	Status    PlanStatus
+	Kind      ArtifactKind
 }
 
 // LoadMeta reads and parses a captured plan's meta.json from its plan directory
@@ -176,12 +200,106 @@ func LoadMeta(planDir string) (Meta, error) {
 	return readMeta(planDir)
 }
 
+// ArtifactKind names what a saved artifact IS. The storage, review loop and
+// chrome are identical for every kind — they differ only in when they arrive
+// and what a reader should expect, which is exactly the distinction the single
+// noun "plan" was hiding.
+type ArtifactKind string
+
+const (
+	// KindPlan is the default: a document written BEFORE the work.
+	KindPlan ArtifactKind = "plan"
+	// KindMockup is a visual proposal for a user-facing surface.
+	KindMockup ArtifactKind = "mockup"
+	// KindReview is a sheet built for a human to judge something — the
+	// artifact whose whole purpose is the look, not the argument.
+	KindReview ArtifactKind = "review"
+	// KindEvidence records what was measured or observed, after the fact.
+	KindEvidence ArtifactKind = "evidence"
+)
+
+// allKinds is the single list every `--kind` hint and ValidKind read, so a
+// hint can never name a subset that makes a valid kind look unsupported.
+var allKinds = []ArtifactKind{KindPlan, KindMockup, KindReview, KindEvidence}
+
+// KindsHint is the `--kind` value spelling for CLI hints: "plan|mockup|...".
+func KindsHint() string {
+	names := make([]string, len(allKinds))
+	for i, k := range allKinds {
+		names[i] = string(k)
+	}
+	return strings.Join(names, "|")
+}
+
+// ValidKind reports whether k is a known artifact kind. Empty is valid and
+// means KindPlan, so every plan saved before kinds existed keeps working.
+func ValidKind(k string) bool {
+	norm := ArtifactKind(strings.ToLower(strings.TrimSpace(k)))
+	return norm == "" || slices.Contains(allKinds, norm)
+}
+
+// KindOrDefault normalizes a kind, mapping empty to KindPlan.
+func KindOrDefault(k ArtifactKind) ArtifactKind {
+	if strings.TrimSpace(string(k)) == "" {
+		return KindPlan
+	}
+	return ArtifactKind(strings.ToLower(strings.TrimSpace(string(k))))
+}
+
+// AllKinds lists the kinds for help text and validation messages.
+func AllKinds() []string {
+	return []string{string(KindPlan), string(KindMockup), string(KindReview), string(KindEvidence)}
+}
+
+// priorSaveOfSource finds a live plan already saved from the same source file,
+// so a re-save revises it instead of forking a new one. Superseded, abandoned
+// and realized plans are skipped — those lifecycle states are deliberate and a
+// later save must not silently reopen them. Fail-open: any read error yields
+// "no prior", which restores the derive-from-topic behavior.
+func priorSaveOfSource(ledger, sourcePath string) (string, Meta, bool) {
+	if strings.TrimSpace(sourcePath) == "" {
+		return "", Meta{}, false
+	}
+	plansDir := paths.LedgerPlansDir(ledger)
+	if plansDir == "" {
+		return "", Meta{}, false
+	}
+	entries, err := os.ReadDir(plansDir)
+	if err != nil {
+		return "", Meta{}, false
+	}
+	var best Meta
+	var bestDir string
+	var found bool
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(plansDir, e.Name())
+		m, err := readMeta(dir)
+		if err != nil || m.SourcePlanPath != sourcePath {
+			continue
+		}
+		// the folded status, as every closed-plan check here: meta.json's
+		// snapshot can lag the event log after two clones race
+		if isClosedStatus(CurrentStatus(dir)) {
+			continue
+		}
+		// Most recent wins when a source path has been saved more than once.
+		if !found || m.CreatedAt.After(best.CreatedAt) {
+			best, bestDir, found = m, dir, true
+		}
+	}
+	return bestDir, best, found
+}
+
 // Save writes a captured plan into the ledger under data/plans/<dated-slug>/.
 // It writes plan.md (from in.Raw), annotations.json (res), and meta.json as
-// plain git-tracked text. plan.html is written ONLY when html != nil: plain
-// when small, as an LFS pointer when it exceeds htmlLFSThreshold. Save never
-// renders HTML and never commits — it only materializes files in the working
-// tree. Returns the absolute plan directory.
+// plain git-tracked text. plan.html is written ONLY when html != nil, and always
+// as PLAIN bytes — dehydration of a large render to an LFS pointer is the CLI
+// caller's job (PointerizeHTML), post-upload. Save never renders HTML, never
+// uploads, and never commits — it only materializes files in the working tree.
+// Returns the absolute plan directory.
 //
 // Save also appends one lifecycle event to the plan's events.jsonl (see
 // events.go) — additive, dual-write alongside meta.json: meta.json remains the
@@ -214,17 +332,18 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 	if meta.CreatedAt.IsZero() {
 		meta.CreatedAt = time.Now().UTC()
 	}
-	if meta.Slug == "" {
-		meta.Slug = Slugify(meta.Topic)
+	dir, resolved, err := resolveSaveDir(ledger, meta)
+	if err != nil {
+		return "", "", err
 	}
+	meta = resolved
 
 	// Stamp the current schema version onto both long-lived artifacts so a
 	// future reader can detect and migrate an older on-disk layout.
+	meta.Kind = KindOrDefault(meta.Kind)
 	meta.SchemaVersion = SchemaVersion
 	res.SchemaVersion = SchemaVersion
 
-	dirName := fmt.Sprintf("%s-%s", meta.CreatedAt.UTC().Format("2006-01-02"), meta.Slug)
-	dir := filepath.Join(paths.LedgerPlansDir(ledger), dirName)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", "", fmt.Errorf("create plan dir=%s: %w", dir, err)
 	}
@@ -257,7 +376,7 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 			existingEvents = nil
 		}
 		firstSave := len(existingEvents) == 0
-		planID = planid.GeneratePlanID()
+		planID = cmp.Or(meta.NewPlanID, planid.GeneratePlanID())
 		if !firstSave {
 			planID = existingEvents[0].PlanID
 		}
@@ -285,8 +404,15 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		// original CreatedAt, while refreshing the rest. Routing through
 		// MutatePlanMeta also serializes against a concurrent session-stop/
 		// doctor outcome write to the same file.
+		var status PlanStatus // meta.json's, after this save
 		if err := MutatePlanMeta(context.Background(), dir, func(existing *Meta) (*Meta, error) {
 			merged := meta
+			// a copy: the event this save appends is stamped from the
+			// caller's provenance, which the merge below must not rewrite
+			if meta.Provenance != nil {
+				prov := *meta.Provenance
+				merged.Provenance = &prov
+			}
 			if existing != nil {
 				if existing.Status != "" {
 					merged.Status = existing.Status
@@ -306,10 +432,10 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 				if merged.Primary == "" {
 					merged.Primary = existing.Primary
 				}
-				// SessionID and SessionOutcome are system-managed (backfilled /
-				// reconciled at stop), never set by a save-time caller — preserve
-				// them across a re-save even when the caller supplies fresh
-				// provenance for the other (snapshot) fields.
+				// A re-save keeps the SessionID and SessionOutcome already
+				// recorded, so it cannot reset a stopped outcome to active or
+				// replace the producing session's id with its own; the other
+				// (snapshot) provenance fields take the caller's values.
 				if existing.Provenance != nil {
 					if existing.Provenance.SessionID != "" || existing.Provenance.SessionOutcome != "" {
 						if merged.Provenance == nil {
@@ -327,27 +453,32 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 			if merged.Status == "" {
 				merged.Status = PlanStatusDraft
 			}
+			status = merged.Status
 			merged.SchemaVersion = SchemaVersion
 			return &merged, nil
 		}); err != nil {
 			return fmt.Errorf("write %s: %w", planMetaFile, err)
 		}
 
-		// plan.html — only when a render was already produced. Size-gated: small
-		// renders stay plain so dehydrated clones read them directly; large ones
-		// become LFS pointers (pure-Go pointer write, never the git-lfs binary).
+		// plan.html — only when a render was already produced. ALWAYS written
+		// plain here. Save is the no-network storage layer: it can hash content
+		// but cannot upload it, and a pointer whose blob was never uploaded is
+		// exactly GH #810 — the render is lost AND the poisoned pointer makes the
+		// remote reject every future push, wedging the whole team's ledger.
+		// Dehydration of a large render to an LFS pointer happens in the CLI
+		// caller (savePlanArtifacts → UploadHTML, then PointerizeHTML) AFTER a
+		// confirmed upload, and only overwrites this plain file once the blob is
+		// provably in the store.
+		// If that step is skipped or the store is unreachable, the plan stays
+		// plain: larger in git, but retrievable and pushable — never lost, never
+		// poisoned. That is the structural property the size-gate-here design
+		// lacked.
 		if html != nil {
-			// Stamp the plan's self-identifying meta tags (see html_meta.go) before
-			// either write path below, so both the plain and LFS-pointer'd copies
-			// carry the same content.
+			// Stamp the plan's self-identifying meta tags (see html_meta.go) so the
+			// stored copy carries them regardless of later dehydration.
 			html = StampHTMLMeta(html, planID, meta.Slug, meta.Topic)
 			htmlPath := filepath.Join(dir, planHTMLFile)
-			if int64(len(html)) > htmlLFSThreshold {
-				ref := lfs.NewFileRef(html)
-				if err := lfs.WritePointerFile(htmlPath, ref); err != nil {
-					return fmt.Errorf("write plan.html LFS pointer: %w", err)
-				}
-			} else if err := os.WriteFile(htmlPath, html, 0o644); err != nil {
+			if err := os.WriteFile(htmlPath, html, 0o644); err != nil {
 				return fmt.Errorf("write %s: %w", planHTMLFile, err)
 			}
 
@@ -384,7 +515,9 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		ev := Event{PlanID: planID, Kind: EventRevised, Topic: meta.Topic}
 		if firstSave {
 			ev.Kind = EventCreated
-			ev.Status = PlanStatusDraft
+			// draft, or the status a legacy plan's meta.json held before it
+			// had events: from now on the status is folded from them
+			ev.Status = status
 		}
 		savedKind = ev.Kind
 		if meta.Provenance != nil {
@@ -405,6 +538,229 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 	}
 
 	return dir, savedKind, nil
+}
+
+// AmbiguousSlugError reports that a slug names more than one saved plan
+// directory. Picking one silently is how a revision lands on the wrong plan (or
+// a lifecycle verb approves the wrong one), so every slug lookup refuses and
+// lists the candidates; the full dated directory name is always unambiguous.
+type AmbiguousSlugError struct {
+	Slug       string
+	Candidates []string // directory base names, sorted
+}
+
+func (e *AmbiguousSlugError) Error() string {
+	return fmt.Sprintf("plan slug %q is ambiguous: it matches %d saved plans (%s); pass the full directory name instead",
+		e.Slug, len(e.Candidates), strings.Join(e.Candidates, ", "))
+}
+
+// ResolveSaveDir reports the directory Save would write meta into, without
+// writing anything. The CLI calls it before Save to learn whether this save
+// REVISES an existing plan dir, so it can make the prior revision durable in
+// ledger history first. It shares resolveSaveDir with Save, so the answer
+// cannot drift from where Save actually writes.
+func ResolveSaveDir(gitRoot string, meta Meta) (string, error) {
+	ledger := ledgerPathFor(gitRoot)
+	if ledger == "" {
+		return "", fmt.Errorf("no ledger configured for %q: cannot save plan", gitRoot)
+	}
+	if meta.CreatedAt.IsZero() {
+		meta.CreatedAt = time.Now().UTC()
+	}
+	dir, _, err := resolveSaveDir(ledger, meta)
+	return dir, err
+}
+
+// SavedHTML returns the plan.html Save writes for html when it saves meta:
+// html stamped with the id, slug and title of the plan meta resolves to. For a
+// plan the save would create, it mints meta.NewPlanID when that is empty and
+// returns meta carrying it, so Save stamps the same id. The CLI uploads this
+// page before it takes the Ledger's repo lock. A save of the same plan that
+// lands in between can change what Save writes, so a caller compares the
+// written bytes before relying on them.
+func SavedHTML(gitRoot string, meta Meta, html []byte) ([]byte, Meta, error) {
+	ledger := ledgerPathFor(gitRoot)
+	if ledger == "" {
+		return nil, meta, fmt.Errorf("no ledger configured for %q: cannot save plan", gitRoot)
+	}
+	if meta.CreatedAt.IsZero() {
+		meta.CreatedAt = time.Now().UTC()
+	}
+	dir, resolved, err := resolveSaveDir(ledger, meta)
+	if err != nil {
+		return nil, meta, err
+	}
+	// the id rule Save applies: the plan's own once it has events (an
+	// unreadable log counts as none), else the new id
+	id := meta.NewPlanID
+	if events, err := LoadEvents(dir); err == nil && len(events) > 0 {
+		id = events[0].PlanID
+	} else if id == "" {
+		id = planid.GeneratePlanID()
+		meta.NewPlanID = id
+	}
+	return StampHTMLMeta(html, id, resolved.Slug, resolved.Topic), meta, nil
+}
+
+// resolveSaveDir decides which plan directory a save lands in and returns meta
+// with Slug/CreatedAt settled to match it.
+//
+// Three cases, in precedence order:
+//   - EXPLICIT slug (--slug, or <meta name="ox-plan-slug">) naming one live
+//     saved plan: this save is a new REVISION of that plan — same dir, same
+//     pln_ id, a `revised` event appended. Before this, the dir name was
+//     re-dated to today, so re-saving an authored page on a later day forked
+//     a second plan with a second id and split its review history.
+//   - EXPLICIT slug naming several live plans: refuse with AmbiguousSlugError.
+//     Guessing would write one plan's page into another plan's history.
+//   - DERIVED slug: re-saving the SAME source file revises the SAME plan (see
+//     priorSaveOfSource); otherwise Slugify(topic) under today's date.
+//
+// Superseded, abandoned and realized plans never match: those lifecycle states
+// are deliberate and a later save must not silently reopen them.
+//
+// Revising in place never destroys the prior version: the ledger is git, and
+// the CLI commits any not-yet-committed prior revision before Save overwrites
+// it — or refuses the save when it cannot (see savePlanArtifacts).
+func resolveSaveDir(ledger string, meta Meta) (string, Meta, error) {
+	plansDir := paths.LedgerPlansDir(ledger)
+	if meta.Slug != "" {
+		// The full dated directory name is the one spelling an AmbiguousSlugError
+		// tells the author to pass, so it must resolve to exactly that plan.
+		// Checked before slug matching: a directory name is unique, a slug is not.
+		if dir, prior, found, err := liveDirNamed(plansDir, meta.Slug); err != nil {
+			return "", meta, err
+		} else if found {
+			meta.Slug = prior.Slug
+			meta.CreatedAt = prior.CreatedAt
+			return dir, meta, nil
+		}
+		matches := livePlanDirsForSlug(plansDir, meta.Slug)
+		switch len(matches) {
+		case 0:
+			// first save under this slug: fall through to a fresh dated dir.
+		case 1:
+			if prior, err := readMeta(matches[0]); err == nil && !prior.CreatedAt.IsZero() {
+				meta.CreatedAt = prior.CreatedAt
+			}
+			return matches[0], meta, nil
+		default:
+			names := make([]string, 0, len(matches))
+			for _, m := range matches {
+				names = append(names, filepath.Base(m))
+			}
+			sort.Strings(names)
+			return "", meta, &AmbiguousSlugError{Slug: meta.Slug, Candidates: names}
+		}
+	} else {
+		// Re-saving the SAME source file revises the SAME plan.
+		//
+		// Without this, the slug is derived from the topic, so editing a page's
+		// title or H1 between saves silently mints a SECOND plan from one
+		// source file — observed in the field as two entries five minutes
+		// apart with identical source_plan_path and session, which the human
+		// then had to reconcile with `ox plan supersede` by hand.
+		if priorDir, prior, ok := priorSaveOfSource(ledger, meta.SourcePlanPath); ok {
+			meta.Slug = prior.Slug
+			meta.CreatedAt = prior.CreatedAt
+			// The prior's ACTUAL dir, not one recomputed from slug+date: a
+			// plan allocated a -N suffix (below) would otherwise recompute to
+			// the closed plan it stepped around.
+			return priorDir, meta, nil
+		}
+		meta.Slug = Slugify(meta.Topic)
+	}
+	return freshPlanDir(plansDir, meta.CreatedAt.UTC().Format("2006-01-02")+"-", meta.Slug), meta, nil
+}
+
+// freshPlanDir returns <datePrefix><slug>, or the first free -2, -3, ...
+// variant when that dir already holds a CLOSED plan (superseded, abandoned,
+// realized). Writing into it would overwrite the closed plan's page, reuse its
+// pln_ id, and log this save as its revision — reopening a plan the team
+// deliberately closed. A LIVE dir at that name is returned as-is: that is the
+// derived-slug same-day re-save, which revises in place by design. meta.Slug
+// keeps the unsuffixed slug so later saves and lookups still find the plan by
+// the slug its author used.
+func freshPlanDir(plansDir, datePrefix, slug string) string {
+	base := filepath.Join(plansDir, datePrefix+slug)
+	candidate := base
+	for n := 2; ; n++ {
+		if _, err := os.Stat(filepath.Join(candidate, planMetaFile)); err != nil {
+			return candidate // no saved plan here (a meta-less dir is not a plan)
+		}
+		if !isClosedStatus(CurrentStatus(candidate)) {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s-%d", base, n)
+	}
+}
+
+// isClosedStatus reports whether a plan's lifecycle is deliberately over, so
+// saves never reopen it and slug lookups prefer a live sibling.
+func isClosedStatus(s PlanStatus) bool {
+	switch s {
+	case PlanStatusSuperseded, PlanStatusAbandoned, PlanStatusRealized:
+		return true
+	}
+	return false
+}
+
+// liveDirNamed resolves name as the exact directory name of a saved plan that is
+// still open to revision. found=false means no directory carries that name, so
+// the caller treats name as an ordinary slug. A directory that exists but is
+// closed (superseded, abandoned, realized) is an error: falling through would
+// mint a new plan whose slug begins with the closed plan's date.
+func liveDirNamed(plansDir, name string) (dir string, prior Meta, found bool, err error) {
+	if plansDir == "" || name == "" || name != filepath.Base(name) || name == "." || name == ".." {
+		return "", Meta{}, false, nil
+	}
+	candidate := filepath.Join(plansDir, name)
+	m, merr := readMeta(candidate)
+	if merr != nil {
+		if errors.Is(merr, fs.ErrNotExist) {
+			return "", Meta{}, false, nil // not a saved plan directory
+		}
+		// a named plan whose meta.json cannot be read or parsed is not "no match":
+		// falling through would mint a dated duplicate of a plan we failed to open
+		return "", Meta{}, false, fmt.Errorf("plan directory %q has an unreadable meta.json: %w", name, merr)
+	}
+	if isClosedStatus(CurrentStatus(candidate)) {
+		return "", Meta{}, false, fmt.Errorf("plan directory %q is %s, not open to revision; save under a new --slug", name, CurrentStatus(candidate))
+	}
+	return candidate, m, true, nil
+}
+
+// livePlanDirsForSlug lists every saved plan dir named by slug (meta.json slug
+// or the dir's trailing slug segment) whose current status is still open to
+// revision. Fail-open: an unreadable plans dir yields no matches, which makes
+// the save a first save under a fresh dated dir — never an overwrite.
+func livePlanDirsForSlug(plansDir, slug string) []string {
+	if plansDir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(plansDir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(plansDir, e.Name())
+		m, merr := readMeta(dir)
+		if merr != nil {
+			continue // a dir without meta.json is not a saved plan
+		}
+		if m.Slug != slug && slugFromDirName(e.Name()) != slug {
+			continue
+		}
+		if isClosedStatus(CurrentStatus(dir)) {
+			continue
+		}
+		out = append(out, dir)
+	}
+	return out
 }
 
 // List enumerates captured plans under <ledger>/data/plans/, parsing each
@@ -539,22 +895,6 @@ func MutatePlanMeta(ctx context.Context, planDir string, mutate func(*Meta) (*Me
 	})
 }
 
-// SetStatus updates a saved plan's lifecycle status (by slug) under the meta
-// flock. No-op if the plan dir has no meta.json. Use the PlanStatus* constants.
-func SetStatus(gitRoot, slug string, status PlanStatus) error {
-	dir, err := resolvePlanDirForSlug(gitRoot, slug)
-	if err != nil {
-		return err
-	}
-	return MutatePlanMeta(context.Background(), dir, func(m *Meta) (*Meta, error) {
-		if m == nil {
-			return nil, nil
-		}
-		m.Status = status
-		return m, nil
-	})
-}
-
 // SetSessionOutcome reconciles the producing session's lifecycle onto the plan
 // (by slug) under the meta flock — written only by session-stop / `ox doctor`,
 // never by Save. Use the SessionOutcome* constants. No-op if no meta.json.
@@ -575,10 +915,10 @@ func SetSessionOutcome(gitRoot, slug, outcome string) error {
 	})
 }
 
-// ReconcileSessionOutcome backfills the producing session's canonical id and
-// final outcome onto a plan (by slug) at session-stop, where both are known.
-// sessionID is the ses_<UUIDv7> minted at stop (skipped when ""); outcome is a
-// SessionOutcome* constant. Single flocked write so it can't race a re-save.
+// ReconcileSessionOutcome records the producing session's id and final outcome
+// in a plan's meta.json (by slug) at session-stop. sessionID is the session's
+// ses_<UUIDv7> (skipped when ""); outcome is a SessionOutcome* constant.
+// Single flocked write so it can't race a re-save.
 func ReconcileSessionOutcome(gitRoot, slug, sessionID, outcome string) error {
 	dir, err := resolvePlanDirForSlug(gitRoot, slug)
 	if err != nil {
@@ -755,14 +1095,24 @@ func planInfoFrom(dir, dirName string, meta Meta) PlanInfo {
 		slug = slugFromDirName(dirName)
 	}
 	_, _, _, hasHTML := PlanHTMLPath(dir)
+	// One events.jsonl read serves both the id and the status; CurrentStatus
+	// would re-read it, which is O(plans) extra file reads per `ox plan list`.
+	status := meta.Status
+	var planID string
+	if events, err := LoadEvents(dir); err == nil && len(events) > 0 {
+		folded := Fold(events)
+		status, planID = folded.Status, folded.PlanID
+	}
 	return PlanInfo{
+		PlanID:    planID,
 		Slug:      slug,
 		Topic:     meta.Topic,
 		Dir:       dir,
 		CreatedAt: meta.CreatedAt,
 		Authors:   meta.Authors,
 		HasHTML:   hasHTML,
-		Status:    CurrentStatus(dir),
+		Status:    status,
+		Kind:      KindOrDefault(meta.Kind),
 	}
 }
 
@@ -784,20 +1134,42 @@ func resolvePlanDir(plansDir, slug string) (string, string, error) {
 		return "", "", fmt.Errorf("read plans dir=%s: %w", plansDir, err)
 	}
 
+	var matches []string
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
-		dir := filepath.Join(plansDir, name)
 		if slugFromDirName(name) == slug {
-			return dir, name, nil
+			matches = append(matches, name)
+			continue
 		}
-		if meta, err := readMeta(dir); err == nil && meta.Slug == slug {
-			return dir, name, nil
+		if meta, err := readMeta(filepath.Join(plansDir, name)); err == nil && meta.Slug == slug {
+			matches = append(matches, name)
 		}
 	}
-	return "", "", fmt.Errorf("plan %q not found", slug)
+	switch len(matches) {
+	case 0:
+		return "", "", fmt.Errorf("plan %q not found", slug)
+	case 1:
+		return filepath.Join(plansDir, matches[0]), matches[0], nil
+	}
+	// Several dirs share the slug. The normal supersede-then-resave flow leaves
+	// exactly this shape (closed old plan + live new one), and save already
+	// resolves to the live one — so lookups do too. Only a genuine tie among
+	// live plans (or among closed ones) is refused; the full directory name
+	// still addresses any of them.
+	var live []string
+	for _, name := range matches {
+		if !isClosedStatus(CurrentStatus(filepath.Join(plansDir, name))) {
+			live = append(live, name)
+		}
+	}
+	if len(live) == 1 {
+		return filepath.Join(plansDir, live[0]), live[0], nil
+	}
+	sort.Strings(matches)
+	return "", "", &AmbiguousSlugError{Slug: slug, Candidates: matches}
 }
 
 // datedDirRe matches the YYYY-MM-DD- prefix of a plan directory name.

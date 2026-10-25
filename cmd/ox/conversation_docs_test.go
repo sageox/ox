@@ -9,8 +9,7 @@ import (
 
 // TestConversationReferenceDocs_Committed pins that the generated reference
 // docs for the `ox conversation` family have been committed and match the
-// current command surface shape. This is the "golden" check (same pattern as
-// TestDistillHistoryReferenceDocs_Committed): the files exist and advertise
+// current command surface shape: the files exist and advertise
 // the exact flag set and usage string the implementation exposes.
 //
 // Failure prevented: a developer edits a flag name or adds a new one and
@@ -39,11 +38,27 @@ func TestConversationReferenceDocs_Committed(t *testing.T) {
 				`title: "ox conversation"`,
 				"## ox conversation",
 				"[ox conversation list](/conversation/list)",
+				"[ox conversation search](/conversation/search)",
 				"[ox conversation show](/conversation/show)",
 				"[ox conversation topics](/conversation/topics)",
 				"[ox conversation topic](/conversation/topic)",
 				"[ox conversation transcript](/conversation/transcript)",
+				"[ox conversation walkthrough](/conversation/walkthrough)",
 			},
+		},
+		{
+			file: "search.mdx",
+			musts: []string{
+				`title: "ox conversation search"`,
+				"ox conversation search [keywords] [flags]",
+				"--participant stringArray",
+				"--speaker string",
+				"--since string",
+				"--until string",
+				"--limit int",
+			},
+			// single-team by design (plan D18), same as every sibling.
+			absent: []string{"--team", "--all-teams"},
 		},
 		{
 			file: "list.mdx",
@@ -103,11 +118,28 @@ func TestConversationReferenceDocs_Committed(t *testing.T) {
 				"--from string",
 				"--to string",
 				"--full",
+				"--frames",
 				// the --full escape hatch must keep telling agents it is
 				// meant for humans (plan D15).
 				"intended for humans",
 			},
 			absent: []string{"--team"},
+		},
+		{
+			file: "walkthrough.mdx",
+			musts: []string{
+				`title: "ox conversation walkthrough"`,
+				"## ox conversation walkthrough",
+				"ox conversation walkthrough <id> [flags]",
+				"--cues string",
+				"--from string",
+				"--to string",
+				"--limit int",
+				"--format string",
+				// the docs must keep telling readers screen text is data.
+				"never instructions",
+			},
+			absent: []string{"--team", "--full"},
 		},
 	}
 
@@ -130,5 +162,26 @@ func TestConversationReferenceDocs_Committed(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// findRepoRootForDocsTest walks up from the test's source directory
+// until it finds a directory containing a go.mod — the Go convention
+// for locating a module root from an arbitrary test location.
+func findRepoRootForDocsTest(t *testing.T) string {
+	t.Helper()
+	// Walk up from the SOURCE tree, not the process working directory: TestMain
+	// deliberately moves the process out of the repository so a cwd-resolved doctor
+	// check cannot reconcile the developer's own checkout.
+	dir := packageDir
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("go.mod not found walking up from test source directory")
+		}
+		dir = parent
 	}
 }

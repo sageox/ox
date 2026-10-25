@@ -36,7 +36,7 @@ func dehydratedLedger(t *testing.T, name string) (ledgerPath, sessionDir string)
 func writeStubbedSession(t *testing.T, sessionDir, name string, meta *lfs.SessionMeta) {
 	t.Helper()
 	require.NoError(t, lfs.WritePointerFile(filepath.Join(sessionDir, "raw.jsonl"),
-		lfs.FileRef{OID: "sha256:abc123", Size: 4242}))
+		lfs.AssertUploaded(lfs.FileRef{OID: "sha256:abc123", Size: 4242})))
 	if meta == nil {
 		meta = lfs.NewSessionMeta(name, "testuser", "a1", "claude-code", time.Now().UTC()).Build()
 	}

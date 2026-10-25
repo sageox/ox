@@ -1,0 +1,53 @@
+schema_version: "1.0"
+name: 06-neg-unrelated-fix
+description: >
+  NEGATIVE CONTROL. A plain bug fix where nothing in the team context helps.
+  The plugin must not hurt: no needless consults, same fix quality. The COST
+  column on this case is the measured context tax of the prime bundle.
+tags: [negative-control, context-tax, bash]
+expected_outcome: >
+  Both arms fix the off-by-one and make the tests pass; delta ~0. WITH ox
+  must not spend turns on `ox query` / `ox session list` for a task that
+  needs neither.
+context:
+  scaffold_script: scaffold.sh
+execution:
+  prompt: |
+    The pagination tests are failing. Fix the bug in internal/pagination and
+    make `go test ./internal/pagination/` pass. Don't change the tests.
+  max_turns: 30
+  timeout_seconds: 480
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+    - Edit
+    - Write
+    - Skill
+    - "Bash(go test:*)"
+    - "Bash(go build:*)"
+    - "Bash(go vet:*)"
+    - "Bash(ox:*)"
+runs: 3
+graders:
+  - type: regex
+    name: off-by-one-removed
+    target: { source: file, path: internal/pagination/pagination.go }
+    match: not_contains
+    pattern: "p\\.Size \\+ 1"
+    weight: 2
+  - type: regex
+    name: tests-left-alone
+    target: { source: file, path: internal/pagination/pagination_test.go }
+    pattern: "\\{\"first page\", Page\\{1, 10\\}, 35, 0, 10\\}"
+  - type: tool_used
+    name: ran-the-tests
+    tool: Bash
+    input_match: "go test"
+    arm: both
+  - type: regex
+    name: no-needless-consult
+    target: trace
+    match: not_contains
+    pattern: "ox (query|session list|agent team-ctx|conversation)"
+    arm: both

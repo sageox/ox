@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sageox.ai/schemas/attest/v1/lifecycle.schema.json",
+  "title": "SageOx Attest lifecycle record",
+  "oneOf": [
+    {"$ref": "#/$defs/active"},
+    {"$ref": "#/$defs/deleted"}
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["manifest_sha256", "archive_sha256", "archive_size_bytes"],
+      "properties": {
+        "manifest_sha256": {"$ref": "#/$defs/sha256"}, "archive_sha256": {"$ref": "#/$defs/sha256"},
+        "archive_size_bytes": {"type": "integer", "minimum": 1, "maximum": 4294967296}
+      }
+    },
+    "sourceReference": {
+      "type": "object", "additionalProperties": false, "required": ["key", "sha256", "size_bytes"],
+      "properties": {"key": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/sha256"}, "size_bytes": {"type": "integer", "minimum": 0}}
+    },
+    "published": {
+      "type": "object", "additionalProperties": false,
+      "required": ["manifest", "run", "observations", "published_at", "evidence_expires_at"],
+      "properties": {
+        "manifest": {"$ref": "#/$defs/sourceReference"}, "run": {"$ref": "#/$defs/sourceReference"},
+        "observations": {"$ref": "#/$defs/sourceReference"}, "published_at": {"$ref": "#/$defs/timestamp"},
+        "evidence_expires_at": {"$ref": "#/$defs/timestamp"}
+      }
+    },
+    "rejection": {
+      "type": "object", "additionalProperties": false, "required": ["code", "message"],
+      "properties": {"code": {"type": "string", "minLength": 1, "maxLength": 128}, "message": {"type": "string", "minLength": 1, "maxLength": 4096}}
+    },
+    "active": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "state", "repo_id", "run_id", "source_identity", "source_run_id", "corpus_key", "creator_principal_kind", "creator_principal_id", "binding", "upload_key", "intent_expires_at"],
+      "properties": {
+        "version": {"const": "1"}, "state": {"enum": ["uploading", "processing", "published", "rejected"]},
+        "repo_id": {"type": "string", "pattern": "^repo_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}, "run_id": {"type": "string", "pattern": "^bdd_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+        "source_identity": {"$ref": "#/$defs/sha256"}, "source_run_id": {"type": "string", "minLength": 1},
+        "corpus_key": {"type": "string", "minLength": 1}, "creator_principal_kind": {"enum": ["human", "team_token"]},
+        "creator_principal_id": {"type": "string", "minLength": 1}, "binding": {"$ref": "#/$defs/binding"},
+        "upload_key": {"type": "string", "minLength": 1}, "upload_version_id": {"type": "string", "minLength": 1},
+        "upload_etag": {"type": "string", "minLength": 1}, "intent_expires_at": {"$ref": "#/$defs/timestamp"},
+        "upload_cutoff_at": {"$ref": "#/$defs/timestamp"}, "processing_deadline_at": {"$ref": "#/$defs/timestamp"},
+        "published": {"$ref": "#/$defs/published"}, "rejected": {"$ref": "#/$defs/rejection"}, "rejected_at": {"$ref": "#/$defs/timestamp"}
+      },
+      "allOf": [
+        {"if": {"properties": {"state": {"const": "uploading"}}, "required": ["state"]}, "then": {"not": {"anyOf": [{"required": ["published"]}, {"required": ["rejected"]}, {"required": ["rejected_at"]}, {"required": ["processing_deadline_at"]}]}}},
+        {"if": {"properties": {"state": {"const": "processing"}}, "required": ["state"]}, "then": {"required": ["processing_deadline_at"], "not": {"anyOf": [{"required": ["published"]}, {"required": ["rejected"]}, {"required": ["rejected_at"]}]}}},
+        {"if": {"properties": {"state": {"const": "published"}}, "required": ["state"]}, "then": {"required": ["published"], "not": {"anyOf": [{"required": ["rejected"]}, {"required": ["rejected_at"]}]}}},
+        {"if": {"properties": {"state": {"const": "rejected"}}, "required": ["state"]}, "then": {"required": ["rejected", "rejected_at"], "not": {"required": ["published"]}}}
+      ]
+    },
+    "deleted": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "state", "repo_id", "run_id", "source_identity", "deleted_at"],
+      "properties": {
+        "version": {"const": "1"}, "state": {"const": "deleted"}, "repo_id": {"type": "string", "pattern": "^repo_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+        "run_id": {"type": "string", "pattern": "^bdd_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}, "source_identity": {"$ref": "#/$defs/sha256"},
+        "upload_cutoff_at": {"$ref": "#/$defs/timestamp"}, "deleted_at": {"$ref": "#/$defs/timestamp"}
+      }
+    }
+  }
+}

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/vtt"
 	"github.com/sageox/ox/pkg/discussion"
@@ -28,6 +31,10 @@ With a team slug: outputs that specific team's context.
 
 Lists the 15 most recent discussion files (read them for full detail),
 then outputs the distilled summary from agent-context/distilled-discussions.md.
+
+Requires ` + "`ox login`" + ` and membership in the team (confirmed with SageOx
+at most once an hour; offline, a confirmation from the last hour still
+counts). Signed out or outside the team, nothing is printed.
 
 Output includes a content hash (team-ctx:<hash>) - if this marker is already
 in your context, you don't need to re-run this command.
@@ -56,6 +63,18 @@ func runAgentTeamCtx(cmd *cobra.Command, args []string) error {
 		if tc == nil {
 			return fmt.Errorf("no team context configured for this project")
 		}
+	}
+
+	// Same gate as ox conversation: the checkout on disk is not proof the
+	// person running ox may read it. Refuse before listing a single file.
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if accessErr := teamAccessGate(ctx, projectRoot, tc); accessErr != nil {
+		msg := fmt.Sprintf("%s: %s", accessErr.Code, accessErr.Message)
+		fmt.Fprintf(cmd.ErrOrStderr(), "%s %s\n", cli.StyleError.Render("Error:"), msg)
+		return &commandExitError{ExitCode: 1, Message: msg}
 	}
 
 	cw := agentinstance.NewCountingWriter(cmd.OutOrStdout())
@@ -200,4 +219,38 @@ func outputDistilledContext(out io.Writer, path string) bool {
 	fmt.Fprint(out, string(content))
 
 	return true
+}
+
+// discussionMetadata matches the metadata.json schema in discussion dirs.
+type discussionMetadata struct {
+	RecordingID string `json:"recording_id"`
+	Title       string `json:"title"`
+	CreatedAt   string `json:"created_at"` // RFC3339
+	UserID      string `json:"user_id"`
+}
+
+// loadDiscussionMetadata reads and parses metadata.json from a discussion dir.
+func loadDiscussionMetadata(dirPath string) (*discussionMetadata, error) {
+	data, err := os.ReadFile(filepath.Join(dirPath, "metadata.json"))
+	if err != nil {
+		return nil, fmt.Errorf("read metadata.json: %w", err)
+	}
+	var meta discussionMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, fmt.Errorf("parse metadata.json: %w", err)
+	}
+	if meta.Title == "" {
+		return nil, fmt.Errorf("metadata.json missing title")
+	}
+	return &meta, nil
+}
+
+// DiscussionIndexEntry holds data for one line in the per-discussion index.
+type DiscussionIndexEntry struct {
+	DirName      string
+	Title        string
+	Date         string   // YYYY-MM-DD
+	VisualTypes  []string // content types from keyframes
+	HasSummary   bool     // server-generated summary.json exists
+	Participants []string // unique speaker names from transcript
 }

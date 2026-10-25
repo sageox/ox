@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -440,6 +441,9 @@ func isGCStagingPath(p string) bool {
 		return false
 	}
 	base := filepath.Base(p)
+	if paths.IsHiddenTeamsEntry(base) && strings.Contains(base, ".tmp-") {
+		return true // team-context clone staging, see teamCloneTempPath
+	}
 	switch {
 	case strings.HasSuffix(base, ".new"),
 		strings.HasSuffix(base, ".old"),
@@ -584,6 +588,21 @@ func (r *WorkspaceRegistry) UpdateLastGC(id string) {
 	}
 
 	if err := config.SaveLocalConfig(r.projectRoot, r.localConfigCache); err != nil {
+		// An uninitialized project root has no .sageox/ to write into, so there
+		// is nothing to persist and nothing wrong. Warning here put a line in
+		// the daemon log once per workspace per GC cycle telling the daemon to
+		// run `ox init` — an instruction the process reading it can never act
+		// on, and invisible to users besides, since neither `ox status` nor
+		// `ox doctor` surfaces daemon logs.
+		//
+		// Keyed off the sentinel rather than a pre-check: SaveLocalConfig's
+		// precondition is only "a .sageox/ directory exists", which is weaker
+		// than config.IsInitialized, and guarding with the stricter predicate
+		// silently skipped persists that would have succeeded.
+		if errors.Is(err, config.ErrProjectNotInitialized) {
+			slog.Debug("skipping last_gc persist: project not initialized", "id", id, "project_root", r.projectRoot)
+			return
+		}
 		slog.Warn("failed to persist last_gc to config.local.toml", "id", id, "error", err)
 	}
 }
@@ -642,6 +661,9 @@ func (r *WorkspaceRegistry) UpdateConfigLastSync(id string) error {
 	case WorkspaceTypeLedger:
 		r.localConfigCache.UpdateLedgerLastSync()
 	case WorkspaceTypeTeamContext:
+		// No-op for an API-discovered team, which has no config entry — by
+		// design, see the note on UpdateTeamContextLastSync. Its last-sync
+		// time lives in the checkout's sync-state.json.
 		r.localConfigCache.UpdateTeamContextLastSync(ws.TeamID)
 	}
 
@@ -694,13 +716,15 @@ func (r *WorkspaceRegistry) GetLedgerPath() string {
 // GetTeamContextStatus returns team context status in the legacy format.
 // This provides backward compatibility with existing status display code.
 func (r *WorkspaceRegistry) GetTeamContextStatus() []TeamContextSyncStatus {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	var result []TeamContextSyncStatus
-	for _, ws := range r.workspaces {
+	for _, ws := range r.GetAllWorkspaces() {
 		if ws.Type != WorkspaceTypeTeamContext {
 			continue
+		}
+		// Read the shared owner's progress without changing registry/config
+		// state or holding the registry lock during disk reads.
+		if state := LoadSyncState(ws.Path); state.LastSync.After(ws.ConfigLastSync) {
+			ws.ConfigLastSync = state.LastSync
 		}
 		result = append(result, TeamContextSyncStatus{
 			TeamID:   ws.TeamID,
@@ -1118,13 +1142,18 @@ func isCheckoutClean(path string) bool {
 }
 
 // isPartialClone returns true if a git repo was cloned with --filter (partial clone).
-// Checks for extensions.partialClone in git config, which git sets automatically
-// when --filter is used during clone.
+//
+// Delegates to gitutil.InspectRepo, which reads the promisor-remote signal
+// (`remote.<name>.promisor`) and only falls back to `extensions.partialClone`.
+// This previously checked `extensions.partialClone` alone — git 2.50 does not
+// set that key for `clone --filter`, it sets remote.origin.promisor, so the
+// check returned false for every ox clone. checkAndRunGC treats "not partial"
+// as a full-clone upgrade trigger that bypasses the GC interval, so every team
+// context was being re-cloned on each hourly GC cycle, in every daemon.
 func isPartialClone(path string) bool {
-	cmd := exec.Command("git", "-C", path, "config", "--get", "extensions.partialClone")
-	output, err := cmd.Output()
+	state, err := gitutil.InspectRepo(path)
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(string(output)) != ""
+	return state.Partial
 }

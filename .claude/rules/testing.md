@@ -15,8 +15,12 @@ paths:
 | Fast (<500ms) | `make test` | Every commit. Target: <30s |
 | Full (expensive) | `make test-all` | Before PRs. Includes git clone, SQLite concurrent, LFS pointer verification |
 | Slow (real binary) | `make test-slow` | Build tag: `slow`. No agent needed |
-| Integration (real sessions) | `make test-integration` | Release gate. Lives in `sageox/ox-test-harness` |
+| Acceptance (compiled binary) | `make test-acceptance` | Deterministic PR/release gate |
+| Digital twins | `make test-digital-twin` | Hermetic auth, ledger, and KB PR/release gate |
+| Integration (real sessions) | `make test-integration` | External compatibility evidence; attested gating tracked by `ox-ilrr.4` |
+| Release | `make test-release` | Enforceable in-repo full + ratchet + slow + acceptance + twin gate |
 | Pre-PR gate | `make test-preflight` | lint + full + slow (~3-5min) |
+| Eval (agent behavior) | `make eval` / `make eval-smoke` | Opt-in, paid. Same task WITH vs WITHOUT the ox plugin, scored, reported as Δ. See `docs/specs/agent-evals.md` |
 
 **Output:** Makefile is quiet by default. Use `V=1 make test` for verbose.
 
@@ -32,6 +36,8 @@ if testing.Short() {
 ## Core Principles
 
 **No test theater.** Each test must answer: "What real-world failure does this prevent?"
+
+**Delivery is not uptake.** A test that proves ox emitted context (prime XML, a ledger commit, a whisper) does not prove the model used it. That claim is only provable by running the model with and without ox — the eval tier (`docs/specs/agent-evals.md`). Do not report an agent-facing feature as covered on delivery tests alone.
 
 **Test intent, not implementation.** Write the assertion first based on the requirement, then build the scenario. If a test would pass even with broken code, it's not testing anything.
 
@@ -63,6 +69,71 @@ time.Sleep(100 * time.Millisecond)
 ```
 
 **Test graceful defaults before initialization.** Stats(), Status() etc. must return clean zero-values before the subsystem has run.
+
+## Failure Paths That Render Identically To Success
+
+**The shape:** a fault and a healthy state produce the same value, so nothing
+announces itself. The test passes, the check reports clean, the guard does not
+fire — and none of it is evidence, because the failing path and the working path
+are indistinguishable at the point you are looking.
+
+Six instances landed on one branch in one afternoon. The individual fixes do not
+teach the pattern, so it is written down here.
+
+| Mechanism | Renders as | Real consequence |
+|---|---|---|
+| `os.Chmod(0o000)` on Windows | unreadable file → readable | `require.Error` fails; the test asserted nothing |
+| `os.Symlink` skip-then-`Fatalf` | isolation absent → isolation present | the test fails instead of skipping, on the one platform it was not written for |
+| `PATH` joined with `":"` on Windows | fake binary unreachable → fake installed | the REAL `git credential reject` ran against a live credential store |
+| `filepath.IsAbs("/etc/x")` on Windows | rejected path → accepted | a trust boundary strictly weaker on one platform |
+| write failure reported as neither written nor unprotected | "nothing to protect" | `Apply`'s gate never fired; vendor files materialized visible to git |
+| `git ls-files` error read as empty | unreadable repo → clean repo | doctor reported "no ox-managed files tracked" for a repo it could not read |
+
+### The rules
+
+1. **A test that isolates itself with a platform-specific mechanism must either
+   skip explicitly where the mechanism does not hold, with a comment saying why,
+   or assert the isolation rather than assume it.** `os.Chmod`, `os.Symlink`,
+   `PATH` manipulation, path-absoluteness, process signals, and file permissions
+   are all in this class.
+
+2. **Prefer an honest skip to a port nobody can exercise.** A port written blind
+   for a platform the author cannot run is how the next fail-open is authored.
+
+3. **Never make an error mean the same thing as an empty success.** Distinguish
+   "there is nothing here" from "I could not look". If a lookup fails, say so;
+   returning an empty list makes the caller act on a false premise.
+
+4. **Fix the product, not the test.** When a test catches a platform-specific
+   weakness, the tempting repair is to make the test match the platform. That
+   turns the job green and leaves the hole open. `/etc/skills` stayed in the
+   refuse set; the guard was hardened instead.
+
+### Portable failure injection
+
+`os.Chmod` no-ops on Windows and `os.Symlink` needs privileges there. When a test
+needs a read or write to fail, use a shape that fails on every platform:
+
+- a **directory where a file is expected** — `ReadFile`/`WriteFile` fail (`EISDIR`)
+- a **regular file where a directory component is needed** — `MkdirAll` fails (`ENOTDIR`)
+- **corrupt bytes** where a parser expects structure — e.g. a garbage `.git/index`
+
+These are also realistic: a bad merge, an interrupted extraction, or a stray
+`mkdir` all produce them.
+
+**Confirm which gate you actually hit.** The lever trips whichever check reads the
+path first. Making `.git/info/sparse-checkout` a directory fails an *earlier*
+readability check and never reaches the repair branch you meant to cover. A
+passing test is not evidence you reached the branch you named.
+
+### Verify a red result, not only a green one
+
+A red-first proof is the cheapest way to find out which branch a test actually
+reaches — twice on this branch it exposed a test that passed while exercising
+nothing. But a red result needs its mechanism checked too: an assertion capturing
+**stdout** went red against a warning that `cli.PrintWarning` writes to **stderr**,
+which reads exactly like "the code stayed silent." Trusting that red would have
+meant "fixing" a bug that did not exist.
 
 ## Anti-Patterns
 

@@ -743,3 +743,44 @@ func readFileStr(t *testing.T, path string) string {
 	require.NoError(t, err, "failed to read %s", path)
 	return string(data)
 }
+
+// TestEnsureInstructionFileMarker_RefreshesStalePlaintextBody verifies that an existing
+// plaintext instruction file (.cursorrules / .windsurfrules / .clinerules) carrying the OLD
+// imperative "# BLOCKING … NOW" body is migrated to the softened wording in place — the
+// injector previously no-op'd whenever both markers were present, so existing files kept the
+// old wording forever (#809). User content and file mode are preserved.
+func TestEnsureInstructionFileMarker_RefreshesStalePlaintextBody(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, ".cursorrules")
+	stale := PlaintextPrimeCheckMarker + "\n# BLOCKING: Run `ox agent prime` NOW before ANY other action.\n\n# my rules\nfoo\n\n" + PlaintextPrimeLine + "\n"
+	require.NoError(t, os.WriteFile(p, []byte(stale), 0o600))
+
+	status, err := ensureInstructionFileMarker(p, markerFormatPlaintext, true)
+	require.NoError(t, err)
+	assert.Equal(t, injectedUpdate, status)
+
+	s := readFileStr(t, p)
+	assert.NotContains(t, s, "# BLOCKING: Run", "stale plaintext body must be refreshed")
+	assert.Contains(t, s, currentPlaintextPrimeCheckBody(), "current plaintext body must be present")
+	assert.Contains(t, s, "# my rules", "user content must be preserved")
+	info, _ := os.Stat(p)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "mode must not be broadened")
+}
+
+// TestEnsureInstructionFileMarker_PlaintextAnchoredToMarker verifies the plaintext refresh is
+// marker-anchored: a legacy body quoted in user prose (not immediately after the marker) is
+// NOT rewritten, and a file whose header is already current is a byte-identical no-op.
+// Failure prevented: an unanchored replace mangles a user's own notes (#809 review B1, plaintext).
+func TestEnsureInstructionFileMarker_PlaintextAnchoredToMarker(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, ".cursorrules")
+	content := PlaintextPrimeCheckMarker + "\n" + currentPlaintextPrimeCheckBody() + "\n\n" +
+		"# note: old ox said '# BLOCKING: Run `ox agent prime` NOW before ANY other action.'\n\n" +
+		PlaintextPrimeLine + "\n"
+	require.NoError(t, os.WriteFile(p, []byte(content), 0o644))
+
+	status, err := ensureInstructionFileMarker(p, markerFormatPlaintext, true)
+	require.NoError(t, err)
+	assert.Equal(t, alreadyPresent, status, "current body + prose quote must not trigger a rewrite")
+	assert.Equal(t, content, readFileStr(t, p), "file must be byte-identical — user prose untouched")
+}

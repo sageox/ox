@@ -2,6 +2,7 @@ package teamdocs
 
 import (
 	"bufio"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -15,7 +16,8 @@ import (
 // Team rules apply to every supported AI coding agent (Claude, Codex, Amp,
 // Cursor, etc.) used by teammates running ox. They are the team-scope cousin
 // of Claude's .claude/rules/<topic>.md — modular, one concern per file, and
-// loaded into agent context via ox agent prime.
+// delivered through one adapter-selected path: an ignored native projection
+// where the agent can preserve the rule's semantics, otherwise ox agent prime.
 //
 // Subdirectories under agents/rules/ are walked recursively. The relative
 // path is preserved so organization (e.g., backend/postgres.md) stays
@@ -26,6 +28,7 @@ type TeamRule struct {
 	RelPath         string   `json:"rel_path"`                   // path relative to rules root (e.g., "backend/postgres.md")
 	AbsPath         string   `json:"abs_path"`                   // absolute path on disk
 	Repos           []string `json:"repos,omitempty"`            // repo filter; empty = all team repos
+	Globs           []string `json:"globs,omitempty"`            // path scope; empty = applies to any file
 	Audience        string   `json:"audience,omitempty"`         // "ai" | "human" | "both" (default: "ai")
 	Visibility      string   `json:"visibility"`                 // "always" | "indexed" | "hidden"
 	Status          string   `json:"status,omitempty"`           // "active" | "draft" | "superseded-by:<other>"
@@ -60,6 +63,11 @@ const DefaultRuleAudience = RuleAudienceAI
 // to think about cost.
 const DefaultRuleVisibility = VisibilityIndexed
 
+// RuleRoots are the canonical and legacy Team Context rule locations. Every
+// discovery and blindness check shares this list so one can never walk a root
+// the other silently ignores.
+var RuleRoots = []string{"agents/rules", "coworkers/rules"}
+
 // DiscoverRules walks the team context for behavioral rule files under
 // agents/rules/**/*.md (preferred) and coworkers/rules/**/*.md (legacy
 // fallback for any teams that adopted that location early). Subdirectories
@@ -80,58 +88,57 @@ const DefaultRuleVisibility = VisibilityIndexed
 //
 // Results are sorted by RelPath for stable output.
 //
-// TODO(sync-out): A future daemon-driven optimization could sync filtered,
-// repo-scoped team rules OUT of team context and into each cloned repo's
-// agent-native rules directory (e.g., .claude/sageox-team-<slug>/rules/
-// for Claude, .cursor/rules/sageox-team-<slug>/ for Cursor). That would
-// let team rules participate in the agent's NATIVE rule-loading machinery
-// (Claude's `paths:`-scoped lazy loading, Cursor's `globs:` matching,
-// etc.) instead of being delivered up front via prime XML.
-//
-// Implementation considerations when picking this up:
-//
-//  1. Adapter dispatch — each agent has its own rules dir convention.
-//     The pkg/adapterprotocol RulesParams + handleInstallRules pattern
-//     already abstracts this (cmd/ox-adapter-claude-code/rules.go is the
-//     reference implementation). Sync-out would extend the rule file
-//     list passed to handleInstallRules with discovered team rules.
-//
-//  2. Namespace — write to a sageox-team-<slug>/ subdirectory under the
-//     agent's rules dir, never directly into .claude/rules/ root, to
-//     avoid colliding with project-local rules of the same name and to
-//     make cleanup unambiguous.
-//
-//  3. Lifecycle — daemon writes on team-context sync (after pull), and
-//     on repo-open. Daemon removes files for rules that disappear from
-//     team context (true mirror, not append-only). At prime time the
-//     sync state is read-only.
-//
-//  4. Filtering — apply the same repos:/audience:/status: filters here
-//     that DiscoverRules already applies, so a teammate working in
-//     repo A doesn't get repo B's rules synced into their working tree.
-//
-//  5. Multi-adapter coverage — today only ox-adapter-claude-code and
-//     ox-adapter-droid implement handleInstallRules. Other adapters
-//     (codex, amp, aider, gemini, opencode, pi) need rules.go before
-//     they can participate. Tracking the gap is the prerequisite for
-//     a uniform sync-out story.
-//
-//  6. Per-user knowledge bubble — when the user-context bubble lands,
-//     sync-out for user rules has the same shape but reads from the
-//     user-context location and tags entries with audience: ai,
-//     source: user (so the budget accounting in agent_prime_xml.go
-//     attributes them correctly to BudgetSourceUser).
-//
-// Not implemented yet; this comment IS the design memo until someone
-// picks up the work.
+// Native projection is a derived cache, never the source of truth. The
+// teamrules package owns its reserved *-team namespace and retires
+// projections when a rule is removed or filtered out. Prime suppresses only
+// the active agent's existing projection, preserving exactly-one delivery.
 func DiscoverRules(teamPath, repoSlug string) ([]TeamRule, error) {
+	published, err := PublishedRules(teamPath)
+	if err != nil {
+		return nil, err
+	}
+
+	rules := published[:0]
+	for _, r := range published {
+		if RuleAppliesToRepo(r, repoSlug) {
+			rules = append(rules, r)
+		}
+	}
+
+	// load body + estimate tokens for visibility: always
+	for i := range rules {
+		if rules[i].Visibility != VisibilityAlways {
+			continue
+		}
+		body, err := readRuleBody(rules[i].AbsPath)
+		if err != nil {
+			// missing or unreadable bodies are skipped silently — prime
+			// must never fail because a single rule file is malformed
+			continue
+		}
+		rules[i].Body = body
+		rules[i].EstimatedTokens = estimateTokens(body)
+	}
+
+	return rules, nil
+}
+
+// PublishedRules returns every rule the team publishes to AI coworkers, before
+// the per-repo `repos:` filter is applied and without loading bodies.
+//
+// Split out from DiscoverRules for the same reason PublishedSkills was: a
+// human asking "which repos does this rule reach?" needs the list BEFORE the
+// filter has removed the answer. The audience/visibility/status filters are not
+// repo-specific and stay here — a draft or human-only rule is not published
+// anywhere, so listing it as "available elsewhere" would be wrong too.
+func PublishedRules(teamPath string) ([]TeamRule, error) {
 	if teamPath == "" {
 		return nil, nil
 	}
 
 	var rules []TeamRule
 
-	for _, rulesRoot := range []string{"agents/rules", "coworkers/rules"} {
+	for _, rulesRoot := range RuleRoots {
 		root := filepath.Join(teamPath, rulesRoot)
 		discovered, err := walkRulesDir(root)
 		if err != nil {
@@ -152,7 +159,7 @@ func DiscoverRules(teamPath, repoSlug string) ([]TeamRule, error) {
 	}
 	rules = deduped
 
-	// filter by audience, status, visibility, and repos
+	// filter by audience, status, and visibility — never by repo
 	filtered := rules[:0]
 	for _, r := range rules {
 		if r.Audience == RuleAudienceHuman {
@@ -167,33 +174,28 @@ func DiscoverRules(teamPath, repoSlug string) ([]TeamRule, error) {
 		if strings.HasPrefix(r.Status, RuleStatusSupersededPrefix) {
 			continue
 		}
-		if !ruleAppliesToRepo(r, repoSlug) {
-			continue
-		}
 		filtered = append(filtered, r)
 	}
 	rules = filtered
-
-	// load body + estimate tokens for visibility: always
-	for i := range rules {
-		if rules[i].Visibility != VisibilityAlways {
-			continue
-		}
-		body, err := readRuleBody(rules[i].AbsPath)
-		if err != nil {
-			// missing or unreadable bodies are skipped silently — prime
-			// must never fail because a single rule file is malformed
-			continue
-		}
-		rules[i].Body = body
-		rules[i].EstimatedTokens = estimateTokens(body)
-	}
 
 	sort.Slice(rules, func(i, j int) bool {
 		return rules[i].RelPath < rules[j].RelPath
 	})
 
 	return rules, nil
+}
+
+// AnyRuleRootOnDisk reports whether sparse checkout materialized a parent that
+// rule discovery can authoritatively treat as empty. The parent (agents/ or
+// coworkers/) is the sparse-set unit, matching Team Skill retention behavior.
+func AnyRuleRootOnDisk(teamPath string) bool {
+	for _, root := range RuleRoots {
+		parent := filepath.Dir(filepath.FromSlash(root))
+		if info, err := os.Stat(filepath.Join(teamPath, parent)); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // walkRulesDir recursively walks a rules root directory. Each rule's
@@ -219,6 +221,12 @@ func walkRulesDir(absRoot string) ([]TeamRule, error) {
 			return nil
 		}
 		if d.IsDir() {
+			return nil
+		}
+		// Team Context is shared input. Never follow a rule-file symlink: its
+		// target can escape the clone and turn arbitrary local files into agent
+		// instructions or native projections.
+		if d.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
 		name := d.Name()
@@ -255,6 +263,7 @@ func walkRulesDir(absRoot string) ([]TeamRule, error) {
 			RelPath:        rel,
 			AbsPath:        path,
 			Repos:          fm.Repos,
+			Globs:          fm.Globs,
 			Audience:       fm.Audience,
 			Visibility:     fm.Visibility,
 			Status:         fm.Status,
@@ -269,11 +278,11 @@ func walkRulesDir(absRoot string) ([]TeamRule, error) {
 	return rules, nil
 }
 
-// ruleAppliesToRepo reports whether a rule's repos: filter matches the
+// RuleAppliesToRepo reports whether a rule's repos: filter matches the
 // current repo slug. Empty repos: means "all team repos." Empty repoSlug
 // means we don't know what repo we're in — be permissive and include
 // non-filtered rules so the agent still gets team-wide guidance.
-func ruleAppliesToRepo(r TeamRule, repoSlug string) bool {
+func RuleAppliesToRepo(r TeamRule, repoSlug string) bool {
 	if len(r.Repos) == 0 {
 		return true
 	}
@@ -296,34 +305,36 @@ func readRuleBody(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s := string(data)
-	if !strings.HasPrefix(s, "---\n") && !strings.HasPrefix(s, "---\r\n") {
-		return s, nil
+	return ManifestBody(string(data)), nil
+}
+
+// ManifestBody returns a rule or skill manifest's markdown with any leading
+// YAML frontmatter stripped. An unterminated frontmatter returns everything
+// after the opening fence, so no part of the document is ever silently dropped
+// from what a reader (or a body scan) sees.
+func ManifestBody(s string) string {
+	s = trimBOM(s)
+	first, rest, found := strings.Cut(s, "\n")
+	if !found || !IsFrontmatterFence(first) {
+		return s
 	}
-	// find the closing --- on its own line
-	rest := s
-	// drop opening fence
-	if strings.HasPrefix(rest, "---\r\n") {
-		rest = rest[5:]
-	} else {
-		rest = rest[4:]
-	}
-	// look for closing fence at start of a line
-	for {
-		i := strings.Index(rest, "\n---")
-		if i < 0 {
-			return strings.TrimLeft(rest, "\r\n"), nil
+	// The closing fence is the next line IsFrontmatterFence accepts; a line
+	// such as "---something" is content, not a fence.
+	for offset := 0; offset <= len(rest); {
+		line, _, _ := strings.Cut(rest[offset:], "\n")
+		if IsFrontmatterFence(line) {
+			return strings.TrimLeft(rest[offset+len(line):], "\r\n")
 		}
-		// must be followed by end-of-line (or EOF)
-		after := i + 4
-		if after >= len(rest) || rest[after] == '\n' || rest[after] == '\r' {
-			rest = rest[after:]
-			rest = strings.TrimLeft(rest, "\r\n")
-			return rest, nil
-		}
-		// not a real fence (e.g. "---something"), keep looking
-		rest = rest[i+1:]
+		offset += len(line) + 1
 	}
+	return strings.TrimLeft(rest, "\r\n")
+}
+
+// ReadRuleBody returns a Team Rule's markdown body without YAML frontmatter.
+// Native projection uses the same parser as prime so the two delivery modes can
+// never disagree about which bytes constitute the rule.
+func ReadRuleBody(path string) (string, error) {
+	return readRuleBody(path)
 }
 
 // estimateTokens is a cheap rule-of-thumb estimator (len/4). Avoids pulling
@@ -340,10 +351,17 @@ type ruleFrontmatter struct {
 	Name           string
 	Description    string
 	Repos          []string
+	Globs          []string
 	Audience       string
 	Visibility     string
 	Status         string
 	FromDiscussion string
+	ValidThrough   string
+	// Requires and RequiresDeclared carry a skill's `requires:` key (rules
+	// ignore it). See SkillRequirements for the semantics.
+	Requires         []string
+	RequiresDeclared bool
+	requiresBlock    bool // inside a `requires:` block list (`  - shell` lines)
 }
 
 // parseRuleFrontmatter does minimal YAML extraction sufficient for the rule
@@ -356,9 +374,14 @@ func parseRuleFrontmatter(path string) ruleFrontmatter {
 		return ruleFrontmatter{}
 	}
 	defer f.Close()
+	return parseRuleFrontmatterFrom(f)
+}
 
-	scanner := bufio.NewScanner(f)
-	inFrontmatter := false
+// parseRuleFrontmatterFrom is parseRuleFrontmatter over any reader, so a
+// manifest held in memory (`ox skills publish` reads the repository copy
+// before it exists in any Team Context) parses with exactly the same rules.
+func parseRuleFrontmatterFrom(r io.Reader) ruleFrontmatter {
+	scanner := bufio.NewScanner(r)
 	lineCount := 0
 	var fm ruleFrontmatter
 
@@ -367,17 +390,40 @@ func parseRuleFrontmatter(path string) ruleFrontmatter {
 		line := scanner.Text()
 
 		if lineCount == 1 {
-			if line != "---" {
+			if !IsFrontmatterFence(trimBOM(line)) {
 				return ruleFrontmatter{}
 			}
-			inFrontmatter = true
 			continue
 		}
-		if inFrontmatter && line == "---" {
+		if IsFrontmatterFence(line) {
 			break
 		}
-		if !inFrontmatter {
-			break
+
+		// A `requires:` block list is the one multi-line form read here.
+		if fm.requiresBlock {
+			if item, isItem := blockListItem(line); isItem {
+				if item != "" {
+					fm.Requires = append(fm.Requires, item)
+					fm.RequiresDeclared = true
+				}
+				continue
+			}
+			fm.requiresBlock = false
+		}
+
+		// requires: is read on EVERY frontmatter line, not only inside the
+		// window below (trust contract v2, R4). It is the one key where a miss
+		// fails open: a declaration pushed past line 30 by a long folded
+		// description: read as "undeclared", so a skill whose author said it
+		// needs a shell could be offered where there is none. Every other key
+		// keeps the window, and with it the behavior teams already rely on.
+		if strings.HasPrefix(line, "requires:") {
+			fm.applyRequires(stripYAMLComment(strings.TrimSpace(strings.TrimPrefix(line, "requires:"))))
+			continue
+		}
+		// The window: the 30 lines after the opening fence.
+		if lineCount > 31 {
+			continue
 		}
 
 		switch {
@@ -391,19 +437,85 @@ func parseRuleFrontmatter(path string) ruleFrontmatter {
 			fm.Visibility = extractValue(line, "visibility:")
 		case strings.HasPrefix(line, "status:"):
 			fm.Status = extractValue(line, "status:")
+		case strings.HasPrefix(line, "valid-through:"):
+			fm.ValidThrough = extractValue(line, "valid-through:")
 		case strings.HasPrefix(line, "from-discussion:"):
 			fm.FromDiscussion = extractValue(line, "from-discussion:")
 		case strings.HasPrefix(line, "repos:"):
-			val := strings.TrimSpace(strings.TrimPrefix(line, "repos:"))
-			fm.Repos = parseInlineList(val)
-		}
-
-		if lineCount > 30 {
-			break
+			fm.Repos = parseInlineList(stripYAMLComment(strings.TrimSpace(strings.TrimPrefix(line, "repos:"))))
+		case strings.HasPrefix(line, "globs:"):
+			fm.Globs = parseGlobs(stripYAMLComment(strings.TrimSpace(strings.TrimPrefix(line, "globs:"))))
 		}
 	}
 
 	return fm
+}
+
+// applyRequires records a `requires:` value. An empty value opens a block list.
+//
+// The block form is read here, unlike for repos:, because the safe default
+// points the other way. A block-form repos: read as absent means "every repo",
+// which only widens where prose lands. A block-form requires: read as absent
+// would let a skill whose author SAID it needs a shell be offered to chat hosts
+// that have none. Mirrors packages/teamskills applyRequires in sageox-mono, so
+// the server and the CLI classify the same manifest the same way.
+func (fm *ruleFrontmatter) applyRequires(value string) {
+	if value == "" {
+		fm.requiresBlock = true
+		return
+	}
+	fm.RequiresDeclared = true
+	fm.Requires = parseInlineList(value)
+}
+
+// blockListItem parses one line of a YAML block sequence. The second return is
+// false for any line that is not an item, which ends the list.
+//
+// Both indentations count (trust contract v2, R3). `requires:\n- shell`, with
+// the dash at column 0, is what PyYAML and most formatters emit; reading it as
+// "no declaration" let a skill whose author declared a shell requirement pass
+// for portable. At column 0 only `-` or `- …` is an item, so a line such as
+// "-foo" still ends the list; indented items keep the looser historical rule.
+// An empty item (`-` alone) yields "" and keeps the list open.
+func blockListItem(line string) (string, bool) {
+	if line == "" {
+		return "", false
+	}
+	trimmed := strings.TrimSpace(line)
+	if line[0] == ' ' || line[0] == '\t' {
+		if !strings.HasPrefix(trimmed, "-") {
+			return "", false
+		}
+	} else if trimmed != "-" && !strings.HasPrefix(line, "- ") {
+		return "", false
+	}
+	item := stripYAMLComment(strings.TrimSpace(strings.TrimPrefix(trimmed, "-")))
+	return strings.Trim(item, `"'`), true
+}
+
+// parseGlobs parses the globs: field, accepting both the inline-list form that
+// repos: uses and the bare comma-separated form every other agent's rule format
+// uses (Cursor's globs:, Copilot's applyTo:, Cline's paths:).
+//
+// Accepting both is deliberate. An author copying a rule out of .cursor/rules
+// writes `globs: **/*.go,**/*.mod`, and rejecting that would mean the rule
+// silently applies everywhere — the failure mode is an unscoped rule loading in
+// every session, which is exactly what globs: exists to prevent.
+func parseGlobs(v string) []string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil
+	}
+	if strings.HasPrefix(v, "[") {
+		return parseInlineList(v)
+	}
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if trimmed := strings.Trim(strings.TrimSpace(part), `"'`); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // parseInlineList parses a YAML inline list like ["a", "b", "c"] or [a, b].

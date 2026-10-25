@@ -1,14 +1,18 @@
 package lfs
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 
+	"github.com/sageox/ox/internal/secretguard"
 	"github.com/sageox/ox/internal/session/pipeline"
 )
+
+var currentSessionRules = secretguard.LatestRules
 
 // ContentFiles lists the session content files eligible for LFS upload.
 // These are the files that get uploaded to LFS blob storage and replaced
@@ -32,7 +36,21 @@ var ContentFiles = pipeline.LedgerContentFiles
 //  3. Call LFS batch API to get upload actions
 //  4. Upload all blobs in parallel
 //  5. Return filename->FileRef map for meta.json
+//
+// The returned manifest is a filename->FileRef map (not UploadedRef) because it
+// flows straight into meta.json merge logic that is FileRef-shaped. Its blobs
+// ARE uploaded on a nil-error return, so callers wrap it in AssertUploadedManifest
+// at the WritePointerFiles boundary — the one audited place upload is asserted.
 func UploadSessionFiles(client *Client, sessionPath string, logger *slog.Logger) (map[string]FileRef, error) {
+	return UploadSessionFilesContext(context.Background(), client, sessionPath, logger)
+}
+
+// UploadSessionFilesContext honors the caller's cancellation during batch setup
+// and any Git credential refresh caused by a rejected PAT.
+func UploadSessionFilesContext(ctx context.Context, client *Client, sessionPath string, logger *slog.Logger) (map[string]FileRef, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -53,6 +71,11 @@ func UploadSessionFiles(client *Client, sessionPath string, logger *slog.Logger)
 				return nil, fmt.Errorf("read pointer %s: %w", name, err)
 			}
 			fileRefs[name] = ref
+			continue
+		}
+		// Trace artifacts have a stricter cache-only path. Never upload an
+		// accidental real trace file from the tracked session directory.
+		if pipeline.IsTraceFile(name) {
 			continue
 		}
 
@@ -77,29 +100,39 @@ func UploadSessionFiles(client *Client, sessionPath string, logger *slog.Logger)
 		return fileRefs, nil // nothing to upload
 	}
 
+	// Validate the same immutable buffers that UploadAll receives, before even
+	// requesting upload actions. Import, daemon repair and CLI capture all use
+	// this boundary; a worktree scan alone has a check/use race and can be skipped.
+
+	proofs, err := prepareUploads(ctx, files)
+	if err != nil {
+		return nil, fmt.Errorf("session publication pending: %w", err)
+	}
+
 	logger.Info("uploading session to LFS", "path", sessionPath, "files", len(batchObjects))
 
 	// request upload URLs from LFS batch API
-	resp, err := client.BatchUpload(batchObjects)
+	resp, err := client.BatchUploadContext(ctx, batchObjects)
 	if err != nil {
 		logger.Info("LFS batch API failed", "error", err, "path", sessionPath, "files", len(batchObjects))
 		return nil, fmt.Errorf("LFS batch upload: %w", err)
 	}
 
 	// upload blobs in parallel (up to 4 concurrent)
-	results := UploadAll(resp, files, 4)
+	results := uploadAllGuarded(resp, proofs, 4)
 
-	// collect all errors so devs can see everything that failed
-	var uploadErrors []string
+	// collect all errors so devs can see everything that failed, and callers
+	// can still match each one with errors.Is
+	var uploadErrors []error
 	for _, r := range results {
 		if r.Error != nil {
 			logger.Info("LFS blob upload failed", "oid", r.OID, "error", r.Error)
-			uploadErrors = append(uploadErrors, fmt.Sprintf("OID %s: %s", r.OID, r.Error))
+			uploadErrors = append(uploadErrors, fmt.Errorf("OID %s: %w", r.OID, r.Error))
 		}
 	}
 	if len(uploadErrors) > 0 {
-		return nil, fmt.Errorf("LFS upload failed (%d/%d files):\n  %s",
-			len(uploadErrors), len(results), strings.Join(uploadErrors, "\n  "))
+		return nil, fmt.Errorf("LFS upload failed (%d/%d files): %w",
+			len(uploadErrors), len(results), errors.Join(uploadErrors...))
 	}
 
 	logger.Info("LFS upload complete", "path", sessionPath, "files", len(fileRefs))
@@ -154,18 +187,17 @@ func FindPointerStubsWithMissingBlobs(client *Client, sessionPath string, logger
 		return nil
 	}
 
-	// build OID → filename map for error reporting
-	oidToFile := make(map[string]string, len(toCheck))
+	// Multiple artifact names may reference the same missing object. Report
+	// every name so an optional trace cannot hide a missing ordinary artifact.
+	oidToFiles := make(map[string][]string, len(toCheck))
 	for _, p := range toCheck {
-		oidToFile[p.obj.OID] = p.filename
+		oidToFiles[p.obj.OID] = append(oidToFiles[p.obj.OID], p.filename)
 	}
 
 	var missing []string
 	for _, obj := range resp.Objects {
 		if obj.Error != nil {
-			if name, ok := oidToFile[obj.OID]; ok {
-				missing = append(missing, name)
-			}
+			missing = append(missing, oidToFiles[obj.OID]...)
 		}
 	}
 	return missing

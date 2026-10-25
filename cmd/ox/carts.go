@@ -2,13 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/carts"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	ident "github.com/sageox/ox/internal/identity"
@@ -86,7 +87,8 @@ func runCartsCreate(cmd *cobra.Command, args []string) error {
 
 	if isJSON(cmd) {
 		data, _ := carts.FormatIssueJSON(issue)
-		fmt.Println(string(data))
+		data = append(data, '\n')
+		_ = cli.WriteJSONBytes(os.Stdout, data)
 	} else {
 		fmt.Printf("Created %s: %s\n", issue.ID, issue.Title)
 	}
@@ -139,7 +141,8 @@ func runCartsList(cmd *cobra.Command, args []string) error {
 
 	if isJSON(cmd) {
 		data, _ := carts.FormatIssueListJSON(issues)
-		fmt.Println(string(data))
+		data = append(data, '\n')
+		_ = cli.WriteJSONBytes(os.Stdout, data)
 	} else {
 		if len(issues) == 0 {
 			fmt.Println("No carts found.")
@@ -175,7 +178,8 @@ func runCartsReady(cmd *cobra.Command, args []string) error {
 
 	if isJSON(cmd) {
 		data, _ := carts.FormatIssueListJSON(issues)
-		fmt.Println(string(data))
+		data = append(data, '\n')
+		_ = cli.WriteJSONBytes(os.Stdout, data)
 	} else {
 		if len(issues) == 0 {
 			fmt.Println("No carts ready.")
@@ -214,7 +218,8 @@ func runCartsShow(cmd *cobra.Command, args []string) error {
 
 	if isJSON(cmd) {
 		data, _ := carts.FormatIssueJSON(issue)
-		fmt.Println(string(data))
+		data = append(data, '\n')
+		_ = cli.WriteJSONBytes(os.Stdout, data)
 	} else {
 		fmt.Print(carts.FormatIssueDetail(issue))
 		if len(issue.Dependencies) > 0 {
@@ -288,7 +293,8 @@ func runCartsUpdate(cmd *cobra.Command, args []string) error {
 
 	if isJSON(cmd) {
 		data, _ := carts.FormatIssueJSON(issue)
-		fmt.Println(string(data))
+		data = append(data, '\n')
+		_ = cli.WriteJSONBytes(os.Stdout, data)
 	} else {
 		fmt.Printf("Updated %s\n", issue.ID)
 	}
@@ -321,8 +327,7 @@ func runCartsStart(cmd *cobra.Command, args []string) error {
 	}
 
 	if isJSON(cmd) {
-		data, _ := json.MarshalIndent(cartStartOutput{Issue: issue, Guidance: cartStartGuidance}, "", "  ")
-		fmt.Println(string(data))
+		_ = cli.PrintJSONTo(os.Stdout, cartStartOutput{Issue: issue, Guidance: cartStartGuidance})
 	} else {
 		fmt.Printf("Started %s: %s (assigned to %s)\n", issue.ID, issue.Title, identity.Name)
 	}
@@ -500,14 +505,17 @@ func init() {
 	cartsCmd.AddCommand(cartsReopenCmd)
 	cartsCmd.AddCommand(cartsDepCmd)
 
-	// Hide carts from --help until the feature is enabled. Execution is gated
-	// independently in openCartsStore, so an explicit `ox carts …` still errors
-	// cleanly when disabled.
-	if !auth.IsCartsEnabled() {
-		cartsCmd.Hidden = true
-	}
-
-	rootCmd.AddCommand(cartsCmd)
+	// NOT registered here: carts is registered by syncFeatureGatedCommands once
+	// FEATURE_CARTS has resolved, exactly like `ox scout` and `ox bulletin`.
+	//
+	// Hidden:true was not enough. It removes carts from `ox --help` but leaves
+	// the command resolvable, so `ox carts` still ran and printed its own help
+	// with exit 0 — a disabled feature that answers when you ask for it is not
+	// hidden, it is merely unlisted. Unregistering makes it report "unknown
+	// command", which is the honest answer when the feature is off.
+	//
+	// Execution stays gated independently in openCartsStore, so this is
+	// defense in depth rather than a replacement for it.
 }
 
 // --- helpers ---

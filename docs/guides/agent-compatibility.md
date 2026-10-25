@@ -58,19 +58,15 @@ ox doctor      # verifies hooks + context injection
 ```
 No extra setup needed — Claude Code is the reference implementation.
 
-Teams using Attest can additionally install its customer-journey BDD and
-evidence-recording playbooks with `ox attest install`. They are opt-in skills,
-not lifecycle hooks; use `ox integrate install` to manage hooks.
-
 ## Canonical Agent Skills
 
 ox authors every portable playbook once in `extensions/skills/`, in the open
 Agent Skills `SKILL.md` format. Claude Code receives a managed copy under
 `.claude/skills/`; Codex, ChatGPT desktop's Codex surface, and Gemini CLI
 receive the same managed skill under `.agents/skills/`. `ox doctor --fix`
-reconciles the project-selected native targets, including updates, retired
-ox-owned files, and a partially installed Attest bundle, while preserving
-user-authored additions and modified managed files.
+reconciles the project-selected native targets, including updates, missing
+skills, and retired ox-owned files, while preserving user-authored additions
+and modified retired files.
 
 ### Codex
 ```bash
@@ -104,9 +100,13 @@ OpenCode exposes 27+ plugin events; ox uses only that one today.
 ox init
 ox integrate install --amp
 ```
-Installs a user-scope plugin at `~/.config/amp/plugins/ox-bridge.ts` that records
-the session, and an `AGENTS.md` marker that primes it. Amp does not persist
-transcripts itself, so the plugin is what makes recording possible.
+Installs a user-scope plugin, `ox-bridge.ts`, in Amp's system plugin directory
+(`$XDG_CONFIG_HOME/amp/plugins/` when `XDG_CONFIG_HOME` is set to an absolute path,
+otherwise `~/.config/amp/plugins/`) that records the session, and an `AGENTS.md`
+marker that primes it. Amp does not persist transcripts itself, so the plugin is
+what makes recording possible. In an Amp orb, the plugin ends a thread's session
+before the orb pauses, and when you reply in that thread later it starts a new
+session, linked as continued from the first.
 
 ### Pi
 ```bash
@@ -156,8 +156,13 @@ directory up to the repo root, so context primes even before hooks are installed
   `OX_PROJECT_ROOT` to the absolute repo root rather than relying on the cwd walk.
 - **Gemini, Droid**: no `SessionStart` hook, so priming depends on the instruction
   file marker rather than firing automatically.
-- **Codex**: no `SessionEnd` hook, so sessions do not auto-finalize; they close on
-  the next `ox agent <id> session stop` or daemon sweep.
+- **Codex**: sessions auto-finalize through `SessionEnd`, which Codex fires when a
+  conversation is archived or deleted, when Codex closes normally, or after 30
+  minutes idle with no connected client. A hard kill of the Codex process skips
+  the hook; the daemon's dead-process sweep finalizes those recordings instead.
+  Project-scope hooks (`.codex/hooks.json`) load only once the project `.codex/`
+  layer is trusted via `/hooks`; user-scope `~/.codex/hooks.json` needs no per-repo
+  trust. Installs made before `SessionEnd` was added are completed by `ox doctor`.
 - **Pi**: instruction-file marker only, no lifecycle hooks. Session recording also only
   understands transcript format version 3. Pi 0.84+ introduced a v4 lane-based session
   model that ox does not yet parse — `ox doctor` reports `pi:format-unsupported` when it

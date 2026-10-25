@@ -175,6 +175,15 @@ func init() {
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugSourceRepoBare,
+		Name:        "Source repo work tree",
+		Category:    "Git Repository Health",
+		FixLevel:    FixLevelAuto,
+		Description: "Repairs a managed checkout whose core.bare was flipped to true (issue #819)",
+		Run:         checkSourceRepoBareFlipped,
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugGitConnectivity,
 		Name:        "Git connectivity",
 		Category:    "Git Repository Health",
@@ -668,7 +677,7 @@ func init() {
 		Name:        "kb orphan dirs",
 		Category:    "Knowledge Bubbles",
 		FixLevel:    FixLevelAuto,
-		Description: "Detects local kb directories no longer in the kb API list and triages them via the daemon's GC pass",
+		Description: "Detects local kb directories from this project's kb scopes that the kb API no longer lists; auto-fix triages them via the daemon's kb GC pass",
 		Run:         checkKBOrphans,
 	})
 

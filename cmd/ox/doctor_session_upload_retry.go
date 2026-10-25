@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/pipeline"
 )
 
 func init() {
@@ -34,8 +35,14 @@ type orphanedSession struct {
 	SessionName string
 	CachePath   string             // full path to cache session dir
 	Meta        *session.StoreMeta // from raw.jsonl header
-	EntryCount  int                // from raw.jsonl footer
+	EntryCount  int                // footer count, or recovered valid turns after a crash
 }
+
+const (
+	rawJSONLInitialScanBuffer     = 1024 * 1024
+	rawJSONLMaxLineBytes          = 10 * 1024 * 1024
+	sessionUploadRetryPendingFile = ".upload-retry-pending"
+)
 
 // checkSessionUploadRetry finds sessions in cache that failed to upload and retries them.
 func checkSessionUploadRetry() checkResult {
@@ -104,6 +111,37 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 	}
 
 	cacheSessionsDir := filepath.Join(contextPath, "sessions")
+	orphans, err := findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath)
+	if err != nil || config.GetSessionPublishing(projectRoot) != config.SessionPublishingManual {
+		return orphans, err
+	}
+	return keepPublishedOrphans(ledgerPath, orphans), nil
+}
+
+// keepPublishedOrphans is the manual-mode filter on doctor's upload retry: it
+// finishes publications already in the Ledger and never publishes a session
+// that is only in the cache. That is 'ox session upload <name>', even when the
+// hold that should keep the session here could not be written (GH #1093).
+func keepPublishedOrphans(ledgerPath string, orphans []orphanedSession) []orphanedSession {
+	var kept []orphanedSession
+	for _, o := range orphans {
+		meta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", o.SessionName))
+		if err == nil && !meta.IsDraft() {
+			kept = append(kept, o)
+			continue
+		}
+		if holdErr := writeSessionHold(o.CachePath, session.HoldManualPublishing, "doctor_upload_retry"); holdErr != nil {
+			slog.Warn("session upload retry: could not hold a cache-only session", "session", o.SessionName, "error", holdErr)
+		}
+		slog.Info("session upload retry: left for 'ox session upload' (session_publishing: manual)", "session", o.SessionName)
+	}
+	return kept
+}
+
+// findOrphanedSessionsInDir contains the filesystem scan after project path
+// resolution. Keeping this as production code lets tests exercise the exact
+// stale-recording and uploaded-session decisions used by doctor.
+func findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath string) ([]orphanedSession, error) {
 	entries, err := os.ReadDir(cacheSessionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -126,6 +164,12 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 			continue
 		}
 
+		// Held on this machine: not an orphan, never uploaded by doctor (GH #1093).
+		// By name, so an unheld copy here cannot be published for a held one.
+		if session.IsHeld(sessionDir) || session.IsHeldInLedger(ledgerPath, sessionName) {
+			continue
+		}
+
 		// check if still recording (.recording.json present)
 		recordingPath := filepath.Join(sessionDir, ".recording.json")
 		if _, err := os.Stat(recordingPath); err == nil {
@@ -137,6 +181,12 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 			var recState session.RecordingState
 			if json.Unmarshal(recData, &recState) != nil {
 				continue // corrupt, skip
+			}
+			// Held for ownership review. Reclaiming it below would delete the
+			// marker that says so and publish the transcript. This scan runs on
+			// every `ox doctor`, whose own quarantine notice sends users here.
+			if recState.SourceRejected {
+				continue
 			}
 
 			// determine if this recording is stale (older than threshold)
@@ -153,6 +203,25 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 				continue // genuinely active recording, skip
 			}
 
+			recState.SessionPath = sessionDir
+			stoppedAt := session.ResolveStoppedAt(recState.StoppedAt, filepath.Join(sessionDir, ledgerFileRaw), time.Now())
+			// Reclaim can happen hours after the recording died. A stop timestamp
+			// cannot identify its spool EOF: another recording may already share
+			// the native session. Preserve only boundaries captured while live;
+			// a missing durable stop makes trace materialization fail closed.
+			if err := session.StampRawCarrier(filepath.Join(sessionDir, ledgerFileRaw), session.CarrierStamp{
+				NativeSessions: recState.NativeSessions,
+				StoppedAt:      stoppedAt,
+				TraceCapture:   recState.Trace,
+			}); err != nil && recState.Trace != nil {
+				slog.Warn("trace recovery carrier not persisted", "session", sessionName, "error", err)
+				continue
+			}
+			// A manual-mode recording is held before its marker goes: this scan
+			// runs on every `ox doctor` and would otherwise upload it below.
+			if err := session.HoldRecordedManual(&recState, "doctor_upload_retry"); err != nil {
+				continue
+			}
 			_ = os.Remove(recordingPath)
 			// also clean up lock files
 			lockFiles, _ := filepath.Glob(filepath.Join(sessionDir, "*.lock"))
@@ -161,13 +230,18 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 			}
 		}
 
+		if session.IsHeld(sessionDir) {
+			continue // just held from its recorded mode
+		}
+
 		// skip if no raw.jsonl (corrupt/empty)
 		rawPath := filepath.Join(sessionDir, ledgerFileRaw)
 		if _, err := os.Stat(rawPath); os.IsNotExist(err) {
 			continue
 		}
 
-		// skip if already uploaded (meta.json exists in ledger).
+		// Skip if already uploaded (meta.json exists in ledger), unless this
+		// retry recorded that post-publication work is still pending.
 		//
 		// A DRAFT placeholder does not count as uploaded. It is a
 		// meta.json-only marker published mid-recording (ADR-029) and carries
@@ -184,7 +258,9 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 		ledgerSessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
 		if _, err := os.Stat(filepath.Join(ledgerSessionDir, "meta.json")); err == nil {
 			ledgerMeta, metaErr := lfs.ReadSessionMeta(ledgerSessionDir)
-			if metaErr != nil || !ledgerMeta.IsDraft() {
+			_, pendingErr := os.Stat(filepath.Join(sessionDir, sessionUploadRetryPendingFile))
+			pendingRetry := pendingErr == nil
+			if metaErr != nil || (!ledgerMeta.IsDraft() && !pendingRetry) {
 				continue
 			}
 		}
@@ -207,8 +283,11 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 	return orphans, nil
 }
 
-// readCacheSessionMeta reads the header and footer from a raw.jsonl file.
-// Returns the StoreMeta from the header and entry_count from the footer.
+// readCacheSessionMeta reads durable metadata and counts recoverable entries
+// from raw.jsonl. A clean stop writes a footer with entry_count, but a crashed
+// process may leave a perfectly usable stream without one. In that case the
+// valid entry lines are authoritative; treating the missing footer as zero
+// made doctor discard the only copy instead of recovering it.
 func readCacheSessionMeta(rawPath string) (*session.StoreMeta, int, error) {
 	f, err := os.Open(rawPath)
 	if err != nil {
@@ -224,11 +303,11 @@ func readCacheSessionMeta(rawPath string) (*session.StoreMeta, int, error) {
 		return nil, 0, fmt.Errorf("not a regular file: %s", rawPath)
 	}
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024) // 256KB line buffer
-
-	// read first line (header)
+	scanner := newRawJSONLScanner(f)
 	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return nil, 0, fmt.Errorf("read header: %w", err)
+		}
 		return nil, 0, fmt.Errorf("empty file")
 	}
 
@@ -236,36 +315,47 @@ func readCacheSessionMeta(rawPath string) (*session.StoreMeta, int, error) {
 	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
 		return nil, 0, fmt.Errorf("parse header: %w", err)
 	}
-
-	// extract metadata from header
-	metaRaw, ok := header["metadata"]
+	metaMap, ok := rawHeaderMetadata(header)
 	if !ok {
 		return nil, 0, fmt.Errorf("no metadata in header")
 	}
-
-	metaMap, ok := metaRaw.(map[string]any)
-	if !ok {
-		return nil, 0, fmt.Errorf("metadata is not a map")
-	}
-
 	meta := session.ParseStoreMeta(metaMap)
 
-	// read to last line for footer entry_count
-	var lastLine []byte
-	for scanner.Scan() {
-		lastLine = scanner.Bytes()
-	}
-
 	entryCount := 0
-	if len(lastLine) > 0 {
-		var footer map[string]any
-		if json.Unmarshal(lastLine, &footer) == nil {
-			if v, ok := footer["entry_count"].(float64); ok {
-				entryCount = int(v)
+	footerCount := -1
+	for scanner.Scan() {
+		var line map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			// Crash recovery follows ReadSessionFromPath semantics: an incomplete
+			// trailing append must not hide the valid turns already fsynced.
+			continue
+		}
+		if line["type"] == "footer" {
+			carrier := session.ParseStoreMeta(line)
+			if carrier.TraceCapture != nil {
+				meta.TraceCapture = carrier.TraceCapture
+			}
+			if carrier.NativeSessions != nil {
+				meta.NativeSessions = carrier.NativeSessions
+			}
+			if carrier.StoppedAt != nil {
+				meta.StoppedAt = carrier.StoppedAt
 			}
 		}
+		if v, ok := line["entry_count"].(float64); ok && v >= 0 {
+			footerCount = int(v)
+			continue
+		}
+		if entryType, _ := line["type"].(string); entryType != "" && entryType != "footer" && entryType != "header" {
+			entryCount++
+		}
 	}
-
+	if err := scanner.Err(); err != nil {
+		return nil, 0, fmt.Errorf("read session: %w", err)
+	}
+	if footerCount > entryCount {
+		entryCount = footerCount
+	}
 	return meta, entryCount, nil
 }
 
@@ -316,6 +406,10 @@ func resolveOrphanSessionID(sessionDir string, orphan orphanedSession, draftPres
 // the authoritative copy; raw.jsonl is the critical file from which all others
 // can be regenerated.
 func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) error {
+	return retrySessionUploadWithEffects(projectRoot, ledgerPath, orphan, productionSessionUploadEffects())
+}
+
+func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphanedSession, effects sessionUploadEffects) error {
 	// guard: never upload a session with zero substantive entries
 	if orphan.EntryCount == 0 {
 		slog.Info("skipping retry upload: zero entries", "session", orphan.SessionName)
@@ -332,6 +426,17 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 	rawSrc := filepath.Join(orphan.CachePath, ledgerFileRaw)
 	if err := validateRawJSONLHeader(rawSrc); err != nil {
 		return fmt.Errorf("%s validation failed (skipping corrupt session): %w", ledgerFileRaw, err)
+	}
+
+	traceCache, traceMeta := prepareRetryTraces(ledgerPath, orphan)
+
+	// Record retry ownership before mutating the ledger. Once meta.json becomes
+	// final, ordinary orphan discovery skips it to avoid replaying an already
+	// published session. This cache-side marker is what keeps failures from any
+	// later phase (including pointer preparation and push) discoverable on the
+	// next doctor pass. A successful pass prunes the cache and marker together.
+	if err := writeSessionUploadRetryPending(orphan.CachePath); err != nil {
+		return fmt.Errorf("record pending session upload retry: %w", err)
 	}
 
 	// Supersede a draft placeholder if one was published before the agent died,
@@ -355,9 +460,12 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 		return fmt.Errorf("copy %s (critical): %w", ledgerFileRaw, err)
 	}
 
-	// copy secondary artifacts (best-effort — skip missing files, don't abort on failure)
-	secondaryFiles := []string{ledgerFileSummaryMD, ledgerFileSessionMD, ledgerFilePlan, "summary.json"}
-	for _, name := range secondaryFiles {
+	// copy secondary artifacts (best-effort — skip missing files, don't abort on failure).
+	// Every content file the upload knows, not a hand-kept subset: the cache is
+	// pruned after a successful retry, and a file left out of this copy (as
+	// context-trace.jsonl once was) is lost with it. Traces go through
+	// prepareRetryTraces.
+	for _, name := range retrySecondaryFiles() {
 		src := filepath.Join(orphan.CachePath, name)
 		dst := filepath.Join(sessionDir, name)
 		if err := copyFile(src, dst); err != nil {
@@ -377,15 +485,52 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 		return err
 	}
 
+	// Redaction records need durable metadata before the upload. The later
+	// read-modify-write preserves that audit when it installs the uploaded refs.
+	if _, err := writeRetryUploadMeta(sessionDir, projectRoot, orphan, sessionID, nil); err != nil {
+		return err
+	}
+	if err := prepareSessionUpload(context.Background(), ledgerPath, orphan.SessionName); err != nil {
+		return fmt.Errorf("prepare session upload: %w", err)
+	}
+
 	// upload to LFS
-	fileRefs, err := uploadSessionLFS(projectRoot, sessionDir)
+	fileRefs, err := effects.uploadLFS(projectRoot, sessionDir)
 	if err != nil {
 		return fmt.Errorf("LFS upload: %w", err)
+	}
+
+	if traceMeta != nil && effects.uploadTraces != nil {
+		traceRefs, traceErr := effects.uploadTraces(projectRoot, traceCache, sessionDir)
+		if traceErr != nil {
+			slog.Warn("trace retry upload skipped", "error", traceErr)
+		}
+		if traceErr == nil && len(traceRefs) == 2 {
+			if fileRefs == nil {
+				fileRefs = make(map[string]lfs.FileRef)
+			}
+			for name, ref := range traceRefs {
+				fileRefs[name] = ref
+			}
+		} else {
+			traceMeta = nil
+		}
+	} else {
+		traceMeta = nil
 	}
 
 	meta, err := writeRetryUploadMeta(sessionDir, projectRoot, orphan, sessionID, fileRefs)
 	if err != nil {
 		return err
+	}
+
+	if traceMeta != nil {
+		if err := lfs.MutateSessionMeta(context.Background(), sessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+			current.Trace = traceMeta
+			return current, nil
+		}); err != nil {
+			return fmt.Errorf("write trace retry metadata: %w", err)
+		}
 	}
 
 	// ensure .gitignore
@@ -400,27 +545,58 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 		hasSummary = true
 	}
 
-	// commit and push (meta.json + optional summary.json)
-	if err := commitAndPushLedgerWithExtras(ledgerPath, orphan.SessionName, hasSummary); err != nil {
-		return fmt.Errorf("commit and push: %w", err)
+	store, err := session.NewStore(ledgerPath)
+	if err != nil {
+		return fmt.Errorf("open session recovery store: %w", err)
+	}
+	recoveryCacheDir, err := store.PreserveSessionCache(sessionDir, orphan.CachePath)
+	if err != nil {
+		return err
 	}
 
-	// push succeeded — now safe to replace content files with LFS pointer stubs
-	if len(meta.Files) > 0 {
-		if _, err := lfs.WritePointerFiles(sessionDir, meta.Files); err != nil {
-			slog.Warn("LFS pointer file write failed after push", "error", err, "session", orphan.SessionName)
+	// AssertUploaded: uploadLFS succeeded above. Keep the source cache for retry,
+	// and publish the pointers with metadata in the first commit so GitLab GC
+	// cannot run between a raw-content push and a later pointer rewrite.
+	if _, err := lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(meta.Files)); err != nil {
+		return fmt.Errorf("write LFS pointer files: %w", err)
+	}
+
+	// commit and push (pointers, meta.json, and optional summary.json)
+	if err := effects.commitRetry(ledgerPath, orphan.SessionName, hasSummary); err != nil {
+		return fmt.Errorf("commit and push: %w", err)
+	}
+	// Register the original URL after publication. Keep retry state in the cache:
+	// editing metadata after push makes session wait report an unpushed recording.
+	if _, notified := effects.notifyUploaded(projectRoot, meta, orphan.SessionName); !notified {
+		return fmt.Errorf("lifecycle notification failed for %s; session uploaded and recovery retained", orphan.SessionName)
+	}
+	if recoveryCacheDir != "" {
+		if err := os.RemoveAll(recoveryCacheDir); err != nil {
+			slog.Debug("prune session recovery copy", "dir", recoveryCacheDir, "error", err)
 		}
 	}
 
 	return nil
 }
 
+// retrySecondaryFiles lists the artifacts a retry copies from the cache after
+// raw.jsonl: every committed content file except raw.jsonl and the traces,
+// plus summary.json, which is git-stored.
+func retrySecondaryFiles() []string {
+	names := []string{"summary.json"}
+	for _, name := range pipeline.LedgerContentFiles {
+		if name != ledgerFileRaw && !pipeline.IsTraceFile(name) {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // writeRetryUploadMeta records a retry-upload's results into meta.json,
 // updating only the fields this path owns and preserving everything else.
 //
-// Uses WriteSessionMetaOnly semantics (via MutateSessionMeta) so content
-// files stay intact until after the push — pointer stubs with no remote
-// would be unrecoverable.
+// Uses WriteSessionMetaOnly semantics (via MutateSessionMeta); the caller
+// prepares pointers only after the upload and metadata write succeed.
 //
 // # Why read-modify-write and not a fresh builder (GH #710)
 //
@@ -474,11 +650,18 @@ func writeRetryUploadMeta(
 		// prefers a preserved meta.json id over minting a new one — so it
 		// is authoritative and never rotates across retries.
 		next.SessionID = sessionID
+		if orphan.Meta.ContinuedFromSessionID != "" {
+			next.ContinuedFromSessionID = orphan.Meta.ContinuedFromSessionID
+		}
 
 		// fields this retry actually owns
 		next.Model = orphan.Meta.Model
 		next.EntryCount = orphan.EntryCount
-		next.Files = fileRefs
+		// A nil manifest is the pre-upload metadata pass. Retain the prior
+		// uploaded refs until a successful upload supplies their replacement.
+		if fileRefs != nil {
+			next.Files = fileRefs
+		}
 		// preserve-if-set: don't stomp a real terminal stop reason with the
 		// generic "recovered" just because doctor re-uploaded the content.
 		if next.StopReason == "" {
@@ -510,10 +693,12 @@ func validateRawJSONLHeader(rawPath string) error {
 		return fmt.Errorf("not a regular file: %s", rawPath)
 	}
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 64*1024)
+	scanner := newRawJSONLScanner(f)
 
 	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("read header: %w", err)
+		}
 		return fmt.Errorf("empty file")
 	}
 
@@ -522,11 +707,45 @@ func validateRawJSONLHeader(rawPath string) error {
 		return fmt.Errorf("invalid JSON on first line: %w", err)
 	}
 
-	if _, ok := header["metadata"]; !ok {
+	if _, ok := rawHeaderMetadata(header); !ok {
 		return fmt.Errorf("first line missing 'metadata' key (not a valid session header)")
 	}
 
 	return nil
+}
+
+// rawHeaderMetadata returns a raw.jsonl header's metadata in either format the
+// session reader accepts: {"type":"header","metadata":{...}} from recording,
+// or {"_meta":{...}}, which daemon recovery writes when it rebuilds a header.
+func rawHeaderMetadata(header map[string]any) (map[string]any, bool) {
+	if m, ok := header["metadata"].(map[string]any); ok {
+		return m, true
+	}
+	m, ok := header["_meta"].(map[string]any)
+	return m, ok
+}
+
+func newRawJSONLScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, rawJSONLInitialScanBuffer), rawJSONLMaxLineBytes)
+	return scanner
+}
+
+func writeSessionUploadRetryPending(cachePath string) error {
+	markerPath := filepath.Join(cachePath, sessionUploadRetryPendingFile)
+	f, err := os.OpenFile(markerPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString("pending\n"); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // copyFile copies a file from src to dst.

@@ -7,8 +7,11 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/addons"
 )
 
 // checkoutRequiredEntries are the entries that must be present in .sageox/.gitignore
@@ -21,12 +24,17 @@ import (
 // are automatically ignored without needing a gitignore update.
 //
 // Re-included committed files:
-//   - !.gitignore:      the gitignore itself (must be committed to propagate)
-//   - !sync.manifest:   sparse checkout manifest (read during clone phase 1)
+//   - !.gitignore:          the gitignore itself (must be committed to propagate)
+//   - !sync.manifest:       sparse checkout manifest (read during clone phase 1)
+//   - !add-ons.lock.json:   the team's Add-on Catalog selection (ADR-032 D5). Derived
+//     from addons.LockRelativePath rather than hardcoded, so the two never drift.
+//     Without this entry, `ox addons install|update` writes a lock this deny-all
+//     gitignore silently swallows: never committed, never reaches a teammate, no error.
 var checkoutRequiredEntries = []string{
 	"*",
 	"!.gitignore",
 	"!sync.manifest",
+	"!" + path.Base(addons.LockRelativePath),
 }
 
 // rejGitignoreEntry is the root-.gitignore pattern that keeps `git apply
@@ -297,8 +305,16 @@ func commitCheckoutGitignore(ctx context.Context, repoPath string) error {
 		return fmt.Errorf("git add .sageox/.gitignore: %s: %w", strings.TrimSpace(string(output)), err)
 	}
 
+	// Commit ONLY .sageox/.gitignore — the trailing pathspec makes this a
+	// path-limited (--only) commit, so any OTHER changes already staged in the
+	// index (e.g. deletions a sparse/GC reconcile removed from the cone) are NOT
+	// swept into this commit. Without the pathspec, this bare `git commit`
+	// snapshotted the whole index: on 2026-08-25 it recorded 10,373 deletions
+	// (every plan + session on the Ox Dot ledger) under this very message and
+	// pushed them. See ADR-024 and the assertNoSacredMassDeletion backstop.
 	commitCmd := exec.CommandContext(ctx, "git", "-C", repoPath,
-		"commit", "-m", "chore: add .sageox/.gitignore to exclude daemon cache files")
+		"commit", "-m", "chore: add .sageox/.gitignore to exclude daemon cache files",
+		"--", ".sageox/.gitignore")
 	if output, err := commitCmd.CombinedOutput(); err != nil {
 		// exit code 1 = nothing to commit (file already committed)
 		var exitErr *exec.ExitError

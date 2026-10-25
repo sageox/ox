@@ -30,11 +30,10 @@ import (
 // early return here discarded the author, the repo id, and the session too,
 // even though none of the three needs an agent — attribution has its own
 // fallback chain (OAuth token → git config → OS username) and RecordingState
-// has a workspace-scoped loader. The cost was permanent, not cosmetic: with
-// SessionName blank, plan.BackfillSessionID (which matches on SessionName) can
-// never attach the canonical ses_ id afterwards, so those plans stayed
-// unattributed forever. Measured over 233 real plans, author was populated on
-// 5.2% and session_id on 4.7% — one failure, not two.
+// has a workspace-scoped loader. The cost was permanent, not cosmetic: event
+// lines are never edited, so a session a save drops is never attached, and
+// those plans stayed unattributed forever. Measured over 233 real plans,
+// author was populated on 5.2% and session_id on 4.7% — one failure, not two.
 func resolvePlanProvenance(gitRoot string) (*plan.Provenance, *session.RecordingState) {
 	agentID, agentType := detectAgentContext()
 
@@ -73,8 +72,9 @@ func resolvePlanProvenance(gitRoot string) (*plan.Provenance, *session.Recording
 	}
 
 	// live recording → session name + start-minted ses_ SessionID (both
-	// available now) + active outcome. Stop-time reconciliation remains the
-	// backstop for recordings started under an older binary (empty ID here).
+	// available now) + active outcome. For a recording an older binary started
+	// (empty ID here), stop-time reconciliation fills meta.json's ID; its event
+	// lines keep none.
 	st := loadPlanRecordingState(gitRoot, agentID)
 	if st != nil {
 		prov.SessionName = session.GetSessionName(st.SessionPath)
@@ -132,7 +132,7 @@ func loadPlanRecordingState(gitRoot, agentID string) *session.RecordingState {
 // the lint on provenance warns "the render carries no /c/ link" about renders
 // that were never supposed to carry one.
 func planSessionLink(gitRoot string) (sessionID, url string) {
-	if attr := loadResolvedAttribution(); attr.Session == "" {
+	if attr := loadResolvedAttributionFor(gitRoot); attr.Session == "" {
 		return "", "" // session attribution disabled — no link expected
 	}
 	cfg, err := config.LoadProjectConfig(gitRoot)

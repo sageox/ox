@@ -575,7 +575,7 @@ func TestCreateSchema_ConcurrentFreshOpen(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start // maximize overlap on the check-then-ALTER race window
-			db, err := openSQLite(root)
+			db, _, err := openSQLite(root)
 			errs[i] = err
 			dbs[i] = db
 		}(i)
@@ -599,7 +599,7 @@ func TestCreateSchema_ConcurrentFreshOpen(t *testing.T) {
 
 	// Regardless of which opener "won" each migration's race, the schema
 	// must have landed fully and be queryable from an independent connection.
-	verifyDB, err := openSQLite(root)
+	verifyDB, _, err := openSQLite(root)
 	if err != nil {
 		t.Fatalf("reopen after concurrent creation: %v", err)
 	}

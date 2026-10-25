@@ -37,14 +37,18 @@ func runConversationTopics(cmd *cobra.Command, args []string) error {
 	}
 	if len(args) != 1 {
 		return conversationUsageExit(cmd.OutOrStdout(), format, conversationUsageErrorCode,
-			"topics takes exactly one <id> (cnv_<uuidv7>, rec_<uuidv7>, or a sageox:// citation URI)")
+			"topics takes exactly one <id> (cnv_<uuidv7>, rec_<uuidv7>, a sageox:// citation URI, or a sageox.ai recording link)")
 	}
 
 	reader, openErr := openConversationReader()
 	if openErr != nil {
 		return finishConversationEnvelope(cmd.OutOrStdout(), format, read.ErrorEnvelope(openErr), nil)
 	}
-	env := reader.Topics(args[0])
+	idArg, shareErr := resolveConversationIDArg(conversationContext(cmd), args[0])
+	if shareErr != nil {
+		return finishConversationEnvelope(cmd.OutOrStdout(), format, read.ErrorEnvelope(shareErr), nil)
+	}
+	env := reader.Topics(idArg)
 	return finishConversationEnvelope(cmd.OutOrStdout(), format, env, renderConversationTopicsText)
 }
 

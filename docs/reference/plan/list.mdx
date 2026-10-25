@@ -1,12 +1,32 @@
 ---
 title: "ox plan list"
 description: "CLI reference for ox plan list"
-sidebar_position: 63
+sidebar_position: 75
 ---
 
 ## ox plan list
 
 Browse saved ledger plans
+
+### Synopsis
+
+Browse saved ledger plans, newest first.
+
+Every saved plan is listed, whatever its status (abandoned and superseded
+plans included). Narrow the list the same way as 'ox session list' and
+'ox conversation list':
+
+  --limit N    show at most N plans (0 = no limit, the default)
+  --since X    only plans saved at or after X
+  --until X    only plans saved before X; a bare date includes that whole day
+
+X is a duration (30m, 2h, 7d, 1w), an RFC3339 instant, or a date (2026-10-01).
+
+Examples:
+  ox plan list                         # every saved plan
+  ox plan list --limit 5               # the five newest
+  ox plan list --since 7d              # saved in the last week
+  ox plan list --since 2026-10-01 --until 2026-10-07 --json
 
 ```
 ox plan list [flags]
@@ -15,21 +35,25 @@ ox plan list [flags]
 ### Options
 
 ```
-  -h, --help   help for list
-      --json   emit the plan list as JSON (scripting path)
+  -h, --help           help for list
+      --json           emit the plan list as JSON (scripting path)
+      --limit int      show at most N plans, newest first (0 = no limit)
+      --since string   only plans saved at or after this time: a duration (30m, 2h, 7d, 1w), RFC3339, or YYYY-MM-DD
+      --until string   only plans saved before this time (same forms as --since; a bare date includes that whole day)
 ```
 
 ### Options inherited from parent commands
 
 ```
-  -c, --config string    config file path (default: .sageox/config.yaml)
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
   -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
 ```
 
 ### SEE ALSO
 
-* [ox plan](/plan)	 - Work with implementation plans (enrich, render, review)
-
+* [ox plan](/plan)	 - Work with plans (enrich, render, review)

@@ -5,7 +5,6 @@ package main
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -202,33 +201,4 @@ func TestCheckProjectHookCommands_InvalidCommand(t *testing.T) {
 	result := checkProjectHookCommands()
 	assert.True(t, result.warning, "should warn about invalid command 'ox prime'")
 	assert.Contains(t, result.message, "1 invalid", "should report 1 invalid command")
-}
-
-// initGitRepo creates a minimal git repo in the given directory.
-func initGitRepo(t *testing.T, dir string) {
-	t.Helper()
-	cmds := [][]string{
-		{"git", "init"},
-		{"git", "config", "user.name", "Dev"},
-		{"git", "config", "user.email", "dev@example.com"},
-		{"git", "config", "commit.gpgsign", "false"},
-	}
-	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = dir
-		out, err := cmd.CombinedOutput()
-		require.NoError(t, err, "failed: %v: %s", args, string(out))
-	}
-
-	// create an initial commit so git operations work
-	readme := filepath.Join(dir, "README.md")
-	require.NoError(t, os.WriteFile(readme, []byte("repo"), 0644))
-	cmd := exec.Command("git", "add", "README.md")
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "git add: %s", string(out))
-	cmd = exec.Command("git", "commit", "-m", "initial")
-	cmd.Dir = dir
-	out, err = cmd.CombinedOutput()
-	require.NoError(t, err, "git commit: %s", string(out))
 }

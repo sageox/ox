@@ -23,6 +23,12 @@ func tryFlock(f *os.File) error {
 	return nil
 }
 
+// flockContended reports whether a tryFlock error means another process
+// holds the lock, as opposed to flock itself failing.
+func flockContended(err error) bool {
+	return errors.Is(err, unix.EWOULDBLOCK)
+}
+
 // unlockFlock releases an advisory lock previously acquired via
 // tryFlock. Errors are logged by the caller (via defer) since by the
 // time we're unlocking the success path has already happened.

@@ -5,11 +5,18 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/sageox/ox/internal/codedb/index"
 	"github.com/sageox/ox/internal/codedb/search"
 	"github.com/sageox/ox/internal/codedb/store"
 )
+
+// renameDir indirects os.Rename so tests can inject a promotion failure and
+// verify the previous cache survives (BuildCodeDBAtomic).
+var renameDir = os.Rename
 
 // DB is the top-level CodeDB facade.
 type DB struct {
@@ -42,6 +49,18 @@ func OpenSQLOnly(root string) (*DB, error) {
 	return &DB{store: s}, nil
 }
 
+// OpenSQLReadOnly opens a CodeDB's SQL half for queries only: it never migrates
+// and never deletes, which a writable open may. Same bleve restrictions as
+// OpenSQLOnly. See store.OpenSQLReadOnly for the tradeoff; callers must be
+// fail-open.
+func OpenSQLReadOnly(root string) (*DB, error) {
+	s, err := store.OpenSQLReadOnly(root)
+	if err != nil {
+		return nil, fmt.Errorf("open codedb store read-only: %w", err)
+	}
+	return &DB{store: s}, nil
+}
+
 // Close releases all resources.
 func (db *DB) Close() error {
 	return db.store.Close()
@@ -52,6 +71,12 @@ func (db *DB) Store() *store.Store {
 	return db.store
 }
 
+// ReadOnly reports whether the codedb was opened from media this process cannot
+// write. Reads work; indexing is refused.
+func (db *DB) ReadOnly() bool {
+	return db.store.ReadOnly
+}
+
 // IndexRepo clones/fetches and indexes a git repository.
 func (db *DB) IndexRepo(ctx context.Context, url string, opts index.IndexOptions) error {
 	return index.IndexRepo(ctx, db.store, url, opts)
@@ -60,6 +85,185 @@ func (db *DB) IndexRepo(ctx context.Context, url string, opts index.IndexOptions
 // IndexLocalRepo indexes a local git repository's committed content.
 func (db *DB) IndexLocalRepo(ctx context.Context, localPath string, opts index.IndexOptions) error {
 	return index.IndexLocalRepo(ctx, db.store, localPath, opts)
+}
+
+// OpenIndexWithHeal opens the codedb at dataDir and runs indexFn against it. If
+// indexFn fails with an on-disk corruption error (see index.IsCorruptionError)
+// — the failure class that otherwise makes every subsequent `ox index` fail
+// identically against the same half-written cache, i.e. a permanent crash loop
+// — it discards the codedb cache and retries indexFn ONCE from a clean
+// directory. This is the indexing-pass analog of the git checkout's
+// discard-and-reclone recovery.
+//
+// The returned *DB is left open so the caller can run follow-up pipeline stages
+// (ParseSymbols/ParseComments) against the healed store; the caller owns Close.
+// A non-corruption failure (context cancellation/deadline, alternates
+// unsupported, disk error, …) is returned as-is WITHOUT discarding anything.
+// One retry only: the discard clears the corrupt state, so a second identical
+// failure is a genuine error, not a loop to keep spinning on.
+func OpenIndexWithHeal(ctx context.Context, dataDir string, indexFn func(context.Context, *DB) error) (*DB, error) {
+	db, err := Open(dataDir)
+	if err != nil {
+		return nil, err
+	}
+
+	// Every recovery below this point writes: the marker escalation and the
+	// corruption retry both wipe dataDir, and indexFn itself only writes. On a
+	// read-only store none of that is possible, so say so once here instead of
+	// failing partway through a pass.
+	if db.ReadOnly() {
+		_ = db.Close()
+		return nil, fmt.Errorf("cannot index into %s: %w", dataDir, store.ErrReadOnly)
+	}
+
+	// Open self-heals a structurally-corrupt bleve sub-index transparently: it
+	// empties the sub-index and writes a .needs_reindex marker. Incremental
+	// indexing would then skip the commits already recorded in SQLite and leave
+	// the emptied sub-index permanently empty — a silent empty search, worse than
+	// a hard error. When a marker is present, escalate to a from-scratch rebuild
+	// (wiping dataDir clears the stale SQL rows and the marker so the build
+	// re-walks every commit). A one-shot in-process `ox index` has no daemon
+	// "next pass" to do this, so it must happen here.
+	if len(store.NeedsReindexMarkers(dataDir)) > 0 {
+		slog.Warn("codedb self-heal marker present after open; rebuilding from scratch", "data_dir", dataDir)
+		db, err = reopenClean(db, dataDir)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	runErr := indexFn(ctx, db)
+	if runErr == nil {
+		return db, nil
+	}
+	if !index.IsCorruptionError(runErr) {
+		_ = db.Close()
+		return nil, runErr
+	}
+
+	slog.Warn("codedb indexing failed on a corrupt cache; discarding cache and retrying once",
+		"data_dir", dataDir, "error", runErr)
+	db, err = reopenClean(db, dataDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := indexFn(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("codedb reindex after cache discard still failed: %w", err)
+	}
+	return db, nil
+}
+
+// reopenClean closes db, discards the codedb cache at dataDir, and returns a
+// freshly-opened empty DB. Shared by OpenIndexWithHeal's marker-escalation and
+// corruption-retry recovery paths so they wipe-and-reopen identically.
+func reopenClean(db *DB, dataDir string) (*DB, error) {
+	if closeErr := db.Close(); closeErr != nil {
+		slog.Warn("close codedb before discard failed", "error", closeErr)
+	}
+	if err := os.RemoveAll(dataDir); err != nil {
+		return nil, fmt.Errorf("discard codedb cache: %w", err)
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return nil, fmt.Errorf("recreate codedb dir after discard: %w", err)
+	}
+	fresh, err := Open(dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("reopen codedb after discard: %w", err)
+	}
+	return fresh, nil
+}
+
+// BuildCodeDBAtomic performs a from-scratch codedb build at finalDir
+// crash-atomically. It builds into a sibling "<finalDir>.building" directory and
+// os.Rename()s it into place only after buildFn returns successfully and the DB
+// is closed. A process killed mid-build therefore leaves finalDir untouched (or
+// absent) rather than half-written — so the next run starts clean instead of
+// crash-looping on a partially-written cache. Any "<finalDir>.building" left by a
+// prior killed build is discarded before starting.
+//
+// buildFn receives a *DB rooted at the temp directory and MUST perform the
+// COMPLETE build (git index + symbol/comment parse) — anything left for after
+// the swap would not be covered by the atomicity guarantee. Use this for
+// full / first-time builds; incremental refreshes of an existing healthy cache
+// write in place (a whole-directory swap would force a full rebuild every pass
+// and break concurrent readers).
+func BuildCodeDBAtomic(ctx context.Context, finalDir string, buildFn func(context.Context, *DB) error) error {
+	parent := filepath.Dir(finalDir)
+	base := filepath.Base(finalDir)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return fmt.Errorf("create codedb parent dir: %w", err)
+	}
+
+	// Unique staging dir per build. A fixed "<dir>.building" path lets two
+	// concurrent builds (e.g. one per worktree, sharing the ledger cache) delete
+	// each other's in-progress files; MkdirTemp gives each build its own.
+	tmpDir, err := os.MkdirTemp(parent, base+".building-*")
+	if err != nil {
+		return fmt.Errorf("create codedb build dir: %w", err)
+	}
+	// Always clean up the staging dir. On the success path it has already been
+	// renamed to finalDir, so this is a no-op; on every failure path it removes
+	// the abandoned build (no orphan accumulation in the shared ledger cache).
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	db, err := Open(tmpDir)
+	if err != nil {
+		return err
+	}
+	if err := buildFn(ctx, db); err != nil {
+		_ = db.Close()
+		return err
+	}
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("close codedb build before swap: %w", err)
+	}
+
+	// Promote without ever leaving a window where no usable cache exists: move
+	// any existing cache aside first, rename the freshly-built one into place,
+	// then discard the moved-aside copy. If the promoting rename fails, restore
+	// the previous cache — it stays available until the replacement is installed.
+	// os.Rename within the same parent dir is atomic on POSIX.
+	suffix := strings.TrimPrefix(filepath.Base(tmpDir), base+".building-")
+	backupDir := filepath.Join(parent, base+".old-"+suffix)
+	haveBackup := false
+	if _, statErr := os.Stat(finalDir); statErr == nil {
+		if err := renameDir(finalDir, backupDir); err != nil {
+			return fmt.Errorf("move stale codedb aside before swap: %w", err)
+		}
+		haveBackup = true
+	} else if !os.IsNotExist(statErr) {
+		return fmt.Errorf("stat codedb before swap: %w", statErr)
+	}
+
+	if err := renameDir(tmpDir, finalDir); err != nil {
+		// Promotion failed: restore the previous healthy cache so it stays usable
+		// (the build simply re-runs on the next pass). The staging dir is removed
+		// by the deferred cleanup.
+		if haveBackup {
+			if restoreErr := renameDir(backupDir, finalDir); restoreErr != nil {
+				// Restore also failed. If finalDir now holds a usable cache — e.g.
+				// a concurrent builder promoted into it while ours was moved aside,
+				// so both of our renames hit a non-empty target — our backup is
+				// redundant; discard it so a full index copy does not leak into the
+				// shared ledger cache. Otherwise the backup is the only surviving
+				// copy: keep it and surface where to recover it from.
+				if _, statErr := os.Stat(finalDir); statErr == nil {
+					_ = os.RemoveAll(backupDir)
+				} else {
+					slog.Error("codedb cache stranded after failed swap and restore; recover from backup",
+						"final_dir", finalDir, "backup_dir", backupDir, "restore_error", restoreErr)
+					return fmt.Errorf("promote codedb build into place: %w (previous cache preserved at %s)", err, backupDir)
+				}
+			}
+		}
+		return fmt.Errorf("promote codedb build into place: %w", err)
+	}
+
+	if haveBackup {
+		_ = os.RemoveAll(backupDir)
+	}
+	return nil
 }
 
 // BuildDirtyIndex builds an on-disk Bleve index of dirty (uncommitted) files.
@@ -138,6 +342,15 @@ func (db *DB) BackfillSymbolEdges(ctx context.Context, progress func(string)) (i
 // IndexGitHubData reads PR/issue JSON files from the ledger and indexes them into CodeDB.
 func (db *DB) IndexGitHubData(ctx context.Context, ledgerPath string, progress func(string)) (*index.GitHubIndexStats, error) {
 	return index.IndexGitHubData(ctx, db.store, ledgerPath, index.ProgressFunc(progress))
+}
+
+// IndexGitHubBoard indexes the team bulletin board's mirrored GitHub posts for
+// repoFullName ("owner/name") into CodeDB. Call it after IndexGitHubData: a
+// board post wins over a Ledger snapshot for the same number. alsoRepos are
+// further spellings of the same repo (GitHub's current name after a rename);
+// when posts fail to index the error wraps index.ErrBoardPostsFailed.
+func (db *DB) IndexGitHubBoard(ctx context.Context, postsDir, repoFullName string, progress func(string), alsoRepos ...string) (*index.GitHubIndexStats, error) {
+	return index.IndexGitHubBoard(ctx, db.store, postsDir, repoFullName, index.ProgressFunc(progress), alsoRepos...)
 }
 
 // Search parses and executes a query.

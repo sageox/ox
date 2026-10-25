@@ -81,7 +81,7 @@ func TestFormatReminderContent(t *testing.T) {
 		c := formatReminderContent(state, dest, true)
 		assert.Contains(t, c, "Tell the user")
 		assert.Contains(t, c, dest, "destination (team + repo) must be surfaced")
-		assert.Contains(t, c, "/ox-session-stop", "first fire offers a stop hint")
+		assert.Contains(t, c, "ox agent session stop", "first fire offers a stop hint")
 		assert.Contains(t, c, "sageox.ai/rec", "first fire offers learn-more link")
 	})
 
@@ -91,7 +91,7 @@ func TestFormatReminderContent(t *testing.T) {
 		assert.Contains(t, c, "45 turns")
 		assert.Contains(t, c, "1h 23m")
 		assert.NotContains(t, c, "sageox.ai/rec", "periodic fire must not repeat the link")
-		assert.NotContains(t, c, "/ox-session-stop", "periodic fire must not repeat the stop hint")
+		assert.NotContains(t, c, "ox agent session stop", "periodic fire must not repeat the stop hint")
 	})
 }
 
@@ -188,7 +188,7 @@ func TestRecordingReminderSource_Produce_FirstReminder(t *testing.T) {
 	// first fire: names team + repo destination, offers stop + learn-more;
 	// counts are omitted (near-zero info at session start)
 	assert.Contains(t, entries[0].Content, "Acme Eng's web-app ledger")
-	assert.Contains(t, entries[0].Content, "/ox-session-stop")
+	assert.Contains(t, entries[0].Content, "ox agent session stop")
 	assert.Contains(t, entries[0].Content, "sageox.ai/rec")
 }
 

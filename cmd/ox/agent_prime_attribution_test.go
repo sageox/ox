@@ -13,14 +13,20 @@ func TestWithAttributionGuidance_DefaultAttribution(t *testing.T) {
 	result := withAttributionGuidance("", true, attr)
 
 	assert.Contains(t, result, "## SageOx Attribution")
+	assert.Contains(t, result, "Attribution is **conditional**")
 	assert.Contains(t, result, "Real-Time Insight Attribution")
 	assert.Contains(t, result, "Plan Footer")
 	assert.Contains(t, result, "Guided by SageOx")
-	assert.Contains(t, result, "Contribution Score (Required)")
+	assert.Contains(t, result, "SageOx Contribution Score (report only when commit attribution is configured; `none` is a valid, common answer)")
 	assert.Contains(t, result, "ox session score")
-	assert.Contains(t, result, "Commit Attribution (Automatic)")
+	assert.Contains(t, result, "Commit Attribution (conditional — the hook adds it only when your reported score meets the threshold)")
 	assert.Contains(t, result, "PR Attribution (Conditional)")
 	assert.NotContains(t, result, "Not Logged In")
+	// #809: the old unconditional labels must be ABSENT, so a botched edit that leaves both
+	// the old and new wording present fails this guard (the exact wording #809 blames).
+	assert.NotContains(t, result, "Contribution Score (Required)")
+	assert.NotContains(t, result, "Commit Attribution (Automatic)")
+	assert.NotContains(t, result, "always credit both")
 }
 
 func TestWithAttributionGuidance_CommitDisabled(t *testing.T) {
@@ -100,8 +106,8 @@ func TestWithAttributionGuidance_CustomCommitValue(t *testing.T) {
 	attr := config.MergeAttribution(&config.Attribution{Commit: &custom}, nil)
 	result := withAttributionGuidance("", true, attr)
 
-	assert.Contains(t, result, "Commit Attribution (Automatic)")
-	assert.Contains(t, result, "Contribution Score (Required)")
+	assert.Contains(t, result, "Commit Attribution (conditional — the hook adds it only when your reported score meets the threshold)")
+	assert.Contains(t, result, "SageOx Contribution Score (report only when commit attribution is configured; `none` is a valid, common answer)")
 	assert.NotContains(t, result, "ox@sageox.ai")
 }
 

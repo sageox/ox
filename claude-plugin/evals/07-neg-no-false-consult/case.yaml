@@ -1,0 +1,45 @@
+schema_version: "1.0"
+name: 07-neg-no-false-consult
+description: >
+  NEGATIVE CONTROL. A general-knowledge question with no before/after cue.
+  Prime's consult-first block must not fire on it; the cheapest correct
+  answer uses no tools at all.
+tags: [negative-control, consult-precision, no-bash, smoke]
+expected_outcome: >
+  Both arms answer directly with zero tool calls; delta 0. Any `ox` call in
+  the WITH arm is a false-positive consult.
+context:
+  scaffold_script: scaffold.sh
+execution:
+  prompt: |
+    Explain what `defer` does in Go, in three sentences.
+  max_turns: 5
+  timeout_seconds: 120
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+    - Skill
+    - "Bash(ox:*)"
+runs: 3
+graders:
+  - type: tool_used
+    name: no-tools-needed
+    tool: Bash
+    min: 0
+    max: 0
+    arm: both
+    weight: 2
+  # Deterministic correctness: the two facts every correct answer states.
+  # (An llm "about three sentences" rubric was piloted and voted inconsistently
+  # across identical answers — judge noise, not signal. Dropped.)
+  - type: regex
+    name: runs-at-function-return
+    target: last_message
+    flags: "i"
+    pattern: "surrounding function (returns|exits)|function (returns|exits)|when .{0,40}returns"
+  - type: regex
+    name: mentions-lifo-or-cleanup
+    target: last_message
+    flags: "i"
+    pattern: 'LIFO|last-in|last in, first out|stack|cleanup|clean-up|Close\(\)|Unlock\(\)'

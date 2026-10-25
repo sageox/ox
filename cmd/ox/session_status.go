@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -236,11 +235,16 @@ func buildSessionRecordingEntry(s *session.RecordingState, alive *bool, status s
 // so the (turn set, time nil) pair is the durable record of "we tried and it
 // did not land" — the state that otherwise looks identical to a healthy
 // session whose server page is merely lagging.
+//
+// resolved is the repo policy (repoDraftPolicy), the same one the Stop hook
+// applies. A recording that saved session_publishing: manual is held on this
+// machine and the hook never drafts it, so it reports "disabled" rather than a
+// "pending" that never arrives.
 func draftStateFor(resolved *config.ResolvedSessionDraft, s *session.RecordingState) string {
 	if s == nil {
 		return ""
 	}
-	if resolved == nil || !resolved.Enabled {
+	if resolved == nil || !resolved.Enabled || s.RecordedManualPublishing() {
 		return "disabled"
 	}
 	// Order matters: check the FAILED shape before the published shape.
@@ -284,17 +288,19 @@ func conversationURLForState(projectCfg *config.ProjectConfig, attributionOn boo
 // recording row, so `ox session status` reads each config file once rather than
 // once per active agent.
 type draftStatusContext struct {
-	resolved      *config.ResolvedSessionDraft
-	projectCfg    *config.ProjectConfig
-	attributionOn bool
+	resolved         *config.ResolvedSessionDraft
+	projectCfg       *config.ProjectConfig
+	attributionOn    bool
+	manualPublishing bool
 }
 
-func newDraftStatusContext() draftStatusContext {
-	projectCfg, _ := config.LoadProjectConfig("")
+func newDraftStatusContext(projectRoot string) draftStatusContext {
+	projectCfg, _ := config.LoadProjectConfig(projectRoot)
 	return draftStatusContext{
-		resolved:      config.ResolveSessionDraft(),
-		projectCfg:    projectCfg,
-		attributionOn: loadResolvedAttribution().Session != "",
+		resolved:         repoDraftPolicy(projectRoot),
+		projectCfg:       projectCfg,
+		attributionOn:    loadResolvedAttributionFor(projectRoot).Session != "",
+		manualPublishing: config.GetSessionPublishing(projectRoot) == config.SessionPublishingManual,
 	}
 }
 
@@ -308,7 +314,12 @@ func (c draftStatusContext) applyTo(s *session.RecordingState, turnCount *int, s
 	if s.DraftPublishedAt != nil {
 		*publishedAt = s.DraftPublishedAt.Format("2006-01-02T15:04:05Z07:00")
 	}
-	*url = conversationURLForState(c.projectCfg, c.attributionOn, s)
+	// A session held on this machine is never registered with the server, so
+	// its /c/ link would 404. Same rule as notifySessionStartedAsync: the mode
+	// saved at start or the setting now.
+	if !c.manualPublishing && !s.RecordedManualPublishing() {
+		*url = conversationURLForState(c.projectCfg, c.attributionOn, s)
+	}
 }
 
 func init() {
@@ -339,6 +350,9 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 
 	// filter to current agent if --current
 	if currentOnly {
+		if cursorRequiresExplicitAgentID() {
+			return fmt.Errorf("missing-native-identity: Cursor does not expose a current conversation ID to shell commands; use 'ox session status' to list recordings")
+		}
 		agentID := os.Getenv("SAGEOX_AGENT_ID")
 		if agentID == "" {
 			if jsonOutput {
@@ -420,11 +434,11 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 				output.PauseCount = state.PauseCount
 				output.InheritedPause = state.InheritedPause
 				output.InheritedFromSession = state.InheritedFromSession
-				output.Guidance = "Recording is SUSPENDED. Resume with `ox session resume` or stop with `ox session stop`."
+				output.Guidance = "Recording is SUSPENDED. Resume with `ox agent session resume` or stop with `ox agent session stop`."
 			}
 			// ADR-029: surface draft-placeholder state so "my /c/ link 404s"
 			// is diagnosable rather than a guess.
-			newDraftStatusContext().applyTo(state, &output.TurnCount, &output.DraftState,
+			newDraftStatusContext(projectRoot).applyTo(state, &output.TurnCount, &output.DraftState,
 				&output.DraftPublishedAt, &output.ConversationURL)
 			return outputJSON(cmd.OutOrStdout(), output)
 		}
@@ -483,7 +497,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 	// multiple recordings
 	if jsonOutput {
 		// Loaded once for the whole invocation, not per row.
-		draftCtx := newDraftStatusContext()
+		draftCtx := newDraftStatusContext(projectRoot)
 		var entries []sessionRecordingEntry
 		for _, s := range states {
 			alive, status := agentLivenessFor(agentAlive, s.AgentID)
@@ -547,14 +561,17 @@ func resolveAgentLiveness(projectRoot string, states []*session.RecordingState) 
 	// collect agent IDs we care about
 	agentIDs := make(map[string]bool)
 	for _, s := range states {
-		if s.AgentID != "" {
+		if s.AgentID != "" && s.AdapterName != "cursor" {
 			agentIDs[s.AgentID] = true
 		}
+	}
+	if len(agentIDs) == 0 {
+		return result // Cursor has no trustworthy per-conversation process PID.
 	}
 
 	// source 1: recording state PID — direct from .recording.json
 	for _, s := range states {
-		if s.AgentID != "" && s.ParentPID > 0 {
+		if agentIDs[s.AgentID] && s.ParentPID > 0 {
 			result[s.AgentID] = s.IsAgentAlive()
 		}
 	}
@@ -611,7 +628,7 @@ func agentLivenessFor(livenessMap map[string]bool, agentID string) (*bool, strin
 // agentAlivePtr returns a *bool indicating agent liveness from PID.
 // Returns nil if no PID is recorded (backward compat with old recordings).
 func agentAlivePtr(state *session.RecordingState) *bool {
-	if state == nil || state.ParentPID <= 0 {
+	if state == nil || state.ParentPID <= 0 || state.AdapterName == "cursor" {
 		return nil
 	}
 	alive := state.IsAgentAlive()
@@ -630,9 +647,10 @@ func formatProcessStatus(status string) string {
 	}
 }
 
-// outputJSON writes JSON to w with 2-space indentation.
+// outputJSON writes JSON to w with 2-space indentation. Shared by every
+// command that reports a JSON result (session status, kb, murmur, session
+// list) — migrating this one implementation carries all of their call sites
+// through the themed printer without touching those files.
 func outputJSON(w io.Writer, v any) error {
-	encoder := json.NewEncoder(w)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(v)
+	return cli.PrintJSONTo(w, v)
 }

@@ -53,7 +53,6 @@ func TestDefaultConfig_AllValues(t *testing.T) {
 	assert.Equal(t, 500*time.Millisecond, cfg.DebounceWindow)
 	assert.Equal(t, 30*time.Minute, cfg.VersionCheckInterval)
 	assert.Equal(t, 1*time.Hour, cfg.GCCheckInterval)
-	assert.Equal(t, 6*time.Hour, cfg.DistillInterval)
 	assert.Equal(t, 15*time.Minute, cfg.LedgerCheckInterval)
 	assert.Equal(t, 15*time.Minute, cfg.GitHubSyncInterval)
 	assert.Equal(t, 1*time.Hour, cfg.InactivityTimeout)

@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "evidence": [
+    {
+      "path": "evidence/available.html",
+      "status": "available",
+      "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "observed_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size_bytes": 3
+    },
+    {
+      "path": "evidence/invalid.html",
+      "status": "invalid",
+      "reason": "invalid_archive_entry"
+    },
+    {
+      "path": "evidence/missing.html",
+      "status": "missing",
+      "reason": "not_listed_in_manifest"
+    }
+  ],
+  "counts": {
+    "referenced": 3,
+    "available": 1,
+    "missing": 1,
+    "invalid": 0
+  }
+}

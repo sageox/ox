@@ -17,22 +17,23 @@ Follow these steps exactly:
 git branch --show-current
 git status
 
-# Run quality gates (run lint and tests in parallel)
+# Run the executable in-repo release gates
 make lint
-make test-all          # all unit tests incl. expensive (git clone, SQLite, LFS)
-make test-slow         # build tag: slow (real ox binary tests)
-make test-digital-twin # ledger + team-context structural verification
+make test-release      # full + coverage ratchets + slow + acceptance + digital twins
 ```
 
 If tests or lint fail, fix issues before proceeding.
 
-### Step 1b: E2E Integration Tests (MANDATORY — requires claude CLI + ANTHROPIC_API_KEY)
+### Step 1b: External Harness Compatibility Evidence
 
 ```bash
 make test-integration
 ```
 
-**This is a hard release gate.** These tests launch real Claude Code instances, exercise real hooks, send real SIGINT signals, and verify the full session recording and anti-entropy pipelines end-to-end. Do NOT proceed if integration tests fail.
+These tests launch real Claude Code instances and exercise hooks, signals, and
+session pipelines end-to-end. Investigate failures, but do not represent this
+as an automated release gate until `ox-ilrr.4` provides machine-verifiable
+current-binary provenance and attestation.
 
 ### Step 1c: Smoke Tests (requires SAGEOX_CI_PASSWORD)
 
@@ -159,31 +160,81 @@ Include in the PR body: summary of changes, changelog highlights, test results, 
 
 Tell the user to review and merge the PR. Wait for merge before proceeding.
 
-### Step 8: Tag and Create Draft GitHub Release
+### Step 8: Create and Review Draft, Then Dispatch Verification
 
 After the PR is merged to main:
 
 ```bash
 git checkout main
 git pull
-git tag v0.X.0
-git push --tags
 ```
 
-Extract the changelog section for this version and create a draft release:
+Create and push the approved tag before the draft. Raw tag pushes do not
+publish anything, but the release workflow must be able to check out the exact
+tag it verifies:
+
+Ask the user to confirm the release-tag push immediately before running these
+commands.
 
 ```bash
-gh release create v0.X.0 --draft --title "v0.X.0" --notes-file -
+git tag v0.X.0
+git push origin v0.X.0
+```
+
+Then extract the changelog section for this version and create the draft.
+`--verify-tag` prevents an accidental release from a different commit, and
+GoReleaser reuses the draft so the human-written notes are preserved:
+
+```bash
+gh release create v0.X.0 --draft --verify-tag --title "v0.X.0" --notes-file -
 ```
 
 Pipe the release notes (the changelog section for this version) to the command.
+Review the draft at https://github.com/sageox/ox/releases. When the notes are
+approved, explicitly dispatch the verified release workflow:
+
+```bash
+gh workflow run release.yml -f tag=v0.X.0
+```
+
+Tag pushes intentionally do not trigger publication. The explicit dispatch
+starts `.github/workflows/release.yml`; its verification job
+must pass before GoReleaser uploads artifacts and publishes the existing draft.
+Do not publish the draft manually: since #848 (Aug 31, 2026) publishing starts
+no build, and releases here are immutable, so a draft published by hand never
+gets binaries and the only fix is a new version. That is how v0.17.1 shipped
+without binaries.
+
+### Step 8b: Publish the notes to the public changelog
+
+A GitHub release is not the announcement. The same notes must appear on
+**https://sageox.ai/changelog** under the **CLI** surface, or the release is
+invisible to anyone who does not watch the repo.
+
+This is authored in the internal marketing repository using its
+`changelog-entry` skill — run that skill there; do not hand-roll the entry. Give
+it the version, the published release URL, and the user-facing bullets from this
+release's notes.
+
+Two things to carry over, both easy to get wrong:
+
+- **Trim anything users cannot reach.** Feature-flagged work that defaults off
+  (a server-enrolled pilot, an experiment) belongs in neither the GitHub release
+  nor the changelog. Check the flag's default before writing the bullet, not
+  after.
+- **Rewrite, do not paste.** The changelog is shorter than the release notes —
+  a handful of bullets, each one user-visible behavior, leading with the outcome.
+
+Verify the entry appears under the CLI filter at
+https://sageox.ai/changelog once the marketing site deploys.
 
 ### Step 9: Final Instructions
 
 After completing all steps, tell the user:
 
-1. **Review the draft release** at: https://github.com/sageox/ox/releases
-2. **Publish the release** in GitHub to trigger GoReleaser automation
+1. **Watch the explicitly dispatched release workflow.**
+2. **Verify the draft was published with signed artifacts** only after all enforced tiers passed.
+3. **Verify the entry is live** on https://sageox.ai/changelog under the CLI surface.
 
 ## Important Rules
 
@@ -192,5 +243,7 @@ After completing all steps, tell the user:
 - One release per day max
 - NEVER auto-generate changelogs from commits
 - ALWAYS ask user to confirm version before bumping
-- Draft releases only - human publishes
+- Draft release notes are human-reviewed; the explicitly dispatched verified workflow publishes
 - ALL changes go through a PR - never commit directly to main
+- A release is not done when the GitHub release publishes; it is done when the
+  notes are live on https://sageox.ai/changelog

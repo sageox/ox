@@ -54,7 +54,7 @@ func TestEmitSuspendedNudge_WhileSuspended(t *testing.T) {
 	got := buf.String()
 	assert.Contains(t, got, "<system-reminder>")
 	assert.Contains(t, got, "Recording SUSPENDED")
-	assert.Contains(t, got, "/ox-session-resume")
+	assert.Contains(t, got, "ox agent session resume")
 }
 
 func TestEmitSuspendedNudge_NotSuspended(t *testing.T) {

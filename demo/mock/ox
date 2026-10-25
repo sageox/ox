@@ -9,10 +9,10 @@
 #   export PATH="$(pwd)/demo/mock:$PATH"
 
 # Colors (ox CLI dark theme - true color)
-G='\033[38;2;122;143;120m'      # sage green (success/primary)
-GB='\033[1;38;2;122;143;120m'   # sage green bold (section headers)
-C='\033[38;2;224;165;106m'      # copper gold (secondary/commands)
-CB='\033[1;38;2;224;165;106m'   # copper gold bold
+G='\033[38;2;122;170;119m'      # sage green (success/primary)
+GB='\033[1;38;2;122;170;119m'   # sage green bold (section headers)
+S='\033[38;2;173;207;163m'      # sage emphasis (secondary/commands)
+SB='\033[1;38;2;173;207;163m'   # sage emphasis bold
 DM='\033[38;2;143;153;163m'     # dim gray
 B='\033[1m'                      # bold
 R='\033[0m'                      # reset
@@ -31,7 +31,7 @@ mock_login() {
     echo ""
     printf "${G}✓${R} Git credentials synced\n"
     echo ""
-    printf "${C}✦${R} Next: ${C}ox init${R} — initialize SageOx in this repo\n"
+    printf "${S}✦${R} Next: ${S}ox init${R} — initialize SageOx in this repo\n"
 }
 
 mock_init() {
@@ -68,10 +68,10 @@ mock_init() {
     echo "════════════════════════════════════════════════════════════"
     echo ""
     printf "${GB}NEXT STEPS${R}\n"
-    printf "  1. Commit .sageox/:  ${C}git add .sageox/ && git commit${R}\n"
-    printf "  2. Verify setup:     ${C}ox doctor${R}\n"
+    printf "  1. Commit .sageox/:  ${S}git add .sageox/ && git commit${R}\n"
+    printf "  2. Verify setup:     ${S}ox doctor${R}\n"
     echo ""
-    printf "${DM}Your AI coworker auto-runs ${R}${C}ox agent prime${R}${DM} at session start.${R}\n"
+    printf "${DM}Your AI coworker auto-runs ${R}${S}ox agent prime${R}${DM} at session start.${R}\n"
 }
 
 mock_doctor() {
@@ -92,7 +92,7 @@ mock_doctor() {
     sleep 0.1
     printf "${G}✓${R} Redaction policy    active\n"
     echo ""
-    printf "${G}All checks passed.${R} ${DM}Run ${R}${C}ox doctor --fix${R}${DM} if any check is ever red.${R}\n"
+    printf "${G}All checks passed.${R} ${DM}Run ${R}${S}ox doctor --fix${R}${DM} if any check is ever red.${R}\n"
 }
 
 mock_status() {
@@ -117,7 +117,7 @@ mock_status() {
     printf "Status            ${G}✓ running, syncing${R} (pid 20966)\n"
     printf "Syncing           ${B}2 workspace(s)${R}\n"
     echo ""
-    printf "${C}✦${R} Ask your AI coworker about prior sessions — context loads on ${C}ox agent prime${R}\n"
+    printf "${S}✦${R} Ask your AI coworker about prior sessions — context loads on ${S}ox agent prime${R}\n"
 }
 
 mock_agent_prime() {

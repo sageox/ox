@@ -1,0 +1,16 @@
+{"t_utc":"2026-09-30T10:00:01.500Z","t_ms":1000,"vis":false,"ax_ref":null,"btn":null}
+{"t_utc":"2026-09-30T10:00:06.500Z","t_ms":6000,"x":40,"y":50,"vis":true,"dwell_ms":0,"v":300,"ax_ref":"axn_saved","btn":{"button":"left","phase":"down"}}
+{"t_utc":"2026-09-30T10:00:06.700Z","t_ms":6200,"x":40,"y":50,"vis":true,"dwell_ms":200,"v":0,"ax_ref":"axn_saved","btn":{"button":"left","phase":"up"}}
+{"t_utc":"2026-09-30T10:00:11.500Z","t_ms":11000,"x":200,"y":300,"vis":true,"dwell_ms":0,"v":900,"ax_ref":"axn_img","btn":null}
+{"t_utc":"2026-09-30T10:00:12.000Z","t_ms":11500,"x":200,"y":300,"vis":true,"dwell_ms":500,"v":0,"ax_ref":"axn_img","btn":null}
+{"t_utc":"2026-09-30T10:00:12.500Z","t_ms":12000,"x":200,"y":300,"vis":true,"dwell_ms":1000,"v":0,"ax_ref":"axn_img","btn":null}
+{"t_utc":"2026-09-30T10:00:13.000Z","t_ms":12500,"x":200,"y":300,"vis":true,"dwell_ms":1500,"v":0,"ax_ref":"axn_img","btn":null}
+{"t_utc":"2026-09-30T10:00:13.500Z","t_ms":13000,"x":200,"y":300,"vis":true,"dwell_ms":2000,"v":0,"ax_ref":"axn_img","btn":null}
+{"t_utc":"2026-09-30T10:00:14.000Z","t_ms":13500,"x":200,"y":300,"vis":true,"dwell_ms":2500,"v":0,"ax_ref":"axn_img","btn":null}
+{"t_utc":"2026-09-30T10:00:14.500Z","t_ms":14000,"x":260,"y":340,"vis":true,"dwell_ms":0,"v":400,"ax_ref":"axn_card","btn":null}
+{"t_utc":"2026-09-30T10:00:15.500Z","t_ms":15000,"x":260,"y":340,"vis":true,"dwell_ms":500,"v":0,"ax_ref":"axn_card","btn":null}
+{"t_utc":"2026-09-30T10:00:16.000Z","t_ms":15500,"x":260,"y":340,"vis":true,"dwell_ms":1000,"v":0,"ax_ref":"axn_card","btn":null}
+{"t_utc":"2026-09-30T10:00:16.500Z","t_ms":16000,"vis":false,"ax_ref":null,"btn":null}
+{"t_utc":"2026-09-30T10:00:17.500Z","t_ms":17000,"x":270,"y":350,"vis":true,"dwell_ms":0,"v":50,"ax_ref":"axn_group","btn":{"button":"left","phase":"down"}}
+{"t_utc":"2026-09-30T10:00:18.500Z","t_ms":18000,"x":10,"y":10,"vis":true,"dwell_ms":0,"v":50,"ax_ref":"axn_group2","btn":{"button":"left","phase":"down"}}
+{"t_utc":"2026-09-30T10:00:19.500Z","t_ms":19000,"target":{"size":{"w":1300,"h":800},"origin":{"x":10,"y":10}},"reason":"resize","vis":false,"ax_ref":null,"btn":null}

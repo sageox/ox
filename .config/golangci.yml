@@ -11,11 +11,15 @@ linters:
     - govet
     - staticcheck
 
+    # Dead code
+    - unused
+
     # Security
     - gosec
 
     # Error handling
     - errorlint
+    - errcheck
 
     # Code quality
     - misspell
@@ -28,6 +32,45 @@ linters:
     - paralleltest
 
   settings:
+    # errcheck is curated, not blanket: a CLI legitimately ignores errors on
+    # terminal output, best-effort drains, and deferred cleanup Close. Excluding
+    # those (below) collapses ~2,900 context-blind hits to the meaningful set —
+    # unchecked Write/WriteString/Encode to a real sink, Sscanf, and lifecycle
+    # calls (Start/Register/Shutdown) whose failure is otherwise silent. Test
+    # files are excluded wholesale (see exclusions.rules).
+    errcheck:
+      check-type-assertions: false
+      check-blank: false # `_ = f()` is the sanctioned explicit-ignore escape hatch
+      exclude-functions:
+        # Terminal output — a broken stdout/stderr pipe is not actionable.
+        - fmt.Print
+        - fmt.Printf
+        - fmt.Println
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        # Best-effort drains/copies (e.g. io.Copy(io.Discard, resp.Body)).
+        - io.Copy
+        - io.WriteString
+        # Deferred cleanup Close: read paths, DB handles, rows, connections,
+        # response bodies — a close error after the useful work is not
+        # actionable. Write-side flush-Close durability is handled in code, not
+        # by this coarse matcher.
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+        - (*os.File).Close
+        - (*database/sql.DB).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Tx).Rollback
+        # Best-effort filesystem/env mutations (teardown, idempotent cleanup).
+        - os.Remove
+        - os.RemoveAll
+        - os.Unsetenv
+        # Cobra/pflag wiring errors fire only on a programmer mistake (unknown
+        # flag name at init), caught immediately in dev — not a runtime error.
+        - (*github.com/spf13/pflag.FlagSet).SetAnnotation
+        - (*github.com/spf13/pflag.FlagSet).MarkHidden
+
     misspell:
       locale: US
 
@@ -58,12 +101,33 @@ linters:
 
   exclusions:
     rules:
-      # Test files - exclude security, strict error checks, and logging strictness
+      # Test files - exclude security, strict error checks, and logging strictness.
+      # errcheck is off for tests: a failed os.Chdir/Setenv/WriteFile in setup or
+      # teardown surfaces as a test failure anyway; flagging them is pure noise.
       - path: _test\.go
         linters:
           - gosec
           - errorlint
           - sloglint
+          - errcheck
+
+      # errcheck: method-name classes that are always best-effort, regardless of
+      # receiver type (the exclude-functions matcher keys on static type, so it
+      # can't catch these on internal concrete types). Deferred Close is cleanup;
+      # colored writers (color.Color.Fprint*) are terminal output; conn deadline
+      # setters fail only on an already-closed conn; Process.Kill / lock Unlock
+      # are best-effort. Genuine data ops (Write/Index/Exec/Encode/Scan) are NOT
+      # excluded and must be handled.
+      - linters: [errcheck]
+        text: 'Error return value of `[^`]+\.(Close|Fprint|Fprintf|Fprintln|SetDeadline|SetReadDeadline|SetWriteDeadline|Kill|Unlock)` is not checked'
+
+      # Adapter rules.go files are deliberately-unwired scaffolds — each file's
+      # header documents "not yet wired into main.go", kept as a documented
+      # future-integration point. Exempt them from `unused` so the intentional
+      # handlers don't have to be deleted or littered with per-func nolints.
+      - path: cmd/ox-adapter-(aider|gemini|pi)/rules\.go
+        linters:
+          - unused
 
       # SA5011 false-positives in tests. The pattern
       #   x := f(); if x == nil { t.Fatal(...) }; x.Field

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -407,6 +408,7 @@ func TestFrictionCollector_RecordFromIPC(t *testing.T) {
 		PathBucket: "/home/user/project",
 		Input:      "ox foo",
 		ErrorMsg:   "unknown command",
+		Suggestion: "status",
 	}
 
 	fc.RecordFromIPC(payload)
@@ -423,6 +425,104 @@ func TestFrictionCollector_RecordFromIPC(t *testing.T) {
 	assert.Equal(t, "/home/user/project", event.PathBucket)
 	assert.Equal(t, "ox foo", event.Input)
 	assert.Equal(t, "unknown command", event.ErrorMsg)
+	assert.Equal(t, "status", event.Suggestion, "the CLI's suggested correction must reach the cloud")
+}
+
+// TestFrictionCollector_RecordFromIPC_ScrubsUserData sends a payload as a
+// client that did not redact would (an older CLI, or any process that can write
+// to the socket) and reads what the daemon submits to the cloud.
+//
+// Failure prevented: the daemon forwarding a coworker's home path, IDs, email,
+// or pasted prompt verbatim because the only redaction lived in one CLI version.
+func TestFrictionCollector_RecordFromIPC_ScrubsUserData(t *testing.T) {
+	var receivedReq friction.SubmitRequest
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&receivedReq)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	t.Setenv("SAGEOX_FRICTION_ENDPOINT", server.URL)
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("SAGEOX_FRICTION", "true")
+
+	fc := NewFrictionCollector(testLogger(), "")
+	fc.RecordFromIPC(FrictionPayload{
+		Kind:       "unknown-command",
+		Command:    "ox /Users/person-a/notes",
+		Subcommand: "team_abc123",
+		Actor:      "human",
+		Input: "plan view /Users/person-a/src/x.html team_abc123 person@example.com\n" +
+			"second line of a pasted prompt: fix the login bug",
+		ErrorMsg:   `unknown command "cnv_01a00000-0000-7000-8000-000000000000" for "ox"`,
+		Suggestion: "plan view /home/person-a/notes.txt https://example.com/acme-corp",
+	})
+	fc.Stop()
+
+	require.Len(t, receivedReq.Events, 1)
+	event := receivedReq.Events[0]
+
+	assert.Equal(t, "plan view ~/<path> <id> <email>", event.Input, "text after the first newline is dropped")
+	assert.Equal(t, `unknown command "<id>" for "ox"`, event.ErrorMsg)
+	assert.Equal(t, "plan view ~/<path> <url>", event.Suggestion)
+	assert.Equal(t, "ox ~/<path>", event.Command)
+	assert.Equal(t, "<id>", event.Subcommand)
+	for _, leak := range []string{"person-a", "/Users", "/home", "team_abc123", "cnv_01a", "example.com", "login", "acme-corp"} {
+		assert.NotContains(t, event.Command+event.Subcommand+event.Input+event.ErrorMsg+event.Suggestion, leak)
+	}
+}
+
+// TestScrubFrictionText pins each pattern the daemon scrubs without a command
+// tree, and that the CLI's already-redacted text passes through unchanged.
+func TestScrubFrictionText(t *testing.T) {
+	t.Parallel()
+
+	token := "ghp_" + strings.Repeat("a1B2", 9)
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"cli-redacted text is untouched", "plan list --limit <arg> --json", "plan list --limit <arg> --json"},
+		{"cli-redacted agent id is untouched", "agent <id> session log", "agent <id> session log"},
+		{"macOS home path", "open /Users/person-a/src/x.html now", "open ~/<path> now"},
+		{"linux home path", "cat /home/person-a/notes.txt", "cat ~/<path>"},
+		{"root home path", "cat /root/.ssh/config", "cat ~/<path>"},
+		{"home directory itself", "cd /Users/person-a", "cd ~/"},
+		{"home directory with trailing slash", "cd /Users/person-a/", "cd ~/"},
+		{"windows home path", `type C:\Users\person-a\Documents\x.txt`, "type ~/<path>"},
+		{"windows home path with forward slashes", "type C:/Users/person-a/x.txt", "type ~/<path>"},
+		{"windows non-home path", `type D:\data\x.txt`, "type <path>"},
+		{"tilde path loses the directories under home", "cat ~/code/acme-corp/notes", "cat ~/<path>"},
+		{"other absolute path", "cat /etc/passwd", "cat <path>"},
+		{"absolute path after =", "plan save --file=/tmp/x.html", "plan save --file=<path>"},
+		{"absolute path in quotes", `error reading "/var/log/x.log"`, `error reading "<path>"`},
+		{"two paths", "cp /a/b /c/d", "cp <path> <path>"},
+		{"relative path is left alone", "plan view src/main.go owner/repo", "plan view src/main.go owner/repo"},
+		{"email", "contact person@example.com now", "contact <email> now"},
+		{"url", "fetch https://example.com/acme-corp?q=1 now", "fetch <url> now"},
+		{"url takes its path with it", "see file:///Users/person-a/x", "see <url>"},
+		{"team id", "plan list --team team_abc123", "plan list --team <id>"},
+		{"conversation id", "conversation transcript cnv_01a00000-0000-7000-8000-000000000000", "conversation transcript <id>"},
+		{"record, session, plan, repo ids", "rec_abc ses_def pln_ghi-jkl repo_mno", "<id> <id> <id> <id>"},
+		{"bare uuid", "get 3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b", "get <id>"},
+		{"id embedded in a longer word is left alone", "my_team_abc", "my_team_abc"},
+		{"input cut at first newline", "plan view\nfix the login bug", "plan view"},
+		{"input cut at first carriage return", "plan view\r\nfix the login bug", "plan view"},
+		{"leading newline leaves nothing", "\nfix the login bug", ""},
+		{"credential", "plan list --token " + token, "plan list --token [REDACTED_GITHUB_TOKEN]"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := ScrubFrictionText(tt.in)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, got, ScrubFrictionText(got), "scrubbing must be idempotent: the CLI scrubs, then the daemon scrubs again")
+		})
+	}
 }
 
 // TestFrictionCollector_UserAgentHeader verifies the daemon User-Agent is sent on requests.

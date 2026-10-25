@@ -7,11 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/tokens"
@@ -33,11 +36,9 @@ func checkTeamContextHealth(opts doctorOptions) []checkResult {
 		if legacyCheck.warning || !legacyCheck.passed {
 			checks = append(checks, legacyCheck)
 		}
-		// guidance check uses FindRepoTeamContext (daemon-discovered)
-		guidanceCheck := checkGuidanceFiles(opts.shouldFix(CheckSlugGuidanceFiles))
-		if guidanceCheck.warning || !guidanceCheck.passed {
-			checks = append(checks, guidanceCheck)
-		}
+		// even with nothing configured locally, the daemon may still be
+		// syncing an "other" team context (ox-baz5.5) — scan it too.
+		checks = append(checks, scanExtraTeamContexts(daemonSyncedTeamContexts(nil), opts)...)
 		return checks
 	}
 
@@ -60,6 +61,15 @@ func checkTeamContextHealth(opts doctorOptions) []checkResult {
 		}
 	}
 
+	// ox-baz5.5: localCfg.TeamContexts is this repo's declared list, but the
+	// daemon may also be syncing an "other" team context that was never
+	// declared here (e.g. a secondary/internal team). Before this, the LFS
+	// nested-pointer scan above silently never visited that clone — the
+	// "Team Context" section completed in ~23ms even while a real diverged
+	// clone sat unscanned. Enumerate what the daemon actually syncs and scan
+	// whatever wasn't already covered.
+	checks = append(checks, scanExtraTeamContexts(daemonSyncedTeamContexts(localCfg.TeamContexts), opts)...)
+
 	// check for legacy team contexts that should be migrated
 	legacyCheck := checkLegacyTeamContexts(gitRoot)
 	if legacyCheck.warning {
@@ -72,13 +82,80 @@ func checkTeamContextHealth(opts doctorOptions) []checkResult {
 		checks = append(checks, orphanCheck)
 	}
 
-	// check for distill guidance files
-	guidanceCheck := checkGuidanceFiles(opts.shouldFix(CheckSlugGuidanceFiles))
-	if guidanceCheck.warning || !guidanceCheck.passed {
-		checks = append(checks, guidanceCheck)
+	return checks
+}
+
+// scanExtraTeamContexts runs the nested-LFS-pointer check against each
+// daemon-synced-but-unconfigured team context (ox-baz5.5) and returns any
+// resulting checkResults. Split out from checkTeamContextHealth's two
+// near-identical loops so the actual scan-and-report behavior is testable
+// with a synthetic extra list, independent of the daemon plumbing that
+// produces it.
+func scanExtraTeamContexts(extra []config.TeamContext, opts doctorOptions) []checkResult {
+	var checks []checkResult
+	for _, tc := range extra {
+		pointerCheck := checkDoubleEncodedLFSPointers(tc, opts)
+		if pointerCheck.warning || !pointerCheck.passed {
+			checks = append(checks, pointerCheck)
+		}
+	}
+	return checks
+}
+
+// daemonSyncedTeamContexts asks the daemon (via IPC — checkTeamContextHealth
+// runs in the CLI process and has no direct access to the daemon's in-memory
+// WorkspaceRegistry) which team-context clones it is actually syncing, and
+// returns the ones not already present in configured. This is how ox-baz5.5
+// closes the gap: configured comes from this repo's declared
+// localCfg.TeamContexts, which does not include a team context the daemon
+// syncs for other reasons (e.g. a secondary/internal team). A daemon that
+// isn't running, or times out, degrades to no extra contexts — this is a
+// best-effort supplement to the configured scan, never a replacement for it.
+func daemonSyncedTeamContexts(configured []config.TeamContext) []config.TeamContext {
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
+	return daemonSyncedTeamContextsVia(client, configured)
+}
+
+// daemonSyncedTeamContextsVia takes the IPC client as a parameter so tests
+// can point it at a socket that is guaranteed not to exist, rather than
+// relying on no daemon happening to be registered for the test process's
+// resolved workspace — daemon.CurrentWorkspaceID() memoizes via sync.Once
+// per process, so a test-local os.Chdir cannot reliably re-scope it once
+// another test in the same binary has already resolved it.
+func daemonSyncedTeamContextsVia(client *daemon.Client, configured []config.TeamContext) []config.TeamContext {
+	if client == nil || client.Ping() != nil {
+		return nil
+	}
+	status, err := client.Status()
+	if err != nil || status == nil {
+		return nil
+	}
+	return extraTeamContextsFromStatus(status, configured)
+}
+
+// extraTeamContextsFromStatus is the pure filtering logic behind
+// daemonSyncedTeamContexts, split out so the ox-baz5.5 fix — "don't miss a
+// team-context clone the daemon syncs but this repo never declared" — is
+// testable without a live daemon IPC connection.
+func extraTeamContextsFromStatus(status *daemon.StatusData, configured []config.TeamContext) []config.TeamContext {
+	known := make(map[string]bool, len(configured))
+	for _, tc := range configured {
+		known[tc.Path] = true
 	}
 
-	return checks
+	var extra []config.TeamContext
+	for _, ws := range status.Workspaces["team-context"] {
+		if !ws.Exists || ws.Path == "" || known[ws.Path] {
+			continue
+		}
+		extra = append(extra, config.TeamContext{
+			TeamID:   ws.TeamID,
+			TeamName: ws.TeamName,
+			Path:     ws.Path,
+			LastSync: ws.LastSync,
+		})
+	}
+	return extra
 }
 
 // checkDoubleEncodedLFSPointers detects the only worktree shape caused by an
@@ -103,7 +180,7 @@ func checkDoubleEncodedLFSPointers(tc config.TeamContext, opts doctorOptions) ch
 		return PassedCheck(name, "no nested LFS pointers")
 	}
 
-	if opts.fix {
+	if opts.fixAll() {
 		if err := restoreRawLFSPointers(tc.Path, paths); err != nil {
 			return FailedCheck(name, "nested LFS pointers found; restore failed", err.Error())
 		}
@@ -193,14 +270,14 @@ func checkSingleTeamContext(tc config.TeamContext, opts doctorOptions) checkResu
 
 	// check for orphaned backpointers
 	if health.OrphanedCount > 0 {
-		if opts.fix {
+		if opts.fixAll() {
 			cleaned, err := config.CleanupOrphanedBackpointers(tc.Path)
 			if err == nil && cleaned > 0 {
 				return PassedCheck(name, fmt.Sprintf("cleaned %d orphaned refs", cleaned))
 			}
 		}
 		detail := fmt.Sprintf("%d workspace(s) reference deleted projects", health.OrphanedCount)
-		if !opts.fix {
+		if !opts.fixAll() {
 			detail += ". Run `ox doctor --fix` to clean up"
 		}
 		return WarningCheck(name, "orphaned references", detail)
@@ -281,7 +358,7 @@ func checkOrphanedTeamDirs(opts doctorOptions) checkResult {
 
 	detail := fmt.Sprintf("Teams with no active workspaces: %s", strings.Join(orphanedNames, ", "))
 
-	if opts.fix {
+	if opts.fixAll() {
 		removed, err := promptTeamContextCleanup(orphanedPaths, opts.forceYes)
 		if err != nil {
 			return FailedCheck("Orphaned team dirs", "cleanup error", err.Error())
@@ -508,6 +585,10 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 	}
 
 	var needsFix, fixed, checked int
+	// unmaterialized collects team contexts whose sparse spec excludes a top-level
+	// directory their own HEAD contains — the #862 shape.
+	var unmaterialized []string
+	var locallyRepairable []string
 
 	for _, tc := range localCfg.TeamContexts {
 		if tc.Path == "" || !isGitRepo(tc.Path) {
@@ -539,6 +620,47 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 			}
 		}
 
+		// Root patterns alone are NOT sufficient, and #862 is the proof: the tracked
+		// manifest omitted `agents/`, so sparse-checkout never materialized team
+		// rules on any client while this check reported everything fine. The
+		// patterns were correct; the include list was short.
+		//
+		// The only reliable signal is comparing what HEAD contains against what is
+		// actually on disk. A top-level directory that exists in the commit but not
+		// in the working tree was excluded by the sparse spec — which is exactly the
+		// failure, and it is invisible to a pattern check.
+		cfg := manifest.ParseFile(filepath.Join(tc.Path, ".sageox", "sync.manifest"), manifest.RepoKindTeamContext)
+		if missing := missingSparseTopLevelDirs(tc.Path, cfg); len(missing) > 0 {
+			localMissing := locallyRepairableMissingDirs(cfg, missing)
+			if len(localMissing) > 0 {
+				needsFix++
+				if !fix {
+					locallyRepairable = append(locallyRepairable,
+						fmt.Sprintf("%s (%s)", filepath.Base(tc.Path), strings.Join(localMissing, ", ")))
+					continue
+				}
+				if repairErr := repairTeamSparseCheckout(tc.Path); repairErr != nil {
+					slog.Warn("failed to repair sparse-checkout",
+						"path", tc.Path, "error", repairErr)
+					locallyRepairable = append(locallyRepairable,
+						fmt.Sprintf("%s (%s)", filepath.Base(tc.Path), strings.Join(localMissing, ", ")))
+					continue
+				}
+				fixed++
+				// Re-read reality after `sparse-checkout set`, against the
+				// manifest the repair used. Only a directory that actually
+				// materialized counts as repaired.
+				cfg = manifest.ParseFile(filepath.Join(tc.Path, ".sageox", "sync.manifest"), manifest.RepoKindTeamContext)
+				missing = missingSparseTopLevelDirs(tc.Path, cfg)
+				if len(missing) == 0 {
+					continue
+				}
+			}
+			unmaterialized = append(unmaterialized,
+				fmt.Sprintf("%s (%s)", filepath.Base(tc.Path), strings.Join(missing, ", ")))
+			continue
+		}
+
 		if hasRootGlob && hasNegateRootDirs {
 			continue
 		}
@@ -558,6 +680,22 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 	if checked == 0 {
 		return SkippedCheck("Team sparse checkout", "no sparse-checkout repos", "")
 	}
+	if len(locallyRepairable) > 0 {
+		return FailedCheck("Team sparse checkout",
+			fmt.Sprintf("%d team context(s) exclude directories ox can restore locally: %s",
+				len(locallyRepairable), strings.Join(locallyRepairable, "; ")),
+			"Run `ox doctor --fix` to reapply the local sparse-checkout spec")
+	}
+
+	if len(unmaterialized) > 0 {
+		// The durable fix is server-side — the manifest is generated there and the
+		// tracked copy wins over the client fallback — so ox reports rather than
+		// pretending it can repair this locally.
+		return WarningCheck("Team sparse checkout",
+			fmt.Sprintf("%d team context(s) are missing directories that exist in HEAD: %s",
+				len(unmaterialized), strings.Join(unmaterialized, "; ")),
+			"The sync manifest excludes content the commit contains, so those files never reach this machine; this needs a server-side manifest fix")
+	}
 
 	if needsFix == 0 {
 		return PassedCheck("Team sparse checkout",
@@ -576,29 +714,82 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 			"        Run `ox doctor` to auto-fix (FixLevelAuto)")
 }
 
+// locallyRepairableMissingDirs returns missing directories that reapplying the
+// local sparse policy can restore. That is the union of paths the manifest
+// includes and paths ox itself requires, such as agents/. Required paths remain
+// repairable even when an older server manifest omits them, but an explicit
+// deny still wins. A map forms the union so a path present in both sources is
+// reported exactly once.
+func locallyRepairableMissingDirs(cfg *manifest.ManifestConfig, missing []string) []string {
+	repairable := make(map[string]bool)
+	addTopLevel := func(entries []string) {
+		for _, entry := range entries {
+			clean := strings.Trim(strings.TrimSpace(filepath.ToSlash(entry)), "/")
+			if clean == "" {
+				continue
+			}
+			repairable[strings.SplitN(clean, "/", 2)[0]] = true
+		}
+	}
+	if cfg != nil {
+		addTopLevel(cfg.Includes)
+	}
+	addTopLevel(manifest.RequiredIncludes(manifest.RepoKindTeamContext))
+
+	// Intersect the manifest/floor union with the sparse set that repair will
+	// actually apply. This preserves the canonical overlap behavior: a deny
+	// beneath a manifest include removes that include entirely, while a denied
+	// descendant of a required floor is re-excluded without removing the floor.
+	effectiveCfg := cfg
+	if effectiveCfg == nil {
+		effectiveCfg = &manifest.ManifestConfig{}
+	}
+	effective := make(map[string]bool)
+	for _, entry := range manifest.SparseSetFor(effectiveCfg, manifest.RepoKindTeamContext) {
+		if strings.HasPrefix(entry, "!") || entry == "/*" {
+			continue
+		}
+		clean := strings.Trim(strings.TrimSpace(filepath.ToSlash(entry)), "/")
+		if clean != "" {
+			effective[strings.SplitN(clean, "/", 2)[0]] = true
+		}
+	}
+
+	var local []string
+	for _, dir := range missing {
+		clean := strings.Trim(filepath.ToSlash(dir), "/")
+		if repairable[clean] && effective[clean] {
+			local = append(local, dir)
+		}
+	}
+	return local
+}
+
 // repairTeamSparseCheckout re-applies sparse-checkout from the manifest
 // with root-level file patterns included.
 func repairTeamSparseCheckout(tcPath string) error {
-	manifestPath := filepath.Join(tcPath, ".sageox", "sync.manifest")
-	cfg := manifest.ParseFile(manifestPath, manifest.RepoKindTeamContext)
+	// under the repo lock: `git sparse-checkout set` rewrites the index, so a
+	// run outside it can fail an ox commit to this clone on index.lock. The
+	// manifest is read inside it: a sync the repair waited out may change it.
+	return gitutil.WithRepoLock(context.Background(), tcPath, func() error {
+		manifestPath := filepath.Join(tcPath, ".sageox", "sync.manifest")
+		cfg := manifest.ParseFile(manifestPath, manifest.RepoKindTeamContext)
+		sparsePaths := manifest.SparseSetFor(cfg, manifest.RepoKindTeamContext)
+		if len(sparsePaths) == 0 {
+			return fmt.Errorf("no sparse paths computed from manifest")
+		}
 
-	sparsePaths := manifest.ComputeSparseSet(cfg)
-	if len(sparsePaths) == 0 {
-		return fmt.Errorf("no sparse paths computed from manifest")
-	}
-	sparsePaths = manifest.EnsureSageoxInclude(sparsePaths)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	args := append([]string{"-C", tcPath, "sparse-checkout", "set", "--no-cone"}, sparsePaths...)
-	cmd := exec.CommandContext(ctx, "git", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git sparse-checkout set: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-
-	return nil
+		args := append([]string{"-C", tcPath, "sparse-checkout", "set", "--no-cone"}, sparsePaths...)
+		cmd := exec.CommandContext(ctx, "git", args...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git sparse-checkout set: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+		return nil
+	})
 }
 
 // runGitStatus runs git status --porcelain on a directory and returns the output.
@@ -614,4 +805,138 @@ func runGitStatus(dir string) (string, error) {
 		return "", fmt.Errorf("git status failed for %s: %s", dir, strings.TrimSpace(string(output)))
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+// missingSparseTopLevelDirs returns top-level directories present in HEAD but
+// absent from the working tree, i.e. excluded by the sparse-checkout spec.
+//
+// This is what catches a manifest whose include list is short. A pattern check
+// can only confirm the patterns it knows to look for; this compares the commit
+// against reality, so it catches an omission nobody anticipated.
+//
+// Each include is checked at its own depth. A top-level include such as
+// agents/ promises everything beneath it; a nested include such as
+// bulletin/general/posts/ promises only that subtree. Tracked files outside
+// every include — the board's archive/, for one — are absent by design, and
+// counting them once produced a false failure on any board whose posts had
+// all expired: the only files left under bulletin/ were archived, none were on
+// disk, and doctor blamed the sync list for a directory it had never promised.
+func missingSparseTopLevelDirs(repoPath string, cfg *manifest.ManifestConfig) []string {
+	cmd := exec.Command("git", "ls-tree", "-d", "--name-only", "HEAD")
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return nil // unborn HEAD or not a repo: nothing to compare against
+	}
+	expected := expectedTeamTopLevelDirs(cfg)
+	var missing []string
+	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if name == "" || !expected.top(name) {
+			continue
+		}
+		// Directory presence is NOT evidence the content materialized: an excluded
+		// directory can exist purely because of untracked local files beside it. Look
+		// for a tracked child that some include actually reaches and the manifest
+		// does not explicitly deny, and require at least one such child to exist in
+		// the working tree.
+		var hasExpectedChild, materialized bool
+		for _, child := range trackedChildren(repoPath, name) {
+			if !expected.covers(child) || manifestPathDenied(child, cfg) {
+				continue
+			}
+			hasExpectedChild = true
+			if _, statErr := os.Stat(filepath.Join(repoPath, filepath.FromSlash(child))); statErr == nil {
+				materialized = true
+				break
+			}
+		}
+		if hasExpectedChild && !materialized {
+			missing = append(missing, name+"/")
+		}
+	}
+	return missing
+}
+
+// expectedTeamDirs maps each expected top-level directory to the include paths
+// (cleaned, slash-trimmed, root-relative) that reach into it. A top-level
+// include registers itself ("agents" -> ["agents"]); a nested include registers
+// under its first segment while keeping its full path
+// ("bulletin/general/posts/" -> "bulletin": ["bulletin/general/posts"]), so the
+// child filter can tell promised content from a sibling that was never synced.
+type expectedTeamDirs map[string][]string
+
+// top reports whether name is a top-level directory some include reaches into.
+func (e expectedTeamDirs) top(name string) bool {
+	return len(e[name]) > 0
+}
+
+// covers reports whether a tracked path lies under some include. A path is
+// covered when it equals an include or sits beneath it on a path boundary —
+// gitignore semantics, where "memory/rollups" matches both a file of that name
+// and everything under a directory of that name, and never "memory/rollupsX".
+func (e expectedTeamDirs) covers(rel string) bool {
+	rel = strings.Trim(filepath.ToSlash(rel), "/")
+	for _, inc := range e[strings.SplitN(rel, "/", 2)[0]] {
+		if rel == inc || strings.HasPrefix(rel, inc+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// expectedTeamTopLevelDirs is the product-level team-context shape plus any
+// additional path the current manifest explicitly includes, grouped by
+// top-level directory. Restricting the check to this set keeps intentionally
+// sparse trees such as data/ and assets/ from being diagnosed merely because
+// they exist in HEAD.
+func expectedTeamTopLevelDirs(cfg *manifest.ManifestConfig) expectedTeamDirs {
+	expected := make(expectedTeamDirs)
+	add := func(entries []string) {
+		for _, entry := range entries {
+			clean := strings.Trim(strings.TrimSpace(filepath.ToSlash(entry)), "/")
+			if clean == "" {
+				continue
+			}
+			top := strings.SplitN(clean, "/", 2)[0]
+			if slices.Contains(expected[top], clean) {
+				continue
+			}
+			expected[top] = append(expected[top], clean)
+		}
+	}
+	add(manifest.FallbackConfigFor(manifest.RepoKindTeamContext).Includes)
+	if cfg != nil {
+		add(cfg.Includes)
+	}
+	return expected
+}
+
+func manifestPathDenied(rel string, cfg *manifest.ManifestConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	rel = strings.Trim(filepath.ToSlash(rel), "/")
+	for _, deny := range cfg.Denies {
+		deny = strings.Trim(filepath.ToSlash(deny), "/")
+		if deny != "" && (rel == deny || strings.HasPrefix(rel, deny+"/")) {
+			return true
+		}
+	}
+	return false
+}
+
+func trackedChildren(repoPath, dir string) []string {
+	cmd := exec.Command("git", "ls-tree", "-r", "--name-only", "HEAD", "--", dir+"/")
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var children []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			children = append(children, line)
+		}
+	}
+	return children
 }

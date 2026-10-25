@@ -1,0 +1,63 @@
+---
+title: "ox feedback"
+description: "CLI reference for ox feedback"
+sidebar_position: 40
+---
+
+## ox feedback
+
+Send private product feedback to SageOx Support
+
+### Synopsis
+
+If ox confused you, failed you, or cost you tokens, say so here.
+Send a report from a file or stdin. The first line is its title (8–200
+characters). Reports must fit within 4 KiB and 4,000 characters.
+
+Only your report, optional reply email, ox version, and OS/architecture are
+included. No logs, environment variables, or session content are collected
+automatically.
+Possible secrets are refused locally. Sending also requires current secret
+checks; --dry-run works offline and prints the exact JSON body without sending.
+
+Replies use your signed-in account's notification address, or --email. Without
+login or email, reports have no reply address. Use --anonymous to skip login
+explicitly. This sends private correspondence to SageOx Support; it does
+not create a public GitHub issue. Explicit feedback works with telemetry off.
+
+Examples:
+  ox feedback --type bug --file report.txt --dry-run
+  ox feedback --type bug --file report.txt --json
+  cat report.txt | ox feedback --file - --email person@example.com
+
+```
+ox feedback --file <path|-> [flags]
+```
+
+### Options
+
+```
+      --anonymous      Submit without using login or supplying a reply address
+      --dry-run        Print the locally checked JSON body without sending
+      --email string   Submit without login using this reply address
+      --file string    Report file, or - to read stdin (required)
+  -h, --help           help for feedback
+      --type string    Report category: bug, feature-request, or feedback (default "feedback")
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
+      --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
+```
+
+### SEE ALSO
+
+* [ox](/)	 - Shared team context that makes agentic engineering multiplayer

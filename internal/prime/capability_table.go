@@ -37,7 +37,7 @@ type CapabilitySupport struct {
 // shape of the user's ask) routes to exactly one corpus, because chronological,
 // semantic, and code retrieval are different modes, not interchangeable. These
 // rows are the single source the Layer-1 <consult-first> reminder renders from,
-// so the reminder and the additive `ox-consult` skill cannot drift.
+// so the reminder and the additive `ox-cli-consult` skill cannot drift.
 type ConsultRoute struct {
 	// Cue is the human-readable trigger shape, rendered before the arrow
 	// (e.g. `Recency / "I just did X"`).
@@ -55,7 +55,7 @@ type ConsultRoute struct {
 // checks every adapter against.
 type Capability struct {
 	// ID is the stable surface key: a command/skill basename without the `.md`
-	// extension (e.g. "ox-plan"), or a floor-block tag name (e.g. "consult-first").
+	// extension (e.g. "ox-cli-plan"), or a floor-block tag name (e.g. "consult-first").
 	ID string `json:"id"`
 	// MechanismClass is one of floor | command | skill.
 	MechanismClass MechanismClass `json:"mechanism_class"`
@@ -64,7 +64,7 @@ type Capability struct {
 	// ConsultRoutes, when set, carries the structured cue→corpus rows the
 	// Layer-1 <consult-first> reminder renders from. Only the consult-first
 	// floor block carries them — it is the single source of the routing table,
-	// so the reminder and the `ox-consult` skill description cannot drift.
+	// so the reminder and the `ox-cli-consult` skill description cannot drift.
 	ConsultRoutes []ConsultRoute `json:"consult_routes,omitempty"`
 	// Layer1Source, when set, names the ox subcommand whose output carries a
 	// floor capability into agent context — so the conformance test can assert
@@ -90,7 +90,7 @@ func OxCapabilities() []Capability {
 			Layer1Source:   "agent prime",
 			// the cue→corpus routing table the Layer-1 <consult-first> reminder
 			// renders from. Keep cue/command text in sync with the activation
-			// description of the additive extensions/skills/ox-consult/SKILL.md
+			// description of the additive extensions/skills/ox-cli-consult/SKILL.md
 			// (enforced by TestConsultRoutes_NoDriftWithSkill in
 			// cmd/ox/agent_prime_xml_test.go).
 			ConsultRoutes: []ConsultRoute{
@@ -103,12 +103,20 @@ func OxCapabilities() []Capability {
 					Command: "`ox query \"<question>\"` (semantic; default `--source=team` covers discussions, docs, and session history). Add `--source=all` to include code.",
 				},
 				{
+					Cue:     `Who/when in a recorded conversation`,
+					Command: "`ox conversation search --participant NAME --since DATE`",
+				},
+				{
 					Cue:     `"Who or what touched this code?"`,
 					Command: "`ox code search \"<pattern>\"` / `ox code insights`.",
 				},
 				{
 					Cue:     `A decision record (ADR/DDR) is being created, edited, or cited by number`,
 					Command: "`ox decision enrich --topic \"<subject>\"` (new) / `--file <dr.md>` (edit) — related DRs, numbering, ref verification.",
+				},
+				{
+					Cue:     `A pasted sageox.ai recording link (…/c/rec_…, …/recordings/rec_…)`,
+					Command: "`ox conversation show <link>` — never web-fetch it (sign-in wall). Requires `ox login` and team membership; on `not_authenticated` / `no_team_access`, stop and tell the user. A screen walkthrough: then `ox walkthrough <link>` (source words and image evidence; read all source pages, inspect pixels, and follow bounded recovery guidance).",
 				},
 			},
 		},
@@ -133,57 +141,74 @@ func OxCapabilities() []Capability {
 			Layer1Source:   "agent prime",
 		},
 
-		// ── command: Layer-2 lifecycle/diagnostic surfaces (stay explicit) ──
-		// extensions/claude/commands/<id>.md. Slash-only; never auto-activate.
-		{ID: "ox", MechanismClass: MechanismCommand, Supports: CapabilitySupport{Slash: true}},
-		{ID: "ox-status", MechanismClass: MechanismCommand, Supports: CapabilitySupport{Slash: true}},
-		{ID: "ox-doctor", MechanismClass: MechanismCommand, Supports: CapabilitySupport{Slash: true}},
-		{ID: "ox-init", MechanismClass: MechanismCommand, Supports: CapabilitySupport{Slash: true}},
-		{ID: "ox-prime", MechanismClass: MechanismCommand, Supports: CapabilitySupport{Slash: true}},
-		{ID: "ox-session-start", MechanismClass: MechanismCommand, Supports: CapabilitySupport{Slash: true}},
-		{ID: "ox-session-stop", MechanismClass: MechanismCommand, Supports: CapabilitySupport{Slash: true}},
-		{ID: "ox-session-status", MechanismClass: MechanismCommand, Supports: CapabilitySupport{Slash: true}},
-		{ID: "ox-session-list", MechanismClass: MechanismCommand, Supports: CapabilitySupport{Slash: true}},
-		{ID: "ox-session-abort", MechanismClass: MechanismCommand, Supports: CapabilitySupport{Slash: true}},
-		{ID: "ox-cart", MechanismClass: MechanismCommand, Supports: CapabilitySupport{Slash: true}},
-		{ID: "ox-cart-start", MechanismClass: MechanismCommand, Supports: CapabilitySupport{Slash: true}},
-		{ID: "ox-cart-done", MechanismClass: MechanismCommand, Supports: CapabilitySupport{Slash: true}},
-		{ID: "ox-cart-drop", MechanismClass: MechanismCommand, Supports: CapabilitySupport{Slash: true}},
+		// ── skill (slash-only): Layer-2 lifecycle/diagnostic surfaces ──
+		// extensions/skills/<id>/SKILL.md, each carrying `disable-model-invocation:
+		// true`. These were Claude-only command files until the 0.15.0 fold; as skills
+		// they reach every adapter that reads a skills root, and their descriptions
+		// stay out of context so folding them in costs no tokens. ADR-023's ruling that
+		// lifecycle and diagnostic surfaces stay EXPLICIT is preserved by the frontmatter
+		// key, not by the file's location.
+		{ID: "sageox", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
+		{ID: "ox-cli-cart", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
+		{ID: "ox-cli-cart-done", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
+		{ID: "ox-cli-cart-drop", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
+		{ID: "ox-cli-cart-start", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
+		{ID: "ox-cli-doctor", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
+		{ID: "ox-cli-init", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
+		{ID: "ox-cli-prime", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
+		{ID: "ox-cli-session-abort", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
+		{ID: "ox-cli-session-list", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
+		{ID: "ox-cli-session-start", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
+		{ID: "ox-cli-session-status", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
+		{ID: "ox-cli-session-stop", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
+		{ID: "ox-cli-status", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
 
 		// ── skill: Layer-2 fat playbooks (slash AND auto-activate) ──
-		// extensions/skills/<id>/SKILL.md. ox-consult is intentionally
+		// extensions/skills/<id>/SKILL.md. ox-cli-consult is intentionally
 		// NOT a row here — it is an additive skill (see additiveSkills below).
-		{ID: "ox-plan", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
-		{ID: "ox-session-review", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
-		{ID: "ox-recap", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
-		// ox-conversation's id also names its slash-relay command file at
-		// extensions/claude/commands/ox-conversation.md — one surface id, two
+		{ID: "ox-cli-plan", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
+		{ID: "ox-cli-session-review", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
+		{ID: "ox-cli-recap", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
+		// ox-cli-conversation's id also names its slash-relay command file at
+		// extensions/claude/commands/ox-cli-conversation.md — one surface id, two
 		// on-disk affordances, both accounted by this single row (the
 		// deterministic floor for citation-walking is prime's KB guidance,
 		// which names `ox conversation` for every adapter).
-		{ID: "ox-conversation", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
+		{ID: "ox-cli-conversation", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
+		// ox-cli-walkthrough activates the live evidence reader. Its JSON guidance
+		// owns transcript paging, image inspection and bounded server recovery,
+		// including actions outside the CLI. Its deterministic floor is the
+		// consult-first recording-link route above, which names
+		// `ox walkthrough` for every adapter.
+		{ID: "ox-cli-walkthrough", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
 	}
 }
 
 // additiveSkills names on-disk skills that are intentionally OUTSIDE the
-// conformance table in OxCapabilities(). They are additive Layer-2 ergonomics:
-// a Claude-only skill whose deterministic floor is already carried by a separate
-// floor-class entry, so the skill itself is not a conformance surface (its
-// absence on Codex/Droid is the documented additive case, not a regression).
+// conformance table in OxCapabilities(). Most are additive Layer-2 ergonomics:
+// a skill whose deterministic floor is already carried by a separate floor-class
+// entry. The allowlist also holds explicitly opt-in catalog skills, whose absence
+// from an adapter is a project choice rather than a conformance regression.
 //
-// Keeping the allowlist explicit closes the disk→table direction of the
-// conformance contract: TestEveryOnDiskSurfaceIsAccounted walks the commands and
-// skills directories and fails if any on-disk surface is neither an
-// OxCapabilities() row NOR listed here — so a future un-accounted skill/command
-// can never silently escape the contract.
+// Keeping the allowlist explicit closes BOTH directions of the conformance
+// contract:
+//
+//   - disk→table: TestEveryOnDiskSurfaceIsAccounted walks the commands and
+//     skills directories and fails if any on-disk surface is neither an
+//     OxCapabilities() row NOR listed here, so a future un-accounted
+//     skill/command can never silently escape the contract.
+//   - table→disk: TestAdditiveSkillsAllExistOnDisk fails on an entry naming a
+//     skill that is no longer there. That direction was open until `post-cutoff`
+//     moved to extensions/addons/ (ADR-032 D6) and left an allowlist entry
+//     excusing a surface that had ceased to exist — an allowlist nobody checks
+//     back is how a dead exemption outlives the thing it exempted.
 //
 // The map value documents WHY each skill is additive rather than a table row.
 var additiveSkills = map[string]string{
-	"ox-consult":       "additive Layer-2 ergonomics; its deterministic floor is the consult-first floor entry (ConsultRoutes), so it is not a separate conformance surface",
-	"ox-decision":      "additive Layer-2 ergonomics; its deterministic floor is the decision-record-guidance floor entry plus the consult-first decision route, so it is not a separate conformance surface",
-	"ox-skill-manager": "native Agent Skills lifecycle guidance; the deterministic installer and ownership rules live in ox CLI code rather than this playbook",
-	"ox-attest-goal":   "opt-in Attest BDD authoring + drive-to-green playbook; it sharpens customer-journey judgment and pursues the capability to proven without becoming a portable product requirement",
-	"ox-attest-create": "opt-in Attest evidence-recording playbook; the attestation CLI remains usable without the Claude-specific skill",
-	"ox-viz":           "additive Layer-2 ergonomics; its deterministic floor is the visualization-guidance entry and the live ox viz pr output, so it is not a separate conformance surface",
-	"ox-pr-header":     "additive Layer-2 ergonomics; its deterministic floor is the `ox pr header` command output plus the PR-header pointer in the prime attribution guidance, so the skill itself is not a separate conformance surface",
+	"ox-cli-consult":       "additive Layer-2 ergonomics; its deterministic floor is the consult-first floor entry (ConsultRoutes), so it is not a separate conformance surface",
+	"ox-cli-decision":      "additive Layer-2 ergonomics; its deterministic floor is the decision-record-guidance floor entry plus the consult-first decision route, so it is not a separate conformance surface",
+	"ox-cli-attest":        "thin relay over `ox attest publish`; the deterministic behavior (frozen-export-only, resume journal, deterministic ZIP) lives in the command, so the skill is guidance rather than a separate conformance surface",
+	"ox-cli-skill-manager": "native Agent Skills lifecycle guidance; the deterministic installer and ownership rules live in ox CLI code rather than this playbook",
+	"ox-cli-viz":           "additive Layer-2 ergonomics; its deterministic floor is the visualization-guidance entry and the live ox viz pr output, so it is not a separate conformance surface",
+	"ox-cli-pr-header":     "additive Layer-2 ergonomics; its deterministic floor is the `ox pr header` command output plus the PR-header pointer in the prime attribution guidance, so the skill itself is not a separate conformance surface",
 }

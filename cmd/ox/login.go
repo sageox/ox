@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -146,6 +147,7 @@ func getAlternativeEndpoints(currentEndpoint string) []string {
 
 var loginCmd = &cobra.Command{
 	Use:   "login",
+	Args:  cobra.NoArgs,
 	Short: "Authenticate with sageox.ai",
 	Long:  "Authenticate with sageox.ai to access premium features and sync your configuration.",
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -238,6 +240,9 @@ func selectLoginEndpoint() (string, error) {
 	if len(endpoints) == 1 && !endpoints[0].IsValid {
 		return endpoints[0].URL, nil
 	}
+	if cli.NoInput() {
+		return "", fmt.Errorf("--no-input requires --endpoint <endpoint> to choose where to log in")
+	}
 
 	// show endpoint selection
 	fmt.Println("Select endpoint to authenticate:")
@@ -304,8 +309,11 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 		}
 
 		fmt.Fprintf(out, "Already authenticated as %s on %s\n", token.UserInfo.Email, endpoint.NormalizeSlug(currentEndpoint))
-		if !cli.ConfirmYesNo("Do you want to re-authenticate?", false) {
-			fmt.Fprintln(out, "Authentication canceled.")
+		reauth, confirmErr := confirmReauthenticate(out)
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if !reauth {
 			return nil
 		}
 	}
@@ -336,10 +344,7 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 
 				var selectedEndpoint string
 				if len(alternatives) == 1 {
-					// single alternative - ask yes/no
-					if cli.ConfirmYesNo(fmt.Sprintf("Would you like to authenticate to %s instead?", alternatives[0]), true) {
-						selectedEndpoint = alternatives[0]
-					}
+					selectedEndpoint = confirmEndpointFallback(out, alternatives[0])
 				} else {
 					// multiple alternatives - show selection
 					selected, selectErr := cli.SelectOne("Select endpoint to authenticate to:", alternatives, 0)
@@ -480,6 +485,9 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 	err = cli.WithSpinnerNoResult("Syncing git credentials...", func() error {
 		return fetchGitCredentialsWithRetry(client)
 	})
+	if errors.Is(err, tea.ErrInterrupted) {
+		return err
+	}
 	if err != nil {
 		// filter out confusing "run 'ox login'" advice since user just logged in
 		errMsg := err.Error()
@@ -577,5 +585,43 @@ func refreshExistingRemotes(ep string) {
 		if err := gitserver.RefreshRemoteCredentials(tc.Path, ep); err != nil {
 			slog.Debug("failed to refresh team context remote credentials", "team", tc.TeamName, "error", err)
 		}
+	}
+}
+
+// confirmReauthenticate asks whether to re-run the device flow for an endpoint
+// the user is already authenticated against.
+//
+// Required, not ConfirmYesNo: silently taking the default printed
+// "Authentication canceled." and exited 0, which reads as a broken login rather
+// than as a prompt nobody answered.
+func confirmReauthenticate(out io.Writer) (bool, error) {
+	reauth, err := cli.ConfirmYesNoRequired("Do you want to re-authenticate?", false, false)
+	if err != nil {
+		return false, err
+	}
+	if !reauth {
+		fmt.Fprintln(out, "Authentication canceled.")
+		return false, nil
+	}
+	return true, nil
+}
+
+// confirmEndpointFallback offers a reachable alternative endpoint when the
+// configured one cannot be reached. Returns the endpoint to use, or "" to stay
+// put.
+//
+// Required, not ConfirmYesNo: this prompt defaults to YES, so a silent default
+// would authenticate against a DIFFERENT endpoint than the one asked for.
+func confirmEndpointFallback(out io.Writer, alternative string) string {
+	switchTo, err := cli.ConfirmYesNoRequired(fmt.Sprintf("Would you like to authenticate to %s instead?", alternative), true, false)
+	switch {
+	case err != nil:
+		fmt.Fprintf(out, "Not switching endpoints — nothing was available to answer the prompt.\n")
+		fmt.Fprintf(out, "Re-run in a terminal, or pass %s explicitly.\n", cli.StyleFlag.Render("--endpoint"))
+		return ""
+	case switchTo:
+		return alternative
+	default:
+		return ""
 	}
 }

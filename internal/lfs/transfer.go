@@ -1,8 +1,12 @@
 package lfs
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -11,8 +15,12 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/secretguard"
 	"github.com/sageox/ox/internal/useragent"
 )
 
@@ -47,7 +55,26 @@ func validateActionHref(action *Action) error {
 	}
 	u, err := url.Parse(action.Href)
 	if err != nil {
+		if action.readClient != nil {
+			return fmt.Errorf("validate read action: invalid URL")
+		}
 		return fmt.Errorf("validate action: parse href: %w", err)
+	}
+	if c := action.readClient; c != nil {
+		if u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
+			return fmt.Errorf("validate read action: HTTPS URL without userinfo or fragment required")
+		}
+		if strings.EqualFold(u.Host, action.TrustedHost) {
+			if err := gitserver.ValidateReadRequestURL(c.readEndpoint, c.readRepoID, c.readURL, action.Href); err != nil {
+				return err
+			}
+			if action.Href != c.readURL+"/info/lfs/objects/"+action.readOID {
+				return fmt.Errorf("validate read action: object URL does not match requested object")
+			}
+		}
+		// External HTTPS actions carry only their storage signature, never headers
+		// from the batch response. The server bounds the signature's actual expiry.
+		return nil
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "https" && !isLoopbackHost(u.Hostname()) {
@@ -66,25 +93,54 @@ func validateActionHref(action *Action) error {
 	return nil
 }
 
-// isLoopbackHost returns true for IP literals that name the local host.
-// Used by validateActionHref to permit http:// for httptest URLs.
-func isLoopbackHost(h string) bool {
-	if h == "" {
-		return false
+// setRequestHeaders keeps direct-Git headers compatible while confining the
+// selected TAT to authenticated object URLs beneath the discovered resource.
+func (action *Action) setRequestHeaders(req *http.Request) error {
+	if c := action.readClient; c != nil {
+		if req.Method != http.MethodGet {
+			return fmt.Errorf("read-only LFS action cannot upload or verify")
+		}
+		token, err := auth.CurrentReadToken(c.readEndpoint)
+		if err != nil {
+			return err
+		}
+		href, err := url.QueryUnescape(req.URL.String())
+		if err != nil {
+			return fmt.Errorf("validate read action: invalid URL encoding")
+		}
+		if strings.Contains(href, token) || strings.Contains(href, base64.StdEncoding.EncodeToString([]byte("ox:"+token))) {
+			return fmt.Errorf("validate read action: credential-bearing URL refused")
+		}
+		if strings.EqualFold(req.URL.Host, action.TrustedHost) {
+			req.SetBasicAuth("ox", token)
+		}
+		return nil
 	}
-	ip := net.ParseIP(h)
-	if ip == nil {
-		// hostnames like "localhost" — accept the well-known name
-		return strings.EqualFold(h, "localhost")
+	for k, v := range action.Header {
+		req.Header.Set(k, v)
 	}
-	return ip.IsLoopback()
+	return nil
 }
+
+// isLoopbackHost delegates to the shared definition so LFS and the git
+// credential helper agree on where plain http is allowed.
+func isLoopbackHost(h string) bool { return gitserver.IsLoopbackHost(h) }
 
 // ComputeOID computes the SHA256 hex digest of content (the LFS OID).
 func ComputeOID(content []byte) string {
 	h := sha256.Sum256(content)
 	return hex.EncodeToString(h[:])
 }
+
+// ErrOIDMismatch reports content whose SHA-256 is not the identity it was
+// requested under. Callers tell it apart from a transport failure because the
+// same request returns the same bytes: retrying cannot change the answer.
+var ErrOIDMismatch = errors.New("OID mismatch")
+
+// ErrPointerContent reports content that is itself an LFS pointer. Stored as an
+// object, it makes the pointer committed for it resolve to another pointer
+// instead of the file it stands for.
+var ErrPointerContent = errors.New("content is an LFS pointer, not the file it points to")
 
 // UploadResult tracks the outcome of a single upload.
 type UploadResult struct {
@@ -93,6 +149,11 @@ type UploadResult struct {
 }
 
 // UploadObject uploads a single blob using the action href from the batch response.
+//
+// The body is the in-memory bytes behind a bytes.Reader, so the request always
+// carries Content-Length and is never sent chunked: object stores behind a WAF
+// or proxy reject chunked PUTs. A connection reset or unexpected EOF is retried
+// once with a fresh request, since the reset says nothing about the object.
 func UploadObject(action *Action, content []byte) error {
 	if action == nil || action.Href == "" {
 		return fmt.Errorf("no upload action provided")
@@ -100,26 +161,80 @@ func UploadObject(action *Action, content []byte) error {
 	if err := validateActionHref(action); err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}
+	proof, err := prepareUpload(context.Background(), "blob", content)
+	if err != nil {
+		return err
+	}
+	return uploadGuardedObject(action, proof)
+}
 
-	client := lfsHTTPClient
+// guardedUpload owns the immutable bytes that passed both mandatory catalogs.
+// Transport functions accept this proof, never caller-owned raw bytes, so a new
+// upload path cannot accidentally bypass validation or mutate a scanned slice.
+type guardedUpload struct{ content []byte }
 
-	req, err := http.NewRequest("PUT", action.Href, nil)
+func prepareUpload(ctx context.Context, name string, content []byte) (guardedUpload, error) {
+	proofs, err := prepareUploads(ctx, map[string][]byte{name: content})
+	if err != nil {
+		return guardedUpload{}, err
+	}
+	return proofs[name], nil
+}
+func prepareUploads(ctx context.Context, files map[string][]byte) (map[string]guardedUpload, error) {
+	// Copy before validation; hashing, network requests and retries all use these
+	// exact private buffers, independent of subsequent caller slice mutation.
+	proofs := make(map[string]guardedUpload, len(files))
+	for name, data := range files {
+		content := bytes.Clone(data)
+		if pointerShaped(content) {
+			return nil, ErrPointerContent
+		}
+		if err := secretguard.ValidateContent(name, content); err != nil {
+			return nil, fmt.Errorf("LFS publication refused: %w", err)
+		}
+		proofs[name] = guardedUpload{content: content}
+	}
+	rules, err := currentSessionRules(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("LFS publication pending: %w", err)
+	}
+	for name, proof := range proofs {
+		if err := rules.ValidateContent(name, proof.content); err != nil {
+			return nil, fmt.Errorf("LFS publication refused: %w", err)
+		}
+	}
+	return proofs, nil
+}
+func uploadGuardedObject(action *Action, proof guardedUpload) error {
+	if action == nil || action.Href == "" {
+		return fmt.Errorf("no upload action provided")
+	}
+	if err := validateActionHref(action); err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	err := putObject(action, proof)
+	if err != nil && isConnectionReset(err) {
+		err = putObject(action, proof)
+	}
+	return err
+}
+
+// putObject sends one PUT with an explicit Content-Length.
+func putObject(action *Action, proof guardedUpload) error {
+	content := proof.content
+	req, err := http.NewRequest(http.MethodPut, action.Href, bytes.NewReader(content))
 	if err != nil {
 		return fmt.Errorf("create upload request: %w", err)
 	}
+	req.ContentLength = int64(len(content))
 
 	// only User-Agent for external Git host; no X-Orchestrator
 	req.Header.Set("User-Agent", useragent.String())
-
-	// set headers from action
-	for k, v := range action.Header {
-		req.Header.Set(k, v)
+	if err := action.setRequestHeaders(req); err != nil {
+		return err
 	}
 
-	req.Body = io.NopCloser(io.NewSectionReader(newBytesReaderAt(content), 0, int64(len(content))))
-	req.ContentLength = int64(len(content))
-
-	resp, err := client.Do(req)
+	resp, err := lfsHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("upload failed: %w", err)
 	}
@@ -129,8 +244,19 @@ func UploadObject(action *Action, content []byte) error {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("upload returned HTTP %d: %s", resp.StatusCode, string(body))
 	}
-
 	return nil
+}
+
+// isConnectionReset reports a transport failure that happened mid-request
+// (reset, broken pipe, premature EOF, or a connection the peer closed while the body was still being written, which Linux surfaces as net.ErrClosed) rather than a server verdict on the object.
+func isConnectionReset(err error) bool {
+	return errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, net.ErrClosed) ||
+		strings.Contains(err.Error(), "connection reset") ||
+		strings.Contains(err.Error(), "broken pipe")
 }
 
 // VerifyObject confirms a blob was received by the server by POSTing to the
@@ -154,8 +280,8 @@ func VerifyObject(action *Action, oid string, size int64) error {
 	req.Header.Set("Content-Type", "application/vnd.git-lfs+json")
 	req.Header.Set("User-Agent", useragent.String())
 
-	for k, v := range action.Header {
-		req.Header.Set(k, v)
+	if err := action.setRequestHeaders(req); err != nil {
+		return err
 	}
 
 	resp, err := lfsHTTPClient.Do(req)
@@ -192,17 +318,24 @@ func DownloadObject(action *Action) ([]byte, error) {
 	req.Header.Set("User-Agent", useragent.String())
 
 	// set headers from action
-	for k, v := range action.Header {
-		req.Header.Set(k, v)
+	if err := action.setRequestHeaders(req); err != nil {
+		return nil, err
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
+		var urlErr *url.Error
+		if action.readClient != nil && errors.As(err, &urlErr) {
+			err = urlErr.Err // signed storage URLs are credentials too
+		}
 		return nil, fmt.Errorf("download failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if action.readClient != nil {
+			return nil, newHTTPError(resp)
+		}
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("download returned HTTP %d: %s", resp.StatusCode, string(body))
 	}
@@ -210,6 +343,9 @@ func DownloadObject(action *Action) ([]byte, error) {
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read download body: %w", err)
+	}
+	if action.readClient != nil && ComputeOID(data) != action.readOID {
+		return nil, fmt.Errorf("download %w", ErrOIDMismatch)
 	}
 
 	return data, nil
@@ -225,7 +361,7 @@ func DownloadAndVerifyObject(action *Action, expectedOID string) ([]byte, error)
 	actualOID := ComputeOID(data)
 	expectedHex := strings.TrimPrefix(expectedOID, "sha256:")
 	if actualOID != expectedHex {
-		return nil, fmt.Errorf("OID mismatch: expected %s, got %s", expectedOID, actualOID)
+		return nil, fmt.Errorf("%w: expected %s, got %s", ErrOIDMismatch, expectedOID, actualOID)
 	}
 	return data, nil
 }
@@ -233,6 +369,12 @@ func DownloadAndVerifyObject(action *Action, expectedOID string) ([]byte, error)
 // DownloadToFile streams a blob directly to dst, hashing incrementally when
 // verify is true. Avoids buffering the entire object in memory.
 func DownloadToFile(action *Action, dst io.Writer, verify bool, expectedOID string) error {
+	return DownloadToFileContext(context.Background(), action, dst, verify, expectedOID)
+}
+
+// DownloadToFileContext streams and verifies an object within the caller's deadline.
+// The destination is only verified after success; callers publish a staged file then.
+func DownloadToFileContext(ctx context.Context, action *Action, dst io.Writer, verify bool, expectedOID string) error {
 	if dst == nil {
 		return fmt.Errorf("invalid destination writer")
 	}
@@ -243,22 +385,36 @@ func DownloadToFile(action *Action, dst io.Writer, verify bool, expectedOID stri
 		return fmt.Errorf("download: %w", err)
 	}
 
-	req, err := http.NewRequest("GET", action.Href, nil)
+	if action.readClient != nil {
+		verify = true
+		if expectedOID != "" && strings.TrimPrefix(expectedOID, "sha256:") != action.readOID {
+			return fmt.Errorf("download action does not match expected OID")
+		}
+		expectedOID = action.readOID
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", action.Href, nil)
 	if err != nil {
 		return fmt.Errorf("create download request: %w", err)
 	}
 	req.Header.Set("User-Agent", useragent.String())
-	for k, v := range action.Header {
-		req.Header.Set(k, v)
+	if err := action.setRequestHeaders(req); err != nil {
+		return err
 	}
 
 	resp, err := lfsHTTPClient.Do(req)
 	if err != nil {
+		var urlErr *url.Error
+		if action.readClient != nil && errors.As(err, &urlErr) {
+			err = urlErr.Err // keep signed query parameters out of diagnostics
+		}
 		return fmt.Errorf("download failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if action.readClient != nil {
+			return newHTTPError(resp)
+		}
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("download returned HTTP %d: %s", resp.StatusCode, string(body))
 	}
@@ -287,7 +443,7 @@ func DownloadToFile(action *Action, dst io.Writer, verify bool, expectedOID stri
 		actualOID := hex.EncodeToString(h.Sum(nil))
 		expectedHex := strings.TrimPrefix(expectedOID, "sha256:")
 		if actualOID != expectedHex {
-			return fmt.Errorf("OID mismatch: expected %s, got %s", expectedOID, actualOID)
+			return fmt.Errorf("%w: expected %s, got %s", ErrOIDMismatch, expectedOID, actualOID)
 		}
 	}
 
@@ -297,6 +453,54 @@ func DownloadToFile(action *Action, dst io.Writer, verify bool, expectedOID stri
 // UploadAll uploads multiple blobs in parallel.
 // files maps OID -> content. Uses objects from the batch response to find upload actions.
 func UploadAll(resp *BatchResponse, files map[string][]byte, maxConcurrent int) []UploadResult {
+	if resp == nil {
+		return []UploadResult{{Error: fmt.Errorf("missing upload batch response")}}
+	}
+	// Preserve independent pointer refusal while scanning all actual content
+	// before any object, including an already-present object, is accepted.
+	var refused []UploadResult
+	safeFiles := make(map[string][]byte, len(files))
+	refusedOIDs := map[string]bool{}
+	for oid, data := range files {
+		if pointerShaped(data) {
+			refused = append(refused, UploadResult{OID: oid, Error: ErrPointerContent})
+			refusedOIDs[oid] = true
+		} else {
+			safeFiles[oid] = data
+		}
+	}
+	filtered := *resp
+	filtered.Objects = nil
+	for _, obj := range resp.Objects {
+		if !refusedOIDs[obj.OID] {
+			filtered.Objects = append(filtered.Objects, obj)
+		}
+	}
+	resp = &filtered
+
+	proofs, err := prepareUploads(context.Background(), safeFiles)
+	if err != nil {
+		results := make([]UploadResult, 0, len(safeFiles)+len(resp.Objects))
+		seen := map[string]bool{}
+		for oid := range safeFiles {
+			results = append(results, UploadResult{OID: oid, Error: err})
+			seen[oid] = true
+		}
+		for _, obj := range resp.Objects {
+			if !seen[obj.OID] {
+				results = append(results, UploadResult{OID: obj.OID, Error: err})
+				seen[obj.OID] = true
+			}
+		}
+		if len(results) == 0 {
+			results = append(results, UploadResult{Error: err})
+		}
+		return append(refused, results...)
+	}
+	return append(refused, uploadAllGuarded(resp, proofs, maxConcurrent)...)
+}
+func uploadAllGuarded(resp *BatchResponse, proofs map[string]guardedUpload, maxConcurrent int) []UploadResult {
+
 	if maxConcurrent <= 0 {
 		maxConcurrent = 4
 	}
@@ -325,7 +529,7 @@ func UploadAll(resp *BatchResponse, files map[string][]byte, maxConcurrent int) 
 			continue
 		}
 
-		content, ok := files[obj.OID]
+		proof, ok := proofs[obj.OID]
 		if !ok {
 			mu.Lock()
 			results = append(results, UploadResult{
@@ -339,11 +543,11 @@ func UploadAll(resp *BatchResponse, files map[string][]byte, maxConcurrent int) 
 		wg.Add(1)
 		sem <- struct{}{} // acquire semaphore
 
-		go func(obj BatchResponseObject, content []byte) {
+		go func(obj BatchResponseObject, proof guardedUpload) {
 			defer wg.Done()
 			defer func() { <-sem }() // release semaphore
 
-			err := UploadObject(obj.Actions.Upload, content)
+			err := uploadGuardedObject(obj.Actions.Upload, proof)
 			if err == nil && obj.Actions.Verify != nil {
 				err = VerifyObject(obj.Actions.Verify, obj.OID, obj.Size)
 			}
@@ -351,7 +555,7 @@ func UploadAll(resp *BatchResponse, files map[string][]byte, maxConcurrent int) 
 			mu.Lock()
 			results = append(results, UploadResult{OID: obj.OID, Error: err})
 			mu.Unlock()
-		}(obj, content)
+		}(obj, proof)
 	}
 
 	wg.Wait()
@@ -423,24 +627,4 @@ func DownloadAll(resp *BatchResponse, maxConcurrent int) []DownloadResult {
 
 	wg.Wait()
 	return results
-}
-
-// bytesReaderAt wraps a byte slice to implement io.ReaderAt.
-type bytesReaderAt struct {
-	data []byte
-}
-
-func newBytesReaderAt(data []byte) *bytesReaderAt {
-	return &bytesReaderAt{data: data}
-}
-
-func (r *bytesReaderAt) ReadAt(p []byte, off int64) (n int, err error) {
-	if off >= int64(len(r.data)) {
-		return 0, io.EOF
-	}
-	n = copy(p, r.data[off:])
-	if n < len(p) {
-		return n, io.EOF
-	}
-	return n, nil
 }

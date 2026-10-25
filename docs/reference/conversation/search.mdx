@@ -1,0 +1,62 @@
+---
+title: "ox conversation search"
+description: "CLI reference for ox conversation search"
+sidebar_position: 30
+---
+
+## ox conversation search
+
+Find recorded conversations by keyword, person, and date
+
+### Synopsis
+
+Search the active team's recorded conversations on disk by keyword,
+participant, speaker, and date — for questions like "what did I talk to Ajit
+about three weeks ago on search?":
+
+  ox conversation search search files --participant Ajit --since 2026-09-01 --until 2026-09-14
+
+Keywords are matched against each conversation's title, topics, chapters,
+decisions, action items, summary, and transcript (word prefixes: "search"
+also finds "searching"). Filler words ("what did we talk about") are dropped.
+Every keyword must match; when none match them all, conversations matching
+some of them are returned with a warning.
+
+Each hit carries a sageox:// citation that ox conversation transcript opens
+at the matched cues. Recordings of the same meeting from two devices fold
+into one result. For semantic search across all team context (docs,
+sessions, plans), use ox query.
+
+```
+ox conversation search [keywords] [flags]
+```
+
+### Options
+
+```
+      --format string             output format: json|text (default "json")
+  -h, --help                      help for search
+      --limit int                 cap the number of results (max 50) (default 10)
+      --participant stringArray   only conversations this person was in (name or part of it; repeat to require several)
+      --since string              only conversations recorded on or after this instant (RFC3339 or YYYY-MM-DD)
+      --speaker string            match keywords only in what this person said
+      --text                      shorthand for --format text
+      --until string              only conversations recorded before this instant; a YYYY-MM-DD date includes that whole day
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
+      --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
+```
+
+### SEE ALSO
+
+* [ox conversation](/conversation)	 - Read recorded team conversations from the local Team Context

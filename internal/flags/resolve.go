@@ -37,6 +37,15 @@ func applyPatch(f *Flags, p *Patch) {
 	if p.AttestEnabled != nil {
 		f.AttestEnabled = *p.AttestEnabled
 	}
+	if p.TraceEnabled != nil {
+		f.TraceEnabled = *p.TraceEnabled
+	}
+	if p.BulletinEnabled != nil {
+		f.BulletinEnabled = *p.BulletinEnabled
+	}
+	if p.GitHubMirrorEnabled != nil {
+		f.GitHubMirrorEnabled = *p.GitHubMirrorEnabled
+	}
 	if p.DisableFileDeleteTools != nil {
 		f.DisableFileDeleteTools = *p.DisableFileDeleteTools
 	}

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -50,6 +52,10 @@ func init() {
 }
 
 func runFetch(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	pointerPath, err := filepath.Abs(args[0])
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
@@ -88,7 +94,10 @@ func runFetch(cmd *cobra.Command, args []string) error {
 
 	// check cache
 	cachePath := filepath.Join(repoRoot, ".sageox", "cache", relPath)
-	if isCacheHit(cachePath, ref.Size) {
+	// Equal size is not integrity: a stale or poisoned cache can otherwise be
+	// advertised as the exact evidence image after reprocessing. Revalidate the
+	// digest on verified fetches so a reader can recover from a corrupt cache.
+	if isCacheHit(cachePath, ref.Size) && (!fetchVerifyFlag || cachedFetchDigestMatches(cachePath, oid)) {
 		if fetchStdoutFlag {
 			return streamFileToStdout(cmd, cachePath)
 		}
@@ -98,13 +107,13 @@ func runFetch(cmd *cobra.Command, args []string) error {
 
 	// create LFS client for the detected repo
 	projectRoot, _ := findProjectRoot()
-	client, err := newFetchLFSClient(projectRoot, repoRoot)
+	client, err := newFetchLFSClient(ctx, projectRoot, repoRoot)
 	if err != nil {
 		return hydrateHint(err)
 	}
 
 	// download
-	resp, err := client.BatchDownload([]lfs.BatchObject{{OID: oid, Size: ref.Size}})
+	resp, err := client.BatchDownloadContext(ctx, []lfs.BatchObject{{OID: oid, Size: ref.Size}})
 	if err != nil {
 		return hydrateHint(fmt.Errorf("LFS batch download: %w", err))
 	}
@@ -185,19 +194,8 @@ func detectRepo(pointerPath string) (string, error) {
 
 // newFetchLFSClient creates an LFS client for any SageOx-managed repo
 // (team context or ledger). Credentials come from the project's endpoint.
-func newFetchLFSClient(projectRoot, repoRoot string) (*lfs.Client, error) {
+func newFetchLFSClient(ctx context.Context, projectRoot, repoRoot string) (*lfs.Client, error) {
 	ep := endpoint.GetForProject(projectRoot)
-
-	creds, err := gitserver.LoadCredentialsForEndpoint(ep)
-	if err != nil {
-		return nil, fmt.Errorf("load credentials: %w", err)
-	}
-	if creds == nil {
-		return nil, fmt.Errorf("no git credentials found (run 'ox login' first)")
-	}
-	if creds.Token == "" {
-		return nil, fmt.Errorf("git credentials have empty token")
-	}
 
 	repoURL, err := gitserver.GetBareRemoteURL(repoRoot)
 	if err != nil {
@@ -207,7 +205,7 @@ func newFetchLFSClient(projectRoot, repoRoot string) (*lfs.Client, error) {
 		return nil, fmt.Errorf("repo has no remote URL: %s", repoRoot)
 	}
 
-	return lfs.NewClient(repoURL, creds.Username, creds.Token), nil
+	return lfs.NewClientForEndpoint(ctx, repoURL, ep)
 }
 
 // isCacheHit returns true if the cached file exists and its size matches.
@@ -234,4 +232,21 @@ func streamFileToStdout(cmd *cobra.Command, path string) error {
 	defer f.Close()
 	_, err = io.Copy(cmd.OutOrStdout(), f)
 	return err
+}
+
+func cachedFetchDigestMatches(filename, oid string) bool {
+	info, err := os.Lstat(filename)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	f, err := os.Open(filename)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	hash := sha256.New()
+	if _, err = io.Copy(hash, f); err != nil {
+		return false
+	}
+	return hex.EncodeToString(hash.Sum(nil)) == oid
 }

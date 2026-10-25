@@ -1,0 +1,8 @@
+{
+  "summary": "Both resolution layouts on one plan: an id-less round as v0.20.0 writes it, the shared resolutions.json array (h1), and per-entry files under feedback/resolutions/ (h1 carried forward, counted once; h2 only there).",
+  "items": [
+    {"anchor": "h1", "reviewer": "Ana", "status": "request-change", "label": "The first risk", "note": "Name the owner.", "open": false, "resolution": "addressed"},
+    {"anchor": "h2", "reviewer": "Ana", "status": "flag", "label": "The second risk", "note": "Is this still true?", "open": false, "resolution": "wontfix"},
+    {"anchor": "h3", "reviewer": "Ana", "status": "comment", "label": "The third risk", "note": "Worth a diagram.", "open": true}
+  ]
+}

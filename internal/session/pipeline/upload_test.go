@@ -7,12 +7,16 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // mockFileSystem is a test double that records calls and can inject errors.
 type mockFileSystem struct {
 	files    map[string][]byte
 	dirs     map[string]bool
+	mkdirErr error
 	writeErr map[string]error
 	readErr  map[string]error
 }
@@ -46,6 +50,9 @@ func (m *mockFileSystem) WriteFile(path string, data []byte, _ os.FileMode) erro
 }
 
 func (m *mockFileSystem) MkdirAll(path string, _ os.FileMode) error {
+	if m.mkdirErr != nil {
+		return m.mkdirErr
+	}
 	m.dirs[path] = true
 	return nil
 }
@@ -155,6 +162,85 @@ func TestCopySessionToLedgerRawReadFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when raw.jsonl read fails")
 	}
+}
+
+func TestCopySessionToLedgerCriticalFailuresPreserveRecoverableState(t *testing.T) {
+	const (
+		rawSource = "/cache/raw.jsonl"
+		session   = "session-fail"
+	)
+	rawDestination := filepath.Join("/ledger", "sessions", session, LedgerFileRaw)
+	sourceContent := []byte(`{"source":"complete"}`)
+	priorDestination := []byte(`{"destination":"prior-good-copy"}`)
+	wantErr := errors.New("injected failure")
+
+	tests := []struct {
+		name      string
+		configure func(*mockFileSystem, *Result)
+	}{
+		{
+			name: "missing raw source path fails before creating destination",
+			configure: func(_ *mockFileSystem, result *Result) {
+				result.RawPath = ""
+			},
+		},
+		{
+			name: "session directory creation fails",
+			configure: func(fsys *mockFileSystem, _ *Result) {
+				fsys.mkdirErr = wantErr
+			},
+		},
+		{
+			name: "raw read fails",
+			configure: func(fsys *mockFileSystem, _ *Result) {
+				fsys.readErr[rawSource] = wantErr
+			},
+		},
+		{
+			name: "raw destination write fails",
+			configure: func(fsys *mockFileSystem, _ *Result) {
+				fsys.writeErr[rawDestination] = wantErr
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fsys := newMockFS()
+			fsys.files[rawSource] = append([]byte(nil), sourceContent...)
+			fsys.files[rawDestination] = append([]byte(nil), priorDestination...)
+			result := &Result{RawPath: rawSource, EntryCount: 2}
+			tt.configure(fsys, result)
+
+			err := CopySessionToLedger(fsys, result, "/ledger", session)
+
+			require.Error(t, err)
+			assert.Equal(t, sourceContent, fsys.files[rawSource], "cache source must remain retryable")
+			assert.Equal(t, priorDestination, fsys.files[rawDestination], "failed copy must preserve prior ledger bytes")
+			if result.RawPath == "" {
+				assert.Empty(t, fsys.dirs, "invalid input must fail before creating ledger state")
+			}
+		})
+	}
+}
+
+func TestCopySessionToLedgerSecondaryWriteFailureKeepsCriticalRaw(t *testing.T) {
+	fsys := newMockFS()
+	fsys.files["/cache/raw.jsonl"] = []byte(`{"raw":true}`)
+	fsys.files["/cache/summary.md"] = []byte("summary")
+	summaryDestination := filepath.Join("/ledger", "sessions", "session-partial", LedgerFileSummaryMD)
+	fsys.writeErr[summaryDestination] = errors.New("disk full")
+	result := &Result{
+		RawPath:       "/cache/raw.jsonl",
+		SummaryMDPath: "/cache/summary.md",
+		EntryCount:    2,
+	}
+
+	err := CopySessionToLedger(fsys, result, "/ledger", "session-partial")
+
+	require.NoError(t, err, "secondary artifacts are explicitly best-effort")
+	assert.Equal(t, []byte(`{"raw":true}`), fsys.files[filepath.Join("/ledger", "sessions", "session-partial", LedgerFileRaw)])
+	assert.NotContains(t, fsys.files, summaryDestination)
 }
 
 func TestCopySessionToLedgerSecondaryFailsGracefully(t *testing.T) {

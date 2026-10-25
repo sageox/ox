@@ -12,18 +12,34 @@ import (
 	"strings"
 )
 
-// DiscoverTeamCommands finds all slash commands in a team context.
+// DiscoverTeamCommands finds all team commands in a team context, reading the
+// canonical agents/commands/ root and the legacy coworkers/commands/ root.
 // It checks index.md first for token-optimized descriptions, then falls back
 // to parsing individual command files for frontmatter.
 //
 // Expected directory structure:
 //
-//	<team_context>/coworkers/commands/
+//	<team_context>/agents/commands/     # canonical
+//	<team_context>/coworkers/commands/  # legacy, still read
 //	├── index.md          # Optional: token-optimized descriptions
-//	├── deploy.md         # /deploy command
-//	└── review-pr.md      # /review-pr command
+//	├── deploy.md         # deploy command
+//	└── review-pr.md      # review-pr command
+//
+// Team commands are NOT installed as host slash commands by ox — they are
+// cataloged with their path so an AI coworker can read the file on demand.
 func DiscoverTeamCommands(teamPath string) ([]Command, error) {
-	commandsDir := filepath.Join(teamPath, CommandsDir)
+	var commands []Command
+	for _, root := range CommandDirs {
+		discovered, err := discoverCommandsIn(filepath.Join(teamPath, root))
+		if err != nil {
+			return nil, err
+		}
+		commands = append(commands, discovered...)
+	}
+	return dedupeByName(commands, func(c Command) string { return c.Name }), nil
+}
+
+func discoverCommandsIn(commandsDir string) ([]Command, error) {
 
 	if _, err := os.Stat(commandsDir); os.IsNotExist(err) {
 		return nil, nil
@@ -101,7 +117,7 @@ func parseCommandFrontmatter(path string) commandFrontmatter {
 	if err != nil {
 		return fm
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	scanner := bufio.NewScanner(file)
 	inFrontmatter := false

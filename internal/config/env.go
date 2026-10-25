@@ -11,6 +11,12 @@ const (
 	// Consumed by: ResolveSessionRecording()
 	EnvSessionRecording = "OX_SESSION_RECORDING"
 
+	// EnvSessionPublishing overrides the session publishing mode. Mirrors
+	// EnvSessionRecording exactly — highest-priority escape hatch for
+	// pipelines/automation, approved by Ryan (contract D13, bead ox-6p5y.13).
+	// Consumed by: ResolveSessionPublishing()
+	EnvSessionPublishing = "OX_SESSION_PUBLISHING"
+
 	// EnvUserConfig overrides the user config file path.
 	// Consumed by: LoadUserConfig()
 	EnvUserConfig = "OX_USER_CONFIG"

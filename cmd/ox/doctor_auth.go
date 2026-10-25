@@ -1,12 +1,12 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"time"
 
-	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
@@ -20,7 +20,7 @@ import (
 // following the advice silently changes which principal the CLI acts as.
 func malformedEnvTokenRemedy(ep string) string {
 	if auth.EnvTokenIsTeamFamily(ep) {
-		return auth.EnvVarToken + " holds a team token whose checksum does not match — a truncated paste is the usual cause. Re-copy it from your CI secret store. `ox login` mints personal oxp_ tokens and cannot replace it."
+		return auth.EnvVarToken + " holds a team token whose checksum does not match — a truncated paste is the usual cause. Re-copy it from your CI secret store. " + auth.ReauthenticationRemedy(ep)
 	}
 	return auth.EnvVarToken + " is set for this endpoint but its value failed a local format check — a truncated paste is the usual cause. Re-copy the value, or unset " + auth.EnvVarToken + " to fall back to `ox login`."
 }
@@ -49,13 +49,17 @@ func checkAuthentication() checkResult {
 	}
 
 	if err != nil {
+		detail := "Could not verify authentication status: " + err.Error()
+		if auth.EnvTokenIsTeamFamily(projectEndpoint) && !errors.Is(err, auth.ErrEndpointUnreachable) {
+			detail += " " + auth.ReauthenticationRemedy(projectEndpoint)
+		}
 		return CriticalCheck("Logged in", "check failed",
-			"Could not verify authentication status: "+err.Error())
+			detail)
 	}
 
 	if !authenticated {
 		return CriticalCheck("Logged in", "NOT LOGGED IN",
-			"Run `ox login` to authenticate. SageOx requires authentication to function.")
+			auth.ReauthenticationRemedy(projectEndpoint)+" SageOx requires authentication to function.")
 	}
 
 	// get user info for display
@@ -97,6 +101,12 @@ func checkGitCredentials() checkResult {
 		return refreshGitCredentials("expired")
 	}
 
+	token, tokenErr := auth.GetTokenForEndpoint(projectEndpoint)
+	if tokenErr != nil || (token != nil && token.AccessToken != "" &&
+		creds.BearerTokenHash != gitserver.BearerTokenFingerprint(token.AccessToken)) {
+		return refreshGitCredentials("credentials are unverified for the current token")
+	}
+
 	// credentials are valid - show expiry info
 	return PassedCheck("Git credentials",
 		fmt.Sprintf("valid, %d repos (expires in %s)", len(creds.Repos), formatCredentialExpiry(creds.ExpiresAt)))
@@ -131,20 +141,20 @@ func refreshGitCredentials(reason string) checkResult {
 	token, err := auth.GetTokenForEndpoint(projectEndpoint)
 	if err != nil || token == nil || token.AccessToken == "" {
 		return WarningCheck("Git credentials", reason,
-			"Not authenticated. Run `ox login` first.")
+			"Not authenticated. "+auth.ReauthenticationRemedy(projectEndpoint))
 	}
 
 	// fetch credentials from API
-	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken)
-	if err := fetchAndSaveGitCredentials(client); err != nil {
+	creds, err := auth.RefreshGitCredentialsForEndpoint(context.Background(), projectEndpoint, true)
+	if err != nil {
 		return WarningCheck("Git credentials", fmt.Sprintf("%s (refresh failed)", reason),
-			fmt.Sprintf("API error: %v. Run `ox login` to retry.", err))
+			fmt.Sprintf("API error: %v. %s", err, auth.ReauthenticationRemedy(projectEndpoint)))
 	}
 
-	// check new status
-	newStatus := gitserver.CheckCredentialStatusForEndpoint(projectEndpoint)
+	refreshExistingRemotes(projectEndpoint)
+
 	return PassedCheck("Git credentials",
-		fmt.Sprintf("refreshed, %d repos (expires in %s)", newStatus.RepoCount, newStatus.FormatExpiry()))
+		fmt.Sprintf("refreshed, %d repos (expires in %s)", len(creds.Repos), formatCredentialExpiry(creds.ExpiresAt)))
 }
 
 func checkAuthFilePermissions(fix bool) checkResult {

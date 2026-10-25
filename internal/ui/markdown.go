@@ -8,6 +8,7 @@ import (
 	"charm.land/glamour/v2"
 	"charm.land/glamour/v2/ansi"
 	lipgloss "charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/term"
 
 	"github.com/sageox/ox/internal/theme"
 )
@@ -340,10 +341,38 @@ func GetSageOxLightStyle() ansi.StyleConfig {
 // GetSageOxStyle returns the appropriate SageOx style based on terminal background.
 // Uses lipgloss to detect if the terminal has a dark or light background.
 func GetSageOxStyle() ansi.StyleConfig {
-	if lipgloss.HasDarkBackground(os.Stdin, os.Stdout) {
+	if terminalHasDarkBackground(os.Stdin, os.Stdout) {
 		return GetSageOxDarkStyle()
 	}
 	return GetSageOxLightStyle()
+}
+
+// terminalHasDarkBackground reports whether the terminal background is dark,
+// defaulting to dark when the terminal cannot be interrogated.
+//
+// lipgloss.HasDarkBackground is only able to honor its own 2s timeout when
+// stdin is the handle it will read the reply from. On Windows it substitutes
+// CONIN$ (and CONOUT$) whenever stdin or stdout is not a console, and the
+// reader it then gets back cannot cancel an in-flight ReadConsole — Cancel()
+// only takes effect on the *next* read — so the query blocks forever instead
+// of timing out. Any non-console stdin therefore hangs the process: a cmd/ox
+// subprocess test and internal/ui both died at the Go test timeout on the
+// Windows runner with a goroutine parked there, internal/uicatalog was still
+// parked in it when the job hit its own 120-minute limit, and Git Bash or an
+// AI coworker capturing output hangs the same way, which makes `ox guide` and
+// `ox doctor` unusable on Windows.
+//
+// Only query when stdin is a console, which is exactly the condition under
+// which lipgloss reads from the handle it was given — and stdin being a
+// console is also what makes uv's cancelable reader (GetConsoleMode succeeds,
+// fd matches os.Stdin) the one it picks, so the timeout works again. Anything
+// else gets the dark default, which is what HasDarkBackground already returns
+// when its query fails.
+func terminalHasDarkBackground(in, out *os.File) bool {
+	if !term.IsTerminal(in.Fd()) {
+		return true
+	}
+	return lipgloss.HasDarkBackground(in, out)
 }
 
 // NewMarkdownRenderer creates a glamour renderer with SageOx branding.

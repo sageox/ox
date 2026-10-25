@@ -304,7 +304,7 @@ func TestFindPiSession_MostRecent(t *testing.T) {
 	older := filepath.Join(projectDir, "old-session.jsonl")
 	newer := filepath.Join(projectDir, "new-session.jsonl")
 
-	data := `{"type":"user","timestamp":"2024-01-15T10:00:00Z","content":"test"}` + "\n"
+	data := `{"type":"session","version":3,"id":"s1","cwd":"/test/project"}` + "\n"
 	if err := os.WriteFile(older, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +347,7 @@ func TestFindPiSession_ScopedRepoWithNoSessions_DoesNotLeakOtherProject(t *testi
 	if err := os.MkdirAll(projectDirB, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	data := `{"type":"user","timestamp":"2024-01-15T10:00:00Z","content":"repo b conversation"}` + "\n"
+	data := `{"type":"session","version":3,"id":"22222222-2222-2222-2222-222222222222","cwd":"/Users/dev/repo-b"}` + "\n"
 	if err := os.WriteFile(filepath.Join(projectDirB, "session-b.jsonl"), []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func TestFindPiSession_DirectIDLookupScopedToRepo(t *testing.T) {
 	}
 	const sharedID = "22222222-2222-2222-2222-222222222222"
 	leakedSession := filepath.Join(projectDirB, sharedID+".jsonl")
-	data := `{"type":"user","timestamp":"2024-01-15T10:00:00Z","content":"repo b conversation"}` + "\n"
+	data := `{"type":"session","version":3,"id":"22222222-2222-2222-2222-222222222222","cwd":"/Users/dev/repo-b"}` + "\n"
 	if err := os.WriteFile(leakedSession, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,10 +102,7 @@ func TestFindOrphanedSessions(t *testing.T) {
 
 			tt.setup(t, cacheDir, ledgerDir)
 
-			// call findOrphanedSessions with a shim: we can't easily use the real
-			// function because it calls getRepoIDOrDefault + GetContextPath.
-			// Instead, test the core scanning logic directly.
-			orphans := scanCacheDirForOrphans(cacheDir, ledgerDir)
+			orphans := findTestOrphans(t, cacheDir, ledgerDir)
 
 			if len(orphans) != tt.expected {
 				t.Errorf("expected %d orphans, got %d", tt.expected, len(orphans))
@@ -166,78 +164,25 @@ func TestReadCacheSessionMeta(t *testing.T) {
 	})
 }
 
-// scanCacheDirForOrphans is a test-friendly version of the core scanning logic
-// extracted from findOrphanedSessions, without the config/path resolution.
-// This MUST stay in sync with findOrphanedSessions — especially StopIncomplete handling.
-//
-// Known divergences from production findOrphanedSessions:
-// - Production uses session.RecordingState struct instead of anonymous struct
-// - Production has stale recording detection (time-based threshold)
-// - Production cleans up .lock files
-// These divergences are intentional to keep the test helper simple.
-func scanCacheDirForOrphans(cacheSessionsDir, ledgerPath string) []orphanedSession {
-	entries, err := os.ReadDir(cacheSessionsDir)
-	if err != nil {
-		return nil
-	}
+func TestRawJSONLReadersRejectOverlongHeader(t *testing.T) {
+	rawPath := filepath.Join(t.TempDir(), ledgerFileRaw)
+	require.NoError(t, os.WriteFile(
+		rawPath,
+		[]byte(strings.Repeat("x", rawJSONLMaxLineBytes+1)),
+		0o600,
+	))
 
-	var orphans []orphanedSession
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
+	_, _, err := readCacheSessionMeta(rawPath)
+	require.ErrorContains(t, err, "read header")
 
-		sessionName := entry.Name()
-		sessionDir := filepath.Join(cacheSessionsDir, sessionName)
+	err = validateRawJSONLHeader(rawPath)
+	require.ErrorContains(t, err, "read header")
+}
 
-		if sessionName == "raw" || sessionName == "events" {
-			continue
-		}
-
-		// check if still recording (.recording.json present)
-		recordingPath := filepath.Join(sessionDir, ".recording.json")
-		if _, err := os.Stat(recordingPath); err == nil {
-			// read recording state to check for StopIncomplete
-			recData, readErr := os.ReadFile(recordingPath)
-			if readErr != nil {
-				continue
-			}
-			var recState struct {
-				StopIncomplete bool `json:"stop_incomplete"`
-			}
-			if json.Unmarshal(recData, &recState) != nil {
-				continue // corrupt, skip
-			}
-			if !recState.StopIncomplete {
-				continue // genuinely active recording, skip
-			}
-			// StopIncomplete: clear the recording state so session can be recovered
-			_ = os.Remove(recordingPath)
-		}
-
-		rawPath := filepath.Join(sessionDir, ledgerFileRaw)
-		if _, err := os.Stat(rawPath); os.IsNotExist(err) {
-			continue
-		}
-
-		ledgerSessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
-		if _, err := os.Stat(filepath.Join(ledgerSessionDir, "meta.json")); err == nil {
-			continue
-		}
-
-		meta, entryCount, err := readCacheSessionMeta(rawPath)
-		if err != nil {
-			continue
-		}
-
-		orphans = append(orphans, orphanedSession{
-			SessionName: sessionName,
-			CachePath:   sessionDir,
-			Meta:        meta,
-			EntryCount:  entryCount,
-		})
-	}
-
+func findTestOrphans(t *testing.T, cacheSessionsDir, ledgerPath string) []orphanedSession {
+	t.Helper()
+	orphans, err := findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath)
+	require.NoError(t, err)
 	return orphans
 }
 
@@ -310,7 +255,7 @@ func TestFindOrphanedSessions_CorruptRawJSONL(t *testing.T) {
 	require.NoError(t, os.MkdirAll(dir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ledgerFileRaw), []byte("this is not json\n"), 0644))
 
-	orphans := scanCacheDirForOrphans(cacheDir, ledgerDir)
+	orphans := findTestOrphans(t, cacheDir, ledgerDir)
 	assert.Empty(t, orphans, "corrupt raw.jsonl should be excluded from orphan list")
 }
 
@@ -361,7 +306,7 @@ func TestFindOrphanedSessions_ActiveRecordingWithRawJSONL(t *testing.T) {
 	writeTestRawJSONL(t, filepath.Join(dir, ledgerFileRaw))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), []byte(`{"agent_id":"OxActv"}`), 0644))
 
-	orphans := scanCacheDirForOrphans(cacheDir, ledgerDir)
+	orphans := findTestOrphans(t, cacheDir, ledgerDir)
 	assert.Empty(t, orphans,
 		"session with .recording.json should be excluded even if raw.jsonl exists")
 }
@@ -380,7 +325,7 @@ func TestFindOrphanedSessions_StopIncompleteRecovery(t *testing.T) {
 	recState := `{"agent_id":"OxStop","stop_incomplete":true}`
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), []byte(recState), 0644))
 
-	orphans := scanCacheDirForOrphans(cacheDir, ledgerDir)
+	orphans := findTestOrphans(t, cacheDir, ledgerDir)
 	assert.Len(t, orphans, 1, "stop_incomplete session should be treated as orphan")
 	assert.Equal(t, "2026-01-15T10-30-ryan-OxStop", orphans[0].SessionName)
 
@@ -403,7 +348,7 @@ func TestFindOrphanedSessions_StopIncompleteActiveNotRecovered(t *testing.T) {
 	recState := `{"agent_id":"OxLive","stop_incomplete":false}`
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), []byte(recState), 0644))
 
-	orphans := scanCacheDirForOrphans(cacheDir, ledgerDir)
+	orphans := findTestOrphans(t, cacheDir, ledgerDir)
 	assert.Empty(t, orphans, "active recording (stop_incomplete=false) should not be treated as orphan")
 
 	// .recording.json should still exist
@@ -424,7 +369,7 @@ func TestFindOrphanedSessions_CorruptRecordingJSON(t *testing.T) {
 	writeTestRawJSONL(t, filepath.Join(dir, ledgerFileRaw))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), []byte("not json{{{"), 0644))
 
-	orphans := scanCacheDirForOrphans(cacheDir, ledgerDir)
+	orphans := findTestOrphans(t, cacheDir, ledgerDir)
 	assert.Empty(t, orphans, "corrupt .recording.json should be skipped, not crash")
 }
 
@@ -464,7 +409,7 @@ func TestFindOrphanedSessions_MixedStates(t *testing.T) {
 	emptyDir := filepath.Join(cacheDir, "2026-01-15T10-40-ryan-Ox0005")
 	require.NoError(t, os.MkdirAll(emptyDir, 0755))
 
-	orphans := scanCacheDirForOrphans(cacheDir, ledgerDir)
+	orphans := findTestOrphans(t, cacheDir, ledgerDir)
 	assert.Len(t, orphans, 2, "should find exactly 2 orphans: plain orphan + stop_incomplete")
 
 	names := make(map[string]bool)
@@ -493,7 +438,7 @@ func TestReadCacheSessionMeta_EntriesButNoFooter(t *testing.T) {
 			"created_at": time.Now().Format(time.RFC3339),
 		},
 	})
-	// entries but no footer
+	// entries but no footer: valid turns remain recoverable after a crash
 	for i := 0; i < 3; i++ {
 		enc.Encode(map[string]any{"type": "assistant", "content": "entry"})
 	}
@@ -502,8 +447,44 @@ func TestReadCacheSessionMeta_EntriesButNoFooter(t *testing.T) {
 	meta, count, err := readCacheSessionMeta(rawPath)
 	require.NoError(t, err)
 	assert.Equal(t, "OxCrash", meta.AgentID)
-	// last line is an entry, not a footer — entry_count should be 0
-	assert.Equal(t, 0, count, "entries without footer should yield entry_count=0")
+	assert.Equal(t, 3, count,
+		"doctor must recover valid entries without a footer instead of treating the only copy as empty")
+}
+
+func TestReadCacheSessionMeta_RecoversDurableEntries(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		agentID   string
+		tail      string
+		assertion string
+	}{
+		{
+			name:      "torn final append",
+			agentID:   "OxTorn",
+			tail:      `{"type":"assistant","content":"torn`,
+			assertion: "a torn final append must not hide prior fsynced turns",
+		},
+		{
+			name:      "stale footer below durable turns",
+			agentID:   "OxStale",
+			tail:      `{"type":"footer","entry_count":0}` + "\n",
+			assertion: "a stale footer must not turn durable content into a zero-entry prune",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rawPath := filepath.Join(t.TempDir(), ledgerFileRaw)
+			content := fmt.Sprintf(`{"type":"header","metadata":{"agent_id":%q,"agent_type":"codex"}}`, tc.agentID) + "\n" +
+				`{"type":"user","content":"durable one"}` + "\n" +
+				`{"type":"assistant","content":"durable two"}` + "\n" + tc.tail
+			require.NoError(t, os.WriteFile(rawPath, []byte(content), 0o600))
+
+			meta, count, err := readCacheSessionMeta(rawPath)
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.agentID, meta.AgentID)
+			assert.Equal(t, 2, count, tc.assertion)
+		})
+	}
 }
 
 func TestReadCacheSessionMeta_HeaderWithNoMetadataKey(t *testing.T) {
@@ -717,11 +698,8 @@ func TestRetrySessionUpload_ZeroEntryGuard(t *testing.T) {
 // credentials with empty projectRoot), raw.jsonl copied to the ledger session dir is
 // NOT replaced with an LFS pointer stub.
 //
-// The bug was: WriteSessionMeta (with fileRefs) was called before git push, replacing
-// content files with pointer stubs. If push then failed, the content was lost.
-// The fix: WriteSessionMetaOnly is used before push; WritePointerFiles runs only after
-// a successful push. When LFS fails, retrySessionUpload returns an error before any
-// write step that would corrupt content.
+// Pointer preparation requires a successful LFS upload. If upload fails, the
+// ledger copy and source cache must both retain their real content for retry.
 func TestRetrySessionUpload_ContentFilesNotPointers_OnLFSFailure(t *testing.T) {
 	tmpDir := t.TempDir()
 	cacheDir := filepath.Join(tmpDir, "cache")
@@ -751,12 +729,7 @@ func TestRetrySessionUpload_ContentFilesNotPointers_OnLFSFailure(t *testing.T) {
 	err := retrySessionUpload("", ledgerDir, orphan)
 	require.Error(t, err, "expected upload error with no project or git repo")
 
-	// CRITICAL (bug #291 regression): raw.jsonl copied to the ledger session dir must
-	// NOT be replaced with an LFS pointer stub at any point before a successful push.
-	// If retrySessionUpload failed after copying raw.jsonl but before the push, the
-	// content file must remain as real bytes — not a tiny pointer.
-	// Before the fix, WriteSessionMeta (with fileRefs) was called before commitAndPush,
-	// so a push failure would leave only pointer stubs with no remote blob backing.
+	// Without a successful upload, no ledger content may become a pointer.
 	// check ALL content files in the ledger session dir survive as real content
 	ledgerSessionDir := filepath.Join(ledgerDir, "sessions", sessionName)
 	contentFiles := []string{ledgerFileRaw}

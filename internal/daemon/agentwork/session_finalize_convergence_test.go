@@ -88,9 +88,10 @@ func TestAntiEntropy_ConvergesAfterTransientPushFailure(t *testing.T) {
 	writeProductionShapedSession(t, clonePath, sessionName)
 
 	handler := newGitBackedHandler()
+	enableLocalFinalizeLFS(t, handler, clonePath)
 
 	// --- cycle 1: the remote is down. Commit lands locally, push does not.
-	runGitCmd(t, clonePath, "remote", "set-url", "origin", "/nonexistent/broken/remote.git")
+	runGitCmd(t, clonePath, "remote", "set-url", "--push", "origin", "/nonexistent/broken/remote.git")
 
 	first, err := handler.Detect(clonePath)
 	if err != nil {
@@ -110,7 +111,7 @@ func TestAntiEntropy_ConvergesAfterTransientPushFailure(t *testing.T) {
 
 	// --- cycle 2: the remote is back. Content is already at HEAD, so nothing
 	// stages. This is the cycle that repeated ~114 times a day per session.
-	runGitCmd(t, clonePath, "remote", "set-url", "origin", "file://"+barePath)
+	runGitCmd(t, clonePath, "remote", "set-url", "--push", "origin", "file://"+barePath)
 
 	second, err := handler.Detect(clonePath)
 	if err != nil {
@@ -150,6 +151,7 @@ func TestProcessUploadOnly_WritesMetaWhenAbsent(t *testing.T) {
 	cacheDir := writeProductionShapedSession(t, clonePath, sessionName)
 
 	handler := newGitBackedHandler()
+	enableLocalFinalizeLFS(t, handler, clonePath)
 	item := &WorkItem{
 		ID:   "test-meta-synthesis",
 		Type: sessionFinalizeType,
@@ -197,12 +199,13 @@ func TestProcessUploadOnly_FailedPushIsReportedAsFailure(t *testing.T) {
 	}
 
 	_, clonePath := setupBareAndCloneLedger(t)
-	runGitCmd(t, clonePath, "remote", "set-url", "origin", "/nonexistent/broken/remote.git")
+	runGitCmd(t, clonePath, "remote", "set-url", "--push", "origin", "/nonexistent/broken/remote.git")
 
 	sessionName := "2026-01-15T17-00-testuser-OxHONEST"
 	cacheDir := writeProductionShapedSession(t, clonePath, sessionName)
 
 	handler := newGitBackedHandler()
+	enableLocalFinalizeLFS(t, handler, clonePath)
 	item := &WorkItem{
 		ID:   "test-failure-is-reported",
 		Type: sessionFinalizeType,
@@ -282,7 +285,7 @@ func TestGitCommitAndPush_IgnoresOtherSessionsStagedFiles(t *testing.T) {
 	handler.gitCommitAndPush(&SessionFinalizePayload{
 		SessionDir: targetDir,
 		LedgerPath: clonePath,
-	})
+	}, nil)
 
 	// the other session's file must still be staged and uncommitted
 	committed := gitOutput(t, clonePath, "log", "-1", "--name-only", "--pretty=format:")
@@ -318,7 +321,11 @@ func TestGitCommitAndPush_CommitExcludesOtherSessionsWhenStaged(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range append([]string{"raw.jsonl", "meta.json"}, requiredArtifacts...) {
-		if err := os.WriteFile(filepath.Join(targetDir, name), []byte("target content"), 0644); err != nil {
+		content := []byte("target content")
+		if name == "meta.json" {
+			content = []byte(`{"version":"1.0","session_name":"` + target + `"}`)
+		}
+		if err := os.WriteFile(filepath.Join(targetDir, name), content, 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -338,6 +345,10 @@ func TestGitCommitAndPush_CommitExcludesOtherSessionsWhenStaged(t *testing.T) {
 	handler.gitCommitAndPush(&SessionFinalizePayload{
 		SessionDir: targetDir,
 		LedgerPath: clonePath,
+	}, map[string]lfs.FileRef{
+		"raw.jsonl":  lfs.NewFileRef([]byte("target content")),
+		"summary.md": lfs.NewFileRef([]byte("target content")),
+		"session.md": lfs.NewFileRef([]byte("target content")),
 	})
 
 	committed := gitOutput(t, clonePath, "log", "-1", "--name-only", "--pretty=format:")

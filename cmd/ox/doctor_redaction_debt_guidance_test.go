@@ -138,7 +138,7 @@ func TestDoctorRedactionDebt_EmittedCommandsParse(t *testing.T) {
 // hand-written source rather than runtime output so a future copy edit
 // can't drift past the assertion.
 func TestDoctorRedactionDebt_HelpTextNoBareSessionPlaceholder(t *testing.T) {
-	buf, err := os.ReadFile("doctor_redaction_debt.go")
+	buf, err := os.ReadFile(repoPath("doctor_redaction_debt.go"))
 	require.NoError(t, err)
 	src := string(buf)
 

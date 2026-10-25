@@ -60,74 +60,14 @@ func (m *mockFS) WriteFile(path string, data []byte, _ os.FileMode) error {
 }
 
 // --- OxInPathCheck tests ---
-
-func TestOxInPathCheck(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name           string
-		lookPath       LookPathFunc
-		wantStatus     doctor.Status
-		wantMessage    string
-		wantFixPresent bool
-	}{
-		{
-			// prevents: user installed ox but gets cryptic errors because it's not in PATH
-			name: "found in /usr/local/bin",
-			lookPath: func(file string) (string, error) {
-				assert.Equal(t, "ox", file)
-				return "/usr/local/bin/ox", nil
-			},
-			wantStatus:  doctor.StatusPass,
-			wantMessage: "bin",
-		},
-		{
-			// prevents: user has ox in GOPATH but check fails to recognize it
-			name: "found in go/bin",
-			lookPath: func(file string) (string, error) {
-				return "/home/user/go/bin/ox", nil
-			},
-			wantStatus:  doctor.StatusPass,
-			wantMessage: "bin",
-		},
-		{
-			// prevents: ox not installed at all; user gets no guidance
-			name: "not found in PATH",
-			lookPath: func(file string) (string, error) {
-				return "", errors.New("executable file not found in $PATH")
-			},
-			wantStatus:     doctor.StatusWarn,
-			wantMessage:    "not found",
-			wantFixPresent: true,
-		},
-		{
-			// prevents: custom install location not recognized
-			name: "found in custom path",
-			lookPath: func(file string) (string, error) {
-				return "/opt/sageox/bin/ox", nil
-			},
-			wantStatus:  doctor.StatusPass,
-			wantMessage: "bin",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			check := NewOxInPathCheck(tt.lookPath)
-
-			result := check.Run(context.Background(), false)
-
-			assert.Equal(t, tt.wantStatus, result.Status)
-			assert.Equal(t, tt.wantMessage, result.Message)
-			if tt.wantFixPresent {
-				assert.NotEmpty(t, result.Fix)
-			} else {
-				assert.Empty(t, result.Fix)
-			}
-		})
-	}
-}
+//
+// The table that used to live here asserted the exact false-green bug this
+// check was rewritten to fix: it treated a bare, successful LookPathFunc as
+// proof that ox is reachable, when the real failure mode is a
+// non-interactive hook shell that can't see PATH edits an interactive
+// shell can. Full coverage of the new shell-probe-based contract (pass /
+// off-path / shadowed / not-installed / inconclusive-probe) now lives in
+// ox_in_path_test.go.
 
 func TestOxInPathCheck_NameAndCategory(t *testing.T) {
 	t.Parallel()
@@ -141,9 +81,13 @@ func TestOxInPathCheck_NilLookPathUsesDefault(t *testing.T) {
 	// prevents: nil lookPath causes panic at runtime
 	check := NewOxInPathCheck(nil)
 	assert.NotNil(t, check.lookPath)
-	// should not panic when run (uses real exec.LookPath)
+	assert.NotNil(t, check.shellProbe)
+	assert.NotNil(t, check.executable)
+	// should not panic when run (uses the real shell probe against
+	// whatever shell/environment this test happens to run under -- so any
+	// of pass/warn/skip is a legitimate outcome here).
 	result := check.Run(context.Background(), false)
-	assert.Contains(t, []doctor.Status{doctor.StatusPass, doctor.StatusWarn}, result.Status)
+	assert.Contains(t, []doctor.Status{doctor.StatusPass, doctor.StatusWarn, doctor.StatusSkip}, result.Status)
 }
 
 // --- SageoxDirectoryCheck tests ---

@@ -201,13 +201,42 @@ told you to run autonomously.
 runs and may draw new CodeRabbit follow-ups; the monitor will fire again
 when they land, and the loop continues naturally.
 
+**Greptile will not follow up on its own.** This repo's `greptile.json`
+sets `triggerOnUpdates: false`, so Greptile reads the PR when it opens and
+then not again until someone asks. CodeRabbit still re-reviews every push;
+Greptile does not. That is what step 7 is for.
+
+### 7. Re-trigger Greptile on the final state
+
+Once every thread is addressed and CI is green — i.e. right before you
+would exit — ask Greptile to read the merged-ready state:
+
+```bash
+gh pr comment <n> --body "@greptileai"
+```
+
+(The same thing is available as the **"Re-trigger Greptile"** button in
+Greptile's own comment footer.)
+
+Then wait for the new review and triage whatever it returns exactly like
+any other round: fix, reply, resolve, push, re-trigger. A PR should be
+merged on a Greptile review of the code that is actually merging, not of
+the first draft of it.
+
+Skip this only when Greptile never reviewed the PR at all (it is not
+installed on the repo, or the PR carries the `no-greptile` label).
+
 ## Exit
 
 When the monitor emits `clean: ...`:
 
-1. `TaskStop` the monitor.
-2. Report a summary: what was fixed, what was intentionally skipped and
-   why (one bullet per skipped thread), final check + thread counts.
+1. Run step 7 if you have not already — re-trigger Greptile and let the
+   final-state review land. If it opens new threads, you are not clean;
+   go back to step 3.
+2. `TaskStop` the monitor.
+3. Report a summary: what was fixed, what was intentionally skipped and
+   why (one bullet per skipped thread), final check + thread counts, and
+   whether the final Greptile re-trigger came back clean.
 
 ## Guardrails
 
@@ -217,6 +246,8 @@ When the monitor emits `clean: ...`:
 - **Never skip outdated comments blindly.** `isOutdated` = line moved.
 - **Never blanket-dismiss CodeRabbit nitpicks.** Judge each on merit.
 - **Never bypass failing checks** with `--no-verify` or similar.
+- **Never merge on a stale Greptile read.** Greptile does not re-review on
+  push here; re-trigger it at the final state (step 7).
 - **Confirm before `git push`** unless running autonomously.
 - **Pause and ask** if a comment implies a design decision the user
   should own, rather than guessing — but **keep the monitor running**
@@ -226,5 +257,7 @@ When the monitor emits `clean: ...`:
 ## Related
 
 - `CLAUDE.md` — repo commit/PR conventions, CodeRabbit reply protocol.
+- `greptile.json` — repo review config; `triggerOnUpdates: false` is why
+  step 7 exists. `CONTRIBUTING.md` explains it for humans.
 - `Monitor` tool — session-length, `persistent: true`, one stdout line =
   one event, stop with `TaskStop`.

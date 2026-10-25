@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -92,21 +94,24 @@ func TestGetRepos_HTTP401_Unauthorized(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	client := &RepoClient{
-		baseURL:    mockServer.URL,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
-		version:    "test-version",
-		authToken:  "expired-token",
+	for _, token := range []string{"expired-token", "oxt_expired"} {
+		t.Run(token, func(t *testing.T) {
+			client := NewRepoClientWithEndpoint(mockServer.URL).WithAuthToken(token)
+			resp, err := client.GetRepos()
+			require.ErrorIs(t, err, ErrUnauthorized)
+			assert.Nil(t, resp)
+			assert.Contains(t, err.Error(), "authentication required")
+			if strings.HasPrefix(token, "oxt_") {
+				assert.Contains(t, err.Error(), "rotate or re-mint")
+				assert.NotContains(t, err.Error(), "ox login")
+			} else {
+				assert.Contains(t, err.Error(), "ox login")
+			}
+			creds, err := client.GetGitCredentials(context.Background())
+			require.ErrorIs(t, err, ErrUnauthorized, "Git discovery must preserve the 401 identity")
+			assert.Nil(t, creds)
+		})
 	}
-
-	resp, err := client.GetRepos()
-
-	require.Error(t, err)
-	assert.Nil(t, resp)
-
-	// error should indicate auth is needed
-	assert.Contains(t, err.Error(), "authentication required")
-	assert.Contains(t, err.Error(), "ox login")
 }
 
 func TestGetCLISettings_HTTP404_IsCapabilityGap(t *testing.T) {
@@ -423,24 +428,18 @@ func TestDaemonMode_DoesNotLeakIntoCLIRequests(t *testing.T) {
 
 func TestGetRepos_EmptyResponseBody(t *testing.T) {
 	t.Parallel()
-	// server returns 200 but empty body
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		// empty body
-	}))
-	defer mockServer.Close()
-
-	client := &RepoClient{
-		baseURL:    mockServer.URL,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
-		version:    "test-version",
-		authToken:  "valid-token",
+	for _, body := range []string{"", `{}`} {
+		t.Run("body="+body, func(t *testing.T) {
+			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.WriteString(w, body)
+			}))
+			defer mockServer.Close()
+			client := NewRepoClientWithEndpoint(mockServer.URL).WithAuthToken("valid-token")
+			creds, err := client.GetGitCredentials(context.Background())
+			require.Error(t, err, "a missing PAT must fail before caching credentials")
+			assert.Nil(t, creds)
+		})
 	}
-
-	resp, err := client.GetRepos()
-
-	require.Error(t, err, "empty body should fail decode")
-	assert.Nil(t, resp)
 }
 
 func TestGetRepos_HTTP500_EmptyBody(t *testing.T) {

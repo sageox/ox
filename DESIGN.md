@@ -2,7 +2,7 @@
 
 > Calm, precise terminal output for humans and AI coworkers.
 
-ox's visual language inherits from the SageOx design system: sage-green primary, copper-gold secondary, forest accent, low-noise Tufte minimums. Components are reusable, theme-aware, and adapt to the terminal in front of them (light/dark, `NO_COLOR`, TTY vs piped, headless SSH).
+ox's visual language inherits from the SageOx design system: an all-sage brand hierarchy, warning-only gold, low-noise semantic accents, and Tufte minimums. Components are reusable, theme-aware, and adapt to the terminal in front of them (light/dark, `NO_COLOR`, TTY vs piped, headless SSH).
 
 This file is the entry point. It is intentionally short.
 

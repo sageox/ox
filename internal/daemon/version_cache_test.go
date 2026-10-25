@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	whisperstore "github.com/sageox/ox/internal/whisper/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -203,4 +204,53 @@ func TestCheckAndUpdate_MalformedBody(t *testing.T) {
 	err := vc.CheckAndUpdate(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decode")
+}
+
+// The daemon rebuilds VersionCacheData from scratch on every successful poll.
+// If it saved that without carrying the CLI's update-notice ledger, each poll
+// would erase the "already told this coworker" memory and the upgrade nag would
+// come back on every command until the next notice fired.
+func TestCheckAndUpdate_200_PreservesNoticeLedger(t *testing.T) {
+	t.Parallel()
+	vc := testVersionCacheWithServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", `"new-etag"`)
+		_ = json.NewEncoder(w).Encode(map[string]string{"tag_name": "v0.16.1"})
+	})
+
+	// The CLI stamped the ledger on disk after this daemon last loaded, so the
+	// daemon's in-memory copy does not know about it.
+	stamped := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	require.NoError(t, vc.Save(&VersionCacheData{
+		LatestVersion:  "v0.16.0",
+		CheckedAt:      stamped,
+		LastNaggedLine: "0.16",
+		LastNaggedAt:   stamped,
+	}))
+	vc.mu.Lock()
+	vc.data = nil // simulate a daemon that started before the stamp
+	vc.mu.Unlock()
+
+	require.NoError(t, vc.CheckAndUpdate(context.Background()))
+
+	fresh := &VersionCache{filePath: vc.filePath, logger: slog.Default()}
+	require.NoError(t, fresh.Load())
+	got := fresh.Data()
+	require.NotNil(t, got)
+	assert.Equal(t, "v0.16.1", got.LatestVersion, "poll must still record the new version")
+	assert.Equal(t, "0.16", got.LastNaggedLine, "poll must not erase the notice ledger")
+	assert.Equal(t, stamped.UTC(), got.LastNaggedAt.UTC())
+}
+
+func TestCheckLatestVersion_TeamTokenSuppressesUpgradeWhispers(t *testing.T) {
+	t.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
+	t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
+	s := newDiscoveryTestScheduler(t)
+	s.versionCache = testVersionCacheWithServer(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("team-token sessions must not check releases")
+	})
+	s.whisperRegistry = NewWhisperRegistry(openTestStore(t), nil)
+	s.checkLatestVersion(context.Background())
+	whispers, err := s.whisperRegistry.GetWhispers("test-coworker", whisperstore.AttentionAll, nil)
+	require.NoError(t, err)
+	require.Empty(t, whispers)
 }

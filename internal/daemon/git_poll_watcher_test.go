@@ -324,14 +324,19 @@ func TestStart_DeliversThenStopsCleanly(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	ready := make(chan struct{})
 	go func() {
-		w.Start(ctx)
+		w.start(ctx, ready)
 		close(done)
 	}()
 
-	// Let Start's silent baseline poll complete before creating the file, so
-	// live.go is a genuine post-baseline change rather than part of the baseline.
-	time.Sleep(100 * time.Millisecond)
+	// Wait for Start's silent baseline before creating the file, so live.go is
+	// a genuine post-baseline change rather than part of the baseline.
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start did not establish its baseline")
+	}
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "live.go"), []byte("package p\n"), 0644))
 	require.True(t, findChange(t, acc, "live.go", ChangeCreated), "expected Start loop to deliver Created for live.go")
 

@@ -2,16 +2,21 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/require"
@@ -35,11 +40,53 @@ type agentSessionFixture struct {
 	// the isolated test environment and returns a handle/path for follow-up writes.
 	createSessionSource func(t *testing.T, homeDir, cwd string) string
 
-	// appendQuery appends a user query to the agent source after session start.
-	appendQuery func(t *testing.T, sourcePath, query string)
+	// appendMessage appends a native message after session start.
+	appendMessage func(t *testing.T, sourcePath, role, content string)
+
+	stopDuringCapture bool
+
+	// holdFails makes recording the hold fail at stop.
+	holdFails bool
+}
+
+// blockingStopCodexAdapter holds the watcher's final native read in flight while
+// the CLI starts stopping. Only that first read blocks; an unlocked CLI drain
+// can still run, exposing duplicate capture instead of hiding it behind the test.
+type blockingStopCodexAdapter struct {
+	testCodexAdapter
+	response string
+	entered  chan struct{}
+	release  chan struct{}
+	blocked  atomic.Bool
+}
+
+func (a *blockingStopCodexAdapter) ReadFromOffset(path string, offset int64) ([]adapters.RawEntry, int64, error) {
+	entries, next, err := a.testCodexAdapter.ReadFromOffset(path, offset)
+	for _, entry := range entries {
+		if entry.Content == a.response && a.blocked.CompareAndSwap(false, true) {
+			close(a.entered)
+			<-a.release
+			break
+		}
+	}
+	return entries, next, err
 }
 
 func TestManualPublishingSessionCapture_Matrix(t *testing.T) {
+	// The test binary may itself run inside Codex, Claude Code, or another AI
+	// coworker. Do not let that ambient session identity make
+	// ensurePrimeBeforeSession recursively execute the test binary as `ox`.
+	for _, key := range []string{
+		"AMP_THREAD_URL",
+		"CLAUDE_CODE_SESSION_ID",
+		"CODEX_THREAD_ID",
+		"GC_RUN_ID",
+		"OMP_SESSION_ID",
+		"PI_SESSION_ID",
+	} {
+		t.Setenv(key, "")
+	}
+
 	adapters.Register(&testCodexAdapter{})
 	t.Cleanup(func() { adapters.Unregister("codex") })
 
@@ -48,7 +95,21 @@ func TestManualPublishingSessionCapture_Matrix(t *testing.T) {
 			name:                "codex",
 			agentType:           "codex",
 			createSessionSource: writeCodexSessionFile,
-			appendQuery:         appendCodexUserQuery,
+			appendMessage:       appendCodexMessage,
+		},
+		{
+			name:                "codex_stop_during_capture",
+			agentType:           "codex",
+			createSessionSource: writeCodexSessionFile,
+			appendMessage:       appendCodexMessage,
+			stopDuringCapture:   true,
+		},
+		{
+			name:                "codex_hold_fails",
+			agentType:           "codex",
+			createSessionSource: writeCodexSessionFile,
+			appendMessage:       appendCodexMessage,
+			holdFails:           true,
 		},
 	}
 
@@ -61,6 +122,10 @@ func TestManualPublishingSessionCapture_Matrix(t *testing.T) {
 }
 
 func runManualPublishingSessionCaptureTest(t *testing.T, fixture agentSessionFixture) {
+	if fixture.stopDuringCapture && testing.Short() {
+		t.Skip("short: waits for native recording polls and concurrent CLI stop")
+	}
+
 	// Fast local HTTP endpoint for auth/access checks (checkUploadAccess fail-open path).
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
@@ -71,7 +136,11 @@ func runManualPublishingSessionCaptureTest(t *testing.T, fixture agentSessionFix
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SAGEOX_DAEMON", "false")
 
 	projectRoot := createInitializedProjectWithConfig(t, &config.ProjectConfig{
 		RepoID:    "test-repo-manual-publish",
@@ -88,6 +157,7 @@ func runManualPublishingSessionCaptureTest(t *testing.T, fixture agentSessionFix
 	require.NoError(t, os.Chdir(projectRoot))
 	actualProjectCWD, err := os.Getwd()
 	require.NoError(t, err)
+	require.Nil(t, daemon.TryConnect(), "fixture must not connect to a live daemon")
 
 	// runAgentSessionStart/Stop read output mode from global cfg, which is normally
 	// initialized by Cobra PersistentPreRun in CLI execution.
@@ -139,23 +209,131 @@ func runManualPublishingSessionCaptureTest(t *testing.T, fixture agentSessionFix
 	require.NoError(t, err)
 	require.NoError(t, store.Add(inst))
 	require.NoError(t, runAgentSessionStart(inst, nil))
+	state, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, "tail", state.WatchMode, "manual Codex start without hooks must start tail capture")
 
 	// (d) append pre-canned query after recording start so it survives timestamp filtering.
 	preCannedQuery := "PRE-CANNED-QUERY: verify manual publishing captures this"
-	fixture.appendQuery(t, sourcePath, preCannedQuery)
+	fixture.appendMessage(t, sourcePath, "user", preCannedQuery)
+
+	// A team context on disk makes the stop's team-memory observation reachable,
+	// so the assertion below that nothing landed there can actually fail.
+	teamCtxPath := config.DefaultTeamContextPath("test-team", apiServer.URL)
+	require.NoError(t, os.MkdirAll(teamCtxPath, 0o755))
 
 	// (e) stop session and gather stored session data.
-	require.NoError(t, runAgentSessionStop(inst))
+	const finalResponse = "FINAL-CODEX-RESPONSE: the recording contains the completed work"
+	if fixture.stopDuringCapture {
+		// Failure prevented: stopping between a source read and its persisted
+		// cursor used to make the CLI drain that same batch a second time.
+		blocking := &blockingStopCodexAdapter{
+			response: finalResponse, entered: make(chan struct{}), release: make(chan struct{}),
+		}
+		previousAdapter, err := adapters.GetAdapter("codex")
+		require.NoError(t, err)
+		adapters.Unregister("codex")
+		adapters.Register(blocking)
+		t.Cleanup(func() {
+			adapters.Unregister("codex")
+			adapters.Register(previousAdapter)
+		})
+		manager := agentwork.NewSessionWatcherManager(slog.Default())
+		manager.SetHomeDirForTest(os.Getenv("HOME"))
+		t.Cleanup(func() {
+			select {
+			case <-blocking.release:
+			default:
+				close(blocking.release)
+			}
+			manager.StopAll()
+		})
+		ledgerPath := deriveLedgerPath(state.SessionPath)
+		require.NotEmpty(t, ledgerPath)
+		require.Equal(t, 1, manager.DetectAndRestart(ledgerPath))
+		firstBatch, err := os.Stat(sourcePath)
+		require.NoError(t, err)
+		require.Eventually(t, func() bool {
+			current, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
+			return err == nil && current != nil && current.SourceOffset == firstBatch.Size() && current.EntryCount == 1
+		}, 8*time.Second, 10*time.Millisecond, "first prompt must be captured before the final read")
 
-	// Read latest saved raw session from local cache store.
-	contextPath := session.GetContextPath("test-repo-manual-publish")
-	require.NotEmpty(t, contextPath)
-	s, err := session.NewStore(contextPath)
-	require.NoError(t, err)
-	latest, err := s.GetLatestRaw()
-	require.NoError(t, err)
-	stored, err := s.ReadSessionRaw(latest.SessionName)
-	require.NoError(t, err)
+		fixture.appendMessage(t, sourcePath, "assistant", finalResponse)
+		select {
+		case <-blocking.entered:
+		case <-time.After(8 * time.Second):
+			t.Fatal("watcher did not begin the final native read")
+		}
+		stopResult := make(chan error, 1)
+		stopFinished := make(chan struct{})
+		go func() {
+			defer close(stopFinished)
+			stopResult <- runAgentSessionStop(inst)
+		}()
+		t.Cleanup(func() {
+			select {
+			case <-blocking.release:
+			default:
+				close(blocking.release)
+			}
+			select {
+			case <-stopFinished:
+			case <-time.After(15 * time.Second):
+				t.Error("CLI stop did not finish during cleanup")
+			}
+		})
+		require.Eventually(t, func() bool {
+			return session.HasExplicitStop(projectRoot, inst.AgentID)
+		}, 3*time.Second, 10*time.Millisecond, "CLI must mark explicit stop before waiting for the watcher")
+		close(blocking.release)
+		select {
+		case err := <-stopResult:
+			require.NoError(t, err)
+		case <-time.After(15 * time.Second):
+			t.Fatal("CLI stop did not finish without daemon IPC")
+		}
+		require.Eventually(t, func() bool { return len(manager.ActiveSessions()) == 0 }, 3*time.Second, 10*time.Millisecond,
+			"watcher must observe explicit stop without IPC")
+		require.NoFileExists(t, filepath.Join(state.SessionPath, ".recording.json"))
+		require.Zero(t, manager.DetectAndRestart(ledgerPath), "stopped recording must not restart")
+	} else if fixture.holdFails {
+		// Failure prevented: a stop that cannot record the hold clears the
+		// recording anyway, leaving a folder the daemon reclaims and publishes.
+		orig := writeSessionHold
+		writeSessionHold = func(string, session.HoldReason, string) error { return errors.New("disk full") }
+		t.Cleanup(func() { writeSessionHold = orig })
+		stopErr := runAgentSessionStop(inst)
+		require.ErrorContains(t, stopErr, "hold session on this machine")
+		require.ErrorContains(t, stopErr, "recording state preserved")
+		kept, loadErr := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
+		require.NoError(t, loadErr)
+		require.NotNil(t, kept, "the recording must survive a hold that could not be recorded")
+		require.False(t, session.IsHeld(state.SessionPath))
+		return
+	} else {
+		require.NoError(t, runAgentSessionStop(inst))
+	}
+
+	var stored *session.StoredSession
+	var sessionDir string
+	if fixture.stopDuringCapture {
+		// Incremental stop finalizes the existing recording cache in place.
+		sessionDir = state.SessionPath
+		stored, err = session.ReadSessionFromPath(filepath.Join(state.SessionPath, "raw.jsonl"))
+		require.NoError(t, err)
+	} else {
+		// A session with no live capture is reconstructed into the store.
+		contextPath := session.GetContextPath("test-repo-manual-publish")
+		require.NotEmpty(t, contextPath)
+		s, err := session.NewStore(contextPath)
+		require.NoError(t, err)
+		latest, err := s.GetLatestRaw()
+		require.NoError(t, err)
+		sessionDir = filepath.Dir(latest.FilePath)
+		stored, err = s.ReadSessionRaw(latest.SessionName)
+		require.NoError(t, err)
+	}
 
 	// (f) assert session contains the pre-canned query.
 	found := false
@@ -166,6 +344,31 @@ func runManualPublishingSessionCaptureTest(t *testing.T, fixture agentSessionFix
 		}
 	}
 	require.True(t, found, "expected stored session to contain pre-canned query")
+	if fixture.stopDuringCapture {
+		counts := make(map[string]int)
+		for _, entry := range stored.Entries {
+			if content, ok := entry["content"].(string); ok {
+				counts[content]++
+			}
+		}
+		require.Equal(t, 1, counts[preCannedQuery], "initial prompt must remain captured once")
+		require.Equal(t, 1, counts[finalResponse], "final response must be drained exactly once")
+	}
+
+	// (g) The session is held on this machine (GH #1093): the hold travels
+	// with the session data, nothing invites the daemon (.needs-summary) or
+	// the AI coworker (summary prompt) to summarize and publish it, and
+	// nothing reaches the team's memory.
+	require.True(t, session.IsHeld(sessionDir), "a manual stop must hold the session it saved: %s", sessionDir)
+	require.NoFileExists(t, filepath.Join(sessionDir, ".needs-summary"), "a held session must not invite summarization")
+	var observations []string
+	_ = filepath.WalkDir(filepath.Join(teamCtxPath, "memory"), func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			observations = append(observations, path)
+		}
+		return nil
+	})
+	require.Empty(t, observations, "a held session must leave nothing in team memory")
 }
 
 func writeCodexSessionFile(t *testing.T, homeDir, cwd string) string {
@@ -201,24 +404,28 @@ func writeCodexSessionFile(t *testing.T, homeDir, cwd string) string {
 	return sessionPath
 }
 
-func appendCodexUserQuery(t *testing.T, sessionPath, query string) {
+func appendCodexMessage(t *testing.T, sessionPath, role, content string) {
 	t.Helper()
 
 	f, err := os.OpenFile(sessionPath, os.O_APPEND|os.O_WRONLY, 0o644)
 	require.NoError(t, err)
 	defer f.Close()
 
+	contentType := "input_text"
+	if role == "assistant" {
+		contentType = "output_text"
+	}
 	enc := json.NewEncoder(f)
 	require.NoError(t, enc.Encode(map[string]any{
 		"timestamp": time.Now().Add(2 * time.Second).UTC().Format(time.RFC3339Nano),
 		"type":      "response_item",
 		"payload": map[string]any{
 			"type": "message",
-			"role": "user",
+			"role": role,
 			"content": []map[string]any{
 				{
-					"type": "input_text",
-					"text": query,
+					"type": contentType,
+					"text": content,
 				},
 			},
 		},

@@ -1,5 +1,7 @@
 # GitHub Activity Assembly — Test Plan
 
+> **Distill integration superseded — 2026-09-09:** `ox distill` has been removed. Scenarios invoking it below are historical and no longer part of the active test plan. Activity assembly and `ox code activity` scenarios remain applicable.
+
 Reference test plan for the GitHub activity assembly feature. Covers user acceptance
 scenarios, integration tests, and simulation strategy.
 

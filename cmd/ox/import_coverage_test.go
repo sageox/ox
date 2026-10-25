@@ -227,9 +227,9 @@ func TestFindExistingDocByOID_FindsMatch(t *testing.T) {
 	data, _ := json.Marshal(meta)
 	assert.NoError(t, os.WriteFile(filepath.Join(docDir, "metadata.json"), data, 0o644))
 
-	docID, found := findExistingDocByOID(dir, "sha256:abc123")
+	metaPath, found := findExistingDocByOID(dir, "sha256:abc123")
 	assert.True(t, found)
-	assert.Equal(t, "my-doc", docID)
+	assert.Equal(t, filepath.Join(docDir, "metadata.json"), metaPath)
 }
 
 func TestFindExistingDocByOID_NoMatch(t *testing.T) {

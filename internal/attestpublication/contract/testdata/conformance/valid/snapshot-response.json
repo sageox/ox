@@ -1,0 +1,25 @@
+{
+  "data": {
+    "run": {
+      "schema_version": "1.0",
+      "source_run_id": "bare-rule",
+      "producer": {"name": "sageox-attest", "version": "0.1.0"},
+      "source": {"git": {"branch": null, "commit_sha": null, "dirty": null}},
+      "timing": {"started_at": "2026-09-10T20:00:00Z", "finished_at": "2026-09-10T20:00:01Z", "duration_ms": 1000},
+      "corpus": {"key":"bare","capabilities":[{"key":"bare","title":"Bare","tags":[],"source":"declared","features":[{"path":"features/bare.feature","title":"Bare feature","tags":[],"scenarios":[],"rules":[{"title":"","tags":[],"scenarios":[{"key":"af7f83bb349ab8f7377618e1f4b3e6c1fd51c00e374a6b089ee2e85d9423345d","title":"Inside","tags":[],"kind":"scenario","examples":[]}]}]}]}]},
+      "outcomes": [{"instance":{"scenario_key":"af7f83bb349ab8f7377618e1f4b3e6c1fd51c00e374a6b089ee2e85d9423345d"},"status":"passed","duration_ms":1000}],
+      "extensions": {}
+    },
+    "observations": {"schema_version":"1.0","evidence":[],"counts":{"referenced":0,"available":0,"missing":0,"invalid":0}},
+    "metadata": {
+      "run_id": "bdd_01990000-0000-7000-8000-000000000001",
+      "status": "published",
+      "source_run_id": "bare-rule",
+      "corpus_key": "bare",
+      "created_at": "2026-09-10T20:00:00Z",
+      "published_at": "2026-09-10T20:01:00Z",
+      "evidence_expires_at": "2026-10-10T20:01:00Z",
+      "diagnostics": []
+    }
+  }
+}

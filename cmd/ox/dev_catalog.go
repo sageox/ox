@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -178,9 +177,7 @@ func runCatalogJSON() error {
 		})
 	}
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(map[string]any{
+	return cli.PrintJSONTo(os.Stdout, map[string]any{
 		"surface":    "cli",
 		"version":    version.Version,
 		"components": out,

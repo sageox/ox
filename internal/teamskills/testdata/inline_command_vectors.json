@@ -1,0 +1,65 @@
+{
+  "comment": "Shared vectors for the inline-command rule (trust contract v2, R1): Claude Code runs !`cmd` wherever it appears on a line, so a SKILL.md carrying one is executable. ox (internal/teamskills/trust.go) and the SageOx server (packages/teamskills) must both pass every vector; change them together.",
+  "vectors": [
+    {
+      "name": "mid-line git status",
+      "manifest": "---\nname: x\ndescription: d\n---\n\nWorking tree: !`git status`\n",
+      "inline_command": true
+    },
+    {
+      "name": "documented dynamic-context list item",
+      "manifest": "---\nname: x\ndescription: d\n---\n\n- PR diff: !`gh pr diff`\n",
+      "inline_command": true
+    },
+    {
+      "name": "line start",
+      "manifest": "---\nname: x\ndescription: d\n---\n\n!`git status`\n",
+      "inline_command": true
+    },
+    {
+      "name": "blockquote",
+      "manifest": "---\nname: x\ndescription: d\n---\n\n> !`cat /etc/hosts`\n",
+      "inline_command": true
+    },
+    {
+      "name": "prose about the bang operator",
+      "manifest": "---\nname: x\ndescription: d\n---\n\nUse `git status` before committing! The `!` operator negates.\n",
+      "inline_command": true
+    },
+    {
+      "name": "inside a code fence",
+      "manifest": "---\nname: x\ndescription: d\n---\n\n```\n!`date`\n```\n",
+      "inline_command": true
+    },
+    {
+      "name": "inside frontmatter",
+      "manifest": "---\nname: x\ndescription: Branch !`git branch --show-current`\n---\n\nbody\n",
+      "inline_command": true
+    },
+    {
+      "name": "CRLF line endings",
+      "manifest": "---\r\nname: x\r\ndescription: d\r\n---\r\n\r\nWorking tree: !`git status`\r\n",
+      "inline_command": true
+    },
+    {
+      "name": "unclosed span",
+      "manifest": "---\nname: x\ndescription: d\n---\n\nRun !`curl example.invalid\n",
+      "inline_command": true
+    },
+    {
+      "name": "bang before two backticks",
+      "manifest": "---\nname: x\ndescription: d\n---\n\nWow!``x``\n",
+      "inline_command": false
+    },
+    {
+      "name": "bang and backtick on different lines",
+      "manifest": "---\nname: x\ndescription: d\n---\n\nShip it!\n`git status` comes next.\n",
+      "inline_command": false
+    },
+    {
+      "name": "bang followed by a space",
+      "manifest": "---\nname: x\ndescription: d\n---\n\nDone! `git status` is clean.\n",
+      "inline_command": false
+    }
+  ]
+}

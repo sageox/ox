@@ -183,6 +183,11 @@ func readAcrossSources[T any](s teamReadSources, read func(root string) T) []T {
 // only way to tell a drive that is earning its place from one that is echoing
 // the checkout.
 func mergeByKey[T any](perSource [][]T, key func(T) string) (merged []T, fromSecondary int) {
+	// One source is the default, flag-off shape: hand it back untouched so a
+	// prime with no mount reads exactly what the single-root code did.
+	if len(perSource) == 1 {
+		return perSource[0], 0
+	}
 	seen := make(map[string]bool)
 	for i, items := range perSource {
 		for _, item := range items {

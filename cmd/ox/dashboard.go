@@ -27,7 +27,7 @@ var dashboardCmd = &cobra.Command{
 			return fmt.Errorf("ox dashboard cannot run inside an agent session — run in an interactive terminal instead")
 		}
 		if !cli.IsInteractive() {
-			return fmt.Errorf("ox dashboard requires an interactive terminal — remove --no-interactive or run in a TTY")
+			return fmt.Errorf("ox dashboard requires an interactive terminal — remove --no-input and --no-interactive, and run in a TTY")
 		}
 		return dashboard.Run(dashboard.DefaultDeps())
 	},

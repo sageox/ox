@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime/pprof"
 	"runtime/trace"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/flags"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -27,6 +30,10 @@ var (
 
 	// CLI context for dependency injection
 	cliCtx *cli.Context
+
+	// preRunReached is set once cobra accepts an invocation and runs
+	// PersistentPreRunE. An error before it is cobra rejecting what was typed.
+	preRunReached bool
 
 	// profiling state
 	profileEnabled bool
@@ -39,6 +46,32 @@ var rootCmd = &cobra.Command{
 	Short: "Shared team context that makes agentic engineering multiplayer",
 	Long:  `Shared team context between your AI and human coworkers. Sessions, ledgers, and team knowledge that make agentic engineering multiplayer.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		preRunReached = true
+		if isFeedbackCommand(cmd) {
+			return applyConfigFlag(cmd, args)
+		}
+		if isHeadlessLedgerRead(cmd) {
+			// Hosted reads never consult local preferences. Sync rejects this
+			// flag in RunE using its own receipt; the other protocols refuse it here.
+			if cmd.Flags().Changed("config") {
+				switch cmd.Name() {
+				case "glance", "list":
+					return hostedReadFailed(cmd, "invalid_arguments", 2)
+				case "git-credential-helper":
+					return &commandExitError{ExitCode: 2, Message: "config is not supported for hosted reads"}
+				}
+			}
+			return nil
+		}
+		if err := applyConfigFlag(cmd, args); err != nil {
+			return err
+		}
+		if config.DisposableMachineEnabled() {
+			if err := gitserver.IsolateManagedClones(); err != nil {
+				slog.Warn("disposable_machine: git in ox's clones still runs their hooks and credential helpers", "error", err)
+			}
+		}
+
 		// initialize CLI context (centralizes config, logger, telemetry)
 		var err error
 		cliCtx, err = cli.NewContext(cmd, args)
@@ -49,17 +82,25 @@ var rootCmd = &cobra.Command{
 		// store config in global for backward compatibility
 		cfg = cliCtx.Config
 
+		// Legacy handlers read JSON from local or root flags instead of cfg.
+		// Publish the resolved value without treating an environment default as
+		// an explicit flag. Cobra may retain an inherited flag across ResetFlags,
+		// so the root flag also needs the parsed flag's explicitness.
+		jsonChanged := cmd.Flags().Changed("json")
+		for _, flags := range []*pflag.FlagSet{cmd.Flags(), cmd.Root().PersistentFlags()} {
+			if flag := flags.Lookup("json"); flag != nil {
+				_ = flag.Value.Set(strconv.FormatBool(cfg.JSON))
+				flag.Changed = jsonChanged
+			}
+		}
+
 		// Daemon is started by `ox agent prime` as a child process of the coding agent.
 		// No auto-start here — when the agent exits, the daemon gets cleaned up automatically.
 		// Users can still start the daemon manually with `ox daemon start`.
 
 		// fire-and-forget heartbeat so daemon always knows current CLI version
 		// (triggers version mismatch restart when CLI is upgraded)
-		if shouldHeartbeat(cmd) && config.IsInitializedInCwd() && daemon.IsRunning() {
-			if gitRoot := findGitRoot(); gitRoot != "" {
-				Heartbeat(gitRoot, nil, "")
-			}
-		}
+		maybeHeartbeat(cmd)
 
 		// resolve feature flags: daemon cache → disk cache → env vars → defaults
 		initFeatureFlags(cmd)
@@ -81,6 +122,13 @@ var rootCmd = &cobra.Command{
 		return nil
 	},
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
+		if isFeedbackCommand(cmd) {
+			return nil
+		}
+		if isHeadlessLedgerRead(cmd) {
+			return nil
+		}
+
 		// drain any in-flight heartbeat goroutines before the process exits.
 		// critical for short-lived hook subprocesses that would otherwise kill
 		// the goroutines before the IPC send completes.
@@ -107,15 +155,44 @@ var rootCmd = &cobra.Command{
 	Version: version.Version,
 }
 
+// applyConfigFlag selects the existing user-config override before any command
+// reads preferences. Sharing it with trace keeps that command free of telemetry
+// initialization while honoring the same global flag.
+func applyConfigFlag(cmd *cobra.Command, _ []string) error {
+	if !cmd.Flags().Changed("config") {
+		return nil
+	}
+	path, _ := cmd.Flags().GetString("config")
+	if path == "" {
+		return fmt.Errorf("--config requires a file path")
+	}
+	// Resolve relative paths once so a later chdir or child process still uses
+	// the file selected from the original working directory.
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("--config: %w", err)
+	}
+	if _, err := config.LoadUserConfigFile(path); err != nil {
+		return fmt.Errorf("--config: %w", err)
+	}
+	// Reuse the same selection for reads, writes, caches, and child processes.
+	return os.Setenv(config.EnvUserConfig, path)
+}
+
 // registerPersistentFlags registers all global persistent flags on rootCmd.
 // This is called both during init() and after ResetFlags() in friction recovery.
 func registerPersistentFlags() {
 	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "enable verbose output (default: false)")
 	rootCmd.PersistentFlags().BoolP("quiet", "q", false, "suppress non-error output (default: false)")
 	rootCmd.PersistentFlags().Bool("json", false, "output in JSON format (default: false)")
-	rootCmd.PersistentFlags().StringP("config", "c", "", "config file path (default: .sageox/config.yaml)")
+	rootCmd.PersistentFlags().StringP("config", "c", "", "user config file (overrides OX_USER_CONFIG)")
 	rootCmd.PersistentFlags().BoolVar(&profileEnabled, "profile", false, "generate CPU profile and execution trace for performance analysis (default: false)")
 	rootCmd.PersistentFlags().Bool("no-interactive", false, "disable spinners and TUI elements (auto-enabled when CI=true)")
+	rootCmd.PersistentFlags().Bool("no-input", false, "disable prompts and terminal UI; provide required input with arguments or flags")
+	// No -y shorthand here on purpose: `ox doctor -y` and `ox team invite -y`
+	// already bind their own, and a root-level shorthand would shadow them
+	// confusingly. Both local flags still feed the same global via NewContext.
+	rootCmd.PersistentFlags().Bool("yes", false, "answer yes to confirmation prompts without reading stdin (overrides a piped answer)")
 }
 
 func init() {
@@ -150,22 +227,22 @@ func init() {
 	// software development
 	initCmd.GroupID = "dev"
 
-	// knowledge surfaces — context, search, distillation, kb bubbles
+	// knowledge surfaces — context, search, kb bubbles
 	importCmd.GroupID = "knowledge"
 	kbCmd.GroupID = "knowledge"
 	queryCmd.GroupID = "knowledge"
 	scoutCmd.GroupID = "knowledge"
-	distillCmd.GroupID = "knowledge"
 	recapCmd.GroupID = "knowledge"
 	conversationCmd.GroupID = "knowledge"
 
-	// team coordination — carts, cart analysis, glance, murmurs.
+	// team coordination — carts, cart analysis, glance, murmurs, bulletin board.
 	// teamCmd (and its `teams` alias) sets its own GroupID in team.go; `ox invite`
 	// is now a subcommand of teamCmd (canonical `ox team invite`).
 	cartsCmd.GroupID = "teams"
 	cartAnalyzeCmd.GroupID = "teams"
 	glanceCmd.GroupID = "teams"
 	murmurCmd.GroupID = "teams"
+	bulletinCmd.GroupID = "teams"
 
 	// auth commands
 	loginCmd.GroupID = "auth"
@@ -186,7 +263,11 @@ func init() {
 	rootCmd.AddCommand(importCmd)
 	rootCmd.AddCommand(queryCmd)
 	rootCmd.AddCommand(recapCmd)
-	rootCmd.AddCommand(scoutCmd)
+	// scoutCmd is feature-gated; registered dynamically in syncFeatureGatedCommands
+	// when FEATURE_SCOUT is enabled (off by default).
+	// bulletinCmd is feature-gated; registered dynamically in syncFeatureGatedCommands
+	// from the server-evaluated pilot flag (flags.Get().BulletinEnabled; off by
+	// default, no env override by design).
 	// teamCmd is registered in team.go (with its `teams` alias + `invite` subcommand)
 	// agentCmd is registered in agent.go
 
@@ -473,6 +554,37 @@ func dirExists(path string) bool {
 	return err == nil && info.IsDir()
 }
 
+// maybeHeartbeat sends the fire-and-forget heartbeat when the command warrants one.
+func maybeHeartbeat(cmd *cobra.Command) {
+	if !shouldHeartbeat(cmd) || !config.IsInitializedInCwd() || !daemonReachable(cmd) {
+		return
+	}
+	if gitRoot := findGitRoot(); gitRoot != "" {
+		Heartbeat(gitRoot, nil, "")
+	}
+}
+
+// daemonReachable reports whether to attempt daemon requests, pinging first unless skipped.
+// Hooks skip it: their first real request already proves liveness, and on dial
+// failure they exit quietly. Each ping is a separate IPC connection (the server
+// handles one request per connection), so skipping saves two dials per hook.
+func daemonReachable(cmd *cobra.Command) bool {
+	if isAgentHookInvocation(cmd) {
+		return true
+	}
+	return daemon.IsRunning()
+}
+
+// isAgentHookInvocation reports whether cmd is `ox agent hook ...`, which the
+// agent command dispatches itself via its first positional argument.
+func isAgentHookInvocation(cmd *cobra.Command) bool {
+	if cmd == nil || cmd.Name() != "agent" {
+		return false
+	}
+	args := cmd.Flags().Args()
+	return len(args) > 0 && args[0] == "hook"
+}
+
 // shouldHeartbeat returns true if the command should send a fire-and-forget heartbeat.
 // Most commands should — skip only zero-side-effect commands like help and version.
 func shouldHeartbeat(cmd *cobra.Command) bool {
@@ -500,7 +612,7 @@ func initFeatureFlags(cmd *cobra.Command) {
 	var daemonProvider flags.DaemonProvider
 
 	// try daemon IPC first (fast path: daemon already has settings in memory)
-	if config.IsInitializedInCwd() && daemon.IsRunning() {
+	if config.IsInitializedInCwd() && daemonReachable(cmd) {
 		client := daemon.NewClientForCurrentRepo()
 		if settings, err := client.SettingsGet(); err == nil && settings != nil {
 			daemonProvider.CachedSettings = settings
@@ -527,7 +639,12 @@ func initFeatureFlags(cmd *cobra.Command) {
 // help before PersistentPreRunE, so a RunE-only guard would still advertise the
 // command and a Hidden-only guard would still allow direct execution.
 func syncFeatureGatedCommands(root *cobra.Command) {
-	setCommandRegistered(root, attestCmd, flags.Get().AttestEnabled)
+	setCommandRegistered(root, scoutCmd, auth.IsScoutEnabled())
+	setCommandRegistered(root, bulletinCmd, flags.Get().BulletinEnabled)
+	setCommandRegistered(sessionCmd, sessionTraceCmd, flags.Get().TraceEnabled)
+	syncTraceDoctorCheck()
+	setCommandRegistered(root, cartsCmd, auth.IsCartsEnabled())
+
 }
 
 func setCommandRegistered(root, command *cobra.Command, enabled bool) {

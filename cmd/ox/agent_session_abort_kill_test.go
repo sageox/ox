@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -235,6 +236,43 @@ func TestAbort_PartialNameNeverKillsTeammateFinalizedSession(t *testing.T) {
 	gitFsckClean(t, f.barePath)
 }
 
+// TestAbortAndDelete_RefuseADotDotSessionName: under sessions/, ".." names the
+// Ledger root, which both commands accepted as a finalized session. With
+// --force, the only gate a non-interactive AI coworker meets, they ran
+// `git rm -r --force .` over the whole Ledger and pushed it to the team.
+//
+// Red-first check: drop the ValidateDraftSessionName call from either command
+// and its row fails — the teammate's session is gone from the remote.
+func TestAbortAndDelete_RefuseADotDotSessionName(t *testing.T) {
+	for _, tc := range []struct {
+		verb string
+		run  func(*agentinstance.Instance, *cobra.Command, []string) error
+	}{
+		{"delete", runAgentSessionDelete},
+		{"abort", runAgentSessionAbort},
+	} {
+		t.Run(tc.verb, func(t *testing.T) {
+			f := newDraftLedgerFixture(t)
+			t.Chdir(f.projectRoot)
+			cfg = &config.Config{}
+
+			const teammate = "2026-01-01T00-00-teammate-OxTeam"
+			seedFinalizedLedgerSessionWithArtifacts(t, f.ledgerPath, teammate)
+			commitAndPushFinalized(t, f, teammate)
+			localDir := filepath.Join(session.GetContextPath(getRepoIDOrDefault(f.projectRoot)), "sessions", "2026-01-01T00-00-me-OxMe")
+			require.NoError(t, os.MkdirAll(localDir, 0755))
+
+			setForceFlag(t, true)
+			err := tc.run(&agentinstance.Instance{AgentID: "OxMe"}, agentCmd, []string{".."})
+
+			assert.Contains(t, remoteTree(t, f.barePath), "sessions/"+teammate+"/meta.json",
+				"a path-shaped name must never delete the team's sessions from the remote")
+			assert.DirExists(t, localDir, "a path-shaped name must never delete the local session cache")
+			assert.Error(t, err)
+		})
+	}
+}
+
 // TestAbort_KillsCommittedThenFinalizedSessionAndAllSummarizedData is the union
 // lifecycle: the session the customer actually aborts has already traveled the
 // full road — committed to the Ledger BECAUSE N turns passed (an ADR-029 draft
@@ -318,4 +356,46 @@ func TestAbort_KillsCommittedThenFinalizedSessionAndAllSummarizedData(t *testing
 	assert.Contains(t, remoteTree(t, f.barePath), "sessions/"+peerName+"/meta.json",
 		"aborting one session must never delete a peer session")
 	assert.DirExists(t, filepath.Join(f.ledgerPath, "sessions", peerName))
+}
+
+// Failure prevented: a hold turned a published session into a "local" one, so
+// removing it by name only deleted this machine's copy while reporting
+// success, and the transcript stayed on the shared Ledger. Two ways in: a
+// .held committed into the shared tree (ox never writes one there, so it is
+// someone else's), or this machine's own hold on a session published before.
+func TestAbort_HoldNeverShieldsAPublishedSessionFromTheKill(t *testing.T) {
+	const sessionName = "2026-01-01T00-00-testuser-OxHeKl"
+	cases := []struct {
+		name string
+		hold func(t *testing.T, f *draftLedgerFixture)
+	}{
+		{"marker committed into the shared tree", func(t *testing.T, f *draftLedgerFixture) {
+			planted := filepath.Join(f.ledgerPath, "sessions", sessionName, session.HeldMarkerFile)
+			require.NoError(t, os.WriteFile(planted, []byte(`{"reason":"manual_publishing"}`), 0o644))
+			runGit(t, f.ledgerPath, "add", "-f", "--sparse", "--", "sessions/"+sessionName+"/"+session.HeldMarkerFile)
+			runGit(t, f.ledgerPath, "commit", "--no-verify", "-q", "-m", "plant hold")
+			f.push(t)
+		}},
+		{"this machine holds a copy of a published session", func(t *testing.T, f *draftLedgerFixture) {
+			local := filepath.Join(session.GetContextPath(getRepoIDOrDefault(f.projectRoot)), "sessions", sessionName)
+			require.NoError(t, os.MkdirAll(local, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(local, "raw.jsonl"), []byte("local raw"), 0o644))
+			require.NoError(t, session.WriteHoldMarker(local, session.HoldManualPublishing, "test"))
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDraftLedgerFixture(t)
+			t.Chdir(f.projectRoot)
+			cfg = &config.Config{}
+			seedFinalizedLedgerSessionWithArtifacts(t, f.ledgerPath, sessionName)
+			commitAndPushFinalized(t, f, sessionName)
+			tc.hold(t, f)
+
+			setForceFlag(t, true)
+			require.NoError(t, runAgentSessionAbort(&agentinstance.Instance{AgentID: "OxKill"}, agentCmd, []string{sessionName}))
+
+			assert.Empty(t, remotePathsUnder(t, f.barePath, sessionName), "the published session is removed from the remote")
+		})
+	}
 }

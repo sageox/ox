@@ -323,3 +323,47 @@ func TestStringSlicesEqual_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+// TestFormatTeamLabel_Pure covers the team label shown on init's success line.
+// Failure prevented: the outcome line reports an opaque team ID, so a user with
+// more than one team cannot tell which team the repo was just bound to.
+func TestFormatTeamLabel_Pure(t *testing.T) {
+	tests := []struct {
+		name     string
+		teamName string
+		teamID   string
+		want     string
+	}{
+		{
+			name:     "named team leads with the name",
+			teamName: "Platform",
+			teamID:   "team_abc123",
+			want:     "Platform (team_abc123)",
+		},
+		{
+			name:     "no name falls back to the bare id",
+			teamName: "",
+			teamID:   "team_abc123",
+			want:     "team_abc123",
+		},
+		{
+			name:     "whitespace-only name is treated as absent",
+			teamName: "   ",
+			teamID:   "team_abc123",
+			want:     "team_abc123",
+		},
+		{
+			name:     "name containing spaces is preserved",
+			teamName: "Developer Experience",
+			teamID:   "team_xyz789",
+			want:     "Developer Experience (team_xyz789)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatTeamLabel(tt.teamName, tt.teamID)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

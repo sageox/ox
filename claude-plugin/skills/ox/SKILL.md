@@ -31,8 +31,40 @@ ox is a CLI that gives AI coworkers shared team context: conventions, architectu
 | `ox status` | Check auth, sync, daemon health |
 | `ox doctor` | Run diagnostic checks |
 | `ox init` | Initialize SageOx in a repository |
-| `ox conventions` | Get verified team coding standards |
+| `ox agent team-ctx` | Get distilled team conventions and decisions |
 | `ox session list` | List recent sessions from ledger |
+
+## Searching Code, History, PRs
+
+`ox code` queries the local CodeDB index (symbols, resolved call graph, diffs, git history, indexed PRs/issues/comments). Reach for it before grep/ripgrep on this repo.
+
+Verb-mode (preferred — match on the intent verb):
+
+| Intent | Command |
+|--------|---------|
+| Symbol definition | `ox code defs <name>` |
+| Who calls <name> (resolved call graph) | `ox code callers <name>` |
+| What <name> calls (transitive via --depth) | `ox code callees <name> --depth 2` |
+| Text references | `ox code refs <name> [--lang go]` |
+| Commits touching <path> | `ox code log <path> [--author X] [--after YYYY-MM-DD]` |
+| PR triage (most stalled first) | `ox code prs --sort stalled` |
+| Recent GitHub activity | `ox code activity --since 7d` |
+| Hotspots & contention | `ox code insights` |
+| Index health | `ox code status` |
+
+DSL-mode (when verbs don't fit):
+
+| Intent | Command |
+|--------|---------|
+| Search PRs/issues by content | `ox code search "<text>" type:pr` (or `type:issue`) |
+| Source comments by kind | `ox code search "<text>" type:comment ckind:todo` |
+| Git history + content together | `ox code search "<text>" author:<n> after:<date>` |
+| Forced regex | `ox code search "/<pattern>/"` |
+| Full DSL grammar | `ox code search --help` |
+
+Fall back to grep/ripgrep only for exact-string matches in known files or
+when `ox code` returns 0 results. See `.claude/rules/ox-code.md` (when shipped
+into the project) for the full decision tree.
 
 ## Requirements
 

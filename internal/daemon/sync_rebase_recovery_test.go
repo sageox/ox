@@ -266,6 +266,35 @@ func TestRecoverPreexistingRebase_ZombieDirRecovered(t *testing.T) {
 	assert.False(t, gitutil.IsRebaseInProgress(repo), "zombie rebase dir must be cleared")
 }
 
+func TestRecoverPreexistingRebase_LockBusyDefersWithoutAborting(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: spawns git subprocesses to build a rebase wedge")
+	}
+	repo := makeWedgedRebase(t)
+	backdateRebaseDir(t, repo, time.Hour)
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		_ = gitutil.WithRepoLock(context.Background(), repo, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	stop, res := (&SyncScheduler{}).recoverPreexistingRebase(ctx, repo, "ledger", discardLogger())
+
+	assert.True(t, stop)
+	assert.True(t, res.Skipped)
+	assert.Equal(t, skipReasonRepoLockBusy, res.SkipReason)
+	assert.True(t, gitutil.IsRebaseInProgress(repo), "a peer's in-flight operation must never be aborted")
+}
+
 // TestRecoverPreexistingRebase_StaleWedge_ApplyBackend covers the same CLASS of
 // failure via git's other rebase backend. A wedge can leave `.git/rebase-apply`
 // instead of `.git/rebase-merge` (older git, `--apply`, `git am`); recovery

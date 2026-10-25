@@ -139,21 +139,35 @@ func TestSaveListLoad_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestSave_HTMLSizeGating(t *testing.T) {
+// TestSave_AlwaysWritesRetrievablePlainHTML pins the GH #810 invariant: a
+// successful Save leaves plan.html RETRIEVABLE, at EVERY size — including above
+// htmlLFSThreshold, which is exactly where the bug lived.
+//
+// Failure prevented: Save wrote a large render as an LFS pointer WITHOUT
+// uploading the blob, so the content named by the pointer existed nowhere — lost,
+// and the poisoned pointer wedged the ledger push. Save is the no-network layer
+// now, so it writes plain at every size; pointerizing a large render is the CLI
+// caller's job (UploadHTML, then PointerizeHTML), only AFTER a confirmed upload.
+//
+// The old test asserted the LARGE case produced a pointer with the right OID —
+// which the bug produced too. That is test theater: it passed while the content
+// was being discarded. This asserts the bytes come back.
+func TestSave_AlwaysWritesRetrievablePlainHTML(t *testing.T) {
 	tests := []struct {
-		name        string
-		size        int
-		wantPointer bool
+		name string
+		size int
 	}{
-		{"small html stays plain git", 1024, false},
-		{"large html becomes LFS pointer", htmlLFSThreshold + 1, true},
+		{"small render stays plain", 1024},
+		{"large render crosses the old LFS threshold", htmlLFSThreshold + 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ledger := t.TempDir()
 			withLedger(t, ledger)
 
-			html := bytes.Repeat([]byte("a"), tc.size)
+			// distinctive payload so a silently-discarded render can't masquerade
+			// as an empty-but-present file.
+			html := bytes.Repeat([]byte("PRESERVE-ME "), tc.size/12+1)[:tc.size]
 			in := Input{Raw: "# H\n"}
 			meta := Meta{Topic: "Size gate", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 
@@ -163,35 +177,20 @@ func TestSave_HTMLSizeGating(t *testing.T) {
 			}
 
 			htmlPath := filepath.Join(dir, "plan.html")
-			isPointer := lfs.IsPointerFile(htmlPath)
-			if isPointer != tc.wantPointer {
-				t.Fatalf("plan.html IsPointer = %v, want %v (size=%d)", isPointer, tc.wantPointer, tc.size)
+			if lfs.IsPointerFile(htmlPath) {
+				t.Fatalf("Save wrote plan.html as an LFS pointer (size=%d); it must write plain — "+
+					"pointerizing without an upload is GH #810", tc.size)
+			}
+			got, err := os.ReadFile(htmlPath)
+			if err != nil {
+				t.Fatalf("read plan.html: %v", err)
+			}
+			// StampHTMLMeta may rewrite tag-bearing HTML; this payload has no tags,
+			// so the bytes must round-trip exactly.
+			if !bytes.Equal(got, html) {
+				t.Fatalf("plan.html not retrievable: got %d bytes, want %d", len(got), len(html))
 			}
 
-			if tc.wantPointer {
-				// pointer references the correct OID/size
-				ref, err := lfs.ReadPointerFile(htmlPath)
-				if err != nil {
-					t.Fatalf("ReadPointerFile: %v", err)
-				}
-				if ref.Size != int64(len(html)) {
-					t.Errorf("pointer size = %d, want %d", ref.Size, len(html))
-				}
-				if ref.OID != "sha256:"+lfs.ComputeOID(html) {
-					t.Errorf("pointer OID = %q, want sha256:%s", ref.OID, lfs.ComputeOID(html))
-				}
-			} else {
-				// plain bytes survive verbatim
-				got, err := os.ReadFile(htmlPath)
-				if err != nil {
-					t.Fatalf("read plain html: %v", err)
-				}
-				if !bytes.Equal(got, html) {
-					t.Errorf("plain html bytes differ from input")
-				}
-			}
-
-			// List reflects HasHTML in both cases.
 			plans, err := List("/g")
 			if err != nil || len(plans) != 1 {
 				t.Fatalf("List: %v (n=%d)", err, len(plans))
@@ -387,9 +386,17 @@ func TestSave_ReadMergePreservesLifecycle(t *testing.T) {
 		t.Fatalf("Save v1: %v", err)
 	}
 
-	// human marks implemented; stop reconciles the session outcome.
-	if err := SetStatus("/g", "my-plan", PlanStatusImplemented); err != nil {
-		t.Fatalf("SetStatus: %v", err)
+	// a status written to meta.json alone (as releases before the event log
+	// did); stop reconciles the session outcome.
+	dir, err := resolvePlanDirForSlug("/g", "my-plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MutatePlanMeta(context.Background(), dir, func(m *Meta) (*Meta, error) {
+		m.Status = PlanStatusImplemented
+		return m, nil
+	}); err != nil {
+		t.Fatalf("mark implemented: %v", err)
 	}
 	if err := ReconcileSessionOutcome("/g", "my-plan", "ses_abc", SessionOutcomeStopped); err != nil {
 		t.Fatalf("ReconcileSessionOutcome: %v", err)
@@ -489,5 +496,169 @@ func TestReadPlanMeta_LegacyNoProvenance(t *testing.T) {
 	}
 	if got.Status != "" || got.Provenance != nil || got.Collaboration != nil {
 		t.Errorf("legacy meta should have empty new fields, got %+v", got)
+	}
+}
+
+// TestSave_ResaveFromSameSourceRevisesInPlace pins the field bug: one authored
+// page saved twice, with an H1 edit between saves, produced TWO ledger plans
+// (identical source_plan_path, minutes apart) because the slug is derived from
+// the topic. The human had to run `ox plan supersede` by hand.
+func TestSave_ResaveFromSameSourceRevisesInPlace(t *testing.T) {
+	withLedger(t, t.TempDir())
+	gitRoot := "/g"
+	src := "/tmp/authored-page.html"
+
+	first := Meta{Topic: "Arc typography at actual size — device capture review",
+		SourcePlanPath: src, Primary: PrimaryHTML}
+	if _, _, err := Save(gitRoot, Input{}, Result{}, []byte("<h1>a</h1>"), first); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	// Same file, edited title — the exact shape that forked in the field.
+	second := Meta{Topic: "Arc typography at actual size",
+		SourcePlanPath: src, Primary: PrimaryHTML}
+	if _, _, err := Save(gitRoot, Input{}, Result{}, []byte("<h1>b</h1>"), second); err != nil {
+		t.Fatalf("second save: %v", err)
+	}
+
+	infos, err := List(gitRoot)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(infos) != 1 {
+		var got []string
+		for _, i := range infos {
+			got = append(got, i.Slug)
+		}
+		t.Fatalf("re-save forked the plan: got %d plans %v, want 1", len(infos), got)
+	}
+}
+
+// An explicit slug still wins, and a superseded plan is never revived.
+func TestSave_ExplicitSlugAndSupersededAreRespected(t *testing.T) {
+	withLedger(t, t.TempDir())
+	gitRoot := "/g"
+	src := "/tmp/page.html"
+
+	dead := Meta{Topic: "Old", Slug: "old-plan", SourcePlanPath: src}
+	deadDir, _, err := Save(gitRoot, Input{}, Result{}, nil, dead)
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if _, err := AppendPlanEvent(context.Background(), deadDir, EventSuperseded, PlanEventFields{SupersededBy: "new-take"}); err != nil {
+		t.Fatalf("supersede: %v", err)
+	}
+	fresh := Meta{Topic: "New take", SourcePlanPath: src}
+	if _, _, err := Save(gitRoot, Input{}, Result{}, nil, fresh); err != nil {
+		t.Fatalf("save fresh: %v", err)
+	}
+	infos, _ := List(gitRoot)
+	if len(infos) != 2 {
+		t.Fatalf("a superseded plan was revived: got %d plans, want 2", len(infos))
+	}
+}
+
+// TestSave_ResaveSkipsAPlanItsHistoryCloses: a plan its event log says is
+// abandoned, whose meta.json snapshot still says draft (a snapshot left
+// behind after two clones raced), is not revised by a re-save from the same
+// source. Failure prevented: a deliberately closed plan is silently reopened
+// because the re-save trusted the snapshot over the plan's history.
+func TestSave_ResaveSkipsAPlanItsHistoryCloses(t *testing.T) {
+	withLedger(t, t.TempDir())
+	ctx := context.Background()
+	gitRoot := "/g"
+	src := "/tmp/dropped.html"
+	dir, _, err := Save(gitRoot, Input{}, Result{}, nil, Meta{Topic: "Dropped", SourcePlanPath: src})
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if _, err := AppendPlanEvent(ctx, dir, EventAbandoned, PlanEventFields{Reason: "dropped"}); err != nil {
+		t.Fatalf("abandon: %v", err)
+	}
+	if err := MutatePlanMeta(ctx, dir, func(m *Meta) (*Meta, error) {
+		m.Status = PlanStatusDraft
+		return m, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Save(gitRoot, Input{}, Result{}, nil, Meta{Topic: "Next take", SourcePlanPath: src}); err != nil {
+		t.Fatalf("re-save: %v", err)
+	}
+	if infos, _ := List(gitRoot); len(infos) != 2 {
+		t.Fatalf("the abandoned plan was reopened: got %d plans, want 2", len(infos))
+	}
+}
+
+// TestSave_FirstEventKeepsALegacyStatus: re-saving a plan saved before event
+// logs existed, whose status lives in meta.json alone, records that status on
+// the plan's first event, as backfill does. Failure prevented: the re-save
+// turns a legacy approval into a draft, since readers fold the new event log.
+func TestSave_FirstEventKeepsALegacyStatus(t *testing.T) {
+	withLedger(t, t.TempDir())
+	ctx := context.Background()
+	m := Meta{Topic: "Legacy", Slug: "legacy"}
+	dir, _, err := Save("/g", Input{}, Result{}, nil, m)
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// what a release before the event log left behind
+	if err := os.Remove(filepath.Join(dir, eventsFile)); err != nil {
+		t.Fatal(err)
+	}
+	if err := MutatePlanMeta(ctx, dir, func(m *Meta) (*Meta, error) {
+		m.Status = PlanStatusApproved
+		return m, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Save("/g", Input{}, Result{}, nil, m); err != nil {
+		t.Fatalf("re-save: %v", err)
+	}
+	if got := CurrentStatus(dir); got != PlanStatusApproved {
+		t.Fatalf("status after the re-save = %q, want approved", got)
+	}
+}
+
+// TestSave_KindRecordedAndDefaulted pins that an artifact's KIND survives the
+// round-trip and that everything saved before kinds existed still reads as a
+// plan. The single noun "plan" is what let a finished review sheet go unsaved.
+func TestSave_KindRecordedAndDefaulted(t *testing.T) {
+	withLedger(t, t.TempDir())
+	for _, tc := range []struct {
+		name string
+		kind ArtifactKind
+		want ArtifactKind
+	}{
+		{"review sheet keeps its kind", KindReview, KindReview},
+		{"mockup keeps its kind", KindMockup, KindMockup},
+		{"legacy plan with no kind reads as plan", "", KindPlan},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := Meta{Topic: "Artifact " + tc.name, Kind: tc.kind,
+				SourcePlanPath: "/tmp/" + string(tc.want) + "-" + tc.name + ".html"}
+			dir, _, err := Save("/g", Input{}, Result{}, nil, meta)
+			if err != nil {
+				t.Fatalf("save: %v", err)
+			}
+			got, err := LoadMeta(dir)
+			if err != nil {
+				t.Fatalf("load meta: %v", err)
+			}
+			if KindOrDefault(got.Kind) != tc.want {
+				t.Fatalf("kind = %q, want %q", got.Kind, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidKind(t *testing.T) {
+	for _, ok := range []string{"", "plan", "mockup", "review", "evidence", "REVIEW", " mockup "} {
+		if !ValidKind(ok) {
+			t.Errorf("ValidKind(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"sketch", "diagram", "notes"} {
+		if ValidKind(bad) {
+			t.Errorf("ValidKind(%q) = true, want false", bad)
+		}
 	}
 }

@@ -16,7 +16,7 @@ import (
 
 var codePRsCmd = &cobra.Command{
 	Use:   "prs",
-	Short: "List pull requests with triage signals",
+	Short: "List pull requests ranked for triage (stalled, age, activity)",
 	Long: `List indexed pull requests ranked for triage.
 
 By default surfaces the most-stalled open PRs first (least-recent activity at
@@ -60,6 +60,11 @@ func runCodePRs(cmd *cobra.Command, _ []string) error {
 
 	dataDir := resolveCodeDBDir(root)
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
+		if agentID, _ := detectAgentContext(); agentID != "" {
+			return emitIndexNotReadyJSON(cmd, indexStatusNotIndexed,
+				"No code index found for this repo.",
+				"Run 'ox code index' to build the index, then rerun 'ox code prs'. Until then, use 'gh pr list' or the GitHub web UI.")
+		}
 		return fmt.Errorf("%s\n%s",
 			cli.StyleError.Render("No code index found"),
 			"Run "+cli.StyleCommand.Render("ox code index")+" to create one")
@@ -125,8 +130,8 @@ func runCodePRs(cmd *cobra.Command, _ []string) error {
 			}
 		}
 	}
-	fmt.Fprintln(cmd.OutOrStdout(), string(out))
-	return nil
+	out = append(out, '\n')
+	return cli.WriteJSONBytes(cmd.OutOrStdout(), out)
 }
 
 type triagePRResponse struct {

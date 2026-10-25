@@ -1,7 +1,9 @@
 package gitutil
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -9,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sageox/ox/internal/fileutil"
 )
 
 // StaleRebaseThreshold is how long a rebase must have been in progress before
@@ -82,9 +86,9 @@ func AbortOrClearRebase(ctx context.Context, repoPath, reason string, logger *sl
 	// Record any parked autostash before dropping the state directory.
 	autostash := readAutostashOID(stateDir)
 
-	quitCtx, cancel := context.WithTimeout(context.Background(), abortTimeout)
+	quitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pullMaxTimeout)
 	defer cancel()
-	quitCmd := exec.CommandContext(quitCtx, "git", "-C", repoPath, "rebase", "--quit")
+	quitCmd := commandContext(quitCtx, "git", "-C", repoPath, "rebase", "--quit")
 	out, quitErr := quitCmd.CombinedOutput()
 	if quitErr != nil {
 		// `git rebase --quit` can exit non-zero while STILL removing the state
@@ -113,6 +117,120 @@ func AbortOrClearRebase(ctx context.Context, repoPath, reason string, logger *sl
 		"head_sha", captureHeadSHA(ctx, repoPath),
 		"autostash_oid", autostash,
 		"abort_error", SanitizeOutput(abortErr.Error()))
+	return nil
+}
+
+// ErrRebaseBranchMoved reports that another writer committed to the branch an
+// in-progress rebase will finish onto, after the rebase began. git refuses to
+// finish such a rebase — the closing update-ref compare-and-swap expects the
+// branch at orig-head — so `rebase --continue` can never succeed and resolving
+// more steps is wasted work. AuditAndAbort is the non-lossy way out: it
+// re-anchors the abort onto the moved branch first. sageox/ox#1541.
+var ErrRebaseBranchMoved = errors.New("rebase branch moved by another writer mid-rebase")
+
+// movedBranchProbeTimeout bounds the reads that decide whether a rebase's
+// branch moved. They are local and normally take milliseconds.
+const movedBranchProbeTimeout = 30 * time.Second
+
+// RebaseBranchMoved reports whether a rebase is in progress whose branch no
+// longer points at the commit the rebase started from. A read failure reports
+// false; AuditAndAbort re-checks before it lets an abort move the branch.
+func RebaseBranchMoved(ctx context.Context, repoPath string) bool {
+	_, moved, _ := movedRebaseBranch(ctx, repoPath)
+	return moved
+}
+
+// movedRebaseBranch inspects the in-progress rebase. state is nil, with no
+// error, when nothing can move a branch on abort: no rebase, a rebase that
+// began on a detached HEAD, a zombie state dir missing orig-head, or a branch
+// that no longer exists. err means
+// the rebase names a branch but its tip could not be read, so the caller cannot
+// rule out that an abort would rewind it.
+func movedRebaseBranch(ctx context.Context, repoPath string) (state *rebaseBranchState, moved bool, err error) {
+	stateDir, ok := rebaseStateDir(repoPath)
+	if !ok {
+		return nil, false, nil
+	}
+	headName, err := os.ReadFile(filepath.Join(stateDir, "head-name"))
+	if err != nil {
+		return nil, false, nil
+	}
+	branch := strings.TrimSpace(string(headName))
+	if !strings.HasPrefix(branch, "refs/heads/") {
+		return nil, false, nil // "detached HEAD": abort moves no branch
+	}
+	origHead, err := os.ReadFile(filepath.Join(stateDir, "orig-head"))
+	if err != nil || len(bytes.TrimSpace(origHead)) == 0 {
+		return nil, false, nil // zombie; AbortOrClearRebase handles it
+	}
+	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), movedBranchProbeTimeout)
+	defer cancel()
+	tip, err := branchTip(probeCtx, repoPath, branch)
+	if err != nil {
+		return nil, false, err
+	}
+	if tip == "" {
+		return nil, false, nil // deleted: abort recreates it and rewinds nothing
+	}
+	state = &rebaseBranchState{dir: stateDir, branch: branch, origHead: strings.TrimSpace(string(origHead)), tip: tip}
+	return state, state.tip != state.origHead, nil
+}
+
+// branchTip returns the commit ref points at, or "" with no error when the ref
+// does not exist. `rev-parse --verify --quiet` exits 1, silently, for exactly
+// that case; any other failure means the tip could not be read.
+func branchTip(ctx context.Context, repoPath, ref string) (string, error) {
+	out, err := commandContext(ctx, "git", "-C", repoPath, "rev-parse", "--verify", "--quiet", ref).Output()
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read %s tip: %w", ref, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// rebaseBranchState is what an abort will do to a branch: reset it from tip to
+// origHead.
+type rebaseBranchState struct {
+	dir      string
+	branch   string
+	origHead string
+	tip      string
+}
+
+// reanchorMovedRebase points an in-progress rebase's orig-head at its branch's
+// current tip when another writer moved the branch mid-rebase, so the abort
+// that follows leaves the branch where it is instead of rewinding it.
+//
+// `git rebase --abort` resets the branch to orig-head unconditionally. A
+// session summary, murmur or draft committed after the rebase began would be
+// reachable only from the reflog after that rewind, and the next push would
+// publish a history without it. Re-anchored, the abort is a restart from the
+// moved branch: the rebase's own replay is discarded (the next pull redoes it)
+// and nothing that landed on the branch is.
+//
+// The branch is honored even when it is not a descendant of orig-head: the
+// writer that moved it may have rewritten history on purpose (a redaction), and
+// rewinding would resurrect what it removed.
+func reanchorMovedRebase(ctx context.Context, repoPath string, logger *slog.Logger) error {
+	state, moved, err := movedRebaseBranch(ctx, repoPath)
+	if err != nil {
+		return err
+	}
+	if !moved {
+		return nil
+	}
+	if err := fileutil.AtomicWriteBytes(filepath.Join(state.dir, "orig-head"), []byte(state.tip+"\n"), 0o644); err != nil {
+		return fmt.Errorf("re-anchor rebase orig-head on %s: %w", state.branch, err)
+	}
+	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), movedBranchProbeTimeout)
+	defer cancel()
+	_, ancestorErr := rescueGit(probeCtx, repoPath, "merge-base", "--is-ancestor", state.origHead, state.tip)
+	logger.Warn("rebase branch moved mid-rebase; abort re-anchored on the moved branch",
+		"op", "rebase_reanchor", "repo", repoPath, "branch", state.branch,
+		"orig_head", state.origHead, "branch_tip", state.tip, "fast_forward", ancestorErr == nil)
 	return nil
 }
 
@@ -159,8 +277,8 @@ func readAutostashOID(stateDir string) string {
 // any error it returns false (treat as on-branch) so a transient git hiccup
 // doesn't over-eagerly refuse the quit path.
 func headDetached(ctx context.Context, repoPath string) bool {
-	subCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pullMaxTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(subCtx, "git", "-C", repoPath, "symbolic-ref", "-q", "HEAD")
+	cmd := commandContext(probeCtx, "git", "-C", repoPath, "symbolic-ref", "-q", "HEAD")
 	return cmd.Run() != nil
 }

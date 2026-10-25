@@ -3,6 +3,8 @@ package doctor
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFormatModeSource(t *testing.T) {
@@ -493,6 +496,65 @@ func TestSessionStopIncompleteCheck_NilRecording(t *testing.T) {
 	assert.Contains(t, result.Message, "unknown")
 }
 
+// --- SessionQuarantineCheck ---
+
+func TestSessionQuarantineCheck_NothingQuarantinedIsSilent(t *testing.T) {
+	check := NewSessionQuarantineCheck("/tmp/fake")
+	assert.Equal(t, "quarantined recording", check.Name())
+	assert.Equal(t, "Sessions", check.Category())
+	check.SetHealthStatus(&session.HealthStatus{})
+
+	assert.Equal(t, StatusSkip, check.Run(context.Background(), false).Status)
+}
+
+// A quarantined recording is never uploaded or cleaned up, so doctor is the only
+// place that can say why the session is missing and how to get it back.
+func TestSessionQuarantineCheck_NamesRecordingsAndANonDestructiveWayOut(t *testing.T) {
+	check := NewSessionQuarantineCheck("/tmp/fake")
+	check.SetHealthStatus(&session.HealthStatus{
+		QuarantinedRecordings: []*session.RecordingState{
+			{AgentID: "OxFirst", SourceRejected: true, SessionPath: "/cache/sessions/2026-01-06T14-30-user-OxFirst"},
+			{AgentID: "OxSecond", SourceRejected: true, SessionPath: "/cache/sessions/2026-01-06T14-31-user-OxSecond"},
+		},
+	})
+
+	result := check.Run(context.Background(), false)
+	assert.Equal(t, StatusWarn, result.Status)
+	assert.Contains(t, result.Message, "OxFirst")
+	assert.Contains(t, result.Message, "OxSecond")
+	assert.Contains(t, result.Fix, "ox agent OxFirst session recover --release-quarantine")
+	assert.Contains(t, result.Fix, "ox agent OxFirst session abort 2026-01-06T14-30-user-OxFirst", "discarding names the held session, not whichever the agent is recording now")
+	assert.Contains(t, result.Fix, "Nothing is lost")
+}
+
+// The orphan fix clears the marker of stale recordings that hold content. Run
+// against a real stale quarantined recording, it must leave the quarantine
+// alone: without the marker nothing would say the transcript was held back.
+func TestSessionOrphanedCheck_FixNeverClearsAQuarantinedRecording(t *testing.T) {
+	cacheDir := t.TempDir()
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("HOME", cacheDir)
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	project := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(project, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, ".sageox", "config.json"), []byte(`{"config_version":"2","repo_id":"test-repo-quarantine"}`), 0o644))
+	state, err := session.StartRecording(project, session.StartRecordingOptions{AgentID: "OxStale", AdapterName: "claude-code", Username: "testuser"})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(state.SessionPath, "raw.jsonl"), []byte(`{"type":"user","content":"captured"}`+"\n"), 0o644))
+	require.NoError(t, session.UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(s *session.RecordingState) {
+		s.StartedAt = time.Now().Add(-72 * time.Hour)
+		s.SourceRejected = true
+	}))
+
+	result := NewSessionOrphanedCheck(project, true).Run(context.Background(), false)
+
+	assert.NotContains(t, result.Message, "cleaned 1 orphaned")
+	held, err := session.LoadQuarantinedRecordingsForAgent(project, "OxStale")
+	require.NoError(t, err)
+	require.Len(t, held, 1, "doctor --fix must not clear a quarantined recording's marker")
+	assert.FileExists(t, filepath.Join(state.SessionPath, "raw.jsonl"))
+}
+
 // --- SessionOrphanedCheck with cached HealthStatus ---
 
 func TestSessionOrphanedCheck_Name(t *testing.T) {
@@ -686,5 +748,34 @@ func TestSessionHealthCacheable_Interface(t *testing.T) {
 	for _, check := range checks {
 		// should not panic
 		check.SetHealthStatus(healthStatus)
+	}
+}
+
+// Failure prevented: `ox doctor --fix` clears a crashed manual-mode
+// recording's marker, and the daemon then publishes it (GH #1093).
+func TestSessionOrphanedCheck_FixHoldsManualRecording(t *testing.T) {
+	for _, mode := range []string{"manual", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			cacheDir := t.TempDir()
+			t.Setenv("OX_XDG_ENABLE", "1")
+			t.Setenv("HOME", cacheDir)
+			t.Setenv("XDG_CACHE_HOME", cacheDir)
+			project := t.TempDir()
+			require.NoError(t, os.MkdirAll(filepath.Join(project, ".sageox"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(project, ".sageox", "config.json"), []byte(`{"config_version":"2","repo_id":"test-repo-hold"}`), 0o644))
+			state, err := session.StartRecording(project, session.StartRecordingOptions{AgentID: "OxStale", AdapterName: "claude-code", Username: "testuser"})
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(state.SessionPath, "raw.jsonl"), []byte(`{"type":"user","content":"captured"}`+"\n"), 0o644))
+			require.NoError(t, session.UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(s *session.RecordingState) {
+				s.StartedAt = time.Now().Add(-72 * time.Hour)
+				s.PublishingMode = mode
+			}))
+
+			result := NewSessionOrphanedCheck(project, true).Run(context.Background(), false)
+
+			assert.Contains(t, result.Message, "cleaned 1 orphaned", "the stale marker is reclaimed either way")
+			assert.Equal(t, mode == "manual", session.IsHeld(state.SessionPath), "only a manual-mode recording is held")
+			assert.FileExists(t, filepath.Join(state.SessionPath, "raw.jsonl"))
+		})
 	}
 }

@@ -1,15 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -19,6 +24,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
@@ -44,10 +50,12 @@ var importCmd = &cobra.Command{
 	Short: "Import a document, media file, or video URL into team context",
 	Long: `Import a document, media file, or video URL for onboarding and knowledge sharing.
 
-Imports are stored with LFS-backed content and git-tracked metadata in the
-team context repo — including media files (mp4, mov, webm, m4a, mp3, wav, …),
-which are transcribed and summarized server-side after import. Supports
-Loom, Cap, and direct video URLs.
+Audio and video files (m4a, mp3, wav, webm, ogg, opus, flac, aac, wma, mp4,
+mov, m4v) upload to SageOx as recordings, which are transcribed and
+summarized server-side. Large files upload in parallel parts with retries,
+and files over 50 MB report progress on stderr. Other files are stored with
+LFS-backed content and git-tracked metadata in the team context repo.
+Supports Loom, Cap, and direct video URLs.
 
 Team context is a conversation store; Knowledge Bubbles are Curator-authored
 syntheses and are not an import target (ox ADR-028).
@@ -55,7 +63,7 @@ syntheses and are not an import target (ox ADR-028).
   ox import report.pdf --text extracted.md
   ox import report.pdf --title "Q2 Review"        # override the filename-derived title
   ox import notes.md --date 2026-01-15
-  ox import ./standup.mp4                       # media file into the team (git-tracked, transcribed)
+  ox import ./standup.mp4                       # recording upload, then transcribed and summarized
   ox import https://www.loom.com/share/abc123 --title "Architecture Review"
   ox import https://cap.link/abc123 --title "Sprint Retro"
   ox import --list                              # find import IDs
@@ -71,13 +79,13 @@ go in agents/rules/, not through ox import.`,
 }
 
 func init() {
-	importCmd.Flags().StringVar(&importFlags.text, "text", "", "path to pre-extracted text/markdown for indexing (optional)")
+	importCmd.Flags().StringVar(&importFlags.text, "text", "", "path to pre-extracted text/markdown for indexing (optional; keeps audio/video on the document path)")
 	importCmd.Flags().SetAnnotation("text", "cobra_annotation_flag_value_name", []string{"file"})
-	importCmd.Flags().StringVar(&importFlags.date, "date", "", "date for filing (YYYY-MM-DD, default: auto-detect from metadata)")
+	importCmd.Flags().StringVar(&importFlags.date, "date", "", "date for filing, or when audio/video was recorded (YYYY-MM-DD, default: auto-detect from metadata)")
 	importCmd.Flags().BoolVar(&importFlags.force, "force", false, "re-import even if content hash already exists")
 	importCmd.Flags().StringVar(&importFlags.team, "team", "", "team ID (or slug/name when inside a repo)")
 	importCmd.Flags().StringVar(&importFlags.title, "title", "", "display title (defaults to filename for file imports)")
-	importCmd.Flags().StringVar(&importFlags.status, "status", "", "check processing status of a URL import (use --list to find IDs)")
+	importCmd.Flags().StringVar(&importFlags.status, "status", "", "check processing status of a media or URL import (use --list to find IDs)")
 	importCmd.Flags().BoolVar(&importFlags.watch, "watch", false, "poll --status until processing completes or fails")
 	importCmd.Flags().BoolVar(&importFlags.list, "list", false, "list imports and their processing status")
 }
@@ -121,9 +129,10 @@ type sidecar struct {
 	CreatedAt string `json:"created_at"`
 }
 
-// importResult is the --json payload for a team document import. recording_id is
-// populated only when the server routes the file to transcription and returns an
-// ID (media files); it can be fed to `ox import --status <id> --watch`.
+// importResult is the --json payload for a team import. recording_id is set for
+// audio/video (and for a document-path media file the server routed to
+// transcription); it can be fed to `ox import --status <id> --watch`. path is
+// set only for files stored in the team context repo.
 type importResult struct {
 	Status      string `json:"status"` // "imported" | "already_imported"
 	Title       string `json:"title,omitempty"`
@@ -135,7 +144,13 @@ type importResult struct {
 	RecordingID string `json:"recording_id,omitempty"`
 }
 
+// runImport uploads audio/video through the recording upload route, and any
+// other file to the team context's LFS store with its pointer files committed.
 func runImport(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 
 	// dispatch: --status flag takes priority
@@ -196,6 +211,30 @@ func runImport(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// audio and video go straight to the recording pipeline. --text keeps a
+	// media file on the document path, which is the only one with a sidecar.
+	if isMediaImportFile(srcPath) && importFlags.text == "" {
+		var recordedAt *time.Time
+		if importFlags.date != "" {
+			recordedAt = &importDate
+		}
+		err := runImportMedia(ctx, cmd, mediaImport{
+			srcPath:     srcPath,
+			size:        srcInfo.Size(),
+			tc:          tc,
+			ep:          ep,
+			docsBaseDir: filepath.Join(tc.Path, "data", "docs"),
+			recordedAt:  recordedAt,
+			jsonOutput:  jsonOutput,
+		})
+		if !errors.Is(err, api.ErrRecordingUploadUnsupported) {
+			return err
+		}
+		// nothing was uploaded; an older server still takes media through the
+		// document path and transcribes it from there
+		cli.PrintWarningTo(cmd.ErrOrStderr(), "This server does not accept recording uploads (HTTP 404); importing through the team context document path instead")
+	}
+
 	// data/ is excluded from the team context sparse checkout (deny list in
 	// sync.manifest). We create the directory ourselves and git add stages
 	// files outside the sparse cone. After commit+push, these local files are
@@ -218,10 +257,18 @@ func runImport(cmd *cobra.Command, args []string) error {
 	// dedup: skip if this exact content was already imported
 	if !importFlags.force {
 		if existing, found := findExistingDocByOID(docsBaseDir, srcRef.OID); found {
-			if jsonOutput {
-				return emitImportJSON(cmd, importResult{Status: "already_imported", ID: existing})
+			meta, resumed, err := resumeDocImport(ctx, tc.Path, ep, existing, srcRef)
+			if err != nil {
+				return fmt.Errorf("resume import: %w", err)
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Already imported (id: %s). Use --force to reimport.\n", existing)
+			if resumed {
+				return finishDocImport(cmd, jsonOutput, tc.TeamID, ep, meta)
+			}
+			docID := filepath.Base(filepath.Dir(existing))
+			if jsonOutput {
+				return emitImportJSON(cmd, importResult{Status: "already_imported", ID: docID})
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Already imported (id: %s). Use --force to reimport.\n", docID)
 			return nil
 		}
 	}
@@ -238,9 +285,6 @@ func runImport(cmd *cobra.Command, args []string) error {
 	)
 	if _, statErr := os.Stat(docDir); statErr == nil && !importFlags.force {
 		return fmt.Errorf("document directory already exists for this date — use --force to reimport: %s", docDir)
-	}
-	if err := os.MkdirAll(docDir, 0o755); err != nil {
-		return fmt.Errorf("create doc directory: %w", err)
 	}
 
 	// prepare LFS batch objects
@@ -269,14 +313,14 @@ func runImport(cmd *cobra.Command, args []string) error {
 	}
 
 	// upload content to LFS
-	lfsClient, err := getTeamContextLFSClient(ep, tc)
+	lfsClient, err := getTeamContextLFSClient(ctx, ep, tc)
 	if err != nil {
 		return fmt.Errorf("create LFS client: %w", err)
 	}
 
 	slog.Info("uploading doc to LFS", "doc", dirSlug, "files", len(batchObjects))
 
-	resp, err := lfsClient.BatchUpload(batchObjects)
+	resp, err := lfsClient.BatchUploadContext(ctx, batchObjects)
 	if err != nil {
 		return fmt.Errorf("LFS batch upload: %w", err)
 	}
@@ -292,6 +336,23 @@ func runImport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("LFS upload failed:\n  %s", strings.Join(uploadErrors, "\n  "))
 	}
 
+	// created only after the upload succeeds, so a failed upload leaves nothing that blocks a retry;
+	// Mkdir, not MkdirAll, so an import that created docDir during our upload is not overwritten without --force
+	err = os.MkdirAll(filepath.Dir(docDir), 0o755)
+	if err == nil {
+		err = os.Mkdir(docDir, 0o755)
+	}
+	createdDocDir := err == nil
+	if errors.Is(err, fs.ErrExist) && importFlags.force {
+		err = nil
+	}
+	if errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("document directory was created by another import while this one was uploading, use --force to reimport: %s", docDir)
+	}
+	if err != nil {
+		return fmt.Errorf("create doc directory: %w", err)
+	}
+
 	// write LFS pointer files (~200 bytes each, referencing content on LFS server).
 	// these are committed to git and survive in history, but the local working-tree
 	// copies are cleaned up on the next sparse-checkout reclone (data/ is denied).
@@ -302,7 +363,13 @@ func runImport(cmd *cobra.Command, args []string) error {
 	if hasText {
 		pointerFiles["extracted.md"] = textRef
 	}
-	if _, err := lfs.WritePointerFiles(docDir, pointerFiles); err != nil {
+	// AssertUploaded: srcRef/textRef blobs were uploaded via BatchUpload/UploadAll above.
+	if _, err := writeDocPointerFiles(docDir, lfs.AssertUploadedManifest(pointerFiles)); err != nil {
+		if createdDocDir {
+			// the pointer writer rolls back owned bytes; returned error paths can
+			// contain a later writer's content and must not be blindly removed
+			discardDocDir(docDir)
+		}
 		return fmt.Errorf("write pointer files: %w", err)
 	}
 
@@ -344,36 +411,54 @@ func runImport(cmd *cobra.Command, args []string) error {
 	}
 	metaPath := filepath.Join(docDir, "metadata.json")
 	if err := os.WriteFile(metaPath, metaData, 0o644); err != nil {
+		if createdDocDir {
+			discardDocDir(docDir, metaPath, srcPointerPath, textPointerPath)
+		}
 		return fmt.Errorf("write metadata.json: %w", err)
-	}
-
-	// ensure metadata.json stays out of LFS
-	if err := ensureMetadataGitattributes(tc.Path); err != nil {
-		slog.Warn("could not update .gitattributes", "error", err, "path", tc.Path)
 	}
 
 	if err := commitAndPushDocImport(tc.Path, ep, dirSlug, metaPath, srcPointerPath, textPointerPath, hasText); err != nil {
 		return fmt.Errorf("commit and push: %w", err)
 	}
 
+	return finishDocImport(cmd, jsonOutput, tc.TeamID, ep, meta)
+}
+
+// writeDocPointerFiles is a test seam: retry tests swap it to fail a write after docDir exists.
+var writeDocPointerFiles = lfs.WritePointerFiles
+
+// discardDocDir removes a document directory this run created when a later write fails,
+// so the retry is not refused as a concurrent import. os.Remove, not RemoveAll: a file
+// this run did not write keeps the directory, and is never deleted.
+func discardDocDir(docDir string, written ...string) {
+	for _, path := range written {
+		_ = os.Remove(path)
+	}
+	if err := os.Remove(docDir); err != nil {
+		slog.Warn("could not remove incomplete import directory", "path", docDir, "error", err)
+	}
+}
+
+// finishDocImport reports a published import using its saved manifest.
+func finishDocImport(cmd *cobra.Command, jsonOutput bool, teamID, ep string, meta docMeta) error {
 	// cloud notification — uses team_id since imports target team contexts, not
 	// project repos. Returns a recording ID when the server routes the file to
 	// transcription; failures degrade silently and never fail the import.
-	recordingID := notifyImport(tc.TeamID, ep, meta)
+	recordingID := notifyImport(teamID, ep, meta)
 
 	if jsonOutput {
 		return emitImportJSON(cmd, importResult{
 			Status:      "imported",
-			Title:       title,
-			Path:        relDocDir,
-			TeamID:      tc.TeamID,
-			SourceOID:   srcRef.OID,
+			Title:       meta.Title,
+			Path:        meta.Path,
+			TeamID:      teamID,
+			SourceOID:   meta.SourceOID,
 			ContentType: meta.ContentType,
 			RecordingID: recordingID,
 		})
 	}
 
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Imported: %s\nPath: %s\n", title, relDocDir)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Imported: %s\nPath: %s\n", meta.Title, meta.Path)
 	if recordingID != "" {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\n  Track progress: ox import --status %s --watch%s\n", recordingID, importContextFlagHint())
 	}
@@ -382,12 +467,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 
 // emitImportJSON writes an importResult as indented JSON to stdout.
 func emitImportJSON(cmd *cobra.Command, result importResult) error {
-	out, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal import result: %w", err)
-	}
-	_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(out))
-	return nil
+	return cli.PrintJSONTo(cmd.OutOrStdout(), result)
 }
 
 // resolveImportTitle returns the explicit --title when set, otherwise the
@@ -430,30 +510,37 @@ func inferTitle(path string) string {
 // must remain a plain-text git object so AI coworkers can read it without hydration.
 func ensureMetadataGitattributes(tcPath string) error {
 	gitattrsPath := filepath.Join(tcPath, ".gitattributes")
-	const marker = "data/**/metadata.json"
-	const override = "data/**/metadata.json !filter !diff !merge text"
 
 	content, err := os.ReadFile(gitattrsPath)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read .gitattributes: %w", err)
 	}
 
-	if strings.Contains(string(content), marker) {
+	newContent := docImportAttributes(content)
+	if bytes.Equal(content, newContent) {
 		return nil
 	}
+	return os.WriteFile(gitattrsPath, newContent, 0o644)
+}
 
+// docImportAttributes adds only the metadata override owned by document imports.
+func docImportAttributes(content []byte) []byte {
+	const marker = "data/**/metadata.json"
+	const override = "data/**/metadata.json !filter !diff !merge text"
+	if strings.Contains(string(content), marker) {
+		return content
+	}
 	existing := strings.TrimRight(string(content), "\n")
 	if existing != "" {
 		existing += "\n"
 	}
-	newContent := existing + override + "\n"
-	return os.WriteFile(gitattrsPath, []byte(newContent), 0o644)
+	return []byte(existing + override + "\n")
 }
 
 // findExistingDocByOID scans data/docs/ metadata.json files for a matching source OID.
-// Returns the doc directory name if found.
+// Returns the metadata path if found, preserving the document's original location.
 func findExistingDocByOID(docsBaseDir, oid string) (string, bool) {
-	var docID string
+	var metaPath string
 	var found bool
 
 	_ = filepath.WalkDir(docsBaseDir, func(path string, d os.DirEntry, err error) error {
@@ -471,14 +558,410 @@ func findExistingDocByOID(docsBaseDir, oid string) (string, bool) {
 			return nil
 		}
 		if meta.SourceOID == oid {
-			docID = filepath.Base(filepath.Dir(path))
+			metaPath = path
 			found = true
 			return filepath.SkipAll
 		}
 		return nil
 	})
 
-	return docID, found
+	return metaPath, found
+}
+
+// resumeDocImport validates and publishes a complete import left behind by a failed commit or push.
+func resumeDocImport(ctx context.Context, tcPath, ep, metaPath string, source lfs.FileRef) (meta docMeta, resumed bool, err error) {
+	var files map[string][]byte
+	err = gitutil.WithRepoLock(ctx, tcPath, func() error {
+		var readErr error
+		files, readErr = readDocImport(ctx, tcPath, metaPath, source, &meta)
+		if readErr != nil {
+			return readErr
+		}
+		tracked, err := docImportTracked(ctx, tcPath, files)
+		if err != nil {
+			return err
+		}
+		published, err := docImportPublished(ctx, tcPath, files, tracked == 0)
+		if err != nil {
+			return err
+		}
+		resumed = !published
+		if !published && tracked == 0 {
+			// snapshot preparation adds attributes; publication checks use only document files
+			return commitDocImportSnapshot(ctx, tcPath, filepath.Base(filepath.Dir(metaPath)), maps.Clone(files))
+		}
+		return nil
+	})
+	if err != nil {
+		return meta, false, fmt.Errorf("%w; review the saved import state, fix the cause, then rerun ox import", err)
+	}
+	if !resumed {
+		return meta, false, nil
+	}
+	// revalidate under the push lock after every sync; another writer may have added private history
+	opts := teamContextPushOpts(ep)
+	opts.ValidatePush = func(ctx context.Context, repoPath string) (bool, error) {
+		tracked, err := docImportTracked(ctx, repoPath, files)
+		if err != nil {
+			return false, err
+		}
+		if tracked != len(files) {
+			return false, fmt.Errorf("saved document is no longer committed; review the team context before retrying")
+		}
+		published, err := docImportPublished(ctx, repoPath, files, false)
+		if err == nil && published {
+			resumed = false
+		}
+		return published, err
+	}
+	if err := gitutil.PushWithRetry(ctx, tcPath, opts); err != nil {
+		return meta, true, fmt.Errorf("saved import commit remains local; could not confirm publication; review outgoing commits and synchronization errors, then rerun ox import: %w", err)
+	}
+	return meta, resumed, nil
+}
+
+// docImportTracked validates the saved files against the worktree, HEAD, and index.
+func docImportTracked(ctx context.Context, tcPath string, files map[string][]byte) (int, error) {
+	tracked := 0
+	for path, content := range files {
+		current, err := readDocImportFile(tcPath, path)
+		if err != nil {
+			return 0, err
+		}
+		if !bytes.Equal(current, content) {
+			return 0, fmt.Errorf("saved document changed while publishing; leaving it unchanged: %s", path)
+		}
+		head, headExists, err := docImportGitBlob(ctx, tcPath, "HEAD", path)
+		if err != nil {
+			return 0, err
+		}
+		if headExists {
+			matches, err := docImportMatchesBlob(ctx, tcPath, path, content, head)
+			if err != nil {
+				return 0, err
+			}
+			if !matches {
+				return 0, fmt.Errorf("document differs from HEAD; leaving it unchanged: %s", path)
+			}
+			tracked++
+		}
+		index, found, err := docImportGitBlob(ctx, tcPath, "", path)
+		if err != nil {
+			return 0, err
+		}
+		indexMatches := !headExists && !found
+		if found {
+			indexMatches, err = docImportMatchesBlob(ctx, tcPath, path, content, index)
+			if err != nil {
+				return 0, err
+			}
+		}
+		if !indexMatches {
+			return 0, fmt.Errorf("document has different staged content; leaving it unchanged: %s", path)
+		}
+	}
+	if tracked != 0 && tracked != len(files) {
+		return 0, fmt.Errorf("document is only partially committed; leaving it unchanged: %s", tcPath)
+	}
+	return tracked, nil
+}
+
+// docImportPublished checks the native push tracking ref for a previously published document.
+// It does not query the remote; an unknown or ambiguous tracking state cannot authorize a push.
+func docImportPublished(ctx context.Context, tcPath string, files map[string][]byte, needsCommit bool) (bool, error) {
+	branch, err := gitutil.RunGit(ctx, tcPath, "symbolic-ref", "--quiet", "HEAD")
+	if err != nil {
+		return false, fmt.Errorf("cannot determine import publication: %w", err)
+	}
+	remote, err := gitutil.RunGit(ctx, tcPath, "for-each-ref", "--format=%(push:remotename)", branch)
+	if err != nil {
+		return false, fmt.Errorf("cannot determine import publication remote: %w", err)
+	}
+	if remote == "" {
+		return false, fmt.Errorf("cannot determine import publication: push remote is unknown")
+	}
+	// @{push} already honors push.default, push refspecs and pushRemote, so it is the
+	// tracking ref of wherever `git push` publishes this branch.
+	pushRef, err := gitutil.RunGit(ctx, tcPath, "rev-parse", "--symbolic-full-name", "@{push}")
+	if err != nil {
+		return false, fmt.Errorf("cannot determine import publication ref: %w", err)
+	}
+	if !strings.HasPrefix(pushRef, "refs/remotes/"+remote+"/") {
+		return false, fmt.Errorf("cannot determine import publication: push tracking ref is unknown")
+	}
+
+	matched := 0
+	for path, expected := range files {
+		content, found, err := docImportGitBlob(ctx, tcPath, pushRef, path)
+		if err != nil {
+			return false, fmt.Errorf("cannot determine import publication: %w", err)
+		}
+		if found {
+			matches, err := docImportMatchesBlob(ctx, tcPath, path, expected, content)
+			if err != nil {
+				return false, err
+			}
+			if !matches {
+				return false, fmt.Errorf("published document differs from the saved import; leaving it unchanged: %s", path)
+			}
+			matched++
+		}
+	}
+	if matched != 0 && matched != len(files) {
+		return false, fmt.Errorf("published document is incomplete; leaving it unchanged")
+	}
+	if matched == len(files) {
+		return true, nil
+	}
+
+	if _, configured, err := docImportGitConfig(ctx, tcPath, "--get-all", "remote."+remote+".push"); err != nil {
+		return false, err
+	} else if configured {
+		return false, fmt.Errorf("cannot determine import publication with an explicit push refspec")
+	}
+	if mirror, _, err := docImportGitConfig(ctx, tcPath, "--bool", "--get", "remote."+remote+".mirror"); err != nil {
+		return false, err
+	} else if mirror == "true" {
+		return false, fmt.Errorf("cannot determine import publication for a mirror remote")
+	}
+	if mode, configured, err := docImportGitConfig(ctx, tcPath, "--get", "push.default"); err != nil {
+		return false, err
+	} else if configured && mode != "simple" && mode != "current" && mode != "upstream" && mode != "tracking" {
+		return false, fmt.Errorf("cannot determine import publication for push.default=%s", mode)
+	}
+	var urls [2]string
+	for i, flags := range [][]string{{"--all"}, {"--push", "--all"}} {
+		args := append([]string{"-C", tcPath, "remote", "get-url"}, flags...)
+		args = append(args, remote)
+		cmd := gitutil.NewNetworkCmd(ctx, args...)
+		cmd.Dir = tcPath
+		out, err := cmd.Output()
+		if err != nil {
+			return false, fmt.Errorf("cannot determine import publication URL: %w", err)
+		}
+		urls[i] = strings.TrimSpace(string(out))
+		if urls[i] == "" || strings.Contains(urls[i], "\n") {
+			return false, fmt.Errorf("cannot determine import publication with multiple remote URLs")
+		}
+	}
+	if urls[0] != urls[1] {
+		return false, fmt.Errorf("cannot determine import publication when fetch and push URLs differ")
+	}
+
+	upstreamRef, err := gitutil.RunGit(ctx, tcPath, "rev-parse", "--symbolic-full-name", "@{u}")
+	if err != nil || upstreamRef != pushRef {
+		return false, fmt.Errorf("cannot safely synchronize the saved import: upstream and push tracking refs must match")
+	}
+
+	// A previously published import can be absent after an upstream rewrite.
+	// Check the history Git still knows before a fast-forward push can revive it.
+	forkPoint, err := gitutil.RunGit(ctx, tcPath, "merge-base", "--fork-point", pushRef, "HEAD")
+	if err != nil {
+		return false, fmt.Errorf("cannot determine safe import retry history: %w", err)
+	}
+	for path := range files {
+		_, found, err := docImportGitBlob(ctx, tcPath, forkPoint, path)
+		if err != nil {
+			return false, fmt.Errorf("cannot determine safe import retry history: %w", err)
+		}
+		if found {
+			return false, fmt.Errorf("document was previously published and removed; leaving it unchanged: %s", path)
+		}
+	}
+
+	// A branch push sends every ancestor, even when private files were later deleted.
+	// Resume only a single non-merge import commit based directly on the known fork point.
+	// Count from the current push ref so an upstream rewind cannot hide removed history.
+	outgoing, err := gitutil.RunGit(ctx, tcPath, "rev-list", "--parents", "--max-count=2", pushRef+"..HEAD")
+	if err != nil {
+		return false, fmt.Errorf("cannot determine safe import retry history: %w", err)
+	}
+	commits := strings.Fields(outgoing)
+	if needsCommit && len(commits) == 0 {
+		return false, nil
+	}
+	if needsCommit || len(commits) != 2 || commits[1] != forkPoint {
+		return false, fmt.Errorf("saved import remains local; outgoing history includes other commits or a merge; review outgoing commits before synchronizing the team context, then rerun ox import")
+	}
+	if err := docImportCommitOwned(ctx, tcPath, forkPoint, commits[0], files); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+// docImportCommitOwned accepts only validated document files and the metadata attributes override.
+func docImportCommitOwned(ctx context.Context, tcPath, parent, commit string, files map[string][]byte) error {
+	// Paths are NUL-delimited data; logging helpers can trim or sanitize valid filename bytes.
+	changed, err := exec.CommandContext(ctx, "git", "-C", tcPath, "diff", "--name-only", "--no-renames", "-z", parent, commit, "--").Output()
+	if err != nil {
+		return fmt.Errorf("inspect import commit: %w", err)
+	}
+	for _, name := range bytes.Split(bytes.TrimSuffix(changed, []byte{0}), []byte{0}) {
+		rel := string(name)
+		path := filepath.Join(tcPath, filepath.FromSlash(rel))
+		if _, owned := files[path]; !owned && rel != ".gitattributes" {
+			return fmt.Errorf("saved import remains local; commit includes changes outside this document; review outgoing commits before synchronizing the team context, then rerun ox import")
+		}
+		mode, err := gitutil.RunGit(ctx, tcPath, "ls-tree", "--format=%(objectmode)", commit, "--", ":(literal)"+rel)
+		if err != nil {
+			return fmt.Errorf("inspect import commit file mode: %w", err)
+		}
+		if mode != "100644" && mode != "100755" {
+			return fmt.Errorf("saved import commit contains a non-regular file; leaving it unchanged")
+		}
+		if rel == ".gitattributes" {
+			before, _, err := docImportGitBlob(ctx, tcPath, parent, path)
+			if err != nil {
+				return err
+			}
+			after, found, err := docImportGitBlob(ctx, tcPath, commit, path)
+			if err != nil {
+				return err
+			}
+			if !found || !bytes.Equal(after, docImportAttributes(before)) {
+				return fmt.Errorf("saved import remains local; commit includes unrelated .gitattributes changes; review outgoing commits before synchronizing the team context, then rerun ox import")
+			}
+		}
+	}
+	return nil
+}
+
+// docImportGitConfig treats only Git's missing-value exit code as an absent setting.
+func docImportGitConfig(ctx context.Context, tcPath string, args ...string) (string, bool, error) {
+	out, err := gitutil.RunGit(ctx, tcPath, append([]string{"config"}, args...)...)
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("cannot determine import publication configuration: %w", err)
+	}
+	return out, true, nil
+}
+
+// readDocImport accepts only a complete manifest and the pointers it describes.
+func readDocImport(ctx context.Context, tcPath, metaPath string, source lfs.FileRef, meta *docMeta) (map[string][]byte, error) {
+	data, err := readDocImportFile(tcPath, metaPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(data, meta); err != nil {
+		return nil, fmt.Errorf("read import manifest: %w", err)
+	}
+	docDir := filepath.Dir(metaPath)
+	relDocDir, err := filepath.Rel(tcPath, docDir)
+	if err != nil || filepath.Clean(meta.Path) != relDocDir || meta.Version != "1" || meta.SourceOID != source.OID || meta.SourceSize != source.Size {
+		return nil, fmt.Errorf("import manifest does not match the source and document path: %s", metaPath)
+	}
+	refs := map[string]lfs.FileRef{meta.SourceFilename: source}
+	for _, sidecar := range meta.Sidecars {
+		if _, exists := refs[sidecar.Filename]; exists {
+			return nil, fmt.Errorf("import manifest repeats a pointer filename: %s", sidecar.Filename)
+		}
+		refs[sidecar.Filename] = lfs.FileRef{OID: sidecar.OID, Size: sidecar.Size}
+	}
+	files := map[string][]byte{metaPath: data}
+	for filename, ref := range refs {
+		if filename == "" || filename == "." || filename == ".." || filename == "metadata.json" || strings.ContainsAny(filename, `/\`) {
+			return nil, fmt.Errorf("unsafe import pointer filename: %q", filename)
+		}
+		path := filepath.Join(docDir, filename)
+		content, err := readDocImportFile(tcPath, path)
+		if err != nil {
+			return nil, err
+		}
+		pointer := lfs.FormatPointer(ref.OID, ref.Size)
+		oid, size, err := lfs.ParsePointer(pointer)
+		if err != nil || oid != ref.OID || size != ref.Size {
+			return nil, fmt.Errorf("import pointer does not match its manifest: %s", path)
+		}
+		matches, err := docImportMatchesBlob(ctx, tcPath, path, content, []byte(pointer))
+		if err != nil {
+			return nil, err
+		}
+		if !matches {
+			return nil, fmt.Errorf("import pointer does not match its manifest: %s", path)
+		}
+		files[path] = content
+	}
+	return files, nil
+}
+
+// readDocImportFile refuses paths that traverse a symlink or leave the clone.
+func readDocImportFile(tcPath, path string) ([]byte, error) {
+	rel, err := filepath.Rel(tcPath, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return nil, fmt.Errorf("unsafe import file path: %s", path)
+	}
+	current := tcPath
+	parts := strings.Split(rel, string(filepath.Separator))
+	for i, part := range parts {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return nil, fmt.Errorf("read import file: %w", err)
+		}
+		if (i < len(parts)-1 && !info.IsDir()) || (i == len(parts)-1 && !info.Mode().IsRegular()) {
+			return nil, fmt.Errorf("import path is not a regular file or directory: %s", current)
+		}
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read import file: %w", err)
+	}
+	return content, nil
+}
+
+// docImportMatchesBlob compares Git-clean file content to a canonical blob without writing objects or checkout bytes.
+func docImportMatchesBlob(ctx context.Context, tcPath, path string, content, blob []byte) (bool, error) {
+	rel, err := filepath.Rel(tcPath, path)
+	if err != nil {
+		return false, err
+	}
+	var oids [2]string
+	for i, input := range [][]byte{content, blob} {
+		args := []string{"-C", tcPath, "hash-object", "--stdin"}
+		if i == 0 {
+			args = append(args, "--path="+filepath.ToSlash(rel))
+		} else {
+			args = append(args, "--no-filters")
+		}
+		cmd := gitutil.NewNetworkCmd(ctx, args...)
+		cmd.Dir = tcPath
+		cmd.Stdin = bytes.NewReader(input)
+		out, err := cmd.Output()
+		if err != nil {
+			return false, fmt.Errorf("compare import content using Git: %w", err)
+		}
+		oids[i] = strings.TrimSpace(string(out))
+	}
+	return oids[0] == oids[1], nil
+}
+
+// docImportGitBlob distinguishes an absent path from an unreadable Git state.
+func docImportGitBlob(ctx context.Context, tcPath, revision, path string) ([]byte, bool, error) {
+	rel, err := filepath.Rel(tcPath, path)
+	if err != nil {
+		return nil, false, err
+	}
+	rel = filepath.ToSlash(rel)
+	args := []string{"ls-tree", "-z", revision, "--", ":(literal)" + rel}
+	if revision == "" {
+		args = []string{"ls-files", "--stage", "-z", "--", ":(literal)" + rel}
+	}
+	out, err := gitutil.RunGit(ctx, tcPath, args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("inspect import Git state: %w", err)
+	}
+	if out == "" {
+		return nil, false, nil
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", tcPath, "show", revision+":"+rel)
+	content, err := cmd.Output()
+	if err != nil {
+		return nil, false, fmt.Errorf("read import Git blob %s: %w", path, err)
+	}
+	return content, true, nil
 }
 
 // detectContentType returns the MIME type for a file.
@@ -530,6 +1013,8 @@ func detectContentType(filename string, content []byte) string {
 		return "video/mp4"
 	case ".mov":
 		return "video/quicktime"
+	case ".m4v":
+		return "video/x-m4v"
 	case ".mkv":
 		return "video/x-matroska"
 	case ".avi":
@@ -567,7 +1052,7 @@ func autoDiscoverSingleTeam(ep string) *config.TeamContext {
 
 	var dirs []os.DirEntry
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() && !paths.IsHiddenTeamsEntry(e.Name()) {
 			dirs = append(dirs, e)
 		}
 	}
@@ -604,22 +1089,12 @@ func resolveTeamContextByEndpoint(query, ep string) *config.TeamContext {
 
 // getTeamContextLFSClient creates an LFS client for the team context repo.
 // Fallback chain: cloud API → cached marker → git remote URL.
-func getTeamContextLFSClient(ep string, tc *config.TeamContext) (*lfs.Client, error) {
-	creds, err := gitserver.LoadCredentialsForEndpoint(ep)
-	if err != nil {
-		return nil, fmt.Errorf("load credentials: %w", err)
-	}
-	if creds == nil {
-		return nil, fmt.Errorf("no git credentials found (run 'ox login' first)")
-	}
-	if creds.Token == "" {
-		return nil, fmt.Errorf("git credentials have empty token")
-	}
+func getTeamContextLFSClient(ctx context.Context, ep string, tc *config.TeamContext) (*lfs.Client, error) {
 
 	repoURL := GetTeamURLWithFallback("", tc.TeamID, ep)
 	if repoURL == "" {
 		// last resort: read from local git remote
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		out, gitErr := gitutil.RunGit(ctx, tc.Path, "remote", "get-url", "origin")
 		if gitErr != nil || strings.TrimSpace(out) == "" {
@@ -628,7 +1103,7 @@ func getTeamContextLFSClient(ep string, tc *config.TeamContext) (*lfs.Client, er
 		repoURL = strings.TrimSpace(out)
 	}
 
-	return lfs.NewClient(repoURL, creds.Username, creds.Token), nil
+	return lfs.NewClientForEndpoint(ctx, repoURL, ep)
 }
 
 // commitAndPushDocImport stages, commits, and pushes imported document files.
@@ -641,37 +1116,149 @@ func commitAndPushDocImport(tcPath, ep, docID, metaPath, srcPointerPath, textPoi
 		filesToAdd = append(filesToAdd, textPointerPath)
 	}
 
-	// include .gitattributes if it exists
-	gitattrsPath := filepath.Join(tcPath, ".gitattributes")
-	if _, err := os.Stat(gitattrsPath); err == nil {
-		filesToAdd = append(filesToAdd, gitattrsPath)
-	}
-
-	// --sparse: team context repos use sparse-checkout; without this flag
-	// git refuses to stage files outside the sparse definition (e.g. .gitattributes at root)
-	addArgs := append([]string{"-C", tcPath, "add", "--sparse"}, filesToAdd...)
-	addCmd := exec.CommandContext(ctx, "git", addArgs...)
-	if out, err := addCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git add failed: %s: %w", string(out), err)
-	}
-
-	commitMsg := fmt.Sprintf("import: doc %s", docID)
-	commitCmd := exec.CommandContext(ctx, "git", "-C", tcPath, "commit", "--no-verify", "-m", commitMsg)
-	if out, err := commitCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(out), "nothing to commit") {
-			return nil
+	if err := gitutil.WithRepoLock(ctx, tcPath, func() error {
+		files := make(map[string][]byte, len(filesToAdd))
+		for _, path := range filesToAdd {
+			content, err := readDocImportFile(tcPath, path)
+			if err != nil {
+				return err
+			}
+			files[path] = content
 		}
-		return fmt.Errorf("git commit failed: %s: %w", string(out), err)
+		return commitDocImportSnapshot(ctx, tcPath, docID, files)
+	}); err != nil {
+		return err
 	}
 
 	return pushTeamContext(context.Background(), tcPath, ep)
+}
+
+// commitDocImportSnapshot stages only validated files and leaves unrelated index entries alone.
+// The caller holds WithRepoLock across validation, staging and the snapshot commit.
+func commitDocImportSnapshot(ctx context.Context, tcPath, docID string, files map[string][]byte) error {
+	if err := gitutil.IsSafeForGitOps(tcPath); err != nil {
+		return fmt.Errorf("unsafe import commit: %w", err)
+	}
+	if err := prepareDocImportAttributes(ctx, tcPath, files); err != nil {
+		return err
+	}
+
+	paths := make([]string, 0, len(files))
+	for path := range files {
+		rel, err := filepath.Rel(tcPath, path)
+		if err != nil {
+			return err
+		}
+		paths = append(paths, ":(literal)"+filepath.ToSlash(rel))
+	}
+	sort.Strings(paths)
+	args := append([]string{"add", "--sparse", "--"}, paths...)
+	if _, err := gitutil.RunGit(ctx, tcPath, args...); err != nil {
+		return fmt.Errorf("stage import files: %w", err)
+	}
+	for path, expected := range files {
+		content, found, err := docImportGitBlob(ctx, tcPath, "", path)
+		if err != nil {
+			return err
+		}
+		matches := false
+		if found {
+			matches, err = docImportMatchesBlob(ctx, tcPath, path, expected, content)
+			if err != nil {
+				return err
+			}
+		}
+		if !matches {
+			return fmt.Errorf("import file changed while staging; leaving it unchanged: %s", path)
+		}
+	}
+	_, err := gitutil.CommitLedgerSnapshot(ctx, tcPath, fmt.Sprintf("import: doc %s", docID), paths...)
+	return err
+}
+
+// prepareDocImportAttributes refuses unrelated edits before updating or staging attributes.
+func prepareDocImportAttributes(ctx context.Context, tcPath string, files map[string][]byte) error {
+	path := filepath.Join(tcPath, ".gitattributes")
+	head, headExists, err := docImportGitBlob(ctx, tcPath, "HEAD", path)
+	if err != nil {
+		return err
+	}
+	expected := docImportAttributes(head)
+	var current []byte
+	currentExists := false
+	if _, err := os.Lstat(path); err == nil {
+		currentExists = true
+		current, err = readDocImportFile(tcPath, path)
+		if err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read import .gitattributes: %w", err)
+	}
+	if headExists && !currentExists {
+		// a team context whose sparse checkout predates root-level files; rewriting the file
+		// from scratch here would drop the team's attributes on the next push
+		return fmt.Errorf("%s is committed but missing from the checkout; run `ox doctor` to repair the team context, then rerun ox import", path)
+	}
+	unchanged := currentExists == headExists
+	owned := false
+	if currentExists {
+		if headExists {
+			unchanged, err = docImportMatchesBlob(ctx, tcPath, path, current, head)
+			if err != nil {
+				return err
+			}
+		}
+		owned, err = docImportMatchesBlob(ctx, tcPath, path, current, expected)
+		if err != nil {
+			return err
+		}
+	}
+	if !unchanged && !owned {
+		return fmt.Errorf("%s has uncommitted changes ox did not make; commit or discard them, then rerun ox import", path)
+	}
+	index, indexExists, err := docImportGitBlob(ctx, tcPath, "", path)
+	if err != nil {
+		return err
+	}
+	unchanged = indexExists == headExists && bytes.Equal(index, head)
+	owned = false
+	if indexExists {
+		owned, err = docImportMatchesBlob(ctx, tcPath, path, expected, index)
+		if err != nil {
+			return err
+		}
+	}
+	if !unchanged && !owned {
+		return fmt.Errorf("%s has staged changes ox did not make; commit or unstage them, then rerun ox import", path)
+	}
+	if err := ensureMetadataGitattributes(tcPath); err != nil {
+		return fmt.Errorf("update import .gitattributes: %w", err)
+	}
+	content, err := readDocImportFile(tcPath, path)
+	if err != nil {
+		return err
+	}
+	matches, err := docImportMatchesBlob(ctx, tcPath, path, content, expected)
+	if err != nil {
+		return err
+	}
+	if !matches {
+		return fmt.Errorf(".gitattributes changed while preparing the import; leaving it unchanged")
+	}
+	files[path] = content
+	return nil
 }
 
 // pushTeamContext pushes team context changes to remote with conflict retry.
 // Takes endpoint explicitly since team context path lacks .sageox/ for discovery.
 // No auto-resolve — team context conflicts require manual resolution.
 func pushTeamContext(ctx context.Context, tcPath, ep string) error {
-	return gitutil.PushWithRetry(ctx, tcPath, gitutil.PushOpts{
+	return gitutil.PushWithRetry(ctx, tcPath, teamContextPushOpts(ep))
+}
+
+func teamContextPushOpts(ep string) gitutil.PushOpts {
+	return gitutil.PushOpts{
 		PrePush: func(repoPath string) error {
 			if ep != "" {
 				if err := gitserver.RefreshRemoteCredentials(repoPath, ep); err != nil {
@@ -680,7 +1267,7 @@ func pushTeamContext(ctx context.Context, tcPath, ep string) error {
 			}
 			return nil
 		},
-	})
+	}
 }
 
 // slugify converts a string to a filesystem-safe directory name.
@@ -756,7 +1343,7 @@ func resolveImportContext(ctx context.Context) (contextType, contextID string, c
 		return "", "", nil, "", fmt.Errorf("failed to read auth store: %w", err)
 	}
 	if storedToken == nil || storedToken.AccessToken == "" {
-		return "", "", nil, "", fmt.Errorf("not authenticated — run 'ox login' first")
+		return "", "", nil, "", errkind.Errorf(errkind.NotLoggedIn, "not authenticated — run 'ox login' first")
 	}
 
 	client = api.NewRepoClientWithEndpoint(ep).WithAuthToken(storedToken.AccessToken)
@@ -793,9 +1380,7 @@ func runImportURL(cmd *cobra.Command, url string, jsonOutput bool) error {
 	}
 
 	if jsonOutput {
-		out, _ := json.MarshalIndent(resp, "", "  ")
-		fmt.Fprintln(cmd.OutOrStdout(), string(out))
-		return nil
+		return cli.PrintJSONTo(cmd.OutOrStdout(), resp)
 	}
 
 	cli.PrintSuccess("Import started")
@@ -829,10 +1414,17 @@ func runImportStatus(cmd *cobra.Command, jsonOutput bool) error {
 		if resp == nil {
 			// row not yet created — show as "starting"
 			if jsonOutput {
+				starting := struct {
+					ID     string `json:"id"`
+					Status string `json:"status"`
+				}{ID: recordingID, Status: "starting"}
 				if importFlags.watch {
-					fmt.Fprintf(cmd.OutOrStdout(), "{\"id\":%q,\"status\":\"starting\"}\n", recordingID)
+					// JSONL: one compact JSON object per line for streaming
+					out, _ := json.Marshal(starting)
+					out = append(out, '\n')
+					_ = cli.WriteJSONBytes(cmd.OutOrStdout(), out)
 				} else {
-					fmt.Fprintf(cmd.OutOrStdout(), "{\n  \"id\": %q,\n  \"status\": \"starting\"\n}\n", recordingID)
+					_ = cli.PrintJSONTo(cmd.OutOrStdout(), starting)
 				}
 			} else {
 				fmt.Fprintf(cmd.OutOrStdout(), "Recording: %s\nStatus:    starting\n", recordingID)
@@ -848,10 +1440,10 @@ func runImportStatus(cmd *cobra.Command, jsonOutput bool) error {
 			if importFlags.watch {
 				// JSONL: one compact JSON object per line for streaming
 				out, _ := json.Marshal(resp)
-				fmt.Fprintln(cmd.OutOrStdout(), string(out))
+				out = append(out, '\n')
+				_ = cli.WriteJSONBytes(cmd.OutOrStdout(), out)
 			} else {
-				out, _ := json.MarshalIndent(resp, "", "  ")
-				fmt.Fprintln(cmd.OutOrStdout(), string(out))
+				_ = cli.PrintJSONTo(cmd.OutOrStdout(), resp)
 			}
 		} else {
 			printVideoStatus(cmd, resp)
@@ -914,9 +1506,7 @@ func runImportList(cmd *cobra.Command, jsonOutput bool) error {
 	}
 
 	if jsonOutput {
-		out, _ := json.MarshalIndent(resp, "", "  ")
-		fmt.Fprintln(cmd.OutOrStdout(), string(out))
-		return nil
+		return cli.PrintJSONTo(cmd.OutOrStdout(), resp)
 	}
 
 	if len(resp.Recordings) == 0 {

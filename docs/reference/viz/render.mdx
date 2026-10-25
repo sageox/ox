@@ -1,7 +1,7 @@
 ---
 title: "ox viz render"
 description: "CLI reference for ox viz render"
-sidebar_position: 102
+sidebar_position: 124
 ---
 
 ## ox viz render
@@ -23,20 +23,22 @@ ox viz render <id> [flags]
 ```
       --data string   JSON data file for the pattern (use - for stdin)
   -h, --help          help for render
+      --page          wrap the fragment in a standalone themed HTML document (pipe to a file and open it)
 ```
 
 ### Options inherited from parent commands
 
 ```
-  -c, --config string    config file path (default: .sageox/config.yaml)
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
       --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
   -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
 ```
 
 ### SEE ALSO
 
 * [ox viz](/viz)	 - Choose, author, render, and lint visual explanations
-

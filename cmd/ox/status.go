@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -21,6 +20,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
@@ -28,6 +28,7 @@ import (
 	"github.com/sageox/ox/internal/status"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/tui"
+	"github.com/sageox/ox/internal/updatenotice"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -134,6 +135,105 @@ func renderVisibilityWithAccess(visibility, accessLevel string) string {
 		s += statusMutedStyle.Render(fmt.Sprintf(" (✓ %s)", accessLevel))
 	}
 	return s
+}
+
+// teamContextRow reduces one team context to the four cells of the compact
+// table: name, visibility, membership, sync state.
+//
+// It reads the same sources the card renderers do — the API's visibility and
+// access level, and the checkout on disk — rather than reformatting their
+// output, so the two views can disagree only if the underlying facts do.
+func teamContextRow(name, visibility, accessLevel, checkoutPath string, daemonStatus *daemon.StatusData) [4]string {
+	if visibility == "" {
+		visibility = "private"
+	}
+
+	// Membership is split out of the visibility cell so the common case is a
+	// single glyph. "private (✓ member)" repeated down a column is the same
+	// claim made twice.
+	member := "—"
+	switch {
+	case accessLevel == "viewer":
+		member = "read-only"
+	case accessLevel != "":
+		member = "✓ " + accessLevel
+	}
+
+	return [4]string{name, visibility, member, teamContextSyncCell(checkoutPath, daemonStatus)}
+}
+
+// cloudTeamContextRow builds a table row for a cloud-listed team. Visibility
+// and access level live on the team DETAIL response, not on RepoInfo, and
+// default to private/member exactly as the card renderer does — a team the
+// detail call did not cover must not render as though it had no membership.
+func cloudTeamContextRow(info api.RepoInfo, teamDetail map[string]api.RepoDetailTeamContext, projectEndpoint string, daemonStatus *daemon.StatusData) [4]string {
+	visibility, accessLevel := "private", "member"
+	if detail, ok := teamDetail[info.StableID()]; ok {
+		if detail.Visibility != "" {
+			visibility = detail.Visibility
+		}
+		if detail.AccessLevel != "" {
+			accessLevel = detail.AccessLevel
+		}
+	}
+	return teamContextRow(info.Name, visibility, accessLevel,
+		paths.TeamContextDir(info.StableID(), projectEndpoint), daemonStatus)
+}
+
+// teamContextSyncCell answers "is this team's checkout current?" in one cell.
+//
+// Staleness outranks a clean tree: a checkout with nothing uncommitted that
+// has not synced in days is the failure this column exists to surface, and
+// reporting it as "✓ synced" is how a stalled sync stays invisible.
+func teamContextSyncCell(checkoutPath string, daemonStatus *daemon.StatusData) string {
+	if _, err := os.Stat(filepath.Join(checkoutPath, ".git")); err != nil {
+		if daemonStatus.IsBootstrapping() {
+			return "⟳ cloning"
+		}
+		return "⚠ not cloned"
+	}
+	syncState := daemon.LoadSyncState(checkoutPath)
+	if syncState.IsStale(daemon.DefaultStalenessThreshold) && !syncState.LastSync.IsZero() {
+		return "⚠ stale " + status.FormatTimeAgo(syncState.LastSync)
+	}
+	repoStatus := getGitRepoStatus(checkoutPath, time.Time{}, false)
+	switch {
+	case repoStatus.Error != "":
+		return "⚠ unreadable"
+	case repoStatus.UncommittedCount > 0:
+		return fmt.Sprintf("%d uncommitted", repoStatus.UncommittedCount)
+	}
+	return "✓ synced"
+}
+
+// teamContextTableColumns bounds each cell so the table fits 80 columns
+// (design rule 12). NAME takes the remainder and is the only cell allowed to
+// be long, because it is the only one a reader scans by.
+const (
+	// Wide enough for the HEADER, not just the values: "VISIBILITY" is longer
+	// than "private", and a header that overflows its own column shifts every
+	// column right of it out of alignment with its data.
+	tcVisibilityColumn = 10
+	tcMemberColumn     = 9
+	tcSyncColumn       = 16
+	tcNameColumn       = 80 - tcVisibilityColumn - tcMemberColumn - tcSyncColumn - 3
+)
+
+// renderTeamContextTable renders the compact one-row-per-team view.
+func renderTeamContextTable(rows [][4]string) string {
+	var b strings.Builder
+	b.WriteString(statusMutedStyle.Render(fmt.Sprintf("%-*s %-*s %-*s %s",
+		tcNameColumn, "TEAM", tcVisibilityColumn, "VISIBILITY", tcMemberColumn, "MEMBER", "SYNCED")))
+	b.WriteString("\n")
+	for _, r := range rows {
+		fmt.Fprintf(&b, "%-*s %-*s %-*s %s",
+			tcNameColumn, truncateCell(sanitizeCell(r[0]), tcNameColumn),
+			tcVisibilityColumn, truncateCell(r[1], tcVisibilityColumn),
+			tcMemberColumn, truncateCell(r[2], tcMemberColumn),
+			truncateCell(r[3], tcSyncColumn))
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // renderTable renders a section with a header and key-value rows
@@ -429,6 +529,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 	var cloudRepos *api.ReposResponse
 	var cloudLedgerURL string
 	var cloudTeamContexts []api.RepoInfo
+	var cloudReposErr error
 
 	// use project endpoint for auth check and API calls (not global default)
 	// this ensures we query the correct endpoint when logged into multiple
@@ -439,8 +540,12 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 	var ledgerStatusErr error
 	var userEmail string
 
-	// repo detail for visibility/access info (works for both members and non-members)
+	// repo detail for visibility/access info (works for both members and non-members).
+	// repoDetailErr is kept (not discarded) because a failed call must render
+	// as "we couldn't check" below, never as "the team isn't visible" -- those
+	// are different facts with different fixes.
 	var repoDetail *api.RepoDetailResponse
+	var repoDetailErr error
 
 	if authenticated {
 		token, err := auth.GetTokenForEndpoint(projectEndpoint)
@@ -450,12 +555,12 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 
 			// fetch repo detail for visibility/access info
 			if projectCfg != nil && projectCfg.RepoID != "" {
-				repoDetail, _ = client.GetRepoDetail(projectCfg.RepoID)
+				repoDetail, repoDetailErr = client.GetRepoDetail(projectCfg.RepoID)
 			}
 
 			// fetch repos for team contexts
-			cloudRepos, err = client.GetRepos()
-			if err == nil && cloudRepos != nil {
+			cloudRepos, cloudReposErr = client.GetRepos()
+			if cloudReposErr == nil && cloudRepos != nil {
 				// categorize cloud repos
 				for _, repo := range cloudRepos.Repos {
 					switch repo.Type {
@@ -579,6 +684,14 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 				b.WriteString("\n")
 				b.WriteString(statusLabelStyle.Render(""))
 				b.WriteString(statusMutedStyle.Render("Run 'ox doctor --fix' to repair (or it will auto-repair on next session stop)"))
+				b.WriteString("\n")
+			}
+
+			// sessions kept on this machine (GH #1095); read-only here
+			if held := listUnpublishedCacheSessions(localCfg.Ledger.Path).Held; len(held) > 0 {
+				b.WriteString(statusLabelStyle.Render("  Held"))
+				b.WriteString(formatValue(fmt.Sprintf("%d session(s) on this machine", len(held)), "highlight"))
+				b.WriteString(statusMutedStyle.Render(" — publish with 'ox session upload <name>'"))
 				b.WriteString("\n")
 			}
 		}
@@ -743,7 +856,12 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 	// --verbose for the Other Team Contexts cards (restored under ox
 	// ADR-028) so the section stays dense by default.
 	renderedTeams := make(map[string]bool)
-	renderCloudTC := func(cloudTC api.RepoInfo, showPath bool) {
+	// renderCloudTC renders one team-context card. isRepoTeam marks the
+	// repo's OWN bound team (config.json's team_id) — the same "(this
+	// repo)" distinction `ox team list` renders — with a "(this repo)"
+	// suffix and a direct dashboard URL, so it never looks like just another
+	// entry in "Other Team Contexts" below it.
+	renderCloudTC := func(cloudTC api.RepoInfo, showPath bool, isRepoTeam bool) {
 		expectedPath := paths.TeamContextDir(cloudTC.StableID(), projectEndpoint)
 		if renderedTeams[expectedPath] {
 			return
@@ -752,7 +870,15 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 
 		b.WriteString(statusLabelStyle.Render("Team"))
 		b.WriteString(statusValueStyle.Render(cloudTC.Name))
+		if isRepoTeam {
+			b.WriteString(" " + statusMutedStyle.Render("(this repo)"))
+		}
 		b.WriteString("\n")
+		if isRepoTeam {
+			b.WriteString(statusLabelStyle.Render("  URL"))
+			b.WriteString(statusMutedStyle.Render(teamDashboardURL(projectEndpoint, cloudTC.StableID())))
+			b.WriteString("\n")
+		}
 
 		visibility := "private"
 		accessLevel := "member"
@@ -830,9 +956,9 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString("\n")
 	}
 
-	// helper: render a single detail-only team context entry (showPath as
-	// in renderCloudTC).
-	renderDetailTC := func(detailTC api.RepoDetailTeamContext, showPath bool) {
+	// helper: render a single detail-only team context entry (showPath and
+	// isRepoTeam as in renderCloudTC).
+	renderDetailTC := func(detailTC api.RepoDetailTeamContext, showPath bool, isRepoTeam bool) {
 		expectedPath := paths.TeamContextDir(detailTC.StableID(), projectEndpoint)
 		if renderedTeams[expectedPath] {
 			return
@@ -841,7 +967,15 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 
 		b.WriteString(statusLabelStyle.Render("Team"))
 		b.WriteString(statusValueStyle.Render(detailTC.Name))
+		if isRepoTeam {
+			b.WriteString(" " + statusMutedStyle.Render("(this repo)"))
+		}
 		b.WriteString("\n")
+		if isRepoTeam {
+			b.WriteString(statusLabelStyle.Render("  URL"))
+			b.WriteString(statusMutedStyle.Render(teamDashboardURL(projectEndpoint, detailTC.StableID())))
+			b.WriteString("\n")
+		}
 
 		detailVisibility := "private"
 		if detailTC.Visibility != "" {
@@ -899,14 +1033,53 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 
 	// Repo team context - rendered inline under Project Status
 	b.WriteString("\n")
-	if repoCloudTC != nil {
+	switch {
+	case repoCloudTC != nil:
 		hasAnyTeams = true
-		renderCloudTC(repoCloudTC.info, true)
-	} else if repoDetailTC != nil {
+		renderCloudTC(repoCloudTC.info, true, true)
+	case repoDetailTC != nil:
 		hasAnyTeams = true
-		renderDetailTC(repoDetailTC.info, true)
-	} else {
-		// no repo team context found
+		renderDetailTC(repoDetailTC.info, true, true)
+	case repoTeamID != "":
+		// The repo IS bound to a team (config.json's team_id is set), but
+		// that team is absent from every source this account can see. This
+		// must render distinguishably from "never initialized" below —
+		// rendering both as "not configured" is exactly what let a user's
+		// successfully-recorded sessions look, from the CLI's own status
+		// output, indistinguishable from a repo nobody had touched.
+		b.WriteString(statusLabelStyle.Render("Team"))
+		b.WriteString(statusMutedStyle.Render(repoTeamID))
+		b.WriteString("\n")
+		b.WriteString(statusLabelStyle.Render("Status"))
+		switch {
+		case repoDetailErr != nil || cloudReposErr != nil:
+			// The absence above is unproven, not confirmed: GetRepoDetail
+			// and/or GetRepos failed outright (network, transient 5xx),
+			// so we never actually got an answer from the source that
+			// would tell us whether this account can see the team.
+			// Rendering that identically to "not visible to this
+			// account" -- a real permission denial -- trains a coworker
+			// to distrust (or ignore) this warning the next time it's
+			// real.
+			b.WriteString(statusWarningStyle.Render("⚠ visibility unavailable"))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("Could not reach the API to check this team's visibility. Try again shortly."))
+		case authenticated:
+			b.WriteString(statusWarningStyle.Render("⚠ not visible to this account"))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("This repo is bound to a team your current account can't see."))
+		default:
+			b.WriteString(statusWarningStyle.Render("⚠ not visible to this account"))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("Log in to check whether your account has access to this team."))
+		}
+		b.WriteString("\n")
+	default:
+		// no repo team context found, and none configured either — this
+		// repo has genuinely never been bound to a team.
 		b.WriteString(statusLabelStyle.Render("Status"))
 		b.WriteString(statusMutedStyle.Render("not configured"))
 		b.WriteString("\n")
@@ -938,22 +1111,48 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			render    func()
 			notCloned bool
 			name      string
+			// path is the checkout directory, and the identity a team is
+			// deduped by: the same team can arrive from both the cloud list
+			// and the repo-detail response.
+			path string
+			// row is the compact-table form of the same team: name,
+			// visibility, membership, sync. Built here rather than parsed back
+			// out of the card text, which would make the table a screen-scrape
+			// of a renderer that is free to change.
+			row [4]string
 		}
 		merged := make([]otherTCEntry, 0, len(otherCloudTCs)+len(otherDetailTCs))
+		// Dedupe on the checkout path. The card renderers guard this
+		// internally (renderedTeams), so the duplicate was invisible until the
+		// table rendered rows directly and printed the same team twice.
+		// Deduping here fixes both views from one place.
+		mergedSeen := make(map[string]bool, cap(merged))
+		add := func(e otherTCEntry) {
+			if mergedSeen[e.path] {
+				return
+			}
+			mergedSeen[e.path] = true
+			merged = append(merged, e)
+		}
 		for _, entry := range otherCloudTCs {
 			info := entry.info
-			merged = append(merged, otherTCEntry{
-				render:    func() { renderCloudTC(info, verbose) },
+			add(otherTCEntry{
+				render:    func() { renderCloudTC(info, verbose, false) },
 				notCloned: notCloned(info.StableID()),
 				name:      info.Name,
+				path:      paths.TeamContextDir(info.StableID(), projectEndpoint),
+				row:       cloudTeamContextRow(info, teamDetail, projectEndpoint, daemonStatus),
 			})
 		}
 		for _, entry := range otherDetailTCs {
 			info := entry.info
-			merged = append(merged, otherTCEntry{
-				render:    func() { renderDetailTC(info, verbose) },
+			add(otherTCEntry{
+				render:    func() { renderDetailTC(info, verbose, false) },
 				notCloned: notCloned(info.StableID()),
 				name:      info.Name,
+				path:      paths.TeamContextDir(info.StableID(), projectEndpoint),
+				row: teamContextRow(info.Name, info.Visibility, info.AccessLevel,
+					paths.TeamContextDir(info.StableID(), projectEndpoint), daemonStatus),
 			})
 		}
 		sort.SliceStable(merged, func(i, j int) bool {
@@ -969,9 +1168,28 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString(statusMutedStyle.Render("───────────────────"))
 		b.WriteString("\n")
 
-		for _, entry := range merged {
-			hasAnyTeams = true
-			entry.render()
+		// Compact table by default, cards under --verbose.
+		//
+		// A card is the right shape for ONE team (the repo's), where every
+		// field earns its line. For the list it was four lines each, and a
+		// typical account has nine teams: 36 lines saying "private, member,
+		// synced" nine times, which buries the one row that is not. The table
+		// puts those nine rows on nine lines, so an anomaly is the thing that
+		// looks different rather than the thing you scroll for.
+		//
+		// --verbose keeps the cards, and with them the Path, Remote, and
+		// remediation-hint rows that have no column here.
+		hasAnyTeams = true
+		if verbose {
+			for _, entry := range merged {
+				entry.render()
+			}
+		} else {
+			rows := make([][4]string, 0, len(merged))
+			for _, entry := range merged {
+				rows = append(rows, entry.row)
+			}
+			b.WriteString(renderTeamContextTable(rows))
 		}
 	}
 
@@ -994,6 +1212,12 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 // daemonSyncWarningThreshold is the uptime duration after which we expect syncs to have occurred
 const daemonSyncWarningThreshold = time.Minute
 
+// daemonGetState indirects daemon.GetState so tests can drive the branches
+// below. The real function probes a live socket, so without this seam the
+// stopped-daemon wording is only reachable on a machine that happens to have
+// no daemon running — which is not the usual developer state.
+var daemonGetState = daemon.GetState
+
 // renderDaemonSyncSection renders daemon sync statistics
 func renderDaemonSyncSection(ds *daemon.StatusData, syncHistory []daemon.SyncEvent, localCfg *config.LocalConfig, noProject bool, projectInitialized bool) string {
 	var b strings.Builder
@@ -1015,7 +1239,7 @@ func renderDaemonSyncSection(ds *daemon.StatusData, syncHistory []daemon.SyncEve
 	// handle nil status (daemon not connected)
 	if ds == nil {
 		b.WriteString(statusLabelStyle.Render("Status"))
-		switch daemon.GetState() {
+		switch daemonGetState() {
 		case daemon.DaemonStateStarting:
 			b.WriteString(statusMutedStyle.Render("◐ starting — process is running but not yet accepting connections"))
 		case daemon.DaemonStateStuck:
@@ -1201,17 +1425,26 @@ func renderDaemonSyncSection(ds *daemon.StatusData, syncHistory []daemon.SyncEve
 					label = ws.TeamID
 				}
 
+				// This block lives under the "Syncing" heading, so the mark
+				// reports SYNC state, not merely that the directory exists.
+				// A bare ✓ meaning "is a git repo" hid a five-hour
+				// team-context sync outage behind a green checkmark while
+				// `ox daemon status` correctly showed "not synced".
 				b.WriteString(syncLabel.Render("  " + label))
-				if ws.Exists {
-					b.WriteString(statusSuccessStyle.Render("✓ "))
-				} else {
+				switch {
+				case !ws.Exists:
 					b.WriteString(statusWarningStyle.Render("⚠ "))
-				}
-				// condensed: sync time on same line as label
-				if !ws.LastSync.IsZero() {
+					if ws.CloneURL != "" {
+						b.WriteString(statusMutedStyle.Render(ws.CloneURL))
+					} else {
+						b.WriteString(statusMutedStyle.Render("not cloned"))
+					}
+				case ws.LastSync.IsZero():
+					b.WriteString(statusWarningStyle.Render("◐ "))
+					b.WriteString(statusMutedStyle.Render("not synced"))
+				default:
+					b.WriteString(statusSuccessStyle.Render("✓ "))
 					b.WriteString(statusMutedStyle.Render(status.FormatTimeAgo(ws.LastSync)))
-				} else if !ws.Exists && ws.CloneURL != "" {
-					b.WriteString(statusMutedStyle.Render(ws.CloneURL))
 				}
 				b.WriteString("\n")
 
@@ -1449,6 +1682,24 @@ func countReadyAgentTasks(gitRoot, agentType string) int {
 	return len(ready)
 }
 
+// resolveStatusProject returns the directory whose .sageox/ describes the
+// repository status is reporting on, and whether that project is initialized.
+//
+// The project root is the git root, not the working directory. gitRoot is
+// already resolved by walking up, so it is correct from any subdirectory,
+// while statting cwd/.sageox reports an initialized project as uninitialized
+// from every subdirectory and then recommends `ox init` on a healthy repo.
+//
+// Outside a git repo there is nothing to walk up to, so status describes the
+// directory the user is standing in, as it always has.
+func resolveStatusProject(cwd, gitRoot string) (root string, initialized bool) {
+	root = gitRoot
+	if root == "" {
+		root = cwd
+	}
+	return root, config.IsInitialized(root)
+}
+
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Display SageOx status and directory locations",
@@ -1490,10 +1741,7 @@ daemon health, and a tree view of all SageOx directory locations.`,
 
 			// ensure git credentials are valid (auto-refresh if needed)
 			// this is fast (local check) unless credentials need refresh
-			_, _ = gitserver.EnsureValidCredentialsForEndpoint(currentEndpoint, func() (*gitserver.GitCredentials, error) {
-				client := api.NewRepoClientWithEndpoint(currentEndpoint).WithAuthToken(token.AccessToken)
-				return fetchGitCredentials(client)
-			})
+			_, _ = auth.RefreshGitCredentialsForEndpoint(cmd.Context(), currentEndpoint, false)
 		}
 
 		// get config paths
@@ -1513,13 +1761,12 @@ daemon health, and a tree view of all SageOx directory locations.`,
 			return fmt.Errorf("failed to get working directory: %w", err)
 		}
 
-		sageoxDir := filepath.Join(cwd, ".sageox")
+		projectRoot, projectInitialized := resolveStatusProject(cwd, gitRoot)
+
+		sageoxDir := filepath.Join(projectRoot, ".sageox")
 		var localCfg *config.LocalConfig
-		var projectInitialized bool
 
-		if stat, err := os.Stat(sageoxDir); err == nil && stat.IsDir() {
-			projectInitialized = true
-
+		if projectInitialized {
 			if gitRoot != "" {
 				// load local config for git repos section
 				localCfg, _ = config.LoadLocalConfig(gitRoot)
@@ -1600,89 +1847,21 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		// JSON output mode
 		if statusJSONFlag {
 			output := buildStatusJSON(authenticated, authErr, token, endpointSlug, authFile, authFileExists,
-				userConfigDir, cwd, sageoxDir, projectInitialized, localCfg, gitRoot, repoDetail, codeStats,
+				userConfigDir, projectRoot, sageoxDir, projectInitialized, localCfg, gitRoot, repoDetail, codeStats,
 				daemonStatus, client, bubblesSummary)
-			jsonBytes, err := json.MarshalIndent(output, "", "  ")
-			if err != nil {
-				return fmt.Errorf("failed to marshal JSON: %w", err)
-			}
-			fmt.Println(string(jsonBytes))
-			return nil
+			return cli.PrintJSONTo(os.Stdout, output)
 		}
 
-		// Human-readable output mode
-		// Authentication Status - always show, includes endpoint
-		fmt.Print(renderAuthStatus(authFile))
-		switch authFollowUpHint(envTokenMalformed, authErr, len(auth.GetLoggedInEndpoints())) {
-		case authHintUnreachable:
-			fmt.Printf("  %s %s\n", statusWarningStyle.Render("⚠ could not reach the endpoint:"), statusMutedStyle.Render("auth state is unverified, not invalid"))
-		case authHintRefreshFailed:
-			fmt.Printf("  %s %s\n", statusWarningStyle.Render("⚠ token refresh failed:"), statusMutedStyle.Render("run `ox login` to re-authenticate"))
-		case authHintLogin:
-			// use contextual action hint matching help's visual style
-			cli.PrintActionHint("ox login", "Authenticate with "+cli.Wordmark(), 1)
+		// Human-readable output mode. --quiet suppresses this whole
+		// informational block (nothing here is an error) so
+		// `ox status --quiet; echo $?` is scriptable without --json.
+		isQuiet := cfg != nil && cfg.Quiet
+		if !isQuiet {
+			renderStatusHumanOutput(cwd, gitRoot, projectInitialized, localCfg, daemonStatus,
+				syncHistory, bubblesSummary, codeStats, client, authFile, userConfigDir, envTokenMalformed, authErr)
 		}
 
-		configDirSemantic := "error"
-		if pathExistsStatus(userConfigDir) {
-			configDirSemantic = "success"
-		}
-
-		configRows := [][]string{
-			{"User config dir", userConfigDir, configDirSemantic},
-		}
-		fmt.Print(renderTable("Configuration", configRows))
-
-		fmt.Print(renderProjectStatus(cwd, gitRoot, projectInitialized, codeStats))
-		if gitRoot != "" && !projectInitialized {
-			cli.PrintActionHint("ox init", "Initialize project for AI agent context", 2)
-		}
-		if gitRoot != "" && projectInitialized && codeStats == nil {
-			// no daemon connected — suggest manual indexing
-			cli.PrintActionHint("ox code index", "Index repo for local code search", 0)
-		}
-
-		// skip ledger/daemon sections when not in a git repo — nothing to show
-		if gitRoot != "" {
-
-			// Ledger + Team Context sections — repos from cloud API.
-			// Knowledge-bubbles summary is rendered inside renderGitReposSection
-			// (just above "Other Team Contexts") so the kb line is the
-			// last line of the project-state block, not sandwiched mid-header.
-			fmt.Print(renderGitReposSection(localCfg, gitRoot, daemonStatus, bubblesSummary, statusVerboseFlag))
-
-			// show daemon sync section
-			fmt.Print(renderDaemonSyncSection(daemonStatus, syncHistory, localCfg, false, projectInitialized))
-
-			// show active AI coworkers with context stats
-			fmt.Print(renderAICoworkersSection(client))
-
-			// show pending scheduled agent tasks, if any
-			fmt.Print(renderAgentTasksSection(gitRoot))
-		}
-
-		// show version update notice if available. refreshVersionCacheIfStale
-		// does a bounded live check so the notice reaches coworkers who never
-		// run the daemon (the daemon is otherwise the only cache writer).
-		if vResult := refreshVersionCacheIfStale(6 * time.Hour); vResult != nil {
-			fmt.Printf("\n%s  %s\n",
-				statusWarningStyle.Render("Update available"),
-				fmt.Sprintf("v%s → v%s", vResult.CurrentVersion, vResult.LatestVersion),
-			)
-			// make the notice actionable rather than a dead string: offer to
-			// run the upgrade right here when we're at an interactive terminal.
-			if cli.IsInteractive() && !cfg.Quiet {
-				if cli.ConfirmYesNo("Upgrade ox now?", false) {
-					_ = runUpgrade(upgradeCmd, nil)
-				} else {
-					fmt.Printf("%s\n", cli.StyleDim.Render("Run 'ox upgrade' when you're ready."))
-				}
-			} else {
-				fmt.Printf("%s\n", cli.StyleDim.Render("Run 'ox upgrade' to update."))
-			}
-		}
-
-		// show contextual tip
+		// tips.MaybeShow already takes cfg.Quiet and no-ops accordingly.
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("status", tips.AlwaysShow, cfg.Quiet, !userCfg.AreTipsEnabled(), cfg.JSON)
 
@@ -1695,8 +1874,128 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		// thresholds, now visible from a plain `ox status` too.
 		emitDaemonIssueWarnings()
 
+		// Exit non-zero when the environment isn't fully set up, so a
+		// script can branch on `ox status` alone instead of parsing
+		// --json. JSON stays exit-0 (mirrors `ox doctor`): a JSON
+		// consumer branches on the auth/project fields in the payload,
+		// not the process exit code.
+		if cfg == nil || !cfg.JSON {
+			return statusExitError(authenticated, projectInitialized, authErr)
+		}
 		return nil
 	},
+}
+
+// statusExitError reports why `ox status` (non-JSON) should exit non-zero:
+// unauthenticated and/or an uninitialized project. Returns nil once both are
+// satisfied — the only state a script should treat as "everything is fine".
+//
+// authErr distinguishes "the endpoint never answered" from "no credential" —
+// same split authFollowUpHint makes for the human-readable hint just above,
+// and for the same reason: telling a script to `ox login` when the real
+// problem is a VPN/proxy/DNS fault is wrong advice, not just wrong tone.
+func statusExitError(authenticated, projectInitialized bool, authErr error) error {
+	unreachable := !authenticated && errors.Is(authErr, auth.ErrEndpointUnreachable)
+	ep := endpoint.GetForProject(findGitRoot())
+	switch {
+	case unreachable && !projectInitialized:
+		return errkind.Errorf(errkind.NotInitialized, "could not verify authentication (endpoint unreachable) and project not initialized — check connectivity and run `ox init`")
+	case unreachable:
+		return errkind.Errorf(errkind.Network, "could not verify authentication — endpoint unreachable, check connectivity")
+	case !authenticated && auth.EnvTokenIsTeamFamily(ep):
+		message := "not authenticated — " + auth.ReauthenticationRemedy(ep)
+		if !projectInitialized {
+			message += " Then run `ox init`."
+		}
+		return errkind.Errorf(errkind.NotLoggedIn, "%s", message)
+	case !authenticated && !projectInitialized:
+		return errkind.Errorf(errkind.NotLoggedIn, "not authenticated and project not initialized — run `ox login` and `ox init`")
+	case !authenticated:
+		return errkind.Errorf(errkind.NotLoggedIn, "not authenticated — run `ox login`")
+	case !projectInitialized:
+		return errkind.Errorf(errkind.NotInitialized, "project not initialized — run `ox init`")
+	default:
+		return nil
+	}
+}
+
+// renderStatusHumanOutput prints the full human-readable `ox status` body.
+// Split out of statusCmd.RunE so --quiet can skip it in one place.
+func renderStatusHumanOutput(cwd, gitRoot string, projectInitialized bool,
+	localCfg *config.LocalConfig, daemonStatus *daemon.StatusData, syncHistory []daemon.SyncEvent,
+	bubblesSummary statusBubblesSummary, codeStats *daemon.CodeDBStats, client *daemon.Client,
+	authFile, userConfigDir string, envTokenMalformed bool, authErr error) {
+	// Authentication Status - always show, includes endpoint
+	fmt.Print(renderAuthStatus(authFile))
+	switch authFollowUpHint(envTokenMalformed, authErr, len(auth.GetLoggedInEndpoints())) {
+	case authHintUnreachable:
+		fmt.Printf("  %s %s\n", statusWarningStyle.Render("⚠ could not reach the endpoint:"), statusMutedStyle.Render("auth state is unverified, not invalid"))
+	case authHintRefreshFailed:
+		fmt.Printf("  %s %s\n", statusWarningStyle.Render("⚠ token refresh failed:"), statusMutedStyle.Render(auth.ReauthenticationRemedy(endpoint.GetForProject(gitRoot))))
+	case authHintLogin:
+		// use contextual action hint matching help's visual style
+		if ep := endpoint.GetForProject(gitRoot); auth.EnvTokenIsTeamFamily(ep) {
+			fmt.Printf("  %s\n", statusMutedStyle.Render(auth.ReauthenticationRemedy(ep)))
+		} else {
+			cli.PrintActionHint("ox login", "Authenticate with "+cli.Wordmark(), 1)
+		}
+	}
+
+	configDirSemantic := "error"
+	if pathExistsStatus(userConfigDir) {
+		configDirSemantic = "success"
+	}
+
+	configRows := [][]string{
+		{"User config dir", userConfigDir, configDirSemantic},
+	}
+	fmt.Print(renderTable("Configuration", configRows))
+
+	fmt.Print(renderProjectStatus(cwd, gitRoot, projectInitialized, codeStats))
+	if gitRoot != "" && !projectInitialized {
+		cli.PrintActionHint("ox init", "Initialize project for AI agent context", 2)
+	}
+	if gitRoot != "" && projectInitialized && codeStats == nil {
+		// no daemon connected — suggest manual indexing
+		cli.PrintActionHint("ox code index", "Index repo for local code search", 0)
+	}
+
+	// skip ledger/daemon sections when not in a git repo — nothing to show
+	if gitRoot != "" {
+		// Ledger + Team Context sections — repos from cloud API.
+		// Knowledge-bubbles summary is rendered inside renderGitReposSection
+		// (just above "Other Team Contexts") so the kb line is the
+		// last line of the project-state block, not sandwiched mid-header.
+		fmt.Print(renderGitReposSection(localCfg, gitRoot, daemonStatus, bubblesSummary, statusVerboseFlag))
+
+		// show daemon sync section
+		fmt.Print(renderDaemonSyncSection(daemonStatus, syncHistory, localCfg, false, projectInitialized))
+
+		// show active AI coworkers with context stats
+		fmt.Print(renderAICoworkersSection(client))
+
+		// show pending scheduled agent tasks, if any
+		fmt.Print(renderAgentTasksSection(gitRoot))
+	}
+
+	// Calm update notice. refreshVersionCacheIfStale does a bounded live
+	// check so the notice reaches coworkers who never run the daemon (the
+	// daemon is otherwise the only cache writer).
+	//
+	// One dim line, at most once per release line per day, and only with a
+	// human watching. The old block printed a bold "Update available"
+	// banner, a hint line, AND an inline "Upgrade ox now?" prompt on every
+	// single `ox status` — three interruptions repeating forever for one
+	// fact. Dim rather than warning-colored on purpose: an available
+	// upgrade is news, not an alarm.
+	if vResult := refreshVersionCacheIfStale(6 * time.Hour); vResult != nil {
+		now := time.Now()
+		if line, due := calmUpdateNoticeDue(now); due {
+			fmt.Printf("\n%s\n", cli.StyleDim.Render(
+				formatCalmUpdateNotice(vResult.LatestVersion, vResult.CurrentVersion)))
+			updatenotice.RecordNotified(line, now)
+		}
+	}
 }
 
 // buildStatusJSON constructs the JSON output structure for ox status --json.
@@ -1707,12 +2006,21 @@ daemon health, and a tree view of all SageOx directory locations.`,
 // fields are permanent, first-class output — conversation stores are not
 // bubbles (ox ADR-028) and never fold into the bubbles field.
 func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken, endpointSlug, authFile string, authFileExists bool,
-	userConfigDir, cwd, sageoxDir string, projectInitialized bool, localCfg *config.LocalConfig, gitRoot string,
+	userConfigDir, projectRoot, sageoxDir string, projectInitialized bool, localCfg *config.LocalConfig, gitRoot string,
 	repoDetail *api.RepoDetailResponse, codeStats *daemon.CodeDBStats,
 	daemonStatus *daemon.StatusData, daemonClient *daemon.Client,
 	bubblesSummary statusBubblesSummary) statusJSONOutput {
 
 	output := statusJSONOutput{}
+
+	// repo/team identity from .sageox/config.json — read once and reused
+	// below for both ProjectJSON and marking the matching TeamContextJSON
+	// entry, so a JSON consumer can detect "bound to a team that isn't in
+	// team_contexts" (the account can't see it) without a second lookup.
+	var projectCfg *config.ProjectConfig
+	if gitRoot != "" {
+		projectCfg, _ = config.LoadProjectConfig(gitRoot)
+	}
 
 	// bubbles section — real KB-API rows only; team_contexts/ledger below
 	// are permanent first-class fields (ox ADR-028), not mirrors of this.
@@ -1738,15 +2046,27 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 		output.Auth.ExpiresAt = &token.ExpiresAt
 
 		// PAT liveness for JSON output
-		creds, credErr := gitserver.LoadCredentialsForEndpoint(endpointSlug)
-		if credErr == nil && creds != nil && creds.Token != "" && !creds.IsExpired() {
+		projectEndpoint := endpoint.GetForProject(gitRoot)
+		creds, credErr := gitserver.LoadCredentialsForEndpoint(projectEndpoint)
+		if credErr == nil && creds != nil && creds.BearerTokenHash != gitserver.BearerTokenFingerprint(token.AccessToken) {
+			valid := false
+			output.Auth.GitPATValid = &valid
+			output.Auth.GitPATReason = "Git credentials are unverified for the current token; refresh required"
+		} else if credErr == nil && creds != nil && creds.Token != "" && !creds.IsExpired() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			liveness := gitserver.ValidatePATLiveness(ctx, creds)
 			cancel()
+			if !liveness.Valid && !liveness.Skipped {
+				if refreshed, refreshErr := auth.RefreshGitCredentialsForEndpoint(context.Background(), projectEndpoint, true); refreshErr == nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+					liveness = gitserver.ValidatePATLiveness(ctx, refreshed)
+					cancel()
+				}
+			}
 			if !liveness.Skipped {
 				output.Auth.GitPATValid = &liveness.Valid
 				if !liveness.Valid {
-					output.Auth.GitPATReason = liveness.Reason
+					output.Auth.GitPATReason = liveness.Reason + " — " + auth.ReauthenticationRemedy(projectEndpoint)
 				}
 			}
 		}
@@ -1762,7 +2082,12 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 	// project section
 	output.Project = &statusProjectJSON{
 		Initialized: projectInitialized,
-		Directory:   cwd,
+		Directory:   projectRoot,
+	}
+	if projectCfg != nil {
+		output.Project.RepoID = projectCfg.RepoID
+		output.Project.TeamID = projectCfg.TeamID
+		output.Project.TeamName = projectCfg.TeamName
 	}
 	if projectInitialized {
 		output.Project.ConfigPath = sageoxDir
@@ -1822,11 +2147,12 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 			}
 			status := getGitRepoStatus(tc.Path, tc.LastSync, tc.HasLastSync())
 			tcJSON := statusTeamContextJSON{
-				TeamID:   tc.TeamID,
-				TeamName: tc.TeamName,
-				Path:     tc.Path,
-				Exists:   status.Exists,
-				Branch:   status.Branch,
+				TeamID:     tc.TeamID,
+				TeamName:   tc.TeamName,
+				Path:       tc.Path,
+				Exists:     status.Exists,
+				Branch:     status.Branch,
+				IsRepoTeam: projectCfg != nil && tc.TeamID != "" && tc.TeamID == projectCfg.TeamID,
 			}
 			if status.Error != "" {
 				tcJSON.Error = status.Error
@@ -1878,8 +2204,12 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 		}
 	}
 
-	// version section — refresh the cache lazily (bounded live check) so
+	// Version section — refresh the cache lazily (bounded live check) so
 	// daemon-less coworkers still see update availability in JSON output.
+	//
+	// Deliberately NOT gated by the notice ledger: this is a field a caller
+	// explicitly asked for, not an interruption. Nor does it stamp the ledger —
+	// a machine reading JSON has not told the human anything.
 	currentVersion := strings.TrimPrefix(version.Version, "v")
 	vJSON := &statusVersionJSON{Current: currentVersion}
 	if vResult := refreshVersionCacheIfStale(6 * time.Hour); vResult != nil {
@@ -2039,11 +2369,9 @@ func renderAuthStatus(authFile string) string {
 			// nowhere. Point at the CI secret store instead, which is where a
 			// team token is actually rotated.
 			if strings.HasPrefix(epToken.AccessToken, auth.TeamTokenPrefix) {
-				b.WriteString(statusMutedStyle.Render("  this looks like a team token — check it has not been revoked or rotated"))
+				b.WriteString(statusMutedStyle.Render("  this looks like a team token — it may have been revoked or rotated"))
 				b.WriteString("\n")
-				b.WriteString(statusMutedStyle.Render("  in your CI secret store; `ox login` mints personal oxp_ tokens and"))
-				b.WriteString("\n")
-				b.WriteString(statusMutedStyle.Render("  cannot replace it"))
+				b.WriteString(statusMutedStyle.Render("  " + auth.ReauthenticationRemedy(ep)))
 			} else {
 				b.WriteString(statusMutedStyle.Render("  the value in SAGEOX_TOKEN is not a credential this endpoint accepts;"))
 				b.WriteString("\n")
@@ -2096,12 +2424,21 @@ func renderAuthStatus(authFile string) string {
 			creds, credErr := gitserver.LoadCredentialsForEndpoint(ep)
 			if credErr != nil || creds == nil || creds.Token == "" {
 				b.WriteString(statusMutedStyle.Render("no git credentials"))
+			} else if creds.BearerTokenHash != gitserver.BearerTokenFingerprint(epToken.AccessToken) {
+				b.WriteString(statusWarningStyle.Render("? refresh required: credentials are unverified for the current token"))
 			} else if creds.IsExpired() {
 				b.WriteString(statusErrorStyle.Render("✗ expired"))
 			} else {
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				liveness := gitserver.ValidatePATLiveness(ctx, creds)
 				cancel()
+				if !liveness.Valid && !liveness.Skipped {
+					if refreshed, refreshErr := auth.RefreshGitCredentialsForEndpoint(context.Background(), ep, true); refreshErr == nil {
+						ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+						liveness = gitserver.ValidatePATLiveness(ctx, refreshed)
+						cancel()
+					}
+				}
 				switch {
 				case liveness.Valid:
 					b.WriteString(statusSuccessStyle.Render("✓ valid"))
@@ -2109,7 +2446,7 @@ func renderAuthStatus(authFile string) string {
 					b.WriteString(statusMutedStyle.Render("? " + liveness.Reason))
 				default:
 					b.WriteString(statusErrorStyle.Render("✗ " + liveness.Reason))
-					b.WriteString(statusMutedStyle.Render(" — run `ox login`"))
+					b.WriteString(statusMutedStyle.Render(" — " + auth.ReauthenticationRemedy(ep)))
 				}
 			}
 			b.WriteString("\n")
@@ -2262,7 +2599,7 @@ func renderMalformedEnvToken(envEP string, shadowsDiskLogin bool, authFile strin
 	if auth.EnvTokenIsTeamFamily(envEP) {
 		b.WriteString(statusMutedStyle.Render("  this looks like a team token — re-copy it from your CI secret store;"))
 		b.WriteString("\n")
-		b.WriteString(statusMutedStyle.Render("  `ox login` mints personal oxp_ tokens and cannot replace it"))
+		b.WriteString(statusMutedStyle.Render("  " + auth.ReauthenticationRemedy(envEP)))
 	} else {
 		b.WriteString(statusMutedStyle.Render("  re-copy the value into SAGEOX_TOKEN, or unset it to fall back to"))
 		b.WriteString("\n")

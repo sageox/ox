@@ -62,9 +62,11 @@ func SetUserConfigEphemeralPreference(value *bool) {
 //
 //	OX_EPHEMERAL  >  CLAUDE_CODE_REMOTE  >  DEVIN_TASK_ID  >  user-config
 //
-// Notably absent: CODESPACES (persistent disk; treat as slow laptop) and
-// generic CI markers (writable FS within a job; non-interactive UX is
-// driven by internal/config.IsCI(), not by us).
+// Notably absent: CODESPACES (persistent disk; treat as slow laptop),
+// AMP_ORB (persistent disk and a working daemon; its early pause is
+// Capabilities.HostEndsWithAgent), and generic CI markers (writable FS
+// within a job; non-interactive UX is driven by internal/config.IsCI(),
+// not by us).
 func Reason() string {
 	if explicitEphemeral() {
 		return EnvEphemeral
@@ -109,6 +111,16 @@ func isClaudeCloud() bool {
 // isDevin detects a Devin task runner by the presence of DEVIN_TASK_ID.
 func isDevin() bool {
 	return os.Getenv("DEVIN_TASK_ID") != ""
+}
+
+// IsAmpOrb detects an Amp orb (Amp's cloud sandbox, one per thread) by the
+// AMP_ORB signal Amp sets inside every orb; Amp's own docs test it for
+// truthiness, so any non-empty value counts. An orb keeps its disk and runs
+// the daemon that clones the Ledger, so it does NOT contribute to Reason().
+// It does pause a few minutes after its agent goes idle, which is what
+// probeHostEndsWithAgent records (sageox/ox#1314).
+func IsAmpOrb() bool {
+	return os.Getenv("AMP_ORB") != ""
 }
 
 // isCodespaces detects a GitHub Codespace by the CODESPACES=true signal

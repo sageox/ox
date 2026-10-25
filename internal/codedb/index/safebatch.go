@@ -1,9 +1,17 @@
 package index
 
 import (
+	"errors"
 	"fmt"
 	"runtime/debug"
 )
+
+// ErrBleveCorrupt marks an error whose root cause is a structurally corrupt
+// bleve index — e.g. a nil FST left by a partial/interrupted write. Callers use
+// errors.Is(err, ErrBleveCorrupt) (via IsCorruptionError) to decide whether
+// discarding and rebuilding the codedb cache is the right recovery, rather than
+// matching on a fragile error string.
+var ErrBleveCorrupt = errors.New("bleve index corrupt")
 
 // safeBatch runs fn (a bleve.Index.Batch call) with panic recovery.
 //
@@ -19,7 +27,9 @@ import (
 func safeBatch(fn func() error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("bleve batch panicked (likely corrupt index): %v\n%s", r, debug.Stack())
+			// Wrap the corruption sentinel so callers can errors.Is on it and
+			// trigger a discard-and-rebuild of the cache (see IsCorruptionError).
+			err = fmt.Errorf("bleve batch panicked (likely corrupt index): %v\n%s: %w", r, debug.Stack(), ErrBleveCorrupt)
 		}
 	}()
 	return fn()

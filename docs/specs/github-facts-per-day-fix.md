@@ -1,5 +1,7 @@
 # Fix: GitHub Facts Per-Day Bucketing
 
+> **Superseded — 2026-09-09:** The `ox distill` pipeline and `cmd/ox/distill_github.go` have been removed. This fix plan is historical; its extraction functions and implementation steps no longer apply.
+
 ## Problem
 
 `extractGitHubFacts()` has the same class of bugs that issue #211 identified for

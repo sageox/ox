@@ -1,15 +1,15 @@
 Feature: A SageOx Credit Line on a Pull Request
   When Devon opens a pull request for work an AI coworker did, ox gives him a
-  thin credit line to paste at the TOP of the PR description — the human-facing
-  counterpart to the SageOx-Session: trailer at the bottom. The line names the
-  team and links the session(s) and plan(s) that produced the change, so a
-  reviewer sees the provenance at a glance. The promise under test is what Devon
-  can paste and what a reviewer can reach, not the exact markup: the line always
-  renders, links only what a reviewer can open, and quietly disappears when a
-  team has turned it off.
+  thin one-line credit to paste at the TOP of the PR description — the
+  human-facing counterpart to the SageOx-Session: trailer at the bottom. The line
+  links the session(s), plan(s), and recorded discussion(s) that produced the
+  change and names the team they belong to, so a reviewer sees the provenance at
+  a glance and can go read it. The promise under test is what Devon can paste and
+  what a reviewer can reach, not the exact markup: the line links only what a
+  reviewer can open, says nothing when it has nothing to link, and quietly
+  disappears when a team has turned it off.
 
   See also: config/settings-that-matter.feature
-  See also: business-actions/create-a-pr.md
 
   Rule: The credit line links the work that produced the PR
 
@@ -20,25 +20,42 @@ Feature: A SageOx Credit Line on a Pull Request
       And the line links to the session
       And the line links to the plan
 
-    Scenario: The line credits SageOx only when enrichment actually fired
-      Given the session's plan surfaced prior team work
-      When Devon asks ox for the PR header
-      Then the line whispers that SageOx guided the work
-      And the whisper reports only the signals that fired
+    Scenario: Devon credits a recorded discussion the PR came directly out of
+      Given Devon's team recorded a discussion that this PR implements
+      When Devon asks ox for the PR header naming that discussion
+      Then the line links to the discussion
+      And a reviewer can open it from the PR description
 
-  Rule: The line always renders, even with little to credit
+    Scenario: Avery reads the credit line on a teammate's PR
+      Given Devon's PR carries the credit line
+      When Avery opens the PR to review it
+      Then Avery can reach the session, plan, and discussion behind the change
+      And the line costs a single row above Devon's description
 
-    Scenario: A PR with a session but no plan and no enrichment
-      Given Devon's AI coworker recorded a session but saved no plan
-      When Devon asks ox for the PR header
-      Then the line still renders with the team and the session
-      And the line makes no claim that SageOx enrichment helped
+  Rule: A credit line that links nothing is not shown at all
+
+    A header exists so a reviewer can go look. A wordmark with no session, plan,
+    or discussion behind it is a logo stamp on someone's pull request, not
+    provenance — so ox would rather say nothing.
 
     Scenario: A PR opened outside any recorded session
-      Given Devon has no recorded session for this work
+      Given Devon has no recorded session, plan, or discussion for this work
       When Devon asks ox for the PR header
-      Then the line still renders with the team and the SageOx wordmark
-      And the line links no session
+      Then ox emits no line
+      And ox explains that a team name alone is not a credit
+
+    Scenario: The team is configured but nothing was recorded
+      Given Devon's repository names his team
+      And Devon has no recorded session, plan, or discussion for this work
+      When Devon asks ox for the PR header
+      Then ox emits no line
+
+    Scenario: Only a plan survives to be credited
+      Given Devon's session cannot be linked
+      But Devon saved a plan during it
+      When Devon asks ox for the PR header
+      Then the line still renders and links the plan
+      And the line does not link the session
 
   Rule: A reviewer never gets a link that cannot open
 
@@ -47,6 +64,13 @@ Feature: A SageOx Credit Line on a Pull Request
       When Devon asks ox for the PR header
       Then the line does not link that session
       And ox explains the session will be linkable once it uploads
+
+    Scenario: The unconfirmed session was the only thing to credit
+      Given Devon's session has not been confirmed on the server
+      And Devon has no plan or discussion to credit
+      When Devon asks ox for the PR header
+      Then ox emits no line
+      And Devon is not left with a credit that leads nowhere
 
   Rule: The header and the trailer are both present, and the team can opt out
 

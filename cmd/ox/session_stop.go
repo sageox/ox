@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
@@ -84,19 +83,23 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 	// before storage to prevent credential leaks in ledgers
 	redactor, parseErrs := session.NewRedactorWithCustomRules(projectRoot)
 	if len(parseErrs) > 0 {
-		for _, pe := range parseErrs {
-			slog.Warn("redaction rule parse error", "file", pe.Path, "line", pe.Line, "error", pe.Message)
-		}
+		// A partial policy cannot authorize publishing any reconstructed session.
+		return nil, fmt.Errorf("invalid redaction policy (%d errors)", len(parseErrs))
 	}
 
 	// convert raw entries to session entries and redact secrets
 	entries := make([]session.Entry, 0, len(rawEntries))
 	for _, raw := range rawEntries {
 		entry := session.Entry{
-			Timestamp: raw.Timestamp,
-			Content:   raw.Content,
-			ToolName:  raw.ToolName,
-			ToolInput: raw.ToolInput,
+			Timestamp:  raw.Timestamp,
+			Content:    raw.Content,
+			ToolName:   raw.ToolName,
+			ToolInput:  raw.ToolInput,
+			ToolOutput: raw.ToolOutput,
+			IsError:    raw.IsError,
+			// the one key shared by the call entry, its result, the native
+			// transcript and the agent's trace — never drop it on this path
+			CallID: raw.CallID,
 		}
 
 		// map role to entry type
@@ -153,7 +156,7 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 	}
 
 	// write raw session (with secrets redacted)
-	rawWriter, err := store.CreateRaw(filename)
+	rawWriter, err := store.CreateRawForProject(filename, projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create raw session: %w", err)
 	}
@@ -173,16 +176,19 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 	// carrier of the start-minted ID on this reconstruct path too (daemon
 	// orphan-finalize recovers it from here when meta.json was never written)
 	meta := &session.StoreMeta{
-		Version:      "1.0",
-		SessionID:    state.SessionID,
-		CreatedAt:    state.StartedAt,
-		AgentID:      state.AgentID,
-		AgentType:    agentTypeForMeta,
-		AgentVersion: result.AgentVersion,
-		Model:        result.Model,
-		Username:     identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
-		RepoID:       repoID,
-		OxVersion:    version.Version,
+		Version:                "1.0",
+		SessionID:              state.SessionID,
+		ContinuedFromSessionID: state.ContinuedFromSessionID,
+		CreatedAt:              state.StartedAt,
+		AgentID:                state.AgentID,
+		AgentType:              agentTypeForMeta,
+		AgentVersion:           result.AgentVersion,
+		Model:                  result.Model,
+		Username:               identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
+		RepoID:                 repoID,
+		OxVersion:              version.Version,
+		NativeSessions:         state.NativeSessions,
+		StoppedAt:              state.StoppedAt,
 	}
 	if err := rawWriter.WriteHeader(meta); err != nil {
 		rawWriter.Close()
@@ -191,21 +197,7 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 
 	// write entries
 	for _, entry := range entries {
-		data := map[string]any{
-			"type":      string(entry.Type),
-			"content":   entry.Content,
-			"timestamp": entry.Timestamp,
-		}
-		if entry.ToolName != "" {
-			data["tool_name"] = entry.ToolName
-		}
-		if entry.ToolInput != "" {
-			data["tool_input"] = entry.ToolInput
-		}
-		if entry.ToolOutput != "" {
-			data["tool_output"] = entry.ToolOutput
-		}
-		if err := rawWriter.WriteRaw(data); err != nil {
+		if err := rawWriter.WriteRaw(rawEntryMap(entry)); err != nil {
 			rawWriter.Close()
 			return nil, fmt.Errorf("failed to write entry: %w", err)
 		}

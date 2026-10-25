@@ -12,33 +12,18 @@ import (
 	"github.com/sageox/ox/pkg/adapterruntime"
 )
 
-// TestHandleInfo_CapabilitiesPinned pins this binary's declared capabilities to
-// the set the cross-agent conformance fixture mirrors
-// (internal/prime/conformance_test.go). Codex declares NEITHER a commands nor a
-// rules installer. Skills are a portable Layer-2 surface installed into
-// .agents/skills. If handleInfo() drifts, this
-// fails so the conformance fixture cannot silently fall out of sync.
-//
-// KEEP IN SYNC: the want set below must match the "codex" entry in adapterCaps
-// in internal/prime/conformance_test.go. Adding/removing a capability requires
-// updating BOTH places. Comparison is order-insensitive (a set) so the two
-// fixtures need not list caps in the same order.
+// TestHandleInfo_CapabilitiesPinned proves handleInfo() actually wires
+// adapterprotocol.CodexCapabilities — the canonical source in
+// pkg/adapterprotocol/capabilities.go — into the response. Codex declares
+// NEITHER a commands nor a rules installer; skills are a portable Layer-2
+// surface installed into .agents/skills. The capability set itself lives in
+// exactly one place now; this test only guards the wiring.
 func TestHandleInfo_CapabilitiesPinned(t *testing.T) {
-	want := []string{
-		adapterprotocol.CapSessionReader,
-		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapSkillsInstaller,
-		adapterprotocol.CapIncrementalReader,
-		adapterprotocol.CapFileWatcher,
-		adapterprotocol.CapServeMode,
-		adapterprotocol.CapSessionImporter,
-	}
-
 	info, err := handleInfo()
 	if err != nil {
 		t.Fatalf("handleInfo() error: %v", err)
 	}
-	assertCapabilitySetsEqual(t, "codex", info.Capabilities, want)
+	assertCapabilitySetsEqual(t, "codex", info.Capabilities, adapterprotocol.CodexCapabilities)
 	if len(info.SkillTargets) != 1 || info.SkillTargets[0].Key != "agents-project" || info.SkillTargets[0].Root != ".agents/skills" {
 		t.Fatalf("codex skill targets = %#v, want shared agents-project target", info.SkillTargets)
 	}
@@ -47,15 +32,15 @@ func TestHandleInfo_CapabilitiesPinned(t *testing.T) {
 func TestInstallSkills_WritesCanonicalAgentSkills(t *testing.T) {
 	repo := t.TempDir()
 	var out bytes.Buffer
-	if err := adapterruntime.RunWithArgs(adapterConfig, []string{"install-skills", "--repo-root", repo, "--version", "1.0.0", "--skill", "ox-attest-goal"}, nil, &out); err != nil {
+	if err := adapterruntime.RunWithArgs(adapterConfig, []string{"install-skills", "--repo-root", repo, "--version", "1.0.0", "--skill", "ox-cli-consult"}, nil, &out); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(repo, ".agents", "skills", "ox-attest-goal", "SKILL.md")
+	path := filepath.Join(repo, ".agents", "skills", "ox-cli-consult", "SKILL.md")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(string(data), "---\nname: ox-attest-goal") {
+	if !strings.HasPrefix(string(data), "---\nname: ox-cli-consult") {
 		t.Fatal("installed skill did not retain canonical frontmatter")
 	}
 }

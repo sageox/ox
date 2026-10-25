@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "sageox": {
+      "type": "http",
+      "url": "https://sageox.ai/mcp",
+      "placement": "server"
+    }
+  }
+}

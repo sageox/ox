@@ -14,6 +14,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/trace/model"
 )
 
 // legacySessionNamespace is the UUIDv5 namespace for synthesizing session
@@ -70,11 +72,29 @@ type SessionMeta struct {
 	//     and silently break dedup/lookup.
 	SessionID string `json:"session_id,omitempty"`
 
-	AgentType           string     `json:"agent_type"` // "claude-code", "cursor", etc.
-	Model               string     `json:"model,omitempty"`
-	Title               string     `json:"title,omitempty"`
-	CreatedAt           time.Time  `json:"created_at"`
-	EntryCount          int        `json:"entry_count,omitempty"`
+	// ContinuedFromSessionID links this recording to the prior finalized
+	// recording created for the same native coding-agent session.
+	ContinuedFromSessionID string `json:"continued_from_session_id,omitempty"`
+
+	AgentType string    `json:"agent_type"` // "claude-code", "cursor", etc.
+	Model     string    `json:"model,omitempty"`
+	Title     string    `json:"title,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+
+	// EntryCount is the number of CONVERSATION entries: user messages, assistant
+	// messages, and every tool call. It counts what the adapter read out of the
+	// agent's own session file, so the type:"header"/type:"footer" records ox
+	// writes into raw.jsonl are NOT included — `wc -l raw.jsonl` runs slightly
+	// ahead of this, and that gap is framing, not loss.
+	//
+	// It is NOT a turn count — one response turn
+	// routinely produces dozens of entries — and it is the authoritative size of
+	// a finished session, which is why finalize clears TurnCount and leaves this
+	// one. A draft is the only state that carries both counters; see ADR-029's
+	// consumer contract for why that pairing is where a reader picks the wrong
+	// "size".
+	EntryCount int `json:"entry_count,omitempty"`
+
 	Summary             string     `json:"summary,omitempty"`
 	StopReason          string     `json:"stop_reason,omitempty"`        // how session ended (session.StopReason* constants)
 	StopDetail          string     `json:"stop_detail,omitempty"`        // human-readable detail (matched message, capped 512B)
@@ -211,6 +231,33 @@ type SessionMeta struct {
 	// branches retried by `ox doctor`. Empty string == legacy/unknown,
 	// treated as pre-linkage and never blocking. omitempty for round-trip.
 	LinkageStatus string `json:"linkage_status,omitempty"`
+
+	// NativeSessions lists every native coding-agent session id this recording
+	// observed, in first-seen order. It is how an external artifact labeled
+	// with the agent's own session id (a Claude Code trace, a native transcript)
+	// is matched to a recording. One recording can span several ids (/clear
+	// re-primes into the same recording when no hook stops it) and several
+	// recordings can share one id (stop and restart, resume), so this is a
+	// list, not a scalar. Accumulated in RecordingState.NativeSessions on every
+	// SessionStart and folded in at finalize by every door (explicit stop,
+	// SessionEnd hook, daemon orphan sweep, recover). Agents that expose no id
+	// record nothing here. omitempty so older meta.json files round-trip.
+	NativeSessions []NativeSession `json:"native_sessions,omitempty"`
+
+	// Trace describes optional locally captured, identity-scrubbed OTLP files.
+	// Legacy recordings omit it; unknown capture observations remain null.
+	Trace *model.Metadata `json:"trace,omitempty"`
+
+	// StoppedAt is when the recording stopped, set by every finalize door.
+	// CreatedAt has always been recorded; without a stop time anything sliced
+	// at the end of a recording is meaningless. Precedence at finalize: the
+	// time the stop was requested (explicit stop, SessionEnd, /clear), else the
+	// stop time carried in raw.jsonl (header or footer), else the last entry's
+	// timestamp, else the raw.jsonl file's modification time, else the
+	// finalize time — see session.ResolveStoppedAt. Every step but the last
+	// is a property of the recording, so a retried upload writes the same
+	// value. omitempty for legacy round-trip.
+	StoppedAt *time.Time `json:"stopped_at,omitempty"`
 
 	// Draft marks this meta.json as an EARLY PLACEHOLDER published while the
 	// recording is still in progress — not a finalized session record. It
@@ -491,6 +538,43 @@ func ValidateRelativePath(name string) error {
 	return nil
 }
 
+// NativeSession is one native coding-agent session id observed by a
+// recording, with where it came from and when. Source is the agent's own
+// SessionStart reason when it provides one (Claude Code: startup, resume,
+// clear, compact) and empty otherwise. FirstSeen/LastSeen bracket the
+// SessionStart events that reported this id; LastSeen advances on every
+// repeat sighting (compact re-reports the same id).
+type NativeSession struct {
+	ID        string    `json:"id"`
+	Source    string    `json:"source,omitempty"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+}
+
+// RecordNativeSession appends id to sessions or, when id is already listed,
+// advances that entry's LastSeen (and fills an empty Source). Returns the
+// updated slice. An empty id is ignored so callers can pass whatever the
+// agent gave them without guarding. Shared by the live RecordingState and
+// any test that builds the list by hand so the dedup rule has one home.
+func RecordNativeSession(sessions []NativeSession, id, source string, at time.Time) []NativeSession {
+	if id == "" {
+		return sessions
+	}
+	for i := range sessions {
+		if sessions[i].ID != id {
+			continue
+		}
+		if at.After(sessions[i].LastSeen) {
+			sessions[i].LastSeen = at
+		}
+		if sessions[i].Source == "" {
+			sessions[i].Source = source
+		}
+		return sessions
+	}
+	return append(sessions, NativeSession{ID: id, Source: source, FirstSeen: at, LastSeen: at})
+}
+
 // SessionMetaBuilder constructs SessionMeta with required fields and optional setters.
 type SessionMetaBuilder struct {
 	meta SessionMeta
@@ -571,6 +655,25 @@ func (b *SessionMetaBuilder) LinkedIssues(issues []string) *SessionMetaBuilder {
 	return b
 }
 
+// NativeSessions sets the native coding-agent session ids observed during
+// the recording. Caller passes RecordingState.NativeSessions (or the list
+// recovered from the raw.jsonl header when the state file is already gone).
+func (b *SessionMetaBuilder) NativeSessions(sessions []NativeSession) *SessionMetaBuilder {
+	b.meta.NativeSessions = sessions
+	return b
+}
+
+// StoppedAt stamps the recording stop time. A zero time is ignored so a
+// door that could not resolve one leaves the field absent rather than
+// writing 0001-01-01.
+func (b *SessionMetaBuilder) StoppedAt(t time.Time) *SessionMetaBuilder {
+	if t.IsZero() {
+		return b
+	}
+	b.meta.StoppedAt = &t
+	return b
+}
+
 // LinkageStatus sets the upload/notify lifecycle state. Use the
 // LinkageStatus* constants.
 func (b *SessionMetaBuilder) LinkageStatus(status string) *SessionMetaBuilder {
@@ -584,6 +687,13 @@ func (b *SessionMetaBuilder) LinkageStatus(status string) *SessionMetaBuilder {
 // round-trip.
 func (b *SessionMetaBuilder) SessionID(id string) *SessionMetaBuilder {
 	b.meta.SessionID = id
+	return b
+}
+
+// ContinuedFromSessionID links this recording to the prior finalized half of
+// the same native coding-agent session.
+func (b *SessionMetaBuilder) ContinuedFromSessionID(id string) *SessionMetaBuilder {
+	b.meta.ContinuedFromSessionID = id
 	return b
 }
 
@@ -663,9 +773,11 @@ func WriteSessionMeta(sessionPath string, meta *SessionMeta) error {
 		return err
 	}
 
-	// replace content files with LFS pointer files for GC protection
+	// replace content files with LFS pointer files for GC protection.
+	// AssertUploaded: meta.Files is the persisted manifest of blobs already in
+	// the store (WriteSessionMeta's callers upload before persisting it).
 	if len(meta.Files) > 0 {
-		if _, err := WritePointerFiles(sessionPath, meta.Files); err != nil {
+		if _, err := WritePointerFiles(sessionPath, AssertUploadedManifest(meta.Files)); err != nil {
 			slog.Warn("LFS pointer file write failed", "error", err, "path", sessionPath)
 		}
 	}
@@ -762,14 +874,25 @@ func ReadSessionMeta(sessionPath string) (*SessionMeta, error) {
 			// errors instead).
 			return nil, fmt.Errorf("meta.json not found in %s: %w", sessionPath, err)
 		}
-		return nil, fmt.Errorf("read session meta: %w", err)
+		return nil, fmt.Errorf("read session meta file=%s: %w", metaPath, err)
 	}
+	meta, err := ParseSessionMeta(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse session meta file=%s: %w", metaPath, err)
+	}
+	return meta, nil
+}
 
+// ParseSessionMeta is ReadSessionMeta's contract applied to bytes, for content that is not on disk
+// yet, such as a candidate resolution of a conflicted meta.json.
+func ParseSessionMeta(data []byte) (*SessionMeta, error) {
 	var meta SessionMeta
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return nil, fmt.Errorf("parse session meta: %w", err)
+		if gitutil.HasConflictMarkersBytes(data) {
+			return nil, fmt.Errorf("unresolved Git conflict markers: %w", err)
+		}
+		return nil, err
 	}
-
 	for filename := range meta.Files {
 		if err := ValidateRelativePath(filename); err != nil {
 			return nil, fmt.Errorf("unsafe filename in meta.json: %w", err)
@@ -996,8 +1119,10 @@ func UpdateMetaSummary(sessionPath, title string) error {
 	// Replace content files with LFS pointer files for GC protection.
 	// Best-effort, matches WriteSessionMeta's prior behavior; pointer
 	// write failures don't invalidate the meta.json update.
+	// AssertUploaded: pointerFiles is a snapshot of the persisted meta manifest,
+	// whose blobs were uploaded before this metadata mutation.
 	if len(pointerFiles) > 0 {
-		if _, err := WritePointerFiles(sessionPath, pointerFiles); err != nil {
+		if _, err := WritePointerFiles(sessionPath, AssertUploadedManifest(pointerFiles)); err != nil {
 			slog.Warn("LFS pointer file write failed", "error", err, "path", sessionPath)
 		}
 	}

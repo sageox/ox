@@ -7,26 +7,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/updatenotice"
 	"github.com/sageox/ox/internal/version"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// useTestCacheDir redirects versionCacheFile to a temp directory for the
+// useTestCacheDir redirects the version cache to a temp directory for the
 // duration of the test, preventing writes to the real ~/.cache/sageox/.
 func useTestCacheDir(t *testing.T) {
 	t.Helper()
-	old := versionCacheFile
-	versionCacheFile = filepath.Join(t.TempDir(), "version-check.json")
-	t.Cleanup(func() { versionCacheFile = old })
+	old := updatenotice.Path
+	updatenotice.Path = filepath.Join(t.TempDir(), "version-check.json")
+	t.Cleanup(func() { updatenotice.Path = old })
 }
 
 func writeTestVersionCache(t *testing.T, data *versionCacheData) {
 	t.Helper()
-	require.NoError(t, os.MkdirAll(filepath.Dir(versionCacheFile), 0700))
+	require.NoError(t, os.MkdirAll(filepath.Dir(updatenotice.Path), 0700))
 	raw, err := json.MarshalIndent(data, "", "  ")
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(versionCacheFile, raw, 0600))
+	require.NoError(t, os.WriteFile(updatenotice.Path, raw, 0600))
 }
 
 // core semver comparison logic — the double-digit case (0.12 vs 0.9) catches
@@ -150,8 +151,8 @@ func TestRefreshVersionCacheIfStale_StaleCacheRefetches(t *testing.T) {
 // corrupt cache must not crash prime — graceful degradation
 func TestCheckVersionFromCache_CorruptFile(t *testing.T) {
 	useTestCacheDir(t)
-	require.NoError(t, os.MkdirAll(filepath.Dir(versionCacheFile), 0700))
-	require.NoError(t, os.WriteFile(versionCacheFile, []byte("{{bad json"), 0600))
+	require.NoError(t, os.MkdirAll(filepath.Dir(updatenotice.Path), 0700))
+	require.NoError(t, os.WriteFile(updatenotice.Path, []byte("{{bad json"), 0600))
 
 	assert.Nil(t, checkVersionFromCache())
 }

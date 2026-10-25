@@ -17,10 +17,12 @@ package main
 // clock. Each assertion names the specific loss it pins.
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/plan"
@@ -148,16 +150,19 @@ func TestSavePlanArtifacts_LinksBothDirectionsWithoutAgentID(t *testing.T) {
 		t.Errorf("provenance.session_id = %q, want %q", meta.Provenance.SessionID, rec.SessionID)
 	}
 
-	// events.jsonl is the PERMANENCE vector: BackfillSessionID matches on
-	// SessionName, so an event line written without one can never be repaired.
-	// This is the 4.7% half of the loss, and the half the PR's first regression
-	// test did not cover.
+	// events.jsonl is the PERMANENCE vector: its lines are never edited, so
+	// the session a save does not stamp is never attached. This is the 4.7%
+	// half of the loss, and the half the PR's first regression test did not
+	// cover.
 	events, err := plan.LoadEvents(dir)
 	if err != nil || len(events) == 0 {
 		t.Fatalf("LoadEvents: err=%v n=%d", err, len(events))
 	}
 	if got := events[len(events)-1].SessionName; got != wantSession {
-		t.Errorf("events.jsonl session_name = %q, want %q — unrepairable: BackfillSessionID matches on this field", got, wantSession)
+		t.Errorf("events.jsonl session_name = %q, want %q — unrepairable: event lines are never edited", got, wantSession)
+	}
+	if got := events[len(events)-1].SessionID; got != rec.SessionID {
+		t.Errorf("events.jsonl session_id = %q, want %q — unrepairable: event lines are never edited", got, rec.SessionID)
 	}
 
 	// Reverse link, read back from the file session stop will read.
@@ -255,8 +260,8 @@ func TestAppendProducedPlan_DoesNotResurrectStoppedRecording(t *testing.T) {
 // `if agentID == "" { return nil }` inside loadPlanRecordingState left the whole
 // suite green, because asserting AuthorName alone keeps prov non-nil.
 //
-// This is the permanent half — with SessionName blank, plan.BackfillSessionID
-// (which matches on SessionName) can never attach the ses_ id afterwards.
+// This is the permanent half: event lines are never edited, so a session the
+// save drops is never attached afterwards.
 func TestResolvePlanProvenance_SessionSurvivesMissingAgentID(t *testing.T) {
 	root := newPlanCaptureTestRepo(t)
 	t.Setenv("SAGEOX_AGENT_ID", "")
@@ -282,6 +287,11 @@ func TestResolvePlanProvenance_SessionSurvivesMissingAgentID(t *testing.T) {
 	}
 	if prov.SessionOutcome != plan.SessionOutcomeActive {
 		t.Errorf("SessionOutcome = %q, want %q", prov.SessionOutcome, plan.SessionOutcomeActive)
+	}
+	// lifecycle events and the review page's Approve take their session from
+	// here, and their lines are never edited, so the id must arrive with them
+	if f := planEventFieldsFromProvenance(root); f.SessionID != rec.SessionID || f.SessionName != want {
+		t.Errorf("lifecycle event session = (%q, %q), want (%q, %q)", f.SessionName, f.SessionID, want, rec.SessionID)
 	}
 }
 
@@ -378,5 +388,44 @@ func TestPlanSessionLink_DisabledAttributionExpectsNoLink(t *testing.T) {
 
 	if id, url := planSessionLink(root); id != "" || url != "" {
 		t.Errorf("planSessionLink = (%q, %q), want empty — no link is expected in the render, so the save-path lint must not run and warn about its absence", id, url)
+	}
+}
+
+// TestSavePlanArtifacts_LargeRenderStaysPlainWhenLFSUnreachable is the #810
+// composition-root fail-safe: driving the REAL savePlanArtifacts path (upload,
+// Save, pointer swap, commit) with a >1MiB render and no reachable LFS client,
+// plan.html must stay PLAIN on disk, never a poisoned pointer. This test ledger
+// has no configured remote/credentials, so planLFSClient resolves to nil and
+// nothing is uploaded, exactly as in an offline save.
+//
+// Failure prevented: a regression where the composition root writes (or leaves) a
+// pointer with no uploaded blob — the wedge #810 was about — at the layer where
+// the original bug actually shipped.
+func TestSavePlanArtifacts_LargeRenderStaysPlainWhenLFSUnreachable(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+
+	body := strings.Repeat("PRESERVE-ME ", 100000) // ~1.2MiB, well over the 1MiB threshold
+	html := []byte("<html><head></head><body>" + body + "</body></html>")
+
+	dir := savePlanArtifacts(root, plan.Input{Raw: "# Big render\n"}, plan.Result{}, html, plan.PrimaryHTML)
+	if dir == "" {
+		t.Fatal("savePlanArtifacts returned empty dir — the large plan was not saved")
+	}
+
+	path, _, isPointer, exists := plan.PlanHTMLPath(dir)
+	if !exists {
+		t.Fatalf("plan.html missing at %s", path)
+	}
+	if isPointer {
+		t.Fatalf("large render was committed as an LFS pointer with no reachable store — a poisoned pointer (GH #810)")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read plan.html: %v", err)
+	}
+	// The FULL render must survive, not just a stray marker: the body repeats the
+	// marker 100000 times and every one must be on disk, plain.
+	if n := bytes.Count(got, []byte("PRESERVE-ME")); n != 100000 {
+		t.Fatalf("plan.html retained %d of 100000 markers — the render was truncated or replaced", n)
 	}
 }

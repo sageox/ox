@@ -69,14 +69,29 @@ Keep skills context-efficient:
 
 ## Required Fields
 
+**ox reads exactly two fields.** `validateSource` in `extensions/skills/catalog.go`
+parses `name:` and `description:` and nothing else, so everything below the line is
+convention for human readers — useful, but inert. Do not rely on any of it to change
+behaviour.
+
 | Field | Required | Purpose |
 |-------|----------|---------|
-| `name` | Yes | Identifier (lowercase, hyphens ok) |
-| `description` | Yes | Agent routing signal |
-| `version` | No | Semver for tracking |
-| `author` | No | Attribution |
-| `tags` | No | Categorization |
-| `triggers` | No | Explicit activation keywords |
+| `name` | **Yes** | Identifier (lowercase, hyphens ok). Must equal the directory name, or validation fails. |
+| `description` | **Yes** | The whole agent-routing budget. Must be non-empty, and must not be an HTML comment. |
+| `version` | No | Convention only — nothing reads it. |
+| `author` | No | Convention only — nothing reads it. |
+| `tags` | No | Convention only — nothing reads it. |
+| `triggers` | No | Convention only — nothing reads it. Put activation phrasing in `description:`, which *is* read. |
+
+### Team-context skills use a different contract
+
+The table above covers skills in ox's own catalog (`extensions/skills/`). A skill
+published to **Team Context** (`<team-context>/agents/skills/<name>/SKILL.md`) is parsed
+by the *rule* frontmatter reader instead, which understands `repos:`, `audience:`,
+`visibility:`, `status:` and `valid-through:`. Run `ox guide team-rules` for that
+contract, and note two traps it documents: only the first 30 frontmatter lines are
+scanned, and there is no folded-scalar support — a `description: >-` block is read as
+the literal string `>-`.
 
 ## Checklist
 

@@ -404,10 +404,33 @@ func TestLoadProjectGuidance_ReturnsNil(t *testing.T) {
 	}
 }
 
+// TestCheckTeamContextStaleness_NilTeamContext pairs the nil guard with a case
+// that proves the function still marks staleness, so the nil test cannot pass
+// against a body that does nothing at all.
+//
+// Failure prevented: the function reports its answer by mutating the struct it
+// is handed. A no-op body satisfies "does not panic on nil" perfectly while
+// silently reporting every team context as fresh.
 func TestCheckTeamContextStaleness_NilTeamContext(t *testing.T) {
 	t.Parallel()
-	// should not panic on nil input
-	checkTeamContextStaleness(nil, "")
+
+	t.Run("nil is ignored", func(t *testing.T) {
+		t.Parallel()
+		checkTeamContextStaleness(nil, "") // must not panic
+	})
+
+	t.Run("a context with no sync state is stale with an unknown age", func(t *testing.T) {
+		t.Parallel()
+		tc := &teamContextInfo{Path: t.TempDir()} // no sync state on disk
+		checkTeamContextStaleness(tc, "")
+
+		if !tc.Stale {
+			t.Error("Stale = false for a context that has never synced, want true")
+		}
+		if tc.StaleSince != "unknown" {
+			t.Errorf("StaleSince = %q, want %q", tc.StaleSince, "unknown")
+		}
+	})
 }
 
 func TestTeamContextAge_EmptyPath(t *testing.T) {

@@ -1,14 +1,16 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 )
 
 // sessionPauseOutput is the JSON output format for session pause.
@@ -58,7 +60,7 @@ func runAgentSessionPause(inst *agentinstance.Instance, _ []string) error {
 			SuspendedAt: state.SuspendedAt.UTC().Format(time.RFC3339),
 			Seq:         state.EntryCount,
 			PauseCount:  state.PauseCount,
-			Guidance:    "No change. Resume with `ox session resume` (or /ox-session-resume).",
+			Guidance:    "No change. Resume with `ox agent session resume`.",
 		})
 	}
 
@@ -76,12 +78,13 @@ func runAgentSessionPause(inst *agentinstance.Instance, _ []string) error {
 		pauseCount  int
 		sessionName string
 	)
-	if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
+	if err := updateRecordingControl(projectRoot, state, session.LifecycleActionPause, func(s *session.RecordingState) {
 		seq = s.EntryCount
 		s.SuspendedAt = &now
 		s.PauseCount++
 		pauseCount = s.PauseCount
 		sessionName = session.GetSessionName(s.SessionPath)
+		s.RecordTraceBoundary("pause", now)
 		s.Lifecycle = append(s.Lifecycle, session.LifecycleEvent{
 			Action: session.LifecycleActionPause,
 			At:     now,
@@ -106,7 +109,7 @@ func runAgentSessionPause(inst *agentinstance.Instance, _ []string) error {
 		Seq:         seq,
 		PauseCount:  pauseCount,
 		SuspendedAt: now.Format(time.RFC3339),
-		Guidance:    "Recording continues to local cache; the suspended range will be excluded from upload. Resume with `ox session resume` (or /ox-session-resume).",
+		Guidance:    "Recording continues to local cache; the suspended range will be excluded from upload. Resume with `ox agent session resume`.",
 	})
 }
 
@@ -120,10 +123,26 @@ func emitPauseOutput(w io.Writer, output *sessionPauseOutput) error {
 			return nil
 		}
 	}
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
-		return fmt.Errorf("format pause JSON: %w", err)
+	return cli.PrintJSONTo(w, output)
+}
+
+// Cursor controls share the watcher's short capture transaction, not its
+// lifetime raw-owner lock; other adapters keep the existing marker update.
+func updateRecordingControl(projectRoot string, state *session.RecordingState, action session.LifecycleAction, update func(*session.RecordingState)) error {
+	if state.AdapterName != "cursor" {
+		return session.UpdateRecordingStateForAgent(projectRoot, state.AgentID, update)
 	}
-	fmt.Fprintln(w, string(jsonOut))
-	return nil
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	adapter, err := adapters.GetAdapter("cursor")
+	if err != nil {
+		return err
+	}
+	reader, ok := adapter.(adapters.IncrementalReader)
+	if !ok {
+		return fmt.Errorf("adapter-missing: Cursor incremental reader is unavailable")
+	}
+	return session.UpdateCursorRecordingControl(context.Background(), projectRoot, state, home, reader, action, update)
 }

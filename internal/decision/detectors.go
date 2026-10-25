@@ -26,8 +26,8 @@ const (
 	// bundleCap / minScore mirror the plan context-bundle conventions.
 	bundleCap      = 12
 	minBundleScore = 0.55
-	// relatedCap bounds related-decision annotations so a broad topic doesn't
-	// bury the numbering/diagnostic signal.
+	// relatedCap bounds related-decision annotations so a broad topic does not
+	// bury numbering and diagnostics. Overflow is reported explicitly.
 	relatedCap = 5
 )
 
@@ -42,13 +42,17 @@ func (relatedDetector) Detect(_ context.Context, env *Env, in Input) ([]Annotati
 	if terms == "" || len(env.Corpus) == 0 {
 		return nil, nil
 	}
-	var out []Annotation
-	for _, s := range scoreCorpus(env.Corpus, terms) {
-		if s.score < minBundleScore || len(out) >= relatedCap {
-			break
-		}
+	var matches []scored
+	for _, s := range relevantCorpus(env.Corpus, terms) {
 		if in.Path != "" && samePath(in.Path, s.rec.Path) {
 			continue // the file being enriched is not "related" to itself
+		}
+		matches = append(matches, s)
+	}
+	var out []Annotation
+	for _, s := range matches {
+		if len(out) >= relatedCap {
+			break
 		}
 		ann := Annotation{
 			Kind:     BadgeDeterministic,
@@ -66,6 +70,14 @@ func (relatedDetector) Detect(_ context.Context, env *Env, in Input) ([]Annotati
 			ann.Anchor = s.rec.DSections[0].ID
 		}
 		out = append(out, ann)
+	}
+	if omitted := len(matches) - min(len(matches), relatedCap); omitted > 0 {
+		out = append(out, Annotation{
+			Kind: BadgeDeterministic,
+			Type: BadgeDiagnostic,
+			Rule: RuleRelatedOverflow,
+			Why:  fmt.Sprintf("%d additional related decision candidate(s) cleared the relevance floor but were omitted from this bounded result; narrow the topic or use `ox decision enrich --explain` / `ox code search --decisions` to inspect them", omitted),
+		})
 	}
 	return out, nil
 }
@@ -99,8 +111,8 @@ func (relatedRetriever) Retrieve(_ context.Context, env *Env, in Input) ([]Conte
 		return nil, nil
 	}
 	var out []ContextItem
-	for _, s := range scoreCorpus(env.Corpus, terms) {
-		if s.score < minBundleScore || len(out) >= bundleCap {
+	for _, s := range relevantCorpus(env.Corpus, terms) {
+		if len(out) >= bundleCap {
 			break
 		}
 		if in.Path != "" && samePath(in.Path, s.rec.Path) {

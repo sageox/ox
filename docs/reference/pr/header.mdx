@@ -1,0 +1,78 @@
+---
+title: "ox pr header"
+description: "CLI reference for ox pr header"
+sidebar_position: 86
+---
+
+## ox pr header
+
+Emit the SageOx credit line for the top of a PR description
+
+### Synopsis
+
+Emit a thin, on-brand credit line to paste at the very TOP of a pull-request
+description body — the human-facing counterpart to the 'SageOx-Session:' trailer.
+
+It links the session(s), plan(s), and discussion(s) that produced the change and
+names the team they belong to. Paste the output above your description; keep the
+'SageOx-Session:' trailer at the bottom.
+
+The line renders ONLY when it has at least one artifact to link. A team name
+alone is not a credit — a wordmark with nothing behind it is a logo stamp, not
+provenance — so with no session, plan, or discussion the command prints nothing
+and explains why on stderr.
+
+ox verifies only the CURRENT session, from local recording state, and withholds
+its link until the server has confirmed it. Ids passed explicitly are the
+caller's assertion: ox includes them as given rather than adding a network
+round-trip to a render command that must never fail on an unreachable remote, so
+it warns on stderr instead. Pass --allow-unconfirmed to accept a possible 404 and
+silence the warning.
+
+The markup is built from the primitives that survive GitHub's PR-body sanitizer
+(a theme-adaptive `<picture>` wordmark and real `<a>` links) and fits on one line.
+
+Examples:
+  # Auto-link the current session
+  ox pr header
+
+  # Link two plans the session produced
+  ox pr header --plan pln_4d8e2f --plan pln_1a6b9c
+
+  # Credit a recorded discussion the PR came directly out of
+  ox pr header --discussion cnv_019ff2f5-2079-7be1-b05e-8caad2772e61
+
+  # Write straight into a PR body file (never a heredoc — it mangles the markup)
+  ox pr header > body.md && cat description.md >> body.md
+  gh pr create --body-file body.md
+
+```
+ox pr header [flags]
+```
+
+### Options
+
+```
+      --allow-unconfirmed        accept links that may not be server-visible yet — the current session before upload, and explicit --session/--plan/--discussion refs — without a warning (may 404)
+      --discussion stringArray   recorded-discussion URL or cnv_ id to link (repeatable; only when the PR came directly out of it)
+  -h, --help                     help for header
+      --plan stringArray         plan URL or pln_ id to link (repeatable)
+      --session stringArray      session URL or ses_ id to link (repeatable; defaults to the current session)
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
+      --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
+```
+
+### SEE ALSO
+
+* [ox pr](/pr)	 - Author SageOx content for pull requests

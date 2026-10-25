@@ -1,7 +1,11 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +15,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sageox/ox/internal/ledger"
 )
 
 // mockMurmurPublisher captures PublishMurmur calls for testing.
@@ -542,4 +548,48 @@ func TestFilterGitIgnored_GitBinaryMissing(t *testing.T) {
 
 	filtered := filterGitIgnored(t.TempDir(), changes, slogDiscard())
 	assert.Len(t, filtered, 2, "missing git binary should fail open")
+}
+
+// --- F. Principal under a team token ---
+
+// Failure prevented: file-change murmurs under a team token carry no AI
+// principal, or keep publishing when the token has no coworker.
+func TestPublisher_TeamTokenPrincipal(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		coworker string
+		want     *ledger.MurmurFile // nil: nothing published
+	}{
+		{"coworker named", `{"id":"agt_rip","display_name":"Rip"}`, &ledger.MurmurFile{PrincipalID: "rip", PrincipalType: "ai", PrincipalDisplay: "Rip"}},
+		{"no coworker attached", `null`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"active":true,"principal_kind":"team-service","coworker":`+tc.coworker+`}`)
+			}))
+			t.Cleanup(srv.Close)
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			t.Setenv("SAGEOX_ENDPOINT", srv.URL)
+			t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
+
+			acc := NewChangeAccumulator(50 * time.Millisecond)
+			defer acc.Stop()
+			pub := &mockMurmurPublisher{}
+			p := NewFileChangeMurmurPublisher(acc, pub, "/tmp/ledger", "/tmp/project", slogDiscard())
+			p.pending["src/main.go"] = &FileChange{Path: "src/main.go", ChangeType: ChangeModified, Timestamp: time.Now()}
+
+			p.publish()
+
+			if tc.want == nil {
+				assert.Empty(t, pub.Payloads())
+				return
+			}
+			require.Len(t, pub.Payloads(), 1)
+			var got ledger.MurmurFile
+			require.NoError(t, json.Unmarshal(pub.Payloads()[0].MurmurJSON, &got))
+			assert.Equal(t, tc.want.PrincipalID, got.PrincipalID)
+			assert.Equal(t, tc.want.PrincipalType, got.PrincipalType)
+			assert.Equal(t, tc.want.PrincipalDisplay, got.PrincipalDisplay)
+		})
+	}
 }

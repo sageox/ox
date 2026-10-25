@@ -482,7 +482,18 @@ func installAdapter(cfg installConfig) error {
 
 	slog.Info("downloading adapter", "asset", assetName, "tag", plan.tag)
 
-	dlResp, err := client.Get(downloadURL) //nolint:gosec // host validated above; bytes checksum-gated below
+	// The asset URL on github.com redirects to a CDN host, so every hop must
+	// pass the same guard, or a redirect could serve the bytes from any host.
+	// A custom CheckRedirect drops net/http's 10-hop cap, so it is restated.
+	dlClient := *client
+	dlClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("stopped after %d redirects", len(via))
+		}
+		return gitutil.ValidateHTTPSHost(req.URL.String(), cfg.allowedHosts)
+	}
+
+	dlResp, err := dlClient.Get(downloadURL) //nolint:gosec // host of every hop validated; bytes checksum-gated below
 	if err != nil {
 		return fmt.Errorf("download binary: %w", err)
 	}

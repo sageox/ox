@@ -1,7 +1,7 @@
 ---
 title: "ox init"
 description: "CLI reference for ox init"
-sidebar_position: 46
+sidebar_position: 54
 ---
 
 ## ox init
@@ -28,7 +28,10 @@ This command will:
 7. Associate the repo with your team (prompts for team selection)
 8. Register repository with SageOx API
 
-Use --team to specify a team ID directly, or let ox init prompt you.
+Use --team to specify a team by name, slug, or ID, or let ox init prompt you.
+
+After setup and sync, run 'ox session import' to preview and choose
+past Claude Code or Codex sessions from this repo for your team's Ledger.
 
 After init, run 'ox guide getting-started' for a five-minute walkthrough,
 or 'ox guide team-rules' to learn how to share AI coworker conventions
@@ -46,20 +49,21 @@ ox init [flags]
       --force             initialize even if .sageox/ exists on remote
   -h, --help              help for init
   -q, --quiet             suppress non-essential output (default: false)
-      --team string       team ID to associate this repo with
+      --team string       team to associate this repo with (name, slug, or ID)
 ```
 
 ### Options inherited from parent commands
 
 ```
-  -c, --config string    config file path (default: .sageox/config.yaml)
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
       --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
 ```
 
 ### SEE ALSO
 
 * [ox](/)	 - Shared team context that makes agentic engineering multiplayer
-

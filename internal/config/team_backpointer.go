@@ -159,8 +159,12 @@ func SaveBackpointers(teamContextPath string, backpointers []WorkspaceBackpointe
 		if err != nil {
 			continue
 		}
-		file.Write(data)
-		file.WriteString("\n")
+		if _, err := file.Write(data); err != nil {
+			return fmt.Errorf("write backpointer file: %w", err)
+		}
+		if _, err := file.WriteString("\n"); err != nil {
+			return fmt.Errorf("write backpointer file: %w", err)
+		}
 	}
 
 	return nil

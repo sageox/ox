@@ -21,13 +21,20 @@ const (
 	codexConfigFile    = "config.toml"
 )
 
-// all Codex CLI hook events ox should install handlers for
+// all Codex CLI hook events ox should install handlers for.
+//
+// SessionEnd is what finalizes a recording without an explicit `session stop`:
+// Codex fires it when the conversation is archived or deleted, when Codex
+// closes normally, or after 30 minutes idle with no connected client. ox maps
+// it to the end phase (handleEnd), the same path Claude Code and Gemini use.
+// Stop only marks the end of a turn.
 var codexHookEvents = []string{
 	"SessionStart",
 	"PreToolUse",
 	"PostToolUse",
 	"UserPromptSubmit",
 	"Stop",
+	"SessionEnd",
 }
 
 // hookCommand returns the shell command for a given event.
@@ -43,6 +50,7 @@ func hookCommand(event string) string {
 type codexHookEntry struct {
 	Matcher string      `json:"matcher"`
 	Hooks   []codexHook `json:"hooks"`
+	raw     map[string]json.RawMessage
 }
 
 type codexHook struct {
@@ -50,6 +58,50 @@ type codexHook struct {
 	Command       string `json:"command"`
 	StatusMessage string `json:"statusMessage,omitempty"`
 	Timeout       int    `json:"timeout,omitempty"`
+	raw           json.RawMessage
+}
+
+// Retain fields owned by other integrations, including MCP tool handlers and
+// matcher-group options, when refreshing SageOx's entries in a shared file.
+func (h *codexHook) UnmarshalJSON(data []byte) error {
+	type plain codexHook
+	if err := json.Unmarshal(data, (*plain)(h)); err != nil {
+		return err
+	}
+	h.raw = append(json.RawMessage(nil), data...)
+	return nil
+}
+
+func (h codexHook) MarshalJSON() ([]byte, error) {
+	if len(h.raw) > 0 && !isOxCommand(h.Command) {
+		return h.raw, nil
+	}
+	type plain codexHook
+	return json.Marshal(plain(h))
+}
+
+func (e *codexHookEntry) UnmarshalJSON(data []byte) error {
+	type plain codexHookEntry
+	if err := json.Unmarshal(data, (*plain)(e)); err != nil {
+		return err
+	}
+	return json.Unmarshal(data, &e.raw)
+}
+
+func (e codexHookEntry) MarshalJSON() ([]byte, error) {
+	if e.raw == nil {
+		return json.Marshal(map[string]any{"matcher": e.Matcher, "hooks": e.Hooks})
+	}
+	fields := make(map[string]json.RawMessage, len(e.raw))
+	for key, value := range e.raw {
+		fields[key] = value
+	}
+	hooks, err := json.Marshal(e.Hooks)
+	if err != nil {
+		return nil, err
+	}
+	fields["hooks"] = hooks
+	return json.Marshal(fields)
 }
 
 // --- install ---
@@ -211,11 +263,17 @@ func readHooksFile(path string) (map[string][]codexHookEntry, map[string]json.Ra
 	if err := json.Unmarshal(data, &rawMap); err != nil {
 		return nil, nil, fmt.Errorf("failed to parse hooks file: %w", err)
 	}
+	if rawMap == nil {
+		return nil, nil, fmt.Errorf("failed to parse hooks file: expected an object")
+	}
 
 	hooksMap := make(map[string][]codexHookEntry)
 	if hooksRaw, ok := rawMap["hooks"]; ok {
 		if err := json.Unmarshal(hooksRaw, &hooksMap); err != nil {
 			return nil, nil, fmt.Errorf("failed to parse hooks section: %w", err)
+		}
+		if hooksMap == nil {
+			return nil, nil, fmt.Errorf("failed to parse hooks section: expected an object")
 		}
 		delete(rawMap, "hooks")
 	}
@@ -254,6 +312,11 @@ func writeHooksFile(path string, hooksMap map[string][]codexHookEntry, rawMap ma
 }
 
 func mergeHookEntries(existing []codexHookEntry, oxCmd string, event string) []codexHookEntry {
+	// Match Gemini's ten-second budget; Codex caps SessionEnd at three seconds.
+	timeout := 10
+	if event == "SessionEnd" {
+		timeout = 3
+	}
 	hasOx := false
 	for i, entry := range existing {
 		for j, hook := range entry.Hooks {
@@ -262,6 +325,7 @@ func mergeHookEntries(existing []codexHookEntry, oxCmd string, event string) []c
 					Type:          "command",
 					Command:       oxCmd,
 					StatusMessage: statusMessageForEvent(event),
+					Timeout:       timeout,
 				}
 				hasOx = true
 			}
@@ -276,6 +340,7 @@ func mergeHookEntries(existing []codexHookEntry, oxCmd string, event string) []c
 					Type:          "command",
 					Command:       oxCmd,
 					StatusMessage: statusMessageForEvent(event),
+					Timeout:       timeout,
 				},
 			},
 		})
@@ -287,10 +352,34 @@ func mergeHookEntries(existing []codexHookEntry, oxCmd string, event string) []c
 func statusMessageForEvent(event string) string {
 	switch event {
 	case "SessionStart":
-		return "Loading SageOx context"
+		return "SageOx: loading context; auto-recording if configured"
+	case "PreToolUse":
+		// phaseBeforeTool is deliberately absent from activePhaseBehavior.
+		return "SageOx: pre-tool hook (currently inactive)"
+	case "PostToolUse":
+		return "SageOx: capturing activity for session recording"
+	case "UserPromptSubmit":
+		return "SageOx: recalling context and delivering team updates"
+	case "Stop":
+		return "SageOx: saving turns and plans; publishing drafts if configured"
+	case "SessionEnd":
+		return "SageOx: finalizing recordings; publishing if configured"
 	default:
 		return ""
 	}
+}
+
+func hookLabelsOutdated(hooks map[string][]codexHookEntry) bool {
+	for _, event := range codexHookEvents {
+		for _, entry := range hooks[event] {
+			for _, hook := range entry.Hooks {
+				if isOxCommand(hook.Command) && hook.StatusMessage != statusMessageForEvent(event) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func eventHasOxHook(entries []codexHookEntry) bool {
@@ -305,7 +394,14 @@ func eventHasOxHook(entries []codexHookEntry) bool {
 }
 
 func isOxCommand(cmd string) bool {
-	return strings.Contains(cmd, "ox agent hook") || strings.Contains(cmd, "ox agent prime")
+	// Only commands emitted by this adapter are safe to refresh or remove.
+	// Substring matches can claim another integration that merely mentions ox.
+	for _, event := range codexHookEvents {
+		if cmd == hookCommand(event) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- config.toml legacy feature migration ---

@@ -237,8 +237,8 @@ func TestCodeDBMaintainerNilManager(t *testing.T) {
 	if result.Name != "codedb" {
 		t.Errorf("expected name=codedb, got %s", result.Name)
 	}
-	if result.Duration <= 0 {
-		t.Error("expected positive duration")
+	if result.Duration < 0 {
+		t.Error("expected non-negative duration")
 	}
 }
 

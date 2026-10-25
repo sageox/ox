@@ -11,6 +11,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestHasExplicitStop_PreservesPerAgentBreadcrumb(t *testing.T) {
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, t.TempDir())
+	assert.False(t, HasExplicitStop("", "OxStopA"))
+	assert.False(t, HasExplicitStop(projectRoot, ""))
+	assert.False(t, HasExplicitStop(projectRoot, "OxStopA"))
+
+	require.NoError(t, MarkExplicitStop(projectRoot, "OxStopA"))
+	for range 2 {
+		assert.True(t, HasExplicitStop(projectRoot, "OxStopA"), "watcher checks must not consume the breadcrumb")
+		assert.False(t, HasExplicitStop(projectRoot, "OxStopB"), "stopping one coworker must not stop another")
+	}
+	assert.FileExists(t, filepath.Join(sessionsBase, explicitStopMarker+".OxStopA"))
+
+	require.NoError(t, MarkExplicitStop(projectRoot, "OxStopB"))
+	assert.True(t, ConsumeExplicitStop(projectRoot, "OxStopA"))
+	assert.False(t, HasExplicitStop(projectRoot, "OxStopA"))
+	assert.True(t, HasExplicitStop(projectRoot, "OxStopB"))
+	assert.True(t, ConsumeExplicitStop(projectRoot, "OxStopB"))
+	assert.False(t, HasExplicitStop(projectRoot, "OxStopB"))
+}
+
 func TestClearRecordingState(t *testing.T) {
 	t.Run("clears existing state from session folder", func(t *testing.T) {
 		cacheDir := t.TempDir()
@@ -100,6 +121,26 @@ func TestCleanupStaleEmptyRecordings_RemovesOldStubs(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), ".recording.json should be removed for stale empty stub")
 }
 
+// Failure prevented: a held folder that still carries a stale, empty recording
+// marker is deleted, hold and all, before StartRecording's held-folder guard
+// can refuse it, so a new recording reuses the path (GH #1093).
+func TestCleanupStaleEmptyRecordings_KeepsHeldStubs(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-01-01T00-00-user-OxHeLd")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+	state := &RecordingState{AgentID: "OxHeLd", StartedAt: time.Now().Add(-72 * time.Hour), SessionPath: sessionPath}
+	data, err := json.Marshal(state)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+	require.NoError(t, WriteHoldMarker(sessionPath, HoldManualPublishing, "session_stop"))
+
+	cleanupStaleEmptyRecordings(projectRoot)
+
+	assert.DirExists(t, sessionPath)
+	assert.True(t, IsHeld(sessionPath), "the hold survives the stale-stub cleanup")
+}
+
 func TestCleanupStaleEmptyRecordings_KeepsRecentStubs(t *testing.T) {
 	cacheDir := t.TempDir()
 	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
@@ -124,13 +165,18 @@ func TestCleanupStaleEmptyRecordings_KeepsRecentStubs(t *testing.T) {
 	assert.False(t, os.IsNotExist(err), ".recording.json should be preserved for recent stub")
 }
 
-func TestCleanupStaleEmptyRecordings_KeepsWithRawJSONL(t *testing.T) {
+// TestCleanupStaleEmptyRecordings_KeepsWithSubstantiveContent proves a stale
+// recording that captured real turns is preserved for recovery, not reaped.
+// Fixture is a header PLUS a user turn — the mere presence of raw.jsonl is not
+// enough, because eager writes made every abandoned session carry a header-only
+// raw.jsonl (that is the phantom removed by the sibling test below).
+func TestCleanupStaleEmptyRecordings_KeepsWithSubstantiveContent(t *testing.T) {
 	cacheDir := t.TempDir()
 	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
 	sessionPath := filepath.Join(sessionsBase, "2026-01-01T00-00-user-OxHasR")
 	require.NoError(t, os.MkdirAll(sessionPath, 0755))
 
-	// create a .recording.json with StartedAt > 48h ago AND raw.jsonl present
+	// create a .recording.json with StartedAt > 48h ago AND substantive raw.jsonl
 	state := &RecordingState{
 		AgentID:     "OxHasR",
 		StartedAt:   time.Now().Add(-72 * time.Hour),
@@ -140,13 +186,44 @@ func TestCleanupStaleEmptyRecordings_KeepsWithRawJSONL(t *testing.T) {
 	require.NoError(t, err)
 	recPath := filepath.Join(sessionPath, recordingFile)
 	require.NoError(t, os.WriteFile(recPath, data, 0600))
-	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"), []byte("{}\n"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"),
+		[]byte(`{"type":"header"}`+"\n"+`{"type":"user"}`+"\n"), 0600))
 
 	cleanupStaleEmptyRecordings(projectRoot)
 
-	// .recording.json should still exist because raw.jsonl is present
+	// .recording.json should still exist because the recording has real content
 	_, err = os.Stat(recPath)
-	assert.False(t, os.IsNotExist(err), ".recording.json should be preserved when raw.jsonl exists")
+	assert.False(t, os.IsNotExist(err), ".recording.json should be preserved when raw.jsonl has real content")
+}
+
+// TestCleanupStaleEmptyRecordings_RemovesHeaderOnlyStub is the corrected-intent
+// test: a stale header-only recording (a real coworker prompt was never
+// captured) is a phantom and must be reclaimed, whole dir and all. This is the
+// class of ~10k orphans the old "any raw.jsonl means keep it" guard preserved
+// forever.
+func TestCleanupStaleEmptyRecordings_RemovesHeaderOnlyStub(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-01-01T00-00-user-OxHdr1")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	state := &RecordingState{
+		AgentID:     "OxHdr1",
+		StartedAt:   time.Now().Add(-72 * time.Hour),
+		SessionPath: sessionPath,
+	}
+	data, err := json.Marshal(state)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+	// header-only raw.jsonl + context-trace — the exact phantom shape.
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"),
+		[]byte(`{"type":"header"}`+"\n"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "context-trace.jsonl"),
+		[]byte(`{"type":"provided"}`+"\n"), 0600))
+
+	cleanupStaleEmptyRecordings(projectRoot)
+
+	assert.NoDirExists(t, sessionPath, "a stale header-only phantom must be removed, whole dir and all")
 }
 
 func TestCleanupStaleEmptyRecordings_RemovesEmptyDir(t *testing.T) {
@@ -173,6 +250,42 @@ func TestCleanupStaleEmptyRecordings_RemovesEmptyDir(t *testing.T) {
 }
 
 // --- Ghost session cleanup tests ---
+
+// Source discovery and capture can both lag prime. All cleanup paths must give
+// native recovery a chance before deleting an old header-only recording.
+func TestRecordingCleanup_PreservesNativeRecoveryState(t *testing.T) {
+	for _, cleanup := range []string{"stale", "ghost", "orphan"} {
+		for _, source := range []string{"known", "pending"} {
+			t.Run(cleanup+"/"+source, func(t *testing.T) {
+				projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, t.TempDir())
+				sessionPath := filepath.Join(sessionsBase, "2026-01-01T00-00-user-OxNative")
+				require.NoError(t, os.MkdirAll(sessionPath, 0700))
+				state := &RecordingState{
+					AgentID: "OxNative", SessionPath: sessionPath,
+					ParentPID: 99999999, StartedAt: time.Now().Add(-72 * time.Hour),
+					AdapterName: "codex", WatchMode: "tail",
+				}
+				if source == "known" {
+					state.SessionFile = filepath.Join(t.TempDir(), "native.jsonl")
+					require.NoError(t, os.WriteFile(state.SessionFile, []byte("native conversation\n"), 0600))
+				}
+				require.NoError(t, SaveRecordingState(projectRoot, state))
+				require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"), []byte("{\"type\":\"header\"}\n"), 0600))
+				require.NoError(t, os.Chtimes(sessionPath, state.StartedAt, state.StartedAt))
+				switch cleanup {
+				case "stale":
+					cleanupStaleEmptyRecordings(projectRoot)
+				case "ghost":
+					assert.Zero(t, CleanupGhostSessionsInDir(sessionsBase).Removed)
+				case "orphan":
+					assert.Zero(t, CleanupOrphanedStubsInDir(sessionsBase).Removed)
+				}
+				assert.FileExists(t, filepath.Join(sessionPath, recordingFile))
+				assert.FileExists(t, filepath.Join(sessionPath, "raw.jsonl"))
+			})
+		}
+	}
+}
 
 func TestCleanupGhostSessionsInDir_RemovesDeadPIDNoData(t *testing.T) {
 	sessionsDir := filepath.Join(t.TempDir(), "sessions")

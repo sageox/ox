@@ -1,0 +1,237 @@
+/* Generated from packages/plan-review by `make plan-review`. Edit the source there, not this file. */
+/* @sageox/plan-review document tools: the marks painted into a plan and the
+   look of review mode inside it. Colors use the plan's own tokens (--sage,
+   --amber, …) when it defines them, else the SageOx palette. */
+
+/* the mode is visible without a hover: crosshair page-wide, and the element
+   under the pointer outlined */
+body.rev-on{cursor:crosshair}
+body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.rev-on tr:hover,body.rev-on .ox-chip:hover,body.rev-on .stat:hover,body.rev-on .bar-row:hover,body.rev-on [data-ox-section]:hover{outline:1px dashed var(--sage, #99c693);outline-offset:2px;cursor:crosshair}
+/* inline mark glyph — redundant encoding: distinct GLYPH per status, color reinforces (never color alone) */
+.rev-marked,.rev-committed{position:relative;box-shadow:inset 3px 0 0 var(--hair, #212620)}
+.rev-glyph{position:absolute;left:-1.25em;top:0;font-size:12px;line-height:1.5;color:var(--dim, #b7b6a3)}
+.rev-marked[data-rev="approve"]{box-shadow:inset 3px 0 0 var(--sage, #99c693)} .rev-marked[data-rev="approve"] .rev-glyph{color:var(--sage, #99c693)}
+.rev-marked[data-rev="request-change"]{box-shadow:inset 3px 0 0 var(--amber, #c6a23c)} .rev-marked[data-rev="request-change"] .rev-glyph{color:var(--amber, #c6a23c)}
+.rev-marked[data-rev="flag"]{box-shadow:inset 3px 0 0 var(--red, #d77e6c)} .rev-marked[data-rev="flag"] .rev-glyph{color:var(--red, #d77e6c)}
+.rev-marked[data-rev="comment"]{box-shadow:inset 3px 0 0 var(--gold, #d9b654)} .rev-marked[data-rev="comment"] .rev-glyph{color:var(--gold, #d9b654)}
+/* committed states: addressed/verified struck + green-check; open keeps status; wontfix muted */
+.rev-committed[data-revstate="addressed"],.rev-committed[data-revstate="verified"]{box-shadow:inset 3px 0 0 var(--sage, #99c693)}
+.rev-committed[data-revstate="addressed"] .rev-glyph,.rev-committed[data-revstate="verified"] .rev-glyph{color:var(--sage, #99c693)}
+.rev-committed[data-revstate="open"]{box-shadow:inset 3px 0 0 var(--amber, #c6a23c)} .rev-committed[data-revstate="open"] .rev-glyph{color:var(--amber, #c6a23c)}
+.rev-committed[data-revstate="wontfix"] .rev-glyph{color:var(--faint, #8c8e7e)}
+.rev-flash{animation:rev-flash 1.2s ease-out}
+@keyframes rev-flash{0%{background:var(--amber, #c6a23c)}100%{background:transparent}}
+/* highlights — a reviewer's highlighted words, tinted (CSS Custom Highlight
+   API) in the element-mark colors, translucent so the words stay readable;
+   focus marks the words an open note is about. */
+::highlight(rev-q-sage){background-color:rgba(153,198,147,.28)}
+::highlight(rev-q-amber){background-color:rgba(198,162,60,.34)}
+::highlight(rev-q-red){background-color:rgba(215,126,108,.34)}
+::highlight(rev-q-gold){background-color:rgba(217,182,84,.3)}
+::highlight(rev-q-faint){background-color:rgba(140,142,126,.22)}
+::highlight(rev-q-focus){background-color:rgba(217,182,84,.55)}
+/* drawings: the ink layer covers the document under the review controls. It
+   takes the pointer only while the Draw tool is selected, and a pen or finger
+   then draws instead of scrolling. */
+.rev-ink{position:absolute;left:0;top:0;overflow:visible;pointer-events:none;z-index:calc(var(--rev-z, 2147483000) - 1)}
+.rev-ink.rev-drawing{pointer-events:auto;cursor:crosshair;touch-action:none}
+.rev-ink:focus{outline:none}
+.rev-ink-sage{color:var(--sage, #99c693)} .rev-ink-amber{color:var(--amber, #c6a23c)} .rev-ink-red{color:var(--red, #d77e6c)}
+.rev-ink-gold{color:var(--gold, #d9b654)} .rev-ink-faint{color:var(--faint, #8c8e7e)}
+/* A live oval uses the same ink as its saved shape. Draft outlines can be
+   grabbed; the selected oval has corner and edge handles. */
+.rev-ink>g>g{opacity:.92} .rev-ink>g>g.rev-ink-unsent{opacity:.7}
+.rev-ink>g>g.rev-ink-live{opacity:.7}
+.rev-ink-hit{fill:none;stroke:transparent;stroke-width:16;pointer-events:stroke;cursor:grab}
+.rev-ink-bounds{fill:none;stroke:var(--gold, #d9b654);stroke-width:1;stroke-dasharray:4 4;pointer-events:none}
+.rev-ink-handle{fill:var(--bg, #111411);stroke:var(--gold, #d9b654);stroke-width:1.5;pointer-events:all}
+.rev-ink.rev-dragging,.rev-ink.rev-dragging *{cursor:grabbing!important}
+/* a drawing whose targets reflowed: a thin dashed outline of them, never the drawing */
+.rev-ink-reflowed{fill:none;stroke:currentColor;stroke-width:1.2;stroke-dasharray:5 5}
+/* while a capture reads the text the reader saw, glyphs review marks painted in are not part of it */
+.rev-reading .rev-glyph{display:none!important}
+@media print{.rev-ink{display:none!important}}
+/* @sageox/plan-review host controls: the review bar, composer, comments rail,
+   orphan banner and sync line. Colors use the page's own tokens (--sage,
+   --panel, …) when it defines them, else the SageOx palette. z-index sits near
+   the top of the 32-bit range: an authored plan's own stacking is unknown and
+   often tall (modals, sticky tab bars), and the controls must stay clickable
+   above it. A host that frames the plan can set --rev-z to keep its own
+   dialogs above the controls. */
+
+.rev-bar{position:fixed;left:16px;bottom:16px;z-index:calc(var(--rev-z, 2147483000) + 2);display:flex;align-items:center;gap:8px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:9px;padding:6px 8px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35));cursor:grab;user-select:none;touch-action:none}
+.rev-bar button{background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+.rev-bar.rev-dragging,.rev-bar.rev-dragging button{cursor:grabbing}
+/* Keep pointer input in the host while dragging across a sandboxed frame. */
+.rev-bar.rev-dragging::before{content:"";position:fixed;inset:0;z-index:-1}
+.rev-bar button:hover{color:var(--ink, #f4f2ef)}
+.rev-bar .rev-toggle.on{background:var(--sage, #99c693);border-color:var(--sage, #99c693);color:#111411}
+/* the Draw tool, selected: the bar shows which tool a stroke on the plan uses */
+.rev-bar .rev-draw.on{background:var(--gold, #d9b654);border-color:var(--gold, #d9b654);color:#111411}
+.rev-bar .rev-submit{border-color:var(--sage, #99c693);color:var(--sage, #99c693)}
+.rev-bar .rev-count{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--faint, #8c8e7e)}
+.rev-bar .rev-who{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--faint, #8c8e7e)}
+.rev-bar .rev-who:hover{color:var(--sage, #99c693);border-color:var(--sage, #99c693)}
+/* top-level Approve (closes the loop) */
+.rev-bar .rev-approve{border-color:var(--sage, #99c693);color:var(--sage, #99c693)}
+.rev-bar .rev-approve:hover{background:var(--sage, #99c693);color:#111411}
+/* in review mode the bar is sage-bordered. The controls keep their normal
+   cursor and get no target outline — clicks there never mark up. The li
+   rules outrank the document's generic li:hover target rule. */
+body.rev-on .rev-bar{border-color:var(--sage, #99c693)}
+body.rev-on .rev-rail,body.rev-on .rev-pop,body.rev-on .rev-orphans,body.rev-on .rev-toast,body.rev-on .rev-sync,body.rev-on .rev-offline-bar,body.rev-on .rev-original{cursor:auto}
+body.rev-on .rev-rail li:hover{outline:none;cursor:pointer}
+body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
+
+/* the composer */
+.rev-pop{position:absolute;z-index:calc(var(--rev-z, 2147483000) + 5);width:280px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:9px;padding:10px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
+.rev-pop .rev-row{display:flex;flex-wrap:wrap;gap:5px;margin:4px 0}
+.rev-pop .rev-s{flex:1 1 auto;background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:5px;padding:3px 6px;font-size:10.5px;cursor:pointer;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+/* control color PREDICTS the resulting mark color */
+.rev-pop .rev-s[data-s="approve"].on{background:var(--sage, #99c693);border-color:var(--sage, #99c693);color:#111411}
+.rev-pop .rev-s[data-s="request-change"].on{background:var(--amber, #c6a23c);border-color:var(--amber, #c6a23c);color:#111411}
+.rev-pop .rev-s[data-s="flag"].on{background:var(--red, #d77e6c);border-color:var(--red, #d77e6c);color:#fff}
+.rev-pop .rev-s[data-s="comment"].on{background:var(--gold, #d9b654);border-color:var(--gold, #d9b654);color:#111411}
+.rev-pop .rev-note{width:100%;min-height:54px;background:var(--bg, #0b0d0b);border:1px solid var(--hair2, var(--hair, #212620));border-radius:5px;color:var(--ink, #f4f2ef);font-family:Inter,system-ui,sans-serif;font-size:12.5px;padding:6px;resize:vertical}
+.rev-pop .rev-save{flex:1;background:var(--sage, #99c693);border:1px solid var(--sage, #99c693);color:#111411;border-radius:5px;padding:4px;font-size:11px;cursor:pointer}
+.rev-pop .rev-del{background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:5px;padding:4px 8px;font-size:11px;cursor:pointer}
+.rev-pop .rev-cap{font-size:11.5px;color:var(--dim, #b7b6a3);margin-bottom:6px}
+.rev-pop .rev-accept{flex:1;background:var(--sage, #99c693);border:1px solid var(--sage, #99c693);color:#111411;border-radius:5px;padding:4px;font-size:11px;cursor:pointer}
+.rev-pop .rev-reopen{background:var(--panel2, #171b17);border:1px solid var(--amber, #c6a23c);color:var(--amber, #c6a23c);border-radius:5px;padding:4px 8px;font-size:11px;cursor:pointer}
+.rev-pop .rev-about{font-size:12px;line-height:1.4;color:var(--dim, #b7b6a3);margin:0 0 6px;overflow-wrap:anywhere}
+.rev-pop .rev-quote{font-size:12px;line-height:1.4;color:var(--ink, #f4f2ef);border-left:2px solid var(--gold, #d9b654);padding:1px 0 1px 8px;margin:0 0 6px;overflow-wrap:anywhere}
+
+/* orphaned-note banner — feedback whose anchored text changed */
+.rev-orphans{max-height:40vh;overflow-y:auto;position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:calc(var(--rev-z, 2147483000) + 4);max-width:680px;background:var(--panel, #111411);border:1px solid var(--amber, #c6a23c);border-left:3px solid var(--amber, #c6a23c);border-radius:9px;padding:10px 14px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35));font-size:13px;color:var(--dim, #b7b6a3)}
+.rev-orphans-h{color:var(--amber, #c6a23c);font-weight:600;margin-bottom:4px}
+.rev-orphans ul{margin:.3em 0;padding-left:1.1em}
+.rev-orphans .rev-orphans-x{margin-top:6px;background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:5px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+
+/* first-visit discoverability bubble above the Review toggle */
+/* A quiet outlined chip, not a filled shout — it sits over the plan's own
+   bottom-left corner and must not win the reader's first fixation. The infinite
+   1.4s bob it used to run repeated forever without ever communicating anything
+   new; one settle on entry says "I just appeared" and then stops. Above the
+   bar, never on its row, where it would take a button's click. */
+.rev-hint{position:fixed;bottom:64px;z-index:calc(var(--rev-z, 2147483000) + 3);background:var(--panel, #111411);border:1px solid var(--sage, #99c693);color:var(--sage, #99c693);border-radius:7px;padding:6px 10px;font-size:12px;font-weight:500;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35));animation:rev-hint-in .25s ease-out both}
+@keyframes rev-hint-in{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.rev-hint{animation:none}}
+
+/* review comments rail — surfaces the note TEXT (not just a margin glyph) in the
+   right gutter; each row scroll-jumps to its anchored element. */
+.rev-rail{position:fixed;top:64px;right:18px;z-index:calc(var(--rev-z, 2147483000) + 1);width:266px;max-height:calc(100vh - 100px);overflow-y:auto;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:10px;padding:10px 12px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
+.rev-rail-h{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim, #b7b6a3);margin-bottom:8px;display:flex;align-items:center;gap:6px}
+/* Hide shrinks the rail to the Show button (comment icon + count), as tall as
+   the theme toggle above it, so the plan under the rail can be read */
+.rev-rail-hide{margin-left:auto;background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));border-radius:6px;color:var(--dim, #b7b6a3);padding:2px 8px;font:11px/1.4 "Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:none;letter-spacing:0;cursor:pointer}
+.rev-rail-hide:hover{color:var(--ink, #f4f2ef)}
+.rev-rail.rev-rail-min{width:fit-content;padding:0;border-radius:8px}
+.rev-rail-show{display:flex;align-items:center;gap:6px;height:32px;padding:0 10px;background:none;border:0;color:var(--dim, #b7b6a3);font:12px/1 "Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;cursor:pointer}
+.rev-rail-show:hover{color:var(--ink, #f4f2ef)}
+.rev-rail-n{background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));border-radius:8px;padding:0 6px;font-size:10.5px;color:var(--faint, #8c8e7e)}
+.rev-rail-empty{color:var(--faint, #8c8e7e);font-size:12px;line-height:1.5}
+/* in review mode: a comment on the plan as a whole, which no click on the plan can pick */
+.rev-rail-plan{display:block;width:100%;margin:0 0 8px;background:none;border:1px dashed var(--hair2, var(--hair, #212620));border-radius:7px;color:var(--dim, #b7b6a3);padding:5px 8px;font:12px/1.4 Inter,system-ui,sans-serif;text-align:left;cursor:pointer}
+.rev-rail-plan:hover{color:var(--ink, #f4f2ef);border-color:var(--sage, #99c693)}
+.rev-rail-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.rev-rail-item{display:flex;gap:8px;padding:7px 8px;background:var(--bg, #0b0d0b);border:1px solid var(--hair2, var(--hair, #212620));border-left:3px solid var(--hair, #212620);border-radius:7px;cursor:pointer}
+.rev-rail-item:hover{border-color:var(--hair, #212620);background:var(--panel2, #171b17)}
+.rev-rail-item[data-status="approve"]{border-left-color:var(--sage, #99c693)} .rev-rail-item[data-status="approve"] .rev-rail-glyph{color:var(--sage, #99c693)}
+.rev-rail-item[data-status="request-change"]{border-left-color:var(--amber, #c6a23c)} .rev-rail-item[data-status="request-change"] .rev-rail-glyph{color:var(--amber, #c6a23c)}
+.rev-rail-item[data-status="flag"]{border-left-color:var(--red, #d77e6c)} .rev-rail-item[data-status="flag"] .rev-rail-glyph{color:var(--red, #d77e6c)}
+.rev-rail-item[data-status="comment"]{border-left-color:var(--gold, #d9b654)} .rev-rail-item[data-status="comment"] .rev-rail-glyph{color:var(--gold, #d9b654)}
+.rev-rail-glyph{flex:none;font-size:12px;line-height:1.4;color:var(--dim, #b7b6a3)}
+.rev-rail-body{min-width:0;flex:1}
+/* the section, then the reviewer and tags, which wrap below it rather than
+   crush it or run out of the row */
+.rev-rail-sec{display:flex;flex-wrap:wrap;align-items:center;gap:3px 6px;margin-bottom:3px}
+.rev-rail-sec-t{flex:1 1 auto;min-width:0;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;color:var(--faint, #8c8e7e);text-transform:uppercase;letter-spacing:.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rev-rail-who{flex:none;font-size:9px;border-radius:6px;padding:0 5px;border:1px solid var(--hair2, var(--hair, #212620));color:var(--sage, #99c693);text-transform:none;letter-spacing:0;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rev-rail-note{font-size:12.5px;color:var(--ink, #f4f2ef);line-height:1.45;overflow-wrap:anywhere}
+.rev-rail-answer{font-size:12px;color:var(--dim, #b7b6a3);line-height:1.45;margin-top:3px;overflow-wrap:anywhere}
+.rev-rail-note.muted{color:var(--dim, #b7b6a3)}
+.rev-rail-tag{flex:none;font-size:9px;border-radius:6px;padding:0 5px;border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);text-transform:uppercase;letter-spacing:.02em}
+.rev-rail-tag.unsent,.rev-rail-tag.queued{color:var(--gold, #d9b654);border-color:var(--gold, #d9b654)}
+/* queued: submitted and stored in this browser, waiting for the server; unsaved: in this tab only */
+.rev-rail-tag.queued{border-style:dashed}
+.rev-rail-tag.unsaved{color:var(--red, #d77e6c);border-color:var(--red, #d77e6c)}
+.rev-rail-tag.addressed,.rev-rail-tag.verified{color:var(--sage, #99c693);border-color:var(--sage, #99c693)}
+.rev-rail-tag.wontfix{color:var(--faint, #8c8e7e)}
+.rev-rail-quote{font-size:12px;line-height:1.4;color:var(--dim, #b7b6a3);border-left:2px solid var(--hair2, var(--hair, #212620));padding-left:6px;margin:1px 0 3px;overflow-wrap:anywhere}
+.rev-rail-orig{margin-top:4px;background:none;border:0;padding:0;color:var(--gold, #d9b654);font:11px/1.4 "Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;cursor:pointer}
+.rev-rail-orig:hover{text-decoration:underline}
+
+/* View original: a drawing redrawn from its record, over the plan */
+.rev-original{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:calc(var(--rev-z, 2147483000) + 5);max-width:min(900px,calc(100vw - 32px));max-height:calc(100vh - 64px);overflow:auto;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:10px;padding:10px 12px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
+.rev-original-h{display:flex;align-items:center;gap:10px;font:11px/1.4 "Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dim, #b7b6a3);margin-bottom:8px}
+.rev-original-x{margin-left:auto;background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:5px;padding:2px 8px;font:inherit;cursor:pointer}
+.rev-original-svg{display:block;max-width:100%;height:auto;background:var(--bg, #0b0d0b);font-family:Inter,system-ui,sans-serif}
+.rev-orig-box{fill:none;stroke:var(--faint, #8c8e7e);stroke-width:.5}
+.rev-orig-label-box{fill:none;stroke:var(--teal, #97aebd);stroke-width:.5}
+.rev-orig-label{fill:var(--teal, #97aebd);font-size:11px}
+/* a run's font-size is an attribute, sized from its box: no rule may set one */
+.rev-orig-run{fill:var(--dim, #b7b6a3)}
+.rev-orig-ink{color:var(--gold, #d9b654);opacity:.95}
+.rev-orig-cut{fill:var(--amber, #c6a23c);font-size:11px}
+/* the text View original cannot place, kept about as wide as a small picture
+   rather than stretching the dialog to its widest */
+.rev-orig-unplaced{max-width:420px;margin-top:8px}
+.rev-orig-unplaced-h{font:11px/1.4 "Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--faint, #8c8e7e)}
+.rev-orig-unplaced blockquote{margin:4px 0 0;padding:1px 0 1px 8px;border-left:2px solid var(--gold, #d9b654);font-size:12.5px;line-height:1.45;color:var(--ink, #f4f2ef);overflow-wrap:anywhere}
+/* narrow viewports: the fixed rail would cover the prose, so drop it into flow;
+   the bottom margin keeps it above the fixed review bar when scrolled to the end */
+@media(max-width:1400px){.rev-rail{position:static;width:auto;max-height:none;margin:24px 16px 72px;right:auto;top:auto}}
+
+/* connection state — the page must never look live when the server is gone */
+.rev-conn{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
+.rev-conn.ok{color:var(--sage, #99c693)}
+.rev-conn.off{color:var(--red, #d77e6c);animation:rev-conn-pulse 1.6s ease-in-out infinite}
+@keyframes rev-conn-pulse{50%{opacity:.45}}
+.rev-offline-bar{position:fixed;top:0;left:0;right:0;z-index:calc(var(--rev-z, 2147483000) + 6);background:var(--panel, #111411);border-bottom:2px solid var(--red, #d77e6c);color:var(--ink, #f4f2ef);padding:9px 14px;font-size:13px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
+.rev-offline-bar code{background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));border-radius:5px;padding:2px 7px;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;user-select:all}
+.rev-offline-bar .rev-offline-copy{margin-left:6px;background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:5px;padding:2px 8px;font-size:11px;cursor:pointer}
+.rev-offline-bar .rev-offline-copy:hover{color:var(--ink, #f4f2ef)}
+body.rev-offline .rev-bar .rev-submit,body.rev-offline .rev-bar .rev-approve{opacity:.45;cursor:not-allowed}
+.rev-toast{position:fixed;left:16px;bottom:64px;z-index:calc(var(--rev-z, 2147483000) + 2);background:var(--panel, #111411);border:1px solid var(--sage, #99c693);color:var(--ink, #f4f2ef);border-radius:9px;padding:8px 12px;font-size:12.5px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
+/* sync status: what happened to the reviewer's feedback; sits above the toast so both read */
+.rev-sync{position:fixed;left:16px;bottom:104px;z-index:calc(var(--rev-z, 2147483000) + 3);max-width:min(560px,calc(100vw - 32px));display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-left-width:3px;color:var(--ink, #f4f2ef);border-radius:9px;padding:8px 10px 8px 12px;font-size:12.5px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
+.rev-sync.ok{border-color:var(--sage, #99c693)}.rev-sync.warn,.rev-sync.ask{border-color:var(--amber, #c6a23c)}.rev-sync.err{border-color:var(--red, #d77e6c)}.rev-sync.pending{border-color:var(--hair, #212620);color:var(--dim, #b7b6a3)}
+/* Chrome sizes the box from the message's text width, not its 220px basis: a
+   shorter message would wrap the button or × after it onto a second line */
+.rev-sync-msg{flex:1 1 220px}.rev-sync-msg:not(:last-child){min-width:220px}
+.rev-sync button,.rev-sync-input{background:var(--panel2, #171b17);border:1px solid var(--hair, #212620);color:var(--ink, #f4f2ef);border-radius:6px;padding:3px 9px;font-size:12px;font-family:inherit}
+.rev-sync button{cursor:pointer}.rev-sync button:hover{color:var(--ink, #f4f2ef)}.rev-sync .rev-sync-x{border:0;background:none;padding:0 4px;font-size:15px;line-height:1}
+
+/* live presence: who else has the plan open, one chip per person, and their
+   pointers, each a cursor in that person's color with their name. A person on
+   another revision is an outlined chip; their pointer is never drawn. The
+   cursors take no pointer input, and sit over the plan but under the controls. */
+.rev-here{display:inline-flex;align-items:center;gap:3px}
+.rev-here[hidden]{display:none}
+.rev-peer{width:18px;height:18px;border-radius:50%;background:var(--c);color:#111411;font:600 10px/18px Inter,system-ui,sans-serif;text-align:center;cursor:default}
+.rev-peer-other{background:none;color:var(--c);box-shadow:inset 0 0 0 1px var(--c)}
+.rev-here-note{margin-left:3px;font-size:11px;color:var(--faint, #8c8e7e);white-space:nowrap}
+.rev-cursors{position:fixed;inset:0;overflow:hidden;pointer-events:none;z-index:var(--rev-z, 2147483000)}
+.rev-cursor{position:absolute;left:0;top:0;color:var(--c);will-change:transform}
+.rev-cursor svg{display:block}
+.rev-cursor.rev-glide{transition:transform .2s linear}
+.rev-cursor-name{position:absolute;left:12px;top:16px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:1px 6px;border-radius:4px;background:var(--c);color:#111411;font:600 11px/16px Inter,system-ui,sans-serif}
+.rev-c0{--c:#99c693} .rev-c1{--c:#7fb3d5} .rev-c2{--c:#e2a36f} .rev-c3{--c:#b39ddb}
+.rev-c4{--c:#6cc4b8} .rev-c5{--c:#e49ac0} .rev-c6{--c:#d9b654} .rev-c7{--c:#a3b8ef}
+@media (prefers-reduced-motion:reduce){.rev-cursor.rev-glide{transition:none}}
+
+/* a framed plan: the controls sit over the frame's box, which mountHostControls
+   tracks into --rev-top/left/right/bottom/width/height, so the host's own
+   chrome around the frame stays clear. The rail stays fixed at every width:
+   below 1400px it would drop into the host's page flow, not the plan's. */
+body.rev-framed .rev-bar{left:calc(var(--rev-left) + 16px);bottom:calc(var(--rev-bottom) + 16px)}
+body.rev-framed .rev-toast{left:calc(var(--rev-left) + 16px);bottom:calc(var(--rev-bottom) + 64px);max-width:calc(var(--rev-width) - 32px)}
+body.rev-framed .rev-sync{left:calc(var(--rev-left) + 16px);bottom:calc(var(--rev-bottom) + 104px);max-width:min(560px,calc(var(--rev-width) - 32px))}
+body.rev-framed .rev-hint{bottom:calc(var(--rev-bottom) + 64px)}
+body.rev-framed .rev-rail{position:fixed;top:calc(var(--rev-top) + 16px);right:calc(var(--rev-right) + 16px);width:min(266px,calc(var(--rev-width) - 32px));max-height:calc(var(--rev-height) - 112px);margin:0}
+body.rev-framed .rev-orphans{top:calc(var(--rev-top) + 14px);left:calc(var(--rev-left) + var(--rev-width) / 2);max-width:min(680px,calc(var(--rev-width) - 32px));max-height:calc(var(--rev-height) * .4)}
+body.rev-framed .rev-offline-bar{top:var(--rev-top);left:var(--rev-left);right:var(--rev-right)}
+body.rev-framed .rev-original{left:calc(var(--rev-left) + var(--rev-width) / 2);top:calc(var(--rev-top) + var(--rev-height) / 2);max-width:min(900px,calc(var(--rev-width) - 32px));max-height:calc(var(--rev-height) - 32px)}
+
+/* print: the controls are a review surface, never part of the printed plan */
+@media print{.rev-bar,.rev-rail,.rev-orphans,.rev-hint,.rev-pop,.rev-offline-bar,.rev-toast,.rev-sync,.rev-original,.rev-cursors{display:none!important}}

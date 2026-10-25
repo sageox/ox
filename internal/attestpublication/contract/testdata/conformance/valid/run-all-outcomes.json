@@ -1,0 +1,57 @@
+{
+  "schema_version": "1.0",
+  "source_run_id": "local-run-2026-09-10",
+  "producer": {"name": "sageox-attest", "version": "5.0.0"},
+  "source": {"git": {"branch": null, "commit_sha": null, "dirty": null}},
+  "timing": {"started_at": "2026-09-10T20:00:00Z", "finished_at": "2026-09-10T20:00:04Z", "duration_ms": 4000},
+  "corpus": {
+    "key": "payments",
+    "capabilities": [
+      {
+        "key": "checkout",
+        "title": "Checkout",
+        "description": "Customer payment behavior",
+        "tags": ["@critical"],
+        "source": "declared",
+        "features": [
+          {
+            "path": "features/payment.feature",
+            "title": "Payment lifecycle",
+            "tags": [],
+            "scenarios": [
+              {"key": "8dffcbb2f165cbfd6f67b3aa1898491f8eafa186460dac13242cc5b0c6d879a5", "title": "card accepted", "tags": [], "line": 3, "kind": "scenario", "examples": []},
+              {"key": "513e5a7c5a1ea94ed437113a2bebca745bb0af13630df57c36c497d5d018ac9b", "title": "card declined", "tags": [], "line": 8, "kind": "scenario", "examples": []},
+              {"key": "b53907828efaadf8ceb82d8d47430a813c77d0589f6dc68f8f85030ef887e049", "title": "speculative refund", "tags": ["@speculative"], "line": 13, "kind": "scenario", "examples": []},
+              {"key": "ff11d1931fb8fd12aea9eea804012f119f96ad681a46317972270be96294d4d4", "title": "subset invoice", "tags": [], "line": 18, "kind": "scenario", "examples": []}
+            ],
+            "rules": []
+          }
+        ]
+      },
+      {
+        "key": "features-unclassified",
+        "title": "Ungrouped behavior",
+        "tags": [],
+        "source": "fallback",
+        "features": [
+          {
+            "path": "features/unclassified.feature",
+            "title": "Ungrouped behavior",
+            "tags": [],
+            "scenarios": [
+              {"key": "4a9e003607c9b85b964ace2ca85e87d4608cf6e6cd50cabe03aa74ead3845511", "title": "future matrix", "tags": [], "kind": "outline", "examples": [{"name": "empty", "tags": [], "columns": ["case"], "rows": []}]}
+            ],
+            "rules": []
+          }
+        ]
+      }
+    ]
+  },
+  "outcomes": [
+    {"instance": {"scenario_key": "8dffcbb2f165cbfd6f67b3aa1898491f8eafa186460dac13242cc5b0c6d879a5"}, "status": "passed", "duration_ms": 900, "evidence_entrypoint": "evidence/card/index.html"},
+    {"instance": {"scenario_key": "513e5a7c5a1ea94ed437113a2bebca745bb0af13630df57c36c497d5d018ac9b"}, "status": "failed", "duration_ms": 1100, "failure": {"message": "expected authorization", "location": "payment.feature:10"}, "evidence_entrypoint": "evidence/decline/index.html"},
+    {"instance": {"scenario_key": "b53907828efaadf8ceb82d8d47430a813c77d0589f6dc68f8f85030ef887e049"}, "status": "pending", "reason": "@speculative"},
+    {"instance": {"scenario_key": "ff11d1931fb8fd12aea9eea804012f119f96ad681a46317972270be96294d4d4"}, "status": "not_run", "reason": "excluded from subset run"}
+  ],
+  "extensions": {"dev.sageox.compiler": "cucumber", "dev.sageox.shards": [1, 2]}
+}

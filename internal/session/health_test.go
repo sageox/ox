@@ -138,6 +138,53 @@ func TestCheckHealth_StopIncomplete(t *testing.T) {
 	assert.True(t, status.StopIncompleteAge > 0)
 }
 
+func TestCheckHealth_ReportsQuarantinedRecordings(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	for _, tt := range []struct {
+		agentID        string
+		sourceRejected bool
+	}{{"OxQuarantined", true}, {"OxHealthy", false}} {
+		state := &RecordingState{
+			AgentID:        tt.agentID,
+			StartedAt:      time.Now().Add(-5 * time.Minute),
+			AdapterName:    "claude-code",
+			SessionPath:    filepath.Join(sessionsBase, "2026-01-06T14-30-user-"+tt.agentID),
+			SourceRejected: tt.sourceRejected,
+		}
+		require.NoError(t, SaveRecordingState(projectRoot, state))
+	}
+
+	status := CheckHealth(projectRoot)
+
+	require.Len(t, status.QuarantinedRecordings, 1)
+	assert.Equal(t, "OxQuarantined", status.QuarantinedRecordings[0].AgentID)
+	require.Len(t, status.AllRecordings, 1, "a quarantined recording is not a recording in progress")
+	assert.Equal(t, "OxHealthy", status.AllRecordings[0].AgentID)
+}
+
+// A stale recording is what the orphan fix clears the marker of. A quarantined
+// one must never be classified stale, or the fix would remove the only record
+// that it is quarantined and leave its transcript looking like any other.
+func TestCheckHealth_QuarantinedRecordingIsNeverStale(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-01-06T14-30-user-OxOld")
+	require.NoError(t, os.MkdirAll(sessionPath, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"), []byte(`{"type":"user","content":"captured"}`+"\n"), 0o644))
+	require.NoError(t, SaveRecordingState(projectRoot, &RecordingState{
+		AgentID: "OxOld", StartedAt: time.Now().Add(-72 * time.Hour), AdapterName: "claude-code",
+		SessionPath: sessionPath, SourceRejected: true,
+	}))
+
+	status := CheckHealth(projectRoot)
+
+	assert.Empty(t, status.StaleRecordings)
+	assert.False(t, status.IsStaleRecording)
+	assert.False(t, status.IsRecordingActive)
+	require.Len(t, status.QuarantinedRecordings, 1)
+}
+
 func TestCheckHealth_RecordingNotActive(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)

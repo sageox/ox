@@ -57,6 +57,12 @@ const (
 	RuleDanglingRef           = "dangling-ref"
 	RuleSupersededNoSuccessor = "superseded-no-successor"
 	RuleSageoxCreditOverflow  = "sageox-credit-overflow"
+	// RuleRelatedOverflow reports bounded related-decision results with more
+	// above-floor candidates available through --explain/code search.
+	RuleRelatedOverflow = "related-decision-overflow"
+	// RuleUnreadableCorpus: one or more intended DR files could not be read or
+	// parsed — a source gap, not evidence that no prior decision exists.
+	RuleUnreadableCorpus = "unreadable-corpus"
 
 	// RelationCandidate is the ONLY relation ox asserts (marker doctrine):
 	// related/conflicting/superseding is the agent's judgment.
@@ -135,6 +141,22 @@ type SignalSummary struct {
 	Diagnostics    int  `json:"diagnostics"`
 	UnresolvedRefs int  `json:"unresolved_refs"`
 	Material       bool `json:"material"`
+	// Degraded is true when a retrieval source could not be read (a detector or
+	// retriever errored, or a decision dir exists but nothing in it parsed as a
+	// record). A degraded run is NOT a verified "no prior decision" — guidance
+	// must never present its emptiness as a checked absence (#823).
+	Degraded bool `json:"degraded,omitempty"`
+}
+
+// DroppedCandidate is a record omitted by a result cap or the relevance floor.
+// Surfaced only under --explain so callers can distinguish a true miss from a
+// bounded or thresholded result (#823).
+type DroppedCandidate struct {
+	Ref     string  `json:"ref,omitempty"`
+	RefPath string  `json:"ref_path,omitempty"`
+	Title   string  `json:"title,omitempty"`
+	Score   float64 `json:"score"`
+	Reason  string  `json:"reason"`
 }
 
 // Result is the `ox decision enrich` JSON payload.
@@ -146,6 +168,8 @@ type Result struct {
 	Context       []ContextItem `json:"context"`
 	Signals       SignalSummary `json:"signals"`
 	Guidance      string        `json:"guidance"`
+	// Dropped lists cap-omitted and sub-floor candidates under --explain.
+	Dropped []DroppedCandidate `json:"dropped,omitempty"`
 }
 
 // Env is the shared, read-only environment Enrich resolves ONCE and hands to
@@ -158,6 +182,17 @@ type Env struct {
 	// LedgerPath is the local ledger checkout (sessions, murmurs). Empty when
 	// no ledger is provisioned.
 	LedgerPath string
+	// CorpusUnparsed counts unreadable files and files with strong DR intent that
+	// did not make it into the catalog. Ordinary notes/templates are excluded
+	// without degrading the corpus.
+	CorpusUnparsed int
+	// SourceUnavailable records a project/config source that could not be loaded.
+	// Enrich remains fail-open, but its result must not describe the resulting
+	// absence as verified.
+	SourceUnavailable bool
+	// Explain, when set, makes Enrich populate Result.Dropped with cap-omitted
+	// and sub-floor candidates.
+	Explain bool
 }
 
 // Detector produces deterministic annotations. Fail-open: return (nil, nil)

@@ -281,7 +281,7 @@ var claudeLifecycleEvents = []string{
 
 // oxHookCommandForEvent returns the ox agent hook shell command for a Claude Code event.
 func oxHookCommandForEvent(event string) string {
-	return fmt.Sprintf(constants.OxHookCommandClaudeCodeTemplate, event)
+	return constants.HookCommand(constants.OxHookCommandClaudeCodeTemplate, event)
 }
 
 // InstallProjectClaudeHooks installs ox lifecycle hooks to .claude/settings.json (shared).

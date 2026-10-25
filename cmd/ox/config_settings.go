@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"math"
+	"os"
 	"strconv"
 
 	"github.com/sageox/ox/internal/config"
@@ -15,17 +17,47 @@ const (
 	ConfigLevelRepo    ConfigLevel = "repo"
 	ConfigLevelTeam    ConfigLevel = "team"
 	ConfigLevelDefault ConfigLevel = "default"
+	// ConfigLevelEnv is display-only: it identifies an env-var override in
+	// ConfigValue.Source (e.g. OX_SESSION_PUBLISHING) so 'ox config get'
+	// shows the value actually in effect. It is not a storage location —
+	// there is nothing to set/unset "at env level" — so it never appears in
+	// ConfigSetting.Levels and SetConfigValue/UnsetConfigValue don't handle
+	// it.
+	ConfigLevelEnv ConfigLevel = "env"
 )
 
 // ConfigSetting defines a configurable setting.
 type ConfigSetting struct {
 	Key             string        // setting key (e.g., "session_recording")
-	Description     string        // short description for list views
+	Label           string        // short user-facing name (e.g., "Session recording")
+	Description     string        // one plain-language sentence for list views and 'ox config schema'
 	LongDescription string        // detailed explanation for help
 	Category        string        // grouping category (e.g., "Sessions", "Privacy")
 	ValidValues     []string      // allowed values (empty = any string)
 	Default         string        // default value
 	Levels          []ConfigLevel // which levels support this setting
+
+	// Number marks a free-text setting that must be a number in
+	// [Number.Min, Number.Max]. 'ox config set' validates against it and
+	// 'ox config schema' publishes it, so the two cannot disagree.
+	Number *NumberRange
+
+	// Deprecated marks a setting kept only for backward compatibility: it
+	// remains resolvable and settable (existing config files and scripts
+	// must not break), but is not wired to any behavior. Never wire new
+	// behavior to a deprecated setting — remove the deprecation instead.
+	Deprecated bool
+	// DeprecationNotice is the honest, specific explanation surfaced by
+	// 'ox config get/set/list' for a Deprecated setting: it must say the
+	// setting never took effect (not merely that it's "no longer used"),
+	// and name the setting that actually does the job. Empty unless
+	// Deprecated is true.
+	DeprecationNotice string
+}
+
+// NumberRange is the inclusive range a numeric setting accepts.
+type NumberRange struct {
+	Min, Max float64
 }
 
 // ConfigValue represents a resolved config value with its source.
@@ -34,6 +66,7 @@ type ConfigValue struct {
 	Value   string      `json:"value"`
 	Source  ConfigLevel `json:"source"`
 	Default string      `json:"default,omitempty"`
+	EnvVal  string      `json:"env_value,omitempty"` // highest priority; only populated for session_publishing/session_recording today (extending to every setting is tracked separately as ox-8d4t)
 	UserVal string      `json:"user_value,omitempty"`
 	RepoVal string      `json:"repo_value,omitempty"`
 	TeamVal string      `json:"team_value,omitempty"`
@@ -43,7 +76,8 @@ type ConfigValue struct {
 var AllSettings = []ConfigSetting{
 	{
 		Key:         "session_recording",
-		Description: "Session recording mode",
+		Label:       "Session recording",
+		Description: "Whether AI coding sessions are recorded to the ledger, and when recording starts.",
 		LongDescription: `Controls whether and how AI agent sessions are recorded.
 
   disabled - No sessions are recorded
@@ -61,8 +95,37 @@ conventions and knowledge that apply to ALL repos your team owns.`,
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo, ConfigLevelTeam},
 	},
 	{
+		Key:         "session_publishing",
+		Label:       "Session publishing",
+		Description: "Whether a recorded session is published to the ledger, or held locally until you upload it explicitly.",
+		LongDescription: `Controls whether a recorded session is published to the ledger, or held
+locally until you upload it explicitly.
+
+  auto   - Publish the session to this repo's ledger on session stop (default).
+  manual - Hold the session locally only: no transcript upload, no mid-session
+           draft placeholder, and no session-started notice to the server.
+           Run 'ox session upload' to publish it explicitly. Because the
+           server never hears about a manual-mode session, any /c/<id> link
+           for it will 404 — surfaces that would print one stay silent
+           instead in manual mode.
+
+Precedence (highest wins): OX_SESSION_PUBLISHING env var > user config >
+this repo's .sageox/config.json > team config > default(auto). User config
+deliberately beats repo and team, so you can always decline to publish
+regardless of what the repo or team says.
+
+Note: telemetry, OTLP tracing, and the friction-feedback channel are
+separate switches with their own defaults — this setting does not affect
+them.`,
+		Category:    "Sessions",
+		ValidValues: config.ValidSessionPublishingModes,
+		Default:     config.SessionPublishingAuto,
+		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo, ConfigLevelTeam},
+	},
+	{
 		Key:         "murmur_send",
-		Description: "Auto work-in-progress signals",
+		Label:       "Send murmurs",
+		Description: "Whether AI coworkers are nudged to share work-in-progress signals with teammates.",
 		LongDescription: `Controls work-in-progress signals to teammates.
 
 Murmurs are short coordination signals that let teammates know what
@@ -79,7 +142,8 @@ coworkers.
 	},
 	{
 		Key:         "murmur_receive",
-		Description: "Receive murmurs from other coworkers",
+		Label:       "Receive murmurs",
+		Description: "Whether teammates' work-in-progress signals reach your AI coworker.",
 		LongDescription: `Controls whether work-in-progress signals from other coworkers
 appear in your whisper stream.
 
@@ -95,27 +159,69 @@ delivery, not whether murmurs are relayed for others.`,
 	},
 	{
 		Key:         "telemetry",
-		Description: "Anonymous usage telemetry",
-		LongDescription: `Controls anonymous usage statistics collection.
+		Label:       "Usage telemetry",
+		Description: "Send usage data that helps improve ox. Never includes your code or session conversations.",
+		LongDescription: `Controls the usage data ox sends to help improve it.
 
-When enabled, ox sends anonymous data to help improve the tool:
-  - Command usage frequency (e.g., "ox session start" was run)
-  - Error rates (no error details or stack traces)
-  - Feature adoption metrics
+When on, ox sends:
+  - To PostHog, once per command: its name and the names of its
+    flags; whether it succeeded and, if it failed, a category such
+    as auth or network and which failure it was, named by ox's own
+    wording or the error's type with no values filled in; how long
+    it took; the ox version, OS, and CPU architecture; whether a
+    person, an AI coworker (and which one), or CI ran it; why ox
+    runs in ephemeral mode, if it does; and, inside a repository set
+    up for SageOx, the repository's and team's SageOx IDs. Events
+    carry a random ID made for this install, the client_id file in
+    ox's config directory (~/.config/sageox by default), and no
+    names, emails, or login details. Delete that file to get a new
+    ID.
+  - To SageOx: command, session, and AI coworker events tagged with
+    the repository's SageOx ID; timing traces while you are logged
+    in; and what was typed when ox cannot parse a command.
 
-What is NEVER collected:
-  - Your code or file contents
-  - Personal information (names, emails, etc.)
-  - Session recordings or conversations
-  - Repository names or paths`,
+Telemetry never includes your code, file contents, or session
+conversations. Nothing sent to PostHog includes command arguments,
+file paths, or values from an error message.
+
+DO_NOT_TRACK=1 turns all of it off, the same as setting this to off.`,
 		Category:    "Privacy",
 		ValidValues: []string{"on", "off"},
 		Default:     "on",
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
+		Key:         "disposable_machine",
+		Label:       "Disposable machine",
+		Description: "This machine runs one job and goes away; only its home directory persists.",
+		LongDescription: `Turn on for a machine that runs ox for one job and then goes away,
+keeping only its home directory, such as a pod with a persistent home
+volume. Leave it off on a laptop or a long-lived server.
+
+When on:
+  - The daemon's first start on a machine removes the Ledger's git lock
+    files, which a machine that went away mid-command leaves behind.
+  - The daemon runs no periodic auto-fix and no clone garbage collection.
+  - The daemon restarts once the Ledger's first clone lands, so the work
+    that needs a Ledger starts.
+  - A recording stores when its AI coworker's process started, so a
+    process on a later machine that reuses the same PID is not taken
+    for it.
+  - Git commands that ox runs in its own clones (the Ledger, team
+    contexts, Knowledge Bubbles) run no hooks and get credentials only
+    from ox.
+
+The daemon reads this setting when it starts: run 'ox daemon restart'
+after changing it.`,
+		Category:    "Machine",
+		ValidValues: []string{"on", "off"},
+		Default:     "off",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
 		Key:         "tips",
-		Description: "Show helpful tips",
+		Label:       "Tips",
+		Description: "Show contextual tips after command output.",
 		LongDescription: `Controls whether ox shows contextual tips and suggestions.
 
 When enabled, ox displays helpful hints about features and workflows
@@ -128,39 +234,50 @@ once you're familiar with the tool.`,
 	},
 	{
 		Key:         "context_git.auto_commit",
-		Description: "Auto-save session changes",
-		LongDescription: `Controls automatic saving of session data to the repo's ledger.
+		Label:       "Auto-commit sessions (deprecated)",
+		Description: "DEPRECATED — never had any effect; use session_publishing",
+		LongDescription: `DEPRECATED: this setting has never had any effect. Sessions were committed
+to the ledger regardless of what it was set to — it was never wired to any
+behavior.
 
-When enabled, sessions are automatically saved to the ledger when
-they end. This ensures no work is lost if you forget to save.
+To hold sessions locally until you publish them explicitly, use:
+    ox config set session_publishing manual
 
-When disabled, you must manually save sessions.
-
-Note: The ledger is specific to this repository. Each repo where
-'ox init' was run has its own ledger for session history.`,
-		Category:    "Sessions",
-		ValidValues: []string{"on", "off"},
-		Default:     "on",
-		Levels:      []ConfigLevel{ConfigLevelUser},
+The value is still accepted and stored, so 'ox config set/get/unset' keep
+working for scripts and older habits, but it does not — and never did —
+control anything. See bead ox-6p5y.11.`,
+		Category:          "Sessions",
+		ValidValues:       []string{"on", "off"},
+		Default:           "on",
+		Levels:            []ConfigLevel{ConfigLevelUser},
+		Deprecated:        true,
+		DeprecationNotice: "context_git.auto_commit has never had any effect — sessions were committed regardless of this setting.\nTo hold sessions locally until you publish them explicitly, use:\n    ox config set session_publishing manual",
 	},
 	{
 		Key:         "context_git.auto_push",
-		Description: "Auto-sync sessions to ledger",
-		LongDescription: `Controls automatic syncing of sessions to the repo's ledger.
+		Label:       "Auto-push sessions (deprecated)",
+		Description: "DEPRECATED — never had any effect; use session_publishing",
+		LongDescription: `DEPRECATED: this setting has never had any effect. Sessions were published
+to the ledger regardless of what it was set to — it was never wired to any
+behavior.
 
-When enabled, sessions are automatically synced to the remote ledger
-after being saved locally. This completes the end-to-end session
-pipeline: record → commit → push → anti-entropy finalizes.
+To hold sessions locally until you publish them explicitly, use:
+    ox config set session_publishing manual
 
-When disabled, sessions stay local until you manually sync them.`,
-		Category:    "Sessions",
-		ValidValues: []string{"on", "off"},
-		Default:     "on",
-		Levels:      []ConfigLevel{ConfigLevelUser},
+The value is still accepted and stored, so 'ox config set/get/unset' keep
+working for scripts and older habits, but it does not — and never did —
+control anything. See bead ox-6p5y.11.`,
+		Category:          "Sessions",
+		ValidValues:       []string{"on", "off"},
+		Default:           "on",
+		Levels:            []ConfigLevel{ConfigLevelUser},
+		Deprecated:        true,
+		DeprecationNotice: "context_git.auto_push has never had any effect — sessions were published regardless of this setting.\nTo hold sessions locally until you publish them explicitly, use:\n    ox config set session_publishing manual",
 	},
 	{
 		Key:         "view_format",
-		Description: "Default session view format",
+		Label:       "Session view format",
+		Description: "Default output format for 'ox session view'.",
 		LongDescription: `Controls the default output format for 'ox session view'.
 
   html - Opens session in browser with rich HTML viewer (default)
@@ -175,8 +292,9 @@ Override per-invocation with --html, --text, or --json flags.`,
 	},
 	{
 		Key:         "session.draft",
+		Label:       "Early session link",
 		Category:    "Sessions",
-		Description: "Publish an early placeholder so /c/<id> resolves mid-session (on/off)",
+		Description: "Publish a placeholder so a session's link works while it is still recording.",
 		LongDescription: `Controls whether ox commits an early placeholder for a recording.
 
   on  — At turn 2, ox commits a metadata-only placeholder to the ledger so
@@ -191,7 +309,7 @@ Override per-invocation with --html, --text, or --json flags.`,
   off — Never publish a placeholder. The /c/ link stays unresolvable until
         session stop.
 
-Aborting a session (/ox-session-abort) deletes any published placeholder from
+Aborting a session (ox agent session abort --force) deletes any published placeholder from
 the ledger.`,
 		ValidValues: config.ValidSessionDraftModes,
 		Default:     config.SessionDraftOn,
@@ -199,7 +317,8 @@ the ledger.`,
 	},
 	{
 		Key:         "agent.summarizer",
-		Description: "Who runs the session-stop summarization (inline/delegated)",
+		Label:       "Session summarizer",
+		Description: "Who writes the session summary at stop: your AI coworker, the background daemon, or nobody.",
 		LongDescription: `Selects who runs the LLM call that summarizes a session at stop.
 
   inline    — The calling agent (Claude Code, Cursor, etc.) runs the LLM
@@ -237,7 +356,8 @@ See ADR-016 for full rationale.`,
 	},
 	{
 		Key:         "agent_worker",
-		Description: "Daemon AI coworker for background tasks",
+		Label:       "Background AI coworker",
+		Description: "Which AI coworker CLI the daemon uses for background tasks, such as filling in missing summaries.",
 		LongDescription: `Selects which agent CLI the daemon uses for background tasks like
 session anti-entropy (generating missing summaries for orphaned sessions).
 
@@ -257,7 +377,8 @@ Rate-limited to 60 invocations/hour, 4 concurrent.`,
 	},
 	{
 		Key:         "recording_reminder",
-		Description: "Periodic recording status reminders",
+		Label:       "Recording reminders",
+		Description: "Periodically remind AI coworkers that the session is being recorded.",
 		LongDescription: `Controls whether AI coworkers receive periodic reminders
 that their session is being recorded.
 
@@ -274,7 +395,8 @@ as whispers in the agent's context.`,
 	},
 	{
 		Key:         "plan.save",
-		Description: "Auto-save approved plans to the ledger",
+		Label:       "Save plans",
+		Description: "Automatically save approved plans to the ledger.",
 		LongDescription: `Controls whether 'ox plan' auto-saves the enriched plan to this repo's
 ledger.
 
@@ -289,7 +411,8 @@ ledger.
 	},
 	{
 		Key:         "plan.html",
-		Description: "Enriched-HTML render mode",
+		Label:       "Plan HTML pages",
+		Description: "When ox renders an enriched HTML page for a plan.",
 		LongDescription: `Controls when 'ox plan' renders an enriched HTML plan for human review.
 
   off       - Never render, never nudge.
@@ -310,7 +433,8 @@ values).`,
 	},
 	{
 		Key:         "plan.open",
-		Description: "Browser-open policy for rendered plans",
+		Label:       "Open rendered plans",
+		Description: "Whether a rendered plan may open in your browser, and whether to ask first.",
 		LongDescription: `Controls whether the plan-exit nudge may instruct opening a rendered
 plan in a browser. Independent of 'plan.html' (which controls rendering) —
 this setting only matters once a render/nudge would already happen; 'plan.html
@@ -334,8 +458,34 @@ values).`,
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
 	},
 	{
+		Key:         "skills.claude_org_dedupe",
+		Label:       "Skip skills your Claude org delivers",
+		Description: "Stop copying team skills into .claude/skills when your Claude organization's plugin already gives them to Claude Code here.",
+		LongDescription: `Controls whether ox skips its own copy of a team skill in .claude/skills
+when Claude Code on this machine already gets that skill from your team's
+Claude organization plugin, so Claude Code does not list it twice.
+
+  on  - Skip a team skill only when Claude Code here is signed in to the
+        claude.ai account that has your organization's plugin, and that
+        plugin carries the skill. Anything ox cannot confirm keeps its
+        copy. (default)
+  off - Always copy every team skill into .claude/skills.
+
+Turn this off if your Claude Code sessions sign in some way ox cannot see
+from Claude Code's files, such as an API key, Bedrock or Vertex set only in
+your shell. Those sessions never load organization plugins, so without
+ox's copy they would have no team skills at all.
+
+Other AI coworkers (Codex, Cursor, ...) always get ox's copies.`,
+		Category:    "Skills",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
 		Key:         "pr_visuals.rich",
-		Description: "Generate rich pull-request visuals",
+		Label:       "Rich PR visuals",
+		Description: "Guide AI coworkers to make rich images for pull requests.",
 		LongDescription: `Controls whether AI coworkers are guided to generate rich, review-only
 PNG/SVG visuals for GitHub pull requests.
 
@@ -357,7 +507,8 @@ repository choice; repository choices override a team default.`,
 	},
 	{
 		Key:         "pr_visuals.theme",
-		Description: "Pull-request visual theme",
+		Label:       "PR visual theme",
+		Description: "Light or dark appearance for pull-request visuals.",
 		LongDescription: `Selects the intended appearance of rich GitHub pull-request visuals.
 
   light - White/light canvas with SageOx accents. Default: aligns with GitHub's
@@ -374,7 +525,8 @@ GitHub's own color scheme. Set it at team, repository, or personal scope.`,
 	},
 	{
 		Key:         "pr_visuals.header",
-		Description: "Emit the SageOx PR credit line (header)",
+		Label:       "PR credit line",
+		Description: "Add the SageOx credit line to the top of pull requests.",
 		LongDescription: `Controls whether the ox pr header command emits the top-of-PR SageOx credit
 line — the human-facing counterpart to the SageOx-Session: trailer. It links the
 session(s) and plan(s) that produced the change, names the team, and whispers a
@@ -390,27 +542,12 @@ repository choice; repository choices override a team default.`,
 		Default:     boolToOnOff(config.DefaultPRVisualsHeader),
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo, ConfigLevelTeam},
 	},
-	{
-		Key:         "pr_visuals.style",
-		Description: "PR header enrichment-whisper style",
-		LongDescription: `Selects how the credit line's enrichment whisper renders.
-
-  text  - A small caption. Always works; no image hosting.
-  image - A baked, floated light/dark strip (real type + a Tufte micro-viz).
-          Needs an asset uploader; falls back to text when unavailable.
-  auto  - image when an uploader is available, else text. (default)
-
-Set at team, repository, or personal scope.`,
-		Category:    "Pull requests",
-		ValidValues: []string{config.PRVisualsStyleText, config.PRVisualsStyleImage, config.PRVisualsStyleAuto},
-		Default:     config.DefaultPRVisualsStyle,
-		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo, ConfigLevelTeam},
-	},
 	// NOTE: attribution.plan and attribution.session are intentionally not exposed
 	// in ox config — they are always-on transparency requirements, not user preferences.
 	{
 		Key:         "attribution.commit",
-		Description: "Git commit trailer for AI coworker attribution",
+		Label:       "Commit attribution",
+		Description: "Git trailer added to commits made with an AI coworker. Empty turns it off.",
 		LongDescription: `Controls the git trailer added to commits made with AI coworker assistance.
 
 Any coding agent that touches your code and is deeply involved in the plan
@@ -431,7 +568,8 @@ Default: "Co-Authored-By: SageOx <ox@sageox.ai>"`,
 	},
 	{
 		Key:         "attribution.pr",
-		Description: "PR body attribution for AI coworker contribution",
+		Label:       "PR attribution",
+		Description: "Attribution line added to pull request descriptions. Empty turns it off.",
 		LongDescription: `Controls the attribution line added to pull request descriptions.
 
 When team context shapes the code in a PR — architecture decisions,
@@ -451,7 +589,8 @@ Default: "Co-Authored-By: [SageOx](https://github.com/SageOx)"`,
 	},
 	{
 		Key:         "hooks.userpromptsubmit.cloud_query",
-		Description: "Allow UserPromptSubmit to also query SageOx cloud",
+		Label:       "Cloud recall on prompts",
+		Description: "Also search SageOx cloud for context on each prompt. Sends redacted prompt text.",
 		LongDescription: `Controls whether the UserPromptSubmit hook may issue a remote SageOx
 query IN ADDITION to the always-on local query.
 
@@ -474,7 +613,8 @@ redaction is non-negotiable, not a separate toggle.`,
 	},
 	{
 		Key:         "attribution.score_threshold",
-		Description: "Minimum SageOx contribution score for commit attribution",
+		Label:       "Attribution threshold",
+		Description: "Minimum SageOx contribution score (0.0 to 1.0) before a commit is attributed.",
 		LongDescription: `Controls the threshold at which SageOx earns commit attribution.
 
 AI coworkers self-report how much SageOx team context influenced their work
@@ -489,6 +629,7 @@ commit hook adds the Co-Authored-By trailer.
 Default: 0.5`,
 		Category:    "Attribution",
 		ValidValues: []string{},
+		Number:      &NumberRange{Min: 0, Max: 1},
 		Default:     "0.5",
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
 	},
@@ -545,6 +686,12 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 	// resolve based on key
 	switch key {
 	case "session_recording":
+		// OX_SESSION_RECORDING beats every stored layer at runtime
+		// (config.ResolveSessionRecording) — display must agree, or 'ox
+		// config get session_recording' shows a value that isn't in effect.
+		if envMode := os.Getenv(config.EnvSessionRecording); envMode != "" {
+			cv.EnvVal = config.NormalizeSessionRecording(envMode)
+		}
 		if userCfg != nil && userCfg.Sessions != nil {
 			mode := userCfg.Sessions.GetMode()
 			if mode != "" && mode != "none" {
@@ -556,6 +703,48 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 		}
 		if teamCfg != nil && teamCfg.SessionRecording != "" {
 			cv.TeamVal = config.NormalizeSessionRecording(teamCfg.SessionRecording)
+		}
+
+	case "session_publishing":
+		// OX_SESSION_PUBLISHING beats every stored layer at runtime
+		// (config.ResolveSessionPublishing) — display must agree, since this
+		// is exactly the privacy control a coworker runs 'ox config get' on
+		// to check their posture.
+		if envMode := os.Getenv(config.EnvSessionPublishing); envMode != "" {
+			cv.EnvVal = config.NormalizeSessionPublishing(envMode)
+		}
+		if userCfg != nil && userCfg.SessionPublishing != "" {
+			cv.UserVal = config.NormalizeSessionPublishing(userCfg.SessionPublishing)
+		}
+		if repoCfg != nil && repoCfg.SessionPublishing != "" {
+			cv.RepoVal = config.NormalizeSessionPublishing(repoCfg.SessionPublishing)
+		}
+		if teamCfg != nil && teamCfg.SessionPublishing != "" {
+			cv.TeamVal = config.NormalizeSessionPublishing(teamCfg.SessionPublishing)
+		}
+
+	case "context_git.auto_commit":
+		// DEPRECATED (bead ox-6p5y.11) — never wired to any behavior. Kept
+		// resolvable only so existing config files/scripts don't break; see
+		// the catalog entry's DeprecationNotice for the user-facing message.
+		if userCfg != nil && userCfg.ContextGit != nil && userCfg.ContextGit.AutoCommit != nil {
+			if *userCfg.ContextGit.AutoCommit {
+				cv.UserVal = "on"
+			} else {
+				cv.UserVal = "off"
+			}
+		}
+
+	case "context_git.auto_push":
+		// DEPRECATED (bead ox-6p5y.11) — never wired to any behavior. Kept
+		// resolvable only so existing config files/scripts don't break; see
+		// the catalog entry's DeprecationNotice for the user-facing message.
+		if userCfg != nil && userCfg.ContextGit != nil && userCfg.ContextGit.AutoPush != nil {
+			if *userCfg.ContextGit.AutoPush {
+				cv.UserVal = "on"
+			} else {
+				cv.UserVal = "off"
+			}
 		}
 
 	case "murmur_send":
@@ -600,22 +789,14 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			}
 		}
 
-	case "context_git.auto_commit":
-		if userCfg != nil && userCfg.ContextGit != nil && userCfg.ContextGit.AutoCommit != nil {
-			if *userCfg.ContextGit.AutoCommit {
-				cv.UserVal = "on"
-			} else {
-				cv.UserVal = "off"
-			}
+	case "disposable_machine":
+		if userCfg != nil && userCfg.DisposableMachine != nil {
+			cv.UserVal = boolToOnOff(*userCfg.DisposableMachine)
 		}
 
-	case "context_git.auto_push":
-		if userCfg != nil && userCfg.ContextGit != nil && userCfg.ContextGit.AutoPush != nil {
-			if *userCfg.ContextGit.AutoPush {
-				cv.UserVal = "on"
-			} else {
-				cv.UserVal = "off"
-			}
+	case "skills.claude_org_dedupe":
+		if userCfg != nil && userCfg.Skills != nil && userCfg.Skills.ClaudeOrgDedupe != nil {
+			cv.UserVal = boolToOnOff(*userCfg.Skills.ClaudeOrgDedupe)
 		}
 
 	case "view_format":
@@ -751,21 +932,15 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.TeamVal = boolToOnOff(*teamCfg.PRVisuals.Header)
 		}
 
-	case "pr_visuals.style":
-		if userCfg != nil && userCfg.PRVisuals.IsStyleSet() {
-			cv.UserVal = *userCfg.PRVisuals.Style
-		}
-		if repoCfg != nil && repoCfg.PRVisuals.IsStyleSet() {
-			cv.RepoVal = *repoCfg.PRVisuals.Style
-		}
-		if teamCfg != nil && teamCfg.PRVisuals.IsStyleSet() {
-			cv.TeamVal = *teamCfg.PRVisuals.Style
-		}
-
 	}
 
-	// determine effective value and source (User > Repo > Team > Default)
-	if cv.UserVal != "" {
+	// determine effective value and source (Env > User > Repo > Team > Default).
+	// EnvVal is only ever populated for session_publishing/session_recording
+	// (see their cases above) — every other setting falls through untouched.
+	if cv.EnvVal != "" {
+		cv.Value = cv.EnvVal
+		cv.Source = ConfigLevelEnv
+	} else if cv.UserVal != "" {
 		cv.Value = cv.UserVal
 		cv.Source = ConfigLevelUser
 	} else if cv.RepoVal != "" {
@@ -820,11 +995,11 @@ func SetConfigValue(key, value string, level ConfigLevel, projectRoot string) er
 		return fmt.Errorf("unknown setting: %s", key)
 	}
 
-	// validate value — score_threshold uses float validation, others use ValidValues list
-	if key == "attribution.score_threshold" {
+	// validate value — numeric settings use their range, others use ValidValues list
+	if r := setting.Number; r != nil {
 		f, err := strconv.ParseFloat(value, 64)
-		if err != nil || f < 0.0 || f > 1.0 {
-			return fmt.Errorf("invalid value %q for %s: must be a number between 0.0 and 1.0", value, key)
+		if err != nil || math.IsNaN(f) || f < r.Min || f > r.Max { // NaN passes both comparisons
+			return fmt.Errorf("invalid value %q for %s: must be a number between %.1f and %.1f", value, key, r.Min, r.Max)
 		}
 	} else if len(setting.ValidValues) > 0 {
 		valid := false
@@ -876,6 +1051,29 @@ func setUserConfig(key, value string) error {
 		}
 		cfg.Sessions.Mode = value
 
+	case "session_publishing":
+		cfg.SessionPublishing = value
+
+	case "context_git.auto_commit":
+		// DEPRECATED (bead ox-6p5y.11) — accepted and stored for backward
+		// compatibility only. Never wire this to behavior; see
+		// SetConfigValue's deprecation-notice print and session_publishing.
+		if cfg.ContextGit == nil {
+			cfg.ContextGit = &config.ContextGitConfig{}
+		}
+		enabled := value == "on"
+		cfg.ContextGit.AutoCommit = &enabled
+
+	case "context_git.auto_push":
+		// DEPRECATED (bead ox-6p5y.11) — accepted and stored for backward
+		// compatibility only. Never wire this to behavior; see
+		// SetConfigValue's deprecation-notice print and session_publishing.
+		if cfg.ContextGit == nil {
+			cfg.ContextGit = &config.ContextGitConfig{}
+		}
+		enabled := value == "on"
+		cfg.ContextGit.AutoPush = &enabled
+
 	case "telemetry":
 		enabled := value == "on"
 		cfg.TelemetryEnabled = &enabled
@@ -884,19 +1082,16 @@ func setUserConfig(key, value string) error {
 		enabled := value == "on"
 		cfg.TipsEnabled = &enabled
 
-	case "context_git.auto_commit":
-		if cfg.ContextGit == nil {
-			cfg.ContextGit = &config.ContextGitConfig{}
-		}
+	case "disposable_machine":
 		enabled := value == "on"
-		cfg.ContextGit.AutoCommit = &enabled
+		cfg.DisposableMachine = &enabled
 
-	case "context_git.auto_push":
-		if cfg.ContextGit == nil {
-			cfg.ContextGit = &config.ContextGitConfig{}
+	case "skills.claude_org_dedupe":
+		if cfg.Skills == nil {
+			cfg.Skills = &config.SkillsConfig{}
 		}
 		enabled := value == "on"
-		cfg.ContextGit.AutoPush = &enabled
+		cfg.Skills.ClaudeOrgDedupe = &enabled
 
 	case "view_format":
 		cfg.ViewFormat = value
@@ -1005,12 +1200,6 @@ func setUserConfig(key, value string) error {
 		enabled := value == "on"
 		cfg.PRVisuals.Header = &enabled
 
-	case "pr_visuals.style":
-		if cfg.PRVisuals == nil {
-			cfg.PRVisuals = &config.PRVisualsConfig{}
-		}
-		cfg.PRVisuals.Style = config.StringPtr(value)
-
 	default:
 		return fmt.Errorf("unknown user setting: %s", key)
 	}
@@ -1031,6 +1220,9 @@ func setRepoConfig(key, value, projectRoot string) error {
 	switch key {
 	case "session_recording":
 		cfg.SessionRecording = value
+
+	case "session_publishing":
+		cfg.SessionPublishing = value
 
 	case "murmur_send":
 		cfg.SetMurmuring(value)
@@ -1113,12 +1305,6 @@ func setRepoConfig(key, value, projectRoot string) error {
 		enabled := value == "on"
 		cfg.PRVisuals.Header = &enabled
 
-	case "pr_visuals.style":
-		if cfg.PRVisuals == nil {
-			cfg.PRVisuals = &config.PRVisualsConfig{}
-		}
-		cfg.PRVisuals.Style = config.StringPtr(value)
-
 	default:
 		return fmt.Errorf("setting %s not supported at repo level", key)
 	}
@@ -1149,6 +1335,9 @@ func setTeamConfig(key, value, projectRoot string) error {
 	case "session_recording":
 		cfg.SessionRecording = value
 
+	case "session_publishing":
+		cfg.SessionPublishing = value
+
 	case "pr_visuals.rich":
 		if cfg.PRVisuals == nil {
 			cfg.PRVisuals = &config.PRVisualsConfig{}
@@ -1168,12 +1357,6 @@ func setTeamConfig(key, value, projectRoot string) error {
 		}
 		enabled := value == "on"
 		cfg.PRVisuals.Header = &enabled
-
-	case "pr_visuals.style":
-		if cfg.PRVisuals == nil {
-			cfg.PRVisuals = &config.PRVisualsConfig{}
-		}
-		cfg.PRVisuals.Style = config.StringPtr(value)
 
 	default:
 		return fmt.Errorf("setting %s not supported at team level", key)
@@ -1198,11 +1381,8 @@ func unsetUserConfig(key string) error {
 			}
 		}
 
-	case "telemetry":
-		cfg.TelemetryEnabled = nil
-
-	case "tips":
-		cfg.TipsEnabled = nil
+	case "session_publishing":
+		cfg.SessionPublishing = ""
 
 	case "context_git.auto_commit":
 		if cfg.ContextGit != nil {
@@ -1217,6 +1397,23 @@ func unsetUserConfig(key string) error {
 			cfg.ContextGit.AutoPush = nil
 			if cfg.ContextGit.AutoCommit == nil {
 				cfg.ContextGit = nil
+			}
+		}
+
+	case "telemetry":
+		cfg.TelemetryEnabled = nil
+
+	case "tips":
+		cfg.TipsEnabled = nil
+
+	case "disposable_machine":
+		cfg.DisposableMachine = nil
+
+	case "skills.claude_org_dedupe":
+		if cfg.Skills != nil {
+			cfg.Skills.ClaudeOrgDedupe = nil
+			if *cfg.Skills == (config.SkillsConfig{}) {
+				cfg.Skills = nil
 			}
 		}
 
@@ -1324,14 +1521,6 @@ func unsetUserConfig(key string) error {
 			}
 		}
 
-	case "pr_visuals.style":
-		if cfg.PRVisuals != nil {
-			cfg.PRVisuals.Style = nil
-			if cfg.PRVisuals.IsEmpty() {
-				cfg.PRVisuals = nil
-			}
-		}
-
 	default:
 		return fmt.Errorf("unknown user setting: %s", key)
 	}
@@ -1352,6 +1541,9 @@ func unsetRepoConfig(key, projectRoot string) error {
 	switch key {
 	case "session_recording":
 		cfg.SessionRecording = ""
+
+	case "session_publishing":
+		cfg.SessionPublishing = ""
 
 	case "murmur_send":
 		cfg.SetMurmuring("")
@@ -1445,14 +1637,6 @@ func unsetRepoConfig(key, projectRoot string) error {
 			}
 		}
 
-	case "pr_visuals.style":
-		if cfg.PRVisuals != nil {
-			cfg.PRVisuals.Style = nil
-			if cfg.PRVisuals.IsEmpty() {
-				cfg.PRVisuals = nil
-			}
-		}
-
 	default:
 		return fmt.Errorf("setting %s not supported at repo level", key)
 	}
@@ -1480,6 +1664,9 @@ func unsetTeamConfig(key, projectRoot string) error {
 	case "session_recording":
 		cfg.SessionRecording = ""
 
+	case "session_publishing":
+		cfg.SessionPublishing = ""
+
 	case "pr_visuals.rich":
 		if cfg.PRVisuals != nil {
 			cfg.PRVisuals.Rich = nil
@@ -1499,14 +1686,6 @@ func unsetTeamConfig(key, projectRoot string) error {
 	case "pr_visuals.header":
 		if cfg.PRVisuals != nil {
 			cfg.PRVisuals.Header = nil
-			if cfg.PRVisuals.IsEmpty() {
-				cfg.PRVisuals = nil
-			}
-		}
-
-	case "pr_visuals.style":
-		if cfg.PRVisuals != nil {
-			cfg.PRVisuals.Style = nil
 			if cfg.PRVisuals.IsEmpty() {
 				cfg.PRVisuals = nil
 			}

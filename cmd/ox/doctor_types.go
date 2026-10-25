@@ -55,6 +55,11 @@ func (d *DoctorCheck) RunCheck(fix bool) checkResult {
 // This extends the basic CheckRegistry with slug-based lookup.
 var DoctorCheckRegistry = make(map[string]*DoctorCheck)
 
+// DoctorCheckAliases maps retired public slugs to the canonical check that
+// replaced them. Aliases stay out of DoctorCheckRegistry itself so metadata
+// enrichment and category execution see each check exactly once.
+var DoctorCheckAliases = make(map[string]string)
+
 // RegisterDoctorCheck adds a check with metadata to the registry.
 // The slug must be unique; duplicate registrations will panic.
 func RegisterDoctorCheck(check *DoctorCheck) {
@@ -64,9 +69,28 @@ func RegisterDoctorCheck(check *DoctorCheck) {
 	DoctorCheckRegistry[check.Slug] = check
 }
 
+// RegisterDoctorCheckAlias preserves a public --fix-slug spelling without
+// registering a second executable check. The canonical check must already be
+// registered so a typo cannot create a dangling alias that validation accepts.
+func RegisterDoctorCheckAlias(alias, canonical string) {
+	if _, exists := DoctorCheckRegistry[alias]; exists {
+		panic("doctor check alias collides with check slug: " + alias)
+	}
+	if _, exists := DoctorCheckAliases[alias]; exists {
+		panic("duplicate doctor check alias: " + alias)
+	}
+	if _, exists := DoctorCheckRegistry[canonical]; !exists {
+		panic("doctor check alias has unknown canonical slug: " + canonical)
+	}
+	DoctorCheckAliases[alias] = canonical
+}
+
 // GetDoctorCheck retrieves a check by slug.
 // Returns nil if no check with that slug is registered.
 func GetDoctorCheck(slug string) *DoctorCheck {
+	if canonical, ok := DoctorCheckAliases[slug]; ok {
+		slug = canonical
+	}
 	return DoctorCheckRegistry[slug]
 }
 
@@ -160,8 +184,13 @@ const (
 
 	// Skill checks
 	CheckSlugClaudeSkills = "claude-skills"
+	// CheckSlugLegacyOxFiles owns the one-time transition that takes ox-managed
+	// skills, rules, and commands out of a customer's git history.
+	CheckSlugLegacyOxFiles    = "legacy-ox-files"
+	CheckSlugOxIgnoreRules    = "ox-ignore-rules"
+	CheckSlugOxFilesUntracked = "ox-files-untracked"
 
-	// Rules checks
+	// Deprecated alias: ox-owned rules now share the native inventory check.
 	CheckSlugAdapterRules = "adapter-rules"
 
 	// Session checks
@@ -186,9 +215,6 @@ const (
 	CheckSlugCredentialIntegrity = "credential-integrity"
 	CheckSlugGitPATLiveness      = "git-pat-liveness"
 
-	// Distillation checks
-	CheckSlugGuidanceFiles = "guidance-files"
-
 	// Agent Worker checks
 	CheckSlugAgentWorkerBinary = "agent-worker-binary"
 
@@ -198,6 +224,7 @@ const (
 
 	// Ledger Infrastructure checks
 	CheckSlugLedgerSparseCheckout = "ledger-sparse-checkout"
+	CheckSlugLedgerFleetHealth    = "ledger-fleet-health"
 
 	// Credential hygiene checks (ox-zyg7, ox-yeae): audit local Ledgers for
 	// credential exposure without uploading findings off-machine.

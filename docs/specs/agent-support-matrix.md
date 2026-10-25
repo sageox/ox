@@ -30,9 +30,9 @@ Agent-specific hooks (`ox integrate install --<agent>`) are *additive* — they 
 | Pull whispers (`ox agent whisper`) | Yes | Yes | Yes | Yes | Yes |
 | AGENTS.md / CLAUDE.md marker | Yes (universal) | Yes (universal) | Yes (universal) | Yes (universal + Amp-specific block) | Yes (universal; OpenCode reads AGENTS.md natively) |
 | **Silver: Hooks** | | | | | |
-| Native hook/plugin events | 6 (SessionStart, PreCompact, PostToolUse, Stop, SessionEnd, UserPromptSubmit) | 4 (SessionStart, BeforeAgent, AfterTool, SessionEnd) | 2 (SessionStart, SessionEnd) | 2 (tool:pre-execute, tool:post-execute — experimental) | 27+ (session.*, message.*, tool.*, file.*, command.*, permission.*, lsp.*, server.*, tui.*, shell.*, todo.*) |
-| ox-used hook events | 6 | 4 | 2 | 0 (AGENTS.md marker only) | 1 (session.created) |
-| Phase mapping (agentx) | Full (in agentx) | Local fallback (pending agentx) | Full (in agentx) | N/A | N/A |
+| Native hook/plugin events | 6 (SessionStart, PreCompact, PostToolUse, Stop, SessionEnd, UserPromptSubmit) | 4 (SessionStart, BeforeAgent, AfterTool, SessionEnd) | 12 (SessionStart, SessionEnd, SubagentStart, PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, UserPromptSubmit, SubagentStop, Stop, Interrupt) | 2 (tool:pre-execute, tool:post-execute — experimental) | 27+ (session.*, message.*, tool.*, file.*, command.*, permission.*, lsp.*, server.*, tui.*, shell.*, todo.*) |
+| ox-used hook events | 6 | 4 | 6 (SessionStart, PreToolUse, PostToolUse, UserPromptSubmit, Stop, SessionEnd) | 0 (AGENTS.md marker only) | 1 (session.created) |
+| Phase mapping (agentx) | Full (in agentx) | Local fallback (pending agentx) | Local fallback (pending agentx) | N/A | N/A |
 | Startup banner (JSON stdout) | Yes | Yes | No | No | No |
 | Hook install/uninstall | `ox integrate install` | `ox integrate install --gemini` | `ox integrate install --codex` | `ox integrate install --amp` |
 | `ox doctor` detection + auto-fix | Yes | Yes | Yes | Yes | Yes |
@@ -60,7 +60,8 @@ Agent-specific hooks (`ox integrate install --<agent>`) are *additive* — they 
 
 ## Plan Enrichment (`ox plan`)
 
-`ox plan` enriches an agent-generated implementation plan with deterministic
+`ox plan` enriches an agent-generated plan of any kind — design, GTM, rollout,
+engineering — with deterministic
 SageOx signals (collision / prior-art / expert-route). `ox plan --json` is the
 plumbing path: 0 tokens, no LLM, no network — it computes badges locally. There
 are three graduated levels of exposure:
@@ -247,3 +248,29 @@ No per-agent configuration is required in `.sageox/config.json` — that file is
 ### Future: Pluggable Agent Architecture
 
 See [GitHub issue #394: pluggable agent adapter architecture](https://github.com/sageox/ox/issues/394) for research on whether agent support should be externally pluggable vs compiled-in. Current agent count is 5; as more AI coding agents emerge, the maintenance cost of compiled-in adapters may warrant a plugin registry pattern.
+
+## Skills (added by ADR-031)
+
+Before the 0.15.0 fold this matrix had no skill rows at all, and the lifecycle
+surface (`/ox-prime`, `/ox-status`, `/ox-doctor`, session start/stop) existed only
+as Claude command files — a Claude-only affordance ADR-023 recorded as a
+cross-agent gap. Folding those into skills closes it for every adapter that reads
+a skills root.
+
+| Capability | Claude Code | Codex | Gemini CLI | OMP | Droid |
+|---|---|---|---|---|---|
+| Skills root | `.claude/skills` | `.agents/skills` | `.agents/skills` | `.agents/skills` | — |
+| Rules root | `.claude/rules` | — | — | — | `.factory/rules` |
+| Auto-activating playbooks (`ox-cli-plan`, …) | yes | yes | yes | yes | — |
+| Slash-only lifecycle skills (`ox-cli-prime`, …) | yes | yes | yes | yes | — |
+| Honors `disable-model-invocation` | yes (documented) | **unverified** | **unverified** | **unverified** | n/a |
+
+**The unverified row is load-bearing, not a footnote.** Codex, Gemini, and OMP
+share one `.agents/skills` projection. If they do not honor
+`disable-model-invocation`, 13 lifecycle and diagnostic skills enter their context
+with descriptions and become model-invocable — so ADR-023's "lifecycle stays
+explicit" ruling would silently fail on exactly the agents the fold was meant to
+help. Treat these cells as unverified until observed on a real client.
+
+Note that Claude Code does **not** read `.agents/skills`; the cross-agent reach
+comes from ox writing a separate projection, not from a shared directory.

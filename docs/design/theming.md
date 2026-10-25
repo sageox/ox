@@ -42,8 +42,8 @@ Mechanism in code:
 ```go
 // internal/theme/generated.go (synced from sageox-design)
 ColorPrimary = compat.AdaptiveColor{
-    Light: lipgloss.Color("#4F6A48"),
-    Dark:  lipgloss.Color("#7A8F78"),
+    Light: lipgloss.Color("#3D643B"),
+    Dark:  lipgloss.Color("#7AAA77"),
 }
 ```
 
@@ -58,11 +58,11 @@ lipgloss v1 downsampled inside `Style.Render()`. **lipgloss v2 does not** — `R
 Skipping that step is not a cosmetic downgrade. A terminal without 24-bit support — macOS Terminal.app, or anything reporting `TERM=xterm-256color` with no `COLORTERM` — does not ignore an unrecognized `38;2;…`; it parses the parameters as independent SGR codes. Any channel landing in 100–107 becomes a **background** color:
 
 ```text
-#E0A56A  →  ESC[38;2;224;165;106m  →  224, 165, and 106 read separately
+#12346A  →  ESC[38;2;18;52;106m  →  18, 52, and 106 read separately
                                        106 = bright-cyan background
 ```
 
-That is how brand copper turned the `ox --help` command column and the login disclaimer into unreadable grey-on-cyan blocks. Other tokens sit one step from the same trap (`#2DD4BF` starts `0x2D` = 45 = magenta background), so the fix is the conversion, not a safer hex.
+That is how a prior brand color turned the `ox --help` command column and the login disclaimer into unreadable grey-on-cyan blocks. Other tokens sit one step from the same trap (`#2DD4BF` starts `0x2D` = 45 = magenta background), so the fix is the conversion, not a safer hex.
 
 | Profile | Emits | Typical terminal |
 |---|---|---|

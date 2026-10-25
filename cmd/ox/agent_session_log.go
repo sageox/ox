@@ -13,6 +13,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session"
 )
 
@@ -100,12 +101,15 @@ func runAgentSessionLog(w io.Writer, inst *agentinstance.Instance, args []string
 	if state == nil {
 		return fmt.Errorf("no active session\nRun 'ox agent %s session start' first", inst.AgentID)
 	}
+	if state.AdapterName == "cursor" {
+		return fmt.Errorf("unsupported-scope: session log cannot add entries to a native Cursor recording")
+	}
 
 	// determine the target file path
 	targetFile := sessionLogTargetFile(state)
 
 	// append entry with file locking
-	seq, err := appendSessionLogEntry(targetFile, role, content, toolName, toolInput)
+	seq, err := appendSessionLogEntryForProject(targetFile, projectRoot, role, content, toolName, toolInput)
 	if err != nil {
 		return fmt.Errorf("failed to append log entry: %w", err)
 	}
@@ -136,12 +140,7 @@ func runAgentSessionLog(w io.Writer, inst *agentinstance.Instance, args []string
 		Success: true,
 		Seq:     seq,
 	}
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
-		return fmt.Errorf("format log JSON: %w", err)
-	}
-	fmt.Fprintln(w, string(jsonOut))
-	return nil
+	return cli.PrintJSONTo(w, output)
 }
 
 // sessionLogTargetFile determines which file to append log entries to.
@@ -158,6 +157,12 @@ func sessionLogTargetFile(state *session.RecordingState) string {
 // Uses file locking to handle concurrent writes safely.
 // Returns the seq number of the appended entry.
 func appendSessionLogEntry(filePath, role, content, toolName, toolInput string) (int, error) {
+	return appendSessionLogEntryForProject(filePath, "", role, content, toolName, toolInput)
+}
+
+// appendSessionLogEntryForProject retains the generic adapter's native framing
+// while enforcing the same mandatory redaction boundary as recorded raw turns.
+func appendSessionLogEntryForProject(filePath, projectRoot, role, content, toolName, toolInput string) (int, error) {
 	lockPath := filePath + ".lock"
 	fl := flock.New(lockPath)
 
@@ -177,12 +182,11 @@ func appendSessionLogEntry(filePath, role, content, toolName, toolInput string) 
 	lastSeq := lastSeqFromFile(filePath)
 	nextSeq := lastSeq + 1
 
-	// open file for append
-	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	writer, err := session.NewRawWriter(filePath, projectRoot)
 	if err != nil {
-		return 0, fmt.Errorf("open session file: %w", err)
+		return 0, fmt.Errorf("open guarded session log: %w", err)
 	}
-	defer f.Close()
+	defer writer.Close()
 
 	entry := sessionLogEntry{
 		Type:      role,
@@ -194,17 +198,10 @@ func appendSessionLogEntry(filePath, role, content, toolName, toolInput string) 
 		ToolInput: toolInput,
 	}
 
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return 0, fmt.Errorf("marshal entry: %w", err)
-	}
-
-	// write entry followed by newline
-	if _, err := f.Write(append(data, '\n')); err != nil {
+	if err := writer.WriteValue(entry); err != nil {
 		return 0, fmt.Errorf("write entry: %w", err)
 	}
-
-	if err := f.Sync(); err != nil {
+	if err := writer.CloseAndSync(); err != nil {
 		return 0, fmt.Errorf("sync session file: %w", err)
 	}
 

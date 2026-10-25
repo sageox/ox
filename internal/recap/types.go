@@ -220,7 +220,7 @@ const (
 // guidanceText instructs the calling agent how to narrate the bundle. It is the
 // load-bearing honesty contract: the agent must ground every claim in a receipt
 // and must never fall back to bare counts or invent value. Behavior lives here
-// (in the command's JSON) rather than in the ox-recap skill body, so every
+// (in the command's JSON) rather than in the ox-cli-recap skill body, so every
 // adapter — Claude, Codex, others — gets identical behavior.
 const guidanceText = "Write a tight, personal, prose answer to the user's question " +
 	"\"what value am I getting from SageOx?\" — why to keep using it and what value it has " +

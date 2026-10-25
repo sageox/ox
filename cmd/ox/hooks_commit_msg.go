@@ -111,7 +111,10 @@ func runHooksCommitMsg(cmd *cobra.Command, args []string) error {
 			// to avoid picking a random session from a different worktree
 			state, loadErr = session.LoadRecordingStateForWorkspace(projectRoot, projectRoot)
 		}
-		if loadErr == nil && state != nil {
+		// A session held on this machine is never registered, so its link
+		// would 404 from git history for good. The session still records this
+		// commit (hooks_post_commit.go), which links them if it is uploaded.
+		if loadErr == nil && state != nil && !stopHoldsSession(projectRoot, state) {
 			// durable /c/ link preferred; recordings started under an older
 			// binary carry no start-minted ID — name-based fallback
 			sessionURL := buildConversationURL(cfg, state.SessionID)
@@ -151,7 +154,10 @@ func runHooksCommitMsg(cmd *cobra.Command, args []string) error {
 //
 // Decision logic:
 //   - No agent ID (human commit): attribute unconditionally (they opted in via ox init)
-//   - No score file (old agent or not yet reported): attribute unconditionally (backward compat)
+//   - Agent with no score reported: do NOT attribute. An agent that never ran `ox session
+//     score` has no established SageOx influence, so stamping the trailer anyway is the
+//     fabricated-attribution failure mode reported in #809. Scoring is how an agent earns
+//     the trailer; unscored means `none`.
 //   - Score file exists: attribute only when score >= threshold
 func shouldAttributeCommit(agentID string, attr config.ResolvedAttribution) bool {
 	if agentID == "" {
@@ -160,7 +166,7 @@ func shouldAttributeCommit(agentID string, attr config.ResolvedAttribution) bool
 
 	scoreFile, _ := session.ReadSageoxScore(agentID)
 	if scoreFile == nil {
-		return true // no score reported — backward compat: unconditional
+		return false // agent never reported a score — no established influence, so no trailer (#809)
 	}
 
 	return scoreFile.Score >= attr.ScoreThreshold

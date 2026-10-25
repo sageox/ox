@@ -3,9 +3,12 @@ package ledger
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -32,8 +35,10 @@ type FetchedPR struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	MergedAt  *time.Time
+	ClosedAt  *time.Time
 	MergeSHA  string
 	HTMLURL   string
+	Draft     bool
 }
 
 // FetchedIssue is a GitHub issue as returned by the fetcher.
@@ -94,6 +99,58 @@ type SyncResult struct {
 	IssueTotal   int
 	IssueCreated int
 	IssueUpdated int
+	// PRFailed and IssueFailed count items left unsynced because their
+	// comments could not be fetched. They are retried on the next sync.
+	PRFailed    int
+	IssueFailed int
+}
+
+// syncWindow tracks one sync pass's listing window and the items it failed to
+// save, and turns them into the next cursor.
+type syncWindow struct {
+	start       time.Time // now - maxDays
+	since       time.Time // what the listing asked for
+	oldestFail  time.Time // earliest updated_at among failed items
+	failedItems int
+}
+
+// newSyncWindow picks where to list from. Normally that is LastSyncAt
+// (incremental). When the requested window reaches further back than any
+// earlier run covered, it lists the whole window instead, so a wider --days
+// takes effect on its own. Items already known and unchanged are skipped
+// without per-item API calls, so re-listing costs only the listing pages.
+func newSyncWindow(state *GitHubTypeSyncState, maxDays int) *syncWindow {
+	w := &syncWindow{start: time.Now().AddDate(0, 0, -maxDays)}
+	w.since = w.start
+	covered := !state.CoveredSince.IsZero() && !w.start.Before(state.CoveredSince)
+	if covered && state.LastSyncAt.After(w.since) {
+		w.since = state.LastSyncAt
+	}
+	return w
+}
+
+// fail records an item that was listed but could not be saved.
+func (w *syncWindow) fail(updatedAt time.Time) {
+	if w.failedItems == 0 || updatedAt.Before(w.oldestFail) {
+		w.oldestFail = updatedAt
+	}
+	w.failedItems++
+}
+
+// advance moves the state's cursors past this pass. Neither cursor may pass an
+// item that failed: holding both at its updated_at makes the next run whose
+// window includes it list it again, and its unchanged KnownItem (or absence)
+// makes that run fetch it again.
+func (w *syncWindow) advance(state *GitHubTypeSyncState) {
+	if w.failedItems > 0 {
+		state.LastSyncAt = w.oldestFail
+		state.CoveredSince = w.oldestFail
+		return
+	}
+	state.LastSyncAt = time.Now()
+	if state.CoveredSince.IsZero() || w.start.Before(state.CoveredSince) {
+		state.CoveredSince = w.start
+	}
 }
 
 // SyncPRs fetches PRs from GitHub and writes them to the ledger.
@@ -118,16 +175,13 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 		}
 	}
 
-	since := time.Now().AddDate(0, 0, -maxDays)
-	if !state.LastSyncAt.IsZero() && state.LastSyncAt.After(since) {
-		since = state.LastSyncAt
-	}
+	window := newSyncWindow(state, maxDays)
 
-	logger.Info("fetching PRs from GitHub", "owner", owner, "repo", repo, "since", since.Format(time.RFC3339))
+	logger.Info("fetching PRs from GitHub", "owner", owner, "repo", repo, "since", window.since.Format(time.RFC3339))
 
 	prs, _, err := fetcher.ListPullRequests(ctx, owner, repo, ListPRsOptions{
 		State: "all",
-		Since: since,
+		Since: window.since,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list PRs: %w", err)
@@ -157,8 +211,21 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 			continue
 		}
 
-		// fetch comments for new PRs or state transitions
-		comments := fetchPRComments(ctx, fetcher, owner, repo, pr.Number, logger)
+		// fetch comments for new PRs or state transitions. Without them the
+		// snapshot would be incomplete, and because it would carry the PR's
+		// current updated_at it would replace the last complete one for every
+		// reader. Leave the PR unsynced instead; the cursor holds so the next
+		// sync retries it.
+		comments, cErr := fetchPRComments(ctx, fetcher, owner, repo, pr.Number)
+		if cErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return result, ctxErr
+			}
+			logger.Warn("fetch PR comments failed, will retry next sync", "pr", pr.Number, "error", cErr)
+			window.fail(pr.UpdatedAt)
+			result.PRFailed++
+			continue
+		}
 
 		// fetch commits for merged PRs — only when first seen as merged
 		// (commit list is immutable once merged, no need to re-fetch)
@@ -173,9 +240,11 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 			Body:        pr.Body,
 			Author:      pr.Author,
 			State:       prState,
+			Draft:       pr.Draft,
 			Labels:      pr.Labels,
 			CreatedAt:   pr.CreatedAt,
 			MergedAt:    pr.MergedAt,
+			ClosedAt:    pr.ClosedAt,
 			UpdatedAt:   pr.UpdatedAt,
 			MergeCommit: pr.MergeSHA,
 			URL:         pr.HTMLURL,
@@ -207,7 +276,7 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 	}
 
 	// persist updated state
-	state.LastSyncAt = time.Now()
+	window.advance(state)
 	state.Count += result.PRCreated
 	if err := WriteGitHubTypeSyncState(ledgerPath, "pr", state); err != nil {
 		return result, fmt.Errorf("write pr sync state: %w", err)
@@ -234,16 +303,13 @@ func SyncIssues(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, r
 		}
 	}
 
-	since := time.Now().AddDate(0, 0, -maxDays)
-	if !state.LastSyncAt.IsZero() && state.LastSyncAt.After(since) {
-		since = state.LastSyncAt
-	}
+	window := newSyncWindow(state, maxDays)
 
-	logger.Info("fetching issues from GitHub", "owner", owner, "repo", repo, "since", since.Format(time.RFC3339))
+	logger.Info("fetching issues from GitHub", "owner", owner, "repo", repo, "since", window.since.Format(time.RFC3339))
 
 	issues, _, err := fetcher.ListIssues(ctx, owner, repo, ListIssuesOptions{
 		State: "all",
-		Since: since,
+		Since: window.since,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list issues: %w", err)
@@ -265,18 +331,24 @@ func SyncIssues(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, r
 			continue
 		}
 
-		var comments []IssueComment
+		// a failed comment fetch leaves the issue unsynced — see SyncPRs
 		fetched, cErr := fetcher.ListIssueComments(ctx, owner, repo, issue.Number)
 		if cErr != nil {
-			logger.Warn("fetch issue comments failed", "issue", issue.Number, "error", cErr)
-		} else {
-			for _, c := range fetched {
-				comments = append(comments, IssueComment{
-					Author:    c.Author,
-					Body:      c.Body,
-					CreatedAt: c.CreatedAt,
-				})
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return result, ctxErr
 			}
+			logger.Warn("fetch issue comments failed, will retry next sync", "issue", issue.Number, "error", cErr)
+			window.fail(issue.UpdatedAt)
+			result.IssueFailed++
+			continue
+		}
+		var comments []IssueComment
+		for _, c := range fetched {
+			comments = append(comments, IssueComment{
+				Author:    c.Author,
+				Body:      c.Body,
+				CreatedAt: c.CreatedAt,
+			})
 		}
 
 		issueFile := &IssueFile{
@@ -307,7 +379,7 @@ func SyncIssues(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, r
 		result.IssueTotal++
 	}
 
-	state.LastSyncAt = time.Now()
+	window.advance(state)
 	state.Count += result.IssueCreated
 	if err := WriteGitHubTypeSyncState(ledgerPath, "issue", state); err != nil {
 		return result, fmt.Errorf("write issue sync state: %w", err)
@@ -326,32 +398,65 @@ func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, o
 	}
 
 	// Deduplicate: when multiple hash-variant files exist for the same PR,
-	// keep only the path with the latest updated_at.
+	// keep only the path with the latest updated_at, preferring the variant
+	// that still lacks commits when that ties (see below).
 	type prPathInfo struct {
-		path      string
-		updatedAt time.Time
+		path       string
+		updatedAt  time.Time
+		hasCommits bool
 	}
 	bestByNumber := make(map[int]prPathInfo)
+
+	// Files that vanish between the directory walk and the read (outside the
+	// ledger's sparse checkout, or removed by a concurrent checkout) are
+	// expected, not failures. They are counted and summarized once per pass
+	// instead of logged per file: a single pass hit 925 of them in 3 minutes.
+	var skippedMissing int
+	defer func() {
+		if skippedMissing > 0 {
+			logger.Debug("PR backfill skipped files that are not on disk", "skipped", skippedMissing)
+		}
+	}()
 
 	for _, path := range prFiles {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			logger.Warn("read PR file for backfill failed", "path", path, "error", err)
+			if errors.Is(err, fs.ErrNotExist) {
+				skippedMissing++
+				logger.Debug("PR file for backfill not on disk", "path", path)
+			} else {
+				logger.Warn("read PR file for backfill failed", "path", path, "error", err)
+			}
 			continue
 		}
 
 		var stub struct {
-			Number    int       `json:"number"`
-			UpdatedAt time.Time `json:"updated_at"`
+			Number    int               `json:"number"`
+			UpdatedAt time.Time         `json:"updated_at"`
+			Commits   []json.RawMessage `json:"commits"`
 		}
 		if err := json.Unmarshal(data, &stub); err != nil {
 			logger.Warn("unmarshal PR file for backfill failed", "path", path, "error", err)
 			continue
 		}
 
+		cand := prPathInfo{path: path, updatedAt: stub.UpdatedAt, hasCommits: len(stub.Commits) > 0}
 		prev, exists := bestByNumber[stub.Number]
-		if !exists || stub.UpdatedAt.After(prev.updatedAt) {
-			bestByNumber[stub.Number] = prPathInfo{path: path, updatedAt: stub.UpdatedAt}
+
+		// On a tie, prefer the snapshot that still lacks commits. A ledger
+		// written before the supersede below existed can hold both variants of
+		// one GitHub state, and their updated_at is identical by construction.
+		// Picking the enriched one there would make this loop skip the PR (it
+		// already has commits) and strand the commit-less duplicate on disk
+		// forever — exactly the tie a reader can lose. Picking the commit-less
+		// one re-runs the enrichment and lets the supersede clean it up, so an
+		// already-broken ledger heals on the next backfill instead of needing
+		// the writer to have been fixed before the files were written.
+		better := !exists ||
+			cand.updatedAt.After(prev.updatedAt) ||
+			(cand.updatedAt.Equal(prev.updatedAt) && prev.hasCommits && !cand.hasCommits)
+		if better {
+			bestByNumber[stub.Number] = cand
 		}
 	}
 
@@ -363,7 +468,12 @@ func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, o
 
 		data, err := os.ReadFile(info.path)
 		if err != nil {
-			logger.Warn("read PR file for backfill failed", "path", info.path, "error", err)
+			if errors.Is(err, fs.ErrNotExist) {
+				skippedMissing++
+				logger.Debug("PR file for backfill not on disk", "path", info.path)
+			} else {
+				logger.Warn("read PR file for backfill failed", "path", info.path, "error", err)
+			}
 			continue
 		}
 
@@ -384,9 +494,44 @@ func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, o
 		}
 
 		pr.Commits = commits
-		if err := WriteGitHubPR(ledgerPath, &pr); err != nil {
+		newPath, err := writeGitHubPR(ledgerPath, &pr)
+		if err != nil {
 			logger.Warn("write backfilled PR failed", "pr", pr.Number, "error", err)
 			continue
+		}
+
+		// Drop the snapshot we just enriched. Both files describe the SAME
+		// GitHub state — backfilling commits does not change the PR upstream,
+		// so updated_at is identical in both — and every consumer that has to
+		// pick one (findLatestFile here, candidateBeats in
+		// internal/codedb/index, the dedup above) orders by updated_at first.
+		// With that key tied the choice falls through to mtime, which ties too
+		// when both writes land in the same tick, and the winner is then the
+		// content hash: a coin flip that can hand a reader the commit-less
+		// snapshot. Leaving a strictly-less-complete duplicate of the same
+		// state on disk is what makes the tie possible, so remove it.
+		//
+		// Deliberately NOT fixed by bumping pr.UpdatedAt: that field mirrors
+		// GitHub's own updated_at, and RebuildSyncStateFromFiles feeds the max
+		// of it into GitHubTypeSyncState.LastSyncAt, which is the `since`
+		// cursor for the next incremental fetch. Inflating it would make ox
+		// skip PRs updated between GitHub's timestamp and ours.
+		// The inequality is an invariant guard, not a reachable case: adding
+		// commits always changes the content, so it always changes the hash.
+		// It is here because the cost of it ever being wrong is deleting the
+		// snapshot we just wrote.
+		if newPath != info.path {
+			// writeGitHubPR trusts a file already at newPath, so a torn one
+			// left by an earlier crash would pass for the enriched snapshot.
+			// Fail closed: the original goes only once its replacement reads
+			// back with the commits, otherwise the PR could vanish.
+			if !snapshotHoldsCommits(newPath, pr.Number) {
+				logger.Warn("keeping PR snapshot: replacement is not intact", "pr", pr.Number, "path", info.path, "replacement", newPath)
+				continue
+			}
+			if rmErr := os.Remove(info.path); rmErr != nil && !os.IsNotExist(rmErr) {
+				logger.Warn("remove superseded PR snapshot failed", "pr", pr.Number, "path", info.path, "error", rmErr)
+			}
 		}
 
 		backfilled++
@@ -396,9 +541,49 @@ func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, o
 	return backfilled, nil
 }
 
+// snapshotHoldsCommits reports whether path parses as a snapshot of PR number
+// that carries commits.
+func snapshotHoldsCommits(path string, number int) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var stub struct {
+		Number  int               `json:"number"`
+		Commits []json.RawMessage `json:"commits"`
+	}
+	return json.Unmarshal(data, &stub) == nil && stub.Number == number && len(stub.Commits) > 0
+}
+
+// ErrGitHubNotFound marks a GitHub API 404. Fetchers wrap it so sync can tell a
+// resource that is gone (a merged PR whose head branch was deleted) from a
+// transient failure.
+var ErrGitHubNotFound = errors.New("github resource not found")
+
+// prCommitsNotFound remembers PRs whose commits endpoint answered 404, keyed by
+// owner/repo#number, for the life of the process. Without it the backfill pass
+// asks again for the same dead PRs on every sync cycle. A daemon restart clears
+// it, costing one retry per PR.
+var prCommitsNotFound sync.Map
+
+// ResetPRCommitsNotFound clears the 404 memo so tests do not share
+// process-wide state.
+func ResetPRCommitsNotFound() {
+	prCommitsNotFound.Clear()
+}
+
 func fetchPRCommits(ctx context.Context, fetcher GitHubFetcher, owner, repo string, number int, logger *slog.Logger) []PRCommit {
+	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
+	if _, gone := prCommitsNotFound.Load(key); gone {
+		return nil
+	}
 	fetched, err := fetcher.ListPRCommits(ctx, owner, repo, number)
 	if err != nil {
+		if errors.Is(err, ErrGitHubNotFound) {
+			prCommitsNotFound.Store(key, struct{}{})
+			logger.Warn("PR commits not found, skipping until daemon restart", "pr", number, "error", err)
+			return nil
+		}
 		logger.Warn("fetch PR commits failed", "pr", number, "error", err)
 		return nil
 	}
@@ -409,26 +594,24 @@ func fetchPRCommits(ctx context.Context, fetcher GitHubFetcher, owner, repo stri
 	return commits
 }
 
-func fetchPRComments(ctx context.Context, fetcher GitHubFetcher, owner, repo string, number int, logger *slog.Logger) []PRComment {
-	var comments []PRComment
-
+// fetchPRComments returns a PR's review and conversation comments, or an
+// error if either listing failed: a partial list is not a PR's discussion.
+func fetchPRComments(ctx context.Context, fetcher GitHubFetcher, owner, repo string, number int) ([]PRComment, error) {
 	reviewComments, err := fetcher.ListPRComments(ctx, owner, repo, number)
 	if err != nil {
-		logger.Warn("fetch review comments failed", "pr", number, "error", err)
-	} else {
-		for _, c := range reviewComments {
-			comments = append(comments, PRComment(c))
-		}
+		return nil, fmt.Errorf("review comments: %w", err)
 	}
-
 	issueComments, err := fetcher.ListIssueComments(ctx, owner, repo, number)
 	if err != nil {
-		logger.Warn("fetch issue comments failed", "pr", number, "error", err)
-	} else {
-		for _, c := range issueComments {
-			comments = append(comments, PRComment(c))
-		}
+		return nil, fmt.Errorf("conversation comments: %w", err)
 	}
 
-	return comments
+	var comments []PRComment
+	for _, c := range reviewComments {
+		comments = append(comments, PRComment(c))
+	}
+	for _, c := range issueComments {
+		comments = append(comments, PRComment(c))
+	}
+	return comments, nil
 }

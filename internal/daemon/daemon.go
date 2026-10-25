@@ -62,6 +62,24 @@ const (
 	restartHistoryFile  = "daemon-restarts.json"
 )
 
+// Shutdown budgets. shutdown() waits for the CodeDB indexer, then for the
+// daemon's own goroutines; these bound each wait.
+const (
+	shutdownCodeDBDrainTimeout   = 30 * time.Second
+	shutdownGoroutineWaitTimeout = 5 * time.Second
+
+	// MaxGracefulShutdown is the longest a healthy daemon takes to exit after a
+	// stop request: the two waits above, back to back. Callers that wait for the
+	// daemon to exit (`ox daemon stop`/`restart`) derive their patience from
+	// this so the two can never drift apart — a CLI that gives up after 2s
+	// reports "did not stop" for a daemon that is correctly draining.
+	MaxGracefulShutdown = shutdownCodeDBDrainTimeout + shutdownGoroutineWaitTimeout
+)
+
+// daemonMaxProcs bounds how many cores the daemon's Go code runs on at once.
+// Indexing and reconcile finish later, never hotter.
+const daemonMaxProcs = 2
+
 // ErrNotRunning indicates the daemon is not running.
 var ErrNotRunning = errors.New("daemon not running")
 
@@ -115,7 +133,10 @@ func saveRestartHistory(h *restartHistory) error {
 
 // recordRestart adds the current time to restart history.
 func recordRestart() error {
-	h, _ := loadRestartHistory() // ignore errors, start fresh if needed
+	h, err := loadRestartHistory()
+	if err != nil {
+		h = &restartHistory{} // unreadable history: start fresh rather than dereference nil
+	}
 	h.Restarts = append(h.Restarts, time.Now())
 	return saveRestartHistory(h)
 }
@@ -283,6 +304,9 @@ func (d *Daemon) checkDeadAgentsAndFinalize() {
 			)
 
 			if d.sessionFinalizeHandler != nil {
+				if d.sessionWatcher != nil {
+					d.sessionWatcher.Cleanup()
+				}
 				items := d.sessionFinalizeHandler.DetectOrphanedForAgent(d.config.LedgerPath, agentID, pid)
 				for _, item := range items {
 					if d.agentWorker.Enqueue(item) {
@@ -312,15 +336,75 @@ func (d *Daemon) hasPendingWork() bool {
 	if d.sessionWatcher != nil && len(d.sessionWatcher.ActiveSessions()) > 0 {
 		return true
 	}
+	// a first Ledger clone can download for many minutes with no IPC traffic;
+	// exiting idle would cancel it and the next start would begin from zero
+	if d.scheduler != nil && d.scheduler.clonesInFlight() {
+		return true
+	}
 	return false
 }
 
-// RestartRequested returns true if the daemon stopped due to a version mismatch
-// and should be re-executed with the updated binary.
+// RestartRequested returns true if the daemon stopped to be re-executed: after
+// a version mismatch, to run the updated binary, or under disposable_machine
+// once the Ledger's first clone lands.
 func (d *Daemon) RestartRequested() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.restartRequested
+}
+
+// startAutofix starts the periodic auto-fix scheduler (ox-0xgx). It runs the
+// registered auto-fix-safe doctor checks on a slow cadence so silent drift
+// (init artifacts reverted from git, legacy hook formats in settings.json,
+// etc.) gets repaired without anyone typing `ox doctor`. The set of checks
+// lives in internal/doctor/autofix/default_checks.go and is intentionally
+// small at first — incremental migration of cmd/ox/doctor_*.go auto-safe
+// checks happens in follow-up beads.
+//
+// Off under disposable_machine: the machine runs one job, and the checks
+// rewrite files in every Ledger under the home, not only this job's.
+func (d *Daemon) startAutofix() {
+	if d.config.ProjectRoot == "" || d.config.DisposableMachine {
+		return
+	}
+	autofixReg := autofix.Default()
+	d.autofixSched = autofix.NewScheduler(autofixReg, d.logger,
+		func() []string { return []string{d.config.ProjectRoot} },
+		d.routeAutofixResult)
+	d.autofixSched.SetLedgerPaths(d.autofixLedgerPaths)
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		d.autofixSched.Run(d.ctx)
+	}()
+}
+
+// restartAfterFirstLedgerClone restarts the daemon, under disposable_machine,
+// once a background clone lands the Ledger it started without: LedgerPath is
+// fixed at start, and a disposable machine's daemon runs for the whole job.
+// This machine made the clone, so none of its locks are another machine's.
+func (d *Daemon) restartAfterFirstLedgerClone() {
+	if !d.config.DisposableMachine || d.config.LedgerPath != "" {
+		return
+	}
+	d.scheduler.SetLedgerClonedCallback(func(ledgerPath string) {
+		if err := writeLedgerLockMarker(ledgerLocksClearedMarker(ledgerPath)); err != nil {
+			d.logger.Warn("could not record that the Ledger's git locks were cleared", "path", ledgerPath, "error", err)
+			return
+		}
+		d.logger.Info("restarting to pick up the Ledger's first clone", "path", ledgerPath)
+		d.requestRestart()
+	})
+}
+
+// requestRestart stops the daemon so that runDaemonForeground re-executes it.
+func (d *Daemon) requestRestart() {
+	d.mu.Lock()
+	d.restartRequested = true
+	d.mu.Unlock()
+	go func() {
+		_ = d.Stop() // best-effort; caller checks RestartRequested() and re-execs regardless
+	}()
 }
 
 // Start starts the daemon in the foreground.
@@ -337,8 +421,12 @@ func (d *Daemon) Start() error {
 		throttleDuration = time.Since(throttleStart)
 	}
 
-	// record this startup attempt for loop detection
-	if err := recordRestart(); err != nil {
+	// record this startup attempt for loop detection, unless the spawner
+	// killed a live daemon to make room for us: that restart is deliberate
+	if os.Getenv(supersedeEnvVar) != "" {
+		_ = os.Unsetenv(supersedeEnvVar) // don't leak to children we spawn
+		d.logger.Debug("startup supersedes a live daemon, not recording restart")
+	} else if err := recordRestart(); err != nil {
 		d.logger.Debug("failed to record restart", "error", err)
 	}
 
@@ -364,6 +452,19 @@ func (d *Daemon) Start() error {
 		debug.SetGCPercent(daemonGCPercent)
 		d.logger.Debug("set GC target", "gogc", daemonGCPercent)
 	}
+
+	// Background work must never compete with the coworker's foreground work.
+	// Do this before any worker starts so the threads and git children they
+	// spawn inherit the lower priority.
+	if err := lowerDaemonPriority(); err != nil {
+		d.logger.Debug("could not lower daemon priority", "error", err)
+	}
+	// Cap parallelism too: the daemon's work is batch work, and an unbounded
+	// index pass used every core it could get (185% measured).
+	if runtime.GOMAXPROCS(0) > daemonMaxProcs {
+		runtime.GOMAXPROCS(daemonMaxProcs)
+	}
+	d.logger.Info("daemon priority", "nice", daemonNiceness, "gomaxprocs", runtime.GOMAXPROCS(0))
 
 	// write PID file (informational only)
 	if err := d.writePidFile(); err != nil {
@@ -759,7 +860,7 @@ func (d *Daemon) shutdown() error {
 	// flush in well under that. We do this BEFORE wg.Wait so the wg timeout
 	// only governs the daemon's own goroutines.
 	if d.codedb != nil {
-		drainCtx, drainCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), shutdownCodeDBDrainTimeout)
 		drainStart := time.Now()
 		if err := d.codedb.WaitIdle(drainCtx); err != nil {
 			d.logger.Warn("codedb did not drain before shutdown timeout; in-flight bleve batch may be killed",
@@ -771,21 +872,36 @@ func (d *Daemon) shutdown() error {
 		drainCancel()
 	}
 
-	// Wait for goroutines with a fixed 5s timeout — codedb drain handled
-	// above out-of-band.
+	// Wait for goroutines — codedb drain handled above out-of-band.
 	done := make(chan struct{})
 	go func() {
 		d.wg.Wait()
 		close(done)
 	}()
 
+	return d.awaitGoroutines(done, shutdownGoroutineWaitTimeout)
+}
+
+// awaitGoroutines finishes shutdown once the daemon's goroutines have exited
+// (done is closed) or timeout elapses, whichever comes first. Either way the
+// socket, PID file and registry entry are cleaned up; on timeout it returns
+// ErrShutdownTimeout.
+func (d *Daemon) awaitGoroutines(done <-chan struct{}, timeout time.Duration) error {
 	select {
 	case <-done:
 		d.logger.Info("graceful shutdown complete")
-		d.cleanup() // only cleanup after successful wait
-	case <-time.After(5 * time.Second):
+		d.cleanup()
+	case <-time.After(timeout):
 		d.logger.Warn("shutdown timeout, forcing exit")
-		// don't cleanup - let OS clean up to avoid corrupting running goroutines
+		// The process exits right after this returns, so straggler goroutines
+		// die with it. What must NOT outlive it is the socket file, PID file
+		// and registry entry: left behind they make the daemon look alive
+		// (GetState trusts a socket file plus a registry PID) and leave the
+		// next `ox daemon stop` dialing a socket with no listener. cleanup()
+		// touches only those files and the already-released lease, never state
+		// the stragglers use, and refuses to remove files a replacement daemon
+		// now owns.
+		d.cleanup()
 		d.mu.Lock()
 		d.running = false
 		d.mu.Unlock()
@@ -871,6 +987,12 @@ func (d *Daemon) releaseGlobalSyncLease() {
 // cleanup removes PID and socket files.
 // When the daemon was superseded by a new instance, skip removing the socket
 // and registry entry — those now belong to the replacement daemon.
+//
+// Supersession is checked twice: d.wasSuperseded covers a takeover noticed by
+// the socket self-check, and superseded() re-reads the registry now because
+// shutdown can take up to MaxGracefulShutdown, long enough for `ox daemon
+// restart` to start a replacement that registers under this same workspace ID
+// and binds this same socket path after the self-check loop has already exited.
 func (d *Daemon) cleanup() {
 	// Release the global-sync lease regardless of supersession. flock is
 	// auto-released on process exit, but Release() also unblocks the
@@ -879,7 +1001,7 @@ func (d *Daemon) cleanup() {
 	if d.scheduler != nil {
 		d.scheduler.ReleaseGlobalSyncLease()
 	}
-	if !d.wasSuperseded {
+	if !d.wasSuperseded && !superseded() {
 		if err := UnregisterDaemon(); err != nil {
 			d.logger.Warn("failed to unregister daemon", "error", err)
 		}
@@ -1039,6 +1161,35 @@ func IsStarting() bool {
 	return s == DaemonStateStarting || s == DaemonStateStuck
 }
 
+// ensureLedgerSparseCheckout refreshes the Ledger cone at daemon startup. It
+// takes the repo lock (RefreshSparseCheckout) because a CLI process can be
+// committing to the Ledger while the daemon starts.
+func (d *Daemon) ensureLedgerSparseCheckout(ctx context.Context) {
+	if !pathIsGitRepo(d.config.LedgerPath) {
+		return
+	}
+	if err := ledger.RefreshSparseCheckout(ctx, d.config.LedgerPath); err != nil {
+		d.logger.Warn("failed to set ledger sparse-checkout at startup", "error", err)
+		return
+	}
+	d.logger.Info("ledger sparse-checkout verified at startup")
+}
+
+// removeLedgerLocksAtStart cleans up git lock files that crashed processes left
+// in the Ledger, before sync starts.
+func (d *Daemon) removeLedgerLocksAtStart() {
+	if d.config.LedgerPath == "" {
+		return
+	}
+	if d.config.DisposableMachine {
+		clearLedgerLocksOnFirstStart(d.ctx, d.config.LedgerPath, d.logger)
+	}
+	gitDir := filepath.Join(d.config.LedgerPath, ".git")
+	if removed, _ := gitutil.RemoveStaleLockFiles(gitDir); len(removed) > 0 {
+		d.logger.Info("removed stale git lock files at startup", "path", d.config.LedgerPath, "locks", removed)
+	}
+}
+
 // initComponents creates and wires all daemon subsystems. Returns setup duration.
 func (d *Daemon) initComponents() time.Duration {
 	startSetup := time.Now()
@@ -1049,24 +1200,12 @@ func (d *Daemon) initComponents() time.Duration {
 		projectEndpoint = projectCfg.GetEndpoint()
 	}
 
-	// clean up stale git lock files left by crashed processes before starting sync
-	if d.config.LedgerPath != "" {
-		gitDir := filepath.Join(d.config.LedgerPath, ".git")
-		if removed, _ := gitutil.RemoveStaleLockFiles(gitDir); len(removed) > 0 {
-			d.logger.Info("removed stale git lock files at startup", "path", d.config.LedgerPath, "locks", removed)
-		}
-	}
+	d.removeLedgerLocksAtStart()
 
 	// ensure ledger sparse-checkout cone is correct before any sync or indexing.
 	// without this, a corrupt cone from a previous session causes every sync cycle
 	// to wipe .sageox/cache/ via ConfigureSparseCheckout's rolling-window refresh.
-	if d.config.LedgerPath != "" && pathIsGitRepo(d.config.LedgerPath) {
-		if err := ledger.ConfigureSparseCheckout(d.config.LedgerPath); err != nil {
-			d.logger.Warn("failed to set ledger sparse-checkout at startup", "error", err)
-		} else {
-			d.logger.Info("ledger sparse-checkout verified at startup")
-		}
-	}
+	d.ensureLedgerSparseCheckout(d.ctx)
 
 	// telemetry + friction collectors
 	d.telemetry = NewTelemetryCollector(d.logger)
@@ -1100,13 +1239,7 @@ func (d *Daemon) initComponents() time.Duration {
 		// The OTLP proxy is JWT-gated. The daemon is long-running and the
 		// stored token rotates on refresh, so resolve per-export via this
 		// closure rather than baking a static header at Init time.
-		tokenFunc := func() string {
-			tok, err := auth.GetTokenForEndpoint(apiEndpoint)
-			if err != nil || tok == nil {
-				return ""
-			}
-			return tok.AccessToken
-		}
+		tokenFunc := func() string { return auth.ExportBearerForEndpoint(apiEndpoint) }
 		// Install perf processor BEFORE Init so the daemon's tree sink
 		// receives every span the OTLP exporter does. Per-span slog is
 		// gated by duration (>=100ms) and OX_TRACE; tree rendering to
@@ -1151,10 +1284,7 @@ func (d *Daemon) initComponents() time.Duration {
 			"cli_version", cliVersion,
 			"daemon_version", daemonVersion,
 		)
-		d.mu.Lock()
-		d.restartRequested = true
-		d.mu.Unlock()
-		go d.Stop()
+		d.requestRestart()
 	})
 	// pre-populate credentials from credential store (cold-start)
 	if creds, err := gitserver.LoadCredentialsForEndpoint(projectEndpoint); err == nil && creds != nil {
@@ -1184,6 +1314,7 @@ func (d *Daemon) initComponents() time.Duration {
 	d.scheduler = NewSyncScheduler(d.config, d.logger)
 	d.scheduler.SetTracer(d.tracer)
 	d.scheduler.SetEventBus(d.eventBus)
+	d.restartAfterFirstLedgerClone()
 
 	// Per-(user, endpoint) global-sync leader election (ox-6zme).
 	// Acquire the flock lease BEFORE the scheduler runs so the first
@@ -1305,6 +1436,14 @@ func (d *Daemon) initComponents() time.Duration {
 		if d.codedb != nil {
 			githubSync.SetCodeDBManager(d.codedb)
 		}
+		// the settings fetcher is created after this block, so the flag is
+		// looked up lazily; nil settings (not fetched yet) mean the mirror is off
+		githubSync.SetMirrorRelayer(newProjectGitHubMirrorRelayer(d.config.ProjectRoot, func() *flags.CLISettingsResponse {
+			if d.settingsFetcher == nil {
+				return nil
+			}
+			return d.settingsFetcher.CachedSettings()
+		}, d.heartbeat.GetAuthToken, d.logger))
 		d.scheduler.SetGitHubSyncManager(githubSync)
 	}
 	d.scheduler.SetTelemetryCallback(func(syncType, operation, status string, duration time.Duration) {
@@ -1390,6 +1529,10 @@ func (d *Daemon) startWorkers() {
 		ws.RunIdleCloseJanitor(d.ctx, &d.wg, DefaultIdleCloseInterval, DefaultIdleCloseThreshold)
 	}
 
+	// IPC checkouts read the scheduler's context to stop a clone at shutdown,
+	// so bind it before the server can accept one; scheduler.Start runs
+	// concurrently and must not write it then.
+	d.scheduler.ctx = d.ctx
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
@@ -1403,39 +1546,7 @@ func (d *Daemon) startWorkers() {
 		d.scheduler.Start(d.ctx)
 	}()
 
-	// ox-0xgx: periodic auto-fix scheduler. Runs the registered
-	// auto-fix-safe doctor checks on a slow cadence so silent drift
-	// (init artifacts reverted from git, legacy hook formats in
-	// settings.json, etc.) gets repaired without anyone typing
-	// `ox doctor`. The set of checks lives in
-	// internal/doctor/autofix/default_checks.go and is intentionally
-	// small at first — incremental migration of cmd/ox/doctor_*.go
-	// auto-safe checks happens in follow-up beads.
-	if d.config.ProjectRoot != "" {
-		autofixReg := autofix.Default()
-		d.autofixSched = autofix.NewScheduler(autofixReg, d.logger,
-			func() []string { return []string{d.config.ProjectRoot} },
-			func(r autofix.CheckResult) {
-				if d.issues == nil {
-					return
-				}
-				severity := SeverityWarning
-				if r.Status == autofix.StatusError {
-					severity = SeverityError
-				}
-				d.issues.SetIssue(DaemonIssue{
-					Type:     "autofix_" + r.Slug,
-					Severity: severity,
-					Repo:     r.Repo,
-					Summary:  r.Summary,
-				})
-			})
-		d.wg.Add(1)
-		go func() {
-			defer d.wg.Done()
-			d.autofixSched.Run(d.ctx)
-		}()
-	}
+	d.startAutofix()
 
 	// unified DB maintenance: prune, vacuum, integrity check for all SQLite databases
 	d.dbMaintenance = NewDBMaintenanceScheduler(d.logger)
@@ -1553,6 +1664,13 @@ func (s *daemonServiceImpl) Status() *StatusData {
 	if registry := s.d.scheduler.WorkspaceRegistry(); registry != nil {
 		projectTeamID = registry.ProjectTeamID()
 		for _, ws := range registry.GetAllWorkspaces() {
+			// A different daemon may own global sync; its cache is fresher
+			// than this project's config. Only update the status snapshot.
+			if ws.Type == WorkspaceTypeTeamContext {
+				if state := LoadSyncState(ws.Path); state.LastSync.After(ws.ConfigLastSync) {
+					ws.ConfigLastSync = state.LastSync
+				}
+			}
 			wsType := string(ws.Type)
 			// normalize type to match API convention (team_context -> team-context)
 			if wsType == "team_context" {
@@ -1587,10 +1705,15 @@ func (s *daemonServiceImpl) Status() *StatusData {
 	globalSyncEndpoint := endpoint.NormalizeEndpoint(endpoint.GetForProject(s.d.config.ProjectRoot))
 
 	return &StatusData{
-		Running:            true,
-		Pid:                os.Getpid(),
-		Version:            Version(),
-		Uptime:             time.Since(s.d.startTime),
+		Running: true,
+		Pid:     os.Getpid(),
+		Version: Version(),
+		// Round(0) strips the monotonic reading so this is a wall-clock
+		// difference. macOS suspends the monotonic clock across system sleep,
+		// so time.Since under-reported uptime by exactly the time the laptop
+		// was asleep — a daemon started 19h ago reported 16h while the issues
+		// it raised, timestamped with wall clock, correctly read "19h ago".
+		Uptime:             time.Since(s.d.startTime.Round(0)),
 		WorkspacePath:      workspacePath,
 		LedgerPath:         s.d.config.LedgerPath,
 		LastSync:           s.d.scheduler.LastSync(),
@@ -1721,6 +1844,10 @@ func (s *daemonServiceImpl) TriggerGCAsync() *TriggerGCResponse {
 	return s.d.scheduler.TriggerGCAsync(s.d.ctx)
 }
 
+func (s *daemonServiceImpl) TriggerKBGC() {
+	s.d.scheduler.TriggerKBGC(s.d.ctx)
+}
+
 func (s *daemonServiceImpl) CodeIndex(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) {
 	if s.d.codedb == nil {
 		return nil, nil
@@ -1814,6 +1941,26 @@ func (s *daemonServiceImpl) runDoctorPass() {
 	logger.Info("doctor pass complete", "duration_ms", time.Since(start).Milliseconds())
 }
 
+// finalizeSessionDir returns the session folder a finalize request names. A
+// CachePath is trusted only when, cleaned, it lies inside the ledger and its
+// last element is the session name: every hold and quarantine check keys on
+// that name, and a path ending in "/." would name "." instead (an untrusted
+// CachePath reports false and the ledger-derived folder is used).
+func finalizeSessionDir(ledgerPath, sessionName, cachePath string) (string, bool) {
+	fallback := filepath.Join(ledgerPath, "sessions", sessionName)
+	if cachePath == "" {
+		return fallback, true
+	}
+	absCache, cacheErr := filepath.Abs(cachePath) // Abs cleans the path
+	absLedger, ledgerErr := filepath.Abs(ledgerPath)
+	if cacheErr != nil || ledgerErr != nil ||
+		!strings.HasPrefix(absCache, absLedger+string(filepath.Separator)) ||
+		filepath.Base(absCache) != sessionName {
+		return fallback, false
+	}
+	return absCache, true
+}
+
 func (s *daemonServiceImpl) SessionFinalize(payload SessionFinalizeIPCPayload) {
 	if s.d.agentWorker == nil {
 		s.d.logger.Warn("session_finalize received but agent worker not initialized")
@@ -1851,17 +1998,10 @@ func (s *daemonServiceImpl) SessionFinalize(payload SessionFinalizeIPCPayload) {
 	)
 	// prefer CachePath from the stop hook (actual session location under .sageox/cache/sessions/)
 	// fall back to ledger-derived path for backwards compatibility
-	sessionDir := filepath.Join(payload.LedgerPath, "sessions", payload.SessionName)
-	if payload.CachePath != "" {
-		// validate CachePath is under the ledger to prevent path traversal from IPC
-		absCache, cacheErr := filepath.Abs(payload.CachePath)
-		absLedger, ledgerErr := filepath.Abs(payload.LedgerPath)
-		if cacheErr == nil && ledgerErr == nil && strings.HasPrefix(absCache, absLedger+string(filepath.Separator)) {
-			sessionDir = payload.CachePath
-		} else {
-			s.d.logger.Warn("ignoring untrusted CachePath from IPC",
-				"cache_path", payload.CachePath, "ledger", payload.LedgerPath)
-		}
+	sessionDir, trusted := finalizeSessionDir(payload.LedgerPath, payload.SessionName, payload.CachePath)
+	if !trusted {
+		s.d.logger.Warn("ignoring untrusted CachePath from IPC",
+			"cache_path", payload.CachePath, "ledger", payload.LedgerPath)
 	}
 
 	// defense in depth: reject header-only sessions before enqueueing.
@@ -1915,7 +2055,7 @@ func (s *daemonServiceImpl) SessionWatchStart(payload SessionWatchStartPayload) 
 	}
 	// derive paths server-side; never trust client-supplied destinations
 	ledgerPath := s.d.config.LedgerPath
-	cachePath := filepath.Join(ledgerPath, "sessions", payload.SessionName)
+	cachePath := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", payload.SessionName)
 	if err := s.d.sessionWatcher.StartWatch(
 		payload.SessionName, payload.SessionFile,
 		payload.AdapterName, ledgerPath, cachePath,
@@ -2104,29 +2244,30 @@ func (s *daemonServiceImpl) commitMurmur(ctx context.Context, payload MurmurPayl
 }
 
 // writeAndCommitMurmur writes the murmur file to disk (the daemon owns all I/O)
-// and commits it, scoped to data/murmurs/. The caller MUST have already
+// and commits it, scoped to the murmur's own path. The caller MUST have already
 // validated targetDir and payload.RelPath. Shared by the IPC path and the
 // outbox drain.
 //
-// The commit is scoped to data/murmurs/ — a bare `git commit` would sweep in any
-// other dirty index entries (e.g. session pointer stubs written by a previous
-// finalize), poisoning the push queue with LFS pointer blobs whose backing
-// objects may not be in the remote LFS store.
+// The commit is scoped to payload.RelPath, not the whole data/murmurs/ tree: a
+// neighbor's valid but unrelated staged edit under that directory must not
+// ride along into this murmur's commit.
 func writeAndCommitMurmur(ctx context.Context, targetDir string, payload MurmurPayload) error {
-	if err := ledger.WriteMurmurRaw(targetDir, payload.RelPath, payload.MurmurJSON); err != nil {
-		return fmt.Errorf("write murmur: %w", err)
-	}
-	if _, err := gitutil.RunGit(ctx, targetDir, "add", "--sparse", "data/murmurs/"); err != nil {
-		return fmt.Errorf("git add murmur: %w", err)
-	}
 	summary := payload.Content
 	if len(summary) > 50 {
 		summary = summary[:50] + "..."
 	}
-	if _, err := gitutil.RunGit(ctx, targetDir, "commit", "-m", fmt.Sprintf("murmur: %s", summary), "--", "data/murmurs/"); err != nil {
-		return fmt.Errorf("git commit murmur: %w", err)
-	}
-	return nil
+	return gitutil.WithRepoLock(ctx, targetDir, func() error {
+		if err := ledger.WriteMurmurRaw(targetDir, payload.RelPath, payload.MurmurJSON); err != nil {
+			return fmt.Errorf("write murmur: %w", err)
+		}
+		if _, err := gitutil.RunGit(ctx, targetDir, "add", "--sparse", "--", payload.RelPath); err != nil {
+			return fmt.Errorf("git add murmur: %w", err)
+		}
+		if _, err := gitutil.CommitLedgerSnapshot(ctx, targetDir, fmt.Sprintf("murmur: %s", summary), payload.RelPath); err != nil {
+			return fmt.Errorf("commit murmur: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *daemonServiceImpl) PauseMurmuring(agentID string) {
@@ -2152,4 +2293,34 @@ func (s *daemonServiceImpl) SessionUploaded(name, url, agentID string, dur time.
 			Payload: hooks.SessionUploadedPayload(name, url, agentID, dur),
 		})
 	}
+}
+
+// routeAutofixResult turns one autofix check result into issue-tracker state.
+//
+// Clean and Fixed RETIRE the issue; only Found (needs a human) and Error (the
+// check itself broke) are open issues. Both halves matter: nothing else clears
+// an "autofix_*" issue, so before Clean was routed here an issue raised once
+// persisted for the daemon's whole lifetime, and filing Fixed as a warning
+// meant a successful repair reported itself as an outstanding problem —
+// "session meta titles: recovered=1" sat in `ox daemon status` long after the
+// titles it names were recovered.
+func (d *Daemon) routeAutofixResult(r autofix.CheckResult) {
+	if d.issues == nil {
+		return
+	}
+	issueType := "autofix_" + r.Slug
+	if r.Status == autofix.StatusClean || r.Status == autofix.StatusFixed {
+		d.issues.ClearIssue(issueType, r.Repo)
+		return
+	}
+	severity := SeverityWarning
+	if r.Status == autofix.StatusError {
+		severity = SeverityError
+	}
+	d.issues.SetIssue(DaemonIssue{
+		Type:     issueType,
+		Severity: severity,
+		Repo:     r.Repo,
+		Summary:  r.Summary,
+	})
 }

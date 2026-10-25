@@ -18,7 +18,11 @@ func setupUninstallAllTest(t *testing.T, adapterConfigs map[string]string) strin
 	cmd.Dir = repoRoot
 	require.NoError(t, cmd.Run())
 	t.Chdir(repoRoot)
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
 
 	adapterDir := t.TempDir()
 	for name, configDir := range adapterConfigs {

@@ -19,7 +19,7 @@ import (
 //
 //  1. Shallow — `git clone --depth N` creates `.git/shallow` listing the
 //     commits whose parents have been truncated. Walking past them fails.
-//     CI defaults (GitHub Actions actions/checkout@v5) still use this.
+//     CI defaults still use this — actions/checkout defaults to fetch-depth: 1.
 //
 //  2. Partial — `git clone --filter=blob:none` (or tree:0) creates a
 //     promisor remote that fetches objects lazily. The commit graph is
@@ -123,7 +123,7 @@ func InspectRepo(repoPath string) (RepoState, error) {
 // which is not an error condition for detection).
 func runQuietGit(ctx context.Context, repoPath string, args ...string) (string, error) {
 	cmdArgs := append([]string{"-C", repoPath}, args...)
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd := commandContext(ctx, "git", cmdArgs...)
 	cmd.Dir = repoPath
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -162,7 +162,7 @@ func DeepenUntilAncestor(ctx context.Context, repoPath, commit, ref string, step
 	}
 
 	check := func() (bool, error) {
-		cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "merge-base", "--is-ancestor", commit, ref)
+		cmd := commandContext(ctx, "git", "-C", repoPath, "merge-base", "--is-ancestor", commit, ref)
 		err := cmd.Run()
 		if err == nil {
 			return true, nil

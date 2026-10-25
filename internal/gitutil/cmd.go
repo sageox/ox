@@ -39,9 +39,36 @@ import (
 // Skipping it would silently discard content that was resolved but never
 // recorded. Applied here rather than at the one committing call site so a
 // future network command that commits inherits the hardening by default.
+//
+// filter.lfs.*: ox never depends on the git-lfs binary and never commits
+// filter=lfs .gitattributes (.claude/rules/lfs-no-git-lfs-binary.md) — but a
+// team-context repo's own .gitattributes can mark server-side attachments
+// filter=lfs (ADR-085), and if the *user* happens to have git-lfs installed
+// globally, its smudge/clean filters still fire on ox's clones regardless of
+// what ox itself writes. A committed nested LFS pointer (a pointer whose
+// smudged content is itself another pointer) then makes the worktree unable
+// to ever equal HEAD: checkout smudges one layer, `git status` sees it as
+// modified, next pull's autostash re-triggers the same smudge, forever
+// (ox-baz5.4). Overriding filter.lfs.{smudge,clean,process,required} makes
+// every ox-managed clone dehydrated regardless of the host's global git-lfs
+// config — the same override restoreRawLFSPointers already uses to repair
+// one clone (cmd/ox/doctor_team.go), applied here so it never needs repairing.
 func NewNetworkCmd(ctx context.Context, args ...string) *exec.Cmd {
-	gitArgs := append([]string{"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"}, args...)
-	cmd := exec.CommandContext(ctx, "git", gitArgs...)
+	gitArgs := append([]string{
+		"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
+		"-c", "filter.lfs.smudge=cat", "-c", "filter.lfs.clean=cat",
+		"-c", "filter.lfs.process=", "-c", "filter.lfs.required=false",
+	}, args...)
+	cmd := commandContext(ctx, "git", gitArgs...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
+	return cmd
+}
+
+// commandContext is exec.CommandContext with process-group kill on
+// cancellation (see setProcessGroupKill). Every git exec in this package goes
+// through it so a timeout can never orphan a child git process.
+func commandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	setProcessGroupKill(cmd)
 	return cmd
 }

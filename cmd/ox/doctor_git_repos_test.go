@@ -764,12 +764,171 @@ func TestNormalizeGitURLForCompare(t *testing.T) {
 	}
 }
 
+// TestCheckSSHAuth drives the key lookup off a controlled HOME so the result is
+// determined by the fixture rather than by the developer's own ~/.ssh.
+//
+// Failure prevented: doctor reports SSH auth as available. Reading the real
+// home directory made the outcome differ between a laptop with keys and CI
+// without them, so neither answer was ever asserted.
 func TestCheckSSHAuth(t *testing.T) {
-	// this test just verifies the function doesn't panic
-	// actual SSH key presence depends on the test environment
-	result := checkSSHAuth()
-	// result can be true or false depending on environment
-	_ = result
+	// plantKey writes a stand-in private key at the given name under ~/.ssh.
+	plantKey := func(t *testing.T, home, name string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+			t.Fatalf("create .ssh: %v", err)
+		}
+		key := filepath.Join(home, ".ssh", name)
+		if err := os.WriteFile(key, []byte("not-a-real-key\n"), 0o600); err != nil {
+			t.Fatalf("write %q: %v", key, err)
+		}
+	}
+
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, home string)
+		want  bool
+	}{
+		{
+			name: "no keys present",
+			want: false,
+		},
+		{
+			name:  "an ed25519 key is found",
+			setup: func(t *testing.T, home string) { plantKey(t, home, "id_ed25519") },
+			want:  true,
+		},
+		{
+			name:  "an rsa key is found",
+			setup: func(t *testing.T, home string) { plantKey(t, home, "id_rsa") },
+			want:  true,
+		},
+		{
+			name:  "an unrelated file in .ssh is not a key",
+			setup: func(t *testing.T, home string) { plantKey(t, home, "known_hosts") },
+			want:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			// os.UserHomeDir reads HOME on unix and USERPROFILE on Windows;
+			// set both so the check cannot fall through to the real profile.
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			if tt.setup != nil {
+				tt.setup(t, home)
+			}
+			if got := checkSSHAuth(); got != tt.want {
+				t.Errorf("checkSSHAuth() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestClassifyFsckOutput covers the checkGitFsck false-positive fix: git
+// fsck exits non-zero both for genuine object-database corruption AND for
+// harmless broken/dangling refs (e.g. a stale refs/remotes/<remote>/HEAD
+// left behind after the remote's default branch was deleted). Only the
+// former should ever recommend re-cloning the repository.
+func TestClassifyFsckOutput(t *testing.T) {
+	const belgradeStaleHead = "error: refs/remotes/belgrade/HEAD: invalid sha1 pointer 0000000000000000000000000000000000000000"
+
+	tests := []struct {
+		name         string
+		output       string
+		wantSeverity fsckSeverity
+	}{
+		{
+			name:         "empty output is OK",
+			output:       "",
+			wantSeverity: fsckSeverityOK,
+		},
+		{
+			name:         "stale remote-tracking HEAD is a warning, not corruption",
+			output:       belgradeStaleHead,
+			wantSeverity: fsckSeverityWarn,
+		},
+		{
+			name:         "missing blob is genuine object corruption",
+			output:       "missing blob deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+			wantSeverity: fsckSeverityFail,
+		},
+		{
+			name: "broken link is genuine object corruption",
+			output: "broken link from   tree 1111111111111111111111111111111111111111\n" +
+				"              to   blob 0000000000000000000000000000000000000000",
+			wantSeverity: fsckSeverityFail,
+		},
+		{
+			name:         "dangling object alone is benign, not corruption",
+			output:       "dangling commit 2222222222222222222222222222222222222222",
+			wantSeverity: fsckSeverityOK,
+		},
+		{
+			name:         "dangling object alongside a stale ref stays a ref warning",
+			output:       "dangling commit 2222222222222222222222222222222222222222\n" + belgradeStaleHead,
+			wantSeverity: fsckSeverityWarn,
+		},
+		{
+			name:         "mixed ref issue and object corruption fails — corruption dominates",
+			output:       belgradeStaleHead + "\nmissing blob deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+			wantSeverity: fsckSeverityFail,
+		},
+		{
+			name:         "unrecognized non-empty output stays conservative and fails",
+			output:       "something git fsck never printed before",
+			wantSeverity: fsckSeverityFail,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			severity, summary, detail := classifyFsckOutput(tt.output)
+			if severity != tt.wantSeverity {
+				t.Fatalf("classifyFsckOutput(%q) severity = %q, want %q\nsummary=%q\ndetail=%q",
+					tt.output, severity, tt.wantSeverity, summary, detail)
+			}
+		})
+	}
+}
+
+// TestClassifyFsckOutput_BrokenRemoteHead_RemedyIsRefRepairNotReclone pins the
+// exact remedy shown for the canonical stale refs/remotes/<remote>/HEAD case:
+// it must name `git remote set-head <remote> -a` and must NOT tell the user
+// to re-clone the repository.
+func TestClassifyFsckOutput_BrokenRemoteHead_RemedyIsRefRepairNotReclone(t *testing.T) {
+	output := "error: refs/remotes/belgrade/HEAD: invalid sha1 pointer 0000000000000000000000000000000000000000"
+
+	severity, summary, detail := classifyFsckOutput(output)
+
+	if severity != fsckSeverityWarn {
+		t.Fatalf("severity = %q, want %q (summary=%q detail=%q)", severity, fsckSeverityWarn, summary, detail)
+	}
+	if !strings.Contains(detail, "git remote set-head belgrade -a") {
+		t.Errorf("expected detail to name the concrete fix `git remote set-head belgrade -a`, got: %s", detail)
+	}
+	if strings.Contains(strings.ToLower(detail), "re-clone") {
+		t.Errorf("broken-ref-only finding must never recommend re-cloning, got detail: %s", detail)
+	}
+	if strings.Contains(strings.ToLower(summary), "re-clone") {
+		t.Errorf("broken-ref-only finding must never recommend re-cloning, got summary: %s", summary)
+	}
+}
+
+// TestClassifyFsckOutput_MissingBlob_RemedyIsReclone pins the remedy for
+// genuine object corruption: it must still recommend re-cloning.
+func TestClassifyFsckOutput_MissingBlob_RemedyIsReclone(t *testing.T) {
+	output := "missing blob deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+	severity, summary, detail := classifyFsckOutput(output)
+
+	if severity != fsckSeverityFail {
+		t.Fatalf("severity = %q, want %q (summary=%q detail=%q)", severity, fsckSeverityFail, summary, detail)
+	}
+	if !strings.Contains(strings.ToLower(detail), "re-clone") {
+		t.Errorf("expected genuine object corruption to still recommend re-cloning, got detail: %s", detail)
+	}
 }
 
 // TestExtractTeamIDFromRepoName_DisplayNames verifies that

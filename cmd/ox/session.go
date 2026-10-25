@@ -6,6 +6,8 @@ import (
 
 var sessionCmd = &cobra.Command{
 	Use:   "session",
+	Args:  cobra.NoArgs,
+	RunE:  func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 	Short: "Manage AI coworker sessions",
 	Long: `View and manage sessions of human + AI coworker conversations.
 

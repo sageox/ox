@@ -36,7 +36,7 @@ import (
 // 31 of 71 freshly-regen'd summaries got clobbered, and 2 sessions had
 // raw.jsonl committed as full git blobs. See bd ox-4ncz post-mortem.
 //
-// All readers (regenerate, view, lint, token-optimize, distill, etc.)
+// All readers (regenerate, view, lint, token-optimize, etc.)
 // MUST go through this function — they should never call
 // session.ReadSessionFromPath against an in-place ledger path directly,
 // and they should never write to the in-place path either.

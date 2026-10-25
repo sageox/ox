@@ -43,3 +43,14 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: InsertIssueComment :exec
 INSERT INTO issue_comments (issue_id, author, body, created_at) VALUES (?, ?, ?, ?);
+
+-- name: GetPRSourceByNumber :one
+-- source_path says whether a Ledger snapshot or a board post wrote the row last;
+-- merge_commit is carried across a board overwrite because a post cannot supply it.
+SELECT id, source_path, merge_commit FROM pull_requests WHERE number = ?;
+
+-- name: ListPRCommitShas :many
+SELECT sha FROM pr_commits WHERE pr_id = ? ORDER BY id;
+
+-- name: GetIssueSourceByNumber :one
+SELECT id, source_path FROM issues WHERE number = ?;

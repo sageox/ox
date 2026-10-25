@@ -1,0 +1,10 @@
+{"t_utc":"2026-08-18T01:00:01.000Z","t_ms":1000,"x":10,"y":20,"vis":true,"dwell_ms":1200,"v":0,"ax_ref":"n1"}
+{"t_utc":"2026-08-18T01:00:02.000Z","t_ms":2000,"x":11,"y":21,"vis":false,"dwell_ms":3000,"v":0,"ax_ref":"n9"}
+{"t_utc":"2026-08-18T01:00:03.000Z","t_ms":3000,"target":{"x":0,"y":0,"w":800,"h":600}}
+{"t_utc":"2026-08-18T01:00:06.000Z","t_ms":6000,"x":50,"y":60,"vis":true,"dwell_ms":0,"v":0,"ax_ref":"n2","btn":{"button":"left","phase":"down"}}
+{"t_utc":"2026-08-18T01:00:06.200Z","t_ms":6200,"x":50,"y":60,"vis":true,"dwell_ms":0,"v":0,"ax_ref":"n2","btn":{"button":"left","phase":"up"}}
+{"t_utc":"2026-08-18T01:00:06.500Z","t_ms":6500,"x":12,"y":22,"vis":true,"dwell_ms":500,"v":0,"ax_ref":"n1"}
+{"t_utc":"2026-08-18T01:00:07.000Z","t_ms":7000,"x":50,"y":60,"vis":true,"dwell_ms":4000,"v":0,"ax_ref":"n2"}
+{"t_utc":"2026-08-18T01:00:11.000Z","t_ms":11000,"x":90,"y":90,"vis":true,"dwell_ms":800,"v":0,"ax_ref":"n3"}
+not json
+{"t_ms":16000,"x":70,"y":70,"vis":true,"dwell_ms":900,"v":0,"ax_ref":"n4"}

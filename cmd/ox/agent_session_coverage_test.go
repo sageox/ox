@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -143,57 +141,6 @@ func TestConvertStoredEntries_Coverage(t *testing.T) {
 	})
 }
 
-func TestRawJSONLHasEntries_Coverage(t *testing.T) {
-	t.Parallel()
-
-	t.Run("nonexistent file", func(t *testing.T) {
-		t.Parallel()
-		if rawJSONLHasEntries("/does/not/exist.jsonl") {
-			t.Error("expected false for nonexistent file")
-		}
-	})
-
-	t.Run("empty file", func(t *testing.T) {
-		t.Parallel()
-		f := filepath.Join(t.TempDir(), "raw.jsonl")
-		os.WriteFile(f, []byte(""), 0644)
-		if rawJSONLHasEntries(f) {
-			t.Error("expected false for empty file")
-		}
-	})
-
-	t.Run("header only", func(t *testing.T) {
-		t.Parallel()
-		f := filepath.Join(t.TempDir(), "raw.jsonl")
-		os.WriteFile(f, []byte(`{"_meta":{"version":"1"}}`+"\n"), 0644)
-		if rawJSONLHasEntries(f) {
-			t.Error("expected false for header-only file")
-		}
-	})
-
-	t.Run("header plus entry", func(t *testing.T) {
-		t.Parallel()
-		f := filepath.Join(t.TempDir(), "raw.jsonl")
-		os.WriteFile(f, []byte(`{"_meta":{"version":"1"}}`+"\n"+`{"type":"user","content":"hi"}`+"\n"), 0644)
-		if !rawJSONLHasEntries(f) {
-			t.Error("expected true for file with entries beyond header")
-		}
-	})
-
-	t.Run("multiple entries", func(t *testing.T) {
-		t.Parallel()
-		f := filepath.Join(t.TempDir(), "raw.jsonl")
-		lines := `{"header":true}
-{"type":"user","content":"a"}
-{"type":"assistant","content":"b"}
-`
-		os.WriteFile(f, []byte(lines), 0644)
-		if !rawJSONLHasEntries(f) {
-			t.Error("expected true for file with multiple lines")
-		}
-	})
-}
-
 func TestBuildSessionStartOutput_Coverage(t *testing.T) {
 	t.Parallel()
 
@@ -215,7 +162,7 @@ func TestBuildSessionStartOutput_Coverage(t *testing.T) {
 	if out.Notice != "notice text" {
 		t.Errorf("Notice = %q, want %q", out.Notice, "notice text")
 	}
-	if out.Hint != "Run /ox-session-stop to end recording" {
+	if out.Hint != "Run ox agent session stop to end recording" {
 		t.Errorf("unexpected Hint: %q", out.Hint)
 	}
 }

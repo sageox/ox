@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -147,6 +148,63 @@ func TestKBGC_Triage_TrashItselfNotTriaged(t *testing.T) {
 	for _, e := range entries {
 		assert.NotContains(t, e.Name(), kbTrashDirName,
 			"trash directory must never be triaged onto itself")
+	}
+}
+
+// TestKBGC_Triage_JudgesOnlyThisProjectsScopes runs one triage pass over a kb
+// root holding a checkout for each meta.json state, none of them in the kb
+// list, and checks which ones move to .trash/. The scheduler's project is
+// bound to kbTestTeamID.
+//
+// Failure prevented: every project on an endpoint shares the kb root, so GC in
+// a project bound to one team moved another team's bubbles into .trash/ —
+// deleting them after the grace period — because that project's scoped kb
+// list never includes them.
+func TestKBGC_Triage_JudgesOnlyThisProjectsScopes(t *testing.T) {
+	kbGCEnv(t)
+	s, _ := kbTestScheduler(t)
+
+	scoped := func(scopeType, scopeID string) func(dir string) error {
+		return func(dir string) error {
+			return writeKBMeta(dir, api.KB{ScopeType: scopeType, ScopeID: scopeID})
+		}
+	}
+	raw := func(body string) func(dir string) error {
+		return func(dir string) error {
+			if err := os.MkdirAll(filepath.Join(dir, ".sageox"), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(dir, ".sageox", "meta.json"), []byte(body), 0o644)
+		}
+	}
+	tests := []struct {
+		kbID      string
+		writeMeta func(dir string) error // nil: no meta.json
+		moved     bool
+	}{
+		{"kb_own_team_revoked", scoped(api.KBScopeTypeTeam, kbTestTeamID), true},
+		{"kb_other_team", scoped(api.KBScopeTypeTeam, "team_other"), false},
+		{"kb_personal_same_id", scoped(api.KBScopeTypeUser, kbTestTeamID), false},
+		{"kb_no_scope_recorded", raw(`{"type":"team","slug":"old","last_sync":"2026-07-01T00:00:00Z"}`), false},
+		{"kb_unparseable_meta", raw(`{not json`), false},
+		{"kb_never_synced", nil, true},
+	}
+	for _, tc := range tests {
+		dir := makeKBDir(t, tc.kbID, tc.kbID)
+		if tc.writeMeta != nil {
+			require.NoError(t, tc.writeMeta(dir))
+		}
+	}
+
+	s.runKBGC(context.Background(), stubListFn())
+
+	for _, tc := range tests {
+		dir := paths.KBDir(endpoint.Get(), tc.kbID)
+		if tc.moved {
+			assert.NoDirExists(t, dir, "%s: this project's orphan must move to .trash/", tc.kbID)
+		} else {
+			assert.DirExists(t, dir, "%s: a bubble this project cannot judge must stay", tc.kbID)
+		}
 	}
 }
 
@@ -292,42 +350,76 @@ func TestKBGC_GenericAPIError_TriageSkipped(t *testing.T) {
 // --- Failure isolation ---
 
 // TestKBGC_Panic_DoesNotBlockExistingGC verifies that a panic inside
-// the kb GC path is caught by the wrapper in checkAndRunGC so the
-// existing ledger / team-context GC still runs. We exercise the
-// wrapper directly by simulating a panicking list function.
+// the kb GC pass is recovered by TriggerKBGC — which both the GC tick
+// and the trigger_kb_gc IPC handler call — and that the tick still
+// releases gcInProgress afterwards.
 //
-// Failure prevented: a bug in the new kb-GC path silently disabling
-// GC for the much more important ledger and team-context workspaces.
+// Failure prevented: a bug in the kb-GC path crashing the daemon, or
+// leaving gcInProgress set so no later GC tick runs the ledger and
+// team-context reclones.
 func TestKBGC_Panic_DoesNotBlockExistingGC(t *testing.T) {
 	kbGCEnv(t)
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
 
 	// seed at least one kb dir so triage actually runs (otherwise
-	// runKBGC short-circuits before the listFn is invoked).
+	// runKBGC short-circuits before the kb API is listed).
 	makeKBDir(t, "kb_present", "x")
+	s.SetKBBubbleListerFactory(func(_, _ string) KBBubbleLister {
+		return panicKBLister{}
+	})
 
-	// the recover wrapper lives in checkAndRunGC; here we just verify
-	// runKBGC + a panicking listFn doesn't propagate. Mirroring the
-	// real call site: the closure in checkAndRunGC catches panics.
-	var recovered atomic.Bool
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				recovered.Store(true)
-			}
-		}()
-		s.runKBGC(ctx, func(_ context.Context) ([]string, error) {
-			panic("simulated kb api crash")
-		})
-	}()
-	assert.True(t, recovered.Load(), "panic in listFn must be containable by caller's recover")
+	assert.NotPanics(t, func() { s.checkAndRunGC(ctx) }, "a kb GC panic must not escape the GC tick")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&s.gcInProgress), "gcInProgress must be released after a kb GC panic")
+}
 
-	// The actual production wrapper sits in checkAndRunGC and continues
-	// running ledger/team GC. That's verified end-to-end by the
-	// existing GC tests because removing the wrapper would re-introduce
-	// the panic; here we confirm the wrapper surface compiles and
-	// catches.
+// panicKBLister is a KBBubbleLister whose list call panics.
+type panicKBLister struct{}
+
+func (panicKBLister) ListBubbles(context.Context, api.KBScope) ([]api.KB, error) {
+	panic("simulated kb api crash")
+}
+
+// --- On-demand trigger ---
+
+// TestTriggerKBGC_OverIPC_MovesOrphanToTrash sends trigger_kb_gc over a real
+// socket to the real daemon service, whose scheduler lists bubbles through the
+// production list function (a fake lister stands in for the kb API).
+//
+// Failure prevented: `ox doctor --fix` could never clear a kb orphan. It sent
+// trigger_gc, which recloned every team context and the ledger (44s against
+// its 30s deadline) and never ran kb GC, so the orphan stayed either way.
+func TestTriggerKBGC_OverIPC_MovesOrphanToTrash(t *testing.T) {
+	kbGCEnv(t)
+	// kbLockDir resolves its directory once per process. Resolve it before
+	// XDG_RUNTIME_DIR moves to a temp dir that cleanup deletes, so a later
+	// test never inherits a lock dir that no longer exists.
+	_, err := kbLockDir()
+	require.NoError(t, err)
+	t.Setenv("XDG_RUNTIME_DIR", recoveryRuntimeDir(t, "ox-kbgc-"))
+
+	s, _ := kbTestScheduler(t)
+	s.SetKBBubbleListerFactory(func(_, _ string) KBBubbleLister {
+		return &fakeKBLister{bubbles: []api.KB{{KBID: "kb_kept"}}}
+	})
+	kept := makeKBDir(t, "kb_kept", "still-listed")
+	orphan := makeKBDir(t, "kb_orphan", "no-longer-listed")
+
+	d := New(s.config, s.logger)
+	d.ctx = context.Background()
+	d.scheduler = s
+	stop := startRecoveryTestServer(t, NewServerWithService(d.logger, &daemonServiceImpl{d: d}))
+	defer stop()
+
+	client := &Client{socketPath: SocketPath(), timeout: 5 * time.Second}
+	require.NoError(t, client.TriggerKBGC())
+
+	assert.NoDirExists(t, orphan, "the orphan must be moved aside by the time the call returns")
+	trash, err := os.ReadDir(filepath.Join(filepath.Dir(orphan), kbTrashDirName))
+	require.NoError(t, err)
+	require.Len(t, trash, 1)
+	assert.True(t, strings.HasPrefix(trash[0].Name(), "kb_orphan-"), "trash entry: %s", trash[0].Name())
+	assert.FileExists(t, filepath.Join(kept, "marker.txt"), "a bubble the API still lists must stay in place")
 }
 
 // --- Concurrency ---

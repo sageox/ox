@@ -1,0 +1,17 @@
+{
+  "created_at": "2026-10-01T01:00:00Z",
+  "id": "r-v2-0001",
+  "items": [
+    {
+      "anchor": "h1",
+      "label": "The first risk",
+      "note": "Name the owner.",
+      "reviewer": "Ana",
+      "section": "Risks",
+      "status": "request-change"
+    }
+  ],
+  "request_sha256": "b7e61fcfc3b4ae8b5568f1596a0fd1eaa64bf00f117346d673563a9dced1bce0",
+  "reviewer": "Ana",
+  "slug": "rc-v2-records"
+}

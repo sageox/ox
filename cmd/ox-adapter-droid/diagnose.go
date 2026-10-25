@@ -52,38 +52,17 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 				Severity: "warning",
 				Title:    "ox hooks not installed for Factory Droid",
 				Detail:   "Factory Droid hooks are not configured for this project. Session recording is disabled.",
-				Fix:      "ox-adapter-droid install-hooks --repo-root " + p.RepoRoot + " --scope project",
-				FixSafe:  true,
+				Fix:      "ox integrate install --droid",
+				// "ox" is the only allowlisted argv[0] for the doctor
+				// auto-fix path (ox-adapter-droid itself is rejected by
+				// adapterFixArgvAllowlist), so route through the in-process
+				// `ox integrate install --droid` command rather than the
+				// external adapter binary.
+				FixArgv: []string{"ox", "integrate", "install", "--droid"},
+				FixSafe: true,
 			})
 		}
 
-		// check rules
-		checkResp, err := handleCheckRules(adapterprotocol.RulesParams{
-			RepoRoot: p.RepoRoot,
-			Version:  p.Version,
-		})
-		if err == nil && !checkResp.Installed {
-			if len(checkResp.Missing) > 0 {
-				issues = append(issues, adapterprotocol.DiagnoseIssue{
-					Slug:     "droid:rules-missing",
-					Severity: "warning",
-					Title:    "ox rules not installed for Factory Droid",
-					Detail:   "Missing rule files: " + strings.Join(checkResp.Missing, ", "),
-					Fix:      "ox integrate install",
-					FixSafe:  true,
-				})
-			}
-			if len(checkResp.Stale) > 0 {
-				issues = append(issues, adapterprotocol.DiagnoseIssue{
-					Slug:     "droid:rules-stale",
-					Severity: "info",
-					Title:    "ox rules are outdated for Factory Droid",
-					Detail:   "Stale rule files: " + strings.Join(checkResp.Stale, ", "),
-					Fix:      "ox integrate install",
-					FixSafe:  true,
-				})
-			}
-		}
 	}
 
 	return &adapterprotocol.DiagnoseResult{

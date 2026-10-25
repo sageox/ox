@@ -37,10 +37,10 @@ func TestOpenSessionContent_PrefersCacheWhenInPlaceIsPointer(t *testing.T) {
 
 	// in-place: LFS pointer (this is the state for any session synced from
 	// the ledger, ever).
-	if err := lfs.WritePointerFile(filepath.Join(sessionDir, "raw.jsonl"), lfs.FileRef{
+	if err := lfs.WritePointerFile(filepath.Join(sessionDir, "raw.jsonl"), lfs.AssertUploaded(lfs.FileRef{
 		OID:  "deadbeef" + "1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
 		Size: 4096,
-	}); err != nil {
+	})); err != nil {
 		t.Fatal(err)
 	}
 
@@ -78,10 +78,10 @@ func TestOpenSessionContent_ReturnsErrorWhenFullyDehydrated(t *testing.T) {
 	}
 
 	// in-place: pointer; cache: empty.
-	if err := lfs.WritePointerFile(filepath.Join(sessionDir, "raw.jsonl"), lfs.FileRef{
+	if err := lfs.WritePointerFile(filepath.Join(sessionDir, "raw.jsonl"), lfs.AssertUploaded(lfs.FileRef{
 		OID:  "feedface" + "1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
 		Size: 1024,
-	}); err != nil {
+	})); err != nil {
 		t.Fatal(err)
 	}
 

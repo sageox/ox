@@ -1,12 +1,13 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/carts"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/glance"
 	"github.com/spf13/cobra"
 )
@@ -88,11 +89,5 @@ func runCartAnalyze(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("analyze: %w", err)
 	}
 
-	data, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal output: %w", err)
-	}
-
-	fmt.Println(string(data))
-	return nil
+	return cli.PrintJSONTo(os.Stdout, output)
 }

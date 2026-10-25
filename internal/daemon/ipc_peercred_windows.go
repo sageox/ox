@@ -19,3 +19,7 @@ func peerUID(conn net.Conn) (uint32, error) {
 	_ = conn
 	return 0, nil
 }
+
+// currentProcessUID uses the sentinel returned by peerUID on Windows. Named
+// pipe ACLs, not Unix numeric UIDs, are the same-user trust boundary here.
+func currentProcessUID() uint32 { return 0 }

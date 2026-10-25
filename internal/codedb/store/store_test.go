@@ -275,7 +275,7 @@ func TestCheckIntegrity_CorruptDB(t *testing.T) {
 		t.Fatalf("write corrupt db: %v", err)
 	}
 
-	// Open should detect corruption via PRAGMA integrity_check and return ErrCorrupt
+	// Open should detect the damaged header and return ErrCorrupt
 	_, err = Open(tmp)
 	if err == nil {
 		t.Fatal("expected error from corrupt database, got nil")
@@ -566,16 +566,130 @@ func TestForeignKeysEnabled(t *testing.T) {
 	}
 }
 
-// TestOpenOrCreateBleveIndex_LockedIndexNotNuked verifies that openOrCreateBleveIndex
-// does NOT delete an existing bleve index when an open error occurs and root.bolt is present.
-// Regression test: previously, any non-ENOENT error caused os.RemoveAll, which would
-// destroy an index being actively written by another goroutine.
+// TestBoltCorruptOnExclusiveOpen_DistinguishesCorruptionFromLiveLock is the
+// honest replacement for a former test (TestOpenOrCreateBleveIndex_LockedIndexNotNuked)
+// that wrote garbage to root.bolt and then asserted the index was NOT recovered.
+// That test used corrupt bytes as a stand-in for a live lock — the two states
+// were indistinguishable at the surface error — and so it hard-coded the
+// crash-loop-on-corruption as the contract. The real guarantee is that the
+// discriminator self-heals ONLY when it can prove no live writer holds the
+// index, so this drives that decision point directly against all three real
+// on-disk states.
 //
-// bleve opens bbolt without a timeout, so true lock-timeout cannot be triggered in-process.
-// Instead the test creates a real index at indexPath (so root.bolt has valid bbolt structure),
-// then corrupts root.bolt to produce an immediate open error — the same code path that fires
-// when another goroutine holds the bbolt exclusive lock.
-func TestOpenOrCreateBleveIndex_LockedIndexNotNuked(t *testing.T) {
+// Failure prevented: destroying a codedb sub-index another process is actively
+// writing (false-corrupt), and its inverse — crash-looping forever on a torn
+// bolt because it was mistaken for a live lock (false-lock, the 458-restart
+// incident).
+func TestBoltCorruptOnExclusiveOpen_DistinguishesCorruptionFromLiveLock(t *testing.T) {
+	// Chmod(0o000) is the isolation mechanism here, and Go's Chmod maps only the
+	// read-only bit on Windows — the file stays readable and this test would pass
+	// while never creating the unreadable condition it asserts on. See
+	// .claude/rules/testing.md, "Failure Paths That Render Identically To Success".
+	if runtime.GOOS == "windows" {
+		t.Skip("windows: chmod cannot remove read permission")
+	}
+
+	// Not parallel: this test overrides the package-level probe timeout. Go
+	// runs non-parallel tests to completion before parallel ones resume, so
+	// the override cannot race a concurrent openOrCreateBleveIndex.
+	if testing.Short() {
+		t.Skip("short: bbolt flock + open operations")
+	}
+	restore := bleveExclusiveProbeTimeout
+	bleveExclusiveProbeTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { bleveExclusiveProbeTimeout = restore })
+
+	// newValidBolt creates a healthy, closed bolt file and returns its path.
+	newValidBolt := func(t *testing.T) string {
+		t.Helper()
+		boltPath := filepath.Join(t.TempDir(), "root.bolt")
+		db, err := bbolt.Open(boltPath, 0o600, &bbolt.Options{Timeout: 2 * time.Second})
+		require.NoError(t, err)
+		require.NoError(t, db.Close())
+		return boltPath
+	}
+
+	tests := []struct {
+		name  string
+		skip  func(t *testing.T)
+		setup func(t *testing.T) string
+		// wantCorrupt is the verdict: true = proven corruption (self-heal),
+		// false = preserve the index (live lock or environmental error).
+		wantCorrupt bool
+	}{
+		{
+			name: "torn bolt, no live writer -> corrupt",
+			setup: func(t *testing.T) string {
+				boltPath := filepath.Join(t.TempDir(), "root.bolt")
+				require.NoError(t, os.WriteFile(boltPath, []byte("corrupted"), 0o600))
+				return boltPath
+			},
+			wantCorrupt: true,
+		},
+		{
+			name:        "valid bolt, no live writer -> preserve",
+			setup:       newValidBolt,
+			wantCorrupt: false,
+		},
+		{
+			name: "live writer holds exclusive lock -> preserve",
+			setup: func(t *testing.T) string {
+				boltPath := filepath.Join(t.TempDir(), "root.bolt")
+				holder, err := bbolt.Open(boltPath, 0o600, &bbolt.Options{Timeout: 2 * time.Second})
+				require.NoError(t, err, "open holder")
+				// Keep bbolt's exclusive flock held for the duration of the
+				// probe so it must time out and read as "live writer".
+				t.Cleanup(func() { _ = holder.Close() })
+				return boltPath
+			},
+			wantCorrupt: false,
+		},
+		{
+			name: "unreadable bolt (permission) -> preserve",
+			skip: func(t *testing.T) {
+				if os.Geteuid() == 0 {
+					t.Skip("root bypasses file permissions")
+				}
+			},
+			setup: func(t *testing.T) string {
+				boltPath := newValidBolt(t)
+				// A permission failure fires BEFORE bbolt validates the meta
+				// pages — environmental, not corruption. Nuking a healthy index
+				// over a permission blip would be destructive data loss.
+				require.NoError(t, os.Chmod(boltPath, 0o000))
+				t.Cleanup(func() { _ = os.Chmod(boltPath, 0o600) })
+				return boltPath
+			},
+			wantCorrupt: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.skip != nil {
+				tc.skip(t)
+			}
+			boltPath := tc.setup(t)
+			require.Equalf(t, tc.wantCorrupt, boltCorruptOnExclusiveOpen(boltPath),
+				"boltCorruptOnExclusiveOpen verdict wrong for %q", tc.name)
+		})
+	}
+}
+
+// TestOpenOrCreateBleveIndex_UnopenableBolt_SelfHeals is the regression for the
+// init-container crash-loop (observed: 458 identical restarts). A root.bolt
+// torn so badly bbolt cannot open it at all — the kill-9 mid-write signature —
+// must be recovered, not looped on. The read-only corruption peek
+// (isBleveIndexCorrupt) cannot classify an unopenable bolt, so before this fix
+// the sub-index fell to the "lock contention" error and every retry failed
+// identically. Now a bounded EXCLUSIVE open proves no live writer holds the
+// index and the file is unusable, so the sub-index self-heals: nuked +
+// recreated empty + a .needs_reindex marker for the next full rebuild.
+//
+// Failure prevented: `ox index` erroring identically on every run against a
+// mid-write-corrupted cache — a permanent container crash-loop that only an
+// external `rm` of the cache could break.
+func TestOpenOrCreateBleveIndex_UnopenableBolt_SelfHeals(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("short: Bleve + bbolt operations")
@@ -584,28 +698,37 @@ func TestOpenOrCreateBleveIndex_LockedIndexNotNuked(t *testing.T) {
 	tmp := t.TempDir()
 	indexPath := filepath.Join(tmp, "test-index")
 
-	// create a real bleve index at indexPath so root.bolt exists with valid bbolt structure
-	first, err := openOrCreateBleveIndex(tmp, indexPath, "test")
-	if err != nil {
-		t.Fatalf("create index: %v", err)
-	}
-	_ = first.Close()
+	first, err := openOrCreateBleveIndex(tmp, indexPath, "code")
+	require.NoError(t, err, "create index")
+	require.NoError(t, first.Close())
 
 	boltPath := filepath.Join(indexPath, "store", "root.bolt")
 
-	// corrupt root.bolt — causes bbolt to return an immediate error (invalid magic bytes)
-	// rather than waiting indefinitely for a lock, exercising the same "bolt exists → don't nuke"
-	// code path that fires during real lock contention
-	require.NoError(t, os.WriteFile(boltPath, []byte("corrupted"), 0600))
+	// Torn/half-written bolt: bytes present but no valid meta page, so bbolt
+	// rejects the file outright. This is the unopenable-bolt class the
+	// read-only peek cannot classify — distinct from an empty/truncated
+	// _mapping (which peeks successfully) and from a live exclusive lock.
+	require.NoError(t, os.WriteFile(boltPath, []byte("corrupted"), 0o600))
 
-	// openOrCreateBleveIndex must fail (corrupt bolt) but must NOT delete the index directory
-	_, openErr := openOrCreateBleveIndex(tmp, indexPath, "test")
-	require.Error(t, openErr, "expected error opening corrupt index")
+	idx, healErr := openOrCreateBleveIndex(tmp, indexPath, "code")
+	require.NoError(t, healErr, "unopenable bolt must self-heal, not crash-loop")
+	require.NotNil(t, idx)
+	// Release the fresh index's exclusive lock before inspecting the file.
+	require.NoError(t, idx.Close())
 
-	// bolt file must survive — index was not nuked
-	if _, statErr := os.Stat(boltPath); statErr != nil {
-		t.Errorf("root.bolt was deleted: openOrCreateBleveIndex nuked on open error: %v", statErr)
-	}
+	// The recovered bolt must open cleanly — proof the torn file was replaced,
+	// not left in place for the next run to trip over again.
+	reopened, reopenErr := bbolt.Open(boltPath, 0o600, &bbolt.Options{
+		ReadOnly: true,
+		Timeout:  2 * time.Second,
+	})
+	require.NoError(t, reopenErr, "recovered bolt must open cleanly")
+	require.NoError(t, reopened.Close())
+
+	// Marker written so the next daemon/in-process pass forces a full rebuild
+	// and repopulates the emptied sub-index.
+	require.True(t, HasNeedsReindexMarker(tmp, "code"),
+		"self-heal must write a .needs_reindex marker for repopulation")
 }
 
 // emptyMappingForLatestSnapshot opens root.bolt and overwrites the latest
@@ -789,16 +912,15 @@ func TestIsBleveIndexCorrupt_RecoversWhenLockClearsWithinRetryBudget(t *testing.
 		"self-heal must write the reindex marker")
 }
 
-// TestOpenOrCreateBleveIndex_SustainedLockStillReturnsContentionError verifies
+// TestOpenOrCreateBleveIndex_SustainedLockDefersSelfHeal verifies
 // that the corruption-peek retry does NOT turn genuinely sustained lock
 // contention into a false self-heal: a lock held for the entire retry budget
-// must still surface the pre-existing "lock contention" error unchanged, and
-// must NOT nuke the index.
+// must surface a distinct deferred-heal error and must NOT nuke the index.
 //
 // Failure prevented: a naive retry-until-success peek turning a real,
 // long-running writer (e.g. the daemon mid full-reindex) into a spurious
 // nuke-and-recreate of an index that was never actually corrupt.
-func TestOpenOrCreateBleveIndex_SustainedLockStillReturnsContentionError(t *testing.T) {
+func TestOpenOrCreateBleveIndex_SustainedLockDefersSelfHeal(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: Bleve + bbolt operations")
 	}
@@ -831,7 +953,7 @@ func TestOpenOrCreateBleveIndex_SustainedLockStillReturnsContentionError(t *test
 	// to finish quickly.
 	var lockDB *bbolt.DB
 	bleveCorruptionPeekRetryHook = func(attempt int) {
-		if attempt == 0 {
+		if attempt == 0 && lockDB == nil {
 			var lockErr error
 			lockDB, lockErr = bbolt.Open(boltPath, 0600, &bbolt.Options{Timeout: 2 * time.Second})
 			require.NoError(t, lockErr, "acquire competing exclusive lock")
@@ -845,8 +967,10 @@ func TestOpenOrCreateBleveIndex_SustainedLockStillReturnsContentionError(t *test
 
 	_, openErr := openOrCreateBleveIndex(tmp, indexPath, "test")
 	require.Error(t, openErr, "sustained contention must still surface an error")
-	require.Contains(t, openErr.Error(), "lock contention",
-		"sustained contention must not be misread as self-healable corruption")
+	require.Contains(t, openErr.Error(), "self-heal deferred",
+		"sustained contention after a corruption trigger must report deferred healing")
+	require.NotContains(t, openErr.Error(), "appears to be in use (lock contention)",
+		"deferred healing must be distinguishable from a direct open contention error")
 	require.False(t, HasNeedsReindexMarker(tmp, "test"),
 		"a genuinely locked (not proven corrupt) index must not trigger self-heal")
 }
@@ -1077,6 +1201,8 @@ func TestSelfHealBleveSubIndex_RecreateFailure_ReturnsError(t *testing.T) {
 	emptyMappingForLatestSnapshot(t, boltPath)
 
 	bleveParent := filepath.Join(tmp, "bleve")
+	// Let the repair acquire its lock before failing in the destructive step.
+	require.NoError(t, os.WriteFile(subIndexHealLockPath(filepath.Join(bleveParent, "comment")), nil, 0o600))
 	require.NoError(t, os.Chmod(bleveParent, 0o500), "make bleve parent read-only")
 	t.Cleanup(func() { _ = os.Chmod(bleveParent, 0o700) })
 
@@ -1085,6 +1211,8 @@ func TestSelfHealBleveSubIndex_RecreateFailure_ReturnsError(t *testing.T) {
 	require.Nil(t, idx, "must not return nil index alongside error")
 	require.Contains(t, err.Error(), "bleve sub-index",
 		"error must identify the failing operation, not bubble up a raw EACCES")
+	require.True(t, HasNeedsReindexMarker(tmp, "comment"),
+		"failed destructive repair must retain the signal needed to repopulate the index")
 }
 
 // TestInsights_NeverEmitsCrypticBleveError is the negative regression for

@@ -84,7 +84,7 @@ func TestHydrateRawToCacheErr_UsesCacheWhenAlreadyHydrated(t *testing.T) {
 
 	// in-place stays a pointer; the real bytes live in the cache
 	rawPath := filepath.Join(sessionDir, "raw.jsonl")
-	require.NoError(t, WritePointerFile(rawPath, FileRef{OID: "sha256:abc", Size: 10}))
+	require.NoError(t, WritePointerFile(rawPath, AssertUploaded(FileRef{OID: "sha256:abc", Size: 10})))
 
 	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
 	require.NoError(t, os.MkdirAll(cacheDir, 0o755))
@@ -116,7 +116,7 @@ func TestResetInlineSummaryEligible_UnhydratablePointerDoesNotReset(t *testing.T
 
 	eligibleMeta(t, sessionDir)
 	require.NoError(t, WritePointerFile(filepath.Join(sessionDir, "raw.jsonl"),
-		FileRef{OID: "sha256:abc", Size: 10}))
+		AssertUploaded(FileRef{OID: "sha256:abc", Size: 10})))
 
 	before, err := os.ReadFile(filepath.Join(sessionDir, "meta.json"))
 	require.NoError(t, err)
@@ -148,7 +148,7 @@ func TestResetInlineSummaryEligible_HydratedPointerDoesReset(t *testing.T) {
 
 	eligibleMeta(t, sessionDir)
 	require.NoError(t, WritePointerFile(filepath.Join(sessionDir, "raw.jsonl"),
-		FileRef{OID: "sha256:abc", Size: 10}))
+		AssertUploaded(FileRef{OID: "sha256:abc", Size: 10})))
 
 	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
 	require.NoError(t, os.MkdirAll(cacheDir, 0o755))
@@ -220,7 +220,7 @@ func TestHydrateRawToCacheErr_FallsBackToOnDiskPointer(t *testing.T) {
 
 	// ...but a valid pointer on disk, carrying the OID
 	require.NoError(t, WritePointerFile(filepath.Join(sessionDir, "raw.jsonl"),
-		FileRef{OID: "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", Size: 4242}))
+		AssertUploaded(FileRef{OID: "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", Size: 4242})))
 
 	// nil client, so this gets as far as needing the network and no further —
 	// what matters is that it is NOT the terminal sentinel.

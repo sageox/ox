@@ -31,6 +31,22 @@ var (
 
 	// ErrProtocolMismatch is returned when an adapter's protocol version is incompatible.
 	ErrProtocolMismatch = errors.New("adapter protocol version mismatch")
+
+	// ErrAdapterOutputLimit is returned when an adapter writes more output than
+	// the runtime will retain. A misbehaving adapter must not be able to grow the
+	// daemon without bound before its subprocess timeout expires.
+	ErrAdapterOutputLimit = errors.New("adapter output exceeded limit")
+)
+
+const (
+	defaultOneShotOutputLimit = 64 * 1024 * 1024
+	// After the adapter exits or is canceled, a descendant may keep the
+	// inherited output pipes open. WaitDelay bounds that orphan case, not
+	// normal copying: it must exceed scheduler jitter on a saturated host, or
+	// a complete adapter answer is discarded with "WaitDelay expired before
+	// I/O complete". oneShotTimeout stays the real deadline. Same order as
+	// gitutil's gitWaitDelay.
+	oneShotPipeDrainDelay = 2 * time.Second
 )
 
 // ExternalAdapter implements Adapter and IncrementalReader by calling an
@@ -47,17 +63,19 @@ type ExternalAdapter struct {
 	serveSeq int
 
 	// timeouts
-	oneShotTimeout time.Duration
-	serveTimeout   time.Duration
+	oneShotTimeout     time.Duration
+	serveTimeout       time.Duration
+	oneShotOutputLimit int
 }
 
 // NewExternalAdapter creates an ExternalAdapter wrapping the binary at the given path.
 // It calls `info` to populate adapter metadata.
 func NewExternalAdapter(binaryPath string) (*ExternalAdapter, error) {
 	ea := &ExternalAdapter{
-		binaryPath:     binaryPath,
-		oneShotTimeout: 10 * time.Second,
-		serveTimeout:   100 * time.Millisecond,
+		binaryPath:         binaryPath,
+		oneShotTimeout:     10 * time.Second,
+		serveTimeout:       100 * time.Millisecond,
+		oneShotOutputLimit: defaultOneShotOutputLimit,
 	}
 
 	// call info to get adapter metadata
@@ -74,10 +92,11 @@ func NewExternalAdapter(binaryPath string) (*ExternalAdapter, error) {
 // Used when info has already been called (e.g., during discovery).
 func NewExternalAdapterWithInfo(binaryPath string, info *adapterprotocol.InfoResponse) *ExternalAdapter {
 	return &ExternalAdapter{
-		binaryPath:     binaryPath,
-		info:           info,
-		oneShotTimeout: 10 * time.Second,
-		serveTimeout:   100 * time.Millisecond,
+		binaryPath:         binaryPath,
+		info:               info,
+		oneShotTimeout:     10 * time.Second,
+		serveTimeout:       100 * time.Millisecond,
+		oneShotOutputLimit: defaultOneShotOutputLimit,
 	}
 }
 
@@ -135,7 +154,21 @@ func (ea *ExternalAdapter) FindSessionFile(lookup SessionLookup) (string, error)
 
 // Read calls the adapter's read subcommand.
 func (ea *ExternalAdapter) Read(sessionPath string) ([]RawEntry, error) {
-	out, err := ea.execOneShot("read", "--session-file", sessionPath)
+	return ea.ReadWithContext(context.Background(), sessionPath, ea.oneShotTimeout)
+}
+
+// ReadWithTimeout reads a session like Read, within a caller-chosen deadline.
+// Importing a months-long transcript takes longer than the 10s a live capture
+// batch allows; the output limit still applies, so an oversized session fails
+// with ErrAdapterOutputLimit instead of being cut short.
+func (ea *ExternalAdapter) ReadWithTimeout(sessionPath string, timeout time.Duration) ([]RawEntry, error) {
+	return ea.ReadWithContext(context.Background(), sessionPath, timeout)
+}
+
+// ReadWithContext reads within the caller's lifetime and the adapter deadline.
+// Cancellation stops the subprocess and its descendants before returning.
+func (ea *ExternalAdapter) ReadWithContext(ctx context.Context, sessionPath string, timeout time.Duration) ([]RawEntry, error) {
+	out, err := ea.execOneShotContext(ctx, timeout, "read", "--session-file", sessionPath)
 	if err != nil {
 		return nil, err
 	}
@@ -572,6 +605,21 @@ func (ea *ExternalAdapter) callInfo() (*adapterprotocol.InfoResponse, error) {
 // Pre-validates --repo-root before spawning the subprocess to fail fast
 // with a clear error instead of letting the adapter silently produce garbage.
 func (ea *ExternalAdapter) execOneShot(subcommand string, args ...string) ([]byte, error) {
+	return ea.execOneShotWithin(ea.oneShotTimeout, subcommand, args...)
+}
+
+// execOneShotWithin is execOneShot with a caller-chosen deadline.
+func (ea *ExternalAdapter) execOneShotWithin(timeout time.Duration, subcommand string, args ...string) ([]byte, error) {
+	return ea.execOneShotContext(context.Background(), timeout, subcommand, args...)
+}
+
+// execOneShotContext runs one subprocess with bounded combined output and caller
+// cancellation. Caller errors retain their identity; the adapter deadline and
+// output limit keep their distinct sentinels.
+func (ea *ExternalAdapter) execOneShotContext(parent context.Context, timeout time.Duration, subcommand string, args ...string) ([]byte, error) {
+	if err := parent.Err(); err != nil {
+		return nil, err
+	}
 	if subcommand == "find-session" {
 		if err := validateRepoRootArg(args, true); err != nil {
 			return nil, fmt.Errorf("pre-flight check for %s %s: %w", ea.binaryPath, subcommand, err)
@@ -579,19 +627,34 @@ func (ea *ExternalAdapter) execOneShot(subcommand string, args ...string) ([]byt
 	}
 
 	cmdArgs := append([]string{subcommand}, args...)
-	ctx, cancel := context.WithTimeout(context.Background(), ea.oneShotTimeout)
-	defer cancel()
+	timeoutCtx, timeoutCancel := context.WithTimeout(parent, timeout)
+	defer timeoutCancel()
+	ctx, outputCancel := context.WithCancel(timeoutCtx)
+	defer outputCancel()
 
 	cmd := exec.CommandContext(ctx, ea.binaryPath, cmdArgs...)
 	cmd.Env = ea.buildEnv()
+	cmd.WaitDelay = oneShotPipeDrainDelay
 
-	var stdout, stderr bytes.Buffer
+	limit := ea.oneShotOutputLimit
+	if limit <= 0 {
+		limit = defaultOneShotOutputLimit
+	}
+	budget := newOutputBudget(limit, outputCancel)
+	stdout := newBoundedBuffer(budget)
+	stderr := newBoundedBuffer(budget)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
-	if ctx.Err() == context.DeadlineExceeded {
+	err := runOneShotCommand(cmd)
+	if err := parent.Err(); err != nil {
+		return nil, err
+	}
+	if timeoutCtx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("%w: %s %s", ErrAdapterTimeout, ea.binaryPath, subcommand)
+	}
+	if budget.wasExceeded() {
+		return nil, fmt.Errorf("%w (%d bytes): %s %s", ErrAdapterOutputLimit, limit, ea.binaryPath, subcommand)
 	}
 	if err != nil {
 		// check for error response in stdout (adapter may exit non-zero with a JSON error)
@@ -609,6 +672,69 @@ func (ea *ExternalAdapter) execOneShot(subcommand string, args ...string) ([]byt
 
 	return bytes.TrimSpace(stdout.Bytes()), nil
 }
+
+// outputBudget bounds stdout and stderr together. The first overflow cancels
+// the subprocess so an adapter that ignores a broken pipe cannot continue
+// consuming CPU until the ordinary timeout.
+type outputBudget struct {
+	mu        sync.Mutex
+	remaining int
+	exceeded  bool
+	cancel    context.CancelFunc
+}
+
+func newOutputBudget(limit int, cancel context.CancelFunc) *outputBudget {
+	return &outputBudget{remaining: limit, cancel: cancel}
+}
+
+func (b *outputBudget) claim(want int) (allowed int, exceeded bool) {
+	b.mu.Lock()
+	allowed = min(want, b.remaining)
+	b.remaining -= allowed
+	if allowed < want {
+		exceeded = true
+		b.exceeded = true
+	}
+	cancel := b.cancel
+	b.mu.Unlock()
+
+	if exceeded && cancel != nil {
+		cancel()
+	}
+	return allowed, exceeded
+}
+
+func (b *outputBudget) wasExceeded() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.exceeded
+}
+
+// boundedBuffer implements io.Writer while retaining only bytes granted by a
+// shared output budget.
+type boundedBuffer struct {
+	buf    bytes.Buffer
+	budget *outputBudget
+}
+
+func newBoundedBuffer(budget *outputBudget) boundedBuffer {
+	return boundedBuffer{budget: budget}
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	allowed, exceeded := b.budget.claim(len(p))
+	if allowed > 0 {
+		_, _ = b.buf.Write(p[:allowed])
+	}
+	if exceeded {
+		return allowed, ErrAdapterOutputLimit
+	}
+	return allowed, nil
+}
+
+func (b *boundedBuffer) Len() int       { return b.buf.Len() }
+func (b *boundedBuffer) Bytes() []byte  { return b.buf.Bytes() }
+func (b *boundedBuffer) String() string { return b.buf.String() }
 
 // validateRepoRootArg scans CLI args for --repo-root and validates the value
 // before spawning the subprocess. Delegates path validation to

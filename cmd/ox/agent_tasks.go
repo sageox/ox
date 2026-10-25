@@ -1,13 +1,13 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/agenttask"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/spf13/cobra"
 )
@@ -296,9 +296,7 @@ func kindOrDash(k string) string {
 }
 
 func writeTasksJSON(w io.Writer, payload map[string]any) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(payload)
+	return cli.PrintJSONTo(w, payload)
 }
 
 // ---- producer-facing cobra command: ox agent tasks <add|list> -------------

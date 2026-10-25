@@ -1,0 +1,316 @@
+{
+  "contract_version": "1.0",
+  "cases": [
+    {
+      "name": "all outcomes, unknown Git, fallback capability and empty outline",
+      "kind": "run",
+      "path": "valid/run-all-outcomes.json",
+      "valid": true
+    },
+    {
+      "name": "bare Rule title remains distinct from no Rule and unknown Git is explicit",
+      "kind": "run",
+      "path": "valid/run-bare-rule.json",
+      "valid": true
+    },
+    {
+      "name": "mandatory capabilities omitted",
+      "kind": "run",
+      "path": "invalid/run-missing-capabilities.json",
+      "valid": false
+    },
+    {
+      "name": "duplicate executable outcome rejected",
+      "kind": "run",
+      "path": "invalid/run-duplicate-outcome.json",
+      "valid": false
+    },
+    {
+      "name": "missing executable outcome rejected",
+      "kind": "run",
+      "path": "invalid/run-missing-outcome.json",
+      "valid": false
+    },
+    {
+      "name": "execution step tree rejected",
+      "kind": "run",
+      "path": "invalid/run-step-tree.json",
+      "valid": false
+    },
+    {
+      "name": "nested extension rejected",
+      "kind": "run",
+      "path": "invalid/run-nested-extension.json",
+      "valid": false
+    },
+    {
+      "name": "unsupported schema version explicit",
+      "kind": "run",
+      "path": "invalid/run-unsupported-version.json",
+      "valid": false
+    },
+    {
+      "name": "sorted manifest with optional evidence absent",
+      "kind": "manifest",
+      "path": "valid/manifest-missing-evidence.json",
+      "valid": true
+    },
+    {
+      "name": "unsorted manifest rejected",
+      "kind": "manifest",
+      "path": "invalid/manifest-unsorted.json",
+      "valid": false
+    },
+    {
+      "name": "mandatory run document absent",
+      "kind": "manifest",
+      "path": "invalid/manifest-missing-run.json",
+      "valid": false
+    },
+    {
+      "name": "absolute manifest path rejected",
+      "kind": "manifest",
+      "path": "invalid/manifest-path-absolute.json",
+      "valid": false
+    },
+    {
+      "name": "dot-segment manifest path rejected",
+      "kind": "manifest",
+      "path": "invalid/manifest-path-dot-segment.json",
+      "valid": false
+    },
+    {
+      "name": "empty-segment manifest path rejected",
+      "kind": "manifest",
+      "path": "invalid/manifest-path-empty-segment.json",
+      "valid": false
+    },
+    {
+      "name": "backslash manifest path rejected",
+      "kind": "manifest",
+      "path": "invalid/manifest-path-backslash.json",
+      "valid": false
+    },
+    {
+      "name": "URL-delimiter manifest path rejected",
+      "kind": "manifest",
+      "path": "invalid/manifest-path-url-delimiter.json",
+      "valid": false
+    },
+    {
+      "name": "C1-control manifest path rejected",
+      "kind": "manifest",
+      "path": "invalid/manifest-path-c1-control.json",
+      "valid": false
+    },
+    {
+      "name": "oversized physical evidence key has no fabricated bytes",
+      "kind": "observations",
+      "path": "valid/observations-physical-key-too-long.json",
+      "valid": true
+    },
+    {
+      "name": "invalid archive evidence has no fabricated bytes",
+      "kind": "observations",
+      "path": "valid/observations-invalid-archive-entry.json",
+      "valid": true
+    },
+    {
+      "name": "create envelope stays on control plane",
+      "kind": "control:createRunRequest",
+      "path": "valid/create-run-request.json",
+      "valid": true
+    },
+    {
+      "name": "create returns initial grant",
+      "kind": "control:createRunResponse",
+      "path": "valid/create-run-response-initial-grant.json",
+      "valid": true
+    },
+    {
+      "name": "upload grant renewal preserves immutable binding",
+      "kind": "control:uploadGrantResponse",
+      "path": "valid/upload-grant-response.json",
+      "valid": true
+    },
+    {
+      "name": "GET state contains no credentials",
+      "kind": "control:runResponse",
+      "path": "valid/run-response-credential-free.json",
+      "valid": true
+    },
+    {
+      "name": "run list uses bounded cursor pagination",
+      "kind": "control:runListResponse",
+      "path": "valid/run-list-response.json",
+      "valid": true
+    },
+    {
+      "name": "snapshot combines immutable semantics and observations",
+      "kind": "control:snapshotResponse",
+      "path": "valid/snapshot-response.json",
+      "valid": true
+    },
+    {
+      "name": "history preserves empty Rule title and raw outcome",
+      "kind": "control:historyResponse",
+      "path": "valid/history-response.json",
+      "valid": true
+    },
+    {
+      "name": "access grant separates evidence and exchange cutoffs",
+      "kind": "control:accessGrantResponse",
+      "path": "valid/access-grant-response.json",
+      "valid": true
+    },
+    {
+      "name": "deletion response is terminal",
+      "kind": "control:deletionResponse",
+      "path": "valid/deletion-response.json",
+      "valid": true
+    },
+    {
+      "name": "errors use the shared envelope",
+      "kind": "control:errorResponse",
+      "path": "valid/error-response.json",
+      "valid": true
+    },
+    {
+      "name": "rejection records the terminal timestamp",
+      "kind": "lifecycle",
+      "path": "valid/lifecycle-rejected.json",
+      "valid": true
+    },
+    {
+      "name": "rejection without terminal timestamp is invalid",
+      "kind": "lifecycle",
+      "path": "invalid/lifecycle-rejected-missing-timestamp.json",
+      "valid": false
+    },
+    {
+      "name": "hosted ID with malformed UUID separators is invalid",
+      "kind": "control:runResponse",
+      "path": "invalid/run-response-malformed-id.json",
+      "valid": false
+    },
+    {
+      "name": "hosted ID with a non-v7 UUID is invalid",
+      "kind": "lifecycle",
+      "path": "invalid/lifecycle-non-v7-id.json",
+      "valid": false
+    },
+    {
+      "name": "next page without continuation cursor rejected",
+      "kind": "control:runListResponse",
+      "path": "invalid/pagination-missing-next-cursor.json",
+      "valid": false
+    },
+    {
+      "name": "last page needs no continuation cursor",
+      "kind": "control:runListResponse",
+      "path": "valid/pagination-last-page.json",
+      "valid": true
+    },
+    {
+      "name": "mixed observations counts match evidence",
+      "kind": "observations",
+      "path": "valid/observations-mixed-status.json",
+      "valid": true
+    },
+    {
+      "name": "observations referenced count mismatch rejected",
+      "kind": "observations",
+      "path": "invalid/observations-count-referenced.json",
+      "valid": false
+    },
+    {
+      "name": "observations available count mismatch rejected",
+      "kind": "observations",
+      "path": "invalid/observations-count-available.json",
+      "valid": false
+    },
+    {
+      "name": "observations missing count mismatch rejected",
+      "kind": "observations",
+      "path": "invalid/observations-count-missing.json",
+      "valid": false
+    },
+    {
+      "name": "observations invalid count mismatch rejected",
+      "kind": "observations",
+      "path": "invalid/observations-count-invalid.json",
+      "valid": false
+    },
+    {
+      "name": "run feature parent segment rejected",
+      "kind": "run",
+      "path": "invalid/run-feature-parent-segment.json",
+      "valid": false
+    },
+    {
+      "name": "run feature dot segment rejected",
+      "kind": "run",
+      "path": "invalid/run-feature-dot-segment.json",
+      "valid": false
+    },
+    {
+      "name": "run evidence parent segment rejected",
+      "kind": "run",
+      "path": "invalid/run-evidence-parent-segment.json",
+      "valid": false
+    },
+    {
+      "name": "run evidence dot segment rejected",
+      "kind": "run",
+      "path": "invalid/run-evidence-dot-segment.json",
+      "valid": false
+    },
+    {
+      "name": "workflow publish payload accepted",
+      "kind": "workflow",
+      "path": "valid/workflow-publish.json",
+      "valid": true
+    },
+    {
+      "name": "workflow delete payload accepted",
+      "kind": "workflow",
+      "path": "valid/workflow-delete.json",
+      "valid": true
+    },
+    {
+      "name": "workflow malformed-run-id rejected",
+      "kind": "workflow",
+      "path": "invalid/workflow-malformed-run-id.json",
+      "valid": false
+    },
+    {
+      "name": "workflow non-v7-repo-id rejected",
+      "kind": "workflow",
+      "path": "invalid/workflow-non-v7-repo-id.json",
+      "valid": false
+    },
+    {
+      "name": "workflow incomplete publish branch rejected",
+      "kind": "workflow",
+      "path": "invalid/workflow-publish-missing-archive.json",
+      "valid": false
+    },
+    {
+      "name": "workflow delete with publish-only field rejected",
+      "kind": "workflow",
+      "path": "invalid/workflow-delete-extra-upload.json",
+      "valid": false
+    },
+    {
+      "name": "observations negative size rejected",
+      "kind": "observations",
+      "path": "invalid/observations-negative-size.json",
+      "valid": false
+    }
+  ],
+  "package_case": {
+    "run": "valid/run-all-outcomes.json",
+    "manifest": "valid/manifest-missing-evidence.json",
+    "expected_observations": "valid/observations-missing-evidence.json"
+  }
+}

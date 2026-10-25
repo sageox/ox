@@ -44,6 +44,34 @@ func TestStartRecording_MintsSessionIDAtBirth(t *testing.T) {
 	assert.Equal(t, state.SessionID, reloaded.SessionID)
 }
 
+func TestStartRecording_ContinuationIdentity(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := setupRecordingTest(t, cacheDir)
+
+	validPrior := sessionid.GenerateSessionID()
+	state, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID:                "OxCont",
+		AdapterName:            "claude-code",
+		Username:               "testuser",
+		ContinuedFromSessionID: validPrior,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, validPrior, state.ContinuedFromSessionID)
+
+	_, err = StopRecording(projectRoot, state.AgentID)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(state.SessionPath))
+
+	invalid, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID:                "OxCont",
+		AdapterName:            "claude-code",
+		Username:               "testuser",
+		ContinuedFromSessionID: "not-a-session-id",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, invalid.ContinuedFromSessionID, "untrusted marker values must not create cross-links")
+}
+
 // TestStartRecording_EveryRecordingGetsItsOwnID verifies the other half of
 // the birth contract: the ID is minted PER RECORDING, never shared or carried
 // over. TestStartRecording_MintsSessionIDAtBirth only proves one recording

@@ -7,12 +7,12 @@ import (
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
-// TestHandleInfo_CapabilitiesPinned locks the declared capability set.
+// TestHandleInfo_CapabilitiesPinned proves handleInfo() actually wires
+// adapterprotocol.GooseCapabilities — the canonical source in
+// pkg/adapterprotocol/capabilities.go, including why it carries no
+// file_watcher — into the response.
 //
-// KEEP IN SYNC with the "goose" entry in internal/prime/conformance_test.go's
-// adapterCaps fixture. Adding or removing a capability requires updating BOTH.
-//
-// Every capability listed here MUST have its handler registered in the
+// Every capability listed there MUST have its handler registered in the
 // adapterruntime.Config literal in main.go. Declaring a capability without
 // wiring its handler makes the subcommand return "not implemented" at runtime
 // while every check reports the feature as present — see ox-8arr, where exactly
@@ -23,16 +23,8 @@ func TestHandleInfo_CapabilitiesPinned(t *testing.T) {
 		t.Fatalf("handleInfo() error: %v", err)
 	}
 
-	want := []string{
-		adapterprotocol.CapSessionReader,
-		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapIncrementalReader,
-		adapterprotocol.CapSessionImporter,
-		adapterprotocol.CapCapturePrior,
-		adapterprotocol.CapServeMode,
-	}
-
 	got := append([]string(nil), info.Capabilities...)
+	want := append([]string(nil), adapterprotocol.GooseCapabilities...)
 	sort.Strings(got)
 	sort.Strings(want)
 
@@ -42,15 +34,6 @@ func TestHandleInfo_CapabilitiesPinned(t *testing.T) {
 	for i := range got {
 		if got[i] != want[i] {
 			t.Fatalf("capabilities = %v, want %v", got, want)
-		}
-	}
-
-	// Goose sessions are SQLite rows behind a virtual handle, so there is no
-	// path fsnotify could watch. Declaring file_watcher would make the daemon
-	// try to tail a handle that will never exist on disk.
-	for _, c := range info.Capabilities {
-		if c == adapterprotocol.CapFileWatcher {
-			t.Error("goose must not declare file_watcher: session handles are virtual")
 		}
 	}
 }
@@ -75,5 +58,38 @@ func TestHandleInfo_Identity(t *testing.T) {
 	}
 	if info.ProtocolVersion != adapterprotocol.ProtocolVersion {
 		t.Errorf("ProtocolVersion = %d, want %d", info.ProtocolVersion, adapterprotocol.ProtocolVersion)
+	}
+}
+
+// TestSkillTargets_SingleCanonicalRoot: goose declares exactly one write root,
+// the canonical .agents/skills.
+//
+// Before this, goose declared no skill targets at all, so `ox init` selected it
+// and installed ZERO skills — silently, because an adapter with no targets is
+// indistinguishable from one whose skills are already current.
+//
+// Exactly one target is the assertion, not "at least one": a skill copied into
+// several of an agent's discovery paths is several files to keep in sync and
+// several answers when they drift.
+func TestSkillTargets_SingleCanonicalRoot(t *testing.T) {
+	info, err := handleInfo()
+	if err != nil {
+		t.Fatalf("handleInfo: {%v}", err)
+	}
+	if len(info.SkillTargets) != 1 {
+		t.Fatalf("SkillTargets = %#v, want exactly one canonical root", info.SkillTargets)
+	}
+	target := info.SkillTargets[0]
+	if target.Key != "agents-project" || target.Root != ".agents/skills" {
+		t.Errorf("target = %+v, want key agents-project at .agents/skills", target)
+	}
+	var declared bool
+	for _, c := range info.Capabilities {
+		if c == "skills_installer" {
+			declared = true
+		}
+	}
+	if !declared {
+		t.Error("SkillTargets are declared but CapSkillsInstaller is not, so ox init routes to the legacy RPC and installs nothing")
 	}
 }

@@ -89,10 +89,34 @@ func TestUnsetConfigValue_UserLevel_BoolSetting(t *testing.T) {
 	assert.Nil(t, cfg.TelemetryEnabled, "TelemetryEnabled should be nil after unset")
 }
 
+func TestUnsetConfigValue_SessionPublishing_UserLevel(t *testing.T) {
+	setupIsolatedUserConfig(t)
+
+	// set at user level
+	require.NoError(t, SetConfigValue("session_publishing", "manual", ConfigLevelUser, ""))
+
+	cv, err := ResolveConfigValue("session_publishing", "")
+	require.NoError(t, err)
+	assert.Equal(t, "manual", cv.Value)
+	assert.Equal(t, ConfigLevelUser, cv.Source)
+
+	// unset falls back to default
+	require.NoError(t, UnsetConfigValue("session_publishing", ConfigLevelUser, ""))
+
+	cv, err = ResolveConfigValue("session_publishing", "")
+	require.NoError(t, err)
+	assert.Equal(t, "auto", cv.Value)
+	assert.Equal(t, ConfigLevelDefault, cv.Source)
+
+	cfg, err := config.LoadUserConfig()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.SessionPublishing, "SessionPublishing should be cleared after unset")
+}
+
 func TestUnsetConfigValue_ContextGit_PartialUnset(t *testing.T) {
 	setupIsolatedUserConfig(t)
 
-	// set both auto_commit and auto_push
+	// set both auto_commit and auto_push (deprecated but still accepted — D5)
 	require.NoError(t, SetConfigValue("context_git.auto_commit", "off", ConfigLevelUser, ""))
 	require.NoError(t, SetConfigValue("context_git.auto_push", "off", ConfigLevelUser, ""))
 

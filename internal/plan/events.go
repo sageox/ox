@@ -14,13 +14,17 @@ package plan
 // fields that a concurrent writer could clobber. An append-only line per
 // event sidesteps that — nothing already on disk is ever rewritten, so two
 // processes recording events for the same plan can never lose each other's
-// history, only interleave it (and interleaving is fine: Fold is order-
-// tolerant for everything except relying on file order for CreatedAt/
-// UpdatedAt, which matches how AppendEvent actually writes).
+// history, only interleave it. Fold reads file order as event order (the last
+// status, topic or visibility wins), so two events appended at once on
+// different clones read in the order git merged them.
 //
-// Locking mirrors AppendResolution in feedback.go exactly: the file is a
-// shared resource across processes (CLI, daemon, a future reconciler), so
-// the read-modify-write that appends a line runs under fileutil.WithFileLock
+// Never edit a line once written: git merges this file with merge=union
+// (kb.MergeUnionPaths), and union keeps both versions of an edited line that
+// sits next to another clone's append.
+//
+// Locking: the file is a shared resource across processes (CLI, daemon, a
+// future reconciler), so the read-modify-write that appends a line runs under
+// fileutil.WithFileLock
 // rather than a bare os.OpenFile(O_APPEND) — two concurrent appends without
 // a lock can both read the same "existing" bytes and each write back a
 // truncated file containing only their own line, silently dropping the
@@ -79,10 +83,9 @@ func validEventKind(k EventKind) bool {
 // Event is one line of a plan's events.jsonl. PlanID is carried on every
 // line (not just implied by the containing directory) so a line remains
 // self-describing if ever copied, replayed, or ingested elsewhere.
-// SessionID/SessionName are two-phase like Provenance's (see store.go):
-// SessionName is the durable join key available while a recording is live;
-// SessionID is the canonical ses_<UUIDv7> backfilled once known, typically
-// via a later event on the same plan rather than an edit to this one.
+// SessionName/SessionID name the recording live when the line was written.
+// A recording mints its ses_ id when it starts, so both are set together; a
+// recording an older ox started has no id, and its lines keep only the name.
 type Event struct {
 	Timestamp   time.Time  `json:"ts"`
 	PlanID      string     `json:"plan_id"`
@@ -108,7 +111,7 @@ type Event struct {
 }
 
 // AppendEvent adds one line to a plan's events.jsonl under an advisory
-// flock — the exact locking idiom AppendResolution uses in feedback.go.
+// flock (fileutil.WithFileLock).
 // Multiple processes (the CLI, the daemon, a future reconciler) can record
 // events for the same plan concurrently; the flocked read-modify-write
 // ensures one append can never silently overwrite another.
@@ -160,9 +163,9 @@ func appendEventLocked(path string, ev Event) error {
 
 // LoadEvents reads a plan's events.jsonl, oldest first (append order). A
 // missing file is not an error — a plan with no lifecycle events recorded
-// yet simply has none. Unlike feedback.go's per-round LoadAllFeedback (which
-// skips a malformed round because rounds are browser-authored, untrusted
-// input), events.jsonl is written only by AppendEvent, so a line that fails
+// yet simply has none. Unlike review records (read around a malformed one,
+// which is reported, because rounds are browser-authored, untrusted input),
+// events.jsonl is written only by AppendEvent, so a line that fails
 // to parse indicates corruption worth surfacing rather than silently
 // dropping lifecycle history.
 func LoadEvents(planDir string) ([]Event, error) {
@@ -190,65 +193,6 @@ func LoadEvents(planDir string) ([]Event, error) {
 	return events, nil
 }
 
-// BackfillSessionID rewrites events.jsonl lines whose SessionName matches
-// sessionName and whose SessionID is still empty, setting SessionID —
-// the same one-time id-reconciliation ReconcileSessionOutcome already
-// performs on meta.json's Provenance at session-stop (see store.go),
-// applied here to the append-only event log. events.jsonl is otherwise
-// immutable by design (see the package comment above): this is the sole,
-// narrowly-scoped exception, and it only ever WIDENS a line (fills a
-// previously-empty field) — it never changes a value a reader has already
-// observed, and only ever targets the calling session's own lines (matched
-// by SessionName, the durable pre-canonical join key). Runs under the same
-// flock AppendEvent/AppendPlanEvent use, so it can never race a concurrent
-// append. Idempotent: a line already carrying a SessionID (this session's or
-// any other's) is left untouched, so re-running after a successful backfill
-// updates nothing. Returns the number of lines changed; sessionName == "" or
-// sessionID == "" is a no-op, not an error (nothing to key off of / nothing
-// to write).
-func BackfillSessionID(ctx context.Context, planDir, sessionName, sessionID string) (int, error) {
-	if sessionName == "" || sessionID == "" {
-		return 0, nil
-	}
-
-	path := filepath.Join(planDir, eventsFile)
-	count := 0
-	err := fileutil.WithFileLock(ctx, path, func() error {
-		events, loadErr := LoadEvents(planDir)
-		if loadErr != nil {
-			return fmt.Errorf("load events: %w", loadErr)
-		}
-		if len(events) == 0 {
-			return nil // no events.jsonl yet (or empty) — nothing to backfill
-		}
-
-		for i := range events {
-			if events[i].SessionName == sessionName && events[i].SessionID == "" {
-				events[i].SessionID = sessionID
-				count++
-			}
-		}
-		if count == 0 {
-			return nil
-		}
-
-		var buf bytes.Buffer
-		for _, ev := range events {
-			line, mErr := json.Marshal(ev)
-			if mErr != nil {
-				return fmt.Errorf("encode event: %w", mErr)
-			}
-			buf.Write(line)
-			buf.WriteByte('\n')
-		}
-		return fileutil.AtomicWriteBytes(path, buf.Bytes(), 0o644)
-	})
-	if err != nil {
-		return 0, err
-	}
-	return count, nil
-}
-
 // FoldedState is the current-state projection of a plan's events.jsonl,
 // derived entirely by replaying the log — never itself stored. Two callers
 // folding the same event slice always get identical output.
@@ -261,6 +205,7 @@ type FoldedState struct {
 	UpdatedAt  time.Time
 	Visibility string
 	Sessions   []SessionRef // distinct sessions, first-seen order
+	Revisions  int          // created and revised events: the plan's saves
 }
 
 // SessionRef is one distinct session that touched a plan, folded from every
@@ -294,7 +239,8 @@ const defaultVisibility = "private"
 //   - CreatedAt: timestamp of the first "created" event; falls back to the
 //     first event overall if the log has no created event (e.g. one
 //     backfilled starting mid-lifecycle).
-//   - UpdatedAt: timestamp of the last event in the slice.
+//   - UpdatedAt: the latest event timestamp in the slice.
+//   - Revisions: the number of created and revised events.
 func Fold(events []Event) FoldedState {
 	state := FoldedState{
 		Status:     PlanStatusDraft,
@@ -322,8 +268,11 @@ func Fold(events []Event) FoldedState {
 			state.UpdatedAt = ev.Timestamp // defensive: tolerate a slice not already in file/append order
 		}
 
-		if (ev.Kind == EventCreated || ev.Kind == EventRevised) && ev.Topic != "" {
-			state.Topic = ev.Topic
+		if ev.Kind == EventCreated || ev.Kind == EventRevised {
+			state.Revisions++
+			if ev.Topic != "" {
+				state.Topic = ev.Topic
+			}
 		}
 		if ev.Status != "" {
 			state.Status = ev.Status
@@ -350,8 +299,7 @@ func Fold(events []Event) FoldedState {
 			sessionOrder = append(sessionOrder, key)
 		} else {
 			// progressive enrichment: a later event on the same session may
-			// carry the SessionID backfilled at stop, or an Author the
-			// earliest event didn't have set.
+			// carry a SessionID or Author the earliest one lacks.
 			if ref.SessionName == "" {
 				ref.SessionName = ev.SessionName
 			}

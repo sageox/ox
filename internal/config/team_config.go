@@ -20,6 +20,13 @@ type TeamConfig struct {
 	// Empty string means no team default (fall back to system default).
 	SessionRecording string `toml:"session_recording,omitempty"`
 
+	// SessionPublishing controls the default session publishing mode for the
+	// team. Values: "auto", "manual". Empty string means no team default
+	// (fall back to the repo's .sageox/config.json, then "auto"). A user's
+	// own session_publishing config always overrides this — see
+	// ResolveSessionPublishing (contract D13).
+	SessionPublishing string `toml:"session_publishing,omitempty"`
+
 	// SessionNotification is the message shown to users when recording starts.
 	// If empty, uses the default notification message.
 	SessionNotification string `toml:"session_notification,omitempty"`

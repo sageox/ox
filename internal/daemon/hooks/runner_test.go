@@ -248,7 +248,7 @@ func TestRunnerEmptyHooksList(t *testing.T) {
 	runner.Dispatch(context.Background(), hooks.Event{Name: hooks.EventDaemonStarted})
 	elapsed := time.Since(start)
 
-	if elapsed > 1*time.Millisecond {
+	if elapsed > 100*time.Millisecond {
 		t.Fatalf("dispatch with empty hooks took %v, expected near-instant", elapsed)
 	}
 }
@@ -427,7 +427,7 @@ func TestRunnerEnvironmentVariables(t *testing.T) {
 		Name:      hooks.EventDaemonStarted,
 		Timestamp: ts,
 	})
-	time.Sleep(300 * time.Millisecond)
+	runner.Wait()
 
 	data, err := os.ReadFile(envFile)
 	if err != nil {

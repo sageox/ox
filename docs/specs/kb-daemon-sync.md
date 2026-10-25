@@ -130,7 +130,7 @@ failure modes. The kb checks (`cmd/ox/doctor_kb.go`,
 
 | kb check | Mirrors | What it catches | Fix |
 |---|---|---|---|
-| `kb-orphans` | `orphaned-team-dirs` | on-disk kb_id absent from API list | daemon GC move-aside |
+| `kb-orphans` | `orphaned-team-dirs` | on-disk kb_id from this project's kb scopes, absent from its API list | daemon kb GC move-aside (`trigger_kb_gc`) |
 | `kb-missing-clone` | (inverse of orphans) | API bubble with no local clone | kick daemon sync |
 | `kb-wedged` | `ledger-unmerged-paths` | stuck merge/rebase (U-state / rebase dir) — **Critical**, blocks the owner's sync for every project | kick daemon sync, else manual `rebase --abort` |
 | `kb-sparse-checkout` | `ledger-sparse-checkout`, `team-sparse-checkout` | `.sageox` dropped from sparse cone | kick daemon sync (reapply from manifest) |

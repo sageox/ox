@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
@@ -68,6 +69,10 @@ func TestCheckLedgerStuckOperation_UnmergedPathsMissesZombie(t *testing.T) {
 func TestFixLedgerStuckOperation_ClearsZombieRebase(t *testing.T) {
 	skipIntegration(t)
 	repo := buildZombieRebaseRepo(t)
+	stateDir := filepath.Join(repo, ".git", "rebase-merge")
+	old := time.Now().Add(-gitutil.StaleRebaseThreshold - time.Minute)
+	require.NoError(t, os.Chtimes(filepath.Join(stateDir, "autostash"), old, old))
+	require.NoError(t, os.Chtimes(stateDir, old, old))
 	headBefore, err := runIsolatedGit(t, repo, "rev-parse", "HEAD")
 	require.NoError(t, err)
 

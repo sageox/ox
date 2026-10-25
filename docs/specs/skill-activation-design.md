@@ -25,7 +25,7 @@ This insight comes from analyzing [beads PR #718](https://github.com/steveyegge/
 ### Why the three names are one boundary
 
 - **Thin-relay → cross-agent conformance.** Portable skills reach Claude, Codex, and Gemini through their native mechanisms, but commands and rules remain host-specific and some AI coworkers have no native skill mechanism. Floor behavior therefore still belongs in prime/CLI output; otherwise support depth depends on the host surface.
-- **Layer 1 → staleness safety.** Layer 1 is always the live binary; it cannot drift from the code. Installed native skills are lockfile-owned projections of `extensions/skills/`; Claude commands remain stamped copies. A copied body **can** go stale; the binary's `guidance` **cannot**. Keeping floor behavior in Layer 1 minimizes rollout drift even though Doctor can now reconcile the complete skill tree.
+- **Layer 1 → staleness safety.** Layer 1 is always the live binary; it cannot drift from the code. Installed native skills are lockfile-owned projections of `extensions/skills/` and are gitignored under the reserved `ox-cli-*` namespace (ADR-031). The Claude-only command surface no longer exists: it folded into slash-only skills carrying `disable-model-invocation: true`, so the same lifecycle affordances now reach every adapter with a skills root. A copied body **can** go stale; the binary's `guidance` **cannot**. Keeping floor behavior in Layer 1 minimizes rollout drift even though Doctor can now reconcile the complete skill tree.
 
 ### Author decision checklist
 
@@ -56,8 +56,8 @@ A skill body may be thick **only when ALL of the following hold**:
 
 Two skills are the sanctioned thick examples:
 
-- `extensions/skills/ox-plan/SKILL.md` — carries the **judgment-badge and rich-page authoring flow**: reasoning the `ox plan enrich` context bundle into cited, section-anchored badges, then authoring the purpose-built `plan.html` that becomes the plan of record. The binary injects SageOx chrome and derives `plan.md`; it does not replace the authored page with a generic renderer.
-- `extensions/skills/ox-session-review/SKILL.md` — carries the **audit + regeneration flow**, which is not backed by a single ox subcommand.
+- `extensions/skills/ox-cli-plan/SKILL.md` — carries the **judgment-badge and rich-page authoring flow**: reasoning the `ox plan enrich` context bundle into cited, section-anchored badges, then authoring the purpose-built `plan.html` that becomes the plan of record. The binary injects SageOx chrome and derives `plan.md`; it does not replace the authored page with a generic renderer.
+- `extensions/skills/ox-cli-session-review/SKILL.md` — carries the **audit + regeneration flow**, which is not backed by a single ox subcommand.
 
 Everything else is thin. If you are unsure whether content clears the gate, it does not: route it to Layer 1.
 

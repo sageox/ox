@@ -1,10 +1,17 @@
 package identity
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/sageox/ox/internal/runtime"
 )
 
 // --- A. osUsername fallback ---
@@ -115,4 +122,86 @@ func TestResolveAttribution_BogusEndpoint(t *testing.T) {
 	attr := ResolveAttribution("https://this-does-not-exist.example.com:99999", "")
 	assert.NotEmpty(t, attr.Username, "should fall back gracefully with bogus endpoint")
 	assert.NotEmpty(t, attr.DisplayName)
+}
+
+// --- F. AI coworker of a team token ---
+
+// Failure prevented: a coworker's work is attributed to its machine's git
+// identity, or its name is abbreviated like a person's.
+func TestResolveAttribution_TeamCoworker(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"active":true,"principal_kind":"team-service","coworker":{"id":"agt_rip","display_name":"Rip Van Winkle"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("SAGEOX_ENDPOINT", srv.URL)
+	t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
+
+	assert.Equal(t, Attribution{
+		Username:    "rip-van-winkle",
+		Name:        "Rip Van Winkle",
+		DisplayName: "Rip Van Winkle",
+		AI:          true,
+	}, ResolveAttribution(srv.URL, "port8080"))
+}
+
+// --- G. Personal token in an Amp project orb ---
+
+// Failure prevented (sageox/ox#1425): an Amp project orb commits as its
+// project's commit author, "Amp", so git's identity named and credited every
+// session there "amp". The verified owner of SAGEOX_TOKEN must name the work
+// in an orb; on a laptop the slug stays git's so existing session names hold.
+func TestResolveAttribution_PersonalTokenInAnOrb(t *testing.T) {
+	gitConfig := t.TempDir() + "/gitconfig"
+	require.NoError(t, os.WriteFile(gitConfig, []byte("[user]\n\tname = Amp\n\temail = amp@test.sageox.ai\n"), 0o600))
+
+	for _, tc := range []struct {
+		name         string
+		venue        string // the venue's env var, set to "1"
+		lookupFails  bool   // /auth/me is down
+		wantUsername string
+		wantEmail    string
+		wantName     string
+	}{
+		{"Amp orb: the token's owner names the session", "AMP_ORB", false, "avery", "avery@test.sageox.ai", "Avery Quinn"},
+		{"laptop: the slug stays git's", "", false, "amp", "avery@test.sageox.ai", "Avery Quinn"},
+		// the other hosts that end with the agent keep git's slug: only Amp
+		// orbs were seen to commit as the host
+		{"Claude Code cloud: the slug stays git's", "CLAUDE_CODE_REMOTE", false, "amp", "avery@test.sageox.ai", "Avery Quinn"},
+		{"Amp orb, owner lookup down: git's identity stands", "AMP_ORB", true, "amp", "amp@test.sageox.ai", "Amp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.lookupFails {
+					http.Error(w, "unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				_, _ = io.WriteString(w, `{"user":{"id":"usr_avery","email":"avery@test.sageox.ai","name":"Avery Quinn"}}`)
+			}))
+			t.Cleanup(srv.Close)
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			t.Setenv("SAGEOX_ENDPOINT", srv.URL)
+			t.Setenv("SAGEOX_TOKEN", "oxp_test_4bDZfN")
+			t.Setenv("GIT_CONFIG_GLOBAL", gitConfig)
+			t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+			t.Chdir(t.TempDir())
+			for _, key := range []string{"AMP_ORB", "CLAUDE_CODE_REMOTE", "DEVIN_TASK_ID"} {
+				t.Setenv(key, "")
+			}
+			if tc.venue != "" {
+				t.Setenv(tc.venue, "1")
+			}
+			runtime.Reset()
+			t.Cleanup(runtime.Reset)
+
+			attr := ResolveAttribution(srv.URL, "")
+
+			assert.Equal(t, tc.wantUsername, attr.Username)
+			assert.Equal(t, tc.wantEmail, attr.Email, "the verified owner beats git when the lookup works")
+			assert.Equal(t, tc.wantName, attr.Name)
+			if !tc.lookupFails {
+				assert.Equal(t, "Avery Q.", attr.DisplayName)
+			}
+		})
+	}
 }

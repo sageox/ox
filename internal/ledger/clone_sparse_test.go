@@ -1,11 +1,15 @@
 package ledger
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -177,4 +181,60 @@ func TestCloneWithSparseCheckout_CacheSurvivesReconfigure(t *testing.T) {
 	assert.NoError(t, err,
 		".sageox/cache/codedb/index.bleve must survive ConfigureSparseCheckout; "+
 			"if missing, the sync scheduler is destroying codedb indexes on every pull cycle")
+}
+
+// TestRefreshSparseCheckout_WaitsForTheRepoLock: `git sparse-checkout`
+// rewrites the index. A refresh run while another ox process held the repo
+// lock to commit failed that commit on index.lock and left its files
+// uncommitted.
+func TestRefreshSparseCheckout_WaitsForTheRepoLock(t *testing.T) {
+	clone := filepath.Join(t.TempDir(), "ledger")
+	out, err := exec.Command("git", "clone", "-q", initBareRepo(t), clone).CombinedOutput()
+	require.NoError(t, err, "clone: %s", out)
+	sparseFile := filepath.Join(clone, ".git", "info", "sparse-checkout")
+
+	require.NoError(t, gitutil.WithRepoLock(context.Background(), clone, func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		err := RefreshSparseCheckout(ctx, clone)
+		assert.True(t, gitutil.IsRepoLockBusy(err), "want the lock-busy error, got %v", err)
+		assert.NoFileExists(t, sparseFile, "the refresh ran while a peer held the repo lock")
+		return nil
+	}))
+
+	require.NoError(t, RefreshSparseCheckout(context.Background(), clone))
+	assert.FileExists(t, sparseFile, "the refresh must run once the lock is free")
+}
+
+// TestRefreshSparseCheckout_GivesUpOnAFetchThatNeverEnds: in a blobless
+// clone, a refresh that widens the cone fetches blobs while it holds the repo
+// lock. Failure prevented: a fetch that keeps transferring but never finishes
+// holds the lock, and every Ledger write waits on it.
+func TestRefreshSparseCheckout_GivesUpOnAFetchThatNeverEnds(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits out the refresh's bound")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("the hanging git is a shell script")
+	}
+	clone := filepath.Join(t.TempDir(), "ledger")
+	out, err := exec.Command("git", "clone", "-q", initBareRepo(t), clone).CombinedOutput()
+	require.NoError(t, err, "clone: %s", out)
+
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	bin := t.TempDir()
+	// `sparse-checkout set` stands in for a fetch that never finishes
+	script := "#!/bin/sh\ncase \" $* \" in *\" sparse-checkout set \"*) exec sleep 30;; esac\nexec '" + realGit + "' \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	prev := sparseRefreshTimeout
+	sparseRefreshTimeout = time.Second
+	t.Cleanup(func() { sparseRefreshTimeout = prev })
+
+	start := time.Now()
+	err = RefreshSparseCheckout(context.Background(), clone)
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 10*time.Second, "the refresh held the repo lock past its bound")
 }

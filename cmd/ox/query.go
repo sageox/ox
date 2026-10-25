@@ -36,7 +36,7 @@ Examples:
 
 func init() {
 	queryCmd.Flags().IntP("limit", "k", 5, "max results to return")
-	queryCmd.Flags().String("team", "", "team ID to search (default: from project config)")
+	queryCmd.Flags().String("team", "", "team ID to search (default: project config, else the credential's team)")
 	queryCmd.Flags().String("repo", "", "repo ID to search (default: from project config)")
 	queryCmd.Flags().String("mode", "hybrid", "search mode: hybrid, knn, or bm25")
 	queryCmd.Flags().String("source", "team", "search source: team (default), code, local, all")

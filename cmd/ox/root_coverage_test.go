@@ -9,6 +9,19 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// Stray arguments must not reach commands that mutate the current repository,
+// credentials, or installation instead of the target the caller intended.
+func TestFlagOnlyMutatingCommandsRejectArguments(t *testing.T) {
+	for _, cmd := range []*cobra.Command{initCmd, loginCmd, logoutCmd, uninstallCmd, syncCmd, upgradeCmd, doctorCmd} {
+		t.Run(cmd.Name(), func(t *testing.T) {
+			assert.NoError(t, cmd.ValidateArgs(nil), "flag-only invocations remain valid")
+			for _, args := range [][]string{{"unexpected"}, {"false"}, {"first", "second"}} {
+				assert.Error(t, cmd.ValidateArgs(args), "reject unused arguments %q before running the command", args)
+			}
+		})
+	}
+}
+
 func TestDirExists_ExistingDir(t *testing.T) {
 	t.Parallel()
 	assert.True(t, dirExists(t.TempDir()))

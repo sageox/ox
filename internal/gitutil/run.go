@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 )
 
@@ -24,10 +23,18 @@ func RunGit(ctx context.Context, repoPath string, args ...string) (string, error
 	// "fatal: failed to write commit object" — silently wedging ledger sync.
 	// Overriding per-invocation makes ox's commits immune regardless of the
 	// repo's persisted config. Harmless no-op for non-commit subcommands.
-	cmdArgs = append(cmdArgs, "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false")
+	// filter.lfs.*: see NewNetworkCmd's doc comment (cmd.go) — this is the
+	// other chokepoint git subprocesses go through, and it needs the same
+	// dehydrated-clone override so a caller through RunGit doesn't reopen
+	// the nested-LFS-pointer wedge (ox-baz5.4) that NewNetworkCmd alone closed.
+	cmdArgs = append(cmdArgs,
+		"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
+		"-c", "filter.lfs.smudge=cat", "-c", "filter.lfs.clean=cat",
+		"-c", "filter.lfs.process=", "-c", "filter.lfs.required=false",
+	)
 	cmdArgs = append(cmdArgs, args...)
 
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd := commandContext(ctx, "git", cmdArgs...)
 	// set cmd.Dir so git doesn't fail on getcwd() when the process CWD
 	// has been deleted (e.g. daemon started from a tmpdir that was cleaned)
 	if repoPath != "" {

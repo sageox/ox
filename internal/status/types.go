@@ -111,10 +111,19 @@ type ConfigJSON struct {
 }
 
 // ProjectJSON represents project info in JSON output.
+//
+// RepoID/TeamID/TeamName come from .sageox/config.json and are populated
+// whenever that config can be read, independent of whether the bound team
+// actually appears in TeamContexts below — a JSON consumer compares the two
+// to detect a repo bound to a team the current account can't see (see
+// TeamContextJSON.IsRepoTeam).
 type ProjectJSON struct {
 	Initialized bool           `json:"initialized"`
 	Directory   string         `json:"directory"`
 	ConfigPath  string         `json:"config_path,omitempty"`
+	RepoID      string         `json:"repo_id,omitempty"`
+	TeamID      string         `json:"team_id,omitempty"`
+	TeamName    string         `json:"team_name,omitempty"`
 	CodeIndex   *CodeIndexJSON `json:"code_index,omitempty"`
 }
 
@@ -152,6 +161,11 @@ type TeamContextJSON struct {
 	Error    string     `json:"error,omitempty"`
 	LastSync *time.Time `json:"last_sync,omitempty"`
 	Stale    bool       `json:"stale,omitempty"`
+
+	// IsRepoTeam marks the entry whose TeamID matches this repo's bound
+	// team (ProjectJSON.TeamID) — the same "(this repo)" distinction
+	// `ox team list` already renders. False for every other team context.
+	IsRepoTeam bool `json:"is_repo_team,omitempty"`
 }
 
 // DaemonJSON represents daemon info in JSON output.

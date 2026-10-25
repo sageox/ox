@@ -169,7 +169,7 @@ func computeDestPath(filename string, allFiles []string) (string, error) {
 }
 
 // transformFile reads the source file, updates frontmatter, and writes to destination
-func transformFile(srcPath, destPath string, sidebarPosition int) error {
+func transformFile(srcPath, destPath string, sidebarPosition int) (err error) {
 	// Read source file
 	srcFile, err := os.Open(srcPath)
 	if err != nil {
@@ -194,7 +194,23 @@ func transformFile(srcPath, destPath string, sidebarPosition int) error {
 
 	scanner := bufio.NewScanner(srcFile)
 	writer := bufio.NewWriter(destFile)
-	defer writer.Flush()
+	defer func() {
+		if flushErr := writer.Flush(); flushErr != nil && err == nil {
+			err = fmt.Errorf("failed to flush destination file: %w", flushErr)
+		}
+	}()
+	pendingBlankLines := 0
+	writeLine := func(line string) {
+		if line == "" {
+			pendingBlankLines++
+			return
+		}
+		for range pendingBlankLines {
+			_, _ = writer.WriteString("\n") // error surfaces at the deferred Flush above
+		}
+		pendingBlankLines = 0
+		_, _ = writer.WriteString(line + "\n") // error surfaces at the deferred Flush above
+	}
 
 	// Track frontmatter processing
 	inFrontmatter := false
@@ -212,14 +228,14 @@ func transformFile(srcPath, destPath string, sidebarPosition int) error {
 		// Detect frontmatter boundaries
 		if lineNum == 1 && strings.TrimSpace(line) == "---" {
 			inFrontmatter = true
-			writer.WriteString(line + "\n")
+			writeLine(line)
 			continue
 		}
 
 		if inFrontmatter && strings.TrimSpace(line) == "---" {
 			// End of frontmatter, add sidebar_position before closing
-			fmt.Fprintf(writer, "sidebar_position: %d\n", sidebarPosition)
-			writer.WriteString(line + "\n")
+			writeLine(fmt.Sprintf("sidebar_position: %d", sidebarPosition))
+			writeLine(line)
 			inFrontmatter = false
 			frontmatterEnded = true
 			continue
@@ -227,7 +243,7 @@ func transformFile(srcPath, destPath string, sidebarPosition int) error {
 
 		// If we're in frontmatter, write line as-is
 		if inFrontmatter {
-			writer.WriteString(line + "\n")
+			writeLine(line)
 			continue
 		}
 
@@ -242,7 +258,7 @@ func transformFile(srcPath, destPath string, sidebarPosition int) error {
 			})
 		}
 
-		writer.WriteString(line + "\n")
+		writeLine(line)
 	}
 
 	if err := scanner.Err(); err != nil {

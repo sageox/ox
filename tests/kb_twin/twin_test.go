@@ -99,7 +99,7 @@ func scenarioEnv(t *testing.T, scenarioName, endpoint string) string {
 	// non-empty ambient scope set. Endpoint inside is overridden by the
 	// env var above.
 	configJSON := fmt.Sprintf(`{"endpoint":%q,"repo_id":%q,"team_id":%q}`,
-		endpoint, "repo_primary", "team_twin")
+		endpoint, "repo_primary", twinTeamID)
 	mustWrite(t, filepath.Join(projectDir, ".sageox", "config.json"), configJSON)
 	mustWrite(t, filepath.Join(projectDir, ".sageox", "config.local.toml"), "")
 	return projectDir
@@ -138,6 +138,9 @@ func buildScheduler(t *testing.T, projectDir string) *daemon.SyncScheduler {
 // subtest and its own XDG isolation. The multi-endpoint scenario has
 // dedicated drive logic in TestKBTwin_MultiEndpoint below.
 func TestKBTwin(t *testing.T) {
+	if len(kbTwinManifest.Scenarios) < 9 {
+		t.Fatalf("KB twin manifest has %d scenarios, want at least 9 required lifecycle scenarios", len(kbTwinManifest.Scenarios))
+	}
 	if testing.Short() {
 		t.Skip("short: kb_twin runs real git clones across multiple scenarios")
 	}
@@ -464,7 +467,9 @@ func TestKBTwin_MetaJSONShape(t *testing.T) {
 	if err := json.Unmarshal(raw, &generic); err != nil {
 		t.Fatalf("parse meta: %v\nraw=%s", err, string(raw))
 	}
-	for _, key := range []string{"type", "slug", "owner_user_id", "viewer_role", "last_sync"} {
+	// scope_type and scope_id decide which project's GC and doctor may treat
+	// the bubble as an orphan (daemon.KBListCovers).
+	for _, key := range []string{"type", "slug", "owner_user_id", "viewer_role", "last_sync", "scope_type", "scope_id"} {
 		if _, ok := generic[key]; !ok {
 			t.Errorf("meta.json missing required key %q (raw=%s)", key, string(raw))
 		}

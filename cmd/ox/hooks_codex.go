@@ -1,5 +1,7 @@
 package main
 
+const codexHookTrustHint = "In Codex, run /hooks to review and trust the SageOx hooks before they can run."
+
 // installCodexHooks delegates to the external ox-adapter-codex binary.
 func installCodexHooks(user bool) error {
 	return installExternalAdapterHooks("codex", user)

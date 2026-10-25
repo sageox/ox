@@ -2,10 +2,14 @@ package adapters
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
 // fakeBinary creates a shell script that echoes canned responses.
@@ -176,6 +180,125 @@ func TestExternalAdapter_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestExternalAdapter_MalformedCommandResponsesFailClosed(t *testing.T) {
+	binary := fakeBinary(t, map[string]string{
+		"read":             `not-json`,
+		"read-metadata":    `not-json`,
+		"read-from-offset": `not-json`,
+		"diagnose":         `not-json`,
+	})
+	ea := NewExternalAdapterWithInfo(binary, &adapterprotocol.InfoResponse{Name: "test"})
+
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{"read", func() error { _, err := ea.Read("session"); return err }},
+		{"metadata", func() error { _, err := ea.ReadMetadata("session"); return err }},
+		{"incremental read", func() error { _, _, err := ea.ReadFromOffset("session", 4); return err }},
+		{"diagnose", func() error { _, err := ea.Diagnose("/repo", "project", ""); return err }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.run(); !errors.Is(err, ErrInvalidResponse) {
+				t.Fatalf("error = %v, want ErrInvalidResponse", err)
+			}
+		})
+	}
+}
+
+func TestExternalAdapter_OneShotTimeoutCancelsProcess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: drives an external adapter subprocess")
+	}
+	script := filepath.Join(t.TempDir(), "ox-adapter-slow")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 2\nprintf '{\"entries\":[]}'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ea := NewExternalAdapterWithInfo(script, &adapterprotocol.InfoResponse{Name: "slow"})
+	ea.oneShotTimeout = 20 * time.Millisecond
+
+	started := time.Now()
+	_, err := ea.Read("session")
+	if !errors.Is(err, ErrAdapterTimeout) {
+		t.Fatalf("error = %v, want ErrAdapterTimeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("timed-out adapter returned after %v; subprocess was not canceled promptly", elapsed)
+	}
+}
+
+func TestExternalAdapter_OneShotOutputIsBounded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: drives an external adapter subprocess")
+	}
+	script := filepath.Join(t.TempDir(), "ox-adapter-noisy")
+	output := strings.Repeat("x", 512)
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nwhile :; do printf '%s' '"+output+"'; done\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ea := NewExternalAdapterWithInfo(script, &adapterprotocol.InfoResponse{Name: "noisy"})
+	ea.oneShotOutputLimit = 64
+	ea.oneShotTimeout = 5 * time.Second
+
+	started := time.Now()
+	_, err := ea.Read("session")
+	if !errors.Is(err, ErrAdapterOutputLimit) {
+		t.Fatalf("error = %v, want ErrAdapterOutputLimit", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("output-limited adapter returned after %v; subprocess was not canceled promptly", elapsed)
+	}
+}
+
+func TestExternalAdapter_OneShotZeroLimitUsesDefault(t *testing.T) {
+	binary := fakeBinary(t, map[string]string{
+		"read": `{"entries":[]}`,
+	})
+	ea := NewExternalAdapterWithInfo(binary, &adapterprotocol.InfoResponse{Name: "default-limit"})
+	ea.oneShotOutputLimit = 0
+
+	entries, err := ea.Read("session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("entries = %v, want empty response", entries)
+	}
+}
+
+func TestBoundedBufferNeverRetainsPastLimit(t *testing.T) {
+	budget := newOutputBudget(4, nil)
+	b := newBoundedBuffer(budget)
+	n, err := b.Write([]byte("abcdef"))
+	if n != 4 || !errors.Is(err, ErrAdapterOutputLimit) {
+		t.Fatalf("Write = (%d, %v), want (4, ErrAdapterOutputLimit)", n, err)
+	}
+	if got := b.String(); got != "abcd" {
+		t.Fatalf("retained %q, want exactly the bounded prefix", got)
+	}
+	if !budget.wasExceeded() {
+		t.Fatal("buffer did not record that its limit was exceeded")
+	}
+}
+
+func TestBoundedBuffersShareOneOutputBudget(t *testing.T) {
+	budget := newOutputBudget(6, nil)
+	stdout := newBoundedBuffer(budget)
+	stderr := newBoundedBuffer(budget)
+
+	if n, err := stdout.Write([]byte("abcd")); n != 4 || err != nil {
+		t.Fatalf("stdout Write = (%d, %v), want (4, nil)", n, err)
+	}
+	if n, err := stderr.Write([]byte("wxyz")); n != 2 || !errors.Is(err, ErrAdapterOutputLimit) {
+		t.Fatalf("stderr Write = (%d, %v), want (2, ErrAdapterOutputLimit)", n, err)
+	}
+	if got := stdout.Len() + stderr.Len(); got != 6 {
+		t.Fatalf("combined retained bytes = %d, want 6", got)
+	}
+}
+
 func TestExternalAdapter_WrongProtocolVersion(t *testing.T) {
 	// protocol version 0 should be rejected (we require >= 1)
 	binary := fakeBinary(t, map[string]string{
@@ -283,5 +406,59 @@ func TestExternalAdapter_Watch_InvalidPath(t *testing.T) {
 	_, err = ea.Watch(context.Background(), "/nonexistent/path/session.jsonl")
 	if err == nil {
 		t.Error("expected error for nonexistent path, got nil")
+	}
+}
+
+// An import reads a whole months-long transcript in one call; the default
+// 10s one-shot deadline is sized for a live capture batch, not that.
+func TestExternalAdapter_ReadWithTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: drives an external adapter subprocess")
+	}
+	script := filepath.Join(t.TempDir(), "ox-adapter-slow")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 0.3\nprintf '{\"entries\":[{\"timestamp\":\"2026-04-02T10:30:00Z\",\"role\":\"user\",\"content\":\"hello\"}]}'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ea := NewExternalAdapterWithInfo(script, &adapterprotocol.InfoResponse{Name: "slow"})
+	ea.oneShotTimeout = 20 * time.Millisecond
+
+	if _, err := ea.Read("session"); !errors.Is(err, ErrAdapterTimeout) {
+		t.Fatalf("Read error = %v, want ErrAdapterTimeout under the default deadline", err)
+	}
+	entries, err := ea.ReadWithTimeout("session", 5*time.Second)
+	if err != nil {
+		t.Fatalf("ReadWithTimeout: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Content != "hello" {
+		t.Fatalf("entries = %+v, want the one user entry", entries)
+	}
+	if _, err := ea.ReadWithTimeout("session", 20*time.Millisecond); !errors.Is(err, ErrAdapterTimeout) {
+		t.Fatalf("ReadWithTimeout error = %v, want ErrAdapterTimeout past its own deadline", err)
+	}
+
+	garbled := filepath.Join(t.TempDir(), "ox-adapter-garbled")
+	if err := os.WriteFile(garbled, []byte("#!/bin/sh\nprintf 'not json'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bad := NewExternalAdapterWithInfo(garbled, &adapterprotocol.InfoResponse{Name: "garbled"})
+	if _, err := bad.ReadWithTimeout("session", 5*time.Second); !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("ReadWithTimeout error = %v, want ErrInvalidResponse for output that is not the protocol", err)
+	}
+}
+
+// Adapter binaries can be uninstalled or replaced between discovery and read.
+// A startup failure must preserve its filesystem cause and return no entries.
+func TestExternalAdapter_ReadStartupFailure(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "removed-adapter")
+	ea := NewExternalAdapterWithInfo(binary, &adapterprotocol.InfoResponse{Name: "removed"})
+	entries, err := ea.ReadWithContext(context.Background(), "session", time.Second)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read error = %v, want missing executable", err)
+	}
+	if entries != nil {
+		t.Fatalf("read entries = %v, want no response after startup failure", entries)
+	}
+	if !strings.Contains(err.Error(), "read failed") {
+		t.Fatalf("error omits failed operation: %v", err)
 	}
 }

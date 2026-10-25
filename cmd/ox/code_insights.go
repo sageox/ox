@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/repotools"
@@ -81,6 +82,11 @@ var codeInsightsCmd = &cobra.Command{
 
 		dataDir := resolveCodeDBDir(root)
 		if _, err := os.Stat(dataDir); os.IsNotExist(err) {
+			if agentID, _ := detectAgentContext(); agentID != "" {
+				return emitIndexNotReadyJSON(cmd, indexStatusNotIndexed,
+					"No code index found for this repo.",
+					"Run 'ox code index' to build the index, then rerun 'ox code insights'. Until then, use Grep/Glob to inspect recent changes.")
+			}
 			return fmt.Errorf("no code index found — run 'ox code index' first")
 		}
 
@@ -123,7 +129,7 @@ var codeInsightsCmd = &cobra.Command{
 				return err
 			}
 			outputBytes = buf.Len()
-			if _, err := buf.WriteTo(os.Stdout); err != nil {
+			if err := cli.WriteJSONBytes(os.Stdout, buf.Bytes()); err != nil {
 				return err
 			}
 		} else {

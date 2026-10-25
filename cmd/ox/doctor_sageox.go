@@ -29,6 +29,7 @@ session.jsonl
 sessions/
 .needs-doctor
 .needs-doctor-agent
+.session-recovery.json
 
 # Ignore agent instance state (ephemeral, per-user)
 agent_instances/
@@ -62,6 +63,7 @@ var requiredGitignoreEntries = []string{
 	"sessions/",
 	".needs-doctor",
 	".needs-doctor-agent",
+	".session-recovery.json",
 	"agent_instances/",
 	"agent_tasks/",
 	"config.local.toml",
@@ -531,7 +533,7 @@ func checkTeamRegistrationWithOpts(opts doctorOptions) checkResult {
 	}
 
 	if cfg.TeamID == "" {
-		if opts.fix {
+		if opts.fixAll() {
 			// prompt user for consent (default No) unless forceYes is set
 			shouldRegister := opts.forceYes || promptOfflineMigration(opts.forceYes)
 			if shouldRegister {
@@ -555,6 +557,11 @@ func checkTeamRegistrationWithOpts(opts doctorOptions) checkResult {
 				"       • Cross-repo knowledge sharing across teammates")
 	}
 
+	// prefer the human-readable name: a raw team_xxx id is unactionable when a
+	// user is trying to work out WHICH team their sessions are landing in
+	if cfg.TeamName != "" {
+		return PassedCheck("Team registration", fmt.Sprintf("%s (%s)", cfg.TeamName, cfg.TeamID))
+	}
 	return PassedCheck("Team registration", cfg.TeamID)
 }
 
@@ -588,7 +595,7 @@ func promptOfflineMigration(forceYes bool) bool {
 	fmt.Println()
 	fmt.Println("Note: Your git user name and email will be shared with SageOx to facilitate team setup.")
 	fmt.Println()
-	return cli.ConfirmYesNo("Register this repository with SageOx?", false)
+	return cli.AssumeYes() || cli.ConfirmYesNo("Register this repository with SageOx?", false)
 }
 
 // registerRepoWithSageOx registers the repo with the SageOx API.

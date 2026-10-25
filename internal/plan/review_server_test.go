@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/sageox/ox/pkg/planreview"
 )
 
 // TestStableReviewPort_DeterministicPerPlan verifies the port derivation is
@@ -103,9 +105,9 @@ func TestSave_RemapsOpenFeedbackOnUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("save v1: %v", err)
 	}
-	saveRound(t, dir, time.Now(), FeedbackItem{
-		Anchor: AnchorFor("Rollout", "Ship the CLI first"), Section: "Rollout",
-		Label: "Ship the CLI first", Status: FeedbackRequestChange, Note: "daemon first",
+	writeRound(t, dir, "ryan", time.Now(), planreview.Item{
+		Anchor: planreview.AnchorFor("Rollout", "Ship the CLI first"), Section: "Rollout",
+		Label: "Ship the CLI first", Status: planreview.StatusRequestChange, Note: "daemon first",
 	})
 
 	v2 := "# T\n\n## Rollout Plan\n\n- Ship the CLI first\n"
@@ -117,11 +119,8 @@ func TestSave_RemapsOpenFeedbackOnUpdate(t *testing.T) {
 		t.Fatalf("save v2: %v", err)
 	}
 
-	items, err := AssembleReview(dir)
-	if err != nil {
-		t.Fatalf("assemble: %v", err)
-	}
-	if len(items) != 1 || items[0].Anchor != AnchorFor("Rollout Plan", "Ship the CLI first") {
+	items := ReadReview(dir).Items
+	if len(items) != 1 || items[0].Anchor != planreview.AnchorFor("Rollout Plan", "Ship the CLI first") {
 		t.Fatalf("re-save must remap the open mark to the updated heading: %+v", items)
 	}
 	if items[0].RemappedFrom == "" || items[0].Note != "daemon first" {

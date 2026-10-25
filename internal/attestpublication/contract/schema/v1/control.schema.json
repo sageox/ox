@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sageox.ai/schemas/attest/v1/control.schema.json",
+  "title": "SageOx Attest control and read API types",
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "runID": {"type": "string", "pattern": "^bdd_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["manifest_sha256", "archive_sha256", "archive_size_bytes"],
+      "properties": {
+        "manifest_sha256": {"$ref": "#/$defs/sha256"}, "archive_sha256": {"$ref": "#/$defs/sha256"},
+        "archive_size_bytes": {"type": "integer", "minimum": 1, "maximum": 4294967296}
+      }
+    },
+    "createRunRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_run_id", "corpus_key", "package_version", "manifest_sha256", "archive_sha256", "archive_size_bytes"],
+      "properties": {
+        "source_run_id": {"type": "string", "minLength": 1}, "corpus_key": {"type": "string", "minLength": 1}, "package_version": {"const": "1"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"}, "archive_sha256": {"$ref": "#/$defs/sha256"},
+        "archive_size_bytes": {"type": "integer", "minimum": 1, "maximum": 4294967296}
+      }
+    },
+    "credentials": {
+      "type": "object", "additionalProperties": false,
+      "required": ["access_key_id", "secret_access_key", "session_token"],
+      "properties": {
+        "access_key_id": {"type": "string", "minLength": 1}, "secret_access_key": {"type": "string", "minLength": 1},
+        "session_token": {"type": "string", "minLength": 1}
+      }
+    },
+    "uploadGrant": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bucket", "key", "region", "credentials", "expires_at", "intent_expires_at", "binding"],
+      "properties": {
+        "bucket": {"type": "string", "minLength": 1}, "key": {"type": "string", "minLength": 1}, "region": {"const": "us-west-2"},
+        "credentials": {"$ref": "#/$defs/credentials"}, "expires_at": {"$ref": "#/$defs/timestamp"},
+        "intent_expires_at": {"$ref": "#/$defs/timestamp"}, "binding": {"$ref": "#/$defs/binding"}
+      }
+    },
+    "diagnostic": {
+      "type": "object", "additionalProperties": false, "required": ["code", "message"],
+      "properties": {
+        "code": {"type": "string", "minLength": 1}, "message": {"type": "string", "minLength": 1, "maxLength": 4096}
+      }
+    },
+    "runControl": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "status", "source_run_id", "corpus_key", "created_at", "diagnostics"],
+      "properties": {
+        "run_id": {"$ref": "#/$defs/runID"}, "status": {"enum": ["uploading", "processing", "published", "rejected", "deleted"]},
+        "source_run_id": {"type": "string", "minLength": 1}, "corpus_key": {"type": "string", "minLength": 1},
+        "created_at": {"$ref": "#/$defs/timestamp"}, "published_at": {"$ref": "#/$defs/timestamp"},
+        "evidence_expires_at": {"$ref": "#/$defs/timestamp"}, "url": {"type": "string", "format": "uri"},
+        "diagnostics": {"type": "array", "maxItems": 2, "$comment": "One rejection and one exhausted-retry diagnostic are the only independent bounded status facts.", "items": {"$ref": "#/$defs/diagnostic"}}
+      }
+    },
+    "createRunResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "status", "source_run_id", "corpus_key", "created_at", "diagnostics"],
+      "properties": {
+        "run_id": {"$ref": "#/$defs/runID"}, "status": {"enum": ["uploading", "processing", "published", "rejected", "deleted"]},
+        "source_run_id": {"type": "string", "minLength": 1}, "corpus_key": {"type": "string", "minLength": 1},
+        "created_at": {"$ref": "#/$defs/timestamp"}, "published_at": {"$ref": "#/$defs/timestamp"},
+        "evidence_expires_at": {"$ref": "#/$defs/timestamp"}, "url": {"type": "string", "format": "uri"},
+        "diagnostics": {"type": "array", "maxItems": 2, "$comment": "One rejection and one exhausted-retry diagnostic are the only independent bounded status facts.", "items": {"$ref": "#/$defs/diagnostic"}}, "upload": {"$ref": "#/$defs/uploadGrant"}
+      }
+    },
+    "createRunResponse": {"type": "object", "additionalProperties": false, "required": ["data"], "properties": {"data": {"$ref": "#/$defs/createRunResult"}}},
+    "uploadGrantResponse": {"type": "object", "additionalProperties": false, "required": ["data"], "properties": {"data": {"$ref": "#/$defs/uploadGrant"}}},
+    "runResponse": {"type": "object", "additionalProperties": false, "required": ["data"], "properties": {"data": {"$ref": "#/$defs/runControl"}}},
+    "pagination": {
+      "type": "object", "additionalProperties": false, "required": ["limit", "has_more"],
+      "properties": {
+        "cursor": {"type": "string", "minLength": 1}, "next_cursor": {"type": "string", "minLength": 1},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 100}, "has_more": {"type": "boolean"}
+      },
+      "allOf": [{"if": {"properties": {"has_more": {"const": true}}, "required": ["has_more"]}, "then": {"required": ["next_cursor"]}}]
+    },
+    "runListResponse": {
+      "type": "object", "additionalProperties": false, "required": ["items", "pagination"],
+      "properties": {
+        "items": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/runControl"}},
+        "pagination": {"$ref": "#/$defs/pagination"}
+      }
+    },
+    "runSnapshot": {
+      "type": "object", "additionalProperties": false, "required": ["run", "observations", "metadata"],
+      "properties": {
+        "run": {"$ref": "run.schema.json"}, "observations": {"$ref": "observations.schema.json"},
+        "metadata": {"$ref": "#/$defs/runControl"}
+      }
+    },
+    "snapshotResponse": {"type": "object", "additionalProperties": false, "required": ["data"], "properties": {"data": {"$ref": "#/$defs/runSnapshot"}}},
+    "accessGrant": {
+      "type": "object", "additionalProperties": false,
+      "required": ["exchange_url", "token", "expires_at", "exchange_expires_at"],
+      "properties": {
+        "exchange_url": {"type": "string", "format": "uri"}, "token": {"type": "string", "minLength": 1},
+        "expires_at": {"$ref": "#/$defs/timestamp"}, "exchange_expires_at": {"$ref": "#/$defs/timestamp"}
+      }
+    },
+    "accessGrantResponse": {"type": "object", "additionalProperties": false, "required": ["data"], "properties": {"data": {"$ref": "#/$defs/accessGrant"}}},
+    "historyPoint": {
+      "type": "object", "additionalProperties": false, "required": ["run_id", "published_at", "outcome"],
+      "properties": {
+        "run_id": {"$ref": "#/$defs/runID"}, "published_at": {"$ref": "#/$defs/timestamp"},
+        "outcome": {"$ref": "run.schema.json#/$defs/outcome"}
+      }
+    },
+    "scenarioHistory": {
+      "type": "object", "additionalProperties": false, "required": ["scenario_key", "title", "feature_path", "points"],
+      "properties": {
+        "scenario_key": {"$ref": "#/$defs/sha256"}, "title": {"type": "string", "minLength": 1},
+        "feature_path": {"type": "string", "minLength": 1}, "rule_title": {"type": "string"},
+        "points": {"type": "array", "maxItems": 30, "items": {"$ref": "#/$defs/historyPoint"}}
+      }
+    },
+    "historyResponse": {
+      "type": "object", "additionalProperties": false, "required": ["items", "pagination"],
+      "properties": {
+        "items": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/scenarioHistory"}},
+        "pagination": {"$ref": "#/$defs/pagination"}
+      }
+    },
+    "deletionState": {
+      "type": "object", "additionalProperties": false, "required": ["run_id", "status"],
+      "properties": {"run_id": {"$ref": "#/$defs/runID"}, "status": {"const": "deleted"}}
+    },
+    "deletionResponse": {"type": "object", "additionalProperties": false, "required": ["data"], "properties": {"data": {"$ref": "#/$defs/deletionState"}}},
+    "errorResponse": {
+      "type": "object", "additionalProperties": false, "required": ["error"],
+      "properties": {
+        "error": {
+          "type": "object", "additionalProperties": false, "required": ["code", "message"],
+          "properties": {
+            "code": {"type": "string", "minLength": 1}, "message": {"type": "string", "minLength": 1}, "details": {"type": "object"}
+          }
+        }
+      }
+    }
+  }
+}

@@ -120,7 +120,9 @@ func (s *Store) initSchema(ctx context.Context) error {
 		}
 	}
 
-	s.setMetadata(ctx, "schema_version", strconv.Itoa(currentSchemaVersion))
+	if err := s.setMetadata(ctx, "schema_version", strconv.Itoa(currentSchemaVersion)); err != nil {
+		return fmt.Errorf("set schema version: %w", err)
+	}
 	s.doltCommit(ctx, "schema: init carts v"+strconv.Itoa(currentSchemaVersion))
 	return nil
 }
@@ -172,11 +174,7 @@ func (s *Store) RunInTransaction(ctx context.Context, commitMsg string, fn func(
 		if _, err := conn.ExecContext(ctx, "CALL DOLT_ADD('-A')"); err != nil {
 			slog.Warn("dolt add failed", "err", err)
 		}
-		author := fmt.Sprintf("%s <%s>", s.committerName, s.committerEmail)
-		if s.committerName == "" {
-			author = "carts <carts@sageox.ai>"
-		}
-		if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", commitMsg, author); err != nil {
+		if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", commitMsg, s.commitAuthor()); err != nil {
 			if !strings.Contains(err.Error(), "nothing to commit") {
 				slog.Warn("dolt commit failed", "err", err)
 			}
@@ -192,17 +190,23 @@ func (tx *Transaction) Exec(ctx context.Context, _ string, query string, args ..
 	return tx.tx.ExecContext(ctx, query, args...)
 }
 
+// commitAuthor is the --author for DOLT_COMMIT. Dolt refuses an author with no
+// email, so a committer without one (an AI coworker, or a git config with no
+// user.email) commits as the carts default.
+func (s *Store) commitAuthor() string {
+	if s.committerName == "" || s.committerEmail == "" {
+		return "carts <carts@sageox.ai>"
+	}
+	return fmt.Sprintf("%s <%s>", s.committerName, s.committerEmail)
+}
+
 // doltCommit creates a Dolt commit outside a transaction (for schema init).
 func (s *Store) doltCommit(ctx context.Context, msg string) {
 	if _, err := s.db.ExecContext(ctx, "CALL DOLT_ADD('-A')"); err != nil {
 		slog.Debug("dolt add all failed", "err", err)
 		return
 	}
-	author := fmt.Sprintf("%s <%s>", s.committerName, s.committerEmail)
-	if s.committerName == "" {
-		author = "carts <carts@sageox.ai>"
-	}
-	if _, err := s.db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", msg, author); err != nil {
+	if _, err := s.db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", msg, s.commitAuthor()); err != nil {
 		if !strings.Contains(err.Error(), "nothing to commit") {
 			slog.Debug("dolt commit failed", "err", err)
 		}
@@ -215,8 +219,11 @@ func (s *Store) getMetadata(ctx context.Context, key string) (string, error) {
 	return value, err
 }
 
-func (s *Store) setMetadata(ctx context.Context, key, value string) {
-	s.db.ExecContext(ctx, "REPLACE INTO metadata (`key`, value) VALUES (?, ?)", key, value)
+func (s *Store) setMetadata(ctx context.Context, key, value string) error {
+	if _, err := s.db.ExecContext(ctx, "REPLACE INTO metadata (`key`, value) VALUES (?, ?)", key, value); err != nil {
+		return fmt.Errorf("set metadata %q: %w", key, err)
+	}
+	return nil
 }
 
 func splitStatements(sql string) []string {

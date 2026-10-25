@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -593,8 +594,14 @@ func (c *SessionOrphanedCheck) Category() string {
 
 // Run executes the orphaned recording check.
 func (c *SessionOrphanedCheck) Run(_ context.Context, _ bool) CheckResult {
-	// phase 1: instant ghost cleanup using PID liveness (no time threshold)
+	// phase 1: instant ghost cleanup using PID liveness (no time threshold),
+	// plus the marker-independent orphan sweep that reclaims header-only phantom
+	// stubs the ghost cleanup structurally cannot see (marker removed at
+	// finalize, dir left behind). Sweep runs on the local cache dirs only.
 	ghostResult := session.CleanupGhostSessions(c.gitRoot)
+	orphanResult := session.CleanupOrphanedStubs(c.gitRoot)
+	ghostResult.Removed += orphanResult.Removed
+	ghostResult.Names = append(ghostResult.Names, orphanResult.Names...)
 
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
 
@@ -610,7 +617,7 @@ func (c *SessionOrphanedCheck) Run(_ context.Context, _ bool) CheckResult {
 		return CheckResult{
 			Name:    c.Name(),
 			Status:  StatusPass,
-			Message: fmt.Sprintf("cleaned %d ghost session(s)", ghostResult.Removed),
+			Message: fmt.Sprintf("cleaned %d abandoned/phantom session(s)", ghostResult.Removed),
 		}
 	}
 
@@ -661,7 +668,11 @@ func (c *SessionOrphanedCheck) Run(_ context.Context, _ bool) CheckResult {
 			cleanedEmpty++
 		} else {
 			// has content: clear .recording.json so it stops showing as "recording"
-			// data preserved for 'ox session recover'
+			// data preserved for 'ox session recover'. A manual-mode recording is
+			// held first, or the daemon publishes it once the marker is gone.
+			if err := session.HoldRecordedManual(state, "doctor"); err != nil {
+				continue
+			}
 			recPath := filepath.Join(state.SessionPath, ".recording.json")
 			if err := os.Remove(recPath); err != nil && !os.IsNotExist(err) {
 				continue
@@ -729,6 +740,59 @@ func (c *SessionStopIncompleteCheck) Run(_ context.Context, _ bool) CheckResult 
 		Status:  StatusWarn,
 		Message: fmt.Sprintf("session stop found empty file (%s)", agentID),
 		Fix:     fmt.Sprintf("Run 'ox agent %s session abort --force' to discard, or restart the agent to write entries and stop again", agentID),
+	}
+}
+
+// SessionQuarantineCheck reports recordings held back because their native
+// source crossed repositories. They are never uploaded or cleaned up
+// automatically, so without this line nothing would say why a session is
+// missing from the Ledger.
+type SessionQuarantineCheck struct {
+	gitRoot      string
+	cachedStatus *session.HealthStatus
+}
+
+func (c *SessionQuarantineCheck) SetHealthStatus(status *session.HealthStatus) {
+	c.cachedStatus = status
+}
+
+// NewSessionQuarantineCheck creates a quarantined-recording check.
+func NewSessionQuarantineCheck(gitRoot string) *SessionQuarantineCheck {
+	return &SessionQuarantineCheck{gitRoot: gitRoot}
+}
+
+// Name returns the check name.
+func (c *SessionQuarantineCheck) Name() string {
+	return "quarantined recording"
+}
+
+// Category returns the check category.
+func (c *SessionQuarantineCheck) Category() string {
+	return "Sessions"
+}
+
+// Run lists recordings with a quarantined native source.
+func (c *SessionQuarantineCheck) Run(_ context.Context, _ bool) CheckResult {
+	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
+
+	if len(status.QuarantinedRecordings) == 0 {
+		return CheckResult{
+			Name:   c.Name(),
+			Status: StatusSkip,
+		}
+	}
+
+	agentIDs := make([]string, 0, len(status.QuarantinedRecordings))
+	for _, state := range status.QuarantinedRecordings {
+		agentIDs = append(agentIDs, state.AgentID)
+	}
+	first := status.QuarantinedRecordings[0]
+
+	return CheckResult{
+		Name:    c.Name(),
+		Status:  StatusWarn,
+		Message: fmt.Sprintf("%d recording(s) kept local, not uploaded: the AI coworker's session file could not be shown to belong only to this repository (%s)", len(agentIDs), strings.Join(agentIDs, ", ")),
+		Fix:     fmt.Sprintf("Nothing is lost. Run 'ox agent %s session recover --release-quarantine' to re-check ownership and upload if it now passes, or 'ox agent %s session abort %s' to discard the captured data", first.AgentID, first.AgentID, filepath.Base(first.SessionPath)),
 	}
 }
 
@@ -1126,6 +1190,11 @@ func (c *SessionAutoStageCheck) findUnstagedSessionFiles(ledgerPath string) []st
 		status := line[:2]
 		filename := strings.TrimSpace(line[3:])
 
+		// never stage while a conflict is unresolved: `git add sessions/` would mark it resolved with markers (#1055)
+		if strings.Contains(status, "U") || status == "AA" || status == "DD" {
+			return nil
+		}
+
 		// check if this is an untracked directory (e.g., "?? sessions/")
 		// when the entire sessions/ directory is untracked, git shows the directory
 		// not the individual files - but we should still stage them
@@ -1160,7 +1229,7 @@ func (c *SessionAutoStageCheck) findUnstagedSessionFiles(ledgerPath string) []st
 func (c *SessionAutoStageCheck) scanSessionFilesInDir(dir string) []string {
 	var files []string
 
-	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	if err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -1179,7 +1248,11 @@ func (c *SessionAutoStageCheck) scanSessionFilesInDir(dir string) []string {
 			files = append(files, relPath)
 		}
 		return nil
-	})
+	}); err != nil {
+		// an incomplete scan can leave session files unstaged; surface it rather
+		// than dropping it silently.
+		slog.Warn("scan session files: walk failed", "dir", dir, "err", err)
+	}
 
 	return files
 }
@@ -1289,6 +1362,7 @@ func (c *SessionPushCheck) Run(_ context.Context, _ bool) CheckResult {
 
 	// push with retry (PushWithRetry handles retries, backoff, and conflict resolution)
 	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
+		ImmutablePaths:      true, // the Ledger never renames paths
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 	}); err != nil {
 		errStr := err.Error()
@@ -1374,7 +1448,9 @@ func (c *SessionPushCheck) countCommitsAhead(ledgerPath string) int {
 	}
 
 	var count int
-	fmt.Sscanf(strings.TrimSpace(string(aheadOutput)), "%d", &count)
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(aheadOutput)), "%d", &count); err != nil {
+		return 0
+	}
 	return count
 }
 

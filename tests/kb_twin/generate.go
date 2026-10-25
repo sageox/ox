@@ -13,10 +13,13 @@ package kb_twin
 // behavior has its own coverage in internal/lfs.
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/api"
 )
@@ -116,13 +119,39 @@ func configGitIdentity(dir string) error {
 // surface the combined output (git's error messages are notoriously
 // terse without it).
 func runGit(cwd string, args ...string) error {
-	cmd := exec.Command("git", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = cwd
+	cmd.Env = isolatedGitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("git %v timed out: %w", args, ctx.Err())
+		}
 		return fmt.Errorf("git %v failed: %s: %w", args, string(out), err)
 	}
 	return nil
+}
+
+// isolatedGitEnv prevents a coworker's signing, hooks, credentials, or prompt
+// settings from changing deterministic twin behavior. Keep PATH and other
+// ordinary process state, but replace Git's configuration trust boundaries.
+func isolatedGitEnv() []string {
+	env := make([]string, 0, len(os.Environ())+3)
+	for _, entry := range os.Environ() {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok && (name == "GIT_CONFIG" || strings.HasPrefix(name, "GIT_CONFIG_") || name == "GIT_TERMINAL_PROMPT") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env,
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TERMINAL_PROMPT=0",
+	)
 }
 
 // resolveRepoURLs walks a scenario's bubbles, materializes a bare
@@ -130,6 +159,12 @@ func runGit(cwd string, args ...string) error {
 // a copy of the bubble list with RepoURL filled in. This is the
 // glue that connects the scenario's declarative spec to a real
 // filesystem.
+// twinTeamID is the primary project's team: the one scope the scheduler
+// lists and the scope every generated bubble row records. Declared here, in a
+// non-test file, because generate.go is compiled without the test files when
+// the coverage run instruments this package.
+const twinTeamID = "team_twin"
+
 func resolveRepoURLs(d *scenarioRepoDir, bubbles []BubbleSpec) ([]api.KB, error) {
 	out := make([]api.KB, 0, len(bubbles))
 	for _, b := range bubbles {
@@ -140,6 +175,10 @@ func resolveRepoURLs(d *scenarioRepoDir, bubbles []BubbleSpec) ([]api.KB, error)
 			OwnerUserID: b.OwnerUserID,
 			ViewerRole:  b.ViewerRole,
 			RepoID:      b.RepoID,
+			// The scoped list API returns the scope it was asked for on
+			// every row; the scheduler lists the primary project's team.
+			ScopeType: api.KBScopeTypeTeam,
+			ScopeID:   twinTeamID,
 		}
 		switch {
 		case b.BadRepoURL:

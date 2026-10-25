@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/testguard"
 	"github.com/stretchr/testify/require"
 )
@@ -45,6 +47,13 @@ type ReportCheck struct {
 	FixLevel string
 	Message  string
 	Detail   string
+}
+
+type mockSageoxAPI struct {
+	*testguard.MockServer
+	cloudDoctorAuthedCalls   atomic.Int32
+	cloudDoctorLegacyCalls   atomic.Int32
+	cloudDoctorSingularCalls atomic.Int32
 }
 
 // buildOxBinary compiles the ox binary from source and returns its path.
@@ -107,9 +116,14 @@ func setupIsolatedAuth(t *testing.T, endpointURL string) []string {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(authDir, "auth.json"), tokenBytes, 0600))
 
-	// XDG overrides isolate from real config; testguard.MinimalEnv adds OX_NO_DAEMON=1
+	// XDG overrides isolate from real config; testguard.MinimalEnv adds OX_NO_DAEMON=1.
+	// Route non-local HTTP through a closed port so this mock acceptance test
+	// cannot silently depend on GitHub or another real service.
 	return []string{
 		"OX_XDG_ENABLE=1",
+		"HTTP_PROXY=http://127.0.0.1:1",
+		"HTTPS_PROXY=http://127.0.0.1:1",
+		"NO_PROXY=127.0.0.1,localhost",
 		fmt.Sprintf("XDG_CONFIG_HOME=%s", configDir),
 		fmt.Sprintf("XDG_DATA_HOME=%s", filepath.Join(t.TempDir(), "data")),
 		fmt.Sprintf("XDG_STATE_HOME=%s", filepath.Join(t.TempDir(), "state")),
@@ -164,10 +178,35 @@ func setupRealAuth(t *testing.T, endpointURL, accessToken string) []string {
 // startMockSageoxAPI creates a mock server that handles the API endpoints
 // needed for ox init and ox doctor. Uses testguard.SafeMockServer to validate
 // that responses never contain production URLs.
-func startMockSageoxAPI(t *testing.T) *testguard.MockServer {
+func startMockSageoxAPI(t *testing.T) *mockSageoxAPI {
 	t.Helper()
 
 	mux := http.NewServeMux()
+	mock := &mockSageoxAPI{}
+
+	// GET /api/v1/auth/introspect -- current CLI authentication contract.
+	// Keeping this in the acceptance server prevents a stale hand-written
+	// auth.json from masquerading as a valid cloud credential.
+	mux.HandleFunc("/api/v1/auth/introspect", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer test-access-token-fresh-install" {
+			http.Error(w, `{"error":"invalid_token"}`, http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"active":         true,
+			"principal_kind": "user",
+			"scope":          "user:profile sageox:write",
+			"token_type":     "Bearer",
+			"expires_at":     nil,
+			"user": map[string]string{
+				"id":    "user_test123",
+				"email": "test@example.com",
+				"name":  "Test User",
+				"tier":  "test",
+			},
+		})
+	})
 
 	// POST /api/v1/repo/init -- repo registration
 	mux.HandleFunc("/api/v1/repo/init", func(w http.ResponseWriter, r *http.Request) {
@@ -238,18 +277,42 @@ func startMockSageoxAPI(t *testing.T) *testguard.MockServer {
 		})
 	})
 
-	// GET /api/v1/repo/{repo_id}/doctor -- cloud doctor
-	mux.HandleFunc("/api/v1/repo/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/doctor") && r.Method == http.MethodGet {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
-				"issues":     []any{},
-				"checked_at": time.Now().Format(time.RFC3339),
-			})
-			return
+	// GET /api/v1/repos/{repo_id}/doctor -- cloud doctor. Route-specific
+	// counters ensure the acceptance test cannot green on a legacy fallback.
+	cloudDoctorHandler := func(calls *atomic.Int32, requireAuth bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if requireAuth && r.Header.Get("Authorization") != "Bearer test-access-token-fresh-install" {
+				http.Error(w, `{"error":"invalid_token"}`, http.StatusUnauthorized)
+				return
+			}
+			if r.Method == http.MethodGet {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/ledger-status"):
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(api.LedgerStatusResponse{
+						Status:     "ready",
+						RepoURL:    "https://localhost:1/ledger-test.git",
+						RepoID:     123,
+						CreatedAt:  time.Now().Format(time.RFC3339),
+						Visibility: "private",
+					})
+					return
+				case strings.HasSuffix(r.URL.Path, "/doctor"):
+					calls.Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(map[string]any{
+						"issues":     []any{},
+						"checked_at": time.Now().Format(time.RFC3339),
+					})
+					return
+				}
+			}
+			http.Error(w, "not found", http.StatusNotFound)
 		}
-		http.Error(w, "not found", http.StatusNotFound)
-	})
+	}
+	mux.HandleFunc("/api/v1/repo/", cloudDoctorHandler(&mock.cloudDoctorSingularCalls, false))
+	mux.HandleFunc("/api/v1/repos/", cloudDoctorHandler(&mock.cloudDoctorAuthedCalls, true))
+	mux.HandleFunc("/api/v1/public/repos/", cloudDoctorHandler(&mock.cloudDoctorLegacyCalls, false))
 
 	// GET /api/v1/teams/{id} -- team info
 	mux.HandleFunc("/api/v1/teams/", func(w http.ResponseWriter, r *http.Request) {
@@ -261,43 +324,39 @@ func startMockSageoxAPI(t *testing.T) *testguard.MockServer {
 		})
 	})
 
-	return testguard.SafeMockServer(t, mux)
+	mock.MockServer = testguard.SafeMockServer(t, mux)
+	return mock
 }
 
-// parseDoctorJSON parses the JSON output from ox doctor --json.
-// Output may include non-JSON lines (debug logs), so we try multiple strategies.
+// parseDoctorJSON parses the JSON output from ox doctor --json. The compiled
+// binary may emit logs before or after a pretty-printed JSON payload.
 func parseDoctorJSON(t *testing.T, output string) *JSONDoctorOutput {
 	t.Helper()
 
-	// fast path: full output is clean JSON
-	var result JSONDoctorOutput
-	if err := json.Unmarshal([]byte(output), &result); err == nil {
-		return &result
+	result, err := parseDoctorJSONOutput(output)
+	if err != nil {
+		t.Logf("no valid JSON found in doctor output:\n%s", output)
+		return nil
+	}
+	return result
+}
+
+func parseDoctorJSONOutput(output string) (*JSONDoctorOutput, error) {
+	for offset := 0; offset < len(output); {
+		relative := strings.IndexByte(output[offset:], '{')
+		if relative < 0 {
+			break
+		}
+		offset += relative
+
+		var candidate JSONDoctorOutput
+		if err := json.NewDecoder(strings.NewReader(output[offset:])).Decode(&candidate); err == nil && len(candidate.Categories) > 0 {
+			return &candidate, nil
+		}
+		offset++
 	}
 
-	// fallback: scan line by line for a JSON object
-	for _, line := range strings.Split(output, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "{") {
-			continue
-		}
-		if err := json.Unmarshal([]byte(trimmed), &result); err == nil {
-			return &result
-		}
-	}
-
-	// last resort: json.Decoder for streaming/multiline JSON
-	dec := json.NewDecoder(strings.NewReader(output))
-	for dec.More() {
-		if err := dec.Decode(&result); err == nil {
-			return &result
-		} else {
-			break // avoid infinite loop on malformed input
-		}
-	}
-
-	t.Logf("no valid JSON found in doctor output:\n%s", output)
-	return nil
+	return nil, fmt.Errorf("doctor output contained no JSON result with categories")
 }
 
 // catalogReport categorizes all checks from the doctor JSON output into a report.

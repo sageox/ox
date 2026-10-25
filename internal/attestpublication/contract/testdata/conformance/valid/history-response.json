@@ -1,0 +1,14 @@
+{
+  "items": [{
+    "scenario_key": "af7f83bb349ab8f7377618e1f4b3e6c1fd51c00e374a6b089ee2e85d9423345d",
+    "title": "Inside",
+    "feature_path": "features/bare.feature",
+    "rule_title": "",
+    "points": [{
+      "run_id": "bdd_01990000-0000-7000-8000-000000000001",
+      "published_at": "2026-09-10T20:01:00Z",
+      "outcome": {"instance":{"scenario_key":"af7f83bb349ab8f7377618e1f4b3e6c1fd51c00e374a6b089ee2e85d9423345d"},"status":"passed","duration_ms":1000}
+    }]
+  }],
+  "pagination": {"limit": 20, "has_more": false}
+}

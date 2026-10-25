@@ -1,11 +1,16 @@
 package agentwork
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -153,49 +158,188 @@ func TestClaudeRunner_Run_Timeout(t *testing.T) {
 	assert.Less(t, elapsed, 5*time.Second)
 }
 
-func TestClaudeRunner_Run_ExitCode(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping real claude test in short mode")
-	}
-	r := NewClaudeRunner(slog.Default())
-	if !r.Available() {
-		t.Skip("claude binary not installed")
-	}
+func TestClaudeRunner_Run_TimeoutBoundsInheritedOutputPipes(t *testing.T) {
+	tmp := t.TempDir()
+	script := filepath.Join(tmp, "claude")
+	// The background child inherits stdout/stderr and outlives the shell when
+	// CommandContext kills it. A runner that waits for EOF before Wait will
+	// block for the full child sleep despite the 100ms timeout.
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nsleep 2 &\nwait\n"), 0o755))
+	r := &ClaudeRunner{binaryPath: script, logger: slog.Default()}
 
-	result, err := r.Run(context.Background(), RunRequest{
-		Prompt:          "respond with exactly one word: hello",
-		TimeoutOverride: 30 * time.Second,
+	start := time.Now()
+	_, err := r.Run(context.Background(), RunRequest{
+		Prompt:          "test",
+		TimeoutOverride: 100 * time.Millisecond,
 	})
-	// if claude exits non-zero (e.g., invalid model), verify we capture it;
-	// if it succeeds, at least verify the runner handles the real binary
-	if err != nil {
-		// timeout or startup error — acceptable for this edge-case test
-		t.Skipf("claude returned error (expected for exit-code test): %v", err)
-	}
-	assert.NotNil(t, result)
-	assert.True(t, result.Duration > 0)
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timed out")
+	assert.Less(t, elapsed, 1500*time.Millisecond,
+		"an inherited output descriptor must not defeat TimeoutOverride")
 }
 
-func TestClaudeRunner_Run_SuccessfulInvocation(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping real claude test in short mode")
+func TestProcessCancellationKillsDescendants(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix process-group semantics")
 	}
-	r := NewClaudeRunner(slog.Default())
-	if !r.Available() {
-		t.Skip("claude binary not installed")
+	tmp := t.TempDir()
+	script := filepath.Join(tmp, "tree")
+	childPIDFile := filepath.Join(tmp, "child.pid")
+	body := "#!/bin/sh\nsleep 60 &\necho $! > " + childPIDFile + "\nwait\n"
+	require.NoError(t, os.WriteFile(script, []byte(body), 0o755))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, script)
+	setProcAttr(cmd)
+	require.NoError(t, cmd.Start())
+	var childPID int
+	require.Eventually(t, func() bool {
+		rawPID, err := os.ReadFile(childPIDFile)
+		if err != nil {
+			return false
+		}
+		childPID, err = strconv.Atoi(strings.TrimSpace(string(rawPID)))
+		return err == nil && childPID > 0
+	}, 5*time.Second, 10*time.Millisecond, "process tree must become ready")
+
+	cancel()
+	require.Error(t, cmd.Wait())
+	assert.Eventually(t, func() bool {
+		process, findErr := os.FindProcess(childPID)
+		if findErr != nil {
+			return true
+		}
+		return process.Signal(syscall.Signal(0)) != nil
+	}, 5*time.Second, 10*time.Millisecond, "cancellation must kill descendants")
+}
+
+func TestCappedBufferDrainsAfterLimit(t *testing.T) {
+	buffer := cappedBuffer{limit: 4}
+
+	n, err := buffer.Write([]byte("abcdefgh"))
+	require.NoError(t, err)
+	assert.Equal(t, 8, n, "writer must report the full input consumed")
+	assert.Equal(t, "abcd", buffer.String())
+
+	n, err = buffer.Write([]byte("more"))
+	require.NoError(t, err)
+	assert.Equal(t, 4, n)
+	assert.Equal(t, "abcd", buffer.String())
+}
+
+func TestTailBufferRetainsFinalResultBeyondLimit(t *testing.T) {
+	buffer := tailBuffer{limit: 128}
+	_, err := buffer.Write([]byte(strings.Repeat("verbose prelude", 100)))
+	require.NoError(t, err)
+	_, err = buffer.Write([]byte("\n" + `{"type":"result","result":"kept","usage":{"input_tokens":1,"output_tokens":2}}` + "\n"))
+	require.NoError(t, err)
+
+	msg, err := parseClaudeOutput(bytes.NewReader(buffer.Bytes()))
+	require.NoError(t, err)
+	require.NotNil(t, msg)
+	assert.Equal(t, "kept", msg.Result)
+}
+
+func TestTailBufferWithZeroLimitStillDrains(t *testing.T) {
+	buffer := tailBuffer{}
+	n, err := buffer.Write([]byte("discarded"))
+	require.NoError(t, err)
+	assert.Equal(t, len("discarded"), n)
+	assert.Empty(t, buffer.Bytes())
+}
+
+func TestClaudeRunner_Run_DrainsStderr(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "claude")
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' 'diagnostic' >&2\nprintf '%s\\n' '{\"type\":\"result\",\"result\":\"ok\"}'\n"), 0o755))
+	r := &ClaudeRunner{binaryPath: script, logger: slog.Default()}
+
+	result, err := r.Run(context.Background(), RunRequest{Prompt: "test", TimeoutOverride: 30 * time.Second})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "ok", result.Output)
+}
+
+func TestClaudeRunner_Run_MissingResultIsError(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "claude")
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' '{\"type\":\"assistant\"}'\n"), 0o755))
+	r := &ClaudeRunner{binaryPath: script, logger: slog.Default()}
+
+	// The full race+coverage suite runs eight packages concurrently and can
+	// starve process scheduling on CI. Keep the fake deterministic while giving
+	// it the same realistic startup budget as a normal runner invocation.
+	result, err := r.Run(context.Background(), RunRequest{Prompt: "test", TimeoutOverride: 30 * time.Second})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "result message not found")
+	require.NotNil(t, result)
+	assert.Equal(t, "claude", result.ModelUsed)
+}
+
+// Failure prevented: a failing claude CLI (rate limit, not logged in) printed
+// one short line and exited non-zero, and the daemon discarded it, leaving 38
+// undiagnosable failures in two hours.
+func TestClaudeRunner_Run_NonZeroExitKeepsCLIErrorText(t *testing.T) {
+	tests := []struct {
+		name   string
+		script string
+		want   string
+		absent string
+	}{
+		{
+			name:   "stdout when stderr is empty",
+			script: "#!/bin/sh\nprintf '%s\\n' 'Claude usage limit reached'\nexit 1\n",
+			want:   "Claude usage limit reached",
+		},
+		{
+			name:   "stderr preferred and redacted",
+			script: "#!/bin/sh\nprintf '%s\\n' 'not logged in glpat-abcdef1234567890XYZ' >&2\nprintf '%s\\n' 'ignored stdout'\nexit 1\n",
+			want:   "not logged in",
+			absent: "glpat-abcdef1234567890XYZ",
+		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			script := filepath.Join(t.TempDir(), "claude")
+			require.NoError(t, os.WriteFile(script, []byte(tt.script), 0o755))
+			r := &ClaudeRunner{binaryPath: script, logger: slog.Default()}
+
+			result, err := r.Run(context.Background(), RunRequest{Prompt: "test", TimeoutOverride: 30 * time.Second})
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+			if tt.absent != "" {
+				assert.NotContains(t, err.Error(), tt.absent)
+			}
+			require.NotNil(t, result)
+			assert.Equal(t, 1, result.ExitCode)
+		})
+	}
+}
+
+func TestFailureDetail_CapsLength(t *testing.T) {
+	t.Parallel()
+	got := failureDetail("", strings.Repeat("x", failureDetailLimit*3))
+	assert.LessOrEqual(t, len(got), failureDetailLimit+len("...(truncated)"))
+	assert.True(t, strings.HasSuffix(got, "...(truncated)"))
+}
+
+func TestClaudeRunner_Run_ExitCode(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "claude")
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' '{\"type\":\"result\",\"result\":\"partial\"}'\nexit 7\n"), 0o755))
+	r := &ClaudeRunner{binaryPath: script, logger: slog.Default()}
 
 	result, err := r.Run(context.Background(), RunRequest{
-		Prompt:          "respond with exactly one word: hello",
-		WorkDir:         t.TempDir(),
-		TimeoutOverride: 30 * time.Second,
+		Prompt:          "test",
+		TimeoutOverride: 5 * time.Second,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 0, result.ExitCode)
-	assert.NotEmpty(t, result.Output, "expected non-empty output from real claude")
-	assert.Greater(t, result.TokensIn, 0)
-	assert.Greater(t, result.TokensOut, 0)
-	assert.True(t, result.Duration > 0)
+	require.NotNil(t, result)
+	assert.Equal(t, 7, result.ExitCode)
+	assert.Equal(t, "partial", result.Output)
 }
 
 // TestClaudeRunner_Run_ModelFlag verifies that req.Model becomes a
@@ -209,20 +353,11 @@ func TestClaudeRunner_Run_ModelFlag(t *testing.T) {
 	argsFile := filepath.Join(tmp, "args.txt")
 	script := filepath.Join(tmp, "claude")
 	// Fake claude: dump argv (one arg per line) to argsFile, then emit a
-	// minimal valid stream-json result so Run() succeeds normally.
-	//
-	// The trailing `sleep 0.1` exists to defuse a CI-only race in
-	// claude_runner.go between cmd.Wait() and the parse goroutine
-	// reading stdout. When the fake script exits within microseconds,
-	// the kernel can close the stdout pipe before the goroutine's
-	// scanner.Scan() runs, producing "file already closed" instead of
-	// the expected EOF. Real claude takes seconds so the race never
-	// manifests in production. We slow the fake just enough to give
-	// the goroutine time to drain the pipe before exit.
+	// minimal valid stream-json result so Run() succeeds normally. It exits
+	// immediately to exercise the runner's pipe-drain-before-Wait contract.
 	body := `#!/bin/sh
 for a in "$@"; do printf '%s\n' "$a" >> "` + argsFile + `"; done
 printf '%s\n' '{"type":"result","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}'
-sleep 0.1
 `
 	require.NoError(t, os.WriteFile(script, []byte(body), 0o755))
 
@@ -245,7 +380,7 @@ sleep 0.1
 			require.NoError(t, os.WriteFile(argsFile, nil, 0o644))
 
 			_, err := r.Run(context.Background(), RunRequest{
-				Prompt: "x", Model: c.model, TimeoutOverride: 5 * time.Second,
+				Prompt: "x", Model: c.model, TimeoutOverride: 30 * time.Second,
 			})
 			require.NoError(t, err)
 
@@ -284,13 +419,11 @@ func TestClaudeRunner_Run_PromptViaStdin(t *testing.T) {
 	stdinFile := filepath.Join(tmp, "stdin.txt")
 	script := filepath.Join(tmp, "claude")
 	// Fake claude: dump argv (one per line) and stdin to files, then emit a
-	// minimal valid stream-json result. The trailing sleep defuses the same
-	// pipe-close race documented in TestClaudeRunner_Run_ModelFlag.
+	// minimal valid stream-json result before exiting immediately.
 	body := `#!/bin/sh
 for a in "$@"; do printf '%s\n' "$a" >> "` + argsFile + `"; done
 cat > "` + stdinFile + `"
 printf '%s\n' '{"type":"result","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}'
-sleep 0.1
 `
 	require.NoError(t, os.WriteFile(script, []byte(body), 0o755))
 

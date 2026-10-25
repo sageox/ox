@@ -55,9 +55,9 @@ func TestResolveNoProviders(t *testing.T) {
 }
 
 func TestEnvProviderUnset(t *testing.T) {
-	os.Unsetenv("FEATURE_MEMORY")
-	os.Unsetenv("FEATURE_TUI")
-	os.Unsetenv("FEATURE_ATTEST")
+	_ = os.Unsetenv("FEATURE_MEMORY")
+	_ = os.Unsetenv("FEATURE_TUI")
+	_ = os.Unsetenv("FEATURE_ATTEST")
 
 	f := flags.Resolve(context.Background(), flags.EnvProvider{})
 	// unset env vars should not change defaults
@@ -480,4 +480,190 @@ type testPatchProvider struct {
 
 func (p *testPatchProvider) Patch(_ context.Context) (*flags.Patch, flags.Source, error) {
 	return p.patch, flags.SourceEnv, nil
+}
+
+// TestBulletinFlagResolvesFromRemotePayload decodes real settings payloads
+// through DaemonProvider and Resolve — the same path the CLI walks at startup —
+// for the four shapes the server can send for features.bulletin.
+//
+// Failure prevented: a JSON null (team service token: no person to evaluate)
+// or an absent key being decoded as an opinionated false, or a true never
+// reaching Flags — so a pilot member never sees `ox bulletin`, or a rolling
+// upgrade flips the gate on a machine the server never enrolled.
+func TestBulletinFlagResolvesFromRemotePayload(t *testing.T) {
+	tests := []struct {
+		name        string
+		features    string
+		wantOpinion *bool // nil means the patch must carry no opinion
+		wantEnabled bool
+	}{
+		{name: "null (team service token)", features: `{"bulletin":null}`, wantOpinion: nil, wantEnabled: false},
+		{name: "absent key", features: `{}`, wantOpinion: nil, wantEnabled: false},
+		{name: "false", features: `{"bulletin":false}`, wantOpinion: bp(false), wantEnabled: false},
+		{name: "true", features: `{"bulletin":true}`, wantOpinion: bp(true), wantEnabled: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := `{"features":` + tt.features + `,"killswitches":{},"fetched_at":"` +
+				time.Now().UTC().Format(time.RFC3339) + `"}`
+			var resp flags.CLISettingsResponse
+			if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+				t.Fatalf("unmarshal %s: %v", raw, err)
+			}
+
+			patch := flags.RemoteSettingsToPatch(&resp)
+			switch {
+			case tt.wantOpinion == nil && patch.BulletinEnabled != nil:
+				t.Errorf("BulletinEnabled patch = %v, want nil (no opinion)", *patch.BulletinEnabled)
+			case tt.wantOpinion != nil && patch.BulletinEnabled == nil:
+				t.Errorf("BulletinEnabled patch = nil, want %v", *tt.wantOpinion)
+			case tt.wantOpinion != nil && *patch.BulletinEnabled != *tt.wantOpinion:
+				t.Errorf("BulletinEnabled patch = %v, want %v", *patch.BulletinEnabled, *tt.wantOpinion)
+			}
+
+			f := flags.Resolve(context.Background(), flags.DaemonProvider{CachedSettings: &resp})
+			if f.BulletinEnabled != tt.wantEnabled {
+				t.Errorf("BulletinEnabled = %v, want %v", f.BulletinEnabled, tt.wantEnabled)
+			}
+		})
+	}
+}
+
+// TestEnvProviderHasNoOpinionOnBulletin proves the pilot gate has no local
+// override: FEATURE_BULLETIN in the environment is ignored by design, both on
+// its own and layered over a server-side decision.
+//
+// Failure prevented: someone wiring FEATURE_BULLETIN into EnvProvider and
+// letting a laptop enable (or re-enable) a server-enrolled pilot command.
+func TestEnvProviderHasNoOpinionOnBulletin(t *testing.T) {
+	for _, val := range []string{"true", "1", "yes"} {
+		t.Setenv("FEATURE_BULLETIN", val)
+
+		patch, _, err := flags.EnvProvider{}.Patch(context.Background())
+		if err != nil {
+			t.Fatalf("EnvProvider.Patch: %v", err)
+		}
+		if patch != nil && patch.BulletinEnabled != nil {
+			t.Errorf("FEATURE_BULLETIN=%q produced an env opinion %v; EnvProvider must have none", val, *patch.BulletinEnabled)
+		}
+
+		f := flags.Resolve(context.Background(), flags.EnvProvider{})
+		if f.BulletinEnabled {
+			t.Errorf("FEATURE_BULLETIN=%q enabled the bulletin pilot", val)
+		}
+	}
+
+	// layered over an explicit server-side false, env must still lose
+	t.Setenv("FEATURE_BULLETIN", "true")
+	remote := flags.DaemonProvider{CachedSettings: &flags.CLISettingsResponse{
+		Features:  flags.CLIFeatures{Bulletin: bp(false)},
+		FetchedAt: time.Now(),
+	}}
+	f := flags.Resolve(context.Background(), remote, flags.EnvProvider{})
+	if f.BulletinEnabled {
+		t.Error("FEATURE_BULLETIN=true overrode a server-side false")
+	}
+}
+
+// TestGitHubMirrorFlagResolvesFromRemotePayload decodes real settings payloads
+// through DaemonProvider and Resolve — the same path the daemon walks before
+// every mirror relay — for the four shapes the server can send for
+// features.github_mirror.
+//
+// Failure prevented: a JSON null or an absent key (an older server that has
+// never heard of the mirror) decoded as an opinionated false, or a true never
+// reaching Flags — so an enrolled team's daemon never relays, or a rolling
+// upgrade turns the relay on for a team the server never enrolled.
+func TestGitHubMirrorFlagResolvesFromRemotePayload(t *testing.T) {
+	tests := []struct {
+		name        string
+		features    string
+		wantOpinion *bool // nil means the patch must carry no opinion
+		wantEnabled bool
+	}{
+		{name: "null", features: `{"github_mirror":null}`, wantOpinion: nil, wantEnabled: false},
+		{name: "absent key", features: `{}`, wantOpinion: nil, wantEnabled: false},
+		{name: "false", features: `{"github_mirror":false}`, wantOpinion: bp(false), wantEnabled: false},
+		{name: "true", features: `{"github_mirror":true}`, wantOpinion: bp(true), wantEnabled: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := `{"features":` + tt.features + `,"killswitches":{},"fetched_at":"` +
+				time.Now().UTC().Format(time.RFC3339) + `"}`
+			var resp flags.CLISettingsResponse
+			if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+				t.Fatalf("unmarshal %s: %v", raw, err)
+			}
+
+			patch := flags.RemoteSettingsToPatch(&resp)
+			switch {
+			case tt.wantOpinion == nil && patch.GitHubMirrorEnabled != nil:
+				t.Errorf("GitHubMirrorEnabled patch = %v, want nil (no opinion)", *patch.GitHubMirrorEnabled)
+			case tt.wantOpinion != nil && patch.GitHubMirrorEnabled == nil:
+				t.Errorf("GitHubMirrorEnabled patch = nil, want %v", *tt.wantOpinion)
+			case tt.wantOpinion != nil && *patch.GitHubMirrorEnabled != *tt.wantOpinion:
+				t.Errorf("GitHubMirrorEnabled patch = %v, want %v", *patch.GitHubMirrorEnabled, *tt.wantOpinion)
+			}
+
+			f := flags.Resolve(context.Background(), flags.DaemonProvider{CachedSettings: &resp})
+			if f.GitHubMirrorEnabled != tt.wantEnabled {
+				t.Errorf("GitHubMirrorEnabled = %v, want %v", f.GitHubMirrorEnabled, tt.wantEnabled)
+			}
+			// the mirror flag must not drag the bulletin pilot along with it
+			if f.BulletinEnabled {
+				t.Error("BulletinEnabled turned on by a payload that only mentions github_mirror")
+			}
+		})
+	}
+}
+
+// TestGitHubMirrorFlagDefaultsOff proves the relay is off until the server
+// says otherwise.
+//
+// Failure prevented: a default-on mirror would publish every teammate's
+// GitHub activity to the team board on machines the server never enrolled.
+func TestGitHubMirrorFlagDefaultsOff(t *testing.T) {
+	if flags.Defaults().GitHubMirrorEnabled {
+		t.Error("GitHubMirrorEnabled should default false")
+	}
+	if flags.Resolve(context.Background()).GitHubMirrorEnabled {
+		t.Error("GitHubMirrorEnabled should resolve false with no providers")
+	}
+}
+
+// TestEnvProviderHasNoOpinionOnGitHubMirror proves the mirror gate has no
+// local override: FEATURE_GITHUB_MIRROR in the environment is ignored by
+// design, both on its own and layered over a server-side decision.
+//
+// Failure prevented: someone wiring FEATURE_GITHUB_MIRROR into EnvProvider and
+// letting a laptop turn on (or re-enable) a relay that publishes to the team's
+// board.
+func TestEnvProviderHasNoOpinionOnGitHubMirror(t *testing.T) {
+	for _, val := range []string{"true", "1", "yes"} {
+		t.Setenv("FEATURE_GITHUB_MIRROR", val)
+
+		patch, _, err := flags.EnvProvider{}.Patch(context.Background())
+		if err != nil {
+			t.Fatalf("EnvProvider.Patch: %v", err)
+		}
+		if patch != nil && patch.GitHubMirrorEnabled != nil {
+			t.Errorf("FEATURE_GITHUB_MIRROR=%q produced an env opinion %v; EnvProvider must have none", val, *patch.GitHubMirrorEnabled)
+		}
+
+		f := flags.Resolve(context.Background(), flags.EnvProvider{})
+		if f.GitHubMirrorEnabled {
+			t.Errorf("FEATURE_GITHUB_MIRROR=%q enabled the GitHub mirror", val)
+		}
+	}
+
+	// layered over an explicit server-side false, env must still lose
+	t.Setenv("FEATURE_GITHUB_MIRROR", "true")
+	remote := flags.DaemonProvider{CachedSettings: &flags.CLISettingsResponse{
+		Features:  flags.CLIFeatures{GitHubMirror: bp(false)},
+		FetchedAt: time.Now(),
+	}}
+	f := flags.Resolve(context.Background(), remote, flags.EnvProvider{})
+	if f.GitHubMirrorEnabled {
+		t.Error("FEATURE_GITHUB_MIRROR=true overrode a server-side false")
+	}
 }

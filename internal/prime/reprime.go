@@ -19,6 +19,34 @@ func IsForceReprimeSource(source string) bool {
 	return source == "clear" || source == "compact"
 }
 
+// preCompactEventName is Claude Code's compaction hook event. It is a distinct
+// EVENT, not a SessionStart `source` value, which is exactly why it needs its
+// own check — see IsForceReprimeEvent.
+const preCompactEventName = "PreCompact"
+
+// IsForceReprimeEvent is IsForceReprimeSource plus the one signal that field
+// cannot carry: the PreCompact hook.
+//
+// Claude Code fires PreCompact as its own event, and agentx.HookInput documents
+// that `source` is populated "only for session start/end" — so on a PreCompact
+// payload `source` is EMPTY. Reading source alone therefore answers "not a
+// force signal" at the one moment the context window is about to be wiped, and
+// the agent gets the compact delta precisely when it is about to lose
+// everything the full preamble already gave it.
+//
+// That is not theoretical. It is how a PR shipped with the `SageOx-Session:`
+// trailer but no `ox pr header` credit line and no saved plan: the trailer is
+// re-emitted with session state on every prime, while the PR-header guidance
+// and the `ox plan save` teaching live in the static-instructions block the
+// compact delta drops. Half the attribution contract survived compaction; the
+// half that had to be re-read did not.
+//
+// Fails the same direction as its sibling: a redundant full preamble costs a
+// few thousand tokens, a silently dropped directive costs the artifact.
+func IsForceReprimeEvent(hookEventName, source string) bool {
+	return hookEventName == preCompactEventName || IsForceReprimeSource(source)
+}
+
 // ShouldCompactReprime reports whether a prime call should emit the
 // compact re-prime delta (session-state only) instead of the full
 // preamble (static instructions, command reference, team knowledge).
@@ -40,5 +68,13 @@ func IsForceReprimeSource(source string) bool {
 // redundant full preamble is only a wasted few thousand tokens. See bd
 // ox-32f6.
 func ShouldCompactReprime(primeCallCount int, hookSource string) bool {
-	return primeCallCount > 1 && !IsForceReprimeSource(hookSource)
+	return ShouldCompactReprimeForEvent(primeCallCount, "", hookSource)
+}
+
+// ShouldCompactReprimeForEvent is ShouldCompactReprime with the hook EVENT in
+// hand as well as the source field. Prefer it at any call site that has parsed
+// hook stdin; the two-argument form remains for callers that genuinely have
+// only a source (a direct re-invocation with no piped payload).
+func ShouldCompactReprimeForEvent(primeCallCount int, hookEventName, hookSource string) bool {
+	return primeCallCount > 1 && !IsForceReprimeEvent(hookEventName, hookSource)
 }

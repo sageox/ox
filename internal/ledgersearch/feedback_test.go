@@ -9,7 +9,8 @@ import (
 )
 
 // TestSearch_FindsPlanFeedbackByReviewerWords verifies a human's review notes
-// are findable by asking — the sacred-data queryability contract. Failure
+// are findable by asking — the sacred-data queryability contract — including
+// the words a highlight covers past its 70-character label. Failure
 // prevented: feedback lands in the ledger but `ox query --local` can never
 // surface it, so "what did the reviewer flag on the auth plan?" comes back
 // empty and the words are effectively lost to recall.
@@ -28,6 +29,10 @@ func TestSearch_FindsPlanFeedbackByReviewerWords(t *testing.T) {
 		"items": []map[string]any{{
 			"anchor": "habc12345", "section": "Token Handling", "label": "refresh flow",
 			"status": "request-change", "note": "rotate the signing keys quarterly",
+		}, {
+			"anchor": "q5e1f00ba", "section": "Token Handling", "status": "comment",
+			"label": "Tokens expire after 30 days unless the client refreshes them befo…",
+			"quote": "Tokens expire after 30 days unless the client refreshes them before the grace window closes",
 		}},
 	}
 	b, _ := json.Marshal(round)
@@ -54,6 +59,12 @@ func TestSearch_FindsPlanFeedbackByReviewerWords(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("reviewer's words not findable: %+v", results)
+	}
+
+	// a highlight's words are searchable past the clipped label.
+	results, err = Search(Options{LedgerPath: ledger, Query: "grace window closes", Now: now})
+	if err != nil || len(results) == 0 || results[0].DocType != "plan-feedback" {
+		t.Fatalf("a highlight's full words must be findable: %v %+v", err, results)
 	}
 
 	// reviewer name is part of the doc — "what did sam flag" works too.

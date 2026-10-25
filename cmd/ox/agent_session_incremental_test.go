@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
@@ -92,6 +94,23 @@ func TestWriteRawHeader(t *testing.T) {
 		require.True(t, ok, "metadata should be a map")
 		assert.Equal(t, "1.0", meta["version"])
 		assert.Equal(t, "OxTest1", meta["agent_id"])
+	})
+
+	t.Run("carries continuation identity", func(t *testing.T) {
+		projectRoot := setupIncrementalTest(t)
+		state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+			AgentID:                "OxResume",
+			AdapterName:            "claude-code",
+			Username:               "testuser",
+			ContinuedFromSessionID: "ses_019f6f6a-d182-7f4e-a54d-8dcb44567c8d",
+		})
+		require.NoError(t, err)
+		require.NoError(t, writeRawHeader(projectRoot, state))
+
+		stored, err := session.ReadSessionFromPath(filepath.Join(state.SessionPath, "raw.jsonl"))
+		require.NoError(t, err)
+		require.NotNil(t, stored.Meta)
+		assert.Equal(t, state.ContinuedFromSessionID, stored.Meta.ContinuedFromSessionID)
 	})
 
 	t.Run("empty session path returns error", func(t *testing.T) {
@@ -222,49 +241,6 @@ func TestAppendRedactedEntries(t *testing.T) {
 	})
 }
 
-// --- rawJSONLHasEntries tests ---
-
-func TestRawJSONLHasEntries(t *testing.T) {
-	t.Run("false for nonexistent file", func(t *testing.T) {
-		assert.False(t, rawJSONLHasEntries("/nonexistent/raw.jsonl"))
-	})
-
-	t.Run("false for empty file", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		rawPath := filepath.Join(tmpDir, "raw.jsonl")
-		require.NoError(t, os.WriteFile(rawPath, []byte{}, 0644))
-		assert.False(t, rawJSONLHasEntries(rawPath))
-	})
-
-	t.Run("false for header-only file", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		rawPath := filepath.Join(tmpDir, "raw.jsonl")
-		header := `{"type":"header","metadata":{"version":"1.0"}}` + "\n"
-		require.NoError(t, os.WriteFile(rawPath, []byte(header), 0644))
-		assert.False(t, rawJSONLHasEntries(rawPath))
-	})
-
-	t.Run("true for header plus one entry", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		rawPath := filepath.Join(tmpDir, "raw.jsonl")
-		content := `{"type":"header","metadata":{"version":"1.0"}}` + "\n" +
-			`{"type":"user","content":"hello"}` + "\n"
-		require.NoError(t, os.WriteFile(rawPath, []byte(content), 0644))
-		assert.True(t, rawJSONLHasEntries(rawPath))
-	})
-
-	t.Run("true for multiple entries", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		rawPath := filepath.Join(tmpDir, "raw.jsonl")
-		content := `{"type":"header"}` + "\n" +
-			`{"type":"user","content":"a"}` + "\n" +
-			`{"type":"assistant","content":"b"}` + "\n" +
-			`{"type":"user","content":"c"}` + "\n"
-		require.NoError(t, os.WriteFile(rawPath, []byte(content), 0644))
-		assert.True(t, rawJSONLHasEntries(rawPath))
-	})
-}
-
 // --- Single Claude agent scenario ---
 
 func TestSingleAgentIncrementalRecording(t *testing.T) {
@@ -307,8 +283,8 @@ func TestSingleAgentIncrementalRecording(t *testing.T) {
 		assert.Equal(t, "assistant", lines[i+1]["type"])
 	}
 
-	// verify rawJSONLHasEntries detects content
-	assert.True(t, rawJSONLHasEntries(rawPath))
+	// verify the canonical classifier detects content
+	assert.True(t, session.HasSubstantiveEntries(rawPath))
 
 	// verify recording state can be loaded
 	loaded, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
@@ -641,8 +617,8 @@ func TestNoHooksFiredFallbackDetection(t *testing.T) {
 
 	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
 
-	// rawJSONLHasEntries should return false (only header, no entries)
-	assert.False(t, rawJSONLHasEntries(rawPath),
+	// the canonical classifier should report no content (only header, no entries)
+	assert.False(t, session.HasSubstantiveEntries(rawPath),
 		"header-only file should not count as having entries")
 
 	// this signals processAgentSession to fall back to batch reading
@@ -779,34 +755,6 @@ func TestAppendLargeEntries(t *testing.T) {
 
 // --- Empty session stop path ---
 
-func TestRawJSONLHasEntries_EmptyFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	rawPath := filepath.Join(tmpDir, "raw.jsonl")
-	require.NoError(t, os.WriteFile(rawPath, []byte{}, 0644))
-	assert.False(t, rawJSONLHasEntries(rawPath))
-}
-
-func TestRawJSONLHasEntries_HeaderOnly(t *testing.T) {
-	tmpDir := t.TempDir()
-	rawPath := filepath.Join(tmpDir, "raw.jsonl")
-	header := `{"_meta":{"schema_version":"1","agent_type":"claude-code"}}` + "\n"
-	require.NoError(t, os.WriteFile(rawPath, []byte(header), 0644))
-	assert.False(t, rawJSONLHasEntries(rawPath))
-}
-
-func TestRawJSONLHasEntries_WithContent(t *testing.T) {
-	tmpDir := t.TempDir()
-	rawPath := filepath.Join(tmpDir, "raw.jsonl")
-	content := `{"_meta":{"schema_version":"1","agent_type":"claude-code"}}` + "\n" +
-		`{"type":"user","content":"hello world","timestamp":"2026-01-01T00:00:00Z"}` + "\n"
-	require.NoError(t, os.WriteFile(rawPath, []byte(content), 0644))
-	assert.True(t, rawJSONLHasEntries(rawPath))
-}
-
-func TestRawJSONLHasEntries_MissingFile(t *testing.T) {
-	assert.False(t, rawJSONLHasEntries(filepath.Join(t.TempDir(), "does-not-exist.jsonl")))
-}
-
 func TestFinalizeIncrementalSession_EmptySession(t *testing.T) {
 	adapters.Register(&testClaudeCodeAdapter{})
 	t.Cleanup(func() { adapters.Unregister("claude-code") })
@@ -820,7 +768,7 @@ func TestFinalizeIncrementalSession_EmptySession(t *testing.T) {
 	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
 
 	// confirm raw.jsonl has no entries beyond the header
-	assert.False(t, rawJSONLHasEntries(rawPath))
+	assert.False(t, session.HasSubstantiveEntries(rawPath))
 
 	adapter, err := adapters.GetAdapter("claude-code")
 	require.NoError(t, err)
@@ -835,4 +783,85 @@ func TestFinalizeIncrementalSession_EmptySession(t *testing.T) {
 	assert.Equal(t, rawPath, got.RawPath, "RawPath should still be set even for empty sessions")
 	assert.Empty(t, got.SummaryMDPath, "no summary should be generated for empty session")
 	assert.Empty(t, got.SessionMDPath, "no session markdown should be generated for empty session")
+}
+
+// A failed final Codex drain must preserve its captured prefix and cursor for retry.
+func TestCodexSessionStop_FinalDrainFailurePreservesRecording(t *testing.T) {
+	for _, failure := range []string{"read", "append"} {
+		t.Run(failure, func(t *testing.T) {
+			if failure == "append" && os.Geteuid() == 0 {
+				t.Skip("root can write files despite read-only permissions")
+			}
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			t.Setenv("SAGEOX_DAEMON", "false")
+			projectRoot := setupIncrementalTest(t)
+			t.Chdir(projectRoot)
+			previousCfg := cfg
+			cfg = &config.Config{Text: true}
+			t.Cleanup(func() { cfg = previousCfg })
+
+			adapter := &testCodexAdapter{}
+			adapters.Register(adapter)
+			t.Cleanup(func() { adapters.Unregister("codex") })
+			sourceFile := writeCodexSessionFile(t, os.Getenv("HOME"), projectRoot)
+			inst := &agentinstance.Instance{AgentID: "OxDrainRetry", AgentType: "codex"}
+			state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+				AgentID: inst.AgentID, AdapterName: "codex", SessionFile: sourceFile,
+				WorkspacePath: projectRoot, WatchMode: "tail", ParentPID: os.Getpid(),
+			})
+			require.NoError(t, err)
+			require.NoError(t, writeRawHeader(projectRoot, state))
+			rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+			appendCodexMessage(t, sourceFile, "user", "captured prefix")
+			prefix, offset, err := adapter.ReadFromOffset(sourceFile, 0)
+			require.NoError(t, err)
+			require.Len(t, prefix, 1)
+			require.NoError(t, appendRedactedEntries(rawPath, session.ConvertRawEntries(prefix)))
+			require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
+				s.SourceOffset = offset
+				s.EntryCount = len(prefix)
+			}))
+			before, err := os.ReadFile(rawPath)
+			require.NoError(t, err)
+			appendCodexMessage(t, sourceFile, "assistant", "final Codex response")
+			if failure == "read" {
+				require.NoError(t, os.Rename(sourceFile, sourceFile+".unavailable"))
+			} else {
+				require.NoError(t, os.Chmod(rawPath, 0o400))
+				t.Cleanup(func() { _ = os.Chmod(rawPath, 0o600) })
+			}
+
+			err = runAgentSessionStop(inst)
+			require.Error(t, err, "stop must not finalize only the captured prefix")
+			assert.Contains(t, err.Error(), "recording state preserved")
+			preserved, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
+			require.NoError(t, err)
+			require.NotNil(t, preserved)
+			assert.Equal(t, offset, preserved.SourceOffset)
+			assert.Equal(t, 1, preserved.EntryCount)
+			after, err := os.ReadFile(rawPath)
+			require.NoError(t, err)
+			assert.Equal(t, before, after, "a failed drain must preserve already captured content")
+
+			if failure == "read" {
+				require.NoError(t, os.Rename(sourceFile+".unavailable", sourceFile))
+			} else {
+				require.NoError(t, os.Chmod(rawPath, 0o600))
+			}
+			require.NoError(t, runAgentSessionStop(inst))
+			cleared, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
+			require.NoError(t, err)
+			assert.Nil(t, cleared)
+			stored, err := session.ReadSessionFromPath(rawPath)
+			require.NoError(t, err)
+			var contents []any
+			for _, entry := range stored.Entries {
+				contents = append(contents, entry["content"])
+			}
+			assert.Equal(t, []any{"captured prefix", "final Codex response"}, contents,
+				"retry must retain the prefix and capture the final turn exactly once")
+		})
+	}
 }

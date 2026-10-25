@@ -18,7 +18,7 @@ import (
 // enrichment overlay, the footer credit, and the review loop — never the
 // author's markup, layout, or scripting.
 
-//go:embed assets/chrome.css assets/chrome.js
+//go:embed assets/chrome.css assets/chrome.js assets/review.css
 var chromeAssets embed.FS
 
 // ChromeMarkerStart / ChromeMarkerEnd delimit the injected ox chrome bundle
@@ -41,6 +41,9 @@ type ChromeData struct {
 	ReviewJSON     string
 	ReviewEndpoint string // live review server base URL ("" = static)
 	ReviewToken    string
+	ReviewPlan     string // see RenderOptions.ReviewPlan
+	ReviewRevision string // see RenderOptions.ReviewRevision
+	ReviewProblems int    // failures and conflicting operations the review read reported
 	SessionURL     string // /c/ conversation link ("" = omit)
 	FooterCredit   bool   // true when any enrichment exists (earned credit)
 }
@@ -74,6 +77,9 @@ type chromePayload struct {
 	Context      []ChromeContext `json:"context"`
 	Endpoint     string          `json:"endpoint"`
 	Token        string          `json:"token"`
+	Plan         string          `json:"plan,omitempty"`
+	Revision     string          `json:"revision,omitempty"`
+	Problems     int             `json:"review_problems,omitempty"`
 	SessionURL   string          `json:"session_url"`
 	FooterCredit bool            `json:"footer_credit"`
 }
@@ -114,6 +120,9 @@ func BuildChromeData(res Result, opts RenderOptions) ChromeData {
 		ReviewJSON:     string(reviewJSON),
 		ReviewEndpoint: opts.ReviewEndpoint,
 		ReviewToken:    opts.ReviewToken,
+		ReviewPlan:     opts.ReviewPlan,
+		ReviewRevision: opts.ReviewRevision,
+		ReviewProblems: opts.ReviewProblems,
 		SessionURL:     opts.SessionURL,
 		// Mirrors RenderHTMLOpts's FooterCredit: earned only when ox actually
 		// found something to say, not on a greenfield plan with zero signals.
@@ -229,6 +238,9 @@ func buildChromeBundle(data ChromeData) []byte {
 		Context:      data.Context,
 		Endpoint:     data.ReviewEndpoint,
 		Token:        data.ReviewToken,
+		Plan:         data.ReviewPlan,
+		Revision:     data.ReviewRevision,
+		Problems:     data.ReviewProblems,
 		SessionURL:   data.SessionURL,
 		FooterCredit: data.FooterCredit,
 	}
@@ -262,6 +274,7 @@ func buildChromeBundle(data ChromeData) []byte {
 
 	b.WriteString(`<style id="ox-chrome-style">`)
 	b.Write(mustChromeAsset("assets/chrome.css"))
+	b.Write(mustChromeAsset("assets/review.css"))
 	b.WriteString("</style>\n")
 
 	b.WriteString(`<script id="ox-chrome-boot">`)
@@ -296,11 +309,11 @@ func escapeScriptIsland(jsonStr string) string {
 	return strings.ReplaceAll(jsonStr, "<", jsonLessThanEscape)
 }
 
-// mustChromeAsset reads an embedded chrome.css/chrome.js asset. Both are
-// embedded above; a read failure means the embed directive itself is
-// broken (a compile-time condition), not a runtime one — panicking here
-// mirrors template.Must's contract for a compiled-in asset that cannot
-// legitimately be missing.
+// mustChromeAsset reads an embedded chrome.css/chrome.js/review.css asset
+// (render.go reads review.css here too). All are embedded above; a read
+// failure means the embed directive itself is broken (a compile-time
+// condition), not a runtime one — panicking here mirrors template.Must's
+// contract for a compiled-in asset that cannot legitimately be missing.
 func mustChromeAsset(path string) []byte {
 	b, err := chromeAssets.ReadFile(path)
 	if err != nil {

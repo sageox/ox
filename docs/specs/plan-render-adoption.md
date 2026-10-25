@@ -42,7 +42,7 @@ text). Lower layers are architecture; higher layers are persuasion.
 | Layer | Mechanism | Channel / moment | Cross-agent? | Durability |
 |---|---|---|---|---|
 | **L0 — Structural pull** | The agent reaches render via its own incentives: `enrich` is the cheap on-ramp; the in-browser review loop is the reward the user visibly wants | CLI workflow | ✅ | Highest |
-| **L1 — Skill-selection capture** | Our shipped `ox-plan` skill wins "render a plan" intent on a capability competitors lack | Skill registry, at selection | ❌ Claude-only | High |
+| **L1 — Skill-selection capture** | Our shipped `ox-cli-plan` skill wins "render a plan" intent on a capability competitors lack | Skill registry, at selection | ❌ Claude-only | High |
 | **L2 — Evidence-backed nudge** | `enrich` guidance leads with the *real computed signals* ("9 files in open PRs, 2 expert routes") at the decision moment | `enrich` JSON (all agents) + hooks (Claude bonus) | ✅ via enrich | Medium |
 | **L3 — Orphan recovery** | Detect "presented a plan *without* rendering" → offer specifically next turn | PostToolUse / next prompt | ❌ Claude-only | Medium |
 | **L4 — Prime floor** | One lean capability line so an agent that ignores everything else still knows render exists and why | Prime payload | ✅ | Baseline |
@@ -128,7 +128,7 @@ push is worse than none).
 
 | Layer | State | Where |
 |---|---|---|
-| L1 | **Shipped** — `ox-plan` skill description leads with the capability (team context + ledger + review loop) and wins plan-render intent | `extensions/skills/ox-plan/SKILL.md` |
+| L1 | **Shipped** — `ox-cli-plan` skill description leads with the capability (team context + ledger + review loop) and wins plan-render intent | `extensions/skills/ox-cli-plan/SKILL.md` |
 | L2 | **Shipped** — `buildGuidance` leads with the computed collision / expert-route / prior-art counts | `internal/plan/diagram_hints.go` (`guidanceLead`) |
 | Push tier | **Shipped** — content-aware viz suggestion now covers the parameterized catalog (`viz_hints`), not just Mermaid; matched by reviewed catalog tags shared with `ox viz suggest` | `internal/plan/diagram_hints.go` (`computeVizHints`) |
 | L4 | **Shipped** — capability line in the prime advisory | `cmd/ox/agent_prime_xml.go` (`writePlanEnrichmentGuidance`) |

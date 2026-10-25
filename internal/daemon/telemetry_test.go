@@ -12,9 +12,23 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// The daemon labels its traces with the same install ID the CLI sends to
+// PostHog. Failure prevented: one install counted as two installs.
+func TestNewTelemetryCollector_UsesTheInstallID(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("SAGEOX_CLIENT_ID", "")
+	installID, err := config.InstallID()
+	require.NoError(t, err)
+
+	collector := NewTelemetryCollector(slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	assert.Equal(t, installID, collector.Stats().ClientID)
+}
 
 func TestNewTelemetryCollector_RespectsOptOut_DoNotTrack(t *testing.T) {
 	t.Setenv("DO_NOT_TRACK", "1")
@@ -327,28 +341,6 @@ func TestTelemetryCollector_Stats(t *testing.T) {
 	assert.Equal(t, telemetryBufferSize, stats.BufferSize)
 	assert.Equal(t, telemetryDefaultInterval, stats.SendInterval)
 	assert.NotEmpty(t, stats.ClientID)
-}
-
-func TestGetOrCreateClientID_Persistence(t *testing.T) {
-	tempDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tempDir)
-	t.Setenv("SAGEOX_CLIENT_ID", "") // ensure env var doesn't interfere
-
-	// first call should create ID
-	id1 := getOrCreateClientID()
-	assert.NotEmpty(t, id1, "expected client ID to be generated")
-
-	// second call should return same ID
-	id2 := getOrCreateClientID()
-	assert.Equal(t, id1, id2, "expected same client ID on subsequent calls")
-}
-
-func TestGetOrCreateClientID_EnvOverride(t *testing.T) {
-	customID := "custom-client-id-from-env"
-	t.Setenv("SAGEOX_CLIENT_ID", customID)
-
-	id := getOrCreateClientID()
-	assert.Equal(t, customID, id, "expected env var to override stored ID")
 }
 
 func TestIsTelemetryEnabled_Precedence(t *testing.T) {

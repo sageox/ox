@@ -1,8 +1,10 @@
 package gitutil
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,6 +12,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// deadPIDLockName uses the same deliberately impossible owner as the liveness
+// tests below. A realistic-looking hardcoded PID can belong to an unrelated CI
+// process, in which case production correctly preserves the lock and the stale
+// owner fixture becomes nondeterministic.
+const deadPIDLockName = "next-index-2147483647.lock"
 
 func TestHasLockFiles(t *testing.T) {
 	t.Run("no lock files", func(t *testing.T) {
@@ -24,6 +32,7 @@ func TestHasLockFiles(t *testing.T) {
 		require.NoError(t, os.MkdirAll(gitDir, 0755))
 
 		for _, lock := range knownLockFiles {
+			require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(gitDir, lock)), 0755))
 			require.NoError(t, os.WriteFile(filepath.Join(gitDir, lock), []byte{}, 0644))
 		}
 
@@ -40,6 +49,7 @@ func TestHasLockFiles(t *testing.T) {
 
 		// create all, then remove one
 		for _, lock := range knownLockFiles {
+			require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(gitDir, lock)), 0755))
 			require.NoError(t, os.WriteFile(filepath.Join(gitDir, lock), []byte{}, 0644))
 		}
 		require.NoError(t, os.Remove(filepath.Join(gitDir, "index.lock")))
@@ -345,6 +355,91 @@ func TestFetchHeadAge(t *testing.T) {
 		assert.True(t, ok)
 		assert.Greater(t, age, 4*time.Minute)
 	})
+
+	// git truncates FETCH_HEAD before contacting the remote, so a FAILED fetch
+	// leaves a zero-byte file with a fresh mtime. Counting that as a recent
+	// fetch makes the failure suppress its own retry.
+	t.Run("empty FETCH_HEAD is not a fetch", func(t *testing.T) {
+		repo := t.TempDir()
+		gitDir := filepath.Join(repo, ".git")
+		require.NoError(t, os.MkdirAll(gitDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(gitDir, "FETCH_HEAD"), nil, 0644))
+
+		age, ok := FetchHeadAge(repo)
+		assert.False(t, ok, "a zero-byte FETCH_HEAD means the fetch failed, not that one just succeeded")
+		assert.Zero(t, age)
+	})
+}
+
+// TestFetchHeadAge_FailedFetchDoesNotSuppressRetry drives real git rather than
+// hand-written fixtures, because the bug lives in git's own behavior: the
+// truncate-then-contact-remote ordering is what leaves a fresh, empty
+// FETCH_HEAD behind a failure.
+//
+// Failure prevented: after a failed fetch, callers that gate on FetchHeadAge
+// (daemon team-context/managed-repo pulls, ledger sync) skipped the next
+// attempt as "recently fetched" — and pullTeamContext reports a skip as
+// success, so the failure counter was cleared and last_sync recorded for a
+// sync that never happened.
+func TestFetchHeadAge_FailedFetchDoesNotSuppressRetry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git fetch")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	work := filepath.Join(root, "work")
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	run(root, "init", "-q", "--bare", "--initial-branch=main", origin)
+	src := filepath.Join(root, "src")
+	require.NoError(t, os.MkdirAll(src, 0o755))
+	run(src, "init", "-q", "--initial-branch=main")
+	run(src, "config", "user.name", "Test")
+	run(src, "config", "user.email", "fetchhead-test@test.sageox.ai")
+	run(src, "config", "commit.gpgsign", "false")
+	require.NoError(t, os.WriteFile(filepath.Join(src, "a.txt"), []byte("a\n"), 0o600))
+	run(src, "add", "a.txt")
+	run(src, "commit", "-qm", "one")
+	run(src, "remote", "add", "origin", origin)
+	run(src, "push", "-q", "origin", "HEAD:refs/heads/main")
+	run(root, "clone", "-q", origin, work)
+
+	// A SUCCESSFUL fetch — even with nothing new — must register.
+	run(work, "fetch", "-q", "origin")
+	age, ok := FetchHeadAge(work)
+	require.True(t, ok, "a successful fetch must register as a recent fetch")
+	assert.Less(t, age, time.Minute)
+
+	// Now fail a fetch. A closed loopback port refuses immediately and needs
+	// no DNS, so the failure mode and latency don't depend on the CI
+	// resolver. Bounded by a context deadline so a hang fails the test
+	// rather than stalling the suite.
+	run(work, "remote", "set-url", "origin", "https://127.0.0.1:1/x.git")
+	fetchCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	failed := exec.CommandContext(fetchCtx, "git", "fetch", "origin")
+	failed.Dir = work
+	require.Error(t, failed.Run(), "fixture must reproduce a failed fetch")
+	require.NoError(t, fetchCtx.Err(), "the fetch must fail on its own, not by deadline")
+
+	info, err := os.Stat(filepath.Join(work, ".git", "FETCH_HEAD"))
+	require.NoError(t, err, "git leaves FETCH_HEAD behind after a failed fetch")
+	require.Zero(t, info.Size(), "and leaves it empty — the whole basis of the bug")
+	require.WithinDuration(t, time.Now(), info.ModTime(), time.Minute,
+		"with a FRESH mtime, which is why the age check was fooled")
+
+	_, ok = FetchHeadAge(work)
+	assert.False(t, ok,
+		"a failed fetch must not count as a recent fetch, or it suppresses its own retry")
 }
 
 // TestLockSweep_PidSuffixedAndSelfHealing covers the wedge that kept a real
@@ -382,11 +477,11 @@ func TestLockSweep_PidSuffixedAndSelfHealing(t *testing.T) {
 
 	t.Run("pid-suffixed next-index lock is removable when stale", func(t *testing.T) {
 		_, gitDir := newGitDir(t)
-		p := writeLock(t, gitDir, "next-index-13088.lock", stale)
+		p := writeLock(t, gitDir, deadPIDLockName, stale)
 
 		removed, errs := RemoveStaleLockFiles(gitDir)
 		assert.Empty(t, errs)
-		assert.Contains(t, removed, "next-index-13088.lock")
+		assert.Contains(t, removed, deadPIDLockName)
 		assert.NoFileExists(t, p)
 	})
 
@@ -562,4 +657,38 @@ func TestLockSweep_OwnerlessLockSurvivesTheStaleWindow(t *testing.T) {
 				"the repo must stay blocked while a writer may still hold the index")
 		})
 	}
+}
+
+// Failure prevented: a lock that a machine which went away left in a git
+// directory survives the clear, so every later command in the clone fails on
+// it; or the clear removes a file that is not a lock, or follows a symlink out
+// of the git directory.
+func TestRemoveAllLockFiles(t *testing.T) {
+	gitDir := filepath.Join(t.TempDir(), ".git")
+	locks := []string{"index.lock", "HEAD.lock", "packed-refs.lock", "refs/heads/main.lock", "objects/info/commit-graph.lock"}
+	for _, name := range append([]string{"index", "refs/heads/main", "objects/pack/pack-1.pack"}, locks...) {
+		path := filepath.Join(gitDir, filepath.FromSlash(name))
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, nil, 0o644))
+	}
+	outside := filepath.Join(t.TempDir(), "outside.lock")
+	require.NoError(t, os.WriteFile(outside, nil, 0o644))
+	if err := os.Symlink(outside, filepath.Join(gitDir, "link.lock")); err != nil {
+		t.Logf("no symlink on this platform (%v); the symlink case is not exercised", err)
+	}
+
+	removed, errs := RemoveAllLockFiles(gitDir)
+
+	require.Empty(t, errs)
+	assert.ElementsMatch(t, locks, removed)
+	for _, name := range locks {
+		assert.NoFileExists(t, filepath.Join(gitDir, filepath.FromSlash(name)))
+	}
+	for _, kept := range []string{"index", "refs/heads/main", "objects/pack/pack-1.pack"} {
+		assert.FileExists(t, filepath.Join(gitDir, filepath.FromSlash(kept)))
+	}
+	assert.FileExists(t, outside, "a symlink's target is not the clone's to remove")
+
+	_, errs = RemoveAllLockFiles(filepath.Join(t.TempDir(), "missing"))
+	assert.NotEmpty(t, errs, "a git directory that cannot be opened is reported, not read as lock-free")
 }

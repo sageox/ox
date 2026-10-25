@@ -1,0 +1,133 @@
+{
+  "version": 1,
+  "tiers": {
+    "fast": {
+      "description": "Deterministic unit and component tests for every local change and main push.",
+      "includes": [
+        "Tests that complete quickly without network access or a real AI coworker",
+        "Tests using testing.Short-aware fakes and in-process protocol twins",
+        "Bounded hermetic subprocess tests, including local git repositories isolated in temporary directories"
+      ],
+      "excludes": [
+        "Files marked //go:build !short",
+        "Real git clone, browser, cloud, real-agent, and long-running stress scenarios"
+      ],
+      "go_test": {
+        "short": true,
+        "tags": ["short"],
+        "race": true,
+        "package_parallelism": 8,
+        "test_parallelism": 32,
+        "timeout": "10m"
+      }
+    },
+    "full": {
+      "description": "All default-build-tag Go tests, including expensive filesystem, git, SQLite, and LFS scenarios.",
+      "includes": [
+        "Every default-build-tag Go test",
+        "Coverage instrumentation for the complete default suite"
+      ],
+      "excludes": [
+        "Explicit slow, browser, real-agent, and digital-twin build tags",
+        "The external ox-test-harness"
+      ],
+      "go_test": {
+        "short": false,
+        "tags": [],
+        "race": true,
+        "count": 1,
+        "package_parallelism": 8,
+        "test_parallelism": 32,
+        "timeout": "25m"
+      }
+    },
+    "slow": {
+      "description": "Long-running hermetic tests that require a real compiled ox binary but no AI coworker.",
+      "includes": [
+        "Tests marked with the slow build tag",
+        "Real binary, git, filesystem, recovery, and stress scenarios"
+      ],
+      "excludes": [
+        "Real AI coworker and cloud-dependent scenarios",
+        "Browser-tagged tests and the external ox-test-harness"
+      ],
+      "go_test": {
+        "short": false,
+        "tags": ["slow"],
+        "race": true,
+        "count": 1,
+        "package_parallelism": 1,
+        "test_parallelism": 1,
+        "timeout": "60m"
+      }
+    },
+    "acceptance": {
+      "description": "Deterministic current-source compiled-binary journeys using isolated repositories and mock services.",
+      "includes": [
+        "Code activity behavior through a freshly built ox binary",
+        "Fresh-install init and doctor journey against a mock SageOx API with external network blocked",
+        "Background daemon survival after command process-group cleanup on supported Unix platforms",
+        "Session start, incremental capture, and stop through the compiled binary, plus crash-artifact preservation through the production finalizer",
+        "Coverage fragments from the compiled binary merged with the full Go test profile"
+      ],
+      "excludes": [
+        "Real cloud credentials and real AI coworker invocations",
+        "Scenarios already owned by the external ox-test-harness"
+      ],
+      "executor": "make test-acceptance"
+    },
+    "digital_twin": {
+      "description": "Deterministic SageOx auth API, ledger, and Knowledge Bubble twins using generated repositories and in-process services.",
+      "includes": [
+        "Product authentication client behavior against twin expiry, refresh, revocation, and injected API faults",
+        "Ledger structural scenarios",
+        "Knowledge Bubble sync and garbage-collection scenarios against real bare Git repositories",
+        "Distinct twin coverage profiles merged into the authoritative full-suite report"
+      ],
+      "excludes": [
+        "Real SageOx cloud infrastructure",
+        "Docker-backed Gitea Git/LFS twins, which belong to the slow tier"
+      ],
+      "executor": "make test-digital-twin"
+    },
+    "integration": {
+      "description": "Cross-agent compatibility and release scenarios in sageox/ox-test-harness.",
+      "includes": [
+        "Current-source ox binary provenance",
+        "Required adapter, hook, session, and real-agent compatibility evidence"
+      ],
+      "excludes": [
+        "Unit-level behavior already owned by fast or full tests",
+        "Optional capabilities that are explicitly reported as blocked"
+      ],
+      "executor": "sageox/ox-test-harness"
+    },
+    "release": {
+      "description": "The enforceable in-repository release gate; no constituent tier may be silently skipped.",
+      "includes": [
+        "Full, slow, acceptance, and digital-twin tier results",
+        "Current-source compiled-binary provenance from the acceptance tier"
+      ],
+      "excludes": [
+        "Informational evaluations that cannot deterministically gate a release",
+        "External ox-test-harness evidence until a machine-verifiable cross-repository attestation exists"
+      ],
+      "requires": ["full", "slow", "acceptance", "digital_twin"],
+      "executor": "make test-release"
+    },
+    "eval": {
+      "description": "Agent-behavior evals: the same coding task run with the ox plugin and without it, scored by graders, reported as a delta. Proves the model takes up what ox delivers.",
+      "includes": [
+        "claude-plugin/evals/**/case.yaml driven by `claude plugin eval --ablation with-without`",
+        "Real Claude Code runs against the seeded Acme sandbox (fresh HOME, offline ox, local-only ledger)",
+        "Negative controls that bound the context tax and catch fabricated attribution"
+      ],
+      "excludes": [
+        "Anything a deterministic Go test can prove (delivery of prime, ledger commits, LFS)",
+        "Every commit, PR, or release gate — opt-in and paid, advisory only",
+        "Murmur, plan-nudge, and floor-only arms (need the six-event `ox init` hook set)"
+      ],
+      "executor": "claude plugin eval (make eval, make eval-smoke)"
+    }
+  }
+}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
@@ -49,13 +50,26 @@ func checkGitCredentialsFreshness(fix bool) checkResult {
 
 	if now.After(creds.ExpiresAt) {
 		msg := fmt.Sprintf("expired %s ago", formatDurationRough(now.Sub(creds.ExpiresAt)))
-		return WarningCheck(name, msg, "run `ox login` to refresh expired credentials")
+		return WarningCheck(name, msg, auth.ReauthenticationRemedy(projectEndpoint))
+	}
+
+	token, tokenErr := auth.GetTokenForEndpoint(projectEndpoint)
+	if tokenErr != nil || (token != nil && token.AccessToken != "" &&
+		creds.BearerTokenHash != gitserver.BearerTokenFingerprint(token.AccessToken)) {
+		if fix {
+			return refreshGitCredentials("credentials are unverified for the current token")
+		}
+		remedy := "run `ox doctor --fix` to refresh credentials for the current token"
+		if tokenErr != nil {
+			remedy = auth.ReauthenticationRemedy(projectEndpoint)
+		}
+		return WarningCheck(name, "credentials are unverified for the current token", remedy)
 	}
 
 	remaining := time.Until(creds.ExpiresAt)
 	if remaining < time.Hour {
 		msg := fmt.Sprintf("expiring in %s", formatDurationRough(remaining))
-		return WarningCheck(name, msg, "run `ox login` to refresh credentials before they expire")
+		return WarningCheck(name, msg, auth.ReauthenticationRemedy(projectEndpoint))
 	}
 
 	return PassedCheck(name, fmt.Sprintf("valid, expires in %s", formatCredentialExpiry(creds.ExpiresAt)))

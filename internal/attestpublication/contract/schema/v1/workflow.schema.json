@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sageox.ai/schemas/attest/v1/workflow.schema.json",
+  "title": "SageOx Attest workflow reference payloads",
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "publish": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repo_id", "run_id", "lifecycle_key", "upload_key", "archive_sha256", "archive_size_bytes", "processing_deadline_at"],
+      "properties": {
+        "repo_id": {"type": "string", "pattern": "^repo_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}, "run_id": {"type": "string", "pattern": "^bdd_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+        "lifecycle_key": {"type": "string", "minLength": 1}, "upload_key": {"type": "string", "minLength": 1},
+        "upload_version_id": {"type": "string", "minLength": 1}, "upload_etag": {"type": "string", "minLength": 1},
+        "archive_sha256": {"$ref": "#/$defs/sha256"}, "archive_size_bytes": {"type": "integer", "minimum": 1, "maximum": 4294967296},
+        "processing_deadline_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "delete": {
+      "type": "object", "additionalProperties": false, "required": ["repo_id", "run_id", "lifecycle_key"],
+      "properties": {"repo_id": {"type": "string", "pattern": "^repo_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}, "run_id": {"type": "string", "pattern": "^bdd_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}, "lifecycle_key": {"type": "string", "minLength": 1}}
+    }
+  },
+  "oneOf": [{"$ref": "#/$defs/publish"}, {"$ref": "#/$defs/delete"}]
+}

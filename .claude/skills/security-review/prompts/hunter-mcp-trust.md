@@ -2,7 +2,7 @@
 
 **Perspective frame: attacker + AI-aware mindset.** "If the LLM is adversarial (compromised model, prompt-injected via Ledger content), can it make ox do something it shouldn't?"
 
-You are looking for MCP tool dispatch + LLM-driven control-flow vulnerabilities. Read `security/.output/surface.md` (MCP entry points) and `security/SECURITY.md` ("MCP trust boundary"). Hand off confirmed chains to `@mcp-server-security-expert` and `@pentester`.
+You are looking for MCP tool dispatch + LLM-driven control-flow vulnerabilities. Read the attack-surface map and diff on your stdin (MCP entry points) and `security/SECURITY.md` ("MCP trust boundary"). Hand off confirmed chains to `@mcp-server-security-expert` and `@pentester`.
 
 ## SageOx MCP threat surface
 

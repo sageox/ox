@@ -96,17 +96,21 @@ type Capabilities struct {
 	// fall back to PAT auth when this is false.
 	Browser bool
 
-	// Network reports whether outbound HTTPS is expected to reach
-	// api.sageox.ai. True on dev laptops, CI runners, sandboxes that
-	// allowlist the SageOx control plane. False only when the operator
-	// has explicitly declared offline. HTTP_PROXY / HTTPS_PROXY are
-	// orthogonal — the HTTP client layer honors them regardless.
-	Network bool
-
 	// EnvLifetime is a coarse expected-runtime bucket for the environment
 	// the CLI is running in. Drives caching strategy (don't warm caches
 	// that won't pay back) and telemetry batching cadence.
 	EnvLifetime Lifetime
+
+	// HostEndsWithAgent reports that the machine may pause or be torn
+	// down once the coding agent finishes: an Amp orb, Claude Code Cloud,
+	// Devin. Work handed to the daemon at session end may then never run,
+	// so session end must upload before it returns.
+	//
+	// Independent of DaemonViable: an Amp orb runs the daemon (it clones
+	// the Ledger and serves the session) yet pauses minutes after its
+	// agent goes idle. False on a laptop, so the zero value still reads
+	// as one.
+	HostEndsWithAgent bool
 }
 
 // envOverrides captures the capability-level OX_* env vars that let an
@@ -118,7 +122,11 @@ type Capabilities struct {
 //   - OX_PERSIST_DISK=0 forces PersistDisk=false.
 //   - OX_NO_DAEMON=1 forces DaemonViable=false.
 //   - OX_BROWSER=0 forces Browser=false.
-//   - OX_NETWORK=0 or OX_OFFLINE=1 forces Network=false.
+//
+// There is deliberately no "offline" knob: nothing ever consumed one, and a
+// flag that promises no outbound calls while prime still dials the KB and
+// telemetry endpoints is worse than no flag. Point SAGEOX_ENDPOINT at a
+// loopback port with no listener when a test must stay offline.
 //
 // "Force on" is intentionally not supported — these are downgrades only,
 // because granting a capability the runtime didn't actually probe is a
@@ -127,8 +135,6 @@ const (
 	envPersistDisk = "OX_PERSIST_DISK"
 	envNoDaemon    = "OX_NO_DAEMON"
 	envBrowser     = "OX_BROWSER"
-	envNetwork     = "OX_NETWORK"
-	envOffline     = "OX_OFFLINE"
 )
 
 var (
@@ -163,11 +169,11 @@ func Reset() {
 // want to bypass the cache.
 func Probe() Capabilities {
 	c := Capabilities{
-		PersistDisk:    probePersistDisk(),
-		TmpdirWritable: probeTmpdir(),
-		Browser:        probeBrowser(),
-		Network:        probeNetwork(),
-		EnvLifetime:    probeLifetime(),
+		PersistDisk:       probePersistDisk(),
+		TmpdirWritable:    probeTmpdir(),
+		Browser:           probeBrowser(),
+		EnvLifetime:       probeLifetime(),
+		HostEndsWithAgent: probeHostEndsWithAgent(),
 	}
 	// DaemonViable composes other capabilities, so probe it last.
 	c.DaemonViable = probeDaemonViable(c)
@@ -278,27 +284,6 @@ func probeBrowser() bool {
 	return true
 }
 
-// probeNetwork honors OX_NETWORK=0 / OX_OFFLINE=1 as operator declarations
-// of "assume no outbound network." We do not probe the network ourselves
-// — a real probe would have to make an outbound call, and Probe is
-// side-effect-free by contract. Subsystems that genuinely need to verify
-// reachability do their own per-request retry with a tight timeout.
-func probeNetwork() bool {
-	if v := strings.TrimSpace(strings.ToLower(os.Getenv(envOffline))); v != "" {
-		switch v {
-		case "1", "true", "yes", "on":
-			return false
-		}
-	}
-	if v := strings.TrimSpace(strings.ToLower(os.Getenv(envNetwork))); v != "" {
-		switch v {
-		case "0", "false", "no", "off", "offline":
-			return false
-		}
-	}
-	return true
-}
-
 // probeLifetime maps detected platforms to a coarse lifetime bucket. The
 // mapping is deliberately blunt — if we're wrong by one bucket the
 // caller's behavior degrades from "perfectly tuned" to "fine but slightly
@@ -308,6 +293,9 @@ func probeLifetime() Lifetime {
 		return LifetimeHours
 	}
 	if os.Getenv("CLAUDE_CODE_REMOTE") != "" {
+		return LifetimeHours
+	}
+	if IsAmpOrb() {
 		return LifetimeHours
 	}
 	if isCodespaces() {
@@ -326,6 +314,13 @@ func probeLifetime() Lifetime {
 	}
 	// default assumption: a dev shell or service that will run for a while
 	return LifetimePersistent
+}
+
+// probeHostEndsWithAgent reports the venues whose machine pauses or is torn
+// down once the coding agent is done. Venue markers only: an explicit
+// OX_EPHEMERAL says the disk is lost, not when the machine stops.
+func probeHostEndsWithAgent() bool {
+	return IsAmpOrb() || isClaudeCloud() || isDevin()
 }
 
 // probeDaemonViable composes the other capability fields plus the

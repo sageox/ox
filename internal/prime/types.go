@@ -61,6 +61,17 @@ type CapturePriorGuidance struct {
 	Example      string   `json:"example"`
 }
 
+// WithheldSkill is a team skill ox found but did not install, and why.
+//
+// Carried as its own shape rather than reusing the skill manager's decision type
+// so this package keeps no dependency on the installer. Only the two fields a
+// reader can act on travel: the name they would recognize, and the reason they
+// would have to accept.
+type WithheldSkill struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason,omitempty"`
+}
+
 // TeamContextInfo represents discovered team context for prime output.
 //
 // Permanent, first-class: team contexts are conversation stores, not
@@ -109,17 +120,44 @@ type TeamContextInfo struct {
 	TeamRules []teamdocs.TeamRule `json:"team_rules,omitempty"`
 
 	// v4 Team Memory
-	MemoryContent        string   `json:"memory_content,omitempty"`         // full MEMORY.md content (always inlined)
-	SoulHint             string   `json:"soul_hint,omitempty"`              // path to SOUL.md (reference, not inlined)
-	TeamHint             string   `json:"team_hint,omitempty"`              // path to TEAM.md (reference, not inlined)
+	MemoryContent string `json:"memory_content,omitempty"` // full MEMORY.md content (always inlined)
+	SoulHint      string `json:"soul_hint,omitempty"`      // path to SOUL.md (reference, not inlined)
+	TeamHint      string `json:"team_hint,omitempty"`      // path to TEAM.md (reference, not inlined)
+	// BulletinHint is the absolute path of the local team bulletin board
+	// directory, <team>/bulletin/general/posts. A pointer only: post bodies
+	// are never inlined. Set only when <team>/bulletin exists in the
+	// checkout (the posts dir itself may be absent after every post
+	// expired). Not gated on the publish flag — reads continue when
+	// publishing is off.
+	BulletinHint         string   `json:"bulletin_hint,omitempty"`
 	MemoryDaily          []string `json:"memory_daily,omitempty"`           // available daily summary files
 	MemoryWeekly         []string `json:"memory_weekly,omitempty"`          // available weekly summary files
 	MemoryMonthly        []string `json:"memory_monthly,omitempty"`         // available monthly summary files
 	ObservationGuideHint string   `json:"observation_guide_hint,omitempty"` // path to memory/GUIDE.md (read when needed)
 
+	// GitHubBoard points at the team's read-only GitHub mirror board. A pointer
+	// only: post bodies are never read. Set only when the board holds at least
+	// one unexpired post for THIS repo, so a team that does not mirror this
+	// repo (or whose posts all aged out) pays nothing.
+	GitHubBoard *GitHubBoardInfo `json:"github_board,omitempty"`
+
 	// sync health
 	Stale      bool   `json:"stale,omitempty"`       // true if last sync exceeds staleness threshold
 	StaleSince string `json:"stale_since,omitempty"` // human-readable duration since last sync
+}
+
+// GitHubBoardInfo is the prime pointer to the github bulletin board.
+type GitHubBoardInfo struct {
+	// Dir is the absolute path of <team>/bulletin/github/posts.
+	Dir string `json:"dir"`
+	// ThisRepo is the filename glob that selects this repo's posts, e.g.
+	// "acme-api-*" (a post file is <slug>-<sha>.md, and a slug starts with the
+	// repo's "{owner}-{name}-" prefix). After a rename it holds one
+	// space-separated glob per name that still has live posts, current name
+	// first: "acme-api-v2-* acme-api-*".
+	ThisRepo string `json:"this_repo"`
+	// Live counts this repo's posts whose .meta.json expires_at is after now.
+	Live int `json:"live"`
 }
 
 // OtherTeams lists non-primary team contexts available to the agent.
@@ -392,32 +430,36 @@ type EphemeralHint struct {
 
 // Output is the structured response for agent bootstrap (prime)
 type Output struct {
-	Status            string                     `json:"status"` // fresh, degraded, unavailable
-	AgentID           string                     `json:"agent_id"`
-	Guidance          *Guidance                  `json:"guidance,omitempty"` // intent-to-command lookup (scan first)
-	SessionID         string                     `json:"session_id,omitempty"`
-	AgentType         string                     `json:"agent_type,omitempty"`     // detected or specified agent type
-	AgentSupported    bool                       `json:"agent_supported"`          // true if agent is officially supported
-	SupportNotice     string                     `json:"support_notice,omitempty"` // warning for unsupported agents
-	Content           string                     `json:"content"`
-	Attribution       config.ResolvedAttribution `json:"attribution"`                 // commit/PR attribution for ox-guided work
-	PlanFooter        string                     `json:"plan_footer,omitempty"`       // exact text for plan footer ("Guided by SageOx")
-	ProjectGuidance   *ProjectGuidance           `json:"project_guidance,omitempty"`  // AGENTS.md content if found
-	TeamInstructions  *TeamInstructions          `json:"team_instructions,omitempty"` // team AGENTS.md/CLAUDE.md content if found
-	CapturePrior      *CapturePriorGuidance      `json:"capture_prior,omitempty"`     // instructions for capturing prior history
-	Message           string                     `json:"message,omitempty"`
-	TokenEstimate     int                        `json:"token_estimate,omitempty"`      // estimated token count
-	ContentLength     int                        `json:"content_length,omitempty"`      // raw byte length
-	Session           *SessionStatus             `json:"session,omitempty"`             // session recording status
-	KB                []KBInfo                   `json:"kb,omitempty"`                  // knowledge-bubble envelope (KB-API rows only, ox ADR-028)
-	KBGuidance        string                     `json:"kb_guidance,omitempty"`         // how to consume the mounted bubbles (set when KB is non-empty)
-	Ledger            *LedgerInfo                `json:"ledger,omitempty"`              // the project ledger (conversation store; see LedgerInfo godoc)
-	Important         string                     `json:"important"`                     // always-present disambiguation of knowledge sources
-	TeamContext       *TeamContextInfo           `json:"team_context,omitempty"`        // team context (conversation store; see TeamContextInfo godoc)
-	TeamContextStatus string                     `json:"team_context_status,omitempty"` // "synced", "syncing", or empty; set when team_context is null but sync is expected
-	OtherTeams        *OtherTeams                `json:"other_teams,omitempty"`         // non-primary teams (nil when only 1 team)
-	UserNotification  string                     `json:"user_notification,omitempty"`   // pre-built status summary for agent to relay to user
-	AgentTip          string                     `json:"agent_tip,omitempty"`           // contextual tip for the agent itself (not for the user)
+	Status           string                     `json:"status"` // fresh, degraded, unavailable
+	AgentID          string                     `json:"agent_id"`
+	Guidance         *Guidance                  `json:"guidance,omitempty"` // intent-to-command lookup (scan first)
+	SessionID        string                     `json:"session_id,omitempty"`
+	AgentType        string                     `json:"agent_type,omitempty"`     // detected or specified agent type
+	AgentSupported   bool                       `json:"agent_supported"`          // true if agent is officially supported
+	SupportNotice    string                     `json:"support_notice,omitempty"` // warning for unsupported agents
+	Content          string                     `json:"content"`
+	Attribution      config.ResolvedAttribution `json:"attribution"`                 // commit/PR attribution for ox-guided work
+	PlanFooter       string                     `json:"plan_footer,omitempty"`       // exact text for plan footer ("Guided by SageOx")
+	ProjectGuidance  *ProjectGuidance           `json:"project_guidance,omitempty"`  // AGENTS.md content if found
+	TeamInstructions *TeamInstructions          `json:"team_instructions,omitempty"` // team AGENTS.md/CLAUDE.md content if found
+	CapturePrior     *CapturePriorGuidance      `json:"capture_prior,omitempty"`     // instructions for capturing prior history
+	Message          string                     `json:"message,omitempty"`
+	TokenEstimate    int                        `json:"token_estimate,omitempty"` // estimated token count
+	ContentLength    int                        `json:"content_length,omitempty"` // raw byte length
+	Session          *SessionStatus             `json:"session,omitempty"`        // session recording status
+	KB               []KBInfo                   `json:"kb,omitempty"`             // knowledge-bubble envelope (KB-API rows only, ox ADR-028)
+	KBGuidance       string                     `json:"kb_guidance,omitempty"`    // how to consume the mounted bubbles (set when KB is non-empty)
+	Ledger           *LedgerInfo                `json:"ledger,omitempty"`         // the project ledger (conversation store; see LedgerInfo godoc)
+	Important        string                     `json:"important"`                // always-present disambiguation of knowledge sources
+	// WithheldTeamSkills are team skills this reconcile declined to materialize.
+	// Empty on the healthy path, which is the common one — a repository with
+	// nothing held pays nothing for this field existing.
+	WithheldTeamSkills []WithheldSkill  `json:"withheld_team_skills,omitempty"`
+	TeamContext        *TeamContextInfo `json:"team_context,omitempty"`        // team context (conversation store; see TeamContextInfo godoc)
+	TeamContextStatus  string           `json:"team_context_status,omitempty"` // "synced", "syncing", or empty; set when team_context is null but sync is expected
+	OtherTeams         *OtherTeams      `json:"other_teams,omitempty"`         // non-primary teams (nil when only 1 team)
+	UserNotification   string           `json:"user_notification,omitempty"`   // pre-built status summary for agent to relay to user
+	AgentTip           string           `json:"agent_tip,omitempty"`           // contextual tip for the agent itself (not for the user)
 	// Prime call tracking
 	PrimeCallCount       int    `json:"prime_call_count,omitempty"`       // number of prime calls this session
 	PrimeExcessiveNotice string `json:"prime_excessive_notice,omitempty"` // warning if prime called excessively
@@ -431,6 +473,16 @@ type Output struct {
 	// for the agent's first prime this window or a clear/compact-triggered
 	// re-prime (the context window was actually wiped). See bd ox-32f6.
 	CompactReprime bool `json:"compact_reprime,omitempty"`
+	// HookOutputBudget, when > 0, is the most bytes the XML renderer may
+	// emit: the host injects hook output into the model only up to a cap
+	// (Claude Code persists anything over 10,000 characters and injects a
+	// 2 KB preview). Set by runAgentPrime for hook-driven Claude Code
+	// primes; zero for direct invocations and other hosts. Sections that
+	// do not fit are written to HookFullBundlePath and named in a
+	// <deferred> pointer. Never serialized: it is a rendering instruction,
+	// not session state.
+	HookOutputBudget   int    `json:"-"`
+	HookFullBundlePath string `json:"-"`
 	// Cumulative context stats (from daemon, best-effort).
 	// CumulativeContextTokens is the rolled-up total; the per-source
 	// split lives in CumulativeContextTokensBySource (keyed by
@@ -447,9 +499,10 @@ type Output struct {
 	// prime` at session start, so even agents without a per-prompt push hook
 	// (the mid-session channel, claude-code/codex) still learn about queued work.
 	AgentTasksReady int `json:"agent_tasks_ready,omitempty"`
-	// Saved plans with open human review feedback (the PULL discovery path): the
-	// count ox agent prime surfaces so ANY new session — not just the authoring
-	// coworker the push task targets — learns feedback is waiting to be addressed.
+	// Saved plans with open human review feedback, or a review that may be
+	// incomplete (the PULL discovery path): the count ox agent prime surfaces so
+	// ANY new session — not just the authoring coworker the push task targets —
+	// learns feedback is waiting to be addressed.
 	OpenPlanFeedback int `json:"open_plan_feedback,omitempty"`
 	// Observation recording directive (behavioral, not just a tool reference)
 	ObservationDirective string `json:"observation_directive,omitempty"` // proactive instruction to record observations via ox memory put
@@ -464,6 +517,7 @@ type Output struct {
 	// This is local-only context (not persisted to ledger), so full name is safe here.
 	CurrentUserName    string   `json:"current_user_name,omitempty"`    // privacy-safe display name (e.g., "Ryan S.")
 	CurrentUserAliases []string `json:"current_user_aliases,omitempty"` // all name forms the agent might encounter
+	CurrentUserKind    string   `json:"current_user_kind,omitempty"`    // "ai" when the current user is the AI coworker a team token acts as; empty for a person
 
 	// Code search availability
 	CodeDBAvailable bool   `json:"code_db_available,omitempty"` // true if code search index exists on disk

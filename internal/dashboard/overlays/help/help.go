@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	lipgloss "charm.land/lipgloss/v2"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/dashboard/overlays"
 	"github.com/sageox/ox/internal/dashboard/theme"
 )
@@ -102,7 +103,7 @@ func (o *Overlay) View(width, height int) string {
 
 	keyStyle := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("#E0A56A")). // copper gold — matches NavSelectedStyle intent
+		Foreground(cli.ColorSecondary).
 		Width(14)
 	descStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#AAAAAA"))

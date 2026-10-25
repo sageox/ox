@@ -1,11 +1,17 @@
 package auth
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitserver"
 )
 
 // Note: these tests use t.Setenv which is incompatible with t.Parallel
@@ -26,6 +32,67 @@ import (
 func validSageOxTestToken(prefix, body string) string {
 	withPrefix := prefix + body
 	return withPrefix + "_" + crc32Base62(withPrefix)
+}
+
+// Failure prevented: read sync silently changes identities by accepting a PAT,
+// using a disk login, or carrying a team token to a different endpoint.
+func TestCurrentReadTokenRequiresSelectedTeamToken(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
+	require.NoError(t, SaveTokenForEndpoint("https://sageox.ai", createTestTokenForTest(time.Hour)))
+	for _, tc := range []struct {
+		name     string
+		token    string
+		endpoint string
+		want     string
+	}{
+		{"team token", "oxt_test_1ljPfr", "https://sageox.ai", "oxt_test_1ljPfr"},
+		{"trailing slash", "oxt_test_1ljPfr", "https://sageox.ai/", "oxt_test_1ljPfr"},
+		{"normalized token", " Bearer oxt_test_1ljPfr\n", "https://sageox.ai", "oxt_test_1ljPfr"},
+		{"missing despite disk login", "", "https://sageox.ai", ""},
+		{"personal token", "oxp_test_4bDZfN", "https://sageox.ai", ""},
+		{"opaque token", "oauth-access-token", "https://sageox.ai", ""},
+		{"bad checksum", "oxt_test_1ljPfX", "https://sageox.ai", ""},
+		{"wrong endpoint", "oxt_test_1ljPfr", "https://staging.sageox.ai", ""},
+		{"normalized sibling host", "oxt_test_1ljPfr", "https://api.sageox.ai", ""},
+		{"embedded newline", validSageOxTestToken(TeamTokenPrefix, "test\ninjected"), "https://sageox.ai", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(EnvVarToken, tc.token)
+			token, err := CurrentReadToken(tc.endpoint)
+			if tc.want == "" {
+				require.ErrorIs(t, err, ErrReadTokenUnavailable)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, tc.want, token)
+		})
+	}
+}
+
+// Failure prevented: a long-lived reader reuses a revoked credential after
+// SAGEOX_TOKEN rotates, disappears, or switches to another deployment.
+func TestCurrentReadTokenObservesRotation(t *testing.T) {
+	t.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
+	for _, raw := range []string{"oxt_test_1ljPfr", "oxt_rotated_1lKvCA", ""} {
+		t.Setenv(EnvVarToken, raw)
+		token, err := CurrentReadToken("https://sageox.ai")
+		if raw == "" {
+			require.ErrorIs(t, err, ErrReadTokenUnavailable)
+		} else {
+			require.NoError(t, err)
+		}
+		require.Equal(t, raw, token)
+	}
+	t.Setenv(EnvVarToken, "oxt_test_1ljPfr")
+	t.Setenv("SAGEOX_ENDPOINT", "https://staging.sageox.ai")
+	token, err := CurrentReadToken("https://sageox.ai")
+	require.ErrorIs(t, err, ErrReadTokenUnavailable)
+	require.Empty(t, token)
+	token, err = CurrentReadToken("https://staging.sageox.ai")
+	require.NoError(t, err)
+	require.Equal(t, "oxt_test_1ljPfr", token)
 }
 
 // TestTokenFromEnv_SageOxTokenSet — Failure prevented: SAGEOX_TOKEN env doesn't produce a
@@ -457,4 +524,107 @@ func TestEnvTokenIsTeamFamily(t *testing.T) {
 		t.Setenv("SAGEOX_ENDPOINT", "https://staging.sageox.ai")
 		assert.False(t, EnvTokenIsTeamFamily(ep))
 	})
+}
+
+// serveTeamToken binds a valid team SAGEOX_TOKEN to an endpoint answering
+// teamAnswer(coworker) and returns the endpoint.
+func serveTeamToken(t *testing.T, coworker string) string {
+	t.Helper()
+	withTempCacheDir(t)
+	ep := serveIntrospectBody(t, teamAnswer(coworker))
+	t.Setenv(endpoint.EnvVar, ep)
+	t.Setenv(EnvVarToken, "oxt_test_1ljPfr")
+	return ep
+}
+
+// Failure prevented: team-token work is refused when the server never said no
+// coworker is attached, or allowed when it did.
+func TestTeamCoworker(t *testing.T) {
+	t.Run("none attached", func(t *testing.T) {
+		_, err := TeamCoworker(serveTeamToken(t, `null`))
+		assert.ErrorIs(t, err, ErrNoCoworker)
+	})
+	t.Run("server predates the field", func(t *testing.T) {
+		c, err := TeamCoworker(serveTeamToken(t, ""))
+		assert.NoError(t, err)
+		assert.Nil(t, c)
+	})
+	t.Run("mistyped team token", func(t *testing.T) {
+		ep := serveTeamToken(t, `null`)
+		t.Setenv(EnvVarToken, "oxt_test_1ljPfX") // checksum fails
+
+		c, err := TeamCoworker(ep)
+		assert.NoError(t, err)
+		assert.Nil(t, c)
+	})
+	t.Run("server unreachable, nothing cached", func(t *testing.T) {
+		withTempCacheDir(t)
+		srv := httptest.NewServer(http.NotFoundHandler())
+		srv.Close()
+		t.Setenv(endpoint.EnvVar, srv.URL)
+		t.Setenv(EnvVarToken, "oxt_test_1ljPfr")
+
+		c, err := TeamCoworker(srv.URL)
+		assert.NoError(t, err)
+		assert.Nil(t, c)
+	})
+}
+
+// Failure prevented: people's commands start asking the server about their own
+// credential on every attribution — a round trip each, or a 5 s stall offline.
+func TestTeamCoworker_NeverAsksAboutAPersonalCredential(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	t.Cleanup(srv.Close)
+	withTempCacheDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv(endpoint.EnvVar, srv.URL)
+	require.NoError(t, SaveTokenForEndpoint(srv.URL, createTestTokenForTest(time.Hour)))
+
+	for _, envToken := range []string{"", "oxp_test_4bDZfN"} { // ox login; personal token
+		t.Setenv(EnvVarToken, envToken)
+		c, err := TeamCoworker(srv.URL)
+		require.NoError(t, err)
+		assert.Nil(t, c)
+		GetUserID(srv.URL)
+		GetUsername(srv.URL)
+		_, _, id := gitserver.TeamCoworkerGetter()
+		assert.Empty(t, id)
+	}
+	assert.Zero(t, calls.Load())
+}
+
+// Failure prevented: a team token's Ledger clones keep the machine's git
+// identity because gitserver never learns which coworker the token acts as.
+func TestTeamCoworkerGetter(t *testing.T) {
+	ep := serveTeamToken(t, `{"id":"agt_rip","display_name":"Rip"}`)
+
+	gotEp, name, id := gitserver.TeamCoworkerGetter()
+	assert.Equal(t, [3]string{ep, "Rip", "agt_rip"}, [3]string{gotEp, name, id})
+}
+
+// Failure prevented: a coworker with no ASCII name, or none, gets an empty
+// slug or name, or one agt_ id gets two different slugs.
+func TestCoworker_FallsBackToID(t *testing.T) {
+	for _, name := range []string{"ロボ", ""} {
+		assert.Equal(t, "agt_01abc", (&Coworker{ID: "agt_01ABC", DisplayName: name}).Username())
+	}
+	assert.Equal(t, "agt_01ABC", (&Coworker{ID: "agt_01ABC"}).Name())
+	assert.Equal(t, "Rip", (&Coworker{ID: "agt_01ABC", DisplayName: "Rip"}).Name())
+}
+
+// Failure prevented: session metadata and daemon murmurs carry no id or
+// principal for the coworker.
+func TestGetUserIDAndUsername_TeamCoworker(t *testing.T) {
+	ep := serveTeamToken(t, `{"id":"agt_rip","display_name":"Rip"}`)
+
+	assert.Equal(t, "agt_rip", GetUserID(ep))
+	assert.Equal(t, "rip", GetUsername(ep))
+	assert.Equal(t, "agt_rip", GetUserID(""))
+	assert.Equal(t, "rip", GetUsername(""))
+
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv(EnvVarToken, "")
+	assert.Empty(t, GetUserID(ep))
+	assert.Empty(t, GetUsername(ep))
 }

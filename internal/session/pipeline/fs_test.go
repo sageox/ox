@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestOSFileSystemReadWriteFile(t *testing.T) {
@@ -24,6 +27,22 @@ func TestOSFileSystemReadWriteFile(t *testing.T) {
 	if string(got) != "hello world" {
 		t.Errorf("got %q, want %q", string(got), "hello world")
 	}
+}
+
+func TestOSFileSystemWriteFileAtomicallyReplacesExistingContent(t *testing.T) {
+	dir := t.TempDir()
+	fsys := OSFileSystem{}
+	path := filepath.Join(dir, "raw.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte("prior"), 0o644))
+
+	require.NoError(t, fsys.WriteFile(path, []byte("complete replacement"), 0o644))
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("complete replacement"), got)
+	matches, err := filepath.Glob(filepath.Join(dir, ".tmp-*"))
+	require.NoError(t, err)
+	assert.Empty(t, matches, "successful atomic copy must not leave temporary files")
 }
 
 func TestOSFileSystemMkdirAll(t *testing.T) {

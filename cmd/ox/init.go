@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -21,12 +23,14 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/sageoxignore"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/ui"
 	"github.com/sageox/ox/internal/version"
@@ -107,6 +111,7 @@ func ensureSageoxConfig(gitRoot string) configResult {
 
 var initCmd = &cobra.Command{
 	Use:   "init",
+	Args:  cobra.NoArgs,
 	Short: "Initialize SageOx for this repository",
 	Long: `Initialize SageOx for this repository.
 
@@ -126,7 +131,10 @@ This command will:
 7. Associate the repo with your team (prompts for team selection)
 8. Register repository with SageOx API
 
-Use --team to specify a team ID directly, or let ox init prompt you.
+Use --team to specify a team by name, slug, or ID, or let ox init prompt you.
+
+After setup and sync, run 'ox session import' to preview and choose
+past Claude Code or Codex sessions from this repo for your team's Ledger.
 
 After init, run 'ox guide getting-started' for a five-minute walkthrough,
 or 'ox guide team-rules' to learn how to share AI coworker conventions
@@ -138,7 +146,7 @@ across your whole team (Claude, Codex, Amp, etc.).`,
 
 func init() {
 	initCmd.Flags().BoolVarP(&initQuiet, "quiet", "q", false, "suppress non-essential output (default: false)")
-	initCmd.Flags().StringVar(&initTeamFlag, "team", "", "team ID to associate this repo with")
+	initCmd.Flags().StringVar(&initTeamFlag, "team", "", "team to associate this repo with (name, slug, or ID)")
 	initCmd.Flags().BoolVar(&initForce, "force", false, "initialize even if .sageox/ exists on remote")
 	initCmd.Flags().StringVar(&initEndpointFlag, "endpoint", "", "SageOx endpoint URL (overrides SAGEOX_ENDPOINT)")
 	initCmd.Flags().StringVar(&initAgentsFlag, "agents", "", "comma-separated list of agents to configure (e.g., 'gemini,codex')")
@@ -162,7 +170,8 @@ func hasCommits(gitRoot string) bool {
 
 // ensureInitialCommit creates a seed commit in an empty git repository so that
 // ox init can compute a fingerprint. It writes .sageox/README.md and commits
-// it. If the repo already has commits this is a no-op.
+// only that file, preserving unrelated staged work. If the repo already has
+// commits this is a no-op.
 //
 // The commit uses -c flags to supply a fallback author identity so it succeeds
 // even when the user has not configured git user.name / user.email.
@@ -192,12 +201,14 @@ func ensureInitialCommit(gitRoot string) error {
 		return fmt.Errorf("git add .sageox/README.md: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 
-	// commit with fallback identity so it works even without git config
+	// Scope the commit to the generated README so existing staged work stays staged.
+	// Use fallback identity so it works even without git config.
 	commitCmd := exec.Command(
 		"git",
 		"-c", "user.name="+constants.SageOxGitName,
 		"-c", "user.email="+constants.SageOxGitEmail,
-		"commit", "-m", "Initialize SageOx configuration",
+		"commit", "--only", "-m", "Initialize SageOx configuration",
+		"--", filepath.Join(".sageox", "README.md"),
 	)
 	commitCmd.Dir = gitRoot
 	if out, err := commitCmd.CombinedOutput(); err != nil {
@@ -297,6 +308,8 @@ func checkRemoteSageoxExists(gitRoot string) (found bool, stale bool, err error)
 	return false, false, nil
 }
 
+// runInit configures AI coworker integrations and registers the authenticated
+// repository, then prints setup guidance when human-readable output is enabled.
 func runInit() error {
 	// warn if using non-default endpoint (subtle, informational)
 	if endpoint.Get() != endpoint.Default {
@@ -316,26 +329,6 @@ func runInit() error {
 		return fmt.Errorf("not a git repository\n\nox init requires a git repository. Run:\n  git init\n  git commit --allow-empty -m \"Initial commit\"\n  ox init")
 	}
 
-	// ensure the repo has at least one commit (required for fingerprinting)
-	if err := ensureInitialCommit(gitRoot); err != nil {
-		return fmt.Errorf("failed to create initial commit: %w", err)
-	}
-
-	// compute fingerprint (now guaranteed to have at least one commit)
-	fingerprint, err := repotools.ComputeFingerprint()
-	if err != nil {
-		fmt.Fprintln(os.Stderr)
-		cli.PrintError("git repository has no commits")
-		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, cli.StyleDim.Render(fmt.Sprintf("%s requires at least one commit for repository fingerprinting.", cli.StyleCommand.Render("ox init"))))
-		return cli.ErrSilent
-	}
-
-	// offline-safe: remote hashes are optional; registration works for local-only repos
-	if hashErr := fingerprint.WithRemoteHashes(); hashErr != nil {
-		cli.PrintWarning(fmt.Sprintf("Could not add remote hashes: %v", hashErr))
-	}
-
 	// check if remote already has .sageox/ (prevents duplicate init race condition)
 	if !initForce {
 		found, stale, err := checkRemoteSageoxExists(gitRoot)
@@ -349,7 +342,8 @@ func runInit() error {
 			fmt.Printf("  %s\n", cli.StyleCommand.Render("git pull"))
 			fmt.Println()
 			fmt.Printf("To initialize with a new team anyway: %s\n", cli.StyleCommand.Render("ox init --force"))
-			return cli.ErrSilent
+			// usage: ox did not fail; the repository needs a git pull
+			return cli.Silent(errkind.Errorf(errkind.Usage, "already initialized on the remote"))
 		} else if stale {
 			fmt.Println()
 			cli.PrintWarning("Your branch may be behind the remote")
@@ -368,13 +362,16 @@ func runInit() error {
 		if resolvedEndpoint == "" {
 			return fmt.Errorf("invalid --endpoint value: %q", initEndpointFlag)
 		}
-		os.Setenv(endpoint.EnvVar, resolvedEndpoint)
+		_ = os.Setenv(endpoint.EnvVar, resolvedEndpoint) // Setenv fails only on an invalid name
 		if !initQuiet {
 			fmt.Println()
 			fmt.Printf("Using endpoint: %s\n", cli.StyleBold.Render(endpoint.NormalizeSlug(resolvedEndpoint)))
 		}
 	} else if os.Getenv(endpoint.EnvVar) == "" {
-		selectedEndpoint, needsLogin := selectInitEndpoint()
+		selectedEndpoint, needsLogin, err := selectInitEndpoint()
+		if err != nil {
+			return err
+		}
 		if selectedEndpoint != "" {
 			if needsLogin {
 				fmt.Println()
@@ -383,9 +380,10 @@ func runInit() error {
 				fmt.Printf("You need to login to %s first.\n", endpoint.NormalizeSlug(selectedEndpoint))
 				fmt.Println()
 				fmt.Printf("Run %s to authenticate.\n", cli.StyleCommand.Render("ox login"))
-				return nil
+				// nothing was initialized, so this must not exit 0
+				return cli.Silent(errkind.Errorf(errkind.NotLoggedIn, "ox init requires login to the selected endpoint"))
 			}
-			os.Setenv(endpoint.EnvVar, selectedEndpoint)
+			_ = os.Setenv(endpoint.EnvVar, selectedEndpoint) // Setenv fails only on an invalid name
 			fmt.Println()
 			fmt.Printf("Using endpoint: %s\n", cli.StyleBold.Render(endpoint.NormalizeSlug(selectedEndpoint)))
 		}
@@ -402,7 +400,7 @@ func runInit() error {
 		fmt.Println()
 		fmt.Printf("Run %s to authenticate first.\n", cli.StyleCommand.Render("ox login"))
 		fmt.Println()
-		return cli.ErrSilent
+		return cli.Silent(errkind.Errorf(errkind.NotLoggedIn, "ox init requires authentication"))
 	}
 
 	// === TEAM SELECTION ===
@@ -410,8 +408,30 @@ func runInit() error {
 	var selectedTeamID string
 	var selectedTeamName string
 	if initTeamFlag != "" {
-		// use explicitly provided team
-		selectedTeamID = initTeamFlag
+		// --team has always taken the raw flag value and sent it to the API. Resolving
+		// it against the user's teams first means the slug `ox team list` prints and the
+		// name the picker shows both work here, matching every other team-taking surface.
+		// The list is a convenience, not the authority: a value it does not contain is
+		// warned about and passed through for the server to rule on (as `ox invite --team`
+		// does), so a stale local list can never block a registration the server would
+		// accept. Only a value matching several teams fails here, and it fails before
+		// ensureInitialCommit or REPOSITORY SETUP has written anything.
+		memberships, fetchErr := fetchTeamMemberships()
+		if fetchErr != nil {
+			// The picker path below reports a failed fetch and asks whether to
+			// continue. This path cannot ask — --team is the non-interactive way in
+			// — but it must not degrade silently either: the value is about to reach
+			// the server unvalidated. The error body is server text, so it is
+			// sanitized before it touches the terminal.
+			cli.PrintWarning(fmt.Sprintf("Could not check --team against your teams: %s",
+				cli.SanitizeTerminalText(fetchErr.Error())))
+		}
+		resolvedID, resolvedName, err := resolveTeamFlag(initTeamFlag, memberships, fetchErr)
+		if err != nil {
+			return err
+		}
+		selectedTeamID = resolvedID
+		selectedTeamName = resolvedName
 	} else {
 		// fetch teams from API to determine if selection is needed
 		teamClient := api.NewRepoClient()
@@ -431,23 +451,51 @@ func runInit() error {
 			slog.Debug("failed to fetch teams", "error", err)
 			cli.PrintWarning(fmt.Sprintf("Could not fetch teams from %s: %v", endpoint.NormalizeSlug(currentEP), err))
 			fmt.Println()
-			if !cli.ConfirmYesNo("Continue without team selection? (a new team may be created)", false) {
-				return fmt.Errorf("team selection canceled")
+			if teamErr := confirmContinueWithoutTeam(currentEP); teamErr != nil {
+				return teamErr
 			}
 		} else if reposResp != nil && len(reposResp.TeamMembershipsFromRepos()) > 0 {
-			selectedTeamID, selectedTeamName, err = selectTeam(reposResp.TeamMembershipsFromRepos())
+			// the repo may already be bound to a team from a prior init —
+			// pre-select and mark that row so re-running ox init doesn't
+			// silently rebind it to whatever sorts first.
+			var currentTeamID string
+			if existingCfg, cfgErr := config.LoadProjectConfig(gitRoot); cfgErr == nil && existingCfg != nil {
+				currentTeamID = existingCfg.TeamID
+			}
+			selectedTeamID, selectedTeamName, err = selectTeam(reposResp.TeamMembershipsFromRepos(), currentTeamID)
 			if err != nil {
-				return fmt.Errorf("team selection canceled")
+				return fmt.Errorf("team selection canceled: %w", err)
 			}
 		} else if reposResp != nil {
 			proceed, promptErr := promptNoTeams()
 			if promptErr != nil {
-				return fmt.Errorf("team selection canceled")
+				return fmt.Errorf("team selection canceled: %w", promptErr)
 			}
 			if !proceed {
-				return nil
+				// nothing was initialized: the person is creating a team first
+				return silentFailure(errkind.Usage, "no team yet: handed off to the dashboard", nil)
 			}
 		}
+	}
+
+	// Resolve required input before creating the seed commit or touching the index.
+	if err := ensureInitialCommit(gitRoot); err != nil {
+		return fmt.Errorf("failed to create initial commit: %w", err)
+	}
+
+	// compute fingerprint (now guaranteed to have at least one commit)
+	fingerprint, err := repotools.ComputeFingerprint()
+	if err != nil {
+		fmt.Fprintln(os.Stderr)
+		cli.PrintError("git repository has no commits")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, cli.StyleDim.Render(fmt.Sprintf("%s requires at least one commit for repository fingerprinting.", cli.StyleCommand.Render("ox init"))))
+		return silentFailure(errkind.Other, "git repository has no commits", err)
+	}
+
+	// offline-safe: remote hashes are optional; registration works for local-only repos
+	if hashErr := fingerprint.WithRemoteHashes(); hashErr != nil {
+		cli.PrintWarning(fmt.Sprintf("Could not add remote hashes: %v", hashErr))
 	}
 
 	sageoxDir := filepath.Join(gitRoot, ".sageox")
@@ -728,13 +776,50 @@ func runInit() error {
 	// <root><root>/.codex/hooks.json, and one such entry failed the whole
 	// `git add`, leaving even .claude/settings.json unstaged.
 	installedHooks := installAgentHooks(gitRoot, true, selectedAgents) // quiet — summarized below
+
+	// Snapshot every scoped ignore file that ALREADY EXISTS, before writing any of
+	// them. trackModifiedFile snapshots eagerly, at call time — so calling it after
+	// the write would capture the already-modified bytes and rollback would
+	// "restore" the ox block into the user's file instead of removing it.
+	for _, f := range scopedIgnoreFiles() {
+		abs := filepath.Join(gitRoot, f.Dir, ".gitignore")
+		if _, err := os.Lstat(abs); err == nil {
+			tracker.trackModifiedFile(abs)
+		}
+	}
+
+	// Write the ox-managed ignore block BEFORE anything is staged, so the rule
+	// that hides ox's own files exists in the tree before the index is touched.
+	// Warn on UNPROTECTED as well as on error. A directory ox cannot own — a
+	// symlinked or non-regular .gitignore — is reported as unprotected and returns
+	// no error at all, so an error-only check goes silent in exactly the case the
+	// user most needs to hear about: ox's files are about to exist in that
+	// directory with nothing hiding them from git.
+	ignoreFiles, unprotected, ignoreErr := skillmanager.EnsureScopedIgnoreFilesForDirs(gitRoot, nil)
+	if !initQuiet {
+		if ignoreErr != nil {
+			cli.PrintWarning(fmt.Sprintf("Could not write ox ignore rules: %v", ignoreErr))
+		}
+		if len(unprotected) > 0 {
+			cli.PrintWarning(fmt.Sprintf(
+				"Could not write ox ignore rules in %s — ox files there will be visible to git; "+
+					"remove or rename the blocking path and rerun `ox doctor --fix`",
+				strings.Join(unprotected, ", ")))
+		}
+	}
+	trackScopedIgnoreFilesForInit(tracker, gitRoot, ignoreFiles, ignoreErr)
+
+	// Every installed path is tracked for ROLLBACK, but only the non-reserved ones
+	// are staged — see stageableInstalledPaths for why.
 	for _, hookFile := range installedHooks {
 		tracker.trackCreatedFile(hookFile)
+	}
+	for _, hookFile := range stageableInstalledPaths(gitRoot, installedHooks) {
 		tracker.trackForceStage(hookFile)
 	}
 
-	// commands and rules are installed by external adapters via CapCommandsInstaller/CapRulesInstaller
-	// (see installAgentHooks → ea.InstallCommands / ea.InstallRules)
+	// Commands remain an adapter compatibility surface. Skills and ox-owned
+	// rules are projected together by the central inventory reconciler.
 
 	// single summary line for the entire integration section
 	if !initQuiet {
@@ -767,18 +852,15 @@ func runInit() error {
 	// call API to register repository
 	// check for endpoint mismatch
 	currentEndpoint := endpoint.Get()
-	if cfg.Endpoint != "" && cfg.Endpoint != currentEndpoint {
-		fmt.Println()
-		cli.PrintWarning("API endpoint mismatch detected")
-		fmt.Printf("  Stored:  %s\n", cfg.Endpoint)
-		fmt.Printf("  Current: %s\n", currentEndpoint)
-		fmt.Println()
-		fmt.Println("Re-registering will associate this repo with the new endpoint.")
-		if !cli.ConfirmYesNo("Continue?", true) {
-			fmt.Println()
-			fmt.Printf("Aborted. Set SAGEOX_ENDPOINT=%s to use the stored endpoint.\n", cfg.Endpoint)
-			return nil
-		}
+	proceed, confirmErr := confirmEndpointRebind(cfg.Endpoint, currentEndpoint)
+	if confirmErr != nil || !proceed {
+		// Init did not complete, so undo everything this run created, modified
+		// and staged — exactly as a failed registration below does. Returning
+		// here without rolling back leaves .sageox and the instruction-file
+		// edits on disk AND in the index, which makes an abort look like a
+		// half-finished init.
+		tracker.rollback(initQuiet)
+		return confirmErr
 	}
 
 	initAt := time.Now().UTC().Format(time.RFC3339)
@@ -880,7 +962,7 @@ func runInit() error {
 		if err := config.SaveProjectConfig(gitRoot, cfg); err != nil {
 			cli.PrintWarning(fmt.Sprintf("Could not save config: %v", err))
 		} else if !initQuiet {
-			cli.PrintSuccess(fmt.Sprintf("Registered with SageOx (team: %s)", resp.TeamID))
+			cli.PrintSuccess(fmt.Sprintf("Registered with SageOx (team: %s)", formatTeamLabel(selectedTeamName, resp.TeamID)))
 		}
 
 		// update README.md with SageOx links now that we have repo_id and team_id
@@ -982,7 +1064,12 @@ func runInit() error {
 		fmt.Printf("  %d. Run %s to confirm everything is working properly\n", step, cli.StyleCommand.Render("ox doctor"))
 		step++
 
-		// step N: invite teammates — ox invite sends the invitations directly,
+		if selectedAgents["codex"] && hasCodexHooks(false) {
+			fmt.Printf("  %d. %s\n", step, codexHookTrustHint)
+			step++
+		}
+
+		// step N: invite teammates — ox team invite sends the invitations directly,
 		// so this no longer sends people to the dashboard to copy a link.
 		if cfg.TeamID != "" {
 			teamLabel := cfg.TeamName
@@ -990,14 +1077,21 @@ func runInit() error {
 				teamLabel = cfg.TeamID
 			}
 			fmt.Printf("  %d. Invite teammates (%s):\n", step, teamLabel)
-			fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox invite alice@example.com,bob@example.com"))
+			fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox team invite alice@example.com,bob@example.com"))
 		} else {
-			fmt.Printf("  %d. Invite teammates with %s\n", step, cli.StyleCommand.Render("ox invite <email>..."))
+			fmt.Printf("  %d. Invite teammates with %s\n", step, cli.StyleCommand.Render("ox team invite <email>..."))
 		}
 		step++
 
 		// step N: start Claude Code (ox will auto-prime and surface team context)
 		fmt.Printf("  %d. Start Claude Code in this repo — ox will auto-prime and surface your team context\n", step)
+		step++
+
+		// Old IDs can survive skipped or partial registration and later reinit.
+		// Only a freshly confirmed repo and team qualify for the import step.
+		if resp != nil && resp.RepoID != "" && resp.TeamID != "" {
+			printInitSessionImportStep(gitRoot, cfg, step)
+		}
 
 		// show team context sync status so user knows what's happening in the background
 		if cfg.TeamID != "" {
@@ -1019,37 +1113,23 @@ func runInit() error {
 	return nil
 }
 
+// printInitSessionImportStep is deterministic setup help, independent of tips.
+// Sync requests do not establish import readiness; the importer owns preflight.
+func printInitSessionImportStep(gitRoot string, projectCfg *config.ProjectConfig, step int) {
+	if initQuiet || (cfg != nil && (cfg.JSON || cfg.Quiet)) || projectCfg == nil ||
+		projectCfg.RepoID == "" || projectCfg.TeamID == "" ||
+		!config.ResolveSessionRecording(gitRoot).ShouldRecord() {
+		return
+	}
+
+	fmt.Printf("  %d. Bring past Claude and Codex sessions into your team's Ledger:\n", step)
+	fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox session import"))
+}
+
 // fetchGitCredentials fetches git credentials from GET /api/v1/cli/repos (team context repos only).
 // Returns the credentials without saving them. Ledger URLs come from a separate API.
 func fetchGitCredentials(client *api.RepoClient) (*gitserver.GitCredentials, error) {
-	reposResp, err := client.GetRepos()
-	if err != nil {
-		return nil, fmt.Errorf("fetch repos: %w", err)
-	}
-	if reposResp == nil {
-		return nil, nil // no repos available yet (async provisioning)
-	}
-
-	// build credentials from response
-	creds := &gitserver.GitCredentials{
-		Token:     reposResp.Token,
-		ServerURL: reposResp.ServerURL,
-		Username:  reposResp.Username,
-		ExpiresAt: reposResp.ExpiresAt,
-		Repos:     make(map[string]gitserver.RepoEntry),
-	}
-
-	// copy repos from response
-	for _, repo := range reposResp.Repos {
-		creds.AddRepo(gitserver.RepoEntry{
-			Name:   repo.Name,
-			Type:   repo.Type,
-			URL:    repo.URL,
-			TeamID: repo.StableID(),
-		})
-	}
-
-	return creds, nil
+	return client.GetGitCredentials(context.Background())
 }
 
 // fetchAndSaveGitCredentials fetches git credentials from GET /api/v1/cli/repos
@@ -1130,6 +1210,18 @@ func createRepoMarker(sageoxDir, repoID, repoSalt string, gitIdentity *repotools
 // Example: "repo_01jfk3mab..." -> "01jfk3mab..."
 func extractUUIDSuffix(repoID string) string {
 	return strings.TrimPrefix(repoID, "repo_")
+}
+
+// formatTeamLabel renders the team this repo was just bound to. init already holds
+// the team's name whenever the user picked it from the selector, so lead with that
+// and keep the ID alongside — the ID is what --team accepts and what the dashboard
+// URL uses. Falls back to the bare ID when no name is available, which is the --team
+// path: passing a team ID skips the team fetch, so no name is ever retrieved.
+func formatTeamLabel(name, id string) string {
+	if strings.TrimSpace(name) == "" {
+		return id
+	}
+	return fmt.Sprintf("%s (%s)", name, id)
 }
 
 // stringSlicesEqual compares two string slices for equality
@@ -1688,6 +1780,73 @@ type initTracker struct {
 	indexEntries map[string]string
 }
 
+// trackScopedIgnoreFilesForInit records rollback ownership and staging for the
+// scoped ignore files EnsureScopedIgnoreFiles just validated.
+//
+// A byte-identical file is absent from results because the writer correctly
+// reports no write. It still has to be force-staged: a prior Doctor run may have
+// created the correct file without adding it to git, and a root `.claude/` ignore
+// rule otherwise makes that committed on-ramp invisible forever.
+func trackScopedIgnoreFilesForInit(tracker *initTracker, gitRoot string, results []ignoreFileResult, ensureErr error) {
+	created := make(map[string]bool, len(results))
+	var paths []string
+	for _, result := range results {
+		created[result.Rel] = result.Created
+		paths = append(paths, result.Rel)
+	}
+	if ensureErr == nil {
+		for _, f := range scopedIgnoreFiles() {
+			rel := filepath.Join(f.Dir, ".gitignore")
+			info, err := os.Lstat(filepath.Join(gitRoot, rel))
+			if err != nil || !info.Mode().IsRegular() || created[rel] {
+				continue
+			}
+			// A no-op Ensure result proves only that the managed block is current;
+			// it says nothing about bytes outside that block. Adopt the file only
+			// when it is untracked and consists solely of ox's generated block.
+			// Tracked no-op files need no staging, and untracked files with user
+			// rules must remain the user's work.
+			if !skillmanager.IsManagedOnlyScopedIgnore(gitRoot, rel) {
+				continue
+			}
+			tracked, trackErr := gitTracksPath(gitRoot, rel)
+			if trackErr == nil && !tracked {
+				paths = append(paths, rel)
+			}
+		}
+	}
+
+	seen := make(map[string]bool, len(paths))
+	for _, rel := range paths {
+		if seen[rel] {
+			continue
+		}
+		seen[rel] = true
+		abs := filepath.Join(gitRoot, rel)
+		// A file ox CREATED is removed on rollback; one that already existed is
+		// restored from the snapshot taken before EnsureScopedIgnoreFiles ran.
+		if created[rel] {
+			tracker.trackCreatedFile(abs)
+		}
+		// Force-staged on purpose: repositories commonly root-ignore .claude/.
+		tracker.trackForceStage(abs)
+	}
+}
+
+func gitTracksPath(gitRoot, rel string) (bool, error) {
+	cmd := exec.Command("git", "ls-files", "--error-unmatch", "--", filepath.ToSlash(rel))
+	cmd.Dir = gitRoot
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, err
+}
+
 func newInitTracker(gitRoot string) *initTracker {
 	return &initTracker{
 		gitRoot:       gitRoot,
@@ -2077,7 +2236,7 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 		}
 	}
 
-	// install hooks + rules only for agents the user selected
+	// Install integrations only for AI coworkers the user selected.
 	externalAdapters := adapters.DiscoverExternalAdapters()
 	var selectedSkillAdapters []*adapters.ExternalAdapter
 	for _, ea := range externalAdapters {
@@ -2087,8 +2246,8 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 		// OpenCode hooks are already installed above: InstallProjectOpenCodeHooks
 		// resolves this same adapter and calls InstallHooks on it, so running the
 		// generic path too would repeat the identical call and double-report the
-		// plugin in installedHooks. Rules/commands/skills below are not installed
-		// by the built-in helper, so they still run for opencode.
+		// plugin in installedHooks. Commands and inventory targets below are not
+		// installed by the built-in helper, so they still run for opencode.
 		if ea.HasCapability(adapterprotocol.CapHookInstaller) && ea.Name() != "opencode" {
 			result, err := ea.InstallHooks(gitRoot, "project")
 			if err != nil {
@@ -2098,20 +2257,6 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 			} else if result.Installed {
 				if !quiet {
 					cli.PrintSuccess(fmt.Sprintf("Installed %s hooks", ea.Name()))
-				}
-				installedHooks = append(installedHooks, result.FilesWritten...)
-			}
-		}
-
-		if ea.HasCapability(adapterprotocol.CapRulesInstaller) {
-			result, err := ea.InstallRules(gitRoot, version.Version)
-			if err != nil {
-				if !quiet {
-					cli.PrintWarning(fmt.Sprintf("Could not install %s rules: %v", ea.Name(), err))
-				}
-			} else if result.Installed {
-				if !quiet {
-					cli.PrintSuccess(fmt.Sprintf("Installed %s rules", ea.Name()))
 				}
 				installedHooks = append(installedHooks, result.FilesWritten...)
 			}
@@ -2138,32 +2283,52 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 			}
 		}
 
-		if ea.HasCapability(adapterprotocol.CapSkillsInstaller) {
-			if len(ea.Info().SkillTargets) > 0 {
-				selectedSkillAdapters = append(selectedSkillAdapters, ea)
-			} else {
-				// One-release compatibility for third-party adapters that have not
-				// adopted target descriptors yet.
-				result, err := ea.InstallSkills(gitRoot, version.Version)
-				if err != nil {
-					if !quiet {
-						cli.PrintWarning(fmt.Sprintf("Could not install legacy %s skills: %v", ea.Name(), err))
-					}
-				} else {
-					installedHooks = append(installedHooks, result.FilesWritten...)
+		info := ea.Info()
+		if (info == nil || len(info.RuleTargets) == 0) && ea.HasCapability(adapterprotocol.CapRulesInstaller) {
+			// One-release compatibility for third-party protocol-v1 adapters.
+			// Built-in adapters declare rule targets and are reconciled below.
+			// Scheduled removal in ox 0.18.0 — see the deprecation note on
+			// adapterprotocol.CapRulesInstaller.
+			result, err := ea.InstallRules(gitRoot, version.Version)
+			if err != nil {
+				if !quiet {
+					cli.PrintWarning(fmt.Sprintf("Could not install legacy %s rules: %v", ea.Name(), err))
 				}
+			} else {
+				installedHooks = append(installedHooks, result.FilesWritten...)
+			}
+		}
+
+		if info != nil && (len(info.SkillTargets) > 0 || len(info.RuleTargets) > 0) {
+			selectedSkillAdapters = append(selectedSkillAdapters, ea)
+		}
+		if (info == nil || len(info.SkillTargets) == 0) && ea.HasCapability(adapterprotocol.CapSkillsInstaller) {
+			// Compatibility for third-party adapters that have not adopted
+			// target descriptors yet. Deliberately undated, unlike the rules
+			// branch above: every bundled adapter that declares
+			// CapSkillsInstaller also declares skill_targets, so this branch is
+			// third-party-only — and ox cannot observe how many such adapters
+			// exist. See the skill_targets section of
+			// docs/guides/adapter-authoring.md.
+			result, err := ea.InstallSkills(gitRoot, version.Version)
+			if err != nil {
+				if !quiet {
+					cli.PrintWarning(fmt.Sprintf("Could not install legacy %s skills: %v", ea.Name(), err))
+				}
+			} else {
+				installedHooks = append(installedHooks, result.FilesWritten...)
 			}
 		}
 	}
 	if targets, err := skillTargetsForAdapters(gitRoot, selectedSkillAdapters); err != nil {
 		if !quiet {
-			cli.PrintWarning(fmt.Sprintf("Could not resolve Agent Skills targets: %v", err))
+			cli.PrintWarning(fmt.Sprintf("Could not resolve AI coworker inventory targets: %v", err))
 		}
 	} else if len(targets) > 0 {
 		plan, err := reconcileSelectedSkills(gitRoot, targets)
 		if err != nil {
 			if !quiet {
-				cli.PrintWarning(fmt.Sprintf("Could not reconcile Agent Skills: %v", err))
+				cli.PrintWarning(fmt.Sprintf("Could not reconcile AI coworker assets: %v", err))
 			}
 		} else {
 			written := plan.WrittenPaths()
@@ -2174,11 +2339,11 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 			if !quiet {
 				switch {
 				case len(plan.Conflicts) > 0:
-					cli.PrintWarning(fmt.Sprintf("Reconciled Agent Skills with %d preserved conflict(s)", len(plan.Conflicts)))
+					cli.PrintWarning(fmt.Sprintf("Reconciled AI coworker assets with %d preserved conflict(s)", len(plan.Conflicts)))
 				case len(written) > 0:
-					cli.PrintSuccess(fmt.Sprintf("Installed %d Agent Skills file(s) across %d native target(s)", len(written), len(targets)))
+					cli.PrintSuccess(fmt.Sprintf("Installed %d AI coworker asset file(s) across %d native target(s)", len(written), len(targets)))
 				default:
-					cli.PrintPreserved("Agent Skills already up to date")
+					cli.PrintPreserved("AI coworker assets already up to date")
 				}
 			}
 		}
@@ -2338,10 +2503,29 @@ type initEndpointInfo struct {
 	IsValid   bool
 }
 
+// soleLoggedInEndpoint returns the one endpoint ox init can default to without
+// asking: the only stored login, whatever the age of its access token. An
+// expired access token is the normal state of a login not used recently (the
+// auth gate refreshes it), so expiry must not rank logins against each other.
+// storedSlugs marks endpoints that came from stored logins, so the injected
+// production row is not mistaken for one.
+func soleLoggedInEndpoint(endpoints []initEndpointInfo, storedSlugs map[string]bool) (initEndpointInfo, bool) {
+	var stored []initEndpointInfo
+	for _, ep := range endpoints {
+		if storedSlugs[ep.Slug] {
+			stored = append(stored, ep)
+		}
+	}
+	if len(stored) == 1 {
+		return stored[0], true
+	}
+	return initEndpointInfo{}, false
+}
+
 // selectInitEndpoint shows endpoint selection UI for ox init.
-// Returns (selectedEndpoint, needsLogin) where needsLogin is true if user must login first.
-// Returns ("", false) if only one valid endpoint or user cancels.
-func selectInitEndpoint() (string, bool) {
+// needsLogin is true if the user must log in first. Cancellation returns an
+// empty endpoint; --no-input returns an error when a choice is needed.
+func selectInitEndpoint() (string, bool, error) {
 	// get all endpoints with stored tokens (including expired)
 	storedEndpoints, err := auth.ListEndpoints()
 	if err != nil {
@@ -2368,6 +2552,12 @@ func selectInitEndpoint() (string, bool) {
 		seenSlugs[info.Slug] = true
 	}
 
+	// remember which endpoints are real logins before the production row is injected
+	storedSlugs := make(map[string]bool, len(seenSlugs))
+	for slug := range seenSlugs {
+		storedSlugs[slug] = true
+	}
+
 	// add production endpoint if not already present
 	prodSlug := endpoint.NormalizeSlug(endpoint.Default)
 	if !seenSlugs[prodSlug] {
@@ -2379,13 +2569,23 @@ func selectInitEndpoint() (string, bool) {
 
 	// if only one endpoint and it's valid, use it without prompting
 	if len(endpoints) == 1 && endpoints[0].IsValid {
-		return endpoints[0].URL, false
+		return endpoints[0].URL, false, nil
 	}
 
 	// if only one endpoint and it's not valid, still need to show it so user knows to login
 	// but if there are no endpoints at all, return empty (will be caught by auth gate later)
 	if len(endpoints) == 0 {
-		return "", false
+		return "", false, nil
+	}
+	if cli.NoInput() {
+		// logged in to exactly one endpoint: there is no choice to make. The
+		// injected production row is not a login, so it does not count. Not
+		// needsLogin even when the access token expired: the auth gate that
+		// follows refreshes it, or reports the login problem itself.
+		if only, ok := soleLoggedInEndpoint(endpoints, storedSlugs); ok {
+			return only.URL, false, nil
+		}
+		return "", false, fmt.Errorf("--no-input requires --endpoint <endpoint> to choose where to initialize")
 	}
 
 	// show endpoint selection
@@ -2410,30 +2610,62 @@ func selectInitEndpoint() (string, bool) {
 
 	selected, err := cli.SelectOne("Endpoint:", options, 0)
 	if err != nil {
-		return "", false // canceled
+		return "", false, nil // canceled
 	}
 	if selected < 0 || selected >= len(endpoints) {
-		return "", false
+		return "", false, nil
 	}
 
 	selectedEp := endpoints[selected]
 
 	// if selected endpoint is not valid, tell user to login first
 	if !selectedEp.IsValid {
-		return selectedEp.URL, true
+		return selectedEp.URL, true, nil
 	}
 
-	return selectedEp.URL, false
+	return selectedEp.URL, false, nil
+}
+
+// teamSortKey returns the case-insensitive label a team sorts by: its
+// display name, falling back to its ID when unnamed. Used to make the team
+// picker's order deterministic — TeamMembershipsFromRepos falls back to
+// ranging over a Go map when the server sends no explicit teams array, which
+// would otherwise reorder the list (and its silently-accepted default row)
+// between runs.
+func teamSortKey(t api.TeamMembership) string {
+	label := t.Name
+	if label == "" {
+		label = t.ID
+	}
+	return strings.ToLower(label)
 }
 
 // selectTeam prompts the user to select a team for this repo.
 // Always shows an interactive selector, even for single-team users.
 // Includes a "Create new team" option that opens the dashboard.
-// Returns the selected team ID, team name (may be empty), or error if canceled.
-func selectTeam(teams []api.TeamMembership) (string, string, error) {
+// currentTeamID is the team this repo is already bound to (empty for a
+// fresh init) — when set, that row is pre-selected and marked "(current)"
+// so pressing Enter re-confirms the existing binding instead of silently
+// picking whatever sorts first.
+// Returns the selected team ID, team name (may be empty), or error if
+// canceled or if no interactive input was available to choose from.
+func selectTeam(teams []api.TeamMembership, currentTeamID string) (string, string, error) {
 	if len(teams) == 0 {
 		return "", "", fmt.Errorf("no teams available")
 	}
+
+	// Sort deterministically so the row Enter silently accepts never depends
+	// on map iteration order.
+	sorted := make([]api.TeamMembership, len(teams))
+	copy(sorted, teams)
+	sort.Slice(sorted, func(i, j int) bool {
+		ki, kj := teamSortKey(sorted[i]), teamSortKey(sorted[j])
+		if ki != kj {
+			return ki < kj
+		}
+		return sorted[i].ID < sorted[j].ID
+	})
+	teams = sorted
 
 	fmt.Println()
 	fmt.Println(ui.RenderCategory("Select Team"))
@@ -2444,23 +2676,39 @@ func selectTeam(teams []api.TeamMembership) (string, string, error) {
 	}
 	fmt.Println()
 
-	// build options with role indicators + "Create new team"
+	// build options with role/personal/current indicators + "Create new team"
+	defaultIdx := 0
 	options := make([]string, len(teams)+1)
 	for i, team := range teams {
-		roleIndicator := ""
+		label := team.Name
+		if label == "" {
+			label = team.ID
+		}
 		if team.Role != "" && team.Role != "member" {
-			roleIndicator = fmt.Sprintf(" (%s)", team.Role)
+			label += fmt.Sprintf("  (%s)", team.Role)
 		}
-		if team.Name != "" {
-			options[i] = fmt.Sprintf("%s%s", team.Name, roleIndicator)
-		} else {
-			options[i] = fmt.Sprintf("%s%s", team.ID, roleIndicator)
+		if team.Personal {
+			// Same "personal team" language as renderPersonalTeamRefusal
+			// (cmd/ox/invite.go) — a private, structurally single-member
+			// team that looks identical to a shared team without this.
+			label += "  (personal team)"
 		}
+		if currentTeamID != "" && team.ID == currentTeamID {
+			label += "  (current)"
+			defaultIdx = i
+		}
+		options[i] = label
 	}
 	options[len(teams)] = "+ Create new team"
 
-	selected, err := cli.SelectOne("Team:", options, 0)
+	// SelectOneRequired (not SelectOne): silently accepting defaultIdx when
+	// no one is there to answer would rebind — or bind — this repo to
+	// whichever team sorts first, with zero indication anything happened.
+	selected, err := cli.SelectOneRequired("Team:", options, defaultIdx)
 	if err != nil {
+		if errors.Is(err, cli.ErrNoInteractiveInput) {
+			return "", "", fmt.Errorf("cannot choose a team without interactive input — pass --team <id> (run 'ox team list' to see available teams)")
+		}
 		return "", "", err
 	}
 	if selected < 0 || selected >= len(options) {
@@ -2487,6 +2735,9 @@ func selectTeam(teams []api.TeamMembership) (string, string, error) {
 // promptNoTeams handles the case where the API returns zero teams.
 // Offers to continue (server will auto-create a team) or open the dashboard.
 func promptNoTeams() (bool, error) {
+	if cli.NoInput() {
+		return false, fmt.Errorf("%w: no teams available; create a team first, or omit --no-input to choose how to continue", cli.ErrNoInteractiveInput)
+	}
 	ep := endpoint.Get()
 	fmt.Println()
 	fmt.Println(ui.RenderCategory("Team Setup"))
@@ -2515,4 +2766,58 @@ func promptNoTeams() (bool, error) {
 	}
 
 	return true, nil
+}
+
+// confirmEndpointRebind asks before re-registering a repo against a different
+// endpoint than the one already stored. Returns (true, nil) when there is no
+// mismatch to resolve.
+//
+// The prompt defaults to YES, and registration has no inverse in the CLI — so
+// this uses ConfirmYesNoRequired rather than ConfirmYesNo: taking the default
+// with nobody there would rebind the repo to a different endpoint with no one
+// having agreed to it.
+func confirmEndpointRebind(storedEndpoint, currentEndpoint string) (bool, error) {
+	if storedEndpoint == "" || storedEndpoint == currentEndpoint {
+		return true, nil
+	}
+
+	fmt.Println()
+	cli.PrintWarning("API endpoint mismatch detected")
+	fmt.Printf("  Stored:  %s\n", storedEndpoint)
+	fmt.Printf("  Current: %s\n", currentEndpoint)
+	fmt.Println()
+	fmt.Println("Re-registering will associate this repo with the new endpoint.")
+
+	proceed, err := cli.ConfirmYesNoRequired("Continue?", true, false)
+	if err != nil {
+		abortEndpointRebind(storedEndpoint)
+		return false, fmt.Errorf("re-registering this repo to %s %w", endpoint.NormalizeSlug(currentEndpoint), err)
+	}
+	if !proceed {
+		abortEndpointRebind(storedEndpoint)
+		return false, nil
+	}
+	return true, nil
+}
+
+func abortEndpointRebind(storedEndpoint string) {
+	fmt.Println()
+	fmt.Printf("Aborted. Set SAGEOX_ENDPOINT=%s to use the stored endpoint.\n", storedEndpoint)
+}
+
+// confirmContinueWithoutTeam asks whether to proceed when the team list could
+// not be fetched. Returns nil to continue.
+//
+// Required, not ConfirmYesNo: an unanswered prompt here used to surface as the
+// bare "team selection canceled", which tells an unattended caller nothing
+// about what to do instead.
+func confirmContinueWithoutTeam(currentEP string) error {
+	proceed, err := cli.ConfirmYesNoRequired("Continue without team selection? (a new team may be created)", false, false)
+	if err != nil {
+		return fmt.Errorf("cannot reach %s to list teams, and %w; pass --team explicitly", endpoint.NormalizeSlug(currentEP), err)
+	}
+	if !proceed {
+		return fmt.Errorf("team selection canceled")
+	}
+	return nil
 }

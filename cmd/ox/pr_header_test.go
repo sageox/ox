@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
@@ -41,34 +40,6 @@ func TestArtifactURL_noEndpointDropsBareID(t *testing.T) {
 	// rather than emit a relative link.
 	if got := artifactURL("", "ses_x", "/c/", "ses_"); got != "" {
 		t.Errorf("want empty for bare id + no endpoint, got %q", got)
-	}
-}
-
-// styleCmd builds a command carrying just the --style flag so resolvePRStyle can
-// be tested without the whole root command tree.
-func styleCmd(value string) *cobra.Command {
-	c := &cobra.Command{Use: "header"}
-	c.Flags().String("style", "", "")
-	if value != "" {
-		_ = c.Flags().Set("style", value)
-	}
-	return c
-}
-
-func TestResolvePRStyle(t *testing.T) {
-	// A valid flag value overrides config.
-	for _, v := range []string{config.PRVisualsStyleText, config.PRVisualsStyleImage, config.PRVisualsStyleAuto} {
-		if got := resolvePRStyle(styleCmd(v), ""); got != v {
-			t.Errorf("flag %q => %q, want %q", v, got, v)
-		}
-	}
-	// An unset or invalid flag falls back to the config default (auto here, since
-	// no config is set in the test environment).
-	if got := resolvePRStyle(styleCmd(""), ""); got != config.DefaultPRVisualsStyle {
-		t.Errorf("unset flag => %q, want default %q", got, config.DefaultPRVisualsStyle)
-	}
-	if got := resolvePRStyle(styleCmd("chartreuse"), ""); got != config.DefaultPRVisualsStyle {
-		t.Errorf("invalid flag => %q, want default %q", got, config.DefaultPRVisualsStyle)
 	}
 }
 
@@ -119,10 +90,7 @@ func buildPRHeaderCmd() (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
 	f := c.Flags()
 	f.StringArray("session", nil, "")
 	f.StringArray("plan", nil, "")
-	f.Int("prior-art", 0, "")
-	f.Int("collisions", 0, "")
-	f.Bool("no-stat", false, "")
-	f.String("style", "", "")
+	f.StringArray("discussion", nil, "")
 	f.Bool("allow-unconfirmed", false, "")
 	f.Bool("json", false, "")
 	var out, errb bytes.Buffer
@@ -131,31 +99,34 @@ func buildPRHeaderCmd() (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
 	return c, &out, &errb
 }
 
-// TestPRHeaderCommand_JSONContract proves the --json shape an agent consumes: the
-// paste-ready markdown, the resolved plan link, the whisper signals, and the
-// text tier (the image uploader is stubbed, so every style resolves to text).
+// TestPRHeaderCommand_JSONContract proves the --json shape an agent consumes:
+// the paste-ready markdown, the resolved links, and the behavioral guidance. The
+// guidance ships in the payload — not only in a SKILL body — because skills are
+// Claude-only and Codex/Droid install no commands, so a rule that lives only in a
+// skill never reaches them.
 // Failure prevented: an agent pastes markup that does not link the work it
-// claims, or misreads the tier and expects a hosted image that never renders.
+// claims, or a non-Claude coworker never learns the paste-verbatim rule.
 func TestPRHeaderCommand_JSONContract(t *testing.T) {
 	prHeaderProject(t, true)
 
 	c, out, _ := buildPRHeaderCmd()
 	require.NoError(t, c.Flags().Set("json", "true"))
 	require.NoError(t, c.Flags().Set("plan", "pln_4d8e2f"))
-	require.NoError(t, c.Flags().Set("prior-art", "1"))
+	require.NoError(t, c.Flags().Set("discussion", "cnv_019ff2f5"))
 	require.NoError(t, runPRHeader(c, nil))
 
 	var resp prHeaderResponse
 	require.NoError(t, json.Unmarshal(out.Bytes(), &resp))
 
 	require.NotEmpty(t, resp.Markdown, "markdown must be present")
-	require.Contains(t, resp.Markdown, "<!-- sageox:pr-header v1 -->", "carries the idempotency marker")
+	require.Contains(t, resp.Markdown, "<!-- sageox:pr-header v2 -->", "carries the bumped idempotency marker")
 	require.Contains(t, resp.Markdown, "Acme&nbsp;Rockets", "names the team (non-breaking)")
 	require.Contains(t, resp.Markdown, "https://sageox.ai/plan/pln_4d8e2f", "links the plan")
+	require.Contains(t, resp.Markdown, "https://sageox.ai/c/cnv_019ff2f5", "links the discussion")
 	require.Equal(t, []string{"https://sageox.ai/plan/pln_4d8e2f"}, resp.Plans)
-	require.True(t, resp.Signals.Material, "a fired signal marks the whisper material")
-	require.Equal(t, 1, resp.Signals.PriorArt)
-	require.Equal(t, "text", resp.Tier, "no uploader is wired, so the tier is text")
+	require.Equal(t, []string{"https://sageox.ai/c/cnv_019ff2f5"}, resp.Discussions)
+	require.NotEmpty(t, resp.Guidance, "guidance must reach non-Claude coworkers via the payload")
+	require.Contains(t, resp.Guidance, "VERBATIM", "carries the paste-verbatim rule")
 }
 
 // TestPRHeaderCommand_OptOutNoOp proves the team/user opt-out: with
@@ -175,18 +146,37 @@ func TestPRHeaderCommand_OptOutNoOp(t *testing.T) {
 	require.Contains(t, errb.String(), "ox config set pr_visuals.header on", "tells how to re-enable")
 }
 
-// TestPRHeaderCommand_NoEnrichmentNoWhisper proves honest enrichment: with no
-// signals passed, the line renders the team but makes NO "Guided by SageOx"
-// claim. Failure prevented: the credit line brags about enrichment that never
-// fired.
-func TestPRHeaderCommand_NoEnrichmentNoWhisper(t *testing.T) {
+// TestPRHeaderCommand_TeamAloneEmitsNothing proves the gate: a configured team
+// with no session, plan, or discussion to link produces NOTHING. The team name is
+// not a credit — the wordmark's /t/ link is chrome, and a mark with nothing behind
+// it is a logo stamp on someone else's pull request.
+// Failure prevented: SageOx brands a PR it has nothing to show for. Red-first:
+// change prheader.Render's guard back to "team name is enough" and the empty-stdout
+// assertion fails with a rendered wordmark.
+func TestPRHeaderCommand_TeamAloneEmitsNothing(t *testing.T) {
+	prHeaderProject(t, true) // team configured, but nothing to link
+
+	c, out, errb := buildPRHeaderCmd()
+	require.NoError(t, runPRHeader(c, nil))
+
+	require.Empty(t, strings.TrimSpace(out.String()), "no artifact to link => no line on stdout")
+	require.Contains(t, errb.String(), "no session, plan, or discussion to link", "names what was missing")
+	require.Contains(t, errb.String(), "a team name alone is not a credit", "explains why")
+}
+
+// TestPRHeaderCommand_DiscussionAloneRenders proves the gate keys on ARTIFACTS,
+// not on the session specifically: a recorded discussion is enough on its own.
+// Failure prevented: the gate is written as a session check and a
+// discussion-credited PR silently loses its header.
+func TestPRHeaderCommand_DiscussionAloneRenders(t *testing.T) {
 	prHeaderProject(t, true)
 
 	c, out, _ := buildPRHeaderCmd()
+	require.NoError(t, c.Flags().Set("discussion", "cnv_019ff2f5"))
 	require.NoError(t, runPRHeader(c, nil))
 
-	require.Contains(t, out.String(), "Acme&nbsp;Rockets", "still renders the team")
-	require.NotContains(t, out.String(), "Guided by SageOx", "no whisper when nothing fired")
+	require.Contains(t, out.String(), "https://sageox.ai/c/cnv_019ff2f5", "links the discussion")
+	require.Contains(t, out.String(), ">Discussion</a>", "labels it for a reviewer")
 }
 
 // TestPRHeaderCommand_WithholdsUnconfirmedSession proves the "reviewer never gets
@@ -209,13 +199,22 @@ func TestPRHeaderCommand_WithholdsUnconfirmedSession(t *testing.T) {
 		LifecycleRegistrationState: "pending",
 	})
 
-	// Default: unconfirmed session is withheld and explained.
+	// Default: unconfirmed session is withheld and explained. With nothing else to
+	// link, the gate then suppresses the header entirely — no orphan wordmark.
 	c, out, errb := buildPRHeaderCmd()
 	require.NoError(t, runPRHeader(c, nil))
 	require.NotContains(t, out.String(), "/c/ses_", "an unconfirmed session must not be linked")
-	require.Contains(t, out.String(), "Acme&nbsp;Rockets", "the team still renders")
+	require.Empty(t, strings.TrimSpace(out.String()), "withheld session + nothing else => no header at all")
 	require.Contains(t, errb.String(), "not yet server-visible", "explains the link is withheld")
 	require.Contains(t, errb.String(), "--allow-unconfirmed", "tells the coworker how to link it anyway")
+
+	// A withheld session but a real plan: the header still renders, proving the
+	// gate keys on "any openable artifact", not on the session.
+	cp, outp, _ := buildPRHeaderCmd()
+	require.NoError(t, cp.Flags().Set("plan", "pln_4d8e2f"))
+	require.NoError(t, runPRHeader(cp, nil))
+	require.Contains(t, outp.String(), "https://sageox.ai/plan/pln_4d8e2f", "a plan alone carries the header")
+	require.NotContains(t, outp.String(), "/c/ses_", "the withheld session is still not linked")
 
 	// --allow-unconfirmed: the coworker opts into a possible 404 and the session
 	// IS linked.
@@ -252,9 +251,10 @@ func TestPRHeaderCommand_ExplicitRefsWarnUnlessAllowed(t *testing.T) {
 	require.NotContains(t, errb2.String(), "not verified against the server", "--allow-unconfirmed silences the note")
 }
 
-// TestPRHeaderCommand_LoneWordmarkEmitsNothing proves the degenerate state: with
-// no team, no session, no plan, and no enrichment, the command emits nothing on
-// stdout rather than a bare wordmark stamped onto a PR body.
+// TestPRHeaderCommand_LoneWordmarkEmitsNothing covers the fully-degenerate state
+// — no team AND nothing to link — as a companion to the team-configured gate test
+// above. Both must emit nothing; this one proves the no-team path does not take a
+// different branch.
 // Failure prevented: a payload-free credit line puts a lone SageOx logo at the
 // top of someone's PR.
 func TestPRHeaderCommand_LoneWordmarkEmitsNothing(t *testing.T) {

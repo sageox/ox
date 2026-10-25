@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/proc"
+	"github.com/sageox/ox/internal/sqliteerr"
 	_ "modernc.org/sqlite"
 )
 
@@ -92,10 +93,19 @@ func NewStore(projectRoot string) (*Store, error) {
 	}
 	dbPath := filepath.Join(storePath, fileName)
 
+	deadline := time.Now().Add(openRetryBudget)
 	db, err := openDB(dbPath)
+	for err != nil && !mustRebuild(err) && time.Now().Before(deadline) {
+		time.Sleep(openRetryBackoff)
+		db, err = openDB(dbPath)
+	}
 	if err != nil {
-		// Corrupt or unreadable DB: the queue is ephemeral, so rebuild it
-		// rather than wedging every command behind a CANTOPEN error.
+		// Only a damaged DB, or one from another schema generation, is
+		// rebuilt: the queue is ephemeral. Any other failure leaves the files
+		// alone, since another connection may be using them (#1339).
+		if !mustRebuild(err) {
+			return nil, fmt.Errorf("failed to open task db: %w", err)
+		}
 		removeDBFiles(dbPath)
 		db, err = openDB(dbPath)
 		if err != nil {
@@ -109,6 +119,27 @@ func NewStore(projectRoot string) (*Store, error) {
 
 	host, _ := os.Hostname()
 	return &Store{db: db, host: host}, nil
+}
+
+// openRetryBudget bounds NewStore's retry of a failed open. Openers racing to
+// create the queue contend for the lock that converts it to WAL, which
+// busy_timeout does not cover: that SQLITE_BUSY returns at once, and retries
+// 20ms apart outlast the race. Other unsettled failures (I/O, an exhausted fd
+// table) may clear the same way. A failure that already waited out
+// busy_timeout has spent the budget, so it is returned.
+const (
+	openRetryBudget  = time.Second
+	openRetryBackoff = 20 * time.Millisecond
+)
+
+// errRebuild marks a DB that opened but must be rebuilt: it fails
+// integrity_check, or it was stamped by another schema generation.
+var errRebuild = errors.New("task db must be rebuilt")
+
+// mustRebuild reports whether a failed open is settled as damage. Every other
+// failure is retried, and never deletes the files.
+func mustRebuild(err error) bool {
+	return errors.Is(err, errRebuild) || sqliteerr.IsDamage(err)
 }
 
 func openDB(dbPath string) (*sql.DB, error) {
@@ -138,7 +169,7 @@ func openDB(dbPath string) (*sql.DB, error) {
 		if err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("integrity_check: %s", integ)
+		return nil, fmt.Errorf("%w: integrity_check: %s", errRebuild, integ)
 	}
 	// Schema-drift guard: a structurally-valid DB from an older schema passes
 	// integrity_check but would fail queries referencing new columns. user_version
@@ -151,7 +182,7 @@ func openDB(dbPath string) (*sql.DB, error) {
 	}
 	if uv != 0 && uv != SchemaVersion {
 		db.Close()
-		return nil, fmt.Errorf("schema version mismatch: db=%d want=%d", uv, SchemaVersion)
+		return nil, fmt.Errorf("%w: schema version mismatch: db=%d want=%d", errRebuild, uv, SchemaVersion)
 	}
 	return db, nil
 }

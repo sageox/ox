@@ -1,0 +1,17 @@
+{
+  "created_at": "2026-10-01T03:00:00Z",
+  "id": "reopen-0001",
+  "items": [
+    {
+      "anchor": "h1",
+      "label": "The first risk",
+      "note": "Still unnamed.",
+      "reviewer": "Ana",
+      "section": "Risks",
+      "status": "request-change"
+    }
+  ],
+  "request_sha256": "d46939655568c49ef56d066e34eb9910f3a75ec3cf0d79b16ede5046fe7c443b",
+  "reviewer": "Ana",
+  "slug": "rc-v2-records"
+}

@@ -1,9 +1,12 @@
 package main
 
 import (
+	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -152,4 +155,167 @@ func TestHandleEnd_NoAgentID_NoError(t *testing.T) {
 func TestPhaseEnd_HasActiveBehavior(t *testing.T) {
 	assert.True(t, activePhaseBehavior[phaseEnd],
 		"phaseEnd must be marked active so dispatchPhase routes it to handleEnd")
+}
+
+// A quarantined recording holds a captured prefix of a session known to span
+// repositories. The agent exiting (SessionEnd) or the context being wiped
+// (/clear) is the normal end of every session, so it must not finalize the
+// prefix or remove the marker that carries the quarantine.
+func TestQuarantinedRecordingSurvivesSessionEndAndClear(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		end  func(t *testing.T, projectRoot, agentID string)
+	}{
+		{"session end", func(t *testing.T, projectRoot, agentID string) {
+			ctx := &HookContext{Phase: phaseEnd, AgentType: "claude-code", ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}
+			require.NoError(t, handleEnd(ctx))
+		}},
+		{"clear", func(t *testing.T, projectRoot, agentID string) {
+			ctx := &HookContext{Phase: phaseStart, AgentType: "claude-code", ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}
+			stopSessionForClear(ctx, agentID)
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			projectRoot, repoID := setupTestProject(t)
+			agentID := "OxQuarantineEnd"
+			createActiveRecording(t, projectRoot, repoID, agentID)
+			require.NoError(t, session.MarkSourceRejected(projectRoot, agentID))
+
+			tt.end(t, projectRoot, agentID)
+
+			kept := heldRecording(t, projectRoot, agentID)
+			assert.True(t, kept.SourceRejected, "the quarantine marker must not be cleared")
+			assert.Nil(t, kept.StoppedAt, "a quarantined recording must not be marked stopped, which hands it to finalization")
+		})
+	}
+}
+
+// Failure prevented: the /clear and SessionEnd hooks send the daemon a
+// finalize request that bypasses its scan, so a manual-mode session is
+// summarized and uploaded the moment the AI coworker exits (GH #1093).
+func TestHookStop_HoldsManualSessionAndSendsNoFinalize(t *testing.T) {
+	phases := []struct {
+		name string
+		stop func(projectRoot, agentID string)
+	}{
+		{"session end", func(projectRoot, agentID string) {
+			_ = handleEnd(&HookContext{Phase: phaseEnd, AgentType: "claude-code", ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}})
+		}},
+		{"clear", func(projectRoot, agentID string) {
+			stopSessionForClear(&HookContext{Phase: phaseStart, AgentType: "claude-code", ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}, agentID)
+		}},
+	}
+	modes := []struct {
+		name, env, recorded string
+		held                bool
+	}{
+		{"manual now", "manual", "", true},
+		{"manual recorded at start", "", "manual", true},
+		{"auto (control)", "auto", "auto", false},
+	}
+	for _, ph := range phases {
+		for _, m := range modes {
+			t.Run(ph.name+"/"+m.name, func(t *testing.T) {
+				projectRoot, repoID := setupTestProject(t)
+				t.Setenv("OX_USER_CONFIG", filepath.Join(t.TempDir(), "absent.yaml"))
+				t.Setenv("OX_SESSION_PUBLISHING", m.env)
+				agentID := "OxHookHold"
+				createActiveRecording(t, projectRoot, repoID, agentID)
+				require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
+					s.PublishingMode = m.recorded
+				}))
+				state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+				require.NoError(t, err)
+
+				sent := 0
+				orig := sendHookFinalizeIPC
+				sendHookFinalizeIPC = func(daemon.SessionFinalizeIPCPayload) error { sent++; return nil }
+				t.Cleanup(func() { sendHookFinalizeIPC = orig })
+
+				ph.stop(projectRoot, agentID)
+
+				assert.Equal(t, m.held, session.IsHeld(state.SessionPath), "hold marker")
+				if m.held {
+					assert.Zero(t, sent, "a held session must not be handed to the daemon")
+				} else {
+					assert.Equal(t, 1, sent, "an auto-mode session is still handed to the daemon")
+				}
+			})
+		}
+	}
+}
+
+// Failure prevented: a hold that cannot be recorded at /clear or SessionEnd
+// still clears the recording, so the folder looks like an orphan the daemon
+// summarizes and publishes (GH #1093).
+func TestHookStop_HoldFailureKeepsTheRecording(t *testing.T) {
+	for _, phase := range []string{"session end", "clear"} {
+		t.Run(phase, func(t *testing.T) {
+			projectRoot, repoID := setupTestProject(t)
+			t.Setenv("OX_USER_CONFIG", filepath.Join(t.TempDir(), "absent.yaml"))
+			t.Setenv("OX_SESSION_PUBLISHING", "manual")
+			agentID := "OxHoldFail"
+			createActiveRecording(t, projectRoot, repoID, agentID)
+			state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+			require.NoError(t, err)
+			require.False(t, state.RecordedManualPublishing(), "precondition: recording started in auto mode")
+
+			sent := 0
+			origIPC := sendHookFinalizeIPC
+			sendHookFinalizeIPC = func(daemon.SessionFinalizeIPCPayload) error { sent++; return nil }
+			t.Cleanup(func() { sendHookFinalizeIPC = origIPC })
+			origHold := writeSessionHold
+			writeSessionHold = func(string, session.HoldReason, string) error { return errors.New("disk full") }
+			t.Cleanup(func() { writeSessionHold = origHold })
+
+			ctx := &HookContext{AgentType: "claude-code", ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}
+			if phase == "clear" {
+				ctx.Phase = phaseStart
+				stopSessionForClear(ctx, agentID)
+				assert.Nil(t, ctx.ClearNotice, "no notice may claim the session was finalized")
+			} else {
+				ctx.Phase = phaseEnd
+				require.ErrorContains(t, handleEnd(ctx), "disk full", "SessionEnd must report a hold it could not record")
+			}
+
+			kept, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+			require.NoError(t, err)
+			require.NotNil(t, kept, "the recording must survive for recovery")
+			assert.NotNil(t, kept.StoppedAt, "capture has ended")
+			assert.False(t, session.IsHeld(state.SessionPath))
+			assert.Zero(t, sent, "a session meant to be held is never handed to the daemon")
+			// Daemon recovery reads only the recorded mode: a kept recording that
+			// still said auto would be reclaimed and published.
+			assert.True(t, kept.RecordedManualPublishing(), "the kept recording must carry the manual choice")
+		})
+	}
+}
+
+// Failure prevented: 'session stop' holds a recording started in auto mode
+// (the coworker switched to manual mid-session), the hold write fails, and the
+// kept recording still says auto. Once its AI coworker exits, daemon recovery
+// reads that and publishes the session.
+func TestHoldStoppedSession_FailedHoldStillRecordsManual(t *testing.T) {
+	projectRoot, repoID := setupTestProject(t)
+	agentID := "OxStpAu"
+	createActiveRecording(t, projectRoot, repoID, agentID)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.False(t, state.RecordedManualPublishing(), "precondition: recording started in auto mode")
+
+	origHold := writeSessionHold
+	writeSessionHold = func(string, session.HoldReason, string) error { return errors.New("disk full") }
+	t.Cleanup(func() { writeSessionHold = origHold })
+
+	require.ErrorContains(t, holdStoppedSession(&agentSessionResult{}, state, state.SessionPath, "session_stop"), "disk full")
+
+	kept, err := session.ReadRecordingStateFile(state.SessionPath)
+	require.NoError(t, err)
+	require.NotNil(t, kept, "the recording is kept for recovery")
+	assert.True(t, kept.RecordedManualPublishing(), "the kept recording must carry the manual choice")
+
+	// what daemon recovery does with it: hold, not publish
+	writeSessionHold = origHold
+	require.NoError(t, session.HoldRecordedManual(kept, "daemon_recovery"))
+	assert.True(t, session.IsHeld(state.SessionPath))
 }

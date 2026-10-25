@@ -172,6 +172,64 @@ echo '{"protocol_version":1,"name":"test-replace","display_name":"External","ver
 	}
 }
 
+// TestAdapterDirs_ResolvesSymlinkedExecutable verifies the fix for the
+// symlink footgun: a user who symlinks `ox` alone (e.g.
+// /usr/local/bin/ox -> ~/go/bin/ox) must still have discovery find the
+// adapter siblings that live next to the REAL binary, not just the
+// directory containing the symlink. os.Executable() reports the path as
+// invoked, without resolving the symlink -- see
+// $(go env GOROOT)/src/os/executable_darwin.go.
+//
+// Failure prevented: `ox init` silently installs zero adapter integrations
+// (no Codex, Gemini, Amp, ...) whenever ox is reached through a symlink,
+// with no error surfaced anywhere.
+func TestAdapterDirs_ResolvesSymlinkedExecutable(t *testing.T) {
+	t.Setenv("OX_ADAPTER_PATH", "") // isolate from the real environment
+
+	realDir := t.TempDir()
+	realBinary := filepath.Join(realDir, "ox")
+	if err := os.WriteFile(realBinary, []byte("#!/bin/sh\necho fake-ox"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	linkDir := t.TempDir()
+	symlinkedBinary := filepath.Join(linkDir, "ox")
+	if err := os.Symlink(realBinary, symlinkedBinary); err != nil {
+		t.Fatal(err)
+	}
+
+	oldExecutableFunc := executableFunc
+	executableFunc = func() (string, error) { return symlinkedBinary, nil }
+	defer func() { executableFunc = oldExecutableFunc }()
+
+	// On macOS, t.TempDir() itself resolves through a symlink
+	// (/var -> /private/var), so compare against what EvalSymlinks
+	// actually reports for realDir rather than the raw path.
+	resolvedReal, err := filepath.EvalSymlinks(realBinary)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", realBinary, err)
+	}
+	wantResolvedDir := filepath.Dir(resolvedReal)
+
+	dirs := AdapterDirs()
+
+	foundUnresolved, foundResolved := false, false
+	for _, d := range dirs {
+		if d == linkDir {
+			foundUnresolved = true
+		}
+		if d == wantResolvedDir {
+			foundResolved = true
+		}
+	}
+	if !foundUnresolved {
+		t.Errorf("AdapterDirs() = %v; want it to still include the unresolved symlink dir %q", dirs, linkDir)
+	}
+	if !foundResolved {
+		t.Errorf("AdapterDirs() = %v; want it to include the resolved real dir %q (where adapter siblings actually live)", dirs, wantResolvedDir)
+	}
+}
+
 func TestAdapterDirs_IncludesEnvPath(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("OX_ADAPTER_PATH", dir)

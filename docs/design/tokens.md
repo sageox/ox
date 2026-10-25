@@ -6,17 +6,17 @@ Semantic color tokens are the unit of design composition in ox. Components refer
 
 | Token | Light | Dark | When to use |
 |-------|-------|------|-------------|
-| `ColorPrimary` | `#4F6A48` | `#7A8F78` | App name, headers, spinners — the calm sage anchor |
-| `ColorSecondary` | `#B87D3A` | `#E0A56A` | Commands, interactive elements — copper highlight |
-| `ColorAccent` | `#3D5437` | `#8FA888` | File paths, callouts, "look here" |
+| `ColorPrimary` | `#3D643B` | `#7AAA77` | App name, headers, spinners — the calm sage anchor |
+| `ColorSecondary` | `#324F31` | `#ADCFA3` | Commands and selected elements — strongest sage emphasis, not a second brand hue |
+| `ColorAccent` | `#4E7D4C` | `#99C693` | File paths, callouts, "look here" |
 
 ## Semantic
 
 | Token | Light | Dark | When to use |
 |-------|-------|------|-------------|
-| `ColorSuccess` | `#4F6A48` | `#7A8F78` | Passed checks, confirmations |
-| `ColorWarning` | `#B87D3A` | `#E0A56A` | Cautions, dirty builds, soft warnings |
-| `ColorError` | `#A03030` | `#E07070` | Failures, blocked items, hard stops |
+| `ColorSuccess` | `#3D643B` | `#7AAA77` | Passed checks, confirmations |
+| `ColorWarning` | `#A5842F` | `#D9B654` | Cautions, dirty builds, soft warnings |
+| `ColorError` | `#9F4838` | `#D77E6C` | Failures, blocked items, hard stops |
 | `ColorInfo` | `#5580A0` | `#7FA7C8` | Flags, links, informational notes |
 | `ColorDim` | `#6B7580` | `#8F99A3` | Descriptions, secondary text, "still here but quiet" |
 

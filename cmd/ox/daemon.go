@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -17,7 +18,9 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
@@ -35,12 +38,17 @@ It handles:
 }
 
 // How long to wait for a stopped daemon to actually release the workspace.
-// Stop() is an IPC request, not a kill: the incumbent still has to finish its
-// current sync tick and unlink its socket. Bounded so a wedged incumbent
-// surfaces as an error instead of hanging a container start forever.
+// Stop() is an IPC request, not a kill: the incumbent first drains in-flight
+// work (CodeDB indexing, ledger pushes) before it unlinks its socket and exits,
+// which takes up to daemon.MaxGracefulShutdown. The budget is derived from that
+// so the CLI never gives up on a daemon that is correctly draining; the extra
+// margin covers process teardown. Bounded so a wedged incumbent is force-stopped
+// instead of hanging a container start forever.
 const (
-	daemonStopWaitAttempts = 20
-	daemonStopWaitInterval = 100 * time.Millisecond
+	daemonStopWaitBudget     = daemon.MaxGracefulShutdown + 5*time.Second
+	daemonStopWaitInterval   = 100 * time.Millisecond
+	daemonStopProgressAfter  = 2 * time.Second // quiet for a normal stop, one line when it drags
+	daemonStopRequestTimeout = 2 * time.Second // busy daemons answer slowly; 50ms would misread that as dead
 )
 
 // daemonStartAction is what `ox daemon start` should do, given whether a daemon
@@ -80,22 +88,88 @@ func decideDaemonStart(alreadyRunning, foreground bool) daemonStartAction {
 	}
 }
 
-// stopRunningDaemonAndWait stops the daemon holding this workspace and blocks
-// until it has actually released it. Shared by `restart` and by `start
-// --foreground`'s takeover — both would otherwise race a half-dead incumbent
-// for the socket.
-func stopRunningDaemonAndWait() error {
-	client := daemon.NewClientForCurrentRepo()
-	if err := client.Stop(); err != nil {
-		return fmt.Errorf("failed to stop daemon: %w", err)
+// daemonStopOps are the side effects of stopping a daemon, injected so the
+// request -> wait -> escalate decision is unit-testable without a live daemon,
+// a socket, or a process to signal.
+type daemonStopOps struct {
+	requestStop func() error // IPC stop: asks the daemon to drain and exit
+	isRunning   func() bool  // whether the daemon still holds the workspace
+	forceStop   func() error // SIGTERM/SIGKILL plus socket/PID/registry cleanup
+	progress    func(msg string)
+	warn        func(msg string)
+}
+
+// daemonStopOutcome distinguishes a daemon that exited on request from one that
+// had to be killed, so callers can describe what actually happened.
+type daemonStopOutcome int
+
+const (
+	daemonStopGraceful daemonStopOutcome = iota // exited on its own after the IPC stop
+	daemonStopForced                            // had to be force-stopped
+)
+
+// stopDaemonAndWait asks the daemon to stop, waits up to budget for it to
+// release the workspace, and force-stops it when it cannot or will not.
+//
+// A daemon is force-stopped when the IPC request itself fails or when the wait
+// runs out. The failed-request case is not an error but a symptom: a daemon
+// already draining from an earlier stop has closed its listener, so a second
+// `ox daemon restart` dials a socket file with no listener and gets
+// ECONNREFUSED even though the process is very much alive.
+func stopDaemonAndWait(ops daemonStopOps, budget, interval, progressAfter time.Duration) (daemonStopOutcome, error) {
+	if err := ops.requestStop(); err != nil {
+		ops.warn(fmt.Sprintf("Daemon did not accept the stop request (%v); force-stopping it", err))
+		return forceStopDaemon(ops)
 	}
-	for i := 0; i < daemonStopWaitAttempts; i++ {
-		if !daemon.IsRunning() {
-			return nil
+
+	start := time.Now()
+	progressShown := false
+	for time.Since(start) < budget {
+		if !ops.isRunning() {
+			return daemonStopGraceful, nil
 		}
-		time.Sleep(daemonStopWaitInterval)
+		if !progressShown && time.Since(start) >= progressAfter {
+			ops.progress("Waiting for daemon to finish in-flight work…")
+			progressShown = true
+		}
+		time.Sleep(interval)
 	}
-	return fmt.Errorf("daemon did not stop within %s", daemonStopWaitAttempts*daemonStopWaitInterval)
+
+	ops.warn(fmt.Sprintf("Daemon did not exit within %s; force-stopping it", budget))
+	return forceStopDaemon(ops)
+}
+
+// forceStopDaemon escalates to the shared stale-daemon kill path and verifies
+// the daemon is really gone, so a restart never proceeds against a survivor.
+func forceStopDaemon(ops daemonStopOps) (daemonStopOutcome, error) {
+	if err := ops.forceStop(); err != nil {
+		return daemonStopForced, fmt.Errorf("failed to force-stop daemon: %w", err)
+	}
+	if ops.isRunning() {
+		return daemonStopForced, errors.New("daemon is still running after force-stop")
+	}
+	return daemonStopForced, nil
+}
+
+// liveDaemonStopOps wires daemonStopOps to the real daemon and terminal.
+func liveDaemonStopOps() daemonStopOps {
+	return daemonStopOps{
+		requestStop: func() error {
+			return daemon.NewClientForCurrentRepoWithTimeout(daemonStopRequestTimeout).Stop()
+		},
+		isRunning: daemon.IsRunning,
+		forceStop: daemon.KillStaleDaemonForCurrentWorkspace,
+		progress:  cli.PrintInfo,
+		warn:      cli.PrintWarning,
+	}
+}
+
+// stopRunningDaemonAndWait stops the daemon holding this workspace and blocks
+// until it has actually released it. Shared by `stop`, `restart` and `start
+// --foreground`'s takeover — all would otherwise race a half-dead incumbent
+// for the socket.
+func stopRunningDaemonAndWait() (daemonStopOutcome, error) {
+	return stopDaemonAndWait(liveDaemonStopOps(), daemonStopWaitBudget, daemonStopWaitInterval, daemonStopProgressAfter)
 }
 
 var daemonStartCmd = &cobra.Command{
@@ -119,7 +193,7 @@ var daemonStartCmd = &cobra.Command{
 			return nil
 		case daemonStartTakeover:
 			cli.PrintInfo("Daemon already running — stopping it to take over in the foreground")
-			if err := stopRunningDaemonAndWait(); err != nil {
+			if _, err := stopRunningDaemonAndWait(); err != nil {
 				return err
 			}
 		}
@@ -156,12 +230,16 @@ var daemonStopCmd = &cobra.Command{
 			return nil
 		}
 
-		client := daemon.NewClientForCurrentRepo()
-		if err := client.Stop(); err != nil {
-			return fmt.Errorf("failed to stop daemon: %w", err)
+		outcome, err := stopRunningDaemonAndWait()
+		if err != nil {
+			return err
 		}
 
-		fmt.Println("Daemon stopped")
+		if outcome == daemonStopForced {
+			fmt.Println("Daemon force-stopped")
+		} else {
+			fmt.Println("Daemon stopped")
+		}
 		return nil
 	},
 }
@@ -173,7 +251,7 @@ var daemonRestartCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// stop if running
 		if daemon.IsRunning() {
-			if err := stopRunningDaemonAndWait(); err != nil {
+			if _, err := stopRunningDaemonAndWait(); err != nil {
 				return err
 			}
 		}
@@ -247,8 +325,7 @@ var daemonStatusCmd = &cobra.Command{
 			if err := enc.Encode(jsonStatus); err != nil {
 				return fmt.Errorf("failed to marshal status: %w", err)
 			}
-			fmt.Print(buf.String())
-			return nil
+			return cli.WriteJSONBytes(os.Stdout, buf.Bytes())
 		}
 
 		// always fetch history for sparkline; verbose adds sync history table
@@ -419,9 +496,7 @@ func runDaemonForeground(ledgerPath string) error {
 	// that escapes with the interactive UA is silently counted as a human.
 	useragent.SetDaemonMode()
 
-	cfg := daemon.DefaultConfig()
-	cfg.LedgerPath = ledgerPath
-	cfg.ProjectRoot = findGitRoot() // required for team context syncing
+	cfg := daemonConfig(ledgerPath)
 
 	// default to INFO; OX_LOG_LEVEL=debug enables verbose output
 	logLevel := slog.LevelInfo
@@ -441,20 +516,44 @@ func runDaemonForeground(ledgerPath string) error {
 	if !d.RestartRequested() {
 		return nil
 	}
+	return reexecDaemon(cfg, logger)
+}
 
-	// version mismatch: re-exec with updated binary (same PID, same FDs)
+// daemonConfig is the configuration `ox daemon start` runs the daemon with.
+func daemonConfig(ledgerPath string) *daemon.Config {
+	cfg := daemon.DefaultConfig()
+	cfg.LedgerPath = ledgerPath
+	cfg.ProjectRoot = findGitRoot() // required for team context syncing
+	cfg.DisposableMachine = config.DisposableMachineEnabled()
+	return cfg
+}
+
+// execProcess replaces this process; tests stub it.
+var execProcess = syscall.Exec
+
+// reexecDaemon re-executes this daemon in place (same PID, same FDs), running
+// the binary now installed. The daemon moved to $HOME at start (StabilizeCWD),
+// and `daemon start` finds its project, Ledger, and workspace from the working
+// directory. Return to the original project before re-exec so version upgrades
+// and restarts after the Ledger's first clone retain its workspace and Ledger.
+func reexecDaemon(cfg *daemon.Config, logger *slog.Logger) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("self-restart: resolve executable: %w", err)
 	}
-	logger.Info("re-executing daemon with updated binary", "exe", exe)
-	return syscall.Exec(exe, os.Args, os.Environ())
+	if cfg.ProjectRoot != "" {
+		if err := os.Chdir(cfg.ProjectRoot); err != nil {
+			return fmt.Errorf("self-restart: return to the project: %w", err)
+		}
+	}
+	logger.Info("re-executing daemon", "exe", exe)
+	return execProcess(exe, os.Args, os.Environ())
 }
 
 // startDaemonBackground starts the daemon as a background process.
 func startDaemonBackground(ledgerPath string) error {
 	// get the path to the current executable
-	exe, err := os.Executable()
+	exe, err := selfexec.Path()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
@@ -464,6 +563,9 @@ func startDaemonBackground(ledgerPath string) error {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
+
+	// keep the log bounded: nothing rotates it while the daemon runs
+	daemon.RotateDaemonLog(logPath)
 
 	// open log file
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
@@ -480,8 +582,8 @@ func startDaemonBackground(ledgerPath string) error {
 	}
 
 	// start daemon process
-	// NOTE: No setsid/detach — Claude manages the daemon process lifecycle.
 	cmd := exec.Command(exe, args...)
+	proc.Detach(cmd)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	// set CWD to git root so daemon computes correct repo-based workspace ID

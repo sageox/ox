@@ -1,0 +1,16 @@
+{
+  "$schema_version": 1,
+  "layer_id": "clyr_019ffe10-0000-7000-8000-0000000000a1",
+  "conversation_id": "cnv_019ffe10-0000-7000-8000-000000000011",
+  "kind": "pointer",
+  "modality": "data",
+  "mime": "application/x-ndjson",
+  "label": "Pointer",
+  "origin": "client",
+  "spec": "sageox://layer-spec/pointer/1",
+  "revision": 1,
+  "status": "active",
+  "supersedes": null,
+  "clock": {"t0": "2026-08-18T01:00:00Z"},
+  "content": {"kind": "pointer", "refs": [{"ref": "git-file", "path": "pointer.jsonl", "mime": "application/x-ndjson"}]}
+}

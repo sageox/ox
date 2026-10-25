@@ -24,7 +24,7 @@ const (
 # appends configured trailers (Co-Authored-By, SageOx-Session) to commits
 if command -v ox >/dev/null 2>&1; then
   ox hooks commit-msg --msg-file "$1" --source "${2:-}" 2>/dev/null || true
-fi
+` + oxGitHookNotOnPathFallback + `
 # end ox hook`
 	oxPrepareCommitMsgProbe = "ox hooks commit-msg"
 
@@ -35,7 +35,7 @@ fi
 # appends HEAD SHA to active recording's ProducedCommits index
 if command -v ox >/dev/null 2>&1; then
   ox hooks post-commit 2>/dev/null || true
-fi
+` + oxGitHookNotOnPathFallback + `
 # end ox hook`
 	oxPostCommitProbe = "ox hooks post-commit"
 
@@ -47,7 +47,7 @@ fi
 # rewrites SHAs in active recording's ProducedCommits on amend/rebase
 if command -v ox >/dev/null 2>&1; then
   ox hooks post-rewrite --mode "${1:-}" 2>/dev/null || true
-fi
+` + oxGitHookNotOnPathFallback + `
 # end ox hook`
 	oxPostRewriteProbe = "ox hooks post-rewrite"
 
@@ -61,7 +61,7 @@ fi
 # records PR + issue linkage for the active recording from the pushed range
 if command -v ox >/dev/null 2>&1; then
   ox hooks pre-push --remote "${1:-}" --url "${2:-}" 2>/dev/null || true
-fi
+` + oxGitHookNotOnPathFallback + `
 # end ox hook`
 	oxPrePushProbe = "ox hooks pre-push"
 
@@ -70,6 +70,108 @@ fi
 	// an alias for the prepare-commit-msg marker so external readers don't
 	// silently break.
 	oxHookMarkerStart = oxPrepareCommitMsgMarkerStart
+
+	// oxGitHookNotOnPathFallback is the shared else-branch for every
+	// ox-managed git hook above. Previously these hooks had no else at all:
+	// `command -v ox` failing meant total silence, every commit, forever —
+	// even though the real cause is usually that ox IS installed but the
+	// hook shell (a non-interactive `sh`, which reads none of a user's
+	// interactive rc files) can't see it on PATH.
+	//
+	// Probe the usual install locations — $GOBIN (when set) first, since
+	// it overrides GOPATH/bin for `go install` and costs nothing but an
+	// env var read — and name the real fix instead of staying silent.
+	// Only speak on the failure path — the success path (ox found, `then`
+	// branch) stays exactly as quiet as before, since these hooks fire on
+	// every commit/push.
+	//
+	// Guidance branches on $SHELL: only zsh has a startup file a
+	// non-interactive shell always reads (~/.zshenv); bash/fish/other read
+	// no rc file by default, so they get an honest explanation instead of
+	// the zsh-specific one, plus a restart reminder. Mirrors
+	// internal/constants/agent.go's oxNotOnPathFallback (the AI-tool-hook
+	// flavor of this same message) and
+	// internal/doctor/checks/ox_in_path.go's explanationFor/shellRCFor —
+	// keep these wordings identical. The same per-shell copy also lives in
+	// scripts/install.sh's print_path_warning and the Makefile's install
+	// target; a fix to one (e.g. the fish quoting in #937) belongs in all
+	// five.
+	//
+	// The printed PATH line escapes the directory for the inside of a
+	// double-quoted string ($, a backtick, " and \ for POSIX shells; fish
+	// leaves backticks alone): the person pastes it into a startup file
+	// that runs on every new shell, so a directory named with those must
+	// read as text there, never run. Lines that carry the directory go out
+	// through printf, not echo: an XSI echo (macOS /bin/sh) would turn the
+	// escaped \\ back into \. If sed fails the PATH line is left out
+	// rather than printed as `$PATH:`, which would put the current
+	// directory on PATH, and `|| _ox_q=""` keeps a set -e hook running.
+	// bash names the file a new terminal's bash reads: on macOS that is a
+	// login shell, which reads the first existing of ~/.bash_profile,
+	// ~/.bash_login, ~/.profile and not ~/.bashrc.
+	//
+	// Uses `_ox_p`/`_ox_gp` (not `p`/`gp`): installHookSection appends this
+	// section into an existing hook file's shell scope, where plain
+	// `p`/`gp` could collide with a variable the surrounding hook already
+	// defines.
+	oxGitHookNotOnPathFallback = `else
+  _ox_p=""
+  _ox_home="${HOME:-}"
+  [ -n "${GOBIN:-}" ] && [ -x "${GOBIN:-}/ox" ] && _ox_p="${GOBIN:-}"
+  if [ -z "$_ox_p" ] && command -v go >/dev/null 2>&1; then
+    _ox_gb="$(go env GOBIN 2>/dev/null)"
+    [ -n "$_ox_gb" ] && [ -x "$_ox_gb/ox" ] && _ox_p="$_ox_gb"
+    if [ -z "$_ox_p" ]; then
+      _ox_gp="$(go env GOPATH 2>/dev/null)/bin"
+      [ -x "$_ox_gp/ox" ] && _ox_p="$_ox_gp"
+    fi
+  fi
+  [ -n "$_ox_home" ] && [ -z "$_ox_p" ] && [ -x "$_ox_home/go/bin/ox" ] && _ox_p="$_ox_home/go/bin"
+  [ -n "$_ox_home" ] && [ -z "$_ox_p" ] && [ -x "$_ox_home/.local/bin/ox" ] && _ox_p="$_ox_home/.local/bin"
+  [ -z "$_ox_p" ] && [ -x "/usr/local/bin/ox" ] && _ox_p="/usr/local/bin"
+  [ -z "$_ox_p" ] && [ -x "/opt/homebrew/bin/ox" ] && _ox_p="/opt/homebrew/bin"
+  if [ -n "$_ox_p" ]; then
+    printf '%s\n' "ox is installed at $_ox_p/ox but is not on PATH for non-interactive shells." >&2
+    _ox_sh="${SHELL:-}"
+    _ox_e='s/[\\"$` + "`" + `]/\\&/g'
+    if [ "${_ox_sh##*/}" = fish ]; then _ox_e='s/[\\"$]/\\&/g'; fi
+    _ox_q="$(printf '%s' "$_ox_p" | sed "$_ox_e" 2>/dev/null)" || _ox_q=""
+    case "${_ox_sh##*/}" in
+      zsh)
+        echo "AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc." >&2
+        echo "Add this line to ~/.zshenv:" >&2
+        if [ -n "$_ox_q" ]; then printf '%s\n' "    export PATH=\"\$PATH:$_ox_q\"" >&2; fi
+        ;;
+      bash)
+        _ox_rc="~/.bashrc"
+        if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+          _ox_rc="~/.bash_profile"
+          for _ox_f in .bash_profile .bash_login .profile; do
+            if [ -n "$_ox_home" ] && [ -f "$_ox_home/$_ox_f" ]; then _ox_rc="~/$_ox_f"; break; fi
+          done
+        fi
+        echo "AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." >&2
+        echo "Add this line to $_ox_rc:" >&2
+        if [ -n "$_ox_q" ]; then printf '%s\n' "    export PATH=\"\$PATH:$_ox_q\"" >&2; fi
+        echo "Then restart your AI coding tool from a new terminal so it picks up the change." >&2
+        ;;
+      fish)
+        echo "AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." >&2
+        echo "Add this line to ~/.config/fish/config.fish:" >&2
+        if [ -n "$_ox_q" ]; then printf '%s\n' "    fish_add_path -- \"$_ox_q\"" >&2; fi
+        echo "Then restart your AI coding tool from a new terminal so it picks up the change." >&2
+        ;;
+      *)
+        echo "AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." >&2
+        echo "Add this line to the startup file for your shell:" >&2
+        if [ -n "$_ox_q" ]; then printf '%s\n' "    export PATH=\"\$PATH:$_ox_q\"" >&2; fi
+        echo "Then restart your AI coding tool from a new terminal so it picks up the change." >&2
+        ;;
+    esac
+  else
+    echo "ox is not installed. Install a release: brew install sageox/tap/ox, or download from https://github.com/sageox/ox/releases/latest" >&2
+  fi
+fi`
 )
 
 // hookSpec describes one ox-managed git hook section.

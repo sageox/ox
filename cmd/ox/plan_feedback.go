@@ -1,16 +1,21 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/agenttask"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/plan"
+	"github.com/sageox/ox/pkg/planreview"
 	"github.com/spf13/cobra"
 )
 
@@ -74,46 +79,82 @@ var planFeedbackApplyCmd = &cobra.Command{
 }
 
 func runPlanFeedbackApply(cmd *cobra.Command, slug, from string) error {
-	var raw []byte
-	var err error
-	if from == "" || from == "-" {
-		raw, err = io.ReadAll(cmd.InOrStdin())
-	} else {
-		raw, err = os.ReadFile(from)
+	in := cmd.InOrStdin()
+	if from != "" && from != "-" {
+		f, err := os.Open(from)
+		if err != nil {
+			return fmt.Errorf("read feedback: %w", err)
+		}
+		defer f.Close()
+		in = f
 	}
+	// the stored round outgrows its request, and no record over the limit is
+	// ever stored, so a larger export cannot apply
+	raw, err := io.ReadAll(io.LimitReader(in, planreview.MaxRecordBytes+1))
 	if err != nil {
 		return fmt.Errorf("read feedback: %w", err)
 	}
-	set, err := plan.ParseFeedback(raw)
+	if len(raw) > planreview.MaxRecordBytes {
+		return fmt.Errorf("feedback export is over the %d-byte limit", planreview.MaxRecordBytes)
+	}
+	q, err := planreview.ParseRoundRequest(raw)
 	if err != nil {
 		return err
 	}
 	if slug == "" {
-		slug = set.Slug
+		slug = q.Slug
 	}
 	if slug == "" {
 		return fmt.Errorf("no slug: pass it as an argument or include it in the feedback JSON")
 	}
-	set.Slug = slug
+	// The CLI freezes an export, so it freezes it canonically (keys sorted at
+	// every level, no insignificant whitespace, numbers as written), and names
+	// one without an id by its content: applying the same export twice (a
+	// retried paste, a re-run script) is one round, whatever an editor did to
+	// its whitespace or key order.
+	var obj map[string]any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	_ = dec.Decode(&obj) // ParseRoundRequest decoded raw as an object
+	if q.ID == "" {
+		obj["id"] = planreview.ContentRoundID(q.Round)
+	}
+	frozen, _ := json.Marshal(obj) // decoded JSON values: Marshal cannot fail
+	if q, err = planreview.ParseRoundRequest(frozen); err != nil {
+		return err
+	}
 
 	gitRoot := findGitRoot()
 	_, _, info, err := plan.Load(gitRoot, slug)
 	if err != nil {
 		return fmt.Errorf("load plan %q: %w", slug, err)
 	}
-	path, err := plan.SaveFeedback(info.Dir, set, time.Now())
+	rec, err := q.Record(slug, q.Reviewer, time.Now())
 	if err != nil {
 		return err
 	}
-	if cerr := commitPlanToLedger(gitRoot, info.Dir); cerr != nil {
-		cli.PrintHint("feedback saved locally; ledger commit deferred: " + cerr.Error())
+	st, receipt, err := publishReviewRecord(context.Background(), gitRoot, info.Dir, rec)
+	if err != nil {
+		return fmt.Errorf("apply round %s: %w", q.ID, err)
 	}
-	enqueuePlanFeedbackTask(gitRoot, info.Dir, slug, len(set.Items))
+	path := filepath.Join(info.Dir, filepath.FromSlash(receipt.Path))
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "Applied %d feedback item(s) to %s\n\n", len(set.Items), cli.StyleFile.Render(path))
-	if _, derr := printPlanReviewDigest(cmd, info.Dir); derr != nil {
-		return derr
+	if !st.Pushed {
+		cli.PrintHintTo(out, "feedback saved locally, not yet shared with your team (`ox agent prime` retries it): "+st.Err)
 	}
+	if receipt.State == planreview.ReceiptAlreadyPublished {
+		// Already stored by an earlier apply, which notified: exit 0 — the
+		// caller's intent is met.
+		if _, werr := fmt.Fprintf(out, "Feedback already applied (round %s): %s\n", q.ID, cli.StyleFile.Render(path)); werr != nil {
+			return fmt.Errorf("write output: %w", werr)
+		}
+		return nil
+	}
+	if err := enqueuePlanFeedbackTask(gitRoot, info.Dir, slug, len(q.Items)); err != nil {
+		cli.PrintWarning("could not notify the plan's authoring coworker automatically — tell them directly, or they'll miss this round of feedback")
+	}
+	fmt.Fprintf(out, "Applied %d feedback item(s) to %s\n\n", len(q.Items), cli.StyleFile.Render(path))
+	printPlanReviewDigest(cmd, info.Dir)
 	return nil
 }
 
@@ -124,19 +165,37 @@ func runPlanFeedbackApply(cmd *cobra.Command, slug, from string) error {
 // protocol (read `ox plan feedback show <slug>`, address, resolve), never from
 // task text. Routed to the authoring agent TYPE (the queue targets a type, not an
 // instance) and deduped per (agent, plan) so repeated rounds don't pile up.
-// Best-effort: an unlinked plan, a missing queue, or a dedup hit is a silent
-// no-op — it never blocks the feedback that already landed in the ledger.
-func enqueuePlanFeedbackTask(gitRoot, planDir, slug string, items int) {
+//
+// An unlinked plan or a missing queue is a silent, error-free no-op — there is
+// nobody to notify. An actual enqueue failure is different: the feedback the
+// human just submitted already landed in the ledger, but the coworker will never
+// see it unless something surfaces the gap. It is retried once (the DedupKey
+// makes a repeat Add safe) since the one intermittent failure observed looked
+// like a transient store-open/lock error rather than a real, repeatable one; a
+// non-nil return still never blocks or reverts the feedback write — the caller
+// decides how (or whether) to tell the human.
+func enqueuePlanFeedbackTask(gitRoot, planDir, slug string, items int) error {
 	if gitRoot == "" || planDir == "" || slug == "" {
-		return
+		return nil
 	}
 	meta, err := plan.LoadMeta(planDir)
-	if err != nil || meta.Provenance == nil || meta.Provenance.AgentID == "" {
-		return // no authoring coworker recorded → nobody to notify
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // no meta.json at all → nobody was ever recorded to notify
+		}
+		// meta.json exists but is unreadable/corrupt — a real failure, not "no
+		// author recorded." Reporting nil here would tell the human it landed
+		// (notified:true) when nothing was ever enqueued.
+		slog.Warn("plan feedback: could not load plan meta — cannot notify authoring coworker",
+			"error", err, "slug", slug, "plan_dir", planDir)
+		return err
+	}
+	if meta.Provenance == nil || meta.Provenance.AgentID == "" {
+		return nil // no authoring coworker recorded → nobody to notify
 	}
 	prov := meta.Provenance
 	title := fmt.Sprintf("Review feedback on plan %q (%d item(s) this round)", slug, items)
-	if _, err := agenttask.Enqueue(gitRoot, &agenttask.Task{
+	task := &agenttask.Task{
 		Title:       title,
 		Kind:        agenttask.KindPlanFeedback,
 		Priority:    30, // above routine chores: a human is waiting on the response
@@ -144,9 +203,64 @@ func enqueuePlanFeedbackTask(gitRoot, planDir, slug string, items int) {
 		TargetAgent: prov.AgentType, // type-level routing; "" = any coworker
 		DedupKey:    "plan-feedback:" + prov.AgentID + ":" + slug,
 		Payload:     map[string]string{"plan_slug": slug},
-	}); err != nil {
-		slog.Debug("plan feedback: enqueue notify task failed", "error", err, "slug", slug)
 	}
+	_, err = agenttask.Enqueue(gitRoot, task)
+	if err != nil && !enqueueFailureIsSettled(err) {
+		time.Sleep(100 * time.Millisecond)
+		_, err = agenttask.Enqueue(gitRoot, task)
+	}
+	if err != nil {
+		slog.Warn("plan feedback: enqueue notify task failed — authoring coworker not notified",
+			"error", err, "slug", slug, "agent_id", prov.AgentID)
+		return err
+	}
+	return nil
+}
+
+// enqueueSettledFailurePrefixes are agenttask.Enqueue error messages that are
+// deterministic for a given task and gitRoot: retrying the exact same call
+// reproduces the identical failure, so a retry only adds latency. This is a
+// negative list — anything NOT matched here is treated as possibly-transient
+// (DB open/lock/write contention) and gets one bounded retry.
+var enqueueSettledFailurePrefixes = []string{
+	"project root cannot be empty",
+	"failed to resolve project root",
+	"failed to create task directory", // MkdirAll blocked by a non-directory — waiting cannot fix this
+	"task cannot be nil",
+	"task title cannot be empty",
+	"unknown task kind",
+	"task title exceeds",
+	"task body exceeds",
+	"task payload exceeds",
+	"task payload key",
+	"new tasks must start",
+	"failed to encode payload",
+}
+
+// enqueueFailureIsSettled reports whether err is a known, deterministic
+// agenttask.Enqueue failure — a structural directory problem or a static task
+// validation error — that a retry cannot fix.
+func enqueueFailureIsSettled(err error) bool {
+	msg := err.Error()
+	for _, prefix := range enqueueSettledFailurePrefixes {
+		if strings.HasPrefix(msg, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// planFeedbackShowJSON is the `ox plan feedback show --json` shape. Items is
+// the merged review. Complete is false when the read failed somewhere:
+// Failures says where and why, and CorruptRounds names the round files that
+// could not be read, so a consumer can tell "no feedback" from "feedback we
+// failed to load". Conflicts are operations stored with differing content.
+type planFeedbackShowJSON struct {
+	Items         []plan.MergedItem     `json:"items"`
+	CorruptRounds []string              `json:"corrupt_rounds"`
+	Complete      bool                  `json:"complete"`
+	Failures      []planreview.Failure  `json:"failures"`
+	Conflicts     []planreview.Conflict `json:"conflicts"`
 }
 
 func runPlanFeedbackShow(cmd *cobra.Command, slug string, jsonOut bool) error {
@@ -155,24 +269,31 @@ func runPlanFeedbackShow(cmd *cobra.Command, slug string, jsonOut bool) error {
 	if err != nil {
 		return fmt.Errorf("load plan %q: %w", slug, err)
 	}
+	rev := plan.ReadReview(info.Dir)
 	if jsonOut {
-		items, err := plan.AssembleReview(info.Dir)
-		if err != nil {
-			return err
+		out := planFeedbackShowJSON{Items: rev.Items, CorruptRounds: []string{}, Complete: rev.Problems() == 0,
+			Failures: rev.Failures, Conflicts: rev.Conflicts}
+		if out.Items == nil {
+			out.Items = []plan.MergedItem{}
 		}
-		if items == nil {
-			items = []plan.MergedItem{}
+		if out.Failures == nil {
+			out.Failures = []planreview.Failure{}
 		}
-		enc := json.NewEncoder(cmd.OutOrStdout())
-		enc.SetIndent("", "  ")
-		return enc.Encode(items)
+		if out.Conflicts == nil {
+			out.Conflicts = []planreview.Conflict{}
+		}
+		for _, f := range rev.Failures {
+			// an altered round is still read and shown
+			if strings.HasPrefix(f.Path, "feedback/round-") && f.Reason != planreview.ReasonAltered {
+				out.CorruptRounds = append(out.CorruptRounds, filepath.Join(info.Dir, filepath.FromSlash(f.Path)))
+			}
+		}
+		return cli.PrintJSONTo(cmd.OutOrStdout(), out)
 	}
-	shown, derr := printPlanReviewDigest(cmd, info.Dir)
-	if derr != nil {
-		return derr
-	}
-	if !shown {
-		fmt.Fprintln(cmd.OutOrStdout(), "No review feedback for this plan yet.")
+	if !printPlanReviewDigest(cmd, info.Dir) {
+		if _, werr := fmt.Fprintln(cmd.OutOrStdout(), "No review feedback for this plan yet."); werr != nil {
+			return fmt.Errorf("write output: %w", werr)
+		}
 	}
 	return nil
 }
@@ -183,44 +304,38 @@ func runPlanFeedbackResolve(cmd *cobra.Command, slug, anchor, state, commit, not
 	if err != nil {
 		return fmt.Errorf("load plan %q: %w", slug, err)
 	}
-	r := plan.Resolution{
-		Anchor: anchor,
-		State:  plan.ResolutionState(state),
-		Commit: commit,
-		Note:   note,
-	}
-	if err := plan.AppendResolution(info.Dir, r, time.Now()); err != nil {
+	rec, err := newResolutionRecord(anchor, planreview.State(state), commit, note, time.Now())
+	if err != nil {
 		return err
 	}
-	if cerr := commitPlanToLedger(gitRoot, info.Dir); cerr != nil {
-		cli.PrintHint("resolution saved locally; ledger commit deferred: " + cerr.Error())
+	st, _, err := publishReviewRecord(context.Background(), gitRoot, info.Dir, rec)
+	if err != nil {
+		return err
+	}
+	if !st.Pushed {
+		cli.PrintHint("resolution saved locally, not yet shared with your team (`ox agent prime` retries it): " + st.Err)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Marked %s as %s.\n\n", anchor, state)
-	if _, derr := printPlanReviewDigest(cmd, info.Dir); derr != nil {
-		return derr
-	}
+	printPlanReviewDigest(cmd, info.Dir)
 	return nil
 }
 
-// printPlanReviewDigest writes the merged review digest for a plan dir. The bool
-// reports whether anything was printed; a read failure is returned as an error so
-// callers don't conflate "no feedback" with "couldn't read it".
-func printPlanReviewDigest(cmd *cobra.Command, planDir string) (bool, error) {
-	items, err := plan.AssembleReview(planDir)
-	if err != nil {
-		return false, fmt.Errorf("read review state: %w", err)
+// printPlanReviewDigest writes a plan's review digest, led by anything the
+// read could not use, on stdout so an agent reading the digest cannot miss
+// that it is incomplete. It reports whether anything was printed.
+func printPlanReviewDigest(cmd *cobra.Command, planDir string) bool {
+	rev := plan.ReadReview(planDir)
+	text := plan.ReviewWarnings(rev) + plan.FeedbackDigest(rev.Items)
+	if text == "" {
+		return false
 	}
-	digest := plan.FeedbackDigest(items)
-	if digest == "" {
-		return false, nil
-	}
-	fmt.Fprint(cmd.OutOrStdout(), digest)
-	return true, nil
+	fmt.Fprint(cmd.OutOrStdout(), text)
+	return true
 }
 
 func init() {
 	planFeedbackApplyCmd.Flags().String("from", "", "feedback JSON file (use - or omit for stdin)")
-	planFeedbackShowCmd.Flags().Bool("json", false, "emit the merged review items as JSON")
+	planFeedbackShowCmd.Flags().Bool("json", false, "emit {items, corrupt_rounds, complete, failures, conflicts} as JSON")
 	planFeedbackResolveCmd.Flags().String("state", "addressed", "addressed | wontfix | verified")
 	planFeedbackResolveCmd.Flags().String("commit", "", "commit SHA that made the change")
 	planFeedbackResolveCmd.Flags().String("note", "", "what the agent did, or why wontfix")

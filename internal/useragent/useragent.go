@@ -41,6 +41,19 @@ var (
 // when the path has no repo.
 const HeaderRepoID = "X-Sageox-Repo-Id"
 
+// HeaderClientType declares the application surface making the request.
+//
+// The server treats a declared X-Client-Type as authoritative over User-Agent
+// sniffing (api-go handlers/media/client_info.go): UA parsing is substring
+// guessing, and it is how desktop captures once logged as generic "api"
+// traffic for months. The daemon sends it too: it is the same ox binary, and
+// the server still tells it apart by its "ox-daemon/" User-Agent prefix.
+const HeaderClientType = "X-Client-Type"
+
+// clientTypeCLI is the value from the server's closed X-Client-Type allowlist
+// that names ox. An unknown value would be dropped server-side, not echoed.
+const clientTypeCLI = "cli"
+
 // repoIDRe bounds what may be emitted in HeaderRepoID. The value comes from
 // .sageox/config.json, which a user can hand-edit, so it is validated rather
 // than trusted: reject anything with control characters, whitespace, or
@@ -242,9 +255,9 @@ func randomTraceparent() string {
 	return "00-" + hex.EncodeToString(buf[:16]) + "-" + hex.EncodeToString(buf[16:]) + "-01"
 }
 
-// SetHeaders sets User-Agent, X-Orchestrator, X-Sageox-Repo-Id, and traceparent
-// headers on the request. Use this for SageOx API requests to include full
-// telemetry context.
+// SetHeaders sets User-Agent, X-Client-Type, X-Orchestrator, X-Sageox-Repo-Id,
+// and traceparent headers on the request. Use this for SageOx API requests to
+// include full telemetry context.
 //
 // Every call site is a SageOx-owned endpoint (internal/api, internal/auth,
 // internal/doctorapi, internal/telemetry) — LFS and git transport do not go
@@ -255,6 +268,7 @@ func randomTraceparent() string {
 // Falls back to a random traceparent when tracing is not initialized.
 func SetHeaders(h http.Header) {
 	h.Set("User-Agent", String())
+	h.Set(HeaderClientType, clientTypeCLI)
 	if ot := OrchestratorType(); ot != "" {
 		h.Set("X-Orchestrator", ot)
 	}

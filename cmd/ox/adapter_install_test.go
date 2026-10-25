@@ -1,12 +1,11 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -70,11 +69,6 @@ func newFakeReleaseServer(t *testing.T, tagName string, assetBody []byte) *fakeR
 	f.srv = httptest.NewTLSServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
-}
-
-func sha256Hex(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
 }
 
 // allowAllHosts returns nil so ValidateHTTPSHost skips the allowlist check, which
@@ -231,6 +225,44 @@ func TestInstallAdapter_RejectsAttackerDownloadHost(t *testing.T) {
 	}
 }
 
+// TestInstallAdapter_RejectsRedirectOffAllowlist: the host guard covers every
+// redirect hop, not only the asset URL the release lists. On the unverified
+// path there is no checksum gate behind it, so a followed redirect would install
+// and run bytes from any host.
+func TestInstallAdapter_RejectsRedirectOffAllowlist(t *testing.T) {
+	f := newFakeReleaseServer(t, "v1.0.0", []byte("bytes"))
+	// f.srv.Client() dials *.example.com to f.srv, so the redirect target is
+	// reachable and only the per-hop check stops the download.
+	redirector := httptest.NewTLSServer(http.RedirectHandler("https://attacker.example.com/asset", http.StatusFound))
+	t.Cleanup(redirector.Close)
+	f.assetHost = redirector.URL
+	allowed, err := url.Parse(redirector.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	verifyCalled := false
+	cfg := installConfig{
+		plan: installPlan{
+			owner: "someone", repo: "adapter", tag: "v1.0.0",
+			platform: fmt.Sprintf("%s_%s", runtime.GOOS, runtime.GOARCH),
+		},
+		apiBaseURL:   f.srv.URL,
+		httpClient:   f.srv.Client(),
+		allowedHosts: map[string]bool{allowed.Hostname(): true},
+		installDir:   t.TempDir(),
+		verify:       func(string) error { verifyCalled = true; return nil },
+	}
+
+	err = installAdapter(cfg)
+	if err == nil || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("install must refuse a redirect off the allowlist, got: %v", err)
+	}
+	if verifyCalled {
+		t.Error("a refused download must never reach verify")
+	}
+}
+
 // TestInstallAdapter_TagNameMismatchRejected verifies that a release whose
 // tag_name differs from the pinned tag is rejected (a retag/substitution attempt).
 func TestInstallAdapter_TagNameMismatchRejected(t *testing.T) {
@@ -351,20 +383,15 @@ func TestResolveAdapterSource_ArbitraryRepoWithTag(t *testing.T) {
 	}
 }
 
-// TestResolveAdapterSource_CuratedUnpinned verifies a curated entry that lacks a
-// tag/checksum (the current external entries) resolves to a checksum-less plan,
-// driving fail-closed behavior until a maintainer pins one.
-func TestResolveAdapterSource_CuratedUnpinned(t *testing.T) {
-	// "cursor" is a real external registry entry shipped without a pin.
-	plan, err := resolveAdapterSource("cursor", "darwin_arm64")
-	if err != nil {
-		t.Fatalf("curated lookup should resolve: %v", err)
+// TestResolveAdapterSource_BundledCursorRefusesSeparateInstall verifies Cursor
+// follows the bundled adapter path instead of resolving an external download.
+func TestResolveAdapterSource_BundledCursorRefusesSeparateInstall(t *testing.T) {
+	_, err := resolveAdapterSource("cursor", "darwin_arm64")
+	if err == nil {
+		t.Fatal("bundled Cursor adapter must not resolve a separate download")
 	}
-	if !plan.curated {
-		t.Error("registry short-name must be marked curated")
-	}
-	if plan.checksum != "" {
-		t.Error("unpinned curated entry must have empty checksum (fail-closed)")
+	if !strings.Contains(err.Error(), "bundled with ox") {
+		t.Errorf("error should identify the bundled adapter, got: %v", err)
 	}
 }
 
@@ -386,14 +413,16 @@ func TestRunAdapterInstall_UnverifiableFailsClosed(t *testing.T) {
 	}
 }
 
-// TestRunAdapterInstall_CuratedUnpinnedFailsClosed verifies the documented
-// transition: `ox adapter install cursor` (no pin yet) fails closed without
-// --allow-unverified.
-func TestRunAdapterInstall_CuratedUnpinnedFailsClosed(t *testing.T) {
+// TestRunAdapterInstall_BundledCursorRefusesSeparateInstall verifies the Cobra
+// path also directs users to the Cursor binary bundled with ox.
+func TestRunAdapterInstall_BundledCursorRefusesSeparateInstall(t *testing.T) {
 	cmd := adapterInstallCmd
 	_ = cmd.Flags().Set("allow-unverified", "false")
 	err := cmd.RunE(cmd, []string{"cursor"})
 	if err == nil {
-		t.Fatal("curated entry with no pinned tag must fail closed")
+		t.Fatal("bundled Cursor adapter must not install separately")
+	}
+	if !strings.Contains(err.Error(), "bundled with ox") {
+		t.Errorf("error should identify the bundled adapter, got: %v", err)
 	}
 }

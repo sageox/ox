@@ -33,6 +33,17 @@ type Flags struct {
 	AutoDistill    bool
 	TUIEnabled     bool
 	AttestEnabled  bool
+	TraceEnabled   bool
+	AddonsEnabled  bool
+	// BulletinEnabled gates `ox bulletin`. It is a server-enrolled pilot:
+	// default off, and deliberately without a FEATURE_* env override, so
+	// nothing local can turn it on.
+	BulletinEnabled bool
+	// GitHubMirrorEnabled gates the daemon's GitHub mirror relay (epic
+	// ox-zjuv). Same shape as BulletinEnabled: a server-evaluated rollout,
+	// default off, and deliberately without a FEATURE_* env override, so
+	// nothing local can turn on a relay that publishes to the team's board.
+	GitHubMirrorEnabled bool
 
 	// Kill switches — default false (not activated).
 	// Any source setting these true disables the capability.
@@ -49,12 +60,16 @@ type Flags struct {
 // Nil fields mean "no opinion" — they are skipped during merge.
 // NOTE: When adding fields, also update allNil() in env.go and applyPatch() in resolve.go.
 type Patch struct {
-	CodeDBEnabled  *bool
-	WhisperEnabled *bool
-	DistillEnabled *bool
-	AutoDistill    *bool
-	TUIEnabled     *bool
-	AttestEnabled  *bool
+	CodeDBEnabled   *bool
+	WhisperEnabled  *bool
+	DistillEnabled  *bool
+	AutoDistill     *bool
+	TUIEnabled      *bool
+	AttestEnabled   *bool
+	TraceEnabled    *bool
+	BulletinEnabled *bool
+	// GitHubMirrorEnabled has no EnvProvider mapping by design.
+	GitHubMirrorEnabled *bool
 
 	DisableFileDeleteTools *bool
 	DisableShellExecTools  *bool
@@ -94,12 +109,16 @@ type Provider interface {
 // Experimental gates and kill switches are off; string fields are empty.
 func Defaults() Flags {
 	return Flags{
-		CodeDBEnabled:  true,
-		WhisperEnabled: true,
-		DistillEnabled: true,
-		AutoDistill:    false, // off until remote settings explicitly enables it
-		TUIEnabled:     false, // off until remote settings explicitly enables it
-		AttestEnabled:  false, // experimental; hidden and unregistered until enabled
+		CodeDBEnabled:   true,
+		WhisperEnabled:  true,
+		DistillEnabled:  true,
+		AutoDistill:     false, // off until remote settings explicitly enables it
+		TUIEnabled:      false, // off until remote settings explicitly enables it
+		AttestEnabled:   false, // experimental; hidden and unregistered until enabled
+		TraceEnabled:    false, // local trace capture pilot; explicit opt-in also required
+		BulletinEnabled: false, // server-enrolled pilot; no env override by design
+
+		GitHubMirrorEnabled: false, // server-evaluated rollout; no env override by design
 	}
 }
 

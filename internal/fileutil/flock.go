@@ -45,10 +45,17 @@ const LockPollInterval = 25 * time.Millisecond
 
 // ErrLockTimeout is returned by WithFileLock when LockTimeout elapses
 // without acquiring the lock.
-type ErrLockTimeout struct{ Path string }
+type ErrLockTimeout struct {
+	Path    string
+	Timeout time.Duration
+}
 
 func (e *ErrLockTimeout) Error() string {
-	return fmt.Sprintf("acquire advisory lock %q: timed out after %s", e.Path, LockTimeout)
+	timeout := e.Timeout
+	if timeout == 0 {
+		timeout = LockTimeout
+	}
+	return fmt.Sprintf("acquire advisory lock %q: timed out after %s", e.Path, timeout)
 }
 
 // LockPath returns the canonical advisory-lock sidecar path for a target
@@ -117,18 +124,34 @@ func lockDir() string {
 // inProcessLocks, so two goroutines in the same binary are safe even
 // if cross-process locking is a no-op.
 func WithFileLock(ctx context.Context, targetPath string, fn func() error) error {
+	return WithFileLockTimeout(ctx, targetPath, LockTimeout, fn)
+}
+
+// WithFileLockTimeout is WithFileLock with a caller-chosen acquire deadline.
+// The default LockTimeout is sized for millisecond read-modify-writes; a
+// caller serializing something that legitimately runs for seconds or
+// minutes (a git fetch/pull on a managed clone — see gitutil.WithRepoLock)
+// needs a longer wait so a legitimately busy peer is not mistaken for a
+// stuck one.
+func WithFileLockTimeout(ctx context.Context, targetPath string, timeout time.Duration, fn func() error) error {
 	lockPath := LockPath(targetPath)
+	deadline := time.Now().Add(timeout)
 
 	// lockDir() creates the parent on first call; nothing else to
 	// pre-flight here — OpenFile below will surface any real error.
 
-	// In-process serialization first. Two goroutines in the same
-	// process trying to flock the same FD do NOT block each other on
-	// some POSIX implementations (flock-by-FD vs flock-by-inode
-	// semantics differ across kernels). We avoid the corner case by
-	// gating on a process-wide named mutex keyed by the lock path.
-	relock := acquireInProcess(lockPath)
-	defer relock()
+	// In-process serialization first, bounded by the SAME ctx/deadline as
+	// the cross-process flock below — see acquireInProcess's doc comment
+	// for why this must be interruptible rather than a plain mu.Lock().
+	// Two goroutines in the same process trying to flock the same FD do
+	// NOT block each other on some POSIX implementations (flock-by-FD vs
+	// flock-by-inode semantics differ across kernels); this gate closes
+	// that loophole.
+	release, err := acquireInProcess(ctx, lockPath, deadline)
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -136,13 +159,12 @@ func WithFileLock(ctx context.Context, targetPath string, fn func() error) error
 	}
 	defer f.Close()
 
-	deadline := time.Now().Add(LockTimeout)
 	for {
 		if err := tryFlock(f); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
-			return &ErrLockTimeout{Path: lockPath}
+			return &ErrLockTimeout{Path: lockPath, Timeout: timeout}
 		}
 		select {
 		case <-ctx.Done():
@@ -153,4 +175,38 @@ func WithFileLock(ctx context.Context, targetPath string, fn func() error) error
 	defer func() { _ = unlockFlock(f) }()
 
 	return fn()
+}
+
+// TryWithFileLock is WithFileLock without the wait. When another goroutine or
+// process holds the lock it returns acquired=false and a nil error at once,
+// without running fn. Use it where a held lock is the answer: another holder
+// is already doing the work, so waiting for it would only tie up the caller.
+//
+// acquired=false with a non-nil error means the lock could not be tried at
+// all (the lock file would not open, or flock failed for a reason other than
+// contention), so a broken lock is never reported as a busy one.
+func TryWithFileLock(targetPath string, fn func() error) (acquired bool, err error) {
+	lockPath := LockPath(targetPath)
+	gate := inProcessChan(lockPath)
+	select {
+	case gate <- struct{}{}:
+	default:
+		return false, nil
+	}
+	defer func() { <-gate }()
+
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false, fmt.Errorf("open lock file %q: %w", lockPath, err)
+	}
+	defer f.Close()
+	if err := tryFlock(f); err != nil {
+		if flockContended(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("lock %q: %w", lockPath, err)
+	}
+	defer func() { _ = unlockFlock(f) }()
+
+	return true, fn()
 }

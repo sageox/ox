@@ -4,17 +4,40 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sageox/agentx"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func findModuleRoot(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	require.True(t, ok, "runtime.Caller failed")
+	dir := filepath.Dir(thisFile)
+	for {
+		if data, err := os.ReadFile(filepath.Join(dir, "go.mod")); err == nil &&
+			strings.Contains(string(data), "github.com/sageox/ox") {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		require.NotEqual(t, parent, dir, "could not find ox module root")
+		dir = parent
+	}
+}
 
 func TestResolvePhase(t *testing.T) {
 	tests := []struct {
@@ -33,8 +56,21 @@ func TestResolvePhase(t *testing.T) {
 		{"claude unknown event", "claude-code", "SubagentStop", ""},
 		{"claude alias resolves", "claudecode", "SessionStart", phaseStart},
 		{"claude short alias resolves", "claude", "SessionStart", phaseStart},
-		{"unknown agent falls back", "codex", "SessionStart", phaseStart},
-		{"unknown agent unknown event", "codex", "FooBar", ""},
+		// every event cmd/ox-adapter-codex installs has an explicit local mapping
+		{"codex SessionStart", "codex", "SessionStart", phaseStart},
+		{"codex PreToolUse", "codex", "PreToolUse", phaseBeforeTool},
+		{"codex PostToolUse", "codex", "PostToolUse", phaseAfterTool},
+		{"codex UserPromptSubmit", "codex", "UserPromptSubmit", phasePrompt},
+		{"codex Stop", "codex", "Stop", phaseStop},
+		{"codex SessionEnd finalizes", "codex", "SessionEnd", phaseEnd},
+		{"codex unknown event", "codex", "FooBar", ""},
+		// agentx maps only Amp's tool events; the ox-bridge plugin's
+		// SessionEnd comes from the local supplement (sageox/ox#1314)
+		{"amp SessionEnd finalizes", "amp", "SessionEnd", phaseEnd},
+		{"amp tool event still from agentx", "amp", "tool:post-execute", phaseAfterTool},
+		{"amp unmapped event stays unmapped", "amp", "SessionStart", ""},
+		{"unregistered agent falls back", "some-new-agent", "SessionStart", phaseStart},
+		{"unregistered agent unknown event", "some-new-agent", "FooBar", ""},
 	}
 
 	for _, tt := range tests {
@@ -82,49 +118,150 @@ func TestRunAgentHook_NoArgs(t *testing.T) {
 
 // --- P0 #1: handleAfterTool direct unit tests ---
 
-// setupHandleAfterToolTest creates a project with an active recording and a
-// Claude Code source JSONL file, returning everything needed to call handleAfterTool directly.
-func setupHandleAfterToolTest(t *testing.T) (projectRoot string, agentID string, sourceFile string) {
+func buildCodexCaptureAdapter(t *testing.T) string {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("short: builds and invokes the real Codex adapter")
+	}
+	adapterBin := filepath.Join(t.TempDir(), "ox-adapter-codex")
+	build := exec.Command("go", "build", "-o", adapterBin, "./cmd/ox-adapter-codex")
+	build.Dir = findModuleRoot(t)
+	buildOutput, err := build.CombinedOutput()
+	require.NoError(t, err, "%s", buildOutput)
+	return adapterBin
+}
 
-	adapters.Register(&testClaudeCodeAdapter{})
-	t.Cleanup(func() { adapters.Unregister("claude-code") })
+// Hook discovery must capture its own native conversation, including files created before prime.
+func TestHandleAfterTool_CodexDiscoveryUsesRecordingIdentity(t *testing.T) {
+	adapterBin := buildCodexCaptureAdapter(t)
 
-	cacheDir := t.TempDir()
-	projectRoot = t.TempDir()
+	for _, sourceState := range []string{"undiscovered", "missing", "truncated"} {
+		for _, knownIdentity := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/native_id=%t", sourceState, knownIdentity), func(t *testing.T) {
+				t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+				t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+				t.Setenv("OX_XDG_DISABLE", "")
+				projectRoot, agentID, previousSource := setupHandleAfterToolTest(t)
+				t.Chdir(projectRoot)
+				adapter, err := adapters.NewExternalAdapter(adapterBin)
+				require.NoError(t, err)
+				adapters.Register(adapter)
+				t.Cleanup(func() {
+					adapters.Unregister("codex")
+					_ = adapter.Close()
+				})
 
-	sageoxDir := filepath.Join(projectRoot, ".sageox")
-	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
-	cfg := `{"config_version":"2","repo_id":"test-repo-hook","endpoint":"http://test.sageox.local","session_publishing":"manual"}`
-	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(cfg), 0644))
+				state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+				require.NoError(t, err)
+				require.NotNil(t, state)
+				nativeID := "019d2c0d-ac3c-7b72-bb1d-0f246ad1f0d0"
+				now := time.Now()
+				dateDir := filepath.Join(os.Getenv("HOME"), ".codex", "sessions", now.Format("2006"), now.Format("01"), now.Format("02"))
+				require.NoError(t, os.MkdirAll(dateDir, 0o755))
+				sourceFile := filepath.Join(dateDir, "requested.jsonl")
+				content := fmt.Sprintf("{\"type\":\"session_meta\",\"payload\":{\"id\":%q,\"cwd\":%q}}\n"+
+					"{\"timestamp\":%q,\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"requested conversation\"}]}}\n",
+					nativeID, projectRoot, state.StartedAt.Add(time.Second).Format(time.RFC3339Nano))
+				require.NoError(t, os.WriteFile(sourceFile, []byte(content), 0o600))
+				beforePrime := state.StartedAt.Add(-time.Minute)
+				require.NoError(t, os.Chtimes(sourceFile, beforePrime, beforePrime))
+				if knownIdentity {
+					// A newer sibling makes ignoring the persisted identity capture the wrong source.
+					sibling := strings.ReplaceAll(content, nativeID, "sibling-session")
+					sibling = strings.ReplaceAll(sibling, "requested conversation", "sibling conversation")
+					require.NoError(t, os.WriteFile(filepath.Join(dateDir, "sibling.jsonl"), []byte(sibling), 0o600))
+				}
+				require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
+					s.AdapterName = "codex"
+					s.WorkspacePath = projectRoot
+					if knownIdentity {
+						s.AgentSessionID = nativeID
+					}
+					switch sourceState {
+					case "undiscovered":
+						s.SessionFile = ""
+					case "missing":
+						s.SessionFile = filepath.Join(dateDir, "missing.jsonl")
+					case "truncated":
+						s.SessionFile = previousSource
+						s.SourceOffset = 1024
+					}
+				}))
 
-	t.Setenv("OX_XDG_ENABLE", "1")
-	t.Setenv("HOME", cacheDir)
-	t.Setenv("XDG_CACHE_HOME", cacheDir)
-	t.Setenv("XDG_DATA_HOME", cacheDir)
+				require.NoError(t, handleAfterTool(&HookContext{
+					Phase: phaseAfterTool, AgentType: "codex", ProjectRoot: projectRoot,
+					Marker: &SessionMarker{AgentID: agentID},
+				}))
+				captured, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+				require.NoError(t, err)
+				require.NotNil(t, captured)
+				assert.Equal(t, sourceFile, captured.SessionFile)
+				assert.Equal(t, int64(len(content)), captured.SourceOffset)
+				assert.Equal(t, 1, captured.EntryCount)
+				raw, err := os.ReadFile(filepath.Join(captured.SessionPath, "raw.jsonl"))
+				require.NoError(t, err)
+				assert.Contains(t, string(raw), "requested conversation")
+				assert.NotContains(t, string(raw), "sibling conversation")
+			})
+		}
+	}
+}
 
-	agentID = "OxHook1"
-	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
-		AgentID:     agentID,
-		AdapterName: "claude-code",
-		Username:    "testuser",
-	})
-	require.NoError(t, err)
+// Current hook input must override an older marker when selecting the native conversation.
+func TestHookStart_UsesCurrentNativeSessionIdentity(t *testing.T) {
+	adapterBin := buildCodexCaptureAdapter(t)
+	const nativeID = "codex-test-session"
+	for _, tt := range []struct {
+		name     string
+		markerID string
+		input    *agentx.HookInput
+	}{
+		{name: "marker only", markerID: nativeID},
+		{name: "empty input retains marker", markerID: nativeID, input: &agentx.HookInput{}},
+		{name: "input overrides stale marker", markerID: "stale-native-session", input: &agentx.HookInput{SessionID: nativeID}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			f := newDraftLedgerFixture(t)
+			t.Chdir(f.projectRoot)
+			defaultLedger, err := ledger.DefaultPath()
+			require.NoError(t, err)
+			require.NoError(t, os.MkdirAll(filepath.Dir(defaultLedger), 0o755))
+			runGit(t, f.projectRoot, "clone", "--quiet", f.barePath, defaultLedger)
+			oldCfg := cfg
+			cfg = &config.Config{}
+			t.Cleanup(func() { cfg = oldCfg })
+			oxConfigSetRepo(t, "session_recording", "auto")
+			adapter, err := adapters.NewExternalAdapter(adapterBin)
+			require.NoError(t, err)
+			adapters.Register(adapter)
+			t.Cleanup(func() {
+				adapters.Unregister("codex")
+				_ = adapter.Close()
+			})
+			source := writeCodexSessionFile(t, os.Getenv("HOME"), f.projectRoot)
+			data, err := os.ReadFile(source)
+			require.NoError(t, err)
+			sibling := filepath.Join(filepath.Dir(source), "stale-session.jsonl")
+			require.NoError(t, os.WriteFile(sibling, []byte(strings.ReplaceAll(string(data), nativeID, "stale-native-session")), 0o600))
 
-	// create a source JSONL file (simulates Claude Code's session file)
-	sourceDir := t.TempDir()
-	sourceFile = filepath.Join(sourceDir, "session.jsonl")
-	require.NoError(t, os.WriteFile(sourceFile, []byte(""), 0644))
-
-	// update recording state with source file and session path
-	require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
-		s.SessionFile = sourceFile
-	}))
-
-	// write the raw.jsonl header
-	require.NoError(t, writeRawHeader(projectRoot, state))
-
-	return projectRoot, agentID, sourceFile
+			const agentID = "OxHookNative"
+			startSessionRecordingIfConfigured(&HookContext{
+				AgentType: "codex", ProjectRoot: f.projectRoot, Input: tt.input,
+				Marker: &SessionMarker{AgentID: agentID, AgentSessionID: tt.markerID, RecordingSessionID: draftTestSessionID},
+			})
+			state, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
+			require.NoError(t, err)
+			require.NotNil(t, state)
+			assert.Equal(t, nativeID, state.AgentSessionID)
+			assert.Equal(t, source, state.SessionFile, "hook startup must attach to the current native conversation")
+			assert.Equal(t, draftTestSessionID, state.ContinuedFromSessionID)
+			assert.FileExists(t, filepath.Join(state.SessionPath, "raw.jsonl"))
+		})
+	}
 }
 
 func TestHandleAfterTool_WritesEntriesToRawJSONL(t *testing.T) {
@@ -303,8 +440,9 @@ func TestHandleAfterTool_PreStartContentLeak_ByOffset(t *testing.T) {
 
 	// these entries have future timestamps but exist in the file BEFORE recording starts
 	futureTs := time.Now().Add(1 * time.Hour)
-	preContent := `{"type":"user","timestamp":"` + futureTs.Format(time.RFC3339Nano) + `","message":{"role":"user","content":"Old session message"}}` + "\n"
-	preContent += `{"type":"assistant","timestamp":"` + futureTs.Add(time.Second).Format(time.RFC3339Nano) + `","message":{"role":"assistant","content":[{"type":"text","text":"Old response"}]}}` + "\n"
+	preContent := fmt.Sprintf("{\"type\":\"session\",\"sessionId\":\"session\",\"cwd\":%q}\n", projectRoot)
+	preContent += fmt.Sprintf(`{"type":"user","sessionId":"session","cwd":%q,"timestamp":"%s","message":{"role":"user","content":"Old session message"}}`+"\n", projectRoot, futureTs.Format(time.RFC3339Nano))
+	preContent += fmt.Sprintf(`{"type":"assistant","sessionId":"session","cwd":%q,"timestamp":"%s","message":{"role":"assistant","content":[{"type":"text","text":"Old response"}]}}`+"\n", projectRoot, futureTs.Add(time.Second).Format(time.RFC3339Nano))
 	require.NoError(t, os.WriteFile(sourceFile, []byte(preContent), 0644))
 
 	// record file size BEFORE recording starts — this is StartOffset
@@ -557,16 +695,67 @@ func TestAppendEntries_DataOnDiskAfterReturn(t *testing.T) {
 
 // --- helpers ---
 
-// appendClaudeEntries appends raw Claude Code JSONL lines to a source file.
-func appendClaudeEntries(t *testing.T, path string, _ time.Time, lines ...string) {
-	t.Helper()
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+func TestHandleAfterTool_QuarantinesForeignClaudeTurn(t *testing.T) {
+	projectRoot, agentID, sourceFile := setupHandleAfterToolTest(t)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 	require.NoError(t, err)
-	defer f.Close()
-	for _, line := range lines {
-		_, err := f.WriteString(line + "\n")
-		require.NoError(t, err)
+	now := state.StartedAt.Add(time.Second)
+	appendClaudeEntries(t, sourceFile, now,
+		`{"type":"user","timestamp":"`+now.Format(time.RFC3339Nano)+`","message":{"role":"user","content":"safe turn"}}`)
+	ctx := &HookContext{Phase: phaseAfterTool, ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}
+	require.NoError(t, handleAfterTool(ctx))
+	state, err = session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.Greater(t, state.SourceOffset, int64(0))
+	before, err := os.ReadFile(filepath.Join(state.SessionPath, "raw.jsonl"))
+	require.NoError(t, err)
+	foreign := fmt.Sprintf(`{"type":"user","sessionId":"session","cwd":%q,"timestamp":%q,"message":{"role":"user","content":"foreign turn"}}`+"\n", filepath.Dir(projectRoot), now.Add(time.Second).Format(time.RFC3339Nano))
+	f, err := os.OpenFile(sourceFile, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString(foreign)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	require.NoError(t, handleAfterTool(ctx))
+	quarantined := heldRecording(t, projectRoot, agentID)
+	require.True(t, quarantined.SourceRejected)
+	require.Equal(t, "source-repo-mismatch", quarantined.LastHookStatus)
+	require.Equal(t, state.SourceOffset, quarantined.SourceOffset)
+	require.NoError(t, handleAfterTool(ctx)) // no repeated scan of the rejected source
+	after, err := os.ReadFile(filepath.Join(state.SessionPath, "raw.jsonl"))
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+}
+
+// Failure prevented: on a disposable machine, a hook leaves in place a
+// parent_pid that a later process has taken, so the recording keeps reading
+// as live; or it adopts the agent's PID without its start time, so the next
+// reuse goes undetected.
+func TestHandleAfterTool_ReplacesAReusedParentPID(t *testing.T) {
+	projectRoot, agentID, sourceFile := setupHandleAfterToolTest(t)
+	self, ok := proc.StartTime(os.Getpid())
+	if !ok {
+		t.Skip("this platform cannot report a process start time")
 	}
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte("disposable_machine: true\n"), 0o600))
+	t.Setenv("OX_USER_CONFIG", cfgPath)
+	require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
+		s.ParentPID, s.ParentStartTime = os.Getpid(), self-1 // alive, but not the process that started the recording
+	}))
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	now := state.StartedAt.Add(time.Second)
+	appendClaudeEntries(t, sourceFile, now,
+		`{"type":"user","timestamp":"`+now.Format(time.RFC3339Nano)+`","message":{"role":"user","content":"a turn"}}`)
+
+	require.NoError(t, handleAfterTool(&HookContext{Phase: phaseAfterTool, ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}))
+
+	after, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	agentPID := proc.FindAgentAncestorPID()
+	require.Equal(t, agentPID, after.ParentPID, "the hook adopts the live agent process")
+	want, _ := proc.StartTime(agentPID)
+	require.Equal(t, want, after.ParentStartTime, "with that process's start time")
 }
 
 // --- Session recording lifecycle regression tests ---
@@ -740,6 +929,46 @@ func TestAfterTool_NilMarkerSkipsGracefully(t *testing.T) {
 
 	err := handleAfterTool(ctx)
 	assert.NoError(t, err, "handleAfterTool should noop gracefully with nil marker")
+}
+
+// TestCaptureHookEntries_SkipsOnSessionIDCollisionWithSamePath prevents a
+// stop immediately followed by a restart for the same agent within the same
+// UTC minute from mixing two recordings' entries. GenerateSessionName is
+// minute-granular, so the two generations can land on the IDENTICAL
+// SessionPath -- a path-only staleness check (the original fix for this
+// hook) cannot distinguish them. SessionID is minted once per StartRecording
+// and must be the tiebreaker.
+func TestCaptureHookEntries_SkipsOnSessionIDCollisionWithSamePath(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+
+	original, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.NotEmpty(t, original.SessionID, "fixture recording must have a SessionID for this test to be meaningful")
+
+	// Simulate the restart: a new generation overwrites .recording.json at
+	// the SAME SessionPath (the minute-granular collision) with a fresh
+	// SessionID and a reset cursor.
+	restarted := *original
+	restarted.SessionID = original.SessionID + "-restarted"
+	restarted.SourceOffset = 0
+	restarted.HookInvocations = 0
+	require.NoError(t, session.SaveRecordingState(projectRoot, &restarted))
+
+	ctx := &HookContext{
+		Phase:       phaseAfterTool,
+		ProjectRoot: projectRoot,
+		Marker:      &SessionMarker{AgentID: agentID},
+	}
+
+	// Call with the ORIGINAL generation's path+SessionID, as if handleAfterTool
+	// had loaded it just before the restart raced in.
+	err = captureHookEntries(ctx, agentID, original.SessionPath, original.SessionID)
+	require.NoError(t, err, "a stale generation must be skipped silently, not errored")
+
+	current, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.Equal(t, restarted.SessionID, current.SessionID, "current generation must be untouched")
+	assert.Equal(t, 0, current.HookInvocations, "a skipped stale-generation call must not record a hook invocation against the new generation")
 }
 
 // readJSONLFile reads a JSONL file and returns parsed lines.

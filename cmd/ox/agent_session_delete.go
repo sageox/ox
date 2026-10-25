@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -42,6 +41,11 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 	}
 
 	sessionName := args[0]
+	// ".." would name the Ledger root, so the delete would become
+	// `git rm -r --force .` and push it to the team.
+	if err := session.ValidateDraftSessionName(sessionName); err != nil {
+		return err
+	}
 
 	projectRoot, err := findProjectRoot()
 	if err != nil {
@@ -155,34 +159,34 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 		}
 	}
 
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
-		return fmt.Errorf("format delete JSON: %w", err)
-	}
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.PrintJSONTo(os.Stdout, output)
 }
 
 // deleteSessionFromLedger removes the session folder from the ledger git repo,
 // commits the removal, and pushes. NEVER uses --force push.
 func deleteSessionFromLedger(ledgerPath, sessionName, sessionDir string) error {
-	// git rm -r the session folder
-	gitRm := exec.Command("git", "rm", "-r", "--force", filepath.Join("sessions", sessionName))
-	gitRm.Dir = ledgerPath
-	if out, err := gitRm.CombinedOutput(); err != nil {
-		return fmt.Errorf("git rm: %s: %w", string(out), err)
-	}
-
-	// commit
+	// rm + commit under the repo lock, so the commit cannot move the branch
+	// under a daemon sync rebase (sageox/ox#1541); the push takes it itself
 	commitMsg := fmt.Sprintf("session: delete %s", sessionName)
-	gitCommit := exec.Command("git", "commit", "-m", commitMsg)
-	gitCommit.Dir = ledgerPath
-	if out, err := gitCommit.CombinedOutput(); err != nil {
-		return fmt.Errorf("git commit: %s: %w", string(out), err)
+	if err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		gitRm := exec.Command("git", "rm", "-r", "--force", filepath.Join("sessions", sessionName))
+		gitRm.Dir = ledgerPath
+		if out, err := gitRm.CombinedOutput(); err != nil {
+			return fmt.Errorf("git rm: %s: %w", string(out), err)
+		}
+		gitCommit := exec.Command("git", "commit", "-m", commitMsg)
+		gitCommit.Dir = ledgerPath
+		if out, err := gitCommit.CombinedOutput(); err != nil {
+			return fmt.Errorf("git commit: %s: %w", string(out), err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	// push with retry — no --force: ledger history must never be rewritten
 	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
+		ImmutablePaths:      true, // the Ledger never renames paths
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 	}); err != nil {
 		return fmt.Errorf("git push: %w", err)

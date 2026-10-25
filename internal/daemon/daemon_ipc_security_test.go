@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session/adapters"
@@ -90,7 +92,11 @@ func TestPublishMurmur_RejectsTraversalDoesNotWrite(t *testing.T) {
 	canary := filepath.Join(tmp, "stolen.json")
 	require.NoFileExists(t, canary, "preflight: canary must not exist yet")
 
-	d := &Daemon{logger: slog.New(slog.NewTextHandler(testWriter{t}, nil))}
+	completed := make(chan struct{}, 3)
+	d := &Daemon{logger: slog.New(murmurPublishCompletionHandler{
+		Handler:   slog.NewTextHandler(testWriter{t}, nil),
+		completed: completed,
+	})}
 	svc := &daemonServiceImpl{d: d}
 
 	// Attack 1: target_dir outside any workspace.
@@ -114,12 +120,37 @@ func TestPublishMurmur_RejectsTraversalDoesNotWrite(t *testing.T) {
 		MurmurJSON: []byte(`{"evil":true}`),
 	})
 
-	// PublishMurmur fires the disk write on a goroutine after validation passes.
-	// Since all three attacks must be rejected synchronously before the goroutine
-	// spawns, no canary file can ever appear. Assert immediately.
+	// PublishMurmur validates inside its worker. Wait for each terminal rejection
+	// and its test log to finish before inspecting disk or releasing testing.T.
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for range 3 {
+		select {
+		case <-completed:
+		case <-deadline.C:
+			t.Fatal("murmur rejection workers did not finish within 2s")
+		}
+	}
 	assert.NoFileExists(t, canary, "rejected murmur must not write the canary")
 	assert.NoFileExists(t, filepath.Join(ledger, "stolen.json"),
 		"rejected murmur must not write inside ledger either")
+}
+
+// Completion follows the underlying handler, so the worker cannot call t.Log
+// after the test has received its terminal rejection notification.
+type murmurPublishCompletionHandler struct {
+	slog.Handler
+	completed chan<- struct{}
+}
+
+// Handle signals only after the rejected publish's warning has been forwarded.
+// Waiting for that signal prevents asynchronous logging against an ended test.
+func (h murmurPublishCompletionHandler) Handle(ctx context.Context, record slog.Record) error {
+	err := h.Handler.Handle(ctx, record)
+	if record.Message == "murmur publish failed" {
+		h.completed <- struct{}{}
+	}
+	return err
 }
 
 // TestValidateSessionName_RejectsTraversal pins the trust-boundary contract
@@ -383,4 +414,35 @@ func TestSessionFinalize_RejectsWhenAuthorityLedgerUnset(t *testing.T) {
 			LedgerPath:  "/tmp/attacker-repo",
 		})
 	})
+}
+
+// Failure prevented: a same-UID peer sends a finalize request whose cache
+// path ends in "/." (or names another folder). The hold and quarantine checks
+// key on the folder's last element, so they looked up "." or the wrong name,
+// and a held session was summarized.
+func TestFinalizeSessionDir_TrustsOnlyTheNamedSessionFolder(t *testing.T) {
+	ledger := t.TempDir()
+	const name = "2026-10-05T10-00-devon-OxNaMe"
+	cache := filepath.Join(ledger, ".sageox", "cache", "sessions", name)
+	fallback := filepath.Join(ledger, "sessions", name)
+	tests := []struct {
+		label     string
+		cachePath string
+		wantDir   string
+		trusted   bool
+	}{
+		{"no cache path", "", fallback, true},
+		{"the session's cache folder", cache, cache, true},
+		{"trailing /. is cleaned", cache + "/.", cache, true},
+		{"another session's folder", filepath.Join(ledger, ".sageox", "cache", "sessions", "2026-10-05T11-00-devon-OxOthr"), fallback, false},
+		{"the parent of the folder", filepath.Join(cache, ".."), fallback, false},
+		{"outside the ledger", filepath.Join(t.TempDir(), name), fallback, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.label, func(t *testing.T) {
+			dir, trusted := finalizeSessionDir(ledger, name, tt.cachePath)
+			assert.Equal(t, tt.wantDir, dir)
+			assert.Equal(t, tt.trusted, trusted)
+		})
+	}
 }

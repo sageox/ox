@@ -39,10 +39,10 @@ func resetExpiryWarnedKeysForTest() {
 	expiryWarnedKeys = map[string]bool{}
 }
 
-// CheckAndWarnExpiry emits a single-line stderr warning when the PAT for
-// the given endpoint is within max(1d, lifetime*pct) of expiry. Returns
-// true if a warning was emitted; false otherwise (including all skip
-// cases — ephemeral, never-expires, dedup, non-TTY, no auth).
+// CheckAndWarnExpiry emits a single-line stderr warning when the SAGEOX_TOKEN
+// credential for the given endpoint is within max(1d, lifetime*pct) of expiry.
+// Returns true if a warning was emitted; false otherwise (including all skip
+// cases — ephemeral, disk-stored, never-expires, dedup, non-TTY, no auth).
 //
 // Skipped silently when:
 //   - runtime.Caps().Browser is false (no human at keyboard — sandbox,
@@ -51,6 +51,9 @@ func resetExpiryWarnedKeysForTest() {
 //   - the writer is not a TTY (unless the *os.File path resolves to stderr
 //     and the caller has already decided to force; today the policy is
 //     "TTY only" with no override flag — keep it simple)
+//   - the credential came from auth.json rather than SAGEOX_TOKEN — its
+//     expiry is an auto-rotating access-token stamp, not a lifetime a user
+//     can act on (see resolveTokenExpiry)
 //   - the token has never-expires semantics (ExpiresAt == nil)
 //   - the same token hash already warned this process
 //   - no token is configured for the endpoint (nothing to warn about)
@@ -83,7 +86,7 @@ func CheckAndWarnExpiry(ctx context.Context, ep string, w io.Writer) bool {
 		return false
 	}
 
-	expiresAt, createdAt, label, ok := resolveTokenExpiry(ctx, ep, token)
+	expiresAt, createdAt, ok := resolveTokenExpiry(ctx, ep, token)
 	if !ok {
 		return false
 	}
@@ -111,44 +114,43 @@ func CheckAndWarnExpiry(ctx context.Context, ep string, w io.Writer) bool {
 	expiryWarnedKeys[key] = true
 	expiryWarnedKeysMu.Unlock()
 
-	emitExpiryWarning(w, ep, label, remaining)
+	emitExpiryWarning(w, ep, "env", remaining)
 	return true
 }
 
-// resolveTokenExpiry returns the authoritative expiry + creation time for
-// the token. For env-supplied tokens it consults the token-meta cache
-// (calling /api/v1/auth/me when stale); for disk-stored tokens it trusts
-// StoredToken.ExpiresAt directly. The third return value is a short
-// human label ("env" or "disk") for the warning's diagnostic key.
+// resolveTokenExpiry returns the authoritative expiry + creation time for an
+// env-supplied token, read from the token-meta cache.
 //
-// Returns ok=false when the token is never-expires (ExpiresAt nil or
-// zero-valued) or when no expiry information is available.
-func resolveTokenExpiry(ctx context.Context, ep string, token *StoredToken) (expiresAt time.Time, createdAt time.Time, label string, ok bool) {
-	if isEnvToken(ep, token) {
-		meta, err := FetchTokenMetaCached(ctx, ep, token.AccessToken)
-		if err != nil || meta == nil {
-			return time.Time{}, time.Time{}, "", false
-		}
-		if meta.ExpiresAt == nil || meta.ExpiresAt.IsZero() {
-			// never-expires token: no warning, ever.
-			return time.Time{}, time.Time{}, "", false
-		}
-		created := meta.CreatedAt
-		if created.IsZero() {
-			created = meta.ExpiresAt.Add(-envTokenAssumedLifetime)
-		}
-		return *meta.ExpiresAt, created, "env", true
+// Only env-supplied tokens can produce a warning. device_flow.go and refresh.go
+// are the only writers of auth.json, so a disk-stored StoredToken.ExpiresAt is
+// always the OAuth ACCESS token's expiry — a value in the hours that the refresh
+// grant rotates on its own — never a credential lifetime. Warning on it told
+// every logged-in user their token expired within the hour and pointed them at
+// the PAT minting page; status.go renders "auto-refresh enabled" for the same
+// reason. When the server issues no refresh credential at all, re-login is
+// genuinely required, but that is already surfaced at login (device_flow.go)
+// and by status.go's "Re-login by" row, and `ox login` — not a new PAT — is the
+// remedy this warning would name.
+//
+// Returns ok=false for any disk-stored token, for a never-expires token
+// (ExpiresAt nil or zero-valued), and when no expiry information is available.
+func resolveTokenExpiry(ctx context.Context, ep string, token *StoredToken) (expiresAt time.Time, createdAt time.Time, ok bool) {
+	if !isEnvToken(ep, token) {
+		return time.Time{}, time.Time{}, false
 	}
-
-	// disk-stored token — ExpiresAt is set by the OAuth flow.
-	if token.ExpiresAt.IsZero() {
-		return time.Time{}, time.Time{}, "", false
+	meta, err := FetchTokenMetaCached(ctx, ep, token.AccessToken)
+	if err != nil || meta == nil {
+		return time.Time{}, time.Time{}, false
 	}
-	// CreatedAt isn't tracked on StoredToken — approximate via fixed
-	// assumed lifetime. The threshold math still floors at 1 day so this
-	// can't pathologically over-warn.
-	created := token.ExpiresAt.Add(-envTokenAssumedLifetime)
-	return token.ExpiresAt, created, "disk", true
+	if meta.ExpiresAt == nil || meta.ExpiresAt.IsZero() {
+		// never-expires token: no warning, ever.
+		return time.Time{}, time.Time{}, false
+	}
+	created := meta.CreatedAt
+	if created.IsZero() {
+		created = meta.ExpiresAt.Add(-envTokenAssumedLifetime)
+	}
+	return *meta.ExpiresAt, created, true
 }
 
 // computeExpiryThreshold returns the duration before expiry at which the
@@ -221,7 +223,12 @@ func humanizeDuration(d time.Duration) string {
 // writerIsTTY returns true when w is an *os.File pointing at a TTY. Any
 // other writer (bytes.Buffer in tests, pipes, files) returns false — we
 // never spam non-interactive consumers.
-func writerIsTTY(w io.Writer) bool {
+//
+// A var, not a plain func, so tests can reach the code below the gate. Every
+// caller passes os.Stderr and no test can hand it a real terminal without a
+// pty, so with a fixed gate the entire decision — threshold, dedupe, and the
+// emitted line itself — is unreachable from the test suite.
+var writerIsTTY = func(w io.Writer) bool {
 	f, ok := w.(*os.File)
 	if !ok {
 		return false

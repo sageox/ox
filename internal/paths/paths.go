@@ -153,6 +153,14 @@ func WhisperDBDir(repoID, endpointURL string) string {
 	return filepath.Join(LedgersDataDir(repoID, endpointURL), ".sageox", "cache", "whisper")
 }
 
+// IsHiddenTeamsEntry reports whether a name inside TeamsDataDir is ox-internal
+// scratch (a clone staging directory such as ".team_x.tmp-123"), not a team
+// context. Every directory scan of the teams directory must skip these, or a
+// half-built clone is listed, and imported into, as if it were a team.
+func IsHiddenTeamsEntry(name string) bool {
+	return strings.HasPrefix(name, ".")
+}
+
 // TeamWhisperDBDir returns the directory for a team's whisper SQLite database.
 // Shared across daemons on the same machine that pull the same team context.
 // Format: ~/.local/share/sageox/<endpoint>/teams/<teamID>/.sageox/cache/whisper/
@@ -389,6 +397,16 @@ func DaemonLogFile(repoID, workspaceID string) string {
 	return filepath.Join(logDir, fmt.Sprintf("daemon_%s_%s.log", repoID, workspaceID))
 }
 
+// AgentPayloadLogFile returns the diagnostics file for payload-producing
+// commands (`ox agent prime`, `ox agent hook`). Their stderr is fenced off
+// (see logger.InitPayloadMode) because hooks pipe it into the model's
+// context, so WARN-level diagnostics land here instead.
+//
+//	~/.cache/sageox/logs/agent-payload.log (or XDG equivalent)
+func AgentPayloadLogFile() string {
+	return filepath.Join(CacheDir(), "logs", "agent-payload.log")
+}
+
 // DaemonCacheDir returns the base directory for daemon cache files.
 // Used for heartbeats and other daemon-managed cache data.
 //
@@ -417,6 +435,28 @@ func HeartbeatCacheDir(ep string) string {
 		slug = "unknown"
 	}
 	return filepath.Join(CacheDir(), slug, "heartbeats")
+}
+
+// ClaudeOrgSyncFile returns the cached server report of which team skills each
+// of the user's teams already delivers through a Claude organization plugin:
+//
+//	~/.cache/sageox/<endpoint>/claude-org-sync.json
+//
+// A cache in the strict sense: deleting it only makes ox copy those skills into
+// .claude/skills again until the daemon's next team discovery rewrites it.
+//
+// Unlike HeartbeatCacheDir, an empty endpoint returns "" rather than panicking:
+// this is read on the prime hot path, where "no record" is a safe answer and a
+// panic is a failed session.
+func ClaudeOrgSyncFile(ep string) string {
+	if ep == "" {
+		return ""
+	}
+	slug := endpoint.NormalizeSlug(ep)
+	if slug == "" {
+		slug = "unknown"
+	}
+	return filepath.Join(CacheDir(), slug, "claude-org-sync.json")
 }
 
 // -----------------------------------------------------------------------------

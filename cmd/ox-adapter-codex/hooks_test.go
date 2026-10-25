@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -166,6 +167,51 @@ func TestHandleInstallHooks_IsIdempotentAfterLegacyMigration(t *testing.T) {
 	assert.Equal(t, firstHooks, secondHooks)
 }
 
+// Fresh installs and upgrades must bound hook execution without changing
+// another tool's timeout or losing the limits on the next install.
+func TestHandleInstallHooks_BoundsExecution(t *testing.T) {
+	for _, scope := range []string{"project", "user"} {
+		t.Run(scope, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			params := adapterprotocol.HookParams{RepoRoot: t.TempDir(), Scope: scope}
+			hooksPath := resolveHooksPath(params.RepoRoot, scope)
+			legacy := map[string][]codexHookEntry{
+				"SessionStart": {{Hooks: []codexHook{{Type: "command", Command: hookCommand("SessionStart"), Timeout: 600}}}},
+				"SessionEnd":   {{Hooks: []codexHook{{Type: "command", Command: hookCommand("SessionEnd")}}}},
+				"Stop":         {{Hooks: []codexHook{{Type: "command", Command: "echo custom-hook", Timeout: 17}}}},
+			}
+			require.NoError(t, writeHooksFile(hooksPath, legacy, nil, scope))
+			wantTimeouts := map[string]int{
+				"SessionStart": 10, "PreToolUse": 10, "PostToolUse": 10,
+				"UserPromptSubmit": 10, "Stop": 10, "SessionEnd": 3,
+			}
+			for range 2 {
+				response, err := handleInstallHooks(params)
+				require.NoError(t, err)
+				require.True(t, response.Installed)
+				hooks, _, err := readHooksFile(hooksPath)
+				require.NoError(t, err)
+				for event, want := range wantTimeouts {
+					count := 0
+					for _, entry := range hooks[event] {
+						for _, hook := range entry.Hooks {
+							if hook.Command == "echo custom-hook" {
+								assert.Equal(t, 17, hook.Timeout)
+								continue
+							}
+							assert.Equal(t, hookCommand(event), hook.Command)
+							assert.Equal(t, want, hook.Timeout, event)
+							count++
+						}
+					}
+					assert.Equal(t, 1, count, event)
+				}
+				assert.Equal(t, "echo custom-hook", hooks["Stop"][0].Hooks[0].Command)
+			}
+		})
+	}
+}
+
 func TestHandleUninstallHooks_LeavesCodexConfigUntouched(t *testing.T) {
 	repoRoot := t.TempDir()
 	params := adapterprotocol.HookParams{RepoRoot: repoRoot, Scope: "project"}
@@ -269,4 +315,40 @@ func TestHandleDiagnose_CodexProjectMissingHooks(t *testing.T) {
 	require.Len(t, result.Issues, 1)
 	assert.Equal(t, "codex:hooks-missing", result.Issues[0].Slug)
 	assert.True(t, result.Issues[0].FixSafe)
+}
+
+// Installs written by older ox versions carry five events. Doctor's check must
+// flag them, and a re-install must add SessionEnd without touching the rest,
+// or Codex sessions on upgraded machines keep waiting for a manual stop.
+func TestHandleInstallHooks_AddsSessionEndToExistingInstall(t *testing.T) {
+	repoRoot := t.TempDir()
+	hooksPath := filepath.Join(repoRoot, codexProjectPath, codexHooksFileName)
+	legacy := map[string][]codexHookEntry{}
+	for _, event := range []string{"SessionStart", "PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop"} {
+		legacy[event] = mergeHookEntries(nil, hookCommand(event), event)
+	}
+	legacy["Stop"] = append(legacy["Stop"], codexHookEntry{Hooks: []codexHook{{Type: "command", Command: "echo user-hook"}}})
+	require.NoError(t, writeHooksFile(hooksPath, legacy, map[string]json.RawMessage{}, "project"))
+
+	check, err := handleCheckHooks(adapterprotocol.HookParams{RepoRoot: repoRoot, Scope: "project"})
+	require.NoError(t, err)
+	assert.False(t, check.Installed, "a five-event install predates SessionEnd and must be reported incomplete")
+
+	response, err := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: repoRoot, Scope: "project"})
+	require.NoError(t, err)
+	assert.Equal(t, codexHookEvents, response.Hooks)
+
+	hooksMap, _, err := readHooksFile(hooksPath)
+	require.NoError(t, err)
+	require.Len(t, hooksMap["SessionEnd"], 1)
+	require.Len(t, hooksMap["SessionEnd"][0].Hooks, 1)
+	assert.Equal(t, hookCommand("SessionEnd"), hooksMap["SessionEnd"][0].Hooks[0].Command)
+	assert.Contains(t, hooksMap["SessionEnd"][0].Hooks[0].Command, "ox agent hook SessionEnd")
+	assert.Equal(t, "SageOx: finalizing recordings; publishing if configured", hooksMap["SessionEnd"][0].Hooks[0].StatusMessage)
+	require.Len(t, hooksMap["Stop"], 2, "the user's own Stop hook must survive the re-install")
+	assert.Equal(t, "echo user-hook", hooksMap["Stop"][1].Hooks[0].Command)
+
+	check, err = handleCheckHooks(adapterprotocol.HookParams{RepoRoot: repoRoot, Scope: "project"})
+	require.NoError(t, err)
+	assert.True(t, check.Installed)
 }

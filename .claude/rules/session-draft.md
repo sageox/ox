@@ -18,6 +18,12 @@ wholesale at session stop.
 
 Full rationale: [docs/adr/ADR-029-session-draft-placeholder.md](../../docs/adr/ADR-029-session-draft-placeholder.md).
 
+Consumers **outside** this repo cannot call `IsDraft()` — it is an internal Go method. Their
+rule is the wire equivalent: **inspect the JSON `draft` field in `sessions/<name>/meta.json`,
+and treat absent or `false` as not-a-draft.** Same fail-safe direction, same three obligations
+(plus the two counter rules). See ADR-029, "The contract for consumers outside the CLI."
+`IsDraft()` stays the in-repo Go form of that one rule.
+
 ---
 
 ## The one rule

@@ -107,3 +107,35 @@ func TestRepairLedgerRebaseWedge_CleanRepo(t *testing.T) {
 	res := repairLedgerRebaseWedge(context.Background(), repo, repo)
 	assert.Equal(t, StatusClean, res.Status)
 }
+
+// A live sync owns the clone lock while it fetches or rebases. The background
+// sweep must defer rather than aborting that operation based on stale state it
+// observed before the owner acquired the lock.
+func TestRepairLedgerRebaseWedge_DefersWhileRepoLocked(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: spawns git subprocesses")
+	}
+	repo := makeZombieLedger(t, true)
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- gitutil.WithRepoLock(context.Background(), repo, func() error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	res := repairLedgerRebaseWedge(ctx, repo, repo)
+	cancel()
+
+	assert.Equal(t, StatusClean, res.Status)
+	assert.Contains(t, res.Summary, "deferred")
+	assert.True(t, gitutil.IsRebaseInProgress(repo), "lock contention must leave the rebase untouched")
+	close(release)
+	require.NoError(t, <-done)
+}

@@ -214,7 +214,7 @@ func formatReminderContent(state *session.RecordingState, dest string, isFirst b
 		// First fire: counts are ~0 at t=0 (near-zero info), so spend the line
 		// on who-sees-this + how-to-stop + where-to-learn instead.
 		return fmt.Sprintf(
-			tell+"\"Recording to %s · your teammates can read this session · stop: /ox-session-stop · %s\"",
+			tell+"\"Recording to %s · your teammates can read this session · stop: ox agent session stop · %s\"",
 			dest, constants.RecordingDocsURL)
 	}
 

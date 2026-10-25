@@ -1,7 +1,7 @@
 ---
 title: "ox decision"
 description: "CLI reference for ox decision"
-sidebar_position: 24
+sidebar_position: 36
 ---
 
 ## ox decision
@@ -31,16 +31,17 @@ LLM/network cost; every citation it emits resolves.
 ### Options inherited from parent commands
 
 ```
-  -c, --config string    config file path (default: .sageox/config.yaml)
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
       --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
   -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
 ```
 
 ### SEE ALSO
 
 * [ox](/)	 - Shared team context that makes agentic engineering multiplayer
 * [ox decision enrich](/decision/enrich)	 - Enrich a Decision Record (or DR topic) with team context (JSON by default)
-

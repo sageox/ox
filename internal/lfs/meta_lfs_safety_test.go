@@ -84,7 +84,7 @@ func TestMutateSessionMeta_PointerWritersCannotClobberGitContent(t *testing.T) {
 	// replace summary.json's real bytes (WritePointerFiles already
 	// skips Storage=git, but we want a regression test for it because
 	// the consequences of a future change are silent data loss).
-	if _, err := WritePointerFiles(dir, final.Files); err != nil {
+	if _, err := WritePointerFiles(dir, AssertUploadedManifest(final.Files)); err != nil {
 		t.Fatalf("WritePointerFiles: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(dir, "summary.json"))
@@ -115,7 +115,7 @@ func TestWritePointerFiles_SkipsStorageGit(t *testing.T) {
 	files := map[string]FileRef{
 		"report.md": NewGitFileRef(int64(len(userBytes))),
 	}
-	written, err := WritePointerFiles(dir, files)
+	written, err := WritePointerFiles(dir, AssertUploadedManifest(files))
 	if err != nil {
 		t.Fatal(err)
 	}

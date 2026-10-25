@@ -547,12 +547,12 @@ func TestDiscoverAgents_SkipsNonMdFiles(t *testing.T) {
 	}
 
 	// non-.md files and directories should be skipped
-	os.WriteFile(filepath.Join(agentsDir, "notes.txt"), []byte("not an agent"), 0644)
-	os.WriteFile(filepath.Join(agentsDir, "config.json"), []byte("{}"), 0644)
-	os.Mkdir(filepath.Join(agentsDir, "subdir"), 0755)
+	_ = os.WriteFile(filepath.Join(agentsDir, "notes.txt"), []byte("not an agent"), 0644)
+	_ = os.WriteFile(filepath.Join(agentsDir, "config.json"), []byte("{}"), 0644)
+	_ = os.Mkdir(filepath.Join(agentsDir, "subdir"), 0755)
 
 	// one valid agent
-	os.WriteFile(filepath.Join(agentsDir, "valid.md"), []byte("---\ndescription: Valid\n---\n"), 0644)
+	_ = os.WriteFile(filepath.Join(agentsDir, "valid.md"), []byte("---\ndescription: Valid\n---\n"), 0644)
 
 	agents, err := DiscoverAgents(tmpDir)
 	if err != nil {
@@ -636,12 +636,12 @@ func TestDiscoverTeamCommands_SkipsNonMdAndIndex(t *testing.T) {
 	}
 
 	// these should all be skipped
-	os.WriteFile(filepath.Join(commandsDir, "index.md"), []byte("# Index"), 0644)
-	os.WriteFile(filepath.Join(commandsDir, "notes.txt"), []byte("not a command"), 0644)
-	os.Mkdir(filepath.Join(commandsDir, "subdir"), 0755)
+	_ = os.WriteFile(filepath.Join(commandsDir, "index.md"), []byte("# Index"), 0644)
+	_ = os.WriteFile(filepath.Join(commandsDir, "notes.txt"), []byte("not a command"), 0644)
+	_ = os.Mkdir(filepath.Join(commandsDir, "subdir"), 0755)
 
 	// one valid command
-	os.WriteFile(filepath.Join(commandsDir, "deploy.md"), []byte("---\ndescription: Deploy\n---\n"), 0644)
+	_ = os.WriteFile(filepath.Join(commandsDir, "deploy.md"), []byte("---\ndescription: Deploy\n---\n"), 0644)
 
 	commands, err := DiscoverTeamCommands(tmpDir)
 	if err != nil {
@@ -705,7 +705,7 @@ func TestDiscoverAll_WithCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	os.WriteFile(filepath.Join(commandsDir, "deploy.md"), []byte("---\ndescription: Deploy\n---\n"), 0644)
+	_ = os.WriteFile(filepath.Join(commandsDir, "deploy.md"), []byte("---\ndescription: Deploy\n---\n"), 0644)
 
 	tc, err := DiscoverAll(tmpDir)
 	if err != nil {

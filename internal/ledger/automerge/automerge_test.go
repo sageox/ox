@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sageox/ox/internal/gitutil"
 )
 
 // initTestRepo creates a fresh git repo in dir and returns its path.
@@ -148,14 +150,14 @@ func TestResolve_AcceptTheirsTier(t *testing.T) {
 	// commit being replayed) is feature's content. ResolveRebaseAcceptTheirs
 	// picks that side. We just verify the file is no longer in conflict.
 	got := readFile(t, repo, "data/feed.json")
-	if hasConflictMarkers([]byte(got)) {
+	if gitutil.HasConflictMarkersBytes([]byte(got)) {
 		t.Errorf("expected resolved content, got conflict markers: %s", got)
 	}
 }
 
 func TestResolve_LLMTier(t *testing.T) {
 	t.Parallel()
-	repo := makeRebaseConflict(t, "config.toml", "version = \"ours\"\n", "version = \"theirs\"\n")
+	repo := makeRebaseConflict(t, "config.toml", "ours = 1\n", "theirs = 2\n")
 
 	r := New(Options{LLMBinary: "fake-llm"})
 	// The LookPath gate in tryLLMTier requires the binary to resolve from
@@ -168,7 +170,7 @@ func TestResolve_LLMTier(t *testing.T) {
 	}
 	r.opts.LLMBinary = gitBin
 	r.runLLM = func(ctx context.Context, binary, prompt string) (string, error) {
-		return "version = \"ours-and-theirs\"\n", nil
+		return "ours = 1\ntheirs = 2\n", nil
 	}
 
 	ok, err := r.Resolve(context.Background(), repo)
@@ -179,7 +181,7 @@ func TestResolve_LLMTier(t *testing.T) {
 		t.Fatal("expected ok=true")
 	}
 	got := readFile(t, repo, "config.toml")
-	if !strings.Contains(got, "ours-and-theirs") {
+	if !strings.Contains(got, "ours = 1") || !strings.Contains(got, "theirs = 2") {
 		t.Errorf("expected merged content, got: %s", got)
 	}
 }
@@ -235,25 +237,29 @@ func TestTryUnionTier_LeavesMarkedFiles(t *testing.T) {
 	}
 }
 
-func TestHasConflictMarkers(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		in   string
-		want bool
-	}{
-		{"empty", "", false},
-		{"plain", "hello\n", false},
-		{"marker at start of line", "a\n<<<<<<< HEAD\nb\n", true},
-		{"marker mid-line is not a marker", "echo \"<<<<<<< embedded\"\n", false},
-		{"only at line start", "<<<<<<< X\n", true},
+// TestResolve_OrphanedMarkerTailIsNotStagedAsResolved checks that a file which
+// lost its opening marker but kept the "=======" and ">>>>>>>" tail stays unmerged.
+// Failure prevented: the union tier stages the tail and the rebase commits it.
+func TestResolve_OrphanedMarkerTailIsNotStagedAsResolved(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: builds a real halted rebase")
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := hasConflictMarkers([]byte(tc.in)); got != tc.want {
-				t.Errorf("hasConflictMarkers(%q) = %v, want %v", tc.in, got, tc.want)
-			}
-		})
+	t.Parallel()
+	const path = "sessions/example/meta.json"
+	repo := makeRebaseConflict(t, path, `{"summary_attempts": 2}`+"\n", `{"summary_attempts": 3}`+"\n")
+	writeFile(t, repo, path, "{\n  \"stopped_at\": \"2026-09-22T16:59:31.860617Z\",\n=======\n  \"summary_attempts\": 3,\n>>>>>>> Stashed changes\n}\n")
+
+	// no safe prefixes and no LLM binary, so only the union tier can stage it
+	ok, err := New(Options{}).Resolve(context.Background(), repo)
+	if ok || !errors.Is(err, ErrLLMUnavailable) {
+		t.Fatalf("Resolve = (%v, %v), want the tail left unresolved", ok, err)
+	}
+	conflicts, err := listConflictedPaths(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("list conflicts: %v", err)
+	}
+	if len(conflicts) != 1 || conflicts[0] != path {
+		t.Errorf("expected %s still unmerged, got %v", path, conflicts)
 	}
 }
 

@@ -75,10 +75,19 @@ func NewGitPollWatcher(projectRoot string, accumulator *ChangeAccumulator, logge
 // occur after the watch starts are reported, so a daemon starting against an
 // already-dirty tree doesn't murmur the entire pre-existing change set.
 func (w *GitPollWatcher) Start(ctx context.Context) {
+	w.start(ctx, nil)
+}
+
+// start exposes a readiness signal to package tests without weakening Start's
+// production API. ready closes only after the silent baseline is established.
+func (w *GitPollWatcher) start(ctx context.Context, ready chan<- struct{}) {
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 
 	w.poll(ctx, true) // baseline only — record state, emit nothing
+	if ready != nil {
+		close(ready)
+	}
 	w.logger.Info("git poll watcher started", "root", w.projectRoot, "interval", w.interval)
 
 	for {

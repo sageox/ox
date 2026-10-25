@@ -34,7 +34,12 @@ docs/design/**/*.webm
 *.dylib
 *.test
 *.out
+*.out.provenance.json
 go.work
+
+# python tooling
+__pycache__/
+*.py[cod]
 
 # dependencies
 /vendor/
@@ -62,6 +67,11 @@ Thumbs.db
 coverage/
 coverage.html
 
+# CI test artifacts — written at the repo root by the PR gate
+# (TEST_JUNIT / TEST_TIMINGS), so reproducing it locally leaves them behind
+test-results.xml
+test-timings.json
+
 # test session artifacts
 internal/session/sessions/
 
@@ -83,6 +93,7 @@ sessions/
 # But DO track our plugin marketplace and manifest
 !/.claude-plugin/
 !/claude-plugin/.claude-plugin/
+!/internal/pet/mod/.claude-plugin/
 
 # Claude Code local settings (user-specific)
 .claude/settings.local.json
@@ -91,12 +102,18 @@ sessions/
 # Claude scheduled-task runtime lock (ephemeral: session PID + timestamp)
 .claude/scheduled_tasks.lock
 
+# Share repository hooks; keep other Codex state local.
 .codex/
+!/.codex/
+/.codex/*
+!/.codex/hooks.json
 
 team-contexts/
 
 demo/credentials.sops.yaml
 demo/playwright/node_modules/
+packages/plan-review/node_modules/
+packages/plan-review/dist/
 .
 # Conductor workspace artifacts (blue-green GC reclone). Artifact paths are
 # <workspace-path> + suffix (no separator, e.g. "ledger.gc-diff"), so these

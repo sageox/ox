@@ -31,9 +31,9 @@ func TestRepoRelativePaths(t *testing.T) {
 		{
 			name:    "skills-dir-relative names become repo-relative",
 			baseDir: filepath.Join(repo, ".claude", "skills"),
-			names:   []string{filepath.FromSlash("ox-plan/SKILL.md")},
-			want:    []string{filepath.FromSlash(".claude/skills/ox-plan/SKILL.md")},
-			why:     "reporting ox-plan/SKILL.md made ox look for it at the repo root",
+			names:   []string{filepath.FromSlash("ox-cli-plan/SKILL.md")},
+			want:    []string{filepath.FromSlash(".claude/skills/ox-cli-plan/SKILL.md")},
+			why:     "reporting ox-cli-plan/SKILL.md made ox look for it at the repo root",
 		},
 		{
 			name:    "already-absolute names are re-expressed, not re-joined",

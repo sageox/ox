@@ -14,11 +14,13 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/search"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/decision"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/ledgersearch"
 	"github.com/sageox/ox/internal/observability"
 )
@@ -125,7 +127,7 @@ const queryUsage = `Usage: ox query "search text" [flags]
 Flags:
   --limit N      Max results to return (default: 5)
   --mode MODE    Search mode: hybrid, knn, or bm25 (default: hybrid)
-  --team ID      Team ID to search (default: from project config)
+  --team ID      Team ID to search (default: project config, else the credential's team)
   --repo ID      Repo ID to search (default: from project config)
   --source SRC   Search source: team (default), code, local, all
   --local        Shorthand for --source=local (zero-network ledger search)
@@ -241,7 +243,7 @@ func writeQueryResponse(combined *combinedQueryResponse, qa *queryArgs) (int, er
 		LocalResults: combined.LocalResults,
 	}
 	if len(combined.CodeResults) > 0 {
-		compact := compactSearchResults(combined.CodeResults, qa.limit, decision.PathMatcher(findGitRoot()))
+		compact := compactSearchResults(combined.CodeResults, qa.limit, 0, decision.PathMatcher(findGitRoot()))
 		resp.CodeResults = compact.Results
 		resp.Guidance = compact.Guidance
 	}
@@ -262,8 +264,43 @@ func writeQueryResponse(combined *combinedQueryResponse, qa *queryArgs) (int, er
 	}
 
 	outputBytes := buf.Len()
-	_, err := buf.WriteTo(os.Stdout)
+	err := cli.WriteJSONBytes(os.Stdout, buf.Bytes())
 	return outputBytes, err
+}
+
+// errNoTeamOrRepoID is the answer when nothing — flags, project config, or the
+// credential itself — names a team or a repo to search. `ox init` and the
+// explicit flags are the only remedies left at that point.
+var errNoTeamOrRepoID = errors.New("no team or repo ID available. Run 'ox init' first or pass --team/--repo flags")
+
+// teamIDFromCredential asks the introspection endpoint which team the bearer
+// credential authenticates as. Only a team-scoped credential names one.
+//
+// errNoTeamOrRepoID is reserved for the one case it describes: introspection
+// ANSWERED, and the answer named no single team. Every way of failing to get an
+// answer — offline, rejected, unreadable — keeps its own error, because none of
+// them is an initialization problem and `ox init` cannot fix any of them (it
+// needs a working credential itself). Collapsing them would tell a coworker
+// holding a revoked token to run the one command that will fail the same way.
+func teamIDFromCredential(ep, accessToken string) (string, error) {
+	res, err := auth.Introspect(ep, accessToken)
+	if err != nil {
+		if errors.Is(err, auth.ErrEndpointUnreachable) {
+			return "", fmt.Errorf("no team or repo ID available and %s could not be reached to read the one your credential is bound to: %w",
+				endpoint.NormalizeEndpoint(ep), err)
+		}
+		// Rejected credential or an unreadable answer. Introspect deliberately
+		// carries no sentinel to tell those apart (the server returns a uniform
+		// 401 so a caller cannot enumerate which credentials exist), so name
+		// the likely remedy conditionally rather than assert the wrong one for
+		// what may be a protocol fault. Its message is already redacted.
+		return "", fmt.Errorf("could not read the team your credential is bound to: %w (run 'ox login' if it is stale)", err)
+	}
+	if res.Team == nil || res.Team.TeamID == "" {
+		return "", errNoTeamOrRepoID
+	}
+	slog.Debug("team id defaulted from credential", "team_id", res.Team.TeamID)
+	return res.Team.TeamID, nil
 }
 
 // queryTeamContext searches team context via the vector search API.
@@ -293,14 +330,39 @@ func queryTeamContext(qa *queryArgs, projectRoot, agentID, agentType string) (*a
 	if qa.repoID != "" {
 		req.Repos = []string{qa.repoID}
 	}
-	if len(req.Teams) == 0 && len(req.Repos) == 0 {
-		return nil, fmt.Errorf("no team or repo ID available. Run 'ox init' first or pass --team/--repo flags")
-	}
 
 	ep := endpoint.GetForProject(projectRoot)
 	token, err := auth.EnsureValidTokenForEndpoint(ep, 300)
-	if err != nil || token == nil || token.AccessToken == "" {
-		return nil, fmt.Errorf("not authenticated. Run 'ox login' first")
+	if err != nil {
+		return nil, fmt.Errorf("load credentials: %w", err)
+	}
+	if token == nil || token.AccessToken == "" {
+		return nil, errkind.Errorf(errkind.NotLoggedIn, "not authenticated. Run 'ox login' first")
+	}
+
+	// Outside an initialized repo the credential is the only identity there
+	// is, and a team-scoped one names exactly one team. Refusing here without
+	// asking sent the caller to `ox init` — wrong for a scratch directory or a
+	// CI checkout that only wants to read — for a fact the credential already
+	// carries and `ox status` already prints. Last resort by construction:
+	// --team/--repo and the project config are both resolved above.
+	if len(req.Teams) == 0 && len(req.Repos) == 0 {
+		teamID, err := teamIDFromCredential(ep, token.AccessToken)
+		if err != nil {
+			return nil, err
+		}
+		req.Teams = []string{teamID}
+		// A credential binds to a team, not a checkout, so this branch has no
+		// repo to name. Without asking for the team's ledgers, "search team
+		// knowledge" answers from team context alone and silently omits every
+		// session, plan, and murmur.
+		//
+		// Deliberately NOT set for every teams-only request, though the server
+		// accepts it from any caller: `--team` with no repo narrows the same
+		// way, but turning it on there would change results for callers who
+		// have them today. That is a separate decision from fixing a path that
+		// returns nothing at all.
+		req.IncludeTeamRepos = true
 	}
 
 	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(token.AccessToken)
@@ -318,7 +380,7 @@ func queryTeamContext(qa *queryArgs, projectRoot, agentID, agentType string) (*a
 	}
 	if err != nil {
 		if errors.Is(err, api.ErrUnauthorized) {
-			return nil, fmt.Errorf("not authenticated. Run 'ox login' first")
+			return nil, errkind.Errorf(errkind.Auth, "not authenticated. Run 'ox login' first")
 		}
 		if errors.Is(err, api.ErrVersionUnsupported) {
 			return nil, fmt.Errorf("CLI version too old. Run 'ox version' and update")

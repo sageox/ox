@@ -41,6 +41,9 @@ const HistorySchemaVersion = "1"
 // HistorySourcePlanningHistory is the source marker for planning history entries.
 const HistorySourcePlanningHistory = "planning_history"
 
+// HistorySourceAgentReconstruction marks a history an AI coworker rebuilt from its own context.
+const HistorySourceAgentReconstruction = "agent_reconstruction"
+
 // HistoryMeta is the metadata header for captured history.
 // This is the first line of a captured history JSONL file.
 type HistoryMeta struct {
@@ -59,7 +62,8 @@ type HistoryMeta struct {
 	// AgentID is the short agent ID (e.g., "Oxa7b3")
 	AgentID string `json:"agent_id"`
 
-	// SessionID is an alias for AgentID for compatibility
+	// SessionID is accepted for compatibility but never read as the agent ID: capture-prior
+	// takes a missing agent_id from its command line instead.
 	SessionID string `json:"session_id,omitempty"`
 
 	// AgentType identifies the AI agent (e.g., "claude-code", "cursor")
@@ -113,6 +117,11 @@ type HistoryEntry struct {
 	// IsError indicates the tool call failed (for tool entries)
 	IsError bool `json:"is_error,omitempty"`
 
+	// CallID is the agent's own identifier for a tool invocation, shared by
+	// the call entry and its result so the two can be joined (see
+	// SessionEntry.CallID). Empty when the source format has none.
+	CallID string `json:"call_id,omitempty"`
+
 	// Summary is a brief summary of this entry (optional)
 	Summary string `json:"summary,omitempty"`
 
@@ -144,6 +153,11 @@ type HistoryValidationResult struct {
 
 // ValidateHistoryJSONLReader reads and validates a captured history JSONL stream.
 func ValidateHistoryJSONLReader(reader io.Reader) (*CapturedHistory, error) {
+	return readHistoryJSONL(reader, validateHistoryMetaFields)
+}
+
+// readHistoryJSONL parses and validates a history stream, checking the _meta line with checkMeta.
+func readHistoryJSONL(reader io.Reader, checkMeta func(*HistoryMeta) (*HistoryMeta, error)) (*CapturedHistory, error) {
 	if reader == nil {
 		return nil, fmt.Errorf("validate history: %w", ErrHistoryEmptyInput)
 	}
@@ -168,7 +182,7 @@ func ValidateHistoryJSONLReader(reader io.Reader) (*CapturedHistory, error) {
 		}
 
 		if !metaParsed {
-			meta, err := parseHistoryMetaLine(line)
+			meta, err := parseHistoryMetaLine(line, checkMeta)
 			if err != nil {
 				return nil, fmt.Errorf("validate history line=%d: %w", lineNum, err)
 			}
@@ -207,13 +221,13 @@ func ValidateHistoryJSONLReader(reader io.Reader) (*CapturedHistory, error) {
 	return history, nil
 }
 
-func parseHistoryMetaLine(line []byte) (*HistoryMeta, error) {
+func parseHistoryMetaLine(line []byte, checkMeta func(*HistoryMeta) (*HistoryMeta, error)) (*HistoryMeta, error) {
 	var wrapper struct {
 		Meta *HistoryMeta `json:"_meta"`
 	}
 
 	if err := json.Unmarshal(line, &wrapper); err == nil && wrapper.Meta != nil {
-		return validateHistoryMetaFields(wrapper.Meta)
+		return checkMeta(wrapper.Meta)
 	}
 
 	var meta HistoryMeta
@@ -221,7 +235,7 @@ func parseHistoryMetaLine(line []byte) (*HistoryMeta, error) {
 		return nil, fmt.Errorf("%w: %w", ErrHistoryInvalidMeta, err)
 	}
 
-	return validateHistoryMetaFields(&meta)
+	return checkMeta(&meta)
 }
 
 func validateHistoryMetaFields(meta *HistoryMeta) (*HistoryMeta, error) {
@@ -336,6 +350,7 @@ func (e *HistoryEntry) ToSessionEntry() SessionEntry {
 		ToolInput:  e.ToolInput,
 		ToolOutput: e.ToolOutput,
 		IsError:    e.IsError,
+		CallID:     e.CallID,
 	}
 }
 
@@ -351,6 +366,7 @@ func HistoryEntryFromSessionEntry(e SessionEntry, seq int, source string) Histor
 		ToolInput:  e.ToolInput,
 		ToolOutput: e.ToolOutput,
 		IsError:    e.IsError,
+		CallID:     e.CallID,
 	}
 }
 

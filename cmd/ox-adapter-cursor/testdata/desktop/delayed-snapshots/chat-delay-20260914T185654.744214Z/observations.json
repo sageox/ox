@@ -1,0 +1,134 @@
+{
+  "scenario": "CHAT-DELAY",
+  "cursor_version": "3.20.21",
+  "conversation_id": "conversation-3",
+  "generation_id": "generation-4",
+  "events": [
+    "sessionStart",
+    "beforeSubmitPrompt",
+    "preToolUse",
+    "beforeShellExecution",
+    "afterShellExecution",
+    "postToolUse",
+    "afterAgentResponse",
+    "stop"
+  ],
+  "tool_call_id_matches": true,
+  "command_matches": true,
+  "tool_result": {
+    "output": "FIXTURE_DELAYED_OK",
+    "exitCode": 0
+  },
+  "reported_duration_ms": 4813.318,
+  "exact_final_response": true,
+  "stop_completed": true,
+  "posttool_snapshot_bytes": 314,
+  "posttool_snapshot_rows": [
+    {
+      "role": "user",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "<timestamp>Monday, Sep 14, 2026, 11:55 AM (UTC-7)</timestamp>\n<user_query>\nThis is CHAT-DELAY.\n\nRun only this shell command:\nsh -c 'sleep 3; printf FIXTURE_DELAYED_OK'\n\nThen reply exactly FINAL_DELAY_NO_TOOL without another tool call.\n</user_query>"
+          }
+        ]
+      }
+    }
+  ],
+  "final_snapshot_bytes": 755,
+  "posttool_prefix_preserved": true,
+  "rows": [
+    {
+      "role": "user",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "<timestamp>Monday, Sep 14, 2026, 11:55 AM (UTC-7)</timestamp>\n<user_query>\nThis is CHAT-DELAY.\n\nRun only this shell command:\nsh -c 'sleep 3; printf FIXTURE_DELAYED_OK'\n\nThen reply exactly FINAL_DELAY_NO_TOOL without another tool call.\n</user_query>"
+          }
+        ]
+      }
+    },
+    {
+      "role": "assistant",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "I'll run that exact command, then send the final reply with no further tools."
+          },
+          {
+            "type": "tool_use",
+            "name": "Shell",
+            "input": {
+              "command": "sh -c 'sleep 3; printf FIXTURE_DELAYED_OK'",
+              "block_until_ms": 10000,
+              "description": "Sleep 3s then print FIXTURE_DELAYED_OK"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "role": "assistant",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "FINAL_DELAY_NO_TOOL"
+          }
+        ]
+      }
+    },
+    {
+      "type": "turn_ended",
+      "status": "success"
+    }
+  ],
+  "delayed_matches_stop_snapshot": true,
+  "stable_across_observations": true,
+  "observations": [
+    {
+      "observed_at_utc": "2026-09-14T18:56:54.744425+00:00",
+      "source_path": "<HOME>/.cursor/projects/<CONTROL_PROJECT_KEY>/agent-transcripts/conversation-3/conversation-3.jsonl",
+      "stat_before": {
+        "inode": 303883690,
+        "size": 755,
+        "mtime_ns": 1789412133793101498
+      },
+      "stat_after": {
+        "inode": 303883690,
+        "size": 755,
+        "mtime_ns": 1789412133793101498
+      },
+      "stable_during_read": true,
+      "sha256": "d7088cee157f9a465607baff7556a207d07d55f38673ab7a787b100eae1de3cd",
+      "snapshot": "capture/delayed-snapshots/chat-delay-20260914T185654.744214Z/01.jsonl",
+      "complete_newline": true
+    },
+    {
+      "observed_at_utc": "2026-09-14T18:56:57.745951+00:00",
+      "source_path": "<HOME>/.cursor/projects/<CONTROL_PROJECT_KEY>/agent-transcripts/conversation-3/conversation-3.jsonl",
+      "stat_before": {
+        "inode": 303883690,
+        "size": 755,
+        "mtime_ns": 1789412133793101498
+      },
+      "stat_after": {
+        "inode": 303883690,
+        "size": 755,
+        "mtime_ns": 1789412133793101498
+      },
+      "stable_during_read": true,
+      "sha256": "d7088cee157f9a465607baff7556a207d07d55f38673ab7a787b100eae1de3cd",
+      "snapshot": "capture/delayed-snapshots/chat-delay-20260914T185654.744214Z/02.jsonl",
+      "complete_newline": true
+    }
+  ],
+  "limitations": [
+    "The controlled tool took more than 3 seconds, but final source was already flushed by afterAgentResponse and stop. This does not demonstrate a write arriving after stop or a universal drain bound.",
+    "Structured successful result and call identity occur in hooks; saved JSONL still omits structured tool results and call IDs.",
+    "Hook-time source stat/hash/copy are separate reads; exact equality of preserved bytes is stronger than reported metadata alone."
+  ]
+}

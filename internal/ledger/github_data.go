@@ -21,6 +21,7 @@ type PRFile struct {
 	Body        string      `json:"body"`
 	Author      string      `json:"author"`
 	State       string      `json:"state"` // "open", "closed", "merged"
+	Draft       bool        `json:"draft,omitempty"`
 	Labels      []string    `json:"labels,omitempty"`
 	CreatedAt   time.Time   `json:"created_at"`
 	MergedAt    *time.Time  `json:"merged_at,omitempty"`
@@ -83,7 +84,13 @@ type IssueComment struct {
 //   - It does not need to be shared across coworkers
 type GitHubTypeSyncState struct {
 	LastSyncAt time.Time `json:"last_sync_at"`
-	Count      int       `json:"count"`
+	// CoveredSince is the oldest updated_at back to which every item has been
+	// synced. A run asking for a window that starts earlier lists from there
+	// instead of from LastSyncAt, so a wider --days applies without --full.
+	// Zero (a state written before this field, or rebuilt from disk) means
+	// unknown: the next run lists its whole window once.
+	CoveredSince time.Time `json:"covered_since,omitempty"`
+	Count        int       `json:"count"`
 	// KnownItems tracks the last-seen state and updated_at of each item by number.
 	// Used to detect state transitions (open→closed/merged) and content updates
 	// (new comments, edits) which trigger a re-extract.
@@ -225,15 +232,24 @@ func redactIssue(issue *IssueFile) *IssueFile {
 // simplicity (no git mv, no reindex, no broken references) outweighs losing visibility
 // on very old open items. Re-evaluate if this becomes a real problem.
 func WriteGitHubPR(ledgerPath string, pr *PRFile) error {
+	_, err := writeGitHubPR(ledgerPath, pr)
+	return err
+}
+
+// writeGitHubPR is WriteGitHubPR, additionally returning the snapshot path it
+// wrote (or the pre-existing path, when the identical content was already on
+// disk). A caller that enriches an existing snapshot needs that path to tell
+// the new snapshot apart from the one it superseded — see BackfillPRCommits.
+func writeGitHubPR(ledgerPath string, pr *PRFile) (string, error) {
 	dir := DateDir(ledgerPath, pr.CreatedAt, "pr")
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("create pr dir: %w", err)
+		return "", fmt.Errorf("create pr dir: %w", err)
 	}
 
 	redacted := redactPR(pr)
 	data, err := json.MarshalIndent(redacted, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal PR %d: %w", pr.Number, err)
+		return "", fmt.Errorf("marshal PR %d: %w", pr.Number, err)
 	}
 
 	hash := contentHash(data)
@@ -242,14 +258,14 @@ func WriteGitHubPR(ledgerPath string, pr *PRFile) error {
 
 	// idempotent: skip if a file with this exact hash already exists
 	if _, err := os.Stat(path); err == nil {
-		return nil
+		return path, nil
 	}
 
 	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("write PR %d: %w", pr.Number, err)
+		return "", fmt.Errorf("write PR %d: %w", pr.Number, err)
 	}
 
-	return nil
+	return path, nil
 }
 
 // WriteGitHubIssue writes an issue to its date-partitioned directory based on created_at.
@@ -565,10 +581,17 @@ func findLatestFile(dir string, number int) (string, error) {
 			continue
 		}
 
-		// prefer latest updated_at; break ties with filesystem mtime
+		// Prefer latest updated_at, then filesystem mtime, then path. The final
+		// key matters: two snapshots of the same GitHub state carry the same
+		// updated_at, and two writes in one tick carry the same mtime, so
+		// without it the winner is whichever name os.ReadDir happened to yield
+		// first — a content hash, i.e. a coin flip. This is the same total
+		// order candidateBeats applies in internal/codedb/index, so the two
+		// readers cannot disagree about which snapshot is current.
 		better := !found ||
 			stub.UpdatedAt.After(bestUpdated) ||
-			(stub.UpdatedAt.Equal(bestUpdated) && mtime.After(bestMtime))
+			(stub.UpdatedAt.Equal(bestUpdated) && mtime.After(bestMtime)) ||
+			(stub.UpdatedAt.Equal(bestUpdated) && mtime.Equal(bestMtime) && path > bestPath)
 		if better {
 			bestPath = path
 			bestUpdated = stub.UpdatedAt

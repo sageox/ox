@@ -52,13 +52,17 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		DisplayName:     adapterDisplay,
 		Version:         adapterVersion,
 		Type:            adapterprotocol.TypeSession,
-		Capabilities: []string{
-			adapterprotocol.CapSessionReader,
-			adapterprotocol.CapHookInstaller,
-			adapterprotocol.CapIncrementalReader,
-			adapterprotocol.CapSessionImporter,
-			adapterprotocol.CapServeMode,
-		},
+		Capabilities:    adapterprotocol.OpenCodeCapabilities,
+		// OpenCode walks .agents/skills, .claude/skills and .opencode/skills up to the worktree.
+		// One root, never a fan-out: a skill copied into several of an agent's
+		// discovery paths is several files to keep in sync and several answers
+		// when they drift. CanonicalizeTargets folds this key across adapters, so
+		// selecting Codex and Amp together still yields one directory.
+		SkillTargets: []adapterprotocol.SkillTarget{{
+			Key: "agents-project", Root: ".agents/skills",
+			Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject,
+			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+		}},
 		HookEnvValues: []string{"opencode"},
 		ServeMode:     true,
 	}, nil
@@ -166,8 +170,14 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 				Severity: "warning",
 				Title:    "OpenCode hooks not installed",
 				Detail:   fmt.Sprintf("%s not found.", pluginPath),
-				Fix:      "ox-adapter-opencode install-hooks --repo-root " + p.RepoRoot + " --scope project",
-				FixSafe:  true,
+				Fix:      "ox integrate install --opencode",
+				// "ox" is the only allowlisted argv[0] for the doctor
+				// auto-fix path (ox-adapter-opencode itself is rejected by
+				// adapterFixArgvAllowlist), so route through the in-process
+				// `ox integrate install --opencode` command rather than the
+				// external adapter binary.
+				FixArgv: []string{"ox", "integrate", "install", "--opencode"},
+				FixSafe: true,
 			})
 		}
 	}

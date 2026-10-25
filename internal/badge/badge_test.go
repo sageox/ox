@@ -223,7 +223,7 @@ func TestFindBadgeInsertionPoint(t *testing.T) {
 func TestBadgeMarkdown(t *testing.T) {
 	// verify badge contains expected elements
 	assert.Contains(t, BadgeMarkdown, "powered%20by-SageOx", "BadgeMarkdown should contain 'powered by SageOx'")
-	assert.Contains(t, BadgeMarkdown, "7A8F78", "BadgeMarkdown should contain SageOx brand color")
+	assert.Contains(t, BadgeMarkdown, "7AAA77", "BadgeMarkdown should contain SageOx brand color")
 	assert.Contains(t, BadgeMarkdown, "github.com/sageox/ox", "BadgeMarkdown should link to ox repo")
 }
 

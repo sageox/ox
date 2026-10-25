@@ -50,12 +50,18 @@ func (r *LedgerStatusResponse) IsReadOnly() bool {
 // Returns ErrLedgerNotFound if no ledger exists for this repo.
 // Returns ErrUnauthorized if authentication fails.
 func (c *RepoClient) GetLedgerStatus(repoID string) (*LedgerStatusResponse, error) {
+	return c.GetLedgerStatusContext(context.Background(), repoID)
+}
+
+// GetLedgerStatusContext fetches Ledger status with caller cancellation while
+// preserving the client's HTTP timeout and GetLedgerStatus's response contract.
+func (c *RepoClient) GetLedgerStatusContext(ctx context.Context, repoID string) (*LedgerStatusResponse, error) {
 	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(ledgerStatusPath, repoID)
 
 	logger.LogHTTPRequest("GET", reqURL)
 	start := time.Now()
 
-	httpReq, err := useragent.NewRequest(context.Background(), "GET", reqURL, nil)
+	httpReq, err := useragent.NewRequest(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/spf13/cobra"
@@ -165,7 +166,7 @@ func handleKBDescribeError(w io.Writer, err error, input string, jsonOutput bool
 			})
 		}
 		fmt.Fprintln(os.Stderr, kbDescribeScopeDeferredMsg)
-		return cli.ErrSilent
+		return silentFailure(errkind.Usage, "deferred", err)
 	}
 	if errors.Is(err, api.ErrKBAPIUnavailable) {
 		// kb_id inputs are immutable identifiers — show them bare; slug
@@ -185,10 +186,11 @@ func handleKBDescribeError(w io.Writer, err error, input string, jsonOutput bool
 		}
 		fmt.Fprintln(os.Stderr, msg)
 		cli.PrintHint("Run 'ox kb list' to see the bubbles in this project's scopes.")
-		return cli.ErrSilent
+		// other: the server answers alike for a missing bubble and a feature that is off
+		return silentFailure(errkind.Other, "unavailable", err)
 	}
 	if errors.Is(err, api.ErrUnauthorized) {
-		return fmt.Errorf("not authenticated — run 'ox login'")
+		return errkind.Errorf(errkind.Auth, "not authenticated — run 'ox login'")
 	}
 	// any other error passes through unwrapped.
 	return err

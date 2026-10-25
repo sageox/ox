@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""Fake golangci-lint v2 for the deterministic-tier tests.
+
+Rejects the v1 --out-format flag the way v2 does (exit 3, empty output), and
+otherwise writes a JSON report to --output.json.path. FAKE_GOSEC picks it:
+  ok         no issues, exit 0 (default)
+  issue      one gosec issue in cmd/ox/upload.go (line FAKE_GOSEC_LINE, default 11), exit 1
+  typecheck  only typecheck issues — what a Go toolchain mismatch produces;
+             gosec analyzed nothing — exit 1
+  crash      exit 3 without a report
+"""
+import json
+import os
+import sys
+
+
+def main():
+    args = sys.argv[1:]
+    if any(a.startswith("--out-format") for a in args):
+        sys.stderr.write("Error: unknown flag: --out-format\n"
+                         "The command is terminated due to an error: unknown flag: --out-format\n")
+        return 3
+    mode = os.environ.get("FAKE_GOSEC", "ok")
+    if mode == "crash":
+        sys.stderr.write('level=error msg="Running error: context loading failed: no go files to analyze"\n')
+        return 3
+    path = next((a.split("=", 1)[1] for a in args if a.startswith("--output.json.path=")), None)
+    issues = []
+    if mode == "issue":
+        issues = [{"FromLinter": "gosec", "Text": "G304: Potential file inclusion via variable",
+                   "Pos": {"Filename": "cmd/ox/upload.go", "Line": int(os.environ.get("FAKE_GOSEC_LINE", "11"))}}]
+    elif mode == "typecheck":
+        issues = [{"FromLinter": "typecheck",
+                   "Text": "could not import fmt (cannot decode \"internal/goarch\", export data version 4 is "
+                           "greater than maximum supported version 2)",
+                   "Pos": {"Filename": "cmd/ox/upload.go", "Line": 4}}]
+    report = {"Issues": issues or None, "Report": {"Linters": [{"Name": "gosec", "Enabled": True}]}}
+    if path:
+        with open(path, "w") as f:
+            json.dump(report, f)
+    return 1 if issues else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

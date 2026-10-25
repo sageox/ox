@@ -1,9 +1,12 @@
 package ui
 
 import (
+	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetSageOxDarkStyle(t *testing.T) {
@@ -29,6 +32,38 @@ func TestGetSageOxLightStyle(t *testing.T) {
 	// verify caching
 	style2 := GetSageOxLightStyle()
 	assert.Equal(t, style, style2, "cached style should match")
+}
+
+// TestGetSageOxStyle_NonConsoleStdinDoesNotQueryTerminal guards the hang that
+// took down internal/ui, internal/uicatalog, and a cmd/ox subprocess test at
+// the Go test timeout on the Windows runner: with a non-console stdin,
+// lipgloss.HasDarkBackground substitutes CONIN$ and then blocks forever in
+// ReadConsole, because the reader it gets back cannot cancel an in-flight read
+// and so its own 2s timeout never fires. CI, Git Bash, and any AI coworker
+// capturing ox's output all hand ox a redirected stdin, so a query here is a
+// hang for the user, not just a slow test.
+//
+// The call is bounded so a regression fails in seconds with a message instead
+// of hanging the package for the whole Go test timeout.
+func TestGetSageOxStyle_NonConsoleStdinDoesNotQueryTerminal(t *testing.T) {
+	t.Parallel()
+
+	// NUL / /dev/null is never a console on any platform.
+	devNull, err := os.Open(os.DevNull)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, devNull.Close()) })
+
+	done := make(chan bool, 1)
+	go func() { done <- terminalHasDarkBackground(devNull, devNull) }()
+
+	select {
+	case dark := <-done:
+		// An unqueryable terminal resolves to the dark default, which is what
+		// lipgloss itself reports when the query errors.
+		assert.True(t, dark, "an unqueryable terminal should keep the dark default")
+	case <-time.After(20 * time.Second):
+		t.Fatal("terminalHasDarkBackground blocked on a console read it cannot cancel")
+	}
 }
 
 func TestSageOxDarkStyleJSON_ValidJSON(t *testing.T) {
