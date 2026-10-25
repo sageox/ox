@@ -116,8 +116,9 @@ func TestSessionStop_PublishesCapturedHistoryWhenTheTranscriptIsMissing(t *testi
 		agentID := r.captureHistoryWithoutTranscript()
 		name := session.GetSessionName(r.recording(agentID).SessionPath)
 
-		stop := r.stop(agentID)
 		remoteBefore := runGit(t, r.barePath, "rev-parse", "HEAD")
+		stop := r.stop(agentID)
+		assert.Equal(t, remoteBefore, runGit(t, r.barePath, "rev-parse", "HEAD"), "a manual stop must not publish")
 		require.NoError(t, sessionUploadCmd.RunE(sessionUploadCmd, []string{name}), "upload must publish what stop saved")
 		assert.True(t, stop.Held, "manual publishing holds the stopped session: %+v", stop)
 		assert.Nil(t, r.recording(agentID), "stop must not leave the recording live")
