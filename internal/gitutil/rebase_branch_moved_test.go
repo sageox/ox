@@ -292,3 +292,30 @@ func TestAuditAndAbort_RefusesWhenReanchorCannotBeWritten(t *testing.T) {
 	assert.True(t, IsRebaseInProgress(f.local))
 	assert.Equal(t, raced, f.git(f.local, "rev-parse", "main"), "the moved branch must be untouched")
 }
+
+// TestResolveRebase_RefusesBranchMovedDuringEmptyStepContinue: a step halted
+// with nothing to resolve is advanced with --continue, and the branch can move
+// while that runs. The resolver must report the move instead of falling
+// through to --skip. Failure prevented: --skip run on a rebase that can never
+// finish, surfacing as a generic resolve failure the daemon cannot restart.
+func TestResolveRebase_RefusesBranchMovedDuringEmptyStepContinue(t *testing.T) {
+	t.Parallel()
+	f := newLedgerFixture(t)
+	f.cloudWrites("sessions/cloud/meta.json", `{"s":"cloud"}`, "cloud session")
+	f.write(f.local, "sessions/local-1/meta.json", `{"s":"one"}`)
+	f.commitAll(f.local, "local session 1")
+	f.write(f.local, "sessions/local-2/meta.json", `{"s":"two"}`)
+	f.commitAll(f.local, "local session 2")
+	f.git(f.local, "fetch", "-q", "origin")
+	// halts after the first pick with a clean tree: a step with nothing to resolve
+	f.gitAllowFail(f.local, "rebase", "--exec", "false", "origin/main")
+	require.True(t, IsRebaseInProgress(f.local))
+	// armed now, so the writer lands during the resolver's --continue
+	installMidRebaseWriter(t, f.local, "post-commit", 1)
+	require.False(t, RebaseBranchMoved(context.Background(), f.local))
+
+	err := ResolveRebaseAcceptTheirs(context.Background(), f.local, []string{"sessions/"})
+
+	require.ErrorIs(t, err, ErrRebaseBranchMoved)
+	assert.True(t, RebaseBranchMoved(context.Background(), f.local), "the writer must have landed during --continue")
+}

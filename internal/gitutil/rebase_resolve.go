@@ -322,6 +322,10 @@ func advanceNonConflictRebaseStep(ctx context.Context, repoPath string) (done bo
 		return false, fmt.Errorf("rebase halted with nothing to resolve: %s",
 			SanitizeOutput(strings.TrimSpace(contOut)))
 	}
+	// the branch can also move during the --continue above
+	if RebaseBranchMoved(ctx, repoPath) {
+		return false, ErrRebaseBranchMoved
+	}
 
 	skipOut, skipErr := runRebaseStep(ctx, repoPath, "--skip")
 	if !IsRebaseInProgress(repoPath) {
