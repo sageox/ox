@@ -19,7 +19,7 @@ The ox CLI does not install this package. It builds the same source into
 
 | Export | What it is |
 |---|---|
-| `@sageox/plan-review` | `PROTOCOL`, the message types, `parseDocumentMessage`, `parseHostMessage`, `connectFrame` (the host's end of a framed plan), `mountHostControls` (the review controls and their outbox), and `forgetAccount` (clears an account's review from storage) |
+| `@sageox/plan-review` | `PROTOCOL`, the message types, `parseDocumentMessage`, `parseHostMessage`, `pointerAt`, `connectFrame` (the host's end of a framed plan), `mountHostControls` (the review controls, their outbox, and live presence), the `PresenceTransport` types, and `forgetAccount` (clears an account's review from storage) |
 | `@sageox/plan-review/host.css` | The review controls' styles |
 | `@sageox/plan-review/document-tools-script` | The document tools for a framed plan, as a string to inline (default export) |
 | `@sageox/plan-review/document-tools.iife.js` | The same script, as a file |
@@ -46,7 +46,7 @@ settings grant your repository read access.
 Pin the exact version and commit your lockfile:
 
 ```sh
-npm install --save-exact @sageox/plan-review@0.7.0
+npm install --save-exact @sageox/plan-review@0.8.0
 ```
 
 Pinning matters because the host end and the document script must come from
@@ -58,10 +58,10 @@ release workflow, naming the tag it was built from. Check a tarball before you
 pin it:
 
 ```sh
-npm pack @sageox/plan-review@0.7.0
-gh attestation verify sageox-plan-review-0.7.0.tgz -R sageox/ox \
+npm pack @sageox/plan-review@0.8.0
+gh attestation verify sageox-plan-review-0.8.0.tgz -R sageox/ox \
   --signer-workflow sageox/ox/.github/workflows/plan-review-release.yml \
-  --source-ref refs/tags/packages/plan-review/v0.7.0
+  --source-ref refs/tags/packages/plan-review/v0.8.0
 ```
 
 ## Frame a plan
@@ -130,6 +130,7 @@ gh attestation verify sageox-plan-review-0.7.0.tgz -R sageox/ox \
    | `{type:'paint', items, drawings}` | Paint these marks and drawings; answered by `placed` |
    | `{type:'focus', anchor}` | Tint the words this anchor's note is about; `null` clears |
    | `{type:'reveal', anchor, nth}` | Scroll to the `nth` placed mark with this anchor and flash it. For a drawing, first show it: reopen what its capture had open or checked |
+   | `{type:'locate', points}` | Place these pointers, `{key, at}`, at most 64: other reviewers' (see [Live presence](#live-presence)); answered by `located` |
 
    | Document → host | Meaning |
    |---|---|
@@ -140,6 +141,8 @@ gh attestation verify sageox-plan-review-0.7.0.tgz -R sageox/ox \
    | `{type:'dismiss'}` | A click that picked nothing, in review mode or out of it: close your composer. In review mode a click on the plan's own form control, label or summary picks nothing and does its own job, such as switching a tab; a link stays a pick |
    | `{type:'placed', items}` | Every painted mark in reading order, with its section and label. A mark you painted that is not here has lost its text. Every drawing is here with its `outcome` (`exact`, `moved`, `reflowed`, `hidden`, `missing`, `ambiguous`); a missing or ambiguous one comes last and is not on the page. It is sent again when a resize, a toggle or a scrolled panel moves a drawing |
    | `{type:'key', key}` | `r` or `Escape`, pressed inside the frame |
+   | `{type:'pointer', at}` | Where the reviewer's pointer rests, as the content under it, or `null` once it leaves the plan |
+   | `{type:'located', points}` | Where each pointer `locate` named lands, `{key, x, y}` in the frame's viewport pixels; one left out cannot be drawn here. Sent again whenever the layout moves one |
 
    A `PaintItem` is `{anchor, kind: 'unsent'|'committed', status, state?, glyph,
    tint, quote?, section?, label?}`, with `glyph` inserted as text. Only
@@ -172,6 +175,7 @@ const controls = mountHostControls(port, {
   resolve: canResolve,       // this reviewer may Accept or Reopen what the author addressed
   reviewing: true,           // the reviewer asked to review: open in review mode
   revision: plan.revision,   // "sha256:<hex>" of the bytes the frame shows: offers Draw
+  presence,                  // PresenceTransport: who else is here, and their pointers
 });
 controls.update(items, problems); // after you read the review again
 controls.destroy(); // before another account signs in, or another plan mounts
@@ -233,6 +237,43 @@ The controls hold to that:
 - Each paint item is checked with `paintItem` before it is sent, so one bad
   item cannot drop the paint.
 
+### Live presence
+
+Pass `presence` with `revision`: the bar lists who else has the plan open,
+and the pointers of everyone on the same revision move over it with their
+names. A pointer travels as the content under it, so it lands on the same
+words at any width, zoom or scroll, and is hidden where this render collapses
+or lacks them. The frame sees only content locations under keys the controls
+mint; names stay in your page. Someone on another revision is listed without
+a pointer.
+
+`presence` is how your page reaches your presence service as the signed-in
+reviewer. `join` opens the plan's room, and the transport keeps it open,
+saying `lost` after a drop and `welcome` again once it reconnects:
+
+```js
+const room = `/api/v1/plans/${plan.id}/presence`;
+const presence = {
+  join(revision, on) {
+    let self = '';
+    const es = new EventSource(`${room}?revision=${encodeURIComponent(revision)}`);
+    es.addEventListener('welcome', (e) => { const d = JSON.parse(e.data); self = d.self; on({ type: 'welcome', ...d }); });
+    es.addEventListener('peer', (e) => on({ type: 'peer', peer: JSON.parse(e.data) }));
+    es.addEventListener('leave', (e) => on({ type: 'leave', id: JSON.parse(e.data).id }));
+    es.onerror = () => on({ type: 'lost' }); // EventSource reconnects by itself
+    return {
+      move(at) { if (self) send(`${room}/${self}`, { at }); }, // with the reviewer's credentials
+      leave() { es.close(); },
+    };
+  },
+};
+```
+
+The controls send the pointer at most every 200 ms, only its latest place,
+and never store it: after a reconnect they send where it is now, not where it
+went. `docs/specs/plan-review-presence.md` in the ox repository is the
+service's contract and the placement rules.
+
 A committed item can carry `resolutionNote`, the author's note on its latest
 resolution; the rail shows it under the item while that resolution stands.
 
@@ -276,7 +317,9 @@ startDocumentTools(tools);
 ox's page passes `host` to `mountHostControls` instead of listening itself,
 with no `frame` and no `reviewer`: it asks for a name and sends it with each
 request. Any reviewer of a local review may resolve, so it passes
-`resolve: true`.
+`resolve: true`. Its `presence` reaches the room through the `ox plan review`
+server, which joins as the user signed in to ox, so the page holds no account
+credentials.
 
 Messages between local ports are plain function calls, so a click has opened
 your composer by the time its handler returns.

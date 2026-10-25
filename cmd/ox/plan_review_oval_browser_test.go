@@ -140,7 +140,7 @@ func TestBrowser_OvalsDrawMoveAndResize(t *testing.T) {
 	}
 	state = inspectOval(t, ctx)
 	if state.Oval == nil || math.Abs(state.Oval.W-(w+60)) > 1 || math.Abs(state.Oval.H-h) > 1 {
-		t.Fatalf("cancelled resize changed the draft: %+v", state.Oval)
+		t.Fatalf("canceled resize changed the draft: %+v", state.Oval)
 	}
 	// A corner can reduce both dimensions independently of the original ratio.
 	drag(state.Oval.X+state.Oval.W, state.Oval.Y+state.Oval.H, -40, -10)

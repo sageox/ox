@@ -2,6 +2,9 @@
 // own window, talking through local ports. Served by `ox plan review`, the
 // page sends to that server and also
 //   - live-reloads via SSE as the agent addresses items and re-renders,
+//   - shows who else has the plan open, and their pointers, through the
+//     same stream: the server joins the plan's presence room as the
+//     signed-in user, so the page never holds their credentials,
 //   - goes offline when the server is gone and reloads once it is back,
 //   - keeps an offline shell (sw.js) so a reload during an outage shows the plan.
 // Built into internal/plan/assets/review.js.
@@ -10,7 +13,8 @@ import { clip } from './anchor.js';
 import { startDocumentTools } from './document-tools.js';
 import { mountHostControls, type CommittedItem } from './host-controls.js';
 import { localPorts } from './ports.js';
-import { migrateLegacy, openStore, type Approval, type Operation, type Receipt } from './state.js';
+import type { PresenceTransport } from './presence.js';
+import { migrateLegacy, newId, openStore, type Approval, type Operation, type Receipt } from './state.js';
 
 // ox's local review has no sign-in: one account per browser profile, and the
 // reviewer's name travels in each request.
@@ -110,6 +114,34 @@ const ACCOUNT = 'local';
     return { state: 'owned', synced: !!d.pushed };
   }
 
+  // The live-reload stream. A page that names the revision it shows, and
+  // itself, is also in the plan's presence room while the stream is open;
+  // its pointer goes to /presence under the same name.
+  const revision = body.getAttribute('data-review-revision') || '';
+  const key = newId();
+  let es: EventSource | null = null;
+  if (base && window.EventSource) {
+    try {
+      es = new EventSource(base + '/events?t=' + encodeURIComponent(token) + (revision ? '&rev=' + encodeURIComponent(revision) + '&k=' + encodeURIComponent(key) : ''));
+    } catch (e) { /* no live reload; Submit still works */ }
+  }
+  const stream = es;
+  const presence: PresenceTransport | undefined = stream && revision ? {
+    join(_shown, on) {
+      stream.addEventListener('presence', (e) => {
+        try { on(JSON.parse((e as MessageEvent).data)); } catch (err) { /* not an event */ }
+      });
+      return {
+        // a pointer that cannot reach the server is dropped: the stream's
+        // own error already says the server is gone
+        move(at) {
+          fetch(base + '/presence', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Review-Token': token }, body: JSON.stringify({ key, at }) }).catch(() => {});
+        },
+        leave() { /* the stream's end leaves the room */ },
+      };
+    },
+  } : undefined;
+
   const ports = localPorts();
   const controls = mountHostControls(ports.host, {
     account: ACCOUNT,
@@ -122,7 +154,8 @@ const ACCOUNT = 'local';
     approve: base ? approve : undefined,
     restartCommand: 'ox plan review ' + slug,
     // the revision ox rendered this page from; a page without one offers no Draw
-    revision: body.getAttribute('data-review-revision') || undefined,
+    revision: revision || undefined,
+    presence,
   });
   startDocumentTools(ports.document);
   if (!base) return;
@@ -130,13 +163,10 @@ const ACCOUNT = 'local';
   // live reload as the agent addresses items + re-renders. The server writes
   // a record, and its watcher fires, before a slow commit+push answers: the
   // reload waits for that answer, and for a note being written.
-  if (window.EventSource) {
-    try {
-      const es = new EventSource(base + '/events?t=' + encodeURIComponent(token));
-      es.onopen = back;
-      es.onerror = () => { controls.setOffline(true); watch(); };
-      es.onmessage = reload;
-    } catch (e) { /* no live reload; Submit still works */ }
+  if (es) {
+    es.onopen = back;
+    es.onerror = () => { controls.setOffline(true); watch(); };
+    es.onmessage = reload;
   }
 
   // offline shell: cache the page so a reload while the server is down still

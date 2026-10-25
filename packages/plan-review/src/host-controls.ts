@@ -14,6 +14,7 @@ import { clip } from './anchor.js';
 import { CHROME, typing } from './document-tools.js';
 import { originalView } from './original.js';
 import type { HostPort } from './ports.js';
+import { startPresence, type Presence, type PresenceTransport } from './presence.js';
 import { drawingPaint, paintItem, STATES, STATUSES, type DrawingPaint, type PaintItem, type Placed, type State, type Status, type Tint } from './protocol.js';
 import { checkRegion, DRAWING, drawingLabel, type Region } from './region.js';
 import { acceptBody, deliver, newId, openStore, queued, reopenBody, roundItems, submitBody, syncMessage, wireItem, type Act, type Approval, type Entry, type Mark, type Receipt, type SyncMessage, type Transport } from './state.js';
@@ -64,6 +65,12 @@ export interface HostControlsOptions {
    * other. Each drawing is stamped with it. Without it the bar offers no Draw.
    */
   revision?: string;
+  /**
+   * The plan's live presence room: the bar lists who else has this plan
+   * open, and their pointers are drawn over the plan with their names when
+   * they show the same revision. Needs revision.
+   */
+  presence?: PresenceTransport;
 }
 
 /** A mounted set of controls. */
@@ -204,6 +211,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   let tool = false; // the Draw tool is selected
   let pending: Region | null = null; // a capture whose note is open, kept only on Save
   const ownedDrawings = new Set<string>(); // receipts may arrive before the host refreshes committed
+  let presence: Presence | null = null; // who else is here, and their pointers
   // a drawing's record: the capture being noted, else your draft's, else the Ledger's
   function regionOf(a: string): Region | undefined {
     if (pending && 'q-' + pending.id === a) return pending;
@@ -558,6 +566,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       bottom: Math.max(window.innerHeight - bottom, 0), width: Math.max(r.width, 0), height: Math.max(bottom - top, 0),
     };
     Object.keys(v).forEach((k) => body.style.setProperty('--rev-' + k, v[k] + 'px'));
+    if (presence) presence.reposition();
   }
   // The note opens just below where the reviewer acted, never over it.
   function placePop(rect: { left: number; bottom: number }) {
@@ -806,6 +815,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   const bar = document.createElement('div');
   bar.className = 'rev-bar';
   bar.innerHTML = (live ? '<span class="rev-conn"></span>' : '') +
+    (opts.presence && revision ? '<span class="rev-here" hidden></span>' : '') +
     '<button class="rev-toggle" title="Toggle review mode">Review</button>' +
     (revision ? '<button class="rev-draw" aria-pressed="false" title="Drag to draw an oval around part of the plan to comment on it">Draw</button>' : '') +
     '<span class="rev-count"></span>' +
@@ -837,6 +847,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   const countEl = bar.querySelector('.rev-count') as HTMLElement;
   connEl = bar.querySelector('.rev-conn');
   paintConn();
+  if (opts.presence && revision) presence = startPresence(port, opts.presence, revision, bar.querySelector('.rev-here') as HTMLElement, opts.frame);
   const whoEl = bar.querySelector('.rev-who') as HTMLElement | null;
   function updateWho() { if (whoEl) whoEl.textContent = named ? ('You: ' + named) : 'Set name'; }
   updateWho();
@@ -935,6 +946,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         // the document tools are listening: paint, and restore what a reload interrupted
         paint();
         sendMode();
+        if (presence) presence.ready();
         if (started) return;
         started = true;
         // A live reload — the agent addressed an item, or the server came back — must
@@ -1003,6 +1015,12 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         if (m.key === 'Escape') escape();
         else setReview(!on);
         break;
+      case 'pointer':
+        if (presence) presence.pointer(m.at);
+        break;
+      case 'located':
+        if (presence) presence.located(m.points);
+        break;
     }
   });
 
@@ -1037,6 +1055,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       destroyed = true;
       off.abort();
       clearTimeout(repaint);
+      if (presence) presence.leave();
       port.listen(() => {});
       port.send({ type: 'mode', on: false, open: false, draw: false });
       port.send({ type: 'paint', items: [], drawings: [] });

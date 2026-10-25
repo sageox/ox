@@ -216,6 +216,27 @@
     });
     return out;
   }
+  var rectOf = (r) => [r1(r.left + scrollX), r1(r.top + scrollY), r1(r.width), r1(r.height)];
+  function shownBox(el) {
+    const e = el;
+    if (e.checkVisibility ? !e.checkVisibility({ visibilityProperty: true }) : !el.getClientRects().length || getComputedStyle(el).visibility === "hidden" || inClosedDetails(el)) return null;
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return null;
+    for (let a = el.parentElement; a && a !== document.body && a !== document.documentElement; a = a.parentElement) {
+      const cs = getComputedStyle(a);
+      if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
+      const ar = a.getBoundingClientRect();
+      if (r.right <= ar.left || r.left >= ar.right || r.bottom <= ar.top || r.top >= ar.bottom) return null;
+    }
+    return rectOf(r);
+  }
+  function inClosedDetails(el) {
+    for (let d = el.parentElement && el.parentElement.closest("details:not([open])"); d; d = d.parentElement && d.parentElement.closest("details:not([open])")) {
+      const sum = d.querySelector(":scope > summary");
+      if (!sum || !sum.contains(el)) return true;
+    }
+    return false;
+  }
   function drawLayer(selector, exclude, capture, refuse, changed) {
     const layer = svg("svg", { class: "rev-ink", "aria-hidden": "true", tabindex: -1 });
     const ink = svg("g", {});
@@ -270,27 +291,6 @@
         (m[c.anchor] = m[c.anchor] || []).push(c);
       });
       return m;
-    }
-    const rectOf = (r) => [r1(r.left + scrollX), r1(r.top + scrollY), r1(r.width), r1(r.height)];
-    function shownBox(el) {
-      const e = el;
-      if (e.checkVisibility ? !e.checkVisibility({ visibilityProperty: true }) : !el.getClientRects().length || getComputedStyle(el).visibility === "hidden" || inClosedDetails(el)) return null;
-      const r = el.getBoundingClientRect();
-      if (r.width < 1 || r.height < 1) return null;
-      for (let a = el.parentElement; a && a !== document.body && a !== document.documentElement; a = a.parentElement) {
-        const cs = getComputedStyle(a);
-        if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
-        const ar = a.getBoundingClientRect();
-        if (r.right <= ar.left || r.left >= ar.right || r.bottom <= ar.top || r.top >= ar.bottom) return null;
-      }
-      return rectOf(r);
-    }
-    function inClosedDetails(el) {
-      for (let d = el.parentElement && el.parentElement.closest("details:not([open])"); d; d = d.parentElement && d.parentElement.closest("details:not([open])")) {
-        const sum = d.querySelector(":scope > summary");
-        if (!sum || !sum.contains(el)) return true;
-      }
-      return false;
     }
     function inside(pt, poly) {
       let w = 0;
@@ -432,8 +432,8 @@
         const keep = () => {
           if (run && overlaps(run.box, band)) out.push(run);
         };
-        const words = /\S+/g;
-        for (let w = words.exec(t.data); w; w = words.exec(t.data)) {
+        const words2 = /\S+/g;
+        for (let w = words2.exec(t.data); w; w = words2.exec(t.data)) {
           range.setStart(t, w.index);
           range.setEnd(t, w.index + w[0].length);
           const r = range.getClientRects()[0];
@@ -680,10 +680,14 @@
 
   // src/protocol.ts
   var MAX_TEXT = 65536;
+  var MAX_ITEMS = 1e4;
   var ANCHOR = /^[hq][0-9a-f]{8}$/;
   var STATUSES = ["approve", "request-change", "flag", "comment"];
   var STATES = ["open", "addressed", "verified", "wontfix"];
   var TINTS = ["sage", "amber", "red", "gold", "faint"];
+  var MAX_POINTERS = 64;
+  var MAX_PATH = 16;
+  var MAX_TEXT_OFFSET = 1 << 20;
   function obj2(v) {
     return typeof v === "object" && v !== null && !Array.isArray(v);
   }
@@ -701,6 +705,26 @@
   }
   function oneOf(v, list) {
     return typeof v === "string" && list.indexOf(v) >= 0;
+  }
+  var whole = (v, max) => num2(v) && v >= 0 && v <= max && Math.floor(v) === v;
+  var unit = (v) => num2(v) && v >= 0 && v <= 1;
+  function pointerAt(v) {
+    if (!obj2(v) || typeof v.anchor !== "string" || !ANCHOR.test(v.anchor) || v.anchor.charAt(0) !== "h" || !unit(v.x) || !unit(v.y)) return null;
+    const at = { anchor: v.anchor, x: v.x, y: v.y };
+    if (v.nth !== void 0 || v.of !== void 0) {
+      if (!whole(v.nth, MAX_ITEMS) || !whole(v.of, MAX_ITEMS) || v.of < 2 || v.nth >= v.of) return null;
+      at.nth = v.nth;
+      at.of = v.of;
+    }
+    if (v.path !== void 0) {
+      if (!Array.isArray(v.path) || !v.path.length || v.path.length > MAX_PATH || !all(v.path, (i) => whole(i, MAX_ITEMS))) return null;
+      at.path = v.path.slice();
+    }
+    if (v.text !== void 0) {
+      if (!whole(v.text, MAX_TEXT_OFFSET)) return null;
+      at.text = v.text;
+    }
+    return at;
   }
   function paintItem(it) {
     if (!obj2(it) || typeof it.anchor !== "string" || !ANCHOR.test(it.anchor)) return null;
@@ -743,6 +767,216 @@
     };
   }
 
+  // src/pointer.ts
+  var SKIP = ".rev-glyph, script, style, noscript, template";
+  var STEP = 50;
+  var kids = (el) => Array.prototype.filter.call(el.children, (c) => !c.matches(SKIP));
+  var nonSpace = (s) => s.replace(/\s+/g, "").length;
+  var frac = (d, size) => size >= 1 ? Math.round(Math.min(1, Math.max(0, d / size)) * 1e3) / 1e3 : 0.5;
+  var words = (root) => document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => n.nodeType === 3 ? NodeFilter.FILTER_ACCEPT : n.matches(SKIP) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP
+  });
+  function caretAt(x, y) {
+    const d = document;
+    if (d.caretPositionFromPoint) {
+      const p = d.caretPositionFromPoint(x, y);
+      return p ? [p.offsetNode, p.offset] : null;
+    }
+    const r = d.caretRangeFromPoint ? d.caretRangeFromPoint(x, y) : null;
+    return r ? [r.startContainer, r.startOffset] : null;
+  }
+  function charBox(node, i) {
+    if (i < 0 || i >= node.data.length) return null;
+    const range = document.createRange();
+    range.setStart(node, i);
+    range.setEnd(node, i + 1);
+    const r = range.getBoundingClientRect();
+    return r.height ? r : null;
+  }
+  function pathTo(host, el) {
+    const path = [];
+    for (let n = el; n !== host; ) {
+      const p = n.parentElement;
+      const i = p ? kids(p).indexOf(n) : -1;
+      if (!p || i < 0 || path.length === MAX_PATH) return null;
+      path.unshift(i);
+      n = p;
+    }
+    return path;
+  }
+  function follow(host, path) {
+    let n = host;
+    for (let i = 0; n && i < path.length; i++) n = kids(n)[path[i]];
+    return n || null;
+  }
+  function pointerLayer(selector, exclude, moved, located) {
+    let started = false;
+    let index = null;
+    function idx() {
+      if (index) return index;
+      const of = /* @__PURE__ */ new Map(), by = /* @__PURE__ */ Object.create(null);
+      markables(selector, exclude).forEach(({ el, anchor }) => {
+        of.set(el, anchor);
+        (by[anchor] = by[anchor] || []).push(el);
+      });
+      return index = { of, by };
+    }
+    let point = null;
+    let sent = "null";
+    let timer;
+    let last = 0;
+    function share() {
+      if (timer !== void 0 || !started) return;
+      timer = setTimeout(() => {
+        timer = void 0;
+        last = Date.now();
+        const at = point ? locationAt(point[0], point[1]) : null;
+        const s = JSON.stringify(at);
+        if (s !== sent) {
+          sent = s;
+          moved(at);
+        }
+      }, Math.max(0, last + STEP - Date.now()));
+    }
+    function locationAt(cx, cy) {
+      let hit = null;
+      for (const e of document.elementsFromPoint(cx, cy)) if (!e.closest(".rev-ink")) {
+        hit = e;
+        break;
+      }
+      if (!hit || hit.closest(exclude)) return null;
+      const host = hit.closest(selector), i = idx();
+      const anchor = host && i.of.get(host);
+      if (!host || !anchor) return null;
+      const at = { anchor, x: 0.5, y: 0.5 };
+      const same = i.by[anchor];
+      if (same.length > 1) {
+        at.nth = same.indexOf(host);
+        at.of = same.length;
+      }
+      const path = pathTo(host, hit);
+      if (path && path.length) at.path = path;
+      const r = (path ? hit : host).getBoundingClientRect();
+      at.x = frac(cx - r.left, r.width);
+      at.y = frac(cy - r.top, r.height);
+      const t = textAt(host, cx, cy);
+      if (t !== void 0) at.text = t;
+      return at;
+    }
+    function textAt(host, cx, cy) {
+      const c = caretAt(cx, cy);
+      if (!c || c[0].nodeType !== 3 || !host.contains(c[0])) return void 0;
+      const node = c[0], off = c[1];
+      const r = charBox(node, off < node.data.length ? off : off - 1);
+      if (!r || cy < r.top || cy > r.bottom || cx < r.left - r.height || cx > r.right + r.height) return void 0;
+      let n = 0;
+      const w = words(host);
+      for (let t = w.nextNode(); t; t = w.nextNode()) {
+        if (t === node) return n + nonSpace(node.data.slice(0, off));
+        n += nonSpace(t.data);
+      }
+      return void 0;
+    }
+    let wanted = [];
+    let told = "[]";
+    let frame = 0;
+    function answer() {
+      frame = 0;
+      if (!started) return;
+      const out = [];
+      wanted.forEach((p) => {
+        const pt = place(p.at);
+        if (pt) out.push({ key: p.key, x: pt[0], y: pt[1] });
+      });
+      const s = JSON.stringify(out);
+      if (s !== told) {
+        told = s;
+        located(out);
+      }
+    }
+    function place(at) {
+      const same = idx().by[at.anchor] || [];
+      if (same.length !== (at.of || 1)) return null;
+      const host = same[at.nth || 0];
+      if (!shownBox(host)) return null;
+      let pt = at.text === void 0 ? null : textPoint(host, at.text);
+      if (!pt) {
+        const el = at.path ? follow(host, at.path) : host;
+        if (!el || el !== host && !shownBox(el)) return null;
+        const r = el.getBoundingClientRect();
+        pt = [r.left + at.x * r.width, r.top + at.y * r.height];
+      }
+      if (pt[0] < 0 || pt[1] < 0 || pt[0] > innerWidth || pt[1] > innerHeight) return null;
+      return [r1(pt[0]), r1(pt[1])];
+    }
+    function textPoint(host, k) {
+      let n = 0, end = null;
+      const w = words(host);
+      for (let t = w.nextNode(); t; t = w.nextNode()) {
+        const s = t.data;
+        for (let i = 0; i < s.length; i++) {
+          if (/\s/.test(s.charAt(i))) continue;
+          if (n++ < k) {
+            end = [t, i];
+            continue;
+          }
+          const r2 = t.parentElement && shownBox(t.parentElement) ? charBox(t, i) : null;
+          return r2 ? [r2.left, r2.top + r2.height / 2] : null;
+        }
+      }
+      const r = n === k && end && end[0].parentElement && shownBox(end[0].parentElement) ? charBox(end[0], end[1]) : null;
+      return r ? [r.right, r.top + r.height / 2] : null;
+    }
+    function relayout() {
+      if (wanted.length && !frame) frame = requestAnimationFrame(answer);
+      if (point) share();
+    }
+    document.addEventListener("pointermove", (e) => {
+      if (e.pointerType === "touch") return;
+      point = [e.clientX, e.clientY];
+      share();
+    }, { capture: true, passive: true });
+    document.addEventListener("pointerout", (e) => {
+      if (!e.relatedTarget) {
+        point = null;
+        share();
+      }
+    }, true);
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        point = null;
+        share();
+      }
+    });
+    document.addEventListener("scroll", relayout, { capture: true, passive: true });
+    window.addEventListener("resize", relayout);
+    document.addEventListener("toggle", relayout, true);
+    document.addEventListener("change", relayout, true);
+    if (window.ResizeObserver) new ResizeObserver(relayout).observe(document.documentElement);
+    new MutationObserver((records) => {
+      for (const r of records) {
+        const el = r.target.nodeType === 1 ? r.target : r.target.parentElement;
+        if (el && el.closest(exclude + ", .rev-ink")) continue;
+        index = null;
+        relayout();
+        return;
+      }
+    }).observe(document.documentElement, { childList: true, characterData: true, subtree: true });
+    return {
+      locate(points) {
+        wanted = points;
+        if (frame) cancelAnimationFrame(frame);
+        answer();
+      },
+      start() {
+        started = true;
+        index = null;
+        answer();
+        share();
+      }
+    };
+  }
+
   // src/ports.ts
   function localPorts() {
     let toHost = null;
@@ -758,7 +992,7 @@
   }
 
   // src/document-tools.ts
-  var CHROME = ".rev-bar, .rev-rail, .rev-orphans, .rev-toast, .rev-sync, .rev-offline-bar, .rev-original";
+  var CHROME = ".rev-bar, .rev-rail, .rev-orphans, .rev-toast, .rev-sync, .rev-offline-bar, .rev-original, .rev-cursors";
   function typing(e) {
     const t = e.target;
     return !!t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.isContentEditable);
@@ -791,6 +1025,12 @@
       (capture, rect, anchor) => port.send({ type: "capture", capture, rect, anchor }),
       (reason) => port.send({ type: "refused", reason }),
       () => paint(items, drawings)
+    );
+    const pointers = pointerLayer(
+      SELECTOR,
+      NOT_PLAN,
+      (at) => port.send({ type: "pointer", at }),
+      (points) => port.send({ type: "located", points })
     );
     function paint(next, nextDrawings) {
       items = next;
@@ -951,8 +1191,8 @@
     }
     function quoteHits(idx, section, quote) {
       const q = quote.trim();
-      const words = q.split(/\s+/).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-      const re = new RegExp((/^\w/.test(q) ? "(^|\\W)" : "()") + words.join("\\s+") + (/\w$/.test(q) ? "(?!\\w)" : ""), "gi");
+      const words2 = q.split(/\s+/).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+      const re = new RegExp((/^\w/.test(q) ? "(^|\\W)" : "()") + words2.join("\\s+") + (/\w$/.test(q) ? "(?!\\w)" : ""), "gi");
       const want = section === null ? null : norm(section), hits = [];
       let m;
       while (m = re.exec(idx.text)) {
@@ -1077,12 +1317,16 @@
         case "reveal":
           reveal(m.anchor, m.nth);
           break;
+        case "locate":
+          pointers.locate(m.points);
+          break;
       }
     });
     whenDiagramsDrawn(() => {
       started = true;
       draw.setTool(tool);
       port.send({ type: "ready" });
+      pointers.start();
     });
   }
   function whenDiagramsDrawn(go) {
@@ -1153,6 +1397,192 @@
       view.appendChild(list);
     }
     return view;
+  }
+
+  // src/presence.ts
+  var SEND_EVERY = 200;
+  var COLORS = 8;
+  var MAX_NAME = 200;
+  var ARROW = '<svg width="16" height="20" viewBox="0 0 16 20" aria-hidden="true"><path d="M1 1l13.5 10.2-6.1.9-3.3 6.4z" fill="currentColor" stroke="#111411" stroke-width="1.2" stroke-linejoin="round"/></svg>';
+  var color = (user) => "rev-c" + parseInt(fnv1a(user), 16) % COLORS;
+  var short = (v, n) => typeof v === "string" && v.length > 0 && v.length <= n;
+  function peerOf(v) {
+    const p = v;
+    if (!p || typeof p !== "object" || !short(p.id, 128) || !short(p.name, MAX_NAME) || !short(p.user, 128) || !short(p.revision, 128)) return null;
+    const at = p.at == null ? null : pointerAt(p.at);
+    if (p.at != null && !at) return null;
+    return { id: p.id, name: p.name, user: p.user, revision: p.revision, at };
+  }
+  function startPresence(port, transport, revision, here, frame) {
+    let self = "";
+    let live = false;
+    let gone = false;
+    const peers = /* @__PURE__ */ new Map();
+    const keys = /* @__PURE__ */ new Map(), ids = /* @__PURE__ */ new Map();
+    let minted = 0;
+    let placed = [];
+    const glide = /* @__PURE__ */ new Set();
+    const layer = document.createElement("div");
+    layer.className = "rev-cursors";
+    layer.setAttribute("aria-hidden", "true");
+    document.body.appendChild(layer);
+    const cursors = /* @__PURE__ */ new Map();
+    let mine = null, sent = "null", last = 0;
+    let timer;
+    const link = transport.join(revision, on);
+    function on(e) {
+      if (gone) return;
+      switch (e.type) {
+        case "welcome":
+          self = typeof e.self === "string" ? e.self : "";
+          peers.clear();
+          (Array.isArray(e.peers) ? e.peers : []).forEach(add);
+          live = true;
+          sent = "";
+          send(true);
+          break;
+        case "peer":
+          add(e.peer);
+          break;
+        case "leave":
+          peers.delete(e.id);
+          break;
+        case "lost":
+          live = false;
+          peers.clear();
+          break;
+      }
+      update();
+    }
+    function add(v) {
+      const p = peerOf(v);
+      if (!p || p.id === self) return;
+      const was = peers.get(p.id);
+      if (was && JSON.stringify(was.at) !== JSON.stringify(p.at)) glide.add(keyOf(p.id));
+      peers.set(p.id, p);
+    }
+    function keyOf(id) {
+      let k = keys.get(id);
+      if (!k) {
+        k = "p" + ++minted;
+        keys.set(id, k);
+        ids.set(k, id);
+      }
+      return k;
+    }
+    function send(now) {
+      if (!live || gone || timer !== void 0 && !now) return;
+      clearTimeout(timer);
+      timer = setTimeout(flush, now ? 0 : Math.max(0, last + SEND_EVERY - Date.now()));
+    }
+    function flush() {
+      timer = void 0;
+      const s = JSON.stringify(mine);
+      if (!live || gone || s === sent) return;
+      sent = s;
+      last = Date.now();
+      link.move(mine);
+    }
+    function update() {
+      if (gone) return;
+      keys.forEach((k, id) => {
+        if (!peers.has(id)) {
+          keys.delete(id);
+          ids.delete(k);
+        }
+      });
+      renderHere();
+      const points = [];
+      peers.forEach((p) => {
+        if (p.revision === revision && p.at && points.length < MAX_POINTERS) points.push({ key: keyOf(p.id), at: p.at });
+      });
+      port.send({ type: "locate", points });
+      cursors.forEach((el, k) => {
+        const id = ids.get(k), p = id ? peers.get(id) : void 0;
+        if (!p || !p.at) {
+          el.remove();
+          cursors.delete(k);
+        }
+      });
+    }
+    function renderHere() {
+      const people = /* @__PURE__ */ new Map();
+      peers.forEach((p) => {
+        const was = people.get(p.user);
+        people.set(p.user, { name: p.name, same: !!was && was.same || p.revision === revision });
+      });
+      here.textContent = "";
+      here.hidden = !people.size;
+      let other = 0, otherName = "";
+      people.forEach((p, user) => {
+        const chip = document.createElement("span");
+        chip.className = "rev-peer " + color(user) + (p.same ? "" : " rev-peer-other");
+        chip.textContent = (p.name.trim().charAt(0) || "?").toUpperCase();
+        chip.title = p.same ? p.name + " is here" : p.name + " is viewing another revision of this plan";
+        here.appendChild(chip);
+        if (!p.same) {
+          other++;
+          otherName = p.name;
+        }
+      });
+      if (other) {
+        const note = document.createElement("span");
+        note.className = "rev-here-note";
+        note.textContent = (other === 1 ? otherName : other + " people") + " on another revision";
+        here.appendChild(note);
+      }
+    }
+    function draw() {
+      const b = frame ? frame.getBoundingClientRect() : { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+      const clip2 = { left: Math.max(b.left, 0), top: Math.max(b.top, 0), right: Math.min(b.right, innerWidth), bottom: Math.min(b.bottom, innerHeight) };
+      const drawn = /* @__PURE__ */ new Set();
+      placed.forEach((p) => {
+        const id = ids.get(p.key), peer = id ? peers.get(id) : void 0;
+        if (!peer || !peer.at) return;
+        const x = b.left + p.x, y = b.top + p.y;
+        if (x < clip2.left || y < clip2.top || x > clip2.right || y > clip2.bottom) return;
+        let el = cursors.get(p.key);
+        if (!el) {
+          el = document.createElement("div");
+          el.innerHTML = ARROW + '<span class="rev-cursor-name"></span>';
+          layer.appendChild(el);
+          cursors.set(p.key, el);
+        }
+        el.className = "rev-cursor " + color(peer.user) + (glide.has(p.key) ? " rev-glide" : "");
+        el.lastChild.textContent = peer.name;
+        el.style.transform = "translate(" + x + "px," + y + "px)";
+        drawn.add(p.key);
+      });
+      glide.clear();
+      cursors.forEach((el, k) => {
+        if (!drawn.has(k)) {
+          el.remove();
+          cursors.delete(k);
+        }
+      });
+    }
+    return {
+      pointer(at) {
+        mine = at;
+        send(false);
+      },
+      located(points) {
+        placed = points;
+        draw();
+      },
+      ready: update,
+      reposition: draw,
+      leave() {
+        if (gone) return;
+        gone = true;
+        clearTimeout(timer);
+        link.leave();
+        port.send({ type: "locate", points: [] });
+        layer.remove();
+        here.textContent = "";
+        here.hidden = true;
+      }
+    };
   }
 
   // src/state.ts
@@ -1488,6 +1918,7 @@
     let tool = false;
     let pending = null;
     const ownedDrawings = /* @__PURE__ */ new Set();
+    let presence = null;
     function regionOf(a) {
       if (pending && "q-" + pending.id === a) return pending;
       if (ds[a] && ds[a].region) return ds[a].region;
@@ -1700,15 +2131,15 @@
       }
       let html = '<div class="rev-rail-h">Comments <span class="rev-rail-n">' + rows.length + "</span>" + hide + "</div>" + plan + '<ul class="rev-rail-list">';
       rows.forEach((row, i) => {
-        const whole = row.a === WHOLE.a;
+        const whole2 = row.a === WHOLE.a;
         let tag = "";
         if (row.tag) tag = '<span class="rev-rail-tag ' + row.tag + '">' + row.tag + "</span>";
         else if (STATE_TAG[row.state]) tag = '<span class="rev-rail-tag ' + STATE_TAG[row.state] + '">' + STATE_TAG[row.state] + "</span>";
-        if (!row.at && !whole) tag += outcome[row.a] === "ambiguous" ? '<span class="rev-rail-tag" title="What it was drawn around now appears a different number of times">repeated</span>' : '<span class="rev-rail-tag">text changed</span>';
+        if (!row.at && !whole2) tag += outcome[row.a] === "ambiguous" ? '<span class="rev-rail-tag" title="What it was drawn around now appears a different number of times">repeated</span>' : '<span class="rev-rail-tag">text changed</span>';
         else if (outcome[row.a] === "hidden") tag += '<span class="rev-rail-tag" title="Collapsed or on another tab: click to show it">hidden</span>';
-        const content = (row.quote ? '<div class="rev-rail-quote">' + esc(row.label) + "</div>" : "") + (row.note ? '<div class="rev-rail-note">' + esc(row.note) + "</div>" : row.quote || whole ? "" : '<div class="rev-rail-note muted">' + esc(row.label) + "</div>") + (row.answer ? '<div class="rev-rail-answer">↳ ' + esc(row.answer) + "</div>" : "") + (row.region ? '<button class="rev-rail-orig" title="What lay under this drawing when it was drawn">View original</button>' : "");
+        const content = (row.quote ? '<div class="rev-rail-quote">' + esc(row.label) + "</div>" : "") + (row.note ? '<div class="rev-rail-note">' + esc(row.note) + "</div>" : row.quote || whole2 ? "" : '<div class="rev-rail-note muted">' + esc(row.label) + "</div>") + (row.answer ? '<div class="rev-rail-answer">↳ ' + esc(row.answer) + "</div>" : "") + (row.region ? '<button class="rev-rail-orig" title="What lay under this drawing when it was drawn">View original</button>' : "");
         const whoTag = row.reviewer ? '<span class="rev-rail-who">' + esc(row.reviewer) + "</span>" : "";
-        html += '<li class="rev-rail-item" data-i="' + i + '" data-status="' + esc(row.status) + '"><span class="rev-rail-glyph">' + glyphFor(row.status) + '</span><div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(whole ? WHOLE.label : row.section || "(plan)") + "</span>" + whoTag + tag + "</div>" + content + "</div></li>";
+        html += '<li class="rev-rail-item" data-i="' + i + '" data-status="' + esc(row.status) + '"><span class="rev-rail-glyph">' + glyphFor(row.status) + '</span><div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(whole2 ? WHOLE.label : row.section || "(plan)") + "</span>" + whoTag + tag + "</div>" + content + "</div></li>";
       });
       html += "</ul>";
       r.innerHTML = html;
@@ -1857,6 +2288,7 @@
         height: Math.max(bottom - top, 0)
       };
       Object.keys(v).forEach((k) => body.style.setProperty("--rev-" + k, v[k] + "px"));
+      if (presence) presence.reposition();
     }
     function placePop(rect) {
       const p = pop;
@@ -2144,7 +2576,7 @@
     if (resized && opts.frame) resized.observe(opts.frame);
     const bar = document.createElement("div");
     bar.className = "rev-bar";
-    bar.innerHTML = (live ? '<span class="rev-conn"></span>' : "") + '<button class="rev-toggle" title="Toggle review mode">Review</button>' + (revision ? '<button class="rev-draw" aria-pressed="false" title="Drag to draw an oval around part of the plan to comment on it">Draw</button>' : "") + '<span class="rev-count"></span>' + (live && !opts.reviewer ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : "") + '<button class="rev-submit" title="Send feedback to the agent">' + (live ? "Submit" : "Export") + "</button>" + (opts.approve ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : "");
+    bar.innerHTML = (live ? '<span class="rev-conn"></span>' : "") + (opts.presence && revision ? '<span class="rev-here" hidden></span>' : "") + '<button class="rev-toggle" title="Toggle review mode">Review</button>' + (revision ? '<button class="rev-draw" aria-pressed="false" title="Drag to draw an oval around part of the plan to comment on it">Draw</button>' : "") + '<span class="rev-count"></span>' + (live && !opts.reviewer ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : "") + '<button class="rev-submit" title="Send feedback to the agent">' + (live ? "Submit" : "Export") + "</button>" + (opts.approve ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : "");
     body.appendChild(bar);
     let drag = null;
     bar.addEventListener("pointerdown", (e) => {
@@ -2173,6 +2605,7 @@
     const countEl = bar.querySelector(".rev-count");
     connEl = bar.querySelector(".rev-conn");
     paintConn();
+    if (opts.presence && revision) presence = startPresence(port, opts.presence, revision, bar.querySelector(".rev-here"), opts.frame);
     const whoEl = bar.querySelector(".rev-who");
     function updateWho() {
       if (whoEl) whoEl.textContent = named ? "You: " + named : "Set name";
@@ -2309,6 +2742,7 @@
         case "ready":
           paint();
           sendMode();
+          if (presence) presence.ready();
           if (started) return;
           started = true;
           try {
@@ -2375,6 +2809,12 @@
           if (m.key === "Escape") escape();
           else setReview(!on);
           break;
+        case "pointer":
+          if (presence) presence.pointer(m.at);
+          break;
+        case "located":
+          if (presence) presence.located(m.points);
+          break;
       }
     });
     restoreSync();
@@ -2408,6 +2848,7 @@
         destroyed = true;
         off.abort();
         clearTimeout(repaint);
+        if (presence) presence.leave();
         port.listen(() => {
         });
         port.send({ type: "mode", on: false, open: false, draw: false });
@@ -2501,6 +2942,36 @@
       const d = await r.json().catch(() => ({}));
       return { state: "owned", synced: !!d.pushed };
     }
+    const revision = body.getAttribute("data-review-revision") || "";
+    const key = newId();
+    let es = null;
+    if (base && window.EventSource) {
+      try {
+        es = new EventSource(base + "/events?t=" + encodeURIComponent(token) + (revision ? "&rev=" + encodeURIComponent(revision) + "&k=" + encodeURIComponent(key) : ""));
+      } catch (e) {
+      }
+    }
+    const stream = es;
+    const presence = stream && revision ? {
+      join(_shown, on) {
+        stream.addEventListener("presence", (e) => {
+          try {
+            on(JSON.parse(e.data));
+          } catch (err) {
+          }
+        });
+        return {
+          // a pointer that cannot reach the server is dropped: the stream's
+          // own error already says the server is gone
+          move(at) {
+            fetch(base + "/presence", { method: "POST", headers: { "Content-Type": "application/json", "X-Review-Token": token }, body: JSON.stringify({ key, at }) }).catch(() => {
+            });
+          },
+          leave() {
+          }
+        };
+      }
+    } : void 0;
     const ports = localPorts();
     const controls = mountHostControls(ports.host, {
       account: ACCOUNT,
@@ -2514,21 +2985,18 @@
       approve: base ? approve : void 0,
       restartCommand: "ox plan review " + slug,
       // the revision ox rendered this page from; a page without one offers no Draw
-      revision: body.getAttribute("data-review-revision") || void 0
+      revision: revision || void 0,
+      presence
     });
     startDocumentTools(ports.document);
     if (!base) return;
-    if (window.EventSource) {
-      try {
-        const es = new EventSource(base + "/events?t=" + encodeURIComponent(token));
-        es.onopen = back;
-        es.onerror = () => {
-          controls.setOffline(true);
-          watch();
-        };
-        es.onmessage = reload;
-      } catch (e) {
-      }
+    if (es) {
+      es.onopen = back;
+      es.onerror = () => {
+        controls.setOffline(true);
+        watch();
+      };
+      es.onmessage = reload;
     }
     if ("serviceWorker" in navigator) {
       try {

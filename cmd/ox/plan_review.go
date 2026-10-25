@@ -183,7 +183,8 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 	activity := make(chan struct{}, 1)
 
 	start := time.Now()
-	srv := &http.Server{Handler: liveReviewHandlerWithActivity(gitRoot, slug, info.Dir, base, token, bc, rounds, approved, activity)}
+	presence := newPresenceBridge(gitRoot, info.Dir)
+	srv := &http.Server{Handler: liveReviewHandlerWithActivity(gitRoot, slug, info.Dir, base, token, bc, rounds, approved, activity, presence)}
 	go func() { _ = srv.Serve(ln) }()
 	defer func() { _ = srv.Shutdown(context.Background()) }()
 
@@ -264,7 +265,7 @@ func reportReviewSession(planDir string, since time.Time, ending string) {
 // GET, so reloads show the latest state) and the round/accept/approve
 // endpoints, plus an SSE stream that pushes reloads.
 func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcaster, rounds chan<- int, approved chan<- struct{}) http.Handler {
-	return liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token, bc, rounds, approved, nil)
+	return liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token, bc, rounds, approved, nil, nil)
 }
 
 // reviewBodyLimit caps a POST body. A round is a few KB of marks and notes;
@@ -278,9 +279,10 @@ const reviewBodyLimit = 1 << 20
 var notifyReviewFeedback = enqueuePlanFeedbackTask
 
 // liveReviewHandlerWithActivity is liveReviewHandler plus an activity signal:
-// every successfully handled POST does a non-blocking send on activity (when
-// non-nil) so the review loop resets its idle timer.
-func liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token string, bc *broadcaster, rounds chan<- int, approved chan<- struct{}, activity chan<- struct{}) http.Handler {
+// every successfully handled review POST does a non-blocking send on activity
+// (when non-nil) so the review loop resets its idle timer. presence, when
+// non-nil, joins each page to the plan's live presence room.
+func liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token string, bc *broadcaster, rounds chan<- int, approved chan<- struct{}, activity chan<- struct{}, presence *presenceBridge) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -363,8 +365,12 @@ func liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token string, b
 	})
 
 	// SSE: EventSource can't set headers, so the token rides as a query param.
+	// A page that names its revision (rev) and itself (k) is also joined to
+	// the plan's presence room for as long as this stream is open; the room's
+	// events ride it as `presence` events, so a tab holds one connection here.
 	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("t") != token {
+		q := r.URL.Query()
+		if q.Get("t") != token {
 			http.Error(w, "bad token", http.StatusForbidden)
 			return
 		}
@@ -378,17 +384,55 @@ func liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token string, b
 		w.Header().Set("Connection", "keep-alive")
 		ch := bc.subscribe()
 		defer bc.unsubscribe(ch)
-		fmt.Fprint(w, "retry: 2000\n\n")
-		flusher.Flush()
+		var mu sync.Mutex // reloads and presence events write from different goroutines
+		write := func(s string) {
+			mu.Lock()
+			defer mu.Unlock()
+			fmt.Fprint(w, s)
+			flusher.Flush()
+		}
+		write("retry: 2000\n\n")
+		if tab := presence.open(r.Context(), q.Get("k"), q.Get("rev"), func(ev []byte) { write("event: presence\ndata: " + string(ev) + "\n\n") }); tab != nil {
+			defer tab.close()
+		}
 		for {
 			select {
 			case <-ch:
-				fmt.Fprint(w, "data: reload\n\n")
-				flusher.Flush()
+				write("data: reload\n\n")
 			case <-r.Context().Done():
 				return
 			}
 		}
+	})
+
+	// /presence: where the page's pointer rests now, for the connection its
+	// event stream opened under the same key. Unlike the review POSTs it
+	// writes nothing, reloads nothing, and does not hold the loop open.
+	mux.HandleFunc("/presence", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.Header.Get("X-Review-Token") != token {
+			http.Error(w, "bad token", http.StatusForbidden)
+			return
+		}
+		var q struct {
+			Key string      `json:"key"`
+			At  *presenceAt `json:"at"`
+		}
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&q); err != nil || (q.At != nil && !q.At.valid()) {
+			http.Error(w, "not a pointer location", http.StatusBadRequest)
+			return
+		}
+		at, _ := json.Marshal(q.At) // "null": the pointer left the plan
+		if presence == nil || !presence.move(q.Key, at) {
+			http.Error(w, "no presence connection", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	post := func(path string, fn func(ctx context.Context, body []byte) (map[string]any, int, error)) {
