@@ -108,6 +108,7 @@ export function startPresence(port: HostPort, transport: PresenceTransport, revi
   layer.setAttribute('aria-hidden', 'true');
   document.body.appendChild(layer);
   const cursors = new Map<string, HTMLElement>();
+  let listed = ''; // who the chips show, as JSON
 
   let mine: PointerAt | null = null, sent = 'null', last = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -190,20 +191,25 @@ export function startPresence(port: HostPort, transport: PresenceTransport, revi
 
   // Who is here, one chip per person, in their cursor's color. A person on
   // another revision is named as such, since their pointer is never drawn
-  // on this one.
+  // on this one. The chips are redrawn only when that changes, not on every
+  // move: a chip's title, the only place its full name shows, would vanish
+  // under the reader's hover.
   function renderHere() {
     const people = new Map<string, { name: string; same: boolean }>();
     peers.forEach((p) => {
       const was = people.get(p.user);
       people.set(p.user, { name: p.name, same: (!!was && was.same) || p.revision === revision });
     });
+    const now = JSON.stringify([...people]);
+    if (now === listed) return;
+    listed = now;
     here.textContent = '';
     here.hidden = !people.size;
     let other = 0, otherName = '';
     people.forEach((p, user) => {
       const chip = document.createElement('span');
       chip.className = 'rev-peer ' + color(user) + (p.same ? '' : ' rev-peer-other');
-      chip.textContent = (p.name.trim().charAt(0) || '?').toUpperCase();
+      chip.textContent = (Array.from(p.name.trim())[0] || '?').toUpperCase(); // a code point, never half of one
       chip.title = p.same ? p.name + ' is here' : p.name + ' is viewing another revision of this plan';
       here.appendChild(chip);
       if (!p.same) { other++; otherName = p.name; }

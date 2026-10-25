@@ -1427,6 +1427,7 @@
     layer.setAttribute("aria-hidden", "true");
     document.body.appendChild(layer);
     const cursors = /* @__PURE__ */ new Map();
+    let listed = "";
     let mine = null, sent = "null", last = 0;
     let timer;
     const link = transport.join(revision, on);
@@ -1511,13 +1512,16 @@
         const was = people.get(p.user);
         people.set(p.user, { name: p.name, same: !!was && was.same || p.revision === revision });
       });
+      const now = JSON.stringify([...people]);
+      if (now === listed) return;
+      listed = now;
       here.textContent = "";
       here.hidden = !people.size;
       let other = 0, otherName = "";
       people.forEach((p, user) => {
         const chip = document.createElement("span");
         chip.className = "rev-peer " + color(user) + (p.same ? "" : " rev-peer-other");
-        chip.textContent = (p.name.trim().charAt(0) || "?").toUpperCase();
+        chip.textContent = (Array.from(p.name.trim())[0] || "?").toUpperCase();
         chip.title = p.same ? p.name + " is here" : p.name + " is viewing another revision of this plan";
         here.appendChild(chip);
         if (!p.same) {

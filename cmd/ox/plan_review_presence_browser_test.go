@@ -266,8 +266,14 @@ func TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers(t *testing.T) {
 	pointAt(t, local, localSpot(t, local, "word"))
 	waitCursor(t, ctx, "Devon", "Devon's pointer in the framed plan", func() spot { return framedSpot(t, ctx, "word") })
 
+	if err := chromedp.Run(local, chromedp.Evaluate(`window.chip = document.querySelector('.rev-peer[title="Avery is here"]')`, nil)); err != nil {
+		t.Fatal(err)
+	}
 	pointIntoFrame(t, ctx, "word")
 	waitCursor(t, local, "Avery", "Avery's pointer on the local page", func() spot { return localSpot(t, local, "word") })
+	if got := evalString(t, local, `document.querySelector('.rev-peer[title="Avery is here"]') === window.chip`); got != "true" {
+		t.Fatal("a teammate's moves must not redraw their chip: its name, in its title, would vanish under the reader's hover")
+	}
 	if err := chromedp.Run(local, chromedp.Evaluate(`window.scrollBy(0, 120)`, nil)); err != nil {
 		t.Fatal(err)
 	}
