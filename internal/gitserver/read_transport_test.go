@@ -228,9 +228,16 @@ func TestReadTransportRejectsUntrustedConfiguration(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("[core]\nrepositoryformatversion = 0\n[remote \"origin\"]\nurl = "+readURL+"\n"), 0o600))
 	cmd, err := transport.LocalCommand(context.Background(), dir, "status", "--porcelain")
 	require.NoError(t, err)
-	require.NotContains(t, strings.Join(cmd.Env, "\n"), "SAGEOX_TOKEN=")
-	require.NotContains(t, strings.Join(cmd.Env, "\n"), "GIT_TRACE=")
-	require.NotContains(t, strings.Join(cmd.Env, "\n"), "GIT_CONFIG_VALUE_0=")
+	// compare variable names, not substrings: runner images export names such
+	// as BLACKSMITH_ENABLE_GIT_TRACE that merely contain a Git variable's name.
+	envKeys := make(map[string]bool, len(cmd.Env))
+	for _, entry := range cmd.Env {
+		key, _, _ := strings.Cut(entry, "=")
+		envKeys[key] = true
+	}
+	for _, leaked := range []string{"SAGEOX_TOKEN", "GIT_TRACE", "GIT_CONFIG_VALUE_0"} {
+		require.NotContains(t, envKeys, leaked)
+	}
 	require.Contains(t, cmd.Args, "protocol.https.allow=never")
 	require.Contains(t, cmd.Env, "GIT_NO_LAZY_FETCH=1")
 }
