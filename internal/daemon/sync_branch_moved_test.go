@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -185,4 +186,41 @@ func TestPullManagedRepo_BranchMovedDuringConflictResolution(t *testing.T) {
 	assert.NoError(t, err, "main must keep the commit landed mid-resolution: %s", out)
 	out, err = runGitOut(t, local, "merge-base", "--is-ancestor", "origin/main", "main")
 	assert.NoError(t, err, "the restarted pull must land the remote's commits: %s", out)
+}
+
+// TestPullManagedRepo_BranchMovedDuringEveryResolution_FailsCleanly: a writer
+// that wins the race on every resolve attempt exhausts the in-cycle retry.
+// Failure prevented: the second lost race being reported as a conflict, or
+// leaving the rebase on disk.
+func TestPullManagedRepo_BranchMovedDuringEveryResolution_FailsCleanly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git pull against a bare remote")
+	}
+	local := makeSessionMetaConflictClone(t)
+	installMidRebaseWriter(t, local, "post-commit", 99)
+
+	result := pullRacedLedger(t, local)
+
+	require.ErrorContains(t, result.Err, "another writer moved the branch")
+	assert.Nil(t, result.Issue, "a lost race is retried next cycle; it must not raise an issue")
+	assert.False(t, gitutil.IsRebaseInProgress(local))
+	for n := 1; n <= 2; n++ {
+		out, err := runGitOut(t, local, "cat-file", "-e", fmt.Sprintf("main:sessions/raced-%d/summary.json", n))
+		assert.NoError(t, err, "main must keep raced commit %d: %s", n, out)
+	}
+}
+
+// TestBranchMovedResult_StuckAbortPointsAtDoctor: when the re-anchored abort
+// itself fails, the issue must send the coworker to doctor, never to a plain
+// `git rebase --abort`, which rewinds the moved branch past the other
+// writer's commit. Failure prevented: the recovery hint causing the data loss.
+func TestBranchMovedResult_StuckAbortPointsAtDoctor(t *testing.T) {
+	result := branchMovedResult(ManagedRepoPullResult{}, errors.New("abort failed"), errors.New("pull failed"), "ledger")
+
+	require.Error(t, result.Err)
+	require.NotNil(t, result.Issue)
+	assert.Equal(t, IssueTypeRebaseStuck, result.Issue.Type)
+	assert.True(t, result.Issue.RequiresConfirm)
+	assert.Contains(t, result.Issue.Summary, "ox doctor --fix")
+	assert.NotContains(t, result.Issue.Summary, "rebase --abort")
 }

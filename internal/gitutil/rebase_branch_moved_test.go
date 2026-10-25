@@ -217,3 +217,78 @@ func TestResolveRebase_RefusesBranchMovedDuringContinue(t *testing.T) {
 	require.NoError(t, err)
 	f.assertMakesProgress()
 }
+
+// TestRebaseBranchMoved_StatesWithNoBranchToRewind: an abort can only lose a
+// commit when the rebase names a branch and pinned where it started. Without
+// either, there is nothing to re-anchor and the abort must not be refused.
+// Failure prevented: a detached or zombie rebase that no recovery can clear.
+func TestRebaseBranchMoved_StatesWithNoBranchToRewind(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		wedge  func(f *ledgerFixture)
+		aborts bool
+	}{
+		{"rebase began on a detached HEAD", func(f *ledgerFixture) {
+			f.git(f.local, "checkout", "-q", "--detach")
+			f.gitAllowFail(f.local, "rebase", "--exec", "false", "HEAD~1")
+		}, true},
+		{"zombie state missing orig-head", func(f *ledgerFixture) {
+			f.gitAllowFail(f.local, "rebase", "--exec", "false", "HEAD~1")
+			require.NoError(t, os.Remove(filepath.Join(f.local, ".git", "rebase-merge", "orig-head")))
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLedgerFixture(t)
+			f.write(f.local, "sessions/local/meta.json", `{"s":"local"}`)
+			f.commitAll(f.local, "local session")
+			tc.wedge(f)
+			require.True(t, IsRebaseInProgress(f.local), "the fixture must be mid-rebase")
+
+			require.False(t, RebaseBranchMoved(context.Background(), f.local))
+			require.NoError(t, reanchorMovedRebase(context.Background(), f.local, quietLogger()), "nothing to re-anchor is not a refusal")
+			if tc.aborts {
+				require.NoError(t, AuditAndAbort(context.Background(), f.local, AuditOpRebase, "test", quietLogger()))
+				assert.False(t, IsRebaseInProgress(f.local))
+			}
+		})
+	}
+}
+
+// TestAuditAndAbort_RefusesWhenBranchTipUnreadable is the fail-closed half: if
+// the branch tip cannot be read, the abort cannot know whether it would rewind
+// a commit, so it must leave the rebase for the next cycle. Failure prevented:
+// a transient git failure turning into a commit lost to the reflog.
+func TestAuditAndAbort_RefusesWhenBranchTipUnreadable(t *testing.T) {
+	f := newLedgerFixture(t)
+	raced := racedRebase(t, f, false)
+	installFakeGit(t, "branchtipfail")
+
+	err := AuditAndAbort(context.Background(), f.local, AuditOpRebase, "test", quietLogger())
+
+	require.ErrorContains(t, err, "refused")
+	assert.True(t, IsRebaseInProgress(f.local), "a refused abort leaves the rebase for the next cycle")
+	assert.Equal(t, raced, f.git(f.local, "rev-parse", "main"), "the moved branch must be untouched")
+}
+
+// TestAuditAndAbort_RefusesWhenReanchorCannotBeWritten: the same fail-closed
+// rule when orig-head cannot be rewritten. Failure prevented: an abort that
+// rewinds the moved branch because its re-anchor silently failed.
+func TestAuditAndAbort_RefusesWhenReanchorCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	f := newLedgerFixture(t)
+	raced := racedRebase(t, f, false)
+	stateDir := filepath.Join(f.local, ".git", "rebase-merge")
+	require.NoError(t, os.Chmod(stateDir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(stateDir, 0o755) })
+	if probe, err := os.CreateTemp(stateDir, "probe"); err == nil {
+		_ = probe.Close()
+		t.Skip("state dir still writable (running as root?); cannot fail the re-anchor")
+	}
+
+	err := AuditAndAbort(context.Background(), f.local, AuditOpRebase, "test", quietLogger())
+
+	require.ErrorContains(t, err, "refused")
+	assert.True(t, IsRebaseInProgress(f.local))
+	assert.Equal(t, raced, f.git(f.local, "rev-parse", "main"), "the moved branch must be untouched")
+}

@@ -156,6 +156,31 @@ func TestCheckLedgerStrandedCommits_FixFailsClosedOnWedge(t *testing.T) {
 	}
 }
 
+// TestCheckLedgerStrandedCommits_InteractiveFixRescuesAndClearsWedge covers
+// the destructive half a human runs: rescue first, then clear the wedge under
+// the repo lock. Failure prevented: an interactive --fix that leaves the
+// ledger wedged, or clears it before the stranded commits are anchored.
+func TestCheckLedgerStrandedCommits_InteractiveFixRescuesAndClearsWedge(t *testing.T) {
+	dir := newStrandedLedger(t, 2, true)
+	headBefore := strandedGit(t, dir, "rev-parse", "HEAD")
+
+	result := strandedCommitsCheck(dir, true, true)
+
+	if !strings.Contains(result.message, "wedge cleared") {
+		t.Fatalf("expected the wedge to be cleared, got %q / %q", result.message, result.detail)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git", "rebase-merge")); !os.IsNotExist(err) {
+		t.Errorf("rebase state survived the interactive fix: %v", err)
+	}
+	ref := strings.TrimSpace(strings.TrimPrefix(strandedGit(t, dir, "branch", "--list", "rescue-wedge-*"), "*"))
+	if ref == "" {
+		t.Fatal("no rescue branch created before clearing the wedge")
+	}
+	if got := strandedGit(t, dir, "rev-parse", ref); got != headBefore {
+		t.Errorf("rescue branch %s points at %s, want pre-fix HEAD %s", ref, got, headBefore)
+	}
+}
+
 // TestCheckLedgerStrandedCommits_CleanLedgerPasses keeps the check quiet on a
 // healthy repo — a noisy check is one people learn to ignore.
 func TestCheckLedgerStrandedCommits_CleanLedgerPasses(t *testing.T) {

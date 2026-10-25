@@ -121,6 +121,14 @@ func TestLedgerWriters_QueueBehindRepoLock(t *testing.T) {
 				return err
 			}
 		}},
+		{"murmur delete", func(t *testing.T, clonePath, _ string) func() error {
+			const murmur = "data/murmurs/m1.json"
+			require.NoError(t, os.MkdirAll(filepath.Join(clonePath, filepath.Dir(murmur)), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(clonePath, murmur), []byte(`{"content":"wip"}`), 0o644))
+			runGit(t, clonePath, "add", murmur)
+			runGit(t, clonePath, "commit", "--no-verify", "-m", "seed murmur")
+			return func() error { return commitMurmurDeletion(context.Background(), clonePath, murmur, "m1") }
+		}},
 		{"session-ID backfill", func(t *testing.T, clonePath, name string) func() error {
 			committedSession(t, clonePath, name)
 			meta := filepath.Join(clonePath, "sessions", name, "meta.json")
@@ -184,4 +192,61 @@ func TestPushSummary_LeavesUnrelatedStagedEntriesStaged(t *testing.T) {
 	_, err = runGitCombined(clonePath, "cat-file", "-e", "HEAD:"+plan)
 	assert.Error(t, err, "the staged plan must not ride along in the summary commit")
 	assert.Contains(t, runGit(t, clonePath, "diff", "--cached", "--name-only"), plan, "the plan edit must stay staged")
+}
+
+// pushSummaryFixture returns a summary file push-summary accepts.
+func pushSummaryFixture(t *testing.T) string {
+	t.Helper()
+	summary := filepath.Join(t.TempDir(), "raw-summary.json")
+	require.NoError(t, os.WriteFile(summary, []byte(`{"title":"Fix ledger sync","summary":"Recovered the ledger sync after a lost rebase race.","outcome":"success"}`), 0o644))
+	return summary
+}
+
+// TestPushSummary_RetryAfterCommitSucceeds: a hook that re-runs push-summary
+// for a summary already in the Ledger must get success, not a commit error.
+// Failure prevented: the snapshot's "nothing to commit" (committed=false)
+// reading as a failure, so a retried session stop reports a broken upload.
+func TestPushSummary_RetryAfterCommitSucceeds(t *testing.T) {
+	_, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+	sessionDir := writeSessionFiles(t, clonePath, "2026-01-01T00-00-testuser-OxRty1")
+	summary := pushSummaryFixture(t)
+	first := pushSummaryToLedger(summary, sessionDir)
+	require.True(t, first.Success, first.Error)
+	head := runGit(t, clonePath, "rev-parse", "HEAD")
+
+	retry := pushSummaryToLedger(summary, sessionDir)
+
+	require.True(t, retry.Success, retry.Error)
+	assert.Equal(t, "summary already committed", retry.Message)
+	assert.Equal(t, head, runGit(t, clonePath, "rev-parse", "HEAD"), "a retry must not add a commit")
+}
+
+// TestPushSummary_UnmergedIndexPointsAtDoctor: an index left unmerged outside a
+// rebase (an autostash or merge conflict) blocks the snapshot commit. Failure
+// prevented: the coworker getting a raw snapshot error with no way forward
+// instead of the `ox doctor --fix` guidance (bd ox-v30g).
+func TestPushSummary_UnmergedIndexPointsAtDoctor(t *testing.T) {
+	_, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+	sessionDir := writeSessionFiles(t, clonePath, "2026-01-01T00-00-testuser-OxUnm1")
+	conflicted := filepath.Join(clonePath, "notes.txt")
+	require.NoError(t, os.WriteFile(conflicted, []byte("base\n"), 0o644))
+	runGit(t, clonePath, "add", "notes.txt")
+	runGit(t, clonePath, "commit", "--no-verify", "-m", "base")
+	branch := runGit(t, clonePath, "branch", "--show-current")
+	runGit(t, clonePath, "checkout", "-q", "-b", "other")
+	require.NoError(t, os.WriteFile(conflicted, []byte("other\n"), 0o644))
+	runGit(t, clonePath, "commit", "--no-verify", "-qam", "other")
+	runGit(t, clonePath, "checkout", "-q", branch)
+	require.NoError(t, os.WriteFile(conflicted, []byte("ours\n"), 0o644))
+	runGit(t, clonePath, "commit", "--no-verify", "-qam", "ours")
+	_, err := runGitCombined(clonePath, "merge", "other")
+	require.Error(t, err, "the merge must conflict")
+	require.False(t, gitutil.IsRebaseInProgress(clonePath))
+
+	out := pushSummaryToLedger(pushSummaryFixture(t), sessionDir)
+
+	require.False(t, out.Success)
+	assert.Contains(t, out.Error, "ox doctor --fix")
 }

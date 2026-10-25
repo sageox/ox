@@ -23,6 +23,8 @@ import (
 //     for the squash's refusal paths.
 //   - "stashstorefail": `stash store` fails while `stash apply` and `stash
 //     create` pass through, for the leftover-autostash failure path.
+//   - "branchtipfail": `rev-parse` of a refs/heads/ name fails the way a
+//     killed or broken git does, while `rev-parse HEAD` passes through.
 //
 // It returns the path of the invocation log.
 func installFakeGit(t *testing.T, mode string) string {
@@ -63,6 +65,11 @@ case "` + mode + `:$sub" in
   updatereffail:update-ref)
     echo "fatal: update-ref refused" >&2
     exit 128;;
+  branchtipfail:rev-parse)
+    case " $* " in *" refs/heads/"*)
+      echo "fatal: rev-parse refused" >&2
+      exit 128;;
+    esac;;
   stashstorefail:stash)
     case " $* " in *" store "*)
       echo "fatal: stash store refused" >&2
