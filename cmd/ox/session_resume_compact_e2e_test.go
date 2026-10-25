@@ -98,17 +98,51 @@ func TestCompactedClaudeSession_IsRecordedAndPublishedOnStop(t *testing.T) {
 
 // When the transcript cannot be found at all, what the recording already holds
 // (here, history an AI coworker reconstructed with capture-prior) is still the
-// session. Failure prevented: stop returned success but left the recording
-// marked live, so `ox session upload` refused it as "still recording" and only
+// session, under either publishing mode. Failure prevented: stop returned
+// success but published nothing and left the recording marked live, so
+// `ox session upload` refused it as "still recording" and only
 // `session recover` could publish it.
 func TestSessionStop_PublishesCapturedHistoryWhenTheTranscriptIsMissing(t *testing.T) {
-	r := newClaudeRecordingFixture(t)
-	projectCfg, err := config.LoadProjectConfig(r.projectRoot)
-	require.NoError(t, err)
-	projectCfg.SessionPublishing = config.SessionPublishingManual
-	require.NoError(t, config.SaveProjectConfig(r.projectRoot, projectCfg))
-	t.Setenv("OX_SESSION_PUBLISHING", "")
+	t.Run("automatic publishing: stop publishes it", func(t *testing.T) {
+		r := newClaudeRecordingFixture(t)
+		r.setSessionPublishing(config.SessionPublishingAuto)
+		agentID := r.captureHistoryWithoutTranscript()
+		r.stopAndRequirePublished(agentID, 2)
+	})
 
+	t.Run("manual publishing: stop holds it, upload publishes it", func(t *testing.T) {
+		r := newClaudeRecordingFixture(t)
+		r.setSessionPublishing(config.SessionPublishingManual)
+		agentID := r.captureHistoryWithoutTranscript()
+		name := session.GetSessionName(r.recording(agentID).SessionPath)
+
+		stop := r.stop(agentID)
+		remoteBefore := runGit(t, r.barePath, "rev-parse", "HEAD")
+		require.NoError(t, sessionUploadCmd.RunE(sessionUploadCmd, []string{name}), "upload must publish what stop saved")
+		assert.True(t, stop.Held, "manual publishing holds the stopped session: %+v", stop)
+		assert.Nil(t, r.recording(agentID), "stop must not leave the recording live")
+		assert.NotEqual(t, remoteBefore, runGit(t, r.barePath, "rev-parse", "HEAD"), "the upload reached the remote")
+		meta, err := lfs.ReadSessionMeta(filepath.Join(r.ledgerPath, "sessions", name))
+		require.NoError(t, err)
+		assert.False(t, meta.IsDraft())
+		assert.Equal(t, 2, meta.EntryCount, "the captured history was published, not an empty session")
+	})
+}
+
+func (r *claudeRecordingFixture) setSessionPublishing(mode string) {
+	r.t.Helper()
+	projectCfg, err := config.LoadProjectConfig(r.projectRoot)
+	require.NoError(r.t, err)
+	projectCfg.SessionPublishing = mode
+	require.NoError(r.t, config.SaveProjectConfig(r.projectRoot, projectCfg))
+	r.t.Setenv("OX_SESSION_PUBLISHING", "")
+}
+
+// captureHistoryWithoutTranscript primes a recording whose transcript does not
+// exist and gives it two turns an AI coworker reconstructed with capture-prior.
+func (r *claudeRecordingFixture) captureHistoryWithoutTranscript() string {
+	t := r.t
+	t.Helper()
 	agentID := r.prime("5a6f0cd0-f4e9-4fbb-8d6b-6c60ccea1613") // no such transcript
 	r.afterTool(agentID)
 	state, err := session.LoadRecordingStateForAgent(r.projectRoot, agentID)
@@ -126,18 +160,7 @@ func TestSessionStop_PublishesCapturedHistoryWhenTheTranscriptIsMissing(t *testi
 	captureStdoutForPlanCLI(t, func() {
 		require.NoError(t, runAgentSessionCapturePrior(&agentinstance.Instance{AgentID: agentID, AgentType: "claude-code"}, []string{"--file", prior}))
 	})
-
-	stop := r.stop(agentID)
-	name := session.GetSessionName(state.SessionPath)
-	remoteBefore := runGit(t, r.barePath, "rev-parse", "HEAD")
-	require.NoError(t, sessionUploadCmd.RunE(sessionUploadCmd, []string{name}), "upload must publish what stop saved")
-	assert.True(t, stop.Held, "manual publishing holds the stopped session: %+v", stop)
-	assert.Nil(t, r.recording(agentID), "stop must not leave the recording live")
-	assert.NotEqual(t, remoteBefore, runGit(t, r.barePath, "rev-parse", "HEAD"), "the upload reached the remote")
-	meta, err := lfs.ReadSessionMeta(filepath.Join(r.ledgerPath, "sessions", name))
-	require.NoError(t, err)
-	assert.False(t, meta.IsDraft())
-	assert.GreaterOrEqual(t, meta.EntryCount, 2, "the captured history was published, not an empty session")
+	return agentID
 }
 
 // claudeRecordingFixture is a project with a Ledger on a bare remote, the real
