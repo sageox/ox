@@ -23,7 +23,7 @@ jobs:
   # Path-filter to gate the security jobs
   # =============================================================================
   changes:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       sensitive: ${{ steps.filter.outputs.sensitive }}
       pipeline: ${{ steps.filter.outputs.pipeline }}
@@ -62,7 +62,7 @@ jobs:
   pipeline-tests:
     needs: changes
     if: needs.changes.outputs.pipeline == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -76,7 +76,7 @@ jobs:
     needs: changes
     # PRs only: on a push to main the diff vs origin/main is empty, so it scanned nothing.
     if: github.event_name == 'pull_request' && needs.changes.outputs.sensitive == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     continue-on-error: true   # never block merge
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

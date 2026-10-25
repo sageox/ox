@@ -28,7 +28,7 @@ jobs:
   # credential inside `make test-release`.
   verify-draft:
     if: github.repository == 'sageox/ox'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       contents: write
     outputs:
@@ -94,7 +94,7 @@ jobs:
   # records the commit the tag names so every later job can refuse a moved tag.
   plan-release-stages:
     if: github.repository == 'sageox/ox'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
       stages: ${{ steps.plan.outputs.stages }}
       sha: ${{ steps.plan.outputs.sha }}
@@ -129,7 +129,8 @@ jobs:
   verify-inrepo:
     if: github.repository == 'sageox/ox'
     needs: [verify-draft, plan-release-stages]
-    runs-on: ubuntu-latest
+    # 8 vCPU: release gate stages run the -race suite at -p 8; one stage is ~3400s at worst on 4 vCPU
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     strategy:
       # Every stage reports even when another fails, and re-running failed
       # jobs repeats only the stage that failed.
@@ -229,7 +230,8 @@ jobs:
   build-release-assets:
     if: github.repository == 'sageox/ox'
     needs: [verify-draft, verify-inrepo, plan-release-stages]
-    runs-on: ubuntu-latest
+    # 8 vCPU: goreleaser cross-compiles every platform binary, ~490s on 4 vCPU
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     permissions:
       contents: write
     outputs:
@@ -391,7 +393,7 @@ jobs:
   publish-release:
     if: github.repository == 'sageox/ox'
     needs: [verify-draft, plan-release-stages, build-release-assets]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       contents: write
     steps:
@@ -482,7 +484,7 @@ jobs:
   # lets a tap failure retry without rebuilding or changing the release.
   publish-homebrew:
     needs: [build-release-assets, publish-release]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       actions: read
       contents: read

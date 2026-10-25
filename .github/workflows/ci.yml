@@ -32,7 +32,7 @@ jobs:
   # under -race. Same tests, same flags, same merged profile, same ratchets.
   plan:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
       slots: ${{ steps.slots.outputs.slots }}
     steps:
@@ -52,7 +52,8 @@ jobs:
 
   unit:
     needs: plan
-    runs-on: ubuntu-latest
+    # 8 vCPU: go test -race -p 8 -parallel 32 per slot; ox-4 is the PR long pole (~1300s on 4 vCPU)
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
@@ -162,7 +163,8 @@ jobs:
   # PR jobs compile and saves it as the build cache every PR job restores.
   main:
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    # 8 vCPU: push-to-main fast tier plus build-cache warm-up: Go compile and test, ~740s on 4 vCPU
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     permissions:
       contents: read
       actions: write  # prune superseded build caches
@@ -278,7 +280,7 @@ jobs:
   # Compiled-binary acceptance journeys through a coverage-instrumented ox.
   acceptance:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -326,7 +328,7 @@ jobs:
   # Deterministic cloud-auth, Ledger, and KB digital twins.
   twins:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -378,7 +380,7 @@ jobs:
   test:
     if: always()
     needs: [plan, unit, main, acceptance, twins, lint, plan-review, skills-windows]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Require every suite to pass
         env:
@@ -456,7 +458,7 @@ jobs:
           fail_ci_if_error: false
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -508,7 +510,7 @@ jobs:
   # pass, and its tarball is reproducible, installs offline and type-checks.
   # Node only here: building ox needs none.
   plan-review:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

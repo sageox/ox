@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   smoke-test:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     # continue even if smoke tests fail - this is a warning, not a blocker
     continue-on-error: true
     steps:

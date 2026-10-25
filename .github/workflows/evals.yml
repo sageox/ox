@@ -36,7 +36,7 @@ concurrency:
 
 jobs:
   evals:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 90
     env:
       EVAL_RUNS: ${{ github.event.inputs.runs || '3' }}
