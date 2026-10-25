@@ -37,6 +37,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -50,6 +51,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/telemetry"
@@ -351,29 +353,49 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 	}
 
 	// disposition == QualityUpload — commit and push to ledger
-	// ensure .gitignore is in place before any commit to prevent cache file leakage
-	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
-
 	// git add the summary file (and meta.json if updated)
 	// --sparse: ledger repos use sparse-checkout
 	addArgs := []string{"-C", ledgerPath, "add", "--sparse", summaryDst}
 	if metaUpdated {
 		addArgs = append(addArgs, filepath.Join(sessionDir, "meta.json"))
 	}
-	addCmd := exec.Command("git", addArgs...)
-	if output, err := addCmd.CombinedOutput(); err != nil {
+	commitMsg := fmt.Sprintf("summary: %s", sessionName)
+
+	// Hold the repo lock from the first index write through commit, as daemon
+	// pulls do, so this commit queues behind a sync rebase instead of moving
+	// main under it (sageox/ox#1541). Under the lock a rebase in progress is a
+	// wedge, and staging into it would mark its conflicts resolved.
+	var addOutput, commitOutput []byte
+	var addErr, commitErr error
+	lockErr := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		if gitutil.IsRebaseInProgress(ledgerPath) {
+			return errors.New("repo in broken rebase state (run 'ox doctor --fix')")
+		}
+		// ensure .gitignore is in place before any commit to prevent cache file leakage
+		gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
+		addOutput, addErr = exec.Command("git", addArgs...).CombinedOutput()
+		if addErr != nil {
+			return nil
+		}
+		commitOutput, commitErr = exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg).CombinedOutput()
+		return nil
+	})
+	if lockErr != nil {
 		return &pushSummaryOutput{
 			Success: false,
 			Type:    "push_summary",
-			Error:   fmt.Sprintf("git add: %s: %v", strings.TrimSpace(string(output)), err),
+			Error:   fmt.Sprintf("ledger not safe for summary commit: %v", lockErr),
 		}
 	}
-
-	// git commit
-	commitMsg := fmt.Sprintf("summary: %s", sessionName)
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		outStr := string(output)
+	if addErr != nil {
+		return &pushSummaryOutput{
+			Success: false,
+			Type:    "push_summary",
+			Error:   fmt.Sprintf("git add: %s: %v", strings.TrimSpace(string(addOutput)), addErr),
+		}
+	}
+	if err := commitErr; err != nil {
+		outStr := string(commitOutput)
 		if strings.Contains(outStr, "nothing to commit") {
 			clearNeedsSummaryMarkerForSession(sessionName)
 			return &pushSummaryOutput{

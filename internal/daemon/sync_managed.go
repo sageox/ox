@@ -983,6 +983,16 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 				return result
 			}
 		}
+		// Another writer committed to the branch while this rebase replayed,
+		// so git refused to finish it (sageox/ox#1541). No resolution can, so
+		// restart from the moved branch and pull again under the same lock.
+		if gitutil.RebaseBranchMoved(ctx, path) {
+			abortErr := abortMovedRebase(ctx, path, repoName, logger)
+			if abortErr == nil && attempt < maxFetchPullAttempts {
+				continue
+			}
+			return branchMovedResult(ManagedRepoPullResult{FetchHeadTime: fetchHeadTime, Diverged: diverged}, abortErr, pullErr, repoName)
+		}
 		// A non-ox git took index.lock mid-pull. That is a busy repo, not a
 		// conflict: wait for it, retry once, and if it will not clear return a
 		// busy skip rather than climbing the conflict ladder, whose final rung
@@ -1028,6 +1038,10 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 				logger.Info("auto-resolved rebase conflicts", "repo", repoName, "strategy", "accept-theirs")
 				result.AutoResolved = true
 				return result
+			}
+			if errors.Is(resolveErr, gitutil.ErrRebaseBranchMoved) {
+				// moved while conflicts were being resolved; not a conflict
+				return branchMovedResult(result, abortMovedRebase(ctx, path, repoName, logger), err, repoName)
 			}
 			logger.Warn("auto-resolve failed, attempting LLM tier", "repo", repoName, "error", resolveErr)
 
@@ -1135,6 +1149,35 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 		result.Err = fmt.Errorf("%s: %w", errMsg, err)
 		return result
 	}
+}
+
+// abortMovedRebase clears a pull's rebase after another writer moved the
+// branch it was replaying onto. AuditAndAbort re-anchors the abort on the
+// moved branch, so the commit that landed mid-rebase stays on it and the next
+// pull replays it with everything else.
+func abortMovedRebase(ctx context.Context, path, repoName string, logger *slog.Logger) error {
+	logger.Warn("branch moved during pull rebase, restarting from the moved branch",
+		"op", "pull_branch_moved", "repo", repoName, "path", path)
+	return gitutil.AuditAndAbort(ctx, path, gitutil.AuditOpRebase, "branch moved during pull rebase", logger)
+}
+
+// branchMovedResult reports a pull that lost the race with another writer
+// and will retry next cycle. Losing a race is not a conflict or a divergence,
+// so it raises no issue unless the abort itself failed and left the rebase.
+func branchMovedResult(result ManagedRepoPullResult, abortErr, pullErr error, repoName string) ManagedRepoPullResult {
+	result.Err = fmt.Errorf("pull failed: another writer moved the branch during the rebase: %w", pullErr)
+	if abortErr != nil {
+		// No manual `git rebase --abort` hint: a plain abort rewinds the moved
+		// branch and drops the other writer's commit. Doctor re-anchors first.
+		result.Issue = &DaemonIssue{
+			Type:            IssueTypeRebaseStuck,
+			Severity:        SeverityError,
+			Repo:            repoName,
+			Summary:         fmt.Sprintf("%s is stuck in a rebase that another writer raced. Run 'ox doctor --fix' to recover without losing commits.", repoName),
+			RequiresConfirm: true,
+		}
+	}
+	return result
 }
 
 // sessionConflictPaths returns the subset of unmerged (conflicted) paths

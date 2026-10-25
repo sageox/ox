@@ -330,9 +330,6 @@ func firstUnstageableFileInIndex(ledgerPath string) (string, error) {
 func commitAndPushLedger(ledgerPath, sessionName string) error {
 	waitForGCSwap(ledgerPath)
 
-	// ensure .gitignore is in place before any commit to prevent cache file leakage
-	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
-
 	// stage meta.json and .gitignore
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
@@ -342,25 +339,44 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 
 	filesToAdd := append([]string{metaPath, gitignorePath}, sessionArtifactsToStage(sessionDir)...)
 
-	// --sparse: ledger repos use sparse-checkout (cone mode); this flag
-	// prevents git from blocking adds if sparse rules change or edge cases arise
-	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, filesToAdd...)
-	addCmd := exec.Command("git", addArgs...)
-	if output, err := addCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git add failed: %s: %w", string(output), err)
-	}
+	// Hold the repo lock from the first index write through commit, as
+	// commitLedgerSnapshot requires: a daemon sync rebase then cannot run under
+	// this commit, and this commit cannot move main under the rebase
+	// (sageox/ox#1541). pushLedger takes the same non-reentrant lock itself, so
+	// it stays outside.
+	err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		// under the lock a rebase in progress is a wedge, and staging into it
+		// would mark its conflicts resolved
+		if gitutil.IsRebaseInProgress(ledgerPath) {
+			return errors.New("committing ledger: repo in broken rebase state (run 'ox doctor --fix')")
+		}
 
-	// Commit the index as an immutable, pre-validated tree snapshot. The old
-	// shape (validate the index, then a no-pathspec `git commit` that re-reads the
-	// WHOLE index at commit time) left a window where a concurrent daemon
-	// `pull --rebase --autostash` could stage an unchecked conflict blob between
-	// the check and the commit. commitLedgerSnapshot writes the index to an
-	// immutable tree, scans that snapshot, and commits exactly it — so a blob
-	// staged after the snapshot is neither vetted-away nor swept in. See #749 and
-	// the PR #811 review (validation↔commit TOCTOU).
-	_, err := commitLedgerSnapshot(context.Background(), ledgerPath, fmt.Sprintf("session: %s", sessionName))
+		// ensure .gitignore is in place before any commit to prevent cache file leakage
+		gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
+
+		// --sparse: ledger repos use sparse-checkout (cone mode); this flag
+		// prevents git from blocking adds if sparse rules change or edge cases arise
+		addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, filesToAdd...)
+		addCmd := exec.Command("git", addArgs...)
+		if output, err := addCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("git add failed: %s: %w", string(output), err)
+		}
+
+		// Commit the index as an immutable, pre-validated tree snapshot. The old
+		// shape (validate the index, then a no-pathspec `git commit` that re-reads the
+		// WHOLE index at commit time) left a window where a concurrent daemon
+		// `pull --rebase --autostash` could stage an unchecked conflict blob between
+		// the check and the commit. commitLedgerSnapshot writes the index to an
+		// immutable tree, scans that snapshot, and commits exactly it — so a blob
+		// staged after the snapshot is neither vetted-away nor swept in. See #749 and
+		// the PR #811 review (validation↔commit TOCTOU).
+		if _, err := commitLedgerSnapshot(context.Background(), ledgerPath, fmt.Sprintf("session: %s", sessionName)); err != nil {
+			return fmt.Errorf("committing ledger: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("committing ledger: %w", err)
+		return err
 	}
 	// An identical retry may have no new commit but still owe the remote the
 	// pointer commit from a failed push. Always retry publication.

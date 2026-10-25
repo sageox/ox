@@ -786,10 +786,9 @@ func TestPushWithRetry_OnUnresolvedConflictsHookCalled(t *testing.T) {
 				if tc.cancelEnumeration {
 					assert.ErrorIs(t, err, context.Canceled)
 					assert.Contains(t, err.Error(), "could not list conflicts")
-					// Cancellation also prevents abort; the original commit
-					// must remain recoverable with a fresh operation context.
-					assert.True(t, IsRebaseInProgress(repo))
-					run(t, repo, "git", "rebase", "--abort")
+					// The abort outlives the canceled caller, as every audited
+					// abort does, so cancellation cannot leave the clone wedged.
+					assert.False(t, IsRebaseInProgress(repo))
 				}
 				assert.Equal(t, localHead, gitInRepo(t, repo, "rev-parse", "HEAD"))
 				assert.Equal(t, "from-first", gitInRepo(t, repo, "show", "HEAD:shared.txt"))

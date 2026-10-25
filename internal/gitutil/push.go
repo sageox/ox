@@ -282,6 +282,15 @@ const lfsObjectsMissing = "LFS objects are missing"
 // is kept under refs/ox-backup/.
 const collapseBacklogAbove = 100
 
+// abortRetryRebase clears the rebase a push retry left behind, if any. The
+// audited abort outlives the caller's deadline, so it must not be spent on a
+// clone with no rebase to clear.
+func abortRetryRebase(ctx context.Context, repoPath, reason string, log *slog.Logger) {
+	if IsRebaseInProgress(repoPath) {
+		_ = AuditAndAbort(ctx, repoPath, AuditOpRebase, reason, log)
+	}
+}
+
 func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 	log := opts.logger()
 	breaker := opts.pushBreaker()
@@ -464,7 +473,8 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 							// (e.g. LLM merge) before we abort. The hook owns the
 							// rebase --continue if it succeeds.
 							hookResolved := false
-							if opts.OnUnresolvedConflicts != nil {
+							// a moved branch cannot finish whatever the hook resolves
+							if opts.OnUnresolvedConflicts != nil && !errors.Is(resolveErr, ErrRebaseBranchMoved) {
 								pathsCtx, pathsCancel := context.WithTimeout(ctx, opTimeout)
 								conflicted, listErr := listConflictedFiles(pathsCtx, repoPath)
 								pathsCancel()
@@ -475,9 +485,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 								// rather than guess.
 								if listErr != nil {
 									log.Warn("listing conflicted files failed; skipping resolve hook", "error", listErr)
-									abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-									_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
-									abortCancel()
+									abortRetryRebase(ctx, repoPath, "push retry: conflicts could not be listed", log)
 									return fmt.Errorf("git rebase failed during retry: %s (could not list conflicts: %w)", pullOut, listErr)
 								}
 								hookCtx, hookCancel := context.WithTimeout(ctx, opTimeout)
@@ -496,9 +504,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 							}
 
 							if !hookResolved {
-								abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-								_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
-								abortCancel()
+								abortRetryRebase(ctx, repoPath, "push retry: conflicts unresolved", log)
 								return fmt.Errorf("%w: git rebase failed during retry: %s", ErrNeedsPullCycle, pullOut)
 							}
 						} else {
@@ -506,9 +512,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 						}
 					} else {
 						// no auto-resolve configured — abort and fail
-						abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-						_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
-						abortCancel()
+						abortRetryRebase(ctx, repoPath, "push retry: rebase failed", log)
 						return fmt.Errorf("%w: git rebase failed during retry: %s", ErrNeedsPullCycle, pullOut)
 					}
 				}
