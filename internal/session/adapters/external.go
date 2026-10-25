@@ -286,7 +286,13 @@ func (ea *ExternalAdapter) Watch(ctx context.Context, sessionPath string) (<-cha
 
 // ReadFromOffset implements IncrementalReader via one-shot subprocess call.
 func (ea *ExternalAdapter) ReadFromOffset(path string, offset int64) ([]RawEntry, int64, error) {
-	out, err := ea.execOneShot("read-from-offset",
+	return ea.ReadFromOffsetWithContext(context.Background(), path, offset, ea.oneShotTimeout)
+}
+
+// ReadFromOffsetWithContext is ReadFromOffset within the caller's lifetime and
+// a caller-chosen deadline, as ReadWithContext is for Read.
+func (ea *ExternalAdapter) ReadFromOffsetWithContext(ctx context.Context, path string, offset int64, timeout time.Duration) ([]RawEntry, int64, error) {
+	out, err := ea.execOneShotContext(ctx, timeout, "read-from-offset",
 		"--session-file", path,
 		"--offset", fmt.Sprintf("%d", offset),
 	)

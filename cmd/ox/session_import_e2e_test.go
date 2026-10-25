@@ -239,10 +239,17 @@ type importFixture struct {
 	ctx            context.Context // the run's context; nil means context.Background()
 	progress       bytes.Buffer    // what a JSON run reports while it works
 
-	mu       sync.Mutex
-	native   map[string][]adapters.RawEntry // adapter output by native file
-	reads    []string
-	notified []string
+	mu         sync.Mutex
+	native     map[string][]adapters.RawEntry     // adapter output by native file
+	nativeFrom map[nativeRead][]adapters.RawEntry // adapter output from a byte offset into it
+	reads      []string
+	notified   []string
+}
+
+// nativeRead is one adapter read: a native file, from a byte offset into it.
+type nativeRead struct {
+	path   string
+	offset int64
 }
 
 func newImportFixture(t *testing.T) *importFixture {
@@ -273,6 +280,7 @@ func newImportFixture(t *testing.T) *importFixture {
 		summarizer:         &fakeSummarizer{},
 		store:              newFakeLFSStore(t),
 		native:             map[string][]adapters.RawEntry{},
+		nativeFrom:         map[nativeRead][]adapters.RawEntry{},
 	}
 }
 
@@ -386,15 +394,19 @@ func (f *importFixture) add(t *testing.T, s pastSession) string {
 	return path
 }
 
-// readNative is the adapter: it answers only for the exact file it is given.
-func (f *importFixture) readNative(_ context.Context, _ nativeimport.Agent, path string) ([]adapters.RawEntry, error) {
+// readNative is the adapter: it answers only for the exact file it is given,
+// and from the exact offset it is given.
+func (f *importFixture) readNative(_ context.Context, s nativeimport.Session) ([]adapters.RawEntry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.reads = append(f.reads, path)
+	f.reads = append(f.reads, s.Path)
 	if f.readErr != nil {
 		return nil, f.readErr
 	}
-	entries, ok := f.native[path]
+	entries, ok := f.native[s.Path]
+	if s.Offset > 0 {
+		entries, ok = f.nativeFrom[nativeRead{s.Path, s.Offset}]
+	}
 	if !ok {
 		return nil, errors.New("adapter: no such session file")
 	}

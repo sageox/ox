@@ -53,25 +53,41 @@ func init() {
 // exercises cancellation through production read code, so callers must serialize.
 func importCancellationAdapter(t *testing.T) *adapters.ExternalAdapter {
 	t.Helper()
+	return testExecutableImportAdapter(t, "1")
+}
+
+// testExecutableImportAdapter registers this test executable as the Claude
+// Code adapter, answering as the init for OX_TEST_IMPORT_ADAPTER=mode does.
+func testExecutableImportAdapter(t *testing.T, mode string) *adapters.ExternalAdapter {
+	t.Helper()
 	binary, err := os.Executable()
 	require.NoError(t, err)
-	t.Setenv("OX_TEST_IMPORT_ADAPTER", "1")
+	t.Setenv("OX_TEST_IMPORT_ADAPTER", mode)
 	// Child test executables must emit the adapter JSON directly, and race
 	// instrumentation need not spend a second sleeping after a successful exit.
 	t.Setenv("CLICOLOR_FORCE", "1")
 	t.Setenv("GORACE", os.Getenv("GORACE")+" atexit_sleep_ms=0")
+	adapter := adapters.NewExternalAdapterWithInfo(binary, &adapterprotocol.InfoResponse{
+		Name: "claude-code", RequiredEnv: []string{"CLICOLOR_FORCE", "GORACE"},
+	})
+	swapClaudeAdapter(t, adapter)
+	return adapter
+}
+
+// swapClaudeAdapter registers adapter as the Claude Code adapter and restores
+// the global registry at cleanup.
+func swapClaudeAdapter(t *testing.T, adapter adapters.Adapter) {
+	t.Helper()
 	var prior adapters.Adapter
 	for _, name := range adapters.ListAdapters() {
 		if name == "claude-code" {
+			var err error
 			prior, err = adapters.GetAdapter(name)
 			require.NoError(t, err)
 			break
 		}
 	}
 	adapters.Unregister("claude-code")
-	adapter := adapters.NewExternalAdapterWithInfo(binary, &adapterprotocol.InfoResponse{
-		Name: "claude-code", RequiredEnv: []string{"CLICOLOR_FORCE", "GORACE"},
-	})
 	adapters.Register(adapter)
 	t.Cleanup(func() {
 		adapters.Unregister("claude-code")
@@ -79,7 +95,6 @@ func importCancellationAdapter(t *testing.T) *adapters.ExternalAdapter {
 			adapters.Register(prior)
 		}
 	})
-	return adapter
 }
 
 // Two stalled native subprocesses occupy every preview reader slot. With no
@@ -220,7 +235,7 @@ func TestImportNativeAdapter_AlreadyCanceledDoesNotStartRead(t *testing.T) {
 	entries, err := adapter.ReadWithContext(ctx, path, importReadTimeout)
 	assert.Nil(t, entries)
 	assert.ErrorIs(t, err, context.Canceled)
-	entries, err = readNativeWithAdapter(ctx, nativeimport.AgentClaude, path)
+	entries, err = readNativeWithAdapter(ctx, nativeimport.Session{Agent: nativeimport.AgentClaude, Path: path})
 	assert.Nil(t, entries)
 	assert.ErrorIs(t, err, context.Canceled)
 	_, err = os.Stat(path + ".started")
