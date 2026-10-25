@@ -84,11 +84,37 @@ export interface Placed {
   outcome?: Outcome;
 }
 
+/**
+ * Where a reviewer's pointer rests, as the plan's content rather than the
+ * screen: the innermost markable element under it ("h" anchor; nth of `of`
+ * when that anchor repeats), the child path from it to the element under the
+ * pointer, the pointer's place in that element's box as fractions, and, over
+ * words, how many non-space characters of the markable precede it. It names
+ * the same content at any width, zoom or scroll position.
+ */
+export interface PointerAt {
+  anchor: string;
+  nth?: number;
+  of?: number;
+  path?: number[];
+  x: number;
+  y: number;
+  text?: number;
+}
+
+/** Where a pointer lands, in the document's viewport pixels. `key` is the host's name for it, never a person's. */
+export interface Located {
+  key: string;
+  x: number;
+  y: number;
+}
+
 export type HostMessage =
   | { type: 'mode'; on: boolean; open: boolean; draw: boolean }
   | { type: 'paint'; items: PaintItem[]; drawings: DrawingPaint[] }
   | { type: 'focus'; anchor: string | null }
-  | { type: 'reveal'; anchor: string; nth: number };
+  | { type: 'reveal'; anchor: string; nth: number }
+  | { type: 'locate'; points: Array<{ key: string; at: PointerAt }> };
 
 export type DocumentMessage =
   | { type: 'ready' }
@@ -99,7 +125,9 @@ export type DocumentMessage =
   | { type: 'refused'; reason: DrawRefusal }
   | { type: 'dismiss' }
   | { type: 'placed'; items: Placed[] }
-  | { type: 'key'; key: 'Escape' | 'r' };
+  | { type: 'key'; key: 'Escape' | 'r' }
+  | { type: 'pointer'; at: PointerAt | null }
+  | { type: 'located'; points: Located[] };
 
 /** Every message travels inside this envelope; instance names one load of one framed document. */
 export interface Envelope {
@@ -119,6 +147,12 @@ export const STATES: readonly State[] = ['open', 'addressed', 'verified', 'wontf
 const TINTS = ['sage', 'amber', 'red', 'gold', 'faint'];
 const OUTCOMES = ['exact', 'moved', 'reflowed', 'hidden', 'missing', 'ambiguous'];
 const DRAW_REFUSALS = ['no-target', 'too-large', 'too-small', 'layout-changed', 'cancelled'];
+/** The most pointers a host asks the document to place at once. */
+export const MAX_POINTERS = 64;
+/** The deepest child path a pointer location carries. */
+export const MAX_PATH = 16;
+const MAX_TEXT_OFFSET = 1 << 20;
+const KEY = /^[A-Za-z0-9_-]{1,32}$/;
 
 type Obj = Record<string, unknown>;
 
@@ -213,6 +247,20 @@ export function parseDocumentMessage(data: unknown, instance: string): DocumentM
     }
     case 'key':
       return d.key === 'Escape' || d.key === 'r' ? { type: 'key', key: d.key } : null;
+    case 'pointer': {
+      if (d.at === null) return { type: 'pointer', at: null };
+      const at = pointerAt(d.at);
+      return at ? { type: 'pointer', at } : null;
+    }
+    case 'located': {
+      if (!Array.isArray(d.points) || d.points.length > MAX_POINTERS) return null;
+      const points: Located[] = [];
+      for (const p of d.points) {
+        if (!obj(p) || typeof p.key !== 'string' || !KEY.test(p.key) || !num(p.x) || !num(p.y)) return null;
+        points.push({ key: p.key, x: p.x, y: p.y });
+      }
+      return { type: 'located', points };
+    }
   }
   return null;
 }
@@ -246,8 +294,42 @@ export function parseHostMessage(data: unknown, instance: string): HostMessage |
       }
       return { type: 'paint', items, drawings };
     }
+    case 'locate': {
+      if (!Array.isArray(d.points) || d.points.length > MAX_POINTERS) return null;
+      const points: Array<{ key: string; at: PointerAt }> = [];
+      for (const p of d.points) {
+        const at = obj(p) && typeof p.key === 'string' && KEY.test(p.key) ? pointerAt(p.at) : null;
+        if (!at) return null;
+        points.push({ key: p.key as string, at });
+      }
+      return { type: 'locate', points };
+    }
   }
   return null;
+}
+
+const whole = (v: unknown, max: number): v is number => num(v) && v >= 0 && v <= max && Math.floor(v) === v;
+const unit = (v: unknown): v is number => num(v) && v >= 0 && v <= 1;
+
+/** pointerAt validates a pointer location, as a fresh object; null when it is not one. A host checks each one a presence service relays. */
+export function pointerAt(v: unknown): PointerAt | null {
+  if (!obj(v) || typeof v.anchor !== 'string' || !ANCHOR.test(v.anchor) || v.anchor.charAt(0) !== 'h' || !unit(v.x) || !unit(v.y)) return null;
+  const at: PointerAt = { anchor: v.anchor, x: v.x, y: v.y };
+  // nth and of come together, and only for an anchor that repeats
+  if (v.nth !== undefined || v.of !== undefined) {
+    if (!whole(v.nth, MAX_ITEMS) || !whole(v.of, MAX_ITEMS) || v.of < 2 || v.nth >= v.of) return null;
+    at.nth = v.nth;
+    at.of = v.of;
+  }
+  if (v.path !== undefined) {
+    if (!Array.isArray(v.path) || !v.path.length || v.path.length > MAX_PATH || !all(v.path, (i) => whole(i, MAX_ITEMS))) return null;
+    at.path = (v.path as number[]).slice();
+  }
+  if (v.text !== undefined) {
+    if (!whole(v.text, MAX_TEXT_OFFSET)) return null;
+    at.text = v.text;
+  }
+  return at;
 }
 
 /** paintItem validates one item a host paints; null when it is not one. A host checks each before it sends, since one bad item drops the whole paint. */

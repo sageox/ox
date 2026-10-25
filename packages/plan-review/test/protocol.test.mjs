@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { load } from './load.mjs';
 
-const { PROTOCOL, envelope, parseDocumentMessage, parseHostMessage } = await load('protocol.ts');
+const { PROTOCOL, MAX_POINTERS, envelope, parseDocumentMessage, parseHostMessage, pointerAt } = await load('protocol.ts');
 const { connectFrame } = await load('ports.ts');
 const I = 'inst-0001';
 const doc = (m) => envelope(m, I);
@@ -113,4 +113,32 @@ test('captures, outcomes and drawing paints parse to their known fields only', (
   const paint = (d) => parseHostMessage(doc({ type: 'paint', items: [], drawings: [d] }), I);
   assert.deepEqual(paint({ ...drawing, note: 'Both retries fire here.', reviewer: 'Devon', region: r, targets: [{ ...drawing.targets[0], text: 'x' }] }), { type: 'paint', items: [], drawings: [drawing] });
   assert.equal(paint({ ...drawing, targets: [] }), null, 'a drawing around nothing');
+});
+
+// Live pointers cross the frame boundary as content locations under keys the
+// host minted, and reach the presence service the same way. Failure
+// prevented: a plan's script, or a peer through the service, carries a name,
+// a note or screen coordinates in a pointer; an unbounded location or list
+// reaches the document's placement or the host's markup; or the rules drift
+// from the ones the review server's bridge and a service apply.
+test('pointer locations parse to their known fields only, by the shared cases', () => {
+  const cases = JSON.parse(readFileSync(new URL('../../../pkg/planreview/testdata/presence/pointers.json', import.meta.url), 'utf8'));
+  for (const at of cases.valid) assert.deepEqual(pointerAt({ ...at, name: 'Devon', clientX: 900 }), at);
+  for (const [name, at] of Object.entries(cases.invalid)) assert.equal(pointerAt(at), null, name);
+
+  const at = cases.valid[1];
+  assert.deepEqual(parseDocumentMessage(doc({ type: 'pointer', at: { ...at, name: 'Devon' } }), I), { type: 'pointer', at });
+  assert.deepEqual(parseDocumentMessage(doc({ type: 'pointer', at: null }), I), { type: 'pointer', at: null });
+  assert.equal(parseDocumentMessage(doc({ type: 'pointer' }), I), null, 'a pointer with no location');
+
+  const points = [{ key: 'p1', x: 10.5, y: 20 }, { key: 'p2', x: 0, y: 900 }];
+  assert.deepEqual(parseDocumentMessage(doc({ type: 'located', points: points.map((p) => ({ ...p, name: 'Devon' })) }), I), { type: 'located', points });
+  for (const bad of [
+    [{ key: 'p1', x: 10 }], [{ key: 'p1', x: '1', y: 2 }], [{ key: 'Devon Avery', x: 1, y: 2 }], Array(MAX_POINTERS + 1).fill({ key: 'p1', x: 1, y: 2 }),
+  ]) assert.equal(parseDocumentMessage(doc({ type: 'located', points: bad }), I), null, JSON.stringify(bad).slice(0, 60));
+
+  assert.deepEqual(parseHostMessage(doc({ type: 'locate', points: [{ key: 'p1', at, name: 'Devon' }] }), I), { type: 'locate', points: [{ key: 'p1', at }] });
+  for (const bad of [
+    [{ key: 'p1', at: { ...at, x: 2 } }], [{ key: 'usr_1 Devon', at }], [{ key: 'p1' }], Array(MAX_POINTERS + 1).fill({ key: 'p1', at }),
+  ]) assert.equal(parseHostMessage(doc({ type: 'locate', points: bad }), I), null, JSON.stringify(bad).slice(0, 60));
 });

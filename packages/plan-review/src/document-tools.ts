@@ -6,6 +6,7 @@
 
 import { anchorFor, clip, headingOf, labelFor, markableSelector, norm, quoteAnchor } from './anchor.js';
 import { drawLayer, markables } from './draw.js';
+import { pointerLayer } from './pointer.js';
 import type { DocumentPort } from './ports.js';
 import type { DrawingPaint, PaintItem, Placed, Target } from './protocol.js';
 import { DRAWING } from './region.js';
@@ -17,7 +18,7 @@ export type { DocumentPort, HostPort, Port } from './ports.js';
  * Host controls drawn into this document (the CLI's review page): never a
  * mark-up target, and clicks on them are the host's own.
  */
-export const CHROME = '.rev-bar, .rev-rail, .rev-orphans, .rev-toast, .rev-sync, .rev-offline-bar, .rev-original';
+export const CHROME = '.rev-bar, .rev-rail, .rev-orphans, .rev-toast, .rev-sync, .rev-offline-bar, .rev-original, .rev-cursors';
 
 export interface DocumentToolsOptions {
   /** Send the review keys (r, Esc) to the host: set when its controls live outside this document. */
@@ -75,6 +76,11 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
     (capture, rect, anchor) => port.send({ type: 'capture', capture, rect, anchor }),
     (reason) => port.send({ type: 'refused', reason }),
     () => paint(items, drawings));
+  // Live pointers: share this reviewer's as the content under it, and place
+  // the ones the host sends, which the host names and draws.
+  const pointers = pointerLayer(SELECTOR, NOT_PLAN,
+    (at) => port.send({ type: 'pointer', at }),
+    (points) => port.send({ type: 'located', points }));
 
   function paint(next: PaintItem[], nextDrawings: DrawingPaint[]) {
     items = next;
@@ -412,16 +418,20 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
       case 'reveal':
         reveal(m.anchor, m.nth);
         break;
+      case 'locate':
+        pointers.locate(m.points);
+        break;
     }
   });
   // An anchor hashes a diagram's drawn text, and Mermaid draws after load: a
   // host that painted, or a click that made a target, before then would use
   // the diagram's source. The CLI's host can turn review on before ready, so
-  // clicks and strokes wait on `started` too.
+  // clicks, strokes and pointers wait on `started` too.
   whenDiagramsDrawn(() => {
     started = true;
     draw.setTool(tool);
     port.send({ type: 'ready' });
+    pointers.start();
   });
 }
 
