@@ -306,7 +306,14 @@ func runCoworkerLoad(cmd *cobra.Command, args []string) error {
 
 	agentContent, err := claude.LoadAgent(tc.Path, name)
 	if err != nil || agentContent == nil {
-		return fmt.Errorf("coworker %q not found in team context", name)
+		// Prime advertises coworkers a mounted SageOx Files drive carries and
+		// the checkout does not (only when SAGEOX_FILES_MOUNT=1), so loading
+		// one has to look there too — checkout first, the drive under its
+		// read budget.
+		agentContent = loadAgentFromMount(tc.Path, tc.TeamID, name)
+		if agentContent == nil {
+			return fmt.Errorf("coworker %q not found in team context", name)
+		}
 	}
 	foundTeam := tc
 

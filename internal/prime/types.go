@@ -195,7 +195,7 @@ type TeamMountSource struct {
 	Rules    int    `json:"rules,omitempty"`    // team rules only the mount carried
 	Agents   int    `json:"agents,omitempty"`   // coworker agents only the mount carried
 	Commands int    `json:"commands,omitempty"` // coworker commands only the mount carried
-	Memory   int    `json:"memory,omitempty"`   // memory timeline files only the mount carried
+	Memory   int    `json:"memory,omitempty"`   // memory documents and timeline files only the mount carried
 }
 
 // Summary names what the drive supplied that the checkout did not, for a

@@ -1748,3 +1748,37 @@ func TestOutputAgentPrimeXML_MountSummaryCannotEscapeItsComment(t *testing.T) {
 		t.Errorf("unescaped markup reached the prime payload:\n%s", out)
 	}
 }
+
+// XML forbids "--" inside a comment, and the mount path is drive-chosen, so a
+// folder name with a hyphen run must not make the whole prime unparseable.
+func TestOutputAgentPrimeXML_MountSummaryStaysWellFormed(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	output := agentPrimeOutput{
+		AgentID: "test-agent",
+		Status:  "fresh",
+		TeamContext: &prime.TeamContextInfo{
+			TeamID: "team_abc",
+			Path:   "/checkout",
+			Mount:  &prime.TeamMountSource{Path: "/Users/x/SageOx/team -- --> ---", Docs: 1},
+		},
+	}
+	if _, err := outputAgentPrimeXML(cmd, output); err != nil {
+		t.Fatalf("outputAgentPrimeXML() error = %v", err)
+	}
+	if !strings.Contains(buf.String(), "supplied 1 docs") {
+		t.Fatalf("the provenance line was not emitted:\n%s", buf.String())
+	}
+	dec := xml.NewDecoder(bytes.NewReader(buf.Bytes()))
+	for {
+		_, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("prime output is not well-formed XML: %v\n\n%s", err, buf.String())
+		}
+	}
+}

@@ -336,7 +336,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 			// and would otherwise close this comment and land arbitrary text in
 			// what the agent reads as its own context.
 			if summary := output.TeamContext.Mount.Summary(); summary != "" {
-				fmt.Fprintf(&sb, "\n<!-- %s -->\n", escapeXML(summary))
+				fmt.Fprintf(&sb, "\n<!-- %s -->\n", escapeXMLComment(summary))
 				bk.charge(prime.BudgetSourceSageox)
 			}
 
@@ -783,6 +783,21 @@ var xmlEscaper = strings.NewReplacer(
 
 func escapeXML(s string) string {
 	return xmlEscaper.Replace(s)
+}
+
+// escapeXMLComment makes s safe to place inside <!-- ... -->. Entity escaping
+// alone is not enough there: XML forbids "--" anywhere in a comment, and a
+// trailing "-" would run into the closing "-->", so hyphen runs are broken up
+// with spaces.
+func escapeXMLComment(s string) string {
+	s = escapeXML(s)
+	for strings.Contains(s, "--") {
+		s = strings.ReplaceAll(s, "--", "- -")
+	}
+	if strings.HasSuffix(s, "-") {
+		s += " "
+	}
+	return s
 }
 
 // xmlTextEscaper escapes only what ELEMENT TEXT requires: &, < and >. Quotes

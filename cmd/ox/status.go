@@ -1050,6 +1050,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString(statusLabelStyle.Render("Team"))
 		b.WriteString(statusMutedStyle.Render(repoTeamID))
 		b.WriteString("\n")
+		renderFilesRow(&b, filesMounts, repoTeamID, true)
 		b.WriteString(statusLabelStyle.Render("Status"))
 		switch {
 		case repoDetailErr != nil || cloudReposErr != nil:

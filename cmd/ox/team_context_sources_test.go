@@ -338,3 +338,36 @@ func TestMergeByKeyPassesASingleSourceThroughUntouched(t *testing.T) {
 		t.Errorf("merged = %q, want %q unchanged", merged, only)
 	}
 }
+
+// A memory document only the drive carried is a contribution, so the
+// provenance line must not claim the drive changed nothing.
+func TestMountedMemoryDocumentsCountAsContributions(t *testing.T) {
+	sources, checkout, mount := twoSources(t)
+	writeTeamFile(t, mount, "MEMORY.md", "drive memory\n")
+	writeTeamFile(t, mount, "SOUL.md", "soul\n")
+
+	info := &teamContextInfo{}
+	loadTeamMemory(info, checkout)
+	if got := fillTeamMemoryGapsFromMount(info, sources); got != 2 {
+		t.Errorf("contributions = %d, want 2 (MEMORY.md and SOUL.md)", got)
+	}
+}
+
+// Prime advertises coworkers that only the drive carries, so loading one must
+// find it there — and only when the flag opts the session in.
+func TestLoadAgentFromMountIsOptIn(t *testing.T) {
+	home := mountHome(t, "team_abc")
+	writeTeamFile(t, filepath.Join(home, "SageOx", "SageOx Internal"),
+		"agents/profiles/reviewer.md", "---\ndescription: Reviews\n---\nbody\n")
+
+	t.Setenv(filesMountEnv, "")
+	if got := loadAgentFromMount(t.TempDir(), "team_abc", "reviewer"); got != nil {
+		t.Fatal("loaded a coworker from the drive without the flag set")
+	}
+
+	t.Setenv(filesMountEnv, "1")
+	got := loadAgentFromMount(t.TempDir(), "team_abc", "reviewer")
+	if got == nil || got.Name != "reviewer" {
+		t.Fatalf("coworker only the drive carries was not loaded: %+v", got)
+	}
+}

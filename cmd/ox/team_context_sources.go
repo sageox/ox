@@ -334,7 +334,7 @@ type mountMemory struct {
 }
 
 // fillTeamMemoryGapsFromMount adds what the drive carries and the checkout does
-// not, and reports how many timeline files that was.
+// not, and reports how many memory documents and timeline files that was.
 //
 // Called after loadTeamMemory has run on the checkout, so every field it can
 // touch is one the checkout left empty. MEMORY.md and the SOUL/TEAM pointers
@@ -358,8 +358,13 @@ func fillTeamMemoryGapsFromMount(info *teamContextInfo, sources teamReadSources)
 		return 0
 	}
 
-	if info.MemoryContent == "" {
+	// Every single document the drive fills in counts as a contribution, the
+	// same as a timeline file: without it, a prime whose MEMORY.md came from
+	// the drive would report that the drive changed nothing.
+	added := 0
+	if info.MemoryContent == "" && found.content != "" {
 		info.MemoryContent = found.content
+		added++
 	}
 	for _, pointer := range []struct {
 		field *string
@@ -369,12 +374,12 @@ func fillTeamMemoryGapsFromMount(info *teamContextInfo, sources teamReadSources)
 		{&info.TeamHint, found.team},
 		{&info.ObservationGuideHint, found.guide},
 	} {
-		if *pointer.field == "" {
+		if *pointer.field == "" && pointer.value != "" {
 			*pointer.field = pointer.value
+			added++
 		}
 	}
 
-	added := 0
 	for _, timeline := range []struct {
 		files   *[]string
 		mounted []string
@@ -403,4 +408,21 @@ func existingPath(path string) string {
 		return ""
 	}
 	return path
+}
+
+// loadAgentFromMount loads a coworker profile from the mounted drive, nil when
+// no drive is read for this team, the budget runs out, or it lacks the profile.
+func loadAgentFromMount(checkout, teamID, name string) *claude.AgentContent {
+	sources := newTeamReadSources(checkout, teamID)
+	content, ok := readMounted(sources, func(root string) *claude.AgentContent {
+		found, err := claude.LoadAgent(root, name)
+		if err != nil {
+			return nil
+		}
+		return found
+	})
+	if !ok {
+		return nil
+	}
+	return content
 }
