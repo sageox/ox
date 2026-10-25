@@ -1782,3 +1782,17 @@ func TestOutputAgentPrimeXML_MountSummaryStaysWellFormed(t *testing.T) {
 		}
 	}
 }
+
+func TestEscapeXMLComment(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain":     "plain",
+		"a--b":      "a- -b",
+		"a---b":     "a- - -b",
+		"ends-":     "ends- ",
+		"<x> & -->": "&lt;x&gt; &amp; - -&gt;",
+	} {
+		if got := escapeXMLComment(in); got != want {
+			t.Errorf("escapeXMLComment(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
