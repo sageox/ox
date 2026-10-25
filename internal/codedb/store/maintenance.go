@@ -165,7 +165,7 @@ func (s *Store) pruneOrphanBlobs(ctx context.Context) (symbols, blobs int64, err
 	const orphan = `(SELECT id FROM orphan_blobs)`
 	const orphanSymbols = `(SELECT id FROM symbols WHERE blob_id IN ` + orphan + `)`
 
-	err = s.withConn(ctx, []pragmaOverride{noForeignKeys}, func(conn *sql.Conn) error {
+	err = withConn(ctx, s.db, []pragmaOverride{noForeignKeys}, func(conn *sql.Conn) error {
 		return inImmediateTx(ctx, conn, func() error {
 			if _, err := conn.ExecContext(ctx, `CREATE TEMP TABLE orphan_blobs AS
 				SELECT id FROM blobs
@@ -262,7 +262,7 @@ func vacuumWorthIt(pages, free int64) bool {
 // a pool connection (temp_store=MEMORY) a multi-GB index would be rebuilt
 // entirely in RAM.
 func (s *Store) vacuum(ctx context.Context) error {
-	return s.withConn(ctx, []pragmaOverride{fileTempStore}, func(conn *sql.Conn) error {
+	return withConn(ctx, s.db, []pragmaOverride{fileTempStore}, func(conn *sql.Conn) error {
 		_, err := conn.ExecContext(ctx, "VACUUM")
 		return err
 	})
