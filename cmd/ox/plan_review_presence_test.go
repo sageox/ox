@@ -372,6 +372,9 @@ func peerID(t *testing.T, f *fakePresence, name string) string {
 // the user's account upstream (a name, a note, an unbounded blob), or a
 // caller without the review token moves the user's pointer.
 func TestReviewLoop_PresenceMovesAreCheckedAndScoped(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: closing the oversized request's connection waits net/http's 500 ms")
+	}
 	fake, base := newFakePresence(t, presenceTestPlan, map[string]fakePerson{"tok-devon": {"Devon", "u-devon"}})
 	review, _ := presenceReview(t, base, "tok-devon")
 	page, _ := pageEvents(t, review.URL, "page-devon-1")
@@ -484,6 +487,9 @@ func TestPresenceBridge_RejoinSendsOnlyTheCurrentPointer(t *testing.T) {
 // error; or a half-open connection leaves the page believing in a room that
 // is gone, with ghosts it will never hear leave.
 func TestPresenceBridge_RetriesOnlyWhatMayRecover(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits on retry backoff and a silent stream")
+	}
 	setPresenceTimings(t, 10*time.Millisecond, time.Hour, 100*time.Millisecond)
 	for _, c := range []struct {
 		status    int

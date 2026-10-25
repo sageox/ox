@@ -2960,6 +2960,7 @@
           } catch (err) {
           }
         });
+        stream.addEventListener("error", () => on({ type: "lost" }));
         return {
           // a pointer that cannot reach the server is dropped: the stream's
           // own error already says the server is gone

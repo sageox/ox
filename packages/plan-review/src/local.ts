@@ -131,6 +131,9 @@ const ACCOUNT = 'local';
       stream.addEventListener('presence', (e) => {
         try { on(JSON.parse((e as MessageEvent).data)); } catch (err) { /* not an event */ }
       });
+      // the review server is gone, and with it the room: nobody is known to
+      // be here until a reconnected page hears welcome
+      stream.addEventListener('error', () => on({ type: 'lost' }));
       return {
         // a pointer that cannot reach the server is dropped: the stream's
         // own error already says the server is gone

@@ -182,7 +182,8 @@ the user signed in with `ox login`:
 - The server joins only the saved plan it serves, by the `pln_` id in its
   event log. The page names its revision and a key, never a plan, room, path
   or identity; `/presence` refuses unknown fields and malformed pointers.
-- A page whose stream closes leaves the room. A pointer move writes nothing,
+- A page whose stream closes leaves the room, and a page whose server is
+  gone stops showing anyone until it is back. A pointer move writes nothing,
   reloads nothing, and does not keep an idle review loop open.
 - With no login for the project's endpoint, or no `pln_` id (a plan saved
   before ids existed), the server makes no presence request at all, and the
@@ -203,7 +204,7 @@ on one markdown plan see each other's pointers.
 
 | Test | Proves |
 |---|---|
-| `TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers` | A local page (1280 px) and a framed host (an offset frame in a 1000 px window) see each other's named pointer on the same word, through a scroll; a pointer in a section collapsed on the other side is drawn only once it is opened there; the framed plan hears no name or connection id; a reload leaves one cursor, not a ghost |
+| `TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers` | A local page (1280 px) and a framed host (an offset frame in a 1000 px window) see each other's named pointer on the same word, through a scroll; a pointer in a section collapsed on the other side is drawn only once it is opened there; the framed plan hears no name or connection id; a reload leaves one cursor, not a ghost; with its server gone, the page shows no one |
 | `TestBrowser_PointerOnAnotherRevisionIsNeverDrawn` | Two local pages on one plan, on different revisions, list each other as on another revision and never draw each other's pointer |
 | `TestReviewLoop_PresenceRelaysTheRoomBothWays` | The server relays joins, moves and leaves between a page and a hosted viewer, under the service's names; a second tab leaves alone; live reloads share the stream |
 | `TestReviewLoop_PresenceMovesAreCheckedAndScoped` | `/presence` refuses a missing token, a name, extra fields, out-of-range values, another page's key, and oversized bodies |

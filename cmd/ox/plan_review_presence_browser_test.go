@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,15 +104,21 @@ func presenceHost(t *testing.T, f *fakePresence, doc []byte, revision, token, re
 }
 
 // servePresenceReview serves the live review loop for the plan in dir, with a
-// bridge that joins the room of planID at base as the holder of token.
-func servePresenceReview(t *testing.T, gitRoot, slug, dir, planID, base, token string) string {
+// bridge that joins the room of planID at base as the holder of token, and
+// returns its URL and how to stop it, as if the process exited.
+func servePresenceReview(t *testing.T, gitRoot, slug, dir, planID, base, token string) (url string, stop func()) {
 	t.Helper()
-	ln := mustLoopbackListener(t)
-	url := "http://" + ln.Addr().String()
+	srv := httptest.NewUnstartedServer(nil)
 	b := &presenceBridge{base: base, planID: planID, tabs: map[string]*presenceTab{},
 		token: func(context.Context) (string, error) { return token, nil }}
-	go serveUntilClosed(t, ln, liveReviewHandlerWithActivity(gitRoot, slug, dir, url, "secret", newBroadcaster(), make(chan int, 8), make(chan struct{}, 1), nil, b))
-	return url
+	srv.Config.Handler = liveReviewHandlerWithActivity(gitRoot, slug, dir, "http://"+srv.Listener.Addr().String(), "secret",
+		newBroadcaster(), make(chan int, 8), make(chan struct{}, 1), nil, b)
+	srv.Start()
+	// Close waits for open requests, and a page's event stream stays open
+	// until its tab closes: end the connections first
+	stop = func() { srv.Listener.Close(); srv.CloseClientConnections(); srv.Close() }
+	t.Cleanup(stop)
+	return srv.URL, stop
 }
 
 // saveAuthoredPresencePlan saves html as an authored plan and returns its
@@ -239,7 +246,7 @@ func TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers(t *testing.T) {
 	dir, planID, stored := saveAuthoredPresencePlan(t, gitRoot, presencePlan)
 	f := fakePresenceFor(planID, map[string]fakePerson{"tok-devon": {"Devon", "u-devon"}, "tok-avery": {"Avery", "u-avery"}})
 	hosted := presenceHost(t, f, stored, planRevision(stored), "tok-avery", "Avery")
-	review := servePresenceReview(t, gitRoot, "presence", dir, planID, hosted, "tok-devon")
+	review, stopReview := servePresenceReview(t, gitRoot, "presence", dir, planID, hosted, "tok-devon")
 
 	// each reviewer has a browser of their own, as on two machines: a second
 	// tab would sit in the background, where a page renders no frames
@@ -302,6 +309,12 @@ func TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers(t *testing.T) {
 	}
 	pointAt(t, local, localSpot(t, local, "word"))
 	waitCursor(t, ctx, "Devon", "Devon's one cursor after he reloads", func() spot { return framedSpot(t, ctx, "word") })
+
+	// the review server goes away: the page stops showing who was here
+	stopReview()
+	if !waitJS(local, `document.querySelector('.rev-here').hidden&&!document.querySelector('.rev-cursor')`, 8*time.Second) {
+		t.Fatalf("with its review server gone, the page must not keep showing who was here: %s", evalString(t, local, `document.querySelector('.rev-here').outerHTML`))
+	}
 }
 
 // TestBrowser_PointerOnAnotherRevisionIsNeverDrawn joins two local review
@@ -317,9 +330,9 @@ func TestBrowser_PointerOnAnotherRevisionIsNeverDrawn(t *testing.T) {
 	later := strings.Replace(strings.Replace(presencePlan, `content="presence"`, `content="presence-later"`, 1), "Ship behind a flag.", "Ship behind a flag, region by region.", 1)
 	laterDir, _, _ := saveAuthoredPresencePlan(t, gitRoot, later)
 	f, base := newFakePresence(t, planID, map[string]fakePerson{"tok-devon": {"Devon", "u-devon"}, "tok-avery": {"Avery", "u-avery"}})
-	devon := servePresenceReview(t, gitRoot, "presence", dir, planID, base, "tok-devon")
+	devon, _ := servePresenceReview(t, gitRoot, "presence", dir, planID, base, "tok-devon")
 	// Avery's loop serves the later page, joined to the same plan's room
-	avery := servePresenceReview(t, gitRoot, "presence-later", laterDir, planID, base, "tok-avery")
+	avery, _ := servePresenceReview(t, gitRoot, "presence-later", laterDir, planID, base, "tok-avery")
 
 	second := frameBrowser(t)
 	for _, p := range []struct {
