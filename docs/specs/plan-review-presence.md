@@ -155,14 +155,17 @@ sends. `id`, `user` and `revision` are at most 128 characters, `name` at most
 
 **Move.** `POST /api/v1/plans/{plan_id}/presence/{connection}` with the same
 token and `{"at": PointerAt | null}`. The service checks the token owns the
-connection, checks `at` by section 1, and relays it as a `peer` event; a
-connection it no longer has answers `404`. A client sends at most 5 moves a
-second per connection; a service may drop faster ones.
+connection, checks `at` by section 1, and relays it as a `peer` event. A
+client sends at most 5 moves a second per connection; a service may drop
+faster ones. A move is fire-and-forget: a client ignores its failures, since
+the next move or the next `welcome` carries the pointer again.
 
-**Lifecycle.** A connection lasts while its stream is open. Each tab is its
-own connection: closing a stream leaves only that one, and the service tells
-the others with `leave`. A connection whose stream is gone without a close,
-such as one held by a server that crashed, is expired within about a minute.
+**Lifecycle.** The stream is the connection: it lasts while its stream is
+open, and a service that ends a connection, on expiry or lost access, closes
+its stream, which the client joins again. Each tab is its own connection:
+closing a stream leaves only that one, and the service tells the others with
+`leave`. A connection whose stream is gone without a close, such as one held
+by a server that crashed, is expired within about a minute.
 
 **Nothing is kept.** Pointer positions are never written to a database, the
 Ledger, analytics or logs, and a reconnect starts from current presence, not
