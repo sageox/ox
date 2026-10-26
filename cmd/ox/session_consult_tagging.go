@@ -10,11 +10,14 @@ import (
 
 // tagSessionConsults runs the deterministic knowledge-flow tagger over a just-
 // finalized session's LOCAL raw.jsonl and appends turn-anchored `consulted`
-// events to its context-trace (epic ox-bcgb, tier 1). It is strictly
-// best-effort: any failure — a bad config, a panic in the scanner, a write
-// error — is logged and swallowed so it can never affect the recording. Runs
-// against the local recording cache (real content), never the ledger LFS
-// pointer, per the cache-only rule.
+// events (reads of SageOx files, ox retrieval commands) and provable `used`
+// events (a surfaced ref re-read, re-fetched by id, or cited in assistant
+// output — surfaced refs come from the trace already on disk) to its
+// context-trace (epic ox-bcgb, tier 1). It is strictly best-effort: any
+// failure — a bad config, a panic in the scanner, a write error — is logged
+// and swallowed so it can never affect the recording. Runs against the local
+// recording cache (real content), never the ledger LFS pointer, per the
+// cache-only rule. Idempotent, so a retry never doubles a receipt.
 func tagSessionConsults(projectRoot, sessionPath, rawPath string) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -36,9 +39,8 @@ func tagSessionConsults(projectRoot, sessionPath, rawPath string) {
 	if tc := config.FindRepoTeamContext(projectRoot); tc != nil && tc.Path != "" {
 		roots.TeamContext = append(roots.TeamContext, tc.Path)
 	}
-	if roots.Ledger == "" && len(roots.TeamContext) == 0 {
-		return // nothing to match reads against
-	}
+	// No roots only disables file-read matching; citation and requery evidence
+	// needs none, so the scan still runs.
 
 	n, err := consultscan.TagSessionReads(rawPath, sessionPath, roots)
 	if err != nil {
@@ -46,6 +48,6 @@ func tagSessionConsults(projectRoot, sessionPath, rawPath string) {
 		return
 	}
 	if n > 0 {
-		slog.Info("tagged SageOx consults", "session", filepath.Base(sessionPath), "turns", n)
+		slog.Info("tagged SageOx consults", "session", filepath.Base(sessionPath), "events", n)
 	}
 }
