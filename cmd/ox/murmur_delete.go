@@ -73,7 +73,7 @@ func commitMurmurDeletion(ctx context.Context, targetDir, relPath, murmurID stri
 		if err := gitutil.IsSafeForIndexWrite(gitCtx, targetDir); err != nil {
 			return err
 		}
-		if _, err := gitutil.RunGit(gitCtx, targetDir, "rm", "-f", "--sparse", "--", relPath); err != nil {
+		if _, err := gitutil.RunGit(gitCtx, targetDir, "rm", "-f", "--sparse", "--", ":(literal)"+relPath); err != nil {
 			return fmt.Errorf("git rm: %w", err)
 		}
 		if _, err := gitutil.CommitLedgerSnapshot(gitCtx, targetDir, fmt.Sprintf("murmur: delete %s", murmurID), ":(literal)"+relPath); err != nil {
