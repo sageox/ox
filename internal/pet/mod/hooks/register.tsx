@@ -17,6 +17,8 @@ import {
   formatDuration,
   frameAt,
   frameFile,
+  hiresFrameFile,
+  hiresLayout,
   isAnim,
   isSize,
   packClips,
@@ -135,17 +137,27 @@ function pictureOf($: EngineInterface, anim: Anim, index: number) {
 // The SVG surfaces can't open a file the way the terminal's Image does, so
 // the PNG bytes go into the tree, packed into self-animating clips. Only the
 // animation on show is kept: all of them at once would be megabytes held
-// for frames rarely drawn again.
-type Clips = { anim: Anim; frames: string[]; ranges: Array<[number, number]> }
-let clipCache: { anim: Anim; loading: Promise<Clips>; ready: Clips | null } | null = null
+// for frames rarely drawn again. `hires` says which art the frames are: the
+// high-resolution set when frames.ts has it and every read succeeds, else
+// the 160x207 frames the terminal draws.
+type Clips = { anim: Anim; hires: boolean; frames: string[]; ranges: Array<[number, number]> }
+let clipCache: { anim: Anim; wantHires: boolean; loading: Promise<Clips>; ready: Clips | null } | null = null
+
+function readClips($: EngineInterface, anim: Anim, hires: boolean): Promise<Clips> {
+  const ms = FRAMES.animations[anim].ms
+  const file = hires ? hiresFrameFile : frameFile
+  return Promise.all(ms.map((_, i) => $.fs.read(file($.plugin.root, anim, i), { as: 'bytes' }).then(b => b.base64))).then(
+    frames => ({ anim, hires, frames, ranges: packClips(ms, frames.map(f => f.length), SVG_SOURCE_CAP) }),
+  )
+}
 
 function clipsOf($: EngineInterface, anim: Anim): Promise<Clips> {
-  if (clipCache?.anim !== anim) {
-    const ms = FRAMES.animations[anim].ms
-    const loading = Promise.all(
-      ms.map((_, i) => $.fs.read(frameFile($.plugin.root, anim, i), { as: 'bytes' }).then(b => b.base64)),
-    ).then(frames => ({ anim, frames, ranges: packClips(ms, frames.map(f => f.length), SVG_SOURCE_CAP) }))
-    const entry: NonNullable<typeof clipCache> = { anim, loading, ready: null }
+  // An older frames.ts has no hires block, and one may lack (or carry an
+  // unusable box for) this animation: those draw the 160x207 frames.
+  const wantHires = FRAMES.hires !== undefined && hiresLayout(FRAMES.hires, anim, 'medium') !== null
+  if (clipCache?.anim !== anim || clipCache.wantHires !== wantHires) {
+    const loading = wantHires ? readClips($, anim, true).catch(() => readClips($, anim, false)) : readClips($, anim, false)
+    const entry: NonNullable<typeof clipCache> = { anim, wantHires, loading, ready: null }
     loading.then(
       c => {
         entry.ready = c
@@ -415,7 +427,11 @@ export const register: Register = on => {
           : { anim: f.anim, index: 0, loop: f.loop, shownAt: await $.clock.now() }
       const [start, end] = loaded.ranges[site.clip.index]
       const ms = FRAMES.animations[f.anim].ms.slice(start, end)
-      const source = clipSvg(loaded.frames.slice(start, end), ms, f.loop && loaded.ranges.length === 1)
+      const layout = loaded.hires && FRAMES.hires !== undefined ? hiresLayout(FRAMES.hires, f.anim, box) : null
+      if (loaded.hires && layout === null) {
+        return next(e)
+      }
+      const source = clipSvg(loaded.frames.slice(start, end), ms, f.loop && loaded.ranges.length === 1, layout ?? undefined)
       if (source.length > SVG_SOURCE_CAP) {
         return next(e)
       }
@@ -423,12 +439,15 @@ export const register: Register = on => {
       sites.set(e.requestId, site)
       startTicker($)
       const { Box, Svg, Text } = $.ui.resolve(e)
-      const px = pixelBox(box)
+      const px = layout ?? pixelBox(box)
+      // Hires SVGs differ in height with their props but all end on the
+      // ground line, so the row aligns their bottoms and lifts the words to
+      // his middle; the fallback frames are all one box and simply centre.
       return (
-        <Box flexDirection="row" gap={1} alignItems="center">
+        <Box flexDirection="row" gap={1} alignItems={layout ? 'flex-end' : 'center'}>
           {/* SMIL only runs in the sandboxed frame; as a plain image it would stand still. */}
           <Svg key={KEY} source={source} alt="Oxy" width={px.width} height={px.height} isInteractive />
-          <Box key="words">
+          <Box key="words" marginBottom={layout?.wordsLift ?? 0}>
             <Text color="claude">
               {e.props.message ?? e.props.word}
               {e.props.suffix}

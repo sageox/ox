@@ -58,26 +58,100 @@ export type AnimationFrames = { ms: number[] }
 // An animation's half-block cells, per size, index-aligned with its frames.
 export type Cells = Record<SizeName, string[]>
 
+// A rectangle in high-resolution cell pixels.
+export type Rect = { x: number; y: number; width: number; height: number }
+
+// The high-resolution art the desktop and VS Code draw: per frame a PNG at
+// `hires/<name>/<i>.png`, index-aligned with `animations[name].ms`. Each
+// animation is cropped to the union of its frames, `animations[name]`, a box
+// in the uncropped cell; `figure` is the union of Oxy alone (blink, wag,
+// wag-big), which sizes him so he stays one scale whatever he holds.
+export type HiresFrames = {
+  cell: { width: number; height: number }
+  // hires pixels per pixel of the 160x207 art
+  scale: number
+  figure: Rect
+  animations: Partial<Record<Anim, Rect>>
+}
+
 export type OxyFrames = {
   // a frame's width over its height
   aspect: number
   sizes: Record<SizeName, Box>
   animations: Record<Anim, AnimationFrames>
+  // Optional: a frames.ts written by an older ox has none, and the desktop
+  // then draws the 160x207 frames.
+  hires?: HiresFrames
 }
 
 // Oxy's height in CSS pixels where the surface draws pictures as SVG (the
 // desktop app, VS Code). The working row there is one ~20 px text line, so
 // medium stands a little over two lines tall, as the terminal's medium does
-// beside its one-row word.
+// beside its one-row word. With the hires art this is his figure's height;
+// with the 160x207 fallback, the whole frame's.
 export const PIXEL_HEIGHTS: Record<SizeName, number> = { small: 32, medium: 48, large: 64 }
 
-// A frame PNG's own size; it must match what `ox pet enable` writes.
+// One text row on the graphical surfaces, in CSS pixels. Box margins there
+// are counted in rows, not pixels, so lifting the words is rounded to it.
+export const ROW_PX = 20
+
+// The fallback frame PNG's own size; it must match what `ox pet enable` writes.
 export const DESKTOP_FRAME = { width: 160, height: 207 } as const
 
-// The part of the frame the SVG shows, in frame pixels. The full frame by
-// default; set to the union of Oxy's bounds across every frame to crop the
-// empty margin without cutting any pose.
+// The fallback clip's viewBox: the whole 160x207 frame.
 export const DESKTOP_VIEWBOX = { x: 0, y: 0, width: DESKTOP_FRAME.width, height: DESKTOP_FRAME.height } as const
+
+// Where a clip's frames sit: the SVG's viewBox, and the box each frame's
+// <image> fills inside it, both in the art's own pixels.
+export type ClipGeometry = { viewBox: Rect; image: Rect }
+
+export const DESKTOP_GEOMETRY: ClipGeometry = {
+  viewBox: DESKTOP_VIEWBOX,
+  image: { x: 0, y: 0, width: DESKTOP_FRAME.width, height: DESKTOP_FRAME.height },
+}
+
+export type HiresLayout = ClipGeometry & {
+  // the Svg element's size, in CSS pixels
+  width: number
+  height: number
+  // CSS pixels of empty cell kept under the crop so his feet stay on the ground
+  groundPad: number
+  // rows of marginBottom that bring the words up to his middle
+  wordsLift: number
+}
+
+/**
+ * How one hires animation is drawn at a size. The scale comes from Oxy's
+ * figure, not the crop, so he is the same size in every animation and a prop
+ * (laptop, clouds, a whiteboard) makes the element bigger instead of making
+ * him smaller. Every viewBox runs down to the cell's bottom edge, the ground
+ * line: a crop that stops short of it (he floats, or props end above his
+ * feet) keeps that empty strip inside the SVG, so bottom-aligned SVGs put
+ * every animation's ground at one height. Padding in the SVG rather than a
+ * Box margin because margins are whole rows, too coarse at 32 px. Null when
+ * the frames carry no box for `anim`.
+ */
+export function hiresLayout(hires: HiresFrames, anim: Anim, size: SizeName): HiresLayout | null {
+  const crop = hires.animations[anim]
+  const ground = hires.cell.height
+  if (crop === undefined || crop.width <= 0 || crop.height <= 0 || hires.figure.height <= 0) {
+    return null
+  }
+  const factor = PIXEL_HEIGHTS[size] / hires.figure.height
+  const viewBox = { x: crop.x, y: crop.y, width: crop.width, height: Math.max(crop.height, ground - crop.y) }
+  // The words are vertically centred on his figure, never on a tall prop: the
+  // row bottom-aligns, so the words' own bottom sits on the ground and is
+  // lifted by the figure's middle less half a row.
+  const middle = (ground - (hires.figure.y + hires.figure.height / 2)) * factor
+  return {
+    viewBox,
+    image: crop,
+    width: Math.max(1, Math.round(viewBox.width * factor)),
+    height: Math.max(1, Math.round(viewBox.height * factor)),
+    groundPad: (viewBox.height - crop.height) * factor,
+    wordsLift: Math.max(0, Math.round((middle - ROW_PX / 2) / ROW_PX)),
+  }
+}
 
 // The Svg element's `source` limit; a longer tree is refused.
 export const SVG_SOURCE_CAP = 131_072
@@ -135,8 +209,11 @@ function keyTime(ms: number, total: number): string {
  * until the next clip replaces it. The first frame is visible without
  * SMIL, so a surface that ignores it still shows Oxy.
  */
-export function clipSvg(frames: string[], ms: number[], loop: boolean): string {
-  const { x, y, width, height } = DESKTOP_VIEWBOX
+export function clipSvg(frames: string[], ms: number[], loop: boolean, geometry: ClipGeometry = DESKTOP_GEOMETRY): string {
+  const { x, y, width, height } = geometry.viewBox
+  const img = geometry.image
+  // x/y only when set, so the fallback's markup is what it always was.
+  const place = (img.x !== 0 ? `x="${img.x}" ` : '') + (img.y !== 0 ? `y="${img.y}" ` : '')
   const total = ms.reduce((a, b) => a + b, 0)
   const timing = loop ? 'repeatCount="indefinite"' : 'fill="freeze"'
   let offset = 0
@@ -160,7 +237,7 @@ export function clipSvg(frames: string[], ms: number[], loop: boolean): string {
         ? ''
         : `<animate attributeName="visibility" calcMode="discrete" values="${values.join(';')}" keyTimes="${times.join(';')}" dur="${total}ms" ${timing}/>`
     return (
-      `<image width="${DESKTOP_FRAME.width}" height="${DESKTOP_FRAME.height}" visibility="${i === 0 ? 'visible' : 'hidden'}" ` +
+      `<image ${place}width="${img.width}" height="${img.height}" visibility="${i === 0 ? 'visible' : 'hidden'}" ` +
       `href="data:image/png;base64,${base64}">${animate}</image>`
     )
   })
@@ -398,6 +475,11 @@ export function pickAnim(s: SpinnerState): Anim {
 /** The PNG file of one frame, under the mod's folder. */
 export function frameFile(root: string, anim: Anim, index: number): string {
   return `${root}/hooks/frames/${anim}/${index}.png`
+}
+
+/** The high-resolution PNG of one frame, drawn on the desktop and in VS Code. */
+export function hiresFrameFile(root: string, anim: Anim, index: number): string {
+  return `${root}/hooks/hires/${anim}/${index}.png`
 }
 
 /** The cells.json of an animation, under the mod's folder. */

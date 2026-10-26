@@ -15,12 +15,16 @@ import {
   formatDuration,
   frameAt,
   frameFile,
+  hiresFrameFile,
+  hiresLayout,
   packClips,
   passMs,
   pickAnim,
   pixelBox,
   planAnim,
+  ROW_PX,
   type Anim,
+  type HiresFrames,
   type Cells,
   type SizeName,
   type SpinnerState,
@@ -409,17 +413,51 @@ function fakePng(name: Anim, index: number, length: number): string {
   return tag + 'A'.repeat(Math.max(0, length - tag.length))
 }
 
-function mockPngFiles(on: Parameters<Parameters<typeof test>[1]>[1], length = 24_000) {
+// Answers frame reads from both sets; a hires frame's stand-in names its set
+// so a test can tell which art reached the SVG. `hires: false` denies the
+// hires reads, as an install whose hires folder went missing would.
+function mockPngFiles(on: Parameters<Parameters<typeof test>[1]>[1], length = 24_000, { hires = true } = {}) {
   const reads: string[] = []
   on('fs.read', (_, e) => {
-    const m = /\/hooks\/frames\/([^/]+)\/(\d+)\.png$/.exec(e.path)
-    if (!m || e.as !== 'bytes') {
+    const m = /\/hooks\/(frames|hires)\/([^/]+)\/(\d+)\.png$/.exec(e.path)
+    if (!m || e.as !== 'bytes' || (m[1] === 'hires' && !hires)) {
       return { deny: `no such file: ${e.path}` }
     }
     reads.push(e.path)
-    return { value: { base64: fakePng(m[1] as Anim, Number(m[2]), length) } }
+    const tag = m[1] === 'hires' ? 'hi' : ''
+    return { value: { base64: tag + fakePng(m[2] as Anim, Number(m[3]), length - tag.length) } }
   })
   return reads
+}
+
+// A hires block shaped like the generator's, with numbers chosen so each
+// rule shows: Oxy's figure ends on the cell's bottom edge; the laptop widens
+// the crop; float's crop stops 100 px above the ground; confetti fills the
+// cell. The cell is not the real one on purpose: nothing may assume its size.
+const FIGURE = { x: 120, y: 141, width: 240, height: 480 }
+const HIRES: HiresFrames = {
+  cell: { width: 480, height: 621 },
+  scale: 3,
+  figure: FIGURE,
+  animations: {
+    ...Object.fromEntries(ANIMS.map(name => [name, FIGURE])),
+    laptop: { x: 30, y: 141, width: 420, height: 480 },
+    float: { x: 120, y: 41, width: 240, height: 480 },
+    confetti: { x: 60, y: 0, width: 360, height: 621 },
+  },
+}
+
+// What the desktop should draw for `anim` at `box`: the hires layout when
+// the generated frames.ts carries one for it, else the 160x207 fallback. The
+// engine under test loads the mod's own copy of frames.ts, so a test can't
+// swap FRAMES.hires; these render tests follow whichever frames.ts is laid.
+function desktopLayout(anim: Anim, box: SizeName) {
+  const l = FRAMES.hires ? hiresLayout(FRAMES.hires, anim, box) : null
+  if (l) {
+    const v = l.viewBox
+    return { hires: true, viewBox: `${v.x} ${v.y} ${v.width} ${v.height}`, image: l.image, size: { width: l.width, height: l.height }, lift: l.wordsLift }
+  }
+  return { hires: false, viewBox: '0 0 160 207', image: { x: 0, y: 0, width: 160, height: 207 }, size: pixelBox(box), lift: 0 }
 }
 
 const WORKING = { word: 'Working', message: null, suffix: '…', mode: 'thinking' } as const
@@ -438,12 +476,16 @@ for (const surface of ['desktop', 'vscode'] as const) {
       const svg = await ui.find({ type: 'Svg' })
       const source = String(svg?.props.source)
       expect(source.startsWith('<svg')).toBe(true)
-      expect(source).toContain('data:image/png;base64,chatter0x')
+      const want = desktopLayout('chatter', box)
+      expect(source).toContain(`viewBox="${want.viewBox}"`)
+      expect(source).toContain(`width="${want.image.width}" height="${want.image.height}"`)
+      expect(source).toContain(`data:image/png;base64,${want.hires ? 'hi' : ''}chatter0x`)
+      expect((await ui.find({ type: 'Box', key: 'words' }))?.props.marginBottom).toBe(want.lift)
       expect(source).toContain('<animate attributeName="visibility" calcMode="discrete"')
       expect(source.length).toBeLessThanOrEqual(SVG_SOURCE_CAP)
       expect(svg?.props.isInteractive).toBe(true)
       expect(svg?.props.alt).toBe('Oxy')
-      expect({ width: svg?.props.width, height: svg?.props.height }).toEqual(pixelBox(box))
+      expect({ width: svg?.props.width, height: svg?.props.height }).toEqual(want.size)
       expect(await ui.find({ type: 'Raster' })).toBeUndefined()
       expect((await ui.find({ type: 'Text', text: /Sautéing/ }))?.text).toBe('Sautéing…')
       await ui.unmount()
@@ -586,4 +628,131 @@ test('a frame that cannot load stops its site instead of retrying forever', asyn
   await clock.advance(2_000)
   expect(reads).toBe(after)
   await ui.unmount()
+})
+
+test('hires frame files sit under hooks/hires, per animation', () => {
+  expect(hiresFrameFile('/mod', 'laptop', 7)).toBe('/mod/hooks/hires/laptop/7.png')
+})
+
+describe('hiresLayout', () => {
+  // [anim, size, viewBox, Svg width x height, ground pad px, words lift rows]
+  const cases: Array<[Anim, SizeName, string, [number, number], number, number]> = [
+    // Oxy alone: his figure is the crop, 48 px tall at medium
+    ['blink', 'medium', '120 141 240 480', [24, 48], 0, 1],
+    ['blink', 'small', '120 141 240 480', [16, 32], 0, 0],
+    ['blink', 'large', '120 141 240 480', [32, 64], 0, 1],
+    // the laptop widens the element; Oxy stays 48 px
+    ['laptop', 'medium', '30 141 420 480', [42, 48], 0, 1],
+    // float's crop ends 100 px short of the ground: the viewBox keeps it
+    ['float', 'medium', '120 41 240 580', [24, 58], 10, 1],
+    // confetti fills the cell: taller than Oxy, same ground
+    ['confetti', 'medium', '60 0 360 621', [36, 62], 0, 1],
+  ]
+  for (const [anim, size, viewBox, [width, height], pad, lift] of cases) {
+    test(`${anim} at ${size}`, () => {
+      const l = hiresLayout(HIRES, anim, size)
+      expect(l).not.toBeNull()
+      const v = l!.viewBox
+      expect(`${v.x} ${v.y} ${v.width} ${v.height}`).toBe(viewBox)
+      // every viewBox ends on the cell's bottom edge, the ground line
+      expect(v.y + v.height).toBe(HIRES.cell.height)
+      expect(l!.image).toEqual(HIRES.animations[anim])
+      expect([l!.width, l!.height]).toEqual([width, height])
+      expect(Math.round(l!.groundPad * 1000) / 1000).toBe(pad)
+      expect(l!.wordsLift).toBe(lift)
+    })
+  }
+  test('words lift follows the figure, never a tall prop', () => {
+    const medium = hiresLayout(HIRES, 'confetti', 'medium')!
+    const middle = (HIRES.cell.height - (FIGURE.y + FIGURE.height / 2)) * (48 / FIGURE.height)
+    expect(medium.wordsLift).toBe(Math.round((middle - ROW_PX / 2) / ROW_PX))
+    expect(hiresLayout(HIRES, 'blink', 'medium')!.wordsLift).toBe(medium.wordsLift)
+  })
+  test('an animation with no box, or an empty figure, has no layout', () => {
+    const { wave: _, ...rest } = HIRES.animations
+    expect(hiresLayout({ ...HIRES, animations: rest }, 'wave', 'medium')).toBeNull()
+    expect(hiresLayout({ ...HIRES, figure: { ...FIGURE, height: 0 } }, 'blink', 'medium')).toBeNull()
+  })
+})
+
+test('packClips packs hires-sized frames under the cap', () => {
+  // hires frames run to ~31K base64 each: about four to a clip
+  for (const n of [1, 4, 5, 34, 60]) {
+    const lengths = Array.from({ length: n }, (_, i) => 18_000 + ((i * 2_731) % 13_000))
+    const clips = packClips(lengths.map(() => 40), lengths, SVG_SOURCE_CAP)
+    expect(clips[0][0]).toBe(0)
+    expect(clips.at(-1)![1]).toBe(n)
+    for (const [start, end] of clips) {
+      expect(end - start).toBeGreaterThanOrEqual(1)
+      expect(end - start).toBeLessThanOrEqual(5)
+      const cost = CLIP_WRAPPER_MAX + lengths.slice(start, end).reduce((t, len) => t + len + CLIP_IMAGE_MARKUP_MAX, 0)
+      expect(cost).toBeLessThanOrEqual(SVG_SOURCE_CAP)
+    }
+  }
+})
+
+test('clipSvg places hires frames at their crop inside a ground-anchored viewBox', () => {
+  const l = hiresLayout(HIRES, 'float', 'medium')!
+  const frames = ['QUJD', 'REVG']
+  const svg = clipSvg(frames, [99_999, 123_456], false, l)
+  expect(svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg" viewBox="120 41 240 580">')).toBe(true)
+  expect(svg).toContain('<image x="120" y="41" width="240" height="480" visibility="visible" href="data:image/png;base64,QUJD"')
+  expect(svg.length).toBeLessThanOrEqual(CLIP_WRAPPER_MAX + frames.reduce((n, f) => n + f.length + CLIP_IMAGE_MARKUP_MAX, 0))
+})
+
+
+for (const surface of ['desktop', 'vscode'] as const) {
+  test(`${surface}: hires Oxy keeps his figure's size and his ground line whatever he holds`, async ($, on) => {
+    mock.clock(on, { now: 1_000 })
+    mock.store(on)
+    const reads = mockPngFiles(on, 30_000)
+    on('command.run', () => ({ text: '' }))
+    const anims = ['laptop', 'float', 'plan-kanban'] as const
+    for (const anim of anims) {
+      await $.command.run({ ...COMMAND, surface, args: anim } as never)
+      for (const box of SIZES) {
+        await $.command.run({ ...COMMAND, surface, args: box } as never)
+        const ui = await $.ui.mount({ ...SPINNER, surface, props: WORKING })
+        const svg = await ui.find({ type: 'Svg' })
+        const source = String(svg?.props.source)
+        const want = desktopLayout(anim, box)
+        expect(source).toContain(`viewBox="${want.viewBox}"`)
+        expect(source.length).toBeLessThanOrEqual(SVG_SOURCE_CAP)
+        expect({ width: svg?.props.width, height: svg?.props.height }).toEqual(want.size)
+        expect((await ui.find({ type: 'Box', key: 'words' }))?.props.marginBottom).toBe(want.lift)
+        if (want.hires && FRAMES.hires) {
+          const h = FRAMES.hires
+          const [, vy, , vh] = want.viewBox.split(' ').map(Number)
+          // his figure is the size's height in every animation, to a pixel
+          expect(Math.abs((h.figure.height * want.size.height) / vh - { small: 32, medium: 48, large: 64 }[box])).toBeLessThanOrEqual(1)
+          // and every viewBox ends on the cell's bottom edge, the ground
+          expect(vy + vh).toBe(h.cell.height)
+        }
+        await ui.unmount()
+      }
+    }
+    const hiresDrawn = anims.some(a => desktopLayout(a, 'medium').hires)
+    expect(reads.some(path => path.includes('/hooks/hires/'))).toBe(hiresDrawn)
+    await $.command.run({ ...COMMAND, args: 'medium' } as never)
+    await $.command.run({ ...COMMAND, args: 'auto' } as never)
+  })
+}
+
+// Covers both fallbacks: an older frames.ts with no hires block, and a hires
+// block whose PNGs can't be read. Either way the 160x207 clip draws.
+test('desktop: hires frames missing or unreadable fall back to the 160x207 clip', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  const reads = mockPngFiles(on, 24_000, { hires: false })
+  on('command.run', () => ({ text: '' }))
+  await $.command.run({ ...COMMAND, surface: 'desktop', args: 'murmur' } as never)
+  const ui = await $.ui.mount({ ...SPINNER, surface: 'desktop', props: WORKING })
+  const svg = await ui.find({ type: 'Svg' })
+  expect(String(svg?.props.source)).toContain('viewBox="0 0 160 207"')
+  expect(String(svg?.props.source)).toContain('base64,murmur0x')
+  expect({ width: svg?.props.width, height: svg?.props.height }).toEqual(pixelBox('medium'))
+  expect(reads.length).toBeGreaterThan(0)
+  expect(reads.every(path => path.includes('/hooks/frames/'))).toBe(true)
+  await ui.unmount()
+  await $.command.run({ ...COMMAND, args: 'auto' } as never)
 })
