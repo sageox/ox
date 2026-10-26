@@ -119,6 +119,8 @@ type Store struct {
 	userSlug      string
 	mu            sync.RWMutex
 	pruneWG       sync.WaitGroup // tracks background Prune goroutines launched by Get/List
+
+	expiryCheckTestHook func() // called between Get's scan and its expiry re-read; tests use it to let a prune finish in that window
 }
 
 // NewStore initializes an instance store for the given project root.
@@ -331,9 +333,11 @@ func (s *Store) Get(agentID string) (*Instance, error) {
 		return nil, err
 	}
 
-	// trigger compaction if needed after read
+	// trigger compaction if needed, but only once this lookup has returned: a
+	// miss re-reads the file to tell an expired record from none, and a prune
+	// that wins that race has already dropped the record
 	if s.shouldCompact(totalCount, expiredCount) {
-		s.launchBackgroundPrune()
+		defer s.launchBackgroundPrune()
 	}
 
 	// scan backwards (newest first) for the matching agent_id
@@ -343,6 +347,9 @@ func (s *Store) Get(agentID string) (*Instance, error) {
 		}
 	}
 
+	if s.expiryCheckTestHook != nil {
+		s.expiryCheckTestHook()
+	}
 	if expiresAt, ok := s.expiredAt(agentID); ok {
 		return nil, fmt.Errorf("%w: %s expired at %s", ErrInstanceExpired, agentID, expiresAt.Format(time.RFC3339))
 	}

@@ -137,6 +137,36 @@ func TestGetExpired(t *testing.T) {
 	}
 }
 
+// TestGetReportsExpiryWhenItsOwnPruneFinishesFirst: a lookup of an expired
+// instance finds enough expired records to trigger compaction. That prune must
+// not run until the lookup has told "expired" from "never existed", or it
+// deletes the record the lookup is about to report on.
+// Failure prevented: `ox agent <id> …` for an expired agent intermittently says
+// "instance not found" instead of "instance expired" (seen as a CI flake in
+// TestLiveAgentOutlivesExpiresAt and TestGetExpired).
+func TestGetReportsExpiryWhenItsOwnPruneFinishesFirst(t *testing.T) {
+	store := newTestStore(t)
+	store.expiryCheckTestHook = store.pruneWG.Wait // a prune already launched finishes first
+	past := time.Now().Add(-time.Hour)
+	if err := store.Add(&Instance{AgentID: "OxOld2", ServerSessionID: "oxsid_old", CreatedAt: past.Add(-24 * time.Hour), ExpiresAt: past}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	if _, err := store.Get("OxOld2"); !errors.Is(err, ErrInstanceExpired) {
+		t.Fatalf("Get(expired) = %v, want ErrInstanceExpired", err)
+	}
+
+	// the compaction still happens, once the lookup has returned
+	store.pruneWG.Wait()
+	data, err := os.ReadFile(store.Path())
+	if err != nil {
+		t.Fatalf("read store: %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("the deferred prune must still drop the expired record; store holds %q", data)
+	}
+}
+
 // TestStorePathMatchesStore pins StorePath to the file a store reads and
 // writes: callers use it to check for a store without creating one.
 func TestStorePathMatchesStore(t *testing.T) {
