@@ -26,7 +26,7 @@ func TestCommitPlanBackfillToLedger_PreCommitGitFailureIsErrBackfillCommitFailed
 	bogusOld := filepath.Join(ledger, "data", "plans", "2026-01-01-does-not-exist")
 	bogusNew := filepath.Join(ledger, "data", "plans", "2026-01-01-renamed")
 
-	err := commitPlanBackfillToLedger(ledger, [][2]string{{bogusOld, bogusNew}}, nil, nil)
+	err := commitPlanBackfillToLedger(ledger, [][2]string{{bogusOld, bogusNew}}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error: git mv on a path that was never created")
 	}
@@ -58,7 +58,7 @@ func TestCommitPlanBackfillToLedger_PushOnlyFailureIsNotErrBackfillCommitFailed(
 		t.Fatal(err)
 	}
 
-	err := commitPlanBackfillToLedger(ledger, nil, []string{dir}, nil)
+	err := commitPlanBackfillToLedger(ledger, nil, []string{dir}, nil, nil)
 	if err == nil {
 		t.Fatal("expected a push failure: no remote is configured for this ledger")
 	}

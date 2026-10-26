@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Failed plan title repairs preserve session references** — a failed rename or commit no longer leaves new plan names for a later session upload to publish.
 - **Session redaction amendments leave other staged work pending** — repairs amend only their selected paths and report failed amendments before publication.
 - **Safer session deletion** — deletion commits validate staged work and restore selected sessions if the commit fails. Plans stay local; other valid staged session work can still be published.
 - **A paused recording no longer says it is recording** — a paused recording hides `● rec` on the status line. `ox session report` and the session report pane show `⏸ paused` instead of `● recording` (`session.paused` in `--json`).
