@@ -24,7 +24,7 @@ const (
 const maxMeDisplayRows = 16
 
 // guidanceMe narrates the --me rollup.
-const guidanceMe = "Show the coworker their recent sessions' ox usage. Print the display field verbatim " +
+const guidanceMe = "Show the coworker what SageOx gave their recent sessions. Print the display field verbatim " +
 	"inside a fenced ```text block, then at most 3 sentences of your own. Rows marked \"no usage trace\" " +
 	"predate usage recording; rows marked \"—\" are not hydrated locally and can be read with " +
 	"`ox session view <name> --context`. Token counts are estimates (~4 bytes per token) — say so once. " +
@@ -42,7 +42,7 @@ type RollupInput struct {
 	Width      int
 }
 
-// MeReport is the `ox usage --me --json` payload.
+// MeReport is the `ox brief --me --json` payload.
 type MeReport struct {
 	View        string       `json:"view"`
 	Window      string       `json:"window"`
@@ -136,7 +136,7 @@ func BuildMe(in RollupInput) MeReport {
 		r.NextActions = append(r.NextActions, NextAction{Action: "ox session view <name> --context", Why: "read a session whose trace is not hydrated locally"})
 	}
 	if r.Totals.Sessions == 0 {
-		r.NextActions = append(r.NextActions, NextAction{Action: "ox session start", Why: "record a session so ox usage can report it"})
+		r.NextActions = append(r.NextActions, NextAction{Action: "ox session start", Why: "record a session so ox brief can report it"})
 	}
 	r.Display = DisplayMe(r, in.Width)
 	return r
@@ -161,7 +161,7 @@ func renderMe(r MeReport, width int, st styler) string {
 	if r.Window == "" {
 		window = "recent"
 	}
-	lines := []string{st.head("ox usage") + st.dim(fmt.Sprintf(" · my sessions  %s · %d session%s", window, r.Totals.Sessions, plural(r.Totals.Sessions, "", "s")))}
+	lines := []string{st.head("ox brief") + st.dim(fmt.Sprintf(" · my sessions  %s · %d session%s", window, r.Totals.Sessions, plural(r.Totals.Sessions, "", "s")))}
 	if len(r.Sessions) == 0 {
 		lines = append(lines, st.dim("no recorded sessions in this window — start one: ox session start"))
 		return finish(lines)

@@ -153,7 +153,7 @@ func sessionHeader(r Report, st styler) string {
 	if r.Session.Turns > 0 {
 		parts = append(parts, fmt.Sprintf("%d turn%s", r.Session.Turns, plural(r.Session.Turns, "", "s")))
 	}
-	h := st.head("ox usage") + st.dim(" · "+scope)
+	h := st.head("ox brief") + st.dim(" · "+scope)
 	if len(parts) > 0 {
 		h += "  " + strings.Join(parts, st.dim(" · "))
 	}

@@ -339,7 +339,7 @@ func exampleLine(surfaced []Surfaced) string {
 func nextActions(r Report) []NextAction {
 	out := []NextAction{}
 	if !r.Trace.Available {
-		out = append(out, NextAction{Action: "ox session start", Why: "record the next session so ox usage can report it"})
+		out = append(out, NextAction{Action: "ox session start", Why: "record the next session so ox brief can report it"})
 		return out
 	}
 	if r.Used.Status == UsedNotYetReported && r.Used.SelfReport != nil {

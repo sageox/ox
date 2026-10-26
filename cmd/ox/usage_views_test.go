@@ -44,15 +44,15 @@ func writeLedgerUsageSession(t *testing.T, ledgerPath, name string, mutate func(
 	return dir
 }
 
-// runOxUsage runs the real `ox usage` with args as the calling AI coworker.
+// runOxUsage runs the real `ox brief` with args as the calling AI coworker.
 func runOxUsage(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	resetUsageFlags(t)
 	t.Setenv("SAGEOX_AGENT_ID", usageAgentID)
-	return executeRootCLI(t, append([]string{"usage"}, args...)...)
+	return executeRootCLI(t, append([]string{"brief"}, args...)...)
 }
 
-// TestUsage_LedgerSessionView drives `ox usage --session <name> --json` over a
+// TestUsage_LedgerSessionView drives `ox brief --session <name> --json` over a
 // real Ledger checkout. Failure prevented: a coworker reviewing a past session
 // gets a report that hides why there is no trace (still recording, stub only,
 // none written) — or one that silently hydrates the trace or drops its score.
@@ -161,7 +161,7 @@ func TestUsage_CommandErrors(t *testing.T) {
 	}
 }
 
-// TestUsage_OutsideProjectFails: with no resolvable project root, ox usage
+// TestUsage_OutsideProjectFails: with no resolvable project root, ox brief
 // says so instead of reporting an empty session.
 func TestUsage_OutsideProjectFails(t *testing.T) {
 	usageTraceEnv(t, nil)
@@ -213,7 +213,7 @@ func TestUsage_HumanAndAgentOutput(t *testing.T) {
 }
 
 // TestUsage_AgentContextDefaultsToJSON: an AI coworker that runs plain
-// `ox usage` gets the JSON report without asking for it.
+// `ox brief` gets the JSON report without asking for it.
 func TestUsage_AgentContextDefaultsToJSON(t *testing.T) {
 	usageTraceEnv(t, nil)
 	isolateAgentDetection(t)
@@ -269,7 +269,7 @@ func TestWriteUsageReport_Errors(t *testing.T) {
 }
 
 // TestInvokedRefType names the kind of team knowledge each retrieval pulled.
-// Failure prevented: `ox usage` lumps a code search or a plan read under the
+// Failure prevented: `ox brief` lumps a code search or a plan read under the
 // wrong kind, so the coworker misreads what ox put in front of the model.
 func TestInvokedRefType(t *testing.T) {
 	tests := []struct {

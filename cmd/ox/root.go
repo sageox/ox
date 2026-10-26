@@ -265,6 +265,7 @@ func init() {
 	rootCmd.AddCommand(queryCmd)
 	rootCmd.AddCommand(recapCmd)
 	rootCmd.AddCommand(usageCmd)
+	rootCmd.AddCommand(usageDeprecatedCmd) // hidden `ox usage` alias for one release
 	// scoutCmd is feature-gated; registered dynamically in syncFeatureGatedCommands
 	// when FEATURE_SCOUT is enabled (off by default).
 	// bulletinCmd is feature-gated; registered dynamically in syncFeatureGatedCommands

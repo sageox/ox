@@ -63,7 +63,7 @@ func contextBudgetAttrs(t *testing.T, doc string) map[string]int {
 // TestPrime_RecordsContextBudgetIntoSessionTrace is the customer claim for
 // prime: the team context a prime injected shows up in the session's usage
 // trace with its per-source token split, and a hook-capped prime says how much
-// was trimmed and what was deferred. Failure prevented: `ox usage` reports no
+// was trimmed and what was deferred. Failure prevented: `ox brief` reports no
 // context from prime (the largest single injection), or reports the
 // untrimmed size as if it all reached the model.
 func TestPrime_RecordsContextBudgetIntoSessionTrace(t *testing.T) {

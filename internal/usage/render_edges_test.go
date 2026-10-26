@@ -146,7 +146,7 @@ func TestDisplayMe_EveryRowKind(t *testing.T) {
 }
 
 // TestBuildMe_DefaultLimit: a zero --limit means the default of 10, not none.
-// Failure prevented: `ox usage --me` with no limit shows zero sessions.
+// Failure prevented: `ox brief --me` with no limit shows zero sessions.
 func TestBuildMe_DefaultLimit(t *testing.T) {
 	ledger := t.TempDir()
 	for h := 1; h <= 12; h++ {

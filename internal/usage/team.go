@@ -13,13 +13,13 @@ import (
 const maxTeamItems = 10
 
 // guidanceTeam narrates the aggregate team view.
-const guidanceTeam = "Show the team-wide ox usage aggregate. Print the display field verbatim inside a " +
+const guidanceTeam = "Show the team-wide ox brief aggregate. Print the display field verbatim inside a " +
 	"fenced ```text block, then at most 3 sentences of your own. This view is aggregate-only by design: " +
 	"never name, count, compare or rank individual coworkers, and never infer who did what. Token counts " +
 	"are estimates (~4 bytes per token) — say so once. For the value narrative (what SageOx delivered), " +
 	"point to `ox recap`. Never state or imply time saved or dollar figures."
 
-// TeamReport is the `ox usage --team --json` payload. It is aggregate-only
+// TeamReport is the `ox brief --team --json` payload. It is aggregate-only
 // (ADR-027 rule 2): it carries no principal IDs, names, session names,
 // per-person counts or rankings — nothing that says who did what.
 type TeamReport struct {
@@ -150,7 +150,7 @@ func renderTeam(r TeamReport, width int, st styler) string {
 	if r.Window == "" {
 		window = "recent"
 	}
-	lines := []string{st.head("ox usage") + st.dim(fmt.Sprintf(" · team  %s · %d session%s (%d with usage trace)",
+	lines := []string{st.head("ox brief") + st.dim(fmt.Sprintf(" · team  %s · %d session%s (%d with usage trace)",
 		window, r.Sessions, plural(r.Sessions, "", "s"), r.Traced))}
 	if r.Traced == 0 {
 		lines = append(lines, st.dim("no usage traces in this window yet"))

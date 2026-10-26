@@ -34,15 +34,15 @@ func resetUsageFlags(t *testing.T) {
 	t.Cleanup(reset)
 }
 
-// runOxUsageJSON runs the REAL `ox usage --json` through the root command as
+// runOxUsageJSON runs the REAL `ox brief --json` through the root command as
 // the calling AI coworker and decodes the report.
 func runOxUsageJSON(t *testing.T, args ...string) usage.Report {
 	t.Helper()
 	resetUsageFlags(t)
 	t.Setenv("SAGEOX_AGENT_ID", usageAgentID)
-	out, err := executeRootCLI(t, append([]string{"usage", "--json"}, args...)...)
+	out, err := executeRootCLI(t, append([]string{"brief", "--json"}, args...)...)
 	require.NoError(t, err)
-	t.Logf("ox usage --json:\n%s", out)
+	t.Logf("ox brief --json:\n%s", out)
 	var r usage.Report
 	require.NoError(t, json.Unmarshal([]byte(out), &r), "stdout must be one JSON document: %s", out)
 	return r
@@ -51,8 +51,8 @@ func runOxUsageJSON(t *testing.T, args ...string) usage.Report {
 // --- A. The customer claim ---
 
 // TestUsage_ListsOxCallAfterHookRecordsIt is the customer claim: after an AI
-// coworker runs `ox murmur list`, `ox usage` lists it with what it returned.
-// It drives the REAL PostToolUse hook and the REAL `ox usage --json` command.
+// coworker runs `ox murmur list`, `ox brief` lists it with what it returned.
+// It drives the REAL PostToolUse hook and the REAL `ox brief --json` command.
 // Failure prevented: a coworker asks "what did ox do?" and the report shows
 // nothing for calls that ran, or the wrong volume.
 func TestUsage_ListsOxCallAfterHookRecordsIt(t *testing.T) {
@@ -77,7 +77,7 @@ func TestUsage_ListsOxCallAfterHookRecordsIt(t *testing.T) {
 			found = &r.Calls.ByCommand[i]
 		}
 	}
-	require.NotNil(t, found, "ox usage must list the murmur list call; got %+v", r.Calls.ByCommand)
+	require.NotNil(t, found, "ox brief must list the murmur list call; got %+v", r.Calls.ByCommand)
 	assert.Equal(t, "murmur list", found.Command)
 	assert.Equal(t, 1, found.Count)
 	assert.InDelta(t, n/4, found.Tokens, 1, "tokens ≈ bytes/4")
@@ -149,7 +149,7 @@ func influencedEvents(t *testing.T, path string) []contexttrace.Event {
 }
 
 // TestContextTrace_JSONLSelfReport: the AI coworker reports every item it
-// used in ONE call, as ox usage's guidance tells it to. Failure prevented: a
+// used in ONE call, as ox brief's guidance tells it to. Failure prevented: a
 // batch lands half-written, or the single-object form existing callers use
 // stops working.
 func TestContextTrace_JSONLSelfReport(t *testing.T) {
@@ -192,7 +192,7 @@ func TestContextTrace_JSONLSelfReport(t *testing.T) {
 }
 
 // TestUsage_SelfReportRoundTrip follows guidance step 1 end to end: report via
-// the command ox usage names, re-run ox usage, and see it reported.
+// the command ox brief names, re-run ox brief, and see it reported.
 func TestUsage_SelfReportRoundTrip(t *testing.T) {
 	root := usageTraceEnv(t, nil)
 	state := startUsageRecording(t, root)
@@ -211,7 +211,7 @@ func TestUsage_SelfReportRoundTrip(t *testing.T) {
 	assert.True(t, after.Used.SelfReported[0].MatchedSurfaced)
 }
 
-// TestUsage_RecentFlagListsEveryCall drives `ox usage --json --recent N`
+// TestUsage_RecentFlagListsEveryCall drives `ox brief --json --recent N`
 // through the root command over a recorded trace of 25 ox calls. Failure
 // prevented: a coworker asks for the full call list and still gets the newest
 // 10, or the flag changes the human display.
@@ -255,14 +255,14 @@ func TestUsage_RecentFlagRejectsNegative(t *testing.T) {
 	usageTraceEnv(t, nil)
 	resetUsageFlags(t)
 	t.Setenv("SAGEOX_AGENT_ID", usageAgentID)
-	_, err := executeRootCLI(t, "usage", "--json", "--recent", "-1")
+	_, err := executeRootCLI(t, "brief", "--json", "--recent", "-1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--recent")
 }
 
 // --- C. --team and --me through the real command ---
 
-// TestUsage_TeamViewThroughRealCommand drives `ox usage --team --json` over a
+// TestUsage_TeamViewThroughRealCommand drives `ox brief --team --json` over a
 // real Ledger checkout. Failure prevented: the team view is wired to the wrong
 // ledger, or a teammate's identity reaches the payload.
 func TestUsage_TeamViewThroughRealCommand(t *testing.T) {
@@ -282,7 +282,7 @@ func TestUsage_TeamViewThroughRealCommand(t *testing.T) {
 
 	resetUsageFlags(t)
 	t.Setenv("SAGEOX_AGENT_ID", usageAgentID)
-	out, err := executeRootCLI(t, "usage", "--team", "--json")
+	out, err := executeRootCLI(t, "brief", "--team", "--json")
 	require.NoError(t, err)
 
 	var r usage.TeamReport
@@ -299,7 +299,44 @@ func TestUsage_TeamViewThroughRealCommand(t *testing.T) {
 func TestUsage_ViewFlagsAreExclusive(t *testing.T) {
 	usageTraceEnv(t, nil)
 	resetUsageFlags(t)
-	_, err := executeRootCLI(t, "usage", "--me", "--team")
+	_, err := executeRootCLI(t, "brief", "--me", "--team")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "none of the others can be")
+}
+
+// TestUsage_DeprecatedAliasStillRuns drives the hidden `ox usage` alias of
+// `ox brief` through the root command. Failure prevented: a coworker's script
+// or muscle memory hits "unknown command" the release `ox usage` became
+// `ox brief`, or keeps using the old name without being told the new one.
+func TestUsage_DeprecatedAliasStillRuns(t *testing.T) {
+	root := usageTraceEnv(t, nil)
+	runAfterTool(t, root, "claude-code", usageAgentID, &agentx.HookInput{
+		ToolName: "Bash", ToolInput: shellInput(t, "command", "ox murmur list"), ToolResponse: bashStdout(t, "[]"),
+	})
+	reset := func() {
+		usageDeprecatedCmd.Flags().VisitAll(func(f *pflag.Flag) {
+			_ = f.Value.Set(f.DefValue)
+			f.Changed = false
+		})
+	}
+	reset()
+	t.Cleanup(reset)
+	t.Setenv("SAGEOX_AGENT_ID", usageAgentID)
+
+	out, err := executeRootCLI(t, "usage", "--json")
+	require.NoError(t, err)
+
+	// cobra prints the notice on the command's output writer, which the
+	// real CLI leaves as stderr; the test harness routes it to out.
+	notice, body, ok := strings.Cut(out, "\n")
+	require.True(t, ok, out)
+	assert.Contains(t, notice, `Command "usage" is deprecated, use 'ox brief' instead`)
+	var r usage.Report
+	require.NoError(t, json.Unmarshal([]byte(body), &r), "the alias must print the same JSON report: %s", body)
+	assert.Equal(t, 1, r.Calls.Total)
+
+	assert.True(t, usageDeprecatedCmd.Hidden, "only `ox brief` shows in help and docs")
+	usageCmd.Flags().VisitAll(func(f *pflag.Flag) {
+		assert.NotNil(t, usageDeprecatedCmd.Flags().Lookup(f.Name), "alias lacks --%s", f.Name)
+	})
 }

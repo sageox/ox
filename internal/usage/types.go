@@ -1,4 +1,4 @@
-// Package usage builds the `ox usage` report: what ox did in an AI coworker's
+// Package usage builds the `ox brief` report: what ox did in an AI coworker's
 // session — the ox calls it made, how much context ox put in front of the
 // model, which team items were surfaced by name, and which of those the AI
 // coworker reports it actually used.
@@ -46,7 +46,7 @@ const (
 // the token total never reads as exhaustive.
 var Unmetered = []string{"recall preamble", "plan nudges", "agent-task surface"}
 
-// Report is the `ox usage --json` payload for the session view.
+// Report is the `ox brief --json` payload for the session view.
 type Report struct {
 	View        string       `json:"view"`
 	Session     SessionInfo  `json:"session"`
@@ -193,14 +193,14 @@ type NextAction struct {
 // load-bearing: the AI coworker must ground every "used" claim in the used
 // section, report its own use before showing, and print the pre-rendered
 // display so the report reads identically in every harness. Behavior lives
-// here, in the command's JSON, rather than in the ox-cli-usage skill body.
+// here, in the command's JSON, rather than in the ox-cli-brief skill body.
 const guidanceText = "Show the coworker what ox did in this session. " +
 	"(1) REPORT FIRST: if used.status is \"not_yet_reported\", before showing anything decide which " +
 	"surfaced[] items actually changed what you did this session. Report ALL of them in ONE call: pipe " +
 	"one JSON line per item (JSONL) to used.self_report.command, each shaped like " +
 	"used.self_report.example_line — type \"influenced\", mechanism \"self-report\", the item's ref and " +
 	"ref_type, and a one-line decision saying what you did because of it. If no surfaced item changed " +
-	"what you did, report nothing. After reporting, re-run `ox usage --json` and show THAT result, not " +
+	"what you did, report nothing. After reporting, re-run `ox brief --json` and show THAT result, not " +
 	"this one. " +
 	"(2) Print the display field verbatim inside a fenced ```text block, then at most 3 sentences of " +
 	"your own. " +

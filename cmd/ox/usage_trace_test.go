@@ -19,7 +19,7 @@ import (
 )
 
 // Usage trace: the PostToolUse hook records every ox call an AI coworker makes
-// as an `invoked` context-trace event, so `ox usage` can say what ox put in
+// as an `invoked` context-trace event, so `ox brief` can say what ox put in
 // front of the model. These tests drive the REAL handleAfterTool.
 
 const usageAgentID = "OxAb12"
@@ -92,7 +92,7 @@ func jsonString(t *testing.T, s string) json.RawMessage {
 
 // TestAfterTool_RecordsOxCallIntoSessionTrace is the customer claim: an ox
 // call an AI coworker makes, in either harness and on either surface, shows up
-// in the session trace with what it returned. Failure prevented: `ox usage`
+// in the session trace with what it returned. Failure prevented: `ox brief`
 // reports zero ox calls (or zero tokens) for a session that ran them.
 func TestAfterTool_RecordsOxCallIntoSessionTrace(t *testing.T) {
 	murmurs := strings.Repeat("m", 1203) // the JSON `ox murmur list` printed
