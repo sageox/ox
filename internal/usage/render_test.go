@@ -16,7 +16,10 @@ import (
 
 var updateGolden = flag.Bool("update", false, "rewrite golden files")
 
-// goldenReport is a busy session: every section populated.
+// goldenReport is a busy session: every section populated, including the
+// optional use-evidence fields a trace may carry — a titled, linked, used
+// discussion, a linked plan, team skills, and two murmurs of which one was
+// used (the unused one must not be listed).
 func goldenReport(width int) Report {
 	prime := primeEvent()
 	prime.FullBytes, prime.Deferred = 14200, []string{"team-docs"}
@@ -34,11 +37,29 @@ func goldenReport(width int) Report {
 		whisper(),
 		selfReport("MEMORY.md"),
 	}
-	return Build(Input{
+	r := Build(Input{
 		TraceSource: TraceSourceSession, SessionName: "2026-10-23T10-00-dev-OxAb12",
 		AgentID: "OxAb12", Harness: "codex", Recording: true, Turns: 31,
 		ScoreCategory: "moderate", ProducedCommits: 2, Events: events, Width: width,
 	})
+	// built: AGENTS.md, MEMORY.md, query, murmur OxR9a1 (received, unused)
+	built := r.Surfaced
+	r.Surfaced = append([]Surfaced{}, built[:2]...)
+	r.Surfaced = append(r.Surfaced,
+		Surfaced{Ref: "review-pr", RefType: refTypeSkill, Via: "prime"},
+		Surfaced{Ref: "release", RefType: refTypeSkill, Via: "prime"},
+		Surfaced{Ref: "triage", RefType: refTypeSkill, Via: "prime"},
+		Surfaced{Ref: "cnv_0192a3b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b", RefType: "discussion", Via: "retrieval",
+			Title: "Usage report design review", Seq: 12, Used: &ItemUsed{Evidence: EvidenceCited, Seq: 14, Grade: "cited"}},
+		Surfaced{Ref: "pln_4d8e2f", RefType: "plan", Via: "retrieval", Title: "Usage receipts"},
+	)
+	r.Surfaced = append(r.Surfaced, built[2:]...)
+	r.Surfaced = append(r.Surfaced, Surfaced{Ref: "mur_r", RefType: "murmur", From: "OxRy01", FromName: "Ryan", Topic: "wip",
+		Via: "whisper", Used: &ItemUsed{Evidence: EvidenceRead}})
+	fillURLs(r.Surfaced, "https://sageox.ai")
+	r.Relevant = &Relevant{Count: 2, SurfacedCount: len(r.Surfaced)}
+	r.Display = Display(r, width)
+	return r
 }
 
 // TestDisplay_Golden pins the dense layout at 80 and 120 columns. Failure
