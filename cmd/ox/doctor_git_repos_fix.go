@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sageox/ox/internal/api"
@@ -809,7 +811,11 @@ func clearCloneTarget(targetPath string) error {
 // lock held.
 func directCloneLedgerLocked(cloneURL, targetPath, endpointURL string) error {
 	budget := directLedgerCloneTimeout
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	// Keep the long clone budget independent of short doctor checks, while
+	// still canceling Git's separate process group when the CLI is interrupted.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
 	tempPath := fmt.Sprintf("%s.tmp-%d", targetPath, time.Now().UnixNano())

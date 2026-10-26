@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -255,6 +256,34 @@ func TestDoctorFix_DirectLedgerCloneBackstopReportsTimeout(t *testing.T) {
 		require.NotContains(t, output, misleading, "git's reaction to being stopped is not the cause")
 	}
 	requireNoHalfClone(t, ledgerPath)
+}
+
+// Ctrl-C must cancel the direct clone even though its backstop is independent
+// of doctor's short check timeout and Git runs in its own process group.
+func TestDoctorFix_DirectLedgerCloneInterrupt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real Git clone and process signal")
+	}
+	ledgerURL := servePacedGitRepo(t, directFixtureBytes, directPace, 96<<10)
+	root := setupDirectCloneProject(t, ledgerURL)
+	setDirectCloneBudgets(t, time.Minute, 15*time.Second)
+	// Absorb SIGINT so a missing clone handler fails without killing the test.
+	sink := make(chan os.Signal, 1)
+	signal.Notify(sink, os.Interrupt)
+	t.Cleanup(func() { signal.Stop(sink) })
+	target := filepath.Join(t.TempDir(), "ledger")
+	wait := startDoctorRepair(t, root, ledgerURL, target)
+	waitForDownload(t, target, 64<<10)
+	process, err := os.FindProcess(os.Getpid())
+	require.NoError(t, err)
+	require.NoError(t, process.Signal(os.Interrupt))
+	result, output := wait()
+	require.False(t, result.passed && !result.warning)
+	require.NotContains(t, output, "timed out", "Ctrl-C must end the clone before its backstop")
+	require.NoDirExists(t, target)
+	temps, err := filepath.Glob(target + ".tmp-*")
+	require.NoError(t, err)
+	require.Empty(t, temps, "interruption must remove the temporary clone")
 }
 
 // TestDoctorFix_DirectLedgerCloneStallIsAborted verifies a direct Ledger clone
