@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 func TestNewStoreForUser(t *testing.T) {
@@ -140,9 +142,9 @@ func TestGetExpired(t *testing.T) {
 
 // TestGetReportsExpiryWhatEverPrunesAfterItsRead: a lookup of an expired
 // instance must answer "expired" from what it read, however soon a prune drops
-// the record afterwards: the background prune the lookup itself launches (it
-// found enough expired records to trigger compaction), or one from another ox
-// process sharing the store.
+// the record afterwards: the compaction the lookup itself runs (it found
+// enough expired records to trigger one), or a prune from another ox process
+// sharing the store.
 // Failure prevented: `ox agent <id> …` for an expired agent intermittently says
 // "instance not found" instead of "instance expired" (seen as a CI flake in
 // TestLiveAgentOutlivesExpiresAt and TestGetExpired).
@@ -150,11 +152,16 @@ func TestGetReportsExpiryWhatEverPrunesAfterItsRead(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// live records beside the expired one: with nine, one record in ten has
-		// expired, too few for Get to launch a prune of its own (shouldCompact)
+		// expired, too few for Get to compact on its own (shouldCompact)
 		live  int
 		prune func(t *testing.T, store *Store)
 	}{
-		{"the prune Get launches", 0, func(t *testing.T, store *Store) { store.pruneWG.Wait() }},
+		{"Get's own compaction", 0, func(t *testing.T, store *Store) {
+			// it runs before the reply; make sure the window really held a prune
+			if data, err := os.ReadFile(store.Path()); err != nil || strings.Contains(string(data), "OxOld2") {
+				t.Errorf("Get's compaction must already have dropped the record: %q, %v", data, err)
+			}
+		}},
 		{"another process's prune", 9, func(t *testing.T, store *Store) {
 			other, err := NewStoreForUser(store.projectRoot, store.userSlug)
 			if err != nil {
@@ -185,7 +192,6 @@ func TestGetReportsExpiryWhatEverPrunesAfterItsRead(t *testing.T) {
 
 			// the prune ran and dropped the record; the next lookup finds nothing
 			store.expiryCheckTestHook = nil
-			store.pruneWG.Wait()
 			data, err := os.ReadFile(store.Path())
 			if err != nil {
 				t.Fatalf("read store: %v", err)
@@ -195,6 +201,77 @@ func TestGetReportsExpiryWhatEverPrunesAfterItsRead(t *testing.T) {
 			}
 			if _, err := store.Get("OxOld2"); !errors.Is(err, ErrInstanceNotFound) {
 				t.Errorf("Get after the prune = %v, want ErrInstanceNotFound", err)
+			}
+		})
+	}
+}
+
+// TestCompactionNeverOutlivesOrStallsItsCaller: a read that triggers
+// compaction finishes it before returning, so nothing is left running when a
+// short-lived ox command exits or its caller removes the store. A store whose
+// lock another writer holds is left for a later read instead of making the
+// lookup wait.
+// Failure prevented: a background prune outlived Get and raced t.TempDir
+// cleanup ("directory not empty" in TestResolveInstanceReportsExpiry, which
+// pulled sageox/ox#1556 from the merge queue); a synchronous prune that waited
+// on the lock would instead stall `ox agent <id> …` for up to lockTimeout.
+func TestCompactionNeverOutlivesOrStallsItsCaller(t *testing.T) {
+	seed := func(t *testing.T) *Store {
+		t.Helper()
+		store := newTestStore(t)
+		past := time.Now().Add(-time.Hour)
+		if err := store.Add(&Instance{AgentID: "OxOld3", ServerSessionID: "oxsid_old", CreatedAt: past.Add(-24 * time.Hour), ExpiresAt: past}); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+		return store
+	}
+	storeHolds := func(t *testing.T, store *Store, agentID string) bool {
+		t.Helper()
+		data, err := os.ReadFile(store.Path())
+		if err != nil {
+			t.Fatalf("read store: %v", err)
+		}
+		return strings.Contains(string(data), agentID)
+	}
+	reads := map[string]func(*Store) error{
+		"Get": func(s *Store) error {
+			if _, err := s.Get("OxOld3"); !errors.Is(err, ErrInstanceExpired) {
+				return fmt.Errorf("Get(expired) = %v, want ErrInstanceExpired", err)
+			}
+			return nil
+		},
+		"List": func(s *Store) error { _, err := s.List(); return err },
+	}
+	for name, read := range reads {
+		t.Run(name+" compacts before returning", func(t *testing.T) {
+			store := seed(t)
+			if err := read(store); err != nil {
+				t.Fatal(err)
+			}
+			if storeHolds(t, store, "OxOld3") {
+				t.Error("the expired record must be compacted away by the time the read returns")
+			}
+			if leftovers, _ := filepath.Glob(store.Path() + ".tmp"); len(leftovers) > 0 {
+				t.Errorf("compaction left %v behind", leftovers)
+			}
+		})
+		t.Run(name+" skips compaction while another writer holds the lock", func(t *testing.T) {
+			store := seed(t)
+			held := flock.New(store.Path() + ".lock")
+			if err := held.Lock(); err != nil {
+				t.Fatalf("hold the store lock: %v", err)
+			}
+			defer func() { _ = held.Unlock() }()
+
+			start := time.Now()
+			if err := read(store); err != nil {
+				t.Fatal(err)
+			}
+			if elapsed := time.Since(start); elapsed > lockTimeout/2 {
+				t.Errorf("the read waited %s for the lock; it must skip compaction instead", elapsed)
+			}
+			if !storeHolds(t, store, "OxOld3") {
+				t.Error("compaction must not run while another writer holds the lock")
 			}
 		})
 	}
@@ -621,9 +698,6 @@ func newTestStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
-	// Get/List fire go s.Prune() which creates flock/tmp files in the temp
-	// dir; wait for them to finish so t.TempDir() cleanup doesn't race.
-	t.Cleanup(func() { store.pruneWG.Wait() })
 	return store
 }
 
@@ -1109,7 +1183,6 @@ func TestSharedStoreConcurrentSessions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to create store: %v", err)
 		}
-		t.Cleanup(func() { s.pruneWG.Wait() })
 		return s
 	}
 
