@@ -235,7 +235,7 @@ func TestClassify_UntrustedNamesAreSanitized(t *testing.T) {
 	assert.NotContains(t, got.Label, "\x1b")
 }
 
-// TestClassify_ShellQuotingAndRedirects: the shell splitter has to honour
+// TestClassify_ShellQuotingAndRedirects: the shell splitter has to honor
 // quoting and redirections the way a shell does, or operators inside an
 // argument split the line and a redirect target is read as a subcommand.
 func TestClassify_ShellQuotingAndRedirects(t *testing.T) {
