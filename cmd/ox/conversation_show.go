@@ -6,7 +6,11 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/conversation/read"
+	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/session/contextuse"
+	"github.com/sageox/ox/internal/weblink"
 	"github.com/spf13/cobra"
 )
 
@@ -48,6 +52,7 @@ func runConversationShow(cmd *cobra.Command, args []string) error {
 		return finishConversationEnvelope(cmd.OutOrStdout(), format, read.ErrorEnvelope(shareErr), nil)
 	}
 	env := reader.Show(idArg)
+	traceConversationEnvelope(env)
 	return finishConversationEnvelope(cmd.OutOrStdout(), format, env, renderConversationShowText)
 }
 
@@ -72,4 +77,67 @@ func renderConversationShowText(w io.Writer, env *read.Envelope) {
 	} else {
 		fmt.Fprintln(w, cli.StyleDim.Render("(no summary: "+data.Summary.Reason+")"))
 	}
+}
+
+// traceConversationEnvelope records the conversation(s) a successful show or
+// search put in front of the AI coworker as surfaced items in its session
+// trace. Best-effort and silent: no agent ID or no live recording, no trace.
+func traceConversationEnvelope(env *read.Envelope) {
+	if env == nil || env.Error != nil {
+		return
+	}
+	agentID := traceAgentIDFromEnv()
+	if agentID == "" {
+		return
+	}
+	projectRoot, err := findProjectRoot()
+	if err != nil {
+		return
+	}
+	cfg, _ := config.LoadProjectConfig(projectRoot)
+	ep := prResolveEndpoint(cfg)
+	traceProvidedHits(projectRoot, agentID, contexttrace.SourceOnDemand, contexttrace.MechanismRetrieval,
+		conversationProvidedHits(env, func(id string) string { return discussionURL(ep, id) }))
+}
+
+// conversationProvidedHits lists the conversations an envelope surfaced:
+// ref = conversation id (recording id when absent), ref_type "discussion",
+// the title, and the /c/ link. Never the summary, hits, or transcript text.
+func conversationProvidedHits(env *read.Envelope, urlFor func(id string) string) []providedHit {
+	one := func(cnvID, recID, title string) providedHit {
+		ref := cnvID
+		if ref == "" {
+			ref = recID
+		}
+		return providedHit{SurfacedRef: contextuse.SurfacedRef{Ref: ref, RefType: "discussion", Title: title, URL: urlFor(ref)}}
+	}
+	switch d := env.Data.(type) {
+	case *read.ShowData:
+		if d != nil {
+			return []providedHit{one(d.ConversationID, d.RecordingID, d.Title)}
+		}
+	case *read.SearchData:
+		if d == nil {
+			return nil
+		}
+		var hits []providedHit
+		for _, r := range d.Results {
+			if len(hits) >= maxProvidedHitsPerCall {
+				break
+			}
+			hits = append(hits, one(r.ConversationID, r.RecordingID, r.Title))
+		}
+		return hits
+	}
+	return nil
+}
+
+// discussionURL is a discussion's universal /c/ link — the route `ox pr
+// header` uses — for a cnv_ or rec_ id; "" for anything else.
+func discussionURL(ep, id string) string {
+	switch weblink.IDTypePrefix(id) {
+	case "cnv_", "rec_":
+		return weblink.ArtifactURL(ep, id, "/c/", weblink.IDTypePrefix(id))
+	}
+	return ""
 }

@@ -14,6 +14,8 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/session/contextuse"
 	"github.com/sageox/ox/internal/vtt"
 	"github.com/sageox/ox/pkg/discussion"
 	"github.com/spf13/cobra"
@@ -82,7 +84,8 @@ func runAgentTeamCtx(cmd *cobra.Command, args []string) error {
 
 	// list recent discussion files
 	discussionsDir := filepath.Join(tc.Path, "discussions")
-	hasDiscussions := listRecentDiscussions(out, discussionsDir)
+	listed := writeRecentDiscussions(out, discussionsDir)
+	hasDiscussions := len(listed) > 0
 
 	// output distilled summary
 	agentContextPath := filepath.Join(tc.Path, "agent-context", "distilled-discussions.md")
@@ -90,6 +93,13 @@ func runAgentTeamCtx(cmd *cobra.Command, args []string) error {
 
 	if !hasDiscussions && !hasDistilled {
 		return fmt.Errorf("no team context available: no discussions or distilled context found in %s", tc.Path)
+	}
+
+	if agentID := traceAgentIDFromEnv(); agentID != "" {
+		cfg, _ := config.LoadProjectConfig(projectRoot)
+		ep := prResolveEndpoint(cfg)
+		traceProvidedHits(projectRoot, agentID, contexttrace.SourceTeamContext, contexttrace.MechanismRetrieval,
+			teamCtxProvidedHits(tc, hasDistilled, listed, func(id string) string { return discussionURL(ep, id) }))
 	}
 
 	// team-ctx is a direct cobra subcommand (not via runWithAgentID),
@@ -116,9 +126,15 @@ func resolveTeamContext(projectRoot, query string) *config.TeamContext {
 // recent with title and visual content tags.
 // Returns true if any discussions were found.
 func listRecentDiscussions(out io.Writer, discussionsDir string) bool {
+	return len(writeRecentDiscussions(out, discussionsDir)) > 0
+}
+
+// writeRecentDiscussions is listRecentDiscussions returning the entries it
+// listed, newest first.
+func writeRecentDiscussions(out io.Writer, discussionsDir string) []DiscussionIndexEntry {
 	entries, err := os.ReadDir(discussionsDir)
 	if err != nil {
-		return false
+		return nil
 	}
 
 	var discussions []DiscussionIndexEntry
@@ -135,6 +151,7 @@ func listRecentDiscussions(out io.Writer, discussionsDir string) bool {
 		// read title from metadata.json
 		if meta, err := loadDiscussionMetadata(dirPath); err == nil {
 			de.Title = meta.Title
+			de.RecordingID = meta.RecordingID
 		}
 
 		// extract unique speaker names from transcript.vtt
@@ -153,7 +170,7 @@ func listRecentDiscussions(out io.Writer, discussionsDir string) bool {
 	}
 
 	if len(discussions) == 0 {
-		return false
+		return nil
 	}
 
 	// sort reverse-alphabetically by dir name (date-prefixed = newest first)
@@ -199,7 +216,38 @@ func listRecentDiscussions(out io.Writer, discussionsDir string) bool {
 	}
 	fmt.Fprintln(out)
 
-	return true
+	return discussions[:limit]
+}
+
+// teamCtxProvidedHits lists what team-ctx put in front of the AI coworker as
+// surfaced items: the distilled team context (ref team-ctx/<slug>) first, then
+// the listed discussions newest first (ref = recording id, falling back to the
+// dir name; url = its /c/ link). Titles only — never the distilled text or a transcript.
+func teamCtxProvidedHits(tc *config.TeamContext, hasDistilled bool, listed []DiscussionIndexEntry, urlFor func(id string) string) []providedHit {
+	var hits []providedHit
+	if hasDistilled {
+		slug := tc.Slug
+		if slug == "" {
+			slug = tc.TeamID
+		}
+		title := tc.TeamName
+		if title == "" {
+			title = slug
+		}
+		hits = append(hits, providedHit{SurfacedRef: contextuse.SurfacedRef{Ref: "team-ctx/" + slug, RefType: "team-context", Title: title + " distilled team context"}})
+	}
+	for _, d := range listed {
+		ref := d.RecordingID
+		if ref == "" {
+			ref = d.DirName
+		}
+		title := d.Title
+		if title == "" {
+			title = d.DirName
+		}
+		hits = append(hits, providedHit{SurfacedRef: contextuse.SurfacedRef{Ref: ref, RefType: "discussion", Title: title, URL: urlFor(ref)}})
+	}
+	return hits
 }
 
 // outputDistilledContext reads and outputs the distilled discussions file.
@@ -248,6 +296,7 @@ func loadDiscussionMetadata(dirPath string) (*discussionMetadata, error) {
 // DiscussionIndexEntry holds data for one line in the per-discussion index.
 type DiscussionIndexEntry struct {
 	DirName      string
+	RecordingID  string // from metadata.json; "" when absent
 	Title        string
 	Date         string   // YYYY-MM-DD
 	VisualTypes  []string // content types from keyframes
