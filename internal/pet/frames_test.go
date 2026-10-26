@@ -215,6 +215,13 @@ func TestFramesFiles_StayUnderClaudeLimits(t *testing.T) {
 	})
 }
 
+// svgSourceCap is Claude Code's limit on an Svg element's source;
+// svgWrapperChars is the markup around a frame's base64 data.
+const (
+	svgSourceCap    = 131072
+	svgWrapperChars = 300
+)
+
 func checkFramesFiles(t *testing.T, render func() (*Frames, error)) {
 	t.Helper()
 	frames, err := render()
@@ -233,6 +240,13 @@ func checkFramesFiles(t *testing.T, render func() (*Frames, error)) {
 			pngs++
 			_, err := png.Decode(bytes.NewReader(data))
 			assert.NoError(t, err, rel)
+			// The desktop and VS Code surfaces draw each frame as an Svg
+			// element wrapping the PNG as a base64 data URI, and Claude Code
+			// caps an Svg source at 131,072 chars (SvgProps in the plugin
+			// API). A frame over it would vanish there while the terminal
+			// still shows it. 300 covers the SVG wrapper and data-URI prefix.
+			assert.Less(t, (len(data)+2)/3*4+svgWrapperChars, svgSourceCap,
+				"%s is too large to draw as an Svg data URI on the desktop", rel)
 		case strings.HasSuffix(rel, "/cells.json"):
 			assert.Less(t, len(data), 4<<20, rel)
 			var cells map[string][]string

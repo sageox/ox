@@ -29,6 +29,11 @@ file. The small `frames.ts` module holds only timing and sizes, keeping frame
 data outside Claude Code's module limits. Check
 `TestFramesFiles_StayUnderClaudeLimits` after an import.
 
+The Claude desktop app (and VS Code) draws the same frames, each as an `Svg`
+element wrapping the PNG as a base64 data URI. Claude Code caps an `Svg`
+source at 131,072 characters, so every frame PNG must stay under about 98 KB;
+the same test guards it.
+
 ## Codex sheet
 
 `ox pet enable` also builds a Codex custom pet from the same `sheet.png`

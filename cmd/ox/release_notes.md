@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Improved
 
+- **Oxy shows up in the Claude desktop app** — `ox pet enable` now draws him in the Code tab's working row too, from the same frames he uses in the terminal, while Claude works. The closing-line confetti and fall stay terminal-only. The desktop has no `/reload-plugins`, so start a new Code session after enabling him.
 - **Codex explains each SageOx hook before you approve it** — all six hooks now identify SageOx and describe their purpose, including recording and configured publishing. `ox doctor` detects old labels and offers a refresh for project and user installations; other integrations' hook settings are preserved.
 - **AI coworkers get the command they meant more often** — ox now runs the right command when a coworker passes a whole command as one word (a zsh loop over `"plan list"`), types a subcommand as a flag (`daemon --list`), or adds arguments to a known shortcut (`auth --help`, `plan show <slug>`). A correction that would change what the command does, or that would not parse, stays a suggestion, and short unknown words no longer get guesses that point at unrelated commands.
 - **List commands share one set of flags** — `plan list`, `murmur list`, `session list` and `conversation list` all accept `--limit`, `--since`, `--until` and `--json`, and `conversation transcript` accepts `--limit`. `murmur list --last` and `session list --window` keep working.

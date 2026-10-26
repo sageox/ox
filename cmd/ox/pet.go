@@ -17,8 +17,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// pet.go — `ox pet`, Oxy in Claude Code's thinking line and as Codex's
-// terminal pet.
+// pet.go — `ox pet`, Oxy in Claude Code's thinking line (terminal) and
+// working row (Claude desktop app's Code tab), and as Codex's terminal pet.
 //
 // Claude Code's startup mascot is compiled in and cannot be swapped; its
 // thinking line can, through a Claude Code mod. `ox pet enable` writes that
@@ -59,9 +59,9 @@ const petNoHostGuidance = "Neither Claude Code nor Codex was found on this machi
 
 var petCmd = &cobra.Command{
 	Use:   "pet",
-	Short: "Show Oxy, SageOx's mascot, in Claude Code's thinking line and as Codex's terminal pet",
-	Long: `Show Oxy, SageOx's mascot, in Claude Code's thinking line and as Codex's
-terminal pet.
+	Short: "Show Oxy, SageOx's mascot, in Claude Code (terminal and desktop app) and as Codex's terminal pet",
+	Long: `Show Oxy, SageOx's mascot, in Claude Code's thinking line, in the Claude
+desktop app's Code tab, and as Codex's terminal pet.
 
 In Claude Code, Oxy animates beside the thinking word while Claude works and
 follows what it is doing: thinking, typing at his laptop, chattering out an
@@ -70,6 +70,11 @@ and ox doctor. When a turn ends, Oxy throws confetti on the closing line, or
 falls flat if it failed. He is installed as a Claude Code plugin
 (ox-cli-oxy@ox-cli-pets) at user scope; /oxy shows him, /oxy off hides him,
 and /oxy small|medium|large sizes him.
+
+The Claude desktop app loads the same plugin: Oxy shows in the Code tab's
+working row while Claude works, from the same frames. The closing-line
+confetti and fall are terminal-only, and the desktop has no /reload-plugins,
+so start a new Code session after ox pet enable.
 
 In Codex, Oxy is a custom terminal pet: he blinks while idle, works at his
 laptop while Codex runs, waves when Codex needs you, throws confetti when a
@@ -183,8 +188,8 @@ var petEnable = petAction{
 			printSteps(w, "In Claude Code, run:", res.ManualSteps)
 			return
 		}
-		cli.PrintSuccessTo(w, "Oxy will show up in Claude Code's thinking line.")
-		cli.PrintHintTo(w, "Run /reload-plugins in an open session, or start a new one. /oxy off hides him.")
+		cli.PrintSuccessTo(w, "Oxy will show up in Claude Code's thinking line and the Claude desktop app's Code tab.")
+		cli.PrintHintTo(w, "Run /reload-plugins in an open terminal session, or start a new one; on the desktop, start a new Code session. /oxy off hides him.")
 	},
 	printCodex: func(cmd *cobra.Command, _ *pet.CodexResult) {
 		w := cmd.OutOrStdout()
@@ -197,7 +202,7 @@ var petEnable = petAction{
 			return "Oxy's Claude Code files are written but the claude CLI isn't on PATH; in Claude Code, run " +
 				strings.Join(res.ManualSteps, " then ") + "."
 		}
-		return "Oxy is in Claude Code's thinking line; run /reload-plugins or start a new session to see him."
+		return "Oxy is in Claude Code's thinking line and the desktop app's Code tab; run /reload-plugins or start a new session (on the desktop, a new Code session) to see him."
 	},
 }
 
