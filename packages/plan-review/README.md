@@ -178,6 +178,7 @@ const controls = mountHostControls(port, {
   presence,                  // PresenceTransport: who else is here, and their pointers
 });
 controls.update(items, problems); // after you read the review again
+controls.setReviewing(false); // switch to reading without leaving presence or replacing the controls
 controls.destroy(); // before another account signs in, or another plan mounts
 ```
 
