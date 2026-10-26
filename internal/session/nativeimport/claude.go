@@ -111,7 +111,15 @@ type claudePart struct {
 }
 
 // InspectClaude reads one Claude Code transcript structurally. The filename's
-// UUID is the session ID, and every record that names a session must agree.
+// UUID is the session ID.
+//
+// Claude Code writes a resumed or forked conversation to a new file named for
+// its new session ID, and opens it with a copy of the conversation it
+// continues, whose records keep the earlier session's ID. That leading block
+// is not this session: it is skipped here, and Offset marks where the
+// session's own records begin so the import reads only those. Another
+// session's record after the first of its own means the file mixes sessions,
+// and is refused.
 func InspectClaude(path string) (Session, error) {
 	id := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 	if !IsNativeID(id) {
@@ -120,14 +128,7 @@ func InspectClaude(path string) (Session, error) {
 	s := Session{Agent: AgentClaude, NativeID: id, Path: path}
 	cwds := cwdSet{}
 	primeCalls := map[string]bool{}
-	info, err := readRecords(path, func(lineNo int, line []byte) error {
-		var rec claudeRecord
-		if json.Unmarshal(line, &rec) != nil {
-			return fmt.Errorf("invalid JSON at line %d", lineNo)
-		}
-		if rec.SessionID != "" && rec.SessionID != id {
-			return fmt.Errorf("record at line %d belongs to another session", lineNo)
-		}
+	inspect := func(rec claudeRecord, line []byte) {
 		s.observe(parseTimestamp(rec.Timestamp))
 		cwds.add(rec.CWD)
 		if rec.GitBranch != "" {
@@ -141,10 +142,60 @@ func InspectClaude(path string) (Session, error) {
 		case "attachment", "system":
 			s.inspectClaudeHookOutput(line, filepath.Dir(path))
 		}
+	}
+	type pendingRecord struct {
+		rec  claudeRecord
+		line []byte
+	}
+	// Records that name no session belong to whichever block they sit in, so
+	// the ones before any record names a session wait until one does.
+	var pending []pendingRecord
+	var pos int64
+	own, inherited := false, false
+	info, err := readRecords(path, func(lineNo int, line []byte) error {
+		start := pos
+		pos += int64(len(line))
+		var rec claudeRecord
+		if json.Unmarshal(line, &rec) != nil {
+			return fmt.Errorf("invalid JSON at line %d", lineNo)
+		}
+		switch {
+		case rec.SessionID == id:
+			if !own {
+				own = true
+				if inherited {
+					s.Offset = start
+				}
+				for _, p := range pending {
+					inspect(p.rec, p.line)
+				}
+				pending = nil
+			}
+		case rec.SessionID != "":
+			if own {
+				return fmt.Errorf("record at line %d belongs to another session", lineNo)
+			}
+			inherited, pending = true, nil
+			return nil
+		case !own:
+			if !inherited {
+				pending = append(pending, pendingRecord{rec, line})
+			}
+			return nil
+		}
+		inspect(rec, line)
 		return nil
 	})
 	if err != nil {
 		return Session{}, err
+	}
+	if !own {
+		if inherited {
+			return Session{}, fmt.Errorf("transcript holds only the conversation it continues")
+		}
+		for _, p := range pending {
+			inspect(p.rec, p.line)
+		}
 	}
 	s.Size, s.ModTime, s.CWDs = info.Size(), info.ModTime(), cwds.sorted()
 	if s.StartedAt.IsZero() {

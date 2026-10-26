@@ -323,14 +323,14 @@ func TestImportContent_RefusesUnavailableUnsafeOrChangingSources(t *testing.T) {
 			case "canceled before read":
 				cancel()
 			case "reader error":
-				env.deps.readNative = func(context.Context, nativeimport.Agent, string) ([]adapters.RawEntry, error) {
+				env.deps.readNative = func(context.Context, nativeimport.Session) ([]adapters.RawEntry, error) {
 					return nil, errors.New("secret-file-path-and-context")
 				}
 			case "invalid policy":
 				require.NoError(t, os.WriteFile(filepath.Join(f.projectRoot, ".sageox", "REDACT.md"), []byte("```redact\nregex \"[\" -> [X]\n```\n"), 0600))
 			case "changed during read", "canceled during read":
-				env.deps.readNative = func(ctx context.Context, agent nativeimport.Agent, source string) ([]adapters.RawEntry, error) {
-					raw, err := f.readNative(ctx, agent, source)
+				env.deps.readNative = func(ctx context.Context, s nativeimport.Session) ([]adapters.RawEntry, error) {
+					raw, err := f.readNative(ctx, s)
 					if scenario == "changed during read" {
 						require.NoError(t, os.Chtimes(path, time.Now(), time.Now()))
 					} else {
