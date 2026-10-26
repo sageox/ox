@@ -382,3 +382,80 @@ func TestInvokedEvent_RoundTripAndLegacyBytesUnchanged(t *testing.T) {
 		t.Errorf("legacy event bytes changed:\n got %s\nwant %s", legacy, want)
 	}
 }
+
+func TestAppend_UsedEventRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		ev   Event
+		keys []string // json keys that must be present
+	}{
+		{
+			name: "cited_commit with metadata",
+			ev: Event{
+				Type: EventUsed, Timestamp: "2026-10-26T10:00:00Z", Source: SourceTeamWhisper,
+				Mechanism: MechanismCitation, Evidence: EvidenceCitedCommit,
+				Ref: "Ox7f2a", RefType: "murmur", Seq: 14, SurfacedSeq: 9,
+				Commit: "3e1c9d0", Title: "auth: retry budget", URL: "https://sageox.ai/c/cnv_1",
+				FromName: "Dana",
+			},
+			keys: []string{"evidence", "surfaced_seq", "commit", "title", "url", "from_name"},
+		},
+		{
+			name: "judged",
+			ev: Event{
+				Type: EventUsed, Timestamp: "2026-10-26T10:00:00Z", Source: SourceLocalRecall,
+				Mechanism: MechanismJudge, Evidence: EvidenceJudged, Ref: "ses_1", Decision: "followed retry pattern",
+			},
+			keys: []string{"evidence", "decision"},
+		},
+		{
+			name: "self-reported none",
+			ev:   Event{Type: EventUsed, Timestamp: "2026-10-26T10:00:00Z", Mechanism: MechanismSelfReport, Evidence: EvidenceNone},
+			keys: []string{"evidence"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := NewWriter(t.TempDir())
+			if err := w.Append(tt.ev); err != nil {
+				t.Fatalf("Append: %v", err)
+			}
+			events, err := ReadEvents(w.Path())
+			if err != nil || len(events) != 1 {
+				t.Fatalf("ReadEvents: %v, n=%d", err, len(events))
+			}
+			if !reflect.DeepEqual(events[0], tt.ev) {
+				t.Errorf("round trip mismatch:\n got %+v\nwant %+v", events[0], tt.ev)
+			}
+			raw, err := os.ReadFile(w.Path())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err != nil {
+				t.Fatal(err)
+			}
+			for _, k := range tt.keys {
+				if _, ok := m[k]; !ok {
+					t.Errorf("json key %q missing in %s", k, raw)
+				}
+			}
+		})
+	}
+}
+
+func TestUsedFields_OmittedWhenEmpty(t *testing.T) {
+	b, err := json.Marshal(Event{Type: EventProvided, Source: SourceTeamContext})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"evidence", "surfaced_seq", "commit", "title", "url", "from_name"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("empty field %q should be omitted: %s", k, b)
+		}
+	}
+}
