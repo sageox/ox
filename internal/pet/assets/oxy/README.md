@@ -28,3 +28,25 @@ go run ./internal/pet/importsheet -base <base.png>
 file. The small `frames.ts` module holds only timing and sizes, keeping frame
 data outside Claude Code's module limits. Check
 `TestFramesFiles_StayUnderClaudeLimits` after an import.
+
+## Codex sheet
+
+`ox pet enable` also builds a Codex custom pet from the same `sheet.png`
+(`codex.go`): one 1536×1872 `spritesheet.png`, a 12×12 grid of 128×156
+cells read row-major from the top left, of which Oxy's frames fill the first
+137, plus a `pet.json` naming each animation's cells. Codex's five states map
+to Oxy's animations:
+
+| Codex state | Oxy animation | Loops |
+|---|---|---|
+| `idle` | `blink` | yes |
+| `running` | `laptop` | yes |
+| `waiting` | `wave` | yes |
+| `review` | `confetti` | no |
+| `failed` | `fail` | no |
+
+The names in Codex's built-in default table alias onto the same art
+(`running-right`, `running-left`, `move_right`, `move_left` → `laptop`;
+`waving`, `wave`, `jumping`, `bounce` → `wave`; `sad` → `fail`), so none
+points at an empty cell. Every animation falls back to `idle`. The full
+table is `CodexAnimations`.

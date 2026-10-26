@@ -3,8 +3,10 @@
 package pettest
 
 import (
+	"bytes"
 	"image"
 	"image/color"
+	"image/png"
 	"sync"
 
 	"github.com/sageox/ox/internal/pet"
@@ -30,3 +32,14 @@ var frames = sync.OnceValues(func() (*pet.Frames, error) {
 	}
 	return pet.BuildFrames(sheet, m)
 })
+
+// CodexSheet is a 1x1 Codex spritesheet and a minimal pet.json stamped with
+// version: plug it into pet.CodexInstaller.Sheet.
+func CodexSheet(version string) (*pet.CodexSheet, error) {
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewNRGBA(image.Rect(0, 0, 1, 1))); err != nil {
+		return nil, err
+	}
+	manifest := []byte(`{"id":"oxy","spritesheetPath":"spritesheet.png","oxVersion":"` + version + `"}` + "\n")
+	return &pet.CodexSheet{PNG: buf.Bytes(), Manifest: manifest}, nil
+}
