@@ -118,7 +118,6 @@ type Store struct {
 	instancesPath string
 	userSlug      string
 	mu            sync.RWMutex
-	pruneWG       sync.WaitGroup // tracks background Prune goroutines launched by Get/List
 
 	expiryCheckTestHook func() // called between Get's read and its reply on a miss; tests use it to run a prune in that window
 }
@@ -318,12 +317,12 @@ func (s *Store) IncrementPrimeCallCount(agentID string) (*Instance, bool, error)
 // Get retrieves an instance by agent ID, pruning expired instances during read.
 // A miss wraps ErrInstanceExpired when the agent ID's records are present but
 // expired, and ErrInstanceNotFound otherwise. Both are decided from one read
-// of the file, so a prune that lands afterwards — the one Get launches, or
+// of the file, so a prune that lands afterwards — Get's own compaction, or
 // another ox process's — cannot turn "expired" into "not found".
 //
 // Design decision: Prune on read
 // Rationale: Amortizes cleanup cost; ensures Get() never returns expired instances
-// without extra syscall. Triggers async compaction if thresholds exceeded.
+// without extra syscall. Compacts when thresholds are exceeded (compactIfIdle).
 func (s *Store) Get(agentID string) (*Instance, error) {
 	if agentID == "" {
 		return nil, fmt.Errorf("agent_id cannot be empty")
@@ -342,9 +341,9 @@ func (s *Store) Get(agentID string) (*Instance, error) {
 		return nil, err
 	}
 
-	// trigger compaction if needed after read
+	// compact if needed after read
 	if s.shouldCompact(totalCount, expiredCount) {
-		s.launchBackgroundPrune()
+		s.compactIfIdle()
 	}
 
 	// scan backwards (newest first) for the matching agent_id
@@ -372,22 +371,35 @@ func (s *Store) List() ([]*Instance, error) {
 		return nil, err
 	}
 
-	// trigger compaction if needed
+	// compact if needed
 	if s.shouldCompact(totalCount, expiredCount) {
-		s.launchBackgroundPrune()
+		s.compactIfIdle()
 	}
 
 	return instances, nil
 }
 
-// launchBackgroundPrune fires Prune() in a goroutine and tracks it on pruneWG
-// so callers (and tests) can wait for in-flight compactions to complete.
-func (s *Store) launchBackgroundPrune() {
-	s.pruneWG.Add(1)
-	go func() {
-		defer s.pruneWG.Done()
-		_, _ = s.Prune()
-	}()
+// compactIfIdle prunes in the caller's goroutine when no other writer holds the
+// store's mutex or file lock, and otherwise leaves compaction to a later read
+// rather than wait for it: a writer can hold the mutex for up to lockTimeout
+// while it waits on the file lock. It used to run in a background goroutine: a
+// short-lived ox command exited before that finished, and a goroutine that
+// outlived its Get raced whatever removed the store next (a test's temp-dir
+// cleanup).
+func (s *Store) compactIfIdle() {
+	if !s.mu.TryLock() {
+		return
+	}
+	defer s.mu.Unlock()
+
+	lock := flock.New(s.instancesPath + ".lock")
+	locked, err := lock.TryLock()
+	if err != nil || !locked {
+		return
+	}
+	defer lock.Unlock()
+
+	_, _ = s.pruneNoLock()
 }
 
 // Count returns the number of active instances
@@ -418,6 +430,11 @@ func (s *Store) Prune() (int, error) {
 	}
 	defer lock.Unlock()
 
+	return s.pruneNoLock()
+}
+
+// pruneNoLock is Prune's body; the caller holds s.mu and the file lock.
+func (s *Store) pruneNoLock() (int, error) {
 	instances, _, expiredCount, err := s.readInstancesNoLock()
 	if err != nil {
 		return 0, err
