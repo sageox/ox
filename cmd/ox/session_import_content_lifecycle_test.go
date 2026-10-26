@@ -79,8 +79,8 @@ func TestImportContent_LoaderCancellationBoundaries(t *testing.T) {
 			}
 			if boundary == "final digest" {
 				ctx.cancelAt = -1
-				env.deps.readNative = func(readCtx context.Context, agent nativeimport.Agent, path string) ([]adapters.RawEntry, error) {
-					raw, err := f.readNative(readCtx, agent, path)
+				env.deps.readNative = func(readCtx context.Context, s nativeimport.Session) ([]adapters.RawEntry, error) {
+					raw, err := f.readNative(readCtx, s)
 					// Loader cancellation check, final digest entry, then its buffer poll.
 					ctx.cancelAt = ctx.checks + 3
 					return raw, err
@@ -114,11 +114,11 @@ func TestImportContent_CanceledQueueDoesNotEnterNativeReader(t *testing.T) {
 			close(release)
 		}
 	})
-	env.deps.readNative = func(ctx context.Context, agent nativeimport.Agent, path string) ([]adapters.RawEntry, error) {
+	env.deps.readNative = func(ctx context.Context, s nativeimport.Session) ([]adapters.RawEntry, error) {
 		entered <- struct{}{}
 		select {
 		case <-release:
-			return f.readNative(ctx, agent, path)
+			return f.readNative(ctx, s)
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -201,9 +201,9 @@ func TestImportContent_ConcurrentVersionsCannotReplaceAcceptedPin(t *testing.T) 
 	entered := make(chan int, 2)
 	gates := []chan struct{}{make(chan struct{}), make(chan struct{})}
 	var reads atomic.Int32
-	env.deps.readNative = func(ctx context.Context, agent nativeimport.Agent, path string) ([]adapters.RawEntry, error) {
+	env.deps.readNative = func(ctx context.Context, s nativeimport.Session) ([]adapters.RawEntry, error) {
 		n := int(reads.Add(1)) - 1
-		raw, err := f.readNative(ctx, agent, path)
+		raw, err := f.readNative(ctx, s)
 		if n == 1 {
 			raw[len(raw)-1].Content = "Other."
 		}
@@ -283,8 +283,8 @@ func TestImportContent_ConcurrentCacheFillRejectsDifferentDigest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	entered, release := make(chan struct{}), make(chan struct{})
-	env.deps.readNative = func(ctx context.Context, agent nativeimport.Agent, path string) ([]adapters.RawEntry, error) {
-		raw, err := f.readNative(ctx, agent, path)
+	env.deps.readNative = func(ctx context.Context, s nativeimport.Session) ([]adapters.RawEntry, error) {
+		raw, err := f.readNative(ctx, s)
 		close(entered)
 		select {
 		case <-release:

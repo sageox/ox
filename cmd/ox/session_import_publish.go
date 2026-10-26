@@ -58,7 +58,7 @@ var errImportHeld = errors.New("held")
 // importDeps are the seams a test replaces. Production wires the real
 // adapters, isolated vendor runners, LFS client, push and notify.
 type importDeps struct {
-	readNative  func(context.Context, nativeimport.Agent, string) ([]adapters.RawEntry, error)
+	readNative  func(context.Context, nativeimport.Session) ([]adapters.RawEntry, error)
 	runner      func(agent nativeimport.Agent) agentwork.Runner
 	lfsClient   func() (*lfs.Client, error)
 	push        func(ctx context.Context, ledgerPath string) error
@@ -90,26 +90,40 @@ type importEnv struct {
 }
 
 // readNativeWithAdapter reads the exact discovered file through the session
-// adapter, never through a by-ID lookup that could return another session.
-func readNativeWithAdapter(ctx context.Context, agent nativeimport.Agent, path string) ([]adapters.RawEntry, error) {
+// adapter, never through a by-ID lookup that could return another session. A
+// resumed or forked transcript is read from where its own records begin: the
+// conversation it continues is that session's, not this one's.
+func readNativeWithAdapter(ctx context.Context, s nativeimport.Session) ([]adapters.RawEntry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	adapter, err := adapters.GetAdapter(adapterNameFor(agent))
+	adapter, err := adapters.GetAdapter(adapterNameFor(s.Agent))
 	if err != nil {
 		return nil, err
+	}
+	if s.Offset > 0 {
+		offsetReader, ok := adapter.(interface {
+			ReadFromOffsetWithContext(context.Context, string, int64, time.Duration) ([]adapters.RawEntry, int64, error)
+		})
+		if !ok {
+			// Never fall back to the whole file: that uploads the earlier
+			// conversation a second time, under this session's name.
+			return nil, fmt.Errorf("the %s adapter cannot read a resumed session from where it begins", adapter.Name())
+		}
+		entries, _, err := offsetReader.ReadFromOffsetWithContext(ctx, s.Path, s.Offset, importReadTimeout)
+		return entries, err
 	}
 	if contextual, ok := adapter.(interface {
 		ReadWithContext(context.Context, string, time.Duration) ([]adapters.RawEntry, error)
 	}); ok {
-		return contextual.ReadWithContext(ctx, path, importReadTimeout)
+		return contextual.ReadWithContext(ctx, s.Path, importReadTimeout)
 	}
 	if timed, ok := adapter.(interface {
 		ReadWithTimeout(string, time.Duration) ([]adapters.RawEntry, error)
 	}); ok {
-		return timed.ReadWithTimeout(path, importReadTimeout)
+		return timed.ReadWithTimeout(s.Path, importReadTimeout)
 	}
-	return adapter.Read(path)
+	return adapter.Read(s.Path)
 }
 
 // preparedImport owns a session's staging directory until the committer has
@@ -147,7 +161,7 @@ func prepareImport(ctx context.Context, env *importEnv, c *importCandidate) (pre
 		}
 	}()
 
-	raw, err := env.deps.readNative(ctx, s.Agent, s.Path)
+	raw, err := env.deps.readNative(ctx, s)
 	if err != nil {
 		if err := ctx.Err(); err != nil {
 			return nil, "", err

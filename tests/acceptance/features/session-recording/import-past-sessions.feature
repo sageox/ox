@@ -61,6 +61,22 @@ Feature: Importing Past Sessions into the Ledger
       Then the preview lists that session as recorded live by ox, not from its start
       And it says the part before the resume is not in the Ledger
 
+  Rule: A resumed conversation is imported as its own session, without the one it continues
+
+    Scenario: Devon imports a session resumed from one ox already recorded
+      Given ox recorded Devon's Monday session live
+      And on Wednesday Devon resumed it in Claude Code, and ox did not record Wednesday's work
+      When Devon runs the import and confirms the preview
+      Then Wednesday's session appears in the Ledger once, holding only Wednesday's turns
+      And it is dated Wednesday
+      And Monday's session is listed as recorded live by ox and is not uploaded again
+
+    Scenario: Devon's transcript mixes in another session's turns after its own
+      Given one of Devon's transcripts holds another session's turns after its own
+      When Devon runs the import
+      Then that transcript is counted as unreadable
+      And nothing from it is uploaded
+
   Rule: A session whose recording the coworker aborted is not recorded or imported again unless they ask
 
     Scenario: Devon aborts a recording, then runs the import
