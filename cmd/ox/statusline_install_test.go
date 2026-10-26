@@ -20,6 +20,9 @@ func isolateUserConfig(t *testing.T) {
 	t.Helper()
 	t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	// applyStatuslineSetting resolves the git root from the working directory;
+	// keep it away from the developer's real checkout.
+	t.Chdir(t.TempDir())
 }
 
 func readProjectSettingsMap(t *testing.T, gitRoot string) map[string]json.RawMessage {

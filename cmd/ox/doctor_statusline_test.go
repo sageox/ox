@@ -70,6 +70,30 @@ func TestCheckClaudeStatusLine(t *testing.T) {
 		assert.Equal(t, claude.StatusLineForeign, claude.ClassifyStatusLine(readLocalSettingsMap(t, gitRoot)))
 	})
 
+	t.Run("project statusLine in shared settings.json is kept and not overridden", func(t *testing.T) {
+		isolateUserConfig(t)
+		gitRoot := t.TempDir()
+		writeProjectSettings(t, gitRoot, `{"statusLine":{"type":"command","command":"./scripts/status.sh"}}`)
+		require.NoError(t, InstallProjectClaudeHooks(gitRoot))
+
+		// settings.local.json outranks settings.json, so a local ox row would
+		// hide the project's own status line for this coworker.
+		noLocalStatusLine := func() {
+			t.Helper()
+			_, m, err := readSettingsFileRaw(getLocalClaudeSettingsPath(gitRoot))
+			require.NoError(t, err)
+			assert.NotContains(t, m, "statusLine")
+		}
+		noLocalStatusLine()
+		assert.Equal(t, claude.StatusLineForeign, claude.ClassifyStatusLine(readProjectSettingsMap(t, gitRoot)))
+
+		res := checkClaudeStatusLineAt(gitRoot, true)
+		assert.True(t, res.passed)
+		assert.False(t, res.warning)
+		assert.Contains(t, res.message, "project statusLine")
+		noLocalStatusLine()
+	})
+
 	t.Run("ox statusLine in shared settings.json is moved out", func(t *testing.T) {
 		isolateUserConfig(t)
 		gitRoot := t.TempDir()

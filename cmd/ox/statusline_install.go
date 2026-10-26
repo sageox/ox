@@ -20,8 +20,10 @@ import (
 // settings.local.json (or upgrades a stale one), off removes it. An ox
 // statusLine in the shared settings.json, where earlier builds put it, is
 // moved out so it stops forcing the row on every coworker. A foreign
-// statusLine in either file is never touched. It reports whether any file
-// changed.
+// statusLine in either file is never touched: settings.local.json outranks
+// settings.json in Claude Code, so a local ox row would hide a status line the
+// project itself ships, and ox is not installed over one. It reports whether
+// any file changed.
 func syncProjectStatusLine(gitRoot string) (bool, error) {
 	changed := false
 
@@ -42,12 +44,16 @@ func syncProjectStatusLine(gitRoot string) (bool, error) {
 		return changed, err
 	}
 	var localChanged bool
-	if statuslineEnabled() {
+	switch {
+	case statuslineEnabled() && claude.ClassifyStatusLine(sharedMap) == claude.StatusLineForeign:
+		// The project ships its own status line; installing ours locally
+		// would override it for this coworker.
+	case statuslineEnabled():
 		localChanged, err = claude.EnsureOxStatusLine(localMap)
 		if err != nil {
 			return changed, fmt.Errorf("set status line: %w", err)
 		}
-	} else {
+	default:
 		localChanged = claude.RemoveOxStatusLine(localMap)
 	}
 	if !localChanged {

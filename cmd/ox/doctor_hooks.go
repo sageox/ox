@@ -550,6 +550,9 @@ func checkClaudeStatusLineAt(gitRoot string, fix bool) checkResult {
 	case local == claude.StatusLineForeign:
 		return PassedCheck(claudeStatusLineCheckName,
 			"custom statusLine kept; ox activity is not shown in the status bar")
+	case enabled && shared == claude.StatusLineForeign && local == claude.StatusLineMissing:
+		return PassedCheck(claudeStatusLineCheckName,
+			"project statusLine kept; ox activity is not shown in the status bar")
 	case !enabled && local == claude.StatusLineMissing:
 		return PassedCheck(claudeStatusLineCheckName, "status line off (ox config set statusline on to show it)")
 	case !enabled:
