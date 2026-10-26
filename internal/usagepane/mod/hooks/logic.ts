@@ -1,14 +1,14 @@
-// Pure helpers for the ox usage pane: parsing `ox usage --json`, spotting an
+// Pure helpers for the ox brief pane: parsing `ox brief --json`, spotting an
 // ox command in a Bash call, and laying out the pane's lines. No `$` here, so
 // every function is unit-testable under `claude plugin test`.
 
 import type { UsageRecentCall, UsageReport } from '../types'
 
-export const PANE = 'ox-usage'
-export const PLUGIN = 'ox-cli-usage-pane'
+export const PANE = 'ox-brief'
+export const PLUGIN = 'ox-cli-brief-pane'
 export const REFRESH_MS = 15_000
 export const RUN_TIMEOUT_MS = 8_000
-export const USAGE_ARGV = ['ox', 'usage', '--json', '--recent', '0'] as const
+export const BRIEF_ARGV = ['ox', 'brief', '--json', '--recent', '0'] as const
 
 const ELLIPSIS = '…'
 
@@ -24,7 +24,7 @@ function str(v: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined
 }
 
-// parseReport reads `ox usage --json` stdout into the slice the pane draws,
+// parseReport reads `ox brief --json` stdout into the slice the pane draws,
 // or null when it is not a session report. Missing fields read as empty.
 export function parseReport(stdout: string): UsageReport | null {
   let raw: unknown
@@ -155,7 +155,7 @@ function humanStatus(status: string): string {
   return status.replace(/_/g, ' ')
 }
 
-// headerLines: the title's tail (after `● ox usage`) and the summary line.
+// headerLines: the title's tail (after `● ox brief`) and the summary line.
 export function headerLines(report: UsageReport | null): { identity: string; summary: string } {
   if (report === null) {
     return { identity: 'loading…', summary: '' }
@@ -183,12 +183,12 @@ export function errorLine(failure: { exitCode?: number; stderr?: string; thrown?
       return 'ox not found on PATH'
     }
     if (/time(d)? ?out/i.test(msg)) {
-      return 'ox usage timed out'
+      return 'ox brief timed out'
     }
-    return `ox usage failed: ${firstLine(msg) || 'could not start'}`
+    return `ox brief failed: ${firstLine(msg) || 'could not start'}`
   }
   const line = firstLine(failure.stderr ?? '')
-  return `ox usage failed: ${line || `exit ${failure.exitCode ?? '?'}`}`
+  return `ox brief failed: ${line || `exit ${failure.exitCode ?? '?'}`}`
 }
 
 function firstLine(s: string): string {

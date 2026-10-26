@@ -1,7 +1,7 @@
-// The ox usage pane: what ox did this session (each ox call, the context it
+// The ox brief pane: what ox did this session (each ox call, the context it
 // put in front of the model, what it surfaced) in a scrollable pane beside
 // the chat. Installed and kept up to date by ox; the data is
-// `ox usage --json --recent 0`, re-read when the pane opens, after each ox
+// `ox brief --json --recent 0`, re-read when the pane opens, after each ox
 // command the AI coworker runs through Bash, and every 15 seconds while open.
 //
 // Every hook falls back to `next(e)`: a pane bug must never cost a turn.
@@ -14,7 +14,7 @@ import {
   PANE,
   REFRESH_MS,
   RUN_TIMEOUT_MS,
-  USAGE_ARGV,
+  BRIEF_ARGV,
   errorLine,
   formatRow,
   headerLines,
@@ -28,11 +28,11 @@ import {
 
 // Change a tag when its value's fields change: an atom declines what an
 // earlier version stored under another tag, which outlives a reload.
-const report = atom({ plugin: 'ox-cli-usage-pane', key: 'report' } as const, null as UsageReport | null, { shape: 'report-1' })
-const status = atom({ plugin: 'ox-cli-usage-pane', key: 'status' } as const, { follow: true } as UsageStatus, { shape: 'status-1' })
+const report = atom({ plugin: 'ox-cli-brief-pane', key: 'report' } as const, null as UsageReport | null, { shape: 'report-1' })
+const status = atom({ plugin: 'ox-cli-brief-pane', key: 'status' } as const, { follow: true } as UsageStatus, { shape: 'status-1' })
 
-const TITLE = 'ox usage'
-const USAGE = '/ox-usage [off|refresh]'
+const TITLE = 'ox brief'
+const USAGE = '/ox-brief [off|refresh]'
 
 // Module state: the refresh timer and the run in flight. A reload drops the
 // timer; the next draw of an open pane starts it again.
@@ -60,7 +60,7 @@ async function setError($: EngineInterface, error: string | undefined) {
 async function refreshOnce($: EngineInterface) {
   let ran
   try {
-    ran = await $.process.run(USAGE_ARGV, { timeoutMs: RUN_TIMEOUT_MS })
+    ran = await $.process.run(BRIEF_ARGV, { timeoutMs: RUN_TIMEOUT_MS })
   } catch (thrown) {
     await setError($, errorLine({ thrown }))
     return
@@ -71,7 +71,7 @@ async function refreshOnce($: EngineInterface) {
   }
   const next = parseReport(ran.stdout)
   if (next === null) {
-    await setError($, 'ox usage returned unreadable JSON')
+    await setError($, 'ox brief returned unreadable JSON')
     return
   }
   const prev = await read($, report)
@@ -84,7 +84,7 @@ async function refreshOnce($: EngineInterface) {
   }
 }
 
-// refresh re-reads `ox usage`; a call while one runs folds into one more run
+// refresh re-reads `ox brief`; a call while one runs folds into one more run
 // after it, so a burst of ox commands costs at most two. Never throws.
 function refresh($: EngineInterface): Promise<void> {
   if (inflight !== null) {
@@ -105,24 +105,24 @@ function refresh($: EngineInterface): Promise<void> {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
-      name: 'ox-usage',
-      description: 'Show what ox did this session in a pane',
+      name: 'ox-brief',
+      description: 'Show what SageOx gave this session in a pane',
       argumentHint: '[off|refresh]',
     })
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  on('command.run', { command: 'ox-usage' }, async ($, e) => {
+  on('command.run', { command: 'ox-brief' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === 'off') {
       await $.ui.close({ id: PANE })
       stopTimer()
-      return { text: 'ox usage pane closed.' }
+      return { text: 'ox brief pane closed.' }
     }
     if (arg === 'refresh') {
       await refresh($)
       const err = (await read($, status)).error
-      return { text: err === undefined ? 'ox usage refreshed.' : err }
+      return { text: err === undefined ? 'ox brief refreshed.' : err }
     }
     if (arg !== '') {
       return { text: `Usage: ${USAGE}` }
@@ -130,8 +130,8 @@ export const register: Register = on => {
     const opened = await $.ui.open({ id: PANE, title: TITLE })
     startTimer($)
     await refresh($)
-    return { text: opened.isPlaced ? 'ox usage pane opened.' : `ox usage pane is open but not shown: ${opened.reason}` }
-  }).catch(() => ({ text: 'ox usage pane hit an error; try /ox-usage again.' }))
+    return { text: opened.isPlaced ? 'ox brief pane opened.' : `ox brief pane is open but not shown: ${opened.reason}` }
+  }).catch(() => ({ text: 'ox brief pane hit an error; try /ox-brief again.' }))
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const ran = await next(e)
@@ -145,13 +145,13 @@ export const register: Register = on => {
     return ran
   }).catch(($, e, next) => next(e))
 
-  on('ui.close', { id: 'ox-usage' }, async ($, e, next) => {
+  on('ui.close', { id: 'ox-brief' }, async ($, e, next) => {
     const done = await next(e)
     stopTimer()
     return done
   }).catch(($, e, next) => next(e))
 
-  on('ui.scroll', { component: 'Pane', requestId: 'ox-usage' }, async ($, e, next) => {
+  on('ui.scroll', { component: 'Pane', requestId: 'ox-brief' }, async ($, e, next) => {
     const moved = await next(e)
     if (e.origin.kind === 'person' && moved.deny === undefined) {
       const follow = isAtEnd(e.offset, e.bodyRows, e.contentRows)
@@ -163,7 +163,7 @@ export const register: Register = on => {
     return moved
   }).catch(($, e, next) => next(e))
 
-  on('ui.render', { component: 'Pane', requestId: 'ox-usage' }, async ($, e) => {
+  on('ui.render', { component: 'Pane', requestId: 'ox-brief' }, async ($, e) => {
     // A reload drops the timer while the pane stays up: start it again here.
     startTimer($)
     const { Box, Text } = $.ui.resolve(e)
@@ -172,7 +172,7 @@ export const register: Register = on => {
     const st = await read($, status)
     const { identity, summary } = headerLines(r)
     const offsetMin = -new Date().getTimezoneOffset()
-    const title = '● ox usage'
+    const title = '● ox brief'
     const recent = r === null ? [] : oldestFirst(r.calls.recent)
 
     let body
@@ -182,7 +182,7 @@ export const register: Register = on => {
       body = (
         <Box flexDirection="column">
           <Text dimColor wrap="wrap">
-            {r.trace.reason ?? 'No usage trace for this session.'}
+            {r.trace.reason ?? 'No ox trace for this session.'}
           </Text>
           <Text wrap="wrap">Run ox session start to record the next session.</Text>
         </Box>

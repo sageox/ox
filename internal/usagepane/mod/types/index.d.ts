@@ -1,4 +1,4 @@
-// The slice of the `ox usage --json` session report the pane draws. The ox
+// The slice of the `ox brief --json` session report the pane draws. The ox
 // binary owns the full shape (internal/usage/types.go); fields the pane does
 // not read are left out, and every one it reads is treated as optional at
 // parse time so an older or newer ox never breaks the drawing.
@@ -39,7 +39,7 @@ export type UsageStatus = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'ox-cli-usage-pane': {
+    'ox-cli-brief-pane': {
       report: Shaped<UsageReport | null>
       status: Shaped<UsageStatus>
     }

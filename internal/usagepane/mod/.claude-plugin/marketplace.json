@@ -1,6 +1,6 @@
 {
-  "name": "ox-cli-usage",
-  "description": "The SageOx usage pane for Claude Code, installed by ox.",
+  "name": "ox-cli-brief",
+  "description": "The SageOx brief pane for Claude Code, installed by ox.",
   "owner": { "name": "SageOx" },
-  "plugins": [{ "name": "ox-cli-usage-pane", "source": "./" }]
+  "plugins": [{ "name": "ox-cli-brief-pane", "source": "./" }]
 }
