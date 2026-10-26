@@ -25,10 +25,12 @@ func IsAnyOxCommand(cmd string) bool {
 	return IsOxPrimeCommand(cmd) || IsOxHookCommand(cmd)
 }
 
-// oxStatuslineRe matches "ox statusline" only where "ox" is the executable:
-// at the start of the command or after a path separator, whitespace, or a
-// shell operator. "fox statusline" or "~/bin/box statusline" are foreign.
-var oxStatuslineRe = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])ox\s+statusline(\s|$)`)
+// oxStatuslineRe matches "ox statusline" only in command position: at the
+// start of the command or after a shell operator, optionally behind a path
+// ("/usr/local/bin/ox statusline", "cd /repo && ox statusline"). An argument
+// ("echo ox statusline") or another binary ("fox statusline",
+// "~/bin/box statusline") is foreign.
+var oxStatuslineRe = regexp.MustCompile(`(^|[;&|({\n])\s*(\S*/)?ox\s+statusline(\s|$)`)
 
 // IsOxStatuslineCommand reports whether a statusLine command runs ox's status
 // line (any version of the installed command, or a hand-written one). A

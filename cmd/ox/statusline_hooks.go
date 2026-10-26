@@ -43,6 +43,9 @@ func recordStatuslineToolCall(projectRoot, agentID, toolName string, toolInput j
 		return
 	}
 	err := oxactivity.UpdateState(projectRoot, agentID, func(state *oxactivity.State) bool {
+		if now.Before(state.LastActionAt) {
+			return false // an overlapping hook already recorded a newer action
+		}
 		state.LastAction = act.Label
 		state.LastActionAt = now
 		return true
