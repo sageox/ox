@@ -806,7 +806,8 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	}
 }
 
-// resolveInstance looks up an agent instance by agent_id
+// resolveInstance looks up an agent instance by agent_id in the store every
+// worktree of the repository shares, then in this checkout's own store.
 func resolveInstance(agentID string) (*agentinstance.Instance, error) {
 	// find project root (look for .sageox directory)
 	projectRoot, err := findProjectRoot()
@@ -814,17 +815,43 @@ func resolveInstance(agentID string) (*agentinstance.Instance, error) {
 		return nil, fmt.Errorf("could not find project root: %w\nRun 'ox agent prime' to initialize an instance", err)
 	}
 
-	store, err := getInstanceStore(projectRoot)
+	userSlug := getUserSlug()
+	sharedRoot := instanceStoreRoot(projectRoot)
+	store, err := agentinstance.NewStoreForUser(sharedRoot, userSlug)
 	if err != nil {
 		return nil, fmt.Errorf("failed to access instance store: %w", err)
 	}
-
-	inst, err := store.Get(agentID)
-	if err != nil {
-		return nil, errkind.Errorf(errkind.Other, "instance not found: %s\nRun 'ox agent prime' to create a new instance", agentID)
+	stores := []*agentinstance.Store{store}
+	if local := checkoutInstanceStore(projectRoot, sharedRoot, userSlug); local != nil {
+		stores = append(stores, local)
 	}
 
-	return inst, nil
+	var searched []string
+	expired := false
+	var readErr error
+	for _, s := range stores {
+		inst, err := s.Get(agentID)
+		if err == nil {
+			return inst, nil
+		}
+		searched = append(searched, s.Path())
+		switch {
+		case errors.Is(err, agentinstance.ErrInstanceExpired):
+			expired = true
+		case !errors.Is(err, agentinstance.ErrInstanceNotFound) && readErr == nil:
+			readErr = err // a store that could not be read cannot rule the instance out
+		}
+	}
+
+	// The first line of each format is the telemetry detail: keep "instance
+	// not found: %s" stable, and count expiry and unreadable stores on their own.
+	if readErr != nil {
+		return nil, fmt.Errorf("failed to read instance store: %w", readErr)
+	}
+	if expired {
+		return nil, errkind.Errorf(errkind.Other, "instance expired: %s\nAn instance expires 24 hours after 'ox agent prime' creates it once its AI coworker's process has exited\nRun 'ox agent prime' to create a new instance", agentID)
+	}
+	return nil, errkind.Errorf(errkind.Other, "instance not found: %s\nSearched: %s\nRun 'ox agent prime' to create a new instance", agentID, strings.Join(searched, ", "))
 }
 
 // findProjectRoot walks up from cwd looking for .sageox directory.
@@ -877,9 +904,10 @@ func getUserSlug() string {
 	return identity.Slug()
 }
 
-// getInstanceStore returns an instance store for the current user
+// getInstanceStore returns the current user's instance store, shared by every
+// worktree of projectRoot's repository (see instanceStoreRoot).
 func getInstanceStore(projectRoot string) (*agentinstance.Store, error) {
-	return agentinstance.NewStoreForUser(projectRoot, getUserSlug())
+	return agentinstance.NewStoreForUser(instanceStoreRoot(projectRoot), getUserSlug())
 }
 
 // runAgentList lists active AI coworkers with context consumption and session info.
