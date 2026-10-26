@@ -5,11 +5,15 @@ import (
 	"testing"
 )
 
+// AWS's documentation key (AKIA…EXAMPLE) is allowlisted by the upstream rule,
+// and so by the guard: it is not a credential and cannot stand in for one.
+const syntheticAWSKey = "AKIA" + "QWERTYUIOPASDFGH"
+
 func TestImmutableSessionBlobRequiresSecretGuard(t *testing.T) {
 	for _, path := range []string{"sessions/synthetic/raw.jsonl", "sessions/synthetic/summary.md", "sessions/synthetic/meta.json"} {
 		t.Run(path, func(t *testing.T) {
 			// storage=git is a valid alternate publication mode, never a scan opt-out.
-			if err := validateLedgerBlob(path, []byte(`{"content":"AKIAIOSFODNN7EXAMPLE"}`), "git"); err == nil {
+			if err := validateLedgerBlob(path, []byte(`{"content":"`+syntheticAWSKey+`"}`), "git"); err == nil {
 				t.Fatal("immutable credential-bearing session blob was accepted")
 			}
 			if err := validateLedgerBlob(path, []byte(`{"content":"ordinary meeting notes"}`), "git"); err != nil {
@@ -32,11 +36,9 @@ func TestSessionMetaProducedCommitsAreNotCredentials(t *testing.T) {
 
 func TestSessionMetaCommitExemptionStaysNarrow(t *testing.T) {
 	for name, meta := range map[string]string{
-		"credential in produced_commits": `{"produced_commits":["` + syntheticCommitSHA + `","AKIAIOSFODNN7EXAMPLE"]}`,
-		"credential beside commits":      `{"produced_commits":["` + syntheticCommitSHA + `"],"summary":"AKIAIOSFODNN7EXAMPLE"}`,
-		"duplicate key hides a value":    `{"produced_commits":["AKIAIOSFODNN7EXAMPLE"],"produced_commits":["` + syntheticCommitSHA + `"]}`,
-		"commits not a string list":      `{"produced_commits":[{"sha":"` + syntheticCommitSHA + `"}]}`,
-		"uppercase is not git's output":  `{"produced_commits":["` + strings.ToUpper(syntheticCommitSHA) + `"]}`,
+		"credential in produced_commits": `{"produced_commits":["` + syntheticCommitSHA + `","` + syntheticAWSKey + `"]}`,
+		"credential beside commits":      `{"produced_commits":["` + syntheticCommitSHA + `"],"summary":"` + syntheticAWSKey + `"}`,
+		"duplicate key hides a value":    `{"produced_commits":["` + syntheticAWSKey + `"],"produced_commits":["` + syntheticCommitSHA + `"]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := validateLedgerBlob("sessions/synthetic/meta.json", []byte(meta), ""); err == nil {
@@ -44,9 +46,18 @@ func TestSessionMetaCommitExemptionStaysNarrow(t *testing.T) {
 			}
 		})
 	}
-	// The exemption belongs to the meta.json schema, not to any session file.
-	if err := validateLedgerBlob("sessions/synthetic/summary.json", []byte(`{"produced_commits":["`+syntheticCommitSHA+`"]}`), "git"); err == nil {
-		t.Fatal("bare SHA outside session meta was exempted")
+	// The bundled guard no longer reads a keyword-less SHA as a credential, but
+	// publication also scans with the latest upstream catalog, which may add a
+	// bare-hex rule. Only exact git object IDs in meta.json's own array leave
+	// the scanned bytes.
+	for name, view := range map[string]struct{ path, data string }{
+		"commits not a string list":     {"sessions/synthetic/meta.json", `{"produced_commits":[{"sha":"` + syntheticCommitSHA + `"}]}`},
+		"uppercase is not git's output": {"sessions/synthetic/meta.json", `{"produced_commits":["` + strings.ToUpper(syntheticCommitSHA) + `"]}`},
+		"not the meta.json schema":      {"sessions/synthetic/summary.json", `{"produced_commits":["` + syntheticCommitSHA + `"]}`},
+	} {
+		if got := string(secretScanView(view.path, []byte(view.data))); got != view.data {
+			t.Errorf("%s: exemption removed bytes from the scan", name)
+		}
 	}
 }
 
