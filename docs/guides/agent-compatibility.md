@@ -67,14 +67,14 @@ files only (no network, no daemon). A `statusLine` already in the project file i
 replaced; one in your own `~/.claude/settings.json` keeps working, with ox's line
 appended after it. Turn it off with `ox config set statusline off`.
 
-**Usage pane.** `/ox-usage` opens a pane beside the chat with this session's usage
-summary (calls, context injected, items surfaced and used) and a scrollable list of every
-ox call, refreshed as they happen. It is a Claude Code plugin, `ox-cli-usage-pane`, that
-`ox init` and `ox doctor` install at user scope when the `claude` CLI is on PATH (Claude
-Code 2.1.309 or newer); the same mechanism ships Oxy (`ox pet`). The pane is a thin view
-over `ox usage --json`, so it shows exactly what `/ox-cli-usage` reports. `/ox-usage off`
-closes it, `ox config set usage_pane off` removes it, and `ox usage pane status` shows
-whether it is installed.
+**Brief pane.** `/ox-brief` opens a pane beside the chat with what SageOx gave this
+session (calls, estimated context tokens, what was read and what was useful) and a
+scrollable list of every ox call, refreshed as they happen. It is a Claude Code plugin,
+`ox-cli-brief-pane`, that `ox init` and `ox doctor` install at user scope when the
+`claude` CLI is on PATH (Claude Code 2.1.309 or newer); the same mechanism ships Oxy
+(`ox pet`). The pane is a thin view over `ox brief --json`, so it shows exactly what
+`/ox-cli-brief` reports. `/ox-brief off` closes it, `ox config set brief_pane off`
+removes it, and `ox brief pane status` shows whether it is installed.
 
 ## Canonical Agent Skills
 
@@ -86,14 +86,14 @@ reconciles the project-selected native targets, including updates, missing
 skills, and retired ox-owned files, while preserving user-authored additions
 and modified retired files.
 
-Run `/ox-cli-usage` (Claude Code slash command, or pick it in Codex's skill
-picker) to see what ox did in the current session: the ox calls your AI
-coworker made, the team context ox injected and from where, the decisions,
-rules, murmurs and sessions it surfaced, and which of those the coworker
-reports using. `/ox-cli-usage me` rolls up your recent sessions in this repo;
-`/ox-cli-usage team` shows team-wide totals only, never per-person reads. The
-skill is a thin relay over `ox usage --json`, so other AI coworkers get the same
-report by running that command.
+Run `/ox-cli-brief` (Claude Code slash command, or pick it in Codex's skill
+picker) to see what SageOx gave the current session: the ox calls your AI
+coworker made, the team context ox put in front of it and from where, the
+decisions, rules, murmurs and sessions it read, and which of those the coworker
+reports were useful. `/ox-cli-brief me` rolls up your recent sessions in this
+repo; `/ox-cli-brief team` shows team-wide totals only, never per-person reads.
+The skill is a thin relay over `ox brief --json`, so other AI coworkers get the
+same report by running that command.
 
 ### Codex
 ```bash
