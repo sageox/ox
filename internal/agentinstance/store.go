@@ -119,6 +119,8 @@ type Store struct {
 	userSlug      string
 	mu            sync.RWMutex
 	pruneWG       sync.WaitGroup // tracks background Prune goroutines launched by Get/List
+
+	expiryCheckTestHook func() // called between Get's read and its reply on a miss; tests use it to run a prune in that window
 }
 
 // NewStore initializes an instance store for the given project root.
@@ -314,8 +316,10 @@ func (s *Store) IncrementPrimeCallCount(agentID string) (*Instance, bool, error)
 }
 
 // Get retrieves an instance by agent ID, pruning expired instances during read.
-// A miss wraps ErrInstanceExpired when the agent ID's record is present but
-// expired, and ErrInstanceNotFound otherwise.
+// A miss wraps ErrInstanceExpired when the agent ID's records are present but
+// expired, and ErrInstanceNotFound otherwise. Both are decided from one read
+// of the file, so a prune that lands afterwards — the one Get launches, or
+// another ox process's — cannot turn "expired" into "not found".
 //
 // Design decision: Prune on read
 // Rationale: Amortizes cleanup cost; ensures Get() never returns expired instances
@@ -325,7 +329,14 @@ func (s *Store) Get(agentID string) (*Instance, error) {
 		return nil, fmt.Errorf("agent_id cannot be empty")
 	}
 
-	instances, totalCount, expiredCount, err := s.readInstances()
+	var newest *Instance // agentID's last record, live or expired
+	s.mu.RLock()
+	instances, totalCount, expiredCount, err := s.scanInstancesNoLock(func(inst *Instance) {
+		if inst.AgentID == agentID {
+			newest = inst
+		}
+	})
+	s.mu.RUnlock()
 
 	if err != nil {
 		return nil, err
@@ -343,38 +354,14 @@ func (s *Store) Get(agentID string) (*Instance, error) {
 		}
 	}
 
-	if expiresAt, ok := s.expiredAt(agentID); ok {
-		return nil, fmt.Errorf("%w: %s expired at %s", ErrInstanceExpired, agentID, expiresAt.Format(time.RFC3339))
+	if s.expiryCheckTestHook != nil {
+		s.expiryCheckTestHook()
+	}
+	// no live record: any record the read saw had expired
+	if newest != nil {
+		return nil, fmt.Errorf("%w: %s expired at %s", ErrInstanceExpired, agentID, newest.ExpiresAt.Format(time.RFC3339))
 	}
 	return nil, fmt.Errorf("%w for agent_id: %s", ErrInstanceNotFound, agentID)
-}
-
-// expiredAt reports when agentID's newest record expired, if the file still
-// holds one. Only called on a Get miss, so the extra read costs nothing on the
-// hit path.
-func (s *Store) expiredAt(agentID string) (time.Time, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	f, err := os.Open(s.instancesPath)
-	if err != nil {
-		return time.Time{}, false
-	}
-	defer f.Close()
-
-	var last *Instance
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		var inst Instance
-		if err := json.Unmarshal(scanner.Bytes(), &inst); err != nil || inst.AgentID != agentID {
-			continue
-		}
-		last = &inst // last write wins, as in readInstancesNoLock
-	}
-	if last == nil || !last.isExpiredAt(time.Now()) {
-		return time.Time{}, false
-	}
-	return last.ExpiresAt, true
 }
 
 // List returns all active (non-expired) instances
@@ -467,6 +454,12 @@ func (s *Store) readInstances() ([]*Instance, int, int, error) {
 // readInstancesNoLock reads instances without acquiring the mutex (caller must hold lock).
 // Deduplicates by AgentID, keeping the latest entry (last-write-wins in append-only JSONL).
 func (s *Store) readInstancesNoLock() ([]*Instance, int, int, error) {
+	return s.scanInstancesNoLock(nil)
+}
+
+// scanInstancesNoLock is readInstancesNoLock that also hands visit, when set,
+// every decoded record in file order, expired or not.
+func (s *Store) scanInstancesNoLock(visit func(*Instance)) ([]*Instance, int, int, error) {
 	f, err := os.Open(s.instancesPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -488,6 +481,9 @@ func (s *Store) readInstancesNoLock() ([]*Instance, int, int, error) {
 		var inst Instance
 		if err := json.Unmarshal(scanner.Bytes(), &inst); err != nil {
 			continue
+		}
+		if visit != nil {
+			visit(&inst)
 		}
 
 		if inst.isExpiredAt(now) {
