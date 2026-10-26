@@ -65,6 +65,13 @@ func TestInspectClaudeReadsOnlyTheRecordsOfTheSessionItIsNamedFor(t *testing.T) 
 		}
 		return out
 	}
+	unnamed := func(lines []string) []string {
+		out := make([]string, len(lines))
+		for i, line := range lines {
+			out[i] = strings.Replace(line, `"sessionId":"`+claudeID+`",`, "", 1)
+		}
+		return out
+	}
 	const (
 		snapshot = `{"type":"file-history-snapshot","messageId":"m1"}`
 		summary  = `{"type":"summary","summary":"no session id or timestamp"}`
@@ -90,6 +97,9 @@ func TestInspectClaudeReadsOnlyTheRecordsOfTheSessionItIsNamedFor(t *testing.T) 
 			prompts: 2, replies: 2, lastAt: time.Date(2026, 9, 12, 10, 6, 0, 0, time.UTC)},
 		{name: "never resumed: a leading record naming no session is its own",
 			inherited: nil, own: cat([]string{summary}, own),
+			prompts: 1, replies: 1, lastAt: time.Date(2026, 9, 12, 9, 1, 0, 0, time.UTC)},
+		{name: "no record names a session: all of it is its own",
+			inherited: nil, own: unnamed(own),
 			prompts: 1, replies: 1, lastAt: time.Date(2026, 9, 12, 9, 1, 0, 0, time.UTC)},
 
 		{name: "another session after its own", own: cat(own, parent),
