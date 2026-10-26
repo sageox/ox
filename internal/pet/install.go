@@ -27,6 +27,9 @@ const (
 	framesFile = "hooks/frames.ts"
 	// framesDir holds one folder per animation: its PNG frames and cells.json.
 	framesDir = "hooks/frames"
+	// hiresDir holds the desktop's high-resolution frames, one folder per
+	// animation; the terminal never reads them.
+	hiresDir = "hooks/hires"
 	// fsReadLimit is the most `$.fs.read` hands a mod from one file.
 	fsReadLimit = 4 << 20
 )
@@ -106,10 +109,11 @@ func (i Installer) WriteMod() error { return i.mod().WriteMod() }
 // FramesFiles renders the frames as the files the mod reads: hooks/frames.ts,
 // a small module with every animation's timing and the sizes, plus per
 // animation a folder of PNG frames the terminal opens by path and a
-// cells.json the mod reads on first use. Nothing heavy sits in the module
-// graph, which Claude Code caps at 8 MiB in all and 1 MiB a file; a cells.json
-// stays under the 4 MiB one `$.fs.read` returns. Keys are paths relative to
-// the mod folder.
+// cells.json the mod reads on first use. With a desktop set, each hi-res
+// frame is a PNG under hooks/hires and frames.ts gains its `hires` layout.
+// Nothing heavy sits in the module graph, which Claude Code caps at 8 MiB in
+// all and 1 MiB a file; a cells.json stays under the 4 MiB one `$.fs.read`
+// returns. Keys are paths relative to the mod folder.
 func FramesFiles(frames *Frames) (map[string][]byte, error) {
 	out := make(map[string][]byte)
 	names := make([]string, 0, len(frames.Animations))
@@ -148,11 +152,15 @@ func FramesFiles(frames *Frames) (map[string][]byte, error) {
 		sizes = append(sizes, fmt.Sprintf("%s: { columns: %d, rows: %d, cells: { columns: %d, rows: %d } }",
 			s.Name, box.Columns, box.Rows, box.Cells.Columns, box.Cells.Rows))
 	}
+	hires := ""
+	if frames.Hires != nil {
+		hires = "  " + hiresFiles(frames.Hires, out) + ",\n"
+	}
 	var index bytes.Buffer
 	index.WriteString(generatedHeader)
 	index.WriteString("import type { OxyFrames } from './logic'\n\n")
-	fmt.Fprintf(&index, "export const FRAMES: OxyFrames = {\n  aspect: %g,\n  sizes: {\n    %s,\n  },\n  animations: {\n    %s,\n  },\n}\n",
-		frames.Aspect, strings.Join(sizes, ",\n    "), strings.Join(fields, ",\n    "))
+	fmt.Fprintf(&index, "export const FRAMES: OxyFrames = {\n  aspect: %g,\n  sizes: {\n    %s,\n  },\n  animations: {\n    %s,\n  },\n%s}\n",
+		frames.Aspect, strings.Join(sizes, ",\n    "), strings.Join(fields, ",\n    "), hires)
 	out[framesFile] = index.Bytes()
 	return out, nil
 }

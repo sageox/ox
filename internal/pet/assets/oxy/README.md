@@ -34,6 +34,44 @@ element wrapping the PNG as a base64 data URI. Claude Code caps an `Svg`
 source at 131,072 characters, so every frame PNG must stay under about 98 KB;
 the same test guards it.
 
+## Desktop set
+
+The Claude desktop app and VS Code draw Oxy from a high-resolution set in
+`desktop/` instead of the 160×207 pixel frames, which the terminal keeps.
+`desktop/make-desktop-set.py` builds it from any sheet in the pixel set's
+layout (one animation per row, the same frame counts and timing; the cell
+size comes from the sheet's own manifest):
+
+```bash
+python3 internal/pet/assets/oxy/desktop/make-desktop-set.py <sheet.png> <sheet.json> internal/pet/assets/oxy/desktop
+```
+
+It writes one palette PNG strip per animation (`<anim>.png`, frames left to
+right) and `manifest.json`: the cell size, `scale` (hi-res cell width over
+the pixel cell's), `figure`, and each animation's frame count and crop box.
+
+- **Crop.** Each animation is cut to the union of its frames' visible pixels,
+  which keeps about half the pixels and holds the figure still across frames.
+  The box is kept in uncropped cell coordinates, so every animation lands on
+  the same ground line. `figure` is the union of `blink`, `wag` and `wag-big`,
+  Oxy with no props; the mod sizes him by its height, so he stays one size
+  whatever he holds.
+- **Palette.** Each strip gets its own palette: pngquant, 128 colors, no
+  dithering. On the 480×621 trial sheet that scored 39.9 dB PSNR at 5.9 MB
+  against 38.5 dB at 5.1 MB for Pillow's 255-color octree with
+  Floyd–Steinberg (`--quantizer octree`, needs only Pillow), and undithered
+  pixels don't shimmer from frame to frame. 256-color pngquant scored 42.8 dB
+  but at 7.7 MB.
+
+`ox pet enable` slices each strip into `hooks/hires/<anim>/<i>.png`, still
+palette PNGs, and adds a `hires` field to `hooks/frames.ts` with the cell,
+scale, figure and crop boxes. Per-frame files lose the matches deflate finds
+across a strip's near-identical frames, so the trial set's 5.7 MB of strips
+installs as about 31 MB of frames, the largest 24 KB (32 K base64), inside the
+131,072-character `Svg` cap. Without `desktop/manifest.json` the build skips
+the set and the desktop draws the pixel frames. `TestFramesFiles_StayUnderClaudeLimits`
+checks frame counts, the per-frame cap and the folder's total.
+
 ## Codex sheet
 
 `ox pet enable` also builds a Codex custom pet from the same `sheet.png`
