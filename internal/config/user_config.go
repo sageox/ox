@@ -309,7 +309,10 @@ type UserConfig struct {
 	DisplayName       string       `yaml:"display_name,omitempty"`
 	TipsEnabled       *bool        `yaml:"tips_enabled,omitempty"`
 	StatuslineEnabled *bool        `yaml:"statusline_enabled,omitempty"` // activity line in harnesses; nil = on
-	UsagePaneEnabled  *bool        `yaml:"usage_pane_enabled,omitempty"` // /ox-usage pane in Claude Code; nil = on
+	BriefPaneEnabled  *bool        `yaml:"brief_pane_enabled,omitempty"` // /ox-brief pane in Claude Code; nil = UsagePaneEnabled, then on
+	// UsagePaneEnabled is DEPRECATED: brief_pane_enabled's name before
+	// `ox usage` became `ox brief`. Read only as BriefPaneEnabled's fallback.
+	UsagePaneEnabled  *bool        `yaml:"usage_pane_enabled,omitempty"`
 	TelemetryEnabled  *bool        `yaml:"telemetry_enabled,omitempty"`
 	SessionTermsShown *bool        `yaml:"session_terms_shown,omitempty"`
 	Attribution       *Attribution `yaml:"attribution,omitempty"`
@@ -477,13 +480,27 @@ func (c *UserConfig) IsStatuslineEnabled() bool {
 	return *c.StatuslineEnabled
 }
 
-// IsUsagePaneEnabled reports whether ox should keep the /ox-usage pane
-// installed in Claude Code (default: true).
-func (c *UserConfig) IsUsagePaneEnabled() bool {
-	if c == nil || c.UsagePaneEnabled == nil {
-		return true
+// IsBriefPaneEnabled reports whether ox should keep the /ox-brief pane
+// installed in Claude Code: brief_pane_enabled when set, else the deprecated
+// usage_pane_enabled, else true.
+func (c *UserConfig) IsBriefPaneEnabled() bool {
+	if v := c.BriefPaneSetting(); v != nil {
+		return *v
 	}
-	return *c.UsagePaneEnabled
+	return true
+}
+
+// BriefPaneSetting is the explicit brief pane value — brief_pane_enabled,
+// falling back to the deprecated usage_pane_enabled — or nil when neither is
+// set.
+func (c *UserConfig) BriefPaneSetting() *bool {
+	if c == nil {
+		return nil
+	}
+	if c.BriefPaneEnabled != nil {
+		return c.BriefPaneEnabled
+	}
+	return c.UsagePaneEnabled
 }
 
 // RecapConfig holds the user-level `recap.*` settings.

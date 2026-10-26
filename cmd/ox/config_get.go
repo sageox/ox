@@ -204,7 +204,8 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 // after `ox config set|unset` changes it. Each reads the setting's new
 // effective value and returns an optional hint for the coworker.
 var userSettingHooks = map[string]func(ctx context.Context) (string, error){
-	"usage_pane": applyUsagePaneSetting,
+	"brief_pane": applyUsagePaneSetting,
+	"usage_pane": applyUsagePaneSetting, // deprecated name of brief_pane
 }
 
 // runUserSettingHook runs key's hook, if any. Best-effort: the setting is

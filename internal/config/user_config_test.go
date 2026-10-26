@@ -760,10 +760,11 @@ func TestIsStatuslineEnabled(t *testing.T) {
 	}
 }
 
-// TestIsUsagePaneEnabled reads the usage_pane_enabled key from a real config
-// file. Failure prevented: a coworker who never touched the setting misses the
-// /ox-usage pane, or one who turned it off gets it reinstalled.
-func TestIsUsagePaneEnabled(t *testing.T) {
+// TestIsBriefPaneEnabled reads the brief_pane_enabled key, and its deprecated
+// usage_pane_enabled fallback, from a real config file. Failure prevented: a
+// coworker who never touched the setting misses the /ox-brief pane, or one
+// who turned the pane off before the rename gets it reinstalled.
+func TestIsBriefPaneEnabled(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		content string
@@ -771,8 +772,12 @@ func TestIsUsagePaneEnabled(t *testing.T) {
 	}{
 		{"no config file", "", true},
 		{"key absent", "tips_enabled: false\n", true},
-		{"off", "usage_pane_enabled: false\n", false},
-		{"on", "usage_pane_enabled: true\n", true},
+		{"off", "brief_pane_enabled: false\n", false},
+		{"on", "brief_pane_enabled: true\n", true},
+		{"deprecated usage_pane off", "usage_pane_enabled: false\n", false},
+		{"deprecated usage_pane on", "usage_pane_enabled: true\n", true},
+		{"brief_pane wins over usage_pane (on)", "brief_pane_enabled: true\nusage_pane_enabled: false\n", true},
+		{"brief_pane wins over usage_pane (off)", "brief_pane_enabled: false\nusage_pane_enabled: true\n", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -781,11 +786,12 @@ func TestIsUsagePaneEnabled(t *testing.T) {
 			}
 			cfg, err := LoadUserConfigFrom(dir)
 			require.NoError(t, err)
-			assert.Equal(t, tc.want, cfg.IsUsagePaneEnabled())
+			assert.Equal(t, tc.want, cfg.IsBriefPaneEnabled())
 		})
 	}
 	var nilCfg *UserConfig
-	assert.True(t, nilCfg.IsUsagePaneEnabled())
+	assert.True(t, nilCfg.IsBriefPaneEnabled())
+	assert.Nil(t, nilCfg.BriefPaneSetting())
 }
 
 // TestIsTraceConsultationsEnabled reads recap.trace_consultations from a real

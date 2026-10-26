@@ -44,14 +44,15 @@ type ConfigSetting struct {
 
 	// Deprecated marks a setting kept only for backward compatibility: it
 	// remains resolvable and settable (existing config files and scripts
-	// must not break), but is not wired to any behavior. Never wire new
+	// must not break), but is either not wired to any behavior or is an old
+	// name that reads and writes its replacement's value. Never wire new
 	// behavior to a deprecated setting — remove the deprecation instead.
 	Deprecated bool
 	// DeprecationNotice is the honest, specific explanation surfaced by
-	// 'ox config get/set/list' for a Deprecated setting: it must say the
-	// setting never took effect (not merely that it's "no longer used"),
-	// and name the setting that actually does the job. Empty unless
-	// Deprecated is true.
+	// 'ox config get/set/list' for a Deprecated setting: it must say what
+	// the setting actually does (that it never took effect, not merely that
+	// it's "no longer used"; or that it is a renamed alias), and name the
+	// setting that does the job. Empty unless Deprecated is true.
 	DeprecationNotice string
 }
 
@@ -249,22 +250,41 @@ Turn it off to keep those surfaces free of ox output.`,
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
-		Key:         "usage_pane",
-		Label:       "Usage pane",
-		Description: "Show the /ox-usage pane in Claude Code (installs the ox-cli-usage-pane plugin)",
-		LongDescription: `Controls whether ox keeps the /ox-usage pane installed in Claude Code.
+		Key:         "brief_pane",
+		Label:       "Brief pane",
+		Description: "Show the /ox-brief pane in Claude Code (installs the ox-cli-brief-pane plugin)",
+		LongDescription: `Controls whether ox keeps the /ox-brief pane installed in Claude Code.
 
-The pane lists this session's ox calls under the usage summary. It is the
-Claude Code plugin ox-cli-usage-pane@ox-cli-usage, installed at user scope;
-/ox-usage opens it and /ox-usage off closes it.
+The pane lists this session's ox calls under the ox brief summary. It is the
+Claude Code plugin ox-cli-brief-pane@ox-cli-brief, installed at user scope;
+/ox-brief opens it and /ox-brief off closes it.
 
   on  - ox installs the plugin (ox init, ox doctor --fix, and right away
         when you set this) and keeps it on this ox's version (default).
-  off - ox removes the plugin and its files.`,
+  off - ox removes the plugin and its files.
+
+Replaces usage_pane, which it falls back to when unset.`,
 		Category:    "Display",
 		ValidValues: []string{"on", "off"},
 		Default:     "on",
 		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
+		Key:         "usage_pane",
+		Label:       "Usage pane (deprecated)",
+		Description: "DEPRECATED — renamed to brief_pane",
+		LongDescription: `DEPRECATED: usage_pane is the old name of brief_pane, from before
+` + "`ox usage`" + ` became ` + "`ox brief`" + `. It still reads and sets the same value, so
+existing config files and scripts keep working.
+
+Use instead:
+    ox config set brief_pane on|off`,
+		Category:          "Display",
+		ValidValues:       []string{"on", "off"},
+		Default:           "on",
+		Levels:            []ConfigLevel{ConfigLevelUser},
+		Deprecated:        true,
+		DeprecationNotice: "usage_pane is renamed to brief_pane; it still sets the same value.\nUse instead:\n    ox config set brief_pane on|off",
 	},
 	{
 		Key:         "recap.trace_consultations",
@@ -851,10 +871,12 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.UserVal = boolToOnOff(*userCfg.StatuslineEnabled)
 		}
 
-	case "usage_pane":
-		// only an explicit value counts as a user layer (see statusline)
-		if userCfg != nil && userCfg.UsagePaneEnabled != nil {
-			cv.UserVal = boolToOnOff(*userCfg.UsagePaneEnabled)
+	case "brief_pane", "usage_pane":
+		// only an explicit value counts as a user layer (see statusline);
+		// usage_pane is brief_pane's deprecated name, and an old
+		// usage_pane_enabled still counts until brief_pane is set
+		if v := userCfg.BriefPaneSetting(); v != nil {
+			cv.UserVal = boolToOnOff(*v)
 		}
 
 	case "recap.trace_consultations":
@@ -1172,9 +1194,12 @@ func setUserConfig(key, value string) error {
 		enabled := value == "on"
 		cfg.StatuslineEnabled = &enabled
 
-	case "usage_pane":
+	case "brief_pane", "usage_pane":
+		// both names write brief_pane_enabled and drop the old key, so the
+		// two can never disagree
 		enabled := value == "on"
-		cfg.UsagePaneEnabled = &enabled
+		cfg.BriefPaneEnabled = &enabled
+		cfg.UsagePaneEnabled = nil
 
 	case "recap.trace_consultations":
 		enabled := value == "on"
@@ -1510,7 +1535,8 @@ func unsetUserConfig(key string) error {
 	case "statusline":
 		cfg.StatuslineEnabled = nil
 
-	case "usage_pane":
+	case "brief_pane", "usage_pane":
+		cfg.BriefPaneEnabled = nil
 		cfg.UsagePaneEnabled = nil
 
 	case "recap.trace_consultations":
