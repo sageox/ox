@@ -138,3 +138,42 @@ func TestClassify_MCPCommandAndKind(t *testing.T) {
 		})
 	}
 }
+
+// TestClassify_Ref names the item an item read pulled, and nothing else.
+// Failure prevented: the status line counting one plan read twice as two
+// plans (no ref), counting a search as an item, or copying free text (a
+// murmur body, a query) into the per-session state.
+func TestClassify_Ref(t *testing.T) {
+	t.Parallel()
+	const cnv = "cnv_019ffe10-0000-7000-8000-000000000011"
+	tests := []struct {
+		command string
+		want    string
+	}{
+		{"ox plan view my-plan", "my-plan"},
+		{"ox plan view --json my-plan", "my-plan"},
+		{"ox agent OxA1b2 plan view my-plan", "my-plan"},
+		{"ox plan show 2026-10-01-auth.v2", "2026-10-01-auth.v2"},
+		{"ox plan view", ""},
+		{"ox conversation show " + cnv, cnv},
+		{"ox conversation topics " + cnv, cnv},
+		{"ox conversation topic " + cnv + " tp_1", cnv},
+		{`ox conversation transcript "sageox://` + cnv + `/transcript@3#cue=4-9"`, cnv},
+		{"ox conversation show https://sageox.ai/c/rec_019ffe10-0000-7000-8000-000000000012", "rec_019ffe10-0000-7000-8000-000000000012"},
+		{`ox conversation show "not an id at all"`, ""},
+		{"ox conversation search pricing", ""},
+		{`ox query "auth"`, ""},
+		{"ox murmur list", ""},
+		{`ox murmur --topic wip "my-plan"`, ""},
+		{"ox session view 2026-10-01-foo", ""},
+		{"ox agent OxA1b2 team-ctx", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.command, func(t *testing.T) {
+			t.Parallel()
+			got, ok := ClassifyCommand(tt.command)
+			require.True(t, ok)
+			assert.Equal(t, tt.want, got.Ref)
+		})
+	}
+}
