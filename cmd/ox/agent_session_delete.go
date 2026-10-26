@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/sageox/ox/internal/agentinstance"
@@ -165,21 +164,27 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 // deleteSessionFromLedger removes the session folder from the ledger git repo,
 // commits the removal, and pushes. NEVER uses --force push.
 func deleteSessionFromLedger(ledgerPath, sessionName, sessionDir string) error {
+	if err := session.ValidateDraftSessionName(sessionName); err != nil {
+		return err
+	}
+	ctx := context.Background()
 	// rm + commit under the repo lock, so the commit cannot move the branch
 	// under a daemon sync rebase (sageox/ox#1541); the push takes it itself
 	commitMsg := fmt.Sprintf("session: delete %s", sessionName)
-	if err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
-		gitRm := exec.Command("git", "rm", "-r", "--force", filepath.Join("sessions", sessionName))
-		gitRm.Dir = ledgerPath
-		if out, err := gitRm.CombinedOutput(); err != nil {
-			return fmt.Errorf("git rm: %s: %w", string(out), err)
+	if err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+			return err
 		}
-		gitCommit := exec.Command("git", "commit", "-m", commitMsg)
-		gitCommit.Dir = ledgerPath
-		if out, err := gitCommit.CombinedOutput(); err != nil {
-			return fmt.Errorf("git commit: %s: %w", string(out), err)
+		if unmerged, err := gitutil.HasUnmergedEntries(ctx, ledgerPath); err != nil {
+			return err
+		} else if unmerged {
+			return fmt.Errorf("ledger has unresolved conflicts; run ox doctor --fix")
 		}
-		return nil
+		if _, err := gitutil.RunGit(ctx, ledgerPath, "rm", "-r", "--force", "--", ":(literal)sessions/"+sessionName); err != nil {
+			return fmt.Errorf("git rm: %w", err)
+		}
+		_, err := gitutil.CommitLedgerSessionDeletion(ctx, ledgerPath, commitMsg, []string{sessionName}, allButPlansPathspec...)
+		return err
 	}); err != nil {
 		return err
 	}

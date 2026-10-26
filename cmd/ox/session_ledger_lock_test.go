@@ -52,6 +52,13 @@ func TestSessionLedgerWriters_RefuseToStageIntoWedgedRebase(t *testing.T) {
 		{"batch re-redaction", func(t *testing.T, ledgerPath, sessionName, _ string) error {
 			return commitAndPushLedgerBatch(ledgerPath, []string{sessionName})
 		}},
+		{"session remove", func(t *testing.T, ledgerPath, sessionName, _ string) error {
+			_, err := batchDeleteSessionsFromLedger(ledgerPath, []string{sessionName})
+			return err
+		}},
+		{"session delete", func(t *testing.T, ledgerPath, sessionName, sessionDir string) error {
+			return deleteSessionFromLedger(ledgerPath, sessionName, sessionDir)
+		}},
 		{"push-summary", func(t *testing.T, _, _, sessionDir string) error {
 			summary := filepath.Join(t.TempDir(), "raw-summary.json")
 			require.NoError(t, os.WriteFile(summary, []byte(`{"title":"Fix ledger sync","summary":"Recovered the ledger sync after a lost rebase race.","outcome":"success"}`), 0o644))
@@ -193,13 +200,17 @@ func TestLedgerWriters_QueueBehindRepoLock(t *testing.T) {
 func TestLedgerMaintenance_LeavesPlansStagedAndIncludesOtherSessions(t *testing.T) {
 	for _, tt := range []struct {
 		name          string
-		batch         bool
+		writer        string
 		advanceRemote bool
 	}{
-		{"batch re-redaction", true, false},
-		{"murmur deletion", false, false},
-		{"batch re-redaction after remote advance", true, true},
-		{"murmur deletion after remote advance", false, true},
+		{"batch re-redaction", "batch re-redaction", false},
+		{"murmur deletion", "murmur deletion", false},
+		{"session remove", "session remove", false},
+		{"session delete", "session delete", false},
+		{"batch re-redaction after remote advance", "batch re-redaction", true},
+		{"murmur deletion after remote advance", "murmur deletion", true},
+		{"session remove after remote advance", "session remove", true},
+		{"session delete after remote advance", "session delete", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			barePath, clonePath := createBareAndClone(t)
@@ -208,6 +219,15 @@ func TestLedgerMaintenance_LeavesPlansStagedAndIncludesOtherSessions(t *testing.
 			const removedPlan = "data/plans/removed/plan.md"
 			const newPlan = "data/plans/new/plan.md"
 			const murmur = "data/murmurs/m1.json"
+			const deletedName = "2026-01-01T00-00-testuser-OxDelete"
+			if tt.writer == "session remove" || tt.writer == "session delete" {
+				dir := writeSessionFiles(t, clonePath, deletedName)
+				// A confirmed session deletion may exceed the automatic guard's limit.
+				for i := range 6 {
+					require.NoError(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("artifact-%d.txt", i)), []byte("recorded work\n"), 0o644))
+				}
+				runGit(t, clonePath, "add", "sessions")
+			}
 			for _, path := range []string{plan, removedPlan, murmur} {
 				require.NoError(t, os.MkdirAll(filepath.Join(clonePath, filepath.Dir(path)), 0o755))
 				require.NoError(t, os.WriteFile(filepath.Join(clonePath, path), []byte("original\n"), 0o644))
@@ -236,7 +256,7 @@ func TestLedgerMaintenance_LeavesPlansStagedAndIncludesOtherSessions(t *testing.
 			const otherName = "2026-01-01T00-00-testuser-OxOther"
 			const batchName = "2026-01-01T00-00-testuser-OxBatch"
 			names := []string{otherName}
-			if tt.batch {
+			if tt.writer == "batch re-redaction" {
 				names = append(names, batchName)
 			}
 			store := newFakeLFSStore(t)
@@ -256,14 +276,25 @@ func TestLedgerMaintenance_LeavesPlansStagedAndIncludesOtherSessions(t *testing.
 				require.NoError(t, lfs.WriteSessionMeta(dir, meta))
 			}
 			runGit(t, clonePath, "add", "sessions/"+otherName)
-			if tt.batch {
+			switch tt.writer {
+			case "batch re-redaction":
 				require.NoError(t, commitAndPushLedgerBatch(clonePath, []string{batchName}))
-			} else {
+			case "session remove":
+				removed, err := batchDeleteSessionsFromLedger(clonePath, []string{deletedName})
+				require.NoError(t, err)
+				assert.Equal(t, 1, removed)
+			case "session delete":
+				require.NoError(t, deleteSessionFromLedger(clonePath, deletedName, filepath.Join(clonePath, "sessions", deletedName)))
+			case "murmur deletion":
 				require.NoError(t, commitMurmurDeletion(context.Background(), clonePath, murmur, "m1"))
 				_, err := runGitCombined(clonePath, "cat-file", "-e", "HEAD:"+murmur)
 				assert.Error(t, err, "the murmur must be deleted from the commit")
 				assert.Equal(t, remoteBefore, runGit(t, barePath, "rev-parse", "HEAD"), "murmur deletion must remain a local commit")
 				require.NoError(t, pushLedger(context.Background(), clonePath))
+			}
+			if tt.writer == "session remove" || tt.writer == "session delete" {
+				_, err := runGitCombined(barePath, "cat-file", "-e", "HEAD:sessions/"+deletedName)
+				assert.Error(t, err, "the selected session must be deleted remotely")
 			}
 
 			for _, name := range names {
@@ -296,13 +327,13 @@ func TestLedgerMaintenance_LeavesPlansStagedAndIncludesOtherSessions(t *testing.
 
 // Maintenance must preserve a conflicted or unreadable index until it is repaired.
 func TestLedgerMaintenance_PreservesIndexAndWorksAfterRecovery(t *testing.T) {
-	for _, writer := range []string{"batch re-redaction", "murmur deletion"} {
+	for _, writer := range []string{"batch re-redaction", "murmur deletion", "session remove", "session delete"} {
 		t.Run(writer, func(t *testing.T) {
 			_, clonePath := createBareAndClone(t)
 			isolatePushEnv(t, clonePath)
 			const name = "2026-01-01T00-00-testuser-OxBatch"
 			path := "data/murmurs/m1.json"
-			if writer == "batch re-redaction" {
+			if writer != "murmur deletion" {
 				writeSessionFiles(t, clonePath, name)
 				path = "sessions/" + name + "/meta.json"
 			} else {
@@ -319,10 +350,17 @@ func TestLedgerMaintenance_PreservesIndexAndWorksAfterRecovery(t *testing.T) {
 			indexBefore := runGit(t, clonePath, "ls-files", "--stage")
 			headBefore := runGit(t, clonePath, "rev-parse", "HEAD")
 			write := func() error {
-				if writer == "batch re-redaction" {
+				switch writer {
+				case "batch re-redaction":
 					return commitAndPushLedgerBatch(clonePath, []string{name})
+				case "session remove":
+					_, err := batchDeleteSessionsFromLedger(clonePath, []string{name})
+					return err
+				case "session delete":
+					return deleteSessionFromLedger(clonePath, name, filepath.Join(clonePath, "sessions", name))
+				default:
+					return commitMurmurDeletion(context.Background(), clonePath, path, "m1")
 				}
-				return commitMurmurDeletion(context.Background(), clonePath, path, "m1")
 			}
 
 			require.ErrorContains(t, write(), "unresolved conflicts")
@@ -351,13 +389,17 @@ func TestLedgerMaintenance_PreservesIndexAndWorksAfterRecovery(t *testing.T) {
 			require.ErrorContains(t, write(), "invalid JSON object")
 			assert.Equal(t, headBefore, runGit(t, clonePath, "rev-parse", "HEAD"))
 			assert.Equal(t, "invalid JSON", runGit(t, clonePath, "show", ":sessions/"+otherName+"/meta.json"))
+			if writer == "session remove" || writer == "session delete" {
+				assert.FileExists(t, filepath.Join(clonePath, path), "a refused deletion must restore the selected session")
+				assert.Empty(t, runGit(t, clonePath, "diff", "HEAD", "--", "sessions/"+name))
+			}
 			lockCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			require.NoError(t, gitutil.WithRepoLock(lockCtx, clonePath, func() error { return nil }), "validation failure must release the lock")
 			writeSessionFiles(t, clonePath, otherName)
 			runGit(t, clonePath, "add", otherMeta)
 			// git rm already staged the deletion before validation refused the commit.
-			// Restore the fixture's murmur so the same delete command can be retried.
+			// Restore the fixture so the same delete command can be retried.
 			if writer == "murmur deletion" {
 				runGit(t, clonePath, "restore", "--source=HEAD", "--staged", "--worktree", "--", path)
 			}

@@ -19,6 +19,95 @@ import (
 
 const cleanMeta = `{"title":"Ready"}` + "\n"
 
+// Confirming one session's deletion must not authorize a neighboring staged wipe.
+func TestCommitLedgerSessionDeletion_ExemptsOnlyConfirmedSessions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
+	repo := newSnapshotRepo(t)
+	for _, name := range []string{"selected", "selected-neighbor"} {
+		for i := range sacred.MassDeleteThreshold + 1 {
+			writeGitutilFixture(t, repo, "sessions/"+name+"/part-"+string(rune('a'+i))+".md", "recorded work\n")
+		}
+	}
+	gitInRepo(t, repo, "add", "sessions")
+	gitInRepo(t, repo, "commit", "-m", "seed sessions")
+	writeGitutilFixture(t, repo, "sessions/staged-only/meta.json", cleanMeta)
+	gitInRepo(t, repo, "add", "sessions/staged-only")
+	gitInRepo(t, repo, "rm", "-r", "--force", "sessions/selected", "sessions/selected-neighbor", "sessions/staged-only")
+	writeGitutilFixture(t, repo, "sessions/recovered/meta.json", cleanMeta)
+	writeGitutilFixture(t, repo, "data/plans/draft/plan.md", "unsaved plan\n")
+	gitInRepo(t, repo, "add", "sessions/recovered", "data/plans")
+	head := gitInRepo(t, repo, "rev-parse", "HEAD")
+	otherStaging := gitInRepo(t, repo, "diff", "--cached", "--binary", "--", ":/", ":(exclude)sessions/selected")
+	ctx := context.Background()
+	require.NoError(t, WithRepoLock(ctx, repo, func() error {
+		committed, err := CommitLedgerSessionDeletion(ctx, repo, "delete selected", []string{"selected", "staged-only"}, ":/", ":(exclude)data/plans")
+		require.ErrorContains(t, err, "sacred")
+		assert.False(t, committed)
+		return nil
+	}))
+	assert.Equal(t, head, gitInRepo(t, repo, "rev-parse", "HEAD"))
+	assert.Empty(t, gitInRepo(t, repo, "diff", "HEAD", "--", "sessions/selected"), "the refused deletion must be restored")
+	assert.FileExists(t, filepath.Join(repo, "sessions/selected/part-a.md"))
+	assert.Equal(t, otherStaging, gitInRepo(t, repo, "diff", "--cached", "--binary", "--", ":/", ":(exclude)sessions/selected"))
+
+	gitInRepo(t, repo, "restore", "--source=HEAD", "--staged", "--worktree", "sessions/selected-neighbor")
+	gitInRepo(t, repo, "rm", "-r", "sessions/selected")
+	require.NoError(t, WithRepoLock(ctx, repo, func() error {
+		committed, err := CommitLedgerSessionDeletion(ctx, repo, "delete selected", []string{"selected"}, ":/", ":(exclude)data/plans")
+		require.NoError(t, err)
+		assert.True(t, committed)
+		return nil
+	}))
+	assert.False(t, headHasPath(t, repo, "sessions/selected"))
+	assert.True(t, headHasPath(t, repo, "sessions/selected-neighbor"))
+	assert.True(t, headHasPath(t, repo, "sessions/recovered/meta.json"))
+	assert.Equal(t, "data/plans/draft/plan.md", gitInRepo(t, repo, "diff", "--cached", "--name-only"))
+
+	gitInRepo(t, repo, "rm", "-r", "sessions/selected-neighbor")
+	require.NoError(t, WithRepoLock(ctx, repo, func() error {
+		committed, err := CommitLedgerSnapshot(ctx, repo, "automatic snapshot", ":/", ":(exclude)data/plans")
+		require.ErrorContains(t, err, "sacred")
+		assert.False(t, committed)
+		return nil
+	}))
+}
+
+func TestCommitLedgerSessionDeletion_CancellationRestoresSelectedSession(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
+	repo := newSnapshotRepo(t)
+	const path = "sessions/selected/meta.json"
+	writeGitutilFixture(t, repo, path, cleanMeta)
+	gitInRepo(t, repo, "add", path)
+	gitInRepo(t, repo, "commit", "-m", "seed session")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.NoError(t, WithRepoLock(context.Background(), repo, func() error {
+		gitInRepo(t, repo, "rm", path)
+		committed, err := CommitLedgerSessionDeletion(ctx, repo, "delete", []string{"selected"})
+		require.Error(t, err)
+		assert.False(t, committed)
+		return nil
+	}))
+	assert.Empty(t, gitInRepo(t, repo, "status", "--porcelain"))
+	assert.FileExists(t, filepath.Join(repo, path))
+}
+
+func TestCommitLedgerSessionDeletion_RequiresSessionNames(t *testing.T) {
+	for _, names := range [][]string{nil, {""}, {"."}, {".."}, {"../neighbor"}, {"a/b"}, {`a\b`}, {"a\x00b"}} {
+		t.Run(strings.Join(names, ","), func(t *testing.T) {
+			// Bad names must fail before touching a repository or broadening the exemption.
+			committed, err := CommitLedgerSessionDeletion(context.Background(), t.TempDir(), "delete", names)
+			require.Error(t, err)
+			assert.False(t, committed)
+			assert.Contains(t, err.Error(), "session")
+		})
+	}
+}
+
 func newSnapshotRepo(t *testing.T) string {
 	t.Helper()
 	repo := t.TempDir()
