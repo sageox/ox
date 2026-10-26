@@ -29,6 +29,7 @@ func TestClassify_CommandAndKind(t *testing.T) {
 		{"ox agent OxA1b2 session pause", "ran ox agent", "agent session pause", KindLifecycle, ""},
 		{"ox agent OxA1b2 session resume", "ran ox agent", "agent session resume", KindLifecycle, ""},
 		{"ox agent OxA1b2 session context-trace", "reported context use", "agent session context-trace", KindWrite, ""},
+		{"ox agent OxA1b2 context used Ox7f2a --why \"kept retry budget\"", "reported context use", "agent context used", KindWrite, ""},
 		{"ox agent OxA1b2 session score", "scored session", "agent session score", KindWrite, ""},
 		{"ox session score", "scored session", "session score", KindWrite, ""},
 		{"ox brief --json", "checked ox brief", "brief", KindOther, ""},

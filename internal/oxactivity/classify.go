@@ -339,6 +339,7 @@ var cliRules = []cliRule{
 	{words: []string{"agent", "team-ctx"}, label: "loaded team context", kind: KindRetrieval},
 	{words: []string{"agent", "session", "stop"}, label: "stopped recording", kind: KindLifecycle},
 	{words: []string{"agent", "session", "context-trace"}, label: "reported context use", kind: KindWrite},
+	{words: []string{"agent", "context", "used"}, label: "reported context use", kind: KindWrite},
 	{words: []string{"agent", "session", "score"}, label: "scored session", kind: KindWrite},
 
 	{words: []string{"murmur", "list"}, label: "checked murmurs", kind: KindRetrieval},

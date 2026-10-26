@@ -480,6 +480,7 @@ var manualAgentFlagSources = []string{
 	"agent_session_subagent.go",
 	"agent_tasks.go",
 	"agent_query.go",
+	"agent_context_used.go",
 	"session_end_sync.go",
 }
 
@@ -530,6 +531,7 @@ func TestAgentDispatchedFlagsAreReinjected(t *testing.T) {
 	for _, list := range [][]string{
 		agentSessionStringFlags, agentSessionBoolFlags, agentTasksStringFlags,
 		agentQueryStringFlags, agentQueryBoolFlags,
+		agentContextStrFlags, agentContextBoolFlags,
 	} {
 		for _, name := range list {
 			reinjected[name] = true

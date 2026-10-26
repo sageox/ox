@@ -116,6 +116,11 @@ Check for team whispers:
 Query team knowledge:
   ox agent <agent_id> query "search text"   # Semantic search (--limit, --team, --repo)
 
+Report which surfaced context you used:
+  ox agent <agent_id> context used <ref> --why "<one line>"  # When a surfaced item changes what you do
+  ox agent <agent_id> context used --none   # Nothing surfaced changed your work
+  ox agent <agent_id> context list          # Surfaced items and their use evidence
+
 Redaction policy:
   ox agent redact                           # View full redaction policy (all sources)
   ox agent redact test "sample text"        # Test redaction against sample text
@@ -236,6 +241,10 @@ func init() {
 	registerHiddenAgentFlag("repo", "repo ID filter (query)")
 	registerHiddenAgentFlag("source", "source filter (query)")
 	registerHiddenAgentBoolFlag("local", "search local data only (query)")
+	// context used: parseContextUsedArgs
+	registerHiddenAgentFlag("why", "one line on how the context changed your work (context used)")
+	registerHiddenAgentFlag("ref-type", "ref type to match, e.g. murmur, doc, session (context used)")
+	registerHiddenAgentBoolFlag("none", "report that no surfaced context was used (context used)")
 
 	// Explicit identity for the agent-ID-free shorthands. `ox agent heartbeat
 	// --agent-id OxA1b2` mirrors `ox murmur list --agent-id`, so AI coworkers
@@ -517,6 +526,9 @@ func dispatchedCommandPath(subargs []string) []string {
 	if subcmd == "whisper" && len(subargs) > 1 && subargs[1] == "history" {
 		return []string{subcmd, subargs[1]}
 	}
+	if subcmd == "context" && len(subargs) > 1 && (subargs[1] == "used" || subargs[1] == "list") {
+		return []string{subcmd, subargs[1]}
+	}
 	return []string{subcmd}
 }
 
@@ -548,6 +560,7 @@ func renameDispatcherSpan(parts ...string) {
 // Used to distinguish `ox agent session start` (missing agent ID)
 // from `ox agent typo` (genuinely unknown command).
 var agentSubcommands = map[string]bool{
+	"context":   true,
 	"doctor":    true,
 	"heartbeat": true,
 	"query":     true,
@@ -576,6 +589,8 @@ var (
 	agentTasksStringFlags = []string{"result", "reason", "note"}
 	agentQueryStringFlags = []string{"mode", "limit", "k", "team", "repo", "source"}
 	agentQueryBoolFlags   = []string{"local"}
+	agentContextStrFlags  = []string{"why", "ref-type"}
+	agentContextBoolFlags = []string{"none"}
 )
 
 // registerHiddenAgentFlag registers a hidden string flag on agentCmd for a
@@ -779,6 +794,10 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		subargs = reinjectFlags(cmd, subargs, agentQueryStringFlags...)
 		subargs = reinjectBoolFlags(cmd, subargs, agentQueryBoolFlags...)
 		return runAgentQuery(inst, subargs)
+	case "context":
+		subargs = reinjectFlags(cmd, subargs, agentContextStrFlags...)
+		subargs = reinjectBoolFlags(cmd, subargs, agentContextBoolFlags...)
+		return runAgentContext(cmd.OutOrStdout(), inst, subargs)
 	case "distill":
 		if !auth.IsMemoryEnabled() {
 			return fmt.Errorf("memory features are not enabled\nSet FEATURE_MEMORY=true to enable")
@@ -799,7 +818,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	case "hook":
 		return runAgentHook(subargs)
 	default:
-		available := "doctor, heartbeat, hook, query, session, tasks, whisper"
+		available := "context, doctor, heartbeat, hook, query, session, tasks, whisper"
 		if auth.IsMemoryEnabled() {
 			available = "distill, " + available
 		}
