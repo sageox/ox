@@ -495,7 +495,8 @@ why: the lockup ("enriched by" + small mark — never the bare logo) is quiet pr
 ```
 ```css
 .wm-corner{position:fixed;left:14px;bottom:12px;z-index:40;opacity:.75}
-.wm-corner svg{width:96px;height:auto;display:block}
+/* Page-wide SVG minimums must not enlarge the quiet provenance mark. */
+.wm-corner svg{width:96px;min-width:0;max-width:96px;height:auto;display:block}
 .wm-l{display:none}
 html[data-theme="light"] .wm-d{display:none}
 html[data-theme="light"] .wm-l{display:inline}

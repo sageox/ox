@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Read plans without an oversized SageOx logo covering the content** — the `ox viz wordmark` snippet stays small even when the page gives its diagrams a minimum width.
+
 - **Sessions in a git worktree reach the Ledger** — the Claude desktop app runs every session in a linked worktree under `.claude/worktrees/`, and ox judged that worktree to be another repository. No turn was captured, and `session stop` uploaded nothing while reporting success. A worktree of the same repository now counts as part of it; another repository's worktree or clone inside your checkout is still refused.
 - **`ox agent <id>` commands work from every worktree** — `ox agent prime` and later commands each looked up agent IDs in the `.sageox/` of whichever checkout they ran in. The desktop app primes in the main checkout while the AI coworker works in a worktree, so every `ox agent <id> …` there failed with "instance not found". All worktrees of a repository now share the main checkout's agent IDs, and the error names the file it searched.
 - **Sessions longer than a day can still stop themselves** — an agent ID expired 24 hours after `ox agent prime` even while its AI coworker was still running, so `ox agent <id> session stop` failed at the end of a long session. An agent ID now lasts as long as its AI coworker's process does.
