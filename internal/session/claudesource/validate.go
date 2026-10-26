@@ -272,8 +272,10 @@ func withinRepo(repoRoot, cwd string) (bool, error) {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return false, nil
 	}
-	// A nested Git worktree or initialized Ox project owns its own ledger;
-	// containment in the parent's filesystem tree does not imply ownership. Only
+	// A nested clone, another repository's worktree, or an initialized Ox project
+	// owns its own ledger; containment in the parent's filesystem tree does not
+	// imply ownership. A linked worktree of this repo (where Claude Code desktop
+	// runs sessions, under .claude/worktrees) is this repo checked out again. Only
 	// "not there" counts as absence: any other failure to look (EACCES, I/O) is an
 	// error, because a marker that cannot be seen cannot be ruled out.
 	for dir := cwd; dir != repoRoot; {
@@ -285,15 +287,18 @@ func withinRepo(repoRoot, cwd string) (bool, error) {
 			if err != nil {
 				return false, fmt.Errorf("inspect %s: %w", filepath.Join(dir, marker), err)
 			}
-			// a submodule is checked out inside this repo and recorded in its
-			// history; its .git file points back into this repo's own git dir
+			// a submodule or linked worktree of this repo has a .git file that
+			// points back into this repo's own git dir
 			if marker == ".git" && info.Mode().IsRegular() {
-				own, ownErr := isOwnSubmodule(repoRoot, dir)
+				owner, ownErr := classifyGitlink(repoRoot, dir)
 				if ownErr != nil {
 					return false, ownErr
 				}
-				if own {
-					continue
+				if owner == ownWorktree {
+					break // its .sageox config is this repo's own, checked out again
+				}
+				if owner == ownSubmodule {
+					continue // a submodule can still be an Ox project of its own
 				}
 			}
 			return false, nil
@@ -307,40 +312,82 @@ func withinRepo(repoRoot, cwd string) (bool, error) {
 	return true, nil
 }
 
-// isOwnSubmodule reports whether dir's .git file is a gitlink into repoRoot's
-// own modules directory. A linked worktree or a separate clone also has a .git
-// file, but its git dir lives elsewhere, so it stays foreign. A file that cannot
-// be read is an error, not a verdict.
-func isOwnSubmodule(repoRoot, dir string) (bool, error) {
+type gitlinkOwner int
+
+const (
+	foreignGitlink gitlinkOwner = iota
+	ownSubmodule                // a submodule of this repo or of one of its worktrees
+	ownWorktree                 // a linked worktree of this repo
+)
+
+// classifyGitlink places the git dir that dir's .git file names inside
+// repoRoot's git common dir, the way git lays them out: modules/<name> is a
+// submodule, worktrees/<name> a linked worktree, and worktrees/<name>/modules/
+// <name> a submodule of one. Anything else stays foreign: another repository's
+// git dir, a gitlink to nowhere (a pruned worktree), or one that names some
+// other directory. A file that cannot be read is an error, not a verdict.
+func classifyGitlink(repoRoot, dir string) (gitlinkOwner, error) {
 	gitdir, ok, err := readGitlink(filepath.Join(dir, ".git"))
 	if err != nil || !ok {
-		return false, err
+		return foreignGitlink, err
 	}
 	gitdir, err = filepath.EvalSymlinks(gitdir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil // a gitlink to nowhere cannot be vouched for
+		return foreignGitlink, nil // a gitlink to nowhere cannot be vouched for
 	}
 	if err != nil {
-		return false, err
+		return foreignGitlink, err
 	}
-	repoGitDir := filepath.Join(repoRoot, ".git")
-	if info, statErr := os.Lstat(repoGitDir); statErr == nil && info.Mode().IsRegular() {
-		// repoRoot is itself a linked worktree: its submodules live under
-		// the git dir its own .git file names
-		repoGitDir, ok, err = readGitlink(repoGitDir)
-		if err != nil || !ok {
-			return false, err
+	commonDir, ok, err := gitCommonDir(repoRoot)
+	if err != nil || !ok {
+		return foreignGitlink, err
+	}
+	rel, err := filepath.Rel(commonDir, gitdir)
+	if err != nil {
+		return foreignGitlink, nil
+	}
+	parts := strings.Split(rel, string(os.PathSeparator))
+	switch {
+	case parts[0] == "modules" && len(parts) > 1,
+		parts[0] == "worktrees" && len(parts) > 3 && parts[2] == "modules":
+		return ownSubmodule, nil
+	case parts[0] == "worktrees" && len(parts) == 2:
+		return ownWorktree, nil
+	}
+	return foreignGitlink, nil
+}
+
+// gitCommonDir returns repoRoot's git common dir, symlink-resolved. A main
+// checkout's .git directory is its own. When repoRoot is itself a linked
+// worktree or a submodule, its .git file names its git dir, and a worktree's git
+// dir has a commondir file leading back to the shared one. ok is false when the
+// git dir names nothing usable, which can vouch for no gitlink.
+func gitCommonDir(repoRoot string) (dir string, ok bool, err error) {
+	dir = filepath.Join(repoRoot, ".git")
+	if info, statErr := os.Lstat(dir); statErr == nil && info.Mode().IsRegular() {
+		if dir, ok, err = readGitlink(dir); err != nil || !ok {
+			return "", false, err
+		}
+		data, readErr := os.ReadFile(filepath.Join(dir, "commondir"))
+		switch {
+		case readErr == nil:
+			common := strings.TrimSpace(string(data))
+			if !filepath.IsAbs(common) {
+				common = filepath.Join(dir, common)
+			}
+			dir = common
+		case !errors.Is(readErr, fs.ErrNotExist):
+			return "", false, readErr
 		}
 	}
-	repoGitDir, err = filepath.EvalSymlinks(repoGitDir)
+	dir, err = filepath.EvalSymlinks(dir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
+		return "", false, nil
 	}
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
-	rel, err := filepath.Rel(filepath.Join(repoGitDir, "modules"), gitdir)
-	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)), nil
+	return dir, true, nil
 }
 
 // readGitlink returns the absolute git dir a ".git" file points at. ok is false

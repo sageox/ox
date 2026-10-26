@@ -330,14 +330,24 @@ type Instance struct {
 }
 ```
 
-**Storage:** `~/.sageox/agent_instances/<user-slug>/agent_instances.jsonl`.
-Append-only, newest-first scan. 500-instance hard cap.
+**Storage:** `<main checkout>/.sageox/agent_instances/<user-slug>/agent_instances.jsonl`
+(`instanceStoreRoot` in `cmd/ox/agent_instance_store.go`). Append-only,
+newest-first scan. 500-instance hard cap.
 
 **Non-obvious design choices:**
 1. **No registry of "current" instance.** Callers pass the AgentID in via env var
    (`SAGEOX_AGENT_ID`) or CLI arg. There is no global "who am I" state.
 2. **Per-user slug in path** lets multi-user machines coexist without locking.
 3. **Hard cap with eviction** prevents runaway growth if sessions aren't reaped.
+4. **One store for every worktree of a repository.** An AI coworker's commands
+   do not all run in the checkout that primed it: the Claude desktop app runs
+   hooks (and so `ox agent prime`) in the main checkout while the coworker works
+   in a linked worktree under `.claude/worktrees/`. A store per checkout made
+   every later `ox agent <id> …` fail with "instance not found" (#1407). Lookups
+   still fall back to a worktree's own store, where older versions kept it.
+5. **`ExpiresAt` never ends a live agent.** It bounds how long an abandoned
+   instance lingers; an instance whose `ParentPID` is still running keeps
+   resolving past it, so a session longer than a day can still stop itself.
 
 ---
 
