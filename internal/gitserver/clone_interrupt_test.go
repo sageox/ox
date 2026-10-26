@@ -124,15 +124,15 @@ func TestCloneRepo_CanceledCloneLeavesNothingBehind(t *testing.T) {
 			srv := serveStallingRepo(t, 512<<10, 64<<10)
 			target := filepath.Join(t.TempDir(), "ledger")
 			if name == "child ignores interrupt" {
-				git, err := exec.LookPath("git")
+				gitExec, err := exec.Command("git", "--exec-path").Output()
 				require.NoError(t, err)
 				bin := t.TempDir()
-				// Like a transport helper that does not exit on SIGINT, this
-				// child keeps downloading when only its parent is interrupted.
-				script := "#!/bin/sh\ntrap '' INT\n\"$CLONE_TEST_GIT\" \"$@\" &\nwait\n"
-				require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755))
-				t.Setenv("CLONE_TEST_GIT", git)
-				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				// Keep Git itself as the parent so Run waits for its cleanup;
+				// only its HTTP transport ignores SIGINT.
+				script := "#!/bin/sh\ntrap '' INT\nexec \"$CLONE_TEST_REMOTE_HTTP\" \"$@\"\n"
+				require.NoError(t, os.WriteFile(filepath.Join(bin, "git-remote-http"), []byte(script), 0o755))
+				t.Setenv("CLONE_TEST_REMOTE_HTTP", filepath.Join(strings.TrimSpace(string(gitExec)), "git-remote-http"))
+				t.Setenv("GIT_EXEC_PATH", bin)
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())

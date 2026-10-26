@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -214,6 +215,44 @@ func serveDumbHTTP(t *testing.T, bareDir string) string {
 	srv := httptest.NewServer(http.FileServer(http.Dir(bareDir)))
 	t.Cleanup(srv.Close)
 	return srv.URL
+}
+
+// Interrupted recloning must restore the original checkout before returning.
+func TestInvalidHeadRepair_InterruptRestoresOriginal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real Git clone and process signal")
+	}
+	isolateLedgerRepairCredentials(t)
+	const fakeEndpoint = "https://fake-ledger-interrupt.invalid"
+	t.Setenv(endpoint.EnvVar, fakeEndpoint)
+	require.NoError(t, gitserver.SaveCredentialsForEndpoint(fakeEndpoint, gitserver.GitCredentials{
+		Token: "test-token", ServerURL: fakeEndpoint, Username: "oauth2",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}))
+	_, target := setupHealthyLedgerClone(t)
+	url := servePacedGitRepo(t, directFixtureBytes, directPace, 96<<10)
+	runGitLedgerT(t, target, "remote", "set-url", "origin", url)
+	corruptHEADToInvalidRef(t, target)
+	sink := make(chan os.Signal, 1)
+	signal.Notify(sink, os.Interrupt)
+	t.Cleanup(func() { signal.Stop(sink) })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan checkResult, 1)
+	go func() { done <- fixLedgerInvalidHead(ctx, target, "refs/heads/.invalid") }()
+	waitForDownload(t, target, 64<<10)
+	process, err := os.FindProcess(os.Getpid())
+	require.NoError(t, err)
+	require.NoError(t, process.Signal(os.Interrupt))
+	result := <-done
+	require.NoError(t, ctx.Err(), "interruption must stop the clone before its backstop")
+	require.False(t, result.passed)
+	head, err := os.ReadFile(filepath.Join(target, ".git", "HEAD"))
+	require.NoError(t, err)
+	require.Contains(t, string(head), "refs/heads/.invalid")
+	content, err := os.ReadFile(filepath.Join(target, "sessions", "s1.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "session content\n", string(content))
 }
 
 func TestInvalidHeadCheck_FixReClonesAndRestoresStagedContent(t *testing.T) {

@@ -7,8 +7,10 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sageox/ox/internal/endpoint"
@@ -154,6 +156,8 @@ func invalidHeadCheck(ledgerPath string, fix bool) checkResult {
 // own) on this exact path at the same moment this runs.
 func fixLedgerInvalidHead(ctx context.Context, ledgerPath, invalidRef string) checkResult {
 	const name = "Ledger HEAD integrity"
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	var result checkResult
 	if lockErr := gitutil.WithPreCloneLock(ctx, ledgerPath, func() error {
