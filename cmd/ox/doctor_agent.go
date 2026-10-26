@@ -124,7 +124,8 @@ func checkConflictingAgentEnvVars() checkResult {
 }
 
 // checkInstanceStale detects agent instances that have not had recent activity.
-// An instance is considered stale if it was created more than 24 hours ago and has not expired.
+// An instance is considered stale if it was created more than 24 hours ago, has
+// not expired, and its agent process is gone.
 // This helps identify abandoned instances that may be consuming resources.
 func checkInstanceStale(fix bool) checkResult {
 	gitRoot := findGitRoot()
@@ -134,8 +135,11 @@ func checkInstanceStale(fix bool) checkResult {
 			"")
 	}
 
+	// every worktree of the repository shares one instance store
+	storeRoot := instanceStoreRoot(gitRoot)
+
 	// check if .sageox directory exists
-	sageoxDir := filepath.Join(gitRoot, ".sageox")
+	sageoxDir := filepath.Join(storeRoot, ".sageox")
 	if _, err := os.Stat(sageoxDir); os.IsNotExist(err) {
 		return SkippedCheck("Stale instances",
 			"not initialized",
@@ -169,7 +173,7 @@ func checkInstanceStale(fix bool) checkResult {
 		}
 
 		userSlug := entry.Name()
-		store, err := agentinstance.NewStoreForUser(gitRoot, userSlug)
+		store, err := agentinstance.NewStoreForUser(storeRoot, userSlug)
 		if err != nil {
 			continue
 		}
@@ -185,8 +189,9 @@ func checkInstanceStale(fix bool) checkResult {
 			// an instance is stale if:
 			// 1. It was created more than 24 hours ago
 			// 2. It has not expired yet (expired instances are already pruned)
+			// 3. Its agent process is gone (a live agent's instance never expires)
 			instanceAge := now.Sub(inst.CreatedAt)
-			if instanceAge > staleInstanceThreshold {
+			if instanceAge > staleInstanceThreshold && !inst.IsProcessAlive() {
 				staleInstanceInfos = append(staleInstanceInfos, staleInstanceInfo{
 					agentID:   inst.AgentID,
 					userSlug:  userSlug,
@@ -223,7 +228,7 @@ func checkInstanceStale(fix bool) checkResult {
 				continue
 			}
 			userSlug := entry.Name()
-			store, err := agentinstance.NewStoreForUser(gitRoot, userSlug)
+			store, err := agentinstance.NewStoreForUser(storeRoot, userSlug)
 			if err != nil {
 				continue
 			}

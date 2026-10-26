@@ -15,7 +15,7 @@ Quick reference for troubleshooting ox. Scan the section you need.
 | `.repo_*` | Endpoint discovery markers (legacy fallback when config.json endpoint is empty). |
 | `cache/health.json` | When `ox doctor` last ran. Staleness triggers hints. |
 | `sessions/<name>/` | Session recordings: `raw.jsonl`, `meta.json`, `summary.md`, `session.html`. |
-| `agent_instances/<user>/agent_instances.jsonl` | Agent identity registry (agent IDs, models, prime counts). |
+| `agent_instances/<user>/agent_instances.jsonl` | Agent identity registry (agent IDs, models, prime counts). One per repository: every linked worktree uses the main checkout's. |
 
 ### User Level (`~/.config/sageox/`)
 
