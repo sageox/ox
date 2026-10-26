@@ -3,6 +3,7 @@ package pet
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/png"
 	"os"
@@ -379,4 +380,131 @@ func TestTOMLValueEnd(t *testing.T) {
 	} {
 		assert.Equal(t, want, tomlValueEnd(in), in)
 	}
+}
+
+// TestCodexInstaller_NoHome verifies every entry point refuses an unresolved
+// Codex home instead of writing relative to the working directory.
+func TestCodexInstaller_NoHome(t *testing.T) {
+	in := CodexInstaller{Version: "1.0.0", Sheet: tinyCodexSheet}
+	ctx := context.Background()
+	for name, run := range map[string]func() (*CodexResult, error){
+		"enable":  func() (*CodexResult, error) { return in.Enable(ctx) },
+		"disable": func() (*CodexResult, error) { return in.Disable(ctx) },
+		"status":  func() (*CodexResult, error) { return in.Status(ctx) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := run()
+			assert.ErrorContains(t, err, "codex home is not set")
+		})
+	}
+}
+
+// TestCodexEnable_FailuresSurface verifies each step's failure reaches the
+// caller, naming what could not be written. Failure prevented: enable reports
+// success while Codex is left without Oxy's files, selection, or skill.
+func TestCodexEnable_FailuresSurface(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, in *CodexInstaller)
+		want  string
+	}{
+		{
+			name: "sheet build fails",
+			setup: func(t *testing.T, in *CodexInstaller) {
+				in.Sheet = func(string) (*CodexSheet, error) { return nil, errors.New("no art") }
+			},
+			want: "no art",
+		},
+		{
+			name: "pets dir blocked by a file",
+			setup: func(t *testing.T, in *CodexInstaller) {
+				require.NoError(t, os.WriteFile(filepath.Join(in.Home, "pets"), nil, 0o644))
+			},
+			want: "create ",
+		},
+		{
+			name: "skills dir blocked by a file",
+			setup: func(t *testing.T, in *CodexInstaller) {
+				require.NoError(t, os.WriteFile(filepath.Join(in.Home, "skills"), nil, 0o644))
+			},
+			want: "create ",
+		},
+		{
+			name: "config cannot be safely edited",
+			setup: func(t *testing.T, in *CodexInstaller) {
+				cfg := "[tui]\nnote = \"\"\"\npet = \"dewey\"\n\"\"\"\n"
+				require.NoError(t, os.WriteFile(filepath.Join(in.Home, "config.toml"), []byte(cfg), 0o600))
+			},
+			want: "set `pet = \"custom:oxy\"` under [tui] by hand",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := newCodexInstaller(t)
+			tt.setup(t, &in)
+			_, err := in.Enable(context.Background())
+			assert.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
+// TestCodexDisable_UnparseableConfigKeepsPet verifies disable stops before
+// removing files when it cannot deselect Oxy. Failure prevented: Codex left
+// pointing at a pet whose files are gone.
+func TestCodexDisable_UnparseableConfigKeepsPet(t *testing.T) {
+	in := newCodexInstaller(t)
+	_, err := in.Enable(context.Background())
+	require.NoError(t, err)
+	cfg := filepath.Join(in.Home, "config.toml")
+	require.NoError(t, os.WriteFile(cfg, []byte("[tui\npet = \n"), 0o600))
+
+	_, err = in.Disable(context.Background())
+	assert.ErrorContains(t, err, cfg)
+	assert.DirExists(t, CodexDir(in.Home))
+}
+
+func TestCodexStatus_UnparseableConfig(t *testing.T) {
+	in := newCodexInstaller(t)
+	cfg := filepath.Join(in.Home, "config.toml")
+	require.NoError(t, os.WriteFile(cfg, []byte("[tui\n"), 0o600))
+	_, err := in.Status(context.Background())
+	assert.ErrorContains(t, err, cfg)
+}
+
+// TestCodexConfig_UnreadablePath verifies a config.toml that exists but
+// cannot be read is an error, never treated as an empty config.
+func TestCodexConfig_UnreadablePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.Mkdir(path, 0o755))
+
+	_, err := readCodexConfig(path)
+	assert.ErrorContains(t, err, "read "+path)
+	assert.ErrorContains(t, selectCodexPet(path, CodexPetSelector), "read "+path)
+	assert.ErrorContains(t, deselectCodexPet(path, CodexPetSelector), "read "+path)
+}
+
+// TestDeselectCodexPet_RefusesLayoutsItCannotEditSafely verifies a selection
+// the line editor cannot remove is reported, not silently kept.
+func TestDeselectCodexPet_RefusesLayoutsItCannotEditSafely(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	before := "tui.pet = \"custom:oxy\"\n"
+	require.NoError(t, os.WriteFile(path, []byte(before), 0o644))
+	err := deselectCodexPet(path, CodexPetSelector)
+	assert.ErrorContains(t, err, "remove `pet` under [tui] by hand")
+	assert.Equal(t, before, readFile(t, path))
+}
+
+func TestTOMLHeader(t *testing.T) {
+	for line, want := range map[string]string{
+		"[tui]\n":          "tui",
+		" [ tui ] # c\n":   "tui",
+		"[[tui]]\n":        "[tui]",
+		"[[ profiles ]]\n": "[profiles]",
+	} {
+		name, ok := tomlHeader(line)
+		assert.True(t, ok, line)
+		assert.Equal(t, want, name, line)
+	}
+	_, ok := tomlHeader("pet = \"x\"\n")
+	assert.False(t, ok)
 }
