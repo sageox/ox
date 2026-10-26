@@ -295,7 +295,7 @@ func fixRepoPathIssues(gitRoot string, localCfg *config.LocalConfig, issues []re
 			// attempt clone
 			if err := cloneRepoForFix(issue); err != nil {
 				if errors.Is(err, context.Canceled) {
-					return interruptedCloneCheck(gitRoot, localCfg, err)
+					return interruptedCloneCheck(gitRoot, localCfg, fixed, err)
 				}
 				if errors.Is(err, daemon.ErrCheckoutInProgress) {
 					cloning++
@@ -421,7 +421,7 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 			cloning++
 		} else if err != nil {
 			if errors.Is(err, context.Canceled) {
-				return interruptedCloneCheck(gitRoot, localCfg, err)
+				return interruptedCloneCheck(gitRoot, localCfg, fixed, err)
 			}
 			fmt.Printf("    Clone failed: %v\n", err)
 			skipped++
@@ -498,7 +498,7 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 			continue
 		} else if err != nil {
 			if errors.Is(err, context.Canceled) {
-				return interruptedCloneCheck(gitRoot, localCfg, err)
+				return interruptedCloneCheck(gitRoot, localCfg, fixed, err)
 			}
 			fmt.Printf("    Clone failed: %v\n", err)
 			skipped++
@@ -897,9 +897,11 @@ func directLedgerCloneError(ctx context.Context, budget time.Duration, received 
 }
 
 // Keep completed repairs when interruption stops the remaining repositories.
-func interruptedCloneCheck(gitRoot string, localCfg *config.LocalConfig, err error) checkResult {
-	if saveErr := config.SaveLocalConfig(gitRoot, localCfg); saveErr != nil {
-		err = errors.Join(err, fmt.Errorf("save local config: %w", saveErr))
+func interruptedCloneCheck(gitRoot string, localCfg *config.LocalConfig, fixed int, err error) checkResult {
+	if fixed > 0 {
+		if saveErr := config.SaveLocalConfig(gitRoot, localCfg); saveErr != nil {
+			err = errors.Join(err, fmt.Errorf("save local config: %w", saveErr))
+		}
 	}
 	result := FailedCheck("git repo paths", "interrupted", err.Error())
 	result.err = err

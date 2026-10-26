@@ -280,6 +280,8 @@ func TestDoctorFix_DirectLedgerCloneInterrupt(t *testing.T) {
 				target = config.DefaultLedgerPath(projectCfg.RepoID, endpoint.GetForProject(root))
 			}
 			next := target + ".next"
+			finished := target + ".finished"
+			finishedURL := servePacedGitRepo(t, 1<<10, 1<<20, 0)
 			localCfg := &config.LocalConfig{}
 			var result checkResult
 			var output string
@@ -292,6 +294,7 @@ func TestDoctorFix_DirectLedgerCloneInterrupt(t *testing.T) {
 						return
 					}
 					result = fixRepoPathIssues(root, localCfg, []repoPathIssue{
+						{repoType: "ledger", path: finished, endpoint: endpoint.GetForProject(root), cloneURL: finishedURL, issue: "missing"},
 						{repoType: "ledger", path: target, endpoint: endpoint.GetForProject(root), cloneURL: ledgerURL, issue: "missing"},
 						{repoType: "ledger", path: next, endpoint: endpoint.GetForProject(root), cloneURL: ledgerURL, issue: "missing"},
 					})
@@ -299,6 +302,13 @@ func TestDoctorFix_DirectLedgerCloneInterrupt(t *testing.T) {
 			}()
 			t.Cleanup(func() { <-done })
 			waitForDownload(t, target, 64<<10)
+			if name == "first clone" {
+				// A peer's update must survive when this repair changed nothing.
+				require.NoError(t, config.MutateLocalConfig(context.Background(), root, func(cfg *config.LocalConfig) error {
+					cfg.SetTeamContext("team_peer", "Peer", next)
+					return nil
+				}))
+			}
 			process, err := os.FindProcess(os.Getpid())
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = process.Release() })
@@ -311,6 +321,15 @@ func TestDoctorFix_DirectLedgerCloneInterrupt(t *testing.T) {
 			temps, err := filepath.Glob(target + ".tmp-*")
 			require.NoError(t, err)
 			require.Empty(t, temps, "interruption must remove the temporary clone")
+			saved, err := config.LoadLocalConfig(root)
+			require.NoError(t, err)
+			if name == "first clone" {
+				require.Len(t, saved.TeamContexts, 1, "no completed repair means no config write")
+				require.Equal(t, "team_peer", saved.TeamContexts[0].TeamID)
+			} else {
+				require.NotNil(t, saved.Ledger)
+				require.Equal(t, finished, saved.Ledger.Path, "completed repairs must survive interruption")
+			}
 		})
 	}
 }
