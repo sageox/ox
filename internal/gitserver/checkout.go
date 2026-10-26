@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/logger"
@@ -57,10 +56,6 @@ type CheckoutOptions struct {
 	// streams them to os.Stderr.
 	Output io.Writer
 }
-
-// cloneInterruptGrace is how long git gets, once the clone's context ends,
-// to delete its half-written clone before it is killed.
-const cloneInterruptGrace = 5 * time.Second
 
 // DefaultCheckoutPath returns the default checkout path for a repo.
 // For ledger repos, defaults to sibling directory of the working directory.
@@ -185,19 +180,13 @@ func cloneRepo(ctx context.Context, repoURL, path string, creds *GitCredentials,
 	// log without exposing token
 	logger.Debug("git clone", "repo", sanitizeURL(repoURL), "path", path)
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	// Cancel the whole Git process group so a stalled transport child cannot
+	// prevent Git from cleaning up its incomplete checkout.
+	cmd := gitutil.NewNetworkCmd(ctx, args...)
 	cmd.Stderr = os.Stderr // show git progress/errors
 	if opts != nil && opts.Output != nil {
 		cmd.Stderr = opts.Output
 	}
-	// When ctx ends, interrupt git rather than kill it: on SIGINT it deletes
-	// the clone it was writing, the way it does on Ctrl-C. Killed outright,
-	// it would leave a half-written .git at path, whose HEAD points at
-	// refs/heads/.invalid. Where interrupting is unsupported (Windows) or
-	// git does not exit, WaitDelay kills it.
-	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
-	cmd.WaitDelay = cloneInterruptGrace
-
 	if err := cmd.Run(); err != nil {
 		// sanitize args to prevent credential leaks in error messages
 		safeArgs := make([]string, len(args))
