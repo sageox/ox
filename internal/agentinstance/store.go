@@ -380,12 +380,16 @@ func (s *Store) List() ([]*Instance, error) {
 }
 
 // compactIfIdle prunes in the caller's goroutine when no other writer holds the
-// store's file lock, and otherwise leaves compaction to a later read rather
-// than wait for it. It used to run in a background goroutine: a short-lived ox
-// command exited before that finished, and a goroutine that outlived its Get
-// raced whatever removed the store next (a test's temp-dir cleanup).
+// store's mutex or file lock, and otherwise leaves compaction to a later read
+// rather than wait for it: a writer can hold the mutex for up to lockTimeout
+// while it waits on the file lock. It used to run in a background goroutine: a
+// short-lived ox command exited before that finished, and a goroutine that
+// outlived its Get raced whatever removed the store next (a test's temp-dir
+// cleanup).
 func (s *Store) compactIfIdle() {
-	s.mu.Lock()
+	if !s.mu.TryLock() {
+		return
+	}
 	defer s.mu.Unlock()
 
 	lock := flock.New(s.instancesPath + ".lock")

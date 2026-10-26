@@ -242,6 +242,27 @@ func TestCompactionNeverOutlivesOrStallsItsCaller(t *testing.T) {
 		},
 		"List": func(s *Store) error { _, err := s.List(); return err },
 	}
+	t.Run("a busy store mutex skips compaction", func(t *testing.T) {
+		// another goroutine's writer holding the mutex while it waits on the
+		// file lock, the way Prune can for up to lockTimeout
+		store := seed(t)
+		store.mu.Lock()
+		done := make(chan struct{})
+		go func() {
+			store.compactIfIdle()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(lockTimeout / 2):
+			t.Error("compaction waited for a busy store mutex; it must skip instead")
+		}
+		store.mu.Unlock()
+		<-done
+		if !storeHolds(t, store, "OxOld3") {
+			t.Error("compaction must not run while another writer holds the store mutex")
+		}
+	})
 	for name, read := range reads {
 		t.Run(name+" compacts before returning", func(t *testing.T) {
 			store := seed(t)
