@@ -23,6 +23,7 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/proc"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/sessionid"
 	"github.com/sageox/ox/internal/trace/model"
 )
@@ -291,6 +292,30 @@ type RecordingState struct {
 	// "the most recent attempt did not land" signal that `ox doctor` and
 	// `ox session status` report.
 	DraftAttemptTurn int `json:"draft_attempt_turn,omitempty"`
+}
+
+// UnmarshalJSON reads a recording state, spelling its adapter the way the
+// Claude-only checks do (see canonicalRecordingAdapter), so a recording saved
+// before that spelling was fixed is checked like any other.
+func (r *RecordingState) UnmarshalJSON(data []byte) error {
+	type plain RecordingState
+	if err := json.Unmarshal(data, (*plain)(r)); err != nil {
+		return err
+	}
+	r.AdapterName = canonicalRecordingAdapter(r.AdapterName)
+	return nil
+}
+
+// canonicalRecordingAdapter spells every Claude Code alias "claude-code", the
+// name the adapter registry and the Claude-only ownership checks use.
+// `ox agent prime` records the agent type, "claude", and every check written
+// against "claude-code" silently skipped those recordings. Other adapters keep
+// the name their checks were written against.
+func canonicalRecordingAdapter(name string) string {
+	if canonical := adapters.CanonicalAdapterName(name); canonical == "claude-code" {
+		return canonical
+	}
+	return name
 }
 
 // Duration returns how long the recording has been running.
@@ -1558,7 +1583,7 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		AgentSessionID:         opts.AgentSessionID,
 		SessionID:              sessionid.GenerateSessionID(),
 		ContinuedFromSessionID: continuedFromSessionID,
-		AdapterName:            opts.AdapterName,
+		AdapterName:            canonicalRecordingAdapter(opts.AdapterName),
 		SessionFile:            opts.SessionFile,
 		OutputFile:             sessionFile,
 		SessionPath:            sessionPath,

@@ -638,9 +638,15 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		}
 	}
 
-	// process session: read, redact secrets, extract events, save
+	// process session: read, redact secrets, extract events, save. With no
+	// native file to read, what the cache already holds (hook batches,
+	// capture-prior, session log) is still the session: finalize it, as recover
+	// would, rather than leave the recording live for 'ox session upload' to
+	// refuse. An empty cache keeps the recording: an undiscovered source does
+	// not prove the session empty, and a later stop can still find it.
+	cacheHasEntries := state.SessionPath != "" && session.HasSubstantiveEntries(filepath.Join(state.SessionPath, "raw.jsonl"))
 	var processResult *agentSessionResult
-	if state.SessionFile != "" || state.AdapterName == "cursor" {
+	if state.SessionFile != "" || state.AdapterName == "cursor" || cacheHasEntries {
 		processStart := time.Now()
 		// Serialize with the raw.jsonl writer's file lock so processAgentSession
 		// (RecoverRawAppend + drain) never runs concurrently with a hook or
