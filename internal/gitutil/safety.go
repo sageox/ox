@@ -365,9 +365,6 @@ func IsSafeForGitOps(repoPath string) error {
 // IsSafeForIndexWrite refuses active Git operations and unresolved entries
 // before add/rm can mark a conflict resolved. The caller holds WithRepoLock.
 func IsSafeForIndexWrite(ctx context.Context, repoPath string) error {
-	if !IsGitRepo(repoPath) {
-		return fmt.Errorf("cannot write index: %s is not a Git checkout", repoPath)
-	}
 	if err := IsSafeForGitOps(repoPath); err != nil {
 		return err
 	}

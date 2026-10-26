@@ -197,7 +197,7 @@ The CLI reads and writes review records only through `pkg/planreview`.
   squash commits the tree of the commits it collapses, so neither carries a
   staged plan file (#1442). The mass-deletion guard does not count removed
   `*.rej` and `*.needs-summary` files (#1443).
-- **Index preflight** (#1355): Ledger snapshots require the expected Git checkout and refuse unresolved index entries. Plan staging uses the same check before it can mark a conflict resolved.
+- **Index preflight** (#1355): Ledger snapshots refuse unresolved index entries before taking a snapshot. Plan staging uses the same check before it can mark a conflict resolved.
 - **Plan changes no retry owns** (`ox doctor`, just before
   `plan-pending-writes`): a plan dir with uncommitted changes, no plan retry
   marker, and changes outside the review records an entry lands. If its
