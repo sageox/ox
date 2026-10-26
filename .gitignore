@@ -94,6 +94,7 @@ sessions/
 !/.claude-plugin/
 !/claude-plugin/.claude-plugin/
 !/internal/pet/mod/.claude-plugin/
+!/internal/usagepane/mod/.claude-plugin/
 
 # Claude Code local settings (user-specific)
 .claude/settings.local.json

@@ -67,6 +67,15 @@ files only (no network, no daemon). A `statusLine` already in the project file i
 replaced; one in your own `~/.claude/settings.json` keeps working, with ox's line
 appended after it. Turn it off with `ox config set statusline off`.
 
+**Usage pane.** `/ox-usage` opens a pane beside the chat with this session's usage
+summary (calls, context injected, items surfaced and used) and a scrollable list of every
+ox call, refreshed as they happen. It is a Claude Code plugin, `ox-cli-usage-pane`, that
+`ox init` and `ox doctor` install at user scope when the `claude` CLI is on PATH (Claude
+Code 2.1.309 or newer); the same mechanism ships Oxy (`ox pet`). The pane is a thin view
+over `ox usage --json`, so it shows exactly what `/ox-cli-usage` reports. `/ox-usage off`
+closes it, `ox config set usage_pane off` removes it, and `ox usage pane status` shows
+whether it is installed.
+
 ## Canonical Agent Skills
 
 ox authors every portable playbook once in `extensions/skills/`, in the open

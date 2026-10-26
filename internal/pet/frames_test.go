@@ -286,7 +286,7 @@ func TestWriteMod_StampsVersionAndDropsStaleFiles(t *testing.T) {
 	}
 	plugin, err := os.ReadFile(filepath.Join(dir, ".claude-plugin", "plugin.json"))
 	require.NoError(t, err)
-	assert.False(t, strings.Contains(string(plugin), versionPlaceholder), "placeholder left in plugin.json")
+	assert.False(t, strings.Contains(string(plugin), "{{VERSION}}"), "placeholder left in plugin.json")
 
 	entries, err := os.ReadDir(filepath.Dir(dir))
 	require.NoError(t, err)

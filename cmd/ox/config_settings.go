@@ -249,6 +249,24 @@ Turn it off to keep those surfaces free of ox output.`,
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
+		Key:         "usage_pane",
+		Label:       "Usage pane",
+		Description: "Show the /ox-usage pane in Claude Code (installs the ox-cli-usage-pane plugin)",
+		LongDescription: `Controls whether ox keeps the /ox-usage pane installed in Claude Code.
+
+The pane lists this session's ox calls under the usage summary. It is the
+Claude Code plugin ox-cli-usage-pane@ox-cli-usage, installed at user scope;
+/ox-usage opens it and /ox-usage off closes it.
+
+  on  - ox installs the plugin (ox init, ox doctor --fix, and right away
+        when you set this) and keeps it on this ox's version (default).
+  off - ox removes the plugin and its files.`,
+		Category:    "Display",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
 		Key:         "recap.trace_consultations",
 		Label:       "Trace consultations",
 		Description: "Record what your AI coworker read and which ox calls it made.",
@@ -833,6 +851,12 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.UserVal = boolToOnOff(*userCfg.StatuslineEnabled)
 		}
 
+	case "usage_pane":
+		// only an explicit value counts as a user layer (see statusline)
+		if userCfg != nil && userCfg.UsagePaneEnabled != nil {
+			cv.UserVal = boolToOnOff(*userCfg.UsagePaneEnabled)
+		}
+
 	case "recap.trace_consultations":
 		// only an explicit value counts as a user layer (see statusline)
 		if userCfg != nil && userCfg.Recap != nil && userCfg.Recap.TraceConsultations != nil {
@@ -1147,6 +1171,10 @@ func setUserConfig(key, value string) error {
 	case "statusline":
 		enabled := value == "on"
 		cfg.StatuslineEnabled = &enabled
+
+	case "usage_pane":
+		enabled := value == "on"
+		cfg.UsagePaneEnabled = &enabled
 
 	case "recap.trace_consultations":
 		enabled := value == "on"
@@ -1481,6 +1509,9 @@ func unsetUserConfig(key string) error {
 
 	case "statusline":
 		cfg.StatuslineEnabled = nil
+
+	case "usage_pane":
+		cfg.UsagePaneEnabled = nil
 
 	case "recap.trace_consultations":
 		if cfg.Recap != nil {

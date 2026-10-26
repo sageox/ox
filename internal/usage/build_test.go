@@ -237,3 +237,35 @@ func TestBuild_CapsSurfacedAndRecent(t *testing.T) {
 	assert.Len(t, r.Calls.Recent, maxRecent)
 	assert.Equal(t, 30, r.Calls.Total)
 }
+
+// TestBuild_RecentLimit: --recent widens calls.recent for a coworker who wants
+// the full call list, without changing the default payload or the display.
+// Failure prevented: `ox usage --recent 0` still truncates at 10, or the
+// default report grows.
+func TestBuild_RecentLimit(t *testing.T) {
+	var events []contexttrace.Event
+	for i := range 25 {
+		events = append(events, invoked("checked murmurs", "murmur list", 1, i+1))
+	}
+	base := Build(Input{TraceSource: TraceSourceSession, Events: events})
+	tests := []struct {
+		name  string
+		limit int
+		want  int
+	}{
+		{"default keeps the last 10", 0, 10},
+		{"all keeps every call", RecentAll, 25},
+		{"any negative keeps every call", -7, 25},
+		{"explicit 5", 5, 5},
+		{"limit above total keeps every call", 100, 25},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Build(Input{TraceSource: TraceSourceSession, Events: events, RecentLimit: tt.limit})
+			require.Len(t, r.Calls.Recent, tt.want)
+			assert.Equal(t, 25, r.Calls.Recent[0].Seq, "newest first")
+			assert.Equal(t, 25-tt.want+1, r.Calls.Recent[tt.want-1].Seq)
+			assert.Equal(t, base.Display, r.Display, "display is for humans and ignores --recent")
+		})
+	}
+}

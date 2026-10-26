@@ -1,0 +1,67 @@
+---
+title: "ox usage"
+description: "CLI reference for ox usage"
+sidebar_position: 121
+---
+
+## ox usage
+
+Show what ox did in this session
+
+### Synopsis
+
+Show what ox did in this session: the ox calls your AI coworker made, how
+much context ox put in front of the model (estimated tokens), which team items
+were surfaced by name, and which of those the AI coworker reports it used.
+
+When called by an AI coworker it emits JSON with a pre-rendered display and
+guidance; in a bare terminal it prints the same report. --me rolls up your
+recent sessions; --team shows a team-wide aggregate only — never who did what.
+
+In the session view, calls.recent in the JSON lists the 10 newest ox calls;
+--recent N widens it (0 = every call). The display text is unchanged.
+
+```
+ox usage [flags]
+```
+
+### Examples
+
+```
+  ox usage                     # this session
+  ox usage --session <name>    # a recorded session in the Ledger
+  ox usage --me --since 14d    # your recent sessions, one row each
+  ox usage --team              # team-wide aggregate (no per-person data)
+  ox usage --json              # structured report for AI coworkers
+  ox usage --json --recent 0   # every ox call in calls.recent
+```
+
+### Options
+
+```
+  -h, --help             help for usage
+      --json             structured JSON report for AI coworkers
+      --limit int        maximum sessions for --me (default 10)
+      --me               roll up your recent sessions, one row each
+      --recent int       session view: ox calls listed in the JSON calls.recent (0 = all) (default 10)
+      --session string   report a recorded session by name instead of the current one
+      --since string     window for --me and --team (e.g. 7d, 24h, or an ISO date) (default "7d")
+      --team             team-wide aggregate across all coworkers' sessions (no per-person data)
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
+```
+
+### SEE ALSO
+
+* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox usage pane](/usage/pane)	 - Show this session's ox calls in a Claude Code pane

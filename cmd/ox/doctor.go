@@ -911,6 +911,13 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 			integrationChecks = append(integrationChecks, res)
 		}
 	}
+	// The /ox-usage pane follows the usage_pane setting (default on); silent
+	// on machines without the claude CLI.
+	if check := GetDoctorCheck(CheckSlugUsagePane); check != nil {
+		if res := check.Run(opts.shouldFix(CheckSlugUsagePane)); !res.skipped {
+			integrationChecks = append(integrationChecks, res)
+		}
+	}
 	integrationChecks = append(integrationChecks, checkClaudeSkills(opts.shouldFix(CheckSlugClaudeSkills)))
 	legacyCheck, legacyPending := checkLegacyOxFilesWithPreflight(legacyRoot, legacyFix, legacyPreflight)
 	// The ox-managed inventory: keep ox's own files ignored, report any that are

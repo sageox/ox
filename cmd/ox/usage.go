@@ -28,12 +28,16 @@ were surfaced by name, and which of those the AI coworker reports it used.
 
 When called by an AI coworker it emits JSON with a pre-rendered display and
 guidance; in a bare terminal it prints the same report. --me rolls up your
-recent sessions; --team shows a team-wide aggregate only — never who did what.`,
+recent sessions; --team shows a team-wide aggregate only — never who did what.
+
+In the session view, calls.recent in the JSON lists the 10 newest ox calls;
+--recent N widens it (0 = every call). The display text is unchanged.`,
 	Example: `  ox usage                     # this session
   ox usage --session <name>    # a recorded session in the Ledger
   ox usage --me --since 14d    # your recent sessions, one row each
   ox usage --team              # team-wide aggregate (no per-person data)
-  ox usage --json              # structured report for AI coworkers`,
+  ox usage --json              # structured report for AI coworkers
+  ox usage --json --recent 0   # every ox call in calls.recent`,
 	Args: cobra.NoArgs,
 	RunE: runUsage,
 }
@@ -44,6 +48,7 @@ func init() {
 	usageCmd.Flags().Bool("team", false, "team-wide aggregate across all coworkers' sessions (no per-person data)")
 	usageCmd.Flags().String("since", "7d", "window for --me and --team (e.g. 7d, 24h, or an ISO date)")
 	usageCmd.Flags().Int("limit", 10, "maximum sessions for --me")
+	usageCmd.Flags().Int("recent", 10, "session view: ox calls listed in the JSON calls.recent (0 = all)")
 	usageCmd.Flags().Bool("json", false, "structured JSON report for AI coworkers")
 	usageCmd.MarkFlagsMutuallyExclusive("session", "me", "team")
 }
@@ -78,6 +83,17 @@ func runUsage(cmd *cobra.Command, _ []string) error {
 	}
 	in.Now = time.Now()
 	in.Width = width
+	if cmd.Flags().Changed("recent") {
+		recent, _ := cmd.Flags().GetInt("recent")
+		switch {
+		case recent < 0:
+			return fmt.Errorf("--recent must be 0 (all) or positive, got %d", recent)
+		case recent == 0:
+			in.RecentLimit = usage.RecentAll
+		default:
+			in.RecentLimit = recent
+		}
+	}
 	r := usage.Build(in)
 
 	return writeUsageReport(cmd.OutOrStdout(), jsonOut, r, func() string { return usage.Human(r, width) })

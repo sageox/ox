@@ -31,7 +31,14 @@ type Input struct {
 
 	Now   time.Time
 	Width int // display width; 0 → 80
+
+	// RecentLimit caps calls.recent: 0 → the default (10), RecentAll (or any
+	// negative value) → every call. Display is unaffected.
+	RecentLimit int
 }
+
+// RecentAll is the Input.RecentLimit that keeps every call in calls.recent.
+const RecentAll = -1
 
 // primeCommand is the Command prime records for itself.
 const primeCommand = "agent prime"
@@ -58,7 +65,7 @@ func Build(in Input) Report {
 	if r.Trace.Source == "" {
 		r.Trace.Source = TraceSourceNone
 	}
-	r.Calls = buildCalls(in.Events)
+	r.Calls = buildCalls(in.Events, in.RecentLimit)
 	r.Injected = buildInjected(in.Events)
 	r.Surfaced = buildSurfaced(in.Events)
 	r.Used = buildUsed(in, r.Surfaced)
@@ -68,7 +75,7 @@ func Build(in Input) Report {
 	return r
 }
 
-func buildCalls(events []contexttrace.Event) Calls {
+func buildCalls(events []contexttrace.Event, recentLimit int) Calls {
 	c := Calls{ByCommand: []CommandStat{}, Recent: []RecentCall{}}
 	idx := map[string]int{}
 	var all []RecentCall
@@ -101,8 +108,15 @@ func buildCalls(events []contexttrace.Event) Calls {
 	if len(c.ByCommand) > maxByCmd {
 		c.ByCommand = c.ByCommand[:maxByCmd]
 	}
+	limit := recentLimit
+	switch {
+	case limit == 0:
+		limit = maxRecent
+	case limit < 0:
+		limit = len(all)
+	}
 	// newest first: the trace is append-only, so reverse file order.
-	for i := len(all) - 1; i >= 0 && len(c.Recent) < maxRecent; i-- {
+	for i := len(all) - 1; i >= 0 && len(c.Recent) < limit; i-- {
 		c.Recent = append(c.Recent, all[i])
 	}
 	return c

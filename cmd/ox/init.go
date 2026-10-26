@@ -776,6 +776,10 @@ func runInit() error {
 	// <root><root>/.codex/hooks.json, and one such entry failed the whole
 	// `git add`, leaving even .claude/settings.json unstaged.
 	installedHooks := installAgentHooks(gitRoot, true, selectedAgents) // quiet — summarized below
+	if selectedAgents["claude-code"] {
+		// user-scope Claude Code plugin, not a repo file: nothing to stage or roll back
+		ensureUsagePane(initQuiet)
+	}
 
 	// Snapshot every scoped ignore file that ALREADY EXISTS, before writing any of
 	// them. trackModifiedFile snapshots eagerly, at call time — so calling it after

@@ -309,6 +309,7 @@ type UserConfig struct {
 	DisplayName       string       `yaml:"display_name,omitempty"`
 	TipsEnabled       *bool        `yaml:"tips_enabled,omitempty"`
 	StatuslineEnabled *bool        `yaml:"statusline_enabled,omitempty"` // activity line in harnesses; nil = on
+	UsagePaneEnabled  *bool        `yaml:"usage_pane_enabled,omitempty"` // /ox-usage pane in Claude Code; nil = on
 	TelemetryEnabled  *bool        `yaml:"telemetry_enabled,omitempty"`
 	SessionTermsShown *bool        `yaml:"session_terms_shown,omitempty"`
 	Attribution       *Attribution `yaml:"attribution,omitempty"`
@@ -474,6 +475,15 @@ func (c *UserConfig) IsStatuslineEnabled() bool {
 		return true
 	}
 	return *c.StatuslineEnabled
+}
+
+// IsUsagePaneEnabled reports whether ox should keep the /ox-usage pane
+// installed in Claude Code (default: true).
+func (c *UserConfig) IsUsagePaneEnabled() bool {
+	if c == nil || c.UsagePaneEnabled == nil {
+		return true
+	}
+	return *c.UsagePaneEnabled
 }
 
 // RecapConfig holds the user-level `recap.*` settings.

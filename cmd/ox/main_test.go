@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/claudemod"
 	"github.com/sageox/ox/internal/testguard"
 	"github.com/sageox/ox/internal/testutil/slogquiet"
 	"github.com/stretchr/testify/assert"
@@ -131,6 +132,19 @@ func TestMain(m *testing.M) {
 		_ = os.Chdir(packageDir)
 		_ = os.RemoveAll(sandbox)
 		os.Exit(1)
+	}
+
+	// Never drive the developer's real claude CLI: ox doctor --fix, ox init,
+	// and `ox config set usage_pane` would install the /ox-usage pane into it.
+	// Tests that want a claude CLI put a fake one on PATH and set
+	// FAKE_CLAUDE_STATE.
+	realUsagePaneInstaller := newUsagePaneInstaller
+	newUsagePaneInstaller = func() claudemod.Installer {
+		in := realUsagePaneInstaller()
+		if os.Getenv("FAKE_CLAUDE_STATE") == "" {
+			in.Claude = nil
+		}
+		return in
 	}
 
 	code := m.Run()
