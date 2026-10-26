@@ -86,7 +86,7 @@ func TestTraceWhisperDelivery_RecordsInlineTokens(t *testing.T) {
 
 	content := strings.Repeat("x", 400)
 	traceWhisperDelivery(projectRoot, "OxWh01", []whisperstore.WhisperEntry{
-		{ID: "m1", Source: "murmur", Topic: "wip", Content: content, AgentID: "OxOther", Scope: "team"},
+		{ID: "m1", Source: "murmur", Topic: "wip", Content: content, AgentID: "OxOther", Scope: "team", PrincipalID: "dana-smith"},
 	})
 
 	events, err := contexttrace.ReadEvents(filepath.Join(state.SessionPath, contexttrace.FileName))
@@ -95,4 +95,7 @@ func TestTraceWhisperDelivery_RecordsInlineTokens(t *testing.T) {
 	assert.Equal(t, contexttrace.EventProvided, events[0].Type, "whisper delivery stays a provided event")
 	assert.Equal(t, tokens.EstimateTokens(content), events[0].InlineTokens)
 	assert.Equal(t, 100, events[0].InlineTokens)
+	assert.Equal(t, "m1", events[0].Ref)
+	assert.NotEmpty(t, events[0].FromName, "sender name travels with the delivery so a used murmur can be credited")
+	assert.Equal(t, whisperFromName(whisperstore.WhisperEntry{PrincipalID: "dana-smith"}), events[0].FromName)
 }
