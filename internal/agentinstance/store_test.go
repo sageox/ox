@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -134,6 +135,68 @@ func TestGetExpired(t *testing.T) {
 	}
 	if errors.Is(err, ErrInstanceNotFound) {
 		t.Errorf("Get(expired) error = %v, must not report not-found", err)
+	}
+}
+
+// TestGetReportsExpiryWhatEverPrunesAfterItsRead: a lookup of an expired
+// instance must answer "expired" from what it read, however soon a prune drops
+// the record afterwards: the background prune the lookup itself launches (it
+// found enough expired records to trigger compaction), or one from another ox
+// process sharing the store.
+// Failure prevented: `ox agent <id> …` for an expired agent intermittently says
+// "instance not found" instead of "instance expired" (seen as a CI flake in
+// TestLiveAgentOutlivesExpiresAt and TestGetExpired).
+func TestGetReportsExpiryWhatEverPrunesAfterItsRead(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// live records beside the expired one: with nine, one record in ten has
+		// expired, too few for Get to launch a prune of its own (shouldCompact)
+		live  int
+		prune func(t *testing.T, store *Store)
+	}{
+		{"the prune Get launches", 0, func(t *testing.T, store *Store) { store.pruneWG.Wait() }},
+		{"another process's prune", 9, func(t *testing.T, store *Store) {
+			other, err := NewStoreForUser(store.projectRoot, store.userSlug)
+			if err != nil {
+				t.Errorf("open the store as another process: %v", err)
+				return
+			}
+			if n, err := other.Prune(); err != nil || n != 1 {
+				t.Errorf("another process's prune = %d, %v; want the expired record dropped", n, err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+			store.expiryCheckTestHook = func() { tc.prune(t, store) }
+			past := time.Now().Add(-time.Hour)
+			if err := store.Add(&Instance{AgentID: "OxOld2", ServerSessionID: "oxsid_old", CreatedAt: past.Add(-24 * time.Hour), ExpiresAt: past}); err != nil {
+				t.Fatalf("add: %v", err)
+			}
+			for i := range tc.live {
+				if err := store.Add(activeInstance(fmt.Sprintf("OxLiv%d", i))); err != nil {
+					t.Fatalf("add live: %v", err)
+				}
+			}
+
+			if _, err := store.Get("OxOld2"); !errors.Is(err, ErrInstanceExpired) {
+				t.Fatalf("Get(expired) = %v, want ErrInstanceExpired", err)
+			}
+
+			// the prune ran and dropped the record; the next lookup finds nothing
+			store.expiryCheckTestHook = nil
+			store.pruneWG.Wait()
+			data, err := os.ReadFile(store.Path())
+			if err != nil {
+				t.Fatalf("read store: %v", err)
+			}
+			if strings.Contains(string(data), "OxOld2") {
+				t.Errorf("the prune must still drop the expired record; store holds %q", data)
+			}
+			if _, err := store.Get("OxOld2"); !errors.Is(err, ErrInstanceNotFound) {
+				t.Errorf("Get after the prune = %v, want ErrInstanceNotFound", err)
+			}
+		})
 	}
 }
 
