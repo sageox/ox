@@ -246,14 +246,7 @@ func commitPlanPathsLocked(ctx context.Context, ledgerPath, msg, rel string, fil
 // resolved with its conflict markers inside, erasing the conflict the daemon
 // and `ox doctor` look for. The caller holds the repo lock.
 func ledgerSafeForPlanWrite(ctx context.Context, ledgerPath string) error {
-	err := gitutil.IsSafeForGitOps(ledgerPath)
-	if err == nil {
-		var unmerged bool
-		if unmerged, err = gitutil.HasUnmergedEntries(ctx, ledgerPath); err == nil && unmerged {
-			err = errors.New("the index holds unresolved conflicts")
-		}
-	}
-	if err != nil {
+	if err := gitutil.IsSafeForIndexWrite(ctx, ledgerPath); err != nil {
 		return fmt.Errorf("%w: %w", errLedgerNotSafe, err)
 	}
 	return nil

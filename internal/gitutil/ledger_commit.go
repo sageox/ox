@@ -73,20 +73,7 @@ func CommitLedgerSnapshot(ctx context.Context, repoPath, message string, pathspe
 // summary requests the guard never counts (assertNoSacredMassDeletion), no
 // other path is exempt, and there is no switch that disables the guard.
 func CommitLedgerSnapshotPreserving(ctx context.Context, repoPath, message string, preserved []string, pathspecs ...string) (committed bool, err error) {
-	// Never mutate the ledger mid-rebase: moving the branch ref under a rebase
-	// consumes the replay step (see .claude/rules/cache-only-design.md).
-	if err := IsSafeForGitOps(repoPath); err != nil {
-		return false, fmt.Errorf("unsafe Ledger commit: %w", err)
-	}
-
-	// Global fail-closed check on the real index, even for a path-scoped
-	// commit: git refuses every commit while any stage is unresolved, and the
-	// temporary index below would otherwise hide the conflict from write-tree.
-	tree, err := writeIndexTree(ctx, repoPath, nil)
-	if err != nil {
-		return false, err
-	}
-	parent, err := currentBranchTip(ctx, repoPath)
+	tree, parent, err := ledgerIndexSnapshot(ctx, repoPath)
 	if err != nil {
 		return false, err
 	}
@@ -116,6 +103,20 @@ func CommitLedgerSnapshotPreserving(ctx context.Context, repoPath, message strin
 		return false, err
 	}
 	return true, nil
+}
+
+// ledgerIndexSnapshot checks the real index before any path-scoped tree can
+// hide a conflict, and captures the branch tip shared by all commit modes.
+func ledgerIndexSnapshot(ctx context.Context, repoPath string) (string, string, error) {
+	if err := IsSafeForIndexWrite(ctx, repoPath); err != nil {
+		return "", "", fmt.Errorf("unsafe Ledger commit: %w", err)
+	}
+	tree, err := writeIndexTree(ctx, repoPath, nil)
+	if err != nil {
+		return "", "", err
+	}
+	tip, err := currentBranchTip(ctx, repoPath)
+	return tree, tip, err
 }
 
 // commitLedgerTree validates tree's delta from parent, refuses it if it deletes

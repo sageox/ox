@@ -455,3 +455,29 @@ func TestCommitLedgerSnapshot_NoOverrideEnv(t *testing.T) {
 	assert.False(t, committed)
 	assert.True(t, headHasPath(t, repo, paths[0]))
 }
+
+// A missing nested Ledger must not let Git walk up and commit the enclosing
+// project's staged draft. The refusal must preserve both copies of that draft.
+func TestCommitLedgerSnapshot_MissingCheckoutPreservesEnclosingDraft(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
+	repo := newSnapshotRepo(t)
+	writeGitutilFixture(t, repo, "draft.txt", "staged draft\n")
+	gitInRepo(t, repo, "add", "draft.txt")
+	writeGitutilFixture(t, repo, "draft.txt", "later working draft\n")
+	head := gitInRepo(t, repo, "rev-parse", "HEAD")
+	index := gitInRepo(t, repo, "ls-files", "--stage")
+	target := filepath.Join(repo, "missing-ledger")
+	require.NoError(t, os.Mkdir(target, 0755))
+
+	committed, err := CommitLedgerSnapshot(context.Background(), target, "maintenance")
+
+	require.ErrorContains(t, err, "not a Git checkout")
+	assert.False(t, committed)
+	assert.Equal(t, head, gitInRepo(t, repo, "rev-parse", "HEAD"))
+	assert.Equal(t, index, gitInRepo(t, repo, "ls-files", "--stage"))
+	working, err := os.ReadFile(filepath.Join(repo, "draft.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "later working draft\n", string(working))
+}
