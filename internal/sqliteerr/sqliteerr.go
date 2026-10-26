@@ -30,6 +30,14 @@ func IsBusy(err error) bool {
 	return isCode(err, sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
 }
 
+// IsReadOnly reports whether err is SQLITE_READONLY or one of its extended
+// codes: SQLite needed to write (the database, its WAL index, or a journal) and
+// could not, because the connection, file, or directory is read-only, or because
+// PRAGMA query_only is set.
+func IsReadOnly(err error) bool {
+	return isCode(err, sqlite3.SQLITE_READONLY)
+}
+
 // isCode reports whether err is a SQLite error whose primary result code is
 // one of want. Extended codes carry the primary in the low byte
 // (SQLITE_BUSY_SNAPSHOT is SQLITE_BUSY | 2<<8), so the comparison masks it off
