@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/session/contextuse"
 	"github.com/sageox/ox/internal/trace/model"
 )
 
@@ -106,6 +107,20 @@ type SessionMeta struct {
 	SageoxScore         *float64   `json:"sageox_score,omitempty"`          // agent's self-reported contribution score (0.0-1.0)
 	SageoxScoreCategory string     `json:"sageox_score_category,omitempty"` // named category: none, minor, moderate, significant, critical
 	SageoxScoreReason   string     `json:"sageox_score_reason,omitempty"`   // detailed explanation of SageOx influence
+
+	// SageoxScoreSource records where SageoxScore came from: "self-reported"
+	// when a per-agent score file was consumed at finalize, "" otherwise
+	// (legacy meta, or no score was ever written). Lets readers tell an
+	// agent's own claim apart from the derived ContextUse category without
+	// sniffing which fields happen to be populated. omitempty for round-trip.
+	SageoxScoreSource string `json:"sageox_score_source,omitempty"`
+
+	// ContextUse is the surfaced-vs-used rollup derived at finalize from the
+	// session's context-trace.jsonl (contextuse.Build). Refs only, never
+	// content. Nil when the recording produced no trace events. A draft
+	// placeholder MUST NOT carry it — a draft is counters-only and purged
+	// wholesale at finalize (validateDraftShape). omitempty for round-trip.
+	ContextUse *contextuse.Rollup `json:"context_use,omitempty"`
 
 	// SummaryStatus and ValidationError mirror the same-named fields on
 	// pkg/sessionsummary.SummarizeResponse. SummaryStatus is the
@@ -728,6 +743,20 @@ func (b *SessionMetaBuilder) SageoxScore(score float64, category, reason string)
 	return b
 }
 
+// SageoxScoreSource stamps where the sageox_score came from
+// (SageoxScoreSourceSelfReported when a score file was consumed).
+func (b *SessionMetaBuilder) SageoxScoreSource(source string) *SessionMetaBuilder {
+	b.meta.SageoxScoreSource = source
+	return b
+}
+
+// ContextUse attaches the finalize-time context-use rollup. A nil rollup
+// leaves the field unset so meta.json omits it.
+func (b *SessionMetaBuilder) ContextUse(r *contextuse.Rollup) *SessionMetaBuilder {
+	b.meta.ContextUse = r
+	return b
+}
+
 // SummaryStatus stamps the lifecycle status (ok / pending /
 // failed_validation / unrecoverable). Use the SummaryStatus* constants
 // from pkg/sessionsummary, mirrored here.
@@ -759,6 +788,10 @@ func (b *SessionMetaBuilder) Build() *SessionMeta {
 }
 
 const metaFilename = "meta.json"
+
+// SageoxScoreSourceSelfReported is the SageoxScoreSource value for a score the
+// AI coworker reported about itself via the per-agent score file.
+const SageoxScoreSourceSelfReported = "self-reported"
 
 // WriteSessionMeta writes meta.json to the given session directory.
 // When meta.Files is populated, also replaces content files with LFS pointer
