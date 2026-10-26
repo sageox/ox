@@ -42,10 +42,12 @@ func recordStatuslineToolCall(projectRoot, agentID, toolName string, toolInput j
 	if !ok || !statuslineEnabled() {
 		return
 	}
-	state := oxactivity.LoadState(projectRoot, agentID)
-	state.LastAction = act.Label
-	state.LastActionAt = now
-	if err := oxactivity.SaveState(projectRoot, agentID, state); err != nil {
+	err := oxactivity.UpdateState(projectRoot, agentID, func(state *oxactivity.State) bool {
+		state.LastAction = act.Label
+		state.LastActionAt = now
+		return true
+	})
+	if err != nil {
 		slog.Debug("statusline: save action failed", "agent_id", agentID, "err", err)
 	}
 }
@@ -70,19 +72,21 @@ func recordStatuslineWhisper(projectRoot, agentID string, entries []whisperstore
 	if newest == nil || !statuslineEnabled() {
 		return
 	}
-	state := oxactivity.LoadState(projectRoot, agentID)
-	if !newest.CreatedAt.After(state.LastWhisperAt) {
-		return // already showing this one or a newer one
-	}
 	from := newest.PrincipalID
 	if from == "" {
 		from = newest.AgentID
 	}
-	state.LastWhisperFrom = from
-	state.LastWhisperTopic = newest.Topic
-	state.LastWhisperContent = newest.Content
-	state.LastWhisperAt = newest.CreatedAt
-	if err := oxactivity.SaveState(projectRoot, agentID, state); err != nil {
+	err := oxactivity.UpdateState(projectRoot, agentID, func(state *oxactivity.State) bool {
+		if !newest.CreatedAt.After(state.LastWhisperAt) {
+			return false // already showing this one or a newer one
+		}
+		state.LastWhisperFrom = from
+		state.LastWhisperTopic = newest.Topic
+		state.LastWhisperContent = newest.Content
+		state.LastWhisperAt = newest.CreatedAt
+		return true
+	})
+	if err != nil {
 		slog.Debug("statusline: save whisper failed", "agent_id", agentID, "err", err)
 	}
 }

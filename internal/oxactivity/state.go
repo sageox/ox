@@ -1,6 +1,7 @@
 package oxactivity
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -75,6 +76,28 @@ func LoadState(projectRoot, agentID string) State {
 		return State{}
 	}
 	return s
+}
+
+// UpdateState applies update to the stored state under a file lock, so two
+// hook processes (a tool call and a prompt submit) that overlap cannot each
+// restore the other's field from a stale snapshot. update reports whether
+// anything changed; false skips the write. A missing or corrupt file starts
+// from a zero State, as LoadState does.
+func UpdateState(projectRoot, agentID string, update func(*State) bool) error {
+	path := StatePath(projectRoot, agentID)
+	if path == "" {
+		return fmt.Errorf("update activity state: %w: %q", ErrInvalidAgentID, agentID)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("update activity state: %w", err)
+	}
+	return fileutil.WithFileLock(context.Background(), path, func() error {
+		s := LoadState(projectRoot, agentID)
+		if !update(&s) {
+			return nil
+		}
+		return SaveState(projectRoot, agentID, s)
+	})
 }
 
 // SaveState atomically writes an AI coworker's activity state, creating the

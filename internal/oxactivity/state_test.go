@@ -3,6 +3,7 @@ package oxactivity
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -139,4 +140,51 @@ func TestSaveState_SurfacesFileWriteFailure(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(StatePath(root, testAgentID), 0o755))
 	assert.Error(t, SaveState(root, testAgentID, State{LastAction: "x"}))
+}
+
+// TestUpdateState_ConcurrentWritersKeepBothFields: a tool-call hook and a
+// prompt hook updating different fields at the same time must not lose either.
+// Failure prevented: the status line shows a whisper but forgets the action,
+// or the reverse, because the later writer restored a stale snapshot.
+func TestUpdateState_ConcurrentWritersKeepBothFields(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			_ = UpdateState(root, testAgentID, func(s *State) bool {
+				s.LastAction = "posted murmur"
+				s.LastActionAt = now.Add(time.Duration(i) * time.Second)
+				return true
+			})
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			_ = UpdateState(root, testAgentID, func(s *State) bool {
+				s.LastWhisperFrom = "ryan"
+				s.LastWhisperAt = now.Add(time.Duration(i) * time.Second)
+				return true
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	got := LoadState(root, testAgentID)
+	assert.Equal(t, "posted murmur", got.LastAction)
+	assert.Equal(t, "ryan", got.LastWhisperFrom)
+	assert.False(t, got.LastActionAt.IsZero())
+	assert.False(t, got.LastWhisperAt.IsZero())
+}
+
+// TestUpdateState_NoChangeSkipsWrite: a stale whisper must not touch the file.
+func TestUpdateState_NoChangeSkipsWrite(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	require.NoError(t, UpdateState(root, testAgentID, func(s *State) bool { return false }))
+	assert.NoFileExists(t, StatePath(root, testAgentID))
+	assert.Error(t, UpdateState(root, "bad id", func(s *State) bool { return true }))
 }
