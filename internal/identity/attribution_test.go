@@ -217,3 +217,16 @@ func TestLocalAttributionUsername_MatchesAttributionUsername(t *testing.T) {
 		assert.Equal(t, AttributionUsername("", ""), LocalAttributionUsername(), "USER=%s", user)
 	}
 }
+
+// TestLocalAttributionUsername_NoGit_FallsBackToOS: without git the status
+// line still gets a lowercase principal, and never "" (which would match no
+// murmur author and show every whisper as a teammate's).
+func TestLocalAttributionUsername_NoGit_FallsBackToOS(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // empty dir — no git binary
+	t.Setenv("USER", "TestOsUser")
+	t.Setenv("USERNAME", "")
+	assert.Equal(t, "testosuser", LocalAttributionUsername())
+
+	t.Setenv("USER", "")
+	assert.Equal(t, "anonymous", LocalAttributionUsername())
+}

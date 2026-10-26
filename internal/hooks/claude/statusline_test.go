@@ -78,3 +78,40 @@ func TestIsOxStatuslineCommand(t *testing.T) {
 	assert.False(t, IsOxStatuslineCommand("starship"))
 	assert.False(t, IsAnyOxCommand(constants.OxStatuslineCommandClaudeCode), "a status line is not a hook command")
 }
+
+// TestStatusLineState_String: doctor and installer logs name the state; an
+// unnamed state would print a bare number.
+func TestStatusLineState_String(t *testing.T) {
+	tests := []struct {
+		state StatusLineState
+		want  string
+	}{
+		{StatusLineMissing, "missing"},
+		{StatusLineCurrent, "current"},
+		{StatusLineStale, "stale"},
+		{StatusLineForeign, "foreign"},
+		{StatusLineState(99), "foreign"},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, tt.state.String())
+	}
+}
+
+// TestEnsureOxStatusLine_UpgradesStaleKeepingForeignFields: an older ox
+// statusLine is brought current without dropping fields the coworker set.
+// Failure prevented: an upgrade silently resets a coworker's padding.
+func TestEnsureOxStatusLine_UpgradesStaleKeepingForeignFields(t *testing.T) {
+	m := map[string]json.RawMessage{
+		StatusLineKey: json.RawMessage(`{"type":"command","command":"ox statusline","padding":2}`),
+	}
+	changed, err := EnsureOxStatusLine(m)
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.Equal(t, StatusLineCurrent, ClassifyStatusLine(m))
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(m[StatusLineKey], &got))
+	assert.Equal(t, float64(2), got["padding"], "foreign field survives the upgrade")
+	assert.Equal(t, constants.OxStatuslineCommandClaudeCode, got["command"])
+	assert.Equal(t, float64(constants.OxStatuslineRefreshSeconds), got["refreshInterval"])
+}

@@ -234,3 +234,50 @@ func TestClassify_UntrustedNamesAreSanitized(t *testing.T) {
 	assert.True(t, ok)
 	assert.NotContains(t, got.Label, "\x1b")
 }
+
+// TestClassify_ShellQuotingAndRedirects: the shell splitter has to honour
+// quoting and redirections the way a shell does, or operators inside an
+// argument split the line and a redirect target is read as a subcommand.
+func TestClassify_ShellQuotingAndRedirects(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		command string
+		want    string // "" means not an activity
+	}{
+		{"single-quoted operators stay content", `ox murmur 'a; b && c | d'`, "posted murmur"},
+		{"escaped quote inside double quotes", `ox murmur "say \"hi\" && go"`, "posted murmur"},
+		{"escaped space joins a word", `ox murmur fixing\ things`, "posted murmur"},
+		{"stderr to file", "ox doctor 2>err.txt", "ran ox doctor"},
+		{"append redirect", "ox code insights >> out.txt", "checked code hotspots"},
+		{"stdout to stderr", "ox doctor >&2", "ran ox doctor"},
+		{"or chain", "false || ox doctor", ""},
+		{"and chain after ox", "ox doctor && make build", "ran ox doctor"},
+		{"assignment-only segment", "FOO=bar; ox doctor", "ran ox doctor"},
+		{"pushd prefix", "pushd /repo && ox doctor", "ran ox doctor"},
+		{"background then ox", "sleep 1 & ox doctor", ""},
+		{"newline separated", "cd /repo\nox doctor", "ran ox doctor"},
+		{"unterminated single quote", "ox murmur 'oops", "posted murmur"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := Classify("Bash", bashInput(tt.command))
+			if tt.want == "" {
+				assert.False(t, ok, "got %q", got.Label)
+				return
+			}
+			assert.True(t, ok)
+			assert.Equal(t, tt.want, got.Label)
+		})
+	}
+}
+
+// TestClassify_MCPToolNameIsOnlyEscapes: a SageOx tool name made of nothing
+// but control characters must not become an empty "used SageOx " label.
+func TestClassify_MCPToolNameIsOnlyEscapes(t *testing.T) {
+	t.Parallel()
+	_, ok := Classify("mcp__sageox__\x1b\x07\u200b", json.RawMessage(`{}`))
+	assert.False(t, ok)
+}

@@ -130,3 +130,18 @@ func TestState_Segment(t *testing.T) {
 		})
 	}
 }
+
+// Failure prevented: SaveState reports success when the directory exists but
+// the file itself cannot be written.
+func TestSaveState_SurfacesFileWriteFailure(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := t.TempDir()
+	dir := filepath.Dir(StatePath(root, testAgentID))
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.Chmod(dir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	assert.Error(t, SaveState(root, testAgentID, State{LastAction: "x"}))
+}
