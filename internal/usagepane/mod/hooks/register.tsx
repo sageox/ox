@@ -287,7 +287,15 @@ export const register: Register = on => {
           <Text color="success" weight="bold">
             {title}
           </Text>
-          <Text dimColor>{truncate(`  ${marker}`, Math.max(0, cols - title.length))}</Text>
+          {r !== null && r.session.recording ? (
+            <Text>
+              {'  '}
+              <Text color="error">●</Text>
+              {' recording'}
+            </Text>
+          ) : (
+            <Text dimColor>{truncate(`  ${marker}`, Math.max(0, cols - title.length))}</Text>
+          )}
         </Text>
         {summary !== '' && (
           <Text dimColor wrap="truncate-end">

@@ -202,6 +202,7 @@ test('/ox-brief opens the pane and lists each ox call, oldest first', async ($, 
     expect(titleRow).not.toMatch(/brief-pane|claude-code|Oxa1b2/)
     expect((await ui.find({ type: 'Text', text: /^calls \d/ }))?.text).toBe('calls 3 (1 failed) · ~16k tokens · read 4 · useful 2')
     expect(await ui.find({ type: 'Text', text: /injected|not yet reported/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /recording/ })).toBeDefined()
 
     for (const h of ['context', 'read', 'murmurs', 'calls']) {
       expect((await ui.find({ key: `h:${h}` }))?.text).toBe(h)
