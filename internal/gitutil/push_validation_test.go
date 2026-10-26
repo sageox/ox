@@ -127,44 +127,62 @@ func TestPushValidation_DivergedRemotePreservesStagedDraft(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git push with diverged remote")
 	}
-	repo := divergedRepo(t)
-	bare := gitInRepo(t, repo, "remote", "get-url", "origin")
-	localHead := gitInRepo(t, repo, "rev-parse", "HEAD")
-	remoteHead := gitInRepo(t, bare, "rev-parse", "HEAD")
-	trackingHead := gitInRepo(t, repo, "rev-parse", "@{upstream}")
-	privatePath := filepath.Join(repo, "private.txt")
-	require.NoError(t, os.WriteFile(privatePath, []byte("staged private draft"), 0o644))
-	run(t, repo, "git", "add", "private.txt")
-	require.NoError(t, os.WriteFile(privatePath, []byte("different working draft"), 0o644))
-	indexPath := filepath.Join(repo, ".git", "index")
-	indexBefore, err := os.ReadFile(indexPath)
-	require.NoError(t, err)
-	fetchHeadPath := filepath.Join(repo, ".git", "FETCH_HEAD")
-	require.NoFileExists(t, fetchHeadPath)
-	validations := 0
-	err = PushWithRetry(context.Background(), repo, PushOpts{
-		MaxRetries: 2,
-		OpTimeout:  10 * time.Second,
-		ValidatePush: func(ctx context.Context, path string) (bool, error) {
-			validations++
-			return false, nil
-		},
-	})
-	require.ErrorContains(t, err, "staged changes remain untouched")
-	assert.Contains(t, err.Error(), "save the staged draft before manual synchronization, then rerun import")
-	assert.Equal(t, 1, validations)
-	assert.Equal(t, localHead, gitInRepo(t, repo, "rev-parse", "HEAD"))
-	assert.Equal(t, remoteHead, gitInRepo(t, bare, "rev-parse", "HEAD"))
-	assert.Equal(t, trackingHead, gitInRepo(t, repo, "rev-parse", "@{upstream}"))
-	assert.NoFileExists(t, fetchHeadPath, "refusal must happen before fetching")
-	indexAfter, err := os.ReadFile(indexPath)
-	require.NoError(t, err)
-	assert.Equal(t, indexBefore, indexAfter, "the index must remain byte-for-byte intact")
-	assert.Equal(t, "staged private draft", gitInRepo(t, repo, "show", ":private.txt"))
-	workingDraft, err := os.ReadFile(privatePath)
-	require.NoError(t, err)
-	assert.Equal(t, "different working draft", string(workingDraft))
-	assert.False(t, IsRebaseInProgress(repo))
+	for _, tc := range []struct {
+		name      string
+		validated bool
+	}{
+		{name: "without publication callback"},
+		{name: "with publication callback", validated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := divergedRepo(t)
+			bare := gitInRepo(t, repo, "remote", "get-url", "origin")
+			localHead := gitInRepo(t, repo, "rev-parse", "HEAD")
+			remoteHead := gitInRepo(t, bare, "rev-parse", "HEAD")
+			trackingHead := gitInRepo(t, repo, "rev-parse", "@{upstream}")
+			privatePath := filepath.Join(repo, "private.txt")
+			require.NoError(t, os.WriteFile(privatePath, []byte("staged private draft"), 0o644))
+			run(t, repo, "git", "add", "private.txt")
+			require.NoError(t, os.WriteFile(privatePath, []byte("different working draft"), 0o644))
+			indexPath := filepath.Join(repo, ".git", "index")
+			indexBefore, err := os.ReadFile(indexPath)
+			require.NoError(t, err)
+			fetchHeadPath := filepath.Join(repo, ".git", "FETCH_HEAD")
+			require.NoFileExists(t, fetchHeadPath)
+			validations := 0
+			opts := PushOpts{
+				MaxRetries:                 2,
+				OpTimeout:                  10 * time.Second,
+				RequireCleanIndexForRebase: true,
+			}
+			if tc.validated {
+				opts.ValidatePush = func(ctx context.Context, path string) (bool, error) {
+					validations++
+					return false, nil
+				}
+			}
+			err = PushWithRetry(context.Background(), repo, opts)
+			require.ErrorContains(t, err, "staged changes remain untouched")
+			assert.Contains(t, err.Error(), "save the staged draft before manual synchronization")
+			if tc.validated {
+				assert.Equal(t, 1, validations)
+			} else {
+				assert.Zero(t, validations)
+			}
+			assert.Equal(t, localHead, gitInRepo(t, repo, "rev-parse", "HEAD"))
+			assert.Equal(t, remoteHead, gitInRepo(t, bare, "rev-parse", "HEAD"))
+			assert.Equal(t, trackingHead, gitInRepo(t, repo, "rev-parse", "@{upstream}"))
+			assert.NoFileExists(t, fetchHeadPath, "refusal must happen before fetching")
+			indexAfter, err := os.ReadFile(indexPath)
+			require.NoError(t, err)
+			assert.Equal(t, indexBefore, indexAfter, "the index must remain byte-for-byte intact")
+			assert.Equal(t, "staged private draft", gitInRepo(t, repo, "show", ":private.txt"))
+			workingDraft, err := os.ReadFile(privatePath)
+			require.NoError(t, err)
+			assert.Equal(t, "different working draft", string(workingDraft))
+			assert.False(t, IsRebaseInProgress(repo))
+		})
+	}
 }
 
 // Failure prevented: git becomes unsafe after preflight and validation runs

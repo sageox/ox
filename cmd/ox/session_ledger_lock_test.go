@@ -218,7 +218,7 @@ func TestPushSummary_RetryAfterCommitSucceeds(t *testing.T) {
 	retry := pushSummaryToLedger(summary, sessionDir)
 
 	require.True(t, retry.Success, retry.Error)
-	assert.Equal(t, "summary already committed", retry.Message)
+	assert.Equal(t, "summary pushed to ledger", retry.Message)
 	assert.Equal(t, head, runGit(t, clonePath, "rev-parse", "HEAD"), "a retry must not add a commit")
 }
 
