@@ -481,3 +481,35 @@ func TestCommitLedgerSnapshot_MissingCheckoutPreservesEnclosingDraft(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, "later working draft\n", string(working))
 }
+
+// A damaged index must refuse publication without replacing the index or
+// losing the separate staged and working drafts once the index is repaired.
+func TestCommitLedgerSnapshot_CorruptIndexPreservesDraft(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
+	repo := newSnapshotRepo(t)
+	writeGitutilFixture(t, repo, "draft.txt", "staged draft\n")
+	gitInRepo(t, repo, "add", "draft.txt")
+	writeGitutilFixture(t, repo, "draft.txt", "later working draft\n")
+	head := gitInRepo(t, repo, "rev-parse", "HEAD")
+	indexPath := filepath.Join(repo, ".git", "index")
+	index, err := os.ReadFile(indexPath)
+	require.NoError(t, err)
+	corrupt := []byte("interrupted index")
+	require.NoError(t, os.WriteFile(indexPath, corrupt, 0644))
+
+	committed, err := CommitLedgerSnapshot(context.Background(), repo, "maintenance")
+
+	require.Error(t, err)
+	assert.False(t, committed)
+	assert.Equal(t, head, gitInRepo(t, repo, "rev-parse", "HEAD"))
+	after, err := os.ReadFile(indexPath)
+	require.NoError(t, err)
+	assert.Equal(t, corrupt, after)
+	require.NoError(t, os.WriteFile(indexPath, index, 0644))
+	assert.Equal(t, "staged draft", gitInRepo(t, repo, "show", ":draft.txt"))
+	working, err := os.ReadFile(filepath.Join(repo, "draft.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "later working draft\n", string(working))
+}
