@@ -34,8 +34,8 @@ doctor. When a turn ends, Oxy throws confetti on the closing line, or falls
 flat if it failed.
 
 Oxy is installed as a Claude Code plugin (ox-cli-oxy@ox-cli-pets) at user scope.
-Inside Claude Code, /hatch-pet shows him, /hatch-pet off hides him, and
-/hatch-pet small|medium|large sizes him.`,
+Inside Claude Code, /oxy shows him, /oxy off hides him, and
+/oxy small|medium|large sizes him.`,
 }
 
 var petEnableCmd = &cobra.Command{
@@ -57,7 +57,7 @@ var petEnableCmd = &cobra.Command{
 			return nil
 		}
 		cli.PrintSuccessTo(w, "Oxy will show up in Claude Code's thinking line.")
-		cli.PrintHintTo(w, "Run /reload-plugins in an open session, or start a new one. /hatch-pet off hides him.")
+		cli.PrintHintTo(w, "Run /reload-plugins in an open session, or start a new one. /oxy off hides him.")
 		return nil
 	},
 }

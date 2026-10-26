@@ -27,7 +27,7 @@ const SPINNER = {
   requestId: 'main',
 } as const
 
-const COMMAND = { command: 'hatch-pet', origin: 'user', presentation: 'inline', cwd: '/', surface: 'terminal', isInteractive: true } as const
+const COMMAND = { command: 'oxy', origin: 'user', presentation: 'inline', cwd: '/', surface: 'terminal', isInteractive: true } as const
 
 describe('classifyToolCall', () => {
   const cases: Array<[string, string, Record<string, unknown>, string | null]> = [
@@ -274,7 +274,7 @@ test('the turn closing line throws confetti', async ($, on) => {
   await ui.unmount()
 })
 
-test('/hatch-pet large draws a bigger Oxy and remembers it', async ($, on) => {
+test('/oxy large draws a bigger Oxy and remembers it', async ($, on) => {
   mock.clock(on, { now: 1_000 })
   mock.store(on)
   mockFrameFiles(on)
@@ -296,7 +296,7 @@ test('/hatch-pet large draws a bigger Oxy and remembers it', async ($, on) => {
   await $.command.run({ ...COMMAND, args: 'medium' } as never)
 })
 
-test('/hatch-pet off hides Oxy until /hatch-pet hatches him again', async ($, on) => {
+test('/oxy off hides Oxy until /oxy hatches him again', async ($, on) => {
   mock.clock(on, { now: 1_000 })
   mock.store(on)
   mockFrameFiles(on)
@@ -318,7 +318,7 @@ test('/hatch-pet off hides Oxy until /hatch-pet hatches him again', async ($, on
   expect((await $.command.run({ ...COMMAND, args: '' } as never)).text).toContain('already here')
 })
 
-test('/hatch-pet remembers a hidden Oxy across sessions', async ($, on) => {
+test('/oxy remembers a hidden Oxy across sessions', async ($, on) => {
   mock.clock(on, { now: 1_000 })
   mock.store(on, { hidden: true })
   mock.env(on, { TERM_PROGRAM: 'ghostty' })

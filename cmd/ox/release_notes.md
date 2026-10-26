@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Send private feedback from the terminal** — `ox feedback --file report.txt` sends a report to SageOx Support and returns a receipt. Preview the exact request with `--dry-run`, use `--anonymous` without login or a reply email, or supply `--email` for replies. Choose `bug`, `feature-request`, or `feedback`. Local secret checks run before sending; no logs or session content are collected automatically.
 - **SageOx Files joins your team context as a second source** — where the macOS Files app has mounted your team's drive, `ox status` now says so on the team card. Set `SAGEOX_FILES_MOUNT=1` and `ox agent prime` reads that drive *alongside* your git checkout rather than in place of it: the checkout stays authoritative wherever both carry the same document, and the drive fills the gaps — a doc that has not synced yet, or a team this machine never cloned. Off by default, never written to, and a drive that is absent or unreachable takes nothing away from what your checkout already had.
+- **`/oxy` is Oxy's command** — in Claude Code, `/oxy` shows him, `/oxy off` hides him, `/oxy small|medium|large` sizes him, and `/oxy <animation>` pins one. It replaces `/hatch-pet`.
 
 ### Improved
 

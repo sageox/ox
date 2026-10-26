@@ -255,7 +255,7 @@ export type SpinnerState = {
   oneShot: OneShot | null
   /** The tools running in this loop, oldest first. */
   activities: Activity[]
-  /** `/hatch-pet <anim>` pins one animation until `/hatch-pet auto`. */
+  /** `/oxy <anim>` pins one animation until `/oxy auto`. */
   pinned: Anim | null
 }
 
