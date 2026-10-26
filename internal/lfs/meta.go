@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/session/contexttrace"
 	"github.com/sageox/ox/internal/session/contextuse"
 	"github.com/sageox/ox/internal/trace/model"
 )
@@ -792,6 +793,36 @@ const metaFilename = "meta.json"
 // SageoxScoreSourceSelfReported is the SageoxScoreSource value for a score the
 // AI coworker reported about itself via the per-agent score file.
 const SageoxScoreSourceSelfReported = "self-reported"
+
+// ContextUseRollupFromDir derives the context-use rollup from the
+// context-trace.jsonl in dir — the directory holding the session's REAL
+// raw.jsonl bytes (the local recording cache, or the ledger cache), never a
+// ledger directory whose artifacts have already become LFS pointer stubs.
+// Returns nil when there is no trace, the trace is a pointer stub, it is
+// unreadable, or it holds no events: the caller then leaves meta.context_use
+// untouched. A partially readable trace still rolls up what was read.
+func ContextUseRollupFromDir(dir string, producedCommits int, allowJudged bool) *contextuse.Rollup {
+	if dir == "" {
+		return nil
+	}
+	tracePath := filepath.Join(dir, contexttrace.FileName)
+	if _, err := os.Stat(tracePath); err != nil {
+		return nil
+	}
+	if IsPointerFile(tracePath) {
+		slog.Debug("context-use rollup skipped: trace is an LFS pointer stub", "path", tracePath)
+		return nil
+	}
+	events, err := contexttrace.ReadEvents(tracePath)
+	if err != nil {
+		slog.Debug("context-use rollup: partial trace read", "path", tracePath, "error", err)
+	}
+	if len(events) == 0 {
+		return nil
+	}
+	r := contextuse.Build(events, contextuse.Surfaced(events), producedCommits, allowJudged)
+	return &r
+}
 
 // WriteSessionMeta writes meta.json to the given session directory.
 // When meta.Files is populated, also replaces content files with LFS pointer
