@@ -508,12 +508,17 @@ func handleEnd(ctx *HookContext) error {
 // whispers are delivered exactly once across all channels. If handlePrompt delivers
 // a whisper, the PostToolUse fallback and active pull get 0 entries — no duplication.
 func handlePrompt(ctx *HookContext) error {
+	agentID := ""
+	if ctx.Marker != nil {
+		agentID = ctx.Marker.AgentID
+	}
+
 	// Local-recall preamble runs BEFORE whispers so the model sees prior
 	// ledger context first. Strictly additive: any failure / timeout /
 	// no-match leaves the existing whisper path completely untouched.
 	if ctx.Input != nil {
 		if prompt := extractPromptText(ctx.Input.RawBytes); prompt != "" {
-			emitLocalRecallPreamble(os.Stdout, prompt)
+			emitLocalRecallPreamble(os.Stdout, ctx.ProjectRoot, agentID, prompt)
 
 			// Cloud-query gate (opt-in only; default off). Wired here so the
 			// policy + redaction layer is exercised on every prompt — even
@@ -536,10 +541,6 @@ func handlePrompt(ctx *HookContext) error {
 		}
 	}
 
-	agentID := ""
-	if ctx.Marker != nil {
-		agentID = ctx.Marker.AgentID
-	}
 	if agentID == "" {
 		return nil
 	}
