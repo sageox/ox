@@ -77,6 +77,8 @@ export interface HostControlsOptions {
 export interface HostControls {
   /** Show the review as the host read it again. */
   update(committed: CommittedItem[], problems?: number): void;
+  /** Change mode like the Review button, keeping drafts, pending deliveries and presence connected. */
+  setReviewing(reviewing: boolean): void;
   /** Say the host is unreachable, or back; back, the outbox is sent again. */
   setOffline(down: boolean): void;
   /** Run fn once nothing is in flight and no note is open, so a reload then loses nothing. Replaces a waiting fn. */
@@ -1047,6 +1049,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       paint();
     },
     setOffline,
+    setReviewing(next) { if (!destroyed && on !== next) setReview(next); },
     whenIdle(fn) { waiter = fn; idle(); },
     destroy() {
       if (destroyed) return;
