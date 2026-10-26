@@ -65,6 +65,108 @@ export type OxyFrames = {
   animations: Record<Anim, AnimationFrames>
 }
 
+// Oxy's height in CSS pixels where the surface draws pictures as SVG (the
+// desktop app, VS Code). The working row there is one ~20 px text line, so
+// medium stands a little over two lines tall, as the terminal's medium does
+// beside its one-row word.
+export const PIXEL_HEIGHTS: Record<SizeName, number> = { small: 32, medium: 48, large: 64 }
+
+// A frame PNG's own size; it must match what `ox pet enable` writes.
+export const DESKTOP_FRAME = { width: 160, height: 207 } as const
+
+// The part of the frame the SVG shows, in frame pixels. The full frame by
+// default; set to the union of Oxy's bounds across every frame to crop the
+// empty margin without cutting any pose.
+export const DESKTOP_VIEWBOX = { x: 0, y: 0, width: DESKTOP_FRAME.width, height: DESKTOP_FRAME.height } as const
+
+// The Svg element's `source` limit; a longer tree is refused.
+export const SVG_SOURCE_CAP = 131_072
+
+// Upper bounds on clipSvg's markup beside the base64 itself, so packClips
+// can pack against the cap without building the string. A test holds
+// clipSvg to them.
+export const CLIP_IMAGE_MARKUP_MAX = 400
+export const CLIP_WRAPPER_MAX = 200
+
+export function pixelBox(size: SizeName): { width: number; height: number } {
+  const height = PIXEL_HEIGHTS[size]
+  return { width: Math.max(1, Math.round((height * DESKTOP_VIEWBOX.width) / DESKTOP_VIEWBOX.height)), height }
+}
+
+/**
+ * Splits an animation's frames into clips, runs of consecutive frames whose
+ * SVG fits under `cap` characters: the graphical surfaces redraw at most
+ * ten times a second, too slow for the frames, so a clip animates itself
+ * and only a clip boundary costs a redraw. A frame too big on its own still
+ * gets a clip; the caller checks the built source. Each clip is
+ * `[start, end)`.
+ */
+export function packClips(ms: number[], base64Lengths: number[], cap: number): Array<[number, number]> {
+  if (ms.length !== base64Lengths.length) {
+    throw new Error(`packClips: ${ms.length} durations for ${base64Lengths.length} frames`)
+  }
+  const clips: Array<[number, number]> = []
+  let start = 0
+  let used = CLIP_WRAPPER_MAX
+  for (let i = 0; i < base64Lengths.length; i++) {
+    const cost = base64Lengths[i] + CLIP_IMAGE_MARKUP_MAX
+    if (i > start && used + cost > cap) {
+      clips.push([start, i])
+      start = i
+      used = CLIP_WRAPPER_MAX
+    }
+    used += cost
+  }
+  if (start < base64Lengths.length) {
+    clips.push([start, base64Lengths.length])
+  }
+  return clips
+}
+
+function keyTime(ms: number, total: number): string {
+  return String(Math.round((ms / total) * 1e6) / 1e6)
+}
+
+/**
+ * One clip as an SVG document: every frame an <image>, shown for its own
+ * duration by a discrete SMIL animation of its visibility. `loop` repeats
+ * the clip forever (an animation that fits in one clip loops with no
+ * redraw at all); otherwise it plays once and freezes on its last frame
+ * until the next clip replaces it. The first frame is visible without
+ * SMIL, so a surface that ignores it still shows Oxy.
+ */
+export function clipSvg(frames: string[], ms: number[], loop: boolean): string {
+  const { x, y, width, height } = DESKTOP_VIEWBOX
+  const total = ms.reduce((a, b) => a + b, 0)
+  const timing = loop ? 'repeatCount="indefinite"' : 'fill="freeze"'
+  let offset = 0
+  const images = frames.map((base64, i) => {
+    const from = offset
+    offset += ms[i]
+    const values: string[] = []
+    const times: string[] = []
+    if (i > 0) {
+      values.push('hidden')
+      times.push('0')
+    }
+    values.push('visible')
+    times.push(keyTime(from, total))
+    if (offset < total) {
+      values.push('hidden')
+      times.push(keyTime(offset, total))
+    }
+    const animate =
+      frames.length === 1
+        ? ''
+        : `<animate attributeName="visibility" calcMode="discrete" values="${values.join(';')}" keyTimes="${times.join(';')}" dur="${total}ms" ${timing}/>`
+    return (
+      `<image width="${DESKTOP_FRAME.width}" height="${DESKTOP_FRAME.height}" visibility="${i === 0 ? 'visible' : 'hidden'}" ` +
+      `href="data:image/png;base64,${base64}">${animate}</image>`
+    )
+  })
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${x} ${y} ${width} ${height}">${images.join('')}</svg>`
+}
+
 export function isSize(name: unknown): name is SizeName {
   return typeof name === 'string' && (SIZES as readonly string[]).includes(name)
 }

@@ -5,7 +5,7 @@
 // Every hook falls back to `next(e)`: a pet bug must never cost a turn.
 
 import { atom, read, update } from 'claude-code'
-import type { Elements, EngineInterface, Register } from 'claude-code'
+import type { Elements, EngineInterface, Register, RenderSurface } from 'claude-code'
 
 import type { Renderer, Size } from '../types'
 import { FRAMES } from './frames'
@@ -13,14 +13,18 @@ import {
   ANIMS,
   cellsFile,
   classifyToolCall,
+  clipSvg,
   formatDuration,
   frameAt,
   frameFile,
   isAnim,
   isSize,
+  packClips,
   passMs,
   pickAnim,
+  pixelBox,
   RAGE_AFTER_FAILURES,
+  SVG_SOURCE_CAP,
   type Activity,
   type Anim,
   type Cells,
@@ -88,9 +92,14 @@ const USAGE = '/oxy [on|off|auto|small|medium|large|image|cells|<animation>]'
 
 type Running = Activity & { loop: string }
 
-// A drawn site: the thinking line of one loop, or one turn's closing line.
+// The clip an SVG surface's site shows, and when it started playing there.
+// Null on the terminal, which blits each frame instead.
+type Clip = { anim: Anim; index: number; loop: boolean; shownAt: number }
+
+// A drawn site: the thinking line of one loop, or one turn's closing line
+// (terminal only: no other surface raises TurnDuration).
 type Site =
-  | { kind: 'spinner'; mode: string; message: string | null; drawn: string }
+  | { kind: 'spinner'; surface: RenderSurface; mode: string; message: string | null; drawn: string; clip: Clip | null }
   | { kind: 'turn'; anim: Anim; start: number; drawn: string }
 
 // Module state: what is running and where Oxy is drawn. A reload of the mod
@@ -123,6 +132,66 @@ function pictureOf($: EngineInterface, anim: Anim, index: number) {
   return { file: frameFile($.plugin.root, anim, index), format: 'png' as const }
 }
 
+// The SVG surfaces can't open a file the way the terminal's Image does, so
+// the PNG bytes go into the tree, packed into self-animating clips. Only the
+// animation on show is kept: all of them at once would be megabytes held
+// for frames rarely drawn again.
+type Clips = { anim: Anim; frames: string[]; ranges: Array<[number, number]> }
+let clipCache: { anim: Anim; loading: Promise<Clips>; ready: Clips | null } | null = null
+
+function clipsOf($: EngineInterface, anim: Anim): Promise<Clips> {
+  if (clipCache?.anim !== anim) {
+    const ms = FRAMES.animations[anim].ms
+    const loading = Promise.all(
+      ms.map((_, i) => $.fs.read(frameFile($.plugin.root, anim, i), { as: 'bytes' }).then(b => b.base64)),
+    ).then(frames => ({ anim, frames, ranges: packClips(ms, frames.map(f => f.length), SVG_SOURCE_CAP) }))
+    const entry: NonNullable<typeof clipCache> = { anim, loading, ready: null }
+    loading.then(
+      c => {
+        entry.ready = c
+      },
+      () => {
+        // A failed read is tried again on the next draw, not cached.
+        if (clipCache === entry) {
+          clipCache = null
+        }
+      },
+    )
+    clipCache = entry
+  }
+  return clipCache.loading
+}
+
+function clipMs(anim: Anim, [start, end]: [number, number]): number {
+  return FRAMES.animations[anim].ms.slice(start, end).reduce((a, b) => a + b, 0)
+}
+
+// Moves an SVG site to its next clip once the one on show has played out;
+// true when that takes a redraw. A one-shot holds its last clip (frozen on
+// the last frame), and a looping animation that fits one clip loops inside
+// the SVG, so neither redraws.
+function advanceClip(site: { clip: Clip | null }, anim: Anim, loop: boolean, now: number): boolean {
+  const clip = site.clip
+  if (clip === null || clip.anim !== anim || clip.loop !== loop) {
+    site.clip = { anim, index: 0, loop, shownAt: now }
+    return true
+  }
+  const loaded = clipCache?.anim === anim ? clipCache.ready : null
+  const range = loaded?.ranges[clip.index]
+  if (loaded == null || range === undefined || now - clip.shownAt < clipMs(anim, range)) {
+    return false
+  }
+  if (clip.index + 1 < loaded.ranges.length) {
+    clip.index++
+  } else if (loop && loaded.ranges.length > 1) {
+    clip.index = 0
+  } else {
+    return false
+  }
+  clip.shownAt = now
+  return true
+}
+
 function playOnce(anim: Anim, now: number) {
   oneShot = { anim, start: now, until: now + passMs(FRAMES.animations[anim]) }
 }
@@ -153,16 +222,24 @@ function frameOf(requestId: string, site: Site, now: number, pin: string | null)
   // expired one loops like any other animation.
   const shot = pin === null && oneShot !== null && now < oneShot.until && anim === oneShot.anim ? oneShot : null
   const index = frameAt(FRAMES.animations[anim], shot?.start ?? loopStart, now, shot === null)
-  return { anim, index, drawn: `${anim}:${index}` }
+  return { anim, index, drawn: `${anim}:${index}`, loop: shot === null }
 }
 
-// Swaps each drawn site to its next frame, without a redraw.
+// Swaps each drawn site to its next frame: a blit on the terminal, no
+// redraw. The SVG surfaces have no blit and redraw at most ten times a
+// second, too slow for 40 ms frames, so each SVG plays a clip of frames
+// itself and this asks for one redraw per clip boundary.
 async function tick($: EngineInterface) {
   const now = await $.clock.now()
   const pin = await read($, pinned)
   const { kind, box } = await prefs($)
+  let redraw = false
   for (const [requestId, site] of sites) {
     const f = frameOf(requestId, site, now, pin)
+    if (site.kind === 'spinner' && site.surface !== 'terminal') {
+      redraw = advanceClip(site, f.anim, f.loop, now) || redraw
+      continue
+    }
     if (f.drawn === site.drawn) {
       continue
     }
@@ -190,6 +267,9 @@ async function tick($: EngineInterface) {
     if (site.kind === 'turn' && f.index === frames.ms.length - 1) {
       sites.delete(requestId)
     }
+  }
+  if (redraw) {
+    $.ui.invalidate('ui.render')
   }
   if (closing !== null && now - closing.start > 5_000) {
     closing = null
@@ -277,6 +357,14 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     closing = { anim: turnFailed ? 'fail' : 'confetti', start: await $.clock.now() }
+    // An SVG surface never says its Spinner went away (the terminal's blit
+    // does, by a deny), and the turn's end is when it does; past it the
+    // ticker would redraw for nothing.
+    for (const [requestId, site] of sites) {
+      if (site.kind === 'spinner' && site.surface !== 'terminal') {
+        sites.delete(requestId)
+      }
+    }
     return next(e)
   })
 
@@ -303,16 +391,52 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
-    if (e.surface !== 'terminal') {
-      return next(e)
-    }
     const { kind, box, hide } = await prefs($)
     if (hide) {
       return next(e)
     }
     const now = await $.clock.now()
-    const site: Site = { kind: 'spinner', mode: e.props.mode, message: e.props.message, drawn: '' }
+    const prev = sites.get(e.requestId)
+    const site: Site = { kind: 'spinner', surface: e.surface, mode: e.props.mode, message: e.props.message, drawn: '', clip: null }
     const f = frameOf(e.requestId, site, now, await read($, pinned))
+    if (e.surface !== 'terminal') {
+      let loaded: Clips
+      try {
+        loaded = await clipsOf($, f.anim)
+      } catch {
+        return next(e)
+      }
+      // A redraw for other props keeps the clip's place; the ticker owns when
+      // it moves on.
+      const kept = prev?.kind === 'spinner' ? prev.clip : null
+      site.clip =
+        kept !== null && kept.anim === f.anim && kept.loop === f.loop && kept.index < loaded.ranges.length
+          ? kept
+          : { anim: f.anim, index: 0, loop: f.loop, shownAt: await $.clock.now() }
+      const [start, end] = loaded.ranges[site.clip.index]
+      const ms = FRAMES.animations[f.anim].ms.slice(start, end)
+      const source = clipSvg(loaded.frames.slice(start, end), ms, f.loop && loaded.ranges.length === 1)
+      if (source.length > SVG_SOURCE_CAP) {
+        return next(e)
+      }
+      site.drawn = `${f.anim}#${site.clip.index}`
+      sites.set(e.requestId, site)
+      startTicker($)
+      const { Box, Svg, Text } = $.ui.resolve(e)
+      const px = pixelBox(box)
+      return (
+        <Box flexDirection="row" gap={1} alignItems="center">
+          {/* SMIL only runs in the sandboxed frame; as a plain image it would stand still. */}
+          <Svg key={KEY} source={source} alt="Oxy" width={px.width} height={px.height} isInteractive />
+          <Box key="words">
+            <Text color="claude">
+              {e.props.message ?? e.props.word}
+              {e.props.suffix}
+            </Text>
+          </Box>
+        </Box>
+      )
+    }
     site.drawn = f.drawn
     sites.set(e.requestId, site)
     startTicker($)

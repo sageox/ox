@@ -3,16 +3,22 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import { FRAMES } from '../hooks/frames'
 import {
   ANIMS,
+  CLIP_IMAGE_MARKUP_MAX,
+  CLIP_WRAPPER_MAX,
   IDLE_AFTER_MS,
   SIZES,
   SLEEP_AFTER_MS,
+  SVG_SOURCE_CAP,
   cellsFile,
   classifyToolCall,
+  clipSvg,
   formatDuration,
   frameAt,
   frameFile,
+  packClips,
   passMs,
   pickAnim,
+  pixelBox,
   planAnim,
   type Anim,
   type Cells,
@@ -350,15 +356,190 @@ test('a session with no session.start still draws a picture at the saved size', 
   await ui.unmount()
 })
 
-test('a non-terminal surface keeps the engine spinner', async ($, on) => {
+test('packClips covers every frame in order and keeps each clip under the cap', () => {
+  const cases: Array<[string, number[]]> = [
+    ['today\'s frames', Array.from({ length: 34 }, (_, i) => 24_000 + (i % 7) * 1_100)],
+    ['tiny frames all fit one clip', [10, 20, 30]],
+    ['mixed sizes', [60_000, 10_000, 70_000, 5_000, 5_000, 5_000, 50_000]],
+    ['one frame', [24_000]],
+    ['no frames', []],
+  ]
+  for (const [, lengths] of cases) {
+    const clips = packClips(lengths.map(() => 40), lengths, SVG_SOURCE_CAP)
+    expect(clips.flatMap(([start, end]) => Array.from({ length: end - start }, (_, i) => start + i))).toEqual(lengths.map((_, i) => i))
+    for (const [start, end] of clips) {
+      expect(end).toBeGreaterThan(start)
+      const cost = CLIP_WRAPPER_MAX + lengths.slice(start, end).reduce((n, len) => n + len + CLIP_IMAGE_MARKUP_MAX, 0)
+      expect(cost).toBeLessThanOrEqual(SVG_SOURCE_CAP)
+    }
+  }
+  // a frame too big on its own still gets a clip, alone
+  expect(packClips([40, 40, 40], [10, SVG_SOURCE_CAP, 10], SVG_SOURCE_CAP)).toEqual([[0, 1], [1, 2], [2, 3]])
+  expect(() => packClips([40], [1, 2], SVG_SOURCE_CAP)).toThrow()
+})
+
+test('clipSvg stays inside the markup bounds packClips packs by', () => {
+  // the widest numbers a frame's timing can print
+  const frames = ['QUJD', 'REVG', 'R0hJ', 'SktM']
+  for (const ms of [[40, 40, 40, 40], [99_999, 1, 7, 123_456], [3, 1_000_000, 3, 3]]) {
+    for (const loop of [true, false]) {
+      const svg = clipSvg(frames, ms, loop)
+      expect(svg.length).toBeLessThanOrEqual(CLIP_WRAPPER_MAX + frames.reduce((n, f) => n + f.length + CLIP_IMAGE_MARKUP_MAX, 0))
+    }
+  }
+})
+
+test('clipSvg shows each frame for its own time, then loops or freezes', () => {
+  const svg = clipSvg(['QUJD', 'REVG', 'R0hJ'], [100, 300, 100], false)
+  expect(svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 207">')).toBe(true)
+  expect(svg).toContain('visibility="visible" href="data:image/png;base64,QUJD"')
+  expect(svg).toContain('values="visible;hidden" keyTimes="0;0.2" dur="500ms" fill="freeze"')
+  expect(svg).toContain('values="hidden;visible;hidden" keyTimes="0;0.2;0.8"')
+  // the last frame stays up once the clip has played
+  expect(svg).toContain('values="hidden;visible" keyTimes="0;0.8"')
+  expect(clipSvg(['QUJD', 'REVG'], [100, 100], true)).toContain('repeatCount="indefinite"')
+  // a single frame needs no animation at all
+  expect(clipSvg(['QUJD'], [100], true)).not.toContain('<animate')
+})
+
+// A frame PNG's bytes as the mod reads them: a stand-in base64 that names
+// the animation and frame, padded to `length` so clips pack as real ones do.
+function fakePng(name: Anim, index: number, length: number): string {
+  const tag = `${name.replace(/-/g, '')}${index}x`
+  return tag + 'A'.repeat(Math.max(0, length - tag.length))
+}
+
+function mockPngFiles(on: Parameters<Parameters<typeof test>[1]>[1], length = 24_000) {
+  const reads: string[] = []
+  on('fs.read', (_, e) => {
+    const m = /\/hooks\/frames\/([^/]+)\/(\d+)\.png$/.exec(e.path)
+    if (!m || e.as !== 'bytes') {
+      return { deny: `no such file: ${e.path}` }
+    }
+    reads.push(e.path)
+    return { value: { base64: fakePng(m[1] as Anim, Number(m[2]), length) } }
+  })
+  return reads
+}
+
+const WORKING = { word: 'Working', message: null, suffix: '…', mode: 'thinking' } as const
+
+for (const surface of ['desktop', 'vscode'] as const) {
+  test(`${surface}: Oxy is a self-animating SVG clip beside the words, at each size`, async ($, on) => {
+    mock.clock(on, { now: 1_000 })
+    mock.store(on)
+    mockPngFiles(on)
+    on('command.run', () => ({ text: '' }))
+    // a pinned animation of its own, so no other test's frames are cached
+    await $.command.run({ ...COMMAND, surface, args: 'chatter' } as never)
+    for (const box of SIZES) {
+      await $.command.run({ ...COMMAND, surface, args: box } as never)
+      const ui = await $.ui.mount({ ...SPINNER, surface, props: { word: 'Sautéing', message: null, suffix: '…', mode: 'thinking' } })
+      const svg = await ui.find({ type: 'Svg' })
+      const source = String(svg?.props.source)
+      expect(source.startsWith('<svg')).toBe(true)
+      expect(source).toContain('data:image/png;base64,chatter0x')
+      expect(source).toContain('<animate attributeName="visibility" calcMode="discrete"')
+      expect(source.length).toBeLessThanOrEqual(SVG_SOURCE_CAP)
+      expect(svg?.props.isInteractive).toBe(true)
+      expect(svg?.props.alt).toBe('Oxy')
+      expect({ width: svg?.props.width, height: svg?.props.height }).toEqual(pixelBox(box))
+      expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+      expect((await ui.find({ type: 'Text', text: /Sautéing/ }))?.text).toBe('Sautéing…')
+      await ui.unmount()
+    }
+    expect([pixelBox('small').height, pixelBox('medium').height, pixelBox('large').height]).toEqual([32, 48, 64])
+    await $.command.run({ ...COMMAND, args: 'medium' } as never)
+    await $.command.run({ ...COMMAND, args: 'auto' } as never)
+  })
+}
+
+test('desktop: /oxy off keeps the engine spinner', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  mockPngFiles(on)
+  on('command.run', () => ({ text: '' }))
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
     return <Text>engine spinner</Text>
   })
-  const ui = await $.ui.mount({ ...SPINNER, surface: 'desktop', props: { word: 'Working', message: null, suffix: '…', mode: 'thinking' } })
-  expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+  await $.command.run({ ...COMMAND, surface: 'desktop', args: 'off' } as never)
+  const ui = await $.ui.mount({ ...SPINNER, surface: 'desktop', props: WORKING })
+  expect(await ui.find({ type: 'Svg' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: 'engine spinner' })).toBeDefined()
   await ui.unmount()
+  await $.command.run({ ...COMMAND, surface: 'desktop', args: 'on' } as never)
+})
+
+test('desktop: a frame that cannot be read keeps the engine spinner', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  on('command.run', () => ({ text: '' }))
+  on('fs.read', (_, e) => ({ deny: `gone: ${e.path}` }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine spinner</Text>
+  })
+  await $.command.run({ ...COMMAND, surface: 'desktop', args: 'doctor' } as never)
+  const ui = await $.ui.mount({ ...SPINNER, surface: 'desktop', props: WORKING })
+  expect(await ui.find({ type: 'Svg' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'engine spinner' })).toBeDefined()
+  await ui.unmount()
+  await $.command.run({ ...COMMAND, args: 'auto' } as never)
+})
+
+test('desktop: the ticker redraws once per clip, never per frame, and never blits', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  // big enough frames that the animation spans several clips
+  const length = 40_000
+  mockPngFiles(on, length)
+  on('command.run', () => ({ text: '' }))
+  let invalidates = 0
+  let blits = 0
+  on('ui.invalidate', (_, e, next) => {
+    invalidates++
+    return next(e)
+  })
+  on('ui.blit', () => {
+    blits++
+    return {}
+  })
+  const anim: Anim = 'game'
+  await $.command.run({ ...COMMAND, surface: 'desktop', args: anim } as never)
+  const ms = FRAMES.animations[anim].ms
+  const clips = packClips(ms, ms.map(() => length), SVG_SOURCE_CAP)
+  expect(clips.length).toBeGreaterThan(1)
+  const ui = await $.ui.mount({ ...SPINNER, surface: 'desktop', props: WORKING })
+  expect(String((await ui.find({ type: 'Svg' }))?.props.source)).toContain(`${anim}0x`)
+  const firstClipMs = ms.slice(clips[0][0], clips[0][1]).reduce((a, b) => a + b, 0)
+  // every frame of the first clip changes while it plays: none redraws
+  await clock.advance(firstClipMs - 60)
+  expect(invalidates).toBe(0)
+  await clock.advance(120)
+  expect(invalidates).toBe(1)
+  expect(String((await ui.find({ type: 'Svg' }))?.props.source)).toContain(`${anim}${clips[1][0]}x`)
+  // a whole pass more, watched in 10 ms steps: each redraw comes once the
+  // clip on show has played out (within a tick), the loop back included
+  const at: number[] = [firstClipMs + 60]
+  let seen = invalidates
+  for (let t = firstClipMs + 70; t <= firstClipMs + 60 + passMs(FRAMES.animations[anim]) + clips.length * 60; t += 10) {
+    await clock.advance(10)
+    if (invalidates !== seen) {
+      seen = invalidates
+      at.push(t)
+    }
+  }
+  expect(at.length).toBeGreaterThan(clips.length)
+  for (let i = 1; i < at.length; i++) {
+    const [start, end] = clips[i % clips.length]
+    const played = ms.slice(start, end).reduce((a, b) => a + b, 0)
+    expect(at[i] - at[i - 1]).toBeGreaterThanOrEqual(played - 60)
+    expect(at[i] - at[i - 1]).toBeLessThanOrEqual(played + 60)
+  }
+  expect(blits).toBe(0)
+  await ui.unmount()
+  await $.command.run({ ...COMMAND, args: 'auto' } as never)
 })
 
 test('a pinned one-shot animation keeps looping after its first pass', async ($, on) => {
