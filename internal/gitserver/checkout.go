@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/logger"
@@ -183,6 +184,9 @@ func cloneRepo(ctx context.Context, repoURL, path string, creds *GitCredentials,
 	// Cancel the whole Git process group so a stalled transport child cannot
 	// prevent Git from cleaning up its incomplete checkout.
 	cmd := gitutil.NewNetworkCmd(ctx, args...)
+	// Retain the clone's output-drain bound, including on Windows where the
+	// shared runner cannot terminate the whole process group.
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Stderr = os.Stderr // show git progress/errors
 	if opts != nil && opts.Output != nil {
 		cmd.Stderr = opts.Output
