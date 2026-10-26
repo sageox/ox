@@ -2,12 +2,15 @@ package usage
 
 import (
 	"encoding/json"
+	"path"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/oxactivity"
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/session/contextuse"
 	"github.com/sageox/ox/internal/weblink"
 )
 
@@ -34,6 +37,13 @@ type Input struct {
 	// set, surfaced discussions and plans with an opaque id get a web link.
 	Endpoint string
 
+	// ScoreThreshold is the project's attribution threshold (the minimum
+	// category value that earns a commit trailer); 0 → the config default.
+	ScoreThreshold float64
+	// AllowJudged lets LLM-judge evidence reach the derived attribution
+	// category. Judged uses are always listed either way.
+	AllowJudged bool
+
 	Now   time.Time
 	Width int // display width; 0 → 80
 
@@ -44,6 +54,9 @@ type Input struct {
 
 // RecentAll is the Input.RecentLimit that keeps every call in calls.recent.
 const RecentAll = -1
+
+// defaultScoreThreshold mirrors the attribution config default.
+const defaultScoreThreshold = 0.5
 
 // primeCommand is the Command prime records for itself.
 const primeCommand = "agent prime"
@@ -72,9 +85,16 @@ func Build(in Input) Report {
 	}
 	r.Calls = buildCalls(in.Events, in.RecentLimit)
 	r.Context = buildContext(in.Events)
-	r.Surfaced = buildSurfaced(in.Events)
+	var all []contextuse.SurfacedRef
+	r.Surfaced, all = buildSurfaced(in.Events)
 	fillURLs(r.Surfaced, in.Endpoint)
 	r.Used = buildUsed(in, r.Surfaced)
+	rollup := contextuse.Build(in.Events, all, in.ProducedCommits, in.AllowJudged)
+	if r.Trace.Available {
+		r.Relevant = buildRelevant(rollup, r.Surfaced, all)
+		r.Relevant.ReportedNone = rollup.ReportedNone && r.Relevant.Count == 0 && len(r.Used.SelfReported) == 0
+	}
+	r.Attribution = buildAttribution(in, rollup)
 	r.NextActions = nextActions(r)
 	r.Guidance = guidanceText
 	r.Display = Display(r, in.Width)
@@ -199,49 +219,43 @@ func buildContext(events []contexttrace.Event) Context {
 	return cx
 }
 
-// docsOf tolerates both the singular Doc and the plural Docs shapes.
-func docsOf(ev contexttrace.Event) []string {
-	if ev.Doc != "" {
-		return []string{ev.Doc}
-	}
-	return ev.Docs
-}
-
-func buildSurfaced(events []contexttrace.Event) []Surfaced {
-	out := []Surfaced{}
-	seen := map[string]bool{}
-	add := func(s Surfaced) {
-		if s.Ref == "" || len(out) >= maxSurfaced {
-			return
-		}
-		key := s.RefType + "\x00" + s.Ref
-		if seen[key] {
-			return
-		}
-		seen[key] = true
-		out = append(out, s)
-	}
+// buildSurfaced lists what reached the model by name (via contextuse, so the
+// report and the rollup agree on what was surfaced), capped for display. The
+// uncapped list is returned too so use evidence is matched against all of it.
+func buildSurfaced(events []contexttrace.Event) ([]Surfaced, []contextuse.SurfacedRef) {
+	all := contextuse.SurfacedWith(events, contextuse.SurfacedOptions{
+		IsRetrieval: func(ev contexttrace.Event) bool { return kindOf(ev) == oxactivity.KindRetrieval },
+	})
+	// Whisper sender id and topic are display fields contextuse does not carry.
+	type whisperMeta struct{ from, topic string }
+	whispers := map[string]whisperMeta{}
 	for _, ev := range events {
-		switch {
-		case ev.Type == contexttrace.EventProvided && isWhisper(ev):
-			ref := ev.Ref
-			if ref == "" {
-				ref = ev.WhisperID
-			}
-			add(Surfaced{Ref: ref, RefType: "murmur", From: ev.From, Topic: ev.Topic, Via: "whisper"})
-		case ev.Type == contexttrace.EventProvided:
-			for _, d := range docsOf(ev) {
-				add(Surfaced{Ref: d, RefType: "doc", Via: "prime"})
-			}
-		case ev.Type == contexttrace.EventInvoked && ev.Query != "" && kindOf(ev) == oxactivity.KindRetrieval:
-			rt := ev.RefType
-			if rt == "" {
-				rt = "query"
-			}
-			add(Surfaced{Ref: ev.Query, RefType: rt, Via: "retrieval"})
+		if ev.Type != contexttrace.EventProvided || !isWhisper(ev) {
+			continue
+		}
+		ref := ev.Ref
+		if ref == "" {
+			ref = ev.WhisperID
+		}
+		if _, seen := whispers[ref]; !seen {
+			whispers[ref] = whisperMeta{ev.From, ev.Topic}
 		}
 	}
-	return out
+	out := make([]Surfaced, 0, len(all))
+	for _, s := range all {
+		if len(out) >= maxSurfaced {
+			break
+		}
+		item := Surfaced{
+			Ref: s.Ref, RefType: s.RefType, Via: s.Via,
+			Title: s.Title, URL: s.URL, FromName: s.FromName, Seq: s.Seq,
+		}
+		if s.Via == contextuse.ViaWhisper {
+			item.From, item.Topic = whispers[s.Ref].from, whispers[s.Ref].topic
+		}
+		out = append(out, item)
+	}
+	return out, all
 }
 
 // kindOf re-derives an invoked event's Kind from its recorded command words —
@@ -263,12 +277,19 @@ func kindOf(ev contexttrace.Event) oxactivity.Kind {
 	return act.Kind
 }
 
-// isSelfReport reports whether an influenced event is the AI coworker's own
-// attribution. Legacy influenced events carry no mechanism; they were written
-// by the same AI-coworker-reported path, so they count as self-assessed too.
+// isSelfReport reports whether an event is the AI coworker's own attribution:
+// a used event it reported at the moment of use, or a legacy influenced event
+// (those carry no mechanism; they were written by the same AI-coworker-reported
+// path, so they count as self-assessed too).
 func isSelfReport(ev contexttrace.Event) bool {
-	return ev.Type == contexttrace.EventInfluenced &&
-		(ev.Mechanism == contexttrace.MechanismSelfReport || ev.Mechanism == "")
+	switch ev.Type {
+	case contexttrace.EventUsed:
+		return ev.Evidence == contexttrace.EvidenceReported ||
+			(ev.Evidence == "" && (ev.Mechanism == contexttrace.MechanismSelfReport || ev.Mechanism == ""))
+	case contexttrace.EventInfluenced:
+		return ev.Mechanism == contexttrace.MechanismSelfReport || ev.Mechanism == ""
+	}
+	return false
 }
 
 func buildUsed(in Input, surfaced []Surfaced) Used {
@@ -308,12 +329,90 @@ func buildUsed(in Input, surfaced []Surfaced) Used {
 		u.SageoxScore = &Score{Category: in.ScoreCategory, Reason: in.ScoreReason}
 	}
 	if in.Recording && in.AgentID != "" {
+		ref := "SURFACED_REF"
+		if len(surfaced) > 0 {
+			ref = surfaced[0].Ref
+		}
 		u.SelfReport = &SelfReportCmd{
-			Command:     "ox agent " + in.AgentID + " session context-trace",
-			ExampleLine: exampleLine(surfaced),
+			Command:          "ox agent " + in.AgentID + " context used " + ref + " --why \"ONE LINE: what you did because of it\"",
+			BatchCommand:     "ox agent " + in.AgentID + " session context-trace",
+			BatchExampleLine: exampleLine(surfaced),
 		}
 	}
 	return u
+}
+
+// buildRelevant turns the use-evidence rollup into the report's relevant
+// section and marks each displayed surfaced item with its strongest evidence.
+func buildRelevant(rollup contextuse.Rollup, surfaced []Surfaced, all []contextuse.SurfacedRef) *Relevant {
+	rel := &Relevant{
+		Count:         rollup.UsedProvable + rollup.UsedReported + rollup.UsedJudged,
+		SurfacedCount: rollup.Surfaced,
+		ByEvidence: map[string]int{
+			contextuse.BucketRead: 0, contextuse.BucketCited: 0,
+			contextuse.BucketReported: 0, contextuse.BucketJudged: 0,
+		},
+		Items:   []RelevantItem{},
+		Derived: &Derived{Category: rollup.DerivedCategory, Reason: rollup.DerivedReason},
+	}
+	for k, n := range rollup.ByEvidence {
+		rel.ByEvidence[k] = n
+	}
+	for _, u := range rollup.Refs {
+		item := RelevantItem{
+			Ref: u.Ref, RefType: u.RefType,
+			Evidence: contextuse.BucketOf(u.Evidence), Grade: u.Grade,
+		}
+		for i := range surfaced {
+			if !sameRef(surfaced[i].Ref, u.Ref) {
+				continue
+			}
+			if surfaced[i].Used == nil {
+				surfaced[i].Used = &ItemUsed{Evidence: item.Evidence, Seq: u.Seq, Grade: u.Grade}
+			}
+			if item.Title == "" {
+				item.Title, item.URL = surfaced[i].Title, surfaced[i].URL
+			}
+		}
+		if item.Title == "" {
+			for _, s := range all {
+				if sameRef(s.Ref, u.Ref) {
+					item.Title, item.URL = s.Title, s.URL
+					break
+				}
+			}
+		}
+		rel.Items = append(rel.Items, item)
+	}
+	return rel
+}
+
+// sameRef matches a used ref to a surfaced one the way contextuse does: exact
+// case-insensitive, else by basename (a read of "/ledger/MEMORY.md" is a use
+// of surfaced "MEMORY.md").
+func sameRef(surfacedRef, usedRef string) bool {
+	if strings.EqualFold(surfacedRef, usedRef) {
+		return true
+	}
+	return strings.EqualFold(path.Base(strings.ReplaceAll(surfacedRef, "\\", "/")),
+		path.Base(strings.ReplaceAll(usedRef, "\\", "/")))
+}
+
+// buildAttribution says whether the session clears the project's attribution
+// threshold. A manual score (ox session score) is the AI coworker's own call
+// and wins over the derived category; both are display-only here.
+func buildAttribution(in Input, rollup contextuse.Rollup) Attribution {
+	a := Attribution{Threshold: in.ScoreThreshold}
+	if a.Threshold == 0 {
+		a.Threshold = defaultScoreThreshold
+	}
+	if in.ScoreCategory != "" {
+		a.Source, a.Category, a.Reason = AttributionSelfReported, in.ScoreCategory, in.ScoreReason
+	} else {
+		a.Source, a.Category, a.Reason = AttributionDerived, rollup.DerivedCategory, rollup.DerivedReason
+	}
+	a.WouldAttribute = session.CategoryValue(session.ScoreCategory(a.Category)) >= a.Threshold
+	return a
 }
 
 // exampleLine is one JSONL self-report line, anchored to a real surfaced item

@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/theme"
 )
 
@@ -229,7 +230,9 @@ func scoreLines(r Report, width int, st styler) []string {
 	switch {
 	case r.Used.SageoxScore != nil && r.Used.SageoxScore.Category != "":
 		items = append(items, r.Used.SageoxScore.Category)
-	case r.Relevant != nil && r.Relevant.Derived != nil && r.Relevant.Derived.Category != "":
+	case r.Relevant != nil && r.Relevant.Derived != nil && r.Relevant.Derived.Category != "" &&
+		r.Relevant.Derived.Category != string(session.ScoreNone):
+		// a derived "none" is the absence of evidence, not a score
 		items = append(items, r.Relevant.Derived.Category)
 	}
 	if n := r.Used.ProducedCommits; n > 0 {

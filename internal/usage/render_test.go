@@ -50,7 +50,7 @@ func goldenReport(width int) Report {
 		Surfaced{Ref: "release", RefType: refTypeSkill, Via: "prime"},
 		Surfaced{Ref: "triage", RefType: refTypeSkill, Via: "prime"},
 		Surfaced{Ref: "cnv_0192a3b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b", RefType: "discussion", Via: "retrieval",
-			Title: "Usage report design review", Seq: 12, Used: &ItemUsed{Evidence: EvidenceCited, Seq: 14, Grade: "cited"}},
+			Title: "Usage report design review", Seq: 12, Used: &ItemUsed{Evidence: EvidenceCited, Seq: 14, Grade: "provable"}},
 		Surfaced{Ref: "pln_4d8e2f", RefType: "plan", Via: "retrieval", Title: "Usage receipts"},
 	)
 	r.Surfaced = append(r.Surfaced, built[2:]...)

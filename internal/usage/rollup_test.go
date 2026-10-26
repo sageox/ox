@@ -99,11 +99,11 @@ func TestBuildMe(t *testing.T) {
 	assert.Equal(t, 2, row.Calls)
 	assert.Equal(t, 4300, row.Tokens)
 	assert.Equal(t, 1, row.Surfaced)
-	assert.Zero(t, row.Useful, "a self-report alone is not use evidence on a surfaced item")
+	assert.Equal(t, 1, row.Useful, "a self-report on a surfaced item is reported-grade use evidence")
 	assert.Equal(t, "moderate", row.Score)
 	assert.Equal(t, RowNoTrace, r.Sessions[1].Trace)
 	assert.Equal(t, RowNotHydrated, r.Sessions[2].Trace)
-	assert.Equal(t, MeTotals{Sessions: 3, Traced: 1, NotHydrated: 1, Calls: 2, Tokens: 4300}, r.Totals)
+	assert.Equal(t, MeTotals{Sessions: 3, Traced: 1, NotHydrated: 1, Calls: 2, Tokens: 4300, Useful: 1}, r.Totals)
 
 	assert.Contains(t, r.Display, "no usage trace")
 	assert.Contains(t, r.Display, "—")

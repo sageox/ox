@@ -83,7 +83,7 @@ func TestUsage_ListsOxCallAfterHookRecordsIt(t *testing.T) {
 	assert.InDelta(t, n/4, found.Tokens, 1, "tokens ≈ bytes/4")
 	assert.Contains(t, r.Display, "checked murmurs ×1")
 	require.NotNil(t, r.Used.SelfReport)
-	assert.Equal(t, "ox agent OxAb12 session context-trace", r.Used.SelfReport.Command)
+	assert.Equal(t, "ox agent OxAb12 session context-trace", r.Used.SelfReport.BatchCommand)
 }
 
 // TestUsage_NotRecordingReadsAgentCache: an AI coworker that is not recording
@@ -229,7 +229,7 @@ func TestUsage_SelfReportRoundTrip(t *testing.T) {
 
 	before := runOxUsageJSON(t)
 	require.NotNil(t, before.Used.SelfReport)
-	_, err := runContextTraceStdin(t, before.Used.SelfReport.ExampleLine)
+	_, err := runContextTraceStdin(t, before.Used.SelfReport.BatchExampleLine)
 	require.NoError(t, err)
 
 	after := runOxUsageJSON(t)

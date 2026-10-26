@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/glance"
 	"github.com/sageox/ox/internal/lfs"
@@ -100,6 +101,9 @@ func runUsage(cmd *cobra.Command, _ []string) error {
 	in.Endpoint = endpoint.GetForProject(projectRoot)
 	in.Now = time.Now()
 	in.Width = width
+	if cfg, cfgErr := config.LoadProjectConfig(projectRoot); cfgErr == nil {
+		in.ScoreThreshold = resolveProjectAttribution(cfg).ScoreThreshold // AllowJudged stays false until a config knob exists
+	}
 	if cmd.Flags().Changed("recent") {
 		recent, _ := cmd.Flags().GetInt("recent")
 		switch {

@@ -158,9 +158,10 @@ func TestBuild(t *testing.T) {
 			in:   Input{TraceSource: TraceSourceSession, AgentID: "OxAb12", Recording: true, Events: []contexttrace.Event{memoryProvided()}},
 			assert: func(t *testing.T, r Report) {
 				require.NotNil(t, r.Used.SelfReport)
-				assert.Equal(t, "ox agent OxAb12 session context-trace", r.Used.SelfReport.Command)
+				assert.Equal(t, "ox agent OxAb12 session context-trace", r.Used.SelfReport.BatchCommand)
+				assert.Contains(t, r.Used.SelfReport.Command, "ox agent OxAb12 context used ")
 				var line contexttrace.Event
-				require.NoError(t, json.Unmarshal([]byte(r.Used.SelfReport.ExampleLine), &line))
+				require.NoError(t, json.Unmarshal([]byte(r.Used.SelfReport.BatchExampleLine), &line))
 				assert.Equal(t, contexttrace.EventInfluenced, line.Type)
 				assert.Equal(t, contexttrace.MechanismSelfReport, line.Mechanism)
 				assert.Equal(t, "MEMORY.md", line.Ref, "example anchors to a real surfaced item")
@@ -335,5 +336,8 @@ func TestBuild_NextActions_NoReportNag(t *testing.T) {
 	assert.NotContains(t, string(b), `"status"`, "used.status is gone from the contract")
 	assert.NotContains(t, string(b), `"injected"`)
 	assert.Contains(t, string(b), `"context":{"tokens":`)
-	assert.NotContains(t, string(b), `"relevant"`, "relevant is omitted when the trace carries none")
+	assert.Contains(t, string(b), `"relevant":{"count":0`, "an available trace always carries relevant")
+	nb, err := json.Marshal(none)
+	require.NoError(t, err)
+	assert.NotContains(t, string(nb), `"relevant"`, "relevant is omitted when there is no trace")
 }
