@@ -23,7 +23,8 @@ const (
 	CodexRows        = 12
 
 	// codexFPS plays every animation on a 50 ms tick, the Claude mod's TICK_MS.
-	codexFPS = 20
+	codexFPS    = 20
+	codexTickMS = 1000 / codexFPS
 	// codexArtWidth and codexArtHeight bound Oxy inside a cell, leaving a
 	// little margin at the sides and top.
 	codexArtWidth  = 120
@@ -125,8 +126,10 @@ func OxyCodexSheet(version string) (*CodexSheet, error) {
 // that plays them. Each source animation's frames get their own cells once,
 // however many Codex names alias it; each frame is scaled to fit
 // codexArtWidth x codexArtHeight, centered horizontally and resting on the
-// cell's floor. A frame shown for ms milliseconds repeats round(ms/50)
-// times (at least once) at 20 fps. Cells left over stay transparent.
+// cell's floor. Frames are first folded to Codex's 50 ms tick and, when the
+// sources outgrow the fixed grid, evenly thinned (fitCells). A cell shown for
+// ms milliseconds repeats round(ms/50) times (at least once) at 20 fps.
+// Cells left over stay transparent.
 func BuildCodexSheet(sheet image.Image, m Manifest, version string) (*CodexSheet, error) {
 	cw, ch := m.Cell, m.cellHeight()
 	if cw <= 0 || ch <= 0 {
@@ -143,13 +146,16 @@ func BuildCodexSheet(sheet image.Image, m Manifest, version string) (*CodexSheet
 	offX, offY := (CodexFrameWidth-w)/2, CodexFrameHeight-h
 
 	b := sheet.Bounds()
-	out := image.NewNRGBA(image.Rect(0, 0, CodexSheetWidth, CodexSheetHeight))
-	frames := make(map[string][]int) // source animation -> frame index list
-	next := 0
+	// Gather each source animation once, however many Codex names alias it,
+	// folded to Codex's tick, then trim the longest until they fit the grid.
+	var sources []Animation
+	var plans [][]codexTick
+	seen := make(map[string]bool)
 	for _, ca := range CodexAnimations {
-		if _, done := frames[ca.Source]; done {
+		if seen[ca.Source] {
 			continue
 		}
+		seen[ca.Source] = true
 		a, ok := byName[ca.Source]
 		if !ok {
 			return nil, fmt.Errorf("codex animation %q: sheet has no %q animation", ca.Name, ca.Source)
@@ -161,22 +167,31 @@ func BuildCodexSheet(sheet image.Image, m Manifest, version string) (*CodexSheet
 		if (a.Row+1)*ch > b.Dy() || a.Frames*cw > b.Dx() {
 			return nil, fmt.Errorf("animation %q: row %d with %d frames exceeds the %dx%d sheet", a.Name, a.Row, a.Frames, b.Dx(), b.Dy())
 		}
-		if next+a.Frames > CodexColumns*CodexRows {
-			return nil, fmt.Errorf("animation %q: %d frames overflow the %d codex cells", a.Name, a.Frames, CodexColumns*CodexRows)
-		}
+		sources = append(sources, a)
+		plans = append(plans, foldToTick(ms, codexTickMS))
+	}
+	if len(plans) > CodexColumns*CodexRows {
+		return nil, fmt.Errorf("%d codex source animations overflow the %d codex cells", len(plans), CodexColumns*CodexRows)
+	}
+	plans = fitCells(plans, CodexColumns*CodexRows)
+
+	out := image.NewNRGBA(image.Rect(0, 0, CodexSheetWidth, CodexSheetHeight))
+	frames := make(map[string][]int) // source animation -> frame index list
+	next := 0
+	for k, a := range sources {
 		var list []int
-		for i := 0; i < a.Frames; i++ {
-			src := crop(sheet, image.Rect(i*cw, a.Row*ch, (i+1)*cw, (a.Row+1)*ch).Add(b.Min))
+		for _, tk := range plans[k] {
+			src := crop(sheet, image.Rect(tk.Frame*cw, a.Row*ch, (tk.Frame+1)*cw, (a.Row+1)*ch).Add(b.Min))
 			art := downscale(src, w, h)
 			cell := image.Pt((next%CodexColumns)*CodexFrameWidth+offX, (next/CodexColumns)*CodexFrameHeight+offY)
 			draw.Draw(out, image.Rectangle{Min: cell, Max: cell.Add(art.Bounds().Size())}, art, image.Point{}, draw.Src)
-			repeats := max(1, int(math.Round(float64(ms[i])*codexFPS/1000)))
+			repeats := max(1, int(math.Round(float64(tk.MS)/codexTickMS)))
 			for r := 0; r < repeats; r++ {
 				list = append(list, next)
 			}
 			next++
 		}
-		frames[ca.Source] = list
+		frames[a.Name] = list
 	}
 
 	pet := codexPet{
@@ -213,4 +228,82 @@ func CodexManifestVersion(petJSON []byte) (string, error) {
 		return "", fmt.Errorf("parse codex pet.json: %w", err)
 	}
 	return p.OxVersion, nil
+}
+
+// codexTick is one Codex cell: the source frame it shows and for how long.
+type codexTick struct{ Frame, MS int }
+
+// foldToTick merges frames too short for Codex's tick into the one before
+// them, summing durations, while that one is itself still shorter than tick.
+// Codex plays at a fixed 20 fps, so a 40 ms frame would round up to a 50 ms
+// tick and play slow; and the Claude sheet keeps 40 ms in-betweens that would
+// otherwise each spend one of Codex's 144 cells. Folding only while the
+// previous tick is short (the rule make-sheet.py used) keeps a run of short
+// frames to pairs instead of collapsing it into one long frame.
+func foldToTick(ms []int, tick int) []codexTick {
+	var out []codexTick
+	for i, d := range ms {
+		if n := len(out); n > 0 && out[n-1].MS < tick {
+			out[n-1].MS += d
+			continue
+		}
+		out = append(out, codexTick{Frame: i, MS: d})
+	}
+	return out
+}
+
+// fitCells thins the plans until their cells total at most cells: each pass
+// takes one cell from whichever animation currently has the most (the first
+// on a tie), then each animation is evenly subsampled to its share. Codex's
+// grid is a fixed 12x12, so a denser source sheet must lose frames here, and
+// spreading the loss over the longest animations keeps every one readable.
+// Requires len(plans) <= cells.
+func fitCells(plans [][]codexTick, cells int) [][]codexTick {
+	counts := make([]int, len(plans))
+	total := 0
+	for i, p := range plans {
+		counts[i] = len(p)
+		total += len(p)
+	}
+	for ; total > cells; total-- {
+		most := 0
+		for i, c := range counts {
+			if c > counts[most] {
+				most = i
+			}
+		}
+		counts[most]--
+	}
+	out := make([][]codexTick, len(plans))
+	for i, p := range plans {
+		out[i] = subsample(p, counts[i])
+	}
+	return out
+}
+
+// subsample keeps n of ticks spread evenly, always the first and the last, and
+// gives each dropped tick's time to the kept tick before it, so the animation
+// runs as long as before.
+func subsample(ticks []codexTick, n int) []codexTick {
+	if n >= len(ticks) {
+		return ticks
+	}
+	keep := make([]int, n) // indices into ticks, ascending
+	for i := range keep {
+		if n > 1 {
+			keep[i] = int(math.Round(float64(i*(len(ticks)-1)) / float64(n-1)))
+		}
+	}
+	out := make([]codexTick, n)
+	for i, k := range keep {
+		end := len(ticks)
+		if i+1 < n {
+			end = keep[i+1]
+		}
+		out[i] = codexTick{Frame: ticks[k].Frame}
+		for _, t := range ticks[k:end] {
+			out[i].MS += t.MS
+		}
+	}
+	return out
 }
