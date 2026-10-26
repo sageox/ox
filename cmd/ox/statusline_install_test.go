@@ -98,9 +98,7 @@ func TestInstallProjectClaudeHooks_NoUserLevelStatusLine(t *testing.T) {
 	require.NoError(t, InstallProjectClaudeHooks(gitRoot))
 	userPath, err := getClaudeSettingsPath()
 	require.NoError(t, err)
-	if data, err := os.ReadFile(userPath); err == nil {
-		assert.NotContains(t, string(data), "statusLine")
-	}
+	assert.NoFileExists(t, userPath, "installing project hooks must not create user-level settings")
 }
 
 // TestCleanupLocalSettingsOxHooks_RemovesOxStatusLine removes an ox statusLine

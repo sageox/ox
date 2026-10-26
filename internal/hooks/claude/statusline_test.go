@@ -75,7 +75,12 @@ func TestEnsureOxStatusLine(t *testing.T) {
 func TestIsOxStatuslineCommand(t *testing.T) {
 	assert.True(t, IsOxStatuslineCommand(constants.OxStatuslineCommandClaudeCode))
 	assert.True(t, IsOxStatuslineCommand("ox statusline"))
+	assert.True(t, IsOxStatuslineCommand("/usr/local/bin/ox statusline --claude"))
+	assert.True(t, IsOxStatuslineCommand("cd /repo && ox statusline"))
 	assert.False(t, IsOxStatuslineCommand("starship"))
+	assert.False(t, IsOxStatuslineCommand("fox statusline"), "a foreign binary ending in ox is not ox")
+	assert.False(t, IsOxStatuslineCommand("~/bin/box statusline"))
+	assert.False(t, IsOxStatuslineCommand("ox statuslinefoo"))
 	assert.False(t, IsAnyOxCommand(constants.OxStatuslineCommandClaudeCode), "a status line is not a hook command")
 }
 

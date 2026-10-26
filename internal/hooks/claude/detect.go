@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/sageox/ox/internal/constants"
@@ -24,8 +25,14 @@ func IsAnyOxCommand(cmd string) bool {
 	return IsOxPrimeCommand(cmd) || IsOxHookCommand(cmd)
 }
 
+// oxStatuslineRe matches "ox statusline" only where "ox" is the executable:
+// at the start of the command or after a path separator, whitespace, or a
+// shell operator. "fox statusline" or "~/bin/box statusline" are foreign.
+var oxStatuslineRe = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])ox\s+statusline(\s|$)`)
+
 // IsOxStatuslineCommand reports whether a statusLine command runs ox's status
-// line (any version of the installed command, or a hand-written one).
+// line (any version of the installed command, or a hand-written one). A
+// foreign command that merely ends in "ox statusline" is not ox's.
 func IsOxStatuslineCommand(cmd string) bool {
-	return strings.Contains(cmd, "ox statusline")
+	return oxStatuslineRe.MatchString(cmd)
 }

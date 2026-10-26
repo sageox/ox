@@ -132,16 +132,11 @@ func TestState_Segment(t *testing.T) {
 }
 
 // Failure prevented: SaveState reports success when the directory exists but
-// the file itself cannot be written.
+// the file itself cannot be written. A directory where the state file must go
+// defeats the atomic rename on every platform, unlike permissions.
 func TestSaveState_SurfacesFileWriteFailure(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores directory permissions")
-	}
 	root := t.TempDir()
-	dir := filepath.Dir(StatePath(root, testAgentID))
-	require.NoError(t, os.MkdirAll(dir, 0o755))
-	require.NoError(t, os.Chmod(dir, 0o500))
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	require.NoError(t, os.MkdirAll(StatePath(root, testAgentID), 0o755))
 	assert.Error(t, SaveState(root, testAgentID, State{LastAction: "x"}))
 }
