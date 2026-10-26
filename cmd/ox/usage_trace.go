@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/oxactivity"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/session/contextuse"
 	"github.com/sageox/ox/internal/tokens"
 )
 
@@ -67,7 +69,207 @@ func recordOxToolCall(projectRoot, agentID string, input *agentx.HookInput) {
 	if act.Kind == oxactivity.KindRetrieval {
 		ev.Query = act.Query
 	}
+	hits := surfacedToolHits(act.Command, input)
+	if singleItemCommands[act.Command] && len(hits) == 1 {
+		ev.Ref, ev.Title, ev.URL = hits[0].Ref, hits[0].Title, hits[0].URL
+	}
 	appendUsageTraceEvent(projectRoot, agentID, ev)
+	// An ox CLI command traces its own surfaced items; an MCP tool runs on
+	// the server, so its items are traced here from the response.
+	if strings.HasPrefix(act.Command, "mcp ") {
+		traceProvidedHits(projectRoot, agentID, contexttrace.SourceOnDemand, contexttrace.MechanismRetrieval, hits)
+	}
+}
+
+// maxSurfacedParseBytes bounds how much of a tool response is parsed for
+// surfaced items. A larger response is still counted, just not itemized.
+const maxSurfacedParseBytes = 256 << 10
+
+// mcpSurfacingTools are the SageOx MCP tools whose response names specific
+// team items, mapped to the ref_type of those items ("" = per item, from its
+// doc_type/source_type).
+var mcpSurfacingTools = map[string]string{
+	"Search":                 "",
+	"Conversation":           "discussion",
+	"ConversationDigest":     "discussion",
+	"ConversationTranscript": "discussion",
+	"GetPlan":                "plan",
+	"ListMurmurs":            "murmur",
+}
+
+// singleItemCommands return exactly one team item, so their invoked event
+// can name it.
+var singleItemCommands = map[string]bool{
+	"conversation show":          true,
+	"mcp Conversation":           true,
+	"mcp ConversationDigest":     true,
+	"mcp ConversationTranscript": true,
+	"mcp GetPlan":                true,
+}
+
+// surfacedToolHits extracts the team items a successful tool call surfaced:
+// from the response of a surfacing MCP tool, or the stdout of a single-item
+// ox command. Refs, titles and links only.
+func surfacedToolHits(command string, input *agentx.HookInput) []providedHit {
+	if input.ToolError != "" || len(input.ToolResponse) > maxSurfacedParseBytes {
+		return nil
+	}
+	if tool, ok := strings.CutPrefix(command, "mcp "); ok {
+		refType, surfacing := mcpSurfacingTools[tool]
+		if !surfacing {
+			return nil
+		}
+		return surfacedItems(responseDocs(input.ToolResponse), refType)
+	}
+	if command == "conversation show" {
+		return surfacedItems(textDocs([]string{toolOutput(input.ToolResponse)}), "discussion")
+	}
+	return nil
+}
+
+// responseDocs decodes the JSON documents in a tool response: an MCP content
+// array ([{"type":"text","text":"<json>"}]), a {"content":[…]} or
+// {"structuredContent":{…}} result, a JSON string, or a bare JSON value.
+func responseDocs(resp json.RawMessage) []any {
+	var v any
+	if json.Unmarshal(resp, &v) != nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case string:
+		return textDocs([]string{t})
+	case []any:
+		if texts := contentTexts(t); len(texts) > 0 {
+			return textDocs(texts)
+		}
+	case map[string]any:
+		if sc, ok := t["structuredContent"].(map[string]any); ok {
+			return []any{sc}
+		}
+		if c, ok := t["content"].([]any); ok {
+			return textDocs(contentTexts(c))
+		}
+	}
+	return []any{v}
+}
+
+// contentTexts returns the text of each MCP text content block.
+func contentTexts(blocks []any) []string {
+	var out []string
+	for _, b := range blocks {
+		if m, ok := b.(map[string]any); ok {
+			if s, ok := m["text"].(string); ok {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
+// textDocs parses each text that is a JSON object or array; prose is skipped.
+func textDocs(texts []string) []any {
+	var out []any
+	for _, s := range texts {
+		s = strings.TrimSpace(s)
+		if s == "" || (s[0] != '{' && s[0] != '[') {
+			continue
+		}
+		var v any
+		if json.Unmarshal([]byte(s), &v) == nil {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// surfacedItemShape is what a response object must look like to count as a
+// team item: an id under one of IDKeys (first wins), plus a title or link —
+// or an id whose type prefix alone says it is a team item. Text fields
+// (text, body, summary, content) are never read.
+var surfacedItemShape = struct {
+	IDKeys, TitleKeys, URLKeys, TypeKeys []string
+	// SkipKeys hold objects that describe people or scopes, not items.
+	SkipKeys map[string]bool
+	// IDPrefixes mark an id as a team item without a title or link.
+	IDPrefixes []string
+}{
+	IDKeys:     []string{"conversation_id", "recording_id", "plan_id", "session_id", "murmur_id", "source_id", "id", "slug"},
+	TitleKeys:  []string{"title", "name", "topic"},
+	URLKeys:    []string{"url", "share_url", "link"},
+	TypeKeys:   []string{"doc_type", "source_type"},
+	SkipKeys:   map[string]bool{"team": true, "teams": true, "author": true, "user": true, "owner": true, "repo": true, "created_by": true, "participants": true, "speakers": true, "from": true},
+	IDPrefixes: []string{"cnv_", "rec_", "ses_", "pln_"},
+}
+
+// maxSurfacedWalkDepth bounds the search for items inside a response.
+const maxSurfacedWalkDepth = 5
+
+// surfacedItems walks decoded documents, collecting up to
+// maxProvidedHitsPerCall items in document order. An item is not descended
+// into, so a search result's nested hits never count as items of their own.
+func surfacedItems(docs []any, refType string) []providedHit {
+	var hits []providedHit
+	var walk func(v any, depth int)
+	walk = func(v any, depth int) {
+		if len(hits) >= maxProvidedHitsPerCall || depth > maxSurfacedWalkDepth {
+			return
+		}
+		switch t := v.(type) {
+		case []any:
+			for _, e := range t {
+				walk(e, depth+1)
+			}
+		case map[string]any:
+			if h, ok := surfacedItem(t, refType); ok {
+				hits = append(hits, h)
+				return
+			}
+			keys := make([]string, 0, len(t))
+			for k := range t {
+				keys = append(keys, k)
+			}
+			slices.Sort(keys) // map order is random; document order is not recoverable
+			for _, k := range keys {
+				if !surfacedItemShape.SkipKeys[k] {
+					walk(t[k], depth+1)
+				}
+			}
+		}
+	}
+	for _, d := range docs {
+		walk(d, 0)
+	}
+	return hits
+}
+
+// surfacedItem reads one response object as a team item, if it is one.
+func surfacedItem(m map[string]any, refType string) (providedHit, bool) {
+	ref := firstString(m, surfacedItemShape.IDKeys)
+	if ref == "" {
+		return providedHit{}, false
+	}
+	title := firstString(m, surfacedItemShape.TitleKeys)
+	url := firstString(m, surfacedItemShape.URLKeys)
+	if title == "" && url == "" && !hasAnyPrefix(ref, surfacedItemShape.IDPrefixes) {
+		return providedHit{}, false
+	}
+	if refType == "" {
+		refType = firstString(m, surfacedItemShape.TypeKeys)
+		if refType == "" {
+			refType = "doc"
+		}
+	}
+	score, _ := m["score"].(float64)
+	return providedHit{SurfacedRef: contextuse.SurfacedRef{Ref: ref, RefType: refType, Title: title, URL: url}, Score: score}, true
+}
+
+func firstString(m map[string]any, keys []string) string {
+	for _, k := range keys {
+		if s, ok := m[k].(string); ok && strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
 }
 
 // invokedRefType names what kind of team knowledge a retrieval pulled, using
