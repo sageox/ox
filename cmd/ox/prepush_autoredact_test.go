@@ -33,6 +33,9 @@ func seedSessionMeta(t *testing.T, sessionDir, sessionName string) {
 		AgentType:   "claude-code",
 		CreatedAt:   time.Now().UTC(),
 	}
+	if _, err := os.Stat(filepath.Join(sessionDir, "raw.jsonl")); err == nil {
+		meta.Files = map[string]lfs.FileRef{"raw.jsonl": {Storage: lfs.StorageGit}}
+	}
 	buf, err := json.MarshalIndent(meta, "", "  ")
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
@@ -60,9 +63,18 @@ func TestRunPrePushSecretGate_AutoRedactsJSONLAndAllowsPush(t *testing.T) {
 	seedSessionMeta(t, filepath.Join(work, "sessions", sessionName), sessionName)
 	mustGit(t, work, "add", "--sparse", filepath.Join("sessions", sessionName, "meta.json"))
 	mustGit(t, work, "commit", "--amend", "--no-edit", "--no-verify")
+	identity := mustGitCapture(t, work, "show", "-s", "--format=%P%n%an%n%ae%n%aI%n%B", "HEAD")
+	planPath := filepath.Join(work, "data", "plans", "unfinished", "plan.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(planPath), 0o755))
+	require.NoError(t, os.WriteFile(planPath, []byte("staged plan\n"), 0o644))
+	mustGit(t, work, "add", "--sparse", planPath)
+	require.NoError(t, os.WriteFile(planPath, []byte("later edit\n"), 0o644))
 
 	err := runPrePushSecretGate(context.Background(), work)
 	require.NoError(t, err, "verified repaired content must pass")
+	assert.Empty(t, mustGitCapture(t, work, "ls-tree", "--name-only", "HEAD", "data/plans"))
+	assert.Equal(t, "staged plan", mustGitCapture(t, work, "show", ":data/plans/unfinished/plan.md"))
+	assert.Equal(t, identity, mustGitCapture(t, work, "show", "-s", "--format=%P%n%an%n%ae%n%aI%n%B", "HEAD"))
 
 	// raw.jsonl on disk must no longer contain the canary bytes.
 	rawAbs := filepath.Join(work, "sessions", sessionName, "raw.jsonl")
@@ -70,6 +82,8 @@ func TestRunPrePushSecretGate_AutoRedactsJSONLAndAllowsPush(t *testing.T) {
 	require.NoError(t, readErr)
 	assert.NotContains(t, string(bytes), canary,
 		"canary still on disk; auto-redact did not run or did not scrub")
+	assert.NotContains(t, mustGitCapture(t, work, "show", "HEAD:sessions/"+sessionName+"/raw.jsonl"), canary,
+		"publication must carry the repaired blob, not only a clean worktree")
 
 	// Re-scan must come back clean — the chokepoint and the scanner
 	// share a detector catalog; if redact says it cleared, scan must
@@ -113,6 +127,37 @@ func TestRunPrePushSecretGate_AutoRedactsJSONLAndAllowsPush(t *testing.T) {
 // Failure prevented: a non-JSONL session file with a finding blocks
 // the push of ALL other sessions and unrelated commits, and either
 // data is lost or the user has no on-disk record of what was carved out.
+func TestRedactionRepairs_RefuseRebaseAndRetry(t *testing.T) {
+	for _, file := range []string{"raw.jsonl", "notes.md"} {
+		t.Run(file, func(t *testing.T) {
+			const name = "2026-10-22-repair"
+			const canary = "AKIAIOSFODNN7EXAMPLE"
+			rel := "sessions/" + name + "/" + file
+			work := makeLedgerWithCommit(t, map[string]string{rel: `{"text":"` + canary + `"}` + "\n"})
+			seedSessionMeta(t, filepath.Join(work, "sessions", name), name)
+			mustGit(t, work, "add", "--sparse", "sessions/"+name+"/meta.json")
+			mustGit(t, work, "commit", "--amend", "--no-edit")
+			tip := mustGitCapture(t, work, "rev-parse", "HEAD")
+			index := mustGitCapture(t, work, "ls-files", "--stage")
+			rebase := filepath.Join(work, ".git", "rebase-merge")
+			require.NoError(t, os.MkdirAll(rebase, 0o755))
+			require.Error(t, runPrePushSecretGate(context.Background(), work))
+			assert.Equal(t, tip, mustGitCapture(t, work, "rev-parse", "HEAD"))
+			assert.Equal(t, index, mustGitCapture(t, work, "ls-files", "--stage"))
+			content, err := os.ReadFile(filepath.Join(work, rel))
+			require.NoError(t, err)
+			assert.Contains(t, string(content), canary, "refusal must precede worktree mutation")
+			require.NoError(t, os.RemoveAll(rebase))
+			require.NoError(t, runPrePushSecretGate(context.Background(), work))
+			if file == "raw.jsonl" {
+				assert.NotContains(t, mustGitCapture(t, work, "show", "HEAD:"+rel), canary)
+			} else {
+				assert.Empty(t, mustGitCapture(t, work, "ls-tree", "--name-only", "HEAD", rel))
+			}
+		})
+	}
+}
+
 func TestRunPrePushSecretGate_QuarantinesNonJSONLAndAllowsPush(t *testing.T) {
 	t.Setenv("OX_ALLOW_SECRETS", "")
 	const sessionName = "2026-05-12-quarantine"
@@ -128,9 +173,17 @@ func TestRunPrePushSecretGate_QuarantinesNonJSONLAndAllowsPush(t *testing.T) {
 	seedSessionMeta(t, filepath.Join(work, "sessions", sessionName), sessionName)
 	mustGit(t, work, "add", "--sparse", filepath.Join("sessions", sessionName, "meta.json"))
 	mustGit(t, work, "commit", "--amend", "--no-edit", "--no-verify")
+	identity := mustGitCapture(t, work, "show", "-s", "--format=%P%n%an%n%ae%n%aI%n%B", "HEAD")
+	planPath := filepath.Join(work, "data", "plans", "unfinished", "plan.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(planPath), 0o755))
+	require.NoError(t, os.WriteFile(planPath, []byte("staged plan\n"), 0o644))
+	mustGit(t, work, "add", "--sparse", planPath)
 
 	err := runPrePushSecretGate(context.Background(), work)
 	require.NoError(t, err, "verified quarantine must permit safe publication")
+	assert.Empty(t, mustGitCapture(t, work, "ls-tree", "--name-only", "HEAD", "data/plans"))
+	assert.Equal(t, "staged plan", mustGitCapture(t, work, "show", ":data/plans/unfinished/plan.md"))
+	assert.Equal(t, identity, mustGitCapture(t, work, "show", "-s", "--format=%P%n%an%n%ae%n%aI%n%B", "HEAD"))
 
 	// Original in-place path must be gone (moved aside).
 	_, statErr := os.Stat(filepath.Join(work, relMD))

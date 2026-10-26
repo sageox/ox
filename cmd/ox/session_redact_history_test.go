@@ -214,7 +214,8 @@ func TestRunRedactHistoryWorkflow_DryRunListsButDoesntModify(t *testing.T) {
 func TestRunRedactHistoryWorkflow_InteractiveYesRedacts(t *testing.T) {
 	work := makeLedgerWithCommitAndOrigin(t, map[string]string{
 		"sessions/leaky/raw.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
-		"sessions/leaky/meta.json": minimalMetaJSON("leaky", "OxLEAK"),
+		// This fixture stores content directly in Git, rather than as an LFS pointer.
+		"sessions/leaky/meta.json": `{"version":"1.0","session_name":"leaky","agent_id":"OxLEAK","files":{"raw.jsonl":{"storage":"git"}}}`,
 	})
 	backupDir := t.TempDir()
 	out := &bytes.Buffer{}
@@ -233,6 +234,7 @@ func TestRunRedactHistoryWorkflow_InteractiveYesRedacts(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(after), "AKIA", "file must be redacted in place")
 	assert.Contains(t, string(after), "[REDACTED_AWS_KEY]")
+	assert.NotContains(t, mustGitCapture(t, work, "show", "HEAD:sessions/leaky/raw.jsonl"), "AKIAIOSFODNN7EXAMPLE")
 
 	// the snapshot must still contain the original bytes
 	entries, err := os.ReadDir(backupDir)

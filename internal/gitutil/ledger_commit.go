@@ -105,6 +105,67 @@ func CommitLedgerSessionDeletion(ctx context.Context, repoPath, message string, 
 	return committed, err
 }
 
+// AmendLedgerSnapshot replaces HEAD with its tree plus only the staged paths
+// named by the caller. It preserves every parent, the message and the original
+// author, and leaves unrelated index entries alone. The caller must hold
+// WithRepoLock from before staging. This is for the redaction gate's scoped
+// repairs; it never converts an amendment into a new child commit.
+func AmendLedgerSnapshot(ctx context.Context, repoPath string, pathspecs ...string) (bool, error) {
+	if len(pathspecs) == 0 {
+		return false, errors.New("amending Ledger requires explicit paths")
+	}
+	if err := IsSafeForGitOps(repoPath); err != nil {
+		return false, err
+	}
+	if _, err := writeIndexTree(ctx, repoPath, nil); err != nil {
+		return false, err
+	}
+	tip, err := currentBranchTip(ctx, repoPath)
+	if err != nil {
+		return false, err
+	}
+	if tip == "" {
+		return false, errors.New("cannot amend an unborn Ledger branch")
+	}
+	tree, err := writeScopedIndexTree(ctx, repoPath, tip, pathspecs)
+	if err != nil {
+		return false, err
+	}
+	oldTree, err := cleanGitOutput(ctx, repoPath, "rev-parse", tip+"^{tree}")
+	if err != nil {
+		return false, err
+	}
+	if tree == strings.TrimSpace(string(oldTree)) {
+		return false, nil
+	}
+	metadata, err := cleanGitOutput(ctx, repoPath, "show", "-s", "--format=%P%x00%an%x00%ae%x00%aI%x00%B", tip)
+	if err != nil {
+		return false, err
+	}
+	fields := strings.SplitN(string(metadata), "\x00", 5)
+	if len(fields) != 5 {
+		return false, errors.New("invalid Ledger commit metadata")
+	}
+	parents := strings.Fields(fields[0])
+	parent := ""
+	if len(parents) > 0 {
+		parent = parents[0]
+	}
+	if err := validateLedgerTree(ctx, repoPath, tip, tree); err != nil {
+		return false, err
+	}
+	// Compare with the original parent: quarantining a new file removes it
+	// from the holding commit, rather than deleting earlier session content.
+	if err := assertNoSacredMassDeletion(ctx, repoPath, parent, tree, nil); err != nil {
+		return false, err
+	}
+	authorEnv := []string{"GIT_AUTHOR_NAME=" + fields[1], "GIT_AUTHOR_EMAIL=" + fields[2], "GIT_AUTHOR_DATE=" + fields[3]}
+	if err := commitTreeToBranch(ctx, repoPath, tree, parents, tip, strings.TrimSuffix(fields[4], "\n"), authorEnv); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // CommitLedgerSnapshotPreserving is CommitLedgerSnapshot for a caller that
 // deletes tracked sacred paths after preserving their full bytes in
 // .sageox/cache. preserved lists those ledger-relative paths. Each one is
@@ -174,7 +235,11 @@ func commitLedgerTree(ctx context.Context, repoPath, tree, parent, tip, message 
 	if err := assertNoSacredMassDeletion(ctx, repoPath, parent, tree, preserved, deletedSessions...); err != nil {
 		return err
 	}
-	return commitTreeToBranch(ctx, repoPath, tree, parent, tip, message)
+	var parents []string
+	if parent != "" {
+		parents = []string{parent}
+	}
+	return commitTreeToBranch(ctx, repoPath, tree, parents, tip, message, nil)
 }
 
 // StageLedgerBlob writes data as a blob and stages it at path (slash-separated,
@@ -317,12 +382,12 @@ func cacheHoldsBlob(ctx context.Context, repoPath, parent, path string) bool {
 // the current branch ref with a compare-and-swap on tip, the value the ref
 // must still hold, so a concurrent commit fails this update rather than being
 // silently overwritten.
-func commitTreeToBranch(ctx context.Context, repoPath, tree, parent, tip, message string) error {
+func commitTreeToBranch(ctx context.Context, repoPath, tree string, parents []string, tip, message string, authorEnv []string) error {
 	args := []string{"commit-tree", tree, "-m", message}
-	if parent != "" {
+	for _, parent := range parents {
 		args = append(args, "-p", parent)
 	}
-	out, err := cleanGitOutput(ctx, repoPath, args...)
+	out, err := runPlumbing(ctx, repoPath, nil, authorEnv, args...)
 	if err != nil {
 		return fmt.Errorf("git commit-tree: %w", err)
 	}

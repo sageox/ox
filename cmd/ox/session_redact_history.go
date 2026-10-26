@@ -536,9 +536,7 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	// Stage + amend in a single holding commit. The operator can review
 	// the amended diff before running `ox session push`. The amend moves the
 	// branch, so it runs under the repo lock (sageox/ox#1541).
-	if err := gitutil.WithRepoLock(context.Background(), opts.LedgerPath, func() error {
-		return stageAndAmendRedactedFiles(opts.LedgerPath, byPath)
-	}); err != nil {
+	if err := stageAndAmendRedactedFiles(opts.LedgerPath, byPath); err != nil {
 		return fmt.Errorf("stage/amend: %w", err)
 	}
 
@@ -734,8 +732,8 @@ func classifyFindingsByPushStatus(ledgerPath string, findings []redactHistoryFin
 	// reachable from origin/main?" — one git call per distinct path.
 	// Quarantined paths are unconditionally treated as unpushed: the
 	// pre-push gate carved them out of the holding commit before any
-	// push could reference the bytes (prepush_autoredact.go:309
-	// amendDroppingPaths). Doing the git lookup for a path that no
+	// push could reference the bytes (quarantineUnredactableFindings).
+	// Doing the git lookup for a path that no
 	// commit references would return "not tracked" → "unpushed" anyway,
 	// but skipping the exec saves a fork per quarantined file.
 	pushedFiles := map[string]bool{}
@@ -980,25 +978,28 @@ func stageAndAmendRedactedFiles(ledgerPath string, byPath map[string][]redactHis
 	if len(byPath) == 0 {
 		return nil
 	}
-	// stage each modified path
+	ctx, cancel := context.WithTimeout(context.Background(), lockedCommitTimeout)
+	defer cancel()
+	return gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		if err := checkRedactionIndex(ctx, ledgerPath); err != nil {
+			return err
+		}
+		return stageAndAmendRedactedFilesLocked(ctx, ledgerPath, byPath)
+	})
+}
+
+func stageAndAmendRedactedFilesLocked(ctx context.Context, ledgerPath string, byPath map[string][]redactHistoryFinding) error {
 	paths := make([]string, 0, len(byPath))
 	for p := range byPath {
-		paths = append(paths, p)
+		paths = append(paths, ":(literal)"+p)
 	}
 	sort.Strings(paths)
-	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, paths...)
-	if output, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
+	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse", "--"}, paths...)
+	if output, err := exec.CommandContext(ctx, "git", addArgs...).CombinedOutput(); err != nil {
 		return fmt.Errorf("git add: %s: %w", strings.TrimSpace(string(output)), err)
 	}
-	// amend without changing message — keep the original session commit's identity
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--amend", "--no-edit", "--no-verify")
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(output), "nothing to commit") {
-			return nil
-		}
-		return fmt.Errorf("git commit --amend: %s: %w", strings.TrimSpace(string(output)), err)
-	}
-	return nil
+	_, err := gitutil.AmendLedgerSnapshot(ctx, ledgerPath, paths...)
+	return err
 }
 
 // groupFindingsByPath buckets findings by file so the interactive prompt

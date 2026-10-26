@@ -9,9 +9,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// These fixtures commit raw.jsonl directly to Git, so the manifest must declare
+// that storage instead of implying an LFS pointer.
+func gitRawMetaJSON(t *testing.T, sessionName, agentID string) string {
+	t.Helper()
+	var meta lfs.SessionMeta
+	require.NoError(t, json.Unmarshal([]byte(minimalMetaJSON(sessionName, agentID)), &meta))
+	meta.Files["raw.jsonl"] = lfs.FileRef{Storage: lfs.StorageGit}
+	data, err := json.Marshal(meta)
+	require.NoError(t, err)
+	return string(data)
+}
 
 // TestSessionScope_BareInvocationRejected guards the bare-form
 // rejection rail. Before #608, a no-flag invocation silently hydrated
@@ -61,9 +74,9 @@ func TestSessionScope_BareInvocationRejected(t *testing.T) {
 func TestSessionScope_SessionFilter_ScopesToMatching(t *testing.T) {
 	work := makeLedgerWithCommitAndOrigin(t, map[string]string{
 		"sessions/leaky-a/raw.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
-		"sessions/leaky-a/meta.json": minimalMetaJSON("leaky-a", "OxLEAKA"),
+		"sessions/leaky-a/meta.json": gitRawMetaJSON(t, "leaky-a", "OxLEAKA"),
 		"sessions/leaky-b/raw.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
-		"sessions/leaky-b/meta.json": minimalMetaJSON("leaky-b", "OxLEAKB"),
+		"sessions/leaky-b/meta.json": gitRawMetaJSON(t, "leaky-b", "OxLEAKB"),
 	})
 	bPath := filepath.Join(work, "sessions/leaky-b/raw.jsonl")
 	originalB, err := os.ReadFile(bPath)
@@ -127,11 +140,11 @@ func TestSessionScope_SessionFilter_UnknownErrorsBeforeHydration(t *testing.T) {
 func TestSessionScope_SessionFilter_RepeatedIsUnion(t *testing.T) {
 	work := makeLedgerWithCommitAndOrigin(t, map[string]string{
 		"sessions/sess-a/raw.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
-		"sessions/sess-a/meta.json": minimalMetaJSON("sess-a", "OxA"),
+		"sessions/sess-a/meta.json": gitRawMetaJSON(t, "sess-a", "OxA"),
 		"sessions/sess-b/raw.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
-		"sessions/sess-b/meta.json": minimalMetaJSON("sess-b", "OxB"),
+		"sessions/sess-b/meta.json": gitRawMetaJSON(t, "sess-b", "OxB"),
 		"sessions/sess-c/raw.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
-		"sessions/sess-c/meta.json": minimalMetaJSON("sess-c", "OxC"),
+		"sessions/sess-c/meta.json": gitRawMetaJSON(t, "sess-c", "OxC"),
 	})
 	bPath := filepath.Join(work, "sessions/sess-b/raw.jsonl")
 	originalB, err := os.ReadFile(bPath)
@@ -163,11 +176,11 @@ func TestSessionScope_SessionFilter_RepeatedIsUnion(t *testing.T) {
 func TestSessionScope_DateRange_LexicographicWindow(t *testing.T) {
 	work := makeLedgerWithCommitAndOrigin(t, map[string]string{
 		"sessions/2026-03-01T10-00-x/raw.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
-		"sessions/2026-03-01T10-00-x/meta.json": minimalMetaJSON("2026-03-01T10-00-x", "OxA"),
+		"sessions/2026-03-01T10-00-x/meta.json": gitRawMetaJSON(t, "2026-03-01T10-00-x", "OxA"),
 		"sessions/2026-04-15T12-00-x/raw.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
-		"sessions/2026-04-15T12-00-x/meta.json": minimalMetaJSON("2026-04-15T12-00-x", "OxB"),
+		"sessions/2026-04-15T12-00-x/meta.json": gitRawMetaJSON(t, "2026-04-15T12-00-x", "OxB"),
 		"sessions/2026-05-10T14-00-x/raw.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
-		"sessions/2026-05-10T14-00-x/meta.json": minimalMetaJSON("2026-05-10T14-00-x", "OxC"),
+		"sessions/2026-05-10T14-00-x/meta.json": gitRawMetaJSON(t, "2026-05-10T14-00-x", "OxC"),
 	})
 	marchPath := filepath.Join(work, "sessions/2026-03-01T10-00-x/raw.jsonl")
 	originalMarch, _ := os.ReadFile(marchPath)
@@ -203,7 +216,7 @@ func TestSessionScope_DateRange_LexicographicWindow(t *testing.T) {
 // orphan).
 func TestSessionScope_QuarantineIntegration_JSONL(t *testing.T) {
 	work := makeLedgerWithCommitAndOrigin(t, map[string]string{
-		"sessions/dirty/meta.json": minimalMetaJSON("dirty", "OxDIRTY"),
+		"sessions/dirty/meta.json": gitRawMetaJSON(t, "dirty", "OxDIRTY"),
 	})
 
 	// Hand-construct quarantine state: bytes at the quarantine path +

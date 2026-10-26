@@ -269,7 +269,7 @@ func TestCommitLedgerSnapshot_IgnoresBlobStagedAfterSnapshot(t *testing.T) {
 	writeGitutilFixture(t, repo, "sessions/y/meta.json", conflictMarkerFixture)
 	gitInRepo(t, repo, "add", "--sparse", "sessions/y/meta.json")
 
-	require.NoError(t, commitTreeToBranch(ctx, repo, tree, parent, parent, "session: x"))
+	require.NoError(t, commitTreeToBranch(ctx, repo, tree, []string{parent}, parent, "session: x", nil))
 	assert.Equal(t, cleanMeta, headBlob(t, repo, "sessions/x/meta.json"))
 	assert.False(t, headHasPath(t, repo, "sessions/y/meta.json"), "a blob staged after the snapshot must not be committed")
 }
@@ -295,7 +295,7 @@ func TestCommitTreeToBranch_RefusesWhenBranchAdvanced(t *testing.T) {
 	gitInRepo(t, repo, "commit", "-m", "theirs")
 	theirs := gitInRepo(t, repo, "rev-parse", "HEAD")
 
-	err = commitTreeToBranch(ctx, repo, tree, parent, parent, "ours")
+	err = commitTreeToBranch(ctx, repo, tree, []string{parent}, parent, "ours", nil)
 	require.ErrorContains(t, err, "concurrent ledger commit")
 	assert.Equal(t, theirs, gitInRepo(t, repo, "rev-parse", "HEAD"), "the concurrent commit must survive")
 }
@@ -325,9 +325,51 @@ func TestCommitTreeToBranch_RefusesWhenUnbornBranchWasBorn(t *testing.T) {
 	gitInRepo(t, repo, "commit", "-m", "theirs")
 	theirs := gitInRepo(t, repo, "rev-parse", "HEAD")
 
-	err = commitTreeToBranch(ctx, repo, tree, parent, parent, "ours")
+	err = commitTreeToBranch(ctx, repo, tree, nil, parent, "ours", nil)
 	require.ErrorContains(t, err, "concurrent ledger commit")
 	assert.Equal(t, theirs, gitInRepo(t, repo, "rev-parse", "HEAD"), "the concurrent first commit must survive")
+}
+
+func TestAmendLedgerSnapshot_PreservesHistoryAndOtherStagedWork(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
+	for _, shape := range []string{"root", "child", "merge"} {
+		t.Run(shape, func(t *testing.T) {
+			repo := newSnapshotRepo(t)
+			base := gitInRepo(t, repo, "rev-parse", "HEAD")
+			writeGitutilFixture(t, repo, "notes.txt", "original\n")
+			gitInRepo(t, repo, "add", "notes.txt")
+			tree := gitInRepo(t, repo, "write-tree")
+			args := []string{"-c", "user.name=Original author", "-c", "user.email=original@example.com", "commit-tree", tree, "-m", "holding commit\n\nOriginal details."}
+			if shape != "root" {
+				args = append(args, "-p", base)
+			}
+			if shape == "merge" {
+				side := gitInRepo(t, repo, "commit-tree", tree, "-p", base, "-m", "side")
+				args = append(args, "-p", side)
+			}
+			tip := gitInRepo(t, repo, args...)
+			gitInRepo(t, repo, "update-ref", "HEAD", tip)
+			identity := gitInRepo(t, repo, "show", "-s", "--format=%P%n%an%n%ae%n%aI%n%B", "HEAD")
+			writeGitutilFixture(t, repo, "notes.txt", "repaired\n")
+			gitInRepo(t, repo, "add", "notes.txt")
+			writeGitutilFixture(t, repo, "notes.txt", "later working edit\n")
+			writeGitutilFixture(t, repo, "data/plans/p/plan.md", "unpublished\n")
+			gitInRepo(t, repo, "add", "--sparse", "data/plans/p/plan.md")
+
+			committed, err := AmendLedgerSnapshot(context.Background(), repo, "notes.txt")
+			require.NoError(t, err)
+			require.True(t, committed)
+			assert.Equal(t, "repaired\n", headBlob(t, repo, "notes.txt"))
+			assert.Equal(t, identity, gitInRepo(t, repo, "show", "-s", "--format=%P%n%an%n%ae%n%aI%n%B", "HEAD"))
+			assert.False(t, headHasPath(t, repo, "data/plans/p/plan.md"))
+			assert.Equal(t, "data/plans/p/plan.md", gitInRepo(t, repo, "diff", "--cached", "--name-only"))
+			worktree, err := os.ReadFile(filepath.Join(repo, "notes.txt"))
+			require.NoError(t, err)
+			assert.Equal(t, "later working edit\n", string(worktree))
+		})
+	}
 }
 
 func TestCommitLedgerSnapshot_NothingToCommit(t *testing.T) {
@@ -567,4 +609,111 @@ func TestCommitLedgerSnapshot_NoOverrideEnv(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, committed)
 	assert.True(t, headHasPath(t, repo, paths[0]))
+}
+
+// An empty or unchanged scope must never consume another writer's staging;
+// an unborn branch has no holding commit to amend.
+func TestAmendLedgerSnapshot_RequiresExistingScopedWork(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repositories")
+	}
+	for _, tc := range []struct {
+		name, wantErr string
+		paths         []string
+		unborn        bool
+	}{
+		{name: "explicit paths required", wantErr: "explicit paths"},
+		{name: "unborn branch", paths: []string{"base.txt"}, unborn: true, wantErr: "unborn"},
+		{name: "unchanged selected path", paths: []string{"base.txt"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newSnapshotRepo(t)
+			head := gitInRepo(t, repo, "rev-parse", "HEAD")
+			writeGitutilFixture(t, repo, "data/plans/p/plan.md", "pending plan\n")
+			gitInRepo(t, repo, "add", "--sparse", "data/plans")
+			if tc.unborn {
+				gitInRepo(t, repo, "update-ref", "-d", "refs/heads/main")
+			}
+			index := gitInRepo(t, repo, "ls-files", "--stage")
+			committed, err := AmendLedgerSnapshot(context.Background(), repo, tc.paths...)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.False(t, committed)
+			assert.Equal(t, index, gitInRepo(t, repo, "ls-files", "--stage"))
+			if tc.unborn {
+				_, err := cleanGitOutput(context.Background(), repo, "rev-parse", "--verify", "HEAD")
+				assert.Error(t, err, "an amendment cannot create the first commit")
+			} else {
+				assert.Equal(t, head, gitInRepo(t, repo, "rev-parse", "HEAD"))
+				assert.False(t, headHasPath(t, repo, "data/plans/p/plan.md"))
+			}
+		})
+	}
+}
+
+// Refused session bytes stay staged for correction; the same scoped amendment
+// must make progress once the metadata or LFS pointer is repaired.
+func TestAmendLedgerSnapshot_InvalidSessionBytesRemainRecoverable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repositories")
+	}
+	for _, tc := range []struct {
+		name, path, original, invalid, repaired, wantErr string
+	}{
+		{"metadata", "sessions/x/meta.json", cleanMeta, `{"title":`, `{"title":"Repaired"}` + "\n", "invalid JSON"},
+		{"LFS artifact", "sessions/x/raw.jsonl", testLFSPointer, `{"type":"user","content":"pending"}` + "\n", strings.Replace(testLFSPointer, "size 42", "size 43", 1), "LFS pointer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newSnapshotRepo(t)
+			writeGitutilFixture(t, repo, tc.path, tc.original)
+			gitInRepo(t, repo, "add", "--sparse", tc.path)
+			gitInRepo(t, repo, "commit", "-m", "holding session")
+			head := gitInRepo(t, repo, "rev-parse", "HEAD")
+			writeGitutilFixture(t, repo, tc.path, tc.invalid)
+			gitInRepo(t, repo, "add", "--sparse", tc.path)
+
+			committed, err := AmendLedgerSnapshot(context.Background(), repo, tc.path)
+			require.ErrorContains(t, err, tc.wantErr)
+			assert.False(t, committed)
+			assert.Equal(t, head, gitInRepo(t, repo, "rev-parse", "HEAD"))
+			staged, err := cleanGitOutput(context.Background(), repo, "show", ":"+tc.path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.invalid, string(staged), "a refusal must preserve the staged repair for recovery")
+
+			writeGitutilFixture(t, repo, tc.path, tc.repaired)
+			gitInRepo(t, repo, "add", "--sparse", tc.path)
+			committed, err = AmendLedgerSnapshot(context.Background(), repo, tc.path)
+			require.NoError(t, err)
+			assert.True(t, committed)
+			assert.Equal(t, tc.repaired, headBlob(t, repo, tc.path))
+			assert.Empty(t, gitInRepo(t, repo, "diff", "--cached", "--name-only"))
+		})
+	}
+}
+
+// The holding commit's existing deletions still count when a repair only
+// changes another file; comparing against HEAD would hide the original wipe.
+func TestAmendLedgerSnapshot_RefusesHoldingCommitSacredWipe(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
+	repo := newSnapshotRepo(t)
+	paths := seedSacredSessionFiles(t, repo, sacred.MassDeleteThreshold+1)
+	gitInRepo(t, repo, "rm", "-r", "sessions")
+	gitInRepo(t, repo, "commit", "-m", "unsafe holding deletion")
+	head := gitInRepo(t, repo, "rev-parse", "HEAD")
+	writeGitutilFixture(t, repo, "repair.txt", "pending repair\n")
+	gitInRepo(t, repo, "add", "repair.txt")
+
+	committed, err := AmendLedgerSnapshot(context.Background(), repo, "repair.txt")
+	require.ErrorContains(t, err, "sacred")
+	assert.False(t, committed)
+	assert.Equal(t, head, gitInRepo(t, repo, "rev-parse", "HEAD"))
+	assert.Equal(t, "repair.txt", gitInRepo(t, repo, "diff", "--cached", "--name-only"))
+	for _, path := range paths {
+		assert.Equal(t, "recording "+path, gitInRepo(t, repo, "show", "HEAD^:"+path), "the previous recorded bytes remain recoverable")
+	}
 }
