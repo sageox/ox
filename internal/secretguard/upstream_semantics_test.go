@@ -214,7 +214,10 @@ func TestGenericAPIKeyHonorsItsUpstreamAllowlists(t *testing.T) {
 		assertPublishable(t, name, input)
 	}
 	key := syntheticToken("generic/key", 32)
-	for i, input := range []string{`api_key = "` + key + `"`, "auth: " + key, `{"config":"client_secret=` + key + `"}`} {
+	// A JSON record line defers only keyword-gated rules to its decoded
+	// strings; literal-anchored generic-api-key still reads key/value structure.
+	camel := `{"type":"user","content":"hi"}` + "\n" + `{"apiKey":"` + key + `"}` + "\n"
+	for i, input := range []string{`api_key = "` + key + `"`, "auth: " + key, `{"config":"client_secret=` + key + `"}`, camel} {
 		if out, found := RedactText(input); len(found) == 0 || strings.Contains(out, key) {
 			t.Errorf("key-shaped case %d not redacted", i)
 		}
@@ -246,6 +249,7 @@ func TestRuleAllowlistsApplyContentConditionsOnly(t *testing.T) {
 		{"line regex", "regexTarget='line'\nregexes=['''^# example:''']", "# example: vendor_abcdefghijk1", true},
 		{"line regex other line", "regexTarget='line'\nregexes=['''^# example:''']", "# example:\nvendor_abcdefghijk1", false},
 		{"stopword", "stopwords=['sample']", "vendor_samplexyz1234", true},
+		{"stopword any case", "stopwords=['Sample']", "vendor_samplexyz1234", true},
 		{"AND both hold", "condition='AND'\nregexes=['''^sample''']\nstopwords=['sample']", "vendor_samplexyz1234", true},
 		{"AND one fails", "condition='AND'\nregexes=['''^0+$''']\nstopwords=['sample']", "vendor_samplexyz1234", false},
 		{"path only", "paths=['''.*''']", "vendor_abcdefghijk1", false},

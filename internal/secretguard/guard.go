@@ -188,9 +188,10 @@ func newRuleAllowlist(cfg allowlist) (ruleAllowlist, error) {
 		}
 		a.regexes = append(a.regexes, re)
 	}
+	// Upstream matches stopwords case-insensitively against the secret.
 	for _, w := range cfg.Stopwords {
 		if w != "" {
-			a.stopwords = append(a.stopwords, w)
+			a.stopwords = append(a.stopwords, strings.ToLower(w))
 		}
 	}
 	return a, nil
