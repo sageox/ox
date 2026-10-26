@@ -549,10 +549,10 @@ func checkClaudeStatusLineAt(gitRoot string, fix bool) checkResult {
 		detail = "ox's status line is a per-coworker setting and belongs in " + localPath + ", not the committed " + settingsPath
 	case local == claude.StatusLineForeign:
 		return PassedCheck(claudeStatusLineCheckName,
-			"custom statusLine kept; ox activity is not shown in the status bar")
+			"custom statusLine kept; ox counts are not shown in the status bar")
 	case enabled && shared == claude.StatusLineForeign && local == claude.StatusLineMissing:
 		return PassedCheck(claudeStatusLineCheckName,
-			"project statusLine kept; ox activity is not shown in the status bar")
+			"project statusLine kept; ox counts are not shown in the status bar")
 	case !enabled && local == claude.StatusLineMissing:
 		return PassedCheck(claudeStatusLineCheckName, "status line off (ox config set statusline on to show it)")
 	case !enabled:
@@ -562,7 +562,7 @@ func checkClaudeStatusLineAt(gitRoot string, fix bool) checkResult {
 		return PassedCheck(claudeStatusLineCheckName, "ox status line installed")
 	default:
 		problem = fmt.Sprintf("status line %s", local)
-		detail = "ox's live activity line is not in " + localPath
+		detail = "ox's status line is not in " + localPath
 	}
 
 	if fix {

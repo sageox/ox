@@ -26,7 +26,6 @@ import (
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/observability"
-	"github.com/sageox/ox/internal/oxactivity"
 	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
@@ -1350,25 +1349,15 @@ func deliverPendingWhispers(cmd *cobra.Command, agentID string) {
 // but not ambient ones, to avoid flooding agent context.
 // Timeout is 100ms (vs 500ms for runAgentWhisper) because this runs in the
 // hot path of every hook invocation and must not add perceptible latency.
-func emitWhispers(w io.Writer, agentID string) { writeWhispers(w, agentID) }
-
-// writeWhispers is emitWhispers, returning the entries it wrote (nil when none)
-// so a hook can tell coworkers who whispered.
-func writeWhispers(w io.Writer, agentID string) []whisperstore.WhisperEntry {
-	return writeWhispersFor(w, agentID, "")
-}
-
-// writeWhispersFor is writeWhispers for a known harness session, so the
-// status line shows the whisper in the window it was delivered to.
-func writeWhispersFor(w io.Writer, agentID, sessionID string) []whisperstore.WhisperEntry {
+func emitWhispers(w io.Writer, agentID string) {
 	// best-effort delivery — 100ms allows for daemon startup/load
 	client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
 	resp, err := client.Whispers(agentID, "normal", nil)
 	if err != nil {
-		return nil
+		return
 	}
 	if resp == nil || len(resp.Entries) == 0 {
-		return nil
+		return
 	}
 
 	entries := capMurmurWhispers(resp.Entries)
@@ -1377,15 +1366,13 @@ func writeWhispersFor(w io.Writer, agentID, sessionID string) []whisperstore.Whi
 	// cursor was already advanced by daemon — these are discarded, not deferred
 	entries = filterMurmurReceive(entries, projectRoot)
 	if len(entries) == 0 {
-		return nil
+		return
 	}
 
 	formatWhispersWithEdits(w, entries, checkoutEditedFiles(projectRoot))
-	recordStatuslineWhisper(projectRoot, oxactivity.StateKey(agentID, sessionID), entries)
 
 	// best-effort context-trace for whisper delivery observability
 	traceWhisperDelivery(projectRoot, agentID, entries)
-	return entries
 }
 
 // traceWhisperDelivery emits context-trace "provided" events for delivered murmur entries.
