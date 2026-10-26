@@ -7,6 +7,7 @@ import {
   formatRow,
   formatTokens,
   headerLines,
+  INITIAL_STATUS,
   isAtEnd,
   isOxCommand,
   murmurRows,
@@ -364,15 +365,22 @@ test('/ox-brief registers at session start without opening the pane', async ($, 
   expect(opened).toBe(0)
 })
 
+// The brief reads top down (header, context, read, then calls), so the pane
+// opens at the top and keeps the end in view only once the person has
+// scrolled there. Jumping to the end on open scrolled the header away.
 describe('following the end', () => {
-  test('new rows pull the window down while following', () => {
-    expect(shouldScrollToEnd(undefined, 3, true)).toBe(true)
+  test('the pane opens at the top: a first load never jumps to the end', () => {
+    expect(INITIAL_STATUS.follow).toBe(false)
+    expect(shouldScrollToEnd(undefined, 3, true)).toBe(false)
+    expect(shouldScrollToEnd(undefined, 3, INITIAL_STATUS.follow)).toBe(false)
+  })
+  test('new rows pull the window down once the person follows the end', () => {
     expect(shouldScrollToEnd(3, 4, true)).toBe(true)
   })
-  test('no new rows, or the person scrolled up, leaves the window', () => {
+  test('no new rows, or the person reading above the end, leaves the window', () => {
     expect(shouldScrollToEnd(3, 3, true)).toBe(false)
     expect(shouldScrollToEnd(3, 4, false)).toBe(false)
-    expect(shouldScrollToEnd(undefined, 0, true)).toBe(false)
+    expect(shouldScrollToEnd(3, 4, INITIAL_STATUS.follow)).toBe(false)
   })
 })
 
@@ -395,3 +403,4 @@ test('a person scrolling the pane passes through untouched', async ($, on) => {
   expect(moved).toEqual({})
   expect(seen).toBe(1)
 })
+

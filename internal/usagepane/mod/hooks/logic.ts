@@ -2,7 +2,7 @@
 // ox command in a Bash call, and laying out the pane's lines. No `$` here, so
 // every function is unit-testable under `claude plugin test`.
 
-import type { UsageContextSource, UsageRecentCall, UsageReport, UsageSurfaced } from '../types'
+import type { UsageContextSource, UsageRecentCall, UsageReport, UsageStatus, UsageSurfaced } from '../types'
 
 export const PANE = 'ox-brief'
 export const PLUGIN = 'ox-cli-brief-pane'
@@ -286,8 +286,14 @@ export function isAtEnd(offset: number, bodyRows: number, contentRows: number): 
   return offset >= Math.max(0, contentRows - bodyRows)
 }
 
-// shouldScrollToEnd: a refresh that added rows pulls the window to the end,
-// unless the person scrolled up to read (follow false).
+// INITIAL_STATUS: the pane opens at the top. The brief reads top down (header,
+// context, read, then calls), so following the end starts only once the
+// person scrolls there (the ui.scroll hook sets follow).
+export const INITIAL_STATUS: UsageStatus = { follow: false }
+
+// shouldScrollToEnd: a refresh that added calls pulls the window to the end
+// while the person follows it (scrolled to the end themselves). The first
+// load (no earlier report) never moves it: that would scroll the header away.
 export function shouldScrollToEnd(prevRows: number | undefined, nextRows: number, follow: boolean): boolean {
-  return follow && nextRows > (prevRows ?? 0)
+  return follow && prevRows !== undefined && nextRows > prevRows
 }

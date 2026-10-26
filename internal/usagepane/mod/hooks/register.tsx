@@ -9,7 +9,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { UsageReport, UsageStatus } from '../types'
+import type { UsageReport } from '../types'
 import {
   PANE,
   REFRESH_MS,
@@ -19,6 +19,7 @@ import {
   errorLine,
   formatRow,
   headerLines,
+  INITIAL_STATUS,
   isAtEnd,
   isOxCommand,
   murmurRows,
@@ -32,7 +33,9 @@ import {
 // Change a tag when its value's fields change: an atom declines what an
 // earlier version stored under another tag, which outlives a reload.
 const report = atom({ plugin: 'ox-cli-brief-pane', key: 'report' } as const, null as UsageReport | null, { shape: 'report-2' })
-const status = atom({ plugin: 'ox-cli-brief-pane', key: 'status' } as const, { follow: true } as UsageStatus, { shape: 'status-1' })
+// status-2: follow now starts false (the pane opens at the top); a stored
+// status-1 value, follow true, is declined so it cannot pull the pane down.
+const status = atom({ plugin: 'ox-cli-brief-pane', key: 'status' } as const, INITIAL_STATUS, { shape: 'status-2' })
 
 const TITLE = 'ox brief'
 const USAGE = '/ox-brief [off|refresh]'
