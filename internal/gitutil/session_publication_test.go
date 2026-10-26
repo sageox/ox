@@ -27,7 +27,7 @@ func TestCommittedSessionScanCannotTrustWorktreeOrFinalDiff(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			useFreshFixtureRules(t)
 			rel := "sessions/synthetic/raw.jsonl"
-			ledger := publicationLedger(t, rel, `{"content":"AKIAIOSFODNN7EXAMPLE"}`)
+			ledger := publicationLedger(t, rel, `{"content":"`+syntheticAWSKey+`"}`)
 			abs := filepath.Join(ledger, rel)
 			if mode == "deleted later commit" {
 				require.NoError(t, os.Remove(abs))
@@ -76,7 +76,7 @@ func TestPushWithRetryCannotOmitSessionSecretGuard(t *testing.T) {
 			remoteBefore := gitInRepo(t, bare, "rev-parse", "HEAD")
 			rel := "sessions/synthetic/raw.jsonl"
 			require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(ledger, rel)), 0700))
-			addCommit(t, ledger, rel, `{"content":"AKIAIOSFODNN7EXAMPLE"}`, "synthetic import")
+			addCommit(t, ledger, rel, `{"content":"`+syntheticAWSKey+`"}`, "synthetic import")
 			opts := PushOpts{}
 			if withCallback {
 				opts.ValidatePush = func(context.Context, string) (bool, error) { return false, nil }
@@ -109,7 +109,7 @@ func TestCommittedSessionScanIncludesMergedDeletedSideHistory(t *testing.T) {
 	gitInRepo(t, ledger, "checkout", "-b", "synthetic-side")
 	rel := "sessions/synthetic/raw.jsonl"
 	require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(ledger, rel)), 0700))
-	addCommit(t, ledger, rel, `{"content":"AKIAIOSFODNN7EXAMPLE"}`, "synthetic side capture")
+	addCommit(t, ledger, rel, `{"content":"`+syntheticAWSKey+`"}`, "synthetic side capture")
 	gitInRepo(t, ledger, "rm", "--", rel)
 	gitInRepo(t, ledger, "commit", "-m", "remove side capture")
 	gitInRepo(t, ledger, "checkout", main)
@@ -156,14 +156,28 @@ func TestCommittedSessionScanAcceptsProducedCommits(t *testing.T) {
 	ledger := publicationLedger(t, "sessions/synthetic/meta.json", `{"produced_commits":["`+syntheticCommitSHA+`"]}`)
 	require.NoError(t, ValidateSessionPublication(context.Background(), ledger))
 
-	leaked := publicationLedger(t, "sessions/synthetic/meta.json", `{"produced_commits":["`+syntheticCommitSHA+`","AKIAIOSFODNN7EXAMPLE"]}`)
+	leaked := publicationLedger(t, "sessions/synthetic/meta.json", `{"produced_commits":["`+syntheticCommitSHA+`","`+syntheticAWSKey+`"]}`)
 	require.ErrorContains(t, ValidateSessionPublication(context.Background(), leaked), "committed session content refused")
 }
 
 // rev-list names one path per blob; the meta.json exemption must not reach the
-// same bytes published under another session filename.
+// same bytes published under another session filename. The current catalog
+// gates its bare-hex rule on keywords, so the fresh rules add a keyword-less
+// one, as a later upstream catalog could.
 func TestCommittedSessionScanSharedBlobKeepsFullScan(t *testing.T) {
-	useFreshFixtureRules(t)
+	data, err := os.ReadFile("../secretguard/gitleaks.toml")
+	require.NoError(t, err)
+	rules, err := secretguard.NewRules(append(data, "\n[[rules]]\nid = \"future-bare-hex\"\nregex = '''\\b[a-f0-9]{40}\\b'''\n"...))
+	require.NoError(t, err)
+	original := freshSessionPublicationRules
+	freshSessionPublicationRules = func(context.Context) (*secretguard.RuleSet, error) { return rules, nil }
+	t.Cleanup(func() { freshSessionPublicationRules = original })
+
+	exempt, _ := initBareRemoteRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(exempt, "sessions", "synthetic"), 0700))
+	addCommit(t, exempt, "sessions/synthetic/meta.json", `{"produced_commits":["`+syntheticCommitSHA+`"]}`, "synthetic meta")
+	require.NoError(t, ValidateSessionPublication(context.Background(), exempt))
+
 	ledger, _ := initBareRemoteRepo(t)
 	content := `{"produced_commits":["` + syntheticCommitSHA + `"]}`
 	for _, rel := range []string{"sessions/synthetic/meta.json", "sessions/synthetic/summary.json"} {

@@ -31,7 +31,7 @@ func TestGCSessionPublicationGuard(t *testing.T) {
 			content := "ordinary recovery notes"
 			if secret {
 				rel = "sessions/synthetic/raw.jsonl"
-				content = `{"content":"AKIAIOSFODNN7EXAMPLE"}`
+				content = `{"content":"` + "AKIA" + "QWERTYUIOPASDFGH" + `"}`
 			}
 			abs := filepath.Join(clone, rel)
 			require.NoError(t, os.MkdirAll(filepath.Dir(abs), 0700))

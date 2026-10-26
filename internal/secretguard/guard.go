@@ -27,9 +27,14 @@ import (
 var bundledCatalog []byte
 
 // RuleSet is immutable after construction and safe for concurrent scans.
-// All upstream regex/path rules and entropy thresholds are loaded. Upstream
-// repository allowlists are not suppressors for captured tool output. Explicit
-// sensitive environment context is always redacted, independent of entropy.
+// All upstream regex/path rules load with the filters that define each
+// detector: entropy, keywords, and the allowlists shipped inside the rule.
+// Keywords gate a rule only when its expression proves no literal; a rule
+// allowlist's path condition never holds, because captured content has no
+// repository location. The catalog-wide allowlist is a repository-scanning
+// policy, not a suppressor for captured tool output. Explicit sensitive
+// environment context is always redacted, independent of entropy, unless the
+// value is a syntactic placeholder.
 type RuleSet struct {
 	rules []rule
 	hash  string
@@ -37,9 +42,20 @@ type RuleSet struct {
 type rule struct {
 	id               string
 	expression, path *regexp.Regexp
-	keywords         []string
+	keywords         []string // literals the expression provably contains
+	gate             []string // upstream keywords, required when keywords is empty
+	allowlists       []ruleAllowlist
 	group            int
 	entropy          float64
+}
+
+// ruleAllowlist is the content side of an upstream [[rules.allowlists]] entry.
+type ruleAllowlist struct {
+	target    string // "secret", "match" or "line"
+	all       bool   // condition AND
+	located   bool   // has a path condition, which captured content never meets
+	regexes   []*regexp.Regexp
+	stopwords []string
 }
 type config struct {
 	Title      string       `toml:"title"`
@@ -101,9 +117,10 @@ func NewRules(data []byte) (*RuleSet, error) {
 				return nil, errors.New("secret guard: unsupported rule path")
 			}
 		}
+		var hints []string
 		for _, k := range cfg.Keywords {
 			if k != "" {
-				r.keywords = append(r.keywords, strings.ToLower(k))
+				hints = append(hints, strings.ToLower(k))
 			}
 		}
 		if r.expression != nil {
@@ -115,6 +132,19 @@ func NewRules(data []byte) (*RuleSet, error) {
 			// keywords are only hints and sometimes absent from valid credential text.
 			// This keeps large tool results cheap without introducing token omissions.
 			r.keywords = requiredKeywords(parsed)
+			// Without a provable literal the expression alone matches ordinary
+			// text: Sourcegraph's bare alternative is any 40-hex commit SHA. Its
+			// keywords are then the detector's precision gate, as upstream applies them.
+			if len(r.keywords) == 0 {
+				r.gate = hints
+			}
+		}
+		for _, a := range cfg.Allowlists {
+			compiled, err := newRuleAllowlist(a)
+			if err != nil {
+				return nil, err
+			}
+			r.allowlists = append(r.allowlists, compiled)
 		}
 
 		s.rules = append(s.rules, r)
@@ -122,6 +152,81 @@ func NewRules(data []byte) (*RuleSet, error) {
 	h := sha256.Sum256(data)
 	s.hash = hex.EncodeToString(h[:])
 	return s, nil
+}
+
+// newRuleAllowlist mirrors upstream allowlist validation; unknown targets or
+// conditions are refused rather than guessed.
+func newRuleAllowlist(cfg allowlist) (ruleAllowlist, error) {
+	unsupported := errors.New("secret guard: unsupported rule allowlist")
+	a := ruleAllowlist{target: cfg.RegexTarget, located: len(cfg.Paths) > 0}
+	switch a.target {
+	case "":
+		a.target = "secret"
+	case "secret", "match", "line":
+	default:
+		return a, unsupported
+	}
+	switch strings.ToUpper(cfg.Condition) {
+	case "", "OR", "||":
+	case "AND", "&&":
+		a.all = true
+	default:
+		return a, unsupported
+	}
+	if len(cfg.Paths) == 0 && len(cfg.Regexes) == 0 && len(cfg.Stopwords) == 0 {
+		return a, unsupported
+	}
+	for _, p := range cfg.Paths {
+		if _, err := regexp.Compile(p); err != nil {
+			return a, unsupported
+		}
+	}
+	for _, expression := range cfg.Regexes {
+		re, err := regexp.Compile(expression)
+		if err != nil {
+			return a, unsupported
+		}
+		a.regexes = append(a.regexes, re)
+	}
+	// Upstream matches stopwords case-insensitively against the secret.
+	for _, w := range cfg.Stopwords {
+		if w != "" {
+			a.stopwords = append(a.stopwords, strings.ToLower(w))
+		}
+	}
+	return a, nil
+}
+
+// allows reports whether upstream would drop the finding. Regexes test the
+// configured target and stopwords the secret; a path condition never holds.
+func (a ruleAllowlist) allows(secret, match, line string) bool {
+	target := secret
+	switch a.target {
+	case "match":
+		target = match
+	case "line":
+		target = line
+	}
+	regex := false
+	for _, re := range a.regexes {
+		if target != "" && re.MatchString(target) {
+			regex = true
+			break
+		}
+	}
+	stopword := false
+	lower := strings.ToLower(secret)
+	for _, w := range a.stopwords {
+		if strings.Contains(lower, w) {
+			stopword = true
+			break
+		}
+	}
+	if a.all {
+		return !a.located && len(a.regexes)+len(a.stopwords) > 0 &&
+			(len(a.regexes) == 0 || regex) && (len(a.stopwords) == 0 || stopword)
+	}
+	return regex || stopword
 }
 
 var bundled = mustBundled()
@@ -179,6 +284,18 @@ var redactionMarker = regexp.MustCompile(`^\[REDACTED(?:_[A-Z0-9_-]+)?\]$`)
 
 func masked(v string) bool { return v == "" || redactionMarker.MatchString(strings.Trim(v, "\"'")) }
 
+// envPlaceholder matches values that name where a credential goes and hold
+// none: a words-only <slot>, or a ${NAME} / $NAME reference (unbraced only in
+// the single-case shape upstream's own allowlist uses, so "$Passw0rd" stays a
+// literal). Natural-language values such as "your-api-key" are not syntax and
+// stay sensitive: a letters-only password is what this detector exists for.
+var envPlaceholder = regexp.MustCompile(`^(?:<[A-Za-z]+(?:[ _.-][A-Za-z]+)*>|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$(?:[A-Z_]+|[a-z_]+))$`)
+
+// unassigned reports a sensitive environment value that carries no credential.
+func unassigned(v string) bool {
+	return masked(v) || envPlaceholder.MatchString(strings.Trim(v, "\"'"))
+}
+
 func sensitiveName(n string) bool {
 	return envName.MatchString(n)
 }
@@ -210,6 +327,13 @@ func (s *RuleSet) redact(text string, found map[string]bool, depth int, values m
 	if d.Decode(&value) == nil {
 		var extra any
 		if d.Decode(&extra) == io.EOF {
+			// A repeated key hides its earlier value from the decoded walk, and
+			// parsers disagree on which one wins: refuse the field, never skip it.
+			if duplicateKeys(text) {
+				rememberValue(values, text)
+				found["duplicate-json-key"] = true
+				return replacement
+			}
 			before := len(found)
 			changed := false
 			value, changed = s.walk(value, found, depth+1, values)
@@ -230,14 +354,10 @@ func (s *RuleSet) redact(text string, found map[string]bool, depth int, values m
 		lines := strings.Split(text, "\n")
 		changed := false
 		for i, line := range lines {
-			trim := strings.TrimSpace(line)
-			if strings.HasPrefix(trim, "{") || strings.HasPrefix(trim, "[") || strings.HasPrefix(trim, "\"") {
-				var v any
-				if json.Unmarshal([]byte(trim), &v) == nil {
-					out := s.redact(line, found, depth+1, values)
-					changed = changed || out != line
-					lines[i] = out
-				}
+			if jsonRecord(line) {
+				out := s.redact(line, found, depth+1, values)
+				changed = changed || out != line
+				lines[i] = out
 			}
 		}
 
@@ -257,22 +377,28 @@ func (s *RuleSet) redact(text string, found map[string]bool, depth int, values m
 	}
 	out = helmEnv.ReplaceAllStringFunc(out, func(m string) string {
 		p := helmEnv.FindStringSubmatch(m)
-		if strings.EqualFold(p[2], "value") && names[strings.ToLower(p[1])] && !masked(p[3]) {
+		if strings.EqualFold(p[2], "value") && names[strings.ToLower(p[1])] && !unassigned(p[3]) {
 			rememberValue(values, strings.Trim(p[3], "\"'"))
 			found["sensitive-env-value"] = true
 			return p[1] + ".value=" + replacement
 		}
 		return m
 	})
-	out = directEnv.ReplaceAllStringFunc(out, func(m string) string {
-		p := directEnv.FindStringSubmatch(m)
-		if sensitiveName(p[1]) && !masked(p[2]) {
-			rememberValue(values, strings.Trim(p[2], "\"'"))
-			found["sensitive-env-value"] = true
-			return p[1] + "=" + replacement
+	// A NAME=value pair lives inside one JSON string, which the record pass has
+	// already scanned decoded. The raw record line only adds escapes glued to the
+	// value (\" or \n after [REDACTED_SECRET]), which would refuse at publication
+	// what capture accepted entry by entry.
+	envMatches := directEnv.FindAllStringSubmatchIndex(out, -1)
+	for i := len(envMatches) - 1; i >= 0; i-- {
+		m := envMatches[i]
+		name, value := out[m[2]:m[3]], out[m[4]:m[5]]
+		if !sensitiveName(name) || unassigned(value) || jsonRecord(matchLines(out, m[0], m[1])) {
+			continue
 		}
-		return m
-	})
+		rememberValue(values, strings.Trim(value, "\"'"))
+		found["sensitive-env-value"] = true
+		out = out[:m[0]] + name + "=" + replacement + out[m[1]:]
+	}
 	// Capture contextual values before any standalone-token masking can erase a
 	// credential-shaped environment name. Both the name and value must be safe.
 
@@ -283,32 +409,25 @@ func (s *RuleSet) redact(text string, found map[string]bool, depth int, values m
 		out = local.expression.ReplaceAllStringFunc(out, func(match string) string { rememberValue(values, match); found[local.name] = true; return replacement })
 	}
 
-	// Only syntax-proven mandatory keywords may screen regex work. Airtable
-	// demonstrates why unverified upstream hints cannot suppress scans.
-	lower := strings.ReplaceAll(strings.ToLower(out), "ſ", "s")
+	// Syntax-proven mandatory keywords screen regex work; upstream hints screen
+	// only rules with no such proof. Airtable demonstrates why unverified hints
+	// cannot suppress a rule that is anchored on its own literal.
+	lower := canonicalLower(out)
 	for _, r := range s.rules {
-		if r.expression == nil {
+		if r.expression == nil || !screened(lower, r.keywords) || !screened(lower, r.gate) {
 			continue
-		}
-		if len(r.keywords) > 0 {
-			matched := false
-			for _, k := range r.keywords {
-				if strings.Contains(lower, k) {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				continue
-			}
 		}
 		indexes := r.expression.FindAllStringSubmatchIndex(out, -1)
 		for i := len(indexes) - 1; i >= 0; i-- {
-			a, b := indexes[i][0], indexes[i][1]
+			m := indexes[i]
+			a, b := m[0], m[1]
 			if r.group > 0 {
-				a, b = indexes[i][2*r.group], indexes[i][2*r.group+1]
+				a, b = m[2*r.group], m[2*r.group+1]
 			}
 			if a < 0 || b <= a || masked(out[a:b]) || r.entropy > 0 && shannonEntropy(out[a:b]) < r.entropy {
+				continue
+			}
+			if r.excused(out, m[0], m[1], out[a:b]) {
 				continue
 			}
 			rememberValue(values, out[a:b])
@@ -327,7 +446,7 @@ func (s *RuleSet) walk(v any, found map[string]bool, depth int, values map[strin
 		changed := false
 		name, _ := x["name"].(string)
 		if sensitiveName(name) {
-			if val, ok := x["value"].(string); ok && !masked(val) {
+			if val, ok := x["value"].(string); ok && !unassigned(val) {
 				rememberValue(values, val)
 				x["value"] = replacement
 				found["sensitive-env-value"] = true
@@ -344,7 +463,7 @@ func (s *RuleSet) walk(v any, found map[string]bool, depth int, values map[strin
 				changed = true
 			}
 			if sensitiveKey {
-				if str, ok := val.(string); ok && !masked(str) {
+				if str, ok := val.(string); ok && !unassigned(str) {
 					rememberValue(values, str)
 					x[k] = replacement
 					found["sensitive-env-value"] = true
@@ -367,6 +486,108 @@ func (s *RuleSet) walk(v any, found map[string]bool, depth int, values map[strin
 		return x, changed
 	}
 	return v, false
+}
+
+// excused applies a rule's own upstream filters to one finding: its keywords
+// when the expression proved no literal, then its allowlists. The keyword
+// fragment is the matched line, so a mention elsewhere in a long session
+// cannot arm a bare-token rule. A JSON record line is left to its decoded
+// strings, already scanned under the same filters, so publication of a JSONL
+// file agrees with capture redacting it entry by entry.
+func (r rule) excused(text string, start, end int, secret string) bool {
+	if len(r.gate) == 0 && len(r.allowlists) == 0 {
+		return false
+	}
+	line := matchLines(text, start, end)
+	if len(r.gate) > 0 && (jsonRecord(line) || !screened(canonicalLower(line), r.gate)) {
+		return true
+	}
+	match := strings.Trim(text[start:end], "\n")
+	for _, a := range r.allowlists {
+		if a.allows(secret, match, line) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchLines returns the complete line or lines a match occupies, the unit
+// upstream reports as a finding's line.
+func matchLines(text string, start, end int) string {
+	for end > start && text[end-1] == '\n' {
+		end--
+	}
+	from := strings.LastIndexByte(text[:start], '\n') + 1
+	to := len(text)
+	if i := strings.IndexByte(text[end:], '\n'); i >= 0 {
+		to = end + i
+	}
+	return text[from:to]
+}
+
+// duplicateKeys reports a JSON object, at any depth, that repeats a key.
+// Keys compare decoded, so an escaped spelling is the same key.
+func duplicateKeys(text string) bool {
+	type frame struct {
+		keys   map[string]bool // nil for arrays
+		tokens int
+	}
+	var stack []*frame
+	d := json.NewDecoder(strings.NewReader(text))
+	for {
+		token, err := d.Token()
+		if err != nil {
+			return false
+		}
+		delim, isDelim := token.(json.Delim)
+		if isDelim && (delim == '}' || delim == ']') {
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		if len(stack) > 0 {
+			top := stack[len(stack)-1]
+			if top.keys != nil && top.tokens%2 == 0 {
+				key, _ := token.(string)
+				if top.keys[key] {
+					return true
+				}
+				top.keys[key] = true
+			}
+			top.tokens++
+		}
+		if isDelim {
+			f := &frame{}
+			if delim == '{' {
+				f.keys = map[string]bool{}
+			}
+			stack = append(stack, f)
+		}
+	}
+}
+
+// jsonRecord reports a line the JSONL pass decodes and scans string by string.
+func jsonRecord(line string) bool {
+	trim := strings.TrimSpace(line)
+	return (strings.HasPrefix(trim, "{") || strings.HasPrefix(trim, "[") || strings.HasPrefix(trim, "\"")) && json.Valid([]byte(trim))
+}
+
+// canonicalLower folds case for literal screens. Go's case folding also accepts
+// long s for ASCII s, so screens canonicalize it explicitly.
+func canonicalLower(text string) string {
+	return strings.ReplaceAll(strings.ToLower(text), "ſ", "s")
+}
+
+// screened reports whether text can match: no screen, or a screening literal appears.
+func screened(lower string, keywords []string) bool {
+	if len(keywords) == 0 {
+		return true
+	}
+	for _, k := range keywords {
+		if strings.Contains(lower, k) {
+			return true
+		}
+	}
+	return false
 }
 
 // requiredKeywords returns an OR-set containing a literal on every accepting

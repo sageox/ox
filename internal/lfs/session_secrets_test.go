@@ -18,7 +18,7 @@ func TestUploadSessionFilesMandatorySecretGuard(t *testing.T) {
 		name, content string
 		refreshFails  bool
 	}{
-		{"capture bypass", `{"content":"AKIAIOSFODNN7EXAMPLE"}`, false},
+		{"capture bypass", `{"content":"` + "AKIA" + "QWERTYUIOPASDFGH" + `"}`, false},
 		{"split helm import", `helm template --set extraEnv[0].name=AWS_SECRET_ACCESS_KEY --set extraEnv[0].value=fabricated-session-secret-value`, false},
 		{"fresh catalog required", `{"content":"ordinary notes"}`, true},
 	} {
