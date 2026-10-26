@@ -1001,7 +1001,13 @@ func UnsetConfigValue(key string, level ConfigLevel, projectRoot string) error {
 
 	switch level {
 	case ConfigLevelUser:
-		return unsetUserConfig(key)
+		if err := unsetUserConfig(key); err != nil {
+			return err
+		}
+		if key == "statusline" {
+			applyStatuslineSetting()
+		}
+		return nil
 	case ConfigLevelRepo:
 		return unsetRepoConfig(key, projectRoot)
 	case ConfigLevelTeam:
@@ -1051,7 +1057,13 @@ func SetConfigValue(key, value string, level ConfigLevel, projectRoot string) er
 
 	switch level {
 	case ConfigLevelUser:
-		return setUserConfig(key, value)
+		if err := setUserConfig(key, value); err != nil {
+			return err
+		}
+		if key == "statusline" {
+			applyStatuslineSetting()
+		}
+		return nil
 	case ConfigLevelRepo:
 		return setRepoConfig(key, value, projectRoot)
 	case ConfigLevelTeam:
