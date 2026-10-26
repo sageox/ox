@@ -24,6 +24,8 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/claudesource"
+	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/session/contextuse"
 )
 
 // ReadHookInput reads hook input from stdin.
@@ -567,6 +569,9 @@ func handlePrompt(ctx *HookContext) error {
 	// that authored a page without ever running enrich arms nothing, so the
 	// artifact itself is the second, independent signal.
 	emitUnsavedArtifactNudge(os.Stdout, ctx.ProjectRoot, agentID, ctx.Marker.PrimedAt)
+	// Once per session, ask the agent to credit (or explicitly disclaim) the
+	// team context surfaced to it. Fail-open.
+	emitContextUseNudge(os.Stdout, ctx.ProjectRoot, agentID)
 
 	// Steer the agent toward `ox plan enrich`/`ox plan render` at the planning
 	// moment — fired when the agent is in plan mode (permission_mode == "plan")
@@ -1088,4 +1093,80 @@ func startSessionRecordingIfConfigured(ctx *HookContext) {
 
 	// Preserve native-session provenance for every observed startup.
 	recordNativeSessionForRecording(ctx.ProjectRoot, agentID, agentSessionID, source)
+}
+
+// contextUseNudgeMinEntries is how many recorded entries a session needs before
+// the context-use nudge may fire: enough work that "did any of it matter" is a
+// real question, not a reflex on the first prompt.
+const contextUseNudgeMinEntries = 8
+
+// contextUseNudgeCacheSubdir holds the per-agent once-per-session stamp.
+const contextUseNudgeCacheSubdir = "context-use-nudge"
+
+// contextUseNudgePath is the stamp file for agentID. It stores the identity of
+// the recording the nudge last fired for, so a new recording re-arms it.
+func contextUseNudgePath(projectRoot, agentID string) string {
+	if projectRoot == "" || agentID == "" {
+		return ""
+	}
+	return filepath.Join(projectRoot, ".sageox", "cache", contextUseNudgeCacheSubdir, filepath.Base(agentID)+".stamp")
+}
+
+// emitContextUseNudge asks the model, once per recorded session, to report
+// whether surfaced team context changed what it did. Fires only when the trace
+// shows at least one surfaced item, the recording has real work in it, and
+// nothing has been reported yet (no used event, no score file). Fail-open:
+// any read error means no nudge.
+func emitContextUseNudge(w io.Writer, projectRoot, agentID string) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Debug("hook: context-use nudge panic recovered", "panic", fmt.Sprint(r))
+		}
+	}()
+	stampPath := contextUseNudgePath(projectRoot, agentID)
+	if stampPath == "" {
+		return
+	}
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	if err != nil || state == nil || state.SessionPath == "" {
+		return
+	}
+	if state.EntryCount < contextUseNudgeMinEntries {
+		return
+	}
+	// the durable ses_ id; the path alone can repeat across recordings
+	stampKey := state.SessionID + "\x00" + state.SessionPath
+	if prev, readErr := os.ReadFile(stampPath); readErr == nil && string(prev) == stampKey {
+		return // already nudged this session
+	}
+	events, err := contexttrace.ReadEvents(contexttrace.NewWriter(state.SessionPath).Path())
+	if err != nil {
+		return
+	}
+	surfaced := contextuse.Surfaced(events)
+	if len(surfaced) == 0 {
+		return
+	}
+	for _, ev := range events {
+		// a legacy influenced event is an earlier form of the same report
+		if ev.Type == contexttrace.EventUsed || ev.Type == contexttrace.EventInfluenced {
+			return
+		}
+	}
+	if score, scoreErr := session.ReadSageoxScore(agentID); scoreErr != nil || score != nil {
+		return // reported already, or unreadable — never nag on doubt
+	}
+
+	// Stamp BEFORE writing: a failed stamp means silence, not a nag that
+	// repeats on every prompt.
+	if err := os.MkdirAll(filepath.Dir(stampPath), 0o755); err != nil {
+		return
+	}
+	if err := os.WriteFile(stampPath, []byte(stampKey), 0o600); err != nil {
+		slog.Debug("hook: could not stamp context-use nudge", "err", err)
+		return
+	}
+	fmt.Fprintf(w,
+		"<system-reminder>[ox] %d team context items surfaced this session. If one changed what you did: ox agent %s context used <ref> --why \"...\"; if none did: ox agent %s context used --none</system-reminder>\n",
+		len(surfaced), agentID, agentID)
 }
