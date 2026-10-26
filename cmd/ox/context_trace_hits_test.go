@@ -133,3 +133,7 @@ func TestTraceAgentIDFromEnv(t *testing.T) {
 	t.Setenv("SAGEOX_AGENT_ID", "../etc")
 	assert.Empty(t, traceAgentIDFromEnv())
 }
+
+func refOf(ref, refType, title, url string) contextuse.SurfacedRef {
+	return contextuse.SurfacedRef{Ref: ref, RefType: refType, Title: title, URL: url}
+}
