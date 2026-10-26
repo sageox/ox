@@ -769,6 +769,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	if bytes := cw.BytesWritten(); bytes > 0 && output.AgentID != "" {
 		sendContextHeartbeatSplit(output.AgentID, bytes, "prime", &bk.budget)
 	}
+	recordPrimeInvocation(output.AgentID, &bk.budget, int(cw.BytesWritten()), primeFullBytes(xml, output.HookFullBundlePath), primeDeferredSections(xml))
 	return &bk.budget, nil
 }
 

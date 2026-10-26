@@ -39,7 +39,7 @@ var Catalog = []Bundle{
 	// which moved to extensions/addons/post-cutoff/. This also closed GH #1028:
 	// nothing in the CLI could ever select a Default: false bundle, since the
 	// commands that would have were withdrawn before release (PR #1013).
-	{ID: "lifecycle", Description: "Explicit ox lifecycle and diagnostic slash surfaces", Default: true, SkillIDs: []string{"ox-cli-attest", "ox-cli-doctor", "ox-cli-init", "ox-cli-prime", "ox-cli-session-abort", "ox-cli-session-list", "ox-cli-session-start", "ox-cli-session-status", "ox-cli-session-stop", "ox-cli-status"}},
+	{ID: "lifecycle", Description: "Explicit ox lifecycle and diagnostic slash surfaces", Default: true, SkillIDs: []string{"ox-cli-attest", "ox-cli-doctor", "ox-cli-init", "ox-cli-prime", "ox-cli-session-abort", "ox-cli-session-list", "ox-cli-session-start", "ox-cli-session-status", "ox-cli-session-stop", "ox-cli-status", "ox-cli-usage"}},
 	// Carts is experimental and gated behind FEATURE_CARTS. These four skills
 	// used to sit in "lifecycle" (Default: true), so they installed for
 	// everyone — teaching an AI coworker to run `ox carts …`, which then

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/sageox/ox/internal/session/contexttrace"
@@ -216,4 +217,55 @@ func joinLines(lines []string) string {
 		out += l + "\n"
 	}
 	return out
+}
+
+// TestTagSessionReads_UnaffectedByInvokedEvents runs the finalize-time tagger
+// into a trace that already holds `invoked` ox-call events. Failure prevented:
+// the consult tagger's output changes (or clobbers the ox-call lines) once the
+// hook starts writing invoked events into the same file.
+func TestTagSessionReads_UnaffectedByInvokedEvents(t *testing.T) {
+	raw := `{"tool_name":"Read","tool_input":"{\"file_path\":\"/x/team/docs/principles.md\"}"}` + "\n" +
+		`{"tool_name":"Bash","tool_input":"{\"command\":\"ox query \\\"auth\\\"\"}"}` + "\n"
+
+	run := func(preexisting []contexttrace.Event) []contexttrace.Event {
+		dir := t.TempDir()
+		rawPath := filepath.Join(dir, "raw.jsonl")
+		if err := os.WriteFile(rawPath, []byte(raw), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		w := contexttrace.NewWriter(dir)
+		for _, ev := range preexisting {
+			if err := w.Append(ev); err != nil {
+				t.Fatal(err)
+			}
+		}
+		n, err := TagSessionReads(rawPath, dir, testRoots())
+		if err != nil || n != 2 {
+			t.Fatalf("TagSessionReads = %d, %v; want 2, nil", n, err)
+		}
+		events, err := contexttrace.ReadEvents(w.Path())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return events
+	}
+
+	invoked := []contexttrace.Event{
+		{Type: contexttrace.EventInvoked, Timestamp: "2026-06-01T00:00:00Z", Source: contexttrace.SourceOxCLI, Command: "query", Label: "searched team memory", RefType: "query", Query: "auth", OutputBytes: 400, InlineTokens: 100, Seq: 1},
+	}
+	plain := run(nil)
+	mixed := run(invoked)
+	if len(mixed) != len(invoked)+len(plain) {
+		t.Fatalf("mixed trace has %d events, want %d", len(mixed), len(invoked)+len(plain))
+	}
+	if mixed[0].Type != contexttrace.EventInvoked {
+		t.Errorf("pre-existing invoked event was not preserved: %+v", mixed[0])
+	}
+	for i, ev := range mixed[len(invoked):] {
+		want := plain[i]
+		ev.Timestamp, want.Timestamp = "", ""
+		if !reflect.DeepEqual(ev, want) {
+			t.Errorf("consulted event %d changed:\n got %+v\nwant %+v", i, ev, want)
+		}
+	}
 }

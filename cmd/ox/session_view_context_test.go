@@ -3,7 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/sageox/ox/internal/session/contexttrace"
 )
@@ -109,4 +113,39 @@ func TestFormatTraceTimestamp(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestViewContextTrace_CountsInvokedSeparately mixes old event types with the
+// new `invoked` ox-call events. Failure prevented: every ox call the AI
+// coworker made is counted (and listed) as "provided context", inflating what
+// the session view says reached the coworker.
+func TestViewContextTrace_CountsInvokedSeparately(t *testing.T) {
+	t.Parallel()
+	events := []contexttrace.Event{
+		{Type: contexttrace.EventProvided, Source: contexttrace.SourceTeamContext, Doc: "AGENTS.md", InlineTokens: 2048},
+		{Type: contexttrace.EventConsulted, Source: contexttrace.SourceOnDemand, Mechanism: contexttrace.MechanismRetrieval, RefType: "query", Query: "auth"},
+		{Type: contexttrace.EventInfluenced, Source: contexttrace.SourceTeamContext, Doc: "AGENTS.md", Decision: "kept TTL"},
+		{Type: contexttrace.EventInvoked, Source: contexttrace.SourceOxCLI, Command: "murmur list", Label: "checked murmurs", OutputBytes: 800, InlineTokens: 200},
+		{Type: contexttrace.EventInvoked, Source: contexttrace.SourceOxCLI, Command: "query", Label: "searched team memory", Failed: true},
+	}
+
+	var buf bytes.Buffer
+	require.NoError(t, viewContextTraceJSON(&buf, events, "s", 0))
+	var out contextTraceJSONOutput
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &out))
+	assert.Equal(t, 2, out.Provided, "provided keeps provided + consulted, never ox calls")
+	assert.Equal(t, 1, out.Influenced)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &raw))
+	assert.EqualValues(t, 2, raw["invoked"], "ox calls get their own count")
+	assert.Equal(t, 5, out.EventCount)
+
+	var text bytes.Buffer
+	viewContextTraceText(&text, events, "s")
+	got := text.String()
+	assert.Contains(t, got, "2 sources")
+	assert.Contains(t, got, "2 ox calls")
+	assert.Contains(t, got, "checked murmurs")
+	provided := got[strings.Index(got, "Provided Context"):strings.Index(got, "Influenced Decisions")]
+	assert.NotContains(t, provided, "ox-cli", "ox calls must not be listed under provided context")
 }

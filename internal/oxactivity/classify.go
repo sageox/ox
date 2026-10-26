@@ -22,8 +22,25 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sageox/ox/internal/agentinstance"
+)
+
+// Kind groups an activity by what it did with team knowledge.
+type Kind string
+
+const (
+	// KindRetrieval pulls team knowledge into the AI coworker's context:
+	// ox query, code search, reading sessions/plans/murmurs/discussions.
+	KindRetrieval Kind = "retrieval"
+	// KindWrite records something: posting a murmur, saving a plan,
+	// reporting context use, scoring a session.
+	KindWrite Kind = "write"
+	// KindLifecycle starts, stops, or primes the AI coworker's session.
+	KindLifecycle Kind = "lifecycle"
+	// KindOther is any other ox call (doctor, status, ...).
+	KindOther Kind = "other"
 )
 
 // Activity is one coworker-visible thing ox did for an AI coworker.
@@ -31,7 +48,21 @@ type Activity struct {
 	// Label is the user-facing wording, lower case, past tense:
 	// "loaded team context", "posted murmur", "ran ox doctor".
 	Label string
+	// Command is the matched ox subcommand words, e.g. "murmur list" or
+	// "agent prime" (an `ox agent <id>` address is dropped). It is built only
+	// from fixed command words — never from arguments, so a posted murmur is
+	// "murmur" and its body never appears. SageOx MCP tools read "mcp <Tool>".
+	Command string
+	// Kind classifies the call; see the Kind constants.
+	Kind Kind
+	// Query is the search subject of `ox query` and `ox code search`: the
+	// first positional argument, capped at MaxQueryLen. Empty for every other
+	// call, including MCP tools (their arguments are not inspected).
+	Query string
 }
+
+// MaxQueryLen caps Activity.Query so a receipt stays short.
+const MaxQueryLen = 200
 
 // shellToolNames are the tool names harnesses use for "run a shell command".
 // Claude Code and Codex hooks both report "Bash"; Codex's own transcript names
@@ -292,46 +323,53 @@ func isDigits(s string) bool {
 type cliRule struct {
 	words []string
 	label string
+	kind  Kind
+	query bool // the first positional argument after words is a search subject
 }
 
 // cliRules is the label table for ox CLI invocations. Names match the cobra
 // definitions in cmd/ox. Keep labels in sync with mcpLabels so both surfaces
 // read the same.
 var cliRules = []cliRule{
-	{[]string{"agent", "prime"}, "loaded team context"},
-	{[]string{"agent", "team-ctx"}, "loaded team context"},
-	{[]string{"agent", "session", "stop"}, "stopped recording"},
+	{words: []string{"agent", "prime"}, label: "loaded team context", kind: KindLifecycle},
+	{words: []string{"agent", "team-ctx"}, label: "loaded team context", kind: KindRetrieval},
+	{words: []string{"agent", "session", "stop"}, label: "stopped recording", kind: KindLifecycle},
+	{words: []string{"agent", "session", "context-trace"}, label: "reported context use", kind: KindWrite},
+	{words: []string{"agent", "session", "score"}, label: "scored session", kind: KindWrite},
 
-	{[]string{"murmur", "list"}, "checked murmurs"},
+	{words: []string{"murmur", "list"}, label: "checked murmurs", kind: KindRetrieval},
 
-	{[]string{"plan", "save"}, "saved plan"},
-	{[]string{"plan", "render"}, "rendered plan"},
-	{[]string{"plan", "view"}, "pulled plan"},
-	{[]string{"plan", "show"}, "pulled plan"},
-	{[]string{"plan", "get"}, "pulled plan"},
-	{[]string{"plan", "enrich"}, "enriched plan"},
+	{words: []string{"plan", "save"}, label: "saved plan", kind: KindWrite},
+	{words: []string{"plan", "render"}, label: "rendered plan", kind: KindWrite},
+	{words: []string{"plan", "view"}, label: "pulled plan", kind: KindRetrieval},
+	{words: []string{"plan", "show"}, label: "pulled plan", kind: KindRetrieval},
+	{words: []string{"plan", "get"}, label: "pulled plan", kind: KindRetrieval},
+	{words: []string{"plan", "enrich"}, label: "enriched plan", kind: KindWrite},
 
-	{[]string{"query"}, "searched team memory"},
+	{words: []string{"query"}, label: "searched team memory", kind: KindRetrieval, query: true},
 
-	{[]string{"code", "search"}, "searched code index"},
-	{[]string{"code", "defs"}, "searched code index"},
-	{[]string{"code", "callers"}, "searched code index"},
-	{[]string{"code", "callees"}, "searched code index"},
-	{[]string{"code", "refs"}, "searched code index"},
-	{[]string{"code", "log"}, "searched code index"},
-	{[]string{"code", "insights"}, "checked code hotspots"},
+	{words: []string{"code", "search"}, label: "searched code index", kind: KindRetrieval, query: true},
+	{words: []string{"code", "defs"}, label: "searched code index", kind: KindRetrieval},
+	{words: []string{"code", "callers"}, label: "searched code index", kind: KindRetrieval},
+	{words: []string{"code", "callees"}, label: "searched code index", kind: KindRetrieval},
+	{words: []string{"code", "refs"}, label: "searched code index", kind: KindRetrieval},
+	{words: []string{"code", "log"}, label: "searched code index", kind: KindRetrieval},
+	{words: []string{"code", "insights"}, label: "checked code hotspots", kind: KindRetrieval},
 
-	{[]string{"session", "list"}, "read sessions"},
-	{[]string{"session", "view"}, "read sessions"},
-	{[]string{"session", "show"}, "read sessions"},
+	{words: []string{"session", "list"}, label: "read sessions", kind: KindRetrieval},
+	{words: []string{"session", "view"}, label: "read sessions", kind: KindRetrieval},
+	{words: []string{"session", "show"}, label: "read sessions", kind: KindRetrieval},
+	{words: []string{"session", "score"}, label: "scored session", kind: KindWrite},
 
-	{[]string{"conversation", "show"}, "read discussion"},
-	{[]string{"conversation", "search"}, "read discussion"},
-	{[]string{"conversation", "transcript"}, "read discussion"},
-	{[]string{"conversation", "topics"}, "read discussion"},
-	{[]string{"conversation", "topic"}, "read discussion"},
+	{words: []string{"conversation", "show"}, label: "read discussion", kind: KindRetrieval},
+	{words: []string{"conversation", "search"}, label: "read discussion", kind: KindRetrieval},
+	{words: []string{"conversation", "transcript"}, label: "read discussion", kind: KindRetrieval},
+	{words: []string{"conversation", "topics"}, label: "read discussion", kind: KindRetrieval},
+	{words: []string{"conversation", "topic"}, label: "read discussion", kind: KindRetrieval},
 
-	{[]string{"decision", "enrich"}, "checked decisions"},
+	{words: []string{"decision", "enrich"}, label: "checked decisions", kind: KindRetrieval},
+
+	{words: []string{"usage"}, label: "checked ox usage", kind: KindOther},
 }
 
 // murmurSubcommands are `ox murmur` children; any other first word is the
@@ -341,6 +379,11 @@ var murmurSubcommands = map[string]bool{
 }
 
 var subcommandRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+
+// recordingLifecycle are `ox agent [id] session <word>` calls that change the
+// recording without a label of their own; they keep the generic label but
+// report a lifecycle kind and their command words.
+var recordingLifecycle = map[string]bool{"start": true, "pause": true, "resume": true}
 
 func classifyOxArgs(args []string) (Activity, bool) {
 	words := positional(args)
@@ -357,32 +400,111 @@ func classifyOxArgs(args []string) (Activity, bool) {
 		if len(rest) > 0 && (rest[0] == "heartbeat" || rest[0] == "hook") {
 			return Activity{}, false
 		}
+		// AI coworkers often address a top-level command through their agent
+		// ID (`ox agent <id> murmur list`, `ox agent <id> query "x"`); credit
+		// the command they meant.
+		if len(rest) > 0 && topLevelUnderAgent[rest[0]] {
+			return classifyWords(rest, args)
+		}
 		words = append([]string{"agent"}, rest...)
 	}
+	return classifyWords(words, args)
+}
 
+// topLevelUnderAgent are top-level ox commands an AI coworker may run as
+// `ox agent <id> <cmd>`. Agent-scoped commands (session, prime, team-ctx,
+// whisper, ...) are not here: they keep their `agent` rules.
+var topLevelUnderAgent = map[string]bool{
+	"murmur": true, "query": true, "plan": true, "code": true,
+	"conversation": true, "decision": true, "usage": true,
+}
+
+// classifyWords matches positional ox words (agent ID already dropped) against
+// the rule table; args are the original words, for the query subject.
+func classifyWords(words, args []string) (Activity, bool) {
 	for _, rule := range cliRules {
 		if hasPrefix(words, rule.words) {
-			return Activity{Label: rule.label}, true
+			act := Activity{Label: rule.label, Command: strings.Join(rule.words, " "), Kind: rule.kind}
+			if rule.query {
+				act.Query = querySubject(args, rule.words)
+			}
+			return act, true
 		}
 	}
 
 	switch words[0] {
 	case "murmur":
 		if len(words) == 1 || !murmurSubcommands[words[1]] {
-			return Activity{Label: "posted murmur"}, true
+			// The words after "murmur" are the murmur body: never copied.
+			return Activity{Label: "posted murmur", Command: "murmur", Kind: KindWrite}, true
 		}
+		return Activity{Label: "ran ox murmur", Command: "murmur " + words[1], Kind: KindOther}, true
 	case "coworker":
 		if len(words) >= 3 && words[1] == "load" {
 			if name := cleanText(words[2], 40); name != "" {
-				return Activity{Label: "loaded coworker " + name}, true
+				return Activity{Label: "loaded coworker " + name, Command: "coworker load", Kind: KindOther}, true
 			}
+		}
+	case "agent":
+		if len(words) >= 3 && words[1] == "session" && recordingLifecycle[words[2]] {
+			return Activity{Label: "ran ox agent", Command: "agent session " + words[2], Kind: KindLifecycle}, true
 		}
 	}
 
 	if !subcommandRe.MatchString(words[0]) {
-		return Activity{Label: "ran ox"}, true
+		return Activity{Label: "ran ox", Kind: KindOther}, true
 	}
-	return Activity{Label: "ran ox " + words[0]}, true
+	command := words[0]
+	// `ox agent` always takes a subcommand word; name it so the report can
+	// tell `agent session import` from `agent whisper`.
+	if words[0] == "agent" && len(words) >= 2 && subcommandRe.MatchString(words[1]) {
+		command += " " + words[1]
+	}
+	return Activity{Label: "ran ox " + words[0], Command: command, Kind: KindOther}, true
+}
+
+// booleanFlags are common ox flags that take no value, so the word after one
+// can still be a search subject (`ox query --json "auth"`).
+var booleanFlags = map[string]bool{
+	"--json": true, "--text": true, "--pretty": true, "--verbose": true, "-v": true, "--all": true,
+}
+
+// querySubject returns the search subject of a retrieval command: the first
+// positional word after the command words that is not a flag's value. Since
+// it is the only argument ever copied out of a command line, it is capped and
+// limited to the rules that opt in (query, code search).
+func querySubject(args, commandWords []string) string {
+	matched := 0
+	prevFlagTakesValue := false
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			prevFlagTakesValue = !strings.Contains(a, "=") && !booleanFlags[a]
+			continue
+		}
+		if prevFlagTakesValue {
+			prevFlagTakesValue = false
+			continue
+		}
+		if matched < len(commandWords) {
+			if a == commandWords[matched] {
+				matched++
+			}
+			continue
+		}
+		return truncateQuery(strings.TrimSpace(a))
+	}
+	return ""
+}
+
+func truncateQuery(s string) string {
+	if len(s) <= MaxQueryLen {
+		return s
+	}
+	cut := MaxQueryLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // positional drops flag words ("-x", "--json", "--topic=wip"). A flag's
@@ -413,19 +535,23 @@ func hasPrefix(words, prefix []string) bool {
 
 // --- SageOx MCP tools -------------------------------------------------------
 
-// mcpLabels maps the final segment of a SageOx MCP tool name to its label.
-var mcpLabels = map[string]string{
-	"Prime":                  "loaded team context",
-	"PublishMurmur":          "posted murmur",
-	"ListMurmurs":            "checked murmurs",
-	"SavePlan":               "saved plan",
-	"RevisePlan":             "saved plan",
-	"GetPlan":                "pulled plan",
-	"EnrichPlan":             "enriched plan",
-	"Search":                 "searched team memory",
-	"Conversation":           "read discussion",
-	"ConversationDigest":     "read discussion",
-	"ConversationTranscript": "read discussion",
+// mcpTools maps the final segment of a SageOx MCP tool name to its label and
+// kind.
+var mcpTools = map[string]struct {
+	label string
+	kind  Kind
+}{
+	"Prime":                  {"loaded team context", KindLifecycle},
+	"PublishMurmur":          {"posted murmur", KindWrite},
+	"ListMurmurs":            {"checked murmurs", KindRetrieval},
+	"SavePlan":               {"saved plan", KindWrite},
+	"RevisePlan":             {"saved plan", KindWrite},
+	"GetPlan":                {"pulled plan", KindRetrieval},
+	"EnrichPlan":             {"enriched plan", KindWrite},
+	"Search":                 {"searched team memory", KindRetrieval},
+	"Conversation":           {"read discussion", KindRetrieval},
+	"ConversationDigest":     {"read discussion", KindRetrieval},
+	"ConversationTranscript": {"read discussion", KindRetrieval},
 }
 
 // isSageoxMCPTool reports whether a tool name is an MCP tool served by a
@@ -448,14 +574,16 @@ func classifyMCP(name string) (Activity, bool) {
 	if tool == "" {
 		return Activity{}, false
 	}
-	if label, ok := mcpLabels[tool]; ok {
-		return Activity{Label: label}, true
+	t := cleanText(tool, 40)
+	if t == "" {
+		return Activity{}, false
+	}
+	command := "mcp " + t
+	if known, ok := mcpTools[tool]; ok {
+		return Activity{Label: known.label, Command: command, Kind: known.kind}, true
 	}
 	if strings.HasPrefix(tool, "Conversation") {
-		return Activity{Label: "read discussion"}, true
+		return Activity{Label: "read discussion", Command: command, Kind: KindRetrieval}, true
 	}
-	if t := cleanText(tool, 40); t != "" {
-		return Activity{Label: "used SageOx " + t}, true
-	}
-	return Activity{}, false
+	return Activity{Label: "used SageOx " + t, Command: command, Kind: KindOther}, true
 }

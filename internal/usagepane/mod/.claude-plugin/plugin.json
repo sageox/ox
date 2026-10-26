@@ -1,0 +1,7 @@
+{
+  "name": "ox-cli-usage-pane",
+  "version": "{{VERSION}}",
+  "description": "What ox did this session, in a scrollable pane beside the chat: each ox call, the context ox put in front of the model, and what was surfaced. /ox-usage opens, refreshes, and closes it.",
+  "author": { "name": "SageOx", "url": "https://sageox.ai" },
+  "types": "./types/index.d.ts"
+}

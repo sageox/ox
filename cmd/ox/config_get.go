@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -193,7 +194,38 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		fmt.Println(cli.StyleWarning.Render(setting.DeprecationNotice))
 	}
 
+	if level == ConfigLevelUser {
+		runUserSettingHook(cmd, key)
+	}
 	return nil
+}
+
+// userSettingHooks apply a user-level setting outside ox's own config right
+// after `ox config set|unset` changes it. Each reads the setting's new
+// effective value and returns an optional hint for the coworker.
+var userSettingHooks = map[string]func(ctx context.Context) (string, error){
+	"usage_pane": applyUsagePaneSetting,
+}
+
+// runUserSettingHook runs key's hook, if any. Best-effort: the setting is
+// already stored, so a failure is a warning, and `ox doctor --fix` retries.
+func runUserSettingHook(cmd *cobra.Command, key string) {
+	hook := userSettingHooks[key]
+	if hook == nil {
+		return
+	}
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	hint, err := hook(ctx)
+	if err != nil {
+		cli.PrintWarningTo(cmd.ErrOrStderr(), fmt.Sprintf("Saved %s, but could not apply it: %v. Run `ox doctor --fix` to retry.", key, err))
+		return
+	}
+	if hint != "" {
+		cli.PrintHintTo(cmd.OutOrStdout(), hint)
+	}
 }
 
 var configUnsetCmd = &cobra.Command{
@@ -256,6 +288,9 @@ func runConfigUnset(cmd *cobra.Command, args []string) error {
 		level,
 		effectiveInfo)
 
+	if level == ConfigLevelUser {
+		runUserSettingHook(cmd, key)
+	}
 	return nil
 }
 
