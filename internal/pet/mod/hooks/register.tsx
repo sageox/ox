@@ -84,7 +84,7 @@ async function prefs($: EngineInterface): Promise<{ kind: Renderer; box: Size; h
 const KEY = 'oxy'
 const MAIN = 'main'
 const TICK_MS = 50
-const USAGE = '/hatch-pet [on|off|auto|small|medium|large|image|cells|<animation>]'
+const USAGE = '/oxy [on|off|auto|small|medium|large|image|cells|<animation>]'
 
 type Running = Activity & { loop: string }
 
@@ -223,14 +223,14 @@ async function sprite($: EngineInterface, { Image, Raster }: Elements['terminal'
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
-      name: 'hatch-pet',
-      description: 'Hatch Oxy into the thinking line; off, auto, small, medium, large, image, cells, or an animation to pin',
+      name: 'oxy',
+      description: 'Oxy in the thinking line: off, auto, small, medium, large, image, cells, or an animation to pin',
       argumentHint: '[on|off|auto|small|medium|large|image|cells|<animation>]',
     })
     return next(e)
   })
 
-  on('command.run', { command: 'hatch-pet' }, async ($, e) => {
+  on('command.run', { command: 'oxy' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === '' || arg === 'on' || arg === 'off') {
       const hide = arg === 'off'
@@ -239,7 +239,7 @@ export const register: Register = on => {
       await $.store.set('hidden', hide)
       saved = { ...(await savedPrefs($)), hidden: hide }
       if (hide) {
-        return { text: 'Oxy is hidden; Claude Code draws its own spinner. /hatch-pet brings him back.' }
+        return { text: 'Oxy is hidden; Claude Code draws its own spinner. /oxy brings him back.' }
       }
       return { text: was ? 'Oxy hatched into the thinking line.' : 'Oxy is already here.' }
     }
@@ -259,7 +259,7 @@ export const register: Register = on => {
     }
     if (isAnim(arg)) {
       await update($, pinned, () => arg)
-      return { text: `Oxy plays ${arg} until /hatch-pet auto.` }
+      return { text: `Oxy plays ${arg} until /oxy auto.` }
     }
     return { text: `Usage: ${USAGE}. Animations: ${ANIMS.join(', ')}.` }
   })
