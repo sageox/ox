@@ -243,6 +243,7 @@ func TestInvalidHeadRepair_InterruptRestoresOriginal(t *testing.T) {
 	waitForDownload(t, target, 64<<10)
 	process, err := os.FindProcess(os.Getpid())
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = process.Release() })
 	require.NoError(t, process.Signal(os.Interrupt))
 	result := <-done
 	require.NoError(t, ctx.Err(), "interruption must stop the clone before its backstop")

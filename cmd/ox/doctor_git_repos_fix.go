@@ -294,6 +294,9 @@ func fixRepoPathIssues(gitRoot string, localCfg *config.LocalConfig, issues []re
 
 			// attempt clone
 			if err := cloneRepoForFix(issue); err != nil {
+				if errors.Is(err, context.Canceled) {
+					return interruptedCloneCheck(gitRoot, localCfg, err)
+				}
 				if errors.Is(err, daemon.ErrCheckoutInProgress) {
 					cloning++
 					fmt.Println()
@@ -417,6 +420,9 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 		} else if err := cloneViaDaemon(repoDetail.Ledger.RepoURL, ledgerPath, "ledger", projectEndpoint); errors.Is(err, daemon.ErrCheckoutInProgress) {
 			cloning++
 		} else if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return interruptedCloneCheck(gitRoot, localCfg, err)
+			}
 			fmt.Printf("    Clone failed: %v\n", err)
 			skipped++
 		} else {
@@ -491,6 +497,9 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 			fmt.Println()
 			continue
 		} else if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return interruptedCloneCheck(gitRoot, localCfg, err)
+			}
 			fmt.Printf("    Clone failed: %v\n", err)
 			skipped++
 			continue
@@ -874,6 +883,8 @@ func watchDirectClone(dir string, start time.Time) (stop func() int64) {
 // describes the abort, not the server, so it is replaced with what happened.
 func directLedgerCloneError(ctx context.Context, budget time.Duration, received int64, gitOutput string, err error) error {
 	switch {
+	case errors.Is(ctx.Err(), context.Canceled):
+		return fmt.Errorf("clone ledger interrupted: %w", ctx.Err())
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return fmt.Errorf("clone ledger timed out after %s (%s received)", budget, humanSize(received))
 	case strings.Contains(gitOutput, curlLowSpeedAbort):
@@ -883,6 +894,16 @@ func directLedgerCloneError(ctx context.Context, budget time.Duration, received 
 		return fmt.Errorf("git clone failed: %s", out)
 	}
 	return err
+}
+
+// Keep completed repairs when interruption stops the remaining repositories.
+func interruptedCloneCheck(gitRoot string, localCfg *config.LocalConfig, err error) checkResult {
+	if saveErr := config.SaveLocalConfig(gitRoot, localCfg); saveErr != nil {
+		err = errors.Join(err, fmt.Errorf("save local config: %w", saveErr))
+	}
+	result := FailedCheck("git repo paths", "interrupted", err.Error())
+	result.err = err
+	return result
 }
 
 // cloneRepoForFix clones a repo to fix a path issue.
