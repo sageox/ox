@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Routine maintenance leaves other staged work pending** — batch session re-redaction, coworker changes and murmur deletion commit only their selected files.
 - **Sharing a session summary leaves other staged work pending** — only the summary and its metadata are committed. Retrying an already committed summary attempts publication again; synchronization waits when it would rebase over a staged draft.
 - **Ledger commits refuse unsafe checkouts earlier** — a missing checkout or unresolved Git index stops the commit before it can affect another repository.
 - **Sessions in a git worktree reach the Ledger** — the Claude desktop app runs every session in a linked worktree under `.claude/worktrees/`, and ox judged that worktree to be another repository. No turn was captured, and `session stop` uploaded nothing while reporting success. A worktree of the same repository now counts as part of it; another repository's worktree or clone inside your checkout is still refused.

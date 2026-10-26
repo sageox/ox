@@ -2,15 +2,111 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Failure prevented: batch re-redaction commits another writer's staged work
+// alongside the intended sessions, or a scoped no-op leaves a prior push owed.
+func TestCommitAndPushLedgerBatch_PreservesOtherWriters(t *testing.T) {
+	bare, ledger := createBareAndClone(t)
+	isolatePushEnv(t, ledger)
+	names := []string{"2026-10-21T00-00-test-OxBaT1", "2026-10-21T00-00-test-OxBaT2"}
+	for _, name := range names {
+		writeSessionFiles(t, ledger, name)
+	}
+	otherSession := writeSessionFiles(t, ledger, "2026-10-21T00-00-test-OxOtHr")
+	runGit(t, ledger, "add", "sessions")
+	runGit(t, ledger, "commit", "--no-verify", "-m", "seed batch sessions")
+	runGit(t, ledger, "push")
+	initialHead := runGit(t, ledger, "rev-parse", "HEAD")
+	for _, name := range names {
+		require.NoError(t, lfs.UpdateMetaSummary(filepath.Join(ledger, "sessions", name), "Updated batch session artifacts"))
+	}
+	require.NoError(t, lfs.UpdateMetaSummary(otherSession, "Unrelated staged session update"))
+	runGit(t, ledger, "add", filepath.Join(otherSession, "meta.json"))
+	otherBlob := runGit(t, ledger, "rev-parse", ":sessions/2026-10-21T00-00-test-OxOtHr/meta.json")
+	plan := "data/plans/unrelated.md"
+	require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(ledger, plan)), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(ledger, plan), []byte("another writer's plan\n"), 0644))
+	runGit(t, ledger, "add", plan)
+	planBlob := runGit(t, ledger, "rev-parse", ":"+plan)
+
+	require.NoError(t, commitAndPushLedgerBatch(ledger, names))
+	assert.Equal(t, otherBlob, runGit(t, ledger, "rev-parse", ":sessions/2026-10-21T00-00-test-OxOtHr/meta.json"))
+	assert.Equal(t, planBlob, runGit(t, ledger, "rev-parse", ":"+plan))
+	assert.Empty(t, runGit(t, bare, "ls-tree", "--name-only", "HEAD", "--", plan))
+	assert.NotContains(t, runGit(t, bare, "show", "HEAD:sessions/2026-10-21T00-00-test-OxOtHr/meta.json"), "Unrelated staged")
+	for _, name := range names {
+		assert.Contains(t, runGit(t, bare, "show", "HEAD:sessions/"+name+"/meta.json"), "Updated batch session artifacts")
+	}
+
+	// Simulate the remote still owing this exact local commit. An identical
+	// retry must push it without creating a commit or including pending work.
+	localHead := runGit(t, ledger, "rev-parse", "HEAD")
+	runGit(t, bare, "update-ref", "HEAD", initialHead)
+	require.NoError(t, commitAndPushLedgerBatch(ledger, names))
+	assert.Equal(t, localHead, runGit(t, ledger, "rev-parse", "HEAD"))
+	assert.Equal(t, localHead, runGit(t, bare, "rev-parse", "HEAD"))
+	assert.Equal(t, planBlob, runGit(t, ledger, "rev-parse", ":"+plan))
+}
+
+// Failure prevented: staging an owned file resolves an existing conflict before
+// the immutable commit validator can see the index's unmerged stages.
+func TestSessionWriters_PreserveConflictedIndex(t *testing.T) {
+	for _, writer := range []string{"push-summary", "regenerate-batch"} {
+		t.Run(writer, func(t *testing.T) {
+			bare, ledger := createBareAndClone(t)
+			isolatePushEnv(t, ledger)
+			name := "2026-10-21T00-00-test-OxCoNf"
+			sessionDir := writeSessionFiles(t, ledger, name)
+			runGit(t, ledger, "add", "sessions")
+			runGit(t, ledger, "commit", "--no-verify", "-m", "seed session")
+			branch := runGit(t, ledger, "branch", "--show-current")
+			runGit(t, ledger, "checkout", "-b", "conflict")
+			require.NoError(t, lfs.UpdateMetaSummary(sessionDir, "Concurrent session summary"))
+			runGit(t, ledger, "commit", "--no-verify", "-am", "concurrent summary")
+			runGit(t, ledger, "checkout", branch)
+			require.NoError(t, lfs.UpdateMetaSummary(sessionDir, "Local session summary"))
+			runGit(t, ledger, "commit", "--no-verify", "-am", "local summary")
+			_, mergeErr := runIsolatedGit(t, ledger, "merge", "conflict")
+			require.Error(t, mergeErr, "fixture must produce an owned-file conflict")
+			beforeStages := runGit(t, ledger, "ls-files", "--stage")
+			beforeHead := runGit(t, ledger, "rev-parse", "HEAD")
+			remoteHead := runGit(t, bare, "rev-parse", "HEAD")
+			summaryFile := filepath.Join(t.TempDir(), "summary.json")
+			require.NoError(t, os.WriteFile(summaryFile, []byte(`{"title":"Publication waits for conflict resolution","summary":"Retained the session work until the shared Ledger conflict was resolved.","outcome":"success","quality_score":0.8}`), 0644))
+			write := func() error {
+				if writer == "regenerate-batch" {
+					return commitAndPushLedgerBatch(ledger, []string{name})
+				}
+				result := pushSummaryToLedger(summaryFile, sessionDir)
+				if !result.Success {
+					return fmt.Errorf("push-summary: %s", result.Error)
+				}
+				return nil
+			}
+
+			assert.ErrorContains(t, write(), "unmerged")
+			assert.Equal(t, beforeStages, runGit(t, ledger, "ls-files", "--stage"))
+			assert.Equal(t, beforeHead, runGit(t, ledger, "rev-parse", "HEAD"))
+			assert.Equal(t, remoteHead, runGit(t, bare, "rev-parse", "HEAD"))
+			assert.NoFileExists(t, filepath.Join(ledger, ".gitignore"))
+
+			runGit(t, ledger, "merge", "--abort")
+			require.NoError(t, write(), "the next write must progress after conflict recovery")
+			assert.NotEqual(t, remoteHead, runGit(t, bare, "rev-parse", "HEAD"))
+		})
+	}
+}
 
 func TestMapEntriesToTyped(t *testing.T) {
 	tests := []struct {

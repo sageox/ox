@@ -199,6 +199,7 @@ The CLI reads and writes review records only through `pkg/planreview`.
   `*.rej` and `*.needs-summary` files (#1443).
 - **Index preflight** (#1355): Ledger snapshots require the expected Git checkout and refuse unresolved index entries. Plan staging uses the same check before it can mark a conflict resolved.
 - **Summary publication** (#1355): lock, stage and commit only the summary, updated session metadata and required ignore cleanup. A no-op snapshot still attempts publication. Selected maintenance retries require a clean index before automatic rebase; normal pushes and default daemon retry policy are unchanged.
+- **Routine maintenance** (#1355): batch session re-redaction, coworker add/remove and murmur deletion commit only their selected paths under the repository lock.
 - **Plan changes no retry owns** (`ox doctor`, just before
   `plan-pending-writes`): a plan dir with uncommitted changes, no plan retry
   marker, and changes outside the review records an entry lands. If its

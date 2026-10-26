@@ -70,10 +70,13 @@ func commitMurmurDeletion(ctx context.Context, targetDir, relPath, murmurID stri
 	return gitutil.WithRepoLock(ctx, targetDir, func() error {
 		gitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), murmurDeleteGitTimeout)
 		defer cancel()
-		if _, err := gitutil.RunGit(gitCtx, targetDir, "rm", "-f", relPath); err != nil {
+		if err := gitutil.IsSafeForIndexWrite(gitCtx, targetDir); err != nil {
+			return err
+		}
+		if _, err := gitutil.RunGit(gitCtx, targetDir, "rm", "-f", "--sparse", "--", relPath); err != nil {
 			return fmt.Errorf("git rm: %w", err)
 		}
-		if _, err := gitutil.RunGit(gitCtx, targetDir, "commit", "-m", fmt.Sprintf("murmur: delete %s", murmurID)); err != nil {
+		if _, err := gitutil.CommitLedgerSnapshot(gitCtx, targetDir, fmt.Sprintf("murmur: delete %s", murmurID), ":(literal)"+relPath); err != nil {
 			return fmt.Errorf("git commit: %w", err)
 		}
 		return nil
