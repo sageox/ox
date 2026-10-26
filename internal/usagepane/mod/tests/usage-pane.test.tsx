@@ -1,13 +1,17 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import {
+  bar,
+  contextRows,
   formatClock,
   formatRow,
   formatTokens,
   headerLines,
   isAtEnd,
   isOxCommand,
+  murmurRows,
   parseReport,
+  readRows,
   shouldScrollToEnd,
   truncate,
 } from '../hooks/logic'
@@ -49,9 +53,34 @@ const REPORT = {
       { label: 'prime', command: 'ox agent prime', seq: 1, tokens: 15000, ts: '2026-10-24T10:01:00Z' },
     ],
   },
-  injected: { total_tokens: 16314, estimated: true, by_source: [] },
-  surfaced: [{ ref: 'adr-12' }, { ref: 'adr-31' }],
-  used: { status: 'not_yet_reported' },
+  context: {
+    tokens: 16314,
+    estimated: true,
+    by_source: [
+      { source: 'prime', tokens: 15000, count: 1 },
+      { source: 'query', tokens: 1234, count: 1 },
+      { source: 'murmurs', tokens: 80, count: 1 },
+    ],
+    unmetered: [],
+  },
+  surfaced: [
+    {
+      ref: 'disc_9',
+      ref_type: 'discussion',
+      via: 'query',
+      title: 'Release versioning sync',
+      url: 'https://sageox.ai/c/disc_9',
+      seq: 2,
+      used: { evidence: 'cited', seq: 3 },
+    },
+    { ref: 'plan_4', ref_type: 'plan', via: 'prime', title: 'Brief pane redesign', url: 'https://sageox.ai/p/plan_4' },
+    { ref: 'murmur_1', ref_type: 'murmur', from: 'Oxa1', from_name: 'Avery', topic: 'wip', via: 'murmur', used: { evidence: 'read' } },
+    { ref: 'murmur_2', ref_type: 'murmur', from: 'Oxb2', from_name: 'Sam', topic: 'release', via: 'murmur' },
+    { ref: 'ox-cli-plan', ref_type: 'skill', via: 'prime' },
+    { ref: 'ox-cli-recap', ref_type: 'skill', via: 'prime' },
+  ],
+  relevant: { count: 2, surfaced_count: 6 },
+  used: { self_reported: false },
   display: '',
   guidance: '',
 }
@@ -108,8 +137,37 @@ describe('formatting', () => {
   })
   test('header', () => {
     const h = headerLines(parseReport(JSON.stringify(REPORT)))
-    expect(h.identity).toBe('brief-pane · claude-code · ● recording')
-    expect(h.summary).toBe('calls 3 (1 failed) · injected ~16k tok · surfaced 2 · used not yet reported')
+    expect(h.marker).toBe('● recording')
+    expect(h.summary).toBe('calls 3 (1 failed) · ~16k tokens · read 4 · useful 2')
+  })
+  test('header without relevant counts used items, and says not recording', () => {
+    const { relevant: _, ...rest } = REPORT
+    const h = headerLines(parseReport(JSON.stringify({ ...rest, session: { recording: false } })))
+    expect(h.marker).toBe('○ not recording')
+    expect(h.summary).toBe('calls 3 (1 failed) · ~16k tokens · read 4 · useful 2')
+  })
+  test('an old trace without context or surfaced still parses', () => {
+    const h = headerLines(parseReport(JSON.stringify({ view: 'session', session: { recording: true }, calls: { total: 0, failed: 0 } })))
+    expect(h.summary).toBe('calls 0 · ~0 tokens · read 0 · useful 0')
+  })
+  test('context bars scale to the largest source', () => {
+    const r = parseReport(JSON.stringify(REPORT))!
+    expect(contextRows(r).map(row => [row.text, row.bar])).toEqual([
+      ['prime    ~15k tokens', '▇▇▇▇▇▇'],
+      ['query    ~1.2k tokens', '▇'],
+      ['murmurs  ~80 tokens', '▇'],
+    ])
+    expect(bar(0, 10)).toBe('')
+    expect(bar(5, 10)).toBe('▇▇▇')
+  })
+  test('read rows group skills; murmur rows keep only used ones', () => {
+    const r = parseReport(JSON.stringify(REPORT))!
+    expect(readRows(r)).toEqual([
+      { key: 'read:0', text: 'discussion  Release versioning sync', used: true, url: 'https://sageox.ai/c/disc_9' },
+      { key: 'read:1', text: 'plan        Brief pane redesign', used: false, url: 'https://sageox.ai/p/plan_4' },
+      { key: 'read:skills', text: '2 team skills', used: false },
+    ])
+    expect(murmurRows(r)).toEqual([{ key: 'murmur:0', text: 'Avery  [wip]', used: true }])
   })
   test('parse', () => {
     expect(parseReport('not json')).toBeNull()
@@ -139,10 +197,27 @@ test('/ox-brief opens the pane and lists each ox call, oldest first', async ($, 
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect((await ui.find({ type: 'Text', text: /● ox brief/ }))?.text).toBe('● ox brief  brief-pane · claude-code · ● recording')
-    expect((await ui.find({ type: 'Text', text: /^calls/ }))?.text).toBe(
-      'calls 3 (1 failed) · injected ~16k tok · surfaced 2 · used not yet reported',
-    )
+    const titleRow = (await ui.find({ type: 'Text', text: /● ox brief/ }))?.text
+    expect(titleRow).toBe('● ox brief  ● recording')
+    expect(titleRow).not.toMatch(/brief-pane|claude-code|Oxa1b2/)
+    expect((await ui.find({ type: 'Text', text: /^calls \d/ }))?.text).toBe('calls 3 (1 failed) · ~16k tokens · read 4 · useful 2')
+    expect(await ui.find({ type: 'Text', text: /injected|not yet reported/ })).toBeUndefined()
+
+    for (const h of ['context', 'read', 'murmurs', 'calls']) {
+      expect((await ui.find({ key: `h:${h}` }))?.text).toBe(h)
+    }
+    expect((await ui.find({ key: 'context:prime' }))?.text).toBe('prime    ~15k tokens  ▇▇▇▇▇▇')
+    expect(await ui.find({ type: 'Text', text: 'estimates, ~4 bytes/token' })).toBeDefined()
+    expect((await ui.find({ key: 'read:0' }))?.text).toBe('discussion  Release versioning sync ✓')
+    expect((await ui.find({ key: 'read:0:url' }))?.text).toBe('https://sageox.ai/c/disc_9')
+    expect((await ui.find({ type: 'Link', text: 'https://sageox.ai/c/disc_9' }))?.props.href).toBe('https://sageox.ai/c/disc_9')
+    expect((await ui.find({ key: 'read:1' }))?.text).toBe('plan        Brief pane redesign')
+    expect((await ui.find({ key: 'read:1:url' }))?.text).toBe('https://sageox.ai/p/plan_4')
+    expect((await ui.find({ key: 'read:skills' }))?.text).toBe('2 team skills')
+    expect((await ui.find({ key: 'murmur:0' }))?.text).toBe('Avery  [wip] ✓')
+    expect(await ui.find({ type: 'Text', text: /Sam/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: '✓ used by the AI coworker' })).toBeDefined()
+
     const rows = [await ui.find({ key: 'row:0' }), await ui.find({ key: 'row:1' }), await ui.find({ key: 'row:2' })]
     expect(rows.map(r => r?.text.replace(/^\d\d:\d\d/, 'HH:MM'))).toEqual([
       'HH:MM  prime  ox agent prime  ~15k',
@@ -233,6 +308,20 @@ test('an empty session and a missing trace read plainly', async ($, on) => {
   await $.command.run({ ...COMMAND, args: '' } as never)
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: 'No ox calls yet.' })).toBeDefined()
+  await ui.unmount()
+
+  // Nothing used: no murmurs section, no legend, and unused murmurs never show.
+  stdout = JSON.stringify({
+    ...EMPTY,
+    surfaced: EMPTY.surfaced.map(({ used: _, ...item }) => item),
+    relevant: undefined,
+  })
+  await $.command.run({ ...COMMAND, args: 'refresh' } as never)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ key: 'h:murmurs' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /used by the AI coworker/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /✓/ })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /^calls \d/ }))?.text).toBe('calls 0 · ~16k tokens · read 4 · useful 0')
   await ui.unmount()
 
   stdout = JSON.stringify({ ...EMPTY, trace: { available: false, source: 'none', reason: 'no usage trace found for this session' } })
