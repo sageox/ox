@@ -280,6 +280,30 @@ var helmEnv = regexp.MustCompile(`(?i)([A-Za-z0-9_.-]*extraEnv\[[0-9]+\])\.(name
 
 const replacement = "[REDACTED_SECRET]"
 
+// builtins run in this order, before the catalog: contextual environment values
+// are captured before any standalone-token masking can erase a credential-shaped
+// environment name. Each is screened like a catalog rule, by literals its own
+// expression proves; unscreened, each would run its NFA across every byte of a
+// multi-MB string (sageox/ox#1457).
+var builtins = []struct {
+	keywords []string
+	redact   func(text string, found, values map[string]bool) string
+}{
+	{expressionKeywords(helmEnv), redactHelmEnv},
+	{expressionKeywords(directEnv), redactDirectEnv},
+	{expressionKeywords(sageoxToken), tokenRedactor(sageoxToken, "sageox-bearer-token")},
+	{expressionKeywords(sageoxAPIKey), tokenRedactor(sageoxAPIKey, "sageox-api-key")},
+}
+
+// expressionKeywords is nil, meaning unscreened, when no literal is provable.
+func expressionKeywords(expression *regexp.Regexp) []string {
+	parsed, err := syntax.Parse(expression.String(), syntax.Perl)
+	if err != nil {
+		return nil
+	}
+	return requiredKeywords(parsed)
+}
+
 var redactionMarker = regexp.MustCompile(`^\[REDACTED(?:_[A-Z0-9_-]+)?\]$`)
 
 func masked(v string) bool { return v == "" || redactionMarker.MatchString(strings.Trim(v, "\"'")) }
@@ -367,52 +391,20 @@ func (s *RuleSet) redact(text string, found map[string]bool, depth int, values m
 	}
 
 	out := text
-	// Pair by the complete indexed Helm path, never by adjacency or provider
-	// prefix; opaque service keys are just as sensitive as recognizable tokens.
-	names := map[string]bool{}
-	for _, m := range helmEnv.FindAllStringSubmatch(out, -1) {
-		if strings.EqualFold(m[2], "name") && sensitiveName(strings.Trim(m[3], "\"'")) {
-			names[strings.ToLower(m[1])] = true
-		}
-	}
-	out = helmEnv.ReplaceAllStringFunc(out, func(m string) string {
-		p := helmEnv.FindStringSubmatch(m)
-		if strings.EqualFold(p[2], "value") && names[strings.ToLower(p[1])] && !unassigned(p[3]) {
-			rememberValue(values, strings.Trim(p[3], "\"'"))
-			found["sensitive-env-value"] = true
-			return p[1] + ".value=" + replacement
-		}
-		return m
-	})
-	// A NAME=value pair lives inside one JSON string, which the record pass has
-	// already scanned decoded. The raw record line only adds escapes glued to the
-	// value (\" or \n after [REDACTED_SECRET]), which would refuse at publication
-	// what capture accepted entry by entry.
-	envMatches := directEnv.FindAllStringSubmatchIndex(out, -1)
-	for i := len(envMatches) - 1; i >= 0; i-- {
-		m := envMatches[i]
-		name, value := out[m[2]:m[3]], out[m[4]:m[5]]
-		if !sensitiveName(name) || unassigned(value) || jsonRecord(matchLines(out, m[0], m[1])) {
+	lower := canonicalLower(out)
+	for _, b := range builtins {
+		if !screened(lower, b.keywords) {
 			continue
 		}
-		rememberValue(values, strings.Trim(value, "\"'"))
-		found["sensitive-env-value"] = true
-		out = out[:m[0]] + name + "=" + replacement + out[m[1]:]
-	}
-	// Capture contextual values before any standalone-token masking can erase a
-	// credential-shaped environment name. Both the name and value must be safe.
-
-	for _, local := range []struct {
-		expression *regexp.Regexp
-		name       string
-	}{{sageoxToken, "sageox-bearer-token"}, {sageoxAPIKey, "sageox-api-key"}} {
-		out = local.expression.ReplaceAllStringFunc(out, func(match string) string { rememberValue(values, match); found[local.name] = true; return replacement })
+		// A replacement inserts marker text, so later screens must see it.
+		if next := b.redact(out, found, values); next != out {
+			out, lower = next, canonicalLower(next)
+		}
 	}
 
 	// Syntax-proven mandatory keywords screen regex work; upstream hints screen
 	// only rules with no such proof. Airtable demonstrates why unverified hints
 	// cannot suppress a rule that is anchored on its own literal.
-	lower := canonicalLower(out)
 	for _, r := range s.rules {
 		if r.expression == nil || !screened(lower, r.keywords) || !screened(lower, r.gate) {
 			continue
@@ -437,6 +429,58 @@ func (s *RuleSet) redact(text string, found map[string]bool, depth int, values m
 	}
 	return out
 }
+
+// redactHelmEnv pairs by the complete indexed Helm path, never by adjacency or
+// provider prefix; opaque service keys are just as sensitive as recognizable tokens.
+func redactHelmEnv(text string, found, values map[string]bool) string {
+	names := map[string]bool{}
+	for _, m := range helmEnv.FindAllStringSubmatch(text, -1) {
+		if strings.EqualFold(m[2], "name") && sensitiveName(strings.Trim(m[3], "\"'")) {
+			names[strings.ToLower(m[1])] = true
+		}
+	}
+	return helmEnv.ReplaceAllStringFunc(text, func(m string) string {
+		p := helmEnv.FindStringSubmatch(m)
+		if strings.EqualFold(p[2], "value") && names[strings.ToLower(p[1])] && !unassigned(p[3]) {
+			rememberValue(values, strings.Trim(p[3], "\"'"))
+			found["sensitive-env-value"] = true
+			return p[1] + ".value=" + replacement
+		}
+		return m
+	})
+}
+
+// redactDirectEnv masks NAME=value pairs. Such a pair lives inside one JSON
+// string, which the record pass has already scanned decoded. The raw record
+// line only adds escapes glued to the value (\" or \n after [REDACTED_SECRET]),
+// which would refuse at publication what capture accepted entry by entry.
+func redactDirectEnv(text string, found, values map[string]bool) string {
+	out := text
+	envMatches := directEnv.FindAllStringSubmatchIndex(out, -1)
+	for i := len(envMatches) - 1; i >= 0; i-- {
+		m := envMatches[i]
+		name, value := out[m[2]:m[3]], out[m[4]:m[5]]
+		if !sensitiveName(name) || unassigned(value) || jsonRecord(matchLines(out, m[0], m[1])) {
+			continue
+		}
+		rememberValue(values, strings.Trim(value, "\"'"))
+		found["sensitive-env-value"] = true
+		out = out[:m[0]] + name + "=" + replacement + out[m[1]:]
+	}
+	return out
+}
+
+// tokenRedactor masks every standalone match of a SageOx-issued format.
+func tokenRedactor(expression *regexp.Regexp, finding string) func(string, map[string]bool, map[string]bool) string {
+	return func(text string, found, values map[string]bool) string {
+		return expression.ReplaceAllStringFunc(text, func(match string) string {
+			rememberValue(values, match)
+			found[finding] = true
+			return replacement
+		})
+	}
+}
+
 func (s *RuleSet) walk(v any, found map[string]bool, depth int, values map[string]bool) (any, bool) {
 	switch x := v.(type) {
 	case string:
