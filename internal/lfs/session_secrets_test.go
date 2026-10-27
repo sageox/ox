@@ -53,3 +53,25 @@ func TestUploadSessionFilesEnforcesNewUpstreamRule(t *testing.T) {
 	_, err = UploadSessionFilesContext(context.Background(), nil, dir, nil)
 	require.ErrorContains(t, err, "publication refused")
 }
+
+// A current catalog is the bundled one plus what upstream added since; after
+// the bundled check, the upload validates only the additions.
+// Failure prevented: that narrower second check drops a rule the bundled
+// catalog lacks, and a credential format added after this release uploads.
+func TestUploadSessionFilesRefusesWhatOnlyCurrentRulesCatch(t *testing.T) {
+	data, err := os.ReadFile("../secretguard/gitleaks.toml")
+	require.NoError(t, err)
+	rules, err := secretguard.NewRules(append(data, "\n[[rules]]\nid = \"future-format\"\nregex = '''future_[a-z]{8}'''\n"...))
+	require.NoError(t, err)
+	original := currentSessionRules
+	currentSessionRules = func(context.Context) (*secretguard.RuleSet, error) { return rules, nil }
+	t.Cleanup(func() { currentSessionRules = original })
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests++; w.WriteHeader(500) }))
+	defer server.Close()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "summary.md"), []byte("ordinary notes, then future_qzxwvjkp"), 0600))
+	_, err = UploadSessionFilesContext(context.Background(), NewClient(server.URL, "testuser", "testtoken"), dir, nil)
+	require.ErrorContains(t, err, "LFS publication refused")
+	require.Zero(t, requests, "no upload action may be requested before the current rules pass")
+}

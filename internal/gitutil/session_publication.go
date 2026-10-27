@@ -130,6 +130,9 @@ func ValidateSessionPublication(ctx context.Context, ledgerPath string) error {
 			if err != nil {
 				return fmt.Errorf("current session rules required before push: %w", err)
 			}
+			// Every use follows the bundled check of the same bytes, so only
+			// the rules the bundled catalog lacks can still refuse them.
+			rules = rules.Delta(secretguard.Bundled())
 		}
 		if err := rules.ValidateContent("sessions/content", data); err != nil {
 			return fmt.Errorf("committed session content refused by current rules: %w", err)
@@ -163,6 +166,7 @@ func ValidateSessionPublication(ctx context.Context, ledgerPath string) error {
 				if rules, err = freshSessionPublicationRules(ctx); err != nil {
 					return fmt.Errorf("current session rules required before push: %w", err)
 				}
+				rules = rules.Delta(secretguard.Bundled())
 			}
 			if err := rules.ValidateContent(path, nil); err != nil {
 				return fmt.Errorf("session filename refused by current rules: %w", err)

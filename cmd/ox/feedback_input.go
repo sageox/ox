@@ -106,7 +106,8 @@ func validateFeedbackPayload(ctx context.Context, payload []byte) error {
 	if err != nil {
 		return errors.New("cannot verify current secret detection rules; feedback was not submitted")
 	}
-	if err := rules.ValidateContent("feedback.json", payload); err != nil {
+	// The bundled rules already passed these bytes; only the rest can refuse.
+	if err := rules.Delta(secretguard.Bundled()).ValidateContent("feedback.json", payload); err != nil {
 		return errors.New("feedback contains a possible secret; remove credentials and retry")
 	}
 	return nil

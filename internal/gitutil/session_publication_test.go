@@ -186,3 +186,27 @@ func TestCommittedSessionScanSharedBlobKeepsFullScan(t *testing.T) {
 	}
 	require.ErrorContains(t, ValidateSessionPublication(context.Background(), ledger), "committed session content refused")
 }
+
+// A current catalog is the bundled one plus what upstream added since; after
+// the bundled check, publication validates only the additions.
+// Failure prevented: that narrower second check drops a rule the bundled
+// catalog lacks, and a credential format or sensitive filename added after
+// this release reaches the Ledger.
+func TestCommittedSessionScanRefusesWhatOnlyCurrentRulesCatch(t *testing.T) {
+	data, err := os.ReadFile("../secretguard/gitleaks.toml")
+	require.NoError(t, err)
+	rules, err := secretguard.NewRules(append(data, "\n[[rules]]\nid = \"future-format\"\nregex = '''future_[a-z]{8}'''\n[[rules]]\nid = \"future-file\"\npath = '''\\.futurekey$'''\n"...))
+	require.NoError(t, err)
+	original := freshSessionPublicationRules
+	freshSessionPublicationRules = func(context.Context) (*secretguard.RuleSet, error) { return rules, nil }
+	t.Cleanup(func() { freshSessionPublicationRules = original })
+
+	require.NoError(t, ValidateSessionPublication(context.Background(), publicationLedger(t, "sessions/synthetic/summary.md", "ordinary notes")))
+	for _, tc := range []struct{ rel, content, refusal string }{
+		{"sessions/synthetic/summary.md", "ordinary notes, then future_qzxwvjkp", "committed session content refused by current rules"},
+		{"sessions/synthetic/notes.futurekey", "ordinary notes", "session filename refused by current rules"},
+	} {
+		ledger := publicationLedger(t, tc.rel, tc.content)
+		require.ErrorContains(t, ValidateSessionPublication(context.Background(), ledger), tc.refusal)
+	}
+}
