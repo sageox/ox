@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/plan"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/session/contextuse"
 )
 
 // Commands that put one specific team item in front of the AI coworker trace
@@ -64,7 +65,13 @@ func TestConversationProvidedHits(t *testing.T) {
 			name:     "show",
 			env:      &read.Envelope{Data: &read.ShowData{ConversationID: "cnv_a", RecordingID: "rec_a", Title: "Standup", Summary: read.ShowSummary{Available: true, HumanSummary: leakMarker}}},
 			wantRefs: []string{"cnv_a"},
-			first:    providedHit{SurfacedRef: refOf("cnv_a", "discussion", "Standup", "u/cnv_a")},
+			first:    providedHit{SurfacedRef: withAliases(refOf("cnv_a", "discussion", "Standup", "u/cnv_a"), "rec_a")},
+		},
+		{
+			name:     "a recording id alone canonicalises to its cnv_ twin",
+			env:      &read.Envelope{Data: &read.SearchData{Results: []read.SearchResult{{RecordingID: convTestFullRec, Title: "Full"}}}},
+			wantRefs: []string{convTestFullCnv},
+			first:    providedHit{SurfacedRef: withAliases(refOf(convTestFullCnv, "discussion", "Full", "u/"+convTestFullCnv), convTestFullRec)},
 		},
 		{
 			name:     "show falls back to the recording id",
@@ -117,6 +124,7 @@ func TestConversationShow_TracesShownConversation(t *testing.T) {
 	require.Len(t, evs, 1)
 	ev := evs[0]
 	assert.Equal(t, convTestFullCnv, ev.Ref)
+	assert.Equal(t, []string{convTestFullRec}, ev.Aliases)
 	assert.Equal(t, "discussion", ev.RefType)
 	assert.Equal(t, shown.Data.Title, ev.Title)
 	assert.True(t, strings.HasSuffix(ev.URL, "/c/"+convTestFullCnv), ev.URL)
@@ -219,4 +227,116 @@ func TestTeamCtxProvidedHits(t *testing.T) {
 			assertNoContent(t, got)
 		})
 	}
+}
+
+// TestConversationReads_TraceTheConversationRead drives the real transcript,
+// topics, topic and walkthrough commands: each read puts the conversation in
+// the live session trace once — canonical cnv_ ref, its rec_ twin as an alias,
+// the conversation title, the /c/ link — and none of what it printed.
+// Failure prevented: a session that read a transcript gets no credit in
+// `ox brief` or the status line because the conversation was never surfaced.
+func TestConversationReads_TraceTheConversationRead(t *testing.T) {
+	const fullTitle = "2026-08-11-22-32-full" // fixture: index + metadata titles empty → folder name
+	tests := []struct {
+		name      string
+		sub       string
+		args      []string
+		desktop   bool // walkthrough fixture corpus
+		wantRef   string
+		wantAlias string
+		wantTitle string
+	}{
+		{"transcript by cnv id", "transcript", []string{convTestFullCnv, "--full"}, false, convTestFullCnv, convTestFullRec, fullTitle},
+		{"transcript by rec id", "transcript", []string{convTestFullRec, "--full"}, false, convTestFullCnv, convTestFullRec, fullTitle},
+		{"transcript by citation URI", "transcript", []string{convTestCueURI}, false, convTestFullCnv, convTestFullRec, fullTitle},
+		{"topics", "topics", []string{convTestFullCnv}, false, convTestFullCnv, convTestFullRec, fullTitle},
+		{"topic", "topic", []string{convTestFullCnv, convTestTopicID}, false, convTestFullCnv, convTestFullRec, fullTitle},
+		{"walkthrough", "walkthrough", []string{convTestWalkthroughCnv}, true, convTestWalkthroughCnv, "rec_" + strings.TrimPrefix(convTestWalkthroughCnv, "cnv_"), "Saved page walkthrough"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.desktop {
+				useDesktopWalkthroughReader(t)
+			} else {
+				useConversationTestReader(t)
+			}
+			root := usageTraceEnv(t, nil)
+			state := startUsageRecording(t, root)
+			t.Setenv("SAGEOX_AGENT_ID", usageAgentID)
+
+			stdout, _, err := runConversationInProc(t, tt.sub, tt.args...)
+			require.NoError(t, err, stdout)
+			env := decodeConvEnvelope(t, stdout)
+			require.True(t, env.Success, stdout)
+
+			evs := providedEvents(t, sessionTracePath(state))
+			require.Len(t, evs, 1)
+			ev := evs[0]
+			assert.Equal(t, tt.wantRef, ev.Ref)
+			assert.Equal(t, []string{tt.wantAlias}, ev.Aliases)
+			assert.Equal(t, "discussion", ev.RefType)
+			assert.Equal(t, tt.wantTitle, ev.Title)
+			assert.True(t, strings.HasSuffix(ev.URL, "/c/"+tt.wantRef), ev.URL)
+			assert.Equal(t, contexttrace.MechanismRetrieval, ev.Mechanism)
+
+			raw, err := os.ReadFile(sessionTracePath(state))
+			require.NoError(t, err)
+			content := printedContent(t, env.Data, tt.wantTitle)
+			require.NotEmpty(t, content, "fixture must print content for the no-content check to mean anything")
+			for _, s := range content {
+				assert.NotContains(t, string(raw), s)
+			}
+		})
+	}
+}
+
+// TestConversationReads_FailedReadTracesNothing: a read that errors surfaced
+// nothing, so it must not credit the conversation.
+func TestConversationReads_FailedReadTracesNothing(t *testing.T) {
+	useConversationTestReader(t)
+	root := usageTraceEnv(t, nil)
+	state := startUsageRecording(t, root)
+	t.Setenv("SAGEOX_AGENT_ID", usageAgentID)
+
+	for _, sub := range []string{"transcript", "topics", "walkthrough"} {
+		stdout, _, _ := runConversationInProc(t, sub, convTestUnknownCnv)
+		require.False(t, decodeConvEnvelope(t, stdout).Success, stdout)
+	}
+	assert.Empty(t, providedEvents(t, sessionTracePath(state)))
+}
+
+// withAliases returns r carrying aliases.
+func withAliases(r contextuse.SurfacedRef, aliases ...string) contextuse.SurfacedRef {
+	r.Aliases = aliases
+	return r
+}
+
+// printedContent collects the long human-readable strings a command printed
+// (cue text, topic summaries, atom bodies) — everything but ids, links and
+// the conversation title, which a provided event is allowed to carry.
+func printedContent(t *testing.T, data json.RawMessage, title string) []string {
+	t.Helper()
+	var v any
+	require.NoError(t, json.Unmarshal(data, &v))
+	var out []string
+	var walk func(any)
+	walk = func(x any) {
+		switch x := x.(type) {
+		case map[string]any:
+			for _, e := range x {
+				walk(e)
+			}
+		case []any:
+			for _, e := range x {
+				walk(e)
+			}
+		case string:
+			if len(x) < 24 || x == title || strings.Contains(x, "://") || strings.HasPrefix(x, "cnv_") || strings.HasPrefix(x, "rec_") {
+				return
+			}
+			out = append(out, x)
+		}
+	}
+	walk(v)
+	return out
 }

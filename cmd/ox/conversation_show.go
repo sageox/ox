@@ -86,6 +86,39 @@ func traceConversationEnvelope(env *read.Envelope) {
 	if env == nil || env.Error != nil {
 		return
 	}
+	traceConversationHits(func(urlFor func(id string) string) []providedHit {
+		return conversationProvidedHits(env, urlFor)
+	})
+}
+
+// traceConversationRead records the one conversation a successful transcript,
+// topics, topic or walkthrough read put in front of the AI coworker, so a
+// session that read it can be credited with using it. Ref and title only —
+// never the transcript, topic or summary text the read printed (ADR-027). The
+// title comes from the walkthrough payload, else the reader's title lookup.
+func traceConversationRead(env *read.Envelope, reader *read.Reader, idArg string) {
+	if env == nil || env.Error != nil || !env.Success {
+		return
+	}
+	traceConversationHits(func(urlFor func(id string) string) []providedHit {
+		id, err := read.ParseID(idArg)
+		if err != nil {
+			return nil
+		}
+		var title string
+		if d, ok := env.Data.(*read.WalkthroughData); ok && d != nil {
+			title = d.Title
+		} else if reader != nil {
+			title, _ = reader.ConversationTitle(idArg)
+		}
+		return []providedHit{conversationHit(id.ConversationID, id.RecordingID, title, urlFor)}
+	})
+}
+
+// traceConversationHits writes the hits build returns into the AI coworker's
+// live session trace, linking each to its /c/ page. build runs only when there
+// is an agent to credit.
+func traceConversationHits(build func(urlFor func(id string) string) []providedHit) {
 	agentID := traceAgentIDFromEnv()
 	if agentID == "" {
 		return
@@ -97,24 +130,16 @@ func traceConversationEnvelope(env *read.Envelope) {
 	cfg, _ := config.LoadProjectConfig(projectRoot)
 	ep := prResolveEndpoint(cfg)
 	traceProvidedHits(projectRoot, agentID, contexttrace.SourceOnDemand, contexttrace.MechanismRetrieval,
-		conversationProvidedHits(env, func(id string) string { return discussionURL(ep, id) }))
+		build(func(id string) string { return discussionURL(ep, id) }))
 }
 
-// conversationProvidedHits lists the conversations an envelope surfaced:
-// ref = conversation id (recording id when absent), ref_type "discussion",
-// the title, and the /c/ link. Never the summary, hits, or transcript text.
+// conversationProvidedHits lists the conversations an envelope surfaced (see
+// conversationHit). Never the summary, hits, or transcript text.
 func conversationProvidedHits(env *read.Envelope, urlFor func(id string) string) []providedHit {
-	one := func(cnvID, recID, title string) providedHit {
-		ref := cnvID
-		if ref == "" {
-			ref = recID
-		}
-		return providedHit{SurfacedRef: contextuse.SurfacedRef{Ref: ref, RefType: "discussion", Title: title, URL: urlFor(ref)}}
-	}
 	switch d := env.Data.(type) {
 	case *read.ShowData:
 		if d != nil {
-			return []providedHit{one(d.ConversationID, d.RecordingID, d.Title)}
+			return []providedHit{conversationHit(d.ConversationID, d.RecordingID, d.Title, urlFor)}
 		}
 	case *read.SearchData:
 		if d == nil {
@@ -125,11 +150,30 @@ func conversationProvidedHits(env *read.Envelope, urlFor func(id string) string)
 			if len(hits) >= maxProvidedHitsPerCall {
 				break
 			}
-			hits = append(hits, one(r.ConversationID, r.RecordingID, r.Title))
+			hits = append(hits, conversationHit(r.ConversationID, r.RecordingID, r.Title, urlFor))
 		}
 		return hits
 	}
 	return nil
+}
+
+// conversationHit is one surfaced conversation: ref = its canonical cnv_ id
+// (the recording id when there is no conversation id and it does not parse),
+// ref_type "discussion", its rec_ twin as an alias so a use recorded under
+// either name attaches, the title, and the /c/ link.
+func conversationHit(cnvID, recID, title string, urlFor func(id string) string) providedHit {
+	ref := cnvID
+	if ref == "" {
+		ref = recID
+	}
+	if id, err := read.ParseID(ref); err == nil {
+		ref, recID = id.ConversationID, id.RecordingID
+	}
+	var aliases []string
+	if recID != "" && recID != ref {
+		aliases = []string{recID}
+	}
+	return providedHit{SurfacedRef: contextuse.SurfacedRef{Ref: ref, RefType: "discussion", Title: title, URL: urlFor(ref), Aliases: aliases}}
 }
 
 // discussionURL is a discussion's universal /c/ link — the route `ox pr

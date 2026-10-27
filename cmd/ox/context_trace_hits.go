@@ -107,6 +107,7 @@ func providedHitEvents(existing []contexttrace.Event, source contexttrace.Source
 			URL:       h.URL,
 			FromName:  h.FromName,
 			Score:     h.Score,
+			Aliases:   h.Aliases,
 		})
 	}
 	return out

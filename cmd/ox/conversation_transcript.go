@@ -102,6 +102,7 @@ func runConversationTranscript(cmd *cobra.Command, args []string) error {
 	}
 	env := reader.Transcript(idArg, opts)
 	capTranscriptCues(env, flags.Limit)
+	traceConversationRead(env, reader, idArg)
 	return finishConversationEnvelope(cmd.OutOrStdout(), format, env, renderConversationTranscriptText)
 }
 
