@@ -131,6 +131,72 @@ func TestScanUses_Negatives(t *testing.T) {
 	}
 }
 
+// TestScanUses_AcrossNames proves a use recorded under any of an item's names
+// attaches to the item surfaced under another: a conversation surfaced as
+// cnv_<u> and re-opened as rec_<u>, a sageox:// citation, or a /c/ link; a plan
+// surfaced as pln_ and re-opened or cited by slug, or read from its dated
+// directory. Failure prevented: the agent plainly goes back to a surfaced item
+// and recap reports it as never used, because it spelled the name differently.
+func TestScanUses_AcrossNames(t *testing.T) {
+	const (
+		u   = "01a17990-6c2e-4b1a-9d3f-1234567890ab"
+		cnv = "cnv_" + u
+		rec = "rec_" + u
+	)
+	conv := contextuse.SurfacedRef{Ref: cnv, RefType: "discussion"}
+	plan := contextuse.SurfacedRef{Ref: "pln_01J9ABC", RefType: "plan", Aliases: []string{"auth-plan", "2026-10-01-auth-plan"}}
+	tests := []struct {
+		name     string
+		surfaced contextuse.SurfacedRef
+		entry    Entry
+		evidence string
+	}{
+		{"requery: rec_ twin", conv, bash("ox conversation transcript " + rec), contexttrace.EvidenceRequery},
+		{"requery: uppercase uuid", conv, bash("ox conversation show cnv_01A17990-6C2E-4B1A-9D3F-1234567890AB"), contexttrace.EvidenceRequery},
+		{"requery: sageox citation URI", conv, bash(`ox conversation transcript "sageox://` + cnv + `/clyr_x@2#t=10-20"`), contexttrace.EvidenceRequery},
+		{"requery: recording link", conv, bash("ox conversation show https://sageox.ai/c/" + rec), contexttrace.EvidenceRequery},
+		{"requery: id after flags", conv, bash("ox conversation topic --json " + rec + " tp_3"), contexttrace.EvidenceRequery},
+		{"requery: id as flag value", conv, bash("ox conversation show --id=" + rec), contexttrace.EvidenceRequery},
+		{"requery: plan slug alias", plan, bash("ox plan view auth-plan --json"), contexttrace.EvidenceRequery},
+		{"requery: plan status by slug", plan, bash("ox plan status auth-plan"), contexttrace.EvidenceRequery},
+		{"cited: rec_ link for cnv_ item", conv, assistant("Per the call at https://sageox.ai/c/" + rec + ", we keep pgx."), contexttrace.EvidenceCited},
+		{"cited: sageox URI", conv, assistant("As said in sageox://" + cnv + "/clyr_x#t=1."), contexttrace.EvidenceCited},
+		{"cited: plan slug alias", plan, assistant("Following auth-plan step 2."), contexttrace.EvidenceCited},
+		{"read: dated plan dir alias", plan, read("/x/ledger/data/plans/2026-10-01-auth-plan/plan.md"), contexttrace.EvidenceRead},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ScanUses([]Entry{{Type: "user", Content: "ctx"}, tt.entry}, []contextuse.SurfacedRef{tt.surfaced}, testRoots())
+			if len(got) != 1 {
+				t.Fatalf("got %d events, want 1: %+v", len(got), got)
+			}
+			if got[0].Evidence != tt.evidence || got[0].Ref != tt.surfaced.Ref {
+				t.Errorf("event = %+v, want %s of %s", got[0], tt.evidence, tt.surfaced.Ref)
+			}
+		})
+	}
+
+	negatives := []struct {
+		name     string
+		surfaced contextuse.SurfacedRef
+		entry    Entry
+	}{
+		{"requery: other conversation", conv, bash("ox conversation show rec_99999999-6c2e-4b1a-9d3f-1234567890ab")},
+		{"requery: id after separator", conv, bash("ox conversation list && echo " + rec)},
+		{"requery: id in a later command", conv, bash("ox conversation show other; cat " + rec)},
+		{"cited: legacy dsc_ is a different id", conv, assistant("see dsc_" + u)},
+		{"cited: id glued to identifier", conv, assistant("x" + rec)},
+		{"read: alias that is a link", contextuse.SurfacedRef{Ref: "pln_Z", RefType: "plan", Aliases: []string{"https://sageox.ai/p/a.md"}}, read("/elsewhere/a.md")},
+	}
+	for _, tt := range negatives {
+		t.Run("negative/"+tt.name, func(t *testing.T) {
+			if got := ScanUses([]Entry{tt.entry}, []contextuse.SurfacedRef{tt.surfaced}, testRoots()); len(got) != 0 {
+				t.Fatalf("expected no used event, got %+v", got)
+			}
+		})
+	}
+}
+
 // TestScanUses_DedupesEarliestPerRefAndEvidence proves one receipt per
 // (ref, evidence) at its first turn, while different evidence kinds for the
 // same ref are each kept.
@@ -174,6 +240,7 @@ func TestMatchesRef(t *testing.T) {
 		{"title case-sensitive", "ox cli status line design feedback", "", "Ox CLI status line design feedback", false},
 		{"empty text", "", "Ox7f2a", "a long enough title", false},
 		{"nothing to match", "hello", "", "", false},
+		{"rec_ link cites cnv_ ref", "see https://sageox.ai/c/rec_01a17990-6c2e-4b1a-9d3f-1234567890ab", "cnv_01a17990-6c2e-4b1a-9d3f-1234567890ab", "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -296,5 +363,28 @@ func TestTagSessionReads_UsesAndIdempotent(t *testing.T) {
 	// Missing raw file: fail-open.
 	if n, err := TagSessionReads(filepath.Join(dir, "nope.jsonl"), dir, testRoots()); n != 0 || err != nil {
 		t.Errorf("missing raw: got (%d, %v)", n, err)
+	}
+}
+
+// TestMatchesRef_Aliases covers the variadic aliases the commit hook can pass:
+// a plan cited by slug in a commit message counts for the surfaced pln_ id.
+func TestMatchesRef_Aliases(t *testing.T) {
+	tests := []struct {
+		name    string
+		text    string
+		aliases []string
+		want    bool
+	}{
+		{"slug alias", "feat: auth-plan step 2", []string{"auth-plan"}, true},
+		{"dated dir alias", "see 2026-10-01-auth-plan", []string{"2026-10-01-auth-plan"}, true},
+		{"short alias is not evidence", "the auth flow", []string{"auth"}, false},
+		{"no alias named", "unrelated change", []string{"auth-plan"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := MatchesRef(tt.text, "pln_01J9ABC", "", tt.aliases...); got != tt.want {
+				t.Errorf("MatchesRef(%q, aliases=%q) = %v, want %v", tt.text, tt.aliases, got, tt.want)
+			}
+		})
 	}
 }

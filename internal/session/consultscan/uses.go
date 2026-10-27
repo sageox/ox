@@ -16,7 +16,8 @@ import (
 // hit is a provable `used` event (ADR-027: refs only, never content).
 
 // requeryCommands are the `ox` invocations that re-open one specific surfaced
-// item. The argument after the prefix must name a surfaced ref. Listing
+// item. Any argument after the prefix (up to the next shell separator) that
+// names the item under any of its names counts. Listing
 // commands (`ox conversation list`) are not re-opens and stay out.
 var requeryCommands = []string{
 	"ox agent team-ctx",
@@ -93,23 +94,23 @@ func ScanUses(entries []Entry, surfaced []contextuse.SurfacedRef, roots Roots) [
 				continue
 			}
 			for _, s := range surfaced {
-				if i >= s.Seq && readMatchesRef(path, s.Ref, roots) {
+				if i >= s.Seq && readMatchesRef(path, s, roots) {
 					emit(i, s, contexttrace.MechanismRetrieval, contexttrace.EvidenceRead)
 				}
 			}
 		case shellToolNames[e.ToolName]:
-			arg, ok := detectRequeryCommand(e.ToolInput)
-			if !ok {
+			args := requeryArgs(e.ToolInput)
+			if len(args) == 0 {
 				continue
 			}
 			for _, s := range surfaced {
-				if i >= s.Seq && arg == strings.TrimRight(s.Ref, "/") {
+				if i >= s.Seq && anyNames(args, s) {
 					emit(i, s, contexttrace.MechanismRetrieval, contexttrace.EvidenceRequery)
 				}
 			}
 		case e.Type == "assistant" && e.Content != "":
 			for _, s := range surfaced {
-				if i >= s.Seq && MatchesRef(e.Content, s.Ref, s.Title) {
+				if i >= s.Seq && MatchesRef(e.Content, s.Ref, s.Title, s.Aliases...) {
 					emit(i, s, contexttrace.MechanismCitation, contexttrace.EvidenceCited)
 				}
 			}
@@ -119,10 +120,25 @@ func ScanUses(entries []Entry, surfaced []contextuse.SurfacedRef, roots Roots) [
 }
 
 // readMatchesRef reports whether a file read of path is a read of the surfaced
-// ref: the path relative to a SageOx root (or its basename) equals the ref,
-// the basename equals the ref's basename when the ref names a file, or the
-// path sits in the ledger under sessions/<ref>/ or data/plans/<ref>.
-func readMatchesRef(path, ref string, roots Roots) bool {
+// item under its ref or any alias (see readMatchesName). Aliases that are links
+// or URIs name no file and are skipped.
+func readMatchesRef(path string, s contextuse.SurfacedRef, roots Roots) bool {
+	for _, name := range append([]string{s.Ref}, s.Aliases...) {
+		if strings.Contains(name, "://") {
+			continue
+		}
+		if readMatchesName(path, name, roots) {
+			return true
+		}
+	}
+	return false
+}
+
+// readMatchesName reports whether a file read of path is a read of the named
+// item: the path relative to a SageOx root (or its basename) equals the name,
+// the basename equals the name's basename when the name is a file, or the path
+// sits in the ledger under sessions/<name>/ or data/plans/<name>.
+func readMatchesName(path, ref string, roots Roots) bool {
 	ref = strings.TrimRight(ref, "/")
 	if ref == "" {
 		return false
@@ -148,39 +164,70 @@ func readMatchesRef(path, ref string, roots Roots) bool {
 	return strings.Contains(base, ".") && base == filepath.Base(clean)
 }
 
-// detectRequeryCommand reports whether a shell tool input runs an `ox`
-// re-fetch of one ref, returning the ref argument.
-func detectRequeryCommand(toolInput string) (string, bool) {
+// requeryArgs returns the arguments of the first `ox` re-open command in a
+// shell tool input, up to the next shell separator, or nil when there is none.
+// A --flag=value argument contributes its value; bare flags are dropped.
+func requeryArgs(toolInput string) []string {
 	cmd := extractCommand(toolInput)
 	if cmd == "" {
-		return "", false
+		return nil
 	}
 	for _, prefix := range requeryCommands {
 		call, ok := findOxCall(cmd, prefix)
 		if !ok {
 			continue
 		}
-		arg := firstQuotedOrToken(cmd[call.start:call.end])
-		if arg == "" {
-			return "", false
+		var args []string
+		for _, a := range call.args {
+			arg := a.text
+			if strings.HasPrefix(arg, "-") {
+				_, v, ok := strings.Cut(arg, "=")
+				if !ok {
+					continue
+				}
+				arg = v
+			}
+			if arg != "" {
+				args = append(args, arg)
+			}
 		}
-		return strings.TrimRight(arg, "/"), true
+		return args
 	}
-	return "", false
+	return nil
 }
 
-// MatchesRef reports whether free text names a surfaced ref: either the ref
-// appears as a whole token (word-bounded; at least minCitedRefLen characters,
-// or any length for id-shaped refs), or the surfaced title appears as an exact
-// phrase of at least minCitedTitleLen characters. Shared by the assistant-output
+// anyNames reports whether any argument names the surfaced item under one of
+// its names (canonical ref, rec_/cnv_ twin, sageox:// URI, /c/ link, alias).
+func anyNames(args []string, s contextuse.SurfacedRef) bool {
+	for _, a := range args {
+		if s.Matches(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// MatchesRef reports whether free text names a surfaced ref: the ref or one
+// of its aliases appears as a whole token (word-bounded; at least
+// minCitedRefLen characters, or any length for id-shaped names), a
+// conversation id in the text is another name of the ref (rec_ for cnv_, in a
+// link or a sageox:// URI), or the surfaced title appears as an exact phrase
+// of at least minCitedTitleLen characters. Shared by the assistant-output
 // citation scan and the commit-message citation hook so both grade evidence
 // the same way.
-func MatchesRef(text, ref, title string) bool {
+func MatchesRef(text, ref, title string, aliases ...string) bool {
 	if text == "" {
 		return false
 	}
-	if ref != "" && (len(ref) >= minCitedRefLen || idShapedRef.MatchString(ref)) && containsToken(text, ref) {
-		return true
+	for _, name := range append([]string{ref}, aliases...) {
+		if name != "" && (len(name) >= minCitedRefLen || idShapedRef.MatchString(name)) && containsToken(text, name) {
+			return true
+		}
+	}
+	for _, id := range contextuse.ConversationIDPattern.FindAllString(text, -1) {
+		if contextuse.SameItem("", id, ref, aliases...) {
+			return true
+		}
 	}
 	if len(title) >= minCitedTitleLen && strings.Contains(text, title) {
 		return true
