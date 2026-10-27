@@ -92,6 +92,55 @@ function ok(stdout: string) {
   return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
 }
 
+describe('parseReport: used items and attribution', () => {
+  const RELEVANT = {
+    count: 3,
+    surfaced_count: 6,
+    by_evidence: { read: 1, cited: 1, reported: 1, judged: 0 },
+    items: [
+      { ref: 'disc_9', ref_type: 'discussion', title: 'Release versioning sync', url: 'https://sageox.ai/c/disc_9', evidence: 'cited', grade: 'provable', detail: 'cited_commit', seq: 3, commit: 'abc1234' },
+      { ref: 'plan_4', evidence: 'reported', grade: 'reported', detail: 'reported', why: 'followed the rollout order' },
+      { ref: 'murmur_1', ref_type: 'murmur', evidence: 'read', grade: 'provable', detail: 'read', seq: 4 },
+    ],
+    derived: { category: 'moderate', reason: 'two cited items' },
+  }
+  const ATTRIBUTION = { would_attribute: true, category: 'moderate', reason: 'cited in a commit', source: 'derived', threshold: 2 }
+
+  test('reads items, evidence counts, derived and attribution', () => {
+    const r = parseReport(JSON.stringify({ ...REPORT, relevant: RELEVANT, attribution: ATTRIBUTION }))!
+    expect(r.relevant?.by_evidence).toEqual({ read: 1, cited: 1, reported: 1, judged: 0 })
+    expect(r.relevant?.items?.map(i => [i.ref, i.evidence, i.detail, i.commit, i.why, i.url])).toEqual([
+      ['disc_9', 'cited', 'cited_commit', 'abc1234', undefined, 'https://sageox.ai/c/disc_9'],
+      ['plan_4', 'reported', 'reported', undefined, 'followed the rollout order', undefined],
+      ['murmur_1', 'read', 'read', undefined, undefined, undefined],
+    ])
+    expect(r.relevant?.derived).toEqual({ category: 'moderate', reason: 'two cited items' })
+    expect(r.relevant?.reported_none).toBeUndefined()
+    expect(r.attribution).toEqual(ATTRIBUTION)
+  })
+  test('reported_none is kept only when true', () => {
+    expect(parseReport(JSON.stringify({ ...REPORT, relevant: { count: 0, surfaced_count: 6, reported_none: true } }))!.relevant?.reported_none).toBe(true)
+    expect(parseReport(JSON.stringify({ ...REPORT, relevant: { count: 0, surfaced_count: 6, reported_none: 'yes' } }))!.relevant?.reported_none).toBeUndefined()
+  })
+  test('malformed fields are tolerated, not fatal', () => {
+    const r = parseReport(
+      JSON.stringify({
+        ...REPORT,
+        relevant: { count: 1, surfaced_count: 'x', by_evidence: 'nope', items: [null, 7, { ref: 'x' }, { evidence: 'read' }, { ref: 'ok', evidence: 'judged', url: '' }], derived: { reason: 'r' } },
+        attribution: { would_attribute: 'yes', category: 7 },
+      }),
+    )!
+    expect(r.relevant).toEqual({ count: 1, surfaced_count: 0, items: [{ ref: 'ok', ref_type: undefined, title: undefined, url: undefined, evidence: 'judged', grade: '', detail: undefined, seq: undefined, commit: undefined, why: undefined }] })
+    expect(r.attribution).toBeUndefined()
+    expect(parseReport(JSON.stringify({ ...REPORT, relevant: { surfaced_count: 3 }, attribution: 'moderate' }))!.relevant).toBeUndefined()
+  })
+  test('an older report without items or attribution still parses', () => {
+    const r = parseReport(JSON.stringify(REPORT))!
+    expect(r.relevant).toEqual({ count: 2, surfaced_count: 6 })
+    expect(r.attribution).toBeUndefined()
+  })
+})
+
 describe('isOxCommand', () => {
   const cases: Array<[string, string, boolean]> = [
     ['plain', 'ox murmur list', true],

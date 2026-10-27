@@ -32,7 +32,8 @@ import {
 
 // Change a tag when its value's fields change: an atom declines what an
 // earlier version stored under another tag, which outlives a reload.
-const report = atom({ plugin: 'ox-cli-brief-pane', key: 'report' } as const, null as UsageReport | null, { shape: 'report-2' })
+// report-3: relevant.items and attribution joined the report.
+const report = atom({ plugin: 'ox-cli-brief-pane', key: 'report' } as const, null as UsageReport | null, { shape: 'report-3' })
 // status-2: follow now starts false (the pane opens at the top); a stored
 // status-1 value, follow true, is declined so it cannot pull the pane down.
 const status = atom({ plugin: 'ox-cli-brief-pane', key: 'status' } as const, INITIAL_STATUS, { shape: 'status-2' })

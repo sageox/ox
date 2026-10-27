@@ -2,7 +2,17 @@
 // ox command in a Bash call, and laying out the pane's lines. No `$` here, so
 // every function is unit-testable under `claude plugin test`.
 
-import type { UsageContextSource, UsageRecentCall, UsageReport, UsageStatus, UsageSurfaced } from '../types'
+import type {
+  UsageAttribution,
+  UsageContextSource,
+  UsageEvidenceCounts,
+  UsageRecentCall,
+  UsageRelevant,
+  UsageReport,
+  UsageStatus,
+  UsageSurfaced,
+  UsageUsedItem,
+} from '../types'
 
 export const PANE = 'ox-brief'
 export const PLUGIN = 'ox-cli-brief-pane'
@@ -46,7 +56,6 @@ export function parseReport(stdout: string): UsageReport | null {
   const trace = isRecord(raw.trace) ? raw.trace : {}
   const calls = isRecord(raw.calls) ? raw.calls : {}
   const context = isRecord(raw.context) ? raw.context : {}
-  const relevant = isRecord(raw.relevant) && typeof raw.relevant.count === 'number' ? raw.relevant : undefined
   const recent: UsageRecentCall[] = (Array.isArray(calls.recent) ? calls.recent : [])
     .filter(isRecord)
     .map(c => ({
@@ -90,7 +99,72 @@ export function parseReport(stdout: string): UsageReport | null {
     calls: { total: num(calls.total), failed: num(calls.failed), recent },
     context: { tokens: num(context.tokens), estimated: context.estimated === true, by_source: bySource },
     surfaced,
-    relevant: relevant === undefined ? undefined : { count: num(relevant.count), surfaced_count: num(relevant.surfaced_count) },
+    relevant: parseRelevant(raw.relevant),
+    attribution: parseAttribution(raw.attribution),
+  }
+}
+
+function optNum(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+}
+
+function parseUsedItem(v: unknown): UsageUsedItem | null {
+  if (!isRecord(v)) {
+    return null
+  }
+  const ref = str(v.ref)
+  const evidence = str(v.evidence)
+  if (ref === undefined || ref === '' || evidence === undefined || evidence === '') {
+    return null
+  }
+  return {
+    ref,
+    ref_type: str(v.ref_type),
+    title: str(v.title),
+    url: str(v.url) || undefined,
+    evidence,
+    grade: str(v.grade) ?? '',
+    detail: str(v.detail),
+    seq: optNum(v.seq),
+    commit: str(v.commit),
+    why: str(v.why),
+  }
+}
+
+// parseRelevant: the used-items slice, or undefined when there is no count.
+export function parseRelevant(v: unknown): UsageRelevant | undefined {
+  if (!isRecord(v) || typeof v.count !== 'number') {
+    return undefined
+  }
+  const out: UsageRelevant = { count: num(v.count), surfaced_count: num(v.surfaced_count) }
+  if (isRecord(v.by_evidence)) {
+    const b = v.by_evidence
+    const counts: UsageEvidenceCounts = { read: num(b.read), cited: num(b.cited), reported: num(b.reported), judged: num(b.judged) }
+    out.by_evidence = counts
+  }
+  if (Array.isArray(v.items)) {
+    out.items = v.items.map(parseUsedItem).filter((i): i is UsageUsedItem => i !== null)
+  }
+  if (v.reported_none === true) {
+    out.reported_none = true
+  }
+  if (isRecord(v.derived) && typeof v.derived.category === 'string') {
+    out.derived = { category: v.derived.category, reason: str(v.derived.reason) }
+  }
+  return out
+}
+
+// parseAttribution: the co-author verdict, or undefined when absent or unreadable.
+export function parseAttribution(v: unknown): UsageAttribution | undefined {
+  if (!isRecord(v) || typeof v.category !== 'string' || v.category === '') {
+    return undefined
+  }
+  return {
+    would_attribute: v.would_attribute === true,
+    category: v.category,
+    reason: str(v.reason) || undefined,
+    source: str(v.source) ?? '',
+    threshold: num(v.threshold),
   }
 }
 
