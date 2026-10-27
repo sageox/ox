@@ -285,18 +285,28 @@ func TestSendFrictionEvent_Suppressed(t *testing.T) {
 // --json into the old flag object while readers look up the new one through
 // cmd.Root().PersistentFlags(), a --json run leaves every cli printer in JSON
 // mode, and a later rootCmd.Execute() reuses the run's context, which the
-// entry point cancels on return.
+// entry point cancels on return. Cobra hands root's context to a subcommand
+// only while the subcommand's own is nil, so the executed command keeps that
+// context too: every command's is put back, and one added since goes back to nil.
 func restoreRootCmdState(t *testing.T) {
 	t.Helper()
 	flags, persistent := rootCmd.Flags(), rootCmd.PersistentFlags()
-	rootCtx := rootCmd.Context()
+	contexts := map[*cobra.Command]context.Context{}
+	var eachCommand func(*cobra.Command, func(*cobra.Command))
+	eachCommand = func(cmd *cobra.Command, visit func(*cobra.Command)) {
+		visit(cmd)
+		for _, child := range cmd.Commands() {
+			eachCommand(child, visit)
+		}
+	}
+	eachCommand(rootCmd, func(cmd *cobra.Command) { contexts[cmd] = cmd.Context() })
 	savedCtx, savedPreRun := cliCtx, preRunReached
 	t.Cleanup(func() {
 		rootCmd.ResetFlags()
 		rootCmd.Flags().AddFlagSet(flags)
 		rootCmd.PersistentFlags().AddFlagSet(persistent)
 		rootCmd.SetArgs(nil)
-		rootCmd.SetContext(rootCtx)
+		eachCommand(rootCmd, func(cmd *cobra.Command) { cmd.SetContext(contexts[cmd]) })
 		cliCtx, preRunReached = savedCtx, savedPreRun
 		resetCLIOutputModes()
 	})
@@ -304,35 +314,30 @@ func restoreRootCmdState(t *testing.T) {
 
 // TestRestoreRootCmdState_NextCommandStartsWithALiveContext runs the entry
 // point with a context that is canceled once it returns, as every
-// executeWithSignalContext run's is, then runs another command in process.
-// Failure prevented: cobra keeps the context root last executed with and a
-// later rootCmd.Execute() reuses it, so the next in-process command started
-// already canceled.
+// executeWithSignalContext run's is, then runs the same command in process.
+// Failure prevented: cobra keeps the context root last executed with, and the
+// executed command keeps the one root handed it, so the next in-process run of
+// that command started already canceled.
 func TestRestoreRootCmdState_NextCommandStartsWithALiveContext(t *testing.T) {
-	probe := func(use string) *cobra.Command {
-		cmd := &cobra.Command{
-			Use:    use,
-			Hidden: true,
-			RunE:   func(cmd *cobra.Command, _ []string) error { return cmd.Context().Err() },
-		}
-		rootCmd.AddCommand(cmd)
-		t.Cleanup(func() { rootCmd.RemoveCommand(cmd) })
-		return cmd
+	probe := &cobra.Command{
+		Use:    "ctx-probe",
+		Hidden: true,
+		RunE:   func(cmd *cobra.Command, _ []string) error { return cmd.Context().Err() },
 	}
-	probe("ctx-probe-entry")
-	probe("ctx-probe-next")
+	rootCmd.AddCommand(probe)
+	t.Cleanup(func() { rootCmd.RemoveCommand(probe) })
 
 	t.Run("entry point", func(t *testing.T) {
 		restoreRootCmdState(t)
 		savedCfg := cfg
 		t.Cleanup(func() { cfg = savedCfg })
 		ctx, cancel := context.WithCancel(context.Background())
-		require.Equal(t, 0, executeWithFrictionRecovery(ctx, []string{"ctx-probe-entry"}, 0))
+		require.Equal(t, 0, executeWithFrictionRecovery(ctx, []string{"ctx-probe"}, 0))
 		cancel()
 	})
 
-	_, err := executeRootCLI(t, "ctx-probe-next")
-	require.NoError(t, err, "the next command inherited the entry point's canceled context")
+	_, err := executeRootCLI(t, "ctx-probe")
+	require.NoError(t, err, "the next run inherited the entry point's canceled context")
 }
 
 // panickingFrictionAdapter panics from inside frictionax's Handle, the way
