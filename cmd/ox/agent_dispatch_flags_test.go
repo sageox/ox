@@ -148,26 +148,37 @@ func resetCLIOutputModes() {
 
 // TestExecuteRootCLI_RestoresCLIOutputModes pins that a run through
 // executeRootCLI leaves none of the output modes PersistentPreRunE sets
-// (--json, --no-input, --yes) behind for the tests that run after it.
+// (--json, --no-interactive, --no-input, --yes, update-notice machine output)
+// behind for the tests that run after it.
 // Failure prevented: one `--json` root run silently drops every cli hint for
 // the rest of the package, so a human-render test passes or fails depending on
 // which tests ran first (TestRenderKBQueryResult_HitHintOnlyWithHits).
 func TestExecuteRootCLI_RestoresCLIOutputModes(t *testing.T) {
+	// Under go test stderr is not a terminal, so Suppressed() is always true.
+	// Pin the TTY check so it reports the machine-output mode alone.
+	savedStderrIsTTY := updatenotice.StderrIsTTY
+	updatenotice.StderrIsTTY = func() bool { return true }
+	t.Cleanup(func() { updatenotice.StderrIsTTY = savedStderrIsTTY })
+
 	hintPrints := func() bool {
 		var buf bytes.Buffer
 		cli.PrintHintTo(&buf, "hint")
 		return buf.Len() > 0
 	}
 	t.Run("run with output-mode flags", func(t *testing.T) {
-		_, err := executeRootCLI(t, "version", "--json", "--no-input", "--yes")
+		_, err := executeRootCLI(t, "version", "--json", "--no-interactive", "--no-input", "--yes")
 		require.NoError(t, err)
 		// The run must really set the modes, or the checks below pass
 		// against state nothing ever changed.
 		require.False(t, hintPrints(), "--json did not reach cli's JSON mode")
+		require.True(t, updatenotice.Suppressed(), "--json did not reach update-notice machine output")
+		require.True(t, cli.NoInteractive(), "--no-interactive did not reach cli")
 		require.True(t, cli.NoInput(), "--no-input did not reach cli")
 		require.True(t, cli.AssumeYes(), "--yes did not reach cli")
 	})
 	assert.True(t, hintPrints(), "JSON mode leaked past executeRootCLI; later human-render tests lose their hints")
+	assert.False(t, updatenotice.Suppressed(), "update-notice machine output leaked past executeRootCLI")
+	assert.False(t, cli.NoInteractive(), "--no-interactive leaked past executeRootCLI")
 	assert.False(t, cli.NoInput(), "--no-input leaked past executeRootCLI")
 	assert.False(t, cli.AssumeYes(), "--yes leaked past executeRootCLI")
 }
