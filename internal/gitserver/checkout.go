@@ -191,7 +191,15 @@ func cloneRepo(ctx context.Context, repoURL, path string, creds *GitCredentials,
 	if opts != nil && opts.Output != nil {
 		cmd.Stderr = opts.Output
 	}
+	_, targetErr := os.Lstat(path)
 	if err := cmd.Run(); err != nil {
+		// SIGKILL prevents Git's cleanup. Remove only a newly created target;
+		// a pre-existing directory or symlink belongs to the caller.
+		if errors.Is(targetErr, os.ErrNotExist) {
+			if cleanupErr := os.RemoveAll(path); cleanupErr != nil {
+				return fmt.Errorf("%w: %w; remove incomplete checkout: %w", ErrCloneFailed, err, cleanupErr)
+			}
+		}
 		// sanitize args to prevent credential leaks in error messages
 		safeArgs := make([]string, len(args))
 		copy(safeArgs, args)
