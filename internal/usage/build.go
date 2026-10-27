@@ -35,7 +35,8 @@ type Input struct {
 	ProducedCommits int
 
 	// Endpoint is the project's SageOx web endpoint (https://sageox.ai). When
-	// set, surfaced discussions and plans with an opaque id get a web link.
+	// set, surfaced and used discussions, sessions and plans with an opaque id
+	// get a web link (see webURL).
 	Endpoint string
 
 	// ScoreThreshold is the project's attribution threshold (the minimum
@@ -93,6 +94,7 @@ func Build(in Input) Report {
 	rollup := contextuse.Build(in.Events, all, in.ProducedCommits, in.AllowJudged)
 	if r.Trace.Available {
 		r.Relevant = buildRelevant(rollup, r.Surfaced, all)
+		fillItemURLs(r.Relevant.Items, in.Endpoint)
 		r.Relevant.ReportedNone = rollup.ReportedNone && r.Relevant.Count == 0 && len(r.Used.SelfReported) == 0
 	}
 	r.Attribution = buildAttribution(in, rollup)
@@ -469,25 +471,44 @@ func nextActions(r Report) []NextAction {
 	return out
 }
 
-// fillURLs gives a surfaced discussion or plan its web link when the trace
-// did not carry one and its ref is an opaque id the web app resolves. Slugs,
-// docs and paths never get a guessed link.
+// fillURLs gives a surfaced item its web link when the trace did not carry
+// one (see webURL).
 func fillURLs(surfaced []Surfaced, endpoint string) {
-	if endpoint == "" {
-		return
-	}
 	for i := range surfaced {
-		s := &surfaced[i]
-		if s.URL != "" {
-			continue
-		}
-		switch s.RefType {
-		case "discussion":
-			if p := weblink.IDTypePrefix(s.Ref); p == "cnv_" || p == "rec_" {
-				s.URL = weblink.Conversation(endpoint, s.Ref)
-			}
-		case "plan":
-			s.URL = weblink.Plan(endpoint, s.Ref)
+		if surfaced[i].URL == "" {
+			surfaced[i].URL = webURL(surfaced[i].RefType, surfaced[i].Ref, endpoint)
 		}
 	}
+}
+
+// fillItemURLs does the same for used items the surfaced join left unlinked.
+func fillItemURLs(items []RelevantItem, endpoint string) {
+	for i := range items {
+		if items[i].URL == "" {
+			items[i].URL = webURL(items[i].RefType, items[i].Ref, endpoint)
+		}
+	}
+}
+
+// webURL is the one rule for which refs get a sageox.ai link: discussions
+// with an opaque cnv_/rec_ id, sessions with a ses_ id (both /c/<id>), and
+// pln_ plans. Slugs, docs, paths and murmurs (no web page) never get a
+// guessed link; "" when the endpoint is unknown.
+func webURL(refType, ref, endpoint string) string {
+	if endpoint == "" {
+		return ""
+	}
+	switch refType {
+	case "discussion":
+		if p := weblink.IDTypePrefix(ref); p == "cnv_" || p == "rec_" {
+			return weblink.Conversation(endpoint, ref)
+		}
+	case "session":
+		if weblink.IDTypePrefix(ref) == "ses_" {
+			return weblink.Conversation(endpoint, ref)
+		}
+	case "plan":
+		return weblink.Plan(endpoint, ref)
+	}
+	return ""
 }

@@ -119,7 +119,7 @@ type PrimeBudget struct {
 
 // Surfaced is one team item put in front of the model by name. Title, URL,
 // FromName, Seq and Used are optional: they are rendered when the trace
-// carries them, and URL is derived from an opaque discussion or plan id when
+// carries them, and URL is derived from an opaque discussion, session or plan id when
 // Input.Endpoint is known — never guessed for a slug, doc or path.
 type Surfaced struct {
 	Ref      string    `json:"ref"`

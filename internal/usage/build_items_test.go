@@ -97,3 +97,68 @@ func TestBuild_RelevantItemWhySurvivesStrongerEvidence(t *testing.T) {
 	assert.Equal(t, "read", r.Relevant.Items[0].Detail)
 	assert.Equal(t, "followed step 2", r.Relevant.Items[0].Why)
 }
+
+// TestWebURL is the one link rule both surfaced and used items share.
+// Failure prevented: a murmur, doc or slug renders as a plausible sageox.ai
+// link that 404s, or the two lists disagree on what is linkable.
+func TestWebURL(t *testing.T) {
+	const ep = "https://sageox.ai"
+	tests := []struct {
+		name, refType, ref, endpoint, want string
+	}{
+		{"cnv discussion", "discussion", testCnv, ep, ep + "/c/" + testCnv},
+		{"rec discussion", "discussion", "rec_abc", ep, ep + "/c/rec_abc"},
+		{"ses session", "session", "ses_abc", ep, ep + "/c/ses_abc"},
+		{"pln plan", "plan", "pln_4d8e2f", ep, ep + "/plan/pln_4d8e2f"},
+		{"session name is not guessed", "session", "2026-10-01-ryan-Ox1", ep, ""},
+		{"cnv id under session is not guessed", "session", "cnv_abc", ep, ""},
+		{"murmur has no page", "murmur", "mur_x", ep, ""},
+		{"doc has no page", "doc", "MEMORY.md", ep, ""},
+		{"untyped ref", "", "cnv_abc", ep, ""},
+		{"no endpoint", "plan", "pln_4d8e2f", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, webURL(tt.refType, tt.ref, tt.endpoint))
+		})
+	}
+}
+
+// TestBuild_RelevantItemURLs links used items that were never surfaced (so
+// the surfaced join had no URL to copy), and never overwrites a carried URL.
+func TestBuild_RelevantItemURLs(t *testing.T) {
+	const ep = "https://sageox.ai"
+	r := Build(Input{TraceSource: TraceSourceSession, Endpoint: ep, Events: []contexttrace.Event{
+		used(contexttrace.EvidenceRead, testCnv, "discussion", 1),
+		used(contexttrace.EvidenceRead, "rec_abc", "discussion", 2),
+		used(contexttrace.EvidenceReported, "pln_q", "plan", 3),
+		used(contexttrace.EvidenceRead, "ses_abc", "session", 4),
+		used(contexttrace.EvidenceReported, "mur_x", "murmur", 5),
+		used(contexttrace.EvidenceRead, "MEMORY.md", "doc", 6),
+	}})
+	var urls []string
+	for _, it := range r.Relevant.Items {
+		urls = append(urls, it.URL)
+	}
+	assert.Equal(t, []string{ep + "/c/" + testCnv, ep + "/c/rec_abc", ep + "/plan/pln_q", ep + "/c/ses_abc", "", ""}, urls)
+
+	items := []RelevantItem{{Ref: "pln_q", RefType: "plan", URL: "https://test.sageox.ai/plan/pln_q"}}
+	fillItemURLs(items, ep)
+	assert.Equal(t, "https://test.sageox.ai/plan/pln_q", items[0].URL, "an existing url is never overwritten")
+
+	none := Build(Input{TraceSource: TraceSourceSession, Events: []contexttrace.Event{used(contexttrace.EvidenceRead, "pln_q", "plan", 1)}})
+	assert.Empty(t, none.Relevant.Items[0].URL, "no endpoint, no link")
+}
+
+// TestBuild_RelevantItemKeepsSurfacedURL: a URL the trace carried on the
+// surfaced item wins over a derived one.
+func TestBuild_RelevantItemKeepsSurfacedURL(t *testing.T) {
+	ev := invoked("searched team memory", "query", 10, 1)
+	ev.Query, ev.RefType = testCnv, "discussion"
+	r := Build(Input{TraceSource: TraceSourceSession, Endpoint: "https://test.sageox.ai", Events: []contexttrace.Event{
+		ev, used(contexttrace.EvidenceCited, testCnv, "discussion", 2),
+	}})
+	require.Len(t, r.Relevant.Items, 1)
+	assert.Equal(t, r.Surfaced[0].URL, r.Relevant.Items[0].URL)
+	assert.Equal(t, "https://test.sageox.ai/c/"+testCnv, r.Relevant.Items[0].URL)
+}
