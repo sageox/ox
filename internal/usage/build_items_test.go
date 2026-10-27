@@ -162,3 +162,20 @@ func TestBuild_RelevantItemKeepsSurfacedURL(t *testing.T) {
 	assert.Equal(t, r.Surfaced[0].URL, r.Relevant.Items[0].URL)
 	assert.Equal(t, "https://test.sageox.ai/c/"+testCnv, r.Relevant.Items[0].URL)
 }
+
+// TestBuild_AllowJudged: judged evidence is always listed but reaches the
+// derived category only when allowed (contextuse.Derive: judged-only → minor).
+func TestBuild_AllowJudged(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		r := Build(Input{TraceSource: TraceSourceSession, AllowJudged: allow, Events: []contexttrace.Event{
+			used(contexttrace.EvidenceJudged, "mur_j", "murmur", 2),
+		}})
+		require.Len(t, r.Relevant.Items, 1)
+		want := "none"
+		if allow {
+			want = "minor"
+		}
+		assert.Equal(t, want, r.Relevant.Derived.Category, "allow=%v", allow)
+		assert.Equal(t, want, r.Attribution.Category, "allow=%v", allow)
+	}
+}

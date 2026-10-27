@@ -101,9 +101,7 @@ func runUsage(cmd *cobra.Command, _ []string) error {
 	in.Endpoint = endpoint.GetForProject(projectRoot)
 	in.Now = time.Now()
 	in.Width = width
-	if cfg, cfgErr := config.LoadProjectConfig(projectRoot); cfgErr == nil {
-		in.ScoreThreshold = resolveProjectAttribution(cfg).ScoreThreshold // AllowJudged stays false until a config knob exists
-	}
+	in.ScoreThreshold, in.AllowJudged = usageAttributionSettings(projectRoot)
 	if cmd.Flags().Changed("recent") {
 		recent, _ := cmd.Flags().GetInt("recent")
 		switch {
@@ -139,6 +137,7 @@ func runUsageRollup(cmd *cobra.Command, projectRoot string, team, jsonOut bool, 
 		LedgerPath: ledgerPath, Since: since, Until: time.Now(),
 		Window: window, Limit: limit, Width: width,
 	}
+	in.ScoreThreshold, in.AllowJudged = usageAttributionSettings(projectRoot)
 	if team {
 		r := usage.BuildTeam(in)
 		return writeUsageReport(cmd.OutOrStdout(), jsonOut, r, func() string { return usage.HumanTeam(r, width) })
@@ -146,6 +145,18 @@ func runUsageRollup(cmd *cobra.Command, projectRoot string, team, jsonOut bool, 
 	in.Identity = currentRecapIdentity(projectRoot)
 	r := usage.BuildMe(in)
 	return writeUsageReport(cmd.OutOrStdout(), jsonOut, r, func() string { return usage.HumanMe(r, width) })
+}
+
+// usageAttributionSettings is the project's attribution threshold and whether
+// judged evidence may drive the derived category. An unreadable config yields
+// zero values: the usage package's defaults (0.5, judged excluded).
+func usageAttributionSettings(projectRoot string) (threshold float64, allowJudged bool) {
+	cfg, err := config.LoadProjectConfig(projectRoot)
+	if err != nil {
+		return 0, false
+	}
+	a := resolveProjectAttribution(cfg)
+	return a.ScoreThreshold, a.AllowJudgedEvidence
 }
 
 // writeUsageReport prints the JSON payload or the human text and charges the

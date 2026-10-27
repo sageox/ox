@@ -134,6 +134,44 @@ func TestBrief_EndpointFromProject(t *testing.T) {
 	assert.Contains(t, r.Display, "https://test.sageox.ai/c/"+cnv)
 }
 
+// TestBrief_AllowJudgedEvidenceFromConfig: the project's
+// attribution.allow_judged_evidence reaches the real `ox brief --json`. A
+// judged-only session derives "minor" when allowed and "none" otherwise; the
+// judged item is listed either way. Failure prevented: the knob is set but the
+// brief ignores it, so it disagrees with what the team configured.
+func TestBrief_AllowJudgedEvidenceFromConfig(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{"knob unset", `{"config_version":"2","repo_id":"repo_usage_trace"}`, "none"},
+		{"knob false", `{"config_version":"2","repo_id":"repo_usage_trace","attribution":{"allow_judged_evidence":false}}`, "none"},
+		{"knob true", `{"config_version":"2","repo_id":"repo_usage_trace","attribution":{"allow_judged_evidence":true}}`, "minor"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := usageTraceEnv(t, nil)
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			require.NoError(t, os.WriteFile(filepath.Join(root, ".sageox", "config.json"), []byte(tt.config), 0o644))
+			state := startUsageRecording(t, root)
+			require.NoError(t, contexttrace.NewWriter(state.SessionPath).Append(contexttrace.Event{
+				Type: contexttrace.EventUsed, Evidence: contexttrace.EvidenceJudged, Mechanism: contexttrace.MechanismJudge,
+				Ref: "mur_judged", RefType: "murmur", Seq: 3,
+			}))
+
+			r := runOxUsageJSON(t)
+
+			require.NotNil(t, r.Relevant)
+			require.Len(t, r.Relevant.Items, 1, "judged uses are always listed")
+			assert.Equal(t, "judged", r.Relevant.Items[0].Detail)
+			assert.Equal(t, tt.want, r.Relevant.Derived.Category)
+			assert.Equal(t, tt.want, r.Attribution.Category)
+			assert.False(t, r.Attribution.WouldAttribute, "minor never clears the default threshold")
+		})
+	}
+}
+
 // TestUsage_NoTraceSaysWhy: a coworker with nothing recorded gets an honest
 // "no trace" with a reason, never an error or an empty success.
 func TestUsage_NoTraceSaysWhy(t *testing.T) {
