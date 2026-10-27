@@ -295,3 +295,117 @@ func mkdirAll(t *testing.T, dir string) string {
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	return dir
 }
+
+// TestResolveSurfacedRef_AnyName: an item surfaced under one name resolves
+// from any other name it goes by — its rec_ twin, a /c/ link, a citation, a
+// plan slug or dated directory — and counts once for prefix ambiguity.
+// Failure prevented: an AI coworker reports the link or slug it saw and gets
+// unknown_ref, so a real use of team context is never recorded.
+func TestResolveSurfacedRef_AnyName(t *testing.T) {
+	const (
+		cnv = "cnv_019ff2f5-2079-7be1-b05e-8caad2772e61"
+		rec = "rec_019ff2f5-2079-7be1-b05e-8caad2772e61"
+	)
+	surfaced := []contextuse.SurfacedRef{
+		{Ref: cnv, RefType: "discussion", Title: "Standup", Aliases: []string{rec}},
+		{Ref: "pln_01a1", RefType: "plan", Title: "Add cache", Aliases: []string{"2026-10-01-cache", "2026-10-01-cache-layer"}},
+		{Ref: "rec_019ff370-e195-7d1c-a727-39a1a85823f2", RefType: "discussion", Title: "Legacy"}, // surfaced under its rec_ id only
+	}
+	tests := []struct {
+		name     string
+		ref      string
+		wantRef  string
+		wantCode string
+	}{
+		{name: "canonical id", ref: cnv, wantRef: cnv},
+		{name: "rec_ twin", ref: rec, wantRef: cnv},
+		{name: "upper-case rec_ twin", ref: strings.ToUpper(rec[:4]) + rec[4:], wantRef: cnv},
+		{name: "/c/ link", ref: "https://sageox.ai/c/" + rec, wantRef: cnv},
+		{name: "recordings link", ref: "https://test.sageox.ai/team/t1/media/recordings/" + rec + "/", wantRef: cnv},
+		{name: "citation URI", ref: "sageox://" + cnv + "/clyr_019ff2f5-deb5-77d3-b84b-04db14c601ca@2#cue=5-6", wantRef: cnv},
+		{name: "cnv_ of an item surfaced as rec_", ref: "cnv_019ff370-e195-7d1c-a727-39a1a85823f2", wantRef: "rec_019ff370-e195-7d1c-a727-39a1a85823f2"},
+		{name: "plan slug alias", ref: "2026-10-01-cache", wantRef: "pln_01a1"},
+		{name: "plan dated directory alias", ref: "2026-10-01-cache-layer", wantRef: "pln_01a1"},
+		{name: "plan directory path", ref: "/ledger/plans/2026-10-01-cache-layer", wantRef: "pln_01a1"},
+		{name: "unique alias prefix", ref: "2026-10-01-cache-l", wantRef: "pln_01a1"},
+		{name: "two names of one item are not ambiguous", ref: "2026-10-01-ca", wantRef: "pln_01a1"},
+		{name: "rec_ prefix of an aliased item", ref: "rec_019ff2f5", wantRef: cnv},
+		{name: "prefix shared by two items is ambiguous", ref: "rec_019ff", wantCode: contextErrAmbiguousRef},
+		{name: "title", ref: "add cache", wantRef: "pln_01a1"},
+		{name: "unknown", ref: "rec_019f0000-0000-7000-8000-0000000000aa", wantCode: contextErrUnknownRef},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, code, _ := resolveSurfacedRef(tt.ref, "", surfaced)
+			assert.Equal(t, tt.wantCode, code)
+			assert.Equal(t, tt.wantRef, got.Ref)
+		})
+	}
+}
+
+// TestAgentContextUsed_AnySurfacedName drives `context used` with the names an
+// AI coworker actually has in hand — a slug, a /c/ link, a rec_ id — and checks
+// the used event names the surfaced item canonically and carries its aliases,
+// so `ox brief` attaches the use to the item that was surfaced.
+func TestAgentContextUsed_AnySurfacedName(t *testing.T) {
+	const (
+		cnv = "cnv_019ff2f5-2079-7be1-b05e-8caad2772e61"
+		rec = "rec_019ff2f5-2079-7be1-b05e-8caad2772e61"
+	)
+	tests := []struct {
+		name        string
+		provided    contexttrace.Event
+		arg         string
+		wantRef     string
+		wantAliases []string
+	}{
+		{
+			name:     "plan by slug",
+			provided: contexttrace.Event{Ref: "pln_01a1", RefType: "plan", Title: "Add cache", Aliases: []string{"cache-layer", "2026-10-01-cache-layer"}},
+			arg:      "cache-layer", wantRef: "pln_01a1", wantAliases: []string{"cache-layer", "2026-10-01-cache-layer"},
+		},
+		{
+			name:     "discussion by /c/ link",
+			provided: contexttrace.Event{Ref: cnv, RefType: "discussion", Title: "Standup", Aliases: []string{rec}},
+			arg:      "https://sageox.ai/c/" + rec, wantRef: cnv, wantAliases: []string{rec},
+		},
+		{
+			name:     "discussion surfaced as rec_ is recorded canonically",
+			provided: contexttrace.Event{Ref: rec, RefType: "discussion", Title: "Standup"},
+			arg:      rec, wantRef: cnv, wantAliases: []string{rec},
+		},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projectRoot := setupSessionTestProject(t)
+			agentID := fmt.Sprintf("OxCn%02d", i)
+			state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{AgentID: agentID, AdapterName: "claude-code"})
+			require.NoError(t, err)
+			tt.provided.Type, tt.provided.Source, tt.provided.Mechanism, tt.provided.Seq = contexttrace.EventProvided, contexttrace.SourceOnDemand, contexttrace.MechanismRetrieval, 2
+			require.NoError(t, contexttrace.NewWriter(state.SessionPath).Append(tt.provided))
+
+			var buf bytes.Buffer
+			require.NoError(t, runAgentContextAt(&buf, projectRoot, agentID, []string{"used", tt.arg, "--why", "followed it"}), buf.String())
+			var out contextUsedOutput
+			require.NoError(t, json.Unmarshal(buf.Bytes(), &out))
+			assert.Equal(t, tt.wantRef, out.Ref)
+
+			evs, err := contexttrace.ReadEvents(filepath.Join(state.SessionPath, contexttrace.FileName))
+			require.NoError(t, err)
+			ev := evs[len(evs)-1]
+			require.Equal(t, contexttrace.EventUsed, ev.Type)
+			assert.Equal(t, tt.wantRef, ev.Ref)
+			assert.Equal(t, tt.wantAliases, ev.Aliases)
+			assert.Equal(t, tt.provided.Title, ev.Title)
+			assert.Equal(t, 2, ev.SurfacedSeq)
+
+			// list joins the use back onto the surfaced item.
+			buf.Reset()
+			require.NoError(t, runAgentContextAt(&buf, projectRoot, agentID, []string{"list"}))
+			var list contextListOutput
+			require.NoError(t, json.Unmarshal(buf.Bytes(), &list))
+			require.Len(t, list.Surfaced, 1)
+			assert.Equal(t, contexttrace.EvidenceReported, list.Surfaced[0].Evidence)
+		})
+	}
+}

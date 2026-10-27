@@ -250,14 +250,17 @@ func runAgentContextUsed(w io.Writer, projectRoot, agentID string, args contextU
 		}
 		why := capContextWhy(args.why)
 		ev.Evidence = contexttrace.EvidenceReported
-		ev.Ref = match.Ref
+		// The use names the surfaced item canonically and carries every other
+		// name it went by, so it attaches whichever one a reader keys on.
+		ev.Ref = contextuse.CanonicalRef(match.RefType, match.Ref)
+		ev.Aliases = hitAliases(ev.Ref, append([]string{match.Ref}, match.Aliases...)...)
 		ev.RefType = refType
 		ev.Title = match.Title
 		ev.URL = match.URL
 		ev.Decision = why
 		ev.SurfacedSeq = match.Seq
 		out.Evidence = contexttrace.EvidenceReported
-		out.Ref, out.RefType, out.Title, out.URL = match.Ref, refType, match.Title, match.URL
+		out.Ref, out.RefType, out.Title, out.URL = ev.Ref, refType, match.Title, match.URL
 		out.Why = why
 		out.SurfacedSeq = match.Seq
 		out.Guidance = contextUsedGuidance(agentID)
@@ -295,9 +298,13 @@ func runAgentContextList(w io.Writer, projectRoot, agentID string) error {
 }
 
 // resolveSurfacedRef matches a ref an AI coworker typed against what was
-// surfaced: exact, then case-insensitive ref or basename, then title, then a
-// unique case-insensitive prefix. A non-empty refType narrows the candidates.
-// On failure it returns an error code and message instead of a match.
+// surfaced, through every name an item went by — its ref and its aliases, raw
+// and canonical — so a rec_ id, a /c/ link or a citation finds the cnv_ it
+// names and a slug or dated directory finds its plan: exact ref, then
+// canonical ref, then alias, then case-insensitive basename, then title, then
+// a unique case-insensitive prefix of any name (one item counts once however
+// many of its names match). A non-empty refType narrows the candidates. On
+// failure it returns an error code and message instead of a match.
 func resolveSurfacedRef(ref, refType string, surfaced []contextuse.SurfacedRef) (contextuse.SurfacedRef, string, string) {
 	candidates := surfaced
 	if refType != "" {
@@ -313,10 +320,24 @@ func resolveSurfacedRef(ref, refType string, surfaced []contextuse.SurfacedRef) 
 			return s, "", ""
 		}
 	}
+	if canon := contextuse.CanonicalRef(refType, ref); canon != "" {
+		for _, s := range candidates {
+			if strings.EqualFold(contextuse.CanonicalRef(s.RefType, s.Ref), canon) {
+				return s, "", ""
+			}
+		}
+	}
+	for _, s := range candidates {
+		if s.Matches(ref) {
+			return s, "", ""
+		}
+	}
 	base := refBase(ref)
 	for _, s := range candidates {
-		if strings.EqualFold(s.Ref, ref) || strings.EqualFold(refBase(s.Ref), base) {
-			return s, "", ""
+		for _, n := range surfacedNames(s) {
+			if strings.EqualFold(refBase(n), base) {
+				return s, "", ""
+			}
 		}
 	}
 	for _, s := range candidates {
@@ -327,8 +348,11 @@ func resolveSurfacedRef(ref, refType string, surfaced []contextuse.SurfacedRef) 
 	var prefixed []contextuse.SurfacedRef
 	lower := strings.ToLower(ref)
 	for _, s := range candidates {
-		if strings.HasPrefix(strings.ToLower(s.Ref), lower) {
-			prefixed = append(prefixed, s)
+		for _, n := range surfacedNames(s) {
+			if strings.HasPrefix(strings.ToLower(n), lower) {
+				prefixed = append(prefixed, s)
+				break
+			}
 		}
 	}
 	switch len(prefixed) {
@@ -343,6 +367,12 @@ func resolveSurfacedRef(ref, refType string, surfaced []contextuse.SurfacedRef) 
 		}
 		return contextuse.SurfacedRef{}, contextErrAmbiguousRef, fmt.Sprintf("%q matches %d surfaced refs: %s", ref, len(prefixed), strings.Join(names, ", "))
 	}
+}
+
+// surfacedNames is every name a surfaced item went by: its ref and aliases as
+// surfaced, then their canonical forms.
+func surfacedNames(s contextuse.SurfacedRef) []string {
+	return append(append([]string{s.Ref}, s.Aliases...), s.Names()...)
 }
 
 func refBase(ref string) string {
@@ -367,7 +397,7 @@ func surfacedJSON(surfaced []contextuse.SurfacedRef, used []contextuse.UseRef) [
 			URL: s.URL, FromName: s.FromName, Seq: s.Seq,
 		}
 		for _, u := range used {
-			if strings.EqualFold(u.Ref, s.Ref) || strings.EqualFold(refBase(u.Ref), refBase(s.Ref)) {
+			if s.Matches(u.Ref) || strings.EqualFold(refBase(u.Ref), refBase(s.Ref)) {
 				item.Evidence, item.Grade = u.Evidence, u.Grade
 				break
 			}
@@ -384,7 +414,7 @@ func writeContextRefError(w io.Writer, agentID, code, msg string, surfaced []con
 		AgentID:  agentID,
 		Error:    contextErrorDetail{Code: code, Message: msg},
 		Surfaced: surfacedJSON(surfaced, nil),
-		Guidance: fmt.Sprintf("Nothing was recorded. Pick one of surfaced[] (by ref, file name, title, or a unique prefix) or run `ox agent %s context list`. Never invent a ref; if nothing surfaced changed your work, record nothing.", agentID),
+		Guidance: fmt.Sprintf("Nothing was recorded. Pick one of surfaced[] (by ref, link, slug, file name, title, or a unique prefix) or run `ox agent %s context list`. Never invent a ref; if nothing surfaced changed your work, record nothing.", agentID),
 	}
 	if err := printContextJSON(w, out); err != nil {
 		return err
