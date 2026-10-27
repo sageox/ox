@@ -6,7 +6,11 @@
 // trace it reads, it handles refs only, never content (ADR-027).
 package contextuse
 
-import "github.com/sageox/ox/internal/session/contexttrace"
+import (
+	"strings"
+
+	"github.com/sageox/ox/internal/session/contexttrace"
+)
 
 // Via values name the channel that surfaced a ref.
 const (
@@ -25,6 +29,10 @@ type SurfacedRef struct {
 	URL      string `json:"url,omitempty"`
 	FromName string `json:"from_name,omitempty"`
 	Seq      int    `json:"seq,omitempty"`
+	// Aliases are other names for the same item (see CanonicalRef and
+	// Names). When an item is surfaced more than once, the aliases of every
+	// delivery are unioned here.
+	Aliases []string `json:"aliases,omitempty"`
 }
 
 // SurfacedOptions tunes Surfaced.
@@ -37,8 +45,9 @@ type SurfacedOptions struct {
 }
 
 // Surfaced lists every ref surfaced by the trace, in trace order, deduped by
-// (RefType, Ref) keeping the first occurrence. It is uncapped; display caps
-// are the caller's concern.
+// RefType and item identity (any shared canonical name, ignoring case) keeping
+// the first occurrence; later deliveries of the same item only add their
+// names to its Aliases. It is uncapped; display caps are the caller's concern.
 func Surfaced(events []contexttrace.Event) []SurfacedRef {
 	return SurfacedWith(events, SurfacedOptions{})
 }
@@ -50,16 +59,32 @@ func SurfacedWith(events []contexttrace.Event, opts SurfacedOptions) []SurfacedR
 		isRetrieval = func(contexttrace.Event) bool { return true }
 	}
 	out := []SurfacedRef{}
-	seen := map[string]bool{}
+	index := map[string]int{} // RefType + lowercased canonical name -> out index
+	key := func(refType, name string) string { return refType + "\x00" + strings.ToLower(name) }
 	add := func(s SurfacedRef) {
-		if s.Ref == "" {
+		if strings.TrimSpace(s.Ref) == "" {
 			return
 		}
-		key := s.RefType + "\x00" + s.Ref
-		if seen[key] {
+		names := s.Names()
+		for _, n := range names {
+			i, ok := index[key(s.RefType, n)]
+			if !ok {
+				continue
+			}
+			// Same item again: keep the first delivery, learn its new names.
+			for _, raw := range append([]string{s.Ref}, s.Aliases...) {
+				if CanonicalRef(s.RefType, raw) != "" && !out[i].Matches(raw) {
+					out[i].Aliases = append(out[i].Aliases, raw)
+				}
+			}
+			for _, m := range names {
+				index[key(s.RefType, m)] = i
+			}
 			return
 		}
-		seen[key] = true
+		for _, n := range names {
+			index[key(s.RefType, n)] = len(out)
+		}
 		out = append(out, s)
 	}
 	for _, ev := range events {
@@ -73,23 +98,28 @@ func SurfacedWith(events []contexttrace.Event, opts SurfacedOptions) []SurfacedR
 			if from == "" {
 				from = ev.From
 			}
-			add(SurfacedRef{Ref: ref, RefType: "murmur", Via: ViaWhisper, Title: ev.Title, URL: ev.URL, FromName: from, Seq: ev.Seq})
+			add(SurfacedRef{Ref: ref, RefType: "murmur", Via: ViaWhisper, Title: ev.Title, URL: ev.URL, FromName: from, Seq: ev.Seq, Aliases: aliasesOf(ev)})
 		case ev.Type == contexttrace.EventProvided && ev.Source == contexttrace.SourceLocalRecall && ev.Ref != "":
-			add(SurfacedRef{Ref: ev.Ref, RefType: orDefault(ev.RefType, "session"), Via: ViaRecall, Title: ev.Title, URL: ev.URL, Seq: ev.Seq})
+			add(SurfacedRef{Ref: ev.Ref, RefType: orDefault(ev.RefType, "session"), Via: ViaRecall, Title: ev.Title, URL: ev.URL, Seq: ev.Seq, Aliases: aliasesOf(ev)})
 		case ev.Type == contexttrace.EventProvided && ev.Mechanism == contexttrace.MechanismRetrieval && ev.Ref != "":
-			add(SurfacedRef{Ref: ev.Ref, RefType: orDefault(ev.RefType, "doc"), Via: ViaRetrieval, Title: ev.Title, URL: ev.URL, Seq: ev.Seq})
+			add(SurfacedRef{Ref: ev.Ref, RefType: orDefault(ev.RefType, "doc"), Via: ViaRetrieval, Title: ev.Title, URL: ev.URL, Seq: ev.Seq, Aliases: aliasesOf(ev)})
 		case ev.Type == contexttrace.EventProvided:
 			via := ViaPrime
 			if ev.Source == contexttrace.SourceLocalRecall {
 				via = ViaRecall
 			}
-			for _, d := range docsOf(ev) {
-				add(SurfacedRef{Ref: d, RefType: "doc", Via: via, Title: ev.Title, URL: ev.URL, Seq: ev.Seq})
+			docs := docsOf(ev)
+			var aliases []string
+			if len(docs) == 1 {
+				aliases = aliasesOf(ev) // a multi-doc event's aliases name no one doc
+			}
+			for _, d := range docs {
+				add(SurfacedRef{Ref: d, RefType: "doc", Via: via, Title: ev.Title, URL: ev.URL, Seq: ev.Seq, Aliases: aliases})
 			}
 		case ev.Type == contexttrace.EventInvoked && ev.Query != "" && isRetrieval(ev):
 			add(SurfacedRef{
 				Ref: orDefault(ev.Ref, ev.Query), RefType: orDefault(ev.RefType, "query"),
-				Via: ViaRetrieval, Title: ev.Title, URL: ev.URL, Seq: ev.Seq,
+				Via: ViaRetrieval, Title: ev.Title, URL: ev.URL, Seq: ev.Seq, Aliases: aliasesOf(ev),
 			})
 		}
 	}
@@ -113,4 +143,13 @@ func orDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// aliasesOf copies an event's aliases so a SurfacedRef never shares the
+// event's backing array (nil stays nil).
+func aliasesOf(ev contexttrace.Event) []string {
+	if len(ev.Aliases) == 0 {
+		return nil
+	}
+	return append([]string(nil), ev.Aliases...)
 }
