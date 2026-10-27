@@ -279,9 +279,11 @@ func TestSendFrictionEvent_Suppressed(t *testing.T) {
 
 // restoreRootCmdState undoes what executeWithFrictionRecovery leaves behind as
 // the process entry point: it resets rootCmd's flags and registers new flag
-// objects, sets root args, and assigns the command context. Left in place, a
-// later in-process command parses --json into the old flag object while readers
-// look up the new one through cmd.Root().PersistentFlags().
+// objects, sets root args, assigns the command context, and sets the cli output
+// modes from the run's flags. Left in place, a later in-process command parses
+// --json into the old flag object while readers look up the new one through
+// cmd.Root().PersistentFlags(), and a --json run leaves every cli printer in
+// JSON mode.
 func restoreRootCmdState(t *testing.T) {
 	t.Helper()
 	flags, persistent := rootCmd.Flags(), rootCmd.PersistentFlags()
@@ -292,6 +294,7 @@ func restoreRootCmdState(t *testing.T) {
 		rootCmd.PersistentFlags().AddFlagSet(persistent)
 		rootCmd.SetArgs(nil)
 		cliCtx, preRunReached = savedCtx, savedPreRun
+		resetCLIOutputModes()
 	})
 }
 

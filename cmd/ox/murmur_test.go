@@ -12,6 +12,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// resetMurmurFlags returns murmurCmd's flags to their defaults now and when the
+// test ends. A `cmd := *murmurCmd` copy shares murmurCmd's flag set, and pflag
+// never resets a parsed value, so without this one test's --importance=high is
+// the next test's importance, in whatever order the package runs.
+func resetMurmurFlags(t *testing.T) {
+	t.Helper()
+	resetFlagsInTree(murmurCmd)
+	t.Cleanup(func() { resetFlagsInTree(murmurCmd) })
+}
+
 func TestMurmurFlagDefaults(t *testing.T) {
 	cmd := &cobra.Command{Use: "test"}
 	cmd.Flags().String("topic", "general", "")
@@ -66,6 +76,7 @@ func TestMurmurValidImportanceLevels(t *testing.T) {
 
 func TestMurmurMissingContent(t *testing.T) {
 
+	resetMurmurFlags(t)
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -82,6 +93,7 @@ func TestMurmurMissingContent(t *testing.T) {
 
 func TestMurmurEmptyContent(t *testing.T) {
 
+	resetMurmurFlags(t)
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -101,6 +113,7 @@ func TestMurmurJSONInputParsing(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	t.Run("valid JSON with content passes parsing", func(t *testing.T) {
+		resetMurmurFlags(t)
 		cmd := *murmurCmd
 		var buf bytes.Buffer
 		cmd.SetOut(&buf)
@@ -121,6 +134,7 @@ func TestMurmurJSONInputParsing(t *testing.T) {
 	})
 
 	t.Run("JSON missing content field", func(t *testing.T) {
+		resetMurmurFlags(t)
 		cmd := *murmurCmd
 		var buf bytes.Buffer
 		cmd.SetOut(&buf)
@@ -136,6 +150,7 @@ func TestMurmurJSONInputParsing(t *testing.T) {
 	})
 
 	t.Run("invalid JSON", func(t *testing.T) {
+		resetMurmurFlags(t)
 		cmd := *murmurCmd
 		var buf bytes.Buffer
 		cmd.SetOut(&buf)
@@ -153,6 +168,7 @@ func TestMurmurJSONInputParsing(t *testing.T) {
 
 func TestMurmurInvalidImportanceReturnsError(t *testing.T) {
 
+	resetMurmurFlags(t)
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -171,6 +187,7 @@ func TestMurmurInvalidImportanceReturnsError(t *testing.T) {
 
 func TestMurmurInvalidScopeReturnsError(t *testing.T) {
 	t.Chdir(t.TempDir())
+	resetMurmurFlags(t)
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -191,6 +208,7 @@ func TestMurmurInvalidScopeReturnsError(t *testing.T) {
 
 func TestMurmurContentTooLarge(t *testing.T) {
 	t.Chdir(t.TempDir())
+	resetMurmurFlags(t)
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -212,6 +230,7 @@ func TestMurmurContentTooLarge(t *testing.T) {
 
 func TestMurmurJSONOverridesDefaults(t *testing.T) {
 	t.Chdir(t.TempDir())
+	resetMurmurFlags(t)
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -260,9 +279,8 @@ func TestMurmurQueuesToOutboxWhenDaemonDown(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // no socket → TryConnect misses
 	t.Chdir(projectDir)                      // findGitRoot resolves the ledger path
 
+	resetMurmurFlags(t)
 	cmd := *murmurCmd
-	// murmurCmd's flagset is shared across tests; pin scope deterministically.
-	_ = cmd.Flags().Set("scope", "ledger")
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
@@ -289,6 +307,7 @@ func TestMurmurQueuesToOutboxWhenDaemonDown(t *testing.T) {
 // The existing test covers >4096; this covers the ==4096 boundary (should pass validation).
 func TestMurmurContentExactlyAtLimit(t *testing.T) {
 	t.Chdir(t.TempDir())
+	resetMurmurFlags(t)
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -315,6 +334,7 @@ func TestMurmurContentExactlyAtLimit(t *testing.T) {
 func TestMurmurJSONImportanceOverridesDefault(t *testing.T) {
 	t.Chdir(t.TempDir())
 
+	resetMurmurFlags(t)
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -340,6 +360,7 @@ func TestMurmurJSONImportanceOverridesDefault(t *testing.T) {
 func TestMurmurExplicitFlagBeatsJSONImportance(t *testing.T) {
 	t.Chdir(t.TempDir())
 
+	resetMurmurFlags(t)
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -370,6 +391,7 @@ func TestMurmurExplicitFlagBeatsJSONImportance(t *testing.T) {
 func TestMurmurJSONTopicOverridesDefault(t *testing.T) {
 	t.Chdir(t.TempDir())
 
+	resetMurmurFlags(t)
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -395,6 +417,7 @@ func TestMurmurJSONTopicOverridesDefault(t *testing.T) {
 func TestMurmurExplicitTopicFlagBeatsJSON(t *testing.T) {
 	t.Chdir(t.TempDir())
 
+	resetMurmurFlags(t)
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)

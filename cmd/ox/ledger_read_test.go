@@ -56,20 +56,34 @@ func runOxInProc(t *testing.T, target *cobra.Command, args ...string) (string, s
 		SilenceErrors:      true,
 		SilenceUsage:       true,
 	}
-	cmd.Flags().AddFlagSet(target.Flags())
+	// target.Flags() also holds copies of root's persistent flags once cobra has
+	// merged them in, which any lookup that walks through target does, and
+	// cobra never removes them. A test that replaces root's flag set leaves
+	// those copies stale, and a stale --json added here would take the parsed
+	// value while the readers consult root's: a --json run would print text.
+	target.Flags().VisitAll(func(flag *pflag.Flag) {
+		if rootCmd.PersistentFlags().Lookup(flag.Name) == nil {
+			cmd.Flags().AddFlag(flag)
+		}
+	})
 	// Persistent, not local: the readers resolve --json through
 	// cmd.Root().PersistentFlags(), so a local copy would leave them reading an
 	// empty flag set and falling back to agent detection.
 	cmd.PersistentFlags().AddFlagSet(rootCmd.PersistentFlags())
-	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
-		value, changed := flag.Value.String(), flag.Changed
-		t.Cleanup(func() {
-			_ = flag.Value.Set(value)
-			flag.Changed = changed
+	// Root's flags are shared with every test, so they start from their
+	// defaults too: a --json an earlier run left set would otherwise decide
+	// this run's output format.
+	for _, set := range []*pflag.FlagSet{cmd.Flags(), cmd.PersistentFlags()} {
+		set.VisitAll(func(flag *pflag.Flag) {
+			value, changed := flag.Value.String(), flag.Changed
+			t.Cleanup(func() {
+				_ = flag.Value.Set(value)
+				flag.Changed = changed
+			})
+			require.NoError(t, flag.Value.Set(flag.DefValue))
+			flag.Changed = false
 		})
-		require.NoError(t, flag.Value.Set(flag.DefValue))
-		flag.Changed = false
-	})
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)

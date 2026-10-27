@@ -21,6 +21,12 @@ import (
 // wiring: subprocesses run in their own process group, so a terminal SIGINT
 // reaches them only if every command's context cancels when ox is interrupted.
 func TestExecuteWithSignalContext_SIGINTCancelsCommandContext(t *testing.T) {
+	// executeWithSignalContext is the process entry point: it replaces root's
+	// flag set and the global cfg, which later in-process tests share.
+	restoreRootCmdState(t)
+	savedCfg := cfg
+	t.Cleanup(func() { cfg = savedCfg })
+
 	// absorb SIGINT so a missing handler fails the test instead of killing it
 	sink := make(chan os.Signal, 4)
 	signal.Notify(sink, os.Interrupt)
