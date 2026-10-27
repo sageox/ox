@@ -112,6 +112,24 @@ export type UsageStatus = {
   follow: boolean
 }
 
+/** The counts `ox statusline --json` reports; zero when omitted. */
+export type StatuslineCounts = {
+  discussions: number
+  plans: number
+  docs: number
+  sessions: number
+  murmurs: number
+  used: number
+}
+
+/** `ox statusline --json`: what the desktop band above the prompt draws. */
+export type Statusline = {
+  /** False: the statusline setting is off, or this is not a SageOx project. */
+  show: boolean
+  counts: StatuslineCounts
+  recording: boolean
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'ox-cli-brief-pane': {
