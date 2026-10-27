@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -255,6 +256,82 @@ func TestDoctorFix_DirectLedgerCloneBackstopReportsTimeout(t *testing.T) {
 		require.NotContains(t, output, misleading, "git's reaction to being stopped is not the cause")
 	}
 	requireNoHalfClone(t, ledgerPath)
+}
+
+// Ctrl-C must cancel the direct clone even though its backstop is independent
+// of doctor's short check timeout and Git runs in its own process group.
+func TestDoctorFix_DirectLedgerCloneInterrupt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real Git clone and process signal")
+	}
+	for _, name := range []string{"first clone", "configured repositories"} {
+		t.Run(name, func(t *testing.T) {
+			ledgerURL := servePacedGitRepo(t, directFixtureBytes, directPace, 96<<10)
+			root := setupDirectCloneProject(t, ledgerURL)
+			setDirectCloneBudgets(t, time.Minute, 15*time.Second)
+			// Absorb SIGINT so a missing handler fails without killing the test.
+			sink := make(chan os.Signal, 1)
+			signal.Notify(sink, os.Interrupt)
+			t.Cleanup(func() { signal.Stop(sink) })
+			target := filepath.Join(t.TempDir(), "ledger")
+			if name == "first clone" {
+				projectCfg, err := config.LoadProjectConfig(root)
+				require.NoError(t, err)
+				target = config.DefaultLedgerPath(projectCfg.RepoID, endpoint.GetForProject(root))
+			}
+			next := target + ".next"
+			finished := target + ".finished"
+			finishedURL := servePacedGitRepo(t, 1<<10, 1<<20, 0)
+			localCfg := &config.LocalConfig{}
+			var result checkResult
+			var output string
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				output = captureStdoutForPlanCLI(t, func() {
+					if name == "first clone" {
+						result = fixMissingRepos(root, localCfg)
+						return
+					}
+					result = fixRepoPathIssues(root, localCfg, []repoPathIssue{
+						{repoType: "ledger", path: finished, endpoint: endpoint.GetForProject(root), cloneURL: finishedURL, issue: "missing"},
+						{repoType: "ledger", path: target, endpoint: endpoint.GetForProject(root), cloneURL: ledgerURL, issue: "missing"},
+						{repoType: "ledger", path: next, endpoint: endpoint.GetForProject(root), cloneURL: ledgerURL, issue: "missing"},
+					})
+				})
+			}()
+			t.Cleanup(func() { <-done })
+			waitForDownload(t, target, 64<<10)
+			if name == "first clone" {
+				// A peer's update must survive when this repair changed nothing.
+				require.NoError(t, config.MutateLocalConfig(context.Background(), root, func(cfg *config.LocalConfig) error {
+					cfg.SetTeamContext("team_peer", "Peer", next)
+					return nil
+				}))
+			}
+			process, err := os.FindProcess(os.Getpid())
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = process.Release() })
+			require.NoError(t, process.Signal(os.Interrupt))
+			<-done
+			require.ErrorIs(t, result.err, context.Canceled)
+			require.NotContains(t, output, next, "interruption must stop the repair loop")
+			require.NotContains(t, output, "timed out", "Ctrl-C must end the clone before its backstop")
+			require.NoDirExists(t, target)
+			temps, err := filepath.Glob(target + ".tmp-*")
+			require.NoError(t, err)
+			require.Empty(t, temps, "interruption must remove the temporary clone")
+			saved, err := config.LoadLocalConfig(root)
+			require.NoError(t, err)
+			if name == "first clone" {
+				require.Len(t, saved.TeamContexts, 1, "no completed repair means no config write")
+				require.Equal(t, "team_peer", saved.TeamContexts[0].TeamID)
+			} else {
+				require.NotNil(t, saved.Ledger)
+				require.Equal(t, finished, saved.Ledger.Path, "completed repairs must survive interruption")
+			}
+		})
+	}
 }
 
 // TestDoctorFix_DirectLedgerCloneStallIsAborted verifies a direct Ledger clone
