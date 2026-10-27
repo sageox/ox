@@ -15,6 +15,7 @@ import (
 	"regexp/syntax"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -36,8 +37,9 @@ var bundledCatalog []byte
 // environment context is always redacted, independent of entropy, unless the
 // value is a syntactic placeholder.
 type RuleSet struct {
-	rules []rule
-	hash  string
+	rules      []rule
+	hash       string
+	noBuiltins bool // a Delta: its base already ran the built-ins
 }
 type rule struct {
 	id               string
@@ -47,6 +49,7 @@ type rule struct {
 	allowlists       []ruleAllowlist
 	group            int
 	entropy          float64
+	fingerprint      string // every configured field; equal rules scan alike
 }
 
 // ruleAllowlist is the content side of an upstream [[rules.allowlists]] entry.
@@ -101,6 +104,10 @@ func NewRules(data []byte) (*RuleSet, error) {
 		}
 		seen[cfg.ID] = true
 		r := rule{id: cfg.ID, group: cfg.SecretGroup, entropy: cfg.Entropy}
+		if raw, err := json.Marshal(cfg); err == nil {
+			sum := sha256.Sum256(raw)
+			r.fingerprint = hex.EncodeToString(sum[:])
+		}
 		var err error
 		if cfg.Regex != "" {
 			r.expression, err = regexp.Compile(cfg.Regex)
@@ -254,6 +261,10 @@ func RedactText(text string) (string, []string) { return bundled.RedactText(text
 // ValidateContent rejects detected secrets without returning their values.
 func ValidateContent(name string, data []byte) error { return bundled.ValidateContent(name, data) }
 func (s *RuleSet) ValidateContent(name string, data []byte) error {
+	// An empty Delta: every rule was already checked by its base.
+	if s != nil && s.noBuiltins && len(s.rules) == 0 {
+		return nil
+	}
 	if s == nil || len(s.rules) == 0 {
 		return errors.New("secret guard: missing rule catalog")
 	}
@@ -328,7 +339,14 @@ func (s *RuleSet) RedactText(text string) (string, []string) {
 		return "[REDACTED_INVALID_SECRET_GUARD]", []string{"invalid-secret-guard"}
 	}
 	found := map[string]bool{}
-	out := s.redact(text, found, 0, nil)
+	out := text
+	key := s.cleanKey(text)
+	if !cleanScans.has(key) {
+		out = s.redact(text, found, 0, nil)
+		if len(found) == 0 && out == text {
+			cleanScans.add(key)
+		}
+	}
 	names := make([]string, 0, len(found))
 	for n := range found {
 		names = append(names, n)
@@ -391,9 +409,11 @@ func (s *RuleSet) redact(text string, found map[string]bool, depth int, values m
 	}
 
 	out := text
-	lower := canonicalLower(out)
+	// Markers already in the input came from an earlier scan; their words never
+	// arm a detector. Once this scan inserts one, screens read the text as is.
+	lower := unmarkedLower(out)
 	for _, b := range builtins {
-		if !screened(lower, b.keywords) {
+		if s.noBuiltins || !screened(lower, b.keywords) {
 			continue
 		}
 		// A replacement inserts marker text, so later screens must see it.
@@ -615,6 +635,19 @@ func jsonRecord(line string) bool {
 	return (strings.HasPrefix(trim, "{") || strings.HasPrefix(trim, "[") || strings.HasPrefix(trim, "\"")) && json.Valid([]byte(trim))
 }
 
+// unmarkedLower is canonicalLower with redaction markers blanked. A marker's
+// words ("secret", "key") would otherwise arm the secret/key detectors over
+// every byte of already-redacted text on each rescan (sageox/ox#1457). Screens
+// only skip work: a rule armed by any other literal still scans the markers.
+func unmarkedLower(text string) string {
+	if strings.Contains(text, "[REDACTED") {
+		text = anyRedactionMarker.ReplaceAllString(text, " ")
+	}
+	return canonicalLower(text)
+}
+
+var anyRedactionMarker = regexp.MustCompile(`\[REDACTED(?:_[A-Z0-9_-]+)?\]`)
+
 // canonicalLower folds case for literal screens. Go's case folding also accepts
 // long s for ASCII s, so screens canonicalize it explicitly.
 func canonicalLower(text string) string {
@@ -729,7 +762,14 @@ type TextReplacement struct {
 func RedactTextWithReplacements(text string, edits []TextReplacement) (string, []string, bool) {
 	found := map[string]bool{}
 	values := map[string]bool{}
-	mandatory := bundled.redact(text, found, 0, values)
+	mandatory := text
+	key := bundled.cleanKey(text)
+	if !cleanScans.has(key) {
+		mandatory = bundled.redact(text, found, 0, values)
+		if len(found) == 0 && mandatory == text {
+			cleanScans.add(key)
+		}
+	}
 	fallback := func() (string, []string, bool) {
 		names := make([]string, 0, len(found))
 		for name := range found {
@@ -799,3 +839,74 @@ func IsFixedRedactionMarker(marker string) bool {
 	}
 	return false
 }
+
+// cleanScans remembers which texts a rule set has already scanned and found
+// clean, so the next boundary that checks the same bytes with the same rules
+// skips the rescan. A key is sha256(catalog hash, 0, text): the set holds no
+// content or values, and changed bytes or another catalog miss. Text with a
+// finding is never stored, so a refusal always rescans.
+var cleanScans = &scanMemo{seen: map[[32]byte]struct{}{}}
+
+// cleanScanLimit bounds the set below 1 MB; reaching it starts a new set.
+const cleanScanLimit = 1 << 14
+
+type scanMemo struct {
+	mu   sync.Mutex
+	seen map[[32]byte]struct{}
+}
+
+func (m *scanMemo) has(key [32]byte) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.seen[key]
+	return ok
+}
+
+func (m *scanMemo) add(key [32]byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.seen) >= cleanScanLimit {
+		m.seen = map[[32]byte]struct{}{}
+	}
+	m.seen[key] = struct{}{}
+}
+
+func (s *RuleSet) cleanKey(text string) [32]byte {
+	h := sha256.New()
+	h.Write([]byte(s.hash))
+	h.Write([]byte{0})
+	h.Write([]byte(text))
+	var k [32]byte
+	copy(k[:], h.Sum(nil))
+	return k
+}
+
+// Delta holds the rules s has that base lacks, and skips the built-ins. It
+// replaces s only after base validated the same name and content.
+//
+// That is exact. Base found the content clean, so no rule or built-in rewrote
+// it: every rule saw the original bytes. A rule equal to one in base, by
+// fingerprint, then finds nothing in s either, and neither do the built-ins.
+// So the first rule of s to find anything is a delta rule, and in the delta it
+// still sees the original bytes, because every delta rule before it is a rule
+// of s before it and found nothing. Validating with the delta refuses exactly
+// what validating with s refuses.
+func (s *RuleSet) Delta(base *RuleSet) *RuleSet {
+	if s == nil || len(s.rules) == 0 || base == nil {
+		return s // keep the missing-catalog refusal
+	}
+	have := map[string]bool{}
+	for _, r := range base.rules {
+		have[r.fingerprint] = true
+	}
+	d := &RuleSet{hash: s.hash + "-" + base.hash, noBuiltins: true}
+	for _, r := range s.rules {
+		if r.fingerprint == "" || !have[r.fingerprint] {
+			d.rules = append(d.rules, r)
+		}
+	}
+	return d
+}
+
+// Bundled is the rule set compiled into this binary.
+func Bundled() *RuleSet { return bundled }

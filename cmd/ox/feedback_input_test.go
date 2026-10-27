@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -127,6 +130,25 @@ func TestValidateFeedbackPayloadUsesBundledAndFreshRules(t *testing.T) {
 	require.Error(t, err)
 	assert.EqualError(t, err, "feedback contains a possible secret; remove credentials and retry")
 	assert.Equal(t, 2, calls)
+}
+
+// A current catalog is the bundled one plus what upstream added since; after
+// the bundled check, feedback validates only the additions.
+// Failure prevented: that narrower second check drops a rule the bundled
+// catalog lacks, and a credential format added after this release is sent.
+func TestValidateFeedbackPayloadRefusesWhatOnlyCurrentRulesCatch(t *testing.T) {
+	previous := feedbackLoadLatestRules
+	t.Cleanup(func() { feedbackLoadLatestRules = previous })
+	_, thisFile, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "..", "..", "internal", "secretguard", "gitleaks.toml"))
+	require.NoError(t, err)
+	rules, err := secretguard.NewRules(append(data, "\n[[rules]]\nid = \"future-format\"\nregex = '''future_[a-z]{8}'''\n"...))
+	require.NoError(t, err)
+	feedbackLoadLatestRules = func(context.Context) (*secretguard.RuleSet, error) { return rules, nil }
+	assert.NoError(t, validateFeedbackPayload(context.Background(), []byte(`{"report":"Sync fails after the update"}`)))
+	err = validateFeedbackPayload(context.Background(), []byte(`{"report":"Sync fails","diagnostics":{"message":"future_qzxwvjkp"}}`))
+	assert.EqualError(t, err, "feedback contains a possible secret; remove credentials and retry")
 }
 
 func TestValidateFeedbackPayloadFailsClosed(t *testing.T) {
