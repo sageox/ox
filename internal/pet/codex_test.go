@@ -102,11 +102,11 @@ func TestOxyCodexSheet_CellsHoldOxyAndNothingElse(t *testing.T) {
 			used[i] = true
 		}
 	}
-	require.Len(t, used, 137)
-	for i := 0; i < 137; i++ {
+	require.LessOrEqual(t, len(used), CodexColumns*CodexRows)
+	for i := 0; i < len(used); i++ {
 		require.True(t, used[i], "cells are packed from 0, cell %d unused", i)
 	}
-	for i := 137; i < CodexColumns*CodexRows; i++ {
+	for i := len(used); i < CodexColumns*CodexRows; i++ {
 		_, ok := opaqueBounds(crop(img, codexCell(i)))
 		assert.False(t, ok, "spare cell %d must be transparent", i)
 	}
@@ -122,20 +122,49 @@ func TestOxyCodexSheet_CellsHoldOxyAndNothingElse(t *testing.T) {
 }
 
 // TestOxyCodexSheet_ReviewKeepsConfettiTiming checks the repeated-index runs
-// replay each confetti frame for about as long as the source sheet asks.
+// replay each confetti cell for about as long as its folded, thinned ticks
+// ask, and that folding and thinning keep the celebration's total length.
 // Failure prevented: the celebration plays at the wrong speed in Codex.
 func TestOxyCodexSheet_ReviewKeepsConfettiTiming(t *testing.T) {
 	_, _, p := buildOxyCodex(t)
 	m, err := OxyManifest()
 	require.NoError(t, err)
-	var confetti Animation
+	byName := map[string]Animation{}
 	for _, a := range m.Animations {
-		if a.Name == "confetti" {
-			confetti = a
+		byName[a.Name] = a
+	}
+	// rebuild the plan the way BuildCodexSheet does: sources in first-use order
+	var names []string
+	var plans [][]codexTick
+	seen := map[string]bool{}
+	for _, ca := range CodexAnimations {
+		if seen[ca.Source] {
+			continue
+		}
+		seen[ca.Source] = true
+		ms, err := byName[ca.Source].durations()
+		require.NoError(t, err)
+		names = append(names, ca.Source)
+		plans = append(plans, foldToTick(ms, codexTickMS))
+	}
+	plans = fitCells(plans, CodexColumns*CodexRows)
+	var plan []codexTick
+	for i, n := range names {
+		if n == "confetti" {
+			plan = plans[i]
 		}
 	}
-	ms, err := confetti.durations()
+	ms, err := byName["confetti"].durations()
 	require.NoError(t, err)
+	total := 0
+	for _, d := range ms {
+		total += d
+	}
+	planned := 0
+	for _, tk := range plan {
+		planned += tk.MS
+	}
+	assert.Equal(t, total, planned, "folding and thinning keep confetti's length")
 
 	var runs []int
 	frames := p.Animations["review"].Frames
@@ -146,10 +175,93 @@ func TestOxyCodexSheet_ReviewKeepsConfettiTiming(t *testing.T) {
 		}
 		runs = append(runs, 1)
 	}
-	require.Len(t, runs, len(ms))
-	tick := 1000 / codexFPS
+	require.Len(t, runs, len(plan))
 	for i, n := range runs {
-		assert.InDelta(t, ms[i], n*tick, float64(tick)/2, "confetti frame %d", i)
+		assert.InDelta(t, plan[i].MS, n*codexTickMS, float64(codexTickMS)/2, "confetti cell %d", i)
+	}
+}
+
+func TestFoldToTick(t *testing.T) {
+	tests := []struct {
+		name string
+		ms   []int
+		want []codexTick
+	}{
+		{name: "long frames pass through", ms: []int{80, 120}, want: []codexTick{{0, 80}, {1, 120}}},
+		{name: "in-betweens join the hold before them", ms: []int{90, 40, 40, 90}, want: []codexTick{{0, 90}, {1, 80}, {3, 90}}},
+		{name: "a run of short frames folds in pairs, not into one", ms: []int{600, 45, 45, 45, 45}, want: []codexTick{{0, 600}, {1, 90}, {3, 90}}},
+		{name: "a short first frame keeps its index", ms: []int{30, 30, 100}, want: []codexTick{{0, 60}, {2, 100}}},
+		{name: "a short frame after a long one stays its own tick", ms: []int{100, 20}, want: []codexTick{{0, 100}, {1, 20}}},
+		{name: "empty", ms: nil, want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, foldToTick(tt.ms, 50))
+		})
+	}
+}
+
+func TestSubsample(t *testing.T) {
+	five := []codexTick{{0, 10}, {1, 20}, {2, 30}, {3, 40}, {4, 50}}
+	tests := []struct {
+		name string
+		n    int
+		want []codexTick
+	}{
+		{name: "room for all", n: 5, want: five},
+		{name: "more room than frames", n: 9, want: five},
+		{name: "keeps first, middle, last", n: 3, want: []codexTick{{0, 30}, {2, 70}, {4, 50}}},
+		{name: "keeps first and last", n: 2, want: []codexTick{{0, 100}, {4, 50}}},
+		{name: "one cell holds the whole run", n: 1, want: []codexTick{{0, 150}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := subsample(five, tt.n)
+			assert.Equal(t, tt.want, got)
+			sum := 0
+			for _, tk := range got {
+				sum += tk.MS
+			}
+			assert.Equal(t, 150, sum, "dropped time goes to the kept frame before it")
+		})
+	}
+}
+
+func TestFitCells(t *testing.T) {
+	plan := func(n int) []codexTick {
+		p := make([]codexTick, n)
+		for i := range p {
+			p[i] = codexTick{Frame: i, MS: 50}
+		}
+		return p
+	}
+	lens := func(plans [][]codexTick) []int {
+		var out []int
+		for _, p := range plans {
+			out = append(out, len(p))
+		}
+		return out
+	}
+	tests := []struct {
+		name  string
+		sizes []int
+		cells int
+		want  []int
+	}{
+		{name: "fits already", sizes: []int{3, 4}, cells: 10, want: []int{3, 4}},
+		{name: "longest loses first", sizes: []int{3, 8}, cells: 9, want: []int{3, 6}},
+		{name: "loss spreads once lengths meet", sizes: []int{6, 8}, cells: 10, want: []int{5, 5}},
+		{name: "tie trims the first", sizes: []int{4, 4}, cells: 7, want: []int{3, 4}},
+		{name: "exact fit", sizes: []int{2, 2}, cells: 4, want: []int{2, 2}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var plans [][]codexTick
+			for _, n := range tt.sizes {
+				plans = append(plans, plan(n))
+			}
+			assert.Equal(t, tt.want, lens(fitCells(plans, tt.cells)))
+		})
 	}
 }
 

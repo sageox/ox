@@ -58,11 +58,225 @@ export type AnimationFrames = { ms: number[] }
 // An animation's half-block cells, per size, index-aligned with its frames.
 export type Cells = Record<SizeName, string[]>
 
+// A rectangle in high-resolution cell pixels.
+export type Rect = { x: number; y: number; width: number; height: number }
+
+// One hires animation: its crop box in the uncropped cell, and frame i
+// showing for ms[i]. The hires set has its own frame rate, so its count
+// differs from the pixel set's; an older frames.ts without `ms` had the
+// pixel set's frames, so a missing `ms` means `animations[name].ms`.
+export type HiresAnimation = Rect & { ms?: number[] }
+
+// The high-resolution art the desktop and VS Code draw: per frame a PNG at
+// `hires/<name>/<i>.png`, index-aligned with `animations[name].ms`. Each
+// animation is cropped to the union of its frames, `animations[name]`, a box
+// in the uncropped cell; `figure` is the union of Oxy alone (blink, wag,
+// wag-big), which sizes him so he stays one scale whatever he holds.
+export type HiresFrames = {
+  cell: { width: number; height: number }
+  // hires pixels per pixel of the 160x207 art
+  scale: number
+  figure: Rect
+  animations: Partial<Record<Anim, HiresAnimation>>
+}
+
+/**
+ * The frame timings for one art: the hires entry's own `ms` when the clips
+ * are hires and it has a usable one, else the pixel set's.
+ */
+export function clipTimings(frames: OxyFrames, anim: Anim, hires: boolean): number[] {
+  const own = hires ? frames.hires?.animations[anim]?.ms : undefined
+  return own !== undefined && own.length > 0 && own.every(ms => ms > 0) ? own : frames.animations[anim].ms
+}
+
 export type OxyFrames = {
   // a frame's width over its height
   aspect: number
   sizes: Record<SizeName, Box>
   animations: Record<Anim, AnimationFrames>
+  // Optional: a frames.ts written by an older ox has none, and the desktop
+  // then draws the 160x207 frames.
+  hires?: HiresFrames
+}
+
+// Oxy's height in CSS pixels on the SVG surfaces: his figure with the hires
+// art, the whole frame with the 160x207 fallback. On the desktop he stands in
+// a 24-column side pane; a tall animation (jump, confetti) is 1.65x his
+// figure, so `large` stops at 120 to stay calm beside the transcript.
+export const PIXEL_HEIGHTS: Record<SizeName, number> = { small: 48, medium: 80, large: 120 }
+
+// One text row on the graphical surfaces, in CSS pixels. Box margins there
+// are counted in rows, not pixels, so lifting the words is rounded to it.
+export const ROW_PX = 20
+
+// The fallback frame PNG's own size; it must match what `ox pet enable` writes.
+export const DESKTOP_FRAME = { width: 160, height: 207 } as const
+
+// The fallback clip's viewBox: the whole 160x207 frame.
+export const DESKTOP_VIEWBOX = { x: 0, y: 0, width: DESKTOP_FRAME.width, height: DESKTOP_FRAME.height } as const
+
+// Where a clip's frames sit: the SVG's viewBox, and the box each frame's
+// <image> fills inside it, both in the art's own pixels.
+export type ClipGeometry = { viewBox: Rect; image: Rect }
+
+export const DESKTOP_GEOMETRY: ClipGeometry = {
+  viewBox: DESKTOP_VIEWBOX,
+  image: { x: 0, y: 0, width: DESKTOP_FRAME.width, height: DESKTOP_FRAME.height },
+}
+
+export type HiresLayout = ClipGeometry & {
+  // the Svg element's size, in CSS pixels
+  width: number
+  height: number
+  // CSS pixels of empty cell kept under the crop so his feet stay on the ground
+  groundPad: number
+  // rows of marginBottom that bring the words up to his middle
+  wordsLift: number
+}
+
+/**
+ * How one hires animation is drawn at a size. The scale comes from Oxy's
+ * figure, not the crop, so he is the same size in every animation and a prop
+ * (laptop, clouds, a whiteboard) makes the element bigger instead of making
+ * him smaller. Every viewBox runs down to the cell's bottom edge, the ground
+ * line: a crop that stops short of it (he floats, or props end above his
+ * feet) keeps that empty strip inside the SVG, so bottom-aligned SVGs put
+ * every animation's ground at one height. Padding in the SVG rather than a
+ * Box margin because margins are whole rows, too coarse at 32 px. Null when
+ * the frames carry no box for `anim`.
+ */
+export function hiresLayout(hires: HiresFrames, anim: Anim, size: SizeName): HiresLayout | null {
+  const crop = hires.animations[anim]
+  const ground = hires.cell.height
+  if (crop === undefined || crop.width <= 0 || crop.height <= 0 || hires.figure.height <= 0) {
+    return null
+  }
+  const factor = PIXEL_HEIGHTS[size] / hires.figure.height
+  const viewBox = { x: crop.x, y: crop.y, width: crop.width, height: Math.max(crop.height, ground - crop.y) }
+  // The words are vertically centred on his figure, never on a tall prop: the
+  // row bottom-aligns, so the words' own bottom sits on the ground and is
+  // lifted by the figure's middle less half a row.
+  const middle = (ground - (hires.figure.y + hires.figure.height / 2)) * factor
+  return {
+    viewBox,
+    image: { x: crop.x, y: crop.y, width: crop.width, height: crop.height },
+    width: Math.max(1, Math.round(viewBox.width * factor)),
+    height: Math.max(1, Math.round(viewBox.height * factor)),
+    groundPad: (viewBox.height - crop.height) * factor,
+    wordsLift: Math.max(0, Math.round((middle - ROW_PX / 2) / ROW_PX)),
+  }
+}
+
+// The Svg element's `source` limit; a longer tree is refused.
+export const SVG_SOURCE_CAP = 131_072
+
+// Upper bounds on clipSvg's markup beside the base64 itself, so packClips
+// can pack against the cap without building the string. A test holds
+// clipSvg to them.
+export const CLIP_IMAGE_MARKUP_MAX = 400
+export const CLIP_WRAPPER_MAX = 200
+
+export function pixelBox(size: SizeName): { width: number; height: number } {
+  const height = PIXEL_HEIGHTS[size]
+  return { width: Math.max(1, Math.round((height * DESKTOP_VIEWBOX.width) / DESKTOP_VIEWBOX.height)), height }
+}
+
+// The shortest clip worth a redraw: the graphical surfaces redraw at most
+// ten times a second, so a clip that plays out sooner would be cut short.
+export const MIN_CLIP_MS = 100
+
+/**
+ * Splits an animation's frames into clips, runs of consecutive frames whose
+ * SVG fits under `cap` characters: the graphical surfaces redraw at most
+ * ten times a second, too slow for the frames, so a clip animates itself
+ * and only a clip boundary costs a redraw. Packing is greedy, so a clip only
+ * ends where the next frame would not fit; the remainder at the end can
+ * still come out short, so a clip playing under `minMs` takes frames from
+ * the clip before it. The cap always wins: where no split under the cap
+ * keeps every clip at `minMs`, one stays short. A frame too big on
+ * its own still gets a clip; the caller checks the built source. Each clip
+ * is `[start, end)`.
+ */
+export function packClips(ms: number[], base64Lengths: number[], cap: number, minMs = MIN_CLIP_MS): Array<[number, number]> {
+  if (ms.length !== base64Lengths.length) {
+    throw new Error(`packClips: ${ms.length} durations for ${base64Lengths.length} frames`)
+  }
+  const clips: Array<[number, number]> = []
+  let start = 0
+  let used = CLIP_WRAPPER_MAX
+  for (let i = 0; i < base64Lengths.length; i++) {
+    const cost = base64Lengths[i] + CLIP_IMAGE_MARKUP_MAX
+    if (i > start && used + cost > cap) {
+      clips.push([start, i])
+      start = i
+      used = CLIP_WRAPPER_MAX
+    }
+    used += cost
+  }
+  if (start < base64Lengths.length) {
+    clips.push([start, base64Lengths.length])
+  }
+  const span = (a: number, b: number, of: number[]) => of.slice(a, b).reduce((t, n) => t + n, 0)
+  const fits = (a: number, b: number) => CLIP_WRAPPER_MAX + span(a, b, base64Lengths) + (b - a) * CLIP_IMAGE_MARKUP_MAX <= cap
+  // Back to front, each short clip takes frames from the one before it, which
+  // may leave that one short in turn for the next step to fix from its own
+  // predecessor. Greedy packing left the slack at the end, so this spreads it.
+  for (let j = clips.length - 1; j > 0; j--) {
+    const cur = clips[j]!
+    const prev = clips[j - 1]!
+    while (span(cur[0], cur[1], ms) < minMs && prev[1] - prev[0] >= 2 && fits(cur[0] - 1, cur[1])) {
+      prev[1]--
+      cur[0]--
+    }
+  }
+  return clips
+}
+
+function keyTime(ms: number, total: number): string {
+  return String(Math.round((ms / total) * 1e6) / 1e6)
+}
+
+/**
+ * One clip as an SVG document: every frame an <image>, shown for its own
+ * duration by a discrete SMIL animation of its visibility. `loop` repeats
+ * the clip forever (an animation that fits in one clip loops with no
+ * redraw at all); otherwise it plays once and freezes on its last frame
+ * until the next clip replaces it. The first frame is visible without
+ * SMIL, so a surface that ignores it still shows Oxy.
+ */
+export function clipSvg(frames: string[], ms: number[], loop: boolean, geometry: ClipGeometry = DESKTOP_GEOMETRY): string {
+  const { x, y, width, height } = geometry.viewBox
+  const img = geometry.image
+  // x/y only when set, so the fallback's markup is what it always was.
+  const place = (img.x !== 0 ? `x="${img.x}" ` : '') + (img.y !== 0 ? `y="${img.y}" ` : '')
+  const total = ms.reduce((a, b) => a + b, 0)
+  const timing = loop ? 'repeatCount="indefinite"' : 'fill="freeze"'
+  let offset = 0
+  const images = frames.map((base64, i) => {
+    const from = offset
+    offset += ms[i]
+    const values: string[] = []
+    const times: string[] = []
+    if (i > 0) {
+      values.push('hidden')
+      times.push('0')
+    }
+    values.push('visible')
+    times.push(keyTime(from, total))
+    if (offset < total) {
+      values.push('hidden')
+      times.push(keyTime(offset, total))
+    }
+    const animate =
+      frames.length === 1
+        ? ''
+        : `<animate attributeName="visibility" calcMode="discrete" values="${values.join(';')}" keyTimes="${times.join(';')}" dur="${total}ms" ${timing}/>`
+    return (
+      `<image ${place}width="${img.width}" height="${img.height}" visibility="${i === 0 ? 'visible' : 'hidden'}" ` +
+      `href="data:image/png;base64,${base64}">${animate}</image>`
+    )
+  })
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${x} ${y} ${width} ${height}">${images.join('')}</svg>`
 }
 
 export function isSize(name: unknown): name is SizeName {
@@ -296,6 +510,11 @@ export function pickAnim(s: SpinnerState): Anim {
 /** The PNG file of one frame, under the mod's folder. */
 export function frameFile(root: string, anim: Anim, index: number): string {
   return `${root}/hooks/frames/${anim}/${index}.png`
+}
+
+/** The high-resolution PNG of one frame, drawn on the desktop and in VS Code. */
+export function hiresFrameFile(root: string, anim: Anim, index: number): string {
+  return `${root}/hooks/hires/${anim}/${index}.png`
 }
 
 /** The cells.json of an animation, under the mod's folder. */
