@@ -32,17 +32,7 @@ func tagSessionConsults(projectRoot, sessionPath, rawPath string) {
 		return
 	}
 
-	roots := consultscan.Roots{}
-	if ctx, err := config.LoadProjectContext(projectRoot); err == nil && ctx != nil {
-		roots.Ledger = ctx.DefaultLedgerPath()
-	}
-	if tc := config.FindRepoTeamContext(projectRoot); tc != nil && tc.Path != "" {
-		roots.TeamContext = append(roots.TeamContext, tc.Path)
-	}
-	// No roots only disables file-read matching; citation and requery evidence
-	// needs none, so the scan still runs.
-
-	n, err := consultscan.TagSessionReads(rawPath, sessionPath, roots)
+	n, err := consultscan.TagSessionReads(rawPath, sessionPath, consultRoots(projectRoot))
 	if err != nil {
 		slog.Debug("consult tagging failed", "error", err)
 		return
@@ -50,4 +40,20 @@ func tagSessionConsults(projectRoot, sessionPath, rawPath string) {
 	if n > 0 {
 		slog.Info("tagged SageOx consults", "session", filepath.Base(sessionPath), "events", n)
 	}
+}
+
+// consultRoots are the SageOx repo roots whose files count as consulted when
+// read: this project's ledger clone and its team-context repo. Finalize and
+// the live `ox brief` scan share it so both grade the same reads. No roots
+// only disables file-read matching; citation and requery evidence needs none,
+// so a scan still runs.
+func consultRoots(projectRoot string) consultscan.Roots {
+	roots := consultscan.Roots{}
+	if ctx, err := config.LoadProjectContext(projectRoot); err == nil && ctx != nil {
+		roots.Ledger = ctx.DefaultLedgerPath()
+	}
+	if tc := config.FindRepoTeamContext(projectRoot); tc != nil && tc.Path != "" {
+		roots.TeamContext = append(roots.TeamContext, tc.Path)
+	}
+	return roots
 }
