@@ -151,10 +151,26 @@ func Build(events []contexttrace.Event, surfaced []SurfacedRef, producedCommits 
 			continue
 		}
 		u := UseRef{
-			Ref: ref, RefType: ev.RefType, Evidence: evidence, Grade: grade,
+			Ref: CanonicalRef(ev.RefType, ref), RefType: ev.RefType, Evidence: evidence, Grade: grade,
 			Mechanism: ev.Mechanism, Seq: ev.Seq, Commit: ev.Commit, Decision: ev.Decision,
 		}
-		key := strings.ToLower(ref)
+		if u.Ref == "" {
+			continue
+		}
+		if s, ok := matchSurfaced(ref, ev.Aliases, surfaced); ok {
+			u.MatchedSurfaced = true
+			if u.RefType == "" {
+				u.RefType = s.RefType
+			}
+			if c := CanonicalRef(s.RefType, s.Ref); s.byName && !strings.EqualFold(c, u.Ref) {
+				// Recorded under another of the item's names (rec_ for cnv_,
+				// a slug for pln_): fold the use into the surfaced item so it
+				// is one item with its link. A case-only difference keeps the
+				// use's own spelling, as dedup always has.
+				u.Ref = c
+			}
+		}
+		key := strings.ToLower(u.Ref)
 		i, ok := index[key]
 		if !ok {
 			index[key] = len(refs)
@@ -162,15 +178,6 @@ func Build(events []contexttrace.Event, surfaced []SurfacedRef, producedCommits 
 			continue
 		}
 		refs[i] = merge(refs[i], u)
-	}
-
-	for i := range refs {
-		if s, ok := matchSurfaced(refs[i].Ref, surfaced); ok {
-			refs[i].MatchedSurfaced = true
-			if refs[i].RefType == "" {
-				refs[i].RefType = s.RefType
-			}
-		}
 	}
 
 	var in DeriveInput
@@ -213,23 +220,34 @@ func merge(cur, next UseRef) UseRef {
 	if win.Decision == "" {
 		win.Decision = lose.Decision
 	}
+	win.MatchedSurfaced = win.MatchedSurfaced || lose.MatchedSurfaced
 	return win
 }
 
-// matchSurfaced finds the surfaced entry for a used ref: an exact
-// case-insensitive match, else a case-insensitive basename match (a use of
-// "/ledger/MEMORY.md" matches surfaced "MEMORY.md").
-func matchSurfaced(ref string, surfaced []SurfacedRef) (SurfacedRef, bool) {
-	for _, s := range surfaced {
-		if strings.EqualFold(s.Ref, ref) {
-			return s, true
+// surfacedMatch is the surfaced entry a use matched, and whether it matched
+// by identity (one of the item's names) rather than by file basename.
+type surfacedMatch struct {
+	SurfacedRef
+	byName bool
+}
+
+// matchSurfaced finds the surfaced entry for a used ref and its aliases:
+// first by identity — the ref or an alias names the item (SurfacedRef.Matches:
+// canonical, case-insensitive, aliases included) — else by a case-insensitive
+// basename (a use of "/ledger/MEMORY.md" matches surfaced "MEMORY.md").
+func matchSurfaced(ref string, aliases []string, surfaced []SurfacedRef) (surfacedMatch, bool) {
+	for _, name := range append([]string{ref}, aliases...) {
+		for _, s := range surfaced {
+			if s.Matches(name) {
+				return surfacedMatch{SurfacedRef: s, byName: true}, true
+			}
 		}
 	}
 	base := path.Base(strings.ReplaceAll(ref, "\\", "/"))
 	for _, s := range surfaced {
 		if strings.EqualFold(path.Base(strings.ReplaceAll(s.Ref, "\\", "/")), base) {
-			return s, true
+			return surfacedMatch{SurfacedRef: s}, true
 		}
 	}
-	return SurfacedRef{}, false
+	return surfacedMatch{}, false
 }

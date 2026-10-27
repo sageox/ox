@@ -270,3 +270,73 @@ func TestGradeAndBucketOf_Unknown(t *testing.T) {
 	assert.Empty(t, GradeOf("bogus"))
 	assert.Empty(t, BucketOf(ct.EvidenceNone))
 }
+
+func TestBuild_AliasesAttachToSurfaced(t *testing.T) {
+	recallPlan := ct.Event{Type: ct.EventProvided, Source: ct.SourceLocalRecall, Ref: "pln_X", RefType: "plan", Aliases: []string{"auth-plan", "2026-10-01-auth-plan"}, Seq: 1}
+	retrievedCnv := ct.Event{Type: ct.EventProvided, Source: ct.SourceOnDemand, Mechanism: ct.MechanismRetrieval, Ref: tCnv, RefType: "discussion", Seq: 2}
+	tests := []struct {
+		name   string
+		events []ct.Event
+		want   []UseRef
+	}{
+		{
+			name:   "use recorded as rec_ attaches to surfaced cnv_",
+			events: []ct.Event{retrievedCnv, used(tRec, "", ct.EvidenceRequery, ct.MechanismRetrieval, 5)},
+			want:   []UseRef{{Ref: tCnv, RefType: "discussion", Evidence: ct.EvidenceRequery, Grade: GradeProvable, Mechanism: ct.MechanismRetrieval, Seq: 5, MatchedSurfaced: true}},
+		},
+		{
+			name:   "use recorded as a /c/ link attaches to surfaced cnv_",
+			events: []ct.Event{retrievedCnv, used("https://sageox.ai/c/"+tRec+"?t=1", "discussion", ct.EvidenceCited, ct.MechanismCitation, 6)},
+			want:   []UseRef{{Ref: tCnv, RefType: "discussion", Evidence: ct.EvidenceCited, Grade: GradeProvable, Mechanism: ct.MechanismCitation, Seq: 6, MatchedSurfaced: true}},
+		},
+		{
+			name:   "use recorded as the plan slug attaches to surfaced pln_",
+			events: []ct.Event{recallPlan, used("auth-plan", "plan", ct.EvidenceRead, ct.MechanismRetrieval, 7)},
+			want:   []UseRef{{Ref: "pln_X", RefType: "plan", Evidence: ct.EvidenceRead, Grade: GradeProvable, Mechanism: ct.MechanismRetrieval, Seq: 7, MatchedSurfaced: true}},
+		},
+		{
+			name: "use matched through its own alias",
+			events: []ct.Event{recallPlan, {
+				Type: ct.EventUsed, Ref: "plans/auth.html", Aliases: []string{"2026-10-01-auth-plan"}, Evidence: ct.EvidenceReported, Mechanism: ct.MechanismSelfReport, Seq: 8,
+			}},
+			want: []UseRef{{Ref: "pln_X", RefType: "plan", Evidence: ct.EvidenceReported, Grade: GradeReported, Mechanism: ct.MechanismSelfReport, Seq: 8, MatchedSurfaced: true}},
+		},
+		{
+			name: "two uses under different names dedup to one, strongest wins",
+			events: []ct.Event{
+				recallPlan,
+				used("auth-plan", "plan", ct.EvidenceReported, ct.MechanismSelfReport, 3),
+				used("2026-10-01-auth-plan/", "", ct.EvidenceCitedCommit, ct.MechanismCitation, 9),
+				used("pln_X", "plan", ct.EvidenceRead, ct.MechanismRetrieval, 4),
+			},
+			want: []UseRef{{Ref: "pln_X", RefType: "plan", Evidence: ct.EvidenceCitedCommit, Grade: GradeProvable, Mechanism: ct.MechanismCitation, Seq: 9, MatchedSurfaced: true}},
+		},
+		{
+			name: "rec_ and cnv_ uses of an unsurfaced conversation dedup on its own canonical ref, keeping a ref type",
+			events: []ct.Event{
+				used(tRec, "discussion", ct.EvidenceReported, ct.MechanismSelfReport, 2),
+				used("sageox://"+tCnv+"#cue=3", "", ct.EvidenceCited, ct.MechanismCitation, 4),
+			},
+			want: []UseRef{{Ref: tCnv, RefType: "discussion", Evidence: ct.EvidenceCited, Grade: GradeProvable, Mechanism: ct.MechanismCitation, Seq: 4}},
+		},
+		{
+			name: "a use matching nothing stays separate",
+			events: []ct.Event{
+				recallPlan,
+				used("other-plan/", "plan", ct.EvidenceRead, ct.MechanismRetrieval, 5),
+			},
+			want: []UseRef{{Ref: "other-plan", RefType: "plan", Evidence: ct.EvidenceRead, Grade: GradeProvable, Mechanism: ct.MechanismRetrieval, Seq: 5}},
+		},
+		{
+			name:   "a ref that canonicalizes to nothing is skipped",
+			events: []ct.Event{used("/", "doc", ct.EvidenceRead, ct.MechanismRetrieval, 5)},
+			want:   nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Build(tt.events, Surfaced(tt.events), 0, false)
+			assert.Equal(t, tt.want, r.Refs)
+		})
+	}
+}
