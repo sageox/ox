@@ -87,16 +87,17 @@ func Build(in Input) Report {
 	}
 	r.Calls = buildCalls(in.Events, in.RecentLimit)
 	r.Context = buildContext(in.Events)
-	var all []contextuse.SurfacedRef
-	r.Surfaced, all = buildSurfaced(in.Events)
-	fillURLs(r.Surfaced, in.Endpoint)
-	r.Used = buildUsed(in, r.Surfaced)
+	surfaced, all := buildSurfaced(in.Events)
+	fillURLs(surfaced, in.Endpoint)
+	r.SurfacedByType = countByType(surfaced)
+	r.Used = buildUsed(in, surfaced)
 	rollup := contextuse.Build(in.Events, all, in.ProducedCommits, in.AllowJudged)
 	if r.Trace.Available {
-		r.Relevant = buildRelevant(rollup, r.Surfaced, all)
+		r.Relevant = buildRelevant(rollup, surfaced, all)
 		fillItemURLs(r.Relevant.Items, in.Endpoint)
 		r.Relevant.ReportedNone = rollup.ReportedNone && r.Relevant.Count == 0 && len(r.Used.SelfReported) == 0
 	}
+	r.Surfaced = capSurfaced(surfaced, maxSurfaced)
 	r.Attribution = buildAttribution(in, rollup)
 	r.NextActions = nextActions(r)
 	r.Guidance = guidanceText
@@ -223,8 +224,9 @@ func buildContext(events []contexttrace.Event) Context {
 }
 
 // buildSurfaced lists what reached the model by name (via contextuse, so the
-// report and the rollup agree on what was surfaced), capped for display. The
-// uncapped list is returned too so use evidence is matched against all of it.
+// report and the rollup agree on what was surfaced), in arrival order and
+// uncapped; capSurfaced trims it for display once use evidence is marked. The
+// contextuse list is returned too so use evidence is matched against all of it.
 func buildSurfaced(events []contexttrace.Event) ([]Surfaced, []contextuse.SurfacedRef) {
 	all := contextuse.SurfacedWith(events, contextuse.SurfacedOptions{
 		IsRetrieval: func(ev contexttrace.Event) bool { return kindOf(ev) == oxactivity.KindRetrieval },
@@ -246,9 +248,6 @@ func buildSurfaced(events []contexttrace.Event) ([]Surfaced, []contextuse.Surfac
 	}
 	out := make([]Surfaced, 0, len(all))
 	for _, s := range all {
-		if len(out) >= maxSurfaced {
-			break
-		}
 		item := Surfaced{
 			Ref: s.Ref, RefType: s.RefType, Via: s.Via,
 			Title: s.Title, URL: s.URL, FromName: s.FromName, Seq: s.Seq,
@@ -259,6 +258,51 @@ func buildSurfaced(events []contexttrace.Event) ([]Surfaced, []contextuse.Surfac
 		out = append(out, item)
 	}
 	return out, all
+}
+
+// capSurfaced trims the surfaced list to n for display without cutting what
+// matters most: every used item survives (so the list can exceed n), then what
+// the AI coworker fetched itself, then startup context (prime docs, whispers,
+// recall), which arrives first and would otherwise fill the cap on its own.
+// Arrival order is kept within each group and in the result.
+func capSurfaced(surfaced []Surfaced, n int) []Surfaced {
+	if len(surfaced) <= n {
+		return surfaced
+	}
+	keep := make([]bool, len(surfaced))
+	kept := 0
+	for _, pass := range []func(Surfaced) bool{
+		func(s Surfaced) bool { return s.Used != nil },
+		func(s Surfaced) bool { return s.Via == contextuse.ViaRetrieval },
+		func(Surfaced) bool { return true },
+	} {
+		for i, s := range surfaced {
+			if !keep[i] && pass(s) && (kept < n || s.Used != nil) {
+				keep[i] = true
+				kept++
+			}
+		}
+	}
+	out := make([]Surfaced, 0, kept)
+	for i, s := range surfaced {
+		if keep[i] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// countByType totals the full surfaced list by ref_type, so a renderer can
+// count what was available even when the displayed list was capped.
+func countByType(surfaced []Surfaced) map[string]int {
+	if len(surfaced) == 0 {
+		return nil
+	}
+	out := map[string]int{}
+	for _, s := range surfaced {
+		out[s.RefType]++
+	}
+	return out
 }
 
 // kindOf re-derives an invoked event's Kind from its recorded command words —

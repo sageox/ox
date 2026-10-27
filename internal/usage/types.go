@@ -37,18 +37,21 @@ var Unmetered = []string{"plan nudges", "agent-task surface"}
 
 // Report is the `ox brief --json` payload for the session view.
 type Report struct {
-	View        string       `json:"view"`
-	Session     SessionInfo  `json:"session"`
-	Trace       TraceInfo    `json:"trace"`
-	Calls       Calls        `json:"calls"`
-	Context     Context      `json:"context"`
-	Surfaced    []Surfaced   `json:"surfaced"`
-	Relevant    *Relevant    `json:"relevant,omitempty"`
-	Used        Used         `json:"used"`
-	Attribution Attribution  `json:"attribution"`
-	Display     string       `json:"display"`
-	Guidance    string       `json:"guidance"`
-	NextActions []NextAction `json:"next_actions"`
+	View     string      `json:"view"`
+	Session  SessionInfo `json:"session"`
+	Trace    TraceInfo   `json:"trace"`
+	Calls    Calls       `json:"calls"`
+	Context  Context     `json:"context"`
+	Surfaced []Surfaced  `json:"surfaced"`
+	// SurfacedByType counts every surfaced item by ref_type, before the
+	// surfaced list's display cap, so "available" counts stay whole.
+	SurfacedByType map[string]int `json:"surfaced_by_type,omitempty"`
+	Relevant       *Relevant      `json:"relevant,omitempty"`
+	Used           Used           `json:"used"`
+	Attribution    Attribution    `json:"attribution"`
+	Display        string         `json:"display"`
+	Guidance       string         `json:"guidance"`
+	NextActions    []NextAction   `json:"next_actions"`
 }
 
 // SessionInfo identifies the session the report covers.
