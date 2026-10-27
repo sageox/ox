@@ -125,7 +125,7 @@ func recordCommitCitations(projectRoot string, state *session.RecordingState, sh
 	var fresh []contexttrace.Event
 	var freshAliases [][]string // freshAliases[i] are fresh[i]'s other names
 	for _, s := range surfaced {
-		if already[s.Ref+"\x00"+short] || !consultscan.MatchesRef(msg, s.Ref, s.Title) {
+		if already[s.Ref+"\x00"+short] || !consultscan.MatchesRef(msg, s.Ref, s.Title, s.Aliases...) {
 			continue
 		}
 		already[s.Ref+"\x00"+short] = true

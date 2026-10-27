@@ -373,6 +373,7 @@ var cliRules = []cliRule{
 	{words: []string{"conversation", "transcript"}, label: "read discussion", kind: KindRetrieval, ref: true},
 	{words: []string{"conversation", "topics"}, label: "read discussion", kind: KindRetrieval, ref: true},
 	{words: []string{"conversation", "topic"}, label: "read discussion", kind: KindRetrieval, ref: true},
+	{words: []string{"conversation", "walkthrough"}, label: "read discussion", kind: KindRetrieval, ref: true},
 
 	{words: []string{"decision", "enrich"}, label: "checked decisions", kind: KindRetrieval},
 
