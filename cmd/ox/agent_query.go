@@ -23,6 +23,8 @@ import (
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/ledgersearch"
 	"github.com/sageox/ox/internal/observability"
+	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/session/contextuse"
 )
 
 // queryArgs holds parsed arguments for the query command.
@@ -201,7 +203,7 @@ func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) 
 	if qa.source == "local" {
 		results := queryLocalLedger(qa, projectRoot)
 		combined.LocalResults = results
-		return writeQueryResponse(combined, qa)
+		return writeAndTraceQueryResponse(combined, qa, projectRoot, agentID)
 	}
 
 	// query team context if source is "all" or "team"
@@ -232,12 +234,56 @@ func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) 
 	}
 
 	combined.CodeResults = codeResults
-	return writeQueryResponse(combined, qa)
+	return writeAndTraceQueryResponse(combined, qa, projectRoot, agentID)
+}
+
+// writeAndTraceQueryResponse writes the response, then records each team and
+// local hit as a surfaced item in the AI coworker's session trace.
+func writeAndTraceQueryResponse(combined *combinedQueryResponse, qa *queryArgs, projectRoot, agentID string) (int, error) {
+	n, err := writeQueryResponse(combined, qa, agentID)
+	if err == nil {
+		traceProvidedHits(projectRoot, agentID, contexttrace.SourceOnDemand, contexttrace.MechanismRetrieval, queryProvidedHits(combined))
+	}
+	return n, err
+}
+
+// queryProvidedHits lists the citable hits of a query: team-context hits
+// first (ranked by the server), then local ledger hits. Refs, titles and
+// links only — never the hit's text. Code results are not team items.
+func queryProvidedHits(combined *combinedQueryResponse) []providedHit {
+	var hits []providedHit
+	if combined.TeamContext != nil {
+		for _, r := range combined.TeamContext.Results {
+			refType := r.DocType
+			if refType == "" {
+				refType = r.SourceType
+			}
+			hits = append(hits, providedHit{
+				SurfacedRef: contextuse.SurfacedRef{Ref: r.SourceID, RefType: refType, Title: r.Title, URL: r.URL},
+				Score:       r.Score,
+			})
+		}
+	}
+	for _, r := range combined.LocalResults {
+		hits = append(hits, providedHit{
+			SurfacedRef: contextuse.SurfacedRef{Ref: r.SourceID, RefType: r.DocType},
+			Score:       r.Score,
+		})
+	}
+	return hits
+}
+
+// queryUseGuidance tells the AI coworker how to report a hit it acts on.
+func queryUseGuidance(agentID string) string {
+	if agentID == "" {
+		agentID = "<id>"
+	}
+	return "If a hit changes what you do, record it: ox agent " + agentID + " context used <ref> --why \"<one line>\"."
 }
 
 // writeQueryResponse marshals the combined response and writes JSON to stdout.
 // Returns bytes written for context tracking.
-func writeQueryResponse(combined *combinedQueryResponse, qa *queryArgs) (int, error) {
+func writeQueryResponse(combined *combinedQueryResponse, qa *queryArgs, agentID string) (int, error) {
 	resp := compactQueryResponse{
 		TeamContext:  combined.TeamContext,
 		LocalResults: combined.LocalResults,
@@ -246,6 +292,9 @@ func writeQueryResponse(combined *combinedQueryResponse, qa *queryArgs) (int, er
 		compact := compactSearchResults(combined.CodeResults, qa.limit, 0, decision.PathMatcher(findGitRoot()))
 		resp.CodeResults = compact.Results
 		resp.Guidance = compact.Guidance
+	}
+	if (combined.TeamContext != nil && len(combined.TeamContext.Results) > 0) || len(combined.LocalResults) > 0 {
+		resp.Guidance = strings.TrimSpace(resp.Guidance + " " + queryUseGuidance(agentID))
 	}
 
 	// Attach combined result count to the root span. Counts the *raw* results

@@ -4,10 +4,14 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/consultscan"
+	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/session/contextuse"
 	"github.com/spf13/cobra"
 )
 
@@ -72,7 +76,103 @@ func runHooksPostCommit(cmd *cobra.Command, args []string) error {
 	}); err != nil {
 		slog.Debug("hooks post-commit: update recording state failed", "error", err, "agent_id", state.AgentID)
 	}
+
+	recordCommitCitations(projectRoot, state, sha)
 	return nil
+}
+
+// recordCommitCitations appends a provable `used` event (mechanism citation,
+// evidence cited_commit) to the active recording's context-trace for every
+// surfaced ref or title the new commit's message names. The surfaced set is
+// read from the trace already on disk, so this works on both finalize paths
+// (CLI and daemon) without either having to rescan git history. Idempotent
+// per (ref, commit); fail-open — any failure is a debug log, never an error,
+// because a post-commit hook must never block a commit. Respects the
+// recap.trace_consultations opt-out like every other trace writer.
+func recordCommitCitations(projectRoot string, state *session.RecordingState, sha string) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Debug("hooks post-commit: citation scan recovered from panic", "recover", r)
+		}
+	}()
+	if state == nil || state.SessionPath == "" || sha == "" {
+		return
+	}
+	if !config.TraceConsultationsEnabled() {
+		return
+	}
+	tracePath := filepath.Join(state.SessionPath, contexttrace.FileName)
+	events, err := contexttrace.ReadEvents(tracePath)
+	if err != nil {
+		slog.Debug("hooks post-commit: read context-trace failed", "error", err)
+		return
+	}
+	surfaced := contextuse.Surfaced(events)
+	if len(surfaced) == 0 {
+		return
+	}
+	msg := readCommitMessage(projectRoot, sha)
+	if msg == "" {
+		return
+	}
+	short := shortSHA(sha)
+	already := map[string]bool{}
+	for _, ev := range events {
+		if ev.Type == contexttrace.EventUsed && ev.Evidence == contexttrace.EvidenceCitedCommit {
+			already[ev.Ref+"\x00"+ev.Commit] = true
+		}
+	}
+	var fresh []contexttrace.Event
+	var freshAliases [][]string // freshAliases[i] are fresh[i]'s other names
+	for _, s := range surfaced {
+		if already[s.Ref+"\x00"+short] || !consultscan.MatchesRef(msg, s.Ref, s.Title, s.Aliases...) {
+			continue
+		}
+		already[s.Ref+"\x00"+short] = true
+		fresh = append(fresh, contexttrace.Event{
+			Type:        contexttrace.EventUsed,
+			Source:      contexttrace.SourceOnDemand,
+			Mechanism:   contexttrace.MechanismCitation,
+			Evidence:    contexttrace.EvidenceCitedCommit,
+			Seq:         state.EntryCount,
+			SurfacedSeq: s.Seq,
+			Ref:         s.Ref,
+			RefType:     s.RefType,
+			Title:       s.Title,
+			URL:         s.URL,
+			Commit:      short,
+		})
+		freshAliases = append(freshAliases, s.Aliases)
+	}
+	if len(fresh) == 0 {
+		return
+	}
+	if err := contexttrace.NewFileWriter(tracePath).AppendAll(fresh); err != nil {
+		slog.Debug("hooks post-commit: append cited_commit events failed", "error", err)
+		return
+	}
+	slog.Debug("hooks post-commit: recorded commit citations", "commit", short, "refs", len(fresh))
+	for i, ev := range fresh {
+		recordStatuslineUse(projectRoot, state, ev.RefType, ev.Ref, freshAliases[i]...)
+	}
+}
+
+// readCommitMessage returns the full message body of a commit, or "" on any
+// failure.
+func readCommitMessage(projectRoot, sha string) string {
+	out, err := exec.Command("git", "-C", projectRoot, "log", "-1", "--format=%B", sha).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// shortSHA abbreviates a commit sha the way git does by default.
+func shortSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
 
 // loadActiveRecording returns the recording state to update for the current

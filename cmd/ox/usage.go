@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/glance"
 	"github.com/sageox/ox/internal/lfs"
@@ -100,6 +101,7 @@ func runUsage(cmd *cobra.Command, _ []string) error {
 	in.Endpoint = endpoint.GetForProject(projectRoot)
 	in.Now = time.Now()
 	in.Width = width
+	in.ScoreThreshold, in.AllowJudged = usageAttributionSettings(projectRoot)
 	if cmd.Flags().Changed("recent") {
 		recent, _ := cmd.Flags().GetInt("recent")
 		switch {
@@ -135,6 +137,7 @@ func runUsageRollup(cmd *cobra.Command, projectRoot string, team, jsonOut bool, 
 		LedgerPath: ledgerPath, Since: since, Until: time.Now(),
 		Window: window, Limit: limit, Width: width,
 	}
+	in.ScoreThreshold, in.AllowJudged = usageAttributionSettings(projectRoot)
 	if team {
 		r := usage.BuildTeam(in)
 		return writeUsageReport(cmd.OutOrStdout(), jsonOut, r, func() string { return usage.HumanTeam(r, width) })
@@ -142,6 +145,18 @@ func runUsageRollup(cmd *cobra.Command, projectRoot string, team, jsonOut bool, 
 	in.Identity = currentRecapIdentity(projectRoot)
 	r := usage.BuildMe(in)
 	return writeUsageReport(cmd.OutOrStdout(), jsonOut, r, func() string { return usage.HumanMe(r, width) })
+}
+
+// usageAttributionSettings is the project's attribution threshold and whether
+// judged evidence may drive the derived category. An unreadable config yields
+// zero values: the usage package's defaults (0.5, judged excluded).
+func usageAttributionSettings(projectRoot string) (threshold float64, allowJudged bool) {
+	cfg, err := config.LoadProjectConfig(projectRoot)
+	if err != nil {
+		return 0, false
+	}
+	a := resolveProjectAttribution(cfg)
+	return a.ScoreThreshold, a.AllowJudgedEvidence
 }
 
 // writeUsageReport prints the JSON payload or the human text and charges the
@@ -193,6 +208,7 @@ func usageInputForCurrentSession(projectRoot, agentID string) usage.Input {
 			in.Harness = h
 		}
 		in.Events, _ = contexttrace.ReadEvents(filepath.Join(state.SessionPath, contexttrace.FileName))
+		in.Events = withLiveUses(projectRoot, state, in.Events)
 		in.TraceSource = usage.TraceSourceSession
 		return in
 	}

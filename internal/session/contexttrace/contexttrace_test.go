@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -380,5 +381,118 @@ func TestInvokedEvent_RoundTripAndLegacyBytesUnchanged(t *testing.T) {
 	const want = `{"type":"provided","ts":"2026-06-01T00:00:00Z","source":"team-docs","doc":"a.md"}`
 	if string(legacy) != want {
 		t.Errorf("legacy event bytes changed:\n got %s\nwant %s", legacy, want)
+	}
+}
+
+func TestAppend_UsedEventRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		ev   Event
+		keys []string // json keys that must be present
+	}{
+		{
+			name: "cited_commit with metadata",
+			ev: Event{
+				Type: EventUsed, Timestamp: "2026-10-26T10:00:00Z", Source: SourceTeamWhisper,
+				Mechanism: MechanismCitation, Evidence: EvidenceCitedCommit,
+				Ref: "Ox7f2a", RefType: "murmur", Seq: 14, SurfacedSeq: 9,
+				Commit: "3e1c9d0", Title: "auth: retry budget", URL: "https://sageox.ai/c/cnv_1",
+				FromName: "Dana",
+			},
+			keys: []string{"evidence", "surfaced_seq", "commit", "title", "url", "from_name"},
+		},
+		{
+			name: "judged",
+			ev: Event{
+				Type: EventUsed, Timestamp: "2026-10-26T10:00:00Z", Source: SourceLocalRecall,
+				Mechanism: MechanismJudge, Evidence: EvidenceJudged, Ref: "ses_1", Decision: "followed retry pattern",
+			},
+			keys: []string{"evidence", "decision"},
+		},
+		{
+			name: "self-reported none",
+			ev:   Event{Type: EventUsed, Timestamp: "2026-10-26T10:00:00Z", Mechanism: MechanismSelfReport, Evidence: EvidenceNone},
+			keys: []string{"evidence"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := NewWriter(t.TempDir())
+			if err := w.Append(tt.ev); err != nil {
+				t.Fatalf("Append: %v", err)
+			}
+			events, err := ReadEvents(w.Path())
+			if err != nil || len(events) != 1 {
+				t.Fatalf("ReadEvents: %v, n=%d", err, len(events))
+			}
+			if !reflect.DeepEqual(events[0], tt.ev) {
+				t.Errorf("round trip mismatch:\n got %+v\nwant %+v", events[0], tt.ev)
+			}
+			raw, err := os.ReadFile(w.Path())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err != nil {
+				t.Fatal(err)
+			}
+			for _, k := range tt.keys {
+				if _, ok := m[k]; !ok {
+					t.Errorf("json key %q missing in %s", k, raw)
+				}
+			}
+		})
+	}
+}
+
+func TestUsedFields_OmittedWhenEmpty(t *testing.T) {
+	b, err := json.Marshal(Event{Type: EventProvided, Source: SourceTeamContext})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"evidence", "surfaced_seq", "commit", "title", "url", "from_name"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("empty field %q should be omitted: %s", k, b)
+		}
+	}
+}
+
+func TestAliases_RoundTripAndLegacyDecode(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want []string
+	}{
+		{name: "legacy event without aliases", line: `{"type":"provided","ts":"t","source":"local-recall","ref":"cnv_x"}`, want: nil},
+		{name: "event with aliases", line: `{"type":"provided","ts":"t","source":"local-recall","ref":"pln_x","aliases":["auth-plan","2026-10-01-auth-plan"]}`, want: []string{"auth-plan", "2026-10-01-auth-plan"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var ev Event
+			if err := json.Unmarshal([]byte(tt.line), &ev); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if !reflect.DeepEqual(ev.Aliases, tt.want) {
+				t.Fatalf("Aliases = %v, want %v", ev.Aliases, tt.want)
+			}
+			out, err := json.Marshal(ev)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var back Event
+			if err := json.Unmarshal(out, &back); err != nil {
+				t.Fatalf("re-unmarshal: %v", err)
+			}
+			if !reflect.DeepEqual(back, ev) {
+				t.Fatalf("round trip = %+v, want %+v", back, ev)
+			}
+			if tt.want == nil && strings.Contains(string(out), "aliases") {
+				t.Fatalf("empty aliases must be omitted, got %s", out)
+			}
+		})
 	}
 }

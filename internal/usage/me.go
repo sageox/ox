@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/ox/internal/recap"
 	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/session/contextuse"
 	"github.com/sageox/ox/internal/theme"
 )
 
@@ -40,6 +41,11 @@ type RollupInput struct {
 	Window     string // the --since value as typed, for the header ("7d")
 	Limit      int
 	Width      int
+
+	// ScoreThreshold and AllowJudged are the project's attribution settings,
+	// as in Input, so a row's would_attribute matches its session view.
+	ScoreThreshold float64
+	AllowJudged    bool
 }
 
 // MeReport is the `ox brief --me --json` payload.
@@ -64,6 +70,9 @@ type MeRow struct {
 	Surfaced int    `json:"surfaced"`
 	Useful   int    `json:"useful"` // surfaced items with use evidence
 	Score    string `json:"score,omitempty"`
+	// WouldAttribute — the session's attribution clears the project
+	// threshold (display-only; the session view's attribution.would_attribute).
+	WouldAttribute bool `json:"would_attribute"`
 }
 
 // MeTotals sums the rows.
@@ -74,6 +83,7 @@ type MeTotals struct {
 	Calls       int `json:"calls"`
 	Tokens      int `json:"tokens"`
 	Useful      int `json:"useful"`
+	Attributed  int `json:"attributed"` // rows whose would_attribute is true
 }
 
 // windowSessions returns the ledger sessions in the window, newest first.
@@ -110,16 +120,25 @@ func BuildMe(in RollupInput) MeReport {
 			break
 		}
 		row := MeRow{Name: s.Name, Date: s.CreatedAt.Local().Format("01-02"), Title: s.Title, Score: s.ScoreCategory}
+		sin := Input{
+			ScoreCategory: s.ScoreCategory, ProducedCommits: len(s.ProducedCommits),
+			ScoreThreshold: in.ScoreThreshold, AllowJudged: in.AllowJudged,
+		}
 		events, dehydrated := recap.ReadTrace(in.LedgerPath, s.Name)
 		switch {
 		case dehydrated:
 			row.Trace = RowNotHydrated
 			r.Totals.NotHydrated++
+			// No readable trace: only a self-reported score can attribute.
+			row.WouldAttribute = buildAttribution(sin, contextuse.Rollup{}).WouldAttribute
 		case !hasInvoked(events):
 			row.Trace = RowNoTrace
+			row.WouldAttribute = buildAttribution(sin, contextuse.Rollup{}).WouldAttribute
 		default:
 			row.Trace = RowTraced
-			sr := Build(Input{Events: events, TraceSource: TraceSourceSession})
+			sin.Events, sin.TraceSource = events, TraceSourceSession
+			sr := Build(sin)
+			row.WouldAttribute = sr.Attribution.WouldAttribute
 			row.Calls = sr.Calls.Total
 			row.Tokens = sr.Context.Tokens
 			row.Surfaced = len(sr.Surfaced)
@@ -128,6 +147,9 @@ func BuildMe(in RollupInput) MeReport {
 			r.Totals.Calls += row.Calls
 			r.Totals.Tokens += row.Tokens
 			r.Totals.Useful += row.Useful
+		}
+		if row.WouldAttribute {
+			r.Totals.Attributed++
 		}
 		r.Sessions = append(r.Sessions, row)
 	}
@@ -214,7 +236,8 @@ func renderMe(r MeReport, width int, st styler) string {
 		lines = append(lines, strings.TrimRight(line, " "))
 	}
 	t := r.Totals
-	lines = append(lines, st.label("total")+fmt.Sprintf("  %d calls · ~%s tokens · %d useful", t.Calls, FmtK(t.Tokens), t.Useful))
+	lines = append(lines, st.label("total")+fmt.Sprintf("  %d calls · ~%s tokens · %d useful · co-author %d of %d",
+		t.Calls, FmtK(t.Tokens), t.Useful, t.Attributed, t.Sessions))
 	if t.NotHydrated > 0 {
 		lines = append(lines, st.dim(fmt.Sprintf("%d not hydrated; `ox session view <name> --context`", t.NotHydrated)))
 	}

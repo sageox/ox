@@ -1759,6 +1759,22 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	return nil
 }
 
+// allowJudgedEvidence resolves attribution.allow_judged_evidence for the
+// handler's project (project config over user config, default false). With no
+// project root, or an unreadable config, judged evidence stays excluded.
+func (h *SessionFinalizeHandler) allowJudgedEvidence() bool {
+	var projAttr, userAttr *config.Attribution
+	if h.projectRoot != "" {
+		if projCfg, err := config.LoadProjectConfig(h.projectRoot); err == nil && projCfg != nil {
+			projAttr = projCfg.Attribution
+		}
+	}
+	if userCfg, err := config.LoadUserConfig(); err == nil && userCfg != nil {
+		userAttr = userCfg.Attribution
+	}
+	return config.MergeAttribution(projAttr, userAttr).AllowJudgedEvidence
+}
+
 // writeMetaAndUploadLFS persists metadata and confirms LFS uploads before any
 // session artifacts are staged. Failed uploads leave local content for retry;
 // automatic finalization never changes an LFS artifact to Git storage.
@@ -1834,6 +1850,14 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	if agentID != "" {
 		score, _ = session.ReadSageoxScore(agentID)
 	}
+
+	// Context-use rollup inputs. The trace is read from the directory that
+	// holds the REAL raw.jsonl bytes (payload.RawPath: the ledger cache or the
+	// local recording dir) — never from a ledger path whose artifacts may
+	// already be LFS pointer stubs; ContextUseRollupFromDir refuses a stub.
+	// Resolved before the mutation so the closure stays side-effect free.
+	traceDir := filepath.Dir(payload.RawPath)
+	allowJudged := h.allowJudgedEvidence()
 
 	// Write meta.json as a locked READ-MODIFY-WRITE, touching only the
 	// fields this path owns.
@@ -1957,6 +1981,14 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 			next.SageoxScore = &s
 			next.SageoxScoreCategory = string(score.Category)
 			next.SageoxScoreReason = score.Reason
+			next.SageoxScoreSource = lfs.SageoxScoreSourceSelfReported
+		}
+
+		// Derived context-use rollup. Recomputed from the trace on every
+		// finalize (deterministic); when the trace is gone or already a
+		// pointer stub the rollup is nil and whatever a CLI door wrote stays.
+		if rollup := lfs.ContextUseRollupFromDir(traceDir, len(next.ProducedCommits), allowJudged); rollup != nil {
+			next.ContextUse = rollup
 		}
 
 		meta = next

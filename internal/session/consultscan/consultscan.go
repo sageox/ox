@@ -11,13 +11,17 @@ package consultscan
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/session/contextuse"
 )
 
 // Roots are the on-disk SageOx repo roots whose files, when read, count as
@@ -28,10 +32,18 @@ type Roots struct {
 	TeamContext []string
 }
 
-// Entry is the minimal raw.jsonl shape the scanner needs — the tool name and
-// its (string-encoded) input. Callers pass entries in transcript order; the
-// slice index is the turn the tag anchors to.
+// Entry is the minimal raw.jsonl shape the scanner needs: the entry's role,
+// its text (assistant output, for citation detection), and the tool name and
+// (string-encoded) input for tool entries. Callers pass entries in transcript
+// order; the slice index is the turn the tag anchors to.
+//
+// Seq frame: the index is the entry's position among NON-header entries, which
+// is the same frame the other trace writers use (`state.EntryCount` counts
+// captured entries, never the header/footer line). LoadRawEntries drops header
+// lines so a raw.jsonl index and an EntryCount seq compare directly.
 type Entry struct {
+	Type      string // user|assistant|system|tool (empty when unknown)
+	Content   string // message text; only read for assistant entries
 	ToolName  string
 	ToolInput string
 }
@@ -114,9 +126,8 @@ func detectRetrievalCommand(toolInput string) (refType, query string, ok bool) {
 		return "", "", false
 	}
 	for _, rc := range retrievalCommands {
-		if idx := strings.Index(cmd, rc.prefix); idx >= 0 {
-			rest := strings.TrimSpace(cmd[idx+len(rc.prefix):])
-			return rc.refType, firstQuotedOrToken(rest), true
+		if call, ok := findOxCall(cmd, rc.prefix); ok {
+			return rc.refType, firstQuotedOrToken(cmd[call.start:call.end]), true
 		}
 	}
 	return "", "", false
@@ -173,55 +184,178 @@ func truncateQuery(s string) string {
 }
 
 // ScanRawFile reads a session's raw.jsonl and returns the consulted events for
-// every SageOx file read in it. Turn (Seq) is the line index. A missing file
-// yields no events and no error — fail-open, like the rest of the trace layer.
-// Malformed lines are skipped but still advance the turn index, so seqs stay
-// aligned with the transcript.
+// every SageOx file read in it. Turn (Seq) is the entry index in the
+// EntryCount frame (see LoadRawEntries). A missing file yields no events and
+// no error — fail-open, like the rest of the trace layer.
 func ScanRawFile(rawPath string, roots Roots) ([]contexttrace.Event, error) {
-	f, err := os.Open(rawPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
+	entries, err := LoadRawEntries(rawPath)
+	if err != nil || len(entries) == 0 {
 		return nil, err
-	}
-	defer f.Close()
-
-	var entries []Entry
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // transcript lines can be large
-	for sc.Scan() {
-		var e struct {
-			ToolName  string `json:"tool_name"`
-			ToolInput string `json:"tool_input"`
-		}
-		// Unparseable lines still occupy a turn slot so seqs stay aligned.
-		_ = json.Unmarshal(sc.Bytes(), &e)
-		entries = append(entries, Entry{ToolName: e.ToolName, ToolInput: e.ToolInput})
 	}
 	return Scan(entries, roots), nil
 }
 
-// TagSessionReads scans a session's raw.jsonl for SageOx file reads and appends
-// the resulting turn-anchored consulted events to the session's
-// context-trace.jsonl. This is the finalize-time home for the file-read tagger:
-// at session stop the local raw.jsonl holds real content, so the scan is a pure
-// local read. Best-effort and idempotency-agnostic (callers run it once at
-// finalize); returns the number of turns tagged.
+// LoadRawEntries reads a session's raw.jsonl into Entries in the seq frame the
+// rest of the trace uses.
+//
+// raw.jsonl opens with a header line ({"type":"header"} or a {"_meta":…}
+// record) and may close with a footer; neither is an entry, and the whisper /
+// invoked / lifecycle writers anchor their Seq to `state.EntryCount`, which
+// counts captured entries only. So those lines are dropped here rather than
+// occupying an index — the "seqOffset" is exactly the number of such lines
+// before the first entry, and subtracting it is what makes a `used` event's
+// "after the surfacing turn" comparison meaningful. Malformed lines ARE kept
+// (as empty entries) because the capture path counted them, so they still
+// hold their slot. A missing file yields nil, nil.
+//
+// It is LoadRawEntriesFrom from the start of the file.
+func LoadRawEntries(rawPath string) ([]Entry, error) {
+	entries, _, _, err := LoadRawEntriesFrom(rawPath, 0, 0)
+	return entries, err
+}
+
+// LoadRawEntriesFrom reads the entries of a growing raw.jsonl that start at
+// byte offset, in the same frame as LoadRawEntries: the first returned entry
+// has index startIndex. It returns the offset and index to pass to the next
+// call, so tailing a file in any number of calls numbers every entry exactly
+// as one LoadRawEntries call over the finished file does.
+//
+// A last line with no newline yet is consumed only when it is already a
+// complete JSON record; otherwise it is likely still being written and is left
+// for the next call (nextOffset stops at its start). A missing file yields no
+// entries, the given offset and index, and no error; an offset past the end
+// yields nothing.
+func LoadRawEntriesFrom(rawPath string, offset int64, startIndex int) (entries []Entry, nextOffset int64, nextIndex int, err error) {
+	if offset < 0 {
+		return nil, offset, startIndex, fmt.Errorf("consultscan: negative raw.jsonl offset %d", offset)
+	}
+	f, err := os.Open(rawPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, offset, startIndex, nil
+		}
+		return nil, offset, startIndex, err
+	}
+	defer f.Close()
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return nil, offset, startIndex, err
+	}
+
+	nextOffset = offset
+	r := bufio.NewReaderSize(f, 64*1024) // transcript lines can be large
+	for {
+		line, rerr := r.ReadBytes('\n')
+		if rerr != nil && !errors.Is(rerr, io.EOF) {
+			return entries, nextOffset, startIndex + len(entries), rerr
+		}
+		terminated := rerr == nil
+		trimmed := bytes.TrimSpace(line)
+		if !terminated && (len(trimmed) == 0 || !json.Valid(trimmed)) {
+			break // unterminated and incomplete: wait for the rest
+		}
+		nextOffset += int64(len(line))
+		if e, ok := parseRawLine(trimmed); ok {
+			entries = append(entries, e)
+		}
+		if !terminated {
+			break
+		}
+	}
+	return entries, nextOffset, startIndex + len(entries), nil
+}
+
+// parseRawLine turns one trimmed raw.jsonl line into an Entry, reporting false
+// for blank and framing lines, which hold no seq slot.
+func parseRawLine(line []byte) (Entry, bool) {
+	if len(line) == 0 {
+		return Entry{}, false
+	}
+	var e struct {
+		Type      string          `json:"type"`
+		Content   json.RawMessage `json:"content"`
+		ToolName  string          `json:"tool_name"`
+		ToolInput json.RawMessage `json:"tool_input"`
+		Meta      json.RawMessage `json:"_meta"`
+	}
+	// Unparseable lines still occupy a turn slot so seqs stay aligned.
+	if err := json.Unmarshal(line, &e); err == nil && isHeaderLine(e.Type, e.Meta) {
+		return Entry{}, false
+	}
+	return Entry{
+		Type:      e.Type,
+		Content:   rawString(e.Content),
+		ToolName:  e.ToolName,
+		ToolInput: rawString(e.ToolInput),
+	}, true
+}
+
+// isHeaderLine reports whether a raw.jsonl record is framing (header/footer/
+// _meta) rather than a captured entry.
+func isHeaderLine(typ string, meta json.RawMessage) bool {
+	return typ == "header" || typ == "footer" || len(meta) > 0
+}
+
+// rawString returns a JSON value as text: a JSON string decoded, anything
+// else (an object tool input, an array content block) as its raw JSON.
+func rawString(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return string(raw)
+}
+
+// TagSessionReads scans a session's raw.jsonl for SageOx file reads and
+// evidence of use of already-surfaced context, and appends the resulting
+// turn-anchored consulted / used events to the session's context-trace.jsonl.
+// This is the finalize-time home for the deterministic tagger: at session stop
+// the local raw.jsonl holds real content, so the scan is a pure local read.
+//
+// Idempotent: any (type, ref, evidence, seq) already in the trace is skipped,
+// so a daemon re-finalize or a CLI retry never double-writes. Returns the
+// number of events appended.
 func TagSessionReads(rawPath, sessionDir string, roots Roots) (int, error) {
-	events, err := ScanRawFile(rawPath, roots)
-	if err != nil || len(events) == 0 {
+	entries, err := LoadRawEntries(rawPath)
+	if err != nil || len(entries) == 0 {
 		return 0, err
 	}
 	w := contexttrace.NewWriter(sessionDir)
-	n := 0
-	for _, ev := range events {
-		if err := w.Append(ev); err != nil {
-			return n, err
-		}
-		n++
+	existing, err := contexttrace.ReadEvents(w.Path())
+	if err != nil {
+		return 0, err
 	}
-	return n, nil
+	seen := make(map[string]bool, len(existing))
+	for _, ev := range existing {
+		seen[eventKey(ev)] = true
+	}
+
+	candidates := Scan(entries, roots)
+	candidates = append(candidates, ScanUses(entries, contextuse.Surfaced(existing), roots)...)
+
+	var fresh []contexttrace.Event
+	for _, ev := range candidates {
+		k := eventKey(ev)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		fresh = append(fresh, ev)
+	}
+	if len(fresh) == 0 {
+		return 0, nil
+	}
+	if err := w.AppendAll(fresh); err != nil {
+		return 0, err
+	}
+	return len(fresh), nil
+}
+
+// eventKey is the idempotency key for a tagger-written event.
+func eventKey(ev contexttrace.Event) string {
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%d", ev.Type, ev.Ref, ev.Evidence, ev.Seq)
 }
 
 // extractPath pulls the target file path out of a tool input. Tool inputs are

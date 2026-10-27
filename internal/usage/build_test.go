@@ -158,9 +158,10 @@ func TestBuild(t *testing.T) {
 			in:   Input{TraceSource: TraceSourceSession, AgentID: "OxAb12", Recording: true, Events: []contexttrace.Event{memoryProvided()}},
 			assert: func(t *testing.T, r Report) {
 				require.NotNil(t, r.Used.SelfReport)
-				assert.Equal(t, "ox agent OxAb12 session context-trace", r.Used.SelfReport.Command)
+				assert.Equal(t, "ox agent OxAb12 session context-trace", r.Used.SelfReport.BatchCommand)
+				assert.Contains(t, r.Used.SelfReport.Command, "ox agent OxAb12 context used ")
 				var line contexttrace.Event
-				require.NoError(t, json.Unmarshal([]byte(r.Used.SelfReport.ExampleLine), &line))
+				require.NoError(t, json.Unmarshal([]byte(r.Used.SelfReport.BatchExampleLine), &line))
 				assert.Equal(t, contexttrace.EventInfluenced, line.Type)
 				assert.Equal(t, contexttrace.MechanismSelfReport, line.Mechanism)
 				assert.Equal(t, "MEMORY.md", line.Ref, "example anchors to a real surfaced item")
@@ -186,7 +187,7 @@ func TestBuild(t *testing.T) {
 				require.NotNil(t, r.Used.SageoxScore)
 				assert.Equal(t, Score{Category: "moderate", Reason: "r"}, *r.Used.SageoxScore)
 				assert.Equal(t, 2, r.Used.ProducedCommits)
-				assert.Contains(t, r.Display, "score      moderate · 2 commits")
+				assert.Contains(t, r.Display, "co-author  moderate · would attribute (threshold 0.5)\n           reported by the AI coworker: r\n")
 			},
 		},
 		{
@@ -194,7 +195,7 @@ func TestBuild(t *testing.T) {
 			in:   Input{TraceSource: TraceSourceSession},
 			assert: func(t *testing.T, r Report) {
 				assert.Nil(t, r.Used.SageoxScore)
-				assert.NotContains(t, r.Display, "score ")
+				assert.NotContains(t, r.Display, "co-author", "a derived none adds nothing")
 			},
 		},
 		{
@@ -302,7 +303,8 @@ func TestBuild_URLFilledFromRefWithEndpoint(t *testing.T) {
 	r := Build(Input{TraceSource: TraceSourceSession, Endpoint: ep, Events: []contexttrace.Event{ev}})
 	require.Len(t, r.Surfaced, 1)
 	assert.Equal(t, ep+"/c/"+testCnv, r.Surfaced[0].URL)
-	assert.Contains(t, r.Display, ep+"/c/"+testCnv)
+	assert.NotContains(t, r.Display, ep+"/c/"+testCnv, "an unused discussion is listed without its link")
+	assert.Contains(t, r.Display, "available  1 discussion\n")
 }
 
 // TestBuild_NoURLWithoutEndpoint: with no endpoint there is no trustworthy
@@ -335,5 +337,8 @@ func TestBuild_NextActions_NoReportNag(t *testing.T) {
 	assert.NotContains(t, string(b), `"status"`, "used.status is gone from the contract")
 	assert.NotContains(t, string(b), `"injected"`)
 	assert.Contains(t, string(b), `"context":{"tokens":`)
-	assert.NotContains(t, string(b), `"relevant"`, "relevant is omitted when the trace carries none")
+	assert.Contains(t, string(b), `"relevant":{"count":0`, "an available trace always carries relevant")
+	nb, err := json.Marshal(none)
+	require.NoError(t, err)
+	assert.NotContains(t, string(nb), `"relevant"`, "relevant is omitted when there is no trace")
 }

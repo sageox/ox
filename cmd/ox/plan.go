@@ -22,6 +22,8 @@ import (
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
+	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/session/contextuse"
 	"github.com/spf13/cobra"
 )
 
@@ -1778,6 +1780,7 @@ func runPlanView(cmd *cobra.Command, slug string) error {
 	if err != nil {
 		return err
 	}
+	tracePlanSurfaced(gitRoot, info)
 
 	fmt.Fprintln(out, cli.StyleBrand.Render(info.Topic))
 	fmt.Fprintf(out, "%s  %s\n", cli.StyleDim.Render("slug:"+info.Slug), cli.StyleDim.Render(planDate(info.CreatedAt)))
@@ -2002,4 +2005,40 @@ func init() {
 
 	planCmd.GroupID = "dev"
 	rootCmd.AddCommand(planCmd)
+}
+
+// tracePlanSurfaced records a plan an ox command put in front of the AI
+// coworker as a surfaced item in its session trace: ref = the stable pln_ id
+// (slug for a legacy plan), title = the plan's topic, url = its share link.
+// Best-effort and silent: no agent ID or no live recording, no trace.
+func tracePlanSurfaced(gitRoot string, info plan.PlanInfo) {
+	agentID := traceAgentIDFromEnv()
+	if agentID == "" || gitRoot == "" {
+		return
+	}
+	traceProvidedHits(gitRoot, agentID, contexttrace.SourceOnDemand, contexttrace.MechanismRetrieval,
+		[]providedHit{planProvidedHit(gitRoot, info, planShareURL)})
+}
+
+// planProvidedHit builds the surfaced item for a plan. shareURL maps a pln_ id
+// to its link (planShareURL in production).
+func planProvidedHit(gitRoot string, info plan.PlanInfo, shareURL func(gitRoot, planID string) string) providedHit {
+	id := info.PlanID
+	if id == "" && info.Dir != "" {
+		id = planIDForDir(info.Dir)
+	}
+	ref := id
+	if ref == "" {
+		ref = info.Slug
+	}
+	title := info.Topic
+	if title == "" {
+		title = info.Slug
+	}
+	url := ""
+	if id != "" {
+		url = shareURL(gitRoot, id)
+	}
+	aliases := hitAliases(ref, info.Slug, filepath.Base(info.Dir))
+	return providedHit{SurfacedRef: contextuse.SurfacedRef{Ref: ref, RefType: "plan", Title: title, URL: url, Aliases: aliases}}
 }
