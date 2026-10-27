@@ -3,8 +3,11 @@
 
 Input: any sprite sheet + sheet.json in the pixel set's layout (one animation
 per row, cells of `cell` x `cellHeight` px, each row's `frames` and `ms`),
-with the same animations and frame counts as ../pixel/sheet.json. The cell
-size is read from the manifest; nothing here assumes one.
+naming the same animations as ../pixel/sheet.json. Frame counts may differ:
+the hi-res set runs at its own frame rate (30 fps, holds merged into longer
+frames), so each animation's per-frame `ms` is copied into the manifest and
+`ox pet enable` plays it with those timings. The cell size is read from the
+manifest; nothing here assumes one.
 
 Output, in <outdir> (normally this folder): one palette PNG strip per
 animation (<anim>.png, frames left to right) and manifest.json, which
@@ -78,17 +81,21 @@ def main():
     p.add_argument("--quantizer", choices=("pngquant", "octree"), default="pngquant")
     p.add_argument("--colors", type=int, default=128)
     p.add_argument("--pixel-json", default=os.path.join(HERE, "..", "pixel", "sheet.json"),
-                   help="the terminal's sheet, for frame counts and scale")
+                   help="the terminal's sheet, for animation names and scale")
     args = p.parse_args()
 
     meta = json.load(open(args.sheet_json))
     pixel = json.load(open(args.pixel_json))
     cw, ch = meta["cell"], meta.get("cellHeight") or meta["cell"]
-    want = {a["name"]: a["frames"] for a in pixel["animations"]}
-    got = {a["name"]: a["frames"] for a in meta["animations"]}
+    want = {a["name"] for a in pixel["animations"]}
+    got = {a["name"] for a in meta["animations"]}
     if want != got:
-        sys.exit(f"frame counts differ from {args.pixel_json}: "
-                 f"{ {n: (want.get(n), got.get(n)) for n in set(want) | set(got) if want.get(n) != got.get(n)} }")
+        sys.exit(f"animations differ from {args.pixel_json}: missing {sorted(want - got)}, extra {sorted(got - want)}")
+    for a in meta["animations"]:
+        # a list of per-frame durations is what lets the counts differ; a scalar ms (the pixel layout)
+        # would leave the Go side guessing the hi-res timing
+        if not isinstance(a.get("ms"), list) or len(a["ms"]) != a["frames"]:
+            sys.exit(f"{a['name']}: sheet.json needs one ms per frame ({a['frames']} frames)")
 
     os.makedirs(args.outdir, exist_ok=True)
     sheet = Image.open(args.sheet_png).convert("RGBA")
@@ -103,8 +110,8 @@ def main():
         for i, f in enumerate(frames):
             strip.paste(f.crop(box), (i * w, 0))
         quantize(strip, args.quantizer, args.colors, os.path.join(args.outdir, a["name"] + ".png"))
-        anims[a["name"]] = {"frames": a["frames"], "x": box[0], "y": box[1], "width": w, "height": h}
-        print(f"{a['name']}: {a['frames']} frames, crop {w}x{h}", file=sys.stderr)
+        anims[a["name"]] = {"frames": a["frames"], "ms": a["ms"], "x": box[0], "y": box[1], "width": w, "height": h}
+        print(f"{a['name']}: {a['frames']} frames, {sum(a['ms'])} ms, crop {w}x{h}", file=sys.stderr)
 
     fig = union([boxes[n] for n in FIGURE_ANIMS])
     scale = cw / pixel["cell"]
