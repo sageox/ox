@@ -6,12 +6,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
@@ -136,7 +136,7 @@ func trimNL(s string) string {
 
 func TestInvalidHeadCheck_CleanLedgerPasses(t *testing.T) {
 	_, cloneDir := setupHealthyLedgerClone(t)
-	result := invalidHeadCheck(cloneDir, false)
+	result := invalidHeadCheck(t.Context(), cloneDir, false)
 	assert.True(t, result.passed)
 	assert.False(t, result.warning)
 }
@@ -145,7 +145,7 @@ func TestInvalidHeadCheck_ReportsWithoutFix(t *testing.T) {
 	_, cloneDir := setupHealthyLedgerClone(t)
 	corruptHEADToInvalidRef(t, cloneDir)
 
-	result := invalidHeadCheck(cloneDir, false)
+	result := invalidHeadCheck(t.Context(), cloneDir, false)
 	assert.False(t, result.passed)
 	assert.Equal(t, "critical", result.priority)
 	assert.Contains(t, result.message, ".invalid")
@@ -157,12 +157,12 @@ func TestInvalidHeadCheck_ReportsWithoutFix(t *testing.T) {
 }
 
 func TestInvalidHeadCheck_NoLedgerSkips(t *testing.T) {
-	result := invalidHeadCheck("", false)
+	result := invalidHeadCheck(t.Context(), "", false)
 	assert.True(t, result.skipped)
 }
 
 func TestInvalidHeadCheck_NotAGitRepoSkips(t *testing.T) {
-	result := invalidHeadCheck(t.TempDir(), false)
+	result := invalidHeadCheck(t.Context(), t.TempDir(), false)
 	assert.True(t, result.skipped)
 }
 
@@ -217,10 +217,15 @@ func serveDumbHTTP(t *testing.T, bareDir string) string {
 	return srv.URL
 }
 
-// Interrupted recloning must restore the original checkout before returning.
+// TestInvalidHeadRepair_InterruptRestoresOriginal verifies Ctrl-C during the
+// HEAD repair's reclone restores the original Ledger and runs no later Ledger
+// check.
+// Failure prevented: an interrupted repair went on to the clean-workdir and
+// branch-status repairs, which commit and push a Ledger whose HEAD had just
+// been restored to an unresolvable ref.
 func TestInvalidHeadRepair_InterruptRestoresOriginal(t *testing.T) {
 	if testing.Short() {
-		t.Skip("short: real Git clone and process signal")
+		t.Skip("short: real paced Git clone")
 	}
 	isolateLedgerRepairCredentials(t)
 	const fakeEndpoint = "https://fake-ledger-interrupt.invalid"
@@ -233,27 +238,89 @@ func TestInvalidHeadRepair_InterruptRestoresOriginal(t *testing.T) {
 	url := servePacedGitRepo(t, directFixtureBytes, directPace, 96<<10)
 	runGitLedgerT(t, target, "remote", "set-url", "origin", url)
 	corruptHEADToInvalidRef(t, target)
-	sink := make(chan os.Signal, 1)
-	signal.Notify(sink, os.Interrupt)
-	t.Cleanup(func() { signal.Stop(sink) })
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// checkLedgerGitHealth finds the Ledger through the working directory's project
+	project := createInitializedProjectWithConfig(t, nil)
+	runGitLedgerT(t, project, "init", "-q")
+	require.NoError(t, config.SaveLocalConfig(project, &config.LocalConfig{Ledger: &config.LedgerConfig{Path: target}}))
+	t.Chdir(project)
+
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	done := make(chan checkResult, 1)
-	go func() { done <- fixLedgerInvalidHead(ctx, target, "refs/heads/.invalid") }()
+	var checks []checkResult
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		checks = checkLedgerGitHealth(ctx, doctorOptions{fix: true, fixSlugs: []string{CheckSlugLedgerInvalidHead}})
+	}()
+	t.Cleanup(func() { <-done })
 	waitForDownload(t, target, 64<<10)
-	process, err := os.FindProcess(os.Getpid())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = process.Release() })
-	require.NoError(t, process.Signal(os.Interrupt))
-	result := <-done
-	require.NoError(t, ctx.Err(), "interruption must stop the clone before its backstop")
-	require.False(t, result.passed)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Ctrl-C did not stop the reclone")
+	}
+
+	require.NotEmpty(t, checks)
+	last := checks[len(checks)-1]
+	require.Equal(t, "Ledger HEAD integrity", last.name, "no Ledger check may run after the interrupted repair")
+	require.False(t, last.passed)
 	head, err := os.ReadFile(filepath.Join(target, ".git", "HEAD"))
 	require.NoError(t, err)
 	require.Contains(t, string(head), "refs/heads/.invalid")
 	content, err := os.ReadFile(filepath.Join(target, "sessions", "s1.txt"))
 	require.NoError(t, err)
 	require.Equal(t, "session content\n", string(content))
+}
+
+// TestInvalidHeadRepair_InterruptAfterRecloneCommits verifies Ctrl-C after
+// the reclone succeeded still lets the repair commit the restored files.
+// Failure prevented: the canceled `git status` read as nothing to restore, so
+// the repair skipped the commit, left the restored sessions uncommitted, and
+// told the coworker the backup held nothing beyond the fresh clone.
+func TestInvalidHeadRepair_InterruptAfterRecloneCommits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("the git wrapper is a shell script")
+	}
+	isolateLedgerRepairCredentials(t)
+	const fakeEndpoint = "https://fake-ledger-late-interrupt.invalid"
+	t.Setenv(endpoint.EnvVar, fakeEndpoint)
+	require.NoError(t, gitserver.SaveCredentialsForEndpoint(fakeEndpoint, gitserver.GitCredentials{
+		Token: "test-token", ServerURL: fakeEndpoint, Username: "oauth2",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}))
+	bareDir, target := setupHealthyLedgerClone(t)
+	runGitLedgerT(t, target, "remote", "set-url", "origin", serveDumbHTTP(t, bareDir))
+	corruptHEADToInvalidRef(t, target)
+
+	// The repair's first `git status --porcelain` runs after the reclone and
+	// the restore; this git holds it until the test has pressed Ctrl-C.
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	bin, marks := t.TempDir(), t.TempDir()
+	paused, resume := filepath.Join(marks, "paused"), filepath.Join(marks, "resume")
+	script := "#!/bin/sh\ncase \" $* \" in *\" status --porcelain \"*)\n" +
+		"  if [ ! -e '" + paused + "' ]; then : > '" + paused + "'; while [ ! -e '" + resume + "' ]; do sleep 0.05; done; fi ;;\n" +
+		"esac\nexec '" + realGit + "' \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Cleanup(func() { _ = os.WriteFile(resume, nil, 0o600) })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan checkResult, 1)
+	go func() { done <- fixLedgerInvalidHead(ctx, target, "refs/heads/.invalid") }()
+	require.Eventually(t, func() bool { _, err := os.Stat(paused); return err == nil },
+		30*time.Second, 10*time.Millisecond, "the repair never reached its status check")
+	cancel()
+	require.NoError(t, os.WriteFile(resume, nil, 0o600))
+	result := <-done
+
+	require.Contains(t, result.message, "repaired", "%s / %s", result.message, result.detail)
+	require.Empty(t, runGitLedgerT(t, target, "status", "--porcelain"), "the restored files must be committed")
 }
 
 func TestInvalidHeadCheck_FixReClonesAndRestoresStagedContent(t *testing.T) {
@@ -280,7 +347,7 @@ func TestInvalidHeadCheck_FixReClonesAndRestoresStagedContent(t *testing.T) {
 
 	corruptHEADToInvalidRef(t, cloneDir)
 
-	result := invalidHeadCheck(cloneDir, true)
+	result := invalidHeadCheck(t.Context(), cloneDir, true)
 
 	require.True(t, result.passed, "fix should succeed: %s / %s", result.message, result.detail)
 	assert.True(t, result.warning, "a repair is reported as a warning, not a silent pass")
@@ -355,7 +422,7 @@ func TestInvalidHeadCheck_FixIdenticalContentIsNoOp(t *testing.T) {
 	cmd.Dir = cloneDir
 	require.NoError(t, cmd.Run())
 
-	result := invalidHeadCheck(cloneDir, true)
+	result := invalidHeadCheck(t.Context(), cloneDir, true)
 
 	require.True(t, result.passed, "identical content must not be treated as a conflict: %s / %s", result.message, result.detail)
 	sessionContent, err := os.ReadFile(filepath.Join(cloneDir, "sessions", "s1.txt"))
@@ -378,7 +445,7 @@ func TestRepairInvalidHead_NoOriginRemoteFailsCleanly(t *testing.T) {
 	corruptHEADToInvalidRef(t, cloneDir)
 	runGitLedgerT(t, cloneDir, "remote", "remove", "origin")
 
-	result := invalidHeadCheck(cloneDir, true)
+	result := invalidHeadCheck(t.Context(), cloneDir, true)
 
 	assert.False(t, result.passed)
 	assert.Contains(t, result.message, "remote URL")
@@ -418,7 +485,7 @@ func TestInvalidHeadCheck_FixIsNonDestructiveWhenRecloneFails(t *testing.T) {
 
 	corruptHEADToInvalidRef(t, cloneDir)
 
-	result := invalidHeadCheck(cloneDir, true)
+	result := invalidHeadCheck(t.Context(), cloneDir, true)
 
 	assert.False(t, result.passed, "fix must fail when the reclone itself fails")
 
@@ -491,7 +558,7 @@ func TestRepairInvalidHead_RefusesConflictingContent(t *testing.T) {
 	// re-serve so the dumb-HTTP mirror picks up the new commit before reclone.
 	runGitLedgerT(t, bareDir, "update-server-info")
 
-	result := invalidHeadCheck(cloneDir, true)
+	result := invalidHeadCheck(t.Context(), cloneDir, true)
 
 	assert.False(t, result.passed, "repair must refuse when backup content conflicts with origin's current content")
 	assert.Contains(t, result.message, "differ")
@@ -543,7 +610,7 @@ func TestRepairInvalidHead_NothingToRestoreIsAWarningNotAFailure(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, ".git", "refs", "heads"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, ".git", "refs", "heads", ".invalid"), nil, 0o644))
 
-	result := invalidHeadCheck(cloneDir, true)
+	result := invalidHeadCheck(t.Context(), cloneDir, true)
 
 	require.True(t, result.passed, "a repair with nothing to restore is still a successful repair: %s / %s", result.message, result.detail)
 	assert.True(t, result.warning)
@@ -593,7 +660,7 @@ func TestRepairInvalidHead_CommitFailureSurfacesButKeepsRepair(t *testing.T) {
 	cmd.Dir = cloneDir
 	require.NoError(t, cmd.Run())
 
-	result := invalidHeadCheck(cloneDir, true)
+	result := invalidHeadCheck(t.Context(), cloneDir, true)
 
 	assert.False(t, result.passed, "a commit-time refusal must surface as a failure")
 	assert.Contains(t, result.detail, "backup at")
@@ -632,7 +699,7 @@ func TestRepairInvalidHead_RenameAsideFails(t *testing.T) {
 	require.NoError(t, os.Chmod(parent, 0o555))
 	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
 
-	result := invalidHeadCheck(cloneDir, true)
+	result := invalidHeadCheck(t.Context(), cloneDir, true)
 
 	assert.False(t, result.passed)
 	assert.Contains(t, result.message, "could not move the corrupted clone aside")
@@ -675,7 +742,7 @@ func TestRepairInvalidHead_RestoreErrorTriggersRollback(t *testing.T) {
 
 	corruptHEADToInvalidRef(t, cloneDir)
 
-	result := invalidHeadCheck(cloneDir, true)
+	result := invalidHeadCheck(t.Context(), cloneDir, true)
 
 	assert.False(t, result.passed, "restoring into a path origin now uses for something else must fail, not silently drop content")
 	assert.Contains(t, result.message, "restoring")

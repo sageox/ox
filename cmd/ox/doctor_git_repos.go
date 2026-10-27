@@ -717,6 +717,12 @@ func gitLockFilesResult(name, gitDir string, now time.Time) checkResult {
 // Detects legacy sibling directory structure and suggests migration.
 // With fix=true, prompts user to fix issues.
 func checkGitRepoPaths(fix bool) checkResult {
+	return gitRepoPathsCheck(context.Background(), fix)
+}
+
+// gitRepoPathsCheck is checkGitRepoPaths for a doctor run, whose ctx stops
+// the repairs.
+func gitRepoPathsCheck(ctx context.Context, fix bool) checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
 		return SkippedCheck("git repo paths", "not in git repo", "")
@@ -848,7 +854,7 @@ func checkGitRepoPaths(fix bool) checkResult {
 					}
 					// authenticated + .sageox exists but no repos configured = problem
 					if fix {
-						return fixMissingRepos(gitRoot, localCfg)
+						return fixMissingRepos(ctx, gitRoot, localCfg)
 					}
 					return WarningCheck("git repo paths", "no repos configured",
 						"Run `ox doctor --fix` to fetch and clone repos from cloud")
@@ -865,7 +871,7 @@ func checkGitRepoPaths(fix bool) checkResult {
 
 	// issues found
 	if fix {
-		return fixRepoPathIssues(gitRoot, localCfg, issues)
+		return fixRepoPathIssues(ctx, gitRoot, localCfg, issues)
 	}
 
 	// during the post-init bootstrap window, the daemon is still cloning repos,
