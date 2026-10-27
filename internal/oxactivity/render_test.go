@@ -3,132 +3,146 @@ package oxactivity
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-var fullSegment = Segment{
-	Action:         "posted murmur",
-	WhisperFrom:    "160305533-ryan",
-	WhisperTopic:   "wip",
-	WhisperContent: "Refactoring auth middleware",
-	Age:            3 * time.Minute,
+var fullCounts = Counts{Discussions: 3, Plans: 1, Docs: 2, Sessions: 4, Murmurs: 1}
+
+// TestRender_Idle is byte-exact with color off. Failure prevented: a session
+// where nothing has been used yet reads as anything but the bare mark, or
+// escape bytes reach a coworker who asked for none.
+func TestRender_Idle(t *testing.T) {
+	t.Parallel()
+	got := Render(Counts{}, false)
+	assert.Equal(t, "● ox", got)
+	line, width := RenderWidth(Counts{}, false, 80)
+	assert.Equal(t, "● ox", line)
+	assert.Equal(t, 4, width)
+	assert.True(t, Counts{}.IsZero())
+	assert.False(t, Counts{Murmurs: 1}.IsZero())
 }
 
-// --- A. Plain rendering is byte-exact ---
-// Failure prevented: a harness that does not want color (NO_COLOR) receives
-// escape bytes, or the two harnesses drift in wording.
-func TestRender_Plain(t *testing.T) {
+// TestRender_Pluralization names one item in the singular and many in the
+// plural, in the fixed order. Failure prevented: "1 discussions", or buckets
+// that reshuffle between refreshes.
+func TestRender_Pluralization(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name string
-		seg  Segment
+		c    Counts
 		want string
 	}{
-		{"full", fullSegment, "● ox  posted murmur · whisper from ryan [wip] Refactoring auth middleware 3m"},
-		{"action only", Segment{Action: "loaded team context"}, "● ox  loaded team context"},
-		{"action with age", Segment{Action: "saved plan", Age: 2 * time.Hour}, "● ox  saved plan 2h"},
-		{"whisper only", Segment{WhisperFrom: "dedhaw", WhisperContent: "hi"}, "● ox  whisper from dedhaw hi"},
-		{"whisper without sender", Segment{WhisperContent: "hi"}, "● ox  whisper hi"},
-		{"empty", Segment{}, "● ox"},
-		{"whitespace collapsed", Segment{Action: "  posted\n\tmurmur "}, "● ox  posted murmur"},
+		{"all singular", Counts{1, 1, 1, 1, 1}, "● ox  1 discussion · 1 plan · 1 doc · 1 session · 1 murmur"},
+		{"all plural", Counts{2, 3, 4, 5, 12}, "● ox  2 discussions · 3 plans · 4 docs · 5 sessions · 12 murmurs"},
+		{"mixed", Counts{Discussions: 3, Plans: 1, Murmurs: 1}, "● ox  3 discussions · 1 plan · 1 murmur"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := Render(tt.seg, false)
+			got := Render(tt.c, false)
 			assert.Equal(t, tt.want, got)
 			assert.NotContains(t, got, "\x1b")
 			assert.NotContains(t, got, "\n")
+			assert.Equal(t, ansi.StringWidth(got), Width(tt.c))
 		})
 	}
 }
 
-// --- B. Color rendering ---
+// TestRender_ZeroBucketsOmitted shows only what was used. Failure prevented:
+// "0 plans" noise drawing the eye to nothing.
+func TestRender_ZeroBucketsOmitted(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		c    Counts
+		want string
+	}{
+		{"only plans", Counts{Plans: 2}, "● ox  2 plans"},
+		{"only murmurs", Counts{Murmurs: 1}, "● ox  1 murmur"},
+		{"gap in the middle", Counts{Discussions: 1, Sessions: 2}, "● ox  1 discussion · 2 sessions"},
+		{"negative treated as zero", Counts{Docs: -1, Plans: 1}, "● ox  1 plan"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, Render(tt.c, false))
+			assert.NotContains(t, Render(tt.c, false), "0 ")
+		})
+	}
+}
+
+// TestRender_FitDropsSmallestFirst keeps the biggest signals when the bar is
+// narrow and never cuts an item in half. Failure prevented: the line wraps,
+// or a truncated "3 discu…" that tells the coworker nothing.
+func TestRender_FitDropsSmallestFirst(t *testing.T) {
+	t.Parallel()
+
+	full := Render(fullCounts, false) // ● ox  3 discussions · 1 plan · 2 docs · 4 sessions · 1 murmur
+	tests := []struct {
+		name  string
+		c     Counts
+		width int
+		want  string
+	}{
+		{"unlimited", fullCounts, 0, full},
+		{"fits exactly", fullCounts, ansi.StringWidth(full), full},
+		// smallest are plan(1) and murmur(1): the rightmost (murmur) goes first
+		{"one over drops rightmost smallest", fullCounts, ansi.StringWidth(full) - 1, "● ox  3 discussions · 1 plan · 2 docs · 4 sessions"},
+		{"then the other 1", fullCounts, 41, "● ox  3 discussions · 2 docs · 4 sessions"},
+		{"then 2", fullCounts, 32, "● ox  3 discussions · 4 sessions"},
+		{"then 3", fullCounts, 20, "● ox  4 sessions"},
+		{"nothing fits but the mark", fullCounts, 10, "● ox"},
+		{"mark is the floor", fullCounts, 2, "● ox"},
+		{"tie keeps leftmost", Counts{Discussions: 2, Plans: 2}, 20, "● ox  2 discussions"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, width := RenderWidth(tt.c, false, tt.width)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, ansi.StringWidth(got), width)
+			if tt.width >= 4 {
+				assert.LessOrEqual(t, width, tt.width)
+			}
+			colored, cw := RenderWidth(tt.c, true, tt.width)
+			assert.Equal(t, got, ansi.Strip(colored), "color must not change fitting")
+			assert.Equal(t, width, cw, "width is the plain width with color on")
+			assert.Equal(t, got, Render(Fit(tt.c, tt.width), false))
+		})
+	}
+}
+
+// TestRender_Color: numbers green, nouns and separators dim, mark bold.
 // Failure prevented: the line loses its green, uses 24-bit color that paints
 // backgrounds on 256-color terminals, or styles differ from the plain words.
 func TestRender_Color(t *testing.T) {
 	t.Parallel()
 
-	got := Render(fullSegment, true)
+	got := Render(Counts{Discussions: 3, Plans: 1}, true)
 	require.Contains(t, got, "\x1b[", "color output must carry SGR sequences")
 	assert.NotContains(t, got, "38;2;", "24-bit color is misread by 256-color terminals")
 	assert.Contains(t, got, "38;5;", "foreground must be a 256-color index")
 	assert.Contains(t, got, "\x1b[1;", "the ● ox mark is bold")
 	assert.False(t, strings.HasSuffix(got, "\n"))
+	assert.Equal(t, Render(Counts{Discussions: 3, Plans: 1}, false), ansi.Strip(got), "color only adds")
 
-	// Stripping escapes reproduces the plain line exactly: color only adds.
-	assert.Equal(t, Render(fullSegment, false), ansi.Strip(got))
-
-	// The action and sender share the mark's green; detail text is a different (dim) color.
 	greenPrefix, _, _ := strings.Cut(greenStyle.Render("x"), "x")
 	dimPrefix, _, _ := strings.Cut(dimStyle.Render("x"), "x")
 	require.NotEmpty(t, greenPrefix)
 	assert.NotEqual(t, greenPrefix, dimPrefix)
-	assert.Contains(t, got, greenPrefix+"posted murmur")
-	assert.Contains(t, got, greenPrefix+"ryan")
-	assert.Contains(t, got, dimPrefix+" Refactoring auth middleware")
-}
+	assert.Contains(t, got, greenPrefix+"3")
+	assert.Contains(t, got, greenPrefix+"1")
+	assert.Contains(t, got, dimPrefix+" discussions")
+	assert.Contains(t, got, dimPrefix+" · ")
+	assert.Contains(t, got, dimPrefix+" plan")
 
-// TestRender_StripsInjectedEscapes: whisper text comes from teammates.
-// Failure prevented: a murmur containing ESC sequences rewrites the
-// coworker's status line or terminal.
-func TestRender_StripsInjectedEscapes(t *testing.T) {
-	t.Parallel()
-
-	seg := Segment{
-		Action:         "posted\x1b[31m murmur",
-		WhisperFrom:    "ev\x1b]0;pwned\x07il",
-		WhisperTopic:   "w\x1bip",
-		WhisperContent: "clear\x1b[2J\x9b2J\u202eme\r\n",
-	}
-	got := Render(seg, false)
-	assert.NotContains(t, got, "\x1b")
-	assert.NotContains(t, got, "\x07")
-	assert.NotContains(t, got, "\x9b")
-	assert.NotContains(t, got, "\u202e")
-	assert.NotContains(t, got, "\r")
-	assert.NotContains(t, got, "\n")
-	assert.Equal(t, ansi.Strip(Render(seg, true)), got)
-}
-
-// --- C. Truncation ---
-// Failure prevented: a long whisper overflows a narrow status line and wraps
-// or pushes the action off screen.
-func TestRenderWidth_Truncation(t *testing.T) {
-	t.Parallel()
-
-	full := Render(fullSegment, false)
-	fullWidth := ansi.StringWidth(full)
-
-	tests := []struct {
-		name  string
-		width int
-		want  string
-	}{
-		{"unlimited", 0, full},
-		{"fits exactly", fullWidth, full},
-		{"content shortened first", fullWidth - 10, "● ox  posted murmur · whisper from ryan [wip] Refactoring auth… 3m"},
-		{"content dropped when too short", 50, "● ox  posted murmur · whisper from ryan [wip] 3m"},
-		{"hard cut after content gone", 30, "● ox  posted murmur · whisper…"},
-		{"tiny", 3, "● …"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := RenderWidth(fullSegment, false, tt.width)
-			assert.Equal(t, tt.want, got)
-			if tt.width > 0 {
-				assert.LessOrEqual(t, ansi.StringWidth(got), tt.width)
-			}
-			colored := RenderWidth(fullSegment, true, tt.width)
-			assert.Equal(t, got, ansi.Strip(colored), "color must not change truncation")
-		})
-	}
+	idle := Render(Counts{}, true)
+	assert.Equal(t, markStyle.Render("● ox"), idle)
 }
 
 func TestTruncate(t *testing.T) {
@@ -158,51 +172,8 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
-func TestFormatAge(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		d    time.Duration
-		want string
-	}{
-		{0, "now"},
-		{59 * time.Second, "now"},
-		{time.Minute, "1m"},
-		{59 * time.Minute, "59m"},
-		{time.Hour, "1h"},
-		{23 * time.Hour, "23h"},
-		{49 * time.Hour, "2d"},
-	}
-	for _, tt := range tests {
-		assert.Equal(t, tt.want, FormatAge(tt.d), tt.d.String())
-	}
-}
-
-// Failure prevented: whisper senders render as "160305533-dedhaw", an
-// identifier no coworker recognizes.
-func TestDisplayName(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		in, want string
-	}{
-		{"160305533-dedhaw", "dedhaw"},
-		{"1-ryan-snodgrass", "ryan-snodgrass"},
-		{"ryan", "ryan"},
-		{"ryan-snodgrass", "ryan-snodgrass"},
-		{"a1-ryan", "a1-ryan"},
-		{"123", "123"},
-		{"123-", "123-"},
-		{"-ryan", "-ryan"},
-		{"", ""},
-	}
-	for _, tt := range tests {
-		assert.Equal(t, tt.want, DisplayName(tt.in), tt.in)
-	}
-}
-
 // Failure prevented: NO_COLOR is ignored because ox's own stdout is a pipe and
-// the activity line decides color by environment alone.
+// the status line decides color by environment alone.
 func TestColorAllowed(t *testing.T) {
 	tests := []struct {
 		name, noColor, profile string

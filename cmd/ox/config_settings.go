@@ -235,15 +235,13 @@ once you're familiar with the tool.`,
 	},
 	{
 		Key:         "statusline",
-		Label:       "Activity line",
-		Description: "Show what ox is doing inside your AI coding tool.",
-		LongDescription: `Controls ox's live activity line in Claude Code's status line and ox's
-activity notices in Codex.
+		Label:       "Status line",
+		Description: "Show how much team context shaped your session in Claude Code's status line.",
+		LongDescription: `Controls ox's row in Claude Code's status line.
 
-When enabled, coworkers see a short green line whenever ox does work for
-an AI coworker — loading team context, posting a murmur, saving a plan,
-searching team memory — plus the latest whisper from a teammate.
-Turn it off to keep those surfaces free of ox output.`,
+When enabled, the row counts the team context that influenced this AI
+coworker session — "● ox  3 discussions · 1 plan · 1 murmur" — with a red
+"● rec" while the session records. Turn it off to remove the row.`,
 		Category:    "Display",
 		ValidValues: []string{"on", "off"},
 		Default:     "on",

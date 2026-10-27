@@ -308,7 +308,7 @@ type UserConfig struct {
 	Trace             *TraceConfig `yaml:"trace,omitempty"`
 	DisplayName       string       `yaml:"display_name,omitempty"`
 	TipsEnabled       *bool        `yaml:"tips_enabled,omitempty"`
-	StatuslineEnabled *bool        `yaml:"statusline_enabled,omitempty"` // activity line in harnesses; nil = on
+	StatuslineEnabled *bool        `yaml:"statusline_enabled,omitempty"` // ox row in the Claude Code status line; nil = on
 	BriefPaneEnabled  *bool        `yaml:"brief_pane_enabled,omitempty"` // /ox-brief pane in Claude Code; nil = UsagePaneEnabled, then on
 	// UsagePaneEnabled is DEPRECATED: brief_pane_enabled's name before
 	// `ox usage` became `ox brief`. Read only as BriefPaneEnabled's fallback.
@@ -471,8 +471,8 @@ func (c *UserConfig) AreTipsEnabled() bool {
 	return *c.TipsEnabled
 }
 
-// IsStatuslineEnabled reports whether ox should show its live activity line in
-// AI coworker harnesses (default: true).
+// IsStatuslineEnabled reports whether ox should show its team-context counts
+// in the Claude Code status line (default: true).
 func (c *UserConfig) IsStatuslineEnabled() bool {
 	if c.StatuslineEnabled == nil {
 		return true

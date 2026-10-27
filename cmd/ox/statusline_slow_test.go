@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/oxactivity"
 	"github.com/sageox/ox/internal/testguard"
 )
@@ -29,9 +28,7 @@ import (
 func TestStatuslineBinary_ColorReachesClaudeCode(t *testing.T) {
 	oxBin := testguard.BuildOxBinary(t, slowTestProjectRoot(t))
 	f := newStatuslineFixture(t)
-	now := time.Now()
-	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{LastAction: "posted murmur", LastActionAt: now}))
-	f.writeMurmur(t, f.ledgerDir, ledger.MurmurFile{AgentID: "OxTm10", PrincipalID: "ryan", Topic: "wip", Content: "hello", Timestamp: now})
+	f.seed(t, oxactivity.Counts{Discussions: 3, Plans: 1, Murmurs: 1})
 
 	run := func(extra ...string) (string, time.Duration) {
 		env := append([]string{
@@ -50,12 +47,11 @@ func TestStatuslineBinary_ColorReachesClaudeCode(t *testing.T) {
 
 	colored, _ := run()
 	assert.Contains(t, colored, "\x1b[", "the status line must carry color through the piped stdout")
-	assert.Contains(t, colored, "posted murmur")
-	assert.Contains(t, colored, "whisper from")
+	assert.Contains(t, colored, "discussions")
 
 	plain, _ := run("NO_COLOR=1")
 	assert.NotContains(t, plain, "\x1b")
-	assert.Equal(t, "● ox  posted murmur · whisper from ryan [wip] hello now\n", plain)
+	assert.Equal(t, "● ox  3 discussions · 1 plan · 1 murmur\n", plain)
 
 	var times []time.Duration
 	for range 20 {

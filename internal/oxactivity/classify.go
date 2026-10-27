@@ -1,18 +1,15 @@
-// Package oxactivity turns an AI coworker's tool calls into the short,
-// human-readable "ox is doing work" line that harnesses show to coworkers.
-//
-// Every harness renders the same wording and the same styling, so the pieces
-// they share live here:
+// Package oxactivity classifies an AI coworker's tool calls and keeps the
+// per-session counts the ox status line shows.
 //
 //   - Classify maps one harness tool call (a shell command or a SageOx MCP
-//     tool) to an Activity label such as "posted murmur".
-//   - Render draws one line — "● ox  posted murmur · whisper from ryan [wip] …"
-//     — with or without color.
-//   - State, LoadState and SaveState persist the latest action and whisper per
-//     AI coworker, so a later process (a status-line refresh, a hook) can render
-//     them.
+//     tool) to an Activity: a label such as "pulled plan", its command words,
+//     its kind, and — for item reads — the item's ID.
+//   - State and RecordInfluence count the distinct discussions, plans, docs,
+//     sessions and murmurs that influenced one harness session.
+//   - Render draws the status line — "● ox  3 discussions · 1 plan" — with or
+//     without color, fitted to a width.
 //
-// The package does no I/O beyond the per-agent state file and never decides
+// The package does no I/O beyond the per-session state file and never decides
 // whether the line is enabled; callers gate on config.UserConfig's
 // IsStatuslineEnabled.
 package oxactivity
@@ -22,6 +19,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/sageox/ox/internal/agentinstance"
@@ -59,6 +57,11 @@ type Activity struct {
 	// first positional argument, capped at MaxQueryLen. Empty for every other
 	// call, including MCP tools (their arguments are not inspected).
 	Query string
+	// Ref is the item a read pulled — the plan slug of `ox plan view <slug>`,
+	// the conversation ID of `ox conversation show <id>` — so a counter can
+	// tell one item read twice from two items. It is only ever an ID or slug
+	// (see itemRef), never free text, and empty for every other call.
+	Ref string
 }
 
 // MaxQueryLen caps Activity.Query so a receipt stays short.
@@ -325,6 +328,7 @@ type cliRule struct {
 	label string
 	kind  Kind
 	query bool // the first positional argument after words is a search subject
+	ref   bool // the first positional argument after words names the item read
 }
 
 // cliRules is the label table for ox CLI invocations. Names match the cobra
@@ -341,9 +345,9 @@ var cliRules = []cliRule{
 
 	{words: []string{"plan", "save"}, label: "saved plan", kind: KindWrite},
 	{words: []string{"plan", "render"}, label: "rendered plan", kind: KindWrite},
-	{words: []string{"plan", "view"}, label: "pulled plan", kind: KindRetrieval},
-	{words: []string{"plan", "show"}, label: "pulled plan", kind: KindRetrieval},
-	{words: []string{"plan", "get"}, label: "pulled plan", kind: KindRetrieval},
+	{words: []string{"plan", "view"}, label: "pulled plan", kind: KindRetrieval, ref: true},
+	{words: []string{"plan", "show"}, label: "pulled plan", kind: KindRetrieval, ref: true},
+	{words: []string{"plan", "get"}, label: "pulled plan", kind: KindRetrieval, ref: true},
 	{words: []string{"plan", "enrich"}, label: "enriched plan", kind: KindWrite},
 
 	{words: []string{"query"}, label: "searched team memory", kind: KindRetrieval, query: true},
@@ -361,11 +365,11 @@ var cliRules = []cliRule{
 	{words: []string{"session", "show"}, label: "read sessions", kind: KindRetrieval},
 	{words: []string{"session", "score"}, label: "scored session", kind: KindWrite},
 
-	{words: []string{"conversation", "show"}, label: "read discussion", kind: KindRetrieval},
+	{words: []string{"conversation", "show"}, label: "read discussion", kind: KindRetrieval, ref: true},
 	{words: []string{"conversation", "search"}, label: "read discussion", kind: KindRetrieval},
-	{words: []string{"conversation", "transcript"}, label: "read discussion", kind: KindRetrieval},
-	{words: []string{"conversation", "topics"}, label: "read discussion", kind: KindRetrieval},
-	{words: []string{"conversation", "topic"}, label: "read discussion", kind: KindRetrieval},
+	{words: []string{"conversation", "transcript"}, label: "read discussion", kind: KindRetrieval, ref: true},
+	{words: []string{"conversation", "topics"}, label: "read discussion", kind: KindRetrieval, ref: true},
+	{words: []string{"conversation", "topic"}, label: "read discussion", kind: KindRetrieval, ref: true},
 
 	{words: []string{"decision", "enrich"}, label: "checked decisions", kind: KindRetrieval},
 
@@ -429,6 +433,9 @@ func classifyWords(words, args []string) (Activity, bool) {
 			act := Activity{Label: rule.label, Command: strings.Join(rule.words, " "), Kind: rule.kind}
 			if rule.query {
 				act.Query = querySubject(args, rule.words)
+			}
+			if rule.ref {
+				act.Ref = itemRef(querySubject(args, rule.words))
 			}
 			return act, true
 		}
@@ -494,6 +501,28 @@ func querySubject(args, commandWords []string) string {
 			continue
 		}
 		return truncateQuery(strings.TrimSpace(a))
+	}
+	return ""
+}
+
+// conversationIDRe finds a conversation or recording ID inside a sageox://
+// citation URI or a pasted sageox.ai link, so every form of one ID counts as
+// the same item.
+var conversationIDRe = regexp.MustCompile(`\b(?:cnv|rec|dsc)_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`)
+
+// slugRe is what a bare item ID or plan slug may look like. Anything else
+// (a sentence, a path, a URI without a known ID) yields no Ref.
+var slugRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// itemRef turns an item-read argument into a stable ID: an embedded
+// conversation ID when there is one, else the argument itself when it looks
+// like a slug, else "".
+func itemRef(arg string) string {
+	if id := conversationIDRe.FindString(arg); id != "" {
+		return id
+	}
+	if slugRe.MatchString(arg) {
+		return arg
 	}
 	return ""
 }
@@ -588,4 +617,33 @@ func classifyMCP(name string) (Activity, bool) {
 		return Activity{Label: "read discussion", Command: command, Kind: KindRetrieval}, true
 	}
 	return Activity{Label: "used SageOx " + t, Command: command, Kind: KindOther}, true
+}
+
+// cleanText makes untrusted text safe for a single terminal line: control
+// characters (including ESC) are removed, runs of whitespace collapse to one
+// space, and the result is trimmed. max > 0 caps the width with an ellipsis.
+func cleanText(s string, max int) string {
+	var b strings.Builder
+	space := false
+	for _, r := range s {
+		switch {
+		case unicode.IsSpace(r):
+			space = b.Len() > 0
+			continue
+		case unicode.IsControl(r), r == '\u2028', r == '\u2029':
+			continue
+		case unicode.Is(unicode.Cf, r): // bidi overrides, zero-width joiners
+			continue
+		}
+		if space {
+			b.WriteByte(' ')
+			space = false
+		}
+		b.WriteRune(r)
+	}
+	out := b.String()
+	if max > 0 {
+		out = Truncate(out, max)
+	}
+	return out
 }

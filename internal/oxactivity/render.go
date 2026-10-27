@@ -1,11 +1,9 @@
 package oxactivity
 
 import (
-	"fmt"
 	"os"
+	"strconv"
 	"strings"
-	"time"
-	"unicode"
 
 	lipgloss "charm.land/lipgloss/v2"
 	"github.com/charmbracelet/colorprofile"
@@ -14,35 +12,66 @@ import (
 	"github.com/sageox/ox/internal/theme"
 )
 
-// Segment is everything the activity line can show. Empty fields are omitted.
-type Segment struct {
-	// Action is an Activity label, e.g. "posted murmur".
-	Action string
-	// WhisperFrom is the raw sender of the latest whisper; Render shows it
-	// through DisplayName ("160305533-dedhaw" → "dedhaw").
-	WhisperFrom string
-	// WhisperTopic is the murmur topic, shown as "[wip]".
-	WhisperTopic string
-	// WhisperContent is the whisper text. It is the first thing shortened
-	// when the line exceeds its width.
-	WhisperContent string
-	// Age is shown last ("3m"); zero or negative omits it.
-	Age time.Duration
+// Counts is what the status line shows: how many distinct items of each kind
+// of team context influenced the harness session. Zero buckets are omitted.
+type Counts struct {
+	Discussions int
+	Plans       int
+	Docs        int
+	Sessions    int
+	Murmurs     int
+}
+
+// IsZero reports whether nothing has been counted yet.
+func (c Counts) IsZero() bool { return c == Counts{} }
+
+// bucket is one count with its singular and plural nouns.
+type bucket struct {
+	n              int
+	singular, many string
+}
+
+// buckets returns the counts in display order: discussions, plans, docs,
+// sessions, murmurs.
+func (c Counts) buckets() []bucket {
+	return []bucket{
+		{c.Discussions, "discussion", "discussions"},
+		{c.Plans, "plan", "plans"},
+		{c.Docs, "doc", "docs"},
+		{c.Sessions, "session", "sessions"},
+		{c.Murmurs, "murmur", "murmurs"},
+	}
+}
+
+// setBucket writes n into the i-th bucket of buckets' order.
+func (c *Counts) setBucket(i, n int) {
+	switch i {
+	case 0:
+		c.Discussions = n
+	case 1:
+		c.Plans = n
+	case 2:
+		c.Docs = n
+	case 3:
+		c.Sessions = n
+	case 4:
+		c.Murmurs = n
+	}
 }
 
 // Ellipsis marks truncated text.
 const Ellipsis = "…"
 
-// mark is the fixed lead of every activity line.
-const mark = "● ox"
+// Mark is the fixed lead of every ox status line.
+const Mark = "● ox"
 
 type pieceStyle int
 
 const (
 	stylePlain pieceStyle = iota
 	styleMark             // green + bold
-	styleGreen            // action, whisper sender
-	styleDim              // detail text
+	styleGreen            // numbers
+	styleDim              // nouns and separators
 )
 
 type piece struct {
@@ -50,118 +79,94 @@ type piece struct {
 	style pieceStyle
 }
 
-// Render draws seg as a single line with no trailing newline, e.g.
+// Render draws c as a single line with no trailing newline, e.g.
 //
-//	● ox  posted murmur · whisper from ryan [wip] Refactoring auth… 3m
+//	● ox  3 discussions · 1 plan · 1 murmur
 //
-// "● ox" is green and bold, the action and whisper sender are green, and the
-// rest is dim. With color false the output contains no escape bytes. All text
-// is stripped of control characters first, so a teammate's whisper cannot
-// inject escape sequences into a harness. With no action and no whisper the
-// line is just "● ox".
-func Render(seg Segment, color bool) string {
-	return RenderWidth(seg, color, 0)
+// "● ox" is green and bold, the numbers are green, and the nouns and " · "
+// separators are dim. With color false the output contains no escape bytes.
+// With every count zero the line is just "● ox".
+func Render(c Counts, color bool) string {
+	line, _ := RenderWidth(c, color, 0)
+	return line
 }
 
 // RenderWidth is Render limited to width terminal cells (0 means unlimited).
-// The whisper content is shortened first; if that is not enough the whole
-// line is cut with an ellipsis. Widths are measured in display cells, so wide
-// runes and emoji are counted correctly.
-func RenderWidth(seg Segment, color bool, width int) string {
-	pieces, content := layout(seg)
+// While the line is too wide the smallest non-zero count is dropped (on a tie,
+// the rightmost), so what remains is always whole "N noun" items; "● ox" is
+// never dropped. It returns the line and its width in cells, which is the
+// plain-text width whether or not color is on.
+func RenderWidth(c Counts, color bool, width int) (string, int) {
 	if width > 0 {
-		pieces = fit(pieces, content, width)
+		c = Fit(c, width)
 	}
+	pieces := layout(c)
 	var b strings.Builder
+	cells := 0
 	for _, p := range pieces {
+		cells += ansi.StringWidth(p.text)
 		if color {
 			b.WriteString(styleFor(p.style).Render(p.text))
 		} else {
 			b.WriteString(p.text)
 		}
 	}
-	return b.String()
+	return b.String(), cells
 }
 
-// layout builds the line's pieces and returns the index of the whisper-content
-// piece (-1 when there is none), which fit shortens first.
-func layout(seg Segment) ([]piece, int) {
-	action := cleanText(seg.Action, 0)
-	from := DisplayName(cleanText(seg.WhisperFrom, 0))
-	topic := cleanText(seg.WhisperTopic, 0)
-	content := cleanText(seg.WhisperContent, 0)
-
-	ps := []piece{{mark, styleMark}}
-	contentAt := -1
-	if action != "" {
-		ps = append(ps, piece{"  ", stylePlain}, piece{action, styleGreen})
+// Fit drops the smallest non-zero count (ties: the rightmost in display
+// order) until the plain line fits width cells, and returns what is left.
+// width <= 0 means unlimited. "● ox" alone is the floor, even if wider than
+// width.
+func Fit(c Counts, width int) Counts {
+	if width <= 0 {
+		return c
 	}
-	if from != "" || content != "" {
-		if action != "" {
-			ps = append(ps, piece{" · ", styleDim})
-		} else {
-			ps = append(ps, piece{"  ", stylePlain})
+	for Width(c) > width && !c.IsZero() {
+		drop := -1
+		for i, b := range c.buckets() {
+			if b.n == 0 {
+				continue
+			}
+			if drop < 0 || b.n <= c.buckets()[drop].n {
+				drop = i
+			}
 		}
-		if from != "" {
-			ps = append(ps, piece{"whisper from ", styleDim}, piece{from, styleGreen})
-		} else {
-			ps = append(ps, piece{"whisper", styleDim})
-		}
-		if topic != "" {
-			ps = append(ps, piece{" [" + topic + "]", styleDim})
-		}
-		if content != "" {
-			contentAt = len(ps)
-			ps = append(ps, piece{" " + content, styleDim})
-		}
+		c.setBucket(drop, 0)
 	}
-	if seg.Age > 0 {
-		ps = append(ps, piece{" " + FormatAge(seg.Age), styleDim})
-	}
-	return ps, contentAt
+	return c
 }
 
-// fit shrinks pieces to width cells: the whisper content first, then a hard
-// cut from the end.
-func fit(ps []piece, content, width int) []piece {
-	total := 0
-	for _, p := range ps {
-		total += ansi.StringWidth(p.text)
+// Width is the plain-text width of Render(c, false) in terminal cells.
+func Width(c Counts) int {
+	w := 0
+	for _, p := range layout(c) {
+		w += ansi.StringWidth(p.text)
 	}
-	over := total - width
-	if over <= 0 {
-		return ps
-	}
+	return w
+}
 
-	if i := content; i >= 0 {
-		w := ansi.StringWidth(ps[i].text)
-		keep := w - over
-		if keep >= 3 { // " x…" — anything shorter carries no meaning
-			ps[i].text = Truncate(ps[i].text, keep)
-			return ps
-		}
-		ps = append(ps[:i:i], ps[i+1:]...)
-		over -= w
-		if over <= 0 {
-			return ps
-		}
-	}
-
-	out := make([]piece, 0, len(ps))
-	remaining := width
-	for _, p := range ps {
-		w := ansi.StringWidth(p.text)
-		if w <= remaining {
-			out = append(out, p)
-			remaining -= w
+// layout builds the line's pieces.
+func layout(c Counts) []piece {
+	ps := []piece{{Mark, styleMark}}
+	first := true
+	for _, b := range c.buckets() {
+		if b.n <= 0 {
 			continue
 		}
-		if remaining > 0 {
-			out = append(out, piece{Truncate(p.text, remaining), p.style})
+		if first {
+			ps = append(ps, piece{"  ", stylePlain})
+			first = false
+		} else {
+			ps = append(ps, piece{" · ", styleDim})
 		}
-		break
+		noun := b.many
+		if b.n == 1 {
+			noun = b.singular
+		}
+		ps = append(ps, piece{strconv.Itoa(b.n), styleGreen}, piece{" " + noun, styleDim})
 	}
-	return out
+	return ps
 }
 
 // Truncate shortens s to at most width display cells, ending in an ellipsis
@@ -176,21 +181,7 @@ func Truncate(s string, width int) string {
 	return ansi.Truncate(s, width, Ellipsis)
 }
 
-// FormatAge renders a duration compactly: "now", "3m", "2h", "5d".
-func FormatAge(d time.Duration) string {
-	switch {
-	case d < time.Minute:
-		return "now"
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d/time.Minute))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh", int(d/time.Hour))
-	default:
-		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
-	}
-}
-
-// ColorAllowed reports whether the environment permits color in the activity
+// ColorAllowed reports whether the environment permits color in the status
 // line. Harnesses capture ox's stdout through a pipe, so theme.ColorEnabled()
 // is always false there even though the harness renders ANSI; this asks only
 // the coworker's explicit opt-outs: NO_COLOR (sacred) and an
@@ -203,8 +194,7 @@ func ColorAllowed() bool {
 // ox's stdout is a pipe inside a harness, so the profile resolves to no color,
 // yet the harness paints our bytes onto a real terminal of unknown depth.
 // 24-bit "38;2;R;G;B" is misread as background colors by 256-color terminals
-// (see internal/theme/profile.go); "38;5;N" is safe on both those terminals
-// and Codex's ANSI parser.
+// (see internal/theme/profile.go); "38;5;N" is safe on all of them.
 var (
 	greenColor = theme.AdaptTo(colorprofile.ANSI256, theme.ColorSuccess)
 	dimColor   = theme.AdaptTo(colorprofile.ANSI256, theme.ColorDim)
@@ -226,43 +216,4 @@ func styleFor(s pieceStyle) lipgloss.Style {
 	default:
 		return plainStyle
 	}
-}
-
-// cleanText makes untrusted text safe for a single terminal line: control
-// characters (including ESC) are removed, runs of whitespace collapse to one
-// space, and the result is trimmed. max > 0 caps the width with an ellipsis.
-func cleanText(s string, max int) string {
-	var b strings.Builder
-	space := false
-	for _, r := range s {
-		switch {
-		case unicode.IsSpace(r):
-			space = b.Len() > 0
-			continue
-		case unicode.IsControl(r), r == '\u2028', r == '\u2029':
-			continue
-		case unicode.Is(unicode.Cf, r): // bidi overrides, zero-width joiners
-			continue
-		}
-		if space {
-			b.WriteByte(' ')
-			space = false
-		}
-		b.WriteRune(r)
-	}
-	out := b.String()
-	if max > 0 {
-		out = Truncate(out, max)
-	}
-	return out
-}
-
-// DisplayName turns a whisper sender into what a coworker reads: a leading
-// numeric GitHub-id prefix is stripped ("160305533-dedhaw" → "dedhaw");
-// anything else passes through unchanged.
-func DisplayName(sender string) string {
-	if i := strings.IndexByte(sender, '-'); i > 0 && i < len(sender)-1 && isDigits(sender[:i]) {
-		return sender[i+1:]
-	}
-	return sender
 }

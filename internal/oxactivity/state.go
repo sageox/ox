@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,43 +23,125 @@ import (
 // state directory.
 var ErrInvalidAgentID = errors.New("invalid agent ID")
 
-// State is the latest coworker-visible ox activity for one AI coworker. It is
-// local-only derived data, rewritten whenever a harness hook classifies a new
-// action or receives a whisper.
+// State counts the team context that influenced one harness session of one
+// AI coworker: how many distinct discussions, plans, docs, sessions and
+// murmurs ox put to work in it. It is local-only derived data, bumped by
+// hooks and use-evidence writers (RecordInfluence) and only ever read by
+// `ox statusline`.
+//
+// Files written by older ox versions held an activity feed (last_action,
+// last_whisper_*); those keys are ignored on decode, so an old file reads as
+// a zero-count State.
 type State struct {
-	LastAction         string    `json:"last_action,omitempty"`
-	LastActionAt       time.Time `json:"last_action_at,omitzero"`
-	LastWhisperFrom    string    `json:"last_whisper_from,omitempty"`
-	LastWhisperTopic   string    `json:"last_whisper_topic,omitempty"`
-	LastWhisperContent string    `json:"last_whisper_content,omitempty"`
-	LastWhisperAt      time.Time `json:"last_whisper_at,omitzero"`
+	Discussions int `json:"discussions,omitempty"`
+	Plans       int `json:"plans,omitempty"`
+	Docs        int `json:"docs,omitempty"`
+	Sessions    int `json:"sessions,omitempty"`
+	Murmurs     int `json:"murmurs,omitempty"`
+	// SeenRefs dedups bumps: one "<refType>\x00<ref>" per counted item, newest
+	// last, capped at MaxSeenRefs. An item that falls off the cap can count
+	// again; at that size the line is already saturated.
+	SeenRefs  []string  `json:"seen_refs,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
 }
 
-// Segment converts the state into what Render draws. Age is measured from the
-// whisper when there is one (it is what the line ends on), otherwise from the
-// action.
-func (s State) Segment(now time.Time) Segment {
-	seg := Segment{
-		Action:         s.LastAction,
-		WhisperFrom:    s.LastWhisperFrom,
-		WhisperTopic:   s.LastWhisperTopic,
-		WhisperContent: s.LastWhisperContent,
+// MaxSeenRefs caps State.SeenRefs; the oldest entries are dropped first.
+const MaxSeenRefs = 64
+
+// Bump counts ref once under the bucket refType names and reports whether
+// anything changed. refType is the context-trace ref_type vocabulary:
+// "discussion" → Discussions; "plan" → Plans; "doc", "team-context", "kb",
+// "skill" → Docs; "session" → Sessions; "murmur" → Murmurs. An unknown
+// refType, an empty ref, or a ref already counted changes nothing.
+func (s *State) Bump(refType, ref string) bool {
+	refType = strings.TrimSpace(refType)
+	ref = strings.TrimSpace(ref)
+	counter := s.counter(refType)
+	if counter == nil || ref == "" {
+		return false
 	}
-	at := s.LastActionAt
-	if s.LastWhisperFrom != "" || s.LastWhisperContent != "" {
-		at = s.LastWhisperAt
+	key := refType + "\x00" + ref
+	if slices.Contains(s.SeenRefs, key) {
+		return false
 	}
-	if !at.IsZero() {
-		seg.Age = now.Sub(at)
+	*counter++
+	s.SeenRefs = append(s.SeenRefs, key)
+	if over := len(s.SeenRefs) - MaxSeenRefs; over > 0 {
+		s.SeenRefs = slices.Delete(s.SeenRefs, 0, over)
 	}
-	return seg
+	return true
+}
+
+// counter returns the count refType bumps, or nil for an unknown refType.
+func (s *State) counter(refType string) *int {
+	switch refType {
+	case "discussion":
+		return &s.Discussions
+	case "plan":
+		return &s.Plans
+	case "doc", "team-context", "kb", "skill":
+		return &s.Docs
+	case "session":
+		return &s.Sessions
+	case "murmur":
+		return &s.Murmurs
+	}
+	return nil
+}
+
+// Counts converts the state into what Render draws.
+func (s State) Counts() Counts {
+	return Counts{
+		Discussions: s.Discussions,
+		Plans:       s.Plans,
+		Docs:        s.Docs,
+		Sessions:    s.Sessions,
+		Murmurs:     s.Murmurs,
+	}
+}
+
+// RecordInfluence counts one item of team context (ref, of kind refType —
+// see State.Bump) as having influenced a harness session, so `ox statusline`
+// shows it. It is the hand-off API for every use-evidence writer: the
+// PostToolUse hook's retrieval classifier, `ox agent <id> context used
+// <ref>`, and post-commit detectors.
+//
+// harnessSessionID is the HARNESS's session ID — Claude Code's or Codex's
+// hook/status-line session_id — not the ox recording ID: the status line is
+// keyed by oxactivity.StateKey(agentID, harnessSessionID), so any other ID
+// writes a file no status line reads. Empty falls back to agent-wide state,
+// which no status line shows either; pass it whenever the caller has it.
+//
+// The state file and its directory are created when absent. An unknown
+// refType or an empty ref is a no-op returning nil, as is a ref already
+// counted. It waits at most the default file-lock timeout for a concurrent
+// writer, then returns that error; callers in hooks should log it and move on.
+func RecordInfluence(projectRoot, agentID, harnessSessionID, refType, ref string) error {
+	var probe State
+	if probe.counter(strings.TrimSpace(refType)) == nil || strings.TrimSpace(ref) == "" {
+		return nil
+	}
+	if projectRoot == "" {
+		return errors.New("record influence: empty project root")
+	}
+	err := UpdateState(projectRoot, StateKey(agentID, harnessSessionID), func(s *State) bool {
+		if !s.Bump(refType, ref) {
+			return false
+		}
+		s.UpdatedAt = time.Now().UTC()
+		return true
+	})
+	if err != nil {
+		return fmt.Errorf("record influence: %w", err)
+	}
+	return nil
 }
 
 // StateKey names the state file for one harness session of one AI coworker:
 // "<agentID>" alone when sessionID is empty, else "<agentID>.<sessionID>".
 // An ox agent ID can outlive a Claude Code or Codex session and be shared by
 // several windows in one repo, so state keyed by it alone shows one window's
-// "checked murmurs" in another. The harness session ID is what makes the
+// counts in another. The harness session ID is what makes the
 // line belong to the session the coworker is looking at. A session ID with
 // characters unsafe in a file name is replaced by a short hash of itself.
 func StateKey(agentID, sessionID string) string {
@@ -92,9 +175,9 @@ func stateDir(projectRoot string) string {
 	return filepath.Join(projectRoot, ".sageox", "cache", "statusline")
 }
 
-// LoadState reads the activity state for key (see StateKey). A missing,
+// LoadState reads the influence state for key (see StateKey). A missing,
 // unreadable, or corrupt file, or a malformed key, yields a zero State: the
-// activity line is best-effort and must never fail the caller.
+// status line is best-effort and must never fail the caller.
 func LoadState(projectRoot, key string) State {
 	var s State
 	path := StatePath(projectRoot, key)
@@ -112,8 +195,8 @@ func LoadState(projectRoot, key string) State {
 }
 
 // UpdateState applies update to the stored state under a file lock, so two
-// hook processes (a tool call and a prompt submit) that overlap cannot each
-// restore the other's field from a stale snapshot. update reports whether
+// writers (a tool-call hook and `ox agent <id> context used`) that overlap
+// cannot each lose the other's bump from a stale snapshot. update reports whether
 // anything changed; false skips the write. A missing or corrupt file starts
 // from a zero State, as LoadState does.
 func UpdateState(projectRoot, key string, update func(*State) bool) error {
@@ -133,7 +216,7 @@ func UpdateState(projectRoot, key string, update func(*State) bool) error {
 	})
 }
 
-// SaveState atomically writes the activity state for key (see StateKey),
+// SaveState atomically writes the influence state for key (see StateKey),
 // creating the cache directory if needed. State files of sessions idle for
 // more than StateRetention are removed at the same time, so per-session
 // files never pile up.
@@ -157,7 +240,7 @@ const StateRetention = 24 * time.Hour
 
 // pruneStale removes per-session state files ("<agentID>.<sessionID>.json")
 // not modified within StateRetention. Other files in the directory, such as
-// agent-wide state or the murmur cache, are left alone. It is best-effort: the
+// agent-wide state or a legacy murmur cache, are left alone. It is best-effort: the
 // state just written is never removed and errors are ignored, since this runs
 // inside a harness hook.
 func pruneStale(dir, keep string, now time.Time) {

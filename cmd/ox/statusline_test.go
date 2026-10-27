@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,14 +14,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/identity"
-	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/oxactivity"
+	"github.com/sageox/ox/internal/session"
 )
 
-// statuslineFixture is an initialized SageOx project with a Ledger and Team
-// Context checkout, a primed Claude Code session, and isolated user and
-// Claude Code config — everything `ox statusline` reads.
+// statuslineFixture is an initialized SageOx project with a primed Claude
+// Code session and isolated user and Claude Code config — everything
+// `ox statusline` reads.
 type statuslineFixture struct {
 	root       string
 	ledgerDir  string
@@ -96,21 +94,6 @@ func (f *statuslineFixture) run(t *testing.T, opts statuslineOptions) string {
 	return out.String()
 }
 
-func (f *statuslineFixture) writeMurmur(t *testing.T, base string, m ledger.MurmurFile) {
-	t.Helper()
-	if m.ID == "" {
-		m.ID = fmt.Sprintf("m-%d", time.Now().UnixNano())
-	}
-	if m.Importance == "" {
-		m.Importance = "normal"
-	}
-	path := filepath.Join(base, ledger.MurmurFilePath(m.Timestamp.UTC(), m.ID))
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-	data, err := json.Marshal(m)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, data, 0o644))
-}
-
 func (f *statuslineFixture) setUserStatusline(t *testing.T, command string) {
 	t.Helper()
 	data, err := json.Marshal(map[string]any{
@@ -120,9 +103,8 @@ func (f *statuslineFixture) setUserStatusline(t *testing.T, command string) {
 	require.NoError(t, os.WriteFile(filepath.Join(f.claudeDir, "settings.json"), data, 0o644))
 }
 
-func testStatuslineOptions(now time.Time) statuslineOptions {
+func testStatuslineOptions() statuslineOptions {
 	return statuslineOptions{
-		now:          now,
 		color:        false,
 		chainTimeout: 2 * time.Second,
 		getenv:       os.Getenv,
@@ -130,30 +112,61 @@ func testStatuslineOptions(now time.Time) statuslineOptions {
 	}
 }
 
-// --- A. What ox did for this AI coworker ---
+// startRecording starts a live recording for the fixture's AI coworker, with
+// the user cache (where recording state lives) isolated to this test.
+func (f *statuslineFixture) startRecording(t *testing.T) {
+	t.Helper()
+	cache := t.TempDir()
+	t.Setenv("HOME", cache)
+	t.Setenv("XDG_CACHE_HOME", cache)
+	_, err := session.StartRecording(f.root, session.StartRecordingOptions{AgentID: f.agentID, AdapterName: "claude-code"})
+	require.NoError(t, err)
+}
 
-// TestStatusline_ActionFreshness shows a recorded action only while it is
-// recent. Failure prevented: the bar claims "posted murmur" an hour after the
-// fact, or never shows the action at all.
-func TestStatusline_ActionFreshness(t *testing.T) {
+// seed stores counts for this fixture's harness session, as hooks would.
+func (f *statuslineFixture) seed(t *testing.T, c oxactivity.Counts) {
+	t.Helper()
+	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{
+		Discussions: c.Discussions, Plans: c.Plans, Docs: c.Docs, Sessions: c.Sessions, Murmurs: c.Murmurs,
+	}))
+}
+
+// --- A. What influenced this session ---
+
+// TestStatusline_CountsLine shows the seeded counts for this session, byte
+// for byte. Failure prevented: the bar shows the wrong numbers, wrong nouns,
+// or anything but the bare mark before anything was used.
+func TestStatusline_CountsLine(t *testing.T) {
 	tests := []struct {
-		name  string
-		state *oxactivity.State
-		want  string
+		name   string
+		counts *oxactivity.Counts
+		want   string
 	}{
 		{"no state yet", nil, "● ox\n"},
-		{"recent action", &oxactivity.State{LastAction: "posted murmur", LastActionAt: time.Now().Add(-2 * time.Minute)}, "● ox  posted murmur 2m\n"},
-		{"stale action (>10m)", &oxactivity.State{LastAction: "posted murmur", LastActionAt: time.Now().Add(-11 * time.Minute)}, "● ox\n"},
+		{"zero counts", &oxactivity.Counts{}, "● ox\n"},
+		{"mixed", &oxactivity.Counts{Discussions: 3, Plans: 1, Murmurs: 1}, "● ox  3 discussions · 1 plan · 1 murmur\n"},
+		{"every bucket", &oxactivity.Counts{Discussions: 1, Plans: 2, Docs: 1, Sessions: 2, Murmurs: 4}, "● ox  1 discussion · 2 plans · 1 doc · 2 sessions · 4 murmurs\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newStatuslineFixture(t)
-			if tt.state != nil {
-				require.NoError(t, oxactivity.SaveState(f.root, f.key(), *tt.state))
+			if tt.counts != nil {
+				f.seed(t, *tt.counts)
 			}
-			assert.Equal(t, tt.want, f.run(t, testStatuslineOptions(time.Now())))
+			assert.Equal(t, tt.want, f.run(t, testStatuslineOptions()))
 		})
 	}
+}
+
+// TestStatusline_CountsAreNotAFeed keeps a count on the bar regardless of age.
+// Failure prevented: the readout decaying like the old 10-minute activity
+// feed, so value the session got disappears while the coworker is still in it.
+func TestStatusline_CountsAreNotAFeed(t *testing.T) {
+	f := newStatuslineFixture(t)
+	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{
+		Plans: 1, UpdatedAt: time.Now().Add(-6 * time.Hour),
+	}))
+	assert.Equal(t, "● ox  1 plan\n", f.run(t, testStatuslineOptions()))
 }
 
 // TestStatusline_UnknownSessionStillShowsMark covers a status line refreshed
@@ -162,150 +175,25 @@ func TestStatusline_ActionFreshness(t *testing.T) {
 func TestStatusline_UnknownSessionStillShowsMark(t *testing.T) {
 	f := newStatuslineFixture(t)
 	f.sessionID = "never-primed"
-	assert.Equal(t, "● ox\n", f.run(t, testStatuslineOptions(time.Now())))
+	assert.Equal(t, "● ox\n", f.run(t, testStatuslineOptions()))
 }
 
-// --- B. Teammate murmurs ---
-
-// TestStatusline_TeammateMurmurs shows the newest teammate murmur from the
-// Ledger or Team Context and never the coworker's own. Failure prevented: the
-// bar echoes your own `ox murmur` back to you as "whisper from <you>", or
-// misses a teammate's.
-func TestStatusline_TeammateMurmurs(t *testing.T) {
-	self := identity.LocalAttributionUsername()
-	now := time.Now()
-	tests := []struct {
-		name    string
-		murmurs func(f *statuslineFixture) []struct {
-			base string
-			m    ledger.MurmurFile
-		}
-		want string
-	}{
-		{
-			name: "teammate murmur in the Ledger",
-			murmurs: func(f *statuslineFixture) []struct {
-				base string
-				m    ledger.MurmurFile
-			} {
-				return []struct {
-					base string
-					m    ledger.MurmurFile
-				}{{f.ledgerDir, ledger.MurmurFile{AgentID: "OxTm01", PrincipalID: "160305533-ryan", Topic: "wip", Content: "refactoring auth", Timestamp: now.Add(-5 * time.Minute)}}}
-			},
-			want: "● ox  whisper from ryan [wip] refactoring auth 5m\n",
-		},
-		{
-			name: "teammate murmur in Team Context",
-			murmurs: func(f *statuslineFixture) []struct {
-				base string
-				m    ledger.MurmurFile
-			} {
-				return []struct {
-					base string
-					m    ledger.MurmurFile
-				}{{f.teamDir, ledger.MurmurFile{AgentID: "OxTm02", PrincipalID: "avery", Topic: "decision", Content: "use sqlite", Timestamp: now.Add(-3 * time.Minute)}}}
-			},
-			want: "● ox  whisper from avery [decision] use sqlite 3m\n",
-		},
-		{
-			name: "own murmur by principal is hidden",
-			murmurs: func(f *statuslineFixture) []struct {
-				base string
-				m    ledger.MurmurFile
-			} {
-				return []struct {
-					base string
-					m    ledger.MurmurFile
-				}{{f.ledgerDir, ledger.MurmurFile{AgentID: "OxOther", PrincipalID: self, Topic: "wip", Content: "my own work", Timestamp: now.Add(-time.Minute)}}}
-			},
-			want: "● ox\n",
-		},
-		{
-			name: "own murmur by agent ID is hidden, older teammate one shows",
-			murmurs: func(f *statuslineFixture) []struct {
-				base string
-				m    ledger.MurmurFile
-			} {
-				return []struct {
-					base string
-					m    ledger.MurmurFile
-				}{
-					{f.ledgerDir, ledger.MurmurFile{AgentID: f.agentID, PrincipalID: "someone-else", Topic: "wip", Content: "mine", Timestamp: now.Add(-time.Minute)}},
-					{f.ledgerDir, ledger.MurmurFile{AgentID: "OxTm03", PrincipalID: "sam", Topic: "wip", Content: "theirs", Timestamp: now.Add(-4 * time.Minute)}},
-				}
-			},
-			want: "● ox  whisper from sam [wip] theirs 4m\n",
-		},
-		{
-			name: "daemon file-change notices and old murmurs are hidden",
-			murmurs: func(f *statuslineFixture) []struct {
-				base string
-				m    ledger.MurmurFile
-			} {
-				return []struct {
-					base string
-					m    ledger.MurmurFile
-				}{
-					{f.ledgerDir, ledger.MurmurFile{AgentID: "daemon", PrincipalID: "riley", Topic: "file-changes", Content: "3 files", Timestamp: now.Add(-time.Minute)}},
-					{f.ledgerDir, ledger.MurmurFile{AgentID: "OxTm04", PrincipalID: "quinn", Topic: "wip", Content: "ancient", Timestamp: now.Add(-90 * time.Minute)}},
-				}
-			},
-			want: "● ox\n",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			f := newStatuslineFixture(t)
-			for _, w := range tt.murmurs(f) {
-				f.writeMurmur(t, w.base, w.m)
-			}
-			assert.Equal(t, tt.want, f.run(t, testStatuslineOptions(now)))
-		})
-	}
-}
-
-// TestStatusline_NewerWhisperWins prefers whichever is newer: the whisper a
-// hook recorded or a murmur file. Failure prevented: an old delivered whisper
-// masks a teammate's fresh murmur (or the reverse).
-func TestStatusline_NewerWhisperWins(t *testing.T) {
-	now := time.Now()
+// TestStatusline_PerSessionState shows each harness session only its own
+// counts, even when both sessions share one ox agent ID in one repo.
+// Failure prevented: plans another Claude Code window used (or a finished
+// session's) inflating this window's bar.
+func TestStatusline_PerSessionState(t *testing.T) {
 	f := newStatuslineFixture(t)
-	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{
-		LastWhisperFrom: "ryan", LastWhisperTopic: "wip", LastWhisperContent: "from the hook",
-		LastWhisperAt: now.Add(-20 * time.Minute),
-	}))
-	f.writeMurmur(t, f.ledgerDir, ledger.MurmurFile{AgentID: "OxTm05", PrincipalID: "avery", Topic: "wip", Content: "from the file", Timestamp: now.Add(-2 * time.Minute)})
-	assert.Equal(t, "● ox  whisper from avery [wip] from the file 2m\n", f.run(t, testStatuslineOptions(now)))
+	other := "some-other-window"
+	require.NoError(t, oxactivity.RecordInfluence(f.root, f.agentID, other, "plan", "p1"))
+	require.NoError(t, oxactivity.RecordInfluence(f.root, f.agentID, other, "plan", "p2"))
+	require.NoError(t, oxactivity.SaveState(f.root, f.agentID, oxactivity.State{Docs: 5}))
 
-	g := newStatuslineFixture(t)
-	require.NoError(t, oxactivity.SaveState(g.root, g.key(), oxactivity.State{
-		LastWhisperFrom: "ryan", LastWhisperTopic: "wip", LastWhisperContent: "from the hook",
-		LastWhisperAt: now.Add(-time.Minute),
-	}))
-	g.writeMurmur(t, g.ledgerDir, ledger.MurmurFile{AgentID: "OxTm06", PrincipalID: "avery", Topic: "wip", Content: "from the file", Timestamp: now.Add(-30 * time.Minute)})
-	assert.Equal(t, "● ox  whisper from ryan [wip] from the hook 1m\n", g.run(t, testStatuslineOptions(now)))
-}
+	assert.Equal(t, "● ox\n", f.run(t, testStatuslineOptions()), "neither another window's nor the agent-wide state shows here")
 
-// TestStatusline_MurmurReadIsCachedAndConsumesNothing reads the same murmur on
-// every refresh and serves repeats from the cache. Failure prevented: the
-// status line acts as a whisper cursor and "uses up" a murmur, or rescans the
-// Ledger on every keystroke.
-func TestStatusline_MurmurReadIsCachedAndConsumesNothing(t *testing.T) {
-	now := time.Now()
-	f := newStatuslineFixture(t)
-	f.writeMurmur(t, f.ledgerDir, ledger.MurmurFile{AgentID: "OxTm07", PrincipalID: "ryan", Topic: "wip", Content: "hello", Timestamp: now.Add(-time.Minute)})
-
-	want := "● ox  whisper from ryan [wip] hello 1m\n"
-	assert.Equal(t, want, f.run(t, testStatuslineOptions(now)))
-	assert.Equal(t, want, f.run(t, testStatuslineOptions(now.Add(time.Second))), "a second refresh still shows it")
-	assert.FileExists(t, statuslineMurmurCachePath(f.root))
-
-	// within the cache TTL a new murmur is not yet read...
-	f.writeMurmur(t, f.ledgerDir, ledger.MurmurFile{AgentID: "OxTm08", PrincipalID: "avery", Topic: "wip", Content: "newer", Timestamp: now})
-	assert.Equal(t, want, f.run(t, testStatuslineOptions(now.Add(2*time.Second))))
-	// ...and after it, it is
-	assert.Contains(t, f.run(t, testStatuslineOptions(now.Add(statuslineMurmurCacheTTL+time.Second))), "whisper from avery [wip] newer")
+	require.NoError(t, oxactivity.RecordInfluence(f.root, f.agentID, f.sessionID, "discussion", "cnv_1"))
+	assert.Equal(t, "● ox  1 discussion\n", f.run(t, testStatuslineOptions()))
+	assert.Equal(t, 2, oxactivity.LoadState(f.root, oxactivity.StateKey(f.agentID, other)).Plans, "the other window keeps its own")
 }
 
 // --- C. Off switch, project detection, failure paths ---
@@ -315,13 +203,13 @@ func TestStatusline_MurmurReadIsCachedAndConsumesNothing(t *testing.T) {
 // or turning ox off also blanks the coworker's own status line.
 func TestStatusline_OffPrintsOnlyChained(t *testing.T) {
 	f := newStatuslineFixture(t)
-	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{LastAction: "posted murmur", LastActionAt: time.Now()}))
+	f.seed(t, oxactivity.Counts{Plans: 2})
 	require.NoError(t, SetConfigValue("statusline", "off", ConfigLevelUser, ""))
 
-	assert.Equal(t, "", f.run(t, testStatuslineOptions(time.Now())), "off with no chained command prints nothing")
+	assert.Equal(t, "", f.run(t, testStatuslineOptions()), "off with no chained command prints nothing")
 
 	f.setUserStatusline(t, "printf 'my line'")
-	assert.Equal(t, "my line\n", f.run(t, testStatuslineOptions(time.Now())))
+	assert.Equal(t, "my line\n", f.run(t, testStatuslineOptions()))
 }
 
 // TestStatusline_OutsideSageoxProject prints nothing of ox's outside an
@@ -330,9 +218,9 @@ func TestStatusline_OffPrintsOnlyChained(t *testing.T) {
 func TestStatusline_OutsideSageoxProject(t *testing.T) {
 	f := newStatuslineFixture(t)
 	f.root = t.TempDir()
-	assert.Equal(t, "", f.run(t, testStatuslineOptions(time.Now())))
+	assert.Equal(t, "", f.run(t, testStatuslineOptions()))
 	f.setUserStatusline(t, "printf 'mine'")
-	assert.Equal(t, "mine\n", f.run(t, testStatuslineOptions(time.Now())))
+	assert.Equal(t, "mine\n", f.run(t, testStatuslineOptions()))
 }
 
 // TestStatusline_GarbageInputStillShowsMark covers unreadable stdin and a
@@ -343,14 +231,13 @@ func TestStatusline_GarbageInputStillShowsMark(t *testing.T) {
 	statePath := oxactivity.StatePath(f.root, f.key())
 	require.NoError(t, os.MkdirAll(filepath.Dir(statePath), 0o755))
 	require.NoError(t, os.WriteFile(statePath, []byte("{not json"), 0o600))
-	require.NoError(t, os.WriteFile(statuslineMurmurCachePath(f.root), []byte("garbage"), 0o600))
 
 	var out bytes.Buffer
-	runStatusline(strings.NewReader("this is not json"), &out, testStatuslineOptions(time.Now()))
+	runStatusline(strings.NewReader("this is not json"), &out, testStatuslineOptions())
 	assert.Equal(t, "● ox\n", out.String())
 
 	out.Reset()
-	runStatusline(bytes.NewReader(f.stdin()), &out, testStatuslineOptions(time.Now()))
+	runStatusline(bytes.NewReader(f.stdin()), &out, testStatuslineOptions())
 	assert.Equal(t, "● ox\n", out.String())
 }
 
@@ -378,7 +265,7 @@ func TestStatusline_ChainsUserCommand(t *testing.T) {
 			f := newStatuslineFixture(t)
 			f.setUserStatusline(t, tt.command)
 			want := strings.ReplaceAll(tt.want, "SESSION", f.sessionID)
-			assert.Equal(t, want, f.run(t, testStatuslineOptions(time.Now())))
+			assert.Equal(t, want, f.run(t, testStatuslineOptions()))
 		})
 	}
 }
@@ -389,7 +276,7 @@ func TestStatusline_ChainsUserCommand(t *testing.T) {
 func TestStatusline_ChainedCommandTimeout(t *testing.T) {
 	f := newStatuslineFixture(t)
 	f.setUserStatusline(t, "sleep 5; echo late")
-	opts := testStatuslineOptions(time.Now())
+	opts := testStatuslineOptions()
 	opts.chainTimeout = 100 * time.Millisecond
 
 	start := time.Now()
@@ -405,7 +292,7 @@ func TestStatusline_ChainRecursionGuard(t *testing.T) {
 	f := newStatuslineFixture(t)
 	f.setUserStatusline(t, "printf 'mine'")
 	t.Setenv(envStatuslineChained, "1")
-	assert.Equal(t, "● ox\n", f.run(t, testStatuslineOptions(time.Now())))
+	assert.Equal(t, "● ox\n", f.run(t, testStatuslineOptions()))
 }
 
 // --- E. Rendering ---
@@ -414,59 +301,53 @@ func TestStatusline_ChainRecursionGuard(t *testing.T) {
 // and in when it is on. Failure prevented: NO_COLOR ignored, or escape codes
 // garbling a terminal that asked for none.
 func TestStatusline_NoColorIsByteExact(t *testing.T) {
-	now := time.Now()
 	f := newStatuslineFixture(t)
-	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{
-		LastAction: "loaded team context", LastActionAt: now.Add(-time.Minute),
-		LastWhisperFrom: "160305533-ryan", LastWhisperTopic: "wip", LastWhisperContent: "auth \x1b[31mred\x1b[0m",
-		LastWhisperAt: now.Add(-time.Minute),
-	}))
+	f.seed(t, oxactivity.Counts{Discussions: 3, Plans: 1})
 
-	plain := f.run(t, testStatuslineOptions(now))
-	assert.Equal(t, "● ox  loaded team context · whisper from ryan [wip] auth [31mred[0m 1m\n", plain)
+	plain := f.run(t, testStatuslineOptions())
+	assert.Equal(t, "● ox  3 discussions · 1 plan\n", plain)
 	assert.NotContains(t, plain, "\x1b")
 
-	opts := testStatuslineOptions(now)
+	opts := testStatuslineOptions()
 	opts.color = true
 	colored := f.run(t, opts)
 	assert.Contains(t, colored, "\x1b[")
 	assert.Equal(t, plain, ansi.Strip(colored), "color only adds escape sequences")
 }
 
-// TestStatusline_PerSessionState shows each harness session only its own ox
-// activity, even when both sessions share one ox agent ID in one repo.
-// Failure prevented: "checked murmurs" from another Claude Code window (or a
-// finished session) appearing on this window's bar.
-func TestStatusline_PerSessionState(t *testing.T) {
-	now := time.Now()
-	f := newStatuslineFixture(t)
-	other := oxactivity.StateKey(f.agentID, "some-other-window")
-	require.NoError(t, oxactivity.SaveState(f.root, other, oxactivity.State{LastAction: "pulled plan", LastActionAt: now}))
-	require.NoError(t, oxactivity.SaveState(f.root, f.agentID, oxactivity.State{LastAction: "loaded team context", LastActionAt: now}))
-
-	assert.Equal(t, "● ox\n", f.run(t, testStatuslineOptions(now)), "neither another window's nor the agent-wide state shows here")
-
-	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{LastAction: "checked murmurs", LastActionAt: now}))
-	assert.Equal(t, "● ox  checked murmurs\n", f.run(t, testStatuslineOptions(now)))
-}
-
-// TestStatusline_FitsColumns keeps ox's own line within COLUMNS and leaves
-// the chained line, below it, untouched. Failure prevented: ox's line wraps.
+// TestStatusline_FitsColumns keeps ox's own line within COLUMNS by dropping
+// the smallest count first, keeps "● rec", and leaves the chained line below
+// it untouched. Failure prevented: ox's line wraps, a count is cut mid-word,
+// or the recording mark disappears before a count does.
 func TestStatusline_FitsColumns(t *testing.T) {
-	now := time.Now()
 	f := newStatuslineFixture(t)
 	f.setUserStatusline(t, "printf 'main ✓ 3 files'")
-	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{
-		LastAction: "posted murmur", LastActionAt: now,
-		LastWhisperFrom: "ryan", LastWhisperContent: strings.Repeat("long whisper ", 20), LastWhisperAt: now,
-	}))
-	opts := testStatuslineOptions(now)
-	opts.width = 60
-	lines := strings.Split(strings.TrimSuffix(f.run(t, opts), "\n"), "\n")
-	require.Len(t, lines, 2)
-	assert.True(t, strings.HasPrefix(lines[0], "● ox  posted murmur"), lines[0])
-	assert.LessOrEqual(t, ansi.StringWidth(lines[0]), 60)
-	assert.Equal(t, "main ✓ 3 files", lines[1])
+	f.seed(t, oxactivity.Counts{Discussions: 3, Plans: 1, Docs: 2, Murmurs: 1})
+	f.startRecording(t)
+
+	tests := []struct {
+		width int
+		want  string
+	}{
+		{0, "● ox  3 discussions · 1 plan · 2 docs · 1 murmur  ● rec"},
+		// 46 + 7 for "  ● rec": the rightmost 1 (murmur) goes first
+		{53, "● ox  3 discussions · 1 plan · 2 docs  ● rec"},
+		{40, "● ox  3 discussions · 2 docs  ● rec"},
+		{30, "● ox  3 discussions  ● rec"},
+		{12, "● ox  ● rec"},
+		{8, "● ox"},
+	}
+	for _, tt := range tests {
+		opts := testStatuslineOptions()
+		opts.width = tt.width
+		lines := strings.Split(strings.TrimSuffix(f.run(t, opts), "\n"), "\n")
+		require.Len(t, lines, 2)
+		assert.Equal(t, tt.want, lines[0], "width %d", tt.width)
+		if tt.width > 0 {
+			assert.LessOrEqual(t, ansi.StringWidth(lines[0]), tt.width)
+		}
+		assert.Equal(t, "main ✓ 3 files", lines[1])
+	}
 }
 
 // TestComposeStatusline_IdleKeepsMarks shows "● ox  ● rec" when nothing has
@@ -479,23 +360,26 @@ func TestComposeStatusline_IdleKeepsMarks(t *testing.T) {
 	assert.Equal(t, "● ox\n", composeStatusline("", oxStatusline{}, true, statuslineOptions{}))
 }
 
-// TestComposeStatusline_RecordingMark appends the dim recording mark only when
-// it fits. Failure prevented: "● rec" crowding out the activity itself.
+// TestComposeStatusline_RecordingMark reserves "● rec" before the counts and
+// drops it only when even the bare mark and it cannot share the width.
+// Failure prevented: a long readout pushing the recording signal off the bar.
 func TestComposeStatusline_RecordingMark(t *testing.T) {
-	line := oxStatusline{seg: oxactivity.Segment{Action: "posted murmur"}, recording: true}
+	line := oxStatusline{counts: oxactivity.Counts{Plans: 1}, recording: true}
 	opts := statuslineOptions{}
-	assert.Equal(t, "● ox  posted murmur  ● rec\n", composeStatusline("", line, true, opts))
+	assert.Equal(t, "● ox  1 plan  ● rec\n", composeStatusline("", line, true, opts))
+	opts.width = 18
+	assert.Equal(t, "● ox  ● rec\n", composeStatusline("", line, true, opts), "the count gives way first")
 	opts.width = 8
-	assert.Equal(t, "● ox  p…\n", composeStatusline("", line, true, opts))
+	assert.Equal(t, "● ox\n", composeStatusline("", line, true, opts))
 }
 
 // TestComposeStatusline_RecordingDotIsRed colors only the dot red, keeping the
 // label dim. Failure prevented: recording that doesn't read as recording.
 func TestComposeStatusline_RecordingDotIsRed(t *testing.T) {
-	line := oxStatusline{seg: oxactivity.Segment{Action: "posted murmur"}, recording: true}
+	line := oxStatusline{counts: oxactivity.Counts{Plans: 1}, recording: true}
 	got := composeStatusline("", line, true, statuslineOptions{color: true})
 	assert.Contains(t, got, statuslineRecDotStyle.Render("●")+statuslineDimStyle.Render(" rec"))
-	assert.Equal(t, "● ox  posted murmur  ● rec\n", ansi.Strip(got))
+	assert.Equal(t, "● ox  1 plan  ● rec\n", ansi.Strip(got))
 }
 
 // TestIsStatuslineFastPath routes only the bare command around cobra, so
@@ -507,35 +391,22 @@ func TestIsStatuslineFastPath(t *testing.T) {
 	assert.False(t, isStatuslineFastPath(nil))
 }
 
-// TestStatusline_LatencyBudget measures one refresh in-process against a
-// Ledger holding a day of murmurs. Failure prevented: the bar lagging every
-// keystroke. Process start-up (~30ms for the ox binary) is measured by the
-// slow-tier binary test.
+// TestStatusline_LatencyBudget measures one warm refresh in-process. Failure
+// prevented: the bar lagging every keystroke. Process start-up (~30ms for the
+// ox binary) is measured by the slow-tier binary test.
 func TestStatusline_LatencyBudget(t *testing.T) {
-	now := time.Now()
 	f := newStatuslineFixture(t)
-	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{LastAction: "posted murmur", LastActionAt: now}))
-	for i := range 200 {
-		f.writeMurmur(t, f.ledgerDir, ledger.MurmurFile{
-			ID: fmt.Sprintf("m%03d", i), AgentID: "OxTm09", PrincipalID: "ryan", Topic: "wip",
-			Content: "x", Timestamp: now.Add(-time.Duration(i) * 7 * time.Minute),
-		})
-	}
+	f.seed(t, oxactivity.Counts{Discussions: 3, Plans: 1, Docs: 2, Sessions: 1, Murmurs: 4})
+	f.startRecording(t)
 
-	measure := func(prep func()) time.Duration {
-		var worst time.Duration
-		for range 5 {
-			prep()
-			start := time.Now()
-			_ = f.run(t, testStatuslineOptions(time.Now()))
-			worst = max(worst, time.Since(start))
-		}
-		return worst
+	_ = f.run(t, testStatuslineOptions()) // warm the page cache
+	var worst time.Duration
+	for range 5 {
+		start := time.Now()
+		got := f.run(t, testStatuslineOptions())
+		worst = max(worst, time.Since(start))
+		require.Equal(t, "● ox  3 discussions · 1 plan · 2 docs · 1 session · 4 murmurs  ● rec\n", got)
 	}
-	cold := measure(func() { _ = os.Remove(statuslineMurmurCachePath(f.root)) })
-	warm := measure(func() {})
-	t.Logf("statusline in-process: cold (murmur scan + identity) %v, warm (cached) %v", cold, warm)
-	assert.Less(t, warm, 20*time.Millisecond)
-	// cold runs git for the coworker's own identity (once per 10 minutes); keep slack for loaded CI
-	assert.Less(t, cold, 150*time.Millisecond)
+	t.Logf("statusline in-process (warm): worst of 5 %v", worst)
+	assert.Less(t, worst, 20*time.Millisecond)
 }

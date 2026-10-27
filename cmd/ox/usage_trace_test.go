@@ -180,12 +180,10 @@ func TestAfterTool_NoInvokedEventForNonOxWork(t *testing.T) {
 	tests := []struct {
 		name    string
 		command string
-		// statusline reports whether the status line still learns of it
-		statusline bool
 	}{
-		{"ls", "ls -la", false},
-		{"heartbeat plumbing", "ox agent OxAb12 heartbeat", false},
-		{"agent prime via Bash", "ox agent OxAb12 prime", true},
+		{"ls", "ls -la"},
+		{"heartbeat plumbing", "ox agent OxAb12 heartbeat"},
+		{"agent prime via Bash", "ox agent OxAb12 prime"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -198,9 +196,7 @@ func TestAfterTool_NoInvokedEventForNonOxWork(t *testing.T) {
 
 			assert.Empty(t, invokedEvents(t, sessionTracePath(state)))
 			assert.NoFileExists(t, filepath.Join(agentTraceCacheDir(root), usageAgentID+".jsonl"))
-			if tt.statusline {
-				assert.Equal(t, "loaded team context", oxactivity.LoadState(root, usageAgentID).LastAction)
-			}
+			assert.NoFileExists(t, oxactivity.StatePath(root, usageAgentID), "none of these counts on the status line")
 		})
 	}
 }
@@ -317,7 +313,8 @@ func TestAfterTool_StdoutIdenticalWithTraceOnAndOff(t *testing.T) {
 			return &agentx.HookInput{ToolName: "exec_command", ToolInput: shellInput(t, "cmd", "ox murmur list"), ToolResponse: jsonString(t, "x")}
 		}, func(t *testing.T, out string) {
 			doc := decodeCodexHookDoc(t, out)
-			assert.Equal(t, "● ox  checked murmurs", doc.SystemMessage)
+			assert.Empty(t, doc.SystemMessage, "ox sends Codex no coworker-visible notice")
+			require.NotNil(t, doc.HookSpecificOutput)
 		}},
 	}
 	for _, tt := range tests {
@@ -387,10 +384,10 @@ func TestAfterTool_OptOutWritesNoInvokedEvent(t *testing.T) {
 	require.NoError(t, SetConfigValue("recap.trace_consultations", "off", ConfigLevelUser, ""))
 
 	runAfterTool(t, root, "claude-code", usageAgentID, &agentx.HookInput{
-		ToolName: "Bash", ToolInput: shellInput(t, "command", "ox murmur list"), ToolResponse: bashStdout(t, "x"),
+		ToolName: "Bash", ToolInput: shellInput(t, "command", "ox plan view my-plan"), ToolResponse: bashStdout(t, "x"),
 	})
 
 	assert.Empty(t, invokedEvents(t, sessionTracePath(state)))
 	assert.NoFileExists(t, filepath.Join(agentTraceCacheDir(root), usageAgentID+".jsonl"))
-	assert.Equal(t, "checked murmurs", oxactivity.LoadState(root, usageAgentID).LastAction, "the status line is a separate setting")
+	assert.Equal(t, 1, oxactivity.LoadState(root, usageAgentID).Plans, "the status line is a separate setting")
 }

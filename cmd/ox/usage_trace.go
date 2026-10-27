@@ -29,7 +29,8 @@ import (
 const agentTraceCacheMaxAge = 7 * 24 * time.Hour
 
 // recordOxToolCall classifies one harness tool call and, when it is ox work,
-// (a) updates the status-line state and (b) appends an `invoked` event to the
+// (a) counts a read of one item of team context (a plan, a discussion, the
+// Team Context) on the status line and (b) appends an `invoked` event to the
 // AI coworker's usage trace. Non-ox tools return after classification, paying
 // no config or recording-state read.
 func recordOxToolCall(projectRoot, agentID string, input *agentx.HookInput) {
@@ -40,7 +41,8 @@ func recordOxToolCall(projectRoot, agentID string, input *agentx.HookInput) {
 	if !ok {
 		return
 	}
-	recordStatuslineActivity(projectRoot, oxactivity.StateKey(agentID, input.SessionID), act, time.Now())
+	refType := invokedRefType(act)
+	recordStatuslineRetrieval(projectRoot, agentID, input.SessionID, act, refType)
 
 	// prime records its own richer event (recordPrimeInvocation) — a second,
 	// smaller one from the hook would double-count its context.
@@ -57,7 +59,7 @@ func recordOxToolCall(projectRoot, agentID string, input *agentx.HookInput) {
 		Source:       contexttrace.SourceOxCLI,
 		Command:      act.Command,
 		Label:        act.Label,
-		RefType:      invokedRefType(act),
+		RefType:      refType,
 		OutputBytes:  len(out),
 		InlineTokens: tokens.EstimateTokens(out),
 		Failed:       input.ToolError != "",

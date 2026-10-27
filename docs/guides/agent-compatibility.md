@@ -58,14 +58,13 @@ ox doctor      # verifies hooks + context injection
 ```
 No extra setup needed — Claude Code is the reference implementation.
 
-**Live activity line.** Alongside the hooks, `ox init` and `ox doctor` set the
-`statusLine` in the project's `.claude/settings.json` to `ox statusline`. Claude Code
-strips color from hook output, so the status bar is where ox shows, in green, what it
-just did for the AI coworker and the newest teammate murmur:
-`● ox  posted murmur · whisper from ryan [wip] Refactoring auth… 3m`. It reads local
-files only (no network, no daemon). A `statusLine` already in the project file is never
-replaced; one in your own `~/.claude/settings.json` keeps working, with ox's line
-appended after it. Turn it off with `ox config set statusline off`.
+**Status line.** Alongside the hooks, `ox init` and `ox doctor` set the `statusLine`
+in the project's `.claude/settings.local.json` to `ox statusline`. It counts the team
+context that influenced this session — `● ox  3 discussions · 1 plan · 1 murmur  ● rec`
+— each item once; with nothing used yet it reads `● ox  ● rec`. It reads local files
+only (no network, no daemon). A `statusLine` already in the project file is never
+replaced; one in your own `~/.claude/settings.json` keeps working, on its own row
+beneath ox's. Turn it off with `ox config set statusline off`.
 
 **Brief pane.** `/ox-brief` opens a pane beside the chat with what SageOx gave this
 session (calls, estimated context tokens, what was read and what was useful) and a
