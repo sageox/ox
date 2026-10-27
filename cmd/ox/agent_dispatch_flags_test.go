@@ -166,6 +166,7 @@ func TestExecuteRootCLI_RestoresCLIOutputModes(t *testing.T) {
 		return buf.Len() > 0
 	}
 	t.Run("run with output-mode flags", func(t *testing.T) {
+		dispatchTestEnv(t)
 		_, err := executeRootCLI(t, "version", "--json", "--no-interactive", "--no-input", "--yes")
 		require.NoError(t, err)
 		// The run must really set the modes, or the checks below pass
