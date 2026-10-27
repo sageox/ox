@@ -99,14 +99,10 @@ export type OxyFrames = {
   hires?: HiresFrames
 }
 
-// Oxy's height in CSS pixels where the surface draws pictures as SVG (the
-// desktop app, VS Code). The working row there is one ~20 px text line, so
-// medium stands a little over two lines tall, as the terminal's medium does
-// beside its one-row word. With the hires art this is his figure's height;
-// with the 160x207 fallback, the whole frame's.
-// His figure's height in the desktop's band above the prompt. That band is
-// capped near 11 text lines plus 40 px (~260 px), and a tall animation (jump,
-// confetti) stands 1.65x his figure, so `large` stays at 120 to fit whole.
+// Oxy's height in CSS pixels on the SVG surfaces: his figure with the hires
+// art, the whole frame with the 160x207 fallback. On the desktop he stands in
+// a 24-column side pane; a tall animation (jump, confetti) is 1.65x his
+// figure, so `large` stops at 120 to stay calm beside the transcript.
 export const PIXEL_HEIGHTS: Record<SizeName, number> = { small: 48, medium: 80, large: 120 }
 
 // One text row on the graphical surfaces, in CSS pixels. Box margins there
