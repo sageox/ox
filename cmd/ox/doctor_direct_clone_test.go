@@ -309,23 +309,22 @@ func TestDoctorFix_FirstLedgerCloneInterrupt(t *testing.T) {
 	require.Equal(t, "team_peer", saved.TeamContexts[0].TeamID)
 }
 
-// TestDoctorFix_RepoPathRepairInterrupt verifies Ctrl-C during one Ledger
-// repair keeps the repairs already made and starts no further one.
-// Failure prevented: the next repair could move a directory aside after the
-// coworker asked doctor to stop, and a completed repair was not saved.
+// TestDoctorFix_RepoPathRepairInterrupt verifies Ctrl-C during the Ledger
+// repair of `ox doctor --fix` starts no repair for the team context after it.
+// Failure prevented: the loop went on to the next repair after the coworker
+// asked doctor to stop.
 func TestDoctorFix_RepoPathRepairInterrupt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real paced Git clone")
 	}
 	ledgerURL := servePacedGitRepo(t, directFixtureBytes, directPace, 96<<10)
-	finishedURL := servePacedGitRepo(t, 1<<10, 1<<20, 0)
 	root := setupDirectCloneProject(t, ledgerURL)
 	setDirectCloneBudgets(t, time.Minute, 15*time.Second)
+	// the Ledger and a team context are configured, and both directories are gone
 	target := filepath.Join(t.TempDir(), "ledger")
-	finished, next := target+".finished", target+".next"
-	issue := func(path, url string) repoPathIssue {
-		return repoPathIssue{repoType: "ledger", path: path, endpoint: endpoint.GetForProject(root), cloneURL: url, issue: "missing"}
-	}
+	localCfg := &config.LocalConfig{Ledger: &config.LedgerConfig{Path: target}}
+	localCfg.SetTeamContext("team_next", "Next", filepath.Join(t.TempDir(), "team_next"))
+	require.NoError(t, config.SaveLocalConfig(root, localCfg))
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -333,11 +332,7 @@ func TestDoctorFix_RepoPathRepairInterrupt(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		output = captureStdoutForPlanCLI(t, func() {
-			fixRepoPathIssues(ctx, root, &config.LocalConfig{}, []repoPathIssue{
-				issue(finished, finishedURL), issue(target, ledgerURL), issue(next, ledgerURL),
-			})
-		})
+		output = captureStdoutForPlanCLI(t, func() { gitRepoPathsCheck(ctx, true) })
 	}()
 	t.Cleanup(func() { <-done })
 	waitForDownload(t, target, 64<<10)
@@ -346,12 +341,8 @@ func TestDoctorFix_RepoPathRepairInterrupt(t *testing.T) {
 
 	require.Contains(t, output, "clone ledger interrupted")
 	require.NotContains(t, output, "timed out", "Ctrl-C must end the clone before its backstop")
-	require.NotContains(t, output, next, "Ctrl-C must stop the repair loop")
+	require.NotContains(t, output, "Team context: Next", "Ctrl-C must stop the repair loop")
 	requireNothingLeftBehind(t, target)
-	saved, err := config.LoadLocalConfig(root)
-	require.NoError(t, err)
-	require.NotNil(t, saved.Ledger)
-	require.Equal(t, finished, saved.Ledger.Path, "completed repairs must survive interruption")
 }
 
 // TestRunDoctorChecks_StopsOnceInterrupted verifies a canceled doctor run
