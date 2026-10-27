@@ -104,7 +104,10 @@ export type OxyFrames = {
 // medium stands a little over two lines tall, as the terminal's medium does
 // beside its one-row word. With the hires art this is his figure's height;
 // with the 160x207 fallback, the whole frame's.
-export const PIXEL_HEIGHTS: Record<SizeName, number> = { small: 32, medium: 48, large: 64 }
+// Large on purpose: at 32/48/64 he was a speck in the desktop's transcript.
+// The hires figure is 301 px tall, so `large` upscales it 1.6x, still crisp
+// enough for cel art; the 160x207 fallback frames go soft past medium.
+export const PIXEL_HEIGHTS: Record<SizeName, number> = { small: 160, medium: 320, large: 480 }
 
 // One text row on the graphical surfaces, in CSS pixels. Box margins there
 // are counted in rows, not pixels, so lifting the words is rounded to it.

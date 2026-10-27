@@ -22,6 +22,7 @@ import {
   MIN_CLIP_MS,
   passMs,
   pickAnim,
+  PIXEL_HEIGHTS,
   pixelBox,
   planAnim,
   ROW_PX,
@@ -494,11 +495,64 @@ for (const surface of ['desktop', 'vscode'] as const) {
       expect((await ui.find({ type: 'Text', text: /Sautéing/ }))?.text).toBe('Sautéing…')
       await ui.unmount()
     }
-    expect([pixelBox('small').height, pixelBox('medium').height, pixelBox('large').height]).toEqual([32, 48, 64])
+    expect([pixelBox('small').height, pixelBox('medium').height, pixelBox('large').height]).toEqual([160, 320, 480])
     await $.command.run({ ...COMMAND, args: 'medium' } as never)
     await $.command.run({ ...COMMAND, args: 'auto' } as never)
   })
 }
+
+test('desktop: Oxy rests above the prompt between turns, and hands the band back while working', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  mockPngFiles(on)
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine band</Text>
+  })
+  const band = (isWorking: boolean) => ({
+    plugin: 'ox-cli-oxy',
+    surface: 'desktop',
+    component: 'AbovePrompt',
+    requestId: 'band',
+    props: { hasSurvey: false, isWorking, maxRows: 20, bodyColumns: 80, scroll: { offset: 0, bodyRows: 19 }, view: {} },
+  })
+  const idle = await $.ui.mount(band(false) as never)
+  const svg = await idle.find({ type: 'Svg' })
+  expect(String(svg?.props.source)).toContain('data:image/png;base64,')
+  expect(svg?.props.isInteractive).toBeFalsy()
+  // The band clips overflow, so it always draws the small figure.
+  expect(svg?.props.height).toBeGreaterThanOrEqual(PIXEL_HEIGHTS.small)
+  expect(svg?.props.height).toBeLessThan(PIXEL_HEIGHTS.medium)
+  await idle.unmount()
+  const working = await $.ui.mount(band(true) as never)
+  expect(await working.find({ type: 'Svg' })).toBeUndefined()
+  expect(await working.find({ type: 'Text', text: 'engine band' })).toBeDefined()
+  await working.unmount()
+  await $.command.run({ ...COMMAND, surface: 'desktop', args: 'off' } as never)
+  const hidden = await $.ui.mount(band(false) as never)
+  expect(await hidden.find({ type: 'Svg' })).toBeUndefined()
+  await hidden.unmount()
+  await $.command.run({ ...COMMAND, surface: 'desktop', args: 'on' } as never)
+})
+
+test('terminal: the band above the prompt stays the engine\'s', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  mockPngFiles(on)
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine band</Text>
+  })
+  const ui = await $.ui.mount({
+    plugin: 'ox-cli-oxy',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    requestId: 'band',
+    props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 80, scroll: { offset: 0, bodyRows: 19 }, view: {} },
+  } as never)
+  expect(await ui.find({ type: 'Text', text: 'engine band' })).toBeDefined()
+  await ui.unmount()
+})
 
 test('desktop: /oxy off keeps the engine spinner', async ($, on) => {
   mock.clock(on, { now: 1_000 })
@@ -645,16 +699,16 @@ test('hires frame files sit under hooks/hires, per animation', () => {
 describe('hiresLayout', () => {
   // [anim, size, viewBox, Svg width x height, ground pad px, words lift rows]
   const cases: Array<[Anim, SizeName, string, [number, number], number, number]> = [
-    // Oxy alone: his figure is the crop, 48 px tall at medium
-    ['blink', 'medium', '120 141 240 480', [24, 48], 0, 1],
-    ['blink', 'small', '120 141 240 480', [16, 32], 0, 0],
-    ['blink', 'large', '120 141 240 480', [32, 64], 0, 1],
-    // the laptop widens the element; Oxy stays 48 px
-    ['laptop', 'medium', '30 141 420 480', [42, 48], 0, 1],
+    // Oxy alone: his figure is the crop, 320 px tall at medium
+    ['blink', 'medium', '120 141 240 480', [160, 320], 0, 8],
+    ['blink', 'small', '120 141 240 480', [80, 160], 0, 4],
+    ['blink', 'large', '120 141 240 480', [240, 480], 0, 12],
+    // the laptop widens the element; Oxy stays 320 px
+    ['laptop', 'medium', '30 141 420 480', [280, 320], 0, 8],
     // float's crop ends 100 px short of the ground: the viewBox keeps it
-    ['float', 'medium', '120 41 240 580', [24, 58], 10, 1],
+    ['float', 'medium', '120 41 240 580', [160, 387], 66.667, 8],
     // confetti fills the cell: taller than Oxy, same ground
-    ['confetti', 'medium', '60 0 360 621', [36, 62], 0, 1],
+    ['confetti', 'medium', '60 0 360 621', [240, 414], 0, 8],
   ]
   for (const [anim, size, viewBox, [width, height], pad, lift] of cases) {
     test(`${anim} at ${size}`, () => {
@@ -673,7 +727,7 @@ describe('hiresLayout', () => {
   }
   test('words lift follows the figure, never a tall prop', () => {
     const medium = hiresLayout(HIRES, 'confetti', 'medium')!
-    const middle = (HIRES.cell.height - (FIGURE.y + FIGURE.height / 2)) * (48 / FIGURE.height)
+    const middle = (HIRES.cell.height - (FIGURE.y + FIGURE.height / 2)) * (PIXEL_HEIGHTS.medium / FIGURE.height)
     expect(medium.wordsLift).toBe(Math.round((middle - ROW_PX / 2) / ROW_PX))
     expect(hiresLayout(HIRES, 'blink', 'medium')!.wordsLift).toBe(medium.wordsLift)
   })
@@ -733,7 +787,7 @@ for (const surface of ['desktop', 'vscode'] as const) {
           const h = FRAMES.hires
           const [, vy, , vh] = want.viewBox.split(' ').map(Number)
           // his figure is the size's height in every animation, to a pixel
-          expect(Math.abs((h.figure.height * want.size.height) / vh - { small: 32, medium: 48, large: 64 }[box])).toBeLessThanOrEqual(1)
+          expect(Math.abs((h.figure.height * want.size.height) / vh - { small: 160, medium: 320, large: 480 }[box])).toBeLessThanOrEqual(1)
           // and every viewBox ends on the cell's bottom edge, the ground
           expect(vy + vh).toBe(h.cell.height)
         }

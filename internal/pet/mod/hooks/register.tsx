@@ -99,11 +99,16 @@ type Running = Activity & { loop: string }
 // Null on the terminal, which blits each frame instead.
 type Clip = { anim: Anim; index: number; loop: boolean; shownAt: number }
 
-// A drawn site: the thinking line of one loop, or one turn's closing line
-// (terminal only: no other surface raises TurnDuration).
+// A drawn site: the thinking line of one loop, one turn's closing line
+// (terminal only: no other surface raises TurnDuration), or the band above
+// the prompt where Oxy rests between turns (the SVG surfaces only).
 type Site =
   | { kind: 'spinner'; surface: RenderSurface; mode: string; message: string | null; drawn: string; clip: Clip | null }
   | { kind: 'turn'; anim: Anim; start: number; drawn: string }
+  | { kind: 'rest'; surface: RenderSurface; drawn: string; clip: Clip | null }
+
+// What Oxy does between turns: a pinned animation, else he idles.
+const REST_ANIM: Anim = 'blink'
 
 // Module state: what is running and where Oxy is drawn. A reload of the mod
 // starts it over, which only costs the frame in flight.
@@ -206,6 +211,47 @@ function advanceClip(site: { clip: Clip | null }, anim: Anim, loop: boolean, now
   return true
 }
 
+// The clip an SVG site shows now, registered and ticking: null when
+// nothing can be drawn (frames unreadable, no layout, over the cap), so
+// the caller hands the site back to the engine.
+async function clipOf(
+  $: EngineInterface,
+  requestId: string,
+  site: Site & { kind: 'spinner' | 'rest' },
+  f: { anim: Anim; loop: boolean },
+  box: Size,
+  now: number,
+) {
+  let loaded: Clips
+  try {
+    loaded = await clipsOf($, f.anim)
+  } catch {
+    return null
+  }
+  // A redraw for other props keeps the clip's place; the ticker owns when
+  // it moves on.
+  const prev = sites.get(requestId)
+  const kept = prev !== undefined && prev.kind === site.kind ? prev.clip : null
+  site.clip =
+    kept !== null && kept.anim === f.anim && kept.loop === f.loop && kept.index < loaded.ranges.length
+      ? kept
+      : { anim: f.anim, index: 0, loop: f.loop, shownAt: now }
+  const [start, end] = loaded.ranges[site.clip.index]
+  const ms = loaded.ms.slice(start, end)
+  const layout = loaded.hires && FRAMES.hires !== undefined ? hiresLayout(FRAMES.hires, f.anim, box) : null
+  if (loaded.hires && layout === null) {
+    return null
+  }
+  const source = clipSvg(loaded.frames.slice(start, end), ms, f.loop && loaded.ranges.length === 1, layout ?? undefined)
+  if (source.length > SVG_SOURCE_CAP) {
+    return null
+  }
+  site.drawn = `${f.anim}#${site.clip.index}`
+  sites.set(requestId, site)
+  startTicker($)
+  return { source, px: layout ?? pixelBox(box), layout }
+}
+
 // A one-shot lasts the longer of its two arts' passes, so an SVG clip at
 // the hires timing reaches its frozen last frame before the next animation
 // takes over; the terminal simply holds its last frame for the difference.
@@ -233,7 +279,12 @@ function spinnerAnim(requestId: string, site: { mode: string; message: string | 
 function frameOf(requestId: string, site: Site, now: number, pin: string | null) {
   if (site.kind === 'turn') {
     const index = frameAt(FRAMES.animations[site.anim], site.start, now, false)
-    return { anim: site.anim, index, drawn: `${site.anim}:${index}` }
+    return { anim: site.anim, index, drawn: `${site.anim}:${index}`, loop: false }
+  }
+  if (site.kind === 'rest') {
+    const anim: Anim = pin !== null && isAnim(pin) ? pin : REST_ANIM
+    const index = frameAt(FRAMES.animations[anim], loopStart, now, true)
+    return { anim, index, drawn: `${anim}:${index}`, loop: true }
   }
   const anim = spinnerAnim(requestId, site, now, pin)
   // One-shot timing only while that one-shot is playing; a pinned or
@@ -254,7 +305,7 @@ async function tick($: EngineInterface) {
   let redraw = false
   for (const [requestId, site] of sites) {
     const f = frameOf(requestId, site, now, pin)
-    if (site.kind === 'spinner' && site.surface !== 'terminal') {
+    if (site.kind !== 'turn' && site.surface !== 'terminal') {
       redraw = advanceClip(site, f.anim, f.loop, now) || redraw
       continue
     }
@@ -408,44 +459,52 @@ export const register: Register = on => {
     }
   }).catch(($, e, next) => next(e))
 
+  // Between turns Oxy rests in the band above the prompt, so he stays on
+  // screen once the thinking line is gone. While a turn runs the band is
+  // handed back: he is in the thinking line then, and twice would be a crowd.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.surface === 'terminal') {
+      // The terminal keeps its band for surveys; Oxy lives in its thinking line.
+      return next(e)
+    }
+    const { hide } = await prefs($)
+    if (hide || e.props.isWorking || e.props.hasSurvey) {
+      sites.delete(e.requestId)
+      return next(e)
+    }
+    const now = await $.clock.now()
+    const site: Site & { kind: 'rest' } = { kind: 'rest', surface: e.surface, drawn: '', clip: null }
+    const f = frameOf(e.requestId, site, now, await read($, pinned))
+    // Always the small figure here: the band is a fixed-height panel and
+    // clips what overflows it (at medium his feet were cut off). The
+    // /oxy size governs the thinking line only.
+    const clip = await clipOf($, e.requestId, site, f, 'small', now)
+    if (clip === null) {
+      return next(e)
+    }
+    const { Box, Svg } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="row" alignItems="flex-end">
+        <Svg key={KEY} source={clip.source} alt="Oxy" width={clip.px.width} height={clip.px.height} />
+      </Box>
+    )
+  }).catch(($, e, next) => next(e))
+
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
     const { kind, box, hide } = await prefs($)
     if (hide) {
       return next(e)
     }
     const now = await $.clock.now()
-    const prev = sites.get(e.requestId)
     const site: Site = { kind: 'spinner', surface: e.surface, mode: e.props.mode, message: e.props.message, drawn: '', clip: null }
     const f = frameOf(e.requestId, site, now, await read($, pinned))
     if (e.surface !== 'terminal') {
-      let loaded: Clips
-      try {
-        loaded = await clipsOf($, f.anim)
-      } catch {
+      const clip = await clipOf($, e.requestId, site, f, box, now)
+      if (clip === null) {
         return next(e)
       }
-      // A redraw for other props keeps the clip's place; the ticker owns when
-      // it moves on.
-      const kept = prev?.kind === 'spinner' ? prev.clip : null
-      site.clip =
-        kept !== null && kept.anim === f.anim && kept.loop === f.loop && kept.index < loaded.ranges.length
-          ? kept
-          : { anim: f.anim, index: 0, loop: f.loop, shownAt: await $.clock.now() }
-      const [start, end] = loaded.ranges[site.clip.index]
-      const ms = loaded.ms.slice(start, end)
-      const layout = loaded.hires && FRAMES.hires !== undefined ? hiresLayout(FRAMES.hires, f.anim, box) : null
-      if (loaded.hires && layout === null) {
-        return next(e)
-      }
-      const source = clipSvg(loaded.frames.slice(start, end), ms, f.loop && loaded.ranges.length === 1, layout ?? undefined)
-      if (source.length > SVG_SOURCE_CAP) {
-        return next(e)
-      }
-      site.drawn = `${f.anim}#${site.clip.index}`
-      sites.set(e.requestId, site)
-      startTicker($)
+      const { source, px, layout } = clip
       const { Box, Svg, Text } = $.ui.resolve(e)
-      const px = layout ?? pixelBox(box)
       // Hires SVGs differ in height with their props but all end on the
       // ground line, so the row aligns their bottoms and lifts the words to
       // his middle; the fallback frames are all one box and simply centre.
