@@ -64,7 +64,9 @@ context that influenced this session — `● ox  3 discussions · 1 plan · 1 m
 — each item once; with nothing used yet it reads `● ox  ● rec`. It reads local files
 only (no network, no daemon). A `statusLine` already in the project file is never
 replaced; one in your own `~/.claude/settings.json` keeps working, on its own row
-beneath ox's. Turn it off with `ox config set statusline off`.
+beneath ox's. In the Claude desktop app's Claude Code tab, which has no status bar, the
+same line is drawn directly above the prompt by the brief pane plugin (below), fed by
+`ox statusline --json`. Turn it off everywhere with `ox config set statusline off`.
 
 **Brief pane.** `/ox-brief` opens a pane beside the chat with what SageOx gave this
 session (calls, estimated context tokens, what was read and what was useful) and a
