@@ -181,18 +181,13 @@ func main() {
 }
 
 // executeWithSignalContext runs the CLI under a context that cancels on
-// SIGINT, SIGTERM or SIGHUP. Subprocesses run in their own process group (see
-// internal/gitutil), so neither a terminal Ctrl-C nor the hangup of a closed
-// terminal reaches them directly; they die only when this context is canceled.
+// SIGINT/SIGTERM. Subprocesses run in their own process group (see
+// internal/gitutil), so a terminal Ctrl-C no longer reaches them directly;
+// they die only when this context is canceled.
 func executeWithSignalContext(args []string) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	interrupts := make(chan os.Signal, 1)
-	signals := []os.Signal{os.Interrupt, syscall.SIGTERM}
-	// Under nohup SIGHUP arrives ignored, and registering it would un-ignore it.
-	if !signal.Ignored(syscall.SIGHUP) {
-		signals = append(signals, syscall.SIGHUP)
-	}
-	signal.Notify(interrupts, signals...)
+	signal.Notify(interrupts, os.Interrupt, syscall.SIGTERM)
 	stop := func() {
 		signal.Stop(interrupts)
 		cancel()
