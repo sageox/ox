@@ -6,8 +6,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -139,9 +137,7 @@ func TestValidateFeedbackPayloadUsesBundledAndFreshRules(t *testing.T) {
 func TestValidateFeedbackPayloadRefusesWhatOnlyCurrentRulesCatch(t *testing.T) {
 	previous := feedbackLoadLatestRules
 	t.Cleanup(func() { feedbackLoadLatestRules = previous })
-	_, thisFile, _, ok := runtime.Caller(0)
-	require.True(t, ok)
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "..", "..", "internal", "secretguard", "gitleaks.toml"))
+	data, err := os.ReadFile(repoPath("..", "..", "internal", "secretguard", "gitleaks.toml"))
 	require.NoError(t, err)
 	rules, err := secretguard.NewRules(append(data, "\n[[rules]]\nid = \"future-format\"\nregex = '''future_[a-z]{8}'''\n"...))
 	require.NoError(t, err)

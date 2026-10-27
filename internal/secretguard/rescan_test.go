@@ -3,6 +3,7 @@ package secretguard
 import (
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -87,9 +88,9 @@ func TestCleanScanMemoIsBoundedAndHoldsNoContent(t *testing.T) {
 	}
 	m := &scanMemo{seen: map[[32]byte]struct{}{}}
 	for i := range cleanScanLimit {
-		m.add(bundled.cleanKey(strings.Repeat("x", i)))
+		m.add(bundled.cleanKey(strconv.Itoa(i)))
 	}
-	first := bundled.cleanKey("")
+	first := bundled.cleanKey("0")
 	if len(m.seen) != cleanScanLimit || !m.has(first) {
 		t.Fatalf("memo holds %d of %d entries", len(m.seen), cleanScanLimit)
 	}
