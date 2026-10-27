@@ -93,6 +93,7 @@ func runConversationSearch(cmd *cobra.Command, args []string) error {
 		Until:        until,
 		Limit:        flags.Limit,
 	})
+	traceConversationEnvelope(env)
 	return finishConversationEnvelope(cmd.OutOrStdout(), format, env, renderConversationSearchText)
 }
 

@@ -94,3 +94,19 @@ func (r *Reader) Show(rawID string) *Envelope {
 
 	return r.finishSuccess(start, data, guidanceShow(id.ConversationID, isScreenRecording(droot)), warnings)
 }
+
+// ConversationTitle returns one conversation's display title by the show
+// title rule (index, then metadata.json, then folder name) without reading its
+// summary or transcript; false when rawID does not parse or is not indexed.
+func (r *Reader) ConversationTitle(rawID string) (string, bool) {
+	id, idErr := ParseID(rawID)
+	if idErr != nil {
+		return "", false
+	}
+	rw, droot, lookErr := r.lookup(id)
+	if lookErr != nil {
+		return "", false
+	}
+	defer droot.Close()
+	return r.conversationTitle(rw, droot), true
+}

@@ -127,7 +127,7 @@ func (f *statuslineFixture) startRecording(t *testing.T) {
 func (f *statuslineFixture) seed(t *testing.T, c oxactivity.Counts) {
 	t.Helper()
 	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{
-		Discussions: c.Discussions, Plans: c.Plans, Docs: c.Docs, Sessions: c.Sessions, Murmurs: c.Murmurs,
+		Discussions: c.Discussions, Plans: c.Plans, Docs: c.Docs, Sessions: c.Sessions, Murmurs: c.Murmurs, Used: c.Used,
 	}))
 }
 
@@ -146,6 +146,7 @@ func TestStatusline_CountsLine(t *testing.T) {
 		{"zero counts", &oxactivity.Counts{}, "● ox\n"},
 		{"mixed", &oxactivity.Counts{Discussions: 3, Plans: 1, Murmurs: 1}, "● ox  3 discussions · 1 plan · 1 murmur\n"},
 		{"every bucket", &oxactivity.Counts{Discussions: 1, Plans: 2, Docs: 1, Sessions: 2, Murmurs: 4}, "● ox  1 discussion · 2 plans · 1 doc · 2 sessions · 4 murmurs\n"},
+		{"used after the kinds", &oxactivity.Counts{Discussions: 3, Plans: 1, Used: 2}, "● ox  3 discussions · 1 plan · 2 used\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -194,6 +195,47 @@ func TestStatusline_PerSessionState(t *testing.T) {
 	require.NoError(t, oxactivity.RecordInfluence(f.root, f.agentID, f.sessionID, "discussion", "cnv_1"))
 	assert.Equal(t, "● ox  1 discussion\n", f.run(t, testStatuslineOptions()))
 	assert.Equal(t, 2, oxactivity.LoadState(f.root, oxactivity.StateKey(f.agentID, other)).Plans, "the other window keeps its own")
+}
+
+// TestStatusline_FetchThenUse shows one fetched-and-used item as one item and
+// one use. Failure prevented: the hook's retrieval ref and the use writer's
+// ref disagreeing, so a discussion pulled and then acted on reads
+// "2 discussions", or team context read once and cited once reads "2 docs".
+func TestStatusline_FetchThenUse(t *testing.T) {
+	f := newStatuslineFixture(t)
+	const cnv = "cnv_019ffe10-0000-7000-8000-000000000011"
+	require.NoError(t, oxactivity.RecordInfluence(f.root, f.agentID, f.sessionID, "discussion", cnv))
+	require.NoError(t, oxactivity.RecordInfluence(f.root, f.agentID, f.sessionID, "team-context", oxactivity.TeamContextRef))
+	assert.Equal(t, "● ox  1 discussion · 1 doc\n", f.run(t, testStatuslineOptions()))
+
+	require.NoError(t, oxactivity.RecordUse(f.root, f.agentID, f.sessionID, "discussion", "https://sageox.ai/c/"+cnv))
+	require.NoError(t, oxactivity.RecordUse(f.root, f.agentID, f.sessionID, "team-context", "team-ctx/acme"))
+	assert.Equal(t, "● ox  1 discussion · 1 doc · 2 used\n", f.run(t, testStatuslineOptions()))
+}
+
+// TestStatusline_UsedFitsLast keeps "N used" when the bar narrows, after every
+// kind count and before "● rec" gives way. Failure prevented: the most
+// informative number dropping first on a narrow terminal.
+func TestStatusline_UsedFitsLast(t *testing.T) {
+	f := newStatuslineFixture(t)
+	f.seed(t, oxactivity.Counts{Discussions: 3, Plans: 1, Used: 2})
+	f.startRecording(t)
+
+	tests := []struct {
+		width int
+		want  string
+	}{
+		{0, "● ox  3 discussions · 1 plan · 2 used  ● rec"},
+		{40, "● ox  3 discussions · 2 used  ● rec"},
+		{25, "● ox  2 used  ● rec"},
+		{12, "● ox  ● rec"},
+	}
+	for _, tt := range tests {
+		opts := testStatuslineOptions()
+		opts.width = tt.width
+		got := strings.TrimSuffix(f.run(t, opts), "\n")
+		assert.Equal(t, tt.want, got, "width %d", tt.width)
+	}
 }
 
 // --- C. Off switch, project detection, failure paths ---

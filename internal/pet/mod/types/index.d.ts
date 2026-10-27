@@ -4,6 +4,10 @@ export type Renderer = 'image' | 'cells'
 // How big Oxy is drawn; a fixed height in rows, as wide as the art needs.
 export type Size = 'small' | 'medium' | 'large'
 
+// Where Oxy stands on the desktop app: under each of Claude's replies, or in
+// a side pane.
+export type Placement = 'reply' | 'pane'
+
 declare module 'claude-code' {
   interface PluginState {
     'ox-cli-oxy': {
@@ -16,6 +20,8 @@ declare module 'claude-code' {
       size: Size | null
       /** `/oxy <animation>` pins one animation; null follows Claude. */
       pinned: string | null
+      /** `/oxy reply` or `/oxy pane`; null falls back to what was saved. */
+      placement: Placement | null
     }
   }
 }

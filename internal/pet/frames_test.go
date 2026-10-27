@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -207,6 +208,7 @@ func TestBuildFrames_RectangularCellsCutWholeFrames(t *testing.T) {
 // module over 8388608 bytes in total") and enable fails for everyone.
 func TestFramesFiles_StayUnderClaudeLimits(t *testing.T) {
 	t.Run("tiny sheet", func(t *testing.T) { checkFramesFiles(t, tinyFrames) })
+	t.Run("tiny sheet with desktop set", func(t *testing.T) { checkFramesFiles(t, tinyHiresFrames) })
 	t.Run("embedded art", func(t *testing.T) {
 		if testing.Short() {
 			t.Skip("short: renders every Oxy animation")
@@ -214,6 +216,19 @@ func TestFramesFiles_StayUnderClaudeLimits(t *testing.T) {
 		checkFramesFiles(t, OxyFrames)
 	})
 }
+
+// svgSourceCap is Claude Code's limit on an Svg element's source;
+// svgWrapperChars is the markup around a frame's base64 data.
+// hiresBudget bounds the desktop frames the mod folder carries, written on
+// every enable and upgrade. They are one file per frame at up to 30 fps, and
+// frame files lose the cross-frame matches deflate finds in a strip, so they
+// total ~5x the embedded strips (~31 MB for the 480x621 trial set at the
+// pixel set's frame rate); this catches a set that grows unnoticed.
+const (
+	svgSourceCap    = 131072
+	svgWrapperChars = 300
+	hiresBudget     = 80 << 20
+)
 
 func checkFramesFiles(t *testing.T, render func() (*Frames, error)) {
 	t.Helper()
@@ -225,14 +240,26 @@ func checkFramesFiles(t *testing.T, render func() (*Frames, error)) {
 	require.Contains(t, files, framesFile)
 	assert.Less(t, len(files[framesFile]), 64<<10, "the index holds timing and sizes only")
 	index := string(files[framesFile])
-	pngs := 0
+	pngs, hiresPNGs, hiresBytes := 0, map[string]int{}, 0
 	for rel, data := range files {
 		switch {
 		case rel == framesFile:
 		case strings.HasSuffix(rel, ".png"):
-			pngs++
+			if anim, ok := strings.CutPrefix(rel, hiresDir+"/"); ok {
+				hiresPNGs[anim[:strings.LastIndex(anim, "/")]]++
+				hiresBytes += len(data)
+			} else {
+				pngs++
+			}
 			_, err := png.Decode(bytes.NewReader(data))
 			assert.NoError(t, err, rel)
+			// The desktop and VS Code surfaces draw each frame as an Svg
+			// element wrapping the PNG as a base64 data URI, and Claude Code
+			// caps an Svg source at 131,072 chars (SvgProps in the plugin
+			// API). A frame over it would vanish there while the terminal
+			// still shows it. 300 covers the SVG wrapper and data-URI prefix.
+			assert.Less(t, (len(data)+2)/3*4+svgWrapperChars, svgSourceCap,
+				"%s is too large to draw as an Svg data URI on the desktop", rel)
 		case strings.HasSuffix(rel, "/cells.json"):
 			assert.Less(t, len(data), 4<<20, rel)
 			var cells map[string][]string
@@ -253,6 +280,23 @@ func checkFramesFiles(t *testing.T, render func() (*Frames, error)) {
 		assert.Contains(t, index, "\""+name+"\": { ms: "+string(ms)+" }")
 	}
 	assert.Equal(t, want, pngs, "one PNG file per frame")
+	if frames.Hires == nil {
+		assert.Empty(t, hiresPNGs)
+		assert.NotContains(t, index, "hires:", "no desktop set, so the desktop draws the pixel frames")
+	} else {
+		for name := range frames.Animations {
+			h := frames.Hires.Manifest.Animations[name]
+			assert.Equal(t, len(h.MS), hiresPNGs[name], "%s: one hi-res PNG per hi-res duration", name)
+			ms, _ := json.Marshal(h.MS)
+			assert.Contains(t, index, fmt.Sprintf("%q: { x: %d, y: %d, width: %d, height: %d, ms: %s }", name, h.X, h.Y, h.Width, h.Height, ms))
+		}
+		assert.Len(t, hiresPNGs, len(frames.Animations))
+		assert.Less(t, hiresBytes, hiresBudget, "the desktop set's frames in all")
+		m := frames.Hires.Manifest
+		assert.Contains(t, index, fmt.Sprintf("hires: { cell: { width: %d, height: %d }, scale: %g, figure: { x: %d, y: %d, width: %d, height: %d }, animations: { ",
+			m.Cell.Width, m.Cell.Height, m.Scale, m.Figure.X, m.Figure.Y, m.Figure.Width, m.Figure.Height))
+		t.Logf("desktop set: %d frames, %d bytes", len(files)-pngs-len(frames.Animations)-1, hiresBytes)
+	}
 	for _, s := range Sizes {
 		box := frames.Sizes[s.Name]
 		assert.Contains(t, index, s.Name+": { columns: "+itoa(box.Columns)+", rows: "+itoa(box.Rows)+", cells: { columns: "+itoa(box.Cells.Columns)+", rows: "+itoa(box.Cells.Rows)+" } }")

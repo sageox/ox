@@ -2,12 +2,16 @@ package usage
 
 import (
 	"encoding/json"
+	"path"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sageox/ox/internal/oxactivity"
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/session/contextuse"
 	"github.com/sageox/ox/internal/weblink"
 )
 
@@ -31,8 +35,16 @@ type Input struct {
 	ProducedCommits int
 
 	// Endpoint is the project's SageOx web endpoint (https://sageox.ai). When
-	// set, surfaced discussions and plans with an opaque id get a web link.
+	// set, surfaced and used discussions, sessions and plans with an opaque id
+	// get a web link (see webURL).
 	Endpoint string
+
+	// ScoreThreshold is the project's attribution threshold (the minimum
+	// category value that earns a commit trailer); 0 → the config default.
+	ScoreThreshold float64
+	// AllowJudged lets LLM-judge evidence reach the derived attribution
+	// category. Judged uses are always listed either way.
+	AllowJudged bool
 
 	Now   time.Time
 	Width int // display width; 0 → 80
@@ -44,6 +56,9 @@ type Input struct {
 
 // RecentAll is the Input.RecentLimit that keeps every call in calls.recent.
 const RecentAll = -1
+
+// defaultScoreThreshold mirrors the attribution config default.
+const defaultScoreThreshold = 0.5
 
 // primeCommand is the Command prime records for itself.
 const primeCommand = "agent prime"
@@ -72,9 +87,18 @@ func Build(in Input) Report {
 	}
 	r.Calls = buildCalls(in.Events, in.RecentLimit)
 	r.Context = buildContext(in.Events)
-	r.Surfaced = buildSurfaced(in.Events)
-	fillURLs(r.Surfaced, in.Endpoint)
-	r.Used = buildUsed(in, r.Surfaced)
+	surfaced, all := buildSurfaced(in.Events)
+	fillURLs(surfaced, in.Endpoint)
+	r.SurfacedByType = countByType(surfaced)
+	r.Used = buildUsed(in, surfaced)
+	rollup := contextuse.Build(in.Events, all, in.ProducedCommits, in.AllowJudged)
+	if r.Trace.Available {
+		r.Relevant = buildRelevant(rollup, surfaced, all)
+		fillItemURLs(r.Relevant.Items, in.Endpoint)
+		r.Relevant.ReportedNone = rollup.ReportedNone && r.Relevant.Count == 0 && len(r.Used.SelfReported) == 0
+	}
+	r.Surfaced = capSurfaced(surfaced, maxSurfaced)
+	r.Attribution = buildAttribution(in, rollup)
 	r.NextActions = nextActions(r)
 	r.Guidance = guidanceText
 	r.Display = Display(r, in.Width)
@@ -199,47 +223,84 @@ func buildContext(events []contexttrace.Event) Context {
 	return cx
 }
 
-// docsOf tolerates both the singular Doc and the plural Docs shapes.
-func docsOf(ev contexttrace.Event) []string {
-	if ev.Doc != "" {
-		return []string{ev.Doc}
+// buildSurfaced lists what reached the model by name (via contextuse, so the
+// report and the rollup agree on what was surfaced), in arrival order and
+// uncapped; capSurfaced trims it for display once use evidence is marked. The
+// contextuse list is returned too so use evidence is matched against all of it.
+func buildSurfaced(events []contexttrace.Event) ([]Surfaced, []contextuse.SurfacedRef) {
+	all := contextuse.SurfacedWith(events, contextuse.SurfacedOptions{
+		IsRetrieval: func(ev contexttrace.Event) bool { return kindOf(ev) == oxactivity.KindRetrieval },
+	})
+	// Whisper sender id and topic are display fields contextuse does not carry.
+	type whisperMeta struct{ from, topic string }
+	whispers := map[string]whisperMeta{}
+	for _, ev := range events {
+		if ev.Type != contexttrace.EventProvided || !isWhisper(ev) {
+			continue
+		}
+		ref := ev.Ref
+		if ref == "" {
+			ref = ev.WhisperID
+		}
+		if _, seen := whispers[ref]; !seen {
+			whispers[ref] = whisperMeta{ev.From, ev.Topic}
+		}
 	}
-	return ev.Docs
+	out := make([]Surfaced, 0, len(all))
+	for _, s := range all {
+		item := Surfaced{
+			Ref: s.Ref, RefType: s.RefType, Via: s.Via,
+			Title: s.Title, URL: s.URL, FromName: s.FromName, Seq: s.Seq,
+		}
+		if s.Via == contextuse.ViaWhisper {
+			item.From, item.Topic = whispers[s.Ref].from, whispers[s.Ref].topic
+		}
+		out = append(out, item)
+	}
+	return out, all
 }
 
-func buildSurfaced(events []contexttrace.Event) []Surfaced {
-	out := []Surfaced{}
-	seen := map[string]bool{}
-	add := func(s Surfaced) {
-		if s.Ref == "" || len(out) >= maxSurfaced {
-			return
-		}
-		key := s.RefType + "\x00" + s.Ref
-		if seen[key] {
-			return
-		}
-		seen[key] = true
-		out = append(out, s)
+// capSurfaced trims the surfaced list to n for display without cutting what
+// matters most: every used item survives (so the list can exceed n), then what
+// the AI coworker fetched itself, then startup context (prime docs, whispers,
+// recall), which arrives first and would otherwise fill the cap on its own.
+// Arrival order is kept within each group and in the result.
+func capSurfaced(surfaced []Surfaced, n int) []Surfaced {
+	if len(surfaced) <= n {
+		return surfaced
 	}
-	for _, ev := range events {
-		switch {
-		case ev.Type == contexttrace.EventProvided && isWhisper(ev):
-			ref := ev.Ref
-			if ref == "" {
-				ref = ev.WhisperID
+	keep := make([]bool, len(surfaced))
+	kept := 0
+	for _, pass := range []func(Surfaced) bool{
+		func(s Surfaced) bool { return s.Used != nil },
+		func(s Surfaced) bool { return s.Via == contextuse.ViaRetrieval },
+		func(Surfaced) bool { return true },
+	} {
+		for i, s := range surfaced {
+			if !keep[i] && pass(s) && (kept < n || s.Used != nil) {
+				keep[i] = true
+				kept++
 			}
-			add(Surfaced{Ref: ref, RefType: "murmur", From: ev.From, Topic: ev.Topic, Via: "whisper"})
-		case ev.Type == contexttrace.EventProvided:
-			for _, d := range docsOf(ev) {
-				add(Surfaced{Ref: d, RefType: "doc", Via: "prime"})
-			}
-		case ev.Type == contexttrace.EventInvoked && ev.Query != "" && kindOf(ev) == oxactivity.KindRetrieval:
-			rt := ev.RefType
-			if rt == "" {
-				rt = "query"
-			}
-			add(Surfaced{Ref: ev.Query, RefType: rt, Via: "retrieval"})
 		}
+	}
+	out := make([]Surfaced, 0, kept)
+	for i, s := range surfaced {
+		if keep[i] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// countByType totals the full surfaced list by ref_type, so a renderer can
+// count what was available even when the displayed list was capped.
+func countByType(surfaced []Surfaced) map[string]int {
+	if len(surfaced) == 0 {
+		return nil
+	}
+	out := map[string]int{}
+	for _, s := range surfaced {
+		out[s.RefType]++
 	}
 	return out
 }
@@ -263,12 +324,19 @@ func kindOf(ev contexttrace.Event) oxactivity.Kind {
 	return act.Kind
 }
 
-// isSelfReport reports whether an influenced event is the AI coworker's own
-// attribution. Legacy influenced events carry no mechanism; they were written
-// by the same AI-coworker-reported path, so they count as self-assessed too.
+// isSelfReport reports whether an event is the AI coworker's own attribution:
+// a used event it reported at the moment of use, or a legacy influenced event
+// (those carry no mechanism; they were written by the same AI-coworker-reported
+// path, so they count as self-assessed too).
 func isSelfReport(ev contexttrace.Event) bool {
-	return ev.Type == contexttrace.EventInfluenced &&
-		(ev.Mechanism == contexttrace.MechanismSelfReport || ev.Mechanism == "")
+	switch ev.Type {
+	case contexttrace.EventUsed:
+		return ev.Evidence == contexttrace.EvidenceReported ||
+			(ev.Evidence == "" && (ev.Mechanism == contexttrace.MechanismSelfReport || ev.Mechanism == ""))
+	case contexttrace.EventInfluenced:
+		return ev.Mechanism == contexttrace.MechanismSelfReport || ev.Mechanism == ""
+	}
+	return false
 }
 
 func buildUsed(in Input, surfaced []Surfaced) Used {
@@ -308,12 +376,117 @@ func buildUsed(in Input, surfaced []Surfaced) Used {
 		u.SageoxScore = &Score{Category: in.ScoreCategory, Reason: in.ScoreReason}
 	}
 	if in.Recording && in.AgentID != "" {
+		ref := "SURFACED_REF"
+		if len(surfaced) > 0 {
+			ref = surfaced[0].Ref
+		}
 		u.SelfReport = &SelfReportCmd{
-			Command:     "ox agent " + in.AgentID + " session context-trace",
-			ExampleLine: exampleLine(surfaced),
+			Command:          "ox agent " + in.AgentID + " context used " + ref + " --why \"ONE LINE: what you did because of it\"",
+			BatchCommand:     "ox agent " + in.AgentID + " session context-trace",
+			BatchExampleLine: exampleLine(surfaced),
 		}
 	}
 	return u
+}
+
+// buildRelevant turns the use-evidence rollup into the report's relevant
+// section and marks each displayed surfaced item with its strongest evidence.
+func buildRelevant(rollup contextuse.Rollup, surfaced []Surfaced, all []contextuse.SurfacedRef) *Relevant {
+	rel := &Relevant{
+		Count:         rollup.UsedProvable + rollup.UsedReported + rollup.UsedJudged,
+		SurfacedCount: rollup.Surfaced,
+		ByEvidence: map[string]int{
+			contextuse.BucketRead: 0, contextuse.BucketCited: 0,
+			contextuse.BucketReported: 0, contextuse.BucketJudged: 0,
+		},
+		Items:   []RelevantItem{},
+		Derived: &Derived{Category: rollup.DerivedCategory, Reason: rollup.DerivedReason},
+	}
+	for k, n := range rollup.ByEvidence {
+		rel.ByEvidence[k] = n
+	}
+	for _, u := range rollup.Refs {
+		item := RelevantItem{
+			Ref: u.Ref, RefType: u.RefType,
+			Evidence: contextuse.BucketOf(u.Evidence), Detail: u.Evidence, Grade: u.Grade,
+			Seq: u.Seq, Why: capRunes(u.Decision, maxWhyRunes),
+		}
+		if u.Evidence == contexttrace.EvidenceCitedCommit {
+			item.Commit = shortSHA(u.Commit)
+		}
+		for i := range surfaced {
+			if !sameRef(surfaced[i].Ref, u.Ref) {
+				continue
+			}
+			if surfaced[i].Used == nil {
+				surfaced[i].Used = &ItemUsed{Evidence: item.Evidence, Seq: u.Seq, Grade: u.Grade}
+			}
+			if item.Title == "" {
+				item.Title, item.URL = surfaced[i].Title, surfaced[i].URL
+			}
+		}
+		if item.Title == "" {
+			for _, s := range all {
+				if sameRef(s.Ref, u.Ref) {
+					item.Title, item.URL = s.Title, s.URL
+					break
+				}
+			}
+		}
+		rel.Items = append(rel.Items, item)
+	}
+	// A timeline: earliest use first; refs with equal seq keep rollup order.
+	sort.SliceStable(rel.Items, func(i, j int) bool { return rel.Items[i].Seq < rel.Items[j].Seq })
+	return rel
+}
+
+// maxWhyRunes caps a reported --why; the writer caps it too, this is defense.
+const maxWhyRunes = 200
+
+// capRunes trims s to at most n runes.
+func capRunes(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n])
+}
+
+// shortSHA is the 7-character form of a commit sha.
+func shortSHA(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
+}
+
+// sameRef matches a used ref to a surfaced one the way contextuse does: exact
+// case-insensitive, else by basename (a read of "/ledger/MEMORY.md" is a use
+// of surfaced "MEMORY.md").
+func sameRef(surfacedRef, usedRef string) bool {
+	if strings.EqualFold(surfacedRef, usedRef) {
+		return true
+	}
+	return strings.EqualFold(path.Base(strings.ReplaceAll(surfacedRef, "\\", "/")),
+		path.Base(strings.ReplaceAll(usedRef, "\\", "/")))
+}
+
+// buildAttribution says whether the session clears the project's attribution
+// threshold. A manual score (ox session score) is the AI coworker's own call
+// and wins over the derived category; both are display-only here.
+func buildAttribution(in Input, rollup contextuse.Rollup) Attribution {
+	a := Attribution{Threshold: in.ScoreThreshold}
+	if a.Threshold == 0 {
+		a.Threshold = defaultScoreThreshold
+	}
+	if in.ScoreCategory != "" {
+		a.Source, a.Category, a.Reason = AttributionSelfReported, in.ScoreCategory, in.ScoreReason
+	} else {
+		a.Source, a.Category, a.Reason = AttributionDerived, rollup.DerivedCategory, rollup.DerivedReason
+	}
+	a.WouldAttribute = session.CategoryValue(session.ScoreCategory(a.Category)) >= a.Threshold
+	return a
 }
 
 // exampleLine is one JSONL self-report line, anchored to a real surfaced item
@@ -342,25 +515,44 @@ func nextActions(r Report) []NextAction {
 	return out
 }
 
-// fillURLs gives a surfaced discussion or plan its web link when the trace
-// did not carry one and its ref is an opaque id the web app resolves. Slugs,
-// docs and paths never get a guessed link.
+// fillURLs gives a surfaced item its web link when the trace did not carry
+// one (see webURL).
 func fillURLs(surfaced []Surfaced, endpoint string) {
-	if endpoint == "" {
-		return
-	}
 	for i := range surfaced {
-		s := &surfaced[i]
-		if s.URL != "" {
-			continue
-		}
-		switch s.RefType {
-		case "discussion":
-			if p := weblink.IDTypePrefix(s.Ref); p == "cnv_" || p == "rec_" {
-				s.URL = weblink.Conversation(endpoint, s.Ref)
-			}
-		case "plan":
-			s.URL = weblink.Plan(endpoint, s.Ref)
+		if surfaced[i].URL == "" {
+			surfaced[i].URL = webURL(surfaced[i].RefType, surfaced[i].Ref, endpoint)
 		}
 	}
+}
+
+// fillItemURLs does the same for used items the surfaced join left unlinked.
+func fillItemURLs(items []RelevantItem, endpoint string) {
+	for i := range items {
+		if items[i].URL == "" {
+			items[i].URL = webURL(items[i].RefType, items[i].Ref, endpoint)
+		}
+	}
+}
+
+// webURL is the one rule for which refs get a sageox.ai link: discussions
+// with an opaque cnv_/rec_ id, sessions with a ses_ id (both /c/<id>), and
+// pln_ plans. Slugs, docs, paths and murmurs (no web page) never get a
+// guessed link; "" when the endpoint is unknown.
+func webURL(refType, ref, endpoint string) string {
+	if endpoint == "" {
+		return ""
+	}
+	switch refType {
+	case "discussion":
+		if p := weblink.IDTypePrefix(ref); p == "cnv_" || p == "rec_" {
+			return weblink.Conversation(endpoint, ref)
+		}
+	case "session":
+		if weblink.IDTypePrefix(ref) == "ses_" {
+			return weblink.Conversation(endpoint, ref)
+		}
+	case "plan":
+		return weblink.Plan(endpoint, ref)
+	}
+	return ""
 }

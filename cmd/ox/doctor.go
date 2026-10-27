@@ -998,9 +998,12 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 
 	// git repo paths check - suppress individual warnings when not logged in
 	if state.isAuthenticated {
-		check := checkGitRepoPaths(opts.shouldFix(CheckSlugGitRepoPaths))
+		check := gitRepoPathsCheck(ctx, opts.shouldFix(CheckSlugGitRepoPaths))
 		if errors.Is(check.err, tea.ErrInterrupted) {
 			return categories, check.err
+		}
+		if err := ctx.Err(); err != nil {
+			return categories, err
 		}
 		gitRepoChecks = append(gitRepoChecks, check)
 	} else {
@@ -1061,7 +1064,10 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 			},
 		})
 	} else {
-		ledgerGitChecks := checkLedgerGitHealth(opts)
+		ledgerGitChecks := checkLedgerGitHealth(ctx, opts)
+		if err := ctx.Err(); err != nil {
+			return categories, err
+		}
 		if len(ledgerGitChecks) > 0 {
 			categories = append(categories, checkCategory{
 				name:   "Ledger Git Health",
@@ -1420,8 +1426,9 @@ var ledgerGitHealthOrder = []string{
 
 // checkLedgerGitHealth runs every check registered in the "Ledger Git Health"
 // category, in ledgerGitHealthOrder, resolving each check's fix flag through
-// opts.shouldFix(slug). Returns nil when there is no ledger to check.
-func checkLedgerGitHealth(opts doctorOptions) []checkResult {
+// opts.shouldFix(slug). Returns nil when there is no ledger to check, and
+// starts no further check once ctx is canceled.
+func checkLedgerGitHealth(ctx context.Context, opts doctorOptions) []checkResult {
 	ledgerPath := getLedgerPath()
 	if ledgerPath == "" {
 		return nil // no ledger found, skip entire category
@@ -1433,6 +1440,9 @@ func checkLedgerGitHealth(opts doctorOptions) []checkResult {
 
 	checks := make([]checkResult, 0, len(ledgerGitHealthOrder))
 	for _, slug := range ledgerGitHealthOrder {
+		if ctx.Err() != nil {
+			break
+		}
 		check := DoctorCheckRegistry[slug]
 		if check == nil {
 			continue // registration removed; the coverage test catches the reverse
@@ -1449,7 +1459,13 @@ func checkLedgerGitHealth(opts doctorOptions) []checkResult {
 			_ = opts.runSessionRepairs()
 		}
 
-		result := check.Run(opts.shouldFix(slug))
+		var result checkResult
+		if slug == CheckSlugLedgerInvalidHead {
+			// its repair re-clones the Ledger, which Ctrl-C must be able to stop
+			result = invalidHeadCheck(ctx, ledgerPath, opts.shouldFix(slug))
+		} else {
+			result = check.Run(opts.shouldFix(slug))
+		}
 		// the checkout .gitignore check reports "skipped" when no checkout
 		// exists; that is not a finding worth a row. The GitHub mirror check
 		// reports "skipped" when the mirror never ran on this machine, which

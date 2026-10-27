@@ -151,7 +151,7 @@ func TestLedgerGitHealthNoLedgerReturnsNil(t *testing.T) {
 		t.Skipf("a ledger resolved in this environment (%q); early-out path not exercised", got)
 	}
 
-	if checks := checkLedgerGitHealth(doctorOptions{}); checks != nil {
+	if checks := checkLedgerGitHealth(t.Context(), doctorOptions{}); checks != nil {
 		t.Errorf("expected nil checks when no ledger is configured, got %d", len(checks))
 	}
 }

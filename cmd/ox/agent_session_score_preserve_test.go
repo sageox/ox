@@ -33,7 +33,7 @@ func TestWriteInitialSessionMetaConsumesScoreOnlyAfterDurableWrite(t *testing.T)
 		sessionDir := t.TempDir()
 		require.NoError(t, os.Mkdir(filepath.Join(sessionDir, "meta.json"), 0o755))
 
-		meta, err := writeInitialSessionMeta(sessionDir, agentID, newBuilder())
+		meta, err := writeInitialSessionMeta(sessionDir, agentID, newBuilder(), contextUseSource{})
 
 		require.Error(t, err)
 		assert.Nil(t, meta)
@@ -46,7 +46,7 @@ func TestWriteInitialSessionMetaConsumesScoreOnlyAfterDurableWrite(t *testing.T)
 	t.Run("successful metadata write consumes score", func(t *testing.T) {
 		sessionDir := t.TempDir()
 
-		meta, err := writeInitialSessionMeta(sessionDir, agentID, newBuilder())
+		meta, err := writeInitialSessionMeta(sessionDir, agentID, newBuilder(), contextUseSource{})
 
 		require.NoError(t, err)
 		require.NotNil(t, meta)
@@ -76,7 +76,7 @@ func TestWriteInitialSessionMetaConsumesScoreOnlyAfterDurableWrite(t *testing.T)
 			time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC),
 		)
 
-		first, err := writeInitialSessionMeta(sessionDir, retryAgentID, firstBuilder)
+		first, err := writeInitialSessionMeta(sessionDir, retryAgentID, firstBuilder, contextUseSource{})
 		require.NoError(t, err)
 		require.NotNil(t, first.SageoxScore)
 		carrier, readErr := session.ReadSageoxScore(retryAgentID)
@@ -90,7 +90,7 @@ func TestWriteInitialSessionMetaConsumesScoreOnlyAfterDurableWrite(t *testing.T)
 			first.AgentType,
 			first.CreatedAt,
 		)
-		retried, err := writeInitialSessionMeta(sessionDir, retryAgentID, retryBuilder)
+		retried, err := writeInitialSessionMeta(sessionDir, retryAgentID, retryBuilder, contextUseSource{})
 
 		require.NoError(t, err)
 		require.NotNil(t, retried.SageoxScore)
@@ -105,7 +105,7 @@ func TestWriteInitialSessionMetaConsumesScoreOnlyAfterDurableWrite(t *testing.T)
 		require.NoError(t, os.WriteFile(scorePath, []byte("{corrupt"), 0o600))
 		sessionDir := t.TempDir()
 
-		meta, err := writeInitialSessionMeta(sessionDir, agentID, newBuilder())
+		meta, err := writeInitialSessionMeta(sessionDir, agentID, newBuilder(), contextUseSource{})
 
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "read SageOx score")

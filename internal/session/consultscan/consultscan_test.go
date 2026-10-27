@@ -35,18 +35,18 @@ func TestScan_TagsSageOxReads(t *testing.T) {
 		wantTag bool
 		refType string
 	}{
-		{"ledger session read", Entry{"Read", readInput("/x/ledger/sessions/2026-07-01-ryan-Ox1/summary.md")}, true, "session"},
-		{"ledger plan read", Entry{"Read", readInput("/x/ledger/data/plans/2026-07-01-foo/plan.md")}, true, "plan"},
-		{"team discussion read", Entry{"Read", readInput("/x/team/discussions/2026-06-30-ajit/summary.md")}, true, "discussion"},
-		{"team rule read", Entry{"Read", readInput("/x/team/agents/rules/postgres.md")}, true, "doc"},
-		{"team doc read", Entry{"Read", readInput("/x/team/docs/principles.md")}, true, "doc"},
-		{"team memory read", Entry{"Read", readInput("/x/team/memory/daily/2026-06-30.md")}, true, "kb"},
-		{"agent-context read", Entry{"Read", readInput("/x/team/agent-context/distilled-discussions.md")}, true, "kb"},
-		{"non-sageox file read", Entry{"Read", readInput("/home/ryan/project/main.go")}, false, ""},
-		{"non-read tool on sageox path", Entry{"Bash", readInput("/x/ledger/sessions/a/x.md")}, false, ""},
-		{"edit is not a read", Entry{"Edit", readInput("/x/team/docs/principles.md")}, false, ""},
-		{"bare path input inside root", Entry{"Read", "/x/team/docs/glossary.md"}, true, "doc"},
-		{"sibling dir must not match (boundary)", Entry{"Read", readInput("/x/teamcontext-other/docs/x.md")}, false, ""},
+		{"ledger session read", Entry{ToolName: "Read", ToolInput: readInput("/x/ledger/sessions/2026-07-01-ryan-Ox1/summary.md")}, true, "session"},
+		{"ledger plan read", Entry{ToolName: "Read", ToolInput: readInput("/x/ledger/data/plans/2026-07-01-foo/plan.md")}, true, "plan"},
+		{"team discussion read", Entry{ToolName: "Read", ToolInput: readInput("/x/team/discussions/2026-06-30-ajit/summary.md")}, true, "discussion"},
+		{"team rule read", Entry{ToolName: "Read", ToolInput: readInput("/x/team/agents/rules/postgres.md")}, true, "doc"},
+		{"team doc read", Entry{ToolName: "Read", ToolInput: readInput("/x/team/docs/principles.md")}, true, "doc"},
+		{"team memory read", Entry{ToolName: "Read", ToolInput: readInput("/x/team/memory/daily/2026-06-30.md")}, true, "kb"},
+		{"agent-context read", Entry{ToolName: "Read", ToolInput: readInput("/x/team/agent-context/distilled-discussions.md")}, true, "kb"},
+		{"non-sageox file read", Entry{ToolName: "Read", ToolInput: readInput("/home/ryan/project/main.go")}, false, ""},
+		{"non-read tool on sageox path", Entry{ToolName: "Bash", ToolInput: readInput("/x/ledger/sessions/a/x.md")}, false, ""},
+		{"edit is not a read", Entry{ToolName: "Edit", ToolInput: readInput("/x/team/docs/principles.md")}, false, ""},
+		{"bare path input inside root", Entry{ToolName: "Read", ToolInput: "/x/team/docs/glossary.md"}, true, "doc"},
+		{"sibling dir must not match (boundary)", Entry{ToolName: "Read", ToolInput: readInput("/x/teamcontext-other/docs/x.md")}, false, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -97,13 +97,17 @@ func TestScan_TagsRetrievalCommands(t *testing.T) {
 		{"ox query quoted", `ox query "token refresh contract"`, "query", "token refresh contract"},
 		{"ox code search", `ox code search "PushWithRetry"`, "code", "PushWithRetry"},
 		{"ox team-ctx", `ox agent team-ctx`, "team-context", ""},
+		{"ox team-ctx with agent id", `ox agent Oxa1b2 team-ctx`, "team-context", ""},
+		{"ox query cut at separator", `ox query auth && echo "done"`, "query", "auth"},
+		{"ox query after cd", `cd /repo && ox query "pgx pools"`, "query", "pgx pools"},
+		{"agent subcommand other than team-ctx", `ox agent Oxa1b2 prime`, "", ""},
 		{"ox decision enrich with flag", `ox decision enrich --topic "session streaming"`, "decision", "session streaming"},
 		{"unrelated command", `ls -la /tmp`, "", ""},
 		{"non-ox query", `grep query file.go`, "", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Scan([]Entry{{"Bash", bashInput(tt.cmd)}}, testRoots())
+			got := Scan([]Entry{{ToolName: "Bash", ToolInput: bashInput(tt.cmd)}}, testRoots())
 			if tt.refType == "" {
 				if len(got) != 0 {
 					t.Fatalf("expected no tag, got %+v", got)
@@ -132,11 +136,11 @@ func TestScan_TagsRetrievalCommands(t *testing.T) {
 // tie a consult to the work in that turn.
 func TestScan_SeqAnchorsToTurn(t *testing.T) {
 	entries := []Entry{
-		{"user", ""},   // 0
-		{"Bash", "ls"}, // 1
-		{"Read", readInput("/x/team/docs/principles.md")}, // 2 -> tag seq 2
-		{"assistant", ""}, // 3
-		{"Read", readInput("/x/ledger/sessions/a/summary.md")}, // 4 -> tag seq 4
+		{ToolName: "user", ToolInput: ""},                                           // 0
+		{ToolName: "Bash", ToolInput: "ls"},                                         // 1
+		{ToolName: "Read", ToolInput: readInput("/x/team/docs/principles.md")},      // 2 -> tag seq 2
+		{ToolName: "assistant", ToolInput: ""},                                      // 3
+		{ToolName: "Read", ToolInput: readInput("/x/ledger/sessions/a/summary.md")}, // 4 -> tag seq 4
 	}
 	got := Scan(entries, testRoots())
 	if len(got) != 2 {

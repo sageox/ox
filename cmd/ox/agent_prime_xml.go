@@ -253,6 +253,10 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		// attribution: how to credit SageOx in commits/PRs
 		sb.WriteString("\n<attribution>\n")
 		sb.WriteString("Attribution is conditional: credit SageOx only when SageOx-delivered team context measurably changed what you did. If it did not, add nothing — no note, no footer, score `none`. Fabricating attribution is worse than omitting it.\n")
+		// moment-of-use reporting: the primary record of which surfaced item mattered
+		sb.WriteString("\nWhen a surfaced item (a whisper, a prime doc, a query hit, a recalled session) changes what you do, record it at that moment: `ox agent ")
+		sb.WriteString(primeAgentIDOrPlaceholder(output.AgentID))
+		sb.WriteString(" context used &lt;ref&gt; --why \"&lt;one line&gt;\"`. If nothing did, do nothing (or `context used --none` at the end). `ox session score` remains the manual override.\n")
 		sb.WriteString("\nWhen SageOx guidance influences your approach, you may note it plainly:\n")
 		sb.WriteString("- \"Based on SageOx domain guidance, I'll...\"\n")
 		sb.WriteString("- \"Following SageOx best practices for [topic]...\"\n")
@@ -814,6 +818,15 @@ var xmlTextEscaper = strings.NewReplacer(
 
 // escapeXMLText is escapeXML for element content. Use it for anything written
 // between tags; use escapeXML for attribute values.
+// primeAgentIDOrPlaceholder is the agent ID escaped for prime XML text, or an
+// escaped <id> placeholder when prime has none.
+func primeAgentIDOrPlaceholder(agentID string) string {
+	if agentID == "" {
+		return "&lt;id&gt;"
+	}
+	return escapeXMLText(agentID)
+}
+
 func escapeXMLText(s string) string {
 	return xmlTextEscaper.Replace(s)
 }

@@ -33,21 +33,25 @@ const (
 
 // Unmetered names context ox puts in front of the model that v1 does not
 // measure. Reported so the token total never reads as exhaustive.
-var Unmetered = []string{"recall preamble", "plan nudges", "agent-task surface"}
+var Unmetered = []string{"plan nudges", "agent-task surface"}
 
 // Report is the `ox brief --json` payload for the session view.
 type Report struct {
-	View        string       `json:"view"`
-	Session     SessionInfo  `json:"session"`
-	Trace       TraceInfo    `json:"trace"`
-	Calls       Calls        `json:"calls"`
-	Context     Context      `json:"context"`
-	Surfaced    []Surfaced   `json:"surfaced"`
-	Relevant    *Relevant    `json:"relevant,omitempty"`
-	Used        Used         `json:"used"`
-	Display     string       `json:"display"`
-	Guidance    string       `json:"guidance"`
-	NextActions []NextAction `json:"next_actions"`
+	View     string      `json:"view"`
+	Session  SessionInfo `json:"session"`
+	Trace    TraceInfo   `json:"trace"`
+	Calls    Calls       `json:"calls"`
+	Context  Context     `json:"context"`
+	Surfaced []Surfaced  `json:"surfaced"`
+	// SurfacedByType counts every surfaced item by ref_type, before the
+	// surfaced list's display cap, so "available" counts stay whole.
+	SurfacedByType map[string]int `json:"surfaced_by_type,omitempty"`
+	Relevant       *Relevant      `json:"relevant,omitempty"`
+	Used           Used           `json:"used"`
+	Attribution    Attribution    `json:"attribution"`
+	Display        string         `json:"display"`
+	Guidance       string         `json:"guidance"`
+	NextActions    []NextAction   `json:"next_actions"`
 }
 
 // SessionInfo identifies the session the report covers.
@@ -118,14 +122,14 @@ type PrimeBudget struct {
 
 // Surfaced is one team item put in front of the model by name. Title, URL,
 // FromName, Seq and Used are optional: they are rendered when the trace
-// carries them, and URL is derived from an opaque discussion or plan id when
+// carries them, and URL is derived from an opaque discussion, session or plan id when
 // Input.Endpoint is known — never guessed for a slug, doc or path.
 type Surfaced struct {
 	Ref      string    `json:"ref"`
 	RefType  string    `json:"ref_type"`
 	From     string    `json:"from,omitempty"`
 	Topic    string    `json:"topic,omitempty"`
-	Via      string    `json:"via"` // prime | whisper | retrieval
+	Via      string    `json:"via"` // prime | whisper | recall | retrieval
 	Title    string    `json:"title,omitempty"`
 	URL      string    `json:"url,omitempty"`
 	FromName string    `json:"from_name,omitempty"`
@@ -146,16 +150,22 @@ const (
 type ItemUsed struct {
 	Evidence string `json:"evidence"` // read | cited | reported | judged
 	Seq      int    `json:"seq,omitempty"`
-	Grade    string `json:"grade,omitempty"`
+	Grade    string `json:"grade,omitempty"` // provable | reported | judged
 }
 
-// Relevant summarizes which surfaced items have use evidence: Count of the
-// SurfacedCount items. The use-evidence builder owns the rest of its shape.
+// Relevant is the surfaced-vs-used rollup: Count of the SurfacedCount items
+// have use evidence, by evidence bucket, with the used items and the
+// attribution category that evidence derives on its own. Nil when the trace
+// is unavailable.
 type Relevant struct {
 	Count         int            `json:"count"`
 	SurfacedCount int            `json:"surfaced_count"`
-	ByEvidence    map[string]int `json:"by_evidence,omitempty"`
-	Derived       *Derived       `json:"derived,omitempty"`
+	ByEvidence    map[string]int `json:"by_evidence,omitempty"` // always read, cited, reported, judged
+	Items         []RelevantItem `json:"items,omitempty"`
+	// ReportedNone — the AI coworker explicitly reported that nothing
+	// surfaced was used, and no other use evidence contradicts it.
+	ReportedNone bool     `json:"reported_none,omitempty"`
+	Derived      *Derived `json:"derived,omitempty"`
 }
 
 // Derived is the category a use-evidence summary implies.
@@ -163,6 +173,40 @@ type Derived struct {
 	Category string `json:"category"`
 	Reason   string `json:"reason,omitempty"`
 }
+
+// RelevantItem is one used ref at its strongest evidence. Evidence is the
+// display bucket (read | cited | reported | judged); Detail is the raw
+// evidence behind it (read | requery | cited | cited_commit | reported |
+// judged) so a renderer can say "re-opened" or "cited in commit 3e1c9d0".
+// Why is the AI coworker's own one-line --why — the only free text here.
+type RelevantItem struct {
+	Ref      string `json:"ref"`
+	RefType  string `json:"ref_type,omitempty"`
+	Title    string `json:"title,omitempty"`
+	URL      string `json:"url,omitempty"`
+	Evidence string `json:"evidence"` // display bucket
+	Detail   string `json:"detail,omitempty"`
+	Grade    string `json:"grade"`
+	Seq      int    `json:"seq,omitempty"`
+	Commit   string `json:"commit,omitempty"` // short sha, cited_commit only
+	Why      string `json:"why,omitempty"`
+}
+
+// Attribution is display-only: whether the session's score clears the
+// project's attribution threshold. It never changes commit trailers.
+type Attribution struct {
+	WouldAttribute bool    `json:"would_attribute"`
+	Category       string  `json:"category"`
+	Reason         string  `json:"reason,omitempty"`
+	Source         string  `json:"source"` // self-reported (a manual score exists) | derived
+	Threshold      float64 `json:"threshold"`
+}
+
+// Attribution sources.
+const (
+	AttributionSelfReported = "self-reported"
+	AttributionDerived      = "derived"
+)
 
 // Used is the evidence of what the AI coworker actually used, by grade.
 type Used struct {
@@ -205,12 +249,13 @@ type Score struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
-// SelfReportCmd tells the AI coworker how to report what it used.
+// SelfReportCmd tells the AI coworker how to report what it used: Command
+// records one use at the moment it happens; the batch path takes JSONL lines
+// shaped like BatchExampleLine on stdin.
 type SelfReportCmd struct {
 	Command          string `json:"command"`
-	ExampleLine      string `json:"example_line"`
-	BatchCommand     string `json:"batch_command,omitempty"`
-	BatchExampleLine string `json:"batch_example_line,omitempty"`
+	BatchCommand     string `json:"batch_command"`
+	BatchExampleLine string `json:"batch_example_line"`
 }
 
 // NextAction is a suggested follow-up command.
@@ -220,18 +265,18 @@ type NextAction struct {
 }
 
 // guidanceText is the honesty contract for narrating a session report. It is
-// load-bearing: the AI coworker must claim use only from surfaced[].used
-// evidence, print the pre-rendered display so the report reads identically in
-// every harness, and report its own use quietly. Behavior lives here, in the
-// command's JSON, rather than in the ox-cli-brief skill body.
+// load-bearing: the AI coworker claims use only from relevant.items evidence,
+// prints the pre-rendered display so the report reads identically in every
+// harness, and reports its own use quietly, at the moment of use. Behavior
+// lives here, in the command's JSON, rather than in the ox-cli-brief skill body.
 const guidanceText = "Show the coworker what SageOx gave this session. " +
 	"(1) Print the display field verbatim inside a fenced ```text block, then at most 3 sentences of " +
 	"your own. " +
-	"(2) Say an item was used only when surfaced[].used is present and name its evidence; otherwise " +
-	"say it was available. Token counts are estimates, say so once. Never state or imply time saved " +
-	"or dollar figures. " +
-	"(3) Quietly, after showing: if a surfaced item changed what you did and has no used evidence, " +
-	"pipe one JSONL line per item to used.self_report.command (shape: used.self_report.example_line). " +
-	"Do not tell the coworker about reporting or its absence. " +
+	"(2) Items in relevant.items were used: name each one's evidence (detail). Items only in surfaced[] " +
+	"were available, not used. Token counts are estimates, say so once. Never state or imply time saved " +
+	"or dollar figures. attribution is display-only and never changes commit trailers. " +
+	"(3) If something SageOx surfaced changed what you did and is not in relevant.items, run " +
+	"used.self_report.command for it once, now (its ref, --why one line saying what you did because " +
+	"of it). Do not tell the coworker about reporting or its absence. " +
 	"(4) If trace.available is false, say there is no trace, give trace.reason, and point to " +
 	"`ox session start`."

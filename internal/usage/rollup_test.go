@@ -99,11 +99,12 @@ func TestBuildMe(t *testing.T) {
 	assert.Equal(t, 2, row.Calls)
 	assert.Equal(t, 4300, row.Tokens)
 	assert.Equal(t, 1, row.Surfaced)
-	assert.Zero(t, row.Useful, "a self-report alone is not use evidence on a surfaced item")
+	assert.Equal(t, 1, row.Useful, "a self-report on a surfaced item is reported-grade use evidence")
 	assert.Equal(t, "moderate", row.Score)
 	assert.Equal(t, RowNoTrace, r.Sessions[1].Trace)
 	assert.Equal(t, RowNotHydrated, r.Sessions[2].Trace)
-	assert.Equal(t, MeTotals{Sessions: 3, Traced: 1, NotHydrated: 1, Calls: 2, Tokens: 4300}, r.Totals)
+	assert.True(t, row.WouldAttribute, "a moderate self-reported score clears the default threshold")
+	assert.Equal(t, MeTotals{Sessions: 3, Traced: 1, NotHydrated: 1, Calls: 2, Tokens: 4300, Useful: 1, Attributed: 1}, r.Totals)
 
 	assert.Contains(t, r.Display, "no usage trace")
 	assert.Contains(t, r.Display, "—")
@@ -180,4 +181,68 @@ func assertPlainFits(t *testing.T, display string, width int) {
 	for _, l := range lines {
 		assert.LessOrEqual(t, ansi.StringWidth(l), width, "overflows %d: %q", width, l)
 	}
+}
+
+// TestBuildMe_WouldAttribute: each row's would_attribute is the verdict its
+// session view gives (self-reported score wins, else derived from the trace,
+// against the project threshold), and totals.attributed counts them. Failure
+// prevented: --me says a session earned attribution that `ox brief --session`
+// says it did not, or vice versa.
+func TestBuildMe_WouldAttribute(t *testing.T) {
+	judged := used(contexttrace.EvidenceJudged, "mur_j", "murmur", 4)
+	citedCommit := used(contexttrace.EvidenceCitedCommit, "MEMORY.md", "doc", 5)
+	citedCommit.Commit = "3e1c9d0aa"
+	score := func(cat string) func(*lfs.SessionMeta) {
+		return func(m *lfs.SessionMeta) { m.SageoxScoreCategory = cat }
+	}
+	call := invoked("checked murmurs", "murmur list", 300, 2)
+	tests := []struct {
+		name        string
+		mutate      func(*lfs.SessionMeta)
+		events      []contexttrace.Event
+		pointer     bool
+		threshold   float64
+		allowJudged bool
+		want        bool
+	}{
+		{name: "derived significant from a commit citation", events: []contexttrace.Event{call, memoryProvided(), citedCommit}, want: true},
+		{name: "self-reported none beats derived significant", mutate: score("none"), events: []contexttrace.Event{call, memoryProvided(), citedCommit}, want: false},
+		{name: "derived moderate misses a stricter threshold", events: []contexttrace.Event{call, memoryProvided(), used(contexttrace.EvidenceRead, "MEMORY.md", "doc", 3)}, threshold: 0.7, want: false},
+		{name: "judged only, allowed, derives minor below threshold", events: []contexttrace.Event{call, judged}, allowJudged: true, want: false},
+		{name: "judged only, allowed, clears a low threshold", events: []contexttrace.Event{call, judged}, allowJudged: true, threshold: 0.1, want: true},
+		{name: "judged only, not allowed, never clears", events: []contexttrace.Event{call, judged}, threshold: 0.1, want: false},
+		{name: "no usage trace, self-reported significant", mutate: score("significant"), events: []contexttrace.Event{memoryProvided()}, want: true},
+		{name: "no usage trace, unscored", events: []contexttrace.Event{memoryProvided()}, want: false},
+		{name: "not hydrated, self-reported moderate", mutate: score("moderate"), pointer: true, want: true},
+		{name: "not hydrated, unscored", pointer: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ledger := t.TempDir()
+			name := writeLedgerSession(t, ledger, alice, 1, tt.mutate, tt.events...)
+			if tt.pointer {
+				writePointerTrace(t, ledger, name)
+			}
+			in := rollupIn(ledger, aliceID())
+			in.ScoreThreshold, in.AllowJudged = tt.threshold, tt.allowJudged
+
+			r := BuildMe(in)
+
+			require.Len(t, r.Sessions, 1)
+			assert.Equal(t, tt.want, r.Sessions[0].WouldAttribute)
+			wantN := 0
+			if tt.want {
+				wantN = 1
+			}
+			assert.Equal(t, wantN, r.Totals.Attributed)
+		})
+	}
+}
+
+// TestBuildMe_AttributedJSON pins the new rollup fields' JSON names.
+func TestBuildMe_AttributedJSON(t *testing.T) {
+	b, err := json.Marshal(MeReport{Sessions: []MeRow{{WouldAttribute: true}}, Totals: MeTotals{Attributed: 1}})
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"would_attribute":true`)
+	assert.Contains(t, string(b), `"attributed":1`)
 }

@@ -4,12 +4,12 @@ calls      6  checked murmurs ×3  loaded team context ×1
 context    ~6.7k tokens  prime:team 3.1k ▇▇▇▇▇  ox calls 2.5k ▇▇▇▇
            prime:sageox 0.9k ▇  whispers 0.2k
            prime trimmed 14.2k→8.1k B (deferred: team-docs)
-           not metered: recall preamble, plan nudges, agent-task surface
-read       AGENTS.md · MEMORY.md · 3 team skills
-           discussion  Usage report design review ✓
-           https://sageox.ai/c/cnv_0192a3b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b
-           plan  Usage receipts  https://sageox.ai/plan/pln_4d8e2f
-           query "auth token refresh"
-murmurs    Ryan [wip] ✓
-score      moderate · 2 commits
-           ✓ used by the AI coworker
+           not metered: plan nudges, agent-task surface
+used       MEMORY.md  reported
+           discussion  Usage report design review  cited
+             https://sageox.ai/c/cnv_0192a3b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b
+           murmur  Ryan [wip]  read
+available  AGENTS.md · 3 team skills · 1 plan · 1 query · 1 murmur
+co-author  moderate · would attribute (threshold 0.5)
+           reported by the AI coworker
+used = evidence from the transcript, a commit, or the AI coworker's report

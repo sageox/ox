@@ -232,3 +232,44 @@ func TestQuery_SkillResultKeepsNameAndLink(t *testing.T) {
 	assert.Equal(t, "https://sageox.ai/team/team-1/settings/skills/ledger-wedge-triage", out.Results[0]["url"],
 		"the console link must survive into ox query output")
 }
+
+// TestQuery_DiscussionResultKeepsMeetingDate: an imported meeting's folder and
+// created_at are its upload time, months after the meeting. The server dates
+// discussion hits with recorded_at; if QueryResult drops it, an agent dates the
+// meeting by its upload. Failure prevented: a primed session merged two SIG Node
+// meetings seven months apart and cited quotes under the wrong one
+// (sageox-monorepo#8891).
+func TestQuery_DiscussionResultKeepsMeetingDate(t *testing.T) {
+	t.Parallel()
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"results":[{
+			"score": 0.03,
+			"text": "kernel picks a process at random",
+			"doc_type": "discussion-transcript",
+			"file_path": "discussions/2026-10-26-05-00-f8c65a68/transcript.vtt",
+			"source_type": "team-context",
+			"source_id": "rec_01a17695-1ac1-7a33-ba01-1c47f8c65a68",
+			"title": "SIG Node: OOM group kill",
+			"created_at": "2026-10-26T05:00:45Z",
+			"recorded_at": "2023-05-16T17:00:00Z",
+			"date_source": "user"
+		}],"latency_ms":{"embed":1,"search":2,"total":3}}`))
+	}))
+	defer mockServer.Close()
+	client := &RepoClient{baseURL: mockServer.URL, httpClient: &http.Client{Timeout: 10 * time.Second}}
+
+	resp, err := client.Query(&QueryRequest{Query: "OOM group kill", Mode: "hybrid", K: 5})
+	require.NoError(t, err)
+
+	emitted, err := json.Marshal(resp) // what writeQueryResponse prints
+	require.NoError(t, err)
+	var out struct {
+		Results []map[string]any `json:"results"`
+	}
+	require.NoError(t, json.Unmarshal(emitted, &out))
+	require.Len(t, out.Results, 1)
+	assert.Equal(t, "2023-05-16T17:00:00Z", out.Results[0]["recorded_at"], "the meeting date must survive into ox query output")
+	assert.Equal(t, "user", out.Results[0]["date_source"])
+	assert.Equal(t, "SIG Node: OOM group kill", out.Results[0]["title"])
+	assert.Equal(t, "2026-10-26T05:00:45Z", out.Results[0]["created_at"])
+}

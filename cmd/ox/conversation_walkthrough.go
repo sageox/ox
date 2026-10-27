@@ -204,6 +204,7 @@ func runConversationWalkthrough(cmd *cobra.Command, args []string) error {
 			env.Warnings = append(env.Warnings, warnings...)
 		}
 	}
+	traceConversationRead(env, reader, idArg)
 	return finishConversationEnvelope(cmd.OutOrStdout(), format, env, renderConversationWalkthroughText)
 }
 
