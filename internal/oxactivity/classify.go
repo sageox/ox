@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/session/contextuse"
 )
 
 // Kind groups an activity by what it did with team knowledge.
@@ -506,20 +507,16 @@ func querySubject(args, commandWords []string) string {
 	return ""
 }
 
-// conversationIDRe finds a conversation or recording ID inside a sageox://
-// citation URI or a pasted sageox.ai link, so every form of one ID counts as
-// the same item.
-var conversationIDRe = regexp.MustCompile(`\b(?:cnv|rec|dsc)_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`)
-
 // slugRe is what a bare item ID or plan slug may look like. Anything else
 // (a sentence, a path, a URI without a known ID) yields no Ref.
 var slugRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
-// itemRef turns an item-read argument into a stable ID: an embedded
-// conversation ID when there is one, else the argument itself when it looks
-// like a slug, else "".
+// itemRef turns an item-read argument into a stable ID: the canonical cnv_
+// form of an embedded conversation ID when there is one (so rec_<u> and
+// cnv_<u> count once), else the argument itself when it looks like a slug,
+// else "".
 func itemRef(arg string) string {
-	if id := conversationIDRe.FindString(arg); id != "" {
+	if id := contextuse.FindConversationID(arg); id != "" {
 		return id
 	}
 	if slugRe.MatchString(arg) {

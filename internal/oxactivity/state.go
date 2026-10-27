@@ -16,6 +16,7 @@ import (
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/session/contextuse"
 )
 
 // ErrInvalidAgentID is returned by SaveState for an agent ID that is not a
@@ -65,9 +66,10 @@ const TeamContextRef = "agent team-ctx"
 // NormalizeRef maps ref to the key it is counted under, so the retrieval hook
 // and the use-evidence writers name the same item the same way: any
 // "team-context" ref becomes TeamContextRef, and a ref holding a
-// conversation, recording or discussion ID (a bare "cnv_…" or a
-// sageox:// / sageox.ai link to one) becomes that ID. Anything else is
-// returned trimmed.
+// conversation, recording or discussion ID (a bare cnv_/rec_ id, a sageox://
+// citation, or a /c/ link to one) becomes its canonical cnv_ id (see
+// contextuse.CanonicalRef), so rec_<u> and cnv_<u> count once. Anything else
+// is returned trimmed.
 func NormalizeRef(refType, ref string) string {
 	refType = strings.TrimSpace(refType)
 	ref = strings.TrimSpace(ref)
@@ -77,51 +79,95 @@ func NormalizeRef(refType, ref string) string {
 	if refType == "team-context" {
 		return TeamContextRef
 	}
-	if id := conversationIDRe.FindString(ref); id != "" {
+	if id := contextuse.FindConversationID(ref); id != "" {
 		return id
 	}
-	return ref
+	return contextuse.CanonicalRef(refType, ref)
+}
+
+// refKeys returns the dedup keys of one item: "<refType>\x00<name>" for ref
+// and every alias, normalised, empties and repeats dropped. The first key is
+// ref's own; it is empty (and the result nil) when ref normalises to "".
+func refKeys(refType, ref string, aliases []string) []string {
+	ref = NormalizeRef(refType, ref)
+	if ref == "" {
+		return nil
+	}
+	keys := []string{refType + "\x00" + ref}
+	for _, a := range aliases {
+		a = NormalizeRef(refType, a)
+		if k := refType + "\x00" + a; a != "" && !slices.Contains(keys, k) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// containsAny reports whether refs holds any of keys.
+func containsAny(refs, keys []string) bool {
+	for _, k := range keys {
+		if slices.Contains(refs, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// appendMissing appends each of keys not already in refs, capped.
+func appendMissing(refs, keys []string) []string {
+	for _, k := range keys {
+		if !slices.Contains(refs, k) {
+			refs = appendCapped(refs, k)
+		}
+	}
+	return refs
 }
 
 // Bump counts ref once under the bucket refType names and reports whether
 // anything changed. refType is the context-trace ref_type vocabulary:
 // "discussion" → Discussions; "plan" → Plans; "doc", "team-context", "kb",
-// "skill" → Docs; "session" → Sessions; "murmur" → Murmurs. An unknown
-// refType, an empty ref, or a ref already counted changes nothing.
-func (s *State) Bump(refType, ref string) bool {
+// "skill" → Docs; "session" → Sessions; "murmur" → Murmurs. aliases are other
+// names of the same item (a plan's slug beside its pln_ id): the item counts
+// once whichever of its names was seen first, and every name is remembered.
+// An unknown refType, an empty ref, or an item already counted under any of
+// its names changes nothing but the remembered names.
+func (s *State) Bump(refType, ref string, aliases ...string) bool {
 	refType = strings.TrimSpace(refType)
-	ref = NormalizeRef(refType, ref)
 	counter := s.counter(refType)
-	if counter == nil || ref == "" {
+	keys := refKeys(refType, ref, aliases)
+	if counter == nil || keys == nil {
 		return false
 	}
-	key := refType + "\x00" + ref
-	if slices.Contains(s.SeenRefs, key) {
-		return false
+	if containsAny(s.SeenRefs, keys) {
+		before := len(s.SeenRefs)
+		s.SeenRefs = appendMissing(s.SeenRefs, keys)
+		return len(s.SeenRefs) != before
 	}
 	*counter++
-	s.SeenRefs = appendCapped(s.SeenRefs, key)
+	s.SeenRefs = appendMissing(s.SeenRefs, keys)
 	return true
 }
 
 // MarkUsed counts ref once in Used and also Bumps it into its kind bucket, so
 // an item used without ever being fetched through a hook (a whisper, a prime
-// doc, a recall hit) still shows its kind. It reports whether anything
-// changed. The same refType vocabulary, normalisation and no-op rules as Bump
-// apply.
-func (s *State) MarkUsed(refType, ref string) bool {
+// doc, a recall hit) still shows its kind. aliases name the same item (see
+// Bump): a plan fetched by slug and used by pln_ id, in either order, is one
+// plan and one use. It reports whether anything changed. The same refType
+// vocabulary, normalisation and no-op rules as Bump apply.
+func (s *State) MarkUsed(refType, ref string, aliases ...string) bool {
 	refType = strings.TrimSpace(refType)
-	ref = NormalizeRef(refType, ref)
-	if s.counter(refType) == nil || ref == "" {
+	keys := refKeys(refType, ref, aliases)
+	if s.counter(refType) == nil || keys == nil {
 		return false
 	}
-	changed := s.Bump(refType, ref)
-	key := refType + "\x00" + ref
-	if slices.Contains(s.UsedRefs, key) {
-		return changed
+	changed := s.Bump(refType, ref, aliases...)
+	if containsAny(s.UsedRefs, keys) {
+		before := len(s.UsedRefs)
+		s.UsedRefs = appendMissing(s.UsedRefs, keys)
+		return changed || len(s.UsedRefs) != before
 	}
 	s.Used++
-	s.UsedRefs = appendCapped(s.UsedRefs, key)
+	s.UsedRefs = appendMissing(s.UsedRefs, keys)
 	return true
 }
 
@@ -180,21 +226,22 @@ func (s State) Counts() Counts {
 // counted. It waits at most the default file-lock timeout for a concurrent
 // writer, then returns that error; callers in hooks should log it and move on.
 func RecordInfluence(projectRoot, agentID, harnessSessionID, refType, ref string) error {
-	return record(projectRoot, agentID, harnessSessionID, refType, ref, "record influence", (*State).Bump)
+	return record(projectRoot, agentID, harnessSessionID, refType, ref, nil, "record influence", (*State).Bump)
 }
 
 // RecordUse counts one item of team context as used — reported by the AI
 // coworker (`ox agent <id> context used <ref>`) or cited in a commit message —
 // in a harness session: Used goes up once per distinct item, and the item is
-// also counted in its kind bucket if no hook saw it fetched (see
-// State.MarkUsed). harnessSessionID, the no-op rules and the locking are as
+// also counted in its kind bucket if no hook saw it fetched under ref or any
+// of aliases, its other names (see State.MarkUsed). harnessSessionID, the no-op rules and the locking are as
 // for RecordInfluence.
-func RecordUse(projectRoot, agentID, harnessSessionID, refType, ref string) error {
-	return record(projectRoot, agentID, harnessSessionID, refType, ref, "record use", (*State).MarkUsed)
+func RecordUse(projectRoot, agentID, harnessSessionID, refType, ref string, aliases ...string) error {
+	return record(projectRoot, agentID, harnessSessionID, refType, ref, aliases, "record use", (*State).MarkUsed)
 }
 
-// record applies apply(refType, ref) to the stored state under the lock.
-func record(projectRoot, agentID, harnessSessionID, refType, ref, op string, apply func(*State, string, string) bool) error {
+// record applies apply(refType, ref, aliases...) to the stored state under the
+// lock.
+func record(projectRoot, agentID, harnessSessionID, refType, ref string, aliases []string, op string, apply func(*State, string, string, ...string) bool) error {
 	var probe State
 	if probe.counter(strings.TrimSpace(refType)) == nil || NormalizeRef(refType, ref) == "" {
 		return nil
@@ -203,7 +250,7 @@ func record(projectRoot, agentID, harnessSessionID, refType, ref, op string, app
 		return fmt.Errorf("%s: empty project root", op)
 	}
 	err := UpdateState(projectRoot, StateKey(agentID, harnessSessionID), func(s *State) bool {
-		if !apply(s, refType, ref) {
+		if !apply(s, refType, ref, aliases...) {
 			return false
 		}
 		s.UpdatedAt = time.Now().UTC()

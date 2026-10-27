@@ -335,6 +335,7 @@ func TestUpdateState_NoChangeSkipsWrite(t *testing.T) {
 const (
 	testCnv  = "cnv_019ffe10-0000-7000-8000-000000000011"
 	testCnv2 = "cnv_019ffe10-0000-7000-8000-000000000022"
+	testRec  = "rec_019ffe10-0000-7000-8000-000000000011" // testCnv's twin
 )
 
 // TestNormalizeRef: the retrieval hook and the use-evidence writers must name
@@ -349,6 +350,13 @@ func TestNormalizeRef(t *testing.T) {
 		{"bare conversation id", "discussion", testCnv, testCnv},
 		{"sageox.ai link", "discussion", "https://sageox.ai/c/" + testCnv, testCnv},
 		{"sageox uri with cue", "discussion", "sageox://team/conversation/" + testCnv + "#t=12", testCnv},
+		{"rec twin folds onto cnv", "discussion", testRec, testCnv},
+		{"rec twin uppercase uuid", "discussion", "rec_019FFE10-0000-7000-8000-000000000011", testCnv},
+		{"sageox citation uri", "discussion", "sageox://" + testCnv + "/clyr_019ffe10-0000-7000-8000-0000000000aa@3#cue=4-9", testCnv},
+		{"c link to rec twin", "discussion", "https://app.sageox.ai/c/" + testRec + "?t=4", testCnv},
+		{"ref_type missing still folds", "", testRec, testCnv},
+		{"plan id kept", "plan", "pln_abc123", "pln_abc123"},
+		{"trailing slash trimmed", "doc", "docs/adr/", "docs/adr"},
 		{"team-ctx slug", "team-context", "team-ctx/acme", TeamContextRef},
 		{"team-ctx retrieval ref", "team-context", TeamContextRef, TeamContextRef},
 		{"plan slug trimmed", "plan", "  my-plan ", "my-plan"},
@@ -428,6 +436,75 @@ func TestState_MarkUsed(t *testing.T) {
 		assert.Equal(t, "doc\x00d5", s.UsedRefs[0], "oldest dropped first")
 		assert.False(t, s.MarkUsed("doc", fmt.Sprintf("d%d", MaxSeenRefs+4)), "a kept ref still dedups")
 	})
+}
+
+// TestState_MarkUsedAliases: one item fetched under one name and used under
+// another counts once, in either order. Failure prevented: `ox plan view
+// <slug>` then `context used pln_X` renders "2 plans", or a discussion read as
+// rec_<u> and used as cnv_<u> renders "2 discussions".
+func TestState_MarkUsedAliases(t *testing.T) {
+	t.Parallel()
+
+	type op struct {
+		use          bool
+		refType, ref string
+		aliases      []string
+	}
+	fetch := func(rt, ref string) op { return op{false, rt, ref, nil} }
+	use := func(rt, ref string, aliases ...string) op { return op{true, rt, ref, aliases} }
+
+	tests := []struct {
+		name string
+		ops  []op
+		want Counts
+	}{
+		{"plan fetched by slug then used by id", []op{fetch("plan", "auth-rollout"), use("plan", "pln_X", "auth-rollout")}, Counts{Plans: 1, Used: 1}},
+		{"plan used by id then fetched by slug", []op{use("plan", "pln_X", "auth-rollout"), fetch("plan", "auth-rollout")}, Counts{Plans: 1, Used: 1}},
+		{"plan used by id then again by slug", []op{use("plan", "pln_X", "auth-rollout"), use("plan", "auth-rollout")}, Counts{Plans: 1, Used: 1}},
+		{"no alias, two names count twice", []op{fetch("plan", "auth-rollout"), use("plan", "pln_X")}, Counts{Plans: 2, Used: 1}},
+		{"rec then cnv count once", []op{fetch("discussion", testRec), fetch("discussion", testCnv)}, Counts{Discussions: 1}},
+		{"rec fetched, cnv used", []op{fetch("discussion", testRec), use("discussion", testCnv)}, Counts{Discussions: 1, Used: 1}},
+		{"alias normalised", []op{fetch("discussion", "https://sageox.ai/c/"+testRec), use("discussion", "sageox://"+testCnv, testRec)}, Counts{Discussions: 1, Used: 1}},
+		{"empty and repeated aliases ignored", []op{use("plan", "pln_X", "", " ", "pln_X"), fetch("plan", "pln_X")}, Counts{Plans: 1, Used: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var s State
+			for _, o := range tt.ops {
+				if o.use {
+					s.MarkUsed(o.refType, o.ref, o.aliases...)
+				} else {
+					s.Bump(o.refType, o.ref)
+				}
+			}
+			assert.Equal(t, tt.want, s.Counts())
+		})
+	}
+
+	t.Run("every name is remembered", func(t *testing.T) {
+		t.Parallel()
+		var s State
+		require.True(t, s.MarkUsed("plan", "pln_X", "auth-rollout", "2026-10-01-auth-rollout"))
+		assert.Equal(t, []string{"plan\x00pln_X", "plan\x00auth-rollout", "plan\x002026-10-01-auth-rollout"}, s.SeenRefs)
+		assert.Equal(t, s.SeenRefs, s.UsedRefs)
+		assert.False(t, s.MarkUsed("plan", "auth-rollout"), "a use under an alias is no change")
+		assert.True(t, s.MarkUsed("plan", "pln_X", "new-slug"), "a new alias is remembered")
+		assert.Contains(t, s.SeenRefs, "plan\x00new-slug")
+		assert.Equal(t, Counts{Plans: 1, Used: 1}, s.Counts())
+	})
+}
+
+// TestRecordUse_Aliases drives the on-disk path with aliases. Failure
+// prevented: the alias reaches MarkUsed in memory but not through RecordUse.
+func TestRecordUse_Aliases(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	require.NoError(t, RecordInfluence(root, testAgentID, "c", "plan", "auth-rollout"))
+	require.NoError(t, RecordUse(root, testAgentID, "c", "plan", "pln_X", "auth-rollout"))
+	got := LoadState(root, StateKey(testAgentID, "c"))
+	assert.Equal(t, Counts{Plans: 1, Used: 1}, got.Counts())
+	assert.Equal(t, "● ox  1 plan · 1 used", Render(got.Counts(), false))
 }
 
 // TestRecordUse_PersistsAndDedups drives the on-disk path the commands use.
