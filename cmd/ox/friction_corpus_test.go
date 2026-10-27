@@ -33,6 +33,7 @@ var corpusBannedSuggestions = []string{"gc", "uninstall", "logout"}
 // regression here means an AI coworker is back to guessing.
 func TestFrictionCorpus(t *testing.T) {
 	unregisterGatedCommandsForTest(t)
+	restoreRootCmdState(t)
 
 	// TestMain moves the working directory into a sandbox; packageDir is the source dir
 	raw, err := os.ReadFile(filepath.Join(packageDir, "testdata", "friction-corpus.json"))
@@ -48,6 +49,7 @@ func TestFrictionCorpus(t *testing.T) {
 		total += c.Events
 		name := strings.Join(c.Argv, " ")
 		t.Run(name, func(t *testing.T) {
+			resetRootFlagsLikeAnInvocation()
 			outcome, detail := whatOxDoes(c.Argv, c.RuntimeError)
 			if outcome == "suggest" {
 				for _, banned := range corpusBannedSuggestions {
@@ -100,6 +102,23 @@ func whatOxDoes(argv []string, runtimeError string) (outcome, detail string) {
 		return "suggest", plan.Suggestion
 	}
 	return "error", fmt.Sprint(err)
+}
+
+// resetRootFlagsLikeAnInvocation gives rootCmd the flag definitions every ox
+// invocation starts with: executeWithFrictionRecovery resets them to the
+// persistent flags alone before cobra parses. Without it, a prediction reads
+// whatever an earlier test or case left on the shared root. Cobra installs
+// --help and --version lazily when the root itself executes or is dry-parsed,
+// and they turn `--session` into a --version suggestion that ox never makes.
+//
+// It keeps the existing persistent flag objects rather than registering new
+// ones: dry-parsing merges root's persistent flags into each subcommand, and a
+// subcommand holding objects restoreRootCmdState then discards would carry
+// parsed values past every later reset done through root.
+func resetRootFlagsLikeAnInvocation() {
+	persistent := rootCmd.PersistentFlags()
+	rootCmd.ResetFlags()
+	rootCmd.PersistentFlags().AddFlagSet(persistent)
 }
 
 // unregisterGatedCommandsForTest removes feature-gated commands for the test,
