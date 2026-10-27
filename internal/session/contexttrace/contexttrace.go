@@ -137,6 +137,11 @@ type Event struct {
 	Query     string    `json:"query,omitempty"`      // the query text, for retrieval-command consults
 	Score     float64   `json:"score,omitempty"`      // retrieval score, when applicable
 	WhisperID string    `json:"whisper_id,omitempty"` // joins a whisper delivery to its murmur
+	// Aliases are other names for the same item as Ref — a rec_ twin of a
+	// cnv_ id, a sageox:// citation or /c/ link, a plan's slug or dated
+	// directory name for its pln_ id. Names only, never content (ADR-027).
+	// Readers that predate it ignore it; old traces decode with it nil.
+	Aliases []string `json:"aliases,omitempty"`
 
 	// invoked: an ox call and the volume it returned. Command holds the matched
 	// subcommand WORDS only ("murmur list") — never the argv, a murmur body, or

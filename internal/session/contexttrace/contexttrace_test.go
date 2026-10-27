@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -457,5 +458,41 @@ func TestUsedFields_OmittedWhenEmpty(t *testing.T) {
 		if _, ok := m[k]; ok {
 			t.Errorf("empty field %q should be omitted: %s", k, b)
 		}
+	}
+}
+
+func TestAliases_RoundTripAndLegacyDecode(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want []string
+	}{
+		{name: "legacy event without aliases", line: `{"type":"provided","ts":"t","source":"local-recall","ref":"cnv_x"}`, want: nil},
+		{name: "event with aliases", line: `{"type":"provided","ts":"t","source":"local-recall","ref":"pln_x","aliases":["auth-plan","2026-10-01-auth-plan"]}`, want: []string{"auth-plan", "2026-10-01-auth-plan"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var ev Event
+			if err := json.Unmarshal([]byte(tt.line), &ev); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if !reflect.DeepEqual(ev.Aliases, tt.want) {
+				t.Fatalf("Aliases = %v, want %v", ev.Aliases, tt.want)
+			}
+			out, err := json.Marshal(ev)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var back Event
+			if err := json.Unmarshal(out, &back); err != nil {
+				t.Fatalf("re-unmarshal: %v", err)
+			}
+			if !reflect.DeepEqual(back, ev) {
+				t.Fatalf("round trip = %+v, want %+v", back, ev)
+			}
+			if tt.want == nil && strings.Contains(string(out), "aliases") {
+				t.Fatalf("empty aliases must be omitted, got %s", out)
+			}
+		})
 	}
 }
