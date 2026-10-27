@@ -2039,5 +2039,6 @@ func planProvidedHit(gitRoot string, info plan.PlanInfo, shareURL func(gitRoot, 
 	if id != "" {
 		url = shareURL(gitRoot, id)
 	}
-	return providedHit{SurfacedRef: contextuse.SurfacedRef{Ref: ref, RefType: "plan", Title: title, URL: url}}
+	aliases := hitAliases(ref, info.Slug, filepath.Base(info.Dir))
+	return providedHit{SurfacedRef: contextuse.SurfacedRef{Ref: ref, RefType: "plan", Title: title, URL: url, Aliases: aliases}}
 }

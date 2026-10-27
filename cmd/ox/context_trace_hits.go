@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -109,6 +110,21 @@ func providedHitEvents(existing []contexttrace.Event, source contexttrace.Source
 			Score:     h.Score,
 			Aliases:   h.Aliases,
 		})
+	}
+	return out
+}
+
+// hitAliases returns the other names a surfaced item goes by, in order:
+// empties, "." (filepath.Base of an empty path), ref itself, and repeats
+// dropped; nil when none remain.
+func hitAliases(ref string, names ...string) []string {
+	var out []string
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		if n == "" || n == "." || n == ref || slices.Contains(out, n) {
+			continue
+		}
+		out = append(out, n)
 	}
 	return out
 }

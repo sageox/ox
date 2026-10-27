@@ -141,9 +141,11 @@ func TestPlanProvidedHit(t *testing.T) {
 		info plan.PlanInfo
 		want providedHit
 	}{
-		{"pln id wins", plan.PlanInfo{PlanID: "pln_1", Slug: "2026-10-01-cache", Topic: "Add cache"}, providedHit{SurfacedRef: refOf("pln_1", "plan", "Add cache", "https://sageox.ai/plan/pln_1")}},
-		{"legacy plan uses slug, no link", plan.PlanInfo{Slug: "2026-10-01-cache", Topic: "Add cache"}, providedHit{SurfacedRef: refOf("2026-10-01-cache", "plan", "Add cache", "")}},
-		{"slug titles an untitled plan", plan.PlanInfo{PlanID: "pln_2", Slug: "s"}, providedHit{SurfacedRef: refOf("pln_2", "plan", "s", "https://sageox.ai/plan/pln_2")}},
+		{"pln id wins, slug is an alias", plan.PlanInfo{PlanID: "pln_1", Slug: "2026-10-01-cache", Topic: "Add cache"}, providedHit{SurfacedRef: withAliases(refOf("pln_1", "plan", "Add cache", "https://sageox.ai/plan/pln_1"), "2026-10-01-cache")}},
+		{"legacy plan uses slug, no link, no self-alias", plan.PlanInfo{Slug: "2026-10-01-cache", Topic: "Add cache"}, providedHit{SurfacedRef: refOf("2026-10-01-cache", "plan", "Add cache", "")}},
+		{"slug titles an untitled plan", plan.PlanInfo{PlanID: "pln_2", Slug: "s"}, providedHit{SurfacedRef: withAliases(refOf("pln_2", "plan", "s", "https://sageox.ai/plan/pln_2"), "s")}},
+		{"dated directory is an alias too", plan.PlanInfo{PlanID: "pln_3", Slug: "cache", Dir: "/repo/plans/2026-10-01-cache", Topic: "Add cache"}, providedHit{SurfacedRef: withAliases(refOf("pln_3", "plan", "Add cache", "https://sageox.ai/plan/pln_3"), "cache", "2026-10-01-cache")}},
+		{"directory equal to slug is not repeated", plan.PlanInfo{PlanID: "pln_4", Slug: "2026-10-01-cache", Dir: "/repo/plans/2026-10-01-cache"}, providedHit{SurfacedRef: withAliases(refOf("pln_4", "plan", "2026-10-01-cache", "https://sageox.ai/plan/pln_4"), "2026-10-01-cache")}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
