@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
@@ -343,6 +344,31 @@ func TestDoctorFix_RepoPathRepairInterrupt(t *testing.T) {
 	require.NotContains(t, output, "timed out", "Ctrl-C must end the clone before its backstop")
 	require.NotContains(t, output, "Team context: Next", "Ctrl-C must stop the repair loop")
 	requireNothingLeftBehind(t, target)
+}
+
+// TestDoctorFix_InterruptedLookupMovesNothingAside verifies Ctrl-C while
+// doctor looks up a repo's clone URL leaves the existing directory in place.
+// Failure prevented: the repair moved the coworker's directory aside after
+// they asked doctor to stop, then failed the clone, leaving the path empty.
+func TestDoctorFix_InterruptedLookupMovesNothingAside(t *testing.T) {
+	root := setupDoctorProject(t, nil, "")
+	dir := filepath.Join(t.TempDir(), "ledger")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("keep\n"), 0o600))
+	cli.SetAssumeYes(true)
+	t.Cleanup(func() { cli.SetAssumeYes(false) })
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // Ctrl-C arrived while the cloud lookup ran
+
+	var err error
+	captureStdoutForPlanCLI(t, func() {
+		err = cloneRepoForFix(ctx, repoPathIssue{repoType: "ledger", path: dir, endpoint: endpoint.GetForProject(root), issue: "not-git-repo"})
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	require.FileExists(t, filepath.Join(dir, "notes.txt"), "the directory must stay where it was")
+	backups, err := filepath.Glob(dir + "_backup_*")
+	require.NoError(t, err)
+	require.Empty(t, backups)
 }
 
 // TestRunDoctorChecks_StopsOnceInterrupted verifies a canceled doctor run

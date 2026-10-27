@@ -916,6 +916,10 @@ func cloneRepoForFix(ctx context.Context, issue repoPathIssue) error {
 		}
 		return fmt.Errorf("team context not available yet - no changes made: %w", fetchErr)
 	}
+	// Ctrl-C during the lookup: move nothing aside and start no clone
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// Now that we know cloud has the repo, proceed with directory cleanup if needed
 	if issue.issue == "not-git-repo" || issue.issue == "empty-dir" {
