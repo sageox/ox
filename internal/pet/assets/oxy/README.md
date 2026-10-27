@@ -48,7 +48,11 @@ python3 internal/pet/assets/oxy/desktop/make-desktop-set.py <sheet.png> <sheet.j
 
 It writes one palette PNG strip per animation (`<anim>.png`, frames left to
 right) and `manifest.json`: the cell size, `scale` (hi-res cell width over
-the pixel cell's), `figure`, and each animation's frame count and crop box.
+the pixel cell's), `figure`, and each animation's crop box and `ms`, its
+per-frame durations. The hi-res set runs at its own, higher frame rate (up
+to 30 fps), so its frame count is `len(ms)` and may differ from the pixel
+set's; each loop must last within 10% of the pixel animation's. A set with
+no `ms` must match the pixel set frame for frame and borrows its timing.
 
 - **Crop.** Each animation is cut to the union of its frames' visible pixels,
   which keeps about half the pixels and holds the figure still across frames.
@@ -65,12 +69,13 @@ the pixel cell's), `figure`, and each animation's frame count and crop box.
 
 `ox pet enable` slices each strip into `hooks/hires/<anim>/<i>.png`, still
 palette PNGs, and adds a `hires` field to `hooks/frames.ts` with the cell,
-scale, figure and crop boxes. Per-frame files lose the matches deflate finds
+scale, figure, and each animation's crop box and `ms`. Per-frame files lose the matches deflate finds
 across a strip's near-identical frames, so the trial set's 5.7 MB of strips
 installs as about 31 MB of frames, the largest 24 KB (32 K base64), inside the
 131,072-character `Svg` cap. Without `desktop/manifest.json` the build skips
-the set and the desktop draws the pixel frames. `TestFramesFiles_StayUnderClaudeLimits`
-checks frame counts, the per-frame cap and the folder's total.
+the set and the desktop draws the pixel frames.
+`TestFramesFiles_StayUnderClaudeLimits` checks frame counts, the per-frame
+cap and the folder's total (80 MB, room for 30 fps).
 
 ## Codex sheet
 

@@ -220,13 +220,14 @@ func TestFramesFiles_StayUnderClaudeLimits(t *testing.T) {
 // svgSourceCap is Claude Code's limit on an Svg element's source;
 // svgWrapperChars is the markup around a frame's base64 data.
 // hiresBudget bounds the desktop frames the mod folder carries, written on
-// every enable and upgrade. Frame files lose the cross-frame matches deflate
-// finds in a strip, so they total ~5x the embedded strips (~31 MB for the
-// 480x621 trial set's 5.7 MB); this catches a set that grows unnoticed.
+// every enable and upgrade. They are one file per frame at up to 30 fps, and
+// frame files lose the cross-frame matches deflate finds in a strip, so they
+// total ~5x the embedded strips (~31 MB for the 480x621 trial set at the
+// pixel set's frame rate); this catches a set that grows unnoticed.
 const (
 	svgSourceCap    = 131072
 	svgWrapperChars = 300
-	hiresBudget     = 40 << 20
+	hiresBudget     = 80 << 20
 )
 
 func checkFramesFiles(t *testing.T, render func() (*Frames, error)) {
@@ -283,10 +284,11 @@ func checkFramesFiles(t *testing.T, render func() (*Frames, error)) {
 		assert.Empty(t, hiresPNGs)
 		assert.NotContains(t, index, "hires:", "no desktop set, so the desktop draws the pixel frames")
 	} else {
-		for name, a := range frames.Animations {
-			assert.Equal(t, len(a.PNG), hiresPNGs[name], "%s: one hi-res PNG per frame", name)
-			r := frames.Hires.Manifest.Animations[name].Rect
-			assert.Contains(t, index, fmt.Sprintf("%q: { x: %d, y: %d, width: %d, height: %d }", name, r.X, r.Y, r.Width, r.Height))
+		for name := range frames.Animations {
+			h := frames.Hires.Manifest.Animations[name]
+			assert.Equal(t, len(h.MS), hiresPNGs[name], "%s: one hi-res PNG per hi-res duration", name)
+			ms, _ := json.Marshal(h.MS)
+			assert.Contains(t, index, fmt.Sprintf("%q: { x: %d, y: %d, width: %d, height: %d, ms: %s }", name, h.X, h.Y, h.Width, h.Height, ms))
 		}
 		assert.Len(t, hiresPNGs, len(frames.Animations))
 		assert.Less(t, hiresBytes, hiresBudget, "the desktop set's frames in all")

@@ -154,7 +154,11 @@ func FramesFiles(frames *Frames) (map[string][]byte, error) {
 	}
 	hires := ""
 	if frames.Hires != nil {
-		hires = "  " + hiresFiles(frames.Hires, out) + ",\n"
+		field, err := hiresFiles(frames.Hires, out)
+		if err != nil {
+			return nil, fmt.Errorf("encode hi-res layout: %w", err)
+		}
+		hires = "  " + field + ",\n"
 	}
 	var index bytes.Buffer
 	index.WriteString(generatedHeader)
