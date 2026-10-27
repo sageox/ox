@@ -41,7 +41,7 @@ func init() {
 		Name:        usagePaneCheckName,
 		Category:    "Integration",
 		FixLevel:    FixLevelAuto,
-		Description: "Installs the /ox-brief pane plugin into Claude Code when the brief_pane setting is on, removes it when off, and removes the old ox-cli-usage-pane plugin",
+		Description: "Installs the /ox-brief pane plugin (which also draws the ox status line above the prompt in the Claude desktop app) into Claude Code when the brief_pane setting is on, removes it when off, and removes the old ox-cli-usage-pane plugin",
 		Run: func(fix bool) checkResult {
 			enabled, err := usagePaneSettingOn()
 			if err != nil {
