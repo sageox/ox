@@ -15,13 +15,21 @@ import (
 // by re-reading it, re-fetching it by id, or naming it in its own output. Each
 // hit is a provable `used` event (ADR-027: refs only, never content).
 
-// requeryCommands are the `ox` invocations that re-fetch one specific surfaced
-// ref by id. The argument after the prefix must equal a surfaced ref.
+// requeryCommands are the `ox` invocations that re-open one specific surfaced
+// item. The argument after the prefix must name a surfaced ref. Listing
+// commands (`ox conversation list`) are not re-opens and stay out.
 var requeryCommands = []string{
 	"ox agent team-ctx",
 	"ox session view",
+	"ox session show",
 	"ox conversation show",
+	"ox conversation transcript",
+	"ox conversation topics",
+	"ox conversation topic",
+	"ox conversation walkthrough",
+	"ox walkthrough",
 	"ox plan view",
+	"ox plan status",
 }
 
 // idShapedRef matches refs that are unambiguous identifiers regardless of
@@ -47,7 +55,7 @@ const minCitedTitleLen = 12
 //     path or basename), or a ledger path under sessions/<ref>/ or
 //     data/plans/<ref>.
 //   - requery (retrieval): a shell command re-fetched the ref by id
-//     (`ox session view <ref>`, `ox murmur show <ref>`, …).
+//     (`ox session view <ref>`, `ox conversation transcript <ref>`, …).
 //   - cited (citation): an ASSISTANT entry names the ref as a whole token, or
 //     quotes the surfaced title. User/system/tool entries never count — they
 //     carry the injected context itself.
@@ -148,17 +156,11 @@ func detectRequeryCommand(toolInput string) (string, bool) {
 		return "", false
 	}
 	for _, prefix := range requeryCommands {
-		idx := strings.Index(cmd, prefix)
-		if idx < 0 {
+		call, ok := findOxCall(cmd, prefix)
+		if !ok {
 			continue
 		}
-		rest := cmd[idx+len(prefix):]
-		// The prefix must end at a word boundary: "ox plan view" must not
-		// match "ox plan viewer".
-		if rest != "" && !isSpace(rest[0]) {
-			continue
-		}
-		arg := firstQuotedOrToken(rest)
+		arg := firstQuotedOrToken(cmd[call.start:call.end])
 		if arg == "" {
 			return "", false
 		}
@@ -166,8 +168,6 @@ func detectRequeryCommand(toolInput string) (string, bool) {
 	}
 	return "", false
 }
-
-func isSpace(b byte) bool { return b == ' ' || b == '\t' || b == '\n' }
 
 // MatchesRef reports whether free text names a surfaced ref: either the ref
 // appears as a whole token (word-bounded; at least minCitedRefLen characters,

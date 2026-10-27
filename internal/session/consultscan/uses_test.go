@@ -42,6 +42,15 @@ func TestScanUses_EvidenceByRefType(t *testing.T) {
 		{"requery: plan view", contextuse.SurfacedRef{Ref: "nifty-panda", RefType: "plan"}, bash("cd /repo && ox plan view nifty-panda"), contexttrace.EvidenceRequery, contexttrace.MechanismRetrieval},
 		{"requery: plan view quoted", contextuse.SurfacedRef{Ref: "nifty-panda", RefType: "plan"}, bash(`ox plan view "nifty-panda"`), contexttrace.EvidenceRequery, contexttrace.MechanismRetrieval},
 		{"requery: conversation show", contextuse.SurfacedRef{Ref: "cnv_7f2a", RefType: "discussion"}, bash("ox conversation show cnv_7f2a"), contexttrace.EvidenceRequery, contexttrace.MechanismRetrieval},
+		{"requery: conversation transcript", contextuse.SurfacedRef{Ref: "cnv_7f2a", RefType: "discussion"}, bash("ox conversation transcript cnv_7f2a --json"), contexttrace.EvidenceRequery, contexttrace.MechanismRetrieval},
+		{"requery: conversation topics", contextuse.SurfacedRef{Ref: "cnv_7f2a", RefType: "discussion"}, bash("ox conversation topics cnv_7f2a"), contexttrace.EvidenceRequery, contexttrace.MechanismRetrieval},
+		{"requery: conversation topic", contextuse.SurfacedRef{Ref: "cnv_7f2a", RefType: "discussion"}, bash("ox conversation topic cnv_7f2a tp_3"), contexttrace.EvidenceRequery, contexttrace.MechanismRetrieval},
+		{"requery: conversation walkthrough", contextuse.SurfacedRef{Ref: "cnv_7f2a", RefType: "discussion"}, bash("ox conversation walkthrough cnv_7f2a"), contexttrace.EvidenceRequery, contexttrace.MechanismRetrieval},
+		{"requery: walkthrough", contextuse.SurfacedRef{Ref: "cnv_7f2a", RefType: "discussion"}, bash("ox walkthrough cnv_7f2a"), contexttrace.EvidenceRequery, contexttrace.MechanismRetrieval},
+		{"requery: plan status", contextuse.SurfacedRef{Ref: "nifty-panda", RefType: "plan"}, bash("ox plan status nifty-panda"), contexttrace.EvidenceRequery, contexttrace.MechanismRetrieval},
+		{"requery: session show", contextuse.SurfacedRef{Ref: "2026-07-01-ryan-Ox1", RefType: "session"}, bash("ox session show 2026-07-01-ryan-Ox1"), contexttrace.EvidenceRequery, contexttrace.MechanismRetrieval},
+		{"requery: team-ctx with agent id", contextuse.SurfacedRef{Ref: "postgres", RefType: "doc"}, bash("ox agent Oxa1b2 team-ctx postgres"), contexttrace.EvidenceRequery, contexttrace.MechanismRetrieval},
+		{"requery: ox binary by path", contextuse.SurfacedRef{Ref: "nifty-panda", RefType: "plan"}, bash("./bin/ox plan view nifty-panda"), contexttrace.EvidenceRequery, contexttrace.MechanismRetrieval},
 		// cited
 		{"cited: murmur id (short, id-shaped)", contextuse.SurfacedRef{Ref: "Ox7f2a", RefType: "murmur", Title: "auth", URL: "https://sageox.ai/m/Ox7f2a"}, assistant("Following Dana's note (Ox7f2a) on auth."), contexttrace.EvidenceCited, contexttrace.MechanismCitation},
 		{"cited: session name", contextuse.SurfacedRef{Ref: "2026-07-01-ryan-Ox1", RefType: "session"}, assistant("SageOx found Ryan's session 2026-07-01-ryan-Ox1 on this."), contexttrace.EvidenceCited, contexttrace.MechanismCitation},
@@ -100,6 +109,11 @@ func TestScanUses_Negatives(t *testing.T) {
 		{"requery: prefix not at word boundary", contextuse.SurfacedRef{Ref: "nifty-panda", RefType: "plan"}, []Entry{bash("ox plan viewer nifty-panda")}},
 		{"requery: before surfaced seq", contextuse.SurfacedRef{Ref: "Ox7f2a", RefType: "murmur", Seq: 2}, []Entry{bash("ox session view Ox7f2a")}},
 		{"requery: unrelated ox command", contextuse.SurfacedRef{Ref: "Ox7f2a", RefType: "murmur"}, []Entry{bash("ox murmur list")}},
+		{"requery: conversation list is not a re-open", contextuse.SurfacedRef{Ref: "cnv_7f2a", RefType: "discussion"}, []Entry{bash("ox conversation list cnv_7f2a")}},
+		{"requery: conversation topics is not topic", contextuse.SurfacedRef{Ref: "cnv_7f2a", RefType: "discussion"}, []Entry{bash("ox conversation topicsx cnv_7f2a")}},
+		{"requery: agent subcommand other than team-ctx", contextuse.SurfacedRef{Ref: "postgres", RefType: "doc"}, []Entry{bash("ox agent Oxa1b2 prime postgres")}},
+		{"requery: quoted in echo", contextuse.SurfacedRef{Ref: "nifty-panda", RefType: "plan"}, []Entry{bash(`echo "ox plan view nifty-panda"`)}},
+		{"requery: not the ox binary", contextuse.SurfacedRef{Ref: "nifty-panda", RefType: "plan"}, []Entry{bash("box plan view nifty-panda")}},
 		{"empty surfaced ref", contextuse.SurfacedRef{Ref: "", RefType: "doc", Title: "a title long enough"}, []Entry{read("/x/team/MEMORY.md")}},
 	}
 	for _, tt := range tests {

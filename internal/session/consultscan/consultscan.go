@@ -125,9 +125,8 @@ func detectRetrievalCommand(toolInput string) (refType, query string, ok bool) {
 		return "", "", false
 	}
 	for _, rc := range retrievalCommands {
-		if idx := strings.Index(cmd, rc.prefix); idx >= 0 {
-			rest := strings.TrimSpace(cmd[idx+len(rc.prefix):])
-			return rc.refType, firstQuotedOrToken(rest), true
+		if call, ok := findOxCall(cmd, rc.prefix); ok {
+			return rc.refType, firstQuotedOrToken(cmd[call.start:call.end]), true
 		}
 	}
 	return "", "", false
