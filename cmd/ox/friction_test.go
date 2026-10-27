@@ -15,6 +15,7 @@ import (
 	friction "github.com/sageox/frictionax"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -282,20 +283,56 @@ func TestSendFrictionEvent_Suppressed(t *testing.T) {
 // objects, sets root args, assigns the command context, and sets the cli output
 // modes from the run's flags. Left in place, a later in-process command parses
 // --json into the old flag object while readers look up the new one through
-// cmd.Root().PersistentFlags(), and a --json run leaves every cli printer in
-// JSON mode.
+// cmd.Root().PersistentFlags(), a --json run leaves every cli printer in JSON
+// mode, and a later rootCmd.Execute() reuses the run's context, which the
+// entry point cancels on return.
 func restoreRootCmdState(t *testing.T) {
 	t.Helper()
 	flags, persistent := rootCmd.Flags(), rootCmd.PersistentFlags()
+	rootCtx := rootCmd.Context()
 	savedCtx, savedPreRun := cliCtx, preRunReached
 	t.Cleanup(func() {
 		rootCmd.ResetFlags()
 		rootCmd.Flags().AddFlagSet(flags)
 		rootCmd.PersistentFlags().AddFlagSet(persistent)
 		rootCmd.SetArgs(nil)
+		rootCmd.SetContext(rootCtx)
 		cliCtx, preRunReached = savedCtx, savedPreRun
 		resetCLIOutputModes()
 	})
+}
+
+// TestRestoreRootCmdState_NextCommandStartsWithALiveContext runs the entry
+// point with a context that is canceled once it returns, as every
+// executeWithSignalContext run's is, then runs another command in process.
+// Failure prevented: cobra keeps the context root last executed with and a
+// later rootCmd.Execute() reuses it, so the next in-process command started
+// already canceled.
+func TestRestoreRootCmdState_NextCommandStartsWithALiveContext(t *testing.T) {
+	probe := func(use string) *cobra.Command {
+		cmd := &cobra.Command{
+			Use:    use,
+			Hidden: true,
+			RunE:   func(cmd *cobra.Command, _ []string) error { return cmd.Context().Err() },
+		}
+		rootCmd.AddCommand(cmd)
+		t.Cleanup(func() { rootCmd.RemoveCommand(cmd) })
+		return cmd
+	}
+	probe("ctx-probe-entry")
+	probe("ctx-probe-next")
+
+	t.Run("entry point", func(t *testing.T) {
+		restoreRootCmdState(t)
+		savedCfg := cfg
+		t.Cleanup(func() { cfg = savedCfg })
+		ctx, cancel := context.WithCancel(context.Background())
+		require.Equal(t, 0, executeWithFrictionRecovery(ctx, []string{"ctx-probe-entry"}, 0))
+		cancel()
+	})
+
+	_, err := executeRootCLI(t, "ctx-probe-next")
+	require.NoError(t, err, "the next command inherited the entry point's canceled context")
 }
 
 // panickingFrictionAdapter panics from inside frictionax's Handle, the way
