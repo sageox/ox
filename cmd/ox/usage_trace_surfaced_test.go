@@ -159,6 +159,7 @@ func TestAfterTool_SingleItemNamesInvokedEvent(t *testing.T) {
 		input        *agentx.HookInput
 		wantRef      string
 		wantProvided int
+		untitled     bool // named by its argument; the command traces its own titled item
 	}{
 		{
 			name: "MCP Conversation",
@@ -172,6 +173,24 @@ func TestAfterTool_SingleItemNamesInvokedEvent(t *testing.T) {
 				ToolResponse: bashStdout(t, `{"success":true,"data":{"conversation_id":"cnv_4","title":"Retro"}}`)},
 			wantRef: "cnv_4", wantProvided: 0,
 		},
+		{
+			name: "ox conversation transcript by rec id names the canonical cnv_",
+			input: &agentx.HookInput{ToolName: "Bash", ToolInput: shellInput(t, "command", "ox conversation transcript "+convTestFullRec+" --full"),
+				ToolResponse: bashStdout(t, `{"success":true,"data":{"cues":[]}}`)},
+			wantRef: convTestFullCnv, wantProvided: 0, untitled: true,
+		},
+		{
+			name: "ox conversation topics by link",
+			input: &agentx.HookInput{ToolName: "Bash", ToolInput: shellInput(t, "command", "ox conversation topics https://sageox.ai/c/"+convTestFullRec),
+				ToolResponse: bashStdout(t, `{"success":true,"data":{"topics":[]}}`)},
+			wantRef: convTestFullCnv, wantProvided: 0, untitled: true,
+		},
+		{
+			name: "ox conversation topic by citation",
+			input: &agentx.HookInput{ToolName: "Bash", ToolInput: shellInput(t, "command", "ox conversation topic '"+convTestCueURI+"' "+convTestTopicID),
+				ToolResponse: bashStdout(t, `{"success":true,"data":{"topic":{}}}`)},
+			wantRef: convTestFullCnv, wantProvided: 0, untitled: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -182,7 +201,9 @@ func TestAfterTool_SingleItemNamesInvokedEvent(t *testing.T) {
 			inv := invokedEvents(t, sessionTracePath(state))
 			require.Len(t, inv, 1)
 			assert.Equal(t, tt.wantRef, inv[0].Ref)
-			assert.NotEmpty(t, inv[0].Title)
+			if !tt.untitled {
+				assert.NotEmpty(t, inv[0].Title)
+			}
 			assert.Len(t, providedEvents(t, sessionTracePath(state)), tt.wantProvided)
 		})
 	}

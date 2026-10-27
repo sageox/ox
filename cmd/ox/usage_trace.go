@@ -70,8 +70,14 @@ func recordOxToolCall(projectRoot, agentID string, input *agentx.HookInput) {
 		ev.Query = act.Query
 	}
 	hits := surfacedToolHits(act.Command, input)
-	if singleItemCommands[act.Command] && len(hits) == 1 {
-		ev.Ref, ev.Title, ev.URL = hits[0].Ref, hits[0].Title, hits[0].URL
+	if singleItemCommands[act.Command] {
+		if len(hits) == 1 {
+			ev.Ref, ev.Title, ev.URL = hits[0].Ref, hits[0].Title, hits[0].URL
+		} else if strings.HasPrefix(act.Command, "conversation ") && !ev.Failed {
+			// The read names its conversation by argument; the command traces
+			// the titled item itself, so the canonical id is enough here.
+			ev.Ref = contextuse.FindConversationID(act.Ref)
+		}
 	}
 	appendUsageTraceEvent(projectRoot, agentID, ev)
 	// An ox CLI command traces its own surfaced items; an MCP tool runs on
@@ -101,6 +107,10 @@ var mcpSurfacingTools = map[string]string{
 // can name it.
 var singleItemCommands = map[string]bool{
 	"conversation show":          true,
+	"conversation transcript":    true,
+	"conversation topics":        true,
+	"conversation topic":         true,
+	"conversation walkthrough":   true,
 	"mcp Conversation":           true,
 	"mcp ConversationDigest":     true,
 	"mcp ConversationTranscript": true,
