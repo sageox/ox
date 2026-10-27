@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,43 +207,86 @@ func ScanRawFile(rawPath string, roots Roots) ([]contexttrace.Event, error) {
 // "after the surfacing turn" comparison meaningful. Malformed lines ARE kept
 // (as empty entries) because the capture path counted them, so they still
 // hold their slot. A missing file yields nil, nil.
+//
+// It is LoadRawEntriesFrom from the start of the file.
 func LoadRawEntries(rawPath string) ([]Entry, error) {
+	entries, _, _, err := LoadRawEntriesFrom(rawPath, 0, 0)
+	return entries, err
+}
+
+// LoadRawEntriesFrom reads the entries of a growing raw.jsonl that start at
+// byte offset, in the same frame as LoadRawEntries: the first returned entry
+// has index startIndex. It returns the offset and index to pass to the next
+// call, so tailing a file in any number of calls numbers every entry exactly
+// as one LoadRawEntries call over the finished file does.
+//
+// A last line with no newline yet is consumed only when it is already a
+// complete JSON record; otherwise it is likely still being written and is left
+// for the next call (nextOffset stops at its start). A missing file yields no
+// entries, the given offset and index, and no error; an offset past the end
+// yields nothing.
+func LoadRawEntriesFrom(rawPath string, offset int64, startIndex int) (entries []Entry, nextOffset int64, nextIndex int, err error) {
+	if offset < 0 {
+		return nil, offset, startIndex, fmt.Errorf("consultscan: negative raw.jsonl offset %d", offset)
+	}
 	f, err := os.Open(rawPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
+			return nil, offset, startIndex, nil
 		}
-		return nil, err
+		return nil, offset, startIndex, err
 	}
 	defer f.Close()
-
-	var entries []Entry
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // transcript lines can be large
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var e struct {
-			Type      string          `json:"type"`
-			Content   json.RawMessage `json:"content"`
-			ToolName  string          `json:"tool_name"`
-			ToolInput json.RawMessage `json:"tool_input"`
-			Meta      json.RawMessage `json:"_meta"`
-		}
-		// Unparseable lines still occupy a turn slot so seqs stay aligned.
-		if err := json.Unmarshal(line, &e); err == nil && isHeaderLine(e.Type, e.Meta) {
-			continue
-		}
-		entries = append(entries, Entry{
-			Type:      e.Type,
-			Content:   rawString(e.Content),
-			ToolName:  e.ToolName,
-			ToolInput: rawString(e.ToolInput),
-		})
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return nil, offset, startIndex, err
 	}
-	return entries, sc.Err()
+
+	nextOffset = offset
+	r := bufio.NewReaderSize(f, 64*1024) // transcript lines can be large
+	for {
+		line, rerr := r.ReadBytes('\n')
+		if rerr != nil && !errors.Is(rerr, io.EOF) {
+			return entries, nextOffset, startIndex + len(entries), rerr
+		}
+		terminated := rerr == nil
+		trimmed := bytes.TrimSpace(line)
+		if !terminated && (len(trimmed) == 0 || !json.Valid(trimmed)) {
+			break // unterminated and incomplete: wait for the rest
+		}
+		nextOffset += int64(len(line))
+		if e, ok := parseRawLine(trimmed); ok {
+			entries = append(entries, e)
+		}
+		if !terminated {
+			break
+		}
+	}
+	return entries, nextOffset, startIndex + len(entries), nil
+}
+
+// parseRawLine turns one trimmed raw.jsonl line into an Entry, reporting false
+// for blank and framing lines, which hold no seq slot.
+func parseRawLine(line []byte) (Entry, bool) {
+	if len(line) == 0 {
+		return Entry{}, false
+	}
+	var e struct {
+		Type      string          `json:"type"`
+		Content   json.RawMessage `json:"content"`
+		ToolName  string          `json:"tool_name"`
+		ToolInput json.RawMessage `json:"tool_input"`
+		Meta      json.RawMessage `json:"_meta"`
+	}
+	// Unparseable lines still occupy a turn slot so seqs stay aligned.
+	if err := json.Unmarshal(line, &e); err == nil && isHeaderLine(e.Type, e.Meta) {
+		return Entry{}, false
+	}
+	return Entry{
+		Type:      e.Type,
+		Content:   rawString(e.Content),
+		ToolName:  e.ToolName,
+		ToolInput: rawString(e.ToolInput),
+	}, true
 }
 
 // isHeaderLine reports whether a raw.jsonl record is framing (header/footer/
