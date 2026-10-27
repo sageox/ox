@@ -123,6 +123,7 @@ func recordCommitCitations(projectRoot string, state *session.RecordingState, sh
 		}
 	}
 	var fresh []contexttrace.Event
+	var freshAliases [][]string // freshAliases[i] are fresh[i]'s other names
 	for _, s := range surfaced {
 		if already[s.Ref+"\x00"+short] || !consultscan.MatchesRef(msg, s.Ref, s.Title) {
 			continue
@@ -141,6 +142,7 @@ func recordCommitCitations(projectRoot string, state *session.RecordingState, sh
 			URL:         s.URL,
 			Commit:      short,
 		})
+		freshAliases = append(freshAliases, s.Aliases)
 	}
 	if len(fresh) == 0 {
 		return
@@ -150,8 +152,8 @@ func recordCommitCitations(projectRoot string, state *session.RecordingState, sh
 		return
 	}
 	slog.Debug("hooks post-commit: recorded commit citations", "commit", short, "refs", len(fresh))
-	for _, ev := range fresh {
-		recordStatuslineUse(projectRoot, state, ev.RefType, ev.Ref)
+	for i, ev := range fresh {
+		recordStatuslineUse(projectRoot, state, ev.RefType, ev.Ref, freshAliases[i]...)
 	}
 }
 

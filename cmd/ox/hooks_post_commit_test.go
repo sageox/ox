@@ -264,3 +264,38 @@ func TestPostCommitHook_CountsCitedUseOnStatusline(t *testing.T) {
 		assert.NoDirExists(t, filepath.Join(projectRoot, ".sageox", "cache", "statusline"))
 	})
 }
+
+// TestPostCommitHook_CitedUseCarriesAliases: a commit citing a surfaced plan
+// by its pln_ id records the plan's other names too, so the earlier fetch by
+// slug and the cited use are one plan. Failure prevented: `ox plan view
+// <slug>` then a commit citing pln_X renders "2 plans · 1 used".
+func TestPostCommitHook_CitedUseCarriesAliases(t *testing.T) {
+	const (
+		harnessSession = "c1a2b3c4-0000-4000-8000-0000000000bb"
+		agentID        = "OxPcA1"
+	)
+	projectRoot, sessionName, _ := postCommitEnv(t)
+	t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
+	state := loadRecordingForTest(t, projectRoot, sessionName)
+	state.AgentID = agentID
+	state.AgentSessionID = harnessSession
+	data, err := json.Marshal(state)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(projectRoot, "sessions", sessionName, ".recording.json"), data, 0o644))
+	t.Setenv("SAGEOX_AGENT_ID", agentID)
+	writeSurfacedTrace(t, projectRoot, sessionName, contexttrace.Event{
+		Type: contexttrace.EventProvided, Source: contexttrace.SourceOnDemand, Mechanism: contexttrace.MechanismRetrieval,
+		Ref: "pln_7f2a9c", RefType: "plan", Aliases: []string{"auth-rollout"}, Seq: 3,
+	})
+	// the hook saw the plan fetched by slug
+	require.NoError(t, oxactivity.RecordInfluence(projectRoot, agentID, harnessSession, "plan", "auth-rollout"))
+
+	commitWithTrailer(t, projectRoot, "feat(auth): implement pln_7f2a9c")
+	require.NoError(t, runHooksPostCommit(nil, nil))
+
+	got := oxactivity.LoadState(projectRoot, oxactivity.StateKey(agentID, harnessSession))
+	assert.Equal(t, oxactivity.Counts{Plans: 1, Used: 1}, got.Counts())
+	assert.Contains(t, got.SeenRefs, "plan\x00pln_7f2a9c")
+	assert.Contains(t, got.SeenRefs, "plan\x00auth-rollout")
+	assert.Contains(t, got.UsedRefs, "plan\x00auth-rollout")
+}
