@@ -42,9 +42,9 @@ func withDefaultTransport(t *testing.T, rt http.RoundTripper) {
 // Failure prevented: a publication test waits on, or fails with, the live
 // upstream catalog. The catalog request never reaches the base transport.
 func TestTransport_ServesCheckedInCatalogOffline(t *testing.T) {
-	want, err := os.ReadFile(catalogFile())
+	want, err := os.ReadFile(checkedInCatalog)
 	require.NoError(t, err)
-	tr := transport{base: noNetwork(t), catalogFile: catalogFile()}
+	tr := transport{base: noNetwork(t), catalogFile: checkedInCatalog}
 	for _, url := range []string{
 		"https://" + catalogHost + catalogPath,
 		"https://" + catalogHost + catalogPath + "?cache=bust",
@@ -78,6 +78,53 @@ func TestTransport_UnreadableCatalogNeverReachesNetwork(t *testing.T) {
 	require.ErrorContains(t, err, "cannot read checked-in catalog")
 }
 
+// Failure prevented: a catalog path that could not be resolved reaches the network.
+func TestTransport_UnlocatedCatalogNeverReachesNetwork(t *testing.T) {
+	tr := transport{base: noNetwork(t), catalogFile: ""}
+	req, err := http.NewRequest(http.MethodGet, "https://"+catalogHost+catalogPath, nil)
+	require.NoError(t, err)
+	resp, err := tr.RoundTrip(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	require.ErrorContains(t, err, "cannot locate checked-in catalog")
+}
+
+// Failure prevented: under go test -trimpath the source path is module-relative,
+// so a path built from it does not resolve and every publication test fails.
+func TestResolveCatalogFile(t *testing.T) {
+	packageDir, err := os.Getwd()
+	require.NoError(t, err)
+	checkout := filepath.Join(packageDir, "..", "..", "..")
+	want, err := filepath.Abs(filepath.Join(checkout, "internal", "secretguard", "gitleaks.toml"))
+	require.NoError(t, err)
+	absoluteSource := filepath.Join(packageDir, "catalog.go")
+	trimmedSource := "github.com/sageox/ox/internal/secretguard/secretguardtest/catalog.go"
+
+	tests := []struct {
+		name, source, wd, want string
+	}{
+		{"absolute source path", absoluteSource, t.TempDir(), want},
+		{"trimpath, started in the package directory", trimmedSource, packageDir, want},
+		{"trimpath, started at the checkout root", trimmedSource, checkout, want},
+		{"trimpath, started outside any checkout", trimmedSource, t.TempDir(), ""},
+		{"trimpath, unknown working directory", trimmedSource, "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveCatalogFile(tt.source, tt.wd)
+			if tt.want == "" {
+				assert.Empty(t, got)
+				return
+			}
+			gotAbs, err := filepath.Abs(got)
+			require.NoError(t, err)
+			assert.Equal(t, filepath.Clean(tt.want), gotAbs)
+			assert.FileExists(t, got)
+		})
+	}
+}
+
 // Failure prevented: the wrapper swallows a package's own test servers.
 func TestTransport_PassesOtherRequestsThrough(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -92,7 +139,7 @@ func TestTransport_PassesOtherRequestsThrough(t *testing.T) {
 		}
 		return server.Client().Transport.RoundTrip(r)
 	})
-	tr := transport{base: base, catalogFile: catalogFile()}
+	tr := transport{base: base, catalogFile: checkedInCatalog}
 
 	req, err := http.NewRequest(http.MethodGet, server.URL+"/local", nil)
 	require.NoError(t, err)
@@ -150,7 +197,7 @@ func requireOfflineCatalogFailure(t *testing.T) string {
 // Failure prevented: the per-package assertion passes in a package whose
 // TestMain does not install the offline catalog.
 func TestRequireOfflineCatalog_FailsWithoutOfflineTransport(t *testing.T) {
-	bundled, err := os.ReadFile(catalogFile())
+	bundled, err := os.ReadFile(checkedInCatalog)
 	require.NoError(t, err)
 	other := filepath.Join(t.TempDir(), "other.toml")
 	require.NoError(t, os.WriteFile(other, []byte("[[rules]]\nid='synthetic'\nregex='synthetic_[a-z]+'\n"), 0o600))
@@ -183,6 +230,23 @@ func TestRequireOfflineCatalog_FailsWithoutOfflineTransport(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			withDefaultTransport(t, tt.transport)
+			assert.Contains(t, requireOfflineCatalogFailure(t), tt.want)
+		})
+	}
+}
+
+// Failure prevented: a missing checked-in catalog reads as a network problem,
+// or the assertion fetches the catalog before it knows what to compare against.
+func TestRequireOfflineCatalog_FailsWithoutCheckedInCatalog(t *testing.T) {
+	withDefaultTransport(t, noNetwork(t))
+	for _, tt := range []struct{ name, path, want string }{
+		{"unlocated", "", "cannot locate internal/secretguard/gitleaks.toml"},
+		{"unreadable", filepath.Join(t.TempDir(), "missing.toml"), "read checked-in catalog"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prior := checkedInCatalog
+			checkedInCatalog = tt.path
+			t.Cleanup(func() { checkedInCatalog = prior })
 			assert.Contains(t, requireOfflineCatalogFailure(t), tt.want)
 		})
 	}

@@ -16,6 +16,7 @@ package secretguardtest
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,6 +38,10 @@ const (
 
 var served atomic.Int64
 
+// checkedInCatalog is resolved during package initialization, before any
+// TestMain can change the working directory.
+var checkedInCatalog = locateCatalog()
+
 // InstallOfflineCatalog wraps http.DefaultTransport so the upstream catalog
 // request is answered from internal/secretguard/gitleaks.toml. Every other
 // request uses the previous transport unchanged. Call it once, from TestMain.
@@ -44,14 +49,17 @@ func InstallOfflineCatalog() {
 	if !testing.Testing() {
 		panic("secretguardtest: InstallOfflineCatalog called outside a test binary")
 	}
-	http.DefaultTransport = transport{base: http.DefaultTransport, catalogFile: catalogFile()}
+	http.DefaultTransport = transport{base: http.DefaultTransport, catalogFile: checkedInCatalog}
 }
 
 // RequireOfflineCatalog fails t unless the production fetch path returns the
 // checked-in catalog from the offline transport rather than from the network.
 func RequireOfflineCatalog(t testing.TB) {
 	t.Helper()
-	want, err := os.ReadFile(catalogFile())
+	if checkedInCatalog == "" {
+		t.Fatal("cannot locate internal/secretguard/gitleaks.toml from the source path or the working directory")
+	}
+	want, err := os.ReadFile(checkedInCatalog)
 	if err != nil {
 		t.Fatalf("read checked-in catalog: %v", err)
 	}
@@ -68,11 +76,35 @@ func RequireOfflineCatalog(t testing.TB) {
 	}
 }
 
-// catalogFile resolves from this source file, not the working directory: tests
-// that re-exec the test binary or chdir into a sandbox must still find it.
-func catalogFile() string {
+func locateCatalog() string {
 	_, thisFile, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(thisFile), "..", "gitleaks.toml")
+	wd, _ := os.Getwd()
+	return resolveCatalogFile(thisFile, wd)
+}
+
+// resolveCatalogFile prefers this source file's location, which still holds in
+// a re-exec'd test binary whose working directory is a sandbox. Under -trimpath
+// that location is module-relative, so it falls back to the directory go test
+// starts in (the package directory) and walks up to the checkout. It returns ""
+// when neither finds the catalog.
+func resolveCatalogFile(sourceFile, wd string) string {
+	if filepath.IsAbs(sourceFile) {
+		return filepath.Join(filepath.Dir(sourceFile), "..", "gitleaks.toml")
+	}
+	if !filepath.IsAbs(wd) {
+		return ""
+	}
+	for dir := wd; ; {
+		candidate := filepath.Join(dir, "internal", "secretguard", "gitleaks.toml")
+		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
+			return candidate
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
 
 type transport struct {
@@ -86,6 +118,9 @@ type transport struct {
 func (tr transport) RoundTrip(request *http.Request) (*http.Response, error) {
 	if request.URL.Host != catalogHost || request.URL.Path != catalogPath {
 		return tr.base.RoundTrip(request)
+	}
+	if tr.catalogFile == "" {
+		return nil, errors.New("secretguardtest: cannot locate checked-in catalog")
 	}
 	catalog, err := os.ReadFile(tr.catalogFile)
 	if err != nil {
