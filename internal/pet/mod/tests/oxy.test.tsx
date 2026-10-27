@@ -466,7 +466,7 @@ function desktopLayout(anim: Anim, box: SizeName) {
 
 const WORKING = { word: 'Working', message: null, suffix: '…', mode: 'thinking' } as const
 
-for (const surface of ['desktop', 'vscode'] as const) {
+for (const surface of ['vscode'] as const) {
   test(`${surface}: Oxy is a self-animating SVG clip beside the words, at each size`, async ($, on) => {
     mock.clock(on, { now: 1_000 })
     mock.store(on)
@@ -501,7 +501,7 @@ for (const surface of ['desktop', 'vscode'] as const) {
   })
 }
 
-test('desktop: Oxy rests above the prompt between turns, and hands the band back while working', async ($, on) => {
+test('desktop: Oxy lives in the band above the prompt, resting between turns and working during them', async ($, on) => {
   mock.clock(on, { now: 1_000 })
   mock.store(on)
   mockPngFiles(on)
@@ -525,9 +525,13 @@ test('desktop: Oxy rests above the prompt between turns, and hands the band back
   expect(svg?.props.height).toBeLessThan(PIXEL_HEIGHTS.medium)
   await idle.unmount()
   const working = await $.ui.mount(band(true) as never)
-  expect(await working.find({ type: 'Svg' })).toBeUndefined()
-  expect(await working.find({ type: 'Text', text: 'engine band' })).toBeDefined()
+  expect(String((await working.find({ type: 'Svg' }))?.props.source)).toContain('data:image/png;base64,')
   await working.unmount()
+  // The desktop's thinking row is one line tall and clips him: it stays the engine's.
+  const row = await $.ui.mount({ ...SPINNER, surface: 'desktop', props: WORKING })
+  expect(await row.find({ type: 'Svg' })).toBeUndefined()
+  expect(await row.find({ type: 'Text', text: 'engine band' })).toBeDefined()
+  await row.unmount()
   await $.command.run({ ...COMMAND, surface: 'desktop', args: 'off' } as never)
   const hidden = await $.ui.mount(band(false) as never)
   expect(await hidden.find({ type: 'Svg' })).toBeUndefined()
@@ -571,7 +575,7 @@ test('desktop: /oxy off keeps the engine spinner', async ($, on) => {
   await $.command.run({ ...COMMAND, surface: 'desktop', args: 'on' } as never)
 })
 
-test('desktop: a frame that cannot be read keeps the engine spinner', async ($, on) => {
+test('vscode: a frame that cannot be read keeps the engine spinner', async ($, on) => {
   mock.clock(on, { now: 1_000 })
   mock.store(on)
   on('command.run', () => ({ text: '' }))
@@ -580,15 +584,15 @@ test('desktop: a frame that cannot be read keeps the engine spinner', async ($, 
     const { Text } = $.ui.resolve(e)
     return <Text>engine spinner</Text>
   })
-  await $.command.run({ ...COMMAND, surface: 'desktop', args: 'doctor' } as never)
-  const ui = await $.ui.mount({ ...SPINNER, surface: 'desktop', props: WORKING })
+  await $.command.run({ ...COMMAND, surface: 'vscode', args: 'doctor' } as never)
+  const ui = await $.ui.mount({ ...SPINNER, surface: 'vscode', props: WORKING })
   expect(await ui.find({ type: 'Svg' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: 'engine spinner' })).toBeDefined()
   await ui.unmount()
   await $.command.run({ ...COMMAND, args: 'auto' } as never)
 })
 
-test('desktop: the ticker redraws once per clip, never per frame, and never blits', async ($, on) => {
+test('vscode: the ticker redraws once per clip, never per frame, and never blits', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000 })
   mock.store(on)
   // big enough frames that the animation spans several clips
@@ -609,12 +613,12 @@ test('desktop: the ticker redraws once per clip, never per frame, and never blit
     return {}
   })
   const anim: Anim = 'game'
-  await $.command.run({ ...COMMAND, surface: 'desktop', args: anim } as never)
+  await $.command.run({ ...COMMAND, surface: 'vscode', args: anim } as never)
   // the timings of whichever art the desktop draws
   const ms = clipTimings(FRAMES, anim, desktopLayout(anim, 'medium').hires)
   const clips = packClips(ms, ms.map(() => length), SVG_SOURCE_CAP)
   expect(clips.length).toBeGreaterThan(1)
-  const ui = await $.ui.mount({ ...SPINNER, surface: 'desktop', props: WORKING })
+  const ui = await $.ui.mount({ ...SPINNER, surface: 'vscode', props: WORKING })
   expect(String((await ui.find({ type: 'Svg' }))?.props.source)).toContain(`${anim}0x`)
   const firstClipMs = ms.slice(clips[0][0], clips[0][1]).reduce((a, b) => a + b, 0)
   // every frame of the first clip changes while it plays: none redraws
@@ -764,7 +768,7 @@ test('clipSvg places hires frames at their crop inside a ground-anchored viewBox
 })
 
 
-for (const surface of ['desktop', 'vscode'] as const) {
+for (const surface of ['vscode'] as const) {
   test(`${surface}: hires Oxy keeps his figure's size and his ground line whatever he holds`, async ($, on) => {
     mock.clock(on, { now: 1_000 })
     mock.store(on)
@@ -809,13 +813,13 @@ for (const surface of ['desktop', 'vscode'] as const) {
 
 // Covers both fallbacks: an older frames.ts with no hires block, and a hires
 // block whose PNGs can't be read. Either way the 160x207 clip draws.
-test('desktop: hires frames missing or unreadable fall back to the 160x207 clip', async ($, on) => {
+test('vscode: hires frames missing or unreadable fall back to the 160x207 clip', async ($, on) => {
   mock.clock(on, { now: 1_000 })
   mock.store(on)
   const reads = mockPngFiles(on, 24_000, { hires: false })
   on('command.run', () => ({ text: '' }))
-  await $.command.run({ ...COMMAND, surface: 'desktop', args: 'murmur' } as never)
-  const ui = await $.ui.mount({ ...SPINNER, surface: 'desktop', props: WORKING })
+  await $.command.run({ ...COMMAND, surface: 'vscode', args: 'murmur' } as never)
+  const ui = await $.ui.mount({ ...SPINNER, surface: 'vscode', props: WORKING })
   const svg = await ui.find({ type: 'Svg' })
   expect(String(svg?.props.source)).toContain('viewBox="0 0 160 207"')
   expect(String(svg?.props.source)).toContain('base64,murmur0x')

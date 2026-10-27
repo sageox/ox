@@ -105,7 +105,7 @@ type Clip = { anim: Anim; index: number; loop: boolean; shownAt: number }
 type Site =
   | { kind: 'spinner'; surface: RenderSurface; mode: string; message: string | null; drawn: string; clip: Clip | null }
   | { kind: 'turn'; anim: Anim; start: number; drawn: string }
-  | { kind: 'rest'; surface: RenderSurface; drawn: string; clip: Clip | null }
+  | { kind: 'rest'; surface: RenderSurface; working: boolean; drawn: string; clip: Clip | null }
 
 // What Oxy does between turns: a pinned animation, else he idles.
 const REST_ANIM: Anim = 'blink'
@@ -281,12 +281,14 @@ function frameOf(requestId: string, site: Site, now: number, pin: string | null)
     const index = frameAt(FRAMES.animations[site.anim], site.start, now, false)
     return { anim: site.anim, index, drawn: `${site.anim}:${index}`, loop: false }
   }
-  if (site.kind === 'rest') {
+  if (site.kind === 'rest' && !site.working) {
     const anim: Anim = pin !== null && isAnim(pin) ? pin : REST_ANIM
     const index = frameAt(FRAMES.animations[anim], loopStart, now, true)
     return { anim, index, drawn: `${anim}:${index}`, loop: true }
   }
-  const anim = spinnerAnim(requestId, site, now, pin)
+  // A working band plays what the main loop's thinking line would.
+  const anim =
+    site.kind === 'rest' ? spinnerAnim(MAIN, { mode: 'thinking', message: null }, now, pin) : spinnerAnim(requestId, site, now, pin)
   // One-shot timing only while that one-shot is playing; a pinned or
   // expired one loops like any other animation.
   const shot = pin === null && oneShot !== null && now < oneShot.until && anim === oneShot.anim ? oneShot : null
@@ -459,21 +461,22 @@ export const register: Register = on => {
     }
   }).catch(($, e, next) => next(e))
 
-  // Between turns Oxy rests in the band above the prompt, so he stays on
-  // screen once the thinking line is gone. While a turn runs the band is
-  // handed back: he is in the thinking line then, and twice would be a crowd.
+  // On the desktop Oxy lives in the band above the prompt, working or not:
+  // the desktop's thinking row is one text line tall and clips anything
+  // taller, so he could only ever be a speck there. While a turn runs he
+  // plays the working animations; between turns he rests.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.surface === 'terminal') {
       // The terminal keeps its band for surveys; Oxy lives in its thinking line.
       return next(e)
     }
     const { hide } = await prefs($)
-    if (hide || e.props.isWorking || e.props.hasSurvey) {
+    if (hide || e.props.hasSurvey) {
       sites.delete(e.requestId)
       return next(e)
     }
     const now = await $.clock.now()
-    const site: Site & { kind: 'rest' } = { kind: 'rest', surface: e.surface, drawn: '', clip: null }
+    const site: Site & { kind: 'rest' } = { kind: 'rest', surface: e.surface, working: e.props.isWorking, drawn: '', clip: null }
     const f = frameOf(e.requestId, site, now, await read($, pinned))
     // Always the small figure here: the band is a fixed-height panel and
     // clips what overflows it (at medium his feet were cut off). The
@@ -493,6 +496,10 @@ export const register: Register = on => {
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
     const { kind, box, hide } = await prefs($)
     if (hide) {
+      return next(e)
+    }
+    if (e.surface === 'desktop') {
+      // Drawn in the band above the prompt instead; see the AbovePrompt hook.
       return next(e)
     }
     const now = await $.clock.now()
