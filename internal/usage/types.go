@@ -171,14 +171,22 @@ type Derived struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
-// RelevantItem is one used ref at its strongest evidence.
+// RelevantItem is one used ref at its strongest evidence. Evidence is the
+// display bucket (read | cited | reported | judged); Detail is the raw
+// evidence behind it (read | requery | cited | cited_commit | reported |
+// judged) so a renderer can say "re-opened" or "cited in commit 3e1c9d0".
+// Why is the AI coworker's own one-line --why — the only free text here.
 type RelevantItem struct {
 	Ref      string `json:"ref"`
 	RefType  string `json:"ref_type,omitempty"`
 	Title    string `json:"title,omitempty"`
 	URL      string `json:"url,omitempty"`
 	Evidence string `json:"evidence"` // display bucket
+	Detail   string `json:"detail,omitempty"`
 	Grade    string `json:"grade"`
+	Seq      int    `json:"seq,omitempty"`
+	Commit   string `json:"commit,omitempty"` // short sha, cited_commit only
+	Why      string `json:"why,omitempty"`
 }
 
 // Attribution is display-only: whether the session's score clears the

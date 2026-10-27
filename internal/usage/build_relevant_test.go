@@ -63,7 +63,7 @@ func TestBuild_Relevant(t *testing.T) {
 				assert.Equal(t, 1, r.Relevant.Count)
 				assert.Equal(t, 1, r.Relevant.ByEvidence["read"])
 				require.Len(t, r.Relevant.Items, 1)
-				assert.Equal(t, RelevantItem{Ref: "/ledger/MEMORY.md", RefType: "doc", Evidence: "read", Grade: "provable"}, r.Relevant.Items[0])
+				assert.Equal(t, RelevantItem{Ref: "/ledger/MEMORY.md", RefType: "doc", Evidence: "read", Detail: "read", Grade: "provable", Seq: 14}, r.Relevant.Items[0])
 				assert.Equal(t, "moderate", r.Relevant.Derived.Category)
 				require.NotNil(t, r.Surfaced[0].Used, "basename match joins the use to MEMORY.md")
 				assert.Equal(t, ItemUsed{Evidence: "read", Seq: 14, Grade: "provable"}, *r.Surfaced[0].Used)
@@ -159,7 +159,7 @@ func TestBuild_Relevant(t *testing.T) {
 				assert.Equal(t, "Retry budget", r.Surfaced[0].Title)
 				require.Len(t, r.Relevant.Items, 1)
 				assert.Equal(t, RelevantItem{Ref: "2026-10-01-ryan-Ox1", RefType: "session", Title: "Retry budget",
-					URL: "https://sageox.ai/s/1", Evidence: "read", Grade: "provable"}, r.Relevant.Items[0])
+					URL: "https://sageox.ai/s/1", Evidence: "read", Detail: "requery", Grade: "provable", Seq: 6}, r.Relevant.Items[0])
 			},
 		},
 	}

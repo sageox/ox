@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sageox/ox/internal/oxactivity"
 	"github.com/sageox/ox/internal/session"
@@ -361,7 +362,11 @@ func buildRelevant(rollup contextuse.Rollup, surfaced []Surfaced, all []contextu
 	for _, u := range rollup.Refs {
 		item := RelevantItem{
 			Ref: u.Ref, RefType: u.RefType,
-			Evidence: contextuse.BucketOf(u.Evidence), Grade: u.Grade,
+			Evidence: contextuse.BucketOf(u.Evidence), Detail: u.Evidence, Grade: u.Grade,
+			Seq: u.Seq, Why: capRunes(u.Decision, maxWhyRunes),
+		}
+		if u.Evidence == contexttrace.EvidenceCitedCommit {
+			item.Commit = shortSHA(u.Commit)
 		}
 		for i := range surfaced {
 			if !sameRef(surfaced[i].Ref, u.Ref) {
@@ -384,7 +389,30 @@ func buildRelevant(rollup contextuse.Rollup, surfaced []Surfaced, all []contextu
 		}
 		rel.Items = append(rel.Items, item)
 	}
+	// A timeline: earliest use first; refs with equal seq keep rollup order.
+	sort.SliceStable(rel.Items, func(i, j int) bool { return rel.Items[i].Seq < rel.Items[j].Seq })
 	return rel
+}
+
+// maxWhyRunes caps a reported --why; the writer caps it too, this is defense.
+const maxWhyRunes = 200
+
+// capRunes trims s to at most n runes.
+func capRunes(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n])
+}
+
+// shortSHA is the 7-character form of a commit sha.
+func shortSHA(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
 
 // sameRef matches a used ref to a surfaced one the way contextuse does: exact
