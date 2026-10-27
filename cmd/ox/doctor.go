@@ -999,7 +999,7 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	// git repo paths check - suppress individual warnings when not logged in
 	if state.isAuthenticated {
 		check := checkGitRepoPaths(opts.shouldFix(CheckSlugGitRepoPaths))
-		if errors.Is(check.err, tea.ErrInterrupted) {
+		if errors.Is(check.err, tea.ErrInterrupted) || errors.Is(check.err, context.Canceled) {
 			return categories, check.err
 		}
 		gitRepoChecks = append(gitRepoChecks, check)

@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sageox/ox/internal/api"
@@ -292,6 +294,9 @@ func fixRepoPathIssues(gitRoot string, localCfg *config.LocalConfig, issues []re
 
 			// attempt clone
 			if err := cloneRepoForFix(issue); err != nil {
+				if errors.Is(err, context.Canceled) {
+					return interruptedCloneCheck(gitRoot, localCfg, fixed, err)
+				}
 				if errors.Is(err, daemon.ErrCheckoutInProgress) {
 					cloning++
 					fmt.Println()
@@ -415,6 +420,9 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 		} else if err := cloneViaDaemon(repoDetail.Ledger.RepoURL, ledgerPath, "ledger", projectEndpoint); errors.Is(err, daemon.ErrCheckoutInProgress) {
 			cloning++
 		} else if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return interruptedCloneCheck(gitRoot, localCfg, fixed, err)
+			}
 			fmt.Printf("    Clone failed: %v\n", err)
 			skipped++
 		} else {
@@ -809,7 +817,11 @@ func clearCloneTarget(targetPath string) error {
 // lock held.
 func directCloneLedgerLocked(cloneURL, targetPath, endpointURL string) error {
 	budget := directLedgerCloneTimeout
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	// Keep the long clone budget independent of short doctor checks, while
+	// still canceling Git's separate process group when the CLI is interrupted.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
 	tempPath := fmt.Sprintf("%s.tmp-%d", targetPath, time.Now().UnixNano())
@@ -868,6 +880,8 @@ func watchDirectClone(dir string, start time.Time) (stop func() int64) {
 // describes the abort, not the server, so it is replaced with what happened.
 func directLedgerCloneError(ctx context.Context, budget time.Duration, received int64, gitOutput string, err error) error {
 	switch {
+	case errors.Is(ctx.Err(), context.Canceled):
+		return fmt.Errorf("clone ledger interrupted: %w", ctx.Err())
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return fmt.Errorf("clone ledger timed out after %s (%s received)", budget, humanSize(received))
 	case strings.Contains(gitOutput, curlLowSpeedAbort):
@@ -877,6 +891,18 @@ func directLedgerCloneError(ctx context.Context, budget time.Duration, received 
 		return fmt.Errorf("git clone failed: %s", out)
 	}
 	return err
+}
+
+// Keep completed repairs when interruption stops the remaining repositories.
+func interruptedCloneCheck(gitRoot string, localCfg *config.LocalConfig, fixed int, err error) checkResult {
+	if fixed > 0 {
+		if saveErr := config.SaveLocalConfig(gitRoot, localCfg); saveErr != nil {
+			err = errors.Join(err, fmt.Errorf("save local config: %w", saveErr))
+		}
+	}
+	result := FailedCheck("git repo paths", "interrupted", err.Error())
+	result.err = err
+	return result
 }
 
 // cloneRepoForFix clones a repo to fix a path issue.

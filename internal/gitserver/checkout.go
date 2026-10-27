@@ -58,10 +58,6 @@ type CheckoutOptions struct {
 	Output io.Writer
 }
 
-// cloneInterruptGrace is how long git gets, once the clone's context ends,
-// to delete its half-written clone before it is killed.
-const cloneInterruptGrace = 5 * time.Second
-
 // DefaultCheckoutPath returns the default checkout path for a repo.
 // For ledger repos, defaults to sibling directory of the working directory.
 // For team repos, defaults to a team-specific subdirectory.
@@ -185,20 +181,25 @@ func cloneRepo(ctx context.Context, repoURL, path string, creds *GitCredentials,
 	// log without exposing token
 	logger.Debug("git clone", "repo", sanitizeURL(repoURL), "path", path)
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	// Cancel the whole Git process group so a stalled transport child cannot
+	// prevent Git from cleaning up its incomplete checkout.
+	cmd := gitutil.NewNetworkCmd(ctx, args...)
+	// Retain the clone's output-drain bound, including on Windows where the
+	// shared runner cannot terminate the whole process group.
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Stderr = os.Stderr // show git progress/errors
 	if opts != nil && opts.Output != nil {
 		cmd.Stderr = opts.Output
 	}
-	// When ctx ends, interrupt git rather than kill it: on SIGINT it deletes
-	// the clone it was writing, the way it does on Ctrl-C. Killed outright,
-	// it would leave a half-written .git at path, whose HEAD points at
-	// refs/heads/.invalid. Where interrupting is unsupported (Windows) or
-	// git does not exit, WaitDelay kills it.
-	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
-	cmd.WaitDelay = cloneInterruptGrace
-
+	_, targetErr := os.Lstat(path)
 	if err := cmd.Run(); err != nil {
+		// SIGKILL prevents Git's cleanup. Remove only a newly created target;
+		// a pre-existing directory or symlink belongs to the caller.
+		if errors.Is(targetErr, os.ErrNotExist) {
+			if cleanupErr := os.RemoveAll(path); cleanupErr != nil {
+				return fmt.Errorf("%w: %w; remove incomplete checkout: %w", ErrCloneFailed, err, cleanupErr)
+			}
+		}
 		// sanitize args to prevent credential leaks in error messages
 		safeArgs := make([]string, len(args))
 		copy(safeArgs, args)
