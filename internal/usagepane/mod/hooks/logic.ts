@@ -457,6 +457,8 @@ const SOURCE_WORDS: Record<string, string> = {
   derived: 'derived from use',
 }
 
+const DERIVED_PREFIX = /^derived from\b/i
+
 // coauthorRows: whether SageOx would be credited as a co-author, and why.
 // Absent attribution draws nothing.
 export function coauthorRows(report: UsageReport, columns: number): CoauthorRows | null {
@@ -465,7 +467,8 @@ export function coauthorRows(report: UsageReport, columns: number): CoauthorRows
     return null
   }
   const verdict = a.would_attribute ? '· would attribute' : `· below threshold ${a.threshold}`
-  const source = SOURCE_WORDS[a.source] ?? ''
+  // ox's derived reason already opens with "derived from …": say it once.
+  const source = DERIVED_PREFIX.test(a.reason ?? '') ? '' : (SOURCE_WORDS[a.source] ?? '')
   const reason = [source, a.reason ?? ''].filter(Boolean).join(': ')
   return { key: 'coauthor', category: a.category, verdict, reason: truncate(reason, columns) }
 }

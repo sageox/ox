@@ -281,6 +281,15 @@ describe('header and co-author', () => {
     expect(coauthorRows(derived, 20)?.reason).toBe('derived from use: a…')
     expect(coauthorRows(parseReport(JSON.stringify(REPORT))!, 80)).toBeNull()
   })
+  test('a derived reason that already says where it came from renders once', () => {
+    const r = parseReport(
+      JSON.stringify({
+        ...USED_REPORT,
+        attribution: { would_attribute: false, category: 'none', reason: 'derived from context use: nothing used', source: 'derived', threshold: 0.5 },
+      }),
+    )!
+    expect(coauthorRows(r, 80)?.reason).toBe('derived from context use: nothing used')
+  })
 })
 
 test('the pane links what was used and folds the rest into counts', async ($, on) => {
