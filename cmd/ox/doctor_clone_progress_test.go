@@ -167,7 +167,7 @@ func TestDoctorFix_FirstLedgerCloneWaitsOnProgress(t *testing.T) {
 		t.Run(sc.name, func(t *testing.T) {
 			root := setupDoctorCloneProject(t, sc.checkout)
 			var result checkResult
-			output := captureStdoutForPlanCLI(t, func() { result = fixMissingRepos(root, &config.LocalConfig{}) })
+			output := captureStdoutForPlanCLI(t, func() { result = fixMissingRepos(t.Context(), root, &config.LocalConfig{}) })
 			requireDoctorCloneOutcome(t, sc, result, output)
 			if sc.wantOutput == "Downloading: 1.0 MB received" {
 				// the daemon reports every few seconds; doctor must not print
@@ -194,7 +194,7 @@ func TestDoctorFix_QuietTeamContextCloneIsAFailure(t *testing.T) {
 
 	var err error
 	output := captureStdoutForPlanCLI(t, func() {
-		err = cloneViaDaemon("http://127.0.0.1:1/team.git", filepath.Join(t.TempDir(), "team"), "team-context", endpoint.GetForProject(root))
+		err = cloneViaDaemon(t.Context(), "http://127.0.0.1:1/team.git", filepath.Join(t.TempDir(), "team"), "team-context", endpoint.GetForProject(root))
 	})
 	if assert.Error(t, err) {
 		assert.NotErrorIs(t, err, daemon.ErrCheckoutInProgress, "a team-context clone is not left cloning in the background")
@@ -214,7 +214,7 @@ func TestDoctorFix_MissingLedgerCloneWaitsOnProgress(t *testing.T) {
 			root := setupDoctorCloneProject(t, sc.checkout)
 			missing := repoPathIssue{repoType: "ledger", path: filepath.Join(t.TempDir(), "ledger"), endpoint: endpoint.GetForProject(root), issue: "missing"}
 			var result checkResult
-			output := captureStdoutForPlanCLI(t, func() { result = fixRepoPathIssues(root, &config.LocalConfig{}, []repoPathIssue{missing}) })
+			output := captureStdoutForPlanCLI(t, func() { result = fixRepoPathIssues(t.Context(), root, &config.LocalConfig{}, []repoPathIssue{missing}) })
 			if sc.cloneFails {
 				// this path has never failed the check outright: an
 				// unrepaired issue is a warning that asks for another run

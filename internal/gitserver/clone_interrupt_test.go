@@ -172,11 +172,13 @@ func TestCloneRepo_CanceledCloneLeavesNothingBehind(t *testing.T) {
 			}
 			cancel()
 
+			// Under the 5s WaitDelay: had cancellation stopped only Git, its
+			// surviving transport child would hold the output pipe until then.
 			select {
 			case err := <-done:
 				require.ErrorIs(t, err, ErrCloneFailed)
-			case <-time.After(10 * time.Second):
-				t.Fatal("the canceled clone did not exit")
+			case <-time.After(4 * time.Second):
+				t.Fatal("the canceled clone did not exit before WaitDelay")
 			}
 			assert.NoDirExists(t, target, "an interrupted clone must remove its half-written repo")
 		})
