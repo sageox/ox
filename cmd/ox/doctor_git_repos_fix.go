@@ -497,9 +497,6 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 			fmt.Println()
 			continue
 		} else if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return interruptedCloneCheck(gitRoot, localCfg, fixed, err)
-			}
 			fmt.Printf("    Clone failed: %v\n", err)
 			skipped++
 			continue
