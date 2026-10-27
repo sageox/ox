@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/claudemod"
+	"github.com/sageox/ox/internal/secretguard/secretguardtest"
 	"github.com/sageox/ox/internal/testguard"
 	"github.com/sageox/ox/internal/testutil/slogquiet"
 	"github.com/stretchr/testify/assert"
@@ -26,28 +25,6 @@ import (
 // inside the real ox repository. Captured before TestMain moves away from it, for
 // the few tests that legitimately need to read fixtures from the source tree.
 var packageDir string
-
-// publicationCatalogTransport keeps real push integration tests on the complete
-// catalog without adding any production option to bypass current-rules checks.
-// Every other HTTP request uses the normal transport unchanged.
-type publicationCatalogTransport struct {
-	base        http.RoundTripper
-	catalogPath string
-}
-
-// The catalog is read per request, not in TestMain: tests that re-exec the test
-// binary inherit a sandbox working directory where the path does not resolve,
-// and only a child that actually fetches the catalog should care.
-func (transport publicationCatalogTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	if request.URL.String() == "https://raw.githubusercontent.com/gitleaks/gitleaks/master/config/gitleaks.toml" {
-		catalog, err := os.ReadFile(transport.catalogPath)
-		if err != nil {
-			return nil, fmt.Errorf("cmd/ox tests: cannot read bundled publication rules: %w", err)
-		}
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(catalog)), Request: request}, nil
-	}
-	return transport.base.RoundTrip(request)
-}
 
 // repoPath resolves a path relative to the ox source tree, for tests that read
 // checked-in fixtures. Use it instead of a relative literal: the process working
@@ -88,13 +65,7 @@ func TestMain(m *testing.M) {
 	packageDir = wd
 	// Publication tests use the real checked-in catalog, never a public network
 	// dependency. Production keeps its unconditional current-rules refresh.
-	// runtime.Caller, not packageDir: re-exec'd child test processes inherit the
-	// sandbox working directory, where a cwd-relative path does not resolve.
-	_, thisFile, _, _ := runtime.Caller(0)
-	http.DefaultTransport = publicationCatalogTransport{
-		base:        http.DefaultTransport,
-		catalogPath: filepath.Join(filepath.Dir(thisFile), "..", "..", "internal", "secretguard", "gitleaks.toml"),
-	}
+	secretguardtest.InstallOfflineCatalog()
 
 	sandbox, err := os.MkdirTemp("", "ox-cmd-tests-")
 	if err != nil {
@@ -168,6 +139,11 @@ func TestMain(m *testing.M) {
 	stderr.Close()
 	stderrWg.Wait()
 	os.Exit(code)
+}
+
+// Failure prevented: cmd/ox publication tests depend on raw.githubusercontent.com.
+func TestPublicationCatalogIsServedOffline(t *testing.T) {
+	secretguardtest.RequireOfflineCatalog(t)
 }
 
 // A failed output destination must neither report success nor leave a large
