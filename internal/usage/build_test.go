@@ -187,7 +187,7 @@ func TestBuild(t *testing.T) {
 				require.NotNil(t, r.Used.SageoxScore)
 				assert.Equal(t, Score{Category: "moderate", Reason: "r"}, *r.Used.SageoxScore)
 				assert.Equal(t, 2, r.Used.ProducedCommits)
-				assert.Contains(t, r.Display, "score      moderate · 2 commits")
+				assert.Contains(t, r.Display, "co-author  moderate · would attribute (threshold 0.5)\n           reported by the AI coworker: r\n")
 			},
 		},
 		{
@@ -195,7 +195,7 @@ func TestBuild(t *testing.T) {
 			in:   Input{TraceSource: TraceSourceSession},
 			assert: func(t *testing.T, r Report) {
 				assert.Nil(t, r.Used.SageoxScore)
-				assert.NotContains(t, r.Display, "score ")
+				assert.NotContains(t, r.Display, "co-author", "a derived none adds nothing")
 			},
 		},
 		{

@@ -7,5 +7,6 @@ used       MEMORY.md  reported
              https://sageox.ai/c/cnv_0192a3b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b
            murmur  Ryan [wip]  read
 available  AGENTS.md · 3 team skills · 1 plan · 1 query · 1 murmur
-score      moderate · 2 commits
+co-author  moderate · would attribute (threshold 0.5)
+           reported by the AI coworker
 used = evidence from the transcript, a commit, or the AI coworker's report

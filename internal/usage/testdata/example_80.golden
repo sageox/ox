@@ -7,4 +7,6 @@ used       discussion  Usage report design review  cited in commit 3e1c9d0
              https://sageox.ai/plan/pln_4d8e2f
            murmur  Ryan [wip]  read
 available  AGENTS.md · MEMORY.md · 3 team skills · 2 discussions · 1 plan
+co-author  significant · would attribute (threshold 0.5)
+           derived from context use: cited discussion cnv_01a17990 in commit 3e…
 used = evidence from the transcript, a commit, or the AI coworker's report

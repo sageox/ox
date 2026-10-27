@@ -90,7 +90,7 @@ func renderSession(r Report, width int, st styler) string {
 	used := usedLines(r, width, st)
 	lines = append(lines, used...)
 	lines = append(lines, availableLines(r.Surfaced, width, st)...)
-	lines = append(lines, scoreLines(r, width, st)...)
+	lines = append(lines, coauthorLines(r.Attribution, width, st)...)
 	if len(used) > 0 {
 		lines = append(lines, st.dim(truncate(usedLegend, width)))
 	}
@@ -246,21 +246,32 @@ func kindPlural(kind string, n int) string {
 	return kind + "s"
 }
 
-// scoreLines is the session's SageOx score and the commits it produced.
-func scoreLines(r Report, width int, st styler) []string {
-	var items []string
-	switch {
-	case r.Used.SageoxScore != nil && r.Used.SageoxScore.Category != "":
-		items = append(items, r.Used.SageoxScore.Category)
-	case r.Relevant != nil && r.Relevant.Derived != nil && r.Relevant.Derived.Category != "" &&
-		r.Relevant.Derived.Category != string(session.ScoreNone):
-		// a derived "none" is the absence of evidence, not a score
-		items = append(items, r.Relevant.Derived.Category)
+// coauthorLines says whether SageOx would be credited as a co-author and
+// why. Display-only: it never changes commit trailers. A derived "none" is
+// the absence of evidence, not a verdict, and is omitted.
+func coauthorLines(a Attribution, width int, st styler) []string {
+	if a.Category == "" || (a.Category == string(session.ScoreNone) && a.Source != AttributionSelfReported) {
+		return nil
 	}
-	if n := r.Used.ProducedCommits; n > 0 {
-		items = append(items, fmt.Sprintf("%d commit%s", n, plural(n, "", "s")))
+	verdict := " · below threshold"
+	if a.WouldAttribute {
+		verdict = " · would attribute"
 	}
-	return wrapItems(st.label("score"), items, st.dim(" · "), width)
+	if a.Threshold > 0 {
+		verdict += fmt.Sprintf(" (threshold %g)", a.Threshold)
+	}
+	lines := wrapItems(st.label("co-author"), []string{a.Category + st.dim(verdict)}, " ", width)
+	why := a.Reason
+	if a.Source == AttributionSelfReported {
+		why = "reported by the AI coworker"
+		if a.Reason != "" {
+			why += ": " + a.Reason
+		}
+	}
+	if why != "" {
+		lines = append(lines, wrapItems("", []string{st.dim(truncate(why, width-labelCol))}, " ", width)...)
+	}
+	return lines
 }
 
 // contextLines renders the estimated token volume and its notes.

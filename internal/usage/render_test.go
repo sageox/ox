@@ -237,3 +237,62 @@ func TestRender_AvailableFoldsByKind(t *testing.T) {
 	// at 80 columns the one label wraps instead of overflowing
 	assertPlainFits(t, Display(r, 40), 40)
 }
+
+// TestRender_CoauthorRow: the co-author row says the category, whether it
+// clears the threshold, and why; a derived none is omitted. Failure
+// prevented: the brief claims credit it would not get, or hides why.
+func TestRender_CoauthorRow(t *testing.T) {
+	tests := []struct {
+		name string
+		a    Attribution
+		want []string
+		none bool
+	}{
+		{"derived, would attribute",
+			Attribution{WouldAttribute: true, Category: "significant", Source: AttributionDerived, Threshold: 0.5, Reason: "derived from context use: cited plan pln_1"},
+			[]string{"co-author  significant · would attribute (threshold 0.5)\n           derived from context use: cited plan pln_1\n"}, false},
+		{"self-reported with reason",
+			Attribution{WouldAttribute: true, Category: "critical", Source: AttributionSelfReported, Threshold: 0.7, Reason: "followed the ADR"},
+			[]string{"co-author  critical · would attribute (threshold 0.7)\n           reported by the AI coworker: followed the ADR\n"}, false},
+		{"self-reported, no reason",
+			Attribution{Category: "moderate", Source: AttributionSelfReported, Threshold: 0.7},
+			[]string{"co-author  moderate · below threshold (threshold 0.7)\n           reported by the AI coworker\n"}, false},
+		{"self-reported none is shown",
+			Attribution{Category: "none", Source: AttributionSelfReported, Threshold: 0.5},
+			[]string{"co-author  none · below threshold (threshold 0.5)\n"}, false},
+		{"derived below threshold, no threshold known",
+			Attribution{Category: "minor", Source: AttributionDerived},
+			[]string{"co-author  minor · below threshold\n"}, false},
+		{"derived none is omitted", Attribution{Category: "none", Source: AttributionDerived, Threshold: 0.5, Reason: "derived from context use: nothing used"}, nil, true},
+		{"no category is omitted", Attribution{Source: AttributionDerived}, nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Display(Report{Trace: TraceInfo{Available: true}, Attribution: tt.a}, 80)
+			for _, w := range tt.want {
+				assert.Contains(t, got, w)
+			}
+			if tt.none {
+				assert.NotContains(t, got, "co-author")
+			}
+		})
+	}
+
+	// no trace, no row — even with a self-reported score
+	noTrace := Display(Report{Attribution: Attribution{Category: "critical", Source: AttributionSelfReported, WouldAttribute: true}}, 80)
+	assert.NotContains(t, noTrace, "co-author")
+}
+
+// TestHuman_NoColorMatchesDisplay: with NO_COLOR the terminal path prints
+// exactly the display text. Failure prevented: NO_COLOR users get escapes.
+func TestHuman_NoColorMatchesDisplay(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	r := goldenReport(80)
+	assert.Equal(t, r.Display, Human(r, 80))
+}
+
+func TestFmtK(t *testing.T) {
+	for n, want := range map[int]string{0: "0", 87: "87", 220: "0.2k", 6400: "6.4k", 14200: "14.2k", 142000: "142k"} {
+		assert.Equal(t, want, FmtK(n), "n=%d", n)
+	}
+}

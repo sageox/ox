@@ -236,7 +236,8 @@ func renderMe(r MeReport, width int, st styler) string {
 		lines = append(lines, strings.TrimRight(line, " "))
 	}
 	t := r.Totals
-	lines = append(lines, st.label("total")+fmt.Sprintf("  %d calls · ~%s tokens · %d useful", t.Calls, FmtK(t.Tokens), t.Useful))
+	lines = append(lines, st.label("total")+fmt.Sprintf("  %d calls · ~%s tokens · %d useful · co-author %d of %d",
+		t.Calls, FmtK(t.Tokens), t.Useful, t.Attributed, t.Sessions))
 	if t.NotHydrated > 0 {
 		lines = append(lines, st.dim(fmt.Sprintf("%d not hydrated; `ox session view <name> --context`", t.NotHydrated)))
 	}

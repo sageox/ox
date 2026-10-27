@@ -388,6 +388,10 @@ func TestBuildMe_UsefulCountsEvidence(t *testing.T) {
 	got := DisplayMe(MeReport{Window: "7d", Totals: MeTotals{Sessions: 1, Calls: 3, Tokens: 1200, Useful: 2},
 		Sessions: []MeRow{{Name: "n", Date: "10-23", Title: "t", Trace: RowTraced, Calls: 3, Tokens: 1200, Surfaced: 5, Useful: 2}}}, 80)
 	assert.Contains(t, got, "read useful")
-	assert.Contains(t, got, "3 calls · ~1.2k tokens · 2 useful")
+	assert.Contains(t, got, "3 calls · ~1.2k tokens · 2 useful · co-author 0 of 1")
+
+	attributed := DisplayMe(MeReport{Totals: MeTotals{Sessions: 3, Attributed: 2},
+		Sessions: []MeRow{{Name: "n", Date: "10-23", Title: "t", Trace: RowTraced, WouldAttribute: true}}}, 80)
+	assert.Contains(t, attributed, "co-author 2 of 3\n", "the total says how many sessions would credit SageOx")
 	assertPlainFits(t, got, 80)
 }
