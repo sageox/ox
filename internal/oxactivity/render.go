@@ -16,13 +16,13 @@ import (
 // of team context influenced the harness session, and how many of them the AI
 // coworker actually used. Zero buckets are omitted.
 type Counts struct {
-	Discussions int
-	Plans       int
-	Docs        int
-	Sessions    int
-	Murmurs     int
+	Discussions int `json:"discussions,omitempty"`
+	Plans       int `json:"plans,omitempty"`
+	Docs        int `json:"docs,omitempty"`
+	Sessions    int `json:"sessions,omitempty"`
+	Murmurs     int `json:"murmurs,omitempty"`
 	// Used is drawn last, as "N used", and is the last count Fit drops.
-	Used int
+	Used int `json:"used,omitempty"`
 }
 
 // IsZero reports whether nothing has been counted yet.
