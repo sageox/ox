@@ -43,19 +43,6 @@ func setupIncrementalTest(t *testing.T) string {
 	return projectRoot
 }
 
-// startTestRecording starts a recording for the given agent and returns the state.
-func startTestRecording(t *testing.T, projectRoot, agentID, adapterName string) *session.RecordingState {
-	t.Helper()
-	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
-		AgentID:     agentID,
-		AdapterName: adapterName,
-		Username:    "testuser",
-	})
-	require.NoError(t, err)
-	require.NotNil(t, state)
-	return state
-}
-
 // readJSONLLines reads a JSONL file and returns non-empty lines parsed as maps.
 func readJSONLLines(t *testing.T, path string) []map[string]any {
 	t.Helper()
