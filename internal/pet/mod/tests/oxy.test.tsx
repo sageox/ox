@@ -12,12 +12,14 @@ import {
   cellsFile,
   classifyToolCall,
   clipSvg,
+  clipTimings,
   formatDuration,
   frameAt,
   frameFile,
   hiresFrameFile,
   hiresLayout,
   packClips,
+  MIN_CLIP_MS,
   passMs,
   pickAnim,
   pixelBox,
@@ -441,7 +443,8 @@ const HIRES: HiresFrames = {
   figure: FIGURE,
   animations: {
     ...Object.fromEntries(ANIMS.map(name => [name, FIGURE])),
-    laptop: { x: 30, y: 141, width: 420, height: 480 },
+    // the hires set's own frame count and timing, unlike the pixel set's
+    laptop: { x: 30, y: 141, width: 420, height: 480, ms: Array.from({ length: 45 }, () => 33) },
     float: { x: 120, y: 41, width: 240, height: 480 },
     confetti: { x: 60, y: 0, width: 360, height: 621 },
   },
@@ -549,7 +552,8 @@ test('desktop: the ticker redraws once per clip, never per frame, and never blit
   })
   const anim: Anim = 'game'
   await $.command.run({ ...COMMAND, surface: 'desktop', args: anim } as never)
-  const ms = FRAMES.animations[anim].ms
+  // the timings of whichever art the desktop draws
+  const ms = clipTimings(FRAMES, anim, desktopLayout(anim, 'medium').hires)
   const clips = packClips(ms, ms.map(() => length), SVG_SOURCE_CAP)
   expect(clips.length).toBeGreaterThan(1)
   const ui = await $.ui.mount({ ...SPINNER, surface: 'desktop', props: WORKING })
@@ -565,7 +569,7 @@ test('desktop: the ticker redraws once per clip, never per frame, and never blit
   // clip on show has played out (within a tick), the loop back included
   const at: number[] = [firstClipMs + 60]
   let seen = invalidates
-  for (let t = firstClipMs + 70; t <= firstClipMs + 60 + passMs(FRAMES.animations[anim]) + clips.length * 60; t += 10) {
+  for (let t = firstClipMs + 70; t <= firstClipMs + 60 + passMs({ ms }) + clips.length * 60; t += 10) {
     await clock.advance(10)
     if (invalidates !== seen) {
       seen = invalidates
@@ -656,7 +660,8 @@ describe('hiresLayout', () => {
       expect(`${v.x} ${v.y} ${v.width} ${v.height}`).toBe(viewBox)
       // every viewBox ends on the cell's bottom edge, the ground line
       expect(v.y + v.height).toBe(HIRES.cell.height)
-      expect(l!.image).toEqual(HIRES.animations[anim])
+      const { x, y, width: w, height: h } = HIRES.animations[anim]!
+      expect(l!.image).toEqual({ x, y, width: w, height: h })
       expect([l!.width, l!.height]).toEqual([width, height])
       expect(Math.round(l!.groundPad * 1000) / 1000).toBe(pad)
       expect(l!.wordsLift).toBe(lift)
@@ -733,6 +738,12 @@ for (const surface of ['desktop', 'vscode'] as const) {
     }
     const hiresDrawn = anims.some(a => desktopLayout(a, 'medium').hires)
     expect(reads.some(path => path.includes('/hooks/hires/'))).toBe(hiresDrawn)
+    // each animation reads exactly the frames its own art's timings name
+    for (const anim of anims) {
+      const art = desktopLayout(anim, 'medium').hires ? 'hires' : 'frames'
+      const read = new Set(reads.filter(path => path.includes(`/hooks/${art}/${anim}/`)))
+      expect(read.size).toBe(clipTimings(FRAMES, anim, art === 'hires').length)
+    }
     await $.command.run({ ...COMMAND, args: 'medium' } as never)
     await $.command.run({ ...COMMAND, args: 'auto' } as never)
   })
@@ -755,4 +766,55 @@ test('desktop: hires frames missing or unreadable fall back to the 160x207 clip'
   expect(reads.every(path => path.includes('/hooks/frames/'))).toBe(true)
   await ui.unmount()
   await $.command.run({ ...COMMAND, args: 'auto' } as never)
+})
+
+test('hires clips use the hires timings; a missing or broken ms falls back to the pixel set', () => {
+  const frames = { ...FRAMES, hires: HIRES }
+  expect(clipTimings(frames, 'laptop', true)).toHaveLength(45)
+  expect(clipTimings(frames, 'laptop', false)).toEqual(FRAMES.animations.laptop.ms)
+  // float's entry has no ms: an older frames.ts, frame for frame the pixel set
+  expect(clipTimings(frames, 'float', true)).toEqual(FRAMES.animations.float.ms)
+  const broken = { ...HIRES, animations: { ...HIRES.animations, laptop: { ...HIRES.animations.laptop!, ms: [33, 0] } } }
+  expect(clipTimings({ ...FRAMES, hires: broken }, 'laptop', true)).toEqual(FRAMES.animations.laptop.ms)
+  expect(clipTimings({ ...FRAMES, hires: undefined }, 'laptop', true)).toEqual(FRAMES.animations.laptop.ms)
+})
+
+describe('packClips keeps clips at least MIN_CLIP_MS when frames allow', () => {
+  const fps30 = (n: number) => Array.from({ length: n }, () => 33)
+  const playMs = (ms: number[], [a, b]: [number, number]) => ms.slice(a, b).reduce((t, n) => t + n, 0)
+  test('a short tail takes frames from the clip before', () => {
+    // six 20K frames fit a clip; greedy leaves a 66 ms tail of two
+    const ms = fps30(8)
+    const lengths = ms.map(() => 20_000)
+    expect(packClips(ms, lengths, SVG_SOURCE_CAP, 0)).toEqual([[0, 6], [6, 8]])
+    const clips = packClips(ms, lengths, SVG_SOURCE_CAP)
+    expect(clips).toEqual([[0, 4], [4, 8]])
+    expect(clips.every(c => playMs(ms, c) >= MIN_CLIP_MS)).toBe(true)
+  })
+  test('hires-sized frames at 30 fps never make a clip under 100 ms', () => {
+    for (const [n, base] of [7, 9, 13, 34, 61].flatMap(n => [20_000, 24_000, 28_000, 31_000].map(b => [n, b] as const))) {
+      // 30 fps rounds to 33, 33, 34 ms
+      const ms = Array.from({ length: n }, (_, i) => [33, 33, 34][i % 3]!)
+      const lengths = ms.map((_, i) => base + ((i * 1_733) % 2_000))
+      const clips = packClips(ms, lengths, SVG_SOURCE_CAP)
+      expect(clips.flatMap(([a, b]) => Array.from({ length: b - a }, (_, i) => a + i))).toEqual(ms.map((_, i) => i))
+      for (const c of clips) {
+        expect(playMs(ms, c)).toBeGreaterThanOrEqual(MIN_CLIP_MS)
+        const cost = CLIP_WRAPPER_MAX + lengths.slice(c[0], c[1]).reduce((t, len) => t + len + CLIP_IMAGE_MARKUP_MAX, 0)
+        expect(cost).toBeLessThanOrEqual(SVG_SOURCE_CAP)
+      }
+    }
+  })
+  test('short clips cascade: each takes from the one before', () => {
+    // four 28K frames to a clip; greedy leaves [0,4) [4,8) [8,9)
+    const ms = Array.from({ length: 9 }, (_, i) => [33, 33, 34][i % 3]!)
+    expect(packClips(ms, ms.map(() => 28_000), SVG_SOURCE_CAP)).toEqual([[0, 3], [3, 6], [6, 9]])
+  })
+  test('the cap still wins over the minimum', () => {
+    const half = SVG_SOURCE_CAP / 2
+    expect(packClips([33, 33, 33], [half, half, half], SVG_SOURCE_CAP)).toEqual([[0, 1], [1, 2], [2, 3]])
+  })
+  test('a clip already long enough is left alone', () => {
+    expect(packClips([200, 200, 200], [60_000, 60_000, 60_000], SVG_SOURCE_CAP)).toEqual([[0, 2], [2, 3]])
+  })
 })

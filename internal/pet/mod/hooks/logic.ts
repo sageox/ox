@@ -61,6 +61,12 @@ export type Cells = Record<SizeName, string[]>
 // A rectangle in high-resolution cell pixels.
 export type Rect = { x: number; y: number; width: number; height: number }
 
+// One hires animation: its crop box in the uncropped cell, and frame i
+// showing for ms[i]. The hires set has its own frame rate, so its count
+// differs from the pixel set's; an older frames.ts without `ms` had the
+// pixel set's frames, so a missing `ms` means `animations[name].ms`.
+export type HiresAnimation = Rect & { ms?: number[] }
+
 // The high-resolution art the desktop and VS Code draw: per frame a PNG at
 // `hires/<name>/<i>.png`, index-aligned with `animations[name].ms`. Each
 // animation is cropped to the union of its frames, `animations[name]`, a box
@@ -71,7 +77,16 @@ export type HiresFrames = {
   // hires pixels per pixel of the 160x207 art
   scale: number
   figure: Rect
-  animations: Partial<Record<Anim, Rect>>
+  animations: Partial<Record<Anim, HiresAnimation>>
+}
+
+/**
+ * The frame timings for one art: the hires entry's own `ms` when the clips
+ * are hires and it has a usable one, else the pixel set's.
+ */
+export function clipTimings(frames: OxyFrames, anim: Anim, hires: boolean): number[] {
+  const own = hires ? frames.hires?.animations[anim]?.ms : undefined
+  return own !== undefined && own.length > 0 && own.every(ms => ms > 0) ? own : frames.animations[anim].ms
 }
 
 export type OxyFrames = {
@@ -145,7 +160,7 @@ export function hiresLayout(hires: HiresFrames, anim: Anim, size: SizeName): Hir
   const middle = (ground - (hires.figure.y + hires.figure.height / 2)) * factor
   return {
     viewBox,
-    image: crop,
+    image: { x: crop.x, y: crop.y, width: crop.width, height: crop.height },
     width: Math.max(1, Math.round(viewBox.width * factor)),
     height: Math.max(1, Math.round(viewBox.height * factor)),
     groundPad: (viewBox.height - crop.height) * factor,
@@ -167,15 +182,23 @@ export function pixelBox(size: SizeName): { width: number; height: number } {
   return { width: Math.max(1, Math.round((height * DESKTOP_VIEWBOX.width) / DESKTOP_VIEWBOX.height)), height }
 }
 
+// The shortest clip worth a redraw: the graphical surfaces redraw at most
+// ten times a second, so a clip that plays out sooner would be cut short.
+export const MIN_CLIP_MS = 100
+
 /**
  * Splits an animation's frames into clips, runs of consecutive frames whose
  * SVG fits under `cap` characters: the graphical surfaces redraw at most
  * ten times a second, too slow for the frames, so a clip animates itself
- * and only a clip boundary costs a redraw. A frame too big on its own still
- * gets a clip; the caller checks the built source. Each clip is
- * `[start, end)`.
+ * and only a clip boundary costs a redraw. Packing is greedy, so a clip only
+ * ends where the next frame would not fit; the remainder at the end can
+ * still come out short, so a clip playing under `minMs` takes frames from
+ * the clip before it. The cap always wins: where no split under the cap
+ * keeps every clip at `minMs`, one stays short. A frame too big on
+ * its own still gets a clip; the caller checks the built source. Each clip
+ * is `[start, end)`.
  */
-export function packClips(ms: number[], base64Lengths: number[], cap: number): Array<[number, number]> {
+export function packClips(ms: number[], base64Lengths: number[], cap: number, minMs = MIN_CLIP_MS): Array<[number, number]> {
   if (ms.length !== base64Lengths.length) {
     throw new Error(`packClips: ${ms.length} durations for ${base64Lengths.length} frames`)
   }
@@ -193,6 +216,19 @@ export function packClips(ms: number[], base64Lengths: number[], cap: number): A
   }
   if (start < base64Lengths.length) {
     clips.push([start, base64Lengths.length])
+  }
+  const span = (a: number, b: number, of: number[]) => of.slice(a, b).reduce((t, n) => t + n, 0)
+  const fits = (a: number, b: number) => CLIP_WRAPPER_MAX + span(a, b, base64Lengths) + (b - a) * CLIP_IMAGE_MARKUP_MAX <= cap
+  // Back to front, each short clip takes frames from the one before it, which
+  // may leave that one short in turn for the next step to fix from its own
+  // predecessor. Greedy packing left the slack at the end, so this spreads it.
+  for (let j = clips.length - 1; j > 0; j--) {
+    const cur = clips[j]!
+    const prev = clips[j - 1]!
+    while (span(cur[0], cur[1], ms) < minMs && prev[1] - prev[0] >= 2 && fits(cur[0] - 1, cur[1])) {
+      prev[1]--
+      cur[0]--
+    }
   }
   return clips
 }

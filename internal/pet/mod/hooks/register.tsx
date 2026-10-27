@@ -14,6 +14,7 @@ import {
   cellsFile,
   classifyToolCall,
   clipSvg,
+  clipTimings,
   formatDuration,
   frameAt,
   frameFile,
@@ -140,14 +141,15 @@ function pictureOf($: EngineInterface, anim: Anim, index: number) {
 // for frames rarely drawn again. `hires` says which art the frames are: the
 // high-resolution set when frames.ts has it and every read succeeds, else
 // the 160x207 frames the terminal draws.
-type Clips = { anim: Anim; hires: boolean; frames: string[]; ranges: Array<[number, number]> }
+type Clips = { anim: Anim; hires: boolean; ms: number[]; frames: string[]; ranges: Array<[number, number]> }
 let clipCache: { anim: Anim; wantHires: boolean; loading: Promise<Clips>; ready: Clips | null } | null = null
 
 function readClips($: EngineInterface, anim: Anim, hires: boolean): Promise<Clips> {
-  const ms = FRAMES.animations[anim].ms
+  // Each art has its own frame count and timing: the hires set runs faster.
+  const ms = clipTimings(FRAMES, anim, hires)
   const file = hires ? hiresFrameFile : frameFile
   return Promise.all(ms.map((_, i) => $.fs.read(file($.plugin.root, anim, i), { as: 'bytes' }).then(b => b.base64))).then(
-    frames => ({ anim, hires, frames, ranges: packClips(ms, frames.map(f => f.length), SVG_SOURCE_CAP) }),
+    frames => ({ anim, hires, ms, frames, ranges: packClips(ms, frames.map(f => f.length), SVG_SOURCE_CAP) }),
   )
 }
 
@@ -174,8 +176,8 @@ function clipsOf($: EngineInterface, anim: Anim): Promise<Clips> {
   return clipCache.loading
 }
 
-function clipMs(anim: Anim, [start, end]: [number, number]): number {
-  return FRAMES.animations[anim].ms.slice(start, end).reduce((a, b) => a + b, 0)
+function clipMs(clips: Clips, [start, end]: [number, number]): number {
+  return clips.ms.slice(start, end).reduce((a, b) => a + b, 0)
 }
 
 // Moves an SVG site to its next clip once the one on show has played out;
@@ -190,7 +192,7 @@ function advanceClip(site: { clip: Clip | null }, anim: Anim, loop: boolean, now
   }
   const loaded = clipCache?.anim === anim ? clipCache.ready : null
   const range = loaded?.ranges[clip.index]
-  if (loaded == null || range === undefined || now - clip.shownAt < clipMs(anim, range)) {
+  if (loaded == null || range === undefined || now - clip.shownAt < clipMs(loaded, range)) {
     return false
   }
   if (clip.index + 1 < loaded.ranges.length) {
@@ -204,8 +206,12 @@ function advanceClip(site: { clip: Clip | null }, anim: Anim, loop: boolean, now
   return true
 }
 
+// A one-shot lasts the longer of its two arts' passes, so an SVG clip at
+// the hires timing reaches its frozen last frame before the next animation
+// takes over; the terminal simply holds its last frame for the difference.
 function playOnce(anim: Anim, now: number) {
-  oneShot = { anim, start: now, until: now + passMs(FRAMES.animations[anim]) }
+  const pass = Math.max(passMs(FRAMES.animations[anim]), passMs({ ms: clipTimings(FRAMES, anim, true) }))
+  oneShot = { anim, start: now, until: now + pass }
 }
 
 function spinnerAnim(requestId: string, site: { mode: string; message: string | null }, now: number, pin: string | null) {
@@ -426,7 +432,7 @@ export const register: Register = on => {
           ? kept
           : { anim: f.anim, index: 0, loop: f.loop, shownAt: await $.clock.now() }
       const [start, end] = loaded.ranges[site.clip.index]
-      const ms = FRAMES.animations[f.anim].ms.slice(start, end)
+      const ms = loaded.ms.slice(start, end)
       const layout = loaded.hires && FRAMES.hires !== undefined ? hiresLayout(FRAMES.hires, f.anim, box) : null
       if (loaded.hires && layout === null) {
         return next(e)
