@@ -362,22 +362,6 @@ func IsSafeForGitOps(repoPath string) error {
 	return nil
 }
 
-// IsSafeForIndexWrite refuses active Git operations and unresolved entries
-// before add/rm can mark a conflict resolved. The caller holds WithRepoLock.
-func IsSafeForIndexWrite(ctx context.Context, repoPath string) error {
-	if err := IsSafeForGitOps(repoPath); err != nil {
-		return err
-	}
-	unmerged, err := HasUnmergedEntries(ctx, repoPath)
-	if err != nil {
-		return err
-	}
-	if unmerged {
-		return errors.New("unresolved conflict in index (unmerged paths); run 'ox doctor --fix' before retrying")
-	}
-	return nil
-}
-
 // StripLFSConfig removes lfs.repositoryformatversion from local git config.
 // This config is set by git-lfs when filter.lfs.required=true is global, but
 // it causes HTTP 403 on push to GitLab when the server-side ALB doesn't
