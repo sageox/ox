@@ -12,6 +12,8 @@ import type {
   UsageStatus,
   UsageSurfaced,
   UsageUsedItem,
+  Statusline,
+  StatuslineCounts,
 } from '../types'
 
 export const PANE = 'ox-brief'
@@ -19,16 +21,29 @@ export const PLUGIN = 'ox-cli-brief-pane'
 export const REFRESH_MS = 15_000
 export const RUN_TIMEOUT_MS = 8_000
 
+export const STATUSLINE_REFRESH_MS = 15_000
+export const STATUSLINE_RUN_TIMEOUT_MS = 2_000
+
 // briefRunInit is how the pane runs `ox brief`. The pane runs it from the
 // Claude Code host process, which carries none of the variables the AI
 // coworker's shell gets, so ox cannot tell which session to report on and
 // reads it as not recording while the status line says it is. Claude Code's
 // own session id lets ox find the session the same way the status line does.
-export function briefRunInit(sessionId: string): { timeoutMs: number; env?: Record<string, string> } {
-  if (sessionId === '') return { timeoutMs: RUN_TIMEOUT_MS }
-  return { timeoutMs: RUN_TIMEOUT_MS, env: { CLAUDE_CODE_SESSION_ID: sessionId } }
+export function briefRunInit(
+  sessionId: string,
+  timeoutMs: number = RUN_TIMEOUT_MS,
+): { timeoutMs: number; env?: Record<string, string> } {
+  if (sessionId === '') return { timeoutMs }
+  return { timeoutMs, env: { CLAUDE_CODE_SESSION_ID: sessionId } }
 }
 export const BRIEF_ARGV = ['ox', 'brief', '--json', '--recent', '0'] as const
+
+// statuslineRunInit runs `ox statusline --json` the way briefRunInit runs the
+// brief (same session id), on a shorter leash: the band redraws on every turn.
+export function statuslineRunInit(sessionId: string): { timeoutMs: number; env?: Record<string, string> } {
+  return briefRunInit(sessionId, STATUSLINE_RUN_TIMEOUT_MS)
+}
+export const STATUSLINE_ARGV = ['ox', 'statusline', '--json'] as const
 
 const ELLIPSIS = '…'
 
@@ -513,4 +528,124 @@ export const INITIAL_STATUS: UsageStatus = { follow: false }
 // load (no earlier report) never moves it: that would scroll the header away.
 export function shouldScrollToEnd(prevRows: number | undefined, nextRows: number, follow: boolean): boolean {
   return follow && prevRows !== undefined && nextRows > prevRows
+}
+
+// --- The status line band (desktop only) ---------------------------------
+//
+// The Claude desktop app's Code tab has no status bar, so the band above the
+// prompt draws ox's status line there. Its layout mirrors the terminal's
+// (internal/oxactivity/render.go `layout` and `Fit`, cmd/ox/statusline.go
+// `composeStatusline`) so the two read the same.
+
+const STATUSLINE_KINDS = ['discussions', 'plans', 'docs', 'sessions', 'murmurs', 'used'] as const
+
+// parseStatusline reads `ox statusline --json` stdout, or null when it is not
+// one. Counts are coerced (missing or non-numeric read as 0); only a boolean
+// true `show` shows.
+export function parseStatusline(stdout: string): Statusline | null {
+  let raw: unknown
+  try {
+    raw = JSON.parse(stdout)
+  } catch {
+    return null
+  }
+  if (!isRecord(raw)) {
+    return null
+  }
+  const c = isRecord(raw.counts) ? raw.counts : {}
+  const counts = {} as StatuslineCounts
+  for (const k of STATUSLINE_KINDS) {
+    counts[k] = Math.max(0, Math.floor(num(c[k])))
+  }
+  return { show: raw.show === true, counts, recording: raw.recording === true }
+}
+
+// sameStatusline: whether two reads would draw the same band.
+export function sameStatusline(a: Statusline | null, b: Statusline | null): boolean {
+  if (a === null || b === null) {
+    return a === b
+  }
+  return a.show === b.show && a.recording === b.recording && STATUSLINE_KINDS.every(k => a.counts[k] === b.counts[k])
+}
+
+export type StatuslinePieceStyle = 'mark' | 'num' | 'dim' | 'plain' | 'recDot' | 'recLabel'
+export type StatuslinePiece = { text: string; style: StatuslinePieceStyle }
+
+export const STATUSLINE_MARK = '● ox'
+const REC_MARK = '  ● rec'
+
+// Kind buckets in display order; used is not a kind and is drawn last.
+const STATUSLINE_BUCKETS: ReadonlyArray<[keyof StatuslineCounts, string, string]> = [
+  ['discussions', 'discussion', 'discussions'],
+  ['plans', 'plan', 'plans'],
+  ['docs', 'doc', 'docs'],
+  ['sessions', 'session', 'sessions'],
+  ['murmurs', 'murmur', 'murmurs'],
+]
+
+function cells(s: string): number {
+  return [...s].length
+}
+
+// statuslineLayout mirrors oxactivity.layout.
+function statuslineLayout(c: StatuslineCounts): StatuslinePiece[] {
+  const ps: StatuslinePiece[] = [{ text: STATUSLINE_MARK, style: 'mark' }]
+  let first = true
+  for (const [k, singular, many] of [...STATUSLINE_BUCKETS, ['used', 'used', 'used'] as const]) {
+    const n = c[k]
+    if (n <= 0) {
+      continue
+    }
+    ps.push(first ? { text: '  ', style: 'plain' } : { text: ' · ', style: 'dim' })
+    first = false
+    ps.push({ text: String(n), style: 'num' }, { text: ` ${n === 1 ? singular : many}`, style: 'dim' })
+  }
+  return ps
+}
+
+function piecesWidth(ps: readonly StatuslinePiece[]): number {
+  return ps.reduce((w, p) => w + cells(p.text), 0)
+}
+
+function isZero(c: StatuslineCounts): boolean {
+  return STATUSLINE_KINDS.every(k => c[k] === 0)
+}
+
+// fitStatusline mirrors oxactivity.Fit: drop the smallest non-zero kind count
+// (ties: the rightmost) until the line fits; used goes last; "● ox" is the
+// floor. width <= 0 means unlimited.
+export function fitStatusline(counts: StatuslineCounts, width: number): StatuslineCounts {
+  const c = { ...counts }
+  if (width <= 0) {
+    return c
+  }
+  while (piecesWidth(statuslineLayout(c)) > width && !isZero(c)) {
+    let drop: keyof StatuslineCounts | null = null
+    for (const [k] of STATUSLINE_BUCKETS) {
+      if (c[k] === 0) {
+        continue
+      }
+      if (drop === null || c[k] <= c[drop]) {
+        drop = k
+      }
+    }
+    c[drop ?? 'used'] = 0
+  }
+  return c
+}
+
+// statuslinePieces lays the band out in `bodyColumns` cells as
+// composeStatusline does: "  ● rec" is reserved first (when "● ox" and it
+// fit), then the counts give way.
+export function statuslinePieces(line: Statusline, bodyColumns: number): StatuslinePiece[] {
+  let width = bodyColumns > 0 ? Math.max(Math.floor(bodyColumns), cells(STATUSLINE_MARK)) : 0
+  const rec = line.recording && (width === 0 || width >= cells(STATUSLINE_MARK) + cells(REC_MARK))
+  if (rec && width > 0) {
+    width -= cells(REC_MARK)
+  }
+  const ps = statuslineLayout(fitStatusline(line.counts, width))
+  if (rec) {
+    ps.push({ text: '  ', style: 'plain' }, { text: '●', style: 'recDot' }, { text: ' rec', style: 'recLabel' })
+  }
+  return ps
 }
