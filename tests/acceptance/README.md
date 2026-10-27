@@ -51,6 +51,7 @@ acceptance/
     config/               # configuration precedence and settings
     decision-records/     # ox decision enrich, ADR/DDR authoring
     pr-header/            # ox pr header credit line
+    brief/                # ox brief: what the AI coworker used vs what was available
     redaction/            # secret redaction in captured sessions
   business-actions/       # named user journeys (one-paragraph stubs in v1)
   system-interactions/    # feature -> ox subcommand / SageOx API touchpoint map

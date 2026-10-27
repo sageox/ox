@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -83,7 +84,7 @@ func TestUsage_ListsOxCallAfterHookRecordsIt(t *testing.T) {
 	assert.InDelta(t, n/4, found.Tokens, 1, "tokens ≈ bytes/4")
 	assert.Contains(t, r.Display, "checked murmurs ×1")
 	require.NotNil(t, r.Used.SelfReport)
-	assert.Equal(t, "ox agent OxAb12 session context-trace", r.Used.SelfReport.Command)
+	assert.Equal(t, "ox agent OxAb12 session context-trace", r.Used.SelfReport.BatchCommand)
 }
 
 // TestUsage_NotRecordingReadsAgentCache: an AI coworker that is not recording
@@ -104,7 +105,7 @@ func TestUsage_NotRecordingReadsAgentCache(t *testing.T) {
 	assert.Nil(t, r.Used.SelfReport)
 }
 
-// TestBrief_EndpointFromProject: a discussion the AI coworker pulled is linked
+// TestBrief_EndpointFromProject: a discussion the AI coworker re-opened is linked
 // on the project's own SageOx endpoint, through the real `ox brief --json`.
 // Failure prevented: the brief shows a discussion with no link, or a link on
 // the wrong environment's host.
@@ -120,6 +121,11 @@ func TestBrief_EndpointFromProject(t *testing.T) {
 		Type: contexttrace.EventInvoked, Source: contexttrace.SourceOxCLI, Label: "searched team memory",
 		Command: "query", Query: cnv, RefType: "discussion", InlineTokens: 40, Seq: 2,
 	}))
+	// re-opened, so the brief lists it as used — the only place it is linked
+	require.NoError(t, w.Append(contexttrace.Event{
+		Type: contexttrace.EventUsed, Evidence: contexttrace.EvidenceRequery, Mechanism: contexttrace.MechanismRetrieval,
+		Ref: cnv, RefType: "discussion", Seq: 3,
+	}))
 
 	r := runOxUsageJSON(t)
 
@@ -132,6 +138,117 @@ func TestBrief_EndpointFromProject(t *testing.T) {
 	require.NotNil(t, found, "the discussion must be surfaced; got %+v", r.Surfaced)
 	assert.Equal(t, "https://test.sageox.ai/c/"+cnv, found.URL)
 	assert.Contains(t, r.Display, "https://test.sageox.ai/c/"+cnv)
+}
+
+// TestBrief_UsedItemsLinkedAvailableFolded is the customer claim of
+// tests/acceptance/features/brief/relevant-context.feature rules 1 and 2:
+// Devon's AI coworker was handed a discussion and a plan, cited the
+// discussion in a commit, and never touched the plan. Through the REAL
+// `ox brief`, the discussion is listed as used with its sageox.ai link and
+// the commit that cited it, SageOx would be credited as co-author, and the
+// plan appears only as a count under "available" with no link. Failure
+// prevented: the brief credits everything it surfaced, or nothing it used,
+// or links pages the AI coworker never opened.
+func TestBrief_UsedItemsLinkedAvailableFolded(t *testing.T) {
+	root := usageTraceEnv(t, nil)
+	t.Setenv("SAGEOX_ENDPOINT", "")
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".sageox", "config.json"),
+		[]byte(`{"config_version":"2","repo_id":"repo_brief_relevant","endpoint":"https://test.sageox.ai"}`), 0o644))
+	state := startUsageRecording(t, root)
+	const (
+		cnv  = "cnv_01a17990-4cb6-7bf9-9584-4728f14b54f1"
+		pln  = "pln_4d8e2f"
+		sha  = "3e1c9d0b7a6f5e4d3c2b1a09f8e7d6c5b4a39281"
+		link = "https://test.sageox.ai/c/" + cnv
+	)
+	w := contexttrace.NewWriter(state.SessionPath)
+	for _, ev := range []contexttrace.Event{
+		{Type: contexttrace.EventProvided, Source: contexttrace.SourceOnDemand, Mechanism: contexttrace.MechanismRetrieval,
+			Ref: cnv, RefType: "discussion", Title: "Usage report design review", InlineTokens: 400, Seq: 2},
+		{Type: contexttrace.EventProvided, Source: contexttrace.SourceOnDemand, Mechanism: contexttrace.MechanismRetrieval,
+			Ref: pln, RefType: "plan", Title: "Usage receipts", InlineTokens: 300, Seq: 3},
+		{Type: contexttrace.EventUsed, Evidence: contexttrace.EvidenceCitedCommit, Mechanism: contexttrace.MechanismCitation,
+			Ref: cnv, RefType: "discussion", Commit: sha, Seq: 9},
+	} {
+		require.NoError(t, w.Append(ev))
+	}
+
+	r := runOxUsageJSON(t)
+
+	require.NotNil(t, r.Relevant)
+	if assert.Len(t, r.Relevant.Items, 1, "the cited discussion is the one used item") {
+		assert.Equal(t, link, r.Relevant.Items[0].URL)
+		assert.Equal(t, "cited_commit", r.Relevant.Items[0].Detail)
+	}
+	assert.True(t, r.Attribution.WouldAttribute, "a commit-cited discussion clears the default threshold")
+
+	// --json=false: the coworker's own terminal view, even when this test
+	// itself runs inside an AI coworker's shell (which defaults to JSON)
+	resetUsageFlags(t)
+	human, err := executeRootCLI(t, "brief", "--json=false")
+	require.NoError(t, err)
+	human = ansi.Strip(human)
+	t.Logf("ox brief:\n%s", human)
+	lines := strings.Split(human, "\n")
+	usedAt, linkAt, availableAt := -1, -1, -1
+	for i, l := range lines {
+		switch {
+		case strings.HasPrefix(l, "used ") && usedAt < 0:
+			usedAt = i
+		case strings.TrimSpace(l) == link:
+			linkAt = i
+		case strings.HasPrefix(l, "available"):
+			availableAt = i
+		}
+	}
+	if assert.GreaterOrEqual(t, usedAt, 0, "the brief has a used section") {
+		assert.Contains(t, lines[usedAt], "Usage report design review  cited in commit 3e1c9d0")
+		assert.Equal(t, usedAt+1, linkAt, "the discussion's link sits on the line after it")
+	}
+	if assert.GreaterOrEqual(t, availableAt, 0, "the brief has an available section") {
+		assert.Equal(t, "available  1 plan", lines[availableAt], "the unused plan is only a count")
+	}
+	assert.NotContains(t, human, "/plan/", "an available plan is never linked")
+	assert.NotContains(t, human, "Usage receipts", "an available plan is a count, not a listing")
+	assert.Contains(t, human, "co-author  significant · would attribute")
+}
+
+// TestBrief_AllowJudgedEvidenceFromConfig: the project's
+// attribution.allow_judged_evidence reaches the real `ox brief --json`. A
+// judged-only session derives "minor" when allowed and "none" otherwise; the
+// judged item is listed either way. Failure prevented: the knob is set but the
+// brief ignores it, so it disagrees with what the team configured.
+func TestBrief_AllowJudgedEvidenceFromConfig(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{"knob unset", `{"config_version":"2","repo_id":"repo_usage_trace"}`, "none"},
+		{"knob false", `{"config_version":"2","repo_id":"repo_usage_trace","attribution":{"allow_judged_evidence":false}}`, "none"},
+		{"knob true", `{"config_version":"2","repo_id":"repo_usage_trace","attribution":{"allow_judged_evidence":true}}`, "minor"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := usageTraceEnv(t, nil)
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			require.NoError(t, os.WriteFile(filepath.Join(root, ".sageox", "config.json"), []byte(tt.config), 0o644))
+			state := startUsageRecording(t, root)
+			require.NoError(t, contexttrace.NewWriter(state.SessionPath).Append(contexttrace.Event{
+				Type: contexttrace.EventUsed, Evidence: contexttrace.EvidenceJudged, Mechanism: contexttrace.MechanismJudge,
+				Ref: "mur_judged", RefType: "murmur", Seq: 3,
+			}))
+
+			r := runOxUsageJSON(t)
+
+			require.NotNil(t, r.Relevant)
+			require.Len(t, r.Relevant.Items, 1, "judged uses are always listed")
+			assert.Equal(t, "judged", r.Relevant.Items[0].Detail)
+			assert.Equal(t, tt.want, r.Relevant.Derived.Category)
+			assert.Equal(t, tt.want, r.Attribution.Category)
+			assert.False(t, r.Attribution.WouldAttribute, "minor never clears the default threshold")
+		})
+	}
 }
 
 // TestUsage_NoTraceSaysWhy: a coworker with nothing recorded gets an honest
@@ -229,7 +346,7 @@ func TestUsage_SelfReportRoundTrip(t *testing.T) {
 
 	before := runOxUsageJSON(t)
 	require.NotNil(t, before.Used.SelfReport)
-	_, err := runContextTraceStdin(t, before.Used.SelfReport.ExampleLine)
+	_, err := runContextTraceStdin(t, before.Used.SelfReport.BatchExampleLine)
 	require.NoError(t, err)
 
 	after := runOxUsageJSON(t)

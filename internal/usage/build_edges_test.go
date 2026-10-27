@@ -76,7 +76,7 @@ func TestBuild_TraceShapes(t *testing.T) {
 			}},
 			assert: func(t *testing.T, r Report) {
 				require.Len(t, r.Surfaced, 2)
-				assert.Equal(t, Surfaced{Ref: "auth", RefType: "query", Via: "retrieval"}, r.Surfaced[0])
+				assert.Equal(t, Surfaced{Ref: "auth", RefType: "query", Via: "retrieval", Seq: 1}, r.Surfaced[0])
 				assert.Equal(t, "billing", r.Surfaced[1].Ref)
 				assert.Len(t, r.Used.Retrieval, 2)
 			},

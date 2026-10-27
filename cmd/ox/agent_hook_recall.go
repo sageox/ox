@@ -7,11 +7,15 @@ import (
 	"io"
 	"log/slog"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/promptintent"
 	"github.com/sageox/ox/internal/selfexec"
+	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/tokens"
 )
 
 // LocalQueryRunner runs a recall query against the *local* ledger / cache
@@ -35,6 +39,10 @@ type LocalQueryResult struct {
 	Snippet string `json:"snippet,omitempty"`    // short context blurb
 	Path    string `json:"path,omitempty"`       // on-disk path when applicable
 	Session string `json:"session_id,omitempty"` // session ID when applicable
+	// SourceID is the ledger's own id for a non-session hit: the murmur ID or
+	// the plan's dated slug. It is the ref the context trace records, because
+	// it is what `ox murmur show` / `ox plan view` take back.
+	SourceID string `json:"source_id,omitempty"`
 }
 
 // recallQueryTimeout caps the entire recall round-trip. The UserPromptSubmit
@@ -69,7 +77,11 @@ func SetLocalQueryRunner(r LocalQueryRunner) LocalQueryRunner {
 // Fail-open contract: any error, timeout, panic in the runner, or empty
 // result MUST result in no output and no returned error. The user's
 // prompt must reach the model unchanged in all failure modes.
-func emitLocalRecallPreamble(w io.Writer, prompt string) {
+//
+// When projectRoot and agentID name a live recording, each emitted hit is
+// also recorded as a "provided" event in that session's context trace (refs
+// only — the prompt never reaches the trace).
+func emitLocalRecallPreamble(w io.Writer, projectRoot, agentID, prompt string) {
 	// crash isolation: a panicking runner (network adapter dereference,
 	// nil map, etc.) must not bring down the hook process — which would
 	// take the agent's whole turn with it.
@@ -101,16 +113,30 @@ func emitLocalRecallPreamble(w io.Writer, prompt string) {
 		return
 	}
 
-	writeRecallPreamble(w, results)
+	emitted := writeRecallPreamble(w, results)
+	traceRecallDelivery(projectRoot, agentID, emitted)
 }
+
+// recallHit is one hit that made it into the rendered preamble, with the
+// token cost of its line.
+type recallHit struct {
+	Result LocalQueryResult
+	Tokens int
+}
+
+// recallPreambleHeader names the self-report command so a hit that shapes
+// the work can be credited at the moment of use.
+const recallPreambleHeader = "[ox-recall] Local matches from this ledger (if one shapes your work: ox agent <id> context used <ref>):"
 
 // writeRecallPreamble renders the recall preamble with a hard 5-line
 // budget (one header + up to four hits). Truncation is silent — a
-// noisier preamble would erode trust in the channel.
-func writeRecallPreamble(w io.Writer, results []LocalQueryResult) {
+// noisier preamble would erode trust in the channel. Returns the hits that
+// were rendered.
+func writeRecallPreamble(w io.Writer, results []LocalQueryResult) []recallHit {
 	const maxLines = 5
 	lines := make([]string, 0, maxLines)
-	lines = append(lines, "[ox-recall] Local matches from this ledger:")
+	lines = append(lines, recallPreambleHeader)
+	var emitted []recallHit
 	for _, r := range results {
 		if len(lines) >= maxLines {
 			break
@@ -136,6 +162,7 @@ func writeRecallPreamble(w io.Writer, results []LocalQueryResult) {
 			line += fmt.Sprintf(" — %s", ref)
 		}
 		lines = append(lines, line)
+		emitted = append(emitted, recallHit{Result: r, Tokens: tokens.EstimateTokens(line)})
 	}
 
 	fmt.Fprintln(w, "<system-reminder>")
@@ -143,6 +170,92 @@ func writeRecallPreamble(w io.Writer, results []LocalQueryResult) {
 		fmt.Fprintln(w, l)
 	}
 	fmt.Fprintln(w, "</system-reminder>")
+	return emitted
+}
+
+// traceRecallDelivery appends one "provided" event per rendered recall hit
+// to the live recording's context trace, so the hit counts as surfaced.
+//
+// Runs inside the prompt hook's latency budget: local file I/O only, no
+// network, no URL building. Silent no-op when not recording. Refs only —
+// never the prompt, the match query, or a snippet (ADR-027 rule 4).
+func traceRecallDelivery(projectRoot, agentID string, hits []recallHit) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Debug("hook: recall trace panic recovered", "panic", fmt.Sprint(r))
+		}
+	}()
+	if projectRoot == "" || agentID == "" || len(hits) == 0 {
+		return
+	}
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	if err != nil || state == nil || state.SessionPath == "" {
+		return
+	}
+	ts := contexttrace.Now()
+	events := make([]contexttrace.Event, 0, len(hits))
+	for _, h := range hits {
+		ref, refType := recallTraceRef(h.Result)
+		if ref == "" {
+			continue
+		}
+		events = append(events, contexttrace.Event{
+			Type:         contexttrace.EventProvided,
+			Timestamp:    ts,
+			Source:       contexttrace.SourceLocalRecall,
+			Mechanism:    contexttrace.MechanismInjection,
+			Ref:          ref,
+			RefType:      refType,
+			Title:        recallTraceTitle(h.Result.Title),
+			Seq:          state.EntryCount,
+			InlineTokens: h.Tokens,
+		})
+	}
+	if err := contexttrace.NewWriter(state.SessionPath).AppendAll(events); err != nil {
+		slog.Debug("hook: recall trace append failed", "agent_id", agentID, "error", err)
+	}
+}
+
+// recallTraceRef picks the ref a recall hit is traced under: the session
+// name for a session hit, the murmur ID or plan slug for those, and the
+// path (relative when it already is) otherwise.
+func recallTraceRef(r LocalQueryResult) (ref, refType string) {
+	refType = recallRefType(r)
+	switch {
+	case refType == "session" && r.Session != "":
+		return r.Session, refType
+	case r.SourceID != "":
+		return r.SourceID, refType
+	case r.Path != "":
+		return filepath.ToSlash(r.Path), refType
+	case r.Session != "":
+		return r.Session, "session"
+	}
+	return "", refType
+}
+
+// recallRefType maps a hit's source to a trace ref_type.
+func recallRefType(r LocalQueryResult) string {
+	switch r.Source {
+	case "session", "murmur", "plan":
+		return r.Source
+	case "plan-feedback":
+		return "plan"
+	}
+	if r.Session != "" && r.Path == "" {
+		return "session"
+	}
+	return "doc"
+}
+
+// recallTraceTitle bounds a hit title for the trace. A title is a label, not
+// content, but it is still capped so a malformed index cannot bloat the trace.
+func recallTraceTitle(title string) string {
+	title = collapseWhitespace(title)
+	if len(title) > 120 {
+		title = title[:117] + "..."
+	}
+	return title
 }
 
 func collapseWhitespace(s string) string {
@@ -229,13 +342,13 @@ func (s *shellLocalQueryRunner) Query(ctx context.Context, prompt string, limit 
 	return parseLocalQueryJSON(out)
 }
 
-// parseLocalQueryJSON tolerates two shapes from `ox query --local --json`:
+// parseLocalQueryJSON tolerates three shapes from `ox query --local --json`:
 //
+//	{"local_results":[ {doc_type, text, file_path, source_id}, ... ]}  (what ox query emits)
 //	{"results":[ {...}, ... ]}
 //	[ {...}, ... ]
 //
-// because the sibling task (ox-m01h) is still settling on the wrapper
-// envelope. Either shape collapses to a flat slice here.
+// Any shape collapses to a flat slice here.
 func parseLocalQueryJSON(b []byte) ([]LocalQueryResult, error) {
 	b = []byte(strings.TrimSpace(string(b)))
 	if len(b) == 0 {
@@ -243,12 +356,29 @@ func parseLocalQueryJSON(b []byte) ([]LocalQueryResult, error) {
 	}
 	if b[0] == '{' {
 		var env struct {
-			Results []LocalQueryResult `json:"results"`
+			Results      []LocalQueryResult `json:"results"`
+			LocalResults []struct {
+				Text     string `json:"text"`
+				DocType  string `json:"doc_type"`
+				FilePath string `json:"file_path"`
+				SourceID string `json:"source_id"`
+			} `json:"local_results"`
 		}
 		if err := json.Unmarshal(b, &env); err != nil {
 			return nil, err
 		}
-		return env.Results, nil
+		if len(env.Results) > 0 {
+			return env.Results, nil
+		}
+		out := make([]LocalQueryResult, 0, len(env.LocalResults))
+		for _, lr := range env.LocalResults {
+			r := LocalQueryResult{Source: lr.DocType, Snippet: lr.Text, Path: lr.FilePath, SourceID: lr.SourceID}
+			if lr.DocType == "session" {
+				r.Session = lr.SourceID
+			}
+			out = append(out, r)
+		}
+		return out, nil
 	}
 	var flat []LocalQueryResult
 	if err := json.Unmarshal(b, &flat); err != nil {

@@ -48,7 +48,59 @@ export type UsageReport = {
   calls: { total: number; failed: number; recent: UsageRecentCall[] }
   context: { tokens: number; estimated?: boolean; by_source: UsageContextSource[] }
   surfaced: UsageSurfaced[]
-  relevant?: { count: number; surfaced_count: number }
+  /** Every surfaced item counted by ref_type; surfaced[] is capped for display. */
+  surfaced_by_type?: Record<string, number>
+  relevant?: UsageRelevant
+  /** Whether SageOx would be credited as a co-author of this session's work. */
+  attribution?: UsageAttribution
+}
+
+/** How many used items rest on each kind of evidence. */
+export type UsageEvidenceCounts = {
+  read: number
+  cited: number
+  reported: number
+  judged: number
+}
+
+/** One surfaced item the AI coworker used, strongest evidence per ref, in seq order. */
+export type UsageUsedItem = {
+  ref: string
+  ref_type?: string
+  title?: string
+  /** Only discussions, plans and sessions carry one. */
+  url?: string
+  /** read | cited | reported | judged */
+  evidence: string
+  /** provable | reported | judged (parsed, never drawn) */
+  grade: string
+  /** read | requery | cited | cited_commit | reported | judged */
+  detail?: string
+  seq?: number
+  /** Short sha of the commit that cited the item (detail cited_commit). */
+  commit?: string
+  /** The AI coworker's reason (evidence reported). */
+  why?: string
+}
+
+export type UsageRelevant = {
+  count: number
+  surfaced_count: number
+  by_evidence?: UsageEvidenceCounts
+  items?: UsageUsedItem[]
+  /** The AI coworker reported it used nothing. */
+  reported_none?: boolean
+  derived?: { category: string; reason?: string }
+}
+
+export type UsageAttribution = {
+  would_attribute: boolean
+  /** none | minor | moderate | significant | critical */
+  category: string
+  reason?: string
+  /** self-reported | derived */
+  source: string
+  threshold: number
 }
 
 export type UsageStatus = {

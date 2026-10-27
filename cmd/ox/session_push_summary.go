@@ -206,6 +206,12 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
+	// mirror the finalize-time context-use rollup from meta.json so
+	// summary.json readers see the same derived evidence (never LLM-authored)
+	if meta != nil && meta.ContextUse != nil {
+		summaryParsed.ContextUse = meta.ContextUse
+	}
+
 	// load quality thresholds from user config
 	userCfg, _ := config.LoadUserConfig()
 	awCfg := userCfg.GetAgentWorkerConfig()

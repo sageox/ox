@@ -60,6 +60,7 @@ func runConversationTopic(cmd *cobra.Command, args []string) error {
 		return finishConversationEnvelope(cmd.OutOrStdout(), format, read.ErrorEnvelope(shareErr), nil)
 	}
 	env := reader.Topic(idArg, args[1], flags.IncludeSuperseded)
+	traceConversationRead(env, reader, idArg)
 	return finishConversationEnvelope(cmd.OutOrStdout(), format, env, renderConversationTopicText)
 }
 

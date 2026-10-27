@@ -40,6 +40,36 @@ func TestBuild_GradesAndKinds(t *testing.T) {
 			"injection", GradeProvable, "OxDmitri",
 		},
 		{
+			"citation consult is provable",
+			contexttrace.Event{Type: contexttrace.EventConsulted, Mechanism: contexttrace.MechanismCitation, RefType: "discussion", Ref: "cnv_9"},
+			"consult", GradeProvable, "cnv_9",
+		},
+		{
+			"used by read is provable with its turn",
+			contexttrace.Event{Type: contexttrace.EventUsed, Mechanism: contexttrace.MechanismRetrieval, Evidence: contexttrace.EvidenceRead, Ref: "MEMORY.md", RefType: "doc", Seq: 14},
+			"use", GradeProvable, "You used MEMORY.md (read, turn 14)",
+		},
+		{
+			"used by commit citation is provable under the cited bucket",
+			contexttrace.Event{Type: contexttrace.EventUsed, Mechanism: contexttrace.MechanismCitation, Evidence: contexttrace.EvidenceCitedCommit, Ref: "Ox7f2a", RefType: "murmur"},
+			"use", GradeProvable, "You used Ox7f2a (cited)",
+		},
+		{
+			"used by self-report is inferred and says so",
+			contexttrace.Event{Type: contexttrace.EventUsed, Mechanism: contexttrace.MechanismSelfReport, Evidence: contexttrace.EvidenceReported, Ref: "mur_x", Decision: "kept the retry budget"},
+			"use", GradeInferred, "You reported using mur_x: “kept the retry budget”",
+		},
+		{
+			"used without evidence falls back to its mechanism",
+			contexttrace.Event{Type: contexttrace.EventUsed, Mechanism: contexttrace.MechanismSelfReport, Ref: "mur_x"},
+			"use", GradeInferred, "You reported using mur_x",
+		},
+		{
+			"judged use is inferred and labeled",
+			contexttrace.Event{Type: contexttrace.EventUsed, Mechanism: contexttrace.MechanismJudge, Evidence: contexttrace.EvidenceJudged, Ref: "cnv_9", RefType: "discussion"},
+			"use", GradeInferred, "Judged used: cnv_9",
+		},
+		{
 			"self-report attribution is inferred + labeled",
 			contexttrace.Event{Type: contexttrace.EventInfluenced, Mechanism: contexttrace.MechanismSelfReport, Ref: "principles.md", Decision: "kept the retry contract"},
 			"attribution", GradeInferred, "self-assessed",
@@ -65,6 +95,18 @@ func TestBuild_GradesAndKinds(t *testing.T) {
 				t.Errorf("session = %q", f.Session)
 			}
 		})
+	}
+}
+
+// TestBuild_SkipsNoneAndUnknownUse ensures a "nothing used" report and an
+// evidence value from a newer writer never render as a use.
+func TestBuild_SkipsNoneAndUnknownUse(t *testing.T) {
+	flows := Build("s", []contexttrace.Event{
+		{Type: contexttrace.EventUsed, Mechanism: contexttrace.MechanismSelfReport, Evidence: contexttrace.EvidenceNone},
+		{Type: contexttrace.EventUsed, Evidence: "telepathy", Ref: "x"},
+	})
+	if len(flows) != 0 {
+		t.Fatalf("none/unknown used events must not be flows, got %+v", flows)
 	}
 }
 

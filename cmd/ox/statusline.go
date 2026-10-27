@@ -26,8 +26,9 @@ import (
 )
 
 // `ox statusline` draws, in Claude Code's status bar, how much team context
-// influenced this harness session: "● ox  3 discussions · 1 plan". Hooks and
-// use-evidence writers bump per-session counts (oxactivity.RecordInfluence);
+// influenced this harness session and how much of it was used:
+// "● ox  3 discussions · 1 plan · 2 used". Hooks and use-evidence writers bump
+// per-session counts (oxactivity.RecordInfluence, oxactivity.RecordUse);
 // this command only reads them. It runs on every status-line refresh, so it
 // reads local files only: no network, no daemon IPC.
 
@@ -63,12 +64,13 @@ Claude Code status bar.
 Claude Code runs this command on every status-line refresh, piping its
 status-line JSON (session_id, cwd, workspace) on stdin. ox prints one line:
 
-  ● ox  3 discussions · 1 plan · 1 murmur  ● rec
+  ● ox  3 discussions · 1 plan · 1 murmur · 2 used  ● rec
 
 Each count is the number of distinct discussions, plans, docs, sessions and
-murmurs that shaped this session; nothing used yet reads "● ox". "● rec"
-shows while the session is recording. When the bar is narrow, the smallest
-count is dropped first. It reads local files only — never the network or the
+murmurs that shaped this session; "used" is how many of the items the AI
+coworker reported using or cited in a commit. Nothing yet reads "● ox".
+"● rec" shows while the session is recording. When the bar is narrow, the
+smallest count is dropped first and "used" last. It reads local files only — never the network or the
 ox daemon — and never prints an error into the bar.
 
 ` + "`ox init`" + ` and ` + "`ox doctor`" + ` install it as the statusLine in the project's
