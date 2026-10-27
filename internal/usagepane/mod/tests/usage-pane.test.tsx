@@ -3,6 +3,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import {
   availableRows,
   bar,
+  briefRunInit,
   coauthorRows,
   contextRows,
   evidencePhrase,
@@ -15,6 +16,7 @@ import {
   isOxCommand,
   MAX_USED,
   parseReport,
+  RUN_TIMEOUT_MS,
   shouldScrollToEnd,
   truncate,
   usedRows,
@@ -389,6 +391,30 @@ describe('formatting', () => {
     expect(isAtEnd(4, 10, 20)).toBe(false)
     expect(isAtEnd(0, 10, 5)).toBe(true)
   })
+})
+
+test('the pane tells ox brief which Claude Code session it is reporting on', async ($, on) => {
+  // Failure prevented: the pane runs ox from the host process, which has no
+  // session variables, so ox reported a recording session as not recording
+  // while the status line showed it recording.
+  mock.clock(on, { now: 1_000 })
+  on('session.id', () => ({ value: 'sess-7f2a' }))
+  const envs: (Record<string, string> | undefined)[] = []
+  on('process.run', (_, e) => {
+    envs.push(e.init?.env)
+    return ok(JSON.stringify(REPORT))
+  })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.panes', () => ({ value: [{ id: 'ox-brief', title: 'ox brief', isShown: true, isFocused: false, isPlaced: true }] }))
+
+  await $.command.run({ ...COMMAND, args: '' } as never)
+  expect(envs.length).toBe(1)
+  expect(envs[0]?.CLAUDE_CODE_SESSION_ID).toBe('sess-7f2a')
+})
+
+test('briefRunInit passes no environment when the session id is unknown', () => {
+  expect(briefRunInit('')).toEqual({ timeoutMs: RUN_TIMEOUT_MS })
+  expect(briefRunInit('abc').env).toEqual({ CLAUDE_CODE_SESSION_ID: 'abc' })
 })
 
 test('/ox-brief opens the pane and lists each ox call, oldest first', async ($, on) => {

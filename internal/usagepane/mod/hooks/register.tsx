@@ -14,10 +14,10 @@ import type { UsageReport } from '../types'
 import {
   PANE,
   REFRESH_MS,
-  RUN_TIMEOUT_MS,
   BRIEF_ARGV,
   availableRows,
   coauthorRows,
+  briefRunInit,
   contextRows,
   errorLine,
   formatRow,
@@ -69,7 +69,8 @@ async function setError($: EngineInterface, error: string | undefined) {
 async function refreshOnce($: EngineInterface) {
   let ran
   try {
-    ran = await $.process.run(BRIEF_ARGV, { timeoutMs: RUN_TIMEOUT_MS })
+    const sessionId = await $.session.id().catch(() => '')
+    ran = await $.process.run(BRIEF_ARGV, briefRunInit(sessionId))
   } catch (thrown) {
     await setError($, errorLine({ thrown }))
     return

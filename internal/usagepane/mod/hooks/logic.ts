@@ -18,6 +18,16 @@ export const PANE = 'ox-brief'
 export const PLUGIN = 'ox-cli-brief-pane'
 export const REFRESH_MS = 15_000
 export const RUN_TIMEOUT_MS = 8_000
+
+// briefRunInit is how the pane runs `ox brief`. The pane runs it from the
+// Claude Code host process, which carries none of the variables the AI
+// coworker's shell gets, so ox cannot tell which session to report on and
+// reads it as not recording while the status line says it is. Claude Code's
+// own session id lets ox find the session the same way the status line does.
+export function briefRunInit(sessionId: string): { timeoutMs: number; env?: Record<string, string> } {
+  if (sessionId === '') return { timeoutMs: RUN_TIMEOUT_MS }
+  return { timeoutMs: RUN_TIMEOUT_MS, env: { CLAUDE_CODE_SESSION_ID: sessionId } }
+}
 export const BRIEF_ARGV = ['ox', 'brief', '--json', '--recent', '0'] as const
 
 const ELLIPSIS = '…'
