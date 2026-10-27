@@ -36,11 +36,12 @@ the same test guards it.
 
 ## Desktop set
 
-In the Claude desktop app's Code tab, Oxy stands in a narrow side pane beside
-the transcript, with no card behind him: the thinking row is one text line
-tall and clips anything taller, and the band above the prompt is a
-full-width card a plugin can't restyle. `/oxy small|medium|large` draws his
-figure 48, 80 or 120 px tall there; the terminal keeps the thinking line.
+In the Claude desktop app's Code tab, Oxy stands under the last block of each
+of Claude's replies: the thinking row is one text line tall and clips
+anything taller, and the band above the prompt is a full-width card a plugin
+can't restyle. `/oxy pane` moves him to a narrow, transparent side pane and
+`/oxy reply` moves him back. `/oxy small|medium|large` draws his figure 48,
+80 or 120 px tall there; the terminal keeps the thinking line.
 
 The Claude desktop app and VS Code draw Oxy from a high-resolution set in
 `desktop/` instead of the 160×207 pixel frames, which the terminal keeps.

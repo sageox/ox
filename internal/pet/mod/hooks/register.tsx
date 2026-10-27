@@ -177,12 +177,16 @@ function pictureOf($: EngineInterface, anim: Anim, index: number) {
 
 // The SVG surfaces can't open a file the way the terminal's Image does, so
 // the PNG bytes go into the tree, packed into self-animating clips. Only the
-// animation on show is kept: all of them at once would be megabytes held
-// for frames rarely drawn again. `hires` says which art the frames are: the
+// animations on show are kept, the two most recently used (a thinking line
+// and a reply can each be playing one): all of them at once would be
+// megabytes held for frames rarely drawn again. `hires` says which art the frames are: the
 // high-resolution set when frames.ts has it and every read succeeds, else
 // the 160x207 frames the terminal draws.
 type Clips = { anim: Anim; hires: boolean; ms: number[]; frames: string[]; ranges: Array<[number, number]> }
-let clipCache: { anim: Anim; wantHires: boolean; loading: Promise<Clips>; ready: Clips | null } | null = null
+type ClipEntry = { wantHires: boolean; loading: Promise<Clips>; ready: Clips | null }
+const CLIP_CACHE_MAX = 2
+// Least recently used first: a Map keeps insertion order.
+const clipCache = new Map<Anim, ClipEntry>()
 
 function readClips($: EngineInterface, anim: Anim, hires: boolean): Promise<Clips> {
   // Each art has its own frame count and timing: the hires set runs faster.
@@ -197,23 +201,32 @@ function clipsOf($: EngineInterface, anim: Anim): Promise<Clips> {
   // An older frames.ts has no hires block, and one may lack (or carry an
   // unusable box for) this animation: those draw the 160x207 frames.
   const wantHires = FRAMES.hires !== undefined && hiresLayout(FRAMES.hires, anim, 'medium') !== null
-  if (clipCache?.anim !== anim || clipCache.wantHires !== wantHires) {
+  let entry = clipCache.get(anim)
+  if (entry === undefined || entry.wantHires !== wantHires) {
     const loading = wantHires ? readClips($, anim, true).catch(() => readClips($, anim, false)) : readClips($, anim, false)
-    const entry: NonNullable<typeof clipCache> = { anim, wantHires, loading, ready: null }
+    const fresh: ClipEntry = { wantHires, loading, ready: null }
     loading.then(
       c => {
-        entry.ready = c
+        fresh.ready = c
       },
       () => {
         // A failed read is tried again on the next draw, not cached.
-        if (clipCache === entry) {
-          clipCache = null
+        if (clipCache.get(anim) === fresh) {
+          clipCache.delete(anim)
         }
       },
     )
-    clipCache = entry
+    entry = fresh
   }
-  return clipCache.loading
+  clipCache.delete(anim)
+  clipCache.set(anim, entry)
+  for (const old of clipCache.keys()) {
+    if (clipCache.size <= CLIP_CACHE_MAX) {
+      break
+    }
+    clipCache.delete(old)
+  }
+  return entry.loading
 }
 
 function clipMs(clips: Clips, [start, end]: [number, number]): number {
@@ -230,7 +243,7 @@ function advanceClip(site: { clip: Clip | null }, anim: Anim, loop: boolean, now
     site.clip = { anim, index: 0, loop, shownAt: now }
     return true
   }
-  const loaded = clipCache?.anim === anim ? clipCache.ready : null
+  const loaded = clipCache.get(anim)?.ready ?? null
   const range = loaded?.ranges[clip.index]
   if (loaded == null || range === undefined || now - clip.shownAt < clipMs(loaded, range)) {
     return false

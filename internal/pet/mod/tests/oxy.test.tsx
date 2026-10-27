@@ -769,6 +769,36 @@ test('desktop: while a turn runs commands before any text, Oxy works under the n
   await $.turn.complete({ answer: '', durationMs: 1_000, isAborted: false, turnId: 'd2', reason: 'answer' })
 })
 
+test('vscode: a thinking line and a reply playing different animations keep both loaded', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  const reads = mockPngFiles(on)
+  engineDraws(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  await $.turn.start({ turnId: 'v1' } as never)
+  // Past the wave that opens every turn.
+  await clock.advance(30_000)
+  const spinner = { ...SPINNER, surface: 'vscode', props: { word: 'Writing', message: null, suffix: '…', mode: 'responding' } } as const
+  const draw = async () => {
+    const line = await $.ui.mount(spinner)
+    const lineSource = String((await line.find({ type: 'Svg' }))?.props.source)
+    await line.unmount()
+    const below = await $.ui.mount(reply('v1-a', 'Working on it.', 'vscode'))
+    const replySource = String((await below.find({ type: 'Svg' }))?.props.source)
+    await below.unmount()
+    return { lineSource, replySource }
+  }
+  const first = await draw()
+  // Two different animations at once, or this test proves nothing.
+  expect(first.lineSource.match(/base64,\w*?([a-z-]+)\d+x/)?.[1]).not.toBe(first.replySource.match(/base64,\w*?([a-z-]+)\d+x/)?.[1])
+  const loaded = reads.length
+  await draw()
+  await draw()
+  expect(reads.length).toBe(loaded)
+  await $.turn.complete({ answer: '', durationMs: 1_000, isAborted: false, turnId: 'v1', reason: 'answer' })
+})
+
 test('desktop: replies keep the engine\'s drawing where Oxy doesn\'t belong', async ($, on) => {
   mock.clock(on, { now: 1_000 })
   mock.store(on)
