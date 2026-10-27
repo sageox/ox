@@ -17,9 +17,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// pet.go — `ox pet`, Oxy in Claude Code's thinking line (terminal) and in a
-// side pane beside the transcript (Claude desktop app's Code tab), and as
-// Codex's terminal pet.
+// pet.go — `ox pet`, Oxy in Claude Code's thinking line (terminal) and under
+// each of Claude's replies (Claude desktop app's Code tab), and as Codex's
+// terminal pet.
 //
 // Claude Code's startup mascot is compiled in and cannot be swapped; its
 // thinking line can, through a Claude Code mod. `ox pet enable` writes that
@@ -61,8 +61,9 @@ const petNoHostGuidance = "Neither Claude Code nor Codex was found on this machi
 var petCmd = &cobra.Command{
 	Use:   "pet",
 	Short: "Show Oxy, SageOx's mascot, in Claude Code (terminal and desktop app) and as Codex's terminal pet",
-	Long: `Show Oxy, SageOx's mascot, in Claude Code's thinking line, in a side pane
-in the Claude desktop app's Code tab, and as Codex's terminal pet.
+	Long: `Show Oxy, SageOx's mascot, in Claude Code's thinking line, under each of
+Claude's replies in the Claude desktop app's Code tab, and as Codex's terminal
+pet.
 
 In Claude Code, Oxy animates beside the thinking word while Claude works and
 follows what it is doing: thinking, typing at his laptop, chattering out an
@@ -73,12 +74,14 @@ falls flat if it failed. He is installed as a Claude Code plugin
 and /oxy small|medium|large sizes him.
 
 The Claude desktop app loads the same plugin, but its thinking row is one
-text line tall, so Oxy stands in a narrow side pane beside the transcript
-instead. He works there while Claude works and rests between turns. /oxy off
-closes the pane and /oxy reopens it; a pane you close by hand stays closed
-until /oxy. /oxy small|medium|large sets his height in the pane. The
-closing-line confetti and fall are terminal-only, and the desktop has no
-/reload-plugins, so start a new Code session after ox pet enable.
+text line tall, so Oxy stands under the last block of each of Claude's
+replies instead. Under the newest reply he works while Claude works and rests
+between turns; under older replies he stands still. /oxy pane moves him to a
+narrow side pane beside the transcript and /oxy reply moves him back. /oxy
+off hides him and /oxy brings him back; a pane you close by hand stays closed
+until /oxy. /oxy small|medium|large sets his height. The closing-line
+confetti and fall are terminal-only, and the desktop has no /reload-plugins,
+so start a new Code session after ox pet enable.
 
 In Codex, Oxy is a custom terminal pet: he blinks while idle, works at his
 laptop while Codex runs, waves when Codex needs you, throws confetti when a
@@ -192,7 +195,7 @@ var petEnable = petAction{
 			printSteps(w, "In Claude Code, run:", res.ManualSteps)
 			return
 		}
-		cli.PrintSuccessTo(w, "Oxy will show up in Claude Code's thinking line and in a side pane in the Claude desktop app's Code tab.")
+		cli.PrintSuccessTo(w, "Oxy will show up in Claude Code's thinking line and under Claude's replies in the Claude desktop app's Code tab.")
 		cli.PrintHintTo(w, "Run /reload-plugins in an open terminal session, or start a new one; on the desktop, start a new Code session. /oxy off hides him.")
 	},
 	printCodex: func(cmd *cobra.Command, _ *pet.CodexResult) {
@@ -206,7 +209,7 @@ var petEnable = petAction{
 			return "Oxy's Claude Code files are written but the claude CLI isn't on PATH; in Claude Code, run " +
 				strings.Join(res.ManualSteps, " then ") + "."
 		}
-		return "Oxy is in Claude Code's thinking line and a side pane in the desktop app's Code tab; run /reload-plugins or start a new session (on the desktop, a new Code session) to see him."
+		return "Oxy is in Claude Code's thinking line and under Claude's replies in the desktop app's Code tab; run /reload-plugins or start a new session (on the desktop, a new Code session) to see him."
 	},
 }
 

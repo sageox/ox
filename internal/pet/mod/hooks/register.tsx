@@ -1,4 +1,5 @@
-// Oxy, SageOx's mascot, in Claude Code's thinking line. Installed and kept up
+// Oxy, SageOx's mascot, in Claude Code's thinking line, and under Claude's
+// replies in the desktop app. Installed and kept up
 // to date by `ox pet enable`; frames.ts is generated from the sprite sheet
 // embedded in the ox binary.
 //
@@ -7,7 +8,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, Register, RenderSurface } from 'claude-code'
 
-import type { Renderer, Size } from '../types'
+import type { Placement, Renderer, Size } from '../types'
 import { FRAMES } from './frames'
 import {
   ANIMS,
@@ -41,12 +42,13 @@ const hidden = atom({ plugin: 'ox-cli-oxy', key: 'hidden' } as const, null as bo
 const renderer = atom({ plugin: 'ox-cli-oxy', key: 'renderer' } as const, null as Renderer | null)
 const size = atom({ plugin: 'ox-cli-oxy', key: 'size' } as const, null as Size | null)
 const pinned = atom({ plugin: 'ox-cli-oxy', key: 'pinned' } as const, null as string | null)
+const placement = atom({ plugin: 'ox-cli-oxy', key: 'placement' } as const, null as Placement | null)
 
 // What outlives a session: the terminal's picture support, read once per
 // process, and the size and visibility `$.store` keeps across sessions. A
 // read that fails draws with the defaults and is tried again next time.
 let terminal: Renderer | null = null
-let saved: { size: Size; hidden: boolean } | null = null
+let saved: { size: Size; hidden: boolean; place: Placement } | null = null
 
 async function terminalRenderer($: EngineInterface): Promise<Renderer> {
   if (terminal === null) {
@@ -62,29 +64,35 @@ async function terminalRenderer($: EngineInterface): Promise<Renderer> {
   return terminal
 }
 
-async function savedPrefs($: EngineInterface): Promise<{ size: Size; hidden: boolean }> {
+async function savedPrefs($: EngineInterface): Promise<{ size: Size; hidden: boolean; place: Placement }> {
   if (saved === null) {
     try {
       const box = await $.store.get('size')
-      saved = { size: isSize(box) ? box : 'medium', hidden: (await $.store.get('hidden')) === true }
+      saved = {
+        size: isSize(box) ? box : 'medium',
+        hidden: (await $.store.get('hidden')) === true,
+        place: (await $.store.get('placement')) === 'pane' ? 'pane' : 'reply',
+      }
     } catch {
-      return { size: 'medium', hidden: false }
+      return { size: 'medium', hidden: false, place: 'reply' }
     }
   }
   return saved
 }
 
-// The renderer, size and visibility in force: this session's choice, else
-// what the terminal supports and what was saved.
-async function prefs($: EngineInterface): Promise<{ kind: Renderer; box: Size; hide: boolean }> {
+// The renderer, size, visibility and desktop placement in force: this
+// session's choice, else what the terminal supports and what was saved.
+async function prefs($: EngineInterface): Promise<{ kind: Renderer; box: Size; hide: boolean; place: Placement }> {
   const kind = await read($, renderer)
   const box = await read($, size)
   const hide = await read($, hidden)
+  const place = await read($, placement)
   const fallback = await savedPrefs($)
   return {
     kind: kind ?? (await terminalRenderer($)),
     box: box ?? fallback.size,
     hide: hide ?? fallback.hidden,
+    place: place ?? fallback.place,
   }
 }
 
@@ -96,7 +104,12 @@ const PANE = 'oxy'
 // large Oxy holding his widest prop (~105 px) without a wide empty column.
 const PANE_COLUMNS = 24
 const TICK_MS = 50
-const USAGE = '/oxy [on|off|auto|small|medium|large|image|cells|<animation>]'
+const USAGE = '/oxy [on|off|auto|reply|pane|small|medium|large|image|cells|<animation>]'
+// The longest reply text the Markdown element draws; a longer block keeps
+// the engine's own drawing.
+const MARKDOWN_MAX = 100_000
+// Rows of space between a reply's text and Oxy standing under it.
+const REPLY_GAP = 1
 
 type Running = Activity & { loop: string }
 
@@ -105,12 +118,14 @@ type Running = Activity & { loop: string }
 type Clip = { anim: Anim; index: number; loop: boolean; shownAt: number }
 
 // A drawn site: the thinking line of one loop, one turn's closing line
-// (terminal only: no other surface raises TurnDuration), or the desktop's
-// side pane, where he works during a turn and rests between turns.
+// (terminal only: no other surface raises TurnDuration), the desktop's side
+// pane, or the newest reply he stands under; in those last two he works
+// during a turn and rests between turns.
 type Site =
   | { kind: 'spinner'; surface: RenderSurface; mode: string; message: string | null; drawn: string; clip: Clip | null }
   | { kind: 'turn'; anim: Anim; start: number; drawn: string }
   | { kind: 'rest'; surface: RenderSurface; working: boolean; drawn: string; clip: Clip | null }
+  | { kind: 'reply'; surface: RenderSurface; working: boolean; drawn: string; clip: Clip | null }
 
 // What Oxy does between turns: a pinned animation, else he idles.
 const REST_ANIM: Anim = 'blink'
@@ -131,6 +146,15 @@ let closing: { anim: Anim; start: number } | null = null
 // no working flag, so turn.start and turn.complete keep it.
 let turnRunning = false
 let ticker: { cancel: () => void } | null = null
+// The reply blocks Oxy stands under: each turn's last block of text on the
+// main loop, by the turn's id. Replies drawn before the mod loaded (a resume,
+// a reload) have none. `currentTurn` is the turn running, if any; the newest
+// reply is the one he animates under, the older ones show a still.
+let currentTurn: string | null = null
+const turnBlocks = new Map<string, string>()
+let newestReply: string | null = null
+// Every reply block drawn so far: a redraw of one is never a new last block.
+const seenBlocks = new Set<string>()
 // Each animation's half-block cells, read from its cells.json on first use.
 const cells = new Map<Anim, Promise<Cells>>()
 
@@ -225,7 +249,7 @@ function advanceClip(site: { clip: Clip | null }, anim: Anim, loop: boolean, now
 async function clipOf(
   $: EngineInterface,
   requestId: string,
-  site: Site & { kind: 'spinner' | 'rest' },
+  site: Site & { kind: 'spinner' | 'rest' | 'reply' },
   f: { anim: Anim; loop: boolean },
   box: Size,
   now: number,
@@ -260,6 +284,32 @@ async function clipOf(
   return { source, px: layout ?? pixelBox(box), layout }
 }
 
+// Oxy standing still under an older reply: one frame of his resting
+// animation, read alone so it never evicts the clip on show. Kept per size;
+// null when it can't be drawn, and a failed read is tried again.
+const stills = new Map<Size, Promise<{ source: string; px: { width: number; height: number } } | null>>()
+
+function stillOf($: EngineInterface, box: Size) {
+  let still = stills.get(box)
+  if (still === undefined) {
+    const layout = FRAMES.hires !== undefined ? hiresLayout(FRAMES.hires, REST_ANIM, box) : null
+    const file = layout !== null ? hiresFrameFile : frameFile
+    const ms = clipTimings(FRAMES, REST_ANIM, layout !== null)
+    still = $.fs
+      .read(file($.plugin.root, REST_ANIM, 0), { as: 'bytes' })
+      .then(b => {
+        const source = clipSvg([b.base64], [ms[0] ?? 100], false, layout ?? undefined)
+        return source.length > SVG_SOURCE_CAP ? null : { source, px: layout ?? pixelBox(box) }
+      })
+      .catch(() => {
+        stills.delete(box)
+        return null
+      })
+    stills.set(box, still)
+  }
+  return still
+}
+
 // A one-shot lasts the longer of its two arts' passes, so an SVG clip at
 // the hires timing reaches its frozen last frame before the next animation
 // takes over; the terminal simply holds its last frame for the difference.
@@ -289,14 +339,14 @@ function frameOf(requestId: string, site: Site, now: number, pin: string | null)
     const index = frameAt(FRAMES.animations[site.anim], site.start, now, false)
     return { anim: site.anim, index, drawn: `${site.anim}:${index}`, loop: false }
   }
-  if (site.kind === 'rest' && !site.working) {
+  if ((site.kind === 'rest' || site.kind === 'reply') && !site.working) {
     const anim: Anim = pin !== null && isAnim(pin) ? pin : REST_ANIM
     const index = frameAt(FRAMES.animations[anim], loopStart, now, true)
     return { anim, index, drawn: `${anim}:${index}`, loop: true }
   }
   // A working pane plays what the main loop's thinking line would.
   const anim =
-    site.kind === 'rest' ? spinnerAnim(MAIN, { mode: 'thinking', message: null }, now, pin) : spinnerAnim(requestId, site, now, pin)
+    site.kind === 'rest' || site.kind === 'reply' ? spinnerAnim(MAIN, { mode: 'thinking', message: null }, now, pin) : spinnerAnim(requestId, site, now, pin)
   // One-shot timing only while that one-shot is playing; a pinned or
   // expired one loops like any other animation.
   const shot = pin === null && oneShot !== null && now < oneShot.until && anim === oneShot.anim ? oneShot : null
@@ -379,14 +429,16 @@ async function sprite($: EngineInterface, { Image, Raster }: Elements['terminal'
   return <Raster key={KEY} cells={frame} columns={b.cells.columns} rows={b.cells.rows} />
 }
 
-// Opens Oxy's side pane where the desktop app is attached. Its thinking row
-// is one text line tall and clips pictures to it, and its band above the
-// prompt sits in a full-width card a plugin can't restyle, so he stands in a
-// pane instead. `transparent` asks the surface to paint nothing under the
+// Opens Oxy's side pane where the desktop app is attached and `/oxy pane`
+// chose it. Its thinking row is one text line tall and clips pictures to it,
+// and its band above the prompt sits in a full-width card a plugin can't
+// restyle, so by default he stands under each reply instead; the pane is the
+// other choice. `transparent` asks the surface to paint nothing under the
 // body, so there is no card there either. A terminal never opens it: there
 // he lives in the thinking line. Null when nothing was opened.
 async function openPane($: EngineInterface) {
-  if ((await prefs($)).hide || !(await $.session.surfaces()).includes('desktop')) {
+  const { hide, place } = await prefs($)
+  if (hide || place !== 'pane' || !(await $.session.surfaces()).includes('desktop')) {
     return null
   }
   return $.ui.open({ id: PANE, title: 'Oxy', backgroundColor: 'transparent', columns: PANE_COLUMNS })
@@ -409,8 +461,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'oxy',
-      description: 'Oxy in the thinking line: off, auto, small, medium, large, image, cells, or an animation to pin',
-      argumentHint: '[on|off|auto|small|medium|large|image|cells|<animation>]',
+      description: 'Oxy in the thinking line, or under replies on desktop: off, auto, reply, pane, a size, image, cells, or an animation to pin',
+      argumentHint: '[on|off|auto|reply|pane|small|medium|large|image|cells|<animation>]',
     })
     await openPane($).catch(() => undefined)
     return next(e)
@@ -453,6 +505,21 @@ export const register: Register = on => {
       }
       return { text: was ? 'Oxy hatched into the thinking line.' : 'Oxy is already here.' }
     }
+    if (arg === 'reply' || arg === 'pane') {
+      await update($, placement, () => arg)
+      await $.store.set('placement', arg)
+      saved = { ...(await savedPrefs($)), place: arg }
+      $.ui.invalidate('ui.render')
+      if (arg === 'reply') {
+        await closePane($).catch(() => undefined)
+        return { text: 'Oxy stands under each of Claude\'s replies on the desktop app.' }
+      }
+      const opened = await openPane($).catch(() => null)
+      if (opened === null) {
+        return { text: 'Oxy will stand in a side pane on the desktop app.' }
+      }
+      return { text: opened.isPlaced ? 'Oxy is in his pane.' : `Oxy's pane is open but not shown: ${opened.reason}` }
+    }
     if (arg === 'auto') {
       await update($, pinned, () => null)
       $.ui.invalidate('ui.render')
@@ -485,6 +552,7 @@ export const register: Register = on => {
     closing = null
     playOnce('wave', now)
     turnRunning = true
+    currentTurn = e.turnId
     startTicker($)
     $.ui.invalidate('ui.render')
     return next(e)
@@ -493,12 +561,14 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     closing = { anim: turnFailed ? 'fail' : 'confetti', start: await $.clock.now() }
     turnRunning = false
+    currentTurn = null
+    newestReply = turnBlocks.get(e.turnId) ?? newestReply
     $.ui.invalidate('ui.render')
     // An SVG surface never says its Spinner went away (the terminal's blit
     // does, by a deny), and the turn's end is when it does; past it the
     // ticker would redraw for nothing.
     for (const [requestId, site] of sites) {
-      if (site.kind === 'spinner' && site.surface !== 'terminal') {
+      if ((site.kind === 'spinner' && site.surface !== 'terminal') || (site.kind === 'reply' && requestId !== newestReply)) {
         sites.delete(requestId)
       }
     }
@@ -548,6 +618,61 @@ export const register: Register = on => {
       <Box flexDirection="column" justifyContent="flex-end" alignItems="center" height={Math.max(1, e.props.scroll.bodyRows)}>
         {/* Never `isInteractive`; see the Spinner hook. */}
         <Svg key={KEY} source={clip.source} alt="Oxy" width={clip.px.width} height={clip.px.height} />
+      </Box>
+    )
+  }).catch(($, e, next) => next(e))
+
+  // On the desktop and VS Code, Oxy stands under the last block of text of
+  // each reply: the reply drawn as markdown, then him. The newest reply's
+  // Oxy works through the turn and rests after it; older ones stand still.
+  on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+    if (e.surface === 'terminal' || e.props.isSummary === true || e.props.text.length > MARKDOWN_MAX) {
+      return next(e)
+    }
+    const { box, hide, place } = await prefs($)
+    if (hide || place !== 'reply') {
+      sites.delete(e.requestId)
+      return next(e)
+    }
+    // A block first drawn during a turn becomes that turn's last; a redraw
+    // of an earlier one (this turn's or an old reply's) changes nothing.
+    if (!seenBlocks.has(e.requestId)) {
+      seenBlocks.add(e.requestId)
+      if (currentTurn !== null) {
+        const prev = turnBlocks.get(currentTurn)
+        turnBlocks.set(currentTurn, e.requestId)
+        if (prev !== undefined) {
+          // The block that was last until now drops Oxy.
+          sites.delete(prev)
+          $.ui.invalidate('ui.render')
+        }
+      }
+    }
+    if (![...turnBlocks.values()].includes(e.requestId)) {
+      return next(e)
+    }
+    const live = (currentTurn !== null && turnBlocks.get(currentTurn) === e.requestId) || (currentTurn === null && newestReply === e.requestId)
+    let art: { source: string; px: { width: number; height: number } } | null
+    if (live && e.props.onScreen !== null) {
+      const now = await $.clock.now()
+      const site: Site & { kind: 'reply' } = { kind: 'reply', surface: e.surface, working: turnRunning, drawn: '', clip: null }
+      const f = frameOf(e.requestId, site, now, await read($, pinned))
+      art = await clipOf($, e.requestId, site, f, box, now)
+    } else {
+      sites.delete(e.requestId)
+      art = await stillOf($, box)
+    }
+    if (art === null) {
+      return next(e)
+    }
+    const { Box, Markdown, Svg } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        <Markdown key="reply" text={e.props.text} />
+        <Box key="oxy-row" flexDirection="row" marginTop={REPLY_GAP}>
+          {/* Never `isInteractive`; see the Spinner hook. */}
+          <Svg key={KEY} source={art.source} alt="Oxy" width={art.px.width} height={art.px.height} />
+        </Box>
       </Box>
     )
   }).catch(($, e, next) => next(e))

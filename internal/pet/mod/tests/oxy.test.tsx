@@ -531,17 +531,21 @@ function mockPanes(on: On, surfaces: string[]) {
   return { opened, closed }
 }
 
-test('desktop: the session opens Oxy\'s side pane, transparent and narrow', async ($, on) => {
+test('desktop: Oxy stands under replies by default; /oxy pane opens his side pane, transparent and narrow', async ($, on) => {
   mock.clock(on, { now: 1_000 })
   mock.store(on)
-  const { opened } = mockPanes(on, ['desktop'])
+  const { opened, closed } = mockPanes(on, ['desktop'])
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.attach', (_, e) => ({ clientId: e.clientId }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
+  expect(opened).toEqual([])
+  expect((await $.command.run({ ...COMMAND, surface: 'desktop', args: 'pane' } as never)).text).toBe('Oxy is in his pane.')
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   // The app may attach after the start: that opens it too (one pane per id).
   await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
-  expect(opened).toHaveLength(2)
+  expect(opened).toHaveLength(3)
   expect(opened[0]).toMatchObject({ id: 'oxy', title: 'Oxy' })
   // Engines before 2.1.311 (the desktop app bundles 2.1.308) drop
   // backgroundColor before any hook sees it; from 2.1.311 it must arrive.
@@ -550,6 +554,8 @@ test('desktop: the session opens Oxy\'s side pane, transparent and narrow', asyn
   }
   expect(opened[0].columns).toBeGreaterThanOrEqual(24)
   expect(opened[0].columns).toBeLessThan(40)
+  expect((await $.command.run({ ...COMMAND, surface: 'desktop', args: 'reply' } as never)).text).toContain('under each')
+  expect(closed).toEqual(['oxy'])
 })
 
 test('terminal: a session with no desktop attached opens no pane', async ($, on) => {
@@ -617,15 +623,17 @@ test('desktop: /oxy off closes the pane and /oxy reopens it', async ($, on) => {
     const { Text } = $.ui.resolve(e)
     return <Text>engine pane</Text>
   })
+  await $.command.run({ ...COMMAND, surface: 'desktop', args: 'pane' } as never)
   expect((await $.command.run({ ...COMMAND, surface: 'desktop', args: '' } as never)).text).toBe('Oxy is in his pane.')
-  expect(opened.map(o => o.id)).toEqual(['oxy'])
+  expect(opened.map(o => o.id)).toEqual(['oxy', 'oxy'])
   expect((await $.command.run({ ...COMMAND, surface: 'desktop', args: 'off' } as never)).text).toContain('hidden')
   expect(closed).toEqual(['oxy'])
   const hidden = await $.ui.mount(PANE as never)
   expect(await hidden.find({ type: 'Svg' })).toBeUndefined()
   await hidden.unmount()
   await $.command.run({ ...COMMAND, surface: 'desktop', args: 'on' } as never)
-  expect(opened.map(o => o.id)).toEqual(['oxy', 'oxy'])
+  expect(opened.map(o => o.id)).toEqual(['oxy', 'oxy', 'oxy'])
+  await $.command.run({ ...COMMAND, surface: 'desktop', args: 'reply' } as never)
 })
 
 // The test engine can't raise a person's close (it has no `$.ui.close`), so
@@ -637,11 +645,114 @@ test('desktop: a closed pane stays closed next session until /oxy', async ($, on
   const { opened } = mockPanes(on, ['desktop'])
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
+  await $.command.run({ ...COMMAND, surface: 'desktop', args: 'pane' } as never)
   await $.command.run({ ...COMMAND, surface: 'desktop', args: 'off' } as never)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  expect(opened).toEqual([])
-  await $.command.run({ ...COMMAND, surface: 'desktop', args: '' } as never)
   expect(opened.map(o => o.id)).toEqual(['oxy'])
+  await $.command.run({ ...COMMAND, surface: 'desktop', args: '' } as never)
+  expect(opened.map(o => o.id)).toEqual(['oxy', 'oxy'])
+  await $.command.run({ ...COMMAND, surface: 'desktop', args: 'reply' } as never)
+})
+
+// One assistant block on `surface`, as the transcript draws it.
+function reply(requestId: string, text: string, surface: 'desktop' | 'vscode' | 'terminal' = 'desktop', extra: Record<string, unknown> = {}) {
+  return {
+    plugin: 'ox-cli-oxy',
+    surface,
+    component: 'AssistantMessage',
+    requestId,
+    props: { text, isFirstOfReply: true, ...extra },
+  } as never
+}
+
+function engineDraws(on: On) {
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+}
+
+test('desktop: Oxy stands under the last block of each reply, the reply drawn as its markdown', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  mockPngFiles(on)
+  engineDraws(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+
+  await $.turn.start({ turnId: 'r1' } as never)
+  const first = await $.ui.mount(reply('r1-a', 'Looking at **the code**.'))
+  expect(await first.find({ type: 'Svg' })).toBeDefined()
+  const second = await $.ui.mount(reply('r1-b', 'Done. `ok`'))
+  // The newer block takes him; the first falls back to the engine's drawing.
+  await first.unmount()
+  const again = await $.ui.mount(reply('r1-a', 'Looking at **the code**.'))
+  expect(await again.find({ type: 'Svg' })).toBeUndefined()
+  expect(await again.find({ type: 'Text', text: 'engine' })).toBeDefined()
+  await again.unmount()
+  const md = await second.find({ type: 'Markdown' })
+  expect(md?.props.text).toBe('Done. `ok`')
+  // He stands a row clear of the text.
+  expect((await second.find({ type: 'Box', key: 'oxy-row' }))?.props.marginTop).toBeGreaterThanOrEqual(1)
+  const svg = await second.find({ type: 'Svg' })
+  expect(svg?.props.alt).toBe('Oxy')
+  expect(svg?.props.isInteractive).toBeFalsy()
+  await second.unmount()
+  await $.turn.complete({ answer: '', durationMs: 1_000, isAborted: false, turnId: 'r1', reason: 'answer' })
+
+  // Newest reply: a playing clip. After the next turn, the older one is a still.
+  const newest = await $.ui.mount(reply('r1-b', 'Done. `ok`'))
+  const playing = String((await newest.find({ type: 'Svg' }))?.props.source)
+  expect((playing.match(/<image /g) ?? []).length).toBeGreaterThan(1)
+  await newest.unmount()
+
+  await $.turn.start({ turnId: 'r2' } as never)
+  const next = await $.ui.mount(reply('r2-a', 'Second reply.'))
+  expect(await next.find({ type: 'Svg' })).toBeDefined()
+  await next.unmount()
+  await $.turn.complete({ answer: '', durationMs: 1_000, isAborted: false, turnId: 'r2', reason: 'answer' })
+  const older = await $.ui.mount(reply('r1-b', 'Done. `ok`'))
+  const still = String((await older.find({ type: 'Svg' }))?.props.source)
+  expect((still.match(/<image /g) ?? []).length).toBe(1)
+  expect(still).toContain('data:image/png;base64,')
+  await older.unmount()
+})
+
+test('desktop: replies keep the engine\'s drawing where Oxy doesn\'t belong', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  mockPngFiles(on)
+  engineDraws(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('command.run', () => ({ text: '' }))
+  mockPanes(on, ['desktop'])
+
+  // A block outside any turn (drawn before the mod loaded).
+  const outside = await $.ui.mount(reply('x-old', 'From before.'))
+  expect(await outside.find({ type: 'Svg' })).toBeUndefined()
+  await outside.unmount()
+
+  await $.turn.start({ turnId: 'x1' } as never)
+  const cases: Array<[string, never]> = [
+    ['terminal', reply('x-term', 'hi', 'terminal')],
+    ['summary', reply('x-sum', 'hi', 'desktop', { isSummary: true })],
+    ['too long for Markdown', reply('x-long', 'a'.repeat(100_001))],
+  ]
+  for (const [name, input] of cases) {
+    const ui = await $.ui.mount(input)
+    expect({ name, svg: await ui.find({ type: 'Svg' }) }).toEqual({ name, svg: undefined })
+    await ui.unmount()
+  }
+  for (const args of ['off', 'pane']) {
+    await $.command.run({ ...COMMAND, surface: 'desktop', args } as never)
+    const ui = await $.ui.mount(reply(`x-${args}`, 'hi'))
+    expect({ args, svg: await ui.find({ type: 'Svg' }) }).toEqual({ args, svg: undefined })
+    expect(await ui.find({ type: 'Text', text: 'engine' })).toBeDefined()
+    await ui.unmount()
+    await $.command.run({ ...COMMAND, surface: 'desktop', args: args === 'off' ? 'on' : 'reply' } as never)
+  }
+  await $.turn.complete({ answer: '', durationMs: 1_000, isAborted: false, turnId: 'x1', reason: 'answer' })
 })
 
 test('desktop: the band above the prompt and the thinking row stay the engine\'s', async ($, on) => {
