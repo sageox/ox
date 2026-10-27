@@ -18,12 +18,14 @@ import (
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/agenttask"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/runtime"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/updatenotice"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -126,9 +128,48 @@ func executeRootCLI(t *testing.T, args ...string) (string, error) {
 		cfg, cliCtx, preRunReached = savedCfg, savedCtx, savedPreRun
 		flags.Init(context.Background(), savedFlags)
 		logger.Init(false)
+		resetCLIOutputModes()
 	})
 	err := rootCmd.Execute()
 	return out.String(), err
+}
+
+// resetCLIOutputModes returns the output modes cli.NewContext sets from a
+// run's flags to their process defaults. They are package globals read by
+// every cli printer: a leaked --json mode silences cli.PrintHintTo for every
+// later test, in whatever order the package happens to run.
+func resetCLIOutputModes() {
+	cli.SetJSONMode(false)
+	cli.SetNoInteractive(false)
+	cli.SetNoInput(false)
+	cli.SetAssumeYes(false)
+	updatenotice.SetMachineOutput(false)
+}
+
+// TestExecuteRootCLI_RestoresCLIOutputModes pins that a run through
+// executeRootCLI leaves none of the output modes PersistentPreRunE sets
+// (--json, --no-input, --yes) behind for the tests that run after it.
+// Failure prevented: one `--json` root run silently drops every cli hint for
+// the rest of the package, so a human-render test passes or fails depending on
+// which tests ran first (TestRenderKBQueryResult_HitHintOnlyWithHits).
+func TestExecuteRootCLI_RestoresCLIOutputModes(t *testing.T) {
+	hintPrints := func() bool {
+		var buf bytes.Buffer
+		cli.PrintHintTo(&buf, "hint")
+		return buf.Len() > 0
+	}
+	t.Run("run with output-mode flags", func(t *testing.T) {
+		_, err := executeRootCLI(t, "version", "--json", "--no-input", "--yes")
+		require.NoError(t, err)
+		// The run must really set the modes, or the checks below pass
+		// against state nothing ever changed.
+		require.False(t, hintPrints(), "--json did not reach cli's JSON mode")
+		require.True(t, cli.NoInput(), "--no-input did not reach cli")
+		require.True(t, cli.AssumeYes(), "--yes did not reach cli")
+	})
+	assert.True(t, hintPrints(), "JSON mode leaked past executeRootCLI; later human-render tests lose their hints")
+	assert.False(t, cli.NoInput(), "--no-input leaked past executeRootCLI")
+	assert.False(t, cli.AssumeYes(), "--yes leaked past executeRootCLI")
 }
 
 // pipeStdin makes os.Stdin a pipe carrying content, as when an AI coworker
