@@ -117,6 +117,52 @@ func TestRender_FitDropsSmallestFirst(t *testing.T) {
 	}
 }
 
+// TestRender_Used places "N used" after every kind count and keeps it longest
+// when the bar narrows. Failure prevented: the one number that says whether
+// the fetched context mattered is the first to vanish, reads as "2 useds",
+// or shows as "0 used" before anything was used.
+func TestRender_Used(t *testing.T) {
+	t.Parallel()
+
+	c := Counts{Discussions: 3, Plans: 1, Used: 2}
+	wide := "● ox  3 discussions · 1 plan · 2 used"
+	tests := []struct {
+		name  string
+		c     Counts
+		width int
+		want  string
+	}{
+		{"after the kinds", c, 0, wide},
+		{"after every kind", Counts{1, 1, 1, 1, 1, 1}, 0, "● ox  1 discussion · 1 plan · 1 doc · 1 session · 1 murmur · 1 used"},
+		{"singular reads the same", Counts{Discussions: 1, Used: 1}, 0, "● ox  1 discussion · 1 used"},
+		{"zero used omitted", Counts{Discussions: 3, Plans: 1}, 0, "● ox  3 discussions · 1 plan"},
+		{"used alone", Counts{Used: 4}, 0, "● ox  4 used"},
+		// used(2) is not the smallest-count candidate: plan(1) goes first ...
+		{"kinds drop before used", c, ansi.StringWidth(wide) - 1, "● ox  3 discussions · 2 used"},
+		// ... and the larger discussions(3) goes before the smaller used(2)
+		{"used outlasts a bigger kind", c, 25, "● ox  2 used"},
+		{"then the mark alone", c, 11, "● ox"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, width := RenderWidth(tt.c, false, tt.width)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, ansi.StringWidth(got), width)
+			assert.NotContains(t, got, "0 used")
+			colored, _ := RenderWidth(tt.c, true, tt.width)
+			assert.Equal(t, got, ansi.Strip(colored), "color only adds")
+		})
+	}
+
+	got := Render(c, true)
+	greenPrefix, _, _ := strings.Cut(greenStyle.Render("x"), "x")
+	dimPrefix, _, _ := strings.Cut(dimStyle.Render("x"), "x")
+	assert.Contains(t, got, greenPrefix+"2")
+	assert.Contains(t, got, dimPrefix+" used")
+	assert.False(t, Counts{Used: 1}.IsZero())
+}
+
 // TestRender_Color: numbers green, nouns and separators dim, mark bold.
 // Failure prevented: the line loses its green, uses 24-bit color that paints
 // backgrounds on 256-color terminals, or styles differ from the plain words.

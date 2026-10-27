@@ -446,7 +446,7 @@ func TestRecordUse_PersistsAndDedups(t *testing.T) {
 	got := LoadState(root, key)
 	assert.Equal(t, Counts{Discussions: 1, Docs: 1, Used: 2}, got.Counts())
 	assert.False(t, got.UpdatedAt.IsZero())
-	// rendering of Used lands with the status line change
+	assert.Equal(t, "● ox  1 discussion · 1 doc · 2 used", Render(got.Counts(), false))
 	assert.Equal(t, State{}, LoadState(root, StateKey(testAgentID, "claude-2")), "other sessions untouched")
 }
 

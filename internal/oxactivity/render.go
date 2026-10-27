@@ -13,14 +13,15 @@ import (
 )
 
 // Counts is what the status line shows: how many distinct items of each kind
-// of team context influenced the harness session. Zero buckets are omitted.
+// of team context influenced the harness session, and how many of them the AI
+// coworker actually used. Zero buckets are omitted.
 type Counts struct {
 	Discussions int
 	Plans       int
 	Docs        int
 	Sessions    int
 	Murmurs     int
-	// Used counts the items the AI coworker actually used (State.MarkUsed).
+	// Used is drawn last, as "N used", and is the last count Fit drops.
 	Used int
 }
 
@@ -33,8 +34,8 @@ type bucket struct {
 	singular, many string
 }
 
-// buckets returns the counts in display order: discussions, plans, docs,
-// sessions, murmurs.
+// buckets returns the kind counts in display order: discussions, plans, docs,
+// sessions, murmurs. Used is not a kind; layout and Fit handle it apart.
 func (c Counts) buckets() []bucket {
 	return []bucket{
 		{c.Discussions, "discussion", "discussions"},
@@ -83,7 +84,7 @@ type piece struct {
 
 // Render draws c as a single line with no trailing newline, e.g.
 //
-//	● ox  3 discussions · 1 plan · 1 murmur
+//	● ox  3 discussions · 1 plan · 1 murmur · 2 used
 //
 // "● ox" is green and bold, the numbers are green, and the nouns and " · "
 // separators are dim. With color false the output contains no escape bytes.
@@ -94,8 +95,8 @@ func Render(c Counts, color bool) string {
 }
 
 // RenderWidth is Render limited to width terminal cells (0 means unlimited).
-// While the line is too wide the smallest non-zero count is dropped (on a tie,
-// the rightmost), so what remains is always whole "N noun" items; "● ox" is
+// While the line is too wide the smallest non-zero kind count is dropped (on a
+// tie, the rightmost), and "N used" only once no kind is left, so what remains is always whole "N noun" items; "● ox" is
 // never dropped. It returns the line and its width in cells, which is the
 // plain-text width whether or not color is on.
 func RenderWidth(c Counts, color bool, width int) (string, int) {
@@ -116,8 +117,9 @@ func RenderWidth(c Counts, color bool, width int) (string, int) {
 	return b.String(), cells
 }
 
-// Fit drops the smallest non-zero count (ties: the rightmost in display
+// Fit drops the smallest non-zero kind count (ties: the rightmost in display
 // order) until the plain line fits width cells, and returns what is left.
+// Used is dropped last: how much was used says more than any one kind.
 // width <= 0 means unlimited. "● ox" alone is the floor, even if wider than
 // width.
 func Fit(c Counts, width int) Counts {
@@ -133,6 +135,10 @@ func Fit(c Counts, width int) Counts {
 			if drop < 0 || b.n <= c.buckets()[drop].n {
 				drop = i
 			}
+		}
+		if drop < 0 {
+			c.Used = 0
+			continue
 		}
 		c.setBucket(drop, 0)
 	}
@@ -152,7 +158,7 @@ func Width(c Counts) int {
 func layout(c Counts) []piece {
 	ps := []piece{{Mark, styleMark}}
 	first := true
-	for _, b := range c.buckets() {
+	for _, b := range append(c.buckets(), bucket{c.Used, "used", "used"}) {
 		if b.n <= 0 {
 			continue
 		}
