@@ -82,7 +82,6 @@ func TestUsage_ListsOxCallAfterHookRecordsIt(t *testing.T) {
 	assert.Equal(t, 1, found.Count)
 	assert.InDelta(t, n/4, found.Tokens, 1, "tokens ≈ bytes/4")
 	assert.Contains(t, r.Display, "checked murmurs ×1")
-	assert.Equal(t, usage.UsedNotYetReported, r.Used.Status)
 	require.NotNil(t, r.Used.SelfReport)
 	assert.Equal(t, "ox agent OxAb12 session context-trace", r.Used.SelfReport.Command)
 }
@@ -102,8 +101,37 @@ func TestUsage_NotRecordingReadsAgentCache(t *testing.T) {
 	assert.Equal(t, usage.TraceSourceAgentCache, r.Trace.Source)
 	assert.False(t, r.Session.Recording)
 	assert.Equal(t, 1, r.Calls.Total)
-	assert.Equal(t, usage.UsedNotRecording, r.Used.Status)
 	assert.Nil(t, r.Used.SelfReport)
+}
+
+// TestBrief_EndpointFromProject: a discussion the AI coworker pulled is linked
+// on the project's own SageOx endpoint, through the real `ox brief --json`.
+// Failure prevented: the brief shows a discussion with no link, or a link on
+// the wrong environment's host.
+func TestBrief_EndpointFromProject(t *testing.T) {
+	root := usageTraceEnv(t, nil)
+	t.Setenv("SAGEOX_ENDPOINT", "")
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".sageox", "config.json"),
+		[]byte(`{"config_version":"2","repo_id":"repo_usage_trace","endpoint":"https://test.sageox.ai"}`), 0o644))
+	state := startUsageRecording(t, root)
+	const cnv = "cnv_0192a3b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b"
+	w := contexttrace.NewWriter(state.SessionPath)
+	require.NoError(t, w.Append(contexttrace.Event{
+		Type: contexttrace.EventInvoked, Source: contexttrace.SourceOxCLI, Label: "searched team memory",
+		Command: "query", Query: cnv, RefType: "discussion", InlineTokens: 40, Seq: 2,
+	}))
+
+	r := runOxUsageJSON(t)
+
+	var found *usage.Surfaced
+	for i := range r.Surfaced {
+		if r.Surfaced[i].Ref == cnv {
+			found = &r.Surfaced[i]
+		}
+	}
+	require.NotNil(t, found, "the discussion must be surfaced; got %+v", r.Surfaced)
+	assert.Equal(t, "https://test.sageox.ai/c/"+cnv, found.URL)
+	assert.Contains(t, r.Display, "https://test.sageox.ai/c/"+cnv)
 }
 
 // TestUsage_NoTraceSaysWhy: a coworker with nothing recorded gets an honest
@@ -205,7 +233,6 @@ func TestUsage_SelfReportRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	after := runOxUsageJSON(t)
-	assert.Equal(t, usage.UsedReported, after.Used.Status)
 	require.Len(t, after.Used.SelfReported, 1)
 	assert.Equal(t, "MEMORY.md", after.Used.SelfReported[0].Ref)
 	assert.True(t, after.Used.SelfReported[0].MatchedSurfaced)

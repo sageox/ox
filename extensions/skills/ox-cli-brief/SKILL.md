@@ -11,14 +11,14 @@ disable-model-invocation: true
 > It performs a lifecycle or diagnostic action with side effects, so never
 > invoke it on your own initiative.
 
-<!-- Thin by design. The whole contract — what to self-report, when to re-run,
-     and how to present the report — lives in the `guidance` field of
+<!-- Thin by design. The whole contract — how to present the report, what
+     counts as used, and when to self-report use — lives in the `guidance` field of
      `ox brief --json` (Layer 1), which reaches every AI coworker whether or
      not it has this native surface. This skill only maps the argument and
      relays the command. Do not grow this body. -->
 
-Show what ox did for this AI coworker: the ox calls it made, the team context
-ox put in front of it, the items ox surfaced, and which of them were used.
+Show what SageOx gave this AI coworker: the ox calls it made, the estimated
+context tokens, what it read by title, and which items were useful.
 
 Map `$ARGUMENTS` to a flag: `me` → `--me`, `team` → `--team`, anything else →
 no flag.

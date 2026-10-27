@@ -24,17 +24,6 @@ const (
 	TraceSourceNone       = "none"
 )
 
-// Used statuses.
-const (
-	// UsedNotRecording — no live recording, so the AI coworker cannot add a
-	// self-report now.
-	UsedNotRecording = "not_recording"
-	// UsedNotYetReported — recording, but no self-report yet.
-	UsedNotYetReported = "not_yet_reported"
-	// UsedReported — at least one self-report is in the trace.
-	UsedReported = "reported"
-)
-
 // Caps keep the payload's token cost bounded.
 const (
 	maxRecent   = 10
@@ -42,8 +31,8 @@ const (
 	maxByCmd    = 12
 )
 
-// Unmetered names context ox injects that v1 does not measure. Reported so
-// the token total never reads as exhaustive.
+// Unmetered names context ox puts in front of the model that v1 does not
+// measure. Reported so the token total never reads as exhaustive.
 var Unmetered = []string{"recall preamble", "plan nudges", "agent-task surface"}
 
 // Report is the `ox brief --json` payload for the session view.
@@ -52,8 +41,9 @@ type Report struct {
 	Session     SessionInfo  `json:"session"`
 	Trace       TraceInfo    `json:"trace"`
 	Calls       Calls        `json:"calls"`
-	Injected    Injected     `json:"injected"`
+	Context     Context      `json:"context"`
 	Surfaced    []Surfaced   `json:"surfaced"`
+	Relevant    *Relevant    `json:"relevant,omitempty"`
 	Used        Used         `json:"used"`
 	Display     string       `json:"display"`
 	Guidance    string       `json:"guidance"`
@@ -103,16 +93,16 @@ type RecentCall struct {
 	TS      string `json:"ts,omitempty"`
 }
 
-// Injected is the estimated context volume ox put in front of the model.
-type Injected struct {
-	TotalTokens int          `json:"total_tokens"`
-	Estimated   bool         `json:"estimated"`
-	BySource    []SourceStat `json:"by_source"`
-	Prime       *PrimeBudget `json:"prime,omitempty"`
-	Unmetered   []string     `json:"unmetered"`
+// Context is the estimated context volume ox put in front of the model.
+type Context struct {
+	Tokens    int          `json:"tokens"`
+	Estimated bool         `json:"estimated"`
+	BySource  []SourceStat `json:"by_source"`
+	Prime     *PrimeBudget `json:"prime,omitempty"`
+	Unmetered []string     `json:"unmetered"`
 }
 
-// SourceStat is one injected-volume bucket.
+// SourceStat is one context-volume bucket.
 type SourceStat struct {
 	Source string `json:"source"`
 	Tokens int    `json:"tokens"`
@@ -126,18 +116,56 @@ type PrimeBudget struct {
 	Deferred     []string `json:"deferred,omitempty"`
 }
 
-// Surfaced is one team item put in front of the model by name.
+// Surfaced is one team item put in front of the model by name. Title, URL,
+// FromName, Seq and Used are optional: they are rendered when the trace
+// carries them, and URL is derived from an opaque discussion or plan id when
+// Input.Endpoint is known — never guessed for a slug, doc or path.
 type Surfaced struct {
-	Ref     string `json:"ref"`
-	RefType string `json:"ref_type"`
-	From    string `json:"from,omitempty"`
-	Topic   string `json:"topic,omitempty"`
-	Via     string `json:"via"` // prime | whisper | retrieval
+	Ref      string    `json:"ref"`
+	RefType  string    `json:"ref_type"`
+	From     string    `json:"from,omitempty"`
+	Topic    string    `json:"topic,omitempty"`
+	Via      string    `json:"via"` // prime | whisper | retrieval
+	Title    string    `json:"title,omitempty"`
+	URL      string    `json:"url,omitempty"`
+	FromName string    `json:"from_name,omitempty"`
+	Seq      int       `json:"seq,omitempty"`
+	Used     *ItemUsed `json:"used,omitempty"`
+}
+
+// Use-evidence kinds for ItemUsed.Evidence.
+const (
+	EvidenceRead     = "read"
+	EvidenceCited    = "cited"
+	EvidenceReported = "reported"
+	EvidenceJudged   = "judged"
+)
+
+// ItemUsed is the evidence that a surfaced item was actually used. Present
+// only when there is evidence; absence means the item was available.
+type ItemUsed struct {
+	Evidence string `json:"evidence"` // read | cited | reported | judged
+	Seq      int    `json:"seq,omitempty"`
+	Grade    string `json:"grade,omitempty"`
+}
+
+// Relevant summarizes which surfaced items have use evidence: Count of the
+// SurfacedCount items. The use-evidence builder owns the rest of its shape.
+type Relevant struct {
+	Count         int            `json:"count"`
+	SurfacedCount int            `json:"surfaced_count"`
+	ByEvidence    map[string]int `json:"by_evidence,omitempty"`
+	Derived       *Derived       `json:"derived,omitempty"`
+}
+
+// Derived is the category a use-evidence summary implies.
+type Derived struct {
+	Category string `json:"category"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // Used is the evidence of what the AI coworker actually used, by grade.
 type Used struct {
-	Status          string         `json:"status"`
 	SelfReported    []SelfReported `json:"self_reported"`
 	Retrieval       []Retrieval    `json:"retrieval"`
 	Consulted       []Consulted    `json:"consulted"`
@@ -179,8 +207,10 @@ type Score struct {
 
 // SelfReportCmd tells the AI coworker how to report what it used.
 type SelfReportCmd struct {
-	Command     string `json:"command"`
-	ExampleLine string `json:"example_line"`
+	Command          string `json:"command"`
+	ExampleLine      string `json:"example_line"`
+	BatchCommand     string `json:"batch_command,omitempty"`
+	BatchExampleLine string `json:"batch_example_line,omitempty"`
 }
 
 // NextAction is a suggested follow-up command.
@@ -190,22 +220,18 @@ type NextAction struct {
 }
 
 // guidanceText is the honesty contract for narrating a session report. It is
-// load-bearing: the AI coworker must ground every "used" claim in the used
-// section, report its own use before showing, and print the pre-rendered
-// display so the report reads identically in every harness. Behavior lives
-// here, in the command's JSON, rather than in the ox-cli-brief skill body.
-const guidanceText = "Show the coworker what ox did in this session. " +
-	"(1) REPORT FIRST: if used.status is \"not_yet_reported\", before showing anything decide which " +
-	"surfaced[] items actually changed what you did this session. Report ALL of them in ONE call: pipe " +
-	"one JSON line per item (JSONL) to used.self_report.command, each shaped like " +
-	"used.self_report.example_line — type \"influenced\", mechanism \"self-report\", the item's ref and " +
-	"ref_type, and a one-line decision saying what you did because of it. If no surfaced item changed " +
-	"what you did, report nothing. After reporting, re-run `ox brief --json` and show THAT result, not " +
-	"this one. " +
-	"(2) Print the display field verbatim inside a fenced ```text block, then at most 3 sentences of " +
+// load-bearing: the AI coworker must claim use only from surfaced[].used
+// evidence, print the pre-rendered display so the report reads identically in
+// every harness, and report its own use quietly. Behavior lives here, in the
+// command's JSON, rather than in the ox-cli-brief skill body.
+const guidanceText = "Show the coworker what SageOx gave this session. " +
+	"(1) Print the display field verbatim inside a fenced ```text block, then at most 3 sentences of " +
 	"your own. " +
-	"(3) Never claim ox context was used unless it appears in used: say \"you reported\" for " +
-	"self_reported items and \"ran\" for retrieval items. Token counts are estimates (~4 bytes per " +
-	"token) — say so once. Never state or imply time saved or dollar figures. " +
-	"(4) If trace.available is false, say there is no usage trace for this session, give " +
-	"trace.reason, and point to `ox session start` to record the next one."
+	"(2) Say an item was used only when surfaced[].used is present and name its evidence; otherwise " +
+	"say it was available. Token counts are estimates, say so once. Never state or imply time saved " +
+	"or dollar figures. " +
+	"(3) Quietly, after showing: if a surfaced item changed what you did and has no used evidence, " +
+	"pipe one JSONL line per item to used.self_report.command (shape: used.self_report.example_line). " +
+	"Do not tell the coworker about reporting or its absence. " +
+	"(4) If trace.available is false, say there is no trace, give trace.reason, and point to " +
+	"`ox session start`."

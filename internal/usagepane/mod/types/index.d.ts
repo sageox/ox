@@ -12,20 +12,43 @@ export type UsageRecentCall = {
   ts?: string
 }
 
+/** One metered source of the context ox put in front of the model. */
+export type UsageContextSource = {
+  source: string
+  tokens: number
+  count?: number
+}
+
+/** Evidence that the AI coworker used a surfaced item. */
+export type UsageUseEvidence = {
+  evidence: string
+  seq?: number
+  grade?: string
+}
+
+/** Something ox surfaced: a discussion, plan, doc, skill, murmur, … */
+export type UsageSurfaced = {
+  ref: string
+  ref_type: string
+  from?: string
+  from_name?: string
+  topic?: string
+  via?: string
+  title?: string
+  url?: string
+  seq?: number
+  used?: UsageUseEvidence
+}
+
 export type UsageReport = {
   view?: string
-  session: {
-    name?: string
-    agent_id?: string
-    harness?: string
-    recording: boolean
-    turns?: number
-  }
+  /** Who the session is (name, harness) is not drawn; only whether it records. */
+  session: { recording: boolean }
   trace: { available: boolean; source?: string; reason?: string }
   calls: { total: number; failed: number; recent: UsageRecentCall[] }
-  injected: { total_tokens: number; estimated?: boolean }
-  surfaced: unknown[]
-  used: { status: string }
+  context: { tokens: number; estimated?: boolean; by_source: UsageContextSource[] }
+  surfaced: UsageSurfaced[]
+  relevant?: { count: number; surfaced_count: number }
 }
 
 export type UsageStatus = {
