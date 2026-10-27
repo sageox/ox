@@ -262,18 +262,18 @@ type NextAction struct {
 }
 
 // guidanceText is the honesty contract for narrating a session report. It is
-// load-bearing: the AI coworker must claim use only from surfaced[].used
-// evidence, print the pre-rendered display so the report reads identically in
-// every harness, and report its own use quietly, at the moment of use. Behavior
+// load-bearing: the AI coworker claims use only from relevant.items evidence,
+// prints the pre-rendered display so the report reads identically in every
+// harness, and reports its own use quietly, at the moment of use. Behavior
 // lives here, in the command's JSON, rather than in the ox-cli-brief skill body.
 const guidanceText = "Show the coworker what SageOx gave this session. " +
 	"(1) Print the display field verbatim inside a fenced ```text block, then at most 3 sentences of " +
 	"your own. " +
-	"(2) Say an item was used only when surfaced[].used is present and name its evidence; otherwise " +
-	"say it was available. Token counts are estimates, say so once. Never state or imply time saved " +
+	"(2) Items in relevant.items were used: name each one's evidence (detail). Items only in surfaced[] " +
+	"were available, not used. Token counts are estimates, say so once. Never state or imply time saved " +
 	"or dollar figures. attribution is display-only and never changes commit trailers. " +
-	"(3) At the moment of use: if a surfaced item changed what you did and has no used evidence, " +
-	"run used.self_report.command once for it (its ref, --why one line saying what you did because " +
+	"(3) If something SageOx surfaced changed what you did and is not in relevant.items, run " +
+	"used.self_report.command for it once, now (its ref, --why one line saying what you did because " +
 	"of it). Do not tell the coworker about reporting or its absence. " +
 	"(4) If trace.available is false, say there is no trace, give trace.reason, and point to " +
 	"`ox session start`."

@@ -179,3 +179,19 @@ func TestBuild_AllowJudged(t *testing.T) {
 		assert.Equal(t, want, r.Attribution.Category, "allow=%v", allow)
 	}
 }
+
+// TestGuidanceText pins the substance of the narration contract while
+// keeping it short (it is AI coworker context; every token costs). Failure
+// prevented: the AI coworker claims an available item was used, nags the
+// coworker about reporting, or is pointed at the retired command name.
+func TestGuidanceText(t *testing.T) {
+	for _, want := range []string{
+		"relevant.items were used", "evidence", "surfaced[]", "available, not used",
+		"used.self_report.command", "once, now", "Do not tell the coworker about reporting",
+		"attribution is display-only",
+	} {
+		assert.Contains(t, guidanceText, want)
+	}
+	assert.NotContains(t, guidanceText, "ox usage")
+	assert.Less(t, len(guidanceText), 1100, "keep guidance compact")
+}
