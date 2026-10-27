@@ -470,7 +470,7 @@ export const register: Register = on => {
       // The terminal keeps its band for surveys; Oxy lives in its thinking line.
       return next(e)
     }
-    const { hide } = await prefs($)
+    const { box, hide } = await prefs($)
     if (hide || e.props.hasSurvey) {
       sites.delete(e.requestId)
       return next(e)
@@ -478,10 +478,7 @@ export const register: Register = on => {
     const now = await $.clock.now()
     const site: Site & { kind: 'rest' } = { kind: 'rest', surface: e.surface, working: e.props.isWorking, drawn: '', clip: null }
     const f = frameOf(e.requestId, site, now, await read($, pinned))
-    // Always the small figure here: the band is a fixed-height panel and
-    // clips what overflows it (at medium his feet were cut off). The
-    // /oxy size governs the thinking line only.
-    const clip = await clipOf($, e.requestId, site, f, 'small', now)
+    const clip = await clipOf($, e.requestId, site, f, box, now)
     if (clip === null) {
       return next(e)
     }

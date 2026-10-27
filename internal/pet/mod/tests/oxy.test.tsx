@@ -495,7 +495,7 @@ for (const surface of ['vscode'] as const) {
       expect((await ui.find({ type: 'Text', text: /Sautéing/ }))?.text).toBe('Sautéing…')
       await ui.unmount()
     }
-    expect([pixelBox('small').height, pixelBox('medium').height, pixelBox('large').height]).toEqual([160, 320, 480])
+    expect([pixelBox('small').height, pixelBox('medium').height, pixelBox('large').height]).toEqual([48, 80, 120])
     await $.command.run({ ...COMMAND, args: 'medium' } as never)
     await $.command.run({ ...COMMAND, args: 'auto' } as never)
   })
@@ -520,9 +520,9 @@ test('desktop: Oxy lives in the band above the prompt, resting between turns and
   const svg = await idle.find({ type: 'Svg' })
   expect(String(svg?.props.source)).toContain('data:image/png;base64,')
   expect(svg?.props.isInteractive).toBeFalsy()
-  // The band clips overflow, so it always draws the small figure.
-  expect(svg?.props.height).toBeGreaterThanOrEqual(PIXEL_HEIGHTS.small)
-  expect(svg?.props.height).toBeLessThan(PIXEL_HEIGHTS.medium)
+  // The band follows /oxy's size: medium by default.
+  expect(svg?.props.height).toBeGreaterThanOrEqual(PIXEL_HEIGHTS.medium)
+  expect(svg?.props.height).toBeLessThan(PIXEL_HEIGHTS.large)
   await idle.unmount()
   const working = await $.ui.mount(band(true) as never)
   expect(String((await working.find({ type: 'Svg' }))?.props.source)).toContain('data:image/png;base64,')
@@ -703,16 +703,16 @@ test('hires frame files sit under hooks/hires, per animation', () => {
 describe('hiresLayout', () => {
   // [anim, size, viewBox, Svg width x height, ground pad px, words lift rows]
   const cases: Array<[Anim, SizeName, string, [number, number], number, number]> = [
-    // Oxy alone: his figure is the crop, 320 px tall at medium
-    ['blink', 'medium', '120 141 240 480', [160, 320], 0, 8],
-    ['blink', 'small', '120 141 240 480', [80, 160], 0, 4],
-    ['blink', 'large', '120 141 240 480', [240, 480], 0, 12],
-    // the laptop widens the element; Oxy stays 320 px
-    ['laptop', 'medium', '30 141 420 480', [280, 320], 0, 8],
+    // Oxy alone: his figure is the crop, 80 px tall at medium
+    ['blink', 'medium', '120 141 240 480', [40, 80], 0, 2],
+    ['blink', 'small', '120 141 240 480', [24, 48], 0, 1],
+    ['blink', 'large', '120 141 240 480', [60, 120], 0, 3],
+    // the laptop widens the element; Oxy stays 80 px
+    ['laptop', 'medium', '30 141 420 480', [70, 80], 0, 2],
     // float's crop ends 100 px short of the ground: the viewBox keeps it
-    ['float', 'medium', '120 41 240 580', [160, 387], 66.667, 8],
+    ['float', 'medium', '120 41 240 580', [40, 97], 16.667, 2],
     // confetti fills the cell: taller than Oxy, same ground
-    ['confetti', 'medium', '60 0 360 621', [240, 414], 0, 8],
+    ['confetti', 'medium', '60 0 360 621', [60, 104], 0, 2],
   ]
   for (const [anim, size, viewBox, [width, height], pad, lift] of cases) {
     test(`${anim} at ${size}`, () => {
@@ -791,7 +791,7 @@ for (const surface of ['vscode'] as const) {
           const h = FRAMES.hires
           const [, vy, , vh] = want.viewBox.split(' ').map(Number)
           // his figure is the size's height in every animation, to a pixel
-          expect(Math.abs((h.figure.height * want.size.height) / vh - { small: 160, medium: 320, large: 480 }[box])).toBeLessThanOrEqual(1)
+          expect(Math.abs((h.figure.height * want.size.height) / vh - { small: 48, medium: 80, large: 120 }[box])).toBeLessThanOrEqual(1)
           // and every viewBox ends on the cell's bottom edge, the ground
           expect(vy + vh).toBe(h.cell.height)
         }
