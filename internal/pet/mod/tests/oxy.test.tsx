@@ -501,61 +501,174 @@ for (const surface of ['vscode'] as const) {
   })
 }
 
-test('desktop: Oxy lives in the band above the prompt, resting between turns and working during them', async ($, on) => {
+const PANE = {
+  plugin: 'ox-cli-oxy',
+  surface: 'desktop',
+  component: 'Pane',
+  requestId: 'oxy',
+  props: { title: 'Oxy', isFocused: false, bodyColumns: 24, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+} as const
+
+type On = Parameters<Parameters<typeof test>[1]>[1]
+
+// The pane's engine side: what is open, and every open and close asked of it.
+function mockPanes(on: On, surfaces: string[]) {
+  const opened: Array<Record<string, unknown>> = []
+  const closed: string[] = []
+  const open = new Set<string>()
+  on('session.surfaces', () => ({ value: surfaces }))
+  on('ui.open', (_, e) => {
+    opened.push({ ...e })
+    open.add(e.id)
+    return { value: { isPlaced: true } }
+  })
+  on('ui.close', (_, e) => {
+    closed.push(e.id)
+    open.delete(e.id)
+    return { value: undefined }
+  })
+  on('ui.panes', () => ({ value: [...open].map(id => ({ id, title: 'Oxy', isShown: true, isFocused: false, isPlaced: true })) }))
+  return { opened, closed }
+}
+
+test('desktop: the session opens Oxy\'s side pane, transparent and narrow', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  const { opened } = mockPanes(on, ['desktop'])
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.attach', (_, e) => ({ clientId: e.clientId }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  // The app may attach after the start: that opens it too (one pane per id).
+  await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
+  expect(opened).toHaveLength(2)
+  expect(opened[0]).toMatchObject({ id: 'oxy', title: 'Oxy' })
+  // Engines before 2.1.311 (the desktop app bundles 2.1.308) drop
+  // backgroundColor before any hook sees it; from 2.1.311 it must arrive.
+  if ('backgroundColor' in opened[0]) {
+    expect(opened[0].backgroundColor).toBe('transparent')
+  }
+  expect(opened[0].columns).toBeGreaterThanOrEqual(24)
+  expect(opened[0].columns).toBeLessThan(40)
+})
+
+test('terminal: a session with no desktop attached opens no pane', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  const { opened } = mockPanes(on, ['terminal'])
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.attach', (_, e) => ({ clientId: e.clientId }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.session.attach({ surface: 'mobile', clientId: 'mobile:default' })
+  expect(opened).toEqual([])
+})
+
+test('desktop: a hidden Oxy opens no pane', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  mock.store(on, { hidden: true })
+  const { opened } = mockPanes(on, ['desktop'])
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(opened).toEqual([])
+})
+
+test('desktop: the pane rests Oxy between turns and plays the working animations during one', async ($, on) => {
   mock.clock(on, { now: 1_000 })
   mock.store(on)
   mockPngFiles(on)
-  on('ui.render', ($, e) => {
-    const { Text } = $.ui.resolve(e)
-    return <Text>engine band</Text>
-  })
-  const band = (isWorking: boolean) => ({
-    plugin: 'ox-cli-oxy',
-    surface: 'desktop',
-    component: 'AbovePrompt',
-    requestId: 'band',
-    props: { hasSurvey: false, isWorking, maxRows: 20, bodyColumns: 80, scroll: { offset: 0, bodyRows: 19 }, view: {} },
-  })
-  const idle = await $.ui.mount(band(false) as never)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  const art = (anim: Anim) => `data:image/png;base64,${desktopLayout(anim, 'medium').hires ? 'hi' : ''}${anim}0x`
+
+  const idle = await $.ui.mount(PANE as never)
   const svg = await idle.find({ type: 'Svg' })
-  expect(String(svg?.props.source)).toContain('data:image/png;base64,')
+  expect(String(svg?.props.source)).toContain(art('blink'))
   expect(svg?.props.isInteractive).toBeFalsy()
-  // The band follows /oxy's size: medium by default.
+  // medium by default
   expect(svg?.props.height).toBeGreaterThanOrEqual(PIXEL_HEIGHTS.medium)
   expect(svg?.props.height).toBeLessThan(PIXEL_HEIGHTS.large)
+  // He stands at the foot of the pane.
+  const column = await idle.find({ type: 'Box' })
+  expect(column?.props.justifyContent).toBe('flex-end')
+  expect(column?.props.height).toBe(30)
   await idle.unmount()
-  const working = await $.ui.mount(band(true) as never)
-  expect(String((await working.find({ type: 'Svg' }))?.props.source)).toContain('data:image/png;base64,')
+
+  await $.turn.start({ turnId: 't1' } as never)
+  const working = await $.ui.mount(PANE as never)
+  const source = String((await working.find({ type: 'Svg' }))?.props.source)
+  expect(source).toContain('data:image/png;base64,')
+  expect(source).not.toContain(art('blink'))
   await working.unmount()
-  // The desktop's thinking row is one line tall and clips him: it stays the engine's.
-  const row = await $.ui.mount({ ...SPINNER, surface: 'desktop', props: WORKING })
-  expect(await row.find({ type: 'Svg' })).toBeUndefined()
-  expect(await row.find({ type: 'Text', text: 'engine band' })).toBeDefined()
-  await row.unmount()
-  await $.command.run({ ...COMMAND, surface: 'desktop', args: 'off' } as never)
-  const hidden = await $.ui.mount(band(false) as never)
+
+  await $.turn.complete({ answer: '', durationMs: 1_000, isAborted: false, turnId: 't1', reason: 'answer' })
+  const after = await $.ui.mount(PANE as never)
+  expect(String((await after.find({ type: 'Svg' }))?.props.source)).toContain(art('blink'))
+  await after.unmount()
+})
+
+test('desktop: /oxy off closes the pane and /oxy reopens it', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  mockPngFiles(on)
+  const { opened, closed } = mockPanes(on, ['desktop'])
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine pane</Text>
+  })
+  expect((await $.command.run({ ...COMMAND, surface: 'desktop', args: '' } as never)).text).toBe('Oxy is in his pane.')
+  expect(opened.map(o => o.id)).toEqual(['oxy'])
+  expect((await $.command.run({ ...COMMAND, surface: 'desktop', args: 'off' } as never)).text).toContain('hidden')
+  expect(closed).toEqual(['oxy'])
+  const hidden = await $.ui.mount(PANE as never)
   expect(await hidden.find({ type: 'Svg' })).toBeUndefined()
   await hidden.unmount()
   await $.command.run({ ...COMMAND, surface: 'desktop', args: 'on' } as never)
+  expect(opened.map(o => o.id)).toEqual(['oxy', 'oxy'])
 })
 
-test('terminal: the band above the prompt stays the engine\'s', async ($, on) => {
+// The test engine can't raise a person's close (it has no `$.ui.close`), so
+// this covers what that close shares with /oxy off: a hidden Oxy stays
+// closed in the next session until /oxy.
+test('desktop: a closed pane stays closed next session until /oxy', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  const { opened } = mockPanes(on, ['desktop'])
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  await $.command.run({ ...COMMAND, surface: 'desktop', args: 'off' } as never)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(opened).toEqual([])
+  await $.command.run({ ...COMMAND, surface: 'desktop', args: '' } as never)
+  expect(opened.map(o => o.id)).toEqual(['oxy'])
+})
+
+test('desktop: the band above the prompt and the thinking row stay the engine\'s', async ($, on) => {
   mock.clock(on, { now: 1_000 })
   mock.store(on)
   mockPngFiles(on)
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
-    return <Text>engine band</Text>
+    return <Text>engine</Text>
   })
-  const ui = await $.ui.mount({
-    plugin: 'ox-cli-oxy',
-    surface: 'terminal',
-    component: 'AbovePrompt',
-    requestId: 'band',
-    props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 80, scroll: { offset: 0, bodyRows: 19 }, view: {} },
-  } as never)
-  expect(await ui.find({ type: 'Text', text: 'engine band' })).toBeDefined()
-  await ui.unmount()
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const band = await $.ui.mount({
+      plugin: 'ox-cli-oxy',
+      surface,
+      component: 'AbovePrompt',
+      requestId: 'band',
+      props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 80, scroll: { offset: 0, bodyRows: 19 }, view: {} },
+    } as never)
+    expect(await band.find({ type: 'Svg' })).toBeUndefined()
+    expect(await band.find({ type: 'Text', text: 'engine' })).toBeDefined()
+    await band.unmount()
+  }
+  // The desktop's thinking row is one line tall and clips him.
+  const row = await $.ui.mount({ ...SPINNER, surface: 'desktop', props: WORKING })
+  expect(await row.find({ type: 'Svg' })).toBeUndefined()
+  expect(await row.find({ type: 'Text', text: 'engine' })).toBeDefined()
+  await row.unmount()
 })
 
 test('desktop: /oxy off keeps the engine spinner', async ($, on) => {
@@ -614,6 +727,8 @@ test('vscode: the ticker redraws once per clip, never per frame, and never blits
   })
   const anim: Anim = 'game'
   await $.command.run({ ...COMMAND, surface: 'vscode', args: anim } as never)
+  // the pin itself asks one redraw; count only the ticker's from here
+  invalidates = 0
   // the timings of whichever art the desktop draws
   const ms = clipTimings(FRAMES, anim, desktopLayout(anim, 'medium').hires)
   const clips = packClips(ms, ms.map(() => length), SVG_SOURCE_CAP)

@@ -90,6 +90,11 @@ async function prefs($: EngineInterface): Promise<{ kind: Renderer; box: Size; h
 
 const KEY = 'oxy'
 const MAIN = 'main'
+// The desktop's side pane, and the `ui.render` requestId it draws under.
+const PANE = 'oxy'
+// The narrowest dock the surface allows: 24 cells is about 190 px, room for
+// large Oxy holding his widest prop (~105 px) without a wide empty column.
+const PANE_COLUMNS = 24
 const TICK_MS = 50
 const USAGE = '/oxy [on|off|auto|small|medium|large|image|cells|<animation>]'
 
@@ -100,8 +105,8 @@ type Running = Activity & { loop: string }
 type Clip = { anim: Anim; index: number; loop: boolean; shownAt: number }
 
 // A drawn site: the thinking line of one loop, one turn's closing line
-// (terminal only: no other surface raises TurnDuration), or the band above
-// the prompt where Oxy rests between turns (the SVG surfaces only).
+// (terminal only: no other surface raises TurnDuration), or the desktop's
+// side pane, where he works during a turn and rests between turns.
 type Site =
   | { kind: 'spinner'; surface: RenderSurface; mode: string; message: string | null; drawn: string; clip: Clip | null }
   | { kind: 'turn'; anim: Anim; start: number; drawn: string }
@@ -122,6 +127,9 @@ let turnFailed = false
 // Tool calls that failed back to back this turn; a success resets it.
 let failStreak = 0
 let closing: { anim: Anim; start: number } | null = null
+// Whether a turn is running: the Pane's props, unlike the Spinner's, carry
+// no working flag, so turn.start and turn.complete keep it.
+let turnRunning = false
 let ticker: { cancel: () => void } | null = null
 // Each animation's half-block cells, read from its cells.json on first use.
 const cells = new Map<Anim, Promise<Cells>>()
@@ -286,7 +294,7 @@ function frameOf(requestId: string, site: Site, now: number, pin: string | null)
     const index = frameAt(FRAMES.animations[anim], loopStart, now, true)
     return { anim, index, drawn: `${anim}:${index}`, loop: true }
   }
-  // A working band plays what the main loop's thinking line would.
+  // A working pane plays what the main loop's thinking line would.
   const anim =
     site.kind === 'rest' ? spinnerAnim(MAIN, { mode: 'thinking', message: null }, now, pin) : spinnerAnim(requestId, site, now, pin)
   // One-shot timing only while that one-shot is playing; a pinned or
@@ -371,6 +379,32 @@ async function sprite($: EngineInterface, { Image, Raster }: Elements['terminal'
   return <Raster key={KEY} cells={frame} columns={b.cells.columns} rows={b.cells.rows} />
 }
 
+// Opens Oxy's side pane where the desktop app is attached. Its thinking row
+// is one text line tall and clips pictures to it, and its band above the
+// prompt sits in a full-width card a plugin can't restyle, so he stands in a
+// pane instead. `transparent` asks the surface to paint nothing under the
+// body, so there is no card there either. A terminal never opens it: there
+// he lives in the thinking line. Null when nothing was opened.
+async function openPane($: EngineInterface) {
+  if ((await prefs($)).hide || !(await $.session.surfaces()).includes('desktop')) {
+    return null
+  }
+  return $.ui.open({ id: PANE, title: 'Oxy', backgroundColor: 'transparent', columns: PANE_COLUMNS })
+}
+
+async function closePane($: EngineInterface) {
+  sites.delete(PANE)
+  if ((await $.ui.panes()).some(p => p.id === PANE)) {
+    await $.ui.close({ id: PANE })
+  }
+}
+
+async function setHidden($: EngineInterface, hide: boolean) {
+  await update($, hidden, () => hide)
+  await $.store.set('hidden', hide)
+  saved = { ...(await savedPrefs($)), hidden: hide }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -378,24 +412,50 @@ export const register: Register = on => {
       description: 'Oxy in the thinking line: off, auto, small, medium, large, image, cells, or an animation to pin',
       argumentHint: '[on|off|auto|small|medium|large|image|cells|<animation>]',
     })
+    await openPane($).catch(() => undefined)
     return next(e)
   })
+
+  // The desktop app may attach after the session starts.
+  on('session.attach', async ($, e, next) => {
+    const done = await next(e)
+    if (e.surface === 'desktop') {
+      await openPane($).catch(() => undefined)
+    }
+    return done
+  }).catch(($, e, next) => next(e))
+
+  // A pane the person closes by hand stays closed in later sessions too;
+  // /oxy brings it back.
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    const done = await next(e)
+    sites.delete(PANE)
+    if (e.origin.kind === 'person') {
+      await setHidden($, true)
+    }
+    return done
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'oxy' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === '' || arg === 'on' || arg === 'off') {
       const hide = arg === 'off'
       const was = (await prefs($)).hide
-      await update($, hidden, () => hide)
-      await $.store.set('hidden', hide)
-      saved = { ...(await savedPrefs($)), hidden: hide }
+      await setHidden($, hide)
       if (hide) {
+        await closePane($).catch(() => undefined)
         return { text: 'Oxy is hidden; Claude Code draws its own spinner. /oxy brings him back.' }
+      }
+      // Asked for, so the surface places it even where an unasked open waits.
+      const opened = await openPane($).catch(() => null)
+      if (opened !== null) {
+        return { text: opened.isPlaced ? 'Oxy is in his pane.' : `Oxy's pane is open but not shown: ${opened.reason}` }
       }
       return { text: was ? 'Oxy hatched into the thinking line.' : 'Oxy is already here.' }
     }
     if (arg === 'auto') {
       await update($, pinned, () => null)
+      $.ui.invalidate('ui.render')
       return { text: 'Oxy follows what Claude is doing.' }
     }
     if (arg === 'image' || arg === 'cells') {
@@ -406,10 +466,12 @@ export const register: Register = on => {
       await update($, size, () => arg)
       await $.store.set('size', arg)
       saved = { ...(await savedPrefs($)), size: arg }
+      $.ui.invalidate('ui.render')
       return { text: `Oxy is ${arg} now.` }
     }
     if (isAnim(arg)) {
       await update($, pinned, () => arg)
+      $.ui.invalidate('ui.render')
       return { text: `Oxy plays ${arg} until /oxy auto.` }
     }
     return { text: `Usage: ${USAGE}. Animations: ${ANIMS.join(', ')}.` }
@@ -422,12 +484,16 @@ export const register: Register = on => {
     failStreak = 0
     closing = null
     playOnce('wave', now)
+    turnRunning = true
     startTicker($)
+    $.ui.invalidate('ui.render')
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     closing = { anim: turnFailed ? 'fail' : 'confetti', start: await $.clock.now() }
+    turnRunning = false
+    $.ui.invalidate('ui.render')
     // An SVG surface never says its Spinner went away (the terminal's blit
     // does, by a deny), and the turn's end is when it does; past it the
     // ticker would redraw for nothing.
@@ -461,22 +527,17 @@ export const register: Register = on => {
     }
   }).catch(($, e, next) => next(e))
 
-  // On the desktop Oxy lives in the band above the prompt, working or not:
-  // the desktop's thinking row is one text line tall and clips anything
-  // taller, so he could only ever be a speck there. While a turn runs he
-  // plays the working animations; between turns he rests.
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.surface === 'terminal') {
-      // The terminal keeps its band for surveys; Oxy lives in its thinking line.
-      return next(e)
-    }
+  // Oxy stands at the foot of his pane: the working animations while a
+  // turn runs, resting (blink, or the pinned animation) between turns.
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     const { box, hide } = await prefs($)
-    if (hide || e.props.hasSurvey) {
+    // The terminal has no Svg, and never opens this pane itself.
+    if (hide || e.surface === 'terminal') {
       sites.delete(e.requestId)
       return next(e)
     }
     const now = await $.clock.now()
-    const site: Site & { kind: 'rest' } = { kind: 'rest', surface: e.surface, working: e.props.isWorking, drawn: '', clip: null }
+    const site: Site & { kind: 'rest' } = { kind: 'rest', surface: e.surface, working: turnRunning, drawn: '', clip: null }
     const f = frameOf(e.requestId, site, now, await read($, pinned))
     const clip = await clipOf($, e.requestId, site, f, box, now)
     if (clip === null) {
@@ -484,7 +545,8 @@ export const register: Register = on => {
     }
     const { Box, Svg } = $.ui.resolve(e)
     return (
-      <Box flexDirection="row" alignItems="flex-end">
+      <Box flexDirection="column" justifyContent="flex-end" alignItems="center" height={Math.max(1, e.props.scroll.bodyRows)}>
+        {/* Never `isInteractive`; see the Spinner hook. */}
         <Svg key={KEY} source={clip.source} alt="Oxy" width={clip.px.width} height={clip.px.height} />
       </Box>
     )
@@ -496,7 +558,8 @@ export const register: Register = on => {
       return next(e)
     }
     if (e.surface === 'desktop') {
-      // Drawn in the band above the prompt instead; see the AbovePrompt hook.
+      // The desktop's thinking row is one text line tall and clips him to it:
+      // he stands in the side pane instead; see openPane.
       return next(e)
     }
     const now = await $.clock.now()
