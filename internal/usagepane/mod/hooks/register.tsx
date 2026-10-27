@@ -1,5 +1,6 @@
-// The ox brief pane: what ox gave this session (the context it put in front
-// of the model, what was read, the murmurs that helped, each ox call) in a
+// The ox brief pane: what ox gave this session (what the AI coworker used,
+// with links, the context ox put in front of the model, what else was
+// available, whether SageOx would co-author the work, each ox call) in a
 // scrollable pane beside the chat. Installed and kept up to date by ox; the data is
 // `ox brief --json --recent 0`, re-read when the pane opens, after each ox
 // command the AI coworker runs through Bash, and every 15 seconds while open.
@@ -15,6 +16,8 @@ import {
   REFRESH_MS,
   RUN_TIMEOUT_MS,
   BRIEF_ARGV,
+  availableRows,
+  coauthorRows,
   contextRows,
   errorLine,
   formatRow,
@@ -22,12 +25,11 @@ import {
   INITIAL_STATUS,
   isAtEnd,
   isOxCommand,
-  murmurRows,
   oldestFirst,
   parseReport,
-  readRows,
   shouldScrollToEnd,
   truncate,
+  usedRows,
 } from './logic'
 
 // Change a tag when its value's fields change: an atom declines what an
@@ -202,12 +204,43 @@ export const register: Register = on => {
         </Box>
       )
     } else {
+      const used = usedRows(r, cols)
       const ctx = contextRows(r)
-      const reads = readRows(r)
-      const murmurs = murmurRows(r)
+      const available = availableRows(r)
+      const coauthor = coauthorRows(r, cols)
       const recent = oldestFirst(r.calls.recent)
-      const anyUsed = reads.some(row => row.used) || murmurs.length > 0
       const sections = []
+      if (used.length > 0) {
+        sections.push(heading('h:used', 'used'))
+        for (const row of used) {
+          sections.push(
+            <Box key={row.key}>
+              <Text wrap="truncate-end">
+                {row.text}
+                {row.phrase !== '' && row.inline && <Text dimColor>{`  ${row.phrase}`}</Text>}
+              </Text>
+            </Box>,
+          )
+          if (row.phrase !== '' && !row.inline) {
+            sections.push(
+              <Box key={`${row.key}:why`} paddingLeft={2}>
+                <Text dimColor wrap="truncate-end">
+                  {row.phrase}
+                </Text>
+              </Box>,
+            )
+          }
+          if (row.url !== undefined) {
+            sections.push(
+              <Box key={`${row.key}:url`} paddingLeft={2}>
+                <Text dimColor wrap="wrap">
+                  <Link href={row.url} />
+                </Text>
+              </Box>,
+            )
+          }
+        }
+      }
       if (ctx.length > 0) {
         sections.push(heading('h:context', 'context'))
         for (const row of ctx) {
@@ -228,31 +261,32 @@ export const register: Register = on => {
           )
         }
       }
-      if (reads.length > 0) {
-        sections.push(heading('h:read', 'read'))
-        for (const row of reads) {
+      if (available.length > 0) {
+        sections.push(heading('h:available', 'available'))
+        for (const row of available) {
           sections.push(
             <Box key={row.key}>
-              <Text wrap="wrap">{`${row.text}${row.used ? ' ✓' : ''}`}</Text>
+              <Text wrap="wrap">{row.text}</Text>
             </Box>,
           )
-          if (row.url !== undefined) {
-            sections.push(
-              <Box key={`${row.key}:url`} paddingLeft={2}>
-                <Text dimColor wrap="wrap">
-                  <Link href={row.url} />
-                </Text>
-              </Box>,
-            )
-          }
         }
       }
-      if (murmurs.length > 0) {
-        sections.push(heading('h:murmurs', 'murmurs'))
-        for (const row of murmurs) {
+      if (coauthor !== null) {
+        sections.push(
+          <Box key={coauthor.key} marginTop={1}>
+            <Text wrap="truncate-end">
+              <Text weight="bold">co-author</Text>
+              {`  ${coauthor.category} `}
+              <Text dimColor>{coauthor.verdict}</Text>
+            </Text>
+          </Box>,
+        )
+        if (coauthor.reason !== '') {
           sections.push(
-            <Box key={row.key}>
-              <Text wrap="wrap">{`${row.text} ✓`}</Text>
+            <Box key={`${coauthor.key}:reason`}>
+              <Text dimColor wrap="truncate-end">
+                {coauthor.reason}
+              </Text>
             </Box>,
           )
         }
@@ -275,10 +309,12 @@ export const register: Register = on => {
           </Box>,
         )
       })
-      if (anyUsed) {
+      if (used.length > 0) {
         sections.push(
           <Box key="legend" marginTop={1}>
-            <Text dimColor>✓ used by the AI coworker</Text>
+            <Text dimColor wrap="wrap">
+              used = evidence from the transcript, a commit, or the AI coworker's report
+            </Text>
           </Box>,
         )
       }

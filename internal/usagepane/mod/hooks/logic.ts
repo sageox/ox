@@ -241,34 +241,38 @@ export function formatRow(call: UsageRecentCall, columns: number, offsetMin = 0)
   return { text, failed: call.failed === true }
 }
 
-// headerLines: the title's tail (after `● ox brief`) and the summary line.
+// headerLines: the title's tail (after `● ox brief`) and the summary line,
+// `calls N · ~Nk tokens · used N of M · co-author <category>`.
 export function headerLines(report: UsageReport | null): { marker: string; summary: string } {
   if (report === null) {
     return { marker: 'loading…', summary: '' }
   }
   const failed = report.calls.failed > 0 ? ` (${report.calls.failed} failed)` : ''
-  const summary = [
+  const parts = [
     `calls ${report.calls.total}${failed}`,
     `${formatTokens(report.context.tokens)} tokens`,
-    `read ${readItems(report).length}`,
-    `useful ${usefulCount(report)}`,
-  ].join(' · ')
-  return { marker: report.session.recording ? '● recording' : '○ not recording', summary }
+    report.relevant?.reported_none === true ? 'used none' : `used ${usedCount(report)} of ${surfacedCount(report)}`,
+  ]
+  const a = report.attribution
+  if (a !== undefined && a.category !== 'none') {
+    parts.push(`co-author ${a.category}`)
+  }
+  return { marker: report.session.recording ? '● recording' : '○ not recording', summary: parts.join(' · ') }
 }
 
 const MURMUR = 'murmur'
 const SKILL = 'skill'
 const MAX_BAR = 6
+export const MAX_USED = 8
 
-// readItems: what ox put in front of the AI coworker that a person can open,
-// i.e. every surfaced item but murmurs.
-export function readItems(report: UsageReport): UsageSurfaced[] {
-  return report.surfaced.filter(s => s.ref_type !== MURMUR)
+// usedCount: the report's relevant count, else the surfaced items with use evidence.
+export function usedCount(report: UsageReport): number {
+  return report.relevant?.count ?? report.surfaced.filter(s => s.used !== undefined).length
 }
 
-// usefulCount: the report's relevant count, else the surfaced items with use evidence.
-export function usefulCount(report: UsageReport): number {
-  return report.relevant?.count ?? report.surfaced.filter(s => s.used !== undefined).length
+// surfacedCount: how many items ox put in front of the AI coworker.
+export function surfacedCount(report: UsageReport): number {
+  return report.relevant?.surfaced_count ?? report.surfaced.length
 }
 
 // bar: up to MAX_BAR cells of ▇, proportional to the largest value; at least
@@ -295,39 +299,144 @@ export function contextRows(report: UsageReport): ContextRow[] {
   }))
 }
 
-export type ReadRow = { key: string; text: string; used: boolean; url?: string }
+// usedItems: what the AI coworker used, strongest evidence per ref in seq
+// order. An older ox has no relevant.items: fall back to the surfaced items
+// that carry use evidence.
+export function usedItems(report: UsageReport): UsageUsedItem[] {
+  const items = report.relevant?.items
+  if (items !== undefined) {
+    return items
+  }
+  return report.surfaced
+    .filter(s => s.used !== undefined)
+    .map(s => ({
+      ref: s.ref,
+      ref_type: s.ref_type,
+      title: s.title,
+      url: s.url,
+      evidence: s.used?.evidence ?? '',
+      grade: s.used?.grade ?? '',
+      seq: s.used?.seq,
+    }))
+}
 
-// readRows: one `kind  title` row per read item, skills folded into one row.
-export function readRows(report: UsageReport): ReadRow[] {
-  const items = readItems(report)
-  const skills = items.filter(s => s.ref_type === SKILL)
-  const rest = items.filter(s => s.ref_type !== SKILL)
-  const width = Math.max(0, ...rest.map(s => [...(s.ref_type || 'ref')].length))
-  const rows: ReadRow[] = rest.map((s, i) => ({
-    key: `read:${i}`,
-    text: `${(s.ref_type || 'ref').padEnd(width)}  ${s.title || s.ref}`,
-    used: s.used !== undefined,
-    url: s.url || undefined,
-  }))
-  if (skills.length > 0) {
-    rows.push({
-      key: 'read:skills',
-      text: `${skills.length} team skill${skills.length === 1 ? '' : 's'}`,
-      used: skills.some(s => s.used !== undefined),
-    })
+// evidencePhrase: the few words that say how we know the item was used.
+export function evidencePhrase(item: UsageUsedItem): string {
+  switch (item.detail) {
+    case 'requery':
+      return 're-opened'
+    case 'cited_commit':
+      return item.commit ? `cited in commit ${item.commit}` : 'cited in a commit'
+  }
+  switch (item.evidence) {
+    case 'cited':
+      return 'cited'
+    case 'reported':
+      return item.why ? `reported: ${item.why}` : 'reported'
+    case 'judged':
+      return 'judged'
+    default:
+      return 'read'
+  }
+}
+
+export type UsedRow = {
+  key: string
+  text: string
+  /** The evidence phrase; empty on the `+N more` row. */
+  phrase: string
+  /** Whether the phrase fits on the item's row; else it gets its own. */
+  inline: boolean
+  url?: string
+}
+
+// usedRows: one `kind  title` row per used item (murmurs: `kind  who  [topic]`),
+// its evidence phrase beside it when it fits, then its link. At most MAX_USED,
+// then `+N more`.
+export function usedRows(report: UsageReport, columns: number): UsedRow[] {
+  const items = usedItems(report)
+  const byRef = new Map(report.surfaced.map(s => [s.ref, s] as const))
+  const kindOf = (i: UsageUsedItem) => i.ref_type || byRef.get(i.ref)?.ref_type || 'ref'
+  const shown = items.slice(0, MAX_USED)
+  const width = Math.max(0, ...shown.map(i => [...kindOf(i)].length))
+  const rows: UsedRow[] = shown.map((item, i) => {
+    const s = byRef.get(item.ref)
+    const kind = kindOf(item)
+    const name =
+      kind === MURMUR
+        ? [s?.from_name || 'a teammate', s?.topic ? `[${s.topic}]` : ''].filter(Boolean).join('  ')
+        : item.title || s?.title || item.ref
+    const text = `${kind.padEnd(width)}  ${name}`
+    const full = evidencePhrase(item)
+    const inline = [...text].length + 2 + [...full].length <= columns
+    return {
+      key: `used:${i}`,
+      text,
+      phrase: inline ? full : truncate(full, columns - 2),
+      inline,
+      url: item.url || s?.url || undefined,
+    }
+  })
+  if (items.length > MAX_USED) {
+    rows.push({ key: 'used:more', text: `+${items.length - MAX_USED} more`, phrase: '', inline: true })
   }
   return rows
 }
 
-// murmurRows: only the murmurs the AI coworker used; the rest is noise here.
-export function murmurRows(report: UsageReport): ReadRow[] {
-  return report.surfaced
-    .filter(s => s.ref_type === MURMUR && s.used !== undefined)
-    .map((s, i) => ({
-      key: `murmur:${i}`,
-      text: [s.from_name || s.from || 'a teammate', s.topic ? `[${s.topic}]` : ''].filter(Boolean).join('  '),
-      used: true,
-    }))
+const FOLDED: ReadonlyArray<[string, string]> = [
+  ['discussion', 'discussions'],
+  ['plan', 'plans'],
+  ['session', 'sessions'],
+  [MURMUR, 'murmurs'],
+]
+
+export type AvailableRow = { key: string; text: string }
+
+// availableRows: what ox surfaced that went unused, without links. Docs stay
+// by name; discussions, plans, sessions and murmurs fold into one count row;
+// skills into `N team skills`.
+export function availableRows(report: UsageReport): AvailableRow[] {
+  const used = new Set(usedItems(report).map(i => i.ref))
+  const unused = report.surfaced.filter(s => s.used === undefined && !used.has(s.ref))
+  const folded = new Set(FOLDED.map(([k]) => k))
+  const named = unused.filter(s => s.ref_type !== SKILL && !folded.has(s.ref_type))
+  const width = Math.max(0, ...named.map(s => [...(s.ref_type || 'ref')].length))
+  const rows: AvailableRow[] = named.map((s, i) => ({
+    key: `available:${i}`,
+    text: `${(s.ref_type || 'ref').padEnd(width)}  ${s.title || s.ref}`,
+  }))
+  const counts = FOLDED.map(([kind, plural]) => {
+    const n = unused.filter(s => s.ref_type === kind).length
+    return n === 0 ? '' : `${n} ${n === 1 ? kind : plural}`
+  }).filter(Boolean)
+  if (counts.length > 0) {
+    rows.push({ key: 'available:counts', text: counts.join(' · ') })
+  }
+  const skills = unused.filter(s => s.ref_type === SKILL).length
+  if (skills > 0) {
+    rows.push({ key: 'available:skills', text: `${skills} team skill${skills === 1 ? '' : 's'}` })
+  }
+  return rows
+}
+
+export type CoauthorRows = { key: string; category: string; verdict: string; reason: string }
+
+const SOURCE_WORDS: Record<string, string> = {
+  'self-reported': 'reported by the AI coworker',
+  derived: 'derived from use',
+}
+
+// coauthorRows: whether SageOx would be credited as a co-author, and why.
+// Absent attribution draws nothing.
+export function coauthorRows(report: UsageReport, columns: number): CoauthorRows | null {
+  const a = report.attribution
+  if (a === undefined) {
+    return null
+  }
+  const verdict = a.would_attribute ? '· would attribute' : `· below threshold ${a.threshold}`
+  const source = SOURCE_WORDS[a.source] ?? ''
+  const reason = [source, a.reason ?? ''].filter(Boolean).join(': ')
+  return { key: 'coauthor', category: a.category, verdict, reason: truncate(reason, columns) }
 }
 
 // errorLine turns a failed refresh into one short line for the pane.
@@ -361,7 +470,7 @@ export function isAtEnd(offset: number, bodyRows: number, contentRows: number): 
 }
 
 // INITIAL_STATUS: the pane opens at the top. The brief reads top down (header,
-// context, read, then calls), so following the end starts only once the
+// used, context, available, then calls), so following the end starts only once the
 // person scrolls there (the ui.scroll hook sets follow).
 export const INITIAL_STATUS: UsageStatus = { follow: false }
 

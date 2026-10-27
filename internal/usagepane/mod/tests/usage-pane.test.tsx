@@ -1,8 +1,11 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import {
+  availableRows,
   bar,
+  coauthorRows,
   contextRows,
+  evidencePhrase,
   formatClock,
   formatRow,
   formatTokens,
@@ -10,11 +13,11 @@ import {
   INITIAL_STATUS,
   isAtEnd,
   isOxCommand,
-  murmurRows,
+  MAX_USED,
   parseReport,
-  readRows,
   shouldScrollToEnd,
   truncate,
+  usedRows,
 } from '../hooks/logic'
 
 const PLUGIN = 'ox-cli-brief-pane'
@@ -141,6 +144,161 @@ describe('parseReport: used items and attribution', () => {
   })
 })
 
+// The fixture the design is drawn for: a discussion cited in a commit, a plan
+// the AI coworker reported using, a murmur it read, two discussions unused.
+const USED_REPORT = {
+  ...REPORT,
+  surfaced: [
+    { ref: 'disc_9', ref_type: 'discussion', via: 'query', title: 'Release versioning sync', url: 'https://sageox.ai/c/disc_9', seq: 2 },
+    { ref: 'plan_4', ref_type: 'plan', via: 'prime', title: 'Brief pane redesign', url: 'https://sageox.ai/p/plan_4' },
+    { ref: 'murmur_1', ref_type: 'murmur', from: 'Oxa1', from_name: 'Avery', topic: 'wip', via: 'murmur' },
+    { ref: 'disc_10', ref_type: 'discussion', via: 'query', title: 'Pricing page review', url: 'https://sageox.ai/c/disc_10' },
+    { ref: 'disc_11', ref_type: 'discussion', via: 'query', title: 'Onboarding retro', url: 'https://sageox.ai/c/disc_11' },
+    { ref: 'docs/adr-031.md', ref_type: 'doc', via: 'prime', title: 'ADR-031 ox-owned names' },
+    { ref: 'ox-cli-plan', ref_type: 'skill', via: 'prime' },
+  ],
+  relevant: {
+    count: 3,
+    surfaced_count: 7,
+    by_evidence: { read: 1, cited: 1, reported: 1, judged: 0 },
+    items: [
+      { ref: 'disc_9', ref_type: 'discussion', title: 'Release versioning sync', url: 'https://sageox.ai/c/disc_9', evidence: 'cited', grade: 'provable', detail: 'cited_commit', seq: 3, commit: 'abc1234' },
+      { ref: 'plan_4', ref_type: 'plan', title: 'Brief pane redesign', url: 'https://sageox.ai/p/plan_4', evidence: 'reported', grade: 'reported', detail: 'reported', why: 'followed its rollout order for the pane sections' },
+      { ref: 'murmur_1', ref_type: 'murmur', evidence: 'read', grade: 'provable', detail: 'read', seq: 4 },
+    ],
+  },
+  attribution: { would_attribute: true, category: 'moderate', reason: 'a discussion cited in a commit and a plan followed', source: 'derived', threshold: 2 },
+}
+
+const item = (over: Record<string, unknown>) => ({ ref: 'r', evidence: 'read', grade: 'provable', ...over })
+
+describe('used rows', () => {
+  test('each evidence phrase', () => {
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      ['read', { evidence: 'read', detail: 'read' }, 'read'],
+      ['re-opened', { evidence: 'read', detail: 'requery' }, 're-opened'],
+      ['cited', { evidence: 'cited', detail: 'cited' }, 'cited'],
+      ['cited in commit', { evidence: 'cited', detail: 'cited_commit', commit: 'abc1234' }, 'cited in commit abc1234'],
+      ['cited in commit, no sha', { evidence: 'cited', detail: 'cited_commit' }, 'cited in a commit'],
+      ['reported with why', { evidence: 'reported', detail: 'reported', why: 'kept the rule' }, 'reported: kept the rule'],
+      ['reported bare', { evidence: 'reported' }, 'reported'],
+      ['judged', { evidence: 'judged', detail: 'judged' }, 'judged'],
+    ]
+    for (const [name, over, want] of cases) {
+      expect([name, evidencePhrase(item(over) as never)]).toEqual([name, want])
+    }
+  })
+  test('the fixture: kinds line up, murmurs join to who and topic, links only with a url', () => {
+    const r = parseReport(JSON.stringify(USED_REPORT))!
+    expect(usedRows(r, 80)).toEqual([
+      { key: 'used:0', text: 'discussion  Release versioning sync', phrase: 'cited in commit abc1234', inline: true, url: 'https://sageox.ai/c/disc_9' },
+      { key: 'used:1', text: 'plan        Brief pane redesign', phrase: 'reported: followed its rollout order for the pane sections', inline: false, url: 'https://sageox.ai/p/plan_4' },
+      { key: 'used:2', text: 'murmur      Avery  [wip]', phrase: 'read', inline: true, url: undefined },
+    ])
+  })
+  test('a phrase that does not fit gets its own row, cut to the pane', () => {
+    const r = parseReport(JSON.stringify(USED_REPORT))!
+    const plan = usedRows(r, 30)[1]!
+    expect(plan.inline).toBe(false)
+    expect(plan.phrase).toBe('reported: followed its roll…')
+    expect([...plan.phrase].length).toBe(28)
+  })
+  test('a murmur with no sender reads as a teammate', () => {
+    const r = parseReport(JSON.stringify({ ...REPORT, surfaced: [], relevant: { count: 1, surfaced_count: 1, items: [item({ ref: 'm', ref_type: 'murmur' })] } }))!
+    expect(usedRows(r, 80)[0]?.text).toBe('murmur  a teammate')
+  })
+  test('caps at MAX_USED, then +N more', () => {
+    const items = Array.from({ length: MAX_USED + 3 }, (_, i) => item({ ref: `doc_${i}`, ref_type: 'doc', title: `Doc ${i}` }))
+    const rows = usedRows(parseReport(JSON.stringify({ ...REPORT, relevant: { count: items.length, surfaced_count: 20, items } }))!, 80)
+    expect(rows).toHaveLength(MAX_USED + 1)
+    expect(rows.at(-1)).toEqual({ key: 'used:more', text: '+3 more', phrase: '', inline: true })
+  })
+})
+
+describe('available rows', () => {
+  test('exclude what was used; fold discussions, plans, sessions, murmurs; docs by name', () => {
+    const r = parseReport(JSON.stringify(USED_REPORT))!
+    expect(availableRows(r)).toEqual([
+      { key: 'available:0', text: 'doc  ADR-031 ox-owned names' },
+      { key: 'available:counts', text: '2 discussions' },
+      { key: 'available:skills', text: '1 team skill' },
+    ])
+  })
+  test('every folded kind, pluralized', () => {
+    const surfaced = ['discussion', 'plan', 'plan', 'session', 'murmur', 'murmur', 'murmur'].map((ref_type, i) => ({ ref: `r${i}`, ref_type }))
+    expect(availableRows(parseReport(JSON.stringify({ ...REPORT, surfaced, relevant: { count: 0, surfaced_count: 7, items: [] } }))!)).toEqual([
+      { key: 'available:counts', text: '1 discussion · 2 plans · 1 session · 3 murmurs' },
+    ])
+  })
+  test('nothing unused, nothing to draw', () => {
+    expect(availableRows(parseReport(JSON.stringify({ ...REPORT, surfaced: [] }))!)).toEqual([])
+  })
+})
+
+describe('header and co-author', () => {
+  test('used N of M with the co-author category', () => {
+    expect(headerLines(parseReport(JSON.stringify(USED_REPORT))).summary).toBe('calls 3 (1 failed) · ~16k tokens · used 3 of 7 · co-author moderate')
+  })
+  test('category none, or no attribution, leaves co-author out', () => {
+    const none = { ...USED_REPORT, attribution: { ...USED_REPORT.attribution, category: 'none', would_attribute: false } }
+    expect(headerLines(parseReport(JSON.stringify(none))).summary).toBe('calls 3 (1 failed) · ~16k tokens · used 3 of 7')
+  })
+  test('reported_none says used none', () => {
+    const r = { ...REPORT, relevant: { count: 0, surfaced_count: 6, reported_none: true, items: [] } }
+    expect(headerLines(parseReport(JSON.stringify(r))).summary).toBe('calls 3 (1 failed) · ~16k tokens · used none')
+  })
+  test('co-author rows: verdict and source wording', () => {
+    const derived = parseReport(JSON.stringify(USED_REPORT))!
+    expect(coauthorRows(derived, 80)).toEqual({
+      key: 'coauthor',
+      category: 'moderate',
+      verdict: '· would attribute',
+      reason: 'derived from use: a discussion cited in a commit and a plan followed',
+    })
+    const below = parseReport(
+      JSON.stringify({ ...USED_REPORT, attribution: { would_attribute: false, category: 'minor', source: 'self-reported', threshold: 2 } }),
+    )!
+    expect(coauthorRows(below, 80)).toEqual({ key: 'coauthor', category: 'minor', verdict: '· below threshold 2', reason: 'reported by the AI coworker' })
+    expect(coauthorRows(derived, 20)?.reason).toBe('derived from use: a…')
+    expect(coauthorRows(parseReport(JSON.stringify(REPORT))!, 80)).toBeNull()
+  })
+})
+
+test('the pane links what was used and folds the rest into counts', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  on('process.run', () => ok(JSON.stringify(USED_REPORT)))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+
+  await $.command.run({ ...COMMAND, args: '' } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /^calls \d/ }))?.text).toBe('calls 3 (1 failed) · ~16k tokens · used 3 of 7 · co-author moderate')
+
+  expect((await ui.find({ key: 'used:0' }))?.text).toBe('discussion  Release versioning sync  cited in commit abc1234')
+  expect((await ui.find({ type: 'Link', text: 'https://sageox.ai/c/disc_9' }))?.props.href).toBe('https://sageox.ai/c/disc_9')
+  expect((await ui.find({ key: 'used:1' }))?.text).toBe('plan        Brief pane redesign')
+  expect((await ui.find({ key: 'used:1:why' }))?.text).toBe('reported: followed its rollout order for the pane sections')
+  expect((await ui.find({ type: 'Link', text: 'https://sageox.ai/p/plan_4' }))?.props.href).toBe('https://sageox.ai/p/plan_4')
+  expect((await ui.find({ key: 'used:2' }))?.text).toBe('murmur      Avery  [wip]  read')
+  expect(await ui.find({ key: 'used:2:url' })).toBeUndefined()
+
+  // The two unused discussions are a count: no title, no link.
+  expect((await ui.find({ key: 'available:counts' }))?.text).toBe('2 discussions')
+  expect(await ui.find({ type: 'Text', text: /Pricing page review|Onboarding retro/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Link', text: /disc_10|disc_11/ })).toBeUndefined()
+
+  expect((await ui.find({ key: 'coauthor' }))?.text).toBe('co-author  moderate · would attribute')
+  expect((await ui.find({ key: 'coauthor:reason' }))?.text).toBe('derived from use: a discussion cited in a commit and a plan followed')
+
+  // The used section leads; co-author sits right above calls.
+  const sectionKeys = new Set(['h:used', 'h:context', 'h:available', 'coauthor', 'h:calls', 'legend'])
+  const order = (await ui.findAll({ type: 'Box' })).map(b => b.key).filter(k => k !== undefined && sectionKeys.has(k))
+  expect(order).toEqual(['h:used', 'h:context', 'h:available', 'coauthor', 'h:calls', 'legend'])
+
+  // Plumbing words never reach the person.
+  expect(await ui.find({ type: 'Text', text: /injected|not yet reported|you reported|surfaced|grade|provable| tok\b|✓/ })).toBeUndefined()
+  await ui.unmount()
+})
+
 describe('isOxCommand', () => {
   const cases: Array<[string, string, boolean]> = [
     ['plain', 'ox murmur list', true],
@@ -188,17 +346,17 @@ describe('formatting', () => {
   test('header', () => {
     const h = headerLines(parseReport(JSON.stringify(REPORT)))
     expect(h.marker).toBe('● recording')
-    expect(h.summary).toBe('calls 3 (1 failed) · ~16k tokens · read 4 · useful 2')
+    expect(h.summary).toBe('calls 3 (1 failed) · ~16k tokens · used 2 of 6')
   })
   test('header without relevant counts used items, and says not recording', () => {
     const { relevant: _, ...rest } = REPORT
     const h = headerLines(parseReport(JSON.stringify({ ...rest, session: { recording: false } })))
     expect(h.marker).toBe('○ not recording')
-    expect(h.summary).toBe('calls 3 (1 failed) · ~16k tokens · read 4 · useful 2')
+    expect(h.summary).toBe('calls 3 (1 failed) · ~16k tokens · used 2 of 6')
   })
   test('an old trace without context or surfaced still parses', () => {
     const h = headerLines(parseReport(JSON.stringify({ view: 'session', session: { recording: true }, calls: { total: 0, failed: 0 } })))
-    expect(h.summary).toBe('calls 0 · ~0 tokens · read 0 · useful 0')
+    expect(h.summary).toBe('calls 0 · ~0 tokens · used 0 of 0')
   })
   test('context bars scale to the largest source', () => {
     const r = parseReport(JSON.stringify(REPORT))!
@@ -210,14 +368,16 @@ describe('formatting', () => {
     expect(bar(0, 10)).toBe('')
     expect(bar(5, 10)).toBe('▇▇▇')
   })
-  test('read rows group skills; murmur rows keep only used ones', () => {
+  test('an older report without items: used falls back to surfaced use evidence', () => {
     const r = parseReport(JSON.stringify(REPORT))!
-    expect(readRows(r)).toEqual([
-      { key: 'read:0', text: 'discussion  Release versioning sync', used: true, url: 'https://sageox.ai/c/disc_9' },
-      { key: 'read:1', text: 'plan        Brief pane redesign', used: false, url: 'https://sageox.ai/p/plan_4' },
-      { key: 'read:skills', text: '2 team skills', used: false },
+    expect(usedRows(r, 80)).toEqual([
+      { key: 'used:0', text: 'discussion  Release versioning sync', phrase: 'cited', inline: true, url: 'https://sageox.ai/c/disc_9' },
+      { key: 'used:1', text: 'murmur      Avery  [wip]', phrase: 'read', inline: true, url: undefined },
     ])
-    expect(murmurRows(r)).toEqual([{ key: 'murmur:0', text: 'Avery  [wip]', used: true }])
+    expect(availableRows(r)).toEqual([
+      { key: 'available:counts', text: '1 plan · 1 murmur' },
+      { key: 'available:skills', text: '2 team skills' },
+    ])
   })
   test('parse', () => {
     expect(parseReport('not json')).toBeNull()
@@ -250,24 +410,26 @@ test('/ox-brief opens the pane and lists each ox call, oldest first', async ($, 
     const titleRow = (await ui.find({ type: 'Text', text: /● ox brief/ }))?.text
     expect(titleRow).toBe('● ox brief  ● recording')
     expect(titleRow).not.toMatch(/brief-pane|claude-code|Oxa1b2/)
-    expect((await ui.find({ type: 'Text', text: /^calls \d/ }))?.text).toBe('calls 3 (1 failed) · ~16k tokens · read 4 · useful 2')
+    expect((await ui.find({ type: 'Text', text: /^calls \d/ }))?.text).toBe('calls 3 (1 failed) · ~16k tokens · used 2 of 6')
     expect(await ui.find({ type: 'Text', text: /injected|not yet reported/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /recording/ })).toBeDefined()
 
-    for (const h of ['context', 'read', 'murmurs', 'calls']) {
+    for (const h of ['used', 'context', 'available', 'calls']) {
       expect((await ui.find({ key: `h:${h}` }))?.text).toBe(h)
     }
     expect((await ui.find({ key: 'context:prime' }))?.text).toBe('prime    ~15k tokens  ▇▇▇▇▇▇')
     expect(await ui.find({ type: 'Text', text: 'estimates, ~4 bytes/token' })).toBeDefined()
-    expect((await ui.find({ key: 'read:0' }))?.text).toBe('discussion  Release versioning sync ✓')
-    expect((await ui.find({ key: 'read:0:url' }))?.text).toBe('https://sageox.ai/c/disc_9')
+    expect((await ui.find({ key: 'used:0' }))?.text).toBe('discussion  Release versioning sync  cited')
+    expect((await ui.find({ key: 'used:0:url' }))?.text).toBe('https://sageox.ai/c/disc_9')
     expect((await ui.find({ type: 'Link', text: 'https://sageox.ai/c/disc_9' }))?.props.href).toBe('https://sageox.ai/c/disc_9')
-    expect((await ui.find({ key: 'read:1' }))?.text).toBe('plan        Brief pane redesign')
-    expect((await ui.find({ key: 'read:1:url' }))?.text).toBe('https://sageox.ai/p/plan_4')
-    expect((await ui.find({ key: 'read:skills' }))?.text).toBe('2 team skills')
-    expect((await ui.find({ key: 'murmur:0' }))?.text).toBe('Avery  [wip] ✓')
-    expect(await ui.find({ type: 'Text', text: /Sam/ })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: '✓ used by the AI coworker' })).toBeDefined()
+    expect((await ui.find({ key: 'used:1' }))?.text).toBe('murmur      Avery  [wip]  read')
+    // Unused items are a count, never a link.
+    expect((await ui.find({ key: 'available:counts' }))?.text).toBe('1 plan · 1 murmur')
+    expect((await ui.find({ key: 'available:skills' }))?.text).toBe('2 team skills')
+    expect(await ui.find({ type: 'Link', text: 'https://sageox.ai/p/plan_4' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /Brief pane redesign|Sam/ })).toBeUndefined()
+    expect(await ui.find({ key: 'coauthor' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: "used = evidence from the transcript, a commit, or the AI coworker's report" })).toBeDefined()
 
     const rows = [await ui.find({ key: 'row:0' }), await ui.find({ key: 'row:1' }), await ui.find({ key: 'row:2' })]
     expect(rows.map(r => r?.text.replace(/^\d\d:\d\d/, 'HH:MM'))).toEqual([
@@ -361,7 +523,7 @@ test('an empty session and a missing trace read plainly', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: 'No ox calls yet.' })).toBeDefined()
   await ui.unmount()
 
-  // Nothing used: no murmurs section, no legend, and unused murmurs never show.
+  // Nothing used: no used section, no legend, and unused items only as counts.
   stdout = JSON.stringify({
     ...EMPTY,
     surfaced: EMPTY.surfaced.map(({ used: _, ...item }) => item),
@@ -369,10 +531,11 @@ test('an empty session and a missing trace read plainly', async ($, on) => {
   })
   await $.command.run({ ...COMMAND, args: 'refresh' } as never)
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ key: 'h:murmurs' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /used by the AI coworker/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /✓/ })).toBeUndefined()
-  expect((await ui.find({ type: 'Text', text: /^calls \d/ }))?.text).toBe('calls 0 · ~16k tokens · read 4 · useful 0')
+  expect(await ui.find({ key: 'h:used' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^used = / })).toBeUndefined()
+  expect(await ui.find({ type: 'Link' })).toBeUndefined()
+  expect((await ui.find({ key: 'available:counts' }))?.text).toBe('1 discussion · 1 plan · 2 murmurs')
+  expect((await ui.find({ type: 'Text', text: /^calls \d/ }))?.text).toBe('calls 0 · ~16k tokens · used 0 of 6')
   await ui.unmount()
 
   stdout = JSON.stringify({ ...EMPTY, trace: { available: false, source: 'none', reason: 'no usage trace found for this session' } })
