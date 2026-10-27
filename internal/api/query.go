@@ -51,6 +51,13 @@ type QueryResult struct {
 	SourceType string  `json:"source_type"`
 	SourceID   string  `json:"source_id"`
 	CreatedAt  string  `json:"created_at,omitempty"`
+	// RecordedAt is when a recorded Discussion's meeting happened; CreatedAt and
+	// the folder in FilePath are its upload time, which for an imported meeting
+	// can be months later. DateSource says how RecordedAt was determined (empty
+	// when it fell back to the upload time). Absent on every other hit and from
+	// older servers.
+	RecordedAt string `json:"recorded_at,omitempty"`
+	DateSource string `json:"date_source,omitempty"`
 	// Title and URL are the hit's display name and citation, decoded so they
 	// survive into `ox query` output. A team skill hit (source_type "skill")
 	// carries the skill name in SourceID and Title and its console page in URL;
