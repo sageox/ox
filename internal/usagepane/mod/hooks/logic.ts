@@ -1,14 +1,14 @@
-// Pure helpers for the ox usage pane: parsing `ox usage --json`, spotting an
+// Pure helpers for the ox brief pane: parsing `ox brief --json`, spotting an
 // ox command in a Bash call, and laying out the pane's lines. No `$` here, so
 // every function is unit-testable under `claude plugin test`.
 
-import type { UsageRecentCall, UsageReport } from '../types'
+import type { UsageContextSource, UsageRecentCall, UsageReport, UsageStatus, UsageSurfaced } from '../types'
 
-export const PANE = 'ox-usage'
-export const PLUGIN = 'ox-cli-usage-pane'
+export const PANE = 'ox-brief'
+export const PLUGIN = 'ox-cli-brief-pane'
 export const REFRESH_MS = 15_000
 export const RUN_TIMEOUT_MS = 8_000
-export const USAGE_ARGV = ['ox', 'usage', '--json', '--recent', '0'] as const
+export const BRIEF_ARGV = ['ox', 'brief', '--json', '--recent', '0'] as const
 
 const ELLIPSIS = '…'
 
@@ -24,7 +24,7 @@ function str(v: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined
 }
 
-// parseReport reads `ox usage --json` stdout into the slice the pane draws,
+// parseReport reads `ox brief --json` stdout into the slice the pane draws,
 // or null when it is not a session report. Missing fields read as empty.
 export function parseReport(stdout: string): UsageReport | null {
   let raw: unknown
@@ -45,8 +45,8 @@ export function parseReport(stdout: string): UsageReport | null {
   const session = isRecord(raw.session) ? raw.session : {}
   const trace = isRecord(raw.trace) ? raw.trace : {}
   const calls = isRecord(raw.calls) ? raw.calls : {}
-  const injected = isRecord(raw.injected) ? raw.injected : {}
-  const used = isRecord(raw.used) ? raw.used : {}
+  const context = isRecord(raw.context) ? raw.context : {}
+  const relevant = isRecord(raw.relevant) && typeof raw.relevant.count === 'number' ? raw.relevant : undefined
   const recent: UsageRecentCall[] = (Array.isArray(calls.recent) ? calls.recent : [])
     .filter(isRecord)
     .map(c => ({
@@ -57,24 +57,40 @@ export function parseReport(stdout: string): UsageReport | null {
       failed: c.failed === true,
       ts: str(c.ts),
     }))
+  const bySource: UsageContextSource[] = (Array.isArray(context.by_source) ? context.by_source : [])
+    .filter(isRecord)
+    .map(s => ({ source: str(s.source) ?? '', tokens: num(s.tokens), count: typeof s.count === 'number' ? s.count : undefined }))
+    .filter(s => s.source !== '')
+  const surfaced: UsageSurfaced[] = (Array.isArray(raw.surfaced) ? raw.surfaced : []).filter(isRecord).map(item => {
+    const used = isRecord(item.used) ? item.used : undefined
+    return {
+      ref: str(item.ref) ?? '',
+      ref_type: str(item.ref_type) ?? '',
+      from: str(item.from),
+      from_name: str(item.from_name),
+      topic: str(item.topic),
+      via: str(item.via),
+      title: str(item.title),
+      url: str(item.url),
+      seq: typeof item.seq === 'number' ? item.seq : undefined,
+      used:
+        used === undefined
+          ? undefined
+          : { evidence: str(used.evidence) ?? '', seq: typeof used.seq === 'number' ? used.seq : undefined, grade: str(used.grade) },
+    }
+  })
   return {
     view: 'session',
-    session: {
-      name: str(session.name),
-      agent_id: str(session.agent_id),
-      harness: str(session.harness),
-      recording: session.recording === true,
-      turns: typeof session.turns === 'number' ? session.turns : undefined,
-    },
+    session: { recording: session.recording === true },
     trace: {
       available: trace.available !== false,
       source: str(trace.source),
       reason: str(trace.reason),
     },
     calls: { total: num(calls.total), failed: num(calls.failed), recent },
-    injected: { total_tokens: num(injected.total_tokens), estimated: injected.estimated === true },
-    surfaced: Array.isArray(raw.surfaced) ? raw.surfaced : [],
-    used: { status: str(used.status) ?? 'unknown' },
+    context: { tokens: num(context.tokens), estimated: context.estimated === true, by_source: bySource },
+    surfaced,
+    relevant: relevant === undefined ? undefined : { count: num(relevant.count), surfaced_count: num(relevant.surfaced_count) },
   }
 }
 
@@ -151,28 +167,93 @@ export function formatRow(call: UsageRecentCall, columns: number, offsetMin = 0)
   return { text, failed: call.failed === true }
 }
 
-function humanStatus(status: string): string {
-  return status.replace(/_/g, ' ')
+// headerLines: the title's tail (after `● ox brief`) and the summary line.
+export function headerLines(report: UsageReport | null): { marker: string; summary: string } {
+  if (report === null) {
+    return { marker: 'loading…', summary: '' }
+  }
+  const failed = report.calls.failed > 0 ? ` (${report.calls.failed} failed)` : ''
+  const summary = [
+    `calls ${report.calls.total}${failed}`,
+    `${formatTokens(report.context.tokens)} tokens`,
+    `read ${readItems(report).length}`,
+    `useful ${usefulCount(report)}`,
+  ].join(' · ')
+  return { marker: report.session.recording ? '● recording' : '○ not recording', summary }
 }
 
-// headerLines: the title's tail (after `● ox usage`) and the summary line.
-export function headerLines(report: UsageReport | null): { identity: string; summary: string } {
-  if (report === null) {
-    return { identity: 'loading…', summary: '' }
+const MURMUR = 'murmur'
+const SKILL = 'skill'
+const MAX_BAR = 6
+
+// readItems: what ox put in front of the AI coworker that a person can open,
+// i.e. every surfaced item but murmurs.
+export function readItems(report: UsageReport): UsageSurfaced[] {
+  return report.surfaced.filter(s => s.ref_type !== MURMUR)
+}
+
+// usefulCount: the report's relevant count, else the surfaced items with use evidence.
+export function usefulCount(report: UsageReport): number {
+  return report.relevant?.count ?? report.surfaced.filter(s => s.used !== undefined).length
+}
+
+// bar: up to MAX_BAR cells of ▇, proportional to the largest value; at least
+// one cell for any non-zero value.
+export function bar(n: number, max: number): string {
+  if (max <= 0 || n <= 0) {
+    return ''
   }
-  const s = report.session
-  const parts = [s.name || s.agent_id || 'this session']
-  if (s.harness) {
-    parts.push(s.harness)
+  return '▇'.repeat(Math.max(1, Math.round((n * MAX_BAR) / max)))
+}
+
+export type ContextRow = { key: string; text: string; bar: string }
+
+// contextRows: one `source  ~Nk tokens` row per metered source, padded so the
+// token counts line up.
+export function contextRows(report: UsageReport): ContextRow[] {
+  const sources = report.context.by_source
+  const max = Math.max(0, ...sources.map(s => s.tokens))
+  const width = Math.max(0, ...sources.map(s => [...s.source].length))
+  return sources.map(s => ({
+    key: s.source,
+    text: `${s.source.padEnd(width)}  ${formatTokens(s.tokens)} tokens`,
+    bar: bar(s.tokens, max),
+  }))
+}
+
+export type ReadRow = { key: string; text: string; used: boolean; url?: string }
+
+// readRows: one `kind  title` row per read item, skills folded into one row.
+export function readRows(report: UsageReport): ReadRow[] {
+  const items = readItems(report)
+  const skills = items.filter(s => s.ref_type === SKILL)
+  const rest = items.filter(s => s.ref_type !== SKILL)
+  const width = Math.max(0, ...rest.map(s => [...(s.ref_type || 'ref')].length))
+  const rows: ReadRow[] = rest.map((s, i) => ({
+    key: `read:${i}`,
+    text: `${(s.ref_type || 'ref').padEnd(width)}  ${s.title || s.ref}`,
+    used: s.used !== undefined,
+    url: s.url || undefined,
+  }))
+  if (skills.length > 0) {
+    rows.push({
+      key: 'read:skills',
+      text: `${skills.length} team skill${skills.length === 1 ? '' : 's'}`,
+      used: skills.some(s => s.used !== undefined),
+    })
   }
-  parts.push(s.recording ? '● recording' : '○ not recording')
-  const summary = [
-    `calls ${report.calls.total}${report.calls.failed > 0 ? ` (${report.calls.failed} failed)` : ''}`,
-    `injected ${formatTokens(report.injected.total_tokens)} tok`,
-    `surfaced ${report.surfaced.length}`,
-    `used ${humanStatus(report.used.status)}`,
-  ].join(' · ')
-  return { identity: parts.join(' · '), summary }
+  return rows
+}
+
+// murmurRows: only the murmurs the AI coworker used; the rest is noise here.
+export function murmurRows(report: UsageReport): ReadRow[] {
+  return report.surfaced
+    .filter(s => s.ref_type === MURMUR && s.used !== undefined)
+    .map((s, i) => ({
+      key: `murmur:${i}`,
+      text: [s.from_name || s.from || 'a teammate', s.topic ? `[${s.topic}]` : ''].filter(Boolean).join('  '),
+      used: true,
+    }))
 }
 
 // errorLine turns a failed refresh into one short line for the pane.
@@ -183,12 +264,12 @@ export function errorLine(failure: { exitCode?: number; stderr?: string; thrown?
       return 'ox not found on PATH'
     }
     if (/time(d)? ?out/i.test(msg)) {
-      return 'ox usage timed out'
+      return 'ox brief timed out'
     }
-    return `ox usage failed: ${firstLine(msg) || 'could not start'}`
+    return `ox brief failed: ${firstLine(msg) || 'could not start'}`
   }
   const line = firstLine(failure.stderr ?? '')
-  return `ox usage failed: ${line || `exit ${failure.exitCode ?? '?'}`}`
+  return `ox brief failed: ${line || `exit ${failure.exitCode ?? '?'}`}`
 }
 
 function firstLine(s: string): string {
@@ -205,8 +286,14 @@ export function isAtEnd(offset: number, bodyRows: number, contentRows: number): 
   return offset >= Math.max(0, contentRows - bodyRows)
 }
 
-// shouldScrollToEnd: a refresh that added rows pulls the window to the end,
-// unless the person scrolled up to read (follow false).
+// INITIAL_STATUS: the pane opens at the top. The brief reads top down (header,
+// context, read, then calls), so following the end starts only once the
+// person scrolls there (the ui.scroll hook sets follow).
+export const INITIAL_STATUS: UsageStatus = { follow: false }
+
+// shouldScrollToEnd: a refresh that added calls pulls the window to the end
+// while the person follows it (scrolled to the end themselves). The first
+// load (no earlier report) never moves it: that would scroll the header away.
 export function shouldScrollToEnd(prevRows: number | undefined, nextRows: number, follow: boolean): boolean {
-  return follow && nextRows > (prevRows ?? 0)
+  return follow && prevRows !== undefined && nextRows > prevRows
 }

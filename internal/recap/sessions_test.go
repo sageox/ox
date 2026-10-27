@@ -171,7 +171,7 @@ func TestScanSessions_MalformedMetaSkippedNotFatal(t *testing.T) {
 }
 
 // TestScanSessions_SkipsDraftPlaceholders: a live recording's draft meta.json
-// (ADR-029) is not a recorded session. Failure prevented: recap and `ox usage
+// (ADR-029) is not a recorded session. Failure prevented: recap and `ox brief
 // --me` count a still-recording session as finished (with no trace) and
 // double it once the real one lands. The non-draft session is the negative
 // control: the skip must not swallow real sessions.

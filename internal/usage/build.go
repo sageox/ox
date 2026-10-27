@@ -8,6 +8,7 @@ import (
 
 	"github.com/sageox/ox/internal/oxactivity"
 	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/weblink"
 )
 
 // Input is everything Build needs. The caller resolves it; Build does no I/O.
@@ -28,6 +29,10 @@ type Input struct {
 	ScoreCategory   string
 	ScoreReason     string
 	ProducedCommits int
+
+	// Endpoint is the project's SageOx web endpoint (https://sageox.ai). When
+	// set, surfaced discussions and plans with an opaque id get a web link.
+	Endpoint string
 
 	Now   time.Time
 	Width int // display width; 0 → 80
@@ -66,8 +71,9 @@ func Build(in Input) Report {
 		r.Trace.Source = TraceSourceNone
 	}
 	r.Calls = buildCalls(in.Events, in.RecentLimit)
-	r.Injected = buildInjected(in.Events)
+	r.Context = buildContext(in.Events)
 	r.Surfaced = buildSurfaced(in.Events)
+	fillURLs(r.Surfaced, in.Endpoint)
 	r.Used = buildUsed(in, r.Surfaced)
 	r.NextActions = nextActions(r)
 	r.Guidance = guidanceText
@@ -127,8 +133,8 @@ func isWhisper(ev contexttrace.Event) bool {
 	return ev.Source == contexttrace.SourceTeamWhisper || ev.Source == contexttrace.SourceProjectWhisper
 }
 
-func buildInjected(events []contexttrace.Event) Injected {
-	inj := Injected{Estimated: true, BySource: []SourceStat{}, Unmetered: append([]string(nil), Unmetered...)}
+func buildContext(events []contexttrace.Event) Context {
+	cx := Context{Estimated: true, BySource: []SourceStat{}, Unmetered: append([]string(nil), Unmetered...)}
 
 	primeTokens := map[string]int{}
 	var whisperTokens, whisperCount, callTokens, callCount int
@@ -146,7 +152,7 @@ func buildInjected(events []contexttrace.Event) Injected {
 			if len(ev.TokensBySource) == 0 && ev.InlineTokens > 0 {
 				primeTokens["total"] += ev.InlineTokens
 			}
-			inj.Prime = &PrimeBudget{EmittedBytes: ev.OutputBytes, FullBytes: ev.FullBytes, Deferred: ev.Deferred}
+			cx.Prime = &PrimeBudget{EmittedBytes: ev.OutputBytes, FullBytes: ev.FullBytes, Deferred: ev.Deferred}
 		case ev.Type == contexttrace.EventInvoked:
 			callTokens += ev.InlineTokens
 			callCount++
@@ -164,7 +170,7 @@ func buildInjected(events []contexttrace.Event) Injected {
 
 	for src, n := range primeTokens {
 		if n > 0 {
-			inj.BySource = append(inj.BySource, SourceStat{Source: "prime:" + src, Tokens: n})
+			cx.BySource = append(cx.BySource, SourceStat{Source: "prime:" + src, Tokens: n})
 		}
 	}
 	// Prime's own provided events (team instructions, MEMORY.md) are already
@@ -172,25 +178,25 @@ func buildInjected(events []contexttrace.Event) Injected {
 	// prime recorded its budget, so nothing is counted twice.
 	if !sawPrime {
 		for _, src := range providedOrder {
-			inj.BySource = append(inj.BySource, SourceStat{Source: src, Tokens: providedTokens[src]})
+			cx.BySource = append(cx.BySource, SourceStat{Source: src, Tokens: providedTokens[src]})
 		}
 	}
 	if whisperCount > 0 {
-		inj.BySource = append(inj.BySource, SourceStat{Source: "whispers", Tokens: whisperTokens, Count: whisperCount})
+		cx.BySource = append(cx.BySource, SourceStat{Source: "whispers", Tokens: whisperTokens, Count: whisperCount})
 	}
 	if callCount > 0 && callTokens > 0 {
-		inj.BySource = append(inj.BySource, SourceStat{Source: "ox calls", Tokens: callTokens, Count: callCount})
+		cx.BySource = append(cx.BySource, SourceStat{Source: "ox calls", Tokens: callTokens, Count: callCount})
 	}
-	sort.SliceStable(inj.BySource, func(i, j int) bool {
-		if inj.BySource[i].Tokens != inj.BySource[j].Tokens {
-			return inj.BySource[i].Tokens > inj.BySource[j].Tokens
+	sort.SliceStable(cx.BySource, func(i, j int) bool {
+		if cx.BySource[i].Tokens != cx.BySource[j].Tokens {
+			return cx.BySource[i].Tokens > cx.BySource[j].Tokens
 		}
-		return inj.BySource[i].Source < inj.BySource[j].Source
+		return cx.BySource[i].Source < cx.BySource[j].Source
 	})
-	for _, s := range inj.BySource {
-		inj.TotalTokens += s.Tokens
+	for _, s := range cx.BySource {
+		cx.Tokens += s.Tokens
 	}
-	return inj
+	return cx
 }
 
 // docsOf tolerates both the singular Doc and the plural Docs shapes.
@@ -301,14 +307,6 @@ func buildUsed(in Input, surfaced []Surfaced) Used {
 	if in.ScoreCategory != "" {
 		u.SageoxScore = &Score{Category: in.ScoreCategory, Reason: in.ScoreReason}
 	}
-	switch {
-	case len(u.SelfReported) > 0:
-		u.Status = UsedReported
-	case in.Recording:
-		u.Status = UsedNotYetReported
-	default:
-		u.Status = UsedNotRecording
-	}
 	if in.Recording && in.AgentID != "" {
 		u.SelfReport = &SelfReportCmd{
 			Command:     "ox agent " + in.AgentID + " session context-trace",
@@ -339,11 +337,30 @@ func exampleLine(surfaced []Surfaced) string {
 func nextActions(r Report) []NextAction {
 	out := []NextAction{}
 	if !r.Trace.Available {
-		out = append(out, NextAction{Action: "ox session start", Why: "record the next session so ox usage can report it"})
-		return out
-	}
-	if r.Used.Status == UsedNotYetReported && r.Used.SelfReport != nil {
-		out = append(out, NextAction{Action: r.Used.SelfReport.Command, Why: "report which surfaced items changed what you did"})
+		out = append(out, NextAction{Action: "ox session start", Why: "record the next session so ox brief can report it"})
 	}
 	return out
+}
+
+// fillURLs gives a surfaced discussion or plan its web link when the trace
+// did not carry one and its ref is an opaque id the web app resolves. Slugs,
+// docs and paths never get a guessed link.
+func fillURLs(surfaced []Surfaced, endpoint string) {
+	if endpoint == "" {
+		return
+	}
+	for i := range surfaced {
+		s := &surfaced[i]
+		if s.URL != "" {
+			continue
+		}
+		switch s.RefType {
+		case "discussion":
+			if p := weblink.IDTypePrefix(s.Ref); p == "cnv_" || p == "rec_" {
+				s.URL = weblink.Conversation(endpoint, s.Ref)
+			}
+		case "plan":
+			s.URL = weblink.Plan(endpoint, s.Ref)
+		}
+	}
 }

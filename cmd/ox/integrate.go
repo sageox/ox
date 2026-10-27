@@ -778,14 +778,24 @@ func uninstallAllIntegrations(force bool) error {
 		installed = append(installed, "Oxy pet (Codex, user)")
 	}
 
-	// check the /ox-usage pane (Claude Code, user scope)
+	// check the /ox-brief pane (Claude Code, user scope), and the
+	// ox-cli-usage-pane plugin it was called before the rename
 	paneInstaller := newUsagePaneInstaller()
 	paneEnabled, paneErr := usagePanePresent(paneInstaller.Dir)
 	if paneErr != nil {
-		return fmt.Errorf("check the usage pane: %w", paneErr)
+		return fmt.Errorf("check the brief pane: %w", paneErr)
 	}
 	if paneEnabled {
-		installed = append(installed, "Usage pane (Claude Code, user)")
+		installed = append(installed, "Brief pane (Claude Code, user)")
+	}
+	legacyPaneInstaller := newLegacyUsagePaneInstaller()
+	legacyPaneEnabled, legacyPaneErr := usagePanePresent(legacyPaneInstaller.Dir)
+	if legacyPaneErr != nil {
+		return fmt.Errorf("check the old usage pane: %w", legacyPaneErr)
+	}
+	legacyPaneEnabled = legacyPaneEnabled || legacyUsagePanePresent(context.Background(), legacyPaneInstaller)
+	if legacyPaneEnabled {
+		installed = append(installed, "Old usage pane (Claude Code, user)")
 	}
 
 	// check git commit hooks
@@ -890,9 +900,17 @@ func uninstallAllIntegrations(force bool) error {
 	if paneEnabled {
 		res, err := paneInstaller.Disable(context.Background())
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("Usage pane: %v", err))
+			errors = append(errors, fmt.Sprintf("Brief pane: %v", err))
 		} else {
 			paneSteps = res.ManualSteps
+		}
+	}
+	if legacyPaneEnabled {
+		res, err := legacyPaneInstaller.Disable(context.Background())
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("Old usage pane: %v", err))
+		} else {
+			paneSteps = append(paneSteps, res.ManualSteps...)
 		}
 	}
 	if gitRoot != "" {
@@ -911,7 +929,7 @@ func uninstallAllIntegrations(force bool) error {
 		printSteps(os.Stdout, "Integrations uninstalled. To finish removing Oxy, in Claude Code run:", petSteps)
 	}
 	if len(paneSteps) > 0 {
-		intro := "To finish removing the usage pane, in Claude Code run:"
+		intro := "To finish removing the brief pane, in Claude Code run:"
 		if len(petSteps) == 0 {
 			intro = "Integrations uninstalled. " + intro
 		}
@@ -1024,7 +1042,7 @@ func init() {
 // petPresent reports whether the Oxy mod folder exists.
 func petPresent(dir string) (bool, error) { return modPresent(dir) }
 
-// usagePanePresent reports whether the usage pane's mod folder exists.
+// usagePanePresent reports whether a brief pane mod folder exists.
 func usagePanePresent(dir string) (bool, error) { return modPresent(dir) }
 
 // modPresent reports whether a Claude Code mod folder exists. Only "not

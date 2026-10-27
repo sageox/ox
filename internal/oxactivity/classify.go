@@ -373,7 +373,9 @@ var cliRules = []cliRule{
 
 	{words: []string{"decision", "enrich"}, label: "checked decisions", kind: KindRetrieval},
 
-	{words: []string{"usage"}, label: "checked ox usage", kind: KindOther},
+	{words: []string{"brief"}, label: "checked ox brief", kind: KindOther},
+	// `ox usage` is the deprecated alias of `ox brief`, kept for one release.
+	{words: []string{"usage"}, label: "checked ox brief", kind: KindOther},
 }
 
 // murmurSubcommands are `ox murmur` children; any other first word is the
@@ -420,7 +422,7 @@ func classifyOxArgs(args []string) (Activity, bool) {
 // whisper, ...) are not here: they keep their `agent` rules.
 var topLevelUnderAgent = map[string]bool{
 	"murmur": true, "query": true, "plan": true, "code": true,
-	"conversation": true, "decision": true, "usage": true,
+	"conversation": true, "decision": true, "brief": true, "usage": true,
 }
 
 // classifyWords matches positional ox words (agent ID already dropped) against

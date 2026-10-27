@@ -135,7 +135,7 @@ func TestMain(m *testing.M) {
 	}
 
 	// Never drive the developer's real claude CLI: ox doctor --fix, ox init,
-	// and `ox config set usage_pane` would install the /ox-usage pane into it.
+	// and `ox config set brief_pane` would install the /ox-brief pane into it.
 	// Tests that want a claude CLI put a fake one on PATH and set
 	// FAKE_CLAUDE_STATE.
 	realUsagePaneInstaller := newUsagePaneInstaller

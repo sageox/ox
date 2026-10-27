@@ -18,7 +18,7 @@ func replaceFakeClaude(t *testing.T, installed bool, msg string) {
 	t.Helper()
 	list := `[]`
 	if installed {
-		list = `[{"id":"ox-cli-usage-pane@ox-cli-usage","version":"1.0.0"}]`
+		list = `[{"id":"ox-cli-brief-pane@ox-cli-brief","version":"1.0.0"}]`
 	}
 	script := "#!/bin/sh\n" +
 		"if [ \"$*\" = \"plugin list --json\" ]; then echo '" + list + "'; exit 0; fi\n" +
@@ -31,7 +31,7 @@ func replaceFakeClaude(t *testing.T, installed bool, msg string) {
 func brokenUserConfig(t *testing.T) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	require.NoError(t, os.WriteFile(path, []byte("usage_pane: [unclosed\n"), 0o644))
+	require.NoError(t, os.WriteFile(path, []byte("brief_pane: [unclosed\n"), 0o644))
 	t.Setenv(config.EnvUserConfig, path)
 }
 
@@ -97,14 +97,14 @@ func TestUsagePane_UnreadableSetting(t *testing.T) {
 
 	res := GetDoctorCheck(CheckSlugUsagePane).Run(true)
 	assert.True(t, res.skipped)
-	assert.Equal(t, "could not read the usage_pane setting", res.message)
+	assert.Equal(t, "could not read the brief_pane setting", res.message)
 
 	_, err := applyUsagePaneSetting(context.Background())
 	require.Error(t, err)
 	assert.Nil(t, env.log(t), "an unreadable setting must not touch Claude Code")
 }
 
-// TestApplyUsagePaneSetting_InstallFails: `ox config set usage_pane on` with a
+// TestApplyUsagePaneSetting_InstallFails: `ox config set brief_pane on` with a
 // claude CLI that refuses the install reports the error instead of a hint
 // pointing at a pane that does not exist.
 func TestApplyUsagePaneSetting_InstallFails(t *testing.T) {
@@ -137,7 +137,7 @@ func TestEnsureUsagePane_Outcomes(t *testing.T) {
 	})
 }
 
-// TestUsagePaneCommands_CLIFails: `ox usage pane enable|disable|status` against
+// TestUsagePaneCommands_CLIFails: `ox brief pane enable|disable|status` against
 // a claude CLI that cannot run its plugin commands returns an error naming
 // the action. Failure prevented: a coworker is told the pane was installed or
 // removed when Claude Code never changed.
@@ -146,9 +146,9 @@ func TestUsagePaneCommands_CLIFails(t *testing.T) {
 		sub     string
 		wantErr string
 	}{
-		{"enable", "enable the usage pane"},
-		{"disable", "disable the usage pane"},
-		{"status", "check the usage pane"},
+		{"enable", "enable the brief pane"},
+		{"disable", "disable the brief pane"},
+		{"status", "check the brief pane"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.sub, func(t *testing.T) {

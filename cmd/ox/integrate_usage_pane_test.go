@@ -9,7 +9,7 @@ import (
 )
 
 // TestUninstallAll_RemovesUsagePane verifies `ox integrate uninstall --all`
-// takes the /ox-usage pane out of Claude Code along with every other
+// takes the /ox-brief pane out of Claude Code along with every other
 // integration.
 // Failure prevented: a coworker removes ox's integrations and the pane keeps
 // loading in every Claude Code session, from a folder ox no longer manages.
@@ -50,8 +50,8 @@ func TestUninstallAll_SaysWhatIsLeftOfThePaneWithoutClaude(t *testing.T) {
 		require.NoError(t, uninstallAllIntegrations(true))
 	})
 	assert.NoDirExists(t, env.dir)
-	assert.Contains(t, out, "Integrations uninstalled. To finish removing the usage pane")
-	assert.Contains(t, out, "/plugin uninstall ox-cli-usage-pane@ox-cli-usage")
-	assert.Contains(t, out, "/plugin marketplace remove ox-cli-usage")
+	assert.Contains(t, out, "Integrations uninstalled. To finish removing the brief pane")
+	assert.Contains(t, out, "/plugin uninstall ox-cli-brief-pane@ox-cli-brief")
+	assert.Contains(t, out, "/plugin marketplace remove ox-cli-brief")
 	assert.NotContains(t, out, "All integrations uninstalled")
 }

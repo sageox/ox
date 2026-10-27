@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/glance"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/recap"
@@ -20,11 +21,12 @@ import (
 )
 
 var usageCmd = &cobra.Command{
-	Use:   "usage",
-	Short: "Show what ox did in this session",
-	Long: `Show what ox did in this session: the ox calls your AI coworker made, how
-much context ox put in front of the model (estimated tokens), which team items
-were surfaced by name, and which of those the AI coworker reports it used.
+	Use:   "brief",
+	Short: "Show what SageOx gave this session",
+	Long: `Show what SageOx gave this session: the ox calls your AI coworker made, how
+much context ox put in front of the model (estimated tokens), what it read by
+title (with sageox.ai links where one exists), and which items have evidence
+they were used. Murmurs are listed only when they were useful.
 
 When called by an AI coworker it emits JSON with a pre-rendered display and
 guidance; in a bare terminal it prints the same report. --me rolls up your
@@ -32,25 +34,39 @@ recent sessions; --team shows a team-wide aggregate only — never who did what.
 
 In the session view, calls.recent in the JSON lists the 10 newest ox calls;
 --recent N widens it (0 = every call). The display text is unchanged.`,
-	Example: `  ox usage                     # this session
-  ox usage --session <name>    # a recorded session in the Ledger
-  ox usage --me --since 14d    # your recent sessions, one row each
-  ox usage --team              # team-wide aggregate (no per-person data)
-  ox usage --json              # structured report for AI coworkers
-  ox usage --json --recent 0   # every ox call in calls.recent`,
+	Example: `  ox brief                     # this session
+  ox brief --session <name>    # a recorded session in the Ledger
+  ox brief --me --since 14d    # your recent sessions, one row each
+  ox brief --team              # team-wide aggregate (no per-person data)
+  ox brief --json              # structured report for AI coworkers
+  ox brief --json --recent 0   # every ox call in calls.recent`,
 	Args: cobra.NoArgs,
 	RunE: runUsage,
 }
 
+// usageDeprecatedCmd keeps `ox usage` working for one release after the
+// rename to `ox brief`. Hidden, and without the pane subcommand, so help and
+// generated docs show only `ox brief`.
+var usageDeprecatedCmd = &cobra.Command{
+	Use:        "usage",
+	Short:      "Show what SageOx gave this session (use 'ox brief' instead)",
+	Hidden:     true,
+	Deprecated: "use 'ox brief' instead",
+	Args:       cobra.NoArgs,
+	RunE:       runUsage,
+}
+
 func init() {
-	usageCmd.Flags().String("session", "", "report a recorded session by name instead of the current one")
-	usageCmd.Flags().Bool("me", false, "roll up your recent sessions, one row each")
-	usageCmd.Flags().Bool("team", false, "team-wide aggregate across all coworkers' sessions (no per-person data)")
-	usageCmd.Flags().String("since", "7d", "window for --me and --team (e.g. 7d, 24h, or an ISO date)")
-	usageCmd.Flags().Int("limit", 10, "maximum sessions for --me")
-	usageCmd.Flags().Int("recent", 10, "session view: ox calls listed in the JSON calls.recent (0 = all)")
-	usageCmd.Flags().Bool("json", false, "structured JSON report for AI coworkers")
-	usageCmd.MarkFlagsMutuallyExclusive("session", "me", "team")
+	for _, c := range []*cobra.Command{usageCmd, usageDeprecatedCmd} {
+		c.Flags().String("session", "", "report a recorded session by name instead of the current one")
+		c.Flags().Bool("me", false, "roll up your recent sessions, one row each")
+		c.Flags().Bool("team", false, "team-wide aggregate across all coworkers' sessions (no per-person data)")
+		c.Flags().String("since", "7d", "window for --me and --team (e.g. 7d, 24h, or an ISO date)")
+		c.Flags().Int("limit", 10, "maximum sessions for --me")
+		c.Flags().Int("recent", 10, "session view: ox calls listed in the JSON calls.recent (0 = all)")
+		c.Flags().Bool("json", false, "structured JSON report for AI coworkers")
+		c.MarkFlagsMutuallyExclusive("session", "me", "team")
+	}
 }
 
 func runUsage(cmd *cobra.Command, _ []string) error {
@@ -81,6 +97,7 @@ func runUsage(cmd *cobra.Command, _ []string) error {
 	} else {
 		in = usageInputForCurrentSession(projectRoot, resolveImplicitAgentID())
 	}
+	in.Endpoint = endpoint.GetForProject(projectRoot)
 	in.Now = time.Now()
 	in.Width = width
 	if cmd.Flags().Changed("recent") {
@@ -207,7 +224,7 @@ func usageInputForLedgerSession(name string) (usage.Input, error) {
 		return usage.Input{}, fmt.Errorf("session %q not found in the Ledger", name)
 	}
 	if meta.IsDraft() {
-		in.TraceReason = "session is still recording; run `ox usage` from that session"
+		in.TraceReason = "session is still recording; run `ox brief` from that session"
 		return in, nil
 	}
 	in.AgentID = meta.AgentID

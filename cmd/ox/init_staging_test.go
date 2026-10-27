@@ -518,7 +518,7 @@ func TestStageAll_NeverStagesReservedOxArtifacts(t *testing.T) {
 		".claude/rules/ox-cli.md",
 		".claude/rules/ox-cli-use-team-context.md",
 		".agents/skills/ox-cli-recap/SKILL.md",
-		".agents/skills/ox-cli-usage/SKILL.md",
+		".agents/skills/ox-cli-brief/SKILL.md",
 		".cursor/rules/sageox-team-security.mdc",
 		".github/instructions/sageox-team-security.md",
 		".clinerules/sageox-team-security.md",

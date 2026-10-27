@@ -1,18 +1,19 @@
 ---
-title: "ox usage"
-description: "CLI reference for ox usage"
-sidebar_position: 121
+title: "ox brief"
+description: "CLI reference for ox brief"
+sidebar_position: 16
 ---
 
-## ox usage
+## ox brief
 
-Show what ox did in this session
+Show what SageOx gave this session
 
 ### Synopsis
 
-Show what ox did in this session: the ox calls your AI coworker made, how
-much context ox put in front of the model (estimated tokens), which team items
-were surfaced by name, and which of those the AI coworker reports it used.
+Show what SageOx gave this session: the ox calls your AI coworker made, how
+much context ox put in front of the model (estimated tokens), what it read by
+title (with sageox.ai links where one exists), and which items have evidence
+they were used. Murmurs are listed only when they were useful.
 
 When called by an AI coworker it emits JSON with a pre-rendered display and
 guidance; in a bare terminal it prints the same report. --me rolls up your
@@ -22,24 +23,24 @@ In the session view, calls.recent in the JSON lists the 10 newest ox calls;
 --recent N widens it (0 = every call). The display text is unchanged.
 
 ```
-ox usage [flags]
+ox brief [flags]
 ```
 
 ### Examples
 
 ```
-  ox usage                     # this session
-  ox usage --session <name>    # a recorded session in the Ledger
-  ox usage --me --since 14d    # your recent sessions, one row each
-  ox usage --team              # team-wide aggregate (no per-person data)
-  ox usage --json              # structured report for AI coworkers
-  ox usage --json --recent 0   # every ox call in calls.recent
+  ox brief                     # this session
+  ox brief --session <name>    # a recorded session in the Ledger
+  ox brief --me --since 14d    # your recent sessions, one row each
+  ox brief --team              # team-wide aggregate (no per-person data)
+  ox brief --json              # structured report for AI coworkers
+  ox brief --json --recent 0   # every ox call in calls.recent
 ```
 
 ### Options
 
 ```
-  -h, --help             help for usage
+  -h, --help             help for brief
       --json             structured JSON report for AI coworkers
       --limit int        maximum sessions for --me (default 10)
       --me               roll up your recent sessions, one row each
@@ -64,4 +65,4 @@ ox usage [flags]
 ### SEE ALSO
 
 * [ox](/)	 - Shared team context that makes agentic engineering multiplayer
-* [ox usage pane](/usage/pane)	 - Show this session's ox calls in a Claude Code pane
+* [ox brief pane](/brief/pane)	 - Show this session's ox calls in a Claude Code pane

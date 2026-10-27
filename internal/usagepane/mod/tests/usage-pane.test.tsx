@@ -1,25 +1,30 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import {
+  bar,
+  contextRows,
   formatClock,
   formatRow,
   formatTokens,
   headerLines,
+  INITIAL_STATUS,
   isAtEnd,
   isOxCommand,
+  murmurRows,
   parseReport,
+  readRows,
   shouldScrollToEnd,
   truncate,
 } from '../hooks/logic'
 
-const PLUGIN = 'ox-cli-usage-pane'
+const PLUGIN = 'ox-cli-brief-pane'
 
 const PANE = {
   plugin: PLUGIN,
   component: 'Pane',
-  requestId: 'ox-usage',
+  requestId: 'ox-brief',
   props: {
-    title: 'ox usage',
+    title: 'ox brief',
     isFocused: false,
     bodyColumns: 80,
     placement: 'dock',
@@ -29,15 +34,15 @@ const PANE = {
 } as const
 
 const COMMAND = {
-  command: 'ox-usage',
+  command: 'ox-brief',
   origin: { kind: 'composer' },
   presentation: { isFullscreen: true, columns: 160 },
 } as const
 
-// Three ox calls, newest first as `ox usage --json` lists them.
+// Three ox calls, newest first as `ox brief --json` lists them.
 const REPORT = {
   view: 'session',
-  session: { name: 'usage-pane', agent_id: 'Oxa1b2', harness: 'claude-code', recording: true, turns: 4 },
+  session: { name: 'brief-pane', agent_id: 'Oxa1b2', harness: 'claude-code', recording: true, turns: 4 },
   trace: { available: true, source: 'session' },
   calls: {
     total: 3,
@@ -49,9 +54,34 @@ const REPORT = {
       { label: 'prime', command: 'ox agent prime', seq: 1, tokens: 15000, ts: '2026-10-24T10:01:00Z' },
     ],
   },
-  injected: { total_tokens: 16314, estimated: true, by_source: [] },
-  surfaced: [{ ref: 'adr-12' }, { ref: 'adr-31' }],
-  used: { status: 'not_yet_reported' },
+  context: {
+    tokens: 16314,
+    estimated: true,
+    by_source: [
+      { source: 'prime', tokens: 15000, count: 1 },
+      { source: 'query', tokens: 1234, count: 1 },
+      { source: 'murmurs', tokens: 80, count: 1 },
+    ],
+    unmetered: [],
+  },
+  surfaced: [
+    {
+      ref: 'disc_9',
+      ref_type: 'discussion',
+      via: 'query',
+      title: 'Release versioning sync',
+      url: 'https://sageox.ai/c/disc_9',
+      seq: 2,
+      used: { evidence: 'cited', seq: 3 },
+    },
+    { ref: 'plan_4', ref_type: 'plan', via: 'prime', title: 'Brief pane redesign', url: 'https://sageox.ai/p/plan_4' },
+    { ref: 'murmur_1', ref_type: 'murmur', from: 'Oxa1', from_name: 'Avery', topic: 'wip', via: 'murmur', used: { evidence: 'read' } },
+    { ref: 'murmur_2', ref_type: 'murmur', from: 'Oxb2', from_name: 'Sam', topic: 'release', via: 'murmur' },
+    { ref: 'ox-cli-plan', ref_type: 'skill', via: 'prime' },
+    { ref: 'ox-cli-recap', ref_type: 'skill', via: 'prime' },
+  ],
+  relevant: { count: 2, surfaced_count: 6 },
+  used: { self_reported: false },
   display: '',
   guidance: '',
 }
@@ -108,8 +138,37 @@ describe('formatting', () => {
   })
   test('header', () => {
     const h = headerLines(parseReport(JSON.stringify(REPORT)))
-    expect(h.identity).toBe('usage-pane · claude-code · ● recording')
-    expect(h.summary).toBe('calls 3 (1 failed) · injected ~16k tok · surfaced 2 · used not yet reported')
+    expect(h.marker).toBe('● recording')
+    expect(h.summary).toBe('calls 3 (1 failed) · ~16k tokens · read 4 · useful 2')
+  })
+  test('header without relevant counts used items, and says not recording', () => {
+    const { relevant: _, ...rest } = REPORT
+    const h = headerLines(parseReport(JSON.stringify({ ...rest, session: { recording: false } })))
+    expect(h.marker).toBe('○ not recording')
+    expect(h.summary).toBe('calls 3 (1 failed) · ~16k tokens · read 4 · useful 2')
+  })
+  test('an old trace without context or surfaced still parses', () => {
+    const h = headerLines(parseReport(JSON.stringify({ view: 'session', session: { recording: true }, calls: { total: 0, failed: 0 } })))
+    expect(h.summary).toBe('calls 0 · ~0 tokens · read 0 · useful 0')
+  })
+  test('context bars scale to the largest source', () => {
+    const r = parseReport(JSON.stringify(REPORT))!
+    expect(contextRows(r).map(row => [row.text, row.bar])).toEqual([
+      ['prime    ~15k tokens', '▇▇▇▇▇▇'],
+      ['query    ~1.2k tokens', '▇'],
+      ['murmurs  ~80 tokens', '▇'],
+    ])
+    expect(bar(0, 10)).toBe('')
+    expect(bar(5, 10)).toBe('▇▇▇')
+  })
+  test('read rows group skills; murmur rows keep only used ones', () => {
+    const r = parseReport(JSON.stringify(REPORT))!
+    expect(readRows(r)).toEqual([
+      { key: 'read:0', text: 'discussion  Release versioning sync', used: true, url: 'https://sageox.ai/c/disc_9' },
+      { key: 'read:1', text: 'plan        Brief pane redesign', used: false, url: 'https://sageox.ai/p/plan_4' },
+      { key: 'read:skills', text: '2 team skills', used: false },
+    ])
+    expect(murmurRows(r)).toEqual([{ key: 'murmur:0', text: 'Avery  [wip]', used: true }])
   })
   test('parse', () => {
     expect(parseReport('not json')).toBeNull()
@@ -123,7 +182,7 @@ describe('formatting', () => {
   })
 })
 
-test('/ox-usage opens the pane and lists each ox call, oldest first', async ($, on) => {
+test('/ox-brief opens the pane and lists each ox call, oldest first', async ($, on) => {
   mock.clock(on, { now: 1_000 })
   let runs = 0
   on('process.run', () => {
@@ -131,18 +190,36 @@ test('/ox-usage opens the pane and lists each ox call, oldest first', async ($, 
     return ok(JSON.stringify(REPORT))
   })
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.panes', () => ({ value: [{ id: 'ox-usage', title: 'ox usage', isShown: true, isFocused: false, isPlaced: true }] }))
+  on('ui.panes', () => ({ value: [{ id: 'ox-brief', title: 'ox brief', isShown: true, isFocused: false, isPlaced: true }] }))
 
   const ran = await $.command.run({ ...COMMAND, args: '' } as never)
-  expect(ran.text).toBe('ox usage pane opened.')
+  expect(ran.text).toBe('ox brief pane opened.')
   expect(runs).toBe(1)
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect((await ui.find({ type: 'Text', text: /● ox usage/ }))?.text).toBe('● ox usage  usage-pane · claude-code · ● recording')
-    expect((await ui.find({ type: 'Text', text: /^calls/ }))?.text).toBe(
-      'calls 3 (1 failed) · injected ~16k tok · surfaced 2 · used not yet reported',
-    )
+    const titleRow = (await ui.find({ type: 'Text', text: /● ox brief/ }))?.text
+    expect(titleRow).toBe('● ox brief  ● recording')
+    expect(titleRow).not.toMatch(/brief-pane|claude-code|Oxa1b2/)
+    expect((await ui.find({ type: 'Text', text: /^calls \d/ }))?.text).toBe('calls 3 (1 failed) · ~16k tokens · read 4 · useful 2')
+    expect(await ui.find({ type: 'Text', text: /injected|not yet reported/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /recording/ })).toBeDefined()
+
+    for (const h of ['context', 'read', 'murmurs', 'calls']) {
+      expect((await ui.find({ key: `h:${h}` }))?.text).toBe(h)
+    }
+    expect((await ui.find({ key: 'context:prime' }))?.text).toBe('prime    ~15k tokens  ▇▇▇▇▇▇')
+    expect(await ui.find({ type: 'Text', text: 'estimates, ~4 bytes/token' })).toBeDefined()
+    expect((await ui.find({ key: 'read:0' }))?.text).toBe('discussion  Release versioning sync ✓')
+    expect((await ui.find({ key: 'read:0:url' }))?.text).toBe('https://sageox.ai/c/disc_9')
+    expect((await ui.find({ type: 'Link', text: 'https://sageox.ai/c/disc_9' }))?.props.href).toBe('https://sageox.ai/c/disc_9')
+    expect((await ui.find({ key: 'read:1' }))?.text).toBe('plan        Brief pane redesign')
+    expect((await ui.find({ key: 'read:1:url' }))?.text).toBe('https://sageox.ai/p/plan_4')
+    expect((await ui.find({ key: 'read:skills' }))?.text).toBe('2 team skills')
+    expect((await ui.find({ key: 'murmur:0' }))?.text).toBe('Avery  [wip] ✓')
+    expect(await ui.find({ type: 'Text', text: /Sam/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: '✓ used by the AI coworker' })).toBeDefined()
+
     const rows = [await ui.find({ key: 'row:0' }), await ui.find({ key: 'row:1' }), await ui.find({ key: 'row:2' })]
     expect(rows.map(r => r?.text.replace(/^\d\d:\d\d/, 'HH:MM'))).toEqual([
       'HH:MM  prime  ox agent prime  ~15k',
@@ -163,7 +240,7 @@ test('an ox Bash call refreshes the open pane once; other commands do not', asyn
     return ok(JSON.stringify(REPORT))
   })
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.panes', () => ({ value: [{ id: 'ox-usage', title: 'ox usage', isShown: true, isFocused: false, isPlaced: true }] }))
+  on('ui.panes', () => ({ value: [{ id: 'ox-brief', title: 'ox brief', isShown: true, isFocused: false, isPlaced: true }] }))
   on('tool.call', () => ({ result: {} }))
 
   await $.command.run({ ...COMMAND, args: '' } as never)
@@ -204,12 +281,12 @@ test('a failing ox shows one error line and throws nothing', async ($, on) => {
   on('ui.open', () => ({ value: { isPlaced: true } }))
 
   const ran = await $.command.run({ ...COMMAND, args: '' } as never)
-  expect(ran.text).toBe('ox usage pane opened.')
+  expect(ran.text).toBe('ox brief pane opened.')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect((await ui.find({ type: 'Text', text: /failed/ }))?.text).toBe('ox usage failed: Error: not logged in')
+  expect((await ui.find({ type: 'Text', text: /failed/ }))?.text).toBe('ox brief failed: Error: not logged in')
   await ui.unmount()
 
-  expect((await $.command.run({ ...COMMAND, args: 'refresh' } as never)).text).toBe('ox usage failed: Error: not logged in')
+  expect((await $.command.run({ ...COMMAND, args: 'refresh' } as never)).text).toBe('ox brief failed: Error: not logged in')
 })
 
 test('ox missing from PATH says so', async ($, on) => {
@@ -235,6 +312,20 @@ test('an empty session and a missing trace read plainly', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: 'No ox calls yet.' })).toBeDefined()
   await ui.unmount()
 
+  // Nothing used: no murmurs section, no legend, and unused murmurs never show.
+  stdout = JSON.stringify({
+    ...EMPTY,
+    surfaced: EMPTY.surfaced.map(({ used: _, ...item }) => item),
+    relevant: undefined,
+  })
+  await $.command.run({ ...COMMAND, args: 'refresh' } as never)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ key: 'h:murmurs' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /used by the AI coworker/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /✓/ })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /^calls \d/ }))?.text).toBe('calls 0 · ~16k tokens · read 4 · useful 0')
+  await ui.unmount()
+
   stdout = JSON.stringify({ ...EMPTY, trace: { available: false, source: 'none', reason: 'no usage trace found for this session' } })
   await $.command.run({ ...COMMAND, args: 'refresh' } as never)
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
@@ -243,7 +334,7 @@ test('an empty session and a missing trace read plainly', async ($, on) => {
   await ui.unmount()
 })
 
-test('/ox-usage off closes the pane', async ($, on) => {
+test('/ox-brief off closes the pane', async ($, on) => {
   mock.clock(on, { now: 1_000 })
   const closed: string[] = []
   on('ui.close', (_, e) => {
@@ -252,11 +343,11 @@ test('/ox-usage off closes the pane', async ($, on) => {
   })
 
   const ran = await $.command.run({ ...COMMAND, args: 'off' } as never)
-  expect(ran.text).toBe('ox usage pane closed.')
-  expect(closed).toEqual(['ox-usage'])
+  expect(ran.text).toBe('ox brief pane closed.')
+  expect(closed).toEqual(['ox-brief'])
 })
 
-test('/ox-usage registers at session start without opening the pane', async ($, on) => {
+test('/ox-brief registers at session start without opening the pane', async ($, on) => {
   const registered: string[] = []
   let opened = 0
   on('command.register', (_, e) => {
@@ -270,19 +361,26 @@ test('/ox-usage registers at session start without opening the pane', async ($, 
   on('session.start', (_, e) => ({ cwd: e.cwd }))
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  expect(registered).toEqual(['ox-usage'])
+  expect(registered).toEqual(['ox-brief'])
   expect(opened).toBe(0)
 })
 
+// The brief reads top down (header, context, read, then calls), so the pane
+// opens at the top and keeps the end in view only once the person has
+// scrolled there. Jumping to the end on open scrolled the header away.
 describe('following the end', () => {
-  test('new rows pull the window down while following', () => {
-    expect(shouldScrollToEnd(undefined, 3, true)).toBe(true)
+  test('the pane opens at the top: a first load never jumps to the end', () => {
+    expect(INITIAL_STATUS.follow).toBe(false)
+    expect(shouldScrollToEnd(undefined, 3, true)).toBe(false)
+    expect(shouldScrollToEnd(undefined, 3, INITIAL_STATUS.follow)).toBe(false)
+  })
+  test('new rows pull the window down once the person follows the end', () => {
     expect(shouldScrollToEnd(3, 4, true)).toBe(true)
   })
-  test('no new rows, or the person scrolled up, leaves the window', () => {
+  test('no new rows, or the person reading above the end, leaves the window', () => {
     expect(shouldScrollToEnd(3, 3, true)).toBe(false)
     expect(shouldScrollToEnd(3, 4, false)).toBe(false)
-    expect(shouldScrollToEnd(undefined, 0, true)).toBe(false)
+    expect(shouldScrollToEnd(3, 4, INITIAL_STATUS.follow)).toBe(false)
   })
 })
 
@@ -295,7 +393,7 @@ test('a person scrolling the pane passes through untouched', async ($, on) => {
   })
   const moved = await $.ui.scroll({
     component: 'Pane',
-    requestId: 'ox-usage',
+    requestId: 'ox-brief',
     offset: 3,
     by: -1,
     bodyRows: 2,
@@ -305,3 +403,4 @@ test('a person scrolling the pane passes through untouched', async ($, on) => {
   expect(moved).toEqual({})
   expect(seen).toBe(1)
 })
+

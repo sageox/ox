@@ -17,11 +17,11 @@ func TestModFS_HoldsTheMod(t *testing.T) {
 		want string
 	}{
 		{".claude-plugin/plugin.json", `"version": "{{VERSION}}"`},
-		{".claude-plugin/marketplace.json", `"name": "ox-cli-usage"`},
+		{".claude-plugin/marketplace.json", `"name": "ox-cli-brief"`},
 		{"hooks/hooks.json", `"./register.tsx"`},
-		{"hooks/register.tsx", `command: 'ox-usage'`},
-		{"hooks/logic.ts", `'usage', '--json', '--recent', '0'`},
-		{"types/index.d.ts", `'ox-cli-usage-pane'`},
+		{"hooks/register.tsx", `command: 'ox-brief'`},
+		{"hooks/logic.ts", `'brief', '--json', '--recent', '0'`},
+		{"types/index.d.ts", `'ox-cli-brief-pane'`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {
@@ -74,8 +74,22 @@ func TestManifests_NameThePlugin(t *testing.T) {
 }
 
 func TestDir_IsUnderOxData(t *testing.T) {
-	want := filepath.Join(paths.DataDir(), "mods", "claude-code", PluginName)
-	if got := Dir(); got != want {
-		t.Errorf("Dir() = %q, want %q", got, want)
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"current", Dir(), filepath.Join(paths.DataDir(), "mods", "claude-code", "ox-cli-brief-pane")},
+		{"legacy", LegacyDir(), filepath.Join(paths.DataDir(), "mods", "claude-code", "ox-cli-usage-pane")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Errorf("dir = %q, want %q", tt.got, tt.want)
+			}
+		})
+	}
+	if Dir() == LegacyDir() {
+		t.Error("Dir and LegacyDir must differ, or the legacy cleanup would remove the current pane")
 	}
 }

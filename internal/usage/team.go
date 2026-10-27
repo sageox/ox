@@ -13,13 +13,13 @@ import (
 const maxTeamItems = 10
 
 // guidanceTeam narrates the aggregate team view.
-const guidanceTeam = "Show the team-wide ox usage aggregate. Print the display field verbatim inside a " +
+const guidanceTeam = "Show the team-wide ox brief aggregate. Print the display field verbatim inside a " +
 	"fenced ```text block, then at most 3 sentences of your own. This view is aggregate-only by design: " +
 	"never name, count, compare or rank individual coworkers, and never infer who did what. Token counts " +
 	"are estimates (~4 bytes per token) — say so once. For the value narrative (what SageOx delivered), " +
 	"point to `ox recap`. Never state or imply time saved or dollar figures."
 
-// TeamReport is the `ox usage --team --json` payload. It is aggregate-only
+// TeamReport is the `ox brief --team --json` payload. It is aggregate-only
 // (ADR-027 rule 2): it carries no principal IDs, names, session names,
 // per-person counts or rankings — nothing that says who did what.
 type TeamReport struct {
@@ -29,7 +29,7 @@ type TeamReport struct {
 	Traced      int          `json:"traced"`
 	NotHydrated int          `json:"not_hydrated"`
 	Calls       []LabelStat  `json:"calls"`
-	Injected    []SourceStat `json:"injected"`
+	Context     []SourceStat `json:"context"`
 	TopSurfaced []DocStat    `json:"top_surfaced"`
 	Display     string       `json:"display"`
 	Guidance    string       `json:"guidance"`
@@ -55,7 +55,7 @@ type DocStat struct {
 func BuildTeam(in RollupInput) TeamReport {
 	r := TeamReport{
 		View: ViewTeam, Window: in.Window,
-		Calls: []LabelStat{}, Injected: []SourceStat{}, TopSurfaced: []DocStat{},
+		Calls: []LabelStat{}, Context: []SourceStat{}, TopSurfaced: []DocStat{},
 		Guidance:    guidanceTeam,
 		NextActions: []NextAction{{Action: "ox recap", Why: "the value narrative: what team knowledge reached your work"}},
 	}
@@ -84,7 +84,7 @@ func BuildTeam(in RollupInput) TeamReport {
 			ls.Count += c.Count
 			ls.Tokens += c.Tokens
 		}
-		for _, src := range sr.Injected.BySource {
+		for _, src := range sr.Context.BySource {
 			tokens[src.Source] += src.Tokens
 		}
 		for _, sf := range sr.Surfaced {
@@ -104,13 +104,13 @@ func BuildTeam(in RollupInput) TeamReport {
 		return r.Calls[i].Label < r.Calls[j].Label
 	})
 	for src, n := range tokens {
-		r.Injected = append(r.Injected, SourceStat{Source: src, Tokens: n})
+		r.Context = append(r.Context, SourceStat{Source: src, Tokens: n})
 	}
-	sort.Slice(r.Injected, func(i, j int) bool {
-		if r.Injected[i].Tokens != r.Injected[j].Tokens {
-			return r.Injected[i].Tokens > r.Injected[j].Tokens
+	sort.Slice(r.Context, func(i, j int) bool {
+		if r.Context[i].Tokens != r.Context[j].Tokens {
+			return r.Context[i].Tokens > r.Context[j].Tokens
 		}
-		return r.Injected[i].Source < r.Injected[j].Source
+		return r.Context[i].Source < r.Context[j].Source
 	})
 	for ref, n := range docs {
 		r.TopSurfaced = append(r.TopSurfaced, DocStat{Ref: ref, Sessions: n})
@@ -150,7 +150,7 @@ func renderTeam(r TeamReport, width int, st styler) string {
 	if r.Window == "" {
 		window = "recent"
 	}
-	lines := []string{st.head("ox usage") + st.dim(fmt.Sprintf(" · team  %s · %d session%s (%d with usage trace)",
+	lines := []string{st.head("ox brief") + st.dim(fmt.Sprintf(" · team  %s · %d session%s (%d with usage trace)",
 		window, r.Sessions, plural(r.Sessions, "", "s"), r.Traced))}
 	if r.Traced == 0 {
 		lines = append(lines, st.dim("no usage traces in this window yet"))
@@ -165,19 +165,19 @@ func renderTeam(r TeamReport, width int, st styler) string {
 		lines = append(lines, wrapItems(st.label("calls"), callItems, "  ", width)...)
 
 		tok, maxTok := 0, 0
-		for _, s := range r.Injected {
+		for _, s := range r.Context {
 			tok += s.Tokens
 			maxTok = max(maxTok, s.Tokens)
 		}
-		injItems := []string{st.accent("~"+FmtK(tok)+" tok") + "  "}
-		for _, s := range r.Injected {
+		cxItems := []string{st.accent("~"+FmtK(tok)+" tokens") + "  "}
+		for _, s := range r.Context {
 			item := s.Source + " " + FmtK(s.Tokens)
 			if n := barLen(s.Tokens, maxTok); n > 0 {
 				item += " " + st.accent(strings.Repeat("▇", n))
 			}
-			injItems = append(injItems, item)
+			cxItems = append(cxItems, item)
 		}
-		lines = append(lines, wrapItems(st.label("injected"), injItems, "  ", width)...)
+		lines = append(lines, wrapItems(st.label("context"), cxItems, "  ", width)...)
 
 		var docItems []string
 		for _, d := range r.TopSurfaced {
