@@ -48,6 +48,8 @@ export type UsageReport = {
   calls: { total: number; failed: number; recent: UsageRecentCall[] }
   context: { tokens: number; estimated?: boolean; by_source: UsageContextSource[] }
   surfaced: UsageSurfaced[]
+  /** Every surfaced item counted by ref_type; surfaced[] is capped for display. */
+  surfaced_by_type?: Record<string, number>
   relevant?: UsageRelevant
   /** Whether SageOx would be credited as a co-author of this session's work. */
   attribution?: UsageAttribution

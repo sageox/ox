@@ -235,6 +235,23 @@ describe('available rows', () => {
   test('nothing unused, nothing to draw', () => {
     expect(availableRows(parseReport(JSON.stringify({ ...REPORT, surfaced: [] }))!)).toEqual([])
   })
+  test('folded counts come from the full per-type totals when the list is capped', () => {
+    // ox capped surfaced[] for display; surfaced_by_type counts everything.
+    const surfaced = [
+      { ref: 'AGENTS.md', ref_type: 'doc', via: 'prime' },
+      { ref: 'mur_1', ref_type: 'murmur', via: 'whisper' },
+      { ref: 'mur_2', ref_type: 'murmur', via: 'whisper', used: { evidence: 'cited' } },
+      { ref: 'cnv_a', ref_type: 'discussion', via: 'retrieval' },
+      { ref: 'ox-cli-plan', ref_type: 'skill', via: 'prime' },
+    ]
+    const surfaced_by_type = { doc: 4, murmur: 11, discussion: 2, plan: 5, skill: 3 }
+    const r = parseReport(JSON.stringify({ ...REPORT, surfaced, surfaced_by_type, relevant: { count: 1, surfaced_count: 25 } }))!
+    expect(availableRows(r)).toEqual([
+      { key: 'available:0', text: 'doc  AGENTS.md' },
+      { key: 'available:counts', text: '2 discussions · 5 plans · 10 murmurs' },
+      { key: 'available:skills', text: '3 team skills' },
+    ])
+  })
 })
 
 describe('header and co-author', () => {

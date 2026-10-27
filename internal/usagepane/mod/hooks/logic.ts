@@ -109,9 +109,22 @@ export function parseReport(stdout: string): UsageReport | null {
     calls: { total: num(calls.total), failed: num(calls.failed), recent },
     context: { tokens: num(context.tokens), estimated: context.estimated === true, by_source: bySource },
     surfaced,
+    surfaced_by_type: parseCounts(raw.surfaced_by_type),
     relevant: parseRelevant(raw.relevant),
     attribution: parseAttribution(raw.attribution),
   }
+}
+
+// parseCounts: a ref_type → count map, or undefined when absent (an older ox).
+function parseCounts(v: unknown): Record<string, number> | undefined {
+  if (!isRecord(v)) {
+    return undefined
+  }
+  const out: Record<string, number> = {}
+  for (const [k, n] of Object.entries(v)) {
+    out[k] = num(n)
+  }
+  return out
 }
 
 function optNum(v: unknown): number | undefined {
@@ -404,10 +417,18 @@ export type AvailableRow = { key: string; text: string }
 
 // availableRows: what ox surfaced that went unused, without links. Docs stay
 // by name; discussions, plans, sessions and murmurs fold into one count row;
-// skills into `N team skills`.
+// skills into `N team skills`. surfaced[] is capped for display, so the counts
+// come from surfaced_by_type less the used items of each kind (used items are
+// never cut); an older ox without it is counted from the list.
 export function availableRows(report: UsageReport): AvailableRow[] {
   const used = new Set(usedItems(report).map(i => i.ref))
-  const unused = report.surfaced.filter(s => s.used === undefined && !used.has(s.ref))
+  const isUsed = (s: UsageSurfaced) => s.used !== undefined || used.has(s.ref)
+  const unused = report.surfaced.filter(s => !isUsed(s))
+  const totals = report.surfaced_by_type
+  const unusedOf = (kind: string) =>
+    totals === undefined
+      ? unused.filter(s => s.ref_type === kind).length
+      : Math.max(0, (totals[kind] ?? 0) - report.surfaced.filter(s => s.ref_type === kind && isUsed(s)).length)
   const folded = new Set(FOLDED.map(([k]) => k))
   const named = unused.filter(s => s.ref_type !== SKILL && !folded.has(s.ref_type))
   const width = Math.max(0, ...named.map(s => [...(s.ref_type || 'ref')].length))
@@ -416,13 +437,13 @@ export function availableRows(report: UsageReport): AvailableRow[] {
     text: `${(s.ref_type || 'ref').padEnd(width)}  ${s.title || s.ref}`,
   }))
   const counts = FOLDED.map(([kind, plural]) => {
-    const n = unused.filter(s => s.ref_type === kind).length
+    const n = unusedOf(kind)
     return n === 0 ? '' : `${n} ${n === 1 ? kind : plural}`
   }).filter(Boolean)
   if (counts.length > 0) {
     rows.push({ key: 'available:counts', text: counts.join(' · ') })
   }
-  const skills = unused.filter(s => s.ref_type === SKILL).length
+  const skills = unusedOf(SKILL)
   if (skills > 0) {
     rows.push({ key: 'available:skills', text: `${skills} team skill${skills === 1 ? '' : 's'}` })
   }
