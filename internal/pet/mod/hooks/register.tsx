@@ -451,8 +451,12 @@ export const register: Register = on => {
       // his middle; the fallback frames are all one box and simply centre.
       return (
         <Box flexDirection="row" gap={1} alignItems={layout ? 'flex-end' : 'center'}>
-          {/* SMIL only runs in the sandboxed frame; as a plain image it would stand still. */}
-          <Svg key={KEY} source={source} alt="Oxy" width={px.width} height={px.height} isInteractive />
+          {/* Never `isInteractive`: the desktop scrubs an interactive Svg with a
+              forbid-list that drops every `<image>` and any href not `#id`, so
+              the PNG frames vanish and Oxy is drawn as his alt text. As a plain
+              image the markup is not scrubbed, data: PNGs load, and Chromium
+              runs SMIL inside an <img>, so the clip still animates. */}
+          <Svg key={KEY} source={source} alt="Oxy" width={px.width} height={px.height} />
           <Box key="words" marginBottom={layout?.wordsLift ?? 0}>
             <Text color="claude">
               {e.props.message ?? e.props.word}

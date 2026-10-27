@@ -486,7 +486,8 @@ for (const surface of ['desktop', 'vscode'] as const) {
       expect((await ui.find({ type: 'Box', key: 'words' }))?.props.marginBottom).toBe(want.lift)
       expect(source).toContain('<animate attributeName="visibility" calcMode="discrete"')
       expect(source.length).toBeLessThanOrEqual(SVG_SOURCE_CAP)
-      expect(svg?.props.isInteractive).toBe(true)
+      // A plain image: the desktop's interactive scrub forbids <image> and data: hrefs.
+      expect(svg?.props.isInteractive).toBeFalsy()
       expect(svg?.props.alt).toBe('Oxy')
       expect({ width: svg?.props.width, height: svg?.props.height }).toEqual(want.size)
       expect(await ui.find({ type: 'Raster' })).toBeUndefined()
@@ -537,7 +538,10 @@ test('desktop: the ticker redraws once per clip, never per frame, and never blit
   const clock = mock.clock(on, { now: 1_000 })
   mock.store(on)
   // big enough frames that the animation spans several clips
-  const length = 40_000
+  // Small enough that a clip holds six or seven 33 ms frames: 40,000 packed
+  // the 30 fps set three to a clip and left the first clip one frame long,
+  // shorter than the 60 ms the test rewinds before the first boundary.
+  const length = 18_000
   mockPngFiles(on, length)
   on('command.run', () => ({ text: '' }))
   let invalidates = 0
