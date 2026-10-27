@@ -62,3 +62,33 @@ Feature: Seeing Which Team Context the AI Coworker Used
       Given Devon's AI coworker made commits this session
       When Devon runs `ox brief`
       Then the commits carry exactly the co-author lines they had before
+
+  Rule: The brief counts what the AI coworker used while the session is still recording
+
+    Scenario: Avery sees the discussions her AI coworker built its answer from, mid-session
+      Given Avery's AI coworker is recording a session
+      And it listed the team's discussions and opened two of them
+      And it wrote its reply from those two, naming each by title
+      And it never reported using them
+      When Avery runs `ox brief` before the session ends
+      Then the brief lists both discussions as used
+      And each used discussion is shown with its sageox.ai link
+      And the status line counts the same two as used
+
+    Scenario: Avery sees a discussion counted after her AI coworker re-opens it by its sageox.ai link
+      Given Avery's AI coworker is recording a session in which it searched the team's discussions
+      When it re-opens one of them by its sageox.ai link
+      And Avery's brief refreshes
+      Then the brief lists that discussion as re-opened
+
+    Scenario: Avery sees nothing counted that only appeared in a tool's output or her own message
+      Given Avery's AI coworker is recording a session in which it was handed a plan
+      And the plan is named only in a command's output and in Avery's own message
+      When Avery runs `ox brief`
+      Then the brief counts the plan as available, not used
+
+    Scenario: Running the brief mid-session leaves the session's record as it was
+      Given Avery's AI coworker is recording a session
+      When Avery runs `ox brief` many times
+      Then the session's recorded context is unchanged until the session ends
+      And when the session ends its record shows the same uses the brief did
