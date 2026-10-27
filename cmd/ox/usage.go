@@ -208,6 +208,7 @@ func usageInputForCurrentSession(projectRoot, agentID string) usage.Input {
 			in.Harness = h
 		}
 		in.Events, _ = contexttrace.ReadEvents(filepath.Join(state.SessionPath, contexttrace.FileName))
+		in.Events = withLiveUses(projectRoot, state, in.Events)
 		in.TraceSource = usage.TraceSourceSession
 		return in
 	}
