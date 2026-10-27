@@ -75,7 +75,9 @@ scrollable list of every ox call, refreshed as they happen. It is a Claude Code 
 `claude` CLI is on PATH (Claude Code 2.1.309 or newer); the same mechanism ships Oxy
 (`ox pet`). The pane is a thin view over `ox brief --json`, so it shows exactly what
 `/ox-cli-brief` reports. `/ox-brief off` closes it, `ox config set brief_pane off`
-removes it, and `ox brief pane status` shows whether it is installed.
+removes it, and `ox brief pane status` shows whether it is installed. In the Claude desktop app's
+Claude Code tab the pane opens by itself, docked beside the chat; close it and it
+stays closed in later sessions until you run `/ox-brief` again.
 
 ## Canonical Agent Skills
 
