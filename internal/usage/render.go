@@ -2,6 +2,7 @@ package usage
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
@@ -89,7 +90,7 @@ func renderSession(r Report, width int, st styler) string {
 
 	used := usedLines(r, width, st)
 	lines = append(lines, used...)
-	lines = append(lines, availableLines(r.Surfaced, width, st)...)
+	lines = append(lines, availableLines(r, width, st)...)
 	lines = append(lines, coauthorLines(r.Attribution, width, st)...)
 	if len(used) > 0 {
 		lines = append(lines, st.dim(truncate(usedLegend, width)))
@@ -198,24 +199,17 @@ func evidencePhrase(it RelevantItem, fit, line int) string {
 
 // availableLines folds what was put in front of the model but not used into
 // one line: docs by name, then counts by kind. No links — a link is earned
-// by use.
-func availableLines(surfaced []Surfaced, width int, st styler) []string {
-	var docs, kinds []string
-	counts := map[string]int{}
+// by use. Counts come from the full per-type totals when the report has them,
+// since the surfaced list is capped for display.
+func availableLines(r Report, width int, st styler) []string {
+	surfaced := r.Surfaced
+	var docs []string
 	for _, s := range surfaced {
-		if s.Used != nil {
-			continue
-		}
-		if s.RefType == "doc" {
+		if s.Used == nil && s.RefType == "doc" {
 			docs = append(docs, readName(s, width))
-			continue
 		}
-		kind := firstNonEmpty(s.RefType, "item")
-		if counts[kind] == 0 {
-			kinds = append(kinds, kind)
-		}
-		counts[kind]++
 	}
+	kinds, counts := unusedCounts(r)
 	items := docs
 	for _, k := range kinds {
 		n := counts[k]
@@ -223,16 +217,72 @@ func availableLines(surfaced []Surfaced, width int, st styler) []string {
 		case k == refTypeSkill && n > 1:
 			items = append(items, fmt.Sprintf("%d team skills", n))
 		case k == refTypeSkill:
+			named := false
 			for _, s := range surfaced {
 				if s.RefType == refTypeSkill && s.Used == nil {
 					items = append(items, surfacedName(s))
+					named = true
 				}
+			}
+			if !named {
+				items = append(items, "1 team skill")
 			}
 		default:
 			items = append(items, fmt.Sprintf("%d %s", n, kindPlural(k, n)))
 		}
 	}
 	return wrapItems(st.label("available"), items, st.dim(" · "), width)
+}
+
+// unusedCounts counts the unused non-doc items by kind ("" reads "item"), in
+// the order the surfaced list first shows each kind. With SurfacedByType a
+// kind's count is its full total less the used items of that kind — used
+// items always survive the display cap, so the list holds all of them.
+func unusedCounts(r Report) ([]string, map[string]int) {
+	var kinds []string
+	counts := map[string]int{}
+	note := func(kind string, n int) {
+		if n <= 0 {
+			return
+		}
+		if _, seen := counts[kind]; !seen {
+			kinds = append(kinds, kind)
+		}
+		counts[kind] += n
+	}
+	if r.SurfacedByType == nil {
+		for _, s := range r.Surfaced {
+			if s.Used == nil && s.RefType != "doc" {
+				note(firstNonEmpty(s.RefType, "item"), 1)
+			}
+		}
+		return kinds, counts
+	}
+	usedOf := map[string]int{}
+	var order []string
+	seen := map[string]bool{}
+	for _, s := range r.Surfaced {
+		if s.Used != nil {
+			usedOf[s.RefType]++
+		}
+		if !seen[s.RefType] {
+			seen[s.RefType] = true
+			order = append(order, s.RefType)
+		}
+	}
+	var rest []string
+	for t := range r.SurfacedByType {
+		if !seen[t] {
+			rest = append(rest, t)
+		}
+	}
+	sort.Strings(rest)
+	for _, t := range append(order, rest...) {
+		if t != "doc" {
+			note(firstNonEmpty(t, "item"), r.SurfacedByType[t]-usedOf[t])
+		}
+	}
+	return kinds, counts
 }
 
 // kindPlural names n items of one kind.

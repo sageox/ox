@@ -58,6 +58,7 @@ func goldenReport(width int) Report {
 	r.Surfaced = append(r.Surfaced, Surfaced{Ref: "mur_r", RefType: "murmur", From: "OxRy01", FromName: "Ryan", Topic: "wip",
 		Via: "whisper", Used: &ItemUsed{Evidence: EvidenceRead}})
 	fillURLs(r.Surfaced, "https://sageox.ai")
+	r.SurfacedByType = countByType(r.Surfaced)
 	r.Relevant = &Relevant{Count: 2, SurfacedCount: len(r.Surfaced)}
 	r.Display = Display(r, width)
 	return r

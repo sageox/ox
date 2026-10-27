@@ -395,3 +395,21 @@ func TestBuildMe_UsefulCountsEvidence(t *testing.T) {
 	assert.Contains(t, attributed, "co-author 2 of 3\n", "the total says how many sessions would credit SageOx")
 	assertPlainFits(t, got, 80)
 }
+
+// TestRender_AvailableCountsFromFullTotals: the available line counts each
+// kind from surfaced_by_type, not the capped list. Failure prevented: 11
+// murmurs surfaced, 2 shown in the list, and the brief says "2 murmurs".
+func TestRender_AvailableCountsFromFullTotals(t *testing.T) {
+	r := Report{
+		Trace: TraceInfo{Available: true, Source: TraceSourceSession},
+		Surfaced: []Surfaced{
+			{Ref: "doc-a.md", RefType: "doc", Via: "prime"},
+			{Ref: "mur_1", RefType: "murmur", Via: "whisper"},
+			{Ref: "mur_2", RefType: "murmur", Via: "whisper", FromName: "Ryan", Used: &ItemUsed{Evidence: EvidenceCited}},
+			{Ref: "cnv_a", RefType: "discussion", Via: "retrieval"},
+		},
+		SurfacedByType: map[string]int{"doc": 4, "murmur": 11, "discussion": 2, "plan": 5, refTypeSkill: 1},
+	}
+	got := Display(r, 120)
+	assert.Contains(t, got, "available  doc-a.md · 10 murmurs · 2 discussions · 5 plans · 1 team skill\n")
+}
