@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	claude "github.com/sageox/ox/internal/hooks/claude"
 	"github.com/sageox/ox/internal/oxactivity"
@@ -42,6 +43,9 @@ const (
 	// envStatuslineChained marks a chained command's environment, so a user
 	// command that itself calls `ox statusline` does not chain again.
 	envStatuslineChained = "OX_STATUSLINE_CHAINED"
+	// envClaudeCodeSessionID names the harness session when no status-line
+	// JSON arrives on stdin, as from the Claude desktop app's plugin host.
+	envClaudeCodeSessionID = "CLAUDE_CODE_SESSION_ID"
 )
 
 // main's init() replaces os.Stdout with an ANSI-stripping pipe and sets
@@ -79,26 +83,51 @@ replaced. If your own ~/.claude/settings.json sets a statusLine, ox runs it
 and prints its line beneath ox's, since the project setting would otherwise
 hide yours.
 
+The Claude desktop app has no status bar. There, the ox brief pane plugin
+runs ` + "`ox statusline --json`" + ` and draws the same line as a band above the
+prompt. --json prints the line's data (show, counts, recording) as one JSON
+document instead of text, never runs your own statusLine command, and reads
+the session from CLAUDE_CODE_SESSION_ID when stdin carries none.
+
 Turn it off with: ox config set statusline off`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+			runStatuslineJSON(cmd.InOrStdin(), cmd.OutOrStdout(), defaultStatuslineOptions())
+			return nil
+		}
 		runStatusline(cmd.InOrStdin(), cmd.OutOrStdout(), defaultStatuslineOptions())
 		return nil
 	},
 }
 
 func init() {
+	statuslineCmd.Flags().Bool("json", false, "print the line's data as JSON, for the Claude desktop app band")
 	rootCmd.AddCommand(statuslineCmd)
 }
 
-// isStatuslineFastPath reports whether argv is exactly `ox statusline`, which
-// main runs before any command setup: the root pre-run pings the daemon and
-// resolves feature flags, which alone would blow the status line's budget.
+// isStatuslineFastPath reports whether argv is exactly `ox statusline` or
+// `ox statusline --json`, which main runs before any command setup: the root
+// pre-run pings the daemon and resolves feature flags, which alone would blow
+// the status line's budget. Anything else (--help, extra args) goes to cobra.
 func isStatuslineFastPath(args []string) bool {
-	return len(args) == 1 && args[0] == "statusline"
+	switch {
+	case len(args) == 1:
+		return args[0] == "statusline"
+	case len(args) == 2:
+		return args[0] == "statusline" && args[1] == "--json"
+	}
+	return false
 }
 
-// runStatuslineFastPath is main's entry point for `ox statusline`.
-func runStatuslineFastPath() {
+// runStatuslineFastPath is main's entry point for `ox statusline [--json]`;
+// args is argv after the binary name, already matched by isStatuslineFastPath.
+func runStatuslineFastPath(args []string) {
+	if len(args) == 2 {
+		// JSON is never colored: leave main's NO_COLOR (set for a piped
+		// stdout) in place rather than restoring the coworker's own.
+		runStatuslineJSON(os.Stdin, statuslineStdout, defaultStatuslineOptions())
+		return
+	}
 	if statuslineHasNoC {
 		_ = os.Setenv("NO_COLOR", statuslineNoColor)
 	} else {
@@ -169,6 +198,19 @@ func readStatuslineStdin(stdin io.Reader, wait time.Duration) []byte {
 // renderStatusline returns the full status-line output for Claude Code's
 // JSON: ox's line first, then the coworker's chained line(s) beneath it.
 func renderStatusline(raw []byte, opts statuslineOptions) string {
+	in, dir := parseStatuslineInput(raw)
+
+	// The coworker's own command runs while ox builds its segment.
+	chained := make(chan string, 1)
+	go func() { chained <- runChainedStatusline(raw, dir, opts) }()
+
+	line, show := buildOxStatusline(in, dir)
+	return composeStatusline(<-chained, line, show, opts)
+}
+
+// parseStatuslineInput decodes Claude Code's JSON and picks the directory to
+// look up the project from: the workspace, else cwd, else ox's own.
+func parseStatuslineInput(raw []byte) (statuslineInput, string) {
 	var in statuslineInput
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &in); err != nil {
@@ -179,13 +221,40 @@ func renderStatusline(raw []byte, opts statuslineOptions) string {
 	if dir == "" {
 		dir, _ = os.Getwd()
 	}
+	return in, dir
+}
 
-	// The coworker's own command runs while ox builds its segment.
-	chained := make(chan string, 1)
-	go func() { chained <- runChainedStatusline(raw, dir, opts) }()
+// statuslineJSON is `ox statusline --json`: the data behind ox's line, for a
+// host without a status bar (the Claude desktop app) to draw itself.
+type statuslineJSON struct {
+	Show      bool              `json:"show"`
+	Counts    oxactivity.Counts `json:"counts"`
+	Recording bool              `json:"recording"`
+}
 
+// buildStatuslineJSON is ox's line as data. The coworker's chained statusLine
+// command never runs: the desktop band is ox's alone. The session comes from
+// stdin, else from CLAUDE_CODE_SESSION_ID, since the desktop plugin host
+// sends no status-line JSON.
+func buildStatuslineJSON(raw []byte, opts statuslineOptions) statuslineJSON {
+	in, dir := parseStatuslineInput(raw)
+	if in.SessionID == "" && opts.getenv != nil {
+		in.SessionID = strings.TrimSpace(opts.getenv(envClaudeCodeSessionID))
+	}
 	line, show := buildOxStatusline(in, dir)
-	return composeStatusline(<-chained, line, show, opts)
+	if !show {
+		return statuslineJSON{}
+	}
+	return statuslineJSON{Show: true, Counts: line.counts, Recording: line.recording}
+}
+
+// runStatuslineJSON writes one JSON document. Like the text line it never
+// fails: a write error is logged at debug level only.
+func runStatuslineJSON(stdin io.Reader, stdout io.Writer, opts statuslineOptions) {
+	raw := readStatuslineStdin(stdin, opts.stdinWait)
+	if err := cli.PrintJSONTo(stdout, buildStatuslineJSON(raw, opts)); err != nil {
+		slog.Debug("statusline: write JSON", "err", err)
+	}
 }
 
 // oxStatusline is ox's part of the line before it is fitted to a width.

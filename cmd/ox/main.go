@@ -142,7 +142,7 @@ func main() {
 	// The Claude Code status line runs on every refresh and must stay local
 	// and fast, so it skips cobra's pre-run (daemon ping, feature flags).
 	if isStatuslineFastPath(os.Args[1:]) {
-		runStatuslineFastPath()
+		runStatuslineFastPath(os.Args[1:])
 		return
 	}
 
