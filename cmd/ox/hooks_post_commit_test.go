@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/oxactivity"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
 	"github.com/stretchr/testify/assert"
@@ -205,4 +206,61 @@ func TestPostCommitHook_CitationRespectsOptOut(t *testing.T) {
 
 	assert.Empty(t, citedCommitEvents(t, tracePath))
 	assert.Equal(t, []string{sha}, loadRecordingForTest(t, projectRoot, sessionName).ProducedCommits)
+}
+
+// TestPostCommitHook_CountsCitedUseOnStatusline: a commit that names a
+// surfaced item counts it as used on the recording harness session's status
+// line, once per item however many commits cite it. Failure prevented: the
+// strongest evidence of use (the coworker's own commit) never reaching the
+// bar, or every re-citing commit inflating "used".
+func TestPostCommitHook_CountsCitedUseOnStatusline(t *testing.T) {
+	const harnessSession = "c1a2b3c4-0000-4000-8000-0000000000aa"
+	tests := []struct {
+		name     string
+		subjects []string
+		want     oxactivity.Counts
+	}{
+		{"one citation", []string{"fix(auth): follow Ox7f2a"}, oxactivity.Counts{Murmurs: 1, Used: 1}},
+		{"cited by two commits counts once", []string{"fix: per Ox7f2a", "test: cover Ox7f2a"}, oxactivity.Counts{Murmurs: 1, Used: 1}},
+		{"two items cited", []string{"chore: Ox7f2a and 2026-07-01-ryan-Ox1"}, oxactivity.Counts{Sessions: 1, Murmurs: 1, Used: 2}},
+		{"nothing cited", []string{"fix: unrelated change"}, oxactivity.Counts{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projectRoot, sessionName, _ := postCommitEnv(t)
+			t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
+			// the shared fixture's agent ID is not one a state file may be named
+			// by; re-key the recording to a valid ID with a harness session
+			const agentID = "OxPcU1"
+			state := loadRecordingForTest(t, projectRoot, sessionName)
+			state.AgentID = agentID
+			state.AgentSessionID = harnessSession
+			data, err := json.Marshal(state)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(projectRoot, "sessions", sessionName, ".recording.json"), data, 0o644))
+			t.Setenv("SAGEOX_AGENT_ID", agentID)
+			writeSurfacedTrace(t, projectRoot, sessionName,
+				contexttrace.Event{Type: contexttrace.EventProvided, Source: contexttrace.SourceTeamWhisper, Ref: "Ox7f2a", Seq: 2},
+				contexttrace.Event{Type: contexttrace.EventProvided, Source: contexttrace.SourceLocalRecall, Ref: "2026-07-01-ryan-Ox1", RefType: "session", Seq: 4},
+			)
+
+			for _, subject := range tt.subjects {
+				commitWithTrailer(t, projectRoot, subject)
+				require.NoError(t, runHooksPostCommit(nil, nil))
+			}
+
+			got := oxactivity.LoadState(projectRoot, oxactivity.StateKey(agentID, harnessSession))
+			assert.Equal(t, tt.want, got.Counts())
+		})
+	}
+
+	t.Run("recording without a harness session writes no state", func(t *testing.T) {
+		projectRoot, sessionName, _ := postCommitEnv(t)
+		t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
+		writeSurfacedTrace(t, projectRoot, sessionName,
+			contexttrace.Event{Type: contexttrace.EventProvided, Source: contexttrace.SourceTeamWhisper, Ref: "Ox7f2a", Seq: 2})
+		commitWithTrailer(t, projectRoot, "fix: per Ox7f2a")
+		require.NoError(t, runHooksPostCommit(nil, nil))
+		assert.NoDirExists(t, filepath.Join(projectRoot, ".sageox", "cache", "statusline"))
+	})
 }

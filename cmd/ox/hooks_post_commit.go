@@ -150,6 +150,9 @@ func recordCommitCitations(projectRoot string, state *session.RecordingState, sh
 		return
 	}
 	slog.Debug("hooks post-commit: recorded commit citations", "commit", short, "refs", len(fresh))
+	for _, ev := range fresh {
+		recordStatuslineUse(projectRoot, state, ev.RefType, ev.Ref)
+	}
 }
 
 // readCommitMessage returns the full message body of a commit, or "" on any

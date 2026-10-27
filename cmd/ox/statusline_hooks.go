@@ -5,6 +5,7 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/oxactivity"
+	"github.com/sageox/ox/internal/session"
 )
 
 // Hook-side writers for the ox status line. Hooks count the team context an
@@ -52,5 +53,21 @@ func recordStatuslineRetrieval(projectRoot, agentID, harnessSessionID string, ac
 	}
 	if err := oxactivity.RecordInfluence(projectRoot, agentID, harnessSessionID, refType, ref); err != nil {
 		slog.Debug("statusline: record influence failed", "agent_id", agentID, "ref_type", refType, "err", err)
+	}
+}
+
+// recordStatuslineUse counts one surfaced item the AI coworker used — reported
+// with `ox agent <id> context used` or cited in a commit message — on the
+// status line of the recording's harness session. Only a live recording names
+// that session, so a nil state or one without AgentSessionID records nothing.
+func recordStatuslineUse(projectRoot string, state *session.RecordingState, refType, ref string) {
+	if projectRoot == "" || state == nil || state.AgentID == "" || state.AgentSessionID == "" || ref == "" {
+		return
+	}
+	if !statuslineEnabled() {
+		return
+	}
+	if err := oxactivity.RecordUse(projectRoot, state.AgentID, state.AgentSessionID, refType, ref); err != nil {
+		slog.Debug("statusline: record use failed", "agent_id", state.AgentID, "ref_type", refType, "err", err)
 	}
 }

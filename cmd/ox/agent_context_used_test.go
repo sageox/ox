@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/oxactivity"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
 	"github.com/sageox/ox/internal/session/contextuse"
@@ -229,6 +231,63 @@ func TestAgentContextUsed_Dispatch(t *testing.T) {
 	require.Len(t, events, 3)
 	assert.Equal(t, "reused Dana's fix", events[1].Decision)
 	assert.Equal(t, contexttrace.EvidenceNone, events[2].Evidence)
+}
+
+// TestAgentContextUsed_CountsOnStatusline: a reported use shows on the status
+// line of the harness session that is recording, once per item. Failure
+// prevented: the bar says how much context was fetched but never how much
+// mattered, a re-report reads "2 used", or a --none / unrecorded run invents
+// a use.
+func TestAgentContextUsed_CountsOnStatusline(t *testing.T) {
+	const harnessSession = "c1a2b3c4-0000-4000-8000-000000000001"
+	newProject := func(t *testing.T, agentID string) (string, string) {
+		t.Helper()
+		projectRoot := setupSessionTestProject(t)
+		state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+			AgentID: agentID, AgentSessionID: harnessSession, AdapterName: "claude-code",
+		})
+		require.NoError(t, err)
+		require.NoError(t, contexttrace.NewWriter(state.SessionPath).AppendAll([]contexttrace.Event{
+			{Type: contexttrace.EventProvided, Source: contexttrace.SourceTeamWhisper, Ref: "Ox7f2a", RefType: "murmur", Seq: 1},
+			{Type: contexttrace.EventProvided, Source: contexttrace.SourceTeamMemory, Doc: "MEMORY.md"},
+		}))
+		return projectRoot, oxactivity.StateKey(agentID, harnessSession)
+	}
+
+	tests := []struct {
+		name string
+		runs [][]string
+		want oxactivity.Counts
+	}{
+		{"one reported use", [][]string{{"used", "Ox7f2a", "--why", "kept Dana's retry budget"}}, oxactivity.Counts{Murmurs: 1, Used: 1}},
+		{"re-reported use counts once", [][]string{{"used", "Ox7f2a"}, {"used", "ox7f2a"}}, oxactivity.Counts{Murmurs: 1, Used: 1}},
+		{"two items", [][]string{{"used", "Ox7f2a"}, {"used", "memory.md"}}, oxactivity.Counts{Murmurs: 1, Docs: 1, Used: 2}},
+		{"--none uses nothing", [][]string{{"used", "--none"}}, oxactivity.Counts{}},
+		{"unknown ref uses nothing", [][]string{{"used", "OxNOPE"}}, oxactivity.Counts{}},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projectRoot, key := newProject(t, fmt.Sprintf("OxSu%02d", i))
+			for _, args := range tt.runs {
+				var buf bytes.Buffer
+				_ = runAgentContextAt(&buf, projectRoot, fmt.Sprintf("OxSu%02d", i), args)
+			}
+			got := oxactivity.LoadState(projectRoot, key)
+			assert.Equal(t, tt.want, got.Counts())
+			assert.Equal(t, tt.want.Used, got.Used)
+		})
+	}
+
+	t.Run("not recording writes no status-line state", func(t *testing.T) {
+		projectRoot := setupSessionTestProject(t)
+		cacheDir := agentTraceCacheDir(projectRoot)
+		require.NoError(t, contexttrace.NewWriter(mkdirAll(t, cacheDir)).Append(contexttrace.Event{
+			Type: contexttrace.EventProvided, Source: contexttrace.SourceTeamMemory, Doc: "MEMORY.md",
+		}))
+		var buf bytes.Buffer
+		require.NoError(t, runAgentContextAt(&buf, projectRoot, "OxSuNR", []string{"used", "memory.md"}))
+		assert.NoDirExists(t, filepath.Join(projectRoot, ".sageox", "cache", "statusline"))
+	})
 }
 
 func mkdirAll(t *testing.T, dir string) string {
