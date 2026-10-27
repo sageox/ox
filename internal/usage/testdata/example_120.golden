@@ -1,0 +1,10 @@
+ox brief · this session  ● recording · 42 turns · 3 of 11 used
+calls      6  query ×2  conversation show ×1  plan view ×1  context used ×2
+context    ~6.7k tokens  prime 3.1k ▇▇▇▇▇  ox calls 3.2k ▇▇▇▇▇  whispers 0.4k ▇
+used       discussion  Usage report design review  cited in commit 3e1c9d0
+             https://sageox.ai/c/cnv_01a17990-4cb6-7bf9-9584-4728f14b54f1
+           plan  Usage receipts  reported: followed its meta.json rollup shape
+             https://sageox.ai/plan/pln_4d8e2f
+           murmur  Ryan [wip]  read
+available  AGENTS.md · MEMORY.md · 3 team skills · 2 discussions · 1 plan
+used = evidence from the transcript, a commit, or the AI coworker's report

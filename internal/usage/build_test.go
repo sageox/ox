@@ -303,7 +303,8 @@ func TestBuild_URLFilledFromRefWithEndpoint(t *testing.T) {
 	r := Build(Input{TraceSource: TraceSourceSession, Endpoint: ep, Events: []contexttrace.Event{ev}})
 	require.Len(t, r.Surfaced, 1)
 	assert.Equal(t, ep+"/c/"+testCnv, r.Surfaced[0].URL)
-	assert.Contains(t, r.Display, ep+"/c/"+testCnv)
+	assert.NotContains(t, r.Display, ep+"/c/"+testCnv, "an unused discussion is listed without its link")
+	assert.Contains(t, r.Display, "available  1 discussion\n")
 }
 
 // TestBuild_NoURLWithoutEndpoint: with no endpoint there is no trustworthy

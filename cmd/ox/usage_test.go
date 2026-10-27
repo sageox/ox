@@ -104,7 +104,7 @@ func TestUsage_NotRecordingReadsAgentCache(t *testing.T) {
 	assert.Nil(t, r.Used.SelfReport)
 }
 
-// TestBrief_EndpointFromProject: a discussion the AI coworker pulled is linked
+// TestBrief_EndpointFromProject: a discussion the AI coworker re-opened is linked
 // on the project's own SageOx endpoint, through the real `ox brief --json`.
 // Failure prevented: the brief shows a discussion with no link, or a link on
 // the wrong environment's host.
@@ -119,6 +119,11 @@ func TestBrief_EndpointFromProject(t *testing.T) {
 	require.NoError(t, w.Append(contexttrace.Event{
 		Type: contexttrace.EventInvoked, Source: contexttrace.SourceOxCLI, Label: "searched team memory",
 		Command: "query", Query: cnv, RefType: "discussion", InlineTokens: 40, Seq: 2,
+	}))
+	// re-opened, so the brief lists it as used — the only place it is linked
+	require.NoError(t, w.Append(contexttrace.Event{
+		Type: contexttrace.EventUsed, Evidence: contexttrace.EvidenceRequery, Mechanism: contexttrace.MechanismRetrieval,
+		Ref: cnv, RefType: "discussion", Seq: 3,
 	}))
 
 	r := runOxUsageJSON(t)

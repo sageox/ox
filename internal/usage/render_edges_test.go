@@ -83,7 +83,7 @@ func TestDisplay_SessionEdgeCases(t *testing.T) {
 					{Ref: "plan-x", RefType: "plan", Via: "prime"},
 				},
 			},
-			want: []string{"ox brief · past session\n", "murmurs    mur_9 ✓", "read       plan plan-x"},
+			want: []string{"ox brief · past session\n", "used       murmur  mur_9  cited\n", "available  1 plan\n"},
 		},
 		{
 			name: "zero-token source draws no bar and narrow width caps the screen",
@@ -237,38 +237,34 @@ func TestRender_HeaderOmitsNameAndHarness(t *testing.T) {
 	}
 }
 
-// TestRender_TitleFallsBackToRef: a titled item reads "kind  title"; an
+// TestRender_UsedNameFallsBack: a used titled item reads "kind  title"; an
 // untitled one keeps its ref-based name; an over-long title is cut to fit.
-func TestRender_TitleFallsBackToRef(t *testing.T) {
+func TestRender_UsedNameFallsBack(t *testing.T) {
+	used := &ItemUsed{Evidence: EvidenceRead}
 	r := Report{Trace: TraceInfo{Available: true, Source: TraceSourceSession}, Surfaced: []Surfaced{
-		{Ref: "pln_1", RefType: "plan", Title: "Usage receipts"},
-		{Ref: "pln_2", RefType: "plan"},
-		{Ref: "docs/x.md", RefType: "doc"},
-		{Ref: "auth refresh", RefType: "query", Via: "retrieval"},
-		{Ref: "skill-a", RefType: refTypeSkill},
-		{Ref: "rec_3", RefType: "discussion", Title: strings.Repeat("long title ", 20)},
+		{Ref: "pln_1", RefType: "plan", Title: "Usage receipts", Used: used},
+		{Ref: "pln_2", RefType: "plan", Used: used},
+		{Ref: "docs/x.md", RefType: "doc", Used: used},
+		{Ref: "auth refresh", RefType: "query", Via: "retrieval", Used: used},
+		{Ref: "rec_3", RefType: "discussion", Title: strings.Repeat("long title ", 20), Used: used},
 	}}
 	got := Display(r, 80)
-	assert.Contains(t, got, "plan  Usage receipts")
-	assert.Contains(t, got, "plan pln_2")
-	assert.Contains(t, got, "docs/x.md")
-	assert.Contains(t, got, `query "auth refresh"`)
-	assert.Contains(t, got, "skill skill-a", "a single skill is not collapsed")
-	assert.NotContains(t, got, "team skills")
+	assert.Contains(t, got, "used       plan  Usage receipts  read\n")
+	assert.Contains(t, got, "plan pln_2  read\n")
+	assert.Contains(t, got, "docs/x.md  read\n")
+	assert.Contains(t, got, `query "auth refresh"  read`)
 	assert.Contains(t, got, "discussion  long title")
 	assert.Contains(t, got, "…")
 	assertPlainFits(t, got, 80)
 }
 
-// TestRender_URLWholeOnContinuationLine: a link too long to share a line with
-// its title moves whole to the next line and is never cut. Failure
+// TestRender_URLWholeOnContinuationLine: a used item's link sits whole on
+// its own line, two past the label column, and is never cut. Failure
 // prevented: a truncated, unclickable link.
 func TestRender_URLWholeOnContinuationLine(t *testing.T) {
 	url := "https://sageox.ai/c/" + testCnv
 	r := Report{Trace: TraceInfo{Available: true, Source: TraceSourceSession}, Surfaced: []Surfaced{
-		{Ref: "MEMORY.md", RefType: "doc"},
-		{Ref: testCnv, RefType: "discussion", Title: "Usage report design review", URL: url},
-		{Ref: "q", RefType: "query", Via: "retrieval"},
+		{Ref: testCnv, RefType: "discussion", Title: "Usage report design review", URL: url, Used: &ItemUsed{Evidence: EvidenceCited}},
 	}}
 	lines := strings.Split(Display(r, 80), "\n")
 	var at int
@@ -278,28 +274,21 @@ func TestRender_URLWholeOnContinuationLine(t *testing.T) {
 		}
 	}
 	require.NotZero(t, at)
-	assert.Equal(t, "read       MEMORY.md", lines[at-1], "unlinked items before a link stay on the label line")
-	assert.Equal(t, strings.Repeat(" ", labelCol)+url, lines[at+1])
-	assert.Equal(t, strings.Repeat(" ", labelCol)+`query "q"`, lines[at+2])
-
-	// a linked first item carries the row label
-	first := Display(Report{Trace: TraceInfo{Available: true}, Surfaced: []Surfaced{
-		{Ref: "pln_1", RefType: "plan", Title: "P", URL: "https://sageox.ai/plan/pln_1"},
-	}}, 80)
-	assert.Contains(t, first, "read       plan  P  https://sageox.ai/plan/pln_1\n")
+	assert.Equal(t, "used       discussion  Usage report design review  cited", lines[at])
+	assert.Equal(t, strings.Repeat(" ", labelCol+2)+url, lines[at+1])
 }
 
-// TestRender_MurmurRowOnlyWithUsed: only murmurs with use evidence are listed,
-// by display name; with none the row is omitted. Failure prevented: the brief
-// lists every murmur received as if it were value.
-func TestRender_MurmurRowOnlyWithUsed(t *testing.T) {
+// TestRender_ReceivedMurmurIsOnlyACount: a murmur merely received is folded
+// into "available"; a used one is named by sender and topic. Failure
+// prevented: the brief lists every murmur received as if it were value.
+func TestRender_ReceivedMurmurIsOnlyACount(t *testing.T) {
 	base := Report{Trace: TraceInfo{Available: true, Source: TraceSourceSession}}
 	received := base
 	received.Surfaced = []Surfaced{{Ref: "mur_1", RefType: "murmur", From: "OxR9a1", Topic: "wip", Via: "whisper"}}
 	got := Display(received, 80)
-	assert.NotContains(t, got, "murmurs")
+	assert.Contains(t, got, "available  1 murmur\n")
 	assert.NotContains(t, got, "OxR9a1")
-	assert.Contains(t, got, "read       nothing by name", "a received murmur is not a read item either")
+	assert.NotContains(t, got, "used ")
 
 	used := base
 	used.Surfaced = []Surfaced{
@@ -308,18 +297,18 @@ func TestRender_MurmurRowOnlyWithUsed(t *testing.T) {
 		{Ref: "mur_3", RefType: "murmur", From: "OxSm02", Via: "whisper", Used: &ItemUsed{Evidence: EvidenceJudged}},
 	}
 	got = Display(used, 80)
-	assert.Contains(t, got, "murmurs    Ryan [wip] ✓ · OxSm02 ✓\n")
+	assert.Contains(t, got, "used       murmur  Ryan [wip]  read\n           murmur  OxSm02  judged\n")
+	assert.Contains(t, got, "available  1 murmur\n")
 	assert.NotContains(t, got, "OxR9a1")
 }
 
-// TestRender_LegendOnlyWithCheck: the ✓ legend appears only when a ✓ does.
-func TestRender_LegendOnlyWithCheck(t *testing.T) {
-	const legend = "✓ used by the AI coworker"
+// TestRender_LegendOnlyWithUsed: the legend appears only when the used
+// section does.
+func TestRender_LegendOnlyWithUsed(t *testing.T) {
 	base := Report{Trace: TraceInfo{Available: true, Source: TraceSourceSession}}
 	plainR := base
 	plainR.Surfaced = []Surfaced{{Ref: "MEMORY.md", RefType: "doc"}}
-	assert.NotContains(t, Display(plainR, 80), legend)
-	assert.NotContains(t, Display(plainR, 80), "✓")
+	assert.NotContains(t, Display(plainR, 80), usedLegend)
 
 	tests := []struct {
 		name string
@@ -327,7 +316,7 @@ func TestRender_LegendOnlyWithCheck(t *testing.T) {
 	}{
 		{"used doc", []Surfaced{{Ref: "MEMORY.md", RefType: "doc", Used: &ItemUsed{Evidence: EvidenceRead}}}},
 		{"used murmur", []Surfaced{{Ref: "mur_1", RefType: "murmur", FromName: "Ryan", Used: &ItemUsed{Evidence: EvidenceCited}}}},
-		{"used skill in a collapsed group", []Surfaced{
+		{"used skill beside an available one", []Surfaced{
 			{Ref: "a", RefType: refTypeSkill, Used: &ItemUsed{Evidence: EvidenceReported}},
 			{Ref: "b", RefType: refTypeSkill},
 		}},
@@ -336,35 +325,38 @@ func TestRender_LegendOnlyWithCheck(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := base
 			r.Surfaced = tt.s
-			assert.Contains(t, Display(r, 80), legend)
+			got := Display(r, 80)
+			assert.Contains(t, got, usedLegend+"\n")
 		})
 	}
 }
 
 // TestRender_RelevantInHeader: "N of M used" appears only when the trace
-// carries a relevant summary; the score falls back to its derived category.
+// carries a relevant summary, and an explicit none report reads "none used".
 func TestRender_RelevantInHeader(t *testing.T) {
 	r := Report{Session: SessionInfo{Recording: true, Turns: 3}, Trace: TraceInfo{Available: true, Source: TraceSourceSession}}
-	assert.NotContains(t, Display(r, 80), "used\n")
-	assert.NotContains(t, Display(r, 80), "score")
+	assert.NotContains(t, Display(r, 80), "used")
 
-	r.Relevant = &Relevant{Count: 2, SurfacedCount: 7, Derived: &Derived{Category: "significant"}}
+	r.Relevant = &Relevant{Count: 2, SurfacedCount: 7}
+	assert.True(t, strings.HasPrefix(Display(r, 80), "ox brief · this session  ● recording · 3 turns · 2 of 7 used\n"))
+
+	r.Relevant = &Relevant{SurfacedCount: 7, ReportedNone: true}
 	got := Display(r, 80)
-	assert.True(t, strings.HasPrefix(got, "ox brief · this session  ● recording · 3 turns · 2 of 7 used\n"), got)
-	assert.Contains(t, got, "score      significant\n")
-
-	r.Used.SageoxScore = &Score{Category: "moderate"}
-	assert.Contains(t, Display(r, 80), "score      moderate\n", "the session score wins over the derived category")
+	assert.True(t, strings.HasPrefix(got, "ox brief · this session  ● recording · 3 turns · none used\n"), got)
+	assert.NotContains(t, got, "0 of 7")
 }
 
 // TestRender_NoPlumbingStrings: none of the retired plumbing wording reaches
 // any session display shape. Failure prevented: the brief regresses to
 // "injected … tok" and "used: not yet reported".
 func TestRender_NoPlumbingStrings(t *testing.T) {
-	banned := []string{"injected", "not yet reported", "not recording — no self-report", " tok\n", " tok ", "you reported", "surfaced "}
+	banned := []string{"injected", "not yet reported", "not recording — no self-report", " tok\n", " tok ", "you reported", "surfaced ",
+		"grade", "provable", "surfaced_seq", "✓"}
 	shapes := map[string]string{
 		"golden 80":     goldenReport(80).Display,
 		"golden 120":    goldenReport(120).Display,
+		"example 80":    exampleReport(80).Display,
+		"example 120":   exampleReport(120).Display,
 		"recording":     Build(Input{TraceSource: TraceSourceSession, AgentID: "OxAb12", Recording: true, Events: []contexttrace.Event{primeEvent(), memoryProvided(), whisper()}}).Display,
 		"not recording": Build(Input{TraceSource: TraceSourceAgentCache, AgentID: "OxAb12", Events: []contexttrace.Event{invoked("checked murmurs", "murmur list", 10, 1), selfReport("MEMORY.md")}}).Display,
 		"no trace":      Build(Input{TraceSource: TraceSourceNone, TraceReason: "not recording"}).Display,
