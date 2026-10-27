@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/plan"
+	"github.com/sageox/ox/internal/weblink"
 )
 
 // plan_share.go answers the question `ox plan save` used to leave open: can a
@@ -238,7 +239,7 @@ func planShareURL(gitRoot, planID string) string {
 	if gitRoot != "" {
 		cfg, _ = config.LoadProjectConfig(gitRoot)
 	}
-	return artifactURL(prResolveEndpoint(cfg), planID, "/plan/", "pln_")
+	return weblink.ArtifactURL(prResolveEndpoint(cfg), planID, "/plan/", "pln_")
 }
 
 // planIDForDir returns the plan's stable pln_ id from its event log, or "".

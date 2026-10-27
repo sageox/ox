@@ -59,10 +59,9 @@ func TestHuman_ColorIsOnlyDecoration(t *testing.T) {
 
 // TestDisplay_SessionEdgeCases covers the less common session shapes.
 // Failure prevented: a missing reason prints an empty sentence, a past
-// session is labeled "this session", an anonymous murmur shows as a bare
-// "murmur", a long self-report list or narrow terminal overflows one screen.
+// session is labeled "this session", an anonymous murmur renders blank, or a
+// narrow terminal overflows one screen.
 func TestDisplay_SessionEdgeCases(t *testing.T) {
-	long := strings.Repeat("decision ", 20)
 	tests := []struct {
 		name  string
 		r     Report
@@ -75,25 +74,22 @@ func TestDisplay_SessionEdgeCases(t *testing.T) {
 			want: []string{"no usage trace for this session: nothing recorded yet"},
 		},
 		{
-			name: "past session, anonymous murmur, other ref, many self-reports",
+			name: "past session, anonymous used murmur, other ref",
 			r: Report{
 				Session: SessionInfo{Name: "2026-10-01T10-00-old-OxZz99"},
 				Trace:   TraceInfo{Available: true, Source: TraceSourceSession},
 				Surfaced: []Surfaced{
-					{Ref: "mur_9", RefType: "murmur", Via: "whisper"},
+					{Ref: "mur_9", RefType: "murmur", Via: "whisper", Used: &ItemUsed{Evidence: EvidenceCited}},
 					{Ref: "plan-x", RefType: "plan", Via: "prime"},
 				},
-				Used: Used{Status: UsedReported, SelfReported: []SelfReported{
-					{Ref: "a", Decision: long}, {Ref: "b"}, {Ref: "c"}, {Ref: "d"}, {Ref: "e"},
-				}},
 			},
-			want: []string{"2026-10-01T10-00-old-OxZz99", "murmur mur_9", "plan plan-x", "+2 more", "…\")"},
+			want: []string{"ox brief · past session\n", "murmurs    mur_9 ✓", "read       plan plan-x"},
 		},
 		{
 			name: "zero-token source draws no bar and narrow width caps the screen",
 			r: func() Report {
 				r := Report{Trace: TraceInfo{Available: true, Source: TraceSourceSession}}
-				r.Injected.BySource = []SourceStat{{Source: "big", Tokens: 500}, {Source: "empty", Tokens: 0}}
+				r.Context.BySource = []SourceStat{{Source: "big", Tokens: 500}, {Source: "empty", Tokens: 0}}
 				for i := 0; i < 40; i++ {
 					r.Surfaced = append(r.Surfaced, Surfaced{Ref: fmt.Sprintf("doc-%02d.md", i), RefType: "doc"})
 				}
@@ -188,7 +184,7 @@ func TestBuildTeam_RanksCapsAndCountsStubs(t *testing.T) {
 	require.Len(t, r.Calls, maxTeamItems)
 	assert.Equal(t, LabelStat{Label: "label 00", Count: 2, Tokens: 10}, r.Calls[0])
 	assert.Equal(t, "label 01", r.Calls[1].Label, "equal counts sort by label")
-	assert.Equal(t, []SourceStat{{Source: "ox calls", Tokens: 65}, {Source: "team-docs", Tokens: 65}}, r.Injected[1:3], "equal tokens sort by source")
+	assert.Equal(t, []SourceStat{{Source: "ox calls", Tokens: 65}, {Source: "team-docs", Tokens: 65}}, r.Context[1:3], "equal tokens sort by source")
 	require.Len(t, r.TopSurfaced, maxTeamItems)
 	assert.Equal(t, DocStat{Ref: "doc-00.md", Sessions: 2}, r.TopSurfaced[0])
 	assert.Equal(t, "doc-01.md", r.TopSurfaced[1].Ref, "equal counts sort by ref")
@@ -201,8 +197,8 @@ func TestBuildTeam_RanksCapsAndCountsStubs(t *testing.T) {
 func TestDisplayTeam_SparseShapes(t *testing.T) {
 	traced := DisplayTeam(TeamReport{
 		Sessions: 1, Traced: 1,
-		Calls:    []LabelStat{{Label: "checked murmurs", Count: 1}},
-		Injected: []SourceStat{{Source: "ox calls", Tokens: 0}},
+		Calls:   []LabelStat{{Label: "checked murmurs", Count: 1}},
+		Context: []SourceStat{{Source: "ox calls", Tokens: 0}},
 	}, 0)
 	assert.Contains(t, traced, "team  recent")
 	assert.Contains(t, traced, "no docs by name")
@@ -210,4 +206,196 @@ func TestDisplayTeam_SparseShapes(t *testing.T) {
 
 	empty := DisplayTeam(TeamReport{Window: "7d"}, 80)
 	assert.Contains(t, empty, "no usage traces in this window yet")
+}
+
+// TestRender_HeaderOmitsNameAndHarness: the header names the scope and the
+// recording state, never the session name, agent id or harness. Failure
+// prevented: the first line of the brief is plumbing.
+func TestRender_HeaderOmitsNameAndHarness(t *testing.T) {
+	tests := []struct {
+		name string
+		s    SessionInfo
+		want string
+	}{
+		{"recording", SessionInfo{Name: "2026-10-23T10-00-dev-OxAb12", AgentID: "OxAb12", Harness: "codex", Recording: true, Turns: 1},
+			"ox brief · this session  ● recording · 1 turn"},
+		{"not recording", SessionInfo{AgentID: "OxAb12", Harness: "claude-code"}, "ox brief · this session  ○ not recording"},
+		{"past session", SessionInfo{Name: "2026-10-01T10-00-old-OxZz99", AgentID: "OxZz99", Harness: "codex", Turns: 4},
+			"ox brief · past session  4 turns"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Display(Report{Session: tt.s, Trace: TraceInfo{Available: true, Source: TraceSourceSession}}, 80)
+			header := strings.SplitN(got, "\n", 2)[0]
+			assert.Equal(t, tt.want, header)
+			for _, banned := range []string{tt.s.Name, tt.s.AgentID, tt.s.Harness} {
+				if banned != "" {
+					assert.NotContains(t, header, banned)
+				}
+			}
+		})
+	}
+}
+
+// TestRender_TitleFallsBackToRef: a titled item reads "kind  title"; an
+// untitled one keeps its ref-based name; an over-long title is cut to fit.
+func TestRender_TitleFallsBackToRef(t *testing.T) {
+	r := Report{Trace: TraceInfo{Available: true, Source: TraceSourceSession}, Surfaced: []Surfaced{
+		{Ref: "pln_1", RefType: "plan", Title: "Usage receipts"},
+		{Ref: "pln_2", RefType: "plan"},
+		{Ref: "docs/x.md", RefType: "doc"},
+		{Ref: "auth refresh", RefType: "query", Via: "retrieval"},
+		{Ref: "skill-a", RefType: refTypeSkill},
+		{Ref: "rec_3", RefType: "discussion", Title: strings.Repeat("long title ", 20)},
+	}}
+	got := Display(r, 80)
+	assert.Contains(t, got, "plan  Usage receipts")
+	assert.Contains(t, got, "plan pln_2")
+	assert.Contains(t, got, "docs/x.md")
+	assert.Contains(t, got, `query "auth refresh"`)
+	assert.Contains(t, got, "skill skill-a", "a single skill is not collapsed")
+	assert.NotContains(t, got, "team skills")
+	assert.Contains(t, got, "discussion  long title")
+	assert.Contains(t, got, "…")
+	assertPlainFits(t, got, 80)
+}
+
+// TestRender_URLWholeOnContinuationLine: a link too long to share a line with
+// its title moves whole to the next line and is never cut. Failure
+// prevented: a truncated, unclickable link.
+func TestRender_URLWholeOnContinuationLine(t *testing.T) {
+	url := "https://sageox.ai/c/" + testCnv
+	r := Report{Trace: TraceInfo{Available: true, Source: TraceSourceSession}, Surfaced: []Surfaced{
+		{Ref: "MEMORY.md", RefType: "doc"},
+		{Ref: testCnv, RefType: "discussion", Title: "Usage report design review", URL: url},
+		{Ref: "q", RefType: "query", Via: "retrieval"},
+	}}
+	lines := strings.Split(Display(r, 80), "\n")
+	var at int
+	for i, l := range lines {
+		if strings.Contains(l, "Usage report design review") {
+			at = i
+		}
+	}
+	require.NotZero(t, at)
+	assert.Equal(t, "read       MEMORY.md", lines[at-1], "unlinked items before a link stay on the label line")
+	assert.Equal(t, strings.Repeat(" ", labelCol)+url, lines[at+1])
+	assert.Equal(t, strings.Repeat(" ", labelCol)+`query "q"`, lines[at+2])
+
+	// a linked first item carries the row label
+	first := Display(Report{Trace: TraceInfo{Available: true}, Surfaced: []Surfaced{
+		{Ref: "pln_1", RefType: "plan", Title: "P", URL: "https://sageox.ai/plan/pln_1"},
+	}}, 80)
+	assert.Contains(t, first, "read       plan  P  https://sageox.ai/plan/pln_1\n")
+}
+
+// TestRender_MurmurRowOnlyWithUsed: only murmurs with use evidence are listed,
+// by display name; with none the row is omitted. Failure prevented: the brief
+// lists every murmur received as if it were value.
+func TestRender_MurmurRowOnlyWithUsed(t *testing.T) {
+	base := Report{Trace: TraceInfo{Available: true, Source: TraceSourceSession}}
+	received := base
+	received.Surfaced = []Surfaced{{Ref: "mur_1", RefType: "murmur", From: "OxR9a1", Topic: "wip", Via: "whisper"}}
+	got := Display(received, 80)
+	assert.NotContains(t, got, "murmurs")
+	assert.NotContains(t, got, "OxR9a1")
+	assert.Contains(t, got, "read       nothing by name", "a received murmur is not a read item either")
+
+	used := base
+	used.Surfaced = []Surfaced{
+		{Ref: "mur_1", RefType: "murmur", From: "OxR9a1", Topic: "wip", Via: "whisper"},
+		{Ref: "mur_2", RefType: "murmur", From: "OxRy01", FromName: "Ryan", Topic: "wip", Via: "whisper", Used: &ItemUsed{Evidence: EvidenceRead}},
+		{Ref: "mur_3", RefType: "murmur", From: "OxSm02", Via: "whisper", Used: &ItemUsed{Evidence: EvidenceJudged}},
+	}
+	got = Display(used, 80)
+	assert.Contains(t, got, "murmurs    Ryan [wip] ✓ · OxSm02 ✓\n")
+	assert.NotContains(t, got, "OxR9a1")
+}
+
+// TestRender_LegendOnlyWithCheck: the ✓ legend appears only when a ✓ does.
+func TestRender_LegendOnlyWithCheck(t *testing.T) {
+	const legend = "✓ used by the AI coworker"
+	base := Report{Trace: TraceInfo{Available: true, Source: TraceSourceSession}}
+	plainR := base
+	plainR.Surfaced = []Surfaced{{Ref: "MEMORY.md", RefType: "doc"}}
+	assert.NotContains(t, Display(plainR, 80), legend)
+	assert.NotContains(t, Display(plainR, 80), "✓")
+
+	tests := []struct {
+		name string
+		s    []Surfaced
+	}{
+		{"used doc", []Surfaced{{Ref: "MEMORY.md", RefType: "doc", Used: &ItemUsed{Evidence: EvidenceRead}}}},
+		{"used murmur", []Surfaced{{Ref: "mur_1", RefType: "murmur", FromName: "Ryan", Used: &ItemUsed{Evidence: EvidenceCited}}}},
+		{"used skill in a collapsed group", []Surfaced{
+			{Ref: "a", RefType: refTypeSkill, Used: &ItemUsed{Evidence: EvidenceReported}},
+			{Ref: "b", RefType: refTypeSkill},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := base
+			r.Surfaced = tt.s
+			assert.Contains(t, Display(r, 80), legend)
+		})
+	}
+}
+
+// TestRender_RelevantInHeader: "N of M used" appears only when the trace
+// carries a relevant summary; the score falls back to its derived category.
+func TestRender_RelevantInHeader(t *testing.T) {
+	r := Report{Session: SessionInfo{Recording: true, Turns: 3}, Trace: TraceInfo{Available: true, Source: TraceSourceSession}}
+	assert.NotContains(t, Display(r, 80), "used\n")
+	assert.NotContains(t, Display(r, 80), "score")
+
+	r.Relevant = &Relevant{Count: 2, SurfacedCount: 7, Derived: &Derived{Category: "significant"}}
+	got := Display(r, 80)
+	assert.True(t, strings.HasPrefix(got, "ox brief · this session  ● recording · 3 turns · 2 of 7 used\n"), got)
+	assert.Contains(t, got, "score      significant\n")
+
+	r.Used.SageoxScore = &Score{Category: "moderate"}
+	assert.Contains(t, Display(r, 80), "score      moderate\n", "the session score wins over the derived category")
+}
+
+// TestRender_NoPlumbingStrings: none of the retired plumbing wording reaches
+// any session display shape. Failure prevented: the brief regresses to
+// "injected … tok" and "used: not yet reported".
+func TestRender_NoPlumbingStrings(t *testing.T) {
+	banned := []string{"injected", "not yet reported", "not recording — no self-report", " tok\n", " tok ", "you reported", "surfaced "}
+	shapes := map[string]string{
+		"golden 80":     goldenReport(80).Display,
+		"golden 120":    goldenReport(120).Display,
+		"recording":     Build(Input{TraceSource: TraceSourceSession, AgentID: "OxAb12", Recording: true, Events: []contexttrace.Event{primeEvent(), memoryProvided(), whisper()}}).Display,
+		"not recording": Build(Input{TraceSource: TraceSourceAgentCache, AgentID: "OxAb12", Events: []contexttrace.Event{invoked("checked murmurs", "murmur list", 10, 1), selfReport("MEMORY.md")}}).Display,
+		"no trace":      Build(Input{TraceSource: TraceSourceNone, TraceReason: "not recording"}).Display,
+	}
+	for name, got := range shapes {
+		t.Run(name, func(t *testing.T) {
+			for _, b := range banned {
+				assert.NotContains(t, got, b)
+			}
+			assert.False(t, strings.HasSuffix(strings.TrimRight(got, "\n"), " tok"))
+		})
+	}
+	ledger := t.TempDir()
+	writeLedgerSession(t, ledger, alice, 1, nil, primeEvent(), invoked("checked murmurs", "murmur list", 300, 2))
+	for _, got := range []string{BuildMe(rollupIn(ledger, aliceID())).Display, BuildTeam(rollupIn(ledger, recap.Identity{})).Display} {
+		assert.NotContains(t, got, "injected")
+		assert.NotContains(t, got, " tok ")
+		assert.NotContains(t, got, "reported used")
+	}
+}
+
+// TestBuildMe_UsefulCountsEvidence: useful is the relevant count when the
+// trace carries one, else the surfaced items with use evidence.
+func TestBuildMe_UsefulCountsEvidence(t *testing.T) {
+	assert.Equal(t, 0, usefulCount(Report{Surfaced: []Surfaced{{Ref: "a"}}}))
+	assert.Equal(t, 1, usefulCount(Report{Surfaced: []Surfaced{{Ref: "a"}, {Ref: "b", Used: &ItemUsed{Evidence: EvidenceRead}}}}))
+	assert.Equal(t, 4, usefulCount(Report{Relevant: &Relevant{Count: 4}, Surfaced: []Surfaced{{Ref: "b", Used: &ItemUsed{Evidence: EvidenceRead}}}}))
+
+	got := DisplayMe(MeReport{Window: "7d", Totals: MeTotals{Sessions: 1, Calls: 3, Tokens: 1200, Useful: 2},
+		Sessions: []MeRow{{Name: "n", Date: "10-23", Title: "t", Trace: RowTraced, Calls: 3, Tokens: 1200, Surfaced: 5, Useful: 2}}}, 80)
+	assert.Contains(t, got, "read useful")
+	assert.Contains(t, got, "3 calls · ~1.2k tokens · 2 useful")
+	assertPlainFits(t, got, 80)
 }

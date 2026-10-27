@@ -9,6 +9,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/prheader"
+	"github.com/sageox/ox/internal/weblink"
 	"github.com/spf13/cobra"
 )
 
@@ -143,7 +144,7 @@ func runPRHeader(cmd *cobra.Command, _ []string) error {
 	}
 	sessionURLs := make([]string, 0, len(sessionArgs))
 	for _, s := range sessionArgs {
-		if u := artifactURL(ep, s, "/c/", "ses_"); u != "" {
+		if u := weblink.ArtifactURL(ep, s, "/c/", "ses_"); u != "" {
 			in.Sessions = append(in.Sessions, prheader.Session{URL: u})
 			sessionURLs = append(sessionURLs, u)
 		}
@@ -151,7 +152,7 @@ func runPRHeader(cmd *cobra.Command, _ []string) error {
 
 	planURLs := make([]string, 0)
 	for _, p := range planFlags {
-		if u := artifactURL(ep, p, "/plan/", "pln_"); u != "" {
+		if u := weblink.ArtifactURL(ep, p, "/plan/", "pln_"); u != "" {
 			in.Plans = append(in.Plans, prheader.Plan{URL: u})
 			planURLs = append(planURLs, u)
 		}
@@ -163,7 +164,7 @@ func runPRHeader(cmd *cobra.Command, _ []string) error {
 	// is DIRECTLY about this PR, which is rare.
 	discussionURLs := make([]string, 0)
 	for _, d := range discussionFlags {
-		if u := artifactURL(ep, d, "/c/", "cnv_"); u != "" {
+		if u := weblink.ArtifactURL(ep, d, "/c/", "cnv_"); u != "" {
 			in.Discussions = append(in.Discussions, prheader.Discussion{URL: u})
 			discussionURLs = append(discussionURLs, u)
 		}
@@ -263,45 +264,6 @@ func autoSessionURL(gitRoot string, allowUnconfirmed bool) (url string, unconfir
 		return "", true // server has not observed it — withhold, signal the caller
 	}
 	return u, false
-}
-
-// artifactURL maps a flag value — either a full http(s) URL or a bare id — to a
-// web URL. A full URL passes through; a bare id becomes {ep}{pathPrefix}{id},
-// tolerating a missing type prefix so both "pln_abc" and "abc" resolve. A bare
-// id that names a DIFFERENT type (e.g. a "ses_" id passed to a --plan slot) is
-// rejected rather than resolved into a plausible-but-wrong 404 URL.
-func artifactURL(ep, raw, pathPrefix, idPrefix string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
-		return raw
-	}
-	if p := idTypePrefix(raw); p != "" && p != idPrefix {
-		return ""
-	}
-	if ep == "" {
-		return ""
-	}
-	return ep + pathPrefix + url.PathEscape(raw)
-}
-
-// idTypePrefix returns the leading "<type>_" token of a bare id (e.g. "pln_" for
-// "pln_4d8e2f"), or "" when the id carries no such prefix ("4d8e2f"). Only a
-// lowercase-letter run followed by an underscore counts, so an id whose body
-// merely contains underscores is treated as prefix-less.
-func idTypePrefix(raw string) string {
-	i := strings.IndexByte(raw, '_')
-	if i <= 0 {
-		return ""
-	}
-	for _, r := range raw[:i] {
-		if r < 'a' || r > 'z' {
-			return ""
-		}
-	}
-	return raw[:i+1]
 }
 
 // Small flag accessors keep runPRHeader readable; cobra's error returns are safe

@@ -53,7 +53,7 @@ func TestBuild_TraceShapes(t *testing.T) {
 				{Type: contexttrace.EventInvoked, Command: primeCommand, Label: "loaded team context", InlineTokens: 700},
 			}},
 			assert: func(t *testing.T, r Report) {
-				assert.Contains(t, r.Injected.BySource, SourceStat{Source: "prime:total", Tokens: 700})
+				assert.Contains(t, r.Context.BySource, SourceStat{Source: "prime:total", Tokens: 700})
 			},
 		},
 		{
@@ -90,7 +90,6 @@ func TestBuild_TraceShapes(t *testing.T) {
 			assert: func(t *testing.T, r Report) {
 				require.Len(t, r.Used.SelfReported, 1)
 				assert.Equal(t, "AGENTS.md", r.Used.SelfReported[0].Ref)
-				assert.Equal(t, UsedReported, r.Used.Status)
 			},
 		},
 	}

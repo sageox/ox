@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/glance"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/recap"
@@ -23,8 +24,9 @@ var usageCmd = &cobra.Command{
 	Use:   "brief",
 	Short: "Show what SageOx gave this session",
 	Long: `Show what SageOx gave this session: the ox calls your AI coworker made, how
-much context ox put in front of the model (estimated tokens), which team items
-were surfaced by name, and which of those the AI coworker reports it used.
+much context ox put in front of the model (estimated tokens), what it read by
+title (with sageox.ai links where one exists), and which items have evidence
+they were used. Murmurs are listed only when they were useful.
 
 When called by an AI coworker it emits JSON with a pre-rendered display and
 guidance; in a bare terminal it prints the same report. --me rolls up your
@@ -95,6 +97,7 @@ func runUsage(cmd *cobra.Command, _ []string) error {
 	} else {
 		in = usageInputForCurrentSession(projectRoot, resolveImplicitAgentID())
 	}
+	in.Endpoint = endpoint.GetForProject(projectRoot)
 	in.Now = time.Now()
 	in.Width = width
 	if cmd.Flags().Changed("recent") {

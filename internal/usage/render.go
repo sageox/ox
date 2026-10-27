@@ -10,10 +10,10 @@ import (
 	"github.com/sageox/ox/internal/theme"
 )
 
-// labelCol is the width of the left-hand section label ("injected   ").
+// labelCol is the width of the left-hand section label ("context    ").
 const labelCol = 11
 
-// maxBar is the bar length of the largest injected source.
+// maxBar is the bar length of the largest context source.
 const maxBar = 5
 
 // maxDisplayLines bounds the display so it fits one screen in any harness.
@@ -84,74 +84,178 @@ func renderSession(r Report, width int, st styler) string {
 	}
 	lines = append(lines, wrapItems(st.label("calls"), callItems, "  ", width)...)
 
-	// injected
-	inj := r.Injected
-	injItems := []string{st.accent("~"+FmtK(inj.TotalTokens)+" tok") + "  "}
+	lines = append(lines, contextLines(r.Context, width, st)...)
+
+	read, readChecked := readLines(r.Surfaced, width, st)
+	murmurs, murmurChecked := murmurLines(r.Surfaced, width, st)
+	lines = append(lines, read...)
+	lines = append(lines, murmurs...)
+	lines = append(lines, scoreLines(r, width, st)...)
+	if readChecked || murmurChecked {
+		lines = append(lines, wrapItems("", []string{st.ok("✓") + st.dim(" used by the AI coworker")}, " ", width)...)
+	}
+	return finish(lines)
+}
+
+// contextLines renders the estimated token volume and its notes.
+func contextLines(cx Context, width int, st styler) []string {
+	items := []string{st.accent("~"+FmtK(cx.Tokens)+" tokens") + "  "}
 	maxTok := 0
-	for _, s := range inj.BySource {
+	for _, s := range cx.BySource {
 		maxTok = max(maxTok, s.Tokens)
 	}
-	for _, s := range inj.BySource {
+	for _, s := range cx.BySource {
 		item := s.Source + " " + FmtK(s.Tokens)
 		if n := barLen(s.Tokens, maxTok); n > 0 {
 			item += " " + st.accent(strings.Repeat("▇", n))
 		}
-		injItems = append(injItems, item)
+		items = append(items, item)
 	}
-	if len(inj.BySource) == 0 {
-		injItems = []string{st.dim("none metered")}
+	if len(cx.BySource) == 0 {
+		items = []string{st.dim("none metered")}
 	}
-	lines = append(lines, wrapItems(st.label("injected"), injItems, "  ", width)...)
+	lines := wrapItems(st.label("context"), items, "  ", width)
 
 	var notes []string
-	if p := inj.Prime; p != nil && p.FullBytes > p.EmittedBytes {
+	if p := cx.Prime; p != nil && p.FullBytes > p.EmittedBytes {
 		note := fmt.Sprintf("prime trimmed %s→%s B", FmtK(p.FullBytes), FmtK(p.EmittedBytes))
 		if len(p.Deferred) > 0 {
 			note += " (deferred: " + strings.Join(p.Deferred, ", ") + ")"
 		}
 		notes = append(notes, note)
 	}
-	if len(inj.Unmetered) > 0 {
-		notes = append(notes, "not metered: "+strings.Join(inj.Unmetered, ", "))
+	if len(cx.Unmetered) > 0 {
+		notes = append(notes, "not metered: "+strings.Join(cx.Unmetered, ", "))
 	}
 	for i := range notes {
 		notes[i] = st.dim(notes[i])
 	}
-	lines = append(lines, wrapItems("", notes, st.dim(" · "), width)...)
+	return append(lines, wrapItems("", notes, st.dim(" · "), width)...)
+}
 
-	// surfaced
-	var surf []string
-	for _, s := range r.Surfaced {
-		surf = append(surf, surfacedName(s))
+// readLines renders every non-murmur surfaced item by title (or name), team
+// skills collapsed to a count. An item with a web link gets its own wrap so
+// the URL lands whole on a continuation line instead of being cut. It reports
+// whether any item carried a use check.
+func readLines(surfaced []Surfaced, width int, st styler) ([]string, bool) {
+	skills := 0
+	for _, s := range surfaced {
+		if s.RefType == refTypeSkill {
+			skills++
+		}
 	}
-	if len(surf) == 0 {
-		surf = []string{st.dim("nothing by name")}
+	label := st.label("read")
+	var lines, run []string
+	checked, skillShown := false, false
+	flush := func() {
+		if len(run) > 0 {
+			lines = append(lines, wrapItems(label, run, st.dim(" · "), width)...)
+			label, run = "", nil
+		}
 	}
-	lines = append(lines, wrapItems(st.label("surfaced"), surf, st.dim(" · "), width)...)
+	for _, s := range surfaced {
+		if s.RefType == "murmur" {
+			continue
+		}
+		if s.RefType == refTypeSkill && skills > 1 {
+			if !skillShown {
+				run = append(run, fmt.Sprintf("%d team skills", skills))
+				skillShown = true
+			}
+			if s.Used != nil {
+				checked = true
+			}
+			continue
+		}
+		text := readName(s, width)
+		if s.Used != nil {
+			text += " " + st.ok("✓")
+			checked = true
+		}
+		if s.URL == "" {
+			run = append(run, text)
+			continue
+		}
+		flush()
+		lines = append(lines, wrapItems(label, []string{text, st.dim(s.URL)}, "  ", width)...)
+		label = ""
+	}
+	flush()
+	if len(lines) == 0 {
+		lines = wrapItems(label, []string{st.dim("nothing by name")}, " ", width)
+	}
+	return lines, checked
+}
 
-	// used
-	lines = append(lines, wrapItems(st.label("used"), usedItems(r.Used, st), st.dim(" · "), width)...)
+// refTypeSkill is the surfaced ref_type of a team skill.
+const refTypeSkill = "skill"
 
-	return finish(lines)
+// readName is "kind  title" when the item has a title, else its name.
+func readName(s Surfaced, width int) string {
+	if s.Title == "" {
+		return surfacedName(s)
+	}
+	kind := s.RefType
+	room := max(12, width-labelCol-ansi.StringWidth(kind)-4)
+	return kind + "  " + truncate(s.Title, room)
+}
+
+// murmurLines lists only the murmurs with use evidence; a murmur that was
+// merely received is not value and is not shown.
+func murmurLines(surfaced []Surfaced, width int, st styler) ([]string, bool) {
+	var items []string
+	for _, s := range surfaced {
+		if s.RefType != "murmur" || s.Used == nil {
+			continue
+		}
+		name := firstNonEmpty(s.FromName, s.From)
+		if s.Topic != "" {
+			name = strings.TrimSpace(name + " [" + s.Topic + "]")
+		}
+		if name == "" {
+			name = s.Ref
+		}
+		items = append(items, name+" "+st.ok("✓"))
+	}
+	if len(items) == 0 {
+		return nil, false
+	}
+	return wrapItems(st.label("murmurs"), items, st.dim(" · "), width), true
+}
+
+// scoreLines is the session's SageOx score and the commits it produced.
+func scoreLines(r Report, width int, st styler) []string {
+	var items []string
+	switch {
+	case r.Used.SageoxScore != nil && r.Used.SageoxScore.Category != "":
+		items = append(items, r.Used.SageoxScore.Category)
+	case r.Relevant != nil && r.Relevant.Derived != nil && r.Relevant.Derived.Category != "":
+		items = append(items, r.Relevant.Derived.Category)
+	}
+	if n := r.Used.ProducedCommits; n > 0 {
+		items = append(items, fmt.Sprintf("%d commit%s", n, plural(n, "", "s")))
+	}
+	return wrapItems(st.label("score"), items, st.dim(" · "), width)
 }
 
 func sessionHeader(r Report, st styler) string {
 	scope := "this session"
-	if !r.Session.Recording && r.Session.Name != "" {
-		scope = r.Session.Name
+	past := !r.Session.Recording && r.Session.Name != ""
+	if past {
+		scope = "past session"
 	}
 	var parts []string
-	if r.Session.AgentID != "" {
-		parts = append(parts, r.Session.AgentID)
-	}
-	if r.Session.Harness != "" {
-		parts = append(parts, r.Session.Harness)
-	}
-	if r.Session.Recording {
+	switch {
+	case r.Session.Recording:
 		parts = append(parts, st.ok("●")+" recording")
+	case !past:
+		parts = append(parts, st.dim("○")+" not recording")
 	}
 	if r.Session.Turns > 0 {
 		parts = append(parts, fmt.Sprintf("%d turn%s", r.Session.Turns, plural(r.Session.Turns, "", "s")))
+	}
+	if rel := r.Relevant; rel != nil {
+		parts = append(parts, fmt.Sprintf("%d of %d used", rel.Count, rel.SurfacedCount))
 	}
 	h := st.head("ox brief") + st.dim(" · "+scope)
 	if len(parts) > 0 {
@@ -160,22 +264,12 @@ func sessionHeader(r Report, st styler) string {
 	return h
 }
 
+// surfacedName is the untitled fallback for a read item: a doc by its path,
+// a retrieval by its query, anything else as "kind ref".
 func surfacedName(s Surfaced) string {
 	switch s.RefType {
 	case "doc":
 		return s.Ref
-	case "murmur":
-		name := "murmur"
-		if s.From != "" {
-			name += " " + s.From
-		}
-		if s.Topic != "" {
-			name += " [" + s.Topic + "]"
-		}
-		if s.From == "" && s.Topic == "" {
-			name += " " + s.Ref
-		}
-		return name
 	}
 	if s.Via == "retrieval" {
 		return fmt.Sprintf("%s %q", s.RefType, truncate(s.Ref, 40))
@@ -183,38 +277,13 @@ func surfacedName(s Surfaced) string {
 	return s.RefType + " " + s.Ref
 }
 
-func usedItems(u Used, st styler) []string {
-	var items []string
-	switch u.Status {
-	case UsedReported:
-		var refs []string
-		for i, s := range u.SelfReported {
-			if i == 3 {
-				refs = append(refs, fmt.Sprintf("+%d more", len(u.SelfReported)-3))
-				break
-			}
-			ref := s.Ref
-			if s.Decision != "" {
-				ref += fmt.Sprintf(" (%q)", truncate(s.Decision, 40))
-			}
-			refs = append(refs, ref)
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
 		}
-		items = append(items, "you reported: "+strings.Join(refs, ", "))
-	case UsedNotYetReported:
-		items = append(items, st.dim("not yet reported"))
-	default:
-		items = append(items, st.dim("not recording — no self-report"))
 	}
-	if n := len(u.Retrieval); n > 0 {
-		items = append(items, fmt.Sprintf("ran %d retrieval", n)+plural(n, "", "s"))
-	}
-	if u.SageoxScore != nil {
-		items = append(items, "score: "+u.SageoxScore.Category)
-	}
-	if u.ProducedCommits > 0 {
-		items = append(items, fmt.Sprintf("%d commit%s", u.ProducedCommits, plural(u.ProducedCommits, "", "s")))
-	}
-	return items
+	return ""
 }
 
 // wrapItems lays items out after a fixed-width label, joined by sep, wrapping

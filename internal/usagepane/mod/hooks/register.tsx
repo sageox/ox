@@ -1,6 +1,6 @@
-// The ox brief pane: what ox did this session (each ox call, the context it
-// put in front of the model, what it surfaced) in a scrollable pane beside
-// the chat. Installed and kept up to date by ox; the data is
+// The ox brief pane: what ox gave this session (the context it put in front
+// of the model, what was read, the murmurs that helped, each ox call) in a
+// scrollable pane beside the chat. Installed and kept up to date by ox; the data is
 // `ox brief --json --recent 0`, re-read when the pane opens, after each ox
 // command the AI coworker runs through Bash, and every 15 seconds while open.
 //
@@ -9,27 +9,33 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { UsageReport, UsageStatus } from '../types'
+import type { UsageReport } from '../types'
 import {
   PANE,
   REFRESH_MS,
   RUN_TIMEOUT_MS,
   BRIEF_ARGV,
+  contextRows,
   errorLine,
   formatRow,
   headerLines,
+  INITIAL_STATUS,
   isAtEnd,
   isOxCommand,
+  murmurRows,
   oldestFirst,
   parseReport,
+  readRows,
   shouldScrollToEnd,
   truncate,
 } from './logic'
 
 // Change a tag when its value's fields change: an atom declines what an
 // earlier version stored under another tag, which outlives a reload.
-const report = atom({ plugin: 'ox-cli-brief-pane', key: 'report' } as const, null as UsageReport | null, { shape: 'report-1' })
-const status = atom({ plugin: 'ox-cli-brief-pane', key: 'status' } as const, { follow: true } as UsageStatus, { shape: 'status-1' })
+const report = atom({ plugin: 'ox-cli-brief-pane', key: 'report' } as const, null as UsageReport | null, { shape: 'report-2' })
+// status-2: follow now starts false (the pane opens at the top); a stored
+// status-1 value, follow true, is declined so it cannot pull the pane down.
+const status = atom({ plugin: 'ox-cli-brief-pane', key: 'status' } as const, INITIAL_STATUS, { shape: 'status-2' })
 
 const TITLE = 'ox brief'
 const USAGE = '/ox-brief [off|refresh]'
@@ -166,14 +172,21 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: 'ox-brief' }, async ($, e) => {
     // A reload drops the timer while the pane stays up: start it again here.
     startTimer($)
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Text, Link } = $.ui.resolve(e)
     const cols = Math.max(10, e.props.bodyColumns)
     const r = await read($, report)
     const st = await read($, status)
-    const { identity, summary } = headerLines(r)
+    const { marker, summary } = headerLines(r)
     const offsetMin = -new Date().getTimezoneOffset()
     const title = '● ox brief'
-    const recent = r === null ? [] : oldestFirst(r.calls.recent)
+
+    const heading = (key: string, text: string) => (
+      <Box key={key} marginTop={1}>
+        <Text dimColor weight="bold">
+          {text}
+        </Text>
+      </Box>
+    )
 
     let body
     if (r === null) {
@@ -187,23 +200,88 @@ export const register: Register = on => {
           <Text wrap="wrap">Run ox session start to record the next session.</Text>
         </Box>
       )
-    } else if (recent.length === 0) {
-      body = <Text dimColor>No ox calls yet.</Text>
     } else {
-      body = (
-        <Box flexDirection="column">
-          {recent.map((call, i) => {
-            const row = formatRow(call, cols, offsetMin)
-            return (
-              <Box key={`row:${i}`}>
-                <Text color={row.failed ? 'error' : undefined} wrap="truncate-end">
-                  {row.text}
+      const ctx = contextRows(r)
+      const reads = readRows(r)
+      const murmurs = murmurRows(r)
+      const recent = oldestFirst(r.calls.recent)
+      const anyUsed = reads.some(row => row.used) || murmurs.length > 0
+      const sections = []
+      if (ctx.length > 0) {
+        sections.push(heading('h:context', 'context'))
+        for (const row of ctx) {
+          sections.push(
+            <Box key={`context:${row.key}`}>
+              <Text wrap="truncate-end">
+                {row.text}
+                {row.bar !== '' && <Text color="success">{`  ${row.bar}`}</Text>}
+              </Text>
+            </Box>,
+          )
+        }
+        if (r.context.estimated) {
+          sections.push(
+            <Text key="context:note" dimColor>
+              estimates, ~4 bytes/token
+            </Text>,
+          )
+        }
+      }
+      if (reads.length > 0) {
+        sections.push(heading('h:read', 'read'))
+        for (const row of reads) {
+          sections.push(
+            <Box key={row.key}>
+              <Text wrap="wrap">{`${row.text}${row.used ? ' ✓' : ''}`}</Text>
+            </Box>,
+          )
+          if (row.url !== undefined) {
+            sections.push(
+              <Box key={`${row.key}:url`} paddingLeft={2}>
+                <Text dimColor wrap="wrap">
+                  <Link href={row.url} />
                 </Text>
-              </Box>
+              </Box>,
             )
-          })}
-        </Box>
-      )
+          }
+        }
+      }
+      if (murmurs.length > 0) {
+        sections.push(heading('h:murmurs', 'murmurs'))
+        for (const row of murmurs) {
+          sections.push(
+            <Box key={row.key}>
+              <Text wrap="wrap">{`${row.text} ✓`}</Text>
+            </Box>,
+          )
+        }
+      }
+      sections.push(heading('h:calls', 'calls'))
+      if (recent.length === 0) {
+        sections.push(
+          <Text key="calls:none" dimColor>
+            No ox calls yet.
+          </Text>,
+        )
+      }
+      recent.forEach((call, i) => {
+        const row = formatRow(call, cols, offsetMin)
+        sections.push(
+          <Box key={`row:${i}`}>
+            <Text color={row.failed ? 'error' : undefined} wrap="truncate-end">
+              {row.text}
+            </Text>
+          </Box>,
+        )
+      })
+      if (anyUsed) {
+        sections.push(
+          <Box key="legend" marginTop={1}>
+            <Text dimColor>✓ used by the AI coworker</Text>
+          </Box>,
+        )
+      }
+      body = <Box flexDirection="column">{sections}</Box>
     }
 
     return (
@@ -212,7 +290,15 @@ export const register: Register = on => {
           <Text color="success" weight="bold">
             {title}
           </Text>
-          <Text dimColor>{truncate(`  ${identity}`, Math.max(0, cols - title.length))}</Text>
+          {r !== null && r.session.recording ? (
+            <Text>
+              {'  '}
+              <Text color="error">●</Text>
+              {' recording'}
+            </Text>
+          ) : (
+            <Text dimColor>{truncate(`  ${marker}`, Math.max(0, cols - title.length))}</Text>
+          )}
         </Text>
         {summary !== '' && (
           <Text dimColor wrap="truncate-end">

@@ -28,7 +28,7 @@ const guidanceMe = "Show the coworker what SageOx gave their recent sessions. Pr
 	"inside a fenced ```text block, then at most 3 sentences of your own. Rows marked \"no usage trace\" " +
 	"predate usage recording; rows marked \"—\" are not hydrated locally and can be read with " +
 	"`ox session view <name> --context`. Token counts are estimates (~4 bytes per token) — say so once. " +
-	"\"used\" counts only items the AI coworker reported using; never claim more, and never state or " +
+	"\"useful\" counts only items with use evidence; never claim more, and never state or " +
 	"imply time saved or dollar figures."
 
 // RollupInput scopes the --me and --team views.
@@ -62,7 +62,7 @@ type MeRow struct {
 	Calls    int    `json:"calls"`
 	Tokens   int    `json:"tokens"`
 	Surfaced int    `json:"surfaced"`
-	Used     int    `json:"used"` // self-reported items
+	Useful   int    `json:"useful"` // surfaced items with use evidence
 	Score    string `json:"score,omitempty"`
 }
 
@@ -73,7 +73,7 @@ type MeTotals struct {
 	NotHydrated int `json:"not_hydrated"`
 	Calls       int `json:"calls"`
 	Tokens      int `json:"tokens"`
-	Used        int `json:"used"`
+	Useful      int `json:"useful"`
 }
 
 // windowSessions returns the ledger sessions in the window, newest first.
@@ -121,13 +121,13 @@ func BuildMe(in RollupInput) MeReport {
 			row.Trace = RowTraced
 			sr := Build(Input{Events: events, TraceSource: TraceSourceSession})
 			row.Calls = sr.Calls.Total
-			row.Tokens = sr.Injected.TotalTokens
+			row.Tokens = sr.Context.Tokens
 			row.Surfaced = len(sr.Surfaced)
-			row.Used = len(sr.Used.SelfReported)
+			row.Useful = usefulCount(sr)
 			r.Totals.Traced++
 			r.Totals.Calls += row.Calls
 			r.Totals.Tokens += row.Tokens
-			r.Totals.Used += row.Used
+			r.Totals.Useful += row.Useful
 		}
 		r.Sessions = append(r.Sessions, row)
 	}
@@ -140,6 +140,22 @@ func BuildMe(in RollupInput) MeReport {
 	}
 	r.Display = DisplayMe(r, in.Width)
 	return r
+}
+
+// usefulCount is the number of surfaced items with use evidence: the
+// relevant summary's count when the trace carries one, else the items whose
+// used evidence is present.
+func usefulCount(r Report) int {
+	if r.Relevant != nil {
+		return r.Relevant.Count
+	}
+	n := 0
+	for _, s := range r.Surfaced {
+		if s.Used != nil {
+			n++
+		}
+	}
+	return n
 }
 
 // DisplayMe renders the --me rollup as plain text (no ANSI).
@@ -169,9 +185,9 @@ func renderMe(r MeReport, width int, st styler) string {
 
 	// date, gaps, the numeric columns and the longest score ("significant")
 	// take a fixed width; the title gets the rest.
-	const fixed = 5 + 2 + 2 + (5 + 1 + 7 + 1 + 8 + 1 + 4) + 2 + 11
+	const fixed = 5 + 2 + 2 + (5 + 1 + 7 + 1 + 4 + 1 + 6) + 2 + 11
 	titleW := max(12, width-fixed)
-	lines = append(lines, st.dim(fmt.Sprintf("%-5s  %-*s  %5s %7s %8s %4s  %s", "date", titleW, "title", "calls", "tokens", "surfaced", "used", "score")))
+	lines = append(lines, st.dim(fmt.Sprintf("%-5s  %-*s  %5s %7s %4s %6s  %s", "date", titleW, "title", "calls", "tokens", "read", "useful", "score")))
 	for i, row := range r.Sessions {
 		if i == maxMeDisplayRows {
 			lines = append(lines, st.dim(fmt.Sprintf("+%d more in the JSON report", len(r.Sessions)-maxMeDisplayRows)))
@@ -185,11 +201,11 @@ func renderMe(r MeReport, width int, st styler) string {
 		var rest string
 		switch row.Trace {
 		case RowNotHydrated:
-			rest = fmt.Sprintf("%5s %7s %8s %4s", "—", "—", "—", "—")
+			rest = fmt.Sprintf("%5s %7s %4s %6s", "—", "—", "—", "—")
 		case RowNoTrace:
 			rest = st.dim("no usage trace")
 		default:
-			rest = fmt.Sprintf("%5d %7s %8d %4d", row.Calls, "~"+FmtK(row.Tokens), row.Surfaced, row.Used)
+			rest = fmt.Sprintf("%5d %7s %4d %6d", row.Calls, "~"+FmtK(row.Tokens), row.Surfaced, row.Useful)
 		}
 		line := fmt.Sprintf("%-5s  %s  %s", row.Date, title, rest)
 		if row.Score != "" && row.Trace != RowNoTrace {
@@ -198,7 +214,7 @@ func renderMe(r MeReport, width int, st styler) string {
 		lines = append(lines, strings.TrimRight(line, " "))
 	}
 	t := r.Totals
-	lines = append(lines, st.label("total")+fmt.Sprintf("  %d calls · ~%s tok · %d reported used", t.Calls, FmtK(t.Tokens), t.Used))
+	lines = append(lines, st.label("total")+fmt.Sprintf("  %d calls · ~%s tokens · %d useful", t.Calls, FmtK(t.Tokens), t.Useful))
 	if t.NotHydrated > 0 {
 		lines = append(lines, st.dim(fmt.Sprintf("%d not hydrated; `ox session view <name> --context`", t.NotHydrated)))
 	}
