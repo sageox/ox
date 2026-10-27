@@ -331,3 +331,156 @@ func TestUpdateState_NoChangeSkipsWrite(t *testing.T) {
 	assert.NoFileExists(t, StatePath(root, testAgentID))
 	assert.Error(t, UpdateState(root, "bad id", func(s *State) bool { return true }))
 }
+
+const (
+	testCnv  = "cnv_019ffe10-0000-7000-8000-000000000011"
+	testCnv2 = "cnv_019ffe10-0000-7000-8000-000000000022"
+)
+
+// TestNormalizeRef: the retrieval hook and the use-evidence writers must name
+// one item the same way. Failure prevented: a fetched discussion that is then
+// used shows as two discussions because one path saw a link and the other an ID.
+func TestNormalizeRef(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name, refType, ref, want string
+	}{
+		{"bare conversation id", "discussion", testCnv, testCnv},
+		{"sageox.ai link", "discussion", "https://sageox.ai/c/" + testCnv, testCnv},
+		{"sageox uri with cue", "discussion", "sageox://team/conversation/" + testCnv + "#t=12", testCnv},
+		{"team-ctx slug", "team-context", "team-ctx/acme", TeamContextRef},
+		{"team-ctx retrieval ref", "team-context", TeamContextRef, TeamContextRef},
+		{"plan slug trimmed", "plan", "  my-plan ", "my-plan"},
+		{"doc path kept", "doc", "docs/adr/001.md", "docs/adr/001.md"},
+		{"empty", "team-context", "  ", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, NormalizeRef(tt.refType, tt.ref))
+		})
+	}
+}
+
+// TestState_MarkUsed counts each used item once, alongside — never instead
+// of — its kind. Failure prevented: one fetch plus one use of the same
+// discussion renders as "2 discussions", re-reporting a use inflates "used",
+// or an item used straight from a whisper never shows its kind.
+func TestState_MarkUsed(t *testing.T) {
+	t.Parallel()
+
+	type op struct {
+		use          bool
+		refType, ref string
+	}
+	fetch := func(rt, ref string) op { return op{false, rt, ref} }
+	use := func(rt, ref string) op { return op{true, rt, ref} }
+
+	tests := []struct {
+		name string
+		ops  []op
+		want Counts
+	}{
+		{"fetch then use is one item, one use", []op{fetch("discussion", testCnv), use("discussion", testCnv)}, Counts{Discussions: 1, Used: 1}},
+		{"use without fetch still counts its kind", []op{use("murmur", "m1")}, Counts{Murmurs: 1, Used: 1}},
+		{"same use reported twice counts once", []op{use("plan", "p"), use("plan", "p"), use("plan", " p ")}, Counts{Plans: 1, Used: 1}},
+		{"distinct uses each count", []op{use("discussion", testCnv), use("discussion", testCnv2), use("doc", "a.md")}, Counts{Discussions: 2, Docs: 1, Used: 3}},
+		{"link and bare id dedup", []op{fetch("discussion", testCnv), use("discussion", "https://sageox.ai/c/"+testCnv), use("discussion", testCnv)}, Counts{Discussions: 1, Used: 1}},
+		{"team-ctx slug dedups with the retrieval ref", []op{fetch("team-context", TeamContextRef), use("team-context", "team-ctx/acme")}, Counts{Docs: 1, Used: 1}},
+		{"use before fetch", []op{use("session", "ses_1"), fetch("session", "ses_1")}, Counts{Sessions: 1, Used: 1}},
+		{"unknown type is ignored", []op{use("query", "auth"), use("", "x")}, Counts{}},
+		{"empty ref is ignored", []op{use("plan", ""), use("plan", " ")}, Counts{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var s State
+			for _, o := range tt.ops {
+				if o.use {
+					s.MarkUsed(o.refType, o.ref)
+				} else {
+					s.Bump(o.refType, o.ref)
+				}
+			}
+			assert.Equal(t, tt.want, s.Counts())
+			assert.Len(t, s.UsedRefs, tt.want.Used)
+		})
+	}
+
+	t.Run("reports change", func(t *testing.T) {
+		t.Parallel()
+		var s State
+		require.True(t, s.Bump("plan", "p"))
+		assert.True(t, s.MarkUsed("plan", "p"), "first use of a fetched item is a change")
+		assert.False(t, s.MarkUsed("plan", "p"))
+		assert.False(t, s.MarkUsed("nope", "p"))
+	})
+
+	t.Run("used refs capped, newest kept", func(t *testing.T) {
+		t.Parallel()
+		var s State
+		for i := range MaxSeenRefs + 5 {
+			require.True(t, s.MarkUsed("doc", fmt.Sprintf("d%d", i)))
+		}
+		assert.Equal(t, MaxSeenRefs+5, s.Used)
+		require.Len(t, s.UsedRefs, MaxSeenRefs)
+		assert.Equal(t, "doc\x00d5", s.UsedRefs[0], "oldest dropped first")
+		assert.False(t, s.MarkUsed("doc", fmt.Sprintf("d%d", MaxSeenRefs+4)), "a kept ref still dedups")
+	})
+}
+
+// TestRecordUse_PersistsAndDedups drives the on-disk path the commands use.
+// Failure prevented: `ox agent <id> context used` run twice for one item
+// shows "2 used", or the use lands in a file no status line reads.
+func TestRecordUse_PersistsAndDedups(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	key := StateKey(testAgentID, "claude-1")
+
+	require.NoError(t, RecordInfluence(root, testAgentID, "claude-1", "discussion", testCnv))
+	require.NoError(t, RecordUse(root, testAgentID, "claude-1", "discussion", testCnv))
+	require.NoError(t, RecordUse(root, testAgentID, "claude-1", "discussion", "https://sageox.ai/c/"+testCnv))
+	require.NoError(t, RecordUse(root, testAgentID, "claude-1", "team-context", "team-ctx/acme"))
+
+	got := LoadState(root, key)
+	assert.Equal(t, Counts{Discussions: 1, Docs: 1, Used: 2}, got.Counts())
+	assert.False(t, got.UpdatedAt.IsZero())
+	// rendering of Used lands with the status line change
+	assert.Equal(t, State{}, LoadState(root, StateKey(testAgentID, "claude-2")), "other sessions untouched")
+}
+
+// TestRecordUse_Noops mirror RecordInfluence's rules. Failure prevented: an
+// `--ref-type query` use or an empty ref creating state or a count.
+func TestRecordUse_Noops(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	for _, rt := range []string{"query", "code", ""} {
+		require.NoError(t, RecordUse(root, testAgentID, "s", rt, "x"), rt)
+	}
+	require.NoError(t, RecordUse(root, testAgentID, "s", "plan", "  "))
+	assert.NoDirExists(t, filepath.Join(root, ".sageox"))
+
+	assert.ErrorIs(t, RecordUse(root, "../x", "s", "plan", "p"), ErrInvalidAgentID)
+	assert.ErrorContains(t, RecordUse("", testAgentID, "s", "plan", "p"), "record use: empty project root")
+}
+
+// TestLoadState_PreUsedSchema reads a file written before the used count
+// existed. Failure prevented: upgrading ox loses the session's retrieval counts
+// or fails to decode, blanking the bar.
+func TestLoadState_PreUsedSchema(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	key := StateKey(testAgentID, "s1")
+	path := StatePath(root, key)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	old := `{"discussions":2,"plans":1,"seen_refs":["discussion\u0000a","discussion\u0000b","plan\u0000p"],"updated_at":"2026-10-23T12:00:00Z"}`
+	require.NoError(t, os.WriteFile(path, []byte(old), 0o600))
+
+	got := LoadState(root, key)
+	assert.Equal(t, Counts{Discussions: 2, Plans: 1}, got.Counts())
+	assert.Empty(t, got.UsedRefs)
+
+	require.NoError(t, RecordUse(root, testAgentID, "s1", "plan", "p"))
+	assert.Equal(t, Counts{Discussions: 2, Plans: 1, Used: 1}, LoadState(root, key).Counts())
+}

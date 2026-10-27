@@ -41,12 +41,47 @@ type State struct {
 	// SeenRefs dedups bumps: one "<refType>\x00<ref>" per counted item, newest
 	// last, capped at MaxSeenRefs. An item that falls off the cap can count
 	// again; at that size the line is already saturated.
-	SeenRefs  []string  `json:"seen_refs,omitempty"`
+	SeenRefs []string `json:"seen_refs,omitempty"`
+	// Used counts the distinct items the AI coworker reported using or cited
+	// in a commit (RecordUse), whether or not a hook saw them fetched.
+	Used int `json:"used,omitempty"`
+	// UsedRefs dedups Used the way SeenRefs dedups the kind buckets, with the
+	// same key format and cap.
+	UsedRefs  []string  `json:"used_refs,omitempty"`
 	UpdatedAt time.Time `json:"updated_at,omitzero"`
 }
 
-// MaxSeenRefs caps State.SeenRefs; the oldest entries are dropped first.
+// MaxSeenRefs caps State.SeenRefs and State.UsedRefs; the oldest entries are
+// dropped first.
 const MaxSeenRefs = 64
+
+// TeamContextRef is the one item every "team-context" ref counts as: the
+// distilled Team Context as a whole, read by `ox agent <id> team-ctx`. The
+// retrieval hook and the use-evidence writers (which name it
+// "team-ctx/<slug>") must agree on it, or one read plus one use would show as
+// two docs.
+const TeamContextRef = "agent team-ctx"
+
+// NormalizeRef maps ref to the key it is counted under, so the retrieval hook
+// and the use-evidence writers name the same item the same way: any
+// "team-context" ref becomes TeamContextRef, and a ref holding a
+// conversation, recording or discussion ID (a bare "cnv_…" or a
+// sageox:// / sageox.ai link to one) becomes that ID. Anything else is
+// returned trimmed.
+func NormalizeRef(refType, ref string) string {
+	refType = strings.TrimSpace(refType)
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	if refType == "team-context" {
+		return TeamContextRef
+	}
+	if id := conversationIDRe.FindString(ref); id != "" {
+		return id
+	}
+	return ref
+}
 
 // Bump counts ref once under the bucket refType names and reports whether
 // anything changed. refType is the context-trace ref_type vocabulary:
@@ -55,7 +90,7 @@ const MaxSeenRefs = 64
 // refType, an empty ref, or a ref already counted changes nothing.
 func (s *State) Bump(refType, ref string) bool {
 	refType = strings.TrimSpace(refType)
-	ref = strings.TrimSpace(ref)
+	ref = NormalizeRef(refType, ref)
 	counter := s.counter(refType)
 	if counter == nil || ref == "" {
 		return false
@@ -65,11 +100,38 @@ func (s *State) Bump(refType, ref string) bool {
 		return false
 	}
 	*counter++
-	s.SeenRefs = append(s.SeenRefs, key)
-	if over := len(s.SeenRefs) - MaxSeenRefs; over > 0 {
-		s.SeenRefs = slices.Delete(s.SeenRefs, 0, over)
-	}
+	s.SeenRefs = appendCapped(s.SeenRefs, key)
 	return true
+}
+
+// MarkUsed counts ref once in Used and also Bumps it into its kind bucket, so
+// an item used without ever being fetched through a hook (a whisper, a prime
+// doc, a recall hit) still shows its kind. It reports whether anything
+// changed. The same refType vocabulary, normalisation and no-op rules as Bump
+// apply.
+func (s *State) MarkUsed(refType, ref string) bool {
+	refType = strings.TrimSpace(refType)
+	ref = NormalizeRef(refType, ref)
+	if s.counter(refType) == nil || ref == "" {
+		return false
+	}
+	changed := s.Bump(refType, ref)
+	key := refType + "\x00" + ref
+	if slices.Contains(s.UsedRefs, key) {
+		return changed
+	}
+	s.Used++
+	s.UsedRefs = appendCapped(s.UsedRefs, key)
+	return true
+}
+
+// appendCapped appends key and drops the oldest entries past MaxSeenRefs.
+func appendCapped(refs []string, key string) []string {
+	refs = append(refs, key)
+	if over := len(refs) - MaxSeenRefs; over > 0 {
+		refs = slices.Delete(refs, 0, over)
+	}
+	return refs
 }
 
 // counter returns the count refType bumps, or nil for an unknown refType.
@@ -97,6 +159,7 @@ func (s State) Counts() Counts {
 		Docs:        s.Docs,
 		Sessions:    s.Sessions,
 		Murmurs:     s.Murmurs,
+		Used:        s.Used,
 	}
 }
 
@@ -117,22 +180,37 @@ func (s State) Counts() Counts {
 // counted. It waits at most the default file-lock timeout for a concurrent
 // writer, then returns that error; callers in hooks should log it and move on.
 func RecordInfluence(projectRoot, agentID, harnessSessionID, refType, ref string) error {
+	return record(projectRoot, agentID, harnessSessionID, refType, ref, "record influence", (*State).Bump)
+}
+
+// RecordUse counts one item of team context as used — reported by the AI
+// coworker (`ox agent <id> context used <ref>`) or cited in a commit message —
+// in a harness session: Used goes up once per distinct item, and the item is
+// also counted in its kind bucket if no hook saw it fetched (see
+// State.MarkUsed). harnessSessionID, the no-op rules and the locking are as
+// for RecordInfluence.
+func RecordUse(projectRoot, agentID, harnessSessionID, refType, ref string) error {
+	return record(projectRoot, agentID, harnessSessionID, refType, ref, "record use", (*State).MarkUsed)
+}
+
+// record applies apply(refType, ref) to the stored state under the lock.
+func record(projectRoot, agentID, harnessSessionID, refType, ref, op string, apply func(*State, string, string) bool) error {
 	var probe State
-	if probe.counter(strings.TrimSpace(refType)) == nil || strings.TrimSpace(ref) == "" {
+	if probe.counter(strings.TrimSpace(refType)) == nil || NormalizeRef(refType, ref) == "" {
 		return nil
 	}
 	if projectRoot == "" {
-		return errors.New("record influence: empty project root")
+		return fmt.Errorf("%s: empty project root", op)
 	}
 	err := UpdateState(projectRoot, StateKey(agentID, harnessSessionID), func(s *State) bool {
-		if !s.Bump(refType, ref) {
+		if !apply(s, refType, ref) {
 			return false
 		}
 		s.UpdatedAt = time.Now().UTC()
 		return true
 	})
 	if err != nil {
-		return fmt.Errorf("record influence: %w", err)
+		return fmt.Errorf("%s: %w", op, err)
 	}
 	return nil
 }

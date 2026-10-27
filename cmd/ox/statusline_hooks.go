@@ -34,10 +34,6 @@ var statuslineCountedRefTypes = map[string]bool{
 	"team-context": true,
 }
 
-// statuslineTeamCtxRef is the item `ox agent <id> team-ctx` reads: the
-// distilled Team Context as a whole, so it counts as one doc per session.
-const statuslineTeamCtxRef = "agent team-ctx"
-
 // recordStatuslineRetrieval counts an already-classified retrieval on the
 // status line of the harness session it ran in. Calls with no countable item
 // return before the config read.
@@ -47,7 +43,9 @@ func recordStatuslineRetrieval(projectRoot, agentID, harnessSessionID string, ac
 	}
 	ref := act.Ref
 	if refType == "team-context" {
-		ref = statuslineTeamCtxRef
+		// the distilled Team Context as a whole: one doc per session, the same
+		// item a reported use of any team-ctx/<slug> ref counts as
+		ref = oxactivity.TeamContextRef
 	}
 	if ref == "" || !statuslineEnabled() {
 		return

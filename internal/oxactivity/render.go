@@ -20,6 +20,8 @@ type Counts struct {
 	Docs        int
 	Sessions    int
 	Murmurs     int
+	// Used counts the items the AI coworker actually used (State.MarkUsed).
+	Used int
 }
 
 // IsZero reports whether nothing has been counted yet.

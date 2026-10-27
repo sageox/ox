@@ -36,8 +36,8 @@ func TestRender_Pluralization(t *testing.T) {
 		c    Counts
 		want string
 	}{
-		{"all singular", Counts{1, 1, 1, 1, 1}, "● ox  1 discussion · 1 plan · 1 doc · 1 session · 1 murmur"},
-		{"all plural", Counts{2, 3, 4, 5, 12}, "● ox  2 discussions · 3 plans · 4 docs · 5 sessions · 12 murmurs"},
+		{"all singular", Counts{1, 1, 1, 1, 1, 0}, "● ox  1 discussion · 1 plan · 1 doc · 1 session · 1 murmur"},
+		{"all plural", Counts{2, 3, 4, 5, 12, 0}, "● ox  2 discussions · 3 plans · 4 docs · 5 sessions · 12 murmurs"},
 		{"mixed", Counts{Discussions: 3, Plans: 1, Murmurs: 1}, "● ox  3 discussions · 1 plan · 1 murmur"},
 	}
 	for _, tt := range tests {
