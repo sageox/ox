@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -108,6 +109,17 @@ func TestLedgerWriters_QueueBehindRepoLock(t *testing.T) {
 			writeSessionFiles(t, clonePath, name)
 			return func() error { return commitAndPushLedger(clonePath, name) }
 		}},
+		{"push-summary", func(t *testing.T, clonePath, name string) func() error {
+			sessionDir := writeSessionFiles(t, clonePath, name)
+			summary := pushSummaryFixture(t)
+			return func() error {
+				out := pushSummaryToLedger(summary, sessionDir)
+				if !out.Success {
+					return &pushSummaryError{out.Error}
+				}
+				return nil
+			}
+		}},
 		{"session delete", func(t *testing.T, clonePath, name string) func() error {
 			committedSession(t, clonePath, name)
 			return func() error {
@@ -173,7 +185,7 @@ func TestLedgerWriters_QueueBehindRepoLock(t *testing.T) {
 // Failure prevented: a bare `git commit` sweeping a coworker's staged plan
 // edit, unvalidated, into the session's summary commit (#1442).
 func TestPushSummary_LeavesUnrelatedStagedEntriesStaged(t *testing.T) {
-	_, clonePath := createBareAndClone(t)
+	barePath, clonePath := createBareAndClone(t)
 	isolatePushEnv(t, clonePath)
 	sessionName := "2026-01-01T00-00-testuser-OxSnp1"
 	sessionDir := writeSessionFiles(t, clonePath, sessionName)
@@ -181,6 +193,8 @@ func TestPushSummary_LeavesUnrelatedStagedEntriesStaged(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(clonePath, filepath.Dir(plan)), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(clonePath, plan), []byte("# draft plan\n"), 0o644))
 	runGit(t, clonePath, "add", plan)
+	otherSession := writeSessionFiles(t, clonePath, "2026-01-01T00-00-testuser-OxOther")
+	runGit(t, clonePath, "add", filepath.Join(otherSession, "meta.json"))
 	summary := filepath.Join(t.TempDir(), "raw-summary.json")
 	require.NoError(t, os.WriteFile(summary, []byte(`{"title":"Fix ledger sync","summary":"Recovered the ledger sync after a lost rebase race.","outcome":"success"}`), 0o644))
 
@@ -192,6 +206,7 @@ func TestPushSummary_LeavesUnrelatedStagedEntriesStaged(t *testing.T) {
 	_, err = runGitCombined(clonePath, "cat-file", "-e", "HEAD:"+plan)
 	assert.Error(t, err, "the staged plan must not ride along in the summary commit")
 	assert.Contains(t, runGit(t, clonePath, "diff", "--cached", "--name-only"), plan, "the plan edit must stay staged")
+	assert.NotEmpty(t, runGit(t, barePath, "show", "HEAD:sessions/"+filepath.Base(otherSession)+"/meta.json"), "another staged session must still be published")
 }
 
 // pushSummaryFixture returns a summary file push-summary accepts.
@@ -220,6 +235,73 @@ func TestPushSummary_RetryAfterCommitSucceeds(t *testing.T) {
 	require.True(t, retry.Success, retry.Error)
 	assert.Equal(t, "summary pushed to ledger", retry.Message)
 	assert.Equal(t, head, runGit(t, clonePath, "rev-parse", "HEAD"), "a retry must not add a commit")
+}
+
+// A failed push leaves the summary committed locally. Identical retries must
+// report failure while the remote is unavailable, then publish that commit.
+func TestPushSummary_RetryAfterFailedPush(t *testing.T) {
+	barePath, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	sessionDir := writeSessionFiles(t, clonePath, "2026-01-01T00-00-testuser-OxPushRetry")
+	summary := pushSummaryFixture(t)
+	cacheDir := filepath.Join(session.GetContextPath(getRepoIDOrDefault(clonePath)), "sessions", filepath.Base(sessionDir))
+	require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+	rawPath := filepath.Join(cacheDir, "raw.jsonl")
+	require.NoError(t, os.WriteFile(rawPath, []byte("{\"type\":\"user\",\"content\":\"Keep this session for retry.\"}\n"), 0o600))
+	require.NoError(t, session.WriteNeedsSummaryMarker(cacheDir, rawPath, sessionDir))
+	remoteHead := runGit(t, barePath, "rev-parse", "HEAD")
+	runGit(t, clonePath, "remote", "set-url", "--push", "origin", filepath.Join(t.TempDir(), "missing.git"))
+
+	first := pushSummaryToLedger(summary, sessionDir)
+	require.False(t, first.Success)
+	assert.Contains(t, first.Error, "git push")
+	assert.FileExists(t, rawPath)
+	assert.True(t, session.HasNeedsSummaryMarker(cacheDir))
+	head := runGit(t, clonePath, "rev-parse", "HEAD")
+	require.NotEqual(t, remoteHead, head, "the commit must succeed before the push fails")
+
+	retry := pushSummaryToLedger(summary, sessionDir)
+	require.False(t, retry.Success, "an unchanged summary must not hide another push failure")
+	assert.Contains(t, retry.Error, "git push")
+	assert.Equal(t, head, runGit(t, clonePath, "rev-parse", "HEAD"))
+	assert.Equal(t, remoteHead, runGit(t, barePath, "rev-parse", "HEAD"))
+	assert.FileExists(t, rawPath, "failed retries must retain recovery content")
+	assert.True(t, session.HasNeedsSummaryMarker(cacheDir), "failed retries must remain pending")
+
+	runGit(t, clonePath, "remote", "set-url", "--push", "origin", barePath)
+	retry = pushSummaryToLedger(summary, sessionDir)
+	require.True(t, retry.Success, retry.Error)
+	assert.Equal(t, head, runGit(t, clonePath, "rev-parse", "HEAD"), "a retry must not add a commit")
+	assert.Equal(t, head, runGit(t, barePath, "rev-parse", "HEAD"), "success must mean the pending commit reached the remote")
+	assert.NoDirExists(t, cacheDir, "recovery cleanup must wait for a successful push")
+}
+
+func TestPushSummary_RemoteAdvanceWithStagedPlan(t *testing.T) {
+	barePath, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+	other := cloneBare(t, barePath)
+	require.NoError(t, os.WriteFile(filepath.Join(other, "remote.txt"), []byte("teammate change\n"), 0o644))
+	runGit(t, other, "add", "remote.txt")
+	runGit(t, other, "commit", "-m", "advance remote")
+	runGit(t, other, "push")
+
+	sessionDir := writeSessionFiles(t, clonePath, "2026-01-01T00-00-testuser-OxAutoStash")
+	const plan = "data/plans/pln_test/plan.md"
+	require.NoError(t, os.MkdirAll(filepath.Join(clonePath, filepath.Dir(plan)), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(clonePath, plan), []byte("# pending plan\n"), 0o644))
+	runGit(t, clonePath, "add", plan)
+
+	out := pushSummaryToLedger(pushSummaryFixture(t), sessionDir)
+	require.True(t, out.Success, out.Error)
+	assert.Equal(t, runGit(t, clonePath, "rev-parse", "HEAD"), runGit(t, barePath, "rev-parse", "HEAD"))
+	assert.NotEmpty(t, runGit(t, barePath, "show", "HEAD:sessions/"+filepath.Base(sessionDir)+"/summary.json"))
+	assert.Equal(t, "teammate change", runGit(t, clonePath, "show", "HEAD:remote.txt"))
+	planContent, err := os.ReadFile(filepath.Join(clonePath, plan))
+	require.NoError(t, err)
+	assert.Equal(t, "# pending plan\n", string(planContent), "autostash must retain the plan content locally")
+	assert.Empty(t, runGit(t, barePath, "ls-tree", "--name-only", "HEAD", "--", plan), "the pending plan must not be published")
 }
 
 // TestPushSummary_UnmergedIndexPointsAtDoctor: an index left unmerged outside a

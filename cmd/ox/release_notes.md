@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Sharing a session summary leaves other staged work pending** — only the summary and its metadata are committed. Retrying an already committed summary attempts publication again; synchronization waits when it would rebase over a staged draft.
+- **Retrying a session summary retries its failed push** — a summary already committed locally is pushed again before publication reports success.
 - **The `/ox-brief` pane no longer says `not recording` while your session records** — the pane now tells `ox brief` which Claude Code session it belongs to, so it agrees with the status line's `● rec`.
 - **Sessions in a git worktree reach the Ledger** — the Claude desktop app runs every session in a linked worktree under `.claude/worktrees/`, and ox judged that worktree to be another repository. No turn was captured, and `session stop` uploaded nothing while reporting success. A worktree of the same repository now counts as part of it; another repository's worktree or clone inside your checkout is still refused.
 - **`ox agent <id>` commands work from every worktree** — `ox agent prime` and later commands each looked up agent IDs in the `.sageox/` of whichever checkout they ran in. The desktop app primes in the main checkout while the AI coworker works in a worktree, so every `ox agent <id> …` there failed with "instance not found". All worktrees of a repository now share the main checkout's agent IDs, and the error names the file it searched.

@@ -512,12 +512,6 @@ var ledgerAutoResolvePrefixes = ledger.AutoResolvePrefixes
 // kills git and skips the abort, leaving the clone mid-rebase. Its own
 // per-step timeouts still bound it.
 func pushLedger(ctx context.Context, ledgerPath string) error {
-	return pushLedgerWithRetryPolicy(ctx, ledgerPath, false)
-}
-
-// pushLedgerWithRetryPolicy lets scoped maintenance writers preserve pending
-// staged drafts without changing plan-review or automatic repair retry policy.
-func pushLedgerWithRetryPolicy(ctx context.Context, ledgerPath string, requireCleanIndexForRebase bool) error {
 	ctx = context.WithoutCancel(ctx)
 	ctx, span := perf.Start(ctx, "pre-push total")
 	defer span.End()
@@ -569,9 +563,8 @@ func pushLedgerWithRetryPolicy(ctx context.Context, ledgerPath string, requireCl
 
 	pushCtx, pushSpan := perf.Start(ctx, "git_push")
 	err := gitutil.PushWithRetry(pushCtx, ledgerPath, gitutil.PushOpts{
-		RequireCleanIndexForRebase: requireCleanIndexForRebase,
-		ImmutablePaths:             true, // the Ledger never renames paths
-		AutoResolvePrefixes:        ledgerAutoResolvePrefixes,
+		ImmutablePaths:      true, // the Ledger never renames paths
+		AutoResolvePrefixes: ledgerAutoResolvePrefixes,
 		PrePush: func(repoPath string) error {
 			if ep != "" {
 				if err := gitserver.RefreshRemoteCredentials(repoPath, ep); err != nil {
