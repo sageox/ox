@@ -155,6 +155,9 @@ const turnBlocks = new Map<string, string>()
 let newestReply: string | null = null
 // Every reply block drawn so far: a redraw of one is never a new last block.
 const seenBlocks = new Set<string>()
+// The newest reply's celebration once its turn ends (confetti, or a fall
+// when it failed), played once before he rests.
+let replyClosing: OneShot | null = null
 // Each animation's half-block cells, read from its cells.json on first use.
 const cells = new Map<Anim, Promise<Cells>>()
 
@@ -313,9 +316,13 @@ function stillOf($: EngineInterface, box: Size) {
 // A one-shot lasts the longer of its two arts' passes, so an SVG clip at
 // the hires timing reaches its frozen last frame before the next animation
 // takes over; the terminal simply holds its last frame for the difference.
-function playOnce(anim: Anim, now: number) {
+function oneShotOf(anim: Anim, now: number): OneShot {
   const pass = Math.max(passMs(FRAMES.animations[anim]), passMs({ ms: clipTimings(FRAMES, anim, true) }))
-  oneShot = { anim, start: now, until: now + pass }
+  return { anim, start: now, until: now + pass }
+}
+
+function playOnce(anim: Anim, now: number) {
+  oneShot = oneShotOf(anim, now)
 }
 
 function spinnerAnim(requestId: string, site: { mode: string; message: string | null }, now: number, pin: string | null) {
@@ -338,6 +345,11 @@ function frameOf(requestId: string, site: Site, now: number, pin: string | null)
   if (site.kind === 'turn') {
     const index = frameAt(FRAMES.animations[site.anim], site.start, now, false)
     return { anim: site.anim, index, drawn: `${site.anim}:${index}`, loop: false }
+  }
+  if (site.kind === 'reply' && !site.working && pin === null && replyClosing !== null && now < replyClosing.until) {
+    const anim = replyClosing.anim
+    const index = frameAt(FRAMES.animations[anim], replyClosing.start, now, false)
+    return { anim, index, drawn: `${anim}:${index}`, loop: false }
   }
   if ((site.kind === 'rest' || site.kind === 'reply') && !site.working) {
     const anim: Anim = pin !== null && isAnim(pin) ? pin : REST_ANIM
@@ -553,13 +565,16 @@ export const register: Register = on => {
     playOnce('wave', now)
     turnRunning = true
     currentTurn = e.turnId
+    replyClosing = null
     startTicker($)
     $.ui.invalidate('ui.render')
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
-    closing = { anim: turnFailed ? 'fail' : 'confetti', start: await $.clock.now() }
+    const ended = await $.clock.now()
+    closing = { anim: turnFailed ? 'fail' : 'confetti', start: ended }
+    replyClosing = oneShotOf(closing.anim, ended)
     turnRunning = false
     currentTurn = null
     newestReply = turnBlocks.get(e.turnId) ?? newestReply
@@ -639,10 +654,12 @@ export const register: Register = on => {
     if (!seenBlocks.has(e.requestId)) {
       seenBlocks.add(e.requestId)
       if (currentTurn !== null) {
-        const prev = turnBlocks.get(currentTurn)
+        // The block he stood under until now: this turn's previous last, or,
+        // for the turn's first block, the last reply he worked under while
+        // the turn had no text (running commands, reading files).
+        const prev = turnBlocks.get(currentTurn) ?? newestReply
         turnBlocks.set(currentTurn, e.requestId)
-        if (prev !== undefined) {
-          // The block that was last until now drops Oxy.
+        if (prev !== null) {
           sites.delete(prev)
           $.ui.invalidate('ui.render')
         }
@@ -651,7 +668,12 @@ export const register: Register = on => {
     if (![...turnBlocks.values()].includes(e.requestId)) {
       return next(e)
     }
-    const live = (currentTurn !== null && turnBlocks.get(currentTurn) === e.requestId) || (currentTurn === null && newestReply === e.requestId)
+    // He animates under the running turn's last block, or, until that turn
+    // writes any text, under the newest reply, working through its commands.
+    const live =
+      currentTurn !== null
+        ? (turnBlocks.get(currentTurn) ?? newestReply) === e.requestId
+        : newestReply === e.requestId
     let art: { source: string; px: { width: number; height: number } } | null
     if (live && e.props.onScreen !== null) {
       const now = await $.clock.now()

@@ -718,6 +718,57 @@ test('desktop: Oxy stands under the last block of each reply, the reply drawn as
   await older.unmount()
 })
 
+test('desktop: the newest reply celebrates when its turn ends, then Oxy rests', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  mockPngFiles(on)
+  engineDraws(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+
+  await $.turn.start({ turnId: 'c1' } as never)
+  await (await $.ui.mount(reply('c1-a', 'All done.'))).unmount()
+  await $.turn.complete({ answer: '', durationMs: 1_000, isAborted: false, turnId: 'c1', reason: 'answer' })
+  const party = await $.ui.mount(reply('c1-a', 'All done.'))
+  expect(String((await party.find({ type: 'Svg' }))?.props.source)).toContain('confetti')
+  await party.unmount()
+
+  await clock.advance(30_000)
+  const resting = await $.ui.mount(reply('c1-a', 'All done.'))
+  const source = String((await resting.find({ type: 'Svg' }))?.props.source)
+  expect(source).toContain('blink')
+  expect(source).not.toContain('confetti')
+  await resting.unmount()
+})
+
+test('desktop: while a turn runs commands before any text, Oxy works under the newest reply', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  mockPngFiles(on)
+  engineDraws(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+
+  await $.turn.start({ turnId: 'd1' } as never)
+  await (await $.ui.mount(reply('d1-a', 'First.'))).unmount()
+  await $.turn.complete({ answer: '', durationMs: 1_000, isAborted: false, turnId: 'd1', reason: 'answer' })
+
+  await $.turn.start({ turnId: 'd2' } as never)
+  const working = await $.ui.mount(reply('d1-a', 'First.'))
+  const source = String((await working.find({ type: 'Svg' }))?.props.source)
+  // A playing clip of a working animation, not the still or the rest.
+  expect((source.match(/<image /g) ?? []).length).toBeGreaterThan(1)
+  expect(source).not.toContain('blink')
+  await working.unmount()
+
+  // The turn's first text takes him; the older reply goes still.
+  await (await $.ui.mount(reply('d2-a', 'Second.'))).unmount()
+  const older = await $.ui.mount(reply('d1-a', 'First.'))
+  expect((String((await older.find({ type: 'Svg' }))?.props.source).match(/<image /g) ?? []).length).toBe(1)
+  await older.unmount()
+  await $.turn.complete({ answer: '', durationMs: 1_000, isAborted: false, turnId: 'd2', reason: 'answer' })
+})
+
 test('desktop: replies keep the engine\'s drawing where Oxy doesn\'t belong', async ($, on) => {
   mock.clock(on, { now: 1_000 })
   mock.store(on)
