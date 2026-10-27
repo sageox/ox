@@ -61,6 +61,9 @@ var rootCmd = &cobra.Command{
 					return &commandExitError{ExitCode: 2, Message: "config is not supported for hosted reads"}
 				}
 			}
+			// Hosted reads build no cfg, so the parsed flag is the resolved value.
+			jsonOutput, _ := cmd.Flags().GetBool("json")
+			publishJSONFlag(cmd, jsonOutput)
 			return nil
 		}
 		if err := applyConfigFlag(cmd, args); err != nil {
@@ -82,17 +85,9 @@ var rootCmd = &cobra.Command{
 		// store config in global for backward compatibility
 		cfg = cliCtx.Config
 
-		// Legacy handlers read JSON from local or root flags instead of cfg.
 		// Publish the resolved value without treating an environment default as
-		// an explicit flag. Cobra may retain an inherited flag across ResetFlags,
-		// so the root flag also needs the parsed flag's explicitness.
-		jsonChanged := cmd.Flags().Changed("json")
-		for _, flags := range []*pflag.FlagSet{cmd.Flags(), cmd.Root().PersistentFlags()} {
-			if flag := flags.Lookup("json"); flag != nil {
-				_ = flag.Value.Set(strconv.FormatBool(cfg.JSON))
-				flag.Changed = jsonChanged
-			}
-		}
+		// an explicit flag.
+		publishJSONFlag(cmd, cfg.JSON)
 
 		// Daemon is started by `ox agent prime` as a child process of the coding agent.
 		// No auto-start here — when the agent exits, the daemon gets cleaned up automatically.
@@ -177,6 +172,21 @@ func applyConfigFlag(cmd *cobra.Command, _ []string) error {
 	}
 	// Reuse the same selection for reads, writes, caches, and child processes.
 	return os.Setenv(config.EnvUserConfig, path)
+}
+
+// publishJSONFlag sets --json on the flag Cobra parsed and on root's persistent
+// flag, with the parsed flag's explicitness. Legacy handlers read JSON from
+// either one instead of cfg, and the two can be different flags: friction
+// recovery gives root new flags before a retry, while Cobra keeps parsing into
+// the copy it merged into the subcommand earlier.
+func publishJSONFlag(cmd *cobra.Command, value bool) {
+	changed := cmd.Flags().Changed("json")
+	for _, flags := range []*pflag.FlagSet{cmd.Flags(), cmd.Root().PersistentFlags()} {
+		if flag := flags.Lookup("json"); flag != nil {
+			_ = flag.Value.Set(strconv.FormatBool(value))
+			flag.Changed = changed
+		}
+	}
 }
 
 // registerPersistentFlags registers all global persistent flags on rootCmd.
