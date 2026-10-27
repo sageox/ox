@@ -46,7 +46,6 @@ func newAmpThreadFixture(t *testing.T) *orbSessionFixture {
 	// install-hooks' AGENTS.md block is what makes Amp record in hook mode
 	require.NoError(t, os.WriteFile(filepath.Join(f.projectRoot, "AGENTS.md"),
 		[]byte("<!-- ox:prime:amp:start -->\nox agent prime\n<!-- ox:prime:amp:end -->\n"), 0o644))
-	t.Cleanup(func() { _ = DeleteSessionMarker(orbThreadURL) })
 	return f
 }
 
