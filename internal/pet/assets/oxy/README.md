@@ -39,8 +39,8 @@ the same test guards it.
 The Claude desktop app and VS Code draw Oxy from a high-resolution set in
 `desktop/` instead of the 160×207 pixel frames, which the terminal keeps.
 `desktop/make-desktop-set.py` builds it from any sheet in the pixel set's
-layout (one animation per row, the same frame counts and timing; the cell
-size comes from the sheet's own manifest):
+layout (one animation per row, the same animations, each row's `ms` a list
+of per-frame durations; the cell size comes from the sheet's own manifest):
 
 ```bash
 python3 internal/pet/assets/oxy/desktop/make-desktop-set.py <sheet.png> <sheet.json> internal/pet/assets/oxy/desktop
@@ -70,8 +70,9 @@ no `ms` must match the pixel set frame for frame and borrows its timing.
 `ox pet enable` slices each strip into `hooks/hires/<anim>/<i>.png`, still
 palette PNGs, and adds a `hires` field to `hooks/frames.ts` with the cell,
 scale, figure, and each animation's crop box and `ms`. Per-frame files lose the matches deflate finds
-across a strip's near-identical frames, so the trial set's 5.7 MB of strips
-installs as about 31 MB of frames, the largest 24 KB (32 K base64), inside the
+across a strip's near-identical frames, so the current set's 9.3 MB of strips
+(a 300 px figure in 384×497 cells, 2,426 frames at up to 30 fps) installs as
+about 51 MB of frames, the largest 29 KB (39 K base64), inside the
 131,072-character `Svg` cap. Without `desktop/manifest.json` the build skips
 the set and the desktop draws the pixel frames.
 `TestFramesFiles_StayUnderClaudeLimits` checks frame counts, the per-frame
