@@ -56,20 +56,34 @@ func runOxInProc(t *testing.T, target *cobra.Command, args ...string) (string, s
 		SilenceErrors:      true,
 		SilenceUsage:       true,
 	}
-	cmd.Flags().AddFlagSet(target.Flags())
+	// target.Flags() also holds copies of root's persistent flags once cobra has
+	// merged them in, which any lookup that walks through target does, and
+	// cobra never removes them. A test that replaces root's flag set leaves
+	// those copies stale, and a stale --json added here would take the parsed
+	// value while the readers consult root's: a --json run would print text.
+	target.Flags().VisitAll(func(flag *pflag.Flag) {
+		if rootCmd.PersistentFlags().Lookup(flag.Name) == nil {
+			cmd.Flags().AddFlag(flag)
+		}
+	})
 	// Persistent, not local: the readers resolve --json through
 	// cmd.Root().PersistentFlags(), so a local copy would leave them reading an
 	// empty flag set and falling back to agent detection.
 	cmd.PersistentFlags().AddFlagSet(rootCmd.PersistentFlags())
-	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
-		value, changed := flag.Value.String(), flag.Changed
-		t.Cleanup(func() {
-			_ = flag.Value.Set(value)
-			flag.Changed = changed
+	// Root's flags are shared with every test, so they start from their
+	// defaults too: a --json an earlier run left set would otherwise decide
+	// this run's output format.
+	for _, set := range []*pflag.FlagSet{cmd.Flags(), cmd.PersistentFlags()} {
+		set.VisitAll(func(flag *pflag.Flag) {
+			value, changed := flag.Value.String(), flag.Changed
+			t.Cleanup(func() {
+				_ = flag.Value.Set(value)
+				flag.Changed = changed
+			})
+			require.NoError(t, flag.Value.Set(flag.DefValue))
+			flag.Changed = false
 		})
-		require.NoError(t, flag.Value.Set(flag.DefValue))
-		flag.Changed = false
-	})
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -560,6 +574,56 @@ func TestHostedSessionListRendersATable(t *testing.T) {
 	require.Equal(t, 1, exitCodeOf(t, err))
 	require.Empty(t, stdout)
 	require.Equal(t, "Ledger read failed: dirty\n", stderr)
+}
+
+// Failure prevented: an auto-corrected hosted read ignores the --json choice
+// that was typed — a person gets the table after asking for JSON, an AI
+// coworker gets JSON after asking for the table. Planning the correction merges
+// root's --json into `session list`; the retry gives root a new --json, and
+// Cobra keeps parsing into the merged copy. The direct `session list` never
+// retries, so it never showed this.
+func TestHostedSessionListKeepsTheJSONChoiceThroughAutoCorrection(t *testing.T) {
+	tests := []struct {
+		name     string
+		agent    bool
+		jsonFlag string
+		wantJSON bool
+	}{
+		{name: "a person asks for JSON", jsonFlag: "--json", wantJSON: true},
+		{name: "an AI coworker asks for the table", agent: true, jsonFlag: "--json=false"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recoveryEnv(t)
+			f := newHostedReaderFixture(t)
+			withoutAgentContext(t)
+			if tt.agent {
+				t.Setenv("AGENT_ENV", "claude-code")
+			}
+
+			run := runRecovery(t, "agent", "session-list", "--repo", readSyncTestRepoID, tt.jsonFlag)
+			require.Equal(t, 0, run.code, "stdout=%s stderr=%s", run.stdout, run.stderr)
+
+			// Both callers read the correction as data: one typed --json, the other is an agent.
+			first, rest, _ := strings.Cut(run.stdout, "\n")
+			var note correctionNote
+			require.NoError(t, json.Unmarshal([]byte(first), &note), first)
+			require.NotNil(t, note.Corrected, first)
+			require.Equal(t, "session list --repo "+readSyncTestRepoID+" "+tt.jsonFlag, note.Corrected.Now)
+
+			if !tt.wantJSON {
+				require.False(t, json.Valid([]byte(rest)), "the corrected read must render the table:\n%s", rest)
+				require.Contains(t, rest, "SESSION")
+				require.Contains(t, rest, f.sessionName)
+				return
+			}
+			var listed sessionListOutput
+			require.NoError(t, json.Unmarshal([]byte(rest), &listed), "the corrected read must answer in JSON:\n%s", rest)
+			require.Equal(t, readSyncTestRepoID, listed.RepoID)
+			require.Len(t, listed.Sessions, 1)
+			require.Equal(t, f.sessionName, listed.Sessions[0].Name)
+		})
+	}
 }
 
 // Failure prevented: isHeadlessLedgerRead dispatches on the command NAME, so a

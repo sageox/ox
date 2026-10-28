@@ -22,7 +22,7 @@ export const REFRESH_MS = 15_000
 export const RUN_TIMEOUT_MS = 8_000
 
 // The width the brief pane asks for when it opens by itself, docked beside
-// the chat in the desktop app: the widest used row and the rule fit.
+// the chat in the desktop app: room for the widest used row.
 export const DESKTOP_COLUMNS = 48
 
 // shouldAutoOpen: the pane opens by itself only where the desktop app is

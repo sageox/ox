@@ -29,6 +29,10 @@ import (
 var allowedBaseEnv = []string{
 	"PATH", "HOME", "TMPDIR", "USER", "LANG", "LC_ALL",
 	"GOPATH", "GOROOT",
+	// the toolchain's home-derived locations, so a subprocess under a test's HOME
+	// keeps the build cache and `go env -w` settings; a re-executed cmd/ox test
+	// binary also finds them pinned and does not run `go env` in that HOME
+	"GOCACHE", "GOMODCACHE", "GOENV",
 	// git needs these for commits
 	"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
 	"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",

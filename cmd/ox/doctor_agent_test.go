@@ -8,66 +8,14 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// agentEnvVarsToSave lists all env vars that might indicate an agent context
-var agentEnvVarsToSave = []string{
-	"AGENT_ENV",
-	"PI_CODING_AGENT", // Pi sets this in every subprocess, including Go tests.
-	"PI_CODING_AGENT_DIR",
-	"PI_SESSION_ID",
-	"CLAUDECODE", // Claude Code sets this to "1"
-	"CLAUDE_CODE",
-	"CURSOR_AGENT",
-	"CURSOR_TRACE_ID",
-	"WINDSURF_AGENT",
-	"WINDSURF_SESSION",
-	"CODEIUM_AGENT",
-	"CLINE_TASK_ID",
-	"AIDER",
-	"AIDER_AGENT",
-	"AIDER_SESSION",
-	"CODEX_CI",
-	"CODEX_SANDBOX",
-	"CODEX_THREAD_ID",
-	"OPENCODE",
-	"OPENCODE_AGENT",
-	"GOOSE",
-	"GOOSE_AGENT",
-	"COPILOT_AGENT",
-	"CONTINUE_AGENT",
-	"KIRO",
-	"KIRO_AGENT",
-	"AMP",
-	"AMP_AGENT",
-	"CODY_AGENT",
-	"MCP_SERVER_NAME",
-	"CLAUDE_CODE_ENTRYPOINT",
-	"_", // executable path checked by some agents
-}
-
-// saveAndClearAgentEnv saves and clears all agent-related env vars
-func saveAndClearAgentEnv() map[string]string {
-	saved := make(map[string]string)
-	for _, v := range agentEnvVarsToSave {
-		saved[v] = os.Getenv(v)
-		os.Unsetenv(v)
-	}
-	return saved
-}
-
-// restoreAgentEnv restores previously saved env vars
-func restoreAgentEnv(saved map[string]string) {
-	for k, v := range saved {
-		if v == "" {
-			os.Unsetenv(k)
-		} else {
-			os.Setenv(k, v)
-		}
-	}
-}
-
+// TestCheckAgentEnvironment reports what doctor sees with no coding agent in the
+// environment, then with an AGENT_ENV it does not recognize.
+// Failure prevented: run inside Claude Code, the inherited
+// CLAUDE_CODE_SESSION_ID, which a hand-kept list here missed, made doctor
+// report Claude Code, so the test failed alone and whenever it ran before the
+// coworker tests that used to unset that variable for good.
 func TestCheckAgentEnvironment(t *testing.T) {
-	saved := saveAndClearAgentEnv()
-	defer restoreAgentEnv(saved)
+	withoutAgentContext(t)
 
 	t.Run("no agent context", func(t *testing.T) {
 		result := checkAgentEnvironment()
@@ -75,8 +23,7 @@ func TestCheckAgentEnvironment(t *testing.T) {
 	})
 
 	t.Run("unrecognized AGENT_ENV", func(t *testing.T) {
-		os.Setenv("AGENT_ENV", "unknown-agent")
-		defer os.Unsetenv("AGENT_ENV")
+		t.Setenv("AGENT_ENV", "unknown-agent")
 
 		result := checkAgentEnvironment()
 		// should be warning (passed=true, warning=true)

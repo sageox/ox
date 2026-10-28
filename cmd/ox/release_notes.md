@@ -49,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ox doctor` finishes plan saves that never committed, and names plan edits nobody saved** — a save that wrote the plan but never committed it (ox was interrupted, or an older version left it) is queued and shared by the same `ox doctor` run. Edits nobody saved are listed by plan; `ox doctor --fix-slug=plan-unsaved-edits` shares them as they are once you confirm.
 - **"Access denied" means access denied** — a Ledger push and `ox doctor`'s Ledger check say you lack access only when the server answered HTTP 403. A sign-in failure on a server whose address or port contains 403 is now reported as a sign-in failure.
 - **View original puts your oval around the words you drew it around** — a drawing in a plan review now records where the words under it sat, and View original draws them there. Before, it guessed: a table row's cells ran together as one paragraph, so the oval landed on other words. Drawings made before this keep their diagram labels in place and list the text they enclosed below the picture. The comments rail also keeps a long reviewer name and its tags inside the comment card instead of running off its edge.
+- **A corrected `ox session list --repo` answers in the format you asked for** — when ox corrected `ox agent session-list --repo <id> --json` to `ox session list`, the corrected command printed the table instead of JSON, and an AI coworker's `--json=false` came back as JSON. It now keeps your `--json` choice.
 
 ## [0.24.2] - 2026-10-21
 

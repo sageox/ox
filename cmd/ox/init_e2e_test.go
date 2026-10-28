@@ -27,9 +27,13 @@ func withInitFlags(t *testing.T, team string) {
 	prevEndpoint, prevAgents := initEndpointFlag, initAgentsFlag
 	initQuiet, initTeamFlag, initForce = true, team, true
 	initEndpointFlag, initAgentsFlag = "", ""
+	// runInit's warnings go through cli printers, which an earlier --json run
+	// can leave in JSON mode: the warning then arrives as an escaped object.
+	resetCLIOutputModes()
 	t.Cleanup(func() {
 		initQuiet, initTeamFlag, initForce = prevQuiet, prevTeam, prevForce
 		initEndpointFlag, initAgentsFlag = prevEndpoint, prevAgents
+		resetCLIOutputModes()
 	})
 }
 
