@@ -209,6 +209,20 @@ test('show:false, a failing ox, and a missing ox draw nothing and throw nothing'
   await ui.unmount()
 })
 
+test('the engine\'s band stays, under the ox line', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000 })
+  engineDraws(on)
+  on('process.run', () => ok(JSON.stringify(LINE)))
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await clock.settle()
+  const rows = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  const ox = rows.findIndex(t => /^● ox  /.test(t ?? ''))
+  const engine = rows.indexOf('engine')
+  expect(ox).toBeGreaterThanOrEqual(0)
+  expect(engine).toBeGreaterThan(ox)
+  await ui.unmount()
+})
+
 test('a survey holds the band', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000 })
   engineDraws(on)

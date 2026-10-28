@@ -249,43 +249,49 @@ export const register: Register = on => {
     if (line === null || !line.show) {
       return next(e)
     }
+    // Whatever else draws in the band (the engine, another plugin) stays,
+    // under the ox line.
+    const below = await next(e)
     const { Box, Text } = $.ui.resolve(e)
     const pieces = statuslinePieces(line, e.props.bodyColumns)
     return (
-      <Box key="ox-statusline">
-        <Text wrap="truncate-end">
-          {pieces.map((p, i) => {
-            switch (p.style) {
-              case 'mark':
-                return (
-                  <Text key={i} color="success" weight="bold">
-                    {p.text}
-                  </Text>
-                )
-              case 'num':
-                return (
-                  <Text key={i} color="success">
-                    {p.text}
-                  </Text>
-                )
-              case 'recDot':
-                return (
-                  <Text key={i} color="error">
-                    {p.text}
-                  </Text>
-                )
-              case 'dim':
-              case 'recLabel':
-                return (
-                  <Text key={i} dimColor>
-                    {p.text}
-                  </Text>
-                )
-              default:
-                return p.text
-            }
-          })}
-        </Text>
+      <Box flexDirection="column">
+        <Box key="ox-statusline">
+          <Text wrap="truncate-end">
+            {pieces.map((p, i) => {
+              switch (p.style) {
+                case 'mark':
+                  return (
+                    <Text key={i} color="success" weight="bold">
+                      {p.text}
+                    </Text>
+                  )
+                case 'num':
+                  return (
+                    <Text key={i} color="success">
+                      {p.text}
+                    </Text>
+                  )
+                case 'recDot':
+                  return (
+                    <Text key={i} color="error">
+                      {p.text}
+                    </Text>
+                  )
+                case 'dim':
+                case 'recLabel':
+                  return (
+                    <Text key={i} dimColor>
+                      {p.text}
+                    </Text>
+                  )
+                default:
+                  return p.text
+              }
+            })}
+          </Text>
+        </Box>
+        {below}
       </Box>
     )
   }).catch(($, e, next) => next(e))
