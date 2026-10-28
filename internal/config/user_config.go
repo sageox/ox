@@ -308,6 +308,11 @@ type UserConfig struct {
 	Trace             *TraceConfig `yaml:"trace,omitempty"`
 	DisplayName       string       `yaml:"display_name,omitempty"`
 	TipsEnabled       *bool        `yaml:"tips_enabled,omitempty"`
+	StatuslineEnabled *bool        `yaml:"statusline_enabled,omitempty"` // ox row in the Claude Code status line; nil = on
+	BriefPaneEnabled  *bool        `yaml:"brief_pane_enabled,omitempty"` // /ox-brief pane in Claude Code; nil = UsagePaneEnabled, then on
+	// UsagePaneEnabled is DEPRECATED: brief_pane_enabled's name before
+	// `ox usage` became `ox brief`. Read only as BriefPaneEnabled's fallback.
+	UsagePaneEnabled  *bool        `yaml:"usage_pane_enabled,omitempty"`
 	TelemetryEnabled  *bool        `yaml:"telemetry_enabled,omitempty"`
 	SessionTermsShown *bool        `yaml:"session_terms_shown,omitempty"`
 	Attribution       *Attribution `yaml:"attribution,omitempty"`
@@ -351,6 +356,9 @@ type UserConfig struct {
 	// Plan holds the user-level `plan.*` settings for the `ox plan` feature.
 	// Pointer so an absent block is distinguishable from explicit zero-values.
 	Plan *PlanConfig `yaml:"plan,omitempty"`
+
+	// Recap holds the user-level `recap.*` settings (ADR-027).
+	Recap *RecapConfig `yaml:"recap,omitempty"`
 
 	// PRVisuals holds the user-level `pr_visuals.*` settings for rich GitHub
 	// pull-request visuals. Pointer preserves inheritance from repo/team.
@@ -461,6 +469,67 @@ func (c *UserConfig) AreTipsEnabled() bool {
 		return true
 	}
 	return *c.TipsEnabled
+}
+
+// IsStatuslineEnabled reports whether ox should show its team-context counts
+// in the Claude Code status line (default: true).
+func (c *UserConfig) IsStatuslineEnabled() bool {
+	if c.StatuslineEnabled == nil {
+		return true
+	}
+	return *c.StatuslineEnabled
+}
+
+// IsBriefPaneEnabled reports whether ox should keep the /ox-brief pane
+// installed in Claude Code: brief_pane_enabled when set, else the deprecated
+// usage_pane_enabled, else true.
+func (c *UserConfig) IsBriefPaneEnabled() bool {
+	if v := c.BriefPaneSetting(); v != nil {
+		return *v
+	}
+	return true
+}
+
+// BriefPaneSetting is the explicit brief pane value — brief_pane_enabled,
+// falling back to the deprecated usage_pane_enabled — or nil when neither is
+// set.
+func (c *UserConfig) BriefPaneSetting() *bool {
+	if c == nil {
+		return nil
+	}
+	if c.BriefPaneEnabled != nil {
+		return c.BriefPaneEnabled
+	}
+	return c.UsagePaneEnabled
+}
+
+// RecapConfig holds the user-level `recap.*` settings.
+type RecapConfig struct {
+	// TraceConsultations is ADR-027's opt-out: when false, ox writes no
+	// record of what this coworker's AI coworker read or which ox calls it
+	// made (`consulted` and `invoked` context-trace events). nil = on.
+	TraceConsultations *bool `yaml:"trace_consultations,omitempty"`
+}
+
+// IsTraceConsultationsEnabled reports whether ox records this coworker's
+// consultations and ox calls into the session trace (default: true).
+func (c *UserConfig) IsTraceConsultationsEnabled() bool {
+	if c == nil || c.Recap == nil || c.Recap.TraceConsultations == nil {
+		return true
+	}
+	return *c.Recap.TraceConsultations
+}
+
+// TraceConsultationsEnabled resolves the `recap.trace_consultations` setting
+// from the user config. An unreadable config file resolves to OFF: this is a
+// privacy opt-out, and skipping a trace write is harmless while writing after
+// a coworker opted out is not.
+func TraceConsultationsEnabled() bool {
+	cfg, err := LoadUserConfig()
+	if err != nil {
+		return false
+	}
+	return cfg.IsTraceConsultationsEnabled()
 }
 
 // HasSeenSessionTerms returns true if the user has seen the session recording notice.

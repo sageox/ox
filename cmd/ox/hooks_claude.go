@@ -318,6 +318,14 @@ func InstallProjectClaudeHooks(gitRoot string) error {
 	// clean up stale ox hooks from settings.local.json
 	_ = cleanupLocalSettingsOxHooks(gitRoot)
 
+	// The ox status line ships with the hooks: it is the one Claude Code
+	// surface that renders color. It is a per-coworker preference, so it goes
+	// in settings.local.json (see statusline_install.go), and a coworker's own
+	// statusLine is never replaced.
+	if _, err := syncProjectStatusLine(gitRoot); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -375,13 +383,15 @@ func cleanupLocalSettingsOxHooks(gitRoot string) error {
 		return err
 	}
 
-	// if no hooks at all, nothing to clean
+	// if no hooks at all, nothing to clean (the ox statusLine lives here on
+	// purpose; syncProjectStatusLine owns it)
 	if len(settings.Hooks) == 0 {
 		return nil
 	}
 
-	// strip ox hooks from all events
 	changed := false
+
+	// strip ox hooks from all events
 	for eventName, entries := range settings.Hooks {
 		var filtered []ClaudeHookEntry
 		for _, entry := range entries {

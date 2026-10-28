@@ -58,6 +58,23 @@ ox doctor      # verifies hooks + context injection
 ```
 No extra setup needed — Claude Code is the reference implementation.
 
+**Status line.** Alongside the hooks, `ox init` and `ox doctor` set the `statusLine`
+in the project's `.claude/settings.local.json` to `ox statusline`. It counts the team
+context that influenced this session — `● ox  3 discussions · 1 plan · 1 murmur  ● rec`
+— each item once; with nothing used yet it reads `● ox  ● rec`. It reads local files
+only (no network, no daemon). A `statusLine` already in the project file is never
+replaced; one in your own `~/.claude/settings.json` keeps working, on its own row
+beneath ox's. Turn it off with `ox config set statusline off`.
+
+**Brief pane.** `/ox-brief` opens a pane beside the chat with what SageOx gave this
+session (calls, estimated context tokens, what was read and what was useful) and a
+scrollable list of every ox call, refreshed as they happen. It is a Claude Code plugin,
+`ox-cli-brief-pane`, that `ox init` and `ox doctor` install at user scope when the
+`claude` CLI is on PATH (Claude Code 2.1.309 or newer); the same mechanism ships Oxy
+(`ox pet`). The pane is a thin view over `ox brief --json`, so it shows exactly what
+`/ox-cli-brief` reports. `/ox-brief off` closes it, `ox config set brief_pane off`
+removes it, and `ox brief pane status` shows whether it is installed.
+
 ## Canonical Agent Skills
 
 ox authors every portable playbook once in `extensions/skills/`, in the open
@@ -67,6 +84,15 @@ receive the same managed skill under `.agents/skills/`. `ox doctor --fix`
 reconciles the project-selected native targets, including updates, missing
 skills, and retired ox-owned files, while preserving user-authored additions
 and modified retired files.
+
+Run `/ox-cli-brief` (Claude Code slash command, or pick it in Codex's skill
+picker) to see what SageOx gave the current session: the ox calls your AI
+coworker made, the team context ox put in front of it and from where, the
+decisions, rules, murmurs and sessions it read, and which of those the coworker
+reports were useful. `/ox-cli-brief me` rolls up your recent sessions in this
+repo; `/ox-cli-brief team` shows team-wide totals only, never per-person reads.
+The skill is a thin relay over `ox brief --json`, so other AI coworkers get the
+same report by running that command.
 
 ### Codex
 ```bash

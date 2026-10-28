@@ -350,6 +350,17 @@ func init() {
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugClaudeStatusLine,
+		Name:        "Claude status line",
+		Category:    "Integration",
+		FixLevel:    FixLevelAuto,
+		Description: "Ensures .claude/settings.json runs the ox status line, leaving a custom statusLine in place",
+		Run: func(fix bool) checkResult {
+			return checkClaudeStatusLine(fix)
+		},
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugStaleLocalHooks,
 		Name:        "Stale local hooks",
 		Category:    "Integration",

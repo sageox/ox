@@ -55,6 +55,32 @@ The complete upstream Gitleaks catalog and contextual env/Helm detection live in
 project rules are additive. Structured name/value pairs and nested tool data are
 scanned together so an opaque value does not need a provider-specific prefix.
 Custom rules cannot disable mandatory detection or introduce an unchecked secret.
+
+Each upstream rule runs with the filters that define it upstream:
+
+- **Entropy** thresholds apply as configured.
+- **Keywords** gate a rule only when its expression proves no literal of its
+  own. Sourcegraph's bare 40-hex alternative is the example: without the
+  `sgp_` / `sourcegraph` keyword it would claim every git commit SHA. The
+  keyword must sit on the matched line, so mentioning a provider anywhere in a
+  long session does not arm the rule everywhere. A rule anchored on its own
+  literal (Airtable's `pat…`) runs even when upstream's keyword is absent,
+  which is stricter than upstream.
+- **Rule allowlists** (`[[rules.allowlists]]`) apply their content conditions:
+  secret, match and line regexes, and stopwords. These are how upstream keeps
+  `generic-api-key` off stage lists, import lines and letters-only values.
+  Path conditions never hold, because captured session content has no
+  repository location, so a path cannot excuse a session credential.
+- The catalog-wide `[allowlist]` is a repository-scanning policy (lockfiles,
+  vendored files, images) and is not applied.
+
+Contextual env detection treats a syntactic placeholder as no value: a
+words-only `<slot>`, `${NAME}`, or a single-case `$NAME`. Natural-language
+values such as `your-api-key` are still treated as values. A JSON record in a
+JSONL file is judged by its decoded strings, the same unit capture redacts, so
+publication never refuses a file over escapes in its raw form. A JSON document
+that repeats a key is refused outright: decoding keeps only one of the values,
+and parsers disagree on which.
 Per-project custom rules live in `.sageox/REDACT.md` (literal-string redactions); see the
 existing `docs/security/redaction-policy.md` for the rule format.
 

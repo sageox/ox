@@ -1637,7 +1637,14 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		return fmt.Errorf("record pending session upload: %w", err)
 	}
 
-	meta, err := writeInitialSessionMeta(sessionDir, state.AgentID, metaBuilder)
+	meta, err := writeInitialSessionMeta(sessionDir, state.AgentID, metaBuilder, contextUseSource{
+		// the trace lives beside the LOCAL raw.jsonl (recording cache), which
+		// still holds real bytes here — the ledger copy becomes a pointer stub
+		// after upload and can never be read for this.
+		TraceDir:        sourceCacheDir,
+		ProducedCommits: len(state.ProducedCommits),
+		AllowJudged:     allowJudgedEvidenceForProject(projectRoot),
+	})
 	if err != nil {
 		return fmt.Errorf("write meta.json: %w", err)
 	}
@@ -1753,23 +1760,33 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 // consuming the per-agent contribution score. If the write fails, the score
 // remains available for a retry instead of being silently lost alongside the
 // failed meta.json write.
-func writeInitialSessionMeta(sessionDir, agentID string, builder *lfs.SessionMetaBuilder) (*lfs.SessionMeta, error) {
+//
+// ctxUse names the directory holding the session's real context-trace.jsonl;
+// when it carries at least one event the derived context-use rollup is stamped
+// on the meta (lfs.ContextUseRollupFromDir), otherwise the field is omitted.
+func writeInitialSessionMeta(sessionDir, agentID string, builder *lfs.SessionMetaBuilder, ctxUse contextUseSource) (*lfs.SessionMeta, error) {
 	scoreFile, err := session.ReadSageoxScore(agentID)
 	if err != nil {
 		return nil, fmt.Errorf("read SageOx score: %w", err)
 	}
 	if scoreFile != nil {
-		builder.SageoxScore(scoreFile.Score, string(scoreFile.Category), scoreFile.Reason)
+		builder.SageoxScore(scoreFile.Score, string(scoreFile.Category), scoreFile.Reason).
+			SageoxScoreSource(lfs.SageoxScoreSourceSelfReported)
 	} else {
 		// A prior attempt may have persisted metadata and consumed the score
 		// carrier before a later LFS/push failure. Preserve that durable score on
 		// retry instead of overwriting meta.json with an unscored rebuild.
 		existing, readErr := lfs.ReadSessionMeta(sessionDir)
 		if readErr == nil && existing.SageoxScore != nil {
-			builder.SageoxScore(*existing.SageoxScore, existing.SageoxScoreCategory, existing.SageoxScoreReason)
+			builder.SageoxScore(*existing.SageoxScore, existing.SageoxScoreCategory, existing.SageoxScoreReason).
+				SageoxScoreSource(existing.SageoxScoreSource)
 		} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 			return nil, fmt.Errorf("read existing session metadata: %w", readErr)
 		}
+	}
+
+	if rollup := lfs.ContextUseRollupFromDir(ctxUse.TraceDir, ctxUse.ProducedCommits, ctxUse.AllowJudged); rollup != nil {
+		builder.ContextUse(rollup)
 	}
 
 	meta := builder.Build()
@@ -1784,6 +1801,25 @@ func writeInitialSessionMeta(sessionDir, agentID string, builder *lfs.SessionMet
 		_ = session.CleanupSageoxScore(agentID)
 	}
 	return meta, nil
+}
+
+// contextUseSource tells writeInitialSessionMeta where the recording's
+// context-trace.jsonl lives and the inputs contextuse.Build needs.
+type contextUseSource struct {
+	TraceDir        string // directory holding the REAL trace bytes; "" = no rollup
+	ProducedCommits int
+	AllowJudged     bool // attribution.allow_judged_evidence
+}
+
+// allowJudgedEvidenceForProject resolves attribution.allow_judged_evidence
+// through the same project-over-user merge as every other attribution knob.
+// An unreadable project config resolves to the default (false).
+func allowJudgedEvidenceForProject(projectRoot string) bool {
+	projCfg, _ := config.LoadProjectConfig(projectRoot)
+	if projCfg == nil {
+		projCfg = &config.ProjectConfig{}
+	}
+	return resolveProjectAttribution(projCfg).AllowJudgedEvidence
 }
 
 // reconcileProducedPlansAtStop records the session id + a "stopped" outcome

@@ -41,13 +41,6 @@ type PushOpts struct {
 	// and returns success without publishing unrelated pending commits.
 	ValidatePush func(ctx context.Context, repoPath string) (alreadyPublished bool, err error)
 
-	// RequireCleanIndexForRebase refuses a non-fast-forward retry before
-	// fetching or restoring autostash if staged changes remain. Scoped writers
-	// use this after committing their paths to preserve another writer's draft,
-	// including separate staged and working copies. It does not prevent a
-	// fast-forward push. Legacy repair callers retain their autostash behavior.
-	RequireCleanIndexForRebase bool
-
 	// ReconcileLFS is called when a push fails with "LFS objects are missing".
 	// If set, PushWithRetry calls this instead of failing permanently, then
 	// retries the push once. This allows the caller to wire lfs.ReconcileUnpushedPointers
@@ -432,11 +425,12 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 				baseCtx, baseCancel := context.WithTimeout(ctx, opTimeout)
 				defer baseCancel()
 				pullCtx, pullCancel := PullContext(baseCtx, ahead, nil)
-				if opts.RequireCleanIndexForRebase {
-					// Autostash cannot preserve differing staged and working copies.
+				if opts.ValidatePush != nil {
+					// autostash restoration does not preserve differing staged
+					// and working copies, so validated publication must stop here.
 					if _, err := RunGit(pullCtx, repoPath, "diff", "--cached", "--quiet", "--"); err != nil {
 						pullCancel()
-						return fmt.Errorf("automatic synchronization stopped; staged changes remain untouched: save the staged draft before manual synchronization, then retry the original command: %w", err)
+						return fmt.Errorf("automatic synchronization stopped; staged changes remain untouched: save the staged draft before manual synchronization, then rerun import: %w", err)
 					}
 				}
 				// A prior pull may have left autostash conflicts without an

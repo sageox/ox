@@ -198,6 +198,9 @@ func prepareUploads(ctx context.Context, files map[string][]byte) (map[string]gu
 	if err != nil {
 		return nil, fmt.Errorf("LFS publication pending: %w", err)
 	}
+	// The bundled rules already passed these exact bytes; only the rules the
+	// bundled catalog lacks can still refuse them.
+	rules = rules.Delta(secretguard.Bundled())
 	for name, proof := range proofs {
 		if err := rules.ValidateContent(name, proof.content); err != nil {
 			return nil, fmt.Errorf("LFS publication refused: %w", err)

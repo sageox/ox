@@ -26,6 +26,39 @@ const (
 	EventConsulted EventType = "consulted"
 	// EventInfluenced is emitted when the agent attributes a decision to specific context.
 	EventInfluenced EventType = "influenced"
+	// EventInvoked is emitted for an ox call the AI coworker made (recorded
+	// deterministically by the post-tool hook, or by prime for itself). It
+	// measures volume — what ox put in front of the model — and is NOT a
+	// consultation: posting a murmur is not reading team knowledge. Readers
+	// that switch on Type (recap, knowledgeflow) ignore it by construction.
+	EventInvoked EventType = "invoked"
+	// EventUsed is emitted when there is evidence the AI coworker actually used
+	// a specific piece of surfaced context — not merely received it. Evidence
+	// names how that was established (see the Evidence* constants) and so
+	// fixes its grade: retrieval/citation evidence is provable, a self-report
+	// is reported, and a judge verdict is inferred. Readers that switch on
+	// Type and predate this event ignore it by construction.
+	EventUsed EventType = "used"
+)
+
+// Evidence values for EventUsed. Each names the observation behind a use and
+// maps to one grade:
+//
+//   - provable (retrieval/citation): EvidenceRead, EvidenceRequery,
+//     EvidenceCited, EvidenceCitedCommit
+//   - reported (self-report): EvidenceReported, EvidenceNone
+//   - inferred (judge): EvidenceJudged
+//
+// EvidenceNone is the AI coworker explicitly reporting that no surfaced
+// context was used; it carries no ref.
+const (
+	EvidenceRead        = "read"         // read a surfaced doc / ledger path
+	EvidenceRequery     = "requery"      // re-fetched a surfaced ref by id
+	EvidenceCited       = "cited"        // named the ref in assistant output
+	EvidenceCitedCommit = "cited_commit" // named the ref in a commit message
+	EvidenceReported    = "reported"     // self-reported at the moment of use
+	EvidenceNone        = "none"         // self-reported: nothing was used
+	EvidenceJudged      = "judged"       // an LLM judge inferred the use
 )
 
 // Mechanism records HOW a consulted/influenced tag was established — i.e. the
@@ -45,6 +78,12 @@ const (
 	// turn's decision to context it already held (no fresh retrieval). The only
 	// non-deterministic grade — there is no server-side classifier.
 	MechanismSelfReport Mechanism = "self-report"
+	// MechanismCitation — deterministic, provable: the surfaced ref appears by
+	// name in the AI coworker's own output or in a commit message.
+	MechanismCitation Mechanism = "citation"
+	// MechanismJudge — inferred, the weakest grade: an LLM judge read the
+	// session and concluded the ref was used. Never treated as provable.
+	MechanismJudge Mechanism = "judge"
 )
 
 // SourceType identifies where the context came from.
@@ -58,6 +97,11 @@ const (
 	SourceTeamWhisper    SourceType = "team-whisper"
 	SourceProjectWhisper SourceType = "project-whisper"
 	SourceOnDemand       SourceType = "on-demand"
+	// SourceLocalRecall marks a prompt-time recall preamble hit (a prior
+	// session, plan, or murmur matched against the local Ledger).
+	SourceLocalRecall SourceType = "local-recall"
+	// SourceOxCLI marks an invoked event: an ox CLI/MCP call.
+	SourceOxCLI SourceType = "ox-cli"
 )
 
 // Event is a single context-trace entry.
@@ -93,6 +137,33 @@ type Event struct {
 	Query     string    `json:"query,omitempty"`      // the query text, for retrieval-command consults
 	Score     float64   `json:"score,omitempty"`      // retrieval score, when applicable
 	WhisperID string    `json:"whisper_id,omitempty"` // joins a whisper delivery to its murmur
+	// Aliases are other names for the same item as Ref — a rec_ twin of a
+	// cnv_ id, a sageox:// citation or /c/ link, a plan's slug or dated
+	// directory name for its pln_ id. Names only, never content (ADR-027).
+	// Readers that predate it ignore it; old traces decode with it nil.
+	Aliases []string `json:"aliases,omitempty"`
+
+	// invoked: an ox call and the volume it returned. Command holds the matched
+	// subcommand WORDS only ("murmur list") — never the argv, a murmur body, or
+	// prompt text (ADR-027 rule 4: refs, not content).
+	Command        string         `json:"command,omitempty"`
+	Label          string         `json:"label,omitempty"`            // human label: "checked murmurs"
+	OutputBytes    int            `json:"output_bytes,omitempty"`     // bytes returned into model context (0 = unknown)
+	FullBytes      int            `json:"full_bytes,omitempty"`       // prime: pre-hook-cap size, set only when trimmed
+	TokensBySource map[string]int `json:"tokens_by_source,omitempty"` // prime: tokens per context source
+	Deferred       []string       `json:"deferred,omitempty"`         // prime: sections withheld by the hook cap
+	Failed         bool           `json:"failed,omitempty"`
+
+	// used: evidence that surfaced context was actually used, plus display
+	// metadata for the ref. None of these fields carries content — no prompt
+	// text, murmur body, or doc text (ADR-027 rule 4: refs, not content). The
+	// one free-text field on a use is Decision (the reader's own --why).
+	Evidence    string `json:"evidence,omitempty"`     // read|requery|cited|cited_commit|reported|none|judged
+	SurfacedSeq int    `json:"surfaced_seq,omitempty"` // Seq of the event that surfaced the ref
+	Commit      string `json:"commit,omitempty"`       // commit sha, for cited_commit
+	Title       string `json:"title,omitempty"`        // display title of the ref
+	URL         string `json:"url,omitempty"`          // sageox.ai link for the ref, when one exists
+	FromName    string `json:"from_name,omitempty"`    // whisper sender display name
 }
 
 // Now returns the current time formatted for context-trace timestamps.
@@ -108,6 +179,13 @@ type Writer struct {
 // NewWriter creates a Writer that appends to context-trace.jsonl in the given session dir.
 func NewWriter(sessionDir string) *Writer {
 	return &Writer{path: filepath.Join(sessionDir, FileName)}
+}
+
+// NewFileWriter creates a Writer that appends to the file at path. Use it for
+// traces kept outside a session dir (e.g. a per-agent cache file); session
+// traces use NewWriter so the canonical FileName is never misspelled.
+func NewFileWriter(path string) *Writer {
+	return &Writer{path: path}
 }
 
 // Path returns the full path to the context-trace.jsonl file.
@@ -136,6 +214,38 @@ func (w *Writer) Append(event Event) error {
 
 	if _, err := f.Write(line); err != nil {
 		return fmt.Errorf("write context-trace event: %w", err)
+	}
+	return nil
+}
+
+// AppendAll appends events in one write, so a batch lands whole or (on an
+// I/O error before the write) not at all. Validation is the caller's job:
+// AppendAll writes nothing when any event fails to marshal.
+func (w *Writer) AppendAll(events []Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+	var buf []byte
+	for _, event := range events {
+		if event.Timestamp == "" {
+			event.Timestamp = Now()
+		}
+		line, err := json.Marshal(event)
+		if err != nil {
+			return fmt.Errorf("marshal context-trace event: %w", err)
+		}
+		buf = append(buf, line...)
+		buf = append(buf, '\n')
+	}
+
+	f, err := os.OpenFile(w.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("open context-trace file: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := f.Write(buf); err != nil {
+		return fmt.Errorf("write context-trace events: %w", err)
 	}
 	return nil
 }

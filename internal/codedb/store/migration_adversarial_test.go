@@ -1,17 +1,15 @@
 package store
 
 import (
+	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
-	"time"
 
-	sqlite "modernc.org/sqlite"
-	sqlite3 "modernc.org/sqlite/lib"
+	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
 )
 
 // This file holds the adversarial coverage for schema creation and migration:
@@ -21,12 +19,10 @@ import (
 // fix; these prove the whole schema layer holds under fault and contention.
 
 // openRawDB opens a bare SQLite connection with the exact production DSN that
-// openSQLite (store.go) uses — including synchronous(NORMAL), which shortens the
-// WAL write-lock hold and is load-bearing for concurrent openers to clear
-// busy_timeout instead of returning SQLITE_BUSY — without applying any schema.
-// Multiple openRawDB handles to one path model independent ox openers racing the
-// same codedb, so these tests must use the same connection config production
-// does or they measure a contention profile ox never sees.
+// openSQLite (store.go) uses, without applying any schema. Multiple openRawDB
+// handles to one path model independent ox openers racing the same codedb, so
+// these tests must use the same connection config production does or they
+// measure a contention profile ox never sees.
 func rawDSN(dbPath string) string {
 	return dbPath + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)&_pragma=mmap_size(268435456)&_pragma=temp_store(MEMORY)"
 }
@@ -105,40 +101,16 @@ func goldenSchema(t *testing.T) schemaShape {
 	return snapshotSchema(t, db)
 }
 
-// createSchemaWithRetry models the production caller of openSQLite, which
-// retries a transient SQLITE_BUSY / SQLITE_LOCKED from a cold concurrent create
-// rather than giving up — 16 openers hitting the first write to a brand-new DB
-// file in lockstep can momentarily contend the file-creation lock past
-// busy_timeout. Per #758 this retry is exactly the caller-side fix ("the caller
-// had no retry — that was our bug"). Only lock-contention is retried; any other
-// error (e.g. a reintroduced duplicate-column failure) is returned immediately
-// so genuine regressions still surface.
-func createSchemaWithRetry(db *sql.DB) error {
-	const maxAttempts = 25
-	var err error
-	for range maxAttempts {
-		if err = CreateSchema(db); err == nil || !isLockContention(err) {
-			return err
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	return err
-}
-
-func isLockContention(err error) bool {
-	var sqErr *sqlite.Error
-	if !errors.As(err, &sqErr) {
-		return false
-	}
-	return sqErr.Code() == sqlite3.SQLITE_BUSY || sqErr.Code() == sqlite3.SQLITE_LOCKED
-}
-
-// runConcurrentCreateSchema fires `runners` independent openers that all call
-// CreateSchema (with production-style busy retry) on the same path at once, and
-// reports any non-transient error. Each opener owns its own connection,
-// mirroring separate ox processes racing one codedb.
+// runConcurrentCreateSchema fires `runners` independent openers at the codedb
+// whose metadata database is dbPath, all at once, and reports any error. Each
+// opens through openSQLite, the production open path: its header probe opens
+// the first connection and absorbs the BUSY that openers converting a brand-new
+// file to WAL can get, which busy_timeout does not cover, and then runs
+// CreateSchema. Each opener has its own connection pool, as a separate ox
+// process would, though openers in one process also take turns on schemaMu.
 func runConcurrentCreateSchema(t *testing.T, dbPath string, runners int) {
 	t.Helper()
+	root := filepath.Dir(dbPath)
 	var wg sync.WaitGroup
 	errs := make([]error, runners)
 	ready := make(chan struct{}, runners)
@@ -147,24 +119,18 @@ func runConcurrentCreateSchema(t *testing.T, dbPath string, runners int) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			// Open inline (not via the t.Fatalf-ing openRawDB): testing.T.FailNow
-			// must run on the test goroutine, so failures here are routed through
-			// errs and reported by the caller below.
-			db, err := sql.Open("sqlite", rawDSN(dbPath))
+			ready <- struct{}{}
+			<-begin // released together to maximize overlap
+			db, _, err := openSQLite(root)
 			if err != nil {
 				errs[i] = err
-				ready <- struct{}{} // still report ready so the barrier below completes
 				return
 			}
-			defer func() { _ = db.Close() }()
-			ready <- struct{}{} // opened and parked at the barrier
-			<-begin             // released together to maximize overlap
-			errs[i] = createSchemaWithRetry(db)
+			errs[i] = db.Close()
 		}(i)
 	}
-	// Wait until every worker has opened and is parked before releasing, so the
-	// openers actually start CreateSchema together instead of trickling in while
-	// close(begin) races their sql.Open.
+	// Wait until every worker is parked before releasing, so the openers start
+	// together instead of trickling in as their goroutines are scheduled.
 	for range runners {
 		<-ready
 	}
@@ -172,17 +138,17 @@ func runConcurrentCreateSchema(t *testing.T, dbPath string, runners int) {
 	wg.Wait()
 	for i, err := range errs {
 		if err != nil {
-			t.Errorf("runner %d CreateSchema: %v", i, err)
+			t.Errorf("runner %d open: %v", i, err)
 		}
 	}
 }
 
 // TestMigrations_ResumeFromEveryCrashPoint is the crash-at-every-step recovery
-// proof for the ALTER-based migrations. Each ALTER auto-commits, so a process
-// killed mid-migration leaves the first k columns present and the rest absent.
-// For every prefix k, the test recreates that post-crash state, re-runs the
-// migration twice (proving convergence AND idempotency), and asserts every
-// column landed.
+// proof for the ALTER-based migrations. Older ox ran each ALTER as its own
+// transaction, so one killed mid-migration left the first k columns present and
+// the rest absent. For every prefix k, the test recreates that post-crash state,
+// re-runs the migration twice (proving convergence AND idempotency), and asserts
+// every column landed.
 //
 // Failure prevented: a migration that short-circuits on a guard column and
 // never completes from a partial state — the class of bug fixed for
@@ -197,7 +163,7 @@ func TestMigrations_ResumeFromEveryCrashPoint(t *testing.T) {
 	type step struct{ column, ddl string }
 	migrations := []struct {
 		name  string
-		run   func(*sql.DB) error
+		run   func(context.Context, codedbsqlc.DBTX) error
 		table string
 		steps []step
 	}{
@@ -229,7 +195,7 @@ func TestMigrations_ResumeFromEveryCrashPoint(t *testing.T) {
 
 				// Resume; a second run must also succeed (idempotent).
 				for run := 0; run < 2; run++ {
-					if err := m.run(db); err != nil {
+					if err := m.run(t.Context(), db); err != nil {
 						t.Fatalf("resume run %d after crash_after_%d: %v", run, k, err)
 					}
 				}
@@ -291,7 +257,7 @@ func TestCreateSchema_ConvergesFromAnyState(t *testing.T) {
 	for _, start := range starts {
 		for _, runners := range []int{1, 4, 16} {
 			t.Run(fmt.Sprintf("%s/runners_%d", start.name, runners), func(t *testing.T) {
-				dbPath := filepath.Join(t.TempDir(), "metadata.db")
+				dbPath := filepath.Join(t.TempDir(), MetadataDBFile)
 
 				// Persist the starting state on its own connection first, then let
 				// the concurrent openers race from that on-disk state.
@@ -326,7 +292,7 @@ func TestData_SurvivesConcurrentMigration(t *testing.T) {
 		t.Skip("short: SQLite migration")
 	}
 
-	dbPath := filepath.Join(t.TempDir(), "metadata.db")
+	dbPath := filepath.Join(t.TempDir(), MetadataDBFile)
 	const wantRepos = 25
 
 	seed := openRawDB(t, dbPath)
@@ -367,7 +333,7 @@ func TestCreateSchema_ConcurrentStress(t *testing.T) {
 	golden := goldenSchema(t)
 	const iterations = 8
 	for iter := range iterations {
-		dbPath := filepath.Join(t.TempDir(), "metadata.db")
+		dbPath := filepath.Join(t.TempDir(), MetadataDBFile)
 		runConcurrentCreateSchema(t, dbPath, 16)
 
 		verify := openRawDB(t, dbPath)

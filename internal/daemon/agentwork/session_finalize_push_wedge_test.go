@@ -276,9 +276,10 @@ func TestGitCommitAndPush_ReturnsPromptlyWhenContextCancelledMidPush(t *testing.
 	}
 }
 
-// Failure prevented: an unmerged index found before staging or during the
-// commit preflight surfaced as a plain error, so #1145's pause never fired and
-// 733 commit transactions a day failed individually.
+// Failure prevented: an unmerged index found INSIDE the commit transaction, or
+// a write-tree failure from a conflict that appeared mid-transaction, surfaced
+// as a plain error — so #1145's pause never fired and 733 commit transactions a
+// day failed individually.
 func TestGitCommitAndPush_UnmergedIndexIsErrLedgerUnresolved(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git operations")
@@ -298,12 +299,12 @@ func TestGitCommitAndPush_UnmergedIndexIsErrLedgerUnresolved(t *testing.T) {
 			wantInMsg: "commit blocked",
 		},
 		{
-			name: "conflict appears between staging and commit (preflight refuses)",
+			name: "conflict appears between staging and commit (write-tree refuses)",
 			arrange: func(t *testing.T, ledger string) func() {
 				return func() { injectUnmergedEntry(t, ledger, "sessions/other/meta.json") }
 			},
 			wantErr:   ErrLedgerUnresolved,
-			wantInMsg: "unsafe Ledger commit: unresolved conflict in index",
+			wantInMsg: "snapshot Ledger index",
 		},
 		{
 			name:    "negative control: healthy ledger commits and pushes",

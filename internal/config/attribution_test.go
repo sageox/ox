@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestDefaultAttribution(t *testing.T) {
@@ -379,4 +380,38 @@ func TestCommitAttributionFormat(t *testing.T) {
 	// Verify the full expected format
 	expected := "Co-Authored-By: SageOx <ox@sageox.ai>"
 	assert.Equal(t, expected, commit, "commit attribution")
+}
+
+func TestAllowJudgedEvidenceAttribution(t *testing.T) {
+	// default: unset, resolves to false
+	attr := DefaultAttribution()
+	assert.Nil(t, attr.AllowJudgedEvidence, "default allow_judged_evidence should be nil")
+	assert.False(t, MergeAttribution(nil, nil).AllowJudgedEvidence, "merged default must be false")
+
+	// user enables
+	result := MergeAttribution(nil, &Attribution{AllowJudgedEvidence: BoolPtr(true)})
+	assert.True(t, result.AllowJudgedEvidence, "user should be able to enable")
+
+	// project disables over user
+	result = MergeAttribution(&Attribution{AllowJudgedEvidence: BoolPtr(false)}, &Attribution{AllowJudgedEvidence: BoolPtr(true)})
+	assert.False(t, result.AllowJudgedEvidence, "project should override user")
+
+	// project enables over unset user
+	result = MergeAttribution(&Attribution{AllowJudgedEvidence: BoolPtr(true)}, nil)
+	assert.True(t, result.AllowJudgedEvidence)
+
+	// helpers mirror ScoreThreshold
+	assert.False(t, (*Attribution)(nil).IsAllowJudgedEvidenceSet())
+	assert.False(t, (&Attribution{}).IsAllowJudgedEvidenceSet())
+	assert.True(t, (&Attribution{AllowJudgedEvidence: BoolPtr(false)}).IsAllowJudgedEvidenceSet())
+	assert.False(t, (*Attribution)(nil).GetAllowJudgedEvidence())
+	assert.False(t, (&Attribution{}).GetAllowJudgedEvidence())
+	assert.True(t, (&Attribution{AllowJudgedEvidence: BoolPtr(true)}).GetAllowJudgedEvidence())
+}
+
+func TestAllowJudgedEvidence_YAMLKey(t *testing.T) {
+	var attr Attribution
+	require.NoError(t, yaml.Unmarshal([]byte("allow_judged_evidence: true\n"), &attr))
+	require.NotNil(t, attr.AllowJudgedEvidence)
+	assert.True(t, *attr.AllowJudgedEvidence)
 }

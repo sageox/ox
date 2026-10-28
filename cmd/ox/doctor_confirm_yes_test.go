@@ -94,7 +94,7 @@ func TestFixBrokenSymlink_DeclineSkips(t *testing.T) {
 
 	var got bool
 	silenceStdout(t, func() {
-		withStdin(t, "n\n", func() { got = fixBrokenSymlink(&config.LocalConfig{}, issue) })
+		withStdin(t, "n\n", func() { got = fixBrokenSymlink(t.Context(), &config.LocalConfig{}, issue) })
 	})
 
 	assert.False(t, got, "an explicit no must skip the re-clone")

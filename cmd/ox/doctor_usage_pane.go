@@ -1,0 +1,246 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"io/fs"
+	"os"
+	"strings"
+
+	"github.com/sageox/ox/internal/claudemod"
+	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/usagepane"
+	"github.com/sageox/ox/internal/version"
+)
+
+// CheckSlugUsagePane is the slug for the /ox-brief pane check.
+const CheckSlugUsagePane = "brief-pane"
+
+const (
+	usagePaneCheckName    = "Brief pane"
+	usagePaneInstalledMsg = "installed; run /reload-plugins in open Claude Code sessions, then /ox-brief"
+	legacyPaneRemovedMsg  = "removed the old " + usagepane.LegacyPluginName + " plugin"
+)
+
+// newLegacyUsagePaneInstaller names the pane plugin an ox from before the
+// `ox usage` → `ox brief` rename installed, so ox can remove it. It is only
+// ever disabled, so it carries no mod files. Swapped in tests.
+var newLegacyUsagePaneInstaller = func() claudemod.Installer {
+	return claudemod.Installer{
+		Dir:         usagepane.LegacyDir(),
+		Plugin:      usagepane.LegacyPluginName,
+		Marketplace: usagepane.LegacyMarketplaceName,
+		Claude:      newUsagePaneInstaller().Claude,
+	}
+}
+
+func init() {
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugUsagePane,
+		Name:        usagePaneCheckName,
+		Category:    "Integration",
+		FixLevel:    FixLevelAuto,
+		Description: "Installs the /ox-brief pane plugin into Claude Code when the brief_pane setting is on, removes it when off, and removes the old ox-cli-usage-pane plugin",
+		Run: func(fix bool) checkResult {
+			enabled, err := usagePaneSettingOn()
+			if err != nil {
+				return SkippedCheck(usagePaneCheckName, "could not read the brief_pane setting", err.Error())
+			}
+			return checkUsagePane(newUsagePaneInstaller(), enabled, version.Version, fix)
+		},
+	})
+}
+
+// usagePaneSettingOn reads the user-level brief_pane setting (default on,
+// falling back to the deprecated usage_pane).
+func usagePaneSettingOn() (bool, error) {
+	cfg, err := config.LoadUserConfig()
+	if err != nil {
+		return false, err
+	}
+	return cfg.IsBriefPaneEnabled(), nil
+}
+
+// checkUsagePane keeps Claude Code's copy of the /ox-brief pane in line with
+// the brief_pane setting — installed on this ox's version when on, gone when
+// off — and removes the pane plugin from before the rename. Without the claude
+// CLI there is nothing ox can register, so the check is skipped rather than
+// half-installing the pane.
+func checkUsagePane(in claudemod.Installer, enabled bool, want string, fix bool) checkResult {
+	res := reconcileUsagePane(in, enabled, want, fix)
+	if res.skipped || !res.passed || in.Claude == nil {
+		return res
+	}
+	return withLegacyUsagePane(res, newLegacyUsagePaneInstaller(), fix)
+}
+
+// withLegacyUsagePane folds the old ox-cli-usage-pane plugin into the pane
+// check's result: removed (and noted) with fix, a warning without.
+func withLegacyUsagePane(res checkResult, legacy claudemod.Installer, fix bool) checkResult {
+	removed, err := removeLegacyUsagePane(context.Background(), legacy, fix)
+	switch {
+	case err != nil:
+		return usagePaneCLIFailure(res.name, "removing the old "+usagepane.LegacyPluginName+" plugin failed", err)
+	case removed:
+		res.detail = joinDetail(res.detail, legacyPaneRemovedMsg)
+	case !fix && legacyUsagePanePresent(context.Background(), legacy):
+		const hint = "the old " + usagepane.LegacyPluginName + " plugin is still installed; `ox doctor --fix` removes it"
+		if res.warning {
+			res.detail = joinDetail(res.detail, hint)
+			return res
+		}
+		return WarningCheck(res.name, "old "+usagepane.LegacyPluginName+" plugin still installed", "Run `ox doctor --fix` to remove it")
+	}
+	return res
+}
+
+func joinDetail(a, b string) string {
+	if a == "" {
+		return b
+	}
+	return a + "; " + b
+}
+
+// legacyUsagePanePresent reports whether the old pane plugin's folder exists
+// or Claude Code still lists it. A claude CLI that cannot answer counts as
+// absent: the main check already reported it.
+func legacyUsagePanePresent(ctx context.Context, legacy claudemod.Installer) bool {
+	if legacy.Claude == nil {
+		return false
+	}
+	if _, err := os.Stat(legacy.Dir); err == nil {
+		return true
+	}
+	st, err := legacy.Status(ctx)
+	return err == nil && st.Installed
+}
+
+// removeLegacyUsagePane uninstalls the old ox-cli-usage-pane plugin, its
+// marketplace, and its folder when any of them is still around and fix is
+// set. It reports whether it removed anything; with nothing legacy, or
+// without the claude CLI, it does nothing.
+func removeLegacyUsagePane(ctx context.Context, legacy claudemod.Installer, fix bool) (bool, error) {
+	if !fix || !legacyUsagePanePresent(ctx, legacy) {
+		return false, nil
+	}
+	if _, err := legacy.Disable(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// reconcileUsagePane is checkUsagePane for the current plugin alone.
+func reconcileUsagePane(in claudemod.Installer, enabled bool, want string, fix bool) checkResult {
+	const name = usagePaneCheckName
+	ctx := context.Background()
+	if err := claudemod.RecoverSwap(in.Dir); err != nil {
+		return FailedCheck(name, "interrupted refresh", err.Error())
+	}
+	if in.Claude == nil {
+		return SkippedCheck(name, "claude CLI not found", "")
+	}
+	in.Version = want
+	st, err := in.Status(ctx)
+	if err != nil {
+		// Status's only claude call is `plugin list`; a CLI that cannot
+		// answer it has no plugin support ox can use.
+		if claudeLacksPlugins(err) {
+			return SkippedCheck(name, "claude CLI too old for plugins", "")
+		}
+		return SkippedCheck(name, "could not list Claude Code plugins", err.Error())
+	}
+
+	if enabled {
+		written, _ := claudemod.WrittenVersion(in.Dir)
+		if st.Installed && written == want && st.InstalledVersion == want {
+			return PassedCheck(name, "installed")
+		}
+		if !fix {
+			msg := "not installed"
+			if st.Installed || st.FilesPresent {
+				msg = "from an older ox"
+			}
+			return WarningCheck(name, msg, "Run `ox doctor --fix` or `ox brief pane enable`")
+		}
+		if _, err := in.Enable(ctx); err != nil {
+			return usagePaneCLIFailure(name, "install failed", err)
+		}
+		return PassedCheck(name, usagePaneInstalledMsg)
+	}
+
+	_, statErr := os.Stat(in.Dir)
+	if errors.Is(statErr, fs.ErrNotExist) && !st.Installed {
+		return PassedCheck(name, "off")
+	}
+	if !fix {
+		return WarningCheck(name, "off but still installed", "Run `ox doctor --fix` or `ox brief pane disable`")
+	}
+	if _, err := in.Disable(ctx); err != nil {
+		return usagePaneCLIFailure(name, "removal failed", err)
+	}
+	return PassedCheck(name, "removed (brief_pane is off)")
+}
+
+// usagePaneCLIFailure reports a failed claude CLI call, as skipped when the
+// CLI predates plugins (nothing ox can fix) and as failed otherwise.
+func usagePaneCLIFailure(name, msg string, err error) checkResult {
+	if claudeLacksPlugins(err) {
+		return SkippedCheck(name, "claude CLI too old for plugins", "")
+	}
+	return FailedCheck(name, msg, err.Error())
+}
+
+// claudeLacksPlugins reports whether a claude CLI error says the CLI has no
+// `plugin` subcommand (or none of the flags ox passes it).
+func claudeLacksPlugins(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unknown command") || strings.Contains(msg, "unknown option")
+}
+
+// ensureUsagePane installs the /ox-brief pane from `ox init` (and removes the
+// old ox-cli-usage-pane plugin) when the brief_pane setting is on and the claude CLI is present. Best-effort: it
+// never fails init, and prints one line when it installed the pane.
+func ensureUsagePane(quiet bool) {
+	enabled, err := usagePaneSettingOn()
+	if err != nil || !enabled {
+		return
+	}
+	in := newUsagePaneInstaller()
+	if in.Claude == nil {
+		return
+	}
+	res := checkUsagePane(in, true, version.Version, true)
+	switch {
+	case res.skipped:
+	case !res.passed:
+		cli.PrintWarning("Could not install the /ox-brief pane: " + res.detail)
+	case res.message == usagePaneInstalledMsg && !quiet:
+		cli.PrintHint("Installed the /ox-brief pane in Claude Code. " + usagePaneReadyHint)
+	}
+}
+
+// applyUsagePaneSetting brings Claude Code in line with the brief_pane
+// setting right after `ox config set|unset` changes it. It does nothing
+// without the claude CLI; `ox doctor --fix` reconciles later. The returned
+// hint is for the coworker when the pane was installed.
+func applyUsagePaneSetting(ctx context.Context) (string, error) {
+	in := newUsagePaneInstaller()
+	if in.Claude == nil {
+		return "", nil
+	}
+	enabled, err := usagePaneSettingOn()
+	if err != nil {
+		return "", err
+	}
+	if enabled {
+		if _, err := in.Enable(ctx); err != nil {
+			return "", err
+		}
+		return usagePaneReadyHint, nil
+	}
+	if _, err := in.Disable(ctx); err != nil {
+		return "", err
+	}
+	return "", nil
+}

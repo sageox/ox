@@ -44,14 +44,15 @@ type ConfigSetting struct {
 
 	// Deprecated marks a setting kept only for backward compatibility: it
 	// remains resolvable and settable (existing config files and scripts
-	// must not break), but is not wired to any behavior. Never wire new
+	// must not break), but is either not wired to any behavior or is an old
+	// name that reads and writes its replacement's value. Never wire new
 	// behavior to a deprecated setting — remove the deprecation instead.
 	Deprecated bool
 	// DeprecationNotice is the honest, specific explanation surfaced by
-	// 'ox config get/set/list' for a Deprecated setting: it must say the
-	// setting never took effect (not merely that it's "no longer used"),
-	// and name the setting that actually does the job. Empty unless
-	// Deprecated is true.
+	// 'ox config get/set/list' for a Deprecated setting: it must say what
+	// the setting actually does (that it never took effect, not merely that
+	// it's "no longer used"; or that it is a renamed alias), and name the
+	// setting that does the job. Empty unless Deprecated is true.
 	DeprecationNotice string
 }
 
@@ -228,6 +229,78 @@ When enabled, ox displays helpful hints about features and workflows
 after command output. Useful for learning ox, but can be disabled
 once you're familiar with the tool.`,
 		Category:    "Display",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
+		Key:         "statusline",
+		Label:       "Status line",
+		Description: "Show how much team context shaped your session in Claude Code's status line.",
+		LongDescription: `Controls ox's row in Claude Code's status line.
+
+When enabled, the row counts the team context that influenced this AI
+coworker session — "● ox  3 discussions · 1 plan · 1 murmur" — with a red
+"● rec" while the session records. Turn it off to remove the row.`,
+		Category:    "Display",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
+		Key:         "brief_pane",
+		Label:       "Brief pane",
+		Description: "Show the /ox-brief pane in Claude Code (installs the ox-cli-brief-pane plugin)",
+		LongDescription: `Controls whether ox keeps the /ox-brief pane installed in Claude Code.
+
+The pane lists this session's ox calls under the ox brief summary. It is the
+Claude Code plugin ox-cli-brief-pane@ox-cli-brief, installed at user scope;
+/ox-brief opens it and /ox-brief off closes it.
+
+  on  - ox installs the plugin (ox init, ox doctor --fix, and right away
+        when you set this) and keeps it on this ox's version (default).
+  off - ox removes the plugin and its files.
+
+Replaces usage_pane, which it falls back to when unset.`,
+		Category:    "Display",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
+		Key:         "usage_pane",
+		Label:       "Usage pane (deprecated)",
+		Description: "DEPRECATED — renamed to brief_pane",
+		LongDescription: `DEPRECATED: usage_pane is the old name of brief_pane, from before
+` + "`ox usage`" + ` became ` + "`ox brief`" + `. It still reads and sets the same value, so
+existing config files and scripts keep working.
+
+Use instead:
+    ox config set brief_pane on|off`,
+		Category:          "Display",
+		ValidValues:       []string{"on", "off"},
+		Default:           "on",
+		Levels:            []ConfigLevel{ConfigLevelUser},
+		Deprecated:        true,
+		DeprecationNotice: "usage_pane is renamed to brief_pane; it still sets the same value.\nUse instead:\n    ox config set brief_pane on|off",
+	},
+	{
+		Key:         "recap.trace_consultations",
+		Label:       "Trace consultations",
+		Description: "Record what your AI coworker read and which ox calls it made.",
+		LongDescription: `Controls whether ox records, in your own session trace, which team
+knowledge your AI coworker consulted and which ox commands it ran (with the
+size of what each returned). The trace syncs to your team's Ledger with the
+session, so this is the switch for whether your reads reach the team.
+
+  on  - Record consultations and ox calls (default). Powers ox recap and
+        the per-session usage report.
+  off - Record neither. Context ox delivered (team context at prime,
+        teammate whispers) is still noted, since that is ox's own output.
+
+Only refs are ever recorded — a command's subcommand words, a doc path, a
+query subject — never a murmur body, prompt text, or command output.`,
+		Category:    "Privacy",
 		ValidValues: []string{"on", "off"},
 		Default:     "on",
 		Levels:      []ConfigLevel{ConfigLevelUser},
@@ -789,6 +862,27 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			}
 		}
 
+	case "statusline":
+		// Unlike tips, only an explicit value counts as a user layer, so an
+		// unset key reports source "default" rather than a phantom "user".
+		if userCfg != nil && userCfg.StatuslineEnabled != nil {
+			cv.UserVal = boolToOnOff(*userCfg.StatuslineEnabled)
+		}
+
+	case "brief_pane", "usage_pane":
+		// only an explicit value counts as a user layer (see statusline);
+		// usage_pane is brief_pane's deprecated name, and an old
+		// usage_pane_enabled still counts until brief_pane is set
+		if v := userCfg.BriefPaneSetting(); v != nil {
+			cv.UserVal = boolToOnOff(*v)
+		}
+
+	case "recap.trace_consultations":
+		// only an explicit value counts as a user layer (see statusline)
+		if userCfg != nil && userCfg.Recap != nil && userCfg.Recap.TraceConsultations != nil {
+			cv.UserVal = boolToOnOff(*userCfg.Recap.TraceConsultations)
+		}
+
 	case "disposable_machine":
 		if userCfg != nil && userCfg.DisposableMachine != nil {
 			cv.UserVal = boolToOnOff(*userCfg.DisposableMachine)
@@ -978,7 +1072,13 @@ func UnsetConfigValue(key string, level ConfigLevel, projectRoot string) error {
 
 	switch level {
 	case ConfigLevelUser:
-		return unsetUserConfig(key)
+		if err := unsetUserConfig(key); err != nil {
+			return err
+		}
+		if key == "statusline" {
+			applyStatuslineSetting()
+		}
+		return nil
 	case ConfigLevelRepo:
 		return unsetRepoConfig(key, projectRoot)
 	case ConfigLevelTeam:
@@ -1028,7 +1128,13 @@ func SetConfigValue(key, value string, level ConfigLevel, projectRoot string) er
 
 	switch level {
 	case ConfigLevelUser:
-		return setUserConfig(key, value)
+		if err := setUserConfig(key, value); err != nil {
+			return err
+		}
+		if key == "statusline" {
+			applyStatuslineSetting()
+		}
+		return nil
 	case ConfigLevelRepo:
 		return setRepoConfig(key, value, projectRoot)
 	case ConfigLevelTeam:
@@ -1081,6 +1187,24 @@ func setUserConfig(key, value string) error {
 	case "tips":
 		enabled := value == "on"
 		cfg.TipsEnabled = &enabled
+
+	case "statusline":
+		enabled := value == "on"
+		cfg.StatuslineEnabled = &enabled
+
+	case "brief_pane", "usage_pane":
+		// both names write brief_pane_enabled and drop the old key, so the
+		// two can never disagree
+		enabled := value == "on"
+		cfg.BriefPaneEnabled = &enabled
+		cfg.UsagePaneEnabled = nil
+
+	case "recap.trace_consultations":
+		enabled := value == "on"
+		if cfg.Recap == nil {
+			cfg.Recap = &config.RecapConfig{}
+		}
+		cfg.Recap.TraceConsultations = &enabled
 
 	case "disposable_machine":
 		enabled := value == "on"
@@ -1405,6 +1529,21 @@ func unsetUserConfig(key string) error {
 
 	case "tips":
 		cfg.TipsEnabled = nil
+
+	case "statusline":
+		cfg.StatuslineEnabled = nil
+
+	case "brief_pane", "usage_pane":
+		cfg.BriefPaneEnabled = nil
+		cfg.UsagePaneEnabled = nil
+
+	case "recap.trace_consultations":
+		if cfg.Recap != nil {
+			cfg.Recap.TraceConsultations = nil
+			if *cfg.Recap == (config.RecapConfig{}) {
+				cfg.Recap = nil
+			}
+		}
 
 	case "disposable_machine":
 		cfg.DisposableMachine = nil

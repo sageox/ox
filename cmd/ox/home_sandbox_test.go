@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/testguard"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/zalando/go-keyring"
 )
 
@@ -225,6 +228,13 @@ func verifyHomeSandbox(home string) error {
 // have right now, so they survive the move of HOME.
 func pinGoEnv() error {
 	keys := []string{"GOCACHE", "GOMODCACHE", "GOPATH", "GOENV"}
+	// A test binary that a test re-executes gets these from the parent through
+	// testguard. Running `go` there would start Go's detached telemetry sidecar,
+	// which writes under the child's HOME, usually the parent's t.TempDir, after
+	// the child exits, and the parent's TempDir cleanup then fails.
+	if !slices.ContainsFunc(keys, func(key string) bool { return os.Getenv(key) == "" }) {
+		return nil
+	}
 	if _, err := exec.LookPath("go"); err != nil {
 		return nil // no toolchain on PATH: no test can build a binary either
 	}
@@ -266,4 +276,29 @@ func useDeveloperHome(t *testing.T) {
 		t.Setenv(key, "") // registers the restore
 		_ = os.Unsetenv(key)
 	}
+}
+
+// Failure prevented: a test binary that a test re-executes with HOME set to a
+// t.TempDir runs `go env` there. Go's telemetry sidecar keeps writing into that
+// HOME after the child exits, and the parent's TempDir cleanup fails with
+// "directory not empty".
+func TestReexecutedTestBinaryLeavesItsHomeEmpty(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real test-binary subprocess")
+	}
+	bin, err := os.Executable()
+	require.NoError(t, err)
+	home := t.TempDir()
+	cmd := testguard.OxCmd(t, bin, t.TempDir(), []string{"HOME=" + home}, "-test.run=^$")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "output=%s", out)
+
+	var written []string
+	require.NoError(t, filepath.WalkDir(home, func(path string, _ fs.DirEntry, err error) error {
+		if path != home {
+			written = append(written, strings.TrimPrefix(path, home))
+		}
+		return err
+	}))
+	assert.Empty(t, written, "the child wrote into the HOME its parent removes")
 }

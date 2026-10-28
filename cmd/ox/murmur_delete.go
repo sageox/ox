@@ -70,13 +70,18 @@ func commitMurmurDeletion(ctx context.Context, targetDir, relPath, murmurID stri
 	return gitutil.WithRepoLock(ctx, targetDir, func() error {
 		gitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), murmurDeleteGitTimeout)
 		defer cancel()
-		if err := gitutil.IsSafeForIndexWrite(gitCtx, targetDir); err != nil {
+		if err := gitutil.IsSafeForGitOps(targetDir); err != nil {
 			return err
 		}
-		if _, err := gitutil.RunGit(gitCtx, targetDir, "rm", "-f", "--sparse", "--", ":(literal)"+relPath); err != nil {
+		if unmerged, err := gitutil.HasUnmergedEntries(gitCtx, targetDir); err != nil {
+			return err
+		} else if unmerged {
+			return fmt.Errorf("cannot commit Ledger with unresolved conflicts (run 'ox doctor --fix')")
+		}
+		if _, err := gitutil.RunGit(gitCtx, targetDir, "rm", "-f", relPath); err != nil {
 			return fmt.Errorf("git rm: %w", err)
 		}
-		if _, err := gitutil.CommitLedgerSnapshot(gitCtx, targetDir, fmt.Sprintf("murmur: delete %s", murmurID), ":(literal)"+relPath); err != nil {
+		if _, err := commitLedgerSnapshot(gitCtx, targetDir, fmt.Sprintf("murmur: delete %s", murmurID)); err != nil {
 			return fmt.Errorf("git commit: %w", err)
 		}
 		return nil

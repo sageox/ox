@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/claudemod"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/constants"
@@ -763,6 +764,40 @@ func uninstallAllIntegrations(force bool) error {
 		installed = append(installed, "Oxy pet (Claude Code, user)")
 	}
 
+	// check the Oxy pet (Codex, user scope)
+	codexPetInstaller := newCodexPetInstaller()
+	codexPetEnabled := false
+	if codexPetInstaller.Home != "" {
+		var err error
+		codexPetEnabled, err = codexPetPresent(pet.CodexDir(codexPetInstaller.Home))
+		if err != nil {
+			return fmt.Errorf("check the Oxy pet for Codex: %w", err)
+		}
+	}
+	if codexPetEnabled {
+		installed = append(installed, "Oxy pet (Codex, user)")
+	}
+
+	// check the /ox-brief pane (Claude Code, user scope), and the
+	// ox-cli-usage-pane plugin it was called before the rename
+	paneInstaller := newUsagePaneInstaller()
+	paneEnabled, paneErr := usagePanePresent(paneInstaller.Dir)
+	if paneErr != nil {
+		return fmt.Errorf("check the brief pane: %w", paneErr)
+	}
+	if paneEnabled {
+		installed = append(installed, "Brief pane (Claude Code, user)")
+	}
+	legacyPaneInstaller := newLegacyUsagePaneInstaller()
+	legacyPaneEnabled, legacyPaneErr := usagePanePresent(legacyPaneInstaller.Dir)
+	if legacyPaneErr != nil {
+		return fmt.Errorf("check the old usage pane: %w", legacyPaneErr)
+	}
+	legacyPaneEnabled = legacyPaneEnabled || legacyUsagePanePresent(context.Background(), legacyPaneInstaller)
+	if legacyPaneEnabled {
+		installed = append(installed, "Old usage pane (Claude Code, user)")
+	}
+
 	// check git commit hooks
 	gitRoot := findGitRoot()
 	if gitRoot != "" && HasGitHooks(gitRoot) {
@@ -856,6 +891,28 @@ func uninstallAllIntegrations(force bool) error {
 			petSteps = res.ManualSteps
 		}
 	}
+	if codexPetEnabled {
+		if _, err := codexPetInstaller.Disable(context.Background()); err != nil {
+			errors = append(errors, fmt.Sprintf("Oxy pet (Codex): %v", err))
+		}
+	}
+	var paneSteps []string
+	if paneEnabled {
+		res, err := paneInstaller.Disable(context.Background())
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("Brief pane: %v", err))
+		} else {
+			paneSteps = res.ManualSteps
+		}
+	}
+	if legacyPaneEnabled {
+		res, err := legacyPaneInstaller.Disable(context.Background())
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("Old usage pane: %v", err))
+		} else {
+			paneSteps = append(paneSteps, res.ManualSteps...)
+		}
+	}
 	if gitRoot != "" {
 		if err := UninstallGitHooks(gitRoot); err != nil {
 			errors = append(errors, fmt.Sprintf("Git commit hooks: %v", err))
@@ -870,6 +927,15 @@ func uninstallAllIntegrations(force bool) error {
 		// Without the claude CLI ox can remove Oxy's files but not
 		// Claude Code's record of the plugin; say what is left.
 		printSteps(os.Stdout, "Integrations uninstalled. To finish removing Oxy, in Claude Code run:", petSteps)
+	}
+	if len(paneSteps) > 0 {
+		intro := "To finish removing the brief pane, in Claude Code run:"
+		if len(petSteps) == 0 {
+			intro = "Integrations uninstalled. " + intro
+		}
+		printSteps(os.Stdout, intro, paneSteps)
+	}
+	if len(petSteps) > 0 || len(paneSteps) > 0 {
 		return nil
 	}
 	fmt.Println(ui.PassStyle.Render("✓") + " All integrations uninstalled")
@@ -973,13 +1039,36 @@ func init() {
 	rootCmd.AddCommand(integrateCmd)
 }
 
-// petPresent reports whether the Oxy mod folder exists. Only "not there"
-// means absent: a folder ox cannot inspect is an error, so bulk uninstall
-// never reports success over a pet it could not see.
-func petPresent(dir string) (bool, error) {
-	if err := pet.RecoverSwap(dir); err != nil {
+// petPresent reports whether the Oxy mod folder exists.
+func petPresent(dir string) (bool, error) { return modPresent(dir) }
+
+// usagePanePresent reports whether a brief pane mod folder exists.
+func usagePanePresent(dir string) (bool, error) { return modPresent(dir) }
+
+// modPresent reports whether a Claude Code mod folder exists. Only "not
+// there" means absent: a folder ox cannot inspect is an error, so bulk
+// uninstall never reports success over a mod it could not see.
+func modPresent(dir string) (bool, error) {
+	if err := claudemod.RecoverSwap(dir); err != nil {
 		return false, err
 	}
+	return dirPresent(dir)
+}
+
+// codexPetPresent reports whether Oxy's Codex pet folder exists, or a
+// complete copy an interrupted refresh left beside it. Like petPresent, only
+// "not there" means absent.
+func codexPetPresent(dir string) (bool, error) {
+	if present, err := dirPresent(dir); present || err != nil {
+		return present, err
+	}
+	if _, err := pet.CodexWrittenVersion(dir + ".old"); err == nil {
+		return true, nil
+	}
+	return false, nil
+}
+
+func dirPresent(dir string) (bool, error) {
 	_, err := os.Stat(dir)
 	if err == nil {
 		return true, nil

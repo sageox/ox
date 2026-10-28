@@ -6,13 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/cli"
-	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
@@ -1031,39 +1029,40 @@ func redactSummaryJSON(path string, redactor *session.Redactor) (bool, error) {
 // glob as fallback for legacy sessions or torn writes. summary.json is
 // staged automatically when meta.Files records it (Storage=git).
 func commitAndPushLedgerBatch(ledgerPath string, sessionNames []string) error {
-	if len(sessionNames) == 0 {
-		return nil
-	}
+	sessionsDir := filepath.Join(ledgerPath, "sessions")
 
-	ctx, cancel := context.WithTimeout(context.Background(), lockedCommitTimeout)
-	defer cancel()
-	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
-		if err := gitutil.IsSafeForIndexWrite(ctx, ledgerPath); err != nil {
+	var filesToAdd []string
+	for _, name := range sessionNames {
+		sessionDir := filepath.Join(sessionsDir, name)
+		filesToAdd = append(filesToAdd, filepath.Join(sessionDir, "meta.json"))
+		filesToAdd = append(filesToAdd, sessionArtifactsToStage(sessionDir)...)
+	}
+	filesToAdd = append(filesToAdd, filepath.Join(sessionsDir, ".gitignore"))
+
+	var committed bool
+	err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
 			return err
 		}
-
-		cleanupPaths := gitserver.EnsureGitignoreBeforeCommitCtx(ctx, ledgerPath)
-		sessionsDir := filepath.Join(ledgerPath, "sessions")
-		var filesToAdd []string
-		for _, name := range sessionNames {
-			sessionDir := filepath.Join(sessionsDir, name)
-			filesToAdd = append(filesToAdd, filepath.Join(sessionDir, "meta.json"))
-			filesToAdd = append(filesToAdd, sessionArtifactsToStage(sessionDir)...)
+		if unmerged, err := gitutil.HasUnmergedEntries(ctx, ledgerPath); err != nil {
+			return err
+		} else if unmerged {
+			return fmt.Errorf("cannot commit Ledger with unresolved conflicts (run 'ox doctor --fix')")
 		}
-		filesToAdd = append(filesToAdd, filepath.Join(sessionsDir, ".gitignore"))
-		addArgs := append([]string{"-C", ledgerPath, "add", "--sparse", "--"}, filesToAdd...)
-		if output, err := exec.CommandContext(ctx, "git", addArgs...).CombinedOutput(); err != nil {
-			return fmt.Errorf("git add failed: %s: %w", string(output), err)
+		if _, err := gitutil.RunGit(ctx, ledgerPath, append([]string{"add", "--sparse", "--"}, filesToAdd...)...); err != nil {
+			return fmt.Errorf("git add: %w", err)
 		}
-		message := fmt.Sprintf("session: re-redact %d sessions", len(sessionNames))
-		_, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, message, append(filesToAdd, cleanupPaths...)...)
-		return err
+		// Keep other staged sessions, but leave plans for their own save.
+		var commitErr error
+		committed, commitErr = commitLedgerSnapshot(ctx, ledgerPath, fmt.Sprintf("session: re-redact %d sessions", len(sessionNames)))
+		return commitErr
 	})
-	if err != nil {
-		return fmt.Errorf("committing Ledger batch: %w", err)
+	if err != nil || !committed {
+		return err
 	}
 
-	// A no-op snapshot can still owe the remote a prior commit. Push outside
-	// the lock so the retry path can acquire it to reconcile divergent history.
-	return pushLedgerWithRetryPolicy(context.Background(), ledgerPath, true)
+	// pushLedger acquires the same lock, so push only after releasing it.
+	return pushLedger(context.Background(), ledgerPath)
 }

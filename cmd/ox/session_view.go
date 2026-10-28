@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/session/contextuse"
 	"github.com/spf13/cobra"
 )
 
@@ -201,8 +202,10 @@ func runSessionView(cmd *cobra.Command, args []string) error {
 	case "web":
 		return viewAsWeb(storedSession.Info.SessionName, projectRoot)
 	case "text":
+		traceSessionViewed(projectRoot, storedSession)
 		return viewAsText(store, storedSession, projectRoot)
 	case "json":
+		traceSessionViewed(projectRoot, storedSession)
 		return viewAsJSON(cmd.OutOrStdout(), storedSession, metadataOnly, entryLimit)
 	default:
 		return fmt.Errorf("unknown view format: %s", format)
@@ -298,4 +301,68 @@ func tryReadFromLedger(name string) *session.StoredSession {
 		return nil
 	}
 	return st
+}
+
+// traceSessionViewed records a session `ox session view` put in front of the
+// AI coworker (text or JSON — the web view opens a browser, not the model's
+// context) as a surfaced item in its session trace. Best-effort and silent:
+// no project, no agent ID, or no live recording, no trace.
+func traceSessionViewed(projectRoot string, st *session.StoredSession) {
+	if projectRoot == "" || st == nil {
+		return
+	}
+	agentID := traceAgentIDFromEnv()
+	if agentID == "" {
+		return
+	}
+	cfg, _ := config.LoadProjectConfig(projectRoot)
+	meta := viewedSessionMeta(st)
+	traceProvidedHits(projectRoot, agentID, contexttrace.SourceOnDemand, contexttrace.MechanismRetrieval,
+		[]providedHit{sessionProvidedHit(cfg, st, meta)})
+}
+
+// viewedSessionMeta finds the viewed session's meta.json: beside its content
+// file first, then in the Ledger. nil when neither has one.
+func viewedSessionMeta(st *session.StoredSession) *lfs.SessionMeta {
+	if st.Info.FilePath != "" {
+		if m, err := lfs.ReadSessionMeta(filepath.Dir(st.Info.FilePath)); err == nil {
+			return m
+		}
+	}
+	if st.Info.SessionName == "" {
+		return nil
+	}
+	ledgerPath, err := resolveLedgerPath()
+	if err != nil {
+		return nil
+	}
+	if m, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", st.Info.SessionName)); err == nil {
+		return m
+	}
+	return nil
+}
+
+// sessionProvidedHit builds the surfaced item for a viewed session: ref = its
+// ses_ id (the folder name when meta.json is missing), title = meta title,
+// url = the /c/ link, else the name-based view link.
+func sessionProvidedHit(cfg *config.ProjectConfig, st *session.StoredSession, meta *lfs.SessionMeta) providedHit {
+	name := st.Info.SessionName
+	ref, title := name, st.Info.Title
+	if meta != nil {
+		if meta.SessionName == "" {
+			meta.SessionName = name
+		}
+		ref = meta.EffectiveSessionID()
+		if meta.Title != "" {
+			title = meta.Title
+		}
+	}
+	url := buildConversationURL(cfg, ref)
+	if url == "" {
+		url = buildSessionURL(cfg, name)
+	}
+	if ref == "" {
+		ref = strings.TrimSuffix(st.Info.Filename, ".jsonl")
+	}
+	return providedHit{SurfacedRef: contextuse.SurfacedRef{Ref: ref, RefType: "session", Title: title, URL: url}}
 }

@@ -35,7 +35,7 @@ func TestFormatWhispers_NonMurmurGolden(t *testing.T) {
 	}
 	want := "<system-reminder>\n" +
 		"Team whispers from SageOx coworkers:\n" +
-		"<entry importance=\"normal\" topic=\"build\" source=\"activity-summary\">build is green</entry>\n" +
+		"<entry id=\"1\" importance=\"normal\" topic=\"build\" source=\"activity-summary\">build is green</entry>\n" +
 		"</system-reminder>\n"
 	if got := buf.String(); got != want {
 		t.Errorf("whisper text format drifted.\n got: %q\nwant: %q", got, want)

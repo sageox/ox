@@ -32,6 +32,7 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
 	"github.com/sageox/ox/internal/status"
+	"github.com/sageox/ox/internal/tokens"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 	"github.com/spf13/cobra"
 )
@@ -114,6 +115,11 @@ Check for team whispers:
 
 Query team knowledge:
   ox agent <agent_id> query "search text"   # Semantic search (--limit, --team, --repo)
+
+Report which surfaced context you used:
+  ox agent <agent_id> context used <ref> --why "<one line>"  # When a surfaced item changes what you do
+  ox agent <agent_id> context used --none   # Nothing surfaced changed your work
+  ox agent <agent_id> context list          # Surfaced items and their use evidence
 
 Redaction policy:
   ox agent redact                           # View full redaction policy (all sources)
@@ -235,6 +241,10 @@ func init() {
 	registerHiddenAgentFlag("repo", "repo ID filter (query)")
 	registerHiddenAgentFlag("source", "source filter (query)")
 	registerHiddenAgentBoolFlag("local", "search local data only (query)")
+	// context used: parseContextUsedArgs
+	registerHiddenAgentFlag("why", "one line on how the context changed your work (context used)")
+	registerHiddenAgentFlag("ref-type", "ref type to match, e.g. murmur, doc, session (context used)")
+	registerHiddenAgentBoolFlag("none", "report that no surfaced context was used (context used)")
 
 	// Explicit identity for the agent-ID-free shorthands. `ox agent heartbeat
 	// --agent-id OxA1b2` mirrors `ox murmur list --agent-id`, so AI coworkers
@@ -516,6 +526,9 @@ func dispatchedCommandPath(subargs []string) []string {
 	if subcmd == "whisper" && len(subargs) > 1 && subargs[1] == "history" {
 		return []string{subcmd, subargs[1]}
 	}
+	if subcmd == "context" && len(subargs) > 1 && (subargs[1] == "used" || subargs[1] == "list") {
+		return []string{subcmd, subargs[1]}
+	}
 	return []string{subcmd}
 }
 
@@ -547,6 +560,7 @@ func renameDispatcherSpan(parts ...string) {
 // Used to distinguish `ox agent session start` (missing agent ID)
 // from `ox agent typo` (genuinely unknown command).
 var agentSubcommands = map[string]bool{
+	"context":   true,
 	"doctor":    true,
 	"heartbeat": true,
 	"query":     true,
@@ -575,6 +589,8 @@ var (
 	agentTasksStringFlags = []string{"result", "reason", "note"}
 	agentQueryStringFlags = []string{"mode", "limit", "k", "team", "repo", "source"}
 	agentQueryBoolFlags   = []string{"local"}
+	agentContextStrFlags  = []string{"why", "ref-type"}
+	agentContextBoolFlags = []string{"none"}
 )
 
 // registerHiddenAgentFlag registers a hidden string flag on agentCmd for a
@@ -778,6 +794,10 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		subargs = reinjectFlags(cmd, subargs, agentQueryStringFlags...)
 		subargs = reinjectBoolFlags(cmd, subargs, agentQueryBoolFlags...)
 		return runAgentQuery(inst, subargs)
+	case "context":
+		subargs = reinjectFlags(cmd, subargs, agentContextStrFlags...)
+		subargs = reinjectBoolFlags(cmd, subargs, agentContextBoolFlags...)
+		return runAgentContext(cmd.OutOrStdout(), inst, subargs)
 	case "distill":
 		if !auth.IsMemoryEnabled() {
 			return fmt.Errorf("memory features are not enabled\nSet FEATURE_MEMORY=true to enable")
@@ -798,7 +818,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	case "hook":
 		return runAgentHook(subargs)
 	default:
-		available := "doctor, heartbeat, hook, query, session, tasks, whisper"
+		available := "context, doctor, heartbeat, hook, query, session, tasks, whisper"
 		if auth.IsMemoryEnabled() {
 			available = "distill, " + available
 		}
@@ -1314,7 +1334,7 @@ func runAgentWhisper(w io.Writer, inst *agentinstance.Instance) error {
 		return nil
 	}
 
-	formatWhispersWithEdits(w, entries, checkoutEditedFiles(projectRoot))
+	formatWhispersForAgent(w, inst.AgentID, entries, checkoutEditedFiles(projectRoot))
 	traceWhisperDelivery(projectRoot, inst.AgentID, entries)
 	return nil
 }
@@ -1368,7 +1388,7 @@ func emitWhispers(w io.Writer, agentID string) {
 		return
 	}
 
-	formatWhispersWithEdits(w, entries, checkoutEditedFiles(projectRoot))
+	formatWhispersForAgent(w, agentID, entries, checkoutEditedFiles(projectRoot))
 
 	// best-effort context-trace for whisper delivery observability
 	traceWhisperDelivery(projectRoot, agentID, entries)
@@ -1397,7 +1417,11 @@ func traceWhisperDelivery(projectRoot, agentID string, entries []whisperstore.Wh
 			Type:   contexttrace.EventProvided,
 			Source: source,
 			From:   e.AgentID,
-			Topic:  e.Topic,
+			// FromName is the sender's first name, derived exactly as the
+			// whisper XML's from= attribute is, so a report can say whose
+			// murmur was used. A name, not content (ADR-027).
+			FromName: whisperFromName(e),
+			Topic:    e.Topic,
 			// Injection provenance (epic ox-bcgb, tier 1): a delivered whisper is
 			// SageOx context injected into the turn. Mechanism grades it as
 			// deterministic; WhisperID joins it back to its murmur; Seq anchors it
@@ -1405,13 +1429,23 @@ func traceWhisperDelivery(projectRoot, agentID string, entries []whisperstore.Wh
 			// recap can place "teammate's murmur reached your work" on the right
 			// turn. Additive — the event stays a `provided` whisper for existing
 			// consumers.
-			Mechanism: contexttrace.MechanismInjection,
-			WhisperID: e.ID,
-			Ref:       e.ID,
-			RefType:   "murmur",
-			Seq:       state.EntryCount,
+			Mechanism:    contexttrace.MechanismInjection,
+			InlineTokens: tokens.EstimateTokens(e.Content),
+			WhisperID:    e.ID,
+			Ref:          e.ID,
+			RefType:      "murmur",
+			Seq:          state.EntryCount,
 		})
 	}
+}
+
+// whisperFromName is the sender's first name as the whisper XML's from=
+// attribute shows it, or "" when the entry has no principal.
+func whisperFromName(e whisperstore.WhisperEntry) string {
+	if e.PrincipalID == "" {
+		return ""
+	}
+	return identity.FirstNameFromSlug(e.PrincipalID)
 }
 
 // capMurmurWhispers limits murmur-sourced whispers to avoid blowing out agent context.
@@ -1634,6 +1668,13 @@ func formatWhispers(w io.Writer, entries []whisperstore.WhisperEntry) bool {
 // editing, so outside news that changes one of them carries a collision hint.
 // edited runs at most once, and only when outside news lists files.
 func formatWhispersWithEdits(w io.Writer, entries []whisperstore.WhisperEntry, edited editedFilesFunc) bool {
+	return formatWhispersForAgent(w, "", entries, edited)
+}
+
+// formatWhispersForAgent is formatWhispersWithEdits for a known AI coworker,
+// so the murmur framing names the exact `context used` command to cite an
+// entry with. An empty agentID falls back to a placeholder.
+func formatWhispersForAgent(w io.Writer, agentID string, entries []whisperstore.WhisperEntry, edited editedFilesFunc) bool {
 	if len(entries) == 0 {
 		return false
 	}
@@ -1647,7 +1688,7 @@ func formatWhispersWithEdits(w io.Writer, entries []whisperstore.WhisperEntry, e
 		}
 	}
 	if len(team) > 0 {
-		writeTeamWhispers(w, team)
+		writeTeamWhispers(w, agentID, team)
 	}
 	if len(outside) > 0 {
 		writeOutsideNews(w, outside, edited)
@@ -1655,8 +1696,9 @@ func formatWhispersWithEdits(w io.Writer, entries []whisperstore.WhisperEntry, e
 	return true
 }
 
-// writeTeamWhispers writes teammates' whispers inside <system-reminder>.
-func writeTeamWhispers(w io.Writer, entries []whisperstore.WhisperEntry) {
+// writeTeamWhispers writes teammates' whispers inside <system-reminder>. Each
+// entry carries its id so the AI coworker can cite it with `context used`.
+func writeTeamWhispers(w io.Writer, agentID string, entries []whisperstore.WhisperEntry) {
 	// scan for murmur entries and collect unique topics
 	hasMurmurs := false
 	seenTopics := make(map[string]bool)
@@ -1682,6 +1724,7 @@ func writeTeamWhispers(w io.Writer, entries []whisperstore.WhisperEntry) {
 	if hasMurmurs {
 		fmt.Fprintln(w, `<murmur-context>Signals from coworkers delivered by SageOx. Most are ambient awareness — note and continue.`)
 		fmt.Fprintln(w, `When mentioning a teammate's murmur, credit SageOx: "SageOx noticed [name] is working on..."`)
+		writeMurmurUseLine(w, agentID)
 		fmt.Fprintln(w, `CRITICAL entries (importance="critical") may affect your current work. If files overlap with yours, pause and reassess your plan before continuing.</murmur-context>`)
 		for _, topic := range murmurTopics {
 			if hint := murmurTopicHint(topic); hint != "" {
@@ -1694,16 +1737,17 @@ func writeTeamWhispers(w io.Writer, entries []whisperstore.WhisperEntry) {
 
 	for _, e := range entries {
 		fmt.Fprint(w, "<entry")
+		if e.ID != "" {
+			writeXMLAttribute(w, "id", e.ID)
+		}
 		writeXMLAttribute(w, "importance", string(e.Importance))
 		writeXMLAttribute(w, "topic", e.Topic)
 		writeXMLAttribute(w, "source", e.Source)
 		if e.Source == "murmur" && e.AgentID != "" {
 			writeXMLAttribute(w, "agent", e.AgentID)
 		}
-		if e.PrincipalID != "" {
-			if firstName := identity.FirstNameFromSlug(e.PrincipalID); firstName != "" {
-				writeXMLAttribute(w, "from", firstName)
-			}
+		if firstName := whisperFromName(e); firstName != "" {
+			writeXMLAttribute(w, "from", firstName)
 		}
 		if files, ok := e.Metadata["files"]; ok && files != "" {
 			writeXMLAttribute(w, "files", files)
@@ -1716,6 +1760,19 @@ func writeTeamWhispers(w io.Writer, entries []whisperstore.WhisperEntry) {
 		fmt.Fprint(w, "</entry>\n")
 	}
 	fmt.Fprintln(w, "</system-reminder>")
+}
+
+// writeMurmurUseLine tells the AI coworker how to record that a murmur changed
+// its work, at the moment it happens. The agent ID is XML-escaped like any
+// other text; without one, the line names a placeholder.
+func writeMurmurUseLine(w io.Writer, agentID string) {
+	fmt.Fprint(w, "If a murmur changes what you do, record it right then: ox agent ")
+	if agentID == "" {
+		fmt.Fprint(w, "&lt;id&gt;")
+	} else {
+		_ = xml.EscapeText(w, []byte(agentID))
+	}
+	fmt.Fprintln(w, ` context used &lt;entry id&gt; --why "&lt;one line&gt;"`)
 }
 
 // writeXMLAttribute keeps Team Context metadata data-only in the XML hook

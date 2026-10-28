@@ -101,6 +101,10 @@ func TestNoRawLipglossColorOutsideTUI(t *testing.T) {
 var adaptiveTokenRef = regexp.MustCompile(
 	`theme\.Color(?:Primary|Secondary|Accent|Success|Warning|Error|Info|Dim|Public|Private|WordmarkSage|WordmarkOx)\b`)
 
+// adaptToCall matches the start of theme.AdaptTo(<profile>, — a token passed
+// as its color argument is downgraded to that explicit profile.
+var adaptToCall = regexp.MustCompile(`theme\.AdaptTo\([A-Za-z0-9_.]+, $`)
+
 // unadaptedToken returns the first adaptive-token reference in src that is not
 // wrapped in theme.Adapt, or "" if there is none. Comment lines are ignored so
 // prose about a token does not trip the check.
@@ -110,7 +114,8 @@ func unadaptedToken(src string) string {
 			continue
 		}
 		for _, m := range adaptiveTokenRef.FindAllStringIndex(line, -1) {
-			if !strings.HasSuffix(line[:m[0]], "theme.Adapt(") {
+			prefix := line[:m[0]]
+			if !strings.HasSuffix(prefix, "theme.Adapt(") && !adaptToCall.MatchString(prefix) {
 				return line[m[0]:m[1]]
 			}
 		}

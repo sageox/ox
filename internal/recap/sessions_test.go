@@ -170,6 +170,22 @@ func TestScanSessions_MalformedMetaSkippedNotFatal(t *testing.T) {
 	assert.Equal(t, "good-one", got[0].Name)
 }
 
+// TestScanSessions_SkipsDraftPlaceholders: a live recording's draft meta.json
+// (ADR-029) is not a recorded session. Failure prevented: recap and `ox brief
+// --me` count a still-recording session as finished (with no trace) and
+// double it once the real one lands. The non-draft session is the negative
+// control: the skip must not swallow real sessions.
+func TestScanSessions_SkipsDraftPlaceholders(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.WriteSession("real-one", WithCreatedAt(fixtureNow))
+	f.WriteSession("live-draft", WithCreatedAt(fixtureNow), WithDraft(), WithTitle(""))
+
+	got := ScanSessions(f.Ledger, time.Time{}, time.Time{}, defaultIdentity())
+	require.Len(t, got, 1, "the draft is skipped; the real session still yields a row")
+	assert.Equal(t, "real-one", got[0].Name)
+}
+
 // TestScanSessions_MissingSessionsDir verifies a ledger with no sessions/
 // directory at all (brand-new ledger) returns an empty, non-nil-panicking
 // result rather than erroring.

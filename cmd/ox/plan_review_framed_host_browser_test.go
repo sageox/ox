@@ -32,9 +32,68 @@ func framedHost(opts string) string {
 		`const frame = document.getElementById('doc');` +
 		`window.addEventListener('message', (e) => { const d = e.data || {}; if ('revOn' in d) window.frameOn = d.revOn; });` +
 		`window.forge = (m) => frame.contentWindow.postMessage({ forge: m }, '*');` +
-		`mountHostControls(connectFrame(frame, '` + frameInstance + `'), { account: 'acct-devon', plan: 'pln_framed', slug: 'framed',` +
+		`window.controls = mountHostControls(connectFrame(frame, '` + frameInstance + `'), { account: 'acct-devon', plan: 'pln_framed', slug: 'framed',` +
 		` reviewer: 'Devon', frame, transport: { send: () => Promise.resolve({ state: 'offline' }) }, ` + opts + ` });` +
 		`frame.src = '/doc';</script></body></html>`
+}
+
+// Changing the host's Review toggle must not replace its controls or presence
+// link, discard saved feedback, or resend an operation already in flight.
+func TestBrowser_HostReviewModePreservesPresenceAndSubmission(t *testing.T) {
+	ctx := frameBrowser(t)
+	host := framedHost(`committed: [], revision: 'sha256:` + strings.Repeat("a", 64) + `',
+		presence: { join(revision, on) {
+			window.joins = (window.joins || 0) + 1; window.leaves = 0;
+			on({ type: 'welcome', self: 'devon', peers: [{ id: 'avery', user: 'avery', name: 'Avery', revision, at: null }] });
+			return { move() {}, leave() { window.leaves++; } };
+		} }, transport: { send() { window.sends = (window.sends || 0) + 1; return new Promise(resolve => window.delivered = resolve); } }`)
+	base := serveFrameHost(t, []byte(forgingDoc), host)
+	if err := chromedp.Run(ctx, chromedp.Navigate(base), chromedp.WaitVisible(".rev-peer", chromedp.ByQuery),
+		chromedp.Evaluate(`window.bar = document.querySelector('.rev-bar'); window.peer = document.querySelector('.rev-peer'); controls.setReviewing(true)`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if !waitJS(ctx, `window.frameOn === true`, 5*time.Second) {
+		t.Fatal("the frame must enter review mode")
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.Click(".rev-rail-plan", chromedp.ByQuery),
+		chromedp.WaitVisible(".rev-note", chromedp.ByQuery),
+		chromedp.SendKeys(".rev-note", "Keep this feedback", chromedp.ByQuery),
+		chromedp.Evaluate(`controls.setReviewing(true)`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if got := evalString(t, ctx, `document.querySelector('.rev-note').value`); got != "Keep this feedback" {
+		t.Fatalf("applying the same mode must leave the open note alone: %q", got)
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(".rev-save", chromedp.ByQuery),
+		chromedp.Evaluate(`controls.setReviewing(false); controls.setReviewing(true)`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if got := evalString(t, ctx, `document.querySelector('.rev-rail').textContent`); !strings.Contains(got, "Keep this feedback") {
+		t.Fatalf("saved feedback must survive mode changes: %q", got)
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(".rev-submit", chromedp.ByQuery),
+		chromedp.Evaluate(`controls.setReviewing(false); controls.setReviewing(true); controls.setReviewing(false)`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if !waitJS(ctx, `window.frameOn === false`, 5*time.Second) {
+		t.Fatal("the frame must return to reading mode")
+	}
+	if got := evalString(t, ctx, `JSON.stringify([joins, leaves, sends, bar === document.querySelector('.rev-bar'), peer === document.querySelector('.rev-peer')])`); got != `[1,0,1,true,true]` {
+		t.Fatalf("mode changes must preserve the controls, peer and in-flight submission: %s", got)
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`controls.whenIdle(() => window.idle = true); delivered({state:'offline'})`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if !waitJS(ctx, `window.idle === true`, 5*time.Second) {
+		t.Fatal("the original submission must still settle and release the idle guard")
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`controls.destroy(); controls.setReviewing(true); controls.destroy()`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if got := evalString(t, ctx, `JSON.stringify([leaves, !!document.querySelector('.rev-bar'), document.body.classList.contains('rev-on')])`); got != `[1,false,false]` {
+		t.Fatalf("destroy must leave once and subsequent mode changes must do nothing: %s", got)
+	}
 }
 
 // forgingDoc is a plan whose own script runs before the document tools and

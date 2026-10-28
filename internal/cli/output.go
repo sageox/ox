@@ -55,6 +55,12 @@ func SetNoInteractive(enabled bool) {
 	noInteractive = enabled
 }
 
+// NoInteractive reports whether --no-interactive disabled spinners and TUI
+// elements. IsInteractive also folds in --no-input and the stdin TTY check.
+func NoInteractive() bool {
+	return noInteractive
+}
+
 // SetNoInput disables prompts without treating missing input as consent.
 func SetNoInput(enabled bool) {
 	noInput = enabled

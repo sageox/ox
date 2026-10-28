@@ -1,6 +1,10 @@
 package sessionsummary
 
-import "time"
+import (
+	"time"
+
+	"github.com/sageox/ox/internal/session/contextuse"
+)
 
 // Entry type constants.
 const (
@@ -148,6 +152,11 @@ type SummarizeResponse struct {
 	SageoxScore         *float64 `json:"sageox_score,omitempty"`          // 0.0-1.0 self-reported contribution score
 	SageoxScoreCategory string   `json:"sageox_score_category,omitempty"` // named category: none, minor, moderate, significant, critical
 	SageoxScoreReason   string   `json:"sageox_score_reason,omitempty"`   // detailed paragraph explaining SageOx influence
+
+	// ContextUse mirrors meta.json's context_use: the surfaced-vs-used rollup
+	// derived from the session's context trace at finalize (refs only, never
+	// content). Injected from meta.json by push-summary, never LLM-generated.
+	ContextUse *contextuse.Rollup `json:"context_use,omitempty"`
 
 	// Lifecycle / failure signals.
 	//

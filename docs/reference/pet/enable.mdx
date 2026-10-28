@@ -1,12 +1,12 @@
 ---
 title: "ox pet enable"
 description: "CLI reference for ox pet enable"
-sidebar_position: 69
+sidebar_position: 74
 ---
 
 ## ox pet enable
 
-Install Oxy into Claude Code, or refresh it after an ox upgrade
+Install Oxy into Claude Code and Codex, or refresh him after an ox upgrade
 
 ```
 ox pet enable [flags]
@@ -15,7 +15,8 @@ ox pet enable [flags]
 ### Options
 
 ```
-  -h, --help   help for enable
+  -h, --help           help for enable
+      --host strings   host to act on: claude-code or codex (repeatable; default: every host found)
 ```
 
 ### Options inherited from parent commands
@@ -33,4 +34,4 @@ ox pet enable [flags]
 
 ### SEE ALSO
 
-* [ox pet](/pet)	 - Show Oxy, SageOx's mascot, in Claude Code's thinking line
+* [ox pet](/pet)	 - Show Oxy, SageOx's mascot, in Claude Code (terminal and desktop app) and as Codex's terminal pet

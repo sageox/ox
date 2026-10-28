@@ -562,6 +562,56 @@ func TestHostedSessionListRendersATable(t *testing.T) {
 	require.Equal(t, "Ledger read failed: dirty\n", stderr)
 }
 
+// Failure prevented: an auto-corrected hosted read ignores the --json choice
+// that was typed — a person gets the table after asking for JSON, an AI
+// coworker gets JSON after asking for the table. Planning the correction merges
+// root's --json into `session list`; the retry gives root a new --json, and
+// Cobra keeps parsing into the merged copy. The direct `session list` never
+// retries, so it never showed this.
+func TestHostedSessionListKeepsTheJSONChoiceThroughAutoCorrection(t *testing.T) {
+	tests := []struct {
+		name     string
+		agent    bool
+		jsonFlag string
+		wantJSON bool
+	}{
+		{name: "a person asks for JSON", jsonFlag: "--json", wantJSON: true},
+		{name: "an AI coworker asks for the table", agent: true, jsonFlag: "--json=false"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recoveryEnv(t)
+			f := newHostedReaderFixture(t)
+			withoutAgentContext(t)
+			if tt.agent {
+				t.Setenv("AGENT_ENV", "claude-code")
+			}
+
+			run := runRecovery(t, "agent", "session-list", "--repo", readSyncTestRepoID, tt.jsonFlag)
+			require.Equal(t, 0, run.code, "stdout=%s stderr=%s", run.stdout, run.stderr)
+
+			// Both callers read the correction as data: one typed --json, the other is an agent.
+			first, rest, _ := strings.Cut(run.stdout, "\n")
+			var note correctionNote
+			require.NoError(t, json.Unmarshal([]byte(first), &note), first)
+			require.NotNil(t, note.Corrected, first)
+			require.Equal(t, "session list --repo "+readSyncTestRepoID+" "+tt.jsonFlag, note.Corrected.Now)
+
+			if !tt.wantJSON {
+				require.False(t, json.Valid([]byte(rest)), "the corrected read must render the table:\n%s", rest)
+				require.Contains(t, rest, "SESSION")
+				require.Contains(t, rest, f.sessionName)
+				return
+			}
+			var listed sessionListOutput
+			require.NoError(t, json.Unmarshal([]byte(rest), &listed), "the corrected read must answer in JSON:\n%s", rest)
+			require.Equal(t, readSyncTestRepoID, listed.RepoID)
+			require.Len(t, listed.Sessions, 1)
+			require.Equal(t, f.sessionName, listed.Sessions[0].Name)
+		})
+	}
+}
+
 // Failure prevented: isHeadlessLedgerRead dispatches on the command NAME, so a
 // new `<something> list --repo` elsewhere in the tree would silently start
 // skipping the ordinary prelude the moment its value looked like a repo ID.

@@ -2875,6 +2875,9 @@
         paint();
       },
       setOffline,
+      setReviewing(next) {
+        if (!destroyed && on !== next) setReview(next);
+      },
       whenIdle(fn) {
         waiter = fn;
         idle();

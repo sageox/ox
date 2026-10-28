@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -124,127 +123,6 @@ func TestPushSummaryToLedger_NoGitRoot(t *testing.T) {
 
 	assert.False(t, result.Success)
 	assert.Contains(t, result.Error, "git root")
-}
-
-// Failure prevented: finishing a summary silently publishes another writer's
-// staged plan, while switching to a scoped commit strands gitignore cleanup.
-func TestPushSummaryToLedger_PreservesUnrelatedStaging(t *testing.T) {
-	bare, ledger := createBareAndClone(t)
-	isolatePushEnv(t, ledger)
-	name := "2026-10-21T00-00-test-OxScOp"
-	sessionDir := writeSessionFiles(t, ledger, name)
-	for _, path := range []string{"sessions/old/meta.json.rej", "sessions/old/.needs-summary"} {
-		require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(ledger, path)), 0755))
-		require.NoError(t, os.WriteFile(filepath.Join(ledger, path), []byte("local scheduling state\n"), 0644))
-		runGit(t, ledger, "add", "-f", path)
-	}
-	runGit(t, ledger, "add", "sessions")
-	runGit(t, ledger, "commit", "--no-verify", "-m", "seed session and legacy artifacts")
-	runGit(t, ledger, "push")
-
-	plan := "data/plans/unrelated.md"
-	require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(ledger, plan)), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(ledger, plan), []byte("staged plan\n"), 0644))
-	runGit(t, ledger, "add", plan)
-	stagedPlan := runGit(t, ledger, "rev-parse", ":"+plan)
-	require.NoError(t, os.WriteFile(filepath.Join(ledger, plan), []byte("later unstaged plan\n"), 0644))
-	summaryFile := filepath.Join(t.TempDir(), "summary.json")
-	require.NoError(t, os.WriteFile(summaryFile, []byte(`{"title":"Scoped session summary publication","summary":"Completed session work while preserving another writer's staged plan.","outcome":"success","quality_score":0.8}`), 0644))
-
-	result := pushSummaryToLedger(summaryFile, sessionDir)
-	require.True(t, result.Success, result.Error)
-	assert.Equal(t, plan, runGit(t, ledger, "diff", "--cached", "--name-only"))
-	assert.Equal(t, stagedPlan, runGit(t, ledger, "rev-parse", ":"+plan))
-	worktreePlan, err := os.ReadFile(filepath.Join(ledger, plan))
-	require.NoError(t, err)
-	assert.Equal(t, "later unstaged plan\n", string(worktreePlan))
-	assert.Empty(t, runGit(t, bare, "ls-tree", "--name-only", "HEAD", "--", plan))
-	assert.NotEmpty(t, runGit(t, bare, "ls-tree", "--name-only", "HEAD", "--", "sessions/"+name+"/summary.json"))
-	assert.Contains(t, runGit(t, bare, "show", "HEAD:sessions/"+name+"/meta.json"), "Scoped session summary publication")
-	assert.Contains(t, runGit(t, bare, "show", "HEAD:.gitignore"), "*.rej")
-	for _, path := range []string{"sessions/old/meta.json.rej", "sessions/old/.needs-summary"} {
-		assert.Empty(t, runGit(t, bare, "ls-tree", "--name-only", "HEAD", "--", path))
-		assert.FileExists(t, filepath.Join(ledger, path), "cleanup must preserve local files")
-	}
-
-	// A later summary must still progress with the same unrelated staged plan.
-	require.NoError(t, os.WriteFile(summaryFile, []byte(`{"title":"Updated scoped session summary publication","summary":"Published a later summary without consuming the pending staged plan.","outcome":"success","quality_score":0.8}`), 0644))
-	result = pushSummaryToLedger(summaryFile, sessionDir)
-	require.True(t, result.Success, result.Error)
-	assert.Contains(t, runGit(t, bare, "show", "HEAD:sessions/"+name+"/summary.json"), "Updated scoped")
-	assert.Equal(t, stagedPlan, runGit(t, ledger, "rev-parse", ":"+plan))
-
-	localHead := runGit(t, ledger, "rev-parse", "HEAD")
-	previousHead := runGit(t, ledger, "rev-parse", "HEAD^")
-	runGit(t, bare, "update-ref", "HEAD", previousHead)
-	result = pushSummaryToLedger(summaryFile, sessionDir)
-	require.True(t, result.Success, result.Error)
-	assert.Equal(t, localHead, runGit(t, ledger, "rev-parse", "HEAD"), "an identical retry needs no new commit")
-	assert.Equal(t, localHead, runGit(t, bare, "rev-parse", "HEAD"), "an identical retry still owes publication")
-
-	// Another clone advances the remote. A retry must not autostash the
-	// unrelated staged draft over its different working copy.
-	other := filepath.Join(t.TempDir(), "teammate")
-	runGit(t, bare, "clone", bare, other)
-	runGit(t, other, "config", "user.name", "Teammate")
-	runGit(t, other, "config", "user.email", "teammate@example.com")
-	require.NoError(t, os.WriteFile(filepath.Join(other, "remote.txt"), []byte("teammate change\n"), 0644))
-	runGit(t, other, "add", "remote.txt")
-	runGit(t, other, "commit", "-m", "advance remote")
-	runGit(t, other, "push")
-	remoteHead := runGit(t, bare, "rev-parse", "HEAD")
-	result = pushSummaryToLedger(summaryFile, sessionDir)
-	require.False(t, result.Success)
-	assert.Contains(t, result.Error, "staged changes remain untouched")
-	assert.Equal(t, localHead, runGit(t, ledger, "rev-parse", "HEAD"))
-	assert.Equal(t, remoteHead, runGit(t, bare, "rev-parse", "HEAD"))
-	assert.Equal(t, stagedPlan, runGit(t, ledger, "rev-parse", ":"+plan))
-	worktreePlan, err = os.ReadFile(filepath.Join(ledger, plan))
-	require.NoError(t, err)
-	assert.Equal(t, "later unstaged plan\n", string(worktreePlan))
-
-	// Once its owner explicitly saves the staged draft, normal retry can
-	// rebase and publish while retaining the later unstaged working copy.
-	runGit(t, ledger, "commit", "-m", "owner saves staged plan")
-	result = pushSummaryToLedger(summaryFile, sessionDir)
-	require.True(t, result.Success, result.Error)
-	assert.Equal(t, "staged plan", runGit(t, bare, "show", "HEAD:"+plan))
-	worktreePlan, err = os.ReadFile(filepath.Join(ledger, plan))
-	require.NoError(t, err)
-	assert.Equal(t, "later unstaged plan\n", string(worktreePlan))
-}
-
-// Failure prevented: git add during a rebase consumes conflict resolution state
-// before the later commit/push guard gets a chance to refuse it.
-func TestPushSummaryToLedger_RefusesIndexMutationDuringRebase(t *testing.T) {
-	for _, marker := range []string{"rebase-merge", "rebase-apply"} {
-		t.Run(marker, func(t *testing.T) {
-			bare, ledger := createBareAndClone(t)
-			isolatePushEnv(t, ledger)
-			name := "2026-10-21T00-00-test-OxReBa"
-			sessionDir := writeSessionFiles(t, ledger, name)
-			beforeIndex := runGit(t, ledger, "ls-files", "--stage")
-			beforeHead := runGit(t, ledger, "rev-parse", "HEAD")
-			markerPath := filepath.Join(ledger, ".git", marker)
-			require.NoError(t, os.MkdirAll(markerPath, 0755))
-			summaryFile := filepath.Join(t.TempDir(), "summary.json")
-			require.NoError(t, os.WriteFile(summaryFile, []byte(`{"title":"Publication waits for rebase completion","summary":"Retained the summary while the shared Ledger was temporarily rebasing.","outcome":"success","quality_score":0.8}`), 0644))
-
-			result := pushSummaryToLedger(summaryFile, sessionDir)
-			assert.False(t, result.Success)
-			assert.Contains(t, result.Error, "rebase")
-			assert.NotContains(t, result.Error, "git commit:", "a preflight refusal is not a failed git commit")
-			assert.Equal(t, beforeHead, runGit(t, ledger, "rev-parse", "HEAD"))
-			assert.Equal(t, beforeHead, runGit(t, bare, "rev-parse", "HEAD"))
-			assert.Equal(t, beforeIndex, runGit(t, ledger, "ls-files", "--stage"))
-			assert.NoFileExists(t, filepath.Join(ledger, ".gitignore"), "the cleanup guard must not stage during rebase")
-
-			require.NoError(t, os.RemoveAll(markerPath))
-			result = pushSummaryToLedger(summaryFile, sessionDir)
-			require.True(t, result.Success, result.Error)
-			assert.NotEqual(t, beforeHead, runGit(t, bare, "rev-parse", "HEAD"), "the next write must publish after recovery")
-		})
-	}
 }
 
 // TestUpdateMetaSummary_FailedThenSucceeded_NoStickyTombstone is the
@@ -385,7 +263,6 @@ func TestWrapCommitError_PreservesUnrelatedFailures(t *testing.T) {
 			assert.NotContains(t, got, "ox doctor --fix",
 				"recovery hint must NOT appear for non-wedge failures (%s) — would mislead the user", tc.name)
 			assert.Contains(t, got, tc.stderr, "raw stderr must be preserved verbatim for non-wedge failures")
-			assert.Equal(t, tc.stderr, wrapCommitError(tc.stderr, errors.New(tc.stderr)), "an already contextualized failure must appear only once")
 		})
 	}
 }

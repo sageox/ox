@@ -38,6 +38,23 @@ func inspectOval(t *testing.T, ctx context.Context) ovalInk {
 	return state
 }
 
+// hostCaughtUp returns once the host has handled every message the framed
+// plan sent it so far. The plan answers each repaint on its port, and the
+// host rebuilds the rail from that answer; ink comes back on another channel,
+// so an oval repainted in the frame does not mean the rail is rebuilt yet. A
+// message forged now on the plan's port arrives after every earlier one, and
+// the host ignores a canceled stroke. The plan must be loaded with ?forge=1.
+func hostCaughtUp(t *testing.T, ctx context.Context) {
+	t.Helper()
+	var after int
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.got.length`, &after),
+		chromedp.Evaluate(`window.ask({forge:{type:'refused',reason:'cancelled'}})`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	var ignored struct{}
+	gotMessage(t, ctx, after, "refused", &ignored)
+}
+
 // Failure prevented: drawing stays freehand until release, editing makes a
 // second comment, loses the note, or submits stale geometry and context.
 func TestBrowser_OvalsDrawMoveAndResize(t *testing.T) {
@@ -229,6 +246,9 @@ func TestBrowser_OvalGeometryFreezesAtSubmit(t *testing.T) {
 			original := evalString(t, ctx, `JSON.stringify(JSON.parse(window.sent[0].body).marks[0].region.ellipse)`)
 			body := evalString(t, ctx, `window.sent[0].body`)
 			waitHandles(0)
+			// Submit repainted the plan: click the rail only once it is rebuilt,
+			// or the click can hold a row the rebuild replaces.
+			hostCaughtUp(t, ctx)
 			// A newer note stamp must not unlock geometry carried by an older entry.
 			if err := chromedp.Run(ctx, chromedp.Click(".rev-rail-body", chromedp.ByQuery), chromedp.WaitVisible(".rev-pop .rev-note", chromedp.ByQuery),
 				chromedp.Evaluate(`document.querySelector('.rev-note').value='Edited while sending.'`, nil), chromedp.Click(".rev-pop .rev-save", chromedp.ByQuery)); err != nil {

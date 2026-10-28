@@ -33,7 +33,7 @@ func TestCustomRulesCannotWeakenMandatoryGuard(t *testing.T) {
 func TestCustomReplacementCannotIntroduceCredential(t *testing.T) {
 	for _, mode := range []string{"text", "details", "map"} {
 		t.Run(mode, func(t *testing.T) {
-			r := NewRedactorWithPatterns([]SecretPattern{{Name: "custom-replacement", Pattern: regexp.MustCompile("replace-me"), Redact: "AKIAIOSFODNN7EXAMPLE"}})
+			r := NewRedactorWithPatterns([]SecretPattern{{Name: "custom-replacement", Pattern: regexp.MustCompile("replace-me"), Redact: "AKIA" + "QWERTYUIOPASDFGH"}})
 			var out string
 			switch mode {
 			case "text":
@@ -45,7 +45,7 @@ func TestCustomReplacementCannotIntroduceCredential(t *testing.T) {
 				r.RedactMap(data)
 				out = data["content"].(string)
 			}
-			if strings.Contains(out, "AKIAIOSFODNN7EXAMPLE") {
+			if strings.Contains(out, "AKIA"+"QWERTYUIOPASDFGH") {
 				t.Fatal("custom replacement introduced unguarded credential")
 			}
 		})

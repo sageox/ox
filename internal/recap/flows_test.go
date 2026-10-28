@@ -32,7 +32,7 @@ func TestKnowledgeFlow_FlipsOnFlows(t *testing.T) {
 func TestGatherFlows_ReadsConsultedEvents(t *testing.T) {
 	ledger := t.TempDir()
 	name := "2026-07-01T10-00-ryan-Ox1"
-	// Write the trace where readTrace resolves it first (the ledger cache).
+	// Write the trace where ReadTrace resolves it first (the ledger cache).
 	cacheDir := filepath.Join(ledger, ".sageox", "cache", "sessions", name)
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		t.Fatal(err)

@@ -37,6 +37,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -205,6 +206,12 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
+	// mirror the finalize-time context-use rollup from meta.json so
+	// summary.json readers see the same derived evidence (never LLM-authored)
+	if meta != nil && meta.ContextUse != nil {
+		summaryParsed.ContextUse = meta.ContextUse
+	}
+
 	// load quality thresholds from user config
 	userCfg, _ := config.LoadUserConfig()
 	awCfg := userCfg.GetAgentWorkerConfig()
@@ -351,40 +358,62 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
-	// Serialize index mutations with the other Ledger writers, including the
-	// cleanup guard's staging. Scope the immutable snapshot to our files and
-	// those owned cleanup paths, leaving another writer's staged work pending.
-	ctx, cancel := context.WithTimeout(context.Background(), lockedCommitTimeout)
-	defer cancel()
-	err = gitutil.WithRepoLock(ctx, ledgerPath, func() error {
-		if err := gitutil.IsSafeForIndexWrite(ctx, ledgerPath); err != nil {
-			return err
-		}
+	// disposition == QualityUpload — commit and push to ledger
+	// git add the summary file (and meta.json if updated)
+	// --sparse: ledger repos use sparse-checkout
+	addArgs := []string{"-C", ledgerPath, "add", "--sparse", summaryDst}
+	if metaUpdated {
+		addArgs = append(addArgs, filepath.Join(sessionDir, "meta.json"))
+	}
+	commitMsg := fmt.Sprintf("summary: %s", sessionName)
 
-		cleanupPaths := gitserver.EnsureGitignoreBeforeCommitCtx(ctx, ledgerPath)
-		files := []string{summaryDst}
-		if metaUpdated {
-			files = append(files, filepath.Join(sessionDir, "meta.json"))
+	// Hold the repo lock from the first index write through commit, as daemon
+	// pulls do, so this commit queues behind a sync rebase instead of moving
+	// main under it (sageox/ox#1541). Under the lock a rebase in progress is a
+	// wedge, and staging into it would mark its conflicts resolved.
+	var addOutput []byte
+	var addErr, commitErr error
+	lockErr := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		if gitutil.IsRebaseInProgress(ledgerPath) {
+			return errors.New("repo in broken rebase state (run 'ox doctor --fix')")
 		}
-		addArgs := append([]string{"-C", ledgerPath, "add", "--sparse", "--"}, files...)
-		if output, err := exec.CommandContext(ctx, "git", addArgs...).CombinedOutput(); err != nil {
-			return fmt.Errorf("git add: %s: %w", strings.TrimSpace(string(output)), err)
+		// ensure .gitignore is in place before any commit to prevent cache file leakage
+		gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
+		addOutput, addErr = exec.Command("git", addArgs...).CombinedOutput()
+		if addErr != nil {
+			return nil
 		}
-		_, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, fmt.Sprintf("summary: %s", sessionName), append(files, cleanupPaths...)...)
-		return err
+		// validated snapshot, not a bare commit: the lock keeps the index still,
+		// but entries staged before it would otherwise ride along unchecked
+		_, commitErr = commitLedgerSnapshot(context.Background(), ledgerPath, commitMsg)
+		return nil
 	})
-	if err != nil {
+	if lockErr != nil {
 		return &pushSummaryOutput{
 			Success: false,
 			Type:    "push_summary",
-			Error:   wrapCommitError(err.Error(), err),
+			Error:   fmt.Sprintf("ledger not safe for summary commit: %v", lockErr),
 		}
 	}
-
-	// Push outside the repo lock: retry may acquire it for a pull/rebase.
-	// An identical retry still owes publication if its earlier push failed.
+	if addErr != nil {
+		return &pushSummaryOutput{
+			Success: false,
+			Type:    "push_summary",
+			Error:   fmt.Sprintf("git add: %s: %v", strings.TrimSpace(string(addOutput)), addErr),
+		}
+	}
+	if commitErr != nil {
+		// an unmerged index reads "unresolved conflict", which wrapCommitError
+		// turns into the `ox doctor --fix` guidance
+		return &pushSummaryOutput{
+			Success: false,
+			Type:    "push_summary",
+			Error:   wrapCommitError(commitErr.Error(), errors.New("ledger snapshot commit failed")),
+		}
+	}
+	// An identical retry must push a commit whose earlier publication failed.
 	slog.Info("pushing summary to ledger", "session", sessionName)
-	if err := pushLedgerWithRetryPolicy(context.Background(), ledgerPath, true); err != nil {
+	if err := pushLedger(context.Background(), ledgerPath); err != nil {
 		return &pushSummaryOutput{
 			Success: false,
 			Type:    "push_summary",
@@ -568,9 +597,6 @@ func wrapCommitError(stderr string, err error) string {
 				"(raw git: %s)",
 			trimmed,
 		)
-	}
-	if err != nil && trimmed == strings.TrimSpace(err.Error()) {
-		return trimmed
 	}
 	return fmt.Sprintf("git commit: %s: %v", trimmed, err)
 }

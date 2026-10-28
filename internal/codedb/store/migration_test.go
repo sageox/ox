@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -144,7 +145,7 @@ func TestMigrateAddTypeInfo_FromOlderSchema(t *testing.T) {
 	// seed data to verify parsed reset
 	_, _ = db.Exec(`INSERT INTO blobs (content_hash, language, parsed) VALUES ('abc', 'go', 1)`)
 
-	if err := migrateAddTypeInfo(db); err != nil {
+	if err := migrateAddTypeInfo(t.Context(), db); err != nil {
 		t.Fatalf("migrateAddTypeInfo: %v", err)
 	}
 
@@ -170,10 +171,10 @@ func TestMigrateAddTypeInfo_Idempotent(t *testing.T) {
 	db, _ := createOldSchemaDB(t)
 	defer func() { _ = db.Close() }()
 
-	if err := migrateAddTypeInfo(db); err != nil {
+	if err := migrateAddTypeInfo(t.Context(), db); err != nil {
 		t.Fatalf("first migration: %v", err)
 	}
-	if err := migrateAddTypeInfo(db); err != nil {
+	if err := migrateAddTypeInfo(t.Context(), db); err != nil {
 		t.Fatalf("second migration should be idempotent: %v", err)
 	}
 }
@@ -193,7 +194,7 @@ func TestMigrateAddComments_FromOlderSchema(t *testing.T) {
 		t.Fatal("base schema should NOT have comments_parsed column")
 	}
 
-	if err := migrateAddComments(db); err != nil {
+	if err := migrateAddComments(t.Context(), db); err != nil {
 		t.Fatalf("migrateAddComments: %v", err)
 	}
 
@@ -220,13 +221,13 @@ func TestMigrateAddComments_Idempotent(t *testing.T) {
 	db, _ := createOldSchemaDB(t)
 	defer func() { _ = db.Close() }()
 
-	if err := migrateAddComments(db); err != nil {
+	if err := migrateAddComments(t.Context(), db); err != nil {
 		t.Fatalf("first migration: %v", err)
 	}
 	// insert data so we can verify it survives
 	_, _ = db.Exec(`INSERT INTO blobs (content_hash, language, parsed, comments_parsed) VALUES ('x', 'go', 1, 1)`)
 
-	if err := migrateAddComments(db); err != nil {
+	if err := migrateAddComments(t.Context(), db); err != nil {
 		t.Fatalf("second migration should be idempotent: %v", err)
 	}
 
@@ -251,7 +252,7 @@ func TestMigrateAddGitHubTables_FromOlderSchema(t *testing.T) {
 		}
 	}
 
-	if err := migrateAddGitHubTables(db); err != nil {
+	if err := migrateAddGitHubTables(t.Context(), db); err != nil {
 		t.Fatalf("migrateAddGitHubTables: %v", err)
 	}
 
@@ -280,12 +281,12 @@ func TestMigrateAddGitHubTables_Idempotent(t *testing.T) {
 	db, _ := createOldSchemaDB(t)
 	defer func() { _ = db.Close() }()
 
-	if err := migrateAddGitHubTables(db); err != nil {
+	if err := migrateAddGitHubTables(t.Context(), db); err != nil {
 		t.Fatalf("first migration: %v", err)
 	}
 	_, _ = db.Exec(`INSERT INTO pull_requests (number, title, state) VALUES (1, 'test', 'open')`)
 
-	if err := migrateAddGitHubTables(db); err != nil {
+	if err := migrateAddGitHubTables(t.Context(), db); err != nil {
 		t.Fatalf("second migration should be idempotent: %v", err)
 	}
 
@@ -305,7 +306,7 @@ func TestMigrateAddPRCommits_FromOlderSchema(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	// run prerequisite migration first
-	if err := migrateAddGitHubTables(db); err != nil {
+	if err := migrateAddGitHubTables(t.Context(), db); err != nil {
 		t.Fatalf("migrateAddGitHubTables: %v", err)
 	}
 
@@ -313,7 +314,7 @@ func TestMigrateAddPRCommits_FromOlderSchema(t *testing.T) {
 		t.Fatal("pr_commits should NOT exist before migration")
 	}
 
-	if err := migrateAddPRCommits(db); err != nil {
+	if err := migrateAddPRCommits(t.Context(), db); err != nil {
 		t.Fatalf("migrateAddPRCommits: %v", err)
 	}
 
@@ -353,11 +354,11 @@ func TestMigrateAddPRCommits_Idempotent(t *testing.T) {
 	db, _ := createOldSchemaDB(t)
 	defer func() { _ = db.Close() }()
 
-	if err := migrateAddGitHubTables(db); err != nil {
+	if err := migrateAddGitHubTables(t.Context(), db); err != nil {
 		t.Fatalf("migrateAddGitHubTables: %v", err)
 	}
 
-	if err := migrateAddPRCommits(db); err != nil {
+	if err := migrateAddPRCommits(t.Context(), db); err != nil {
 		t.Fatalf("first migration: %v", err)
 	}
 
@@ -365,7 +366,7 @@ func TestMigrateAddPRCommits_Idempotent(t *testing.T) {
 	_, _ = db.Exec(`INSERT INTO pull_requests (number, title, state) VALUES (1, 'test', 'merged')`)
 	_, _ = db.Exec(`INSERT INTO pr_commits (pr_id, sha) VALUES (1, 'sha1')`)
 
-	if err := migrateAddPRCommits(db); err != nil {
+	if err := migrateAddPRCommits(t.Context(), db); err != nil {
 		t.Fatalf("second migration should be idempotent: %v", err)
 	}
 
@@ -389,7 +390,7 @@ func TestMigrateInvalidateGitHubMtimesForIssue474(t *testing.T) {
 	db, _ := createOldSchemaDB(t)
 	defer func() { _ = db.Close() }()
 
-	if err := migrateAddGitHubTables(db); err != nil {
+	if err := migrateAddGitHubTables(t.Context(), db); err != nil {
 		t.Fatalf("migrateAddGitHubTables: %v", err)
 	}
 
@@ -409,7 +410,7 @@ func TestMigrateInvalidateGitHubMtimesForIssue474(t *testing.T) {
 	}
 
 	// run migration
-	if err := migrateInvalidateGitHubMtimesForIssue474(db); err != nil {
+	if err := migrateInvalidateGitHubMtimesForIssue474(t.Context(), db); err != nil {
 		t.Fatalf("first migration: %v", err)
 	}
 
@@ -442,7 +443,7 @@ func TestMigrateInvalidateGitHubMtimesForIssue474(t *testing.T) {
 	}
 
 	// second run must be a no-op (idempotent) — must NOT clear the new rows
-	if err := migrateInvalidateGitHubMtimesForIssue474(db); err != nil {
+	if err := migrateInvalidateGitHubMtimesForIssue474(t.Context(), db); err != nil {
 		t.Fatalf("second migration: %v", err)
 	}
 
@@ -543,19 +544,17 @@ func TestOpenExistingDB_TriggersAllMigrations(t *testing.T) {
 	}
 }
 
-// TestCreateSchema_ConcurrentFreshOpen reproduces #758 end-to-end: a cold
-// `ox index code` racing another opener (e.g. a concurrent `OpenSQLOnly` read
-// path, or two agents cold-building the same repo) against a codedb
-// directory that does not exist yet. This is a real-world sanity check, not
-// the regression proof — goroutine scheduling makes the exact race window
-// unreliable to hit on its own (it did not reproduce #758 even once across
-// 8 runs against the unfixed code during development of this test). The
-// deterministic proof is TestAddColumnMigrations_ConcurrentRace below, which
-// forces the window with a hook instead of hoping for it.
+// TestCreateSchema_ConcurrentFreshOpen races 16 openers against a codedb
+// directory that does not exist yet: a cold `ox index code` meeting another
+// opener (e.g. a concurrent `OpenSQLOnly` read path, or two agents
+// cold-building the same repo). Every open must succeed and the full schema
+// must land. It runs in parallel with the package's other tests, whose SQLite
+// traffic in the same process is the load under which the per-statement build
+// used to outlast busy_timeout in CI. TestCreateSchema_OneTransaction and
+// TestCreateSchema_InProcessOpenersTakeTurns are the deterministic proofs.
 //
-// Failure prevented (when it does land): a cold index build failing under
-// concurrent openers, leaving an empty-but-schema-complete codedb that
-// answers every future query with zero results instead of erroring loudly.
+// Failure prevented: a cold index build failing under concurrent openers with
+// "create schema: database is locked".
 func TestCreateSchema_ConcurrentFreshOpen(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -574,7 +573,7 @@ func TestCreateSchema_ConcurrentFreshOpen(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			<-start // maximize overlap on the check-then-ALTER race window
+			<-start // released together to maximize overlap
 			db, _, err := openSQLite(root)
 			errs[i] = err
 			dbs[i] = db
@@ -597,8 +596,8 @@ func TestCreateSchema_ConcurrentFreshOpen(t *testing.T) {
 		}
 	}
 
-	// Regardless of which opener "won" each migration's race, the schema
-	// must have landed fully and be queryable from an independent connection.
+	// Whichever opener created it, the schema must have landed fully and be
+	// queryable from an independent connection.
 	verifyDB, _, err := openSQLite(root)
 	if err != nil {
 		t.Fatalf("reopen after concurrent creation: %v", err)
@@ -616,90 +615,134 @@ func TestCreateSchema_ConcurrentFreshOpen(t *testing.T) {
 	}
 }
 
-// TestAddColumnMigrations_ConcurrentRace is the deterministic regression
-// proof for #758. It forces the exact race — N callers all observing a
-// column as missing, then all attempting `ALTER TABLE ADD COLUMN`
-// together — via testAddColumnRaceHook, rather than betting on goroutine
-// scheduling to land the same microsecond-wide window on its own (see the
-// non-deterministic TestCreateSchema_ConcurrentFreshOpen above, which did
-// not catch this bug in 8/8 runs against the unfixed code).
+// TestCreateSchema_OneTransaction holds the first opener of a new codedb inside
+// its write transaction, after the whole schema is applied and before COMMIT,
+// and checks what other connections see: nothing. A concurrent opener therefore
+// waits for that one transaction instead of starting its own statement-by-
+// statement build, and succeeds once the first commits.
 //
-// Covers the class of failure, not just the one reported column: every
-// ALTER-based migration in schema.go shares the identical
-// "SELECT exists, then ALTER" pattern, so all three are exercised here.
+// Failure prevented: openers interleaving dozens of schema write transactions
+// until one waits past busy_timeout and the open fails with "create schema:
+// database is locked".
 //
-// Not run with t.Parallel(): it mutates the package-level race hook, which
-// would race against other tests in this file that also touch the DB.
-func TestAddColumnMigrations_ConcurrentRace(t *testing.T) {
+// Not run with t.Parallel(): it sets testSchemaAppliedHook, which CreateSchema
+// reads without a lock.
+func TestCreateSchema_OneTransaction(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: SQLite migration")
 	}
 
-	cases := []struct {
-		name    string
-		migrate func(*sql.DB) error
-		table   string
-		columns []string
-		// syncColumn is the one column each racer parks on to force the race.
-		// migrateAddTypeInfo adds three columns via addColumnIfMissing, so the
-		// hook fires once per column; parking on only the first keeps the
-		// bounded ready channel from overflowing while still guaranteeing all
-		// racers hit the check-then-ALTER window together.
-		syncColumn string
-	}{
-		{"edge_version", migrateAddEdgeVersion, "blobs", []string{"edge_version"}, "edge_version"},
-		{"type_info", migrateAddTypeInfo, "symbols", []string{"signature", "return_type", "params"}, "signature"},
-		{"comments_parsed", migrateAddComments, "blobs", []string{"comments_parsed"}, "comments_parsed"},
+	dbPath := filepath.Join(t.TempDir(), MetadataDBFile)
+	first, second, observer := openRawDB(t, dbPath), openRawDB(t, dbPath), openRawDB(t, dbPath)
+	defer func() {
+		for _, db := range []*sql.DB{first, second, observer} {
+			_ = db.Close()
+		}
+	}()
+
+	applied := make(chan struct{})
+	release := make(chan struct{})
+	var holdFirst sync.Once
+	testSchemaAppliedHook = func() {
+		holdFirst.Do(func() {
+			close(applied)
+			<-release
+		})
+	}
+	t.Cleanup(func() { testSchemaAppliedHook = nil })
+
+	firstErr := make(chan error, 1)
+	go func() { firstErr <- CreateSchema(first) }()
+	select {
+	case <-applied:
+	case err := <-firstErr:
+		t.Fatalf("first opener returned without applying the schema in a write transaction: %v", err)
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			db, _ := createOldSchemaDB(t)
-			defer func() { _ = db.Close() }()
+	var objects int
+	if err := observer.QueryRow(`SELECT COUNT(*) FROM sqlite_master`).Scan(&objects); err != nil {
+		close(release)
+		<-firstErr
+		t.Fatalf("read schema while the first opener holds its transaction: %v", err)
+	}
+	if objects != 0 {
+		t.Errorf("another connection saw %d schema objects before the first opener committed; the build must be one transaction", objects)
+	}
 
-			const racers = 8
-			ready := make(chan struct{}, racers)
-			release := make(chan struct{})
+	secondErr := make(chan error, 1)
+	go func() { secondErr <- CreateSchema(second) }()
+	close(release)
+	// Collect both before failing, so no opener is still running when Cleanup
+	// resets the hook.
+	errFirst, errSecond := <-firstErr, <-secondErr
+	if errFirst != nil {
+		t.Fatalf("first opener: %v", errFirst)
+	}
+	if errSecond != nil {
+		t.Fatalf("second opener, waiting for the first: %v", errSecond)
+	}
 
-			testAddColumnRaceHook = func(column string) {
-				if column != tc.syncColumn {
-					return
-				}
-				ready <- struct{}{}
-				<-release
-			}
-			t.Cleanup(func() { testAddColumnRaceHook = nil })
+	requireIntegrityOK(t, observer)
+	if got, want := snapshotSchema(t, observer), goldenSchema(t); !reflect.DeepEqual(got, want) {
+		t.Errorf("schema after both openers diverged from golden\n got=%+v\nwant=%+v", got, want)
+	}
+}
 
-			var wg sync.WaitGroup
-			errs := make([]error, racers)
-			for i := range racers {
-				wg.Add(1)
-				go func(i int) {
-					defer wg.Done()
-					errs[i] = tc.migrate(db)
-				}(i)
-			}
+// TestCreateSchema_InProcessOpenersTakeTurns opens a new codedb from 16
+// connections in this process at once, each with busy_timeout(0), so any wait on
+// SQLite's write lock fails at once with SQLITE_BUSY. All 16 must succeed:
+// openers in one process take turns on schemaMu and reach SQLite's lock one at a
+// time.
+//
+// Failure prevented: openers in one process polling SQLite's write lock for each
+// other. Every poll takes SQLite's process-wide VFS mutex, which the opener
+// holding the lock needs to commit, so under load that commit can stall past the
+// waiters' busy_timeout.
+func TestCreateSchema_InProcessOpenersTakeTurns(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
 
-			// Block until every racer has observed the column missing and is
-			// parked in the hook, then release them all into the ALTER at once —
-			// guarantees the race window is hit, not just hoped for.
-			for range racers {
-				<-ready
-			}
-			close(release)
-			wg.Wait()
+	dbPath := filepath.Join(t.TempDir(), MetadataDBFile)
+	// Create the file in WAL mode, read once to build its WAL index, and keep the
+	// connection open so the index stays built: an opener would otherwise convert
+	// the file or recover the index, and busy_timeout(0) fails anyone waiting on
+	// those, which is not what this test measures.
+	keeper := openRawDB(t, dbPath)
+	defer func() { _ = keeper.Close() }()
+	var objects int
+	if err := keeper.QueryRow(`SELECT COUNT(*) FROM sqlite_master`).Scan(&objects); err != nil {
+		t.Fatalf("create %s: %v", dbPath, err)
+	}
 
-			for i, err := range errs {
-				if err != nil {
-					t.Errorf("racer %d: %s: %v (a losing ALTER must be swallowed as success, not returned)", i, tc.name, err)
-				}
-			}
-			for _, col := range tc.columns {
-				if !columnExists(t, db, tc.table, col) {
-					t.Errorf("%s.%s missing after concurrent migration", tc.table, col)
-				}
-			}
-		})
+	const openers = 16
+	var wg sync.WaitGroup
+	errs := make([]error, openers)
+	begin := make(chan struct{})
+	for i := range openers {
+		db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(0)")
+		if err != nil {
+			t.Fatalf("open %d: %v", i, err)
+		}
+		defer func() { _ = db.Close() }()
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-begin
+			errs[i] = CreateSchema(db)
+		}(i)
+	}
+	close(begin)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("opener %d: %v", i, err)
+		}
+	}
+	if got, want := snapshotSchema(t, keeper), goldenSchema(t); !reflect.DeepEqual(got, want) {
+		t.Errorf("schema diverged from golden\n got=%+v\nwant=%+v", got, want)
 	}
 }
 
@@ -726,7 +769,7 @@ func TestMigrateAddTypeInfo_ResumesPartialMigration(t *testing.T) {
 		t.Fatalf("seed partial migration: %v", err)
 	}
 
-	if err := migrateAddTypeInfo(db); err != nil {
+	if err := migrateAddTypeInfo(t.Context(), db); err != nil {
 		t.Fatalf("migrateAddTypeInfo on partially migrated schema: %v", err)
 	}
 
@@ -734,59 +777,6 @@ func TestMigrateAddTypeInfo_ResumesPartialMigration(t *testing.T) {
 		if !columnExists(t, db, "symbols", col) {
 			t.Errorf("symbols.%s missing after resuming a partial migration", col)
 		}
-	}
-}
-
-// TestIsDuplicateColumnError pins the precision of the duplicate-column guard:
-// it must swallow a duplicate ONLY for the exact column being added, so a
-// genuine schema bug that reports a duplicate on a different column, or any
-// other error, still fails the migration loudly.
-//
-// Failure prevented: an over-broad match (e.g. plain substring on the message)
-// silently eating a real error and leaving a half-built schema.
-func TestIsDuplicateColumnError(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: SQLite migration")
-	}
-
-	db, _ := createOldSchemaDB(t)
-	defer func() { _ = db.Close() }()
-
-	// Provoke a real "duplicate column name: signature" from the driver.
-	if _, err := db.Exec(`ALTER TABLE symbols ADD COLUMN signature TEXT`); err != nil {
-		t.Fatalf("seed column: %v", err)
-	}
-	_, dupErr := db.Exec(`ALTER TABLE symbols ADD COLUMN signature TEXT`)
-	if dupErr == nil {
-		t.Fatal("expected a duplicate-column error on the second ALTER")
-	}
-	// A different sqlite error (same generic SQLITE_ERROR code, different message)
-	// must not be mistaken for a duplicate-column error.
-	_, missingTableErr := db.Exec(`ALTER TABLE definitely_no_such_table ADD COLUMN x TEXT`)
-	if missingTableErr == nil {
-		t.Fatal("expected an error for a missing table")
-	}
-
-	cases := []struct {
-		name   string
-		err    error
-		column string
-		want   bool
-	}{
-		{"matches the exact column", dupErr, "signature", true},
-		{"rejects a different column", dupErr, "return_type", false},
-		// "sign" is a prefix of "signature": a substring match would wrongly
-		// accept it, silently swallowing a real duplicate on another column.
-		{"rejects a column that is a prefix of the real one", dupErr, "sign", false},
-		{"rejects nil", nil, "signature", false},
-		{"rejects a non-duplicate sqlite error", missingTableErr, "x", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isDuplicateColumnError(tc.err, tc.column); got != tc.want {
-				t.Errorf("isDuplicateColumnError(%v, %q) = %v, want %v", tc.err, tc.column, got, tc.want)
-			}
-		})
 	}
 }
 
@@ -808,7 +798,7 @@ func TestMigrateAddTypeInfo_PreservesParsedOnReopen(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	// First migration adds the columns and (correctly) invalidates parsed.
-	if err := migrateAddTypeInfo(db); err != nil {
+	if err := migrateAddTypeInfo(t.Context(), db); err != nil {
 		t.Fatalf("first migrate: %v", err)
 	}
 
@@ -818,7 +808,7 @@ func TestMigrateAddTypeInfo_PreservesParsedOnReopen(t *testing.T) {
 	}
 
 	// Reopen path: run the migration again against the now-current schema.
-	if err := migrateAddTypeInfo(db); err != nil {
+	if err := migrateAddTypeInfo(t.Context(), db); err != nil {
 		t.Fatalf("second migrate: %v", err)
 	}
 

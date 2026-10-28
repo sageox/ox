@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -45,6 +47,9 @@ func TestSessionLedgerWriters_RefuseToStageIntoWedgedRebase(t *testing.T) {
 	}{
 		{"session upload", func(t *testing.T, ledgerPath, sessionName, _ string) error {
 			return commitAndPushLedger(ledgerPath, sessionName)
+		}},
+		{"batch re-redaction", func(t *testing.T, ledgerPath, sessionName, _ string) error {
+			return commitAndPushLedgerBatch(ledgerPath, []string{sessionName})
 		}},
 		{"push-summary", func(t *testing.T, _, _, sessionDir string) error {
 			summary := filepath.Join(t.TempDir(), "raw-summary.json")
@@ -108,6 +113,21 @@ func TestLedgerWriters_QueueBehindRepoLock(t *testing.T) {
 			writeSessionFiles(t, clonePath, name)
 			return func() error { return commitAndPushLedger(clonePath, name) }
 		}},
+		{"batch re-redaction", func(t *testing.T, clonePath, name string) func() error {
+			writeSessionFiles(t, clonePath, name)
+			return func() error { return commitAndPushLedgerBatch(clonePath, []string{name}) }
+		}},
+		{"push-summary", func(t *testing.T, clonePath, name string) func() error {
+			sessionDir := writeSessionFiles(t, clonePath, name)
+			summary := pushSummaryFixture(t)
+			return func() error {
+				out := pushSummaryToLedger(summary, sessionDir)
+				if !out.Success {
+					return &pushSummaryError{out.Error}
+				}
+				return nil
+			}
+		}},
 		{"session delete", func(t *testing.T, clonePath, name string) func() error {
 			committedSession(t, clonePath, name)
 			return func() error {
@@ -168,12 +188,111 @@ func TestLedgerWriters_QueueBehindRepoLock(t *testing.T) {
 	}
 }
 
+// Maintenance must leave unsaved plans alone without stranding another staged session.
+func TestLedgerMaintenance_LeavesPlansStagedAndIncludesOtherSessions(t *testing.T) {
+	for _, writer := range []string{"batch re-redaction", "murmur deletion"} {
+		t.Run(writer, func(t *testing.T) {
+			barePath, clonePath := createBareAndClone(t)
+			isolatePushEnv(t, clonePath)
+			const plan = "data/plans/draft/plan.md"
+			const removedPlan = "data/plans/removed/plan.md"
+			const newPlan = "data/plans/new/plan.md"
+			const murmur = "data/murmurs/m1.json"
+			for _, path := range []string{plan, removedPlan, murmur} {
+				require.NoError(t, os.MkdirAll(filepath.Join(clonePath, filepath.Dir(path)), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(clonePath, path), []byte("original\n"), 0o644))
+			}
+			runGit(t, clonePath, "add", "data")
+			runGit(t, clonePath, "commit", "--no-verify", "-m", "seed plans and murmur")
+			runGit(t, clonePath, "push")
+			remoteBefore := runGit(t, barePath, "rev-parse", "HEAD")
+
+			require.NoError(t, os.WriteFile(filepath.Join(clonePath, plan), []byte("staged draft\n"), 0o644))
+			require.NoError(t, os.MkdirAll(filepath.Join(clonePath, filepath.Dir(newPlan)), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(clonePath, newPlan), []byte("new draft\n"), 0o644))
+			runGit(t, clonePath, "add", plan, newPlan)
+			runGit(t, clonePath, "rm", removedPlan)
+			require.NoError(t, os.WriteFile(filepath.Join(clonePath, plan), []byte("later working draft\n"), 0o644))
+			stagedPlans := runGit(t, clonePath, "diff", "--cached", "--binary", "--", "data/plans")
+			workingPlans := runGit(t, clonePath, "diff", "--binary", "--", "data/plans")
+
+			otherSession := writeSessionFiles(t, clonePath, "2026-01-01T00-00-testuser-OxOther")
+			otherMeta := "sessions/" + filepath.Base(otherSession) + "/meta.json"
+			runGit(t, clonePath, "add", otherMeta)
+			if writer == "batch re-redaction" {
+				const name = "2026-01-01T00-00-testuser-OxBatch"
+				writeSessionFiles(t, clonePath, name)
+				require.NoError(t, commitAndPushLedgerBatch(clonePath, []string{name}))
+				assert.NotEmpty(t, runGit(t, barePath, "show", "HEAD:sessions/"+name+"/meta.json"))
+			} else {
+				require.NoError(t, commitMurmurDeletion(context.Background(), clonePath, murmur, "m1"))
+				_, err := runGitCombined(clonePath, "cat-file", "-e", "HEAD:"+murmur)
+				assert.Error(t, err, "the murmur must be deleted from the commit")
+				assert.Equal(t, remoteBefore, runGit(t, barePath, "rev-parse", "HEAD"), "murmur deletion must remain a local commit")
+				require.NoError(t, pushLedger(context.Background(), clonePath))
+			}
+
+			assert.NotEmpty(t, runGit(t, barePath, "show", "HEAD:"+otherMeta), "the other staged session must still reach the remote")
+			assert.Equal(t, "original", runGit(t, barePath, "show", "HEAD:"+plan))
+			assert.Equal(t, "original", runGit(t, barePath, "show", "HEAD:"+removedPlan))
+			_, err := runGitCombined(barePath, "cat-file", "-e", "HEAD:"+newPlan)
+			assert.Error(t, err, "a staged new plan must not be published")
+			assert.Equal(t, stagedPlans, runGit(t, clonePath, "diff", "--cached", "--binary", "--", "data/plans"))
+			assert.Equal(t, workingPlans, runGit(t, clonePath, "diff", "--binary", "--", "data/plans"))
+		})
+	}
+}
+
+// A maintenance write must not resolve an existing conflict by staging over it.
+func TestLedgerMaintenance_PreservesConflictsAndWorksAfterRecovery(t *testing.T) {
+	for _, writer := range []string{"batch re-redaction", "murmur deletion"} {
+		t.Run(writer, func(t *testing.T) {
+			_, clonePath := createBareAndClone(t)
+			isolatePushEnv(t, clonePath)
+			const name = "2026-01-01T00-00-testuser-OxBatch"
+			path := "data/murmurs/m1.json"
+			if writer == "batch re-redaction" {
+				writeSessionFiles(t, clonePath, name)
+				path = "sessions/" + name + "/meta.json"
+			} else {
+				require.NoError(t, os.MkdirAll(filepath.Join(clonePath, filepath.Dir(path)), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(clonePath, path), []byte(`{"content":"wip"}`), 0o644))
+			}
+			runGit(t, clonePath, "add", "-A")
+			runGit(t, clonePath, "commit", "--no-verify", "-m", "seed maintenance file")
+			blob := runGit(t, clonePath, "rev-parse", "HEAD:"+path)
+			update := exec.Command("git", "-C", clonePath, "update-index", "--index-info")
+			update.Stdin = strings.NewReader(fmt.Sprintf("0 %[1]s 0\t%[2]s\n100644 %[3]s 1\t%[2]s\n100644 %[3]s 2\t%[2]s\n100644 %[3]s 3\t%[2]s\n", strings.Repeat("0", len(blob)), path, blob))
+			out, err := update.CombinedOutput()
+			require.NoError(t, err, "%s", out)
+			indexBefore := runGit(t, clonePath, "ls-files", "--stage")
+			headBefore := runGit(t, clonePath, "rev-parse", "HEAD")
+			write := func() error {
+				if writer == "batch re-redaction" {
+					return commitAndPushLedgerBatch(clonePath, []string{name})
+				}
+				return commitMurmurDeletion(context.Background(), clonePath, path, "m1")
+			}
+
+			require.ErrorContains(t, write(), "unresolved conflicts")
+			assert.Equal(t, indexBefore, runGit(t, clonePath, "ls-files", "--stage"))
+			assert.Equal(t, headBefore, runGit(t, clonePath, "rev-parse", "HEAD"))
+			assert.FileExists(t, filepath.Join(clonePath, path))
+
+			runGit(t, clonePath, "reset", "HEAD", "--", path)
+			require.NoError(t, os.WriteFile(filepath.Join(clonePath, path), []byte(`{"content":"recovered"}`), 0o644))
+			require.NoError(t, write(), "a refused write must release the lock for the next attempt")
+			assert.NotEqual(t, headBefore, runGit(t, clonePath, "rev-parse", "HEAD"))
+		})
+	}
+}
+
 // TestPushSummary_LeavesUnrelatedStagedEntriesStaged: the summary commit goes
 // through the validated Ledger snapshot, which never publishes data/plans.
 // Failure prevented: a bare `git commit` sweeping a coworker's staged plan
 // edit, unvalidated, into the session's summary commit (#1442).
 func TestPushSummary_LeavesUnrelatedStagedEntriesStaged(t *testing.T) {
-	_, clonePath := createBareAndClone(t)
+	barePath, clonePath := createBareAndClone(t)
 	isolatePushEnv(t, clonePath)
 	sessionName := "2026-01-01T00-00-testuser-OxSnp1"
 	sessionDir := writeSessionFiles(t, clonePath, sessionName)
@@ -181,6 +300,8 @@ func TestPushSummary_LeavesUnrelatedStagedEntriesStaged(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(clonePath, filepath.Dir(plan)), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(clonePath, plan), []byte("# draft plan\n"), 0o644))
 	runGit(t, clonePath, "add", plan)
+	otherSession := writeSessionFiles(t, clonePath, "2026-01-01T00-00-testuser-OxOther")
+	runGit(t, clonePath, "add", filepath.Join(otherSession, "meta.json"))
 	summary := filepath.Join(t.TempDir(), "raw-summary.json")
 	require.NoError(t, os.WriteFile(summary, []byte(`{"title":"Fix ledger sync","summary":"Recovered the ledger sync after a lost rebase race.","outcome":"success"}`), 0o644))
 
@@ -192,6 +313,7 @@ func TestPushSummary_LeavesUnrelatedStagedEntriesStaged(t *testing.T) {
 	_, err = runGitCombined(clonePath, "cat-file", "-e", "HEAD:"+plan)
 	assert.Error(t, err, "the staged plan must not ride along in the summary commit")
 	assert.Contains(t, runGit(t, clonePath, "diff", "--cached", "--name-only"), plan, "the plan edit must stay staged")
+	assert.NotEmpty(t, runGit(t, barePath, "show", "HEAD:sessions/"+filepath.Base(otherSession)+"/meta.json"), "another staged session must still be published")
 }
 
 // pushSummaryFixture returns a summary file push-summary accepts.
@@ -220,6 +342,73 @@ func TestPushSummary_RetryAfterCommitSucceeds(t *testing.T) {
 	require.True(t, retry.Success, retry.Error)
 	assert.Equal(t, "summary pushed to ledger", retry.Message)
 	assert.Equal(t, head, runGit(t, clonePath, "rev-parse", "HEAD"), "a retry must not add a commit")
+}
+
+// A failed push leaves the summary committed locally. Identical retries must
+// report failure while the remote is unavailable, then publish that commit.
+func TestPushSummary_RetryAfterFailedPush(t *testing.T) {
+	barePath, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	sessionDir := writeSessionFiles(t, clonePath, "2026-01-01T00-00-testuser-OxPushRetry")
+	summary := pushSummaryFixture(t)
+	cacheDir := filepath.Join(session.GetContextPath(getRepoIDOrDefault(clonePath)), "sessions", filepath.Base(sessionDir))
+	require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+	rawPath := filepath.Join(cacheDir, "raw.jsonl")
+	require.NoError(t, os.WriteFile(rawPath, []byte("{\"type\":\"user\",\"content\":\"Keep this session for retry.\"}\n"), 0o600))
+	require.NoError(t, session.WriteNeedsSummaryMarker(cacheDir, rawPath, sessionDir))
+	remoteHead := runGit(t, barePath, "rev-parse", "HEAD")
+	runGit(t, clonePath, "remote", "set-url", "--push", "origin", filepath.Join(t.TempDir(), "missing.git"))
+
+	first := pushSummaryToLedger(summary, sessionDir)
+	require.False(t, first.Success)
+	assert.Contains(t, first.Error, "git push")
+	assert.FileExists(t, rawPath)
+	assert.True(t, session.HasNeedsSummaryMarker(cacheDir))
+	head := runGit(t, clonePath, "rev-parse", "HEAD")
+	require.NotEqual(t, remoteHead, head, "the commit must succeed before the push fails")
+
+	retry := pushSummaryToLedger(summary, sessionDir)
+	require.False(t, retry.Success, "an unchanged summary must not hide another push failure")
+	assert.Contains(t, retry.Error, "git push")
+	assert.Equal(t, head, runGit(t, clonePath, "rev-parse", "HEAD"))
+	assert.Equal(t, remoteHead, runGit(t, barePath, "rev-parse", "HEAD"))
+	assert.FileExists(t, rawPath, "failed retries must retain recovery content")
+	assert.True(t, session.HasNeedsSummaryMarker(cacheDir), "failed retries must remain pending")
+
+	runGit(t, clonePath, "remote", "set-url", "--push", "origin", barePath)
+	retry = pushSummaryToLedger(summary, sessionDir)
+	require.True(t, retry.Success, retry.Error)
+	assert.Equal(t, head, runGit(t, clonePath, "rev-parse", "HEAD"), "a retry must not add a commit")
+	assert.Equal(t, head, runGit(t, barePath, "rev-parse", "HEAD"), "success must mean the pending commit reached the remote")
+	assert.NoDirExists(t, cacheDir, "recovery cleanup must wait for a successful push")
+}
+
+func TestPushSummary_RemoteAdvanceWithStagedPlan(t *testing.T) {
+	barePath, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+	other := cloneBare(t, barePath)
+	require.NoError(t, os.WriteFile(filepath.Join(other, "remote.txt"), []byte("teammate change\n"), 0o644))
+	runGit(t, other, "add", "remote.txt")
+	runGit(t, other, "commit", "-m", "advance remote")
+	runGit(t, other, "push")
+
+	sessionDir := writeSessionFiles(t, clonePath, "2026-01-01T00-00-testuser-OxAutoStash")
+	const plan = "data/plans/pln_test/plan.md"
+	require.NoError(t, os.MkdirAll(filepath.Join(clonePath, filepath.Dir(plan)), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(clonePath, plan), []byte("# pending plan\n"), 0o644))
+	runGit(t, clonePath, "add", plan)
+
+	out := pushSummaryToLedger(pushSummaryFixture(t), sessionDir)
+	require.True(t, out.Success, out.Error)
+	assert.Equal(t, runGit(t, clonePath, "rev-parse", "HEAD"), runGit(t, barePath, "rev-parse", "HEAD"))
+	assert.NotEmpty(t, runGit(t, barePath, "show", "HEAD:sessions/"+filepath.Base(sessionDir)+"/summary.json"))
+	assert.Equal(t, "teammate change", runGit(t, clonePath, "show", "HEAD:remote.txt"))
+	planContent, err := os.ReadFile(filepath.Join(clonePath, plan))
+	require.NoError(t, err)
+	assert.Equal(t, "# pending plan\n", string(planContent), "autostash must retain the plan content locally")
+	assert.Empty(t, runGit(t, barePath, "ls-tree", "--name-only", "HEAD", "--", plan), "the pending plan must not be published")
 }
 
 // TestPushSummary_UnmergedIndexPointsAtDoctor: an index left unmerged outside a
