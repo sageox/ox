@@ -2140,14 +2140,10 @@
         rail.addEventListener("click", (ev) => {
           const t = ev.target;
           if (t.closest(".rev-rail-show, .rev-rail-hide")) toggleRail();
-          const plan2 = t.closest(".rev-rail-plan");
-          if (plan2) {
-            const b = plan2.getBoundingClientRect();
-            openPop(WHOLE, { left: b.left, bottom: b.bottom }, true);
-            popByHost = true;
-          }
+          if (t.closest(".rev-rail-plan")) openPop(WHOLE, null, true);
         });
       }
+      if (pop && popByHost) return;
       const r = rail;
       const rows = railRows();
       if (!on && !rows.length) {
@@ -2177,7 +2173,7 @@
         else if (outcome[row.a] === "hidden") tag += '<span class="rev-rail-tag" title="Collapsed or on another tab: click to show it">hidden</span>';
         const content = (row.quote ? '<div class="rev-rail-quote">' + esc(row.label) + "</div>" : "") + (row.note ? '<div class="rev-rail-note">' + esc(row.note) + "</div>" : row.quote || whole2 ? "" : '<div class="rev-rail-note muted">' + esc(row.label) + "</div>") + (row.answer ? '<div class="rev-rail-answer">↳ ' + esc(row.answer) + "</div>" : "") + (row.region ? '<button class="rev-rail-orig" title="What lay under this drawing when it was drawn">View original</button>' : "");
         const whoTag = row.reviewer ? '<span class="rev-rail-who">' + esc(row.reviewer) + "</span>" : "";
-        html += '<li class="rev-rail-item" data-i="' + i + '" data-status="' + esc(row.status) + '"><span class="rev-rail-glyph">' + glyphFor(row.status) + '</span><div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(whole2 ? WHOLE.label : row.section || "(plan)") + "</span>" + whoTag + tag + "</div>" + content + "</div></li>";
+        html += '<li class="rev-rail-item" data-i="' + i + '" data-a="' + esc(row.a) + '" data-status="' + esc(row.status) + '"><span class="rev-rail-glyph">' + glyphFor(row.status) + '</span><div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(whole2 ? WHOLE.label : row.section || "(plan)") + "</span>" + whoTag + tag + "</div>" + content + "</div></li>";
       });
       html += "</ul>";
       r.innerHTML = html;
@@ -2192,8 +2188,7 @@
           }
           if (row.at) port.send({ type: "reveal", anchor: row.at.anchor, nth: row.at.nth });
           if (!row.at || DRAWING.test(row.a)) {
-            openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }, { left: ev.clientX, bottom: ev.clientY });
-            popByHost = true;
+            openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }, null);
             ev.stopPropagation();
           }
         };
@@ -2211,6 +2206,7 @@
       return !!pop && (popByHost || !!n && n.value.trim() !== popNote);
     }
     function closePop(replacing) {
+      const docked = popByHost;
       popByHost = false;
       if (pop) {
         pop.remove();
@@ -2221,6 +2217,7 @@
           pending = null;
           paint();
         }
+        if (docked) renderRail();
       }
       port.send({ type: "focus", anchor: null });
       if (!replacing) idle();
@@ -2228,6 +2225,7 @@
     function openPop(t, rect, fresh) {
       closePop(true);
       popAbout = t;
+      popByHost = !rect;
       const a = t.a;
       const cstate = committedState(a);
       const p = pop = document.createElement("div");
@@ -2330,9 +2328,20 @@
     }
     function placePop(rect) {
       const p = pop;
-      body.appendChild(p);
-      p.style.top = window.scrollY + rect.bottom + 8 + "px";
-      p.style.left = window.scrollX + Math.min(rect.left, window.innerWidth - 300) + "px";
+      if (rect) {
+        body.appendChild(p);
+        p.style.top = window.scrollY + rect.bottom + 8 + "px";
+        p.style.left = window.scrollX + Math.min(rect.left, window.innerWidth - 300) + "px";
+      } else {
+        const r = rail, a = popAbout.a;
+        let at = r.querySelector(".rev-rail-plan");
+        r.querySelectorAll(".rev-rail-item").forEach((li) => {
+          if (li.getAttribute("data-a") === a) at = li;
+        });
+        if (at) at.after(p);
+        else r.appendChild(p);
+        p.scrollIntoView({ block: "nearest" });
+      }
       sendMode();
     }
     document.addEventListener("click", (ev) => {
@@ -2812,7 +2821,7 @@
               popAbout.section = section;
               const about = pop.querySelector(".rev-about");
               if (about) about.textContent = label;
-              placePop(toHost(m.rect));
+              if (!popByHost) placePop(toHost(m.rect));
             }
             paint();
             break;

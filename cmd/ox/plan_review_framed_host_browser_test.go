@@ -282,16 +282,21 @@ func TestBrowser_PlanCannotDriveTheComposer(t *testing.T) {
 	}
 
 	// a note the reviewer opens from the rail stays open, empty, whatever the
-	// plan sends; the placed answer last shows every earlier message was handled
+	// plan sends. The rail holds still while a note is open in it, so the
+	// banner of notes no longer anchored, which the placed answer last clears,
+	// shows every earlier message was handled.
 	if err := chromedp.Run(ctx, chromedp.KeyEvent(kb.Escape), chromedp.Click(".rev-rail-plan", chromedp.ByQuery), chromedp.WaitVisible(".rev-pop .rev-note", chromedp.ByQuery)); err != nil {
 		t.Fatalf("open the whole-plan note from the rail: %v", err)
+	}
+	if !waitJS(ctx, `document.querySelector('.rev-orphans')`, 5*time.Second) {
+		t.Fatal("the mark placed nowhere must show in the banner, or its clearing proves nothing")
 	}
 	for _, msg := range []string{`{type:'dismiss'}`, `{type:'key',key:'Escape'}`, `{type:'key',key:'r'}`,
 		target("h22222222", "Elsewhere", 60, 60), `{type:'refused',reason:'cross-section'}`} {
 		forge(msg)
 	}
 	forge(`{type:'placed',items:[{anchor:'h33333333',section:'S',label:'Watched'}]}`)
-	if !waitJS(ctx, `!(`+textChanged+`)`, 5*time.Second) {
+	if !waitJS(ctx, `!document.querySelector('.rev-orphans')`, 5*time.Second) {
 		t.Fatal("the forged messages never arrived")
 	}
 	if got := evalString(t, ctx, `document.querySelector('.rev-pop .rev-about')&&document.querySelector('.rev-pop .rev-about').textContent`); got != "Whole plan" {
