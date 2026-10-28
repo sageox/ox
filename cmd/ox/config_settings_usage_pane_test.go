@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestUsagePaneSetting_Lifecycle drives `ox config set|get|unset brief_pane`
+// TestUsagePaneSetting_Lifecycle drives `ox config set|get|unset session_report_pane`
 // through the real settings plumbing against an isolated user config file.
 func TestUsagePaneSetting_Lifecycle(t *testing.T) {
 	t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
@@ -27,19 +27,19 @@ func TestUsagePaneSetting_Lifecycle(t *testing.T) {
 		wantOn     bool
 	}{
 		{"default is on", func() error { return nil }, "on", ConfigLevelDefault, true},
-		{"set off", func() error { return SetConfigValue("brief_pane", "off", ConfigLevelUser, "") }, "off", ConfigLevelUser, false},
-		{"set on", func() error { return SetConfigValue("brief_pane", "on", ConfigLevelUser, "") }, "on", ConfigLevelUser, true},
-		{"unset falls back to default", func() error { return UnsetConfigValue("brief_pane", ConfigLevelUser, "") }, "on", ConfigLevelDefault, true},
+		{"set off", func() error { return SetConfigValue("session_report_pane", "off", ConfigLevelUser, "") }, "off", ConfigLevelUser, false},
+		{"set on", func() error { return SetConfigValue("session_report_pane", "on", ConfigLevelUser, "") }, "on", ConfigLevelUser, true},
+		{"unset falls back to default", func() error { return UnsetConfigValue("session_report_pane", ConfigLevelUser, "") }, "on", ConfigLevelDefault, true},
 	}
 	for _, step := range steps {
 		require.NoError(t, step.act(), step.name)
-		cv, err := ResolveConfigValue("brief_pane", project)
+		cv, err := ResolveConfigValue("session_report_pane", project)
 		require.NoError(t, err, step.name)
 		assert.Equal(t, step.wantValue, cv.Value, step.name)
 		assert.Equal(t, step.wantSource, cv.Source, step.name)
 		userCfg, err := config.LoadUserConfig()
 		require.NoError(t, err, step.name)
-		assert.Equal(t, step.wantOn, userCfg.IsBriefPaneEnabled(), step.name)
+		assert.Equal(t, step.wantOn, userCfg.IsSessionReportPaneEnabled(), step.name)
 	}
 }
 
@@ -50,11 +50,11 @@ func TestUsagePaneSetting_RejectsInvalidValues(t *testing.T) {
 		value string
 		level ConfigLevel
 	}{{"of", ConfigLevelUser}, {"false", ConfigLevelUser}, {"off", ConfigLevelRepo}, {"off", ConfigLevelTeam}} {
-		require.Error(t, SetConfigValue("brief_pane", tc.value, tc.level, t.TempDir()), tc)
+		require.Error(t, SetConfigValue("session_report_pane", tc.value, tc.level, t.TempDir()), tc)
 	}
 	userCfg, err := config.LoadUserConfig()
 	require.NoError(t, err)
-	assert.Nil(t, userCfg.BriefPaneEnabled)
+	assert.Nil(t, userCfg.SessionReportPaneEnabled)
 }
 
 // runConfigWith runs `ox config set|unset` with its output captured.
@@ -73,7 +73,7 @@ func runConfigWith(t *testing.T, run func(cmd *cobra.Command, args []string) err
 }
 
 // TestConfigSetUsagePane_AppliesToClaudeCode verifies `ox config set
-// brief_pane off|on` (and unset) changes Claude Code right away, not at the
+// session_report_pane off|on` (and unset) changes Claude Code right away, not at the
 // next ox doctor --fix.
 // Failure prevented: a coworker turns the pane off and it keeps loading, or
 // turns it on and nothing appears until some later doctor run.
@@ -82,20 +82,20 @@ func TestConfigSetUsagePane_AppliesToClaudeCode(t *testing.T) {
 	t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
 	installedFile := filepath.Join(env.state, "installed")
 
-	out, err := runConfigWith(t, runConfigSet, configSetCmd, "brief_pane", "on")
+	out, err := runConfigWith(t, runConfigSet, configSetCmd, "session_report_pane", "on")
 	require.NoError(t, err)
 	assert.FileExists(t, installedFile, "set on: Enable installs the plugin")
 	assert.Contains(t, env.log(t), "plugin install ox-cli-brief-pane@ox-cli-brief --scope user")
-	assert.Contains(t, out, "/ox-brief")
+	assert.Contains(t, out, "/ox-session-report")
 
 	require.NoError(t, os.Remove(filepath.Join(env.state, "log")))
-	_, err = runConfigWith(t, runConfigSet, configSetCmd, "brief_pane", "off")
+	_, err = runConfigWith(t, runConfigSet, configSetCmd, "session_report_pane", "off")
 	require.NoError(t, err)
 	assert.NoFileExists(t, installedFile, "set off: Disable uninstalls the plugin")
 	assert.Contains(t, env.log(t), "plugin uninstall ox-cli-brief-pane@ox-cli-brief --scope user")
 	assert.NoDirExists(t, env.dir)
 
-	_, err = runConfigWith(t, runConfigUnset, configUnsetCmd, "brief_pane")
+	_, err = runConfigWith(t, runConfigUnset, configUnsetCmd, "session_report_pane")
 	require.NoError(t, err)
 	assert.FileExists(t, installedFile, "unset: back to the default (on) reinstalls")
 }
@@ -108,12 +108,12 @@ func TestConfigSetUsagePane_ClaudeFailureIsAWarning(t *testing.T) {
 	bin := filepath.Dir(firstOnPath(t, "claude"))
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\necho broken; exit 2\n"), 0o755))
 
-	out, err := runConfigWith(t, runConfigSet, configSetCmd, "brief_pane", "off")
+	out, err := runConfigWith(t, runConfigSet, configSetCmd, "session_report_pane", "off")
 	require.NoError(t, err)
 	assert.Contains(t, out, "ox doctor --fix")
 	userCfg, err := config.LoadUserConfig()
 	require.NoError(t, err)
-	assert.False(t, userCfg.IsBriefPaneEnabled())
+	assert.False(t, userCfg.IsSessionReportPaneEnabled())
 }
 
 // TestConfigSetUsagePane_SkipsWithoutClaude verifies a machine without the
@@ -121,17 +121,17 @@ func TestConfigSetUsagePane_ClaudeFailureIsAWarning(t *testing.T) {
 func TestConfigSetUsagePane_SkipsWithoutClaude(t *testing.T) {
 	env := setupUsagePaneEnv(t, false)
 	t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
-	out, err := runConfigWith(t, runConfigSet, configSetCmd, "brief_pane", "on")
+	out, err := runConfigWith(t, runConfigSet, configSetCmd, "session_report_pane", "on")
 	require.NoError(t, err)
 	assert.Empty(t, out)
 	assert.NoDirExists(t, env.dir)
 }
 
-// TestBriefPaneSetting_FallsBackToUsagePane verifies the rename from
-// usage_pane to brief_pane keeps every coworker's choice. Failure prevented:
+// TestSessionReportPaneSetting_FallsBackToBriefPane verifies the rename from
+// brief_pane to session_report_pane keeps every coworker's choice. Failure prevented:
 // a coworker who turned the pane off before the rename gets it reinstalled,
-// or `ox config set usage_pane off` from an old script silently stops working.
-func TestBriefPaneSetting_FallsBackToUsagePane(t *testing.T) {
+// or `ox config set brief_pane off` from an old script silently stops working.
+func TestSessionReportPaneSetting_FallsBackToBriefPane(t *testing.T) {
 	tests := []struct {
 		name       string
 		file       string // config.yaml before the step
@@ -144,37 +144,37 @@ func TestBriefPaneSetting_FallsBackToUsagePane(t *testing.T) {
 		noFile     []string // substrings config.yaml must not hold after
 	}{
 		{
-			name: "old usage_pane off is read by brief_pane", file: "usage_pane_enabled: false\n",
+			name: "old brief_pane off is read by session_report_pane", file: "brief_pane_enabled: false\n",
+			act: func() error { return nil }, key: "session_report_pane",
+			wantValue: "off", wantSource: ConfigLevelUser, wantOn: false,
+		},
+		{
+			name: "old brief_pane off is read by brief_pane", file: "brief_pane_enabled: false\n",
 			act: func() error { return nil }, key: "brief_pane",
 			wantValue: "off", wantSource: ConfigLevelUser, wantOn: false,
 		},
 		{
-			name: "old usage_pane off is read by usage_pane", file: "usage_pane_enabled: false\n",
-			act: func() error { return nil }, key: "usage_pane",
-			wantValue: "off", wantSource: ConfigLevelUser, wantOn: false,
-		},
-		{
-			name: "brief_pane wins over the old key", file: "usage_pane_enabled: false\nbrief_pane_enabled: true\n",
-			act: func() error { return nil }, key: "brief_pane",
+			name: "session_report_pane wins over the old key", file: "brief_pane_enabled: false\nsession_report_pane_enabled: true\n",
+			act: func() error { return nil }, key: "session_report_pane",
 			wantValue: "on", wantSource: ConfigLevelUser, wantOn: true,
 		},
 		{
-			name: "setting brief_pane migrates the old key", file: "usage_pane_enabled: false\n",
-			act: func() error { return SetConfigValue("brief_pane", "on", ConfigLevelUser, "") }, key: "brief_pane",
+			name: "setting session_report_pane migrates the old key", file: "brief_pane_enabled: false\n",
+			act: func() error { return SetConfigValue("session_report_pane", "on", ConfigLevelUser, "") }, key: "session_report_pane",
 			wantValue: "on", wantSource: ConfigLevelUser, wantOn: true,
-			wantFile: []string{"brief_pane_enabled: true"}, noFile: []string{"usage_pane_enabled"},
+			wantFile: []string{"session_report_pane_enabled: true"}, noFile: []string{"brief_pane_enabled"},
 		},
 		{
-			name: "setting the deprecated usage_pane writes brief_pane",
-			act:  func() error { return SetConfigValue("usage_pane", "off", ConfigLevelUser, "") }, key: "brief_pane",
+			name: "setting the deprecated brief_pane writes session_report_pane",
+			act:  func() error { return SetConfigValue("brief_pane", "off", ConfigLevelUser, "") }, key: "session_report_pane",
 			wantValue: "off", wantSource: ConfigLevelUser, wantOn: false,
-			wantFile: []string{"brief_pane_enabled: false"}, noFile: []string{"usage_pane_enabled"},
+			wantFile: []string{"session_report_pane_enabled: false"}, noFile: []string{"brief_pane_enabled"},
 		},
 		{
-			name: "unsetting brief_pane clears the old key too", file: "usage_pane_enabled: false\n",
-			act: func() error { return UnsetConfigValue("brief_pane", ConfigLevelUser, "") }, key: "brief_pane",
+			name: "unsetting session_report_pane clears the old key too", file: "brief_pane_enabled: false\n",
+			act: func() error { return UnsetConfigValue("session_report_pane", ConfigLevelUser, "") }, key: "session_report_pane",
 			wantValue: "on", wantSource: ConfigLevelDefault, wantOn: true,
-			noFile: []string{"usage_pane_enabled", "brief_pane_enabled"},
+			noFile: []string{"brief_pane_enabled", "session_report_pane_enabled"},
 		},
 	}
 	for _, tt := range tests {
@@ -192,7 +192,7 @@ func TestBriefPaneSetting_FallsBackToUsagePane(t *testing.T) {
 			assert.Equal(t, tt.wantSource, cv.Source)
 			userCfg, err := config.LoadUserConfig()
 			require.NoError(t, err)
-			assert.Equal(t, tt.wantOn, userCfg.IsBriefPaneEnabled())
+			assert.Equal(t, tt.wantOn, userCfg.IsSessionReportPaneEnabled())
 
 			data, _ := os.ReadFile(path)
 			for _, s := range tt.wantFile {
@@ -205,20 +205,31 @@ func TestBriefPaneSetting_FallsBackToUsagePane(t *testing.T) {
 	}
 }
 
-// TestUsagePaneSetting_IsDeprecatedAlias verifies `ox config set usage_pane`
-// says it is renamed and names brief_pane. Failure prevented: a coworker keeps
+// TestBriefPaneSetting_IsDeprecatedAlias verifies `ox config set brief_pane`
+// says it is renamed and names session_report_pane. Failure prevented: a coworker keeps
 // using the old key without ever learning the new one.
-func TestUsagePaneSetting_IsDeprecatedAlias(t *testing.T) {
-	setting := GetSetting("usage_pane")
+func TestBriefPaneSetting_IsDeprecatedAlias(t *testing.T) {
+	setting := GetSetting("brief_pane")
 	require.NotNil(t, setting)
 	assert.True(t, setting.Deprecated)
-	assert.Contains(t, setting.DeprecationNotice, "brief_pane")
-	assert.False(t, GetSetting("brief_pane").Deprecated)
+	assert.Contains(t, setting.DeprecationNotice, "session_report_pane")
+	assert.False(t, GetSetting("session_report_pane").Deprecated)
 
 	t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
 	out := string(captureRealStdout(t, func() {
-		require.NoError(t, configSetCmd.RunE(configSetCmd, []string{"usage_pane", "off"}))
+		require.NoError(t, configSetCmd.RunE(configSetCmd, []string{"brief_pane", "off"}))
 	}))
-	assert.Contains(t, out, "renamed to brief_pane")
-	assert.Contains(t, out, "ox config set brief_pane on|off")
+	assert.Contains(t, out, "renamed to session_report_pane")
+	assert.Contains(t, out, "ox config set session_report_pane on|off")
+
+	// the old key flips the same value the new key reads
+	cv, err := ResolveConfigValue("session_report_pane", t.TempDir())
+	require.NoError(t, err)
+	assert.Equal(t, "off", cv.Value)
+	assert.Equal(t, ConfigLevelUser, cv.Source)
+	userCfg, err := config.LoadUserConfig()
+	require.NoError(t, err)
+	assert.False(t, userCfg.IsSessionReportPaneEnabled())
+	require.NotNil(t, userCfg.SessionReportPaneEnabled, "brief_pane must write session_report_pane_enabled")
+	assert.Nil(t, userCfg.BriefPaneEnabled)
 }

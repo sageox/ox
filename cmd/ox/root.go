@@ -243,7 +243,6 @@ func init() {
 	queryCmd.GroupID = "knowledge"
 	scoutCmd.GroupID = "knowledge"
 	recapCmd.GroupID = "knowledge"
-	usageCmd.GroupID = "knowledge"
 	conversationCmd.GroupID = "knowledge"
 
 	// team coordination — carts, cart analysis, glance, murmurs, bulletin board.
@@ -274,8 +273,7 @@ func init() {
 	rootCmd.AddCommand(importCmd)
 	rootCmd.AddCommand(queryCmd)
 	rootCmd.AddCommand(recapCmd)
-	rootCmd.AddCommand(usageCmd)
-	rootCmd.AddCommand(usageDeprecatedCmd) // hidden `ox usage` alias for one release
+	rootCmd.AddCommand(usageDeprecatedCmd) // hidden `ox brief` alias for one release
 	// scoutCmd is feature-gated; registered dynamically in syncFeatureGatedCommands
 	// when FEATURE_SCOUT is enabled (off by default).
 	// bulletinCmd is feature-gated; registered dynamically in syncFeatureGatedCommands

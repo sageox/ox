@@ -19,7 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeUsagePaneClaudeScript stands in for the claude CLI for the brief pane:
+// fakeUsagePaneClaudeScript stands in for the claude CLI for the session report pane:
 // it logs each invocation and keeps marketplace/install state in files,
 // answering the --json lists the way the real CLI does. `plugin validate`
 // checks the mod folder really holds a manifest. With an "old" marker file it
@@ -117,19 +117,19 @@ func runUsagePane(t *testing.T, sub string) (string, string, error) {
 	return out.String(), errOut.String(), err
 }
 
-// TestUsagePaneEnable_InstallsIntoClaudeCode drives `ox brief pane enable`
+// TestUsagePaneEnable_InstallsIntoClaudeCode drives `ox session report pane enable`
 // against a claude CLI on PATH: the mod lands at the ox data path stamped
 // with this ox's version, and Claude Code was asked to validate, add the
 // marketplace, and install ox-cli-brief-pane@ox-cli-brief — in order.
 // Failure prevented: enable reports success while Claude Code never got the
-// plugin, so /ox-brief does nothing.
+// plugin, so /ox-session-report does nothing.
 func TestUsagePaneEnable_InstallsIntoClaudeCode(t *testing.T) {
 	env := setupUsagePaneEnv(t, true)
 
 	out, _, err := runUsagePane(t, "enable")
 	require.NoError(t, err)
 	assert.Contains(t, out, "/reload-plugins")
-	assert.Contains(t, out, "/ox-brief")
+	assert.Contains(t, out, "/ox-session-report")
 
 	assert.Equal(t, []string{
 		"plugin validate " + env.dir,
@@ -176,7 +176,7 @@ func TestUsagePaneStatus_SaysWhatToDo(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(env.state, "installed"), []byte("0.0.1\n"), 0o644))
 	out, _, err := runUsagePane(t, "status")
 	require.NoError(t, err)
-	assert.Contains(t, out, "Run `ox brief pane enable` to refresh it")
+	assert.Contains(t, out, "Run `ox session report pane enable` to refresh it")
 
 	require.NoError(t, os.Remove(filepath.Join(env.state, "installed")))
 	out, _, err = runUsagePane(t, "status")
@@ -233,9 +233,12 @@ func TestUsagePane_JSONReportsTheOutcome(t *testing.T) {
 // coworker where the pane comes from and how to open and close it.
 func TestUsagePane_HelpNamesThePluginAndCommands(t *testing.T) {
 	assert.Contains(t, usagePaneCmd.Long, usagepane.PluginRef)
-	assert.Contains(t, usagePaneCmd.Long, "/ox-brief opens it")
-	assert.Contains(t, usagePaneCmd.Long, "/ox-brief off closes it")
+	assert.Contains(t, usagePaneCmd.Long, "/ox-session-report opens it")
+	assert.Contains(t, usagePaneCmd.Long, "/ox-session-report off closes it")
 	assert.Equal(t, usageCmd, usagePaneCmd.Parent())
-	assert.Equal(t, "brief", usageCmd.Name())
-	assert.Empty(t, usageDeprecatedCmd.Commands(), "the deprecated `ox usage` alias carries no pane, so docs show only `ox brief pane`")
+	assert.Equal(t, "report", usageCmd.Name())
+	assert.Equal(t, sessionCmd, usageCmd.Parent())
+	assert.Equal(t, "brief", usageDeprecatedCmd.Name())
+	assert.Equal(t, rootCmd, usageDeprecatedCmd.Parent())
+	assert.Empty(t, usageDeprecatedCmd.Commands(), "the deprecated `ox brief` alias carries no pane, so docs show only `ox session report pane`")
 }

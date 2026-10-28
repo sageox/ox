@@ -186,7 +186,7 @@ func assertPlainFits(t *testing.T, display string, width int) {
 // TestBuildMe_WouldAttribute: each row's would_attribute is the verdict its
 // session view gives (self-reported score wins, else derived from the trace,
 // against the project threshold), and totals.attributed counts them. Failure
-// prevented: --me says a session earned attribution that `ox brief --session`
+// prevented: --me says a session earned attribution that `ox session report --session`
 // says it did not, or vice versa.
 func TestBuildMe_WouldAttribute(t *testing.T) {
 	judged := used(contexttrace.EvidenceJudged, "mur_j", "murmur", 4)

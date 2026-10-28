@@ -1,4 +1,4 @@
-// Package usage builds the `ox brief` report: what ox did in an AI coworker's
+// Package usage builds the `ox session report` report: what ox did in an AI coworker's
 // session — the ox calls it made, how much context ox put in front of the
 // model, which team items were surfaced by name, and which of those the AI
 // coworker reports it actually used.
@@ -35,7 +35,7 @@ const (
 // measure. Reported so the token total never reads as exhaustive.
 var Unmetered = []string{"plan nudges", "agent-task surface"}
 
-// Report is the `ox brief --json` payload for the session view.
+// Report is the `ox session report --json` payload for the session view.
 type Report struct {
 	View     string      `json:"view"`
 	Session  SessionInfo `json:"session"`
@@ -268,7 +268,7 @@ type NextAction struct {
 // load-bearing: the AI coworker claims use only from relevant.items evidence,
 // prints the pre-rendered display so the report reads identically in every
 // harness, and reports its own use quietly, at the moment of use. Behavior
-// lives here, in the command's JSON, rather than in the ox-cli-brief skill body.
+// lives here, in the command's JSON, rather than in the ox-cli-session-report skill body.
 const guidanceText = "Show the coworker what SageOx gave this session. " +
 	"(1) Print the display field verbatim inside a fenced ```text block, then at most 3 sentences of " +
 	"your own. " +

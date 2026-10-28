@@ -236,7 +236,7 @@ func TestTeamCtxProvidedHits(t *testing.T) {
 // the live session trace once — canonical cnv_ ref, its rec_ twin as an alias,
 // the conversation title, the /c/ link — and none of what it printed.
 // Failure prevented: a session that read a transcript gets no credit in
-// `ox brief` or the status line because the conversation was never surfaced.
+// `ox session report` or the status line because the conversation was never surfaced.
 func TestConversationReads_TraceTheConversationRead(t *testing.T) {
 	const fullTitle = "2026-08-11-22-32-full" // fixture: index + metadata titles empty → folder name
 	tests := []struct {

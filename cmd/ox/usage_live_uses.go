@@ -18,7 +18,7 @@ import (
 	"github.com/sageox/ox/internal/session/contextuse"
 )
 
-// Live use evidence for `ox brief`. Finalize (tagSessionConsults) is the
+// Live use evidence for `ox session report`. Finalize (tagSessionConsults) is the
 // writer of record for `used` events; until then a recording's trace holds
 // only self-reports, so a brief taken mid-session would say nothing surfaced
 // was used even when the AI coworker re-opened it or named it in its reply.
