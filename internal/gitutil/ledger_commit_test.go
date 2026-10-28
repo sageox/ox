@@ -83,17 +83,30 @@ func TestCommitLedgerSessionDeletion_CancellationRestoresSelectedSession(t *test
 	writeGitutilFixture(t, repo, path, cleanMeta)
 	gitInRepo(t, repo, "add", path)
 	gitInRepo(t, repo, "commit", "-m", "seed session")
+	// A host's LFS filter must not run during rollback: a failed download
+	// would leave the selected session deleted and block later snapshots.
+	writeGitutilFixture(t, repo, ".git/info/attributes", "sessions/** filter=lfs\n")
+	gitInRepo(t, repo, "config", "filter.lfs.process", "exit 1")
+	gitInRepo(t, repo, "config", "filter.lfs.clean", "cat")
+	gitInRepo(t, repo, "config", "filter.lfs.smudge", "exit 1")
+	gitInRepo(t, repo, "config", "filter.lfs.required", "true")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	require.NoError(t, WithRepoLock(context.Background(), repo, func() error {
-		gitInRepo(t, repo, "rm", path)
+		_, err := RunGit(context.Background(), repo, "rm", path)
+		require.NoError(t, err)
 		committed, err := CommitLedgerSessionDeletion(ctx, repo, "delete", []string{"selected"})
 		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "restore deleted sessions")
 		assert.False(t, committed)
 		return nil
 	}))
-	assert.Empty(t, gitInRepo(t, repo, "status", "--porcelain"))
-	assert.FileExists(t, filepath.Join(repo, path))
+	status, err := RunGit(context.Background(), repo, "status", "--porcelain")
+	require.NoError(t, err)
+	assert.Empty(t, status)
+	content, err := os.ReadFile(filepath.Join(repo, path))
+	require.NoError(t, err)
+	assert.Equal(t, cleanMeta, string(content))
 }
 
 func TestCommitLedgerSessionDeletion_RequiresSessionNames(t *testing.T) {

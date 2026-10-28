@@ -96,7 +96,7 @@ func CommitLedgerSessionDeletion(ctx context.Context, repoPath, message string, 
 			for _, path := range splitNUL(tracked) {
 				args = append(args, ":(top,literal)"+path)
 			}
-			_, restoreErr = cleanGitOutput(restoreCtx, repoPath, args...)
+			_, restoreErr = RunGit(restoreCtx, repoPath, args...)
 		}
 		if restoreErr != nil {
 			return false, errors.Join(err, fmt.Errorf("restore deleted sessions: %w", restoreErr))
