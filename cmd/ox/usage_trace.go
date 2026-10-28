@@ -21,7 +21,7 @@ import (
 )
 
 // Usage trace: every ox call an AI coworker makes is recorded as an `invoked`
-// context-trace event, so `ox brief` can report what ox put in front of the
+// context-trace event, so `ox session report` can report what ox put in front of the
 // model in a session. Written from the PostToolUse hook for both harnesses.
 // Everything here is best-effort: errors are logged at debug and never reach
 // the hook's stdout.

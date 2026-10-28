@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`ox brief` is now `ox session report`** — the command, its `pane` subcommands, the Claude Code pane and the Agent Skill all take the new name: `ox session report`, `/ox-session-report` opens and closes the pane, and `/ox-cli-session-report` (Claude Code and Codex) prints the report. `ox brief` keeps working as a hidden alias for one release, and the `brief_pane` setting still toggles `session_report_pane`. `ox doctor --fix` and `ox upgrade` refresh the pane plugin and retire the old `ox-cli-brief` skill, so `/ox-brief` and `/ox-cli-brief` leave the slash menu on their own.
+
 ### Fixed
 
 - **Ledger maintenance leaves unsaved plans alone** — re-redacting sessions or deleting a murmur no longer commits staged plan edits. Other staged sessions can still be included.

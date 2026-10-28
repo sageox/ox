@@ -61,7 +61,7 @@ func renderSession(r Report, width int, st styler) string {
 		width = 80
 	}
 	var lines []string
-	lines = append(lines, sessionHeader(r, st))
+	lines = append(lines, sessionHeader(r, st, width))
 
 	if !r.Trace.Available {
 		reason := r.Trace.Reason
@@ -373,7 +373,9 @@ func readName(s Surfaced, width int) string {
 	return kind + "  " + truncate(s.Title, room)
 }
 
-func sessionHeader(r Report, st styler) string {
+// sessionHeader is the report's first line. When it would overflow width it
+// drops the scope, then trailing status parts, so the title always fits.
+func sessionHeader(r Report, st styler, width int) string {
 	scope := "this session"
 	past := !r.Session.Recording && r.Session.Name != ""
 	if past {
@@ -396,9 +398,24 @@ func sessionHeader(r Report, st styler) string {
 	default:
 		parts = append(parts, fmt.Sprintf("%d of %d used", rel.Count, rel.SurfacedCount))
 	}
-	h := st.head("ox brief") + st.dim(" · "+scope)
-	if len(parts) > 0 {
-		h += "  " + strings.Join(parts, st.dim(" · "))
+	build := func(scope string, parts []string) string {
+		h := st.head("ox session report")
+		if scope != "" {
+			h += st.dim(" · " + scope)
+		}
+		if len(parts) > 0 {
+			h += "  " + strings.Join(parts, st.dim(" · "))
+		}
+		return h
+	}
+	h := build(scope, parts)
+	if ansi.StringWidth(h) <= width {
+		return h
+	}
+	for n := len(parts); n >= 0; n-- {
+		if h = build("", parts[:n]); ansi.StringWidth(h) <= width {
+			return h
+		}
 	}
 	return h
 }

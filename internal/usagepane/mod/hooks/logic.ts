@@ -1,4 +1,4 @@
-// Pure helpers for the ox brief pane: parsing `ox brief --json`, spotting an
+// Pure helpers for the ox session report pane: parsing `ox session report --json`, spotting an
 // ox command in a Bash call, and laying out the pane's lines. No `$` here, so
 // every function is unit-testable under `claude plugin test`.
 
@@ -16,7 +16,7 @@ import type {
   StatuslineCounts,
 } from '../types'
 
-export const PANE = 'ox-brief'
+export const PANE = 'ox-session-report'
 export const PLUGIN = 'ox-cli-brief-pane'
 export const REFRESH_MS = 15_000
 export const RUN_TIMEOUT_MS = 8_000
@@ -27,7 +27,7 @@ export const DESKTOP_COLUMNS = 48
 
 // shouldAutoOpen: the pane opens by itself only where the desktop app is
 // attached, and only until the person turns it off (closing it by hand or
-// `/ox-brief off` stores false). Anything but boolean false counts as on, so
+// `/ox-session-report off` stores false). Anything but boolean false counts as on, so
 // an unset or unreadable preference keeps the default.
 export function shouldAutoOpen({ surfaces, autoOpen }: { surfaces: readonly string[]; autoOpen: unknown }): boolean {
   return surfaces.includes('desktop') && autoOpen !== false
@@ -36,7 +36,7 @@ export function shouldAutoOpen({ surfaces, autoOpen }: { surfaces: readonly stri
 export const STATUSLINE_REFRESH_MS = 15_000
 export const STATUSLINE_RUN_TIMEOUT_MS = 2_000
 
-// briefRunInit is how the pane runs `ox brief`. The pane runs it from the
+// briefRunInit is how the pane runs `ox session report`. The pane runs it from the
 // Claude Code host process, which carries none of the variables the AI
 // coworker's shell gets, so ox cannot tell which session to report on and
 // reads it as not recording while the status line says it is. Claude Code's
@@ -48,7 +48,7 @@ export function briefRunInit(
   if (sessionId === '') return { timeoutMs }
   return { timeoutMs, env: { CLAUDE_CODE_SESSION_ID: sessionId } }
 }
-export const BRIEF_ARGV = ['ox', 'brief', '--json', '--recent', '0'] as const
+export const BRIEF_ARGV = ['ox', 'session', 'report', '--json', '--recent', '0'] as const
 
 // statuslineRunInit runs `ox statusline --json` the way briefRunInit runs the
 // brief (same session id), on a shorter leash: the band redraws on every turn.
@@ -71,7 +71,7 @@ function str(v: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined
 }
 
-// parseReport reads `ox brief --json` stdout into the slice the pane draws,
+// parseReport reads `ox session report --json` stdout into the slice the pane draws,
 // or null when it is not a session report. Missing fields read as empty.
 export function parseReport(stdout: string): UsageReport | null {
   let raw: unknown
@@ -291,7 +291,7 @@ export function formatRow(call: UsageRecentCall, columns: number, offsetMin = 0)
   return { text, failed: call.failed === true }
 }
 
-// headerLines: the title's tail (after `● ox brief`) and the summary line,
+// headerLines: the title's tail (after `● ox session report`) and the summary line,
 // `calls N · ~Nk tokens · used N of M · co-author <category>`.
 export function headerLines(report: UsageReport | null): { marker: string; summary: string } {
   if (report === null) {
@@ -508,12 +508,12 @@ export function errorLine(failure: { exitCode?: number; stderr?: string; thrown?
       return 'ox not found on PATH'
     }
     if (/time(d)? ?out/i.test(msg)) {
-      return 'ox brief timed out'
+      return 'ox session report timed out'
     }
-    return `ox brief failed: ${firstLine(msg) || 'could not start'}`
+    return `ox session report failed: ${firstLine(msg) || 'could not start'}`
   }
   const line = firstLine(failure.stderr ?? '')
-  return `ox brief failed: ${line || `exit ${failure.exitCode ?? '?'}`}`
+  return `ox session report failed: ${line || `exit ${failure.exitCode ?? '?'}`}`
 }
 
 function firstLine(s: string): string {

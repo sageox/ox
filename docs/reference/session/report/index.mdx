@@ -1,10 +1,10 @@
 ---
-title: "ox brief"
-description: "CLI reference for ox brief"
-sidebar_position: 16
+title: "ox session report"
+description: "CLI reference for ox session report"
+sidebar_position: 99
 ---
 
-## ox brief
+## ox session report
 
 Show what SageOx gave this session
 
@@ -23,24 +23,24 @@ In the session view, calls.recent in the JSON lists the 10 newest ox calls;
 --recent N widens it (0 = every call). The display text is unchanged.
 
 ```
-ox brief [flags]
+ox session report [flags]
 ```
 
 ### Examples
 
 ```
-  ox brief                     # this session
-  ox brief --session <name>    # a recorded session in the Ledger
-  ox brief --me --since 14d    # your recent sessions, one row each
-  ox brief --team              # team-wide aggregate (no per-person data)
-  ox brief --json              # structured report for AI coworkers
-  ox brief --json --recent 0   # every ox call in calls.recent
+  ox session report                     # this session
+  ox session report --session <name>    # a recorded session in the Ledger
+  ox session report --me --since 14d    # your recent sessions, one row each
+  ox session report --team              # team-wide aggregate (no per-person data)
+  ox session report --json              # structured report for AI coworkers
+  ox session report --json --recent 0   # every ox call in calls.recent
 ```
 
 ### Options
 
 ```
-  -h, --help             help for brief
+  -h, --help             help for report
       --json             structured JSON report for AI coworkers
       --limit int        maximum sessions for --me (default 10)
       --me               roll up your recent sessions, one row each
@@ -64,5 +64,5 @@ ox brief [flags]
 
 ### SEE ALSO
 
-* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
-* [ox brief pane](/brief/pane)	 - Show this session's ox calls in a Claude Code pane
+* [ox session](/session)	 - Manage AI coworker sessions
+* [ox session report pane](/session/report/pane)	 - Show this session's ox calls in a Claude Code pane

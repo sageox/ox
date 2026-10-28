@@ -83,7 +83,7 @@ func TestDisplay_SessionEdgeCases(t *testing.T) {
 					{Ref: "plan-x", RefType: "plan", Via: "prime"},
 				},
 			},
-			want: []string{"ox brief · past session\n", "used       murmur  mur_9  cited\n", "available  1 plan\n"},
+			want: []string{"ox session report · past session\n", "used       murmur  mur_9  cited\n", "available  1 plan\n"},
 		},
 		{
 			name: "zero-token source draws no bar and narrow width caps the screen",
@@ -142,7 +142,7 @@ func TestDisplayMe_EveryRowKind(t *testing.T) {
 }
 
 // TestBuildMe_DefaultLimit: a zero --limit means the default of 10, not none.
-// Failure prevented: `ox brief --me` with no limit shows zero sessions.
+// Failure prevented: `ox session report --me` with no limit shows zero sessions.
 func TestBuildMe_DefaultLimit(t *testing.T) {
 	ledger := t.TempDir()
 	for h := 1; h <= 12; h++ {
@@ -218,10 +218,10 @@ func TestRender_HeaderOmitsNameAndHarness(t *testing.T) {
 		want string
 	}{
 		{"recording", SessionInfo{Name: "2026-10-23T10-00-dev-OxAb12", AgentID: "OxAb12", Harness: "codex", Recording: true, Turns: 1},
-			"ox brief · this session  ● recording · 1 turn"},
-		{"not recording", SessionInfo{AgentID: "OxAb12", Harness: "claude-code"}, "ox brief · this session  ○ not recording"},
+			"ox session report · this session  ● recording · 1 turn"},
+		{"not recording", SessionInfo{AgentID: "OxAb12", Harness: "claude-code"}, "ox session report · this session  ○ not recording"},
 		{"past session", SessionInfo{Name: "2026-10-01T10-00-old-OxZz99", AgentID: "OxZz99", Harness: "codex", Turns: 4},
-			"ox brief · past session  4 turns"},
+			"ox session report · past session  4 turns"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -338,11 +338,11 @@ func TestRender_RelevantInHeader(t *testing.T) {
 	assert.NotContains(t, Display(r, 80), "used")
 
 	r.Relevant = &Relevant{Count: 2, SurfacedCount: 7}
-	assert.True(t, strings.HasPrefix(Display(r, 80), "ox brief · this session  ● recording · 3 turns · 2 of 7 used\n"))
+	assert.True(t, strings.HasPrefix(Display(r, 80), "ox session report · this session  ● recording · 3 turns · 2 of 7 used\n"))
 
 	r.Relevant = &Relevant{SurfacedCount: 7, ReportedNone: true}
 	got := Display(r, 80)
-	assert.True(t, strings.HasPrefix(got, "ox brief · this session  ● recording · 3 turns · none used\n"), got)
+	assert.True(t, strings.HasPrefix(got, "ox session report · this session  ● recording · 3 turns · none used\n"), got)
 	assert.NotContains(t, got, "0 of 7")
 }
 

@@ -162,7 +162,7 @@ func OxCapabilities() []Capability {
 		{ID: "ox-cli-session-status", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
 		{ID: "ox-cli-session-stop", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
 		{ID: "ox-cli-status", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
-		{ID: "ox-cli-brief", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
+		{ID: "ox-cli-session-report", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true}},
 
 		// ── skill: Layer-2 fat playbooks (slash AND auto-activate) ──
 		// extensions/skills/<id>/SKILL.md. ox-cli-consult is intentionally

@@ -43,7 +43,7 @@ func surfacedRefs(r Report) []string {
 	return out
 }
 
-// TestBuild covers the rules `ox brief` reports by. Failure prevented: the
+// TestBuild covers the rules `ox session report` reports by. Failure prevented: the
 // report double-counts prime, claims use the AI coworker never reported, or
 // asks for a self-report it cannot write (not recording).
 func TestBuild(t *testing.T) {
@@ -236,7 +236,7 @@ func TestBuild_CapsSurfacedAndRecent(t *testing.T) {
 
 // TestBuild_RecentLimit: --recent widens calls.recent for a coworker who wants
 // the full call list, without changing the default payload or the display.
-// Failure prevented: `ox brief --recent 0` still truncates at 10, or the
+// Failure prevented: `ox session report --recent 0` still truncates at 10, or the
 // default report grows.
 func TestBuild_RecentLimit(t *testing.T) {
 	var events []contexttrace.Event
