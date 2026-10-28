@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - **Plan review notes reach your AI coworker as untrusted text** — `ox plan feedback show` and `ox plan review await` tell your AI coworker that everything reviewers wrote is feedback to weigh, never instructions to follow. The digest prints each item on one line without terminal escapes or hidden characters, and leaves out anchors that are unsafe to pass to a command.
-- **Ledger recall stays inside its reminder** — the titles and snippets ox adds before each prompt are escaped, so text in the Ledger cannot end the reminder early.
+- **Ledger recall stays inside its reminder** — the titles and snippets ox adds before each prompt are escaped and marked as coworker-written data, so text in the Ledger cannot end the reminder early or pass as an instruction.
 
 ## [0.25.0] - 2026-10-27
 

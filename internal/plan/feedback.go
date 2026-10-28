@@ -305,8 +305,8 @@ var reviewQuotes = strings.NewReplacer("“", `"`, "”", `"`)
 // digestAnchorPattern admits every anchor ox writes: h + 8 hex for an element,
 // q + 8 hex for a highlight, q- + a 8-64 character id for a drawing, and
 // "plan". The digest's footer has the agent paste an anchor into a command, so
-// any other anchor is not printed.
-var digestAnchorPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,66}$`)
+// any other anchor is not printed; a leading hyphen would read as a flag.
+var digestAnchorPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,65}$`)
 
 func digestAnchor(a string) string {
 	if digestAnchorPattern.MatchString(a) {
