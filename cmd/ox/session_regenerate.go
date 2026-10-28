@@ -1055,8 +1055,9 @@ func commitAndPushLedgerBatch(ledgerPath string, sessionNames []string) error {
 			return fmt.Errorf("git add: %w", err)
 		}
 		// Keep other staged sessions, but leave plans for their own save.
+		// A large snapshot can take longer than the staging timeout to validate.
 		var commitErr error
-		committed, commitErr = commitLedgerSnapshot(ctx, ledgerPath, fmt.Sprintf("session: re-redact %d sessions", len(sessionNames)))
+		committed, commitErr = commitLedgerSnapshot(context.WithoutCancel(ctx), ledgerPath, fmt.Sprintf("session: re-redact %d sessions", len(sessionNames)))
 		return commitErr
 	})
 	if err != nil || !committed {
