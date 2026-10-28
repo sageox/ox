@@ -279,6 +279,13 @@ test('desktop: the pane draws every section from the fixture within its width', 
   const order = (await ui.findAll({ type: 'Box' })).map(b => b.key).filter(k => k !== undefined && sectionKeys.has(k))
   expect(order).toEqual(['h:used', 'h:context', 'h:available', 'coauthor', 'h:calls', 'legend'])
 
+  // Dense: no rule under the header and no blank spacer row before a
+  // section, so a docked pane spends its rows on content.
+  expect(await ui.find({ type: 'Text', text: /^─+$/ })).toBeUndefined()
+  for (const b of await ui.findAll({ type: 'Box' })) {
+    expect([b.key, b.props.marginTop ?? 0]).toEqual([b.key, 0])
+  }
+
   // Every line that does not wrap fits the pane's body: nothing is cut by
   // the surface. Lines drawn to wrap (links, the legend) wrap instead.
   const keyed = (await ui.findAll({ type: 'Box' })).filter(b => b.key !== undefined && b.key !== 'legend' && !b.key.endsWith(':url') && !b.key.startsWith('available'))

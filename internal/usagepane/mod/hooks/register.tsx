@@ -416,7 +416,7 @@ export const register: Register = on => {
     const title = '● ox brief'
 
     const heading = (key: string, text: string) => (
-      <Box key={key} marginTop={1}>
+      <Box key={key}>
         <Text dimColor weight="bold">
           {text}
         </Text>
@@ -505,7 +505,7 @@ export const register: Register = on => {
       }
       if (coauthor !== null) {
         sections.push(
-          <Box key={coauthor.key} marginTop={1}>
+          <Box key={coauthor.key}>
             <Text wrap="truncate-end">
               <Text weight="bold">co-author</Text>
               {`  ${coauthor.category} `}
@@ -543,7 +543,7 @@ export const register: Register = on => {
       })
       if (used.length > 0) {
         sections.push(
-          <Box key="legend" marginTop={1}>
+          <Box key="legend">
             <Text dimColor wrap="wrap">
               used = evidence from the transcript, a commit, or the AI coworker's report
             </Text>
@@ -579,7 +579,6 @@ export const register: Register = on => {
             {truncate(st.error, cols)}
           </Text>
         )}
-        <Text dimColor>{'─'.repeat(Math.min(cols, 48))}</Text>
         {body}
       </Box>
     )
