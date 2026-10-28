@@ -116,6 +116,9 @@ func TestPullManagedRepo_ProgressAfterSessionDeletion(t *testing.T) {
 					require.NoError(t, err)
 					assert.True(t, committed)
 				}
+				staged, err := gitutil.RunGit(context.Background(), local, "diff", "--cached", "--name-only", "--", plan)
+				require.NoError(t, err)
+				require.Equal(t, plan, staged, "daemon pulls must start with the unsaved plan still staged")
 				ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 				defer cancel()
 				result := s.pullManagedRepo(ctx, opts)
