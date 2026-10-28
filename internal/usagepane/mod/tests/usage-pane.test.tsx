@@ -605,6 +605,7 @@ test('/ox-brief off closes the pane', async ($, on) => {
     closed.push(e.id)
     return { value: undefined }
   })
+  on('store.set', () => ({ value: undefined }))
 
   const ran = await $.command.run({ ...COMMAND, args: 'off' } as never)
   expect(ran.text).toBe('ox brief pane closed.')

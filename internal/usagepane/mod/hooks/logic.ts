@@ -21,6 +21,18 @@ export const PLUGIN = 'ox-cli-brief-pane'
 export const REFRESH_MS = 15_000
 export const RUN_TIMEOUT_MS = 8_000
 
+// The width the brief pane asks for when it opens by itself, docked beside
+// the chat in the desktop app: room for the widest used row.
+export const DESKTOP_COLUMNS = 48
+
+// shouldAutoOpen: the pane opens by itself only where the desktop app is
+// attached, and only until the person turns it off (closing it by hand or
+// `/ox-brief off` stores false). Anything but boolean false counts as on, so
+// an unset or unreadable preference keeps the default.
+export function shouldAutoOpen({ surfaces, autoOpen }: { surfaces: readonly string[]; autoOpen: unknown }): boolean {
+  return surfaces.includes('desktop') && autoOpen !== false
+}
+
 export const STATUSLINE_REFRESH_MS = 15_000
 export const STATUSLINE_RUN_TIMEOUT_MS = 2_000
 
