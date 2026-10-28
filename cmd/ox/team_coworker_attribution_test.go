@@ -84,8 +84,8 @@ func runMurmurToOutbox(t *testing.T) (string, error) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Chdir(projectDir)
 
+	resetMurmurFlags(t)
 	cmd := *murmurCmd
-	_ = cmd.Flags().Set("scope", "ledger")
 	cmd.SetOut(io.Discard)
 	return daemon.MurmurOutboxDir(ledgerDir), cmd.RunE(&cmd, []string{"rebasing the auth branch"})
 }
