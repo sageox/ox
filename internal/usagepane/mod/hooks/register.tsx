@@ -5,6 +5,12 @@
 // `ox brief --json --recent 0`, re-read when the pane opens, after each ox
 // command the AI coworker runs through Bash, and every 15 seconds while open.
 //
+// In the terminal it opens only on `/ox-brief`. In the Claude desktop app it
+// opens by itself, docked beside the chat, at session start and whenever the
+// desktop app attaches. A person closing it by hand turns that off across
+// sessions (the `autoOpen` store key); `/ox-brief` turns it back on and
+// `/ox-brief off` turns it off.
+//
 // On the Claude desktop app (whose Code tab has no status bar) it also draws
 // ox's status line as a band directly above the prompt:
 // `● ox  3 discussions · 1 plan · 2 used  ● rec`, from `ox statusline --json`,
@@ -19,6 +25,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Statusline, UsageReport } from '../types'
 import {
   PANE,
+  DESKTOP_COLUMNS,
   REFRESH_MS,
   BRIEF_ARGV,
   STATUSLINE_ARGV,
@@ -39,6 +46,7 @@ import {
   isOxCommand,
   oldestFirst,
   parseReport,
+  shouldAutoOpen,
   shouldScrollToEnd,
   truncate,
   usedRows,
@@ -54,6 +62,9 @@ const status = atom({ plugin: 'ox-cli-brief-pane', key: 'status' } as const, INI
 
 const TITLE = 'ox brief'
 const USAGE = '/ox-brief [off|refresh]'
+// The store key remembering whether the pane opens by itself on desktop:
+// unset or true opens it, false (a person's close, `/ox-brief off`) does not.
+const AUTO_OPEN = 'autoOpen'
 
 // Module state: the refresh timer and the run in flight. A reload drops the
 // timer; the next draw of an open pane starts it again.
@@ -124,6 +135,54 @@ function refresh($: EngineInterface): Promise<void> {
   return inflight
 }
 
+async function surfacesOf($: EngineInterface): Promise<readonly string[]> {
+  try {
+    return await $.session.surfaces()
+  } catch {
+    return []
+  }
+}
+
+async function hasDesktop($: EngineInterface): Promise<boolean> {
+  return (await surfacesOf($)).includes('desktop')
+}
+
+// Whether a Pane draw has kicked a first refresh: a pane placed late (an
+// unasked open on a narrow window) would otherwise sit on "Loading…" until
+// the timer's first tick. Once per load, so a failing ox does not loop.
+let kicked = false
+
+// openDesktopPane opens the pane by itself where the desktop app is attached,
+// unless the person turned that off. No focus, no Escape-to-close: it sits
+// beside the chat until closed. An open the surface does not place yet (too
+// narrow) polls nothing: the Pane draw starts the timer once it is placed.
+// Never throws.
+async function openDesktopPane($: EngineInterface): Promise<void> {
+  try {
+    let autoOpen: unknown
+    try {
+      autoOpen = await $.store.get(AUTO_OPEN)
+    } catch {
+      autoOpen = undefined
+    }
+    const surfaces = await $.session.surfaces()
+    if (!shouldAutoOpen({ surfaces, autoOpen })) {
+      return
+    }
+    const opened = await $.ui.open({ id: PANE, title: TITLE, columns: DESKTOP_COLUMNS })
+    if (opened.isPlaced) {
+      void refresh($)
+      startTimer($)
+    }
+  } catch {
+    // A pane that can't open costs nothing; /ox-brief still opens it.
+  }
+}
+
+async function setAutoOpen($: EngineInterface, on: boolean) {
+  await $.store.set(AUTO_OPEN, on).catch(() => undefined)
+}
+
 // Module state for the desktop band: the last status line read (null draws
 // nothing), whether a desktop band draw has been seen (until then nothing
 // runs, so terminal sessions pay nothing), its timer and its run in flight.
@@ -176,10 +235,30 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'ox-brief',
-      description: 'Show what SageOx gave this session in a pane',
+      description: 'Show what SageOx gave this session in a pane (opens by itself in the desktop app; off stops that)',
       argumentHint: '[off|refresh]',
     })
+    await openDesktopPane($)
     return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // The desktop app may attach after the session starts.
+  on('session.attach', async ($, e, next) => {
+    const done = await next(e)
+    if (e.surface === 'desktop') {
+      await openDesktopPane($).catch(() => undefined)
+    }
+    return done
+  }).catch(($, e, next) => next(e))
+
+  // The desktop app leaving: with no desktop left, stop polling `ox brief`
+  // (only a close stopped it before). The pane's next draw restarts it.
+  on('session.detach', async ($, e, next) => {
+    const done = await next(e)
+    if (e.surface === 'desktop' && !(await hasDesktop($))) {
+      stopTimer()
+    }
+    return done
   }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'ox-brief' }, async ($, e) => {
@@ -187,6 +266,7 @@ export const register: Register = on => {
     if (arg === 'off') {
       await $.ui.close({ id: PANE })
       stopTimer()
+      await setAutoOpen($, false)
       return { text: 'ox brief pane closed.' }
     }
     if (arg === 'refresh') {
@@ -195,9 +275,12 @@ export const register: Register = on => {
       return { text: err === undefined ? 'ox brief refreshed.' : err }
     }
     if (arg !== '') {
-      return { text: `Usage: ${USAGE}` }
+      return { text: `Usage: ${USAGE} (opens by itself in the desktop app)` }
     }
-    const opened = await $.ui.open({ id: PANE, title: TITLE })
+    await setAutoOpen($, true)
+    // On desktop, open at the width the pane opens by itself at, so each
+    // open does not flip the dock between the default share and that width.
+    const opened = await $.ui.open((await hasDesktop($)) ? { id: PANE, title: TITLE, columns: DESKTOP_COLUMNS } : { id: PANE, title: TITLE })
     startTimer($)
     await refresh($)
     return { text: opened.isPlaced ? 'ox brief pane opened.' : `ox brief pane is open but not shown: ${opened.reason}` }
@@ -230,6 +313,7 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('session.end', async ($, e, next) => {
+    stopTimer()
     statuslineTimer?.cancel()
     statuslineTimer = null
     return next(e)
@@ -296,9 +380,17 @@ export const register: Register = on => {
     )
   }).catch(($, e, next) => next(e))
 
+  // A pane the person closes by hand stays closed in later desktop sessions
+  // too; /ox-brief brings it back. A plugin's close (`/ox-brief off`) or an
+  // unload is not the person's choice and stores nothing here.
   on('ui.close', { id: 'ox-brief' }, async ($, e, next) => {
     const done = await next(e)
     stopTimer()
+    // Only a close where the desktop app is attached turns off its opening
+    // by itself: a terminal close is about the terminal.
+    if (e.origin.kind === 'person' && (await hasDesktop($))) {
+      await setAutoOpen($, false)
+    }
     return done
   }).catch(($, e, next) => next(e))
 
@@ -320,13 +412,17 @@ export const register: Register = on => {
     const { Box, Text, Link } = $.ui.resolve(e)
     const cols = Math.max(10, e.props.bodyColumns)
     const r = await read($, report)
+    if (r === null && !kicked) {
+      kicked = true
+      void refresh($)
+    }
     const st = await read($, status)
     const { marker, summary } = headerLines(r)
     const offsetMin = -new Date().getTimezoneOffset()
     const title = '● ox brief'
 
     const heading = (key: string, text: string) => (
-      <Box key={key} marginTop={1}>
+      <Box key={key}>
         <Text dimColor weight="bold">
           {text}
         </Text>
@@ -415,7 +511,7 @@ export const register: Register = on => {
       }
       if (coauthor !== null) {
         sections.push(
-          <Box key={coauthor.key} marginTop={1}>
+          <Box key={coauthor.key}>
             <Text wrap="truncate-end">
               <Text weight="bold">co-author</Text>
               {`  ${coauthor.category} `}
@@ -453,7 +549,7 @@ export const register: Register = on => {
       })
       if (used.length > 0) {
         sections.push(
-          <Box key="legend" marginTop={1}>
+          <Box key="legend">
             <Text dimColor wrap="wrap">
               used = evidence from the transcript, a commit, or the AI coworker's report
             </Text>
@@ -489,7 +585,6 @@ export const register: Register = on => {
             {truncate(st.error, cols)}
           </Text>
         )}
-        <Text dimColor>{'─'.repeat(Math.min(cols, 48))}</Text>
         {body}
       </Box>
     )
