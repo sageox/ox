@@ -339,11 +339,6 @@ func removedLocationLabel(local, ledger bool) string {
 // single git commit + push. Returns the count of successfully staged removals.
 // Uses pushLedger() for push with pull --rebase retry on conflict.
 func batchDeleteSessionsFromLedger(ledgerPath string, sessionNames []string) (int, error) {
-	for _, name := range sessionNames {
-		if err := session.ValidateDraftSessionName(name); err != nil {
-			return 0, err
-		}
-	}
 	ctx := context.Background()
 	var staged []string
 	// rm + commit under the repo lock, so the commit cannot move the branch
@@ -358,6 +353,10 @@ func batchDeleteSessionsFromLedger(ledgerPath string, sessionNames []string) (in
 			return fmt.Errorf("ledger has unresolved conflicts; run ox doctor --fix")
 		}
 		for _, name := range sessionNames {
+			if err := session.ValidateDraftSessionName(name); err != nil {
+				slog.Warn("skip_invalid_session_name", "session", name, "err", err)
+				continue
+			}
 			if _, err := gitutil.RunGit(ctx, ledgerPath, "rm", "-r", "--force", "--", ":(literal)sessions/"+name); err != nil {
 				slog.Warn("git_rm_session", "session", name, "err", err)
 				continue
