@@ -657,3 +657,61 @@ func TestStatuslineCmd_JSONFlag(t *testing.T) {
 	require.NoError(t, statuslineCmd.RunE(statuslineCmd, nil))
 	assert.Equal(t, statuslineJSON{Show: true, Counts: oxactivity.Counts{Plans: 1}}, decodeStatuslineJSON(t, out.String()))
 }
+
+// swapStatuslineStdio points main's fast path at files: stdin holds in, and
+// the returned func reads what was written to the real stdout.
+func swapStatuslineStdio(t *testing.T, in []byte) func() string {
+	t.Helper()
+	dir := t.TempDir()
+	inPath := filepath.Join(dir, "stdin")
+	require.NoError(t, os.WriteFile(inPath, in, 0o600))
+	stdin, err := os.Open(inPath)
+	require.NoError(t, err)
+	stdout, err := os.Create(filepath.Join(dir, "stdout"))
+	require.NoError(t, err)
+	prevIn, prevOut := os.Stdin, statuslineStdout
+	os.Stdin, statuslineStdout = stdin, stdout
+	t.Cleanup(func() {
+		os.Stdin, statuslineStdout = prevIn, prevOut
+		_ = stdin.Close()
+		_ = stdout.Close()
+	})
+	return func() string {
+		b, err := os.ReadFile(stdout.Name())
+		require.NoError(t, err)
+		return string(b)
+	}
+}
+
+// TestRunStatuslineFastPath_JSONAndText drives main's entry point, which
+// skips cobra: `ox statusline --json` must print the JSON document and plain
+// `ox statusline` the text line. Failure prevented: the desktop band's
+// `ox statusline --json` getting the text line it cannot parse (or the
+// terminal bar getting JSON) because the fast path ignored the flag.
+func TestRunStatuslineFastPath_JSONAndText(t *testing.T) {
+	t.Run("json", func(t *testing.T) {
+		f := newStatuslineFixture(t)
+		f.seed(t, oxactivity.Counts{Plans: 1, Used: 1})
+		read := swapStatuslineStdio(t, f.stdin())
+		runStatuslineFastPath([]string{"statusline", "--json"})
+		assert.Equal(t, statuslineJSON{Show: true, Counts: oxactivity.Counts{Plans: 1, Used: 1}}, decodeStatuslineJSON(t, read()))
+	})
+	t.Run("text", func(t *testing.T) {
+		f := newStatuslineFixture(t)
+		f.seed(t, oxactivity.Counts{Plans: 1, Used: 1})
+		read := swapStatuslineStdio(t, f.stdin())
+		t.Setenv("NO_COLOR", "1")
+		runStatuslineFastPath([]string{"statusline"})
+		assert.Equal(t, "● ox  1 plan · 1 used\n", ansi.Strip(read()))
+	})
+}
+
+// TestRunStatuslineJSON_WriteErrorNeverFails: a closed stdout (the desktop
+// host gave up on the run) is swallowed, like the text line's. Failure
+// prevented: a panic or error exit the plugin host would surface.
+func TestRunStatuslineJSON_WriteErrorNeverFails(t *testing.T) {
+	f := newStatuslineFixture(t)
+	assert.NotPanics(t, func() {
+		runStatuslineJSON(bytes.NewReader(f.stdin()), failingWriter{}, testStatuslineOptions())
+	})
+}
