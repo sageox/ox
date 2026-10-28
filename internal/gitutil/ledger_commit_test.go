@@ -96,8 +96,7 @@ func TestCommitLedgerSessionDeletion_CancellationRestoresSelectedSession(t *test
 		_, err := RunGit(context.Background(), repo, "rm", path)
 		require.NoError(t, err)
 		committed, err := CommitLedgerSessionDeletion(ctx, repo, "delete", []string{"selected"})
-		require.Error(t, err)
-		assert.NotContains(t, err.Error(), "restore deleted sessions")
+		require.ErrorIs(t, err, context.Canceled)
 		assert.False(t, committed)
 		return nil
 	}))
@@ -110,13 +109,23 @@ func TestCommitLedgerSessionDeletion_CancellationRestoresSelectedSession(t *test
 }
 
 func TestCommitLedgerSessionDeletion_RequiresSessionNames(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
 	for _, names := range [][]string{nil, {""}, {"."}, {".."}, {"../neighbor"}, {"a/b"}, {`a\b`}, {"a\x00b"}} {
 		t.Run(strings.Join(names, ","), func(t *testing.T) {
-			// Bad names must fail before touching a repository or broadening the exemption.
-			committed, err := CommitLedgerSessionDeletion(context.Background(), t.TempDir(), "delete", names)
-			require.Error(t, err)
-			assert.False(t, committed)
-			assert.Contains(t, err.Error(), "session")
+			repo := newSnapshotRepo(t)
+			writeGitutilFixture(t, repo, "sessions/ready/meta.json", cleanMeta)
+			gitInRepo(t, repo, "add", "sessions/ready")
+			head := gitInRepo(t, repo, "rev-parse", "HEAD")
+			ctx := context.Background()
+			require.NoError(t, WithRepoLock(ctx, repo, func() error {
+				committed, err := CommitLedgerSessionDeletion(ctx, repo, "delete", names)
+				assert.Error(t, err)
+				assert.False(t, committed)
+				return nil
+			}))
+			assert.Equal(t, head, gitInRepo(t, repo, "rev-parse", "HEAD"), "invalid names must not commit staged work")
 		})
 	}
 }

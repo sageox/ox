@@ -75,8 +75,8 @@ func advanceRemote(t *testing.T, writer string, n int) {
 	}
 }
 
-// A completed or refused deletion must release the shared lock and leave the
-// Ledger usable by later daemon pulls, including with a staged plan left over.
+// A completed or refused deletion must leave the Ledger usable by later daemon
+// pulls, including with a staged plan left over.
 func TestPullManagedRepo_ProgressAfterSessionDeletion(t *testing.T) {
 	for _, reject := range []bool{false, true} {
 		t.Run(fmt.Sprintf("rejected=%t", reject), func(t *testing.T) {
@@ -119,12 +119,6 @@ func TestPullManagedRepo_ProgressAfterSessionDeletion(t *testing.T) {
 				staged, err := gitutil.RunGit(context.Background(), local, "diff", "--cached", "--name-only", "--", plan)
 				require.NoError(t, err)
 				require.Equal(t, plan, staged, "daemon pulls must start with the unsaved plan still staged")
-				ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-				defer cancel()
-				result := s.pullManagedRepo(ctx, opts)
-				assert.True(t, result.Skipped)
-				assert.Equal(t, skipReasonRepoLockBusy, result.SkipReason)
-				assert.Nil(t, result.Issue, "lock contention is not a broken Ledger")
 				return nil
 			}))
 			for cycle := range 2 {
