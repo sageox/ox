@@ -15,6 +15,8 @@ permissions:
 jobs:
   publish-docs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -33,6 +35,7 @@ jobs:
           registry-url: 'https://npm.pkg.github.com'
 
       - name: Extract version from tag
+        id: version
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
@@ -41,7 +44,7 @@ jobs:
             *) echo "::error::Invalid release tag: $RELEASE_TAG"; exit 1 ;;
           esac
           VERSION=${RELEASE_TAG#v}
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           cd docs && npm version "$VERSION" --no-git-tag-version --allow-same-version
 
       - name: Generate docs
@@ -56,7 +59,40 @@ jobs:
           # for organizations that do not inherit package access from source.
           NODE_AUTH_TOKEN: ${{ secrets.DOCS_PACKAGE_TOKEN || secrets.GITHUB_TOKEN }}
 
+  # Separate from publish-docs on purpose. DISPATCH_TOKEN can write to another
+  # repository, so it lives in the release-docs environment (deployments limited
+  # to main) instead of the repository secrets every branch's workflows can read.
+  # Never also store it as a repository secret: that would resolve here too and
+  # reopen it to every branch. This job never checks out the repository, so no repository code runs beside
+  # the token. The ref check skips the job when release.yml is dispatched from
+  # anywhere but main, even before the environment's branch policy exists.
+  notify-docs-site:
+    needs: publish-docs
+    if: github.ref == 'refs/heads/main'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    environment: release-docs
+    permissions: {}
+    env:
+      DISPATCH_TOKEN_SET: ${{ secrets.DISPATCH_TOKEN != '' }}
+      VERSION: ${{ needs.publish-docs.outputs.version }}
+    steps:
+      # The version goes into a JSON payload next to the token; accept only a
+      # release version, as the plan-review-release publish job does.
+      - name: Require a release version
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::publish-docs reported no release version"
+            exit 1
+          fi
+
+      # The docs package is already published; a missing token only skips the
+      # docs site refresh, so it warns instead of failing the release.
+      - name: Report a missing dispatch token
+        if: env.DISPATCH_TOKEN_SET != 'true'
+        run: echo "::warning::DISPATCH_TOKEN is not set in the release-docs environment; the docs site was not notified."
+
       - name: Trigger docs site update
+        if: env.DISPATCH_TOKEN_SET == 'true'
         uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
         with:
           token: ${{ secrets.DISPATCH_TOKEN }}
