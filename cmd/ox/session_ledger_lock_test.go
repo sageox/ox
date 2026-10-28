@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,6 +48,9 @@ func TestSessionLedgerWriters_RefuseToStageIntoWedgedRebase(t *testing.T) {
 	}{
 		{"session upload", func(t *testing.T, ledgerPath, sessionName, _ string) error {
 			return commitAndPushLedger(ledgerPath, sessionName)
+		}},
+		{"batch re-redaction", func(t *testing.T, ledgerPath, sessionName, _ string) error {
+			return commitAndPushLedgerBatch(ledgerPath, []string{sessionName})
 		}},
 		{"push-summary", func(t *testing.T, _, _, sessionDir string) error {
 			summary := filepath.Join(t.TempDir(), "raw-summary.json")
@@ -108,6 +113,10 @@ func TestLedgerWriters_QueueBehindRepoLock(t *testing.T) {
 		{"session upload", func(t *testing.T, clonePath, name string) func() error {
 			writeSessionFiles(t, clonePath, name)
 			return func() error { return commitAndPushLedger(clonePath, name) }
+		}},
+		{"batch re-redaction", func(t *testing.T, clonePath, name string) func() error {
+			writeSessionFiles(t, clonePath, name)
+			return func() error { return commitAndPushLedgerBatch(clonePath, []string{name}) }
 		}},
 		{"push-summary", func(t *testing.T, clonePath, name string) func() error {
 			sessionDir := writeSessionFiles(t, clonePath, name)
@@ -176,6 +185,185 @@ func TestLedgerWriters_QueueBehindRepoLock(t *testing.T) {
 			require.NoError(t, <-syncDone)
 			require.NoError(t, <-writeDone)
 			assert.NotEqual(t, headBefore, runGit(t, clonePath, "rev-parse", "HEAD"), "the queued write must still land once the lock is free")
+		})
+	}
+}
+
+// Maintenance must leave unsaved plans alone without stranding another staged session.
+func TestLedgerMaintenance_LeavesPlansStagedAndIncludesOtherSessions(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		batch         bool
+		advanceRemote bool
+	}{
+		{"batch re-redaction", true, false},
+		{"murmur deletion", false, false},
+		{"batch re-redaction after remote advance", true, true},
+		{"murmur deletion after remote advance", false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			barePath, clonePath := createBareAndClone(t)
+			isolatePushEnv(t, clonePath)
+			const plan = "data/plans/draft/plan.md"
+			const removedPlan = "data/plans/removed/plan.md"
+			const newPlan = "data/plans/new/plan.md"
+			const murmur = "data/murmurs/m1.json"
+			for _, path := range []string{plan, removedPlan, murmur} {
+				require.NoError(t, os.MkdirAll(filepath.Join(clonePath, filepath.Dir(path)), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(clonePath, path), []byte("original\n"), 0o644))
+			}
+			runGit(t, clonePath, "add", "data")
+			runGit(t, clonePath, "commit", "--no-verify", "-m", "seed plans and murmur")
+			runGit(t, clonePath, "push")
+			if tt.advanceRemote {
+				other := cloneBare(t, barePath)
+				require.NoError(t, os.WriteFile(filepath.Join(other, "remote.txt"), []byte("teammate change\n"), 0o644))
+				runGit(t, other, "add", "remote.txt")
+				runGit(t, other, "commit", "-m", "advance remote")
+				runGit(t, other, "push")
+			}
+			remoteBefore := runGit(t, barePath, "rev-parse", "HEAD")
+
+			require.NoError(t, os.WriteFile(filepath.Join(clonePath, plan), []byte("staged draft\n"), 0o644))
+			require.NoError(t, os.MkdirAll(filepath.Join(clonePath, filepath.Dir(newPlan)), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(clonePath, newPlan), []byte("new draft\n"), 0o644))
+			runGit(t, clonePath, "add", plan, newPlan)
+			runGit(t, clonePath, "rm", removedPlan)
+			require.NoError(t, os.WriteFile(filepath.Join(clonePath, plan), []byte("later working draft\n"), 0o644))
+			stagedPlans := runGit(t, clonePath, "diff", "--cached", "--binary", "--", "data/plans")
+			workingPlans := runGit(t, clonePath, "diff", "--binary", "--", "data/plans")
+
+			const otherName = "2026-01-01T00-00-testuser-OxOther"
+			const batchName = "2026-01-01T00-00-testuser-OxBatch"
+			names := []string{otherName}
+			if tt.batch {
+				names = append(names, batchName)
+			}
+			store := newFakeLFSStore(t)
+			for _, name := range names {
+				dir := writeSessionFiles(t, clonePath, name)
+				raw := &session.StoredSession{
+					Meta:    &session.StoreMeta{Version: "1", AgentType: "claude-code"},
+					Entries: []map[string]any{{"type": "user", "content": "Keep the recovered session."}},
+				}
+				require.NoError(t, rewriteRawJSONL(filepath.Join(dir, "raw.jsonl"), raw))
+				require.NoError(t, regenerateArtifacts(dir, raw))
+				refs, err := lfs.UploadSessionFiles(store.client(), dir, nil)
+				require.NoError(t, err)
+				meta, err := lfs.ReadSessionMeta(dir)
+				require.NoError(t, err)
+				meta.Files = refs
+				require.NoError(t, lfs.WriteSessionMeta(dir, meta))
+			}
+			runGit(t, clonePath, "add", "sessions/"+otherName)
+			if tt.batch {
+				require.NoError(t, commitAndPushLedgerBatch(clonePath, []string{batchName}))
+			} else {
+				require.NoError(t, commitMurmurDeletion(context.Background(), clonePath, murmur, "m1"))
+				_, err := runGitCombined(clonePath, "cat-file", "-e", "HEAD:"+murmur)
+				assert.Error(t, err, "the murmur must be deleted from the commit")
+				assert.Equal(t, remoteBefore, runGit(t, barePath, "rev-parse", "HEAD"), "murmur deletion must remain a local commit")
+				require.NoError(t, pushLedger(context.Background(), clonePath))
+			}
+
+			for _, name := range names {
+				assert.NotEmpty(t, runGit(t, barePath, "show", "HEAD:sessions/"+name+"/meta.json"))
+				for _, artifact := range []string{"raw.jsonl", "session.md"} {
+					pointer := runGit(t, barePath, "show", "HEAD:sessions/"+name+"/"+artifact)
+					oid, _, err := lfs.ParsePointer(pointer)
+					require.NoError(t, err)
+					assert.Contains(t, string(store.object(oid)), "Keep the recovered session.")
+				}
+			}
+			assert.Equal(t, "original", runGit(t, barePath, "show", "HEAD:"+plan))
+			assert.Equal(t, "original", runGit(t, barePath, "show", "HEAD:"+removedPlan))
+			_, err := runGitCombined(barePath, "cat-file", "-e", "HEAD:"+newPlan)
+			assert.Error(t, err, "a staged new plan must not be published")
+			if tt.advanceRemote {
+				assert.Equal(t, "teammate change", runGit(t, clonePath, "show", "HEAD:remote.txt"))
+				assert.FileExists(t, filepath.Join(clonePath, newPlan))
+				assert.NoFileExists(t, filepath.Join(clonePath, removedPlan))
+				content, err := os.ReadFile(filepath.Join(clonePath, plan))
+				require.NoError(t, err)
+				assert.Equal(t, "later working draft\n", string(content), "autostash must preserve the working plan")
+			} else {
+				assert.Equal(t, stagedPlans, runGit(t, clonePath, "diff", "--cached", "--binary", "--", "data/plans"))
+				assert.Equal(t, workingPlans, runGit(t, clonePath, "diff", "--binary", "--", "data/plans"))
+			}
+		})
+	}
+}
+
+// Maintenance must preserve a conflicted or unreadable index until it is repaired.
+func TestLedgerMaintenance_PreservesIndexAndWorksAfterRecovery(t *testing.T) {
+	for _, writer := range []string{"batch re-redaction", "murmur deletion"} {
+		t.Run(writer, func(t *testing.T) {
+			_, clonePath := createBareAndClone(t)
+			isolatePushEnv(t, clonePath)
+			const name = "2026-01-01T00-00-testuser-OxBatch"
+			path := "data/murmurs/m1.json"
+			if writer == "batch re-redaction" {
+				writeSessionFiles(t, clonePath, name)
+				path = "sessions/" + name + "/meta.json"
+			} else {
+				require.NoError(t, os.MkdirAll(filepath.Join(clonePath, filepath.Dir(path)), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(clonePath, path), []byte(`{"content":"wip"}`), 0o644))
+			}
+			runGit(t, clonePath, "add", "-A")
+			runGit(t, clonePath, "commit", "--no-verify", "-m", "seed maintenance file")
+			blob := runGit(t, clonePath, "rev-parse", "HEAD:"+path)
+			update := exec.Command("git", "-C", clonePath, "update-index", "--index-info")
+			update.Stdin = strings.NewReader(fmt.Sprintf("0 %[1]s 0\t%[2]s\n100644 %[3]s 1\t%[2]s\n100644 %[3]s 2\t%[2]s\n100644 %[3]s 3\t%[2]s\n", strings.Repeat("0", len(blob)), path, blob))
+			out, err := update.CombinedOutput()
+			require.NoError(t, err, "%s", out)
+			indexBefore := runGit(t, clonePath, "ls-files", "--stage")
+			headBefore := runGit(t, clonePath, "rev-parse", "HEAD")
+			write := func() error {
+				if writer == "batch re-redaction" {
+					return commitAndPushLedgerBatch(clonePath, []string{name})
+				}
+				return commitMurmurDeletion(context.Background(), clonePath, path, "m1")
+			}
+
+			require.ErrorContains(t, write(), "unresolved conflicts")
+			assert.Equal(t, indexBefore, runGit(t, clonePath, "ls-files", "--stage"))
+			assert.Equal(t, headBefore, runGit(t, clonePath, "rev-parse", "HEAD"))
+			assert.FileExists(t, filepath.Join(clonePath, path))
+
+			runGit(t, clonePath, "reset", "HEAD", "--", path)
+			indexPath := filepath.Join(clonePath, ".git", "index")
+			cleanIndex, err := os.ReadFile(indexPath)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(indexPath, []byte("corrupt index"), 0o644))
+			require.ErrorContains(t, write(), "git ls-files --unmerged")
+			indexAfter, err := os.ReadFile(indexPath)
+			require.NoError(t, err)
+			assert.Equal(t, "corrupt index", string(indexAfter))
+			assert.Equal(t, headBefore, runGit(t, clonePath, "rev-parse", "HEAD"))
+			assert.FileExists(t, filepath.Join(clonePath, path))
+			require.NoError(t, os.WriteFile(indexPath, cleanIndex, 0o644))
+
+			const otherName = "2026-01-01T00-00-testuser-OxInvalid"
+			otherDir := writeSessionFiles(t, clonePath, otherName)
+			otherMeta := filepath.Join(otherDir, "meta.json")
+			require.NoError(t, os.WriteFile(otherMeta, []byte("invalid JSON"), 0o644))
+			runGit(t, clonePath, "add", otherMeta)
+			require.ErrorContains(t, write(), "invalid JSON object")
+			assert.Equal(t, headBefore, runGit(t, clonePath, "rev-parse", "HEAD"))
+			assert.Equal(t, "invalid JSON", runGit(t, clonePath, "show", ":sessions/"+otherName+"/meta.json"))
+			lockCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			require.NoError(t, gitutil.WithRepoLock(lockCtx, clonePath, func() error { return nil }), "validation failure must release the lock")
+			writeSessionFiles(t, clonePath, otherName)
+			runGit(t, clonePath, "add", otherMeta)
+			// git rm already staged the deletion before validation refused the commit.
+			// Restore the fixture's murmur so the same delete command can be retried.
+			if writer == "murmur deletion" {
+				runGit(t, clonePath, "restore", "--source=HEAD", "--staged", "--worktree", "--", path)
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(clonePath, path), []byte(`{"content":"recovered"}`), 0o644))
+			require.NoError(t, write(), "a refused write must release the lock for the next attempt")
+			assert.NotEqual(t, headBefore, runGit(t, clonePath, "rev-parse", "HEAD"))
 		})
 	}
 }

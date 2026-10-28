@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Ledger maintenance leaves unsaved plans alone** — re-redacting sessions or deleting a murmur no longer commits staged plan edits. Other staged sessions can still be included.
+
 ## [0.25.0] - 2026-10-27
 
 See how team context shaped each session in your status line and the new `ox brief`, meet Oxy in Codex and the Claude desktop app, and get sessions from worktrees, resumed conversations and commits into your Ledger again.
