@@ -351,7 +351,8 @@ func TestBrowser_AutoSubmitPostsWhenTheReviewerIsDone(t *testing.T) {
 	ctx := frameBrowser(t)
 	host := framedHost(`committed: [], autoSubmit: !location.search.includes('manual'), transport: { send(op) {
 		(window.sent = window.sent || []).push(JSON.parse(op.body).items.map((i) => i.note));
-		return Promise.resolve({ state: 'owned', id: op.id, synced: true });
+		const owned = { state: 'owned', id: op.id, synced: true };
+		return window.hold ? new Promise((resolve) => { window.release = () => resolve(owned); }) : Promise.resolve(owned);
 	} }`)
 	base := serveFrameHost(t, []byte(forgingDoc), host)
 	run := func(what string, actions ...chromedp.Action) {
@@ -418,4 +419,16 @@ func TestBrowser_AutoSubmitPostsWhenTheReviewerIsDone(t *testing.T) {
 	comment("On the way out")
 	run("navigate away inside the host", chromedp.Evaluate(`controls.destroy()`, nil))
 	posted(4, `["On the way out"]`)
+
+	// a comment saved while a send is still out goes too, after the controls are gone
+	run("reload", chromedp.Navigate(base), chromedp.WaitVisible(".rev-bar", chromedp.ByQuery), chromedp.Evaluate(`window.hold = true; controls.setReviewing(true)`, nil))
+	comment("Held")
+	run("leave review mode while the host is slow", chromedp.Evaluate(`controls.setReviewing(false); controls.setReviewing(true)`, nil))
+	posted(1, `["Held"]`)
+	comment("Saved during the send")
+	run("navigate away, then the host answers", chromedp.Evaluate(`controls.destroy(); window.hold = false; window.release()`, nil))
+	posted(2, `["Saved during the send"]`)
+	if got := evalString(t, ctx, `document.querySelectorAll('.rev-sync, .rev-bar, .rev-pop').length`); got != "0" {
+		t.Fatalf("delivery after destroy() must draw nothing on the host page: %s left", got)
+	}
 }

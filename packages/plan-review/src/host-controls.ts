@@ -91,7 +91,7 @@ export interface HostControls {
   setOffline(down: boolean): void;
   /** Run fn once nothing is in flight and no note is open, so a reload then loses nothing. Replaces a waiting fn. */
   whenIdle(fn: () => void): void;
-  /** Remove the controls and stop sending, before mounting them for another account or plan. With autoSubmit, what the reviewer saved is sent first. */
+  /** Remove the controls and stop sending, before mounting them for another account or plan. With autoSubmit, what the reviewer saved is sent first, and delivery goes on after the controls are gone. */
   destroy(): void;
 }
 
@@ -479,6 +479,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   // replacing: another note opens in its place, so a waiting reload keeps waiting
   function closePop(replacing?: boolean) {
     const docked = popByHost;
+    const closed = !!pop;
     popByHost = false;
     if (pop) {
       pop.remove(); pop = null; sendMode();
@@ -488,7 +489,9 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       if (docked) renderRail();
     }
     port.send({ type: 'focus', anchor: null });
-    if (!replacing) { idle(); armAuto(); }
+    // Only a note closing re-arms autoSubmit. queue() closes none, and a
+    // round the host refused keeps its drafts for a timer to resend forever.
+    if (!replacing) { idle(); if (closed) armAuto(); }
   }
   // t is what a note is about: an element or a highlight — anchor, section,
   // label, and a highlight's quote. rect is where it opens below, in this
@@ -681,15 +684,18 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     queue('reopen', (id, r) => reopenBody(id, r, item, note), {}, () => reopen(a, note));
   }
   // flush tries even while the host looks offline: a host it reaches is back.
+  // autoSubmit keeps delivering after destroy(): a host destroys the controls
+  // when the reviewer navigates away, and what they saved still has to go.
+  function sending() { return !destroyed || auto; }
   function flush() {
-    if (!transport || destroyed) return;
+    if (!transport || !sending()) return;
     if (flushing) { again = true; return; }
     if (!store.entries().length) return;
     flushing = true; inflight++; paintSubmit();
-    showSync('pending', 'Sending…');
-    deliver(store, transport, report, () => destroyed).finally(() => {
+    if (!destroyed) showSync('pending', 'Sending…');
+    deliver(store, transport, report, () => !sending()).finally(() => {
       flushing = false; inflight--; paintSubmit();
-      if (again && !destroyed) { again = false; flush(); }
+      if (again && sending()) { again = false; flush(); }
       idle();
     });
   }

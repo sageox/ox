@@ -2211,6 +2211,7 @@
     }
     function closePop(replacing) {
       const docked = popByHost;
+      const closed = !!pop;
       popByHost = false;
       if (pop) {
         pop.remove();
@@ -2226,7 +2227,7 @@
       port.send({ type: "focus", anchor: null });
       if (!replacing) {
         idle();
-        armAuto();
+        if (closed) armAuto();
       }
     }
     function openPop(t, rect, fresh) {
@@ -2407,8 +2408,11 @@
       const item = c ? { anchor: a, section: c.section, label: c.label, quote: c.quote, region: regionOf(a) } : { anchor: a, region: regionOf(a) };
       queue("reopen", (id, r) => reopenBody(id, r, item, note), {}, () => reopen(a, note));
     }
+    function sending() {
+      return !destroyed || auto;
+    }
     function flush() {
-      if (!transport || destroyed) return;
+      if (!transport || !sending()) return;
       if (flushing) {
         again = true;
         return;
@@ -2417,12 +2421,12 @@
       flushing = true;
       inflight++;
       paintSubmit();
-      showSync("pending", "Sending…");
-      deliver(store, transport, report, () => destroyed).finally(() => {
+      if (!destroyed) showSync("pending", "Sending…");
+      deliver(store, transport, report, () => !sending()).finally(() => {
         flushing = false;
         inflight--;
         paintSubmit();
-        if (again && !destroyed) {
+        if (again && sending()) {
           again = false;
           flush();
         }
