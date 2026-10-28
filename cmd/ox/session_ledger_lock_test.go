@@ -243,8 +243,8 @@ func TestLedgerMaintenance_LeavesPlansStagedAndIncludesOtherSessions(t *testing.
 	}
 }
 
-// A maintenance write must not resolve an existing conflict by staging over it.
-func TestLedgerMaintenance_PreservesConflictsAndWorksAfterRecovery(t *testing.T) {
+// Maintenance must preserve a conflicted or unreadable index until it is repaired.
+func TestLedgerMaintenance_PreservesIndexAndWorksAfterRecovery(t *testing.T) {
 	for _, writer := range []string{"batch re-redaction", "murmur deletion"} {
 		t.Run(writer, func(t *testing.T) {
 			_, clonePath := createBareAndClone(t)
@@ -280,6 +280,17 @@ func TestLedgerMaintenance_PreservesConflictsAndWorksAfterRecovery(t *testing.T)
 			assert.FileExists(t, filepath.Join(clonePath, path))
 
 			runGit(t, clonePath, "reset", "HEAD", "--", path)
+			indexPath := filepath.Join(clonePath, ".git", "index")
+			cleanIndex, err := os.ReadFile(indexPath)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(indexPath, []byte("corrupt index"), 0o644))
+			require.ErrorContains(t, write(), "git ls-files --unmerged")
+			indexAfter, err := os.ReadFile(indexPath)
+			require.NoError(t, err)
+			assert.Equal(t, "corrupt index", string(indexAfter))
+			assert.Equal(t, headBefore, runGit(t, clonePath, "rev-parse", "HEAD"))
+			assert.FileExists(t, filepath.Join(clonePath, path))
+			require.NoError(t, os.WriteFile(indexPath, cleanIndex, 0o644))
 			require.NoError(t, os.WriteFile(filepath.Join(clonePath, path), []byte(`{"content":"recovered"}`), 0o644))
 			require.NoError(t, write(), "a refused write must release the lock for the next attempt")
 			assert.NotEqual(t, headBefore, runGit(t, clonePath, "rev-parse", "HEAD"))
