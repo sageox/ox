@@ -89,6 +89,11 @@ func newOrbLedgerFixture(t *testing.T) *orbSessionFixture {
 	for _, key := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
 		t.Setenv(key, t.TempDir())
 	}
+	// The thread's session marker is keyed by the constant orbThreadURL. In
+	// the machine-wide marker dir, a concurrent `go test ./cmd/ox` run writes
+	// and deletes that same file, so a re-prime read no prior marker and the
+	// reply's session lost its continued-from link.
+	isolateSessionMarkerDir(t)
 	// a laptop baseline with a working daemon: the orb is the only difference
 	clearFinalizeEnv(t)
 	priorDir := gitserver.TestSetConfigDirOverride(t.TempDir())

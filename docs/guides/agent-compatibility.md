@@ -64,7 +64,9 @@ context that influenced this session — `● ox  3 discussions · 1 plan · 1 m
 — each item once; with nothing used yet it reads `● ox  ● rec`. It reads local files
 only (no network, no daemon). A `statusLine` already in the project file is never
 replaced; one in your own `~/.claude/settings.json` keeps working, on its own row
-beneath ox's. Turn it off with `ox config set statusline off`.
+beneath ox's. In the Claude desktop app's Claude Code tab, which has no status bar, the
+same line is drawn directly above the prompt by the brief pane plugin (below), fed by
+`ox statusline --json`. Turn it off everywhere with `ox config set statusline off`.
 
 **Brief pane.** `/ox-brief` opens a pane beside the chat with what SageOx gave this
 session (calls, estimated context tokens, what was read and what was useful) and a
@@ -73,7 +75,9 @@ scrollable list of every ox call, refreshed as they happen. It is a Claude Code 
 `claude` CLI is on PATH (Claude Code 2.1.309 or newer); the same mechanism ships Oxy
 (`ox pet`). The pane is a thin view over `ox brief --json`, so it shows exactly what
 `/ox-cli-brief` reports. `/ox-brief off` closes it, `ox config set brief_pane off`
-removes it, and `ox brief pane status` shows whether it is installed.
+removes it, and `ox brief pane status` shows whether it is installed. In the Claude desktop app's
+Claude Code tab the pane opens by itself, docked beside the chat; close it and it
+stays closed in later sessions until you run `/ox-brief` again.
 
 ## Canonical Agent Skills
 

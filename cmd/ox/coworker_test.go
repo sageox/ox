@@ -61,8 +61,7 @@ func newCoworkerCmd(flags map[string]string) (*cobra.Command, *bytes.Buffer) {
 }
 
 func TestCoworkerListCommand(t *testing.T) {
-	os.Setenv("CLAUDE_CODE_SESSION_ID", "test-session")
-	defer os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "test-session")
 
 	tests := []struct {
 		name       string
@@ -213,8 +212,7 @@ func TestCoworkerListCommand(t *testing.T) {
 }
 
 func TestCoworkerLoadCommand(t *testing.T) {
-	os.Setenv("CLAUDE_CODE_SESSION_ID", "test-session")
-	defer os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "test-session")
 
 	tests := []struct {
 		name       string
