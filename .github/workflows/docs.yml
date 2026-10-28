@@ -62,7 +62,8 @@ jobs:
   # Separate from publish-docs on purpose. DISPATCH_TOKEN can write to another
   # repository, so it lives in the release-docs environment (deployments limited
   # to main) instead of the repository secrets every branch's workflows can read.
-  # This job never checks out the repository, so no repository code runs beside
+  # Never also store it as a repository secret: that would resolve here too and
+  # reopen it to every branch. This job never checks out the repository, so no repository code runs beside
   # the token. The ref check skips the job when release.yml is dispatched from
   # anywhere but main, even before the environment's branch policy exists.
   notify-docs-site:
@@ -73,7 +74,17 @@ jobs:
     permissions: {}
     env:
       DISPATCH_TOKEN_SET: ${{ secrets.DISPATCH_TOKEN != '' }}
+      VERSION: ${{ needs.publish-docs.outputs.version }}
     steps:
+      # The version goes into a JSON payload next to the token; accept only a
+      # release version, as the plan-review-release publish job does.
+      - name: Require a release version
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::publish-docs reported no release version"
+            exit 1
+          fi
+
       # The docs package is already published; a missing token only skips the
       # docs site refresh, so it warns instead of failing the release.
       - name: Report a missing dispatch token
@@ -87,4 +98,4 @@ jobs:
           token: ${{ secrets.DISPATCH_TOKEN }}
           repository: sageox/sageox-monorepo
           event-type: cli-docs-updated
-          client-payload: '{"version": "${{ needs.publish-docs.outputs.version }}"}'
+          client-payload: '{"version": "${{ env.VERSION }}"}'
