@@ -1880,6 +1880,7 @@
     "layout-changed": "The page changed while you drew. Draw the oval again."
   };
   var REVISION2 = /^sha256:[0-9a-f]{64}$/;
+  var AUTO_SUBMIT_IDLE_MS = 2 * 60 * 1e3;
   var WHOLE = { a: "plan", section: "", label: "Whole plan" };
   var BUBBLE = '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h10A1.5 1.5 0 0 1 14.5 4v6a1.5 1.5 0 0 1-1.5 1.5H7.5L4 14.5v-3H3A1.5 1.5 0 0 1 1.5 10V4A1.5 1.5 0 0 1 3 2.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
   function esc(s) {
@@ -1908,6 +1909,7 @@
     const slug = opts.slug;
     const transport = opts.transport;
     const live = !!transport;
+    const auto = live && !!opts.reviewer && !!opts.autoSubmit;
     const store = openStore(window.localStorage, opts.account, opts.plan);
     const tab = encodeURIComponent(opts.plan);
     const ON_KEY = "ox-plan-rev-on:" + tab;
@@ -1949,6 +1951,7 @@
     let inflight = 0;
     let flushing = false, again = false;
     let waiter = null;
+    let autoTimer;
     let ds = /* @__PURE__ */ Object.create(null);
     let placed = [];
     let unplaced = [];
@@ -2024,7 +2027,8 @@
         ds[m.anchor] = m;
       });
       const n = Object.keys(ds).length;
-      countEl.textContent = n ? n + " unsent" : "";
+      countEl.textContent = !n ? "" : auto ? (n === 1 ? "1 comment posts" : n + " comments post") + " when you are done" : n + " unsent";
+      if (auto) paintSubmit();
       port.send({ type: "paint", items: paintItems(), drawings: paintDrawings() });
     }
     let outcome = /* @__PURE__ */ Object.create(null);
@@ -2207,6 +2211,7 @@
     }
     function closePop(replacing) {
       const docked = popByHost;
+      const closed = !!pop;
       popByHost = false;
       if (pop) {
         pop.remove();
@@ -2220,7 +2225,10 @@
         if (docked) renderRail();
       }
       port.send({ type: "focus", anchor: null });
-      if (!replacing) idle();
+      if (!replacing) {
+        idle();
+        if (closed) armAuto();
+      }
     }
     function openPop(t, rect, fresh) {
       closePop(true);
@@ -2247,7 +2255,7 @@
       const existing = ds[a] || { status: "request-change", note: "" };
       popNote = existing.note || "";
       const btns = STATUS.map((s) => '<button data-s="' + s.id + '" class="rev-s' + (existing.status === s.id ? " on" : "") + '">' + s.glyph + " " + s.id + "</button>").join("");
-      p.innerHTML = quote + '<div class="rev-row">' + btns + '</div><textarea class="rev-note" placeholder="note (optional)">' + esc(existing.note || "") + '</textarea><div class="rev-row"><button class="rev-save">Save</button><button class="rev-del">Delete</button></div>';
+      p.innerHTML = quote + '<div class="rev-row">' + btns + '</div><textarea class="rev-note" placeholder="note (optional)">' + esc(existing.note || "") + '</textarea><div class="rev-row"><button class="rev-save">' + (auto ? "Comment" : "Save") + '</button><button class="rev-del">Delete</button></div>' + (auto ? '<div class="rev-when">Posts with your other comments when you are done.</div>' : "");
       placePop(rect);
       let status = existing.status;
       p.querySelectorAll(".rev-s").forEach((b) => {
@@ -2381,6 +2389,17 @@
       });
       queue("submit", (id, r) => submitBody(id, r, fresh), stamps, submit);
     }
+    function armAuto() {
+      if (!auto || destroyed) return;
+      clearTimeout(autoTimer);
+      autoTimer = setTimeout(autoSend, AUTO_SUBMIT_IDLE_MS);
+    }
+    function autoSend(leaving) {
+      clearTimeout(autoTimer);
+      if (!auto || destroyed || pop && !leaving) return;
+      const waiting = store.entries();
+      if (store.drafts().some((m) => !queued(waiting, m))) submit();
+    }
     function accept(a) {
       queue("accept", (id, r) => acceptBody(id, r, a), {}, () => accept(a));
     }
@@ -2389,8 +2408,11 @@
       const item = c ? { anchor: a, section: c.section, label: c.label, quote: c.quote, region: regionOf(a) } : { anchor: a, region: regionOf(a) };
       queue("reopen", (id, r) => reopenBody(id, r, item, note), {}, () => reopen(a, note));
     }
+    function sending() {
+      return !destroyed || auto;
+    }
     function flush() {
-      if (!transport || destroyed) return;
+      if (!transport || !sending()) return;
       if (flushing) {
         again = true;
         return;
@@ -2399,12 +2421,12 @@
       flushing = true;
       inflight++;
       paintSubmit();
-      showSync("pending", "Sending…");
-      deliver(store, transport, report, () => destroyed).finally(() => {
+      if (!destroyed) showSync("pending", "Sending…");
+      deliver(store, transport, report, () => !sending()).finally(() => {
         flushing = false;
         inflight--;
         paintSubmit();
-        if (again && !destroyed) {
+        if (again && sending()) {
           again = false;
           flush();
         }
@@ -2420,7 +2442,7 @@
       setOffline(r.state === "offline");
       const verb = e.act === "accept" ? "Accepted" : e.act === "reopen" ? "Reopened" : "Sent";
       if (r.state === "owned") reportSync(syncMessage(verb, r));
-      else if (r.state === "refused") showSync("err", "Not saved — the server refused it (" + r.message + ")." + (e.act === "submit" ? " Your marks are kept: Submit sends them as a new review." : ""));
+      else if (r.state === "refused") showSync("err", "Not saved — the server refused it (" + r.message + ")." + (e.act === "submit" ? auto ? " Your marks are kept." : " Your marks are kept: Submit sends them as a new review." : ""));
       else if (r.state === "failed") showSync("err", "Not sent (" + r.message + "). " + (e.act === "submit" ? "Your marks are kept." : "It stays queued in this browser."), [{ label: "Retry", fn: flush }]);
       else showSync("warn", "Review server offline — your feedback is queued in this browser and sends when the server is back.");
     }
@@ -2623,7 +2645,7 @@
     if (resized && opts.frame) resized.observe(opts.frame);
     const bar = document.createElement("div");
     bar.className = "rev-bar";
-    bar.innerHTML = (live ? '<span class="rev-conn"></span>' : "") + (opts.presence && revision ? '<span class="rev-here" hidden></span>' : "") + '<button class="rev-toggle" title="Toggle review mode">Review</button>' + (revision ? '<button class="rev-draw" aria-pressed="false" title="Drag to draw an oval around part of the plan to comment on it">Draw</button>' : "") + '<span class="rev-count"></span>' + (live && !opts.reviewer ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : "") + '<button class="rev-submit" title="Send feedback to the agent">' + (live ? "Submit" : "Export") + "</button>" + (opts.approve ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : "");
+    bar.innerHTML = (live ? '<span class="rev-conn"></span>' : "") + (opts.presence && revision ? '<span class="rev-here" hidden></span>' : "") + '<button class="rev-toggle" title="Toggle review mode">Review</button>' + (revision ? '<button class="rev-draw" aria-pressed="false" title="Drag to draw an oval around part of the plan to comment on it">Draw</button>' : "") + '<span class="rev-count' + (auto ? " rev-wait" : "") + '"></span>' + (live && !opts.reviewer ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : "") + '<button class="rev-submit" title="' + (auto ? "Post your comments now" : "Send feedback to the agent") + '">' + (live ? auto ? "Post now" : "Submit" : "Export") + "</button>" + (opts.approve ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : "");
     body.appendChild(bar);
     let drag = null;
     bar.addEventListener("pointerdown", (e) => {
@@ -2665,7 +2687,8 @@
     function paintSubmit() {
       if (!live || destroyed) return;
       submitEl.disabled = flushing;
-      submitEl.textContent = flushing ? "Sending…" : "Submit";
+      submitEl.textContent = flushing ? "Sending…" : auto ? "Post now" : "Submit";
+      if (auto) submitEl.hidden = !flushing && !Object.keys(ds).length;
     }
     const toggleEl = bar.querySelector(".rev-toggle");
     const drawEl = bar.querySelector(".rev-draw");
@@ -2720,6 +2743,7 @@
         hintBubble = null;
       }
       renderRail();
+      if (!on) autoSend();
     }
     toggleEl.onclick = () => {
       setReview(!on);
@@ -2783,6 +2807,14 @@
       }
     }, { signal });
     window.addEventListener("online", flush, { signal });
+    if (auto) {
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") autoSend();
+      }, { signal });
+      window.addEventListener("pagehide", () => {
+        autoSend(true);
+      }, { signal });
+    }
     let started = false;
     port.listen((m) => {
       switch (m.type) {
@@ -2875,7 +2907,8 @@
     }
     paint();
     const restored = Object.keys(ds).length;
-    if (live && restored && !store.entries().length) toast(restored + " unsent mark(s) restored — Submit to send them.");
+    if (auto) autoSend();
+    else if (live && restored && !store.entries().length) toast(restored + " unsent mark(s) restored — Submit to send them.");
     flush();
     return {
       update(items, n) {
@@ -2894,10 +2927,12 @@
       destroy() {
         if (destroyed) return;
         waiter = null;
+        autoSend(true);
         closePop();
         destroyed = true;
         off.abort();
         clearTimeout(repaint);
+        clearTimeout(autoTimer);
         if (presence) presence.leave();
         port.listen(() => {
         });

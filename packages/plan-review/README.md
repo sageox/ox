@@ -176,6 +176,7 @@ const controls = mountHostControls(port, {
   reviewing: true,           // the reviewer asked to review: open in review mode
   revision: plan.revision,   // "sha256:<hex>" of the bytes the frame shows: offers Draw
   presence,                  // PresenceTransport: who else is here, and their pointers
+  autoSubmit: true,          // no Submit: comments post together when the reviewer is done
 });
 controls.update(items, problems); // after you read the review again
 controls.setReviewing(false); // switch to reading without leaving presence or replacing the controls
@@ -185,6 +186,16 @@ controls.destroy(); // before another account signs in, or another plan mounts
 Leave `resolve` off for a reviewer your server will not let resolve: an
 addressed item then opens the mark-up composer instead of offering Accept and
 Reopen.
+
+With `autoSubmit`, a reviewer never has to remember Submit. Their comments go
+out together as one round when they leave review mode, when the page is
+hidden, two minutes after their last note closes, and when the host destroys
+the controls. Comments left from an earlier visit go out on mount. The bar
+says when comments will post, and Submit becomes Post now, shown only while
+comments wait. A send as the tab closes may not finish; the round is stored
+first, so it goes out on the next mount. It needs a transport and a reviewer. ox's local review page
+leaves it off, because the AI coworker waiting on `ox plan review await` acts
+on each round it gets.
 
 ### Drawings
 

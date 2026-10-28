@@ -71,6 +71,14 @@ export interface HostControlsOptions {
    * they show the same revision. Needs revision.
    */
   presence?: PresenceTransport;
+  /**
+   * Send the reviewer's comments without a Submit, together as one round: on
+   * leaving review mode, when the page is hidden or the controls are
+   * destroyed, two minutes after the last note closes, and on mount for any
+   * left from an earlier visit. Submit becomes Post now, shown only while
+   * comments wait. Needs a transport and a reviewer.
+   */
+  autoSubmit?: boolean;
 }
 
 /** A mounted set of controls. */
@@ -83,7 +91,7 @@ export interface HostControls {
   setOffline(down: boolean): void;
   /** Run fn once nothing is in flight and no note is open, so a reload then loses nothing. Replaces a waiting fn. */
   whenIdle(fn: () => void): void;
-  /** Remove the controls and stop sending, before mounting them for another account or plan. */
+  /** Remove the controls and stop sending, before mounting them for another account or plan. With autoSubmit, what the reviewer saved is sent first, and delivery goes on after the controls are gone. */
   destroy(): void;
 }
 
@@ -128,6 +136,10 @@ const DRAW_REFUSED: Record<string, string> = {
   'layout-changed': 'The page changed while you drew. Draw the oval again.',
 };
 const REVISION = /^sha256:[0-9a-f]{64}$/;
+// autoSubmit's wait after a note closes: longer than a reviewer's pause
+// between comments, so one sitting is one round, and short enough that a
+// reviewer who walks away with the tab open still has their comments sent.
+const AUTO_SUBMIT_IDLE_MS = 2 * 60 * 1000;
 // a comment on the plan as a whole: WholePlanAnchor in pkg/planreview, with
 // the label readers that predate it print (plan-review-ledger-contract.md 3.10)
 const WHOLE: About = { a: 'plan', section: '', label: 'Whole plan' };
@@ -161,6 +173,9 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   const slug = opts.slug;
   const transport = opts.transport;
   const live = !!transport;
+  // without a reviewer a send stops to ask for a name, which a send the
+  // reviewer did not start must never do
+  const auto = live && !!opts.reviewer && !!opts.autoSubmit;
   const store = openStore(window.localStorage, opts.account, opts.plan);
   const tab = encodeURIComponent(opts.plan);
   const ON_KEY = 'ox-plan-rev-on:' + tab; // sessionStorage: survives a reload, not a new tab
@@ -204,6 +219,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   let inflight = 0; // a delivery or an approval awaiting its answer
   let flushing = false, again = false;
   let waiter: (() => void) | null = null;
+  let autoTimer: ReturnType<typeof setTimeout> | undefined;
   // drafts by anchor as of the last paint; every change to them repaints
   let ds: Record<string, Mark> = Object.create(null);
   let placed: Placed[] = []; // what the document painted, in reading order
@@ -284,7 +300,8 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     ds = Object.create(null);
     store.drafts().forEach((m) => { ds[m.anchor] = m; });
     const n = Object.keys(ds).length;
-    countEl.textContent = n ? (n + ' unsent') : '';
+    countEl.textContent = !n ? '' : auto ? (n === 1 ? '1 comment posts' : n + ' comments post') + ' when you are done' : n + ' unsent';
+    if (auto) paintSubmit();
     port.send({ type: 'paint', items: paintItems(), drawings: paintDrawings() }); // answered by 'placed'
   }
   let outcome: Record<string, string> = Object.create(null); // drawing anchor -> where it landed
@@ -462,6 +479,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   // replacing: another note opens in its place, so a waiting reload keeps waiting
   function closePop(replacing?: boolean) {
     const docked = popByHost;
+    const closed = !!pop;
     popByHost = false;
     if (pop) {
       pop.remove(); pop = null; sendMode();
@@ -471,7 +489,9 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       if (docked) renderRail();
     }
     port.send({ type: 'focus', anchor: null });
-    if (!replacing) idle();
+    // Only a note closing re-arms autoSubmit. queue() closes none, and a
+    // round the host refused keeps its drafts for a timer to resend forever.
+    if (!replacing) { idle(); if (closed) armAuto(); }
   }
   // t is what a note is about: an element or a highlight — anchor, section,
   // label, and a highlight's quote. rect is where it opens below, in this
@@ -506,7 +526,8 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     const btns = STATUS.map((s) => '<button data-s="' + s.id + '" class="rev-s' + (existing.status === s.id ? ' on' : '') + '">' + s.glyph + ' ' + s.id + '</button>').join('');
     p.innerHTML = quote + '<div class="rev-row">' + btns + '</div>' +
       '<textarea class="rev-note" placeholder="note (optional)">' + esc(existing.note || '') + '</textarea>' +
-      '<div class="rev-row"><button class="rev-save">Save</button><button class="rev-del">Delete</button></div>';
+      '<div class="rev-row"><button class="rev-save">' + (auto ? 'Comment' : 'Save') + '</button><button class="rev-del">Delete</button></div>' +
+      (auto ? '<div class="rev-when">Posts with your other comments when you are done.</div>' : '');
     placePop(rect);
     let status = existing.status as Status;
     p.querySelectorAll('.rev-s').forEach((b) => {
@@ -637,6 +658,20 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     fresh.forEach((m) => { stamps[m.anchor] = m.at; });
     queue('submit', (id, r) => submitBody(id, r, fresh), stamps, submit);
   }
+  function armAuto() {
+    if (!auto || destroyed) return;
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(autoSend, AUTO_SUBMIT_IDLE_MS);
+  }
+  // autoSend submits what the reviewer saved, but never under an open note:
+  // queue closes it, losing what they typed. leaving: the page or the
+  // controls are going, and the note with them.
+  function autoSend(leaving?: boolean) {
+    clearTimeout(autoTimer);
+    if (!auto || destroyed || (pop && !leaving)) return;
+    const waiting = store.entries();
+    if (store.drafts().some((m) => !queued(waiting, m))) submit();
+  }
   function accept(a: string) {
     queue('accept', (id, r) => acceptBody(id, r, a), {}, () => accept(a));
   }
@@ -649,15 +684,18 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     queue('reopen', (id, r) => reopenBody(id, r, item, note), {}, () => reopen(a, note));
   }
   // flush tries even while the host looks offline: a host it reaches is back.
+  // autoSubmit keeps delivering after destroy(): a host destroys the controls
+  // when the reviewer navigates away, and what they saved still has to go.
+  function sending() { return !destroyed || auto; }
   function flush() {
-    if (!transport || destroyed) return;
+    if (!transport || !sending()) return;
     if (flushing) { again = true; return; }
     if (!store.entries().length) return;
     flushing = true; inflight++; paintSubmit();
-    showSync('pending', 'Sending…');
-    deliver(store, transport, report, () => destroyed).finally(() => {
+    if (!destroyed) showSync('pending', 'Sending…');
+    deliver(store, transport, report, () => !sending()).finally(() => {
       flushing = false; inflight--; paintSubmit();
-      if (again && !destroyed) { again = false; flush(); }
+      if (again && sending()) { again = false; flush(); }
       idle();
     });
   }
@@ -669,7 +707,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     setOffline(r.state === 'offline');
     const verb = e.act === 'accept' ? 'Accepted' : e.act === 'reopen' ? 'Reopened' : 'Sent';
     if (r.state === 'owned') reportSync(syncMessage(verb, r));
-    else if (r.state === 'refused') showSync('err', 'Not saved — the server refused it (' + r.message + ').' + (e.act === 'submit' ? ' Your marks are kept: Submit sends them as a new review.' : ''));
+    else if (r.state === 'refused') showSync('err', 'Not saved — the server refused it (' + r.message + ').' + (e.act === 'submit' ? (auto ? ' Your marks are kept.' : ' Your marks are kept: Submit sends them as a new review.') : ''));
     else if (r.state === 'failed') showSync('err', 'Not sent (' + r.message + '). ' + (e.act === 'submit' ? 'Your marks are kept.' : 'It stays queued in this browser.'), [{ label: 'Retry', fn: flush }]);
     else showSync('warn', 'Review server offline — your feedback is queued in this browser and sends when the server is back.');
   }
@@ -836,9 +874,9 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     (opts.presence && revision ? '<span class="rev-here" hidden></span>' : '') +
     '<button class="rev-toggle" title="Toggle review mode">Review</button>' +
     (revision ? '<button class="rev-draw" aria-pressed="false" title="Drag to draw an oval around part of the plan to comment on it">Draw</button>' : '') +
-    '<span class="rev-count"></span>' +
+    '<span class="rev-count' + (auto ? ' rev-wait' : '') + '"></span>' +
     (live && !opts.reviewer ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : '') +
-    '<button class="rev-submit" title="Send feedback to the agent">' + (live ? 'Submit' : 'Export') + '</button>' +
+    '<button class="rev-submit" title="' + (auto ? 'Post your comments now' : 'Send feedback to the agent') + '">' + (live ? (auto ? 'Post now' : 'Submit') : 'Export') + '</button>' +
     (opts.approve ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : '');
   body.appendChild(bar);
   let drag: { x: number; y: number } | null = null;
@@ -874,7 +912,9 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   function paintSubmit() {
     if (!live || destroyed) return;
     submitEl.disabled = flushing; // a second click while a send is in flight would race it
-    submitEl.textContent = flushing ? 'Sending…' : 'Submit';
+    submitEl.textContent = flushing ? 'Sending…' : auto ? 'Post now' : 'Submit';
+    // autoSubmit's button only sends sooner, so it shows while comments wait
+    if (auto) submitEl.hidden = !flushing && !Object.keys(ds).length;
   }
   // Review is a mode: while on, clicks mark up instead of navigating. A mode has
   // to announce itself on entry and keep its exit in view — otherwise the only
@@ -906,6 +946,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     try { if (on) sessionStorage.setItem(ON_KEY, '1'); else sessionStorage.removeItem(ON_KEY); } catch (e) { /* not restored after a reload */ }
     if (hintBubble) { hintBubble.remove(); hintBubble = null; }
     renderRail();
+    if (!on) autoSend();
   }
   toggleEl.onclick = () => { setReview(!on); };
   if (drawEl) drawEl.onclick = () => { setTool(!tool); };
@@ -956,6 +997,12 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   }, { signal });
   // the browser is back on a network: a host it could not reach may answer now
   window.addEventListener('online', flush, { signal });
+  if (auto) {
+    // A send started as the tab closes may not finish; its round is stored
+    // first and goes out on the next mount.
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') autoSend(); }, { signal });
+    window.addEventListener('pagehide', () => { autoSend(true); }, { signal });
+  }
 
   let started = false;
   port.listen((m) => {
@@ -1050,9 +1097,11 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     setReview(true, seen);
   }
   paint();
-  // unsent marks that survived a restart or reload — tell the reviewer.
+  // unsent marks that survived a restart or reload: with autoSubmit the visit
+  // that saved them is over, so they are sent; otherwise the reviewer is told.
   const restored = Object.keys(ds).length;
-  if (live && restored && !store.entries().length) toast(restored + ' unsent mark(s) restored — Submit to send them.');
+  if (auto) autoSend();
+  else if (live && restored && !store.entries().length) toast(restored + ' unsent mark(s) restored — Submit to send them.');
   // An operation this page never saw acknowledged — a reload, a crash, or the
   // host dropping mid-send — is resent with its original id and bytes; the
   // host answers one it already has as stored, so this can't double-post.
@@ -1070,10 +1119,14 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     destroy() {
       if (destroyed) return;
       waiter = null;
+      // a host destroys the controls when the reviewer navigates away inside
+      // its own page, which hides nothing and unloads nothing
+      autoSend(true);
       closePop();
       destroyed = true;
       off.abort();
       clearTimeout(repaint);
+      clearTimeout(autoTimer);
       if (presence) presence.leave();
       port.listen(() => {});
       port.send({ type: 'mode', on: false, open: false, draw: false });

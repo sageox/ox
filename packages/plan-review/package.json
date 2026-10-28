@@ -1,6 +1,6 @@
 {
   "name": "@sageox/plan-review",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Plan review in the browser: document tools that run inside a SageOx plan, and the review controls and durable outbox a trusted host mounts around it.",
   "license": "MIT",
   "type": "module",

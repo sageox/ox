@@ -17,6 +17,8 @@
 .rev-bar .rev-draw.on{background:var(--gold, #d9b654);border-color:var(--gold, #d9b654);color:#111411}
 .rev-bar .rev-submit{border-color:var(--sage, #99c693);color:var(--sage, #99c693)}
 .rev-bar .rev-count{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--faint, #8c8e7e)}
+/* autoSubmit: the count is the sentence saying when comments post */
+.rev-bar .rev-count.rev-wait{font-family:inherit;font-size:12px;color:var(--dim, #b7b6a3)}
 .rev-bar .rev-who{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--faint, #8c8e7e)}
 .rev-bar .rev-who:hover{color:var(--sage, #99c693);border-color:var(--sage, #99c693)}
 /* top-level Approve (closes the loop) */
@@ -42,6 +44,7 @@ body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 .rev-pop .rev-note{box-sizing:border-box;width:100%;min-height:54px;background:var(--bg, #0b0d0b);border:1px solid var(--hair2, var(--hair, #212620));border-radius:5px;color:var(--ink, #f4f2ef);font-family:Inter,system-ui,sans-serif;font-size:12.5px;padding:6px;resize:vertical}
 .rev-pop .rev-save{flex:1;background:var(--sage, #99c693);border:1px solid var(--sage, #99c693);color:#111411;border-radius:5px;padding:4px;font-size:11px;cursor:pointer}
 .rev-pop .rev-del{background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:5px;padding:4px 8px;font-size:11px;cursor:pointer}
+.rev-pop .rev-when{margin:6px 2px 0;font-size:11px;color:var(--dim, #b7b6a3)}
 .rev-pop .rev-cap{font-size:11.5px;color:var(--dim, #b7b6a3);margin-bottom:6px}
 .rev-pop .rev-accept{flex:1;background:var(--sage, #99c693);border:1px solid var(--sage, #99c693);color:#111411;border-radius:5px;padding:4px;font-size:11px;cursor:pointer}
 .rev-pop .rev-reopen{background:var(--panel2, #171b17);border:1px solid var(--amber, #c6a23c);color:var(--amber, #c6a23c);border-radius:5px;padding:4px 8px;font-size:11px;cursor:pointer}
