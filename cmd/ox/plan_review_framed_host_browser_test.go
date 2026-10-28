@@ -342,3 +342,80 @@ func TestBrowser_LedgerTextCannotStyleOrScriptTheRail(t *testing.T) {
 		t.Errorf("Ledger text must render as text and never as markup or classes: [no script ran, injected elements, injected classes, shown as text] = %s", got)
 	}
 }
+
+// With autoSubmit a reviewer never has to press Submit: a comment waits while
+// they review, a send never closes a note they are typing, and what they saved
+// posts as one round when they hide the page, leave review mode or navigate
+// away inside the host, and on the next visit when an earlier one left it.
+func TestBrowser_AutoSubmitPostsWhenTheReviewerIsDone(t *testing.T) {
+	ctx := frameBrowser(t)
+	host := framedHost(`committed: [], autoSubmit: !location.search.includes('manual'), transport: { send(op) {
+		(window.sent = window.sent || []).push(JSON.parse(op.body).items.map((i) => i.note));
+		return Promise.resolve({ state: 'owned', id: op.id, synced: true });
+	} }`)
+	base := serveFrameHost(t, []byte(forgingDoc), host)
+	run := func(what string, actions ...chromedp.Action) {
+		t.Helper()
+		if err := chromedp.Run(ctx, actions...); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+	}
+	// The rail redraws each time the plan answers a paint, and a click that
+	// lands mid-redraw opens nothing, so click until the note is open.
+	openNote := func() {
+		t.Helper()
+		for deadline := time.Now().Add(10 * time.Second); !waitJS(ctx, `document.querySelector('.rev-pop .rev-note')`, 300*time.Millisecond); {
+			if time.Now().After(deadline) {
+				t.Fatal("the whole-plan note never opened")
+			}
+			run("open a whole-plan note", chromedp.Click(".rev-rail-plan", chromedp.ByQuery))
+		}
+	}
+	comment := func(note string) {
+		t.Helper()
+		openNote()
+		run("comment "+note, chromedp.SetValue(".rev-note", note, chromedp.ByQuery), chromedp.Click(".rev-save", chromedp.ByQuery))
+	}
+	posted := func(n int, want string) {
+		t.Helper()
+		if !waitJS(ctx, `(window.sent || []).length === `+strconv.Itoa(n), 5*time.Second) {
+			t.Fatalf("want round %d posted: %s", n, evalString(t, ctx, `JSON.stringify(window.sent || [])`))
+		}
+		if got := evalString(t, ctx, `JSON.stringify(window.sent[`+strconv.Itoa(n-1)+`])`); got != want {
+			t.Fatalf("round %d = %s, want %s", n, got, want)
+		}
+	}
+
+	// a comment saved where only Submit sent it
+	run("load without autoSubmit", chromedp.Navigate(base+"?manual"), chromedp.WaitVisible(".rev-bar", chromedp.ByQuery),
+		chromedp.Evaluate(`controls.setReviewing(true)`, nil))
+	comment("Left from yesterday")
+	run("load with autoSubmit", chromedp.Navigate(base), chromedp.WaitVisible(".rev-bar", chromedp.ByQuery))
+	posted(1, `["Left from yesterday"]`)
+
+	run("review", chromedp.Evaluate(`controls.setReviewing(true)`, nil))
+	comment("Retry budget")
+	if got := evalString(t, ctx, `JSON.stringify([window.sent.length, document.querySelector('.rev-count').textContent, document.querySelector('.rev-submit').textContent])`); got != `[1,"1 comment posts when you are done","Post now"]` {
+		t.Fatalf("a comment must wait while the reviewer reviews, and the bar say when it posts: %s", got)
+	}
+	openNote()
+	run("hide the page mid-note", chromedp.SetValue(".rev-note", "Retry budget is three", chromedp.ByQuery),
+		chromedp.Evaluate(`Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }); document.dispatchEvent(new Event('visibilitychange'))`, nil))
+	if got := evalString(t, ctx, `JSON.stringify([window.sent.length, (document.querySelector('.rev-note') || {}).value || null])`); got != `[1,"Retry budget is three"]` {
+		t.Fatalf("a send must never close the note the reviewer is typing: %s", got)
+	}
+	run("save, then hide", chromedp.Click(".rev-save", chromedp.ByQuery), chromedp.Evaluate(`document.dispatchEvent(new Event('visibilitychange'))`, nil))
+	posted(2, `["Retry budget is three"]`)
+	if !waitJS(ctx, `document.querySelector('.rev-submit').hidden && !document.querySelector('.rev-count').textContent`, 5*time.Second) {
+		t.Fatal("with nothing waiting, the bar must offer no Post now")
+	}
+
+	comment("Second thought")
+	run("leave review mode", chromedp.Evaluate(`controls.setReviewing(false)`, nil))
+	posted(3, `["Second thought"]`)
+
+	run("review again", chromedp.Evaluate(`controls.setReviewing(true)`, nil))
+	comment("On the way out")
+	run("navigate away inside the host", chromedp.Evaluate(`controls.destroy()`, nil))
+	posted(4, `["On the way out"]`)
+}
