@@ -1,6 +1,6 @@
-// Package usagepane embeds the ox brief pane: a Claude Code mod that shows
-// what SageOx gave this session (`ox brief --json`) in a scrollable pane beside
-// the chat, opened with /ox-brief. Installing it is the generic Claude mod
+// Package usagepane embeds the ox session report pane: a Claude Code mod that shows
+// what SageOx gave this session (`ox session report --json`) in a scrollable pane beside
+// the chat, opened with /ox-session-report. Installing it is the generic Claude mod
 // installer's job; this package only names the mod and hands over its files.
 package usagepane
 
@@ -14,7 +14,7 @@ import (
 // The mod's identity in Claude Code: plugin `ox-cli-brief-pane` from the local
 // folder marketplace `ox-cli-brief`, which is the mod folder itself. The
 // `ox-cli-` prefix marks it as owned by the ox binary (ADR-031): ox rewrites it
-// freely. Coworkers see "ox brief" and type /ox-brief.
+// freely. Coworkers see "ox session report" and type /ox-session-report.
 const (
 	PluginName      = "ox-cli-brief-pane"
 	MarketplaceName = "ox-cli-brief"

@@ -1,7 +1,7 @@
 // The brief pane in the Claude desktop app: it opens by itself, docked beside
 // the chat, at session start and when the desktop app attaches, and stays
 // closed across sessions once a person closes it. Failure prevented: desktop
-// users never find the pane (there is no status bar pointing at /ox-brief),
+// users never find the pane (there is no status bar pointing at /ox-session-report),
 // terminal users get a pane they never asked for, or a pane the person closed
 // keeps coming back every session.
 
@@ -13,7 +13,7 @@ import { register } from '../hooks/register'
 const PLUGIN = 'ox-cli-brief-pane'
 
 const COMMAND = {
-  command: 'ox-brief',
+  command: 'ox-session-report',
   origin: { kind: 'composer' },
   presentation: { isFullscreen: true, columns: 160 },
 } as const
@@ -103,7 +103,7 @@ function mockSession(on: On, surfaces: string[], stored: Record<string, unknown>
     open.delete(e.id)
     return { value: undefined }
   })
-  on('ui.panes', () => ({ value: [...open].map(id => ({ id, title: 'ox brief', isShown: true, isFocused: false, isPlaced: true })) }))
+  on('ui.panes', () => ({ value: [...open].map(id => ({ id, title: 'ox session report', isShown: true, isFocused: false, isPlaced: true })) }))
   on('process.run', (_, e) => {
     runs.push([...e.argv])
     if (ox.fails) {
@@ -141,20 +141,20 @@ describe('shouldAutoOpen', () => {
   })
 })
 
-test('desktop: the session start opens the brief pane docked beside the chat and runs ox brief', async ($, on) => {
+test('desktop: the session start opens the brief pane docked beside the chat and runs ox session report', async ($, on) => {
   const s = mockSession(on, ['desktop'])
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   expect(s.opened).toHaveLength(1)
-  expect(s.opened[0]).toMatchObject({ id: 'ox-brief', title: 'ox brief', columns: DESKTOP_COLUMNS })
+  expect(s.opened[0]).toMatchObject({ id: 'ox-session-report', title: 'ox session report', columns: DESKTOP_COLUMNS })
   expect(DESKTOP_COLUMNS).toBe(48)
   // It sits beside the chat: it never takes the keyboard or closes on Escape.
   expect(s.opened[0].focus).toBeUndefined()
   expect(s.opened[0].closeOnEscape).toBeUndefined()
   expect(briefRuns(s.runs).length).toBeGreaterThanOrEqual(1)
-  expect(briefRuns(s.runs)[0]).toEqual(['ox', 'brief', '--json', '--recent', '0'])
+  expect(briefRuns(s.runs)[0]).toEqual(['ox', 'session', 'report', '--json', '--recent', '0'])
 })
 
-test('terminal: the session start opens nothing and runs no ox brief', async ($, on) => {
+test('terminal: the session start opens nothing and runs no ox session report', async ($, on) => {
   const s = mockSession(on, ['terminal'])
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   expect(s.opened).toEqual([])
@@ -174,32 +174,32 @@ test('the desktop app attaching after the start opens the pane; vscode and mobil
   surfaces.push('desktop')
   await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
   expect(s.opened).toHaveLength(1)
-  expect(s.opened[0]).toMatchObject({ id: 'ox-brief', columns: DESKTOP_COLUMNS })
+  expect(s.opened[0]).toMatchObject({ id: 'ox-session-report', columns: DESKTOP_COLUMNS })
 })
 
-test('a pane the person closed stays closed next session; /ox-brief reopens it and turns it back on', async ($, on) => {
+test('a pane the person closed stays closed next session; /ox-session-report reopens it and turns it back on', async ($, on) => {
   // autoOpen false is what a person's close stores (see the next test).
   const s = mockSession(on, ['desktop'], { autoOpen: false })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
   expect(s.opened).toEqual([])
 
-  expect((await $.command.run({ ...COMMAND, surface: 'desktop', args: '' } as never)).text).toBe('ox brief pane opened.')
-  expect(s.opened.map(o => o.id)).toEqual(['ox-brief'])
+  expect((await $.command.run({ ...COMMAND, surface: 'desktop', args: '' } as never)).text).toBe('ox session report pane opened.')
+  expect(s.opened.map(o => o.id)).toEqual(['ox-session-report'])
   expect(s.store.autoOpen).toBe(true)
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  expect(s.opened.map(o => o.id)).toEqual(['ox-brief', 'ox-brief'])
+  expect(s.opened.map(o => o.id)).toEqual(['ox-session-report', 'ox-session-report'])
 })
 
-test('/ox-brief off closes the pane and stops it opening by itself; a plugin close alone stores nothing', async ($, on) => {
+test('/ox-session-report off closes the pane and stops it opening by itself; a plugin close alone stores nothing', async ($, on) => {
   const s = mockSession(on, ['desktop'])
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   expect(s.opened).toHaveLength(1)
   expect(s.store.autoOpen).toBeUndefined()
 
-  expect((await $.command.run({ ...COMMAND, surface: 'desktop', args: 'off' } as never)).text).toBe('ox brief pane closed.')
-  expect(s.closed).toEqual(['ox-brief'])
+  expect((await $.command.run({ ...COMMAND, surface: 'desktop', args: 'off' } as never)).text).toBe('ox session report pane closed.')
+  expect(s.closed).toEqual(['ox-session-report'])
   expect(s.store.autoOpen).toBe(false)
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -222,7 +222,7 @@ describe('the ui.close hook', () => {
     if (found === undefined) {
       throw new Error('no ui.close hook registered')
     }
-    expect(found.filter).toEqual({ id: 'ox-brief' })
+    expect(found.filter).toEqual({ id: 'ox-session-report' })
     return found.fn
   }
 
@@ -237,7 +237,7 @@ describe('the ui.close hook', () => {
       },
     }
     let passed = 0
-    await closeHook()($, { id: 'ox-brief', origin: { kind } }, async () => {
+    await closeHook()($, { id: 'ox-session-report', origin: { kind } }, async () => {
       passed++
       return undefined
     })
@@ -265,8 +265,8 @@ test('desktop: the pane draws every section from the fixture within its width', 
     plugin: PLUGIN,
     surface: 'desktop',
     component: 'Pane',
-    requestId: 'ox-brief',
-    props: { title: 'ox brief', isFocused: false, bodyColumns, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+    requestId: 'ox-session-report',
+    props: { title: 'ox session report', isFocused: false, bodyColumns, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
   } as never)
 
   expect((await ui.find({ type: 'Text', text: /^calls \d/ }))?.text).toBe('calls 3 (1 failed) · ~16k tokens · used 3 of 7 · co-author moderate'.slice(0, bodyColumns - 1) + '…')
@@ -310,7 +310,7 @@ test('desktop: the pane draws every section from the fixture within its width', 
   await ui.unmount()
 })
 
-const PANE_PROPS = { title: 'ox brief', isFocused: false, bodyColumns: 46, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} }
+const PANE_PROPS = { title: 'ox session report', isFocused: false, bodyColumns: 46, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} }
 
 test('desktop: an open the window is too narrow to place polls nothing until the pane is drawn', async ($, on) => {
   const s = mockSession(on, ['desktop'], {}, { placed: false })
@@ -320,7 +320,7 @@ test('desktop: an open the window is too narrow to place polls nothing until the
   expect(briefRuns(s.runs)).toEqual([])
 
   // The person widens the window: the surface places the pane and draws it.
-  const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'ox-brief', props: PANE_PROPS } as never)
+  const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'ox-session-report', props: PANE_PROPS } as never)
   await s.clock.advance(0)
   expect(briefRuns(s.runs)).toHaveLength(1)
   // A drawn pane keeps polling, but redraws with a report do not re-run it.
@@ -357,28 +357,28 @@ test('desktop: the session ending stops the pane polling', async ($, on) => {
   expect(briefRuns(s.runs)).toHaveLength(1)
 })
 
-test('/ox-brief opens at the desktop width where the desktop app is attached, the default width in the terminal', async ($, on) => {
+test('/ox-session-report opens at the desktop width where the desktop app is attached, the default width in the terminal', async ($, on) => {
   const surfaces = ['terminal']
   const s = mockSession(on, surfaces)
   await $.command.run({ ...COMMAND, surface: 'terminal', args: '' } as never)
-  expect(s.opened[0]).toEqual({ id: 'ox-brief', title: 'ox brief' })
+  expect(s.opened[0]).toEqual({ id: 'ox-session-report', title: 'ox session report' })
   surfaces.push('desktop')
   await $.command.run({ ...COMMAND, surface: 'desktop', args: '' } as never)
-  expect(s.opened[1]).toEqual({ id: 'ox-brief', title: 'ox brief', columns: DESKTOP_COLUMNS })
+  expect(s.opened[1]).toEqual({ id: 'ox-session-report', title: 'ox session report', columns: DESKTOP_COLUMNS })
 })
 
-// Failure prevented: `/ox-brief off` says the pane will stay closed when the
+// Failure prevented: `/ox-session-report off` says the pane will stay closed when the
 // setting never saved, and it pops open again next session.
-test('/ox-brief off says so when the setting did not save', async ($, on) => {
+test('/ox-session-report off says so when the setting did not save', async ($, on) => {
   const s = mockSession(on, ['desktop'], {}, { storeFails: true })
   const reply = await $.command.run({ ...COMMAND, surface: 'desktop', args: 'off' } as never)
-  expect(s.closed).toEqual(['ox-brief'])
-  expect(reply.text).toBe('ox brief pane closed, but the setting did not save; it may open again next session.')
+  expect(s.closed).toEqual(['ox-session-report'])
+  expect(reply.text).toBe('ox session report pane closed, but the setting did not save; it may open again next session.')
 })
 
-// Failure prevented: a `/ox-brief` the window is too narrow to place runs
-// `ox brief` every 15 seconds for a pane nobody can see.
-test('/ox-brief on a window too narrow to place it polls nothing until the pane is drawn', async ($, on) => {
+// Failure prevented: a `/ox-session-report` the window is too narrow to place runs
+// `ox session report` every 15 seconds for a pane nobody can see.
+test('/ox-session-report on a window too narrow to place it polls nothing until the pane is drawn', async ($, on) => {
   const s = mockSession(on, ['desktop'], {}, { placed: false })
   const reply = await $.command.run({ ...COMMAND, surface: 'desktop', args: '' } as never)
   expect(reply.text).toMatch(/not shown/)
@@ -420,18 +420,18 @@ test('desktop: the desktop app detaching stops the status band polling too', asy
 // Failure prevented: a pane closed after a failed first read, then opened
 // again, sits on "Loading…" until the timer's first tick instead of reading
 // at once.
-test('a pane drawn again after a close reads ox brief at once', async ($, on) => {
+test('a pane drawn again after a close reads ox session report at once', async ($, on) => {
   const s = mockSession(on, ['desktop'])
   // A first pane whose first read fails: it stays on no report.
   s.ox.fails = true
-  const first = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'ox-brief', props: PANE_PROPS } as never)
+  const first = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'ox-session-report', props: PANE_PROPS } as never)
   await s.clock.advance(0)
   await first.unmount()
   s.ox.fails = false
   await $.command.run({ ...COMMAND, surface: 'desktop', args: 'off' } as never)
   const failed = briefRuns(s.runs).length
 
-  const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'ox-brief', props: PANE_PROPS } as never)
+  const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'ox-session-report', props: PANE_PROPS } as never)
   await s.clock.advance(0)
   expect(briefRuns(s.runs)).toHaveLength(failed + 1)
   await ui.unmount()

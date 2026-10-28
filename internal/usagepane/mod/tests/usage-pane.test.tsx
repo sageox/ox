@@ -27,9 +27,9 @@ const PLUGIN = 'ox-cli-brief-pane'
 const PANE = {
   plugin: PLUGIN,
   component: 'Pane',
-  requestId: 'ox-brief',
+  requestId: 'ox-session-report',
   props: {
-    title: 'ox brief',
+    title: 'ox session report',
     isFocused: false,
     bodyColumns: 80,
     placement: 'dock',
@@ -39,12 +39,12 @@ const PANE = {
 } as const
 
 const COMMAND = {
-  command: 'ox-brief',
+  command: 'ox-session-report',
   origin: { kind: 'composer' },
   presentation: { isFullscreen: true, columns: 160 },
 } as const
 
-// Three ox calls, newest first as `ox brief --json` lists them.
+// Three ox calls, newest first as `ox session report --json` lists them.
 const REPORT = {
   view: 'session',
   session: { name: 'brief-pane', agent_id: 'Oxa1b2', harness: 'claude-code', recording: true, turns: 4 },
@@ -419,7 +419,7 @@ describe('formatting', () => {
   })
 })
 
-test('the pane tells ox brief which Claude Code session it is reporting on', async ($, on) => {
+test('the pane tells ox session report which Claude Code session it is reporting on', async ($, on) => {
   // Failure prevented: the pane runs ox from the host process, which has no
   // session variables, so ox reported a recording session as not recording
   // while the status line showed it recording.
@@ -431,7 +431,7 @@ test('the pane tells ox brief which Claude Code session it is reporting on', asy
     return ok(JSON.stringify(REPORT))
   })
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.panes', () => ({ value: [{ id: 'ox-brief', title: 'ox brief', isShown: true, isFocused: false, isPlaced: true }] }))
+  on('ui.panes', () => ({ value: [{ id: 'ox-session-report', title: 'ox session report', isShown: true, isFocused: false, isPlaced: true }] }))
 
   await $.command.run({ ...COMMAND, args: '' } as never)
   expect(envs.length).toBe(1)
@@ -443,7 +443,7 @@ test('briefRunInit passes no environment when the session id is unknown', () => 
   expect(briefRunInit('abc').env).toEqual({ CLAUDE_CODE_SESSION_ID: 'abc' })
 })
 
-test('/ox-brief opens the pane and lists each ox call, oldest first', async ($, on) => {
+test('/ox-session-report opens the pane and lists each ox call, oldest first', async ($, on) => {
   mock.clock(on, { now: 1_000 })
   let runs = 0
   on('process.run', () => {
@@ -451,16 +451,16 @@ test('/ox-brief opens the pane and lists each ox call, oldest first', async ($, 
     return ok(JSON.stringify(REPORT))
   })
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.panes', () => ({ value: [{ id: 'ox-brief', title: 'ox brief', isShown: true, isFocused: false, isPlaced: true }] }))
+  on('ui.panes', () => ({ value: [{ id: 'ox-session-report', title: 'ox session report', isShown: true, isFocused: false, isPlaced: true }] }))
 
   const ran = await $.command.run({ ...COMMAND, args: '' } as never)
-  expect(ran.text).toBe('ox brief pane opened.')
+  expect(ran.text).toBe('ox session report pane opened.')
   expect(runs).toBe(1)
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    const titleRow = (await ui.find({ type: 'Text', text: /● ox brief/ }))?.text
-    expect(titleRow).toBe('● ox brief  ● recording')
+    const titleRow = (await ui.find({ type: 'Text', text: /● ox session report/ }))?.text
+    expect(titleRow).toBe('● ox session report  ● recording')
     expect(titleRow).not.toMatch(/brief-pane|claude-code|Oxa1b2/)
     expect((await ui.find({ type: 'Text', text: /^calls \d/ }))?.text).toBe('calls 3 (1 failed) · ~16k tokens · used 2 of 6')
     expect(await ui.find({ type: 'Text', text: /injected|not yet reported/ })).toBeUndefined()
@@ -503,7 +503,7 @@ test('an ox Bash call refreshes the open pane once; other commands do not', asyn
     return ok(JSON.stringify(REPORT))
   })
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.panes', () => ({ value: [{ id: 'ox-brief', title: 'ox brief', isShown: true, isFocused: false, isPlaced: true }] }))
+  on('ui.panes', () => ({ value: [{ id: 'ox-session-report', title: 'ox session report', isShown: true, isFocused: false, isPlaced: true }] }))
   on('tool.call', () => ({ result: {} }))
 
   await $.command.run({ ...COMMAND, args: '' } as never)
@@ -544,12 +544,12 @@ test('a failing ox shows one error line and throws nothing', async ($, on) => {
   on('ui.open', () => ({ value: { isPlaced: true } }))
 
   const ran = await $.command.run({ ...COMMAND, args: '' } as never)
-  expect(ran.text).toBe('ox brief pane opened.')
+  expect(ran.text).toBe('ox session report pane opened.')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect((await ui.find({ type: 'Text', text: /failed/ }))?.text).toBe('ox brief failed: Error: not logged in')
+  expect((await ui.find({ type: 'Text', text: /failed/ }))?.text).toBe('ox session report failed: Error: not logged in')
   await ui.unmount()
 
-  expect((await $.command.run({ ...COMMAND, args: 'refresh' } as never)).text).toBe('ox brief failed: Error: not logged in')
+  expect((await $.command.run({ ...COMMAND, args: 'refresh' } as never)).text).toBe('ox session report failed: Error: not logged in')
 })
 
 test('ox missing from PATH says so', async ($, on) => {
@@ -598,7 +598,7 @@ test('an empty session and a missing trace read plainly', async ($, on) => {
   await ui.unmount()
 })
 
-test('/ox-brief off closes the pane', async ($, on) => {
+test('/ox-session-report off closes the pane', async ($, on) => {
   mock.clock(on, { now: 1_000 })
   const closed: string[] = []
   on('ui.close', (_, e) => {
@@ -608,11 +608,11 @@ test('/ox-brief off closes the pane', async ($, on) => {
   on('store.set', () => ({ value: undefined }))
 
   const ran = await $.command.run({ ...COMMAND, args: 'off' } as never)
-  expect(ran.text).toBe('ox brief pane closed.')
-  expect(closed).toEqual(['ox-brief'])
+  expect(ran.text).toBe('ox session report pane closed.')
+  expect(closed).toEqual(['ox-session-report'])
 })
 
-test('/ox-brief registers at session start without opening the pane', async ($, on) => {
+test('/ox-session-report registers at session start without opening the pane', async ($, on) => {
   const registered: string[] = []
   let opened = 0
   on('command.register', (_, e) => {
@@ -626,7 +626,7 @@ test('/ox-brief registers at session start without opening the pane', async ($, 
   on('session.start', (_, e) => ({ cwd: e.cwd }))
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  expect(registered).toEqual(['ox-brief'])
+  expect(registered).toEqual(['ox-session-report'])
   expect(opened).toBe(0)
 })
 
@@ -658,7 +658,7 @@ test('a person scrolling the pane passes through untouched', async ($, on) => {
   })
   const moved = await $.ui.scroll({
     component: 'Pane',
-    requestId: 'ox-brief',
+    requestId: 'ox-session-report',
     offset: 3,
     by: -1,
     bodyRows: 2,
