@@ -116,6 +116,9 @@ func TestBrowserRoundTrip_FeedbackReachesAuthoringAgent(t *testing.T) {
 	if item.Reviewer != "Devon" {
 		t.Errorf("item lost its reviewer attribution, got %q", item.Reviewer)
 	}
+	if res.Guidance != plan.ReviewTextGuidance {
+		t.Errorf("await must tell the agent the reviewer's text is untrusted, got guidance %q", res.Guidance)
+	}
 }
 
 // TestBrowserRoundTrip_MultiMarkRoundArrivesIntact proves that several marks in

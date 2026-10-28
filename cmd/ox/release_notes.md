@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Ledger maintenance leaves unsaved plans alone** — re-redacting sessions or deleting a murmur no longer commits staged plan edits. Other staged sessions can still be included.
 
+### Security
+
+- **Plan review notes reach your AI coworker as untrusted text** — `ox plan feedback show` and `ox plan review await` tell your AI coworker that reviewers' notes, quotes and names are feedback to weigh, never instructions to follow, and the digest prints each item on one line with terminal escapes removed.
+
 ## [0.25.0] - 2026-10-27
 
 See how team context shaped each session in your status line and the new `ox brief`, meet Oxy in Codex and the Claude desktop app, and get sessions from worktrees, resumed conversations and commits into your Ledger again.

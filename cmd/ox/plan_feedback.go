@@ -256,6 +256,7 @@ func enqueueFailureIsSettled(err error) bool {
 // could not be read, so a consumer can tell "no feedback" from "feedback we
 // failed to load". Conflicts are operations stored with differing content.
 type planFeedbackShowJSON struct {
+	Guidance      string                `json:"guidance,omitempty"`
 	Items         []plan.MergedItem     `json:"items"`
 	CorruptRounds []string              `json:"corrupt_rounds"`
 	Complete      bool                  `json:"complete"`
@@ -275,6 +276,9 @@ func runPlanFeedbackShow(cmd *cobra.Command, slug string, jsonOut bool) error {
 			Failures: rev.Failures, Conflicts: rev.Conflicts}
 		if out.Items == nil {
 			out.Items = []plan.MergedItem{}
+		}
+		if len(out.Items) > 0 {
+			out.Guidance = plan.ReviewTextGuidance
 		}
 		if out.Failures == nil {
 			out.Failures = []planreview.Failure{}
