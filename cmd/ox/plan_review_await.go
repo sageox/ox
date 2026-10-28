@@ -58,6 +58,7 @@ say what, and the open items may be missing some.`,
 type awaitResult struct {
 	Slug      string                `json:"slug"`
 	Status    string                `json:"status"` // feedback | approved | timeout
+	Guidance  string                `json:"guidance,omitempty"`
 	Open      []plan.MergedItem     `json:"open"`
 	Contested []string              `json:"contested,omitempty"`
 	Counts    awaitCounts           `json:"counts"`
@@ -176,6 +177,7 @@ func awaitSnapshot(planDir string) (awaitResult, bool) {
 	}
 	sort.Strings(res.Contested)
 	res.Status = "feedback"
+	res.Guidance = plan.ReviewTextGuidance
 	res.Counts = awaitCounts{Open: len(res.Open), Reviewers: len(reviewers)}
 	return res, true
 }
