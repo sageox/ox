@@ -427,10 +427,22 @@ func TestComposeStatusline_RecordingDotIsRed(t *testing.T) {
 // TestIsStatuslineFastPath routes only the bare command around cobra, so
 // `ox statusline --help` still gets help. Failure prevented: help text in the bar.
 func TestIsStatuslineFastPath(t *testing.T) {
-	assert.True(t, isStatuslineFastPath([]string{"statusline"}))
-	assert.False(t, isStatuslineFastPath([]string{"statusline", "--help"}))
-	assert.False(t, isStatuslineFastPath([]string{"status"}))
-	assert.False(t, isStatuslineFastPath(nil))
+	tests := []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"statusline"}, true},
+		{[]string{"statusline", "--json"}, true},
+		{[]string{"statusline", "--help"}, false},
+		{[]string{"statusline", "--json", "x"}, false},
+		{[]string{"--json", "statusline"}, false},
+		{[]string{"statusline", "--json=true"}, false},
+		{[]string{"status"}, false},
+		{nil, false},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, isStatuslineFastPath(tt.args), "%q", tt.args)
+	}
 }
 
 // TestStatusline_LatencyBudget measures one warm refresh in-process. Failure
@@ -451,4 +463,255 @@ func TestStatusline_LatencyBudget(t *testing.T) {
 	}
 	t.Logf("statusline in-process (warm): worst of 5 %v", worst)
 	assert.Less(t, worst, 20*time.Millisecond)
+}
+
+// --- F. `ox statusline --json` for the Claude desktop app band ---
+
+// runJSON runs JSON mode with the given stdin and returns the raw output.
+func (f *statuslineFixture) runJSON(t *testing.T, stdin []byte, opts statuslineOptions) string {
+	t.Helper()
+	var out bytes.Buffer
+	runStatuslineJSON(bytes.NewReader(stdin), &out, opts)
+	return out.String()
+}
+
+// decodeStatuslineJSON asserts out is exactly one JSON document of the
+// documented shape, ending in one newline, and returns it.
+func decodeStatuslineJSON(t *testing.T, out string) statuslineJSON {
+	t.Helper()
+	require.True(t, strings.HasSuffix(out, "}\n"), "one trailing newline: %q", out)
+	require.False(t, strings.HasSuffix(out, "\n\n"), "exactly one trailing newline: %q", out)
+	assert.NotContains(t, out, "\x1b", "JSON is never colored")
+	dec := json.NewDecoder(strings.NewReader(out))
+	dec.DisallowUnknownFields()
+	var got statuslineJSON
+	require.NoError(t, dec.Decode(&got), out)
+	assert.False(t, dec.More(), "exactly one JSON document: %q", out)
+	return got
+}
+
+// envWith returns a getenv that answers CLAUDE_CODE_SESSION_ID with sid and
+// everything else from the real environment.
+func envWith(sid string) func(string) string {
+	return func(k string) string {
+		if k == envClaudeCodeSessionID {
+			return sid
+		}
+		return os.Getenv(k)
+	}
+}
+
+// TestRenderStatuslineJSON_Matrix covers what the desktop band reads in each
+// state. Failure prevented: the band showing ox where the text bar would not
+// (setting off, a non-SageOx repo), or dropping counts and "● rec" where it
+// would.
+func TestRenderStatuslineJSON_Matrix(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, f *statuslineFixture)
+		want  statuslineJSON
+	}{
+		{
+			name: "on: counts and recording",
+			setup: func(t *testing.T, f *statuslineFixture) {
+				require.NoError(t, oxactivity.RecordInfluence(f.root, f.agentID, f.sessionID, "discussion", "cnv_019ffe10-0000-7000-8000-000000000012"))
+				require.NoError(t, oxactivity.RecordInfluence(f.root, f.agentID, f.sessionID, "plan", "p1"))
+				require.NoError(t, oxactivity.RecordUse(f.root, f.agentID, f.sessionID, "discussion", "https://sageox.ai/c/cnv_019ffe10-0000-7000-8000-000000000012"))
+				f.startRecording(t)
+			},
+			want: statuslineJSON{Show: true, Counts: oxactivity.Counts{Discussions: 1, Plans: 1, Used: 1}, Recording: true},
+		},
+		{
+			name: "on: idle session shows the bare mark",
+			want: statuslineJSON{Show: true},
+		},
+		{
+			name: "statusline setting off",
+			setup: func(t *testing.T, f *statuslineFixture) {
+				f.seed(t, oxactivity.Counts{Plans: 2})
+				require.NoError(t, SetConfigValue("statusline", "off", ConfigLevelUser, ""))
+			},
+			want: statuslineJSON{},
+		},
+		{
+			name: "outside a SageOx project",
+			setup: func(t *testing.T, f *statuslineFixture) {
+				f.seed(t, oxactivity.Counts{Plans: 2})
+				f.root = t.TempDir()
+			},
+			want: statuslineJSON{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newStatuslineFixture(t)
+			if tt.setup != nil {
+				tt.setup(t, f)
+			}
+			got := decodeStatuslineJSON(t, f.runJSON(t, f.stdin(), testStatuslineOptions()))
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestRenderStatuslineJSON_ExactShape pins the wire shape the desktop plugin
+// parses. Failure prevented: a renamed or re-cased key silently blanking the
+// band, or zero counts arriving as noise the plugin must filter.
+func TestRenderStatuslineJSON_ExactShape(t *testing.T) {
+	f := newStatuslineFixture(t)
+	f.seed(t, oxactivity.Counts{Discussions: 3, Plans: 1, Used: 2})
+	assert.Equal(t, `{
+  "show": true,
+  "counts": {
+    "discussions": 3,
+    "plans": 1,
+    "used": 2
+  },
+  "recording": false
+}
+`, f.runJSON(t, f.stdin(), testStatuslineOptions()))
+
+	f.root = t.TempDir()
+	assert.Equal(t, "{\n  \"show\": false,\n  \"counts\": {},\n  \"recording\": false\n}\n",
+		f.runJSON(t, f.stdin(), testStatuslineOptions()))
+}
+
+// TestRenderStatuslineJSON_SessionFromEnv reads the session from
+// CLAUDE_CODE_SESSION_ID when stdin is empty, as from the desktop plugin host.
+// Failure prevented: the desktop band stuck on the bare mark because the host
+// sends no status-line JSON.
+func TestRenderStatuslineJSON_SessionFromEnv(t *testing.T) {
+	f := newStatuslineFixture(t)
+	t.Chdir(f.root) // no stdin cwd either: the plugin runs ox in the project
+	require.NoError(t, oxactivity.RecordInfluence(f.root, f.agentID, f.sessionID, "plan", "p1"))
+
+	opts := testStatuslineOptions()
+	opts.getenv = envWith("")
+	assert.Equal(t, statuslineJSON{Show: true}, decodeStatuslineJSON(t, f.runJSON(t, nil, opts)),
+		"without the env var the session is unknown")
+
+	opts.getenv = envWith(f.sessionID)
+	assert.Equal(t, statuslineJSON{Show: true, Counts: oxactivity.Counts{Plans: 1}},
+		decodeStatuslineJSON(t, f.runJSON(t, nil, opts)))
+}
+
+// TestRenderStatuslineJSON_StdinSessionWinsOverEnv prefers the session Claude
+// Code names on stdin. Failure prevented: an inherited CLAUDE_CODE_SESSION_ID
+// from a parent session putting another window's counts on this band.
+func TestRenderStatuslineJSON_StdinSessionWinsOverEnv(t *testing.T) {
+	f := newStatuslineFixture(t)
+	other := "some-other-window"
+	require.NoError(t, WriteSessionMarker(&SessionMarker{AgentID: f.agentID, AgentSessionID: other, PrimedAt: time.Now()}))
+	require.NoError(t, oxactivity.RecordInfluence(f.root, f.agentID, other, "doc", "d1"))
+	require.NoError(t, oxactivity.RecordInfluence(f.root, f.agentID, f.sessionID, "plan", "p1"))
+
+	opts := testStatuslineOptions()
+	opts.getenv = envWith(other)
+	assert.Equal(t, statuslineJSON{Show: true, Counts: oxactivity.Counts{Plans: 1}},
+		decodeStatuslineJSON(t, f.runJSON(t, f.stdin(), opts)))
+}
+
+// TestRenderStatuslineJSON_NeverRunsChainedCommand keeps the coworker's own
+// statusLine command out of JSON mode, on and off. Failure prevented: the
+// user's script running (side effects, latency) on every desktop band refresh,
+// or its text corrupting the JSON document.
+func TestRenderStatuslineJSON_NeverRunsChainedCommand(t *testing.T) {
+	for _, off := range []bool{false, true} {
+		t.Run(map[bool]string{false: "on", true: "off"}[off], func(t *testing.T) {
+			f := newStatuslineFixture(t)
+			ran := filepath.Join(t.TempDir(), "ran")
+			f.setUserStatusline(t, "touch '"+ran+"'; printf 'mine'")
+			if off {
+				require.NoError(t, SetConfigValue("statusline", "off", ConfigLevelUser, ""))
+			}
+
+			out := f.runJSON(t, f.stdin(), testStatuslineOptions())
+			decodeStatuslineJSON(t, out)
+			assert.NotContains(t, out, "mine")
+			assert.NoFileExists(t, ran, "the chained command must not run in JSON mode")
+
+			// the same fixture does chain in text mode, so the probe works
+			if !off {
+				assert.Equal(t, "● ox\nmine\n", f.run(t, testStatuslineOptions()))
+				assert.FileExists(t, ran)
+			}
+		})
+	}
+}
+
+// TestStatuslineCmd_JSONFlag routes `ox statusline --json` through cobra to
+// JSON mode. Failure prevented: the flag parsing but printing the text line,
+// which the desktop plugin cannot parse.
+func TestStatuslineCmd_JSONFlag(t *testing.T) {
+	f := newStatuslineFixture(t)
+	f.seed(t, oxactivity.Counts{Plans: 1})
+	require.NoError(t, statuslineCmd.Flags().Set("json", "true"))
+	t.Cleanup(func() {
+		_ = statuslineCmd.Flags().Set("json", "false")
+		statuslineCmd.SetIn(nil)
+		statuslineCmd.SetOut(nil)
+	})
+	var out bytes.Buffer
+	statuslineCmd.SetIn(bytes.NewReader(f.stdin()))
+	statuslineCmd.SetOut(&out)
+	require.NoError(t, statuslineCmd.RunE(statuslineCmd, nil))
+	assert.Equal(t, statuslineJSON{Show: true, Counts: oxactivity.Counts{Plans: 1}}, decodeStatuslineJSON(t, out.String()))
+}
+
+// swapStatuslineStdio points main's fast path at files: stdin holds in, and
+// the returned func reads what was written to the real stdout.
+func swapStatuslineStdio(t *testing.T, in []byte) func() string {
+	t.Helper()
+	dir := t.TempDir()
+	inPath := filepath.Join(dir, "stdin")
+	require.NoError(t, os.WriteFile(inPath, in, 0o600))
+	stdin, err := os.Open(inPath)
+	require.NoError(t, err)
+	stdout, err := os.Create(filepath.Join(dir, "stdout"))
+	require.NoError(t, err)
+	prevIn, prevOut := os.Stdin, statuslineStdout
+	os.Stdin, statuslineStdout = stdin, stdout
+	t.Cleanup(func() {
+		os.Stdin, statuslineStdout = prevIn, prevOut
+		_ = stdin.Close()
+		_ = stdout.Close()
+	})
+	return func() string {
+		b, err := os.ReadFile(stdout.Name())
+		require.NoError(t, err)
+		return string(b)
+	}
+}
+
+// TestRunStatuslineFastPath_JSONAndText drives main's entry point, which
+// skips cobra: `ox statusline --json` must print the JSON document and plain
+// `ox statusline` the text line. Failure prevented: the desktop band's
+// `ox statusline --json` getting the text line it cannot parse (or the
+// terminal bar getting JSON) because the fast path ignored the flag.
+func TestRunStatuslineFastPath_JSONAndText(t *testing.T) {
+	t.Run("json", func(t *testing.T) {
+		f := newStatuslineFixture(t)
+		f.seed(t, oxactivity.Counts{Plans: 1, Used: 1})
+		read := swapStatuslineStdio(t, f.stdin())
+		runStatuslineFastPath([]string{"statusline", "--json"})
+		assert.Equal(t, statuslineJSON{Show: true, Counts: oxactivity.Counts{Plans: 1, Used: 1}}, decodeStatuslineJSON(t, read()))
+	})
+	t.Run("text", func(t *testing.T) {
+		f := newStatuslineFixture(t)
+		f.seed(t, oxactivity.Counts{Plans: 1, Used: 1})
+		read := swapStatuslineStdio(t, f.stdin())
+		t.Setenv("NO_COLOR", "1")
+		runStatuslineFastPath([]string{"statusline"})
+		assert.Equal(t, "● ox  1 plan · 1 used\n", ansi.Strip(read()))
+	})
+}
+
+// TestRunStatuslineJSON_WriteErrorNeverFails: a closed stdout (the desktop
+// host gave up on the run) is swallowed, like the text line's. Failure
+// prevented: a panic or error exit the plugin host would surface.
+func TestRunStatuslineJSON_WriteErrorNeverFails(t *testing.T) {
+	f := newStatuslineFixture(t)
+	assert.NotPanics(t, func() {
+		runStatuslineJSON(bytes.NewReader(f.stdin()), failingWriter{}, testStatuslineOptions())
+	})
 }

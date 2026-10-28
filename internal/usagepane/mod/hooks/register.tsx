@@ -5,16 +5,28 @@
 // `ox brief --json --recent 0`, re-read when the pane opens, after each ox
 // command the AI coworker runs through Bash, and every 15 seconds while open.
 //
+// On the Claude desktop app (whose Code tab has no status bar) it also draws
+// ox's status line as a band directly above the prompt:
+// `● ox  3 discussions · 1 plan · 2 used  ● rec`, from `ox statusline --json`,
+// re-read at each turn's start and end, after each ox command, and every 15
+// seconds. Terminal sessions keep their own status line and never run it.
+//
 // Every hook falls back to `next(e)`: a pane bug must never cost a turn.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { UsageReport } from '../types'
+import type { Statusline, UsageReport } from '../types'
 import {
   PANE,
   REFRESH_MS,
   BRIEF_ARGV,
+  STATUSLINE_ARGV,
+  STATUSLINE_REFRESH_MS,
+  parseStatusline,
+  sameStatusline,
+  statuslinePieces,
+  statuslineRunInit,
   availableRows,
   coauthorRows,
   briefRunInit,
@@ -112,6 +124,54 @@ function refresh($: EngineInterface): Promise<void> {
   return inflight
 }
 
+// Module state for the desktop band: the last status line read (null draws
+// nothing), whether a desktop band draw has been seen (until then nothing
+// runs, so terminal sessions pay nothing), its timer and its run in flight.
+// A reload drops all of it; the next band draw starts it again.
+let statusline: Statusline | null = null
+let bandSeen = false
+let statuslineTimer: { cancel: () => void } | null = null
+let statuslineInflight: Promise<void> | null = null
+let statuslineAgain = false
+
+async function refreshStatuslineOnce($: EngineInterface) {
+  let next: Statusline | null = null
+  try {
+    const sessionId = await $.session.id().catch(() => '')
+    const ran = await $.process.run(STATUSLINE_ARGV, statuslineRunInit(sessionId))
+    next = ran.exitCode === 0 ? parseStatusline(ran.stdout) : null
+  } catch {
+    // ox missing or timed out: draw nothing.
+    next = null
+  }
+  if (!sameStatusline(statusline, next)) {
+    statusline = next
+    $.ui.invalidate('ui.render')
+  }
+}
+
+// refreshStatusline re-reads `ox statusline`; like `refresh`, a call while one
+// runs folds into one more run after it. Never throws; does nothing until a
+// desktop band has been drawn.
+function refreshStatusline($: EngineInterface): Promise<void> {
+  if (!bandSeen) {
+    return Promise.resolve()
+  }
+  if (statuslineInflight !== null) {
+    statuslineAgain = true
+    return statuslineInflight
+  }
+  statuslineInflight = (async () => {
+    do {
+      statuslineAgain = false
+      await refreshStatuslineOnce($).catch(() => undefined)
+    } while (statuslineAgain)
+  })().finally(() => {
+    statuslineInflight = null
+  })
+  return statuslineInflight
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -146,13 +206,94 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const ran = await next(e)
     try {
-      if (isOxCommand(e.command) && (await isOpen($))) {
-        void refresh($)
+      if (isOxCommand(e.command)) {
+        void refreshStatusline($)
+        if (await isOpen($)) {
+          void refresh($)
+        }
       }
     } catch {
       // The tool already ran; a pane that can't refresh changes nothing.
     }
     return ran
+  }).catch(($, e, next) => next(e))
+
+  on('turn.start', async ($, e, next) => {
+    void refreshStatusline($)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('turn.complete', async ($, e, next) => {
+    const done = await next(e)
+    void refreshStatusline($)
+    return done
+  }).catch(($, e, next) => next(e))
+
+  on('session.end', async ($, e, next) => {
+    statuslineTimer?.cancel()
+    statuslineTimer = null
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // The status line band: desktop only (the terminal has its own status line).
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.surface !== 'desktop' || e.props.hasSurvey) {
+      return next(e)
+    }
+    if (!bandSeen) {
+      bandSeen = true
+      void refreshStatusline($)
+    }
+    statuslineTimer ??= $.clock.every(STATUSLINE_REFRESH_MS, () => void refreshStatusline($).catch(() => undefined))
+    const line = statusline
+    if (line === null || !line.show) {
+      return next(e)
+    }
+    // Whatever else draws in the band (the engine, another plugin) stays,
+    // under the ox line.
+    const below = await next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    const pieces = statuslinePieces(line, e.props.bodyColumns)
+    return (
+      <Box flexDirection="column">
+        <Box key="ox-statusline">
+          <Text wrap="truncate-end">
+            {pieces.map((p, i) => {
+              switch (p.style) {
+                case 'mark':
+                  return (
+                    <Text key={i} color="success" weight="bold">
+                      {p.text}
+                    </Text>
+                  )
+                case 'num':
+                  return (
+                    <Text key={i} color="success">
+                      {p.text}
+                    </Text>
+                  )
+                case 'recDot':
+                  return (
+                    <Text key={i} color="error">
+                      {p.text}
+                    </Text>
+                  )
+                case 'dim':
+                case 'recLabel':
+                  return (
+                    <Text key={i} dimColor>
+                      {p.text}
+                    </Text>
+                  )
+                default:
+                  return p.text
+              }
+            })}
+          </Text>
+        </Box>
+        {below}
+      </Box>
+    )
   }).catch(($, e, next) => next(e))
 
   on('ui.close', { id: 'ox-brief' }, async ($, e, next) => {
