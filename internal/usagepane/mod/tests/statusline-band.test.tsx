@@ -269,3 +269,36 @@ test('an ox Bash call and the timer re-read the line; other commands do not', as
   expect((await ui.find({ type: 'Text', text: /● ox/ }))?.text).toMatch(/5 used/)
   await ui.unmount()
 })
+
+// Failure prevented: the next desktop session draws the previous session's
+// counts, including one from a read that finished after the session ended,
+// until its own first read lands.
+test('a new session never draws the line of the session before it', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000 })
+  engineDraws(on)
+  on('ui.panes', () => ({ value: [] }))
+  on('tool.call', () => ({ result: {} }))
+  on('session.end', () => ({ sessionId: 's1' }) as never)
+  let release: (v: unknown) => void = () => undefined
+  let answer: () => unknown = () => ok(JSON.stringify(LINE))
+  on('process.run', () => answer() as never)
+
+  let ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /● ox/ })).toBeDefined()
+  await ui.unmount()
+
+  // A read in flight when the session ends, answering after it.
+  answer = () => new Promise(r => (release = r))
+  await $.tool.call({ tool: 'Bash', command: 'ox status' })
+  await $.session.end({ reason: 'other' } as never)
+  release(ok(JSON.stringify({ ...LINE, counts: { ...LINE.counts, used: 9 } })))
+  await clock.settle()
+
+  // The next session's own read has not answered yet: nothing is drawn.
+  answer = () => new Promise(() => undefined)
+  ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /● ox/ })).toBeUndefined()
+  await ui.unmount()
+})

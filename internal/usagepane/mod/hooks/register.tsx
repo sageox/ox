@@ -149,7 +149,8 @@ async function hasDesktop($: EngineInterface): Promise<boolean> {
 
 // Whether a Pane draw has kicked a first refresh: a pane placed late (an
 // unasked open on a narrow window) would otherwise sit on "Loading…" until
-// the timer's first tick. Once per load, so a failing ox does not loop.
+// the timer's first tick. Once per open pane, so a failing ox does not loop;
+// a close resets it.
 let kicked = false
 
 // openDesktopPane opens the pane by itself where the desktop app is attached,
@@ -179,8 +180,12 @@ async function openDesktopPane($: EngineInterface): Promise<void> {
   }
 }
 
-async function setAutoOpen($: EngineInterface, on: boolean) {
-  await $.store.set(AUTO_OPEN, on).catch(() => undefined)
+// setAutoOpen stores the auto-open choice and reports whether it saved.
+async function setAutoOpen($: EngineInterface, on: boolean): Promise<boolean> {
+  return $.store.set(AUTO_OPEN, on).then(
+    () => true,
+    () => false,
+  )
 }
 
 // Module state for the desktop band: the last status line read (null draws
@@ -192,8 +197,22 @@ let bandSeen = false
 let statuslineTimer: { cancel: () => void } | null = null
 let statuslineInflight: Promise<void> | null = null
 let statuslineAgain = false
+// Bumped when a session ends or the desktop app leaves: a read started before
+// then finishes into a session it no longer belongs to, so it is dropped.
+let statuslineGen = 0
+
+// resetBand stops the band's polling and forgets its line. The next desktop
+// band draw starts it again from nothing.
+function resetBand() {
+  statuslineTimer?.cancel()
+  statuslineTimer = null
+  bandSeen = false
+  statusline = null
+  statuslineGen++
+}
 
 async function refreshStatuslineOnce($: EngineInterface) {
+  const gen = statuslineGen
   let next: Statusline | null = null
   try {
     const sessionId = await $.session.id().catch(() => '')
@@ -202,6 +221,9 @@ async function refreshStatuslineOnce($: EngineInterface) {
   } catch {
     // ox missing or timed out: draw nothing.
     next = null
+  }
+  if (gen !== statuslineGen) {
+    return
   }
   if (!sameStatusline(statusline, next)) {
     statusline = next
@@ -252,11 +274,13 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   // The desktop app leaving: with no desktop left, stop polling `ox brief`
-  // (only a close stopped it before). The pane's next draw restarts it.
+  // and `ox statusline` (the terminal has its own status line). The pane's
+  // and the band's next draws restart them.
   on('session.detach', async ($, e, next) => {
     const done = await next(e)
     if (e.surface === 'desktop' && !(await hasDesktop($))) {
       stopTimer()
+      resetBand()
     }
     return done
   }).catch(($, e, next) => next(e))
@@ -266,8 +290,8 @@ export const register: Register = on => {
     if (arg === 'off') {
       await $.ui.close({ id: PANE })
       stopTimer()
-      await setAutoOpen($, false)
-      return { text: 'ox brief pane closed.' }
+      const saved = await setAutoOpen($, false)
+      return { text: saved ? 'ox brief pane closed.' : 'ox brief pane closed, but the setting did not save; it may open again next session.' }
     }
     if (arg === 'refresh') {
       await refresh($)
@@ -281,7 +305,10 @@ export const register: Register = on => {
     // On desktop, open at the width the pane opens by itself at, so each
     // open does not flip the dock between the default share and that width.
     const opened = await $.ui.open((await hasDesktop($)) ? { id: PANE, title: TITLE, columns: DESKTOP_COLUMNS } : { id: PANE, title: TITLE })
-    startTimer($)
+    // An open not placed yet polls nothing: the Pane draw starts the timer.
+    if (opened.isPlaced) {
+      startTimer($)
+    }
     await refresh($)
     return { text: opened.isPlaced ? 'ox brief pane opened.' : `ox brief pane is open but not shown: ${opened.reason}` }
   }).catch(() => ({ text: 'ox brief pane hit an error; try /ox-brief again.' }))
@@ -314,8 +341,7 @@ export const register: Register = on => {
 
   on('session.end', async ($, e, next) => {
     stopTimer()
-    statuslineTimer?.cancel()
-    statuslineTimer = null
+    resetBand()
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -386,6 +412,8 @@ export const register: Register = on => {
   on('ui.close', { id: 'ox-brief' }, async ($, e, next) => {
     const done = await next(e)
     stopTimer()
+    // The next pane gets its own first-draw refresh.
+    kicked = false
     // Only a close where the desktop app is attached turns off its opening
     // by itself: a terminal close is about the terminal.
     if (e.origin.kind === 'person' && (await hasDesktop($))) {

@@ -7,7 +7,7 @@
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { BRIEF_ARGV, DESKTOP_COLUMNS, REFRESH_MS, shouldAutoOpen } from '../hooks/logic'
+import { BRIEF_ARGV, DESKTOP_COLUMNS, REFRESH_MS, STATUSLINE_ARGV, STATUSLINE_REFRESH_MS, shouldAutoOpen } from '../hooks/logic'
 import { register } from '../hooks/register'
 
 const PLUGIN = 'ox-cli-brief-pane'
@@ -74,17 +74,22 @@ function ok(stdout: string) {
 // surfaces, the plugin's store, every pane opened and closed, every ox run.
 // `placed: false` answers each open as a surface too narrow to place an
 // unasked pane does.
-function mockSession(on: On, surfaces: string[], stored: Record<string, unknown> = {}, { placed = true } = {}) {
+function mockSession(on: On, surfaces: string[], stored: Record<string, unknown> = {}, { placed = true, storeFails = false } = {}) {
   const store: Record<string, unknown> = { ...stored }
   const opened: Array<Record<string, unknown>> = []
   const closed: string[] = []
   const runs: string[][] = []
   const open = new Set<string>()
+  // Set `ox.fails` to make every ox run exit 1.
+  const ox = { fails: false }
   const clock = mock.clock(on, { now: 1_000 })
   // The roster as it stands at each call: a test may push to it to attach.
   on('session.surfaces', () => ({ value: [...surfaces] }))
   on('store.get', (_, e) => ({ value: store[e.key] }))
   on('store.set', (_, e) => {
+    if (storeFails) {
+      return { deny: 'the store is unavailable' } as never
+    }
     store[e.key] = e.value
     return { value: undefined }
   })
@@ -101,16 +106,20 @@ function mockSession(on: On, surfaces: string[], stored: Record<string, unknown>
   on('ui.panes', () => ({ value: [...open].map(id => ({ id, title: 'ox brief', isShown: true, isFocused: false, isPlaced: true })) }))
   on('process.run', (_, e) => {
     runs.push([...e.argv])
+    if (ox.fails) {
+      return { value: { exitCode: 1, stdout: '', stderr: 'ox failed', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     return ok(JSON.stringify(REPORT))
   })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.attach', (_, e) => ({ clientId: e.clientId }))
   on('session.detach', (_, e) => ({ clientId: e.clientId }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
-  return { store, opened, closed, runs, clock }
+  return { store, opened, closed, runs, clock, ox }
 }
 
 const briefRuns = (runs: string[][]) => runs.filter(r => r.join(' ') === BRIEF_ARGV.join(' '))
+const statuslineRuns = (runs: string[][]) => runs.filter(r => r.join(' ') === STATUSLINE_ARGV.join(' '))
 
 describe('shouldAutoOpen', () => {
   test('opens only on desktop, and only until turned off', () => {
@@ -356,4 +365,74 @@ test('/ox-brief opens at the desktop width where the desktop app is attached, th
   surfaces.push('desktop')
   await $.command.run({ ...COMMAND, surface: 'desktop', args: '' } as never)
   expect(s.opened[1]).toEqual({ id: 'ox-brief', title: 'ox brief', columns: DESKTOP_COLUMNS })
+})
+
+// Failure prevented: `/ox-brief off` says the pane will stay closed when the
+// setting never saved, and it pops open again next session.
+test('/ox-brief off says so when the setting did not save', async ($, on) => {
+  const s = mockSession(on, ['desktop'], {}, { storeFails: true })
+  const reply = await $.command.run({ ...COMMAND, surface: 'desktop', args: 'off' } as never)
+  expect(s.closed).toEqual(['ox-brief'])
+  expect(reply.text).toBe('ox brief pane closed, but the setting did not save; it may open again next session.')
+})
+
+// Failure prevented: a `/ox-brief` the window is too narrow to place runs
+// `ox brief` every 15 seconds for a pane nobody can see.
+test('/ox-brief on a window too narrow to place it polls nothing until the pane is drawn', async ($, on) => {
+  const s = mockSession(on, ['desktop'], {}, { placed: false })
+  const reply = await $.command.run({ ...COMMAND, surface: 'desktop', args: '' } as never)
+  expect(reply.text).toMatch(/not shown/)
+  const once = briefRuns(s.runs).length
+  await s.clock.advance(REFRESH_MS * 3 + 1_000)
+  expect(briefRuns(s.runs)).toHaveLength(once)
+})
+
+// Failure prevented: after the desktop app leaves, a terminal-only session
+// keeps running `ox statusline` every 15 seconds and after each ox command,
+// for a band nothing draws.
+test('desktop: the desktop app detaching stops the status band polling too', async ($, on) => {
+  const surfaces = ['terminal', 'desktop']
+  const s = mockSession(on, surfaces)
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+  on('tool.call', () => ({ result: {} }))
+  const band = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'desktop',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  } as never)
+  await s.clock.settle()
+  await band.unmount()
+  expect(statuslineRuns(s.runs).length).toBeGreaterThan(0)
+
+  surfaces.splice(surfaces.indexOf('desktop'), 1)
+  await $.session.detach({ surface: 'desktop', clientId: 'desktop:default', reason: 'detach' } as never)
+  const before = statuslineRuns(s.runs).length
+  await s.clock.advance(STATUSLINE_REFRESH_MS * 3)
+  await $.tool.call({ tool: 'Bash', command: 'ox status' })
+  await s.clock.settle()
+  expect(statuslineRuns(s.runs)).toHaveLength(before)
+})
+
+// Failure prevented: a pane closed after a failed first read, then opened
+// again, sits on "Loading…" until the timer's first tick instead of reading
+// at once.
+test('a pane drawn again after a close reads ox brief at once', async ($, on) => {
+  const s = mockSession(on, ['desktop'])
+  // A first pane whose first read fails: it stays on no report.
+  s.ox.fails = true
+  const first = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'ox-brief', props: PANE_PROPS } as never)
+  await s.clock.advance(0)
+  await first.unmount()
+  s.ox.fails = false
+  await $.command.run({ ...COMMAND, surface: 'desktop', args: 'off' } as never)
+  const failed = briefRuns(s.runs).length
+
+  const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'ox-brief', props: PANE_PROPS } as never)
+  await s.clock.advance(0)
+  expect(briefRuns(s.runs)).toHaveLength(failed + 1)
+  await ui.unmount()
 })
