@@ -20,7 +20,7 @@ import (
 )
 
 // Live use evidence: a recorded session that re-opened or named surfaced
-// discussions shows them as used in `ox brief` while it is still recording,
+// discussions shows them as used in `ox session report` while it is still recording,
 // with no `context used` self-report and no session stop.
 
 const (
@@ -121,7 +121,7 @@ func relevantDetails(r usage.Report) map[string]string {
 // tests/acceptance/features/brief/relevant-context.feature: Ashby's AI
 // coworker searched discussions, re-opened the first by its sageox.ai
 // recording link, and wrote its reply naming the second by title. While the
-// session is still recording, with no self-report, `ox brief` lists both as
+// session is still recording, with no self-report, `ox session report` lists both as
 // used — one re-opened, one cited — each with its /c/ link. Failure
 // prevented: the brief says "used 0" for discussions the reply was built
 // from, until the session stops.
@@ -146,7 +146,7 @@ func TestBrief_LiveUses_AshbyShape(t *testing.T) {
 	for _, it := range r.Relevant.Items {
 		assert.Equal(t, liveEndpoint+"/c/"+it.Ref, it.URL, "used discussion %s carries its /c/ link", it.Ref)
 	}
-	assert.Equal(t, traceBefore, readTraceBytes(t, state), "ox brief writes nothing to the trace")
+	assert.Equal(t, traceBefore, readTraceBytes(t, state), "ox session report writes nothing to the trace")
 
 	st := oxactivity.LoadState(root, oxactivity.StateKey(usageAgentID, liveHarnessSess))
 	assert.Equal(t, 2, st.Used, "the status line's used count agrees with the brief")
@@ -295,5 +295,5 @@ func TestBrief_LiveUses_IncrementalCache(t *testing.T) {
 	assert.Equal(t, []int64{0}, offsets)
 	assert.Equal(t, 1, r.Relevant.Count)
 
-	assert.Equal(t, traceBefore, readTraceBytes(t, state), "ox brief never writes the trace")
+	assert.Equal(t, traceBefore, readTraceBytes(t, state), "ox session report never writes the trace")
 }

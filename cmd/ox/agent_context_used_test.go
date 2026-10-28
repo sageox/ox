@@ -346,7 +346,7 @@ func TestResolveSurfacedRef_AnyName(t *testing.T) {
 // TestAgentContextUsed_AnySurfacedName drives `context used` with the names an
 // AI coworker actually has in hand — a slug, a /c/ link, a rec_ id — and checks
 // the used event names the surfaced item canonically and carries its aliases,
-// so `ox brief` attaches the use to the item that was surfaced.
+// so `ox session report` attaches the use to the item that was surfaced.
 func TestAgentContextUsed_AnySurfacedName(t *testing.T) {
 	const (
 		cnv = "cnv_019ff2f5-2079-7be1-b05e-8caad2772e61"

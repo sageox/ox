@@ -19,8 +19,8 @@ func TestModFS_HoldsTheMod(t *testing.T) {
 		{".claude-plugin/plugin.json", `"version": "{{VERSION}}"`},
 		{".claude-plugin/marketplace.json", `"name": "ox-cli-brief"`},
 		{"hooks/hooks.json", `"./register.tsx"`},
-		{"hooks/register.tsx", `command: 'ox-brief'`},
-		{"hooks/logic.ts", `'brief', '--json', '--recent', '0'`},
+		{"hooks/register.tsx", `command: 'ox-session-report'`},
+		{"hooks/logic.ts", `'session', 'report', '--json', '--recent', '0'`},
 		{"types/index.d.ts", `'ox-cli-brief-pane'`},
 	}
 	for _, tt := range tests {

@@ -14,7 +14,7 @@ import (
 
 // TestCheckUsagePane drives the doctor check against a fake claude CLI and
 // asserts what Claude Code ends up with, not just the check's verdict.
-// Failure prevented: brief_pane is on (the default) and doctor reports
+// Failure prevented: session_report_pane is on (the default) and doctor reports
 // healthy while Claude Code never got the plugin — or it is off and the pane
 // keeps loading.
 func TestCheckUsagePane(t *testing.T) {
@@ -89,7 +89,7 @@ func TestCheckUsagePane(t *testing.T) {
 		},
 		{
 			name: "disabled, installed, fix removes", setup: enableAt(want), fix: true,
-			wantPassed: true, wantMessage: "removed (brief_pane is off)",
+			wantPassed: true, wantMessage: "removed (session_report_pane is off)",
 			wantLog: func(usagePaneEnv) []string {
 				return []string{
 					"plugin list --json",
@@ -178,7 +178,7 @@ func TestCheckUsagePane_RestoresInterruptedRefresh(t *testing.T) {
 }
 
 // TestUsagePaneCheck_IsRegistered verifies the doctor registry runs the check
-// with the user's brief_pane setting, against the real data path.
+// with the user's session_report_pane setting, against the real data path.
 func TestUsagePaneCheck_IsRegistered(t *testing.T) {
 	env := setupUsagePaneEnv(t, true)
 	t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
@@ -193,9 +193,9 @@ func TestUsagePaneCheck_IsRegistered(t *testing.T) {
 	assert.FileExists(t, filepath.Join(env.state, "installed"))
 
 	// off: the fix removes it
-	require.NoError(t, SetConfigValue("brief_pane", "off", ConfigLevelUser, ""))
+	require.NoError(t, SetConfigValue("session_report_pane", "off", ConfigLevelUser, ""))
 	res = check.Run(true)
-	assert.Equal(t, "removed (brief_pane is off)", res.message)
+	assert.Equal(t, "removed (session_report_pane is off)", res.message)
 	assert.NoFileExists(t, filepath.Join(env.state, "installed"))
 	assert.NoDirExists(t, env.dir)
 }
@@ -206,11 +206,11 @@ func TestEnsureUsagePane_FromInit(t *testing.T) {
 	env := setupUsagePaneEnv(t, true)
 	t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
 
-	require.NoError(t, SetConfigValue("brief_pane", "off", ConfigLevelUser, ""))
+	require.NoError(t, SetConfigValue("session_report_pane", "off", ConfigLevelUser, ""))
 	ensureUsagePane(true)
-	assert.Nil(t, env.log(t), "brief_pane off: init must not touch Claude Code")
+	assert.Nil(t, env.log(t), "session_report_pane off: init must not touch Claude Code")
 
-	require.NoError(t, UnsetConfigValue("brief_pane", ConfigLevelUser, ""))
+	require.NoError(t, UnsetConfigValue("session_report_pane", ConfigLevelUser, ""))
 	ensureUsagePane(true)
 	assert.FileExists(t, filepath.Join(env.state, "installed"))
 	assert.Contains(t, env.log(t), "plugin install ox-cli-brief-pane@ox-cli-brief --scope user")
@@ -228,9 +228,9 @@ func TestEnsureUsagePane_NeverFailsInit(t *testing.T) {
 }
 
 // TestCheckUsagePane_RemovesLegacyPlugin drives the doctor check with the
-// pane plugin from before the `ox usage` → `ox brief` rename around.
+// pane plugin from before the `ox usage` → `ox session report` rename around.
 // Failure prevented: a coworker upgrades and ends up with two panes — the old
-// /ox-usage one, frozen on the old ox, beside the new /ox-brief one — or
+// /ox-usage one, frozen on the old ox, beside the new /ox-session-report one — or
 // doctor fails on a machine that never had the old plugin.
 func TestCheckUsagePane_RemovesLegacyPlugin(t *testing.T) {
 	const want = "2.0.0"

@@ -377,9 +377,11 @@ var cliRules = []cliRule{
 
 	{words: []string{"decision", "enrich"}, label: "checked decisions", kind: KindRetrieval},
 
-	{words: []string{"brief"}, label: "checked ox brief", kind: KindOther},
-	// `ox usage` is the deprecated alias of `ox brief`, kept for one release.
-	{words: []string{"usage"}, label: "checked ox brief", kind: KindOther},
+	{words: []string{"session", "report"}, label: "checked session report", kind: KindOther},
+	// `ox brief` is the hidden alias of `ox session report`, kept for one
+	// release; `ox usage` is its older name, still found in recorded traces.
+	{words: []string{"brief"}, label: "checked session report", kind: KindOther},
+	{words: []string{"usage"}, label: "checked session report", kind: KindOther},
 }
 
 // murmurSubcommands are `ox murmur` children; any other first word is the

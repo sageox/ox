@@ -48,7 +48,7 @@ type RollupInput struct {
 	AllowJudged    bool
 }
 
-// MeReport is the `ox brief --me --json` payload.
+// MeReport is the `ox session report --me --json` payload.
 type MeReport struct {
 	View        string       `json:"view"`
 	Window      string       `json:"window"`
@@ -158,7 +158,7 @@ func BuildMe(in RollupInput) MeReport {
 		r.NextActions = append(r.NextActions, NextAction{Action: "ox session view <name> --context", Why: "read a session whose trace is not hydrated locally"})
 	}
 	if r.Totals.Sessions == 0 {
-		r.NextActions = append(r.NextActions, NextAction{Action: "ox session start", Why: "record a session so ox brief can report it"})
+		r.NextActions = append(r.NextActions, NextAction{Action: "ox session start", Why: "record a session so ox session report can report it"})
 	}
 	r.Display = DisplayMe(r, in.Width)
 	return r
@@ -199,7 +199,7 @@ func renderMe(r MeReport, width int, st styler) string {
 	if r.Window == "" {
 		window = "recent"
 	}
-	lines := []string{st.head("ox brief") + st.dim(fmt.Sprintf(" · my sessions  %s · %d session%s", window, r.Totals.Sessions, plural(r.Totals.Sessions, "", "s")))}
+	lines := []string{st.head("ox session report") + st.dim(fmt.Sprintf(" · my sessions  %s · %d session%s", window, r.Totals.Sessions, plural(r.Totals.Sessions, "", "s")))}
 	if len(r.Sessions) == 0 {
 		lines = append(lines, st.dim("no recorded sessions in this window — start one: ox session start"))
 		return finish(lines)

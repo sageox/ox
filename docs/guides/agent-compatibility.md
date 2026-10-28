@@ -65,19 +65,19 @@ context that influenced this session — `● ox  3 discussions · 1 plan · 1 m
 only (no network, no daemon). A `statusLine` already in the project file is never
 replaced; one in your own `~/.claude/settings.json` keeps working, on its own row
 beneath ox's. In the Claude desktop app's Claude Code tab, which has no status bar, the
-same line is drawn directly above the prompt by the brief pane plugin (below), fed by
+same line is drawn directly above the prompt by the session report pane plugin (below), fed by
 `ox statusline --json`. Turn it off everywhere with `ox config set statusline off`.
 
-**Brief pane.** `/ox-brief` opens a pane beside the chat with what SageOx gave this
+**Session report pane.** `/ox-session-report` opens a pane beside the chat with what SageOx gave this
 session (calls, estimated context tokens, what was read and what was useful) and a
 scrollable list of every ox call, refreshed as they happen. It is a Claude Code plugin,
 `ox-cli-brief-pane`, that `ox init` and `ox doctor` install at user scope when the
 `claude` CLI is on PATH (Claude Code 2.1.309 or newer); the same mechanism ships Oxy
-(`ox pet`). The pane is a thin view over `ox brief --json`, so it shows exactly what
-`/ox-cli-brief` reports. `/ox-brief off` closes it, `ox config set brief_pane off`
-removes it, and `ox brief pane status` shows whether it is installed. In the Claude desktop app's
+(`ox pet`). The pane is a thin view over `ox session report --json`, so it shows exactly what
+`/ox-cli-session-report` reports. `/ox-session-report off` closes it, `ox config set session_report_pane off`
+removes it, and `ox session report pane status` shows whether it is installed. In the Claude desktop app's
 Claude Code tab the pane opens by itself, docked beside the chat; close it and it
-stays closed in later sessions until you run `/ox-brief` again.
+stays closed in later sessions until you run `/ox-session-report` again.
 
 ## Canonical Agent Skills
 
@@ -89,13 +89,13 @@ reconciles the project-selected native targets, including updates, missing
 skills, and retired ox-owned files, while preserving user-authored additions
 and modified retired files.
 
-Run `/ox-cli-brief` (Claude Code slash command, or pick it in Codex's skill
+Run `/ox-cli-session-report` (Claude Code slash command, or pick it in Codex's skill
 picker) to see what SageOx gave the current session: the ox calls your AI
 coworker made, the team context ox put in front of it and from where, the
 decisions, rules, murmurs and sessions it read, and which of those the coworker
-reports were useful. `/ox-cli-brief me` rolls up your recent sessions in this
-repo; `/ox-cli-brief team` shows team-wide totals only, never per-person reads.
-The skill is a thin relay over `ox brief --json`, so other AI coworkers get the
+reports were useful. `/ox-cli-session-report me` rolls up your recent sessions in this
+repo; `/ox-cli-session-report team` shows team-wide totals only, never per-person reads.
+The skill is a thin relay over `ox session report --json`, so other AI coworkers get the
 same report by running that command.
 
 ### Codex

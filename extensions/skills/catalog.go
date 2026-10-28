@@ -39,7 +39,7 @@ var Catalog = []Bundle{
 	// which moved to extensions/addons/post-cutoff/. This also closed GH #1028:
 	// nothing in the CLI could ever select a Default: false bundle, since the
 	// commands that would have were withdrawn before release (PR #1013).
-	{ID: "lifecycle", Description: "Explicit ox lifecycle and diagnostic slash surfaces", Default: true, SkillIDs: []string{"ox-cli-attest", "ox-cli-brief", "ox-cli-doctor", "ox-cli-init", "ox-cli-prime", "ox-cli-session-abort", "ox-cli-session-list", "ox-cli-session-start", "ox-cli-session-status", "ox-cli-session-stop", "ox-cli-status"}},
+	{ID: "lifecycle", Description: "Explicit ox lifecycle and diagnostic slash surfaces", Default: true, SkillIDs: []string{"ox-cli-attest", "ox-cli-doctor", "ox-cli-init", "ox-cli-prime", "ox-cli-session-abort", "ox-cli-session-list", "ox-cli-session-report", "ox-cli-session-start", "ox-cli-session-status", "ox-cli-session-stop", "ox-cli-status"}},
 	// Carts is experimental and gated behind FEATURE_CARTS. These four skills
 	// used to sit in "lifecycle" (Default: true), so they installed for
 	// everyone — teaching an AI coworker to run `ox carts …`, which then
@@ -88,6 +88,8 @@ var Retired = []string{
 	"ox-agents", "ox-session-pause", "ox-session-recover", "ox-session-resume",
 	// `ox usage` became `ox brief`; the skill was renamed with it.
 	"ox-cli-usage",
+	// `ox brief` became `ox session report`; the skill was renamed with it.
+	"ox-cli-brief",
 }
 
 // IsRetired reports whether name is a surface ox once installed and now removes.

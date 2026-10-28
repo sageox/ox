@@ -22,7 +22,7 @@ import (
 )
 
 var usageCmd = &cobra.Command{
-	Use:   "brief",
+	Use:   "report",
 	Short: "Show what SageOx gave this session",
 	Long: `Show what SageOx gave this session: the ox calls your AI coworker made, how
 much context ox put in front of the model (estimated tokens), what it read by
@@ -35,24 +35,24 @@ recent sessions; --team shows a team-wide aggregate only — never who did what.
 
 In the session view, calls.recent in the JSON lists the 10 newest ox calls;
 --recent N widens it (0 = every call). The display text is unchanged.`,
-	Example: `  ox brief                     # this session
-  ox brief --session <name>    # a recorded session in the Ledger
-  ox brief --me --since 14d    # your recent sessions, one row each
-  ox brief --team              # team-wide aggregate (no per-person data)
-  ox brief --json              # structured report for AI coworkers
-  ox brief --json --recent 0   # every ox call in calls.recent`,
+	Example: `  ox session report                     # this session
+  ox session report --session <name>    # a recorded session in the Ledger
+  ox session report --me --since 14d    # your recent sessions, one row each
+  ox session report --team              # team-wide aggregate (no per-person data)
+  ox session report --json              # structured report for AI coworkers
+  ox session report --json --recent 0   # every ox call in calls.recent`,
 	Args: cobra.NoArgs,
 	RunE: runUsage,
 }
 
-// usageDeprecatedCmd keeps `ox usage` working for one release after the
-// rename to `ox brief`. Hidden, and without the pane subcommand, so help and
-// generated docs show only `ox brief`.
+// usageDeprecatedCmd keeps `ox brief` working for one release after the
+// rename to `ox session report`. Hidden, and without the pane subcommand, so
+// help and generated docs show only `ox session report`.
 var usageDeprecatedCmd = &cobra.Command{
-	Use:        "usage",
-	Short:      "Show what SageOx gave this session (use 'ox brief' instead)",
+	Use:        "brief",
+	Short:      "Show what SageOx gave this session (use 'ox session report' instead)",
 	Hidden:     true,
-	Deprecated: "use 'ox brief' instead",
+	Deprecated: "use 'ox session report' instead",
 	Args:       cobra.NoArgs,
 	RunE:       runUsage,
 }
@@ -240,7 +240,7 @@ func usageInputForLedgerSession(name string) (usage.Input, error) {
 		return usage.Input{}, fmt.Errorf("session %q not found in the Ledger", name)
 	}
 	if meta.IsDraft() {
-		in.TraceReason = "session is still recording; run `ox brief` from that session"
+		in.TraceReason = "session is still recording; run `ox session report` from that session"
 		return in, nil
 	}
 	in.AgentID = meta.AgentID

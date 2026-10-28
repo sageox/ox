@@ -309,10 +309,13 @@ type UserConfig struct {
 	DisplayName       string       `yaml:"display_name,omitempty"`
 	TipsEnabled       *bool        `yaml:"tips_enabled,omitempty"`
 	StatuslineEnabled *bool        `yaml:"statusline_enabled,omitempty"` // ox row in the Claude Code status line; nil = on
-	BriefPaneEnabled  *bool        `yaml:"brief_pane_enabled,omitempty"` // /ox-brief pane in Claude Code; nil = UsagePaneEnabled, then on
-	// UsagePaneEnabled is DEPRECATED: brief_pane_enabled's name before
-	// `ox usage` became `ox brief`. Read only as BriefPaneEnabled's fallback.
-	UsagePaneEnabled  *bool        `yaml:"usage_pane_enabled,omitempty"`
+	// SessionReportPaneEnabled is the /ox-session-report pane in Claude Code;
+	// nil = BriefPaneEnabled, then on.
+	SessionReportPaneEnabled *bool `yaml:"session_report_pane_enabled,omitempty"`
+	// BriefPaneEnabled is DEPRECATED: session_report_pane_enabled's name before
+	// `ox brief` became `ox session report`. Read only as
+	// SessionReportPaneEnabled's fallback.
+	BriefPaneEnabled  *bool        `yaml:"brief_pane_enabled,omitempty"`
 	TelemetryEnabled  *bool        `yaml:"telemetry_enabled,omitempty"`
 	SessionTermsShown *bool        `yaml:"session_terms_shown,omitempty"`
 	Attribution       *Attribution `yaml:"attribution,omitempty"`
@@ -480,27 +483,28 @@ func (c *UserConfig) IsStatuslineEnabled() bool {
 	return *c.StatuslineEnabled
 }
 
-// IsBriefPaneEnabled reports whether ox should keep the /ox-brief pane
-// installed in Claude Code: brief_pane_enabled when set, else the deprecated
-// usage_pane_enabled, else true.
-func (c *UserConfig) IsBriefPaneEnabled() bool {
-	if v := c.BriefPaneSetting(); v != nil {
+// IsSessionReportPaneEnabled reports whether ox should keep the
+// /ox-session-report pane installed in Claude Code:
+// session_report_pane_enabled when set, else the deprecated
+// brief_pane_enabled, else true.
+func (c *UserConfig) IsSessionReportPaneEnabled() bool {
+	if v := c.SessionReportPaneSetting(); v != nil {
 		return *v
 	}
 	return true
 }
 
-// BriefPaneSetting is the explicit brief pane value — brief_pane_enabled,
-// falling back to the deprecated usage_pane_enabled — or nil when neither is
-// set.
-func (c *UserConfig) BriefPaneSetting() *bool {
+// SessionReportPaneSetting is the explicit session report pane value —
+// session_report_pane_enabled, falling back to the deprecated
+// brief_pane_enabled — or nil when neither is set.
+func (c *UserConfig) SessionReportPaneSetting() *bool {
 	if c == nil {
 		return nil
 	}
-	if c.BriefPaneEnabled != nil {
-		return c.BriefPaneEnabled
+	if c.SessionReportPaneEnabled != nil {
+		return c.SessionReportPaneEnabled
 	}
-	return c.UsagePaneEnabled
+	return c.BriefPaneEnabled
 }
 
 // RecapConfig holds the user-level `recap.*` settings.

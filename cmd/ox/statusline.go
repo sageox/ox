@@ -83,7 +83,7 @@ replaced. If your own ~/.claude/settings.json sets a statusLine, ox runs it
 and prints its line beneath ox's, since the project setting would otherwise
 hide yours.
 
-The Claude desktop app has no status bar. There, the ox brief pane plugin
+The Claude desktop app has no status bar. There, the ox session report pane plugin
 runs ` + "`ox statusline --json`" + ` and draws the same line as a band above the
 prompt. --json prints the line's data (show, counts, recording) as one JSON
 document instead of text, never runs your own statusLine command, and reads

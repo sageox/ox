@@ -41,7 +41,7 @@ func TestClassifyLegacyPath_ReservedNamesAreOxOwnedRegardlessOfContent(t *testin
 	cases := []string{
 		".claude/skills/ox-cli-plan/SKILL.md",
 		".agents/skills/ox-cli-recap/SKILL.md",
-		".claude/skills/ox-cli-brief/SKILL.md",
+		".claude/skills/ox-cli-session-report/SKILL.md",
 		".claude/rules/ox-cli.md",
 		".factory/rules/ox-cli-use-team-context.md",
 		".claude/skills/sageox-team-deploy/SKILL.md",

@@ -149,7 +149,7 @@ func TestConfigSchema_FlagsDeprecatedKeys(t *testing.T) {
 			deprecated = append(deprecated, s.Key)
 		}
 	}
-	assert.ElementsMatch(t, []string{"context_git.auto_commit", "context_git.auto_push", "usage_pane"}, deprecated)
+	assert.ElementsMatch(t, []string{"context_git.auto_commit", "context_git.auto_push", "brief_pane"}, deprecated)
 }
 
 // TestConfigSchema_WorksOutsideARepo — failure prevented: the desktop app,

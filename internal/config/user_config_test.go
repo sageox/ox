@@ -760,11 +760,11 @@ func TestIsStatuslineEnabled(t *testing.T) {
 	}
 }
 
-// TestIsBriefPaneEnabled reads the brief_pane_enabled key, and its deprecated
-// usage_pane_enabled fallback, from a real config file. Failure prevented: a
-// coworker who never touched the setting misses the /ox-brief pane, or one
+// TestIsSessionReportPaneEnabled reads the session_report_pane_enabled key,
+// and its deprecated brief_pane_enabled fallback, from a real config file. Failure prevented: a
+// coworker who never touched the setting misses the /ox-session-report pane, or one
 // who turned the pane off before the rename gets it reinstalled.
-func TestIsBriefPaneEnabled(t *testing.T) {
+func TestIsSessionReportPaneEnabled(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		content string
@@ -772,12 +772,13 @@ func TestIsBriefPaneEnabled(t *testing.T) {
 	}{
 		{"no config file", "", true},
 		{"key absent", "tips_enabled: false\n", true},
-		{"off", "brief_pane_enabled: false\n", false},
-		{"on", "brief_pane_enabled: true\n", true},
-		{"deprecated usage_pane off", "usage_pane_enabled: false\n", false},
-		{"deprecated usage_pane on", "usage_pane_enabled: true\n", true},
-		{"brief_pane wins over usage_pane (on)", "brief_pane_enabled: true\nusage_pane_enabled: false\n", true},
-		{"brief_pane wins over usage_pane (off)", "brief_pane_enabled: false\nusage_pane_enabled: true\n", false},
+		{"off", "session_report_pane_enabled: false\n", false},
+		{"on", "session_report_pane_enabled: true\n", true},
+		{"deprecated brief_pane off", "brief_pane_enabled: false\n", false},
+		{"deprecated brief_pane on", "brief_pane_enabled: true\n", true},
+		{"session_report_pane wins over brief_pane (on)", "session_report_pane_enabled: true\nbrief_pane_enabled: false\n", true},
+		{"session_report_pane wins over brief_pane (off)", "session_report_pane_enabled: false\nbrief_pane_enabled: true\n", false},
+		{"retired usage_pane is ignored", "usage_pane_enabled: false\n", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -786,12 +787,12 @@ func TestIsBriefPaneEnabled(t *testing.T) {
 			}
 			cfg, err := LoadUserConfigFrom(dir)
 			require.NoError(t, err)
-			assert.Equal(t, tc.want, cfg.IsBriefPaneEnabled())
+			assert.Equal(t, tc.want, cfg.IsSessionReportPaneEnabled())
 		})
 	}
 	var nilCfg *UserConfig
-	assert.True(t, nilCfg.IsBriefPaneEnabled())
-	assert.Nil(t, nilCfg.BriefPaneSetting())
+	assert.True(t, nilCfg.IsSessionReportPaneEnabled())
+	assert.Nil(t, nilCfg.SessionReportPaneSetting())
 }
 
 // TestIsTraceConsultationsEnabled reads recap.trace_consultations from a real

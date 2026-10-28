@@ -1,15 +1,15 @@
-// The ox brief pane: what ox gave this session (what the AI coworker used,
+// The ox session report pane: what ox gave this session (what the AI coworker used,
 // with links, the context ox put in front of the model, what else was
 // available, whether SageOx would co-author the work, each ox call) in a
 // scrollable pane beside the chat. Installed and kept up to date by ox; the data is
-// `ox brief --json --recent 0`, re-read when the pane opens, after each ox
+// `ox session report --json --recent 0`, re-read when the pane opens, after each ox
 // command the AI coworker runs through Bash, and every 15 seconds while open.
 //
-// In the terminal it opens only on `/ox-brief`. In the Claude desktop app it
+// In the terminal it opens only on `/ox-session-report`. In the Claude desktop app it
 // opens by itself, docked beside the chat, at session start and whenever the
 // desktop app attaches. A person closing it by hand turns that off across
-// sessions (the `autoOpen` store key); `/ox-brief` turns it back on and
-// `/ox-brief off` turns it off.
+// sessions (the `autoOpen` store key); `/ox-session-report` turns it back on and
+// `/ox-session-report off` turns it off.
 //
 // On the Claude desktop app (whose Code tab has no status bar) it also draws
 // ox's status line as a band directly above the prompt:
@@ -60,10 +60,10 @@ const report = atom({ plugin: 'ox-cli-brief-pane', key: 'report' } as const, nul
 // status-1 value, follow true, is declined so it cannot pull the pane down.
 const status = atom({ plugin: 'ox-cli-brief-pane', key: 'status' } as const, INITIAL_STATUS, { shape: 'status-2' })
 
-const TITLE = 'ox brief'
-const USAGE = '/ox-brief [off|refresh]'
+const TITLE = 'ox session report'
+const USAGE = '/ox-session-report [off|refresh]'
 // The store key remembering whether the pane opens by itself on desktop:
-// unset or true opens it, false (a person's close, `/ox-brief off`) does not.
+// unset or true opens it, false (a person's close, `/ox-session-report off`) does not.
 const AUTO_OPEN = 'autoOpen'
 
 // Module state: the refresh timer and the run in flight. A reload drops the
@@ -104,7 +104,7 @@ async function refreshOnce($: EngineInterface) {
   }
   const next = parseReport(ran.stdout)
   if (next === null) {
-    await setError($, 'ox brief returned unreadable JSON')
+    await setError($, 'ox session report returned unreadable JSON')
     return
   }
   const prev = await read($, report)
@@ -117,7 +117,7 @@ async function refreshOnce($: EngineInterface) {
   }
 }
 
-// refresh re-reads `ox brief`; a call while one runs folds into one more run
+// refresh re-reads `ox session report`; a call while one runs folds into one more run
 // after it, so a burst of ox commands costs at most two. Never throws.
 function refresh($: EngineInterface): Promise<void> {
   if (inflight !== null) {
@@ -176,7 +176,7 @@ async function openDesktopPane($: EngineInterface): Promise<void> {
       startTimer($)
     }
   } catch {
-    // A pane that can't open costs nothing; /ox-brief still opens it.
+    // A pane that can't open costs nothing; /ox-session-report still opens it.
   }
 }
 
@@ -256,7 +256,7 @@ function refreshStatusline($: EngineInterface): Promise<void> {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
-      name: 'ox-brief',
+      name: 'ox-session-report',
       description: 'Show what SageOx gave this session in a pane (opens by itself in the desktop app; off stops that)',
       argumentHint: '[off|refresh]',
     })
@@ -273,7 +273,7 @@ export const register: Register = on => {
     return done
   }).catch(($, e, next) => next(e))
 
-  // The desktop app leaving: with no desktop left, stop polling `ox brief`
+  // The desktop app leaving: with no desktop left, stop polling `ox session report`
   // and `ox statusline` (the terminal has its own status line). The pane's
   // and the band's next draws restart them.
   on('session.detach', async ($, e, next) => {
@@ -285,18 +285,18 @@ export const register: Register = on => {
     return done
   }).catch(($, e, next) => next(e))
 
-  on('command.run', { command: 'ox-brief' }, async ($, e) => {
+  on('command.run', { command: 'ox-session-report' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === 'off') {
       await $.ui.close({ id: PANE })
       stopTimer()
       const saved = await setAutoOpen($, false)
-      return { text: saved ? 'ox brief pane closed.' : 'ox brief pane closed, but the setting did not save; it may open again next session.' }
+      return { text: saved ? 'ox session report pane closed.' : 'ox session report pane closed, but the setting did not save; it may open again next session.' }
     }
     if (arg === 'refresh') {
       await refresh($)
       const err = (await read($, status)).error
-      return { text: err === undefined ? 'ox brief refreshed.' : err }
+      return { text: err === undefined ? 'ox session report refreshed.' : err }
     }
     if (arg !== '') {
       return { text: `Usage: ${USAGE} (opens by itself in the desktop app)` }
@@ -310,8 +310,8 @@ export const register: Register = on => {
       startTimer($)
     }
     await refresh($)
-    return { text: opened.isPlaced ? 'ox brief pane opened.' : `ox brief pane is open but not shown: ${opened.reason}` }
-  }).catch(() => ({ text: 'ox brief pane hit an error; try /ox-brief again.' }))
+    return { text: opened.isPlaced ? 'ox session report pane opened.' : `ox session report pane is open but not shown: ${opened.reason}` }
+  }).catch(() => ({ text: 'ox session report pane hit an error; try /ox-session-report again.' }))
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const ran = await next(e)
@@ -407,9 +407,9 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   // A pane the person closes by hand stays closed in later desktop sessions
-  // too; /ox-brief brings it back. A plugin's close (`/ox-brief off`) or an
+  // too; /ox-session-report brings it back. A plugin's close (`/ox-session-report off`) or an
   // unload is not the person's choice and stores nothing here.
-  on('ui.close', { id: 'ox-brief' }, async ($, e, next) => {
+  on('ui.close', { id: PANE }, async ($, e, next) => {
     const done = await next(e)
     stopTimer()
     // The next pane gets its own first-draw refresh.
@@ -422,7 +422,7 @@ export const register: Register = on => {
     return done
   }).catch(($, e, next) => next(e))
 
-  on('ui.scroll', { component: 'Pane', requestId: 'ox-brief' }, async ($, e, next) => {
+  on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     const moved = await next(e)
     if (e.origin.kind === 'person' && moved.deny === undefined) {
       const follow = isAtEnd(e.offset, e.bodyRows, e.contentRows)
@@ -434,7 +434,7 @@ export const register: Register = on => {
     return moved
   }).catch(($, e, next) => next(e))
 
-  on('ui.render', { component: 'Pane', requestId: 'ox-brief' }, async ($, e) => {
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     // A reload drops the timer while the pane stays up: start it again here.
     startTimer($)
     const { Box, Text, Link } = $.ui.resolve(e)
@@ -447,7 +447,7 @@ export const register: Register = on => {
     const st = await read($, status)
     const { marker, summary } = headerLines(r)
     const offsetMin = -new Date().getTimezoneOffset()
-    const title = '● ox brief'
+    const title = '● ox session report'
 
     const heading = (key: string, text: string) => (
       <Box key={key}>

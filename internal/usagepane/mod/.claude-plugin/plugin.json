@@ -1,7 +1,7 @@
 {
   "name": "ox-cli-brief-pane",
   "version": "{{VERSION}}",
-  "description": "What SageOx gave this session, in a scrollable pane beside the chat: each ox call, the context ox put in front of the model, and what was read. /ox-brief opens, refreshes, and closes it.",
+  "description": "What SageOx gave this session, in a scrollable pane beside the chat: each ox call, the context ox put in front of the model, and what was read. /ox-session-report opens, refreshes, and closes it.",
   "author": { "name": "SageOx", "url": "https://sageox.ai" },
   "types": "./types/index.d.ts"
 }

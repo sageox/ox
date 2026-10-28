@@ -163,7 +163,7 @@ func TestOxCapabilitiesCountsByClass(t *testing.T) {
 		MechanismCommand: 0,
 		// 5 auto-activating playbooks + the committed `sageox` on-ramp
 		// + 13 slash-only lifecycle surfaces folded in from commands
-		// + ox-cli-brief (slash-only session brief).
+		// + ox-cli-session-report (slash-only session report).
 		MechanismSkill: 20,
 	}
 	for class, n := range want {

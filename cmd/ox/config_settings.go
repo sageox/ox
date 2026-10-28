@@ -248,41 +248,41 @@ coworker session — "● ox  3 discussions · 1 plan · 1 murmur" — with a re
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
-		Key:         "brief_pane",
-		Label:       "Brief pane",
-		Description: "Show the /ox-brief pane in Claude Code (installs the ox-cli-brief-pane plugin)",
-		LongDescription: `Controls whether ox keeps the /ox-brief pane installed in Claude Code.
+		Key:         "session_report_pane",
+		Label:       "Session report pane",
+		Description: "Show the /ox-session-report pane in Claude Code (installs the ox-cli-brief-pane plugin)",
+		LongDescription: `Controls whether ox keeps the /ox-session-report pane installed in Claude Code.
 
-The pane lists this session's ox calls under the ox brief summary. It is the
-Claude Code plugin ox-cli-brief-pane@ox-cli-brief, installed at user scope;
-/ox-brief opens it and /ox-brief off closes it.
+The pane lists this session's ox calls under the ox session report summary.
+It is the Claude Code plugin ox-cli-brief-pane@ox-cli-brief, installed at
+user scope; /ox-session-report opens it and /ox-session-report off closes it.
 
   on  - ox installs the plugin (ox init, ox doctor --fix, and right away
         when you set this) and keeps it on this ox's version (default).
   off - ox removes the plugin and its files.
 
-Replaces usage_pane, which it falls back to when unset.`,
+Replaces brief_pane, which it falls back to when unset.`,
 		Category:    "Display",
 		ValidValues: []string{"on", "off"},
 		Default:     "on",
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
-		Key:         "usage_pane",
-		Label:       "Usage pane (deprecated)",
-		Description: "DEPRECATED — renamed to brief_pane",
-		LongDescription: `DEPRECATED: usage_pane is the old name of brief_pane, from before
-` + "`ox usage`" + ` became ` + "`ox brief`" + `. It still reads and sets the same value, so
+		Key:         "brief_pane",
+		Label:       "Brief pane (deprecated)",
+		Description: "DEPRECATED — renamed to session_report_pane",
+		LongDescription: `DEPRECATED: brief_pane is the old name of session_report_pane, from before
+` + "`ox brief`" + ` became ` + "`ox session report`" + `. It still reads and sets the same value, so
 existing config files and scripts keep working.
 
 Use instead:
-    ox config set brief_pane on|off`,
+    ox config set session_report_pane on|off`,
 		Category:          "Display",
 		ValidValues:       []string{"on", "off"},
 		Default:           "on",
 		Levels:            []ConfigLevel{ConfigLevelUser},
 		Deprecated:        true,
-		DeprecationNotice: "usage_pane is renamed to brief_pane; it still sets the same value.\nUse instead:\n    ox config set brief_pane on|off",
+		DeprecationNotice: "brief_pane is renamed to session_report_pane; it still sets the same value.\nUse instead:\n    ox config set session_report_pane on|off",
 	},
 	{
 		Key:         "recap.trace_consultations",
@@ -869,11 +869,11 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.UserVal = boolToOnOff(*userCfg.StatuslineEnabled)
 		}
 
-	case "brief_pane", "usage_pane":
+	case "session_report_pane", "brief_pane":
 		// only an explicit value counts as a user layer (see statusline);
-		// usage_pane is brief_pane's deprecated name, and an old
-		// usage_pane_enabled still counts until brief_pane is set
-		if v := userCfg.BriefPaneSetting(); v != nil {
+		// brief_pane is session_report_pane's deprecated name, and an old
+		// brief_pane_enabled still counts until session_report_pane is set
+		if v := userCfg.SessionReportPaneSetting(); v != nil {
 			cv.UserVal = boolToOnOff(*v)
 		}
 
@@ -1192,12 +1192,12 @@ func setUserConfig(key, value string) error {
 		enabled := value == "on"
 		cfg.StatuslineEnabled = &enabled
 
-	case "brief_pane", "usage_pane":
-		// both names write brief_pane_enabled and drop the old key, so the
-		// two can never disagree
+	case "session_report_pane", "brief_pane":
+		// both names write session_report_pane_enabled and drop the old key,
+		// so the two can never disagree
 		enabled := value == "on"
-		cfg.BriefPaneEnabled = &enabled
-		cfg.UsagePaneEnabled = nil
+		cfg.SessionReportPaneEnabled = &enabled
+		cfg.BriefPaneEnabled = nil
 
 	case "recap.trace_consultations":
 		enabled := value == "on"
@@ -1533,9 +1533,9 @@ func unsetUserConfig(key string) error {
 	case "statusline":
 		cfg.StatuslineEnabled = nil
 
-	case "brief_pane", "usage_pane":
+	case "session_report_pane", "brief_pane":
+		cfg.SessionReportPaneEnabled = nil
 		cfg.BriefPaneEnabled = nil
-		cfg.UsagePaneEnabled = nil
 
 	case "recap.trace_consultations":
 		if cfg.Recap != nil {

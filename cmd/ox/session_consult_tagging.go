@@ -44,7 +44,7 @@ func tagSessionConsults(projectRoot, sessionPath, rawPath string) {
 
 // consultRoots are the SageOx repo roots whose files count as consulted when
 // read: this project's ledger clone and its team-context repo. Finalize and
-// the live `ox brief` scan share it so both grade the same reads. No roots
+// the live `ox session report` scan share it so both grade the same reads. No roots
 // only disables file-read matching; citation and requery evidence needs none,
 // so a scan still runs.
 func consultRoots(projectRoot string) consultscan.Roots {
