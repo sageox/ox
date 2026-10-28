@@ -17,8 +17,8 @@ import (
 // AND `.agents/skills` (Codex, Gemini, OMP) with byte-identical bodies.
 //
 // Failure prevented: a skill added to extensions/skills (most recently
-// ox-cli-brief) that is missing from the catalog, or that one root receives and
-// the other does not, so `/ox-cli-brief` works in Claude Code but never appears
+// ox-cli-session-report) that is missing from the catalog, or that one root receives and
+// the other does not, so `/ox-cli-session-report` works in Claude Code but never appears
 // in Codex's skill picker — or the two copies drift and answer differently.
 func TestReconcile_ProjectsEveryDefaultSkillIntoBothRoots(t *testing.T) {
 	repo := t.TempDir()
@@ -47,7 +47,7 @@ func TestReconcile_ProjectsEveryDefaultSkillIntoBothRoots(t *testing.T) {
 	}
 	// Pinned explicitly: dropping it from the catalog would otherwise just
 	// shrink the table and pass.
-	require.Contains(t, names, "ox-cli-brief", "ox-cli-brief is not in the default catalog")
+	require.Contains(t, names, "ox-cli-session-report", "ox-cli-session-report is not in the default catalog")
 
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
