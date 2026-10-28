@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"log/slog"
@@ -157,9 +158,9 @@ func writeRecallPreamble(w io.Writer, results []LocalQueryResult) []recallHit {
 		if src == "" {
 			src = "local"
 		}
-		line := fmt.Sprintf("- (%s) %s", src, label)
+		line := fmt.Sprintf("- (%s) %s", recallText(src), recallText(label))
 		if ref != "" {
-			line += fmt.Sprintf(" — %s", ref)
+			line += fmt.Sprintf(" — %s", recallText(ref))
 		}
 		lines = append(lines, line)
 		emitted = append(emitted, recallHit{Result: r, Tokens: tokens.EstimateTokens(line)})
@@ -171,6 +172,15 @@ func writeRecallPreamble(w io.Writer, results []LocalQueryResult) []recallHit {
 	}
 	fmt.Fprintln(w, "</system-reminder>")
 	return emitted
+}
+
+// recallText escapes Ledger text for the <system-reminder> block it is written
+// into. Coworkers write these titles, snippets and paths, and an unescaped
+// "</system-reminder>" in one would end the block early.
+func recallText(s string) string {
+	var b strings.Builder
+	_ = xml.EscapeText(&b, []byte(s)) // writing to a strings.Builder cannot fail
+	return b.String()
 }
 
 // traceRecallDelivery appends one "provided" event per rendered recall hit

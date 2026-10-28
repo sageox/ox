@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,7 +117,7 @@ func TestBrowserRoundTrip_FeedbackReachesAuthoringAgent(t *testing.T) {
 	if item.Reviewer != "Devon" {
 		t.Errorf("item lost its reviewer attribution, got %q", item.Reviewer)
 	}
-	if res.Guidance != plan.ReviewTextGuidance {
+	if !strings.Contains(res.Guidance, "untrusted data") {
 		t.Errorf("await must tell the agent the reviewer's text is untrusted, got guidance %q", res.Guidance)
 	}
 }

@@ -339,7 +339,7 @@ func printPlanReviewDigest(cmd *cobra.Command, planDir string) bool {
 
 func init() {
 	planFeedbackApplyCmd.Flags().String("from", "", "feedback JSON file (use - or omit for stdin)")
-	planFeedbackShowCmd.Flags().Bool("json", false, "emit {items, corrupt_rounds, complete, failures, conflicts} as JSON")
+	planFeedbackShowCmd.Flags().Bool("json", false, "emit {guidance, items, corrupt_rounds, complete, failures, conflicts} as JSON")
 	planFeedbackResolveCmd.Flags().String("state", "addressed", "addressed | wontfix | verified")
 	planFeedbackResolveCmd.Flags().String("commit", "", "commit SHA that made the change")
 	planFeedbackResolveCmd.Flags().String("note", "", "what the agent did, or why wontfix")
