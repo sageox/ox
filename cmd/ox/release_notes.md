@@ -25,7 +25,7 @@ See how team context shaped each session in your status line and the new `ox bri
 - **AI coworkers get the command they meant** — ox corrects more of what they type, keeps their `--json` choice, and only suggests a correction that would change what the command does. Commands ox itself suggests, such as `ox agent <id> session log`, now run, and `plan list`, `murmur list`, `session list` and `conversation list` share `--limit`, `--since`, `--until` and `--json`.
 - **Drawing on a plan review is easier** — drag to draw an oval, then move or resize it before you send it, and drag the review toolbar out of your way. View original now circles the words you drew around.
 - **Large sessions preview, import and stop faster** — previewing or importing a multi-megabyte session is up to about 4× faster, and stopping it or retrying its upload about 8× faster, with every credential check still in place.
-- **Codex explains each SageOx hook before you approve it** — and no longer prints an ox notice after every ox command. `ox doctor` refreshes older hook labels.
+- **Codex explains each SageOx hook before you approve it** — every hook names SageOx and says what it does, including recording and publishing. `ox doctor` refreshes older hook labels.
 - **`ox query` says when a discussion happened** — results carry the date a meeting was recorded, not only when it was uploaded, so imported meetings land in the right place in time.
 
 ### Fixed
@@ -37,7 +37,7 @@ See how team context shaped each session in your status line and the new `ox bri
 - **First-time setup works without help** — `ox agent prime` no longer hangs in tools that keep input open, a new session's first prime brings team context, first clones of the Ledger and Team Context succeed, `ox team list` shows your teams before anything syncs, and `ox init --no-input` works with a single login.
 - **Your unsaved plan edits stay yours** — `ox doctor`'s repairs and session uploads no longer commit plan edits nobody saved; it finishes saves that were interrupted, and `ox doctor --fix-slug=plan-unsaved-edits` shares unsaved edits once you confirm. Saving an HTML plan from review or plan mode keeps the page you wrote, and a review waiting to retry survives Ledger cleanup.
 - **Team skills reach your team** — `ox skills publish` now pushes the skill and says whether it did, `ox agent prime` installs team skills, and `ox sync` skips an item this machine cannot install instead of failing. Teams that connect their Claude organization no longer see each skill twice in Claude Code.
-- **Sync and repairs are more dependable** — two writers syncing a Ledger at once no longer wedge it, interrupting `ox doctor` while it re-clones leaves nothing half-done, a new code index no longer fails when several commands open it at once, and "access denied" appears only when access is actually denied.
+- **Sync and repairs are more dependable** — two writers syncing a Ledger at once no longer wedge it, ox's background sync stays with your repository after you upgrade instead of starting a second copy, interrupting `ox doctor` while it re-clones leaves nothing half-done, a new code index no longer fails when several commands open it at once, and "access denied" appears only when access is actually denied.
 
 ### Security
 
