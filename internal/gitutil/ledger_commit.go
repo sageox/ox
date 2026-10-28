@@ -65,13 +65,13 @@ func CommitLedgerSnapshot(ctx context.Context, repoPath, message string, pathspe
 	return commitLedgerSnapshot(ctx, repoPath, message, nil, nil, pathspecs...)
 }
 
-// CommitLedgerSessionDeletion commits a snapshot after the caller has confirmed
-// and staged removal of the named sessions. Only those sessions are exempt from
-// the mass-deletion limit; all other staged content is validated as usual.
+// CommitLedgerSessionDeletion commits the staged snapshot after the caller has
+// confirmed and staged removal of the named sessions. Only those sessions are
+// exempt from the mass-deletion limit; all staged content is validated as usual.
 // If the commit fails, restore those sessions from current HEAD so their staged
 // deletions cannot block later automatic snapshots.
 // The caller must hold WithRepoLock from before staging through this call.
-func CommitLedgerSessionDeletion(ctx context.Context, repoPath, message string, sessionNames []string, pathspecs ...string) (bool, error) {
+func CommitLedgerSessionDeletion(ctx context.Context, repoPath, message string, sessionNames []string) (bool, error) {
 	if len(sessionNames) == 0 {
 		return false, errors.New("session deletion requires explicit session names")
 	}
@@ -80,7 +80,7 @@ func CommitLedgerSessionDeletion(ctx context.Context, repoPath, message string, 
 			return false, fmt.Errorf("invalid session name %q", name)
 		}
 	}
-	committed, err := commitLedgerSnapshot(ctx, repoPath, message, nil, sessionNames, pathspecs...)
+	committed, err := commitLedgerSnapshot(ctx, repoPath, message, nil, sessionNames)
 	if err != nil {
 		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()

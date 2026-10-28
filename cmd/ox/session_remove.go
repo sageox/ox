@@ -373,7 +373,7 @@ func batchDeleteSessionsFromLedger(ledgerPath string, sessionNames []string) (in
 		if len(staged) == 1 {
 			commitMsg = fmt.Sprintf("session: delete %s", staged[0])
 		}
-		_, err := gitutil.CommitLedgerSessionDeletion(ctx, ledgerPath, commitMsg, staged, allButPlansPathspec...)
+		_, err := gitutil.CommitLedgerSessionDeletion(ctx, ledgerPath, commitMsg, staged)
 		return err
 	}); err != nil {
 		return 0, err
