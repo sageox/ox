@@ -386,10 +386,12 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       rail.addEventListener('click', (ev) => {
         const t = ev.target as Element;
         if (t.closest('.rev-rail-show, .rev-rail-hide')) toggleRail();
-        const plan = t.closest('.rev-rail-plan');
-        if (plan) { const b = plan.getBoundingClientRect(); openPop(WHOLE, { left: b.left, bottom: b.bottom }, true); popByHost = true; }
+        if (t.closest('.rev-rail-plan')) openPop(WHOLE, null, true);
       });
     }
+    // A note open in the rail holds it still, so a redraw never takes the
+    // reviewer's focus or moves the note while they type; closePop redraws it.
+    if (pop && popByHost) return;
     const r = rail;
     const rows = railRows();
     // hidden when there's nothing to read and we're not actively reviewing.
@@ -425,7 +427,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         (row.answer ? '<div class="rev-rail-answer">↳ ' + esc(row.answer) + '</div>' : '') +
         (row.region ? '<button class="rev-rail-orig" title="What lay under this drawing when it was drawn">View original</button>' : '');
       const whoTag = row.reviewer ? '<span class="rev-rail-who">' + esc(row.reviewer) + '</span>' : '';
-      html += '<li class="rev-rail-item" data-i="' + i + '" data-status="' + esc(row.status) + '">' +
+      html += '<li class="rev-rail-item" data-i="' + i + '" data-a="' + esc(row.a) + '" data-status="' + esc(row.status) + '">' +
         '<span class="rev-rail-glyph">' + glyphFor(row.status) + '</span>' +
         '<div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(whole ? WHOLE.label : row.section || '(plan)') + '</span>' + whoTag + tag + '</div>' + content + '</div></li>';
     });
@@ -439,7 +441,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         // A drawing takes no click on the page, so its row shows it and opens
         // its note; anything with nothing on the page opens from its row too
         if (row.at) port.send({ type: 'reveal', anchor: row.at.anchor, nth: row.at.nth });
-        if (!row.at || DRAWING.test(row.a)) { openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }, { left: ev.clientX, bottom: ev.clientY }); popByHost = true; ev.stopPropagation(); }
+        if (!row.at || DRAWING.test(row.a)) { openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }, null); ev.stopPropagation(); }
       };
     });
   }
@@ -447,7 +449,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   let pop: HTMLElement | null = null;
   let popAbout: About | null = null;
   let popNote = ''; // the open note's text when it opened
-  let popByHost = false; // opened from the rail, not by a pick in the plan's frame
+  let popByHost = false; // opened from the rail, not by a pick in the plan's frame: it sits in the rail
   function sendMode() { port.send({ type: 'mode', on, open: !!pop, draw: tool }); }
   // The open note is held when the reviewer opened it from the rail or typed
   // in it: only their own Esc, Save or Delete ends it, never the plan's frame.
@@ -459,22 +461,26 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   }
   // replacing: another note opens in its place, so a waiting reload keeps waiting
   function closePop(replacing?: boolean) {
+    const docked = popByHost;
     popByHost = false;
     if (pop) {
       pop.remove(); pop = null; sendMode();
       popAbout = null;
       // a capture is kept only by Save
       if (pending) { pending = null; paint(); }
+      if (docked) renderRail();
     }
     port.send({ type: 'focus', anchor: null });
     if (!replacing) idle();
   }
   // t is what a note is about: an element or a highlight — anchor, section,
-  // label, and a highlight's quote. rect is where it opens below, in this window.
+  // label, and a highlight's quote. rect is where it opens below, in this
+  // window; null opens it in the rail.
   // fresh: a new comment, which never resolves the marks already there.
-  function openPop(t: About, rect: { left: number; bottom: number }, fresh?: boolean) {
+  function openPop(t: About, rect: { left: number; bottom: number } | null, fresh?: boolean) {
     closePop(true);
     popAbout = t;
+    popByHost = !rect;
     const a = t.a;
     const cstate = committedState(a);
     const p = pop = document.createElement('div'); p.className = 'rev-pop';
@@ -570,12 +576,22 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     Object.keys(v).forEach((k) => body.style.setProperty('--rev-' + k, v[k] + 'px'));
     if (presence) presence.reposition();
   }
-  // The note opens just below where the reviewer acted, never over it.
-  function placePop(rect: { left: number; bottom: number }) {
+  // The note opens just below where the reviewer acted, never over it. From
+  // the rail it opens in the rail, after the last comment on what it is about
+  // (a first whole-plan comment: after its button), pushing later rows down.
+  function placePop(rect: { left: number; bottom: number } | null) {
     const p = pop as HTMLElement;
-    body.appendChild(p);
-    p.style.top = (window.scrollY + rect.bottom + 8) + 'px';
-    p.style.left = (window.scrollX + Math.min(rect.left, window.innerWidth - 300)) + 'px';
+    if (rect) {
+      body.appendChild(p);
+      p.style.top = (window.scrollY + rect.bottom + 8) + 'px';
+      p.style.left = (window.scrollX + Math.min(rect.left, window.innerWidth - 300)) + 'px';
+    } else {
+      const r = rail as HTMLElement, a = (popAbout as About).a;
+      let at = r.querySelector('.rev-rail-plan');
+      r.querySelectorAll('.rev-rail-item').forEach((li) => { if (li.getAttribute('data-a') === a) at = li; });
+      if (at) at.after(p); else r.appendChild(p);
+      p.scrollIntoView({ block: 'nearest' }); // the rail scrolls: a note under its last visible row would open out of view
+    }
     sendMode();
   }
 
@@ -986,7 +1002,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
             popAbout.section = section;
             const about = pop.querySelector('.rev-about');
             if (about) about.textContent = label;
-            placePop(toHost(m.rect));
+            if (!popByHost) placePop(toHost(m.rect));
           }
           paint();
           break;
