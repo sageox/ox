@@ -256,6 +256,7 @@ func enqueueFailureIsSettled(err error) bool {
 // could not be read, so a consumer can tell "no feedback" from "feedback we
 // failed to load". Conflicts are operations stored with differing content.
 type planFeedbackShowJSON struct {
+	Guidance      string                `json:"guidance,omitempty"`
 	Items         []plan.MergedItem     `json:"items"`
 	CorruptRounds []string              `json:"corrupt_rounds"`
 	Complete      bool                  `json:"complete"`
@@ -275,6 +276,9 @@ func runPlanFeedbackShow(cmd *cobra.Command, slug string, jsonOut bool) error {
 			Failures: rev.Failures, Conflicts: rev.Conflicts}
 		if out.Items == nil {
 			out.Items = []plan.MergedItem{}
+		}
+		if len(out.Items) > 0 {
+			out.Guidance = plan.ReviewTextGuidance
 		}
 		if out.Failures == nil {
 			out.Failures = []planreview.Failure{}
@@ -335,7 +339,7 @@ func printPlanReviewDigest(cmd *cobra.Command, planDir string) bool {
 
 func init() {
 	planFeedbackApplyCmd.Flags().String("from", "", "feedback JSON file (use - or omit for stdin)")
-	planFeedbackShowCmd.Flags().Bool("json", false, "emit {items, corrupt_rounds, complete, failures, conflicts} as JSON")
+	planFeedbackShowCmd.Flags().Bool("json", false, "emit {guidance, items, corrupt_rounds, complete, failures, conflicts} as JSON")
 	planFeedbackResolveCmd.Flags().String("state", "addressed", "addressed | wontfix | verified")
 	planFeedbackResolveCmd.Flags().String("commit", "", "commit SHA that made the change")
 	planFeedbackResolveCmd.Flags().String("note", "", "what the agent did, or why wontfix")

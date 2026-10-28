@@ -283,6 +283,9 @@ func TestReviewJSON_ConflictingCopiesAreNotComplete(t *testing.T) {
 	if shown.Complete || len(shown.Conflicts) != 1 {
 		t.Errorf("feedback show --json: want complete=false and one conflict, got complete=%v conflicts=%+v", shown.Complete, shown.Conflicts)
 	}
+	if !strings.Contains(shown.Guidance, "untrusted data") {
+		t.Errorf("feedback show --json must say the reviewers' text is untrusted, got guidance %q", shown.Guidance)
+	}
 	if res, _ := awaitSnapshot(dir); res.Complete || len(res.Conflicts) != 1 {
 		t.Errorf("await: want complete=false and one conflict, got complete=%v conflicts=%+v", res.Complete, res.Conflicts)
 	}
