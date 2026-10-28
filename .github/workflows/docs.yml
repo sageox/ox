@@ -63,9 +63,11 @@ jobs:
   # repository, so it lives in the release-docs environment (deployments limited
   # to main) instead of the repository secrets every branch's workflows can read.
   # This job never checks out the repository, so no repository code runs beside
-  # the token.
+  # the token. The ref check skips the job when release.yml is dispatched from
+  # anywhere but main, even before the environment's branch policy exists.
   notify-docs-site:
     needs: publish-docs
+    if: github.ref == 'refs/heads/main'
     runs-on: blacksmith-2vcpu-ubuntu-2404
     environment: release-docs
     permissions: {}
