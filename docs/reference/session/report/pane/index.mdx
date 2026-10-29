@@ -16,6 +16,13 @@ The pane keeps the ox session report summary on top (ox calls, estimated context
 tokens, team items surfaced and used) and a scrollable list of every ox call
 your AI coworker made in this session underneath.
 
+In the Claude desktop app, VS Code and mobile, the same plugin draws a one-line
+flow lane in the transcript under each ox call that moves team data (a search,
+a murmur, a plan, a session upload; not status or config) and under each prompt
+that carried Team Context in: what moved between SageOx and the session, in which direction,
+and how much. /ox-session-report flow still draws the lanes without motion, and
+/ox-session-report flow off hides them.
+
 The pane is installed as a Claude Code plugin (ox-cli-brief-pane@ox-cli-brief) at
 user scope. Inside Claude Code, /ox-session-report opens it and /ox-session-report off closes it.
 

@@ -138,3 +138,6 @@ issues.jsonl
 # Beads / Dolt files (added by bd init)
 .beads-credential-key
 security/.output/
+
+# Design reference screenshots (study material, not ours to ship)
+design/*/refs/
