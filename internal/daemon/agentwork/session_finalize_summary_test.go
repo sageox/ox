@@ -762,12 +762,16 @@ func TestProcessResult_EmptySessionLLMScoreZero_Discarded(t *testing.T) {
 	}
 }
 
-func TestProcessResult_QualityScoreBelowUpload(t *testing.T) {
+// TestProcessResult_LocalOnlyWritesTitle verifies a session the summarizer
+// rates local_only gets its title and status in meta.json.
+// Failure prevented: the session is published untitled, every clone's title
+// autofix leaves an uncommitted meta.json edit, and a teammate's later summary
+// of the same session wedges those clones' Ledger sync.
+func TestProcessResult_LocalOnlyWritesTitle(t *testing.T) {
 	ledgerPath := createTestSession(t, "test-local", nil)
 	sessionDir := filepath.Join(ledgerPath, "sessions", "test-local")
 
 	handler := NewSessionFinalizeHandlerForTest(slog.Default())
-	handler.SetQualityThresholds(0.3, 0.1)
 
 	item := &WorkItem{
 		ID:       "test-2",
@@ -781,9 +785,8 @@ func TestProcessResult_QualityScoreBelowUpload(t *testing.T) {
 		},
 	}
 
-	// score above discard but below upload — artifacts generated, no push
 	result := &RunResult{
-		Output: `{"title":"Quick fix","summary":"Minor config change","key_actions":["updated config"],"outcome":"success","topics_found":["config"],"quality_score":0.2,"score_reason":"Routine config update"}`,
+		Output: `{"title":"Quick fix","summary":"Minor daemon config change","key_actions":["updated config"],"outcome":"success","topics_found":["config"],"quality_category":"local_only","score_reason":"Routine config update"}`,
 	}
 
 	err := handler.ProcessResult(item, result)
@@ -793,12 +796,15 @@ func TestProcessResult_QualityScoreBelowUpload(t *testing.T) {
 
 	// session dir should still exist (not discarded)
 	if _, statErr := os.Stat(sessionDir); os.IsNotExist(statErr) {
-		t.Error("expected session directory to still exist for quality between discard and upload thresholds")
+		t.Error("expected session directory to still exist for a local_only session")
 	}
 
-	// summary.json should be written (artifacts generated locally)
-	if _, statErr := os.Stat(filepath.Join(sessionDir, "summary.json")); os.IsNotExist(statErr) {
-		t.Error("expected summary.json to be generated even below upload threshold")
+	meta, err := lfs.ReadSessionMeta(sessionDir)
+	if err != nil {
+		t.Fatalf("local_only session has no readable meta.json: %v", err)
+	}
+	if meta.Title != "Quick fix" || meta.SummaryStatus != "ok" {
+		t.Errorf("local_only meta.json title=%q summary_status=%q, want %q and %q", meta.Title, meta.SummaryStatus, "Quick fix", "ok")
 	}
 }
 
