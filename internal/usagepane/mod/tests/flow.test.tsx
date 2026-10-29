@@ -130,6 +130,17 @@ describe('classifyBash: not flow events', () => {
   test('the first data-moving ox command in a line wins', () => {
     expect(classifyBash('ox doctor && ox murmur list')?.command).toBe('murmur list')
   })
+  test('a backtick substitution inside double quotes runs', () => {
+    expect(classifyBash('echo "result: `ox query topic`"')?.command).toBe('query')
+    expect(classifyBash('echo "a `date` b" && ox murmur list')?.command).toBe('murmur list')
+  })
+  test('a heredoc body is data, not commands', () => {
+    expect(classifyBash("cat <<'EOF' > notes.md\nox query secret\nEOF")).toBeNull()
+    expect(classifyBash('cat <<-EOF\n\tox agent prime\n\tEOF\nox murmur list')?.command).toBe('murmur list')
+    expect(classifyBash('cat <<EOF\nox query x\nEOF\nox query y')?.command).toBe('query')
+    expect(classifyBash('ox query "x" <<< "ox murmur list"')?.command).toBe('query')
+    expect(classifyBash('cat <<EOF\nox query never closed')).toBeNull()
+  })
   test('a murmur body is never copied out', () => {
     const start = classifyBash('ox murmur --topic=wip "secret plan for auth"')!
     expect(JSON.stringify(start).includes('secret')).toBe(false)
@@ -171,6 +182,11 @@ describe('classifyMcp', () => {
   test('unknown and malformed tools are not flow events', () => {
     for (const bad of [UUID + 'DeleteEverything', 'mcp__github__Search__x', 'mcp__Search', 'Search', 'Bash', UUID, UUID + 'toString', UUID + '__proto__', '']) {
       expect(classifyMcp(bad)).toBeNull()
+    }
+  })
+  test("a named server that is not SageOx's never matches", () => {
+    for (const other of ['mcp__github__Search', 'mcp__plugin_docs_docs__Help', 'mcp__notion__Prime']) {
+      expect(classifyMcp(other)).toBeNull()
     }
   })
 })
@@ -253,6 +269,7 @@ describe('finishTokens / finishItems', () => {
     expect(finishTokens(undefined)).toBe(0)
     expect(finishTokens('')).toBe(0)
     expect(finishTokens('abcdef')).toBe(2)
+    expect(finishTokens('a')).toBe(1) // nonempty is at least one token
     expect(finishTokens('é'.repeat(4))).toBe(2) // 8 UTF-8 bytes
     expect(finishTokens(PRIME)).toBe(4817)
   })

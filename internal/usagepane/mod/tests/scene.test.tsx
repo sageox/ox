@@ -5,6 +5,7 @@ import {
   ANIM_MS,
   caption,
   dotCount,
+  formatDuration,
   fitSource,
   laneSvg,
   promptSvg,
@@ -243,6 +244,21 @@ describe('the non-visual channel', () => {
     expect(caption(ev({ tokens: 14_820, items: undefined, label: 'loaded team context', endedAt: T0 + 1130 }))).toBe(
       'loaded team context: ~15k tokens, 1.1s',
     )
+  })
+
+  test('an outbound event that failed or was cut short sent nothing', () => {
+    const out = { direction: 'out' as const, lane: 'murmurs' as const, label: 'posted murmur', step: 'posting murmur', endedAt: T0 + 400 }
+    expect(caption(ev({ ...out, failed: true }))).toBe('failed while posting murmur after 0.4s; nothing sent')
+    expect(caption(ev({ ...out, interrupted: true }))).toBe('interrupted while posting murmur after 0.4s; nothing sent')
+  })
+
+  test('durations carry rounded seconds into minutes', () => {
+    expect(formatDuration(800)).toBe('0.8s')
+    expect(formatDuration(9_960)).toBe('10s')
+    expect(formatDuration(12_000)).toBe('12s')
+    expect(formatDuration(59_600)).toBe('1m 0s')
+    expect(formatDuration(72_000)).toBe('1m 12s')
+    expect(formatDuration(119_600)).toBe('2m 0s')
   })
 
   test('a prompt strip sums its sources in words', () => {

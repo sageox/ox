@@ -49,6 +49,7 @@ import {
   settleDelay,
   startOf,
   submitted,
+  withSent,
   type FlowMode,
   type RanLike,
 } from './flowwire'
@@ -331,11 +332,16 @@ async function beginFlow($: EngineInterface, id: string, start: FlowStart | null
       return null
     }
     await update($, flow, s => startEvent(s, { id, start, now }))
-    $.ui.invalidate('ui.render')
-    return start
   } catch {
     return null
   }
+  // The event is stored: a redraw that fails must not strand it open.
+  try {
+    $.ui.invalidate('ui.render')
+  } catch {
+    // The next draw shows it.
+  }
+  return start
 }
 
 // endFlow closes it with what the call moved. Never throws.
@@ -354,10 +360,18 @@ async function endFlow($: EngineInterface, id: string, start: FlowStart | null, 
 }
 
 // withAttachments files one hook attachment's blocks under a prompt row.
-// Each attachment gets its own batch id (`att:<msg>#b<n>`), so a prompt
-// holding both SessionStart and UserPromptSubmit context keeps both.
+// Each attachment gets its own batch id (`att:<msg>#b<n>`), n above every
+// batch still retained, so a prompt holding both SessionStart and
+// UserPromptSubmit context keeps both, even after the cap evicted some.
 function withAttachments(s: FlowState, msg: string, attachments: FlowAttachment[], now: number): FlowState {
-  return attachEvents(s, { id: `att:${msg}#b${promptEvents(s, msg).length}`, now, attachments })
+  let next = 0
+  for (const e of promptEvents(s, msg)) {
+    const m = /#b(\d+)#/.exec(e.id)
+    if (m) {
+      next = Math.max(next, Number(m[1]) + 1)
+    }
+  }
+  return attachEvents(s, { id: `att:${msg}#b${next}`, now, attachments })
 }
 
 async function recordAttachments($: EngineInterface, msg: string, attachments: FlowAttachment[], now: number) {
@@ -446,7 +460,7 @@ export const register: Register = on => {
   // and refreshes the pane and band after any ox command. It never blocks or
   // alters the call.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    const start = await beginFlow($, e.tool_use_id, safely(() => classifyBash(e.command)))
+    const start = await beginFlow($, e.tool_use_id, safely(() => withSent(classifyBash(e.command), e.command)))
     let ran
     try {
       ran = await next(e)
@@ -475,7 +489,8 @@ export const register: Register = on => {
     if (!isMcpName(tool) || typeof id !== 'string') {
       return next(e)
     }
-    const start = await beginFlow($, id, safely(() => classifyMcp(tool)))
+    const { tool: _tool, tool_use_id: _id, ...args } = e as Record<string, unknown>
+    const start = await beginFlow($, id, safely(() => withSent(classifyMcp(tool), args)))
     if (start === null) {
       return next(e)
     }

@@ -18,6 +18,8 @@ export type FlowStart = {
   label: string
   step: string
   command: string
+  /** For an `out` call: tokens of the payload the AI coworker sent, measured when it starts. */
+  sent?: number
 }
 
 /** One block of hook-injected team context; always direction `in`. */
@@ -38,8 +40,9 @@ export type FlowItems = { items: number; itemsNoun: string }
 // oxactivity's splitCommands: quotes and escapes are honored; `&&`, `||`,
 // `;`, `&` and newlines separate commands; a pipe tail is dropped; and
 // redirections go with their targets. It also opens a new command at `(`,
-// `$(` (even inside double quotes) and backticks, so `X=$(ox query "a")`
-// is found. A classifier, not a shell.
+// `$(` and backticks (even inside double quotes), so `X=$(ox query "a")`
+// and `echo "r: `ox query a`"` are found. A heredoc body is skipped: its
+// lines are data, not commands. A classifier, not a shell.
 function splitCommands(line: string): string[][] {
   const cmds: string[][] = []
   let cur: string[] = []
@@ -47,8 +50,11 @@ function splitCommands(line: string): string[][] {
   let inWord = false
   let piped = false
   let skipNext = false
-  // 'dq' while inside double quotes, 'sub' for each open `$(` or `(`.
-  const stack: ('dq' | 'sub')[] = []
+  // 'dq' while inside double quotes, 'sub' for each open `$(` or `(`, 'bt'
+  // for an open backtick substitution.
+  const stack: ('dq' | 'sub' | 'bt')[] = []
+  // Heredoc delimiters whose bodies start after the next newline.
+  const heredocs: { delim: string; tabs: boolean }[] = []
 
   const emit = () => {
     if (!inWord) {
@@ -93,6 +99,55 @@ function splitCommands(line: string): string[][] {
     skipNext = true
     return j - 1
   }
+  // heredoc: `<<` (or `<<-`) at i; records the delimiter word and returns
+  // the index of its last character. The body is skipped at the next newline.
+  const heredoc = (i: number): number => {
+    emit()
+    let j = i + 2
+    const tabs = line[j] === '-'
+    if (tabs) {
+      j++
+    }
+    while (j < line.length && (line[j] === ' ' || line[j] === '\t')) {
+      j++
+    }
+    let delim = ''
+    while (j < line.length && !' \t\n;&|<>()'.includes(line[j])) {
+      const c = line[j]
+      if (c === "'" || c === '"') {
+        for (j++; j < line.length && line[j] !== c; j++) {
+          delim += line[j]
+        }
+      } else if (c === '\\' && j + 1 < line.length) {
+        delim += line[++j]
+      } else {
+        delim += c
+      }
+      j++
+    }
+    if (delim !== '') {
+      heredocs.push({ delim, tabs })
+    }
+    return j - 1
+  }
+  // skipBodies: from the newline at i, skips every pending heredoc body and
+  // returns the index of the last body character consumed.
+  const skipBodies = (i: number): number => {
+    let pos = i + 1
+    for (const h of heredocs) {
+      while (pos < line.length) {
+        const nl = line.indexOf('\n', pos)
+        const stop = nl < 0 ? line.length : nl
+        const text = line.slice(pos, stop)
+        pos = stop + 1
+        if ((h.tabs ? text.replace(/^\t+/, '') : text) === h.delim) {
+          break
+        }
+      }
+    }
+    heredocs.length = 0
+    return Math.min(pos, line.length) - 1
+  }
 
   for (let i = 0; i < line.length; i++) {
     const c = line[i]
@@ -105,6 +160,9 @@ function splitCommands(line: string): string[][] {
         end()
         stack.push('sub')
         i++
+      } else if (c === '`') {
+        end()
+        stack.push('bt')
       } else {
         word += c
       }
@@ -154,9 +212,24 @@ function splitCommands(line: string): string[][] {
         }
         break
       case ';':
+        end()
+        break
       case '\n':
+        end()
+        if (heredocs.length > 0) {
+          i = skipBodies(i)
+        }
+        break
       case '`':
         end()
+        if (stack[stack.length - 1] === 'bt') {
+          stack.pop()
+          if (stack[stack.length - 1] === 'dq') {
+            inWord = true
+          }
+        } else {
+          stack.push('bt')
+        }
         break
       case '&':
         if (line[i + 1] === '>') {
@@ -178,8 +251,10 @@ function splitCommands(line: string): string[][] {
         emit()
         piped = true
         break
-      case '>':
       case '<':
+        i = line[i + 1] === '<' && line[i + 2] !== '<' ? heredoc(i) : redirect(i)
+        break
+      case '>':
         i = redirect(i)
         break
       case ' ':
@@ -397,10 +472,17 @@ const MCP_TOOLS: Record<string, McpEntry> = {
   ReportBulletinUsefulness: mcpOut('reported bulletin usefulness', 'reporting bulletin usefulness'),
 }
 
+// SAGEOX_SERVER: the server segments a SageOx MCP tool comes under: a name
+// carrying `sageox` (`claude_ai_sageox`), or the opaque connector id a
+// claude.ai connector gets. A named server that is not SageOx's (`github`)
+// never matches, whatever its tools are called.
+const SAGEOX_SERVER = /sageox|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 /**
  * classifyMcp: the flow an MCP tool call starts, matched on the tool name
- * after the last `__` (the server segment may be an opaque id). Tools that
- * are not SageOx's return null.
+ * after the last `__`, for a server segment SAGEOX_SERVER accepts. The
+ * server's identity is not visible to a hook, so an opaque connector id
+ * offering a tool of the same name is taken for SageOx's.
  */
 export function classifyMcp(tool: string): FlowStart | null {
   if (typeof tool !== 'string' || !tool.startsWith('mcp__')) {
@@ -412,14 +494,19 @@ export function classifyMcp(tool: string): FlowStart | null {
     return null
   }
   const name = rest.slice(cut + 2)
+  if (!SAGEOX_SERVER.test(rest.slice(0, cut))) {
+    return null
+  }
   const entry = Object.prototype.hasOwnProperty.call(MCP_TOOLS, name) ? MCP_TOOLS[name] : undefined
   return entry ? { ...entry, command: `mcp ${name}` } : null
 }
 
 // --- Finishing: tokens and items --------------------------------------------
 
-function byteTokens(s: string): number {
-  return Math.round(utf8Bytes(s) / 4)
+/** byteTokens: bytes/4 rounded; nonempty text is at least one token. */
+export function byteTokens(s: string): number {
+  const bytes = utf8Bytes(s)
+  return bytes === 0 ? 0 : Math.max(1, Math.round(bytes / 4))
 }
 
 const BUDGET_TOTAL = /<context-budget\b[^>]*\stotal="(\d+)"/

@@ -132,7 +132,11 @@ function mount(el) {
 // Play: an ox query opens, runs 1.4s, lands ~1.2k from 5 discussions, settles. Redraw every 500ms, as the
 // host re-creates the row's image; the motion must not restart or jump on a redraw.
 async function play(el, signal) {
-  const wait = (ms) => new Promise((r, x) => { const t = setTimeout(r, ms); signal.addEventListener('abort', () => { clearTimeout(t); x(signal.reason) }, { once: true }) })
+  const wait = (ms) => new Promise((r, x) => {
+    const abort = () => { clearTimeout(t); x(signal.reason) }
+    const t = setTimeout(() => { signal.removeEventListener('abort', abort); r() }, ms)
+    signal.addEventListener('abort', abort, { once: true })
+  })
   const c = mount(el)
   for (;;) {
     const t0 = Date.now()

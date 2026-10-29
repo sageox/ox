@@ -8,11 +8,12 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { ANIM_MS } from '../hooks/scene'
-import { arrived, drawn, laneWidth, LANE_DEFAULT_PX, LANE_MAX_PX, LANE_MIN_PX, newBinder, settleDelay, submitted } from '../hooks/flowwire'
+import { arrived, drawn, finishOf, laneWidth, LANE_DEFAULT_PX, LANE_MAX_PX, LANE_MIN_PX, newBinder, settleDelay, startOf, submitted } from '../hooks/flowwire'
 
 const PLUGIN = 'ox-cli-brief-pane'
 const SURFACES = ['desktop', 'vscode'] as const
 const MCP_SEARCH = 'mcp__3a5362ee-dfc4-43c0-a99a-d9d0d1864003__Search'
+const MCP_PUBLISH = 'mcp__3a5362ee-dfc4-43c0-a99a-d9d0d1864003__PublishMurmur'
 
 type On = Parameters<Parameters<typeof test>[1]>[1]
 type Answer = { result?: unknown; text?: string; isError?: true }
@@ -409,5 +410,20 @@ describe('flowwire helpers', () => {
     expect(arrived(b, 'C', 'c')).toBeNull()
     expect(drawn(b, 'm1', true)).toEqual([])
     expect(drawn(b, 'm2', true)).toEqual(['c'])
+    // The same text on a later prompt is that prompt's own.
+    expect(arrived(b, 'B', 'b')).toBe('m2')
+  })
+
+  test('an outbound call counts what it sent, never the acknowledgement', () => {
+    const body = 'x'.repeat(4000)
+    const bash = startOf('Bash', { command: `ox murmur --topic=wip "${body}"` })!
+    expect(finishOf({ text: 'ok' }, bash).tokens).toBeGreaterThan(1000)
+    const mcp = startOf(MCP_PUBLISH, { body })!
+    expect(finishOf({ text: 'ok' }, mcp).tokens).toBeGreaterThan(1000)
+    // An inbound call still counts its result.
+    const query = startOf('Bash', { command: 'ox query "x"' })!
+    expect(query.sent).toBeUndefined()
+    expect(finishOf({ text: 'abcdefgh' }, query).tokens).toBe(2)
+    expect(finishOf({ text: 'ok', isError: true }, bash)).toEqual({ tokens: 0, failed: true })
   })
 })

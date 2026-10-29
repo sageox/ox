@@ -64,15 +64,16 @@ export function strokeWeight(tokens: number): number {
 
 /** `0.8s`, `3.4s`, `12s`, `1m 12s`. */
 export function formatDuration(ms: number): string {
-  const s = Math.max(0.1, ms / 1000)
-  if (s < 10) {
-    return `${s.toFixed(1)}s`
+  // Round before splitting, so 9.96s reads 10s and 119.6s reads 2m 0s.
+  const tenths = Math.max(1, Math.round(ms / 100))
+  if (tenths < 100) {
+    return `${(tenths / 10).toFixed(1)}s`
   }
+  const s = Math.round(ms / 1000)
   if (s < 60) {
-    return `${Math.round(s)}s`
+    return `${s}s`
   }
-  const m = Math.floor(s / 60)
-  return `${m}m ${Math.round(s - m * 60)}s`
+  return `${Math.floor(s / 60)}m ${s % 60}s`
 }
 
 export function phaseOf(e: { endedAt?: number }, now: number, reducedMotion = false): Phase {
@@ -190,11 +191,11 @@ export function caption(input: FlowEvent | FlowEvent[]): string {
     case 'open':
       return `${e.step}, still running`
     case 'failed':
-      return `failed while ${e.step} after ${dur}; nothing came back`
+      return `failed while ${e.step} after ${dur}; ${nothingMoved(e)}`
     case 'interrupted':
-      return `interrupted while ${e.step} after ${dur}; nothing came back`
+      return `interrupted while ${e.step} after ${dur}; ${nothingMoved(e)}`
     case 'empty':
-      return `${e.label}: ${e.direction === 'in' ? 'nothing came back' : 'nothing sent'}, ${dur}`
+      return `${e.label}: ${nothingMoved(e)}, ${dur}`
     case 'flowed': {
       const tok = `${formatTokens(e.tokens)} tokens`
       if (e.direction === 'out') {
@@ -204,6 +205,10 @@ export function caption(input: FlowEvent | FlowEvent[]): string {
       return items ? `${e.label}: ${tok} from ${items}, ${dur}` : `${e.label}: ${tok}, ${dur}`
     }
   }
+}
+
+function nothingMoved(e: FlowEvent): string {
+  return e.direction === 'in' ? 'nothing came back' : 'nothing sent'
 }
 
 function promptCaption(events: FlowEvent[]): string {

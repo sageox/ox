@@ -4,7 +4,7 @@
 // readable and every rule is unit-testable.
 
 import type { FlowEvent } from '../types'
-import { classifyBash, classifyMcp, finishItems, finishTokens, type FlowStart } from './flow'
+import { byteTokens, classifyBash, classifyMcp, finishItems, finishTokens, type FlowStart } from './flow'
 import { ANIM_MS } from './scene'
 
 // --- The setting: /ox-session-report flow [on|off|still] ----------------------
@@ -80,13 +80,32 @@ export function isMcpName(tool: unknown): tool is string {
   return typeof tool === 'string' && tool.startsWith('mcp__')
 }
 
+/**
+ * withSent: an `out` start carrying the size of what the AI coworker sent:
+ * the Bash command line, or an MCP call's arguments as JSON. A payload the
+ * call names but does not hold (a `--file`, the recorded session) is not
+ * read, so it is not counted.
+ */
+export function withSent(start: FlowStart | null, payload: unknown): FlowStart | null {
+  if (start === null || start.direction !== 'out') {
+    return start
+  }
+  let text: string | undefined
+  try {
+    text = typeof payload === 'string' ? payload : JSON.stringify(payload)
+  } catch {
+    text = undefined
+  }
+  return typeof text === 'string' ? { ...start, sent: byteTokens(text) } : start
+}
+
 /** startOf: the flow a call starts, by tool and input; null for a call that moves no team data. */
 export function startOf(tool: string, input: unknown): FlowStart | null {
   if (tool === 'Bash') {
     const command = input !== null && typeof input === 'object' ? (input as { command?: unknown }).command : undefined
-    return typeof command === 'string' ? classifyBash(command) : null
+    return typeof command === 'string' ? withSent(classifyBash(command), command) : null
   }
-  return isMcpName(tool) ? classifyMcp(tool) : null
+  return isMcpName(tool) ? withSent(classifyMcp(tool), input) : null
 }
 
 /** What `next(e)` resolved to in a `tool.call` hook, loosely. */
@@ -110,16 +129,18 @@ function field(o: unknown, key: string): unknown {
 }
 
 /**
- * finishOf: what a finished call moved. The model's text is read first; a
- * Bash record's stdout stands in when core gave none. A deny or an error
- * fails it; Bash's own `interrupted` flag marks an interrupt.
+ * finishOf: what a finished call moved. An `out` call counts what it sent
+ * (withSent), never its acknowledgement; an `in` call counts its result: the
+ * model's text first, a Bash record's stdout when core gave none. A deny or
+ * an error fails it; Bash's own `interrupted` flag marks an interrupt.
  */
 export function finishOf(ran: RanLike, start: FlowStart): FinishFields {
   const stdout = field(ran.result, 'stdout')
   const text = typeof ran.text === 'string' ? ran.text : typeof stdout === 'string' ? stdout : undefined
   const failed = ran.deny !== undefined || ran.isError === true
   const interrupted = field(ran.result, 'interrupted') === true
-  const out: FinishFields = failed ? { tokens: 0, failed: true } : { tokens: finishTokens(text), ...finishItems(text, start) }
+  const tokens = start.direction === 'out' && typeof start.sent === 'number' ? start.sent : finishTokens(text)
+  const out: FinishFields = failed ? { tokens: 0, failed: true } : { tokens, ...finishItems(text, start) }
   if (interrupted) {
     out.interrupted = true
   }
@@ -149,7 +170,7 @@ export type Binder<T> = {
   current: string | null
   /** Attachments that arrived before the window's row was drawn. */
   pending: T[]
-  /** Exact attachment texts already taken this process: one raised twice counts once. */
+  /** Exact attachment texts already taken this window: one raised twice counts once. */
   taken: Set<string>
 }
 
@@ -157,9 +178,14 @@ export function newBinder<T>(): Binder<T> {
   return { seen: new Set(), current: null, pending: [], taken: new Set() }
 }
 
-/** submitted: a prompt was submitted; the next composer row drawn is its row. */
+/**
+ * submitted: a prompt was submitted; the next composer row drawn is its row.
+ * The new window forgets the texts taken, so the same recall on a later
+ * prompt draws under that prompt too.
+ */
 export function submitted<T>(b: Binder<T>): void {
   b.current = null
+  b.taken.clear()
 }
 
 /**

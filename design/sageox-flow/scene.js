@@ -131,15 +131,15 @@
     return 1;
   }
   function formatDuration(ms) {
-    const s = Math.max(0.1, ms / 1000);
-    if (s < 10) {
-      return `${s.toFixed(1)}s`;
+    const tenths = Math.max(1, Math.round(ms / 100));
+    if (tenths < 100) {
+      return `${(tenths / 10).toFixed(1)}s`;
     }
+    const s = Math.round(ms / 1000);
     if (s < 60) {
-      return `${Math.round(s)}s`;
+      return `${s}s`;
     }
-    const m = Math.floor(s / 60);
-    return `${m}m ${Math.round(s - m * 60)}s`;
+    return `${Math.floor(s / 60)}m ${s % 60}s`;
   }
   function phaseOf(e, now, reducedMotion = false) {
     if (e.endedAt === undefined) {
@@ -227,11 +227,11 @@
       case "open":
         return `${e.step}, still running`;
       case "failed":
-        return `failed while ${e.step} after ${dur}; nothing came back`;
+        return `failed while ${e.step} after ${dur}; ${nothingMoved(e)}`;
       case "interrupted":
-        return `interrupted while ${e.step} after ${dur}; nothing came back`;
+        return `interrupted while ${e.step} after ${dur}; ${nothingMoved(e)}`;
       case "empty":
-        return `${e.label}: ${e.direction === "in" ? "nothing came back" : "nothing sent"}, ${dur}`;
+        return `${e.label}: ${nothingMoved(e)}, ${dur}`;
       case "flowed": {
         const tok = `${formatTokens(e.tokens)} tokens`;
         if (e.direction === "out") {
@@ -241,6 +241,9 @@
         return items ? `${e.label}: ${tok} from ${items}, ${dur}` : `${e.label}: ${tok}, ${dur}`;
       }
     }
+  }
+  function nothingMoved(e) {
+    return e.direction === "in" ? "nothing came back" : "nothing sent";
   }
   function promptCaption(events) {
     if (events.length === 0) {
