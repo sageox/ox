@@ -153,7 +153,7 @@ function laneDigest(e: FlowEvent): Seg[] {
       return [{ text: e.label }, SEP, { text: e.direction === 'in' ? 'nothing came back' : 'nothing sent' }, SEP, { text: dur, cls: 'n' }]
     case 'flowed': {
       if (e.unsized) {
-        return [{ text: e.label }, SEP, { text: dur, cls: 'n' }]
+        return [{ text: e.label }, SEP, { text: 'size unknown' }, SEP, { text: dur, cls: 'n' }]
       }
       const items = itemsPhrase(e)
       const amount: Seg[] = [{ text: formatTokens(e.tokens), cls: 'n' }]

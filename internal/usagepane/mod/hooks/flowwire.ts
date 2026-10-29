@@ -82,16 +82,17 @@ export function isMcpName(tool: unknown): tool is string {
 
 /**
  * withSent: an `out` start carrying the size of what the AI coworker sent:
- * an MCP call's arguments as JSON, or a murmur post's command line (its body
- * is in it). Any other Bash `out` call sends what it names but does not hold
- * (a `--file`, the recorded session); that is not read, so its start carries
- * no `sent` and finishOf marks its size unknown.
+ * an MCP call's arguments as JSON, or a murmur post's command line when its
+ * body is literally in it. Any other Bash `out` call sends what it names but
+ * does not hold (a `--file`, the recorded session, a `$MESSAGE`, a backtick
+ * or a redirected input the shell expands); that is not read, so its start
+ * carries no `sent` and finishOf marks its size unknown.
  */
 export function withSent(start: FlowStart | null, payload: unknown): FlowStart | null {
   if (start === null || start.direction !== 'out') {
     return start
   }
-  if (typeof payload === 'string' && start.command !== 'murmur') {
+  if (typeof payload === 'string' && (start.command !== 'murmur' || /[$`<]/.test(payload))) {
     return start
   }
   let text: string | undefined

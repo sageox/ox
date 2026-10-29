@@ -429,5 +429,9 @@ describe('flowwire helpers', () => {
     const save = startOf('Bash', { command: 'ox plan save --file plan.html' })!
     expect(save.sent).toBeUndefined()
     expect(finishOf({ text: 'saved plan pln_1 with a long acknowledgement' }, save)).toEqual({ tokens: 0, unsized: true })
+    // A murmur body the shell expands is not in the command line either.
+    for (const command of ['ox murmur --topic=wip "$MESSAGE"', 'ox murmur "`cat note`"', 'ox murmur --topic=wip < note.txt']) {
+      expect(startOf('Bash', { command })!.sent).toBeUndefined()
+    }
   })
 })

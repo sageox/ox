@@ -256,6 +256,7 @@ describe('the non-visual channel', () => {
     const e = ev({ direction: 'out', lane: 'ledger', label: 'saved plan', tokens: 0, items: undefined, unsized: true, endedAt: T0 + 900 })
     expect(caption(e)).toBe('saved plan: sent to ledger, size unknown, 0.9s')
     expect(laneSvg(e, T0 + 60_000)).not.toContain('nothing sent')
+    expect(laneSvg(e, T0 + 60_000)).toContain('saved plan · size unknown · ')
   })
 
   test('durations carry rounded seconds into minutes', () => {
