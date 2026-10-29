@@ -336,9 +336,8 @@ func RebaseAge(repoPath string) (time.Duration, bool) {
 	return 0, false
 }
 
-// IsSafeForGitOps combines lock file and rebase state checks into a single
-// pre-flight check. Returns nil if safe to proceed, or an error describing
-// why the repo is blocked.
+// IsSafeForGitOps checks lock files and unfinished rebases or merges before
+// automatic writes. Returns nil if safe to proceed, or why the repo is blocked.
 func IsSafeForGitOps(repoPath string) error {
 	gitDir := filepath.Join(repoPath, ".git")
 
@@ -357,6 +356,14 @@ func IsSafeForGitOps(repoPath string) error {
 
 	if IsRebaseInProgress(repoPath) {
 		return fmt.Errorf("repo in broken rebase state (run 'git rebase --abort' in %s)", repoPath)
+	}
+
+	// A resolved index can still belong to an unfinished merge. commit-tree
+	// would drop its second parent and leave MERGE_HEAD blocking later pulls.
+	if _, err := os.Stat(filepath.Join(gitDir, "MERGE_HEAD")); err == nil {
+		return fmt.Errorf("repo has a merge in progress; finish or abort it in %s", repoPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect merge state: %w", err)
 	}
 
 	return nil

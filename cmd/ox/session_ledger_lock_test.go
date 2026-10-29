@@ -88,6 +88,60 @@ func TestSessionLedgerWriters_RefuseToStageIntoWedgedRebase(t *testing.T) {
 	}
 }
 
+// A resolved but unfinished merge must not become a single-parent deletion
+// commit that leaves MERGE_HEAD behind and blocks subsequent pulls.
+func TestSessionDeletion_PreservesUnfinishedMerge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git merge and push")
+	}
+	for _, writer := range []string{"session remove", "session delete"} {
+		t.Run(writer, func(t *testing.T) {
+			remote, repo := createBareAndClone(t)
+			isolatePushEnv(t, repo)
+			const name = "2026-01-01T00-00-testuser-OxMerge"
+			dir := writeSessionFiles(t, repo, name)
+			runGit(t, repo, "add", "sessions")
+			runGit(t, repo, "commit", "-m", "seed session")
+			runGit(t, repo, "push")
+			branch := runGit(t, repo, "branch", "--show-current")
+			runGit(t, repo, "checkout", "-b", "manual-merge")
+			require.NoError(t, os.WriteFile(filepath.Join(repo, "merge-note.txt"), []byte("manual merge work\n"), 0o644))
+			runGit(t, repo, "add", "merge-note.txt")
+			runGit(t, repo, "commit", "-m", "manual work")
+			runGit(t, repo, "checkout", branch)
+			runGit(t, repo, "merge", "--no-ff", "--no-commit", "manual-merge")
+			require.FileExists(t, filepath.Join(repo, ".git", "MERGE_HEAD"))
+			require.Empty(t, runGit(t, repo, "ls-files", "--unmerged"), "the index is fully resolved")
+			headBefore := runGit(t, repo, "rev-parse", "HEAD")
+			indexBefore := runGit(t, repo, "write-tree")
+			remove := func() error {
+				if writer == "session remove" {
+					_, err := batchDeleteSessionsFromLedger(repo, []string{name})
+					return err
+				}
+				return deleteSessionFromLedger(repo, name, dir)
+			}
+
+			require.ErrorContains(t, remove(), "merge in progress")
+			assert.Equal(t, headBefore, runGit(t, repo, "rev-parse", "HEAD"))
+			assert.Equal(t, headBefore, runGit(t, remote, "rev-parse", "HEAD"))
+			assert.Equal(t, indexBefore, runGit(t, repo, "write-tree"), "refusal must preserve the staged merge")
+			assert.FileExists(t, filepath.Join(dir, "meta.json"))
+			assert.FileExists(t, filepath.Join(repo, ".git", "MERGE_HEAD"))
+
+			// Completing the original merge preserves both parents and unblocks
+			// deletion and later synchronization without restarting ox.
+			runGit(t, repo, "commit", "-m", "complete manual merge")
+			require.Len(t, strings.Fields(runGit(t, repo, "rev-list", "--parents", "-n", "1", "HEAD")), 3)
+			require.NoError(t, remove())
+			assert.NoDirExists(t, dir)
+			_, err := runGitCombined(remote, "cat-file", "-e", "HEAD:sessions/"+name)
+			assert.Error(t, err, "the deletion must reach the remote after the merge completes")
+			runGit(t, repo, "pull", "--rebase", "--autostash")
+		})
+	}
+}
+
 // runGitCombined runs git for a step that may fail on purpose.
 func runGitCombined(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
