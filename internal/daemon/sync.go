@@ -1943,24 +1943,10 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 		if gitutil.IsRebaseInProgress(ledgerPath) {
 			return nil
 		}
-		// The optimistic scan above avoids taking both locks when there is no
-		// work. Repeat the full orphan predicate now: a peer may have pulled a
-		// fresh cross-machine heartbeat while this reaper waited for the lock.
-		// Rechecking only local cache data would still delete that live draft.
-		currentOrphans, err := session.FindOrphanedDrafts(ledgerPath, cacheDirs)
-		if err != nil {
-			return fmt.Errorf("revalidate orphaned drafts: %w", err)
-		}
-
-		for _, name := range currentOrphans {
-			if err := session.ValidateDraftSessionName(name); err != nil {
-				continue
-			}
-			// Revalidate under the lock. SaveRecordingState writes .recording.json /
-			// raw.jsonl WITHOUT ledgerMu, so a recording could have appeared for this
-			// name between detection and here. Never git-rm a draft that now has
-			// local recording data — recovering it is upload-retry's job.
-			if session.DraftHasLocalSessionData(cacheDirs, name) {
+		for _, name := range orphans {
+			// A heartbeat, session artifact, or local recording may have arrived
+			// since discovery. Recheck each candidate immediately before removal.
+			if session.ReadOrphanedDraftMeta(ledgerPath, name, cacheDirs) == nil {
 				continue
 			}
 			rel := filepath.ToSlash(filepath.Join("sessions", name))
@@ -1973,17 +1959,24 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 			if !s.draftPublishedOnRemote(ctx, ledgerPath, rel) {
 				continue
 			}
-
-			if _, err := s.git.RunGit(ctx, ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", rel); err != nil {
-				s.logger.Warn("retract orphaned draft: git rm failed", "session", name, "error", err)
+			clean, err := session.DraftIsCleanPlaceholder(ctx, ledgerPath, name)
+			if err != nil {
+				return fmt.Errorf("check draft before retraction: %w", err)
+			}
+			if !clean {
+				s.logger.Debug("retract orphaned draft: retaining session data or local changes", "session", name)
 				continue
 			}
-			// Remove any untracked leftovers git rm --ignore-unmatch left behind. If
-			// that fails, do NOT commit a partial retraction — restore and retry next
-			// scan, otherwise the remote loses meta.json while leftover files linger
-			// locally and no future scan rediscovers them.
-			if err := os.RemoveAll(filepath.Join(ledgerPath, "sessions", name)); err != nil {
-				s.restoreDraftForRetry(ctx, ledgerPath, rel, name, fmt.Errorf("remove leftovers: %w", err))
+
+			// Only a clean meta.json may be removed. Never force-remove edits or
+			// recursively erase content that appeared after the eligibility check.
+			if _, err := s.git.RunGit(ctx, ledgerPath, "rm", "--ignore-unmatch", "--", rel+"/meta.json"); err != nil {
+				s.logger.Warn("retract orphaned draft: git rm failed", "session", name, "error", err)
+				// A killed rm can remove the file before updating the index. If
+				// the file is still present, rm may instead have refused an edit.
+				if _, statErr := os.Lstat(filepath.Join(ledgerPath, rel, "meta.json")); os.IsNotExist(statErr) {
+					s.restoreDraftForRetry(ctx, ledgerPath, name, err)
+				}
 				continue
 			}
 
@@ -1994,14 +1987,14 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 			// rediscovers the orphan to retry.
 			staged, diffErr := s.git.RunGit(ctx, ledgerPath, "diff", "--cached", "--name-only", "--", rel)
 			if diffErr != nil || strings.TrimSpace(staged) == "" {
-				s.restoreDraftForRetry(ctx, ledgerPath, rel, name, diffErr)
+				s.restoreDraftForRetry(ctx, ledgerPath, name, diffErr)
 				continue
 			}
 			committed, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, sessionDraftCommitPrefix+"retract "+name, rel)
 			if err != nil {
 				// Commit failed: the deletion is staged and the dir is gone, which
 				// would orphan the candidate. Restore so the next scan retries.
-				s.restoreDraftForRetry(ctx, ledgerPath, rel, name, err)
+				s.restoreDraftForRetry(ctx, ledgerPath, name, err)
 				continue
 			}
 			if !committed {
@@ -2009,7 +2002,7 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 				// equal to HEAD here means nothing actually changed — restore
 				// rather than leave a dangling staged deletion for a later,
 				// unrelated commit to sweep up.
-				s.restoreDraftForRetry(ctx, ledgerPath, rel, name, fmt.Errorf("retraction produced no change"))
+				s.restoreDraftForRetry(ctx, ledgerPath, name, fmt.Errorf("retraction produced no change"))
 				continue
 			}
 			removed++
@@ -2042,12 +2035,9 @@ func (s *SyncScheduler) draftPublishedOnRemote(ctx context.Context, ledgerPath, 
 // restores the draft dir from HEAD — so a failed retract leaves no dangling
 // staged deletion (which an unrelated commit could sweep under the wrong
 // message) and the next scan can rediscover the orphan and retry it.
-func (s *SyncScheduler) restoreDraftForRetry(ctx context.Context, ledgerPath, rel, name string, cause error) {
+func (s *SyncScheduler) restoreDraftForRetry(ctx context.Context, ledgerPath, name string, cause error) {
 	s.logger.Warn("retract orphaned draft: restoring after failed retraction", "session", name, "error", cause)
-	if _, err := s.git.RunGit(ctx, ledgerPath, "reset", "-q", "--", rel); err != nil {
-		s.logger.Warn("retract orphaned draft: reset failed", "session", name, "error", err)
-	}
-	if _, err := s.git.RunGit(ctx, ledgerPath, "checkout", "-q", "HEAD", "--", rel); err != nil {
+	if err := session.RestoreDraftPlaceholder(ctx, ledgerPath, name); err != nil {
 		s.logger.Warn("retract orphaned draft: checkout restore failed", "session", name, "error", err)
 	}
 }

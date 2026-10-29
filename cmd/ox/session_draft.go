@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/session"
 )
 
 // Draft session placeholders. See docs/adr/ADR-029-session-draft-placeholder.md.
@@ -588,6 +589,12 @@ type draftDeleteResult struct {
 // discarded. Failing the abort here would leave the user's session data deleted
 // locally with no clean way to retry.
 func deleteDraftFromLedger(ledgerPath, sessionName string) (draftDeleteResult, error) {
+	return deleteDraftFromLedgerWithOrphanCheck(ledgerPath, sessionName, nil)
+}
+
+// orphanCacheDirs is non-nil for doctor's automatic cleanup. Explicit aborts
+// may remove a live draft, but cleanup must revalidate abandonment under lock.
+func deleteDraftFromLedgerWithOrphanCheck(ledgerPath, sessionName string, orphanCacheDirs []string) (draftDeleteResult, error) {
 	var res draftDeleteResult
 
 	// Validate the name BEFORE anything reads or removes a path built from it.
@@ -617,17 +624,57 @@ func deleteDraftFromLedger(ledgerPath, sessionName string) (draftDeleteResult, e
 	}
 
 	relDir := draftSessionRelDir(sessionName)
-	if err := withDraftLedgerLock(ledgerPath, func() error {
-		gitRm := exec.Command("git", "-C", ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", relDir)
+	if err := withDraftLedgerLock(ledgerPath, func() (err error) {
+		if orphanCacheDirs != nil {
+			if session.ReadOrphanedDraftMeta(ledgerPath, sessionName, orphanCacheDirs) == nil {
+				return nil
+			}
+			clean, checkErr := session.DraftIsCleanPlaceholder(context.Background(), ledgerPath, sessionName)
+			if checkErr != nil || !clean {
+				return checkErr
+			}
+			defer func() {
+				if err != nil {
+					// rm can fail before removing anything (for example, a new
+					// local edit). Restore only a placeholder actually removed.
+					if _, statErr := os.Lstat(filepath.Join(sessionDir, "meta.json")); os.IsNotExist(statErr) {
+						err = errors.Join(err, session.RestoreDraftPlaceholder(context.Background(), ledgerPath, sessionName))
+					}
+				}
+			}()
+		}
+		rmArgs := []string{"-C", ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", relDir}
+		if orphanCacheDirs != nil {
+			// Automatic cleanup only owns the proven placeholder, never edits
+			// or additional content that appeared since revalidation.
+			rmArgs = []string{"-C", ledgerPath, "rm", "--ignore-unmatch", "--", relDir + "/meta.json"}
+		}
+		gitRm := exec.Command("git", rmArgs...)
 		if out, err := gitRm.CombinedOutput(); err != nil {
 			return fmt.Errorf("git rm draft %s: %s: %w", sessionName, strings.TrimSpace(string(out)), err)
 		}
-		_ = os.RemoveAll(sessionDir)
-		return commitDraftRemoval(ledgerPath, sessionName, "discard")
+		if orphanCacheDirs == nil {
+			_ = os.RemoveAll(sessionDir)
+			if err := commitDraftRemoval(ledgerPath, sessionName, "discard"); err != nil {
+				return err
+			}
+		} else {
+			committed, err := gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, "session-draft: retract "+sessionName, relDir)
+			if err != nil {
+				return err
+			}
+			if !committed {
+				return fmt.Errorf("draft retraction produced no change")
+			}
+		}
+		res.Deleted = true
+		return nil
 	}); err != nil {
 		return res, err
 	}
-	res.Deleted = true
+	if !res.Deleted {
+		return res, nil
+	}
 
 	if err := pushLedger(context.Background(), ledgerPath); err != nil {
 		res.PushWarning = fmt.Sprintf("draft removed locally but the ledger push failed (%v); it will be pushed by the next 'ox doctor --fix' or session upload", err)

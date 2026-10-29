@@ -75,9 +75,10 @@ func checkSessionDraftOrphan(fix bool) checkResult {
 			fmt.Sprintf("run 'ox doctor --fix' to retract them (oldest: %s)", orphans[0]))
 	}
 
-	var removed, failed int
+	cacheDirs := draftCacheDirs(gitRoot, ledgerPath)
+	var removed, retained, failed int
 	for _, sessionName := range orphans {
-		res, err := deleteDraftFromLedger(ledgerPath, sessionName)
+		res, err := deleteDraftFromLedgerWithOrphanCheck(ledgerPath, sessionName, cacheDirs)
 		if err != nil {
 			slog.Warn("retract orphaned draft failed", "session", sessionName, "error", err)
 			failed++
@@ -88,13 +89,20 @@ func checkSessionDraftOrphan(fix bool) checkResult {
 		}
 		if res.Deleted {
 			removed++
+		} else {
+			retained++
 		}
 	}
 
 	if failed > 0 {
 		return WarningCheck(name,
-			fmt.Sprintf("retracted %d, %d failed", removed, failed),
-			"run 'ox doctor --fix' again to retry")
+			fmt.Sprintf("retracted %d, retained %d, %d failed", removed, retained, failed),
+			"inspect any retained drafts for changed or local state, then run 'ox doctor --fix' again to retry")
+	}
+	if retained > 0 {
+		return WarningCheck(name,
+			fmt.Sprintf("retracted %d, retained %d orphaned draft(s)", removed, retained),
+			"retained drafts have changed or contain local state; inspect them before retrying cleanup")
 	}
 	return PassedCheck(name, fmt.Sprintf("retracted %d orphaned draft(s)", removed))
 }
