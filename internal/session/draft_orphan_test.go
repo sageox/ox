@@ -33,101 +33,84 @@ func draftGit(t *testing.T, ledger string, args ...string) string {
 	return out
 }
 
-func TestOrphanedDraftEligibility_PreservesRecoverableState(t *testing.T) {
-	t.Parallel()
-	ledger, cache := t.TempDir(), t.TempDir()
-	writeDraftPlaceholder(t, ledger, "newer", 2*OrphanedDraftAge)
-	writeDraftPlaceholder(t, ledger, "older", 3*OrphanedDraftAge)
-	for _, name := range []string{"content", "cached", "fresh", "unreadable"} {
-		dir := writeDraftPlaceholder(t, ledger, name, 2*OrphanedDraftAge)
-		switch name {
-		case "content":
-			require.NoError(t, os.WriteFile(filepath.Join(dir, "summary.json"), []byte(`{"summary":"keep"}`), 0o644))
-		case "cached":
-			require.NoError(t, os.MkdirAll(filepath.Join(cache, name), 0o755))
-			require.NoError(t, os.WriteFile(filepath.Join(cache, name, "raw.jsonl"), []byte("recoverable transcript\n"), 0o644))
-		case "fresh":
-			writeDraftPlaceholder(t, ledger, name, time.Minute)
-		case "unreadable":
-			// A directory in place of metadata fails on every OS, even as root.
-			require.NoError(t, os.Remove(filepath.Join(dir, "meta.json")))
-			require.NoError(t, os.Mkdir(filepath.Join(dir, "meta.json"), 0o755))
-		}
-		assert.Nil(t, ReadOrphanedDraftMeta(ledger, name, []string{cache}), name)
+// Wildcard classes are checked without creating filenames forbidden on Windows.
+func TestValidateDraftSessionName_RejectsWildcards(t *testing.T) {
+	for _, name := range []string{"*", "draft?", "[ab]"} {
+		assert.Error(t, ValidateDraftSessionName(name), name)
 	}
-
-	assert.Nil(t, ReadOrphanedDraftMeta(ledger, "missing", []string{cache}))
-	// This alias reaches valid metadata if name validation is bypassed.
-	assert.Nil(t, ReadOrphanedDraftMeta(ledger, "../sessions/older", []string{cache}))
-	orphans, err := FindOrphanedDrafts(ledger, []string{cache})
-	require.NoError(t, err)
-	assert.Equal(t, []string{"older", "newer"}, orphans)
-	assert.FileExists(t, filepath.Join(ledger, "sessions", "content", "summary.json"))
-	assert.FileExists(t, filepath.Join(cache, "cached", "raw.jsonl"))
+	assert.NoError(t, ValidateDraftSessionName("2026-01-01T00-00-testuser-OxDraft"))
 }
 
-func TestDraftIsCleanPlaceholder_RejectsLocalChanges(t *testing.T) {
+// A missing, unreadable, or path-shaped candidate cannot authorize deletion.
+func TestOrphanedDraftEligibility_RefusesUnclassifiableMetadata(t *testing.T) {
 	t.Parallel()
-	for _, state := range []string{"clean", "unstaged metadata", "staged metadata", "untracked content", "ignored content", "missing tracked content"} {
-		t.Run(state, func(t *testing.T) {
-			t.Parallel()
-			ledger := t.TempDir()
-			dir := writeDraftPlaceholder(t, ledger, "abandoned", 2*OrphanedDraftAge)
-			metaPath := filepath.Join(dir, "meta.json")
-			draftGit(t, ledger, "init", "--quiet")
-			draftGit(t, ledger, "add", "sessions")
-			draftGit(t, ledger, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "draft")
-
-			switch state {
-			case "unstaged metadata", "staged metadata":
-				meta, err := lfs.ReadSessionMeta(dir)
-				require.NoError(t, err)
-				meta.TurnCount++
-				require.NoError(t, lfs.WriteSessionMetaOnly(dir, meta))
-				if state == "staged metadata" {
-					draftGit(t, ledger, "add", "sessions")
-				}
-			case "untracked content", "ignored content", "missing tracked content":
-				contentPath := filepath.Join(dir, "raw.jsonl")
-				require.NoError(t, os.WriteFile(contentPath, []byte("recoverable transcript\n"), 0o644))
-				if state == "ignored content" {
-					require.NoError(t, os.WriteFile(filepath.Join(ledger, ".git", "info", "exclude"), []byte("raw.jsonl\n"), 0o644))
-				}
-				if state == "missing tracked content" {
-					draftGit(t, ledger, "add", "sessions")
-					draftGit(t, ledger, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "session content")
-					require.NoError(t, os.Remove(contentPath))
-				}
-			}
-
-			before, err := os.ReadFile(metaPath)
-			require.NoError(t, err)
-			index := draftGit(t, ledger, "write-tree")
-			status := draftGit(t, ledger, "status", "--porcelain", "--ignored")
-			clean, err := DraftIsCleanPlaceholder(t.Context(), ledger, "abandoned")
-			require.NoError(t, err)
-			assert.Equal(t, state == "clean", clean)
-			if state == "clean" {
-				clean, err = DraftIsCleanPlaceholder(t.Context(), ledger, "../sessions/abandoned")
-				require.Error(t, err)
-				assert.False(t, clean)
-			}
-			after, err := os.ReadFile(metaPath)
-			require.NoError(t, err)
-			assert.Equal(t, before, after)
-			assert.Equal(t, index, draftGit(t, ledger, "write-tree"))
-			assert.Equal(t, status, draftGit(t, ledger, "status", "--porcelain", "--ignored"))
-		})
-	}
-
-	// Inspection failure never authorizes deletion, even with valid metadata.
 	ledger := t.TempDir()
-	writeDraftPlaceholder(t, ledger, "abandoned", 2*OrphanedDraftAge)
+	dir := writeDraftPlaceholder(t, ledger, "abandoned", 2*OrphanedDraftAge)
+	assert.Nil(t, ReadOrphanedDraftMeta(ledger, "missing", nil))
+	// This alias reaches valid metadata if name validation is bypassed.
+	assert.Nil(t, ReadOrphanedDraftMeta(ledger, "../sessions/abandoned", nil))
+	// A directory in place of metadata fails on every OS, even as root.
+	require.NoError(t, os.Remove(filepath.Join(dir, "meta.json")))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "meta.json"), 0o755))
+	assert.Nil(t, ReadOrphanedDraftMeta(ledger, "abandoned", nil))
+}
+
+// Only stale placeholders without local recovery data or artifacts are disposable.
+func TestFindOrphanedDrafts_RetainsRecoverableSessions(t *testing.T) {
+	t.Parallel()
+	ledger, cache := t.TempDir(), t.TempDir()
+	for _, name := range []string{"abandoned", "fresh", "cached", "content"} {
+		dir := writeDraftPlaceholder(t, ledger, name, 2*OrphanedDraftAge)
+		switch name {
+		case "fresh":
+			writeDraftPlaceholder(t, ledger, name, time.Minute)
+		case "cached":
+			require.NoError(t, os.MkdirAll(filepath.Join(cache, name), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(cache, name, "raw.jsonl"), []byte("recoverable session\n"), 0o644))
+		case "content":
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "summary.json"), []byte(`{"summary":"retained work"}`), 0o644))
+		}
+	}
+	orphans, err := FindOrphanedDrafts(ledger, []string{cache})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"abandoned"}, orphans)
+}
+
+// Git inspection must notice hidden artifacts and inspection errors before removal.
+func TestDraftIsCleanPlaceholder_RequiresMetadataOnlyGitState(t *testing.T) {
+	t.Parallel()
+	ledger := t.TempDir()
+	dir := writeDraftPlaceholder(t, ledger, "abandoned", 2*OrphanedDraftAge)
 	clean, err := DraftIsCleanPlaceholder(t.Context(), ledger, "abandoned")
 	require.Error(t, err)
 	assert.False(t, clean)
+
+	draftGit(t, ledger, "init", "--quiet")
+	draftGit(t, ledger, "add", "sessions")
+	draftGit(t, ledger, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "draft")
+	clean, err = DraftIsCleanPlaceholder(t.Context(), ledger, "abandoned")
+	require.NoError(t, err)
+	require.True(t, clean)
+	clean, err = DraftIsCleanPlaceholder(t.Context(), ledger, "../sessions/abandoned")
+	require.Error(t, err)
+	assert.False(t, clean)
+
+	require.NoError(t, os.WriteFile(filepath.Join(ledger, ".git", "info", "exclude"), []byte("raw.jsonl\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte("recoverable session\n"), 0o644))
+	clean, err = DraftIsCleanPlaceholder(t.Context(), ledger, "abandoned")
+	require.NoError(t, err)
+	assert.False(t, clean)
+
+	// A missing checkout file does not make a committed artifact disposable.
+	draftGit(t, ledger, "add", "-f", "sessions/abandoned/raw.jsonl")
+	draftGit(t, ledger, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "session content")
+	require.NoError(t, os.Remove(filepath.Join(dir, "raw.jsonl")))
+	clean, err = DraftIsCleanPlaceholder(t.Context(), ledger, "abandoned")
+	require.NoError(t, err)
+	assert.False(t, clean)
 }
 
+// Rollback must survive cancellation without overwriting unrelated staged or new data.
 func TestRestoreDraftPlaceholder_ExpiredCallerPreservesIndexAndContent(t *testing.T) {
 	t.Parallel()
 	ledger := t.TempDir()

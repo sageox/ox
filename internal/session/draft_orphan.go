@@ -29,15 +29,17 @@ import (
 // git-removing a live session's placeholder, and that asymmetry says wait.
 const OrphanedDraftAge = 72 * time.Hour
 
-// ValidateDraftSessionName rejects empty and traversal-shaped names before any
-// path built from a session name is handed to `git rm` / os.RemoveAll. An
-// unvalidated name widens a pathspec to the whole sessions tree.
+// ValidateDraftSessionName keeps destructive paths within one literal session.
 func ValidateDraftSessionName(sessionName string) error {
 	if sessionName == "" || sessionName == "." || sessionName == ".." {
 		return fmt.Errorf("invalid session name %q", sessionName)
 	}
 	if strings.ContainsAny(sessionName, `/\`) || strings.Contains(sessionName, "..") {
 		return fmt.Errorf("session name %q must be a single path component", sessionName)
+	}
+	// Git expands wildcard pathspecs even after --, potentially matching peers.
+	if strings.ContainsAny(sessionName, "*?[") {
+		return fmt.Errorf("session name %q must not contain Git wildcard characters", sessionName)
 	}
 	return nil
 }
@@ -94,9 +96,8 @@ func FindOrphanedDrafts(ledgerPath string, cacheDirs []string) ([]string, error)
 	return names, nil
 }
 
-// ReadOrphanedDraftMeta returns metadata only when this session meets every
-// FindOrphanedDrafts condition. nil means retain it, including unreadable state.
-// Writers recheck this single candidate under the repo lock before removal.
+// ReadOrphanedDraftMeta returns nil for any session that must be retained.
+// Writers recheck this candidate under the repo lock before removal.
 func ReadOrphanedDraftMeta(ledgerPath, sessionName string, cacheDirs []string) *lfs.SessionMeta {
 	if ValidateDraftSessionName(sessionName) != nil {
 		return nil
@@ -107,11 +108,9 @@ func ReadOrphanedDraftMeta(ledgerPath, sessionName string, cacheDirs []string) *
 		return nil
 	}
 	meta, err := lfs.ReadSessionMeta(dir)
-	// Unreadable or malformed metadata cannot authorize deletion.
 	if err != nil || !meta.IsDraft() || meta.Validate() != nil {
 		return nil
 	}
-	// Without a heartbeat there is no evidence of abandonment.
 	if meta.UpdatedAt == nil || time.Since(*meta.UpdatedAt) < OrphanedDraftAge {
 		return nil
 	}
@@ -125,10 +124,8 @@ func ReadOrphanedDraftMeta(ledgerPath, sessionName string, cacheDirs []string) *
 	return meta
 }
 
-// DraftIsCleanPlaceholder verifies the Git state immediately before automatic
-// retraction. The caller must hold the repo lock and recheck ReadOrphanedDraftMeta.
-// A clean metadata-only HEAD makes restoring HEAD after failure safe: there are
-// no pre-existing edits to overwrite, nor sparse/missing artifacts to delete.
+// DraftIsCleanPlaceholder requires a metadata-only HEAD and a clean worktree/index.
+// The caller must hold the repo lock and recheck ReadOrphanedDraftMeta.
 func DraftIsCleanPlaceholder(ctx context.Context, ledgerPath, sessionName string) (bool, error) {
 	if err := ValidateDraftSessionName(sessionName); err != nil {
 		return false, err
@@ -145,16 +142,14 @@ func DraftIsCleanPlaceholder(ctx context.Context, ledgerPath, sessionName string
 	return status == "" && err == nil, err
 }
 
-// RestoreDraftPlaceholder undoes a failed automatic retraction. The caller
-// still holds the repo lock and proved DraftIsCleanPlaceholder before removal,
-// so HEAD is the exact prior state of both the index and the worktree.
+// RestoreDraftPlaceholder restores only metadata removed by automatic cleanup.
+// The caller still holds the repo lock used for DraftIsCleanPlaceholder.
 func RestoreDraftPlaceholder(ctx context.Context, ledgerPath, sessionName string) error {
 	if err := ValidateDraftSessionName(sessionName); err != nil {
 		return err
 	}
-	// The sync deadline may be why removal failed. One local metadata restore
-	// gets its own 30-second budget, bounding recovery without reusing that
-	// expired deadline. The repo lock remains held until recovery returns.
+	// Ignore caller cancellation so cleanup can undo a partial removal. Limit
+	// this local Git restore to 30 seconds while the repo lock remains held.
 	recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	rel := filepath.ToSlash(filepath.Join("sessions", sessionName, "meta.json"))

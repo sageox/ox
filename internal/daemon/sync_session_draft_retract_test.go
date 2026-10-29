@@ -138,6 +138,23 @@ func TestRetractOrphanedDrafts_KeepsFreshDraft(t *testing.T) {
 		"a fresh draft is a live session and must never be retracted")
 }
 
+// A wildcard-shaped stale name must not expand to a fresh neighbor's metadata.
+func TestRetractOrphanedDrafts_PreservesWildcardNeighbors(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real Git repositories and published drafts")
+	}
+	s, ledger := newRetractScheduler(t)
+	commitStaleDraft(t, ledger, "[ab]", 120*time.Hour)
+	writeDraftCommit(t, ledger, "a", time.Minute, true)
+	beforeHead := mustGit(t, ledger, "rev-parse", "HEAD")
+
+	s.retractOrphanedDrafts(context.Background(), ledger)
+
+	assert.FileExists(t, filepath.Join(ledger, "sessions", "a", "meta.json"))
+	assert.FileExists(t, filepath.Join(ledger, "sessions", "[ab]", "meta.json"))
+	assert.Equal(t, beforeHead, mustGit(t, ledger, "rev-parse", "HEAD"))
+}
+
 // A cross-machine heartbeat can land after the reaper's optimistic scan but
 // before it acquires the repo lock. The locked revalidation must observe that
 // refresh instead of deleting a session that is live on another machine.
@@ -281,14 +298,19 @@ func TestRetractOrphanedDrafts_PreservesSessionData(t *testing.T) {
 
 type cancelRetractionRunner struct {
 	gitutil.GitRunner
-	cancel context.CancelFunc
-	after  string
+	cancel      context.CancelFunc
+	after       string
+	failCommand bool
 }
 
 func (r *cancelRetractionRunner) RunGit(ctx context.Context, repoPath string, args ...string) (string, error) {
 	out, err := r.GitRunner.RunGit(ctx, repoPath, args...)
 	if err == nil && args[0] == r.after {
 		r.cancel()
+		if r.failCommand {
+			// A killed command can report failure after removing the file.
+			err = ctx.Err()
+		}
 	}
 	return out, err
 }
@@ -299,8 +321,16 @@ func TestRetractOrphanedDrafts_CancellationRestoresAndRetries(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real Git repositories and recovery retries")
 	}
-	for _, after := range []string{"rm", "diff"} {
-		t.Run("cancel after "+after, func(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		after       string
+		failCommand bool
+	}{
+		{"cancel after rm", "rm", false},
+		{"cancel after diff", "diff", false},
+		{"rm removes metadata then fails", "rm", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			s, ledger := newRetractScheduler(t)
 			const name = "2026-01-01T00-00-testuser-OxRetry"
 			commitStaleDraft(t, ledger, name, 120*time.Hour)
@@ -311,7 +341,7 @@ func TestRetractOrphanedDrafts_CancellationRestoresAndRetries(t *testing.T) {
 			beforeIndex := mustGit(t, ledger, "write-tree")
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			s.git = &cancelRetractionRunner{GitRunner: gitutil.DefaultRunner(), cancel: cancel, after: after}
+			s.git = &cancelRetractionRunner{GitRunner: gitutil.DefaultRunner(), cancel: cancel, after: tc.after, failCommand: tc.failCommand}
 
 			s.retractOrphanedDrafts(ctx, ledger)
 

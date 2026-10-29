@@ -380,6 +380,7 @@ func TestDoctorDraftRetraction_RechecksSessionContent(t *testing.T) {
 func TestDoctorDraftRetraction_FailedCommitRestoresAndRetries(t *testing.T) {
 	setTestCfg(t)
 	f := newDraftLedgerFixture(t)
+	t.Chdir(f.projectRoot)
 	const name = "2026-01-01T00-00-testuser-OxRetry"
 	f.publish(t, name, 2)
 	dir := agedDraft(t, f.ledgerPath, name, 120*time.Hour)
@@ -401,6 +402,15 @@ func TestDoctorDraftRetraction_FailedCommitRestoresAndRetries(t *testing.T) {
 	assert.Equal(t, beforeHead, runGit(t, f.ledgerPath, "rev-parse", "HEAD"))
 	assert.Equal(t, beforeIndex, runGit(t, f.ledgerPath, "write-tree"))
 	afterMeta, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	require.NoError(t, err)
+	assert.Equal(t, beforeMeta, afterMeta)
+
+	// The doctor entry point must surface the failure and leave the same retryable state.
+	check := checkSessionDraftOrphan(true)
+	assert.True(t, check.warning)
+	assert.Contains(t, check.message, "retracted 0, retained 0, 1 failed")
+	assert.Equal(t, beforeIndex, runGit(t, f.ledgerPath, "write-tree"))
+	afterMeta, err = os.ReadFile(filepath.Join(dir, "meta.json"))
 	require.NoError(t, err)
 	assert.Equal(t, beforeMeta, afterMeta)
 	require.NoError(t, os.Remove(hook))
