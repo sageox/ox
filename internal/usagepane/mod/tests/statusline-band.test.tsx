@@ -122,6 +122,12 @@ describe('statuslinePieces: same layout as the terminal status line', () => {
       { text: ' rec', style: 'recLabel' },
     ])
   })
+  test('recording:false (ox reports it while a recording is paused) draws no rec mark', () => {
+    const paused = parseStatusline(JSON.stringify({ ...LINE, recording: false }))!
+    expect(paused.recording).toBe(false)
+    expect(text(paused, 0)).toBe('● ox  3 discussions · 1 plan · 1 murmur · 2 used')
+    expect(statuslinePieces(paused, 0).some(p => p.style === 'recDot' || p.style === 'recLabel')).toBe(false)
+  })
   test('nothing counted reads "● ox" (and rec)', () => {
     expect(text({ show: true, counts: counts({}), recording: true }, 80)).toBe('● ox  ● rec')
     expect(text({ show: true, counts: counts({}), recording: false }, 80)).toBe('● ox')
