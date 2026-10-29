@@ -76,7 +76,7 @@ func TestGC_FailedPreparationPreservesOriginalAndRetries(t *testing.T) {
 	}
 	for _, phase := range []string{
 		"restore cancellation", "restore cancellation without tracked changes", "swap deadline",
-		"cache restore error", "swap signal error", "backup cleanup error",
+		"untracked capture error", "cache restore error", "swap signal error", "backup cleanup error",
 	} {
 		t.Run(phase, func(t *testing.T) {
 			if phase == "backup cleanup error" && (runtime.GOOS == "windows" || os.Geteuid() == 0) {
@@ -103,7 +103,10 @@ func TestGC_FailedPreparationPreservesOriginalAndRetries(t *testing.T) {
 			defer cancel()
 			restoreCache := gcRestoreCache
 			t.Cleanup(func() { gcRestoreCache = restoreCache })
+			originalCopy := copyFile
+			t.Cleanup(func() { copyFile = originalCopy })
 			hookCalled := false
+			wantResult := gcFailed
 			switch phase {
 			case "restore cancellation", "restore cancellation without tracked changes":
 				gcRestoreCache = func(backup, dst string) error {
@@ -119,6 +122,14 @@ func TestGC_FailedPreparationPreservesOriginalAndRetries(t *testing.T) {
 				scheduler.gcSwapWindowTestHook = func() {
 					hookCalled = true
 					<-ctx.Done()
+				}
+			case "untracked capture error":
+				wantResult = gcSkippedDirty
+				copyFile = func(src, dst string) error {
+					if src == filepath.Join(clone, "sessions", "local.txt") {
+						return errors.New("synthetic read failure")
+					}
+					return originalCopy(src, dst)
 				}
 			case "cache restore error":
 				gcRestoreCache = func(string, string) error { return errors.New("synthetic cache write failure") }
@@ -136,7 +147,7 @@ func TestGC_FailedPreparationPreservesOriginalAndRetries(t *testing.T) {
 				t.Cleanup(func() { _ = os.Chmod(clone+".gc-cache", 0700) })
 			}
 			ws := WorkspaceState{ID: "ledger", Type: WorkspaceTypeLedger, Path: clone, CloneURL: "file://" + bare, Exists: true}
-			require.Equal(t, gcFailed, scheduler.runBlueGreenGC(ctx, ws))
+			require.Equal(t, wantResult, scheduler.runBlueGreenGC(ctx, ws))
 			if phase == "swap deadline" {
 				require.True(t, hookCalled, "the test must reach the swap before its deadline expires")
 				require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
@@ -158,6 +169,7 @@ func TestGC_FailedPreparationPreservesOriginalAndRetries(t *testing.T) {
 				require.Equal(t, "cached recording", string(got))
 			}
 			gcRestoreCache = restoreCache
+			copyFile = originalCopy
 			scheduler.gcSwapWindowTestHook = nil
 			require.Equal(t, gcSuccess, scheduler.runBlueGreenGC(context.Background(), ws))
 			for path, content := range files {
@@ -217,32 +229,6 @@ func TestGC_BusyLedgerSkipsCanceledRequest(t *testing.T) {
 		t.Fatal("optional GC waited for a busy Ledger after its caller canceled")
 	}
 	require.NoDirExists(t, ws.Path+".new")
-}
-
-// A failed copy must abort capture, not silently omit the only local file from
-// a replacement that will delete its original.
-func TestGC_UntrackedCaptureFailureKeepsOriginal(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: real Ledger clones")
-	}
-	bare, clone, scheduler := setupClonedLedger(t)
-	local := filepath.Join(clone, "sessions", "local.txt")
-	require.NoError(t, os.WriteFile(local, []byte("only copy"), 0600))
-	copy := copyFile
-	t.Cleanup(func() { copyFile = copy })
-	copyFile = func(src, dst string) error {
-		if src == local {
-			return errors.New("synthetic read failure")
-		}
-		return copy(src, dst)
-	}
-	ws := WorkspaceState{ID: "ledger", Type: WorkspaceTypeLedger, Path: clone, CloneURL: "file://" + bare, Exists: true}
-	require.Equal(t, gcSkippedDirty, scheduler.runBlueGreenGC(context.Background(), ws))
-	got, err := os.ReadFile(local)
-	require.NoError(t, err)
-	require.Equal(t, "only copy", string(got))
-	require.NoDirExists(t, clone+".old")
-	require.NoDirExists(t, clone+".new")
 }
 
 // GC must apply its own execution budget even with a background caller. The
@@ -410,31 +396,32 @@ func TestGC_CaptureUntracked(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, has)
 
-	// add untracked files including a nested one
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "new.txt"), []byte("new content"), 0644))
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "sub"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "sub", "nested.txt"), []byte("nested"), 0644))
 	unusualName := " spaces and\nnewline "
 	if runtime.GOOS == "windows" {
 		unusualName = " spaces and unicode α" // Windows disallows newline and trailing spaces.
 	}
-	require.NoError(t, os.WriteFile(filepath.Join(dir, unusualName), []byte("unquoted path"), 0644))
+	files := map[string]string{
+		"new.txt":        "new content",
+		"sub/nested.txt": "nested",
+		unusualName:      "unquoted path",
+		"..notes/...cfg": "dot-prefixed directory",
+		"...cfg":         "dot-prefixed file",
+	}
+	for name, content := range files {
+		path := filepath.Join(dir, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+	}
 
 	has, err = s.gcCaptureUntracked(ctx, dir, destDir)
 	require.NoError(t, err)
 	assert.True(t, has)
 
-	// verify captured files
-	data, err := os.ReadFile(filepath.Join(destDir, "new.txt"))
-	require.NoError(t, err)
-	assert.Equal(t, "new content", string(data))
-
-	data, err = os.ReadFile(filepath.Join(destDir, "sub", "nested.txt"))
-	require.NoError(t, err)
-	assert.Equal(t, "nested", string(data))
-	data, err = os.ReadFile(filepath.Join(destDir, unusualName))
-	require.NoError(t, err)
-	assert.Equal(t, "unquoted path", string(data))
+	for name, content := range files {
+		data, err := os.ReadFile(filepath.Join(destDir, name))
+		require.NoError(t, err)
+		assert.Equal(t, content, string(data), name)
+	}
 }
 
 func TestGC_RestoreDiff(t *testing.T) {
@@ -607,14 +594,44 @@ func TestGC_FullCycle_TeamContext(t *testing.T) {
 	ws := WorkspaceState{
 		ID:       "team-test",
 		Type:     WorkspaceTypeTeamContext,
+		TeamID:   "team-test",
 		TeamName: "test-team",
 		Path:     cloneDir,
 		CloneURL: cloneURL,
 		Exists:   true,
 	}
+	dbPath := filepath.Join(cloneDir, ".sageox", "cache", "whisper", "whisper.db")
+	store, err := whisperstore.Open(dbPath)
+	require.NoError(t, err)
+	registry := NewWhisperRegistry(nil, nil)
+	registry.AddTeamStore(ws.TeamID, store)
+	t.Cleanup(func() { registry.Close() })
+	s.whisperRegistry = registry
+	entry := whisperstore.WhisperEntry{
+		ID: "before-gc", Scope: "team", Type: whisperstore.WhisperTrigger,
+		Source: "test", Topic: "gc", Content: "retained team whisper",
+		Importance: whisperstore.ImportanceNormal, CreatedAt: time.Now(),
+	}
+	require.NoError(t, store.Add(entry))
 
 	result := s.runBlueGreenGC(ctx, ws)
-	assert.Equal(t, gcSuccess, result, "full cycle should succeed")
+	require.Equal(t, gcSuccess, result, "full cycle should succeed")
+	// A live handle would keep the renamed-away SQLite files mapped.
+	_, err = store.GetAllWhispers("")
+	require.ErrorContains(t, err, "database is closed")
+	require.False(t, registry.HasTeamStore(ws.TeamID), "the next sync must reopen the team's store")
+	reopened, err := whisperstore.Open(dbPath)
+	require.NoError(t, err)
+	registry.AddTeamStore(ws.TeamID, reopened)
+	entries, err := registry.GetAllWhispers("")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, entry.Content, entries[0].Content, "the replacement must retain the team whisper")
+	entry.ID = "after-gc"
+	require.NoError(t, reopened.Add(entry))
+	entries, err = registry.GetAllWhispers("")
+	require.NoError(t, err)
+	require.Len(t, entries, 2, "the reopened replacement must accept new whispers")
 
 	// the repo should still exist at the original path
 	assert.DirExists(t, cloneDir)
@@ -1054,6 +1071,57 @@ func TestGC_PlanRetriesSurviveInterruptedSwap(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A recovered .old must not make a later attempt replay stale preparation
+// backups over edits or deletions made after that preparation failed.
+func TestGC_RecoveredSwapDoesNotReplayFailedPreparation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real Ledger clones")
+	}
+	bare, clone, scheduler := setupClonedLedger(t)
+	local := filepath.Join(clone, "sessions", "discarded.txt")
+	cache := filepath.Join(clone, ".sageox", "cache", "recording.txt")
+	retry := filepath.Join(ledger.PlanReviewPendingDir, "only.json")
+	// Model a completed swap whose cleanup left part of the old clone.
+	for path, content := range map[string]string{
+		local:                              "before failed preparation",
+		cache:                              "before failed preparation",
+		filepath.Join(clone+".old", retry): "pending review",
+	} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0600))
+	}
+	require.NoError(t, os.WriteFile(clone+".gc-swap-done", nil, 0600))
+	ws := WorkspaceState{
+		ID: "ledger", Type: WorkspaceTypeLedger, Path: clone, Exists: true,
+		CloneURL: "file://" + filepath.Join(t.TempDir(), "missing.git"),
+	}
+	require.Equal(t, gcFailed, scheduler.runBlueGreenGC(context.Background(), ws))
+	for _, backup := range []string{
+		filepath.Join(clone+".gc-untracked", "sessions", "discarded.txt"),
+		filepath.Join(clone+".gc-cache", "recording.txt"),
+	} {
+		data, err := os.ReadFile(backup)
+		require.NoError(t, err, "the failure must happen after capture")
+		require.Equal(t, "before failed preparation", string(data))
+	}
+	require.NoError(t, os.WriteFile(cache, []byte("newer recording"), 0600))
+	require.NoError(t, os.Remove(local))
+	tracked := filepath.Join(clone, "sessions", ".gitkeep")
+	require.NoError(t, os.WriteFile(tracked, []byte("newer tracked edit"), 0600))
+	ws.CloneURL = "file://" + bare
+	require.Equal(t, gcSuccess, scheduler.runBlueGreenGC(context.Background(), ws))
+	for path, content := range map[string]string{
+		cache:                       "newer recording",
+		tracked:                     "newer tracked edit",
+		filepath.Join(clone, retry): "pending review",
+	} {
+		data, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.Equal(t, content, string(data), path)
+	}
+	assert.NoFileExists(t, local, "a deleted local file must not return from a stale backup")
 }
 
 func TestGC_SkipsWhenLocked(t *testing.T) {

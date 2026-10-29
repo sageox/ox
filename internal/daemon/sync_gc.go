@@ -761,6 +761,12 @@ func (s *SyncScheduler) runBlueGreenGCLocked(ctx context.Context, ws WorkspaceSt
 	if carryErr != nil {
 		return gcFailed, false
 	}
+	// Retire the recovered clone before capturing new backups; otherwise a
+	// later run can recreate the swap marker and replay a failed preparation.
+	if err := os.RemoveAll(oldPath); err != nil {
+		s.logger.Error("gc: cannot remove recovered old clone", "path", oldPath, "error", err)
+		return gcFailed, false
+	}
 
 	// clean up leftover artifacts from a previous failed GC (safe under the
 	// lock) — reaching here means there was no pending swap-marker recovery
@@ -966,13 +972,6 @@ func (s *SyncScheduler) runBlueGreenGCLocked(ctx context.Context, ws WorkspaceSt
 	for _, artifact := range []string{diffFile, untrackedDir, cacheBackupDir} {
 		if err := os.RemoveAll(artifact); err != nil {
 			s.logger.Error("gc: cannot retire restored backup, keeping original", "path", artifact, "error", err)
-			return gcFailed, false
-		}
-	}
-
-	if _, err := os.Stat(oldPath); err == nil {
-		if err := os.RemoveAll(oldPath); err != nil {
-			s.logger.Error("gc: cannot remove recovered old clone", "path", oldPath, "error", err)
 			return gcFailed, false
 		}
 	}
@@ -1344,7 +1343,7 @@ func (s *SyncScheduler) gcCaptureUntracked(ctx context.Context, repoPath, destDi
 		absRepo, _ := filepath.Abs(repoPath)
 		// use filepath.Rel for separator-aware containment (prevents /tmp/repo-evil matching /tmp/repo)
 		rel, err := filepath.Rel(absRepo, absResolved)
-		if err != nil || strings.HasPrefix(rel, "..") {
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return false, fmt.Errorf("untracked path outside repo boundary: %s", relPath)
 		}
 
@@ -1448,6 +1447,9 @@ func removeRejFiles(repoPath string) int {
 
 // gcRestoreUntracked copies previously captured untracked files back into the repo.
 func (s *SyncScheduler) gcRestoreUntracked(repoPath, untrackedDir string) error {
+	if err := gcCheckRestorePaths(untrackedDir, repoPath, "."); err != nil {
+		return err
+	}
 	var firstErr error
 	err := filepath.WalkDir(untrackedDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -1480,6 +1482,35 @@ func (s *SyncScheduler) gcRestoreUntracked(repoPath, untrackedDir string) error 
 		return err
 	}
 	return firstErr
+}
+
+// GC holds the repo lock, but a cloned or previously restored symlink can still
+// redirect a copy into the original checkout. Check each restore immediately
+// before copying, including parents above the cache's destination directory.
+func gcCheckRestorePaths(backupDir, repoPath, subdir string) error {
+	repoPath = filepath.Clean(repoPath)
+	return filepath.WalkDir(backupDir, func(path string, _ fs.DirEntry, err error) error {
+		if path == backupDir && errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(backupDir, path)
+		if err != nil {
+			return err
+		}
+		for dst := filepath.Join(repoPath, subdir, rel); dst != repoPath; dst = filepath.Dir(dst) {
+			info, err := os.Lstat(dst)
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+			if err == nil && info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("restore destination is a symlink: %s", dst)
+			}
+		}
+		return nil
+	})
 }
 
 // validateGCClone checks that a freshly cloned repo has the minimum expected
@@ -1542,13 +1573,15 @@ func (s *SyncScheduler) validateLedgerGCClone(repoPath string) bool {
 	return true
 }
 
-// Cache preservation and file copying moved to shared packages so ledger read
-// sync preserves a cache through the same code (ox #1045). The GC keeps its
-// names for them.
 var (
 	gcPreserveCache = ledger.PreserveCache
-	gcRestoreCache  = ledger.RestoreCache
-	copyFile        = fileutil.CopyFile
+	gcRestoreCache  = func(backupDir, repoPath string) error {
+		if err := gcCheckRestorePaths(backupDir, repoPath, filepath.Join(".sageox", "cache")); err != nil {
+			return err
+		}
+		return ledger.RestoreCache(backupDir, repoPath)
+	}
+	copyFile = fileutil.CopyFile
 )
 
 // reopenWhisperStoreAfterGC reopens the ledger whisper store after a

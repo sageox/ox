@@ -575,11 +575,8 @@ func configureSparseCheckout(ctx context.Context, path string) error {
 	// base directories always included
 	dirs := sparseCheckoutDirs()
 
-	// protect staged/dirty files: "sparse-checkout set" removes tracked files
-	// outside the cone from the working tree. If the CLI has staged files in a
-	// directory not in our computed set (e.g. data/linear/, data/custom/), those
-	// files would be deleted from disk before the CLI commits+pushes.
-	// Detect such directories and include them in the cone.
+	// Keep dirty directories in the cone so sparse-checkout cannot discard
+	// local changes before the CLI publishes them.
 	// Porcelain's leading spaces encode index/worktree status; keep raw output.
 	status, err := gitutil.NewNetworkCmd(ctx, "-C", path, "status", "--porcelain", "-z").Output()
 	if err != nil {

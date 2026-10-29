@@ -584,6 +584,9 @@ func TestGC_OrphanedSwapArtifacts_RecoveryFailureBlocksNewCycle(t *testing.T) {
 	// return an error rather than silently no-op.
 	require.NoError(t, os.WriteFile(diffFile, []byte("not a valid diff\x00binary garbage"), 0o600))
 	require.NoError(t, os.WriteFile(swapMarker, nil, 0o600))
+	retained := filepath.Join(cloneDir+".old", "only-copy.txt")
+	require.NoError(t, os.MkdirAll(filepath.Dir(retained), 0755))
+	require.NoError(t, os.WriteFile(retained, []byte("pre-swap content"), 0o600))
 
 	ws := WorkspaceState{
 		ID:       "orphan-fail-test",
@@ -599,6 +602,7 @@ func TestGC_OrphanedSwapArtifacts_RecoveryFailureBlocksNewCycle(t *testing.T) {
 
 	assert.FileExists(t, diffFile, "the unrecoverable diff backup must be preserved for manual recovery, not discarded")
 	assert.FileExists(t, swapMarker, "the swap marker must remain set so the next invocation retries recovery instead of skipping it")
+	assert.FileExists(t, retained, "the old clone must survive until legacy restoration succeeds")
 }
 
 // --- E. cross-process swap lock actually protects the swap window ---
