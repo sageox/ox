@@ -979,10 +979,10 @@ func TestImportE2E_UploadCommandPinsWhatWasPreviewed(t *testing.T) {
 		"only the previewed session is uploaded")
 }
 
-// Live recording discards a session its summarizer judges "skip" and keeps a
-// "local_only" one off the Ledger; the import routes the same way, whether the
-// verdict came from the summarizer or from the brief-session prefilter, and a
-// rerun remembers it instead of summarizing again.
+// The import keeps a session its summarizer judges "skip" or "local_only" off
+// the Ledger, whether the verdict came from the summarizer or from the
+// brief-session prefilter, and a rerun remembers it instead of summarizing
+// again.
 //
 // Failure prevented: trivial sessions filling the Ledger, and a skip reply,
 // which has no title, committed as the empty-title meta.json that the daemon

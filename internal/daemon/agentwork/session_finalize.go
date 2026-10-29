@@ -1716,15 +1716,10 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 			h.emitSummarizationTelemetry(sessionName, "delegated", result, summaryResp, scored)
 		}
 
-		if disposition == session.QualityLocalOnly {
-			h.logger.Info("session below upload threshold, keeping locally",
-				"session", sessionName,
-				"quality_score", summaryResp.QualityScore,
-				"threshold", h.qualityUploadThreshold,
-				"reason", summaryResp.ScoreReason,
-			)
-			return nil
-		}
+		// QualityLocalOnly is published like QualityUpload pending a team decision.
+		// An early return here leaves Detect to requeue the completed cache as
+		// upload-only, which publishes it without a title. Keeping it local also
+		// requires the upload-only path to honor that policy.
 
 		// Finalized downloads already preserve their full metadata (including
 		// legacy derived identity) in writeMetaAndUploadLFS. Seed only a draft
