@@ -56,11 +56,14 @@ type Report struct {
 
 // SessionInfo identifies the session the report covers.
 type SessionInfo struct {
-	Name      string `json:"name,omitempty"`
-	AgentID   string `json:"agent_id,omitempty"`
-	Harness   string `json:"harness,omitempty"`
-	Recording bool   `json:"recording"`
-	Turns     int    `json:"turns,omitempty"`
+	Name    string `json:"name,omitempty"`
+	AgentID string `json:"agent_id,omitempty"`
+	Harness string `json:"harness,omitempty"`
+	// Recording means a live recording owns this report's trace, paused or
+	// not. Paused says that recording's capture is currently suspended.
+	Recording bool `json:"recording"`
+	Paused    bool `json:"paused,omitempty"`
+	Turns     int  `json:"turns,omitempty"`
 }
 
 // TraceInfo says whether a usage trace was found and where.
