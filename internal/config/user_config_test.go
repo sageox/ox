@@ -653,22 +653,17 @@ func TestAgentWorkerConfig_SessionFinalizeRequiresEnabled(t *testing.T) {
 
 func TestAgentWorkerConfig_QualityThresholdDefaults(t *testing.T) {
 	var nilCfg *AgentWorkerConfig
-	assert.InDelta(t, 0.3, nilCfg.GetQualityUploadThreshold(), 0.001)
 	assert.InDelta(t, 0.1, nilCfg.GetQualityDiscardThreshold(), 0.001)
 
 	cfg := (&AgentWorkerConfig{}).WithDefaults()
-	assert.InDelta(t, 0.3, cfg.GetQualityUploadThreshold(), 0.001)
 	assert.InDelta(t, 0.1, cfg.GetQualityDiscardThreshold(), 0.001)
 }
 
 func TestAgentWorkerConfig_QualityThresholdCustom(t *testing.T) {
-	upload := 0.6
 	discard := 0.2
 	cfg := &AgentWorkerConfig{
-		QualityUploadThreshold:  &upload,
 		QualityDiscardThreshold: &discard,
 	}
-	assert.InDelta(t, 0.6, cfg.GetQualityUploadThreshold(), 0.001)
 	assert.InDelta(t, 0.2, cfg.GetQualityDiscardThreshold(), 0.001)
 }
 
@@ -678,13 +673,12 @@ func TestAgentWorkerConfig_WithDefaults_SessionFinalizeTrue(t *testing.T) {
 	assert.True(t, *cfg.SessionFinalize, "WithDefaults should set SessionFinalize to true")
 }
 
-func TestLoadUserConfig_QualityThresholds(t *testing.T) {
+func TestLoadUserConfig_QualityDiscardThreshold(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
 
 	content := []byte(`agent_worker:
   enabled: true
-  quality_upload_threshold: 0.5
   quality_discard_threshold: 0.15
 `)
 	require.NoError(t, os.WriteFile(configPath, content, 0644))
@@ -692,7 +686,6 @@ func TestLoadUserConfig_QualityThresholds(t *testing.T) {
 	cfg, err := LoadUserConfigFrom(tmpDir)
 	require.NoError(t, err)
 	require.NotNil(t, cfg.AgentWorker)
-	assert.InDelta(t, 0.5, cfg.AgentWorker.GetQualityUploadThreshold(), 0.001)
 	assert.InDelta(t, 0.15, cfg.AgentWorker.GetQualityDiscardThreshold(), 0.001)
 }
 

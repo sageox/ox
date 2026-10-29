@@ -360,7 +360,7 @@ func TestImportE2E_ParallelReportsKeepPreviewOrder(t *testing.T) {
 	assert.Equal(t, []string{e2eClaudeA, e2eCodexA, e2eClaudeB}, ids, "JSON order follows the preview, not worker completion")
 }
 
-// TestImportE2E_ParallelVerdictsAreAllRemembered prevents concurrent local-only
+// TestImportE2E_ParallelVerdictsAreAllRemembered prevents concurrent skip
 // decisions from overwriting each other and triggering unnecessary summaries on rerun.
 func TestImportE2E_ParallelVerdictsAreAllRemembered(t *testing.T) {
 	f := parallelImportFixture(t)
@@ -385,7 +385,7 @@ func TestImportE2E_ParallelVerdictsAreAllRemembered(t *testing.T) {
 		if strings.Contains(prompt, pushPrompt) {
 			return `{"quality_category":"skip","score_reason":"No useful work to share."}`
 		}
-		return `{"title":"Keep account research local","summary":"Checked a local account setup.","key_actions":["Checked the account"],"outcome":"success","quality_category":"local_only","score_reason":"Personal local account setup."}`
+		return `{"quality_category":"skip","score_reason":"Repeated account check with no new work or decisions."}`
 	}
 	start := time.Date(2026, 9, 10, 8, 0, 0, 0, time.UTC)
 	ids := []string{e2eClaudeA, e2eCodexA, e2eClaudeB}

@@ -1,21 +1,16 @@
 package session
 
-// QualityDisposition is the action to take based on a session's quality score.
+// QualityDisposition is the action to take based on a session's quality.
 type QualityDisposition string
 
 const (
 	// QualityUpload means the session should be pushed to the team ledger.
 	QualityUpload QualityDisposition = "upload"
-	// QualityLocalOnly marks real but primarily individual work. The daemon's
-	// finalize publishes it like QualityUpload, pending a team decision (see
-	// ProcessResult in internal/daemon/agentwork/session_finalize.go);
-	// ox session push-summary and session import do not push it.
-	QualityLocalOnly QualityDisposition = "local_only"
-	// QualityDiscard means the session should be deleted entirely.
+	// QualityDiscard means the session should be skipped.
 	QualityDiscard QualityDisposition = "discard"
 )
 
-// EvaluateQuality maps a quality score to a disposition using the two thresholds.
+// EvaluateQuality maps a legacy quality score to an upload or discard disposition.
 //
 // The score argument is a real, scored value (0.0–1.0). Callers must not pass
 // a negative sentinel or similar "unscored" placeholder: if the LLM did not
@@ -25,12 +20,9 @@ const (
 // upload," which conflated an empty session the LLM correctly scored 0 with
 // the truly-unscored case and quietly published header-only sessions to the
 // team ledger (see #525).
-func EvaluateQuality(score, uploadThreshold, discardThreshold float64) QualityDisposition {
+func EvaluateQuality(score, discardThreshold float64) QualityDisposition {
 	if score < discardThreshold {
 		return QualityDiscard
-	}
-	if score < uploadThreshold {
-		return QualityLocalOnly
 	}
 	return QualityUpload
 }
@@ -41,7 +33,7 @@ func EvaluateQuality(score, uploadThreshold, discardThreshold float64) QualityDi
 // rubric distinctions, while LLMs are far more reliable picking from a
 // small named set with anchored examples.
 //
-// Unknown / empty category returns QualityUpload by design: an
+// Legacy local_only, unknown, and empty categories return QualityUpload: an
 // unrecognized string from a legacy or future summary should default to
 // preserving the artifact, not silently discarding it. Callers that have
 // a numeric score on hand should use EvaluateQuality instead — this
@@ -49,14 +41,8 @@ func EvaluateQuality(score, uploadThreshold, discardThreshold float64) QualityDi
 // matches the existing "unscored fallbacks default to upload" policy in
 // session_finalize.go's ProcessResult.
 func EvaluateQualityCategory(category string) QualityDisposition {
-	switch category {
-	case "skip":
+	if category == "skip" {
 		return QualityDiscard
-	case "local_only":
-		return QualityLocalOnly
-	case "share":
-		return QualityUpload
-	default:
-		return QualityUpload
 	}
+	return QualityUpload
 }

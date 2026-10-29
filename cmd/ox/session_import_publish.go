@@ -309,16 +309,11 @@ func heldf(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", errImportHeld, fmt.Sprintf(format, args...))
 }
 
-// importVerdictFor routes the summarizer's verdict: the import leaves a "skip"
-// session and a "local_only" one where they are. Live recording also discards
-// "skip" but publishes "local_only". The brief-session prefilter returns
-// "skip" too.
+// importVerdictFor leaves skipped sessions where they are, whether the verdict
+// came from the summarizer or the brief-session prefilter.
 func importVerdictFor(summary *session.SummarizeResponse) string {
-	switch session.EvaluateQualityCategory(summary.QualityCategory) {
-	case session.QualityDiscard:
+	if session.EvaluateQualityCategory(summary.QualityCategory) == session.QualityDiscard {
 		return "not worth sharing"
-	case session.QualityLocalOnly:
-		return "kept local"
 	}
 	return ""
 }
