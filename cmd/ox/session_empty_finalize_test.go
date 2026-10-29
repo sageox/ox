@@ -223,7 +223,8 @@ func TestEmptyLedgerSession_SettledAfterFailedPush(t *testing.T) {
 
 	// When: the first attempt cannot reach the remote.
 	runGit(t, f.ledgerPath, "remote", "set-url", "--push", "origin", filepath.Join(t.TempDir(), "unreachable.git"))
-	_, llmRuns := runFinalizePass(t, f.projectRoot, f.ledgerPath)
+	_, llmRuns, err := runFinalizePassResult(t, f.projectRoot, f.ledgerPath)
+	require.ErrorContains(t, err, "git push")
 	require.Zero(t, llmRuns)
 	require.Equal(t, remoteBefore, runGit(t, f.barePath, "rev-parse", "HEAD"), "precondition: the push must fail")
 	require.DirExists(t, cacheDir, "precondition: the download is kept for a retry")

@@ -53,6 +53,7 @@ func TestSessionFinalize_LFSFailurePreservesCacheUntilRetry(t *testing.T) {
 					service.blobUnavailable.Store(true)
 				}
 				before := gitOutput(t, ledgerPath, "rev-parse", "HEAD")
+				beforeWorktree := gitOutput(t, ledgerPath, "status", "--porcelain", "--untracked-files=all", "--", "sessions")
 				payload := &SessionFinalizePayload{
 					SessionDir: cacheDir,
 					RawPath:    filepath.Join(cacheDir, "raw.jsonl"),
@@ -61,14 +62,13 @@ func TestSessionFinalize_LFSFailurePreservesCacheUntilRetry(t *testing.T) {
 				if door == "regular" {
 					payload.Missing = requiredArtifacts
 					item := &WorkItem{ID: "lfs-outage", Type: sessionFinalizeType, Payload: payload}
-					// Regular finalization preserves the cache and defers publication;
-					// its caller observes the pending session on the next Detect pass.
-					_ = handler.ProcessResult(item, &RunResult{Output: `{"title":"Recovered Session","summary":"A useful session with completed implementation and validation.","quality_score":0.8,"score_reason":"fine","outcome":"success","key_actions":["did something"]}`})
+					require.Error(t, handler.ProcessResult(item, &RunResult{Output: `{"title":"Recovered Session","summary":"A useful session with completed implementation and validation.","quality_score":0.8,"score_reason":"fine","outcome":"success","key_actions":["did something"]}`}))
 				} else {
 					require.Error(t, handler.processUploadOnly(payload))
 				}
 				assert.Equal(t, before, gitOutput(t, ledgerPath, "rev-parse", "HEAD"), "LFS failure must not create a fallback commit")
 				assert.Equal(t, before, gitOutput(t, barePath, "rev-parse", "HEAD"), "LFS failure must not publish content")
+				assert.Equal(t, beforeWorktree, gitOutput(t, ledgerPath, "status", "--porcelain", "--untracked-files=all", "--", "sessions"), "failed upload must not purge the draft or copy unuploaded content into the Ledger")
 				raw, err := os.ReadFile(filepath.Join(cacheDir, "raw.jsonl"))
 				require.NoError(t, err, "the original cache is required for retry")
 				assert.Equal(t, testRawContent, string(raw))

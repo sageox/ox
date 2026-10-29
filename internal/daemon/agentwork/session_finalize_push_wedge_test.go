@@ -163,7 +163,7 @@ func TestProcessUploadOnly_FailureExitsReachTheRetryCap(t *testing.T) {
 				dest := filepath.Join(ledger, "sessions", filepath.Base(item.Payload.(*SessionFinalizePayload).SessionDir))
 				require.NoError(t, os.WriteFile(dest, []byte("in the way"), 0o644))
 			},
-			wantErr: "stage session",
+			wantErr: "read published session metadata",
 		},
 		{
 			name: "pointer stub references a blob the remote lacks",
@@ -296,7 +296,7 @@ func TestGitCommitAndPush_UnmergedIndexIsErrLedgerUnresolved(t *testing.T) {
 			name:      "conflict already in the index before the transaction",
 			arrange:   func(t *testing.T, ledger string) func() { wedgeLedger(t, ledger); return nil },
 			wantErr:   ErrLedgerUnresolved,
-			wantInMsg: "commit blocked",
+			wantInMsg: "finalize blocked",
 		},
 		{
 			name: "conflict appears between staging and commit (write-tree refuses)",
@@ -327,7 +327,6 @@ func TestGitCommitAndPush_UnmergedIndexIsErrLedgerUnresolved(t *testing.T) {
 			}
 			assert.False(t, pushed)
 			require.ErrorIs(t, err, tt.wantErr)
-			assert.True(t, isLedgerWideBlocker(err))
 			assert.ErrorContains(t, err, tt.wantInMsg)
 		})
 	}

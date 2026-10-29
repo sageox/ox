@@ -138,10 +138,10 @@ func TestProcessResult_PushFailPreservesArtifacts(t *testing.T) {
 		Output: `{"summary":"test summary","quality_score":1.0,"score_reason":"test"}`,
 	}
 
-	// ProcessResult returns nil even on push failure (push is non-fatal)
+	// Publication failure remains visible while all content survives for retry.
 	err = handler.ProcessResult(item, result)
-	if err != nil {
-		t.Fatalf("ProcessResult should not return error on push failure: %v", err)
+	if err == nil {
+		t.Fatal("ProcessResult should return the push failure")
 	}
 
 	// CRITICAL: all artifacts must survive despite failed push

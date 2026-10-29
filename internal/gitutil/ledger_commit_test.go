@@ -44,6 +44,95 @@ func headHasPath(t *testing.T, repo, path string) bool {
 	return err == nil
 }
 
+// Completed publication must not inherit missing or provisional metadata from
+// HEAD, including when the entire candidate tree is an identical retry.
+func TestCommitFinalizedSessionSnapshot_MetadataInvariant(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repositories")
+	}
+	for _, tc := range []struct {
+		name, meta string
+		valid      bool
+		symlink    bool
+	}{
+		{name: "missing"},
+		{name: "draft", meta: `{"draft":true}`},
+		{name: "corrupt", meta: `{"draft":`},
+		{name: "null", meta: `null`},
+		{name: "invalid draft type", meta: `{"draft":"false"}`},
+		{name: "invalid files", meta: `{"files":"invalid"}`},
+		{name: "symlink", meta: `{"draft":false}`, symlink: true},
+		{name: "minimal legacy metadata", meta: `{}`, valid: true},
+		{name: "failure stub", meta: `{"draft":false,"summary_status":"failed_validation"}`, valid: true},
+	} {
+		for _, changed := range []bool{false, true} {
+			t.Run(tc.name+map[bool]string{false: "/no-op", true: "/new artifact"}[changed], func(t *testing.T) {
+				repo := newSnapshotRepo(t)
+				if tc.meta != "" {
+					writeGitutilFixture(t, repo, "sessions/example/meta.json", tc.meta)
+					if tc.symlink {
+						metaPath := filepath.Join(repo, "sessions/example/meta.json")
+						require.NoError(t, os.Remove(metaPath))
+						require.NoError(t, os.Symlink(tc.meta, metaPath))
+					}
+				}
+				writeGitutilFixture(t, repo, "sessions/example/raw.jsonl", "version https://git-lfs.github.com/spec/v1\noid sha256:"+strings.Repeat("a", 64)+"\nsize 7\n")
+				gitInRepo(t, repo, "add", "--sparse", "sessions")
+				gitInRepo(t, repo, "commit", "-m", "historical session")
+				before := gitInRepo(t, repo, "rev-parse", "HEAD")
+				if changed {
+					writeGitutilFixture(t, repo, "sessions/example/summary.json", `{"title":"A completed session"}`)
+					gitInRepo(t, repo, "add", "--sparse", "sessions")
+				}
+				committed, err := CommitFinalizedSessionSnapshot(context.Background(), repo, "finalize session example", "example")
+				if tc.valid {
+					require.NoError(t, err)
+					assert.Equal(t, changed, committed)
+				} else {
+					require.Error(t, err)
+					assert.False(t, committed)
+					assert.Equal(t, before, gitInRepo(t, repo, "rev-parse", "HEAD"))
+				}
+			})
+		}
+	}
+}
+
+func TestCommitFinalizedSessionSnapshot_RejectsInvalidSessionNames(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
+	repo := newSnapshotRepo(t)
+	writeGitutilFixture(t, repo, "sessions/example/meta.json", cleanMeta)
+	gitInRepo(t, repo, "add", "--sparse", "sessions")
+	beforeHead := gitInRepo(t, repo, "rev-parse", "HEAD")
+	beforeIndex := gitInRepo(t, repo, "write-tree")
+	for _, name := range []string{"", ".", "..", "../example", "nested/example", `nested\example`, "bad\x00name"} {
+		t.Run(name, func(t *testing.T) {
+			committed, err := CommitFinalizedSessionSnapshot(context.Background(), repo, "finalize session", name)
+			require.ErrorContains(t, err, "invalid session name")
+			assert.False(t, committed)
+			assert.Equal(t, beforeHead, gitInRepo(t, repo, "rev-parse", "HEAD"))
+			assert.Equal(t, beforeIndex, gitInRepo(t, repo, "write-tree"))
+		})
+	}
+}
+
+// Draft placeholders and server-authored draft summaries use the ordinary
+// snapshot API; the finalization-only invariant must not prohibit those writes.
+func TestCommitLedgerSnapshot_AllowsDraftPublication(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
+	repo := newSnapshotRepo(t)
+	writeGitutilFixture(t, repo, "sessions/draft/meta.json", `{"draft":true}`)
+	writeGitutilFixture(t, repo, "sessions/draft/summary.json", `{"title":"Provisional"}`)
+	gitInRepo(t, repo, "add", "--sparse", "sessions")
+	committed, err := CommitLedgerSnapshot(context.Background(), repo, "session draft", "sessions/draft/")
+	require.NoError(t, err)
+	assert.True(t, committed)
+}
+
 // TestCommitLedgerSnapshot_CommitsStagedBlobNotWorktree is the regression for
 // the PR #910 review finding: `git commit -- <pathspec>` reads the WORKTREE, so
 // an unlocked writer that rewrites meta.json after validation gets its bytes

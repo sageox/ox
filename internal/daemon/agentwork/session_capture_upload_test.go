@@ -255,7 +255,9 @@ func TestSessionCapture_UploadsNativeEntries(t *testing.T) {
 				}
 				if mode.uploadOnly {
 					for _, name := range requiredArtifacts {
-						require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(rawPath), name), []byte("{}"), 0o600))
+						// A completed summary keeps retry focused on publication;
+						// an empty object correctly requests another summary.
+						require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(rawPath), name), []byte(`{"title":"Native session capture and upload"}`), 0o600))
 					}
 				}
 				if mode.rejectPush {
@@ -273,7 +275,7 @@ func TestSessionCapture_UploadsNativeEntries(t *testing.T) {
 				// Only the summary response is supplied: artifact generation, LFS
 				// upload, pointer publication, and git push use production code.
 				processErr := handler.ProcessResult(items[0], &RunResult{Output: `{"title":"Native session capture and upload","summary":"Verified native conversation and tool capture across watcher restart, then finalized the session into the team ledger.","key_actions":["Captured native messages and tools","Resumed recording from its persisted cursor","Uploaded session artifacts"],"outcome":"success","topics_found":["session capture"],"quality_score":0.9,"score_reason":"Verified the complete session recording and upload lifecycle"}`})
-				if mode.uploadOnly && mode.rejectPush {
+				if mode.rejectPush {
 					require.Error(t, processErr)
 				} else {
 					require.NoError(t, processErr)

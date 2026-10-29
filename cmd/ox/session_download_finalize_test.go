@@ -175,6 +175,13 @@ func (f *downloadLedgerFixture) publishFinishedSession(t *testing.T, name, title
 // so any item that reaches it would publish that title.
 func runFinalizePass(t *testing.T, projectRoot, ledgerPath string) (queued, llmRuns int) {
 	t.Helper()
+	queued, llmRuns, err := runFinalizePassResult(t, projectRoot, ledgerPath)
+	require.NoError(t, err)
+	return queued, llmRuns
+}
+
+func runFinalizePassResult(t *testing.T, projectRoot, ledgerPath string) (queued, llmRuns int, err error) {
+	t.Helper()
 	h := agentwork.NewSessionFinalizeHandler(slog.New(slog.DiscardHandler))
 	h.SetLedgerMu(&sync.Mutex{})
 	h.SetProjectRoot(projectRoot)
@@ -192,9 +199,11 @@ func runFinalizePass(t *testing.T, projectRoot, ledgerPath string) (queued, llmR
 				Duration: time.Second,
 			}
 		}
-		require.NoError(t, h.ProcessResult(item, result))
+		if err := h.ProcessResult(item, result); err != nil {
+			return len(items), llmRuns, err
+		}
 	}
-	return len(items), llmRuns
+	return len(items), llmRuns, nil
 }
 
 func TestSessionDownload_DaemonDoesNotRewriteTeammateSession(t *testing.T) {

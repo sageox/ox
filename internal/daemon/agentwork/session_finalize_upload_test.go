@@ -455,8 +455,8 @@ func TestProcessResult_RegularFinalize_CachePreservedOnPushFail(t *testing.T) {
 		},
 	}
 
-	if err := handler.ProcessResult(item, &RunResult{Output: llmOutput}); err != nil {
-		t.Fatalf("ProcessResult returned unexpected error: %v", err)
+	if err := handler.ProcessResult(item, &RunResult{Output: llmOutput}); err == nil {
+		t.Fatal("ProcessResult should return the push failure")
 	}
 
 	// CRITICAL: cache must survive push failure — it's the only surviving copy
@@ -563,15 +563,10 @@ func TestProcessResult_UploadOnly_AlreadyCommitted_PrunesCache(t *testing.T) {
 		}
 	}
 
-	// meta.json goes into the LEDGER copy only, never the cache copy. Without it
-	// the handler synthesizes one during ProcessResult — a genuinely new file, so
-	// `git add` stages a real diff and the run takes the ordinary commit path.
-	// The no-op branch this test exists to guard would never execute and the
-	// assertions below would pass for the wrong reason. Keeping it out of the
-	// cache dir matters too: stageSessionInLedger copies cache over ledger, so a
-	// cache-side meta.json would overwrite this one and reintroduce a diff.
-	if err := os.WriteFile(filepath.Join(ledgerDir, "meta.json"),
-		[]byte(`{"version":"1.0","session_name":"`+sessionName+`"}`), 0644); err != nil {
+	// Seed the published record with the canonical writer's bytes, then let the
+	// finalizer preserve it in the cache. Synthesized metadata or a one-time JSON
+	// format normalization would create a diff and miss the no-op branch.
+	if err := lfs.WriteSessionMetaOnly(ledgerDir, &lfs.SessionMeta{Version: "1.0", SessionName: sessionName}); err != nil {
 		t.Fatal(err)
 	}
 

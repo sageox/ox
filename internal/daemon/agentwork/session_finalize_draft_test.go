@@ -529,7 +529,7 @@ func TestStageSessionInLedger_DurablyPreservesDraftIdentity(t *testing.T) {
 			h := newGitBackedHandler()
 			_, err := h.stageSessionInLedger(&SessionFinalizePayload{SessionDir: cacheDir, LedgerPath: ledgerPath})
 			if mode == "corrupt metadata" {
-				require.ErrorContains(t, err, "preserve draft session identity")
+				require.ErrorContains(t, err, "preserve published session metadata")
 				draft, err := lfs.ReadSessionMeta(destDir)
 				require.NoError(t, err)
 				require.True(t, draft.Draft)

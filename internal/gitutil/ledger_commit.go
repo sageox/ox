@@ -3,6 +3,7 @@ package gitutil
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -64,6 +65,17 @@ func CommitLedgerSnapshot(ctx context.Context, repoPath, message string, pathspe
 	return CommitLedgerSnapshotPreserving(ctx, repoPath, message, nil, pathspecs...)
 }
 
+// CommitFinalizedSessionSnapshot publishes one completed session. Unlike a
+// draft-only snapshot, it requires non-draft metadata in the exact tree being
+// committed, even when metadata is unchanged or this is an identical retry.
+// The caller holds WithRepoLock from preparation through this call.
+func CommitFinalizedSessionSnapshot(ctx context.Context, repoPath, message, sessionName string) (bool, error) {
+	if sessionName == "" || sessionName == "." || sessionName == ".." || strings.ContainsAny(sessionName, "/\\\x00") {
+		return false, fmt.Errorf("invalid session name %q", sessionName)
+	}
+	return commitLedgerSnapshot(ctx, repoPath, message, nil, sessionName, ":(top,literal)sessions/"+sessionName+"/")
+}
+
 // CommitLedgerSnapshotPreserving is CommitLedgerSnapshot for a caller that
 // deletes tracked sacred paths after preserving their full bytes in
 // .sageox/cache. preserved lists those ledger-relative paths. Each one is
@@ -73,6 +85,10 @@ func CommitLedgerSnapshot(ctx context.Context, repoPath, message string, pathspe
 // summary requests the guard never counts (assertNoSacredMassDeletion), no
 // other path is exempt, and there is no switch that disables the guard.
 func CommitLedgerSnapshotPreserving(ctx context.Context, repoPath, message string, preserved []string, pathspecs ...string) (committed bool, err error) {
+	return commitLedgerSnapshot(ctx, repoPath, message, preserved, "", pathspecs...)
+}
+
+func commitLedgerSnapshot(ctx context.Context, repoPath, message string, preserved []string, finalizedSession string, pathspecs ...string) (bool, error) {
 	// Never mutate the ledger mid-rebase: moving the branch ref under a rebase
 	// consumes the replay step (see .claude/rules/cache-only-design.md).
 	if err := IsSafeForGitOps(repoPath); err != nil {
@@ -95,6 +111,25 @@ func CommitLedgerSnapshotPreserving(ctx context.Context, repoPath, message strin
 		tree, err = writeScopedIndexTree(ctx, repoPath, parent, pathspecs)
 		if err != nil {
 			return false, err
+		}
+	}
+
+	if finalizedSession != "" {
+		metaPath := "sessions/" + finalizedSession + "/meta.json"
+		// The ordinary delta check skips unchanged metadata. Reuse the manifest
+		// reader to validate its mode, content and files even on a no-op retry.
+		if _, err := ledgerContentStorage(ctx, repoPath, tree, "sessions/"+finalizedSession+"/raw.jsonl"); err != nil {
+			return false, fmt.Errorf("invalid finalized session metadata: %w", err)
+		}
+		data, err := cleanGitOutput(ctx, repoPath, "cat-file", "blob", tree+":"+metaPath)
+		if err != nil {
+			return false, fmt.Errorf("finalized session metadata missing or unreadable: %w", err)
+		}
+		var meta struct {
+			Draft bool `json:"draft"`
+		}
+		if err := json.Unmarshal(data, &meta); err != nil || meta.Draft {
+			return false, fmt.Errorf("finalized session still has draft metadata: %s", metaPath)
 		}
 	}
 
