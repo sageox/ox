@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/doctor/autofix"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -403,6 +405,88 @@ func TestSessionMetaConflict_AutoResolvesUnderProductionRules(t *testing.T) {
 		"sessions/ conflicts must auto-resolve under production rules, not wedge")
 	require.False(t, gitutil.IsRebaseInProgress(localDir),
 		"no rebase may be left in progress after a successful reconcile")
+}
+
+// sessionTitleRepair returns the session-meta-titles autofix check. The daemon's
+// scheduler runs it with the Ledger path.
+func sessionTitleRepair(t *testing.T) *autofix.Check {
+	t.Helper()
+	for _, c := range autofix.Default().All() {
+		if c.Slug == "session-meta-titles" {
+			return c
+		}
+	}
+	t.Fatal("session-meta-titles check is not registered")
+	return nil
+}
+
+// Failure prevented (2026-10-28): every clone's title repair was left as an
+// uncommitted meta.json edit, so a teammate's different summary of the same
+// session made the autostash pop refuse and wedged the Ledger. Committed, the
+// repair is replayed by the rebase, which the production rules resolve.
+func TestPullManagedRepo_CommittedTitleRepairNeverWedges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git pull")
+	}
+	const session = "2026-10-22T16-37-owner-OxTITL"
+	writeMeta := func(t *testing.T, repo string, meta *lfs.SessionMeta) {
+		t.Helper()
+		dir := filepath.Join(repo, "sessions", session)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, lfs.WriteSessionMetaOnly(dir, meta))
+	}
+	untitled := func() *lfs.SessionMeta {
+		return &lfs.SessionMeta{Version: "1.0", SessionName: session, Username: "Owner",
+			CreatedAt: time.Date(2026, 10, 22, 16, 37, 0, 0, time.UTC), Files: map[string]lfs.FileRef{}}
+	}
+	for _, tc := range []struct {
+		name     string
+		teammate func(t *testing.T, writer string) // what the other clone commits and pushes first
+	}{
+		{"teammate pushed the same title repair", func(t *testing.T, writer string) {
+			res := sessionTitleRepair(t).Run(context.Background(), writer)
+			require.Equal(t, autofix.StatusFixed, res.Status, res.Summary)
+		}},
+		{"teammate pushed a different summary", func(t *testing.T, writer string) {
+			meta := untitled()
+			meta.Title, meta.Summary, meta.SummaryStatus = "Teammate title", "A different summary written on a teammate's machine.", "ok"
+			writeMeta(t, writer, meta)
+			gitInDir(t, writer, "commit", "-qam", "finalize session "+session)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateCredentials(t)
+			bare, writer := initBareRepo(t, "titles")
+			writeMeta(t, writer, untitled())
+			require.NoError(t, os.WriteFile(filepath.Join(writer, "sessions", session, "summary.json"), []byte(`{"title":"Owner title"}`), 0o644))
+			gitInDir(t, writer, "add", "sessions")
+			gitInDir(t, writer, "commit", "-qm", "finalize session "+session)
+			gitInDir(t, writer, "push", "-q", "origin", "main")
+			local := filepath.Join(t.TempDir(), "local")
+			gitInDir(t, writer, "clone", "-q", bare, local)
+			gitConfig(t, local)
+
+			tc.teammate(t, writer)
+			gitInDir(t, writer, "push", "-q", "origin", "main")
+
+			// This clone's autofix repairs the same session, then the daemon pulls.
+			res := sessionTitleRepair(t).Run(context.Background(), local)
+			require.Equal(t, autofix.StatusFixed, res.Status, res.Summary)
+			s := newTestScheduler(t.TempDir())
+			result := s.pullManagedRepo(context.Background(), ManagedRepoPullOpts{
+				RepoPath: local, RepoName: "ledger", ResolveRules: ledger.DefaultResolveRules, Logger: discardLogger(),
+			})
+
+			require.Nil(t, result.Issue, "a title repair must never wedge the Ledger")
+			require.NoError(t, result.Err)
+			assert.False(t, gitutil.IsRebaseInProgress(local))
+			unmerged, err := runGitOut(t, local, "ls-files", "--unmerged")
+			require.NoError(t, err)
+			assert.Empty(t, unmerged)
+			_, err = runGitOut(t, local, "merge-base", "--is-ancestor", "origin/main", "HEAD")
+			assert.NoError(t, err, "the pull must integrate the teammate's push")
+		})
+	}
 }
 
 // A successful pull can leave autostash conflicts without a rebase in progress.
