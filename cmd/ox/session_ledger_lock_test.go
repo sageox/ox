@@ -94,20 +94,35 @@ func TestSessionDeletion_PreservesUnfinishedGitOperation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git operations and push")
 	}
-	for _, tt := range []struct{ writer, operation string }{
-		{"session remove", "merge"},
-		{"session delete", "merge"},
-		{"session remove", "linked rebase"},
-		{"session delete", "linked rebase"},
-		{"session remove", "cherry-pick"},
-		{"session delete", "cherry-pick"},
-		{"session remove", "revert"},
-		{"session delete", "revert"},
-		{"session remove", "cherry-pick sequence"},
-		{"session delete", "cherry-pick sequence"},
+	for _, tt := range []struct{ writer, operation, format string }{
+		{"session remove", "merge", "files"},
+		{"session delete", "merge", "files"},
+		{"session remove", "linked rebase", "files"},
+		{"session delete", "linked rebase", "files"},
+		{"session remove", "cherry-pick", "files"},
+		{"session delete", "cherry-pick", "files"},
+		{"session remove", "revert", "files"},
+		{"session delete", "revert", "files"},
+		{"session remove", "cherry-pick sequence", "files"},
+		{"session delete", "cherry-pick sequence", "files"},
+		{"session remove", "cherry-pick", "reftable"},
+		{"session delete", "cherry-pick", "reftable"},
+		{"session remove", "revert", "reftable"},
+		{"session delete", "revert", "reftable"},
 	} {
-		t.Run(tt.writer+"/"+tt.operation, func(t *testing.T) {
+		t.Run(tt.writer+"/"+tt.operation+"/"+tt.format, func(t *testing.T) {
+			if tt.format == "reftable" {
+				out, err := runGitCombined(t.TempDir(), "init", "--bare", "--ref-format=reftable")
+				if err != nil && (strings.Contains(out, "unknown option") || strings.Contains(out, "unknown ref storage format")) {
+					t.Skip("installed Git does not support reftable")
+				}
+				require.NoError(t, err, out)
+			}
+			t.Setenv("GIT_DEFAULT_REF_FORMAT", tt.format)
 			remote, repo := createBareAndClone(t)
+			if tt.format == "reftable" {
+				require.Equal(t, "reftable", runGit(t, repo, "config", "--get", "extensions.refStorage"))
+			}
 			isolatePushEnv(t, repo)
 			const name = "2026-01-01T00-00-testuser-OxMerge"
 			dir := writeSessionFiles(t, repo, name)
@@ -160,8 +175,14 @@ func TestSessionDeletion_PreservesUnfinishedGitOperation(t *testing.T) {
 				runGit(t, repo, "add", "sessions")
 			}
 			markerPath := runGit(t, repo, "rev-parse", "--path-format=absolute", "--git-path", marker)
-			_, err := os.Stat(markerPath)
-			require.NoError(t, err)
+			var operationRef string
+			if tt.format == "reftable" {
+				assert.NoFileExists(t, markerPath, "the operation ref must be stored in reftable")
+				operationRef = runGit(t, repo, "rev-parse", "--verify", marker)
+			} else {
+				_, err := os.Stat(markerPath)
+				require.NoError(t, err)
+			}
 			require.Empty(t, runGit(t, repo, "ls-files", "--unmerged"), "the index is fully resolved")
 			headBefore := runGit(t, repo, "rev-parse", "HEAD")
 			indexBefore := runGit(t, repo, "write-tree")
@@ -182,8 +203,12 @@ func TestSessionDeletion_PreservesUnfinishedGitOperation(t *testing.T) {
 			workAfter, err := os.ReadFile(filepath.Join(dir, "meta.json"))
 			require.NoError(t, err)
 			assert.Equal(t, workBefore, workAfter)
-			_, err = os.Stat(markerPath)
-			require.NoError(t, err)
+			if tt.format == "reftable" {
+				assert.Equal(t, operationRef, runGit(t, repo, "rev-parse", "--verify", marker))
+			} else {
+				_, err = os.Stat(markerPath)
+				require.NoError(t, err)
+			}
 
 			// Finishing or aborting unblocks deletion and synchronization.
 			switch tt.operation {

@@ -437,6 +437,7 @@ func TestStageSessionInLedger_PurgesDraftAndPreservesSessionID(t *testing.T) {
 		[]byte(`{"type":"header"}`+"\n"+`{"type":"user","content":"real"}`+"\n"), 0644))
 
 	h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
+	h.skipGit = false
 	payload := &SessionFinalizePayload{SessionDir: cacheDir, LedgerPath: ledgerPath}
 	// An unfinished merge must be refused before purging the draft or copying
 	// cache bytes into its tracked directory. Recovery can then retry staging.

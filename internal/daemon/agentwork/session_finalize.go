@@ -2194,8 +2194,10 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 		return store.PreserveSessionCache(payload.SessionDir, payload.SessionDir)
 	}
 
-	if err := gitutil.IsSafeForGitOps(payload.LedgerPath); err != nil {
-		return "", err
+	if !h.skipGit {
+		if err := gitutil.IsSafeForGitOps(payload.LedgerPath); err != nil {
+			return "", err
+		}
 	}
 
 	// Supersede any draft placeholder wholesale before copying (ADR-029).

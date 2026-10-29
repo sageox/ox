@@ -339,12 +339,12 @@ func RebaseAge(repoPath string) (time.Duration, bool) {
 // IsSafeForGitOps checks lock files and unfinished Git operations before
 // automatic writes. Returns nil if safe to proceed, or why the repo is blocked.
 func IsSafeForGitOps(repoPath string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), inspectTimeout)
+	defer cancel()
 	gitDir := filepath.Join(repoPath, ".git")
 	if info, err := os.Stat(gitDir); err == nil && !info.IsDir() {
 		// Explicitly configured checkouts can be linked worktrees. All state
 		// checks must use their Git directory, not the .git pointer file.
-		ctx, cancel := context.WithTimeout(context.Background(), inspectTimeout)
-		defer cancel()
 		gitDir, err = RunGit(ctx, repoPath, "rev-parse", "--absolute-git-dir")
 		if err != nil {
 			return fmt.Errorf("resolve git directory: %w", err)
@@ -374,7 +374,20 @@ func IsSafeForGitOps(repoPath string) error {
 		{"REVERT_HEAD", "revert"},
 		{"sequencer", "cherry-pick or revert"},
 	} {
-		if _, err := os.Stat(filepath.Join(gitDir, op.marker)); err == nil {
+		_, err := os.Stat(filepath.Join(gitDir, op.marker))
+		present := err == nil
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect git state: %w", err)
+		}
+		if !present && (op.marker == "CHERRY_PICK_HEAD" || op.marker == "REVERT_HEAD") {
+			// These refs can live in reftable instead of individual files.
+			tip, err := branchTip(ctx, repoPath, op.marker)
+			if err != nil {
+				return fmt.Errorf("inspect git operation: %w", err)
+			}
+			present = tip != ""
+		}
+		if present {
 			if op.name == "rebase" {
 				return fmt.Errorf("repo in broken rebase state (run 'git rebase --abort' in %s)", repoPath)
 			}
@@ -382,8 +395,6 @@ func IsSafeForGitOps(repoPath string) error {
 				return fmt.Errorf("repo has a %s in progress in %s; finish or abort it", op.name, repoPath)
 			}
 			return fmt.Errorf("repo has a %s in progress in %s; finish or abort it, or run 'ox doctor --fix'", op.name, repoPath)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("inspect git state: %w", err)
 		}
 	}
 

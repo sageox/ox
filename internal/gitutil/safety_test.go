@@ -247,10 +247,12 @@ func TestIsSafeForGitOps(t *testing.T) {
 	})
 
 	t.Run("clean repo", func(t *testing.T) {
-		repo := t.TempDir()
-		require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0755))
+		repo := newSnapshotRepo(t)
 
 		assert.NoError(t, IsSafeForGitOps(repo))
+		// An unreadable ref lookup must not be treated as an absent operation.
+		require.NoError(t, os.WriteFile(filepath.Join(repo, ".git", "config"), []byte("[invalid\n"), 0644))
+		assert.ErrorContains(t, IsSafeForGitOps(repo), "inspect git operation")
 	})
 
 	t.Run("lock files present", func(t *testing.T) {
@@ -526,7 +528,8 @@ func TestLockSweep_PidSuffixedAndSelfHealing(t *testing.T) {
 	})
 
 	t.Run("IsSafeForGitOps self-heals an abandoned lock", func(t *testing.T) {
-		repo, gitDir := newGitDir(t)
+		repo := newSnapshotRepo(t)
+		gitDir := filepath.Join(repo, ".git")
 		p := writeLock(t, gitDir, "index.lock", stale)
 
 		assert.NoError(t, IsSafeForGitOps(repo),
