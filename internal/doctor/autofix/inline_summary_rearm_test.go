@@ -187,3 +187,37 @@ func TestRearmInlineSummarySessions_DefersWhilePushSuspended(t *testing.T) {
 	assert.Empty(t, afGit(t, ledger, "status", "--porcelain"))
 	assert.Equal(t, headBefore, afGit(t, ledger, "rev-parse", "HEAD"))
 }
+
+// Failure prevented: a staged meta.json edit whose worktree file matches HEAD
+// read as clean, so a repair overwrote it and a failed commit's restore
+// discarded it.
+func TestMetaDiffersFromHead_SeesStagedEdit(t *testing.T) {
+	ledger := newRearmLedger(t)
+	rel := "sessions/" + rearmOwnSession + "/meta.json"
+	abs := filepath.Join(ledger, filepath.FromSlash(rel))
+	original, err := os.ReadFile(abs)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(abs, append(original, '\n'), 0o644))
+	afGit(t, ledger, "add", rel)
+	require.NoError(t, os.WriteFile(abs, original, 0o644)) // worktree back to HEAD; the edit stays staged
+
+	assert.True(t, metaDiffersFromHead(context.Background(), ledger, rel))
+}
+
+// Failure prevented: a commit interrupted by daemon shutdown left the rewrite
+// uncommitted, because the restore ran with the same canceled context.
+func TestRestoreRepairedMetas_RunsAfterCancel(t *testing.T) {
+	ledger := newRearmLedger(t)
+	rel := "sessions/" + rearmOwnSession + "/meta.json"
+	abs := filepath.Join(ledger, filepath.FromSlash(rel))
+	original, err := os.ReadFile(abs)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(abs, append(original, '\n'), 0o644))
+	afGit(t, ledger, "add", rel)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	restoreRepairedMetas(ctx, ledger, []string{rel})
+
+	assert.Empty(t, afGit(t, ledger, "status", "--porcelain"), "the rewrite must be undone even after cancellation")
+}

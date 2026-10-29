@@ -378,7 +378,11 @@ func metaDiffersFromHead(ctx context.Context, ledgerPath, relPath string) bool {
 	if _, err := gitutil.RunGit(ctx, ledgerPath, "ls-files", "--error-unmatch", "--", relPath); err != nil {
 		return true
 	}
-	_, err := gitutil.RunGit(ctx, ledgerPath, "diff", "--quiet", "HEAD", "--", relPath)
+	if _, err := gitutil.RunGit(ctx, ledgerPath, "diff", "--quiet", "HEAD", "--", relPath); err != nil {
+		return true
+	}
+	// a staged edit can sit behind a worktree file that matches HEAD
+	_, err := gitutil.RunGit(ctx, ledgerPath, "diff", "--cached", "--quiet", "HEAD", "--", relPath)
 	return err != nil
 }
 
@@ -395,7 +399,11 @@ func commitRepairedMetas(ctx context.Context, ledgerPath, msg string, paths []st
 
 // restoreRepairedMetas puts the rewritten files back to HEAD after a failed
 // commit. Best effort by design: the caller already reports StatusError.
+// It ignores ctx cancellation: a commit interrupted by daemon shutdown lands
+// here, and a restore canceled the same way would leave the rewrite uncommitted.
 func restoreRepairedMetas(ctx context.Context, ledgerPath string, paths []string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
 	resetArgs := append([]string{"reset", "-q", "--"}, paths...)
 	if _, err := gitutil.RunGit(ctx, ledgerPath, resetArgs...); err != nil {
 		slog.WarnContext(ctx, "unstage repaired meta.json failed", "error", err)
@@ -467,7 +475,7 @@ func repairLedgerSessionTitles(ctx context.Context, sessionsDir, repoPath string
 			continue
 		}
 		sessionDir := filepath.Join(sessionsDir, e.Name())
-		// Dry run first: the git check below costs two subprocesses per session.
+		// Dry run first: the git check below costs three subprocesses per session.
 		probe := lfs.RecoverEmptyTitleMeta(sessionDir, true)
 		if probe.Error != "" {
 			errored++
