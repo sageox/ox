@@ -127,6 +127,7 @@ func TestGC_FailedPreparationPreservesOriginalAndRetries(t *testing.T) {
 				wantResult = gcSkippedDirty
 				copyFile = func(src, dst string) error {
 					if src == filepath.Join(clone, "sessions", "local.txt") {
+						hookCalled = true
 						return errors.New("synthetic read failure")
 					}
 					return originalCopy(src, dst)
@@ -148,8 +149,10 @@ func TestGC_FailedPreparationPreservesOriginalAndRetries(t *testing.T) {
 			}
 			ws := WorkspaceState{ID: "ledger", Type: WorkspaceTypeLedger, Path: clone, CloneURL: "file://" + bare, Exists: true}
 			require.Equal(t, wantResult, scheduler.runBlueGreenGC(ctx, ws))
+			if phase == "swap deadline" || phase == "untracked capture error" {
+				require.True(t, hookCalled, "the test must reach the injected failure")
+			}
 			if phase == "swap deadline" {
-				require.True(t, hookCalled, "the test must reach the swap before its deadline expires")
 				require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
 			}
 			current, err := os.Stat(filepath.Join(clone, ".git"))
