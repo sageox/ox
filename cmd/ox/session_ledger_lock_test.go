@@ -112,7 +112,7 @@ func TestSessionDeletion_PreservesUnfinishedGitOperation(t *testing.T) {
 	} {
 		t.Run(tt.writer+"/"+tt.operation+"/"+tt.format, func(t *testing.T) {
 			if tt.format == "reftable" {
-				out, err := runGitCombined(t.TempDir(), "init", "--bare", "--ref-format=reftable")
+				out, err := runGitCombined(t.TempDir(), "init", "--ref-format=reftable")
 				if err != nil && (strings.Contains(out, "unknown option") || strings.Contains(out, "unknown ref storage format")) {
 					t.Skip("installed Git does not support reftable")
 				}
