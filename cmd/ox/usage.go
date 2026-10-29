@@ -201,6 +201,7 @@ func usageInputForCurrentSession(projectRoot, agentID string) usage.Input {
 	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 	if err == nil && state != nil && state.SessionPath != "" {
 		in.Recording = true
+		in.Paused = state.IsSuspended()
 		in.SessionName = filepath.Base(state.SessionPath)
 		in.Turns = state.TurnCount
 		in.ProducedCommits = len(state.ProducedCommits)

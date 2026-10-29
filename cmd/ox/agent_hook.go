@@ -608,7 +608,7 @@ func emitSuspendedNudge(w io.Writer, projectRoot, agentID string) {
 		return
 	}
 	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
-	if err != nil || state == nil || state.SuspendedAt == nil {
+	if err != nil || !state.IsSuspended() {
 		return
 	}
 	dur := formatPausedDuration(time.Since(*state.SuspendedAt))

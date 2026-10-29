@@ -17,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
 	"github.com/sageox/ox/internal/usage"
 )
@@ -483,4 +484,30 @@ func TestUsage_DeprecatedAliasStillRuns(t *testing.T) {
 	usageCmd.Flags().VisitAll(func(f *pflag.Flag) {
 		assert.NotNil(t, usageDeprecatedCmd.Flags().Lookup(f.Name), "alias lacks --%s", f.Name)
 	})
+}
+
+// TestUsage_PausedRecordingSaysPaused: a recording suspended by
+// `ox agent session pause` still owns the trace but the report says it is
+// paused, in --json and in the coworker's terminal view. Failure prevented:
+// `ox session report` and its pane claim "● recording" while capture is paused.
+func TestUsage_PausedRecordingSaysPaused(t *testing.T) {
+	root := usageTraceEnv(t, nil)
+	startUsageRecording(t, root)
+	require.NoError(t, session.UpdateRecordingStateForAgent(root, usageAgentID, func(s *session.RecordingState) {
+		now := time.Now().UTC()
+		s.SuspendedAt = &now
+	}))
+
+	r := runOxUsageJSON(t)
+	assert.True(t, r.Session.Recording)
+	assert.True(t, r.Session.Paused)
+	assert.Contains(t, r.Display, "⏸ paused")
+	assert.NotContains(t, r.Display, "● recording")
+
+	resetUsageFlags(t)
+	human, err := executeRootCLI(t, "session", "report", "--json=false")
+	require.NoError(t, err)
+	human = ansi.Strip(human)
+	assert.Contains(t, human, "⏸ paused")
+	assert.NotContains(t, human, "● recording")
 }

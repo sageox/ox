@@ -383,6 +383,8 @@ func sessionHeader(r Report, st styler, width int) string {
 	}
 	var parts []string
 	switch {
+	case r.Session.Recording && r.Session.Paused:
+		parts = append(parts, st.dim("⏸")+" paused")
 	case r.Session.Recording:
 		parts = append(parts, st.ok("●")+" recording")
 	case !past:

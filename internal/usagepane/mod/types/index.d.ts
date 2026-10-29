@@ -42,8 +42,12 @@ export type UsageSurfaced = {
 
 export type UsageReport = {
   view?: string
-  /** Who the session is (name, harness) is not drawn; only whether it records. */
-  session: { recording: boolean }
+  /**
+   * Who the session is (name, harness) is not drawn; only whether it records.
+   * `recording` stays true while paused (a live recording still owns the
+   * trace); `paused` says capture is suspended.
+   */
+  session: { recording: boolean; paused: boolean }
   trace: { available: boolean; source?: string; reason?: string }
   calls: { total: number; failed: number; recent: UsageRecentCall[] }
   context: { tokens: number; estimated?: boolean; by_source: UsageContextSource[] }

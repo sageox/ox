@@ -343,6 +343,13 @@ func (r *RecordingState) IsAgentAlive() bool {
 	return isPIDAlive(r.ParentPID) && !proc.IsReused(r.ParentPID, r.ParentStartTime)
 }
 
+// IsSuspended reports whether the recording is paused (ADR-020). Capture
+// continues locally while suspended, but the paused range is excluded from
+// upload, so surfaces must not present a paused session as recording.
+func (r *RecordingState) IsSuspended() bool {
+	return r != nil && r.SuspendedAt != nil
+}
+
 // ParentStartTimeOf returns the value to store as ParentStartTime for pid: its
 // start time under the disposable_machine setting, otherwise 0, which leaves
 // liveness checks on the PID alone.

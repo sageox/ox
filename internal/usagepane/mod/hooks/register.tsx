@@ -593,7 +593,8 @@ export const register: Register = on => {
           <Text color="success" weight="bold">
             {title}
           </Text>
-          {r !== null && r.session.recording ? (
+          {/* The red dot is for live capture only; a paused recording reads dim. */}
+          {r !== null && r.session.recording && !r.session.paused ? (
             <Text>
               {'  '}
               <Text color="error">●</Text>
