@@ -21,6 +21,8 @@ func TestGitHubOrigin_EveryRemoteFormNamesTheSameRepo(t *testing.T) {
 		"ssh://git@github.com/readest/readest",
 		"ssh://git@github.com:22/readest/readest.git",
 		"https://github.com/readest/readest/",
+		"https://github.com/readest/readest.git/",
+		"https://github.com/Readest/Readest.GIT",
 	} {
 		t.Run(remote, func(t *testing.T) {
 			dir := gitRepoWithOrigin(t, remote)

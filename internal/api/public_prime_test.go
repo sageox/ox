@@ -72,6 +72,7 @@ func TestDecodePublicPrime_ServerGolden(t *testing.T) {
 
 	// strict decode of the golden: every server field is one this ox models
 	dec := json.NewDecoder(bytes.NewReader(publicPrimeGolden(t)))
+	// strict-reader-ok: asserts the server golden holds only fields this ox models
 	dec.DisallowUnknownFields()
 	var strict PublicPrimeResponse
 	require.NoError(t, dec.Decode(&strict))

@@ -20,8 +20,15 @@ func parseGitHubRepo(normalized string) (owner, name string, ok bool) {
 		return "", "", false
 	}
 	parts := strings.Split(strings.TrimSuffix(rest, "/"), "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	if len(parts) != 2 {
 		return "", "", false
 	}
-	return parts[0], parts[1], true
+	// normalizeGitURL strips ".git" before it trims a trailing slash or
+	// lowercases, so "repo.git/" and "Repo.GIT" arrive as "repo.git". GitHub
+	// reserves the suffix (no repo name ends in .git), so dropping it here is safe.
+	owner, name = parts[0], strings.TrimSuffix(parts[1], ".git")
+	if owner == "" || name == "" {
+		return "", "", false
+	}
+	return owner, name, true
 }
