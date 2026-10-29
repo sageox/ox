@@ -88,17 +88,23 @@ func TestSessionLedgerWriters_RefuseToStageIntoWedgedRebase(t *testing.T) {
 	}
 }
 
-// Refusal must preserve staged merge/rebase resolutions, including in a
+// Refusal must preserve staged Git operation resolutions, including in a
 // configured linked checkout, so finishing the operation can unblock writes.
 func TestSessionDeletion_PreservesUnfinishedGitOperation(t *testing.T) {
 	if testing.Short() {
-		t.Skip("short: real git merge, rebase and push")
+		t.Skip("short: real git operations and push")
 	}
 	for _, tt := range []struct{ writer, operation string }{
 		{"session remove", "merge"},
 		{"session delete", "merge"},
 		{"session remove", "linked rebase"},
 		{"session delete", "linked rebase"},
+		{"session remove", "cherry-pick"},
+		{"session delete", "cherry-pick"},
+		{"session remove", "revert"},
+		{"session delete", "revert"},
+		{"session remove", "cherry-pick sequence"},
+		{"session delete", "cherry-pick sequence"},
 	} {
 		t.Run(tt.writer+"/"+tt.operation, func(t *testing.T) {
 			remote, repo := createBareAndClone(t)
@@ -119,22 +125,39 @@ func TestSessionDeletion_PreservesUnfinishedGitOperation(t *testing.T) {
 				runGit(t, repo, "checkout", branch)
 				runGit(t, repo, "merge", "--no-ff", "--no-commit", "manual-merge")
 			} else {
-				// Conflicting edits to the selected session leave a real rebase
-				// paused in a linked checkout. Stage its resolution without continuing.
+				// Conflicting edits leave a real operation paused in a linked
+				// checkout. Stage its resolution without continuing.
 				runGit(t, repo, "checkout", "-b", "rebase-upstream")
 				linked := filepath.Join(t.TempDir(), "linked")
 				runGit(t, repo, "worktree", "add", linked, branch)
 				require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"title":"upstream"}`), 0o644))
 				runGit(t, repo, "commit", "-am", "upstream edit")
+				if tt.operation == "cherry-pick sequence" {
+					require.NoError(t, os.WriteFile(filepath.Join(repo, "sequence-note.txt"), []byte("second commit\n"), 0o644))
+					runGit(t, repo, "add", "sequence-note.txt")
+					runGit(t, repo, "commit", "-m", "second pick")
+				}
 				repo, dir = linked, filepath.Join(linked, "sessions", name)
 				require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"title":"local"}`), 0o644))
 				runGit(t, repo, "commit", "-am", "local edit")
-				_, err := runGitCombined(repo, "rebase", "rebase-upstream")
+				args := []string{"rebase", "rebase-upstream"}
+				marker, blocked = "rebase-merge", "broken rebase state"
+				switch tt.operation {
+				case "cherry-pick":
+					args = []string{"cherry-pick", "rebase-upstream"}
+					marker, blocked = "CHERRY_PICK_HEAD", "cherry-pick in progress"
+				case "revert":
+					args = []string{"revert", "--no-edit", "rebase-upstream"}
+					marker, blocked = "REVERT_HEAD", "revert in progress"
+				case "cherry-pick sequence":
+					args = []string{"cherry-pick", "--no-commit", "rebase-upstream~1", "rebase-upstream"}
+					marker, blocked = "sequencer", "cherry-pick or revert in progress"
+				}
+				_, err := runGitCombined(repo, args...)
 				require.Error(t, err)
 				require.NotEmpty(t, runGit(t, repo, "ls-files", "--unmerged"))
 				require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"title":"resolved"}`), 0o644))
 				runGit(t, repo, "add", "sessions")
-				marker, blocked = "rebase-merge", "broken rebase state"
 			}
 			markerPath := runGit(t, repo, "rev-parse", "--path-format=absolute", "--git-path", marker)
 			_, err := os.Stat(markerPath)
@@ -162,12 +185,17 @@ func TestSessionDeletion_PreservesUnfinishedGitOperation(t *testing.T) {
 			_, err = os.Stat(markerPath)
 			require.NoError(t, err)
 
-			// Finishing the operation unblocks deletion and synchronization.
-			if tt.operation == "merge" {
+			// Finishing or aborting unblocks deletion and synchronization.
+			switch tt.operation {
+			case "merge":
 				runGit(t, repo, "commit", "-m", "complete manual merge")
 				require.Len(t, strings.Fields(runGit(t, repo, "rev-list", "--parents", "-n", "1", "HEAD")), 3)
-			} else {
+			case "linked rebase":
 				runGit(t, repo, "-c", "core.editor=true", "rebase", "--continue")
+			case "cherry-pick sequence":
+				runGit(t, repo, "cherry-pick", "--abort")
+			default:
+				runGit(t, repo, "-c", "core.editor=true", tt.operation, "--continue")
 			}
 			require.NoError(t, remove())
 			assert.NoDirExists(t, dir)

@@ -336,7 +336,7 @@ func RebaseAge(repoPath string) (time.Duration, bool) {
 	return 0, false
 }
 
-// IsSafeForGitOps checks lock files and unfinished rebases or merges before
+// IsSafeForGitOps checks lock files and unfinished Git operations before
 // automatic writes. Returns nil if safe to proceed, or why the repo is blocked.
 func IsSafeForGitOps(repoPath string) error {
 	gitDir := filepath.Join(repoPath, ".git")
@@ -364,14 +364,24 @@ func IsSafeForGitOps(repoPath string) error {
 		return fmt.Errorf("git lock files detected: %s (remove stale locks or wait for in-progress operation)", strings.Join(locks, ", "))
 	}
 
-	// A resolved index can still belong to an unfinished merge. commit-tree
-	// would drop its second parent and leave MERGE_HEAD blocking later pulls.
-	for _, state := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD"} {
-		if _, err := os.Stat(filepath.Join(gitDir, state)); err == nil {
-			if state == "MERGE_HEAD" {
-				return fmt.Errorf("repo has a merge in progress in %s; finish or abort it, or run 'ox doctor --fix'", repoPath)
+	// A resolved index can still belong to an unfinished operation. Unlike
+	// git commit, commit-tree would leave its markers blocking later writes.
+	for _, op := range []struct{ marker, name string }{
+		{"rebase-merge", "rebase"},
+		{"rebase-apply", "rebase"},
+		{"MERGE_HEAD", "merge"},
+		{"CHERRY_PICK_HEAD", "cherry-pick"},
+		{"REVERT_HEAD", "revert"},
+		{"sequencer", "cherry-pick or revert"},
+	} {
+		if _, err := os.Stat(filepath.Join(gitDir, op.marker)); err == nil {
+			if op.name == "rebase" {
+				return fmt.Errorf("repo in broken rebase state (run 'git rebase --abort' in %s)", repoPath)
 			}
-			return fmt.Errorf("repo in broken rebase state (run 'git rebase --abort' in %s)", repoPath)
+			if op.marker == "sequencer" {
+				return fmt.Errorf("repo has a %s in progress in %s; finish or abort it", op.name, repoPath)
+			}
+			return fmt.Errorf("repo has a %s in progress in %s; finish or abort it, or run 'ox doctor --fix'", op.name, repoPath)
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("inspect git state: %w", err)
 		}
