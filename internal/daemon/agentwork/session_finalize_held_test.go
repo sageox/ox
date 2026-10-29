@@ -331,6 +331,7 @@ func TestFinalizeEntryPoints_ManualPublishingDropsUnpublishedItem(t *testing.T) 
 // teammate's machine) is copied into the shared sessions/ tree.
 func TestStageSessionInLedger_LeavesDotfilesBehind(t *testing.T) {
 	f := newHeldFixture(t)
+	runGitCmd(t, f.ledgerPath, "init")
 	f.transcript(t)
 	f.write(t, "summary.md", "summary")
 	for _, local := range []string{".upload-retry-pending", ".needs-summary", ".held", ".tmp-123"} {

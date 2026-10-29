@@ -159,7 +159,7 @@ func TestBuildPrompt_UploadOnly_SkipsLLM(t *testing.T) {
 // is gitignored in the ledger.
 func TestStageSessionInLedger_CopiesFiles(t *testing.T) {
 	handler := NewSessionFinalizeHandler(slog.Default())
-	ledgerPath := t.TempDir()
+	ledgerPath := initTestGitRepo(t)
 
 	sessionName := "2026-01-10T14-00-testuser-OxSTAGE"
 	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
