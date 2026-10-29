@@ -229,6 +229,23 @@ func TestRebaseAge(t *testing.T) {
 }
 
 func TestIsSafeForGitOps(t *testing.T) {
+	t.Run("linked worktree", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("short: real git worktree and merge")
+		}
+		repo := newSnapshotRepo(t)
+		worktree := filepath.Join(t.TempDir(), "linked")
+		gitInRepo(t, repo, "worktree", "add", "-b", "linked", worktree)
+		require.NoError(t, IsSafeForGitOps(worktree), "a healthy linked checkout must remain writable")
+
+		gitInRepo(t, repo, "commit", "--allow-empty", "-m", "advance main")
+		gitInRepo(t, worktree, "merge", "--no-ff", "--no-commit", "main")
+		require.Empty(t, gitInRepo(t, worktree, "ls-files", "--unmerged"))
+		require.ErrorContains(t, IsSafeForGitOps(worktree), "merge in progress")
+		gitInRepo(t, worktree, "merge", "--abort")
+		require.NoError(t, IsSafeForGitOps(worktree), "finishing the operation must unblock writes")
+	})
+
 	t.Run("clean repo", func(t *testing.T) {
 		repo := t.TempDir()
 		require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0755))

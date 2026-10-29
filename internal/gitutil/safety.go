@@ -360,7 +360,17 @@ func IsSafeForGitOps(repoPath string) error {
 
 	// A resolved index can still belong to an unfinished merge. commit-tree
 	// would drop its second parent and leave MERGE_HEAD blocking later pulls.
-	if _, err := os.Stat(filepath.Join(gitDir, "MERGE_HEAD")); err == nil {
+	mergeHead := filepath.Join(gitDir, "MERGE_HEAD")
+	if info, err := os.Stat(gitDir); err == nil && !info.IsDir() {
+		// An explicitly configured managed checkout can be a linked worktree.
+		ctx, cancel := context.WithTimeout(context.Background(), inspectTimeout)
+		defer cancel()
+		mergeHead, err = RunGit(ctx, repoPath, "rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD")
+		if err != nil {
+			return fmt.Errorf("resolve merge state: %w", err)
+		}
+	}
+	if _, err := os.Stat(mergeHead); err == nil {
 		return fmt.Errorf("repo has a merge in progress in %s; finish or abort it, or run 'ox doctor --fix'", repoPath)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect merge state: %w", err)
