@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -568,7 +567,7 @@ func releaseGCLock(f *os.File, lockPath string) {
 }
 
 // runBlueGreenGC performs a blue-green reclone for a single workspace (team context or ledger).
-// Steps: preserve local state → clone .new → validate → atomic swap → remove old → restore state.
+// Steps: preserve local state → clone .new → restore and validate → swap → remove old.
 //
 // GC is a disk-space optimization — it should never impair the user experience.
 // Local changes (unpushed commits, uncommitted edits, untracked files) are preserved
@@ -595,6 +594,41 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 // value specifically, not on gcSuccess or on their own pre-call wedge
 // sample.
 func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) (result gcResult, recovered bool) {
+	// Match publication's lock order. The shared repo lock must cover capture
+	// as well as swap, or a writer can publish after the snapshot is taken.
+	if ws.Type == WorkspaceTypeLedger {
+		// GC is optional: do not wait behind a sync or publication before its
+		// execution budget starts. A later cycle can retry the optimization.
+		if !s.ledgerMu.TryLock() {
+			s.logger.Info("gc: ledger is busy, skipping", "path", ws.Path)
+			return gcSkippedLocked, false
+		}
+		defer s.ledgerMu.Unlock()
+	}
+	result = gcSkippedLocked
+	err := gitutil.WithRepoLock(ctx, ws.Path, func() error {
+		// The repo lock's timeout only bounds acquisition. Reuse the clone
+		// budgets to bound preparation too; a partial clone can fetch on apply.
+		budget := teamContextCloneTimeout
+		if ws.Type == WorkspaceTypeLedger {
+			budget = ledgerCloneTimeout
+		}
+		ctx, cancel := context.WithTimeout(ctx, budget)
+		defer cancel()
+		result, recovered = s.runBlueGreenGCLocked(ctx, ws, captureUnpushedOnDiverge)
+		return nil
+	})
+	if err != nil {
+		s.logger.Warn("gc: cannot acquire repository lock", "path", ws.Path, "error", err)
+		if !gitutil.IsRepoLockBusy(err) {
+			result = gcFailed
+		}
+	}
+	return result, recovered
+}
+
+// The caller holds the repo lock and, for a Ledger, ledgerMu until cleanup.
+func (s *SyncScheduler) runBlueGreenGCLocked(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) (result gcResult, recovered bool) {
 	newPath := ws.Path + ".new"
 	oldPath := ws.Path + ".old"
 	diffFile := ws.Path + ".gc-diff"
@@ -655,10 +689,6 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 			}
 		}
 		err := func() error {
-			if isLedger {
-				s.ledgerMu.Lock()
-				defer s.ledgerMu.Unlock()
-			}
 			if _, err := os.Stat(ws.Path); errors.Is(err, fs.ErrNotExist) {
 				// The process stopped between the two renames.
 				if err := os.Rename(oldPath, ws.Path); err != nil {
@@ -690,18 +720,9 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		_ = os.Remove(swapLockPath)
 	}
 
-	// If a prior GC attempt on this workspace crashed AFTER completing the
-	// rename-swap but BEFORE finishing phase 2's restore, ws.Path already
-	// holds the fresh clone and diffFile/untrackedDir/cacheBackupDir (if
-	// present) are the ONLY surviving copy of whatever that prior run
-	// captured — the pre-GC tree is already gone. The swap marker (written
-	// right after the swap succeeds, removed only once phase 2 fully
-	// completes — see below) is how this is told apart from the ordinary
-	// "a prior attempt died before ever cloning" case: an earlier version
-	// of this code treated diffFile/untrackedDir as generic leftover
-	// artifacts and deleted them unconditionally here regardless of which
-	// case it was, silently discarding live wedge-recovered content on
-	// exactly this crash timing.
+	// Older GC versions restored after swapping. Their marker protects
+	// captured state that may be the only surviving copy after a crash.
+	// Recover it before cleaning leftovers or preparing another replacement.
 	if _, err := os.Stat(swapMarker); err == nil {
 		s.logger.Warn("gc: found an interrupted prior GC that completed its swap but not its restore, recovering before continuing",
 			"path", ws.Path, "workspace", wsLabel)
@@ -757,6 +778,9 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 			}
 		}
 	}
+	// Before the swap the original remains authoritative. After the swap
+	// .new no longer exists, so this also cleans failed/canceled preparations.
+	defer os.RemoveAll(newPath)
 
 	// --- phase 0: preserve local state ---
 
@@ -858,22 +882,14 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	// step 1: clone into .new (method depends on workspace type)
 	var mCfg *manifest.ManifestConfig
 	if isLedger {
-		if err := ledger.CloneWithSparseCheckout(newPath, cloneURL); err != nil {
+		if err := ledger.CloneWithSparseCheckoutContext(ctx, newPath, cloneURL); err != nil {
 			s.logger.Error("gc: reclone failed, keeping old", "workspace", wsLabel, "error", err)
-			_ = os.RemoveAll(newPath)
 			return gcFailed, false
-		}
-		// Install the credential helper into the freshly cloned ledger so
-		// subsequent pulls/pushes resolve auth via the helper.
-		if _, err := gitserver.MigrateLedgerCredentials(newPath, gitserver.DefaultHelperCommand()); err != nil {
-			s.logger.Warn("gc: failed to install credential helper after reclone",
-				"path", newPath, "error", err)
 		}
 	} else {
 		mCfg, err = s.twoPhaseClone(ctx, cloneURL, newPath, nil)
 		if err != nil {
 			s.logger.Error("gc: reclone failed, keeping old", "workspace", wsLabel, "error", err)
-			_ = os.RemoveAll(newPath)
 			return gcFailed, false
 		}
 	}
@@ -887,7 +903,6 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	}
 	if !valid {
 		s.logger.Error("gc: validation failed, keeping old", "workspace", wsLabel)
-		_ = os.RemoveAll(newPath)
 		return gcFailed, false
 	}
 
@@ -903,6 +918,70 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		s.logger.Warn("gc: failed to ensure checkout .gitignore on new clone", "error", err)
 	}
 
+	// Restore into the disposable replacement. A failure or cancellation here
+	// must never turn the original's captured state into the only backup.
+	if hasCache {
+		if err := gcRestoreCache(cacheBackupDir, newPath); err != nil {
+			s.logger.Error("gc: cannot restore cache into replacement, keeping original", "path", ws.Path, "error", err)
+			return gcFailed, false
+		}
+	}
+	if hasDiff {
+		if err := s.gcRestoreDiff(ctx, newPath, diffFile); err != nil {
+			s.logger.Error("gc: cannot restore changes into replacement, keeping original", "path", ws.Path, "error", err)
+			return gcFailed, false
+		}
+	}
+	if hasUntracked {
+		if err := s.gcRestoreUntracked(newPath, untrackedDir); err != nil {
+			s.logger.Error("gc: cannot restore untracked files into replacement, keeping original", "path", ws.Path, "error", err)
+			return gcFailed, false
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		s.logger.Info("gc: preparation canceled, keeping original", "path", ws.Path, "error", err)
+		return gcFailed, false
+	}
+
+	// Keep the legacy signal for older CLIs; current writers share the repo
+	// lock held since capture. A failed signal must stop before any rename.
+	if isLedger {
+		if err := os.WriteFile(swapLockPath, nil, 0o600); err != nil {
+			s.logger.Error("gc: cannot protect swap, keeping original", "path", ws.Path, "error", err)
+			return gcFailed, false
+		}
+	}
+
+	if s.gcSwapWindowTestHook != nil {
+		s.gcSwapWindowTestHook()
+	}
+
+	if err := ctx.Err(); err != nil {
+		s.logger.Info("gc: swap canceled, keeping original", "path", ws.Path, "error", err)
+		return gcFailed, false
+	}
+	// Recovery treats these files as not-yet-restored state. Remove them
+	// before swapping an already-restored replacement, while the original
+	// still contains every byte; otherwise a crash would apply them twice.
+	for _, artifact := range []string{diffFile, untrackedDir, cacheBackupDir} {
+		if err := os.RemoveAll(artifact); err != nil {
+			s.logger.Error("gc: cannot retire restored backup, keeping original", "path", artifact, "error", err)
+			return gcFailed, false
+		}
+	}
+
+	if _, err := os.Stat(oldPath); err == nil {
+		if err := os.RemoveAll(oldPath); err != nil {
+			s.logger.Error("gc: cannot remove recovered old clone", "path", oldPath, "error", err)
+			return gcFailed, false
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		s.logger.Info("gc: swap canceled, keeping original", "path", ws.Path, "error", err)
+		return gcFailed, false
+	}
+
 	// Close any whisper SQLite store rooted under ws.Path BEFORE the rename.
 	// SQLite keeps -shm/-wal files mmap'd; on POSIX, os.Rename + os.RemoveAll
 	// unlinks the underlying inodes but the kernel pins them as long as the
@@ -911,54 +990,23 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	if s.whisperRegistry != nil {
 		if isLedger {
 			s.whisperRegistry.CloseLedgerStore()
+			defer func() {
+				// Failure can leave either the replacement or a rolled-back
+				// original live. Callers only reopen stores on GC success.
+				if result != gcSuccess && gitutil.IsGitRepo(ws.Path) {
+					s.reopenWhisperStoreAfterGC()
+				}
+			}()
 		} else if ws.TeamID != "" {
 			s.whisperRegistry.CloseTeamStore(ws.TeamID)
 		}
 	}
 
-	// step 3: atomic swap — the GC lock (held since entry) serializes against
-	// concurrent GCs on this same workspace. For ledger repos, also acquire
-	// ledgerMu to prevent concurrent pull/push conflicts during the swap —
-	// but ledgerMu is an in-process sync.Mutex, and the CLI's direct
-	// ledger writes (cmd/ox/session_upload.go's commitAndPushLedger) run
-	// as a SEPARATE OS process per .claude/rules/daemon-git.md's own
-	// architecture, so it cannot serialize against them. A CLI git
-	// operation whose open file descriptors are still resolving through
-	// ws.Path at the exact moment of the rename below can end up writing
-	// into what becomes oldPath, which is then removed a few lines down —
-	// silently losing that write. swapLockPath is a filesystem-based,
-	// genuinely cross-process signal scoped tightly to just this
-	// rename+cleanup window (not the whole, potentially multi-minute GC)
-	// so the CLI can check it without risking a long wait; see
-	// commitAndPushLedger's corresponding check.
-	if isLedger {
-		if err := os.WriteFile(swapLockPath, nil, 0o600); err != nil {
-			s.logger.Warn("gc: failed to write swap lock, CLI writes racing this swap would be undetected",
-				"path", ws.Path, "error", err)
-		}
-		s.ledgerMu.Lock()
-	}
-	if s.gcSwapWindowTestHook != nil {
-		s.gcSwapWindowTestHook()
-	}
-
-	if _, err := os.Stat(oldPath); err == nil {
-		if err := os.RemoveAll(oldPath); err != nil {
-			if isLedger {
-				s.ledgerMu.Unlock()
-			}
-			s.logger.Error("gc: cannot remove recovered old clone", "path", oldPath, "error", err)
-			return gcFailed, false
-		}
-	}
-
+	// From the first rename onward, finish the swap or roll it back even if
+	// the caller cancels. Keep .old until the marker and retry transfer succeed;
+	// it also identifies an interrupted swap if the marker cannot be written.
 	if err := os.Rename(ws.Path, oldPath); err != nil {
-		if isLedger {
-			s.ledgerMu.Unlock()
-			_ = os.Remove(swapLockPath)
-		}
 		s.logger.Error("gc: failed to move old repo aside", "path", ws.Path, "error", err)
-		_ = os.RemoveAll(newPath)
 		return gcFailed, false
 	}
 
@@ -967,26 +1015,9 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		if restoreErr := os.Rename(oldPath, ws.Path); restoreErr != nil {
 			s.logger.Error("gc: CRITICAL failed to restore old repo", "error", restoreErr)
 		}
-		if isLedger {
-			s.ledgerMu.Unlock()
-			_ = os.Remove(swapLockPath)
-		}
 		return gcFailed, false
 	}
 
-	if isLedger {
-		s.ledgerMu.Unlock()
-	}
-
-	// The swap just succeeded: ws.Path now holds the fresh clone, and
-	// diffFile/untrackedDir/cacheBackupDir (if any) are the ONLY surviving
-	// copy of whatever phase 0 captured — the original pre-GC tree at
-	// oldPath is about to be removed below. If the process dies anywhere
-	// between here and the end of phase 2, the next invocation must NOT
-	// treat those backup files as ordinary leftovers to discard; this
-	// marker is how it tells the difference (see the orphan-recovery
-	// check at the top of this function). Keep .old if the marker cannot be
-	// written, so a restart can still recognize and recover the swap.
 	if err := os.WriteFile(swapMarker, nil, 0o600); err != nil {
 		s.logger.Error("gc: failed to write swap marker, retaining old clone",
 			"path", ws.Path, "error", err)
@@ -998,76 +1029,13 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	carryErr = gcCarryPlanRetries(oldPath, ws.Path)
 	if carryErr != nil {
 		s.logger.Error("gc: failed to carry plan retries, retaining old clone", "path", oldPath, "error", carryErr)
-	} else if err := os.RemoveAll(oldPath); err != nil {
-		s.logger.Warn("gc: failed to remove old clone", "path", oldPath, "error", err)
-	}
-
-	// The risky window for a concurrent CLI write (see the comment where
-	// swapLockPath was written, above) ends once oldPath is gone — release
-	// the cross-process signal now rather than holding it through the
-	// (potentially much longer) phase 2 restore below.
-	if isLedger {
-		_ = os.Remove(swapLockPath)
-	}
-
-	// --- phase 1.5: restore cache ---
-	if hasCache {
-		if err := gcRestoreCache(cacheBackupDir, ws.Path); err != nil {
-			// keep backup so manual recovery is possible
-			s.logger.Error("gc: failed to restore cache, backup retained",
-				"path", ws.Path, "backup", cacheBackupDir, "error", err)
-		} else {
-			_ = os.RemoveAll(cacheBackupDir)
-		}
-	}
-
-	// --- phase 2: restore local state ---
-
-	diffApplied := true
-	if hasDiff {
-		if err := s.gcRestoreDiff(ctx, ws.Path, diffFile); err != nil {
-			diffApplied = false
-			s.logger.Warn("gc: reclone succeeded but failed to restore uncommitted changes",
-				"path", ws.Path, "workspace", wsLabel, "error", err,
-				"recovery_file", diffFile)
-		}
-	}
-
-	untrackedRestored := true
-	if hasUntracked {
-		if err := s.gcRestoreUntracked(ws.Path, untrackedDir); err != nil {
-			untrackedRestored = false
-			s.logger.Warn("gc: reclone succeeded but failed to restore some untracked files, backup retained",
-				"path", ws.Path, "workspace", wsLabel, "error", err,
-				"recovery_dir", untrackedDir)
-		}
-	}
-
-	// clean up preservation artifacts — but only the ones that actually
-	// landed. gcRestoreUntracked is a best-effort walk that can fail
-	// partway through (one locked/colliding file) and still return an
-	// error; deleting untrackedDir unconditionally here would silently
-	// discard the only surviving copy of whatever didn't make it, which is
-	// exactly the data-loss GC's own doc comment says this mechanism must
-	// never risk. Mirrors the diffFile gate immediately above.
-	if hasDiff && diffApplied {
-		_ = os.Remove(diffFile)
-	}
-	if hasUntracked && untrackedRestored {
-		_ = os.RemoveAll(untrackedDir)
-	}
-
-	// phase 2 has now been fully attempted (successfully or with a
-	// preserved-for-manual-recovery fallback above) — this invocation is
-	// no longer in the "crashed mid-restore" state the marker exists to
-	// flag, so clear it regardless of diffApplied/untrackedRestored.
-	// Leaving it set here would make the next GC re-attempt an
-	// auto-recovery apply on top of whatever a human already did with the
-	// preserved files, which is the wrong kind of "recovery".
-	_ = os.Remove(swapMarker)
-	if carryErr != nil {
 		return gcFailed, false
 	}
+	if err := os.RemoveAll(oldPath); err != nil {
+		s.logger.Warn("gc: failed to remove old clone, retaining recovery marker", "path", oldPath, "error", err)
+		return gcFailed, false
+	}
+	_ = os.Remove(swapMarker)
 
 	if isLedger && divergeCaptured {
 		// The conflict that caused the wedge also drove RecordSyncFailure
@@ -1175,8 +1143,8 @@ func gcCarryPlanRetries(oldPath, newPath string) error {
 // Returns nil if there are no unpushed commits or if push succeeds.
 // Returns an error if unpushed commits exist and push fails.
 //
-// GC uses explicit credential-helper arguments and a destination ref. Its push
-// still shares mandatory exact-history validation with every other publisher.
+// The caller holds WithRepoLock through capture and swap. Publication still
+// shares mandatory exact-history validation with every other publisher.
 func (s *SyncScheduler) gcPushUnpushedCommits(ctx context.Context, ws WorkspaceState) error {
 	// count unpushed commits against the upstream tracking branch
 	countOutput, err := gitutil.RunGit(ctx, ws.Path, "rev-list", "--count", "@{upstream}..HEAD")
@@ -1207,19 +1175,17 @@ func (s *SyncScheduler) gcPushUnpushedCommits(ctx context.Context, ws WorkspaceS
 	}
 	helperCmd := gitserver.DefaultHelperCommand()
 
-	// Hold the ledger lock from validation through each attempt. Never interpret
-	// a validation refusal as an LFS failure eligible for a fallback push.
+	// Never interpret a validation refusal as an LFS failure eligible for a
+	// fallback push. The surrounding GC owns the non-reentrant repo lock.
 	push := func(args ...string) error {
-		return gitutil.WithRepoLock(ctx, ws.Path, func() error {
-			if err := gitutil.IsSafeForGitOps(ws.Path); err != nil {
-				return err
-			}
-			if err := gitutil.ValidateSessionPublication(ctx, ws.Path); err != nil {
-				return err
-			}
-			_, err := gitutil.RunGit(ctx, ws.Path, args...)
+		if err := gitutil.IsSafeForGitOps(ws.Path); err != nil {
 			return err
-		})
+		}
+		if err := gitutil.ValidateSessionPublication(ctx, ws.Path); err != nil {
+			return err
+		}
+		_, err := gitutil.RunGit(ctx, ws.Path, args...)
+		return err
 	}
 	pushArgs := []string{
 		"-c", "credential.helper=",
@@ -1293,7 +1259,9 @@ func (s *SyncScheduler) gcCaptureDiff(ctx context.Context, repoPath, diffFile, b
 		return false, nil
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "diff", "--binary", baseRef)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := gitutil.NewNetworkCmd(ctx, "-C", repoPath, "diff", "--binary", baseRef)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return false, fmt.Errorf("git diff pipe: %w", err)
@@ -1304,32 +1272,37 @@ func (s *SyncScheduler) gcCaptureDiff(ctx context.Context, repoPath, diffFile, b
 
 	outFile, err := os.OpenFile(diffFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
+		cancel()
 		_ = cmd.Wait()
 		return false, fmt.Errorf("create diff file: %w", err)
 	}
 
 	written, copyErr := io.Copy(outFile, io.LimitReader(stdout, maxGCDiffSize+1))
-	outFile.Close()
-
-	if waitErr := cmd.Wait(); waitErr != nil {
-		_ = os.Remove(diffFile)
-		return false, fmt.Errorf("git diff HEAD: %w", waitErr)
+	copyErr = errors.Join(copyErr, outFile.Close())
+	if copyErr != nil || written > maxGCDiffSize {
+		// Once we stop reading, git can block on the full pipe. Cancel its
+		// process group before Wait so GC does not retain the repo lock.
+		cancel()
 	}
+	waitErr := cmd.Wait()
 
 	if copyErr != nil {
 		_ = os.Remove(diffFile)
 		return false, fmt.Errorf("write diff file: %w", copyErr)
 	}
 
-	if written == 0 {
-		_ = os.Remove(diffFile)
-		return false, nil
-	}
-
 	if written > maxGCDiffSize {
 		_ = os.Remove(diffFile)
 		s.logger.Warn("gc: diff too large, cannot preserve changes", "path", repoPath, "size", written, "max", maxGCDiffSize)
 		return false, fmt.Errorf("diff too large (%d bytes, max %d) — cannot safely preserve uncommitted changes", written, maxGCDiffSize)
+	}
+	if waitErr != nil {
+		_ = os.Remove(diffFile)
+		return false, fmt.Errorf("git diff HEAD: %w", waitErr)
+	}
+	if written == 0 {
+		_ = os.Remove(diffFile)
+		return false, nil
 	}
 
 	s.logger.Info("gc: captured uncommitted changes", "path", repoPath, "diff_size", written)
@@ -1339,53 +1312,51 @@ func (s *SyncScheduler) gcCaptureDiff(ctx context.Context, repoPath, diffFile, b
 // gcCaptureUntracked copies untracked files (excluding gitignored) to a temp directory.
 // Returns (hasFiles, error).
 func (s *SyncScheduler) gcCaptureUntracked(ctx context.Context, repoPath, destDir string) (bool, error) {
-	output, err := gitutil.RunGit(ctx, repoPath, "ls-files", "--others", "--exclude-standard")
+	// RunGit trims output for humans; here leading whitespace is filename data.
+	output, err := gitutil.NewNetworkCmd(ctx, "-C", repoPath, "ls-files", "--others", "--exclude-standard", "-z").Output()
 	if err != nil {
 		return false, fmt.Errorf("git ls-files: %w", err)
 	}
 
-	output = strings.TrimSpace(output)
-	if output == "" {
+	if len(output) == 0 {
 		return false, nil
 	}
 
-	files := strings.Split(output, "\n")
+	files := strings.Split(string(output), "\x00")
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return false, fmt.Errorf("create untracked dir: %w", err)
 	}
 
 	copied := 0
 	for _, relPath := range files {
-		relPath = strings.TrimSpace(relPath)
 		if relPath == "" {
 			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return false, err
 		}
 
 		// guard against path traversal and symlink escape
 		absResolved, err := filepath.Abs(filepath.Join(repoPath, relPath))
 		if err != nil {
-			s.logger.Warn("gc: skipping untracked file, cannot resolve path", "path", relPath, "error", err)
-			continue
+			return false, fmt.Errorf("resolve untracked path %s: %w", relPath, err)
 		}
 		absRepo, _ := filepath.Abs(repoPath)
 		// use filepath.Rel for separator-aware containment (prevents /tmp/repo-evil matching /tmp/repo)
 		rel, err := filepath.Rel(absRepo, absResolved)
 		if err != nil || strings.HasPrefix(rel, "..") {
-			s.logger.Warn("gc: skipping untracked file outside repo boundary", "path", relPath)
-			continue
+			return false, fmt.Errorf("untracked path outside repo boundary: %s", relPath)
 		}
 
 		srcPath := filepath.Join(repoPath, relPath)
 		dstPath := filepath.Join(destDir, relPath)
 
 		if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
-			s.logger.Warn("gc: failed to create dir for untracked file", "path", relPath, "error", err)
-			continue
+			return false, fmt.Errorf("create directory for untracked file %s: %w", relPath, err)
 		}
 
 		if err := copyFile(srcPath, dstPath); err != nil {
-			s.logger.Warn("gc: failed to copy untracked file", "path", relPath, "error", err)
-			continue
+			return false, fmt.Errorf("capture untracked file %s: %w", relPath, err)
 		}
 		copied++
 	}
@@ -1581,7 +1552,7 @@ var (
 )
 
 // reopenWhisperStoreAfterGC reopens the ledger whisper store after a
-// successful GC reclone. The rename-swap invalidates the old sql.DB handle
+// GC reclone or rollback. The rename-swap invalidates the old sql.DB handle
 // because the underlying inode is deleted — even though cache files are
 // preserved and copied back, the daemon's open file descriptor is stale.
 func (s *SyncScheduler) reopenWhisperStoreAfterGC() {

@@ -1034,8 +1034,12 @@ func TestBlueGreenGC_DiffApplyConflictPreservesDiffFile(t *testing.T) {
 	}
 
 	result := scheduler.runBlueGreenGC(context.Background(), ws)
-	// reclone succeeds even if diff apply fails — the repo is valid
-	assert.Equal(t, gcSuccess, result)
+	assert.Equal(t, gcFailed, result, "a conflicting replacement must not replace local edits")
+	content, err := os.ReadFile(filepath.Join(teamDir, "SOUL.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "local user edit\nwith different content\nthat also conflicts\n", string(content))
+	assert.NoDirExists(t, teamDir+".new")
+	assert.NoDirExists(t, teamDir+".old")
 
 	// the .gc-diff file should be preserved for manual recovery
 	diffFile := teamDir + ".gc-diff"

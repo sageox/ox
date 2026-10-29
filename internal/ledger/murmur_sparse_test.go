@@ -449,11 +449,19 @@ func TestConfigureSparseCheckout_PreservesModifiedFilesOutsideWindow(t *testing.
 	if err := os.WriteFile(oldFile, []byte(modifiedContent), 0o644); err != nil {
 		t.Fatalf("modify: %v", err)
 	}
+	status, err := exec.Command("git", "-C", tempDir, "status", "--porcelain", "-z").Output()
+	if err != nil || string(status) != " M data/github/2025/01/01/prs.json\x00" {
+		t.Fatalf("expected first entry to be an unstaged modification: %q, %v", status, err)
+	}
 
 	// ConfigureSparseCheckout won't include data/github/2025/01/01 (outside 30-day window),
 	// but the modified file should be protected by dirtyDirsOutsideCone
 	if err := ConfigureSparseCheckout(tempDir); err != nil {
 		t.Fatalf("ConfigureSparseCheckout: %v", err)
+	}
+	cone, err := exec.Command("git", "-C", tempDir, "sparse-checkout", "list").Output()
+	if err != nil || !strings.Contains("\n"+string(cone), "\ndata\n") {
+		t.Fatalf("modified directory missing from sparse cone: %q, %v", cone, err)
 	}
 
 	content, err := os.ReadFile(oldFile)

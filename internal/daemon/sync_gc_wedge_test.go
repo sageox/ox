@@ -289,17 +289,22 @@ func TestGC_UntrackedRestoreFailure_PreservesBackup(t *testing.T) {
 	registry.mu.Unlock()
 
 	result := s.runBlueGreenGC(context.Background(), ws)
-	require.Equal(t, gcSuccess, result, "the reclone itself must still succeed — only the untracked restore partially fails")
-
-	// the colliding file must exist (it's what the remote committed)
-	assert.FileExists(t, filepath.Join(ledgerDir, "sessions", "conflict"))
+	require.Equal(t, gcFailed, result, "a partial restore must never replace the original checkout")
+	for _, name := range []string{"plain.txt", "sessions/conflict/nested.txt"} {
+		assert.FileExists(t, filepath.Join(ledgerDir, name), "the original must retain every untracked file")
+	}
+	assert.NoDirExists(t, ledgerDir+".new")
+	assert.NoDirExists(t, ledgerDir+".old")
 
 	// the untracked backup must SURVIVE — gcRestoreUntracked failed on the
-	// colliding nested file, so untrackedRestored must be false and the
-	// backup dir must not have been deleted.
+	// colliding nested file, so it must not be treated as a successful GC.
 	backupDir := ledgerDir + ".gc-untracked"
 	assert.DirExists(t, backupDir, "backup must be preserved when restore partially fails — this is the actual regression: it used to be deleted unconditionally")
 	assert.FileExists(t, filepath.Join(backupDir, "plain.txt"), "the backup must still contain the file that DID restore successfully")
+	require.Equal(t, gcFailed, s.runBlueGreenGC(context.Background(), ws))
+	content, err := os.ReadFile(filepath.Join(ledgerDir, "sessions", "conflict", "nested.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "nested", string(content), "a subsequent GC must not erase the unrestored content")
 }
 
 // TestGC_RestoreDiff_PartialReject_CleansRejFilesAndReportsPartial proves

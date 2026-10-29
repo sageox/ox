@@ -786,8 +786,12 @@ func TestBlueGreenGC_Ledger_DiffConflictPreservesDiffFile(t *testing.T) {
 	registry.mu.Unlock()
 
 	result := scheduler.runBlueGreenGC(context.Background(), ws)
-	// reclone succeeds even if diff apply fails — the repo is valid
-	assert.Equal(t, gcSuccess, result)
+	assert.Equal(t, gcFailed, result, "a conflicting replacement must not replace local edits")
+	content, err := os.ReadFile(filepath.Join(ledgerDir, "sessions", ".gitkeep"))
+	require.NoError(t, err)
+	assert.Equal(t, "local edit\nwith different content\n", string(content))
+	assert.NoDirExists(t, ledgerDir+".new")
+	assert.NoDirExists(t, ledgerDir+".old")
 
 	// the .gc-diff file should be preserved for manual recovery
 	diffFile := ledgerDir + ".gc-diff"
