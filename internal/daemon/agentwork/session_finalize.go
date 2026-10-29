@@ -865,8 +865,9 @@ type detectSkipStats struct {
 	// manual). Skipping them is the intended outcome, not an anomaly, so they
 	// are reported as a count and never in the Warn line.
 	held map[string]bool
-	// refused: the secret guard refused these and nothing in them has changed
-	// since. They wait for a redaction, so they are a count like held.
+	// refused: the secret guard refused these and their files still match the
+	// refusal's fingerprint. They wait for a redaction, so they are a count
+	// like held.
 	refused map[string]bool
 }
 
@@ -2352,6 +2353,10 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 		}
 	}
 
+	// Fingerprint before staging: the guard scans the staged copy, so an edit
+	// made after this point must not be recorded as what it refused.
+	fingerprint, fingerprintErr := refusalFingerprint(payload.SessionDir)
+
 	// copy all artifacts from cache to ledger/sessions/<name>/
 	origCacheDir, err := h.stageSessionInLedger(payload)
 	if err != nil {
@@ -2372,8 +2377,8 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 				// staging pointed payload.SessionDir at the Ledger copy; the marker
 				// belongs in the cache, which never reaches the Ledger
 				var refused *secretguard.RefusedError
-				if errors.As(err, &refused) && origCacheDir != "" {
-					markPublicationRefused(origCacheDir, h.logger)
+				if errors.As(err, &refused) && origCacheDir != "" && fingerprintErr == nil {
+					markPublicationRefused(origCacheDir, fingerprint, h.logger)
 				}
 				return fmt.Errorf("upload-only: upload session content: %w", err)
 			} else {
@@ -2933,42 +2938,51 @@ func (h *SessionFinalizeHandler) shouldRetryEmptySummary(sessionDir string) bool
 }
 
 // publicationRefusedMarker sits in a ledger-cache session folder whose upload
-// the secret guard refused. Under the same rules the guard refuses unchanged
-// bytes again, so Detect skips the session until a file in it changes, as a
-// redaction does; a rule change alone does not re-queue it. Like every dotfile
-// there, stageSessionInLedger never copies it to the Ledger.
+// the secret guard refused. It holds the folder's refusalFingerprint from just
+// before that attempt staged it. Under the same rules the guard refuses
+// unchanged bytes again, so Detect skips the session while the fingerprint
+// still matches: a file added or removed, or a change in any file's size or
+// modification time, re-queues it; a rule change alone does not. Like every
+// dotfile there, stageSessionInLedger never copies it to the Ledger.
 const publicationRefusedMarker = ".publication-refused"
 
-// markPublicationRefused records a refusal. It runs after the failed attempt,
-// so the marker is newer than every file that attempt wrote.
-func markPublicationRefused(dir string, logger *slog.Logger) {
-	stamp := []byte(time.Now().UTC().Format(time.RFC3339) + "\n")
-	if err := os.WriteFile(filepath.Join(dir, publicationRefusedMarker), stamp, 0o644); err != nil {
+// refusalFingerprint lists each file directly in dir with its size and mtime.
+// It skips dotfiles and trace files: staging leaves both out of the copy the
+// guard scans, and prepareTraces can rewrite the trace files on any attempt.
+func refusalFingerprint(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || pipeline.IsTraceFile(e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "%s %d %d\n", e.Name(), info.Size(), info.ModTime().UnixNano())
+	}
+	return b.String(), nil
+}
+
+func markPublicationRefused(dir, fingerprint string, logger *slog.Logger) {
+	if err := os.WriteFile(filepath.Join(dir, publicationRefusedMarker), []byte(fingerprint), 0o644); err != nil {
 		logger.Warn("could not record the secret guard refusal; the session will be retried", "dir", dir, "err", err)
 	}
 }
 
 // refusedUnchanged reports whether the secret guard refused the session in dir
-// and no file in it has changed since.
+// and its refusalFingerprint still matches the one recorded then.
 func refusedUnchanged(dir string) bool {
-	marker, err := os.Stat(filepath.Join(dir, publicationRefusedMarker))
+	refused, err := os.ReadFile(filepath.Join(dir, publicationRefusedMarker))
 	if err != nil {
 		return false
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if e.Name() == publicationRefusedMarker {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil || info.ModTime().After(marker.ModTime()) {
-			return false
-		}
-	}
-	return true
+	current, err := refusalFingerprint(dir)
+	return err == nil && current == string(refused)
 }
 
 // isDownloadedCopy reports whether a ledger-cache folder is a read-only copy
