@@ -127,7 +127,7 @@ export function parseReport(stdout: string): UsageReport | null {
   })
   return {
     view: 'session',
-    session: { recording: session.recording === true },
+    session: { recording: session.recording === true, paused: session.paused === true },
     trace: {
       available: trace.available !== false,
       source: str(trace.source),
@@ -292,7 +292,9 @@ export function formatRow(call: UsageRecentCall, columns: number, offsetMin = 0)
 }
 
 // headerLines: the title's tail (after `● ox session report`) and the summary line,
-// `calls N · ~Nk tokens · used N of M · co-author <category>`.
+// `calls N · ~Nk tokens · used N of M · co-author <category>`. The marker is
+// `● recording`, `⏸ paused` (a recording whose capture is suspended), or
+// `○ not recording`.
 export function headerLines(report: UsageReport | null): { marker: string; summary: string } {
   if (report === null) {
     return { marker: 'loading…', summary: '' }
@@ -307,7 +309,9 @@ export function headerLines(report: UsageReport | null): { marker: string; summa
   if (a !== undefined && a.category !== 'none') {
     parts.push(`co-author ${a.category}`)
   }
-  return { marker: report.session.recording ? '● recording' : '○ not recording', summary: parts.join(' · ') }
+  const { recording, paused } = report.session
+  const marker = recording && paused ? '⏸ paused' : recording ? '● recording' : '○ not recording'
+  return { marker, summary: parts.join(' · ') }
 }
 
 const MURMUR = 'murmur'

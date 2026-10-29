@@ -73,7 +73,7 @@ status-line JSON (session_id, cwd, workspace) on stdin. ox prints one line:
 Each count is the number of distinct discussions, plans, docs, sessions and
 murmurs that shaped this session; "used" is how many of the items the AI
 coworker reported using or cited in a commit. Nothing yet reads "● ox".
-"● rec" shows while the session is recording. When the bar is narrow, the
+"● rec" shows while the session is recording and is hidden while it is paused. When the bar is narrow, the
 smallest count is dropped first and "used" last. It reads local files only — never the network or the
 ox daemon — and never prints an error into the bar.
 
@@ -294,8 +294,8 @@ func buildOxStatusline(in statuslineInput, dir string) (line oxStatusline, show 
 	// Keyed by this harness session, not the agent ID alone: another
 	// window's counts must not show up on this bar.
 	line.counts = oxactivity.LoadState(root, oxactivity.StateKey(agentID, in.SessionID)).Counts()
-	if rec, err := session.LoadRecordingStateForAgent(root, agentID); err == nil && rec != nil {
-		line.recording = true
+	if rec, err := session.LoadRecordingStateForAgent(root, agentID); err == nil {
+		line.recording = rec != nil && !rec.IsSuspended()
 	}
 	return line, true
 }

@@ -297,3 +297,25 @@ func TestFmtK(t *testing.T) {
 		assert.Equal(t, want, FmtK(n), "n=%d", n)
 	}
 }
+
+// TestSessionHeader_RecordingStates pins the header's recording mark for a
+// live, a paused and an unrecorded session. Failure prevented: a paused
+// recording still reads "● recording" in the report and the pane.
+func TestSessionHeader_RecordingStates(t *testing.T) {
+	tests := []struct {
+		name        string
+		session     SessionInfo
+		want, notIn string
+	}{
+		{"recording", SessionInfo{Recording: true}, "● recording", "paused"},
+		{"paused", SessionInfo{Recording: true, Paused: true}, "⏸ paused", "● recording"},
+		{"not recording", SessionInfo{}, "○ not recording", "paused"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sessionHeader(Report{Session: tt.session}, plain, 80)
+			assert.Contains(t, got, tt.want)
+			assert.NotContains(t, got, tt.notIn)
+		})
+	}
+}

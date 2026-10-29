@@ -28,6 +28,7 @@ type Input struct {
 	AgentID     string
 	Harness     string
 	Recording   bool // a live recording owns this report's trace
+	Paused      bool // that recording is paused: capture is suspended
 	Turns       int
 
 	ScoreCategory   string
@@ -72,6 +73,7 @@ func Build(in Input) Report {
 			AgentID:   in.AgentID,
 			Harness:   in.Harness,
 			Recording: in.Recording,
+			Paused:    in.Paused,
 			Turns:     in.Turns,
 		},
 		Trace: TraceInfo{
