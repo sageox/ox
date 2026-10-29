@@ -126,11 +126,6 @@ type AgentWorkerConfig struct {
 	// Default: true (runs automatically when daemon is enabled)
 	SessionFinalize *bool `yaml:"session_finalize,omitempty"`
 
-	// QualityUploadThreshold is the minimum quality score (0.0-1.0) for a
-	// session to be uploaded to the team ledger. Sessions below this score
-	// are kept locally but not shared. Default: 0.3 (capture more initially)
-	QualityUploadThreshold *float64 `yaml:"quality_upload_threshold,omitempty"`
-
 	// QualityDiscardThreshold is the quality score (0.0-1.0) below which a
 	// session is deleted entirely. Only truly empty/abandoned sessions should
 	// score this low. Default: 0.1
@@ -210,14 +205,6 @@ func (c *AgentWorkerConfig) IsSessionFinalizeEnabled() bool {
 	return *c.SessionFinalize && c.IsEnabled()
 }
 
-// GetQualityUploadThreshold returns the minimum quality score for ledger upload (default: 0.3).
-func (c *AgentWorkerConfig) GetQualityUploadThreshold() float64 {
-	if c == nil || c.QualityUploadThreshold == nil {
-		return 0.3
-	}
-	return *c.QualityUploadThreshold
-}
-
 // GetQualityDiscardThreshold returns the quality score below which sessions are deleted (default: 0.1).
 func (c *AgentWorkerConfig) GetQualityDiscardThreshold() float64 {
 	if c == nil || c.QualityDiscardThreshold == nil {
@@ -289,10 +276,6 @@ func (c *AgentWorkerConfig) WithDefaults() *AgentWorkerConfig {
 	if out.SessionFinalize == nil {
 		t := true
 		out.SessionFinalize = &t
-	}
-	if out.QualityUploadThreshold == nil {
-		v := 0.3
-		out.QualityUploadThreshold = &v
 	}
 	if out.QualityDiscardThreshold == nil {
 		v := 0.1

@@ -50,7 +50,7 @@ const (
 // fine-grained distinctions they pretend to capture; LLMs are far more
 // reliable at picking from a small named set with anchored examples.
 //
-// Three categories matching session.QualityDisposition 1:1 — adding more
+// Two categories matching session.QualityDisposition 1:1 — adding more
 // categories invites the same fine-distinction problem numeric had. The
 // rubric in the summarization prompt anchors each category with concrete
 // examples so the LLM can place a session unambiguously.
@@ -68,17 +68,9 @@ const (
 	// tokens that would otherwise produce a stub teammates can't use.
 	QualityCategorySkip = "skip"
 
-	// QualityCategoryLocalOnly — there was real work, but it's primarily
-	// individual: routine feature implementation, bug fixes without
-	// broader insight, configuration that isn't team-level. Useful to
-	// the coworker who did it; not worth pushing to the team ledger.
-	// Maps to QualityLocalOnly.
-	QualityCategoryLocalOnly = "local_only"
-
-	// QualityCategoryShare — contains content a teammate would benefit
-	// from: architectural decisions, root-cause analyses, novel
-	// approaches, reusable patterns, important context for ongoing
-	// work. Maps to QualityUpload.
+	// QualityCategoryShare — substantive work or useful context, including
+	// routine implementation, fixes, configuration, and refactoring as well
+	// as architectural decisions and root-cause analyses. Maps to QualityUpload.
 	QualityCategoryShare = "share"
 )
 
@@ -136,8 +128,7 @@ type SummarizeResponse struct {
 	// Quality gate
 	//
 	// QualityCategory is the canonical quality signal as of 2026-05.
-	// Values: QualityCategorySkip, QualityCategoryLocalOnly,
-	// QualityCategoryShare. See those constants for rubric.
+	// Values: QualityCategorySkip and QualityCategoryShare. See those constants for rubric.
 	// Empty on legacy summaries — readers fall back to QualityScore.
 	QualityCategory string `json:"quality_category,omitempty"`
 	// QualityScore is the legacy 0.0-1.0 numeric value. Retained for
