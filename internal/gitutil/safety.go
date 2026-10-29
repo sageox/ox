@@ -361,7 +361,7 @@ func IsSafeForGitOps(repoPath string) error {
 	// A resolved index can still belong to an unfinished merge. commit-tree
 	// would drop its second parent and leave MERGE_HEAD blocking later pulls.
 	if _, err := os.Stat(filepath.Join(gitDir, "MERGE_HEAD")); err == nil {
-		return fmt.Errorf("repo has a merge in progress; finish or abort it in %s", repoPath)
+		return fmt.Errorf("repo has a merge in progress in %s; finish or abort it, or run 'ox doctor --fix'", repoPath)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect merge state: %w", err)
 	}

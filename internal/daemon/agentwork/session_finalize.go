@@ -2501,15 +2501,17 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	if err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
 		// Index removals for optional traces must never resolve a real conflict.
 		// Check before either pointer writes or staging mutate this transaction.
-		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
-			return err
-		}
 		unmerged, err := gitutil.HasUnmergedEntries(ctx, ledgerPath)
 		if err != nil {
 			return err
 		}
 		if unmerged {
 			return fmt.Errorf("commit blocked: %w", ErrLedgerUnresolved)
+		}
+		// Keep the conflict classification above so a merge marker cannot hide
+		// the ledger-wide blocker that pauses finalization retries.
+		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+			return err
 		}
 		// A raw-only first push can trigger GitLab GC before a second pointer
 		// push, unlinking the newly uploaded objects from the project. Publish
