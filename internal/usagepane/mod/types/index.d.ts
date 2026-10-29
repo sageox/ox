@@ -130,11 +130,53 @@ export type Statusline = {
   recording: boolean
 }
 
+
+// --- Data flow: what moved between SageOx and this session -----------------
+//
+// One FlowEvent per ox call (a Bash `ox …` command or a SageOx MCP tool) and
+// one per prompt whose hooks brought team context in (prime, murmurs, ledger
+// recall). The pure classifier in hooks/flow.ts makes them; hooks/scene.ts
+// draws one as an SVG lane under the transcript row it belongs to.
+
+/** Where the data came from or went. */
+export type FlowLane = 'team-context' | 'ledger' | 'murmurs' | 'code' | 'cloud'
+
+/** `in`: SageOx → session (filled dots). `out`: session → SageOx (hollow rings). */
+export type FlowDirection = 'in' | 'out'
+
+export type FlowEvent = {
+  /** The tool_use_id of the call, or `att:<message id>` for a prompt's attachments. */
+  id: string
+  lane: FlowLane
+  direction: FlowDirection
+  /** oxactivity wording, past tense: "loaded team context", "searched team", "posted murmur". */
+  label: string
+  /** Present participle + object while open: "searching team discussions". */
+  step: string
+  /** Estimated tokens moved (bytes/4, or the prime's context-budget total). */
+  tokens: number
+  /** Items moved, when known ("5 discussions"): count and its noun. */
+  items?: number
+  itemsNoun?: string
+  /** ms since the epoch, from $.clock.now(). */
+  startedAt: number
+  endedAt?: number
+  failed?: boolean
+  interrupted?: boolean
+}
+
+/** Every event of the session, newest last; capped at 60. */
+export type FlowState = {
+  byId: Record<string, FlowEvent>
+  order: string[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'ox-cli-brief-pane': {
       report: Shaped<UsageReport | null>
       status: Shaped<UsageStatus>
+      flow: Shaped<FlowState>
     }
   }
 }
