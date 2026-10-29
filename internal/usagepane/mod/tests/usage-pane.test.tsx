@@ -382,6 +382,17 @@ describe('formatting', () => {
     expect(h.marker).toBe('○ not recording')
     expect(h.summary).toBe('calls 3 (1 failed) · ~16k tokens · used 2 of 6')
   })
+  test('header says paused while a recording is suspended', () => {
+    // Failure prevented: a paused recording still showed a red `● recording`.
+    const r = parseReport(JSON.stringify({ ...REPORT, session: { recording: true, paused: true } }))!
+    expect(r.session).toEqual({ recording: true, paused: true })
+    expect(headerLines(r).marker).toBe('⏸ paused')
+  })
+  test('paused absent parses as false; paused alone without recording is not recording', () => {
+    expect(parseReport(JSON.stringify({ ...REPORT, session: { recording: true } }))!.session).toEqual({ recording: true, paused: false })
+    expect(parseReport(JSON.stringify({ ...REPORT, session: { recording: true, paused: 'yes' } }))!.session.paused).toBe(false)
+    expect(headerLines(parseReport(JSON.stringify({ ...REPORT, session: { recording: false, paused: true } }))).marker).toBe('○ not recording')
+  })
   test('an old trace without context or surfaced still parses', () => {
     const h = headerLines(parseReport(JSON.stringify({ view: 'session', session: { recording: true }, calls: { total: 0, failed: 0 } })))
     expect(h.summary).toBe('calls 0 · ~0 tokens · used 0 of 0')
@@ -491,6 +502,26 @@ test('/ox-session-report opens the pane and lists each ox call, oldest first', a
     ])
     const failed = await ui.find({ type: 'Text', text: /murmur list/ })
     expect(failed?.props.color).toBe('error')
+    await ui.unmount()
+  }
+})
+
+test('a paused recording draws a dim ⏸ paused, never the red recording dot', async ($, on) => {
+  // Failure prevented: the pane showed a red `● recording` while capture was paused.
+  mock.clock(on, { now: 1_000 })
+  on('process.run', () => ok(JSON.stringify({ ...REPORT, session: { recording: true, paused: true } })))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.panes', () => ({ value: [{ id: 'ox-session-report', title: 'ox session report', isShown: true, isFocused: false, isPlaced: true }] }))
+  await $.command.run({ ...COMMAND, args: '' } as never)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect((await ui.find({ type: 'Text', text: /● ox session report/ }))?.text).toBe('● ox session report  ⏸ paused')
+    const marker = (await ui.findAll({ type: 'Text' })).find(t => t.text === '  ⏸ paused')
+    expect(marker?.props.dimColor).toBe(true)
+    expect(await ui.find({ type: 'Text', text: /recording/ })).toBeUndefined()
+    const reds = (await ui.findAll({ type: 'Text' })).filter(t => t.props.color === 'error' && t.text === '●')
+    expect(reds).toEqual([])
     await ui.unmount()
   }
 })

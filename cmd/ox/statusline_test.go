@@ -715,3 +715,31 @@ func TestRunStatuslineJSON_WriteErrorNeverFails(t *testing.T) {
 		runStatuslineJSON(bytes.NewReader(f.stdin()), failingWriter{}, testStatuslineOptions())
 	})
 }
+
+// TestStatusline_PausedHidesRec drops "● rec" from the bar and the desktop
+// band while `ox agent session pause` has the recording suspended, and brings
+// it back on resume. Failure prevented: a paused session still claims to be
+// recording.
+func TestStatusline_PausedHidesRec(t *testing.T) {
+	f := newStatuslineFixture(t)
+	f.seed(t, oxactivity.Counts{Plans: 1})
+	f.startRecording(t)
+	setSuspended := func(paused bool) {
+		require.NoError(t, session.UpdateRecordingStateForAgent(f.root, f.agentID, func(s *session.RecordingState) {
+			if paused {
+				now := time.Now().UTC()
+				s.SuspendedAt = &now
+				return
+			}
+			s.SuspendedAt = nil
+		}))
+	}
+
+	setSuspended(true)
+	assert.Equal(t, "● ox  1 plan\n", f.run(t, testStatuslineOptions()))
+	assert.False(t, buildStatuslineJSON(f.stdin(), testStatuslineOptions()).Recording)
+
+	setSuspended(false)
+	assert.Equal(t, "● ox  1 plan  ● rec\n", f.run(t, testStatuslineOptions()))
+	assert.True(t, buildStatuslineJSON(f.stdin(), testStatuslineOptions()).Recording)
+}
