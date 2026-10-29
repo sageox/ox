@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A paused recording no longer says it is recording** — a paused recording no longer shows `● rec` on the status line or `● recording` in `ox session report` and the session report pane; they say `⏸ paused` instead (`session.paused` in `--json`).
+- **A paused recording no longer says it is recording** — a paused recording hides `● rec` on the status line. `ox session report` and the session report pane show `⏸ paused` instead of `● recording` (`session.paused` in `--json`).
 - **Ledger maintenance leaves unsaved plans alone** — re-redacting sessions or deleting a murmur no longer commits staged plan edits. Other staged sessions can still be included.
 
 ### Security
