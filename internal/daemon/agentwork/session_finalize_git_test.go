@@ -9,8 +9,26 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 )
+
+// Exercise prepared fixtures without synthesizing metadata that could conceal
+// a malformed snapshot. Production callers hold these locks during preparation.
+func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayload, refs map[string]lfs.FileRef) (bool, error) {
+	if h.ledgerMu != nil {
+		h.ledgerMu.Lock()
+		defer h.ledgerMu.Unlock()
+	}
+	if err := gitutil.WithRepoLock(h.rootContext(), payload.LedgerPath, func() error {
+		return h.commitSession(payload, refs)
+	}); err != nil {
+		return false, err
+	}
+	err := h.pushSessionAndPrune(payload, "")
+	return err == nil, err
+}
 
 // TestProcessResult_RealGit exercises ProcessResult with skipGit=false against
 // a real bare git repo. Verifies the full pipeline: artifact generation → git

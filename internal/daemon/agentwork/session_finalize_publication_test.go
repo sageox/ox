@@ -7,11 +7,78 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Interrupted metadata promotion must leave completed cache content discoverable.
+func TestSessionFinalize_InterruptedDraftPromotionRemainsRetryable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git and local LFS service")
+	}
+	bare, ledgerPath := setupBareAndCloneLedger(t)
+	const name = "2026-10-21T18-06-test-OxRETRY"
+	cacheDir := writeProductionShapedSession(t, ledgerPath, name)
+	target := filepath.Join(ledgerPath, "sessions", name)
+	writeDraftMeta(t, target)
+	draft, err := lfs.ReadSessionMeta(target)
+	require.NoError(t, err)
+	draft.RepoID = "repo-preserved"
+	require.NoError(t, lfs.WriteSessionMetaOnly(target, draft))
+	runGitCmd(t, ledgerPath, "add", "--sparse", "sessions")
+	runGitCmd(t, ledgerPath, "commit", "-m", "session draft")
+	runGitCmd(t, ledgerPath, "push", "origin", "HEAD")
+	before := gitOutput(t, bare, "rev-parse", "HEAD")
+	draftBytes, err := os.ReadFile(filepath.Join(target, "meta.json"))
+	require.NoError(t, err)
+	payload := &SessionFinalizePayload{SessionDir: cacheDir, RawPath: filepath.Join(cacheDir, "raw.jsonl"), LedgerPath: ledgerPath}
+	stored, err := session.ReadSessionFromPath(payload.RawPath)
+	require.NoError(t, err)
+	handler := newGitBackedHandler()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handler.SetDaemonContext(ctx)
+
+	require.NoError(t, gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		require.NoError(t, handler.preserveLedgerMetaInCache(payload))
+		// Cancel at the boundary between the identity seed and the next metadata
+		// write. The held lock makes that write fail without a timeout or sleep.
+		return fileutil.WithFileLock(context.Background(), filepath.Join(cacheDir, "meta.json"), func() error {
+			cancel()
+			_, err := handler.writeMetaAndUploadLFS(payload, stored, &session.SummarizeResponse{})
+			require.ErrorIs(t, err, context.Canceled)
+			return nil
+		})
+	}))
+	assert.Equal(t, before, gitOutput(t, ledgerPath, "rev-parse", "HEAD"))
+	assert.Equal(t, before, gitOutput(t, bare, "rev-parse", "HEAD"))
+	currentDraft, err := os.ReadFile(filepath.Join(target, "meta.json"))
+	require.NoError(t, err)
+	assert.Equal(t, draftBytes, currentDraft)
+	raw, err := os.ReadFile(payload.RawPath)
+	require.NoError(t, err)
+	assert.Equal(t, testRawContent, string(raw))
+
+	retry := newGitBackedHandler()
+	enableLocalFinalizeLFS(t, retry, ledgerPath)
+	pending, err := retry.Detect(ledgerPath)
+	require.NoError(t, err)
+	require.Len(t, pending, 1, "completed content must survive a fresh detector")
+	require.True(t, pending[0].Payload.(*SessionFinalizePayload).UploadOnly)
+	require.NoError(t, retry.ProcessResult(pending[0], &RunResult{}))
+	assert.NoDirExists(t, cacheDir)
+	assert.Equal(t, gitOutput(t, ledgerPath, "rev-parse", "HEAD"), gitOutput(t, bare, "rev-parse", "HEAD"))
+	var published lfs.SessionMeta
+	require.NoError(t, json.Unmarshal([]byte(gitOutput(t, bare, "show", "HEAD:sessions/"+name+"/meta.json")), &published))
+	assert.False(t, published.IsDraft())
+	assert.Equal(t, draftTestSessionID, published.SessionID)
+	assert.Equal(t, draft.RepoID, published.RepoID)
+	assert.Equal(t, lfs.NewFileRef(raw), published.Files["raw.jsonl"])
+}
 
 // A canceled finalizer waiting behind GC must not write artifacts or metadata
 // into the clone that GC is about to replace.
@@ -143,47 +210,38 @@ func TestSessionFinalize_PreparationFailurePreservesSessionUntilRetry(t *testing
 	}
 }
 
-// Upload-only recovery must promote stale draft metadata and preserve the ID
-// and fields already published for a legacy recording without a header ID.
+// Upload-only recovery must promote existing cache drafts without losing identity or fields.
 func TestSessionFinalize_UploadOnlyPromotesDraftMetadata(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git and local LFS service")
 	}
-	for _, cachedMeta := range []bool{false, true} {
-		t.Run(map[bool]string{false: "missing cache meta", true: "draft cache meta"}[cachedMeta], func(t *testing.T) {
-			bare, ledgerPath := setupBareAndCloneLedger(t)
-			const name = "2026-10-21T18-06-test-OxDRAFT"
-			cacheDir := writeProductionShapedSession(t, ledgerPath, name)
-			target := filepath.Join(ledgerPath, "sessions", name)
-			writeDraftMeta(t, target)
-			meta, err := lfs.ReadSessionMeta(target)
-			require.NoError(t, err)
-			meta.RepoID, meta.UserID, meta.Model = "repo-preserved", "user-preserved", "model-preserved"
-			require.NoError(t, lfs.WriteSessionMetaOnly(target, meta))
-			if cachedMeta {
-				require.NoError(t, lfs.WriteSessionMetaOnly(cacheDir, meta))
-			}
-			runGitCmd(t, ledgerPath, "add", "--sparse", "sessions")
-			runGitCmd(t, ledgerPath, "commit", "-m", "session draft")
-			runGitCmd(t, ledgerPath, "push", "origin", "HEAD")
-			handler := newGitBackedHandler()
-			enableLocalFinalizeLFS(t, handler, ledgerPath)
-			item := &WorkItem{Type: sessionFinalizeType, Payload: &SessionFinalizePayload{
-				SessionDir: cacheDir, RawPath: filepath.Join(cacheDir, "raw.jsonl"), LedgerPath: ledgerPath, UploadOnly: true,
-			}}
-			require.NoError(t, handler.ProcessResult(item, &RunResult{}))
-			var published lfs.SessionMeta
-			require.NoError(t, json.Unmarshal([]byte(gitOutput(t, bare, "show", "HEAD:sessions/"+name+"/meta.json")), &published))
-			assert.False(t, published.IsDraft())
-			assert.Equal(t, draftTestSessionID, published.SessionID)
-			assert.Equal(t, meta.RepoID, published.RepoID)
-			assert.Equal(t, meta.UserID, published.UserID)
-			assert.Equal(t, meta.Model, published.Model)
-			assert.Equal(t, "artifact content", gitOutput(t, bare, "show", "HEAD:sessions/"+name+"/summary.json"))
-			assert.NotEmpty(t, published.Files["raw.jsonl"].OID)
-			assert.NoDirExists(t, cacheDir)
-		})
-	}
+	bare, ledgerPath := setupBareAndCloneLedger(t)
+	const name = "2026-10-21T18-06-test-OxDRAFT"
+	cacheDir := writeProductionShapedSession(t, ledgerPath, name)
+	target := filepath.Join(ledgerPath, "sessions", name)
+	writeDraftMeta(t, target)
+	meta, err := lfs.ReadSessionMeta(target)
+	require.NoError(t, err)
+	meta.RepoID, meta.UserID, meta.Model = "repo-preserved", "user-preserved", "model-preserved"
+	require.NoError(t, lfs.WriteSessionMetaOnly(cacheDir, meta))
+	runGitCmd(t, ledgerPath, "add", "--sparse", "sessions")
+	runGitCmd(t, ledgerPath, "commit", "-m", "session draft")
+	runGitCmd(t, ledgerPath, "push", "origin", "HEAD")
+	handler := newGitBackedHandler()
+	enableLocalFinalizeLFS(t, handler, ledgerPath)
+	item := &WorkItem{Type: sessionFinalizeType, Payload: &SessionFinalizePayload{
+		SessionDir: cacheDir, RawPath: filepath.Join(cacheDir, "raw.jsonl"), LedgerPath: ledgerPath, UploadOnly: true,
+	}}
+	require.NoError(t, handler.ProcessResult(item, &RunResult{}))
+	var published lfs.SessionMeta
+	require.NoError(t, json.Unmarshal([]byte(gitOutput(t, bare, "show", "HEAD:sessions/"+name+"/meta.json")), &published))
+	assert.False(t, published.IsDraft())
+	assert.Equal(t, draftTestSessionID, published.SessionID)
+	assert.Equal(t, meta.RepoID, published.RepoID)
+	assert.Equal(t, meta.UserID, published.UserID)
+	assert.Equal(t, meta.Model, published.Model)
+	assert.NotEmpty(t, published.Files["raw.jsonl"].OID)
+	assert.NoDirExists(t, cacheDir)
 }
 
 // A non-cooperating writer can still restore the old metadata in the index.

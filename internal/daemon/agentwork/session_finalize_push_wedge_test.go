@@ -157,9 +157,9 @@ func TestProcessUploadOnly_FailureExitsReachTheRetryCap(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "session cannot be staged into the ledger",
+			name: "published session metadata cannot be read",
 			prepare: func(t *testing.T, _ *SessionFinalizeHandler, ledger string, item *WorkItem) {
-				// a regular file where the session directory must go
+				// A file in place of the session directory blocks reading its metadata.
 				dest := filepath.Join(ledger, "sessions", filepath.Base(item.Payload.(*SessionFinalizePayload).SessionDir))
 				require.NoError(t, os.WriteFile(dest, []byte("in the way"), 0o644))
 			},
