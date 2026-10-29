@@ -421,6 +421,8 @@ func TestCommitLedgerSnapshot_RefusesUnmergedIndexOutsideScope(t *testing.T) {
 	gitInRepo(t, repo, "commit", "-am", "main change")
 	_, mergeErr := RunGit(context.Background(), repo, "merge", "other")
 	require.Error(t, mergeErr, "fixture must leave an unmerged index")
+	// Exercise the unmerged-index check even without an active merge marker.
+	gitInRepo(t, repo, "merge", "--quit")
 	writeGitutilFixture(t, repo, "sessions/x/meta.json", cleanMeta)
 	gitInRepo(t, repo, "add", "--sparse", "sessions/x/meta.json")
 	before := gitInRepo(t, repo, "rev-parse", "HEAD")

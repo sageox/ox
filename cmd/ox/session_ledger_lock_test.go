@@ -88,14 +88,19 @@ func TestSessionLedgerWriters_RefuseToStageIntoWedgedRebase(t *testing.T) {
 	}
 }
 
-// A resolved but unfinished merge must not become a single-parent deletion
-// commit that leaves MERGE_HEAD behind and blocks subsequent pulls.
-func TestSessionDeletion_PreservesUnfinishedMerge(t *testing.T) {
+// Refusal must preserve staged merge/rebase resolutions, including in a
+// configured linked checkout, so finishing the operation can unblock writes.
+func TestSessionDeletion_PreservesUnfinishedGitOperation(t *testing.T) {
 	if testing.Short() {
-		t.Skip("short: real git merge and push")
+		t.Skip("short: real git merge, rebase and push")
 	}
-	for _, writer := range []string{"session remove", "session delete"} {
-		t.Run(writer, func(t *testing.T) {
+	for _, tt := range []struct{ writer, operation string }{
+		{"session remove", "merge"},
+		{"session delete", "merge"},
+		{"session remove", "linked rebase"},
+		{"session delete", "linked rebase"},
+	} {
+		t.Run(tt.writer+"/"+tt.operation, func(t *testing.T) {
 			remote, repo := createBareAndClone(t)
 			isolatePushEnv(t, repo)
 			const name = "2026-01-01T00-00-testuser-OxMerge"
@@ -103,40 +108,71 @@ func TestSessionDeletion_PreservesUnfinishedMerge(t *testing.T) {
 			runGit(t, repo, "add", "sessions")
 			runGit(t, repo, "commit", "-m", "seed session")
 			runGit(t, repo, "push")
+			remoteBefore := runGit(t, remote, "rev-parse", "HEAD")
 			branch := runGit(t, repo, "branch", "--show-current")
-			runGit(t, repo, "checkout", "-b", "manual-merge")
-			require.NoError(t, os.WriteFile(filepath.Join(repo, "merge-note.txt"), []byte("manual merge work\n"), 0o644))
-			runGit(t, repo, "add", "merge-note.txt")
-			runGit(t, repo, "commit", "-m", "manual work")
-			runGit(t, repo, "checkout", branch)
-			runGit(t, repo, "merge", "--no-ff", "--no-commit", "manual-merge")
-			require.FileExists(t, filepath.Join(repo, ".git", "MERGE_HEAD"))
+			marker, blocked := "MERGE_HEAD", "merge in progress"
+			if tt.operation == "merge" {
+				runGit(t, repo, "checkout", "-b", "manual-merge")
+				require.NoError(t, os.WriteFile(filepath.Join(repo, "merge-note.txt"), []byte("manual merge work\n"), 0o644))
+				runGit(t, repo, "add", "merge-note.txt")
+				runGit(t, repo, "commit", "-m", "manual work")
+				runGit(t, repo, "checkout", branch)
+				runGit(t, repo, "merge", "--no-ff", "--no-commit", "manual-merge")
+			} else {
+				// Conflicting edits to the selected session leave a real rebase
+				// paused in a linked checkout. Stage its resolution without continuing.
+				runGit(t, repo, "checkout", "-b", "rebase-upstream")
+				linked := filepath.Join(t.TempDir(), "linked")
+				runGit(t, repo, "worktree", "add", linked, branch)
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"title":"upstream"}`), 0o644))
+				runGit(t, repo, "commit", "-am", "upstream edit")
+				repo, dir = linked, filepath.Join(linked, "sessions", name)
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"title":"local"}`), 0o644))
+				runGit(t, repo, "commit", "-am", "local edit")
+				_, err := runGitCombined(repo, "rebase", "rebase-upstream")
+				require.Error(t, err)
+				require.NotEmpty(t, runGit(t, repo, "ls-files", "--unmerged"))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"title":"resolved"}`), 0o644))
+				runGit(t, repo, "add", "sessions")
+				marker, blocked = "rebase-merge", "broken rebase state"
+			}
+			markerPath := runGit(t, repo, "rev-parse", "--path-format=absolute", "--git-path", marker)
+			_, err := os.Stat(markerPath)
+			require.NoError(t, err)
 			require.Empty(t, runGit(t, repo, "ls-files", "--unmerged"), "the index is fully resolved")
 			headBefore := runGit(t, repo, "rev-parse", "HEAD")
 			indexBefore := runGit(t, repo, "write-tree")
+			workBefore, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+			require.NoError(t, err)
 			remove := func() error {
-				if writer == "session remove" {
+				if tt.writer == "session remove" {
 					_, err := batchDeleteSessionsFromLedger(repo, []string{name})
 					return err
 				}
 				return deleteSessionFromLedger(repo, name, dir)
 			}
 
-			require.ErrorContains(t, remove(), "merge in progress")
+			assert.ErrorContains(t, remove(), blocked)
 			assert.Equal(t, headBefore, runGit(t, repo, "rev-parse", "HEAD"))
-			assert.Equal(t, headBefore, runGit(t, remote, "rev-parse", "HEAD"))
-			assert.Equal(t, indexBefore, runGit(t, repo, "write-tree"), "refusal must preserve the staged merge")
-			assert.FileExists(t, filepath.Join(dir, "meta.json"))
-			assert.FileExists(t, filepath.Join(repo, ".git", "MERGE_HEAD"))
+			assert.Equal(t, remoteBefore, runGit(t, remote, "rev-parse", "HEAD"))
+			assert.Equal(t, indexBefore, runGit(t, repo, "write-tree"), "refusal must preserve staged resolutions")
+			workAfter, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+			require.NoError(t, err)
+			assert.Equal(t, workBefore, workAfter)
+			_, err = os.Stat(markerPath)
+			require.NoError(t, err)
 
-			// Completing the original merge preserves both parents and unblocks
-			// deletion and later synchronization without restarting ox.
-			runGit(t, repo, "commit", "-m", "complete manual merge")
-			require.Len(t, strings.Fields(runGit(t, repo, "rev-list", "--parents", "-n", "1", "HEAD")), 3)
+			// Finishing the operation unblocks deletion and synchronization.
+			if tt.operation == "merge" {
+				runGit(t, repo, "commit", "-m", "complete manual merge")
+				require.Len(t, strings.Fields(runGit(t, repo, "rev-list", "--parents", "-n", "1", "HEAD")), 3)
+			} else {
+				runGit(t, repo, "-c", "core.editor=true", "rebase", "--continue")
+			}
 			require.NoError(t, remove())
 			assert.NoDirExists(t, dir)
-			_, err := runGitCombined(remote, "cat-file", "-e", "HEAD:sessions/"+name)
-			assert.Error(t, err, "the deletion must reach the remote after the merge completes")
+			_, err = runGitCombined(remote, "cat-file", "-e", "HEAD:sessions/"+name)
+			assert.Error(t, err, "the deletion must reach the remote after recovery")
 			runGit(t, repo, "pull", "--rebase", "--autostash")
 		})
 	}

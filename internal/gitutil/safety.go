@@ -340,6 +340,16 @@ func RebaseAge(repoPath string) (time.Duration, bool) {
 // automatic writes. Returns nil if safe to proceed, or why the repo is blocked.
 func IsSafeForGitOps(repoPath string) error {
 	gitDir := filepath.Join(repoPath, ".git")
+	if info, err := os.Stat(gitDir); err == nil && !info.IsDir() {
+		// Explicitly configured checkouts can be linked worktrees. All state
+		// checks must use their Git directory, not the .git pointer file.
+		ctx, cancel := context.WithTimeout(context.Background(), inspectTimeout)
+		defer cancel()
+		gitDir, err = RunGit(ctx, repoPath, "rev-parse", "--absolute-git-dir")
+		if err != nil {
+			return fmt.Errorf("resolve git directory: %w", err)
+		}
+	}
 
 	// Sweep abandoned locks before reporting them as blocking. Without this the
 	// push path is asymmetric with the pull path (which already sweeps before
@@ -354,26 +364,17 @@ func IsSafeForGitOps(repoPath string) error {
 		return fmt.Errorf("git lock files detected: %s (remove stale locks or wait for in-progress operation)", strings.Join(locks, ", "))
 	}
 
-	if IsRebaseInProgress(repoPath) {
-		return fmt.Errorf("repo in broken rebase state (run 'git rebase --abort' in %s)", repoPath)
-	}
-
 	// A resolved index can still belong to an unfinished merge. commit-tree
 	// would drop its second parent and leave MERGE_HEAD blocking later pulls.
-	mergeHead := filepath.Join(gitDir, "MERGE_HEAD")
-	if info, err := os.Stat(gitDir); err == nil && !info.IsDir() {
-		// An explicitly configured managed checkout can be a linked worktree.
-		ctx, cancel := context.WithTimeout(context.Background(), inspectTimeout)
-		defer cancel()
-		mergeHead, err = RunGit(ctx, repoPath, "rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD")
-		if err != nil {
-			return fmt.Errorf("resolve merge state: %w", err)
+	for _, state := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD"} {
+		if _, err := os.Stat(filepath.Join(gitDir, state)); err == nil {
+			if state == "MERGE_HEAD" {
+				return fmt.Errorf("repo has a merge in progress in %s; finish or abort it, or run 'ox doctor --fix'", repoPath)
+			}
+			return fmt.Errorf("repo in broken rebase state (run 'git rebase --abort' in %s)", repoPath)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect git state: %w", err)
 		}
-	}
-	if _, err := os.Stat(mergeHead); err == nil {
-		return fmt.Errorf("repo has a merge in progress in %s; finish or abort it, or run 'ox doctor --fix'", repoPath)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect merge state: %w", err)
 	}
 
 	return nil
