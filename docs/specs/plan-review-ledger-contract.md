@@ -184,17 +184,11 @@ The CLI reads and writes review records only through `pkg/planreview`.
   it uploads a page still awaiting upload before it takes the lock, and while
   the page stays unstored it commits and pushes the rest of the dir and keeps
   the marker.
-- **Session publication** (uploads, summary pushes and deletions) commits
-  the validated index, including plan changes left staged by a failed save.
-  It stages only its own session files, never plan working files. Later
-  unstaged edits and new unstaged plans remain local. Already committed saves
-  whose push failed travel with the next successful branch push. Git staging
-  is the boundary: a manually staged plan is also eligible for publication.
-  Saves that failed before staging still need the plan's existing retry.
-- **Maintenance commits** (`commitLedgerSnapshot` in `cmd/ox`: automatic
-  doctor sweeps `ledger-clean-workdir`, `ledger-cache-tracked` and
-  `ledger-rej-tracked`, the `--fix`-only GitHub data migration, batch session
-  re-redaction and murmur deletion) commit everything but `data/plans/`, through
+- **Whole-index commits** (`commitLedgerSnapshot` in `cmd/ox`: the commit
+  that uploads a session, at stop and in `ox doctor`'s upload retry, the
+  automatic doctor sweeps `ledger-clean-workdir`, `ledger-cache-tracked` and
+  `ledger-rej-tracked`, and the `--fix`-only GitHub data migration) commit
+  everything but `data/plans/`, through
   `CommitLedgerSnapshot` with an exclude pathspec, and the sweeps stage nothing
   there. A plan file stays as it was, staged or not, as do its retry marker
   and review entries: the plan's own writers and their retries commit it.

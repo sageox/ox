@@ -383,9 +383,9 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		if addErr != nil {
 			return nil
 		}
-		// Recover earlier staged saves, including plans, after validating the
-		// snapshot. Only session files were staged above; unstaged plan edits stay local.
-		_, commitErr = gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, commitMsg)
+		// validated snapshot, not a bare commit: the lock keeps the index still,
+		// but entries staged before it would otherwise ride along unchecked
+		_, commitErr = commitLedgerSnapshot(context.Background(), ledgerPath, commitMsg)
 		return nil
 	})
 	if lockErr != nil {

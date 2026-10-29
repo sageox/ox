@@ -340,7 +340,7 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 	filesToAdd := append([]string{metaPath, gitignorePath}, sessionArtifactsToStage(sessionDir)...)
 
 	// Hold the repo lock from the first index write through commit, as
-	// CommitLedgerSnapshot requires: a daemon sync rebase then cannot run under
+	// commitLedgerSnapshot requires: a daemon sync rebase then cannot run under
 	// this commit, and this commit cannot move main under the rebase
 	// (sageox/ox#1541). pushLedger takes the same non-reentrant lock itself, so
 	// it stays outside.
@@ -362,9 +362,15 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 			return fmt.Errorf("git add failed: %s: %w", string(output), err)
 		}
 
-		// Commit exactly the staged bytes we validate, including earlier saves.
-		// Plan working files were not staged above, so later edits remain local.
-		if _, err := gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, fmt.Sprintf("session: %s", sessionName)); err != nil {
+		// Commit the index as an immutable, pre-validated tree snapshot. The old
+		// shape (validate the index, then a no-pathspec `git commit` that re-reads the
+		// WHOLE index at commit time) left a window where a concurrent daemon
+		// `pull --rebase --autostash` could stage an unchecked conflict blob between
+		// the check and the commit. commitLedgerSnapshot writes the index to an
+		// immutable tree, scans that snapshot, and commits exactly it — so a blob
+		// staged after the snapshot is neither vetted-away nor swept in. See #749 and
+		// the PR #811 review (validation↔commit TOCTOU).
+		if _, err := commitLedgerSnapshot(context.Background(), ledgerPath, fmt.Sprintf("session: %s", sessionName)); err != nil {
 			return fmt.Errorf("committing ledger: %w", err)
 		}
 		return nil

@@ -10,7 +10,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -129,45 +128,27 @@ func TestCommitAndPushLedger_Success(t *testing.T) {
 	assert.Equal(t, fmt.Sprintf("session: %s", sessionName), msg)
 }
 
-// A session upload recovers a plan save whose commit failed, without
-// publishing later edits or a new plan that was never staged for saving.
-func TestCommitAndPushLedger_RecoversStagedPlanSave(t *testing.T) {
+// TestCommitAndPushLedger_LeavesAStagedPlanFileStaged: a session's commit,
+// from session stop or `ox doctor`'s upload retry, never carries a plan file
+// someone else staged; the file stays staged for the plan's own save. Failure
+// prevented: an unsaved plan edit reaches the team in a `session:` commit
+// (#1409).
+func TestCommitAndPushLedger_LeavesAStagedPlanFileStaged(t *testing.T) {
 	barePath, clonePath := createBareAndClone(t)
 	isolatePushEnv(t, clonePath)
 	const plan = "data/plans/2026-10-01-p/plan.md"
-	planDir := filepath.Join(clonePath, filepath.Dir(plan))
-	require.NoError(t, os.MkdirAll(planDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(clonePath, plan), []byte("# saved plan\n"), 0o644))
-	previous := commitPlanSnapshot
-	t.Cleanup(func() { commitPlanSnapshot = previous })
-	commitPlanSnapshot = func(context.Context, string, string, ...string) (bool, error) {
-		return false, assert.AnError
-	}
-	err := gitutil.WithRepoLock(context.Background(), clonePath, func() error {
-		return commitPlanDirLocked(context.Background(), clonePath, planDir, "")
-	})
-	commitPlanSnapshot = previous
-	require.ErrorIs(t, err, assert.AnError)
-	require.Equal(t, "# saved plan", runGit(t, clonePath, "show", ":"+plan))
-	require.NoError(t, os.WriteFile(filepath.Join(clonePath, plan), []byte("# later unsaved edit\n"), 0o644))
-	const unsaved = "data/plans/unsaved/plan.md"
-	require.NoError(t, os.MkdirAll(filepath.Join(clonePath, filepath.Dir(unsaved)), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(clonePath, unsaved), []byte("# new draft\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(clonePath, "data", "plans", "2026-10-01-p"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(clonePath, filepath.FromSlash(plan)), []byte("# unsaved\n"), 0o644))
+	runGit(t, clonePath, "add", plan)
 	sessionName := "2026-01-01T00-00-testuser-OxAbc1"
 	writeSessionFiles(t, clonePath, sessionName)
 
 	require.NoError(t, commitAndPushLedger(clonePath, sessionName))
 
-	assert.NotEmpty(t, runGit(t, barePath, "show", "HEAD:sessions/"+sessionName+"/meta.json"))
-	assert.Equal(t, "# saved plan", runGit(t, barePath, "show", "HEAD:"+plan))
-	assert.Empty(t, runGit(t, barePath, "ls-tree", "--name-only", "HEAD", "--", unsaved))
-	assert.Empty(t, runGit(t, clonePath, "diff", "--cached", "--name-only", "--", "data/plans"))
-	content, err := os.ReadFile(filepath.Join(clonePath, plan))
-	require.NoError(t, err)
-	assert.Equal(t, "# later unsaved edit\n", string(content))
-	content, err = os.ReadFile(filepath.Join(clonePath, unsaved))
-	require.NoError(t, err)
-	assert.Equal(t, "# new draft\n", string(content))
+	verifyClone := cloneBare(t, barePath)
+	assert.FileExists(t, filepath.Join(verifyClone, "sessions", sessionName, "meta.json"))
+	assert.NoFileExists(t, filepath.Join(verifyClone, filepath.FromSlash(plan)), "the session commit published a staged plan file")
+	assert.Equal(t, plan, runGit(t, clonePath, "diff", "--cached", "--name-only"), "the plan file must stay staged")
 }
 
 func TestCommitAndPushLedger_NothingToCommit(t *testing.T) {

@@ -183,7 +183,7 @@ func deleteSessionFromLedger(ledgerPath, sessionName, sessionDir string) error {
 		if _, err := gitutil.RunGit(ctx, ledgerPath, "rm", "-r", "--force", "--", ":(literal)sessions/"+sessionName); err != nil {
 			return fmt.Errorf("git rm: %w", err)
 		}
-		_, err := gitutil.CommitLedgerSessionDeletion(ctx, ledgerPath, commitMsg, []string{sessionName})
+		_, err := gitutil.CommitLedgerSessionDeletion(ctx, ledgerPath, commitMsg, []string{sessionName}, allButPlansPathspec...)
 		return err
 	}); err != nil {
 		return err

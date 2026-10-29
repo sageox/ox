@@ -76,15 +76,14 @@ func advanceRemote(t *testing.T, writer string, n int) {
 }
 
 // A completed or refused deletion must leave the Ledger usable by later daemon
-// pulls, including with unstaged edits to a plan that was staged for saving.
+// pulls, including with a staged plan left over.
 func TestPullManagedRepo_ProgressAfterSessionDeletion(t *testing.T) {
 	for _, reject := range []bool{false, true} {
 		t.Run(fmt.Sprintf("rejected=%t", reject), func(t *testing.T) {
 			_, local, writer := setupRacingLedger(t)
 			const selected = "sessions/selected/meta.json"
 			const plan = "data/plans/draft/plan.md"
-			const invalid = "data/plans/rejected/plan.md"
-			const conflict = "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> saved\n"
+			const invalid = "sessions/invalid/meta.json"
 			for _, path := range []string{selected, plan} {
 				require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(writer, path)), 0o755))
 				require.NoError(t, os.WriteFile(filepath.Join(writer, path), []byte("{}\n"), 0o644))
@@ -93,12 +92,11 @@ func TestPullManagedRepo_ProgressAfterSessionDeletion(t *testing.T) {
 			gitInDir(t, writer, "commit", "-m", "seed session and plan")
 			gitInDir(t, writer, "push")
 			gitInDir(t, local, "pull", "--ff-only")
-			require.NoError(t, os.WriteFile(filepath.Join(local, plan), []byte("saved plan\n"), 0o644))
-			gitInDir(t, local, "add", plan)
 			require.NoError(t, os.WriteFile(filepath.Join(local, plan), []byte("unsaved plan\n"), 0o644))
+			gitInDir(t, local, "add", plan)
 			if reject {
 				require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(local, invalid)), 0o755))
-				require.NoError(t, os.WriteFile(filepath.Join(local, invalid), []byte(conflict), 0o644))
+				require.NoError(t, os.WriteFile(filepath.Join(local, invalid), []byte("invalid JSON"), 0o644))
 				gitInDir(t, local, "add", invalid)
 			}
 			s := newTestScheduler(t.TempDir())
@@ -110,22 +108,17 @@ func TestPullManagedRepo_ProgressAfterSessionDeletion(t *testing.T) {
 			require.NoError(t, gitutil.WithRepoLock(context.Background(), local, func() error {
 				_, err := gitutil.RunGit(context.Background(), local, "rm", "-r", "sessions/selected")
 				require.NoError(t, err)
-				committed, err := gitutil.CommitLedgerSessionDeletion(context.Background(), local, "session: delete selected", []string{"selected"})
-				wantStaged := ""
+				committed, err := gitutil.CommitLedgerSessionDeletion(context.Background(), local, "session: delete selected", []string{"selected"}, ":/", ":(exclude)data/plans")
 				if reject {
-					require.ErrorContains(t, err, "unresolved conflict")
+					require.ErrorContains(t, err, "invalid JSON object")
 					assert.False(t, committed)
-					wantStaged = plan
 				} else {
 					require.NoError(t, err)
 					assert.True(t, committed)
-					saved, err := gitutil.RunGit(context.Background(), local, "show", "HEAD:"+plan)
-					require.NoError(t, err)
-					assert.Equal(t, "saved plan", saved)
 				}
 				staged, err := gitutil.RunGit(context.Background(), local, "diff", "--cached", "--name-only", "--", plan)
 				require.NoError(t, err)
-				require.Equal(t, wantStaged, staged, "a refused deletion must preserve the staged plan save")
+				require.Equal(t, plan, staged, "daemon pulls must start with the unsaved plan still staged")
 				return nil
 			}))
 			for cycle := range 2 {
@@ -149,7 +142,7 @@ func TestPullManagedRepo_ProgressAfterSessionDeletion(t *testing.T) {
 				assert.FileExists(t, filepath.Join(local, selected))
 				content, err := os.ReadFile(filepath.Join(local, invalid))
 				require.NoError(t, err)
-				assert.Equal(t, conflict, string(content))
+				assert.Equal(t, "invalid JSON", string(content))
 			} else {
 				assert.NoFileExists(t, filepath.Join(local, selected))
 			}

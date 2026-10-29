@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Session pushes recover staged saves** — uploads, summary pushes and deletions publish validated changes left staged by a failed save, while unstaged plan edits stay local. Failed deletion commits restore the selected sessions.
+- **Safer session deletion** — deletion commits validate staged work and restore selected sessions if the commit fails. Plans stay local; other valid staged session work can still be published.
 - **Ledger maintenance leaves unsaved plans alone** — re-redacting sessions or deleting a murmur no longer commits staged plan edits. Other staged sessions can still be included.
 
 ### Security

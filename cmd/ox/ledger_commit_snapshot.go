@@ -8,10 +8,10 @@ import (
 
 // allButPlansPathspec is the whole Ledger except data/plans/. A plan file
 // still uncommitted there can be an author's unsaved edit, or a plan write
-// waiting on its retry, such as a large plan.html whose upload failed.
-// Maintenance leaves it to the plan's own writers and their retries (#1409).
-// Session publication calls gitutil.CommitLedgerSnapshot directly to recover
-// staged saves, while leaving unstaged plan edits alone.
+// waiting on its retry, such as a large plan.html whose upload failed. The
+// plan's own writers commit it (its save, lifecycle events, review records,
+// and their retries in `ox plan flush-pending`), so a commit of whatever else
+// is staged leaves it alone, staged or not (#1409).
 var allButPlansPathspec = []string{":/", ":(exclude)data/plans"}
 
 // commitLedgerSnapshot commits the ledger index, all but data/plans/
