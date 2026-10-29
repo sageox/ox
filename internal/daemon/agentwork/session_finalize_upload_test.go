@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/require"
@@ -791,4 +792,61 @@ func TestGitCommitAndPush_RefusesUnuploadedArtifacts(t *testing.T) {
 	content, err := os.ReadFile(rawPath)
 	require.NoError(t, err)
 	require.Equal(t, testRawContent, string(content))
+}
+
+// TestUploadOnly_SecretGuardRefusalWaitsForAChange: the secret guard refuses
+// the same bytes every time.
+// Failure prevented: the daemon re-detected and retried a refused session every
+// few minutes, forever, re-scanning the whole transcript each time.
+func TestUploadOnly_SecretGuardRefusalWaitsForAChange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	_, ledger := setupBareAndCloneLedger(t)
+	handler := NewSessionFinalizeHandler(slog.Default())
+	handler.skipGit = false
+	handler.ledgerMu = &sync.Mutex{}
+	enableLocalFinalizeLFS(t, handler, ledger)
+
+	const name = "2026-10-16T22-52-testuser-OxSECR"
+	cacheDir := filepath.Join(ledger, ".sageox", "cache", "sessions", name)
+	require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+	rawPath := filepath.Join(cacheDir, "raw.jsonl")
+	// a synthetic credential the bundled rules refuse, so no rule download is needed
+	const withSecret = `{"metadata":{"schema_version":"1","agent_type":"claude-code","username":"testuser","agent_id":"OxSECR"}}
+{"type":"user","content":"MAILLAB_API_KEY=syntheticOpaqueLFSBoundarySentinel39xyAZ","seq":1}
+{"type":"assistant","content":"world","seq":2}
+{"entry_count":2}
+`
+	require.NoError(t, os.WriteFile(rawPath, []byte(withSecret), 0o644))
+	for _, artifact := range requiredArtifacts {
+		require.NoError(t, os.WriteFile(filepath.Join(cacheDir, artifact), []byte("artifact"), 0o644))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "meta.json"), []byte(`{"session_name":"`+name+`"}`), 0o644))
+
+	detected := func() *WorkItem {
+		t.Helper()
+		items, err := handler.Detect(ledger)
+		require.NoError(t, err)
+		for _, item := range items {
+			if item.DedupKey == sessionFinalizeType+":"+name {
+				return item
+			}
+		}
+		return nil
+	}
+
+	item := detected()
+	require.NotNil(t, item, "precondition: the finalized cache session is queued for upload")
+	err := handler.ProcessResult(item, &RunResult{})
+	require.ErrorContains(t, err, "content contains credentials")
+	require.Nil(t, detected(), "a refused session must not be retried until it changes")
+	require.NoFileExists(t, filepath.Join(ledger, "sessions", name, publicationRefusedMarker),
+		"the refusal marker must stay in the cache, never in the Ledger's tracked sessions/")
+
+	// A redaction rewrites the transcript.
+	require.NoError(t, os.WriteFile(rawPath, []byte(testRawContent), 0o644))
+	later := time.Now().Add(2 * time.Second)
+	require.NoError(t, os.Chtimes(rawPath, later, later))
+	require.NotNil(t, detected(), "a session changed since the refusal must be retried")
 }
