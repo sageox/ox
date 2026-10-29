@@ -6,7 +6,10 @@ type QualityDisposition string
 const (
 	// QualityUpload means the session should be pushed to the team ledger.
 	QualityUpload QualityDisposition = "upload"
-	// QualityLocalOnly means artifacts are kept locally but not pushed.
+	// QualityLocalOnly marks real but primarily individual work. The daemon's
+	// finalize publishes it like QualityUpload, pending a team decision (see
+	// ProcessResult in internal/daemon/agentwork/session_finalize.go);
+	// ox session push-summary and session import do not push it.
 	QualityLocalOnly QualityDisposition = "local_only"
 	// QualityDiscard means the session should be deleted entirely.
 	QualityDiscard QualityDisposition = "discard"

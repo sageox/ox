@@ -1701,15 +1701,22 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		h.emitSummarizationTelemetry(sessionName, "delegated", result, summaryResp, scored)
 	}
 
-	if disposition == session.QualityLocalOnly {
-		h.logger.Info("session below upload threshold, keeping locally",
-			"session", sessionName,
-			"quality_score", summaryResp.QualityScore,
-			"threshold", h.qualityUploadThreshold,
-			"reason", summaryResp.ScoreReason,
-		)
-		return nil
-	}
+	// QualityLocalOnly is published like QualityUpload until the team decides
+	// whether local_only sessions should stay off the Ledger. Restoring the
+	// early return below does not keep a session local by itself: Detect
+	// re-queues a finalized ledger-cache session as upload-only, which then
+	// publishes it without a title. Restore it only together with an
+	// upload-only check that skips local_only sessions.
+	//
+	// if disposition == session.QualityLocalOnly {
+	// 	h.logger.Info("session below upload threshold, keeping locally",
+	// 		"session", sessionName,
+	// 		"quality_score", summaryResp.QualityScore,
+	// 		"threshold", h.qualityUploadThreshold,
+	// 		"reason", summaryResp.ScoreReason,
+	// 	)
+	// 	return nil
+	// }
 
 	// Persist metadata and confirm LFS uploads before staging pointer files.
 	// Keep the cache recoverable if metadata or upload preparation fails.
