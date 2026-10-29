@@ -118,7 +118,7 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
 			exitCode = exitErr.ExitCode()
-			r.logger.Warn("codex exited with non-zero status", "exit_code", exitCode, "stderr", string(stderrBuf))
+			r.logger.Warn("codex exited with non-zero status", "exit_code", exitCode, "stderr", failureTail(string(stderrBuf)))
 		} else {
 			return nil, fmt.Errorf("wait codex: %w", waitErr)
 		}

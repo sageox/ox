@@ -138,7 +138,7 @@ func (r *GeminiRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
 			exitCode = exitErr.ExitCode()
-			r.logger.Warn("gemini exited with non-zero status", "exit_code", exitCode, "stderr", string(stderrBuf))
+			r.logger.Warn("gemini exited with non-zero status", "exit_code", exitCode, "stderr", failureTail(string(stderrBuf)))
 		} else {
 			return nil, fmt.Errorf("wait gemini: %w", waitErr)
 		}

@@ -27,6 +27,18 @@ func failureDetail(stderr, stdout string) string {
 	return detail
 }
 
+// failureTail returns the last failureDetailLimit bytes of a failed CLI's
+// stderr, redacted. codex prints the prompt it was given, session text
+// included, before its error, so the end is the part worth keeping in a
+// daemon log that outlives reboots.
+func failureTail(stderr string) string {
+	detail := logger.RedactSecrets(strings.TrimSpace(stderr))
+	if len(detail) > failureDetailLimit {
+		detail = "(truncated)..." + detail[len(detail)-failureDetailLimit:]
+	}
+	return detail
+}
+
 // Runner spawns and manages agent CLI processes.
 type Runner interface {
 	// Run executes an agent with the given request and returns the result.

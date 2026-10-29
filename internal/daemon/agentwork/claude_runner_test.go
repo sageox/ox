@@ -327,6 +327,18 @@ func TestFailureDetail_CapsLength(t *testing.T) {
 	assert.True(t, strings.HasSuffix(got, "...(truncated)"))
 }
 
+// Failure prevented: a failed codex exec logged its whole stderr, which echoes
+// the prompt and its session text (about 56 KB), into a daemon log that now
+// survives reboots.
+func TestFailureTail_KeepsTheErrorNotTheEchoedPrompt(t *testing.T) {
+	t.Parallel()
+	stderr := "user\n" + strings.Repeat("session transcript ", 4000) + "\nERROR: usage limit reached"
+	got := failureTail(stderr)
+	assert.LessOrEqual(t, len(got), failureDetailLimit+len("(truncated)..."))
+	assert.True(t, strings.HasSuffix(got, "ERROR: usage limit reached"))
+	assert.NotContains(t, got, "user\n")
+}
+
 func TestClaudeRunner_Run_ExitCode(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "claude")
 	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' '{\"type\":\"result\",\"result\":\"partial\"}'\nexit 7\n"), 0o755))

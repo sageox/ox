@@ -72,9 +72,10 @@ func xdgCacheHome() string {
 }
 
 // xdgStateHome returns the XDG state directory.
-// Respects XDG_STATE_HOME, defaults to ~/.local/state
+// Respects XDG_STATE_HOME, defaults to ~/.local/state. A relative value is
+// ignored, as the XDG spec requires (an unexpanded "~/..." from pam_env, say).
 func xdgStateHome() string {
-	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
+	if xdg := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(xdg) {
 		return xdg
 	}
 	home := getHomeDir()

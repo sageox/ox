@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/selfexec"
@@ -362,18 +363,7 @@ var daemonLogsCmd = &cobra.Command{
 			return nil
 		}
 
-		var tailArgs []string
-		if all {
-			tailArgs = []string{"-n", "+1"} // entire file from line 1
-		} else {
-			tailArgs = []string{"-n", fmt.Sprintf("%d", lines)}
-		}
-		if follow {
-			tailArgs = append(tailArgs, "-f")
-		}
-		tailArgs = append(tailArgs, logPath)
-
-		tailCmd := exec.Command("tail", tailArgs...)
+		tailCmd := exec.Command("tail", daemonLogTailArgs(lines, all, follow, logPath)...)
 		tailCmd.Stderr = os.Stderr
 
 		// colorize when output is a terminal
@@ -395,6 +385,20 @@ var daemonLogsCmd = &cobra.Command{
 		cli.StreamFormattedLogs(stdout, os.Stdout)
 		return tailCmd.Wait()
 	},
+}
+
+// daemonLogTailArgs returns the tail arguments `ox daemon logs` runs with.
+func daemonLogTailArgs(lines int, all, follow bool, path string) []string {
+	args := []string{"-n", fmt.Sprintf("%d", lines)}
+	if all {
+		args = []string{"-n", "+1"} // entire file from line 1
+	}
+	if follow {
+		// -F, not -f: the next daemon start renames a log over 10 MB and
+		// opens a new one at this path, and -f would keep reading the old file
+		args = append(args, "-F")
+	}
+	return append(args, path)
 }
 
 var daemonListCmd = &cobra.Command{
@@ -503,10 +507,7 @@ func runDaemonForeground(ledgerPath string) error {
 	if os.Getenv("OX_LOG_LEVEL") == "debug" {
 		logLevel = slog.LevelDebug
 	}
-	// include PID so multi-daemon scenarios and auto-restarts can be distinguished
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: logLevel,
-	})).With("pid", os.Getpid())
+	logger := newDaemonLogger(os.Stderr, logLevel)
 
 	d := daemon.New(cfg, logger)
 	if err := d.Start(); err != nil {
@@ -517,6 +518,17 @@ func runDaemonForeground(ledgerPath string) error {
 		return nil
 	}
 	return reexecDaemon(cfg, logger)
+}
+
+// newDaemonLogger builds the logger for the daemon log. That log survives
+// reboots and lands in home-directory backups, so its lines get the secret
+// redaction internal/logger's handlers apply. It includes the PID so
+// multi-daemon scenarios and auto-restarts can be distinguished.
+func newDaemonLogger(w io.Writer, level slog.Level) *slog.Logger {
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{
+		Level:       level,
+		ReplaceAttr: logger.RedactAttr,
+	})).With("pid", os.Getpid())
 }
 
 // daemonConfig is the configuration `ox daemon start` runs the daemon with.
@@ -558,20 +570,11 @@ func startDaemonBackground(ledgerPath string) error {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	// create log directory
-	logPath := daemon.LogPath()
-	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
-		return fmt.Errorf("failed to create log directory: %w", err)
-	}
-
-	// keep the log bounded: nothing rotates it while the daemon runs
-	daemon.RotateDaemonLog(logPath)
-
-	// open log file
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	logFile, err := daemon.OpenLog()
 	if err != nil {
-		return fmt.Errorf("failed to open log file: %w", err)
+		return err
 	}
+	logPath := logFile.Name()
 
 	// build args with repo name for ps visibility
 	args := []string{"daemon", "start", "--foreground"}

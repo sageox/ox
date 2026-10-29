@@ -19,7 +19,7 @@ func init() {
 	// is never nil even if Init() is not called.
 	log.Store(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level:       slog.LevelWarn,
-		ReplaceAttr: redactAttr,
+		ReplaceAttr: RedactAttr,
 	})))
 }
 
@@ -34,12 +34,12 @@ func Init(verbose bool) {
 	if os.Getenv("OX_ENV") == "production" {
 		handler = slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 			Level:       level,
-			ReplaceAttr: redactAttr,
+			ReplaceAttr: RedactAttr,
 		})
 	} else {
 		handler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 			Level:       level,
-			ReplaceAttr: redactAttr,
+			ReplaceAttr: RedactAttr,
 		})
 	}
 

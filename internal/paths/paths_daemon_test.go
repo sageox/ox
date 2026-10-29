@@ -39,12 +39,28 @@ func TestDaemonPaths(t *testing.T) {
 		}
 	})
 
-	t.Run("log file", func(t *testing.T) {
+	// XDG state, not TempDir or the XDG-mode StateDir, which the OS clears: a
+	// reboot must not erase the log that explains what a daemon did
+	t.Run("log file persists across reboots", func(t *testing.T) {
 		repoID := "repo_test123"
-		path := DaemonLogFile(repoID, wsID)
-		want := fmt.Sprintf("daemon_%s_%s.log", repoID, wsID)
-		if !strings.HasSuffix(path, want) {
-			t.Errorf("DaemonLogFile(%q, %q) = %q, want suffix %q", repoID, wsID, path, want)
+		name := fmt.Sprintf("daemon_%s_%s.log", repoID, wsID)
+		stateHome := t.TempDir()
+		t.Setenv("XDG_STATE_HOME", stateHome)
+
+		if got, want := DaemonLogFile(repoID, wsID), filepath.Join(stateHome, "sageox", "logs", name); got != want {
+			t.Errorf("DaemonLogFile() = %q, want %q", got, want)
+		}
+		// repo_id comes from the repo's committed config: a hostile one must not
+		// move the log, or the chmod and pruning of its directory, out of logs/
+		if got, want := filepath.Dir(DaemonLogFile("/../../../../../Documents/x", wsID)), filepath.Join(stateHome, "sageox", "logs"); got != want {
+			t.Errorf("DaemonLogFile() with a traversing repo_id is in %q, want %q", got, want)
+		}
+		t.Setenv("OX_XDG_DISABLE", "1")
+		if got, want := DaemonLogFile(repoID, wsID), filepath.Join(getHomeDir(), ".sageox", "state", "logs", name); got != want {
+			t.Errorf("DaemonLogFile() in legacy mode = %q, want %q", got, want)
+		}
+		if got, want := TempDaemonLogFile(repoID, wsID), filepath.Join(TempDir(), "logs", name); got != want {
+			t.Errorf("TempDaemonLogFile() = %q, want %q", got, want)
 		}
 	})
 }

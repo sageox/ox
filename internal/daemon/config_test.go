@@ -79,29 +79,6 @@ func TestSocketPath_DefaultModeWithoutRuntime(t *testing.T) {
 	assert.Equal(t, expected, path)
 }
 
-func TestLogPath(t *testing.T) {
-	path := LogPath()
-	assert.NotEmpty(t, path)
-	assert.Contains(t, path, "daemon_")
-	assert.Contains(t, path, ".log")
-}
-
-func TestLogPath_DefaultMode(t *testing.T) {
-	// Logs go to /tmp/<username>/sageox/logs (OS cleanup), regardless of XDG settings
-	path := LogPath()
-	assert.Contains(t, path, filepath.Join("sageox", "logs"))
-	assert.Contains(t, path, "tmp")
-}
-
-func TestLogPath_LegacyMode(t *testing.T) {
-	// Logs use /tmp/<username>/sageox even in legacy mode (OS cleanup)
-	t.Setenv("OX_XDG_DISABLE", "1")
-
-	path := LogPath()
-	assert.Contains(t, path, filepath.Join("sageox", "logs"))
-	assert.Contains(t, path, "tmp")
-}
-
 func TestPidPath(t *testing.T) {
 	path := PidPath()
 	assert.NotEmpty(t, path)
@@ -173,32 +150,6 @@ func TestPidPathForWorkspace_LegacyMode(t *testing.T) {
 	assert.NoError(t, err)
 	expected := filepath.Join(home, ".sageox", "state", "daemon", "daemon-abc12345.pid")
 	assert.Equal(t, expected, path)
-}
-
-func TestLogPathForWorkspace_DefaultMode(t *testing.T) {
-	// Logs go to /tmp/<username>/sageox/logs with composite ID
-	repoID := "repo_test123"
-	workspaceID := "abc12345"
-	path := LogPathForWorkspace(repoID, workspaceID)
-	// Path includes username and composite ID
-	assert.Contains(t, path, "sageox")
-	assert.Contains(t, path, "logs")
-	assert.Contains(t, path, "daemon_repo_test123_abc12345.log")
-	assert.Contains(t, path, "tmp")
-}
-
-func TestLogPathForWorkspace_LegacyMode(t *testing.T) {
-	// Daemon logs use /tmp/<username>/sageox even in legacy mode
-	t.Setenv("OX_XDG_DISABLE", "1")
-
-	repoID := "repo_test123"
-	workspaceID := "abc12345"
-	path := LogPathForWorkspace(repoID, workspaceID)
-	// Path includes username and composite ID
-	assert.Contains(t, path, "sageox")
-	assert.Contains(t, path, "logs")
-	assert.Contains(t, path, "daemon_repo_test123_abc12345.log")
-	assert.Contains(t, path, "tmp")
 }
 
 // --- Per-repo identity tests ---

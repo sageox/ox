@@ -114,7 +114,7 @@ func matches(info HealthInfo, state processState) bool {
 func withLaunchLock(ctx context.Context, fn func(context.Context) error) error {
 	ctx, cancel := context.WithTimeout(ctx, processTimeout)
 	defer cancel()
-	if err := ensurePrivateDir(StateDir()); err != nil {
+	if err := fileutil.EnsurePrivateDir(StateDir()); err != nil {
 		return fmt.Errorf("create trace state directory: %w", err)
 	}
 	lock := flock.New(filepath.Join(StateDir(), "launch.lock"))
@@ -172,17 +172,14 @@ func EnsureRunningIf(ctx context.Context, port int, allowed func() bool) error {
 		if err != nil {
 			return fmt.Errorf("locate ox executable: %w", err)
 		}
-		if err := ensurePrivateDir(filepath.Dir(LogPath())); err != nil {
+		if err := fileutil.EnsurePrivateDir(filepath.Dir(LogPath())); err != nil {
 			return fmt.Errorf("create trace log directory: %w", err)
 		}
-		logFile, err := openPrivateLog(LogPath())
+		logFile, err := fileutil.OpenPrivateLog(LogPath())
 		if err != nil {
 			return fmt.Errorf("open trace receiver log: %w", err)
 		}
 		defer logFile.Close()
-		if err = logFile.Chmod(0600); err != nil {
-			return fmt.Errorf("secure trace receiver log: %w", err)
-		}
 		cmd := exec.Command(exe, "session", "trace", "serve", "--port", strconv.Itoa(port))
 		cmd.Env = traceChildEnv(os.Environ())
 		proc.Detach(cmd)
@@ -237,7 +234,7 @@ func Run(ctx context.Context, port int, prune func() error) error {
 	if err := validatePort(port); err != nil {
 		return err
 	}
-	if err := ensurePrivateDir(StateDir()); err != nil {
+	if err := fileutil.EnsurePrivateDir(StateDir()); err != nil {
 		return fmt.Errorf("create trace state directory: %w", err)
 	}
 	lock := processLock()
@@ -350,31 +347,4 @@ func stopped(ctx context.Context, purge bool) error {
 		case <-ticker.C:
 		}
 	}
-}
-
-// Existing receiver directories must remain private too. Refusing symlinks
-// prevents predictable temporary paths from redirecting writes elsewhere.
-func ensurePrivateDir(path string) error {
-	if err := os.MkdirAll(path, 0700); err != nil {
-		return err
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("trace directory is not a real directory: %s", path)
-	}
-	return os.Chmod(path, 0700)
-}
-
-func openPrivateLog(path string) (*os.File, error) {
-	info, err := os.Lstat(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	if err == nil && !info.Mode().IsRegular() {
-		return nil, errors.New("trace log is not a regular file")
-	}
-	return os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 }
