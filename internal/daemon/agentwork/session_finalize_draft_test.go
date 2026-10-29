@@ -438,7 +438,23 @@ func TestStageSessionInLedger_PurgesDraftAndPreservesSessionID(t *testing.T) {
 
 	h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
 	payload := &SessionFinalizePayload{SessionDir: cacheDir, LedgerPath: ledgerPath}
+	// An unfinished merge must be refused before purging the draft or copying
+	// cache bytes into its tracked directory. Recovery can then retry staging.
+	branch := gitOutput(t, ledgerPath, "branch", "--show-current")
+	runGitCmd(t, ledgerPath, "checkout", "-b", "manual-merge")
+	runGitCmd(t, ledgerPath, "commit", "--allow-empty", "-m", "manual work")
+	runGitCmd(t, ledgerPath, "checkout", branch)
+	runGitCmd(t, ledgerPath, "merge", "--no-ff", "--no-commit", "manual-merge")
 	_, stageErr := h.stageSessionInLedger(payload)
+	require.ErrorContains(t, stageErr, "merge in progress")
+	assert.Equal(t, cacheDir, payload.SessionDir)
+	assert.Empty(t, gitOutput(t, ledgerPath, "diff", "HEAD", "--", "sessions/"+sessionName))
+	assert.FileExists(t, filepath.Join(destDir, "summary.json"))
+	assert.FileExists(t, filepath.Join(cacheDir, "raw.jsonl"))
+	assert.NoFileExists(t, filepath.Join(destDir, "raw.jsonl"))
+	runGitCmd(t, ledgerPath, "merge", "--abort")
+
+	_, stageErr = h.stageSessionInLedger(payload)
 	require.NoError(t, stageErr)
 
 	assert.Equal(t, destDir, payload.SessionDir, "payload must point at the staged location")

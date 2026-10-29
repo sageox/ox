@@ -2194,6 +2194,10 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 		return store.PreserveSessionCache(payload.SessionDir, payload.SessionDir)
 	}
 
+	if err := gitutil.IsSafeForGitOps(payload.LedgerPath); err != nil {
+		return "", err
+	}
+
 	// Supersede any draft placeholder wholesale before copying (ADR-029).
 	// This loop copies every file from the cache dir over the destination, but
 	// a copy is not a purge: a server-authored summary.json sitting in the
