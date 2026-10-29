@@ -425,5 +425,9 @@ describe('flowwire helpers', () => {
     expect(query.sent).toBeUndefined()
     expect(finishOf({ text: 'abcdefgh' }, query).tokens).toBe(2)
     expect(finishOf({ text: 'ok', isError: true }, bash)).toEqual({ tokens: 0, failed: true })
+    // A payload the call names but does not hold has no size, never the acknowledgement's.
+    const save = startOf('Bash', { command: 'ox plan save --file plan.html' })!
+    expect(save.sent).toBeUndefined()
+    expect(finishOf({ text: 'saved plan pln_1 with a long acknowledgement' }, save)).toEqual({ tokens: 0, unsized: true })
   })
 })

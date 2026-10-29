@@ -771,6 +771,7 @@ export type FlowFinish = {
   itemsNoun?: string
   failed?: boolean
   interrupted?: boolean
+  unsized?: boolean
 }
 
 /**
@@ -796,6 +797,9 @@ export function finishEvent(state: FlowState, f: FlowFinish): FlowState {
   }
   if (f.interrupted) {
     done.interrupted = true
+  }
+  if (f.unsized) {
+    done.unsized = true
   }
   return { byId: { ...state.byId, [f.id]: done }, order: state.order }
 }

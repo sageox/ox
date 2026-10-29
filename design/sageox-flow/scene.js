@@ -160,7 +160,7 @@
     if (e.failed) {
       return "failed";
     }
-    return e.tokens > 0 ? "flowed" : "empty";
+    return e.tokens > 0 || e.unsized === true ? "flowed" : "empty";
   }
   function esc(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -198,6 +198,9 @@
       case "empty":
         return [{ text: e.label }, SEP, { text: e.direction === "in" ? "nothing came back" : "nothing sent" }, SEP, { text: dur, cls: "n" }];
       case "flowed": {
+        if (e.unsized) {
+          return [{ text: e.label }, SEP, { text: dur, cls: "n" }];
+        }
         const items = itemsPhrase(e);
         const amount = [{ text: formatTokens(e.tokens), cls: "n" }];
         if (items) {
@@ -233,6 +236,9 @@
       case "empty":
         return `${e.label}: ${nothingMoved(e)}, ${dur}`;
       case "flowed": {
+        if (e.unsized) {
+          return `${e.label}: sent to ${LANE_NAMES[e.lane]}, size unknown, ${dur}`;
+        }
         const tok = `${formatTokens(e.tokens)} tokens`;
         if (e.direction === "out") {
           return `${e.label}: ${tok} sent to ${LANE_NAMES[e.lane]}, ${dur}`;

@@ -155,6 +155,8 @@ export type FlowEvent = {
   step: string
   /** Estimated tokens moved (bytes/4, or the prime's context-budget total). */
   tokens: number
+  /** An `out` call whose payload the call did not hold (a `--file`, a session upload): its size is unknown, `tokens` is 0. */
+  unsized?: boolean
   /** Items moved, when known ("5 discussions"): count and its noun. */
   items?: number
   itemsNoun?: string

@@ -82,12 +82,16 @@ export function isMcpName(tool: unknown): tool is string {
 
 /**
  * withSent: an `out` start carrying the size of what the AI coworker sent:
- * the Bash command line, or an MCP call's arguments as JSON. A payload the
- * call names but does not hold (a `--file`, the recorded session) is not
- * read, so it is not counted.
+ * an MCP call's arguments as JSON, or a murmur post's command line (its body
+ * is in it). Any other Bash `out` call sends what it names but does not hold
+ * (a `--file`, the recorded session); that is not read, so its start carries
+ * no `sent` and finishOf marks its size unknown.
  */
 export function withSent(start: FlowStart | null, payload: unknown): FlowStart | null {
   if (start === null || start.direction !== 'out') {
+    return start
+  }
+  if (typeof payload === 'string' && start.command !== 'murmur') {
     return start
   }
   let text: string | undefined
@@ -122,6 +126,7 @@ export type FinishFields = {
   itemsNoun?: string
   failed?: boolean
   interrupted?: boolean
+  unsized?: boolean
 }
 
 function field(o: unknown, key: string): unknown {
@@ -130,17 +135,24 @@ function field(o: unknown, key: string): unknown {
 
 /**
  * finishOf: what a finished call moved. An `out` call counts what it sent
- * (withSent), never its acknowledgement; an `in` call counts its result: the
- * model's text first, a Bash record's stdout when core gave none. A deny or
- * an error fails it; Bash's own `interrupted` flag marks an interrupt.
+ * (withSent), never its acknowledgement, and is `unsized` when the start
+ * could not measure it; an `in` call counts its result: the model's text
+ * first, a Bash record's stdout when core gave none. A deny or an error
+ * fails it; Bash's own `interrupted` flag marks an interrupt.
  */
 export function finishOf(ran: RanLike, start: FlowStart): FinishFields {
   const stdout = field(ran.result, 'stdout')
   const text = typeof ran.text === 'string' ? ran.text : typeof stdout === 'string' ? stdout : undefined
   const failed = ran.deny !== undefined || ran.isError === true
   const interrupted = field(ran.result, 'interrupted') === true
-  const tokens = start.direction === 'out' && typeof start.sent === 'number' ? start.sent : finishTokens(text)
-  const out: FinishFields = failed ? { tokens: 0, failed: true } : { tokens, ...finishItems(text, start) }
+  let out: FinishFields
+  if (failed) {
+    out = { tokens: 0, failed: true }
+  } else if (start.direction === 'out') {
+    out = typeof start.sent === 'number' ? { tokens: start.sent } : { tokens: 0, unsized: true }
+  } else {
+    out = { tokens: finishTokens(text), ...finishItems(text, start) }
+  }
   if (interrupted) {
     out.interrupted = true
   }

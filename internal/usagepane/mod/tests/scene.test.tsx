@@ -252,6 +252,12 @@ describe('the non-visual channel', () => {
     expect(caption(ev({ ...out, interrupted: true }))).toBe('interrupted while posting murmur after 0.4s; nothing sent')
   })
 
+  test('an outbound event of unknown size says so, never "nothing sent"', () => {
+    const e = ev({ direction: 'out', lane: 'ledger', label: 'saved plan', tokens: 0, items: undefined, unsized: true, endedAt: T0 + 900 })
+    expect(caption(e)).toBe('saved plan: sent to ledger, size unknown, 0.9s')
+    expect(laneSvg(e, T0 + 60_000)).not.toContain('nothing sent')
+  })
+
   test('durations carry rounded seconds into minutes', () => {
     expect(formatDuration(800)).toBe('0.8s')
     expect(formatDuration(9_960)).toBe('10s')
