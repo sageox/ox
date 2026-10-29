@@ -96,7 +96,7 @@ func readRearmMeta(t *testing.T, ledger, name string) *lfs.SessionMeta {
 	return meta
 }
 
-// Failure prevented: restoreRearmedMetas runs `git checkout --` on a failed
+// Failure prevented: restoreRepairedMetas runs `git checkout --` on a failed
 // commit, which would destroy edits that existed before the re-arm.
 func TestRearmInlineSummarySessions_SkipsMetaThatDiffersFromHead(t *testing.T) {
 	ledger := newRearmLedger(t)

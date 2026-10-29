@@ -48,7 +48,7 @@ func Default() *Registry {
 		Description: "Recover empty meta.title from summary.json after summarization; skip draft and pending sessions; never counts summary attempts",
 		Scope:       ScopeLedger,
 		MinInterval: 30 * time.Minute,
-		BlastRadius: "single ledger; per-session meta.json rewrite only when summary.json holds a title or summary holds leaked error prose",
+		BlastRadius: "single ledger; per-session meta.json rewrite only when summary.json holds a title or summary holds leaked error prose, committed in one snapshot commit; skips meta.json files with uncommitted edits",
 		Run:         checkSessionMetaTitles,
 	})
 	r.Register(&Check{
@@ -350,7 +350,7 @@ func rearmInlineSummaryLocked(ctx context.Context, ledgerPath, username string, 
 		}
 		metaPath := path.Join("sessions", e.Name(), "meta.json")
 		if metaDiffersFromHead(ctx, ledgerPath, metaPath) {
-			// restoreRearmedMetas would discard these edits on a failed commit
+			// restoreRepairedMetas would discard these edits on a failed commit
 			continue
 		}
 		if lfs.ResetInlineSummaryEligible(sessionDir, false, lfsClient, ledgerPath) {
@@ -362,8 +362,8 @@ func rearmInlineSummaryLocked(ctx context.Context, ledgerPath, username string, 
 	}
 
 	msg := fmt.Sprintf("fix: re-arm %d sessions for re-summarization", len(resetPaths))
-	if err := commitRearmedMetas(ctx, ledgerPath, msg, resetPaths); err != nil {
-		restoreRearmedMetas(ctx, ledgerPath, resetPaths)
+	if err := commitRepairedMetas(ctx, ledgerPath, msg, resetPaths); err != nil {
+		restoreRepairedMetas(ctx, ledgerPath, resetPaths)
 		return CheckResult{Status: StatusError, Summary: fmt.Sprintf("commit inline-summary re-arm: %v", err)}
 	}
 	return CheckResult{
@@ -382,7 +382,7 @@ func metaDiffersFromHead(ctx context.Context, ledgerPath, relPath string) bool {
 	return err != nil
 }
 
-func commitRearmedMetas(ctx context.Context, ledgerPath, msg string, paths []string) error {
+func commitRepairedMetas(ctx context.Context, ledgerPath, msg string, paths []string) error {
 	addArgs := append([]string{"add", "--sparse", "--"}, paths...)
 	if _, err := gitutil.RunGit(ctx, ledgerPath, addArgs...); err != nil {
 		return fmt.Errorf("stage meta.json: %w", err)
@@ -393,16 +393,16 @@ func commitRearmedMetas(ctx context.Context, ledgerPath, msg string, paths []str
 	return nil
 }
 
-// restoreRearmedMetas puts the rewritten files back to HEAD after a failed
+// restoreRepairedMetas puts the rewritten files back to HEAD after a failed
 // commit. Best effort by design: the caller already reports StatusError.
-func restoreRearmedMetas(ctx context.Context, ledgerPath string, paths []string) {
+func restoreRepairedMetas(ctx context.Context, ledgerPath string, paths []string) {
 	resetArgs := append([]string{"reset", "-q", "--"}, paths...)
 	if _, err := gitutil.RunGit(ctx, ledgerPath, resetArgs...); err != nil {
-		slog.WarnContext(ctx, "unstage inline-summary re-arm failed", "error", err)
+		slog.WarnContext(ctx, "unstage repaired meta.json failed", "error", err)
 	}
 	checkoutArgs := append([]string{"checkout", "--"}, paths...)
 	if _, err := gitutil.RunGit(ctx, ledgerPath, checkoutArgs...); err != nil {
-		slog.WarnContext(ctx, "restore inline-summary re-arm failed", "error", err)
+		slog.WarnContext(ctx, "restore repaired meta.json failed", "error", err)
 	}
 }
 
@@ -430,7 +430,7 @@ func checkSessionMetaTitles(ctx context.Context, ledgerPath string) CheckResult 
 	defer cancel()
 	result := CheckResult{Status: StatusClean, Repo: ledgerPath}
 	lockErr := gitutil.WithRepoLock(lockCtx, ledgerPath, func() error {
-		result = repairLedgerSessionTitles(filepath.Join(ledgerPath, "sessions"), ledgerPath)
+		result = repairLedgerSessionTitles(ctx, filepath.Join(ledgerPath, "sessions"), ledgerPath)
 		return nil
 	})
 	if lockErr == nil {
@@ -447,7 +447,7 @@ func checkSessionMetaTitles(ctx context.Context, ledgerPath string) CheckResult 
 // want to drive it without standing up a full ProjectContext +
 // LoadProjectContext stack. Iterates session subdirs and aggregates
 // per-session recovery outcomes into a CheckResult.
-func repairLedgerSessionTitles(sessionsDir, repoPath string) CheckResult {
+func repairLedgerSessionTitles(ctx context.Context, sessionsDir, repoPath string) CheckResult {
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -461,18 +461,46 @@ func repairLedgerSessionTitles(sessionsDir, repoPath string) CheckResult {
 	}
 
 	var recovered, movedDiagnostic, errored int
+	var repaired []string
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		out := lfs.RecoverEmptyTitleMeta(filepath.Join(sessionsDir, e.Name()), false)
+		sessionDir := filepath.Join(sessionsDir, e.Name())
+		// Dry run first: the git check below costs two subprocesses per session.
+		probe := lfs.RecoverEmptyTitleMeta(sessionDir, true)
+		if probe.Error != "" {
+			errored++
+			continue
+		}
+		if probe.Skipped {
+			continue
+		}
+		metaPath := path.Join("sessions", e.Name(), "meta.json")
+		if metaDiffersFromHead(ctx, repoPath, metaPath) {
+			// restoreRepairedMetas would discard these edits on a failed commit
+			continue
+		}
+		out := lfs.RecoverEmptyTitleMeta(sessionDir, false)
 		switch {
 		case out.Error != "":
 			errored++
 		case out.RecoveredFromJSON:
 			recovered++
+			repaired = append(repaired, metaPath)
 		case out.MovedDiagnostic:
 			movedDiagnostic++
+			repaired = append(repaired, metaPath)
+		}
+	}
+	// Every clone runs this repair. Left uncommitted, it conflicts with a
+	// teammate's different summary of the same session on the next pull, and
+	// the autostash fixer refuses differing values, which wedges the Ledger.
+	if len(repaired) > 0 {
+		msg := fmt.Sprintf("fix: repair %d session titles", len(repaired))
+		if err := commitRepairedMetas(ctx, repoPath, msg, repaired); err != nil {
+			restoreRepairedMetas(ctx, repoPath, repaired)
+			return CheckResult{Status: StatusError, Repo: repoPath, Summary: fmt.Sprintf("commit session title repair: %v", err)}
 		}
 	}
 	if recovered == 0 && movedDiagnostic == 0 && errored == 0 {
