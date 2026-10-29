@@ -1,8 +1,8 @@
 // The flow lane: a one-line SVG drawn under a transcript row, from SageOx (left)
 // to the session (right). Context arriving travels the lane as filled dots;
 // anything the session sends back travels it right to left as hollow rings.
-// The grammar: a solid sage line flowed, a dotted line
-// and a ring are still open, a short faint stub ended with nothing.
+// A solid sage line flowed, a dotted line and a ring are still open, a short
+// faint stub ended with nothing.
 //
 // The desktop draws the source as a plain <img>, so: SMIL only (Chromium runs
 // it inside an image), no script, no on* attributes, no external refs, no
@@ -17,7 +17,7 @@
 // design/sageox-flow/SPEC.md is the design record for every value below.
 
 import type { FlowDirection, FlowEvent, FlowLane } from '../types'
-import { formatTokens } from './logic'
+import { formatTokens, utf8Bytes } from './logic'
 import { DARK, FONT_MONO, FONT_SANS, LIGHT, TOKENS as T, type Palette } from './tokens'
 
 /** How long after `endedAt` an animation can still be in flight. */
@@ -115,15 +115,6 @@ function sec(ms: number): string {
   return `${num(ms / 1000)}s`
 }
 
-function utf8Len(s: string): number {
-  let n = 0
-  for (const ch of s) {
-    const c = ch.codePointAt(0) ?? 0
-    n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4
-  }
-  return n
-}
-
 function hash(s: string): string {
   let h = 5381
   for (let i = 0; i < s.length; i++) {
@@ -184,10 +175,10 @@ function attachmentWords(e: FlowEvent): string {
 }
 
 /**
- * The sentence for the non-visual channel. One event: "searched team: ~1.2k
- * tokens from 5 discussions, 0.8s". Several (a prompt's attachments): "with
- * this prompt: team context ~15k tokens, 3 murmurs, 1 ledger match; ~16k
- * tokens in all".
+ * The sentence for the non-visual channel, used as both the image's alt and
+ * its aria-label. One event: "searched team: ~1.2k tokens from 5 discussions,
+ * 0.8s". Several (a prompt's attachments): "with this prompt: team context
+ * ~15k tokens, 3 murmurs, 1 ledger match; ~16k tokens in all".
  */
 export function caption(input: FlowEvent | FlowEvent[]): string {
   if (Array.isArray(input)) {
@@ -234,11 +225,6 @@ function promptCaption(events: FlowEvent[]): string {
     s += `; ${bad} failed`
   }
   return s
-}
-
-/** The image's alt text: the same sentence as the caption. */
-export function alt(input: FlowEvent | FlowEvent[]): string {
-  return caption(input)
 }
 
 // ---- layout --------------------------------------------------------------
@@ -447,10 +433,11 @@ function draw(m: Model, now: number, opts: SceneOpts, level: Level): string {
     )
   }
 
+  // Level 1 drops a flowed lane's words (its line and aria-label say it);
+  // level 2 drops all text.
   if (level < 2 && (level === 0 || m.outcome !== 'flowed')) {
     parts.push(digestSvg(fitDigest(m.digest, g.w - g.digestX - 2), g.digestX))
   }
-  // Under level 1, a flowed lane keeps its line and its alt, and loses its words.
   return parts.join('')
 }
 
@@ -473,7 +460,7 @@ function wrap(m: Model, now: number, opts: SceneOpts, level: Level, caption: str
 export function fitSource(render: (level: Level) => string, cap = SVG_SOURCE_CAP): string {
   for (const level of [0, 1, 2] as const) {
     const s = render(level)
-    if (utf8Len(s) <= cap) {
+    if (utf8Bytes(s) <= cap) {
       return s
     }
   }
@@ -495,7 +482,7 @@ function eventModel(e: FlowEvent): Model {
 /** One tool row's lane. */
 export function laneSvg(event: FlowEvent, now: number, opts: SceneOpts = {}): string {
   const m = eventModel(event)
-  const label = alt(event)
+  const label = caption(event)
   return fitSource((level) => wrap(m, now, opts, level, label))
 }
 
@@ -504,7 +491,7 @@ export function laneSvg(event: FlowEvent, now: number, opts: SceneOpts = {}): st
  * inbound lane. Open while any is open; settled when all have ended.
  */
 export function promptSvg(events: FlowEvent[], now: number, opts: SceneOpts = {}): string {
-  const label = alt(events)
+  const label = caption(events)
   const running = events.find((e) => e.endedAt === undefined)
   const ok = events.filter((e) => !e.failed && !e.interrupted && e.tokens > 0)
   const bad = events.length - ok.length
@@ -525,10 +512,11 @@ export function promptSvg(events: FlowEvent[], now: number, opts: SceneOpts = {}
     digest.push({ text: `${bad} failed`, cls: 'bad' })
   }
 
+  // No events at all draws as an empty lane that ended now.
   let outcome: Outcome
-  if (running) {
-    outcome = 'open'
-  } else if (events.length === 0) {
+  if (events.length === 0) {
+    outcome = 'empty'
+  } else if (running) {
     outcome = 'open'
   } else if (ok.length) {
     outcome = 'flowed'
@@ -541,14 +529,8 @@ export function promptSvg(events: FlowEvent[], now: number, opts: SceneOpts = {}
     tokens: ok.reduce((n, e) => n + e.tokens, 0),
     startedAt,
     endedAt: events.length === 0 ? now : endedAt,
-    outcome: events.length === 0 ? 'empty' : outcome,
+    outcome,
     digest: running ? [{ text: running.step }] : digest.length ? digest : [{ text: 'nothing came back' }],
   }
   return fitSource((level) => wrap(m, now, opts, level, label))
-}
-
-/** For the caller: is anything in this row still moving at `now`? */
-export function inFlight(events: FlowEvent | FlowEvent[], now: number): boolean {
-  const list = Array.isArray(events) ? events : [events]
-  return list.some((e) => phaseOf(e, now) !== 'settled')
 }

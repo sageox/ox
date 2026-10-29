@@ -77,7 +77,10 @@ scrollable list of every ox call, refreshed as they happen. It is a Claude Code 
 `/ox-cli-session-report` reports. `/ox-session-report off` closes it, `ox config set session_report_pane off`
 removes it, and `ox session report pane status` shows whether it is installed. In the Claude desktop app's
 Claude Code tab the pane opens by itself, docked beside the chat; close it and it
-stays closed in later sessions until you run `/ox-session-report` again.
+stays closed in later sessions until you run `/ox-session-report` again. Outside the
+terminal the plugin also draws a one-line flow lane under each ox call and each prompt
+that carried Team Context in; `/ox-session-report flow still` stops its motion and
+`/ox-session-report flow off` hides it.
 
 ## Canonical Agent Skills
 

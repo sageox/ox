@@ -24,8 +24,8 @@
 // the lane as filled dots, anything sent back as hollow rings, once; then the
 // lane settles to a still line that says what moved. Folded tool groups
 // holding an ox call unfold so the lane shows. `/ox-session-report flow off`
-// turns the lanes off, `flow still` draws them without motion. Terminal
-// sessions draw none.
+// turns the lanes off, `flow still` draws them without motion and `flow on`
+// brings the motion back. Terminal sessions draw none.
 //
 // Every hook falls back to `next(e)`: a pane bug must never cost a turn.
 
@@ -80,7 +80,7 @@ import {
   truncate,
   usedRows,
 } from './logic'
-import { alt, laneSvg, promptSvg } from './scene'
+import { caption, laneSvg, promptSvg } from './scene'
 import { TOKENS } from './tokens'
 
 // Change a tag when its value's fields change: an atom declines what an
@@ -353,7 +353,7 @@ async function endFlow($: EngineInterface, id: string, start: FlowStart | null, 
   }
 }
 
-// recordAttachments files one hook attachment's blocks under a prompt row.
+// withAttachments files one hook attachment's blocks under a prompt row.
 // Each attachment gets its own batch id (`att:<msg>#b<n>`), so a prompt
 // holding both SessionStart and UserPromptSubmit context keeps both.
 function withAttachments(s: FlowState, msg: string, attachments: FlowAttachment[], now: number): FlowState {
@@ -633,7 +633,7 @@ export const register: Register = on => {
       <Box flexDirection="column">
         {own}
         <Box key="ox-flow" flexDirection="row">
-          <Svg key="ox-flow-lane" source={laneSvg(ev, now, { width, reducedMotion: still })} alt={alt(ev)} width={width} height={TOKENS.height} />
+          <Svg key="ox-flow-lane" source={laneSvg(ev, now, { width, reducedMotion: still })} alt={caption(ev)} width={width} height={TOKENS.height} />
         </Box>
       </Box>
     )
@@ -684,7 +684,7 @@ export const register: Register = on => {
       <Box flexDirection="column">
         {own}
         <Box key="ox-flow" flexDirection="row">
-          <Svg key="ox-flow-lane" source={promptSvg(evs, now, { width, reducedMotion: still })} alt={alt(evs)} width={width} height={TOKENS.height} />
+          <Svg key="ox-flow-lane" source={promptSvg(evs, now, { width, reducedMotion: still })} alt={caption(evs)} width={width} height={TOKENS.height} />
         </Box>
       </Box>
     )

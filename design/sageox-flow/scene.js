@@ -21,17 +21,32 @@
     promptSvg: () => promptSvg,
     phaseOf: () => phaseOf,
     laneSvg: () => laneSvg,
-    inFlight: () => inFlight,
     formatDuration: () => formatDuration,
     fitSource: () => fitSource,
     dotCount: () => dotCount,
     caption: () => caption,
-    alt: () => alt,
     SVG_SOURCE_CAP: () => SVG_SOURCE_CAP,
     ANIM_MS: () => ANIM_MS
   });
 
   // internal/usagepane/mod/hooks/logic.ts
+  function utf8Bytes(s) {
+    let n = 0;
+    for (let i = 0;i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      if (c < 128) {
+        n += 1;
+      } else if (c < 2048) {
+        n += 2;
+      } else if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+        n += 4;
+        i++;
+      } else {
+        n += 3;
+      }
+    }
+    return n;
+  }
   function formatTokens(n) {
     const t = Math.max(0, Math.round(n));
     if (t < 1000) {
@@ -44,16 +59,16 @@
   // internal/usagepane/mod/hooks/tokens.ts
   var LIGHT = {
     stream: "#4e7d4c",
-    node: "#7aaa77",
+    node: "#3d643b",
     text: "#4a4d42",
     quiet: "#6b6d60",
-    danger: "#bd5b49"
+    danger: "#9f4838"
   };
   var DARK = {
     stream: "#99c693",
     node: "#7aaa77",
     text: "#b7b6a3",
-    quiet: "#6b6d60",
+    quiet: "#8c8e7e",
     danger: "#d77e6c"
   };
   var FONT_SANS = "Inter, ui-sans-serif, system-ui, -apple-system, sans-serif";
@@ -156,14 +171,6 @@
   function sec(ms) {
     return `${num(ms / 1000)}s`;
   }
-  function utf8Len(s) {
-    let n = 0;
-    for (const ch of s) {
-      const c = ch.codePointAt(0) ?? 0;
-      n += c < 128 ? 1 : c < 2048 ? 2 : c < 65536 ? 3 : 4;
-    }
-    return n;
-  }
   function hash(s) {
     let h = 5381;
     for (let i = 0;i < s.length; i++) {
@@ -254,9 +261,6 @@
       s += `; ${bad} failed`;
     }
     return s;
-  }
-  function alt(input) {
-    return caption(input);
   }
   function geo(width) {
     const w = Math.min(2400, Math.max(200, Math.round(width ?? TOKENS.width)));
@@ -400,7 +404,7 @@
   function fitSource(render, cap = SVG_SOURCE_CAP) {
     for (const level of [0, 1, 2]) {
       const s = render(level);
-      if (utf8Len(s) <= cap) {
+      if (utf8Bytes(s) <= cap) {
         return s;
       }
     }
@@ -419,11 +423,11 @@
   }
   function laneSvg(event, now, opts = {}) {
     const m = eventModel(event);
-    const label = alt(event);
+    const label = caption(event);
     return fitSource((level) => wrap(m, now, opts, level, label));
   }
   function promptSvg(events, now, opts = {}) {
-    const label = alt(events);
+    const label = caption(events);
     const running = events.find((e) => e.endedAt === undefined);
     const ok = events.filter((e) => !e.failed && !e.interrupted && e.tokens > 0);
     const bad = events.length - ok.length;
@@ -443,9 +447,9 @@
       digest.push({ text: `${bad} failed`, cls: "bad" });
     }
     let outcome;
-    if (running) {
-      outcome = "open";
-    } else if (events.length === 0) {
+    if (events.length === 0) {
+      outcome = "empty";
+    } else if (running) {
       outcome = "open";
     } else if (ok.length) {
       outcome = "flowed";
@@ -458,14 +462,10 @@
       tokens: ok.reduce((n, e) => n + e.tokens, 0),
       startedAt,
       endedAt: events.length === 0 ? now : endedAt,
-      outcome: events.length === 0 ? "empty" : outcome,
+      outcome,
       digest: running ? [{ text: running.step }] : digest.length ? digest : [{ text: "nothing came back" }]
     };
     return fitSource((level) => wrap(m, now, opts, level, label));
-  }
-  function inFlight(events, now) {
-    const list = Array.isArray(events) ? events : [events];
-    return list.some((e) => phaseOf(e, now) !== "settled");
   }
 
   // design/sageox-flow/entry.ts

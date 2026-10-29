@@ -227,6 +227,25 @@ export function isOxCommand(command: unknown): boolean {
   return typeof command === 'string' && OX_COMMAND.test(command)
 }
 
+// utf8Bytes: the UTF-8 length of a string, without TextEncoder.
+export function utf8Bytes(s: string): number {
+  let n = 0
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c < 0x80) {
+      n += 1
+    } else if (c < 0x800) {
+      n += 2
+    } else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+      n += 4
+      i++
+    } else {
+      n += 3
+    }
+  }
+  return n
+}
+
 // formatTokens: `~80`, `~1.2k`, `~15k`.
 export function formatTokens(n: number): string {
   const t = Math.max(0, Math.round(n))

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **See SageOx context reach your AI coworker** — in the Claude desktop app, VS Code and mobile, each ox call and each prompt that carried Team Context in gets a one-line lane underneath: dots travel from SageOx into the session (or back out, for murmurs, plans and Ledger uploads), then it settles to a still line that says what moved, e.g. "searched team memory · ~1.2k from 5 discussions · 0.8s". `/ox-session-report flow still` keeps the lanes without motion; `/ox-session-report flow off` hides them.
+
 ### Changed
 
 - **`ox brief` is now `ox session report`** — the command, its `pane` subcommands, the Claude Code pane and the Agent Skill all take the new name: `ox session report`, `/ox-session-report` opens and closes the pane, and `/ox-cli-session-report` (Claude Code and Codex) prints the report. `ox brief` keeps working as a hidden alias for one release, and the `brief_pane` setting still toggles `session_report_pane`. `ox doctor --fix` and `ox upgrade` refresh the pane plugin and retire the old `ox-cli-brief` skill, so `/ox-brief` and `/ox-cli-brief` leave the slash menu on their own.

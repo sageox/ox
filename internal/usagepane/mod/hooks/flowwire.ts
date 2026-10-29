@@ -119,17 +119,7 @@ export function finishOf(ran: RanLike, start: FlowStart): FinishFields {
   const text = typeof ran.text === 'string' ? ran.text : typeof stdout === 'string' ? stdout : undefined
   const failed = ran.deny !== undefined || ran.isError === true
   const interrupted = field(ran.result, 'interrupted') === true
-  const out: FinishFields = { tokens: failed ? 0 : finishTokens(text) }
-  if (!failed) {
-    const items = finishItems(text, start)
-    if (items) {
-      out.items = items.items
-      out.itemsNoun = items.itemsNoun
-    }
-  }
-  if (failed) {
-    out.failed = true
-  }
+  const out: FinishFields = failed ? { tokens: 0, failed: true } : { tokens: finishTokens(text), ...finishItems(text, start) }
   if (interrupted) {
     out.interrupted = true
   }

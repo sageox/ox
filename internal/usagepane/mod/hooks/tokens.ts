@@ -1,6 +1,11 @@
 // Design values for the flow lane (hooks/scene.ts), from the SageOx design
-// system (sageox-design/DESIGN.md).
-// design/sageox-flow/SPEC.md tags where each one comes from.
+// system (sageox-design/DESIGN.md). design/sageox-flow/SPEC.md tags where
+// each one comes from.
+//
+// Every colour that carries meaning clears 3:1 against the host's surfaces in
+// its theme (DESIGN.md §11 rule 18); text clears 4.5:1 (rule 5). The host is
+// Claude Code, not a SageOx surface, so the check runs against dust-50/white
+// in light and crater-800 through a #262624-class grey in dark.
 
 export type Palette = {
   /** Solid line where context flowed, and the dots or rings travelling it. */
@@ -16,19 +21,19 @@ export type Palette = {
 }
 
 export const LIGHT: Palette = {
-  stream: '#4e7d4c',
-  node: '#7aaa77',
-  text: '#4a4d42',
-  quiet: '#6b6d60',
-  danger: '#bd5b49',
+  stream: '#4e7d4c', // sage-700
+  node: '#3d643b', // sage-800; sage-500 is 2.4:1 on dust
+  text: '#4a4d42', // silt-600
+  quiet: '#6b6d60', // silt-500
+  danger: '#9f4838', // error-600, the light error text; error-500 is 3.9:1
 }
 
 export const DARK: Palette = {
-  stream: '#99c693',
-  node: '#7aaa77',
-  text: '#b7b6a3',
-  quiet: '#6b6d60',
-  danger: '#d77e6c',
+  stream: '#99c693', // sage-400
+  node: '#7aaa77', // sage-500
+  text: '#b7b6a3', // silt-300
+  quiet: '#8c8e7e', // silt-400; silt-500 is 2.9:1 on a grey host
+  danger: '#d77e6c', // error-400
 }
 
 export const FONT_SANS = 'Inter, ui-sans-serif, system-ui, -apple-system, sans-serif'
@@ -76,6 +81,6 @@ export const TOKENS = {
   dotStaggerMs: 90,
   /** cubic-bezier(0.4, 0, 0.2, 1), the house easing. */
   easeHouse: '0.4 0 0.2 1',
-  /** ease-out for the draw-in. */
+  /** ease-out, for the lane drawing in. */
   easeOut: '0 0 0.58 1',
 } as const

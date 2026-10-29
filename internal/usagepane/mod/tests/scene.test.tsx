@@ -2,7 +2,6 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import type { FlowEvent } from '../types'
 import {
-  alt,
   ANIM_MS,
   caption,
   dotCount,
@@ -12,7 +11,7 @@ import {
   strokeWeight,
   SVG_SOURCE_CAP,
 } from '../hooks/scene'
-import { TOKENS } from '../hooks/tokens'
+import { DARK, LIGHT, TOKENS } from '../hooks/tokens'
 
 const T0 = 1_760_000_000_000
 
@@ -134,7 +133,7 @@ describe('states', () => {
     const svg = laneSvg(ev({ failed: true, tokens: 0, endedAt: T0 + 1210 }), T0 + 60_000)
     expect(svg).toMatch(/<rect x="55" y="11" width="34" height="2" fill="url\(#f[a-z0-9]+\)">/)
     expect(svg).toContain('<tspan class="bad">failed</tspan>')
-    expect(svg).toContain('.bad{fill:#bd5b49}')
+    expect(svg).toContain('.bad{fill:#9f4838}')
     expect(svg).not.toContain('class="flow"')
   })
 
@@ -228,9 +227,8 @@ describe('safe as a plain <img>', () => {
 })
 
 describe('the non-visual channel', () => {
-  test('caption and alt say the same sentence', () => {
+  test('the caption is the image aria-label', () => {
     expect(caption(ev())).toBe('searched team: ~1.2k tokens from 5 discussions, 0.8s')
-    expect(alt(ev())).toBe(caption(ev()))
     expect(laneSvg(ev(), T0 + 60_000)).toContain('aria-label="searched team: ~1.2k tokens from 5 discussions, 0.8s"')
   })
 
@@ -261,5 +259,34 @@ describe('the non-visual channel', () => {
   test('text is escaped', () => {
     const svg = laneSvg(ev({ label: 'a < b & "c"' }), T0 + 60_000)
     expect(svg).toContain('a &lt; b &amp; &quot;c&quot;')
+  })
+})
+
+describe('contrast (DESIGN.md rules 5 and 18)', () => {
+  const lum = (hex: string) => {
+    const [r, g, b] = [1, 3, 5].map((i) => {
+      const c = parseInt(hex.slice(i, i + 2), 16) / 255
+      return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
+    })
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+  }
+  const ratio = (a: string, b: string) => {
+    const [lo, hi] = [lum(a), lum(b)].sort((x, y) => x - y)
+    return (hi + 0.05) / (lo + 0.05)
+  }
+  // dust-100 and white in light; crater-800 and a mid-grey host row in dark.
+  const surfaces = { light: ['#f4f2ef', '#ffffff'], dark: ['#111411', '#262624'] }
+
+  test('graphics clear 3:1 and text 4.5:1 on every surface, in both themes', () => {
+    for (const [theme, p] of [['light', LIGHT], ['dark', DARK]] as const) {
+      for (const bg of surfaces[theme]) {
+        for (const key of ['stream', 'node', 'quiet'] as const) {
+          expect(ratio(p[key], bg)).toBeGreaterThanOrEqual(3)
+        }
+        for (const key of ['text', 'danger'] as const) {
+          expect(ratio(p[key], bg)).toBeGreaterThanOrEqual(4.5)
+        }
+      }
+    }
   })
 })
