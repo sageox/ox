@@ -17,12 +17,42 @@
 // re-read at each turn's start and end, after each ox command, and every 15
 // seconds. Terminal sessions keep their own status line and never run it.
 //
+// On the desktop app, VS Code and mobile it also draws SageOx's data flow
+// into the transcript: a one-line lane under each ox tool row (a Bash `ox …`
+// command or a SageOx MCP tool) and under each prompt whose hooks brought
+// team context in (prime, murmurs, ledger recall). Context arriving travels
+// the lane as filled dots, anything sent back as hollow rings, once; then the
+// lane settles to a still line that says what moved. Folded tool groups
+// holding an ox call unfold so the lane shows. `/ox-session-report flow off`
+// turns the lanes off, `flow still` draws them without motion and `flow on`
+// brings the motion back. Terminal sessions draw none.
+//
 // Every hook falls back to `next(e)`: a pane bug must never cost a turn.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Statusline, UsageReport } from '../types'
+import type { FlowEvent, FlowState, Statusline, UsageReport } from '../types'
+import { attachEvents, classifyAttachment, classifyBash, classifyMcp, EMPTY_FLOW, eventsFor, finishEvent, promptEvents, startEvent } from './flow'
+import type { FlowAttachment, FlowStart } from './flow'
+import {
+  arrived,
+  drawn,
+  finishOf,
+  FLOW_KEY,
+  flowMode,
+  flowStored,
+  isMcpName,
+  laneWidth,
+  newBinder,
+  parseFlowArg,
+  settleDelay,
+  startOf,
+  submitted,
+  withSent,
+  type FlowMode,
+  type RanLike,
+} from './flowwire'
 import {
   PANE,
   DESKTOP_COLUMNS,
@@ -51,6 +81,8 @@ import {
   truncate,
   usedRows,
 } from './logic'
+import { caption, laneSvg, promptSvg } from './scene'
+import { TOKENS } from './tokens'
 
 // Change a tag when its value's fields change: an atom declines what an
 // earlier version stored under another tag, which outlives a reload.
@@ -59,9 +91,11 @@ const report = atom({ plugin: 'ox-cli-brief-pane', key: 'report' } as const, nul
 // status-2: follow now starts false (the pane opens at the top); a stored
 // status-1 value, follow true, is declined so it cannot pull the pane down.
 const status = atom({ plugin: 'ox-cli-brief-pane', key: 'status' } as const, INITIAL_STATUS, { shape: 'status-2' })
+// flow-1: FlowState, the session's flow events (hooks/flow.ts).
+const flow = atom({ plugin: 'ox-cli-brief-pane', key: 'flow' } as const, EMPTY_FLOW, { shape: 'flow-1' })
 
 const TITLE = 'ox session report'
-const USAGE = '/ox-session-report [off|refresh]'
+const USAGE = '/ox-session-report [off|refresh|flow on|off|still]'
 // The store key remembering whether the pane opens by itself on desktop:
 // unset or true opens it, false (a person's close, `/ox-session-report off`) does not.
 const AUTO_OPEN = 'autoOpen'
@@ -253,12 +287,118 @@ function refreshStatusline($: EngineInterface): Promise<void> {
   return statuslineInflight
 }
 
+// Module state for the flow lanes: the setting as last read (re-read after
+// FLOW_CACHE_MS; the command sets it at once), one settle timer per row
+// still animating, and the binder tying hook attachments to their prompt row
+// (hooks/flowwire.ts states the rule). A reload drops all of it: the events
+// themselves live in the `flow` atom, and the next draw settles what it finds.
+const FLOW_CACHE_MS = 5_000
+let flowCache: { mode: FlowMode; at: number } | null = null
+const settling = new Map<string, { cancel: () => void }>()
+let binder = newBinder<FlowAttachment[]>()
+
+async function modeOf($: EngineInterface, now: number): Promise<FlowMode> {
+  if (flowCache !== null && now - flowCache.at < FLOW_CACHE_MS) {
+    return flowCache.mode
+  }
+  let stored: unknown
+  try {
+    stored = await $.store.get(FLOW_KEY)
+  } catch {
+    stored = undefined
+  }
+  flowCache = { mode: flowMode(stored), at: now }
+  return flowCache.mode
+}
+
+function resetFlow() {
+  for (const t of settling.values()) {
+    t.cancel()
+  }
+  settling.clear()
+  binder = newBinder<FlowAttachment[]>()
+  flowCache = null
+}
+
+// beginFlow opens an event for a call that moves team data; the start, or
+// null when there is nothing to draw. Never throws.
+async function beginFlow($: EngineInterface, id: string, start: FlowStart | null): Promise<FlowStart | null> {
+  if (start === null || !id) {
+    return null
+  }
+  try {
+    const now = await $.clock.now()
+    if ((await modeOf($, now)) === 'off') {
+      return null
+    }
+    await update($, flow, s => startEvent(s, { id, start, now }))
+  } catch {
+    return null
+  }
+  // The event is stored: a redraw that fails must not strand it open.
+  try {
+    $.ui.invalidate('ui.render')
+  } catch {
+    // The next draw shows it.
+  }
+  return start
+}
+
+// endFlow closes it with what the call moved. Never throws.
+async function endFlow($: EngineInterface, id: string, start: FlowStart | null, ran: RanLike) {
+  if (start === null) {
+    return
+  }
+  try {
+    const now = await $.clock.now()
+    const f = finishOf(ran, start)
+    await update($, flow, s => finishEvent(s, { id, now, ...f }))
+    $.ui.invalidate('ui.render')
+  } catch {
+    // The call already ran; a lane that cannot close changes nothing.
+  }
+}
+
+// withAttachments files one hook attachment's blocks under a prompt row.
+// Each attachment gets its own batch id (`att:<msg>#b<n>`), n above every
+// batch still retained, so a prompt holding both SessionStart and
+// UserPromptSubmit context keeps both, even after the cap evicted some.
+function withAttachments(s: FlowState, msg: string, attachments: FlowAttachment[], now: number): FlowState {
+  let next = 0
+  for (const e of promptEvents(s, msg)) {
+    const m = /#b(\d+)#/.exec(e.id)
+    if (m) {
+      next = Math.max(next, Number(m[1]) + 1)
+    }
+  }
+  return attachEvents(s, { id: `att:${msg}#b${next}`, now, attachments })
+}
+
+async function recordAttachments($: EngineInterface, msg: string, attachments: FlowAttachment[], now: number) {
+  await update($, flow, s => withAttachments(s, msg, attachments, now))
+}
+
+// settleLater redraws a row once its animation has played, so it settles to
+// the still frame. One timer per row: a redraw while it waits adds none.
+function settleLater($: EngineInterface, id: string, delay: number | null) {
+  if (delay === null || settling.has(id)) {
+    return
+  }
+  settling.set(
+    id,
+    $.clock.after(delay, () => {
+      settling.delete(id)
+      $.ui.invalidate('ui.render')
+    }),
+  )
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'ox-session-report',
       description: 'Show what SageOx gave this session in a pane (opens by itself in the desktop app; off stops that)',
-      argumentHint: '[off|refresh]',
+      argumentHint: '[off|refresh|flow on|off|still]',
     })
     await openDesktopPane($)
     return next(e)
@@ -298,6 +438,9 @@ export const register: Register = on => {
       const err = (await read($, status)).error
       return { text: err === undefined ? 'ox session report refreshed.' : err }
     }
+    if (arg === 'flow' || arg.startsWith('flow ')) {
+      return { text: await flowCommand($, arg.slice('flow'.length)) }
+    }
     if (arg !== '') {
       return { text: `Usage: ${USAGE} (opens by itself in the desktop app)` }
     }
@@ -313,8 +456,19 @@ export const register: Register = on => {
     return { text: opened.isPlaced ? 'ox session report pane opened.' : `ox session report pane is open but not shown: ${opened.reason}` }
   }).catch(() => ({ text: 'ox session report pane hit an error; try /ox-session-report again.' }))
 
+  // One Bash hook: it draws the flow of an ox command that moves team data
+  // and refreshes the pane and band after any ox command. It never blocks or
+  // alters the call.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    const ran = await next(e)
+    const start = await beginFlow($, e.tool_use_id, safely(() => withSent(classifyBash(e.command), e.command)))
+    let ran
+    try {
+      ran = await next(e)
+    } catch (thrown) {
+      await endFlow($, e.tool_use_id, start, { isError: true })
+      throw thrown
+    }
+    await endFlow($, e.tool_use_id, start, ran as RanLike)
     try {
       if (isOxCommand(e.command)) {
         void refreshStatusline($)
@@ -326,6 +480,65 @@ export const register: Register = on => {
       // The tool already ran; a pane that can't refresh changes nothing.
     }
     return ran
+  }).catch(($, e, next) => next(e))
+
+  // SageOx MCP tools: the same lane, classified by the tool's own name.
+  on('tool.call', { tool: /^mcp__/ }, async ($, e, next) => {
+    const tool = (e as { tool: unknown }).tool
+    const id = (e as { tool_use_id?: unknown }).tool_use_id
+    if (!isMcpName(tool) || typeof id !== 'string') {
+      return next(e)
+    }
+    const { tool: _tool, tool_use_id: _id, ...args } = e as Record<string, unknown>
+    const start = await beginFlow($, id, safely(() => withSent(classifyMcp(tool), args)))
+    if (start === null) {
+      return next(e)
+    }
+    let ran
+    try {
+      ran = await next(e)
+    } catch (thrown) {
+      await endFlow($, id, start, { isError: true })
+      throw thrown
+    }
+    await endFlow($, id, start, ran as RanLike)
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  // A prompt submit opens the window its hook attachments belong to.
+  on('prompt.submit', async ($, e, next) => {
+    if (e.isMeta !== true) {
+      submitted(binder)
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // Hook-injected team context (prime, murmurs, ledger recall): filed under
+  // the prompt row it came in with, now or once that row draws. The text the
+  // model reads passes through untouched.
+  on('prompt.attachment', async ($, e, next) => {
+    const out = await next(e)
+    try {
+      if (e.origin.kind !== 'hook' || e.agentId !== undefined || typeof out.text !== 'string') {
+        return out
+      }
+      const attachments = classifyAttachment(out.text, e.origin.event)
+      if (attachments.length === 0) {
+        return out
+      }
+      const now = await $.clock.now()
+      if ((await modeOf($, now)) === 'off') {
+        return out
+      }
+      const target = arrived(binder, out.text, attachments)
+      if (target !== null) {
+        await recordAttachments($, target, attachments, now)
+        $.ui.invalidate('ui.render')
+      }
+    } catch {
+      // Context still reaches the model; only its lane is lost.
+    }
+    return out
   }).catch(($, e, next) => next(e))
 
   on('turn.start', async ($, e, next) => {
@@ -342,6 +555,7 @@ export const register: Register = on => {
   on('session.end', async ($, e, next) => {
     stopTimer()
     resetBand()
+    resetFlow()
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -404,6 +618,105 @@ export const register: Register = on => {
         {below}
       </Box>
     )
+  }).catch(($, e, next) => next(e))
+
+  // The flow lane under an ox tool row (desktop, VS Code, mobile).
+  on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
+    const own = await next(e)
+    if (e.surface === 'terminal') {
+      return own
+    }
+    const now = await $.clock.now()
+    const mode = await modeOf($, now)
+    if (mode === 'off') {
+      return own
+    }
+    const ev = eventsFor(await read($, flow), e.requestId).find(x => x.id === e.requestId)
+    if (ev === undefined) {
+      return own
+    }
+    // Off screen, or asked for no motion: the still frame, no timer.
+    const still = mode === 'still' || e.props.onScreen === null
+    if (!still) {
+      settleLater($, e.requestId, settleDelay([ev], now))
+    }
+    const width = laneWidth(e.viewport)
+    const { Box, Svg } = $.ui.resolve(e)
+    // Never `isInteractive`: as a plain image the desktop keeps the markup
+    // whole and Chromium still runs its SMIL (see the pet mod's Spinner hook).
+    return (
+      <Box flexDirection="column">
+        {own}
+        <Box key="ox-flow" flexDirection="row">
+          <Svg key="ox-flow-lane" source={laneSvg(ev, now, { width, reducedMotion: still })} alt={caption(ev)} width={width} height={TOKENS.height} />
+        </Box>
+      </Box>
+    )
+  }).catch(($, e, next) => next(e))
+
+  // The flow strip under a prompt that carried team context in. Every
+  // UserMessage draw also lets the binder claim pending attachments.
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    const own = await next(e)
+    const composer = e.props.origin.kind === 'composer'
+    const now = await $.clock.now()
+    // Drawing is pure: the claim is written from a timer, and this draw folds
+    // it in locally so the strip shows at once.
+    const claimed = drawn(binder, e.requestId, composer)
+    if (claimed.length > 0) {
+      const id = e.requestId
+      $.clock.after(0, () => {
+        void (async () => {
+          for (const attachments of claimed) {
+            await recordAttachments($, id, attachments, now)
+          }
+          $.ui.invalidate('ui.render')
+        })().catch(() => undefined)
+      })
+    }
+    if (e.surface === 'terminal' || !composer) {
+      return own
+    }
+    const mode = await modeOf($, now)
+    if (mode === 'off') {
+      return own
+    }
+    let state = await read($, flow)
+    for (const attachments of claimed) {
+      state = withAttachments(state, e.requestId, attachments, now)
+    }
+    const evs: FlowEvent[] = promptEvents(state, e.requestId)
+    if (evs.length === 0) {
+      return own
+    }
+    const still = mode === 'still' || e.props.onScreen === null
+    if (!still) {
+      settleLater($, `att:${e.requestId}`, settleDelay(evs, now))
+    }
+    const width = laneWidth(e.viewport)
+    const { Box, Svg } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        {own}
+        <Box key="ox-flow" flexDirection="row">
+          <Svg key="ox-flow-lane" source={promptSvg(evs, now, { width, reducedMotion: still })} alt={caption(evs)} width={width} height={TOKENS.height} />
+        </Box>
+      </Box>
+    )
+  }).catch(($, e, next) => next(e))
+
+  // A folded group holding an ox call unfolds, so its rows (and lanes) show.
+  on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
+    if (e.surface === 'terminal' || e.props.isExpanded) {
+      return next(e)
+    }
+    if (!e.props.calls.some(c => safely(() => startOf(c.tool, c.input)) !== null)) {
+      return next(e)
+    }
+    if ((await modeOf($, await $.clock.now())) === 'off') {
+      return next(e)
+    }
+    return next({ ...e, props: { ...e.props, isExpanded: true } } as typeof e)
   }).catch(($, e, next) => next(e))
 
   // A pane the person closes by hand stays closed in later desktop sessions
@@ -618,4 +931,41 @@ export const register: Register = on => {
       </Box>
     )
   }).catch(($, e, next) => next(e))
+}
+
+// safely runs a pure classifier; a bug in it draws no lane and costs nothing.
+function safely<T>(fn: () => T | null): T | null {
+  try {
+    return fn()
+  } catch {
+    return null
+  }
+}
+
+// flowCommand: `/ox-session-report flow [on|off|still]`.
+async function flowCommand($: EngineInterface, rest: string): Promise<string> {
+  const mode = parseFlowArg(rest)
+  const now = await $.clock.now()
+  if (mode === null) {
+    return `Usage: ${USAGE}`
+  }
+  if (mode === undefined) {
+    flowCache = null
+    const cur = await modeOf($, now)
+    return `ox flow lanes are ${cur === 'still' ? 'on, drawn still' : cur}. ${USAGE}`
+  }
+  const saved = await $.store.set(FLOW_KEY, flowStored(mode)).then(
+    () => true,
+    () => false,
+  )
+  // Unsaved, it holds for this session: the cache never goes stale.
+  flowCache = { mode, at: saved ? now : Infinity }
+  $.ui.invalidate('ui.render')
+  const said =
+    mode === 'off'
+      ? 'ox flow lanes off.'
+      : mode === 'still'
+        ? 'ox flow lanes drawn still, without motion.'
+        : 'ox flow lanes on: SageOx data flow draws under ox calls and prompts (desktop, VS Code, mobile).'
+  return saved ? said : `${said} The setting did not save; it lasts until the session ends.`
 }
