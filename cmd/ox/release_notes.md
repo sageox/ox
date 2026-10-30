@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Safer session deletion** — deletion commits validate staged work and restore selected sessions if the commit fails. Plans stay local; other valid staged session work can still be published.
 - **A paused recording no longer says it is recording** — a paused recording hides `● rec` on the status line. `ox session report` and the session report pane show `⏸ paused` instead of `● recording` (`session.paused` in `--json`).
 - **Ledger maintenance leaves unsaved plans alone** — re-redacting sessions or deleting a murmur no longer commits staged plan edits. Other staged sessions can still be included.
 

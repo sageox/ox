@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/sacred"
 )
@@ -61,7 +62,47 @@ import (
 // Returns committed=false with nil error when the snapshot equals the parent's
 // tree — the "nothing to commit" idempotency callers rely on.
 func CommitLedgerSnapshot(ctx context.Context, repoPath, message string, pathspecs ...string) (committed bool, err error) {
-	return CommitLedgerSnapshotPreserving(ctx, repoPath, message, nil, pathspecs...)
+	return commitLedgerSnapshot(ctx, repoPath, message, nil, nil, pathspecs...)
+}
+
+// CommitLedgerSessionDeletion commits a snapshot after the caller has confirmed
+// and staged removal of the named sessions. Only those sessions are exempt from
+// the mass-deletion limit; all other staged content is validated as usual.
+// If the commit fails, restore those sessions from current HEAD so their staged
+// deletions cannot block later automatic snapshots.
+// The caller must hold WithRepoLock from before staging through this call.
+func CommitLedgerSessionDeletion(ctx context.Context, repoPath, message string, sessionNames []string, pathspecs ...string) (bool, error) {
+	if len(sessionNames) == 0 {
+		return false, errors.New("session deletion requires explicit session names")
+	}
+	for _, name := range sessionNames {
+		if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
+			return false, fmt.Errorf("invalid session name %q", name)
+		}
+	}
+	committed, err := commitLedgerSnapshot(ctx, repoPath, message, nil, sessionNames, pathspecs...)
+	if err != nil {
+		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		args := []string{"ls-tree", "-z", "--name-only", "HEAD", "--"}
+		for _, name := range sessionNames {
+			args = append(args, ":(top,literal)sessions/"+name)
+		}
+		// A selected session may have only been staged, never committed. Passing
+		// that missing path to restore would prevent restoration of the others.
+		tracked, restoreErr := cleanGitOutput(restoreCtx, repoPath, args...)
+		if restoreErr == nil && len(tracked) > 0 {
+			args = []string{"restore", "--source=HEAD", "--staged", "--worktree", "--"}
+			for _, path := range splitNUL(tracked) {
+				args = append(args, ":(top,literal)"+path)
+			}
+			_, restoreErr = RunGit(restoreCtx, repoPath, args...)
+		}
+		if restoreErr != nil {
+			return false, errors.Join(err, fmt.Errorf("restore deleted sessions: %w", restoreErr))
+		}
+	}
+	return committed, err
 }
 
 // CommitLedgerSnapshotPreserving is CommitLedgerSnapshot for a caller that
@@ -73,6 +114,10 @@ func CommitLedgerSnapshot(ctx context.Context, repoPath, message string, pathspe
 // summary requests the guard never counts (assertNoSacredMassDeletion), no
 // other path is exempt, and there is no switch that disables the guard.
 func CommitLedgerSnapshotPreserving(ctx context.Context, repoPath, message string, preserved []string, pathspecs ...string) (committed bool, err error) {
+	return commitLedgerSnapshot(ctx, repoPath, message, preserved, nil, pathspecs...)
+}
+
+func commitLedgerSnapshot(ctx context.Context, repoPath, message string, preserved, deletedSessions []string, pathspecs ...string) (bool, error) {
 	// Never mutate the ledger mid-rebase: moving the branch ref under a rebase
 	// consumes the replay step (see .claude/rules/cache-only-design.md).
 	if err := IsSafeForGitOps(repoPath); err != nil {
@@ -112,7 +157,7 @@ func CommitLedgerSnapshotPreserving(ctx context.Context, repoPath, message strin
 	// delta is what this commit publishes. Filtering by pathspecs again would
 	// break an exclude pathspec on an unborn branch: validation lists that
 	// tree with ls-tree, which refuses exclude magic.
-	if err := commitLedgerTree(ctx, repoPath, tree, parent, parent, message, preserved); err != nil {
+	if err := commitLedgerTree(ctx, repoPath, tree, parent, parent, message, preserved, deletedSessions...); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -122,11 +167,11 @@ func CommitLedgerSnapshotPreserving(ctx context.Context, repoPath, message strin
 // a mass of sacred files, and commits tree onto parent, moving the branch only
 // while it still points at tip: parent for a snapshot, the replaced commit for
 // a squash.
-func commitLedgerTree(ctx context.Context, repoPath, tree, parent, tip, message string, preserved []string) error {
+func commitLedgerTree(ctx context.Context, repoPath, tree, parent, tip, message string, preserved []string, deletedSessions ...string) error {
 	if err := validateLedgerTree(ctx, repoPath, parent, tree); err != nil {
 		return err
 	}
-	if err := assertNoSacredMassDeletion(ctx, repoPath, parent, tree, preserved); err != nil {
+	if err := assertNoSacredMassDeletion(ctx, repoPath, parent, tree, preserved, deletedSessions...); err != nil {
 		return err
 	}
 	return commitTreeToBranch(ctx, repoPath, tree, parent, tip, message)
@@ -216,7 +261,7 @@ func writeScopedIndexTree(ctx context.Context, repoPath, parent string, pathspec
 // Fail-closed, matching validateLedgerTree: an unborn branch (parent=="") has
 // no deletions and passes; if the diff itself cannot be computed the caller
 // must NOT commit, so the error propagates rather than defaulting to "safe".
-func assertNoSacredMassDeletion(ctx context.Context, repoPath, parent, tree string, preserved []string) error {
+func assertNoSacredMassDeletion(ctx context.Context, repoPath, parent, tree string, preserved []string, deletedSessions ...string) error {
 	if parent == "" {
 		return nil // first commit: nothing pre-existing to delete
 	}
@@ -228,6 +273,11 @@ func assertNoSacredMassDeletion(ctx context.Context, repoPath, parent, tree stri
 	}
 	deleted := sacred.Filter(strings.Split(string(out), "\n"))
 	deleted = slices.DeleteFunc(deleted, func(path string) bool {
+		for _, name := range deletedSessions {
+			if strings.HasPrefix(path, "sessions/"+name+"/") {
+				return true
+			}
+		}
 		if strings.HasSuffix(path, ".rej") || strings.HasSuffix(path, ".needs-summary") {
 			return true
 		}

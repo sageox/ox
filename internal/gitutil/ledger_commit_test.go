@@ -19,6 +19,117 @@ import (
 
 const cleanMeta = `{"title":"Ready"}` + "\n"
 
+// Confirming one session's deletion must not authorize a neighboring staged wipe.
+func TestCommitLedgerSessionDeletion_ExemptsOnlyConfirmedSessions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
+	repo := newSnapshotRepo(t)
+	for _, name := range []string{"selected", "selected-neighbor"} {
+		for i := range sacred.MassDeleteThreshold + 1 {
+			writeGitutilFixture(t, repo, "sessions/"+name+"/part-"+string(rune('a'+i))+".md", "recorded work\n")
+		}
+	}
+	gitInRepo(t, repo, "add", "sessions")
+	gitInRepo(t, repo, "commit", "-m", "seed sessions")
+	writeGitutilFixture(t, repo, "sessions/staged-only/meta.json", cleanMeta)
+	gitInRepo(t, repo, "add", "sessions/staged-only")
+	gitInRepo(t, repo, "rm", "-r", "--force", "sessions/selected", "sessions/selected-neighbor", "sessions/staged-only")
+	writeGitutilFixture(t, repo, "sessions/recovered/meta.json", cleanMeta)
+	writeGitutilFixture(t, repo, "data/plans/draft/plan.md", "unsaved plan\n")
+	gitInRepo(t, repo, "add", "sessions/recovered", "data/plans")
+	head := gitInRepo(t, repo, "rev-parse", "HEAD")
+	otherStaging := gitInRepo(t, repo, "diff", "--cached", "--binary", "--", ":/", ":(exclude)sessions/selected")
+	ctx := context.Background()
+	require.NoError(t, WithRepoLock(ctx, repo, func() error {
+		committed, err := CommitLedgerSessionDeletion(ctx, repo, "delete selected", []string{"selected", "staged-only"}, ":/", ":(exclude)data/plans")
+		require.ErrorContains(t, err, "sacred")
+		assert.False(t, committed)
+		return nil
+	}))
+	assert.Equal(t, head, gitInRepo(t, repo, "rev-parse", "HEAD"))
+	assert.Empty(t, gitInRepo(t, repo, "diff", "HEAD", "--", "sessions/selected"), "the refused deletion must be restored")
+	assert.FileExists(t, filepath.Join(repo, "sessions/selected/part-a.md"))
+	assert.Equal(t, otherStaging, gitInRepo(t, repo, "diff", "--cached", "--binary", "--", ":/", ":(exclude)sessions/selected"))
+
+	gitInRepo(t, repo, "restore", "--source=HEAD", "--staged", "--worktree", "sessions/selected-neighbor")
+	gitInRepo(t, repo, "rm", "-r", "sessions/selected")
+	require.NoError(t, WithRepoLock(ctx, repo, func() error {
+		committed, err := CommitLedgerSessionDeletion(ctx, repo, "delete selected", []string{"selected"}, ":/", ":(exclude)data/plans")
+		require.NoError(t, err)
+		assert.True(t, committed)
+		return nil
+	}))
+	assert.False(t, headHasPath(t, repo, "sessions/selected"))
+	assert.True(t, headHasPath(t, repo, "sessions/selected-neighbor"))
+	assert.True(t, headHasPath(t, repo, "sessions/recovered/meta.json"))
+	assert.Equal(t, "data/plans/draft/plan.md", gitInRepo(t, repo, "diff", "--cached", "--name-only"))
+
+	gitInRepo(t, repo, "rm", "-r", "sessions/selected-neighbor")
+	require.NoError(t, WithRepoLock(ctx, repo, func() error {
+		committed, err := CommitLedgerSnapshot(ctx, repo, "automatic snapshot", ":/", ":(exclude)data/plans")
+		require.ErrorContains(t, err, "sacred")
+		assert.False(t, committed)
+		return nil
+	}))
+}
+
+func TestCommitLedgerSessionDeletion_CancellationRestoresSelectedSession(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
+	repo := newSnapshotRepo(t)
+	const path = "sessions/selected/meta.json"
+	writeGitutilFixture(t, repo, path, cleanMeta)
+	gitInRepo(t, repo, "add", path)
+	gitInRepo(t, repo, "commit", "-m", "seed session")
+	// A host's LFS filter must not run during rollback: a failed download
+	// would leave the selected session deleted and block later snapshots.
+	writeGitutilFixture(t, repo, ".git/info/attributes", "sessions/** filter=lfs\n")
+	gitInRepo(t, repo, "config", "filter.lfs.process", "exit 1")
+	gitInRepo(t, repo, "config", "filter.lfs.clean", "cat")
+	gitInRepo(t, repo, "config", "filter.lfs.smudge", "exit 1")
+	gitInRepo(t, repo, "config", "filter.lfs.required", "true")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.NoError(t, WithRepoLock(context.Background(), repo, func() error {
+		_, err := RunGit(context.Background(), repo, "rm", path)
+		require.NoError(t, err)
+		committed, err := CommitLedgerSessionDeletion(ctx, repo, "delete", []string{"selected"})
+		require.ErrorIs(t, err, context.Canceled)
+		assert.False(t, committed)
+		return nil
+	}))
+	status, err := RunGit(context.Background(), repo, "status", "--porcelain")
+	require.NoError(t, err)
+	assert.Empty(t, status)
+	content, err := os.ReadFile(filepath.Join(repo, path))
+	require.NoError(t, err)
+	assert.Equal(t, cleanMeta, string(content))
+}
+
+func TestCommitLedgerSessionDeletion_RequiresSessionNames(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
+	for _, names := range [][]string{nil, {""}, {"."}, {".."}, {"../neighbor"}, {"a/b"}, {`a\b`}, {"a\x00b"}} {
+		t.Run(strings.Join(names, ","), func(t *testing.T) {
+			repo := newSnapshotRepo(t)
+			writeGitutilFixture(t, repo, "sessions/ready/meta.json", cleanMeta)
+			gitInRepo(t, repo, "add", "sessions/ready")
+			head := gitInRepo(t, repo, "rev-parse", "HEAD")
+			ctx := context.Background()
+			require.NoError(t, WithRepoLock(ctx, repo, func() error {
+				committed, err := CommitLedgerSessionDeletion(ctx, repo, "delete", names)
+				assert.Error(t, err)
+				assert.False(t, committed)
+				return nil
+			}))
+			assert.Equal(t, head, gitInRepo(t, repo, "rev-parse", "HEAD"), "invalid names must not commit staged work")
+		})
+	}
+}
+
 func newSnapshotRepo(t *testing.T) string {
 	t.Helper()
 	repo := t.TempDir()
@@ -310,6 +421,8 @@ func TestCommitLedgerSnapshot_RefusesUnmergedIndexOutsideScope(t *testing.T) {
 	gitInRepo(t, repo, "commit", "-am", "main change")
 	_, mergeErr := RunGit(context.Background(), repo, "merge", "other")
 	require.Error(t, mergeErr, "fixture must leave an unmerged index")
+	// Exercise the unmerged-index check even without an active merge marker.
+	gitInRepo(t, repo, "merge", "--quit")
 	writeGitutilFixture(t, repo, "sessions/x/meta.json", cleanMeta)
 	gitInRepo(t, repo, "add", "--sparse", "sessions/x/meta.json")
 	before := gitInRepo(t, repo, "rev-parse", "HEAD")
