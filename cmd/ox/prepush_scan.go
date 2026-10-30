@@ -253,16 +253,13 @@ func countDistinctPaths(findings []PrePushFinding) int {
 	return len(seen)
 }
 
-// runPrePushSecretGate repairs or quarantines current session artifacts, then
-// verifies the immutable session blobs actually reachable by the push. Any
-// uninspected or still-sensitive content keeps publication pending.
+// runPrePushSecretGate repairs or quarantines current session artifacts.
+// PushWithRetry separately validates the immutable objects before publication.
+// The caller must hold the repo lock: repairs may stage and amend HEAD.
 func runPrePushSecretGate(ctx context.Context, ledgerPath string) error {
-	if err := runSessionSecretGate(ctx, ledgerPath, func() (*PrePushScanResult, error) {
+	return runSessionSecretGate(ctx, ledgerPath, func() (*PrePushScanResult, error) {
 		return scanPrePushForSecrets(ctx, ledgerPath)
-	}, true); err != nil {
-		return err
-	}
-	return nil
+	}, true)
 }
 
 // prepareSessionUpload runs the same redaction and quarantine policy on real
@@ -292,11 +289,12 @@ func runSessionSecretGate(ctx context.Context, ledgerPath string, scan func() (*
 		return nil
 	}
 
-	// Recovery may repair a failed redact pass by preserving sensitive files
-	// outside publication, but only an actual final clean scan authorizes it.
+	// Per-file rewrite failures remain findings for quarantine. A metadata or
+	// amend failure must hold publication even if the working bytes are clean:
+	// the original commit may still contain the unredacted content.
 	auto, redactErr := autoRedactSessionFindings(ctx, ledgerPath, result, amendCommit)
 	if redactErr != nil {
-		slog.Warn("pre-push secret gate: auto-redact failed; will quarantine remainder", "error", redactErr)
+		return fmt.Errorf("auto-redact session content: %w", redactErr)
 	}
 	rescan, err := scan()
 	if err != nil {
@@ -313,7 +311,7 @@ func runSessionSecretGate(ctx context.Context, ledgerPath string, scan func() (*
 		}
 		return nil
 	}
-	q, err := quarantineUnredactableFindings(ledgerPath, rescan.Findings, amendCommit)
+	q, err := quarantineUnredactableFindings(ctx, ledgerPath, rescan.Findings, amendCommit)
 	emitQuarantineWarning(os.Stderr, auto, q, rescan)
 	if err != nil {
 		return fmt.Errorf("prepare session quarantine: %w", err)

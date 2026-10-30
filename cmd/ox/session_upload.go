@@ -551,6 +551,8 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 	// runs under the repo lock (sageox/ox#1541). PushWithRetry takes the same
 	// non-reentrant lock itself, so it stays outside.
 	gateCtx, gateSpan := perf.Start(ctx, "secret_gate")
+	gateCtx, cancelGate := context.WithTimeout(gateCtx, lockedCommitTimeout)
+	defer cancelGate()
 	if err := gitutil.WithRepoLock(gateCtx, ledgerPath, func() error {
 		return runPrePushSecretGate(gateCtx, ledgerPath)
 	}); err != nil {

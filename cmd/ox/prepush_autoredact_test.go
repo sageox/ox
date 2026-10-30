@@ -7,10 +7,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,6 +34,9 @@ func seedSessionMeta(t *testing.T, sessionDir, sessionName string) {
 		AgentID:     "test-agent",
 		AgentType:   "claude-code",
 		CreatedAt:   time.Now().UTC(),
+	}
+	if _, err := os.Stat(filepath.Join(sessionDir, "raw.jsonl")); err == nil {
+		meta.Files = map[string]lfs.FileRef{"raw.jsonl": {Storage: lfs.StorageGit}}
 	}
 	buf, err := json.MarshalIndent(meta, "", "  ")
 	require.NoError(t, err)
@@ -60,9 +65,28 @@ func TestRunPrePushSecretGate_AutoRedactsJSONLAndAllowsPush(t *testing.T) {
 	seedSessionMeta(t, filepath.Join(work, "sessions", sessionName), sessionName)
 	mustGit(t, work, "add", "--sparse", filepath.Join("sessions", sessionName, "meta.json"))
 	mustGit(t, work, "commit", "--amend", "--no-edit", "--no-verify")
+	identity := mustGitCapture(t, work, "show", "-s", "--format=%P%n%an%n%ae%n%aI%n%B", "HEAD")
+	planPath := filepath.Join(work, "data", "plans", "unfinished", "plan.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(planPath), 0o755))
+	require.NoError(t, os.WriteFile(planPath, []byte("staged plan\n"), 0o644))
+	mustGit(t, work, "add", "--sparse", planPath)
+	require.NoError(t, os.WriteFile(planPath, []byte("later edit\n"), 0o644))
+	const pending = "sessions/pending/meta.json"
+	seedSessionMeta(t, filepath.Join(work, "sessions", "pending"), "pending")
+	mustGit(t, work, "add", "--sparse", pending)
 
-	err := runPrePushSecretGate(context.Background(), work)
+	// Match pushLedger: the gate repairs commits while holding the repo lock.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := gitutil.WithRepoLock(ctx, work, func() error {
+		return runPrePushSecretGate(ctx, work)
+	})
 	require.NoError(t, err, "verified repaired content must pass")
+	assert.Empty(t, mustGitCapture(t, work, "ls-tree", "--name-only", "HEAD", "data/plans"))
+	assert.Equal(t, "staged plan", mustGitCapture(t, work, "show", ":data/plans/unfinished/plan.md"))
+	assert.Equal(t, identity, mustGitCapture(t, work, "show", "-s", "--format=%P%n%an%n%ae%n%aI%n%B", "HEAD"))
+	assert.Empty(t, mustGitCapture(t, work, "ls-tree", "--name-only", "HEAD", pending))
+	assert.Contains(t, mustGitCapture(t, work, "diff", "--cached", "--name-only"), pending)
 
 	// raw.jsonl on disk must no longer contain the canary bytes.
 	rawAbs := filepath.Join(work, "sessions", sessionName, "raw.jsonl")
@@ -70,6 +94,8 @@ func TestRunPrePushSecretGate_AutoRedactsJSONLAndAllowsPush(t *testing.T) {
 	require.NoError(t, readErr)
 	assert.NotContains(t, string(bytes), canary,
 		"canary still on disk; auto-redact did not run or did not scrub")
+	assert.NotContains(t, mustGitCapture(t, work, "show", "HEAD:sessions/"+sessionName+"/raw.jsonl"), canary,
+		"publication must carry the repaired blob, not only a clean worktree")
 
 	// Re-scan must come back clean — the chokepoint and the scanner
 	// share a detector catalog; if redact says it cleared, scan must
@@ -97,48 +123,147 @@ func TestRunPrePushSecretGate_AutoRedactsJSONLAndAllowsPush(t *testing.T) {
 		assert.NotContains(t, e.Detector, canary)
 	}
 
-	// The amend should have updated HEAD with the redacted bytes —
-	// `git diff HEAD~..HEAD --stat` should show raw.jsonl changed.
-	// (We don't strictly assert content here; the disk-bytes check above
-	// covers the load-bearing claim.)
+	// The next normal snapshot must still pick up the other session, while
+	// leaving the plan alone. Verify both sessions actually reach the remote.
+	require.NoError(t, gitutil.WithRepoLock(ctx, work, func() error {
+		_, err := gitutil.CommitLedgerSnapshot(ctx, work, "recover pending session", ".", ":(exclude)data/plans")
+		return err
+	}))
+	require.NoError(t, gitutil.PushWithRetry(ctx, work, gitutil.PushOpts{}))
+	remote := mustGitCapture(t, work, "remote", "get-url", "origin")
+	assert.NotEmpty(t, mustGitCapture(t, remote, "show", "main:"+pending))
+	assert.NotContains(t, mustGitCapture(t, remote, "show", "main:sessions/"+sessionName+"/raw.jsonl"), canary)
+	assert.Empty(t, mustGitCapture(t, remote, "ls-tree", "--name-only", "main", "data/plans"))
+	plan, err := os.ReadFile(planPath)
+	require.NoError(t, err)
+	assert.Equal(t, "later edit\n", string(plan))
 }
 
-// TestRunPrePushSecretGate_QuarantinesNonJSONLAndAllowsPush exercises
-// the recovery path that auto-redact cannot service. A planted canary
-// in a non-JSONL file (the chokepoint only rewrites JSONL) must be
-// preserved on disk, moved to the quarantine cache, dropped from the
-// holding commit, and surfaced via a debt marker — all without
-// returning an error.
-//
-// Failure prevented: a non-JSONL session file with a finding blocks
-// the push of ALL other sessions and unrelated commits, and either
-// data is lost or the user has no on-disk record of what was carved out.
+// Repairs must preserve an unfinished rebase or autostash conflict and resume
+// after it is resolved, without staging over the unresolved index entries.
+func TestRedactionRepairs_RefuseConflictsAndRetry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real Git redaction repair and retry")
+	}
+	for _, tc := range []struct {
+		name, file  string
+		autostash   bool
+		interactive bool
+	}{
+		{"rebase JSONL", "raw.jsonl", false, false},
+		{"rebase notes", "notes.md", false, false},
+		{"autostash conflict", "raw.jsonl", true, false},
+		{"interactive rebase", "raw.jsonl", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const name = "2026-10-22-repair"
+			const canary = "AKIAIOSFODNN7EXAMPLE"
+			rel := "sessions/" + name + "/" + tc.file
+			work := makeLedgerWithCommit(t, map[string]string{rel: `{"text":"` + canary + `"}` + "\n"})
+			seedSessionMeta(t, filepath.Join(work, "sessions", name), name)
+			mustGit(t, work, "add", "--sparse", "sessions/"+name+"/meta.json")
+			mustGit(t, work, "commit", "--amend", "--no-edit")
+			rebase := filepath.Join(work, ".git", "rebase-merge")
+			if tc.autostash {
+				require.NoError(t, os.WriteFile(filepath.Join(work, rel), []byte(`{"text":"local `+canary+`"}`+"\n"), 0o644))
+				mustGit(t, work, "stash", "push")
+				require.NoError(t, os.WriteFile(filepath.Join(work, rel), []byte(`{"text":"upstream `+canary+`"}`+"\n"), 0o644))
+				mustGit(t, work, "commit", "-am", "upstream change")
+				output, err := exec.Command("git", "-C", work, "stash", "pop").CombinedOutput()
+				require.Error(t, err)
+				require.Contains(t, string(output), "CONFLICT")
+				require.Contains(t, mustGitCapture(t, work, "ls-files", "--unmerged"), rel)
+				require.NoFileExists(t, filepath.Join(work, ".git", "MERGE_HEAD"))
+			} else {
+				require.NoError(t, os.MkdirAll(rebase, 0o755))
+			}
+			tip := mustGitCapture(t, work, "rev-parse", "HEAD")
+			index := mustGitCapture(t, work, "ls-files", "--stage")
+			before, err := os.ReadFile(filepath.Join(work, rel))
+			require.NoError(t, err)
+			repair := func() error {
+				if tc.interactive {
+					return runRedactHistoryWorkflow(redactHistoryOptions{
+						LedgerPath: work,
+						BackupDir:  t.TempDir(),
+						Scope:      &sessionScope{Names: []string{name}},
+						Stdin:      strings.NewReader("y\n"),
+						Stdout:     &strings.Builder{},
+					})
+				}
+				return gitutil.WithRepoLock(context.Background(), work, func() error {
+					return runPrePushSecretGate(context.Background(), work)
+				})
+			}
+			err = repair()
+			require.Error(t, err)
+			if tc.autostash {
+				require.ErrorContains(t, err, "unresolved conflicts")
+			}
+			assert.Equal(t, tip, mustGitCapture(t, work, "rev-parse", "HEAD"))
+			assert.Equal(t, index, mustGitCapture(t, work, "ls-files", "--stage"))
+			content, err := os.ReadFile(filepath.Join(work, rel))
+			require.NoError(t, err)
+			assert.Equal(t, before, content, "refusal must precede worktree mutation")
+			if tc.autostash {
+				mustGit(t, work, "restore", "--source=HEAD", "--staged", "--worktree", "--", rel)
+			} else {
+				require.NoError(t, os.RemoveAll(rebase))
+			}
+			require.NoError(t, repair())
+			if tc.file == "raw.jsonl" {
+				assert.NotContains(t, mustGitCapture(t, work, "show", "HEAD:"+rel), canary)
+			} else {
+				assert.Empty(t, mustGitCapture(t, work, "ls-tree", "--name-only", "HEAD", rel))
+			}
+		})
+	}
+}
+
 func TestRunPrePushSecretGate_QuarantinesNonJSONLAndAllowsPush(t *testing.T) {
 	t.Setenv("OX_ALLOW_SECRETS", "")
 	const sessionName = "2026-05-12-quarantine"
 	const canary = "AKIAIOSFODNN7EXAMPLE"
-	relMD := filepath.ToSlash(filepath.Join("sessions", sessionName, "notes.md"))
+	relMD := filepath.ToSlash(filepath.Join("sessions", sessionName, "notes[1].md"))
+	neighbor := filepath.ToSlash(filepath.Join("sessions", sessionName, "notes1.md"))
 
 	work := makeLedgerWithCommit(t, map[string]string{
 		// Also include an UNRELATED file in the same commit so we can
 		// assert that the rest of the push survives.
 		"unrelated.txt": "hello world\n",
 		relMD:           "# Notes\n\nfound a token: " + canary + "\n",
+		neighbor:        "committed notes\n",
 	})
 	seedSessionMeta(t, filepath.Join(work, "sessions", sessionName), sessionName)
 	mustGit(t, work, "add", "--sparse", filepath.Join("sessions", sessionName, "meta.json"))
 	mustGit(t, work, "commit", "--amend", "--no-edit", "--no-verify")
+	identity := mustGitCapture(t, work, "show", "-s", "--format=%P%n%an%n%ae%n%aI%n%B", "HEAD")
+	planPath := filepath.Join(work, "data", "plans", "unfinished", "plan.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(planPath), 0o755))
+	require.NoError(t, os.WriteFile(planPath, []byte("staged plan\n"), 0o644))
+	mustGit(t, work, "add", "--sparse", planPath)
+	require.NoError(t, os.WriteFile(filepath.Join(work, neighbor), []byte("pending notes\n"), 0o644))
+	mustGit(t, work, "add", "--", neighbor)
 
-	err := runPrePushSecretGate(context.Background(), work)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := gitutil.WithRepoLock(ctx, work, func() error {
+		return runPrePushSecretGate(ctx, work)
+	})
 	require.NoError(t, err, "verified quarantine must permit safe publication")
+	assert.Empty(t, mustGitCapture(t, work, "ls-tree", "--name-only", "HEAD", "data/plans"))
+	assert.Equal(t, "staged plan", mustGitCapture(t, work, "show", ":data/plans/unfinished/plan.md"))
+	assert.Equal(t, identity, mustGitCapture(t, work, "show", "-s", "--format=%P%n%an%n%ae%n%aI%n%B", "HEAD"))
+	assert.Equal(t, "pending notes", mustGitCapture(t, work, "show", ":"+neighbor), "quarantine must treat brackets literally, preserving neighboring staging")
+	assert.Equal(t, "committed notes", mustGitCapture(t, work, "show", "HEAD:"+neighbor))
 
 	// Original in-place path must be gone (moved aside).
 	_, statErr := os.Stat(filepath.Join(work, relMD))
 	assert.True(t, os.IsNotExist(statErr),
-		"original notes.md should have been moved to quarantine; stat err=%v", statErr)
+		"original notes[1].md should have been moved to quarantine; stat err=%v", statErr)
 
 	// Quarantine path must hold the bytes.
-	quarRel := filepath.Join(".sageox", "cache", "quarantine", sessionName, "notes.md")
+	quarRel := filepath.Join(".sageox", "cache", "quarantine", sessionName, "notes[1].md")
 	quarAbs := filepath.Join(work, quarRel)
 	bytes, readErr := os.ReadFile(quarAbs)
 	require.NoError(t, readErr, "quarantine path missing")
@@ -222,9 +347,9 @@ func TestQuarantineBeforeUpload_PartialFailureRemainsDiscoverable(t *testing.T) 
 				binDir := t.TempDir()
 				// Real git handles every operation. The later read uses a broken
 				// alternate index; removal/restore failures use a competing lock.
-				wrapper := "#!/bin/sh\nfor arg do last=\"$arg\"; done\n" +
-					"if [ \"$3\" = \"$OX_TEST_QUARANTINE_FAIL_OP\" ] && { [ \"$3\" = update-index ] || [ \"$last\" = \"$OX_TEST_QUARANTINE_FAIL_PATH\" ]; }; then\n" +
-					"  if [ \"$3\" = ls-files ]; then\n" +
+				wrapper := "#!/bin/sh\nfor arg do\n  last=\"$arg\"\n  case \"$arg\" in ls-files|rm|update-index) op=\"$arg\";; esac\ndone\n" +
+					"if [ \"$op\" = \"$OX_TEST_QUARANTINE_FAIL_OP\" ] && { [ \"$op\" = update-index ] || [ \"$last\" = \"$OX_TEST_QUARANTINE_FAIL_PATH\" ]; }; then\n" +
+					"  if [ \"$op\" = ls-files ]; then\n" +
 					"    GIT_INDEX_FILE=\"$OX_TEST_QUARANTINE_BAD_INDEX\" exec \"$OX_TEST_QUARANTINE_REAL_GIT\" \"$@\"\n  fi\n" +
 					"  : > \"$OX_TEST_QUARANTINE_LOCK\"\nfi\n" +
 					"exec \"$OX_TEST_QUARANTINE_REAL_GIT\" \"$@\"\n"
@@ -233,13 +358,13 @@ func TestQuarantineBeforeUpload_PartialFailureRemainsDiscoverable(t *testing.T) 
 				require.NoError(t, os.WriteFile(badIndex, []byte("invalid index"), 0o600))
 				t.Setenv("OX_TEST_QUARANTINE_BAD_INDEX", badIndex)
 				t.Setenv("OX_TEST_QUARANTINE_FAIL_OP", tc.failOp)
-				t.Setenv("OX_TEST_QUARANTINE_FAIL_PATH", failedRel)
+				t.Setenv("OX_TEST_QUARANTINE_FAIL_PATH", ":(literal)"+failedRel)
 				t.Setenv("OX_TEST_QUARANTINE_LOCK", filepath.Join(work, ".git", "index.lock"))
 				t.Setenv("OX_TEST_QUARANTINE_REAL_GIT", realGit)
 				t.Setenv("PATH", binDir+string(os.PathListSeparator)+previousPath)
 			}
 
-			out, err := quarantineUnredactableFindings(work, []PrePushFinding{
+			out, err := quarantineUnredactableFindings(context.Background(), work, []PrePushFinding{
 				{Path: firstRel, Line: 1, Detector: "aws_access_key"},
 				{Path: failedRel, Line: 1, Detector: "aws_access_key"},
 			}, false)
@@ -290,6 +415,110 @@ func TestQuarantineBeforeUpload_PartialFailureRemainsDiscoverable(t *testing.T) 
 			require.Len(t, recovery, 1, "session redaction must discover the preserved file")
 			assert.Equal(t, firstRel, recovery[0].Path)
 			assert.Equal(t, filepath.ToSlash(filepath.Join(".sageox", "cache", "quarantine", sessionName, "notes.md")), recovery[0].QuarantinePath)
+		})
+	}
+}
+
+// A canceled Git operation must release the Ledger lock and leave the session
+// recoverable, whether quarantine runs before upload or repairs a holding commit.
+func TestQuarantineCancellationReleasesLedger(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real Git subprocess cancellation and recovery")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Git stall injection uses a POSIX wrapper")
+	}
+	for _, op := range []string{"ls-files", "rm", "reset"} {
+		t.Run(op, func(t *testing.T) {
+			amend := op == "reset"
+			const name = "2026-10-29-canceled-quarantine"
+			const rel = "sessions/" + name + "/notes.md"
+			const content = "keep these session bytes\n"
+			work := makeLedgerWithCommit(t, map[string]string{rel: content})
+			tip := mustGitCapture(t, work, "rev-parse", "HEAD")
+			realGit, err := exec.LookPath("git")
+			require.NoError(t, err)
+			binDir := t.TempDir()
+			started := filepath.Join(binDir, "started")
+			wrapper := "#!/bin/sh\nfor arg do\n  last=\"$arg\"\n" +
+				"  if [ \"$arg\" = \"$OX_TEST_QUARANTINE_STALL\" ]; then matched=1; fi\ndone\n" +
+				"if [ \"$matched\" = 1 ] && [ \"$last\" = \"$OX_TEST_QUARANTINE_PATH\" ]; then\n" +
+				"  echo $$ > \"$OX_TEST_QUARANTINE_STARTED\"\n  exec sleep 30\nfi\n" +
+				"exec \"$OX_TEST_QUARANTINE_REAL_GIT\" \"$@\"\n"
+			require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(wrapper), 0o755))
+			t.Setenv("OX_TEST_QUARANTINE_REAL_GIT", realGit)
+			t.Setenv("OX_TEST_QUARANTINE_STARTED", started)
+			t.Setenv("OX_TEST_QUARANTINE_STALL", op)
+			t.Setenv("OX_TEST_QUARANTINE_PATH", ":(literal)"+rel)
+			previousPath := os.Getenv("PATH")
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+previousPath)
+			completed := false
+			done := make(chan error, 1)
+			t.Cleanup(func() {
+				if completed {
+					return
+				}
+				data, _ := os.ReadFile(started)
+				if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+					process, _ := os.FindProcess(pid)
+					_ = process.Kill()
+					<-done
+				}
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			findings := []PrePushFinding{{Path: rel, Line: 1, Detector: "test"}}
+			go func() {
+				repair := func() error {
+					_, err := quarantineUnredactableFindings(ctx, work, findings, amend)
+					return err
+				}
+				if amend {
+					done <- gitutil.WithRepoLock(ctx, work, repair)
+				} else {
+					done <- repair()
+				}
+			}()
+			require.Eventually(t, func() bool {
+				_, err := os.Stat(started)
+				return err == nil
+			}, 5*time.Second, 10*time.Millisecond, "quarantine must reach the Git operation")
+			cancel()
+			select {
+			case err := <-done:
+				completed = true
+				require.Error(t, err)
+			case <-time.After(3 * time.Second):
+				t.Fatal("canceled quarantine kept the Ledger locked")
+			}
+			t.Setenv("PATH", previousPath)
+			lockCtx, unlock := context.WithTimeout(context.Background(), time.Second)
+			defer unlock()
+			require.NoError(t, gitutil.WithRepoLock(lockCtx, work, func() error { return nil }))
+			assert.Equal(t, tip, mustGitCapture(t, work, "rev-parse", "HEAD"))
+			preserved := filepath.Join(work, rel)
+			if amend {
+				preserved = filepath.Join(work, ".sageox", "cache", "quarantine", name, "notes.md")
+				recovery, err := enumerateQuarantineFindings(work, nil)
+				require.NoError(t, err)
+				require.Len(t, recovery, 1)
+				// Put the preserved file back to retry the interrupted repair.
+				require.NoError(t, os.Rename(preserved, filepath.Join(work, rel)))
+				preserved = filepath.Join(work, rel)
+			}
+			data, err := os.ReadFile(preserved)
+			require.NoError(t, err)
+			assert.Equal(t, content, string(data))
+			retry := func() error {
+				_, err := quarantineUnredactableFindings(context.Background(), work, findings, amend)
+				return err
+			}
+			if amend {
+				err = gitutil.WithRepoLock(context.Background(), work, retry)
+			} else {
+				err = retry()
+			}
+			require.NoError(t, err, "a subsequent repair must still work")
 		})
 	}
 }
