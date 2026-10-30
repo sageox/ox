@@ -32,20 +32,24 @@ Quick reference for troubleshooting ox. Scan the section you need.
 | `<endpoint>/ledger/` | The ledger git repo. Sessions live at `sessions/<name>/meta.json`. |
 | `<endpoint>/teams/<team-id>/` | Symlinks to `~/.local/share/sageox/<endpoint>/teams/<team-id>/`. |
 
-### Daemon Runtime (`$XDG_RUNTIME_DIR/sageox/` or `~/.local/state/sageox/`)
+### Daemon Runtime (`$XDG_RUNTIME_DIR/sageox/`, or `sageox/` in the OS temp directory without it)
 
 | File | What It Is |
 |------|-----------|
-| `daemon-<workspace>.sock` | IPC socket (CLI talks to daemon here). |
-| `daemon-<workspace>.pid` | Daemon process ID. |
-| `daemon-<workspace>.lock` | Prevents concurrent daemon instances. |
+| `daemon/daemon-<workspace>.sock` | IPC socket (CLI talks to daemon here). |
+| `daemon/daemon-<workspace>.pid` | Daemon process ID. |
 | `daemon/registry.json` | All active daemons across workspaces. |
 
-### Daemon Logs (`$XDG_CACHE_HOME/sageox/daemon/`)
+### Daemon Logs (`$XDG_STATE_HOME/sageox/logs/`, default `~/.local/state/sageox/logs/`)
 
 | File | What It Is |
 |------|-----------|
-| `daemon-<workspace>.log` | Structured daemon logs. View with `ox daemon logs --follow`. |
+| `daemon_<repo>_<workspace>.log` | The current daemon log. View with `ox daemon logs --follow`; `ox daemon logs --path` prints where it is. |
+| `daemon_<repo>_<workspace>.log.<UTC time>` | Earlier logs. A log over 10 MB is renamed when the daemon next starts. |
+
+Logs survive a reboot. When a daemon starts, ox deletes logs nobody has written for 30 days. If the directory still holds more than 1 GB, it deletes the oldest earlier logs of whichever workspace holds the most, though never a workspace's current or most recent earlier log. When ox cannot write there, the daemon logs to `/tmp/<user>/sageox/logs/` instead. `ox daemon logs` reads whichever of the workspace's logs was written last, and `--follow` keeps following the log path when a restart renames the log.
+
+If you set `XDG_STATE_HOME` only in a shell profile, a daemon started from a GUI app logs under `~/.local/state` while `ox daemon logs` in that shell looks under your setting.
 
 ---
 
@@ -96,12 +100,10 @@ cat .sageox/config.local.toml | grep path
 cat ~/.config/sageox/auth.json | jq 'keys'
 
 # Daemon socket alive?
-ls -la $XDG_RUNTIME_DIR/sageox/daemon-*.sock 2>/dev/null || \
-  ls -la ~/.local/state/sageox/daemon-*.sock 2>/dev/null
+ls -la "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"/sageox/daemon/daemon-*.sock
 
 # Active daemons
-cat $XDG_RUNTIME_DIR/sageox/daemon/registry.json 2>/dev/null || \
-  cat ~/.local/state/sageox/daemon/registry.json 2>/dev/null
+cat "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"/sageox/daemon/registry.json
 ```
 
 ### Environment Variables

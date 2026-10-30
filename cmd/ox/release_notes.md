@@ -21,11 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Session redaction amendments leave other staged work pending** — repairs amend only their selected paths and report failed amendments before publication.
 - **Safer session deletion** — deletion commits validate staged work and restore selected sessions if the commit fails. Plans stay local; other valid staged session work can still be published.
 - **A paused recording no longer says it is recording** — a paused recording hides `● rec` on the status line. `ox session report` and the session report pane show `⏸ paused` instead of `● recording` (`session.paused` in `--json`).
+- **Daemon logs survive a reboot** — ox keeps daemon logs in your home directory instead of a temporary folder your computer clears, and cleans up ones untouched for 30 days. `ox daemon logs --path` shows where they are, and `ox daemon logs -f` keeps following when a restart renames the log.
 - **Ledger maintenance leaves unsaved plans alone** — re-redacting sessions or deleting a murmur no longer commits staged plan edits. Other staged sessions can still be included.
 
 ### Security
 
 - **Plan review notes reach your AI coworker as untrusted text** — `ox plan feedback show` and `ox plan review await` tell your AI coworker that everything reviewers wrote is feedback to weigh, never instructions to follow. The digest prints each item on one line without terminal escapes or hidden characters, and leaves out anchors that are unsafe to pass to a command.
+- **Credentials in error messages stay out of logs** — ox already scrubbed tokens and passwords from text it logs; it now scrubs error messages too, and the daemon's log gets the same scrubbing.
 - **Ledger recall stays inside its reminder** — the titles and snippets ox adds before each prompt are escaped and marked as coworker-written data, so text in the Ledger cannot end the reminder early or pass as an instruction.
 
 ## [0.25.0] - 2026-10-27
