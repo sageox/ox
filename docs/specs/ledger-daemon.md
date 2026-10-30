@@ -225,10 +225,9 @@ ox daemon logs      # Show recent daemon activity
 
 | File | Path | Purpose |
 |------|------|---------|
-| Socket | `$XDG_RUNTIME_DIR/sageox-daemon.sock` | IPC communication |
-| Lock | `$XDG_RUNTIME_DIR/sageox-daemon.lock` | Liveness detection |
-| PID | `$XDG_RUNTIME_DIR/sageox-daemon.pid` | Process identification |
-| Log | `~/.cache/sageox/daemon.log` | Activity logging |
+| Socket | `$XDG_RUNTIME_DIR/sageox/daemon/daemon-<workspace>.sock` | IPC communication |
+| PID | `$XDG_RUNTIME_DIR/sageox/daemon/daemon-<workspace>.pid` | Process identification |
+| Log | `$XDG_STATE_HOME/sageox/logs/daemon_<repo>_<workspace>.log` (default `~/.local/state`) | Activity logging; `ox daemon logs --path` prints it |
 
 ## Memory Budget
 

@@ -262,18 +262,56 @@ func StabilizeCWD() {
 	}
 }
 
-// LogPath returns the path to the daemon log file for the current workspace.
-// Requires project to be initialized with repo_id.
+// LogPath returns the log the current workspace's daemon writes: of the
+// workspace's logs in the persistent and /tmp directories, current and
+// rotated, the one written last. When there are none, it returns the
+// persistent path, or the /tmp one without a home directory.
+// A daemon writes the file it was spawned with, which is not always the
+// persistent current log: one that cannot open it falls back to /tmp
+// (OpenLog), one spawned by an older ox keeps its /tmp log after re-executing
+// a newer binary, and one that sleeps out a restart-loop throttle while
+// another start rotates its log writes the rotated generation.
 func LogPath() string {
-	cwd, _ := os.Getwd()
-	repoID := config.GetRepoID(cwd)
-	workspaceID := CurrentWorkspaceID()
-	return paths.DaemonLogFile(repoID, workspaceID)
+	persistent, temp := logPaths()
+	name := filepath.Base(temp)
+	latest, dirs := persistent, []string{filepath.Dir(persistent), filepath.Dir(temp)}
+	if !filepath.IsAbs(persistent) {
+		// no home directory: OpenLog refuses the relative path and uses /tmp
+		latest, dirs = temp, dirs[1:]
+	}
+	var latestMod time.Time
+	for _, dir := range dirs {
+		entries, _ := os.ReadDir(dir)
+		for _, entry := range entries {
+			// pruneDaemonLogs' rule, so a lookalike name from another
+			// workspace's repo_id cannot count as this workspace's log
+			if !strings.HasPrefix(entry.Name(), name) || currentLogName(entry.Name()) != name {
+				continue
+			}
+			// ties keep the earlier candidate: persistent before /tmp, and the
+			// current log, which sorts first, before its generations. Stat,
+			// not entry.Info: on Windows that is the directory listing's
+			// copy, which lags for a file a daemon holds open.
+			path := filepath.Join(dir, entry.Name())
+			if info, err := os.Stat(path); err == nil && info.ModTime().After(latestMod) {
+				latest, latestMod = path, info.ModTime()
+			}
+		}
+	}
+	return latest
 }
 
-// LogPathForWorkspace returns the log path for a specific workspace and repo.
-func LogPathForWorkspace(repoID, workspaceID string) string {
-	return paths.DaemonLogFile(repoID, workspaceID)
+// logPaths returns the current workspace's persistent daemon log and its /tmp
+// fallback, both named after config.FindProjectRoot, so a start from a
+// subdirectory logs where `ox daemon logs` at the root looks.
+func logPaths() (persistent, temp string) {
+	root := config.FindProjectRoot()
+	if root == "" {
+		root, _ = os.Getwd()
+	}
+	repoID := config.GetRepoID(root)
+	workspaceID := RepoBasedWorkspaceID(root)
+	return paths.DaemonLogFile(repoID, workspaceID), paths.TempDaemonLogFile(repoID, workspaceID)
 }
 
 // PidPath returns the path to the daemon PID file for the current workspace.

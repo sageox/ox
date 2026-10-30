@@ -159,6 +159,24 @@ func TestReexecDaemon_DeletedProjectDoesNotExec(t *testing.T) {
 	require.False(t, called)
 }
 
+// Failure prevented: `ox daemon logs -f` ran `tail -f`, which keeps reading
+// the renamed file after a daemon start rotates the log, so the new daemon's
+// lines never appear.
+func TestDaemonLogTailArgs_FollowTracksTheLogPath(t *testing.T) {
+	args := daemonLogTailArgs(50, false, true, "/logs/daemon.log")
+	assert.Equal(t, []string{"-n", "50", "-F", "/logs/daemon.log"}, args)
+}
+
+// Failure prevented: the daemon's logger skips the secret redaction
+// internal/logger's handlers apply, and the daemon log survives reboots.
+func TestNewDaemonLogger_RedactsSecrets(t *testing.T) {
+	var buf strings.Builder
+	newDaemonLogger(&buf, slog.LevelInfo).Info("http response body", "body", `{"token":"glpat-LIVEPATVALUE123456"}`)
+
+	assert.NotContains(t, buf.String(), "glpat-LIVEPATVALUE123456")
+	assert.Contains(t, buf.String(), "[REDACTED]")
+}
+
 // Failure prevented: disposable_machine is on, but `ox daemon start` never
 // hands it to the daemon, so none of the daemon's disposable-machine
 // behaviors happen.

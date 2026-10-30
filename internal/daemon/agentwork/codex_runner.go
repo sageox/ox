@@ -95,14 +95,15 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 
 	// Drain both streams even after their limits: stopping a pipe reader can
 	// deadlock a verbose child. Reject truncated summaries rather than publish them.
+	// stderr keeps its end: codex echoes the prompt there before its error.
 	stdout := &boundedCodexOutput{limit: 8 * 1024 * 1024}
-	stderr := &boundedCodexOutput{limit: 64 * 1024}
+	stderr := &tailBuffer{limit: 64 * 1024}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	cmd.WaitDelay = time.Second
 	start := time.Now()
 	waitErr := cmd.Run()
 	elapsed := time.Since(start)
-	stderrBuf := stderr.buf.Bytes()
+	stderrBuf := stderr.Bytes()
 	output := strings.TrimSpace(stdout.buf.String())
 
 	if ctx.Err() != nil {
@@ -118,7 +119,7 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
 			exitCode = exitErr.ExitCode()
-			r.logger.Warn("codex exited with non-zero status", "exit_code", exitCode, "stderr", string(stderrBuf))
+			r.logger.Warn("codex exited with non-zero status", "exit_code", exitCode, "stderr", failureTail(string(stderrBuf)))
 		} else {
 			return nil, fmt.Errorf("wait codex: %w", waitErr)
 		}

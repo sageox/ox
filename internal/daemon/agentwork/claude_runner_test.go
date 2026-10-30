@@ -327,6 +327,44 @@ func TestFailureDetail_CapsLength(t *testing.T) {
 	assert.True(t, strings.HasSuffix(got, "...(truncated)"))
 }
 
+// Failure prevented: a failed codex run logged its whole captured stderr, the
+// prompt it echoes with its session text, into a daemon log that now survives
+// reboots; and a capture that kept the first 64 KiB lost the error printed
+// after a longer echo.
+func TestRunnerFailureLog_KeepsTheErrorAndBoundsTheEcho(t *testing.T) {
+	// about 87 KB of echo, then the error; the sleep lets gemini's stderr
+	// reader drain the pipe before Wait closes it
+	script := "#!/bin/sh\n" +
+		"if [ \"$2\" = \"--help\" ]; then echo \"--sandbox --ephemeral --color --config\"; exit; fi\n" +
+		"i=0; while [ $i -lt 3000 ]; do printf 'session transcript line %s\\n' $i >&2; i=$((i+1)); done\n" +
+		"printf 'ERROR: usage limit reached\\n' >&2; sleep 0.2; exit 1\n"
+	for _, tc := range []struct {
+		name   string
+		runner func(binary string, logger *slog.Logger) Runner
+	}{
+		{"codex", func(binary string, logger *slog.Logger) Runner {
+			return &CodexRunner{binaryPath: binary, logger: logger}
+		}},
+		{"gemini", func(binary string, logger *slog.Logger) Runner {
+			return &GeminiRunner{binaryPath: binary, logger: logger}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			binary := filepath.Join(t.TempDir(), tc.name)
+			require.NoError(t, os.WriteFile(binary, []byte(script), 0o755))
+			var log bytes.Buffer
+
+			result, err := tc.runner(binary, slog.New(slog.NewTextHandler(&log, nil))).Run(context.Background(), RunRequest{Prompt: "p", TimeoutOverride: 10 * time.Second})
+
+			require.NoError(t, err)
+			assert.Equal(t, 1, result.ExitCode)
+			assert.Contains(t, log.String(), "ERROR: usage limit reached")
+			assert.Less(t, log.Len(), 2*failureDetailLimit, "the logged stderr must be bounded")
+		})
+	}
+}
+
 func TestClaudeRunner_Run_ExitCode(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "claude")
 	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' '{\"type\":\"result\",\"result\":\"partial\"}'\nexit 7\n"), 0o755))

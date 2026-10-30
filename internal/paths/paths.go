@@ -107,7 +107,7 @@ func DataDir() string {
 // CacheDir returns the cache directory per XDG Base Directory Specification.
 // https://specifications.freedesktop.org/basedir-spec/latest/
 //
-// Contains: guidance/, sessions/, daemon/ (logs)
+// Contains: guidance/, sessions/, logs/ (agent payload log)
 //
 // XDG mode (default): $XDG_CACHE_HOME/sageox (default: ~/.cache/sageox)
 // Legacy mode (OX_XDG_DISABLE=1): ~/.sageox/cache
@@ -125,6 +125,9 @@ func CacheDir() string {
 //
 // XDG mode (default): $XDG_RUNTIME_DIR/sageox (ephemeral, doesn't persist across reboots)
 // Legacy mode (OX_XDG_DISABLE=1): ~/.sageox/state
+//
+// Despite the name, this is not $XDG_STATE_HOME in XDG mode. Daemon logs must
+// survive a reboot, so DaemonLogFile uses $XDG_STATE_HOME instead.
 func StateDir() string {
 	if useXDGMode() {
 		// use runtime dir for ephemeral daemon state in XDG mode
@@ -322,27 +325,16 @@ func AlternateSessionCacheDirs(repoID string) []string {
 	return dirs
 }
 
-// TempDir returns the base temporary directory for SageOx ephemeral files.
+// TempDir returns the base temporary directory for SageOx ephemeral files,
+// such as the trace log and prime session markers. The OS empties /tmp at
+// boot (macOS, and Linux where /tmp is a tmpfs) or ages files out of it
+// (systemd-tmpfiles), so nothing that must persist belongs here.
 //
 // CRITICAL: Uses /tmp/<username>/sageox/ to avoid multi-user permission conflicts.
 //
 // Why /tmp/<username>/sageox/ (not /tmp/sageox/<username>/)?
 //   - If user A creates /tmp/sageox/ first, user B cannot write into it (owned by A)
 //   - /tmp/<username>/ is always owned by that user, so each user can create sageox/ inside
-//   - Daemon logs are ephemeral - only useful while daemon is running
-//   - OS automatically cleans /tmp (on reboot or via tmpwatch/systemd-tmpfiles)
-//   - Standard pattern (many apps use /tmp/<username>/)
-//
-// Structure:
-//
-//	/tmp/<username>/sageox/logs/daemon-<workspace_id>.log
-//
-// Example:
-//
-//	ryan: /tmp/ryan/sageox/logs/daemon-abc123.log
-//	ajit: /tmp/ajit/sageox/logs/daemon-def456.log
-//
-// Note: Heartbeats use cache (bounded size), logs use /tmp (OS cleanup).
 func TempDir() string {
 	username := os.Getenv("USER")
 	if username == "" {
@@ -363,38 +355,39 @@ func TempDir() string {
 	return filepath.Join(base, username, "sageox")
 }
 
-// DaemonLogFile returns the path to a specific daemon's log file.
-// Ensures the log directory exists with proper permissions.
+// DaemonLogFile returns the path to a specific daemon's log file. Logs are XDG
+// state data, kept across reboots, unlike TempDir and the XDG-mode StateDir:
 //
-// Returns /tmp/<username>/sageox/logs/daemon_<repo_id>_<workspace_id>.log
+//	$XDG_STATE_HOME/sageox/logs/daemon_<repo_id>_<workspace_id>.log  (default: ~/.local/state)
+//	~/.sageox/state/logs/daemon_<repo_id>_<workspace_id>.log          (legacy mode)
 //
 // Uses composite identifier (repo_id + workspace_id) for consistency with heartbeats:
 //   - repo_id makes logs debuggable (can see which repo)
 //   - workspace_id ensures uniqueness (supports multiple worktrees)
-//
-// Creates entire directory tree with 0700 permissions (owner-only access):
-//
-//	/tmp/<username>/sageox/       (0700 - owner-only)
-//	/tmp/<username>/sageox/logs/  (0700 - owner-only)
-//
-// CRITICAL: All directories are 0700 to prevent other users from accessing
-// daemon logs, which may contain sensitive information.
-//
-// If directory creation fails, still returns the path (caller will get error when opening file).
 func DaemonLogFile(repoID, workspaceID string) string {
-	// Ensure base sageox directory exists with 0700
-	sageoxDir := TempDir()
-	_ = os.MkdirAll(sageoxDir, 0700)
-	// Fix permissions even if directory already existed
-	_ = os.Chmod(sageoxDir, 0700)
+	dir := filepath.Join(xdgStateHome(), "sageox", "logs")
+	if !useXDGMode() {
+		dir = filepath.Join(StateDir(), "logs")
+	}
+	return filepath.Join(dir, daemonLogName(repoID, workspaceID))
+}
 
-	// Ensure logs subdirectory exists with 0700
-	logDir := filepath.Join(sageoxDir, "logs")
-	_ = os.MkdirAll(logDir, 0700)
-	// Fix permissions even if directory already existed
-	_ = os.Chmod(logDir, 0700)
+// TempDaemonLogFile returns where daemons logged before DaemonLogFile moved to
+// persistent storage, and where daemon.OpenLog falls back to:
+//
+//	/tmp/<username>/sageox/logs/daemon_<repo_id>_<workspace_id>.log
+func TempDaemonLogFile(repoID, workspaceID string) string {
+	return filepath.Join(TempDir(), "logs", daemonLogName(repoID, workspaceID))
+}
 
-	return filepath.Join(logDir, fmt.Sprintf("daemon_%s_%s.log", repoID, workspaceID))
+// daemonLogName sanitizes repoID, which comes from the repo's committed
+// .sageox/config.json: a "/.." in it would point the log, and the chmod and
+// pruning done to its directory, outside the logs directory.
+func daemonLogName(repoID, workspaceID string) string {
+	if repoID != "" {
+		repoID = sanitizePathComponent(repoID)
+	}
+	return fmt.Sprintf("daemon_%s_%s.log", repoID, workspaceID)
 }
 
 // AgentPayloadLogFile returns the diagnostics file for payload-producing
