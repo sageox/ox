@@ -968,12 +968,8 @@ func redactFileInPlace(abs string, _ *session.Redactor) error {
 	return os.Rename(tmpName, abs)
 }
 
-// stageAndAmendRedactedFiles stages each redacted path and creates an
-// amend commit. The amend lets the original commit retain its identity
-// in the operator's mental model ("the session-stop commit") while the
-// scrubbed bytes replace the leaked ones. Push pipeline will refuse if
-// the amend touches commits already on origin/main (we filtered those
-// out earlier; this is defense in depth).
+// stageAndAmendRedactedFiles locks the Ledger and amends only the repaired
+// paths. The interactive workflow has already excluded published content.
 func stageAndAmendRedactedFiles(ledgerPath string, byPath map[string][]redactHistoryFinding) error {
 	if len(byPath) == 0 {
 		return nil
@@ -994,9 +990,9 @@ func stageAndAmendRedactedFilesLocked(ctx context.Context, ledgerPath string, by
 		paths = append(paths, ":(literal)"+p)
 	}
 	sort.Strings(paths)
-	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse", "--"}, paths...)
-	if output, err := exec.CommandContext(ctx, "git", addArgs...).CombinedOutput(); err != nil {
-		return fmt.Errorf("git add: %s: %w", strings.TrimSpace(string(output)), err)
+	addArgs := append([]string{"add", "--sparse", "--"}, paths...)
+	if _, err := gitutil.RunGit(ctx, ledgerPath, addArgs...); err != nil {
+		return err
 	}
 	_, err := gitutil.AmendLedgerSnapshot(ctx, ledgerPath, paths...)
 	return err

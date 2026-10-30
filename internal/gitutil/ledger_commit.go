@@ -154,9 +154,10 @@ func AmendLedgerSnapshot(ctx context.Context, repoPath string, pathspecs ...stri
 	if err := validateLedgerTree(ctx, repoPath, tip, tree); err != nil {
 		return false, err
 	}
-	// Compare with the original parent: quarantining a new file removes it
-	// from the holding commit, rather than deleting earlier session content.
-	if err := assertNoSacredMassDeletion(ctx, repoPath, parent, tree, nil); err != nil {
+	// Check only the repaired paths against the original parent. Newly
+	// quarantined files are not historical deletions, and an unrelated
+	// confirmed session deletion in HEAD must not block the repair.
+	if err := assertNoSacredMassDeletion(ctx, repoPath, parent, tree, nil, nil, pathspecs...); err != nil {
 		return false, err
 	}
 	authorEnv := []string{"GIT_AUTHOR_NAME=" + fields[1], "GIT_AUTHOR_EMAIL=" + fields[2], "GIT_AUTHOR_DATE=" + fields[3]}
@@ -232,7 +233,7 @@ func commitLedgerTree(ctx context.Context, repoPath, tree, parent, tip, message 
 	if err := validateLedgerTree(ctx, repoPath, parent, tree); err != nil {
 		return err
 	}
-	if err := assertNoSacredMassDeletion(ctx, repoPath, parent, tree, preserved, deletedSessions...); err != nil {
+	if err := assertNoSacredMassDeletion(ctx, repoPath, parent, tree, preserved, deletedSessions); err != nil {
 		return err
 	}
 	var parents []string
@@ -326,12 +327,12 @@ func writeScopedIndexTree(ctx context.Context, repoPath, parent string, pathspec
 // Fail-closed, matching validateLedgerTree: an unborn branch (parent=="") has
 // no deletions and passes; if the diff itself cannot be computed the caller
 // must NOT commit, so the error propagates rather than defaulting to "safe".
-func assertNoSacredMassDeletion(ctx context.Context, repoPath, parent, tree string, preserved []string, deletedSessions ...string) error {
+func assertNoSacredMassDeletion(ctx context.Context, repoPath, parent, tree string, preserved, deletedSessions []string, pathspecs ...string) error {
 	if parent == "" {
 		return nil // first commit: nothing pre-existing to delete
 	}
-	out, err := cleanGitOutput(ctx, repoPath,
-		"diff-tree", "--no-commit-id", "--name-only", "-r", "--diff-filter=D", parent, tree)
+	args := append([]string{"diff-tree", "--no-commit-id", "--name-only", "-r", "--diff-filter=D", parent, tree, "--"}, pathspecs...)
+	out, err := cleanGitOutput(ctx, repoPath, args...)
 	if err != nil {
 		return fmt.Errorf("sacred mass-delete guard: git diff-tree %s..%s: %w",
 			shortOID(parent), shortOID(tree), err)

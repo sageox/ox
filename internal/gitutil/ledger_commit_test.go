@@ -694,26 +694,45 @@ func TestAmendLedgerSnapshot_InvalidSessionBytesRemainRecoverable(t *testing.T) 
 	}
 }
 
-// The holding commit's existing deletions still count when a repair only
-// changes another file; comparing against HEAD would hide the original wipe.
-func TestAmendLedgerSnapshot_RefusesHoldingCommitSacredWipe(t *testing.T) {
+// Repairing another path must not reject a session deletion already confirmed
+// through the deletion writer. New unconfirmed deletions still need the guard.
+func TestAmendLedgerSnapshot_PreservesConfirmedDeletion(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git repository")
 	}
 	repo := newSnapshotRepo(t)
-	paths := seedSacredSessionFiles(t, repo, sacred.MassDeleteThreshold+1)
-	gitInRepo(t, repo, "rm", "-r", "sessions")
-	gitInRepo(t, repo, "commit", "-m", "unsafe holding deletion")
-	head := gitInRepo(t, repo, "rev-parse", "HEAD")
-	writeGitutilFixture(t, repo, "repair.txt", "pending repair\n")
-	gitInRepo(t, repo, "add", "repair.txt")
-
-	committed, err := AmendLedgerSnapshot(context.Background(), repo, "repair.txt")
-	require.ErrorContains(t, err, "sacred")
-	assert.False(t, committed)
-	assert.Equal(t, head, gitInRepo(t, repo, "rev-parse", "HEAD"))
-	assert.Equal(t, "repair.txt", gitInRepo(t, repo, "diff", "--cached", "--name-only"))
-	for _, path := range paths {
-		assert.Equal(t, "recording "+path, gitInRepo(t, repo, "show", "HEAD^:"+path), "the previous recorded bytes remain recoverable")
+	for _, name := range []string{"selected", "remaining"} {
+		for i := range sacred.MassDeleteThreshold + 1 {
+			writeGitutilFixture(t, repo, "sessions/"+name+"/part-"+string(rune('a'+i))+".md", "recorded work\n")
+		}
 	}
+	gitInRepo(t, repo, "add", "sessions")
+	gitInRepo(t, repo, "commit", "-m", "seed sessions")
+	ctx := context.Background()
+	require.NoError(t, WithRepoLock(ctx, repo, func() error {
+		gitInRepo(t, repo, "rm", "-r", "sessions/selected")
+		_, err := CommitLedgerSessionDeletion(ctx, repo, "delete selected", []string{"selected"})
+		return err
+	}))
+	writeGitutilFixture(t, repo, "repair.txt", "repaired\n")
+	gitInRepo(t, repo, "add", "repair.txt")
+	require.NoError(t, WithRepoLock(ctx, repo, func() error {
+		committed, err := AmendLedgerSnapshot(ctx, repo, "repair.txt")
+		require.NoError(t, err)
+		assert.True(t, committed)
+		return nil
+	}))
+	assert.False(t, headHasPath(t, repo, "sessions/selected"))
+	assert.True(t, headHasPath(t, repo, "sessions/remaining"))
+	assert.Equal(t, "repaired\n", headBlob(t, repo, "repair.txt"))
+
+	head := gitInRepo(t, repo, "rev-parse", "HEAD")
+	gitInRepo(t, repo, "rm", "-r", "sessions/remaining")
+	require.NoError(t, WithRepoLock(ctx, repo, func() error {
+		committed, err := AmendLedgerSnapshot(ctx, repo, "sessions/remaining")
+		require.ErrorContains(t, err, "sacred")
+		assert.False(t, committed)
+		return nil
+	}))
+	assert.Equal(t, head, gitInRepo(t, repo, "rev-parse", "HEAD"))
 }

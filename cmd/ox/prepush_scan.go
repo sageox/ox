@@ -253,9 +253,9 @@ func countDistinctPaths(findings []PrePushFinding) int {
 	return len(seen)
 }
 
-// runPrePushSecretGate repairs or quarantines current session artifacts, then
-// verifies the immutable session blobs actually reachable by the push. Any
-// uninspected or still-sensitive content keeps publication pending.
+// runPrePushSecretGate repairs or quarantines current session artifacts.
+// PushWithRetry separately validates the immutable objects before publication.
+// The caller must hold the repo lock: repairs may stage and amend HEAD.
 func runPrePushSecretGate(ctx context.Context, ledgerPath string) error {
 	if err := runSessionSecretGate(ctx, ledgerPath, func() (*PrePushScanResult, error) {
 		return scanPrePushForSecrets(ctx, ledgerPath)
@@ -314,7 +314,7 @@ func runSessionSecretGate(ctx context.Context, ledgerPath string, scan func() (*
 		}
 		return nil
 	}
-	q, err := quarantineUnredactableFindings(ledgerPath, rescan.Findings, amendCommit)
+	q, err := quarantineUnredactableFindings(ctx, ledgerPath, rescan.Findings, amendCommit)
 	emitQuarantineWarning(os.Stderr, auto, q, rescan)
 	if err != nil {
 		return fmt.Errorf("prepare session quarantine: %w", err)
