@@ -413,6 +413,11 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 		return nil
 	}
 
+	// Refuse before rewriting files or moving them out of quarantine.
+	if err := checkRedactionIndex(context.Background(), opts.LedgerPath); err != nil {
+		return fmt.Errorf("prepare redaction: %w", err)
+	}
+
 	// Snapshot BEFORE any modification. This is the most important safety
 	// rail in the entire tool — operator can always recover from "the
 	// scrubber broke my ledger" by extracting the snapshot.

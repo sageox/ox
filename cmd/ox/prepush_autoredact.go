@@ -89,6 +89,8 @@ type autoRedactResult struct {
 // checkRedactionIndex refuses before a repair can overwrite a Git operation's
 // staged resolution or modify files while another operation is incomplete.
 func checkRedactionIndex(ctx context.Context, ledgerPath string) error {
+	ctx, cancel := context.WithTimeout(ctx, lockedCommitTimeout)
+	defer cancel()
 	if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
 		return err
 	}

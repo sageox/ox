@@ -146,12 +146,14 @@ func TestRedactionRepairs_RefuseConflictsAndRetry(t *testing.T) {
 		t.Skip("short: real Git redaction repair and retry")
 	}
 	for _, tc := range []struct {
-		name, file string
-		autostash  bool
+		name, file  string
+		autostash   bool
+		interactive bool
 	}{
-		{"rebase JSONL", "raw.jsonl", false},
-		{"rebase notes", "notes.md", false},
-		{"autostash conflict", "raw.jsonl", true},
+		{"rebase JSONL", "raw.jsonl", false, false},
+		{"rebase notes", "notes.md", false, false},
+		{"autostash conflict", "raw.jsonl", true, false},
+		{"interactive rebase", "raw.jsonl", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const name = "2026-10-22-repair"
@@ -179,8 +181,21 @@ func TestRedactionRepairs_RefuseConflictsAndRetry(t *testing.T) {
 			index := mustGitCapture(t, work, "ls-files", "--stage")
 			before, err := os.ReadFile(filepath.Join(work, rel))
 			require.NoError(t, err)
-			repair := func() error { return runPrePushSecretGate(context.Background(), work) }
-			err = gitutil.WithRepoLock(context.Background(), work, repair)
+			repair := func() error {
+				if tc.interactive {
+					return runRedactHistoryWorkflow(redactHistoryOptions{
+						LedgerPath: work,
+						BackupDir:  t.TempDir(),
+						Scope:      &sessionScope{Names: []string{name}},
+						Stdin:      strings.NewReader("y\n"),
+						Stdout:     &strings.Builder{},
+					})
+				}
+				return gitutil.WithRepoLock(context.Background(), work, func() error {
+					return runPrePushSecretGate(context.Background(), work)
+				})
+			}
+			err = repair()
 			require.Error(t, err)
 			if tc.autostash {
 				require.ErrorContains(t, err, "unresolved conflicts")
@@ -195,7 +210,7 @@ func TestRedactionRepairs_RefuseConflictsAndRetry(t *testing.T) {
 			} else {
 				require.NoError(t, os.RemoveAll(rebase))
 			}
-			require.NoError(t, gitutil.WithRepoLock(context.Background(), work, repair))
+			require.NoError(t, repair())
 			if tc.file == "raw.jsonl" {
 				assert.NotContains(t, mustGitCapture(t, work, "show", "HEAD:"+rel), canary)
 			} else {
