@@ -264,13 +264,13 @@ func StabilizeCWD() {
 
 // LogPath returns the log the current workspace's daemon writes: of the
 // workspace's logs in the persistent and /tmp directories, current and
-// rotated, the one written last, or the persistent path when there are none.
+// rotated, the one written last. When there are none, it returns the
+// persistent path, or the /tmp one without a home directory.
 // A daemon writes the file it was spawned with, which is not always the
 // persistent current log: one that cannot open it falls back to /tmp
 // (OpenLog), one spawned by an older ox keeps its /tmp log after re-executing
 // a newer binary, and one that sleeps out a restart-loop throttle while
 // another start rotates its log writes the rotated generation.
-// Requires project to be initialized with repo_id.
 func LogPath() string {
 	persistent, temp := logPaths()
 	name := filepath.Base(temp)
@@ -302,9 +302,8 @@ func LogPath() string {
 }
 
 // logPaths returns the current workspace's persistent daemon log and its /tmp
-// fallback, named after the project root, as the spawned daemon is
-// (findProjectRootForDaemon): a start from a subdirectory must log where
-// `ox daemon logs` at the root looks.
+// fallback, both named after config.FindProjectRoot, so a start from a
+// subdirectory logs where `ox daemon logs` at the root looks.
 func logPaths() (persistent, temp string) {
 	root := config.FindProjectRoot()
 	if root == "" {

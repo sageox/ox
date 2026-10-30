@@ -29,8 +29,8 @@ func failureDetail(stderr, stdout string) string {
 
 // failureTail returns the last failureDetailLimit bytes of a failed CLI's
 // stderr, redacted. codex prints the prompt it was given, session text
-// included, before its error, so the end is the part worth keeping in a
-// daemon log that outlives reboots.
+// included, before its error, so the end is where the error is; the rest of
+// the kept bytes can be the end of that prompt.
 func failureTail(stderr string) string {
 	detail := logger.RedactSecrets(strings.TrimSpace(stderr))
 	if len(detail) > failureDetailLimit {

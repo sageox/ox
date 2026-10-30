@@ -185,13 +185,14 @@ func TestPruneDaemonLogs(t *testing.T) {
 			remaining(t, dir))
 	})
 
-	// a runaway's log is rotated by the restart that investigates it, and the
-	// prune in that same start must not delete it
-	t.Run("keeps each workspace's newest rotated log over the cap", func(t *testing.T) {
+	// a runaway's log is rotated by the restart that investigates it, and no
+	// prune may delete it, even after a daemon that slept out a restart-loop
+	// throttle writes an earlier generation: rename keeps the runaway's mtime
+	t.Run("keeps each workspace's most recently rotated log over the cap", func(t *testing.T) {
 		dir := t.TempDir()
 		quarter := int64(maxDaemonLogDirBytes / 4)
 		write(t, dir, "daemon_repo_a.log", 1, ago(time.Minute))
-		write(t, dir, "daemon_repo_a.log.1", quarter, ago(5*day))
+		write(t, dir, "daemon_repo_a.log.1", quarter, ago(time.Minute)) // the throttled daemon's
 		write(t, dir, "daemon_repo_a.log.2", 5*quarter, ago(time.Hour)) // the runaway, just rotated
 		write(t, dir, "daemon_repo_b.log.1", quarter, ago(4*day))
 		write(t, dir, "daemon_repo_b.log.2", quarter, ago(2*day))
@@ -277,6 +278,33 @@ func TestOpenLogFile_BusyLockStillOpensTheLog(t *testing.T) {
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	assert.Equal(t, int64(maxDaemonLogBytes+1), info.Size(), "rotation waits for a start that gets the lock")
+}
+
+// Failure prevented: on Linux without TMPDIR the lock directory is
+// /tmp/sageox-locks, shared by every user and private to the first. Other
+// users could not open the lock file, so no start of theirs got the lock, and
+// their persistent logs were never rotated or pruned.
+func TestOpenLogFile_UnopenableLockStillRotates(t *testing.T) {
+	base := t.TempDir()
+	// a file where the lock directory belongs fails the open on every platform
+	tmp := filepath.Join(base, "tmp")
+	require.NoError(t, os.Mkdir(tmp, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "sageox-locks"), nil, 0o600))
+	t.Setenv("TMPDIR", tmp) // os.TempDir on Unix
+	t.Setenv("TMP", tmp)    // and on Windows
+	dir := filepath.Join(base, "logs")
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	require.Equal(t, filepath.Join(tmp, "sageox-locks"), filepath.Dir(fileutil.LockPath(dir)), "the lock must be the one this test broke")
+	path := filepath.Join(dir, "daemon_repo_ws.log")
+	writeSparseFile(t, path, maxDaemonLogBytes+1)
+
+	f, err := openLogFile(path)
+
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Zero(t, info.Size(), "the log must rotate without the lock")
 }
 
 // Failure prevented: a session started in a subdirectory (repo/web) spawned
