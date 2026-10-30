@@ -2,6 +2,7 @@ package agentwork
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -799,7 +800,8 @@ func TestGitCommitAndPush_RefusesUnuploadedArtifacts(t *testing.T) {
 // Failure prevented: the daemon re-detected and retried a refused session every
 // few minutes, forever, re-scanning the whole transcript each time. Any change
 // to the refused files, including a deletion or an edit stamped older than the
-// refusal, must make the session eligible again.
+// refusal, must make the session eligible again, and a redacted transcript must
+// then publish.
 func TestUploadOnly_SecretGuardRefusalWaitsForAChange(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git operations")
@@ -811,24 +813,25 @@ func TestUploadOnly_SecretGuardRefusalWaitsForAChange(t *testing.T) {
 {"entry_count":2}
 `
 	for _, tc := range []struct {
-		name   string
-		change func(t *testing.T, cacheDir string)
+		name      string
+		change    func(t *testing.T, cacheDir string)
+		publishes bool // the change removed the credential
 	}{
 		{"transcript rewritten", func(t *testing.T, cacheDir string) {
 			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"), []byte(testRawContent), 0o644))
-		}},
+		}, true},
 		{"transcript edited with an older timestamp", func(t *testing.T, cacheDir string) {
 			rawPath := filepath.Join(cacheDir, "raw.jsonl")
 			require.NoError(t, os.WriteFile(rawPath, []byte(testRawContent), 0o644))
 			earlier := time.Now().Add(-time.Hour)
 			require.NoError(t, os.Chtimes(rawPath, earlier, earlier))
-		}},
+		}, true},
 		{"artifact deleted", func(t *testing.T, cacheDir string) {
 			require.NoError(t, os.Remove(filepath.Join(cacheDir, requiredArtifacts[0])))
-		}},
+		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, ledger := setupBareAndCloneLedger(t)
+			bare, ledger := setupBareAndCloneLedger(t)
 			handler := NewSessionFinalizeHandler(slog.Default())
 			handler.skipGit = false
 			handler.ledgerMu = &sync.Mutex{}
@@ -864,7 +867,21 @@ func TestUploadOnly_SecretGuardRefusalWaitsForAChange(t *testing.T) {
 				"the refusal marker must stay in the cache, never in the Ledger's tracked sessions/")
 
 			tc.change(t, cacheDir)
-			require.NotNil(t, detected(), "a session changed since the refusal must be retried")
+			item = detected()
+			require.NotNil(t, item, "a session changed since the refusal must be retried")
+			if !tc.publishes {
+				return
+			}
+			require.NoError(t, handler.ProcessResult(item, &RunResult{}), "the redacted session must publish")
+			require.Equal(t, gitOutput(t, ledger, "rev-parse", "HEAD"), gitOutput(t, bare, "rev-parse", "HEAD"),
+				"the publication must reach the remote")
+			oid, size, err := lfs.ParsePointer(gitOutput(t, bare, "show", "HEAD:sessions/"+name+"/raw.jsonl"))
+			require.NoError(t, err, "the published transcript must be an LFS pointer")
+			require.Equal(t, "sha256:"+lfs.ComputeOID([]byte(testRawContent)), oid, "the pointer must name the redacted transcript")
+			require.Equal(t, int64(len(testRawContent)), size)
+			var meta lfs.SessionMeta
+			require.NoError(t, json.Unmarshal([]byte(gitOutput(t, bare, "show", "HEAD:sessions/"+name+"/meta.json")), &meta))
+			require.Equal(t, oid, meta.Files["raw.jsonl"].OID, "the published manifest must name the redacted transcript")
 		})
 	}
 }
