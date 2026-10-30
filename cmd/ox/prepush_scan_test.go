@@ -36,8 +36,10 @@ func TestSessionSecretGateCannotBypassFailedVerification(t *testing.T) {
 
 func TestSessionSecretGateRequiresVerifiedCleanAfterQuarantine(t *testing.T) {
 	t.Setenv("OX_ALLOW_SECRETS", "")
+	ledger := t.TempDir()
+	initGitRepo(t, ledger)
 	calls := 0
-	err := runSessionSecretGate(context.Background(), t.TempDir(), func() (*PrePushScanResult, error) {
+	err := runSessionSecretGate(context.Background(), ledger, func() (*PrePushScanResult, error) {
 		calls++
 		return &PrePushScanResult{Findings: []PrePushFinding{{Detector: "synthetic", Path: "sessions/unrecoverable.txt", Line: 1}}}, nil
 	}, false)

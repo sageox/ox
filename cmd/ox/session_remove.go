@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/cli"
@@ -341,36 +339,42 @@ func removedLocationLabel(local, ledger bool) string {
 // single git commit + push. Returns the count of successfully staged removals.
 // Uses pushLedger() for push with pull --rebase retry on conflict.
 func batchDeleteSessionsFromLedger(ledgerPath string, sessionNames []string) (int, error) {
-	var staged int
+	ctx := context.Background()
+	var staged []string
 	// rm + commit under the repo lock, so the commit cannot move the branch
 	// under a daemon sync rebase (sageox/ox#1541); pushLedger takes it itself
-	if err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
-		var lastStaged string
+	if err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+			return err
+		}
+		if unmerged, err := gitutil.HasUnmergedEntries(ctx, ledgerPath); err != nil {
+			return err
+		} else if unmerged {
+			return fmt.Errorf("ledger has unresolved conflicts; run ox doctor --fix")
+		}
 		for _, name := range sessionNames {
-			gitRm := exec.Command("git", "rm", "-r", "--force", filepath.Join("sessions", name))
-			gitRm.Dir = ledgerPath
-			if out, err := gitRm.CombinedOutput(); err != nil {
-				slog.Warn("git_rm_session", "session", name, "err", fmt.Sprintf("%s: %v", string(out), err))
+			if err := session.ValidateDraftSessionName(name); err != nil {
+				slog.Warn("skip_invalid_session_name", "session", name, "err", err)
 				continue
 			}
-			staged++
-			lastStaged = name
+			if _, err := gitutil.RunGit(ctx, ledgerPath, "rm", "-r", "--force", "--", ":(literal)sessions/"+name); err != nil {
+				slog.Warn("git_rm_session", "session", name, "err", err)
+				continue
+			}
+			staged = append(staged, name)
 		}
 
-		if staged == 0 {
+		if len(staged) == 0 {
 			return fmt.Errorf("no sessions could be staged for removal")
 		}
 
 		// single commit for all removals
-		commitMsg := fmt.Sprintf("session: delete %d session(s)", staged)
-		if staged == 1 {
-			commitMsg = fmt.Sprintf("session: delete %s", lastStaged)
+		commitMsg := fmt.Sprintf("session: delete %d session(s)", len(staged))
+		if len(staged) == 1 {
+			commitMsg = fmt.Sprintf("session: delete %s", staged[0])
 		}
-		gitCommit := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-		if out, err := gitCommit.CombinedOutput(); err != nil {
-			return fmt.Errorf("git commit: %s: %w", string(out), err)
-		}
-		return nil
+		_, err := gitutil.CommitLedgerSessionDeletion(ctx, ledgerPath, commitMsg, staged, allButPlansPathspec...)
+		return err
 	}); err != nil {
 		return 0, err
 	}
@@ -380,5 +384,5 @@ func batchDeleteSessionsFromLedger(ledgerPath string, sessionNames []string) (in
 		return 0, fmt.Errorf("push: %w", err)
 	}
 
-	return staged, nil
+	return len(staged), nil
 }

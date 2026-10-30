@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -71,6 +72,81 @@ func advanceRemote(t *testing.T, writer string, n int) {
 	for _, args := range [][]string{{"add", "-A"}, {"commit", "-q", "-m", fmt.Sprintf("remote %d", n)}, {"push", "-q", "origin", "main"}} {
 		out, err := runGitOut(t, writer, args...)
 		require.NoError(t, err, out)
+	}
+}
+
+// A completed or refused deletion must leave the Ledger usable by later daemon
+// pulls, including with a staged plan left over.
+func TestPullManagedRepo_ProgressAfterSessionDeletion(t *testing.T) {
+	for _, reject := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rejected=%t", reject), func(t *testing.T) {
+			_, local, writer := setupRacingLedger(t)
+			const selected = "sessions/selected/meta.json"
+			const plan = "data/plans/draft/plan.md"
+			const invalid = "sessions/invalid/meta.json"
+			for _, path := range []string{selected, plan} {
+				require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(writer, path)), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(writer, path), []byte("{}\n"), 0o644))
+			}
+			gitInDir(t, writer, "add", "sessions", "data/plans")
+			gitInDir(t, writer, "commit", "-m", "seed session and plan")
+			gitInDir(t, writer, "push")
+			gitInDir(t, local, "pull", "--ff-only")
+			require.NoError(t, os.WriteFile(filepath.Join(local, plan), []byte("unsaved plan\n"), 0o644))
+			gitInDir(t, local, "add", plan)
+			if reject {
+				require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(local, invalid)), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(local, invalid), []byte("invalid JSON"), 0o644))
+				gitInDir(t, local, "add", invalid)
+			}
+			s := newTestScheduler(t.TempDir())
+			opts := ManagedRepoPullOpts{
+				RepoPath: local, RepoName: "ledger", ImmutablePaths: true,
+				NoSymlinks: true, ResolveRules: ledger.DefaultResolveRules,
+				SkipFetchAgeCheck: true, Logger: s.logger,
+			}
+			require.NoError(t, gitutil.WithRepoLock(context.Background(), local, func() error {
+				_, err := gitutil.RunGit(context.Background(), local, "rm", "-r", "sessions/selected")
+				require.NoError(t, err)
+				committed, err := gitutil.CommitLedgerSessionDeletion(context.Background(), local, "session: delete selected", []string{"selected"}, ":/", ":(exclude)data/plans")
+				if reject {
+					require.ErrorContains(t, err, "invalid JSON object")
+					assert.False(t, committed)
+				} else {
+					require.NoError(t, err)
+					assert.True(t, committed)
+				}
+				staged, err := gitutil.RunGit(context.Background(), local, "diff", "--cached", "--name-only", "--", plan)
+				require.NoError(t, err)
+				require.Equal(t, plan, staged, "daemon pulls must start with the unsaved plan still staged")
+				return nil
+			}))
+			for cycle := range 2 {
+				advanceRemote(t, writer, cycle)
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				result := s.pullManagedRepo(ctx, opts)
+				cancel()
+				require.NoError(t, result.Err)
+				require.True(t, result.PullRan, "sync must actually pull: %+v", result)
+				assert.Nil(t, result.Issue)
+				assert.FileExists(t, filepath.Join(local, fmt.Sprintf("c%03d.txt", cycle)))
+				assert.False(t, gitutil.IsRebaseInProgress(local))
+				unmerged, err := gitutil.HasUnmergedEntries(context.Background(), local)
+				require.NoError(t, err)
+				assert.False(t, unmerged)
+			}
+			content, err := os.ReadFile(filepath.Join(local, plan))
+			require.NoError(t, err)
+			assert.Equal(t, "unsaved plan\n", string(content))
+			if reject {
+				assert.FileExists(t, filepath.Join(local, selected))
+				content, err := os.ReadFile(filepath.Join(local, invalid))
+				require.NoError(t, err)
+				assert.Equal(t, "invalid JSON", string(content))
+			} else {
+				assert.NoFileExists(t, filepath.Join(local, selected))
+			}
+		})
 	}
 }
 

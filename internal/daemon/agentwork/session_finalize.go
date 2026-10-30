@@ -2195,6 +2195,12 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 		return store.PreserveSessionCache(payload.SessionDir, payload.SessionDir)
 	}
 
+	if !h.skipGit {
+		if err := gitutil.IsSafeForGitOps(payload.LedgerPath); err != nil {
+			return "", err
+		}
+	}
+
 	// Supersede any draft placeholder wholesale before copying (ADR-029).
 	// This loop copies every file from the cache dir over the destination, but
 	// a copy is not a purge: a server-authored summary.json sitting in the
@@ -2512,15 +2518,17 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	if err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
 		// Index removals for optional traces must never resolve a real conflict.
 		// Check before either pointer writes or staging mutate this transaction.
-		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
-			return err
-		}
 		unmerged, err := gitutil.HasUnmergedEntries(ctx, ledgerPath)
 		if err != nil {
 			return err
 		}
 		if unmerged {
 			return fmt.Errorf("commit blocked: %w", ErrLedgerUnresolved)
+		}
+		// Keep the conflict classification above so a merge marker cannot hide
+		// the ledger-wide blocker that pauses finalization retries.
+		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+			return err
 		}
 		// A raw-only first push can trigger GitLab GC before a second pointer
 		// push, unlinking the newly uploaded objects from the project. Publish
