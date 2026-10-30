@@ -379,13 +379,20 @@ read summary.has_failed for the result and the process exit code for scripting.`
 			_ = doctor.ClearNeedsDoctorHuman(gitRoot)
 		}
 
-		// set or clear .needs-doctor-agent marker based on whether any check
-		// requires agent intervention (e.g., incomplete sessions)
+		// Clear a stale agent chore only after session inspection succeeds.
+		// Recovery/upload work and failed or skipped scans must keep their
+		// existing marker even when they cannot request a summary yet.
 		if gitRoot != "" {
 			if hasRequiresAgentIssues(categories) {
 				_ = doctor.SetNeedsDoctorAgent(gitRoot)
 			} else {
-				_ = doctor.ClearNeedsDoctorAgent(gitRoot)
+				for _, category := range categories {
+					for _, check := range category.checks {
+						if check.slug == CheckSlugSessionIncomplete && check.passed && !check.warning && !check.skipped {
+							_ = doctor.ClearNeedsDoctorAgent(gitRoot)
+						}
+					}
+				}
 			}
 		}
 

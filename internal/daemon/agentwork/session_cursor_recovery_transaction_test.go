@@ -190,7 +190,7 @@ func TestCursorInactivityRecoveryRechecksActivityInsideCaptureLocks(t *testing.T
 			var detectErr error
 			go func() {
 				defer close(done)
-				items, _, detectErr = handler.detectInDir(filepath.Dir(f.cachePath), f.ledgerPath)
+				items, _, detectErr = handler.detectInDir(filepath.Dir(f.cachePath), f.ledgerPath, true)
 			}()
 			t.Cleanup(func() { release(); <-done })
 			select {

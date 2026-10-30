@@ -465,16 +465,22 @@ func (s *Store) getRaw(ctx context.Context, id string) (*Task, error) {
 // Complete marks a task completed with an optional result note. Idempotent on
 // already-terminal tasks.
 func (s *Store) Complete(id, result string) error {
-	return s.terminate(id, StatusCompleted, result)
+	return s.terminate(id, StatusCompleted, result, "")
 }
 
 // Cancel marks a task canceled with an optional reason. Idempotent on
 // already-terminal tasks.
 func (s *Store) Cancel(id, reason string) error {
-	return s.terminate(id, StatusCanceled, reason)
+	return s.terminate(id, StatusCanceled, reason, "")
 }
 
-func (s *Store) terminate(id string, status Status, note string) error {
+// CancelReady cancels a task only while it is still ready. A concurrent claim
+// is preserved, even when a caller selected the task before it was claimed.
+func (s *Store) CancelReady(id, reason string) error {
+	return s.terminate(id, StatusCanceled, reason, StatusReady)
+}
+
+func (s *Store) terminate(id string, status Status, note string, requiredStatus Status) error {
 	ctx := context.Background()
 	if err := s.reconcile(ctx); err != nil {
 		return err
@@ -497,8 +503,8 @@ func (s *Store) terminate(id string, status Status, note string) error {
 	_, err = s.db.ExecContext(ctx,
 		`UPDATE tasks SET status=?, completed_at=?, result=CASE WHEN ?='' THEN result ELSE ? END,
 			claimed_by_agent_id='', claimed_by_pid=0, claimed_host='', claimed_at=0, lease_expires_at=0
-		 WHERE id=? AND status NOT IN ('completed','canceled')`,
-		string(status), tsToDB(time.Now()), note, note, id)
+		 WHERE id=? AND status NOT IN ('completed','canceled') AND (?='' OR status=?)`,
+		string(status), tsToDB(time.Now()), note, note, id, string(requiredStatus), string(requiredStatus))
 	return err
 }
 
