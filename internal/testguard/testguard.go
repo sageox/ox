@@ -39,6 +39,9 @@ var allowedBaseEnv = []string{
 	// keeps ox's git credentials out of the OS keychain, which is not under HOME
 	// and so not isolated by a test's home sandbox
 	"OX_GIT_CREDENTIALS_FILE",
+	// the daemon registry and sockets follow it, not HOME; without it a
+	// subprocess falls back to the system temp dir, outside a test's sandbox
+	"XDG_RUNTIME_DIR",
 }
 
 // TestOxBinaryEnv selects a prebuilt ox binary for compiled-binary tests.

@@ -60,7 +60,8 @@ func isolateHome(sandbox string) error {
 
 	home := filepath.Join(sandbox, "home")
 	mirrors := filepath.Join(sandbox, "path")
-	for _, dir := range []string{home, mirrors} {
+	runtimeDir := filepath.Join(sandbox, "runtime")
+	for _, dir := range []string{home, mirrors, runtimeDir} {
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			return err
 		}
@@ -68,9 +69,15 @@ func isolateHome(sandbox string) error {
 
 	// USERPROFILE is what os.UserHomeDir reads on Windows. An inherited
 	// GIT_CONFIG_GLOBAL would take precedence over the sandbox's ~/.gitconfig.
+	// The daemon registry, sockets and PID files are not under HOME: in XDG mode
+	// they follow XDG_RUNTIME_DIR, or the system temp dir when it is unset, so it
+	// is pointed into the sandbox rather than unset. Inherited, a test that
+	// reached daemon.KillAllDaemons stopped every ox daemon the developer had
+	// running.
 	setenv := map[string]string{
 		"HOME": home, "USERPROFILE": home,
 		"GIT_CONFIG_GLOBAL": filepath.Join(home, ".gitconfig"),
+		"XDG_RUNTIME_DIR":   runtimeDir,
 	}
 	// Unset rather than point into the sandbox, so the defaults derived from HOME
 	// are what tests exercise. CLAUDE_CONFIG_DIR and CODEX_HOME relocate those
@@ -127,7 +134,7 @@ func isolateHome(sandbox string) error {
 		return err
 	}
 
-	return verifyHomeSandbox(home)
+	return verifyHomeSandbox(home, runtimeDir)
 }
 
 // hideCLIs returns pathList with each directory that holds one of hiddenCLIs
@@ -186,7 +193,7 @@ func recordDeveloperEnv(key string) {
 // verifyHomeSandbox checks the redirect from the outside, the way the code under
 // test will see it. Calling into internal/paths here also pins its cached home
 // directory to the sandbox for the rest of the run.
-func verifyHomeSandbox(home string) error {
+func verifyHomeSandbox(home, runtimeDir string) error {
 	inside := func(path string) bool { return strings.HasPrefix(path, home+string(filepath.Separator)) }
 
 	if got, err := os.UserHomeDir(); err != nil || got != home {
@@ -207,12 +214,22 @@ func verifyHomeSandbox(home string) error {
 				"Resolve that path when it is used instead", name, dir, home)
 		}
 	}
+	// Legacy mode keeps daemon state under the home, XDG mode under runtimeDir.
+	if dir := paths.DaemonStateDir(); !inside(dir) && !strings.HasPrefix(dir, runtimeDir+string(filepath.Separator)) {
+		return fmt.Errorf("paths.DaemonStateDir() = %q, outside the sandbox: a test that stops every "+
+			"registered daemon would stop the developer's real ones", dir)
+	}
 	// The ox binaries tests start get their environment from testguard, not from
-	// this process, so check the keychain switch survives that hop.
+	// this process, so check the keychain switch and the runtime dir survive that
+	// hop.
 	want := credentialsFileEnv + "=" + os.Getenv(credentialsFileEnv)
 	if !inside(os.Getenv(credentialsFileEnv)) || !slices.Contains(testguard.MinimalEnv(nil), want) {
 		return fmt.Errorf("ox subprocesses would not get %s; they would store git credentials in the "+
 			"developer's OS keychain", want)
+	}
+	if want := "XDG_RUNTIME_DIR=" + runtimeDir; !slices.Contains(testguard.MinimalEnv(nil), want) {
+		return fmt.Errorf("ox subprocesses would not get %s; they would keep daemon state in the "+
+			"system temp dir, outside the sandbox", want)
 	}
 	if runtime.GOOS != "windows" {
 		for _, name := range hiddenCLIs {
