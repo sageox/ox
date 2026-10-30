@@ -2,6 +2,7 @@ package secretguard
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -36,8 +37,13 @@ func TestRulesFailClosed(t *testing.T) {
 		}
 	}
 	var missing *RuleSet
-	if missing.ValidateContent("raw.jsonl", []byte("clean")) == nil {
+	err := missing.ValidateContent("raw.jsonl", []byte("clean"))
+	if err == nil {
 		t.Fatal("missing guard accepted")
+	}
+	var refused *RefusedError
+	if errors.As(err, &refused) {
+		t.Fatal("a missing catalog is not a refusal: callers retry it")
 	}
 }
 func TestContextualSecretsAndJSONEncoding(t *testing.T) {
@@ -100,13 +106,14 @@ func TestRefreshedCatalogIsAdditiveAndImmutable(t *testing.T) {
 	}
 }
 func TestPathOnlyRuleAndErrorPrivacy(t *testing.T) {
-	if err := ValidateContent("archive.p12", []byte("opaque binary")); err == nil {
-		t.Fatal("path-only upstream rule bypassed")
+	var refused *RefusedError
+	if err := ValidateContent("archive.p12", []byte("opaque binary")); !errors.As(err, &refused) {
+		t.Fatal("path-only upstream rule bypassed or not reported as a refusal")
 	}
 	secret := "opaqueSentinel72w89qq"
 	err := ValidateContent("sensitive-name-"+secret, []byte("MAILLAB_API_KEY="+secret))
-	if err == nil || strings.Contains(err.Error(), secret) {
-		t.Fatal("error exposed content or accepted secret")
+	if !errors.As(err, &refused) || strings.Contains(err.Error(), secret) {
+		t.Fatal("error exposed content, accepted a secret, or was not reported as a refusal")
 	}
 }
 func TestBenignJSONFramingAndNumbersPreserved(t *testing.T) {
