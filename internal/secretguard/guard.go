@@ -270,15 +270,22 @@ func (s *RuleSet) ValidateContent(name string, data []byte) error {
 	}
 	for _, r := range s.rules {
 		if r.expression == nil && r.path.MatchString(name) {
-			return errors.New("secret guard: sensitive file content refused")
+			return &RefusedError{msg: "secret guard: sensitive file content refused"}
 		}
 	}
 	_, found := s.RedactText(string(data))
 	if len(found) > 0 {
-		return fmt.Errorf("secret guard: content contains credentials (%d detectors)", len(found))
+		return &RefusedError{msg: fmt.Sprintf("secret guard: content contains credentials (%d detectors)", len(found))}
 	}
 	return nil
 }
+
+// RefusedError reports content the guard refused: a sensitive file, or detected
+// credentials. Unlike a missing or invalid rule catalog, the same bytes under
+// the same rules are refused every time.
+type RefusedError struct{ msg string }
+
+func (e *RefusedError) Error() string { return e.msg }
 
 // These private product prefixes are additive to every upstream catalog;
 // Gitleaks cannot discover SageOx-issued formats from its public rule set.
