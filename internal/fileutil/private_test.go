@@ -3,6 +3,7 @@ package fileutil
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -11,6 +12,9 @@ import (
 // Predictable private paths must not follow planted symlinks or retain broad
 // permissions from an older installation.
 func TestPrivatePathsRejectSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no Unix permission bits, and os.Symlink needs privileges there")
+	}
 	base := t.TempDir()
 	dir := filepath.Join(base, "state")
 	require.NoError(t, os.Mkdir(dir, 0755))
