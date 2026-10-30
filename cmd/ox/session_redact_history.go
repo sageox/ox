@@ -413,6 +413,11 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 		return nil
 	}
 
+	// Refuse before rewriting files or moving them out of quarantine.
+	if err := checkRedactionIndex(context.Background(), opts.LedgerPath); err != nil {
+		return fmt.Errorf("prepare redaction: %w", err)
+	}
+
 	// Snapshot BEFORE any modification. This is the most important safety
 	// rail in the entire tool — operator can always recover from "the
 	// scrubber broke my ledger" by extracting the snapshot.
@@ -443,9 +448,9 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	// rather than as a silent skip — the operator needs to know which
 	// files require the manual scrub path.
 	var quarantineSkipped []string
-	redactedFiles := 0
-	for _, fileFindings := range byPath {
-		path := fileFindings[0].Path
+	var repairedPaths []string
+	for _, path := range sortedKeys(byPath) {
+		fileFindings := byPath[path]
 		quarantined := fileFindings[0].Quarantined
 		quarantineRel := fileFindings[0].QuarantinePath
 		header := path
@@ -492,7 +497,7 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 					return fmt.Errorf("redact %s: %w", path, err)
 				}
 			}
-			redactedFiles++
+			repairedPaths = append(repairedPaths, path)
 			// Record per-finding entries against the session that owns
 			// this file. Detector + line + filename only — never bytes.
 			if sess, fname, ok := splitSessionPath(path); ok {
@@ -510,7 +515,7 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 		}
 	}
 
-	if redactedFiles == 0 {
+	if len(repairedPaths) == 0 {
 		fmt.Fprintln(opts.Stdout, "No files redacted. Snapshot remains for reference.")
 		return nil
 	}
@@ -525,19 +530,14 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	if err != nil {
 		return fmt.Errorf("write redaction pass: %w", err)
 	}
-	// Stage the modified meta.json files alongside the redacted content
-	// files so the amend commit captures both.
-	for _, mp := range metaPaths {
-		if _, ok := byPath[mp]; !ok {
-			byPath[mp] = nil
+	// Leave skipped files alone, including files still in quarantine.
+	ctx, cancel := context.WithTimeout(context.Background(), lockedCommitTimeout)
+	defer cancel()
+	if err := gitutil.WithRepoLock(ctx, opts.LedgerPath, func() error {
+		if err := checkRedactionIndex(ctx, opts.LedgerPath); err != nil {
+			return err
 		}
-	}
-
-	// Stage + amend in a single holding commit. The operator can review
-	// the amended diff before running `ox session push`. The amend moves the
-	// branch, so it runs under the repo lock (sageox/ox#1541).
-	if err := gitutil.WithRepoLock(context.Background(), opts.LedgerPath, func() error {
-		return stageAndAmendRedactedFiles(opts.LedgerPath, byPath)
+		return stageAndAmendRedactedFiles(ctx, opts.LedgerPath, append(repairedPaths, metaPaths...))
 	}); err != nil {
 		return fmt.Errorf("stage/amend: %w", err)
 	}
@@ -575,7 +575,7 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	remainingQuarantine, _ := enumerateQuarantineFindings(opts.LedgerPath, matcher)
 	remaining := len(postScan.Findings) + len(remainingQuarantine)
 	fmt.Fprintf(opts.Stdout, "\nRedaction complete. Files modified: %d. Remaining findings in scope: %d.\n",
-		redactedFiles, remaining)
+		len(repairedPaths), remaining)
 	if remaining > 0 {
 		fmt.Fprintln(opts.Stdout, "Re-run to address remaining findings.")
 	}
@@ -734,9 +734,8 @@ func classifyFindingsByPushStatus(ledgerPath string, findings []redactHistoryFin
 	// reachable from origin/main?" — one git call per distinct path.
 	// Quarantined paths are unconditionally treated as unpushed: the
 	// pre-push gate carved them out of the holding commit before any
-	// push could reference the bytes (prepush_autoredact.go:309
-	// amendDroppingPaths). Doing the git lookup for a path that no
-	// commit references would return "not tracked" → "unpushed" anyway,
+	// push could reference the bytes (quarantineUnredactableFindings).
+	// Looking up a path that no commit references would return "unpushed",
 	// but skipping the exec saves a fork per quarantined file.
 	pushedFiles := map[string]bool{}
 	for _, f := range findings {
@@ -970,35 +969,20 @@ func redactFileInPlace(abs string, _ *session.Redactor) error {
 	return os.Rename(tmpName, abs)
 }
 
-// stageAndAmendRedactedFiles stages each redacted path and creates an
-// amend commit. The amend lets the original commit retain its identity
-// in the operator's mental model ("the session-stop commit") while the
-// scrubbed bytes replace the leaked ones. Push pipeline will refuse if
-// the amend touches commits already on origin/main (we filtered those
-// out earlier; this is defense in depth).
-func stageAndAmendRedactedFiles(ledgerPath string, byPath map[string][]redactHistoryFinding) error {
-	if len(byPath) == 0 {
-		return nil
-	}
-	// stage each modified path
-	paths := make([]string, 0, len(byPath))
-	for p := range byPath {
-		paths = append(paths, p)
+// stageAndAmendRedactedFiles stages and amends only repaired files and metadata.
+// The caller holds the repo lock and checks Git state before staging.
+func stageAndAmendRedactedFiles(ctx context.Context, ledgerPath string, repairedPaths []string) error {
+	paths := make([]string, 0, len(repairedPaths))
+	for _, p := range repairedPaths {
+		paths = append(paths, ":(literal)"+p)
 	}
 	sort.Strings(paths)
-	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, paths...)
-	if output, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
-		return fmt.Errorf("git add: %s: %w", strings.TrimSpace(string(output)), err)
+	addArgs := append([]string{"add", "--sparse", "--"}, paths...)
+	if _, err := gitutil.RunGit(ctx, ledgerPath, addArgs...); err != nil {
+		return err
 	}
-	// amend without changing message — keep the original session commit's identity
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--amend", "--no-edit", "--no-verify")
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(output), "nothing to commit") {
-			return nil
-		}
-		return fmt.Errorf("git commit --amend: %s: %w", strings.TrimSpace(string(output)), err)
-	}
-	return nil
+	_, err := gitutil.AmendLedgerSnapshot(ctx, ledgerPath, paths...)
+	return err
 }
 
 // groupFindingsByPath buckets findings by file so the interactive prompt
