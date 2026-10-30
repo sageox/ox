@@ -1345,8 +1345,18 @@ func TestGC_SwapMarkerWriteFailureRetainsRetriesAndRecovers(t *testing.T) {
 	scheduler.gcSwapWindowTestHook = func() {
 		require.NoError(t, os.Mkdir(clone+".gc-swap-done", 0755))
 	}
+	restoreCache := gcRestoreCache
+	t.Cleanup(func() { gcRestoreCache = restoreCache })
+	gcRestoreCache = func(backup, dst string) error {
+		require.ErrorContains(t, store.Add(whisperstore.WhisperEntry{
+			ID: "during-restore", Scope: "ledger", Type: whisperstore.WhisperTrigger,
+			Content: "must be refused", CreatedAt: time.Now(),
+		}), "database is closed", "restoration must not accept writes to the old store")
+		return restoreCache(backup, dst)
+	}
 	ws := WorkspaceState{ID: "marker-refused", Type: WorkspaceTypeLedger, Path: clone, CloneURL: "file://" + bare, Exists: true}
 	require.Equal(t, gcFailed, scheduler.runBlueGreenGC(context.Background(), ws))
+	gcRestoreCache = restoreCache
 	for path, contents := range map[string]string{entry: "only retry copy", local: "unpublished content"} {
 		data, err := os.ReadFile(filepath.Join(clone+".old", path))
 		require.NoError(t, err)

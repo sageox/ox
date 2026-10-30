@@ -939,6 +939,26 @@ func (s *SyncScheduler) runBlueGreenGCLocked(ctx context.Context, ws WorkspaceSt
 		s.logger.Warn("gc: failed to ensure checkout .gitignore on new clone", "error", err)
 	}
 
+	// Close Whisper stores before restoration to avoid extending the write window.
+	// SQLite keeps -shm/-wal files mmap'd; on POSIX, os.Rename + os.RemoveAll
+	// unlinks the underlying inodes but the kernel pins them as long as the
+	// mmap region is alive, leaking FDs across every reclone. Ledger reopens
+	// via reopenWhisperStoreAfterGC; team stores reopen lazily on next sync.
+	if s.whisperRegistry != nil {
+		if isLedger {
+			s.whisperRegistry.CloseLedgerStore()
+			defer func() {
+				// Failure can leave either the replacement or a rolled-back
+				// original live. Callers only reopen stores on GC success.
+				if result != gcSuccess && gitutil.IsGitRepo(ws.Path) {
+					s.reopenWhisperStoreAfterGC()
+				}
+			}()
+		} else if ws.TeamID != "" {
+			s.whisperRegistry.CloseTeamStore(ws.TeamID)
+		}
+	}
+
 	// Restore into the disposable replacement. A failure or cancellation here
 	// must never turn the original's captured state into the only backup.
 	if hasCache {
@@ -994,26 +1014,6 @@ func (s *SyncScheduler) runBlueGreenGCLocked(ctx context.Context, ws WorkspaceSt
 	if err := ctx.Err(); err != nil {
 		s.logger.Info("gc: swap canceled, keeping original", "path", ws.Path, "error", err)
 		return gcFailed, false
-	}
-
-	// Close any whisper SQLite store rooted under ws.Path BEFORE the rename.
-	// SQLite keeps -shm/-wal files mmap'd; on POSIX, os.Rename + os.RemoveAll
-	// unlinks the underlying inodes but the kernel pins them as long as the
-	// mmap region is alive, leaking FDs across every reclone. Ledger reopens
-	// via reopenWhisperStoreAfterGC; team stores reopen lazily on next sync.
-	if s.whisperRegistry != nil {
-		if isLedger {
-			s.whisperRegistry.CloseLedgerStore()
-			defer func() {
-				// Failure can leave either the replacement or a rolled-back
-				// original live. Callers only reopen stores on GC success.
-				if result != gcSuccess && gitutil.IsGitRepo(ws.Path) {
-					s.reopenWhisperStoreAfterGC()
-				}
-			}()
-		} else if ws.TeamID != "" {
-			s.whisperRegistry.CloseTeamStore(ws.TeamID)
-		}
 	}
 
 	// From the first rename onward, finish the swap or roll it back even if
