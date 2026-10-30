@@ -139,42 +139,64 @@ func TestRunPrePushSecretGate_AutoRedactsJSONLAndAllowsPush(t *testing.T) {
 	assert.Equal(t, "later edit\n", string(plan))
 }
 
-// TestRunPrePushSecretGate_QuarantinesNonJSONLAndAllowsPush exercises
-// the recovery path that auto-redact cannot service. A planted canary
-// in a non-JSONL file (the chokepoint only rewrites JSONL) must be
-// preserved on disk, moved to the quarantine cache, dropped from the
-// holding commit, and surfaced via a debt marker — all without
-// returning an error.
-//
-// Failure prevented: a non-JSONL session file with a finding blocks
-// the push of ALL other sessions and unrelated commits, and either
-// data is lost or the user has no on-disk record of what was carved out.
-func TestRedactionRepairs_RefuseRebaseAndRetry(t *testing.T) {
+// Repairs must preserve an unfinished rebase or autostash conflict and resume
+// after it is resolved, without staging over the unresolved index entries.
+func TestRedactionRepairs_RefuseConflictsAndRetry(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real Git redaction repair and retry")
 	}
-	for _, file := range []string{"raw.jsonl", "notes.md"} {
-		t.Run(file, func(t *testing.T) {
+	for _, tc := range []struct {
+		name, file string
+		autostash  bool
+	}{
+		{"rebase JSONL", "raw.jsonl", false},
+		{"rebase notes", "notes.md", false},
+		{"autostash conflict", "raw.jsonl", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			const name = "2026-10-22-repair"
 			const canary = "AKIAIOSFODNN7EXAMPLE"
-			rel := "sessions/" + name + "/" + file
+			rel := "sessions/" + name + "/" + tc.file
 			work := makeLedgerWithCommit(t, map[string]string{rel: `{"text":"` + canary + `"}` + "\n"})
 			seedSessionMeta(t, filepath.Join(work, "sessions", name), name)
 			mustGit(t, work, "add", "--sparse", "sessions/"+name+"/meta.json")
 			mustGit(t, work, "commit", "--amend", "--no-edit")
+			rebase := filepath.Join(work, ".git", "rebase-merge")
+			if tc.autostash {
+				require.NoError(t, os.WriteFile(filepath.Join(work, rel), []byte(`{"text":"local `+canary+`"}`+"\n"), 0o644))
+				mustGit(t, work, "stash", "push")
+				require.NoError(t, os.WriteFile(filepath.Join(work, rel), []byte(`{"text":"upstream `+canary+`"}`+"\n"), 0o644))
+				mustGit(t, work, "commit", "-am", "upstream change")
+				output, err := exec.Command("git", "-C", work, "stash", "pop").CombinedOutput()
+				require.Error(t, err)
+				require.Contains(t, string(output), "CONFLICT")
+				require.Contains(t, mustGitCapture(t, work, "ls-files", "--unmerged"), rel)
+				require.NoFileExists(t, filepath.Join(work, ".git", "MERGE_HEAD"))
+			} else {
+				require.NoError(t, os.MkdirAll(rebase, 0o755))
+			}
 			tip := mustGitCapture(t, work, "rev-parse", "HEAD")
 			index := mustGitCapture(t, work, "ls-files", "--stage")
-			rebase := filepath.Join(work, ".git", "rebase-merge")
-			require.NoError(t, os.MkdirAll(rebase, 0o755))
-			require.Error(t, runPrePushSecretGate(context.Background(), work))
+			before, err := os.ReadFile(filepath.Join(work, rel))
+			require.NoError(t, err)
+			repair := func() error { return runPrePushSecretGate(context.Background(), work) }
+			err = gitutil.WithRepoLock(context.Background(), work, repair)
+			require.Error(t, err)
+			if tc.autostash {
+				require.ErrorContains(t, err, "unresolved conflicts")
+			}
 			assert.Equal(t, tip, mustGitCapture(t, work, "rev-parse", "HEAD"))
 			assert.Equal(t, index, mustGitCapture(t, work, "ls-files", "--stage"))
 			content, err := os.ReadFile(filepath.Join(work, rel))
 			require.NoError(t, err)
-			assert.Contains(t, string(content), canary, "refusal must precede worktree mutation")
-			require.NoError(t, os.RemoveAll(rebase))
-			require.NoError(t, runPrePushSecretGate(context.Background(), work))
-			if file == "raw.jsonl" {
+			assert.Equal(t, before, content, "refusal must precede worktree mutation")
+			if tc.autostash {
+				mustGit(t, work, "restore", "--source=HEAD", "--staged", "--worktree", "--", rel)
+			} else {
+				require.NoError(t, os.RemoveAll(rebase))
+			}
+			require.NoError(t, gitutil.WithRepoLock(context.Background(), work, repair))
+			if tc.file == "raw.jsonl" {
 				assert.NotContains(t, mustGitCapture(t, work, "show", "HEAD:"+rel), canary)
 			} else {
 				assert.Empty(t, mustGitCapture(t, work, "ls-tree", "--name-only", "HEAD", rel))

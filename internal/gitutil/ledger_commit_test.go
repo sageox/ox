@@ -654,17 +654,19 @@ func TestAmendLedgerSnapshot_RequiresExistingScopedWork(t *testing.T) {
 	}
 }
 
-// Refused session bytes stay staged for correction; the same scoped amendment
-// must make progress once the metadata or LFS pointer is repaired.
-func TestAmendLedgerSnapshot_InvalidSessionBytesRemainRecoverable(t *testing.T) {
+// A refused amendment must leave staged repairs available for retry after the
+// metadata, LFS pointer, or committer identity is corrected.
+func TestAmendLedgerSnapshot_RefusalLeavesRepairsPending(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git repositories")
 	}
 	for _, tc := range []struct {
-		name, path, original, invalid, repaired, wantErr string
+		name, path, original, staged, repaired, wantErr string
+		noIdentity                                      bool
 	}{
-		{"metadata", "sessions/x/meta.json", cleanMeta, `{"title":`, `{"title":"Repaired"}` + "\n", "invalid JSON"},
-		{"LFS artifact", "sessions/x/raw.jsonl", testLFSPointer, `{"type":"user","content":"pending"}` + "\n", strings.Replace(testLFSPointer, "size 42", "size 43", 1), "LFS pointer"},
+		{"metadata", "sessions/x/meta.json", cleanMeta, `{"title":`, `{"title":"Repaired"}` + "\n", "invalid JSON", false},
+		{"LFS artifact", "sessions/x/raw.jsonl", testLFSPointer, `{"type":"user","content":"pending"}` + "\n", strings.Replace(testLFSPointer, "size 42", "size 43", 1), "LFS pointer", false},
+		{"committer identity", "sessions/x/meta.json", cleanMeta, `{"title":"Repaired"}` + "\n", `{"title":"Repaired"}` + "\n", "git commit-tree", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := newSnapshotRepo(t)
@@ -672,17 +674,23 @@ func TestAmendLedgerSnapshot_InvalidSessionBytesRemainRecoverable(t *testing.T) 
 			gitInRepo(t, repo, "add", "--sparse", tc.path)
 			gitInRepo(t, repo, "commit", "-m", "holding session")
 			head := gitInRepo(t, repo, "rev-parse", "HEAD")
-			writeGitutilFixture(t, repo, tc.path, tc.invalid)
+			writeGitutilFixture(t, repo, tc.path, tc.staged)
 			gitInRepo(t, repo, "add", "--sparse", tc.path)
 
+			if tc.noIdentity {
+				t.Setenv("GIT_COMMITTER_NAME", "")
+			}
 			committed, err := AmendLedgerSnapshot(context.Background(), repo, tc.path)
 			require.ErrorContains(t, err, tc.wantErr)
 			assert.False(t, committed)
 			assert.Equal(t, head, gitInRepo(t, repo, "rev-parse", "HEAD"))
 			staged, err := cleanGitOutput(context.Background(), repo, "show", ":"+tc.path)
 			require.NoError(t, err)
-			assert.Equal(t, tc.invalid, string(staged), "a refusal must preserve the staged repair for recovery")
+			assert.Equal(t, tc.staged, string(staged), "a refusal must preserve the staged repair for recovery")
 
+			if tc.noIdentity {
+				t.Setenv("GIT_COMMITTER_NAME", "Test")
+			}
 			writeGitutilFixture(t, repo, tc.path, tc.repaired)
 			gitInRepo(t, repo, "add", "--sparse", tc.path)
 			committed, err = AmendLedgerSnapshot(context.Background(), repo, tc.path)
