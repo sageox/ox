@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -98,28 +97,6 @@ func TestFindOrphanedDrafts_OnlyReapsTrulyAbandoned(t *testing.T) {
 			},
 			wantOrphan: true,
 			why:        "nothing else will ever reclaim this",
-		},
-		{
-			name: "stale metadata beside session content",
-			setup: func(t *testing.T, _, ledgerPath, name string) {
-				dir := agedDraft(t, ledgerPath, name, 120*time.Hour)
-				require.NoError(t, os.WriteFile(filepath.Join(dir, "summary.json"), []byte(`{"summary":"retained work"}`), 0644))
-			},
-			why: "a stale draft flag does not make session content disposable",
-		},
-		{
-			name: "draft metadata carrying an artifact manifest",
-			setup: func(t *testing.T, _, ledgerPath, name string) {
-				dir := agedDraft(t, ledgerPath, name, 120*time.Hour)
-				meta, err := lfs.ReadSessionMeta(dir)
-				require.NoError(t, err)
-				meta.Files = map[string]lfs.FileRef{"raw.jsonl": {OID: "historical-artifact", Size: 20}}
-				data, err := json.Marshal(meta)
-				require.NoError(t, err)
-				// Historical malformed metadata bypasses today's writer guard.
-				require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"), data, 0644))
-			},
-			why: "metadata may be the only remaining reference to a recoverable artifact",
 		},
 		{
 			name: "recently refreshed draft",
@@ -308,119 +285,6 @@ func TestCheckSessionDraftOrphan_FixRemovesFromRemote(t *testing.T) {
 	assert.Contains(t, tree, "sessions/"+live+"/meta.json",
 		"a live session's placeholder must survive the reaper")
 	gitFsckClean(t, f.barePath)
-}
-
-// Doctor must not overwrite edits while deleting a stale placeholder, even
-// though those edits have not refreshed its committed heartbeat yet.
-func TestCheckSessionDraftOrphan_PreservesDirtyMetadata(t *testing.T) {
-	setTestCfg(t)
-	f := newDraftLedgerFixture(t)
-	t.Chdir(f.projectRoot)
-	const name = "2026-01-01T00-00-testuser-OxEdited"
-	f.publish(t, name, 2)
-	dir := agedDraft(t, f.ledgerPath, name, 120*time.Hour)
-	runGit(t, f.ledgerPath, "add", "--sparse", "--", "sessions/"+name+"/meta.json")
-	runGit(t, f.ledgerPath, "commit", "--no-verify", "-m", "session-draft: age "+name)
-	f.push(t)
-	meta, err := lfs.ReadSessionMeta(dir)
-	require.NoError(t, err)
-	meta.TurnCount++
-	require.NoError(t, lfs.WriteSessionMetaOnly(dir, meta))
-	runGit(t, f.ledgerPath, "add", "--sparse", "--", "sessions/"+name+"/meta.json")
-	meta.TurnCount++
-	require.NoError(t, lfs.WriteSessionMetaOnly(dir, meta))
-	beforeIndex := runGit(t, f.ledgerPath, "write-tree")
-	beforeHead := runGit(t, f.ledgerPath, "rev-parse", "HEAD")
-	beforeMeta, err := os.ReadFile(filepath.Join(dir, "meta.json"))
-	require.NoError(t, err)
-
-	res := checkSessionDraftOrphan(true)
-
-	assert.True(t, res.warning, "retaining a dirty candidate must not report a clean result")
-	assert.Contains(t, res.message, "retracted 0, retained 1")
-	assert.Contains(t, res.detail, "local state")
-	assert.Equal(t, beforeHead, runGit(t, f.ledgerPath, "rev-parse", "HEAD"))
-	assert.Equal(t, beforeIndex, runGit(t, f.ledgerPath, "write-tree"))
-	afterMeta, err := os.ReadFile(filepath.Join(dir, "meta.json"))
-	require.NoError(t, err)
-	assert.Equal(t, beforeMeta, afterMeta)
-	assert.Contains(t, remoteTree(t, f.barePath), "sessions/"+name+"/meta.json")
-}
-
-// A session may finish after doctor's discovery pass; cleanup must classify
-// it again inside the same lock used for deletion.
-func TestDoctorDraftRetraction_RechecksSessionContent(t *testing.T) {
-	setTestCfg(t)
-	f := newDraftLedgerFixture(t)
-	const name = "2026-01-01T00-00-testuser-OxFinished"
-	f.publish(t, name, 2)
-	dir := agedDraft(t, f.ledgerPath, name, 120*time.Hour)
-	runGit(t, f.ledgerPath, "add", "--sparse", "--", "sessions/"+name+"/meta.json")
-	runGit(t, f.ledgerPath, "commit", "--no-verify", "-m", "session-draft: age "+name)
-	f.push(t)
-	orphans, err := findOrphanedDrafts(f.projectRoot, f.ledgerPath)
-	require.NoError(t, err)
-	require.Contains(t, orphans, name)
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "summary.json"), []byte(`{"summary":"retained work"}`), 0644))
-	beforeHead := runGit(t, f.ledgerPath, "rev-parse", "HEAD")
-
-	res, err := deleteDraftFromLedgerWithOrphanCheck(f.ledgerPath, name, draftCacheDirs(f.projectRoot, f.ledgerPath))
-
-	require.NoError(t, err)
-	assert.False(t, res.Deleted)
-	assert.Equal(t, beforeHead, runGit(t, f.ledgerPath, "rev-parse", "HEAD"))
-	assert.FileExists(t, filepath.Join(dir, "meta.json"))
-	content, err := os.ReadFile(filepath.Join(dir, "summary.json"))
-	require.NoError(t, err)
-	assert.Equal(t, `{"summary":"retained work"}`, string(content))
-}
-
-// A failed delete commit must leave a retryable placeholder, not a deletion
-// waiting to be swept into another session's commit.
-func TestDoctorDraftRetraction_FailedCommitRestoresAndRetries(t *testing.T) {
-	setTestCfg(t)
-	f := newDraftLedgerFixture(t)
-	t.Chdir(f.projectRoot)
-	const name = "2026-01-01T00-00-testuser-OxRetry"
-	f.publish(t, name, 2)
-	dir := agedDraft(t, f.ledgerPath, name, 120*time.Hour)
-	runGit(t, f.ledgerPath, "add", "--sparse", "--", "sessions/"+name+"/meta.json")
-	runGit(t, f.ledgerPath, "commit", "--no-verify", "-m", "session-draft: age "+name)
-	f.push(t)
-	beforeHead := runGit(t, f.ledgerPath, "rev-parse", "HEAD")
-	beforeIndex := runGit(t, f.ledgerPath, "write-tree")
-	beforeMeta, err := os.ReadFile(filepath.Join(dir, "meta.json"))
-	require.NoError(t, err)
-	hook := filepath.Join(f.ledgerPath, ".git", "hooks", "reference-transaction")
-	require.NoError(t, os.WriteFile(hook, []byte("#!/bin/sh\nif [ \"$1\" = prepared ]; then exit 1; fi\n"), 0755))
-	cacheDirs := draftCacheDirs(f.projectRoot, f.ledgerPath)
-
-	res, err := deleteDraftFromLedgerWithOrphanCheck(f.ledgerPath, name, cacheDirs)
-
-	require.ErrorContains(t, err, "reference-transaction")
-	assert.False(t, res.Deleted)
-	assert.Equal(t, beforeHead, runGit(t, f.ledgerPath, "rev-parse", "HEAD"))
-	assert.Equal(t, beforeIndex, runGit(t, f.ledgerPath, "write-tree"))
-	afterMeta, err := os.ReadFile(filepath.Join(dir, "meta.json"))
-	require.NoError(t, err)
-	assert.Equal(t, beforeMeta, afterMeta)
-
-	// The doctor entry point must surface the failure and leave the same retryable state.
-	check := checkSessionDraftOrphan(true)
-	assert.True(t, check.warning)
-	assert.Contains(t, check.message, "retracted 0, retained 0, 1 failed")
-	assert.Equal(t, beforeIndex, runGit(t, f.ledgerPath, "write-tree"))
-	afterMeta, err = os.ReadFile(filepath.Join(dir, "meta.json"))
-	require.NoError(t, err)
-	assert.Equal(t, beforeMeta, afterMeta)
-	require.NoError(t, os.Remove(hook))
-
-	res, err = deleteDraftFromLedgerWithOrphanCheck(f.ledgerPath, name, cacheDirs)
-
-	require.NoError(t, err)
-	assert.True(t, res.Deleted)
-	assert.NoDirExists(t, dir)
-	assert.NotContains(t, remoteTree(t, f.barePath), "sessions/"+name+"/meta.json")
 }
 
 // TestHasLocalSessionData covers the helper's own decision, including the

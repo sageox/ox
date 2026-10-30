@@ -1,7 +1,6 @@
 package session
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 )
 
@@ -29,17 +27,15 @@ import (
 // git-removing a live session's placeholder, and that asymmetry says wait.
 const OrphanedDraftAge = 72 * time.Hour
 
-// ValidateDraftSessionName keeps destructive paths within one literal session.
+// ValidateDraftSessionName rejects empty and traversal-shaped names before any
+// path built from a session name is handed to `git rm` / os.RemoveAll. An
+// unvalidated name widens a pathspec to the whole sessions tree.
 func ValidateDraftSessionName(sessionName string) error {
 	if sessionName == "" || sessionName == "." || sessionName == ".." {
 		return fmt.Errorf("invalid session name %q", sessionName)
 	}
 	if strings.ContainsAny(sessionName, `/\`) || strings.Contains(sessionName, "..") {
 		return fmt.Errorf("session name %q must be a single path component", sessionName)
-	}
-	// Git expands wildcard pathspecs even after --, potentially matching peers.
-	if strings.ContainsAny(sessionName, "*?[") {
-		return fmt.Errorf("session name %q must not contain Git wildcard characters", sessionName)
 	}
 	return nil
 }
@@ -55,9 +51,8 @@ func ValidateDraftSessionName(sessionName string) error {
 //  2. Its updated_at heartbeat is older than OrphanedDraftAge.
 //  3. No recording state or cached transcript exists for it locally. If either
 //     exists the session is alive or recoverable and upload-retry owns it.
-//  4. The directory contains only valid draft metadata. The draft flag can be
-//     stale after an interrupted finalization; it never authorizes deleting
-//     existing session artifacts.
+//  4. The directory holds only meta.json. A stale draft=true can sit beside a
+//     committed transcript or summary (#1648).
 //
 // This is the single source of truth for "orphaned draft"; both `ox doctor` and
 // the daemon's periodic retraction call it.
@@ -81,11 +76,26 @@ func FindOrphanedDrafts(ledgerPath string, cacheDirs []string) ([]string, error)
 		if !entry.IsDir() {
 			continue
 		}
-		meta := ReadOrphanedDraftMeta(ledgerPath, entry.Name(), cacheDirs)
-		if meta == nil {
+		name := entry.Name()
+		meta, metaErr := lfs.ReadSessionMeta(filepath.Join(sessionsDir, name))
+		// Fail safe: an unreadable meta.json is not a draft we are willing to
+		// delete. Some other check owns diagnosing it.
+		if metaErr != nil || !meta.IsDraft() {
 			continue
 		}
-		found = append(found, candidate{name: entry.Name(), updatedAt: *meta.UpdatedAt})
+		// No updated_at means we cannot age it. Refuse rather than guess —
+		// deleting a placeholder for a session that might be live is worse than
+		// leaving a stale page.
+		if meta.UpdatedAt == nil || time.Since(*meta.UpdatedAt) < OrphanedDraftAge {
+			continue
+		}
+		if DraftHasLocalSessionData(cacheDirs, name) {
+			continue
+		}
+		if files, err := os.ReadDir(filepath.Join(sessionsDir, name)); err != nil || len(files) != 1 {
+			continue
+		}
+		found = append(found, candidate{name: name, updatedAt: *meta.UpdatedAt})
 	}
 
 	sort.Slice(found, func(i, j int) bool { return found[i].updatedAt.Before(found[j].updatedAt) })
@@ -94,67 +104,6 @@ func FindOrphanedDrafts(ledgerPath string, cacheDirs []string) ([]string, error)
 		names = append(names, c.name)
 	}
 	return names, nil
-}
-
-// ReadOrphanedDraftMeta returns nil for any session that must be retained.
-// Writers recheck this candidate under the repo lock before removal.
-func ReadOrphanedDraftMeta(ledgerPath, sessionName string, cacheDirs []string) *lfs.SessionMeta {
-	if ValidateDraftSessionName(sessionName) != nil {
-		return nil
-	}
-	dir := filepath.Join(ledgerPath, "sessions", sessionName)
-	info, err := os.Lstat(dir)
-	if err != nil || !info.IsDir() {
-		return nil
-	}
-	meta, err := lfs.ReadSessionMeta(dir)
-	if err != nil || !meta.IsDraft() || meta.Validate() != nil {
-		return nil
-	}
-	if meta.UpdatedAt == nil || time.Since(*meta.UpdatedAt) < OrphanedDraftAge {
-		return nil
-	}
-	if DraftHasLocalSessionData(cacheDirs, sessionName) {
-		return nil
-	}
-	files, err := os.ReadDir(dir)
-	if err != nil || len(files) != 1 || files[0].Name() != "meta.json" || !files[0].Type().IsRegular() {
-		return nil
-	}
-	return meta
-}
-
-// DraftIsCleanPlaceholder requires a metadata-only HEAD and a clean worktree/index.
-// The caller must hold the repo lock and recheck ReadOrphanedDraftMeta.
-func DraftIsCleanPlaceholder(ctx context.Context, ledgerPath, sessionName string) (bool, error) {
-	if err := ValidateDraftSessionName(sessionName); err != nil {
-		return false, err
-	}
-	rel := filepath.ToSlash(filepath.Join("sessions", sessionName))
-	tracked, err := gitutil.RunGit(ctx, ledgerPath, "ls-tree", "-r", "--name-only", "HEAD", "--", rel)
-	if err != nil {
-		return false, err
-	}
-	if tracked != rel+"/meta.json" {
-		return false, nil
-	}
-	status, err := gitutil.RunGit(ctx, ledgerPath, "status", "--porcelain", "--untracked-files=all", "--ignored=matching", "--", rel)
-	return status == "" && err == nil, err
-}
-
-// RestoreDraftPlaceholder restores only metadata removed by automatic cleanup.
-// The caller still holds the repo lock used for DraftIsCleanPlaceholder.
-func RestoreDraftPlaceholder(ctx context.Context, ledgerPath, sessionName string) error {
-	if err := ValidateDraftSessionName(sessionName); err != nil {
-		return err
-	}
-	// Ignore caller cancellation so cleanup can undo a partial removal. Limit
-	// this local Git restore to 30 seconds while the repo lock remains held.
-	recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-	defer cancel()
-	rel := filepath.ToSlash(filepath.Join("sessions", sessionName, "meta.json"))
-	_, err := gitutil.RunGit(recoveryCtx, ledgerPath, "checkout", "-q", "HEAD", "--", rel)
-	return err
 }
 
 // DraftHasLocalSessionData reports whether any cache location still holds this

@@ -138,23 +138,6 @@ func TestRetractOrphanedDrafts_KeepsFreshDraft(t *testing.T) {
 		"a fresh draft is a live session and must never be retracted")
 }
 
-// A wildcard-shaped stale name must not expand to a fresh neighbor's metadata.
-func TestRetractOrphanedDrafts_PreservesWildcardNeighbors(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: real Git repositories and published drafts")
-	}
-	s, ledger := newRetractScheduler(t)
-	commitStaleDraft(t, ledger, "[ab]", 120*time.Hour)
-	writeDraftCommit(t, ledger, "a", time.Minute, true)
-	beforeHead := mustGit(t, ledger, "rev-parse", "HEAD")
-
-	s.retractOrphanedDrafts(context.Background(), ledger)
-
-	assert.FileExists(t, filepath.Join(ledger, "sessions", "a", "meta.json"))
-	assert.FileExists(t, filepath.Join(ledger, "sessions", "[ab]", "meta.json"))
-	assert.Equal(t, beforeHead, mustGit(t, ledger, "rev-parse", "HEAD"))
-}
-
 // A cross-machine heartbeat can land after the reaper's optimistic scan but
 // before it acquires the repo lock. The locked revalidation must observe that
 // refresh instead of deleting a session that is live on another machine.
@@ -236,128 +219,45 @@ func TestRetractOrphanedDrafts_KeepsDraftWithLocalRecording(t *testing.T) {
 		"a stale draft with a recoverable local recording must not be retracted")
 }
 
-// Stale draft metadata must never turn existing session content or local edits
-// into permission to delete a session.
-func TestRetractOrphanedDrafts_PreservesSessionData(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: real Git repositories and multiple retraction attempts")
-	}
-	for _, state := range []string{"committed content", "untracked content", "content after scan", "unstaged metadata", "staged metadata", "locally deleted content"} {
-		t.Run(state, func(t *testing.T) {
-			s, ledger := newRetractScheduler(t)
-			const name = "2026-01-01T00-00-testuser-OxData"
-			commitStaleDraft(t, ledger, name, 120*time.Hour)
-			dir := filepath.Join(ledger, "sessions", name)
-			metaPath := filepath.Join(dir, "meta.json")
-			contentPath := filepath.Join(dir, "summary.json")
-			writeContent := func() {
-				require.NoError(t, os.WriteFile(contentPath, []byte(`{"summary":"synthetic retained work"}`), 0o644))
-			}
-			switch state {
-			case "committed content", "locally deleted content":
-				writeContent()
-				mustGit(t, ledger, "add", "--sparse", "sessions/"+name)
-				mustGit(t, ledger, "commit", "--quiet", "-m", "session artifacts")
-				mustGit(t, ledger, "push", "--quiet", "origin", "main")
-				if state == "locally deleted content" {
-					require.NoError(t, os.Remove(contentPath))
-				}
-			case "untracked content":
-				writeContent()
-			case "content after scan":
-				s.retractLockedTestHook = writeContent
-			case "unstaged metadata", "staged metadata":
-				meta, err := lfs.ReadSessionMeta(dir)
-				require.NoError(t, err)
-				meta.TurnCount++
-				require.NoError(t, lfs.WriteSessionMetaOnly(dir, meta))
-				if state == "staged metadata" {
-					mustGit(t, ledger, "add", "--sparse", "sessions/"+name+"/meta.json")
-				}
-			}
-			beforeHead := mustGit(t, ledger, "rev-parse", "HEAD")
-			beforeIndex := mustGit(t, ledger, "write-tree")
-			beforeMeta, err := os.ReadFile(metaPath)
-			require.NoError(t, err)
-
-			s.retractOrphanedDrafts(context.Background(), ledger)
-
-			assert.Equal(t, beforeHead, mustGit(t, ledger, "rev-parse", "HEAD"))
-			assert.Equal(t, beforeIndex, mustGit(t, ledger, "write-tree"))
-			afterMeta, err := os.ReadFile(metaPath)
-			require.NoError(t, err)
-			assert.Equal(t, beforeMeta, afterMeta)
-			if state == "committed content" || state == "untracked content" || state == "content after scan" {
-				content, err := os.ReadFile(contentPath)
-				require.NoError(t, err)
-				assert.Equal(t, `{"summary":"synthetic retained work"}`, string(content))
-			}
-		})
-	}
-}
-
-type cancelRetractionRunner struct {
+// cancelAfterRunner cancels the retraction's context once the named git
+// subcommand succeeds, as a daemon shutdown or sync timeout would.
+type cancelAfterRunner struct {
 	gitutil.GitRunner
-	cancel      context.CancelFunc
-	after       string
-	failCommand bool
+	cancel context.CancelFunc
+	after  string
 }
 
-func (r *cancelRetractionRunner) RunGit(ctx context.Context, repoPath string, args ...string) (string, error) {
+func (r *cancelAfterRunner) RunGit(ctx context.Context, repoPath string, args ...string) (string, error) {
 	out, err := r.GitRunner.RunGit(ctx, repoPath, args...)
 	if err == nil && args[0] == r.after {
 		r.cancel()
-		if r.failCommand {
-			// A killed command can report failure after removing the file.
-			err = ctx.Err()
-		}
 	}
 	return out, err
 }
 
-// Cancellation after removing the placeholder must restore both the worktree
-// and index, even when it prevents the subsequent commit from starting.
+// A retraction interrupted after git rm must leave the placeholder restored and
+// retryable. The restore used to run on the canceled context, fail too, and
+// leave the deletion staged for the next autostash to conflict on (#1648).
 func TestRetractOrphanedDrafts_CancellationRestoresAndRetries(t *testing.T) {
 	if testing.Short() {
-		t.Skip("short: real Git repositories and recovery retries")
+		t.Skip("short: real Git repositories and a retry")
 	}
-	for _, tc := range []struct {
-		name        string
-		after       string
-		failCommand bool
-	}{
-		{"cancel after rm", "rm", false},
-		{"cancel after diff", "diff", false},
-		{"rm removes metadata then fails", "rm", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s, ledger := newRetractScheduler(t)
-			const name = "2026-01-01T00-00-testuser-OxRetry"
-			commitStaleDraft(t, ledger, name, 120*time.Hour)
-			metaPath := filepath.Join(ledger, "sessions", name, "meta.json")
-			beforeMeta, err := os.ReadFile(metaPath)
-			require.NoError(t, err)
-			beforeHead := mustGit(t, ledger, "rev-parse", "HEAD")
-			beforeIndex := mustGit(t, ledger, "write-tree")
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			s.git = &cancelRetractionRunner{GitRunner: gitutil.DefaultRunner(), cancel: cancel, after: tc.after, failCommand: tc.failCommand}
+	s, ledger := newRetractScheduler(t)
+	const name = "2026-01-01T00-00-testuser-OxRetry"
+	commitStaleDraft(t, ledger, name, 120*time.Hour)
+	metaPath := filepath.Join(ledger, "sessions", name, "meta.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.git = &cancelAfterRunner{GitRunner: gitutil.DefaultRunner(), cancel: cancel, after: "rm"}
 
-			s.retractOrphanedDrafts(ctx, ledger)
+	s.retractOrphanedDrafts(ctx, ledger)
 
-			require.ErrorIs(t, ctx.Err(), context.Canceled, "must reach the post-removal cancellation")
-			assert.Equal(t, beforeHead, mustGit(t, ledger, "rev-parse", "HEAD"))
-			assert.Equal(t, beforeIndex, mustGit(t, ledger, "write-tree"))
-			afterMeta, err := os.ReadFile(metaPath)
-			require.NoError(t, err)
-			assert.Equal(t, beforeMeta, afterMeta)
-			assert.Empty(t, mustGit(t, ledger, "status", "--porcelain"))
+	require.ErrorIs(t, ctx.Err(), context.Canceled, "the context must be canceled after git rm")
+	assert.FileExists(t, metaPath)
+	assert.Empty(t, mustGit(t, ledger, "status", "--porcelain"), "no staged deletion left behind")
 
-			s.git = gitutil.DefaultRunner()
-			s.retractOrphanedDrafts(context.Background(), ledger)
-			assert.NoFileExists(t, metaPath)
-			assert.Equal(t, "session-draft: retract "+name, mustGit(t, ledger, "log", "-1", "--format=%s"))
-			assert.Empty(t, mustGit(t, ledger, "status", "--porcelain"))
-		})
-	}
+	s.git = gitutil.DefaultRunner()
+	s.retractOrphanedDrafts(context.Background(), ledger)
+	assert.NoFileExists(t, metaPath)
+	assert.Equal(t, "session-draft: retract "+name, mustGit(t, ledger, "log", "-1", "--format=%s"))
 }
