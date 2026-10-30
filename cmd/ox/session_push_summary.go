@@ -87,7 +87,7 @@ type pushSummaryOutput struct {
 	SummaryPath  string  `json:"summary_path,omitempty"`
 	Message      string  `json:"message,omitempty"`
 	Error        string  `json:"error,omitempty"`
-	Disposition  string  `json:"disposition,omitempty"`   // "upload", "local_only", "discard"
+	Disposition  string  `json:"disposition,omitempty"`   // "upload", "discard"
 	QualityScore float64 `json:"quality_score,omitempty"` // 0.0-1.0 from LLM
 }
 
@@ -212,20 +212,14 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		summaryParsed.ContextUse = meta.ContextUse
 	}
 
-	// load quality thresholds from user config
+	// load the legacy numeric discard threshold from user config
 	userCfg, _ := config.LoadUserConfig()
-	awCfg := userCfg.GetAgentWorkerConfig()
-	uploadThreshold := (&config.AgentWorkerConfig{}).GetQualityUploadThreshold()
-	discardThreshold := (&config.AgentWorkerConfig{}).GetQualityDiscardThreshold()
-	if awCfg != nil {
-		uploadThreshold = awCfg.GetQualityUploadThreshold()
-		discardThreshold = awCfg.GetQualityDiscardThreshold()
-	}
+	discardThreshold := userCfg.GetAgentWorkerConfig().GetQualityDiscardThreshold()
 
 	// Disposition routing — three-way precedence:
 	//   1. QualityCategory (canonical, categorical) — used when present.
 	//      LLMs emitting the new schema set this; deterministic prefilter
-	//      sets it to "skip" on local-only stub generation.
+	//      sets it to "skip" on brief-session stub generation.
 	//   2. QualityScore (legacy numeric) — used when category is absent
 	//      and the score field was present in the JSON. Reads existing
 	//      summary.json files written before categorical scoring shipped.
@@ -236,7 +230,7 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 	case summaryParsed.QualityCategory != "":
 		disposition = session.EvaluateQualityCategory(summaryParsed.QualityCategory)
 	case qualityScorePresent:
-		disposition = session.EvaluateQuality(summaryParsed.QualityScore, uploadThreshold, discardThreshold)
+		disposition = session.EvaluateQuality(summaryParsed.QualityScore, discardThreshold)
 	default:
 		disposition = session.QualityUpload
 	}
@@ -338,25 +332,6 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 
 	// extract session name from session dir path for commit message
 	sessionName := filepath.Base(sessionDir)
-
-	// if below upload threshold, keep locally but don't push
-	if disposition == session.QualityLocalOnly {
-		slog.Info("session below upload threshold, keeping locally",
-			"session", sessionName,
-			"quality_score", summaryParsed.QualityScore,
-			"threshold", uploadThreshold,
-			"reason", summaryParsed.ScoreReason,
-		)
-		clearNeedsSummaryMarkerForSession(sessionName)
-		return &pushSummaryOutput{
-			Success:      true,
-			Type:         "push_summary",
-			SummaryPath:  summaryDst,
-			Message:      "summary saved locally (below upload threshold)",
-			Disposition:  string(session.QualityLocalOnly),
-			QualityScore: summaryParsed.QualityScore,
-		}
-	}
 
 	// disposition == QualityUpload — commit and push to ledger
 	// git add the summary file (and meta.json if updated)

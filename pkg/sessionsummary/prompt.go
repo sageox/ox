@@ -132,21 +132,19 @@ Only include fields with actual content. Omit empty arrays.
 
 ## Quality Category Guidelines (read this BEFORE writing any other field)
 
-Pick exactly one category for ` + "`quality_category`" + `. This is the most
-important field — it determines whether the session is shared with the team,
-kept locally, or discarded entirely. Categorical (not numeric) because
+Pick exactly one category for ` + "`quality_category`" + `: share or skip.
+Categorical (not numeric) because
 fine-grained 0.0-1.0 scores cluster on round numbers and ignore real
 distinctions; LLM-based rubric scoring works better with a small named set.
 Pick the category whose anchor examples best match the session.
 
-**share** — A teammate would benefit from reading this. Examples:
+**share** — Real work or useful context worth recording, including routine
+individual work. Examples:
 - Architectural decisions or design rationale documented
 - Bugs found with root cause analysis (not just the fix)
 - Reusable patterns or approaches discovered
 - Novel debugging techniques or non-obvious gotchas
 - Important context for ongoing initiatives
-
-**local_only** — Real work, but primarily individual. Examples:
 - Routine feature implementation following an existing pattern
 - Bug fixes without broader insight (the fix is in the diff)
 - Configuration or environment setup
@@ -178,11 +176,10 @@ being skipped. Don't write them. The downstream pipeline recognizes the
 skip-shape and routes it the same place a deterministic prefilter skip
 would (discarded, not shared).
 
-For ` + "`local_only`" + ` and ` + "`share`" + ` categories, emit the full schema above.
+For the ` + "`share`" + ` category, emit the full schema above.
 
 ` + "`score_reason`" + ` is a single sentence explaining the category choice —
-useful for telemetry and ops investigation when reviewing skipped or
-local-only sessions.
+useful for telemetry and ops investigation when reviewing session decisions.
 `
 
 // BuildSummaryPrompt builds a prompt for the calling agent to generate a session summary.

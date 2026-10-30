@@ -165,8 +165,7 @@ type SessionFinalizeHandler struct {
 	quota quotaPause
 	// now is the clock for the quota pause; tests replace it.
 	now func() time.Time
-	// quality thresholds (configurable via AgentWorkerConfig)
-	qualityUploadThreshold  float64
+	// legacy numeric quality threshold (configurable via AgentWorkerConfig)
 	qualityDiscardThreshold float64
 	// judgeCompleter, when non-nil and OX_SUMMARY_JUDGE=on is set, runs
 	// a post-summary LLM-as-judge evaluation. Nil disables judging.
@@ -222,16 +221,14 @@ func NewSessionFinalizeHandler(logger *slog.Logger) *SessionFinalizeHandler {
 	}
 	return &SessionFinalizeHandler{
 		logger:                  logger,
-		qualityUploadThreshold:  0.3,
 		qualityDiscardThreshold: 0.1,
 		captureLockWait:         defaultCaptureLockWait,
 		now:                     time.Now,
 	}
 }
 
-// SetQualityThresholds configures the quality score thresholds for upload/discard.
-func (h *SessionFinalizeHandler) SetQualityThresholds(upload, discard float64) {
-	h.qualityUploadThreshold = upload
+// SetQualityDiscardThreshold configures the legacy numeric discard threshold.
+func (h *SessionFinalizeHandler) SetQualityDiscardThreshold(discard float64) {
 	h.qualityDiscardThreshold = discard
 }
 
@@ -1604,7 +1601,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	//
 	// Three-way precedence:
 	//   1. QualityCategory (canonical, categorical) — used when present.
-	//      Maps cleanly to QualityDiscard/LocalOnly/Upload via
+	//      Maps cleanly to QualityDiscard/Upload via
 	//      EvaluateQualityCategory. This is how new summaries flow.
 	//   2. QualityScore (legacy numeric) — used when category is absent
 	//      and the summary was scored. Reads existing summary.json files
@@ -1617,7 +1614,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	case summaryResp.QualityCategory != "":
 		disposition = session.EvaluateQualityCategory(summaryResp.QualityCategory)
 	case scored:
-		disposition = session.EvaluateQuality(summaryResp.QualityScore, h.qualityUploadThreshold, h.qualityDiscardThreshold)
+		disposition = session.EvaluateQuality(summaryResp.QualityScore, h.qualityDiscardThreshold)
 	default:
 		disposition = session.QualityUpload
 	}
@@ -1705,11 +1702,6 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		if !payload.emptyTranscript {
 			h.emitSummarizationTelemetry(sessionName, "delegated", result, summaryResp, scored)
 		}
-
-		// QualityLocalOnly is published like QualityUpload pending a team decision.
-		// An early return here leaves Detect to requeue the completed cache as
-		// upload-only, which publishes it without a title. Keeping it local also
-		// requires the upload-only path to honor that policy.
 
 		// Downloads preserve their metadata in writeMetaAndUploadLFS. Seed draft
 		// identity here before that writer could mint an unrelated session ID.

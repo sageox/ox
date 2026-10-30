@@ -127,7 +127,7 @@ export function parseReport(stdout: string): UsageReport | null {
   })
   return {
     view: 'session',
-    session: { recording: session.recording === true },
+    session: { recording: session.recording === true, paused: session.paused === true },
     trace: {
       available: trace.available !== false,
       source: str(trace.source),
@@ -227,6 +227,25 @@ export function isOxCommand(command: unknown): boolean {
   return typeof command === 'string' && OX_COMMAND.test(command)
 }
 
+// utf8Bytes: the UTF-8 length of a string, without TextEncoder.
+export function utf8Bytes(s: string): number {
+  let n = 0
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c < 0x80) {
+      n += 1
+    } else if (c < 0x800) {
+      n += 2
+    } else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+      n += 4
+      i++
+    } else {
+      n += 3
+    }
+  }
+  return n
+}
+
 // formatTokens: `~80`, `~1.2k`, `~15k`.
 export function formatTokens(n: number): string {
   const t = Math.max(0, Math.round(n))
@@ -292,7 +311,9 @@ export function formatRow(call: UsageRecentCall, columns: number, offsetMin = 0)
 }
 
 // headerLines: the title's tail (after `● ox session report`) and the summary line,
-// `calls N · ~Nk tokens · used N of M · co-author <category>`.
+// `calls N · ~Nk tokens · used N of M · co-author <category>`. The marker is
+// `● recording`, `⏸ paused` (a recording whose capture is suspended), or
+// `○ not recording`.
 export function headerLines(report: UsageReport | null): { marker: string; summary: string } {
   if (report === null) {
     return { marker: 'loading…', summary: '' }
@@ -307,7 +328,9 @@ export function headerLines(report: UsageReport | null): { marker: string; summa
   if (a !== undefined && a.category !== 'none') {
     parts.push(`co-author ${a.category}`)
   }
-  return { marker: report.session.recording ? '● recording' : '○ not recording', summary: parts.join(' · ') }
+  const { recording, paused } = report.session
+  const marker = recording && paused ? '⏸ paused' : recording ? '● recording' : '○ not recording'
+  return { marker, summary: parts.join(' · ') }
 }
 
 const MURMUR = 'murmur'
