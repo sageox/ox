@@ -220,11 +220,16 @@ func verifyHomeSandbox(home, runtimeDir string) error {
 			"registered daemon would stop the developer's real ones", dir)
 	}
 	// The ox binaries tests start get their environment from testguard, not from
-	// this process, so check the keychain switch survives that hop.
+	// this process, so check the keychain switch and the runtime dir survive that
+	// hop.
 	want := credentialsFileEnv + "=" + os.Getenv(credentialsFileEnv)
 	if !inside(os.Getenv(credentialsFileEnv)) || !slices.Contains(testguard.MinimalEnv(nil), want) {
 		return fmt.Errorf("ox subprocesses would not get %s; they would store git credentials in the "+
 			"developer's OS keychain", want)
+	}
+	if want := "XDG_RUNTIME_DIR=" + runtimeDir; !slices.Contains(testguard.MinimalEnv(nil), want) {
+		return fmt.Errorf("ox subprocesses would not get %s; they would keep daemon state in the "+
+			"system temp dir, outside the sandbox", want)
 	}
 	if runtime.GOOS != "windows" {
 		for _, name := range hiddenCLIs {
