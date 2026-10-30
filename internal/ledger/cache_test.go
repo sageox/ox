@@ -46,3 +46,12 @@ func TestRestoreCacheReportsWhatItCouldNotRestore(t *testing.T) {
 	require.NoError(t, os.WriteFile(parent, []byte("a file"), 0600))
 	require.Error(t, RestoreCache(filepath.Join(parent, "backup"), t.TempDir()), "a backup that cannot be inspected is not a missing one")
 }
+
+func TestPreserveCacheReportsInspectionFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a path through a file reads as missing on Windows")
+	}
+	src := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(src, ".sageox"), []byte("not a directory"), 0600))
+	require.Error(t, PreserveCache(src, filepath.Join(t.TempDir(), "backup")), "an unreadable cache is not an absent cache")
+}
