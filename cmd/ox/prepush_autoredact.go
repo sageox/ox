@@ -330,7 +330,7 @@ quarantineFiles:
 			if !amendCommit {
 				// Preserve the index's bytes and mode, which may differ from the
 				// working file. An empty snapshot means the path is untracked.
-				indexRead := gitutil.NewNetworkCmd(ctx, "-C", ledgerPath, "ls-files", "--stage", "-z", "--", fromRel)
+				indexRead := gitutil.NewNetworkCmd(ctx, "-C", ledgerPath, "ls-files", "--stage", "-z", "--", ":(literal)"+fromRel)
 				indexRead.Dir = ledgerPath
 				indexEntries, err = indexRead.Output()
 				if err != nil {
@@ -340,7 +340,7 @@ quarantineFiles:
 				// A previous attempt may already have staged these bytes. Moving
 				// only the working file would leave that secret-bearing blob in
 				// the next commit, invisible to the working-tree scanner.
-				_, err := gitutil.RunGit(ctx, ledgerPath, "rm", "--cached", "--ignore-unmatch", "--force", "--sparse", "--", fromRel)
+				_, err := gitutil.RunGit(ctx, ledgerPath, "rm", "--cached", "--ignore-unmatch", "--force", "--sparse", "--", ":(literal)"+fromRel)
 				if err != nil {
 					quarantineErr = fmt.Errorf("remove quarantined path from index %s: %w", fromRel, err)
 					break quarantineFiles
@@ -452,10 +452,10 @@ func unstagePath(ctx context.Context, ledgerPath, rel string) error {
 		// `git reset HEAD~ -- <path>` rewinds the index entry for this
 		// path to its HEAD~ state. WT untouched (the file is already
 		// moved aside; this just rewrites the staged tree).
-		_, err := gitutil.RunGit(ctx, ledgerPath, "reset", "HEAD~", "--", rel)
+		_, err := gitutil.RunGit(ctx, ledgerPath, "reset", "HEAD~", "--", ":(literal)"+rel)
 		return err
 	}
-	_, err := gitutil.RunGit(ctx, ledgerPath, "rm", "--cached", "--ignore-unmatch", "--", rel)
+	_, err := gitutil.RunGit(ctx, ledgerPath, "rm", "--cached", "--ignore-unmatch", "--", ":(literal)"+rel)
 	return err
 }
 

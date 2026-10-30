@@ -224,13 +224,15 @@ func TestRunPrePushSecretGate_QuarantinesNonJSONLAndAllowsPush(t *testing.T) {
 	t.Setenv("OX_ALLOW_SECRETS", "")
 	const sessionName = "2026-05-12-quarantine"
 	const canary = "AKIAIOSFODNN7EXAMPLE"
-	relMD := filepath.ToSlash(filepath.Join("sessions", sessionName, "notes.md"))
+	relMD := filepath.ToSlash(filepath.Join("sessions", sessionName, "notes[1].md"))
+	neighbor := filepath.ToSlash(filepath.Join("sessions", sessionName, "notes1.md"))
 
 	work := makeLedgerWithCommit(t, map[string]string{
 		// Also include an UNRELATED file in the same commit so we can
 		// assert that the rest of the push survives.
 		"unrelated.txt": "hello world\n",
 		relMD:           "# Notes\n\nfound a token: " + canary + "\n",
+		neighbor:        "committed notes\n",
 	})
 	seedSessionMeta(t, filepath.Join(work, "sessions", sessionName), sessionName)
 	mustGit(t, work, "add", "--sparse", filepath.Join("sessions", sessionName, "meta.json"))
@@ -240,6 +242,8 @@ func TestRunPrePushSecretGate_QuarantinesNonJSONLAndAllowsPush(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(planPath), 0o755))
 	require.NoError(t, os.WriteFile(planPath, []byte("staged plan\n"), 0o644))
 	mustGit(t, work, "add", "--sparse", planPath)
+	require.NoError(t, os.WriteFile(filepath.Join(work, neighbor), []byte("pending notes\n"), 0o644))
+	mustGit(t, work, "add", "--", neighbor)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -250,14 +254,16 @@ func TestRunPrePushSecretGate_QuarantinesNonJSONLAndAllowsPush(t *testing.T) {
 	assert.Empty(t, mustGitCapture(t, work, "ls-tree", "--name-only", "HEAD", "data/plans"))
 	assert.Equal(t, "staged plan", mustGitCapture(t, work, "show", ":data/plans/unfinished/plan.md"))
 	assert.Equal(t, identity, mustGitCapture(t, work, "show", "-s", "--format=%P%n%an%n%ae%n%aI%n%B", "HEAD"))
+	assert.Equal(t, "pending notes", mustGitCapture(t, work, "show", ":"+neighbor), "quarantine must treat brackets literally, preserving neighboring staging")
+	assert.Equal(t, "committed notes", mustGitCapture(t, work, "show", "HEAD:"+neighbor))
 
 	// Original in-place path must be gone (moved aside).
 	_, statErr := os.Stat(filepath.Join(work, relMD))
 	assert.True(t, os.IsNotExist(statErr),
-		"original notes.md should have been moved to quarantine; stat err=%v", statErr)
+		"original notes[1].md should have been moved to quarantine; stat err=%v", statErr)
 
 	// Quarantine path must hold the bytes.
-	quarRel := filepath.Join(".sageox", "cache", "quarantine", sessionName, "notes.md")
+	quarRel := filepath.Join(".sageox", "cache", "quarantine", sessionName, "notes[1].md")
 	quarAbs := filepath.Join(work, quarRel)
 	bytes, readErr := os.ReadFile(quarAbs)
 	require.NoError(t, readErr, "quarantine path missing")
@@ -352,7 +358,7 @@ func TestQuarantineBeforeUpload_PartialFailureRemainsDiscoverable(t *testing.T) 
 				require.NoError(t, os.WriteFile(badIndex, []byte("invalid index"), 0o600))
 				t.Setenv("OX_TEST_QUARANTINE_BAD_INDEX", badIndex)
 				t.Setenv("OX_TEST_QUARANTINE_FAIL_OP", tc.failOp)
-				t.Setenv("OX_TEST_QUARANTINE_FAIL_PATH", failedRel)
+				t.Setenv("OX_TEST_QUARANTINE_FAIL_PATH", ":(literal)"+failedRel)
 				t.Setenv("OX_TEST_QUARANTINE_LOCK", filepath.Join(work, ".git", "index.lock"))
 				t.Setenv("OX_TEST_QUARANTINE_REAL_GIT", realGit)
 				t.Setenv("PATH", binDir+string(os.PathListSeparator)+previousPath)
@@ -443,7 +449,7 @@ func TestQuarantineCancellationReleasesLedger(t *testing.T) {
 			t.Setenv("OX_TEST_QUARANTINE_REAL_GIT", realGit)
 			t.Setenv("OX_TEST_QUARANTINE_STARTED", started)
 			t.Setenv("OX_TEST_QUARANTINE_STALL", op)
-			t.Setenv("OX_TEST_QUARANTINE_PATH", rel)
+			t.Setenv("OX_TEST_QUARANTINE_PATH", ":(literal)"+rel)
 			previousPath := os.Getenv("PATH")
 			t.Setenv("PATH", binDir+string(os.PathListSeparator)+previousPath)
 			completed := false
