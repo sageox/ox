@@ -76,9 +76,12 @@ func TestGC_FailedPreparationPreservesOriginalAndRetries(t *testing.T) {
 	}
 	for _, phase := range []string{
 		"restore cancellation", "restore cancellation without tracked changes", "swap deadline",
-		"untracked capture error", "cache restore error", "swap signal error", "backup cleanup error",
+		"untracked capture error", "cache inspection error", "cache restore error", "swap signal error", "backup cleanup error",
 	} {
 		t.Run(phase, func(t *testing.T) {
+			if phase == "cache inspection error" && runtime.GOOS == "windows" {
+				t.Skip("requires a symlink loop to make backup inspection fail")
+			}
 			if phase == "backup cleanup error" && (runtime.GOOS == "windows" || os.Geteuid() == 0) {
 				t.Skip("requires directory permissions to refuse backup removal")
 			}
@@ -103,6 +106,8 @@ func TestGC_FailedPreparationPreservesOriginalAndRetries(t *testing.T) {
 			defer cancel()
 			restoreCache := gcRestoreCache
 			t.Cleanup(func() { gcRestoreCache = restoreCache })
+			preserveCache := gcPreserveCache
+			t.Cleanup(func() { gcPreserveCache = preserveCache })
 			originalCopy := copyFile
 			t.Cleanup(func() { copyFile = originalCopy })
 			hookCalled := false
@@ -132,6 +137,19 @@ func TestGC_FailedPreparationPreservesOriginalAndRetries(t *testing.T) {
 					}
 					return originalCopy(src, dst)
 				}
+			case "cache inspection error":
+				gcPreserveCache = func(src, backup string) error {
+					if err := preserveCache(src, backup); err != nil {
+						return err
+					}
+					require.NoError(t, os.Rename(backup, backup+".saved"))
+					require.NoError(t, os.Symlink(filepath.Base(backup), backup))
+					_, err := os.Stat(backup)
+					require.Error(t, err)
+					require.False(t, os.IsNotExist(err))
+					hookCalled = true
+					return nil
+				}
 			case "cache restore error":
 				gcRestoreCache = func(string, string) error { return errors.New("synthetic cache write failure") }
 			case "swap signal error":
@@ -149,7 +167,7 @@ func TestGC_FailedPreparationPreservesOriginalAndRetries(t *testing.T) {
 			}
 			ws := WorkspaceState{ID: "ledger", Type: WorkspaceTypeLedger, Path: clone, CloneURL: "file://" + bare, Exists: true}
 			require.Equal(t, wantResult, scheduler.runBlueGreenGC(ctx, ws))
-			if phase == "swap deadline" || phase == "untracked capture error" {
+			if phase == "swap deadline" || phase == "untracked capture error" || phase == "cache inspection error" {
 				require.True(t, hookCalled, "the test must reach the injected failure")
 			}
 			if phase == "swap deadline" {
@@ -165,13 +183,20 @@ func TestGC_FailedPreparationPreservesOriginalAndRetries(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, content, string(got), path)
 			}
+			if phase == "cache inspection error" {
+				require.NoError(t, os.Remove(clone+".gc-cache"), "failed inspection must retain the backup path")
+				require.NoError(t, os.Rename(clone+".gc-cache.saved", clone+".gc-cache"))
+			}
 			if phase == "backup cleanup error" {
 				require.NoError(t, os.Chmod(clone+".gc-cache", 0700))
+			}
+			if phase == "cache inspection error" || phase == "backup cleanup error" {
 				got, err := os.ReadFile(filepath.Join(clone+".gc-cache", "recording.txt"))
 				require.NoError(t, err, "failed retirement must retain the backup")
 				require.Equal(t, "cached recording", string(got))
 			}
 			gcRestoreCache = restoreCache
+			gcPreserveCache = preserveCache
 			copyFile = originalCopy
 			scheduler.gcSwapWindowTestHook = nil
 			require.Equal(t, gcSuccess, scheduler.runBlueGreenGC(context.Background(), ws))
@@ -1195,13 +1220,16 @@ func TestGC_InterruptedSwapRefusalPreservesBackups(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX symlink failure modes")
 	}
-	for _, obstruction := range []string{"swap lock directory", "dangling canonical symlink", "canonical symlink loop", "swap marker directory", "old clone symlink loop"} {
+	for _, obstruction := range []string{
+		"swap lock directory", "dangling canonical symlink", "canonical symlink loop", "swap marker directory", "old clone symlink loop",
+		"swap marker symlink loop", "cache backup symlink loop", "diff backup symlink loop", "untracked backup symlink loop",
+	} {
 		t.Run(obstruction, func(t *testing.T) {
 			clone := filepath.Join(t.TempDir(), "clone")
 			old := clone + ".old"
 			require.NoError(t, os.MkdirAll(clone, 0755))
 			retained := filepath.Join(old, ".git", "ox-plan-review-pending", "only.json")
-			if obstruction == "old clone symlink loop" {
+			if obstruction == "old clone symlink loop" || obstruction == "swap marker symlink loop" {
 				retained = filepath.Join(clone, ".git", "ox-plan-review-pending", "only.json")
 			}
 			require.NoError(t, os.MkdirAll(filepath.Dir(retained), 0755))
@@ -1210,6 +1238,7 @@ func TestGC_InterruptedSwapRefusalPreservesBackups(t *testing.T) {
 				require.NoError(t, os.MkdirAll(clone+suffix, 0755))
 				require.NoError(t, os.WriteFile(filepath.Join(clone+suffix, "only.txt"), []byte("only backup"), 0644))
 			}
+			loopPath := ""
 			switch obstruction {
 			case "swap lock directory":
 				require.NoError(t, os.Mkdir(clone+".gc-swap-lock", 0755))
@@ -1224,17 +1253,54 @@ func TestGC_InterruptedSwapRefusalPreservesBackups(t *testing.T) {
 				require.NoError(t, os.Mkdir(clone+".gc-swap-done", 0755))
 			case "old clone symlink loop":
 				require.NoError(t, os.Symlink(old, old))
+			case "swap marker symlink loop":
+				loopPath = clone + ".gc-swap-done"
+				require.NoError(t, os.WriteFile(loopPath, nil, 0644))
+			case "cache backup symlink loop":
+				loopPath = clone + ".gc-cache"
+			case "diff backup symlink loop":
+				loopPath = clone + ".gc-diff"
+				require.NoError(t, os.WriteFile(loopPath, []byte("unrestored diff"), 0644))
+			case "untracked backup symlink loop":
+				loopPath = clone + ".gc-untracked"
+			}
+			if loopPath != "" {
+				require.NoError(t, os.Rename(loopPath, loopPath+".saved"))
+				require.NoError(t, os.Symlink(filepath.Base(loopPath), loopPath))
+				_, err := os.Stat(loopPath)
+				require.Error(t, err)
+				require.False(t, os.IsNotExist(err))
 			}
 			scheduler := gcTestScheduler(t)
 			ws := WorkspaceState{ID: "blocked-recovery", Type: WorkspaceTypeLedger, Path: clone}
 			require.Equal(t, gcFailed, scheduler.runBlueGreenGC(context.Background(), ws))
+			if loopPath != "" && obstruction != "swap marker symlink loop" {
+				require.DirExists(t, old, "the old clone must survive failed recovery")
+				retained = filepath.Join(clone, ledger.PlanReviewPendingDir, "only.json")
+			}
 			data, err := os.ReadFile(retained)
 			require.NoError(t, err)
 			require.Equal(t, "only retry copy", string(data))
+			if loopPath != "" {
+				_, err := os.Lstat(clone + ".gc-swap-done")
+				require.NoError(t, err, "failed inspection must retain the recovery marker")
+			}
 			for _, suffix := range []string{".gc-cache", ".gc-untracked"} {
-				data, err := os.ReadFile(filepath.Join(clone+suffix, "only.txt"))
+				backup := clone + suffix
+				if backup == loopPath {
+					backup += ".saved"
+				}
+				if suffix == ".gc-cache" && (obstruction == "diff backup symlink loop" || obstruction == "untracked backup symlink loop") {
+					backup = filepath.Join(clone, ".sageox", "cache")
+				}
+				data, err := os.ReadFile(filepath.Join(backup, "only.txt"))
 				require.NoError(t, err)
-				require.Equal(t, "only backup", string(data), "fatal setup errors must not consume backups")
+				require.Equal(t, "only backup", string(data), "failed recovery must retain captured content")
+			}
+			if obstruction == "diff backup symlink loop" {
+				data, err := os.ReadFile(loopPath + ".saved")
+				require.NoError(t, err)
+				require.Equal(t, "unrestored diff", string(data))
 			}
 			require.NoDirExists(t, clone+".new")
 			require.True(t, scheduler.ledgerMu.TryLock(), "failed recovery must release the ledger lock")

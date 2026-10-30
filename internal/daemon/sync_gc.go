@@ -738,6 +738,9 @@ func (s *SyncScheduler) runBlueGreenGCLocked(ctx context.Context, ws WorkspaceSt
 				return gcFailed, false
 			}
 			_ = os.RemoveAll(cacheBackupDir)
+		} else if !errors.Is(statErr, fs.ErrNotExist) {
+			s.logger.Error("gc: cannot inspect orphaned cache backup", "path", cacheBackupDir, "error", statErr)
+			return gcFailed, false
 		}
 		if _, statErr := os.Stat(diffFile); statErr == nil {
 			if applyErr := s.gcRestoreDiff(ctx, ws.Path, diffFile); applyErr != nil {
@@ -746,6 +749,9 @@ func (s *SyncScheduler) runBlueGreenGCLocked(ctx context.Context, ws WorkspaceSt
 				return gcFailed, false
 			}
 			_ = os.Remove(diffFile)
+		} else if !errors.Is(statErr, fs.ErrNotExist) {
+			s.logger.Error("gc: cannot inspect orphaned diff", "path", diffFile, "error", statErr)
+			return gcFailed, false
 		}
 		if _, statErr := os.Stat(untrackedDir); statErr == nil {
 			if applyErr := s.gcRestoreUntracked(ws.Path, untrackedDir); applyErr != nil {
@@ -754,9 +760,15 @@ func (s *SyncScheduler) runBlueGreenGCLocked(ctx context.Context, ws WorkspaceSt
 				return gcFailed, false
 			}
 			_ = os.RemoveAll(untrackedDir)
+		} else if !errors.Is(statErr, fs.ErrNotExist) {
+			s.logger.Error("gc: cannot inspect orphaned untracked backup", "path", untrackedDir, "error", statErr)
+			return gcFailed, false
 		}
 		_ = os.Remove(swapMarker)
 		s.logger.Info("gc: recovered orphaned artifacts from an interrupted prior GC", "path", ws.Path, "workspace", wsLabel)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		s.logger.Error("gc: cannot inspect interrupted swap marker", "path", swapMarker, "error", err)
+		return gcFailed, false
 	}
 	if carryErr != nil {
 		return gcFailed, false
@@ -867,6 +879,9 @@ func (s *SyncScheduler) runBlueGreenGCLocked(ctx context.Context, ws WorkspaceSt
 		return gcFailed, false
 	} else if _, err := os.Stat(cacheBackupDir); err == nil {
 		hasCache = true
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		s.logger.Error("gc: cannot inspect cache backup, keeping original", "path", ws.Path, "error", err)
+		return gcFailed, false
 	}
 
 	// --- phase 1: clone, validate, swap ---
