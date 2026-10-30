@@ -257,12 +257,9 @@ func countDistinctPaths(findings []PrePushFinding) int {
 // PushWithRetry separately validates the immutable objects before publication.
 // The caller must hold the repo lock: repairs may stage and amend HEAD.
 func runPrePushSecretGate(ctx context.Context, ledgerPath string) error {
-	if err := runSessionSecretGate(ctx, ledgerPath, func() (*PrePushScanResult, error) {
+	return runSessionSecretGate(ctx, ledgerPath, func() (*PrePushScanResult, error) {
 		return scanPrePushForSecrets(ctx, ledgerPath)
-	}, true); err != nil {
-		return err
-	}
-	return nil
+	}, true)
 }
 
 // prepareSessionUpload runs the same redaction and quarantine policy on real

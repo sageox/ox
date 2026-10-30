@@ -204,70 +204,76 @@ func TestSessionScope_DateRange_LexicographicWindow(t *testing.T) {
 	assert.Equal(t, originalMarch, marchAfter, "March excluded by --since")
 }
 
-// TestSessionScope_QuarantineIntegration_JSONL is the load-bearing test
-// for Path Y: a session whose JSONL was carved out by the pre-push gate
-// into .sageox/cache/quarantine/<name>/raw.jsonl must be recoverable
-// via `redact --session <name>`. After approve, bytes move back to
-// sessions/<name>/raw.jsonl AND the debt marker is removed (signaling
-// to `ox doctor` that the debt is paid).
-//
-// Failure prevented: doctor warning points at a command that doesn't
-// help (the original #608 symptom — surface mismatch and marker
-// orphan).
+// A skipped quarantined file must not prevent committing a successful repair
+// of another file. Its bytes and recovery marker must remain available.
 func TestSessionScope_QuarantineIntegration_JSONL(t *testing.T) {
-	work := makeLedgerWithCommitAndOrigin(t, map[string]string{
-		"sessions/dirty/meta.json": gitRawMetaJSON(t, "dirty", "OxDIRTY"),
-	})
-
-	// Hand-construct quarantine state: bytes at the quarantine path +
-	// a marker pointing at them. This is what the forward path
-	// (prepush_autoredact.quarantineUnredactableFindings) would leave
-	// behind for a JSONL-with-rewrite-error case.
-	quarantineDir := filepath.Join(work, ".sageox", "cache", "quarantine", "dirty")
-	require.NoError(t, os.MkdirAll(quarantineDir, 0o700))
-	quarantineFile := filepath.Join(quarantineDir, "raw.jsonl")
-	require.NoError(t, os.WriteFile(quarantineFile, []byte(`{"text":"AKIAIOSFODNN7EXAMPLE"}`+"\n"), 0o600))
-
-	markerDir := filepath.Join(work, ".sageox", "cache", "redaction-debt")
-	require.NoError(t, os.MkdirAll(markerDir, 0o700))
-	rec := redactionDebtRecord{
-		SessionName:   "dirty",
-		QuarantinedAt: time.Now().UTC(),
-		Reason:        "test fixture",
-		Findings: []redactionDebtFinding{
-			{Detector: "aws_access_key", Filename: "raw.jsonl", Line: 1},
-		},
-		QuarantinePaths: []redactionDebtLocation{
-			{From: "sessions/dirty/raw.jsonl", To: ".sageox/cache/quarantine/dirty/raw.jsonl"},
-		},
+	if testing.Short() {
+		t.Skip("short: real Git quarantine recovery")
 	}
-	buf, err := json.MarshalIndent(rec, "", "  ")
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(markerDir, "dirty.json"), buf, 0o600))
+	for _, tc := range []struct {
+		name, answers string
+		withSummary   bool
+	}{
+		{"all repaired", "y\n", false},
+		{"unsupported summary stays quarantined", "y\ny\n", true},
+		{"declined summary stays quarantined", "y\nn\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			work := makeLedgerWithCommitAndOrigin(t, map[string]string{
+				"sessions/dirty/meta.json": gitRawMetaJSON(t, "dirty", "OxDIRTY"),
+			})
+			quarantineDir := filepath.Join(work, ".sageox", "cache", "quarantine", "dirty")
+			require.NoError(t, os.MkdirAll(quarantineDir, 0o700))
+			files := []string{"raw.jsonl"}
+			if tc.withSummary {
+				files = append(files, "summary.md")
+			}
+			const content = `{"text":"AKIAIOSFODNN7EXAMPLE"}` + "\n"
+			rec := redactionDebtRecord{
+				SessionName: "dirty", QuarantinedAt: time.Now().UTC(), Reason: "test fixture",
+			}
+			for _, file := range files {
+				require.NoError(t, os.WriteFile(filepath.Join(quarantineDir, file), []byte(content), 0o600))
+				rec.Findings = append(rec.Findings, redactionDebtFinding{
+					Detector: "aws_access_key", Filename: file, Line: 1,
+				})
+				rec.QuarantinePaths = append(rec.QuarantinePaths, redactionDebtLocation{
+					From: "sessions/dirty/" + file, To: ".sageox/cache/quarantine/dirty/" + file,
+				})
+			}
+			markerDir := filepath.Join(work, ".sageox", "cache", "redaction-debt")
+			require.NoError(t, os.MkdirAll(markerDir, 0o700))
+			buf, err := json.Marshal(rec)
+			require.NoError(t, err)
+			marker := filepath.Join(markerDir, "dirty.json")
+			require.NoError(t, os.WriteFile(marker, buf, 0o600))
 
-	out := &bytes.Buffer{}
-	err = runRedactHistoryWorkflow(redactHistoryOptions{
-		LedgerPath: work,
-		BackupDir:  t.TempDir(),
-		Scope:      &sessionScope{Names: []string{"dirty"}},
-		Stdin:      strings.NewReader("y\n"),
-		Stdout:     out,
-	})
-	require.NoError(t, err)
-
-	// quarantine source must be gone
-	_, statErr := os.Stat(quarantineFile)
-	assert.True(t, os.IsNotExist(statErr), "quarantine source must be moved")
-
-	// destination must hold redacted bytes
-	inPlace, err := os.ReadFile(filepath.Join(work, "sessions/dirty/raw.jsonl"))
-	require.NoError(t, err)
-	assert.Contains(t, string(inPlace), "[REDACTED_AWS_KEY]", "moved-back file is redacted")
-	assert.NotContains(t, string(inPlace), "AKIAIOSFODNN7EXAMPLE", "secret bytes gone")
-
-	// debt marker must be cleaned up
-	_, markerErr := os.Stat(filepath.Join(markerDir, "dirty.json"))
-	assert.True(t, os.IsNotExist(markerErr), "drained debt marker must be removed")
+			out := &bytes.Buffer{}
+			err = runRedactHistoryWorkflow(redactHistoryOptions{
+				LedgerPath: work,
+				BackupDir:  t.TempDir(),
+				Scope:      &sessionScope{Names: []string{"dirty"}},
+				Stdin:      strings.NewReader(tc.answers),
+				Stdout:     out,
+			})
+			require.NoError(t, err)
+			require.NoFileExists(t, filepath.Join(quarantineDir, "raw.jsonl"))
+			inPlace, err := os.ReadFile(filepath.Join(work, "sessions/dirty/raw.jsonl"))
+			require.NoError(t, err)
+			assert.Contains(t, string(inPlace), "[REDACTED_AWS_KEY]")
+			assert.NotContains(t, string(inPlace), "AKIAIOSFODNN7EXAMPLE")
+			assert.Equal(t, strings.TrimSpace(string(inPlace)), mustGitCapture(t, work, "show", "HEAD:sessions/dirty/raw.jsonl"))
+			if tc.withSummary {
+				preserved, err := os.ReadFile(filepath.Join(quarantineDir, "summary.md"))
+				require.NoError(t, err)
+				assert.Equal(t, content, string(preserved))
+				assert.FileExists(t, marker)
+				assert.Empty(t, mustGitCapture(t, work, "ls-tree", "--name-only", "HEAD", "sessions/dirty/summary.md"))
+			} else {
+				assert.NoFileExists(t, marker, "drained debt marker must be removed")
+			}
+		})
+	}
 }
 
 // TestSessionScope_Match_DateRangeUnit unit-tests the matcher in

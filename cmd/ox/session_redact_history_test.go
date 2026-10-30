@@ -214,8 +214,7 @@ func TestRunRedactHistoryWorkflow_DryRunListsButDoesntModify(t *testing.T) {
 func TestRunRedactHistoryWorkflow_InteractiveYesRedacts(t *testing.T) {
 	work := makeLedgerWithCommitAndOrigin(t, map[string]string{
 		"sessions/leaky/raw.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
-		// This fixture stores content directly in Git, rather than as an LFS pointer.
-		"sessions/leaky/meta.json": `{"version":"1.0","session_name":"leaky","agent_id":"OxLEAK","files":{"raw.jsonl":{"storage":"git"}}}`,
+		"sessions/leaky/meta.json": gitRawMetaJSON(t, "leaky", "OxLEAK"),
 	})
 	backupDir := t.TempDir()
 	out := &bytes.Buffer{}

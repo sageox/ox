@@ -443,9 +443,9 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	// rather than as a silent skip — the operator needs to know which
 	// files require the manual scrub path.
 	var quarantineSkipped []string
-	redactedFiles := 0
-	for _, fileFindings := range byPath {
-		path := fileFindings[0].Path
+	var repairedPaths []string
+	for _, path := range sortedKeys(byPath) {
+		fileFindings := byPath[path]
 		quarantined := fileFindings[0].Quarantined
 		quarantineRel := fileFindings[0].QuarantinePath
 		header := path
@@ -492,7 +492,7 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 					return fmt.Errorf("redact %s: %w", path, err)
 				}
 			}
-			redactedFiles++
+			repairedPaths = append(repairedPaths, path)
 			// Record per-finding entries against the session that owns
 			// this file. Detector + line + filename only — never bytes.
 			if sess, fname, ok := splitSessionPath(path); ok {
@@ -510,7 +510,7 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 		}
 	}
 
-	if redactedFiles == 0 {
+	if len(repairedPaths) == 0 {
 		fmt.Fprintln(opts.Stdout, "No files redacted. Snapshot remains for reference.")
 		return nil
 	}
@@ -525,18 +525,15 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	if err != nil {
 		return fmt.Errorf("write redaction pass: %w", err)
 	}
-	// Stage the modified meta.json files alongside the redacted content
-	// files so the amend commit captures both.
-	for _, mp := range metaPaths {
-		if _, ok := byPath[mp]; !ok {
-			byPath[mp] = nil
+	// Leave skipped files alone, including files still in quarantine.
+	ctx, cancel := context.WithTimeout(context.Background(), lockedCommitTimeout)
+	defer cancel()
+	if err := gitutil.WithRepoLock(ctx, opts.LedgerPath, func() error {
+		if err := checkRedactionIndex(ctx, opts.LedgerPath); err != nil {
+			return err
 		}
-	}
-
-	// Stage + amend in a single holding commit. The operator can review
-	// the amended diff before running `ox session push`. The amend moves the
-	// branch, so it runs under the repo lock (sageox/ox#1541).
-	if err := stageAndAmendRedactedFiles(opts.LedgerPath, byPath); err != nil {
+		return stageAndAmendRedactedFiles(ctx, opts.LedgerPath, append(repairedPaths, metaPaths...))
+	}); err != nil {
 		return fmt.Errorf("stage/amend: %w", err)
 	}
 
@@ -573,7 +570,7 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	remainingQuarantine, _ := enumerateQuarantineFindings(opts.LedgerPath, matcher)
 	remaining := len(postScan.Findings) + len(remainingQuarantine)
 	fmt.Fprintf(opts.Stdout, "\nRedaction complete. Files modified: %d. Remaining findings in scope: %d.\n",
-		redactedFiles, remaining)
+		len(repairedPaths), remaining)
 	if remaining > 0 {
 		fmt.Fprintln(opts.Stdout, "Re-run to address remaining findings.")
 	}
@@ -733,8 +730,7 @@ func classifyFindingsByPushStatus(ledgerPath string, findings []redactHistoryFin
 	// Quarantined paths are unconditionally treated as unpushed: the
 	// pre-push gate carved them out of the holding commit before any
 	// push could reference the bytes (quarantineUnredactableFindings).
-	// Doing the git lookup for a path that no
-	// commit references would return "not tracked" → "unpushed" anyway,
+	// Looking up a path that no commit references would return "unpushed",
 	// but skipping the exec saves a fork per quarantined file.
 	pushedFiles := map[string]bool{}
 	for _, f := range findings {
@@ -968,25 +964,11 @@ func redactFileInPlace(abs string, _ *session.Redactor) error {
 	return os.Rename(tmpName, abs)
 }
 
-// stageAndAmendRedactedFiles locks the Ledger and amends only the repaired
-// paths. The interactive workflow has already excluded published content.
-func stageAndAmendRedactedFiles(ledgerPath string, byPath map[string][]redactHistoryFinding) error {
-	if len(byPath) == 0 {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), lockedCommitTimeout)
-	defer cancel()
-	return gitutil.WithRepoLock(ctx, ledgerPath, func() error {
-		if err := checkRedactionIndex(ctx, ledgerPath); err != nil {
-			return err
-		}
-		return stageAndAmendRedactedFilesLocked(ctx, ledgerPath, byPath)
-	})
-}
-
-func stageAndAmendRedactedFilesLocked(ctx context.Context, ledgerPath string, byPath map[string][]redactHistoryFinding) error {
-	paths := make([]string, 0, len(byPath))
-	for p := range byPath {
+// stageAndAmendRedactedFiles stages and amends only repaired files and metadata.
+// The caller holds the repo lock and checks Git state before staging.
+func stageAndAmendRedactedFiles(ctx context.Context, ledgerPath string, repairedPaths []string) error {
+	paths := make([]string, 0, len(repairedPaths))
+	for _, p := range repairedPaths {
 		paths = append(paths, ":(literal)"+p)
 	}
 	sort.Strings(paths)

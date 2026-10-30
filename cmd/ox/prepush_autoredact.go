@@ -195,18 +195,9 @@ func autoRedactSessionFindings(ctx context.Context, ledgerPath string, result *P
 		return out, fmt.Errorf("write redaction passes: %w", err)
 	}
 
-	// Stage + amend in one go. Reuses the same primitive `ox session
-	// redact` uses; auditors get one consistent shape regardless of
-	// whether the redaction was interactive or automatic.
+	// Include the audit metadata in the same scoped amendment.
 	if amendCommit {
-		byPath := map[string][]redactHistoryFinding{}
-		for _, rel := range redactedRels {
-			byPath[rel] = nil
-		}
-		for _, mp := range metaPaths {
-			byPath[mp] = nil
-		}
-		if err := stageAndAmendRedactedFilesLocked(ctx, ledgerPath, byPath); err != nil {
+		if err := stageAndAmendRedactedFiles(ctx, ledgerPath, append(redactedRels, metaPaths...)); err != nil {
 			return out, fmt.Errorf("stage/amend redacted files: %w", err)
 		}
 	}
@@ -262,7 +253,7 @@ func quarantineUnredactableFindings(ctx context.Context, ledgerPath string, find
 			return err
 		}
 		var err error
-		out, err = quarantineUnredactableFindingsLocked(ctx, ledgerPath, findings, amendCommit)
+		out, err = quarantineUnredactableFindingsLocked(ctx, ledgerPath, findings, false)
 		return err
 	})
 	return out, err
