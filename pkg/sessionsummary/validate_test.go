@@ -298,7 +298,6 @@ func TestIsSkipCategory(t *testing.T) {
 		{"nil response", nil, false},
 		{"skip category", &SummarizeResponse{QualityCategory: QualityCategorySkip}, true},
 		{"share category", &SummarizeResponse{QualityCategory: QualityCategoryShare}, false},
-		{"local_only category", &SummarizeResponse{QualityCategory: QualityCategoryLocalOnly}, false},
 		{"empty category", &SummarizeResponse{QualityCategory: ""}, false},
 	}
 	for _, tt := range tests {

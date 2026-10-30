@@ -1374,7 +1374,7 @@ func (d *Daemon) initComponents() time.Duration {
 			sfh.SetTelemetry(d.telemetry)
 		}
 		awCfg := configLoader()
-		sfh.SetQualityThresholds(awCfg.GetQualityUploadThreshold(), awCfg.GetQualityDiscardThreshold())
+		sfh.SetQualityDiscardThreshold(awCfg.GetQualityDiscardThreshold())
 		d.sessionFinalizeHandler = sfh
 		d.agentWorker.RegisterHandler(sfh)
 		d.agentWorker.SetOnComplete(func(result agentwork.WorkResult) {

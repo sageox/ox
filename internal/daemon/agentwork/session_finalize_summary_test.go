@@ -528,7 +528,7 @@ func TestProcessResult_QualityScoreDiscard(t *testing.T) {
 	}
 
 	handler := NewSessionFinalizeHandlerForTest(slog.Default())
-	handler.SetQualityThresholds(0.3, 0.1)
+	handler.SetQualityDiscardThreshold(0.1)
 
 	item := &WorkItem{
 		ID:       "test-1",
@@ -578,7 +578,7 @@ func TestProcessResult_SkipOnLedger_FinalizesInPlace(t *testing.T) {
 	require.NoError(t, os.WriteFile(markerPath, []byte(`{"cache_dir":"`+sessionDir+`"}`), 0644))
 
 	handler := NewSessionFinalizeHandlerForTest(slog.Default())
-	handler.SetQualityThresholds(0.3, 0.1)
+	handler.SetQualityDiscardThreshold(0.1)
 
 	item := &WorkItem{
 		ID:       "test-skip-ledger",
@@ -637,7 +637,7 @@ func TestProcessResult_SkipTitleDefault(t *testing.T) {
 	sessionDir := filepath.Join(ledgerPath, "sessions", "2026-05-12T06-00-ajit-OxSKP2")
 
 	handler := NewSessionFinalizeHandlerForTest(slog.Default())
-	handler.SetQualityThresholds(0.3, 0.1)
+	handler.SetQualityDiscardThreshold(0.1)
 
 	item := &WorkItem{
 		ID:       "test-skip-title",
@@ -674,7 +674,7 @@ func TestProcessResult_ValidationFailure_UploadsFallbackStub(t *testing.T) {
 	sessionDir := filepath.Join(ledgerPath, "sessions", "test-valfail")
 
 	handler := NewSessionFinalizeHandlerForTest(slog.Default())
-	handler.SetQualityThresholds(0.3, 0.1)
+	handler.SetQualityDiscardThreshold(0.1)
 
 	item := &WorkItem{
 		ID:       "test-valfail",
@@ -728,7 +728,7 @@ func TestProcessResult_EmptySessionLLMScoreZero_Discarded(t *testing.T) {
 	}
 
 	handler := NewSessionFinalizeHandlerForTest(slog.Default())
-	handler.SetQualityThresholds(0.3, 0.1)
+	handler.SetQualityDiscardThreshold(0.1)
 
 	item := &WorkItem{
 		ID:       "test-525",
@@ -762,12 +762,12 @@ func TestProcessResult_EmptySessionLLMScoreZero_Discarded(t *testing.T) {
 	}
 }
 
-// TestProcessResult_LocalOnlyWritesTitle verifies a session the summarizer
-// rates local_only gets its title and status in meta.json.
+// TestProcessResult_RoutineWorkWritesTitle verifies a session the summarizer
+// rates share for routine work gets its title and status in meta.json.
 // Failure prevented: the session is published untitled, every clone's title
 // autofix leaves an uncommitted meta.json edit, and a teammate's later summary
 // of the same session wedges those clones' Ledger sync.
-func TestProcessResult_LocalOnlyWritesTitle(t *testing.T) {
+func TestProcessResult_RoutineWorkWritesTitle(t *testing.T) {
 	ledgerPath := createTestSession(t, "test-local", nil)
 	sessionDir := filepath.Join(ledgerPath, "sessions", "test-local")
 
@@ -786,7 +786,7 @@ func TestProcessResult_LocalOnlyWritesTitle(t *testing.T) {
 	}
 
 	result := &RunResult{
-		Output: `{"title":"Quick fix","summary":"Minor daemon config change","key_actions":["updated config"],"outcome":"success","topics_found":["config"],"quality_category":"local_only","score_reason":"Routine config update"}`,
+		Output: `{"title":"Quick fix","summary":"Minor daemon config change","key_actions":["updated config"],"outcome":"success","topics_found":["config"],"quality_category":"share","score_reason":"Routine config update"}`,
 	}
 
 	err := handler.ProcessResult(item, result)
@@ -796,24 +796,24 @@ func TestProcessResult_LocalOnlyWritesTitle(t *testing.T) {
 
 	// session dir should still exist (not discarded)
 	if _, statErr := os.Stat(sessionDir); os.IsNotExist(statErr) {
-		t.Error("expected session directory to still exist for a local_only session")
+		t.Error("expected session directory to still exist for a shared session")
 	}
 
 	meta, err := lfs.ReadSessionMeta(sessionDir)
 	if err != nil {
-		t.Fatalf("local_only session has no readable meta.json: %v", err)
+		t.Fatalf("shared session has no readable meta.json: %v", err)
 	}
 	if meta.Title != "Quick fix" || meta.SummaryStatus != "ok" {
-		t.Errorf("local_only meta.json title=%q summary_status=%q, want %q and %q", meta.Title, meta.SummaryStatus, "Quick fix", "ok")
+		t.Errorf("shared meta.json title=%q summary_status=%q, want %q and %q", meta.Title, meta.SummaryStatus, "Quick fix", "ok")
 	}
 }
 
-func TestProcessResult_QualityScoreAboveUpload(t *testing.T) {
+func TestProcessResult_QualityScoreAboveDiscard(t *testing.T) {
 	ledgerPath := createTestSession(t, "test-upload", nil)
 	sessionDir := filepath.Join(ledgerPath, "sessions", "test-upload")
 
 	handler := NewSessionFinalizeHandlerForTest(slog.Default())
-	handler.SetQualityThresholds(0.3, 0.1)
+	handler.SetQualityDiscardThreshold(0.1)
 
 	item := &WorkItem{
 		ID:       "test-3",
@@ -827,7 +827,7 @@ func TestProcessResult_QualityScoreAboveUpload(t *testing.T) {
 		},
 	}
 
-	// score above upload threshold — should proceed to git push (skipped in test mode)
+	// score above discard threshold — should proceed to git push (skipped in test mode)
 	result := &RunResult{
 		Output: `{"title":"Feature implementation","summary":"Implemented quality scoring","key_actions":["added scoring","updated config"],"outcome":"success","topics_found":["architecture"],"quality_score":0.8,"score_reason":"New feature with design decisions"}`,
 	}

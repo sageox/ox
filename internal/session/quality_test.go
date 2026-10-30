@@ -6,7 +6,6 @@ func TestEvaluateQuality(t *testing.T) {
 	tests := []struct {
 		name    string
 		score   float64
-		upload  float64
 		discard float64
 		want    QualityDisposition
 	}{
@@ -14,24 +13,23 @@ func TestEvaluateQuality(t *testing.T) {
 		// correctly scored 0) must flow through the discard gate. The function
 		// no longer has an "unscored sentinel" branch — "unscored" decisions
 		// are the caller's responsibility.
-		{"explicit zero is discarded below discard threshold", 0.0, 0.3, 0.1, QualityDiscard},
-		{"below discard threshold", 0.05, 0.3, 0.1, QualityDiscard},
-		{"at discard threshold boundary", 0.1, 0.3, 0.1, QualityLocalOnly},
-		{"between thresholds", 0.2, 0.3, 0.1, QualityLocalOnly},
-		{"at upload threshold", 0.3, 0.3, 0.1, QualityUpload},
-		{"above upload threshold", 0.8, 0.3, 0.1, QualityUpload},
-		{"perfect score", 1.0, 0.3, 0.1, QualityUpload},
-		{"custom high thresholds", 0.5, 0.7, 0.3, QualityLocalOnly},
-		{"custom high thresholds above", 0.8, 0.7, 0.3, QualityUpload},
-		{"custom high thresholds below", 0.2, 0.7, 0.3, QualityDiscard},
+		{"explicit zero is discarded below discard threshold", 0.0, 0.1, QualityDiscard},
+		{"below discard threshold", 0.05, 0.1, QualityDiscard},
+		{"at discard threshold boundary", 0.1, 0.1, QualityUpload},
+		{"above discard threshold", 0.2, 0.1, QualityUpload},
+		{"substantive score", 0.8, 0.1, QualityUpload},
+		{"perfect score", 1.0, 0.1, QualityUpload},
+		{"above custom threshold", 0.5, 0.3, QualityUpload},
+		{"at custom threshold", 0.3, 0.3, QualityUpload},
+		{"below custom threshold", 0.2, 0.3, QualityDiscard},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := EvaluateQuality(tt.score, tt.upload, tt.discard)
+			got := EvaluateQuality(tt.score, tt.discard)
 			if got != tt.want {
-				t.Errorf("EvaluateQuality(%f, %f, %f) = %q, want %q",
-					tt.score, tt.upload, tt.discard, got, tt.want)
+				t.Errorf("EvaluateQuality(%f, %f) = %q, want %q",
+					tt.score, tt.discard, got, tt.want)
 			}
 		})
 	}
@@ -48,7 +46,6 @@ func TestEvaluateQualityCategory(t *testing.T) {
 		want     QualityDisposition
 	}{
 		{"skip", QualityDiscard},
-		{"local_only", QualityLocalOnly},
 		{"share", QualityUpload},
 		// Defensive defaults — unknown / future / empty categories must
 		// preserve the artifact (upload) rather than silently discard.
