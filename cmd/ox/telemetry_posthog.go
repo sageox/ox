@@ -12,8 +12,11 @@ import (
 	"syscall"
 	"time"
 
+	friction "github.com/sageox/frictionax"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ephemeral"
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/telemetry"
@@ -57,9 +60,18 @@ func capturePostHogCommand(exitCode int, stderr io.Writer) {
 		return
 	}
 	if telemetry.PostHogConfigured() {
-		telemetry.CapturePostHog(postHogCommandEvent, postHogCommandProps(cliCtx, path, exitCode))
+		opts := postHogCaptureOpts(cliCtx)
+		telemetry.CapturePostHog(postHogCommandEvent, postHogCommandProps(cliCtx, path, exitCode), opts)
 	}
 	showTelemetryNoticeOnce(stderr)
+}
+
+func postHogCaptureOpts(c *cli.Context) telemetry.CaptureOpts {
+	opts := telemetry.CaptureOpts{}
+	if ep := endpoint.GetForProject(c.ProjectRoot); endpoint.IsProduction(ep) {
+		opts.PersonID = auth.LocalUserID(ep)
+	}
+	return opts
 }
 
 // skipPostHogCommand reports commands that run automatically: coding-agent
@@ -87,8 +99,10 @@ func skipPostHogCommand(path string) bool {
 // replacing a property above.
 func postHogCommandProps(c *cli.Context, path string, exitCode int) map[string]any {
 	actor, agentType := oxActorDetector{}.DetectActor()
-	if agentType == "ci" { // friction files CI under the agent actor
-		actor, agentType = "ci", ""
+	specActor, legacyActor, agentType := postHogActors(actor, agentType)
+	env := "test"
+	if endpoint.IsProduction(endpoint.GetForProject(c.ProjectRoot)) {
+		env = "production"
 	}
 	initialized := c.ProjectRoot != "" && config.IsInitialized(c.ProjectRoot)
 	props := map[string]any{
@@ -97,7 +111,11 @@ func postHogCommandProps(c *cli.Context, path string, exitCode int) map[string]a
 		"success":          exitCode == 0,
 		"exit_code":        exitCode,
 		"duration_ms":      time.Since(c.CommandStartTime).Milliseconds(),
-		"actor":            string(actor),
+		"actor":            specActor,
+		"cli_actor":        legacyActor,
+		"surface":          "cli",
+		"env":              env,
+		"event_version":    1,
 		"agent_type":       agentType,
 		"repo_initialized": initialized,
 		"ephemeral":        ephemeral.Reason(),
@@ -124,6 +142,16 @@ func postHogCommandProps(c *cli.Context, path string, exitCode int) map[string]a
 		}
 	}
 	return props
+}
+
+func postHogActors(actor friction.Actor, agentType string) (string, string, string) {
+	if agentType == "ci" {
+		return "ci", "ci", ""
+	}
+	if actor == friction.ActorAgent {
+		return "ai_coworker", "agent", agentType
+	}
+	return "person", "human", agentType
 }
 
 // setFlagNames lists the flags given on the command line, by name.
@@ -222,6 +250,7 @@ func postHogErrorDetail(err error) string {
 // telemetryNotice is shown once per install, the first time a person runs ox
 // at a terminal.
 const telemetryNotice = "ox sends usage data (which commands run and whether they worked) to improve it.\n" +
+	"When signed in to production, events include your SageOx user ID and this install's ID.\n" +
 	"Details: ox config get telemetry · Turn off: ox config set telemetry off"
 
 // showTelemetryNoticeOnce prints telemetryNotice unless it was shown before or

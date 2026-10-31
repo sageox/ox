@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/proc"
@@ -58,10 +59,18 @@ func PostHogConfigured() bool {
 }
 
 type postHogEvent struct {
+	UUID       string         `json:"uuid"`
 	Event      string         `json:"event"`
 	DistinctID string         `json:"distinct_id"`
 	Timestamp  time.Time      `json:"timestamp"`
 	Properties map[string]any `json:"properties"`
+}
+
+// CaptureOpts identifies a person and optionally preserves an occurrence on replay.
+type CaptureOpts struct {
+	PersonID string
+	UUID     string
+	At       time.Time
 }
 
 // CapturePostHog sends one event to PostHog from a detached ox process, so
@@ -70,12 +79,14 @@ type postHogEvent struct {
 // background flush, so it would have to either block at exit or lose the
 // event.
 //
-// Its distinct_id is the install ID, and it creates no PostHog person
-// profile. It adds the version, OS, and arch to props.
+// Its distinct_id is opts.PersonID when set, otherwise the install ID. It
+// always carries install_id and creates no person profile. Each event gets a
+// fresh UUID and capture time unless the caller supplies them for replay.
+// It adds the CLI version, OS, and arch to props.
 // Nothing is sent when the build has no PostHog key, or when the install ID
 // cannot be saved, since an ID that changes every run would count each run
 // as a new install. Callers check the user's telemetry opt-out.
-func CapturePostHog(event string, props map[string]any) {
+func CapturePostHog(event string, props map[string]any, opts CaptureOpts) {
 	if !PostHogConfigured() {
 		return
 	}
@@ -87,13 +98,28 @@ func CapturePostHog(event string, props map[string]any) {
 	props["$geoip_disable"] = true
 	props["$lib"] = "ox-cli"
 	props["$lib_version"] = version.Version
+	props["cli_version"] = version.Version
+	props["install_id"] = installID
+	distinctID := installID
+	delete(props, "user_id")
+	if opts.PersonID != "" {
+		distinctID = opts.PersonID
+		props["user_id"] = opts.PersonID
+	}
+	if opts.UUID == "" {
+		opts.UUID = uuid.NewString()
+	}
+	if opts.At.IsZero() {
+		opts.At = time.Now().UTC()
+	}
 	props["os"] = runtime.GOOS
 	props["arch"] = runtime.GOARCH
 
 	payload, err := json.Marshal(postHogEvent{
+		UUID:       opts.UUID,
 		Event:      event,
-		DistinctID: installID,
-		Timestamp:  time.Now().UTC(),
+		DistinctID: distinctID,
+		Timestamp:  opts.At,
 		Properties: props,
 	})
 	if err != nil || len(payload) > postHogMaxPayload {

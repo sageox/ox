@@ -173,10 +173,11 @@ When on, ox sends:
     person, an AI coworker (and which one), or CI ran it; why ox
     runs in ephemeral mode, if it does; and, inside a repository set
     up for SageOx, the repository's and team's SageOx IDs. Events
-    carry a random ID made for this install, the client_id file in
-    ox's config directory (~/.config/sageox by default), and no
-    names, emails, or login details. Delete that file to get a new
-    ID.
+    carry a random install ID from the client_id file in ox's config
+    directory (~/.config/sageox by default). When signed in to
+    production, they also carry your SageOx user ID. No names,
+    emails or tokens are sent. Deleting client_id gives a new
+    install ID, but does not change your person ID.
   - To SageOx: command, session, and AI coworker events tagged with
     the repository's SageOx ID; timing traces while you are logged
     in; and what was typed when ox cannot parse a command.

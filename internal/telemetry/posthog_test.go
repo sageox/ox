@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/selfexec"
@@ -95,7 +96,7 @@ func TestCapturePostHog_DeliversFromADetachedProcessWithoutWaiting(t *testing.T)
 	t.Cleanup(func() { close(release) })
 	sendTo(t, srv.URL)
 
-	CapturePostHog("ox command run", map[string]any{"command": "status"})
+	CapturePostHog("ox command run", map[string]any{"command": "status"}, CaptureOpts{})
 
 	var got request
 	select {
@@ -118,6 +119,8 @@ func TestCapturePostHog_DeliversFromADetachedProcessWithoutWaiting(t *testing.T)
 	assert.NotEmpty(t, event["timestamp"])
 	assert.Equal(t, map[string]any{
 		"command":                 "status",
+		"install_id":              installID,
+		"cli_version":             version.Version,
 		"$process_person_profile": false,
 		"$geoip_disable":          true,
 		"$lib":                    "ox-cli",
@@ -132,7 +135,7 @@ func TestCapturePostHog_BuildWithoutAKeyStartsNothing(t *testing.T) {
 	isolateConfig(t)
 	setPostHog(t, "", "https://posthog.test", mustNotStart(t))
 
-	CapturePostHog("ox command run", map[string]any{})
+	CapturePostHog("ox command run", map[string]any{}, CaptureOpts{})
 }
 
 // Failure prevented: an install whose ID cannot be saved sends a new ID on
@@ -145,7 +148,7 @@ func TestCapturePostHog_UnsavedInstallIDStartsNothing(t *testing.T) {
 	t.Setenv("SAGEOX_CLIENT_ID", "")
 	setPostHog(t, "phc_test", "https://posthog.test", mustNotStart(t))
 
-	CapturePostHog("ox command run", map[string]any{})
+	CapturePostHog("ox command run", map[string]any{}, CaptureOpts{})
 }
 
 func TestRunPostHogSender_PostsNothingItCannotSend(t *testing.T) {
@@ -242,7 +245,7 @@ func TestCapturePostHog_UnderGoTestTheDefaultSenderRefuses(t *testing.T) {
 		return path, err
 	})
 
-	CapturePostHog("ox command run", map[string]any{})
+	CapturePostHog("ox command run", map[string]any{}, CaptureOpts{})
 
 	assert.ErrorIs(t, refused, selfexec.ErrUnderTest)
 }
@@ -253,7 +256,7 @@ func TestCapturePostHog_UnencodableEventStartsNothing(t *testing.T) {
 	isolateConfig(t)
 	setPostHog(t, "phc_test", "https://posthog.test", mustNotStart(t))
 
-	CapturePostHog("ox command run", map[string]any{"bad": func() {}})
+	CapturePostHog("ox command run", map[string]any{"bad": func() {}}, CaptureOpts{})
 }
 
 // Failure prevented: an opt-out is ignored, or its documented precedence
@@ -291,5 +294,90 @@ func TestCapturePostHog_OversizedEventStartsNothing(t *testing.T) {
 	isolateConfig(t)
 	setPostHog(t, "phc_test", "https://posthog.test", mustNotStart(t))
 
-	CapturePostHog("ox command run", map[string]any{"flags": strings.Repeat("x", postHogMaxPayload)})
+	CapturePostHog("ox command run", map[string]any{"flags": strings.Repeat("x", postHogMaxPayload)}, CaptureOpts{})
+}
+
+// Failure prevented: a person loses install attribution, extra private properties leak, or separate occurrences dedupe.
+func TestCapturePostHog_IdentityAndOccurrence(t *testing.T) {
+	type properties struct {
+		Command    string `json:"command"`
+		InstallID  string `json:"install_id"`
+		UserID     string `json:"user_id,omitempty"`
+		CLIVersion string `json:"cli_version"`
+		Lib        string `json:"$lib"`
+		LibVersion string `json:"$lib_version"`
+		Profile    bool   `json:"$process_person_profile"`
+		GeoIP      bool   `json:"$geoip_disable"`
+		OS         string `json:"os"`
+		Arch       string `json:"arch"`
+	}
+	type event struct {
+		UUID       string     `json:"uuid"`
+		Event      string     `json:"event"`
+		DistinctID string     `json:"distinct_id"`
+		Timestamp  time.Time  `json:"timestamp"`
+		Properties properties `json:"properties"`
+	}
+	arrived := make(chan event, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			APIKey string  `json:"api_key"`
+			Batch  []event `json:"batch"`
+		}
+		decoder := json.NewDecoder(r.Body)
+		// strict-reader-ok: verifies the exact event payload ox itself writes.
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&body); err != nil {
+			t.Error(err)
+			return
+		}
+		if len(body.Batch) != 1 {
+			t.Error("expected one event")
+			return
+		}
+		arrived <- body.Batch[0]
+	}))
+	defer srv.Close()
+	sendTo(t, srv.URL)
+	next := func() event {
+		select {
+		case got := <-arrived:
+			return got
+		case <-time.After(15 * time.Second):
+			t.Fatal("missing event")
+			return event{}
+		}
+	}
+	install, err := config.InstallID()
+	require.NoError(t, err)
+	var ids []string
+	for _, person := range []string{"", "usr_signedin"} {
+		before := time.Now().UTC()
+		CapturePostHog("ox command run", map[string]any{"command": "version"}, CaptureOpts{PersonID: person})
+		got := next()
+		after := time.Now().UTC()
+		want := install
+		if person != "" {
+			want = person
+		}
+		assert.Equal(t, want, got.DistinctID)
+		assert.Equal(t, person, got.Properties.UserID)
+		assert.Equal(t, install, got.Properties.InstallID)
+		assert.Equal(t, version.Version, got.Properties.CLIVersion)
+		assert.False(t, got.Properties.Profile)
+		assert.True(t, got.Properties.GeoIP)
+		assert.False(t, got.Timestamp.Before(before))
+		assert.False(t, got.Timestamp.After(after))
+		id, err := uuid.Parse(got.UUID)
+		require.NoError(t, err)
+		assert.Equal(t, uuid.Version(4), id.Version())
+		ids = append(ids, got.UUID)
+	}
+	assert.NotEqual(t, ids[0], ids[1])
+	at := time.Date(2026, 10, 31, 21, 35, 0, 123000000, time.UTC)
+	const occurrence = "7125dd72-896a-5df0-91a7-92ce9b811db6"
+	CapturePostHog("ox command run", map[string]any{"command": "version"}, CaptureOpts{UUID: occurrence, At: at})
+	got := next()
+	assert.Equal(t, occurrence, got.UUID)
+	assert.True(t, at.Equal(got.Timestamp))
 }
