@@ -2,8 +2,6 @@
 //
 // The daemon performs git pull (read) operations for ledger and team context sync.
 // The CLI handles add/commit/push (write) operations via the session upload pipeline.
-// Exception: GitHubSyncManager also performs add/commit/push for data/github/ files,
-// since these are idempotent and last-write-wins safe (accept-theirs conflict resolution).
 //
 // # NETWORK DISCONNECTION HANDLING
 //

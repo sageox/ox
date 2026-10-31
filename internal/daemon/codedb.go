@@ -76,7 +76,9 @@ type CodeDBManager struct {
 	// CheckFreshness treats a moved board like a moved HEAD: teammates' PRs reach
 	// the board through the Team Context pull without touching this repo's git
 	// state. Other repos' posts are not part of it.
-	lastIndexedBoard string
+	lastIndexedBoard     string
+	lastGitHubRepoRead   time.Time
+	githubRepoRetryAfter time.Time
 	// boardFailedFingerprint and boardFailedAttempts count consecutive board
 	// stages that left posts unindexed for one board state, so a persistent
 	// failure is retried maxBoardIndexAttempts times and then left alone.
@@ -825,6 +827,12 @@ const maxBoardIndexAttempts = 3
 func (m *CodeDBManager) indexGitHubBoard(ctx context.Context, db *codedb.DB, pw *ProgressWriter) {
 	postsDir := m.boardPostsDir()
 	if postsDir == "" {
+		if !m.githubRepoReadEligible() {
+			return
+		}
+		if err := m.indexGitHubRepo(ctx, db); err != nil {
+			m.logger.Warn("github repo indexing failed; will retry", "error", err)
+		}
 		return
 	}
 	// a project without a GitHub remote has no posts on the board to find
@@ -859,6 +867,13 @@ func (m *CodeDBManager) indexGitHubBoard(ctx context.Context, db *codedb.DB, pw 
 		return
 	}
 	m.recordBoardStage(fingerprint, failed)
+	// The configured Team Context may belong to a linked team, not the repo
+	// owner. The existing repo reader selects the authoritative thread.
+	if m.githubRepoReadEligible() {
+		if err := m.indexGitHubRepo(ctx, db); err != nil {
+			m.logger.Warn("github repo indexing failed; will retry", "error", err)
+		}
+	}
 }
 
 // recordBoardStage records the outcome of a board stage that ran to the end.
@@ -912,6 +927,12 @@ func (m *CodeDBManager) boardPostsDir() string {
 
 	teamContext := config.FindRepoTeamContext(projectRoot)
 	if teamContext == nil || teamContext.Path == "" {
+		return ""
+	}
+	// A configured path can precede a successful checkout, especially for a
+	// linked-team member who cannot clone the owner's Team Context.
+	info, err := os.Stat(teamContext.Path)
+	if err != nil || !info.IsDir() {
 		return ""
 	}
 	return githubmirror.PostsDir(teamContext.Path)
@@ -1110,6 +1131,7 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 		if cached != "" && cached == fingerprint && !m.boardChanged() {
 			dataDir := m.resolveSharedDataDir()
 			if _, err := os.Stat(dataDir); err == nil {
+				m.refreshGitHubRepoIfDue(ctx, dataDir)
 				m.logger.Debug("codedb freshness check skipped, HEAD unchanged")
 				return
 			}
@@ -1507,6 +1529,8 @@ func (m *CodeDBManager) UpdateProjectRoot(path string) {
 	old := m.projectRoot
 	m.projectRoot = path
 	m.githubRepo = "" // the new root may have different remotes
+	m.lastGitHubRepoRead = time.Time{}
+	m.githubRepoRetryAfter = time.Time{}
 	m.logger.Info("codedb project root updated", "old", old, "new", path)
 }
 

@@ -63,18 +63,19 @@ func (f *MirrorFetcher) ListPullRequests(ctx context.Context, owner, name string
 	result := make([]githubmirror.SourcePR, len(prs))
 	for i, pr := range prs {
 		result[i] = githubmirror.SourcePR{
-			Number:    pr.Number,
-			Title:     pr.Title,
-			Body:      pr.Body,
-			State:     pr.State,
-			Draft:     pr.Draft,
-			Author:    mirrorAuthor(pr.User, pr.AuthorAssociation),
-			Labels:    labelNames(pr.Labels),
-			CreatedAt: pr.CreatedAt,
-			UpdatedAt: pr.UpdatedAt,
-			ClosedAt:  pr.ClosedAt,
-			MergedAt:  pr.MergedAt,
-			HTMLURL:   pr.HTMLURL,
+			Number:      pr.Number,
+			Title:       pr.Title,
+			Body:        pr.Body,
+			State:       pr.State,
+			Draft:       pr.Draft,
+			Author:      mirrorAuthor(pr.User, pr.AuthorAssociation),
+			Labels:      labelNames(pr.Labels),
+			CreatedAt:   pr.CreatedAt,
+			UpdatedAt:   pr.UpdatedAt,
+			ClosedAt:    pr.ClosedAt,
+			MergedAt:    pr.MergedAt,
+			HTMLURL:     pr.HTMLURL,
+			MergeCommit: pr.MergeSHA,
 		}
 	}
 	return result, err
@@ -206,4 +207,17 @@ func sourceComments(comments []Comment) []githubmirror.SourceComment {
 		}
 	}
 	return result
+}
+
+// ListPRCommits fetches the legacy commit details for a merged PR.
+func (f *MirrorFetcher) ListPRCommits(ctx context.Context, owner, name string, number int) ([]githubmirror.Commit, error) {
+	commits, err := f.client.ListPRCommits(ctx, owner, name, number)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]githubmirror.Commit, len(commits))
+	for i, c := range commits {
+		out[i] = githubmirror.Commit{SHA: c.SHA, Author: c.Author, Date: c.Date, Message: c.Msg}
+	}
+	return out, nil
 }

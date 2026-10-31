@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"slices"
 	"strings"
+	"time"
 )
 
 const changeHashPrefix = "sha256:"
@@ -80,6 +81,21 @@ func canonicalJSON(it Item) ([]byte, error) {
 		"reviews":   hashedReviews,
 		"comments":  hashedComments,
 		"files":     sortedStrings(it.Files),
+	}
+
+	// Optional keys preserve the released hash for older clients without metadata.
+	if it.MergeCommit != "" {
+		payload["merge_commit"] = it.MergeCommit
+	}
+	if len(it.Commits) > 0 {
+		commits := make([]any, 0, len(it.Commits))
+		for _, c := range it.Commits {
+			commits = append(commits, map[string]any{
+				"sha": c.SHA, "author": c.Author,
+				"date": c.Date.UTC().Format(time.RFC3339Nano), "message": c.Message,
+			})
+		}
+		payload["commits"] = commits
 	}
 
 	var buf bytes.Buffer

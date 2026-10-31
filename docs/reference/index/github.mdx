@@ -12,7 +12,7 @@ Index GitHub PRs and issues
 
 Fetch recent pull requests and issues from GitHub and make them searchable.
 
-Data is extracted to the project ledger and indexed into CodeDB for search
+Recent data is published to the team bulletin and indexed into CodeDB for search
 with 'ox code search type:pr' or 'ox code search type:issue'.
 
 Requires a GitHub token (GITHUB_TOKEN, GH_TOKEN, or gh CLI config).
@@ -27,10 +27,10 @@ ox index github [flags]
 
 ```
   -d, --days int      max days of history to fetch (default 30)
-      --full          clear sync state and re-fetch everything
+      --full          re-fetch selected GitHub history
   -h, --help          help for github
       --issues-only   index only issues
-      --no-push       extract to ledger without pushing
+      --no-push       index locally without publishing
       --prs-only      index only pull requests
 ```
 
