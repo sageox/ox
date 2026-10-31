@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/agentx"
+	_ "github.com/sageox/agentx/setup"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
@@ -129,24 +131,21 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	// if in a project context, uses disk-based queue for persistence
 	projectRoot := config.FindProjectRoot()
 	cliCtx.ProjectRoot = projectRoot
+	// Command identity must be set before Start can flush queued HTTP work.
+	// A service serves many workspaces and must not inherit one command's actor.
+	if !cliCtx.LongRunning {
+		actor, agentType := DetectActor(nil)
+		useragent.SetActor(actor, agentType)
+		if projectRoot != "" {
+			useragent.SetRepoID(config.GetRepoID(projectRoot))
+		}
+	}
 	if projectRoot != "" {
 		cliCtx.TelemetryClient = telemetry.NewClient(auth.NewServerSessionID(), telemetry.WithProjectRoot(projectRoot))
 	} else {
 		cliCtx.TelemetryClient = telemetry.NewClient(auth.NewServerSessionID())
 	}
 	cliCtx.TelemetryClient.Start()
-
-	// Tag outbound SageOx API requests with the repo this invocation is
-	// working in, so server-side CLI activity can be attributed to a repo on
-	// routes whose URL does not name one. Set before any request is made.
-	//
-	// Deliberately skipped for service processes: the daemon serves every
-	// workspace on the machine from one process, so a process-global repo ID
-	// would misattribute all its traffic to whichever repo it started in.
-	// Leaving it unset keeps daemon rows honestly repo-less.
-	if !cliCtx.LongRunning && projectRoot != "" {
-		useragent.SetRepoID(config.GetRepoID(projectRoot))
-	}
 
 	// check signature and warn if unsigned/invalid (non-blocking)
 	signature.CheckAndWarn()
@@ -244,6 +243,28 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 
 	return cliCtx, nil
 }
+
+// DetectActor resolves command identity from agent environment signals, then CI.
+// A nil environment uses the process environment. This shared path serves
+// request headers, command events and friction attribution.
+func DetectActor(env agentx.Environment) (string, string) {
+	if env == nil {
+		env = agentx.NewSystemEnvironment()
+	}
+	if a, _ := agentx.NewDetectorWithEnv(envSignalsOnly{env}).Detect(context.Background()); a != nil {
+		return "agent", string(a.Type())
+	}
+	if env.GetEnv("CI") != "" {
+		return "agent", "ci"
+	}
+	return "human", ""
+}
+
+// A repository's .codex directory is configuration, not evidence of an actor.
+type envSignalsOnly struct{ agentx.Environment }
+
+func (envSignalsOnly) IsDir(string) bool      { return false }
+func (envSignalsOnly) FileExists(string) bool { return false }
 
 // otlpTokenFunc builds the TokenFunc passed to observability.Init.
 //
