@@ -27,6 +27,7 @@ import (
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/identity"
+	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/sageoxignore"
 	"github.com/sageox/ox/internal/session/adapters"
@@ -43,6 +44,7 @@ var initTeamFlag string
 var initForce bool
 var initEndpointFlag string
 var initAgentsFlag string
+var initAgentsFlagExplicit bool
 
 // configResult indicates what happened when ensuring config exists
 type configResult int
@@ -140,6 +142,13 @@ After init, run 'ox guide getting-started' for a five-minute walkthrough,
 or 'ox guide team-rules' to learn how to share AI coworker conventions
 across your whole team (Claude, Codex, Amp, etc.).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		initAgentsFlagExplicit = cmd.Flags().Changed("agents")
+		defer func() {
+			initAgentsFlagExplicit = false
+			if flag := cmd.Flags().Lookup("agents"); flag != nil {
+				flag.Changed = false
+			}
+		}()
 		return runInit()
 	},
 }
@@ -327,6 +336,17 @@ func runInit() error {
 	gitRoot, err := repotools.FindRepoRoot(repotools.VCSGit)
 	if err != nil {
 		return fmt.Errorf("not a git repository\n\nox init requires a git repository. Run:\n  git init\n  git commit --allow-empty -m \"Initial commit\"\n  ox init")
+	}
+
+	// Validate explicit agent names before init changes repository files or makes
+	// remote requests. Keep the parsed selection so later setup uses the same
+	// adapter names that passed validation.
+	var explicitAgents map[string]bool
+	if initAgentsFlagWasSet() {
+		explicitAgents, err = selectAgentsForInit(gitRoot)
+		if err != nil {
+			return err
+		}
 	}
 
 	// check if remote already has .sageox/ (prevents duplicate init race condition)
@@ -690,13 +710,16 @@ func runInit() error {
 	// === AGENT INTEGRATION ===
 
 	// prompt for which agents to configure
-	selectedAgents, agentSelectErr := selectAgentsForInit(gitRoot)
-	if agentSelectErr != nil {
-		// user canceled — default to Claude Code only
-		if !initQuiet {
-			cli.PrintWarning("Agent selection canceled, defaulting to Claude Code")
+	selectedAgents := explicitAgents
+	if selectedAgents == nil {
+		selectedAgents, err = selectAgentsForInit(gitRoot)
+		if err != nil {
+			// user canceled — default to Claude Code only
+			if !initQuiet {
+				cli.PrintWarning("Agent selection canceled, defaulting to Claude Code")
+			}
+			selectedAgents = map[string]bool{"claude-code": true}
 		}
-		selectedAgents = map[string]bool{"claude-code": true}
 	}
 
 	if !initQuiet {
@@ -2111,18 +2134,12 @@ func displayPath(absPath string) string {
 // choose which ones to configure. Detected agents default to selected.
 // Returns adapter names the user selected.
 func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
-	selected := map[string]bool{}
-
 	// if --agents flag provided, use it directly
-	if initAgentsFlag != "" {
-		for _, name := range strings.Split(initAgentsFlag, ",") {
-			name = strings.TrimSpace(name)
-			if name != "" {
-				selected[name] = true
-			}
-		}
-		return selected, nil
+	if initAgentsFlagWasSet() {
+		return parseInitAgentsFlag(initAgentsFlag, adapters.DiscoverExternalAdapters())
 	}
+
+	selected := map[string]bool{}
 
 	// Non-interactive callers cannot answer the selection prompt. Configure
 	// every detected agent so `ox init` keeps its hook-installation promise
@@ -2190,6 +2207,66 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 
 	for _, name := range chosen {
 		selected[name] = true
+	}
+	return selected, nil
+}
+
+func initAgentsFlagWasSet() bool {
+	return initAgentsFlagExplicit || initAgentsFlag != ""
+}
+
+func parseInitAgentsFlag(value string, externalAdapters []*adapters.ExternalAdapter) (map[string]bool, error) {
+	valid := map[string]string{
+		"claude-code": "claude-code",
+		"opencode":    "opencode",
+	}
+	externalNames := make(map[string]string, len(externalAdapters))
+	for name, supported := range prime.SupportedAgents {
+		if supported {
+			valid[name] = name
+		}
+	}
+	for _, ea := range externalAdapters {
+		name := ea.Name()
+		key := strings.ToLower(name)
+		valid[key] = name
+		externalNames[key] = name
+	}
+
+	validNames := make([]string, 0, len(valid))
+	for _, name := range valid {
+		validNames = append(validNames, name)
+	}
+	sort.Strings(validNames)
+	validValues := strings.Join(validNames, ", ")
+
+	selected := make(map[string]bool)
+	for _, input := range strings.Split(value, ",") {
+		name := strings.ToLower(strings.TrimSpace(input))
+		if name == "" {
+			continue
+		}
+
+		if resolved, ok := externalNames[name]; ok {
+			selected[resolved] = true
+			continue
+		}
+
+		canonical := adapters.CanonicalAdapterName(name)
+		if canonical != "" && canonical != "generic" {
+			if resolved, ok := valid[strings.ToLower(canonical)]; ok {
+				selected[resolved] = true
+				continue
+			}
+		}
+		if resolved, ok := valid[name]; ok {
+			selected[resolved] = true
+			continue
+		}
+		return nil, fmt.Errorf("invalid agent %q in --agents; valid values: %s", input, validValues)
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("--agents must include at least one agent; valid values: %s", validValues)
 	}
 	return selected, nil
 }
