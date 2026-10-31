@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +10,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/spf13/cobra"
@@ -84,36 +82,34 @@ func TestFeedbackEarlyPreludePreservesRequestActor(t *testing.T) {
 
 // Failure prevented: headless ledger discovery skips telemetry startup and sends requests without an actor.
 func TestHeadlessReadEarlyPreludePreservesRequestActor(t *testing.T) {
-	root := earlyActorTestRoot(t)
-	const repoID = "repo_01936d5a-0000-7abc-8def-0123456789ab"
+	earlyActorTestRoot(t)
 	var requests atomic.Int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
 		assert.Equal(t, http.MethodGet, r.Method)
-		assert.Equal(t, "/api/v1/cli/repos/"+repoID, r.URL.Path)
+		assert.Equal(t, "/api/v1/cli/repos/"+readSyncTestRepoID, r.URL.Path)
 		assert.Equal(t, "agent", r.Header.Get(useragent.HeaderActor))
 		assert.Equal(t, "codex", r.Header.Get(useragent.HeaderAgentType))
-		_, _ = fmt.Fprintf(w, `{"ledger":{"status":"ready","read_url":"https://%s/api/v1/cli/repos/%s/ledger.git"}}`, r.Host, repoID)
+		// Stop after discovery so the shipped request path runs without a Git
+		// clone or a request to another endpoint.
+		w.WriteHeader(http.StatusNotFound)
 	}))
 	t.Cleanup(server.Close)
 	t.Setenv("SAGEOX_ENDPOINT", server.URL)
+	t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
 	previousTransport := http.DefaultTransport
 	http.DefaultTransport = server.Client().Transport
 	t.Cleanup(func() { http.DefaultTransport = previousTransport })
 
-	cmd := &cobra.Command{Use: "sync"}
-	cmd.Flags().Bool("read-only", false, "")
-	root.AddCommand(cmd)
-	require.NoError(t, cmd.Flags().Set("read-only", "true"))
-	require.True(t, isHeadlessLedgerRead(cmd))
-	require.NoError(t, rootCmd.PersistentPreRunE(cmd, nil))
+	result, _, err := runReadSyncInProc(t, "--read-only", "--repo", readSyncTestRepoID, "--timeout", "5s", "--json")
+	require.Error(t, err, "the local server deliberately rejects ledger discovery")
+	assert.Equal(t, "unavailable", result.ErrorClass)
 	require.True(t, preRunReached)
 	require.Nil(t, cliCtx, "headless reads must not bootstrap the telemetry context")
 	require.Nil(t, cfg, "headless reads must not load local command preferences")
 
-	readURL, err := api.NewRepoClientWithEndpoint(server.URL).GetLedgerReadURL(t.Context(), repoID, "oxt_test_1ljPfr")
-	require.NoError(t, err)
-	assert.Equal(t, server.URL+"/api/v1/cli/repos/"+repoID+"/ledger.git", readURL)
 	require.Equal(t, int32(1), requests.Load(), "discovery must actually reach the local endpoint")
 	assert.Nil(t, cliCtx)
 }
