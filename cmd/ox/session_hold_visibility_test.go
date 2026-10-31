@@ -126,6 +126,12 @@ func TestBuildAgentDoctorOutput_ReportsHeldSessionsWithoutPublishing(t *testing.
 		"Held on this machine: "+held+". Publish only if the coworker asks: 'ox session upload "+held+"'")
 	assert.True(t, session.IsHeld(filepath.Join(cache, held)), "reporting a hold never releases it")
 	assert.NoDirExists(t, filepath.Join(ledgerPath, "sessions"), "agent doctor never publishes")
+
+	t.Setenv("OX_SESSION_PUBLISHING", "manual")
+	out = buildAgentDoctorOutput("OxTest", projectRoot)
+	assert.ElementsMatch(t, []string{held, waiting}, out.HeldSessions)
+	assert.Empty(t, out.CacheOnlySessions, "an inferred hold must not also be reported as waiting for the daemon")
+	assert.False(t, session.IsHeld(filepath.Join(cache, waiting)), "inspection does not write an inferred hold")
 }
 
 // Failure prevented: doctor and status report nothing to do while sessions sit

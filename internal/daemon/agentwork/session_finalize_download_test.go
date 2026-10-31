@@ -213,7 +213,7 @@ func TestDetect_LedgerCacheFolderDecision(t *testing.T) {
 // dirs on the test machine cannot leak items in.
 func detectCacheOnly(t *testing.T, h *SessionFinalizeHandler, ledgerPath string) []*WorkItem {
 	t.Helper()
-	items, _, err := h.detectInDir(filepath.Join(ledgerPath, ".sageox", "cache", "sessions"), ledgerPath)
+	items, _, err := h.detectInDir(filepath.Join(ledgerPath, ".sageox", "cache", "sessions"), ledgerPath, true)
 	require.NoError(t, err)
 	return items
 }

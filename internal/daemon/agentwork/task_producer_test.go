@@ -62,6 +62,93 @@ func TestProduceAgentTasks_DoctorMarker(t *testing.T) {
 	if len(tasks) != 1 {
 		t.Fatalf("expected dedup to keep 1 task, got %d", len(tasks))
 	}
+
+	// Once doctor clears the marker, the ready chore must stop surfacing.
+	originalID := tasks[0].ID
+	if err := os.Remove(filepath.Join(sageox, markers.NeedsDoctorAgent)); err != nil {
+		t.Fatal(err)
+	}
+	m.produceDoctorTask()
+	tasks, err := store.List(false)
+	if err != nil || len(tasks) != 0 {
+		t.Fatalf("stale ready chore survived: tasks=%v err=%v", tasks, err)
+	}
+	retired, err := store.Get(originalID)
+	if err != nil || retired.Status != agenttask.StatusCanceled {
+		t.Fatalf("expected canceled chore: task=%+v err=%v", retired, err)
+	}
+
+	// A later failure can request new work using the same dedup key.
+	if err := os.WriteFile(filepath.Join(sageox, markers.NeedsDoctorAgent), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.produceDoctorTask()
+	tasks, err = store.List(false)
+	if err != nil || len(tasks) != 1 || tasks[0].ID == originalID {
+		t.Fatalf("new marker did not create new work: tasks=%v err=%v", tasks, err)
+	}
+}
+
+// Clearing this marker must not cancel claimed work or another producer's task.
+func TestProduceDoctorTask_PreservesClaimedAndUnrelatedTasks(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, source, key string
+		claim                   bool
+	}{
+		{"claimed doctor", "doctor", "daemon", "doctor-agent", true},
+		{"other kind", "session-finalize", "daemon", "doctor-agent", false},
+		{"other source", "doctor", "cli", "doctor-agent", false},
+		{"other key", "doctor", "daemon", "another-doctor", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := agenttask.NewStore(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if added, err := store.Add(&agenttask.Task{Title: tc.name, Kind: tc.kind, Source: tc.source, DedupKey: tc.key}); err != nil || !added {
+				t.Fatalf("Add: added=%v err=%v", added, err)
+			}
+			want := agenttask.StatusReady
+			if tc.claim {
+				if _, err := store.Claim(agenttask.ClaimOptions{AgentID: "OxLive", PID: os.Getpid(), Lease: time.Hour}); err != nil {
+					t.Fatalf("Claim: %v", err)
+				}
+				want = agenttask.StatusInProgress
+			}
+			newProducerManager(t, root).produceDoctorTask()
+			tasks, err := store.List(false)
+			if err != nil || len(tasks) != 1 || tasks[0].Status != want {
+				t.Fatalf("unrelated/claimed work changed: tasks=%+v err=%v", tasks, err)
+			}
+		})
+	}
+}
+
+// An unreadable marker is not proof that the requested repair is finished.
+func TestProduceDoctorTask_MarkerStatErrorKeepsReadyTask(t *testing.T) {
+	root := t.TempDir()
+	store, err := agenttask.NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if added, err := store.Add(&agenttask.Task{Title: "doctor", Kind: "doctor", Source: "daemon", DedupKey: "doctor-agent"}); err != nil || !added {
+		t.Fatalf("Add: added=%v err=%v", added, err)
+	}
+	marker := filepath.Join(root, ".sageox", markers.NeedsDoctorAgent)
+	if err := os.Symlink(marker, marker); err != nil {
+		t.Skipf("symlink loop unavailable on this platform: %v", err)
+	}
+	if _, err := os.Stat(marker); err == nil || os.IsNotExist(err) {
+		t.Fatalf("expected a non-absence stat error, got %v", err)
+	}
+	newProducerManager(t, root).produceDoctorTask()
+	tasks, err := store.List(false)
+	if err != nil || len(tasks) != 1 || tasks[0].Status != agenttask.StatusReady {
+		t.Fatalf("unreadable marker canceled work: tasks=%+v err=%v", tasks, err)
+	}
 }
 
 // TestProduceAgentTasks_NoProjectRoot verifies the producer is a no-op without

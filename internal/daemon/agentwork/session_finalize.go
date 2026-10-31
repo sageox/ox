@@ -389,68 +389,92 @@ func (h *SessionFinalizeHandler) Cleanup(ledgerPath string) {
 	}
 }
 
+// SessionFinalizeInspection describes local finalization work without repairing
+// recordings or changing their publication state. Names in Recovery need
+// recording recovery before their raw data is safe to summarize; Automatic
+// names need deterministic settlement without summarization.
+type SessionFinalizeInspection struct {
+	Items     []*WorkItem
+	Automatic []string
+	Recovery  []string
+	Held      []string
+	Refused   []string
+	Blocked   []string
+}
+
+// Inspect applies the daemon's finalization rules without changing session
+// files. A partial result is returned alongside any inspection errors.
+func (h *SessionFinalizeHandler) Inspect(ledgerPath string) (SessionFinalizeInspection, error) {
+	if _, err := os.ReadDir(ledgerPath); err != nil {
+		return SessionFinalizeInspection{}, fmt.Errorf("read ledger directory: %w", err)
+	}
+	items, skips, err := h.scan(ledgerPath, false)
+	result := SessionFinalizeInspection{
+		Recovery: slices.Sorted(maps.Keys(skips.recovery)),
+		Held:     slices.Sorted(maps.Keys(skips.held)),
+		Refused:  slices.Sorted(maps.Keys(skips.refused)),
+		Blocked:  skips.names(),
+	}
+	// A recorded manual choice or a pending recovery in one cache must also
+	// protect another copy of the same session. Detect makes that choice durable
+	// during recovery; inspection leaves the recording and hold markers alone.
+	for _, item := range items {
+		payload := item.Payload.(*SessionFinalizePayload)
+		name := filepath.Base(payload.SessionDir)
+		if skips.held[name] || skips.recovery[name] {
+			continue
+		}
+		if !payload.UploadOnly && isEmptyLedgerTranscript(payload.SessionDir, payload.RawPath, payload.LedgerPath) {
+			result.Automatic = append(result.Automatic, name)
+		} else {
+			result.Items = append(result.Items, item)
+		}
+	}
+	slices.Sort(result.Automatic)
+	return result, err
+}
+
 // Detect scans all locations where sessions can live for sessions missing artifacts.
 // Sessions are initially written to ledgerPath/.sageox/cache/sessions/ (primary),
 // and moved to ledgerPath/sessions/ after finalization/upload. XDG cache paths
 // are also scanned for sessions written by older ox versions or different environments.
 func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) {
+	// Detection is best-effort, as before: an unreadable directory does not
+	// prevent the daemon processing work it found in another cache location.
+	items, _, _ := h.scan(ledgerPath, true)
+	return items, nil
+}
+
+func (h *SessionFinalizeHandler) scan(ledgerPath string, repair bool) ([]*WorkItem, detectSkipStats, error) {
 	// deduplicate across all scan dirs (prefer earlier-found copy)
 	seen := make(map[string]bool)
 	var items []*WorkItem
 	var skips detectSkipStats
+	var scanErrors []error
 
-	mergeItems := func(newItems []*WorkItem) {
-		for _, item := range newItems {
+	// Preserve scan precedence: primary cache, Ledger, then XDG/legacy caches.
+	dirs := slices.Insert(session.HeldSessionDirs(ledgerPath), 1, filepath.Join(ledgerPath, "sessions"))
+	for i, dir := range dirs {
+		if i > 1 && (dir == dirs[0] || dir == dirs[1]) {
+			continue
+		}
+		if repair {
+			if ghosts := session.CleanupGhostSessionsInDir(dir); ghosts.Removed > 0 {
+				h.logger.Info("ghost cleanup: removed abandoned recordings", "dir", dir, "count", ghosts.Removed, "sessions", ghosts.Names)
+			}
+		}
+		found, skipped, err := h.detectInDir(dir, ledgerPath, repair)
+		if err != nil {
+			scanErrors = append(scanErrors, err)
+			if repair {
+				continue
+			}
+		}
+		skips.merge(skipped)
+		for _, item := range found {
 			if !seen[item.DedupKey] {
 				seen[item.DedupKey] = true
 				items = append(items, item)
-			}
-		}
-	}
-
-	// 1. primary ledger cache — where StartRecording writes sessions
-	ledgerCacheSessionsDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions")
-	if ghostResult := session.CleanupGhostSessionsInDir(ledgerCacheSessionsDir); ghostResult.Removed > 0 {
-		h.logger.Info("ghost cleanup (ledger cache): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
-	}
-	if cacheItems, cacheSkips, err := h.detectInDir(ledgerCacheSessionsDir, ledgerPath); err == nil {
-		mergeItems(cacheItems)
-		skips.merge(cacheSkips)
-	}
-
-	// 2. git-tracked ledger sessions — uploaded/finalized sessions
-	ledgerSessionsDir := filepath.Join(ledgerPath, "sessions")
-	if ghostResult := session.CleanupGhostSessionsInDir(ledgerSessionsDir); ghostResult.Removed > 0 {
-		h.logger.Info("ghost cleanup (ledger): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
-	}
-	if ledgerItems, ledgerSkips, err := h.detectInDir(ledgerSessionsDir, ledgerPath); err == nil {
-		mergeItems(ledgerItems)
-		skips.merge(ledgerSkips)
-	}
-
-	// 3. XDG/legacy cache paths — older ox versions or different XDG_CACHE_HOME environments
-	repoID := filepath.Base(ledgerPath)
-	if repoID != "" && repoID != "." {
-		xdgDirs := append(
-			[]string{filepath.Join(paths.SessionCacheDir(repoID), "sessions")},
-			func() []string {
-				var out []string
-				for _, d := range paths.AlternateSessionCacheDirs(repoID) {
-					out = append(out, filepath.Join(d, "sessions"))
-				}
-				return out
-			}()...,
-		)
-		for _, dir := range xdgDirs {
-			if dir == ledgerCacheSessionsDir || dir == ledgerSessionsDir {
-				continue
-			}
-			if ghostResult := session.CleanupGhostSessionsInDir(dir); ghostResult.Removed > 0 {
-				h.logger.Info("ghost cleanup (xdg cache): removed abandoned recordings", "dir", dir, "count", ghostResult.Removed, "sessions", ghostResult.Names)
-			}
-			if xdgItems, xdgSkips, err := h.detectInDir(dir, ledgerPath); err == nil {
-				mergeItems(xdgItems)
-				skips.merge(xdgSkips)
 			}
 		}
 	}
@@ -483,21 +507,22 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 			"sessions", skips.names(),
 		)
 	}
-	return items, nil
+	return items, skips, errors.Join(scanErrors...)
 }
 
 // detectInDir scans a single sessions directory for sessions needing
 // finalization. The second return value reports sessions it deliberately
 // skipped while they still held transcript bytes — see detectSkipStats.
-func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]*WorkItem, detectSkipStats, error) {
+func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string, repair bool) ([]*WorkItem, detectSkipStats, error) {
 	var skips detectSkipStats
+	var scanErrors []error
 
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, skips, nil
 		}
-		return nil, skips, fmt.Errorf("read sessions dir: %w", err)
+		return nil, skips, fmt.Errorf("read sessions dir %s: %w", sessionsDir, err)
 	}
 
 	var items []*WorkItem
@@ -524,7 +549,29 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		// costs one stat for sessions that have no marker.
 		recPath := filepath.Join(sessionDir, recordingMarker)
 		recInfo, recStatErr := os.Stat(recPath)
+		if !repair && recStatErr != nil && !os.IsNotExist(recStatErr) {
+			scanErrors = append(scanErrors, fmt.Errorf("inspect recording %s: %w", name, recStatErr))
+			continue
+		}
 		hasRecordingMarker := recStatErr == nil
+		var recorded *session.RecordingState
+		if hasRecordingMarker && !repair {
+			// ReadRecordingStateFile repairs stale JSON tails on read. An
+			// inspection must report that state without rewriting the marker.
+			data, readErr := os.ReadFile(recPath)
+			recorded = &session.RecordingState{}
+			if readErr == nil {
+				readErr = json.Unmarshal(data, recorded)
+			}
+			if readErr != nil {
+				scanErrors = append(scanErrors, fmt.Errorf("inspect recording %s: %w", name, readErr))
+				continue
+			}
+			if recorded.SourceRejected {
+				scanErrors = append(scanErrors, fmt.Errorf("session %s is quarantined for source ownership review", name))
+				continue
+			}
+		}
 		var (
 			recStale  bool
 			recAge    time.Duration
@@ -532,6 +579,14 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		)
 		if hasRecordingMarker {
 			recStale, recAge, recMethod = isStaleRecording(recPath, recInfo, h.pidLookup, h.logger)
+		}
+		if !repair && hasRecordingMarker && !recStale {
+			// A failed stop can leave the owner alive after capture has stopped.
+			// Otherwise a live recording (including its draft) needs no repair.
+			if session.HasExplicitStop(h.projectRoot, recorded.AgentID) {
+				skips.addRecovery(name)
+			}
+			continue
 		}
 		// Keyed on the METHOD, not on recStale. recStale is ALSO true for
 		// stalenessTimeThreshold, which fires exactly when no PID could be
@@ -562,6 +617,9 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		// Debug line between them is part of why #966 was unreadable in the
 		// logs.
 		if metaErr != nil {
+			if !repair {
+				scanErrors = append(scanErrors, fmt.Errorf("inspect session %s metadata: %w", name, metaErr))
+			}
 			// Warn only when bytes are actually stranded. A corrupt meta.json
 			// over an empty directory is a nuisance, not lost work, and this
 			// scan repeats every detectCooldown — warning on both would train
@@ -630,6 +688,9 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 				continue
 			}
 			hasRaw = true
+		} else if !repair && !os.IsNotExist(statErr) {
+			scanErrors = append(scanErrors, fmt.Errorf("inspect session %s raw: %w", name, statErr))
+			continue
 		}
 
 		// Reuse the liveness probe above; do not let a second probe race with
@@ -647,6 +708,16 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			}
 			if !recStale {
 				h.logger.Debug("skipping session with active recording", "session", name)
+				continue
+			}
+			if !repair {
+				if recorded.RecordedManualPublishing() || session.HeldAnywhere(name, heldDirs...) {
+					skips.addHeld(name)
+				} else {
+					// Recovery drains native entries and reconciles the capture
+					// cursor. Existing raw may only be a partial session.
+					skips.addRecovery(name)
+				}
 				continue
 			}
 			// Recovery also fills an eager header and drains the final native
@@ -729,7 +800,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		// discarded. It covers what no stop or recovery held: a cache-only
 		// session from a second recording (GH #1077), or one stopped before
 		// holds existed. After the download check: a download is not ours.
-		if manual && h.holdIfUnpublished(sessionDir, ledgerPath) {
+		if manual && h.holdIfUnpublished(sessionDir, ledgerPath, repair) {
 			skips.addHeld(name)
 			continue
 		}
@@ -835,7 +906,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		})
 	}
 
-	return items, skips, nil
+	return items, skips, errors.Join(scanErrors...)
 }
 
 // detectSkipStats accumulates sessions detectInDir refused to queue even though
@@ -866,6 +937,15 @@ type detectSkipStats struct {
 	// refusal's fingerprint. They wait for a redaction, so they are a count
 	// like held.
 	refused map[string]bool
+	// Inspection defers these sessions until their recordings are recovered.
+	recovery map[string]bool
+}
+
+func (s *detectSkipStats) addRecovery(name string) {
+	if s.recovery == nil {
+		s.recovery = make(map[string]bool)
+	}
+	s.recovery[name] = true
 }
 
 func (s *detectSkipStats) addHeld(name string) {
@@ -908,6 +988,9 @@ func (s *detectSkipStats) merge(other detectSkipStats) {
 	}
 	for name := range other.refused {
 		s.addRefused(name)
+	}
+	for name := range other.recovery {
+		s.addRecovery(name)
 	}
 }
 
@@ -1141,7 +1224,7 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 
 			// held on this machine: recovered locally, never finalized, and so
 			// is an unpublished session while publishing is manual (GH #1093)
-			if session.IsHeldInLedger(ledgerPath, name) || (manual && h.holdIfUnpublished(sessionDir, ledgerPath)) {
+			if session.IsHeldInLedger(ledgerPath, name) || (manual && h.holdIfUnpublished(sessionDir, ledgerPath, true)) {
 				continue
 			}
 
@@ -3843,14 +3926,11 @@ func (h *SessionFinalizeHandler) manualPublishing() bool {
 	return config.GetSessionPublishing(h.projectRoot) == config.SessionPublishingManual
 }
 
-// holdIfUnpublished holds a session that is not in the Ledger yet, for a
-// project that publishes manually, and reports whether the session must stay
-// on this machine. A session already in the Ledger (a coworker published it,
-// and it is waiting for its summary) is not held: summarizing it publishes
-// nothing new. An unreadable Ledger entry counts as not published. The hold is
-// written on the cache folder; if that fails, the session is still kept here,
-// and the next pass tries again (GH #1093).
-func (h *SessionFinalizeHandler) holdIfUnpublished(sessionDir, ledgerPath string) bool {
+// holdIfUnpublished reports whether a manually published session must remain
+// local. Already-published sessions may still receive summaries. Missing or
+// unreadable Ledger metadata counts as unpublished. When repair is true,
+// persist a cache hold; a failed write still keeps the session local (GH #1093).
+func (h *SessionFinalizeHandler) holdIfUnpublished(sessionDir, ledgerPath string, repair bool) bool {
 	if isGitTrackedLedgerSession(sessionDir, ledgerPath) {
 		return false // the Ledger's shared tree: in the Ledger by definition
 	}
@@ -3859,8 +3939,10 @@ func (h *SessionFinalizeHandler) holdIfUnpublished(sessionDir, ledgerPath string
 	if err == nil && !meta.IsDraft() {
 		return false
 	}
-	if err := writeHoldMarker(sessionDir, session.HoldManualPublishing, "daemon"); err != nil {
-		h.logger.Warn("session kept on this machine, but its hold could not be written", "session", name, "err", err)
+	if repair {
+		if err := writeHoldMarker(sessionDir, session.HoldManualPublishing, "daemon"); err != nil {
+			h.logger.Warn("session kept on this machine, but its hold could not be written", "session", name, "err", err)
+		}
 	}
 	return true
 }
@@ -3869,5 +3951,5 @@ func (h *SessionFinalizeHandler) holdIfUnpublished(sessionDir, ledgerPath string
 // is held, or the project publishes manually and the session is not in the
 // Ledger yet. Every entry point (scan, IPC, prompt, result) asks it.
 func (h *SessionFinalizeHandler) keepLocal(p *SessionFinalizePayload) bool {
-	return sessionHeldLocally(p) || (h.manualPublishing() && h.holdIfUnpublished(p.SessionDir, p.LedgerPath))
+	return sessionHeldLocally(p) || (h.manualPublishing() && h.holdIfUnpublished(p.SessionDir, p.LedgerPath, true))
 }
