@@ -59,11 +59,13 @@ func capturePostHogCommand(exitCode int, stderr io.Writer) {
 	if skipPostHogCommand(path) {
 		return
 	}
-	if telemetry.PostHogConfigured() {
-		opts := postHogCaptureOpts(cliCtx)
-		telemetry.CapturePostHog(postHogCommandEvent, postHogCommandProps(cliCtx, path, exitCode), opts)
-	}
+	// The notice comes first, so a person at a terminal reads that events carry
+	// their user ID before the first one goes out.
 	showTelemetryNoticeOnce(stderr)
+	if telemetry.PostHogConfigured() {
+		props := postHogCommandProps(cliCtx, path, exitCode)
+		telemetry.CapturePostHog(postHogCommandEvent, props, postHogCaptureOpts(cliCtx))
+	}
 }
 
 func postHogCaptureOpts(c *cli.Context) telemetry.CaptureOpts {
