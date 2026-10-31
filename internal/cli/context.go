@@ -138,9 +138,14 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	cliCtx.ProjectRoot = projectRoot
 	// Command identity must be set before Start can flush queued HTTP work.
 	// A service serves many workspaces and must not inherit one command's actor.
+	// Git runs the credential helper for the daemon's syncs with the daemon's
+	// inherited environment, so it would stamp whoever started the daemon on
+	// every workspace: credential plumbing sends no actor (the server writes unknown).
 	if !cliCtx.LongRunning {
-		actor, agentType := DetectActor(nil)
-		useragent.SetActor(actor, agentType)
+		if cmd.Name() != gitCredentialHelperCommand {
+			actor, agentType := DetectActor(nil)
+			useragent.SetActor(actor, agentType)
+		}
 		if projectRoot != "" {
 			useragent.SetRepoID(config.GetRepoID(projectRoot))
 		}
@@ -269,10 +274,33 @@ func DetectActor(env agentx.Environment) (string, string) {
 	if a, _ := agentx.NewDetectorWithEnv(envSignalsOnly{env}).Detect(context.Background()); a != nil {
 		return "agent", string(a.Type())
 	}
-	if env.GetEnv("CI") != "" || agentx.DetectOrigin(env, "") == agentx.OriginAgent {
+	if env.GetEnv("CI") != "" || agentx.DetectOrigin(jenkinsBuildsOnly{env}, "") == agentx.OriginAgent {
 		return "agent", "ci"
 	}
 	return "human", ""
+}
+
+// gitCredentialHelperCommand is the command git starts for credentials,
+// including on the daemon's behalf.
+const gitCredentialHelperCommand = "git-credential-helper"
+
+// JENKINS_URL is also the Jenkins CLI's server setting, often exported in a
+// person's shell; only a running build (BUILD_NUMBER or EXECUTOR_NUMBER) is CI.
+type jenkinsBuildsOnly struct{ agentx.Environment }
+
+func (e jenkinsBuildsOnly) GetEnv(key string) string {
+	if key == "JENKINS_URL" && e.Environment.GetEnv("BUILD_NUMBER") == "" && e.Environment.GetEnv("EXECUTOR_NUMBER") == "" {
+		return ""
+	}
+	return e.Environment.GetEnv(key)
+}
+
+func (e jenkinsBuildsOnly) LookupEnv(key string) (string, bool) {
+	if key == "JENKINS_URL" {
+		v := e.GetEnv(key)
+		return v, v != ""
+	}
+	return e.Environment.LookupEnv(key)
 }
 
 // A repository's .codex directory is configuration, not evidence of an actor.

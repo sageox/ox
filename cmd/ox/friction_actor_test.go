@@ -41,7 +41,9 @@ func TestOxActorDetector_EnvSignalsOnly(t *testing.T) {
 		{name: "explicit AGENT_ENV", vars: map[string]string{"AGENT_ENV": "codex"}, wantActor: friction.ActorAgent, wantType: "codex"},
 		{name: "ci", vars: map[string]string{"CI": "true"}, wantActor: friction.ActorAgent, wantType: "ci"},
 		// Failure prevented: a CI provider without the generic CI flag is filed as a person.
-		{name: "jenkins without CI", vars: map[string]string{"JENKINS_URL": "1"}, wantActor: friction.ActorAgent, wantType: "ci"},
+		{name: "jenkins build without CI", vars: map[string]string{"JENKINS_URL": "1", "BUILD_NUMBER": "7"}, wantActor: friction.ActorAgent, wantType: "ci"},
+		// A person with the Jenkins CLI's JENKINS_URL exported is not CI.
+		{name: "jenkins cli setting only", vars: map[string]string{"JENKINS_URL": "https://ci.example"}, wantActor: friction.ActorHuman, wantType: ""},
 		{name: "agent in jenkins", vars: map[string]string{"JENKINS_URL": "1", "AGENT_ENV": "codex"}, wantActor: friction.ActorAgent, wantType: "codex"},
 		{name: "existing CI with subagent signal", vars: map[string]string{"CI": "true", "CLAUDE_CODE_ENTRY_POINT": "task"}, wantActor: friction.ActorAgent, wantType: "ci"},
 	}

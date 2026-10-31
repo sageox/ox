@@ -59,6 +59,30 @@ func TestNewContext_ActorHeadersOutsideProjectAndService(t *testing.T) {
 	}
 }
 
+// Prevents the daemon's credential-helper runs (git starts them with the
+// daemon's inherited environment) from stamping one actor on every workspace.
+func TestNewContext_GitCredentialHelperSendsNoActor(t *testing.T) {
+	useragent.ResetForTesting()
+	t.Cleanup(useragent.ResetForTesting)
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv(config.EnvProjectRoot, "")
+	t.Setenv(config.EnvUserConfig, filepath.Join(dir, "config.yaml"))
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("SAGEOX_TOKEN", "")
+	t.Setenv("SAGEOX_ENDPOINT", "http://127.0.0.1:1")
+	t.Setenv("DO_NOT_TRACK", "1")
+	t.Setenv("CLAUDECODE", "1")
+	ctx, err := NewContext(&cobra.Command{Use: "git-credential-helper [get|store|erase]"}, nil)
+	require.NoError(t, err)
+	t.Cleanup(ctx.Shutdown)
+	h := http.Header{}
+	useragent.SetHeaders(h)
+	assert.Empty(t, h.Values("X-Sageox-Actor"))
+	assert.Empty(t, h.Values("X-Sageox-Agent-Type"))
+}
+
 func TestContext_Accessors(t *testing.T) {
 	tests := []struct {
 		name     string
