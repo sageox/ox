@@ -2250,21 +2250,20 @@ func (h *SessionFinalizeHandler) preserveDraftIdentity(payload *SessionFinalizeP
 	if err != nil || !wasDraft {
 		return false, nil
 	}
-	if draftID == "" {
-		return true, nil
-	}
-	if err := lfs.MutateSessionMeta(context.Background(), cacheDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
-		if current == nil {
-			current = h.synthesizeMeta(cacheDir, sessionName)
-			current.SessionID = session.ResolveSessionID(session.ReadHeaderSessionID(filepath.Join(cacheDir, "raw.jsonl")), draftID)
-		} else if current.SessionID == "" {
-			current.SessionID = draftID
+	if draftID != "" {
+		if err := lfs.MutateSessionMeta(context.Background(), cacheDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+			if current == nil {
+				current = h.synthesizeMeta(cacheDir, sessionName)
+				current.SessionID = session.ResolveSessionID(session.ReadHeaderSessionID(filepath.Join(cacheDir, "raw.jsonl")), draftID)
+			} else if current.SessionID == "" {
+				current.SessionID = draftID
+			}
+			return current, nil
+		}); err != nil {
+			return true, fmt.Errorf("preserve draft session identity: %w", err)
 		}
-		return current, nil
-	}); err != nil {
-		return true, fmt.Errorf("preserve draft session identity: %w", err)
+		payload.PreservedSessionID = draftID
 	}
-	payload.PreservedSessionID = draftID
 	return true, nil
 }
 
@@ -2557,13 +2556,11 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 
 	if h.skipGit {
 		cacheDir, err := h.stageSessionInLedger(payload)
+		if err == nil && finishStaged != nil {
+			err = finishStaged()
+		}
 		if err != nil {
 			return false, err
-		}
-		if finishStaged != nil {
-			if err := finishStaged(); err != nil {
-				return false, err
-			}
 		}
 		if cacheDir != "" {
 			_ = os.RemoveAll(cacheDir) // treat skip as success so tests can prune cache

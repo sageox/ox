@@ -627,3 +627,26 @@ func TestSessionFinalize_UploadOnlyStagesUnderRepoLock(t *testing.T) {
 	assert.Equal(t, draftTestSessionID, published.SessionID)
 	assert.NotEmpty(t, published.Files["raw.jsonl"].OID)
 }
+
+// Recording the uploaded references now happens inside the commit's lock. If
+// that write fails, nothing may be committed, and the cache stays the source
+// for a retry.
+func TestSessionFinalize_UploadOnlyMetaFailureCommitsNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git and local LFS service")
+	}
+	_, ledgerPath := setupBareAndCloneLedger(t)
+	cacheDir := writeProductionShapedSession(t, ledgerPath, "2026-10-24T18-19-test-OxMETA")
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "meta.json"), []byte("{"), 0o644))
+	handler := newGitBackedHandler()
+	enableLocalFinalizeLFS(t, handler, ledgerPath)
+	before := gitOutput(t, ledgerPath, "rev-parse", "HEAD")
+
+	err := handler.processUploadOnly(&SessionFinalizePayload{
+		SessionDir: cacheDir, RawPath: filepath.Join(cacheDir, "raw.jsonl"), LedgerPath: ledgerPath, UploadOnly: true,
+	})
+
+	require.ErrorContains(t, err, "write uploaded references")
+	assert.Equal(t, before, gitOutput(t, ledgerPath, "rev-parse", "HEAD"))
+	assert.FileExists(t, filepath.Join(cacheDir, "raw.jsonl"))
+}
