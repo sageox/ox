@@ -2,6 +2,7 @@ package useragent
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"runtime"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/sageox/ox/internal/version"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // clearEnv clears all useragent-relevant env vars for a clean test.
@@ -324,4 +326,75 @@ func TestTraceparent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, tt.fn)
 	}
+}
+
+// Failure prevented: malformed metadata breaks requests, CI sends a bare ci actor, or daemon traffic inherits a command actor.
+func TestActorHeaders_ValidatedWireContract(t *testing.T) {
+	for _, tt := range []struct {
+		name, actor, kind, wantActor, wantKind string
+		daemon                                 bool
+	}{
+		{name: "human", actor: "human", wantActor: "human"},
+		{name: "agent", actor: "agent", kind: "codex", wantActor: "agent", wantKind: "codex"},
+		{name: "CI", actor: "agent", kind: "ci", wantActor: "agent", wantKind: "ci"},
+		{name: "daemon after actor setup", actor: "agent", kind: "codex", daemon: true},
+		{name: "absent means unknown to the server"},
+		{name: "bare ci rejected", actor: "ci", kind: "ci"},
+		{name: "other enum rejected", actor: "person", kind: "codex"},
+		{name: "actor injection rejected", actor: "agent\r\nX-Injected: yes", kind: "codex"},
+		{name: "bad type dropped", actor: "agent", kind: "bad type", wantActor: "agent"},
+		{name: "type injection dropped", actor: "agent", kind: "codex\r\nX-Injected: yes", wantActor: "agent"},
+		{name: "uppercase type dropped", actor: "agent", kind: "Codex", wantActor: "agent"},
+		{name: "non ASCII type dropped", actor: "agent", kind: "co✓", wantActor: "agent"},
+		{name: "overlong type dropped", actor: "agent", kind: strings.Repeat("a", 65), wantActor: "agent"},
+		{name: "max length type", actor: "agent", kind: strings.Repeat("a", 64), wantActor: "agent", wantKind: strings.Repeat("a", 64)},
+		{name: "allowed punctuation", actor: "agent", kind: "type.v1_cli-tool", wantActor: "agent", wantKind: "type.v1_cli-tool"},
+		{name: "human ignores type", actor: "human", kind: "codex", wantActor: "human"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ResetForTesting()
+			t.Cleanup(ResetForTesting)
+			SetActor(tt.actor, tt.kind)
+			if tt.daemon {
+				SetDaemonMode()
+			}
+			arrived := make(chan http.Header, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				arrived <- r.Header.Clone()
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+			req, err := NewRequest(t.Context(), http.MethodGet, srv.URL, nil)
+			require.NoError(t, err)
+			resp, err := srv.Client().Do(req)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			got := <-arrived
+			assert.Equal(t, tt.wantActor, got.Get(HeaderActor))
+			assert.Equal(t, tt.wantKind, got.Get(HeaderAgentType))
+			if tt.wantActor == "" {
+				assert.Empty(t, got.Values(HeaderActor))
+			}
+			if tt.wantKind == "" {
+				assert.Empty(t, got.Values(HeaderAgentType))
+			}
+			assert.Empty(t, got.Values("X-Injected"))
+		})
+	}
+}
+
+// Failure prevented: repeated initialization changes the actor halfway through a command, or reused headers retain stale identity.
+func TestActorHeaders_FirstWriteAndReuse(t *testing.T) {
+	ResetForTesting()
+	defer ResetForTesting()
+	SetActor("human", "")
+	SetActor("agent", "codex")
+	h := http.Header{}
+	SetHeaders(h)
+	assert.Equal(t, "human", h.Get(HeaderActor))
+	assert.Empty(t, h.Values(HeaderAgentType))
+	SetDaemonMode()
+	SetHeaders(h)
+	assert.Empty(t, h.Values(HeaderActor))
+	assert.Empty(t, h.Values(HeaderAgentType))
 }
