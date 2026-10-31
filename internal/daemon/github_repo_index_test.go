@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -120,4 +121,93 @@ func TestGitHubRepoFallbackWhenConfiguredTeamCheckoutMissing(t *testing.T) {
 	require.NoError(t, config.SaveLocalConfig(root, &config.LocalConfig{TeamContexts: []config.TeamContext{{TeamID: "team_owner", Path: filepath.Join(root, "not-cloned")}}}))
 	m := NewCodeDBManager(root, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	require.Empty(t, m.boardPostsDir())
+}
+
+func TestGitHubRepoIndexRejectsIncompleteSnapshotsAndBacksOff(t *testing.T) {
+	id := strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		name, kind, status, body, want string
+		httpStatus                     int
+	}{
+		{"unavailable catalog", "pr", "ready", "", "HTTP 503", http.StatusServiceUnavailable},
+		{"pending entry", "pr", "pending", "", "unavailable entries", 0},
+		{"invalid PR shape", "pr", "ready", `[]`, "cannot unmarshal", 0},
+		{"PR number mismatch", "pr", "ready", `{"number":8}`, "PR number mismatch", 0},
+		{"invalid issue shape", "issue", "ready", `[]`, "cannot unmarshal", 0},
+		{"issue number mismatch", "issue", "ready", `{"number":8}`, "issue number mismatch", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reads atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reads.Add(1)
+				if tc.httpStatus != 0 {
+					w.WriteHeader(tc.httpStatus)
+					return
+				}
+				if r.URL.Query().Get("view") == "catalog" {
+					fmt.Fprintf(w, `{"complete":true,"entries":[{"id":%q,"kind":%q,"number":7,"status":%q}]}`, id, tc.kind, tc.status)
+					return
+				}
+				fmt.Fprint(w, tc.body)
+			}))
+			defer server.Close()
+			t.Setenv("SAGEOX_ENDPOINT", server.URL)
+			t.Setenv("SAGEOX_TOKEN", "test-token")
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			root := t.TempDir()
+			require.NoError(t, config.SaveProjectConfig(root, &config.ProjectConfig{RepoID: "repo_1", TeamID: "team_secondary", Endpoint: server.URL}))
+			db, err := codedb.Open(t.TempDir())
+			require.NoError(t, err)
+			defer db.Close()
+			m := NewCodeDBManager(root, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+			err = m.indexGitHubRepo(context.Background(), db)
+			require.ErrorContains(t, err, tc.want)
+			m.mu.Lock()
+			lastRead, retryAfter := m.lastGitHubRepoRead, m.githubRepoRetryAfter
+			m.mu.Unlock()
+			require.True(t, lastRead.IsZero(), "failed read must not mark the index fresh")
+			require.True(t, retryAfter.After(time.Now()), "failed read schedules retry backoff")
+			var prs, issues int
+			require.NoError(t, db.Store().QueryRow("SELECT COUNT(*) FROM pull_requests").Scan(&prs))
+			require.NoError(t, db.Store().QueryRow("SELECT COUNT(*) FROM issues").Scan(&issues))
+			require.Zero(t, prs)
+			require.Zero(t, issues)
+			before := reads.Load()
+			require.ErrorContains(t, m.indexGitHubRepo(context.Background(), db), "retry backoff")
+			require.Equal(t, before, reads.Load(), "backoff must avoid another network read")
+		})
+	}
+}
+
+func TestGitHubRepoIndexMakesIssueAndCommentsSearchable(t *testing.T) {
+	id := strings.Repeat("b", 64)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("view") == "catalog" {
+			fmt.Fprintf(w, `{"complete":true,"entries":[{"id":%q,"kind":"issue","number":42,"status":"ready"}]}`, id)
+			return
+		}
+		fmt.Fprint(w, `{"number":42,"title":"fixture issue","body":"searchable issue body","author":"author","state":"open","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z","comments":[{"author":"reviewer","body":"helpful response","created_at":"2026-10-02T00:00:00Z"}]}`)
+	}))
+	defer server.Close()
+	t.Setenv("SAGEOX_ENDPOINT", server.URL)
+	t.Setenv("SAGEOX_TOKEN", "test-token")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	root := t.TempDir()
+	require.NoError(t, config.SaveProjectConfig(root, &config.ProjectConfig{RepoID: "repo_1", TeamID: "team_secondary", Endpoint: server.URL}))
+	db, err := codedb.Open(t.TempDir())
+	require.NoError(t, err)
+	defer db.Close()
+	m := NewCodeDBManager(root, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	require.NoError(t, m.indexGitHubRepo(context.Background(), db))
+	var title, body, source, comment string
+	require.NoError(t, db.Store().QueryRow("SELECT i.title,i.body,i.source_path,c.body FROM issues i JOIN issue_comments c ON c.issue_id=i.id WHERE i.number=42").Scan(&title, &body, &source, &comment))
+	require.Equal(t, "fixture issue", title)
+	require.Equal(t, "searchable issue body", body)
+	require.Equal(t, "helpful response", comment)
+	require.Equal(t, "github-repo:repo_1:"+id, source)
+	m.mu.Lock()
+	lastRead, retryAfter := m.lastGitHubRepoRead, m.githubRepoRetryAfter
+	m.mu.Unlock()
+	require.False(t, lastRead.IsZero())
+	require.True(t, retryAfter.IsZero())
 }

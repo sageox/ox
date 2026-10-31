@@ -98,7 +98,10 @@ func (c *RepoClient) githubRepoGET(ctx context.Context, requestURL string, limit
 	if c.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
-	resp, err := c.httpClient.Do(req)
+	// Keep the selected repository path bound to its credential across every read.
+	client := *c.httpClient
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("GitHub repository read: %w", err)
 	}

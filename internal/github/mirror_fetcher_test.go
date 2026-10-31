@@ -74,7 +74,7 @@ func TestMirrorFetcher_ListPullRequestsMapsIdentityAndLifecycle(t *testing.T) {
 	   "labels":[],
 	   "created_at":"2026-10-07T08:00:00Z","updated_at":"2026-10-07T08:00:00Z",
 	   "closed_at":null,"merged_at":null,
-	   "html_url":"https://github.com/acme/api/pull/1290"},
+	   "merge_commit_sha":"1122334455667788990011223344556677889900","html_url":"https://github.com/acme/api/pull/1290"},
 	  {"number":1291,"title":"From a drive-by","body":"hi","state":"open","draft":false,
 	   "user":{"login":"drive-by-user","id":5550199,"type":"User"},"author_association":"FIRST_TIME_CONTRIBUTOR",
 	   "labels":null,
@@ -117,7 +117,7 @@ func TestMirrorFetcher_ListPullRequestsMapsIdentityAndLifecycle(t *testing.T) {
 			Author:    githubmirror.Author{Login: "dependabot[bot]", ID: 49699333, Association: "NONE", Type: "Bot"},
 			Labels:    []string{},
 			CreatedAt: mustTime(t, "2026-10-07T08:00:00Z"), UpdatedAt: mustTime(t, "2026-10-07T08:00:00Z"),
-			HTMLURL: "https://github.com/acme/api/pull/1290",
+			HTMLURL: "https://github.com/acme/api/pull/1290", MergeCommit: "1122334455667788990011223344556677889900",
 		},
 		{
 			Number: 1291, Title: "From a drive-by", Body: "hi", State: "open",

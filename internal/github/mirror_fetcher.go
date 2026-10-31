@@ -62,6 +62,7 @@ func (f *MirrorFetcher) ListPullRequests(ctx context.Context, owner, name string
 
 	result := make([]githubmirror.SourcePR, len(prs))
 	for i, pr := range prs {
+		// Open-PR collision detection uses the test-merge ref, as legacy Ledger indexing did.
 		result[i] = githubmirror.SourcePR{
 			Number:      pr.Number,
 			Title:       pr.Title,
