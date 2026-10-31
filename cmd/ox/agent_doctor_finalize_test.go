@@ -12,6 +12,7 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/doctor"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,6 +50,21 @@ func TestDoctor_FinalizationEligibility(t *testing.T) {
 		}
 	}
 
+	// An empty transcript already in the Ledger needs deterministic settlement,
+	// not another AI-generated summary. Its bytes must match the Ledger manifest.
+	emptyDir := filepath.Join(ledger, ".sageox", "cache", "sessions", "empty-rearmed")
+	require.NoError(t, os.MkdirAll(emptyDir, 0755))
+	rawPath := filepath.Join(emptyDir, "raw.jsonl")
+	writeTestRawJSONLWithEntries(t, rawPath, 0)
+	raw, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	ledgerDir := filepath.Join(ledger, "sessions", "empty-rearmed")
+	require.NoError(t, os.MkdirAll(ledgerDir, 0755))
+	require.NoError(t, lfs.WriteSessionMetaOnly(ledgerDir, &lfs.SessionMeta{
+		Version: "1.0", Files: map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef(raw)},
+	}))
+	require.NoError(t, session.WriteNeedsSummaryMarker(emptyDir, rawPath, ledgerDir))
+
 	before := snapshotDestination(t, ledger)
 	output := buildAgentDoctorOutput("OxTest", project)
 	require.True(t, output.Success, output.SessionScanError)
@@ -59,10 +75,12 @@ func TestDoctor_FinalizationEligibility(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{"unfinished", "cache-only", "requested"}, names)
 	assert.Equal(t, []string{"upload-only"}, output.PendingUploads)
+	assert.Equal(t, []string{"empty-rearmed"}, output.PendingFinalization)
 	result := checkSessionIncomplete(false)
 	assert.True(t, result.requiresAgent)
 	assert.Equal(t, "3 found", result.message)
 	assert.Contains(t, result.detail, "Awaiting upload: upload-only")
+	assert.Contains(t, result.detail, "Awaiting automatic finalization: empty-rearmed")
 	assert.Equal(t, before, snapshotDestination(t, ledger), "inspection preserves session files and markers")
 }
 
