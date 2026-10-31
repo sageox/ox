@@ -198,6 +198,7 @@ The CLI reads and writes review records only through `pkg/planreview`.
   staged plan file (#1442). The mass-deletion guard does not count removed
   `*.rej` and `*.needs-summary` files (#1443).
 - **Redaction amendments** (#1355): amend only repaired paths, retaining all parents, author and message. Amendment errors hold publication.
+- **Plan title backfill** (#1355): update session references only after the plan moves succeed, under the Ledger and metadata locks. A commit failure restores the original working metadata and its independently staged version before releasing the locks; push failure retains the completed commit.
 - **Plan changes no retry owns** (`ox doctor`, just before
   `plan-pending-writes`): a plan dir with uncommitted changes, no plan retry
   marker, and changes outside the review records an entry lands. If its

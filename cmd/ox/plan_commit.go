@@ -688,76 +688,126 @@ func commitPlanDirLocked(ctx context.Context, ledgerPath, planDir, msgPrefix str
 	return nil
 }
 
-// commitPlanBackfillToLedger stages every backfilled plan rename, in-place
-// plan edit, and session produced_plans fix into ONE commit and pushes it —
-// the batch counterpart to commitAndPushPlanDir (which commits a single plan
-// dir). A repair run can touch hundreds of plans; landing that as one
-// reviewable commit beats one commit per directory. Mirrors
-// commitAndPushPlanDir's pattern (--sparse, --no-verify, pushLedger with
-// pull-rebase retry) rather than hand-rolling new git plumbing.
-//
-// Only the final push is best-effort. Every git op at or before `git
-// commit` (mv, add, commit itself) returns an error wrapped in
-// errBackfillCommitFailed on failure — unlike a push failure, those leave
-// the working tree in a half-mutated state with nothing to anchor it, so
-// the caller must treat that as a hard failure, not a warning.
-//
-// renames are (oldAbsPath, newAbsPath) pairs applied via `git mv --sparse`.
-// touchedPlanDirs/touchedSessionDirs are absolute paths edited in-place
-// (topic-only correction with no slug change; a session's produced_plans
-// fix) that need a plain `git add`.
-//
-// Each rename is `git mv` followed by an explicit `git add` of the NEW path.
-// `git mv` alone is NOT enough here: it only restages the move of whatever
-// content is already in the index (HEAD) — a file mutated on disk but never
-// `git add`'d before the mv (exactly ApplyBackfillMeta's write, which happens
-// before this function is ever called) rides along as a rename of the OLD
-// content, leaving the just-mutated bytes as an uncommitted diff on the NEW
-// path immediately after the commit. Confirmed against git 2.55 directly —
-// `git status --porcelain` shows "RM" (rename + pending modify), not a clean
-// rename, when the source was dirty. The follow-up `git add` stages the
-// current working-tree content at the new path in the same pass.
-func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedPlanDirs, touchedSessionDirs []string) error {
-	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
-
-	for _, pair := range renames {
-		oldRel, err := filepath.Rel(ledgerPath, pair[0])
+// commitPlanBackfillToLedger commits the plan moves and their session references
+// together. Reference edits are made only after the moves succeed and restored
+// on commit failure. Push runs after the repository and metadata locks release.
+func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedPlanDirs, touchedSessionDirs []string, renamed map[string]string) error {
+	ctx := context.Background()
+	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		ctx, cancel := context.WithTimeout(ctx, lockedCommitTimeout)
+		defer cancel()
+		if err := ledgerSafeForPlanWrite(ctx, ledgerPath); err != nil {
+			return err
+		}
+		gitserver.EnsureGitignoreBeforeCommitCtx(ctx, ledgerPath)
+		for _, pair := range renames {
+			oldRel, err := filepath.Rel(ledgerPath, pair[0])
+			if err != nil {
+				return fmt.Errorf("relativize %q: %w", pair[0], err)
+			}
+			newRel, err := filepath.Rel(ledgerPath, pair[1])
+			if err != nil {
+				return fmt.Errorf("relativize %q: %w", pair[1], err)
+			}
+			if _, err := gitutil.RunGit(ctx, ledgerPath, "mv", "--sparse", "--", oldRel, newRel); err != nil {
+				return err
+			}
+			if _, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", "--", newRel); err != nil {
+				return err
+			}
+		}
+		if len(touchedPlanDirs) > 0 {
+			args := append([]string{"add", "--sparse", "--"}, touchedPlanDirs...)
+			if _, err := gitutil.RunGit(ctx, ledgerPath, args...); err != nil {
+				return err
+			}
+		}
+		indexTree, err := gitutil.RunGit(ctx, ledgerPath, "write-tree")
 		if err != nil {
-			return fmt.Errorf("relativize %q: %w", pair[0], err)
+			return err
 		}
-		newRel, err := filepath.Rel(ledgerPath, pair[1])
-		if err != nil {
-			return fmt.Errorf("relativize %q: %w", pair[1], err)
+		var referencePaths []string
+		for _, dir := range touchedSessionDirs {
+			rel, err := ledgerRelPath(ledgerPath, filepath.Join(dir, "meta.json"))
+			if err != nil {
+				return err
+			}
+			referencePaths = append(referencePaths, ":(literal)"+rel)
 		}
-		mvArgs := []string{"-C", ledgerPath, "mv", "--sparse", oldRel, newRel}
-		if out, err := exec.Command("git", mvArgs...).CombinedOutput(); err != nil {
-			return fmt.Errorf("%w: git mv %s -> %s failed: %s: %w", errBackfillCommitFailed, oldRel, newRel, string(out), err)
+		restoredIndex := false
+		// Keep each metadata lock through the single commit and any rollback.
+		// A daemon summary writer must not land between our backup and restore.
+		var commitWithReferences func(int) error
+		commitWithReferences = func(i int) error {
+			if i == len(touchedSessionDirs) {
+				intendedTree, err := gitutil.RunGit(ctx, ledgerPath, "write-tree")
+				if err != nil {
+					return err
+				}
+				msg := fmt.Sprintf("plan: backfill %d title(s)", len(renames)+len(touchedPlanDirs))
+				if out, err := gitutil.RunGit(ctx, ledgerPath, "commit", "--no-verify", "-m", msg); err != nil {
+					if strings.Contains(out, "nothing to commit") {
+						return nil
+					}
+					// Git can be interrupted after updating HEAD (for example in
+					// post-commit maintenance). Do not undo a commit that landed.
+					checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+					headTree, checkErr := gitutil.RunGit(checkCtx, ledgerPath, "rev-parse", "HEAD^{tree}")
+					cancel()
+					if checkErr == nil && headTree == intendedTree {
+						return nil
+					}
+					return err
+				}
+				return nil
+			}
+			dir := touchedSessionDirs[i]
+			path := filepath.Join(dir, "meta.json")
+			return fileutil.WithFileLock(ctx, path, func() (err error) {
+				original, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				meta, err := lfs.ParseSessionMeta(original)
+				if err != nil {
+					return err
+				}
+				defer func() {
+					if err == nil {
+						return
+					}
+					if !restoredIndex {
+						restoredIndex = true
+						restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+						args := append([]string{"reset", "-q", indexTree, "--"}, referencePaths...)
+						_, indexErr := gitutil.RunGit(restoreCtx, ledgerPath, args...)
+						cancel()
+						if indexErr != nil {
+							err = errors.Join(err, fmt.Errorf("restore staged backfill references: %w", indexErr))
+						}
+					}
+					if writeErr := fileutil.AtomicWriteBytes(path, original, 0o644); writeErr != nil {
+						err = errors.Join(err, fmt.Errorf("restore backfill references in %s: %w", path, writeErr))
+					}
+				}()
+				for j, slug := range meta.ProducedPlans {
+					if newSlug, ok := renamed[slug]; ok {
+						meta.ProducedPlans[j] = newSlug
+					}
+				}
+				if err := lfs.WriteSessionMetaOnly(dir, meta); err != nil {
+					return err
+				}
+				if _, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", "--", referencePaths[i]); err != nil {
+					return err
+				}
+				return commitWithReferences(i + 1)
+			})
 		}
-		addArgs := []string{"-C", ledgerPath, "add", "--sparse", newRel}
-		if out, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
-			return fmt.Errorf("%w: git add %s (post-mv content) failed: %s: %w", errBackfillCommitFailed, newRel, string(out), err)
-		}
+		return commitWithReferences(0)
+	})
+	if err != nil {
+		return fmt.Errorf("%w: %w", errBackfillCommitFailed, err)
 	}
-
-	addPaths := slices.Concat(touchedPlanDirs, touchedSessionDirs)
-	if len(addPaths) > 0 {
-		addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, addPaths...)
-		if out, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
-			return fmt.Errorf("%w: git add failed: %s: %w", errBackfillCommitFailed, string(out), err)
-		}
-	}
-
-	commitMsg := fmt.Sprintf("plan: backfill %d title(s)", len(renames)+len(touchedPlanDirs))
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if out, err := commitCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(out), "nothing to commit") {
-			return nil // idempotent: re-run with nothing left to change
-		}
-		return fmt.Errorf("%w: %s: %w", errBackfillCommitFailed, wrapCommitError(string(out), err), err)
-	}
-
-	// Everything from here down is push-only: the commit above already
-	// landed locally, so a failure past this point must NOT match
-	// errBackfillCommitFailed — see the caller's best-effort push contract.
 	return pushLedger(context.Background(), ledgerPath)
 }

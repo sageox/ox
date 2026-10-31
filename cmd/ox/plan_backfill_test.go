@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
 )
 
 // plan_backfill_test.go covers the cmd/ox layer of `ox plan backfill-titles`:
@@ -171,6 +173,7 @@ func initGitLedger(t *testing.T, ledgerPath string) {
 func TestRunPlanBackfillTitlesOnLedger_RealRunRenamesAndCommits(t *testing.T) {
 	ledger := t.TempDir()
 	oldDir := writeBackfillPlanFixture(t, ledger, "2026-05-01-1-context-why-now", backfillTestRaw, "1. Context — Why Now", time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC))
+	sessionDir := writeBackfillSessionFixture(t, ledger, "2026-05-03-sess-Ox0001", []string{"1-context-why-now"})
 	initGitLedger(t, ledger)
 
 	out, err := runBackfillForTest(t, ledger, false)
@@ -196,6 +199,11 @@ func TestRunPlanBackfillTitlesOnLedger_RealRunRenamesAndCommits(t *testing.T) {
 	if meta.Topic != "Conversation model update — the execution plan" {
 		t.Errorf("meta.Topic = %q, want the corrected H1 title", meta.Topic)
 	}
+	// A failed push retains the coherent local commit, including its references.
+	sessionMeta, err := lfs.ReadSessionMeta(sessionDir)
+	require.NoError(t, err)
+	require.Equal(t, []string{"conversation-model-update-the-execution-plan"}, sessionMeta.ProducedPlans)
+	require.Contains(t, runGitInDir(t, ledger, "show", "HEAD:sessions/"+filepath.Base(sessionDir)+"/meta.json"), `"conversation-model-update-the-execution-plan"`)
 
 	// The rename + edit landed in a real git commit (whether or not the
 	// best-effort push to a nonexistent remote succeeded).
@@ -387,4 +395,119 @@ func TestRunPlanBackfillTitlesOnLedger_PreCommitFailureFailsCommandAndSkipsSumma
 	if strings.Count(strings.TrimSpace(logOut), "\n") != 0 {
 		t.Errorf("expected only the init commit (nothing landed), got:\n%s", logOut)
 	}
+}
+
+// Failed repairs must not leave references that an ordinary session upload
+// can publish without the plan rename. Exercise failures before and after staging.
+func TestPlanBackfillFailureKeepsPublishedReferencesValid(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real ledger commits and pushes")
+	}
+	for _, failure := range []string{"second rename", "commit"} {
+		t.Run(failure, func(t *testing.T) {
+			root := newPlanCaptureTestRepo(t)
+			ledger, remote := newSharedLedger(t, root, true)
+			oldName := "2026-05-01-1-context-why-now"
+			newName := "2026-05-01-conversation-model-update-the-execution-plan"
+			created := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+			writeBackfillPlanFixture(t, ledger, oldName, backfillTestRaw, "1. Context — Why Now", created)
+			sessionName := "2026-05-03-sess-Ox0001"
+			sessionDir := writeBackfillSessionFixture(t, ledger, sessionName, []string{"1-context-why-now"})
+			secondSessionDir := writeBackfillSessionFixture(t, ledger, "2026-05-03-sess-Ox0003", []string{"1-context-why-now"})
+			require.NoError(t, os.WriteFile(filepath.Join(ledger, "sessions", ".gitignore"), []byte("*.needs-summary\n"), 0o644))
+			runGitInDir(t, ledger, "add", "--", "data", "sessions")
+			runGitInDir(t, ledger, "commit", "-m", "saved plan and session")
+			runGitInDir(t, ledger, "push", "origin", "main")
+
+			meta, err := lfs.ReadSessionMeta(sessionDir)
+			require.NoError(t, err)
+			meta.Title = "Staged title"
+			require.NoError(t, lfs.WriteSessionMetaOnly(sessionDir, meta))
+			rel := "sessions/" + sessionName + "/meta.json"
+			runGitInDir(t, ledger, "add", "--", rel)
+			staged := runGitInDir(t, ledger, "rev-parse", ":"+rel)
+			meta.Title = "Working title"
+			require.NoError(t, lfs.WriteSessionMetaOnly(sessionDir, meta))
+			working, err := os.ReadFile(filepath.Join(sessionDir, "meta.json"))
+			require.NoError(t, err)
+			secondWorking, err := os.ReadFile(filepath.Join(secondSessionDir, "meta.json"))
+			require.NoError(t, err)
+			secondRel := "sessions/" + filepath.Base(secondSessionDir) + "/meta.json"
+			secondStaged := runGitInDir(t, ledger, "rev-parse", ":"+secondRel)
+
+			lockPath := filepath.Join(ledger, ".git", "refs", "heads", "main.lock")
+			if failure == "second rename" {
+				// A save that failed before staging leaves a real, untracked plan.
+				writeBackfillPlanFixture(t, ledger, "2026-05-02-tl-dr", "# Second Plan\n\n## TL;DR\n\nBody.\n", "TL;DR", created.Add(24*time.Hour))
+			} else {
+				// The ref lock allows staging but prevents the final commit.
+				require.NoError(t, os.WriteFile(lockPath, nil, 0o644))
+			}
+			_, err = runBackfillForTest(t, ledger, false)
+			require.ErrorIs(t, err, errBackfillCommitFailed)
+			if failure == "second rename" {
+				require.ErrorContains(t, err, "git mv")
+			} else {
+				require.ErrorContains(t, err, "main.lock")
+				require.NoError(t, os.Remove(lockPath))
+			}
+			after, err := os.ReadFile(filepath.Join(sessionDir, "meta.json"))
+			require.NoError(t, err)
+			require.Equal(t, string(working), string(after), "working metadata must survive the failed repair")
+			require.Equal(t, staged, runGitInDir(t, ledger, "rev-parse", ":"+rel), "restore the staged version, not HEAD")
+			secondAfter, err := os.ReadFile(filepath.Join(secondSessionDir, "meta.json"))
+			require.NoError(t, err)
+			require.Equal(t, string(secondWorking), string(secondAfter))
+			require.Equal(t, secondStaged, runGitInDir(t, ledger, "rev-parse", ":"+secondRel))
+			for _, dir := range []string{sessionDir, secondSessionDir} {
+				require.NoError(t, lfs.MutateSessionMeta(context.Background(), dir, func(*lfs.SessionMeta) (*lfs.SessionMeta, error) {
+					return nil, nil // the failure must release every metadata lock
+				}))
+			}
+
+			otherName := "2026-05-03-other-Ox0002"
+			writeBackfillSessionFixture(t, ledger, otherName, nil)
+			require.NoError(t, commitAndPushLedger(ledger, otherName))
+			published := runGitInDir(t, remote, "show", "main:"+rel)
+			require.Contains(t, published, `"1-context-why-now"`)
+			require.Contains(t, published, "Staged title")
+			require.NotEmpty(t, runGitInDir(t, remote, "ls-tree", "--name-only", "main", "--", "data/plans/"+oldName))
+			require.Empty(t, runGitInDir(t, remote, "ls-tree", "--name-only", "main", "--", "data/plans/"+newName))
+			require.NotEmpty(t, runGitInDir(t, remote, "show", "main:sessions/"+otherName+"/meta.json"))
+			require.Contains(t, runGitInDir(t, remote, "show", "main:"+secondRel), `"1-context-why-now"`)
+		})
+	}
+}
+
+// A process error after Git advances HEAD must not undo the committed references.
+func TestPlanBackfillKeepsReferencesWhenCommitLandsBeforeInterruption(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real ledger commits and pushes")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("post-commit interruption fixture requires POSIX signals")
+	}
+	root := newPlanCaptureTestRepo(t)
+	ledger, remote := newSharedLedger(t, root, true)
+	writeBackfillPlanFixture(t, ledger, "2026-05-01-1-context-why-now", backfillTestRaw, "1. Context — Why Now", time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC))
+	name := "2026-05-03-sess-Ox0001"
+	dir := writeBackfillSessionFixture(t, ledger, name, []string{"1-context-why-now"})
+	require.NoError(t, os.WriteFile(filepath.Join(ledger, "sessions", ".gitignore"), []byte("*.needs-summary\n"), 0o644))
+	runGitInDir(t, ledger, "add", "--", "data", "sessions")
+	runGitInDir(t, ledger, "commit", "-m", "saved plan and session")
+	runGitInDir(t, ledger, "push", "origin", "main")
+	hook := filepath.Join(ledger, ".git", "hooks", "post-commit")
+	marker := filepath.Join(ledger, ".git", "interrupted-backfill")
+	require.NoError(t, os.WriteFile(hook, []byte("#!/bin/sh\ncase \"$(git log -1 --format=%s)\" in\n  'plan: backfill '*) touch .git/interrupted-backfill; kill -TERM \"$PPID\";;\nesac\n"), 0o755))
+	_, err := runBackfillForTest(t, ledger, false)
+	require.NoError(t, err)
+	require.FileExists(t, marker, "the interruption must actually fire")
+	require.NoError(t, os.Remove(hook))
+	meta, err := lfs.ReadSessionMeta(dir)
+	require.NoError(t, err)
+	require.Equal(t, []string{"conversation-model-update-the-execution-plan"}, meta.ProducedPlans)
+	require.NoError(t, commitAndPushLedger(ledger, name))
+	require.Contains(t, runGitInDir(t, remote, "show", "main:sessions/"+name+"/meta.json"), `"conversation-model-update-the-execution-plan"`)
+	require.NotEmpty(t, runGitInDir(t, remote, "ls-tree", "--name-only", "main", "--", "data/plans/2026-05-01-conversation-model-update-the-execution-plan"))
+	require.Empty(t, runGitInDir(t, ledger, "status", "--porcelain"))
 }
