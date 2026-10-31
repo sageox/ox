@@ -161,10 +161,6 @@ func runPlanBackfillTitlesOnLedger(cmd *cobra.Command, ledgerPath string, dryRun
 
 	var touchedSessionDirs []string
 	for _, r := range sessionRewrites {
-		if err := plan.ApplyProducedPlansRewrite(ctx, r.SessionDir, renamed); err != nil {
-			slog.Warn("plan backfill: produced_plans rewrite failed, skipping", "dir", r.SessionDir, "error", err)
-			continue
-		}
 		touchedSessionDirs = append(touchedSessionDirs, r.SessionDir)
 	}
 	writeSessionRewriteTable(out, sessionRewrites)
@@ -174,7 +170,7 @@ func runPlanBackfillTitlesOnLedger(cmd *cobra.Command, ledgerPath string, dryRun
 		return nil
 	}
 
-	if err := commitPlanBackfillToLedger(ledgerPath, renames, touchedPlanDirs, touchedSessionDirs); err != nil {
+	if err := commitPlanBackfillToLedger(ledgerPath, renames, touchedPlanDirs, touchedSessionDirs, renamed); err != nil {
 		if errors.Is(err, errBackfillCommitFailed) {
 			// The mv/edit work above already landed on disk but never made it
 			// into a commit — a materially different, worse state than "committed
