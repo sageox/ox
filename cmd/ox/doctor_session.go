@@ -125,12 +125,8 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 		results = append(results, convertDoctorResult(pushResult))
 	}
 
-	// add incomplete sessions check (context-aware: human vs agent guidance)
-	incompleteResult := checkSessionIncomplete(opts.shouldFix(CheckSlugSessionIncomplete))
-	// only include if not a pass with "all sessions complete" (reduce noise)
-	if !incompleteResult.passed || incompleteResult.message != "all sessions complete" {
-		results = append(results, incompleteResult)
-	}
+	// Retain a successful inspection too: it acknowledges a stale agent chore.
+	results = append(results, checkSessionIncomplete(opts.shouldFix(CheckSlugSessionIncomplete)))
 
 	// draft placeholders whose recording is gone
 	orphanResult := checkSessionDraftOrphanViaRegistry(opts)

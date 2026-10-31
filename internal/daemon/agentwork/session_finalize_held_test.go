@@ -64,7 +64,7 @@ func TestDetect_HeldSessionIsLeftAlone(t *testing.T) {
 			f := newHeldFixture(t)
 			tc.setup(t, f)
 			h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
-			items, skips, err := h.detectInDir(filepath.Join(f.ledgerPath, ".sageox", "cache", "sessions"), f.ledgerPath)
+			items, skips, err := h.detectInDir(filepath.Join(f.ledgerPath, ".sageox", "cache", "sessions"), f.ledgerPath, true)
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantItem, len(items) == 1)
 			assert.Equal(t, !tc.wantItem, skips.held[f.name], "a held session is counted as held")
@@ -264,7 +264,7 @@ func TestDetect_ManualPublishingHoldsUnpublishedSessions(t *testing.T) {
 			h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
 			h.SetProjectRoot(projectWithPublishing(t, tc.mode))
 
-			items, skips, err := h.detectInDir(filepath.Join(f.ledgerPath, ".sageox", "cache", "sessions"), f.ledgerPath)
+			items, skips, err := h.detectInDir(filepath.Join(f.ledgerPath, ".sageox", "cache", "sessions"), f.ledgerPath, true)
 
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantItem, len(items) == 1, "queued for the LLM and the Ledger")
