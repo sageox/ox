@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -129,6 +130,9 @@ func TestIndexGitHubCommandNoPushCanReuseLocallyIndexedItems(t *testing.T) {
 }
 
 func TestIndexGitHubCommandReportsRefreshAfterPublication(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("this fake daemon uses Unix sockets; Windows uses named pipes")
+	}
 	for _, tc := range []struct {
 		name, response, want string
 		indexErr             error
@@ -143,6 +147,7 @@ func TestIndexGitHubCommandReportsRefreshAfterPublication(t *testing.T) {
 			t.Setenv("SAGEOX_DAEMON", "false") // prevents a real daemon spawn if the fake is unavailable
 			t.Setenv("OX_XDG_ENABLE", "1")
 			t.Setenv("OX_XDG_DISABLE", "")
+			// macOS limits Unix socket paths to 104 bytes, so use a short runtime path.
 			runtimeDir, err := os.MkdirTemp("/tmp", "ox-index-")
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })

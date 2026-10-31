@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -85,39 +86,51 @@ func (m *CodeDBManager) indexGitHubRepo(ctx context.Context, db *codedb.DB) (res
 	if err != nil {
 		return err
 	}
+	// Keep healthy snapshots searchable while leaving a partial pass eligible for repair.
+	var failures []error
 	for i, entry := range entries {
-		var item githubmirror.Item
-		if entry.Kind == "pr" {
-			var pr ledger.PRFile
-			if err = json.Unmarshal(bodies[i], &pr); err != nil {
-				return err
-			}
-			if pr.Number != entry.Number {
-				return fmt.Errorf("repository PR number mismatch")
-			}
-			item = githubmirror.Item{Kind: githubmirror.KindPullRequest, Number: pr.Number, Title: pr.Title, Body: pr.Body, Author: githubmirror.Author{Login: pr.Author}, State: pr.State, Draft: pr.Draft, Labels: pr.Labels, CreatedAt: pr.CreatedAt, MergedAt: pr.MergedAt, ClosedAt: pr.ClosedAt, UpdatedAt: pr.UpdatedAt, MergeCommit: pr.MergeCommit, URL: pr.URL}
-			for _, c := range pr.Comments {
-				item.Comments = append(item.Comments, githubmirror.Comment{Author: githubmirror.Author{Login: c.Author}, Body: c.Body, Path: c.Path, Line: c.Line, CreatedAt: c.CreatedAt})
-			}
-			for _, c := range pr.Commits {
-				item.Commits = append(item.Commits, githubmirror.Commit{SHA: c.SHA, Author: c.Author, Date: c.Date, Message: c.Msg})
-			}
-		} else {
-			var issue ledger.IssueFile
-			if err = json.Unmarshal(bodies[i], &issue); err != nil {
-				return err
-			}
-			if issue.Number != entry.Number {
-				return fmt.Errorf("repository issue number mismatch")
-			}
-			item = githubmirror.Item{Kind: githubmirror.KindIssue, Number: issue.Number, Title: issue.Title, Body: issue.Body, Author: githubmirror.Author{Login: issue.Author}, State: issue.State, Labels: issue.Labels, CreatedAt: issue.CreatedAt, ClosedAt: issue.ClosedAt, UpdatedAt: issue.UpdatedAt, URL: issue.URL}
-			for _, c := range issue.Comments {
-				item.Comments = append(item.Comments, githubmirror.Comment{Author: githubmirror.Author{Login: c.Author}, Body: c.Body, CreatedAt: c.CreatedAt})
-			}
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(failures, err)...)
 		}
-		if _, err = index.IndexRepoGitHubItems(ctx, db.Store(), repoID+":"+entry.ID, []githubmirror.Item{item}); err != nil {
+		itemErr := func() error {
+			var item githubmirror.Item
+			if entry.Kind == "pr" {
+				var pr ledger.PRFile
+				if err := json.Unmarshal(bodies[i], &pr); err != nil {
+					return err
+				}
+				if pr.Number != entry.Number {
+					return fmt.Errorf("repository PR number mismatch")
+				}
+				item = githubmirror.Item{Kind: githubmirror.KindPullRequest, Number: pr.Number, Title: pr.Title, Body: pr.Body, Author: githubmirror.Author{Login: pr.Author}, State: pr.State, Draft: pr.Draft, Labels: pr.Labels, CreatedAt: pr.CreatedAt, MergedAt: pr.MergedAt, ClosedAt: pr.ClosedAt, UpdatedAt: pr.UpdatedAt, MergeCommit: pr.MergeCommit, URL: pr.URL}
+				for _, c := range pr.Comments {
+					item.Comments = append(item.Comments, githubmirror.Comment{Author: githubmirror.Author{Login: c.Author}, Body: c.Body, Path: c.Path, Line: c.Line, CreatedAt: c.CreatedAt})
+				}
+				for _, c := range pr.Commits {
+					item.Commits = append(item.Commits, githubmirror.Commit{SHA: c.SHA, Author: c.Author, Date: c.Date, Message: c.Msg})
+				}
+			} else {
+				var issue ledger.IssueFile
+				if err := json.Unmarshal(bodies[i], &issue); err != nil {
+					return err
+				}
+				if issue.Number != entry.Number {
+					return fmt.Errorf("repository issue number mismatch")
+				}
+				item = githubmirror.Item{Kind: githubmirror.KindIssue, Number: issue.Number, Title: issue.Title, Body: issue.Body, Author: githubmirror.Author{Login: issue.Author}, State: issue.State, Labels: issue.Labels, CreatedAt: issue.CreatedAt, ClosedAt: issue.ClosedAt, UpdatedAt: issue.UpdatedAt, URL: issue.URL}
+				for _, c := range issue.Comments {
+					item.Comments = append(item.Comments, githubmirror.Comment{Author: githubmirror.Author{Login: c.Author}, Body: c.Body, CreatedAt: c.CreatedAt})
+				}
+			}
+			_, err := index.IndexRepoGitHubItems(ctx, db.Store(), repoID+":"+entry.ID, []githubmirror.Item{item})
 			return err
+		}()
+		if itemErr != nil {
+			failures = append(failures, fmt.Errorf("repository %s %d: %w", entry.Kind, entry.Number, itemErr))
 		}
+	}
+	if len(failures) > 0 {
+		return errors.Join(failures...)
 	}
 	m.mu.Lock()
 	m.lastGitHubRepoRead = time.Now()

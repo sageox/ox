@@ -211,3 +211,58 @@ func TestGitHubRepoIndexMakesIssueAndCommentsSearchable(t *testing.T) {
 	require.False(t, lastRead.IsZero())
 	require.True(t, retryAfter.IsZero())
 }
+
+func TestGitHubRepoIndexContinuesAfterBadSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, wantError, table, badBody string
+		failInsert                            bool
+	}{
+		{"pr mismatch", "pr", "PR number mismatch", "pull_requests", `{"number":999,"title":"bad","state":"open"}`, false},
+		{"issue mismatch", "issue", "issue number mismatch", "issues", `{"number":999,"title":"bad","state":"open"}`, false},
+		{"pr malformed", "pr", "cannot unmarshal", "pull_requests", `[]`, false},
+		{"issue malformed", "issue", "cannot unmarshal", "issues", `[]`, false},
+		{"pr index failure", "pr", "fixture insert rejected", "pull_requests", `{"number":7,"title":"bad","state":"open"}`, true},
+		{"issue index failure", "issue", "fixture insert rejected", "issues", `{"number":7,"title":"bad","state":"open"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			badID, goodID := strings.Repeat("a", 64), strings.Repeat("b", 64)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("view") == "catalog" {
+					fmt.Fprintf(w, `{"complete":true,"entries":[{"id":%q,"kind":%q,"number":7,"status":"ready"},{"id":%q,"kind":%q,"number":8,"status":"ready"}]}`, badID, tc.kind, goodID, tc.kind)
+					return
+				}
+				if strings.HasSuffix(r.URL.Path, badID) {
+					fmt.Fprint(w, tc.badBody)
+					return
+				}
+				fmt.Fprint(w, `{"number":8,"title":"healthy snapshot","body":"retained context","state":"open","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z"}`)
+			}))
+			defer server.Close()
+			t.Setenv("SAGEOX_ENDPOINT", server.URL)
+			t.Setenv("SAGEOX_TOKEN", "test-token")
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			root := t.TempDir()
+			require.NoError(t, config.SaveProjectConfig(root, &config.ProjectConfig{RepoID: "repo_1", TeamID: "team_secondary", Endpoint: server.URL}))
+			db, err := codedb.Open(t.TempDir())
+			require.NoError(t, err)
+			defer db.Close()
+			if tc.failInsert {
+				_, err = db.Store().Exec("CREATE TRIGGER reject_fixture BEFORE INSERT ON " + tc.table + " WHEN NEW.number = 7 BEGIN SELECT RAISE(FAIL, 'fixture insert rejected'); END")
+				require.NoError(t, err)
+			}
+			m := NewCodeDBManager(root, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+			err = m.indexGitHubRepo(context.Background(), db)
+			require.ErrorContains(t, err, tc.wantError)
+			var title, source string
+			require.NoError(t, db.Store().QueryRow("SELECT title,source_path FROM "+tc.table+" WHERE number=8").Scan(&title, &source), "a bad item must not starve later snapshots")
+			require.Equal(t, "healthy snapshot", title)
+			require.Equal(t, "github-repo:repo_1:"+goodID, source)
+			m.mu.Lock()
+			lastRead, retryAfter := m.lastGitHubRepoRead, m.githubRepoRetryAfter
+			m.mu.Unlock()
+			require.True(t, lastRead.IsZero(), "partial failure must not report a fresh index")
+			require.True(t, retryAfter.After(time.Now()), "partial failure retains the normal retry backoff")
+			require.ErrorContains(t, m.indexGitHubRepo(context.Background(), db), "retry backoff")
+		})
+	}
+}
