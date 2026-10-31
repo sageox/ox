@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -38,6 +39,27 @@ func TestGetToken_NoFile(t *testing.T) {
 	token, err := client.GetToken()
 	require.NoError(t, err)
 	assert.Nil(t, token, "want nil when no token file exists")
+}
+
+// Failure prevented: OIDC sub is lost at sign-in or reload, leaving direct UserID readers blank.
+func TestUserInfo_SubPopulatesUserID(t *testing.T) {
+	for _, tt := range []struct{ name, raw, want string }{
+		{"sub only", `{"sub":"usr_subject"}`, "usr_subject"},
+		{"legacy id wins", `{"user_id":"usr_legacy","sub":"usr_subject"}`, "usr_legacy"},
+		{"missing", `{}`, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var info UserInfo
+			require.NoError(t, json.Unmarshal([]byte(tt.raw), &info))
+			assert.Equal(t, tt.want, info.UserID)
+			client := NewTestClient(t)
+			require.NoError(t, client.SaveToken(&StoredToken{UserInfo: info}))
+			stored, err := client.GetToken()
+			require.NoError(t, err)
+			require.NotNil(t, stored)
+			assert.Equal(t, tt.want, stored.UserInfo.UserID)
+		})
+	}
 }
 
 func TestSaveAndGetToken(t *testing.T) {
@@ -1369,4 +1391,40 @@ func TestAuthClientAuthChecks_MalformedEnvTokenSurfacesReason(t *testing.T) {
 			"only ErrEnvTokenMalformed is worth surfacing here — reporting every resolution failure "+
 				"would make a corrupt auth.json a hard error for callers that only wanted to know whether to show a login hint")
 	})
+}
+
+// Failure prevented: analytics attributes an environment/team token to a local person or performs auth IO.
+func TestLocalUserID_OnlyLocalPerson(t *testing.T) {
+	jwt := func(payload string) string {
+		return "header." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
+	}
+	for _, tt := range []struct{ name, rawInfo, token, env, want string }{
+		{name: "signed out"},
+		{name: "stored person", rawInfo: `{"user_id":"usr_stored"}`, token: "opaque", want: "usr_stored"},
+		{name: "sub only", rawInfo: `{"sub":"usr_subject"}`, token: "opaque", want: "usr_subject"},
+		{name: "jwt subject", rawInfo: `{}`, token: jwt(`{"sub":"usr_jwt","ignored":"private"}`), want: "usr_jwt"},
+		{name: "non-person subject", rawInfo: `{}`, token: jwt(`{"sub":"agt_coworker"}`)},
+		{name: "bad payload", rawInfo: `{}`, token: "header.%.signature"},
+		{name: "bad json", rawInfo: `{}`, token: jwt(`{`)},
+		{name: "opaque token", rawInfo: `{}`, token: "opaque"},
+		{name: "team token", rawInfo: `{"user_id":"usr_stored"}`, token: "oxt_invalid_fixture"},
+		{name: "env shadows login", rawInfo: `{"user_id":"usr_stored"}`, token: "opaque", env: jwt(`{"sub":"usr_env"}`)},
+		{name: "malformed env shadows login", rawInfo: `{"user_id":"usr_stored"}`, token: "opaque", env: "oxt_invalid_fixture"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			t.Setenv("SAGEOX_ENDPOINT", "https://local.test")
+			t.Setenv("SAGEOX_TOKEN", tt.env)
+			if tt.rawInfo != "" {
+				path, err := GetAuthFilePath()
+				require.NoError(t, err)
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+				token, _ := json.Marshal(tt.token)
+				raw := `{"tokens":{"https://local.test":{"access_token":` + string(token) + `,"user_info":` + tt.rawInfo + `}}}`
+				require.NoError(t, os.WriteFile(path, []byte(raw), 0o600))
+			}
+			assert.Equal(t, tt.want, LocalUserID("https://local.test"))
+		})
+	}
 }

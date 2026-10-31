@@ -222,6 +222,12 @@ func runMurmurList(cmd *cobra.Command, args []string) error {
 	})
 
 	total := len(allMurmurs)
+	if cliCtx != nil {
+		cliCtx.SetOutcome("murmur_count", total)
+		if total > 0 {
+			cliCtx.SetOutcome("newest_murmur_at", allMurmurs[0].Timestamp.UTC().Format(time.RFC3339))
+		}
+	}
 
 	// JSON output: agents need full data, no file-changes hiding, --limit still applies
 	if jsonOutput {

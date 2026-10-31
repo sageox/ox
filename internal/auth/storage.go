@@ -1,9 +1,12 @@
 package auth
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/endpoint"
@@ -24,8 +27,58 @@ var ErrEnvTokenMalformed = errkind.Errorf(errkind.Auth, "SAGEOX_TOKEN is set but
 // UserInfo contains user information from the authentication provider
 type UserInfo struct {
 	UserID string `json:"user_id"`
+	Sub    string `json:"sub"`
 	Email  string `json:"email"`
 	Name   string `json:"name"`
+}
+
+// UnmarshalJSON accepts the OIDC subject on sign-in and when loading auth.json.
+// Normalize here so direct UserID readers see the same identity as GetUserID.
+func (u *UserInfo) UnmarshalJSON(data []byte) error {
+	type plain UserInfo
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if decoded.UserID == "" {
+		decoded.UserID = decoded.Sub
+	}
+	*u = UserInfo(decoded)
+	return nil
+}
+
+// LocalUserID returns only the signed-in person's SageOx ID without network IO.
+// An unverified JWT subject is an analytics hint, never an authorization claim.
+// Environment and team credentials must never inherit the laptop's person.
+func LocalUserID(ep string) string {
+	if ep == "" {
+		ep = endpoint.Get()
+	}
+	if _, state := EnvTokenFor(ep); state != EnvTokenAbsent {
+		return ""
+	}
+	token, err := GetTokenForEndpoint(ep)
+	if err != nil || token == nil || strings.HasPrefix(token.AccessToken, TeamTokenPrefix) {
+		return ""
+	}
+	if strings.HasPrefix(token.UserInfo.UserID, "usr_") {
+		return token.UserInfo.UserID
+	}
+	parts := strings.Split(token.AccessToken, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		Sub string `json:"sub"`
+	}
+	if json.Unmarshal(payload, &claims) != nil || !strings.HasPrefix(claims.Sub, "usr_") {
+		return ""
+	}
+	return claims.Sub
 }
 
 // StoredToken represents the authentication token stored locally

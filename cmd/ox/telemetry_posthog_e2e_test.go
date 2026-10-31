@@ -166,7 +166,7 @@ func TestPostHog_InvocationMistakesAndWhoMadeThem(t *testing.T) {
 	output, code, _ := testguard.RunOx(t, e.bin, e.workDir, e.env, "version")
 	require.Equal(t, 0, code, output)
 	props := e.props(t)
-	assert.Equal(t, "human", props["actor"], "a person in a repo with .codex/ is not an AI coworker")
+	assert.Equal(t, "person", props["actor"], "a person in a repo with .codex/ is not an AI coworker")
 	assert.Equal(t, "", props["agent_type"])
 
 	mistakes := []struct {
@@ -190,7 +190,7 @@ func TestPostHog_InvocationMistakesAndWhoMadeThem(t *testing.T) {
 		assert.Equal(t, "usage", props["error_kind"], "%v", m.args)
 		assert.Equal(t, m.detail, props["error_detail"], "%v", m.args)
 		assert.Equal(t, false, props["success"], "%v", m.args)
-		assert.Equal(t, "human", props["actor"], "%v", m.args)
+		assert.Equal(t, "person", props["actor"], "%v", m.args)
 	}
 }
 
