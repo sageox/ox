@@ -728,6 +728,18 @@ func TestPostHogCaptureOpts_LoginRecordsSelectedEndpoint(t *testing.T) {
 	assert.Equal(t, "test", postHogCommandProps(cliCtx, "login", 1)["env"])
 }
 
+// Failure prevented: shared view/team endpoint selection is omitted from command attribution.
+func TestPostHogCaptureOpts_ResolvedEndpointRecordsSelection(t *testing.T) {
+	previous := cliCtx
+	cliCtx = &cli.Context{Cmd: &cobra.Command{Use: "view"}, CommandStartTime: time.Now()}
+	t.Cleanup(func() { cliCtx = previous })
+	selected, err := resolveEndpoint(t.TempDir(), "https://test.sageox.ai", "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{selected}, cliCtx.TelemetryEndpoints)
+	assert.Empty(t, postHogCaptureOpts(cliCtx).PersonID)
+	assert.Equal(t, "test", postHogCommandProps(cliCtx, "view repo", 0)["env"])
+}
+
 // Failure prevented: changing the actor enum breaks either the signed contract or the historical dashboard.
 func TestPostHogActors_ContractAndLegacy(t *testing.T) {
 	for _, tt := range []struct {
