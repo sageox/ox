@@ -325,6 +325,7 @@ func TestCapturePostHog_IdentityAndOccurrence(t *testing.T) {
 			Batch  []event `json:"batch"`
 		}
 		decoder := json.NewDecoder(r.Body)
+		// strict-reader-ok: verifies the exact event payload ox itself writes.
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&body); err != nil {
 			t.Error(err)

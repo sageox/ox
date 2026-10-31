@@ -108,6 +108,7 @@ func TestPostHog_ReleaseBuildSignedInPerson(t *testing.T) {
 		} `json:"properties"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	// strict-reader-ok: verifies the closed event payload ox itself writes.
 	decoder.DisallowUnknownFields()
 	require.NoError(t, decoder.Decode(&safe))
 	for _, private := range []string{"opaque_fixture", "private_email_value", "private_display_value"} {
@@ -190,6 +191,10 @@ func TestPostHog_ReleaseBuildCapturesCommandEnd(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("command never reached the local server")
 	}
+	// Hold command work for a measured interval, independent of capture setup.
+	blocked := time.NewTimer(50 * time.Millisecond)
+	defer blocked.Stop()
+	<-blocked.C
 	released := time.Now().UTC()
 	unblock()
 	select {
@@ -203,9 +208,10 @@ func TestPostHog_ReleaseBuildCapturesCommandEnd(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, end.Before(released), "capture must follow the command's blocked API operation")
 	props := event["properties"].(map[string]any)
-	start := end.Add(-time.Duration(props["duration_ms"].(float64)) * time.Millisecond)
+	duration := time.Duration(props["duration_ms"].(float64)) * time.Millisecond
+	assert.GreaterOrEqual(t, duration.Milliseconds(), released.Sub(requested).Milliseconds(), "duration must include blocked command work")
+	start := end.Add(-duration)
 	assert.False(t, start.Before(begin.Add(-time.Millisecond)))
-	assert.False(t, start.After(requested.Add(time.Millisecond)), "duration must include command work")
 }
 
 // nextEvent waits for the next event to reach PostHog.

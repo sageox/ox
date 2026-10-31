@@ -502,6 +502,10 @@ ADR-027 (consultation-attribution privacy) governs who-read-what data in the Led
 
 **Decided by:** Scott ("option 1"). Amends D2 and D3 of the PostHog addendum.
 
+This also supersedes that addendum's "No names, emails, or login details"
+statement and its deferral of identifying logged-in users. Names and emails
+remain excluded; signed-in production events now carry the SageOx user ID.
+
 - **D2 amended.** Events from signed-in production accounts use the person's
   SageOx user ID as `distinct_id` and `user_id`. Every event also carries
   `install_id`, the existing random `client_id`. Signed-out, team-token,

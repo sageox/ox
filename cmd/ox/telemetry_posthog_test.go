@@ -667,8 +667,8 @@ func TestPostHogActors_ContractAndLegacy(t *testing.T) {
 	}
 }
 
-// Failure prevented: event time is changed to command start, invalidating start = end minus duration_ms.
-func TestPostHogCommandProps_EndTimeAndClosedProperties(t *testing.T) {
+// Failure prevented: command duration omits elapsed work, or undeclared properties enter the payload.
+func TestPostHogCommandProps_DurationAndClosedProperties(t *testing.T) {
 	withIsolatedConfig(t)
 	start := time.Now().Add(-1500 * time.Millisecond)
 	c := &cli.Context{Cmd: &cobra.Command{Use: "version"}, CommandStartTime: start}
@@ -695,6 +695,7 @@ func TestPostHogCommandProps_EndTimeAndClosedProperties(t *testing.T) {
 		Ephemeral   string   `json:"ephemeral"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
+	// strict-reader-ok: verifies the closed command property list ox itself writes.
 	decoder.DisallowUnknownFields()
 	require.NoError(t, decoder.Decode(&closed))
 	assert.Equal(t, "cli", closed.Surface)
