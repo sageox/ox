@@ -8,8 +8,17 @@ and save a chat to Team Context as a session.
 
 ## Install
 
-1. In Grok Bot, open the **Marketplace** and search for **SageOx**.
-2. Click **Install**, then connect it and sign in with your SageOx account.
+SageOx is not listed in the public Marketplace yet, so searching for it finds
+nothing. Until it is, a team on a Cursor Teams or Enterprise plan can add this
+repository as a team marketplace:
+
+1. In the Cursor dashboard, open **Plugins & MCPs**, then under
+   **Team Marketplaces** select **Add Marketplace**.
+2. Choose **Import from Repo** and paste `https://github.com/sageox/ox`.
+3. Install **SageOx** from that marketplace, then connect it and sign in with
+   your SageOx account.
+
+Once SageOx is listed, install it from the **Marketplace** directly.
 
 You need a SageOx account on a team. Sign up at [sageox.ai](https://sageox.ai).
 
