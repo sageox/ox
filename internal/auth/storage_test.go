@@ -951,6 +951,19 @@ func TestGetUserID_EmptyUserInfo(t *testing.T) {
 	assert.Equal(t, "", uid, "empty UserInfo should return empty user ID")
 }
 
+// Failure prevented: a login stored before user_id was filled keeps sending
+// an empty person to session metadata until the next sign-in.
+func TestGetUserID_LegacyLoginFromJWTSubject(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"usr_legacy","email":"private"}`))
+	require.NoError(t, SaveToken(&StoredToken{AccessToken: "header." + payload + ".sig", ExpiresAt: time.Now().Add(time.Hour)}))
+	assert.Equal(t, "usr_legacy", GetUserID(""))
+
+	coworker := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"agt_coworker"}`))
+	require.NoError(t, SaveToken(&StoredToken{AccessToken: "header." + coworker + ".sig", ExpiresAt: time.Now().Add(time.Hour)}))
+	assert.Equal(t, "", GetUserID(""), "only a usr_ subject names a person")
+}
+
 func TestGetUserID_NoToken(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	uid := GetUserID("")

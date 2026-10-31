@@ -516,8 +516,9 @@ remain excluded; signed-in production events now carry the SageOx user ID.
   `cli_version`, `env` (`production` or `test`), `surface` (`cli`), `cli_actor`,
   `event_version`, `murmur_count` and `newest_murmur_at`. `actor` uses `person`,
   `ai_coworker` or `ci`; `cli_actor` retains `human`, `agent` or `ci` for
-  existing dashboards. Murmur-list facts contain only the returned count and
-  newest UTC RFC 3339 instant, never content, topic or author.
+  existing dashboards. Murmur-list facts contain only the count matched in the
+  window (before `--limit`) and the newest UTC RFC 3339 instant, never content,
+  topic or author.
 - Each event has its own UUID and UTC capture timestamp. A caller may supply
   both to preserve an occurrence during replay. Command capture remains after
   the command returns: start time is the end timestamp minus `duration_ms`.
@@ -532,5 +533,6 @@ remain excluded; signed-in production events now carry the SageOx user ID.
   using the versioned `telemetry_notice_v2_shown` flag.
 
 Session metadata synced to the Ledger also starts carrying the filled-in
-SageOx user ID. That is the intended repair to identity loading, separate
+SageOx user ID (for a login stored before this change, read from the access
+token's `usr_` subject until the next sign-in). That is the intended repair to identity loading, separate
 from the PostHog property contract.

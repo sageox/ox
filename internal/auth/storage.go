@@ -64,7 +64,13 @@ func LocalUserID(ep string) string {
 	if strings.HasPrefix(token.UserInfo.UserID, "usr_") {
 		return token.UserInfo.UserID
 	}
-	parts := strings.Split(token.AccessToken, ".")
+	return jwtPersonSubject(token.AccessToken)
+}
+
+// jwtPersonSubject reads only an unverified usr_ subject from a JWT access
+// token, locally; anything else in the token is never parsed or kept.
+func jwtPersonSubject(accessToken string) string {
+	parts := strings.Split(accessToken, ".")
 	if len(parts) != 3 {
 		return ""
 	}
@@ -251,6 +257,11 @@ func GetUserID(ep string) string {
 	token, err := GetTokenForEndpoint(ep)
 	if err != nil || token == nil {
 		return ""
+	}
+	// Logins stored before user_id was filled carry the person only in the
+	// access token's subject until the next sign-in.
+	if token.UserInfo.UserID == "" && !strings.HasPrefix(token.AccessToken, TeamTokenPrefix) {
+		return jwtPersonSubject(token.AccessToken)
 	}
 	return token.UserInfo.UserID
 }
