@@ -1,6 +1,8 @@
 package agentwork
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -8,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -566,4 +569,61 @@ func TestStageSessionInLedger_DurablyPreservesDraftIdentity(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A retried finalize published the transcript beside the committed draft
+// meta.json (#1648): it copied the session into the ledger outside the repo
+// lock, where a pull's autostash or a GC swap could rewrite it before the
+// commit. While another holder has that lock, the finalize must leave the
+// ledger folder untouched, then publish finished metadata. The cache holds a
+// copy of the draft meta.json, which validation used to refuse forever.
+func TestSessionFinalize_UploadOnlyStagesUnderRepoLock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git and local LFS service")
+	}
+	bare, ledgerPath := setupBareAndCloneLedger(t)
+	const name = "2026-10-24T18-19-test-OxLOCK"
+	cacheDir := writeProductionShapedSession(t, ledgerPath, name)
+	target := filepath.Join(ledgerPath, "sessions", name)
+	writeDraftMeta(t, target)
+	runGitCmd(t, ledgerPath, "add", "--sparse", "sessions")
+	runGitCmd(t, ledgerPath, "commit", "-m", "session-draft: "+name)
+	runGitCmd(t, ledgerPath, "push", "origin", "HEAD")
+	draft, err := os.ReadFile(filepath.Join(target, "meta.json"))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "meta.json"), draft, 0o644))
+
+	handler := newGitBackedHandler()
+	enableLocalFinalizeLFS(t, handler, ledgerPath)
+	item := &WorkItem{Type: sessionFinalizeType, Payload: &SessionFinalizePayload{
+		SessionDir: cacheDir, RawPath: filepath.Join(cacheDir, "raw.jsonl"), LedgerPath: ledgerPath, UploadOnly: true,
+	}}
+
+	done := make(chan error, 1)
+	require.NoError(t, gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		go func() { done <- handler.ProcessResult(item, &RunResult{}) }()
+		// gitCommitAndPush holds ledgerMu while it waits for this repo lock, so
+		// everything the finalize does before taking the lock has happened.
+		require.Eventually(t, func() bool {
+			if handler.ledgerMu.TryLock() {
+				handler.ledgerMu.Unlock()
+				return false
+			}
+			return true
+		}, 30*time.Second, 5*time.Millisecond)
+		files, err := os.ReadDir(target)
+		require.NoError(t, err)
+		require.Len(t, files, 1, "the ledger folder changed before the commit held the repo lock")
+		current, err := os.ReadFile(filepath.Join(target, "meta.json"))
+		require.NoError(t, err)
+		require.Equal(t, draft, current)
+		return nil
+	}))
+	require.NoError(t, <-done)
+
+	var published lfs.SessionMeta
+	require.NoError(t, json.Unmarshal([]byte(gitOutput(t, bare, "show", "HEAD:sessions/"+name+"/meta.json")), &published))
+	assert.False(t, published.IsDraft())
+	assert.Equal(t, draftTestSessionID, published.SessionID)
+	assert.NotEmpty(t, published.Files["raw.jsonl"].OID)
 }

@@ -179,6 +179,17 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 	// Read meta once; reused below for richness validation and sageox score injection.
 	meta, _ := lfs.ReadSessionMeta(sessionDir)
 
+	// A draft folder means the transcript has not been published. Committing
+	// the summary there left draft=true beside real content (#1648), so leave
+	// the session to the finalize that publishes it.
+	if meta.IsDraft() {
+		return &pushSummaryOutput{
+			Success: true,
+			Type:    "push_summary",
+			Message: "session not published yet; nothing pushed",
+		}
+	}
+
 	// Enforce richness schema on non-trivial sessions. The prompt asks for
 	// key_actions / aha_moments / etc.; rejecting summaries that skip them
 	// is essentially free quality — output tokens cost nothing compared to
