@@ -2415,13 +2415,14 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 		}
 	}
 
-	// Fingerprint before the upload: an edit made after this point must not be
-	// recorded as what the guard refused.
-	fingerprint, fingerprintErr := refusalFingerprint(payload.SessionDir)
-
 	if _, err := h.preserveDraftIdentity(payload); err != nil {
 		return fmt.Errorf("upload-only: %w", err)
 	}
+
+	// Fingerprint after the identity write and before the upload: it must match
+	// what the guard scans, and an edit made after it must not be recorded as
+	// what the guard refused.
+	fingerprint, fingerprintErr := refusalFingerprint(payload.SessionDir)
 
 	// Failed LFS uploads defer publication; keep source content for retry.
 	var fileRefs map[string]lfs.FileRef
