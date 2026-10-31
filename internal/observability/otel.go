@@ -46,6 +46,7 @@ const rejectedTokenCooldown = 10 * time.Minute
 type bearerRoundTripper struct {
 	base      http.RoundTripper
 	tokenFunc TokenFunc
+	headers   http.Header
 
 	// rejected is the last bearer the server answered 401/403 to, and
 	// rejectedAt when. While tokenFunc keeps returning that exact value the
@@ -58,6 +59,18 @@ type bearerRoundTripper struct {
 	rejectMu   sync.Mutex
 	rejected   string
 	rejectedAt time.Time
+}
+
+// newBearerRoundTripper takes an immutable snapshot of per-export metadata.
+// Authorization always comes from tokenFunc, never from the supplied headers.
+func newBearerRoundTripper(base http.RoundTripper, tokenFunc TokenFunc, headers http.Header) *bearerRoundTripper {
+	copied := headers.Clone()
+	for key := range copied {
+		if strings.EqualFold(key, "Authorization") {
+			delete(copied, key)
+		}
+	}
+	return &bearerRoundTripper{base: base, tokenFunc: tokenFunc, headers: copied}
 }
 
 // dropped is the synthetic 2xx returned when a batch is discarded client-side:
@@ -130,6 +143,9 @@ func (rt *bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	}
 	// clone to avoid mutating the caller's request (otlptracehttp may retry)
 	req = req.Clone(req.Context())
+	for key, values := range rt.headers {
+		req.Header[http.CanonicalHeaderKey(key)] = append([]string(nil), values...)
+	}
 	req.Header.Set("Authorization", "Bearer "+tok)
 	resp, err := rt.base.RoundTrip(req)
 	if err == nil && resp != nil {
@@ -183,6 +199,18 @@ func AddSpanProcessor(p sdktrace.SpanProcessor) {
 // rather than 401'd by the server. Either is fine for tests and for users
 // who are logged out.
 func Init(ctx context.Context, serviceName, apiEndpoint string, tokenFunc TokenFunc, attrs ...attribute.KeyValue) error {
+	return initWithHeaders(ctx, serviceName, apiEndpoint, tokenFunc, nil, attrs...)
+}
+
+// InitWithHeaders initializes tracing with a copied snapshot of HTTP metadata
+// for authenticated exports. Authorization is always resolved by tokenFunc.
+// Callers supply only metadata intended for the OTLP endpoint; Init keeps
+// daemon exports free of command-scoped headers.
+func InitWithHeaders(ctx context.Context, serviceName, apiEndpoint string, tokenFunc TokenFunc, headers http.Header, attrs ...attribute.KeyValue) error {
+	return initWithHeaders(ctx, serviceName, apiEndpoint, tokenFunc, headers, attrs...)
+}
+
+func initWithHeaders(ctx context.Context, serviceName, apiEndpoint string, tokenFunc TokenFunc, headers http.Header, attrs ...attribute.KeyValue) error {
 	if apiEndpoint == "" {
 		slog.Debug("otel tracing disabled", "reason", "no endpoint")
 		return nil
@@ -205,7 +233,7 @@ func Init(ctx context.Context, serviceName, apiEndpoint string, tokenFunc TokenF
 	if tokenFunc != nil {
 		opts = append(opts, otlptracehttp.WithHTTPClient(&http.Client{
 			Timeout:   2 * time.Second,
-			Transport: &bearerRoundTripper{base: http.DefaultTransport, tokenFunc: tokenFunc},
+			Transport: newBearerRoundTripper(http.DefaultTransport, tokenFunc, headers),
 		}))
 	}
 

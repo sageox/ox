@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"runtime"
 	"strings"
@@ -224,7 +225,17 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 		OnSpan: perf.PerSpanSlog(cliCtx.Logger),
 		OnTree: perf.CLITreeSink(os.Stderr, cfg.Verbose),
 	}))
-	if err := observability.Init(cliCtx.Ctx, "ox-cli", apiEndpoint, tokenFunc, resourceAttrs...); err != nil {
+	// OTLP bypasses useragent's request builder. Copy only its validated actor
+	// metadata so exports identify the command without freezing trace headers.
+	requestHeaders := make(http.Header)
+	useragent.SetHeaders(requestHeaders)
+	actorHeaders := make(http.Header)
+	for _, key := range []string{useragent.HeaderActor, useragent.HeaderAgentType} {
+		if value := requestHeaders.Get(key); value != "" {
+			actorHeaders.Set(key, value)
+		}
+	}
+	if err := observability.InitWithHeaders(cliCtx.Ctx, "ox-cli", apiEndpoint, tokenFunc, actorHeaders, resourceAttrs...); err != nil {
 		slog.Debug("otel init failed, continuing without tracing", "error", err)
 	}
 
