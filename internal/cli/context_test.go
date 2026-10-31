@@ -2,10 +2,12 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,10 +15,49 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/observability"
+	"github.com/sageox/ox/internal/useragent"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
+
+// Failure prevented: commands outside a project omit their actor, or a service inherits one workspace's actor.
+func TestNewContext_ActorHeadersOutsideProjectAndService(t *testing.T) {
+	for _, service := range []bool{false, true} {
+		t.Run(fmt.Sprint(service), func(t *testing.T) {
+			useragent.ResetForTesting()
+			t.Cleanup(useragent.ResetForTesting)
+			dir := t.TempDir()
+			t.Chdir(dir)
+			t.Setenv(config.EnvProjectRoot, "")
+			t.Setenv(config.EnvUserConfig, filepath.Join(dir, "config.yaml"))
+			t.Setenv("XDG_CONFIG_HOME", dir)
+			t.Setenv("OX_XDG_DISABLE", "")
+			t.Setenv("SAGEOX_TOKEN", "")
+			t.Setenv("SAGEOX_ENDPOINT", "http://127.0.0.1:1")
+			t.Setenv("DO_NOT_TRACK", "1")
+			t.Setenv("AGENT_ENV", "codex")
+			cmd := &cobra.Command{Use: "status"}
+			if service {
+				cmd.Annotations = map[string]string{AnnotationLongRunning: "true"}
+			}
+			ctx, err := NewContext(cmd, nil)
+			require.NoError(t, err)
+			t.Cleanup(ctx.Shutdown)
+			require.Equal(t, service, ctx.LongRunning)
+			h := http.Header{}
+			useragent.SetHeaders(h)
+			if service {
+				assert.Empty(t, h.Values("X-Sageox-Actor"))
+				assert.Empty(t, h.Values("X-Sageox-Agent-Type"))
+			} else {
+				assert.Equal(t, "agent", h.Get("X-Sageox-Actor"))
+				assert.Equal(t, "codex", h.Get("X-Sageox-Agent-Type"))
+			}
+		})
+	}
+}
 
 func TestContext_Accessors(t *testing.T) {
 	tests := []struct {
