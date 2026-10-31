@@ -107,7 +107,15 @@ func IndexGitHubBoard(ctx context.Context, s *store.Store, postsDir, repoFullNam
 		if err := ctx.Err(); err != nil {
 			return stats, err
 		}
-		if boardPostUnchanged(ctx, s, bp, knownMtimes) {
+		conflict, err := localBoardConflictsWithRepoSelection(s, bp)
+		if err != nil {
+			failed++
+			if firstFailure == nil {
+				firstFailure = err
+			}
+			continue
+		}
+		if conflict || boardPostUnchanged(ctx, s, bp, knownMtimes) {
 			continue
 		}
 		changed++
@@ -357,10 +365,7 @@ func boardPostUnchanged(ctx context.Context, s *store.Store, bp boardPost, known
 
 // indexBoardPR upserts one PR post via delete-insert, like indexPRFile.
 //
-// A post carries no commit list and no merge commit, but a Ledger snapshot
-// that this row replaces may. Plan collision detection joins merged PRs to
-// diffs through exactly those, so they are carried across the overwrite rather
-// than dropped: the board wins on every field it can supply.
+// Older posts omit commit metadata; retain the existing row in that case.
 func indexBoardPR(ctx context.Context, s *store.Store, bp boardPost) error {
 	header := bp.post.Header
 	labels, err := boardLabels(header.Labels)
@@ -381,9 +386,17 @@ func indexBoardPR(ctx context.Context, s *store.Store, bp boardPost) error {
 	existing, err := q.GetPRSourceByNumber(ctx, int64(header.Number))
 	switch {
 	case err == nil:
-		mergeCommit = existing.MergeCommit
-		if commitSHAs, err = q.ListPRCommitShas(ctx, existing.ID); err != nil {
-			return fmt.Errorf("list pr commits: %w", err)
+		var oldURL sql.NullString
+		if err = tx.QueryRowContext(ctx, "SELECT url FROM pull_requests WHERE id = ?", existing.ID).Scan(&oldURL); err != nil {
+			return err
+		}
+		samePR := !oldURL.Valid || oldURL.String == "" || header.URL == "" || strings.EqualFold(oldURL.String, header.URL)
+		if samePR {
+			// Board state can lag locally fetched merge metadata; preserve it even across states.
+			mergeCommit = existing.MergeCommit
+			if commitSHAs, err = q.ListPRCommitShas(ctx, existing.ID); err != nil {
+				return fmt.Errorf("list pr commits: %w", err)
+			}
 		}
 		if err := q.DeletePRCommentsByPR(ctx, existing.ID); err != nil {
 			return fmt.Errorf("delete pr comments: %w", err)
@@ -398,6 +411,15 @@ func indexBoardPR(ctx context.Context, s *store.Store, bp boardPost) error {
 		return fmt.Errorf("check existing PR %d: %w", header.Number, err)
 	}
 
+	if header.MergeCommit != "" {
+		mergeCommit = toNullString(header.MergeCommit)
+	}
+	if len(header.Commits) > 0 {
+		commitSHAs = make([]string, 0, len(header.Commits))
+		for _, c := range header.Commits {
+			commitSHAs = append(commitSHAs, c.SHA)
+		}
+	}
 	res, err := q.InsertPullRequest(ctx, codedbsqlc.InsertPullRequestParams{
 		Number:      int64(header.Number),
 		Title:       header.Title,
@@ -524,4 +546,22 @@ func boardLabels(labels []string) (sql.NullString, error) {
 		return sql.NullString{}, fmt.Errorf("encode labels: %w", err)
 	}
 	return toNullString(string(encoded)), nil
+}
+
+// A linked team's local board can name a different upstream than the repo's
+// selected watch. Keep the server's selection if the repo read later fails.
+func localBoardConflictsWithRepoSelection(s *store.Store, bp boardPost) (bool, error) {
+	table := "issues"
+	if bp.post.Header.Kind == githubmirror.KindPullRequest {
+		table = "pull_requests"
+	}
+	var source, link sql.NullString
+	err := s.QueryRow("SELECT source_path, url FROM "+table+" WHERE number = ?", bp.post.Header.Number).Scan(&source, &link)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return source.Valid && strings.HasPrefix(source.String, "github-repo:") && link.Valid && link.String != "" && bp.post.Header.URL != "" && !strings.EqualFold(link.String, bp.post.Header.URL), nil
 }

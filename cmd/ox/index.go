@@ -6,15 +6,18 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/index"
+	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	gh "github.com/sageox/ox/internal/github"
+	"github.com/sageox/ox/internal/githubmirror"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/repotools"
@@ -162,7 +165,7 @@ var indexGitHubCmd = &cobra.Command{
 	Short: "Index GitHub PRs and issues",
 	Long: `Fetch recent pull requests and issues from GitHub and make them searchable.
 
-Data is extracted to the project ledger and indexed into CodeDB for search
+Recent data is published to the team bulletin and indexed into CodeDB for search
 with 'ox code search type:pr' or 'ox code search type:issue'.
 
 Requires a GitHub token (GITHUB_TOKEN, GH_TOKEN, or gh CLI config).
@@ -195,6 +198,8 @@ func runIndexAll(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+var runManualGitHubMirror = daemon.RunProjectGitHubMirror
+
 func runIndexGitHub(cmd *cobra.Command, args []string) error {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
@@ -215,13 +220,6 @@ func runIndexGitHub(cmd *cobra.Command, args []string) error {
 	ledgerPath, err := resolveLedgerPath()
 	if err != nil {
 		return fmt.Errorf("resolve ledger: %w", err)
-	}
-
-	// --full: selectively clear sync state so items are re-fetched from GitHub.
-	if full {
-		if err := resetGitHubSyncState(ledgerPath, prsOnly, issuesOnly); err != nil {
-			return err
-		}
 	}
 
 	// detect GitHub remote (graceful skip for non-GitHub repos)
@@ -255,17 +253,76 @@ func runIndexGitHub(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	return syncGitHubIndex(cmd.Context(), githubIndexRun{
-		Fetcher:    gh.NewFetcher(gh.NewClient(token)),
-		LedgerPath: ledgerPath,
-		CodeDBDir:  githubFallbackCodeDBDir(gitRoot),
-		Owner:      owner,
-		Repo:       repo,
-		MaxDays:    maxDays,
-		SyncPRs:    syncPRs,
-		SyncIssues: syncIssues,
-		NoPush:     noPush,
-	})
+	codeDBDir := githubFallbackCodeDBDir(gitRoot)
+	target := daemon.MirrorTarget{RepoID: config.GetRepoID(gitRoot), LedgerPath: ledgerPath, Owner: owner, Repo: repo, GitHubToken: token, PullRequests: syncPRs, Issues: syncIssues}
+	opts := daemon.ManualMirrorOptions{Days: maxDays, Full: full, NoPush: noPush}
+	if noPush {
+		// Build the normal code index first, so a GitHub-only database does
+		// not hide an existing Ledger index on a fresh project.
+		sharedDir := resolveCodeDBDir(gitRoot)
+		if _, err := os.Stat(filepath.Join(sharedDir, store.MetadataDBFile)); errors.Is(err, os.ErrNotExist) {
+			if err := indexCodeInProcess(cmd, nil, false); err != nil {
+				return fmt.Errorf("build code index: %w", err)
+			}
+			codeDBDir = githubFallbackCodeDBDir(gitRoot)
+			if _, err := os.Stat(filepath.Join(sharedDir, store.MetadataDBFile)); err != nil {
+				return fmt.Errorf("code search index was not built: %w", err)
+			}
+		}
+		if codeDBDir == "" {
+			return errors.New("code search index is not available")
+		}
+		opts.KnownLocal = func(ctx context.Context) (map[string]githubmirror.ItemState, error) {
+			db, err := codedb.OpenSQLOnly(codeDBDir)
+			if err != nil {
+				return nil, err
+			}
+			defer db.Close()
+			return index.KnownLocalGitHubItems(ctx, db.Store(), owner, repo)
+		}
+		opts.IndexLocal = func(ctx context.Context, items []githubmirror.Item) (int, error) {
+			db, err := codedb.OpenSQLOnly(codeDBDir)
+			if err != nil {
+				return 0, err
+			}
+			defer db.Close()
+			return index.IndexLocalGitHubItems(ctx, db.Store(), items)
+		}
+	}
+	result, err := runManualGitHubMirror(cmd.Context(), gitRoot, target, opts)
+	if err != nil {
+		return fmt.Errorf("index GitHub: %w", err)
+	}
+	if noPush {
+		fmt.Printf("Indexed %d GitHub items locally; %d already current. Nothing was published.\n", result.Indexed, result.Unchanged)
+		return nil
+	}
+	fmt.Printf("GitHub bulletin: %d published, %d current, %d unchanged, %d expired.\n", result.Accepted, result.Current, result.Unchanged, result.Expired)
+	// Publication and Team Context synchronization are separate operations.
+	if err := daemon.EnsureDaemon(); err != nil {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Published; search indexing is pending.")
+		return nil
+	}
+	client := daemon.NewClientForCurrentRepoWithTimeout(5 * time.Minute)
+	results, syncErr := client.TeamSyncWithProgress(nil)
+	team := config.FindRepoTeamContext(gitRoot)
+	synced := false
+	for _, r := range results {
+		if team != nil && r.TeamID == team.TeamID && r.Status == "synced" {
+			synced = true
+		}
+	}
+	if err := indexGitHubViaDaemon(); err != nil {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Published; search indexing is pending.")
+		return nil
+	}
+	if syncErr != nil || !synced {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Published; search refresh requested through repository access.")
+	} else {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Team Context synced; search refresh requested.")
+	}
+	return nil
+
 }
 
 // githubFallbackCodeDBDir returns where the in-process fallback may index
@@ -412,47 +469,21 @@ func detectGitHubRemote() (owner, repo string, err error) {
 	return "", "", fmt.Errorf("no GitHub remote found (indexing requires a github.com remote)")
 }
 
-// resetGitHubSyncState selectively clears sync state for a full re-fetch.
-func resetGitHubSyncState(ledgerPath string, prsOnly, issuesOnly bool) error {
-	if !prsOnly && !issuesOnly {
-		cacheDir := ledger.GitHubSyncCacheDir(ledgerPath)
-		if err := os.RemoveAll(cacheDir); err != nil {
-			return fmt.Errorf("remove github sync cache: %w", err)
-		}
-		fmt.Fprintf(os.Stderr, "Cleared all GitHub sync state, re-fetching from scratch...\n")
-		return nil
-	}
-
-	if prsOnly {
-		if err := ledger.ResetGitHubTypeSyncState(ledgerPath, "pr"); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "Cleared PR sync state, re-fetching PRs from scratch...\n")
-	}
-	if issuesOnly {
-		if err := ledger.ResetGitHubTypeSyncState(ledgerPath, "issue"); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "Cleared issue sync state, re-fetching issues from scratch...\n")
-	}
-	return nil
-}
-
 func init() {
 	// ox index code flags
 	indexCodeCmd.Flags().Bool("full", false, "wipe index and rebuild from scratch")
 
 	// ox index github flags
 	indexGitHubCmd.Flags().IntP("days", "d", defaultGitHubSyncMaxDays, "max days of history to fetch")
-	indexGitHubCmd.Flags().Bool("no-push", false, "extract to ledger without pushing")
+	indexGitHubCmd.Flags().Bool("no-push", false, "index locally without publishing")
 	indexGitHubCmd.Flags().Bool("prs-only", false, "index only pull requests")
 	indexGitHubCmd.Flags().Bool("issues-only", false, "index only issues")
-	indexGitHubCmd.Flags().Bool("full", false, "clear sync state and re-fetch everything")
+	indexGitHubCmd.Flags().Bool("full", false, "re-fetch selected GitHub history")
 
 	// propagate common flags to parent for runIndexAll
 	indexCmd.Flags().Bool("full", false, "wipe all indexes and rebuild from scratch")
 	indexCmd.Flags().IntP("days", "d", defaultGitHubSyncMaxDays, "max days of GitHub history to fetch")
-	indexCmd.Flags().Bool("no-push", false, "extract to ledger without pushing")
+	indexCmd.Flags().Bool("no-push", false, "index locally without publishing")
 	indexCmd.Flags().Bool("prs-only", false, "index only pull requests (GitHub)")
 	indexCmd.Flags().Bool("issues-only", false, "index only issues (GitHub)")
 

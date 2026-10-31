@@ -513,3 +513,12 @@ func TestChangeHash_HTMLEscapingIsOff(t *testing.T) {
 		t.Errorf("HTML characters must stay literal: %s", raw)
 	}
 }
+
+func TestChangeHash_CommitMetadataGolden(t *testing.T) {
+	it := Item{Kind: KindPullRequest, Number: 1, State: StateMerged,
+		MergeCommit: "abc123", Commits: []Commit{{SHA: "def456", Author: "dev", Date: time.Date(2026, 10, 28, 12, 34, 56, 0, time.UTC), Message: "fix <x>"}}}
+	const want = "sha256:8f6c13efbca5feef42120349a2bf0655e732208f2b9bf822cea1c9e5a5120ad3"
+	if got := ChangeHash(it); got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}

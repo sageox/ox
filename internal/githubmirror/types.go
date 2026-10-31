@@ -108,6 +108,14 @@ type Omitted struct {
 	FilesTruncated bool `json:"files_truncated"`
 }
 
+// Commit preserves the GitHub commit information carried by legacy snapshots.
+type Commit struct {
+	SHA     string    `json:"sha" yaml:"sha"`
+	Author  string    `json:"author" yaml:"author"`
+	Date    time.Time `json:"date" yaml:"date"`
+	Message string    `json:"message" yaml:"message"`
+}
+
 // Item is one PR or issue as relayed to the mirror API.
 type Item struct {
 	Kind                 string     `json:"kind"`
@@ -128,6 +136,8 @@ type Item struct {
 	Comments             []Comment  `json:"comments"`
 	Files                []string   `json:"files"`
 	Omitted              Omitted    `json:"omitted"`
+	MergeCommit          string     `json:"merge_commit,omitempty"`
+	Commits              []Commit   `json:"commits,omitempty"`
 	ChangeHash           string     `json:"change_hash"` // "sha256:<hex>"
 }
 
@@ -144,8 +154,9 @@ type Repo struct {
 
 // RelayRequest is the body of POST /api/v1/teams/{team}/github-mirror/items.
 type RelayRequest struct {
-	Repo  Repo   `json:"repo"`
-	Items []Item `json:"items"`
+	RepoID string `json:"repo_id,omitempty"`
+	Repo   Repo   `json:"repo"`
+	Items  []Item `json:"items"`
 }
 
 // Per-item relay outcomes.
@@ -179,18 +190,20 @@ type RelayResponse struct {
 // SourcePR, SourceIssue, SourceComment and SourceReview are GitHub data as
 // fetched, before Build applies the bot filter, cleanup and hashing.
 type SourcePR struct {
-	Number    int
-	Title     string
-	Body      string
-	State     string // GitHub: open, closed
-	Draft     bool
-	Author    Author
-	Labels    []string
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	ClosedAt  *time.Time
-	MergedAt  *time.Time
-	HTMLURL   string
+	Number      int
+	Title       string
+	Body        string
+	State       string // GitHub: open, closed
+	Draft       bool
+	Author      Author
+	Labels      []string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	ClosedAt    *time.Time
+	MergedAt    *time.Time
+	HTMLURL     string
+	MergeCommit string
+	Commits     []Commit
 }
 
 type SourceIssue struct {
@@ -261,6 +274,8 @@ type PostHeader struct {
 	Closed             *time.Time            `yaml:"closed,omitempty"`
 	Merged             *time.Time            `yaml:"merged,omitempty"`
 	LastMaterialChange time.Time             `yaml:"last_material_change"`
+	MergeCommit        string                `yaml:"merge_commit,omitempty"`
+	Commits            []Commit              `yaml:"commits,omitempty"`
 	Review             PostReview            `yaml:"review,omitempty"`
 	CommentMetadata    []PostCommentMetadata `yaml:"comment_metadata,omitempty"`
 	Files              []string              `yaml:"files,omitempty"`

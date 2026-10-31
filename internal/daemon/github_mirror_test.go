@@ -21,7 +21,6 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/flags"
 	gh "github.com/sageox/ox/internal/github"
 	"github.com/sageox/ox/internal/githubmirror"
 	"github.com/sageox/ox/internal/ledger"
@@ -388,10 +387,6 @@ func withMirrorBudget(n int) mirrorHarnessOption { return func(h *mirrorHarness)
 
 func withMirrorCycleTimeout(d time.Duration) mirrorHarnessOption {
 	return func(h *mirrorHarness) { h.cycleTimeout = d }
-}
-
-func withMirrorEnabledFunc(fn func() bool) mirrorHarnessOption {
-	return func(h *mirrorHarness) { h.enabledFunc = fn }
 }
 
 func newMirrorHarness(t *testing.T, opts ...mirrorHarnessOption) *mirrorHarness {
@@ -826,10 +821,6 @@ func TestGitHubMirror_GatesMakeNoNetworkCalls(t *testing.T) {
 		setup func(h *mirrorHarness)
 	}{
 		{"no team", func(h *mirrorHarness) { h.teamRef = "" }},
-		{"team context checkout missing", func(h *mirrorHarness) {
-			h.teamPathFunc = func() string { return filepath.Join(h.teamPath, "not-cloned-yet") }
-		}},
-		{"no team context path", func(h *mirrorHarness) { h.teamPathFunc = func() string { return "" } }},
 		{"no sageox token", func(h *mirrorHarness) { h.authToken = "" }},
 	}
 	for _, tt := range tests {
@@ -1350,39 +1341,9 @@ func TestGitHubMirror_Stats(t *testing.T) {
 	assert.False(t, stats.Enabled)
 }
 
-func TestGitHubMirrorFeatureOn(t *testing.T) {
-	t.Parallel()
-	yes, no := true, false
-	tests := []struct {
-		name     string
-		settings func() *flags.CLISettingsResponse
-		want     bool
-	}{
-		{"no settings source", nil, false},
-		{"settings not fetched yet", func() *flags.CLISettingsResponse { return nil }, false},
-		{"server sends no opinion", func() *flags.CLISettingsResponse { return &flags.CLISettingsResponse{} }, false},
-		{"server says off", func() *flags.CLISettingsResponse {
-			return &flags.CLISettingsResponse{FetchedAt: time.Now(), Features: flags.CLIFeatures{GitHubMirror: &no}}
-		}, false},
-		{"server says on", func() *flags.CLISettingsResponse {
-			return &flags.CLISettingsResponse{FetchedAt: time.Now(), Features: flags.CLIFeatures{GitHubMirror: &yes}}
-		}, true},
-		{"server said on a while ago but the refresh is still within twice its interval", func() *flags.CLISettingsResponse {
-			return &flags.CLISettingsResponse{FetchedAt: time.Now().Add(-flags.CLISettingsMaxAge - time.Minute), Features: flags.CLIFeatures{GitHubMirror: &yes}}
-		}, true},
-		{"server said on but the cache is older than twice the refresh interval", func() *flags.CLISettingsResponse {
-			return &flags.CLISettingsResponse{FetchedAt: time.Now().Add(-2*flags.CLISettingsMaxAge - time.Minute), Features: flags.CLIFeatures{GitHubMirror: &yes}}
-		}, false},
-		{"server said on but the fetch time was never recorded", func() *flags.CLISettingsResponse {
-			return &flags.CLISettingsResponse{Features: flags.CLIFeatures{GitHubMirror: &yes}}
-		}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, githubMirrorFeatureOn(tt.settings))
-		})
-	}
+func TestProjectGitHubMirrorDoesNotDependOnRemoteSettings(t *testing.T) {
+	r := newProjectGitHubMirrorRelayer(t.TempDir(), nil, slog.Default())
+	assert.True(t, r.deps.Enabled())
 }
 
 func TestResolveMirrorAuthToken_PrefersHeartbeatToken(t *testing.T) {
@@ -1518,10 +1479,10 @@ func TestGitHubSync_MirrorFailureNeverTouchesLedgerSyncAccounting(t *testing.T) 
 			assert.Zero(t, failCount, "mirror failures are not Ledger sync failures")
 			assert.True(t, backoffUntil.IsZero())
 			assert.NoError(t, lastErr)
-			assert.False(t, lastSync.IsZero(), "the Ledger sync completed every cycle")
+			assert.True(t, lastSync.IsZero(), "retired Ledger sync does not run")
 			assert.Zero(t, s.issues.Count(), "the mirror must not raise the Ledger sync's issues")
-			assert.Empty(t, s.manager.Status().LastError)
-			assert.GreaterOrEqual(t, s.ledger.calls(), 8, "the Ledger sync ran every cycle")
+			assert.NotEmpty(t, s.manager.Status().LastError)
+			assert.Zero(t, s.ledger.calls(), "retired Ledger sync must never run")
 
 			mirror := s.manager.Status().Mirror
 			require.NotNil(t, mirror)
@@ -1539,10 +1500,11 @@ func TestGitHubSync_LedgerFailureDoesNotPreventTheMirror(t *testing.T) {
 	s.manager.doSync(context.Background(), s.ledgerPath)
 
 	failCount, backoffUntil, _, lastErr := s.ledgerAccounting()
-	assert.Equal(t, 1, failCount, "the Ledger sync did fail")
-	assert.True(t, backoffUntil.After(time.Now()))
-	require.Error(t, lastErr)
-	assert.Equal(t, 1, s.issues.Count())
+	assert.Zero(t, failCount)
+	assert.True(t, backoffUntil.IsZero())
+	require.NoError(t, lastErr)
+	assert.Zero(t, s.issues.Count())
+	assert.Zero(t, s.ledger.calls())
 
 	assert.ElementsMatch(t, []int{1, 2, 3}, s.relay.relayedNumbers(), "the mirror ran anyway")
 	assert.Empty(t, s.state().LastError)
@@ -1611,7 +1573,7 @@ func TestGitHubSync_MirrorPanicIsContained(t *testing.T) {
 	failCount, _, lastSync, lastErr := s.ledgerAccounting()
 	assert.Zero(t, failCount)
 	assert.NoError(t, lastErr)
-	assert.False(t, lastSync.IsZero())
+	assert.True(t, lastSync.IsZero())
 	assert.Contains(t, s.logs.String(), "github mirror cycle panicked")
 }
 
@@ -2016,49 +1978,23 @@ func TestGitHubSync_SlowMirrorDoesNotHoldBackTheNextLedgerSync(t *testing.T) {
 	s.fetcher.hang = func(method string, _ int) bool { return method == "ListIssueComments" }
 
 	s.manager.CheckAndSync(context.Background(), s.ledgerPath)
-	require.Eventually(t, func() bool { return s.ledger.calls() >= 1 }, 5*time.Second, 10*time.Millisecond, "the Ledger half ran")
+	require.Eventually(t, func() bool { return s.fetcher.totalCalls() > 0 }, 5*time.Second, 10*time.Millisecond)
 	require.Eventually(t, func() bool { return !s.manager.Status().Syncing }, 5*time.Second, 10*time.Millisecond,
 		"the sync manager must be free again once the mirror's budget is spent")
-
+	before := s.fetcher.totalCalls()
 	s.manager.CheckAndSync(context.Background(), s.ledgerPath)
-	require.Eventually(t, func() bool { return s.ledger.calls() >= 2 }, 5*time.Second, 10*time.Millisecond, "the next Ledger cycle runs")
+	require.Eventually(t, func() bool { return s.fetcher.totalCalls() > before }, 5*time.Second, 10*time.Millisecond, "the next mirror cycle runs")
 	require.Eventually(t, func() bool { return !s.manager.Status().Syncing }, 5*time.Second, 10*time.Millisecond)
+	assert.Zero(t, s.ledger.calls(), "retired Ledger writer must not run")
 	assert.Empty(t, s.manager.Status().LastError)
 	assert.Zero(t, s.issues.Count())
 }
 
-// --- stale cached settings -----------------------------------------------
-
-// Failure prevented: the server turns the mirror off (revoked, incident) but
-// the daemon's settings refresh keeps failing; the last cached "on" is trusted
-// forever and the daemon keeps publishing to the team board.
-func TestGitHubMirror_StaleCachedSettingsMakeNoCalls(t *testing.T) {
-	t.Parallel()
-	yes := true
-	var mu sync.Mutex
-	settings := &flags.CLISettingsResponse{
-		FetchedAt: time.Now().Add(-3 * flags.CLISettingsMaxAge),
-		Features:  flags.CLIFeatures{GitHubMirror: &yes},
-	}
-	current := func() *flags.CLISettingsResponse {
-		mu.Lock()
-		defer mu.Unlock()
-		cp := *settings
-		return &cp
-	}
-	h := newMirrorHarness(t, withMirrorEnabledFunc(func() bool { return githubMirrorFeatureOn(current) }))
+// A repository member may lack the owning team's checkout; the server checks access.
+func TestGitHubMirrorDoesNotRequireTeamCheckout(t *testing.T) {
+	h := newMirrorHarness(t)
 	seedColdStart(h)
-
+	h.teamPathFunc = func() string { return "" }
 	h.run()
-
-	assert.Zero(t, h.totalCalls(), "settings older than twice the refresh interval are no opinion: the mirror stays off")
-	_, err := os.Stat(githubmirror.StatePath(h.ledgerPath))
-	assert.ErrorIs(t, err, os.ErrNotExist)
-
-	// a successful refresh turns it back on
-	mu.Lock()
-	settings.FetchedAt = time.Now()
-	mu.Unlock()
-	h.run()
-	assert.Equal(t, []int{1, 2, 3}, sortedCopy(h.relay.relayedNumbers()))
+	assert.NotZero(t, h.relay.requestCount())
 }
