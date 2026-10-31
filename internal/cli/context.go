@@ -269,7 +269,7 @@ func DetectActor(env agentx.Environment) (string, string) {
 	if a, _ := agentx.NewDetectorWithEnv(envSignalsOnly{env}).Detect(context.Background()); a != nil {
 		return "agent", string(a.Type())
 	}
-	if env.GetEnv("CI") != "" {
+	if env.GetEnv("CI") != "" || agentx.DetectOrigin(env, "") == agentx.OriginAgent {
 		return "agent", "ci"
 	}
 	return "human", ""

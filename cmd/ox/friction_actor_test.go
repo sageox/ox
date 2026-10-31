@@ -40,6 +40,10 @@ func TestOxActorDetector_EnvSignalsOnly(t *testing.T) {
 		},
 		{name: "explicit AGENT_ENV", vars: map[string]string{"AGENT_ENV": "codex"}, wantActor: friction.ActorAgent, wantType: "codex"},
 		{name: "ci", vars: map[string]string{"CI": "true"}, wantActor: friction.ActorAgent, wantType: "ci"},
+		// Failure prevented: a CI provider without the generic CI flag is filed as a person.
+		{name: "jenkins without CI", vars: map[string]string{"JENKINS_URL": "1"}, wantActor: friction.ActorAgent, wantType: "ci"},
+		{name: "agent in jenkins", vars: map[string]string{"JENKINS_URL": "1", "AGENT_ENV": "codex"}, wantActor: friction.ActorAgent, wantType: "codex"},
+		{name: "existing CI with subagent signal", vars: map[string]string{"CI": "true", "CLAUDE_CODE_ENTRY_POINT": "task"}, wantActor: friction.ActorAgent, wantType: "ci"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
