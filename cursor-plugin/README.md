@@ -8,6 +8,9 @@ and save a chat to Team Context as a session.
 
 ## Install
 
+SageOx is not listed in the Grok Bot Marketplace yet, so searching for it finds
+nothing today. Once it is listed:
+
 1. In Grok Bot, open the **Marketplace** and search for **SageOx**.
 2. Click **Install**, then connect it and sign in with your SageOx account.
 
