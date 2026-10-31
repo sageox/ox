@@ -104,7 +104,7 @@ func TestReadTransportRejectsUnsafeConfigFiles(t *testing.T) {
 	readURL := "https://sageox.ai/api/v1/cli/repos/" + readTestRepoID + "/ledger.git"
 	transport, err := NewReadTransport("https://sageox.ai", readTestRepoID, readURL)
 	require.NoError(t, err)
-	for _, name := range []string{"git file", "git symlink", "missing config", "config symlink", "malformed config", "worktree override"} {
+	for _, name := range []string{"git file", "git symlink", "missing config", "config symlink", "malformed config", "worktree override", "common dir"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			gitDir := filepath.Join(dir, ".git")
@@ -126,6 +126,13 @@ func TestReadTransportRejectsUnsafeConfigFiles(t *testing.T) {
 				case "worktree override":
 					require.NoError(t, os.WriteFile(configPath, nil, 0o600))
 					require.NoError(t, os.WriteFile(filepath.Join(gitDir, "config.worktree"), []byte("[credential]\nhelper = !echo stolen\n"), 0o600))
+				case "common dir":
+					// Git reads the config of the directory commondir names and
+					// ignores this checkout's own, which stays harmless here.
+					require.NoError(t, os.WriteFile(configPath, nil, 0o600))
+					common := t.TempDir()
+					require.NoError(t, os.WriteFile(filepath.Join(common, "config"), []byte("[filter \"lfs\"]\nsmudge = evil-command\n"), 0o600))
+					require.NoError(t, os.WriteFile(filepath.Join(gitDir, "commondir"), []byte(common+"\n"), 0o600))
 				}
 			}
 			cmd, err := transport.LocalCommand(context.Background(), dir, "status", "--porcelain")
