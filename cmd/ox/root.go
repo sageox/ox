@@ -20,6 +20,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -47,6 +48,10 @@ var rootCmd = &cobra.Command{
 	Long:  `Shared team context between your AI and human coworkers. Sessions, ledgers, and team knowledge that make agentic engineering multiplayer.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		preRunReached = true
+		if !cli.IsLongRunning(cmd) && (isFeedbackCommand(cmd) || isHeadlessLedgerRead(cmd)) {
+			actor, agentType := cli.DetectActor(nil)
+			useragent.SetActor(actor, agentType)
+		}
 		if isFeedbackCommand(cmd) {
 			return applyConfigFlag(cmd, args)
 		}
