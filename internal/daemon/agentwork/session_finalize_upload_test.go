@@ -662,7 +662,7 @@ func TestGitCommitAndPush_LeavesOutOfLedgerSessionIntact(t *testing.T) {
 
 			handler := NewSessionFinalizeHandler(slog.Default())
 			payload := &SessionFinalizePayload{SessionDir: sessionDir, RawPath: filepath.Join(sessionDir, "raw.jsonl"), LedgerPath: ledgerPath}
-			if pushed, _ := handler.gitCommitAndPush(payload, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef(raw)}); pushed {
+			if pushed, _ := handler.gitCommitAndPush(payload, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef(raw)}, nil); pushed {
 				t.Fatal("a session outside the ledger must not report a successful push")
 			}
 
@@ -710,7 +710,7 @@ func TestGitCommitAndPush_RefusesConflictMarkers(t *testing.T) {
 		SessionDir: sessionDir,
 		RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
 		LedgerPath: ledgerPath,
-	}, nil)
+	}, nil, nil)
 	if pushed {
 		t.Fatal("marker-laden metadata must not report a successful publication")
 	}
@@ -761,7 +761,7 @@ func TestGitCommitAndPush_CommitsStagedBytesNotWorktree(t *testing.T) {
 		SessionDir: sessionDir,
 		RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
 		LedgerPath: ledgerPath,
-	}, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef([]byte(testRawContent))})
+	}, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef([]byte(testRawContent))}, nil)
 	if !pushed {
 		t.Fatal("a clean staged session must commit and push")
 	}
@@ -787,7 +787,7 @@ func TestGitCommitAndPush_RefusesUnuploadedArtifacts(t *testing.T) {
 	require.NoError(t, os.WriteFile(rawPath, []byte(testRawContent), 0o644))
 	before := gitOutput(t, ledgerPath, "rev-parse", "HEAD")
 	handler := newGitBackedHandler()
-	pushed, _ := handler.gitCommitAndPush(&SessionFinalizePayload{SessionDir: sessionDir, RawPath: rawPath, LedgerPath: ledgerPath}, nil)
+	pushed, _ := handler.gitCommitAndPush(&SessionFinalizePayload{SessionDir: sessionDir, RawPath: rawPath, LedgerPath: ledgerPath}, nil, nil)
 	require.False(t, pushed)
 	require.Equal(t, before, gitOutput(t, ledgerPath, "rev-parse", "HEAD"))
 	content, err := os.ReadFile(rawPath)
@@ -812,23 +812,28 @@ func TestUploadOnly_SecretGuardRefusalWaitsForAChange(t *testing.T) {
 {"type":"assistant","content":"world","seq":2}
 {"entry_count":2}
 `
+	rewrite := func(t *testing.T, cacheDir string) {
+		require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"), []byte(testRawContent), 0o644))
+	}
 	for _, tc := range []struct {
 		name      string
 		change    func(t *testing.T, cacheDir string)
 		publishes bool // the change removed the credential
+		draft     bool // the Ledger still holds the session's draft placeholder
 	}{
-		{"transcript rewritten", func(t *testing.T, cacheDir string) {
-			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"), []byte(testRawContent), 0o644))
-		}, true},
+		{"transcript rewritten", rewrite, true, false},
+		// copying the draft's ses_ id into the cache rewrites meta.json, which the
+		// refusal fingerprint covers
+		{"transcript rewritten under a draft placeholder", rewrite, true, true},
 		{"transcript edited with an older timestamp", func(t *testing.T, cacheDir string) {
 			rawPath := filepath.Join(cacheDir, "raw.jsonl")
 			require.NoError(t, os.WriteFile(rawPath, []byte(testRawContent), 0o644))
 			earlier := time.Now().Add(-time.Hour)
 			require.NoError(t, os.Chtimes(rawPath, earlier, earlier))
-		}, true},
+		}, true, false},
 		{"artifact deleted", func(t *testing.T, cacheDir string) {
 			require.NoError(t, os.Remove(filepath.Join(cacheDir, requiredArtifacts[0])))
-		}, false},
+		}, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bare, ledger := setupBareAndCloneLedger(t)
@@ -845,6 +850,12 @@ func TestUploadOnly_SecretGuardRefusalWaitsForAChange(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(cacheDir, artifact), []byte("artifact"), 0o644))
 			}
 			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "meta.json"), []byte(`{"session_name":"`+name+`"}`), 0o644))
+			if tc.draft {
+				writeDraftMeta(t, filepath.Join(ledger, "sessions", name))
+				runGitCmd(t, ledger, "add", "sessions")
+				runGitCmd(t, ledger, "commit", "-m", "session-draft: "+name)
+				runGitCmd(t, ledger, "push", "origin", "HEAD")
+			}
 
 			detected := func() *WorkItem {
 				t.Helper()

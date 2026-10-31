@@ -257,7 +257,7 @@ func TestGitCommitAndPush_ReturnsPromptlyWhenContextCancelledMidPush(t *testing.
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		pushed, err := handler.gitCommitAndPush(payload, refs)
+		pushed, err := handler.gitCommitAndPush(payload, refs, nil)
 		done <- outcome{pushed, err}
 	}()
 
@@ -318,7 +318,7 @@ func TestGitCommitAndPush_UnmergedIndexIsErrLedgerUnresolved(t *testing.T) {
 			payload, refs := ledgerSession(t, ledger, "2026-01-15T10-00-testuser-OxUNMERGED")
 			handler.afterStageTestHook = tt.arrange(t, ledger)
 
-			pushed, err := handler.gitCommitAndPush(payload, refs)
+			pushed, err := handler.gitCommitAndPush(payload, refs, nil)
 
 			if tt.wantErr == nil {
 				require.NoError(t, err)
