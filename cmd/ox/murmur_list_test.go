@@ -550,6 +550,9 @@ func TestMurmurList_OutcomeFacts(t *testing.T) {
 				t.Skip("short: initializes a git project")
 			}
 			withIsolatedConfig(t)
+			t.Setenv("SAGEOX_TOKEN", "")
+			t.Setenv("SAGEOX_ENDPOINT", "http://127.0.0.1:1")
+			t.Setenv("OX_XDG_DISABLE", "")
 			ages := []time.Duration{time.Minute, 2 * time.Minute, 3 * time.Minute}
 			murmurListProject(t, ages[:n]...)
 			saved := cliCtx

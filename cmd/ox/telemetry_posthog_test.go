@@ -608,11 +608,12 @@ func TestConversationErrorKind_EveryCodeFiled(t *testing.T) {
 
 // Failure prevented: staging or non-person credentials reach the production analytics person column.
 func TestPostHogCaptureOpts_PersonBoundary(t *testing.T) {
-	for _, tt := range []struct{ name, ep, info, env, want string }{
+	for _, tt := range []struct{ name, ep, info, token, env, want string }{
 		{name: "signed out", ep: endpoint.Default},
 		{name: "production person", ep: endpoint.Default, info: `{"user_id":"usr_person"}`, want: "usr_person"},
 		{name: "production sub", ep: endpoint.Default, info: `{"sub":"usr_subject"}`, want: "usr_subject"},
 		{name: "staging", ep: "https://test.sageox.ai", info: `{"user_id":"usr_staging"}`},
+		{name: "team token", ep: endpoint.Default, info: `{"user_id":"usr_person"}`, token: "oxt_invalid_fixture"},
 		{name: "environment token", ep: endpoint.Default, info: `{"user_id":"usr_person"}`, env: "opaque_env"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -625,7 +626,11 @@ func TestPostHogCaptureOpts_PersonBoundary(t *testing.T) {
 				path, err := auth.GetAuthFilePath()
 				require.NoError(t, err)
 				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
-				raw := `{"tokens":{` + fmt.Sprintf("%q", tt.ep) + `:{"access_token":"opaque_fixture","user_info":` + tt.info + `}}}`
+				token := tt.token
+				if token == "" {
+					token = "opaque_fixture"
+				}
+				raw := `{"tokens":{` + fmt.Sprintf("%q", tt.ep) + `:{"access_token":` + fmt.Sprintf("%q", token) + `,"user_info":` + tt.info + `}}}`
 				require.NoError(t, os.WriteFile(path, []byte(raw), 0o600))
 			}
 			c := &cli.Context{Cmd: &cobra.Command{Use: "version"}, CommandStartTime: time.Now()}

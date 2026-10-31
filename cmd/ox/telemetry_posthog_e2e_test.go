@@ -3,16 +3,20 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/testguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,13 +32,99 @@ type postHogE2E struct {
 	batches chan map[string]any
 }
 
-func newPostHogE2E(t *testing.T) *postHogE2E {
+// Failure prevented: a release-shaped signed-in command drops its person, install or occurrence identity.
+func TestPostHog_ReleaseBuildSignedInPerson(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: builds and runs a real ox binary")
+	}
+	e := newPostHogE2E(t)
+	// Exercise the default production identity policy while every HTTPS request
+	// is rejected locally. No connection or credential reaches production.
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer proxy.Close()
+	env := make([]string, 0, len(e.env)+2)
+	for _, kv := range e.env {
+		if !strings.HasPrefix(kv, "SAGEOX_ENDPOINT=") {
+			env = append(env, kv)
+		}
+	}
+	env = append(env, "HTTPS_PROXY="+proxy.URL, "HTTP_PROXY="+proxy.URL)
+	authDir := filepath.Join(e.home, ".config", "sageox")
+	require.NoError(t, os.MkdirAll(authDir, 0o700))
+	stored := map[string]any{"tokens": map[string]any{endpoint.Default: map[string]any{
+		"access_token": "opaque_fixture", "expires_at": time.Now().Add(time.Hour).UTC(),
+		"user_info": map[string]any{"sub": "usr_release_fixture", "email": "private_email_value", "name": "private_display_value"},
+	}}}
+	raw, err := json.Marshal(stored)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(authDir, "auth.json"), raw, 0o600))
+	output, code, _ := testguard.RunOx(t, e.bin, e.workDir, env, "version", "--json")
+	require.Equal(t, 0, code, output)
+	event := e.nextEvent(t)
+	props := event["properties"].(map[string]any)
+	assert.Equal(t, "usr_release_fixture", event["distinct_id"])
+	assert.Equal(t, "usr_release_fixture", props["user_id"])
+	install, err := os.ReadFile(filepath.Join(authDir, "client_id"))
+	require.NoError(t, err)
+	assert.Equal(t, strings.TrimSpace(string(install)), props["install_id"])
+	assert.NotEmpty(t, event["uuid"])
+	assert.Equal(t, "production", props["env"])
+	assert.Equal(t, "person", props["actor"])
+	assert.Equal(t, "human", props["cli_actor"])
+	assert.NotEmpty(t, props["cli_version"])
+	assert.Equal(t, "cli", props["surface"])
+	encoded, err := json.Marshal(event)
+	require.NoError(t, err)
+	var safe struct {
+		UUID       string    `json:"uuid"`
+		Event      string    `json:"event"`
+		DistinctID string    `json:"distinct_id"`
+		Timestamp  time.Time `json:"timestamp"`
+		Properties struct {
+			Command     string   `json:"command"`
+			Flags       []string `json:"flags"`
+			Success     bool     `json:"success"`
+			ExitCode    int      `json:"exit_code"`
+			Duration    int64    `json:"duration_ms"`
+			Actor       string   `json:"actor"`
+			CLIActor    string   `json:"cli_actor"`
+			AgentType   string   `json:"agent_type"`
+			Surface     string   `json:"surface"`
+			Env         string   `json:"env"`
+			Version     int      `json:"event_version"`
+			Initialized bool     `json:"repo_initialized"`
+			Ephemeral   string   `json:"ephemeral"`
+			InstallID   string   `json:"install_id"`
+			UserID      string   `json:"user_id"`
+			CLIVersion  string   `json:"cli_version"`
+			Lib         string   `json:"$lib"`
+			LibVersion  string   `json:"$lib_version"`
+			Profile     bool     `json:"$process_person_profile"`
+			GeoIP       bool     `json:"$geoip_disable"`
+			OS          string   `json:"os"`
+			Arch        string   `json:"arch"`
+		} `json:"properties"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	require.NoError(t, decoder.Decode(&safe))
+	for _, private := range []string{"opaque_fixture", "private_email_value", "private_display_value"} {
+		assert.NotContains(t, string(encoded), private)
+	}
+}
+
+func newPostHogE2E(t *testing.T, api ...http.HandlerFunc) *postHogE2E {
 	t.Helper()
 	batches := make(chan map[string]any, 8)
 	srv := testguard.SafeMockServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		if r.URL.Path == "/batch/" && json.NewDecoder(r.Body).Decode(&body) == nil {
 			batches <- body
+		} else if len(api) > 0 {
+			api[0](w, r)
+			return
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -63,6 +153,59 @@ func newPostHogE2E(t *testing.T) *postHogE2E {
 	}
 	workDir := t.TempDir()
 	return &postHogE2E{bin: bin, env: env, workDir: workDir, home: home, batches: batches}
+}
+
+// Failure prevented: command events are captured before completion, shifting reconstructed start times.
+func TestPostHog_ReleaseBuildCapturesCommandEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: builds and runs a real ox binary")
+	}
+	arrived := make(chan time.Time, 1)
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	e := newPostHogE2E(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/cli/repos" {
+			arrived <- time.Now().UTC()
+			<-release
+			_, _ = w.Write([]byte(`{"repos":{},"teams":[]}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	type result struct {
+		output string
+		code   int
+	}
+	done := make(chan result, 1)
+	begin := time.Now().UTC()
+	go func() {
+		output, code, _ := testguard.RunOx(t, e.bin, e.workDir, append(e.env, "SAGEOX_TOKEN=opaque_fixture"), "teams", "--json")
+		done <- result{output, code}
+	}()
+	var requested time.Time
+	select {
+	case requested = <-arrived:
+	case <-time.After(15 * time.Second):
+		t.Fatal("command never reached the local server")
+	}
+	released := time.Now().UTC()
+	unblock()
+	select {
+	case got := <-done:
+		require.Equal(t, 0, got.code, got.output)
+	case <-time.After(15 * time.Second):
+		t.Fatal("command never finished")
+	}
+	event := e.nextEvent(t)
+	end, err := time.Parse(time.RFC3339Nano, event["timestamp"].(string))
+	require.NoError(t, err)
+	assert.False(t, end.Before(released), "capture must follow the command's blocked API operation")
+	props := event["properties"].(map[string]any)
+	start := end.Add(-time.Duration(props["duration_ms"].(float64)) * time.Millisecond)
+	assert.False(t, start.Before(begin.Add(-time.Millisecond)))
+	assert.False(t, start.After(requested.Add(time.Millisecond)), "duration must include command work")
 }
 
 // nextEvent waits for the next event to reach PostHog.
