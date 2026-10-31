@@ -291,6 +291,7 @@ func loginShadowedByEnvToken(ep string, tokenErr error) bool {
 }
 
 func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
+	recordPostHogEndpoint(currentEndpoint)
 	out := cmd.OutOrStdout()
 	// check if already authenticated for this endpoint
 	// If token refresh fails, treat as unauthenticated and proceed with login
@@ -354,6 +355,7 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 				}
 
 				if selectedEndpoint != "" {
+					recordPostHogEndpoint(selectedEndpoint)
 					// retry with selected endpoint
 					authClient = authClient.WithEndpoint(selectedEndpoint)
 					fmt.Fprintf(out, "\nAuthenticating to %s...\n", selectedEndpoint)

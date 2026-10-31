@@ -59,6 +59,10 @@ type Context struct {
 	// see config.IsInitialized.
 	ProjectRoot string
 
+	// TelemetryEndpoints records endpoints explicitly selected during this
+	// invocation. It is only used to classify command telemetry, never emitted.
+	TelemetryEndpoints []string
+
 	// Err is what the command returned, set by cmd/ox's
 	// executeWithFrictionRecovery after Execute so usage telemetry can report
 	// how it failed.

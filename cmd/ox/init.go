@@ -373,6 +373,7 @@ func runInit() error {
 			return err
 		}
 		if selectedEndpoint != "" {
+			recordPostHogEndpoint(selectedEndpoint)
 			if needsLogin {
 				fmt.Println()
 				cli.PrintError("Authentication required")

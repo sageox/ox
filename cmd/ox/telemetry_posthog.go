@@ -68,10 +68,43 @@ func capturePostHogCommand(exitCode int, stderr io.Writer) {
 
 func postHogCaptureOpts(c *cli.Context) telemetry.CaptureOpts {
 	opts := telemetry.CaptureOpts{}
-	if ep := endpoint.GetForProject(c.ProjectRoot); endpoint.IsProduction(ep) {
+	if ep := postHogCommandEndpoint(c); endpoint.IsProduction(ep) {
 		opts.PersonID = auth.LocalUserID(ep)
 	}
 	return opts
+}
+
+// recordPostHogEndpoint keeps late command selections separate from event
+// properties. A command that touches any test endpoint remains install-only.
+func recordPostHogEndpoint(ep string) {
+	if cliCtx != nil && ep != "" {
+		cliCtx.TelemetryEndpoints = append(cliCtx.TelemetryEndpoints, ep)
+	}
+}
+
+func postHogCommandEndpoint(c *cli.Context) string {
+	for _, ep := range c.TelemetryEndpoints {
+		if !endpoint.IsProduction(ep) {
+			return ep
+		}
+	}
+	if len(c.TelemetryEndpoints) > 0 {
+		return c.TelemetryEndpoints[0]
+	}
+	if c.Cmd != nil {
+		if ep, err := c.Cmd.Flags().GetString("endpoint"); err == nil && ep != "" {
+			if normalized := endpoint.NormalizeEndpoint(ep); normalized != "" {
+				return normalized
+			}
+			return ep // An invalid selection must not default to production.
+		}
+	}
+	if c.ProjectRoot != "" {
+		return endpoint.GetForProject(c.ProjectRoot)
+	}
+	// Global commands have no project configuration; use the same sole-login
+	// fallback as their CLI bootstrap instead of defaulting to production.
+	return endpoint.Get()
 }
 
 // skipPostHogCommand reports commands that run automatically: coding-agent
@@ -101,7 +134,7 @@ func postHogCommandProps(c *cli.Context, path string, exitCode int) map[string]a
 	actor, agentType := oxActorDetector{}.DetectActor()
 	specActor, legacyActor, agentType := postHogActors(actor, agentType)
 	env := "test"
-	if endpoint.IsProduction(endpoint.GetForProject(c.ProjectRoot)) {
+	if endpoint.IsProduction(postHogCommandEndpoint(c)) {
 		env = "production"
 	}
 	initialized := c.ProjectRoot != "" && config.IsInitialized(c.ProjectRoot)

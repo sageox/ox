@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -643,6 +645,87 @@ func TestPostHogCaptureOpts_PersonBoundary(t *testing.T) {
 			assert.Equal(t, wantEnv, props["env"])
 		})
 	}
+}
+
+// Failure prevented: a selected staging operation inherits a cached production person's identity.
+func TestPostHogCaptureOpts_InvocationEndpoint(t *testing.T) {
+	const staging = "https://test.sageox.ai"
+	for _, tt := range []struct {
+		name, flag, env, project, wantPerson, wantEnv string
+		selected                                      []string
+		stagingOnly                                   bool
+	}{
+		{name: "production global", wantPerson: "usr_production", wantEnv: "production"},
+		{name: "sole staging login", stagingOnly: true, wantEnv: "test"},
+		{name: "staging project", project: staging, wantEnv: "test"},
+		{name: "explicit staging", flag: staging, wantEnv: "test"},
+		{name: "explicit production overrides environment", flag: endpoint.Default, env: staging, wantPerson: "usr_production", wantEnv: "production"},
+		{name: "selected staging overrides flag", flag: endpoint.Default, selected: []string{staging}, wantEnv: "test"},
+		{name: "selected production", flag: staging, selected: []string{endpoint.Default}, wantPerson: "usr_production", wantEnv: "production"},
+		{name: "login fallback to staging", selected: []string{endpoint.Default, staging}, wantEnv: "test"},
+		{name: "mixed logout", selected: []string{staging, endpoint.Default}, wantEnv: "test"},
+		{name: "invalid explicit endpoint", flag: " ", wantEnv: "test"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			withIsolatedConfig(t)
+			t.Setenv("SAGEOX_ENDPOINT", tt.env)
+			t.Setenv("SAGEOX_TOKEN", "")
+			t.Setenv("OX_XDG_DISABLE", "")
+			for _, ep := range []string{endpoint.Default, staging} {
+				if tt.stagingOnly && ep == endpoint.Default {
+					continue
+				}
+				id := "usr_staging"
+				if ep == endpoint.Default {
+					id = "usr_production"
+				}
+				require.NoError(t, auth.SaveTokenForEndpoint(ep, &auth.StoredToken{
+					AccessToken: "opaque_fixture", ExpiresAt: time.Now().Add(time.Hour),
+					UserInfo: auth.UserInfo{UserID: id},
+				}))
+			}
+			oldGetter := endpoint.ProjectEndpointGetter
+			endpoint.ProjectEndpointGetter = func(string) string { return tt.project }
+			t.Cleanup(func() { endpoint.ProjectEndpointGetter = oldGetter })
+			cmd := &cobra.Command{Use: "login"}
+			cmd.Flags().String("endpoint", "", "")
+			if tt.flag != "" {
+				require.NoError(t, cmd.Flags().Set("endpoint", tt.flag))
+			}
+			c := &cli.Context{Cmd: cmd, TelemetryEndpoints: tt.selected, CommandStartTime: time.Now()}
+			if tt.project != "" {
+				c.ProjectRoot = t.TempDir()
+			}
+			assert.Equal(t, tt.wantPerson, postHogCaptureOpts(c).PersonID)
+			props := postHogCommandProps(c, "login", 0)
+			assert.Equal(t, tt.wantEnv, props["env"])
+			for _, value := range props {
+				assert.NotEqual(t, staging, value, "endpoint values must not become event properties")
+			}
+		})
+	}
+}
+
+// Failure prevented: login's runtime selection is lost when a device request fails before storing a token.
+func TestPostHogCaptureOpts_LoginRecordsSelectedEndpoint(t *testing.T) {
+	withIsolatedConfig(t)
+	t.Setenv("SAGEOX_ENDPOINT", "")
+	t.Setenv("SAGEOX_TOKEN", "")
+	t.Setenv("SKIP_BROWSER", "1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/auth/device/code", r.URL.Path)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	previous := cliCtx
+	cmd := &cobra.Command{Use: "login"}
+	cmd.SetOut(io.Discard)
+	cliCtx = &cli.Context{Cmd: cmd, CommandStartTime: time.Now()}
+	t.Cleanup(func() { cliCtx = previous })
+	require.Error(t, runLoginFlow(cmd, server.URL))
+	assert.Equal(t, []string{server.URL}, cliCtx.TelemetryEndpoints)
+	assert.Empty(t, postHogCaptureOpts(cliCtx).PersonID)
+	assert.Equal(t, "test", postHogCommandProps(cliCtx, "login", 1)["env"])
 }
 
 // Failure prevented: changing the actor enum breaks either the signed contract or the historical dashboard.

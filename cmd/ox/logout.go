@@ -47,6 +47,9 @@ var logoutCmd = &cobra.Command{
 		if selErr != nil {
 			return selErr
 		}
+		for _, ep := range endpointsToLogout {
+			recordPostHogEndpoint(ep)
+		}
 
 		// confirm before logging out (skip if --force)
 		if !logoutForce {
