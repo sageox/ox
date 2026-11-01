@@ -558,6 +558,13 @@ the command's output or exit code.
   `ref_type` is empty, `session`, `discussion`, `doc`, `file`, `murmur`,
   `plan`, `kb` or `other`. Unknown types become `other`. Titles, aliases,
   URLs and the reader's `--why` text are never sent.
+  No `context.used` is sent while the recording is paused (ADR-020): pause
+  is fail-closed, and an event key derived from the session ID could be
+  re-linked once the session is published. While `session_publishing` is
+  manual (resolved now, or recorded when the session started), the event
+  omits `session_id`, so a held session is never named to the server. A
+  recording without a session ID (started by an older ox) also omits
+  `session_id`.
 - `murmur.published` is sent after a successful IPC hand-off or outbox
   write. Its closed property list is `murmur_id`, `importance`, `scope`,
   optional `team_id` and `topic`. The allowed topics are `general`, `wip`,

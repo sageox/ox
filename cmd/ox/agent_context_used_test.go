@@ -643,3 +643,68 @@ func TestAgentContextUsed_UnrecordedUseSendsNoSessionID(t *testing.T) {
 	require.Len(t, *captured, 3)
 	assert.Equal(t, (*captured)[1].Opts, (*captured)[2].Opts, "a replay keeps its uuid and time")
 }
+
+// Failure prevented: a paused recording, a held (manual publishing) recording
+// or an older recording without an ID names a session to PostHog that pause
+// or manual publishing promised to keep on this machine.
+func TestAgentContextUsed_PostHogPauseAndManualPublishing(t *testing.T) {
+	const ref = "cnv_019ff2f5-2079-7be1-b05e-8caad2772e61"
+	for _, tt := range []struct {
+		name          string
+		envPublishing string
+		update        func(*session.RecordingState)
+		wantCapture   bool
+		wantSessionID bool
+	}{
+		// Failure prevented: an active auto recording loses its session link and ref.
+		{name: "active auto recording", wantCapture: true, wantSessionID: true},
+		// Failure prevented: a use inside a paused range reaches PostHog with a key derived from the session.
+		{name: "paused", update: func(s *session.RecordingState) { now := time.Now(); s.SuspendedAt = &now }},
+		// Failure prevented: manual publishing resolved now (env) still names the held session.
+		{name: "manual resolved now", envPublishing: config.SessionPublishingManual, wantCapture: true},
+		// Failure prevented: a recording started under manual publishing names its held session once the setting reads auto.
+		{name: "manual recorded on the state", update: func(s *session.RecordingState) { s.PublishingMode = config.SessionPublishingManual }, wantCapture: true},
+		// Failure prevented: an older recording with no session ID sends its minted trace scope as session_id.
+		{name: "recording without session id", update: func(s *session.RecordingState) { s.SessionID = "" }, wantCapture: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := setupSessionTestProject(t)
+			captured := captureUsageForTest(t, nil)
+			t.Setenv(config.EnvSessionPublishing, "")
+			const agentID = "OxPh02"
+			state, err := session.StartRecording(root, session.StartRecordingOptions{AgentID: agentID, AdapterName: "codex"})
+			require.NoError(t, err)
+			require.NotEmpty(t, state.SessionID)
+			require.False(t, state.RecordedManualPublishing(), "the recording must start in auto mode")
+			if tt.update != nil {
+				require.NoError(t, session.UpdateRecordingStateAt(state.SessionPath, state.SessionID, tt.update))
+			}
+			if tt.envPublishing != "" {
+				t.Setenv(config.EnvSessionPublishing, tt.envPublishing)
+			}
+			writer := contexttrace.NewWriter(state.SessionPath)
+			require.NoError(t, writer.Append(contexttrace.Event{Type: contexttrace.EventProvided, Ref: ref, RefType: "discussion", Source: contexttrace.SourceOnDemand, Mechanism: contexttrace.MechanismRetrieval}))
+
+			var out bytes.Buffer
+			require.NoError(t, runAgentContextUsed(&out, root, agentID, contextUsedArgs{ref: ref}))
+
+			events, err := contexttrace.ReadEvents(writer.Path())
+			require.NoError(t, err)
+			require.Len(t, events, 2, "the use is recorded locally whatever is sent")
+			assert.Equal(t, contexttrace.EventUsed, events[1].Type)
+			if !tt.wantCapture {
+				assert.Empty(t, *captured)
+				return
+			}
+			require.Len(t, *captured, 1)
+			c := (*captured)[0]
+			assert.Equal(t, "context.used", c.Event)
+			assert.Equal(t, ref, c.Props["ref"])
+			if tt.wantSessionID {
+				assert.Equal(t, state.SessionID, c.Props["session_id"])
+			} else {
+				assert.NotContains(t, c.Props, "session_id")
+			}
+		})
+	}
+}

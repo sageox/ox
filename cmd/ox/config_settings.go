@@ -185,11 +185,12 @@ When on, ox sends:
 PostHog also receives context.used after a context-use trace is written:
 the reference only when it is a SageOx conversation, recording or plan
 ID, its fixed type, reported/none evidence, the recording session (only
-while one is recording) and AI coworker type, and repository/team IDs
-when present. It receives murmur.published after a murmur is handed to
-the daemon or queued: its ID, importance, scope and team ID. Topic is
-general, wip, lint, architecture, conflict, or other; a custom topic is
-never sent. Both carry the CLI surface, actor, event version and
+while one is recording and session_publishing is not manual; nothing is
+sent while a recording is paused) and AI coworker type, and
+repository/team IDs when present. It receives murmur.published after a
+murmur is handed to the daemon or queued: its ID, importance, scope and
+team ID. Topic is general, wip, lint, architecture, conflict, or other;
+a custom topic is never sent. Both carry the CLI surface, actor, event version and
 production/test label, plus the install and signed-in person IDs
 described above. Neither includes titles, URLs, why text, murmur text,
 files or principal details.
