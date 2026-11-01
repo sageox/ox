@@ -64,7 +64,7 @@ func TestAgentContextUsed_PostHogPrivacyAndReplay(t *testing.T) {
 			writer := contexttrace.NewWriter(state.SessionPath)
 			tracePath = writer.Path()
 			if !tt.none {
-				require.NoError(t, writer.Append(contexttrace.Event{Type: contexttrace.EventProvided, Ref: tt.ref, RefType: tt.kind, Title: "private-title", URL: "https://example.invalid/title", Source: contexttrace.SourceOnDemand}))
+				require.NoError(t, writer.Append(contexttrace.Event{Type: contexttrace.EventProvided, Ref: tt.ref, RefType: tt.kind, Title: "private-title", URL: "https://example.invalid/title", Source: contexttrace.SourceOnDemand, Mechanism: contexttrace.MechanismRetrieval}))
 			}
 			var out bytes.Buffer
 			require.NoError(t, runAgentContextUsed(&out, root, "OxPh01", contextUsedArgs{ref: tt.ref, why: "private-why", none: tt.none}))
