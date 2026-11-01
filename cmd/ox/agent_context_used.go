@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -266,8 +267,23 @@ func runAgentContextUsed(w io.Writer, projectRoot, agentID string, args contextU
 		out.Guidance = contextUsedGuidance(agentID)
 	}
 
-	if err := trace.writer.Append(ev); err != nil {
+	sessionID := ""
+	if trace.state != nil {
+		sessionID = trace.state.SessionID
+	}
+	ev, err = trace.writer.AppendUse(context.Background(), ev, sessionID)
+	if err != nil {
 		return fmt.Errorf("record context use: %w", err)
+	}
+	// A paused recording (ADR-020) sends nothing: pause is fail-closed, and a
+	// key derived from the session ID could be re-linked once it is published.
+	// A held recording (session_publishing: manual, now or when it started) or
+	// one with no session ID (started by an older ox) is never named as
+	// session_id; the event is still counted under its UUID key.
+	if !trace.state.IsSuspended() {
+		held := trace.state != nil && stopHoldsSession(projectRoot, trace.state)
+		recorded := trace.state != nil && trace.state.SessionID != "" && !held
+		captureContextUsed(projectRoot, ev, recorded)
 	}
 	if ev.Evidence == contexttrace.EvidenceReported {
 		recordStatuslineUse(projectRoot, trace.state, ev.RefType, ev.Ref, ev.Aliases...)
