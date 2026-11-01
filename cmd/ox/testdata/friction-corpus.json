@@ -847,7 +847,7 @@
     "--help"
    ],
    "events": 1,
-   "expect": "error"
+   "expect": "resolves"
   },
   {
    "argv": [
@@ -1381,7 +1381,7 @@
     "--help"
    ],
    "events": 1,
-   "expect": "error"
+   "expect": "resolves"
   },
   {
    "argv": [

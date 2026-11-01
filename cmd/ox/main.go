@@ -135,7 +135,7 @@ func main() {
 	// supports FEATURE_CLOUD, FEATURE_AUTH, SAGEOX_API, etc.
 	// A hosted read must not inherit endpoint or credential selection from
 	// whichever source checkout happens to be the working directory.
-	if !headlessLedgerReadRequested(os.Args[1:]) {
+	if !headlessLedgerReadRequested(os.Args[1:]) && !localMCPRequested(os.Args[1:]) {
 		_ = godotenv.Load(".env.local")
 		_ = godotenv.Load(".env")
 	}
@@ -226,10 +226,11 @@ func executeWithFrictionRecovery(ctx context.Context, args []string, attempt int
 	rootCmd.ResetFlags()
 	// Re-register persistent flags after ResetFlags() clears them
 	registerPersistentFlags()
+	localMCP := localMCPRequested(args)
 	// Resolve cached/env feature flags before Cobra parses the command. This is
 	// required for default-off commands: help and command lookup both happen
 	// before PersistentPreRunE.
-	if !headlessLedgerReadRequested(args) {
+	if !headlessLedgerReadRequested(args) && !localMCP {
 		initFeatureFlags(rootCmd)
 		syncFeatureGatedCommands(rootCmd)
 	}
@@ -237,7 +238,7 @@ func executeWithFrictionRecovery(ctx context.Context, args []string, attempt int
 	// a subcommand typed as a flag is fixed before flag aliases look at the
 	// argv. Both run after the feature-gate sync so an enabled gated command
 	// resolves like any other.
-	if attempt == 0 {
+	if attempt == 0 && !localMCP {
 		args = applyCatalogTokenRewrites(normalizeInvocation(args), loadFlagAliases(defaultCatalogJSON))
 	}
 	rootCmd.SetArgs(args)
@@ -271,7 +272,7 @@ func executeWithFrictionRecovery(ctx context.Context, args []string, attempt int
 	if unknownCommand {
 		err = fmt.Errorf("%w\n\nRun '%s --help' for usage", err, cmd.CommandPath())
 	}
-	if err != nil && !headlessLedgerReadRequested(args) {
+	if err != nil && !headlessLedgerReadRequested(args) && !localMCP {
 		switch {
 		case !preRunReached:
 			// Cobra rejected the invocation before ox built its context. Give
@@ -306,8 +307,8 @@ func executeWithFrictionRecovery(ctx context.Context, args []string, attempt int
 		fmt.Fprintln(os.Stderr, "Interrupted.")
 		return 130
 	}
-	if isFeedbackCommand(cmd) {
-		// Feedback failures must not trigger analytics or automatic resubmission.
+	if isFeedbackCommand(cmd) || localMCP {
+		// Local helpers and feedback failures must not trigger analytics or retries.
 		printError(err)
 		return 1
 	}
