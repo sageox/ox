@@ -226,13 +226,22 @@ func resolveHooksDir(gitRoot string) string {
 			return filepath.Join(gitRoot, hooksPath)
 		}
 	}
+	cmd = exec.Command("git", "-C", gitRoot, "rev-parse", "--git-common-dir")
+	if output, err := cmd.Output(); err == nil {
+		if commonDir := strings.TrimSpace(string(output)); commonDir != "" {
+			if !filepath.IsAbs(commonDir) {
+				commonDir = filepath.Join(gitRoot, commonDir)
+			}
+			return filepath.Join(commonDir, "hooks")
+		}
+	}
 	return filepath.Join(gitRoot, ".git", "hooks")
 }
 
 // InstallGitHooks installs every ox-managed git hook into the resolved hooks
 // directory: prepare-commit-msg (trailer injection), post-commit (reverse
 // index append), and post-rewrite (reverse index SHA rewrite on amend/
-// rebase). Idempotent across all three. If a hook file already exists, the
+// rebase), and pre-push (PR and issue linkage). If a hook file already exists, the
 // ox section is appended without disturbing existing content.
 //
 // post-commit / post-rewrite are best-effort CLI-side: they no-op silently
@@ -349,16 +358,18 @@ func hasValidHookSection(content string, spec hookSpec) bool {
 // prepare-commit-msg present from a previous ox version) returns false so
 // `ox doctor --fix` can complete the install.
 func HasGitHooks(gitRoot string) bool {
+	return len(missingGitHooks(gitRoot)) == 0
+}
+
+func missingGitHooks(gitRoot string) []string {
 	hooksDir := resolveHooksDir(gitRoot)
+	var missing []string
 	for _, spec := range allHookSpecs() {
 		hookPath := filepath.Join(hooksDir, spec.name)
 		content, err := os.ReadFile(hookPath)
-		if err != nil {
-			return false
-		}
-		if !hasValidHookSection(string(content), spec) {
-			return false
+		if err != nil || !hasValidHookSection(string(content), spec) {
+			missing = append(missing, spec.name)
 		}
 	}
-	return true
+	return missing
 }
