@@ -47,9 +47,6 @@ var logoutCmd = &cobra.Command{
 		if selErr != nil {
 			return selErr
 		}
-		for _, ep := range endpointsToLogout {
-			recordPostHogEndpoint(ep)
-		}
 
 		// confirm before logging out (skip if --force)
 		if !logoutForce {
@@ -208,7 +205,17 @@ func stripExistingRemotes(ep string) {
 // logout that silently did not happen. Which endpoint to log out of is a
 // selection, not a yes/no, so --yes cannot answer it either — the error names
 // the deterministic alternatives instead of guessing one.
-func selectLogoutEndpoints(loggedInEndpoints []string, all bool, specified string, force bool) ([]string, error) {
+//
+// Every endpoint it returns is recorded for usage telemetry, so a logout that
+// touches a test endpoint is not counted under the production person.
+func selectLogoutEndpoints(loggedInEndpoints []string, all bool, specified string, force bool) (chosen []string, err error) {
+	defer func() {
+		if err == nil {
+			for _, ep := range chosen {
+				recordPostHogEndpoint(ep)
+			}
+		}
+	}()
 	switch {
 	case all:
 		return loggedInEndpoints, nil

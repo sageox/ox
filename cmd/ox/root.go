@@ -20,6 +20,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
@@ -89,6 +90,11 @@ var rootCmd = &cobra.Command{
 
 		// store config in global for backward compatibility
 		cfg = cliCtx.Config
+
+		// Command telemetry names the person as of the start (see postHogCaptureOpts).
+		if !cliCtx.LongRunning && telemetry.Enabled() && telemetry.PostHogConfigured() {
+			startPostHogIdentity(cliCtx)
+		}
 
 		// Publish the resolved value without treating an environment default as
 		// an explicit flag.

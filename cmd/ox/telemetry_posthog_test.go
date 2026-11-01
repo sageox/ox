@@ -647,6 +647,44 @@ func TestPostHogCaptureOpts_PersonBoundary(t *testing.T) {
 	}
 }
 
+// Failure prevented: `ox logout` is counted under the install instead of the
+// person who logged out, and `ox login` keeps the person who was signed in
+// before it (or none) instead of the one it signed in.
+func TestPostHogCaptureOpts_PersonAtCommandStart(t *testing.T) {
+	save := func(t *testing.T, id string) {
+		t.Helper()
+		require.NoError(t, auth.SaveTokenForEndpoint(endpoint.Default, &auth.StoredToken{
+			AccessToken: "opaque_fixture", ExpiresAt: time.Now().Add(time.Hour), UserInfo: auth.UserInfo{UserID: id},
+		}))
+	}
+	for _, tt := range []struct {
+		name, use, before, after, want string
+	}{
+		{name: "logout keeps the person", use: "logout", before: "usr_alice", want: "usr_alice"},
+		{name: "login sends the new person", use: "login", after: "usr_alice", want: "usr_alice"},
+		{name: "login switch sends the new account", use: "login", before: "usr_alice", after: "usr_bob", want: "usr_bob"},
+		{name: "other commands keep the start person", use: "status", before: "usr_alice", after: "usr_bob", want: "usr_alice"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			withIsolatedConfig(t)
+			t.Setenv("SAGEOX_ENDPOINT", endpoint.Default)
+			t.Setenv("SAGEOX_TOKEN", "")
+			t.Setenv("OX_XDG_DISABLE", "")
+			if tt.before != "" {
+				save(t, tt.before)
+			}
+			c := &cli.Context{Cmd: &cobra.Command{Use: tt.use}, CommandStartTime: time.Now()}
+			startPostHogIdentity(c)
+			if tt.after != "" {
+				save(t, tt.after)
+			} else {
+				require.NoError(t, auth.RemoveTokenForEndpoint(endpoint.Default))
+			}
+			assert.Equal(t, tt.want, postHogCaptureOpts(c).PersonID)
+		})
+	}
+}
+
 // Failure prevented: a selected staging operation inherits a cached production person's identity.
 func TestPostHogCaptureOpts_InvocationEndpoint(t *testing.T) {
 	const staging = "https://test.sageox.ai"
@@ -704,6 +742,33 @@ func TestPostHogCaptureOpts_InvocationEndpoint(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Failure prevented: a usage mistake Cobra rejects in a staging repository is counted under the production person.
+func TestRejectedInvocationContext_ClassifiedByProject(t *testing.T) {
+	const staging = "https://test.sageox.ai"
+	withIsolatedConfig(t)
+	t.Setenv("SAGEOX_ENDPOINT", "")
+	t.Setenv("SAGEOX_TOKEN", "")
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv(config.EnvProjectRoot, "")
+	for ep, id := range map[string]string{endpoint.Default: "usr_production", staging: "usr_staging"} {
+		require.NoError(t, auth.SaveTokenForEndpoint(ep, &auth.StoredToken{
+			AccessToken: "opaque_fixture", ExpiresAt: time.Now().Add(time.Hour),
+			UserInfo: auth.UserInfo{UserID: id},
+		}))
+	}
+	oldGetter := endpoint.ProjectEndpointGetter
+	endpoint.ProjectEndpointGetter = func(string) string { return staging }
+	t.Cleanup(func() { endpoint.ProjectEndpointGetter = oldGetter })
+	project := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(project, ".sageox"), 0o755))
+	t.Chdir(project)
+
+	c := rejectedInvocationContext(&cobra.Command{Use: "status"}, time.Now())
+	require.NotEmpty(t, c.ProjectRoot, "the fallback context must find the project like cli.NewContext")
+	assert.Empty(t, postHogCaptureOpts(c).PersonID)
+	assert.Equal(t, "test", postHogCommandProps(c, "status", 2)["env"])
 }
 
 // Failure prevented: login's runtime selection is lost when a device request fails before storing a token.

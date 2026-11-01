@@ -20,6 +20,7 @@ import (
 	"github.com/sageox/agentx"
 	friction "github.com/sageox/frictionax"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/telemetry"
@@ -277,7 +278,7 @@ func executeWithFrictionRecovery(ctx context.Context, args []string, attempt int
 			// usage telemetry one, so the mistake is counted like any failure.
 			err = errkind.WithDetail(errkind.Usage, cobraRejection(err), err)
 			if !isFeedbackCommand(cmd) {
-				cliCtx = &cli.Context{Cmd: cmd, CommandStartTime: start, Ctx: context.Background()}
+				cliCtx = rejectedInvocationContext(cmd, start)
 			}
 		case cobraFlagValidation(err):
 			// Required flags and flag groups are checked after
@@ -381,4 +382,13 @@ func printError(err error) {
 	if !cli.IsSilent(err) {
 		fmt.Fprintf(os.Stderr, "%s %s\n", cli.Styles.Error.Render("Error:"), err)
 	}
+}
+
+// rejectedInvocationContext builds the context usage telemetry needs for an
+// invocation Cobra rejected before PersistentPreRunE. ProjectRoot is found the
+// way cli.NewContext finds it, so a mistake typed in a repository set up for a
+// staging endpoint is classified by that project, not by the production
+// default endpoint.Get returns when more than one endpoint is signed in.
+func rejectedInvocationContext(cmd *cobra.Command, start time.Time) *cli.Context {
+	return &cli.Context{Cmd: cmd, CommandStartTime: start, Ctx: context.Background(), ProjectRoot: config.FindProjectRoot()}
 }

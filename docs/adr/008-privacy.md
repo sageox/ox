@@ -26,7 +26,7 @@ not an exhaustive line-by-line reconciliation.
 | `~/.config/sageox/telemetry.json` state file, `{"enabled": ..., "disabled_at": ...}` | **Does not exist.** The opt-out is a field (`telemetry_enabled`) in the ordinary user config file, `~/.config/sageox/config.yaml` — no dedicated telemetry state file, no `disabled_at` timestamp. |
 | `ox init --offline` | **Not implemented.** `ox init` has no `--offline` flag today. |
 | `ox deregister` | **Not implemented.** No such command exists. |
-| First-run telemetry notice ("ox collects anonymous usage telemetry...") | **Implemented 2026-09-27, with different text.** A two-line notice goes to stderr once per install, the first time a person runs ox at a terminal; AI coworker transcripts and `--json` output never get it (`showTelemetryNoticeOnce` in `cmd/ox/telemetry_posthog.go`). It points to `ox config get telemetry`, since `ox telemetry` does not exist. |
+| First-run telemetry notice ("ox collects anonymous usage telemetry...") | **Implemented 2026-09-27, with different text; revised 2026-10-31.** A three-line notice goes to stderr once per notice version (the `telemetry_notice_v2_shown` flag, so people who saw the earlier notice see the new one; see the 2026-10-31 addendum), the first time a person runs ox at a terminal; AI coworker transcripts and `--json` output never get it (`showTelemetryNoticeOnce` in `cmd/ox/telemetry_posthog.go`). It points to `ox config get telemetry`, since `ox telemetry` does not exist. |
 | Quarterly transparency report | **Not implemented.** Never published. |
 | "What We NEVER Collect" table: **Machine identifiers** | **Inaccurate as written.** `internal/telemetry/types.go`'s `Event.RepoID` is sent on every telemetry event — a per-repository identifier that lets events be correlated over time for that repo. It is not a hardware ID, but the table's blanket "machine identifiers: never" reads stronger than what the code actually does. Since 2026-09-27, PostHog events also carry a persistent random install ID and, inside an initialized repository, its repo and team IDs; see the addendum. |
 | **Precedence:** "Config file > Environment variable > Default" | **Backwards.** `internal/telemetry/client.go`'s `NewClient` checks `DO_NOT_TRACK` and `SAGEOX_TELEMETRY` **before** falling back to the config file — env wins, not config. |
@@ -511,6 +511,9 @@ remain excluded; signed-in production events now carry the SageOx user ID.
   `install_id`, the existing random `client_id`. Signed-out, team-token,
   environment-token and non-production runs keep the install as `distinct_id`
   without `user_id`. Identity lookup is local and makes no network request.
+  The person is read when the command starts, so `ox logout` names who logged
+  out; `ox login`, and a command that picks another endpoint mid-run, read it
+  when they end.
   Deleting `client_id` changes the install ID, not the signed-in person ID.
 - **D3 amended.** The closed property list also includes `user_id`, `install_id`,
   `cli_version`, `env` (`production` or `test`), `surface` (`cli`), `cli_actor`,

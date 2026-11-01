@@ -36,8 +36,9 @@ const envStartedByOx = "OX_STARTED_BY_OX"
 // startedByOx records whether this process inherited envStartedByOx.
 var startedByOx bool
 
-// capturePostHogCommand sends the invocation that just finished to PostHog,
-// then shows the one-time telemetry notice on stderr. main calls it after the
+// capturePostHogCommand shows the one-time telemetry notice on stderr, then
+// sends the invocation that just finished to PostHog. The notice comes first
+// so a person reads it before an event names them. main calls it after the
 // command returns, on success and failure alike, because the exit code and
 // duration are known only then.
 //
@@ -70,10 +71,32 @@ func capturePostHogCommand(exitCode int, stderr io.Writer) {
 
 func postHogCaptureOpts(c *cli.Context) telemetry.CaptureOpts {
 	opts := telemetry.CaptureOpts{}
-	if ep := postHogCommandEndpoint(c); endpoint.IsProduction(ep) {
+	ep := postHogCommandEndpoint(c)
+	if !endpoint.IsProduction(ep) {
+		return opts
+	}
+	// The person as of the command's start, so a logout still names who logged
+	// out. `ox login` creates the person, and a command that picked another
+	// endpoint mid-run has no start snapshot for it: both resolve at the end.
+	if c.TelemetryStartEndpoint != "" && c.TelemetryStartEndpoint == ep && c.CommandPath(c.Cmd) != "login" {
+		opts.PersonID = c.TelemetryStartPersonID
+	} else {
 		opts.PersonID = auth.LocalUserID(ep)
 	}
 	return opts
+}
+
+// startPostHogIdentity records, at command start, the endpoint the command
+// resolves to and its signed-in person (local read, no network).
+func startPostHogIdentity(c *cli.Context) {
+	if c == nil || c.Cmd == nil {
+		return
+	}
+	ep := postHogCommandEndpoint(c)
+	c.TelemetryStartEndpoint = ep
+	if endpoint.IsProduction(ep) {
+		c.TelemetryStartPersonID = auth.LocalUserID(ep)
+	}
 }
 
 // recordPostHogEndpoint keeps late command selections separate from event

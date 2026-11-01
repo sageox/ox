@@ -609,6 +609,40 @@ func TestNoInputUninstallEndpointSelection(t *testing.T) {
 	}
 }
 
+// Failure prevented: uninstalling from a test endpoint is counted as production activity under the cached production person.
+func TestSelectEndpointForUninstall_RecordsEndpointsForTelemetry(t *testing.T) {
+	const production, staging = "https://sageox.ai", "http://127.0.0.1:8102"
+	previousNoInput, previousAll, previousForce, previousCtx := cli.NoInput(), uninstallAll, uninstallForce, cliCtx
+	cli.SetNoInput(true)
+	t.Cleanup(func() {
+		cli.SetNoInput(previousNoInput)
+		uninstallAll, uninstallForce, cliCtx = previousAll, previousForce, previousCtx
+	})
+	for _, tt := range []struct {
+		name       string
+		endpoints  []string
+		all, force bool
+		want       []string
+	}{
+		{name: "sole endpoint", endpoints: []string{staging}, want: []string{staging}},
+		{name: "explicit all", endpoints: []string{production, staging}, all: true, want: []string{production, staging}},
+		{name: "explicit force", endpoints: []string{production, staging}, force: true, want: []string{production, staging}},
+		{name: "missing choice records nothing", endpoints: []string{production, staging}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			uninstallAll, uninstallForce = tt.all, tt.force
+			cliCtx = &cli.Context{}
+			withStdin(t, "", func() {
+				_, _, _ = selectEndpointForUninstall(t.TempDir(), tt.endpoints)
+			})
+			assert.Equal(t, tt.want, cliCtx.TelemetryEndpoints)
+			if len(tt.want) > 0 {
+				assert.Empty(t, postHogCaptureOpts(cliCtx).PersonID, "a test endpoint makes the event install-only")
+			}
+		})
+	}
+}
+
 // Isolate both the parent-side auth fixture and the child process. A file-backed
 // git credential store also prevents logout from touching the real keychain.
 func noInputCLIEnv(t *testing.T) []string {

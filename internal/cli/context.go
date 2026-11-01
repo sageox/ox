@@ -65,6 +65,13 @@ type Context struct {
 	// invocation. It is only used to classify command telemetry, never emitted.
 	TelemetryEndpoints []string
 
+	// TelemetryStartEndpoint and TelemetryStartPersonID are the endpoint the
+	// command resolved when it started and that endpoint's signed-in person
+	// then (a local read). Command telemetry names the person as of the start,
+	// so `ox logout` still names who logged out. Never emitted themselves.
+	TelemetryStartEndpoint string
+	TelemetryStartPersonID string
+
 	// Err is what the command returned, set by cmd/ox's
 	// executeWithFrictionRecovery after Execute so usage telemetry can report
 	// how it failed.
