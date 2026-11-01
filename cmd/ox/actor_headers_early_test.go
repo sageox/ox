@@ -31,6 +31,7 @@ func earlyActorTestRoot(t *testing.T) *cobra.Command {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
 	t.Setenv(config.EnvUserConfig, filepath.Join(home, "config.yaml"))
+	isolateAgentDetection(t)
 	t.Setenv("AGENT_ENV", "codex")
 	t.Setenv("DO_NOT_TRACK", "1")
 

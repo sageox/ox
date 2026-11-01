@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"runtime"
 	"strings"
@@ -230,17 +229,9 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 		OnSpan: perf.PerSpanSlog(cliCtx.Logger),
 		OnTree: perf.CLITreeSink(os.Stderr, cfg.Verbose),
 	}))
-	// OTLP bypasses useragent's request builder. Copy only its validated actor
+	// OTLP bypasses useragent's request builder. Pass only its validated actor
 	// metadata so exports identify the command without freezing trace headers.
-	requestHeaders := make(http.Header)
-	useragent.SetHeaders(requestHeaders)
-	actorHeaders := make(http.Header)
-	for _, key := range []string{useragent.HeaderActor, useragent.HeaderAgentType} {
-		if value := requestHeaders.Get(key); value != "" {
-			actorHeaders.Set(key, value)
-		}
-	}
-	if err := observability.InitWithHeaders(cliCtx.Ctx, "ox-cli", apiEndpoint, tokenFunc, actorHeaders, resourceAttrs...); err != nil {
+	if err := initTracing(cliCtx.Ctx, "ox-cli", apiEndpoint, tokenFunc, useragent.ActorHeaders(), resourceAttrs...); err != nil {
 		slog.Debug("otel init failed, continuing without tracing", "error", err)
 	}
 
@@ -279,6 +270,10 @@ func DetectActor(env agentx.Environment) (string, string) {
 	}
 	return "human", ""
 }
+
+// initTracing is observability.InitWithHeaders; tests swap it to observe the
+// actor headers NewContext hands the OTLP exporter.
+var initTracing = observability.InitWithHeaders
 
 // gitCredentialHelperCommand is the command git starts for credentials,
 // including on the daemon's behalf.

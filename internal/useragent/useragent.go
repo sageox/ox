@@ -287,9 +287,11 @@ func randomTraceparent() string {
 // X-Sageox-Actor, X-Sageox-Agent-Type and traceparent on SageOx API requests.
 // Actor headers are omitted for daemon requests.
 //
-// Every call site is a SageOx-owned endpoint (internal/api, internal/auth,
-// internal/doctorapi, internal/telemetry) — LFS and git transport do not go
-// through here — so the repo ID is never disclosed to a third party.
+// Every call site is a SageOx-owned endpoint (internal/api,
+// internal/attestpublication, internal/auth, internal/doctorapi,
+// internal/telemetry, cmd/ox plan-review presence) — LFS and git transport do
+// not go through here — so the repo ID and actor are never disclosed to a
+// third party.
 //
 // If OTel tracing is active, the traceparent comes from the current command's
 // root span so all requests within one command share the same trace ID.
@@ -303,16 +305,10 @@ func SetHeaders(h http.Header) {
 	if rid := RepoID(); rid != "" {
 		h.Set(HeaderRepoID, rid)
 	}
-	mu.RLock()
-	actor, agent, daemon := requestActor, requestAgentType, daemonMode
-	mu.RUnlock()
 	h.Del(HeaderActor)
 	h.Del(HeaderAgentType)
-	if !daemon && actor != "" {
-		h.Set(HeaderActor, actor)
-		if agent != "" {
-			h.Set(HeaderAgentType, agent)
-		}
+	for key, values := range ActorHeaders() {
+		h[key] = values
 	}
 	if h.Get("traceparent") == "" {
 		tp := observability.TraceParent()
@@ -322,6 +318,23 @@ func SetHeaders(h http.Header) {
 		h.Set("traceparent", tp)
 		slog.Debug("http request traceparent", "traceparent", tp)
 	}
+}
+
+// ActorHeaders returns the validated actor headers SetHeaders adds, for
+// exporters that do not build requests through SetHeaders (OTLP). It is empty
+// in daemon mode and before SetActor.
+func ActorHeaders() http.Header {
+	mu.RLock()
+	actor, agent, daemon := requestActor, requestAgentType, daemonMode
+	mu.RUnlock()
+	h := make(http.Header)
+	if !daemon && actor != "" {
+		h.Set(HeaderActor, actor)
+		if agent != "" {
+			h.Set(HeaderAgentType, agent)
+		}
+	}
+	return h
 }
 
 // DaemonString returns the User-Agent for daemon requests.

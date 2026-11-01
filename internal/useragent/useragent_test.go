@@ -379,6 +379,13 @@ func TestActorHeaders_ValidatedWireContract(t *testing.T) {
 				assert.Empty(t, got.Values(HeaderAgentType))
 			}
 			assert.Empty(t, got.Values("X-Injected"))
+			// OTLP exports read the same snapshot without building a request.
+			snapshot := ActorHeaders()
+			assert.Equal(t, tt.wantActor, snapshot.Get(HeaderActor))
+			assert.Equal(t, tt.wantKind, snapshot.Get(HeaderAgentType))
+			for key := range snapshot {
+				assert.Contains(t, []string{HeaderActor, HeaderAgentType}, key)
+			}
 		})
 	}
 }

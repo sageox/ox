@@ -19,15 +19,40 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
-// Failure prevented: commands outside a project omit their actor, or a service inherits one workspace's actor.
+// isolateAgentDetection unsets the coding-agent runtime signals agentx
+// resolves before AGENT_ENV, so a suite run inside Claude Code or another
+// agent cannot supply an identity the test did not (mirrors cmd/ox's helper).
+func isolateAgentDetection(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID",
+		"CODEX_CI", "CODEX_SANDBOX", "CODEX_THREAD_ID", "AMP_THREAD_URL",
+		"CURSOR_SESSION_ID", "PI_CODING_AGENT", "PI_SESSION_ID", "PI_CODING_AGENT_DIR",
+	} {
+		t.Setenv(name, "")
+		require.NoError(t, os.Unsetenv(name))
+	}
+}
+
+// Failure prevented: commands outside a project omit their actor (on requests
+// or OTLP exports), or a service inherits one workspace's actor.
 func TestNewContext_ActorHeadersOutsideProjectAndService(t *testing.T) {
 	for _, service := range []bool{false, true} {
 		t.Run(fmt.Sprint(service), func(t *testing.T) {
 			useragent.ResetForTesting()
 			t.Cleanup(useragent.ResetForTesting)
+			var exported []http.Header
+			previousInit := initTracing
+			initTracing = func(ctx context.Context, serviceName, apiEndpoint string, tokenFunc observability.TokenFunc, headers http.Header, attrs ...attribute.KeyValue) error {
+				exported = append(exported, headers.Clone())
+				return previousInit(ctx, serviceName, apiEndpoint, tokenFunc, headers, attrs...)
+			}
+			t.Cleanup(func() { initTracing = previousInit })
+			isolateAgentDetection(t)
 			dir := t.TempDir()
 			t.Chdir(dir)
 			t.Setenv(config.EnvProjectRoot, "")
@@ -51,9 +76,13 @@ func TestNewContext_ActorHeadersOutsideProjectAndService(t *testing.T) {
 			if service {
 				assert.Empty(t, h.Values("X-Sageox-Actor"))
 				assert.Empty(t, h.Values("X-Sageox-Agent-Type"))
+				assert.Empty(t, exported, "a service installs its own actor-free tracing")
 			} else {
 				assert.Equal(t, "agent", h.Get("X-Sageox-Actor"))
 				assert.Equal(t, "codex", h.Get("X-Sageox-Agent-Type"))
+				require.Len(t, exported, 1, "OTLP export must be initialized with the actor snapshot")
+				assert.Equal(t, "agent", exported[0].Get("X-Sageox-Actor"))
+				assert.Equal(t, "codex", exported[0].Get("X-Sageox-Agent-Type"))
 			}
 		})
 	}
