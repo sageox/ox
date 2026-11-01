@@ -20,8 +20,6 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
-	"github.com/sageox/ox/internal/theme"
-	"github.com/sageox/ox/internal/tips"
 	"github.com/spf13/cobra"
 )
 
@@ -93,7 +91,8 @@ func (m loginSpinnerModel) View() tea.View {
 		if m.err != nil {
 			return tea.NewView(lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("✗ Authentication failed\n"))
 		}
-		return tea.NewView(lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Render("✓ Successfully authenticated\n"))
+		// the success block (login_arrival.go) prints right after the spinner exits
+		return tea.NewView("")
 	}
 	return tea.NewView(fmt.Sprintf("\n%s %s\n\n", m.spinner.View(), m.message))
 }
@@ -374,15 +373,12 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 		}
 	}
 
+	// whether this person has signed in here before decides "Welcome" vs
+	// "Welcome back"; the device flow overwrites the record, so read it now
+	priorLogin, _ := authClient.GetToken()
+
 	// display verification instructions
-	fmt.Fprintln(out)
-	if deviceCode.VerificationURIComplete != "" {
-		fmt.Fprintf(out, "Visit: %s\n", deviceCode.VerificationURIComplete)
-	} else {
-		fmt.Fprintf(out, "Visit: %s\n", deviceCode.VerificationURI)
-		fmt.Fprintf(out, "Enter code: %s\n", deviceCode.UserCode)
-	}
-	fmt.Fprintln(out)
+	writeDeviceInstructions(out, deviceCode)
 
 	// Open browser to the verification URL so the user can authorize.
 	// SKIP_BROWSER and headless detection are handled inside cli.OpenInBrowser.
@@ -405,7 +401,7 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 			fmt.Fprintf(out, "Status: %s\n", status)
 		})
 		if err != nil {
-			return fmt.Errorf("authentication failed: %w", err)
+			return loginFailure(ctx, err)
 		}
 	} else {
 		// interactive mode: use bubbletea spinner
@@ -433,7 +429,7 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 				return nil // user canceled, exit cleanly
 			}
 			if finalSpinnerModel.err != nil {
-				return fmt.Errorf("authentication failed: %w", finalSpinnerModel.err)
+				return loginFailure(ctx, finalSpinnerModel.err)
 			}
 		}
 	}
@@ -456,27 +452,10 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 		return fmt.Errorf("authentication succeeded but failed to retrieve token: %w", err)
 	}
 
-	// display a fun welcome message
+	// three lines: who, where, what's next, with Oxy beside them on a color terminal
 	fmt.Fprintln(out)
-	// theme.Color, not lipgloss.Color: this prints via fmt.Fprintf rather than
-	// through Bubble Tea, so nothing downstream downsamples it.
-	welcomeStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(theme.Color("212"))
-	nameStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(theme.Color("86"))
-
-	// extract first name or use email prefix
-	displayName := token.UserInfo.Name
-	if displayName == "" {
-		displayName = strings.Split(token.UserInfo.Email, "@")[0]
-	} else if parts := strings.Fields(displayName); len(parts) > 0 {
-		displayName = parts[0]
-	}
-
-	fmt.Fprintf(out, "%s %s!\n", welcomeStyle.Render("Welcome back,"), nameStyle.Render(displayName))
-	fmt.Fprintf(out, "You're signed in as %s\n", token.UserInfo.Email)
+	arrival := cli.NewLoginArrival(token.UserInfo.Name, token.UserInfo.Email, endpoint.NormalizeSlug(authClient.Endpoint()), isReturningLogin(priorLogin, token.UserInfo))
+	fmt.Fprint(out, arrival.Render(loginArt(out)))
 	fmt.Fprintln(out)
 
 	// fetch git credentials from /api/v1/cli/repos (source of truth for team context URLs)
@@ -500,16 +479,11 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 		fmt.Fprintln(out, "Git credentials sync failed - this won't affect your login.")
 		fmt.Fprintln(out, "You can sync git credentials later with 'ox doctor'.")
 	} else {
-		cli.PrintPreserved("Git credentials synced")
+		// nothing to say on success: the block above is the whole confirmation
+		slog.Debug("git credentials synced", "endpoint", currentEndpoint)
 		// refresh remote URLs in existing repos with new credentials
 		refreshExistingRemotes(currentEndpoint)
 	}
-
-	// show contextual tip
-	userCfg, _ := config.LoadUserConfig()
-	tips.MaybeShow("login", tips.AlwaysShow, cfg.Quiet, !userCfg.AreTipsEnabled(), cfg.JSON)
-
-	cli.PrintDisclaimer()
 
 	return nil
 }

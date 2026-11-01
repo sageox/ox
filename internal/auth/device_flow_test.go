@@ -6,11 +6,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sageox/ox/internal/endpoint"
 )
 
 func TestRequestDeviceCode_Success(t *testing.T) {
@@ -292,6 +295,82 @@ func TestLogin_AccessDenied(t *testing.T) {
 
 	// verify error message
 	assert.Contains(t, err.Error(), "denied")
+	// callers pick the retry advice from the sentinel, not the message
+	assert.ErrorIs(t, err, ErrDeviceAuthorizationDenied)
+	assert.NotErrorIs(t, err, ErrDeviceCodeExpired)
+}
+
+// TestLogin_EndsWithTheSentinelsCallersMatch verifies the package-level Login
+// (used by the OAuth helper) ends a denied, server-expired or window-expired
+// request with the same sentinels AuthClient.Login does.
+// Failure prevented: one of the two Login functions reporting a denial as a bare
+// string, so the retry advice `ox login` gives is picked for only one of them.
+func TestLogin_EndsWithTheSentinelsCallersMatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
+
+	// the device code in the request decides how the server answers
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req TokenRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(ErrorResponse{Error: req.DeviceCode})
+	}))
+	t.Cleanup(server.Close) // not defer: the parallel subtests run after this function returns
+	t.Setenv(endpoint.EnvVar, server.URL)
+
+	tests := []struct {
+		name       string
+		deviceCode string
+		expiresIn  int
+		want       error
+		notWant    error
+	}{
+		{"declined on the approval page", "access_denied", 300, ErrDeviceAuthorizationDenied, ErrDeviceCodeExpired},
+		{"the server says the code expired", "expired_token", 300, ErrDeviceCodeExpired, ErrDeviceAuthorizationDenied},
+		{"the code lapsed before the first poll", "authorization_pending", 0, ErrDeviceCodeExpired, ErrDeviceAuthorizationDenied},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+
+			err := Login(ctx, &DeviceCodeResponse{DeviceCode: tt.deviceCode, ExpiresIn: tt.expiresIn, Interval: 1}, nil)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, tt.want)
+			assert.NotErrorIs(t, err, tt.notWant)
+		})
+	}
+}
+
+// TestLogin_ExpiredBeforeApproval verifies a code that lapses while the person
+// has not approved it ends the poll with ErrDeviceCodeExpired, without asking
+// the server again.
+// Failure prevented: polling a dead code until the context gave up, which reads
+// as a network problem rather than an expired code.
+func TestLogin_ExpiredBeforeApproval(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
+
+	var polls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		polls.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+	client := NewAuthClientWithDir(t.TempDir()).WithEndpoint(server.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	err := client.Login(ctx, &DeviceCodeResponse{DeviceCode: "test-device-code", ExpiresIn: 0, Interval: 1}, nil)
+
+	require.ErrorIs(t, err, ErrDeviceCodeExpired)
+	assert.Zero(t, polls.Load(), "an expired code is not polled")
 }
 
 func TestLogin_SlowDown(t *testing.T) {
@@ -483,6 +562,8 @@ func TestLogin_ExpiredToken(t *testing.T) {
 
 	// verify error message
 	assert.Contains(t, err.Error(), "expired")
+	assert.ErrorIs(t, err, ErrDeviceCodeExpired)
+	assert.NotErrorIs(t, err, ErrDeviceAuthorizationDenied)
 }
 
 func TestLogin_UserInfoError(t *testing.T) {

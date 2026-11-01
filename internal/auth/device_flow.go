@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,6 +19,16 @@ import (
 // authHTTPTimeout is the timeout for authentication HTTP requests.
 // Set to 60 seconds to accommodate slow backend startup (e.g., devcontainer compilation).
 const authHTTPTimeout = 60 * time.Second
+
+// The two ways a device flow ends without a login that a person can fix by
+// starting over. Callers match them with errors.Is to say what to do next,
+// rather than reading the message.
+var (
+	// ErrDeviceAuthorizationDenied means the request was declined on the approval page.
+	ErrDeviceAuthorizationDenied = errors.New("authorization was denied")
+	// ErrDeviceCodeExpired means the code lapsed before anyone approved it.
+	ErrDeviceCodeExpired = errors.New("device code expired")
+)
 
 // DeviceCodeResponse represents the response from the device code endpoint
 type DeviceCodeResponse struct {
@@ -152,7 +163,7 @@ func Login(ctx context.Context, deviceCode *DeviceCodeResponse, statusCallback f
 			return ctx.Err()
 		case <-ticker.C:
 			if time.Now().After(expiresAt) {
-				return fmt.Errorf("device code expired")
+				return ErrDeviceCodeExpired
 			}
 
 			token, err := pollToken(client, endpointURL, deviceCode.DeviceCode)
@@ -169,10 +180,10 @@ func Login(ctx context.Context, deviceCode *DeviceCodeResponse, statusCallback f
 					continue
 				}
 				if strings.Contains(err.Error(), "access_denied") {
-					return fmt.Errorf("authorization was denied")
+					return ErrDeviceAuthorizationDenied
 				}
 				if strings.Contains(err.Error(), "expired_token") {
-					return fmt.Errorf("device code expired")
+					return ErrDeviceCodeExpired
 				}
 				return err
 			}
@@ -519,7 +530,7 @@ func (c *AuthClient) Login(ctx context.Context, deviceCode *DeviceCodeResponse, 
 			return ctx.Err()
 		case <-ticker.C:
 			if time.Now().After(expiresAt) {
-				return fmt.Errorf("device code expired")
+				return ErrDeviceCodeExpired
 			}
 
 			token, err := pollToken(httpClient, endpointURL, deviceCode.DeviceCode)
@@ -536,10 +547,10 @@ func (c *AuthClient) Login(ctx context.Context, deviceCode *DeviceCodeResponse, 
 					continue
 				}
 				if strings.Contains(err.Error(), "access_denied") {
-					return fmt.Errorf("authorization was denied")
+					return ErrDeviceAuthorizationDenied
 				}
 				if strings.Contains(err.Error(), "expired_token") {
-					return fmt.Errorf("device code expired")
+					return ErrDeviceCodeExpired
 				}
 				return err
 			}
