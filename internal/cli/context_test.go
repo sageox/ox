@@ -2,10 +2,12 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,10 +15,102 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/observability"
+	"github.com/sageox/ox/internal/useragent"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
+
+// isolateAgentDetection unsets the coding-agent runtime signals agentx
+// resolves before AGENT_ENV, so a suite run inside Claude Code or another
+// agent cannot supply an identity the test did not (mirrors cmd/ox's helper).
+func isolateAgentDetection(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID",
+		"CODEX_CI", "CODEX_SANDBOX", "CODEX_THREAD_ID", "AMP_THREAD_URL",
+		"CURSOR_SESSION_ID", "PI_CODING_AGENT", "PI_SESSION_ID", "PI_CODING_AGENT_DIR",
+	} {
+		t.Setenv(name, "")
+		require.NoError(t, os.Unsetenv(name))
+	}
+}
+
+// Failure prevented: commands outside a project omit their actor (on requests
+// or OTLP exports), or a service inherits one workspace's actor.
+func TestNewContext_ActorHeadersOutsideProjectAndService(t *testing.T) {
+	for _, service := range []bool{false, true} {
+		t.Run(fmt.Sprint(service), func(t *testing.T) {
+			useragent.ResetForTesting()
+			t.Cleanup(useragent.ResetForTesting)
+			var exported []http.Header
+			previousInit := initTracing
+			initTracing = func(ctx context.Context, serviceName, apiEndpoint string, tokenFunc observability.TokenFunc, headers http.Header, attrs ...attribute.KeyValue) error {
+				exported = append(exported, headers.Clone())
+				return previousInit(ctx, serviceName, apiEndpoint, tokenFunc, headers, attrs...)
+			}
+			t.Cleanup(func() { initTracing = previousInit })
+			isolateAgentDetection(t)
+			dir := t.TempDir()
+			t.Chdir(dir)
+			t.Setenv(config.EnvProjectRoot, "")
+			t.Setenv(config.EnvUserConfig, filepath.Join(dir, "config.yaml"))
+			t.Setenv("XDG_CONFIG_HOME", dir)
+			t.Setenv("OX_XDG_DISABLE", "")
+			t.Setenv("SAGEOX_TOKEN", "")
+			t.Setenv("SAGEOX_ENDPOINT", "http://127.0.0.1:1")
+			t.Setenv("DO_NOT_TRACK", "1")
+			t.Setenv("AGENT_ENV", "codex")
+			cmd := &cobra.Command{Use: "status"}
+			if service {
+				cmd.Annotations = map[string]string{AnnotationLongRunning: "true"}
+			}
+			ctx, err := NewContext(cmd, nil)
+			require.NoError(t, err)
+			t.Cleanup(ctx.Shutdown)
+			require.Equal(t, service, ctx.LongRunning)
+			h := http.Header{}
+			useragent.SetHeaders(h)
+			if service {
+				assert.Empty(t, h.Values("X-Sageox-Actor"))
+				assert.Empty(t, h.Values("X-Sageox-Agent-Type"))
+				assert.Empty(t, exported, "a service installs its own actor-free tracing")
+			} else {
+				assert.Equal(t, "agent", h.Get("X-Sageox-Actor"))
+				assert.Equal(t, "codex", h.Get("X-Sageox-Agent-Type"))
+				require.Len(t, exported, 1, "OTLP export must be initialized with the actor snapshot")
+				assert.Equal(t, "agent", exported[0].Get("X-Sageox-Actor"))
+				assert.Equal(t, "codex", exported[0].Get("X-Sageox-Agent-Type"))
+			}
+		})
+	}
+}
+
+// Prevents the daemon's credential-helper runs (git starts them with the
+// daemon's inherited environment) from stamping one actor on every workspace.
+func TestNewContext_GitCredentialHelperSendsNoActor(t *testing.T) {
+	useragent.ResetForTesting()
+	t.Cleanup(useragent.ResetForTesting)
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv(config.EnvProjectRoot, "")
+	t.Setenv(config.EnvUserConfig, filepath.Join(dir, "config.yaml"))
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("SAGEOX_TOKEN", "")
+	t.Setenv("SAGEOX_ENDPOINT", "http://127.0.0.1:1")
+	t.Setenv("DO_NOT_TRACK", "1")
+	t.Setenv("CLAUDECODE", "1")
+	ctx, err := NewContext(&cobra.Command{Use: "git-credential-helper [get|store|erase]"}, nil)
+	require.NoError(t, err)
+	t.Cleanup(ctx.Shutdown)
+	h := http.Header{}
+	useragent.SetHeaders(h)
+	assert.Empty(t, h.Values("X-Sageox-Actor"))
+	assert.Empty(t, h.Values("X-Sageox-Agent-Type"))
+}
 
 func TestContext_Accessors(t *testing.T) {
 	tests := []struct {
