@@ -292,6 +292,9 @@ func TestLogin_AccessDenied(t *testing.T) {
 
 	// verify error message
 	assert.Contains(t, err.Error(), "denied")
+	// callers pick the retry advice from the sentinel, not the message
+	assert.ErrorIs(t, err, ErrDeviceAuthorizationDenied)
+	assert.NotErrorIs(t, err, ErrDeviceCodeExpired)
 }
 
 func TestLogin_SlowDown(t *testing.T) {
@@ -483,6 +486,8 @@ func TestLogin_ExpiredToken(t *testing.T) {
 
 	// verify error message
 	assert.Contains(t, err.Error(), "expired")
+	assert.ErrorIs(t, err, ErrDeviceCodeExpired)
+	assert.NotErrorIs(t, err, ErrDeviceAuthorizationDenied)
 }
 
 func TestLogin_UserInfoError(t *testing.T) {

@@ -386,6 +386,11 @@ type UserConfig struct {
 	// TelemetryNoticeShown records that the current person-ID notice was shown.
 	// The old telemetry_notice_shown flag does not cover this disclosure.
 	TelemetryNoticeShown *bool `yaml:"telemetry_notice_v2_shown,omitempty"`
+
+	// InitOffersShown records that `ox init` has offered the optional Claude
+	// Code add-ons (Oxy, the session report pane) on this machine. The offer is
+	// made once per machine, not once per repo.
+	InitOffersShown *bool `yaml:"init_offers_shown,omitempty"`
 }
 
 // SkillsConfig holds the user-level `skills.*` settings.
@@ -541,6 +546,18 @@ func (c *UserConfig) HasSeenTelemetryNotice() bool {
 // SetTelemetryNoticeShown records whether the one-time telemetry notice has been shown.
 func (c *UserConfig) SetTelemetryNoticeShown(shown bool) {
 	c.TelemetryNoticeShown = &shown
+}
+
+// HasSeenInitOffers returns true if `ox init` has already offered the optional
+// Claude Code add-ons on this machine.
+func (c *UserConfig) HasSeenInitOffers() bool {
+	return c.InitOffersShown != nil && *c.InitOffersShown
+}
+
+// SetInitOffersShown records whether `ox init` has offered the optional Claude
+// Code add-ons on this machine.
+func (c *UserConfig) SetInitOffersShown(shown bool) {
+	c.InitOffersShown = &shown
 }
 
 // IsTelemetryEnabled returns true if telemetry is enabled (default: true)

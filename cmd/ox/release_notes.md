@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`ox login` always shows the code to match** — the terminal prints the code beside the link, so you can check it against the one the approval page shows. A first sign-in now says "Welcome" instead of "Welcome back", a denied or expired request tells you to run `ox login` again, and success ends on three lines: who, where, and `ox init`. At a color terminal, a small Oxy celebrates.
+- **`ox init` tells you who can read your sessions** — it ends on a box showing your repo, your team, and whether sessions go to the team's Ledger, then a plan prompt to try first. The first time on a machine, it also offers Oxy and the session report pane.
 - **Routine coding work is shared consistently** — feature implementation, straightforward fixes and setup sessions now follow the same sharing decision as other substantive work. Manual publishing and skipped sessions keep their existing behavior.
 - **`ox brief` is now `ox session report`** — the command, its `pane` subcommands, the Claude Code pane and the Agent Skill all take the new name: `ox session report`, `/ox-session-report` opens and closes the pane, and `/ox-cli-session-report` (Claude Code and Codex) prints the report. `ox brief` keeps working as a hidden alias for one release, and the `brief_pane` setting still toggles `session_report_pane`. `ox doctor --fix` and `ox upgrade` refresh the pane plugin and retire the old `ox-cli-brief` skill, so `/ox-brief` and `/ox-cli-brief` leave the slash menu on their own.
 

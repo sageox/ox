@@ -1037,14 +1037,17 @@ func runInit() error {
 	}
 
 	if !initQuiet {
-		// success message with visual emphasis
+		// the docking box: what is now connected to what, and who can read the
+		// sessions that flow between them. Framed only at a terminal.
+		onTeam := resp != nil && resp.RepoID != "" && resp.TeamID != ""
 		fmt.Println()
-		fmt.Println(ui.MutedStyle.Render(ui.SeparatorHeavy))
-		fmt.Println(cli.StyleBold.Render("SageOx initialized successfully!"))
-		fmt.Println(ui.MutedStyle.Render(ui.SeparatorHeavy))
+		fmt.Println(initDockFor(gitRoot, cfg, onTeam).Render(isTerminalWriter(os.Stdout)))
+
+		// the first thing to try, above the steps: the steps are chores, this is the payoff
+		fmt.Println()
+		fmt.Println(ui.RenderTryFirst())
 
 		// next steps - THE primary call to action
-		fmt.Println()
 		fmt.Println(ui.RenderCategory("Next Steps"))
 		fmt.Println()
 
@@ -1096,6 +1099,9 @@ func runInit() error {
 		if resp != nil && resp.RepoID != "" && resp.TeamID != "" {
 			printInitSessionImportStep(gitRoot, cfg, step)
 		}
+
+		// the optional Claude Code add-ons, offered once per machine
+		offerInitAddons(os.Stdout)
 
 		// show team context sync status so user knows what's happening in the background
 		if cfg.TeamID != "" {

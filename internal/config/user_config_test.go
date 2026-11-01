@@ -705,6 +705,23 @@ func TestUserConfig_TelemetryNoticeShownSurvivesSaveAndLoad(t *testing.T) {
 	assert.True(t, reloaded.HasSeenTelemetryNotice())
 }
 
+// Failure prevented: the flag does not survive a save and load (a wrong YAML
+// tag), so `ox init` offers Oxy and the session report pane again in every
+// repo instead of once per machine.
+func TestUserConfig_InitOffersShownSurvivesSaveAndLoad(t *testing.T) {
+	t.Setenv(EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
+	cfg, err := LoadUserConfig()
+	require.NoError(t, err)
+	require.False(t, cfg.HasSeenInitOffers(), "a machine that was never offered anything")
+
+	cfg.SetInitOffersShown(true)
+	require.NoError(t, SaveUserConfig(cfg))
+	reloaded, err := LoadUserConfig()
+
+	require.NoError(t, err)
+	assert.True(t, reloaded.HasSeenInitOffers())
+}
+
 // Failure prevented: a machine without the disposable_machine setting, or with
 // a config ox cannot read, takes the disposable-machine behaviors.
 func TestDisposableMachineEnabled(t *testing.T) {
