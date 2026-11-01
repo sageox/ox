@@ -128,7 +128,7 @@ func TestHooksDir_FallbackOutsideRepository(t *testing.T) {
 
 // Failure prevented: `ox uninstall` reports success but leaves ox's git hooks
 // running in every checkout, because it looked in a linked worktree's .git
-// file or did not recognise the post-rewrite and pre-push sections.
+// file or did not recognize the post-rewrite and pre-push sections.
 func TestRemoveHooks_RemovesEveryOxHookFromEitherCheckout(t *testing.T) {
 	skipIntegration(t) // Real git init, commit, and worktree creation.
 	origDryRun := uninstallDryRun
@@ -166,7 +166,7 @@ func TestRemoveHooks_RemovesEveryOxHookFromEitherCheckout(t *testing.T) {
 				foundNames = append(foundNames, item.Name)
 			}
 			for _, spec := range allHookSpecs() {
-				assert.Contains(t, foundNames, spec.name, "uninstall must recognise every hook ox installs")
+				assert.Contains(t, foundNames, spec.name, "uninstall must recognize every hook ox installs")
 			}
 
 			require.NoError(t, removeHooks(root))
@@ -181,6 +181,48 @@ func TestRemoveHooks_RemovesEveryOxHookFromEitherCheckout(t *testing.T) {
 				}
 			}
 			assert.Empty(t, oxHookSectionsPresent(t, mainRoot), "no ox section may survive uninstall")
+		})
+	}
+}
+
+// Failure prevented: `ox uninstall --dry-run` cuts the current ox sections
+// out of the shared hooks, silently disabling ox in every checkout.
+func TestRemoveHooks_DryRunLeavesCurrentOxHooks(t *testing.T) {
+	skipIntegration(t) // Real git init, commit, and worktree creation.
+	origDryRun := uninstallDryRun
+	t.Cleanup(func() { uninstallDryRun = origDryRun })
+	uninstallDryRun = true
+
+	for _, tt := range []struct {
+		name         string
+		fromWorktree bool
+	}{
+		{name: "main"},
+		{name: "worktree", fromWorktree: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mainRoot, worktreeRoot := gitHooksWorktree(t)
+			root := mainRoot
+			if tt.fromWorktree {
+				root = worktreeRoot
+			}
+			require.NoError(t, InstallGitHooks(root))
+			hooksDir := filepath.Join(mainRoot, ".git", "hooks")
+			before := make(map[string][]byte)
+			for _, spec := range allHookSpecs() {
+				content, err := os.ReadFile(filepath.Join(hooksDir, spec.name))
+				require.NoError(t, err, spec.name)
+				before[spec.name] = content
+			}
+
+			require.NoError(t, removeHooks(root))
+			for _, spec := range allHookSpecs() {
+				content, err := os.ReadFile(filepath.Join(hooksDir, spec.name))
+				require.NoError(t, err, "dry run must not delete %s", spec.name)
+				assert.Equal(t, string(before[spec.name]), string(content), spec.name)
+			}
+			assert.True(t, HasGitHooks(mainRoot))
+			assert.True(t, HasGitHooks(worktreeRoot))
 		})
 	}
 }
