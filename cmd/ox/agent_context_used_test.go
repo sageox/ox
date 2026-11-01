@@ -164,6 +164,65 @@ func TestAgentContextUsed_PostHogWriteAndCaptureFailure(t *testing.T) {
 	}
 }
 
+// Failure prevented: interrupted or large trace entries swallow a successful
+// use or make separate successful uses share one analytics occurrence.
+func TestAgentContextUsed_PostHogTraceRecovery(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		tail string
+	}{
+		// Failure prevented: a partial append consumes the next valid use line.
+		{name: "interrupted JSON", tail: `{"type":`},
+		// Failure prevented: a complete record without its newline merges with the next use.
+		{name: "complete unterminated JSON", tail: `{"type":"invoked","ts":"2026-11-01T00:00:00Z","source":"ox-cli"}`},
+		// Failure prevented: long metadata from a tool response blocks subsequent use reports.
+		{name: "large complete line", tail: `{"type":"provided","ts":"2026-11-01T00:00:00Z","source":"on-demand","title":"` + strings.Repeat("x", 70<<10) + "\"}\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := setupSessionTestProject(t)
+			captured := captureUsageForTest(t, nil)
+			state, err := session.StartRecording(root, session.StartRecordingOptions{AgentID: "OxBr01", AdapterName: "codex"})
+			require.NoError(t, err)
+			tracePath := contexttrace.NewWriter(state.SessionPath).Path()
+			record := func() {
+				var out bytes.Buffer
+				require.NoError(t, runAgentContextUsed(&out, root, "OxBr01", contextUsedArgs{none: true}))
+				assert.Contains(t, out.String(), `"success": true`)
+			}
+			record()
+			f, err := os.OpenFile(tracePath, os.O_APPEND|os.O_WRONLY, 0o600)
+			require.NoError(t, err)
+			_, err = f.WriteString(tt.tail)
+			require.NoError(t, err)
+			require.NoError(t, f.Close())
+			before, err := os.ReadFile(tracePath)
+			require.NoError(t, err)
+			record()
+			record()
+			require.Len(t, *captured, 3)
+			assert.NotEqual(t, (*captured)[0].Opts.UUID, (*captured)[1].Opts.UUID)
+			assert.NotEqual(t, (*captured)[1].Opts.UUID, (*captured)[2].Opts.UUID)
+			after, err := os.ReadFile(tracePath)
+			require.NoError(t, err)
+			assert.True(t, bytes.HasPrefix(after, before), "repair must preserve all prior trace bytes")
+			events, err := contexttrace.ReadEvents(tracePath)
+			require.NoError(t, err)
+			var uses []contexttrace.Event
+			for _, ev := range events {
+				if ev.Type == contexttrace.EventUsed {
+					uses = append(uses, ev)
+				}
+			}
+			require.Len(t, uses, 3, "every successful use must remain replayable")
+			for i, ev := range uses {
+				assert.Equal(t, i+1, ev.OccurrenceSeq)
+				captureContextUsed(root, ev)
+				assert.Equal(t, (*captured)[i].Opts, (*captured)[i+3].Opts)
+			}
+		})
+	}
+}
+
 func TestResolveSurfacedRef(t *testing.T) {
 	tests := []struct {
 		name     string
