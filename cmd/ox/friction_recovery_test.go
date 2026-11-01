@@ -229,12 +229,12 @@ func TestRecovery_SuggestOnly(t *testing.T) {
 }
 
 // TestRecovery_NoUnrelatedGuess covers the edit-distance guard.
-// Failure prevented: `ox mcp` suggesting `gc`, a command that re-clones
+// Failure prevented: `ox rpc` suggesting `gc`, a command that re-clones
 // repositories, because the two names are two edits apart.
 func TestRecovery_NoUnrelatedGuess(t *testing.T) {
 	withoutAgentContext(t)
 
-	for _, word := range []string{"mcp", "doc", "api"} {
+	for _, word := range []string{"rpc", "doc", "api"} {
 		t.Run(word, func(t *testing.T) {
 			recoveryEnv(t)
 			run := runRecovery(t, word)
