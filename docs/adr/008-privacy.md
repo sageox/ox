@@ -511,6 +511,9 @@ remain excluded; signed-in production events now carry the SageOx user ID.
   `install_id`, the existing random `client_id`. Signed-out, team-token,
   environment-token and non-production runs keep the install as `distinct_id`
   without `user_id`. Identity lookup is local and makes no network request.
+  The person is read when the command starts, so `ox logout` names who logged
+  out; `ox login`, and a command that picks another endpoint mid-run, read it
+  when they end.
   Deleting `client_id` changes the install ID, not the signed-in person ID.
 - **D3 amended.** The closed property list also includes `user_id`, `install_id`,
   `cli_version`, `env` (`production` or `test`), `surface` (`cli`), `cli_actor`,

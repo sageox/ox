@@ -647,6 +647,44 @@ func TestPostHogCaptureOpts_PersonBoundary(t *testing.T) {
 	}
 }
 
+// Failure prevented: `ox logout` is counted under the install instead of the
+// person who logged out, and `ox login` keeps the person who was signed in
+// before it (or none) instead of the one it signed in.
+func TestPostHogCaptureOpts_PersonAtCommandStart(t *testing.T) {
+	save := func(t *testing.T, id string) {
+		t.Helper()
+		require.NoError(t, auth.SaveTokenForEndpoint(endpoint.Default, &auth.StoredToken{
+			AccessToken: "opaque_fixture", ExpiresAt: time.Now().Add(time.Hour), UserInfo: auth.UserInfo{UserID: id},
+		}))
+	}
+	for _, tt := range []struct {
+		name, use, before, after, want string
+	}{
+		{name: "logout keeps the person", use: "logout", before: "usr_alice", want: "usr_alice"},
+		{name: "login sends the new person", use: "login", after: "usr_alice", want: "usr_alice"},
+		{name: "login switch sends the new account", use: "login", before: "usr_alice", after: "usr_bob", want: "usr_bob"},
+		{name: "other commands keep the start person", use: "status", before: "usr_alice", after: "usr_bob", want: "usr_alice"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			withIsolatedConfig(t)
+			t.Setenv("SAGEOX_ENDPOINT", endpoint.Default)
+			t.Setenv("SAGEOX_TOKEN", "")
+			t.Setenv("OX_XDG_DISABLE", "")
+			if tt.before != "" {
+				save(t, tt.before)
+			}
+			c := &cli.Context{Cmd: &cobra.Command{Use: tt.use}, CommandStartTime: time.Now()}
+			startPostHogIdentity(c)
+			if tt.after != "" {
+				save(t, tt.after)
+			} else {
+				require.NoError(t, auth.RemoveTokenForEndpoint(endpoint.Default))
+			}
+			assert.Equal(t, tt.want, postHogCaptureOpts(c).PersonID)
+		})
+	}
+}
+
 // Failure prevented: a selected staging operation inherits a cached production person's identity.
 func TestPostHogCaptureOpts_InvocationEndpoint(t *testing.T) {
 	const staging = "https://test.sageox.ai"
