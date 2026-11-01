@@ -680,7 +680,25 @@ func removeHooks(gitRoot string) error {
 		return nil
 	}
 
-	// remove the hooks
+	// Current ox sections first, cut at their end marker so user content around
+	// them survives. Only hook files the scan found are touched: a stray
+	// directory at another hook's path must not stop the removal. The scan
+	// below then removes what older ox versions and beads left behind.
+	if !uninstallDryRun {
+		found := make(map[string]bool, len(hooks))
+		for _, hook := range hooks {
+			found[hook.Name] = true
+		}
+		hooksDir := resolveHooksDir(gitRoot)
+		for _, spec := range allHookSpecs() {
+			if !found[spec.name] {
+				continue
+			}
+			if err := uninstallHookSection(hooksDir, spec); err != nil {
+				return fmt.Errorf("removing hooks: %w", err)
+			}
+		}
+	}
 	if err := uninstall.RemoveRepoHooks(gitRoot, uninstallDryRun); err != nil {
 		return fmt.Errorf("removing hooks: %w", err)
 	}

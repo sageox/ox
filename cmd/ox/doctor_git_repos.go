@@ -290,17 +290,9 @@ func checkGitHooks() checkResult {
 		return SkippedCheck("Git hooks", "not in git repo", "")
 	}
 
-	// check core.hooksPath configuration
-	hooksPath := getGitConfigValue("core.hooksPath")
-
-	// check default hooks directory
-	defaultHooksDir := gitRoot + "/.git/hooks"
-	if hooksPath != "" {
-		defaultHooksDir = hooksPath
-	}
-
-	// look for active hooks (executable files without .sample extension)
-	entries, err := os.ReadDir(defaultHooksDir)
+	// look for active hooks (executable files without .sample extension) where
+	// git runs them: core.hooksPath, or the common dir from a linked worktree
+	entries, err := os.ReadDir(resolveHooksDir(gitRoot))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return PassedCheck("Git hooks", "no hooks directory")
