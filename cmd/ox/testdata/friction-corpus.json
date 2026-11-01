@@ -842,7 +842,7 @@
   },
   {
    "argv": [
-    "mcp",
+    "rpc",
     "serve",
     "--help"
    ],
@@ -1377,7 +1377,7 @@
   },
   {
    "argv": [
-    "mcp",
+    "rpc",
     "--help"
    ],
    "events": 1,

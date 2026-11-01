@@ -1,8 +1,7 @@
 package main
 
 import (
-	"encoding/json"
-
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/spf13/cobra"
@@ -34,7 +33,13 @@ var mcpHeadersCmd = &cobra.Command{
 		if id := useragent.RepoID(); id != "" {
 			headers[useragent.HeaderRepoID] = id
 		}
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(headers)
+		// MCP consumes these bytes as a protocol, even when terminal color is forced.
+		data, err := cli.MarshalJSONIndent(headers)
+		if err != nil {
+			return err
+		}
+		_, err = cmd.OutOrStdout().Write(data)
+		return err
 	},
 }
 

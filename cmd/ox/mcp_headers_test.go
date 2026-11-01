@@ -9,14 +9,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/colorprofile"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/theme"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/stretchr/testify/require"
 )
 
 // Failure prevented: an MCP helper leaks credentials, emits malformed headers, or starts network telemetry.
 func TestMCPHeadersLocalOutput(t *testing.T) {
+	previousProfile := theme.Profile
+	theme.Profile = colorprofile.TrueColor
+	t.Cleanup(func() { theme.Profile = previousProfile })
 	tests := []struct {
 		name, repoID, rawConfig string
 		sageoxDir, initialized  bool
