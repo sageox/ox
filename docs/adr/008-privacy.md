@@ -526,10 +526,11 @@ remain excluded; signed-in production events now carry the SageOx user ID.
   both to preserve an occurrence during replay. Command capture remains after
   the command returns: start time is the end timestamp minus `duration_ms`.
 - The allowed event names also include `context.used` and `murmur.published`;
-  their senders are added separately. This addendum does not implement them.
+  their senders are added separately. Their property lists are below.
 - Events still create no person profile (`$process_person_profile: false`),
   disable GeoIP (`$geoip_disable: true`), and carry no email, name, path,
-  prompt, token, argument values or free text. Product usage is not gated by
+  prompt, token, free-text argument values or free text (an argument is sent
+  only as an exact SageOx ID or one of the fixed values listed here). Product usage is not gated by
   marketing-site consent or region. The existing telemetry switches and
   `DO_NOT_TRACK=1` still stop collection.
 - The updated notice is shown once to people who saw the earlier notice,
@@ -539,3 +540,52 @@ Session metadata synced to the Ledger also starts carrying the filled-in
 SageOx user ID (for a login stored before this change, read from the access
 token's `usr_` subject until the next sign-in). That is the intended repair to identity loading, separate
 from the PostHog property contract.
+
+### Clarification (2026-11-01): Context use and murmur publication
+
+The two event names approved above now have CLI senders. They use the same
+person rule, telemetry switches and detached sender as `ox command run`.
+They create no person profile, disable GeoIP, make no retries and drop an
+event when all sender slots are occupied. A failed capture never changes
+the command's output or exit code.
+
+- `context.used` is sent after a successful context-use trace append. Its
+  closed property list is `ref` (optional), `ref_type`, `evidence` (`reported`
+  or `none`), `session_id` (only while a SageOx recording is active: the
+  recording's ID), `agent_type`, and optional `repo_id` / `team_id`.
+  `ref` is included only for an exact canonical SageOx conversation,
+  recording or plan ID; paths, URLs and free-text slugs are excluded.
+  `ref_type` is empty, `session`, `discussion`, `doc`, `file`, `murmur`,
+  `plan`, `kb` or `other`. Unknown types become `other`. Titles, aliases,
+  URLs and the reader's `--why` text are never sent.
+  No `context.used` is sent while the recording is paused (ADR-020): pause
+  is fail-closed, and an event key derived from the session ID could be
+  re-linked once the session is published. While `session_publishing` is
+  manual (resolved now, or recorded when the session started), the event
+  omits `session_id`, so a held session is never named to the server. A
+  recording without a session ID (started by an older ox) also omits
+  `session_id`.
+- `murmur.published` is sent after a successful IPC hand-off or outbox
+  write. Its closed property list is `murmur_id`, `importance`, `scope`,
+  optional `team_id` and `topic`. The allowed topics are `general`, `wip`,
+  `lint`, `architecture` and `conflict`; every other value becomes `other`.
+  Murmur text, files and principal details are never sent.
+- Both events also carry `actor`, `cli_actor`, `surface: cli`, `env` and
+  `event_version: 1`, plus the sender's existing `install_id`, optional
+  `user_id`, `cli_version`, `$lib`, `$lib_version`, `os`, `arch`,
+  `$process_person_profile` and `$geoip_disable` properties.
+- The fixed UUIDv5 namespace is `6d8961b7-070a-585f-aeae-ae2b06ad2ce1`
+  (UUIDv5 of the URL namespace and `https://sageox.ai/ox/telemetry`).
+  Context-use occurrence names are `session_id:occurrence_seq`; the
+  occurrence ordinal is persisted under a file lock independently of the
+  existing turn `seq`. A trace without a recording retains a random session
+  scope until that cache trace is removed; that scope keys the event UUID
+  only and is never sent as `session_id`. Murmur occurrence names are the
+  murmur ID. Both use the stored occurrence timestamp on replay. PostHog
+  collapses a replay only when the distinct ID also matches, and the person
+  ID is resolved at send time: a replay after signing in or out is counted
+  again in PostHog. The layer dedupes on the UUID alone.
+
+This fills in the already-approved event names and preserves the existing
+no-free-text promise. The notice's wording now includes context use and
+murmur publication; its version remains unchanged.

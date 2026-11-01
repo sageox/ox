@@ -230,6 +230,7 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 	// Fast path: deliver to a running daemon via IPC (it owns the file write + commit).
 	if client := daemon.TryConnect(); client != nil {
 		if err := client.Murmur(payload); err == nil {
+			captureMurmurPublished(projectRoot, murmur)
 			slog.Info("murmur published", "id", id.String(), "topic", topic, "importance", importance, "scope", scope)
 			fmt.Fprintf(cmd.OutOrStdout(), "Murmur published: %s\n", id.String())
 			return nil
@@ -244,6 +245,7 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 		slog.Error("murmur outbox write failed", "id", id.String(), "error", err)
 		return fmt.Errorf("queue murmur: %w", err)
 	}
+	captureMurmurPublished(projectRoot, murmur)
 	_ = daemon.StartDaemonNoWait() // best-effort, non-blocking
 	slog.Info("murmur queued", "id", id.String(), "topic", topic, "importance", importance, "scope", scope)
 	fmt.Fprintf(cmd.OutOrStdout(), "Murmur queued (daemon starting, will sync shortly): %s\n", id.String())

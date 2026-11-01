@@ -8,15 +8,19 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/oxactivity"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
 	"github.com/sageox/ox/internal/session/contextuse"
+	"github.com/sageox/ox/internal/telemetry"
 )
 
 var testSurfaced = []contextuse.SurfacedRef{
@@ -24,6 +28,209 @@ var testSurfaced = []contextuse.SurfacedRef{
 	{Ref: "Ox7f9c", RefType: "murmur", Via: contextuse.ViaWhisper, Seq: 4},
 	{Ref: "MEMORY.md", RefType: "doc", Via: contextuse.ViaPrime},
 	{Ref: "2026-10-01-dana-auth", RefType: "session", Via: contextuse.ViaRecall, Title: "Auth middleware rewrite", Seq: 2},
+}
+
+// Failure prevented: private refs and --why text leak, or capture precedes persistence.
+func TestAgentContextUsed_PostHogPrivacyAndReplay(t *testing.T) {
+	const id = "cnv_019ff2f5-2079-7be1-b05e-8caad2772e61"
+	for _, tt := range []struct {
+		name, ref, kind, wantRef, wantType string
+		none                               bool
+	}{
+		// Failure prevented: canonical opaque IDs are lost with private refs.
+		{"conversation", id, "discussion", id, "discussion", false},
+		{"recording", "rec_019ff2f5-2079-7be1-b05e-8caad2772e61", "discussion", id, "discussion", false},
+		{"plan", "pln_019ff2f5-2079-7be1-b05e-8caad2772e61", "plan", "pln_019ff2f5-2079-7be1-b05e-8caad2772e61", "plan", false},
+		// Failure prevented: URLs, paths, slugs and ID-shaped free text escape.
+		{"URL", "https://example.invalid/private", "doc", "", "doc", false},
+		{"path", "/private/project/file.md", "file", "", "file", false},
+		{"slug", "private-project-plan", "plan", "", "plan", false},
+		{"fake ID", "pln_private-plan", "plan", "", "plan", false},
+		// Failure prevented: legacy discussion IDs widen the documented ref allowlist.
+		{"legacy discussion", "dsc_019ff2f5-2079-7be1-b05e-8caad2772e61", "discussion", "", "discussion", false},
+		{"free type", "private-ref", "private-type", "", "other", false},
+		// Failure prevented: --none invents a reference or evidence of use.
+		{"none", "", "", "", "", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := setupSessionTestProject(t)
+			var tracePath string
+			captured := captureUsageForTest(t, func(c capturedUsage) {
+				events, err := contexttrace.ReadEvents(tracePath)
+				require.NoError(t, err)
+				// capture runs under a recover: an index panic here would pass silently
+				require.NotEmpty(t, events, "the use must be on disk before it is captured")
+				require.Equal(t, contexttrace.EventUsed, events[len(events)-1].Type)
+			})
+			require.NoError(t, config.SaveProjectConfig(root, &config.ProjectConfig{RepoID: "repo_fixture", TeamID: "team_fixture"}))
+			state, err := session.StartRecording(root, session.StartRecordingOptions{AgentID: "OxPh01", AdapterName: "codex"})
+			require.NoError(t, err)
+			writer := contexttrace.NewWriter(state.SessionPath)
+			tracePath = writer.Path()
+			if !tt.none {
+				require.NoError(t, writer.Append(contexttrace.Event{Type: contexttrace.EventProvided, Ref: tt.ref, RefType: tt.kind, Title: "private-title", URL: "https://example.invalid/title", Source: contexttrace.SourceOnDemand, Mechanism: contexttrace.MechanismRetrieval}))
+			}
+			var out bytes.Buffer
+			require.NoError(t, runAgentContextUsed(&out, root, "OxPh01", contextUsedArgs{ref: tt.ref, why: "private-why", none: tt.none}))
+			require.Len(t, *captured, 1)
+			c := (*captured)[0]
+			assert.Equal(t, "context.used", c.Event)
+			var closed struct {
+				Ref       string `json:"ref"`
+				RefType   string `json:"ref_type"`
+				Evidence  string `json:"evidence"`
+				SessionID string `json:"session_id"`
+				AgentType string `json:"agent_type"`
+				Actor     string `json:"actor"`
+				CLIActor  string `json:"cli_actor"`
+				Surface   string `json:"surface"`
+				Env       string `json:"env"`
+				Version   int    `json:"event_version"`
+				RepoID    string `json:"repo_id"`
+				TeamID    string `json:"team_id"`
+			}
+			raw := strictUsageProps(t, c.Props, &closed)
+			wantKeys := 11
+			if tt.wantRef != "" {
+				wantKeys++
+			}
+			assert.Len(t, c.Props, wantKeys)
+			assert.Equal(t, tt.wantRef, closed.Ref)
+			if tt.wantRef == "" {
+				assert.NotContains(t, c.Props, "ref")
+			}
+			assert.Equal(t, tt.wantType, closed.RefType)
+			wantEvidence := "reported"
+			if tt.none {
+				wantEvidence = "none"
+			}
+			assert.Equal(t, wantEvidence, closed.Evidence)
+			assert.Equal(t, state.SessionID, closed.SessionID)
+			assert.Equal(t, "cli", closed.Surface)
+			assert.Equal(t, 1, closed.Version)
+			assert.Equal(t, "repo_fixture", closed.RepoID)
+			assert.Equal(t, "team_fixture", closed.TeamID)
+			for _, private := range []string{"private-why", "private-title", "https://example.invalid", "private-type"} {
+				assert.NotContains(t, string(raw), private)
+			}
+			events, err := contexttrace.ReadEvents(tracePath)
+			require.NoError(t, err)
+			ev := events[len(events)-1]
+			at, err := time.Parse(time.RFC3339Nano, ev.Timestamp)
+			require.NoError(t, err)
+			assert.Equal(t, at, c.Opts.At)
+			captureContextUsed(root, ev, true)
+			require.Len(t, *captured, 2)
+			assert.Equal(t, c.Opts, (*captured)[1].Opts)
+		})
+	}
+}
+
+// Failure prevented: changing the frozen namespace or key encoding breaks replay deduplication.
+func TestPostHogUsage_FrozenOccurrenceIDs(t *testing.T) {
+	captured := captureUsageForTest(t, nil)
+	const sessionID = "ses_019ff2f5-2079-7be1-b05e-8caad2772e61"
+	const at = "2026-10-31T12:00:00Z"
+	captureContextUsed("", contexttrace.Event{SessionID: sessionID, OccurrenceSeq: 1, Timestamp: at, Evidence: "reported"}, true)
+	timestamp, err := time.Parse(time.RFC3339, at)
+	require.NoError(t, err)
+	captureMurmurPublished("", ledger.MurmurFile{ID: "019ff2f5-2079-7be1-b05e-8caad2772e61", Timestamp: timestamp})
+	require.Len(t, *captured, 2)
+	assert.Equal(t, "7f238a71-e34a-5300-bac1-66a6683fabae", (*captured)[0].Opts.UUID)
+	assert.Equal(t, "1f5d802c-0480-563f-a24d-851d7727a60c", (*captured)[1].Opts.UUID)
+}
+
+// Failure prevented: failed trace writes emit usage, or telemetry panics fail a successful command.
+func TestAgentContextUsed_PostHogWriteAndCaptureFailure(t *testing.T) {
+	for _, failWrite := range []bool{false, true} {
+		t.Run(fmt.Sprint(failWrite), func(t *testing.T) {
+			root := setupSessionTestProject(t)
+			captured := captureUsageForTest(t, nil)
+			trace, err := resolveAgentContextTrace(root, "OxPh02")
+			require.NoError(t, err)
+			if failWrite {
+				require.NoError(t, os.Mkdir(trace.writer.Path(), 0o755))
+			} else {
+				capturePostHogUsage = func(string, map[string]any, telemetry.CaptureOpts) { panic("sender failed") }
+			}
+			var out bytes.Buffer
+			err = runAgentContextUsed(&out, root, "OxPh02", contextUsedArgs{none: true})
+			if failWrite {
+				require.ErrorContains(t, err, "record context use")
+			} else {
+				require.NoError(t, err)
+				assert.Contains(t, out.String(), `"success": true`)
+			}
+			assert.Empty(t, *captured)
+		})
+	}
+}
+
+// Failure prevented: interrupted or large trace entries swallow a successful
+// use or make separate successful uses share one analytics occurrence.
+func TestAgentContextUsed_PostHogTraceRecovery(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		tail        string
+		trimNewline bool
+	}{
+		// Failure prevented: a partial append consumes the next valid use line.
+		{name: "interrupted JSON", tail: `{"type":`},
+		// Failure prevented: a complete record without its newline merges with the next use.
+		{name: "complete unterminated JSON", tail: `{"type":"invoked","ts":"2026-11-01T00:00:00Z","source":"ox-cli"}`},
+		// Failure prevented: an already recorded use without its newline is lost or its ordinal reused.
+		{name: "unterminated previous use", trimNewline: true},
+		// Failure prevented: long metadata from a tool response blocks subsequent use reports.
+		{name: "large complete line", tail: `{"type":"provided","ts":"2026-11-01T00:00:00Z","source":"on-demand","title":"` + strings.Repeat("x", 70<<10) + "\"}\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := setupSessionTestProject(t)
+			captured := captureUsageForTest(t, nil)
+			state, err := session.StartRecording(root, session.StartRecordingOptions{AgentID: "OxBr01", AdapterName: "codex"})
+			require.NoError(t, err)
+			tracePath := contexttrace.NewWriter(state.SessionPath).Path()
+			record := func() {
+				var out bytes.Buffer
+				require.NoError(t, runAgentContextUsed(&out, root, "OxBr01", contextUsedArgs{none: true}))
+				assert.Contains(t, out.String(), `"success": true`)
+			}
+			record()
+			if tt.trimNewline {
+				raw, err := os.ReadFile(tracePath)
+				require.NoError(t, err)
+				require.NoError(t, os.WriteFile(tracePath, bytes.TrimSuffix(raw, []byte{'\n'}), 0o600))
+			}
+			f, err := os.OpenFile(tracePath, os.O_APPEND|os.O_WRONLY, 0o600)
+			require.NoError(t, err)
+			_, err = f.WriteString(tt.tail)
+			require.NoError(t, err)
+			require.NoError(t, f.Close())
+			before, err := os.ReadFile(tracePath)
+			require.NoError(t, err)
+			record()
+			record()
+			require.Len(t, *captured, 3)
+			assert.NotEqual(t, (*captured)[0].Opts.UUID, (*captured)[1].Opts.UUID)
+			assert.NotEqual(t, (*captured)[1].Opts.UUID, (*captured)[2].Opts.UUID)
+			after, err := os.ReadFile(tracePath)
+			require.NoError(t, err)
+			assert.True(t, bytes.HasPrefix(after, before), "repair must preserve all prior trace bytes")
+			events, err := contexttrace.ReadEvents(tracePath)
+			require.NoError(t, err)
+			var uses []contexttrace.Event
+			for _, ev := range events {
+				if ev.Type == contexttrace.EventUsed {
+					uses = append(uses, ev)
+				}
+			}
+			require.Len(t, uses, 3, "every successful use must remain replayable")
+			for i, ev := range uses {
+				assert.Equal(t, i+1, ev.OccurrenceSeq)
+				captureContextUsed(root, ev, true)
+				assert.Equal(t, (*captured)[i].Opts, (*captured)[i+3].Opts)
+			}
+		})
+	}
 }
 
 func TestResolveSurfacedRef(t *testing.T) {
@@ -406,6 +613,98 @@ func TestAgentContextUsed_AnySurfacedName(t *testing.T) {
 			require.NoError(t, json.Unmarshal(buf.Bytes(), &list))
 			require.Len(t, list.Surfaced, 1)
 			assert.Equal(t, contexttrace.EvidenceReported, list.Surfaced[0].Evidence)
+		})
+	}
+}
+
+// Failure prevented: a use reported with no recording sends its minted trace
+// scope as session_id, which looks like a real session: distinct-session
+// counts grow and joins to recordings silently miss.
+func TestAgentContextUsed_UnrecordedUseSendsNoSessionID(t *testing.T) {
+	projectRoot := setupSessionTestProject(t)
+	captured := captureUsageForTest(t, nil)
+	const agentID = "OxCu03"
+	for range 2 {
+		var buf bytes.Buffer
+		require.NoError(t, runAgentContextAt(&buf, projectRoot, agentID, []string{"used", "--none"}))
+	}
+	require.Len(t, *captured, 2)
+	for _, c := range *captured {
+		assert.Equal(t, "context.used", c.Event)
+		assert.NotContains(t, c.Props, "session_id")
+	}
+	// the minted scope still keys the uuid: two uses, two occurrences
+	assert.NotEqual(t, (*captured)[0].Opts.UUID, (*captured)[1].Opts.UUID)
+
+	events, err := contexttrace.ReadEvents(filepath.Join(agentTraceCacheDir(projectRoot), agentID+".jsonl"))
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	captureContextUsed(projectRoot, events[1], false)
+	require.Len(t, *captured, 3)
+	assert.Equal(t, (*captured)[1].Opts, (*captured)[2].Opts, "a replay keeps its uuid and time")
+}
+
+// Failure prevented: a paused recording, a held (manual publishing) recording
+// or an older recording without an ID names a session to PostHog that pause
+// or manual publishing promised to keep on this machine.
+func TestAgentContextUsed_PostHogPauseAndManualPublishing(t *testing.T) {
+	const ref = "cnv_019ff2f5-2079-7be1-b05e-8caad2772e61"
+	for _, tt := range []struct {
+		name          string
+		envPublishing string
+		update        func(*session.RecordingState)
+		wantCapture   bool
+		wantSessionID bool
+	}{
+		// Failure prevented: an active auto recording loses its session link and ref.
+		{name: "active auto recording", wantCapture: true, wantSessionID: true},
+		// Failure prevented: a use inside a paused range reaches PostHog with a key derived from the session.
+		{name: "paused", update: func(s *session.RecordingState) { now := time.Now(); s.SuspendedAt = &now }},
+		// Failure prevented: manual publishing resolved now (env) still names the held session.
+		{name: "manual resolved now", envPublishing: config.SessionPublishingManual, wantCapture: true},
+		// Failure prevented: a recording started under manual publishing names its held session once the setting reads auto.
+		{name: "manual recorded on the state", update: func(s *session.RecordingState) { s.PublishingMode = config.SessionPublishingManual }, wantCapture: true},
+		// Failure prevented: an older recording with no session ID sends its minted trace scope as session_id.
+		{name: "recording without session id", update: func(s *session.RecordingState) { s.SessionID = "" }, wantCapture: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := setupSessionTestProject(t)
+			captured := captureUsageForTest(t, nil)
+			t.Setenv(config.EnvSessionPublishing, "")
+			const agentID = "OxPh02"
+			state, err := session.StartRecording(root, session.StartRecordingOptions{AgentID: agentID, AdapterName: "codex"})
+			require.NoError(t, err)
+			require.NotEmpty(t, state.SessionID)
+			require.False(t, state.RecordedManualPublishing(), "the recording must start in auto mode")
+			if tt.update != nil {
+				require.NoError(t, session.UpdateRecordingStateAt(state.SessionPath, state.SessionID, tt.update))
+			}
+			if tt.envPublishing != "" {
+				t.Setenv(config.EnvSessionPublishing, tt.envPublishing)
+			}
+			writer := contexttrace.NewWriter(state.SessionPath)
+			require.NoError(t, writer.Append(contexttrace.Event{Type: contexttrace.EventProvided, Ref: ref, RefType: "discussion", Source: contexttrace.SourceOnDemand, Mechanism: contexttrace.MechanismRetrieval}))
+
+			var out bytes.Buffer
+			require.NoError(t, runAgentContextUsed(&out, root, agentID, contextUsedArgs{ref: ref}))
+
+			events, err := contexttrace.ReadEvents(writer.Path())
+			require.NoError(t, err)
+			require.Len(t, events, 2, "the use is recorded locally whatever is sent")
+			assert.Equal(t, contexttrace.EventUsed, events[1].Type)
+			if !tt.wantCapture {
+				assert.Empty(t, *captured)
+				return
+			}
+			require.Len(t, *captured, 1)
+			c := (*captured)[0]
+			assert.Equal(t, "context.used", c.Event)
+			assert.Equal(t, ref, c.Props["ref"])
+			if tt.wantSessionID {
+				assert.Equal(t, state.SessionID, c.Props["session_id"])
+			} else {
+				assert.NotContains(t, c.Props, "session_id")
+			}
 		})
 	}
 }
