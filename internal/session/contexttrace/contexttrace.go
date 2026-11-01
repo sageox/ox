@@ -203,6 +203,10 @@ func (w *Writer) Path() string {
 // Append marshals the event to JSON and appends it as a single line.
 // Creates the file if it doesn't exist. Safe for sequential use; not goroutine-safe.
 func (w *Writer) Append(event Event) error {
+	return w.append(event, false)
+}
+
+func (w *Writer) append(event Event, separateTail bool) error {
 	if event.Timestamp == "" {
 		event.Timestamp = Now()
 	}
@@ -210,6 +214,9 @@ func (w *Writer) Append(event Event) error {
 	line, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("marshal context-trace event: %w", err)
+	}
+	if separateTail {
+		line = append([]byte{'\n'}, line...)
 	}
 	line = append(line, '\n')
 

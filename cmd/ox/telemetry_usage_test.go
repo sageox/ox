@@ -93,3 +93,27 @@ func strictUsageProps(t *testing.T, props map[string]any, target any) []byte {
 	require.NoError(t, d.Decode(target))
 	return raw
 }
+
+// Failure prevented: a damaged replay silently acquires a new capture time or
+// emits an occurrence without its valid persisted session scope and ordinal.
+func TestPostHogUsage_InvalidOccurrencesAreDropped(t *testing.T) {
+	const scope = "ses_019ff2f5-2079-7be1-b05e-8caad2772e61"
+	const timestamp = "2026-11-01T00:00:00Z"
+	for _, tt := range []struct {
+		name, sessionID, at string
+		seq                 int
+	}{
+		// Failure prevented: arbitrary session text becomes analytics identity.
+		{"invalid scope", "private-session", timestamp, 1},
+		// Failure prevented: a trace with no allocated ordinal becomes a synthetic event.
+		{"missing ordinal", scope, timestamp, 0},
+		// Failure prevented: an invalid clock becomes time.Now during capture.
+		{"invalid time", scope, "invalid-time", 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			captured := captureUsageForTest(t, nil)
+			captureContextUsed("", contexttrace.Event{SessionID: tt.sessionID, OccurrenceSeq: tt.seq, Timestamp: tt.at, Evidence: "reported"})
+			assert.Empty(t, *captured)
+		})
+	}
+}

@@ -3,7 +3,6 @@ package contexttrace
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/fileutil"
@@ -51,21 +50,7 @@ func (w *Writer) AppendUse(ctx context.Context, event Event, sessionID string) (
 		if event.Timestamp == "" {
 			event.Timestamp = Now()
 		}
-		if unterminated {
-			f, err := os.OpenFile(w.path, os.O_APPEND|os.O_WRONLY, 0o644)
-			if err != nil {
-				return fmt.Errorf("open context-trace tail: %w", err)
-			}
-			_, writeErr := f.Write([]byte{'\n'})
-			closeErr := f.Close()
-			if writeErr != nil {
-				return fmt.Errorf("separate context-trace tail: %w", writeErr)
-			}
-			if closeErr != nil {
-				return fmt.Errorf("close context-trace tail: %w", closeErr)
-			}
-		}
-		return w.Append(event)
+		return w.append(event, unterminated)
 	})
 	if err != nil {
 		return Event{}, err

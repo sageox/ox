@@ -3,6 +3,7 @@ package contexttrace
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -52,6 +53,50 @@ func TestAppendUse_UniquePersistedOccurrences(t *testing.T) {
 				require.NoError(t, err)
 				assert.NotEqual(t, events[0].SessionID, fresh.SessionID)
 				assert.Equal(t, 1, fresh.OccurrenceSeq)
+			}
+		})
+	}
+}
+
+// Failure prevented: invalid use records enter the trace, or an unsuccessful
+// append returns an occurrence a caller could publish as if it were persisted.
+func TestAppendUse_RejectsInvalidAndUnwritableRecords(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		event         Event
+		sessionID     string
+		missingParent bool
+		blockedParent bool
+		want          string
+	}{
+		// Failure prevented: another trace event is allocated a use identity.
+		{name: "wrong event type", event: Event{Type: EventProvided}, want: "expected used event"},
+		// Failure prevented: arbitrary session text becomes an occurrence scope.
+		{name: "invalid session ID", event: Event{Type: EventUsed}, sessionID: "private-session", want: "invalid session ID"},
+		// Failure prevented: the append error is masked after a successful empty read.
+		{name: "missing parent", event: Event{Type: EventUsed}, missingParent: true, want: "open context-trace file"},
+		// Failure prevented: an unreadable existing trace is mistaken for an empty trace.
+		{name: "parent is a file", event: Event{Type: EventUsed}, blockedParent: true, want: "open context-trace file"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), FileName)
+			if tt.missingParent {
+				path = filepath.Join(t.TempDir(), "missing", FileName)
+			}
+			parent := filepath.Join(t.TempDir(), "blocked")
+			if tt.blockedParent {
+				require.NoError(t, os.WriteFile(parent, []byte("preserve"), 0o600))
+				path = filepath.Join(parent, FileName)
+			}
+			event, err := NewFileWriter(path).AppendUse(context.Background(), tt.event, tt.sessionID)
+			require.ErrorContains(t, err, tt.want)
+			assert.Equal(t, Event{}, event)
+			if tt.blockedParent {
+				raw, err := os.ReadFile(parent)
+				require.NoError(t, err)
+				assert.Equal(t, "preserve", string(raw))
+			} else {
+				assert.NoFileExists(t, path)
 			}
 		})
 	}
