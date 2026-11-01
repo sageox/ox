@@ -54,6 +54,56 @@ func TestSessionReachFor(t *testing.T) {
 	}
 }
 
+// TestInitDockFor verifies the dock names a team only when registration just
+// confirmed one, and falls back to the team ID when the server sent no name.
+// Failure prevented: a skipped registration looking connected because an old
+// team ID was still in config, and a blank team name printing an empty arrow.
+func TestInitDockFor(t *testing.T) {
+	t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
+	gitRoot := t.TempDir()
+
+	tests := []struct {
+		name     string
+		cfg      *config.ProjectConfig
+		onTeam   bool
+		wantTeam string
+	}{
+		{"on a team, with a name", &config.ProjectConfig{TeamID: "team_1", TeamName: "Team A"}, true, "Team A"},
+		{"on a team, name blank: the ID stands in", &config.ProjectConfig{TeamID: "team_1", TeamName: "  "}, true, "team_1"},
+		{"a name from the server cannot carry terminal control codes", &config.ProjectConfig{TeamID: "team_1", TeamName: "Team\x1b[31m A"}, true, "Team A"},
+		{"a stale team ID from an earlier init: registration did not confirm", &config.ProjectConfig{TeamID: "team_1", TeamName: "Team A"}, false, ""},
+		{"no team ID", &config.ProjectConfig{TeamName: "Team A"}, true, ""},
+		{"no project config", nil, true, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dock := initDockFor(gitRoot, tt.cfg, tt.onTeam)
+			assert.Equal(t, tt.wantTeam, dock.Team)
+			assert.NotEmpty(t, dock.Repo)
+		})
+	}
+}
+
+// TestPrintInitOffersOnce_SpendsNothingWhenThereIsNothingToOffer verifies a
+// machine without Claude Code is not marked as having been offered.
+// Failure prevented: installing Claude Code later and never being told about
+// Oxy because the one-time offer was used up on a machine that could not use it.
+func TestPrintInitOffersOnce_SpendsNothingWhenThereIsNothingToOffer(t *testing.T) {
+	t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
+	prevOxy, prevPane := newPetInstaller, newUsagePaneInstaller
+	newPetInstaller = func() pet.Installer { return pet.Installer{} }
+	newUsagePaneInstaller = func() claudemod.Installer { return claudemod.Installer{} }
+	t.Cleanup(func() { newPetInstaller, newUsagePaneInstaller = prevOxy, prevPane })
+
+	var out bytes.Buffer
+	printInitOffersOnce(&out)
+	assert.Empty(t, out.String())
+
+	userCfg, err := config.LoadUserConfig()
+	require.NoError(t, err)
+	assert.False(t, userCfg.HasSeenInitOffers(), "the offer is still available")
+}
+
 func TestPendingInitOffers(t *testing.T) {
 	present := t.TempDir()
 	absent := filepath.Join(t.TempDir(), "never-written")

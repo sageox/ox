@@ -109,16 +109,30 @@ func (d InitDock) reach() string {
 	return ""
 }
 
-// wrapAt splits s at sep into two lines when it is wider than width.
+// wrapAt splits s into lines no wider than width. It prefers to break once at
+// sep, which keeps a sentence's clauses together; a sentence with no sep breaks
+// between words instead. A single word wider than width keeps its own line.
 func wrapAt(s, sep string, width int) []string {
 	if lipgloss.Width(s) <= width {
 		return []string{s}
 	}
-	head, tail, ok := strings.Cut(s, sep)
-	if !ok {
-		return []string{s}
+	if head, tail, ok := strings.Cut(s, sep); ok {
+		return []string{head + strings.TrimRight(sep, " "), tail}
 	}
-	return []string{head + strings.TrimRight(sep, " "), tail}
+	var lines []string
+	line := ""
+	for _, word := range strings.Fields(s) {
+		switch {
+		case line == "":
+			line = word
+		case lipgloss.Width(line+" "+word) > width:
+			lines = append(lines, line)
+			line = word
+		default:
+			line += " " + word
+		}
+	}
+	return append(lines, line)
 }
 
 // RenderTryFirst is the plan prompt to paste into an AI coworker. The prompt is

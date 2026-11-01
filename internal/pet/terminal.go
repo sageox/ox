@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io/fs"
 	"math"
 	"strings"
 
@@ -44,6 +45,12 @@ const armsReach = 30
 // picture at all: callers must check theme.Profile themselves and print text
 // alone then.
 func TerminalFrame(animation string, at float64, rows int) (*TerminalArt, error) {
+	return terminalFrameFrom(desktopAssets, animation, at, rows)
+}
+
+// terminalFrameFrom is TerminalFrame over any desktop-set layout, so a damaged
+// set can be drawn from in a test.
+func terminalFrameFrom(assets fs.ReadFileFS, animation string, at float64, rows int) (*TerminalArt, error) {
 	if rows <= 0 {
 		return nil, fmt.Errorf("rows must be positive, got %d", rows)
 	}
@@ -51,7 +58,7 @@ func TerminalFrame(animation string, at float64, rows int) (*TerminalArt, error)
 		return nil, fmt.Errorf("frame position must be within [0, 1], got %v", at)
 	}
 
-	raw, err := desktopAssets.ReadFile(desktopDir + "/manifest.json")
+	raw, err := assets.ReadFile(desktopDir + "/manifest.json")
 	if err != nil {
 		return nil, fmt.Errorf("oxy desktop set: %w", err)
 	}
@@ -82,7 +89,7 @@ func TerminalFrame(animation string, at float64, rows int) (*TerminalArt, error)
 	}
 	figure = figure.Sub(image.Pt(anim.X, anim.Y))
 
-	data, err := desktopAssets.ReadFile(desktopDir + "/" + animation + ".png")
+	data, err := assets.ReadFile(desktopDir + "/" + animation + ".png")
 	if err != nil {
 		return nil, fmt.Errorf("desktop animation %q: %w", animation, err)
 	}

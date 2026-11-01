@@ -1,8 +1,14 @@
 package pet
 
 import (
+	"bytes"
+	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
@@ -96,6 +102,140 @@ func TestTerminalFrame_RejectsBadRequests(t *testing.T) {
 			art, err := TerminalFrame(tt.animation, tt.at, tt.rows)
 			require.Error(t, err)
 			assert.Nil(t, art)
+		})
+	}
+}
+
+const (
+	fakeManifestPath = desktopDir + "/manifest.json"
+	fakeStripPath    = desktopDir + "/wave.png"
+)
+
+// desktopSet is a two-frame desktop set small enough to write out in full: one
+// animation, "wave", 8x8 pixels a frame, with Oxy filling its top-left corner.
+// editManifest changes the manifest before it is written; a test then edits the
+// returned files to break the set another way.
+func desktopSet(t *testing.T, editManifest func(m *HiresManifest)) fstest.MapFS {
+	t.Helper()
+	strip := image.NewNRGBA(image.Rect(0, 0, 16, 8))
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 16; x += 8 {
+			for dx := 0; dx < 4; dx++ {
+				strip.SetNRGBA(x+dx, y, color.NRGBA{R: 200, G: 120, B: 40, A: 255})
+			}
+		}
+	}
+	var encoded bytes.Buffer
+	require.NoError(t, png.Encode(&encoded, strip))
+
+	manifest := HiresManifest{
+		Figure:     Rect{X: 0, Y: 0, Width: 4, Height: 4},
+		Animations: map[string]HiresAnimation{"wave": {MS: []int{100, 100}, Rect: Rect{Width: 8, Height: 8}}},
+	}
+	if editManifest != nil {
+		editManifest(&manifest)
+	}
+	raw, err := json.Marshal(manifest)
+	require.NoError(t, err)
+	return fstest.MapFS{
+		fakeManifestPath: {Data: raw},
+		fakeStripPath:    {Data: encoded.Bytes()},
+	}
+}
+
+// TestTerminalFrameFrom_DrawsTheSetItIsGiven verifies the fake set is a sound
+// baseline, and that a set without per-frame durations is counted by Frames.
+func TestTerminalFrameFrom_DrawsTheSetItIsGiven(t *testing.T) {
+	withProfile(t, colorprofile.TrueColor)
+
+	tests := []struct {
+		name string
+		edit func(m *HiresManifest)
+	}{
+		{"durations give the frame count", nil},
+		{"an older set without durations is counted by Frames", func(m *HiresManifest) {
+			m.Animations["wave"] = HiresAnimation{Frames: 2, Rect: Rect{Width: 8, Height: 8}}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			art, err := terminalFrameFrom(desktopSet(t, tt.edit), "wave", 1, 3)
+			require.NoError(t, err)
+			require.Len(t, art.Lines, 3)
+			assert.Contains(t, strings.Join(art.Lines, ""), "▀", "the figure is drawn")
+		})
+	}
+}
+
+// TestTerminalFrameFrom_NamesWhatIsWrongWithADamagedSet verifies each way the
+// embedded art can be wrong comes back as an error that says which, never a
+// panic or a blank picture.
+// Failure prevented: a bad art re-import crashing `ox login` at its last step,
+// after the person has already signed in.
+func TestTerminalFrameFrom_NamesWhatIsWrongWithADamagedSet(t *testing.T) {
+	withProfile(t, colorprofile.TrueColor)
+
+	tests := []struct {
+		name         string
+		editManifest func(m *HiresManifest)
+		editFiles    func(files fstest.MapFS)
+		wantErr      string
+	}{
+		{
+			name:      "no manifest",
+			editFiles: func(files fstest.MapFS) { delete(files, fakeManifestPath) },
+			wantErr:   "oxy desktop set",
+		},
+		{
+			name:      "manifest is not JSON",
+			editFiles: func(files fstest.MapFS) { files[fakeManifestPath] = &fstest.MapFile{Data: []byte("{not json")} },
+			wantErr:   "parse desktop manifest",
+		},
+		{
+			name: "animation has no frames",
+			editManifest: func(m *HiresManifest) {
+				m.Animations["wave"] = HiresAnimation{Rect: Rect{Width: 8, Height: 8}}
+			},
+			wantErr: "no frames to draw",
+		},
+		{
+			name:         "animation has no size",
+			editManifest: func(m *HiresManifest) { m.Animations["wave"] = HiresAnimation{MS: []int{100}} },
+			wantErr:      "no frames to draw",
+		},
+		{
+			name:         "figure sits outside the animation's crop",
+			editManifest: func(m *HiresManifest) { m.Figure = Rect{X: 500, Y: 500, Width: 4, Height: 4} },
+			wantErr:      "does not show the figure",
+		},
+		{
+			name:      "strip is missing",
+			editFiles: func(files fstest.MapFS) { delete(files, fakeStripPath) },
+			wantErr:   `desktop animation "wave"`,
+		},
+		{
+			name:      "strip is not a PNG",
+			editFiles: func(files fstest.MapFS) { files[fakeStripPath] = &fstest.MapFile{Data: []byte("not a png")} },
+			wantErr:   "decode desktop strip",
+		},
+		{
+			name: "strip is not frames x size",
+			editManifest: func(m *HiresManifest) {
+				m.Animations["wave"] = HiresAnimation{MS: []int{100, 100, 100}, Rect: Rect{Width: 8, Height: 8}}
+			},
+			wantErr: "want 3 frames of 8x8",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			files := desktopSet(t, tt.editManifest)
+			if tt.editFiles != nil {
+				tt.editFiles(files)
+			}
+			art, err := terminalFrameFrom(files, "wave", 0.5, 3)
+			require.Error(t, err)
+			assert.Nil(t, art)
+			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
 }

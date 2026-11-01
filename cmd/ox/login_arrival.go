@@ -114,10 +114,15 @@ func currentLoginArtEnv(out io.Writer) loginArtEnv {
 // or nil when it may not or cannot be drawn. Art is never worth failing a login
 // over.
 func loginArt(out io.Writer) []string {
-	if !currentLoginArtEnv(out).allowed() {
+	return loginArtFor(currentLoginArtEnv(out), loginArtAnimation)
+}
+
+// loginArtFor is loginArt for a given audience and animation.
+func loginArtFor(env loginArtEnv, animation string) []string {
+	if !env.allowed() {
 		return nil
 	}
-	art, err := pet.TerminalFrame(loginArtAnimation, loginArtPosition, loginArtRows)
+	art, err := pet.TerminalFrame(animation, loginArtPosition, loginArtRows)
 	if err != nil {
 		slog.Debug("login: Oxy art unavailable", "error", err)
 		return nil

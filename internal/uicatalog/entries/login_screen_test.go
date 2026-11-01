@@ -4,10 +4,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sageox/ox/internal/theme"
 	"github.com/sageox/ox/internal/uicatalog"
 )
 
@@ -34,6 +36,27 @@ func TestLoginScreenReference(t *testing.T) {
 	for _, gone := range []string{"/cli/auth", "127.0.0.1:7392", "Local listener", "Tip:", "designed initially for Claude Code"} {
 		assert.NotContains(t, text, gone)
 	}
+	for _, line := range strings.Split(view, "\n") {
+		assert.LessOrEqual(t, ansi.StringWidth(line), 80, line)
+	}
+}
+
+// TestLoginScreenReference_ShowsOxyAtAColorTerminal verifies the catalog draws
+// Oxy beside the block when the terminal has color, the one audience `ox login`
+// draws him for, and still fits 80 columns with him there.
+// Failure prevented: the catalog documenting a picture the command no longer
+// draws, or a picture that pushes the block past the terminal's edge.
+func TestLoginScreenReference_ShowsOxyAtAColorTerminal(t *testing.T) {
+	prev := theme.Profile
+	theme.Profile = colorprofile.TrueColor
+	t.Cleanup(func() { theme.Profile = prev })
+
+	entry, ok := uicatalog.Get("login-screen")
+	require.True(t, ok)
+	view := entry.Render()
+
+	assert.Contains(t, view, "▀", "Oxy's half-block picture")
+	assert.Contains(t, ansi.Strip(view), "Welcome back, Person (person.a@company.test)")
 	for _, line := range strings.Split(view, "\n") {
 		assert.LessOrEqual(t, ansi.StringWidth(line), 80, line)
 	}

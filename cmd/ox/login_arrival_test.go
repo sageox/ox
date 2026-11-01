@@ -20,6 +20,7 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 )
 
@@ -155,6 +156,49 @@ func TestLoginArt_NeverDrawsToAWriterThatIsNotATerminal(t *testing.T) {
 	assert.Nil(t, loginArt(io.Discard))
 }
 
+// TestLoginArtFor verifies Oxy's still reaches the success block for a person
+// at a color terminal, and that a missing animation costs the art, not the login.
+// Failure prevented: a failure to draw the art being returned as a failed login
+// after the credential was already stored.
+func TestLoginArtFor(t *testing.T) {
+	person := loginArtEnv{StdoutTerminal: true, Interactive: true, Profile: colorprofile.TrueColor}
+
+	lines := loginArtFor(person, loginArtAnimation)
+	require.Len(t, lines, loginArtRows, "one string per terminal row")
+	assert.Contains(t, lines[len(lines)/2], "▀", "something is drawn")
+
+	assert.Nil(t, loginArtFor(person, "no-such-animation"), "art that cannot be drawn is left out")
+	assert.Nil(t, loginArtFor(loginArtEnv{StdoutTerminal: true, Interactive: true, Quiet: true, Profile: colorprofile.TrueColor}, loginArtAnimation),
+		"--quiet gets the text alone")
+}
+
+// TestCurrentLoginArtEnv_FollowsTheOutputFlags verifies --quiet and --json,
+// which arrive through the global config, reach the art decision.
+// Failure prevented: Oxy appearing in a --json or --quiet run because the flags
+// were read from somewhere the command never set.
+func TestCurrentLoginArtEnv_FollowsTheOutputFlags(t *testing.T) {
+	prev := cfg
+	t.Cleanup(func() { cfg = prev })
+
+	cfg = &config.Config{Quiet: true}
+	env := currentLoginArtEnv(&bytes.Buffer{})
+	assert.True(t, env.Quiet)
+	assert.False(t, env.JSON)
+
+	cfg = &config.Config{JSON: true}
+	env = currentLoginArtEnv(&bytes.Buffer{})
+	assert.True(t, env.JSON)
+	assert.False(t, env.Quiet)
+}
+
+// TestLoginSpinnerView_SuccessIsSilent verifies the spinner leaves nothing
+// behind when the login worked, because the arrival block is the confirmation.
+// Failure prevented: a second, redundant success line above the arrival block.
+func TestLoginSpinnerView_SuccessIsSilent(t *testing.T) {
+	assert.Empty(t, loginSpinnerModel{done: true}.View().Content)
+	assert.Contains(t, ansi.Strip(loginSpinnerModel{done: true, canceled: true}.View().Content), "canceled", "the other end states still say something")
+}
+
 func TestWriteDeviceInstructions(t *testing.T) {
 	tests := []struct {
 		name string
@@ -220,6 +264,21 @@ func fakeSageox(t *testing.T) *httptest.Server {
 	return server
 }
 
+// isolateLoginEnv points every place a login reads or writes at a throwaway
+// home, and keeps the flow from opening a browser or touching the OS keychain.
+func isolateLoginEnv(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	t.Setenv("SKIP_BROWSER", "1")
+	t.Setenv("CI", "true") // CI is also how git credentials skip the OS keychain
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, "gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+}
+
 // TestRunLoginFlow_PrintsCodeAndThreeLineArrival drives `ox login` end to end
 // against a fake SageOx and snapshots everything it prints when stdout is not
 // a terminal (a pipe, CI): the code beside the URL, then who, where, what's
@@ -238,15 +297,7 @@ func TestRunLoginFlow_PrintsCodeAndThreeLineArrival(t *testing.T) {
 	}
 
 	server := fakeSageox(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("OX_XDG_ENABLE", "1")
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
-	t.Setenv("SKIP_BROWSER", "1")
-	t.Setenv("CI", "true") // CI is also how git credentials skip the OS keychain
-	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, "gitconfig"))
-	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	isolateLoginEnv(t)
 	t.Chdir(t.TempDir()) // refreshing remotes looks for a repo in the working directory
 
 	// login returns what runLoginFlow wrote to its own writer, and what it
@@ -301,4 +352,43 @@ func TestRunLoginFlow_PrintsCodeAndThreeLineArrival(t *testing.T) {
 		assert.Equal(t, wantFor("Welcome back"), ansi.Strip(out))
 		assert.Empty(t, stdout)
 	})
+}
+
+// TestRunLoginFlow_ArrivalNamesTheEndpointAfterAFallback signs in through an
+// endpoint fallback and checks the arrival's Endpoint line names the endpoint
+// the login was stored on.
+// Failure prevented: the block naming the unreachable endpoint the person
+// declined, while the new login sits on the one they switched to.
+func TestRunLoginFlow_ArrivalNamesTheEndpointAfterAFallback(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: the device flow polls no faster than every 5 seconds")
+	}
+
+	// the project is configured for the live server; login is asked to use an
+	// IPv6 loopback address nothing listens on (its slug, "[::1]", differs from
+	// the live server's "localhost", where a second 127.0.0.1 port would not)
+	const unreachable = "http://[::1]:1"
+	live := fakeSageox(t)
+	isolateLoginEnv(t)
+	repo := t.TempDir()
+	initGitRepo(t, repo)
+	require.NoError(t, config.SaveProjectConfig(repo, &config.ProjectConfig{Endpoint: live.URL}))
+	t.Chdir(repo)
+	require.Equal(t, "[::1]", endpoint.NormalizeSlug(unreachable), "the two endpoints must have distinct slugs")
+	require.NotEqual(t, endpoint.NormalizeSlug(unreachable), endpoint.NormalizeSlug(live.URL))
+
+	var buf bytes.Buffer
+	captureConfirmOutput(t, func() { // the switch prompt prints to stdout
+		withStdin(t, "y\n", func() {
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+			cmd.SetOut(&buf)
+			require.NoError(t, runLoginFlow(cmd, unreachable))
+		})
+	})
+
+	out := ansi.Strip(buf.String())
+	require.Contains(t, out, "Authenticating to "+live.URL, "the person switched endpoints")
+	assert.Contains(t, out, "  Endpoint: "+endpoint.NormalizeSlug(live.URL)+"\n")
+	assert.NotContains(t, out, "Endpoint: "+endpoint.NormalizeSlug(unreachable))
 }

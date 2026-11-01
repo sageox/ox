@@ -454,7 +454,7 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 
 	// three lines: who, where, what's next, with Oxy beside them on a color terminal
 	fmt.Fprintln(out)
-	arrival := cli.NewLoginArrival(token.UserInfo.Name, token.UserInfo.Email, endpoint.NormalizeSlug(currentEndpoint), isReturningLogin(priorLogin, token.UserInfo))
+	arrival := cli.NewLoginArrival(token.UserInfo.Name, token.UserInfo.Email, endpoint.NormalizeSlug(authClient.Endpoint()), isReturningLogin(priorLogin, token.UserInfo))
 	fmt.Fprint(out, arrival.Render(loginArt(out)))
 	fmt.Fprintln(out)
 
