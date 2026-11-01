@@ -164,6 +164,11 @@ type Event struct {
 	Title       string `json:"title,omitempty"`        // display title of the ref
 	URL         string `json:"url,omitempty"`          // sageox.ai link for the ref, when one exists
 	FromName    string `json:"from_name,omitempty"`    // whisper sender display name
+
+	// OccurrenceSeq is a unique use ordinal within SessionID, independent of
+	// the raw-session turn Seq. Persist both so replay preserves event identity.
+	SessionID     string `json:"session_id,omitempty"`
+	OccurrenceSeq int    `json:"occurrence_seq,omitempty"`
 }
 
 // Now returns the current time formatted for context-trace timestamps.

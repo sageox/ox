@@ -8,15 +8,19 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/oxactivity"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
 	"github.com/sageox/ox/internal/session/contextuse"
+	"github.com/sageox/ox/internal/telemetry"
 )
 
 var testSurfaced = []contextuse.SurfacedRef{
@@ -24,6 +28,138 @@ var testSurfaced = []contextuse.SurfacedRef{
 	{Ref: "Ox7f9c", RefType: "murmur", Via: contextuse.ViaWhisper, Seq: 4},
 	{Ref: "MEMORY.md", RefType: "doc", Via: contextuse.ViaPrime},
 	{Ref: "2026-10-01-dana-auth", RefType: "session", Via: contextuse.ViaRecall, Title: "Auth middleware rewrite", Seq: 2},
+}
+
+// Failure prevented: private refs and --why text leak, or capture precedes persistence.
+func TestAgentContextUsed_PostHogPrivacyAndReplay(t *testing.T) {
+	const id = "cnv_019ff2f5-2079-7be1-b05e-8caad2772e61"
+	for _, tt := range []struct {
+		name, ref, kind, wantRef, wantType string
+		none                               bool
+	}{
+		// Failure prevented: canonical opaque IDs are lost with private refs.
+		{"conversation", id, "discussion", id, "discussion", false},
+		{"recording", "rec_019ff2f5-2079-7be1-b05e-8caad2772e61", "discussion", id, "discussion", false},
+		{"plan", "pln_019ff2f5-2079-7be1-b05e-8caad2772e61", "plan", "pln_019ff2f5-2079-7be1-b05e-8caad2772e61", "plan", false},
+		// Failure prevented: URLs, paths, slugs and ID-shaped free text escape.
+		{"URL", "https://example.invalid/private", "doc", "", "doc", false},
+		{"path", "/private/project/file.md", "file", "", "file", false},
+		{"slug", "private-project-plan", "plan", "", "plan", false},
+		{"fake ID", "pln_private-plan", "plan", "", "plan", false},
+		{"free type", "private-ref", "private-type", "", "other", false},
+		// Failure prevented: --none invents a reference or evidence of use.
+		{"none", "", "", "", "", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := setupSessionTestProject(t)
+			var tracePath string
+			captured := captureUsageForTest(t, func(c capturedUsage) {
+				events, err := contexttrace.ReadEvents(tracePath)
+				require.NoError(t, err)
+				require.Equal(t, contexttrace.EventUsed, events[len(events)-1].Type)
+			})
+			require.NoError(t, config.SaveProjectConfig(root, &config.ProjectConfig{RepoID: "repo_fixture", TeamID: "team_fixture"}))
+			state, err := session.StartRecording(root, session.StartRecordingOptions{AgentID: "OxPh01", AdapterName: "codex"})
+			require.NoError(t, err)
+			writer := contexttrace.NewWriter(state.SessionPath)
+			tracePath = writer.Path()
+			if !tt.none {
+				require.NoError(t, writer.Append(contexttrace.Event{Type: contexttrace.EventProvided, Ref: tt.ref, RefType: tt.kind, Title: "private-title", URL: "https://example.invalid/title", Source: contexttrace.SourceOnDemand}))
+			}
+			var out bytes.Buffer
+			require.NoError(t, runAgentContextUsed(&out, root, "OxPh01", contextUsedArgs{ref: tt.ref, why: "private-why", none: tt.none}))
+			require.Len(t, *captured, 1)
+			c := (*captured)[0]
+			assert.Equal(t, "context.used", c.Event)
+			var closed struct {
+				Ref       string `json:"ref"`
+				RefType   string `json:"ref_type"`
+				Evidence  string `json:"evidence"`
+				SessionID string `json:"session_id"`
+				AgentType string `json:"agent_type"`
+				Actor     string `json:"actor"`
+				CLIActor  string `json:"cli_actor"`
+				Surface   string `json:"surface"`
+				Env       string `json:"env"`
+				Version   int    `json:"event_version"`
+				RepoID    string `json:"repo_id"`
+				TeamID    string `json:"team_id"`
+			}
+			raw := strictUsageProps(t, c.Props, &closed)
+			wantKeys := 11
+			if tt.wantRef != "" {
+				wantKeys++
+			}
+			assert.Len(t, c.Props, wantKeys)
+			assert.Equal(t, tt.wantRef, closed.Ref)
+			if tt.wantRef == "" {
+				assert.NotContains(t, c.Props, "ref")
+			}
+			assert.Equal(t, tt.wantType, closed.RefType)
+			wantEvidence := "reported"
+			if tt.none {
+				wantEvidence = "none"
+			}
+			assert.Equal(t, wantEvidence, closed.Evidence)
+			assert.Equal(t, state.SessionID, closed.SessionID)
+			assert.Equal(t, "cli", closed.Surface)
+			assert.Equal(t, 1, closed.Version)
+			assert.Equal(t, "repo_fixture", closed.RepoID)
+			assert.Equal(t, "team_fixture", closed.TeamID)
+			for _, private := range []string{"private-why", "private-title", "https://example.invalid", "private-type"} {
+				assert.NotContains(t, string(raw), private)
+			}
+			events, err := contexttrace.ReadEvents(tracePath)
+			require.NoError(t, err)
+			ev := events[len(events)-1]
+			at, err := time.Parse(time.RFC3339Nano, ev.Timestamp)
+			require.NoError(t, err)
+			assert.Equal(t, at, c.Opts.At)
+			captureContextUsed(root, ev)
+			require.Len(t, *captured, 2)
+			assert.Equal(t, c.Opts, (*captured)[1].Opts)
+		})
+	}
+}
+
+// Failure prevented: changing the frozen namespace or key encoding breaks replay deduplication.
+func TestPostHogUsage_FrozenOccurrenceIDs(t *testing.T) {
+	captured := captureUsageForTest(t, nil)
+	const sessionID = "ses_019ff2f5-2079-7be1-b05e-8caad2772e61"
+	const at = "2026-10-31T12:00:00Z"
+	captureContextUsed("", contexttrace.Event{SessionID: sessionID, OccurrenceSeq: 1, Timestamp: at, Evidence: "reported"})
+	timestamp, err := time.Parse(time.RFC3339, at)
+	require.NoError(t, err)
+	captureMurmurPublished("", ledger.MurmurFile{ID: "019ff2f5-2079-7be1-b05e-8caad2772e61", Timestamp: timestamp})
+	require.Len(t, *captured, 2)
+	assert.Equal(t, "7f238a71-e34a-5300-bac1-66a6683fabae", (*captured)[0].Opts.UUID)
+	assert.Equal(t, "1f5d802c-0480-563f-a24d-851d7727a60c", (*captured)[1].Opts.UUID)
+}
+
+// Failure prevented: failed trace writes emit usage, or telemetry panics fail a successful command.
+func TestAgentContextUsed_PostHogWriteAndCaptureFailure(t *testing.T) {
+	for _, failWrite := range []bool{false, true} {
+		t.Run(fmt.Sprint(failWrite), func(t *testing.T) {
+			root := setupSessionTestProject(t)
+			captured := captureUsageForTest(t, nil)
+			trace, err := resolveAgentContextTrace(root, "OxPh02")
+			require.NoError(t, err)
+			if failWrite {
+				require.NoError(t, os.Mkdir(trace.writer.Path(), 0o755))
+			} else {
+				capturePostHogUsage = func(string, map[string]any, telemetry.CaptureOpts) { panic("sender failed") }
+			}
+			var out bytes.Buffer
+			err = runAgentContextUsed(&out, root, "OxPh02", contextUsedArgs{none: true})
+			if failWrite {
+				require.ErrorContains(t, err, "record context use")
+			} else {
+				require.NoError(t, err)
+				assert.Contains(t, out.String(), `"success": true`)
+			}
+			assert.Empty(t, *captured)
+		})
+	}
 }
 
 func TestResolveSurfacedRef(t *testing.T) {

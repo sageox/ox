@@ -307,7 +307,7 @@ func postHogErrorDetail(err error) string {
 
 // telemetryNotice is shown once per install, the first time a person runs ox
 // at a terminal.
-const telemetryNotice = "ox sends usage data (which commands run and whether they worked) to improve it.\n" +
+const telemetryNotice = "ox sends usage data (commands, context use and murmur publication) to improve it.\n" +
 	"When signed in to production, events include your SageOx user ID and this install's ID.\n" +
 	"Details: ox config get telemetry · Turn off: ox config set telemetry off"
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -266,9 +267,15 @@ func runAgentContextUsed(w io.Writer, projectRoot, agentID string, args contextU
 		out.Guidance = contextUsedGuidance(agentID)
 	}
 
-	if err := trace.writer.Append(ev); err != nil {
+	sessionID := ""
+	if trace.state != nil {
+		sessionID = trace.state.SessionID
+	}
+	ev, err = trace.writer.AppendUse(context.Background(), ev, sessionID)
+	if err != nil {
 		return fmt.Errorf("record context use: %w", err)
 	}
+	captureContextUsed(projectRoot, ev)
 	if ev.Evidence == contexttrace.EvidenceReported {
 		recordStatuslineUse(projectRoot, trace.state, ev.RefType, ev.Ref, ev.Aliases...)
 	}

@@ -2,14 +2,22 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/daemon/testutil"
+	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/telemetry"
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // resetMurmurFlags returns murmurCmd's flags to their defaults now and when the
@@ -20,6 +28,134 @@ func resetMurmurFlags(t *testing.T) {
 	t.Helper()
 	resetFlagsInTree(murmurCmd)
 	t.Cleanup(func() { resetFlagsInTree(murmurCmd) })
+}
+
+// Failure prevented: free topics, content, files or principal details reach analytics.
+func TestMurmur_PostHogPrivacyAndReplay(t *testing.T) {
+	for _, topic := range []string{"general", "wip", "lint", "architecture", "conflict", "private-topic"} {
+		t.Run(topic, func(t *testing.T) {
+			root := setupSessionTestProject(t)
+			captured := captureUsageForTest(t, nil)
+			require.NoError(t, config.SaveProjectConfig(root, &config.ProjectConfig{RepoID: "repo_fixture", TeamID: "team_fixture"}))
+			m := ledger.MurmurFile{ID: "019ff2f5-2079-7be1-b05e-8caad2772e61", Timestamp: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC), Content: "private-body", Topic: topic, Scope: "ledger", Importance: "normal", PrincipalID: "private-principal", Metadata: map[string]string{"files": "private-file"}}
+			captureMurmurPublished(root, m)
+			captureMurmurPublished(root, m)
+			require.Len(t, *captured, 2)
+			c := (*captured)[0]
+			assert.Equal(t, "murmur.published", c.Event)
+			assert.Equal(t, c.Opts, (*captured)[1].Opts)
+			assert.Equal(t, m.Timestamp, c.Opts.At)
+			var closed struct {
+				ID         string `json:"murmur_id"`
+				Importance string `json:"importance"`
+				Scope      string `json:"scope"`
+				TeamID     string `json:"team_id"`
+				Topic      string `json:"topic"`
+				Actor      string `json:"actor"`
+				CLIActor   string `json:"cli_actor"`
+				Surface    string `json:"surface"`
+				Env        string `json:"env"`
+				Version    int    `json:"event_version"`
+			}
+			raw := strictUsageProps(t, c.Props, &closed)
+			assert.Len(t, c.Props, 10)
+			want := topic
+			if topic == "private-topic" {
+				want = "other"
+			}
+			assert.Equal(t, want, closed.Topic)
+			assert.Equal(t, m.ID, closed.ID)
+			assert.Equal(t, "team_fixture", closed.TeamID)
+			assert.Equal(t, "normal", closed.Importance)
+			assert.Equal(t, "ledger", closed.Scope)
+			assert.Equal(t, "cli", closed.Surface)
+			assert.Equal(t, 1, closed.Version)
+			for _, private := range []string{"private-body", "private-topic", "private-file", "private-principal"} {
+				assert.NotContains(t, string(raw), private)
+			}
+		})
+	}
+}
+
+// Failure prevented: a failed outbox write emits an event, or either successful
+// delivery path omits its event; a failed sender must preserve command success.
+func TestMurmur_PostHogCaptureAfterDelivery(t *testing.T) {
+	for _, mode := range []string{"outbox", "IPC", "write fails", "capture fails"} {
+		t.Run(mode, func(t *testing.T) {
+			captured := captureUsageForTest(t, nil)
+			var delivered chan daemon.MurmurPayload
+			var svc *testutil.MockService
+			if mode == "IPC" {
+				delivered = make(chan daemon.MurmurPayload, 1)
+				svc = &testutil.MockService{PublishMurmurFunc: func(p daemon.MurmurPayload) { delivered <- p }}
+			}
+			startSyncTestDaemon(t, svc)
+			root, err := os.Getwd()
+			require.NoError(t, err)
+			initGitRepo(t, root)
+			require.NoError(t, os.MkdirAll(filepath.Join(root, ".sageox"), 0o755))
+			require.NoError(t, config.SaveProjectConfig(root, &config.ProjectConfig{RepoID: "repo_fixture", TeamID: "team_fixture"}))
+			target := t.TempDir()
+			require.NoError(t, config.SaveLocalConfig(root, &config.LocalConfig{Ledger: &config.LedgerConfig{Path: target}}))
+			t.Setenv(config.EnvProjectRoot, root)
+			t.Setenv("SAGEOX_DAEMON", "false")
+			t.Setenv("SAGEOX_AGENT_ID", "")
+			var handedOff daemon.MurmurPayload
+			baseCapture := capturePostHogUsage
+			capturePostHogUsage = func(event string, props map[string]any, opts telemetry.CaptureOpts) {
+				if mode == "IPC" {
+					select {
+					case handedOff = <-delivered:
+					case <-time.After(time.Second):
+						t.Fatal("capture happened before IPC hand-off")
+					}
+				} else {
+					files, err := os.ReadDir(daemon.MurmurOutboxDir(target))
+					require.NoError(t, err, "capture must follow the outbox write")
+					require.Len(t, files, 1)
+				}
+				baseCapture(event, props, opts)
+			}
+			if mode == "write fails" {
+				require.NoError(t, os.WriteFile(filepath.Join(target, ".sageox"), []byte("blocked"), 0o600))
+			}
+			if mode == "capture fails" {
+				capturePostHogUsage = func(string, map[string]any, telemetry.CaptureOpts) { panic("sender failed") }
+			}
+			resetMurmurFlags(t)
+			cmd := *murmurCmd
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			err = runMurmur(&cmd, []string{"private-body"})
+			if mode == "write fails" {
+				require.ErrorContains(t, err, "queue murmur")
+				assert.Empty(t, *captured)
+				return
+			}
+			require.NoError(t, err)
+			if mode == "capture fails" {
+				assert.Contains(t, out.String(), "Murmur queued")
+				return
+			}
+			require.Len(t, *captured, 1)
+			var payload daemon.MurmurPayload
+			if mode == "IPC" {
+				payload = handedOff
+				assert.NoDirExists(t, daemon.MurmurOutboxDir(target))
+			} else {
+				files, err := os.ReadDir(daemon.MurmurOutboxDir(target))
+				require.NoError(t, err)
+				require.Len(t, files, 1)
+				raw, err := os.ReadFile(filepath.Join(daemon.MurmurOutboxDir(target), files[0].Name()))
+				require.NoError(t, err)
+				require.NoError(t, json.Unmarshal(raw, &payload))
+			}
+			var m ledger.MurmurFile
+			require.NoError(t, json.Unmarshal(payload.MurmurJSON, &m))
+			assert.Equal(t, m.ID, (*captured)[0].Props["murmur_id"])
+			assert.Equal(t, m.Timestamp, (*captured)[0].Opts.At)
+		})
+	}
 }
 
 func TestMurmurFlagDefaults(t *testing.T) {
