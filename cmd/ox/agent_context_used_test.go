@@ -168,13 +168,16 @@ func TestAgentContextUsed_PostHogWriteAndCaptureFailure(t *testing.T) {
 // use or make separate successful uses share one analytics occurrence.
 func TestAgentContextUsed_PostHogTraceRecovery(t *testing.T) {
 	for _, tt := range []struct {
-		name string
-		tail string
+		name        string
+		tail        string
+		trimNewline bool
 	}{
 		// Failure prevented: a partial append consumes the next valid use line.
 		{name: "interrupted JSON", tail: `{"type":`},
 		// Failure prevented: a complete record without its newline merges with the next use.
 		{name: "complete unterminated JSON", tail: `{"type":"invoked","ts":"2026-11-01T00:00:00Z","source":"ox-cli"}`},
+		// Failure prevented: an already recorded use without its newline is lost or its ordinal reused.
+		{name: "unterminated previous use", trimNewline: true},
 		// Failure prevented: long metadata from a tool response blocks subsequent use reports.
 		{name: "large complete line", tail: `{"type":"provided","ts":"2026-11-01T00:00:00Z","source":"on-demand","title":"` + strings.Repeat("x", 70<<10) + "\"}\n"},
 	} {
@@ -190,6 +193,11 @@ func TestAgentContextUsed_PostHogTraceRecovery(t *testing.T) {
 				assert.Contains(t, out.String(), `"success": true`)
 			}
 			record()
+			if tt.trimNewline {
+				raw, err := os.ReadFile(tracePath)
+				require.NoError(t, err)
+				require.NoError(t, os.WriteFile(tracePath, bytes.TrimSuffix(raw, []byte{'\n'}), 0o600))
+			}
 			f, err := os.OpenFile(tracePath, os.O_APPEND|os.O_WRONLY, 0o600)
 			require.NoError(t, err)
 			_, err = f.WriteString(tt.tail)

@@ -3,7 +3,9 @@ package contexttrace
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -258,30 +260,36 @@ func (w *Writer) AppendAll(events []Event) error {
 // ReadEvents reads all events from a context-trace.jsonl file.
 // Malformed lines are skipped. Returns nil, nil for a missing file.
 func ReadEvents(path string) ([]Event, error) {
+	events, _, err := readEvents(path)
+	return events, err
+}
+
+// readEvents also reports a final record without its newline so a locked
+// occurrence writer can isolate an interrupted tail before appending.
+func readEvents(path string) ([]Event, bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, false, nil
 		}
-		return nil, fmt.Errorf("open context-trace file: %w", err)
+		return nil, false, fmt.Errorf("open context-trace file: %w", err)
 	}
 	defer f.Close()
 
 	var events []Event
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
+	reader := bufio.NewReader(f)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return events, false, fmt.Errorf("read context-trace file: %w", err)
 		}
+		unterminated := len(line) > 0 && line[len(line)-1] != '\n'
 		var ev Event
-		if err := json.Unmarshal(line, &ev); err != nil {
-			continue // skip malformed lines
+		if json.Unmarshal(line, &ev) == nil {
+			events = append(events, ev)
 		}
-		events = append(events, ev)
+		if errors.Is(err, io.EOF) {
+			return events, unterminated, nil
+		}
 	}
-	if err := scanner.Err(); err != nil {
-		return events, fmt.Errorf("scan context-trace file: %w", err)
-	}
-	return events, nil
 }
