@@ -68,3 +68,30 @@ func TestSelectInitEndpoint_NoInputDefaultsToSoleLoggedInEndpoint(t *testing.T) 
 		})
 	}
 }
+
+// Failure prevented: initializing against a test endpoint is counted as production activity under the cached production person.
+func TestSelectInitEndpoint_RecordsChosenEndpointForTelemetry(t *testing.T) {
+	const staging = "http://127.0.0.1:9"
+	noInputCLIEnv(t)
+	previous, previousCtx := cli.NoInput(), cliCtx
+	cli.SetNoInput(true)
+	t.Cleanup(func() { cli.SetNoInput(previous); cliCtx = previousCtx })
+	cliCtx = &cli.Context{}
+	require.NoError(t, auth.SaveTokenForEndpoint(staging, &auth.StoredToken{
+		AccessToken: "test-access", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Hour),
+	}))
+
+	got, _, err := selectInitEndpoint()
+	require.NoError(t, err)
+	require.Equal(t, staging, got)
+	assert.Equal(t, []string{staging}, cliCtx.TelemetryEndpoints)
+
+	// A choice --no-input cannot make records nothing.
+	cliCtx = &cli.Context{}
+	require.NoError(t, auth.SaveTokenForEndpoint("http://127.0.0.1:19", &auth.StoredToken{
+		AccessToken: "test-access", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Hour),
+	}))
+	_, _, err = selectInitEndpoint()
+	require.Error(t, err)
+	assert.Empty(t, cliCtx.TelemetryEndpoints)
+}

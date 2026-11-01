@@ -86,7 +86,12 @@ var viewRepoCmd = &cobra.Command{
 // If flagEndpoint is provided, it is used directly (after validation).
 // If multiple endpoints exist and no flag is provided, prompts the user to select.
 // Otherwise, returns the defaultEndpoint from config.
-func resolveEndpoint(gitRoot, defaultEndpoint, flagEndpoint string) (string, error) {
+func resolveEndpoint(gitRoot, defaultEndpoint, flagEndpoint string) (selected string, err error) {
+	defer func() {
+		if err == nil {
+			recordPostHogEndpoint(selected)
+		}
+	}()
 	sageoxDir := filepath.Join(gitRoot, ".sageox")
 
 	// discover all endpoints from marker files
