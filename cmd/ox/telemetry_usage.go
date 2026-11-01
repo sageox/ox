@@ -25,17 +25,22 @@ const oxOccurrenceNamespace = "6d8961b7-070a-585f-aeae-ae2b06ad2ce1"
 
 var capturePostHogUsage = telemetry.CapturePostHog
 
+// usageTelemetryOff applies ox command run's gates before any payload is built:
+// a process ox started for itself, a long-running command, or an opt-out.
+func usageTelemetryOff() bool {
+	return startedByOx || (cliCtx != nil && cliCtx.LongRunning) || !telemetry.Enabled()
+}
+
+// recoverUsageTelemetry keeps a telemetry bug from failing a successful write.
+func recoverUsageTelemetry() {
+	if r := recover(); r != nil {
+		slog.Debug("usage telemetry failed", "panic", r)
+	}
+}
+
 // captureUsage adds only the shared stamp and reuses command identity rules.
 // A sender failure must never change a successful write's output or exit code.
 func captureUsage(projectRoot, event, key string, at time.Time, props map[string]any) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Debug("usage telemetry failed", "panic", r)
-		}
-	}()
-	if !telemetry.Enabled() {
-		return
-	}
 	c := &cli.Context{ProjectRoot: projectRoot}
 	if cliCtx != nil {
 		copyCtx := *cliCtx
@@ -60,7 +65,14 @@ func captureUsage(projectRoot, event, key string, at time.Time, props map[string
 	capturePostHogUsage(event, props, opts)
 }
 
-func captureContextUsed(projectRoot string, ev contexttrace.Event) {
+// captureContextUsed sends one context.used. recorded says ev.SessionID is a
+// real recording: an unrecorded trace's minted scope keys the event's UUID but
+// is never sent as session_id, so session counts and joins stay true.
+func captureContextUsed(projectRoot string, ev contexttrace.Event, recorded bool) {
+	defer recoverUsageTelemetry()
+	if usageTelemetryOff() {
+		return
+	}
 	if !sessionid.IsValidSessionID(ev.SessionID) || ev.OccurrenceSeq < 1 {
 		return
 	}
@@ -68,7 +80,10 @@ func captureContextUsed(projectRoot string, ev contexttrace.Event) {
 	if err != nil {
 		return
 	} // Never substitute capture time on replay.
-	props := map[string]any{"ref_type": postHogRefType(ev.RefType), "evidence": ev.Evidence, "session_id": ev.SessionID}
+	props := map[string]any{"ref_type": postHogRefType(ev.RefType), "evidence": ev.Evidence}
+	if recorded {
+		props["session_id"] = ev.SessionID
+	}
 	if ref := postHogContextRef(ev.RefType, ev.Ref); ref != "" {
 		props["ref"] = ref
 	}
@@ -112,6 +127,10 @@ func postHogRefType(kind string) string {
 }
 
 func captureMurmurPublished(projectRoot string, murmur ledger.MurmurFile) {
+	defer recoverUsageTelemetry()
+	if usageTelemetryOff() {
+		return
+	}
 	topic := "other"
 	switch murmur.Topic {
 	case "general", "wip", "lint", "architecture", "conflict":

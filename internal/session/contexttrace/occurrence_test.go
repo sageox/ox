@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -99,5 +100,45 @@ func TestAppendUse_RejectsInvalidAndUnwritableRecords(t *testing.T) {
 				assert.NoFileExists(t, path)
 			}
 		})
+	}
+}
+
+// Failure prevented: two writers reach one trace through different spellings
+// of its directory (macOS /var vs /private/var), take two different locks and
+// hand out the same occurrence, so PostHog keeps one use and drops the other.
+func TestAppendUse_SymlinkedSpellingsShareOneLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a directory symlink needs privileges on Windows")
+	}
+	real := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	require.NoError(t, os.Symlink(real, alias))
+	const n = 40
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		dir := real
+		if i%2 == 1 {
+			dir = alias
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := NewWriter(dir).AppendUse(context.Background(), Event{Type: EventUsed, Evidence: EvidenceNone}, "ses_019ff2f5-2079-7be1-b05e-8caad2772e61")
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	events, err := ReadEvents(NewWriter(real).Path())
+	require.NoError(t, err)
+	require.Len(t, events, n)
+	seen := map[int]bool{}
+	for _, ev := range events {
+		assert.False(t, seen[ev.OccurrenceSeq], "occurrence %d handed out twice", ev.OccurrenceSeq)
+		seen[ev.OccurrenceSeq] = true
 	}
 }

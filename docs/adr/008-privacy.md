@@ -529,7 +529,8 @@ remain excluded; signed-in production events now carry the SageOx user ID.
   their senders are added separately. Their property lists are below.
 - Events still create no person profile (`$process_person_profile: false`),
   disable GeoIP (`$geoip_disable: true`), and carry no email, name, path,
-  prompt, token, argument values or free text. Product usage is not gated by
+  prompt, token, free-text argument values or free text (an argument is sent
+  only as an exact SageOx ID or one of the fixed values listed here). Product usage is not gated by
   marketing-site consent or region. The existing telemetry switches and
   `DO_NOT_TRACK=1` still stop collection.
 - The updated notice is shown once to people who saw the earlier notice,
@@ -550,7 +551,8 @@ the command's output or exit code.
 
 - `context.used` is sent after a successful context-use trace append. Its
   closed property list is `ref` (optional), `ref_type`, `evidence` (`reported`
-  or `none`), `session_id`, `agent_type`, and optional `repo_id` / `team_id`.
+  or `none`), `session_id` (only while a SageOx recording is active: the
+  recording's ID), `agent_type`, and optional `repo_id` / `team_id`.
   `ref` is included only for an exact canonical SageOx conversation,
   recording or plan ID; paths, URLs and free-text slugs are excluded.
   `ref_type` is empty, `session`, `discussion`, `doc`, `file`, `murmur`,
@@ -570,8 +572,12 @@ the command's output or exit code.
   Context-use occurrence names are `session_id:occurrence_seq`; the
   occurrence ordinal is persisted under a file lock independently of the
   existing turn `seq`. A trace without a recording retains a random session
-  scope until that cache trace is removed. Murmur occurrence names are the
-  murmur ID. Both use the stored occurrence timestamp on replay.
+  scope until that cache trace is removed; that scope keys the event UUID
+  only and is never sent as `session_id`. Murmur occurrence names are the
+  murmur ID. Both use the stored occurrence timestamp on replay. PostHog
+  collapses a replay only when the distinct ID also matches, and the person
+  ID is resolved at send time: a replay after signing in or out is counted
+  again in PostHog. The layer dedupes on the UUID alone.
 
 This fills in the already-approved event names and preserves the existing
 no-free-text promise. The notice's wording now includes context use and

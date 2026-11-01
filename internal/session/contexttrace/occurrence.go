@@ -3,6 +3,7 @@ package contexttrace
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/fileutil"
@@ -20,7 +21,13 @@ func (w *Writer) AppendUse(ctx context.Context, event Event, sessionID string) (
 	if sessionID != "" && !sessionid.IsValidSessionID(sessionID) {
 		return Event{}, fmt.Errorf("append use: invalid session ID")
 	}
-	err := fileutil.WithFileLock(ctx, w.path, func() error {
+	// Lock the symlink-resolved path: the lock is keyed on the spelling, so
+	// /var/... and /private/var/... would take two locks and reuse an ordinal.
+	lockTarget := w.path
+	if dir, err := filepath.EvalSymlinks(filepath.Dir(w.path)); err == nil {
+		lockTarget = filepath.Join(dir, filepath.Base(w.path))
+	}
+	err := fileutil.WithFileLock(ctx, lockTarget, func() error {
 		events, unterminated, err := readEvents(w.path)
 		if err != nil {
 			return err

@@ -58,6 +58,8 @@ func TestAgentContextUsed_PostHogPrivacyAndReplay(t *testing.T) {
 			captured := captureUsageForTest(t, func(c capturedUsage) {
 				events, err := contexttrace.ReadEvents(tracePath)
 				require.NoError(t, err)
+				// capture runs under a recover: an index panic here would pass silently
+				require.NotEmpty(t, events, "the use must be on disk before it is captured")
 				require.Equal(t, contexttrace.EventUsed, events[len(events)-1].Type)
 			})
 			require.NoError(t, config.SaveProjectConfig(root, &config.ProjectConfig{RepoID: "repo_fixture", TeamID: "team_fixture"}))
@@ -117,7 +119,7 @@ func TestAgentContextUsed_PostHogPrivacyAndReplay(t *testing.T) {
 			at, err := time.Parse(time.RFC3339Nano, ev.Timestamp)
 			require.NoError(t, err)
 			assert.Equal(t, at, c.Opts.At)
-			captureContextUsed(root, ev)
+			captureContextUsed(root, ev, true)
 			require.Len(t, *captured, 2)
 			assert.Equal(t, c.Opts, (*captured)[1].Opts)
 		})
@@ -129,7 +131,7 @@ func TestPostHogUsage_FrozenOccurrenceIDs(t *testing.T) {
 	captured := captureUsageForTest(t, nil)
 	const sessionID = "ses_019ff2f5-2079-7be1-b05e-8caad2772e61"
 	const at = "2026-10-31T12:00:00Z"
-	captureContextUsed("", contexttrace.Event{SessionID: sessionID, OccurrenceSeq: 1, Timestamp: at, Evidence: "reported"})
+	captureContextUsed("", contexttrace.Event{SessionID: sessionID, OccurrenceSeq: 1, Timestamp: at, Evidence: "reported"}, true)
 	timestamp, err := time.Parse(time.RFC3339, at)
 	require.NoError(t, err)
 	captureMurmurPublished("", ledger.MurmurFile{ID: "019ff2f5-2079-7be1-b05e-8caad2772e61", Timestamp: timestamp})
@@ -224,7 +226,7 @@ func TestAgentContextUsed_PostHogTraceRecovery(t *testing.T) {
 			require.Len(t, uses, 3, "every successful use must remain replayable")
 			for i, ev := range uses {
 				assert.Equal(t, i+1, ev.OccurrenceSeq)
-				captureContextUsed(root, ev)
+				captureContextUsed(root, ev, true)
 				assert.Equal(t, (*captured)[i].Opts, (*captured)[i+3].Opts)
 			}
 		})
@@ -613,4 +615,31 @@ func TestAgentContextUsed_AnySurfacedName(t *testing.T) {
 			assert.Equal(t, contexttrace.EvidenceReported, list.Surfaced[0].Evidence)
 		})
 	}
+}
+
+// Failure prevented: a use reported with no recording sends its minted trace
+// scope as session_id, which looks like a real session: distinct-session
+// counts grow and joins to recordings silently miss.
+func TestAgentContextUsed_UnrecordedUseSendsNoSessionID(t *testing.T) {
+	projectRoot := setupSessionTestProject(t)
+	captured := captureUsageForTest(t, nil)
+	const agentID = "OxCu03"
+	for range 2 {
+		var buf bytes.Buffer
+		require.NoError(t, runAgentContextAt(&buf, projectRoot, agentID, []string{"used", "--none"}))
+	}
+	require.Len(t, *captured, 2)
+	for _, c := range *captured {
+		assert.Equal(t, "context.used", c.Event)
+		assert.NotContains(t, c.Props, "session_id")
+	}
+	// the minted scope still keys the uuid: two uses, two occurrences
+	assert.NotEqual(t, (*captured)[0].Opts.UUID, (*captured)[1].Opts.UUID)
+
+	events, err := contexttrace.ReadEvents(filepath.Join(agentTraceCacheDir(projectRoot), agentID+".jsonl"))
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	captureContextUsed(projectRoot, events[1], false)
+	require.Len(t, *captured, 3)
+	assert.Equal(t, (*captured)[1].Opts, (*captured)[2].Opts, "a replay keeps its uuid and time")
 }

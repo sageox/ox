@@ -184,18 +184,20 @@ When on, ox sends:
 
 PostHog also receives context.used after a context-use trace is written:
 the reference only when it is a SageOx conversation, recording or plan
-ID, its fixed type, reported/none evidence, session and AI coworker
-type, and repository/team IDs when present. It receives murmur.published
-after a murmur is handed to the daemon or queued: its ID, importance,
-scope and team ID. Topic is general, wip, lint, architecture, conflict,
-or other; a custom topic is never sent. Both carry the CLI surface,
-actor, event version and production/test label, plus the install and
-signed-in person IDs described above. Neither includes titles, URLs,
-why text, murmur text, files or principal details.
+ID, its fixed type, reported/none evidence, the recording session (only
+while one is recording) and AI coworker type, and repository/team IDs
+when present. It receives murmur.published after a murmur is handed to
+the daemon or queued: its ID, importance, scope and team ID. Topic is
+general, wip, lint, architecture, conflict, or other; a custom topic is
+never sent. Both carry the CLI surface, actor, event version and
+production/test label, plus the install and signed-in person IDs
+described above. Neither includes titles, URLs, why text, murmur text,
+files or principal details.
 
 Telemetry never includes your code, file contents, or session
-conversations. Nothing sent to PostHog includes command arguments,
-file paths, or values from an error message.
+conversations. Nothing sent to PostHog includes free-text command
+arguments, file paths, or values from an error message: only exact
+SageOx IDs and the fixed values listed above.
 
 DO_NOT_TRACK=1 turns all of it off, the same as setting this to off.`,
 		Category:    "Privacy",

@@ -275,7 +275,7 @@ func runAgentContextUsed(w io.Writer, projectRoot, agentID string, args contextU
 	if err != nil {
 		return fmt.Errorf("record context use: %w", err)
 	}
-	captureContextUsed(projectRoot, ev)
+	captureContextUsed(projectRoot, ev, trace.state != nil)
 	if ev.Evidence == contexttrace.EvidenceReported {
 		recordStatuslineUse(projectRoot, trace.state, ev.RefType, ev.Ref, ev.Aliases...)
 	}

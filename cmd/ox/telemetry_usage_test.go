@@ -67,7 +67,7 @@ func TestPostHogUsage_PersonAndOptOutBoundary(t *testing.T) {
 				cliCtx = &cli.Context{Cmd: &cobra.Command{Use: "agent"}}
 				at := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
 				if event == "context" {
-					captureContextUsed("", contexttrace.Event{SessionID: "ses_019ff2f5-2079-7be1-b05e-8caad2772e61", OccurrenceSeq: 1, Timestamp: at.Format(time.RFC3339Nano), Evidence: "reported"})
+					captureContextUsed("", contexttrace.Event{SessionID: "ses_019ff2f5-2079-7be1-b05e-8caad2772e61", OccurrenceSeq: 1, Timestamp: at.Format(time.RFC3339Nano), Evidence: "reported"}, true)
 				} else {
 					captureMurmurPublished("", ledger.MurmurFile{ID: "019ff2f5-2079-7be1-b05e-8caad2772e61", Timestamp: at, Topic: "general", Scope: "ledger", Importance: "normal"})
 				}
@@ -112,7 +112,7 @@ func TestPostHogUsage_InvalidOccurrencesAreDropped(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			captured := captureUsageForTest(t, nil)
-			captureContextUsed("", contexttrace.Event{SessionID: tt.sessionID, OccurrenceSeq: tt.seq, Timestamp: tt.at, Evidence: "reported"})
+			captureContextUsed("", contexttrace.Event{SessionID: tt.sessionID, OccurrenceSeq: tt.seq, Timestamp: tt.at, Evidence: "reported"}, true)
 			assert.Empty(t, *captured)
 		})
 	}
