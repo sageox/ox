@@ -92,12 +92,11 @@ func postHogContextRef(refType, ref string) string {
 	if planid.IsPlanID(ref) {
 		return ref
 	}
-	for _, prefix := range []string{"cnv_", "dsc_"} {
-		if strings.HasPrefix(ref, prefix) {
-			id, err := uuid.Parse(strings.TrimPrefix(ref, prefix))
-			if err == nil && prefix+id.String() == ref {
-				return ref
-			}
+	const prefix = "cnv_" // CanonicalRef maps recording IDs to their conversation twin.
+	if strings.HasPrefix(ref, prefix) {
+		id, err := uuid.Parse(strings.TrimPrefix(ref, prefix))
+		if err == nil && prefix+id.String() == ref {
+			return ref
 		}
 	}
 	return ""

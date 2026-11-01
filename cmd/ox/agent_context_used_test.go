@@ -46,6 +46,8 @@ func TestAgentContextUsed_PostHogPrivacyAndReplay(t *testing.T) {
 		{"path", "/private/project/file.md", "file", "", "file", false},
 		{"slug", "private-project-plan", "plan", "", "plan", false},
 		{"fake ID", "pln_private-plan", "plan", "", "plan", false},
+		// Failure prevented: legacy discussion IDs widen the documented ref allowlist.
+		{"legacy discussion", "dsc_019ff2f5-2079-7be1-b05e-8caad2772e61", "discussion", "", "discussion", false},
 		{"free type", "private-ref", "private-type", "", "other", false},
 		// Failure prevented: --none invents a reference or evidence of use.
 		{"none", "", "", "", "", true},
