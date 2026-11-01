@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -261,6 +262,9 @@ func TestValidateInstalledHooks_LinkedWorktreeScansSharedHooks(t *testing.T) {
 // every linked worktree instead of reporting the hooks git runs there.
 func TestCheckGitHooks_LinkedWorktree(t *testing.T) {
 	skipIntegration(t) // Real git init, commit, and worktree creation.
+	if runtime.GOOS == "windows" {
+		t.Skip("checkGitHooks counts hooks by the executable bit, which Windows does not report")
+	}
 	mainRoot, worktreeRoot := gitHooksWorktree(t)
 	require.NoError(t, InstallGitHooks(mainRoot))
 	t.Chdir(worktreeRoot)
@@ -269,4 +273,23 @@ func TestCheckGitHooks_LinkedWorktree(t *testing.T) {
 	assert.False(t, result.skipped, result.message)
 	assert.True(t, result.passed)
 	assert.Equal(t, fmt.Sprintf("%d active", len(allHookSpecs())), result.message)
+}
+
+// Failure prevented: a directory sitting at one hook's path makes `ox
+// uninstall` stop before it removes the ox hooks it did find.
+func TestRemoveHooks_SkipsHookPathThatIsADirectory(t *testing.T) {
+	skipIntegration(t) // Real git init, commit, and worktree creation.
+	origDryRun := uninstallDryRun
+	t.Cleanup(func() { uninstallDryRun = origDryRun })
+	uninstallDryRun = false
+
+	mainRoot, worktreeRoot := gitHooksWorktree(t)
+	require.NoError(t, InstallGitHooks(mainRoot))
+	hooksDir := filepath.Join(mainRoot, ".git", "hooks")
+	require.NoError(t, os.Remove(filepath.Join(hooksDir, prePushHookName)))
+	require.NoError(t, os.Mkdir(filepath.Join(hooksDir, prePushHookName), 0o755))
+
+	require.NoError(t, removeHooks(worktreeRoot))
+	assert.Empty(t, oxHookSectionsPresent(t, mainRoot))
+	assert.DirExists(t, filepath.Join(hooksDir, prePushHookName))
 }
