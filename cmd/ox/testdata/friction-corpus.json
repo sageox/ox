@@ -842,12 +842,12 @@
   },
   {
    "argv": [
-    "rpc",
+    "mcp",
     "serve",
     "--help"
    ],
    "events": 1,
-   "expect": "error"
+   "expect": "resolves"
   },
   {
    "argv": [
@@ -1377,11 +1377,11 @@
   },
   {
    "argv": [
-    "rpc",
+    "mcp",
     "--help"
    ],
    "events": 1,
-   "expect": "error"
+   "expect": "resolves"
   },
   {
    "argv": [

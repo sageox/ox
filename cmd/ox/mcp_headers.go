@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/useragent"
@@ -11,6 +13,12 @@ var mcpCmd = &cobra.Command{
 	Use:    "mcp",
 	Short:  "Local helpers for MCP clients",
 	Hidden: true,
+	// `ox mcp serve` and other words stay an unknown command, so friction
+	// recovery still records an AI coworker looking for an MCP server.
+	Args: cobra.NoArgs,
+	RunE: func(*cobra.Command, []string) error {
+		return errors.New("ox mcp has no command of its own; MCP clients run `ox mcp headers`")
+	},
 	// Do not initialize root's auth, telemetry, exporters, or daemon heartbeat.
 	PersistentPreRunE: applyConfigFlag,
 	PersistentPostRun: func(*cobra.Command, []string) {},
@@ -56,11 +64,8 @@ func localMCPRequested(args []string) bool {
 	if split, ok := wordSplitArgs(args); ok {
 		args = split
 	}
+	// Only the helper itself skips shared startup; any other `ox mcp …` takes the
+	// normal path, so its friction is still recorded.
 	cmd, _, _ := rootCmd.Find(args)
-	for ; cmd != nil; cmd = cmd.Parent() {
-		if cmd == mcpCmd {
-			return true
-		}
-	}
-	return false
+	return cmd == mcpHeadersCmd
 }

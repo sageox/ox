@@ -136,7 +136,6 @@ func TestMCPHeadersRejectedArgumentsStayLocal(t *testing.T) {
 	for _, args := range [][]string{
 		{"mcp", "headers", "extra"},
 		{"mcp", "headers", "--unknown"},
-		{"mcp", "unknown"},
 		{"mcp", "headers", "--config="},
 		{"mcp headers"},
 	} {
@@ -145,11 +144,17 @@ func TestMCPHeadersRejectedArgumentsStayLocal(t *testing.T) {
 			t.Setenv("DO_NOT_TRACK", "")
 			t.Setenv("SAGEOX_FRICTION", "true")
 			t.Setenv("CLAUDECODE", "1")
+			t.Setenv("OX_XDG_ENABLE", "1")
+			t.Setenv("XDG_RUNTIME_DIR", "/tmp") // Keep the Unix socket path below the platform limit.
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			// A friction event from the helper would dial the daemon; nothing may.
+			dials, _ := fakeDaemonDials(t)
 			cliCtx = nil
 
 			run := runRecovery(t, args...)
 			require.NotZero(t, run.code, "invalid helper invocations must still be rejected")
 			require.Empty(t, run.stdout)
+			require.Zero(t, dials.Load(), "a rejected helper invocation must not send friction to the daemon")
 			if cliCtx != nil {
 				t.Fatal("shared error recovery created a telemetry context for the local helper")
 			}
