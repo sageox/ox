@@ -954,7 +954,10 @@ func TestGetUserID_EmptyUserInfo(t *testing.T) {
 // Failure prevented: a login stored before user_id was filled keeps sending
 // an empty person to session metadata until the next sign-in.
 func TestGetUserID_LegacyLoginFromJWTSubject(t *testing.T) {
+	// Isolated from legacy-mode paths and an endpoint-bound SAGEOX_TOKEN.
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("SAGEOX_TOKEN", "")
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"usr_legacy","email":"private"}`))
 	require.NoError(t, SaveToken(&StoredToken{AccessToken: "header." + payload + ".sig", ExpiresAt: time.Now().Add(time.Hour)}))
 	assert.Equal(t, "usr_legacy", GetUserID(""))
