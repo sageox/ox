@@ -84,6 +84,7 @@ func TestInitDock_StaysInsideAnEightyColumnTerminal(t *testing.T) {
 	const longTeam = "Platform Engineering and Reliability"
 	tests := []struct {
 		name     string
+		team     string // defaults to longTeam
 		sessions SessionReach
 		sentence string // what the box says once its line breaks are undone
 	}{
@@ -97,12 +98,23 @@ func TestInitDock_StaysInsideAnEightyColumnTerminal(t *testing.T) {
 			sessions: SessionsStayLocal,
 			sentence: "Sessions stay on this machine until you upload them to " + longTeam + "'s Ledger.",
 		},
+		{
+			// The clause before the semicolon can itself overflow; it wraps too.
+			name:     "to the team: an over-width clause after the split wraps between words",
+			team:     "Platform Engineering and Reliability Operations Team",
+			sessions: SessionsToTeam,
+			sentence: "Sessions go to Platform Engineering and Reliability Operations Team's Ledger; teammates can read them.",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			team := tt.team
+			if team == "" {
+				team = longTeam
+			}
 			dock := InitDock{
 				Repo:     "a-large-organization/a-repository-with-a-rather-long-name",
-				Team:     longTeam,
+				Team:     team,
 				Sessions: tt.sessions,
 			}
 			framed := ansi.Strip(dock.Render(true))

@@ -117,7 +117,18 @@ func wrapAt(s, sep string, width int) []string {
 		return []string{s}
 	}
 	if head, tail, ok := strings.Cut(s, sep); ok {
-		return []string{head + strings.TrimRight(sep, " "), tail}
+		// Either clause can still be too wide (a long team name), so each one
+		// wraps between words on its own.
+		return append(wrapWords(head+strings.TrimRight(sep, " "), width), wrapWords(tail, width)...)
+	}
+	return wrapWords(s, width)
+}
+
+// wrapWords breaks s between words so no line is wider than width. A single
+// word wider than width stays whole on its own line.
+func wrapWords(s string, width int) []string {
+	if lipgloss.Width(s) <= width {
+		return []string{s}
 	}
 	var lines []string
 	line := ""
