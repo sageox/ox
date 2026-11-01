@@ -44,14 +44,20 @@ func checkGitCommitHooks(fix bool) checkResult {
 		if err := InstallGitHooks(gitRoot); err != nil {
 			return FailedCheck("Git commit hooks", "repair failed", err.Error())
 		}
-		return PassedCheck("Git commit hooks", installedMessage)
+		// name what the repair added, so a fixed run reads differently from a clean one
+		return PassedCheck("Git commit hooks", "installed "+hookNames(missing))
 	}
 
-	suffix := " hooks not installed"
-	if len(missing) == 1 {
-		suffix = " hook not installed"
-	}
 	return FailedCheck("Git commit hooks",
-		strings.Join(missing, ", ")+suffix,
+		hookNames(missing)+" not installed",
 		"Run `ox doctor --fix` or `ox integrate install` to install")
+}
+
+// hookNames renders hook names for doctor text: "post-commit hook" or
+// "post-commit, post-rewrite hooks".
+func hookNames(names []string) string {
+	if len(names) == 1 {
+		return names[0] + " hook"
+	}
+	return strings.Join(names, ", ") + " hooks"
 }

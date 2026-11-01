@@ -464,10 +464,6 @@ func filterTestEnvironmentIssues(issues []string) []string {
 		}
 		// NOTE: "uncommitted change" filter was intentionally removed —
 		// it was hiding a real bug where init didn't properly re-stage files.
-		// skip git hooks — fresh installs don't have hooks until `ox integrate install`
-		if strings.Contains(issue, "hook not installed") {
-			continue
-		}
 		// skip credential helper warning — CI runners typically have no helper configured
 		if strings.Contains(issue, "credential helper") {
 			continue

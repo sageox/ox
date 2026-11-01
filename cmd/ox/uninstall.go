@@ -680,7 +680,14 @@ func removeHooks(gitRoot string) error {
 		return nil
 	}
 
-	// remove the hooks
+	// Current ox sections first: UninstallGitHooks cuts each one at its end
+	// marker, so user content around it survives. The scan below then removes
+	// what older ox versions and beads left behind.
+	if !uninstallDryRun {
+		if err := UninstallGitHooks(gitRoot); err != nil {
+			return fmt.Errorf("removing hooks: %w", err)
+		}
+	}
 	if err := uninstall.RemoveRepoHooks(gitRoot, uninstallDryRun); err != nil {
 		return fmt.Errorf("removing hooks: %w", err)
 	}

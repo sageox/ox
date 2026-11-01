@@ -3,9 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/gitutil"
 )
 
 const (
@@ -213,29 +214,11 @@ func allHookSpecs() []hookSpec {
 	}
 }
 
-// resolveHooksDir returns the git hooks directory, respecting core.hooksPath.
+// resolveHooksDir returns the directory git runs hooks from; see
+// gitutil.HooksDir for the resolution rules (core.hooksPath, then the git
+// common dir, which is what makes linked worktrees work).
 func resolveHooksDir(gitRoot string) string {
-	cmd := exec.Command("git", "-C", gitRoot, "config", "--get", "core.hooksPath")
-	output, err := cmd.Output()
-	if err == nil {
-		hooksPath := strings.TrimSpace(string(output))
-		if hooksPath != "" {
-			if filepath.IsAbs(hooksPath) {
-				return hooksPath
-			}
-			return filepath.Join(gitRoot, hooksPath)
-		}
-	}
-	cmd = exec.Command("git", "-C", gitRoot, "rev-parse", "--git-common-dir")
-	if output, err := cmd.Output(); err == nil {
-		if commonDir := strings.TrimSpace(string(output)); commonDir != "" {
-			if !filepath.IsAbs(commonDir) {
-				commonDir = filepath.Join(gitRoot, commonDir)
-			}
-			return filepath.Join(commonDir, "hooks")
-		}
-	}
-	return filepath.Join(gitRoot, ".git", "hooks")
+	return gitutil.HooksDir(gitRoot)
 }
 
 // InstallGitHooks installs every ox-managed git hook into the resolved hooks

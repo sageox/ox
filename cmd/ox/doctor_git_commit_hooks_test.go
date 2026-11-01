@@ -27,7 +27,8 @@ func TestCheckGitCommitHooks_NamesMissingHooks(t *testing.T) {
 		{name: "multiple_missing", missing: []string{postCommitHookName, postRewriteHookName}, message: "post-commit, post-rewrite hooks not installed"},
 		{name: "pre_push_missing", missing: []string{prePushHookName}, message: "pre-push hook not installed"},
 		{name: "worktree_all_present", worktree: true},
-		{name: "worktree_repair", missing: []string{postCommitHookName}, worktree: true, fix: true},
+		{name: "worktree_repair", missing: []string{postCommitHookName}, worktree: true, fix: true, message: "installed post-commit hook"},
+		{name: "repair_names_every_added_hook", missing: []string{postCommitHookName, prePushHookName}, fix: true, message: "installed post-commit, pre-push hooks"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			mainRoot, worktreeRoot := gitHooksWorktree(t)
@@ -50,8 +51,12 @@ func TestCheckGitCommitHooks_NamesMissingHooks(t *testing.T) {
 			assert.False(t, result.skipped)
 			assert.Equal(t, len(tt.missing) == 0 || tt.fix, result.passed)
 			if result.passed {
-				for _, spec := range allHookSpecs() {
-					assert.Contains(t, result.message, spec.name)
+				if tt.fix {
+					assert.Equal(t, tt.message, result.message)
+				} else {
+					for _, spec := range allHookSpecs() {
+						assert.Contains(t, result.message, spec.name)
+					}
 				}
 				assert.True(t, HasGitHooks(mainRoot))
 				assert.True(t, HasGitHooks(worktreeRoot))

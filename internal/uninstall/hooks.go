@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/gitutil"
 )
 
 // GitHookItem represents a git hook that can be removed
@@ -21,6 +23,8 @@ type GitHookItem struct {
 var sageoxHookMarkers = []string{
 	"# ox pre-commit hook",
 	"# ox post-commit hook",
+	"# ox post-rewrite hook",
+	"# ox pre-push hook",
 	"# ox prepare-commit-msg hook",
 	"# ox commit-msg hook",
 	"# SageOx hook",
@@ -31,10 +35,12 @@ var sageoxHookMarkers = []string{
 // legacy cleanup: users may have beads hooks from prior ox versions
 const beadsHookMarker = "# bd-hooks-version:"
 
-// FindSageoxHooks scans .git/hooks/ directory for SageOx-installed hooks
-// Returns list of hooks that contain SageOx markers
+// FindSageoxHooks scans the repository's git hooks directory for
+// SageOx-installed hooks. The directory is the one git runs hooks from
+// (gitutil.HooksDir): core.hooksPath, or the common dir, so a linked worktree
+// finds the hooks ox installed for it. Returns hooks that contain SageOx markers.
 func FindSageoxHooks(repoRoot string) ([]GitHookItem, error) {
-	hooksDir := filepath.Join(repoRoot, ".git", "hooks")
+	hooksDir := gitutil.HooksDir(repoRoot)
 
 	// check if hooks directory exists
 	if _, err := os.Stat(hooksDir); os.IsNotExist(err) {
@@ -180,7 +186,7 @@ func containsAny(s string, patterns []string) bool {
 	return false
 }
 
-// RemoveRepoHooks removes SageOx hooks from .git/hooks/
+// RemoveRepoHooks removes SageOx hooks from the directory FindSageoxHooks scans
 // If dryRun is true, only reports what would be removed without making changes
 // Returns error if any removal fails
 func RemoveRepoHooks(repoRoot string, dryRun bool) error {
