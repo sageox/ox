@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	_ "embed"
 	"encoding/json"
 	"log/slog"
@@ -14,6 +13,7 @@ import (
 	friction "github.com/sageox/frictionax"
 	frictioncobra "github.com/sageox/frictionax/adapters/cobra"
 	"github.com/sageox/frictionax/redactors/secrets"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/spf13/cobra"
@@ -86,28 +86,9 @@ type oxActorDetector struct {
 }
 
 func (d oxActorDetector) DetectActor() (friction.Actor, string) {
-	env := d.env
-	if env == nil {
-		env = agentx.NewSystemEnvironment()
-	}
-	if a, _ := agentx.NewDetectorWithEnv(envSignalsOnly{env}).Detect(context.Background()); a != nil {
-		return friction.ActorAgent, string(a.Type())
-	}
-	if env.GetEnv("CI") != "" {
-		return friction.ActorAgent, "ci"
-	}
-	return friction.ActorHuman, ""
+	actor, agentType := cli.DetectActor(d.env)
+	return friction.Actor(actor), agentType
 }
-
-// envSignalsOnly hides the filesystem from agent detection, so only
-// environment variables an agent sets can name the actor. agentx's Codex
-// detector otherwise falls back to a .codex/ directory in the working
-// directory, which ox itself writes into repositories, and would file every
-// person working there as an AI coworker.
-type envSignalsOnly struct{ agentx.Environment }
-
-func (envSignalsOnly) IsDir(string) bool      { return false }
-func (envSignalsOnly) FileExists(string) bool { return false }
 
 // sendFrictionEvent sends a friction event to the daemon via IPC for telemetry.
 // Fire-and-forget with a 5ms timeout — must complete synchronously so os.Exit()

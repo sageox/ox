@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -726,4 +728,56 @@ func TestRevokeTokenStatus_NetworkError(t *testing.T) {
 	status, err := client.RevokeTokenStatus()
 	assert.NoError(t, err)
 	assert.Equal(t, RevocationNetworkError, status)
+}
+
+// Failure prevented: both logout revocation paths must identify agent traffic without changing form or status handling.
+func TestRevokeOnServer_ActorHeadersAndForm(t *testing.T) {
+	useragent.ResetForTesting()
+	t.Cleanup(useragent.ResetForTesting)
+	useragent.SetActor("agent", "codex")
+
+	for _, implementation := range []struct {
+		name   string
+		revoke func(string, *StoredToken) RevocationStatus
+	}{
+		{"legacy", func(baseURL string, token *StoredToken) RevocationStatus {
+			if (&AuthClient{endpoint: baseURL}).revokeOnServer(token) {
+				return RevocationSuccess
+			}
+			return RevocationServerFailed
+		}},
+		{"structured", func(baseURL string, token *StoredToken) RevocationStatus {
+			return revokeOnServerAt(context.Background(), baseURL, token)
+		}},
+	} {
+		t.Run(implementation.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name                string
+				token               StoredToken
+				wantToken, wantHint string
+				statusCode          int
+				wantStatus          RevocationStatus
+			}{
+				{"refresh", StoredToken{AccessToken: "test-access", RefreshToken: "test-refresh"}, "test-refresh", "refresh_token", http.StatusOK, RevocationSuccess},
+				{"access", StoredToken{AccessToken: "test-access"}, "test-access", "access_token", http.StatusOK, RevocationSuccess},
+				{"rejected", StoredToken{AccessToken: "test-access"}, "test-access", "access_token", http.StatusBadRequest, RevocationServerFailed},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						assert.Equal(t, http.MethodPost, r.Method)
+						assert.Equal(t, RevokeEndpoint, r.URL.Path)
+						assert.Equal(t, "agent", r.Header.Get(useragent.HeaderActor))
+						assert.Equal(t, "codex", r.Header.Get(useragent.HeaderAgentType))
+						assert.Equal(t, "application/x-www-form-urlencoded", r.Header.Get("Content-Type"))
+						if assert.NoError(t, r.ParseForm()) {
+							assert.Equal(t, url.Values{"token": {tc.wantToken}, "token_type_hint": {tc.wantHint}, "client_id": {ClientID}}, r.PostForm)
+						}
+						w.WriteHeader(tc.statusCode)
+					}))
+					t.Cleanup(server.Close)
+					assert.Equal(t, tc.wantStatus, implementation.revoke(server.URL, &tc.token))
+				})
+			}
+		})
+	}
 }

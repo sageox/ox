@@ -383,8 +383,9 @@ type UserConfig struct {
 	// via max(). Set to 0 with pct==0 to disable warnings entirely.
 	PATExpiryWarningMinDays *int `yaml:"pat_expiry_warning_min_days,omitempty"`
 
-	// TelemetryNoticeShown records that the one-time telemetry notice was shown.
-	TelemetryNoticeShown *bool `yaml:"telemetry_notice_shown,omitempty"`
+	// TelemetryNoticeShown records that the current person-ID notice was shown.
+	// The old telemetry_notice_shown flag does not cover this disclosure.
+	TelemetryNoticeShown *bool `yaml:"telemetry_notice_v2_shown,omitempty"`
 }
 
 // SkillsConfig holds the user-level `skills.*` settings.

@@ -24,6 +24,8 @@ var (
 	agentVersion     string
 	orchestratorType string
 	repoID           string
+	requestActor     string
+	requestAgentType string
 	daemonMode       bool
 	cached           string
 	daemonStr        string
@@ -50,6 +52,12 @@ const HeaderRepoID = "X-Sageox-Repo-Id"
 // the server still tells it apart by its "ox-daemon/" User-Agent prefix.
 const HeaderClientType = "X-Client-Type"
 
+// HeaderActor identifies who initiated a command: human or agent.
+const HeaderActor = "X-Sageox-Actor"
+
+// HeaderAgentType identifies the detected agent; CI uses agent with type ci.
+const HeaderAgentType = "X-Sageox-Agent-Type"
+
 // clientTypeCLI is the value from the server's closed X-Client-Type allowlist
 // that names ox. An unknown value would be dropped server-side, not echoed.
 const clientTypeCLI = "cli"
@@ -60,6 +68,26 @@ const clientTypeCLI = "cli"
 // separators that could split a header. Mirrors the character-class posture
 // the server applies to User-Agent metadata fields.
 var repoIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+
+var actorValueRe = regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
+
+// SetActor records the command's detected actor for SageOx requests.
+// Thread-safe; the first valid actor wins. Invalid types are dropped while
+// retaining a valid actor. Long-running services must leave this unset.
+func SetActor(actor, agentType string) {
+	if actor != "human" && actor != "agent" {
+		return
+	}
+	if actor != "agent" || !actorValueRe.MatchString(agentType) {
+		agentType = ""
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requestActor != "" {
+		return
+	}
+	requestActor, requestAgentType = actor, agentType
+}
 
 func init() {
 	daemonStr = fmt.Sprintf("ox-daemon/%s (%s; %s)", version.Version, runtime.GOOS, runtime.GOARCH)
@@ -256,12 +284,14 @@ func randomTraceparent() string {
 }
 
 // SetHeaders sets User-Agent, X-Client-Type, X-Orchestrator, X-Sageox-Repo-Id,
-// and traceparent headers on the request. Use this for SageOx API requests to
-// include full telemetry context.
+// X-Sageox-Actor, X-Sageox-Agent-Type and traceparent on SageOx API requests.
+// Actor headers are omitted for daemon requests.
 //
-// Every call site is a SageOx-owned endpoint (internal/api, internal/auth,
-// internal/doctorapi, internal/telemetry) — LFS and git transport do not go
-// through here — so the repo ID is never disclosed to a third party.
+// Every call site is a SageOx-owned endpoint (internal/api,
+// internal/attestpublication, internal/auth, internal/doctorapi,
+// internal/telemetry, cmd/ox plan-review presence) — LFS and git transport do
+// not go through here — so the repo ID and actor are never disclosed to a
+// third party.
 //
 // If OTel tracing is active, the traceparent comes from the current command's
 // root span so all requests within one command share the same trace ID.
@@ -275,6 +305,11 @@ func SetHeaders(h http.Header) {
 	if rid := RepoID(); rid != "" {
 		h.Set(HeaderRepoID, rid)
 	}
+	h.Del(HeaderActor)
+	h.Del(HeaderAgentType)
+	for key, values := range ActorHeaders() {
+		h[key] = values
+	}
 	if h.Get("traceparent") == "" {
 		tp := observability.TraceParent()
 		if tp == "" {
@@ -283,6 +318,23 @@ func SetHeaders(h http.Header) {
 		h.Set("traceparent", tp)
 		slog.Debug("http request traceparent", "traceparent", tp)
 	}
+}
+
+// ActorHeaders returns the validated actor headers SetHeaders adds, for
+// exporters that do not build requests through SetHeaders (OTLP). It is empty
+// in daemon mode and before SetActor.
+func ActorHeaders() http.Header {
+	mu.RLock()
+	actor, agent, daemon := requestActor, requestAgentType, daemonMode
+	mu.RUnlock()
+	h := make(http.Header)
+	if !daemon && actor != "" {
+		h.Set(HeaderActor, actor)
+		if agent != "" {
+			h.Set(HeaderAgentType, agent)
+		}
+	}
+	return h
 }
 
 // DaemonString returns the User-Agent for daemon requests.
@@ -299,6 +351,8 @@ func ResetForTesting() {
 	agentVersion = ""
 	orchestratorType = ""
 	repoID = ""
+	requestActor = ""
+	requestAgentType = ""
 	daemonMode = false
 	cached = ""
 }

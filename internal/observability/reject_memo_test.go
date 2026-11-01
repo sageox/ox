@@ -15,15 +15,17 @@ import (
 // countingBase is a RoundTripper that answers with a fixed status per bearer
 // and counts how many requests actually reached it.
 type countingBase struct {
-	mu     sync.Mutex
-	status map[string]int // bearer -> status
-	hits   []string       // bearer per request that got through
+	mu      sync.Mutex
+	status  map[string]int // bearer -> status
+	hits    []string       // bearer per request that got through
+	headers []http.Header  // request metadata that reached the base transport
 }
 
 func (b *countingBase) RoundTrip(req *http.Request) (*http.Response, error) {
 	tok := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
 	b.mu.Lock()
 	b.hits = append(b.hits, tok)
+	b.headers = append(b.headers, req.Header.Clone())
 	st := b.status[tok]
 	b.mu.Unlock()
 	return &http.Response{StatusCode: st, Status: http.StatusText(st), Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
@@ -122,4 +124,52 @@ func TestBearerRoundTripper_OnlyAuthFailuresSuppress(t *testing.T) {
 	_, _ = rt.RoundTrip(newReq(t))
 	_, _ = rt.RoundTrip(newReq(t))
 	assert.Equal(t, 4, base.hitCount(), "403 arms the memo like 401")
+}
+
+// Failure prevented: OTLP exports lose command identity, mutate retry requests, or accept caller-owned header changes.
+func TestBearerRoundTripper_ActorHeadersSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		actor     string
+		agentType string
+	}{
+		{name: "human", actor: "human"},
+		{name: "agent", actor: "agent", agentType: "codex"},
+		{name: "ci", actor: "agent", agentType: "ci"},
+		{name: "no headers"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := &countingBase{status: map[string]int{"tok": http.StatusOK}}
+			var headers http.Header
+			if tc.actor != "" {
+				headers = http.Header{"X-Sageox-Actor": {tc.actor}, "authorization": {"override"}}
+				if tc.agentType != "" {
+					headers.Set("X-Sageox-Agent-Type", tc.agentType)
+				}
+			}
+			rt := newBearerRoundTripper(base, func() string { return "tok" }, headers)
+			if headers != nil {
+				// Mutate both the input slice and map after constructing the exporter.
+				headers["X-Sageox-Actor"][0] = "changed"
+				headers.Set("X-Sageox-Agent-Type", "changed")
+				headers.Set("Authorization", "changed")
+			}
+			req := newReq(t)
+			req.Header.Set("Authorization", "original")
+			req.Header.Set("Content-Type", "application/x-protobuf")
+			original := req.Header.Clone()
+
+			resp, err := rt.RoundTrip(req)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = resp.Body.Close() })
+			require.Len(t, base.headers, 1)
+			seen := base.headers[0]
+			assert.Equal(t, tc.actor, seen.Get("X-Sageox-Actor"))
+			assert.Equal(t, tc.agentType, seen.Get("X-Sageox-Agent-Type"))
+			assert.Equal(t, []string{"Bearer tok"}, seen.Values("Authorization"))
+			assert.NotContains(t, seen, "authorization", "noncanonical authorization must not bypass tokenFunc")
+			assert.Equal(t, "application/x-protobuf", seen.Get("Content-Type"))
+			assert.Equal(t, original, req.Header, "the caller's request must remain reusable")
+		})
+	}
 }

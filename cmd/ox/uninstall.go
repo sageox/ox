@@ -381,7 +381,21 @@ func checkUninstallAuth(endpoints []string, allEndpoints bool, selectedEndpoint 
 // selectEndpointForUninstall handles endpoint selection when multiple endpoints are configured.
 // Returns: selected endpoint, whether to uninstall from all endpoints, error.
 // If only one endpoint exists or --all flag is set, returns immediately.
-func selectEndpointForUninstall(gitRoot string, endpoints []string) (string, bool, error) {
+func selectEndpointForUninstall(gitRoot string, endpoints []string) (selected string, all bool, err error) {
+	// Usage telemetry classifies the command by every endpoint chosen here, so
+	// uninstalling from a test endpoint is not counted as production activity.
+	defer func() {
+		if err != nil {
+			return
+		}
+		recordPostHogEndpoint(selected)
+		if all {
+			for _, ep := range endpoints {
+				recordPostHogEndpoint(ep)
+			}
+		}
+	}()
+
 	// handle --all flag
 	if uninstallAll {
 		if len(endpoints) == 0 {

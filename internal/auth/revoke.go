@@ -11,6 +11,7 @@ import (
 
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/useragent"
 )
 
 // RevokeToken revokes token and removes from local storage.
@@ -105,12 +106,15 @@ func (c *AuthClient) revokeOnServer(token *StoredToken) bool {
 	logger.LogHTTPRequest("POST", revokeURL)
 	start := time.Now()
 
+	req, err := useragent.NewRequest(context.Background(), http.MethodPost, revokeURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		logger.LogHTTPError("POST", revokeURL, err, time.Since(start))
+		return false
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
 	// make POST request to revocation endpoint
-	resp, err := client.Post(
-		revokeURL,
-		"application/x-www-form-urlencoded",
-		strings.NewReader(data.Encode()),
-	)
+	resp, err := client.Do(req)
 	duration := time.Since(start)
 	if err != nil {
 		logger.LogHTTPError("POST", revokeURL, err, duration)
@@ -248,7 +252,7 @@ func revokeOnServerAt(ctx context.Context, baseURL string, token *StoredToken) R
 		Timeout: 10 * time.Second,
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, revokeURL, strings.NewReader(data.Encode()))
+	req, err := useragent.NewRequest(ctx, http.MethodPost, revokeURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return RevocationNetworkError
 	}

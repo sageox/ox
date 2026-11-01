@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,9 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -535,6 +538,33 @@ func TestMurmurList_InvalidWindowIsAUsageError(t *testing.T) {
 					t.Errorf("error %q lacks %q", err, want)
 				}
 			}
+		})
+	}
+}
+
+// Failure prevented: polls have no raw delivery facts, or send murmur content instead of just a count and time.
+func TestMurmurList_OutcomeFacts(t *testing.T) {
+	for _, n := range []int{0, 3} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			if testing.Short() {
+				t.Skip("short: initializes a git project")
+			}
+			withIsolatedConfig(t)
+			t.Setenv("SAGEOX_TOKEN", "")
+			t.Setenv("SAGEOX_ENDPOINT", "http://127.0.0.1:1")
+			t.Setenv("OX_XDG_DISABLE", "")
+			ages := []time.Duration{time.Minute, 2 * time.Minute, 3 * time.Minute}
+			murmurListProject(t, ages[:n]...)
+			saved := cliCtx
+			t.Cleanup(func() { cliCtx = saved })
+			cliCtx = &cli.Context{}
+			out, err := runMurmurListJSON(t)
+			require.NoError(t, err)
+			expected := map[string]any{"murmur_count": n}
+			if n > 0 {
+				expected["newest_murmur_at"] = out.Murmurs[0].Timestamp
+			}
+			assert.Equal(t, expected, cliCtx.Outcome())
 		})
 	}
 }
