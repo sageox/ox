@@ -373,7 +373,6 @@ func runInit() error {
 			return err
 		}
 		if selectedEndpoint != "" {
-			recordPostHogEndpoint(selectedEndpoint)
 			if needsLogin {
 				fmt.Println()
 				cli.PrintError("Authentication required")
@@ -2530,7 +2529,15 @@ func soleLoggedInEndpoint(endpoints []initEndpointInfo, storedSlugs map[string]b
 // selectInitEndpoint shows endpoint selection UI for ox init.
 // needsLogin is true if the user must log in first. Cancellation returns an
 // empty endpoint; --no-input returns an error when a choice is needed.
-func selectInitEndpoint() (string, bool, error) {
+//
+// The chosen endpoint is recorded for usage telemetry, so initializing against
+// a test endpoint is not counted under the production person.
+func selectInitEndpoint() (chosen string, needsLogin bool, err error) {
+	defer func() {
+		if err == nil {
+			recordPostHogEndpoint(chosen)
+		}
+	}()
 	// get all endpoints with stored tokens (including expired)
 	storedEndpoints, err := auth.ListEndpoints()
 	if err != nil {

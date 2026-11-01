@@ -36,8 +36,9 @@ const envStartedByOx = "OX_STARTED_BY_OX"
 // startedByOx records whether this process inherited envStartedByOx.
 var startedByOx bool
 
-// capturePostHogCommand sends the invocation that just finished to PostHog,
-// then shows the one-time telemetry notice on stderr. main calls it after the
+// capturePostHogCommand shows the one-time telemetry notice on stderr, then
+// sends the invocation that just finished to PostHog. The notice comes first
+// so a person reads it before an event names them. main calls it after the
 // command returns, on success and failure alike, because the exit code and
 // duration are known only then.
 //

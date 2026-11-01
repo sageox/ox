@@ -706,6 +706,33 @@ func TestPostHogCaptureOpts_InvocationEndpoint(t *testing.T) {
 	}
 }
 
+// Failure prevented: a usage mistake Cobra rejects in a staging repository is counted under the production person.
+func TestRejectedInvocationContext_ClassifiedByProject(t *testing.T) {
+	const staging = "https://test.sageox.ai"
+	withIsolatedConfig(t)
+	t.Setenv("SAGEOX_ENDPOINT", "")
+	t.Setenv("SAGEOX_TOKEN", "")
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv(config.EnvProjectRoot, "")
+	for ep, id := range map[string]string{endpoint.Default: "usr_production", staging: "usr_staging"} {
+		require.NoError(t, auth.SaveTokenForEndpoint(ep, &auth.StoredToken{
+			AccessToken: "opaque_fixture", ExpiresAt: time.Now().Add(time.Hour),
+			UserInfo: auth.UserInfo{UserID: id},
+		}))
+	}
+	oldGetter := endpoint.ProjectEndpointGetter
+	endpoint.ProjectEndpointGetter = func(string) string { return staging }
+	t.Cleanup(func() { endpoint.ProjectEndpointGetter = oldGetter })
+	project := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(project, ".sageox"), 0o755))
+	t.Chdir(project)
+
+	c := rejectedInvocationContext(&cobra.Command{Use: "status"}, time.Now())
+	require.NotEmpty(t, c.ProjectRoot, "the fallback context must find the project like cli.NewContext")
+	assert.Empty(t, postHogCaptureOpts(c).PersonID)
+	assert.Equal(t, "test", postHogCommandProps(c, "status", 2)["env"])
+}
+
 // Failure prevented: login's runtime selection is lost when a device request fails before storing a token.
 func TestPostHogCaptureOpts_LoginRecordsSelectedEndpoint(t *testing.T) {
 	withIsolatedConfig(t)
