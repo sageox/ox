@@ -293,3 +293,23 @@ func TestRemoveHooks_SkipsHookPathThatIsADirectory(t *testing.T) {
 	assert.Empty(t, oxHookSectionsPresent(t, mainRoot))
 	assert.DirExists(t, filepath.Join(hooksDir, prePushHookName))
 }
+
+// Failure prevented: an ox start marker with no end marker makes `ox
+// uninstall` cut everything after it, deleting another tool's hook section.
+func TestRemoveHooks_KeepsUserContentAfterIncompleteOxSection(t *testing.T) {
+	skipIntegration(t) // Real git init, commit, and worktree creation.
+	origDryRun := uninstallDryRun
+	t.Cleanup(func() { uninstallDryRun = origDryRun })
+	uninstallDryRun = false
+
+	mainRoot, worktreeRoot := gitHooksWorktree(t)
+	hookPath := filepath.Join(mainRoot, ".git", "hooks", postCommitHookName)
+	const incomplete = "#!/bin/sh\n" + oxPostCommitMarkerStart + "\nox hooks post-commit\n\n\n# lefthook\nlefthook run post-commit\n"
+	require.NoError(t, os.WriteFile(hookPath, []byte(incomplete), 0o755))
+
+	require.NoError(t, removeHooks(worktreeRoot))
+	content, err := os.ReadFile(hookPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "lefthook run post-commit")
+	assert.NotContains(t, string(content), oxPostCommitMarkerStart)
+}

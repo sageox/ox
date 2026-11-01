@@ -320,6 +320,12 @@ func uninstallHookSection(hooksDir string, spec hookSpec) error {
 			result = append(result, line)
 		}
 	}
+	if inSection {
+		// A start marker with no end marker (an older or hand-edited hook): the
+		// section's extent is unknown, so cutting to end of file could delete
+		// user content after it. Leave the file for the legacy marker scan.
+		return nil
+	}
 
 	cleaned := strings.TrimSpace(strings.Join(result, "\n"))
 	if cleaned == "" || cleaned == "#!/bin/sh" || cleaned == "#!/bin/bash" {
