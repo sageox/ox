@@ -5,6 +5,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/charmbracelet/colorprofile"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/theme"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/stretchr/testify/require"
@@ -162,6 +165,43 @@ func TestMCPHeadersRejectedArgumentsStayLocal(t *testing.T) {
 	}
 }
 
+// Failure prevented: an AI coworker looking for an MCP server under `ox mcp`
+// leaves no friction event, because the hidden group swallowed the signal.
+func TestMCPNonHelperInvocationsRecordFriction(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fakeDaemonDials listens on a Unix socket; the Windows client dials a named pipe")
+	}
+	for _, tt := range []struct {
+		args    []string
+		wantErr string
+	}{
+		{[]string{"mcp"}, `unknown command "mcp" for "ox"`},
+		{[]string{"mcp", "serve"}, `unknown command "serve" for "ox mcp"`},
+	} {
+		t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
+			recoveryEnv(t)
+			t.Setenv("DO_NOT_TRACK", "")
+			t.Setenv("SAGEOX_FRICTION", "true")
+			t.Setenv("OX_XDG_ENABLE", "1")
+			t.Setenv("XDG_RUNTIME_DIR", "/tmp") // Keep the Unix socket path below the platform limit.
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			_, received := fakeDaemonDials(t)
+			previousContext := cliCtx
+			t.Cleanup(func() { cliCtx = previousContext })
+			cliCtx = nil
+
+			run := runRecovery(t, tt.args...)
+			require.Equal(t, 1, run.code)
+			require.Contains(t, run.stderr, tt.wantErr)
+			require.Empty(t, run.stdout)
+			// The friction send is one-way, so the fake daemon records it after the run returns.
+			require.Eventually(t, func() bool {
+				return slices.Contains(received(), daemon.MsgTypeFriction)
+			}, time.Second, 10*time.Millisecond, "a non-helper `ox mcp` invocation must send a friction event")
+		})
+	}
+}
+
 // Failure prevented: startup probes the daemon before the helper can skip the root lifecycle.
 func TestMCPHeadersSkipDaemonStartup(t *testing.T) {
 	recoveryEnv(t)
@@ -216,7 +256,9 @@ func TestMCPHeadersInvocationLookup(t *testing.T) {
 		{[]string{"--json", "mcp", "headers"}, true},
 		{[]string{"--config", "local.yaml", "mcp", "headers"}, true},
 		{[]string{"mcp", "headers", "--unknown"}, true},
-		{[]string{"mcp", "unknown"}, true},
+		{[]string{"mcp"}, false},
+		{[]string{"mcp", "serve"}, false},
+		{[]string{"mcp", "unknown"}, false},
 		{[]string{"status", "--config", "mcp"}, false},
 		{[]string{"--config=mcp", "status"}, false},
 		{[]string{"status", "mcp"}, false},

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"errors"
+	"fmt"
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
@@ -13,11 +13,12 @@ var mcpCmd = &cobra.Command{
 	Use:    "mcp",
 	Short:  "Local helpers for MCP clients",
 	Hidden: true,
-	// `ox mcp serve` and other words stay an unknown command, so friction
-	// recovery still records an AI coworker looking for an MCP server.
+	// Bare `ox mcp`, `ox mcp serve` and other words stay an unknown command,
+	// worded as cobra words it, so friction recovery still records an AI
+	// coworker looking for an MCP server.
 	Args: cobra.NoArgs,
-	RunE: func(*cobra.Command, []string) error {
-		return errors.New("ox mcp has no command of its own; MCP clients run `ox mcp headers`")
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		return fmt.Errorf("unknown command %q for %q", cmd.Name(), cmd.Parent().CommandPath())
 	},
 	// Do not initialize root's auth, telemetry, exporters, or daemon heartbeat.
 	PersistentPreRunE: applyConfigFlag,
