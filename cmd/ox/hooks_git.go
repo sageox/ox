@@ -361,6 +361,7 @@ func HasGitHooks(gitRoot string) bool {
 	return len(missingGitHooks(gitRoot)) == 0
 }
 
+// missingGitHooks returns managed hook names whose ox sections are absent or incomplete.
 func missingGitHooks(gitRoot string) []string {
 	hooksDir := resolveHooksDir(gitRoot)
 	var missing []string
