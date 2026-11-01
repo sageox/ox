@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -157,7 +158,13 @@ func TestMCPHeadersRejectedArgumentsStayLocal(t *testing.T) {
 			run := runRecovery(t, args...)
 			require.NotZero(t, run.code, "invalid helper invocations must still be rejected")
 			require.Empty(t, run.stdout)
-			require.Zero(t, dials.Load(), "a rejected helper invocation must not send friction to the daemon")
+			// Barrier: the accept loop takes connections in order, so once this sentinel
+			// is counted, any connection the run made has been counted before it.
+			sentinel, err := net.Dial("unix", daemon.SocketPath())
+			require.NoError(t, err)
+			_ = sentinel.Close()
+			require.Eventually(t, func() bool { return dials.Load() >= 1 }, time.Second, 5*time.Millisecond)
+			require.Equal(t, int64(1), dials.Load(), "a rejected helper invocation must not send friction to the daemon")
 			if cliCtx != nil {
 				t.Fatal("shared error recovery created a telemetry context for the local helper")
 			}
