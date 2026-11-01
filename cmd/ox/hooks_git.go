@@ -321,10 +321,11 @@ func uninstallHookSection(hooksDir string, spec hookSpec) error {
 		}
 	}
 	if inSection {
-		// A start marker with no end marker (an older or hand-edited hook): the
-		// section's extent is unknown, so cutting to end of file could delete
-		// user content after it. Leave the file for the legacy marker scan.
-		return nil
+		// A start marker with no end marker can only come from a hand edit (ox
+		// has always written both). The section's extent is unknown: cutting to
+		// end of file, or handing the file to a heuristic scan, could delete the
+		// user's own commands. Leave the file untouched and say which hook.
+		return fmt.Errorf("%s hook has an ox section with no %q line; remove it by hand: %s", spec.name, oxHookMarkerEnd, hookPath)
 	}
 
 	cleaned := strings.TrimSpace(strings.Join(result, "\n"))

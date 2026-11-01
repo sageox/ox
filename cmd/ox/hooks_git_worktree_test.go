@@ -295,21 +295,33 @@ func TestRemoveHooks_SkipsHookPathThatIsADirectory(t *testing.T) {
 }
 
 // Failure prevented: an ox start marker with no end marker makes `ox
-// uninstall` cut everything after it, deleting another tool's hook section.
-func TestRemoveHooks_KeepsUserContentAfterIncompleteOxSection(t *testing.T) {
+// uninstall` delete the user's own commands that follow it, either by cutting
+// to end of file or by the legacy scan calling the whole file ox's.
+func TestRemoveHooks_RefusesIncompleteOxSection(t *testing.T) {
 	skipIntegration(t) // Real git init, commit, and worktree creation.
 	origDryRun := uninstallDryRun
 	t.Cleanup(func() { uninstallDryRun = origDryRun })
 	uninstallDryRun = false
 
-	mainRoot, worktreeRoot := gitHooksWorktree(t)
-	hookPath := filepath.Join(mainRoot, ".git", "hooks", postCommitHookName)
-	const incomplete = "#!/bin/sh\n" + oxPostCommitMarkerStart + "\nox hooks post-commit\n\n\n# lefthook\nlefthook run post-commit\n"
-	require.NoError(t, os.WriteFile(hookPath, []byte(incomplete), 0o755))
+	for _, tt := range []struct {
+		name string
+		tail string
+	}{
+		{name: "another tool's section", tail: "\n\n# lefthook\nlefthook run post-commit\n"},
+		{name: "unmarked user command", tail: "./scripts/notify-build.sh\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mainRoot, worktreeRoot := gitHooksWorktree(t)
+			hookPath := filepath.Join(mainRoot, ".git", "hooks", postCommitHookName)
+			incomplete := "#!/bin/sh\n" + oxPostCommitMarkerStart + "\nox hooks post-commit\n" + tt.tail
+			require.NoError(t, os.WriteFile(hookPath, []byte(incomplete), 0o755))
 
-	require.NoError(t, removeHooks(worktreeRoot))
-	content, err := os.ReadFile(hookPath)
-	require.NoError(t, err)
-	assert.Contains(t, string(content), "lefthook run post-commit")
-	assert.NotContains(t, string(content), oxPostCommitMarkerStart)
+			err := removeHooks(worktreeRoot)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), postCommitHookName)
+			content, readErr := os.ReadFile(hookPath)
+			require.NoError(t, readErr)
+			assert.Equal(t, incomplete, string(content), "the hook must be left exactly as it was")
+		})
+	}
 }
