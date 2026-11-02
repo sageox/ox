@@ -1,6 +1,9 @@
 package lfs
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -549,4 +552,44 @@ func TestSharedHTTPClient_Timeout(t *testing.T) {
 	useBundledSessionRules(t)
 	// verify the shared client has the expected timeout
 	assert.Equal(t, 5*time.Minute, lfsHTTPClient.Timeout, "shared LFS client should have 5-minute timeout")
+}
+
+func TestUploadAndVerify_TransportErrorsOmitSignedURL(t *testing.T) {
+	useBundledSessionRules(t)
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+	redirectTo := func(location string) string {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Location", location)
+			w.WriteHeader(http.StatusTemporaryRedirect)
+			fmt.Fprintf(w, "<a href=%q>moved</a>", location)
+		}))
+		t.Cleanup(server.Close)
+		return server.URL
+	}
+	servers := map[string]string{
+		"unreachable":        closed.URL,
+		"redirect":           redirectTo("https://storage.example/o?X-Amz-Signature=signed-secret"),
+		"malformed redirect": redirectTo("/%zz?X-Amz-Signature=signed-secret"),
+	}
+
+	ctx := context.Background()
+	tests := map[string]func(*Action) error{
+		"upload":          func(a *Action) error { return UploadObject(a, []byte("data")) },
+		"verify":          func(a *Action) error { return VerifyObject(a, "abc", 4) },
+		"recovery upload": func(a *Action) error { return putRecoveryObject(ctx, a, []byte("data")) },
+		"recovery verify": func(a *Action) error { return verifyRecoveryObject(ctx, a, FileRef{OID: "sha256:abc", Size: 4}) },
+	}
+	for server, base := range servers {
+		for name, call := range tests {
+			t.Run(server+"/"+name, func(t *testing.T) {
+				err := call(&Action{Href: base + "/objects/abc?X-Amz-Signature=signed-secret"})
+				require.Error(t, err)
+				assert.NotContains(t, err.Error(), "signed-secret")
+			})
+		}
+	}
+
+	other := errors.New("not a transport error")
+	assert.Equal(t, other, withoutURL(other), "non-URL errors pass through unchanged")
 }
