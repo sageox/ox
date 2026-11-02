@@ -3,6 +3,7 @@ package lfs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -557,12 +558,20 @@ func TestUploadAndVerify_TransportErrorsOmitSignedURL(t *testing.T) {
 	useBundledSessionRules(t)
 	closed := httptest.NewServer(http.NotFoundHandler())
 	closed.Close()
-	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Location", "/%zz?X-Amz-Signature=signed-secret")
-		w.WriteHeader(http.StatusTemporaryRedirect)
-	}))
-	t.Cleanup(redirect.Close)
-	servers := map[string]string{"unreachable": closed.URL, "malformed redirect": redirect.URL}
+	redirectTo := func(location string) string {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Location", location)
+			w.WriteHeader(http.StatusTemporaryRedirect)
+			fmt.Fprintf(w, "<a href=%q>moved</a>", location)
+		}))
+		t.Cleanup(server.Close)
+		return server.URL
+	}
+	servers := map[string]string{
+		"unreachable":        closed.URL,
+		"redirect":           redirectTo("https://storage.example/o?X-Amz-Signature=signed-secret"),
+		"malformed redirect": redirectTo("/%zz?X-Amz-Signature=signed-secret"),
+	}
 
 	ctx := context.Background()
 	tests := map[string]func(*Action) error{

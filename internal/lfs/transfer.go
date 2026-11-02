@@ -35,22 +35,24 @@ import (
 // legitimate use case for action.Href) never 302 anyway.
 var lfsHTTPClient = &http.Client{
 	Timeout:   5 * time.Minute,
-	Transport: dropLocation{},
+	Transport: dropRedirect{},
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
 }
 
-// dropLocation strips Location from responses. Redirects are never
-// followed, and net/http quotes a malformed Location (possibly a signed
-// URL) in its error before CheckRedirect runs. http.DefaultTransport is
-// read per request, as a nil Transport would.
-type dropLocation struct{}
+// dropRedirect strips a 3xx response's Location and body, both of which
+// can carry a signed URL. Redirects are never followed, and net/http
+// quotes a malformed Location in its error before CheckRedirect runs.
+// http.DefaultTransport is read per request, as a nil Transport would.
+type dropRedirect struct{}
 
-func (dropLocation) RoundTrip(req *http.Request) (*http.Response, error) {
+func (dropRedirect) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := http.DefaultTransport.RoundTrip(req)
-	if resp != nil {
+	if resp != nil && resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		resp.Header.Del("Location")
+		resp.Body.Close()
+		resp.Body = http.NoBody
 	}
 	return resp, err
 }
