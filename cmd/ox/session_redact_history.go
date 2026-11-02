@@ -1006,7 +1006,11 @@ func redactLFSContent(ctx context.Context, ledgerPath, rel string, newClient fun
 		return fmt.Errorf("%s is not JSONL; redact it manually", name)
 	}
 	pointerPath := filepath.Join(ledgerPath, filepath.FromSlash(rel))
-	oldRef, err := lfs.ReadPointerFile(pointerPath)
+	oldPointer, err := os.ReadFile(pointerPath)
+	if err != nil {
+		return err
+	}
+	oldOID, _, err := lfs.ParsePointer(string(oldPointer))
 	if err != nil {
 		return err
 	}
@@ -1015,7 +1019,7 @@ func redactLFSContent(ctx context.Context, ledgerPath, rel string, newClient fun
 	if err != nil {
 		return err
 	}
-	if lfs.ComputeOID(cached) != oldRef.BareOID() {
+	if "sha256:"+lfs.ComputeOID(cached) != oldOID {
 		return fmt.Errorf("cached content does not match the pointer for %s; rehydrate it first", rel)
 	}
 
@@ -1038,27 +1042,39 @@ func redactLFSContent(ctx context.Context, ledgerPath, rel string, newClient fun
 	}
 
 	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
-	setRef := func(ref lfs.FileRef) error {
-		return lfs.MutateSessionMeta(ctx, sessionDir, func(m *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+	// swapRef sets (or, for nil, removes) the meta.json entry and returns
+	// the previous one so a failure can put it back exactly.
+	swapRef := func(ref *lfs.FileRef) (prev *lfs.FileRef, err error) {
+		err = lfs.MutateSessionMeta(ctx, sessionDir, func(m *lfs.SessionMeta) (*lfs.SessionMeta, error) {
 			if m == nil {
 				return nil, errors.New("meta.json missing")
 			}
 			if m.Files == nil {
 				m.Files = map[string]lfs.FileRef{}
 			}
-			m.Files[name] = ref
+			if old, ok := m.Files[name]; ok {
+				prev = &old
+			}
+			if ref == nil {
+				delete(m.Files, name)
+			} else {
+				m.Files[name] = *ref
+			}
 			return m, nil
 		})
+		return prev, err
 	}
-	if err := setRef(uploaded.Ref()); err != nil {
+	newRef := uploaded.Ref()
+	prev, err := swapRef(&newRef)
+	if err != nil {
 		return fmt.Errorf("record OID in meta.json: %w", err)
 	}
 	if err = lfs.WritePointerFile(pointerPath, uploaded); err == nil {
 		err = os.Rename(tmpName, cachePath)
 	}
 	if err != nil {
-		restorePointer := os.WriteFile(pointerPath, []byte(lfs.FormatPointer(oldRef.OID, oldRef.Size)), 0o600)
-		return errors.Join(err, restorePointer, setRef(oldRef))
+		_, restoreMeta := swapRef(prev)
+		return errors.Join(err, os.WriteFile(pointerPath, oldPointer, 0o600), restoreMeta)
 	}
 	return nil
 }

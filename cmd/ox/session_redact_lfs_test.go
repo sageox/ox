@@ -203,12 +203,17 @@ func TestRedactLFSContent_FailuresLeaveSessionUnchanged(t *testing.T) {
 			got, err := os.ReadFile(pointerPath)
 			require.NoError(t, err)
 			assert.Equal(t, pointer, string(got), "pointer must be restored")
-			if !tt.noMeta && !tt.noFiles {
+			if !tt.noMeta {
 				var gotMeta lfs.SessionMeta
 				data, err := os.ReadFile(metaPath)
 				require.NoError(t, err)
 				require.NoError(t, json.Unmarshal(data, &gotMeta))
-				assert.Equal(t, originalRef, gotMeta.Files["raw.jsonl"], "meta.json must be restored")
+				gotRef, ok := gotMeta.Files["raw.jsonl"]
+				if tt.noFiles {
+					assert.False(t, ok, "an absent meta.json entry must stay absent")
+				} else {
+					assert.Equal(t, originalRef, gotRef, "meta.json must be restored")
+				}
 			}
 		})
 	}
