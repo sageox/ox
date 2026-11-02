@@ -769,6 +769,14 @@ func runInit() error {
 		}
 	}
 
+	// A pre-existing .devin/config.json holds the user's own Devin settings:
+	// snapshot it so rollback restores it instead of deleting it.
+	devinConfig := devinConfigPath(gitRoot)
+	devinConfigExisted := fileExists(devinConfig)
+	if devinConfigExisted {
+		tracker.trackModifiedFile(devinConfig)
+	}
+
 	// detect and install agent hooks
 	// installAgentHooks returns absolute, existence-verified paths inside
 	// gitRoot — do NOT re-join against gitRoot here. Doing so was half of
@@ -816,6 +824,9 @@ func runInit() error {
 	// Every installed path is tracked for ROLLBACK, but only the non-reserved ones
 	// are staged — see stageableInstalledPaths for why.
 	for _, hookFile := range installedHooks {
+		if devinConfigExisted && hookFile == devinConfig {
+			continue
+		}
 		tracker.trackCreatedFile(hookFile)
 	}
 	for _, hookFile := range stageableInstalledPaths(gitRoot, installedHooks) {
@@ -2371,8 +2382,6 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 	}
 
 	if selectedAgents["devin"] {
-		_, statErr := os.Stat(devinConfigPath(gitRoot))
-		devinConfigExisted := statErr == nil
 		if HasDevinPlugin(gitRoot) {
 			if !quiet {
 				cli.PrintPreserved("Devin integration")
@@ -2383,11 +2392,7 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 			if !quiet {
 				cli.PrintSuccess("Installed Devin integration")
 			}
-			// Only a file we created is safe to remove on rollback; an existing
-			// config holds the user's own Devin settings.
-			if !devinConfigExisted {
-				installedHooks = append(installedHooks, filepath.Join(".devin", "config.json"))
-			}
+			installedHooks = append(installedHooks, filepath.Join(".devin", "config.json"))
 		}
 	}
 
