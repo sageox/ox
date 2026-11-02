@@ -34,10 +34,24 @@ import (
 // exfiltration vector — and pre-signed cloud-storage URLs (the
 // legitimate use case for action.Href) never 302 anyway.
 var lfsHTTPClient = &http.Client{
-	Timeout: 5 * time.Minute,
+	Timeout:   5 * time.Minute,
+	Transport: dropLocation{http.DefaultTransport},
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
+}
+
+// dropLocation strips Location from responses. Redirects are never
+// followed, and net/http quotes a malformed Location (possibly a signed
+// URL) in its error before CheckRedirect runs.
+type dropLocation struct{ http.RoundTripper }
+
+func (t dropLocation) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.RoundTripper.RoundTrip(req)
+	if resp != nil {
+		resp.Header.Del("Location")
+	}
+	return resp, err
 }
 
 // validateActionHref enforces the ox-90gh trust contract on an action:
@@ -250,18 +264,14 @@ func putObject(action *Action, proof guardedUpload) error {
 	return nil
 }
 
-// withoutURL drops URLs from a transport error: action hrefs can carry
-// signed credentials in their query string. net/http also quotes a
-// malformed redirect Location in the cause, so that cause is replaced.
+// withoutURL drops the request URL from a transport error: action hrefs
+// can carry signed credentials in their query string.
 func withoutURL(err error) error {
 	var urlErr *url.Error
-	if !errors.As(err, &urlErr) {
-		return err
+	if errors.As(err, &urlErr) {
+		return urlErr.Err
 	}
-	if strings.Contains(urlErr.Err.Error(), "Location header") {
-		return errors.New("server sent a malformed redirect")
-	}
-	return urlErr.Err
+	return err
 }
 
 // isConnectionReset reports a transport failure that happened mid-request
