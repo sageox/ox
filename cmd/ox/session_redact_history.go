@@ -936,29 +936,28 @@ func redactFileInPlace(abs string, _ *session.Redactor) error {
 	return os.Rename(tmpName, abs)
 }
 
-// redactFileTo writes the redacted form of src to dst with src's mode,
-// removing dst on failure.
-func redactFileTo(src, dst string) error {
-	in, err := os.Open(src)
+// redactFileTo writes the redacted form of abs to tmpName with abs's mode.
+func redactFileTo(abs, tmpName string) error {
+	src, err := os.Open(abs)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-	info, err := in.Stat()
+	defer src.Close()
+	info, err := src.Stat()
 	if err != nil {
 		return err
 	}
 
-	rw, err := session.NewRawWriterTruncate(dst, "")
+	rw, err := session.NewRawWriterTruncate(tmpName, "")
 	if err != nil {
 		return err
 	}
 	cleanup := func() {
 		_ = rw.Close()
-		_ = os.Remove(dst)
+		_ = os.Remove(tmpName)
 	}
 
-	scanner := bufio.NewScanner(in)
+	scanner := bufio.NewScanner(src)
 	// Match scanFileForSecrets: a line the scanner accepted must be redactable
 	// here, or the file falls through to quarantine instead of being cleaned.
 	scanner.Buffer(make([]byte, 64*1024), rawJSONLMaxLineBytes)
@@ -984,11 +983,11 @@ func redactFileTo(src, dst string) error {
 		return err
 	}
 	if err := rw.CloseAndSync(); err != nil {
-		_ = os.Remove(dst)
+		_ = os.Remove(tmpName)
 		return err
 	}
-	if err := os.Chmod(dst, info.Mode()); err != nil {
-		_ = os.Remove(dst)
+	// preserve original mode
+	if err := os.Chmod(tmpName, info.Mode()); err != nil {
 		return err
 	}
 	return nil
@@ -1007,10 +1006,6 @@ func redactLFSContent(ctx context.Context, ledgerPath, rel string, newClient fun
 		return fmt.Errorf("%s is not JSONL; redact it manually", name)
 	}
 	pointerPath := filepath.Join(ledgerPath, filepath.FromSlash(rel))
-	oldPointer, err := os.ReadFile(pointerPath)
-	if err != nil {
-		return err
-	}
 	oldRef, err := lfs.ReadPointerFile(pointerPath)
 	if err != nil {
 		return err
@@ -1025,10 +1020,10 @@ func redactLFSContent(ctx context.Context, ledgerPath, rel string, newClient fun
 	}
 
 	tmpName := cachePath + ".redact.tmp"
+	defer os.Remove(tmpName)
 	if err := redactFileTo(cachePath, tmpName); err != nil {
 		return err
 	}
-	defer os.Remove(tmpName)
 	content, err := os.ReadFile(tmpName)
 	if err != nil {
 		return err
@@ -1043,38 +1038,27 @@ func redactLFSContent(ctx context.Context, ledgerPath, rel string, newClient fun
 	}
 
 	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
-	var prev lfs.FileRef
-	var hadPrev bool
-	err = lfs.MutateSessionMeta(ctx, sessionDir, func(m *lfs.SessionMeta) (*lfs.SessionMeta, error) {
-		if m == nil {
-			return nil, errors.New("meta.json missing")
-		}
-		if m.Files == nil {
-			m.Files = map[string]lfs.FileRef{}
-		}
-		prev, hadPrev = m.Files[name]
-		m.Files[name] = uploaded.Ref()
-		return m, nil
-	})
-	if err != nil {
+	setRef := func(ref lfs.FileRef) error {
+		return lfs.MutateSessionMeta(ctx, sessionDir, func(m *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+			if m == nil {
+				return nil, errors.New("meta.json missing")
+			}
+			if m.Files == nil {
+				m.Files = map[string]lfs.FileRef{}
+			}
+			m.Files[name] = ref
+			return m, nil
+		})
+	}
+	if err := setRef(uploaded.Ref()); err != nil {
 		return fmt.Errorf("record OID in meta.json: %w", err)
 	}
 	if err = lfs.WritePointerFile(pointerPath, uploaded); err == nil {
 		err = os.Rename(tmpName, cachePath)
 	}
 	if err != nil {
-		restoreMeta := lfs.MutateSessionMeta(ctx, sessionDir, func(m *lfs.SessionMeta) (*lfs.SessionMeta, error) {
-			if m == nil {
-				return nil, errors.New("meta.json missing")
-			}
-			if hadPrev {
-				m.Files[name] = prev
-			} else {
-				delete(m.Files, name)
-			}
-			return m, nil
-		})
-		return errors.Join(err, os.WriteFile(pointerPath, oldPointer, 0o600), restoreMeta)
+		restorePointer := os.WriteFile(pointerPath, []byte(lfs.FormatPointer(oldRef.OID, oldRef.Size)), 0o600)
+		return errors.Join(err, restorePointer, setRef(oldRef))
 	}
 	return nil
 }

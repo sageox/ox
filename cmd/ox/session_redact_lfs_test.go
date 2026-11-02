@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -108,4 +109,111 @@ func TestRunRedactHistoryWorkflow_RedactsLFSCachedContent(t *testing.T) {
 			assert.Equal(t, headPointer, mustGitOutput(t, bare, "show", "main:"+rel), "origin must hold the new pointer")
 		})
 	}
+}
+
+// TestRedactLFSContent_FailuresLeaveSessionUnchanged covers each early refusal
+// and the rollback after upload: a failure must leave the pointer, meta.json
+// and cached content exactly as they were.
+func TestRedactLFSContent_FailuresLeaveSessionUnchanged(t *testing.T) {
+	const rel = "sessions/leaky/raw.jsonl"
+	original := `{"type":"user","content":"key AKIAIOSFODNN7EXAMPLE"}` + "\n"
+	originalRef := lfs.NewFileRef([]byte(original))
+	pointer := lfs.FormatPointer(originalRef.OID, originalRef.Size)
+	var meta lfs.SessionMeta
+	require.NoError(t, json.Unmarshal([]byte(minimalMetaJSON("leaky", "OxLEAK")), &meta))
+	meta.Files["raw.jsonl"] = originalRef
+	metaJSON, err := json.Marshal(meta)
+	require.NoError(t, err)
+	stub := newLFSStub(t)
+
+	tests := []struct {
+		name      string
+		rel       string
+		noPointer bool
+		noCache   bool
+		noMeta    bool
+		noFiles   bool
+		blockTmp  bool
+		client    func(ledger string) (*lfs.Client, error)
+		wantErr   string
+	}{
+		{name: "not a session path", rel: "notes/raw.jsonl", wantErr: "not a session artifact"},
+		{name: "not JSONL", rel: "sessions/leaky/summary.md", wantErr: "not JSONL"},
+		{name: "pointer missing", rel: rel, noPointer: true, wantErr: "no such file"},
+		{name: "cache missing", rel: rel, noCache: true, wantErr: "no such file"},
+		{name: "redacted copy cannot be written", rel: rel, blockTmp: true, wantErr: "redact.tmp"},
+		{name: "client unavailable", rel: rel, client: func(string) (*lfs.Client, error) {
+			return nil, errors.New("no credentials")
+		}, wantErr: "no credentials"},
+		{name: "meta.json missing", rel: rel, noMeta: true, wantErr: "meta.json missing"},
+		{name: "cache replace fails after upload", rel: rel, client: func(ledger string) (*lfs.Client, error) {
+			// Turn the cache path into a non-empty directory so the final
+			// rename fails after meta.json and the pointer were switched.
+			cachePath := filepath.Join(ledger, ".sageox", "cache", rel)
+			if err := os.Remove(cachePath); err != nil {
+				return nil, err
+			}
+			if err := os.MkdirAll(filepath.Join(cachePath, "block"), 0o755); err != nil {
+				return nil, err
+			}
+			return lfs.NewClient(stub.url+"/ledger.git", "tester", "token"), nil
+		}, wantErr: "raw.jsonl"},
+	}
+	blocked := tests[len(tests)-1]
+	blocked.name, blocked.noFiles = "cache replace fails, meta.json had no files", true
+	tests = append(tests, blocked)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ledger := t.TempDir()
+			sessionDir := filepath.Join(ledger, "sessions", "leaky")
+			require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+			pointerPath := filepath.Join(sessionDir, "raw.jsonl")
+			if !tt.noPointer {
+				require.NoError(t, os.WriteFile(pointerPath, []byte(pointer), 0o644))
+			}
+			metaPath := filepath.Join(sessionDir, "meta.json")
+			if !tt.noMeta {
+				seeded := metaJSON
+				if tt.noFiles {
+					seeded = []byte(strings.Replace(minimalMetaJSON("leaky", "OxLEAK"), ",\n  \"files\": {}", "", 1))
+				}
+				require.NoError(t, os.WriteFile(metaPath, seeded, 0o644))
+			}
+			cachePath := filepath.Join(ledger, ".sageox", "cache", rel)
+			if !tt.noCache {
+				require.NoError(t, os.MkdirAll(filepath.Dir(cachePath), 0o755))
+				require.NoError(t, os.WriteFile(cachePath, []byte(original), 0o644))
+			}
+			if tt.blockTmp {
+				require.NoError(t, os.MkdirAll(filepath.Join(cachePath+".redact.tmp", "block"), 0o755))
+			}
+			client := tt.client
+			if client == nil {
+				client = func(string) (*lfs.Client, error) {
+					return lfs.NewClient(stub.url+"/ledger.git", "tester", "token"), nil
+				}
+			}
+
+			err := redactLFSContent(t.Context(), ledger, tt.rel, func() (*lfs.Client, error) { return client(ledger) })
+			require.ErrorContains(t, err, tt.wantErr)
+
+			if tt.noPointer {
+				return
+			}
+			got, err := os.ReadFile(pointerPath)
+			require.NoError(t, err)
+			assert.Equal(t, pointer, string(got), "pointer must be restored")
+			if !tt.noMeta && !tt.noFiles {
+				var gotMeta lfs.SessionMeta
+				data, err := os.ReadFile(metaPath)
+				require.NoError(t, err)
+				require.NoError(t, json.Unmarshal(data, &gotMeta))
+				assert.Equal(t, originalRef, gotMeta.Files["raw.jsonl"], "meta.json must be restored")
+			}
+		})
+	}
+}
+
+func TestRedactFileInPlace_MissingFile(t *testing.T) {
+	require.ErrorIs(t, redactFileInPlace(filepath.Join(t.TempDir(), "raw.jsonl"), nil), os.ErrNotExist)
 }
