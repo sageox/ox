@@ -2,6 +2,7 @@ package lfs
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -572,4 +573,7 @@ func TestUploadAndVerify_TransportErrorsOmitSignedURL(t *testing.T) {
 			assert.NotContains(t, err.Error(), "signed-secret")
 		})
 	}
+
+	other := errors.New("not a transport error")
+	assert.Equal(t, other, withoutURL(other), "non-URL errors pass through unchanged")
 }
