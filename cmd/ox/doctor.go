@@ -1401,6 +1401,9 @@ var ledgerGitHealthOrder = []string{
 	// instead of pulling on top of the wedge.
 	CheckSlugLedgerStuckOperation,
 	CheckSlugLedgerCleanWorkdir,
+	// before branch-status: a plan page pointer the store lost makes that push
+	// fail, so the repair (which rewrites only unpushed commits) runs first
+	CheckSlugPlanPointersMissing,
 	CheckSlugLedgerBranchStatus,
 	// plan-stranded-saves before plan-unsaved-edits and plan-pending-writes: a
 	// save it queues is not also listed as an unsaved edit, and lands in this

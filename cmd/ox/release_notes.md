@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A large plan page can no longer stop your Ledger from syncing** — ox keeps a local copy of every plan page over 1 MiB, so when the content store drops the upload first (GitLab housekeeping deletes objects no pushed commit uses yet), the next push uploads it again. A Ledger an older version already stuck repairs itself: the lost page becomes a short note saying it was lost, the plan's text and history stay, and the plans, sessions and murmurs queued behind it reach the team. `ox doctor` lists it under "unpushed plan pages", and `ox doctor --fix-slug=plan-pointers-missing` runs the repair by hand.
 - **Failed plan title repairs preserve session references** — a failed rename or commit no longer leaves new plan names for a later session upload to publish.
 - **Session redaction amendments leave other staged work pending** — repairs amend only their selected paths and report failed amendments before publication.
 - **Safer session deletion** — deletion commits validate staged work and restore selected sessions if the commit fails. Plans stay local; other valid staged session work can still be published.

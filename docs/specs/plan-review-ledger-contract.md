@@ -176,7 +176,13 @@ The CLI reads and writes review records only through `pkg/planreview`.
   revision's snapshot, the writes (companion pages included), the pointer swap
   and the commit run in that one hold, so a daemon pull never finds a save
   half written. The push follows outside it. The pointer replaces plan.html
-  only while the file holds exactly the uploaded bytes; when the store did not
+  only while the file holds exactly the uploaded bytes, and only once those
+  bytes are kept in the Ledger recovery cache
+  (`.sageox/cache/data/plans/<plan>/plan.html`): GitLab housekeeping deletes
+  an uploaded object no pushed ref points at yet, and the push repair
+  re-uploads it from that copy. When no copy exists anywhere (a page saved by
+  an older build), the push repair replaces the pointer with a tombstone page
+  in unpushed commits so the push resumes. When the store did not
   take the page, or the page changed after its upload, the save commits
   nothing. With no store reachable it commits everything but the page. Each of
   these, and a failed commit or push, leaves a whole-dir marker in a Ledger

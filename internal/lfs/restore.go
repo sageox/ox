@@ -94,6 +94,14 @@ func RestorePointer(path, cachePath string, content []byte, ref FileRef) error {
 	return nil
 }
 
+// RecoveryCachePath is where the Ledger keeps the exact bytes behind the
+// pointer committed at relPath (ledger-relative, either separator). The push
+// repair re-uploads a blob the store lost from here (preflightMissingPointer),
+// and `ox fetch` reads and fills the same slot.
+func RecoveryCachePath(ledgerPath, relPath string) string {
+	return filepath.Join(ledgerPath, ".sageox", "cache", filepath.FromSlash(relPath))
+}
+
 // PreserveInCache keeps content at cachePath (the ledger's hydration cache) without
 // overwriting a different copy already there, which fails closed.
 func PreserveInCache(cachePath string, content []byte) error {

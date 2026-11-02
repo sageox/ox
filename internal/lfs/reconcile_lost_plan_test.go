@@ -1,0 +1,306 @@
+package lfs
+
+import (
+	"bytes"
+	"context"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+const lostPlan = "2026-10-24-launch-mockup"
+
+// lostPlanFiles is a saved plan whose page pointer names a blob that exists
+// nowhere: what a pre-fix `ox plan save` leaves once the store drops the blob.
+func lostPlanFiles(oid string) map[string]string {
+	dir := "data/plans/" + lostPlan + "/"
+	return map[string]string{
+		dir + "plan.md":      "# Launch mockup\n",
+		dir + "meta.json":    `{"schema_version":"v1","slug":"launch-mockup","primary":"html"}` + "\n",
+		dir + "events.jsonl": `{"plan_id":"pln_01","event":"created"}` + "\n",
+		dir + "plan.html":    lfsPointerContent(oid, 2196945),
+	}
+}
+
+func lostPlanHTML(ledger string) string {
+	return filepath.Join(ledger, "data", "plans", lostPlan, "plan.html")
+}
+
+func headFile(t *testing.T, ledger, path string) []byte {
+	t.Helper()
+	out, err := exec.Command("git", "-C", ledger, "show", "HEAD:"+path).Output()
+	require.NoError(t, err, "HEAD:%s", path)
+	return out
+}
+
+// --- A. The repair ---
+
+// TestReconcile_LostPlanPageIsTombstonedInUnpushedHistory: a plan page whose
+// blob the store does not have and no local copy holds is replaced by a
+// tombstone page in unpushed history, the unpushed commits are squashed so no
+// commit in the push still carries the dead pointer, and nothing else changes.
+// Failure prevented: one lost page refusing every push from the clone for good,
+// with every later plan, session and murmur queued behind it.
+func TestReconcile_LostPlanPageIsTombstonedInUnpushedHistory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repositories and a mocked LFS store")
+	}
+	useBundledSessionRules(t)
+	ledger, bare := initLedgerWithRemote(t)
+	upstream := git(t, ledger, "rev-parse", "@{upstream}")
+	oid := strings.Repeat("6", 64)
+	writeAndCommit(t, ledger, "plan: lost page", lostPlanFiles(oid))
+	writeAndCommit(t, ledger, "murmur: queued behind the wedge", map[string]string{"data/murmurs/m1.json": `{"text":"later work"}` + "\n"})
+	before := map[string][]byte{}
+	for _, name := range []string{"plan.md", "meta.json", "events.jsonl"} {
+		before[name] = headFile(t, ledger, "data/plans/"+lostPlan+"/"+name)
+	}
+	var logs bytes.Buffer
+	client := fakeLFSDownloadServer(t, map[string]int{oid: http.StatusNotFound})
+
+	result, err := reconcileUnpushedPointers(context.Background(), ledger, slog.New(slog.NewTextHandler(&logs, nil)),
+		func() (*Client, error) { return client, nil })
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.LostPlanRenders)
+	assert.True(t, result.Squashed)
+	assert.True(t, result.Changed(), "the push must be retried")
+
+	tombstone := headFile(t, ledger, "data/plans/"+lostPlan+"/plan.html")
+	_, _, parseErr := ParsePointer(string(tombstone))
+	assert.Error(t, parseErr, "the tombstone must not read as a pointer")
+	assert.Greater(t, len(tombstone), maxPointerSize, "GitLab only checks pointer-sized blobs")
+	assert.Contains(t, string(tombstone), renderLostMetaName)
+	assert.Contains(t, string(tombstone), "sha256:"+oid, "the lost object stays named")
+	for name, content := range before {
+		assert.Equal(t, content, headFile(t, ledger, "data/plans/"+lostPlan+"/"+name), "%s must be untouched", name)
+	}
+	assert.Equal(t, `{"text":"later work"}`+"\n", string(headFile(t, ledger, "data/murmurs/m1.json")), "queued work survives the squash")
+
+	// pushed history is never rewritten: one new commit on the unchanged upstream
+	assert.Equal(t, upstream, git(t, ledger, "rev-parse", "@{upstream}"))
+	assert.Equal(t, upstream, git(t, bare, "rev-parse", "HEAD"))
+	assert.Equal(t, upstream, git(t, ledger, "rev-parse", "HEAD^"))
+	set, err := scanPushRange(context.Background(), ledger, slog.Default())
+	require.NoError(t, err)
+	for _, p := range set.repairable {
+		assert.NotEqual(t, oid, p.ref.BareOID(), "the dead pointer is still in the push")
+	}
+	assert.NotContains(t, set.historyOnly, oid, "the dead pointer is still in the push")
+
+	// the working copy matches, so no later `git add` re-commits the pointer
+	assert.Equal(t, tombstone, mustReadFile(t, lostPlanHTML(ledger)))
+	assert.Empty(t, git(t, ledger, "status", "--porcelain", "--", "data/plans"))
+
+	// the pre-squash history stays reachable locally: the backup is the
+	// tombstone commit, and its parent still holds the dead pointer
+	backups := strings.Fields(git(t, ledger, "for-each-ref", "--format=%(refname)", "refs/ox-backup/"))
+	require.Len(t, backups, 1)
+	assert.Equal(t, lfsPointerContent(oid, 2196945), git(t, ledger, "show", backups[0]+"~1:data/plans/"+lostPlan+"/plan.html")+"\n")
+
+	assert.Contains(t, logs.String(), "level=WARN")
+	assert.Contains(t, logs.String(), "plan="+lostPlan)
+}
+
+// TestReconcile_LostPlanPageRepairIgnoresAStagedArtifactItCannotUpload: the
+// repair runs even while the index holds the coworker's own session artifact
+// that the secret guard refuses to upload, and leaves that artifact staged and
+// uncommitted. Failure prevented: the 2026-11-02 wedge, where every reconcile
+// stopped at that artifact and never reached the lost page.
+func TestReconcile_LostPlanPageRepairIgnoresAStagedArtifactItCannotUpload(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repositories and a mocked LFS store")
+	}
+	useBundledSessionRules(t)
+	ledger, _ := initLedgerWithRemote(t)
+	oid := strings.Repeat("7", 64)
+	writeAndCommit(t, ledger, "plan: lost page", lostPlanFiles(oid))
+	credential := []byte(`{"content":"` + "AKIA" + "QWERTYUIOPASDFGH" + `"}` + "\n")
+	stagePlainSession(t, ledger, "own", "person-a", credential)
+	client := fakeLFSDownloadServer(t, map[string]int{oid: http.StatusNotFound})
+	ctx := withReconcileOwner(context.Background(), "person-a")
+
+	result, err := reconcileUnpushedPointers(ctx, ledger, nil, func() (*Client, error) { return client, nil })
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.LostPlanRenders)
+	staged, readErr := exec.Command("git", "-C", ledger, "show", ":sessions/own/raw.jsonl").Output()
+	require.NoError(t, readErr)
+	assert.Equal(t, credential, staged, "the refused artifact stays staged as it was")
+	_, headErr := exec.Command("git", "-C", ledger, "cat-file", "-e", "HEAD:sessions/own/raw.jsonl").Output()
+	assert.Error(t, headErr, "the refused artifact must not ride along in the repair")
+}
+
+// TestReconcile_LostPlanPageAndOwnRawArtifactAreBothRepaired: the coworker's
+// own session artifact committed plain in unpushed history is still uploaded
+// and dehydrated when a lost plan page is repaired in the same run. Failure
+// prevented: the tip validation refusing the plain artifact on every run, so
+// neither repair ever happens.
+func TestReconcile_LostPlanPageAndOwnRawArtifactAreBothRepaired(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repositories and a mocked LFS store")
+	}
+	useBundledSessionRules(t)
+	ledger, _ := initLedgerWithRemote(t)
+	oid := strings.Repeat("5", 64)
+	writeAndCommit(t, ledger, "plan: lost page", lostPlanFiles(oid))
+	recording := []byte(`{"type":"user","content":"finalize committed this before its upload landed"}` + "\n")
+	stagePlainSession(t, ledger, "own", "person-a", recording)
+	git(t, ledger, "commit", "-m", "finalize session own", "--no-verify")
+	client, store := newFakeUploadStore(t, false, false)
+	ctx := withReconcileOwner(context.Background(), "person-a")
+
+	result, err := reconcileUnpushedPointers(ctx, ledger, nil, func() (*Client, error) { return client, nil })
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.LostPlanRenders)
+	assert.True(t, result.Squashed)
+	ref := NewFileRef(recording)
+	assert.Equal(t, FormatPointer(ref.OID, ref.Size), string(headFile(t, ledger, "sessions/own/raw.jsonl")))
+	assert.Equal(t, recording, store.stored[ref.BareOID()], "the recording reached the store")
+	assert.Contains(t, string(headFile(t, ledger, "data/plans/"+lostPlan+"/plan.html")), renderLostMetaName)
+}
+
+// --- B. What it never touches ---
+
+// TestReconcile_LostPlanPageRepairFailsClosed: the repair runs only when lost
+// plan pages are the whole problem. Next to an unrecoverable session, or when
+// the page is already on the remote, nothing changes. Failure prevented: a plan
+// rule reaching sacred session pointers or pushed history.
+func TestReconcile_LostPlanPageRepairFailsClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repositories and a mocked LFS store")
+	}
+	useBundledSessionRules(t)
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, ledger, oid string) map[string]int
+		check func(t *testing.T, result *ReconcileResult, err error)
+	}{
+		{
+			name: "beside an unrecoverable session",
+			setup: func(t *testing.T, ledger, oid string) map[string]int {
+				writeAndCommit(t, ledger, "plan: lost page", lostPlanFiles(oid))
+				_, _, _, session := commitMissingSessionPointer(t, ledger, "lost-recording", []byte("gone\n"))
+				return map[string]int{oid: http.StatusNotFound, session.BareOID(): http.StatusNotFound}
+			},
+			check: func(t *testing.T, result *ReconcileResult, err error) {
+				var unrecoverable *UnrecoverablePointersError
+				require.ErrorAs(t, err, &unrecoverable)
+				assert.Len(t, unrecoverable.Pointers, 2)
+				assert.Zero(t, result.LostPlanRenders)
+			},
+		},
+		{
+			// a copy that cannot be inspected is not proof there is none
+			name: "plan recovery cache unreadable",
+			setup: func(t *testing.T, ledger, oid string) map[string]int {
+				writeAndCommit(t, ledger, "plan: lost page", lostPlanFiles(oid))
+				slot := RecoveryCachePath(ledger, "data/plans/"+lostPlan+"/plan.html")
+				// a regular file where the slot's directory belongs fails Lstat with
+				// ENOTDIR on every platform
+				require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Dir(slot)), 0o700))
+				require.NoError(t, os.WriteFile(filepath.Dir(slot), []byte("not a directory"), 0o600))
+				return map[string]int{oid: http.StatusNotFound}
+			},
+			check: func(t *testing.T, result *ReconcileResult, err error) {
+				require.ErrorContains(t, err, "inspect plan recovery cache")
+				assert.Zero(t, result.LostPlanRenders)
+			},
+		},
+		{
+			name: "already pushed",
+			setup: func(t *testing.T, ledger, oid string) map[string]int {
+				writeAndCommit(t, ledger, "plan: page", lostPlanFiles(oid))
+				git(t, ledger, "push", "--quiet")
+				writeAndCommit(t, ledger, "plan: edit text", map[string]string{"data/plans/" + lostPlan + "/plan.md": "# edited\n"})
+				return map[string]int{oid: http.StatusNotFound}
+			},
+			check: func(t *testing.T, result *ReconcileResult, err error) {
+				require.NoError(t, err)
+				assert.Zero(t, result.ScannedPointers, "a pushed pointer is outside the push range")
+				assert.False(t, result.Changed())
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger, _ := initLedgerWithRemote(t)
+			oid := strings.Repeat("8", 64)
+			codes := tc.setup(t, ledger, oid)
+			head := git(t, ledger, "rev-parse", "HEAD")
+			index := git(t, ledger, "write-tree")
+			pointer := mustReadFile(t, lostPlanHTML(ledger))
+			client := fakeLFSDownloadServer(t, codes)
+
+			result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
+
+			tc.check(t, result, err)
+			assert.Equal(t, head, git(t, ledger, "rev-parse", "HEAD"))
+			assert.Equal(t, index, git(t, ledger, "write-tree"))
+			assert.Equal(t, pointer, mustReadFile(t, lostPlanHTML(ledger)))
+		})
+	}
+}
+
+func TestIsPlanRenderPath(t *testing.T) {
+	t.Parallel()
+	for path, want := range map[string]bool{
+		"data/plans/p/plan.html":                         true,
+		filepath.Join("data", "plans", "p", "plan.html"): true,
+		"data/plans/p/plan.md":                           false,
+		"data/plans/p/companions/plan.html":              false,
+		"data/plans/plan.html":                           false,
+		"sessions/s/plan.html":                           false,
+		"data/plans/../plan.html":                        false,
+	} {
+		assert.Equal(t, want, isPlanRenderPath(path), path)
+	}
+}
+
+// --- C. Reading it without repairing ---
+
+// TestFindMissingPlanRenders_ReportsWithoutChanging: the read-only finder doctor
+// uses names each unpushed plan page the store lacks, says whether a local copy
+// can restore it, and changes nothing. A push range with no plan page pointer
+// never builds a client.
+func TestFindMissingPlanRenders_ReportsWithoutChanging(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repositories and a mocked LFS store")
+	}
+	useBundledSessionRules(t)
+	ledger, _ := initLedgerWithRemote(t)
+
+	none, err := findMissingPlanRenders(context.Background(), ledger, func() (*Client, error) {
+		t.Fatal("no plan page pointer: the store must not be asked")
+		return nil, nil
+	})
+	require.NoError(t, err)
+	assert.Empty(t, none)
+
+	lostOID := strings.Repeat("9", 64)
+	writeAndCommit(t, ledger, "plan: lost page", lostPlanFiles(lostOID))
+	kept := []byte("<!doctype html><title>kept</title>\n")
+	keptRef := NewFileRef(kept)
+	writeAndCommit(t, ledger, "plan: kept page", map[string]string{"data/plans/kept/plan.html": FormatPointer(keptRef.OID, keptRef.Size)})
+	keptCache := RecoveryCachePath(ledger, "data/plans/kept/plan.html")
+	require.NoError(t, os.MkdirAll(filepath.Dir(keptCache), 0o700))
+	require.NoError(t, os.WriteFile(keptCache, kept, 0o600))
+	head := git(t, ledger, "rev-parse", "HEAD")
+	client := fakeLFSDownloadServer(t, map[string]int{lostOID: http.StatusNotFound, keptRef.BareOID(): http.StatusNotFound})
+
+	missing, err := findMissingPlanRenders(context.Background(), ledger, func() (*Client, error) { return client, nil })
+
+	require.NoError(t, err)
+	assert.Equal(t, []MissingPlanRender{
+		{Path: "data/plans/" + lostPlan + "/plan.html", OID: "sha256:" + lostOID, Size: 2196945},
+		{Path: "data/plans/kept/plan.html", OID: keptRef.OID, Size: keptRef.Size, Recoverable: true},
+	}, missing)
+	assert.Equal(t, head, git(t, ledger, "rev-parse", "HEAD"))
+}

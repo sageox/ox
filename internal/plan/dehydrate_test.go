@@ -180,7 +180,7 @@ func TestPointerizeHTML_SwapsOnlyTheUploadedBytes(t *testing.T) {
 	}
 
 	changed := append(bytes.Clone(page), "<!-- edited -->"...)
-	dir := t.TempDir()
+	_, dir := ledgerPlanDir(t)
 	writePlanHTMLPlain(t, dir, changed)
 	if swapped, err := PointerizeHTML(dir, ref); err != nil || swapped {
 		t.Fatalf("other bytes: swapped=%v err=%v, want left alone", swapped, err)
@@ -197,5 +197,124 @@ func TestPointerizeHTML_SwapsOnlyTheUploadedBytes(t *testing.T) {
 	}
 	if blob, ok := stored.Load(pointer.BareOID()); !ok || !bytes.Equal(blob.([]byte), page) {
 		t.Fatal("the pointer must name the uploaded blob")
+	}
+}
+
+// ledgerPlanDir makes the layout every saved plan has, <ledger>/data/plans/<plan>,
+// and returns the Ledger root and the plan dir.
+func ledgerPlanDir(t *testing.T) (ledger, dir string) {
+	t.Helper()
+	ledger = t.TempDir()
+	dir = filepath.Join(ledger, "data", "plans", "2026-10-24-launch-mockup")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("make plan dir: %v", err)
+	}
+	return ledger, dir
+}
+
+func recoveryCopy(ledger, dir string) string {
+	return lfs.RecoveryCachePath(ledger, filepath.Join("data", "plans", filepath.Base(dir), planHTMLFile))
+}
+
+// TestPointerizeHTML_KeepsThePageWhereThePushRepairFindsIt: once plan.html is a
+// pointer, its exact bytes sit in the Ledger recovery cache slot the push repair
+// re-uploads from. Failure prevented: the store drops the uploaded blob before
+// the commit is pushed (GitLab housekeeping deletes unreferenced LFS objects),
+// the page exists nowhere on this machine, and the pointer refuses every later
+// push for days (the 2026-10-24 Ledger wedge).
+func TestPointerizeHTML_KeepsThePageWhereThePushRepairFindsIt(t *testing.T) {
+	client, _ := fakeLFSUploadServer(t)
+	page := largeHTMLWithHead()
+	ref, ok, err := UploadHTML(client, page)
+	if err != nil || !ok {
+		t.Fatalf("UploadHTML: ok=%v err=%v", ok, err)
+	}
+	ledger, dir := ledgerPlanDir(t)
+	writePlanHTMLPlain(t, dir, page)
+
+	if swapped, err := PointerizeHTML(dir, ref); err != nil || !swapped {
+		t.Fatalf("PointerizeHTML: swapped=%v err=%v, want a pointer", swapped, err)
+	}
+
+	kept, err := os.ReadFile(recoveryCopy(ledger, dir))
+	if err != nil {
+		t.Fatalf("no recovery copy of the page: %v", err)
+	}
+	pointer, err := lfs.ReadPointerFile(filepath.Join(dir, planHTMLFile))
+	if err != nil {
+		t.Fatalf("plan.html is not a pointer: %v", err)
+	}
+	if !bytes.Equal(kept, page) || lfs.ComputeOID(kept) != pointer.BareOID() {
+		t.Fatal("the recovery copy must be exactly the bytes the pointer names")
+	}
+}
+
+// TestPointerizeHTML_NoRecoveryCopyMeansNoPointer: when the page cannot be kept
+// locally, plan.html stays plain and the error tells the caller to treat it as
+// awaiting upload. Failure prevented: a pointer committed with no local copy,
+// which a store that later drops the blob turns into a permanent push wedge.
+func TestPointerizeHTML_NoRecoveryCopyMeansNoPointer(t *testing.T) {
+	client, _ := fakeLFSUploadServer(t)
+	page := largeHTMLWithHead()
+	ref, ok, err := UploadHTML(client, page)
+	if err != nil || !ok {
+		t.Fatalf("UploadHTML: ok=%v err=%v", ok, err)
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T) string
+	}{
+		{"plan dir outside a Ledger", func(t *testing.T) string { return t.TempDir() }},
+		{"recovery cache blocked by a file", func(t *testing.T) string {
+			ledger, dir := ledgerPlanDir(t)
+			// a regular file where the cache directory belongs fails MkdirAll on every platform
+			if err := os.MkdirAll(filepath.Join(ledger, ".sageox"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(ledger, ".sageox", "cache"), []byte("not a dir"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return dir
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tc.setup(t)
+			writePlanHTMLPlain(t, dir, page)
+
+			swapped, err := PointerizeHTML(dir, ref)
+
+			if err == nil || swapped {
+				t.Fatalf("swapped=%v err=%v, want an error and no pointer", swapped, err)
+			}
+			assertPlainHTML(t, dir, page)
+			if !HasLargePlainHTML(dir) {
+				t.Fatal("the plain page must read as awaiting upload so the save is retried")
+			}
+		})
+	}
+}
+
+// TestPointerizeHTML_RevisionReplacesTheOlderCopy: a revision of a large page
+// replaces the earlier revision's recovery copy. Failure prevented: the copy
+// refuses to change, so every revision after the first stays plain, awaiting
+// an upload that already succeeded.
+func TestPointerizeHTML_RevisionReplacesTheOlderCopy(t *testing.T) {
+	client, _ := fakeLFSUploadServer(t)
+	ledger, dir := ledgerPlanDir(t)
+	first := largeHTMLWithHead()
+	second := append(bytes.Clone(first), "<!-- revision 2 -->"...)
+	for _, page := range [][]byte{first, second} {
+		ref, ok, err := UploadHTML(client, page)
+		if err != nil || !ok {
+			t.Fatalf("UploadHTML: ok=%v err=%v", ok, err)
+		}
+		writePlanHTMLPlain(t, dir, page)
+		if swapped, err := PointerizeHTML(dir, ref); err != nil || !swapped {
+			t.Fatalf("PointerizeHTML: swapped=%v err=%v", swapped, err)
+		}
+	}
+	kept, err := os.ReadFile(recoveryCopy(ledger, dir))
+	if err != nil || !bytes.Equal(kept, second) {
+		t.Fatalf("recovery copy is not the latest revision (err=%v)", err)
 	}
 }
