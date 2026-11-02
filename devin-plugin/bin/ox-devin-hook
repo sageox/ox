@@ -3,21 +3,32 @@
 # Usage: ox-devin-hook <SessionStart|UserPromptSubmit|PostToolUse|Stop>  (event JSON on stdin)
 # Fails open: Devin ignores hook failures, and so should we — never block the agent.
 set -u
+umask 077  # state holds prompts, tool output, and the token
 EVENT="${1:-}"
 STATE_ROOT="${OX_DEVIN_STATE:-$HOME/.ox-devin}"
 LOG="$STATE_ROOT/hook.log"
 mkdir -p "$STATE_ROOT"
 export PATH="$HOME/.local/bin:$PATH"
+# ox agent prime requires a detected coding agent; Devin sets none of the env
+# vars agentx looks for, so declare it (agentx's documented override).
+export AGENT_ENV="${AGENT_ENV:-devin}"
 PAYLOAD="$(cat)"
 # Hook stdout is parsed by Devin as a decision; keep ox chatter out of it.
 # fd 3 keeps the real stdout for the one deliberate reply (nudge_once).
 exec 3>&1 >>"$LOG" 2>&1
 log() { printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$EVENT" "$*" >> "$LOG"; }
 
+field() { printf '%s' "$PAYLOAD" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('$1') or '')" 2>/dev/null; }
+
+# session_id names a directory: keep it inside STATE_ROOT.
+SID="$(field session_id | tr -cd 'A-Za-z0-9_-')"; SID="${SID:-unknown}"
+SDIR="$STATE_ROOT/$SID"; mkdir -p "$SDIR"
+
 # Devin hook processes don't inherit secrets; a personal SAGEOX_TOKEN only
 # reaches us inside PostToolUse payloads (tool_input.injected_env of a tool
-# call). Cache it 0600 so later hooks in this session can authenticate.
-TOKEN_FILE="$STATE_ROOT/token"
+# call). Cache it 0600, per Devin session, so later hooks in this session can
+# authenticate and no other session's user can ever inherit it.
+TOKEN_FILE="$SDIR/token"
 if [ -z "${SAGEOX_TOKEN:-}" ]; then
   t=$(printf '%s' "$PAYLOAD" | python3 -c '
 import sys, json
@@ -38,8 +49,12 @@ ensure_ox() {
   local tag tmp
   tag=$(curl -fsSI https://github.com/sageox/ox/releases/latest | tr -d '\r' | awk -F/ 'tolower($0) ~ /^location:/ {print $NF}')
   [ -n "$tag" ] || { log "ox install: no tag"; return 1; }
+  local base="https://github.com/sageox/ox/releases/download/$tag" asset="ox_${tag#v}_linux_amd64.tar.gz"
   tmp=$(mktemp -d)
-  curl -fsSL "https://github.com/sageox/ox/releases/download/$tag/ox_${tag#v}_linux_amd64.tar.gz" | tar xz -C "$tmp" || { log "ox install failed"; return 1; }
+  # Verify against the release's checksums.txt before running anything from it.
+  curl -fsSL -o "$tmp/$asset" "$base/$asset" && curl -fsSL -o "$tmp/checksums.txt" "$base/checksums.txt" &&
+    (cd "$tmp" && grep " $asset\$" checksums.txt | sha256sum -c --status) &&
+    tar xzf "$tmp/$asset" -C "$tmp" || { log "ox install failed (download or checksum)"; rm -rf "$tmp"; return 1; }
   mkdir -p "$HOME/.local/bin" && cp "$tmp"/ox "$tmp"/ox-adapter-* "$HOME/.local/bin/" 2>/dev/null
   rm -rf "$tmp"; log "installed ox $tag"
 }
@@ -56,10 +71,6 @@ find_repo() {
   return 1
 }
 
-field() { printf '%s' "$PAYLOAD" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('$1') or '')" 2>/dev/null; }
-
-SID="$(field session_id)"; SID="${SID:-unknown}"
-SDIR="$STATE_ROOT/$SID"; mkdir -p "$SDIR"
 
 ensure_recording() {
   if [ -f "$SDIR/session_file" ] && [ -f "$SDIR/agent_id" ]; then return 0; fi
@@ -178,7 +189,10 @@ stop_recording() {
   # turn end uploads; the next prompt starts a fresh recording.
   out=$(timeout 70 ox agent "$id" session stop 2>&1); rc=$?
   log "stop agent=$id rc=$rc url=$(printf '%s' "$out" | grep -oE 'https://[^"]*/c/ses_[A-Za-z0-9-]+' | head -1) $(printf '%s' "$out" | grep -oE '"(upload_warning|entry_count)": [^,]*' | tr '\n' ' ')"
-  rm -f "$SDIR/agent_id" "$SDIR/session_file"
+  # A failed stop keeps the recording so the next turn end retries; after a
+  # second failure, start fresh rather than append to a broken recording.
+  if [ "$rc" -ne 0 ] && [ ! -f "$SDIR/stop_failed" ]; then touch "$SDIR/stop_failed"; return 0; fi
+  rm -f "$SDIR/agent_id" "$SDIR/session_file" "$SDIR/stop_failed"
 }
 
 case "$EVENT" in

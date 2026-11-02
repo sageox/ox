@@ -2371,6 +2371,8 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 	}
 
 	if selectedAgents["devin"] {
+		_, statErr := os.Stat(devinConfigPath(gitRoot))
+		devinConfigExisted := statErr == nil
 		if HasDevinPlugin(gitRoot) {
 			if !quiet {
 				cli.PrintPreserved("Devin integration")
@@ -2381,7 +2383,11 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 			if !quiet {
 				cli.PrintSuccess("Installed Devin integration")
 			}
-			installedHooks = append(installedHooks, filepath.Join(".devin", "config.json"))
+			// Only a file we created is safe to remove on rollback; an existing
+			// config holds the user's own Devin settings.
+			if !devinConfigExisted {
+				installedHooks = append(installedHooks, filepath.Join(".devin", "config.json"))
+			}
 		}
 	}
 
