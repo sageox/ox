@@ -442,7 +442,7 @@ func putGuardedRecoveryObject(ctx context.Context, action *Action, proof guarded
 	req.ContentLength = int64(len(content))
 	resp, err := lfsHTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("upload failed: %w", err)
+		return fmt.Errorf("upload failed: %w", withoutURL(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
@@ -468,7 +468,7 @@ func verifyRecoveryObject(ctx context.Context, action *Action, ref FileRef) erro
 	}
 	resp, err := lfsHTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("verify request failed: %w", err)
+		return fmt.Errorf("verify request failed: %w", withoutURL(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
