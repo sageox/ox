@@ -546,3 +546,24 @@ func TestRunInit_RegistrationConfirmationGatesSessionImport(t *testing.T) {
 		})
 	}
 }
+
+// An existing .devin/config.json holds the user's own Devin settings: init must
+// merge the recorder into it and stage it, so the plugin reaches every clone.
+func TestRunInit_DevinMergesAndStagesExistingConfig(t *testing.T) {
+	env := newOxE2E(t)
+	withInitFlags(t, env.TeamID)
+	initAgentsFlag = "devin"
+
+	cfg := filepath.Join(env.Root, ".devin", "config.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfg), 0o755))
+	require.NoError(t, os.WriteFile(cfg, []byte(`{"requiredPlugins":["acme/tools"],"other":true}`), 0o644))
+
+	require.NoError(t, runInit())
+
+	data, err := os.ReadFile(cfg)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"other": true`, "existing settings must be preserved")
+	assert.Contains(t, string(data), "acme/tools", "existing plugins must be preserved")
+	assert.True(t, HasDevinPlugin(env.Root), "recorder plugin must be added")
+	assert.Contains(t, stagedPaths(t, env.Root), ".devin/config.json")
+}

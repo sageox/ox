@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -75,6 +76,9 @@ func TestInstallDevinPlugin(t *testing.T) {
 func TestDevinDetected(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("DEVIN_DIR", "")
+	prevAgents := initAgentsFlag
+	initAgentsFlag = ""
+	t.Cleanup(func() { initAgentsFlag = prevAgents })
 	if devinDetected(root) {
 		t.Fatal("detected without .devin or DEVIN_DIR")
 	}
@@ -88,5 +92,80 @@ func TestDevinDetected(t *testing.T) {
 	}
 	if !devinDetected(root) {
 		t.Fatal("not detected with .devin/")
+	}
+}
+
+func TestHasDevinPlugin(t *testing.T) {
+	root := t.TempDir()
+	if HasDevinPlugin(root) {
+		t.Fatal("no config must not report the plugin")
+	}
+	path := devinConfigPath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{`{not json`, `{"requiredPlugins":["acme/tools"]}`} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if HasDevinPlugin(root) {
+			t.Fatalf("%s must not report the plugin", content)
+		}
+	}
+
+	// an unreadable config (here a directory) is an error, not an empty config
+	dirRoot := t.TempDir()
+	if err := os.MkdirAll(devinConfigPath(dirRoot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readDevinConfig(dirRoot); err == nil {
+		t.Fatal("expected error reading a directory as config")
+	}
+}
+
+func TestInstallAgentHooksDevin(t *testing.T) {
+	root := t.TempDir()
+	want := devinConfigPath(root)
+	devin := map[string]bool{"devin": true}
+
+	installed := installAgentHooks(root, false, devin)
+	if !slices.Contains(installed, want) {
+		t.Fatalf("first install must report %s, got %v", want, installed)
+	}
+	if !HasDevinPlugin(root) {
+		t.Fatal("plugin not written")
+	}
+
+	if again := installAgentHooks(root, false, devin); slices.Contains(again, want) {
+		t.Fatalf("re-install must be a no-op, got %v", again)
+	}
+
+	broken := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(broken, ".devin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(devinConfigPath(broken), []byte(`{not json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := installAgentHooks(broken, false, devin); slices.Contains(got, devinConfigPath(broken)) {
+		t.Fatalf("invalid config must not be reported as installed, got %v", got)
+	}
+}
+
+func TestSelectAgentsForInitDetectsDevin(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("DEVIN_DIR", "")
+	prevAgents := initAgentsFlag
+	initAgentsFlag = ""
+	t.Cleanup(func() { initAgentsFlag = prevAgents })
+	if err := os.MkdirAll(filepath.Join(root, ".devin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	selected, err := selectAgentsForInit(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !selected["devin"] {
+		t.Fatalf("devin not selected: %v", selected)
 	}
 }
