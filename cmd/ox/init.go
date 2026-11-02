@@ -770,9 +770,10 @@ func runInit() error {
 	}
 
 	// A pre-existing .devin/config.json holds the user's own Devin settings:
-	// snapshot it so rollback restores it instead of deleting it.
+	// when init will write it, snapshot it so rollback restores it instead of
+	// deleting it.
 	devinConfig := devinConfigPath(gitRoot)
-	devinConfigExisted := fileExists(devinConfig)
+	devinConfigExisted := selectedAgents["devin"] && !HasDevinPlugin(gitRoot) && fileExists(devinConfig)
 	if devinConfigExisted {
 		tracker.trackModifiedFile(devinConfig)
 	}
