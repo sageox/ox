@@ -2143,6 +2143,9 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 		if info, err := os.Stat(filepath.Join(gitRoot, ".opencode")); err == nil && info.IsDir() {
 			selected["opencode"] = true
 		}
+		if devinDetected(gitRoot) {
+			selected["devin"] = true
+		}
 		return selected, nil
 	}
 
@@ -2181,6 +2184,14 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 			Selected: true,
 		})
 	}
+
+	// Devin runs in the cloud, so there is nothing to detect locally; offer it
+	// always and preselect it when the repo or machine already uses Devin.
+	options = append(options, cli.MultiSelectOption{
+		Label:    "Devin",
+		Value:    "devin",
+		Selected: devinDetected(gitRoot),
+	})
 
 	if !initQuiet {
 		fmt.Println()
@@ -2356,6 +2367,21 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 					cli.PrintPreserved("AI coworker assets already up to date")
 				}
 			}
+		}
+	}
+
+	if selectedAgents["devin"] {
+		if HasDevinPlugin(gitRoot) {
+			if !quiet {
+				cli.PrintPreserved("Devin integration")
+			}
+		} else if err := InstallDevinPlugin(gitRoot); err != nil {
+			cli.PrintWarning(fmt.Sprintf("Could not install Devin integration: %v", err))
+		} else {
+			if !quiet {
+				cli.PrintSuccess("Installed Devin integration")
+			}
+			installedHooks = append(installedHooks, filepath.Join(".devin", "config.json"))
 		}
 	}
 

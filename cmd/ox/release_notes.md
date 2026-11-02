@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Record Devin sessions** — the new Devin plugin (`devin-plugin/`) records each Devin session to your team's Ledger under the Devin user who started it, using their own `SAGEOX_TOKEN` personal secret. `ox init` offers Devin and adds the plugin to `.devin/config.json`; users without a token get a one-time hint on how to add one.
 - **See SageOx context reach your AI coworker** — in the Claude desktop app, VS Code and mobile, each ox call that moves team data and each prompt that carried Team Context in gets a one-line lane underneath: dots travel from SageOx into the session (or back out, for murmurs, plans and Ledger uploads), then it settles to a still line that says what moved, e.g. "searched team memory · ~1.2k from 5 discussions · 0.8s". `/ox-session-report flow still` keeps the lanes without motion; `/ox-session-report flow off` hides them.
 
 ### Changed
