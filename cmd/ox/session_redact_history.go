@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,10 +16,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
@@ -279,6 +282,10 @@ type redactHistoryOptions struct {
 	// Use Scope{AllowAll: true} to opt back into the full-ledger sweep.
 	Scope *sessionScope
 
+	// LFSClient uploads redacted content behind LFS pointers. Nil uses the
+	// Ledger's own credentials.
+	LFSClient func() (*lfs.Client, error)
+
 	Stdin  io.Reader
 	Stdout io.Writer
 }
@@ -438,6 +445,12 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	// trail is correlatable; appliedAt is captured once so the records
 	// share a wall-clock instant.
 	answers := newAnswerReader(opts.Stdin)
+	lfsClient := opts.LFSClient
+	if lfsClient == nil {
+		lfsClient = sync.OnceValues(func() (*lfs.Client, error) {
+			return lfs.NewClientFromLedger(opts.LedgerPath, endpoint.GetForProject(opts.ProjectRoot))
+		})
+	}
 	redactedBySession := map[string][]lfs.RedactionEntry{}
 	// quarantineSessionsTouched tracks sessions whose quarantined files
 	// were redacted + moved back; used after the loop to clean up debt
@@ -491,11 +504,14 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 				if fileFindings[0].SessionName != "" {
 					quarantineSessionsTouched[fileFindings[0].SessionName] = true
 				}
-			} else {
-				abs := filepath.Join(opts.LedgerPath, path)
-				if err := redactFileInPlace(abs, redactor); err != nil {
-					return fmt.Errorf("redact %s: %w", path, err)
+			} else if abs := filepath.Join(opts.LedgerPath, path); lfs.IsPointerFile(abs) {
+				// The finding came from the cached content behind this pointer.
+				if err := redactLFSContent(context.Background(), opts.LedgerPath, path, lfsClient); err != nil {
+					fmt.Fprintf(opts.Stdout, "  Skipped (cannot publish redacted content): %v\n\n", err)
+					continue
 				}
+			} else if err := redactFileInPlace(abs, redactor); err != nil {
+				return fmt.Errorf("redact %s: %w", path, err)
 			}
 			repairedPaths = append(repairedPaths, path)
 			// Record per-finding entries against the session that owns
@@ -913,27 +929,36 @@ func snapshotLedger(ledgerPath, backupDir string) (string, string, error) {
 // Line-by-line because session raw.jsonl entries can be large; whole-
 // file decoding would blow memory on real captures.
 func redactFileInPlace(abs string, _ *session.Redactor) error {
-	src, err := os.Open(abs)
+	tmpName := abs + ".redact.tmp"
+	if err := redactFileTo(abs, tmpName); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, abs)
+}
+
+// redactFileTo writes the redacted form of src to dst with src's mode,
+// removing dst on failure.
+func redactFileTo(src, dst string) error {
+	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer src.Close()
-	info, err := src.Stat()
+	defer in.Close()
+	info, err := in.Stat()
 	if err != nil {
 		return err
 	}
 
-	tmpName := abs + ".redact.tmp"
-	rw, err := session.NewRawWriterTruncate(tmpName, "")
+	rw, err := session.NewRawWriterTruncate(dst, "")
 	if err != nil {
 		return err
 	}
 	cleanup := func() {
 		_ = rw.Close()
-		_ = os.Remove(tmpName)
+		_ = os.Remove(dst)
 	}
 
-	scanner := bufio.NewScanner(src)
+	scanner := bufio.NewScanner(in)
 	// Match scanFileForSecrets: a line the scanner accepted must be redactable
 	// here, or the file falls through to quarantine instead of being cleaned.
 	scanner.Buffer(make([]byte, 64*1024), rawJSONLMaxLineBytes)
@@ -959,14 +984,60 @@ func redactFileInPlace(abs string, _ *session.Redactor) error {
 		return err
 	}
 	if err := rw.CloseAndSync(); err != nil {
-		_ = os.Remove(tmpName)
+		_ = os.Remove(dst)
 		return err
 	}
-	// preserve original mode
-	if err := os.Chmod(tmpName, info.Mode()); err != nil {
+	if err := os.Chmod(dst, info.Mode()); err != nil {
+		_ = os.Remove(dst)
 		return err
 	}
-	return os.Rename(tmpName, abs)
+	return nil
+}
+
+// redactLFSContent redacts the cached content behind the LFS pointer at rel
+// and uploads it. Only after the upload succeeds are meta.json, the pointer
+// and the cache moved to the new OID, so a failure leaves all three as they
+// were and the original content stays recoverable.
+func redactLFSContent(ctx context.Context, ledgerPath, rel string, newClient func() (*lfs.Client, error)) error {
+	sessionName, name, ok := splitSessionPath(rel)
+	if !ok {
+		return fmt.Errorf("not a session artifact: %s", rel)
+	}
+	cachePath := filepath.Join(ledgerPath, ".sageox", "cache", filepath.FromSlash(rel))
+	tmpName := cachePath + ".redact.tmp"
+	if err := redactFileTo(cachePath, tmpName); err != nil {
+		return err
+	}
+	defer os.Remove(tmpName)
+	content, err := os.ReadFile(tmpName)
+	if err != nil {
+		return err
+	}
+	client, err := newClient()
+	if err != nil {
+		return fmt.Errorf("LFS client: %w", err)
+	}
+	uploaded, err := lfs.UploadBlob(client, content)
+	if err != nil {
+		return err
+	}
+	err = lfs.MutateSessionMeta(ctx, filepath.Join(ledgerPath, "sessions", sessionName), func(m *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+		if m == nil {
+			return nil, errors.New("meta.json missing")
+		}
+		if m.Files == nil {
+			m.Files = map[string]lfs.FileRef{}
+		}
+		m.Files[name] = uploaded.Ref()
+		return m, nil
+	})
+	if err != nil {
+		return fmt.Errorf("record OID in meta.json: %w", err)
+	}
+	if err := lfs.WritePointerFile(filepath.Join(ledgerPath, filepath.FromSlash(rel)), uploaded); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, cachePath)
 }
 
 // stageAndAmendRedactedFiles stages and amends only repaired files and metadata.
