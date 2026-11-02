@@ -20,7 +20,8 @@ import (
 // cache. Redaction must rewrite the cached content, upload it, and amend the
 // pointer and meta.json to the new OID. Failure prevented (#1666): the pointer
 // text itself was "redacted" into _raw_line records and published, while the
-// cached secret stayed untouched. On upload failure, nothing may change.
+// cached secret stayed untouched. On upload failure, or when the cache no
+// longer matches the pointer, nothing may change.
 func TestRunRedactHistoryWorkflow_RedactsLFSCachedContent(t *testing.T) {
 	const secret = "AKIAIOSFODNN7EXAMPLE"
 	original := `{"type":"user","content":"key ` + secret + `"}` + "\n"
@@ -40,13 +41,17 @@ func TestRunRedactHistoryWorkflow_RedactsLFSCachedContent(t *testing.T) {
 	t.Cleanup(down.Close)
 	stub := newLFSStub(t)
 
+	stale := original + `{"type":"user","content":"newer ` + secret + `"}` + "\n"
+
 	tests := []struct {
 		name      string
 		serverURL string
+		cache     string
 		wantOK    bool
 	}{
-		{"upload succeeds", stub.url, true},
-		{"upload fails", down.URL, false},
+		{"upload succeeds", stub.url, original, true},
+		{"upload fails", down.URL, original, false},
+		{"cache does not match pointer", stub.url, stale, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -56,7 +61,7 @@ func TestRunRedactHistoryWorkflow_RedactsLFSCachedContent(t *testing.T) {
 			})
 			cachePath := filepath.Join(work, ".sageox", "cache", rel)
 			require.NoError(t, os.MkdirAll(filepath.Dir(cachePath), 0o755))
-			require.NoError(t, os.WriteFile(cachePath, []byte(original), 0o644))
+			require.NoError(t, os.WriteFile(cachePath, []byte(tt.cache), 0o644))
 			out := &bytes.Buffer{}
 
 			err := runRedactHistoryWorkflow(redactHistoryOptions{
@@ -80,7 +85,7 @@ func TestRunRedactHistoryWorkflow_RedactsLFSCachedContent(t *testing.T) {
 
 			if !tt.wantOK {
 				assert.Contains(t, out.String(), "Skipped")
-				assert.Equal(t, original, string(cached), "cached content must stay recoverable")
+				assert.Equal(t, tt.cache, string(cached), "cached content must stay recoverable")
 				assert.Equal(t, pointer, headPointer)
 				assert.Equal(t, originalRef.OID, headMeta.Files["raw.jsonl"].OID)
 				assert.Empty(t, headMeta.Redactions, "a failed redaction must not be recorded")

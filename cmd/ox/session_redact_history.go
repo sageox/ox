@@ -996,14 +996,34 @@ func redactFileTo(src, dst string) error {
 
 // redactLFSContent redacts the cached content behind the LFS pointer at rel
 // and uploads it. Only after the upload succeeds are meta.json, the pointer
-// and the cache moved to the new OID, so a failure leaves all three as they
-// were and the original content stays recoverable.
+// and the cache switched to the redacted blob; if any of those steps fails,
+// meta.json and the pointer are restored so nothing is left half-switched.
 func redactLFSContent(ctx context.Context, ledgerPath, rel string, newClient func() (*lfs.Client, error)) error {
 	sessionName, name, ok := splitSessionPath(rel)
 	if !ok {
 		return fmt.Errorf("not a session artifact: %s", rel)
 	}
+	if filepath.Ext(name) != ".jsonl" {
+		return fmt.Errorf("%s is not JSONL; redact it manually", name)
+	}
+	pointerPath := filepath.Join(ledgerPath, filepath.FromSlash(rel))
+	oldPointer, err := os.ReadFile(pointerPath)
+	if err != nil {
+		return err
+	}
+	oldRef, err := lfs.ReadPointerFile(pointerPath)
+	if err != nil {
+		return err
+	}
 	cachePath := filepath.Join(ledgerPath, ".sageox", "cache", filepath.FromSlash(rel))
+	cached, err := os.ReadFile(cachePath)
+	if err != nil {
+		return err
+	}
+	if lfs.ComputeOID(cached) != oldRef.BareOID() {
+		return fmt.Errorf("cached content does not match the pointer for %s; rehydrate it first", rel)
+	}
+
 	tmpName := cachePath + ".redact.tmp"
 	if err := redactFileTo(cachePath, tmpName); err != nil {
 		return err
@@ -1021,23 +1041,42 @@ func redactLFSContent(ctx context.Context, ledgerPath, rel string, newClient fun
 	if err != nil {
 		return err
 	}
-	err = lfs.MutateSessionMeta(ctx, filepath.Join(ledgerPath, "sessions", sessionName), func(m *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	var prev lfs.FileRef
+	var hadPrev bool
+	err = lfs.MutateSessionMeta(ctx, sessionDir, func(m *lfs.SessionMeta) (*lfs.SessionMeta, error) {
 		if m == nil {
 			return nil, errors.New("meta.json missing")
 		}
 		if m.Files == nil {
 			m.Files = map[string]lfs.FileRef{}
 		}
+		prev, hadPrev = m.Files[name]
 		m.Files[name] = uploaded.Ref()
 		return m, nil
 	})
 	if err != nil {
 		return fmt.Errorf("record OID in meta.json: %w", err)
 	}
-	if err := lfs.WritePointerFile(filepath.Join(ledgerPath, filepath.FromSlash(rel)), uploaded); err != nil {
-		return err
+	if err = lfs.WritePointerFile(pointerPath, uploaded); err == nil {
+		err = os.Rename(tmpName, cachePath)
 	}
-	return os.Rename(tmpName, cachePath)
+	if err != nil {
+		restoreMeta := lfs.MutateSessionMeta(ctx, sessionDir, func(m *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+			if m == nil {
+				return nil, errors.New("meta.json missing")
+			}
+			if hadPrev {
+				m.Files[name] = prev
+			} else {
+				delete(m.Files, name)
+			}
+			return m, nil
+		})
+		return errors.Join(err, os.WriteFile(pointerPath, oldPointer, 0o600), restoreMeta)
+	}
+	return nil
 }
 
 // stageAndAmendRedactedFiles stages and amends only repaired files and metadata.
