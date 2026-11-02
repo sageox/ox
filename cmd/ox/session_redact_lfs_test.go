@@ -136,11 +136,12 @@ func TestRedactLFSContent_FailuresLeaveSessionUnchanged(t *testing.T) {
 		blockTmp  bool
 		client    func(ledger string) (*lfs.Client, error)
 		wantErr   string
+		wantIs    error
 	}{
 		{name: "not a session path", rel: "notes/raw.jsonl", wantErr: "not a session artifact"},
 		{name: "not JSONL", rel: "sessions/leaky/summary.md", wantErr: "not JSONL"},
-		{name: "pointer missing", rel: rel, noPointer: true, wantErr: "no such file"},
-		{name: "cache missing", rel: rel, noCache: true, wantErr: "no such file"},
+		{name: "pointer missing", rel: rel, noPointer: true, wantIs: os.ErrNotExist},
+		{name: "cache missing", rel: rel, noCache: true, wantIs: os.ErrNotExist},
 		{name: "redacted copy cannot be written", rel: rel, blockTmp: true, wantErr: "redact.tmp"},
 		{name: "client unavailable", rel: rel, client: func(string) (*lfs.Client, error) {
 			return nil, errors.New("no credentials")
@@ -195,7 +196,11 @@ func TestRedactLFSContent_FailuresLeaveSessionUnchanged(t *testing.T) {
 			}
 
 			err := redactLFSContent(t.Context(), ledger, tt.rel, func() (*lfs.Client, error) { return client(ledger) })
-			require.ErrorContains(t, err, tt.wantErr)
+			if tt.wantIs != nil {
+				require.ErrorIs(t, err, tt.wantIs)
+			} else {
+				require.ErrorContains(t, err, tt.wantErr)
+			}
 
 			if tt.noPointer {
 				return
