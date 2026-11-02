@@ -239,7 +239,7 @@ func putObject(action *Action, proof guardedUpload) error {
 
 	resp, err := lfsHTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("upload failed: %w", err)
+		return fmt.Errorf("upload failed: %w", withoutURL(err))
 	}
 	defer resp.Body.Close()
 
@@ -248,6 +248,16 @@ func putObject(action *Action, proof guardedUpload) error {
 		return fmt.Errorf("upload returned HTTP %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
+}
+
+// withoutURL drops the request URL from a transport error: action hrefs
+// can carry signed credentials in their query string.
+func withoutURL(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return urlErr.Err
+	}
+	return err
 }
 
 // isConnectionReset reports a transport failure that happened mid-request
@@ -289,7 +299,7 @@ func VerifyObject(action *Action, oid string, size int64) error {
 
 	resp, err := lfsHTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("verify request failed: %w", err)
+		return fmt.Errorf("verify request failed: %w", withoutURL(err))
 	}
 	defer resp.Body.Close()
 

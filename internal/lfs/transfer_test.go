@@ -1,6 +1,7 @@
 package lfs
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -549,4 +550,26 @@ func TestSharedHTTPClient_Timeout(t *testing.T) {
 	useBundledSessionRules(t)
 	// verify the shared client has the expected timeout
 	assert.Equal(t, 5*time.Minute, lfsHTTPClient.Timeout, "shared LFS client should have 5-minute timeout")
+}
+
+func TestUploadAndVerify_TransportErrorsOmitSignedURL(t *testing.T) {
+	useBundledSessionRules(t)
+	server := httptest.NewServer(http.NotFoundHandler())
+	href := server.URL + "/objects/abc?X-Amz-Signature=signed-secret"
+	server.Close()
+
+	ctx := context.Background()
+	tests := map[string]func(*Action) error{
+		"upload":          func(a *Action) error { return UploadObject(a, []byte("data")) },
+		"verify":          func(a *Action) error { return VerifyObject(a, "abc", 4) },
+		"recovery upload": func(a *Action) error { return putRecoveryObject(ctx, a, []byte("data")) },
+		"recovery verify": func(a *Action) error { return verifyRecoveryObject(ctx, a, FileRef{OID: "sha256:abc", Size: 4}) },
+	}
+	for name, call := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := call(&Action{Href: href})
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), "signed-secret")
+		})
+	}
 }
