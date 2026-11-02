@@ -250,14 +250,18 @@ func putObject(action *Action, proof guardedUpload) error {
 	return nil
 }
 
-// withoutURL drops the request URL from a transport error: action hrefs
-// can carry signed credentials in their query string.
+// withoutURL drops URLs from a transport error: action hrefs can carry
+// signed credentials in their query string. net/http also quotes a
+// malformed redirect Location in the cause, so that cause is replaced.
 func withoutURL(err error) error {
 	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
-		return urlErr.Err
+	if !errors.As(err, &urlErr) {
+		return err
 	}
-	return err
+	if strings.Contains(urlErr.Err.Error(), "Location header") {
+		return errors.New("server sent a malformed redirect")
+	}
+	return urlErr.Err
 }
 
 // isConnectionReset reports a transport failure that happened mid-request
@@ -337,9 +341,8 @@ func DownloadObject(action *Action) ([]byte, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		var urlErr *url.Error
-		if action.readClient != nil && errors.As(err, &urlErr) {
-			err = urlErr.Err // signed storage URLs are credentials too
+		if action.readClient != nil {
+			err = withoutURL(err) // signed storage URLs are credentials too
 		}
 		return nil, fmt.Errorf("download failed: %w", err)
 	}
@@ -416,9 +419,8 @@ func DownloadToFileContext(ctx context.Context, action *Action, dst io.Writer, v
 
 	resp, err := lfsHTTPClient.Do(req)
 	if err != nil {
-		var urlErr *url.Error
-		if action.readClient != nil && errors.As(err, &urlErr) {
-			err = urlErr.Err // keep signed query parameters out of diagnostics
+		if action.readClient != nil {
+			err = withoutURL(err) // signed storage URLs are credentials too
 		}
 		return fmt.Errorf("download failed: %w", err)
 	}

@@ -555,9 +555,14 @@ func TestSharedHTTPClient_Timeout(t *testing.T) {
 
 func TestUploadAndVerify_TransportErrorsOmitSignedURL(t *testing.T) {
 	useBundledSessionRules(t)
-	server := httptest.NewServer(http.NotFoundHandler())
-	href := server.URL + "/objects/abc?X-Amz-Signature=signed-secret"
-	server.Close()
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "/%zz?X-Amz-Signature=signed-secret")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirect.Close)
+	servers := map[string]string{"unreachable": closed.URL, "malformed redirect": redirect.URL}
 
 	ctx := context.Background()
 	tests := map[string]func(*Action) error{
@@ -566,12 +571,14 @@ func TestUploadAndVerify_TransportErrorsOmitSignedURL(t *testing.T) {
 		"recovery upload": func(a *Action) error { return putRecoveryObject(ctx, a, []byte("data")) },
 		"recovery verify": func(a *Action) error { return verifyRecoveryObject(ctx, a, FileRef{OID: "sha256:abc", Size: 4}) },
 	}
-	for name, call := range tests {
-		t.Run(name, func(t *testing.T) {
-			err := call(&Action{Href: href})
-			require.Error(t, err)
-			assert.NotContains(t, err.Error(), "signed-secret")
-		})
+	for server, base := range servers {
+		for name, call := range tests {
+			t.Run(server+"/"+name, func(t *testing.T) {
+				err := call(&Action{Href: base + "/objects/abc?X-Amz-Signature=signed-secret"})
+				require.Error(t, err)
+				assert.NotContains(t, err.Error(), "signed-secret")
+			})
+		}
 	}
 
 	other := errors.New("not a transport error")
