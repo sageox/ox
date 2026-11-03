@@ -159,12 +159,20 @@ func NewGitHubMirrorRelayer(deps GitHubMirrorDeps) *GitHubMirrorRelayer {
 // project: the server flag from the cached CLI settings, the heartbeat token
 // (then the on-disk token) for the SageOx API, and the project's team.
 func newProjectGitHubMirrorRelayer(projectRoot string, settings func() *flags.CLISettingsResponse, heartbeatToken func(destination string) string, logger *slog.Logger) *GitHubMirrorRelayer {
-	// Pin the destination so a config edit between token resolution and client
-	// construction cannot send a token checked for one origin to another.
-	ep := endpoint.GetForProject(projectRoot)
+	// Resolve the endpoint once per cycle (AuthToken runs first) and reuse it
+	// for the relay client, so a config edit mid-cycle cannot send a token
+	// checked for one origin to another, yet the next cycle follows the edit.
+	var (
+		mu      sync.Mutex
+		cycleEP string
+	)
 	return NewGitHubMirrorRelayer(GitHubMirrorDeps{
 		Enabled: func() bool { return githubMirrorFeatureOn(settings) },
 		AuthToken: func() string {
+			ep := endpoint.GetForProject(projectRoot)
+			mu.Lock()
+			cycleEP = ep
+			mu.Unlock()
 			return resolveMirrorAuthToken(heartbeatToken, ep)
 		},
 		Team: func() (string, string) {
@@ -178,6 +186,9 @@ func newProjectGitHubMirrorRelayer(projectRoot string, settings func() *flags.CL
 			return gh.NewMirrorFetcher(gh.NewClient(githubToken))
 		},
 		NewRelay: func(authToken string) MirrorRelayClient {
+			mu.Lock()
+			ep := cycleEP
+			mu.Unlock()
 			return api.NewRepoClientWithEndpoint(ep).WithAuthToken(authToken)
 		},
 		Logger: logger,

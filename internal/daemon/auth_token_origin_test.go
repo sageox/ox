@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
@@ -79,6 +80,25 @@ func TestProjectGitHubMirrorRelayer_HeartbeatTokenOnlyForProjectOrigin(t *testin
 			assert.NotNil(t, r.deps.NewRelay(tt.want))
 		})
 	}
+}
+
+// Each mirror cycle follows the project's current endpoint, and the token and
+// relay client of one cycle agree on it.
+func TestProjectGitHubMirrorRelayer_FollowsProjectEndpointEditsBetweenCycles(t *testing.T) {
+	const movedAPI = "https://api.moved.example"
+	noSettings := func() *flags.CLISettingsResponse { return nil }
+	isolateCredentialsWithDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	root := projectWithEndpoint(t)
+	r := newProjectGitHubMirrorRelayer(root, noSettings, heartbeatWithTokenFrom(t, movedAPI).GetAuthToken, testLogger())
+
+	assert.Empty(t, r.deps.AuthToken(), "token loaded for the moved endpoint must not reach the original one")
+	assert.Equal(t, projectAPI, r.deps.NewRelay("").(*api.RepoClient).Endpoint())
+
+	require.NoError(t, config.SaveProjectConfig(root, &config.ProjectConfig{Endpoint: movedAPI}))
+
+	assert.Equal(t, "oauth-token", r.deps.AuthToken())
+	assert.Equal(t, movedAPI, r.deps.NewRelay("oauth-token").(*api.RepoClient).Endpoint())
 }
 
 // Cold start loads the stored OAuth token for the project endpoint; it must
