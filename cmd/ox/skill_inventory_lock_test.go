@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -13,21 +14,20 @@ import (
 	"github.com/sageox/ox/internal/skillmanager"
 )
 
-// TestReconcileSkillInventoryIfStale_SkipsWhenAnotherProcessHoldsTheLock covers
+// TestReconcileSkillInventoryIfStale_FailsWhenAnotherProcessHoldsTheLock covers
 // the interleaving that this feature newly makes likely: reconcile moved onto the
 // session hot path, so two agent sessions starting together in one repository —
 // or a session starting while the daemon's autofix tick runs — now race on the
 // same managed files.
 //
-// The required behavior is skip, not fail and not wait. The other holder is doing
-// this exact work, so losing the race is a correct outcome; blocking would stall a
-// session start behind a background process.
+// The required behavior is fail closed without waiting: another holder is not
+// proof that revoked content has been removed, so prime must stop and retry.
 //
 // The lock is taken here the same way the implementation takes it — flock(2) on
 // .sageox/cache/skills-apply.lock — because flock is per-open-file-description,
 // so a second descriptor in this same process contends exactly as another process
 // would.
-func TestReconcileSkillInventoryIfStale_SkipsWhenAnotherProcessHoldsTheLock(t *testing.T) {
+func TestReconcileSkillInventoryIfStale_FailsWhenAnotherProcessHoldsTheLock(t *testing.T) {
 	repoRoot, managedFile := installSkillsForTest(t)
 	removeManaged(t, managedFile)
 	setLockRevision(t, repoRoot, "revision-from-an-older-release")
@@ -46,18 +46,18 @@ func TestReconcileSkillInventoryIfStale_SkipsWhenAnotherProcessHoldsTheLock(t *t
 	}
 
 	// Stale revision, so without contention this would definitely do work.
-	if changed, _ := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
-		t.Errorf("reconcile proceeded while another holder had the apply lock: changed=%d", changed)
+	if changed, _, err := reconcileSkillInventoryIfStale(repoRoot); changed != 0 || !errors.Is(err, skillmanager.ErrApplyInProgress) {
+		t.Errorf("contended reconcile must fail without changes: changed=%d err=%v", changed, err)
 	}
 	if managedExists(t, managedFile) {
 		t.Errorf("a contended reconcile still wrote managed files, which is the interleaving the lock exists to prevent")
 	}
 
-	// Releasing the lock must restore normal behavior — proving the skip was
+	// Releasing the lock must restore normal behavior — proving the error was
 	// contention and not a permanently broken path.
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	if changed, _ := reconcileSkillInventoryIfStale(repoRoot); changed == 0 {
-		t.Errorf("reconcile did not resume after the lock was released")
+	if changed, _, err := reconcileSkillInventoryIfStale(repoRoot); changed == 0 || err != nil {
+		t.Errorf("reconcile did not resume after the lock was released: changed=%d err=%v", changed, err)
 	}
 	if !managedExists(t, managedFile) {
 		t.Errorf("managed file not restored after the lock was released")
@@ -94,9 +94,12 @@ func TestReconcileSkillInventoryIfStale_NeverWaitsOnTheReconcileLock(t *testing.
 	}
 
 	start := time.Now()
-	changed, _ := reconcileSkillInventoryIfStale(repoRoot)
+	changed, _, err := reconcileSkillInventoryIfStale(repoRoot)
 	elapsed := time.Since(start)
 
+	if !errors.Is(err, skillmanager.ErrApplyInProgress) {
+		t.Errorf("a held reconcile lock must block prime: err=%v", err)
+	}
 	if changed != 0 {
 		t.Errorf("reconcile proceeded while the sidecar lock was held: changed=%d", changed)
 	}
