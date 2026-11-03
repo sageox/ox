@@ -253,3 +253,27 @@ func TestRetractOrphanedDrafts_KeepsDraftWithLocalRecording(t *testing.T) {
 	assert.DirExists(t, filepath.Join(ledger, "sessions", name),
 		"a stale draft with a recoverable local recording must not be retracted")
 }
+
+// The retry restore must address exactly one draft directory: a wildcard in
+// its name must not also match a sibling and unstage that sibling's work.
+func TestRestoreDraftForRetry_TouchesOnlyTheLiteralDraft(t *testing.T) {
+	s, ledger := newRetractScheduler(t)
+	const name = "*"
+	commitStaleDraft(t, ledger, name, 120*time.Hour)
+	sibling := filepath.Join(ledger, "sessions", "victim")
+	require.NoError(t, os.MkdirAll(sibling, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sibling, "work.txt"), []byte("original\n"), 0o644))
+	mustGit(t, ledger, "add", "sessions/victim")
+	mustGit(t, ledger, "commit", "-m", "seed sibling")
+	require.NoError(t, os.WriteFile(filepath.Join(sibling, "work.txt"), []byte("local work\n"), 0o644))
+	mustGit(t, ledger, "add", "sessions/victim/work.txt")
+	mustGit(t, ledger, "rm", "-r", "-q", "--", ":(literal)sessions/"+name)
+
+	s.restoreDraftForRetry(context.Background(), ledger, "sessions/"+name, name, nil)
+
+	assert.FileExists(t, filepath.Join(ledger, "sessions", name, "meta.json"))
+	assert.Equal(t, "sessions/victim/work.txt", mustGit(t, ledger, "diff", "--cached", "--name-only"))
+	data, err := os.ReadFile(filepath.Join(sibling, "work.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "local work\n", string(data))
+}
