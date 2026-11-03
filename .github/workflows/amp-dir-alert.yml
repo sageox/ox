@@ -5,11 +5,18 @@ name: Alert on .amp/ changes to main
 # under .amp/, however it got there, so a bypass is seen the same day instead
 # of silently. Needs the AMP_DIR_ALERT_SLACK_WEBHOOK secret (a Slack incoming
 # webhook for #amp-steward); the job fails loudly if it's missing.
+#
+# Known gap: a push carrying [skip ci] in its commit message skips this
+# workflow entirely, same as every other push-triggered Action -- GitHub
+# does not run any workflow for that push at all. That is a platform
+# behavior, not something fixable in this file.
 on:
   push:
     branches: [main]
     paths:
       - '.amp/**'
+
+permissions: {}
 
 jobs:
   alert:
