@@ -20,7 +20,7 @@ func localTraceCapturePath(sessionDir string) (string, error) {
 		return "", fmt.Errorf("trace recording directory must be absolute")
 	}
 	key := sha256.Sum256([]byte(filepath.Clean(sessionDir)))
-	return filepath.Join(paths.TraceDir(), "recordings", fmt.Sprintf("%x.json", key)), nil
+	return filepath.Join(paths.CacheDir(), "trace", "recordings", fmt.Sprintf("%x.json", key)), nil
 }
 
 func readLocalTraceCapture(sessionDir string) (*model.Capture, error) {
