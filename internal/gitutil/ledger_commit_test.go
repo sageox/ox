@@ -130,6 +130,28 @@ func TestCommitLedgerSessionDeletion_RequiresSessionNames(t *testing.T) {
 	}
 }
 
+// Literal pathspecs must survive both diff-index and ls-files in the scoped
+// snapshot builder; otherwise a retraction can commit staged sibling deletions.
+func TestCommitLedgerSnapshot_LiteralDraftRemoval(t *testing.T) {
+	repo := newSnapshotRepo(t)
+	for _, name := range []string{"*", "victim"} {
+		writeGitutilFixture(t, repo, "sessions/"+name+"/meta.json", cleanMeta)
+	}
+	gitInRepo(t, repo, "add", "sessions")
+	gitInRepo(t, repo, "commit", "-m", "seed sessions")
+	pathspec := ":(literal)sessions/*"
+	gitInRepo(t, repo, "rm", "-r", "--force", "--ignore-unmatch", "--", pathspec)
+	// An unrelated deletion is already staged by another writer.
+	gitInRepo(t, repo, "rm", "-r", "--", "sessions/victim")
+
+	committed, err := CommitLedgerSnapshot(context.Background(), repo, "session-draft: retract *", pathspec)
+	require.NoError(t, err)
+	require.True(t, committed)
+	assert.Equal(t, "sessions/*/meta.json", gitInRepo(t, repo, "diff", "--name-only", "HEAD^", "HEAD"))
+	assert.Equal(t, cleanMeta, headBlob(t, repo, "sessions/victim/meta.json"))
+	assert.Equal(t, "sessions/victim/meta.json", gitInRepo(t, repo, "diff", "--cached", "--name-only"))
+}
+
 func newSnapshotRepo(t *testing.T) string {
 	t.Helper()
 	repo := t.TempDir()
