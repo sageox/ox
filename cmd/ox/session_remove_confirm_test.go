@@ -209,12 +209,12 @@ func TestRemoveSessionByPattern_PipedYesRemoves(t *testing.T) {
 	assert.False(t, sessionDirExists(t, root, name))
 }
 
-// A listed name the store refuses to delete is reported and kept, and does not
-// stop the rest of the removal or count as removed.
-func TestRemoveAllSessions_RefusedNameIsReportedAndKept(t *testing.T) {
-	refused := recentSessionName("OxRm..B4")
-	removable := recentSessionName("OxRmB5")
-	store, root := localStoreWithSessions(t, refused, removable)
+// Session names keep periods, so a listed name containing ".." is a normal
+// session and remove --all must remove it like any other.
+func TestRemoveAllSessions_RemovesDottedNames(t *testing.T) {
+	dotted := recentSessionName("OxRm..B4")
+	plain := recentSessionName("OxRmB5")
+	store, root := localStoreWithSessions(t, dotted, plain)
 
 	var err error
 	out := captureStdoutForPlanCLI(t, func() {
@@ -222,8 +222,8 @@ func TestRemoveAllSessions_RefusedNameIsReportedAndKept(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.Contains(t, out, "Warning: failed to remove "+refused)
-	assert.Contains(t, out, "Removed 1 session(s)")
-	assert.True(t, sessionDirExists(t, root, refused), "a refused name must not be removed")
-	assert.False(t, sessionDirExists(t, root, removable))
+	assert.NotContains(t, out, "Warning")
+	assert.Contains(t, out, "Removed 2 session(s)")
+	assert.False(t, sessionDirExists(t, root, dotted))
+	assert.False(t, sessionDirExists(t, root, plain))
 }

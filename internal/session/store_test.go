@@ -617,6 +617,17 @@ func TestStore_Delete_ExactDirectoryName(t *testing.T) {
 	}
 }
 
+func TestStore_Delete_DottedSingleComponent(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+	name := "2026-11-03T10-00-user-v1..2"
+	require.NoError(t, os.MkdirAll(filepath.Join(store.BasePath(), name), 0o755))
+
+	require.NoError(t, store.Delete(name))
+	assert.NoDirExists(t, filepath.Join(store.BasePath(), name))
+	assert.DirExists(t, store.BasePath())
+}
+
 func TestStore_Delete_RejectsPathShapedNames(t *testing.T) {
 	root := t.TempDir()
 	store, err := NewStore(root)

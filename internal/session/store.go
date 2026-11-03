@@ -1276,12 +1276,14 @@ func (s *Store) GetLatestRaw() (*SessionInfo, error) {
 
 // Delete removes a session folder by its exact directory name, not a legacy filename.
 func (s *Store) Delete(name string) error {
-	if err := ValidateDraftSessionName(name); err != nil {
-		return err
+	// Only a single, non-traversal component: names may contain ".." (the name
+	// sanitizer keeps periods), but never "..", ".", or a separator.
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("session name %q must be a single path component", name)
 	}
 
 	// Never normalize a name (e.g. strip .jsonl) into the store root or a
-	// different session. A validated single component cannot leave basePath.
+	// different session. A single component cannot leave basePath.
 	sessionPath := filepath.Join(s.basePath, name)
 	if info, err := os.Stat(sessionPath); err == nil && info.IsDir() {
 		if err := os.RemoveAll(sessionPath); err != nil {
