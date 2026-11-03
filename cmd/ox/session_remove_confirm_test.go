@@ -208,3 +208,22 @@ func TestRemoveSessionByPattern_PipedYesRemoves(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, sessionDirExists(t, root, name))
 }
+
+// A listed name the store refuses to delete is reported and kept, and does not
+// stop the rest of the removal or count as removed.
+func TestRemoveAllSessions_RefusedNameIsReportedAndKept(t *testing.T) {
+	refused := recentSessionName("OxRm..B4")
+	removable := recentSessionName("OxRmB5")
+	store, root := localStoreWithSessions(t, refused, removable)
+
+	var err error
+	out := captureStdoutForPlanCLI(t, func() {
+		err = removeAllSessions(store, true)
+	})
+
+	require.NoError(t, err)
+	assert.Contains(t, out, "Warning: failed to remove "+refused)
+	assert.Contains(t, out, "Removed 1 session(s)")
+	assert.True(t, sessionDirExists(t, root, refused), "a refused name must not be removed")
+	assert.False(t, sessionDirExists(t, root, removable))
+}
