@@ -794,12 +794,13 @@ func TestDraftCommit_RefusesWhenWorktreeChangedAfterStaging(t *testing.T) {
 // tree. That was reachable only by accident before (the paths first require a
 // draft meta.json to exist), which is not a guarantee.
 func TestDraftSessionName_RejectsPathTraversal(t *testing.T) {
-	for _, name := range []string{"", ".", "..", "../evil", "a/b", `a\b`, "foo/../.."} {
+	for _, name := range []string{"", ".", "..", "../evil", "a/b", `a\b`, "foo/../..", "*", "session?", "[abc]", "a]", ":(glob)*", "a\x00b", "a b"} {
 		t.Run("name="+name, func(t *testing.T) {
 			require.Error(t, validateDraftSessionName(name))
 		})
 	}
 	require.NoError(t, validateDraftSessionName("2026-01-01T00-00-testuser-OxOk01"))
+	require.NoError(t, validateDraftSessionName("2026-01-01T00-00-test_user.name-OxOk01"))
 }
 
 // TestDraftSessionName_GuardIsWiredIntoEveryWriter proves the validation is not
@@ -812,9 +813,10 @@ func TestDraftSessionName_GuardIsWiredIntoEveryWriter(t *testing.T) {
 	require.NoError(t, os.MkdirAll(sessionsDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(sessionsDir, "canary.txt"), []byte("keep me"), 0644))
 
-	for _, bad := range []string{"", ".", "../evil"} {
+	for _, bad := range []string{"", ".", "../evil", "*", "session?", "[abc]"} {
 		assert.Error(t, commitDraftLocally(f.ledgerPath, bad), "commitDraftLocally(%q)", bad)
 		assert.Error(t, purgeDraftSessionDir(f.ledgerPath, bad), "purgeDraftSessionDir(%q)", bad)
+		assert.Error(t, commitDraftRemoval(f.ledgerPath, bad, "discard"), "commitDraftRemoval(%q)", bad)
 		_, err := deleteDraftFromLedger(f.ledgerPath, bad)
 		assert.Error(t, err, "deleteDraftFromLedger(%q)", bad)
 	}

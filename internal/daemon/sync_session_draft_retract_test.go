@@ -107,6 +107,41 @@ func TestRetractOrphanedDrafts_RemovesStaleCommittedDraft(t *testing.T) {
 		"retraction must land as a session-draft: commit so the daemon push carries it")
 }
 
+func TestRetractOrphanedDrafts_RejectsWildcardNames(t *testing.T) {
+	for _, name := range []string{"*", "victi?", "[v]ictim"} {
+		t.Run(name, func(t *testing.T) {
+			s, ledger := newRetractScheduler(t)
+			commitStaleDraft(t, ledger, name, 120*time.Hour)
+			sibling := filepath.Join(ledger, "sessions", "victim")
+			require.NoError(t, os.MkdirAll(sibling, 0755))
+			for _, file := range []string{"tracked.txt", "modified.txt", "staged.txt"} {
+				require.NoError(t, os.WriteFile(filepath.Join(sibling, file), []byte("original\n"), 0644))
+			}
+			mustGit(t, ledger, "add", "sessions/victim")
+			mustGit(t, ledger, "commit", "-m", "seed sibling")
+			// A valid orphan must still be removed in the same sweep.
+			commitStaleDraft(t, ledger, "ordinary", 120*time.Hour)
+			for _, file := range []string{"modified.txt", "staged.txt", "untracked.txt"} {
+				require.NoError(t, os.WriteFile(filepath.Join(sibling, file), []byte("local work\n"), 0644))
+			}
+			mustGit(t, ledger, "add", "sessions/victim/staged.txt")
+			staged := mustGit(t, ledger, "diff", "--cached", "--binary")
+			unstaged := mustGit(t, ledger, "diff", "--binary")
+
+			s.retractOrphanedDrafts(context.Background(), ledger)
+
+			assert.NoDirExists(t, filepath.Join(ledger, "sessions", "ordinary"))
+			assert.Equal(t, "sessions/ordinary/meta.json", mustGit(t, ledger, "diff", "--name-only", "HEAD^", "HEAD"))
+			assert.Equal(t, staged, mustGit(t, ledger, "diff", "--cached", "--binary"))
+			assert.Equal(t, unstaged, mustGit(t, ledger, "diff", "--binary"))
+			data, err := os.ReadFile(filepath.Join(sibling, "untracked.txt"))
+			require.NoError(t, err)
+			assert.Equal(t, "local work\n", string(data))
+			assert.FileExists(t, filepath.Join(ledger, "sessions", name, "meta.json"))
+		})
+	}
+}
+
 // TestRetractOrphanedDrafts_SkipsUnpushedDraft — a stale draft whose publish
 // commit is still LOCAL must never be retracted. Stacking a retraction on an
 // unpushed publish would make pushSessionDraftCommits ship both, manufacturing a
