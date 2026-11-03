@@ -3,6 +3,7 @@ package upgrade
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -60,6 +61,9 @@ func TestInstallFromDirErrors(t *testing.T) {
 		require.ErrorIs(t, err, ErrNotWritable)
 	})
 	t.Run("unreadable source binary", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("chmod 000 does not block reads on Windows")
+		}
 		if os.Getuid() == 0 {
 			t.Skip("root reads any file")
 		}

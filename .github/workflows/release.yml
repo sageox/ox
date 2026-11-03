@@ -519,11 +519,13 @@ jobs:
   # npm publishes the binaries of the public release as @sageox/ox, so
   # `npx @sageox/ox@latest install` never ships what GitHub does not. The token
   # reaches only the last step, which runs no repository code; reruns skip
-  # versions npm already has.
+  # versions npm already has. NPM_TOKEN lives in the npm environment, whose
+  # deployment rules keep it from workflow runs on other branches.
   publish-npm:
     if: github.repository == 'sageox/ox'
     needs: publish-release
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    environment: npm
     permissions:
       contents: read
       id-token: write # npm provenance

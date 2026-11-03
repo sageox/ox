@@ -223,11 +223,11 @@ func warnInstallPath(out io.Writer, destDir, oxPath string) {
 	if !dirOnPath(destDir) {
 		if filepath.Base(os.Getenv("SHELL")) == "fish" {
 			cli.PrintWarningTo(out, destDir+" is not on your PATH. Add it with:")
-			fmt.Fprintf(out, "  fish_add_path \"%s\"\n", destDir)
+			fmt.Fprintf(out, "  fish_add_path %s\n", shellQuote(destDir))
 			return
 		}
 		cli.PrintWarningTo(out, destDir+" is not on your PATH. Add this line to your shell profile:")
-		fmt.Fprintf(out, "  export PATH=\"%s:$PATH\"\n", destDir)
+		fmt.Fprintf(out, "  export PATH=%s:\"$PATH\"\n", shellQuote(destDir))
 		return
 	}
 	if found := lookPathOutsideNodeModules("ox"); found != "" && !sameFile(found, oxPath) {
@@ -245,10 +245,11 @@ func dirOnPath(dir string) bool {
 }
 
 // lookPathOutsideNodeModules is exec.LookPath that skips node_modules
-// directories, so the npx launcher on PATH is not mistaken for an install.
+// directories, so the npx launcher on PATH is not mistaken for an install,
+// and, like exec.LookPath, ignores relative entries.
 func lookPathOutsideNodeModules(name string) string {
 	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
-		if d == "" || strings.Contains(filepath.ToSlash(d)+"/", "/node_modules/") {
+		if !filepath.IsAbs(d) || strings.Contains(filepath.ToSlash(d)+"/", "/node_modules/") {
 			continue
 		}
 		candidate := filepath.Join(d, name)

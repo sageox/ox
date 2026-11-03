@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/sageox/ox/internal/cli"
@@ -18,6 +19,7 @@ import (
 // directory holding a fake ox release.
 func stubInstall(t *testing.T, loggedIn bool) (src string, logins *[]string, retired *int) {
 	t.Helper()
+	skipInstallOnWindows(t)
 	src = t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(src, "ox"), []byte("ox"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(src, "ox-adapter-codex"), []byte("a"), 0o755))
@@ -96,7 +98,7 @@ func TestRunInstallDirFlagReplacesAndWarnsOffPath(t *testing.T) {
 	assert.Equal(t, 1, *retired, "daemons running the replaced ox restart")
 	assert.Empty(t, *logins)
 	assert.Contains(t, out, dest+" is not on your PATH")
-	assert.Contains(t, out, `export PATH="`+dest+`:$PATH"`)
+	assert.Contains(t, out, `export PATH=`+shellQuote(dest)+`:"$PATH"`)
 	assert.Contains(t, out, "cd <repo> && ox init")
 }
 
@@ -191,6 +193,7 @@ func TestAdapterSuffix(t *testing.T) {
 }
 
 func TestRunInstalledLogin(t *testing.T) {
+	skipInstallOnWindows(t)
 	dir := t.TempDir()
 	fail := filepath.Join(dir, "fail")
 	require.NoError(t, os.WriteFile(fail, []byte("#!/bin/sh\nexit 3\n"), 0o755))
@@ -237,7 +240,7 @@ func TestRunInstallFishPathHint(t *testing.T) {
 
 	out := runInstallCmd(t)
 
-	assert.Contains(t, out, `fish_add_path "`+installDirFlag+`"`)
+	assert.Contains(t, out, "fish_add_path "+shellQuote(installDirFlag))
 	assert.NotContains(t, out, "export PATH")
 }
 
@@ -285,4 +288,33 @@ func TestRunInstallJSONShadowedOx(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(runInstallCmd(t, "--json")), &got))
 	assert.True(t, got.OnPath)
 	assert.Equal(t, []string{"cd <repo> && '" + filepath.Join(dest, "ox") + "' init"}, got.Next)
+}
+
+// skipInstallOnWindows skips tests built on executable bits, symlinks and sh
+// scripts. ox install ships for macOS, Linux and FreeBSD only.
+func skipInstallOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("ox install is not built for Windows; these tests need Unix file modes and symlinks")
+	}
+}
+
+func TestShellPathHintsQuoteTheDirectory(t *testing.T) {
+	skipInstallOnWindows(t)
+	dir := filepath.Join(t.TempDir(), "$(id) it's")
+	t.Setenv("PATH", t.TempDir())
+	var out bytes.Buffer
+	warnInstallPath(&out, dir, filepath.Join(dir, "ox"))
+	assert.Contains(t, out.String(), "export PATH="+shellQuote(dir)+`:"$PATH"`)
+	assert.NotContains(t, out.String(), `"`+dir)
+}
+
+func TestLookPathSkipsRelativeEntries(t *testing.T) {
+	skipInstallOnWindows(t)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	require.NoError(t, os.Mkdir("bin", 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join("bin", "ox"), []byte("x"), 0o755))
+	t.Setenv("PATH", "bin"+string(os.PathListSeparator)+".")
+	assert.Empty(t, lookPathOutsideNodeModules("ox"))
 }
