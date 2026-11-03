@@ -737,7 +737,7 @@ func copyRawSessionForPublication(sourcePath, destinationPath, projectRoot strin
 	decoder := json.NewDecoder(source)
 	decoder.UseNumber()
 	var records []map[string]any
-	var entries []session.SessionEntry
+	var entryPositions []int
 	for {
 		var record map[string]any
 		if err := decoder.Decode(&record); err == io.EOF {
@@ -763,12 +763,13 @@ func copyRawSessionForPublication(sourcePath, destinationPath, projectRoot strin
 		if _, ok := record["_meta"].(map[string]any); ok {
 			continue
 		}
-		// Carry the record position through the mask without projecting away
-		// native fields or rounding integers in the original map.
-		entries = append(entries, session.SessionEntry{Seq: len(records) - 1})
+		// Track record positions separately from lifecycle entry positions,
+		// preserving native fields and integer precision in the original maps.
+		entryPositions = append(entryPositions, len(records)-1)
 	}
 
-	originalCount := len(entries)
+	originalCount := len(entryPositions)
+	retained := make(map[int]bool, originalCount)
 	if state != nil {
 		if originalCount != state.EntryCount {
 			return fmt.Errorf("publication aborted: cached entry count does not match lifecycle checkpoint")
@@ -780,8 +781,13 @@ func copyRawSessionForPublication(sourcePath, destinationPath, projectRoot strin
 			}
 			previousSeq = event.Seq
 		}
-		entries = session.ApplySegmentMask(entries, state.Lifecycle)
-		if msg := validateMaskInvariant(originalCount, len(entries), state.Lifecycle); msg != "" {
+		ranges := session.BuildSegmentRanges(state.Lifecycle)
+		for entryIndex, recordIndex := range entryPositions {
+			if !session.IsSeqExcluded(entryIndex, ranges) {
+				retained[recordIndex] = true
+			}
+		}
+		if msg := validateMaskInvariant(originalCount, len(retained), state.Lifecycle); msg != "" {
 			return fmt.Errorf("publication aborted: %s", msg)
 		}
 	}
@@ -789,10 +795,6 @@ func copyRawSessionForPublication(sourcePath, destinationPath, projectRoot strin
 	// Headers and carrier footers are not part of the lifecycle sequence.
 	// Keep their relative order, but replace the entry stream with the mask's
 	// retained maps. Never serialize an excluded entry, even as a placeholder.
-	retained := make(map[int]bool, len(entries))
-	for _, entry := range entries {
-		retained[entry.Seq] = true
-	}
 	for i, record := range records {
 		_, meta := record["_meta"].(map[string]any)
 		if record["type"] != "header" && record["type"] != "footer" && !meta && !retained[i] {
@@ -800,7 +802,7 @@ func copyRawSessionForPublication(sourcePath, destinationPath, projectRoot strin
 		}
 		if state != nil && record["type"] == "footer" {
 			if _, ok := record["entry_count"]; ok {
-				record["entry_count"] = len(entries)
+				record["entry_count"] = len(retained)
 			}
 		}
 		if err := writer.WriteRaw(record); err != nil {

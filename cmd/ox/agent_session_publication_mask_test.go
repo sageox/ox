@@ -75,10 +75,11 @@ func TestIncrementalPublicationMasksPausedRawAndArtifacts(t *testing.T) {
 			require.Equal(t, want, result.EntryCount)
 			requirePublicationMask(t, result.RawPath, resume)
 			requirePublicationMask(t, result.SessionMDPath, resume)
-			for _, path := range []string{result.SummaryMDPath, filepath.Join(state.SessionPath, "summary.json")} {
-				data, err := os.ReadFile(path)
-				require.NoError(t, err)
-				require.NotContains(t, string(data), pausedPublicationContent)
+			// LocalSummary is a stub: only session.md is emitted until a
+			// substantive summary is supplied.
+			require.Empty(t, result.SummaryMDPath)
+			for _, name := range []string{ledgerFileSummaryMD, "summary.json"} {
+				require.NoFileExists(t, filepath.Join(state.SessionPath, name))
 			}
 			// Exercise the actual cache-to-ledger boundary used before LFS upload.
 			ledger := t.TempDir()
