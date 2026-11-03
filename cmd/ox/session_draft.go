@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/session"
 )
 
 // Draft session placeholders. See docs/adr/ADR-029-session-draft-placeholder.md.
@@ -105,13 +106,7 @@ var errDraftUnsafeLedger = errors.New("ledger is not in a safe state for a draft
 // draft meta.json to exist at that location, which is an incidental guard, not
 // an intentional one. Make it intentional.
 func validateDraftSessionName(sessionName string) error {
-	if sessionName == "" || sessionName == "." || sessionName == ".." {
-		return fmt.Errorf("invalid session name %q", sessionName)
-	}
-	if strings.ContainsAny(sessionName, `/\`) || strings.Contains(sessionName, "..") {
-		return fmt.Errorf("session name %q must be a single path component", sessionName)
-	}
-	return nil
+	return session.ValidateDraftSessionName(sessionName)
 }
 
 // assertLedgerSafeForDraftWrite refuses to touch the ledger index when the
@@ -263,6 +258,9 @@ func withDraftLedgerLock(ledgerPath string, fn func() error) error {
 // caller holds the repo lock.
 func stageAndCommitDraft(ledgerPath, sessionName string) error {
 	paths := draftStagePaths(sessionName)
+	for i, path := range paths {
+		paths[i] = ":(literal)" + path
+	}
 
 	// --sparse: ledger repos use cone-mode sparse-checkout, and git 2.37+
 	// refuses to stage paths outside the sparse definition without it.
@@ -433,10 +431,10 @@ func purgeDraftSessionDir(ledgerPath, sessionName string) error {
 	if err := validateDraftWriteTarget(ledgerPath, sessionName); err != nil {
 		return err
 	}
-	relDir := draftSessionRelDir(sessionName)
+	pathspec := ":(literal)" + draftSessionRelDir(sessionName)
 
 	return withDraftLedgerLock(ledgerPath, func() error {
-		gitRm := exec.Command("git", "-C", ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", relDir)
+		gitRm := exec.Command("git", "-C", ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", pathspec)
 		if out, err := gitRm.CombinedOutput(); err != nil {
 			return fmt.Errorf("git rm draft %s: %s: %w", sessionName, strings.TrimSpace(string(out)), err)
 		}
@@ -465,14 +463,14 @@ func commitDraftRemoval(ledgerPath, sessionName, verb string) error {
 	if err := assertLedgerSafeForDraftWrite(ledgerPath); err != nil {
 		return err
 	}
-	relDir := draftSessionRelDir(sessionName)
-	if !hasStagedChangesFor(ledgerPath, []string{relDir}) {
+	pathspec := ":(literal)" + draftSessionRelDir(sessionName)
+	if !hasStagedChangesFor(ledgerPath, []string{pathspec}) {
 		return nil
 	}
 	commitArgs := []string{
 		"-C", ledgerPath, "commit", "--no-verify",
 		"-m", fmt.Sprintf("session-draft: %s %s", verb, sessionName),
-		"--", relDir,
+		"--", pathspec,
 	}
 	if out, err := exec.Command("git", commitArgs...).CombinedOutput(); err != nil {
 		return fmt.Errorf("git commit draft %s: %s: %w", verb, strings.TrimSpace(string(out)), err)
@@ -616,9 +614,9 @@ func deleteDraftFromLedger(ledgerPath, sessionName string) (draftDeleteResult, e
 		return res, err
 	}
 
-	relDir := draftSessionRelDir(sessionName)
+	pathspec := ":(literal)" + draftSessionRelDir(sessionName)
 	if err := withDraftLedgerLock(ledgerPath, func() error {
-		gitRm := exec.Command("git", "-C", ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", relDir)
+		gitRm := exec.Command("git", "-C", ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", pathspec)
 		if out, err := gitRm.CombinedOutput(); err != nil {
 			return fmt.Errorf("git rm draft %s: %s: %w", sessionName, strings.TrimSpace(string(out)), err)
 		}

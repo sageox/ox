@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Install ox with npx** — `npx @sageox/ox@latest install` copies ox and its adapters onto your PATH and runs `ox login`, without touching any repository. Run `ox init` inside a repo to link it. `ox install` does the same from any ox binary, and `ox upgrade` on an npm copy tells you how to update it.
+- **Record Devin sessions** — the new Devin plugin (`devin-plugin/`) records each Devin session to your team's Ledger under the Devin user who started it, using their own `SAGEOX_TOKEN` personal secret. `ox init` offers Devin and adds the plugin to `.devin/config.json`; users without a token get a one-time hint on how to add one.
 - **See SageOx context reach your AI coworker** — in the Claude desktop app, VS Code and mobile, each ox call that moves team data and each prompt that carried Team Context in gets a one-line lane underneath: dots travel from SageOx into the session (or back out, for murmurs, plans and Ledger uploads), then it settles to a still line that says what moved, e.g. "searched team memory · ~1.2k from 5 discussions · 0.8s". `/ox-session-report flow still` keeps the lanes without motion; `/ox-session-report flow off` hides them.
 
 ### Changed
@@ -21,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **LFS upload errors no longer print the storage URL** — when an upload or its verification fails to connect, ox reports the network error without the request URL, so signed links never reach terminal output or logs.
 - **Failed plan title repairs preserve session references** — a failed rename or commit no longer leaves new plan names for a later session upload to publish.
 - **`ox session redact` cleans sessions stored in LFS** — it now redacts the cached recording, uploads it and points the session at the new copy, instead of rewriting the LFS stub. If the upload fails, the session is skipped and left unchanged.
 - **Session redaction amendments leave other staged work pending** — repairs amend only their selected paths and report failed amendments before publication.

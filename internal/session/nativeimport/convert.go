@@ -43,7 +43,7 @@ func (h RawHeader) NativeSessions() []lfs.NativeSession {
 // how many entries were written. projectRoot selects the team, repo and user
 // REDACT.md rules; a policy the strict writer rejects refuses the write.
 func WriteRaw(rawPath, projectRoot string, h RawHeader, raw []adapters.RawEntry) (int, error) {
-	entries, err := convertRedactedEntries(projectRoot, raw)
+	entries, err := convertEntries(projectRoot, raw)
 	if err != nil {
 		return 0, err
 	}
@@ -94,7 +94,7 @@ func WriteRaw(rawPath, projectRoot string, h RawHeader, raw []adapters.RawEntry)
 // The stream writer mutates entries in place; its output is discarded, so
 // inspecting a session creates no recording, staging directory or summary.
 func PreviewEntries(projectRoot string, raw []adapters.RawEntry) ([]session.Entry, error) {
-	entries, err := convertRedactedEntries(projectRoot, raw)
+	entries, err := convertEntries(projectRoot, raw)
 	if err != nil {
 		return nil, err
 	}
@@ -111,17 +111,15 @@ func PreviewEntries(projectRoot string, raw []adapters.RawEntry) ([]session.Entr
 	return entries, nil
 }
 
-// convertRedactedEntries normalizes records and applies configured redaction to
-// messages and tool fields, refusing invalid policy. Callers must still run the
-// raw writer for command-correlated redaction.
-func convertRedactedEntries(projectRoot string, raw []adapters.RawEntry) ([]session.Entry, error) {
+// convertEntries normalizes records and refuses invalid policy. Callers must
+// run the raw writer to redact all fields before exposing or persisting entries.
+func convertEntries(projectRoot string, raw []adapters.RawEntry) ([]session.Entry, error) {
 	entries := session.ConvertRawEntries(raw)
-	redactor, problems := session.NewRedactorWithCustomRules(projectRoot)
+	_, problems := session.NewRedactorWithCustomRules(projectRoot)
 	if len(problems) > 0 {
 		return nil, fmt.Errorf("invalid redaction policy (%d errors)", len(problems))
 	}
-	// The writer's pattern layer covers message text only. The hook path runs
-	// this pass first so tool input and output get the same rules; so does import.
-	redactor.RedactEntries(entries)
+	// Preserve original tool input until the writer correlates commands with
+	// their results. Its pattern layer then applies custom rules to all fields.
 	return entries, nil
 }

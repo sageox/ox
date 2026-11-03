@@ -1,9 +1,15 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -123,6 +129,100 @@ func TestDeletePruneCandidates_PartialFailureStillDeletesOtherLocations(t *testi
 	assert.True(t, os.IsNotExist(statErr), "clean candidate's location should be deleted")
 	_, statErr = os.Stat(storeC.GetSessionPath(partialName))
 	assert.True(t, os.IsNotExist(statErr), "surviving location must still be deleted even though its sibling location already failed")
+}
+
+// A downloaded .jsonl directory must never resolve to the cache root when
+// its ledger entry disappears and default prune selects the cached copy.
+func TestPrune_HydratedJSONLDirectoryPreservesCache(t *testing.T) {
+	raw := []byte("{\"type\":\"user\",\"content\":\"session transcript\"}\n")
+	ref := lfs.NewFileRef(raw)
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ledger.git/info/lfs/objects/batch":
+			w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
+			_ = json.NewEncoder(w).Encode(lfs.BatchResponse{Transfer: "basic", Objects: []lfs.BatchResponseObject{{
+				OID: ref.BareOID(), Size: ref.Size,
+				Actions: &lfs.Actions{Download: &lfs.Action{Href: server.URL + "/download"}},
+			}}})
+		case "/download":
+			_, _ = w.Write(raw)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	ledgerPath := t.TempDir()
+	sessionsDir := filepath.Join(ledgerPath, "sessions")
+	const name = ".jsonl"
+	sessionDir := filepath.Join(sessionsDir, name)
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	meta := lfs.NewSessionMeta(name, "teammate", "OxTEST", "claude-code", time.Now().UTC()).Build()
+	meta.Files = map[string]lfs.FileRef{"raw.jsonl": ref}
+	require.NoError(t, lfs.WriteSessionMetaOnly(sessionDir, meta))
+	require.NoError(t, lfs.WritePointerFile(filepath.Join(sessionDir, "raw.jsonl"), lfs.AssertUploaded(ref)))
+
+	// Hydrate through the cache helper with a local LFS server, then exercise
+	// the command's resolver/status check without requiring real credentials.
+	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", name)
+	require.NoError(t, lfs.MarkCacheDownload(cacheDir))
+	cachedRaw, err := lfs.HydrateRawToCacheErr(lfs.NewClient(server.URL+"/ledger.git", "user", "token"), sessionDir, ledgerPath)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(cacheDir, "raw.jsonl"), cachedRaw)
+	require.NoError(t, hydrateFromLedgerContext(t.Context(), t.TempDir(), sessionsDir, name, true))
+
+	localStore, err := session.NewStore(t.TempDir())
+	require.NoError(t, err)
+	stores := buildPruneStores(localStore, ledgerPath)
+	require.Len(t, stores, 2)
+	cacheStore := stores[1].store
+
+	// Default prune must preserve both live work and an orphaned transcript
+	// that is still recoverable, as well as a sibling still in the ledger.
+	preserved := make(map[string][]byte)
+	for _, sibling := range []string{"active", "recoverable", "uploaded"} {
+		dir := filepath.Join(cacheStore.BasePath(), sibling)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		rawPath := filepath.Join(dir, "raw.jsonl")
+		require.NoError(t, os.WriteFile(rawPath, raw, 0o600))
+		preserved[rawPath] = raw
+		if sibling == "uploaded" {
+			ledgerDir := filepath.Join(sessionsDir, sibling)
+			require.NoError(t, os.MkdirAll(ledgerDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(ledgerDir, "raw.jsonl"), raw, 0o600))
+			continue
+		}
+		state := session.RecordingState{StartedAt: time.Now().Add(-time.Hour)}
+		if sibling == "active" {
+			state.ParentPID = os.Getpid()
+		}
+		data, err := json.Marshal(state)
+		require.NoError(t, err)
+		recordingPath := filepath.Join(dir, ".recording.json")
+		require.NoError(t, os.WriteFile(recordingPath, data, 0o600))
+		preserved[recordingPath] = data
+	}
+
+	require.NoError(t, os.RemoveAll(sessionDir))
+	uploaded, err := loadUploadedKeys(ledgerPath)
+	require.NoError(t, err)
+	candidates, skipped, err := collectPruneCandidates(stores, uploaded, false)
+	require.NoError(t, err)
+	require.Equal(t, 1, skipped)
+	require.Len(t, candidates, 1)
+	require.Equal(t, name, candidates[0].name)
+	require.Equal(t, session.StatusLocal, candidates[0].status)
+
+	assert.Equal(t, 1, deletePruneCandidates(candidates))
+	assert.NoDirExists(t, cacheDir)
+	assert.DirExists(t, cacheStore.BasePath())
+	for path, want := range preserved {
+		got, err := os.ReadFile(path)
+		require.NoError(t, err, "prune removed protected sibling data: %s", path)
+		assert.Equal(t, want, got, path)
+	}
+	assert.FileExists(t, filepath.Join(sessionsDir, "uploaded", "raw.jsonl"))
 }
 
 func TestPrunePartialFailureError(t *testing.T) {

@@ -1964,6 +1964,7 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 				continue
 			}
 			rel := filepath.ToSlash(filepath.Join("sessions", name))
+			pathspec := ":(literal)" + rel
 
 			// Only retract drafts that are ALREADY on the remote. If a draft's publish
 			// commit is still local/unpushed, stacking a retraction on top of it would
@@ -1974,7 +1975,7 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 				continue
 			}
 
-			if _, err := s.git.RunGit(ctx, ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", rel); err != nil {
+			if _, err := s.git.RunGit(ctx, ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", pathspec); err != nil {
 				s.logger.Warn("retract orphaned draft: git rm failed", "session", name, "error", err)
 				continue
 			}
@@ -1992,12 +1993,12 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 			// commit — restore the index + worktree from HEAD so a dangling staged
 			// deletion can't be swept into an unrelated commit, and the next scan
 			// rediscovers the orphan to retry.
-			staged, diffErr := s.git.RunGit(ctx, ledgerPath, "diff", "--cached", "--name-only", "--", rel)
+			staged, diffErr := s.git.RunGit(ctx, ledgerPath, "diff", "--cached", "--name-only", "--", pathspec)
 			if diffErr != nil || strings.TrimSpace(staged) == "" {
 				s.restoreDraftForRetry(ctx, ledgerPath, rel, name, diffErr)
 				continue
 			}
-			committed, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, sessionDraftCommitPrefix+"retract "+name, rel)
+			committed, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, sessionDraftCommitPrefix+"retract "+name, pathspec)
 			if err != nil {
 				// Commit failed: the deletion is staged and the dir is gone, which
 				// would orphan the candidate. Restore so the next scan retries.
@@ -2044,10 +2045,15 @@ func (s *SyncScheduler) draftPublishedOnRemote(ctx context.Context, ledgerPath, 
 // message) and the next scan can rediscover the orphan and retry it.
 func (s *SyncScheduler) restoreDraftForRetry(ctx context.Context, ledgerPath, rel, name string, cause error) {
 	s.logger.Warn("retract orphaned draft: restoring after failed retraction", "session", name, "error", cause)
-	if _, err := s.git.RunGit(ctx, ledgerPath, "reset", "-q", "--", rel); err != nil {
+	// Not the caller's ctx: when it is what failed the retraction, a restore on
+	// it fails too and leaves the deletion staged for the next autostash (#1648).
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	pathspec := ":(literal)" + rel
+	if _, err := s.git.RunGit(ctx, ledgerPath, "reset", "-q", "--", pathspec); err != nil {
 		s.logger.Warn("retract orphaned draft: reset failed", "session", name, "error", err)
 	}
-	if _, err := s.git.RunGit(ctx, ledgerPath, "checkout", "-q", "HEAD", "--", rel); err != nil {
+	if _, err := s.git.RunGit(ctx, ledgerPath, "checkout", "-q", "HEAD", "--", pathspec); err != nil {
 		s.logger.Warn("retract orphaned draft: checkout restore failed", "session", name, "error", err)
 	}
 }

@@ -1912,9 +1912,9 @@
     const auto = live && !!opts.reviewer && !!opts.autoSubmit;
     const store = openStore(window.localStorage, opts.account, opts.plan);
     const tab = encodeURIComponent(opts.plan);
-    const ON_KEY = "ox-plan-rev-on:" + tab;
-    const MIN_KEY = "ox-plan-rail-min:" + tab;
-    const SYNC_KEY = "ox-plan-fb-sync:" + tab;
+    const ON_SLOT = "ox-plan-rev-on:" + tab;
+    const MIN_SLOT = "ox-plan-rail-min:" + tab;
+    const SYNC_SLOT = "ox-plan-fb-sync:" + tab;
     const off = new AbortController();
     const signal = off.signal;
     let problems = opts.problems || 0;
@@ -2074,14 +2074,14 @@
     let rail = null;
     let railMin = false;
     try {
-      railMin = !!sessionStorage.getItem(MIN_KEY);
+      railMin = !!sessionStorage.getItem(MIN_SLOT);
     } catch (e) {
     }
     function toggleRail() {
       railMin = !railMin;
       try {
-        if (railMin) sessionStorage.setItem(MIN_KEY, "1");
-        else sessionStorage.removeItem(MIN_KEY);
+        if (railMin) sessionStorage.setItem(MIN_SLOT, "1");
+        else sessionStorage.removeItem(MIN_SLOT);
       } catch (e) {
       }
       renderRail();
@@ -2554,14 +2554,14 @@
     function reportSync(m) {
       showSync(m.kind, m.text);
       try {
-        sessionStorage.setItem(SYNC_KEY, JSON.stringify({ kind: m.kind, text: m.text, at: Date.now() }));
+        sessionStorage.setItem(SYNC_SLOT, JSON.stringify({ kind: m.kind, text: m.text, at: Date.now() }));
       } catch (e) {
       }
     }
     function restoreSync() {
       try {
-        const s = JSON.parse(sessionStorage.getItem(SYNC_KEY) || "null");
-        sessionStorage.removeItem(SYNC_KEY);
+        const s = JSON.parse(sessionStorage.getItem(SYNC_SLOT) || "null");
+        sessionStorage.removeItem(SYNC_SLOT);
         if (s && Date.now() - s.at < 3e4) showSync(s.kind, s.text);
       } catch (e) {
       }
@@ -2734,8 +2734,8 @@
       } catch (e) {
       }
       try {
-        if (on) sessionStorage.setItem(ON_KEY, "1");
-        else sessionStorage.removeItem(ON_KEY);
+        if (on) sessionStorage.setItem(ON_SLOT, "1");
+        else sessionStorage.removeItem(ON_SLOT);
       } catch (e) {
       }
       if (hintBubble) {
@@ -2825,7 +2825,7 @@
           if (started) return;
           started = true;
           try {
-            if (!on && sessionStorage.getItem(ON_KEY)) setReview(true, true);
+            if (!on && sessionStorage.getItem(ON_SLOT)) setReview(true, true);
           } catch (e) {
           }
           break;

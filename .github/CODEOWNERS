@@ -2,3 +2,8 @@
 # workflow publishes it.
 /packages/plan-review/ @shrimalmadhur
 /.github/workflows/plan-review-release.yml @shrimalmadhur
+
+# Agent plugins and settings run with repo access, so every change needs owner review.
+/.amp/ @faridun-m
+# Owners also review this file, so the rule above cannot be dropped unseen.
+/.github/CODEOWNERS @faridun-m
