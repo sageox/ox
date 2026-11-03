@@ -24,8 +24,9 @@ package teamskills
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
-	"fmt"
+	"hash"
 	"path"
 	"regexp"
 	"sort"
@@ -291,21 +292,36 @@ func normalizeManifest(content string) string {
 
 // Digest is the content identity an approval is pinned to.
 //
-// It covers every file path AND its bytes, sorted, so neither reordering nor
-// renaming nor editing can preserve a digest. An approval that survived any of
-// those would be approval of a name rather than of content.
+// It covers every canonical file path AND its bytes in sorted order. Reordering
+// files preserves the digest; renaming, adding, removing, or editing does not.
+// Length prefixes keep delimiters in POSIX filenames from imitating file records.
+// The version tag deliberately invalidates legacy delimiter-based approvals,
+// including their script grants: those require a fresh approval, not migration.
 func Digest(s Skill) string {
 	files := make([]File, len(s.Files))
-	copy(files, s.Files)
+	for i, f := range s.Files {
+		files[i] = File{Path: path.Clean(strings.ReplaceAll(f.Path, "\\", "/")), Content: f.Content}
+	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 
 	h := sha256.New()
-	fmt.Fprintf(h, "skill:%s\n", s.Name)
+	writeDigestField(h, []byte("ox-team-skill-digest-v2"))
+	writeDigestField(h, []byte(s.Name))
+	var count [8]byte
+	binary.BigEndian.PutUint64(count[:], uint64(len(files)))
+	_, _ = h.Write(count[:])
 	for _, f := range files {
-		fmt.Fprintf(h, "file:%s:%d\n", path.Clean(strings.ReplaceAll(f.Path, "\\", "/")), len(f.Content))
-		h.Write(f.Content)
+		writeDigestField(h, []byte(f.Path))
+		writeDigestField(h, f.Content)
 	}
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+func writeDigestField(h hash.Hash, value []byte) {
+	var size [8]byte
+	binary.BigEndian.PutUint64(size[:], uint64(len(value)))
+	_, _ = h.Write(size[:])
+	_, _ = h.Write(value)
 }
 
 // Describe renders a one-line, human-readable reason a skill needs approval.

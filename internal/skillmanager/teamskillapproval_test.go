@@ -1,9 +1,11 @@
 package skillmanager
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/sageox/ox/internal/config"
@@ -180,6 +182,54 @@ func removedPaths(plan *ReconcilePlan) []string {
 		out = append(out, action.Path)
 	}
 	return out
+}
+
+func TestApproval_AmbiguousInventoryRequiresFreshScriptsGrant(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires POSIX filenames containing colons and newlines")
+	}
+	t.Parallel()
+
+	const skillName = "deploy"
+	const script = "echo unreviewed\n"
+	// Under the legacy digest this one inert file encoded a, b.sh, and c.
+	// Keep the reviewed script identical so only the inventory framing changes.
+	oddPath := fmt.Sprintf("a:0\nfile:b.sh:%d\n%sfile:c", len(script), script)
+	repo, team := t.TempDir(), t.TempDir()
+	writeTeamSkill(t, team, skillName, "", map[string]string{
+		oddPath:          "",
+		"scripts/run.sh": "echo reviewed\n",
+	})
+	stageTeamWiredProject(t, repo, team)
+	approveViaStore(t, repo, skillName, true)
+	require.Empty(t, reconcileOnce(t, repo).WithheldTeamSkills())
+	installed := filepath.Join(repo, ".agents", "skills", skillName+TeamSuffix)
+	require.FileExists(t, filepath.Join(installed, "scripts", "run.sh"))
+
+	source := filepath.Join(team, "agents", "skills", skillName)
+	require.NoError(t, os.Remove(filepath.Join(source, oddPath)))
+	for name, content := range map[string]string{"a": "", "b.sh": script, "c": ""} {
+		require.NoError(t, os.WriteFile(filepath.Join(source, name), []byte(content), 0o644))
+	}
+
+	plan := reconcileOnce(t, repo)
+	require.Len(t, plan.WithheldTeamSkills(), 1, "an ambiguous inventory reused its prior approval")
+	require.FileExists(t, filepath.Join(installed, "SKILL.md"))
+	require.NoFileExists(t, filepath.Join(installed, "b.sh"), "an unreviewed script reached disk")
+	require.NoFileExists(t, filepath.Join(installed, "scripts", "run.sh"), "the stale script grant survived")
+
+	// Reapproval without an explicit scripts grant must not restore the old one.
+	approveViaStore(t, repo, skillName, false)
+	require.Len(t, reconcileOnce(t, repo).WithheldTeamSkills(), 1)
+	require.NoFileExists(t, filepath.Join(installed, "b.sh"))
+	approveViaStore(t, repo, skillName, true)
+	require.Empty(t, reconcileOnce(t, repo).WithheldTeamSkills())
+	content, err := os.ReadFile(filepath.Join(installed, "b.sh"))
+	require.NoError(t, err)
+	require.Equal(t, script, string(content))
+	info, err := os.Stat(filepath.Join(installed, "b.sh"))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
 }
 
 // TestApproval_FlippingBackToWithheldSweepsTheStaleCopy is the other half of the
