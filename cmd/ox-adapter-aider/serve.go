@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"log"
-	"os"
 	"time"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
@@ -37,7 +36,7 @@ func handleServe(srv *adapterruntime.Server) {
 		}
 
 		var offset int64
-		if info, err := os.Stat(sessionFile); err == nil {
+		if info, err := statAiderFile(sessionFile); err == nil {
 			offset = info.Size()
 		}
 
