@@ -804,6 +804,90 @@ func TestInstall_LargeFileInstallsAtomically(t *testing.T) {
 
 // --- F. the lock as a cross-version contract ------------------------------
 
+// A committed lock must not grant ownership of checkout-local git metadata.
+func TestMutatingOps_RefuseGitMetadataInLock(t *testing.T) {
+	t.Parallel()
+
+	for _, target := range []string{".git/HEAD", ".git/hooks/pre-commit"} {
+		for _, op := range []string{"remove", "update"} {
+			t.Run(target+"/"+op, func(t *testing.T) {
+				t.Parallel()
+				ctx := context.Background()
+				dir := newTeamRepo(t)
+				p := newFakeProvider()
+				p.register("hello", "1.0.0", addonFile("agents/skills/hello/SKILL.md", "v1\n"))
+				_, err := Install(ctx, dir, p, "hello", "")
+				require.NoError(t, err)
+
+				lock, err := LoadLock(dir)
+				require.NoError(t, err)
+				lock.Addons[0].Files = append(lock.Addons[0].Files, LockedFile{
+					Path: target, Digest: contentDigest([]byte("not the local file\n")), Mode: 0o644,
+				})
+				data, err := json.Marshal(lock)
+				require.NoError(t, err)
+				writeRawLock(t, dir, string(data))
+				runGit(t, dir, "add", "--", LockRelativePath)
+				runGit(t, dir, "commit", "--quiet", "-m", "a teammate's crafted lock")
+				if target == ".git/hooks/pre-commit" {
+					installFailingPreCommitHook(t, dir)
+				}
+				targetPath := filepath.Join(dir, filepath.FromSlash(target))
+				targetBefore, err := os.ReadFile(targetPath)
+				require.NoError(t, err)
+				before := snapshotTeam(t, dir)
+				p.register("hello", "2.0.0", addonFile("agents/skills/hello/SKILL.md", "v2\n"))
+
+				var result Result
+				if op == "remove" {
+					result, err = Remove(ctx, dir, "hello")
+				} else {
+					result, err = Update(ctx, dir, p, "hello")
+				}
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid path in "+LockRelativePath)
+				assert.Empty(t, result.Written)
+				assert.Empty(t, result.Removed)
+				assert.Empty(t, result.Modified)
+
+				targetAfter, err := os.ReadFile(targetPath)
+				require.NoError(t, err)
+				assert.Equal(t, targetBefore, targetAfter, "git metadata must remain untouched")
+				assert.Equal(t, data, lockFileBytes(t, dir), "the invalid lock must not be rewritten")
+				before.requireUnchanged(t, dir, op+" with git metadata in the lock")
+			})
+		}
+	}
+}
+
+// The filesystem boundary must also refuse unsafe paths if lock validation
+// is bypassed by a future caller.
+func TestTransaction_RefusesGitMetadataPaths(t *testing.T) {
+	t.Parallel()
+
+	for _, target := range []string{".git/HEAD", ".git/hooks/pre-commit", "agents/../.git/HEAD"} {
+		t.Run(target, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			targetPath := writeRaw(t, dir, target, "local metadata\n")
+			root, err := os.OpenRoot(dir)
+			require.NoError(t, err)
+			defer func() { _ = root.Close() }()
+			tx := &transaction{root: root}
+
+			content, present, err := tx.readCurrent(target)
+			require.Error(t, err)
+			assert.Empty(t, content)
+			assert.False(t, present)
+			require.Error(t, tx.remove(target))
+			assert.Empty(t, tx.removed)
+			after, err := os.ReadFile(targetPath)
+			require.NoError(t, err)
+			assert.Equal(t, "local metadata\n", string(after))
+		})
+	}
+}
+
 // TestMutatingOps_RefuseAnUnreadableLockAndPreserveItByteForByte is the
 // downgrade and corruption gate, run across all three verbs.
 //
