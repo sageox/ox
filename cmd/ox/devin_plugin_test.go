@@ -181,7 +181,8 @@ func TestInstallDevinPluginRejectsSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(outside, devinConfigPath(fileLink)); err != nil {
-		t.Fatal(err)
+		// Windows needs extra privileges to create symlinks.
+		t.Skipf("symlinks unavailable: %v", err)
 	}
 
 	dirLink := t.TempDir()

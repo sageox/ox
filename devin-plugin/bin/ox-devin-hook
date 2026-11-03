@@ -125,7 +125,9 @@ nudge_once() {
   [ "$EVENT" = PostToolUse ] && [ -z "$SAGEOX_TOKEN" ] || return 0
   [ -f "$SDIR/nudged" ] && return 0
   [ "$(field tool_name)" = exec ] || return 0
-  find_repo >/dev/null || return 0
+  local repo; repo=$(find_repo) || return 0
+  # Don't invite users who opted out of recording to opt back in.
+  command -v ox >/dev/null && { recording_allowed "$repo" || return 0; }
   touch "$SDIR/nudged"
   log "nudged: no personal SAGEOX_TOKEN"
   python3 -c '
@@ -161,6 +163,7 @@ d = json.load(sys.stdin); ev = os.environ["EVENT"]
 ts = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 MAX = 20000  # keep huge tool outputs from bloating the recording
 def s(v): return v if isinstance(v, str) else json.dumps(v)
+SECRETS = []
 if ev == "UserPromptSubmit":
     e = {"type": "user", "content": s(d.get("prompt", ""))}
 else:
@@ -168,6 +171,9 @@ else:
     # Devin puts the plaintext values of secrets bound to a tool call in
     # tool_input.injected_env; they must never reach a recording.
     if isinstance(inp, dict):
+        for k, v in inp.items():
+            if k == "injected_env" or k.startswith("__DEVIN"):
+                SECRETS.extend(x for x in (v.values() if isinstance(v, dict) else [v]) if isinstance(x, str) and len(x) >= 4)
         inp = {k: v for k, v in inp.items() if k != "injected_env" and not k.startswith("__DEVIN")}
     if name == "message_user" and isinstance(inp, dict):
         e = {"type": "assistant", "content": s(inp.get("message", ""))}
@@ -175,6 +181,12 @@ else:
         out = resp.get("output") if isinstance(resp, dict) else resp
         if isinstance(resp, dict) and resp.get("error"): out = s(out or "") + "\n[error] " + s(resp["error"])
         e = {"type": "tool", "tool_name": name, "tool_input": s(inp)[:MAX], "content": s(out or "")[:MAX]}
+# A command can echo a bound secret (e.g. a password the ox scanner would not
+# recognize), so scrub every injected value from the entry too.
+for k, v in e.items():
+    for x in SECRETS:
+        v = v.replace(x, "[REDACTED]").replace(json.dumps(x)[1:-1], "[REDACTED]")
+    e[k] = v
 e["timestamp"] = ts
 print(json.dumps(e))'
 }
@@ -215,6 +227,13 @@ stop_recording() {
   [ -f "$SDIR/agent_id" ] || return 0
   local id repo; id=$(cat "$SDIR/agent_id"); repo=$(cat "$SDIR/repo")
   cd "$repo" || return 1
+  # Opted out mid-turn: discard this session's own local recording, don't upload it.
+  if ! recording_allowed "$repo"; then
+    ox agent "$id" session abort --force >/dev/null 2>&1
+    log "aborted agent=$id: recording opt-out"
+    rm -f "$SDIR/agent_id" "$SDIR/session_file" "$SDIR/stop_failed"
+    return 0
+  fi
   ledger_ready || { log "deferred: ledger still cloning, upload at next turn end"; return 0; }
   # Cloud Devin never fires SessionEnd and may delete a sleeping VM, so every
   # turn end uploads; the next prompt starts a fresh recording.
