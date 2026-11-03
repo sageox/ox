@@ -10,6 +10,7 @@ import (
 	"github.com/sageox/ox/internal/teamskills"
 	"github.com/sageox/ox/internal/version"
 	"github.com/sageox/ox/pkg/adapterprotocol"
+	"github.com/stretchr/testify/require"
 )
 
 // installSkillsForTest materializes the real embedded catalog into a temp repo
@@ -115,7 +116,8 @@ func TestReconcileSkillInventoryIfStale_RepairsAfterUpgrade(t *testing.T) {
 	removeManaged(t, managedFile)
 	setLockRevision(t, repoRoot, "revision-from-an-older-release")
 
-	changed, _ := reconcileSkillInventoryIfStale(repoRoot)
+	changed, _, err := reconcileSkillInventoryIfStale(repoRoot)
+	require.NoError(t, err)
 	if changed == 0 {
 		t.Fatalf("stale revision did not trigger a reconcile")
 	}
@@ -139,7 +141,7 @@ func TestReconcileSkillInventoryIfStale_LeavesGitStatusClean(t *testing.T) {
 		t.Fatalf("fixture is dirty before prime: %q", status)
 	}
 
-	if changed, _ := reconcileSkillInventoryIfStale(repoRoot); changed == 0 {
+	if changed, _, err := reconcileSkillInventoryIfStale(repoRoot); changed == 0 || err != nil {
 		t.Fatal("fixture did not exercise automatic projection repair")
 	}
 	if status := gitOutput(t, repoRoot, "status", "--porcelain"); status != "" {
@@ -160,7 +162,7 @@ func TestReconcileSkillInventoryIfStale_CurrentInventoryDoesNoWork(t *testing.T)
 	removeManaged(t, managedFile)
 	// Deliberately do NOT touch the lockfile: revision and version both match.
 
-	if changed, _ := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
+	if changed, _, err := reconcileSkillInventoryIfStale(repoRoot); changed != 0 || err != nil {
 		t.Errorf("prime planned work for an up-to-date inventory: changed=%d", changed)
 	}
 	if managedExists(t, managedFile) {
@@ -182,7 +184,7 @@ func TestReconcileSkillInventoryIfStale_TwoUnchangedPrimesBuildOnePlan(t *testin
 	removeManaged(t, managedFile)
 	setLockRevision(t, repoRoot, "revision-from-an-older-release")
 
-	if changed, _ := reconcileSkillInventoryIfStale(repoRoot); changed == 0 {
+	if changed, _, err := reconcileSkillInventoryIfStale(repoRoot); changed == 0 || err != nil {
 		t.Fatal("first prime did not plan the stale inventory")
 	}
 	if !managedExists(t, managedFile) {
@@ -190,7 +192,7 @@ func TestReconcileSkillInventoryIfStale_TwoUnchangedPrimesBuildOnePlan(t *testin
 	}
 
 	removeManaged(t, managedFile)
-	if changed, _ := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
+	if changed, _, err := reconcileSkillInventoryIfStale(repoRoot); changed != 0 || err != nil {
 		t.Fatalf("second unchanged prime planned work: changed=%d", changed)
 	}
 	if managedExists(t, managedFile) {
@@ -205,7 +207,7 @@ func TestReconcileSkillInventoryIfStale_TwoUnchangedPrimesBuildOnePlan(t *testin
 func TestReconcileSkillInventoryIfStale_NeverInstallsIntoAnUnselectedRepo(t *testing.T) {
 	repoRoot := t.TempDir()
 
-	if changed, _ := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
+	if changed, _, err := reconcileSkillInventoryIfStale(repoRoot); changed != 0 || err != nil {
 		t.Errorf("prime installed into a repo with no selected targets: changed=%d", changed)
 	}
 	for _, dir := range []string{".claude", ".agents", ".sageox"} {
@@ -228,7 +230,7 @@ func TestReconcileSkillInventoryIfStale_ToleratesMalformedLockfile(t *testing.T)
 		t.Fatalf("write malformed state: %v", err)
 	}
 
-	if changed, _ := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
+	if changed, _, err := reconcileSkillInventoryIfStale(repoRoot); changed != 0 || err != nil {
 		t.Errorf("malformed lockfile should yield no work, got changed=%d", changed)
 	}
 }
@@ -244,7 +246,8 @@ func TestReconcileSkillInventoryIfStale_DoesNotRepairTrackedIgnoreAtSessionStart
 		_ = os.Remove(filepath.Join(repoRoot, dir, ".gitignore"))
 	}
 
-	changed, _ := reconcileSkillInventoryIfStale(repoRoot)
+	changed, _, err := reconcileSkillInventoryIfStale(repoRoot)
+	require.NoError(t, err)
 	if changed != 0 {
 		t.Errorf("healing the ignore rule must not require a reconcile; got changed=%d", changed)
 	}
@@ -279,7 +282,7 @@ func stageWithheldOnlyRevision(t *testing.T) (repo, installedNotes string) {
 	commitTeamCheckout(t, team, "publish notes")
 
 	// settle the baseline: the first real team commit is itself a revision change.
-	if _, withheld := reconcileSkillInventoryIfStale(repo); len(withheld) != 0 {
+	if _, withheld, err := reconcileSkillInventoryIfStale(repo); len(withheld) != 0 || err != nil {
 		t.Fatalf("the prose-only baseline reported something withheld: %+v", withheld)
 	}
 	installedNotes = filepath.Join(installedSkillDir(repo, "notes"), "SKILL.md")
@@ -319,7 +322,8 @@ func TestReconcileSkillInventoryIfStale_WithheldOnlyRevisionIsReportedOnce(t *te
 		t.Fatalf("fixture did not move the team revision: %q", recorded)
 	}
 
-	changed, withheld := reconcileSkillInventoryIfStale(repo)
+	changed, withheld, err := reconcileSkillInventoryIfStale(repo)
+	require.NoError(t, err)
 	if changed != 0 {
 		t.Fatalf("fixture is no longer withheld-only; the plan mutated %d files", changed)
 	}
@@ -333,7 +337,8 @@ func TestReconcileSkillInventoryIfStale_WithheldOnlyRevisionIsReportedOnce(t *te
 	// delete a managed file so a second plan, if built, is observable: it would
 	// restore it, while the recorded-revision fast path leaves it alone.
 	removeManaged(t, installedNotes)
-	changed, withheld = reconcileSkillInventoryIfStale(repo)
+	changed, withheld, err = reconcileSkillInventoryIfStale(repo)
+	require.NoError(t, err)
 	if changed != 0 || len(withheld) != 0 {
 		t.Errorf("second prime on the same revision repeated itself: changed=%d withheld=%+v", changed, withheld)
 	}
@@ -356,7 +361,8 @@ func TestReconcileSkillInventoryIfStale_RefusedPlanReportsNothing(t *testing.T) 
 	setStateSource(t, repo, "version", "999.0.0")
 
 	for prime := 1; prime <= 2; prime++ {
-		changed, withheld := reconcileSkillInventoryIfStale(repo)
+		changed, withheld, err := reconcileSkillInventoryIfStale(repo)
+		require.Error(t, err, "a refused plan must not let prime continue with stale policy")
 		if changed != 0 || len(withheld) != 0 {
 			t.Errorf("prime %d reported a decision from a refused reconcile: changed=%d withheld=%+v", prime, changed, withheld)
 		}
@@ -384,7 +390,8 @@ func TestReconcileSkillInventoryIfStale_FailedReconcileReportsNothingAndRecovers
 		t.Fatalf("corrupt approvals store: %v", err)
 	}
 
-	changed, withheld := reconcileSkillInventoryIfStale(repo)
+	changed, withheld, err := reconcileSkillInventoryIfStale(repo)
+	require.Error(t, err, "unreadable approvals must stop prime")
 	if changed != 0 || len(withheld) != 0 {
 		t.Errorf("a reconcile that failed still reported a decision: changed=%d withheld=%+v", changed, withheld)
 	}
@@ -399,7 +406,152 @@ func TestReconcileSkillInventoryIfStale_FailedReconcileReportsNothingAndRecovers
 	if err := os.Remove(approvals); err != nil {
 		t.Fatalf("repair approvals store: %v", err)
 	}
-	if _, withheld := reconcileSkillInventoryIfStale(repo); len(withheld) != 1 || withheld[0].Name != "grants" {
+	if _, withheld, err := reconcileSkillInventoryIfStale(repo); len(withheld) != 1 || withheld[0].Name != "grants" || err != nil {
 		t.Errorf("after the store was repaired the held-back skill was not reported: %+v", withheld)
 	}
+}
+
+// stageApprovedInventory leaves both a runnable manifest and bundled script on
+// disk, with the installed revision matching the unchanged Team Context HEAD.
+func stageApprovedInventory(t *testing.T) (repo, team string) {
+	t.Helper()
+	repo, team = stageApprovalRepo(t, "deploy", map[string]string{
+		"scripts/run.sh": "#!/bin/sh\necho hi\n",
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(team, "agents", "skills", "deploy", "SKILL.md"),
+		[]byte("---\nname: deploy\nallowed-tools: Bash\n---\n\nbody\n"), 0o644))
+	gitInitRepo(t, team)
+	commitTeamCheckout(t, team, "publish runnable skill")
+	_, err := runApprove(t, "--allow-scripts", "deploy")
+	require.NoError(t, err)
+	want, err := skillmanager.ExpectedRevision(repo)
+	require.NoError(t, err)
+	installed, oxVersion, selected := skillmanager.InstalledSource(repo)
+	require.True(t, selected)
+	require.Equal(t, version.Version, oxVersion)
+	require.Equal(t, want, installed)
+	require.FileExists(t, filepath.Join(installedSkillDir(repo, "deploy"), "SKILL.md"))
+	require.FileExists(t, filepath.Join(installedSkillDir(repo, "deploy"), "scripts", "run.sh"))
+	return repo, team
+}
+
+func TestReconcileSkillInventoryIfStale_ApprovalOnlyCommit(t *testing.T) {
+	for _, change := range []string{"revoke", "withdraw scripts", "delete store"} {
+		t.Run(change, func(t *testing.T) {
+			repo, team := stageApprovedInventory(t)
+			teamHead := gitOutput(t, team, "rev-parse", "HEAD")
+			before, _, _ := skillmanager.InstalledSource(repo)
+			gitInitRepo(t, repo)
+			gitOutput(t, repo, "add", "--", ".sageox/team-skills.approvals.json")
+			gitOutput(t, repo, "commit", "-q", "-m", "approve deploy")
+
+			// This is a pulled project-policy change, NOT `ox skills revoke`:
+			// nothing has reconciled this checkout since the approval changed.
+			store, err := teamskills.LoadApprovals(repo)
+			require.NoError(t, err)
+			switch change {
+			case "revoke":
+				require.True(t, store.Revoke("deploy"))
+				require.NoError(t, store.Save(repo))
+			case "withdraw scripts":
+				store.Approvals[0].AllowScripts = false
+				require.NoError(t, store.Save(repo))
+			case "delete store":
+				require.NoError(t, os.Remove(teamskills.ApprovalPath(repo)))
+			}
+			gitOutput(t, repo, "add", "--", ".sageox/team-skills.approvals.json")
+			gitOutput(t, repo, "commit", "-q", "-m", "withdraw permission")
+			require.Equal(t, ".sageox/team-skills.approvals.json\n",
+				gitOutput(t, repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"))
+			require.Equal(t, teamHead, gitOutput(t, team, "rev-parse", "HEAD"))
+			want, err := skillmanager.ExpectedRevision(repo)
+			require.NoError(t, err)
+			require.NotEqual(t, before, want, "approval-only changes must invalidate Prime's fast path")
+
+			changed, withheld, err := reconcileSkillInventoryIfStale(repo)
+			require.NoError(t, err)
+			require.Positive(t, changed)
+			require.Len(t, withheld, 1)
+			dir := installedSkillDir(repo, "deploy")
+			require.NoFileExists(t, filepath.Join(dir, "scripts", "run.sh"))
+			if change == "withdraw scripts" {
+				require.FileExists(t, filepath.Join(dir, "SKILL.md"), "the manifest approval still applies")
+			} else {
+				require.NoFileExists(t, filepath.Join(dir, "SKILL.md"), "the runnable manifest was revoked")
+			}
+			installed, _, _ := skillmanager.InstalledSource(repo)
+			require.Equal(t, want, installed)
+			changed, withheld, err = reconcileSkillInventoryIfStale(repo)
+			require.NoError(t, err)
+			require.Zero(t, changed)
+			require.Empty(t, withheld, "an unchanged approval revision should take the fast path")
+		})
+	}
+}
+
+func TestReconcileSkillInventoryIfStale_UnreadableApprovalsBlockCurrentInventory(t *testing.T) {
+	for _, broken := range []string{"invalid JSON", "unreadable file", "newer schema"} {
+		t.Run(broken, func(t *testing.T) {
+			repo, _ := stageApprovedInventory(t)
+			before, _, _ := skillmanager.InstalledSource(repo)
+			path := teamskills.ApprovalPath(repo)
+			original, err := os.ReadFile(path)
+			require.NoError(t, err)
+			switch broken {
+			case "invalid JSON":
+				require.NoError(t, os.WriteFile(path, []byte("{bad json"), 0o644))
+			case "unreadable file":
+				// A directory fails ReadFile even when tests run as root.
+				require.NoError(t, os.Remove(path))
+				require.NoError(t, os.Mkdir(path, 0o755))
+			case "newer schema":
+				require.NoError(t, os.WriteFile(path, []byte(`{"schema_version":999}`), 0o644))
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				_, err := skillmanager.ExpectedRevision(repo)
+				require.Error(t, err)
+				changed, withheld, err := reconcileSkillInventoryIfStale(repo)
+				require.ErrorContains(t, err, "team skill approvals")
+				require.Zero(t, changed)
+				require.Empty(t, withheld)
+				installed, _, _ := skillmanager.InstalledSource(repo)
+				require.Equal(t, before, installed, "unreadable policy must not be recorded as applied")
+			}
+			require.NoError(t, os.Remove(path))
+			require.NoError(t, os.WriteFile(path, original, 0o644))
+			_, _, err = reconcileSkillInventoryIfStale(repo)
+			require.NoError(t, err, "repairing the policy should allow prime again")
+		})
+	}
+}
+
+func TestReconcileSkillInventoryIfStale_RetainedRevocationCannotBecomeCurrent(t *testing.T) {
+	repo, team := stageApprovedInventory(t)
+	store, err := teamskills.LoadApprovals(repo)
+	require.NoError(t, err)
+	require.True(t, store.Revoke("deploy"))
+	require.NoError(t, store.Save(repo))
+	// Simulate a temporarily unmaterialized Team Context. Existing retention
+	// rules preserve its files, but must not certify the new approval policy.
+	require.NoError(t, os.RemoveAll(filepath.Join(team, "agents")))
+	want, err := skillmanager.ExpectedRevision(repo)
+	require.NoError(t, err)
+	for attempt := 0; attempt < 2; attempt++ {
+		_, _, err := reconcileSkillInventoryIfStale(repo)
+		require.Error(t, err, "retained executable content must block prime, including retries")
+		installed, _, _ := skillmanager.InstalledSource(repo)
+		require.NotEqual(t, want, installed)
+	}
+}
+
+func TestReconcileSkillInventoryIfStale_ImmediateRevokeStaysCurrent(t *testing.T) {
+	repo, _ := stageApprovedInventory(t)
+	_, err := runRevoke(t, "deploy")
+	require.NoError(t, err)
+	require.NoFileExists(t, filepath.Join(installedSkillDir(repo, "deploy"), "SKILL.md"))
+	require.NoFileExists(t, filepath.Join(installedSkillDir(repo, "deploy"), "scripts", "run.sh"))
+	changed, withheld, err := reconcileSkillInventoryIfStale(repo)
+	require.NoError(t, err)
+	require.Zero(t, changed)
+	require.Empty(t, withheld, "immediate revocation should already have reconciled the new policy")
 }

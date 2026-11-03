@@ -715,6 +715,15 @@ func planWithCatalogs(repoRoot, version string, desired DesiredSkills, targets [
 	if err := sweepRetiredFiles(repoRoot, keys, targetByKey, desiredPaths, oldFiles, trackedDirs, plan); err != nil {
 		return nil, err
 	}
+	// A retained team file may still require an approval that was just revoked.
+	// Do not certify this policy revision until the projection can be reconciled;
+	// otherwise Prime's next fast path would hide the unresolved revocation.
+	for _, file := range next.ManagedFiles {
+		if _, wanted := desiredPaths[file.Path]; !wanted && isTeamOwnedPath(targetByKey, file) {
+			next.Source.Revision = ""
+			break
+		}
+	}
 
 	neededTargets := stringSet(next.Desired.Targets)
 	for _, file := range next.ManagedFiles {

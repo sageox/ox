@@ -269,6 +269,52 @@ func TestExpectedRevisionMatchesWhatThePlannerRecords(t *testing.T) {
 		"the prime fast path and the planner disagree about the recorded revision, so prime would re-plan on every session")
 }
 
+func TestExpectedRevisionMatchesAnEmptyTeamCatalog(t *testing.T) {
+	project, team := t.TempDir(), t.TempDir()
+	stageTeamWiredProject(t, project, team)
+	require.NoError(t, os.MkdirAll(filepath.Join(team, "agents", "skills"), 0o755))
+	source, _, err := catalogForRepo(project)
+	require.NoError(t, err)
+	recorded, err := source.Digest()
+	require.NoError(t, err)
+	expected, err := ExpectedRevision(project)
+	require.NoError(t, err)
+	require.Equal(t, expected, recorded, "empty teams must use the same policy-aware revision builder")
+}
+
+func TestTeamSkillSource_DigestUsesTheEvaluatedApprovalSnapshot(t *testing.T) {
+	project, team := t.TempDir(), t.TempDir()
+	stageTeamWiredProject(t, project, team)
+	writeTeamSkill(t, team, "deploy", "", map[string]string{"scripts/run.sh": "#!/bin/sh\n"})
+	store := &teamskills.ApprovalStore{}
+	store.Approve("deploy", teamskills.Classify(loadForTest(t, team, "deploy")), true)
+	require.NoError(t, store.Save(project))
+	source, _, err := catalogForRepo(project)
+	require.NoError(t, err)
+	before, err := ExpectedRevision(project)
+	require.NoError(t, err)
+
+	// A concurrent edit between selection and digesting must not certify the
+	// old executable projection as having evaluated this new policy.
+	store.Approvals[0].AllowScripts = false
+	require.NoError(t, store.Save(project))
+	after, err := ExpectedRevision(project)
+	require.NoError(t, err)
+	require.NotEqual(t, before, after)
+	recorded, err := source.Digest()
+	require.NoError(t, err)
+	require.Equal(t, before, recorded)
+
+	// JSON layout is not policy: reformatting must leave the cheap path intact.
+	path := teamskills.ApprovalPath(project)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, append(data, '\n'), 0o644))
+	formatted, err := ExpectedRevision(project)
+	require.NoError(t, err)
+	require.Equal(t, after, formatted)
+}
+
 // TestTeamSkillSource_UnreadableApprovalsRefuseRatherThanMaterialize.
 //
 // An approval store ox cannot parse is not an empty one. Treating it as empty
