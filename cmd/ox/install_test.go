@@ -322,3 +322,13 @@ func TestShadowWarningSeesRelativePathEntries(t *testing.T) {
 	warnInstallPath(&out, dest, oxPath)
 	assert.Contains(t, out.String(), "Another ox at bin/ox comes first")
 }
+
+func TestLookPathSkipsRelativeNodeModules(t *testing.T) {
+	skipInstallOnWindows(t)
+	t.Chdir(t.TempDir())
+	shimDir := filepath.Join("node_modules", ".bin")
+	require.NoError(t, os.MkdirAll(shimDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(shimDir, "ox"), []byte("x"), 0o755))
+	t.Setenv("PATH", shimDir)
+	assert.Empty(t, lookPathOutsideNodeModules("ox"))
+}

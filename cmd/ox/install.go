@@ -250,7 +250,7 @@ func dirOnPath(dir string) bool {
 // install. The result is only reported, never executed or overwritten.
 func lookPathOutsideNodeModules(name string) string {
 	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
-		if d == "" || strings.Contains(filepath.ToSlash(d)+"/", "/node_modules/") {
+		if d == "" || strings.Contains("/"+filepath.ToSlash(d)+"/", "/node_modules/") {
 			continue
 		}
 		candidate := filepath.Join(d, name)
