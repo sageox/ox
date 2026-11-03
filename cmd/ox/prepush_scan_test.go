@@ -374,24 +374,21 @@ func TestInPrePushScannerScope(t *testing.T) {
 			assert.Equal(t, want, inPrePushScannerScope(path))
 		})
 	}
+	for _, path := range []string{"data/plans/draft/plan.md", "data/plans/group/draft/plan.md", "data/plans/plan.md"} {
+		assert.True(t, inPrePushScannerScope(path), path)
+	}
+	for _, path := range []string{"data/plans/draft/annotations.json", "data/plans-other/draft/plan.md", "docs/plan.md"} {
+		assert.False(t, inPrePushScannerScope(path), path)
+	}
 }
 
-// TestFormatPrePushFindings_RecoveryMatchesScannerScope encodes the
-// writer-vs-message contract that the original bug exposed: the recovery
-// message tells the user to run `ox session audit` and `ox session redact`.
-// Those commands operate on the same path prefix that the scanner inspects.
-// If a future change widens prePushScannerScopePrefixes beyond what the
-// recovery commands can fix, the user is again handed instructions that
-// don't apply to the flagged path — exactly the symptom that prompted this
-// fix.
-//
-// We pin both directions: every scope prefix must appear in some recovery
-// command surface, and the recovery message must continue to reference
-// session-scoped tooling.
+// Recovery must cover both session tooling and the plan history cleanup that
+// session audit/redact cannot perform.
 func TestFormatPrePushFindings_RecoveryMatchesScannerScope(t *testing.T) {
 	r := &PrePushScanResult{
 		Findings: []PrePushFinding{
 			{Detector: "aws_access_key", Path: "sessions/x/raw.jsonl", Line: 1},
+			{Detector: "aws_access_key", Path: "data/plans/draft/plan.md", Line: 1},
 		},
 	}
 	msg := FormatPrePushFindings(r)
@@ -399,8 +396,31 @@ func TestFormatPrePushFindings_RecoveryMatchesScannerScope(t *testing.T) {
 		"recovery message must reference the audit command that covers sessions/")
 	assert.Contains(t, msg, "ox session redact",
 		"recovery message must reference the redact command that covers sessions/")
-	// If the scanner is ever widened, the recovery surface must widen too.
-	// Today only "sessions/" is in scope.
+	assert.Contains(t, msg, "data/plans/**/plan.md")
+	assert.Contains(t, msg, "unpushed history")
+	// Whole-prefix scanning remains session-only; plans use a Markdown predicate.
 	assert.Equal(t, []string{"sessions/"}, prePushScannerScopePrefixes,
 		"scope widened without updating recovery message; see ox-cqdo")
+}
+
+func TestPrePushPlanFindingsHoldPublicationWithoutSessionRepair(t *testing.T) {
+	const rel = "data/plans/draft/plan.md"
+	const canary = "AKIA" + "QWERTYUIOPASDFGH"
+	work := makeLedgerWithCommit(t, map[string]string{rel: "# Plan\n" + canary + "\n"})
+	result, err := scanPrePushForSecrets(context.Background(), work)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.FilesScanned)
+	require.NotEmpty(t, result.Findings)
+	for _, finding := range result.Findings {
+		require.Equal(t, rel, finding.Path)
+		require.Equal(t, 2, finding.Line)
+	}
+	head := mustGitCapture(t, work, "rev-parse", "HEAD")
+	err = runPrePushSecretGate(context.Background(), work)
+	require.ErrorContains(t, err, "unpushed history")
+	require.NotContains(t, err.Error(), canary)
+	require.Equal(t, head, mustGitCapture(t, work, "rev-parse", "HEAD"))
+	data, err := os.ReadFile(filepath.Join(work, rel))
+	require.NoError(t, err)
+	require.Contains(t, string(data), canary, "session repair must not rewrite or quarantine a plan")
 }
