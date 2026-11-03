@@ -10,7 +10,7 @@
 //
 // So team skills are split by what they can DO, not by who wrote them:
 //
-//   - Prose — no bundled scripts, no inline command execution, no allowed-tools —
+//   - Prose — no bundled scripts, inline command execution, tool grants or hooks —
 //     materializes automatically. It is exactly the trust level team RULES already
 //     have, and prime already injects those.
 //   - Executable content requires an explicit approval PINNED TO A DIGEST. Change
@@ -26,12 +26,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"path"
 	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/sageox/ox/internal/teamdocs"
+	"gopkg.in/yaml.v3"
 )
 
 // File is one file belonging to a team skill, as read out of the team-context
@@ -57,6 +59,15 @@ const (
 
 	// CapAllowedTools — frontmatter grants the skill tool access up front.
 	CapAllowedTools Capability = "allowed-tools"
+
+	// CapHooks — frontmatter configures lifecycle hooks. Gate every hook shape,
+	// not just known command types, so host-specific hook semantics cannot bypass
+	// approval.
+	CapHooks Capability = "hooks"
+
+	// CapUnparsedFrontmatter — malformed or unsupported frontmatter cannot be
+	// established to be prose and must not materialize without approval.
+	CapUnparsedFrontmatter Capability = "unparsed-frontmatter"
 
 	// CapInlineCommand — the body carries Claude's inline command-execution syntax,
 	// which runs a shell command when the skill is loaded rather than when a human
@@ -124,8 +135,9 @@ func IsExecutableFile(relPath string, content []byte) (bool, string) {
 
 // Verdict is the trust classification of one candidate skill.
 type Verdict struct {
-	// Executable is true when the skill can cause code to run. Such a skill needs
-	// a digest-pinned approval before ox will materialize it.
+	// Executable is true when the skill can cause code to run or its frontmatter
+	// cannot safely be classified. Such a skill needs a digest-pinned approval
+	// before ox will materialize it.
 	Executable bool
 
 	// Capabilities lists every reason Executable is true, so a human deciding on an
@@ -154,9 +166,6 @@ type Verdict struct {
 // that misses the documented form is not. An exclamation mark followed by TWO
 // backticks is not a command; an unclosed "!`foo" is treated as one.
 var inlineCommandLine = regexp.MustCompile("!`[^`\n]")
-
-// allowedToolsKey matches an allowed-tools frontmatter key.
-var allowedToolsKey = regexp.MustCompile(`(?mi)^\s*allowed[-_]tools\s*:`)
 
 // Classify decides whether a team skill may materialize without human approval.
 //
@@ -199,9 +208,22 @@ func Classify(s Skill) Verdict {
 		// Normalized ONCE, here: splitFrontmatter takes the result as is, so
 		// exactly one leading BOM is ever stripped (see normalizeManifest).
 		normalized := normalizeManifest(string(f.Content))
-		front, _ := splitFrontmatter(normalized)
-		if allowedToolsKey.MatchString(front) {
-			add(CapAllowedTools, clean)
+		front, _, terminated := splitFrontmatter(normalized)
+		if !terminated {
+			add(CapUnparsedFrontmatter, clean+" (unterminated frontmatter)")
+		}
+		fields, err := parseFrontmatter(front)
+		if err != nil {
+			add(CapUnparsedFrontmatter, clean+" ("+err.Error()+")")
+		} else {
+			for key := range fields {
+				switch strings.ToLower(key) {
+				case "allowed-tools", "allowed_tools":
+					add(CapAllowedTools, clean)
+				case "hooks":
+					add(CapHooks, clean)
+				}
+			}
 		}
 		// Scan the FULL document, not just the body. splitFrontmatter returns an
 		// empty body for unterminated frontmatter — deliberately, so a hidden
@@ -218,6 +240,58 @@ func Classify(s Skill) Verdict {
 		sort.Strings(v.Evidence[c])
 	}
 	return v
+}
+
+// parseFrontmatter reads YAML keys, not their spelling in the source. Quoted,
+// escaped and flow-style keys have the same meaning as bare keys to a host.
+// Only ordinary string-keyed mappings, sequences and scalars are accepted here;
+// aliases, merges and custom tags require approval rather than relying on
+// potentially different YAML loader behavior in each supported host.
+func parseFrontmatter(front string) (map[string]any, error) {
+	decoder := yaml.NewDecoder(strings.NewReader(front))
+	var doc yaml.Node
+	if err := decoder.Decode(&doc); err != nil {
+		if err == io.EOF {
+			return nil, nil // no frontmatter, or an empty/comment-only block
+		}
+		return nil, err
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("frontmatter must contain a single YAML mapping")
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode || !supportedFrontmatter(root) {
+		return nil, fmt.Errorf("unsupported frontmatter; expected a string-keyed YAML mapping")
+	}
+	var fields map[string]any
+	// Decode also rejects duplicate keys, including in nested mappings.
+	if err := root.Decode(&fields); err != nil {
+		return nil, err
+	}
+	return fields, nil
+}
+
+func supportedFrontmatter(node *yaml.Node) bool {
+	switch node.Tag {
+	case "!!map", "!!seq", "!!str", "!!bool", "!!int", "!!float", "!!null", "!!timestamp":
+	default:
+		return false
+	}
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i < len(node.Content); i += 2 {
+			key := node.Content[i]
+			if key.Kind != yaml.ScalarNode || key.Tag != "!!str" {
+				return false
+			}
+		}
+	}
+	for _, child := range node.Content {
+		if !supportedFrontmatter(child) {
+			return false
+		}
+	}
+	return true
 }
 
 // inlineCommandLines returns the offending lines, trimmed, so the evidence names
@@ -250,22 +324,23 @@ func inlineCommandLines(body string) []string {
 // (trust contract v2, R2). YAML loaders accept "--- ", so a check that demanded
 // the exact bytes read "--- \nallowed-tools: Bash(*)" as having no frontmatter
 // and installed the grant as prose. Leading whitespace is still not a fence.
-func splitFrontmatter(normalized string) (front, body string) {
-	first, rest, found := strings.Cut(normalized, "\n")
-	if !found || !teamdocs.IsFrontmatterFence(first) {
-		return "", normalized
+// terminated is false only for a leading block with no closing fence.
+func splitFrontmatter(normalized string) (front, body string, terminated bool) {
+	first, rest, _ := strings.Cut(normalized, "\n")
+	if !teamdocs.IsFrontmatterFence(first) {
+		return "", normalized, true
 	}
 	for offset := 0; offset <= len(rest); {
 		line, _, _ := strings.Cut(rest[offset:], "\n")
 		if teamdocs.IsFrontmatterFence(line) {
 			front = strings.TrimSuffix(rest[:offset], "\n")
-			return front, strings.TrimPrefix(rest[offset+len(line):], "\n")
+			return front, strings.TrimPrefix(rest[offset+len(line):], "\n"), true
 		}
 		offset += len(line) + 1
 	}
 	// Unterminated frontmatter: treat the whole document as frontmatter rather
-	// than as body. Reading it as body would skip the allowed-tools check.
-	return rest, ""
+	// than as body, and report the missing fence so classification fails closed.
+	return rest, "", false
 }
 
 // utf8BOM is the byte-order mark some Windows editors write at the start of a
