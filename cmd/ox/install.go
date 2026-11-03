@@ -92,8 +92,8 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		result.LoggedIn = installLoggedIn()
 		result.OnPath = dirOnPath(filepath.Dir(oxPath))
 		ox := "ox"
-		if !result.OnPath {
-			ox = oxPath
+		if found := lookPathOutsideNodeModules("ox"); found == "" || !sameFile(found, oxPath) {
+			ox = shellQuote(oxPath)
 		}
 		if !result.LoggedIn {
 			result.Next = append(result.Next, ox+" login")

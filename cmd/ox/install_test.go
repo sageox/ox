@@ -256,7 +256,7 @@ func TestRunInstallJSON(t *testing.T) {
 	assert.ElementsMatch(t, []string{"ox", "ox-adapter-codex"}, got.Binaries)
 	assert.False(t, got.LoggedIn)
 	assert.False(t, got.OnPath)
-	oxPath := filepath.Join(dest, "ox")
+	oxPath := shellQuote(filepath.Join(dest, "ox"))
 	assert.Equal(t, []string{oxPath + " login", "cd <repo> && " + oxPath + " init"}, got.Next, "off PATH, next steps use the full path")
 	assert.Empty(t, *logins, "--json never starts the interactive login")
 }
@@ -271,4 +271,18 @@ func TestRunInstallJSONOnPath(t *testing.T) {
 	assert.True(t, got.OnPath)
 	assert.True(t, got.LoggedIn)
 	assert.Equal(t, []string{"cd <repo> && ox init"}, got.Next)
+}
+
+func TestRunInstallJSONShadowedOx(t *testing.T) {
+	_, _, _ = stubInstall(t, true)
+	other := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(other, "ox"), []byte("other"), 0o755))
+	dest := filepath.Join(t.TempDir(), "my bin")
+	installDirFlag = dest
+	t.Setenv("PATH", other+string(os.PathListSeparator)+dest)
+
+	var got installResult
+	require.NoError(t, json.Unmarshal([]byte(runInstallCmd(t, "--json")), &got))
+	assert.True(t, got.OnPath)
+	assert.Equal(t, []string{"cd <repo> && '" + filepath.Join(dest, "ox") + "' init"}, got.Next)
 }
