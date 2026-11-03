@@ -484,3 +484,22 @@ printf '%s\n' '{"type":"result","result":"merged\n"}'
 		t.Errorf("runner waited %s for a descendant after the CLI exited", elapsed)
 	}
 }
+
+func TestRunClaudeBinary_FailureCarriesStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell script")
+	}
+
+	binary := filepath.Join(t.TempDir(), "llm")
+	body := "#!/bin/sh\ncat > /dev/null\necho 'auth expired' >&2\nexit 3\n"
+	if err := os.WriteFile(binary, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := runClaudeBinary(ctx, binary, "private merge prompt")
+	if err == nil || err.Error() != "claude exited 3: auth expired" {
+		t.Fatalf("err = %v, want the exit code and stderr", err)
+	}
+}

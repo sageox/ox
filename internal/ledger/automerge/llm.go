@@ -393,7 +393,7 @@ type claudeStreamMessage struct {
 // at all. `plan` mode disables all tool use including Bash/Edit/Write.
 // Even if the model is tricked into trying to "fix" something, it
 // can't write to disk or execute commands.
-// outputDrainGrace bounds reading a finished CLI's buffered output.
+// outputDrainGrace bounds reading a finished CLI's output.
 const outputDrainGrace = 2 * time.Second
 
 func runClaudeBinary(ctx context.Context, binary, prompt string) (string, error) {
@@ -402,44 +402,18 @@ func runClaudeBinary(ctx context.Context, binary, prompt string) (string, error)
 	cmd.Stdin = strings.NewReader(prompt)
 	setProcAttr(cmd) // process-group isolation so hung descendants get killed on cancel
 
-	// Own the read ends: exec's pipes close them in Wait, which would race the
-	// readers, while waiting for EOF first lets any descendant that inherited
-	// a write end hold a finished result until the deadline.
-	stdoutPipe, stdoutW, err := os.Pipe()
-	if err != nil {
-		return "", fmt.Errorf("stdout pipe: %w", err)
-	}
-	defer stdoutPipe.Close()
-	stderrPipe, stderrW, err := os.Pipe()
-	if err != nil {
-		_ = stdoutW.Close()
-		return "", fmt.Errorf("stderr pipe: %w", err)
-	}
-	defer stderrPipe.Close()
+	// exec copies output into these writers. WaitDelay ends that copying soon
+	// after the CLI exits, even if a descendant inherited the pipe and keeps
+	// it open, so a finished merge is not held until the deadline.
+	stdoutR, stdoutW := io.Pipe()
+	stderrBuf := &cappedBuffer{max: 64 * 1024}
 	cmd.Stdout = stdoutW
-	cmd.Stderr = stderrW
+	cmd.Stderr = stderrBuf
+	cmd.WaitDelay = outputDrainGrace
 
-	startErr := cmd.Start()
-	_ = stdoutW.Close()
-	_ = stderrW.Close()
-	if startErr != nil {
-		return "", fmt.Errorf("start: %w", startErr)
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start: %w", err)
 	}
-
-	closeOutput := func() {
-		_ = stdoutPipe.Close()
-		_ = stderrPipe.Close()
-	}
-	// Unblock readers on cancellation even if a descendant holds a pipe open.
-	stopClosingPipes := context.AfterFunc(ctx, closeOutput)
-	defer stopClosingPipes()
-
-	stderrDone := make(chan struct{})
-	var stderrBuf []byte
-	go func() {
-		defer close(stderrDone)
-		stderrBuf, _ = io.ReadAll(io.LimitReader(stderrPipe, 64*1024))
-	}()
 
 	type parseRes struct {
 		result string
@@ -447,17 +421,19 @@ func runClaudeBinary(ctx context.Context, binary, prompt string) (string, error)
 	}
 	parseCh := make(chan parseRes, 1)
 	go func() {
-		result, err := parseClaudeStream(stdoutPipe)
+		result, err := parseClaudeStream(stdoutR)
+		// Fail further writes so a parser that stops early cannot stall Wait.
+		_ = stdoutR.Close()
 		parseCh <- parseRes{result: result, err: err}
 	}()
 
 	waitErr := cmd.Wait()
-	// The CLI has exited, so its output is already buffered. Stop waiting for
-	// EOF from descendants after a short drain instead of the merge deadline.
-	drain := time.AfterFunc(outputDrainGrace, closeOutput)
-	defer drain.Stop()
+	_ = stdoutW.Close()
 	pr := <-parseCh
-	<-stderrDone
+	if errors.Is(waitErr, exec.ErrWaitDelay) {
+		// The CLI exited cleanly; only a descendant still held its output.
+		waitErr = nil
+	}
 
 	if ctx.Err() != nil {
 		return "", fmt.Errorf("timeout: %w", ctx.Err())
@@ -465,7 +441,7 @@ func runClaudeBinary(ctx context.Context, binary, prompt string) (string, error)
 	if waitErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
-			return "", fmt.Errorf("claude exited %d: %s", exitErr.ExitCode(), strings.TrimSpace(string(stderrBuf)))
+			return "", fmt.Errorf("claude exited %d: %s", exitErr.ExitCode(), strings.TrimSpace(string(stderrBuf.buf)))
 		}
 		return "", fmt.Errorf("wait: %w", waitErr)
 	}
@@ -476,6 +452,20 @@ func runClaudeBinary(ctx context.Context, binary, prompt string) (string, error)
 		return "", fmt.Errorf("claude produced no result message")
 	}
 	return pr.result, nil
+}
+
+// cappedBuffer keeps the first max bytes written and accepts the rest, so a
+// noisy CLI cannot fail its own stderr copy.
+type cappedBuffer struct {
+	buf []byte
+	max int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.max - len(b.buf); room > 0 {
+		b.buf = append(b.buf, p[:min(room, len(p))]...)
+	}
+	return len(p), nil
 }
 
 // parseClaudeStream scans JSONL output and returns the `result` message body.
