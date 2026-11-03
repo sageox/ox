@@ -1,17 +1,14 @@
 package daemon
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-)
 
-// murmurOutboxSubdir is the local-only, gitignored directory (under a ledger or
-// team-context checkout's .sageox/cache/) where the CLI queues murmurs that
-// could not be delivered to a running daemon. The daemon drains it on each sync
-// cycle. See .claude/rules/ledger-cache.md for the cache convention.
-const murmurOutboxSubdir = ".sageox/cache/murmur-outbox"
+	"github.com/sageox/ox/internal/paths"
+)
 
 // outboxEntry is one queued murmur read back from the outbox: its on-disk path
 // and the decoded payload the daemon needs to commit it.
@@ -21,9 +18,19 @@ type outboxEntry struct {
 }
 
 // MurmurOutboxDir returns the outbox directory for a given ledger/team-context
-// checkout root.
+// checkout root, outside the checkout in daemon-owned cache state. Gitignored
+// checkout content is still remotely writable via a forced add. Deliberately
+// do not read or migrate the old .sageox/cache/murmur-outbox queue.
 func MurmurOutboxDir(targetDir string) string {
-	return filepath.Join(targetDir, murmurOutboxSubdir)
+	if abs, err := filepath.Abs(targetDir); err == nil {
+		targetDir = abs
+	}
+	// A CLI may address the same registered workspace through a local alias.
+	if real, err := filepath.EvalSymlinks(targetDir); err == nil {
+		targetDir = real
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(targetDir)))
+	return filepath.Join(paths.DaemonCacheDir(), "murmur-outbox", fmt.Sprintf("%x", sum))
 }
 
 // WriteOutboxMurmur persists a murmur payload to the outbox so it survives a
@@ -31,7 +38,7 @@ func MurmurOutboxDir(targetDir string) string {
 // RelPath, e.g. "<id>.json"), so re-queuing the same murmur is idempotent.
 func WriteOutboxMurmur(targetDir string, p MurmurPayload) error {
 	dir := MurmurOutboxDir(targetDir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create murmur outbox dir: %w", err)
 	}
 	data, err := json.Marshal(p)
@@ -42,7 +49,7 @@ func WriteOutboxMurmur(targetDir string, p MurmurPayload) error {
 	if name == "" || name == "." || name == string(filepath.Separator) {
 		return fmt.Errorf("invalid murmur rel_path %q", p.RelPath)
 	}
-	return os.WriteFile(filepath.Join(dir, name), data, 0o644)
+	return os.WriteFile(filepath.Join(dir, name), data, 0o600)
 }
 
 // ReadOutboxMurmurs returns all queued murmurs for a target. Unreadable or
@@ -59,7 +66,7 @@ func ReadOutboxMurmurs(targetDir string) ([]outboxEntry, error) {
 
 	var entries []outboxEntry
 	for _, f := range files {
-		if f.IsDir() || filepath.Ext(f.Name()) != ".json" {
+		if !f.Type().IsRegular() || filepath.Ext(f.Name()) != ".json" {
 			continue
 		}
 		full := filepath.Join(dir, f.Name())

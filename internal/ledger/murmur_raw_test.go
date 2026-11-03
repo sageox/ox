@@ -2,8 +2,10 @@ package ledger
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -46,6 +48,75 @@ func TestWriteMurmurRaw_RoundTrip(t *testing.T) {
 	foundPath, err := FindMurmur(baseDir, murmurID)
 	require.NoError(t, err)
 	assert.Equal(t, relPath, foundPath)
+
+	// Re-publishing a regular file remains supported.
+	data = append(data, '\n')
+	require.NoError(t, WriteMurmurRaw(baseDir, relPath, data))
+	got, err = os.ReadFile(filepath.Join(baseDir, relPath))
+	require.NoError(t, err)
+	assert.Equal(t, data, got)
+}
+
+func TestWriteMurmur_RejectsSymlinkComponents(t *testing.T) {
+	for _, raw := range []bool{false, true} {
+		for _, outside := range []bool{false, true} {
+			for component := 0; component < 5; component++ {
+				t.Run(fmt.Sprintf("raw=%t/outside=%t/component=%d", raw, outside, component), func(t *testing.T) {
+					base := t.TempDir()
+					mf := MurmurFile{ID: "test", Timestamp: time.Now().UTC(), Content: "replacement"}
+					rel := MurmurFilePath(mf.Timestamp, mf.ID)
+					parts := strings.Split(rel, string(filepath.Separator))
+					link := filepath.Join(base, filepath.Join(parts[:component+1]...))
+					target := filepath.Join(base, ".git")
+					if outside {
+						target = t.TempDir()
+					}
+					victim := filepath.Join(target, filepath.Join(parts[component+1:]...))
+					if component == len(parts)-1 {
+						target = filepath.Join(target, "config")
+						victim = target
+					}
+					require.NoError(t, os.MkdirAll(filepath.Dir(victim), 0o755))
+					require.NoError(t, os.WriteFile(victim, []byte("unchanged"), 0o644))
+					require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+					if err := os.Symlink(target, link); err != nil {
+						t.Skipf("symlinks unavailable: %v", err)
+					}
+					var err error
+					if raw {
+						err = WriteMurmurRaw(base, rel, []byte("replacement"))
+					} else {
+						_, err = WriteMurmur(base, mf)
+					}
+					require.Error(t, err)
+					got, err := os.ReadFile(victim)
+					require.NoError(t, err)
+					require.Equal(t, "unchanged", string(got))
+				})
+			}
+		}
+	}
+}
+
+func TestWriteMurmurRaw_RejectsNonMurmurPaths(t *testing.T) {
+	base := t.TempDir()
+	for _, rel := range []string{"", "../escape", ".git/config", "data/murmurs/../../../escape", filepath.Join(base, "absolute")} {
+		require.Error(t, WriteMurmurRaw(base, rel, []byte("replacement")), "path %q", rel)
+	}
+}
+
+func TestWriteMurmurRaw_RejectsDanglingSymlink(t *testing.T) {
+	base := t.TempDir()
+	rel := MurmurFilePath(time.Now().UTC(), "dangling")
+	link := filepath.Join(base, rel)
+	victim := filepath.Join(t.TempDir(), "missing")
+	require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+	if err := os.Symlink(victim, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	require.Error(t, WriteMurmurRaw(base, rel, []byte("replacement")))
+	_, err := os.Lstat(victim)
+	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
 // TestWriteMurmurRaw_DeletedDir verifies that writing to a deleted base dir

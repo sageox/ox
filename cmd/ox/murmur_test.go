@@ -117,7 +117,9 @@ func TestMurmur_PostHogCaptureAfterDelivery(t *testing.T) {
 				baseCapture(event, props, opts)
 			}
 			if mode == "write fails" {
-				require.NoError(t, os.WriteFile(filepath.Join(target, ".sageox"), []byte("blocked"), 0o600))
+				outbox := daemon.MurmurOutboxDir(target)
+				require.NoError(t, os.MkdirAll(filepath.Dir(outbox), 0o700))
+				require.NoError(t, os.WriteFile(outbox, []byte("blocked"), 0o600))
 			}
 			if mode == "capture fails" {
 				capturePostHogUsage = func(string, map[string]any, telemetry.CaptureOpts) { panic("sender failed") }

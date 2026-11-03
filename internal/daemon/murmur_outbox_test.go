@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -13,8 +14,15 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/require"
 )
+
+func isolateMurmurOutbox(t *testing.T) {
+	t.Helper()
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+}
 
 // makeOutboxMurmur builds a MurmurPayload whose RelPath/MurmurJSON match what the
 // CLI would queue, stamped at ts.
@@ -44,7 +52,7 @@ func makeOutboxMurmur(t *testing.T, targetDir, content string, ts time.Time) Mur
 // intact, and removed. Failure prevented: a serialization or path bug silently
 // drops queued murmurs the daemon was supposed to drain.
 func TestMurmurOutbox_RoundTrip(t *testing.T) {
-	t.Parallel()
+	isolateMurmurOutbox(t)
 	target := t.TempDir()
 	p := makeOutboxMurmur(t, target, "hello outbox", time.Now().UTC())
 
@@ -58,9 +66,11 @@ func TestMurmurOutbox_RoundTrip(t *testing.T) {
 	require.Equal(t, p.Content, got.Content)
 	require.JSONEq(t, string(p.MurmurJSON), string(got.MurmurJSON))
 
-	// file lives under the gitignored ledger cache, named "<id>.json"
+	// file lives outside the checkout in daemon-owned state, named "<id>.json"
 	require.Equal(t, filepath.Base(p.RelPath), filepath.Base(entries[0].path))
-	require.Contains(t, entries[0].path, filepath.Join(".sageox", "cache", "murmur-outbox"))
+	require.True(t, strings.HasPrefix(entries[0].path, filepath.Join(paths.DaemonCacheDir(), "murmur-outbox")+string(filepath.Separator)))
+	require.False(t, strings.HasPrefix(entries[0].path, target+string(filepath.Separator)))
+	require.NotEqual(t, MurmurOutboxDir(target), MurmurOutboxDir(t.TempDir()))
 
 	require.NoError(t, RemoveOutboxMurmur(entries[0].path))
 	entries, err = ReadOutboxMurmurs(target)
@@ -71,7 +81,7 @@ func TestMurmurOutbox_RoundTrip(t *testing.T) {
 // TestMurmurOutbox_ReadMissingDirIsEmpty verifies an absent outbox dir is not an
 // error — the common case where the daemon never missed a murmur.
 func TestMurmurOutbox_ReadMissingDirIsEmpty(t *testing.T) {
-	t.Parallel()
+	isolateMurmurOutbox(t)
 	entries, err := ReadOutboxMurmurs(t.TempDir())
 	require.NoError(t, err)
 	require.Empty(t, entries)
@@ -104,6 +114,7 @@ func gitLog(t *testing.T, dir, pathspec string) string {
 // and removed from the outbox once the daemon drains. Failure prevented: the
 // original bug where a daemon-down murmur was lost forever.
 func TestDrainMurmurOutbox_CommitsAndRemoves(t *testing.T) {
+	isolateMurmurOutbox(t)
 	if testing.Short() {
 		t.Skip("short: shells git")
 	}
@@ -135,7 +146,8 @@ func TestWriteAndCommitMurmur_RefusesConflictMarkers(t *testing.T) {
 	p.MurmurJSON = []byte("<<<<<<< Updated upstream\n{}\n=======\n{}\n>>>>>>> Stashed changes\n")
 
 	err := writeAndCommitMurmur(context.Background(), ledgerDir, p)
-	require.ErrorContains(t, err, "unresolved conflict")
+	require.ErrorContains(t, err, "invalid murmur JSON")
+	require.NoFileExists(t, filepath.Join(ledgerDir, p.RelPath), "reject malformed JSON before writing")
 	require.Equal(t, before, getGitSHA(t, ledgerDir), "validation failure must not advance HEAD")
 }
 
@@ -182,6 +194,7 @@ func mustGitOutput(t *testing.T, dir string, args ...string) string {
 // TestDrainMurmurOutbox_DropsStale verifies murmurs older than the 24h window are
 // discarded (deleted, never committed) so day-old WIP never resurfaces.
 func TestDrainMurmurOutbox_DropsStale(t *testing.T) {
+	isolateMurmurOutbox(t)
 	if testing.Short() {
 		t.Skip("short: shells git")
 	}
@@ -205,6 +218,7 @@ func TestDrainMurmurOutbox_DropsStale(t *testing.T) {
 // file's stored TargetDir) as the commit target. Failure prevented: a crafted
 // outbox file redirecting a commit outside the workspace.
 func TestDrainMurmurOutbox_IgnoresUnregisteredTarget(t *testing.T) {
+	isolateMurmurOutbox(t)
 	if testing.Short() {
 		t.Skip("short: shells git")
 	}
@@ -228,6 +242,7 @@ func TestDrainMurmurOutbox_IgnoresUnregisteredTarget(t *testing.T) {
 // TestDrainMurmurOutbox_DropsMalformedRelPath verifies a traversal-escaping
 // RelPath is rejected and removed rather than committed.
 func TestDrainMurmurOutbox_DropsMalformedRelPath(t *testing.T) {
+	isolateMurmurOutbox(t)
 	if testing.Short() {
 		t.Skip("short: shells git")
 	}
@@ -243,4 +258,79 @@ func TestDrainMurmurOutbox_DropsMalformedRelPath(t *testing.T) {
 	entries, err := ReadOutboxMurmurs(ledgerDir)
 	require.NoError(t, err)
 	require.Empty(t, entries, "malformed murmur must be dropped from the outbox")
+}
+
+func TestDrainMurmurOutbox_DropsMalformedInnerJSON(t *testing.T) {
+	isolateMurmurOutbox(t)
+	for _, raw := range []string{"not JSON", "null", "{}", `{"schema_version":"2"}`} {
+		t.Run(raw, func(t *testing.T) {
+			target := t.TempDir()
+			p := makeOutboxMurmur(t, target, "invalid", time.Now().UTC())
+			p.MurmurJSON = []byte(raw)
+			require.NoError(t, WriteOutboxMurmur(target, p))
+			newDrainScheduler(t, target).drainMurmurOutbox(context.Background())
+			require.NoDirExists(t, filepath.Join(target, "data"))
+			entries, err := ReadOutboxMurmurs(target)
+			require.NoError(t, err)
+			require.Empty(t, entries)
+			require.Error(t, writeAndCommitMurmur(context.Background(), target, p))
+		})
+	}
+}
+
+// Exercise both remote queue injection and a locally queued write into an old
+// team checkout that already materialized a tracked symlink.
+func TestDrainMurmurOutbox_TeamSymlinks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: shells git")
+	}
+	isolateMurmurOutbox(t)
+	for _, outside := range []bool{false, true} {
+		for _, localQueue := range []bool{false, true} {
+			t.Run(fmt.Sprintf("outside=%t/localQueue=%t", outside, localQueue), func(t *testing.T) {
+				teamDir, _ := initGitRepoWithCommit(t)
+				gitCmd(t, teamDir, "config", "core.symlinks", "true")
+				p := makeOutboxMurmur(t, teamDir, "must not overwrite", time.Now().UTC())
+				victim := filepath.Join(teamDir, ".git", "config")
+				if outside {
+					victim = filepath.Join(t.TempDir(), "victim")
+					require.NoError(t, os.WriteFile(victim, []byte("unchanged"), 0o600))
+				}
+				before, err := os.ReadFile(victim)
+				require.NoError(t, err)
+				link := filepath.Join(teamDir, p.RelPath)
+				require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+				if err := os.Symlink(victim, link); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+				legacy := filepath.Join(teamDir, ".sageox", "cache", "murmur-outbox", filepath.Base(p.RelPath))
+				require.NoError(t, os.MkdirAll(filepath.Dir(legacy), 0o755))
+				raw, err := json.Marshal(p)
+				require.NoError(t, err)
+				require.NoError(t, os.WriteFile(legacy, raw, 0o644))
+				require.NoError(t, os.WriteFile(filepath.Join(teamDir, ".sageox", "sync.manifest"), []byte("version 1\ninclude /.sageox/\ninclude /data/murmurs/\n"), 0o644))
+				gitCmd(t, teamDir, "add", "-f", "--", ".sageox", p.RelPath)
+				gitCmd(t, teamDir, "commit", "-m", "remote symlink and outbox")
+				head := getGitSHA(t, teamDir)
+				if localQueue {
+					require.NoError(t, WriteOutboxMurmur(teamDir, p))
+				}
+				s := newDrainScheduler(t, teamDir)
+				s.workspaceRegistry.workspaces["ledger"].Type = WorkspaceTypeTeamContext
+				s.drainMurmurOutbox(context.Background())
+				after, err := os.ReadFile(victim)
+				require.NoError(t, err)
+				require.Equal(t, before, after)
+				require.Equal(t, head, getGitSHA(t, teamDir))
+				require.FileExists(t, legacy, "remote queue is not consumed or migrated")
+				entries, err := ReadOutboxMurmurs(teamDir)
+				require.NoError(t, err)
+				if localQueue {
+					require.Len(t, entries, 1, "failed write remains queued")
+				} else {
+					require.Empty(t, entries, "remote content is not a local queue")
+				}
+			})
+		}
+	}
 }
