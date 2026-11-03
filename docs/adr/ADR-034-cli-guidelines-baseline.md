@@ -640,9 +640,10 @@ applications such as editors. ox's full-screen Bubble Tea screens follow
   has no history), holds only strings, drifts into disorder, invites encoding
   trouble, and often holds credentials. *Source: [clig.dev § Environment
   variables](https://clig.dev/#environment-variables).*
-  - **ox:** ox loads `.env.local`, then `.env`, from the working directory at
-    startup, without overriding variables already set; hosted Ledger reads skip
-    them (`cmd/ox/main.go`).
+  - **ox:** security deviation — ox does not load `.env.local` or `.env` from
+    the working directory. A checkout must not redirect inherited credentials or
+    replace the user's telemetry preferences. Export intended overrides in the
+    invoking process instead (`cmd/ox/main.go`).
 
 ### Changing the interface (CHANGE)
 
