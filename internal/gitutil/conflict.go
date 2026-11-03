@@ -107,9 +107,9 @@ func validateLedgerBlob(path string, data []byte, storage string) error {
 	if HasConflictMarkersBytes(data) {
 		return fmt.Errorf("%s contains an unresolved conflict", path)
 	}
-	// Inspect immutable tree bytes, including storage=git imports and session
-	// metadata. Pointer-only checks cannot protect alternate storage or headers.
-	if isSessionPath(path) {
+	// Inspect immutable tree bytes, including plain-Git plan text, storage=git
+	// imports and session metadata. Pointer-only checks cannot protect these.
+	if isSessionPath(path) || IsPlanTextPath(path) {
 		if err := secretguard.ValidateContent(path, secretScanView(path, data)); err != nil {
 			return fmt.Errorf("%s refused: %w", path, err)
 		}
@@ -442,6 +442,13 @@ func isSessionMetaPath(path string) bool {
 func isSessionPath(path string) bool {
 	parts := strings.Split(filepath.ToSlash(filepath.Clean(path)), "/")
 	return len(parts) >= 3 && parts[0] == "sessions" && parts[1] != ""
+}
+
+// IsPlanTextPath reports whether a Ledger path holds canonical plan Markdown.
+// Keep this scope in sync with planTextPathspec used by the history scan.
+func IsPlanTextPath(path string) bool {
+	path = filepath.ToSlash(filepath.Clean(path))
+	return strings.HasPrefix(path, "data/plans/") && strings.HasSuffix(path, "/plan.md")
 }
 
 func splitNUL(data []byte) []string {
