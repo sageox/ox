@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sageox/ox/internal/repotools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,23 +32,23 @@ func TestGiteaIdentity_RemoteTrust(t *testing.T) {
 	}{
 		{
 			name:     "unscoped environment token",
-			remote:   "https://attacker.example/gitea/repo.git",
+			remote:   "attacker.example/gitea/repo",
 			envToken: "env-token",
 		},
 		{
 			name:     "environment token for another instance",
-			remote:   "https://attacker.example/gitea/repo.git",
+			remote:   "attacker.example/gitea/repo",
 			envURL:   "https://git.example.com",
 			envToken: "env-token",
 		},
 		{
 			name:   "tea default for another instance",
-			remote: "https://attacker.example/gitea/repo.git",
+			remote: "attacker.example/gitea/repo",
 			teaURL: "https://git.example.com",
 		},
 		{
 			name:      "matching tea login ignores unrelated environment token",
-			remote:    "https://git.example.com/team/repo.git",
+			remote:    "git.example.com/team/repo",
 			envURL:    "https://other.example.com",
 			envToken:  "env-token",
 			teaURL:    "https://git.example.com/",
@@ -58,7 +57,7 @@ func TestGiteaIdentity_RemoteTrust(t *testing.T) {
 		},
 		{
 			name:      "matching environment instance",
-			remote:    "https://git.example.com/team/repo.git",
+			remote:    "git.example.com/team/repo",
 			envURL:    "https://git.example.com/",
 			envToken:  "env-token",
 			wantURL:   "https://git.example.com",
@@ -94,14 +93,13 @@ func TestGiteaIdentity_RemoteTrust(t *testing.T) {
 				}, nil
 			})
 
-			// Exercise the same remote normalization and instance selection as Resolve.
-			remote := repotools.NormalizeRemoteURL(tt.remote)
-			instanceURL := extractGiteaInstanceURL([]string{remote})
+			// Remotes use the normalized host/path form returned by repotools.GetRemoteURLs.
+			instanceURL := extractGiteaInstanceURL([]string{tt.remote})
 			assert.Equal(t, tt.wantURL, instanceURL)
-			assert.Equal(t, tt.wantURL != "", isGiteaInstance(remote))
+			assert.Equal(t, tt.wantURL != "", isGiteaInstance(tt.remote))
 			if tt.wantURL == "" {
 				// Credential selection must also fail closed if detection is bypassed.
-				identity, err := getGiteaIdentity("https://" + extractHost(remote))
+				identity, err := getGiteaIdentity("https://" + extractHost(tt.remote))
 				assert.Error(t, err)
 				assert.Nil(t, identity)
 				assert.Zero(t, requests)
