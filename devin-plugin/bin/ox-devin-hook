@@ -127,11 +127,7 @@ while i >= 0:
     except ValueError:
         pass
     i = t.find("{", i + 1)' 2>/dev/null)
-  [ -n "$sf" ] || {
-    log "session start failed: $(printf '%s' "$out" | grep -m1 -iE 'error|fail' | cut -c1-200)"
-    ox agent "$id" session abort --force >/dev/null 2>&1
-    return 1
-  }
+  [ -n "$sf" ] || { log "session start failed"; return 1; }
   echo "$repo" > "$SDIR/repo"; echo "$id" > "$SDIR/agent_id"; echo "$sf" > "$SDIR/session_file"
   ox status --json 2>/dev/null | python3 -c 'import sys,json;print((json.load(sys.stdin).get("ledger") or {}).get("path") or "")' > "$SDIR/ledger" 2>/dev/null
   log "recording agent=$id repo=$repo"
