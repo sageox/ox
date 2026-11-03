@@ -24,7 +24,7 @@ func TestCleanupPreservesUndiscoveredClaudeHookSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	cleanupStaleEmptyRecordings(project)
-	if removed := cleanupGhosts([]*RecordingState{state}); removed.Removed != 0 {
+	if removed := CleanupGhostSessions(project); removed.Removed != 0 {
 		t.Fatalf("ghost cleanup removed uncertain recording: %+v", removed)
 	}
 	if _, err := os.Stat(filepath.Join(state.SessionPath, recordingFile)); err != nil {
