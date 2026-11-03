@@ -218,3 +218,46 @@ func TestRetractOrphanedDrafts_KeepsDraftWithLocalRecording(t *testing.T) {
 	assert.DirExists(t, filepath.Join(ledger, "sessions", name),
 		"a stale draft with a recoverable local recording must not be retracted")
 }
+
+// cancelAfterRunner cancels the retraction's context once the named git
+// subcommand succeeds, as a daemon shutdown or sync timeout would.
+type cancelAfterRunner struct {
+	gitutil.GitRunner
+	cancel context.CancelFunc
+	after  string
+}
+
+func (r *cancelAfterRunner) RunGit(ctx context.Context, repoPath string, args ...string) (string, error) {
+	out, err := r.GitRunner.RunGit(ctx, repoPath, args...)
+	if err == nil && args[0] == r.after {
+		r.cancel()
+	}
+	return out, err
+}
+
+// A retraction interrupted after git rm must leave the placeholder restored and
+// retryable. The restore used to run on the canceled context, fail too, and
+// leave the deletion staged for the next autostash to conflict on (#1648).
+func TestRetractOrphanedDrafts_CancellationRestoresAndRetries(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real Git repositories and a retry")
+	}
+	s, ledger := newRetractScheduler(t)
+	const name = "2026-01-01T00-00-testuser-OxRetry"
+	commitStaleDraft(t, ledger, name, 120*time.Hour)
+	metaPath := filepath.Join(ledger, "sessions", name, "meta.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.git = &cancelAfterRunner{GitRunner: gitutil.DefaultRunner(), cancel: cancel, after: "rm"}
+
+	s.retractOrphanedDrafts(ctx, ledger)
+
+	require.ErrorIs(t, ctx.Err(), context.Canceled, "the context must be canceled after git rm")
+	assert.FileExists(t, metaPath)
+	assert.Empty(t, mustGit(t, ledger, "status", "--porcelain"), "no staged deletion left behind")
+
+	s.git = gitutil.DefaultRunner()
+	s.retractOrphanedDrafts(context.Background(), ledger)
+	assert.NoFileExists(t, metaPath)
+	assert.Equal(t, "session-draft: retract "+name, mustGit(t, ledger, "log", "-1", "--format=%s"))
+}
