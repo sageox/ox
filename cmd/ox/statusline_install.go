@@ -25,21 +25,29 @@ import (
 // project itself ships, and ox is not installed over one. It reports whether
 // any file changed.
 func syncProjectStatusLine(gitRoot string) (bool, error) {
+	root, err := os.OpenRoot(gitRoot)
+	if err != nil {
+		return false, err
+	}
+	defer root.Close()
+	return syncProjectStatusLineInRoot(root)
+}
+
+func syncProjectStatusLineInRoot(root *os.Root) (bool, error) {
 	changed := false
 
-	shared, sharedMap, err := readSharedClaudeSettings(gitRoot)
+	shared, sharedMap, err := readSettingsFileRawFrom(root.ReadFile, projectClaudeSettingsFile)
 	if err != nil {
 		return false, err
 	}
 	if claude.RemoveOxStatusLine(sharedMap) {
-		if err := writeSharedClaudeSettings(gitRoot, shared, sharedMap); err != nil {
+		if err := writeSettingsFileRawInRoot(root, projectClaudeSettingsFile, shared, sharedMap, sharedSettingsPerm); err != nil {
 			return false, err
 		}
 		changed = true
 	}
 
-	localPath := getLocalClaudeSettingsPath(gitRoot)
-	local, localMap, err := readSettingsFileRaw(localPath)
+	local, localMap, err := readSettingsFileRawFrom(root.ReadFile, projectClaudeLocalSettingsFile)
 	if err != nil {
 		return changed, err
 	}
@@ -60,12 +68,12 @@ func syncProjectStatusLine(gitRoot string) (bool, error) {
 		return changed, nil
 	}
 	if len(localMap) == 0 && len(local.Hooks) == 0 {
-		if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
+		if err := root.Remove(projectClaudeLocalSettingsFile); err != nil && !os.IsNotExist(err) {
 			return changed, err
 		}
 		return true, nil
 	}
-	if err := writeSettingsFileRaw(localPath, local, localMap, settingsPerm); err != nil {
+	if err := writeSettingsFileRawInRoot(root, projectClaudeLocalSettingsFile, local, localMap, settingsPerm); err != nil {
 		return changed, err
 	}
 	return true, nil
