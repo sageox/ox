@@ -591,6 +591,52 @@ func TestStore_Delete_NotFound(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestStore_Delete_ExactDirectoryName(t *testing.T) {
+	for _, name := range []string{".jsonl", "sibling.jsonl"} {
+		t.Run(name, func(t *testing.T) {
+			store, err := NewStore(t.TempDir())
+			require.NoError(t, err)
+			for _, sessionName := range []string{name, "sibling"} {
+				require.NoError(t, os.MkdirAll(filepath.Join(store.BasePath(), sessionName), 0o755))
+			}
+			siblingPath := filepath.Join(store.BasePath(), "sibling", "raw.jsonl")
+			siblingData := []byte("sibling transcript\n")
+			require.NoError(t, os.WriteFile(siblingPath, siblingData, 0o600))
+
+			require.NoError(t, store.Delete(name))
+
+			assert.NoDirExists(t, filepath.Join(store.BasePath(), name))
+			assert.DirExists(t, store.BasePath())
+			got, err := os.ReadFile(siblingPath)
+			require.NoError(t, err)
+			assert.Equal(t, siblingData, got)
+			// A missing suffixed directory must not fall back to its sibling.
+			assert.ErrorIs(t, store.Delete(name), ErrSessionNotFound)
+			assert.FileExists(t, siblingPath)
+		})
+	}
+}
+
+func TestStore_Delete_RejectsPathShapedNames(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewStore(root)
+	require.NoError(t, err)
+	outside := filepath.Join(root, "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(store.BasePath(), "sibling", "nested"), 0o755))
+	for _, name := range []string{
+		"", ".", "..", "../outside", outside, store.BasePath(),
+		"sibling/..", "sibling/../../outside", "sibling/nested", `sibling\nested`,
+	} {
+		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
+			require.Error(t, store.Delete(name))
+			assert.DirExists(t, store.BasePath())
+			assert.DirExists(t, outside)
+			assert.DirExists(t, filepath.Join(store.BasePath(), "sibling", "nested"))
+		})
+	}
+}
+
 func TestStore_DeleteSession(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := NewStore(tmpDir)
