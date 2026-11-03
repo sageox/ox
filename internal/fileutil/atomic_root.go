@@ -2,7 +2,9 @@ package fileutil
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -23,7 +25,7 @@ func AtomicWriteBytesInRoot(root *os.Root, name string, data []byte, perm os.Fil
 			return fmt.Errorf("too many symlinks in %q", name)
 		}
 		info, err := root.Lstat(name)
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			break
 		}
 		if err != nil {
@@ -59,7 +61,7 @@ func AtomicWriteBytesInRoot(root *os.Root, name string, data []byte, perm os.Fil
 			return fmt.Errorf("refusing to replace non-regular or read-only file %q", name)
 		}
 		perm = info.Mode().Perm()
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 

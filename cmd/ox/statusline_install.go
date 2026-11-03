@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 
 	claude "github.com/sageox/ox/internal/hooks/claude"
@@ -68,7 +70,7 @@ func syncProjectStatusLineInRoot(root *os.Root) (bool, error) {
 		return changed, nil
 	}
 	if len(localMap) == 0 && len(local.Hooks) == 0 {
-		if err := root.Remove(projectClaudeLocalSettingsFile); err != nil && !os.IsNotExist(err) {
+		if err := root.Remove(projectClaudeLocalSettingsFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return changed, err
 		}
 		return true, nil

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
@@ -1475,13 +1476,13 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 
 	// check what exists (Lstat to detect symlinks)
 	_, agentsErr := root.Stat(agentsPath)
-	if agentsErr != nil && !os.IsNotExist(agentsErr) {
+	if agentsErr != nil && !errors.Is(agentsErr, fs.ErrNotExist) {
 		return nil, agentsErr
 	}
 	agentsExists := agentsErr == nil
 
 	claudeInfo, claudeErr := root.Lstat(claudePath)
-	if claudeErr != nil && !os.IsNotExist(claudeErr) {
+	if claudeErr != nil && !errors.Is(claudeErr, fs.ErrNotExist) {
 		return nil, claudeErr
 	}
 	claudeExists := claudeErr == nil

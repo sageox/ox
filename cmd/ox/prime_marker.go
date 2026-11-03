@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -228,7 +230,7 @@ func EnsureOxPrimeMarker(gitRoot string) (bool, error) {
 	}
 
 	// neither file exists — seed AGENTS.md with both markers.
-	if _, err := root.Stat(agentsPath); os.IsNotExist(err) {
+	if _, err := root.Stat(agentsPath); errors.Is(err, fs.ErrNotExist) {
 		content := OxPrimeCheckBlock + "\n# AI Agent Instructions\n\n" + OxPrimeLine + "\n"
 		if err := fileutil.AtomicWriteBytesInRoot(root, agentsPath, []byte(content), 0644); err != nil {
 			return false, err

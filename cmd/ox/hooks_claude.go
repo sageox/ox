@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -30,7 +32,7 @@ func readSettingsFileRaw(path string) (*ClaudeSettings, map[string]json.RawMessa
 
 func readSettingsFileRawFrom(readFile func(string) ([]byte, error), path string) (*ClaudeSettings, map[string]json.RawMessage, error) {
 	data, err := readFile(path)
-	if os.IsNotExist(err) {
+	if errors.Is(err, fs.ErrNotExist) {
 		return &ClaudeSettings{
 			Hooks: make(map[string][]ClaudeHookEntry),
 		}, make(map[string]json.RawMessage), nil
