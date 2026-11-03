@@ -2045,6 +2045,10 @@ func (s *SyncScheduler) draftPublishedOnRemote(ctx context.Context, ledgerPath, 
 // message) and the next scan can rediscover the orphan and retry it.
 func (s *SyncScheduler) restoreDraftForRetry(ctx context.Context, ledgerPath, rel, name string, cause error) {
 	s.logger.Warn("retract orphaned draft: restoring after failed retraction", "session", name, "error", cause)
+	// Not the caller's ctx: when it is what failed the retraction, a restore on
+	// it fails too and leaves the deletion staged for the next autostash (#1648).
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	pathspec := ":(literal)" + rel
 	if _, err := s.git.RunGit(ctx, ledgerPath, "reset", "-q", "--", pathspec); err != nil {
 		s.logger.Warn("retract orphaned draft: reset failed", "session", name, "error", err)
