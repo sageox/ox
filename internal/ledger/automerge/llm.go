@@ -381,8 +381,10 @@ type claudeStreamMessage struct {
 }
 
 // runClaudeBinary spawns `claude --output-format stream-json
-// --permission-mode plan -p <prompt>` and returns the result message's
-// text. This is the production llmRunner; tests inject a fake.
+// --permission-mode plan -p` with the prompt on stdin and returns the result
+// message's text. This is the production llmRunner; tests inject a fake.
+// Keep private file contents out of process arguments, which may be visible
+// to other local users.
 //
 // Permission mode rationale: the merge prompt feeds untrusted ledger
 // content (potentially including hostile prompt-injection in conflict
@@ -391,8 +393,9 @@ type claudeStreamMessage struct {
 // Even if the model is tricked into trying to "fix" something, it
 // can't write to disk or execute commands.
 func runClaudeBinary(ctx context.Context, binary, prompt string) (string, error) {
-	args := []string{"--output-format", "stream-json", "--verbose", "--permission-mode", "plan", "-p", prompt}
+	args := []string{"--output-format", "stream-json", "--verbose", "--permission-mode", "plan", "-p"}
 	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Stdin = strings.NewReader(prompt)
 	setProcAttr(cmd) // process-group isolation so hung descendants get killed on cancel
 
 	stdoutPipe, err := cmd.StdoutPipe()

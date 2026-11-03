@@ -3,6 +3,9 @@ package automerge
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +39,48 @@ func TestBuildPrompt_AppendsNewlineWhenMissing(t *testing.T) {
 	prompt := buildPrompt("a.txt", []byte("no-trailing-newline"))
 	if !strings.Contains(prompt, "no-trailing-newline\nEND_FILE") {
 		t.Errorf("expected newline before END_FILE, got: %s", prompt)
+	}
+}
+
+func TestRunClaudeBinary_PromptViaStdin(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell script")
+	}
+
+	// All configured binaries use the same Claude-compatible runner.
+	for _, name := range []string{"claude", "gemini", "codex", "custom-llm"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			binary := filepath.Join(dir, name)
+			body := `#!/bin/sh
+set -eu
+printf '%s\n' "$@" > "$0.args"
+cat > "$0.stdin"
+printf '%s\n' '{"type":"result","result":"merged\n"}'
+`
+			if err := os.WriteFile(binary, []byte(body), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			prompt := buildPrompt("private-ledger.md", []byte("context: \"private\" $(not-a-command)\n<<<<<<< HEAD\nours-only\n=======\ntheirs-only\n>>>>>>> branch\ntail\n\n"))
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			merged, err := runClaudeBinary(ctx, binary, prompt)
+			if err != nil {
+				t.Fatalf("runClaudeBinary: %v", err)
+			}
+			if merged != "merged\n" {
+				t.Errorf("merged = %q, want %q", merged, "merged\n")
+			}
+			const wantArgs = "--output-format\nstream-json\n--verbose\n--permission-mode\nplan\n-p\n"
+			if got := readFile(t, dir, name+".args"); got != wantArgs {
+				t.Errorf("argv = %q, want only fixed flags %q (no prompt)", got, wantArgs)
+			}
+			if got := readFile(t, dir, name+".stdin"); got != prompt {
+				t.Errorf("stdin = %q, want intact prompt %q", got, prompt)
+			}
+		})
 	}
 }
 
