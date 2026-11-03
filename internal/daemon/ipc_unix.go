@@ -78,12 +78,17 @@ func dial(path string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	return authenticateDaemonPeer(conn, currentProcessUID())
+}
+
+// authenticateDaemonPeer closes conn unless its kernel-reported peer UID matches expectedUID.
+func authenticateDaemonPeer(conn net.Conn, expectedUID uint32) (net.Conn, error) {
 	uid, err := peerUID(conn)
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("authenticate daemon peer: %w", err)
 	}
-	if uid != currentProcessUID() {
+	if uid != expectedUID {
 		_ = conn.Close()
 		return nil, fmt.Errorf("authenticate daemon peer: UID mismatch")
 	}

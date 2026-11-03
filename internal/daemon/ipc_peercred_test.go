@@ -3,10 +3,12 @@
 package daemon
 
 import (
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -50,6 +52,34 @@ func TestPeerUID_SameProcessReturnsCallerUID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint32(os.Geteuid()), uid,
 		"peer UID over a same-process connection must match the caller's effective UID")
+
+	// Exercise UID rejection without root: the real kernel UID must not
+	// authenticate when a different UID is expected. dial always expects
+	// currentProcessUID(); the cross-UID subprocess test checks that wiring.
+	conn, err := authenticateDaemonPeer(client, currentProcessUID()+1)
+	require.ErrorContains(t, err, "authenticate daemon peer: UID mismatch")
+	assert.Nil(t, conn)
+	require.NoError(t, server.SetReadDeadline(time.Now().Add(time.Second)))
+	var b [1]byte
+	n, err := server.Read(b[:])
+	assert.Zero(t, n, "rejected peer must receive no IPC data")
+	assert.ErrorIs(t, err, io.EOF, "rejected connection must be closed")
+}
+
+func TestAuthenticateDaemonPeer_CredentialErrorClosesConnection(t *testing.T) {
+	// A non-Unix connection makes the kernel credential lookup fail closed.
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	require.NoError(t, server.SetReadDeadline(time.Now().Add(time.Second)))
+
+	conn, err := authenticateDaemonPeer(client, currentProcessUID())
+	require.ErrorContains(t, err, "authenticate daemon peer: peercred: not a unix socket")
+	assert.Nil(t, conn)
+	var b [1]byte
+	n, err := server.Read(b[:])
+	assert.Zero(t, n, "unauthenticated peer must receive no IPC data")
+	assert.ErrorIs(t, err, io.EOF, "failed credential lookup must close the connection")
 }
 
 // TestPeerUID_RejectsNonUnixConn verifies the fail-closed shape on the
