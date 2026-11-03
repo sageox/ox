@@ -1,0 +1,30 @@
+name: Alert on .amp/ changes to main
+
+# A same-day backstop for the admins who can bypass the CODEOWNERS ruleset on
+# .amp/ (see sageox/ox#1693): this fires on every commit that lands on main
+# under .amp/, however it got there, so a bypass is seen the same day instead
+# of silently. Needs the AMP_DIR_ALERT_SLACK_WEBHOOK secret (a Slack incoming
+# webhook for #amp-steward); the job fails loudly if it's missing.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.amp/**'
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.AMP_DIR_ALERT_SLACK_WEBHOOK }}
+          ACTOR: ${{ github.actor }}
+          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::error::AMP_DIR_ALERT_SLACK_WEBHOOK secret is not set. Add a Slack incoming webhook for #amp-steward in repo settings, or point this workflow at an existing org secret."
+            exit 1
+          fi
+          msg=":rotating_light: .amp/ changed on \`main\`, pushed by \`${ACTOR}\`: ${COMMIT_URL}"
+          payload=$(printf '{"text": %s}' "$(printf '%s' "$msg" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')")
+          curl -fsS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
