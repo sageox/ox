@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -38,10 +39,12 @@ func stubInstall(t *testing.T, loggedIn bool) (src string, logins *[]string, ret
 	return src, &calls, &stopped
 }
 
-func runInstallCmd(t *testing.T) string {
+func runInstallCmd(t *testing.T, args ...string) string {
 	t.Helper()
 	var out bytes.Buffer
 	c := &cobra.Command{}
+	c.Flags().Bool("json", false, "")
+	require.NoError(t, c.Flags().Parse(args))
 	c.SetOut(&out)
 	require.NoError(t, runInstall(c, nil))
 	return out.String()
@@ -206,4 +209,52 @@ func TestRunInstalledLogin(t *testing.T) {
 func TestIsNpmInstall(t *testing.T) {
 	assert.True(t, isNpmInstall("/home/u/.npm/_npx/abc/node_modules/@sageox/ox-linux-x64/bin/ox"))
 	assert.False(t, isNpmInstall("/usr/local/bin/ox"))
+}
+
+func TestRunInstallLeavesGlobalNpmAlone(t *testing.T) {
+	_, _, _ = stubInstall(t, true)
+	pkg := filepath.Join(t.TempDir(), "lib", "node_modules", "@sageox", "ox", "bin")
+	require.NoError(t, os.MkdirAll(pkg, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(pkg, "ox.js"), []byte("launcher"), 0o755))
+	bin := t.TempDir()
+	require.NoError(t, os.Symlink(filepath.Join(pkg, "ox.js"), filepath.Join(bin, "ox")))
+	installSystemBinDir = bin
+	t.Setenv("PATH", bin)
+
+	out := runInstallCmd(t)
+
+	assert.Contains(t, out, "installed globally with npm")
+	target, err := os.Readlink(filepath.Join(bin, "ox"))
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(pkg, "ox.js"), target, "npm's link is untouched")
+}
+
+func TestRunInstallFishPathHint(t *testing.T) {
+	_, _, _ = stubInstall(t, true)
+	installDirFlag = t.TempDir()
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("SHELL", "/usr/bin/fish")
+
+	out := runInstallCmd(t)
+
+	assert.Contains(t, out, "fish_add_path "+installDirFlag)
+	assert.NotContains(t, out, "export PATH")
+}
+
+func TestRunInstallJSON(t *testing.T) {
+	_, logins, _ := stubInstall(t, false)
+	dest := t.TempDir()
+	installDirFlag = dest
+	t.Setenv("PATH", t.TempDir())
+
+	out := runInstallCmd(t, "--json")
+
+	var got installResult
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	assert.Equal(t, "installed", got.Status)
+	assert.Equal(t, filepath.Join(dest, "ox"), got.OxPath)
+	assert.ElementsMatch(t, []string{"ox", "ox-adapter-codex"}, got.Binaries)
+	assert.False(t, got.LoggedIn)
+	assert.Equal(t, []string{"ox login", "cd <repo> && ox init"}, got.Next)
+	assert.Empty(t, *logins, "--json never starts the interactive login")
 }

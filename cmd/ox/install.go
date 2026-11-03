@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -56,8 +57,21 @@ func init() {
 	installCmd.Flags().BoolVar(&installSkipLogin, "skip-login", false, "install without running ox login (default: false)")
 }
 
+// installResult is the --json output of ox install.
+type installResult struct {
+	Status   string   `json:"status"` // installed, already_installed, homebrew, npm_global
+	OxPath   string   `json:"ox_path"`
+	Binaries []string `json:"binaries,omitempty"`
+	LoggedIn bool     `json:"logged_in"`
+	Next     []string `json:"next"`
+}
+
 func runInstall(cmd *cobra.Command, _ []string) error {
+	jsonOutput, _ := cmd.Flags().GetBool("json")
 	out := cmd.OutOrStdout()
+	if jsonOutput {
+		out = io.Discard
+	}
 
 	exe, err := installExecutable()
 	if err != nil {
@@ -67,9 +81,22 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		exe = resolved
 	}
 
-	oxPath, err := installBinaries(out, filepath.Dir(exe), installDirFlag)
+	result, err := installBinaries(out, filepath.Dir(exe), installDirFlag)
 	if err != nil {
 		return err
+	}
+	oxPath := result.OxPath
+
+	if jsonOutput {
+		// ox login is interactive, so --json reports the login state instead
+		result.LoggedIn = installLoggedIn()
+		if !result.LoggedIn {
+			result.Next = append(result.Next, "ox login")
+		}
+		result.Next = append(result.Next, "cd <repo> && ox init")
+		enc := json.NewEncoder(cmd.OutOrStdout())
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
 	}
 
 	ranLogin := false
@@ -88,27 +115,35 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 }
 
 // installBinaries copies ox and its adapters from srcDir into the install
-// directory and returns the path of the ox that later steps should run.
-func installBinaries(out io.Writer, srcDir, dirFlag string) (string, error) {
+// directory and reports the ox that later steps should run.
+func installBinaries(out io.Writer, srcDir, dirFlag string) (installResult, error) {
 	if dirFlag == "" {
 		if existing := lookPathOutsideNodeModules("ox"); existing != "" {
-			if resolved, err := filepath.EvalSymlinks(existing); err == nil && isHomebrewInstall(resolved) {
+			resolved, err := filepath.EvalSymlinks(existing)
+			switch {
+			case err != nil:
+			case isHomebrewInstall(resolved):
 				fmt.Fprintf(out, "ox is managed by Homebrew at %s; update it with %s\n",
 					existing, cli.StyleCommand.Render("brew upgrade sageox/tap/ox"))
-				return existing, nil
+				return installResult{Status: "homebrew", OxPath: existing}, nil
+			case strings.Contains(filepath.ToSlash(resolved), "/node_modules/"):
+				// a global npm install owns this path; replacing it would break npm uninstall
+				fmt.Fprintf(out, "ox is installed globally with npm at %s; update it with %s\n",
+					existing, cli.StyleCommand.Render("npm install -g @sageox/ox@latest"))
+				return installResult{Status: "npm_global", OxPath: existing}, nil
 			}
 		}
 	}
 
 	destDir, err := resolveInstallTarget(dirFlag)
 	if err != nil {
-		return "", err
+		return installResult{}, err
 	}
 	oxPath := filepath.Join(destDir, "ox")
 	if sameDir(srcDir, destDir) {
 		fmt.Fprintf(out, "ox is already installed at %s\n", oxPath)
 		warnInstallPath(out, destDir, oxPath)
-		return oxPath, nil
+		return installResult{Status: "already_installed", OxPath: oxPath}, nil
 	}
 
 	_, statErr := os.Stat(oxPath)
@@ -116,10 +151,10 @@ func installBinaries(out io.Writer, srcDir, dirFlag string) (string, error) {
 
 	names, err := upgrade.InstallFromDir(srcDir, destDir)
 	if errors.Is(err, upgrade.ErrNotWritable) {
-		return "", fmt.Errorf("%w\n  Choose another directory with: ox install --dir <dir>", err)
+		return installResult{}, fmt.Errorf("%w\n  Choose another directory with: ox install --dir <dir>", err)
 	}
 	if err != nil {
-		return "", err
+		return installResult{}, err
 	}
 	if replaced {
 		// a daemon still running the replaced ox restarts on the new one
@@ -128,7 +163,7 @@ func installBinaries(out io.Writer, srcDir, dirFlag string) (string, error) {
 
 	cli.PrintSuccessTo(out, fmt.Sprintf("Installed ox%s to %s", adapterSuffix(len(names)-1), destDir))
 	warnInstallPath(out, destDir, oxPath)
-	return oxPath, nil
+	return installResult{Status: "installed", OxPath: oxPath, Binaries: names}, nil
 }
 
 func adapterSuffix(n int) string {
@@ -190,6 +225,11 @@ func warnInstallPath(out io.Writer, destDir, oxPath string) {
 		}
 	}
 	if !onPath {
+		if filepath.Base(os.Getenv("SHELL")) == "fish" {
+			cli.PrintWarningTo(out, destDir+" is not on your PATH. Add it with:")
+			fmt.Fprintf(out, "  fish_add_path %s\n", destDir)
+			return
+		}
 		cli.PrintWarningTo(out, destDir+" is not on your PATH. Add this line to your shell profile:")
 		fmt.Fprintf(out, "  export PATH=\"%s:$PATH\"\n", destDir)
 		return
