@@ -52,6 +52,9 @@ func requirePublicationMask(t *testing.T, path string, resume bool) {
 }
 
 func TestIncrementalPublicationMasksPausedRawAndArtifacts(t *testing.T) {
+	adapters.Register(&testClaudeCodeAdapter{})
+	t.Cleanup(func() { adapters.Unregister("claude-code") })
+
 	for _, resume := range []bool{false, true} {
 		name := "pause then stop"
 		if resume {
@@ -168,6 +171,9 @@ func TestPublicationMaskFailsClosedAndPreservesCache(t *testing.T) {
 }
 
 func TestIncrementalPublicationMaskRejectsMalformedCache(t *testing.T) {
+	adapters.Register(&testClaudeCodeAdapter{})
+	t.Cleanup(func() { adapters.Unregister("claude-code") })
+
 	root := setupIncrementalTest(t)
 	state := startTestRecording(t, root, "OxMask", "claude-code")
 	state.EntryCount = 3
@@ -187,6 +193,9 @@ func TestIncrementalPublicationMaskRejectsMalformedCache(t *testing.T) {
 }
 
 func TestPublicationMaskAllPausedAndShortenedCacheFailsClosed(t *testing.T) {
+	adapters.Register(&testClaudeCodeAdapter{})
+	t.Cleanup(func() { adapters.Unregister("claude-code") })
+
 	root := setupIncrementalTest(t)
 	state := startTestRecording(t, root, "OxMask", "claude-code")
 	state.EntryCount = 3
