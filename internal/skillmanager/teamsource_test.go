@@ -484,3 +484,21 @@ func TestLoadTeamSkill_RefusesAnEntrySwappedAfterDiscovery(t *testing.T) {
 	}
 	require.Contains(t, err.Error(), "note.md", "the error should name the tampered entry")
 }
+
+// A project without a team context still digests its approval policy: an
+// unreadable approval store must fail the revision instead of certifying the
+// old installation.
+func TestTeamSkillSource_IncompleteCatalogDigestRefusesUnreadableApprovals(t *testing.T) {
+	project := t.TempDir()
+	source, _, err := catalogForRepo(project)
+	require.NoError(t, err)
+	_, err = source.Digest()
+	require.NoError(t, err)
+
+	path := teamskills.ApprovalPath(project)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o644))
+
+	_, err = source.Digest()
+	require.ErrorContains(t, err, "parse team skill approvals")
+}
