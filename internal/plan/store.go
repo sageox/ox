@@ -43,6 +43,7 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/planid"
+	"github.com/sageox/ox/internal/secretguard"
 )
 
 const (
@@ -294,9 +295,10 @@ func priorSaveOfSource(ledger, sourcePath string) (string, Meta, bool) {
 }
 
 // Save writes a captured plan into the ledger under data/plans/<dated-slug>/.
-// It writes plan.md (from in.Raw), annotations.json (res), and meta.json as
-// plain git-tracked text. plan.html is written ONLY when html != nil, and always
-// as PLAIN bytes — dehydration of a large render to an LFS pointer is the CLI
+// It redacts plan text and topic before writing plan.md (from in.Raw),
+// annotations.json (res), and meta.json as plain git-tracked text. Unsafe
+// companion content refuses the save. plan.html is written ONLY when html != nil,
+// and always as PLAIN bytes — dehydration of a large render to an LFS pointer is the CLI
 // caller's job (PointerizeHTML), post-upload. Save never renders HTML, never
 // uploads, and never commits — it only materializes files in the working tree.
 // Returns the absolute plan directory.
@@ -329,6 +331,39 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		return "", "", fmt.Errorf("no ledger configured for %q: cannot save plan", gitRoot)
 	}
 
+	// All capture and explicit-save paths meet here. Redact before deriving a
+	// slug or writing anything; the topic is also copied into metadata/events.
+	in.Raw, _ = secretguard.RedactText(in.Raw)
+	meta.Topic, _ = secretguard.RedactText(meta.Topic)
+	// Stamp the current schema version onto both long-lived artifacts so a
+	// future reader can detect and migrate an older on-disk layout.
+	meta.Kind = KindOrDefault(meta.Kind)
+	meta.SchemaVersion = SchemaVersion
+	res.SchemaVersion = SchemaVersion
+	annotations, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		return "", "", fmt.Errorf("marshal annotations: %w", err)
+	}
+	metadata, err := json.Marshal(meta)
+	if err != nil {
+		return "", "", fmt.Errorf("marshal plan metadata: %w", err)
+	}
+	// Independently authored/derived companions may still contain the original
+	// secret. Refuse rather than persist a second copy or rewrite structured data.
+	for _, artifact := range []struct {
+		name string
+		data []byte
+	}{
+		{planMDFile, []byte(in.Raw)},
+		{annotationsFile, annotations},
+		{planMetaFile, metadata},
+		{planHTMLFile, html},
+	} {
+		if err := secretguard.ValidateContent(artifact.name, artifact.data); err != nil {
+			return "", "", fmt.Errorf("plan save: %s refused: %w", artifact.name, err)
+		}
+	}
+
 	if meta.CreatedAt.IsZero() {
 		meta.CreatedAt = time.Now().UTC()
 	}
@@ -337,12 +372,6 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		return "", "", err
 	}
 	meta = resolved
-
-	// Stamp the current schema version onto both long-lived artifacts so a
-	// future reader can detect and migrate an older on-disk layout.
-	meta.Kind = KindOrDefault(meta.Kind)
-	meta.SchemaVersion = SchemaVersion
-	res.SchemaVersion = SchemaVersion
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", "", fmt.Errorf("create plan dir=%s: %w", dir, err)
@@ -387,10 +416,6 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		}
 
 		// annotations.json — the searchable badge data (Result).
-		annotations, err := json.MarshalIndent(res, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal annotations: %w", err)
-		}
 		if err := os.WriteFile(filepath.Join(dir, annotationsFile), annotations, 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", annotationsFile, err)
 		}
@@ -623,6 +648,9 @@ func SavedHTML(gitRoot string, meta Meta, html []byte) ([]byte, Meta, error) {
 // the CLI commits any not-yet-committed prior revision before Save overwrites
 // it — or refuses the save when it cannot (see savePlanArtifacts).
 func resolveSaveDir(ledger string, meta Meta) (string, Meta, error) {
+	// Directory previews and pre-upload HTML stamping must agree with Save's
+	// redacted topic, including when a credential appeared in the plan title.
+	meta.Topic, _ = secretguard.RedactText(meta.Topic)
 	plansDir := paths.LedgerPlansDir(ledger)
 	if meta.Slug != "" {
 		// The full dated directory name is the one spelling an AmbiguousSlugError
