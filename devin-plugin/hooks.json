@@ -1,0 +1,50 @@
+{
+  "SessionStart": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "exec bash \"${DEVIN_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/bin/ox-devin-hook\" SessionStart",
+          "timeout": 120
+        }
+      ]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "exec bash \"${DEVIN_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/bin/ox-devin-hook\" UserPromptSubmit",
+          "timeout": 60
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "exec bash \"${DEVIN_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/bin/ox-devin-hook\" PostToolUse",
+          "timeout": 60
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "exec bash \"${DEVIN_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/bin/ox-devin-hook\" Stop",
+          "timeout": 120
+        }
+      ]
+    }
+  ]
+}
