@@ -68,6 +68,27 @@ func TestSaveRefusesUnsafeCompanionsBeforeWriting(t *testing.T) {
 	}
 }
 
+func TestSaveGeneratedHTMLSecretGuard(t *testing.T) {
+	const canary = "oxb_" + "syntheticToken123456789"
+	for _, content := range []string{"Ordinary deployment steps.", canary} {
+		t.Run(content, func(t *testing.T) {
+			withLedger(t, t.TempDir())
+			in := Parse("# Deployment plan\n\n" + content)
+			page, err := RenderHTMLOpts(in, Result{}, RenderOptions{Slug: "deployment-plan"})
+			require.NoError(t, err)
+			dir, _, err := Save("/fake/root", in, Result{}, page, Meta{Topic: "Deployment plan"})
+			if content == canary {
+				require.ErrorContains(t, err, "plan.html refused")
+				require.NotContains(t, err.Error(), canary)
+				require.Empty(t, dir)
+			} else {
+				require.NoError(t, err, "generated review controls must not look like credentials")
+				require.FileExists(t, filepath.Join(dir, planHTMLFile))
+			}
+		})
+	}
+}
+
 func TestPlanHTMLUploadRefusesSecretsBeforeNetwork(t *testing.T) {
 	const canary = "oxb_" + "syntheticToken123456789"
 	page := []byte(strings.Repeat(" ", htmlLFSThreshold) + "<p>" + canary + "</p>")
