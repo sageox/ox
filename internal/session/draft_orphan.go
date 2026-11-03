@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/sageox/ox/internal/lfs"
 )
@@ -27,22 +28,24 @@ import (
 // git-removing a live session's placeholder, and that asymmetry says wait.
 const OrphanedDraftAge = 72 * time.Hour
 
-// ValidateDraftSessionName allows only ASCII letters, digits, '-', '_', and '.'
-// (but never '..') before a name is used for draft writes or removal. Ledger
-// entries are untrusted: filesystem path components can contain Git wildcards.
-// Git callers must still use literal pathspecs, not rely on this allowlist.
+// ValidateDraftSessionName requires a single path component free of control
+// characters and of the characters sanitizeFilename strips from generated
+// names (including the Git wildcards '*', '?', '[' and ']' and pathspec magic
+// ':').
+// Every name GenerateSessionName produces passes, including usernames with
+// spaces or non-ASCII letters. Ledger entries are untrusted, so Git callers
+// must still use literal pathspecs rather than rely on this check.
 func ValidateDraftSessionName(sessionName string) error {
 	if sessionName == "" || sessionName == "." || sessionName == ".." {
 		return fmt.Errorf("invalid session name %q", sessionName)
 	}
-	if strings.ContainsAny(sessionName, `/\`) || strings.Contains(sessionName, "..") {
+	if strings.ContainsAny(sessionName, `/\`) {
 		return fmt.Errorf("session name %q must be a single path component", sessionName)
 	}
 	for _, c := range sessionName {
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' {
-			continue
+		if unicode.IsControl(c) || strings.ContainsRune(`:*?[]"<>|`, c) {
+			return fmt.Errorf("session name %q contains disallowed character %q", sessionName, c)
 		}
-		return fmt.Errorf("session name %q must contain only ASCII letters, digits, '-', '_', and '.'", sessionName)
 	}
 	return nil
 }

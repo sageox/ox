@@ -11,13 +11,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Ledger directory names arrive from teammates by git; only generated-name
-// characters may reach a draft git pathspec or RemoveAll.
-func TestValidateDraftSessionName_AllowsOnlyGeneratedNameCharacters(t *testing.T) {
-	require.NoError(t, ValidateDraftSessionName(GenerateSessionName("Ox7f3a", "ryan")))
-	require.NoError(t, ValidateDraftSessionName("2026-01-06T14-32-r.y_an-Ox7f3a"))
-	for _, name := range []string{"*", "victi?", "[v]ictim", ":(glob)x", "caf\u00e9", "a b"} {
-		assert.Error(t, ValidateDraftSessionName(name), name)
+// Ledger directory names arrive from teammates by git. Every name ox
+// generates must pass; separators, control characters, and the wildcard and
+// pathspec-magic characters generation strips must not.
+func TestValidateDraftSessionName_AcceptsGeneratedNamesOnly(t *testing.T) {
+	for _, user := range []string{"ryan", "José", "Dana Ñ [dev]", "r.y_an", "a..b"} {
+		name := GenerateSessionName("Ox7f3a", user)
+		assert.NoError(t, ValidateDraftSessionName(name), name)
+	}
+	for _, name := range []string{"", ".", "..", "a/b", `a\b`, "*", "victi?", "[v]ictim", ":(glob)x", "a\x00b", "a\nb", "a|b"} {
+		assert.Error(t, ValidateDraftSessionName(name), "%q", name)
 	}
 }
 

@@ -794,13 +794,15 @@ func TestDraftCommit_RefusesWhenWorktreeChangedAfterStaging(t *testing.T) {
 // tree. That was reachable only by accident before (the paths first require a
 // draft meta.json to exist), which is not a guarantee.
 func TestDraftSessionName_RejectsPathTraversal(t *testing.T) {
-	for _, name := range []string{"", ".", "..", "../evil", "a/b", `a\b`, "foo/../..", "*", "session?", "[abc]", "a]", ":(glob)*", "a\x00b", "a b"} {
+	for _, name := range []string{"", ".", "..", "../evil", "a/b", `a\b`, "foo/../..", "*", "session?", "[abc]", "a]", ":(glob)*", "a\x00b"} {
 		t.Run("name="+name, func(t *testing.T) {
 			require.Error(t, validateDraftSessionName(name))
 		})
 	}
 	require.NoError(t, validateDraftSessionName("2026-01-01T00-00-testuser-OxOk01"))
 	require.NoError(t, validateDraftSessionName("2026-01-01T00-00-test_user.name-OxOk01"))
+	// generated from usernames with spaces or non-ASCII letters
+	require.NoError(t, validateDraftSessionName("2026-01-01T00-00-José Ñ-OxOk01"))
 }
 
 // TestDraftSessionName_GuardIsWiredIntoEveryWriter proves the validation is not
