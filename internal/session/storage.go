@@ -16,7 +16,8 @@ type Storage interface {
 	// List returns all session infos, sorted by date descending.
 	List() ([]SessionInfo, error)
 
-	// Delete removes a session by filename.
+	// Delete removes a session by its exact name as listed by List; a
+	// ".jsonl" filename is not mapped to its session directory.
 	Delete(filename string) error
 
 	// Exists checks if a session with the given filename exists.

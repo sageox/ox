@@ -100,8 +100,8 @@ func removeAllSessions(store *session.Store, force bool) error {
 
 	var removed int
 	for _, t := range sessions {
-		if err := store.Delete(t.Filename); err != nil {
-			fmt.Printf("  Warning: failed to remove %s: %v\n", t.Filename, err)
+		if err := store.Delete(t.SessionName); err != nil {
+			fmt.Printf("  Warning: failed to remove %s: %v\n", t.SessionName, err)
 		} else {
 			removed++
 		}
