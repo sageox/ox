@@ -1075,51 +1075,22 @@ const orphanStubGracePeriod = 1 * time.Hour
 // content (no raw.jsonl). These accumulate when agents start sessions but exit
 // without calling session stop. Best-effort: errors are logged but not returned.
 func cleanupStaleEmptyRecordings(projectRoot string) {
-	states, err := LoadAllRecordingStates(projectRoot)
-	if err != nil {
-		return
-	}
-
-	for _, state := range states {
-		if state.SourceRejected {
-			continue // a quarantined source is not a disposable empty stub
-		}
-		if time.Since(state.StartedAt) < staleEmptyThreshold {
-			continue
-		}
-		if state.SessionPath == "" {
-			continue
-		}
-		if IsHeld(state.SessionPath) {
-			continue // a held session is the coworker's to remove, by name
-		}
-		// A native log can hold the session even when the watcher never wrote
-		// an entry. Claude hook discovery can fail with an unverifiable cwd,
-		// leaving SessionFile empty despite a real native conversation.
-		if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail" || state.AdapterName == "claude-code") {
-			continue
-		}
-		// only clean phantom stubs — a header-only or missing raw.jsonl. Since
-		// eager writes at recording start (ses_/c link, header, context-trace),
-		// an abandoned session leaves a dir with content, so a plain os.Stat
-		// "has raw.jsonl" test kept every phantom alive. Classify instead:
-		// substantive content is a recoverable orphan and a content-store
-		// pointer's transcript lives elsewhere — never delete those.
-		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
-		switch ClassifyRawFile(rawPath) {
-		case RawSubstantive, RawPointerStub:
-			continue // real or recoverable data — don't auto-delete
-		case RawMissing, RawHeaderOnly:
-			// phantom — fall through to removal
-		}
-		// remove the whole stub dir (header raw.jsonl + context-trace.jsonl +
-		// .recording.json). os.RemoveAll, not removeEmptyDir: the dir is not
-		// empty, which is exactly why these accumulated.
-		if err := os.RemoveAll(state.SessionPath); err != nil {
-			slog.Debug("cleanup stale empty recording", "path", state.SessionPath, "error", err)
-			continue
-		}
-		slog.Debug("cleaned stale empty recording", "session", filepath.Base(state.SessionPath))
+	for _, dir := range cacheSessionsDirs(projectRoot) {
+		cleanupRecordingStatesInDir(dir, func(state *RecordingState, sessionDir *os.Root) bool {
+			if state.SourceRejected || time.Since(state.StartedAt) < staleEmptyThreshold {
+				return false
+			}
+			if _, err := sessionDir.Lstat(HeldMarkerFile); !errors.Is(err, os.ErrNotExist) {
+				return false // a held session is the coworker's to remove, by name
+			}
+			// A native log can hold the session even when the watcher never wrote
+			// an entry. Claude hook discovery can fail with an unverifiable cwd,
+			// leaving SessionFile empty despite a real native conversation.
+			if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail" || state.AdapterName == "claude-code") {
+				return false
+			}
+			return true
+		})
 	}
 }
 
@@ -1138,94 +1109,46 @@ type GhostCleanupResult struct {
 // orphans that need recovery, not cleanup.
 //
 // Safe to call from daemon anti-entropy, doctor --fix, or session start.
-// Uses projectRoot to find session directories via sessionsSearchPaths.
+// Only scans local caches; the legacy in-repository fallback is read-only.
 func CleanupGhostSessions(projectRoot string) GhostCleanupResult {
-	states, err := LoadAllRecordingStates(projectRoot)
-	if err != nil {
-		return GhostCleanupResult{}
+	var result GhostCleanupResult
+	for _, dir := range cacheSessionsDirs(projectRoot) {
+		r := CleanupGhostSessionsInDir(dir)
+		result.Removed += r.Removed
+		result.Names = append(result.Names, r.Names...)
 	}
-	return cleanupGhosts(states)
+	return result
 }
 
 // CleanupGhostSessionsInDir removes ghost sessions from a specific sessions directory.
 // Used by the daemon which has a ledgerPath rather than a projectRoot.
 func CleanupGhostSessionsInDir(sessionsDir string) GhostCleanupResult {
-	states, err := loadRecordingStatesFromDir(sessionsDir)
-	if err != nil {
-		return GhostCleanupResult{}
-	}
-	return cleanupGhosts(states)
-}
-
-// cleanupGhosts is the shared implementation for ghost session cleanup.
-func cleanupGhosts(states []*RecordingState) GhostCleanupResult {
-	var result GhostCleanupResult
-
-	for _, state := range states {
-		if state.SessionPath == "" || state.SourceRejected {
-			continue
+	return cleanupRecordingStatesInDir(sessionsDir, func(state *RecordingState, _ *os.Root) bool {
+		if state.SourceRejected {
+			return false
 		}
 
 		// skip if parent PID is unknown — can't determine liveness
 		if state.ParentPID <= 0 {
-			continue
+			return false
 		}
 
 		// skip if parent process is alive — still recording
 		if state.IsAgentAlive() {
-			continue
+			return false
 		}
 
 		// grace period: don't remove young recordings even with dead PIDs.
 		// FindAgentAncestorPID() can return a transient shell PID that dies
 		// immediately; give the recording time to establish before cleanup.
 		if !state.StartedAt.IsZero() && time.Since(state.StartedAt) < GhostGracePeriod {
-			continue
+			return false
 		}
 		if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail" || state.AdapterName == "claude-code") {
-			continue // native source may exist even before hook discovery succeeds
+			return false // native source may exist even before hook discovery succeeds
 		}
-
-		// parent is dead — check if there's any recoverable data. Classify
-		// rather than calling HasSubstantiveEntries, because "no substantive
-		// entries" and "nothing to recover" are NOT the same thing here.
-		//
-		// Only a header-only or missing raw.jsonl is a ghost. A pointer stub
-		// is a session whose transcript lives in the content store, so it has
-		// very much got recoverable data — deleting it (and, via the
-		// os.RemoveAll below, its whole session directory) would destroy a
-		// synced session. HasSubstantiveEntries reports false for pointers as
-		// of GH #710, so this must not be collapsed back into that call.
-		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
-		switch ClassifyRawFile(rawPath) {
-		case RawSubstantive:
-			// has session entries — this is an orphan, not a ghost.
-			// don't delete: it has recoverable data.
-			continue
-		case RawPointerStub:
-			// content lives in the content store; never a ghost.
-			continue
-		case RawMissing, RawHeaderOnly:
-			// fall through to ghost cleanup
-		}
-
-		// ghost confirmed: dead PID, no meaningful data. Remove the whole dir
-		// (marker + header raw.jsonl + context-trace.jsonl). os.RemoveAll, not
-		// removeEmptyDir: eager writes at recording start mean the dir is never
-		// empty, so removeEmptyDir left the marker gone but the stub behind —
-		// invisible to every later pass and the source of the accumulation.
-		sessionName := filepath.Base(state.SessionPath)
-		if err := os.RemoveAll(state.SessionPath); err != nil {
-			slog.Debug("ghost cleanup: failed to remove stub dir", "session", sessionName, "error", err)
-			continue
-		}
-
-		result.Removed++
-		result.Names = append(result.Names, sessionName)
-		slog.Debug("ghost cleanup: removed", "session", sessionName, "parent_pid", state.ParentPID)
-	}
-
-	return result
+		return true
+	})
 }
 
 // CleanupOrphanedStubs sweeps a project's LOCAL CACHE session dirs for
@@ -1245,9 +1168,11 @@ func CleanupOrphanedStubs(projectRoot string) GhostCleanupResult {
 // cacheSessionsDirs returns the LOCAL CACHE session directories for a project —
 // the ledger cache and XDG cache locations — excluding the legacy in-repo
 // sessions dir (projectRoot/sessions). The exclusion is load-bearing:
-// CleanupOrphanedStubsInDir uses os.RemoveAll, and the legacy path is the user's
-// own repo, never safe to reap.
+// Recursive cleanup must never reap the user's own repository.
 func cacheSessionsDirs(projectRoot string) []string {
+	if projectRoot == "" {
+		return nil
+	}
 	legacy := filepath.Join(projectRoot, "sessions")
 	var out []string
 	for _, p := range sessionsSearchPaths(projectRoot) {
@@ -1263,7 +1188,7 @@ func cacheSessionsDirs(projectRoot string) []string {
 // from a LOCAL CACHE sessions directory, whether or not they still carry a
 // .recording.json marker. This is the reclaimer for the accumulation that the
 // marker-based ghost cleanup structurally cannot see: once a header-only
-// session's marker is removed at finalize, loadRecordingStatesFromDir skips the
+// session's marker is removed at finalize, marker-based cleanup skips the
 // dir forever, and removeEmptyDir cannot delete it because the dir still holds
 // raw.jsonl (the header) plus context-trace.jsonl.
 //
@@ -1347,33 +1272,75 @@ func CleanupOrphanedStubsInDir(cacheSessionsDir string) GhostCleanupResult {
 	return result
 }
 
-// loadRecordingStatesFromDir loads recording states from a single sessions directory.
-func loadRecordingStatesFromDir(sessionsDir string) ([]*RecordingState, error) {
-	entries, err := os.ReadDir(sessionsDir)
-	if err != nil {
-		return nil, err
+// cleanupRecordingStatesInDir only removes immediate, scanned children of the
+// supplied session root. Serialized SessionPath values are never filesystem
+// authority. Root-scoped reads and removal prevent symlinks (including changes
+// during cleanup) from redirecting classification or deletion outside the root.
+func cleanupRecordingStatesInDir(sessionsDir string, eligible func(*RecordingState, *os.Root) bool) GhostCleanupResult {
+	var result GhostCleanupResult
+	info, err := os.Lstat(sessionsDir)
+	if err != nil || !info.IsDir() {
+		return result // do not follow a symlinked sessions root
 	}
+	root, err := os.OpenRoot(sessionsDir)
+	if err != nil {
+		return result
+	}
+	defer root.Close()
+	openedInfo, err := root.Stat(".")
+	if err != nil || !os.SameFile(info, openedInfo) {
+		return result
+	}
+	dir, err := root.Open(".")
+	if err != nil {
+		return result
+	}
+	entries, err := dir.ReadDir(-1)
+	dir.Close()
+	if err != nil {
+		return result
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 
-	var states []*RecordingState
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		recordingPath := filepath.Join(sessionsDir, entry.Name(), recordingFile)
-		data, readErr := os.ReadFile(recordingPath)
-		if readErr != nil {
+		// A directory entry name cannot be the root, an absolute path or a
+		// traversal. Recheck its type before opening; RemoveAll never follows
+		// a final symlink even if the entry changes after this check.
+		if info, err := root.Lstat(entry.Name()); err != nil || !info.IsDir() {
 			continue
 		}
-		state, jsonErr := ParseRecordingState(recordingPath, data)
-		if jsonErr != nil {
+		sessionDir, err := root.OpenRoot(entry.Name())
+		if err != nil {
 			continue
 		}
-		if state.SessionPath == "" {
-			state.SessionPath = filepath.Join(sessionsDir, entry.Name())
+		remove := false
+		if data, err := sessionDir.ReadFile(recordingFile); err == nil {
+			// Cleanup only reads markers; do not repair untrusted files.
+			if state, _, err := decodeRecordingState(data); err == nil && eligible(state, sessionDir) {
+				switch classifyRawContent(sessionDir.Open("raw.jsonl")) {
+				case RawMissing, RawHeaderOnly:
+					remove = true
+				}
+			}
 		}
-		states = append(states, state)
+		sessionDir.Close()
+		if !remove {
+			continue // real, pointer-backed, unreadable or ineligible recording
+		}
+		// Remove the whole stub, not just its marker: eager recording writes
+		// leave header and context files even when no turns were captured.
+		if err := root.RemoveAll(entry.Name()); err != nil {
+			slog.Debug("recording cleanup: failed to remove stub dir", "session", entry.Name(), "error", err)
+			continue
+		}
+		result.Removed++
+		result.Names = append(result.Names, entry.Name())
+		slog.Debug("recording cleanup: removed", "session", entry.Name())
 	}
-	return states, nil
+	return result
 }
 
 // PreparedRecordingIdentity holds a project-scoped identity check performed
