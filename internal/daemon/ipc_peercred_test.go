@@ -38,7 +38,8 @@ func TestPeerUID_SameProcessReturnsCallerUID(t *testing.T) {
 		}
 	}()
 
-	client, err := net.Dial("unix", sock)
+	// The shared client dial must authenticate and accept a same-UID server.
+	client, err := dial(sock)
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -100,4 +101,31 @@ func TestListen_ParentDirIs0700(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0700), info.Mode().Perm(),
 		"parent must be 0700 even when it pre-existed with looser perms")
+}
+
+func TestListen_RejectsSymlinkParent(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	require.NoError(t, os.Mkdir(target, 0755))
+	marker := filepath.Join(target, "t.sock")
+	require.NoError(t, os.WriteFile(marker, []byte("do not remove"), 0600))
+	parent := filepath.Join(dir, "link")
+	require.NoError(t, os.Symlink(target, parent))
+
+	ln, err := listen(filepath.Join(parent, "t.sock"))
+	if ln != nil {
+		ln.Close()
+	}
+	require.ErrorContains(t, err, "socket directory")
+	data, err := os.ReadFile(marker)
+	require.NoError(t, err)
+	assert.Equal(t, "do not remove", string(data))
+}
+
+func TestListen_RejectsRelativePath(t *testing.T) {
+	ln, err := listen("daemon.sock")
+	if ln != nil {
+		ln.Close()
+	}
+	require.ErrorContains(t, err, "absolute")
 }
