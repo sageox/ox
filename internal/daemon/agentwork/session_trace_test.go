@@ -26,7 +26,7 @@ import (
 )
 
 func TestTraceFinalizeDoorsPublishPointers(t *testing.T) {
-	for _, door := range []string{"normal", "orphan-upload-only", "invalid-trace", "missing-stop", "orphan-missing-stop"} {
+	for _, door := range []string{"normal", "orphan-upload-only", "invalid-trace", "missing-stop", "orphan-missing-stop", "synchronized-forged-trace"} {
 		t.Run(door, func(t *testing.T) {
 			t.Setenv("XDG_CACHE_HOME", t.TempDir())
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -75,12 +75,23 @@ func TestTraceFinalizeDoorsPublishPointers(t *testing.T) {
 			runGitCmd(t, ledger, "remote", "set-url", "--push", "origin", bare)
 			project := t.TempDir()
 			require.NoError(t, gitserver.SaveCredentialsForEndpoint(endpoint.GetForProject(project), gitserver.GitCredentials{Username: "test", Token: "local-test"}))
-			const name = "2026-09-22T10-00-test-OxTraceDoor"
 			const nativeID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-			cache := filepath.Join(ledger, ".sageox", "cache", "sessions", name)
-			require.NoError(t, os.MkdirAll(cache, 0700))
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(configPath, []byte("trace:\n  enabled: true\n"), 0600))
+			t.Setenv("OX_USER_CONFIG", configPath)
+			local, err := session.StartRecording(t.TempDir(), session.StartRecordingOptions{
+				AgentID: "OxTraceDoor", AgentSessionID: nativeID, AdapterName: "claude-code", Username: "test",
+				RepoContextPath: filepath.Join(ledger, ".sageox", "cache"),
+			})
+			require.NoError(t, err)
+			require.NotNil(t, local.Trace)
+			cache := local.SessionPath
+			name := filepath.Base(cache)
+			require.NoError(t, os.Remove(filepath.Join(cache, ".recording.json")))
 			now := time.Now().UTC()
-			capture := &model.Capture{Boundaries: []model.Boundary{{Action: "start", At: now.Add(-time.Minute), Offsets: map[string]model.Offsets{nativeID: {}}}}}
+			if door == "synchronized-forged-trace" {
+				local.RecordTraceBoundary("pause", now)
+			}
 			spans := []byte(`{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"kept-span","attributes":[{"key":"user.email","value":{"stringValue":"PRIVATE_EMAIL"}}]}]}]}]}` + "\n")
 			events := []byte(`{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"body":{"stringValue":"kept-event"}}]}]}]}` + "\n")
 			if door == "invalid-trace" {
@@ -90,9 +101,22 @@ func TestTraceFinalizeDoorsPublishPointers(t *testing.T) {
 			require.NoError(t, os.MkdirAll(spool, 0700))
 			require.NoError(t, os.WriteFile(filepath.Join(spool, "traces.jsonl"), spans, 0600))
 			require.NoError(t, os.WriteFile(filepath.Join(spool, "logs.jsonl"), events, 0600))
+			if door == "synchronized-forged-trace" {
+				local.RecordTraceBoundary("resume", now)
+			}
 			// Only a live stop can capture the immutable boundary before reclaim.
 			if door != "missing-stop" && door != "orphan-missing-stop" {
-				capture.Boundaries = append(capture.Boundaries, model.Boundary{Action: "stop", At: now, Offsets: map[string]model.Offsets{nativeID: {Spans: int64(len(spans)), Events: int64(len(events))}}})
+				local.RecordTraceBoundary("stop", now)
+			}
+			capture := local.Trace
+			if door == "synchronized-forged-trace" {
+				// A teammate knows a retained UUID and offsets bracketing a pause,
+				// but omits the pause from a plain Git-stored raw header. Neither
+				// the valid ranges nor the shared transcript authorize a spool read.
+				capture = &model.Capture{Boundaries: []model.Boundary{capture.Boundaries[0], capture.Boundaries[3]}}
+				name += "-teammate"
+				cache = filepath.Join(ledger, "sessions", name)
+				require.NoError(t, os.MkdirAll(cache, 0700))
 			}
 			meta := session.StoreMeta{AgentID: "OxTraceDoor", AgentType: "claude-code", Username: "test", CreatedAt: now.Add(-time.Minute), NativeSessions: []lfs.NativeSession{{ID: nativeID, FirstSeen: now.Add(-time.Minute), LastSeen: now}}, TraceCapture: capture}
 			if door == "orphan-upload-only" {
@@ -104,6 +128,10 @@ func TestTraceFinalizeDoorsPublishPointers(t *testing.T) {
 			require.NoError(t, err)
 			raw := append(header, []byte("\n{\"type\":\"user\",\"content\":\"Implement the session trace attachment feature with byte offsets and pointer-only Ledger uploads.\",\"seq\":1}\n{\"type\":\"assistant\",\"content\":\"Implemented the feature and validated local trace capture.\",\"seq\":2}\n")...)
 			require.NoError(t, os.WriteFile(filepath.Join(cache, "raw.jsonl"), raw, 0600))
+			if door == "synchronized-forged-trace" {
+				runGitCmd(t, ledger, "add", "sessions/"+name+"/raw.jsonl")
+				runGitCmd(t, ledger, "commit", "-m", "Teammate session with forged trace metadata")
+			}
 			if door == "orphan-upload-only" || door == "orphan-missing-stop" {
 				state := session.RecordingState{SessionPath: cache, Trace: capture, NativeSessions: meta.NativeSessions, StoppedAt: &now}
 				stateData, err := json.Marshal(state)
@@ -139,6 +167,14 @@ func TestTraceFinalizeDoorsPublishPointers(t *testing.T) {
 				}
 			}
 			payload := &SessionFinalizePayload{SessionDir: cache, RawPath: filepath.Join(cache, "raw.jsonl"), LedgerPath: ledger, UploadOnly: door == "orphan-upload-only" || door == "orphan-missing-stop"}
+			if door == "synchronized-forged-trace" {
+				items, err := handler.Detect(ledger)
+				require.NoError(t, err)
+				require.Len(t, items, 1)
+				payload, err = extractPayload(items[0])
+				require.NoError(t, err)
+				require.Equal(t, cache, payload.SessionDir)
+			}
 			result := &RunResult{Output: `{"title":"Trace attachment implemented","summary":"Implemented session trace attachments with byte windows and local validation.","key_actions":["implemented trace capture"],"outcome":"success","topics_found":["tracing"],"quality_score":0.8,"score_reason":"Feature implementation"}`}
 			require.NoError(t, handler.ProcessResult(&WorkItem{ID: "trace-finalize", Type: sessionFinalizeType, Payload: payload}, result))
 			require.True(t, staged, "actual finalization door must stage a commit")
@@ -146,10 +182,18 @@ func TestTraceFinalizeDoorsPublishPointers(t *testing.T) {
 			finalMeta, err := lfs.ReadSessionMeta(tracked)
 			require.NoError(t, err)
 			require.Contains(t, finalMeta.Files, "raw.jsonl", "ordinary recording upload must survive trace failure")
-			if door == "invalid-trace" || door == "missing-stop" || door == "orphan-missing-stop" {
+			if door == "invalid-trace" || door == "missing-stop" || door == "orphan-missing-stop" || door == "synchronized-forged-trace" {
 				require.Nil(t, finalMeta.Trace)
-				require.NotContains(t, finalMeta.Files, materialize.SpansFile)
-				require.NoFileExists(t, filepath.Join(tracked, materialize.SpansFile))
+				for _, file := range []string{materialize.SpansFile, materialize.EventsFile} {
+					require.NotContains(t, finalMeta.Files, file)
+					require.NoFileExists(t, filepath.Join(tracked, file))
+					require.NoFileExists(t, filepath.Join(ledger, ".sageox", "cache", "sessions", name, file))
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				for _, data := range uploaded {
+					require.False(t, bytes.HasPrefix(data, []byte{0x1f, 0x8b}), "no trace gzip may be uploaded")
+				}
 				return
 			}
 			require.NotNil(t, finalMeta.Trace)

@@ -399,7 +399,7 @@ func (r *RecordingState) RecordNativeSession(id, source string, at time.Time) {
 	r.NativeSessions = lfs.RecordNativeSession(r.NativeSessions, id, source, at)
 	r.AgentSessionID = id
 	if len(r.NativeSessions) > previousCount {
-		r.RecordTraceBoundary("native-session", at)
+		r.recordTraceBoundary("native-session", at, id)
 	}
 }
 

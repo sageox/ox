@@ -46,7 +46,7 @@ func TestTraceBoundariesOptInFrozenAtStart(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			traceBoundaryEnvironment(t, tc.enabled)
-			state := &RecordingState{AgentType: tc.agent, AdapterName: tc.adapter, AgentSessionID: traceBoundaryID, StartedAt: time.Now()}
+			state := &RecordingState{SessionPath: t.TempDir(), AgentType: tc.agent, AdapterName: tc.adapter, AgentSessionID: traceBoundaryID, StartedAt: time.Now()}
 			state.initializeTraceCapture()
 			require.Equal(t, tc.want, state.Trace != nil)
 			if tc.want {
@@ -60,7 +60,7 @@ func TestTraceBoundariesOptInFrozenAtStart(t *testing.T) {
 func TestTraceBoundariesLifecycleAndCarrier(t *testing.T) {
 	traceBoundaryEnvironment(t, true)
 	now := time.Now().UTC()
-	state := &RecordingState{AgentType: "claude-code", AgentSessionID: traceBoundaryID, StartedAt: now}
+	state := &RecordingState{SessionPath: t.TempDir(), AgentType: "claude-code", AgentSessionID: traceBoundaryID, StartedAt: now}
 	state.RecordNativeSession(traceBoundaryID, "startup", now)
 	state.initializeTraceCapture()
 	dir := filepath.Join(paths.TraceSpoolDir(), traceBoundaryID)
@@ -90,7 +90,7 @@ func TestTraceBoundariesLifecycleAndCarrier(t *testing.T) {
 func TestTraceBoundariesNewNativeAndUnsafe(t *testing.T) {
 	traceBoundaryEnvironment(t, true)
 	now := time.Now().UTC()
-	state := &RecordingState{AgentType: "claude-code", AgentSessionID: traceBoundaryID, StartedAt: now}
+	state := &RecordingState{SessionPath: t.TempDir(), AgentType: "claude-code", AgentSessionID: traceBoundaryID, StartedAt: now}
 	state.RecordNativeSession(traceBoundaryID, "startup", now)
 	state.initializeTraceCapture()
 	state.RecordNativeSession(traceBoundaryID, "resume", now)
@@ -125,4 +125,16 @@ func TestTraceBoundariesStartRecordingPersistence(t *testing.T) {
 	require.NoError(t, os.WriteFile(os.Getenv("OX_USER_CONFIG"), []byte("trace:\n  enabled: false\n"), 0600))
 	stored.RecordTraceBoundary("stop", time.Now())
 	require.Len(t, stored.Trace.Boundaries, 2)
+}
+
+func TestTraceBoundariesDoNotTrustRecoveredNativeIDs(t *testing.T) {
+	traceBoundaryEnvironment(t, true)
+	state := &RecordingState{SessionPath: t.TempDir(), AgentType: "claude-code", AgentSessionID: traceBoundaryID, StartedAt: time.Now()}
+	state.initializeTraceCapture()
+	state.AgentSessionID = traceBoundarySecondID
+	state.NativeSessions = []NativeSession{{ID: traceBoundarySecondID}}
+	state.RecordTraceBoundary("stop", time.Now())
+	require.NotNil(t, state.Trace)
+	require.Contains(t, state.Trace.Boundaries[1].Offsets, traceBoundaryID)
+	require.NotContains(t, state.Trace.Boundaries[1].Offsets, traceBoundarySecondID)
 }

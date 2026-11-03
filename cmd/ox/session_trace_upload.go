@@ -24,7 +24,7 @@ func prepareRetryTraces(ledgerPath string, orphan orphanedSession) (string, *mod
 	if orphan.Meta == nil {
 		return "", nil
 	}
-	cache, meta, err := session.MaterializeTraces(ledgerPath, orphan.SessionName, orphan.Meta.TraceCapture)
+	cache, meta, err := session.MaterializeTraces(ledgerPath, orphan.CachePath, orphan.Meta.TraceCapture)
 	if err != nil {
 		slog.Warn("trace retry materialization skipped", "error", err)
 		return "", nil

@@ -24,14 +24,16 @@ func TestTraceAttachmentAndFailureIsolation(t *testing.T) {
 				t.Run(mode, func(t *testing.T) {
 					f := newSessionUploadFixture(t)
 					const id = "12345678-1234-4234-8234-123456789abc"
+					f.state = startLocalTraceRecording(t, f.ledgerPath, "OxLifecycle", id)
+					f.sessionName = filepath.Base(f.state.SessionPath)
+					f.result.SessionName = f.sessionName
+					f.result.RawPath = filepath.Join(f.state.SessionPath, ledgerFileRaw)
+					require.NoError(t, os.WriteFile(f.result.RawPath, f.rawContent, 0600))
 					data := []byte("{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[{\"name\":\"selected\",\"attributes\":[{\"key\":\"user.email\",\"value\":{\"stringValue\":\"private@example.com\"}}]}]}]}]}\n")
 					dir := filepath.Join(paths.TraceSpoolDir(), id)
 					require.NoError(t, os.MkdirAll(dir, 0700))
 					require.NoError(t, os.WriteFile(filepath.Join(dir, "traces.jsonl"), data, 0600))
-					f.state.Trace = &model.Capture{Boundaries: []model.Boundary{
-						{Action: "start", At: time.Now(), Offsets: map[string]model.Offsets{id: {}}},
-						{Action: "stop", At: time.Now(), Offsets: map[string]model.Offsets{id: {Spans: int64(len(data))}}},
-					}}
+					f.state.RecordTraceBoundary("stop", time.Now())
 					if mode == "invalid-boundary" {
 						f.state.Trace.Boundaries[1].Offsets[id] = model.Offsets{Spans: -1}
 					}
