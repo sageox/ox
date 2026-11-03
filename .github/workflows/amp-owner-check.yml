@@ -1,15 +1,24 @@
 name: amp-owner-check
 
-# Gates .amp/ changes on an owner's approval, scoped to that one path, without
-# touching the repo-wide "require review from code owners" ruleset toggle
-# (that toggle covers every CODEOWNERS entry, including unrelated ones). Owners
-# are read live from .github/CODEOWNERS' /.amp/ line, so this and that file
-# can never drift apart. A PR that doesn't touch .amp/ reports success
-# immediately — this must always post a status, never skip, or GitHub's
-# required-checks gate waits on it forever once it's registered as required.
+# .amp/ changes need a current approval from an .amp/ owner, enforced without
+# touching the repo-wide "require review from code owners" ruleset (that
+# covers every CODEOWNERS entry, not just .amp/).
+#
+# Runs as pull_request_target, not pull_request: the workflow definition that
+# executes always comes from main, never from the PR's own (possibly edited)
+# copy of this file, so a PR cannot weaken the rule it is evaluated against.
+# For the same reason it never checks out or runs the PR's code -- everything
+# below comes from the GitHub API only, and CODEOWNERS is always read from
+# the base branch, never the PR's branch, so a PR cannot add itself as its
+# own owner either.
+#
+# Known gap: a push carrying [skip ci] in its commit message skips this
+# entirely. That is a GitHub platform behavior, not something a workflow can
+# opt out of; it has no fix at this layer.
 on:
-  pull_request:
+  pull_request_target:
     branches: [main]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
@@ -19,41 +28,49 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Does this PR touch .amp/?
         id: touch
-        run: |
-          git fetch -q origin "${{ github.event.pull_request.base.sha }}" --depth=1
-          if git diff --name-only "${{ github.event.pull_request.base.sha }}...HEAD" -- .amp/ | grep -q .; then
-            echo "touches=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "touches=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Require an .amp/ owner's approval
-        if: steps.touch.outputs.touches == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          # The CODEOWNERS line for /.amp/ names its owners; this reads them
-          # live so the check and the file can't say two different things.
-          owners=$(grep -E '^/\.amp/[[:space:]]' .github/CODEOWNERS | head -1 | grep -oE '@[A-Za-z0-9_-]+' | tr -d '@')
+          touches=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[] | select(.filename | startswith(".amp/")) | .filename' | head -1)
+          if [ -n "$touches" ]; then
+            echo "touches=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "touches=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Require a current .amp/ owner approval
+        if: steps.touch.outputs.touches == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          codeowners=$(gh api "repos/$REPO/contents/.github/CODEOWNERS?ref=$BASE_REF" --jq '.content' | base64 -d)
+          owners=$(printf '%s\n' "$codeowners" | grep -E '^/\.amp/[[:space:]]' | head -1 | grep -oE '@[A-Za-z0-9_-]+' | tr -d '@')
           if [ -z "$owners" ]; then
-            echo "::error::No /.amp/ line in .github/CODEOWNERS; nobody to approve against."
+            echo "::error::No /.amp/ line in $BASE_REF's .github/CODEOWNERS; nobody to approve against."
             exit 1
           fi
-          approved=$(gh pr view "$PR" -R "$REPO" --json reviews --jq '[.reviews[] | select(.state == "APPROVED") | .author.login] | unique | .[]')
+          # Only an APPROVED review submitted against the PR's current head
+          # commit counts: an approval given before later .amp/ changes, or
+          # since dismissed (a dismissed review's state is DISMISSED, not
+          # APPROVED, so it is already excluded by the state filter below),
+          # must not authorize those changes. gh api's own --jq takes one
+          # string and does not support --arg, so this goes through a
+          # separate real jq instead of gh api's built-in one.
+          approved=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate | jq -r --arg sha "$HEAD_SHA" '.[] | select(.state == "APPROVED" and .commit_id == $sha) | .user.login' | sort -u)
           ok=0
           for o in $owners; do
             if printf '%s\n' "$approved" | grep -qx "$o"; then ok=1; fi
           done
           if [ "$ok" != 1 ]; then
-            echo "::error::This PR changes .amp/ and needs an APPROVED review from one of: $owners"
+            echo "::error::This PR changes .amp/ and needs a current APPROVED review (on commit ${HEAD_SHA:0:8}) from one of: $owners. An approval given before this commit, or since dismissed, does not count."
             exit 1
           fi
-          echo "Approved by an .amp/ owner."
+          echo "Approved by an .amp/ owner on the current commit."
