@@ -95,6 +95,7 @@ func TestRemoveAllSessions_PipedYesRemoves(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.False(t, sessionDirExists(t, root, name), "a piped yes must actually remove")
+	assert.DirExists(t, store.BasePath(), "removal must preserve the sessions root")
 }
 
 // TestRemoveAllSessions_ForceSkipsThePrompt covers the --force short-circuit,
@@ -102,6 +103,8 @@ func TestRemoveAllSessions_PipedYesRemoves(t *testing.T) {
 func TestRemoveAllSessions_ForceSkipsThePrompt(t *testing.T) {
 	name := recentSessionName("OxRmA4")
 	store, root := localStoreWithSessions(t, name)
+	// Cover raw content as well as the metadata-only fixtures above.
+	require.NoError(t, os.WriteFile(filepath.Join(store.BasePath(), name, "raw.jsonl"), []byte("{\"type\":\"user\",\"content\":\"hello\"}\n"), 0o600))
 
 	var err error
 	silenceStdout(t, func() {
@@ -112,6 +115,7 @@ func TestRemoveAllSessions_ForceSkipsThePrompt(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.False(t, sessionDirExists(t, root, name), "--force must remove without reading stdin")
+	assert.DirExists(t, store.BasePath(), "removal must preserve the sessions root")
 }
 
 // TestRemoveAllSessions_GlobalYesSkipsThePrompt covers the --yes path.
@@ -131,6 +135,7 @@ func TestRemoveAllSessions_GlobalYesSkipsThePrompt(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.False(t, sessionDirExists(t, root, name), "--yes must satisfy this prompt")
+	assert.DirExists(t, store.BasePath(), "removal must preserve the sessions root")
 }
 
 // TestRemoveAllSessions_NoSessionsNeverPrompts keeps the early exit ahead of
@@ -202,4 +207,23 @@ func TestRemoveSessionByPattern_PipedYesRemoves(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.False(t, sessionDirExists(t, root, name))
+}
+
+// Session names keep periods, so a listed name containing ".." is a normal
+// session and remove --all must remove it like any other.
+func TestRemoveAllSessions_RemovesDottedNames(t *testing.T) {
+	dotted := recentSessionName("OxRm..B4")
+	plain := recentSessionName("OxRmB5")
+	store, root := localStoreWithSessions(t, dotted, plain)
+
+	var err error
+	out := captureStdoutForPlanCLI(t, func() {
+		err = removeAllSessions(store, true)
+	})
+
+	require.NoError(t, err)
+	assert.NotContains(t, out, "Warning")
+	assert.Contains(t, out, "Removed 2 session(s)")
+	assert.False(t, sessionDirExists(t, root, dotted))
+	assert.False(t, sessionDirExists(t, root, plain))
 }
