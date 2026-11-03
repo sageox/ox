@@ -43,7 +43,8 @@ func TestBuildPrompt_AppendsNewlineWhenMissing(t *testing.T) {
 }
 
 func TestRunClaudeBinary_PromptViaStdin(t *testing.T) {
-	t.Parallel()
+	// Keep process tests serial: concurrent forks can inherit a writable
+	// fixture descriptor and briefly make exec fail with ETXTBSY.
 	if runtime.GOOS == "windows" {
 		t.Skip("requires a POSIX shell script")
 	}
@@ -81,6 +82,56 @@ printf '%s\n' '{"type":"result","result":"merged\n"}'
 				t.Errorf("stdin = %q, want intact prompt %q", got, prompt)
 			}
 		})
+	}
+}
+
+func TestRunClaudeBinary_Cancellation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell script")
+	}
+
+	binary := filepath.Join(t.TempDir(), "llm")
+	body := `#!/bin/sh
+set -eu
+cat > /dev/null
+: > "$0.ready"
+exec sleep 30
+`
+	if err := os.WriteFile(binary, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := runClaudeBinary(ctx, binary, "private merge prompt")
+		done <- err
+	}()
+
+	// Cancel only after the child has consumed stdin, so the runner has
+	// started and cancellation exercises its output-pipe cleanup.
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(binary + ".ready"); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("runner exited before cancellation: %v", err)
+		case <-ctx.Done():
+			t.Fatal("fake LLM did not become ready")
+		case <-ticker.C:
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("runClaudeBinary error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner did not return after cancellation")
 	}
 }
 
