@@ -7,7 +7,7 @@ import (
 )
 
 // --- normalizeGiteaURL ---
-// Prevents URL comparison mismatches (trailing slashes, scheme differences)
+// Preserve credential scope while normalizing host case and a trailing slash.
 
 func TestNormalizeGiteaURL(t *testing.T) {
 	t.Parallel()
@@ -17,12 +17,13 @@ func TestNormalizeGiteaURL(t *testing.T) {
 		url  string
 		want string
 	}{
-		{"https url", "https://gitea.example.com/user/repo", "gitea.example.com"},
-		{"http url", "http://gitea.example.com/user/repo", "gitea.example.com"},
-		{"with port", "https://gitea.example.com:3000/user/repo", "gitea.example.com:3000"},
-		{"trailing slash", "https://gitea.example.com/", "gitea.example.com"},
+		{"https url", "https://gitea.example.com/user/repo", "https://gitea.example.com/user/repo"},
+		{"http url", "http://gitea.example.com/user/repo", "http://gitea.example.com/user/repo"},
+		{"with port", "https://gitea.example.com:3000/user/repo", "https://gitea.example.com:3000/user/repo"},
+		{"trailing slash", "https://gitea.example.com/", "https://gitea.example.com"},
+		{"host case", "https://GITEA.EXAMPLE.COM/", "https://gitea.example.com"},
 		{"empty", "", ""},
-		{"just host", "https://gitea.local", "gitea.local"},
+		{"just host", "https://gitea.local", "https://gitea.local"},
 	}
 
 	for _, tt := range tests {
@@ -74,19 +75,23 @@ func TestXdgConfigHome(t *testing.T) {
 // --- normalizeGiteaURL edge case ---
 // Prevents panic or wrong comparison when URL is malformed (no scheme)
 
-func TestNormalizeGiteaURL_MalformedFallback(t *testing.T) {
+func TestNormalizeGiteaURL_Invalid(t *testing.T) {
 	t.Parallel()
 
-	// exercise the fallback path in normalizeGiteaURL when url.Parse fails
 	tests := []struct {
 		name string
 		url  string
 		want string
 	}{
-		{"bare host with trailing slash (no scheme, host empty)", "gitea.local/", ""},               // url.Parse succeeds but Host=""
-		{"bare host no scheme", "gitea.local", ""},                                                  // same: Host="" when no scheme
-		{"invalid scheme triggers trimTrailingSlash fallback", "://gitea.local/", "://gitea.local"}, // url.Parse fails, fallback trims slash
-		{"invalid scheme no trailing slash", "://gitea.local", "://gitea.local"},                    // url.Parse fails, fallback returns as-is
+		{"bare host with trailing slash", "gitea.local/", ""},
+		{"bare host no scheme", "gitea.local", ""},
+		{"invalid scheme with trailing slash", "://gitea.local/", ""},
+		{"invalid scheme no trailing slash", "://gitea.local", ""},
+		{"unsupported scheme", "ssh://gitea.local", ""},
+		{"userinfo", "https://user@gitea.local", ""},
+		{"query", "https://gitea.local?other", ""},
+		{"fragment", "https://gitea.local#other", ""},
+		{"invalid port", "https://gitea.local:bad", ""},
 	}
 
 	for _, tt := range tests {

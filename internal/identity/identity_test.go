@@ -21,6 +21,10 @@ func TestExtractHost(t *testing.T) {
 		{"bare host", "example.com/repo.git", "example.com"},
 		{"empty string", "", ""},
 		{"ssh with subdomain", "git@git.internal.company.com:team/repo.git", "git.internal.company.com"},
+		{"ssh scheme", "ssh://git@git.internal.company.com/team/repo.git", "git.internal.company.com"},
+		{"userinfo is not host", "https://gitea.example.com@attacker.example/repo", "attacker.example"},
+		{"case insensitive host", "https://GITEA.EXAMPLE.COM/repo", "gitea.example.com"},
+		{"invalid URL", "https://host:invalid/repo", ""},
 	}
 
 	for _, tt := range tests {
@@ -32,22 +36,29 @@ func TestExtractHost(t *testing.T) {
 }
 
 func TestExtractGiteaInstanceURL(t *testing.T) {
-	t.Parallel()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GITEA_URL", "https://git.corp.com")
+	t.Setenv("GITEA_TOKEN", "corp-token")
 
 	tests := []struct {
 		name string
 		urls []string
 		want string
 	}{
-		{"gitea in url", []string{"https://gitea.example.com/user/repo.git"}, "https://gitea.example.com"},
+		{"unconfigured gitea host", []string{"https://gitea.example.com/user/repo.git"}, ""},
+		{"gitea in path", []string{"https://attacker.example/gitea/repo.git"}, ""},
+		{"configured host", []string{"https://git.corp.com/user/repo.git"}, "https://git.corp.com"},
+		{"normalized remote", []string{"git.corp.com/user/repo"}, "https://git.corp.com"},
+		{"ssh remote", []string{"git@git.corp.com:user/repo.git"}, "https://git.corp.com"},
+		{"different port", []string{"https://git.corp.com:3000/user/repo.git"}, ""},
+		{"host suffix", []string{"https://git.corp.com.attacker.example/gitea/repo.git"}, ""},
 		{"no gitea", []string{"https://github.com/user/repo.git"}, ""},
 		{"empty urls", nil, ""},
-		{"mixed remotes", []string{"https://github.com/a/b", "https://gitea.corp.com/c/d"}, "https://gitea.corp.com"},
+		{"mixed remotes", []string{"https://attacker.example/gitea/repo.git", "https://git.corp.com/c/d"}, "https://git.corp.com"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := extractGiteaInstanceURL(tt.urls)
 			assert.Equal(t, tt.want, got)
 		})
@@ -55,14 +66,18 @@ func TestExtractGiteaInstanceURL(t *testing.T) {
 }
 
 func TestIsGiteaInstance(t *testing.T) {
-	t.Parallel()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GITEA_URL", "https://gitea.corp.com")
+	t.Setenv("GITEA_TOKEN", "corp-token")
 
 	tests := []struct {
 		url  string
 		want bool
 	}{
-		{"https://gitea.example.com/user/repo", true},
+		{"https://gitea.example.com/user/repo", false},
 		{"https://GITEA.CORP.COM/user/repo", true},
+		{"https://attacker.example/gitea/repo", false},
+		{"https://gitea.corp.com@attacker.example/repo", false},
 		{"https://github.com/user/repo", false},
 		{"https://gitlab.com/user/repo", false},
 		{"", false},
@@ -70,7 +85,6 @@ func TestIsGiteaInstance(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.url, func(t *testing.T) {
-			t.Parallel()
 			got := isGiteaInstance(tt.url)
 			assert.Equal(t, tt.want, got)
 		})
