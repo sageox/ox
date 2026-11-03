@@ -237,7 +237,7 @@ func TestRunInstallFishPathHint(t *testing.T) {
 
 	out := runInstallCmd(t)
 
-	assert.Contains(t, out, "fish_add_path "+installDirFlag)
+	assert.Contains(t, out, `fish_add_path "`+installDirFlag+`"`)
 	assert.NotContains(t, out, "export PATH")
 }
 
@@ -255,6 +255,20 @@ func TestRunInstallJSON(t *testing.T) {
 	assert.Equal(t, filepath.Join(dest, "ox"), got.OxPath)
 	assert.ElementsMatch(t, []string{"ox", "ox-adapter-codex"}, got.Binaries)
 	assert.False(t, got.LoggedIn)
-	assert.Equal(t, []string{"ox login", "cd <repo> && ox init"}, got.Next)
+	assert.False(t, got.OnPath)
+	oxPath := filepath.Join(dest, "ox")
+	assert.Equal(t, []string{oxPath + " login", "cd <repo> && " + oxPath + " init"}, got.Next, "off PATH, next steps use the full path")
 	assert.Empty(t, *logins, "--json never starts the interactive login")
+}
+
+func TestRunInstallJSONOnPath(t *testing.T) {
+	_, _, _ = stubInstall(t, true)
+	installDirFlag = t.TempDir()
+	t.Setenv("PATH", installDirFlag)
+
+	var got installResult
+	require.NoError(t, json.Unmarshal([]byte(runInstallCmd(t, "--json")), &got))
+	assert.True(t, got.OnPath)
+	assert.True(t, got.LoggedIn)
+	assert.Equal(t, []string{"cd <repo> && ox init"}, got.Next)
 }

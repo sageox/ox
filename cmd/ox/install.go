@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -62,6 +61,7 @@ type installResult struct {
 	Status   string   `json:"status"` // installed, already_installed, homebrew, npm_global
 	OxPath   string   `json:"ox_path"`
 	Binaries []string `json:"binaries,omitempty"`
+	OnPath   bool     `json:"on_path"`
 	LoggedIn bool     `json:"logged_in"`
 	Next     []string `json:"next"`
 }
@@ -90,13 +90,16 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	if jsonOutput {
 		// ox login is interactive, so --json reports the login state instead
 		result.LoggedIn = installLoggedIn()
-		if !result.LoggedIn {
-			result.Next = append(result.Next, "ox login")
+		result.OnPath = dirOnPath(filepath.Dir(oxPath))
+		ox := "ox"
+		if !result.OnPath {
+			ox = oxPath
 		}
-		result.Next = append(result.Next, "cd <repo> && ox init")
-		enc := json.NewEncoder(cmd.OutOrStdout())
-		enc.SetIndent("", "  ")
-		return enc.Encode(result)
+		if !result.LoggedIn {
+			result.Next = append(result.Next, ox+" login")
+		}
+		result.Next = append(result.Next, "cd <repo> && "+ox+" init")
+		return cli.PrintJSONTo(cmd.OutOrStdout(), result)
 	}
 
 	ranLogin := false
@@ -217,17 +220,10 @@ func dirWritable(dir string) bool {
 // warnInstallPath tells the user when destDir is not on PATH, or when another
 // ox earlier on PATH would run instead of the one just installed.
 func warnInstallPath(out io.Writer, destDir, oxPath string) {
-	onPath := false
-	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
-		if d != "" && sameDir(d, destDir) {
-			onPath = true
-			break
-		}
-	}
-	if !onPath {
+	if !dirOnPath(destDir) {
 		if filepath.Base(os.Getenv("SHELL")) == "fish" {
 			cli.PrintWarningTo(out, destDir+" is not on your PATH. Add it with:")
-			fmt.Fprintf(out, "  fish_add_path %s\n", destDir)
+			fmt.Fprintf(out, "  fish_add_path \"%s\"\n", destDir)
 			return
 		}
 		cli.PrintWarningTo(out, destDir+" is not on your PATH. Add this line to your shell profile:")
@@ -237,6 +233,15 @@ func warnInstallPath(out io.Writer, destDir, oxPath string) {
 	if found := lookPathOutsideNodeModules("ox"); found != "" && !sameFile(found, oxPath) {
 		cli.PrintWarningTo(out, fmt.Sprintf("Another ox at %s comes first on your PATH and will run instead.", found))
 	}
+}
+
+func dirOnPath(dir string) bool {
+	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
+		if d != "" && sameDir(d, dir) {
+			return true
+		}
+	}
+	return false
 }
 
 // lookPathOutsideNodeModules is exec.LookPath that skips node_modules
