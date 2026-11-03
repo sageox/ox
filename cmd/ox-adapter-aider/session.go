@@ -30,6 +30,37 @@ const aiderSessionPrefix = "# aider chat started at "
 
 // --- session reading ---
 
+// openAiderFile confines history reads to the file's directory. Discovery and
+// import use repoRoot/aiderHistoryFile without resolving the history symlink,
+// so this directory is the workspace root (which may itself be a symlink).
+// OpenInRoot prevents symlink escapes during the open, including replacements
+// after discovery; callers must parse this handle rather than reopen the path.
+func openAiderFile(path string) (*os.File, error) {
+	f, err := os.OpenInRoot(filepath.Dir(path), filepath.Base(path))
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("aider history is not a regular file")
+	}
+	return f, nil
+}
+
+func statAiderFile(path string) (os.FileInfo, error) {
+	f, err := openAiderFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return f.Stat()
+}
+
 func handleRead(p adapterprotocol.ReadParams) (*adapterprotocol.ReadResult, error) {
 	entries, err := readAiderFile(p.SessionFile)
 	if err != nil {
@@ -44,7 +75,7 @@ func handleReadMetadata(_ adapterprotocol.ReadParams) (*adapterprotocol.ReadMeta
 }
 
 func readAiderFile(path string) ([]adapterprotocol.RawEntry, error) {
-	f, err := os.Open(path)
+	f, err := openAiderFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open session file: %w", err)
 	}
@@ -58,7 +89,7 @@ func readAiderFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry,
 }
 
 func readAiderFromOffsetWithTS(path string, offset int64, initialTS time.Time) ([]adapterprotocol.RawEntry, int64, error) {
-	f, err := os.Open(path)
+	f, err := openAiderFile(path)
 	if err != nil {
 		return nil, offset, fmt.Errorf("failed to open session file: %w", err)
 	}
@@ -180,7 +211,7 @@ func parseAiderMarkdown(scanner *bufio.Scanner, initialTS time.Time) ([]adapterp
 // and returns the timestamp from the last "# aider chat started at" header.
 // This is used by serve mode so incremental reads inherit the correct timestamp.
 func resolveLatestSessionTS(path string, offset int64) time.Time {
-	f, err := os.Open(path)
+	f, err := openAiderFile(path)
 	if err != nil {
 		return time.Time{}
 	}
@@ -223,7 +254,7 @@ func parseAiderSessionByTimestamp(path, sessionTS string) ([]adapterprotocol.Raw
 		normalizedTS = t.UTC().Format(time.RFC3339)
 	}
 
-	f, err := os.Open(path)
+	f, err := openAiderFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +291,7 @@ func findAiderSession(repoRoot, _, since, _ string) (string, error) {
 	}
 
 	historyPath := filepath.Join(repoRoot, aiderHistoryFile)
-	info, err := os.Stat(historyPath)
+	info, err := statAiderFile(historyPath)
 	if err != nil {
 		return "", fmt.Errorf("no aider session found: %w", err)
 	}
