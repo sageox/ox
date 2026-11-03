@@ -245,11 +245,12 @@ func dirOnPath(dir string) bool {
 }
 
 // lookPathOutsideNodeModules is exec.LookPath that skips node_modules
-// directories, so the npx launcher on PATH is not mistaken for an install,
-// and, like exec.LookPath, ignores relative entries.
+// directories, so the npx launcher on PATH is not mistaken for an install.
+// Relative entries are kept: the shell runs them too, so they can shadow the
+// install. The result is only reported, never executed or overwritten.
 func lookPathOutsideNodeModules(name string) string {
 	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
-		if !filepath.IsAbs(d) || strings.Contains(filepath.ToSlash(d)+"/", "/node_modules/") {
+		if d == "" || strings.Contains(filepath.ToSlash(d)+"/", "/node_modules/") {
 			continue
 		}
 		candidate := filepath.Join(d, name)

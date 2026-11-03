@@ -309,12 +309,16 @@ func TestShellPathHintsQuoteTheDirectory(t *testing.T) {
 	assert.NotContains(t, out.String(), `"`+dir)
 }
 
-func TestLookPathSkipsRelativeEntries(t *testing.T) {
+func TestShadowWarningSeesRelativePathEntries(t *testing.T) {
 	skipInstallOnWindows(t)
-	cwd := t.TempDir()
-	t.Chdir(cwd)
+	t.Chdir(t.TempDir())
 	require.NoError(t, os.Mkdir("bin", 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join("bin", "ox"), []byte("x"), 0o755))
-	t.Setenv("PATH", "bin"+string(os.PathListSeparator)+".")
-	assert.Empty(t, lookPathOutsideNodeModules("ox"))
+	dest := t.TempDir()
+	oxPath := filepath.Join(dest, "ox")
+	require.NoError(t, os.WriteFile(oxPath, []byte("y"), 0o755))
+	t.Setenv("PATH", "bin"+string(os.PathListSeparator)+dest)
+	var out bytes.Buffer
+	warnInstallPath(&out, dest, oxPath)
+	assert.Contains(t, out.String(), "Another ox at bin/ox comes first")
 }
