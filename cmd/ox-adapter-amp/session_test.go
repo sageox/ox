@@ -162,9 +162,8 @@ func TestReadAmpFromOffset(t *testing.T) {
 
 // --- C. Session discovery ---
 
-// TestFindAmpSession_MostRecent verifies newest session file is returned.
-// Failure prevented: stale session returned instead of active one.
-func TestFindAmpSession_MostRecent(t *testing.T) {
+// A missing native ID must not select another thread by recency or text.
+func TestFindAmpSession_RequiresNativeID(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -188,12 +187,9 @@ func TestFindAmpSession_MostRecent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := findAmpSession("", "", "", "")
-	if err != nil {
-		t.Fatalf("findAmpSession: %v", err)
-	}
-	if got != newer {
-		t.Errorf("got %q, want %q (most recent)", got, newer)
+	got, err := findAmpSession("", "test", "", "")
+	if err == nil || got != "" {
+		t.Fatalf("unbound discovery = %q, %v", got, err)
 	}
 }
 
@@ -234,7 +230,7 @@ func TestFindAmpSession_PrefersBridgeDir(t *testing.T) {
 	}
 
 	data := `{"type":"user","timestamp":"2024-01-15T10:00:00Z","content":"x"}` + "\n"
-	legacyFile := filepath.Join(legacyDir, "old.jsonl")
+	legacyFile := filepath.Join(legacyDir, "new.jsonl")
 	bridgeFile := filepath.Join(bridgeDir, "new.jsonl")
 	if err := os.WriteFile(legacyFile, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
@@ -243,7 +239,7 @@ func TestFindAmpSession_PrefersBridgeDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := findAmpSession("", "", "", "")
+	got, err := findAmpSession("", "", "", "new")
 	if err != nil {
 		t.Fatalf("findAmpSession: %v", err)
 	}
@@ -279,7 +275,7 @@ func TestFindAmpSession_EmptyBridgeFallsBackToLegacy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := findAmpSession("", "", "", "")
+	got, err := findAmpSession("", "", "", "old")
 	if err != nil {
 		t.Fatalf("findAmpSession: %v", err)
 	}
@@ -306,7 +302,7 @@ func TestFindAmpSession_LegacyFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := findAmpSession("", "", "", "")
+	got, err := findAmpSession("", "", "", "old")
 	if err != nil {
 		t.Fatalf("findAmpSession: %v", err)
 	}
@@ -406,10 +402,10 @@ func TestFindAmpSession_ExplicitThreadMissIsNotFound(t *testing.T) {
 		})
 	}
 
-	t.Run("no id still finds the newest sidecar", func(t *testing.T) {
+	t.Run("no id fails closed", func(t *testing.T) {
 		got, err := findAmpSession("", "", "", "")
-		require.NoError(t, err)
-		assert.Equal(t, other, got)
+		require.Error(t, err)
+		assert.Empty(t, got)
 	})
 
 	t.Run("import by a missing id fails", func(t *testing.T) {
