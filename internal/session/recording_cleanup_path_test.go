@@ -20,6 +20,27 @@ func recordingPathCleaners() map[string]func(string, string) {
 	}
 }
 
+func TestRecordingCleanupSkipsEmptyProjectRoot(t *testing.T) {
+	assert.Empty(t, cacheSessionsDirs(""), "an empty project root must not resolve cleanup paths")
+}
+
+func TestRecordingCleanupPreservesQuarantinedState(t *testing.T) {
+	for name, cleanup := range recordingPathCleaners() {
+		t.Run(name, func(t *testing.T) {
+			project, sessionsDir := setupRecordingTestWithSessionsBase(t, t.TempDir())
+			sessionDir := filepath.Join(sessionsDir, "quarantined")
+			state := ghostState(t, sessionDir)
+			state.StartedAt = time.Now().Add(-72 * time.Hour)
+			state.SourceRejected = true
+			require.NoError(t, os.WriteFile(recordingStatePath(sessionDir), mustMarshal(t, state), 0600))
+
+			cleanup(project, sessionsDir)
+
+			assert.FileExists(t, recordingStatePath(sessionDir), "quarantined sources are not disposable stubs")
+		})
+	}
+}
+
 func TestRecordingCleanupIgnoresSerializedSessionPath(t *testing.T) {
 	for name, cleanup := range recordingPathCleaners() {
 		t.Run(name, func(t *testing.T) {
