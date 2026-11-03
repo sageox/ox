@@ -49,6 +49,14 @@ func loadLockRoot(root *os.Root) (Lock, error) {
 			"%s is schema version %d, but this ox understands up to version %d — upgrade ox before running add-on commands in this Team Context",
 			LockRelativePath, lock.SchemaVersion, LockSchemaVersion)
 	}
+	// The shared lock is untrusted input, just like provider destinations.
+	for _, addon := range lock.Addons {
+		for _, file := range addon.Files {
+			if _, err := cleanAddonPath(file.Path); err != nil {
+				return Lock{}, fmt.Errorf("invalid path in %s for %q: %w", LockRelativePath, addon.Addon, err)
+			}
+		}
+	}
 	if lock.Addons == nil {
 		lock.Addons = []LockedAddon{}
 	}

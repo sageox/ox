@@ -57,6 +57,94 @@ func TestClassify_AllowedToolsIsExecutable(t *testing.T) {
 	}
 }
 
+func TestClassify_FrontmatterCapabilitiesRequireDigestApproval(t *testing.T) {
+	for _, tt := range []struct {
+		name, front string
+		want        Capability
+	}{
+		{"bare tools", "allowed-tools: Bash(*)", CapAllowedTools},
+		{"double quoted tools", `"allowed-tools": "Bash(*)"`, CapAllowedTools},
+		{"single quoted tools", `'allowed-tools': [Bash]`, CapAllowedTools},
+		{"escaped tools key", `"allowed\u002Dtools": Bash(*)`, CapAllowedTools},
+		{"flow mapping", `{"allowed-tools": "Bash(*)"}`, CapAllowedTools},
+		{"explicit key", "? allowed-tools\n: Bash(*)", CapAllowedTools},
+		{"legacy spelling", `'allowed_tools': Bash(*)`, CapAllowedTools},
+		{"case insensitive", "ALLOWED-TOOLS: Bash(*)", CapAllowedTools},
+		{"hooks only", "hooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: echo hook", CapHooks},
+		{"quoted hooks", `'hooks': {Stop: [{hooks: [{type: command, command: echo hook}]}]}`, CapHooks},
+		// Unknown and empty hook shapes must not depend on host version or policy.
+		{"unknown hook type", "hooks: {Stop: [{hooks: [{type: future}]}]}", CapHooks},
+		{"empty hooks", "hooks: {}", CapHooks},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := Skill{Name: "x", Files: []File{{Path: "SKILL.md", Content: md("---\n" + tt.front + "\n---\nOrdinary prose.\n")}}}
+			v := Classify(s)
+			if !v.Executable || len(v.Capabilities) != 1 || !hasCapability(v, tt.want) {
+				t.Fatalf("frontmatter capability not classified: %s", v.Describe())
+			}
+			if got := v.Evidence[tt.want]; len(got) != 1 || got[0] != "SKILL.md" {
+				t.Fatalf("evidence does not name the manifest: %v", got)
+			}
+			store := &ApprovalStore{}
+			if store.Decide(s.Name, v) != DecisionNeedsApproval {
+				t.Fatal("unapproved frontmatter capability would materialize")
+			}
+			store.Approve(s.Name, v, false)
+			if store.Decide(s.Name, v) != DecisionMaterialize {
+				t.Fatal("matching digest approval did not permit materialization")
+			}
+			s.Files[0].Content = append(s.Files[0].Content, md("Changed instructions.\n")...)
+			if store.Decide(s.Name, Classify(s)) != DecisionNeedsApproval {
+				t.Fatal("approval survived a change to the manifest bytes")
+			}
+		})
+	}
+}
+
+func TestClassify_UnparsedFrontmatterRequiresApproval(t *testing.T) {
+	for name, manifest := range map[string]string{
+		"invalid YAML":          "---\nname: x\nbroken: [\n---\nbody\n",
+		"invalid closing fence": "---\nname: x\n---foo\nallowed-tools: Bash(*)\n---\n",
+		"unterminated":          "---\nname: x\n",
+		"opening fence only":    "---",
+		"duplicate keys":        "---\nallowed-tools: Bash(*)\n'allowed-tools': []\n---\n",
+		"nested duplicate keys": "---\nmetadata: {x: 1, x: 2}\n---\n",
+		"sequence root":         "---\n- allowed-tools: Bash(*)\n---\n",
+		"scalar root":           "---\nplain scalar\n---\n",
+		"null root":             "---\nnull\n---\n",
+		"non-string key":        "---\n? [allowed-tools]\n: Bash(*)\n---\n",
+		"custom tag":            "---\nmetadata: !custom value\n---\n",
+		"alias":                 "---\nname: &name x\ndescription: *name\n---\n",
+		"merge":                 "---\ndefaults: &d {allowed-tools: Bash(*)}\n<<: *d\n---\n",
+		"trailing YAML":         "---\nname: x\n...\nallowed-tools: Bash(*)\n---\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			v := classifyManifest("SKILL.md", manifest)
+			if !hasCapability(v, CapUnparsedFrontmatter) || !v.Executable {
+				t.Fatalf("unparsed frontmatter classified as prose: %s", v.Describe())
+			}
+			if (&ApprovalStore{}).Decide("x", v) != DecisionNeedsApproval {
+				t.Fatal("unparsed frontmatter would materialize without approval")
+			}
+		})
+	}
+}
+
+func TestClassify_ProseFrontmatterIsNotACapability(t *testing.T) {
+	for _, manifest := range []string{
+		"Ordinary prose without frontmatter.\n",
+		"---\n---\nOrdinary prose.\n",
+		"---\n# comment only\n---\nOrdinary prose.\n",
+		"---\n'name': x\n\"description\": notes\n---\nOrdinary prose.\n",
+		"---\ndescription: |\n  allowed-tools: Bash(*)\n  hooks: examples, not grants\n---\n",
+		"---\nname: x\n---\n\"allowed-tools\": Bash(*)\nhooks: examples in the body\n",
+	} {
+		if v := classifyManifest("SKILL.md", manifest); v.Executable {
+			t.Errorf("prose classified executable (%s) for %q", v.Describe(), manifest)
+		}
+	}
+}
+
 func TestClassify_InlineCommandIsExecutable(t *testing.T) {
 	// Claude's inline command-execution syntax runs when the skill LOADS, not when
 	// a human chooses to run something — which is exactly why it needs approval.
@@ -404,11 +492,6 @@ func TestClassify_R2_FenceWithTrailingWhitespace(t *testing.T) {
 		{"tab after the opening fence", "---\t\nallowed-tools: Bash(*)\n---\n", true},
 		{"spaces after the closing fence", "---\nname: x\nallowed-tools: Bash(*)\n---   \nbody\n", true},
 		{"CRLF with trailing space", "--- \r\nallowed-tools: Bash(*)\r\n---\r\n", true},
-		{
-			// A "---foo" line is content, not a fence. Treating it as the close
-			// (the old prefix match) moved the grant below it into the body.
-			"a dashes-prefixed line does not close", "---\nname: x\n---foo\nallowed-tools: Bash(*)\n---\n", true,
-		},
 		{"leading whitespace is not a fence", " ---\nallowed-tools: Bash(*)\n---\n", false},
 		{"a grant below a closing fence with trailing space is body", "---\nname: x\n--- \n\nallowed-tools: Bash(*)\n", false},
 	} {
@@ -430,7 +513,7 @@ func TestClassify_ExactlyOneBOMIsStripped(t *testing.T) {
 	if !strings.HasPrefix(normalized, "\ufeff---") {
 		t.Fatalf("normalizeManifest stripped more than one BOM: %q", normalized)
 	}
-	if front, _ := splitFrontmatter(normalized); front != "" {
+	if front, _, _ := splitFrontmatter(normalized); front != "" {
 		t.Errorf("splitFrontmatter normalized again and found frontmatter behind a second BOM: %q", front)
 	}
 }
