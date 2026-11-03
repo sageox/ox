@@ -46,7 +46,8 @@ var ErrNoConflicts = errors.New("automerge: no conflicted files in index")
 type Options struct {
 	// LLMBinary is the path or name of the LLM CLI to invoke for semantic
 	// merges. Empty disables the LLM tier. The binary is expected to behave
-	// like `claude --output-format stream-json --permission-mode bypassPermissions -p <prompt>`.
+	// like `claude --output-format stream-json --verbose --permission-mode plan -p`,
+	// reading the prompt from stdin.
 	LLMBinary string
 
 	// LLMTimeout is the per-file deadline for an LLM merge. Default 60s.
