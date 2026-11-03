@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 	"gopkg.in/yaml.v3"
@@ -381,8 +382,10 @@ type claudeStreamMessage struct {
 }
 
 // runClaudeBinary spawns `claude --output-format stream-json
-// --permission-mode plan -p <prompt>` and returns the result message's
-// text. This is the production llmRunner; tests inject a fake.
+// --permission-mode plan -p` with the prompt on stdin and returns the result
+// message's text. This is the production llmRunner; tests inject a fake.
+// Keep private file contents out of process arguments, which may be visible
+// to other local users.
 //
 // Permission mode rationale: the merge prompt feeds untrusted ledger
 // content (potentially including hostile prompt-injection in conflict
@@ -390,30 +393,27 @@ type claudeStreamMessage struct {
 // at all. `plan` mode disables all tool use including Bash/Edit/Write.
 // Even if the model is tricked into trying to "fix" something, it
 // can't write to disk or execute commands.
+// outputDrainGrace bounds reading a finished CLI's output.
+const outputDrainGrace = 2 * time.Second
+
 func runClaudeBinary(ctx context.Context, binary, prompt string) (string, error) {
-	args := []string{"--output-format", "stream-json", "--verbose", "--permission-mode", "plan", "-p", prompt}
+	args := []string{"--output-format", "stream-json", "--verbose", "--permission-mode", "plan", "-p"}
 	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Stdin = strings.NewReader(prompt)
 	setProcAttr(cmd) // process-group isolation so hung descendants get killed on cancel
 
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", fmt.Errorf("stdout pipe: %w", err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return "", fmt.Errorf("stderr pipe: %w", err)
-	}
+	// exec copies output into these writers. WaitDelay ends that copying soon
+	// after the CLI exits, even if a descendant inherited the pipe and keeps
+	// it open, so a finished merge is not held until the deadline.
+	stdoutR, stdoutW := io.Pipe()
+	stderrBuf := &cappedBuffer{max: 64 * 1024}
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stderrBuf
+	cmd.WaitDelay = outputDrainGrace
 
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("start: %w", err)
 	}
-
-	stderrDone := make(chan struct{})
-	var stderrBuf []byte
-	go func() {
-		defer close(stderrDone)
-		stderrBuf, _ = io.ReadAll(io.LimitReader(stderrPipe, 64*1024))
-	}()
 
 	type parseRes struct {
 		result string
@@ -421,13 +421,19 @@ func runClaudeBinary(ctx context.Context, binary, prompt string) (string, error)
 	}
 	parseCh := make(chan parseRes, 1)
 	go func() {
-		result, err := parseClaudeStream(stdoutPipe)
+		result, err := parseClaudeStream(stdoutR)
+		// Fail further writes so a parser that stops early cannot stall Wait.
+		_ = stdoutR.Close()
 		parseCh <- parseRes{result: result, err: err}
 	}()
 
 	waitErr := cmd.Wait()
-	<-stderrDone
+	_ = stdoutW.Close()
 	pr := <-parseCh
+	if errors.Is(waitErr, exec.ErrWaitDelay) {
+		// The CLI exited cleanly; only a descendant still held its output.
+		waitErr = nil
+	}
 
 	if ctx.Err() != nil {
 		return "", fmt.Errorf("timeout: %w", ctx.Err())
@@ -435,7 +441,7 @@ func runClaudeBinary(ctx context.Context, binary, prompt string) (string, error)
 	if waitErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
-			return "", fmt.Errorf("claude exited %d: %s", exitErr.ExitCode(), strings.TrimSpace(string(stderrBuf)))
+			return "", fmt.Errorf("claude exited %d: %s", exitErr.ExitCode(), strings.TrimSpace(string(stderrBuf.buf)))
 		}
 		return "", fmt.Errorf("wait: %w", waitErr)
 	}
@@ -446,6 +452,20 @@ func runClaudeBinary(ctx context.Context, binary, prompt string) (string, error)
 		return "", fmt.Errorf("claude produced no result message")
 	}
 	return pr.result, nil
+}
+
+// cappedBuffer keeps the first max bytes written and accepts the rest, so a
+// noisy CLI cannot fail its own stderr copy.
+type cappedBuffer struct {
+	buf []byte
+	max int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.max - len(b.buf); room > 0 {
+		b.buf = append(b.buf, p[:min(room, len(p))]...)
+	}
+	return len(p), nil
 }
 
 // parseClaudeStream scans JSONL output and returns the `result` message body.

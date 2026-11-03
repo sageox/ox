@@ -178,9 +178,10 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   const auto = live && !!opts.reviewer && !!opts.autoSubmit;
   const store = openStore(window.localStorage, opts.account, opts.plan);
   const tab = encodeURIComponent(opts.plan);
-  const ON_KEY = 'ox-plan-rev-on:' + tab; // sessionStorage: survives a reload, not a new tab
-  const MIN_KEY = 'ox-plan-rail-min:' + tab; // sessionStorage, like ON_KEY
-  const SYNC_KEY = 'ox-plan-fb-sync:' + tab; // sessionStorage: last send result, re-shown after the reload it triggers
+  // Storage slots, not credentials: KEY assignments trip secret scanning in saved HTML.
+  const ON_SLOT = 'ox-plan-rev-on:' + tab; // sessionStorage: survives a reload, not a new tab
+  const MIN_SLOT = 'ox-plan-rail-min:' + tab; // sessionStorage, like ON_SLOT
+  const SYNC_SLOT = 'ox-plan-fb-sync:' + tab; // sessionStorage: last send result, re-shown after the reload it triggers
   const off = new AbortController(); // every listener, removed by destroy()
   const signal = off.signal;
 
@@ -350,10 +351,10 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   // Hide shrinks the rail to a Show button (comment icon + count) so the plan
   // under it can be read; kept per tab, so a live reload doesn't reopen it.
   let railMin = false;
-  try { railMin = !!sessionStorage.getItem(MIN_KEY); } catch (e) { /* no sessionStorage: start shown */ }
+  try { railMin = !!sessionStorage.getItem(MIN_SLOT); } catch (e) { /* no sessionStorage: start shown */ }
   function toggleRail() {
     railMin = !railMin;
-    try { if (railMin) sessionStorage.setItem(MIN_KEY, '1'); else sessionStorage.removeItem(MIN_KEY); } catch (e) { /* kept for this page only */ }
+    try { if (railMin) sessionStorage.setItem(MIN_SLOT, '1'); else sessionStorage.removeItem(MIN_SLOT); } catch (e) { /* kept for this page only */ }
     renderRail();
     (rail!.querySelector('.rev-rail-show, .rev-rail-hide') as HTMLElement).focus(); // the clicked button was just replaced
   }
@@ -790,12 +791,12 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   // server reloads the page right after it answers, which would wipe it.
   function reportSync(m: SyncMessage) {
     showSync(m.kind, m.text);
-    try { sessionStorage.setItem(SYNC_KEY, JSON.stringify({ kind: m.kind, text: m.text, at: Date.now() })); } catch (e) { /* shown now, not after the reload */ }
+    try { sessionStorage.setItem(SYNC_SLOT, JSON.stringify({ kind: m.kind, text: m.text, at: Date.now() })); } catch (e) { /* shown now, not after the reload */ }
   }
   function restoreSync() {
     try {
-      const s = JSON.parse(sessionStorage.getItem(SYNC_KEY) || 'null');
-      sessionStorage.removeItem(SYNC_KEY);
+      const s = JSON.parse(sessionStorage.getItem(SYNC_SLOT) || 'null');
+      sessionStorage.removeItem(SYNC_SLOT);
       // 30s: long enough to span a slow reload, short enough that an old
       // result never reads as the outcome of something newer
       if (s && Date.now() - s.at < 30000) showSync(s.kind, s.text);
@@ -943,7 +944,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     if (on && !silent) toast('Review mode — click any section, item, or row to mark it up, or highlight text to comment on it. Esc or Exit review to leave.');
     if (!on) { closePop(); if (toastEl) { toastEl.remove(); toastEl = null; } }
     try { localStorage.setItem('ox-plan-rev-seen', '1'); } catch (e) { /* the hint shows again next visit */ }
-    try { if (on) sessionStorage.setItem(ON_KEY, '1'); else sessionStorage.removeItem(ON_KEY); } catch (e) { /* not restored after a reload */ }
+    try { if (on) sessionStorage.setItem(ON_SLOT, '1'); else sessionStorage.removeItem(ON_SLOT); } catch (e) { /* not restored after a reload */ }
     if (hintBubble) { hintBubble.remove(); hintBubble = null; }
     renderRail();
     if (!on) autoSend();
@@ -1017,7 +1018,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         // A live reload — the agent addressed an item, or the server came back — must
         // not drop a reviewer mid-review back to reading mode. Restored silently: the
         // reviewer did not just enter, so no entry toast.
-        try { if (!on && sessionStorage.getItem(ON_KEY)) setReview(true, true); } catch (e) { /* starts in reading mode */ }
+        try { if (!on && sessionStorage.getItem(ON_SLOT)) setReview(true, true); } catch (e) { /* starts in reading mode */ }
         break;
       case 'placed':
         onPlaced(m.items);

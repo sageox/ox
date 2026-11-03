@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/perf"
 	"github.com/sageox/ox/internal/session"
@@ -38,13 +39,14 @@ type PrePushFinding struct {
 	Line     int    // 1-indexed line number
 }
 
-// prePushScannerScopePrefixes restricts the gate to ledger paths the
-// recovery tooling can actually fix. As of ox-cqdo:
+// prePushScannerScopePrefixes covers session artifacts. Canonical plan
+// Markdown is additionally included by inPrePushScannerScope.
 //
 //   - sessions/      raw AI session recordings — assistant chat and tool
-//     I/O. The one path where unscrubbed credentials can
-//     plausibly land in a ledger from ox-controlled writes.
+//     I/O.
 //     Covered by `ox session audit` / `ox session redact`.
+//   - data/plans/**/plan.md — automatically captured or explicitly saved plans.
+//     Findings hold publication until unpushed history is cleaned.
 //
 // Out of scope (intentionally not gated):
 //
@@ -66,7 +68,7 @@ var prePushScannerScopePrefixes = []string{
 }
 
 // inPrePushScannerScope returns true iff rel (a forward-slash-relative path
-// from the ledger root) sits inside one of prePushScannerScopePrefixes.
+// from the ledger root) is a session artifact or canonical plan Markdown.
 // Paths produced by `git diff --name-only` and `git ls-tree` are already
 // forward-slash, so no normalization is needed.
 func inPrePushScannerScope(rel string) bool {
@@ -75,7 +77,7 @@ func inPrePushScannerScope(rel string) bool {
 			return true
 		}
 	}
-	return false
+	return gitutil.IsPlanTextPath(rel)
 }
 
 // scanPrePushForSecrets enumerates files that the next push would publish
@@ -93,10 +95,9 @@ func inPrePushScannerScope(rel string) bool {
 func scanPrePushForSecrets(ctx context.Context, ledgerPath string) (*PrePushScanResult, error) {
 	ctx, span := perf.Start(ctx, "secret_scan")
 	defer span.End()
-	// Enumerate files in the push range. The triple-dot syntax includes
-	// every file touched by commits on HEAD that aren't on origin/main —
-	// even if a later commit reverts them, the bytes are still in the
-	// pack that would be pushed, so the scan correctly flags them.
+	// Enumerate the final diff for working-tree repair. The mandatory immutable
+	// publication scan also checks earlier blobs, even if later commits delete
+	// or redact them.
 	cmd := exec.CommandContext(ctx, "git", "-C", ledgerPath,
 		"diff", "--name-only", "origin/main...HEAD")
 	out, err := cmd.Output()
@@ -137,8 +138,8 @@ func scanAllTrackedFiles(ctx context.Context, ledgerPath string) (*PrePushScanRe
 
 // scanPaths runs the redactor against the working-tree content of every
 // path in paths, recording detector matches as PrePushFindings. Only paths
-// outside sessions/ and legitimately deleted files are skipped. Extensions and
-// scan limits cannot authorize uninspected session content for publication.
+// outside the session/plan scope and legitimately deleted files are skipped.
+// Scan limits cannot authorize uninspected content for publication.
 // File size is not a limit: long recordings are streamed line by line, and a
 // scan failure holds publication rather than skipping the file.
 func scanPaths(ledgerPath string, paths []string) (*PrePushScanResult, error) {
@@ -159,10 +160,10 @@ func scanPaths(ledgerPath string, paths []string) (*PrePushScanResult, error) {
 				// The immutable publication scan still checks deleted Git blobs.
 				continue
 			}
-			return nil, fmt.Errorf("inspect session path %s: %w", rel, err)
+			return nil, fmt.Errorf("inspect ledger path %s: %w", rel, err)
 		}
 		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("session path %s is not a regular file", rel)
+			return nil, fmt.Errorf("ledger path %s is not a regular file", rel)
 		}
 		result.FilesScanned++
 
@@ -240,8 +241,9 @@ func FormatPrePushFindings(r *PrePushScanResult) string {
 	b.WriteString("\nTo proceed:\n")
 	b.WriteString("  1. Inspect the flagged paths and remove or redact the credential.\n")
 	b.WriteString("     Run `ox session audit` for a per-line audit, then `ox session redact` for interactive cleanup.\n")
+	b.WriteString("     For data/plans/**/plan.md, redact or re-save the plan and remove credential-bearing blobs from unpushed history.\n")
 	b.WriteString("  2. Amend the holding commit, then retry the push.\n")
-	b.WriteString("  3. Retry only after the session content passes verification.\n")
+	b.WriteString("  3. Retry only after the session and plan content passes verification.\n")
 	return b.String()
 }
 
@@ -287,6 +289,13 @@ func runSessionSecretGate(ctx context.Context, ledgerPath string, scan func() (*
 	if len(result.Findings) == 0 {
 		slog.Debug("pre-push secret gate: clean", "files_scanned", result.FilesScanned)
 		return nil
+	}
+	// Session repair/quarantine cannot rewrite plans. Hold publication instead
+	// of passing plan findings to tooling that only understands sessions/.
+	for _, finding := range result.Findings {
+		if gitutil.IsPlanTextPath(finding.Path) {
+			return fmt.Errorf("%s", FormatPrePushFindings(result))
+		}
 	}
 
 	// Per-file rewrite failures remain findings for quarantine. A metadata or
