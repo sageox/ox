@@ -526,6 +526,9 @@ func checkRecoveryDestination(ledgerSessionDir, sessionName, recoveredID string)
 // it until this returns: the bytes read here are the bytes published, and the
 // recording cleared is the one they came from.
 func publishCachedRecording(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState, rawPath string) (*sessionRecoverOutput, error) {
+	if err := maskCachedRecordingForPublication(rawPath, projectRoot, state); err != nil {
+		return nil, err
+	}
 	stored, err := session.ReadSessionFromPath(rawPath)
 	if err != nil {
 		return nil, unreadableCachedSessionError(projectRoot, state, err)
@@ -691,9 +694,31 @@ func publishCachedRecording(inst *agentinstance.Instance, projectRoot string, st
 	return output, nil
 }
 
+// maskCachedRecordingForPublication is shared by incremental stop and cache-only
+// recovery. Lifecycle seqs count entries, not header/footer records or a native
+// record's optional seq field. Refuse a shortened or malformed cache rather than
+// apply those boundaries to a different entry sequence. The atomic replacement
+// leaves the cache intact on parsing, policy, or lifecycle validation failure.
+func maskCachedRecordingForPublication(rawPath, projectRoot string, state *session.RecordingState) error {
+	if state.AdapterName == "cursor" {
+		return nil // Cursor's native finalizer already applied the lifecycle.
+	}
+	for _, event := range state.Lifecycle {
+		if event.Action == session.LifecycleActionPause {
+			return copyRawSessionForPublication(rawPath, rawPath, projectRoot, state)
+		}
+	}
+	return nil
+}
+
 // copyRecoveredRawSession preserves every native record and framing field while
-// applying current policy. Parse/policy failures leave the destination intact.
+// applying current policy. Lifecycle masking happens before any recovery preview
+// or copy. Parse/policy failures leave the destination intact.
 func copyRecoveredRawSession(sourcePath, destinationPath, projectRoot string) error {
+	return copyRawSessionForPublication(sourcePath, destinationPath, projectRoot, nil)
+}
+
+func copyRawSessionForPublication(sourcePath, destinationPath, projectRoot string, state *session.RecordingState) error {
 	source, err := os.Open(sourcePath)
 	if err != nil {
 		return fmt.Errorf("open cached recording: %w", err)
@@ -711,6 +736,8 @@ func copyRecoveredRawSession(sourcePath, destinationPath, projectRoot string) er
 	}
 	decoder := json.NewDecoder(source)
 	decoder.UseNumber()
+	var records []map[string]any
+	var entries []session.SessionEntry
 	for {
 		var record map[string]any
 		if err := decoder.Decode(&record); err == io.EOF {
@@ -719,6 +746,62 @@ func copyRecoveredRawSession(sourcePath, destinationPath, projectRoot string) er
 			// Decoder errors may quote source bytes. A malformed recording is
 			// repairable local data, never safe content for a terminal diagnostic.
 			return fmt.Errorf("cached recording is not valid JSONL")
+		}
+		if record == nil {
+			return fmt.Errorf("cached recording is not a JSONL object")
+		}
+		if state == nil {
+			if err := writer.WriteRaw(record); err != nil {
+				return fmt.Errorf("redact recovered recording: %w", err)
+			}
+			continue
+		}
+		records = append(records, record)
+		if record["type"] == "header" || record["type"] == "footer" {
+			continue
+		}
+		if _, ok := record["_meta"].(map[string]any); ok {
+			continue
+		}
+		// Carry the record position through the mask without projecting away
+		// native fields or rounding integers in the original map.
+		entries = append(entries, session.SessionEntry{Seq: len(records) - 1})
+	}
+
+	originalCount := len(entries)
+	if state != nil {
+		if originalCount != state.EntryCount {
+			return fmt.Errorf("publication aborted: cached entry count does not match lifecycle checkpoint")
+		}
+		previousSeq := 0
+		for _, event := range state.Lifecycle {
+			if event.Seq < previousSeq || event.Seq > originalCount {
+				return fmt.Errorf("publication aborted: invalid lifecycle sequence")
+			}
+			previousSeq = event.Seq
+		}
+		entries = session.ApplySegmentMask(entries, state.Lifecycle)
+		if msg := validateMaskInvariant(originalCount, len(entries), state.Lifecycle); msg != "" {
+			return fmt.Errorf("publication aborted: %s", msg)
+		}
+	}
+
+	// Headers and carrier footers are not part of the lifecycle sequence.
+	// Keep their relative order, but replace the entry stream with the mask's
+	// retained maps. Never serialize an excluded entry, even as a placeholder.
+	retained := make(map[int]bool, len(entries))
+	for _, entry := range entries {
+		retained[entry.Seq] = true
+	}
+	for i, record := range records {
+		_, meta := record["_meta"].(map[string]any)
+		if record["type"] != "header" && record["type"] != "footer" && !meta && !retained[i] {
+			continue
+		}
+		if state != nil && record["type"] == "footer" {
+			if _, ok := record["entry_count"]; ok {
+				record["entry_count"] = len(entries)
+			}
 		}
 		if err := writer.WriteRaw(record); err != nil {
 			return fmt.Errorf("redact recovered recording: %w", err)
