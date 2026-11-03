@@ -169,3 +169,36 @@ func TestSelectAgentsForInitDetectsDevin(t *testing.T) {
 		t.Fatalf("devin not selected: %v", selected)
 	}
 }
+
+func TestInstallDevinPluginRejectsSymlinks(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "victim.json")
+	if err := os.WriteFile(outside, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fileLink := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(fileLink, ".devin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, devinConfigPath(fileLink)); err != nil {
+		t.Fatal(err)
+	}
+
+	dirLink := t.TempDir()
+	if err := os.Symlink(filepath.Dir(outside), filepath.Join(dirLink, ".devin")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(outside, filepath.Join(filepath.Dir(outside), "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	outside = filepath.Join(filepath.Dir(outside), "config.json")
+
+	for name, root := range map[string]string{"config.json symlink": fileLink, ".devin symlink": dirLink} {
+		if err := InstallDevinPlugin(root); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+	if data, _ := os.ReadFile(outside); string(data) != `{}` {
+		t.Fatalf("file outside the repo was modified: %s", data)
+	}
+}

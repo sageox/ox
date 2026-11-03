@@ -38,14 +38,28 @@ func isDevinPluginEntry(v any) bool {
 		m["url"] == devinPluginSource["url"] && m["path"] == devinPluginSource["path"]
 }
 
+// rejectDevinSymlinks refuses a symlinked .devin or .devin/config.json: a
+// checked-in symlink would otherwise point init's write outside the checkout.
+func rejectDevinSymlinks(gitRoot string) error {
+	for _, p := range []string{filepath.Dir(devinConfigPath(gitRoot)), devinConfigPath(gitRoot)} {
+		if info, err := os.Lstat(p); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to follow symlink %s", p)
+		}
+	}
+	return nil
+}
+
 func readDevinConfig(gitRoot string) (map[string]any, error) {
+	if err := rejectDevinSymlinks(gitRoot); err != nil {
+		return nil, err
+	}
 	cfg := map[string]any{}
 	data, err := os.ReadFile(devinConfigPath(gitRoot))
 	if os.IsNotExist(err) {
 		return cfg, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read %s: %w", devinConfigPath(gitRoot), err)
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		return cfg, nil
@@ -95,10 +109,13 @@ func InstallDevinPlugin(gitRoot string) error {
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("encode %s: %w", devinConfigPath(gitRoot), err)
 	}
 	if err := os.MkdirAll(filepath.Dir(devinConfigPath(gitRoot)), 0o755); err != nil {
-		return err
+		return fmt.Errorf("create %s: %w", filepath.Dir(devinConfigPath(gitRoot)), err)
 	}
-	return os.WriteFile(devinConfigPath(gitRoot), append(data, '\n'), 0o644)
+	if err := os.WriteFile(devinConfigPath(gitRoot), append(data, '\n'), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", devinConfigPath(gitRoot), err)
+	}
+	return nil
 }

@@ -831,6 +831,11 @@ func runInit() error {
 		tracker.trackCreatedFile(hookFile)
 	}
 	for _, hookFile := range stageableInstalledPaths(gitRoot, installedHooks) {
+		// A pre-existing .devin/config.json the user keeps out of git may hold
+		// local secrets (e.g. mcpServers env): never force-add it.
+		if devinConfigExisted && hookFile == devinConfig && gitPathIsIgnoredRespectingIndex(gitRoot, devinConfig) {
+			continue
+		}
 		tracker.trackForceStage(hookFile)
 	}
 

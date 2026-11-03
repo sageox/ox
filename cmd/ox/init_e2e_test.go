@@ -567,3 +567,21 @@ func TestRunInit_DevinMergesAndStagesExistingConfig(t *testing.T) {
 	assert.True(t, HasDevinPlugin(env.Root), "recorder plugin must be added")
 	assert.Contains(t, stagedPaths(t, env.Root), ".devin/config.json")
 }
+
+// A pre-existing .devin/config.json the user gitignores may hold local secrets:
+// init still merges the recorder in but must not force-add the file.
+func TestRunInit_DevinLeavesIgnoredExistingConfigUnstaged(t *testing.T) {
+	env := newOxE2E(t)
+	withInitFlags(t, env.TeamID)
+	initAgentsFlag = "devin"
+
+	cfg := filepath.Join(env.Root, ".devin", "config.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfg), 0o755))
+	require.NoError(t, os.WriteFile(cfg, []byte(`{"mcpServers":{}}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(env.Root, ".devin", ".gitignore"), []byte("config.json\n"), 0o644))
+
+	require.NoError(t, runInit())
+
+	assert.True(t, HasDevinPlugin(env.Root), "recorder plugin must be added")
+	assert.NotContains(t, stagedPaths(t, env.Root), ".devin/config.json")
+}

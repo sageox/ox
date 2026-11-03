@@ -24,4 +24,6 @@ A user without the secret isn't recorded; Devin tells them once per session how 
 - **Token:** Devin doesn't pass secrets to hooks; it includes them with each command's `tool_input.injected_env`. The hook caches the token (mode 0600) and strips `injected_env` and `__DEVIN*` keys before anything is recorded. Events before the first command are buffered.
 - **One SageOx session per turn:** cloud Devin never sends `SessionEnd` and may delete a sleeping VM, so every turn end uploads.
 - **Ledger clone:** a fresh VM clones the Ledger first. If it isn't ready at turn end, the recording stays open and uploads at the next turn end.
+- **Which repo:** the session's repo comes from Devin's project dir or the command's working directory, never from other checkouts on the VM. A repo without `.sageox/` is not recorded.
+- **Opt-outs:** recording only happens where `ox config get session_recording` is `auto` (the default in `ox init`ed repos). `manual` or `disabled`, at any level or via `OX_SESSION_RECORDING`, turns it off.
 - **Fails open:** any error is logged to `~/.ox-devin/hook.log` and never blocks Devin.

@@ -55,34 +55,63 @@ ensure_ox() {
   curl -fsSL -o "$tmp/$asset" "$base/$asset" && curl -fsSL -o "$tmp/checksums.txt" "$base/checksums.txt" &&
     (cd "$tmp" && grep " $asset\$" checksums.txt | sha256sum -c --status) &&
     tar xzf "$tmp/$asset" -C "$tmp" || { log "ox install failed (download or checksum)"; rm -rf "$tmp"; return 1; }
-  mkdir -p "$HOME/.local/bin" && cp "$tmp"/ox "$tmp"/ox-adapter-* "$HOME/.local/bin/" 2>/dev/null
+  mkdir -p "$HOME/.local/bin" && cp "$tmp/ox" "$HOME/.local/bin/" || { log "ox install failed (copy)"; rm -rf "$tmp"; return 1; }
+  cp "$tmp"/ox-adapter-* "$HOME/.local/bin/" 2>/dev/null  # adapters are optional for the generic recorder
   rm -rf "$tmp"; log "installed ox $tag"
 }
 
-# Record into the repo Devin is working in: an explicit override, Devin's
-# project dir, the tool call's workdir, then the first `ox init`ed ~/repos/*.
+# Record into the repo this Devin session works in: the one already chosen
+# this session, an explicit override, Devin's project dir, then the tool call's
+# workdir. Never guess from other checkouts on the VM: with an org-wide plugin
+# that could upload one team's session into another team's Ledger. A git repo
+# without .sageox/ is the real project and is not initialized, so stop there.
 find_repo() {
-  local d wd
+  local d top wd
   wd=$(printf '%s' "$PAYLOAD" | python3 -c 'import sys,json;i=json.load(sys.stdin).get("tool_input") or {};print(i.get("workdir") or i.get("cwd") or "" if isinstance(i,dict) else "")' 2>/dev/null)
-  for d in "${OX_PROJECT_ROOT:-}" "${DEVIN_PROJECT_DIR:-}" "${CLAUDE_PROJECT_DIR:-}" "$wd" "$PWD" "$HOME"/repos/*; do
-    [ -n "$d" ] && d=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null || echo "$d")
-    [ -n "$d" ] && [ -f "$d/.sageox/config.json" ] && { echo "$d"; return 0; }
+  for d in "$(cat "$SDIR/repo" 2>/dev/null)" "${OX_PROJECT_ROOT:-}" "${DEVIN_PROJECT_DIR:-}" "${CLAUDE_PROJECT_DIR:-}" "$wd"; do
+    [ -n "$d" ] || continue
+    top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || continue
+    [ -f "$top/.sageox/config.json" ] && { echo "$top"; return 0; }
+    return 1
   done
   return 1
 }
 
+# Honor recording opt-outs: only record where ox's effective policy is "auto"
+# (the default for ox-initialized repos). A user, repo, or OX_SESSION_RECORDING
+# set to manual or disabled means this session is not recorded.
+recording_allowed() {
+  local mode
+  mode=$(cat "$SDIR/mode" 2>/dev/null)
+  if [ -z "$mode" ]; then
+    mode=$( (cd "$1" && ox config get session_recording --json 2>/dev/null) |
+      python3 -c 'import sys,json;print(json.load(sys.stdin).get("value",""))' 2>/dev/null)
+    [ -n "$mode" ] && echo "$mode" > "$SDIR/mode"
+  fi
+  [ "$mode" = auto ] || { log "skip: session_recording=${mode:-unknown}"; return 1; }
+}
 
+# Hooks run concurrently: serialize start and stop so two hooks never create
+# competing recordings or stop one another mid-start. fd 9 holds the lock
+# until the hook process exits.
+lock_session() { exec 9>"$SDIR/init.lock" && flock -w 50 9; }
+
+# Returns 0 when recording, 1 when not ready yet (buffer the event), 2 when
+# this session must not be recorded (drop it).
 ensure_recording() {
   if [ -f "$SDIR/session_file" ] && [ -f "$SDIR/agent_id" ]; then return 0; fi
   ensure_ox || return 1
   local repo id out sf
-  repo=$(find_repo) || { log "skip: no repo with .sageox/"; return 1; }
+  repo=$(find_repo) || { log "waiting: no initialized session repo yet"; return 1; }
+  recording_allowed "$repo" || return 2
+  lock_session || return 1
+  if [ -f "$SDIR/session_file" ] && [ -f "$SDIR/agent_id" ]; then return 0; fi
   cd "$repo" || return 1
   log "repo=$repo DEVIN_PROJECT_DIR=${DEVIN_PROJECT_DIR:-} PWD=$PWD"
-  # session_recording defaults to "auto": prime would start a recording with no
-  # generic drop file, and stop then uploads nothing. Start it ourselves instead.
-  [ -f "$STATE_ROOT/.manual" ] || { ox config set session_recording manual >/dev/null 2>&1 && touch "$STATE_ROOT/.manual"; }
-  id=$(ox agent prime --agent devin 2>/dev/null | grep -oE 'agent_id="Ox[A-Za-z0-9]+"' | head -1 | cut -d'"' -f2)
+  # In auto mode prime would start its own recording with no generic drop file,
+  # and stop would upload nothing. Suppress that for this one call only (never
+  # persisted) and start the recording explicitly instead.
+  id=$(OX_SESSION_RECORDING=manual ox agent prime --agent devin 2>/dev/null | grep -oE 'agent_id="Ox[A-Za-z0-9]+"' | head -1 | cut -d'"' -f2)
   [ -n "$id" ] || { log "prime failed"; return 1; }
   out=$(ox agent "$id" session start --title "Devin session $SID" 2>&1)
   sf=$(printf '%s' "$out" | python3 -c "import sys,json,re;t=sys.stdin.read();m=re.search(r'\{.*\}',t,re.S);print(json.loads(m.group(0)).get('session_file',''))" 2>/dev/null)
@@ -162,7 +191,10 @@ record_event() {
     # until a tool call delivers the user's own token (or forever, if none).
     make_entry | append_line "$SDIR/pending.jsonl"; log "buffered: no SAGEOX_TOKEN yet"; return 0
   fi
-  ensure_recording || return 1
+  local rc; ensure_recording; rc=$?
+  [ "$rc" -eq 2 ] && return 0
+  # Not recording yet (no initialized repo seen, ox not ready): keep the event.
+  [ "$rc" -eq 0 ] || { make_entry | append_line "$SDIR/pending.jsonl"; return 0; }
   local sf; sf=$(cat "$SDIR/session_file")
   if [ -s "$SDIR/pending.jsonl" ]; then
     # Buffered entries predate the recording, and stop drops anything stamped
@@ -182,6 +214,8 @@ for i, line in enumerate(l for l in sys.stdin if l.strip()):
 stop_recording() {
   [ -f "$SDIR/agent_id" ] || return 0
   [ -n "$SAGEOX_TOKEN" ] || return 0
+  lock_session || return 0
+  [ -f "$SDIR/agent_id" ] || return 0
   local id repo; id=$(cat "$SDIR/agent_id"); repo=$(cat "$SDIR/repo")
   cd "$repo" || return 1
   ledger_ready || { log "deferred: ledger still cloning, upload at next turn end"; return 0; }
