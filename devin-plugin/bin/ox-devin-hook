@@ -81,13 +81,10 @@ find_repo() {
 # (the default for ox-initialized repos). A user, repo, or OX_SESSION_RECORDING
 # set to manual or disabled means this session is not recorded.
 recording_allowed() {
+  # Checked on every event, never cached, so an opt-out applies mid-session.
   local mode
-  mode=$(cat "$SDIR/mode" 2>/dev/null)
-  if [ -z "$mode" ]; then
-    mode=$( (cd "$1" && ox config get session_recording --json 2>/dev/null) |
-      python3 -c 'import sys,json;print(json.load(sys.stdin).get("value",""))' 2>/dev/null)
-    [ -n "$mode" ] && echo "$mode" > "$SDIR/mode"
-  fi
+  mode=$( (cd "$1" && ox config get session_recording --json 2>/dev/null) |
+    python3 -c 'import sys,json;print(json.load(sys.stdin).get("value",""))' 2>/dev/null)
   [ "$mode" = auto ] || { log "skip: session_recording=${mode:-unknown}"; return 1; }
 }
 
@@ -99,11 +96,11 @@ lock_session() { exec 9>"$SDIR/init.lock" && flock -w 50 9; }
 # Returns 0 when recording, 1 when not ready yet (buffer the event), 2 when
 # this session must not be recorded (drop it).
 ensure_recording() {
-  if [ -f "$SDIR/session_file" ] && [ -f "$SDIR/agent_id" ]; then return 0; fi
   ensure_ox || return 1
   local repo id out sf
   repo=$(find_repo) || { log "waiting: no initialized session repo yet"; return 1; }
   recording_allowed "$repo" || return 2
+  if [ -f "$SDIR/session_file" ] && [ -f "$SDIR/agent_id" ]; then return 0; fi
   lock_session || return 1
   if [ -f "$SDIR/session_file" ] && [ -f "$SDIR/agent_id" ]; then return 0; fi
   cd "$repo" || return 1
