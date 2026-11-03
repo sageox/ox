@@ -138,3 +138,35 @@ func TestTraceBoundariesDoNotTrustRecoveredNativeIDs(t *testing.T) {
 	require.Contains(t, state.Trace.Boundaries[1].Offsets, traceBoundaryID)
 	require.NotContains(t, state.Trace.Boundaries[1].Offsets, traceBoundarySecondID)
 }
+
+// Trace authority lives only in the local capture. When that capture cannot
+// be written, the recording must carry no trace state rather than unpersisted
+// state a later materialize would have to trust.
+func TestTraceBoundariesUnpersistableCaptureFailsClosed(t *testing.T) {
+	t.Run("relative recording dir", func(t *testing.T) {
+		traceBoundaryEnvironment(t, true)
+		state := &RecordingState{SessionPath: "relative/session", AgentType: "claude-code", AgentSessionID: traceBoundaryID, StartedAt: time.Now()}
+		state.initializeTraceCapture()
+		require.Nil(t, state.Trace)
+	})
+	t.Run("cache unwritable at start", func(t *testing.T) {
+		traceBoundaryEnvironment(t, true)
+		blocker := filepath.Join(t.TempDir(), "not-a-dir")
+		require.NoError(t, os.WriteFile(blocker, nil, 0600))
+		t.Setenv("XDG_CACHE_HOME", blocker)
+		state := &RecordingState{SessionPath: t.TempDir(), AgentType: "claude-code", AgentSessionID: traceBoundaryID, StartedAt: time.Now()}
+		state.initializeTraceCapture()
+		require.Nil(t, state.Trace)
+	})
+	t.Run("cache unwritable at a later boundary", func(t *testing.T) {
+		traceBoundaryEnvironment(t, true)
+		state := &RecordingState{SessionPath: t.TempDir(), AgentType: "claude-code", AgentSessionID: traceBoundaryID, StartedAt: time.Now()}
+		state.initializeTraceCapture()
+		require.NotNil(t, state.Trace)
+		captures := filepath.Join(paths.CacheDir(), "trace", "recordings")
+		require.NoError(t, os.RemoveAll(captures))
+		require.NoError(t, os.WriteFile(captures, nil, 0600))
+		state.recordTraceBoundary("stop", time.Now())
+		require.Nil(t, state.Trace)
+	})
+}
