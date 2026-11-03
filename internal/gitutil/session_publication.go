@@ -67,22 +67,29 @@ func ValidateSessionPublication(ctx context.Context, ledgerPath string) error {
 	if exec.CommandContext(ctx, "git", "-C", ledgerPath, "rev-parse", "--verify", "@{upstream}").Run() == nil {
 		args = append(args, "^@{upstream}")
 	}
-	args = append(args, "--", "sessions/", planTextPathspec)
+	// rev-list's object walk does not descend into a ":(glob)" "**" pathspec, so
+	// it would list no plan blobs at all. Walk the plans directory and keep only
+	// plan-text blobs below.
+	args = append(args, "--", "sessions/", "data/plans/")
 	out, err := exec.CommandContext(ctx, "git", args...).Output()
 	if err != nil {
 		return errors.New("cannot enumerate committed session/plan objects; publication pending")
 	}
-	if len(strings.TrimSpace(string(out))) == 0 {
-		return nil
-	}
-	ids := make([]string, 0)
-	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
-		id, _, _ := strings.Cut(line, " ")
-		ids = append(ids, id)
-	}
 	blobPaths, err := sessionBlobPaths(ctx, ledgerPath)
 	if err != nil {
 		return errors.New("cannot inspect committed session/plan paths; publication pending")
+	}
+	ids := make([]string, 0)
+	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+		id, path, _ := strings.Cut(line, " ")
+		// rev-list names one path per blob; a blob also committed at a plan
+		// path is still in blobPaths.
+		if _, changed := blobPaths[id]; changed || strings.HasPrefix(path, "sessions/") || IsPlanTextPath(path) {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
 	}
 	cmd := exec.CommandContext(ctx, "git", "-C", ledgerPath, "cat-file", "--batch")
 	cmd.Stdin = strings.NewReader(strings.Join(ids, "\n") + "\n")

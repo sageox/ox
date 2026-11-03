@@ -38,7 +38,7 @@ func TestCommittedSessionScanCannotTrustWorktreeOrFinalDiff(t *testing.T) {
 				gitInRepo(t, ledger, "add", "--", rel)
 				gitInRepo(t, ledger, "commit", "-m", "redact synthetic session")
 			}
-				require.ErrorContains(t, ValidateSessionPublication(context.Background(), ledger), "committed session/plan content refused")
+			require.ErrorContains(t, ValidateSessionPublication(context.Background(), ledger), "committed session/plan content refused")
 		})
 	}
 }
