@@ -36,6 +36,11 @@ const aiderSessionPrefix = "# aider chat started at "
 // OpenInRoot prevents symlink escapes during the open, including replacements
 // after discovery; callers must parse this handle rather than reopen the path.
 func openAiderFile(path string) (*os.File, error) {
+	// The directory is trusted only as Aider's workspace, identified by the
+	// history file name; any other caller-supplied path is not a session.
+	if filepath.Base(path) != aiderHistoryFile {
+		return nil, fmt.Errorf("not an aider history file: %s", filepath.Base(path))
+	}
 	f, err := os.OpenInRoot(filepath.Dir(path), filepath.Base(path))
 	if err != nil {
 		return nil, err
