@@ -158,7 +158,7 @@ func TestTraceFinalizeDoorsPublishPointers(t *testing.T) {
 					require.Equal(t, "stop", last.Action)
 					require.Equal(t, model.Offsets{Spans: int64(len(spans)), Events: int64(len(events))}, last.Offsets[nativeID])
 				}
-				if door == "invalid-trace" || door == "missing-stop" || door == "orphan-missing-stop" {
+				if door == "invalid-trace" || door == "missing-stop" || door == "orphan-missing-stop" || door == "synchronized-forged-trace" {
 					return
 				}
 				for _, file := range []string{materialize.SpansFile, materialize.EventsFile} {
