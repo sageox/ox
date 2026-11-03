@@ -85,7 +85,10 @@ recording_allowed() {
   local mode
   mode=$( (cd "$1" && ox config get session_recording --json 2>/dev/null) |
     python3 -c 'import sys,json;print(json.load(sys.stdin).get("value",""))' 2>/dev/null)
-  [ "$mode" = auto ] || { log "skip: session_recording=${mode:-unknown}"; return 1; }
+  [ "$mode" = auto ] && return 0
+  log "skip: session_recording=${mode:-unknown}"
+  # 1 = explicit opt-out; 3 = lookup failed, which may be transient.
+  [ -n "$mode" ] && return 1 || return 3
 }
 
 # Hooks run concurrently: serialize start and stop so two hooks never create
@@ -228,7 +231,9 @@ stop_recording() {
   local id repo; id=$(cat "$SDIR/agent_id"); repo=$(cat "$SDIR/repo")
   cd "$repo" || return 1
   # Opted out mid-turn: discard this session's own local recording, don't upload it.
-  if ! recording_allowed "$repo"; then
+  local policy; recording_allowed "$repo"; policy=$?
+  [ "$policy" -eq 3 ] && { log "deferred: recording policy unknown"; return 0; }
+  if [ "$policy" -ne 0 ]; then
     ox agent "$id" session abort --force >/dev/null 2>&1
     log "aborted agent=$id: recording opt-out"
     rm -f "$SDIR/agent_id" "$SDIR/session_file" "$SDIR/stop_failed"
