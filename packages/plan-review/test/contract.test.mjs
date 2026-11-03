@@ -52,8 +52,8 @@ test('review mode announces itself, keeps its exit in view, and survives a reloa
     "if (e.key === 'Escape') { if (escape()) e.preventDefault(); return; }", // …marked handled
     "if (m.key === 'Escape') escape();", // a framed document's Esc too
     "if (e.key === 'r' && !typing(e)", // r toggles, not from a text field
-    "sessionStorage.setItem(ON_KEY, '1')", // kept per tab, not per browser
-    'if (!on && sessionStorage.getItem(ON_KEY)) setReview(true, true);', // restored silently after a reload
+    "sessionStorage.setItem(ON_SLOT, '1')", // kept per tab, not per browser
+    'if (!on && sessionStorage.getItem(ON_SLOT)) setReview(true, true);', // restored silently after a reload
     'if (t.closest && t.closest(CHROME) && (on || pop)) closePop();', // a click on the controls dismisses a note
     "case 'dismiss':\n        if ((on || pop) && !held()) closePop();", // so does a click on nothing markable, unless the reviewer opened the note from the rail or typed in it
     'if (toastEl === el) toastEl = null;', // a toast timer removes only its own toast
@@ -71,8 +71,8 @@ test('the comments rail hides to a Show button that survives a reload', () => {
     `'<button class="rev-rail-hide"`, // the open rail's way out…
     `'<button class="rev-rail-show"`, // …and the hidden rail's way back
     'BUBBLE + rows.length', // including an explicit zero-comment count
-    "sessionStorage.setItem(MIN_KEY, '1')", // hidden is kept per tab…
-    'railMin = !!sessionStorage.getItem(MIN_KEY)', // …and read back after a reload
+    "sessionStorage.setItem(MIN_SLOT, '1')", // hidden is kept per tab…
+    'railMin = !!sessionStorage.getItem(MIN_SLOT)', // …and read back after a reload
     "classList.toggle('rev-rail-min', railMin)", // the class the stylesheet keys on
   ]);
   pins('host.css', [
