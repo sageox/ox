@@ -28,12 +28,12 @@ func ValidateSessionSource(adapter, path, nativeID string) error {
 			return fmt.Errorf("%w: Amp requires a native thread ID", ErrUnboundSource)
 		}
 		if err := ValidateSessionID(id); err != nil {
-			return fmt.Errorf("%w: %v", ErrUnboundSource, err)
+			return fmt.Errorf("%w: %w", ErrUnboundSource, err)
 		}
 		if path != "" {
 			resolved, err := filepath.EvalSymlinks(path)
 			if err != nil {
-				return fmt.Errorf("%w: resolve Amp sidecar: %v", ErrUnboundSource, err)
+				return fmt.Errorf("%w: resolve Amp sidecar: %w", ErrUnboundSource, err)
 			}
 			if filepath.Base(path) != id+".jsonl" || filepath.Base(resolved) != id+".jsonl" {
 				return fmt.Errorf("%w: Amp sidecar does not match native thread ID", ErrUnboundSource)

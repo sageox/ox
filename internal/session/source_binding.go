@@ -25,7 +25,7 @@ func CheckNativeSourceBinding(state *RecordingState) error {
 	state.SourceRejected = true
 	if state.SessionPath != "" {
 		if markErr := SetSourceRejectedAt(state.SessionPath, state.SessionID, true); markErr != nil {
-			return fmt.Errorf("%w; persist source quarantine: %v", err, markErr)
+			return fmt.Errorf("%w; persist source quarantine: %w", err, markErr)
 		}
 	}
 	return err
