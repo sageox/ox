@@ -1,0 +1,59 @@
+name: amp-owner-check
+
+# Gates .amp/ changes on an owner's approval, scoped to that one path, without
+# touching the repo-wide "require review from code owners" ruleset toggle
+# (that toggle covers every CODEOWNERS entry, including unrelated ones). Owners
+# are read live from .github/CODEOWNERS' /.amp/ line, so this and that file
+# can never drift apart. A PR that doesn't touch .amp/ reports success
+# immediately — this must always post a status, never skip, or GitHub's
+# required-checks gate waits on it forever once it's registered as required.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Does this PR touch .amp/?
+        id: touch
+        run: |
+          git fetch -q origin "${{ github.event.pull_request.base.sha }}" --depth=1
+          if git diff --name-only "${{ github.event.pull_request.base.sha }}...HEAD" -- .amp/ | grep -q .; then
+            echo "touches=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "touches=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Require an .amp/ owner's approval
+        if: steps.touch.outputs.touches == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # The CODEOWNERS line for /.amp/ names its owners; this reads them
+          # live so the check and the file can't say two different things.
+          owners=$(grep -E '^/\.amp/[[:space:]]' .github/CODEOWNERS | head -1 | grep -oE '@[A-Za-z0-9_-]+' | tr -d '@')
+          if [ -z "$owners" ]; then
+            echo "::error::No /.amp/ line in .github/CODEOWNERS; nobody to approve against."
+            exit 1
+          fi
+          approved=$(gh pr view "$PR" -R "$REPO" --json reviews --jq '[.reviews[] | select(.state == "APPROVED") | .author.login] | unique | .[]')
+          ok=0
+          for o in $owners; do
+            if printf '%s\n' "$approved" | grep -qx "$o"; then ok=1; fi
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::This PR changes .amp/ and needs an APPROVED review from one of: $owners"
+            exit 1
+          fi
+          echo "Approved by an .amp/ owner."
