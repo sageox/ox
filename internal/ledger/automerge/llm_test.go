@@ -453,3 +453,34 @@ func TestMergeOneWithLLM_ContentPreservation(t *testing.T) {
 		})
 	}
 }
+
+func TestRunClaudeBinary_ResultSurvivesDescendantHoldingOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell script")
+	}
+
+	binary := filepath.Join(t.TempDir(), "llm")
+	body := `#!/bin/sh
+set -eu
+cat > /dev/null
+sleep 20 &
+printf '%s\n' '{"type":"result","result":"merged\n"}'
+`
+	if err := os.WriteFile(binary, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	merged, err := runClaudeBinary(ctx, binary, "private merge prompt")
+	if err != nil {
+		t.Fatalf("runClaudeBinary: %v (after %s)", err, time.Since(start).Round(time.Millisecond))
+	}
+	if merged != "merged\n" {
+		t.Errorf("merged = %q, want %q", merged, "merged\n")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("runner waited %s for a descendant after the CLI exited", elapsed)
+	}
+}

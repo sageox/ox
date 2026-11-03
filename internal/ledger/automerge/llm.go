@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 	"gopkg.in/yaml.v3"
@@ -392,30 +393,45 @@ type claudeStreamMessage struct {
 // at all. `plan` mode disables all tool use including Bash/Edit/Write.
 // Even if the model is tricked into trying to "fix" something, it
 // can't write to disk or execute commands.
+// outputDrainGrace bounds reading a finished CLI's buffered output.
+const outputDrainGrace = 2 * time.Second
+
 func runClaudeBinary(ctx context.Context, binary, prompt string) (string, error) {
 	args := []string{"--output-format", "stream-json", "--verbose", "--permission-mode", "plan", "-p"}
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Stdin = strings.NewReader(prompt)
 	setProcAttr(cmd) // process-group isolation so hung descendants get killed on cancel
 
-	stdoutPipe, err := cmd.StdoutPipe()
+	// Own the read ends: exec's pipes close them in Wait, which would race the
+	// readers, while waiting for EOF first lets any descendant that inherited
+	// a write end hold a finished result until the deadline.
+	stdoutPipe, stdoutW, err := os.Pipe()
 	if err != nil {
 		return "", fmt.Errorf("stdout pipe: %w", err)
 	}
-	stderrPipe, err := cmd.StderrPipe()
+	defer stdoutPipe.Close()
+	stderrPipe, stderrW, err := os.Pipe()
 	if err != nil {
+		_ = stdoutW.Close()
 		return "", fmt.Errorf("stderr pipe: %w", err)
 	}
+	defer stderrPipe.Close()
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stderrW
 
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start: %w", err)
+	startErr := cmd.Start()
+	_ = stdoutW.Close()
+	_ = stderrW.Close()
+	if startErr != nil {
+		return "", fmt.Errorf("start: %w", startErr)
 	}
 
-	// Unblock readers on cancellation even if a descendant holds a pipe open.
-	stopClosingPipes := context.AfterFunc(ctx, func() {
+	closeOutput := func() {
 		_ = stdoutPipe.Close()
 		_ = stderrPipe.Close()
-	})
+	}
+	// Unblock readers on cancellation even if a descendant holds a pipe open.
+	stopClosingPipes := context.AfterFunc(ctx, closeOutput)
 	defer stopClosingPipes()
 
 	stderrDone := make(chan struct{})
@@ -435,10 +451,13 @@ func runClaudeBinary(ctx context.Context, binary, prompt string) (string, error)
 		parseCh <- parseRes{result: result, err: err}
 	}()
 
-	// Wait closes the read pipes, so consume the output before calling it.
+	waitErr := cmd.Wait()
+	// The CLI has exited, so its output is already buffered. Stop waiting for
+	// EOF from descendants after a short drain instead of the merge deadline.
+	drain := time.AfterFunc(outputDrainGrace, closeOutput)
+	defer drain.Stop()
 	pr := <-parseCh
 	<-stderrDone
-	waitErr := cmd.Wait()
 
 	if ctx.Err() != nil {
 		return "", fmt.Errorf("timeout: %w", ctx.Err())
