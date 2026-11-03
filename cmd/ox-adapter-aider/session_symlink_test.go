@@ -3,12 +3,14 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
 )
 
@@ -75,7 +77,11 @@ func TestAiderHistoryRejectsEscapingSymlinks(t *testing.T) {
 
 func TestAiderHistoryAllowsContainedSymlinkAndLinkedWorkspace(t *testing.T) {
 	repo := t.TempDir()
-	if err := os.WriteFile(filepath.Join(repo, "history.md"), []byte("workspace text\n"), 0o600); err != nil {
+	if err := os.Mkdir(filepath.Join(repo, ".sageox"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const content = "workspace text\n"
+	if err := os.WriteFile(filepath.Join(repo, "history.md"), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink("history.md", filepath.Join(repo, aiderHistoryFile)); err != nil {
@@ -85,16 +91,57 @@ func TestAiderHistoryAllowsContainedSymlinkAndLinkedWorkspace(t *testing.T) {
 	if err := os.Symlink(repo, linkedRepo); err != nil {
 		t.Fatal(err)
 	}
-	path, err := findAiderSession(linkedRepo, "", "", "")
+	params := adapterprotocol.FindSessionParams{RepoRoot: linkedRepo, AgentID: "OxAider"}
+	found, err := handleFindSession(params)
 	if err != nil {
 		t.Fatal(err)
 	}
+	path := found.SessionFile
 	if path != filepath.Join(linkedRepo, aiderHistoryFile) {
 		t.Fatalf("discovery must preserve the workspace-rooted path, got %q", path)
+	}
+	if found.Offset != int64(len(content)) {
+		t.Fatalf("discovery offset = %d, want %d", found.Offset, len(content))
 	}
 	entries, err := readAiderFile(path)
 	if err != nil || len(entries) != 1 || entries[0].Content != "workspace text" {
 		t.Fatalf("contained history was not read: entries=%v, error=%v", entries, err)
+	}
+
+	// Serve mode must use the same confined stat and report the same offset.
+	encodedParams, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input, output bytes.Buffer
+	if err := json.NewEncoder(&input).Encode(adapterprotocol.Request{ID: 1, Method: adapterprotocol.MethodFindSession, Params: encodedParams}); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapterruntime.RunWithArgs(newConfig(), []string{"--serve"}, &input, &output); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Result adapterprotocol.FindSessionResult `json:"result"`
+		Error  *adapterprotocol.RPCError         `json:"error"`
+	}
+	if err := json.NewDecoder(&output).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error != nil || response.Result != *found {
+		t.Fatalf("serve discovery differs from one-shot: response=%+v, want=%+v", response, *found)
+	}
+}
+
+func TestAiderHistoryRejectsDirectory(t *testing.T) {
+	history := filepath.Join(t.TempDir(), aiderHistoryFile)
+	if err := os.Mkdir(history, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := openAiderFile(history); err == nil {
+		f.Close()
+		t.Fatal("accepted a directory as Aider history")
+	} else if !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("unexpected error for non-regular history: %v", err)
 	}
 }
 
