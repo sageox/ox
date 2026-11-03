@@ -158,11 +158,14 @@ func NewGitHubMirrorRelayer(deps GitHubMirrorDeps) *GitHubMirrorRelayer {
 // newProjectGitHubMirrorRelayer wires the production dependencies for one
 // project: the server flag from the cached CLI settings, the heartbeat token
 // (then the on-disk token) for the SageOx API, and the project's team.
-func newProjectGitHubMirrorRelayer(projectRoot string, settings func() *flags.CLISettingsResponse, heartbeatToken func() string, logger *slog.Logger) *GitHubMirrorRelayer {
+func newProjectGitHubMirrorRelayer(projectRoot string, settings func() *flags.CLISettingsResponse, heartbeatToken func(destination string) string, logger *slog.Logger) *GitHubMirrorRelayer {
+	// Pin the destination so a config edit between token resolution and client
+	// construction cannot send a token checked for one origin to another.
+	ep := endpoint.GetForProject(projectRoot)
 	return NewGitHubMirrorRelayer(GitHubMirrorDeps{
 		Enabled: func() bool { return githubMirrorFeatureOn(settings) },
 		AuthToken: func() string {
-			return resolveMirrorAuthToken(heartbeatToken, endpoint.GetForProject(projectRoot))
+			return resolveMirrorAuthToken(heartbeatToken, ep)
 		},
 		Team: func() (string, string) {
 			tc := config.FindRepoTeamContext(projectRoot)
@@ -175,7 +178,7 @@ func newProjectGitHubMirrorRelayer(projectRoot string, settings func() *flags.CL
 			return gh.NewMirrorFetcher(gh.NewClient(githubToken))
 		},
 		NewRelay: func(authToken string) MirrorRelayClient {
-			return api.NewRepoClientWithEndpoint(endpoint.GetForProject(projectRoot)).WithAuthToken(authToken)
+			return api.NewRepoClientWithEndpoint(ep).WithAuthToken(authToken)
 		},
 		Logger: logger,
 	})
@@ -196,9 +199,9 @@ func githubMirrorFeatureOn(settings func() *flags.CLISettingsResponse) bool {
 
 // resolveMirrorAuthToken mirrors SettingsFetcher.resolveAuthToken: the
 // heartbeat's token first, then the on-disk token for the endpoint.
-func resolveMirrorAuthToken(heartbeatToken func() string, ep string) string {
+func resolveMirrorAuthToken(heartbeatToken func(destination string) string, ep string) string {
 	if heartbeatToken != nil {
-		if t := heartbeatToken(); t != "" {
+		if t := heartbeatToken(ep); t != "" {
 			return t
 		}
 	}

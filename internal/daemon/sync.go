@@ -208,7 +208,7 @@ type SyncScheduler struct {
 	// callbacks
 	onActivity   func()                                                           // called on any sync activity
 	onTelemetry  func(syncType, operation, status string, duration time.Duration) // called on sync complete for telemetry
-	getAuthToken func() string                                                    // returns cached auth token from heartbeat
+	getAuthToken func(destination string) string                                  // returns cached auth token scoped to the destination
 
 	onLedgerCloned func(ledgerPath string)
 
@@ -386,9 +386,9 @@ func (s *SyncScheduler) SetTelemetryCallback(cb func(syncType, operation, status
 	s.onTelemetry = cb
 }
 
-// SetAuthTokenGetter sets the callback to get auth token from heartbeat cache.
+// SetAuthTokenGetter sets the callback to get a destination-scoped heartbeat token.
 // Used for lazy credential refresh via /api/v1/cli/repos.
-func (s *SyncScheduler) SetAuthTokenGetter(cb func() string) {
+func (s *SyncScheduler) SetAuthTokenGetter(cb func(destination string) string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.getAuthToken = cb

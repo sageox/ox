@@ -1195,10 +1195,7 @@ func (d *Daemon) initComponents() time.Duration {
 	startSetup := time.Now()
 
 	// load project endpoint early - needed by friction collector and credential loading
-	var projectEndpoint string
-	if projectCfg, err := config.LoadProjectConfig(d.config.ProjectRoot); err == nil && projectCfg != nil {
-		projectEndpoint = projectCfg.GetEndpoint()
-	}
+	projectEndpoint := endpoint.GetForProject(d.config.ProjectRoot)
 
 	d.removeLedgerLocksAtStart()
 
@@ -1295,6 +1292,7 @@ func (d *Daemon) initComponents() time.Duration {
 		}
 		if token, err := auth.GetTokenForEndpoint(projectEndpoint); err == nil && token != nil {
 			hbCreds.AuthToken = token.AccessToken
+			hbCreds.AuthEndpoint = projectEndpoint
 		}
 		d.heartbeat.SetInitialCredentials(hbCreds)
 	}
