@@ -326,7 +326,7 @@ func runInit() error {
 	// find git root
 	gitRoot, err := repotools.FindRepoRoot(repotools.VCSGit)
 	if err != nil {
-		return fmt.Errorf("not a git repository\n\nox init requires a git repository. Run:\n  git init\n  git commit --allow-empty -m \"Initial commit\"\n  ox init")
+		return fmt.Errorf("not a git repository\n\nox init links a git repository to SageOx. Run it inside the repo you want to link:\n  cd <repo>\n  ox init\n\nTo start a new repository here instead:\n  git init\n  git commit --allow-empty -m \"Initial commit\"\n  ox init")
 	}
 
 	// check if remote already has .sageox/ (prevents duplicate init race condition)

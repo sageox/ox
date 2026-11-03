@@ -1,0 +1,28 @@
+{
+  "name": "@sageox/ox",
+  "version": "0.0.0",
+  "description": "The SageOx CLI. Run npx @sageox/ox@latest install to put ox on your PATH and log in.",
+  "license": "MIT",
+  "homepage": "https://sageox.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sageox/ox.git",
+    "directory": "npm/ox"
+  },
+  "bin": {
+    "ox": "bin/ox.js"
+  },
+  "files": [
+    "bin/ox.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@sageox/ox-darwin-arm64": "0.0.0",
+    "@sageox/ox-darwin-x64": "0.0.0",
+    "@sageox/ox-freebsd-x64": "0.0.0",
+    "@sageox/ox-linux-arm64": "0.0.0",
+    "@sageox/ox-linux-x64": "0.0.0"
+  }
+}

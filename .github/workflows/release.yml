@@ -516,6 +516,63 @@ jobs:
             '{message: $message, content: $content, sha: $sha}' |
             gh api --method PUT repos/sageox/homebrew-tap/contents/ox.rb --input - >/dev/null
 
+  # npm publishes the binaries of the public release as @sageox/ox, so
+  # `npx @sageox/ox@latest install` never ships what GitHub does not. The token
+  # reaches only the last step, which runs no repository code; reruns skip
+  # versions npm already has.
+  publish-npm:
+    if: github.repository == 'sageox/ox'
+    needs: publish-release
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download and verify the release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir "$RUNNER_TEMP/archives"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/archives" --pattern 'ox_*.tar.gz' --pattern checksums.txt
+          cd "$RUNNER_TEMP/archives"
+          sha256sum --check --strict --ignore-missing checksums.txt
+
+      - name: Build the npm packages
+        run: node scripts/npm-packages.mjs --version "${RELEASE_TAG#v}" --archives "$RUNNER_TEMP/archives" --out "$RUNNER_TEMP/npm"
+
+      # Platform packages first, so the launcher never points at a missing one.
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::warning::NPM_TOKEN is not set; @sageox/ox was not published."
+            exit 0
+          fi
+          version=${RELEASE_TAG#v}
+          tag=latest
+          case "$version" in *-*) tag=next ;; esac
+          for dir in "$RUNNER_TEMP"/npm/ox-*/ "$RUNNER_TEMP/npm/ox/"; do
+            name=$(jq -r .name "$dir/package.json")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already on npm"
+              continue
+            fi
+            npm publish "$dir" --access public --provenance --tag "$tag" --ignore-scripts
+          done
+
   publish-docs:
     needs: publish-release
     permissions:
