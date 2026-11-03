@@ -227,3 +227,28 @@ func TestRemoveAllSessions_RemovesDottedNames(t *testing.T) {
 	assert.False(t, sessionDirExists(t, root, dotted))
 	assert.False(t, sessionDirExists(t, root, plain))
 }
+
+// One session that cannot be removed must not stop remove --all: the others
+// are still removed and the failure is reported, not counted as removed.
+func TestRemoveAllSessions_ReportsUnremovableAndContinues(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	stuck := recentSessionName("OxRmStuck")
+	plain := recentSessionName("OxRmFree")
+	store, root := localStoreWithSessions(t, stuck, plain)
+	stuckDir := filepath.Join(root, "sessions", stuck)
+	require.NoError(t, os.Chmod(stuckDir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(stuckDir, 0o700) })
+
+	var err error
+	out := captureStdoutForPlanCLI(t, func() {
+		err = removeAllSessions(store, true)
+	})
+
+	require.NoError(t, err)
+	assert.Contains(t, out, "Warning: failed to remove "+stuck)
+	assert.Contains(t, out, "Removed 1 session(s)")
+	assert.True(t, sessionDirExists(t, root, stuck))
+	assert.False(t, sessionDirExists(t, root, plain))
+}
