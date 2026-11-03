@@ -25,6 +25,7 @@ package teamskills
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -251,13 +252,13 @@ func parseFrontmatter(front string) (map[string]any, error) {
 	decoder := yaml.NewDecoder(strings.NewReader(front))
 	var doc yaml.Node
 	if err := decoder.Decode(&doc); err != nil {
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil, nil // no frontmatter, or an empty/comment-only block
 		}
 		return nil, err
 	}
 	var extra yaml.Node
-	if err := decoder.Decode(&extra); err != io.EOF {
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("frontmatter must contain a single YAML mapping")
 	}
 	root := doc.Content[0]
