@@ -425,7 +425,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// only run on properly initialized projects (config.json exists, not just .sageox/ dir)
 	if config.IsInitialized(projectRoot) {
 		if _, err := EnsureOxPrimeMarker(projectRoot); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to repair ox prime markers: %v\n", err)
+			fmt.Fprintf(os.Stderr, "warning: failed to repair ox:prime markers: %v\n", err)
 		}
 	}
 

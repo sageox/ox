@@ -68,7 +68,7 @@ func AtomicWriteBytesInRoot(root *os.Root, name string, data []byte, perm os.Fil
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
-	defer parent.Remove(tmpName)
+	defer func() { _ = parent.Remove(tmpName) }()
 	defer tmp.Close()
 	if _, err := tmp.Write(data); err != nil {
 		return err

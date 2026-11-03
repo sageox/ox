@@ -270,16 +270,6 @@ func readSharedClaudeSettings(gitRoot string) (*ClaudeSettings, map[string]json.
 	return readProjectSettingsFileRaw(gitRoot, projectClaudeSettingsFile)
 }
 
-// writeSharedClaudeSettings writes .claude/settings.json using raw-preserving write.
-func writeSharedClaudeSettings(gitRoot string, settings *ClaudeSettings, rawMap map[string]json.RawMessage) error {
-	root, err := os.OpenRoot(gitRoot)
-	if err != nil {
-		return err
-	}
-	defer root.Close()
-	return writeSettingsFileRawInRoot(root, projectClaudeSettingsFile, settings, rawMap, sharedSettingsPerm)
-}
-
 // readProjectClaudeSettings reads .claude/settings.json (shared) from the project.
 // Falls back to settings.local.json during migration period.
 func readProjectClaudeSettings(gitRoot string) (*ClaudeSettings, error) {
