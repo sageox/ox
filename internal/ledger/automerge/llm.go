@@ -411,6 +411,13 @@ func runClaudeBinary(ctx context.Context, binary, prompt string) (string, error)
 		return "", fmt.Errorf("start: %w", err)
 	}
 
+	// Unblock readers on cancellation even if a descendant holds a pipe open.
+	stopClosingPipes := context.AfterFunc(ctx, func() {
+		_ = stdoutPipe.Close()
+		_ = stderrPipe.Close()
+	})
+	defer stopClosingPipes()
+
 	stderrDone := make(chan struct{})
 	var stderrBuf []byte
 	go func() {
@@ -428,9 +435,10 @@ func runClaudeBinary(ctx context.Context, binary, prompt string) (string, error)
 		parseCh <- parseRes{result: result, err: err}
 	}()
 
-	waitErr := cmd.Wait()
-	<-stderrDone
+	// Wait closes the read pipes, so consume the output before calling it.
 	pr := <-parseCh
+	<-stderrDone
+	waitErr := cmd.Wait()
 
 	if ctx.Err() != nil {
 		return "", fmt.Errorf("timeout: %w", ctx.Err())
