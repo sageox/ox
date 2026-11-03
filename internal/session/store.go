@@ -1274,10 +1274,17 @@ func (s *Store) GetLatestRaw() (*SessionInfo, error) {
 	return &sessions[0], nil
 }
 
-// Delete removes a session folder by name.
+// Delete removes a session folder by its exact directory name, not a legacy filename.
 func (s *Store) Delete(name string) error {
-	sessionName := strings.TrimSuffix(name, jsonlExt)
-	sessionPath := filepath.Join(s.basePath, sessionName)
+	// Only a single, non-traversal component: names may contain ".." (the name
+	// sanitizer keeps periods), but never "..", ".", or a separator.
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("session name %q must be a single path component", name)
+	}
+
+	// Never normalize a name (e.g. strip .jsonl) into the store root or a
+	// different session. A single component cannot leave basePath.
+	sessionPath := filepath.Join(s.basePath, name)
 	if info, err := os.Stat(sessionPath); err == nil && info.IsDir() {
 		if err := os.RemoveAll(sessionPath); err != nil {
 			return fmt.Errorf("delete session folder=%s: %w", sessionPath, err)
