@@ -388,7 +388,7 @@ func TestMurmurJSONOverridesDefaults(t *testing.T) {
 }
 
 // TestMurmurQueuesToOutboxWhenDaemonDown verifies the durable-outbox fix: when no
-// daemon is reachable, the murmur is queued to the ledger cache (never lost) and
+// daemon is reachable, the murmur is queued to the daemon cache (never lost) and
 // the command still succeeds. Failure prevented: the original bug where a murmur
 // emitted with the daemon down was dropped and its content gone forever.
 func TestMurmurQueuesToOutboxWhenDaemonDown(t *testing.T) {
@@ -431,7 +431,7 @@ func TestMurmurQueuesToOutboxWhenDaemonDown(t *testing.T) {
 		t.Errorf("expected 'queued' message, got: %q", buf.String())
 	}
 
-	outboxDir := filepath.Join(ledgerDir, ".sageox", "cache", "murmur-outbox")
+	outboxDir := daemon.MurmurOutboxDir(ledgerDir)
 	entries, err := os.ReadDir(outboxDir)
 	if err != nil {
 		t.Fatalf("read outbox dir %s: %v", outboxDir, err)
