@@ -35,3 +35,5 @@ jobs:
           msg=":rotating_light: .amp/ changed on \`main\`, pushed by \`${ACTOR}\`: ${COMMIT_URL}"
           payload=$(printf '{"text": %s}' "$(printf '%s' "$msg" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')")
           curl -fsS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
+
+# (retrigger CI: the first run of this commit never got a pull_request-event CI run)
