@@ -109,15 +109,25 @@ func splitFrontmatter(text string) (string, frontmatterState) {
 }
 
 // scopeKeyLine finds a scope key with a value on its own line at any indentation.
-var scopeKeyLine = regexp.MustCompile(`(?im)^[ \t]*["']?(repos|globs)["']?[ \t]*:[ \t]*[^\s#]`)
+var scopeKeyLine = regexp.MustCompile(`(?im)^[ \t]*["']?(?:repos|globs)["']?[ \t]*:[ \t]*([^\s#][^\n#]*)`)
 
 // yamlLineBreaks spells out every break YAML honors. Anything reading this text by line
 // has to agree with the parser, or a key after a bare carriage return is one line to
 // the reader and its own key to YAML.
 var yamlLineBreaks = strings.NewReplacer("\r\n", "\n", "\r", "\n", "\u0085", "\n", "\u2028", "\n", "\u2029", "\n")
 
+// mentionsScopeKey reports a scope key holding a real value. An explicit empty value
+// (~, null, "", ”, []) means "everywhere", which is what the repaired parse already
+// read, so it is no reason to withhold the rule.
 func mentionsScopeKey(block string) bool {
-	return scopeKeyLine.MatchString(yamlLineBreaks.Replace(block))
+	for _, match := range scopeKeyLine.FindAllStringSubmatch(yamlLineBreaks.Replace(block), -1) {
+		switch value := strings.TrimSpace(match[1]); {
+		case value == "~", strings.EqualFold(value, "null"), value == `""`, value == "''", value == "[]":
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // parseManifest reads one rule or skill manifest. It never fails: what it cannot

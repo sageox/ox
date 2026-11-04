@@ -26,6 +26,8 @@ func TestParseRuleScope(t *testing.T) {
 		{name: "no frontmatter", manifest: "Just a body.\n", wantKind: ScopeUnscoped},
 		{name: "empty frontmatter", manifest: "---\n---\nBody.\n", wantKind: ScopeUnscoped},
 		{name: "comment-only frontmatter", manifest: "---\n# nothing yet\n---\nBody.\n", wantKind: ScopeUnscoped},
+		{name: "repaired block with an explicit empty repos", manifest: "---\ndescription: Use when: testing\nrepos: []\n---\nBody.\n", wantKind: ScopeUnscoped},
+		{name: "repaired block with a null globs", manifest: "---\ndescription: Use when: testing\nglobs: ~\n---\nBody.\n", wantKind: ScopeUnscoped},
 		{name: "no scope keys", manifest: "---\nname: a\n---\n", wantKind: ScopeUnscoped},
 		{name: "empty list means all", manifest: "---\nrepos: []\nglobs: []\n---\n", wantKind: ScopeUnscoped},
 		{name: "null value means all", manifest: "---\nrepos:\nglobs: ~\n---\n", wantKind: ScopeUnscoped},
