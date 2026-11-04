@@ -64,33 +64,49 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          # changed_files reflects the PR's true total; the files-listing
-          # endpoint below silently caps at 3,000 regardless of --paginate
-          # -- a documented GitHub API limit, not a client-side pagination
-          # gap -- so a PR that large can't be fully verified by listing
-          # files and is treated the same as a touch (Devin).
+          # changed_files reflects the PR's true total; the comparison
+          # below silently caps around 3,000 files regardless of pagination
+          # -- a documented GitHub API limit on diff listings generally,
+          # not a client-side pagination gap -- so a PR that large can't be
+          # fully verified by listing files and is treated the same as a
+          # touch (Devin).
           if ! total=$(gh api "repos/$REPO/pulls/$PR" --jq .changed_files); then
             echo "::error::Could not read this PR's changed-file count. Alerting conservatively."
             echo "touches=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$total" -gt 3000 ]; then
-            echo "::warning::This PR changes $total files, beyond the files API's 3,000-file cap; cannot verify .amp/ is untouched. Alerting conservatively."
+            echo "::warning::This PR changes $total files, beyond the API's file-listing cap; cannot verify .amp/ is untouched. Alerting conservatively."
             echo "touches=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # A rename's destination can land outside .amp/ while the source
-          # was inside it (previous_filename); .filename alone would miss
-          # that removal (CodeRabbit).
-          if touches=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[] | select((.filename | startswith(".amp/")) or ((.previous_filename // "") | startswith(".amp/"))) | .filename'); then
+          # Compared against the event's own base/head SHAs via the
+          # Compare API, not the PR files endpoint: that endpoint takes no
+          # SHA parameter and always reflects the PR's CURRENT state, so a
+          # commit pushed while this job is queued or running could make
+          # this query answer for a different commit than the one this
+          # check run is pinned to (HEAD_SHA, fixed at trigger time)
+          # (veria-ai). The pathspec matches ".amp" exactly as well as
+          # ".amp/"-prefixed: exact-match alone would miss a real nested
+          # file, and prefix-match alone would miss a ".amp" entry that is
+          # itself a symlink or submodule rather than a directory
+          # (veria-ai). A rename's destination can land outside .amp/ while
+          # the source was inside it (previous_filename); .filename alone
+          # would miss that removal (CodeRabbit).
+          if touches=$(gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq '.files[] | select(
+                (.filename == ".amp") or (.filename | startswith(".amp/")) or
+                ((.previous_filename // "") == ".amp") or ((.previous_filename // "") | startswith(".amp/"))
+              ) | .filename'); then
             if [ -n "$touches" ]; then
               echo "touches=true" >> "$GITHUB_OUTPUT"
             else
               echo "touches=false" >> "$GITHUB_OUTPUT"
             fi
           else
-            echo "::error::Could not list this PR's changed files. Alerting conservatively."
+            echo "::error::Could not compare $BASE_SHA...$HEAD_SHA. Alerting conservatively."
             echo "touches=true" >> "$GITHUB_OUTPUT"
           fi
 
