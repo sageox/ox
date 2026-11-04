@@ -1,3 +1,8 @@
+---
+description: List recent sessions from the project ledger and offer to view one.
+allowed-tools: Bash(ox:*)
+argument-hint: [ox session list flags]
+---
 List recent sessions from the project ledger and offer to view one.
 
 Use when:
