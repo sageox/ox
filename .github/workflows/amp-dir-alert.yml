@@ -1,0 +1,193 @@
+name: Alert on .amp/ changes to main
+
+# A same-day backstop for the admins who can bypass the CODEOWNERS ruleset on
+# .amp/ (see sageox/ox#1693): this fires on every commit that lands on main
+# under .amp/, however it got there, so a bypass is seen the same day instead
+# of silently. Needs the AMP_DIR_ALERT_SLACK_WEBHOOK secret (a Slack incoming
+# webhook for #amp-steward); the job fails loudly if it's missing.
+#
+# Triggers on every push to main, not a path-filtered one: GitHub's trigger
+# filter only evaluates the first 3,000 changed files in a push, so a push
+# bundling enough unrelated files could put every .amp/ change outside that
+# window and the workflow would never start at all. The job checks the full
+# pushed diff itself instead, with no such limit.
+#
+# Known gap: a push carrying [skip ci] in its commit message skips this
+# workflow entirely, same as every other push-triggered Action -- GitHub
+# does not run any workflow for that push at all. That is a platform
+# behavior, not something fixable in this file.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    # Explicit, not the unspecified default: GitHub only adds -o pipefail
+    # when shell: bash is named directly (the unspecified default is -e
+    # alone, confirmed against GitHub's own docs after an earlier commit
+    # message on this PR overstated it as already on). Nothing below
+    # currently depends on it, but it is the right default for any script
+    # that later pipes git's output into something that can fail.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Does this push touch .amp/?
+        id: touch
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          # Piping git's output into an early-closing consumer (head -1,
+          # grep -q) risks a SIGPIPE'd writer being masked by the reader's
+          # own success -- a real risk independent of pipefail, since even
+          # without it, the pipeline's reported status is the last command's,
+          # not git's (CodeRabbit, correcting an earlier commit message on
+          # this PR that overstated pipefail as the mechanism here). Command
+          # substitution and git log/cat-file below have no pipe at all.
+          #
+          # A failed comparison (an unresolvable before-SHA after a force
+          # push; any other git error) must not read the same as "no
+          # change" -- that would make an admin's own force push silence
+          # exactly the alert meant to catch an admin bypassing review
+          # (Devin, veria-ai).
+          #
+          # Two independent checks below, alerting if either says yes or
+          # either fails to run: a history walk (catches a push that edits
+          # .amp/ and reverts it again before the push ends -- the tree
+          # comparison alone sees no difference at the endpoints -- and,
+          # with --diff-merges=first-parent, a .amp/ change introduced only
+          # by a merge commit's own resolution, which merge commits don't
+          # show by default and --full-history alone doesn't turn on) and an
+          # endpoint tree diff (catches a force push that rewinds main to an
+          # ancestor with a different .amp/ tree while the old tip stays
+          # reachable elsewhere: the history range is then empty or
+          # reversed, since HEAD ends up behind BEFORE) (veria-ai).
+          #
+          # The pathspec has no trailing slash: with one, it only matches
+          # paths *inside* a directory literally named .amp, not a .amp
+          # entry that is itself a symlink to some other directory --
+          # veria-ai reproduced the gap with this repo's own CLAUDE.md
+          # symlink. Without the slash it matches the entry either way.
+          zero_sha="0000000000000000000000000000000000000000"
+          touches=false
+          if [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "$zero_sha" ]; then
+            if listing=$(git ls-tree -r --name-only "$HEAD_SHA" -- .amp 2>&1); then
+              [ -n "$listing" ] && touches=true
+            else
+              echo "::warning::Could not list .amp at $HEAD_SHA: $listing. Alerting conservatively."
+              touches=true
+            fi
+          elif ! git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
+            echo "::warning::\$BEFORE_SHA ($BEFORE_SHA) is not reachable from this checkout, likely a force push. Cannot compare; alerting conservatively."
+            touches=true
+          else
+            log_err=$(mktemp)
+            if touched=$(git log --name-only --format=tformat: --full-history --diff-merges=first-parent "$BEFORE_SHA..$HEAD_SHA" -- .amp 2>"$log_err"); then
+              [ -n "$touched" ] && touches=true
+            else
+              echo "::warning::git log failed comparing $BEFORE_SHA..$HEAD_SHA: $(cat "$log_err"). Alerting conservatively."
+              touches=true
+            fi
+
+            diff_err=$(mktemp)
+            if git diff --quiet "$BEFORE_SHA" "$HEAD_SHA" -- .amp 2>"$diff_err"; then
+              diff_status=0
+            else
+              diff_status=$?
+            fi
+            if [ "$diff_status" = 1 ]; then
+              touches=true
+            elif [ "$diff_status" != 0 ]; then
+              echo "::warning::git diff failed comparing $BEFORE_SHA $HEAD_SHA: $(cat "$diff_err"). Alerting conservatively."
+              touches=true
+            fi
+          fi
+          echo "touches=$touches" >> "$GITHUB_OUTPUT"
+
+      - name: Post to Slack
+        if: steps.touch.outputs.touches == 'true'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.AMP_DIR_ALERT_SLACK_WEBHOOK }}
+          ACTOR: ${{ github.actor }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::error::AMP_DIR_ALERT_SLACK_WEBHOOK secret is not set. Add a Slack incoming webhook for #amp-steward in repo settings, or point this workflow at an existing org secret."
+            exit 1
+          fi
+          # A push can bundle several commits; github.sha only names the last
+          # one, so a single-commit link can miss the .amp/ change if it
+          # wasn't final. Link the whole pushed range instead, falling back
+          # to the one commit when there's no prior SHA to compare from (a
+          # brand-new branch's first push). Two dots, not three: three-dot
+          # compare diffs from the merge-base, which can omit the .amp/
+          # change on divergent history; two-dot matches the endpoint
+          # comparison the detection step itself uses (CodeRabbit).
+          zero_sha="0000000000000000000000000000000000000000"
+          if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "$zero_sha" ]; then
+            change_url="$REPO_URL/compare/$BEFORE_SHA..$HEAD_SHA"
+          else
+            change_url="$REPO_URL/commit/$HEAD_SHA"
+          fi
+          msg=":rotating_light: .amp/ changed on \`main\`, pushed by \`${ACTOR}\`: ${change_url}"
+          # -I: a root json.py/json/__init__.py merged onto main, outside this
+          # workflow's own CODEOWNERS protection, would otherwise shadow the
+          # stdlib module in a step that holds SLACK_WEBHOOK_URL (veria-ai).
+          payload=$(printf '{"text": %s}' "$(printf '%s' "$msg" | python3 -I -c 'import json,sys; print(json.dumps(sys.stdin.read()))')")
+
+          # A transient Slack error or a 429 shouldn't drop the alert, but
+          # GitHub Actions failure notifications are opt-in and go to the
+          # user who triggered the run, not the team -- so retry bounded
+          # (<=3 attempts, one retry layer, team rule) before giving up loud.
+          max_attempts=3
+          attempt=1
+          while :; do
+            headers=$(mktemp); body=$(mktemp)
+            status=$(curl -sS --connect-timeout 5 --max-time 15 \
+              -D "$headers" -o "$body" -w '%{http_code}' \
+              -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" || echo 000)
+            if [ "$status" -ge 200 ] 2>/dev/null && [ "$status" -lt 300 ]; then
+              echo "Posted to Slack (attempt $attempt)."
+              exit 0
+            fi
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "::error::Slack webhook failed after $max_attempts attempts (last status $status): $(cat "$body")"
+              exit 1
+            fi
+            # A single awk pass, not grep piped onward: grep exits 1 on no
+            # match (the expected case when Slack sends no Retry-After),
+            # pipefail propagates that, and -e would abort the whole step
+            # right here instead of falling back to jittered backoff (Devin,
+            # PR #1696). FS matches blank, not just a literal space: a
+            # "Retry-After:\t30" header (colon then tab) has no space there,
+            # and ': ' alone missed it (Devin).
+            retry_after=$(awk -F':[[:blank:]]*' 'tolower($1) == "retry-after" { gsub(/\r/, "", $2); print $2; exit }' "$headers")
+            # Retry-After can be an HTTP-date instead of delay-seconds (RFC
+            # 7231); sleep-ing on a date fragment fails under -e and aborts
+            # the retry loop instead of falling back to backoff. Bound the
+            # digit count before doing arithmetic on it too -- an unbounded
+            # value risks overflowing $(( )) -- and force base-10 so a
+            # leading zero isn't read as octal (CodeRabbit).
+            if [[ "$retry_after" =~ ^[0-9]{1,4}$ ]]; then
+              delay=$(( 10#$retry_after > 30 ? 30 : 10#$retry_after ))
+            else
+              # Exponential backoff with full jitter: up to 2^(attempt-1) seconds.
+              ceiling=$((1 << (attempt - 1)))
+              delay=$(( (RANDOM % (ceiling * 1000)) / 1000 + 1 ))
+            fi
+            echo "Slack post failed (status $status, attempt $attempt/$max_attempts); retrying in ${delay}s."
+            sleep "$delay"
+            attempt=$((attempt + 1))
+          done
