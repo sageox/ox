@@ -1,0 +1,2 @@
+go test fuzz v1
+string("---\n4: \n4: \ngloBs\": 0000\n---")

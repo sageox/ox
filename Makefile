@@ -2,7 +2,7 @@
 
 .PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open check-test-tiers test-tiers
 .PHONY: test-all-split test-split-slots test-split-slot coverage-merge-unit warm-test-cache coverage-integration-profile coverage-merge
-.PHONY: help build build-ox build-adapters build-acceptance install install-adapters uninstall uninstall-ox uninstall-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-release-coverage release-stages test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish plan-review plan-review-check refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
+.PHONY: help build build-ox build-adapters build-acceptance install install-adapters uninstall uninstall-ox uninstall-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-release-coverage release-stages test-agents test-agents-scoping test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish plan-review plan-review-check refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
 GO := go
@@ -497,6 +497,10 @@ release-stages: ## Print the release gate's stages as a JSON array (the release 
 test-agents: ## Drive real coding agents and read their transcripts back through ox (opt-in, costs API calls)
 	$(call say,"Driving real coding agents — requires each agent installed and authenticated...")
 	@OX_TEST_REAL_AGENTS=1 $(GO) test -tags=agents -count=1 -v -timeout=20m ./internal/daemon/agentwork ./tests/agents/
+
+test-agents-scoping: ## Prove team rule scoping on real Claude and Codex sessions (opt-in, costs API calls)
+	$(call say,"Driving real Claude and Codex sessions against ox-projected rules...")
+	@OX_TEST_REAL_AGENTS=1 $(GO) test -tags=agents -count=1 -v -timeout=20m -run 'TestTeamRuleScoping|TestGlobCorpus|TestVersionMatrix' ./tests/agents/
 
 check-no-git-lfs-shell: ## Ensure no code shells out to git-lfs binary (see .claude/rules/lfs-no-git-lfs-binary.md)
 	@if grep -r --include='*.go' -nE 'exec\.(Command|CommandContext)\("git",\s*"lfs"|exec\.(Command|CommandContext)\("git-lfs"|LookPath\("git-lfs"\)' . 2>/dev/null \

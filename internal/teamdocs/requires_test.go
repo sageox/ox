@@ -15,7 +15,7 @@ import (
 // shell skill look portable, and one that invents a declaration hides a
 // portable skill.
 //
-// The rules mirror sageox-mono packages/teamskills frontmatter.go: inline list,
+// The forms read here are the ones ox has always accepted: inline list,
 // bare scalar, and block list are all declarations; a bare `requires:` with no
 // items is not.
 func TestSkillRequirements_Parsing(t *testing.T) {
@@ -270,16 +270,17 @@ func TestDocFrontmatter_ByteOrderMarkIsReadThrough(t *testing.T) {
 	require.Equal(t, "First paragraph.", extractDescriptionFromContent(path))
 }
 
-// TestRuleFrontmatter_OtherKeysKeepTheWindow: R4 widens ONLY requires:. A
-// repos: or status: past line 30 keeps its old meaning (not read), so no
-// published skill or rule changes scope because of this contract.
-func TestRuleFrontmatter_OtherKeysKeepTheWindow(t *testing.T) {
+// TestRuleFrontmatter_NoKeyHasAWindow: frontmatter is parsed as a whole document, so
+// a key means the same on line 40 as on line 2. A status: draft past line 30 used to
+// read as absent, which published the draft.
+func TestRuleFrontmatter_NoKeyHasAWindow(t *testing.T) {
 	t.Parallel()
-	manifest := "---\nname: a\n" + strings.Repeat("x: y\n", 35) + "repos: [\"acme/api\"]\nstatus: draft\nrequires: [shell]\n---\n"
+	manifest := "---\nname: a\n" + strings.Repeat("x: y\n", 35) + "status: draft\naudience: human\nvisibility: hidden\nrequires: [shell]\n---\n"
 	fm := parseRuleFrontmatterFrom(strings.NewReader(manifest))
 	require.Equal(t, "a", fm.Name)
-	require.Nil(t, fm.Repos, "a key past the window was read")
-	require.Empty(t, fm.Status, "a key past the window was read")
+	require.Equal(t, "draft", fm.Status)
+	require.Equal(t, "human", fm.Audience)
+	require.Equal(t, "hidden", fm.Visibility)
 	require.Equal(t, []string{"shell"}, fm.Requires)
 }
 
