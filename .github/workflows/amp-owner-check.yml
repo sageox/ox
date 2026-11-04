@@ -18,7 +18,8 @@ name: amp-owner-check
 # status check looking at the PR's head would never find one there, and no
 # PR -- not even an approved one -- could ever satisfy it (Devin).
 #
-# Known gaps, neither fixable at this layer:
+# Known gaps, NEITHER fixable by editing this file -- both need a human
+# decision before this check is added to required_status_checks:
 # - A push carrying [skip ci] in its commit message skips this entirely --
 #   a GitHub platform behavior, not a workflow opt-out.
 # - Dismissing an owner's approval after this check has already passed
@@ -31,6 +32,18 @@ name: amp-owner-check
 #   their own branch, which is strictly worse than the gap it would close.
 #   Accepted as-is rather than ship a weaker gate under the appearance of a
 #   stronger one.
+# - Required status checks match by NAME, not by which workflow produced
+#   them: a PR author could add a trivially-successful job also named
+#   "amp-owner-approval" to any OTHER workflow that isn't owner-protected
+#   (e.g. ci.yml, which reads its own definition the same PR-branch way
+#   pull_request_review does) and GitHub would accept either one (veria-ai).
+#   The name below is deliberately specific, not "check", to cut down on
+#   ACCIDENTAL collisions, but that alone does not stop a deliberate one.
+#   Two real fixes exist, both bigger than this file: require the check
+#   from a dedicated GitHub App (pins it to an identity a PR can't produce),
+#   or extend CODEOWNERS/ruleset review to all of .github/workflows/, not
+#   just this file and amp-dir-alert.yml -- a human call, flagged for the
+#   same required-status-checks wiring step.
 on:
   pull_request_target:
     branches: [main]
@@ -55,7 +68,7 @@ jobs:
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          id=$(gh api "repos/$REPO/check-runs" -f name="check" -f head_sha="$HEAD_SHA" -f status=in_progress --jq .id)
+          id=$(gh api "repos/$REPO/check-runs" -f name="amp-owner-approval" -f head_sha="$HEAD_SHA" -f status=in_progress --jq .id)
           echo "check_run_id=$id" >> "$GITHUB_OUTPUT"
 
       - name: Does this PR touch .amp/?
