@@ -279,6 +279,10 @@ func TestParseInlineList(t *testing.T) {
 		{``, nil},
 		{`["sageox/ox"]`, []string{"sageox/ox"}},
 		{`sageox/ox`, []string{"sageox/ox"}},
+		// A comma inside quotes or braces belongs to its item.
+		{`["a,b", c]`, []string{"a,b", "c"}},
+		{`[src/*.{ts,tsx}, lib/**]`, []string{"src/*.{ts,tsx}", "lib/**"}},
+		{`["{a,b}/{c,d}/*.{ts,tsx}"]`, []string{"{a,b}/{c,d}/*.{ts,tsx}"}},
 	}
 	for _, c := range cases {
 		got := parseInlineList(c.in)
@@ -369,6 +373,12 @@ func TestDiscoverRules_Globs(t *testing.T) {
 		{"trailing comment on the bare form", "globs: **/*.go,**/*.mod   # matches Cursor, Copilot, Cline", []string{"**/*.go", "**/*.mod"}},
 		{"trailing comment on the inline form", `globs: ["**/*.go", "**/*.mod"]   # matches the repos: style`, []string{"**/*.go", "**/*.mod"}},
 		{"comment-only value is no scope", "globs: # TODO decide", nil},
+		// A brace group holds a comma. Cutting there leaves patterns that match
+		// nothing, so the rule would silently never load.
+		{"brace group in an inline list", `globs: ["src/{client,admin}/**/*.{tsx,css}", "lib/**"]`, []string{"src/{client,admin}/**/*.{tsx,css}", "lib/**"}},
+		{"brace group in the bare form", "globs: src/**/*.{ts,tsx},lib/**", []string{"src/**/*.{ts,tsx}", "lib/**"}},
+		// The shape ox itself writes into a Cursor projection.
+		{"quoted comma string is still two globs", `globs: "**/*.go,**/*.mod"`, []string{"**/*.go", "**/*.mod"}},
 	}
 
 	for _, tt := range tests {
@@ -615,5 +625,328 @@ func TestDiscoverRules_UnreadableSymlinkIsSkipped(t *testing.T) {
 	}
 	if _, ok := byName["broken"]; ok {
 		t.Fatalf("an unreadable symlink became a Team Rule: %v", byName)
+	}
+}
+
+// TestDiscoverRules_ScopeListForms: an empty repos: or globs: means "everywhere",
+// so every YAML form an author or a formatter can produce has to parse. Each of
+// these used to read as empty and widen the rule to every repo or every file.
+func TestDiscoverRules_ScopeListForms(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		frontmatter string
+		wantRepos   []string
+		wantGlobs   []string
+	}{
+		{
+			name:        "indented block lists",
+			frontmatter: "repos:\n  - acme/api\n  - acme/web\nglobs:\n  - \"**/*.go\"\n  - '**/*.mod'",
+			wantRepos:   []string{"acme/api", "acme/web"},
+			wantGlobs:   []string{"**/*.go", "**/*.mod"},
+		},
+		{
+			name:        "zero-indent block lists, as PyYAML and formatters write them",
+			frontmatter: "repos:\n- acme/api\nglobs:\n- \"**/*.go\"",
+			wantRepos:   []string{"acme/api"},
+			wantGlobs:   []string{"**/*.go"},
+		},
+		{
+			name:        "tab-indented items and trailing comments",
+			frontmatter: "repos:\n\t- acme/api # the backend\nglobs:\n\t- \"**/*.go\" # sources",
+			wantRepos:   []string{"acme/api"},
+			wantGlobs:   []string{"**/*.go"},
+		},
+		{
+			name:        "comment before the first item",
+			frontmatter: "repos:\n  # only the two that own schemas\n  - acme/api\n  - acme/db",
+			wantRepos:   []string{"acme/api", "acme/db"},
+		},
+		{
+			name:        "blank line between items",
+			frontmatter: "globs:\n  - \"**/*.go\"\n\n  - \"**/*.mod\"",
+			wantGlobs:   []string{"**/*.go", "**/*.mod"},
+		},
+		{
+			name:        "CRLF block list",
+			frontmatter: "repos:\r\n  - acme/api\r\nglobs:\r\n- \"**/*.go\"\r",
+			wantRepos:   []string{"acme/api"},
+			wantGlobs:   []string{"**/*.go"},
+		},
+		{
+			name:        "brace group in a block item stays whole",
+			frontmatter: "globs:\n  - src/{client,admin}/**/*.{tsx,css}",
+			wantGlobs:   []string{"src/{client,admin}/**/*.{tsx,css}"},
+		},
+		{
+			name:        "flow list wrapped below its key, as Prettier writes a long one",
+			frontmatter: "globs:\n  [\n    \"src/client/**/*.{tsx,css}\",\n    \"lib/widgets/**/*.{tsx,css}\",\n  ]\nrepos: [\"acme/web\"]",
+			wantRepos:   []string{"acme/web"},
+			wantGlobs:   []string{"src/client/**/*.{tsx,css}", "lib/widgets/**/*.{tsx,css}"},
+		},
+		{
+			name:        "flow list opened on the key line",
+			frontmatter: "repos: [\n  acme/api,\n  acme/web\n] # the two services",
+			wantRepos:   []string{"acme/api", "acme/web"},
+		},
+		{
+			name:        "flow list on the line below its key",
+			frontmatter: "globs:\n  [\"**/*.go\", \"**/*.mod\"]",
+			wantGlobs:   []string{"**/*.go", "**/*.mod"},
+		},
+		{
+			// Only `key:` followed by a space or the line's end ends an open list, so
+			// these items, which all hold a colon, stay in it.
+			name:        "column-0 flow items holding a colon are not keys",
+			frontmatter: "globs: [\n\"**/*.go\",\nsrc:main/**,\n\"a: b/*.go\",\n\"**/*.mod\"\n]",
+			wantGlobs:   []string{"**/*.go", "src:main/**", "a: b/*.go", "**/*.mod"},
+		},
+		{
+			name:        "scalar on the line below its key",
+			frontmatter: "repos:\n  acme/api\nglobs:\n  **/*.go,**/*.mod",
+			wantRepos:   []string{"acme/api"},
+			wantGlobs:   []string{"**/*.go", "**/*.mod"},
+		},
+		{
+			name:        "an apostrophe in an inline list does not open a wrapped list",
+			frontmatter: "repos: [it's/api, acme/web]\nglobs: [\"**/*.go\"]",
+			wantRepos:   []string{"it's/api", "acme/web"},
+			wantGlobs:   []string{"**/*.go"},
+		},
+		{
+			name:        "an empty key is still no scope",
+			frontmatter: "repos:\nglobs:",
+		},
+		{
+			name:        "empty block items add nothing",
+			frontmatter: "repos:\n  -\nglobs:\n-",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			team := t.TempDir()
+			writeRule(t, team, "agents/rules/scoped.md",
+				"---\nname: scoped\n"+tt.frontmatter+"\ndescription: Below the lists.\n---\n\nBody.\n")
+			rules, err := PublishedRules(team)
+			if err != nil {
+				t.Fatalf("PublishedRules: %v", err)
+			}
+			if len(rules) != 1 {
+				t.Fatalf("got %d rules, want 1", len(rules))
+			}
+			if !slices.Equal(rules[0].Repos, tt.wantRepos) {
+				t.Errorf("Repos = %#v, want %#v", rules[0].Repos, tt.wantRepos)
+			}
+			if !slices.Equal(rules[0].Globs, tt.wantGlobs) {
+				t.Errorf("Globs = %#v, want %#v", rules[0].Globs, tt.wantGlobs)
+			}
+			if rules[0].Description != "Below the lists." {
+				t.Errorf("a key below the list was swallowed: Description = %q", rules[0].Description)
+			}
+		})
+	}
+}
+
+// TestDiscoverRules_UnclosedFlowListFailsClosed: a flow list that never closes
+// cannot be read, so it must not read as empty, which would mean "everywhere".
+func TestDiscoverRules_UnclosedFlowListFailsClosed(t *testing.T) {
+	t.Parallel()
+	team := t.TempDir()
+	writeRule(t, team, "agents/rules/broken.md", "---\nname: broken\nrepos: [\n  acme/api,\n---\n\nBody.\n")
+	rules, err := DiscoverRules(team, "acme/web")
+	if err != nil {
+		t.Fatalf("DiscoverRules: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("an unreadable repos: widened to every repo: %#v", rules)
+	}
+}
+
+// TestDiscoverRules_UnclosedFlowListIsWithheld: a missing closing bracket makes the
+// whole block unreadable as YAML, so nothing in it can be trusted to limit the rule.
+// When it read as an empty list, a draft or repo-scoped rule reached every repo.
+func TestDiscoverRules_UnclosedFlowListIsWithheld(t *testing.T) {
+	t.Parallel()
+	const unclosedGlobs = "globs: [\"**/*.go\",\n"
+	tests := []struct {
+		name        string
+		frontmatter string
+		repo        string
+	}{
+		{"a draft stays unpublished in the repo it names", unclosedGlobs + "repos: [\"acme/api\"]\nstatus: draft", "acme/api"},
+		{"a draft stays unpublished everywhere else", unclosedGlobs + "repos: [\"acme/api\"]\nstatus: draft", "acme/web"},
+		{"a repo scope still excludes another repo", unclosedGlobs + "repos: [\"acme/api\"]", "acme/web"},
+		{"the repo it names does not get a half-read rule", unclosedGlobs + "repos: [\"acme/api\"]", "acme/api"},
+		{"a hidden rule stays hidden", unclosedGlobs + "visibility: hidden", "acme/api"},
+		{"a human-only rule stays out of the agent's rules", unclosedGlobs + "audience: human", "acme/api"},
+		{"an unclosed repos above a key still reaches no repo", "repos: [\n  acme/api,\nglobs: [\"**/*.go\"]", "acme/web"},
+		{"a stray item after a list", "repos:\n  - acme/api\nglobs: [\"**/*.go\"]\n- stray", "acme/api"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			team := t.TempDir()
+			writeRule(t, team, "agents/rules/r.md", "---\nname: r\n"+tt.frontmatter+"\n---\n\nBody.\n")
+			rules, err := DiscoverRules(team, tt.repo)
+			if err != nil {
+				t.Fatalf("DiscoverRules: %v", err)
+			}
+			if len(rules) != 0 {
+				t.Fatalf("an unreadable rule was delivered in %s: %#v", tt.repo, rules)
+			}
+			warnings, err := RuleWarnings(team)
+			if err != nil {
+				t.Fatalf("RuleWarnings: %v", err)
+			}
+			if len(warnings) != 1 || !strings.HasPrefix(warnings[0], "r.md: withheld from every session") {
+				t.Fatalf("a withheld rule must say so exactly once, got %q", warnings)
+			}
+		})
+	}
+}
+
+// TestDiscoverRules_ScopeKeysPastTheWindow: a long folded description pushes the
+// scope keys past line 30. Read as absent, the rule landed in every repo and loaded
+// for every file, the opposite of what its author wrote.
+func TestDiscoverRules_ScopeKeysPastTheWindow(t *testing.T) {
+	t.Parallel()
+	longDescription := "description: >-\n" + strings.Repeat("  a long line of description\n", 40)
+	tests := []struct {
+		name        string
+		frontmatter string
+	}{
+		{"inline lists past the window", longDescription + "repos: [\"acme/api\"]\nglobs: [\"**/*.go\"]"},
+		{"block lists past the window", longDescription + "repos:\n  - acme/api\nglobs:\n- \"**/*.go\""},
+		{"block list crossing the window", strings.Repeat("x: y\n", 28) + "globs:\n  - \"**/*.go\"\nrepos:\n  - acme/api"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			team := t.TempDir()
+			writeRule(t, team, "agents/rules/scoped.md", "---\nname: scoped\n"+tt.frontmatter+"\n---\n\nBody.\n")
+
+			other, err := DiscoverRules(team, "acme/web")
+			if err != nil {
+				t.Fatalf("DiscoverRules: %v", err)
+			}
+			if len(other) != 0 {
+				t.Fatalf("a rule scoped to acme/api reached acme/web: %#v", other)
+			}
+			own, err := DiscoverRules(team, "acme/api")
+			if err != nil {
+				t.Fatalf("DiscoverRules: %v", err)
+			}
+			if len(own) != 1 {
+				t.Fatalf("got %d rules in acme/api, want 1", len(own))
+			}
+			if !slices.Equal(own[0].Globs, []string{"**/*.go"}) {
+				t.Errorf("Globs = %#v, want the path scope the author wrote", own[0].Globs)
+			}
+		})
+	}
+}
+
+// ruleOfSize returns a rule file of exactly size bytes.
+func ruleOfSize(t *testing.T, frontmatter string, size int) string {
+	t.Helper()
+	head := "---\n" + frontmatter + "\n---\n\n"
+	if size < len(head) {
+		t.Fatalf("size %d cannot hold the %d-byte frontmatter", size, len(head))
+	}
+	return head + strings.Repeat("x", size-len(head))
+}
+
+// TestRuleWarnings covers the tier boundaries exactly: at budget is silent, one
+// byte over warns. Advisory or not, a warning that fires on healthy rules gets
+// ignored, and one that never fires protects nothing.
+func TestRuleWarnings(t *testing.T) {
+	t.Parallel()
+	const always, indexed = "name: r\nvisibility: always", "name: r\nvisibility: indexed"
+	tests := []struct {
+		name    string
+		path    string
+		content func(t *testing.T) string
+		want    []string
+	}{
+		{
+			name:    "always-on rule at budget",
+			path:    "agents/rules/r.md",
+			content: func(t *testing.T) string { return ruleOfSize(t, always, 2048) },
+		},
+		{
+			name:    "always-on rule one byte over",
+			path:    "agents/rules/r.md",
+			content: func(t *testing.T) string { return ruleOfSize(t, always, 2049) },
+			want:    []string{"r.md: 2049 B, over the 2048 B budget for always-on rules"},
+		},
+		{
+			name:    "on-demand rule at budget",
+			path:    "agents/rules/r.md",
+			content: func(t *testing.T) string { return ruleOfSize(t, indexed, 8192) },
+		},
+		{
+			name:    "on-demand rule one byte over",
+			path:    "agents/rules/r.md",
+			content: func(t *testing.T) string { return ruleOfSize(t, indexed, 8193) },
+			want:    []string{"r.md: 8193 B, over the 8192 B budget for on-demand rules"},
+		},
+		{
+			// globs: outranks visibility: always, so this rule is paid on a match.
+			name: "scoped always rule gets the on-demand budget",
+			path: "agents/rules/r.md",
+			content: func(t *testing.T) string {
+				return ruleOfSize(t, always+"\nglobs: [\"**/*.go\"]", 3000)
+			},
+		},
+		{
+			name:    "nested rule",
+			path:    "agents/rules/backend/r.md",
+			content: func(t *testing.T) string { return "---\nname: r\n---\n\nBody.\n" },
+			want:    []string{"backend/r.md: nested in a subdirectory, so it may not reach cloud sessions; move it to the top of the rules directory"},
+		},
+		{
+			name:    "nested and oversized reports both",
+			path:    "agents/rules/backend/r.md",
+			content: func(t *testing.T) string { return ruleOfSize(t, indexed, 9000) },
+			want: []string{
+				"backend/r.md: nested in a subdirectory, so it may not reach cloud sessions; move it to the top of the rules directory",
+				"backend/r.md: 9000 B, over the 8192 B budget for on-demand rules",
+			},
+		},
+		{
+			name: "an unpublished rule costs nobody anything",
+			path: "agents/rules/drafts/r.md",
+			content: func(t *testing.T) string {
+				return ruleOfSize(t, "name: r\nstatus: draft", 9000)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			team := t.TempDir()
+			writeRule(t, team, tt.path, tt.content(t))
+			got, err := RuleWarnings(team)
+			if err != nil {
+				t.Fatalf("RuleWarnings: %v", err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("RuleWarnings = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRuleWarnings_NoTeamContext(t *testing.T) {
+	t.Parallel()
+	for _, team := range []string{"", filepath.Join(t.TempDir(), "missing")} {
+		got, err := RuleWarnings(team)
+		if err != nil {
+			t.Fatalf("RuleWarnings(%q): %v", team, err)
+		}
+		if len(got) != 0 {
+			t.Errorf("RuleWarnings(%q) = %#v, want none", team, got)
+		}
 	}
 }

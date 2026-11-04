@@ -2,6 +2,7 @@ package teamrules
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,9 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestDeliveryMode_PreservesScopeAndVisibility(t *testing.T) {
@@ -74,7 +77,10 @@ func TestReconcile_ProjectsOnceAndRemovesRetiredRules(t *testing.T) {
 	require.True(t, ok)
 	content, err := os.ReadFile(native)
 	require.NoError(t, err)
-	require.Contains(t, string(content), `globs: "**/*.go"`)
+	require.Equal(t, map[string]any{
+		"description": "Go conventions",
+		"paths":       []any{"**/*.go"},
+	}, projectionFrontmatter(t, content))
 	require.Contains(t, string(content), "Use gofmt.")
 	require.True(t, verifiedProjection(content))
 
@@ -614,4 +620,350 @@ func TestReconcile_ConflictInOneRootDoesNotBlockOthers(t *testing.T) {
 	content, readErr := os.ReadFile(conflictNative)
 	require.NoError(t, readErr)
 	require.Equal(t, "hand-authored\n", string(content), "the conflicting file itself must be left untouched")
+}
+
+// projectionFrontmatter parses a projection's frontmatter with a real YAML parser,
+// because the agent reading it does too: Claude Code loads a rule with unparsable
+// frontmatter as if it had no paths at all.
+func projectionFrontmatter(t *testing.T, content []byte) map[string]any {
+	t.Helper()
+	rest, ok := strings.CutPrefix(string(content), "---\n")
+	require.True(t, ok, "projection has no frontmatter: %q", content)
+	frontmatter, _, ok := strings.Cut(rest, "\n---\n")
+	require.True(t, ok, "projection frontmatter is unterminated: %q", content)
+	var parsed map[string]any
+	require.NoError(t, yaml.Unmarshal([]byte(frontmatter), &parsed))
+	return parsed
+}
+
+// newProtectedClaudeProject returns a repository whose .claude/rules root ox may
+// project into.
+func newProtectedClaudeProject(t *testing.T) string {
+	t.Helper()
+	project := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(project, ".claude", "rules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, ".claude", ".gitignore"), []byte("rules/*-team.md\n"), 0o644))
+	git := exec.Command("git", "init", "-q")
+	git.Dir = project
+	require.NoError(t, git.Run())
+	return project
+}
+
+// documentedConsumers reads a rendered frontmatter the way each agent's own docs say
+// that agent does, and answers which patterns it was given. The expected key and
+// shape come from those docs (see the policies comment for the sources), so this
+// holds an independent copy of them on purpose.
+//
+// Only Claude Code is run for real, under tests/agents. These stand in for agents
+// with no headless mode, and a change to their docs needs a change here.
+var documentedConsumers = map[string]func(t *testing.T, fm map[string]any) []string{
+	"claude": func(t *testing.T, fm map[string]any) []string {
+		patterns := yamlStringList(t, fm["paths"])
+		for _, pattern := range patterns {
+			require.False(t, hasNestedBraceGroup(pattern), "real Claude Code drops options from the nested group in %q", pattern)
+		}
+		return patterns
+	},
+	"cline": func(t *testing.T, fm map[string]any) []string { return yamlStringList(t, fm["paths"]) },
+	"cursor": func(t *testing.T, fm map[string]any) []string {
+		require.Equal(t, false, fm["alwaysApply"], "alwaysApply: true overrides the globs")
+		return commaSeparated(t, fm["globs"])
+	},
+	"copilot": func(t *testing.T, fm map[string]any) []string { return commaSeparated(t, fm["applyTo"]) },
+	"kiro": func(t *testing.T, fm map[string]any) []string {
+		require.Equal(t, "fileMatch", fm["inclusion"], "with no inclusion mode a steering file is always included")
+		return yamlStringList(t, fm["fileMatchPattern"])
+	},
+}
+
+func hasNestedBraceGroup(pattern string) bool {
+	depth := 0
+	for _, r := range pattern {
+		switch r {
+		case '{':
+			depth++
+			if depth > 1 {
+				return true
+			}
+		case '}':
+			depth--
+		}
+	}
+	return false
+}
+
+func yamlStringList(t *testing.T, value any) []string {
+	t.Helper()
+	list, ok := value.([]any)
+	require.True(t, ok, "the docs call for a list, got %#v", value)
+	patterns := make([]string, 0, len(list))
+	for _, item := range list {
+		text, isString := item.(string)
+		require.True(t, isString, "a list entry is not text: %#v", item)
+		patterns = append(patterns, text)
+	}
+	return patterns
+}
+
+func commaSeparated(t *testing.T, value any) []string {
+	t.Helper()
+	text, ok := value.(string)
+	require.True(t, ok, "the docs call for one string, got %#v", value)
+	return strings.Split(text, ",")
+}
+
+// TestRender_EveryAgentMatchesTheFilesTheRuleNames is the property that matters: read
+// as its docs describe, each agent ends up matching exactly the files the source
+// globs match. A comma inside a brace group is where this breaks: split on it, the
+// pattern src/{client,admin}/x matches nothing at all, and a rule that looks scoped
+// silently never loads.
+func TestRender_EveryAgentMatchesTheFilesTheRuleNames(t *testing.T) {
+	t.Parallel()
+	source := filepath.Join(t.TempDir(), "rule.md")
+	require.NoError(t, os.WriteFile(source, []byte("Body.\n"), 0o644))
+	globs := []string{"**/*.go", "src/{client,admin}/**/*.{tsx,css}", "app/(group)/page.tsx", "lib/{a,{b,c}}/x.ts"}
+	rule := teamdocs.TeamRule{Name: "scoped", AbsPath: source, RelPath: "rule.md", Globs: globs}
+	paths := []string{
+		"main.go", "cmd/ox/main.go",
+		"src/client/page.tsx", "src/client/deep/er/page.css", "src/admin/page.tsx", "src/admin/a.css",
+		"src/other/page.tsx", "src/client/page.go.txt", "src/client/page.ts",
+		"app/(group)/page.tsx", "app/group/page.tsx",
+		"lib/a/x.ts", "lib/b/x.ts", "lib/c/x.ts", "lib/d/x.ts",
+		"README.md",
+	}
+	matches := func(t *testing.T, patterns []string) []string {
+		t.Helper()
+		var matched []string
+		for _, candidate := range paths {
+			for _, pattern := range patterns {
+				ok, err := doublestar.Match(pattern, candidate)
+				require.NoError(t, err, "pattern %q is not a valid glob", pattern)
+				if ok {
+					matched = append(matched, candidate)
+					break
+				}
+			}
+		}
+		return matched
+	}
+	want := matches(t, globs)
+	require.Contains(t, want, "src/admin/a.css", "the source globs must match something for this to test anything")
+
+	for _, p := range policies {
+		if p.GlobField == "" {
+			continue
+		}
+		t.Run(p.Agent, func(t *testing.T) {
+			t.Parallel()
+			consumer, known := documentedConsumers[p.Agent]
+			require.True(t, known, "a new agent needs its documented format recorded here")
+			content, err := render(rule, p)
+			require.NoError(t, err)
+			require.Equal(t, want, matches(t, consumer(t, projectionFrontmatter(t, content))))
+		})
+	}
+}
+
+// TestRender_ClaudeReadingMatchesTheCorpus holds the Claude consumer above to what real
+// Claude Code did. The other consumers come from docs, but this one has evidence: for
+// every brace row in the committed corpus, reading what ox writes must give the same
+// answer real Claude gave. A row that disagrees means the reading is wrong, not the row.
+func TestRender_ClaudeReadingMatchesTheCorpus(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join("..", "..", "tests", "agents", "testdata", "glob-conformance.json"))
+	require.NoError(t, err)
+	var corpus struct {
+		Rows []struct {
+			Glob      string `json:"glob"`
+			Path      string `json:"path"`
+			Loads     bool   `json:"loads"`
+			Construct string `json:"construct"`
+		} `json:"rows"`
+	}
+	require.NoError(t, json.Unmarshal(data, &corpus))
+	p, ok := policyFor("claude")
+	require.True(t, ok)
+
+	checked := 0
+	for _, row := range corpus.Rows {
+		if row.Construct != "brace" {
+			continue
+		}
+		patterns, writable := nativePatterns([]string{row.Glob}, p)
+		require.True(t, writable, row.Glob)
+		loads := false
+		for _, pattern := range patterns {
+			matched, matchErr := doublestar.Match(pattern, row.Path)
+			require.NoError(t, matchErr, pattern)
+			loads = loads || matched
+		}
+		require.Equal(t, row.Loads, loads, "glob %q on %q: real Claude and this reading disagree", row.Glob, row.Path)
+		checked++
+	}
+	require.NotZero(t, checked, "the corpus holds no brace rows, so this proved nothing")
+}
+
+// TestRender_UnwritablePatternsFallBackToTheIndex: a comma that is part of a path
+// cannot go in a comma-joined field. The rule must not be written with a pattern
+// that now means something else, and it must not vanish either.
+func TestRender_UnwritablePatternsFallBackToTheIndex(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		globs []string
+		agent string
+		want  DeliveryMode
+	}{
+		{"literal comma in a comma field", []string{"data/a,b/*.csv"}, "copilot", DeliveryPrimeIndexed},
+		{"unclosed group in a comma field", []string{"src/{client,admin/*.ts"}, "cursor", DeliveryPrimeIndexed},
+		{"literal comma in a list is fine", []string{"data/a,b/*.csv"}, "claude", DeliveryNative},
+		{"expansion past the bound", []string{strings.Repeat("{a,b,c}", 9)}, "kiro", DeliveryPrimeIndexed},
+		{"expansion past the bound on Claude", []string{strings.Repeat("{a,b,c}", 9)}, "claude", DeliveryPrimeIndexed},
+		{"brace groups are fine", []string{"src/{client,admin}/*.ts"}, "copilot", DeliveryNative},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rule := teamdocs.TeamRule{Name: "r", RelPath: "r.md", Globs: tt.globs}
+			require.Equal(t, tt.want, ModeForAgent(tt.agent, rule))
+		})
+	}
+}
+
+func TestExpandBraces(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		glob string
+		want []string
+	}{
+		{"**/*.go", []string{"**/*.go"}},
+		{"a/{b,c}", []string{"a/b", "a/c"}},
+		{"{a,b}/{c,d}", []string{"a/c", "a/d", "b/c", "b/d"}},
+		{"x/{a,{b,c}}/y", []string{"x/a/y", "x/b/y", "x/c/y"}},
+		{"{a}/{b,c}", []string{"{a}/b", "{a}/c"}},
+		{"{{a,b}}", []string{"{a}", "{b}"}},
+		{"a/{b,", []string{"a/{b,"}},
+		{"a/{,b}.ts", []string{"a/.ts", "a/b.ts"}},
+		{"app/[id]/{a,b}", []string{"app/[id]/a", "app/[id]/b"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.glob, func(t *testing.T) {
+			t.Parallel()
+			got, ok := expandBraces(tt.glob, maxNativePatterns)
+			require.True(t, ok)
+			require.Equal(t, tt.want, got)
+		})
+	}
+	_, ok := expandBraces(strings.Repeat("{a,b}", 12), maxNativePatterns)
+	require.False(t, ok, "4,096 patterns must hit the bound rather than be written")
+}
+
+// TestReconcile_WithheldRuleIsNeverProjected: a rule whose frontmatter cannot be read
+// must not reach the agent's native root, and an earlier copy must not linger there.
+func TestReconcile_WithheldRuleIsNeverProjected(t *testing.T) {
+	t.Parallel()
+	team := t.TempDir()
+	rulesDir := filepath.Join(team, "agents", "rules")
+	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
+	path := filepath.Join(rulesDir, "scoped.md")
+	require.NoError(t, os.WriteFile(path, []byte("---\nname: scoped\nglobs: [\"**/*.go\"]\n---\n\nBody.\n"), 0o644))
+
+	project := newProtectedClaudeProject(t)
+	rules, err := teamdocs.DiscoverRules(team, "")
+	require.NoError(t, err)
+	require.Len(t, rules, 1)
+	result, err := Reconcile(context.Background(), project, rules)
+	require.NoError(t, err)
+	require.Len(t, result.Written, 1)
+
+	require.NoError(t, os.WriteFile(path, []byte("---\nname: scoped\nglobs: [\"**/*.go\",\n---\n\nBody.\n"), 0o644))
+	rules, err = teamdocs.DiscoverRules(team, "")
+	require.NoError(t, err)
+	require.Empty(t, rules)
+	result, err = Reconcile(context.Background(), project, rules)
+	require.NoError(t, err)
+	require.Len(t, result.Removed, 1, "the earlier projection must be retired")
+	entries, err := os.ReadDir(filepath.Join(project, ".claude", "rules"))
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+// TestReconcile_AuthoredScopeReachesClaudeAsPaths runs the path a teammate's rule
+// takes: real source file, real discovery, real projection. Whichever way the
+// author wrote the scope, Claude Code must get one whole pattern per list entry.
+func TestReconcile_AuthoredScopeReachesClaudeAsPaths(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		scope string
+		want  []any
+	}{
+		{"inline list", `globs: ["**/*.go", "**/*.mod"]`, []any{"**/*.go", "**/*.mod"}},
+		{"bare comma form", "globs: **/*.go,**/*.mod", []any{"**/*.go", "**/*.mod"}},
+		{"block list", "globs:\n  - \"**/*.go\"\n  - \"**/*.mod\"", []any{"**/*.go", "**/*.mod"}},
+		{"brace group in an inline list", `globs: ["lib/{a,b}/**/*.ts"]`, []any{"lib/a/**/*.ts", "lib/b/**/*.ts"}},
+		{"brace group in a block list", "globs:\n- lib/{a,b}/**/*.ts", []any{"lib/a/**/*.ts", "lib/b/**/*.ts"}},
+		{"nested brace group", `globs: ["lib/{a,b/{c,d}}/x.ts"]`, []any{"lib/a/x.ts", "lib/b/c/x.ts", "lib/b/d/x.ts"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			team := t.TempDir()
+			rulesDir := filepath.Join(team, "agents", "rules")
+			require.NoError(t, os.MkdirAll(rulesDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "scoped.md"),
+				[]byte("---\nname: scoped\n"+tt.scope+"\n---\n\nBody.\n"), 0o644))
+			rules, err := teamdocs.DiscoverRules(team, "")
+			require.NoError(t, err)
+			require.Len(t, rules, 1)
+
+			project := newProtectedClaudeProject(t)
+			_, err = Reconcile(context.Background(), project, rules)
+			require.NoError(t, err)
+			native, ok := NativePath(project, "claude", rules[0])
+			require.True(t, ok)
+			content, err := os.ReadFile(native)
+			require.NoError(t, err)
+			require.Equal(t, map[string]any{"paths": tt.want}, projectionFrontmatter(t, content))
+		})
+	}
+}
+
+// TestReconcile_RewritesStaleGlobsProjectionForClaude: a repository that upgrades
+// already holds a projection ox wrote with globs:, which Claude Code ignores. It
+// keeps its filename and its valid stamp, so nothing but this rewrite would ever
+// change it, and the rule would keep loading in every session after the upgrade.
+func TestReconcile_RewritesStaleGlobsProjectionForClaude(t *testing.T) {
+	t.Parallel()
+	project := newProtectedClaudeProject(t)
+	source := filepath.Join(t.TempDir(), "go.md")
+	require.NoError(t, os.WriteFile(source, []byte("---\nname: go-style\n---\n\nUse gofmt.\n"), 0o644))
+	rule := teamdocs.TeamRule{
+		Name: "go-style", Description: "Go conventions", RelPath: "go.md", AbsPath: source,
+		Globs: []string{"**/*.go", "**/*.mod"}, Visibility: teamdocs.VisibilityIndexed,
+	}
+	native, ok := NativePath(project, "claude", rule)
+	require.True(t, ok)
+
+	// The exact shape earlier releases wrote, spelled out so it cannot follow render.
+	stale := stampProjection([]byte("---\ndescription: \"Go conventions\"\nglobs: \"**/*.go,**/*.mod\"\n---\n\nUse gofmt.\n"))
+	require.True(t, verifiedProjection(stale))
+	require.NoError(t, os.WriteFile(native, stale, 0o644))
+
+	result, err := Reconcile(context.Background(), project, []teamdocs.TeamRule{rule})
+	require.NoError(t, err)
+	require.Equal(t, []string{filepath.ToSlash(filepath.Join(".claude", "rules", filepath.Base(native)))}, result.Written)
+
+	content, err := os.ReadFile(native)
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{
+		"description": "Go conventions",
+		"paths":       []any{"**/*.go", "**/*.mod"},
+	}, projectionFrontmatter(t, content))
+	require.True(t, verifiedProjection(content), "the rewritten projection must stay owned by ox")
+	require.Empty(t, ForPrime(project, "claude", []teamdocs.TeamRule{rule}), "the rule must not also arrive through prime")
+
+	result, err = Reconcile(context.Background(), project, []teamdocs.TeamRule{rule})
+	require.NoError(t, err)
+	require.Empty(t, result.Written, "a converged projection must not be rewritten again")
 }

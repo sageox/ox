@@ -60,23 +60,57 @@ const (
 	DeliveryPrimeIndexed DeliveryMode = "prime-index"
 )
 
+// globStyle is how an agent's rule format holds more than one pattern.
+type globStyle int
+
+const (
+	globCommaString globStyle = iota // one string, patterns joined with commas
+	globBlockList                    // a YAML block sequence
+	globFlowList                     // a YAML flow sequence on one line
+)
+
 type policy struct {
 	Agent            string
 	Root             string
 	Extension        string
 	GlobField        string
+	GlobStyle        globStyle
+	ScopedFields     []string // frontmatter lines a scoped rule also needs
 	AlwaysApplyField string
 }
 
 // These mappings are agentx's documented native rule surfaces. A policy is
 // activated only when its rule root already exists in the repository; ox never
 // creates an unrelated agent's footprint during background convergence.
+//
+// A wrong key or shape is not an error anywhere: the agent ignores it and the rule
+// either loads in every session or never loads. Claude Code's reading is observed
+// by the live test under tests/agents. The others are taken from each agent's docs,
+// because none of them has a headless mode to run here:
+//
+//   - Cursor: comma-separated globs and alwaysApply (cursor.com/docs/context/rules).
+//     Brace groups are not documented.
+//   - Copilot: applyTo as one quoted, comma-separated string
+//     (docs.github.com, "Adding repository custom instructions"). Brace groups are
+//     not documented.
+//   - Cline: paths as a list, with {a,b} documented (docs.cline.bot, "Cline Rules").
+//     Nested groups are not.
+//   - Kiro: fileMatchPattern as a string or array, and only with
+//     inclusion: fileMatch, because a steering file with no inclusion mode is always
+//     included (kiro.dev/docs/steering). Brace groups are not documented.
+//
+// Every agent gets brace groups expanded. A glob such as src/{client,admin}/*.{ts,css}
+// holds commas, so a comma field would cut it into fragments like src/{client. And
+// Claude Code loads only part of a nested group: given x/{a,b/{c,d}}/** it loaded
+// x/b/c and missed x/a and x/b/d. The as-written rows in
+// tests/agents/testdata/glob-conformance.json record that. Flat groups read the same
+// expanded or not on every row there, so expansion costs Claude nothing.
 var policies = []policy{
-	{Agent: "claude", Root: ".claude/rules", Extension: ".md", GlobField: "globs"},
+	{Agent: "claude", Root: ".claude/rules", Extension: ".md", GlobField: "paths", GlobStyle: globBlockList},
 	{Agent: "cursor", Root: ".cursor/rules", Extension: ".mdc", GlobField: "globs", AlwaysApplyField: "alwaysApply"},
 	{Agent: "copilot", Root: ".github/instructions", Extension: ".md", GlobField: "applyTo"},
-	{Agent: "cline", Root: ".clinerules", Extension: ".md", GlobField: "paths"},
-	{Agent: "kiro", Root: ".kiro/steering", Extension: ".md", GlobField: "fileMatchPattern"},
+	{Agent: "cline", Root: ".clinerules", Extension: ".md", GlobField: "paths", GlobStyle: globBlockList},
+	{Agent: "kiro", Root: ".kiro/steering", Extension: ".md", GlobField: "fileMatchPattern", GlobStyle: globFlowList, ScopedFields: []string{"inclusion: fileMatch"}},
 	{Agent: "droid", Root: ".factory/rules", Extension: ".md"},
 	{Agent: "windsurf", Root: ".windsurf/rules", Extension: ".md"},
 }
@@ -104,13 +138,16 @@ func newResult() Result {
 
 // ModeForAgent chooses exactly one delivery mechanism. A globs-scoped rule is
 // never flattened into an always-on native rule: agents without a native glob
-// field receive an indexed prime entry instead. For capable agents, globs
-// supersedes visibility because the native matcher owns activation.
+// field, and patterns that field cannot hold unambiguously, receive an indexed
+// prime entry instead. For capable agents, globs supersedes visibility because the
+// native matcher owns activation.
 func ModeForAgent(agent string, rule teamdocs.TeamRule) DeliveryMode {
 	p, ok := policyFor(agent)
 	if len(rule.Globs) > 0 {
 		if ok && p.GlobField != "" {
-			return DeliveryNative
+			if _, writable := nativePatterns(rule.Globs, p); writable {
+				return DeliveryNative
+			}
 		}
 		return DeliveryPrimeIndexed
 	}
@@ -155,7 +192,7 @@ func Reconcile(ctx context.Context, projectRoot string, rules []teamdocs.TeamRul
 		for _, rule := range rules {
 			mode := ModeForAgent(p.Agent, rule)
 			if mode != DeliveryNative {
-				if len(rule.Globs) > 0 && p.GlobField == "" {
+				if len(rule.Globs) > 0 {
 					result.Fallbacks[rule.Name] = append(result.Fallbacks[rule.Name], Fallback{
 						Agent: p.Agent, Reason: "native rule format cannot preserve globs; using the prime index",
 					})
@@ -377,7 +414,12 @@ func render(rule teamdocs.TeamRule, p policy) ([]byte, error) {
 			lines = append(lines, "description: "+strconv.Quote(rule.Description))
 		}
 		if len(rule.Globs) > 0 && p.GlobField != "" {
-			lines = append(lines, p.GlobField+": "+strconv.Quote(strings.Join(rule.Globs, ",")))
+			patterns, writable := nativePatterns(rule.Globs, p)
+			if !writable {
+				return nil, fmt.Errorf("patterns cannot be written for %s", p.Agent)
+			}
+			lines = append(lines, p.ScopedFields...)
+			lines = append(lines, globFieldLines(patterns, p)...)
 		}
 		if p.AlwaysApplyField != "" {
 			lines = append(lines, fmt.Sprintf("%s: %t", p.AlwaysApplyField, len(rule.Globs) == 0))
@@ -392,6 +434,115 @@ func render(rule teamdocs.TeamRule, p policy) ([]byte, error) {
 		out += "\n"
 	}
 	return stampProjection([]byte(out)), nil
+}
+
+// globFieldLines renders a rule's scope in the agent's frontmatter shape. Every
+// pattern is quoted because a bare **/*.go is a YAML alias: the frontmatter then
+// fails to parse, and Claude Code treats a rule with unparsable frontmatter as
+// having no paths, so it would load everywhere.
+func globFieldLines(patterns []string, p policy) []string {
+	switch p.GlobStyle {
+	case globBlockList:
+		lines := make([]string, 0, len(patterns)+1)
+		lines = append(lines, p.GlobField+":")
+		for _, pattern := range patterns {
+			lines = append(lines, "  - "+strconv.Quote(pattern))
+		}
+		return lines
+	case globFlowList:
+		quoted := make([]string, len(patterns))
+		for i, pattern := range patterns {
+			quoted[i] = strconv.Quote(pattern)
+		}
+		return []string{p.GlobField + ": [" + strings.Join(quoted, ", ") + "]"}
+	default:
+		return []string{p.GlobField + ": " + strconv.Quote(strings.Join(patterns, ","))}
+	}
+}
+
+// maxNativePatterns bounds brace expansion, which is exponential in the number of
+// groups and runs on team-authored text in the background. Eight three-way groups
+// already reach 6,561 patterns; no real scope comes near this, and past it the rule
+// costs an index row rather than a frontmatter nobody can read.
+const maxNativePatterns = 256
+
+// nativePatterns returns the patterns to write for this agent, and false when its
+// field cannot hold them without changing what they match.
+func nativePatterns(globs []string, p policy) ([]string, bool) {
+	patterns := make([]string, 0, len(globs))
+	for _, glob := range globs {
+		expanded, ok := expandBraces(glob, maxNativePatterns-len(patterns))
+		if !ok {
+			return nil, false
+		}
+		patterns = append(patterns, expanded...)
+	}
+	if p.GlobStyle != globCommaString {
+		return patterns, true
+	}
+	// A comma left over after expansion is part of a path, or of a group that never
+	// closed. Joined, it would read as two patterns that match different files.
+	for _, pattern := range patterns {
+		if strings.Contains(pattern, ",") {
+			return nil, false
+		}
+	}
+	return patterns, true
+}
+
+// expandBraces rewrites a glob's brace groups as separate patterns, keeping their
+// order: src/{client,admin}/*.{ts,css} becomes four patterns. A group with no comma or
+// no closing brace is left as text, since it offers no alternatives. The second
+// return is false when the result would exceed limit.
+func expandBraces(glob string, limit int) ([]string, bool) {
+	if limit <= 0 {
+		return nil, false
+	}
+	open, end, options := firstBraceGroup(glob)
+	if open < 0 {
+		return []string{glob}, true
+	}
+	var expanded []string
+	for _, option := range options {
+		more, ok := expandBraces(glob[:open]+option+glob[end+1:], limit-len(expanded))
+		if !ok {
+			return nil, false
+		}
+		expanded = append(expanded, more...)
+	}
+	return expanded, true
+}
+
+// firstBraceGroup finds the first brace group holding a top-level comma and returns
+// its bounds and alternatives, or -1 when there is none.
+func firstBraceGroup(glob string) (open, end int, options []string) {
+	for start := 0; start < len(glob); start++ {
+		if glob[start] != '{' {
+			continue
+		}
+		depth, last := 0, start+1
+		var parts []string
+		for i := start; i < len(glob); i++ {
+			switch glob[i] {
+			case '{':
+				depth++
+			case ',':
+				if depth == 1 {
+					parts = append(parts, glob[last:i])
+					last = i + 1
+				}
+			case '}':
+				depth--
+				if depth == 0 {
+					if len(parts) > 0 {
+						return start, i, append(parts, glob[last:i])
+					}
+					i = len(glob) // no comma at this level; look for a group inside it
+				}
+			}
+		}
+	}
+	return -1, -1, nil
 }
 
 // stampProjection records ownership without requiring a machine-local
