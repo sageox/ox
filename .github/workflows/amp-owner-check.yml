@@ -63,53 +63,51 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          # changed_files reflects the PR's true total. The Compare API's
-          # own docs are explicit that this is a hard, non-paginable cap --
-          # "up to 300 changed files for the entire comparison... shown
-          # only on the first page of results" -- unlike the pulls/files
-          # endpoint, which supports --paginate up to a separate 3,000-file
-          # limit. Devin's first pass here assumed the higher number still
-          # applied after the switch to Compare; it doesn't, and 300 is the
-          # real ceiling for this endpoint specifically.
-          if ! total=$(gh api "repos/$REPO/pulls/$PR" --jq .changed_files); then
-            echo "::error::Could not read this PR's changed-file count. Alerting conservatively."
-            echo "touches=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$total" -gt 300 ]; then
-            echo "::warning::This PR changes $total files, beyond the Compare API's 300-file cap (not paginable for files); cannot verify .amp/ is untouched. Alerting conservatively."
-            echo "touches=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           # Compared against the event's own base/head SHAs via the
           # Compare API, not the PR files endpoint: that endpoint takes no
           # SHA parameter and always reflects the PR's CURRENT state, so a
           # commit pushed while this job is queued or running could make
           # this query answer for a different commit than the one this
-          # check run is pinned to (HEAD_SHA, fixed at trigger time)
-          # (veria-ai). The pathspec matches ".amp" exactly as well as
-          # ".amp/"-prefixed: exact-match alone would miss a real nested
-          # file, and prefix-match alone would miss a ".amp" entry that is
-          # itself a symlink or submodule rather than a directory
-          # (veria-ai). A rename's destination can land outside .amp/ while
-          # the source was inside it (previous_filename); .filename alone
-          # would miss that removal (CodeRabbit).
-          if touches=$(gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq '.files[] | select(
+          # check run is pinned to (veria-ai). One call, one response: the
+          # truncation check and the path filter both read from the SAME
+          # captured JSON, so there is nothing left to race between them --
+          # a PR-level changed_files count (as a first attempt at this used)
+          # has the identical live-state problem the Compare switch was
+          # meant to fix in the first place (CodeRabbit). The Compare API's
+          # own docs cap its files list at 300 for the WHOLE comparison,
+          # shown only on the first page, with no way to paginate past it,
+          # so a response at the cap is treated as possibly truncated
+          # rather than trusted (Devin, CodeRabbit). The pathspec matches
+          # ".amp" exactly as well as ".amp/"-prefixed: exact-match alone
+          # would miss a real nested file, and prefix-match alone would
+          # miss a ".amp" entry that is itself a symlink or submodule
+          # rather than a directory (veria-ai). A rename's destination can
+          # land outside .amp/ while the source was inside it
+          # (previous_filename); .filename alone would miss that removal
+          # (CodeRabbit).
+          files_json=$(mktemp); compare_err=$(mktemp)
+          if ! gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq '.files' > "$files_json" 2>"$compare_err"; then
+            echo "::error::Could not compare $BASE_SHA...$HEAD_SHA: $(cat "$compare_err"). Alerting conservatively."
+            echo "touches=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          count=$(jq 'length' "$files_json")
+          if [ "$count" -ge 300 ]; then
+            echo "::warning::This comparison returned $count files, at the Compare API's 300-file cap; cannot rule out a truncated .amp/ change. Alerting conservatively."
+            echo "touches=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          touches=$(jq -r '.[] | select(
                 (.filename == ".amp") or (.filename | startswith(".amp/")) or
                 ((.previous_filename // "") == ".amp") or ((.previous_filename // "") | startswith(".amp/"))
-              ) | .filename'); then
-            if [ -n "$touches" ]; then
-              echo "touches=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "touches=false" >> "$GITHUB_OUTPUT"
-            fi
-          else
-            echo "::error::Could not compare $BASE_SHA...$HEAD_SHA. Alerting conservatively."
+              ) | .filename' "$files_json")
+          if [ -n "$touches" ]; then
             echo "touches=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "touches=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Require a current .amp/ owner approval
