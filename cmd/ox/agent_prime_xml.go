@@ -491,7 +491,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 			}
 
 			emitWithheldTeamSkills(&sb, bk, output.WithheldTeamSkills)
-			emitTeamRuleWarnings(&sb, bk, output.TeamContext)
+			emitTeamRuleWarnings(&sb, bk, output.TeamContext, false)
 
 			// team memory (inlined content): framing ours, body is team's
 			if output.TeamContext.MemoryContent != "" {
@@ -580,10 +580,11 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	// A held-back skill is reported once: the reconcile that found it recorded its
 	// revision, so no later prime will see it again. A compact re-prime skips team
 	// knowledge, so it must carry the report here or the coworker never learns of it.
-	// Rule warnings are not repeated here: the full prime earlier in this window
-	// already carried them, and they say the same thing on every prime.
+	// Only withheld rules are repeated here: one that broke after the full prime has no
+	// other report, while size advice would repeat what the full prime already said.
 	if compact {
 		emitWithheldTeamSkills(&sb, bk, output.WithheldTeamSkills)
+		emitTeamRuleWarnings(&sb, bk, output.TeamContext, true)
 	}
 
 	// ════════════════════════════════════════════════════════════
@@ -982,11 +983,15 @@ const maxTeamRuleWarnings = 5
 // rule with a native projection, and those still cost context when they load. A
 // rule scoped to other repos warns here too: its author is on the same team, and
 // the bound below keeps that cheap.
-func emitTeamRuleWarnings(sb *strings.Builder, bk *bookkeeper, tc *teamContextInfo) {
+func emitTeamRuleWarnings(sb *strings.Builder, bk *bookkeeper, tc *teamContextInfo, withheldOnly bool) {
 	if tc == nil {
 		return
 	}
-	warnings, err := teamdocs.RuleWarnings(tc.Path)
+	read := teamdocs.RuleWarnings
+	if withheldOnly {
+		read = teamdocs.WithheldRuleWarnings
+	}
+	warnings, err := read(tc.Path)
 	if err != nil {
 		slog.Warn("team rule warnings skipped", "team_path", tc.Path, "error", err)
 	}

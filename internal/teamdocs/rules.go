@@ -229,11 +229,23 @@ const (
 // file on disk, frontmatter included, which is cheap and close enough for an
 // advisory.
 func RuleWarnings(teamPath string) ([]string, error) {
+	withheld, advisory, err := ruleWarnings(teamPath)
+	return append(withheld, advisory...), err
+}
+
+// WithheldRuleWarnings lists only the rules that reach nobody. A compact re-prime
+// carries these and not the advisories: a rule that broke since the full prime has
+// no other way to be reported, while size advice repeats what was already said.
+func WithheldRuleWarnings(teamPath string) ([]string, error) {
+	withheld, _, err := ruleWarnings(teamPath)
+	return withheld, err
+}
+
+func ruleWarnings(teamPath string) (withheld, advisory []string, err error) {
 	rules, err := scanRules(teamPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var withheld, advisory []string
 	for _, r := range rules {
 		rel := filepath.ToSlash(r.RelPath)
 		if r.withheldReason != "" {
@@ -252,7 +264,7 @@ func RuleWarnings(teamPath string) ([]string, error) {
 			advisory = append(advisory, fmt.Sprintf("%s: %d B, over the %d B budget for %s rules", rel, info.Size(), budget, tier))
 		}
 	}
-	return append(withheld, advisory...), nil
+	return withheld, advisory, nil
 }
 
 // ruleBudget picks a rule's tier by when it is paid for. globs: outranks

@@ -184,9 +184,8 @@ func TestTeamRuleWarnings_SurviveTheHookCap(t *testing.T) {
 	require.NotContains(t, deferred, "team-rule-warnings")
 }
 
-func TestTeamRuleWarnings_NotRepeatedOnACompactReprime(t *testing.T) {
-	team := t.TempDir()
-	writeTeamRule(t, team, "nested/a.md", "---\nname: a\n---\n\nBody.\n")
+func compactPrime(t *testing.T, team string) string {
+	t.Helper()
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
 	cmd.SetOut(&buf)
@@ -196,5 +195,22 @@ func TestTeamRuleWarnings_NotRepeatedOnACompactReprime(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Contains(t, buf.String(), `mode="compact"`)
-	require.NotContains(t, buf.String(), "<team-rule-warnings")
+	return buf.String()
+}
+
+func TestTeamRuleWarnings_CompactReprimeSkipsAdvice(t *testing.T) {
+	team := t.TempDir()
+	writeTeamRule(t, team, "nested/a.md", "---\nname: a\n---\n\nBody.\n")
+	require.NotContains(t, compactPrime(t, team), "<team-rule-warnings")
+}
+
+func TestTeamRuleWarnings_CompactReprimeReportsARuleThatBroke(t *testing.T) {
+	team := t.TempDir()
+	writeTeamRule(t, team, "nested/a.md", "---\nname: a\n---\n\nBody.\n")
+	// Broke after the full prime: the frontmatter never closes, so the rule reaches nobody.
+	writeTeamRule(t, team, "broken.md", "---\nname: broken\nglobs: [\"**/*.go\"]\n\nBody.\n")
+	out := compactPrime(t, team)
+	block := warningsBlock.FindString(out)
+	require.Contains(t, block, "broken.md: withheld")
+	require.NotContains(t, block, "nested in a subdirectory")
 }
