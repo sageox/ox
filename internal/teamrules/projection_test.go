@@ -977,3 +977,11 @@ func TestExpandBraces_HostileGlobFallsBackInsteadOfStalling(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, []string{"apps/web/**/*.tsx", "apps/web/**/*.css"}, got)
 }
+
+func TestExpandBraces_ManyUnmatchedBracesUnderTheLengthCapFallBack(t *testing.T) {
+	// Under 1 KiB, yet about 400 million steps without a brace count bound.
+	glob := strings.Repeat("{", 900) + strings.Repeat("{a,b}", 8)
+	require.Less(t, len(glob), maxBraceGlobBytes)
+	_, ok := expandBraces(glob, maxNativePatterns)
+	require.False(t, ok)
+}

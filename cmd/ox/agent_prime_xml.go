@@ -580,9 +580,10 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	// A held-back skill is reported once: the reconcile that found it recorded its
 	// revision, so no later prime will see it again. A compact re-prime skips team
 	// knowledge, so it must carry the report here or the coworker never learns of it.
+	// Rule warnings are not repeated here: the full prime earlier in this window
+	// already carried them, and they say the same thing on every prime.
 	if compact {
 		emitWithheldTeamSkills(&sb, bk, output.WithheldTeamSkills)
-		emitTeamRuleWarnings(&sb, bk, output.TeamContext)
 	}
 
 	// ════════════════════════════════════════════════════════════

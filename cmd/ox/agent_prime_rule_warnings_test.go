@@ -183,3 +183,18 @@ func TestTeamRuleWarnings_SurviveTheHookCap(t *testing.T) {
 	require.Contains(t, trimmed, "<team-rule-warnings")
 	require.NotContains(t, deferred, "team-rule-warnings")
 }
+
+func TestTeamRuleWarnings_NotRepeatedOnACompactReprime(t *testing.T) {
+	team := t.TempDir()
+	writeTeamRule(t, team, "nested/a.md", "---\nname: a\n---\n\nBody.\n")
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+	_, err := outputAgentPrimeXML(cmd, agentPrimeOutput{
+		AgentID: "agent-1", Status: "fresh", CompactReprime: true, PrimeCallCount: 2,
+		TeamContext: &teamContextInfo{TeamID: "team-1", TeamName: "TestTeam", Path: team},
+	})
+	require.NoError(t, err)
+	require.Contains(t, buf.String(), `mode="compact"`)
+	require.NotContains(t, buf.String(), "<team-rule-warnings")
+}

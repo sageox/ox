@@ -203,7 +203,7 @@ flattened into an unscoped native format.
 
 ## Size guidance
 
-Nothing is ever blocked over size, but every `always`-tier rule loads on every session — its tokens compete with the user's actual work. `ox agent prime` warns inside its `<context-budget>` block when a rule file goes over its budget:
+Nothing is ever blocked over size, but every `always`-tier rule loads on every session — its tokens compete with the user's actual work. `ox agent prime` warns in its `<team-rule-warnings>` section when a rule file goes over its budget:
 
 | Rule | Budget | Paid |
 |---|---|---|

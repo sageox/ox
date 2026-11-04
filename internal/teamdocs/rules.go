@@ -1,6 +1,7 @@
 package teamdocs
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"io/fs"
@@ -472,8 +473,13 @@ func parseRuleFrontmatterFrom(r io.Reader) ruleFrontmatter {
 		return ruleFrontmatter{Scope: invalidScope("file cannot be read"), unreadable: true}
 	}
 	if len(data) > maxFrontmatterReadBytes {
+		// The bound can cut a line in half, and a cut "----" reads as a closing
+		// fence. Drop the partial line so only whole lines decide.
 		data = data[:maxFrontmatterReadBytes]
-		if !frontmatterCloses(string(data)) {
+		if cut := bytes.LastIndexByte(data, '\n'); cut >= 0 {
+			data = data[:cut+1]
+		}
+		if _, state := splitFrontmatter(string(data)); state == frontmatterUnclosed {
 			return ruleFrontmatter{Scope: invalidScope("frontmatter does not close within %d bytes", maxFrontmatterReadBytes)}
 		}
 	}
@@ -483,20 +489,6 @@ func parseRuleFrontmatterFrom(r io.Reader) ruleFrontmatter {
 // maxFrontmatterReadBytes bounds what discovery reads from one rule. Real frontmatter
 // is under 2 KiB; 64 KiB leaves room for a long description and stays cheap.
 const maxFrontmatterReadBytes = 64 << 10
-
-// frontmatterCloses reports whether text opens a frontmatter block and closes it.
-func frontmatterCloses(text string) bool {
-	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
-		return true // no frontmatter: the bound cut only body text
-	}
-	for _, line := range lines[1:] {
-		if strings.TrimSpace(line) == "---" {
-			return true
-		}
-	}
-	return false
-}
 
 // blockListItem parses one line of a YAML block sequence. The second return is
 // false for any line that is not an item, which ends the list.

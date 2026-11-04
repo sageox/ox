@@ -983,3 +983,15 @@ func TestParseRuleFrontmatterFrom_UnclosedPastTheBoundIsWithheld(t *testing.T) {
 		t.Fatalf("scope = %+v; a block that does not close within the bound must never read as unscoped", fm.Scope)
 	}
 }
+
+func TestParseRuleFrontmatterFrom_CutLineIsNotAFence(t *testing.T) {
+	// The bound lands three bytes into "-----tail", leaving "---", which must not
+	// read as the closing fence and drop the globs: below it.
+	prefix := "---\nname: r\ndescription: "
+	pad := maxFrontmatterReadBytes - len(prefix) - len("\n") - len("---")
+	text := prefix + strings.Repeat("y", pad) + "\n-----tail\nglobs: [\"**/*.go\"]\n---\nBody.\n"
+	fm := parseRuleFrontmatterFrom(strings.NewReader(text))
+	if fm.Scope.Kind != ScopeInvalid {
+		t.Fatalf("scope = %+v; a fence made by the read bound must not widen the rule", fm.Scope)
+	}
+}
