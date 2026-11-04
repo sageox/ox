@@ -26,14 +26,25 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.AMP_DIR_ALERT_SLACK_WEBHOOK }}
           ACTOR: ${{ github.actor }}
-          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
           if [ -z "$SLACK_WEBHOOK_URL" ]; then
             echo "::error::AMP_DIR_ALERT_SLACK_WEBHOOK secret is not set. Add a Slack incoming webhook for #amp-steward in repo settings, or point this workflow at an existing org secret."
             exit 1
           fi
-          msg=":rotating_light: .amp/ changed on \`main\`, pushed by \`${ACTOR}\`: ${COMMIT_URL}"
+          # A push can bundle several commits; github.sha only names the last
+          # one, so a single-commit link can miss the .amp/ change if it
+          # wasn't final. Link the whole pushed range instead, falling back
+          # to the one commit when there's no prior SHA to compare from (a
+          # brand-new branch's first push).
+          zero_sha="0000000000000000000000000000000000000000"
+          if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "$zero_sha" ]; then
+            change_url="$REPO_URL/compare/$BEFORE_SHA...$HEAD_SHA"
+          else
+            change_url="$REPO_URL/commit/$HEAD_SHA"
+          fi
+          msg=":rotating_light: .amp/ changed on \`main\`, pushed by \`${ACTOR}\`: ${change_url}"
           payload=$(printf '{"text": %s}' "$(printf '%s' "$msg" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')")
           curl -fsS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
-
-# (retrigger CI: the first run of this commit never got a pull_request-event CI run)
