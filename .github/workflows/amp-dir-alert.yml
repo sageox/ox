@@ -27,7 +27,7 @@ jobs:
   alert:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -37,19 +37,47 @@ jobs:
           BEFORE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
         run: |
+          # GitHub Actions runs this as `bash -eo pipefail`. Piping git's
+          # output into an early-closing consumer (head -1, grep -q) can
+          # SIGPIPE git mid-write on a large diff; pipefail then fails the
+          # whole pipeline and -e aborts the step before GITHUB_OUTPUT is
+          # written at all, so the job just goes red with no alert and no
+          # clear reason (two independent findings on this PR: Devin,
+          # veria-ai). git diff --quiet and command substitution both read
+          # to completion with no pipe at all, so neither can SIGPIPE.
+          #
+          # A failed comparison (an unresolvable before-SHA after a force
+          # push; any other git error) must not read the same as "no
+          # change" -- that would make an admin's own force push silence
+          # exactly the alert meant to catch an admin bypassing review
+          # (Devin, veria-ai). Fail toward alerting instead.
           zero_sha="0000000000000000000000000000000000000000"
+          touches=false
           if [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "$zero_sha" ]; then
-            # No prior SHA to diff from (the ref's first push): check the
-            # whole tree at HEAD instead of a diff.
-            touched=$(git ls-tree -r --name-only "$HEAD_SHA" -- .amp/ | head -1)
+            if listing=$(git ls-tree -r --name-only "$HEAD_SHA" -- .amp/ 2>&1); then
+              [ -n "$listing" ] && touches=true
+            else
+              echo "::warning::Could not list .amp/ at $HEAD_SHA: $listing. Alerting conservatively."
+              touches=true
+            fi
+          elif ! git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
+            echo "::warning::\$BEFORE_SHA ($BEFORE_SHA) is not reachable from this checkout, likely a force push. Cannot compare; alerting conservatively."
+            touches=true
           else
-            touched=$(git diff --name-only "$BEFORE_SHA" "$HEAD_SHA" -- .amp/ | head -1)
+            diff_err=$(mktemp)
+            if git diff --quiet "$BEFORE_SHA" "$HEAD_SHA" -- .amp/ 2>"$diff_err"; then
+              rc=0
+            else
+              rc=$?
+            fi
+            if [ "$rc" = 1 ]; then
+              touches=true
+            elif [ "$rc" != 0 ]; then
+              echo "::warning::git diff exited $rc comparing $BEFORE_SHA..$HEAD_SHA: $(cat "$diff_err"). Alerting conservatively."
+              touches=true
+            fi
           fi
-          if [ -n "$touched" ]; then
-            echo "touches=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "touches=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "touches=$touches" >> "$GITHUB_OUTPUT"
 
       - name: Post to Slack
         if: steps.touch.outputs.touches == 'true'
