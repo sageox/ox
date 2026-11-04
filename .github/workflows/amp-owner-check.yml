@@ -1,0 +1,189 @@
+name: amp-owner-check
+
+# .amp/ changes need a current approval from an .amp/ owner, enforced without
+# touching the repo-wide "require review from code owners" ruleset (that
+# covers every CODEOWNERS entry, not just .amp/).
+#
+# Runs as pull_request_target, not pull_request: the workflow definition that
+# executes always comes from main, never from the PR's own (possibly edited)
+# copy of this file, so a PR cannot weaken the rule it is evaluated against.
+# For the same reason it never checks out or runs the PR's code -- everything
+# below comes from the GitHub API only, and CODEOWNERS is always read from
+# the base branch, never the PR's branch, so a PR cannot add itself as its
+# own owner either.
+#
+# Posts an explicit Check Run against the PR's head SHA instead of relying
+# on the job's own implicit status: pull_request_target's implicit
+# GITHUB_SHA is the base branch's latest commit, not the PR's, so a required
+# status check looking at the PR's head would never find one there, and no
+# PR -- not even an approved one -- could ever satisfy it (Devin).
+#
+# Known gaps, NEITHER fixable by editing this file -- both need a human
+# decision before this check is added to required_status_checks:
+# - A push carrying [skip ci] in its commit message skips this entirely --
+#   a GitHub platform behavior, not a workflow opt-out.
+# - Dismissing an owner's approval after this check has already passed
+#   leaves that pass in place until the next push re-triggers the check
+#   (CodeRabbit). pull_request_review looked like the fix, but unlike
+#   pull_request_target it does NOT guarantee the workflow definition comes
+#   from main -- confirmed live: a pull_request_review run on this very PR
+#   picked up this file's own branch copy, permissions block included. That
+#   would hand a PR author a trigger whose logic they can tamper with on
+#   their own branch, which is strictly worse than the gap it would close.
+#   Accepted as-is rather than ship a weaker gate under the appearance of a
+#   stronger one.
+# - Required status checks match by NAME, not by which workflow produced
+#   them: a PR author could add a trivially-successful job also named
+#   "amp-owner-approval" to any OTHER workflow that isn't owner-protected
+#   (e.g. ci.yml, which reads its own definition the same PR-branch way
+#   pull_request_review does) and GitHub would accept either one (veria-ai).
+#   The name below is deliberately specific, not "check", to cut down on
+#   ACCIDENTAL collisions, but that alone does not stop a deliberate one.
+#   Two real fixes exist, both bigger than this file: require the check
+#   from a dedicated GitHub App (pins it to an identity a PR can't produce),
+#   or extend CODEOWNERS/ruleset review to all of .github/workflows/, not
+#   just this file and amp-dir-alert.yml -- a human call, flagged for the
+#   same required-status-checks wiring step.
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Start a check run against the PR's head commit
+        id: start
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          id=$(gh api "repos/$REPO/check-runs" -f name="amp-owner-approval" -f head_sha="$HEAD_SHA" -f status=in_progress --jq .id)
+          echo "check_run_id=$id" >> "$GITHUB_OUTPUT"
+
+      - name: Does this PR touch .amp/?
+        id: touch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Compared against the event's own base/head SHAs via the
+          # Compare API, not the PR files endpoint: that endpoint takes no
+          # SHA parameter and always reflects the PR's CURRENT state, so a
+          # commit pushed while this job is queued or running could make
+          # this query answer for a different commit than the one this
+          # check run is pinned to (veria-ai). One call, one response: the
+          # truncation check and the path filter both read from the SAME
+          # captured JSON, so there is nothing left to race between them --
+          # a PR-level changed_files count (as a first attempt at this used)
+          # has the identical live-state problem the Compare switch was
+          # meant to fix in the first place (CodeRabbit). The Compare API's
+          # own docs cap its files list at 300 for the WHOLE comparison,
+          # shown only on the first page, with no way to paginate past it,
+          # so a response at the cap is treated as possibly truncated
+          # rather than trusted (Devin, CodeRabbit). The pathspec matches
+          # ".amp" exactly as well as ".amp/"-prefixed: exact-match alone
+          # would miss a real nested file, and prefix-match alone would
+          # miss a ".amp" entry that is itself a symlink or submodule
+          # rather than a directory (veria-ai). A rename's destination can
+          # land outside .amp/ while the source was inside it
+          # (previous_filename); .filename alone would miss that removal
+          # (CodeRabbit).
+          files_json=$(mktemp); compare_err=$(mktemp)
+          if ! gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq '.files' > "$files_json" 2>"$compare_err"; then
+            echo "::error::Could not compare $BASE_SHA...$HEAD_SHA: $(cat "$compare_err"). Alerting conservatively."
+            echo "touches=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          count=$(jq 'length' "$files_json")
+          if [ "$count" -ge 300 ]; then
+            echo "::warning::This comparison returned $count files, at the Compare API's 300-file cap; cannot rule out a truncated .amp/ change. Alerting conservatively."
+            echo "touches=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          touches=$(jq -r '.[] | select(
+                (.filename == ".amp") or (.filename | startswith(".amp/")) or
+                ((.previous_filename // "") == ".amp") or ((.previous_filename // "") | startswith(".amp/"))
+              ) | .filename' "$files_json")
+          if [ -n "$touches" ]; then
+            echo "touches=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "touches=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Require a current .amp/ owner approval
+        id: approve
+        if: steps.touch.outputs.touches == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          codeowners=$(gh api "repos/$REPO/contents/.github/CODEOWNERS?ref=$BASE_REF" --jq '.content' | base64 -d)
+          owners=$(printf '%s\n' "$codeowners" | grep -E '^/\.amp/[[:space:]]' | head -1 | grep -oE '@[A-Za-z0-9_-]+' | tr -d '@')
+          if [ -z "$owners" ]; then
+            echo "::error::No /.amp/ line in $BASE_REF's .github/CODEOWNERS; nobody to approve against."
+            echo "result=failure" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          # Only an APPROVED review submitted against the PR's current head
+          # commit counts: an approval given before later .amp/ changes, or
+          # since dismissed (a dismissed review's state is DISMISSED, not
+          # APPROVED, so it is already excluded by the state filter below),
+          # must not authorize those changes. gh api's own --jq takes one
+          # string and does not support --arg, so this goes through a
+          # separate real jq instead of gh api's built-in one.
+          approved=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate | jq -r --arg sha "$HEAD_SHA" '.[] | select(.state == "APPROVED" and .commit_id == $sha) | .user.login' | sort -u)
+          ok=0
+          for o in $owners; do
+            if printf '%s\n' "$approved" | grep -qx "$o"; then ok=1; fi
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::This PR changes .amp/ and needs a current APPROVED review (on commit ${HEAD_SHA:0:8}) from one of: $owners. An approval given before this commit, or since dismissed, does not count."
+            echo "result=failure" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "Approved by an .amp/ owner on the current commit."
+          echo "result=success" >> "$GITHUB_OUTPUT"
+
+      - name: Conclude the check run
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CHECK_RUN_ID: ${{ steps.start.outputs.check_run_id }}
+          TOUCHES: ${{ steps.touch.outputs.touches }}
+          APPROVE_RESULT: ${{ steps.approve.outputs.result }}
+        run: |
+          # Defaults to failure, not success: anything unexpected here (a
+          # step that aborted before writing its output, an empty TOUCHES
+          # from a step that never ran) fails this gate closed, not open --
+          # only two states explicitly earn success: "provably doesn't touch
+          # .amp/" and "touches .amp/ and has a valid current approval."
+          conclusion=failure
+          if [ "$TOUCHES" = "false" ]; then
+            conclusion=success
+          elif [ "$TOUCHES" = "true" ] && [ "$APPROVE_RESULT" = "success" ]; then
+            conclusion=success
+          fi
+          # -X PATCH is required: gh api defaults to POST once any -f field
+          # is given, and POST has no route at /check-runs/{id} (only at
+          # /check-runs, for creating a new one) -- silently 404ing instead
+          # of concluding the run, discovered live against this PR's own
+          # pull_request_review test firing before that trigger was reverted.
+          gh api -X PATCH "repos/$REPO/check-runs/$CHECK_RUN_ID" -f status=completed -f conclusion="$conclusion" >/dev/null
+          echo "Check run $CHECK_RUN_ID concluded: $conclusion"
