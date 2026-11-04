@@ -123,7 +123,10 @@ jobs:
             change_url="$REPO_URL/commit/$HEAD_SHA"
           fi
           msg=":rotating_light: .amp/ changed on \`main\`, pushed by \`${ACTOR}\`: ${change_url}"
-          payload=$(printf '{"text": %s}' "$(printf '%s' "$msg" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')")
+          # -I: a root json.py/json/__init__.py merged onto main, outside this
+          # workflow's own CODEOWNERS protection, would otherwise shadow the
+          # stdlib module in a step that holds SLACK_WEBHOOK_URL (veria-ai).
+          payload=$(printf '{"text": %s}' "$(printf '%s' "$msg" | python3 -I -c 'import json,sys; print(json.dumps(sys.stdin.read()))')")
 
           # A transient Slack error or a 429 shouldn't drop the alert, but
           # GitHub Actions failure notifications are opt-in and go to the
@@ -148,10 +151,18 @@ jobs:
             # match (the expected case when Slack sends no Retry-After),
             # pipefail propagates that, and -e would abort the whole step
             # right here instead of falling back to jittered backoff (Devin,
-            # PR #1696).
-            retry_after=$(awk -F': ' 'tolower($1) == "retry-after" { gsub(/\r/, "", $2); print $2; exit }' "$headers")
-            if [ -n "$retry_after" ]; then
-              delay=$retry_after
+            # PR #1696). FS matches blank, not just a literal space: a
+            # "Retry-After:\t30" header (colon then tab) has no space there,
+            # and ': ' alone missed it (Devin).
+            retry_after=$(awk -F':[[:blank:]]*' 'tolower($1) == "retry-after" { gsub(/\r/, "", $2); print $2; exit }' "$headers")
+            # Retry-After can be an HTTP-date instead of delay-seconds (RFC
+            # 7231); sleep-ing on a date fragment fails under -e and aborts
+            # the retry loop instead of falling back to backoff. Bound the
+            # digit count before doing arithmetic on it too -- an unbounded
+            # value risks overflowing $(( )) -- and force base-10 so a
+            # leading zero isn't read as octal (CodeRabbit).
+            if [[ "$retry_after" =~ ^[0-9]{1,4}$ ]]; then
+              delay=$(( 10#$retry_after > 30 ? 30 : 10#$retry_after ))
             else
               # Exponential backoff with full jitter: up to 2^(attempt-1) seconds.
               ceiling=$((1 << (attempt - 1)))
