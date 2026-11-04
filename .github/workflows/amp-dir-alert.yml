@@ -26,10 +26,20 @@ permissions:
 jobs:
   alert:
     runs-on: ubuntu-latest
+    # Explicit, not the unspecified default: GitHub only adds -o pipefail
+    # when shell: bash is named directly (the unspecified default is -e
+    # alone, confirmed against GitHub's own docs after an earlier commit
+    # message on this PR overstated it as already on). Nothing below
+    # currently depends on it, but it is the right default for any script
+    # that later pipes git's output into something that can fail.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Does this push touch .amp/?
         id: touch
@@ -37,43 +47,49 @@ jobs:
           BEFORE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
         run: |
-          # GitHub Actions runs this as `bash -eo pipefail`. Piping git's
-          # output into an early-closing consumer (head -1, grep -q) can
-          # SIGPIPE git mid-write on a large diff; pipefail then fails the
-          # whole pipeline and -e aborts the step before GITHUB_OUTPUT is
-          # written at all, so the job just goes red with no alert and no
-          # clear reason (two independent findings on this PR: Devin,
-          # veria-ai). git diff --quiet and command substitution both read
-          # to completion with no pipe at all, so neither can SIGPIPE.
+          # Piping git's output into an early-closing consumer (head -1,
+          # grep -q) risks a SIGPIPE'd writer being masked by the reader's
+          # own success -- a real risk independent of pipefail, since even
+          # without it, the pipeline's reported status is the last command's,
+          # not git's (CodeRabbit, correcting an earlier commit message on
+          # this PR that overstated pipefail as the mechanism here). Command
+          # substitution and git log/cat-file below have no pipe at all.
           #
           # A failed comparison (an unresolvable before-SHA after a force
           # push; any other git error) must not read the same as "no
           # change" -- that would make an admin's own force push silence
           # exactly the alert meant to catch an admin bypassing review
-          # (Devin, veria-ai). Fail toward alerting instead.
+          # (Devin, veria-ai).
+          #
+          # Compares history, not just the two endpoint trees: a push that
+          # edits .amp/ and then reverts that edit, in the same push, nets
+          # to no tree difference at the endpoints but still put the edit on
+          # main's history (veria-ai). --full-history keeps a commit that
+          # git would otherwise simplify away, including in a merge.
+          #
+          # The pathspec has no trailing slash: with one, it only matches
+          # paths *inside* a directory literally named .amp, not a .amp
+          # entry that is itself a symlink to some other directory --
+          # veria-ai reproduced the gap with this repo's own CLAUDE.md
+          # symlink. Without the slash it matches the entry either way.
           zero_sha="0000000000000000000000000000000000000000"
           touches=false
           if [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "$zero_sha" ]; then
-            if listing=$(git ls-tree -r --name-only "$HEAD_SHA" -- .amp/ 2>&1); then
+            if listing=$(git ls-tree -r --name-only "$HEAD_SHA" -- .amp 2>&1); then
               [ -n "$listing" ] && touches=true
             else
-              echo "::warning::Could not list .amp/ at $HEAD_SHA: $listing. Alerting conservatively."
+              echo "::warning::Could not list .amp at $HEAD_SHA: $listing. Alerting conservatively."
               touches=true
             fi
           elif ! git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
             echo "::warning::\$BEFORE_SHA ($BEFORE_SHA) is not reachable from this checkout, likely a force push. Cannot compare; alerting conservatively."
             touches=true
           else
-            diff_err=$(mktemp)
-            if git diff --quiet "$BEFORE_SHA" "$HEAD_SHA" -- .amp/ 2>"$diff_err"; then
-              rc=0
+            log_err=$(mktemp)
+            if touched=$(git log --name-only --format=tformat: --full-history "$BEFORE_SHA..$HEAD_SHA" -- .amp 2>"$log_err"); then
+              [ -n "$touched" ] && touches=true
             else
-              rc=$?
-            fi
-            if [ "$rc" = 1 ]; then
-              touches=true
-            elif [ "$rc" != 0 ]; then
-              echo "::warning::git diff exited $rc comparing $BEFORE_SHA..$HEAD_SHA: $(cat "$diff_err"). Alerting conservatively."
+              echo "::warning::git log failed comparing $BEFORE_SHA..$HEAD_SHA: $(cat "$log_err"). Alerting conservatively."
               touches=true
             fi
           fi
@@ -96,10 +112,13 @@ jobs:
           # one, so a single-commit link can miss the .amp/ change if it
           # wasn't final. Link the whole pushed range instead, falling back
           # to the one commit when there's no prior SHA to compare from (a
-          # brand-new branch's first push).
+          # brand-new branch's first push). Two dots, not three: three-dot
+          # compare diffs from the merge-base, which can omit the .amp/
+          # change on divergent history; two-dot matches the endpoint
+          # comparison the detection step itself uses (CodeRabbit).
           zero_sha="0000000000000000000000000000000000000000"
           if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "$zero_sha" ]; then
-            change_url="$REPO_URL/compare/$BEFORE_SHA...$HEAD_SHA"
+            change_url="$REPO_URL/compare/$BEFORE_SHA..$HEAD_SHA"
           else
             change_url="$REPO_URL/commit/$HEAD_SHA"
           fi
