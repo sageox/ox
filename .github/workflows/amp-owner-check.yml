@@ -10,7 +10,16 @@ name: amp-owner-check
 # For the same reason it never checks out or runs the PR's code -- everything
 # below comes from the GitHub API only, and CODEOWNERS is always read from
 # the base branch, never the PR's branch, so a PR cannot add itself as its
-# own owner either.
+# own owner either. pull_request_review re-runs the same check on an
+# approval or a dismissal, reading the workflow definition from the base
+# branch the same way, so revoking an approval invalidates the gate instead
+# of leaving a stale pass in place (Devin).
+#
+# Posts an explicit Check Run against the PR's head SHA instead of relying
+# on the job's own implicit status: pull_request_target's implicit
+# GITHUB_SHA is the base branch's latest commit, not the PR's, so a required
+# status check looking at the PR's head would never find one there, and no
+# PR -- not even an approved one -- could ever satisfy it (Devin).
 #
 # Known gap: a push carrying [skip ci] in its commit message skips this
 # entirely. That is a GitHub platform behavior, not something a workflow can
@@ -18,16 +27,37 @@ name: amp-owner-check
 on:
   pull_request_target:
     branches: [main]
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
+  pull_request_review:
+    types: [submitted, dismissed]
 
 permissions:
   contents: read
   pull-requests: read
+  checks: write
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    # pull_request_target already filters to base main via branches: above;
+    # pull_request_review has no such filter at the trigger level, so a
+    # review on a PR targeting some other branch would otherwise still fire
+    # this job.
+    if: github.event_name != 'pull_request_review' || github.event.pull_request.base.ref == 'main'
+    defaults:
+      run:
+        shell: bash
     steps:
+      - name: Start a check run against the PR's head commit
+        id: start
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          id=$(gh api "repos/$REPO/check-runs" -f name="check" -f head_sha="$HEAD_SHA" -f status=in_progress --jq .id)
+          echo "check_run_id=$id" >> "$GITHUB_OUTPUT"
+
       - name: Does this PR touch .amp/?
         id: touch
         env:
@@ -35,14 +65,37 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          touches=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[] | select(.filename | startswith(".amp/")) | .filename' | head -1)
-          if [ -n "$touches" ]; then
+          # changed_files reflects the PR's true total; the files-listing
+          # endpoint below silently caps at 3,000 regardless of --paginate
+          # -- a documented GitHub API limit, not a client-side pagination
+          # gap -- so a PR that large can't be fully verified by listing
+          # files and is treated the same as a touch (Devin).
+          if ! total=$(gh api "repos/$REPO/pulls/$PR" --jq .changed_files); then
+            echo "::error::Could not read this PR's changed-file count. Alerting conservatively."
             echo "touches=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$total" -gt 3000 ]; then
+            echo "::warning::This PR changes $total files, beyond the files API's 3,000-file cap; cannot verify .amp/ is untouched. Alerting conservatively."
+            echo "touches=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A rename's destination can land outside .amp/ while the source
+          # was inside it (previous_filename); .filename alone would miss
+          # that removal (CodeRabbit).
+          if touches=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[] | select((.filename | startswith(".amp/")) or ((.previous_filename // "") | startswith(".amp/"))) | .filename'); then
+            if [ -n "$touches" ]; then
+              echo "touches=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "touches=false" >> "$GITHUB_OUTPUT"
+            fi
           else
-            echo "touches=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Could not list this PR's changed files. Alerting conservatively."
+            echo "touches=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Require a current .amp/ owner approval
+        id: approve
         if: steps.touch.outputs.touches == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -55,6 +108,7 @@ jobs:
           owners=$(printf '%s\n' "$codeowners" | grep -E '^/\.amp/[[:space:]]' | head -1 | grep -oE '@[A-Za-z0-9_-]+' | tr -d '@')
           if [ -z "$owners" ]; then
             echo "::error::No /.amp/ line in $BASE_REF's .github/CODEOWNERS; nobody to approve against."
+            echo "result=failure" >> "$GITHUB_OUTPUT"
             exit 1
           fi
           # Only an APPROVED review submitted against the PR's current head
@@ -71,6 +125,31 @@ jobs:
           done
           if [ "$ok" != 1 ]; then
             echo "::error::This PR changes .amp/ and needs a current APPROVED review (on commit ${HEAD_SHA:0:8}) from one of: $owners. An approval given before this commit, or since dismissed, does not count."
+            echo "result=failure" >> "$GITHUB_OUTPUT"
             exit 1
           fi
           echo "Approved by an .amp/ owner on the current commit."
+          echo "result=success" >> "$GITHUB_OUTPUT"
+
+      - name: Conclude the check run
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CHECK_RUN_ID: ${{ steps.start.outputs.check_run_id }}
+          TOUCHES: ${{ steps.touch.outputs.touches }}
+          APPROVE_RESULT: ${{ steps.approve.outputs.result }}
+        run: |
+          # Defaults to failure, not success: anything unexpected here (a
+          # step that aborted before writing its output, an empty TOUCHES
+          # from a step that never ran) fails this gate closed, not open --
+          # only two states explicitly earn success: "provably doesn't touch
+          # .amp/" and "touches .amp/ and has a valid current approval."
+          conclusion=failure
+          if [ "$TOUCHES" = "false" ]; then
+            conclusion=success
+          elif [ "$TOUCHES" = "true" ] && [ "$APPROVE_RESULT" = "success" ]; then
+            conclusion=success
+          fi
+          gh api "repos/$REPO/check-runs/$CHECK_RUN_ID" -f status=completed -f conclusion="$conclusion" >/dev/null
+          echo "Check run $CHECK_RUN_ID concluded: $conclusion"
