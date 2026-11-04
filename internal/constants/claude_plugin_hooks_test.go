@@ -41,3 +41,24 @@ func TestClaudePluginHooksMatchInit(t *testing.T) {
 		assert.Equal(t, cmd, entries[0].Hooks[0].Command, event)
 	}
 }
+
+// TestClaudePluginMCPURLMatchesOAuthResource pins the plugin's MCP URL to the
+// canonical one. Claude matches it exactly against the server's OAuth
+// `resource`, so an alias path breaks sign-in.
+func TestClaudePluginMCPURLMatchesOAuthResource(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "claude-plugin", ".mcp.json"))
+	require.NoError(t, err)
+
+	var cfg struct {
+		MCPServers map[string]struct {
+			Type string `json:"type"`
+			URL  string `json:"url"`
+		} `json:"mcpServers"`
+	}
+	require.NoError(t, json.Unmarshal(data, &cfg))
+
+	server, ok := cfg.MCPServers["sageox"]
+	require.True(t, ok, "sageox MCP server missing")
+	assert.Equal(t, "http", server.Type)
+	assert.Equal(t, "https://sageox.ai/mcp", server.URL)
+}

@@ -15,7 +15,7 @@ every session, so Claude does not start from zero.
 - **Skills.** `sageox` explains the product; `ox` lists the commands and code
   search verbs.
 - **SageOx MCP server.** Registered in `.mcp.json` at
-  `https://sageox.ai/api/v1/mcp`. Claude Code asks you to sign in with SageOx
+  `https://sageox.ai/mcp`. Claude Code asks you to sign in with SageOx
   the first time it connects.
 
 ## Install

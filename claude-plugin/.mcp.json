@@ -2,7 +2,7 @@
   "mcpServers": {
     "sageox": {
       "type": "http",
-      "url": "https://sageox.ai/api/v1/mcp"
+      "url": "https://sageox.ai/mcp"
     }
   }
 }
