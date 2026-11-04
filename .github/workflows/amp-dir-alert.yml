@@ -61,11 +61,17 @@ jobs:
           # exactly the alert meant to catch an admin bypassing review
           # (Devin, veria-ai).
           #
-          # Compares history, not just the two endpoint trees: a push that
-          # edits .amp/ and then reverts that edit, in the same push, nets
-          # to no tree difference at the endpoints but still put the edit on
-          # main's history (veria-ai). --full-history keeps a commit that
-          # git would otherwise simplify away, including in a merge.
+          # Two independent checks below, alerting if either says yes or
+          # either fails to run: a history walk (catches a push that edits
+          # .amp/ and reverts it again before the push ends -- the tree
+          # comparison alone sees no difference at the endpoints -- and,
+          # with --diff-merges=first-parent, a .amp/ change introduced only
+          # by a merge commit's own resolution, which merge commits don't
+          # show by default and --full-history alone doesn't turn on) and an
+          # endpoint tree diff (catches a force push that rewinds main to an
+          # ancestor with a different .amp/ tree while the old tip stays
+          # reachable elsewhere: the history range is then empty or
+          # reversed, since HEAD ends up behind BEFORE) (veria-ai).
           #
           # The pathspec has no trailing slash: with one, it only matches
           # paths *inside* a directory literally named .amp, not a .amp
@@ -86,10 +92,23 @@ jobs:
             touches=true
           else
             log_err=$(mktemp)
-            if touched=$(git log --name-only --format=tformat: --full-history "$BEFORE_SHA..$HEAD_SHA" -- .amp 2>"$log_err"); then
+            if touched=$(git log --name-only --format=tformat: --full-history --diff-merges=first-parent "$BEFORE_SHA..$HEAD_SHA" -- .amp 2>"$log_err"); then
               [ -n "$touched" ] && touches=true
             else
               echo "::warning::git log failed comparing $BEFORE_SHA..$HEAD_SHA: $(cat "$log_err"). Alerting conservatively."
+              touches=true
+            fi
+
+            diff_err=$(mktemp)
+            if git diff --quiet "$BEFORE_SHA" "$HEAD_SHA" -- .amp 2>"$diff_err"; then
+              diff_status=0
+            else
+              diff_status=$?
+            fi
+            if [ "$diff_status" = 1 ]; then
+              touches=true
+            elif [ "$diff_status" != 0 ]; then
+              echo "::warning::git diff failed comparing $BEFORE_SHA $HEAD_SHA: $(cat "$diff_err"). Alerting conservatively."
               touches=true
             fi
           fi
