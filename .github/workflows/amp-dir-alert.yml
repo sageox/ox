@@ -6,6 +6,12 @@ name: Alert on .amp/ changes to main
 # of silently. Needs the AMP_DIR_ALERT_SLACK_WEBHOOK secret (a Slack incoming
 # webhook for #amp-steward); the job fails loudly if it's missing.
 #
+# Triggers on every push to main, not a path-filtered one: GitHub's trigger
+# filter only evaluates the first 3,000 changed files in a push, so a push
+# bundling enough unrelated files could put every .amp/ change outside that
+# window and the workflow would never start at all. The job checks the full
+# pushed diff itself instead, with no such limit.
+#
 # Known gap: a push carrying [skip ci] in its commit message skips this
 # workflow entirely, same as every other push-triggered Action -- GitHub
 # does not run any workflow for that push at all. That is a platform
@@ -13,16 +19,40 @@ name: Alert on .amp/ changes to main
 on:
   push:
     branches: [main]
-    paths:
-      - '.amp/**'
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   alert:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Does this push touch .amp/?
+        id: touch
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          zero_sha="0000000000000000000000000000000000000000"
+          if [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "$zero_sha" ]; then
+            # No prior SHA to diff from (the ref's first push): check the
+            # whole tree at HEAD instead of a diff.
+            touched=$(git ls-tree -r --name-only "$HEAD_SHA" -- .amp/ | head -1)
+          else
+            touched=$(git diff --name-only "$BEFORE_SHA" "$HEAD_SHA" -- .amp/ | head -1)
+          fi
+          if [ -n "$touched" ]; then
+            echo "touches=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "touches=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Post to Slack
+        if: steps.touch.outputs.touches == 'true'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.AMP_DIR_ALERT_SLACK_WEBHOOK }}
           ACTOR: ${{ github.actor }}
