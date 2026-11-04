@@ -77,4 +77,35 @@ jobs:
           fi
           msg=":rotating_light: .amp/ changed on \`main\`, pushed by \`${ACTOR}\`: ${change_url}"
           payload=$(printf '{"text": %s}' "$(printf '%s' "$msg" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')")
-          curl -fsS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
+
+          # A transient Slack error or a 429 shouldn't drop the alert, but
+          # GitHub Actions failure notifications are opt-in and go to the
+          # user who triggered the run, not the team -- so retry bounded
+          # (<=3 attempts, one retry layer, team rule) before giving up loud.
+          max_attempts=3
+          attempt=1
+          while :; do
+            headers=$(mktemp); body=$(mktemp)
+            status=$(curl -sS --connect-timeout 5 --max-time 15 \
+              -D "$headers" -o "$body" -w '%{http_code}' \
+              -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" || echo 000)
+            if [ "$status" -ge 200 ] 2>/dev/null && [ "$status" -lt 300 ]; then
+              echo "Posted to Slack (attempt $attempt)."
+              exit 0
+            fi
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "::error::Slack webhook failed after $max_attempts attempts (last status $status): $(cat "$body")"
+              exit 1
+            fi
+            retry_after=$(grep -i '^retry-after:' "$headers" | tr -d '\r' | awk '{print $2}')
+            if [ -n "$retry_after" ]; then
+              delay=$retry_after
+            else
+              # Exponential backoff with full jitter: up to 2^(attempt-1) seconds.
+              ceiling=$((1 << (attempt - 1)))
+              delay=$(( (RANDOM % (ceiling * 1000)) / 1000 + 1 ))
+            fi
+            echo "Slack post failed (status $status, attempt $attempt/$max_attempts); retrying in ${delay}s."
+            sleep "$delay"
+            attempt=$((attempt + 1))
+          done
