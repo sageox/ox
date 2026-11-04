@@ -967,3 +967,13 @@ func TestReconcile_RewritesStaleGlobsProjectionForClaude(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, result.Written, "a converged projection must not be rewritten again")
 }
+
+func TestExpandBraces_HostileGlobFallsBackInsteadOfStalling(t *testing.T) {
+	// Each unmatched '{' starts a rescan of the rest, so 60,000 of them cost about
+	// 1.8 billion steps while expanding to a single pattern.
+	_, ok := expandBraces(strings.Repeat("{", 60_000), maxNativePatterns)
+	require.False(t, ok, "an oversized glob must fall back to the prime index")
+	got, ok := expandBraces("apps/web/**/*.{tsx,css}", maxNativePatterns)
+	require.True(t, ok)
+	require.Equal(t, []string{"apps/web/**/*.tsx", "apps/web/**/*.css"}, got)
+}

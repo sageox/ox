@@ -490,12 +490,19 @@ func nativePatterns(globs []string, p policy) ([]string, bool) {
 	return patterns, true
 }
 
+// maxBraceGlobBytes bounds one glob before brace expansion. The longest real scope
+// glob seen is under 200 bytes; 1 KiB keeps the worst-case scan near a million steps.
+const maxBraceGlobBytes = 1024
+
 // expandBraces rewrites a glob's brace groups as separate patterns, keeping their
 // order: src/{client,admin}/*.{ts,css} becomes four patterns. A group with no comma or
 // no closing brace is left as text, since it offers no alternatives. The second
 // return is false when the result would exceed limit.
 func expandBraces(glob string, limit int) ([]string, bool) {
-	if limit <= 0 {
+	// Finding a group rescans from each '{', so a hostile glob of unmatched braces costs
+	// time quadratic in its length while expanding to one pattern. Real globs are short;
+	// a longer one falls back to the prime index instead of stalling startup.
+	if limit <= 0 || len(glob) > maxBraceGlobBytes {
 		return nil, false
 	}
 	open, end, options := firstBraceGroup(glob)

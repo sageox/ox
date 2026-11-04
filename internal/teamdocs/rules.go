@@ -463,11 +463,39 @@ func parseRuleFrontmatter(path string) ruleFrontmatter {
 // manifest held in memory (`ox skills publish` reads the repository copy
 // before it exists in any Team Context) parses with exactly the same rules.
 func parseRuleFrontmatterFrom(r io.Reader) ruleFrontmatter {
-	data, err := io.ReadAll(r)
+	// Discovery reads every published rule, drafts and other repos' rules included, so
+	// a Team Context writer must not be able to make it allocate a whole large file.
+	// Frontmatter is all this needs; a block that does not close within the bound is
+	// withheld, never read as unscoped.
+	data, err := io.ReadAll(io.LimitReader(r, maxFrontmatterReadBytes+1))
 	if err != nil {
 		return ruleFrontmatter{Scope: invalidScope("file cannot be read"), unreadable: true}
 	}
+	if len(data) > maxFrontmatterReadBytes {
+		data = data[:maxFrontmatterReadBytes]
+		if !frontmatterCloses(string(data)) {
+			return ruleFrontmatter{Scope: invalidScope("frontmatter does not close within %d bytes", maxFrontmatterReadBytes)}
+		}
+	}
 	return parseManifest(string(data))
+}
+
+// maxFrontmatterReadBytes bounds what discovery reads from one rule. Real frontmatter
+// is under 2 KiB; 64 KiB leaves room for a long description and stays cheap.
+const maxFrontmatterReadBytes = 64 << 10
+
+// frontmatterCloses reports whether text opens a frontmatter block and closes it.
+func frontmatterCloses(text string) bool {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		return true // no frontmatter: the bound cut only body text
+	}
+	for _, line := range lines[1:] {
+		if strings.TrimSpace(line) == "---" {
+			return true
+		}
+	}
+	return false
 }
 
 // blockListItem parses one line of a YAML block sequence. The second return is

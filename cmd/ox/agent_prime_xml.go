@@ -491,6 +491,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 			}
 
 			emitWithheldTeamSkills(&sb, bk, output.WithheldTeamSkills)
+			emitTeamRuleWarnings(&sb, bk, output.TeamContext)
 
 			// team memory (inlined content): framing ours, body is team's
 			if output.TeamContext.MemoryContent != "" {
@@ -581,6 +582,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	// knowledge, so it must carry the report here or the coworker never learns of it.
 	if compact {
 		emitWithheldTeamSkills(&sb, bk, output.WithheldTeamSkills)
+		emitTeamRuleWarnings(&sb, bk, output.TeamContext)
 	}
 
 	// ════════════════════════════════════════════════════════════
@@ -740,7 +742,6 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	fmt.Fprintf(&sb, " total=\"%d\">\n", bk.budget.Total())
 	sb.WriteString("SageOx is judged on the sageox bucket — every word in it is our product decision.\n")
 	sb.WriteString("Other sources (team, project, user, ...) reflect content authored elsewhere; SageOx delivers them but does not control their size.\n")
-	emitTeamRuleWarnings(&sb, output.TeamContext)
 	sb.WriteString("</context-budget>\n")
 	bk.charge(prime.BudgetSourceSageox)
 
@@ -969,8 +970,10 @@ func emitWithheldTeamSkills(sb *strings.Builder, bk *bookkeeper, withheld []prim
 // nested rules needs the count and a few examples, not all of them.
 const maxTeamRuleWarnings = 5
 
-// emitTeamRuleWarnings adds rule warnings to the <context-budget> block: rules
-// withheld from this session, then advisory size and layout. A healthy team pays
+// emitTeamRuleWarnings writes <team-rule-warnings>: rules withheld from this
+// session, then advisory size and layout. It is its own section, emitted before the
+// budget totals, so a host's hook cap ranks it like a defect report rather than
+// trimming it with the budget footer, and the totals count it. A healthy team pays
 // nothing, and a failure here costs only the warning, because prime must never fail
 // over a rule file.
 //
@@ -978,7 +981,7 @@ const maxTeamRuleWarnings = 5
 // rule with a native projection, and those still cost context when they load. A
 // rule scoped to other repos warns here too: its author is on the same team, and
 // the bound below keeps that cheap.
-func emitTeamRuleWarnings(sb *strings.Builder, tc *teamContextInfo) {
+func emitTeamRuleWarnings(sb *strings.Builder, bk *bookkeeper, tc *teamContextInfo) {
 	if tc == nil {
 		return
 	}
@@ -992,7 +995,7 @@ func emitTeamRuleWarnings(sb *strings.Builder, tc *teamContextInfo) {
 	if len(warnings) == 0 {
 		return
 	}
-	sb.WriteString("Team rule warnings (see `ox guide team-rules`):\n")
+	sb.WriteString("\n<team-rule-warnings hint=\"see `ox guide team-rules`\">\n")
 	for i, warning := range warnings {
 		if i == maxTeamRuleWarnings {
 			fmt.Fprintf(sb, "- and %d more\n", len(warnings)-maxTeamRuleWarnings)
@@ -1000,6 +1003,8 @@ func emitTeamRuleWarnings(sb *strings.Builder, tc *teamContextInfo) {
 		}
 		fmt.Fprintf(sb, "- %s\n", escapeXMLText(warning))
 	}
+	sb.WriteString("</team-rule-warnings>\n")
+	bk.charge(prime.BudgetSourceSageox)
 }
 
 // emitTeamRules writes <team-rules> and <team-rules-budget> blocks for the

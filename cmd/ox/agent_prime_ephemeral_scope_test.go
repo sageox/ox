@@ -154,6 +154,9 @@ func teamRuleRowPath(primeOutput, name string) string {
 // bundle is the only way a rule reaches it. A team that scopes its rules to named
 // repos loses all of them with nothing said if repo identity is lost here.
 func TestEphemeralPrime_RepoScopedRuleReachesTheSession(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the ox binary and runs four primes")
+	}
 	bin := buildOxForPrimeTest(t)
 	bundle := ephemeralContextBundle(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

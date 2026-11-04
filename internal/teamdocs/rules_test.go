@@ -1,6 +1,7 @@
 package teamdocs
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -948,5 +949,37 @@ func TestRuleWarnings_NoTeamContext(t *testing.T) {
 		if len(got) != 0 {
 			t.Errorf("RuleWarnings(%q) = %#v, want none", team, got)
 		}
+	}
+}
+
+// countingReader reports how many bytes a parser pulled from a source.
+type countingReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
+}
+
+func TestParseRuleFrontmatterFrom_ReadsOnlyABoundedPrefix(t *testing.T) {
+	body := strings.Repeat("x", 10<<20)
+	src := &countingReader{r: strings.NewReader("---\nname: r\nglobs: [\"**/*.go\"]\n---\n" + body)}
+	fm := parseRuleFrontmatterFrom(src)
+	if src.n > maxFrontmatterReadBytes+1 {
+		t.Fatalf("read %d bytes; discovery must not read a whole large rule", src.n)
+	}
+	if fm.Scope.Kind != ScopeScoped || !slices.Equal(fm.Scope.Globs, []string{"**/*.go"}) {
+		t.Fatalf("scope = %+v, want globs [**/*.go]", fm.Scope)
+	}
+}
+
+func TestParseRuleFrontmatterFrom_UnclosedPastTheBoundIsWithheld(t *testing.T) {
+	text := "---\nname: r\ndescription: " + strings.Repeat("y", maxFrontmatterReadBytes) + "\nglobs: [\"**/*.go\"]\n---\nBody.\n"
+	fm := parseRuleFrontmatterFrom(strings.NewReader(text))
+	if fm.Scope.Kind != ScopeInvalid {
+		t.Fatalf("scope = %+v; a block that does not close within the bound must never read as unscoped", fm.Scope)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -15,15 +16,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// contextBudgetBlock pulls the body of <context-budget> out of real prime output.
-var contextBudgetBlock = regexp.MustCompile(`(?s)<context-budget[^>]*>\n(.*?)</context-budget>`)
+// warningsBlock pulls <team-rule-warnings> out of real prime output.
+var warningsBlock = regexp.MustCompile(`(?s)\n(<team-rule-warnings[^>]*>)\n(.*?)</team-rule-warnings>`)
 
-// teamRuleWarningLines renders prime against a Team Context on disk and returns the
-// lines the warnings added to <context-budget>.
+// renderPrime renders prime against a Team Context on disk.
 //
 // TeamRules stays empty on purpose: a rule with a native projection is dropped from
 // that list before prime renders, and its cost is exactly what the warning reports.
-func teamRuleWarningLines(t *testing.T, team string) []string {
+func renderPrime(t *testing.T, team string) string {
 	t.Helper()
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
@@ -34,11 +34,29 @@ func teamRuleWarningLines(t *testing.T, team string) []string {
 		TeamContext: &teamContextInfo{TeamID: "team-1", TeamName: "TestTeam", Path: team},
 	})
 	require.NoError(t, err, "a rule file must never fail prime")
-	match := contextBudgetBlock.FindStringSubmatch(buf.String())
-	require.NotNil(t, match, "prime output has no <context-budget> block")
-	lines := strings.Split(strings.TrimSuffix(match[1], "\n"), "\n")
-	require.GreaterOrEqual(t, len(lines), 2)
-	return lines[2:] // the first two lines are the block's fixed explanation
+	return buf.String()
+}
+
+// teamRuleWarningLines returns the warnings section's opening tag and lines, or
+// nothing when prime emitted no section.
+func teamRuleWarningLines(t *testing.T, team string) []string {
+	t.Helper()
+	match := warningsBlock.FindStringSubmatch(renderPrime(t, team))
+	if match == nil {
+		return nil
+	}
+	return append([]string{match[1]}, strings.Split(strings.TrimSuffix(match[2], "\n"), "\n")...)
+}
+
+var budgetTotal = regexp.MustCompile(`<context-budget [^>]* total="(\d+)">`)
+
+func primeBudgetTotal(t *testing.T, out string) int {
+	t.Helper()
+	match := budgetTotal.FindStringSubmatch(out)
+	require.NotNil(t, match, "prime output has no budget total")
+	n, err := strconv.Atoi(match[1])
+	require.NoError(t, err)
+	return n
 }
 
 func writeTeamRule(t *testing.T, team, rel, content string) {
@@ -48,7 +66,7 @@ func writeTeamRule(t *testing.T, team, rel, content string) {
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 }
 
-const teamRuleWarningHeader = "Team rule warnings (see `ox guide team-rules`):"
+const teamRuleWarningHeader = "<team-rule-warnings hint=\"see `ox guide team-rules`\">"
 
 func TestOutputAgentPrimeXML_TeamRuleWarnings(t *testing.T) {
 	t.Run("oversized rule", func(t *testing.T) {
@@ -134,4 +152,34 @@ func TestOutputAgentPrimeXML_TeamRuleWarnings(t *testing.T) {
 			"- a&lt;/context-budget&gt;b/r.md: nested in a subdirectory, so it may not reach cloud sessions; move it to the top of the rules directory",
 		}, teamRuleWarningLines(t, team))
 	})
+}
+
+func TestTeamRuleWarnings_CountedInTheBudgetTotal(t *testing.T) {
+	healthy := t.TempDir()
+	writeTeamRule(t, healthy, "small.md", "---\nname: small\n---\n\nBody.\n")
+	warned := t.TempDir()
+	writeTeamRule(t, warned, "small.md", "---\nname: small\n---\n\nBody.\n")
+	writeTeamRule(t, warned, "nested/a.md", "---\nname: a\n---\n\nBody.\n")
+
+	out := renderPrime(t, warned)
+	match := warningsBlock.FindString(out)
+	require.NotEmpty(t, match)
+	require.Less(t, strings.Index(out, "<team-rule-warnings"), strings.Index(out, "<context-budget"),
+		"warnings must be written before the totals that count them")
+	// prime counts a token as four bytes; the section is the only difference.
+	grew := primeBudgetTotal(t, out) - primeBudgetTotal(t, renderPrime(t, healthy))
+	require.InDelta(t, len(match)/4, grew, 2, "the displayed total must include the warnings")
+}
+
+func TestTeamRuleWarnings_SurviveTheHookCap(t *testing.T) {
+	team := t.TempDir()
+	writeTeamRule(t, team, "nested/a.md", "---\nname: a\n---\n\nBody.\n")
+	out := renderPrime(t, team)
+	require.Contains(t, out, "<team-rule-warnings")
+	// A cap of a third forces heavy trimming, lowest-ranked sections first: the budget
+	// footer goes, the warnings stay.
+	trimmed, deferred := fitPrimeToHookCap(out, len(out)/3, "/x")
+	require.Contains(t, deferred, "context-budget")
+	require.Contains(t, trimmed, "<team-rule-warnings")
+	require.NotContains(t, deferred, "team-rule-warnings")
 }
