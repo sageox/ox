@@ -125,7 +125,12 @@ jobs:
               echo "::error::Slack webhook failed after $max_attempts attempts (last status $status): $(cat "$body")"
               exit 1
             fi
-            retry_after=$(grep -i '^retry-after:' "$headers" | tr -d '\r' | awk '{print $2}')
+            # A single awk pass, not grep piped onward: grep exits 1 on no
+            # match (the expected case when Slack sends no Retry-After),
+            # pipefail propagates that, and -e would abort the whole step
+            # right here instead of falling back to jittered backoff (Devin,
+            # PR #1696).
+            retry_after=$(awk -F': ' 'tolower($1) == "retry-after" { gsub(/\r/, "", $2); print $2; exit }' "$headers")
             if [ -n "$retry_after" ]; then
               delay=$retry_after
             else
