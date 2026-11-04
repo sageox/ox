@@ -5,8 +5,8 @@
 Each eligible pull request and issue within the 90-day activity window becomes a read-only post on the team's
 `github` bulletin board. The post is injection-scanned, replaced in place when the item changes,
 and expires 90 days after the last material change. AI coworkers in every repo see recent GitHub
-context without the bot noise. The mirror runs beside the Ledger `data/github` sync and replaces
-it once the board is proven.
+context without the bot noise. New CLI and daemon snapshots use the mirror; historical Ledger
+`data/github` snapshots remain readable and are not modified.
 
 ```mermaid
 flowchart LR
@@ -27,16 +27,14 @@ flowchart LR
 | Injection scan | Every segment (title, body, each comment), before anything is published. Fails closed |
 | Expiry | `last_material_change_at + 90d`, open and closed alike |
 | Private repos | The client sends `repo.private`; the server enforces the team's opt-in |
-| Rollout | Beside the Ledger sync → verify board coverage → Ledger `data/github` writer retired |
+| Client | Daemon and manual indexing use the relay; `--no-push` indexes locally without relaying |
 
 ## Trust boundary
 
-**The SageOx cloud never contacts GitHub.** It holds no GitHub credentials and has no access to
-any repository. The ox daemon, running with a teammate's own GitHub token, is the only reader;
-everything the server knows about an item arrives in a relay request. Consequences:
+ADR-232 permits the cloud watcher to read linked public GitHub repositories; the daemon can
+also relay structured items from its own GitHub credentials. Private repository relays remain
+subject to the server's existing access and eligibility controls.
 
-- **There is no server-side fetch path** (no GitHub App, no webhooks). The daemon relay is the
-  only feeder.
 - **The server cannot verify relayed content against GitHub.** A relay is exactly as trustworthy
   as the authenticated team member whose daemon sent it — the same trust the Ledger `data/github`
   sync has today. The server must check that the caller is a member of the team and that the
@@ -115,6 +113,10 @@ comments: [{id, author_id, body, path}] (sorted by id),
 files (sorted)
 ```
 
+When present, `merge_commit` and `commits` (ordered `{sha, author, date, message}` records)
+are included in the hash. Their keys are omitted when empty, preserving released hashes.
+Commit dates use UTC RFC3339Nano; author and message receive the same cleanup as other text.
+
 Excluded on purpose: `updated_at`, `last_material_change_at`, `url`, `omitted`, logins, every
 bot comment, and an inline comment's `line` (GitHub nulls it when a push outdates the comment). A bot comment, a reaction or an `updated_at` bump never changes the hash; a human
 comment or edit, a review decision, a state, title, body, label or file change always does. Every
@@ -124,7 +126,8 @@ many teammates' daemons as no-ops.
 ### Relay endpoint
 
 `POST /api/v1/teams/{team}/github-mirror/items`, body `RelayRequest`, at most 50 items per request.
-The caller is a signed-in person (team membership is checked); the server publishes as the team.
+The caller is signed in; `repo_id` identifies the SageOx repository when available. The server
+checks authorization and publishes as the team.
 
 | Status | Meaning | Client action |
 |---|---|---|
@@ -215,13 +218,11 @@ least `board`, `slug`, `path`, `created_at`, `expires_at` and `source_key`.
 
 ## Daemon relay
 
-Runs inside the existing GitHub sync cycle (`GitHubSyncManager.doSync`), after the Ledger sync, with
-the same GitHub token, remote detection and on/off config. A relay failure never fails or delays the
-Ledger sync.
+Runs inside the existing GitHub sync cycle (`GitHubSyncManager.doSync`) with the GitHub token,
+remote detection and on/off config. No new Ledger snapshot is written.
 
-1. **Gate:** server feature `features.github_mirror` (from `/api/v1/cli/settings`, no env override;
-   cached settings older than two hours, or with no fetch time, count as off),
-   a GitHub remote, a token, the team's Team Context checkout present, not inside a backoff window.
+1. **Gate:** existing GitHub sync and per-kind settings, a GitHub remote, tokens, a repository
+   team and no active backoff. A Team Context checkout is not required for the relay.
 2. **Cursor:** one per kind. A cold start lists items updated in the last 90 days; afterwards each
    kind lists items updated since its own cursor (minus a 5-minute overlap). A disabled kind's cursor
    does not move, so enabling it later picks up its whole 90-day backlog.
@@ -264,12 +265,16 @@ cut to the shortest length any item number can force; `source_key` decides.
 - **ox doctor** warns when the mirror is enabled but has not succeeded in 24 hours, shows the last
   error, and names a repo the server refused.
 
-## Rollout
+## Manual indexing
 
-| Step | Change | Gate to the next step |
-|---|---|---|
-| 1 | Run both: Ledger sync unchanged, mirror on for the SageOx team | 2 weeks; no member text wrongly withheld |
-| 2 | Verify board coverage: CodeDB and prime already consume available posts | Every eligible item within the 90-day activity window has a live post |
-| 3 | Retire the Ledger `data/github` writer; enable customers | One release with no missing items |
+`ox index github` uses the same relay with an independent bounded pass. `--days` selects the
+window (30 days by default), `--full` re-fetches selected kinds, and `--prs-only` / `--issues-only`
+select kinds. Live bulletin posts still expire after 90 days; older items cannot be published as
+live posts. `--no-push` fetches and indexes locally without relaying or creating Ledger files; the
+local CodeDB is rebuildable and is not a durable copy. When the repo, update time and required
+commit metadata match an existing local row, an incremental run skips detail calls; `--full`
+fetches them again. A separately running daemon may still sync.
 
-Server-side work is a private-owner follow-up.
+A coworker who can read the repository but cannot clone its owner Team Context uses the existing
+access-checked repo GitHub catalog and snapshot reader for CodeDB. Refreshes reuse snapshot IDs to
+avoid downloading unchanged blobs. The server remains authoritative for access and publication.

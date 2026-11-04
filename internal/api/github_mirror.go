@@ -40,7 +40,7 @@ var (
 	// enabled for this account.
 	ErrGitHubMirrorNotEnabled = errors.New("the GitHub mirror is not enabled for your account")
 	// ErrGitHubMirrorNotAMember: 404 with the nested error envelope.
-	ErrGitHubMirrorNotAMember = errors.New("no such team, or you are not a member of it")
+	ErrGitHubMirrorNotAMember = errors.New("team or repository not found or access denied")
 	// ErrGitHubMirrorUnsupported: 404 with a flat envelope or plain text —
 	// this server has no mirror route.
 	ErrGitHubMirrorUnsupported = errors.New("this SageOx server does not support the GitHub mirror")

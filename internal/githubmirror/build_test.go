@@ -683,3 +683,19 @@ func TestExpiry(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildPR_CleansCommitIdentifiers(t *testing.T) {
+	in := newPRInputs()
+	in.pr.MergeCommit = "merge<!-- hidden -->"
+	in.pr.Commits = []Commit{{SHA: "commit\u200b"}}
+	item := in.build()
+	if item.MergeCommit != "merge"+HiddenTextMarker || item.Commits[0].SHA != "commit"+HiddenTextMarker {
+		t.Fatal("commit identifiers were not cleaned")
+	}
+	if item.Omitted.HiddenSpans != 2 {
+		t.Fatalf("hidden span count = %d, want 2", item.Omitted.HiddenSpans)
+	}
+	if item.ChangeHash != ChangeHash(item) {
+		t.Fatal("change hash must cover cleaned identifiers")
+	}
+}

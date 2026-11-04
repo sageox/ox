@@ -69,7 +69,7 @@ func IndexGitHubData(ctx context.Context, s *store.Store, ledgerPath string, pro
 		if err := ctx.Err(); err != nil {
 			return stats, err
 		}
-		if groupUnchanged(group, knownMtimes) {
+		if groupUnchanged(group, knownMtimes) || newerLocalGitHubRow(ctx, s, group.winner, true) {
 			continue
 		}
 		changedPR++
@@ -97,7 +97,7 @@ func IndexGitHubData(ctx context.Context, s *store.Store, ledgerPath string, pro
 		if err := ctx.Err(); err != nil {
 			return stats, err
 		}
-		if groupUnchanged(group, knownMtimes) {
+		if groupUnchanged(group, knownMtimes) || newerLocalGitHubRow(ctx, s, group.winner, false) {
 			continue
 		}
 		changedIssue++
@@ -367,6 +367,10 @@ func indexPRFile(ctx context.Context, s *store.Store, path string) (int64, error
 		return 0, fmt.Errorf("unmarshal %s: %w", path, err)
 	}
 
+	return indexPRValue(ctx, s, pr, path, mtimeNano)
+}
+
+func indexPRValue(ctx context.Context, s *store.Store, pr ledger.PRFile, path string, mtimeNano int64) (int64, error) {
 	tx, err := s.Begin()
 	if err != nil {
 		return 0, fmt.Errorf("begin tx: %w", err)
@@ -462,6 +466,10 @@ func indexIssueFile(ctx context.Context, s *store.Store, path string) (int64, er
 		return 0, fmt.Errorf("unmarshal %s: %w", path, err)
 	}
 
+	return indexIssueValue(ctx, s, issue, path, mtimeNano)
+}
+
+func indexIssueValue(ctx context.Context, s *store.Store, issue ledger.IssueFile, path string, mtimeNano int64) (int64, error) {
 	tx, err := s.Begin()
 	if err != nil {
 		return 0, fmt.Errorf("begin tx: %w", err)
@@ -548,4 +556,34 @@ func timePtrToNullInt64(t *time.Time) sql.NullInt64 {
 		return sql.NullInt64{}
 	}
 	return timeToNullInt64(*t)
+}
+
+// A rebuildable local row may be newer than a historical Ledger snapshot.
+// Repo-scoped rows are already selected by the server's board-first reader.
+func newerLocalGitHubRow(ctx context.Context, s *store.Store, path string, pr bool) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var item struct {
+		Number    int       `json:"number"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+	if json.Unmarshal(raw, &item) != nil {
+		return false
+	}
+	table := "issues"
+	if pr {
+		table = "pull_requests"
+	}
+	var source sql.NullString
+	var updated sql.NullInt64
+	err = s.QueryRow("SELECT source_path, updated_at FROM "+table+" WHERE number = ?", item.Number).Scan(&source, &updated)
+	if err != nil || !source.Valid {
+		return false
+	}
+	if strings.HasPrefix(source.String, "github-repo:") {
+		return true
+	}
+	return source.String == "github-local" && updated.Valid && updated.Int64 >= item.UpdatedAt.Unix()
 }

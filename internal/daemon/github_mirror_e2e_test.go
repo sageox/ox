@@ -58,6 +58,7 @@ type e2eItem struct {
 	UpdatedAt   time.Time  `json:"updated_at"`
 	ClosedAt    *time.Time `json:"closed_at"`
 	MergedAt    *time.Time `json:"merged_at,omitempty"`
+	MergeSHA    string     `json:"merge_commit_sha,omitempty"`
 	HTMLURL     string     `json:"html_url"`
 	PullRequest *struct{}  `json:"pull_request,omitempty"`
 }
@@ -131,6 +132,8 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, []any{})
 	case len(rest) == 3 && rest[0] == "pulls" && rest[2] == "reviews":
 		writeJSON(w, nonNil(g.reviews[atoi(rest[1])]))
+	case len(rest) == 3 && rest[0] == "pulls" && rest[2] == "commits":
+		writeJSON(w, []any{map[string]any{"sha": "abc123", "author": map[string]any{"login": "devon-dev"}, "commit": map[string]any{"message": "change", "author": map[string]any{"name": "Devon", "date": "2026-10-08T16:00:00Z"}}}})
 	case len(rest) == 3 && rest[0] == "pulls" && rest[2] == "files":
 		var out []map[string]any
 		for _, f := range g.files[atoi(rest[1])] {
@@ -235,7 +238,8 @@ func TestGitHubMirror_EndToEnd(t *testing.T) {
 		Body:  "## Summary\n\nRelays bot-free extracts.\n\n## Test plan\n\n- e2e",
 		State: "closed", User: devon, Association: "MEMBER", Labels: []any{},
 		CreatedAt: t0, UpdatedAt: merged, ClosedAt: &merged, MergedAt: &merged,
-		HTMLURL: "https://github.com/acme/api/pull/1287",
+		MergeSHA: "merge123",
+		HTMLURL:  "https://github.com/acme/api/pull/1287",
 	}
 	github.comments[1287] = []e2eComment{
 		{ID: 1, User: rabbit, Association: "NONE", Body: strings.Repeat("walkthrough ", 2000), CreatedAt: t0.Add(time.Minute), UpdatedAt: t0.Add(time.Minute)},
@@ -273,6 +277,11 @@ func TestGitHubMirror_EndToEnd(t *testing.T) {
 	assert.Equal(t, int64(5550101), pr.Header.Author.ID, "credit by GitHub user id")
 	assert.Equal(t, githubmirror.TrustMember, pr.Header.Trust)
 	assert.Equal(t, githubmirror.StateMerged, pr.Header.State)
+	assert.Equal(t, "merge123", pr.Header.MergeCommit)
+	require.Len(t, pr.Header.Commits, 1)
+	assert.Equal(t, "abc123", pr.Header.Commits[0].SHA)
+	assert.Equal(t, "devon-dev", pr.Header.Commits[0].Author)
+	assert.Equal(t, "change", pr.Header.Commits[0].Message)
 	assert.Contains(t, pr.Body, "## Summary", "a member's own headings stay in the description")
 	assert.Contains(t, pr.Body, "## Test plan")
 	require.Len(t, pr.Comments, 1, "bot review text never reaches the board")
@@ -331,6 +340,11 @@ func TestGitHubMirror_EndToEnd(t *testing.T) {
 	require.NoError(t, db.Store().QueryRow("SELECT title, state FROM pull_requests WHERE number = ?", 1287).Scan(&title, &state))
 	assert.Equal(t, "Mirror GitHub activity onto the bulletin board", title)
 	assert.Equal(t, githubmirror.StateMerged, state)
+	var mergeSHA, commitSHA string
+	require.NoError(t, db.Store().QueryRow("SELECT merge_commit FROM pull_requests WHERE number = ?", 1287).Scan(&mergeSHA))
+	require.NoError(t, db.Store().QueryRow("SELECT c.sha FROM pr_commits c JOIN pull_requests p ON p.id = c.pr_id WHERE p.number = ?", 1287).Scan(&commitSHA))
+	assert.Equal(t, "merge123", mergeSHA)
+	assert.Equal(t, "abc123", commitSHA)
 	var comments int
 	require.NoError(t, db.Store().QueryRow("SELECT COUNT(*) FROM pr_comments c JOIN pull_requests p ON p.id = c.pr_id WHERE p.number = ?", 1287).Scan(&comments))
 	assert.Equal(t, 2, comments, "both human comments indexed, no bot text")

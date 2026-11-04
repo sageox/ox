@@ -357,8 +357,13 @@ func (s *Server) publish(repo githubmirror.Repo, it githubmirror.Item, key strin
 
 	// the scan runs on every segment before anything is written, and a refused
 	// title or description stops the item entirely
-	if s.cfg.scan(it.Title) || s.cfg.scan(it.Body) {
+	if s.cfg.scan(it.Title) || s.cfg.scan(it.Body) || s.cfg.scan(it.MergeCommit) {
 		return githubmirror.ResultRejected, flaggedReason, nil
+	}
+	for _, commit := range it.Commits {
+		if s.cfg.scan(commit.SHA) || s.cfg.scan(commit.Author) || s.cfg.scan(commit.Message) {
+			return githubmirror.ResultRejected, flaggedReason, nil
+		}
 	}
 	withheld := map[int64]bool{}
 	for _, c := range it.Comments {

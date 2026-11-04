@@ -81,14 +81,16 @@ func postHeader(repo githubmirror.Repo, it githubmirror.Item, trust string, with
 	}
 
 	return githubmirror.PostHeader{
-		Source: "github",
-		Repo:   repo.Owner + "/" + repo.Name,
-		Kind:   it.Kind,
-		Number: it.Number,
-		URL:    it.URL,
-		State:  it.State,
-		Draft:  it.Draft,
-		Title:  it.Title,
+		MergeCommit: it.MergeCommit,
+		Commits:     it.Commits,
+		Source:      "github",
+		Repo:        repo.Owner + "/" + repo.Name,
+		Kind:        it.Kind,
+		Number:      it.Number,
+		URL:         it.URL,
+		State:       it.State,
+		Draft:       it.Draft,
+		Title:       it.Title,
 		Author: githubmirror.PostAuthor{
 			Login:       renderLogin(it.Author.Login),
 			ID:          it.Author.ID,

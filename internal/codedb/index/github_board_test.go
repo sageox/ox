@@ -1000,3 +1000,151 @@ func TestBoardFingerprint_OnlyThisReposPosts(t *testing.T) {
 		assert.NotEqual(t, before, BoardFingerprint(dir, prefix, renamed), "a post under the canonical name moves it")
 	})
 }
+
+func TestLocalGitHubItemsPreserveBoardAndCommitMetadata(t *testing.T) {
+	s := openBoardStore(t)
+	dir := filepath.Join(t.TempDir(), "bulletin", "github", "posts")
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, boardPRName), []byte(boardMemberPR), 0o600))
+	_, err := IndexGitHubBoard(context.Background(), s, dir, boardRepoFullName, nil)
+	require.NoError(t, err)
+	item := githubmirror.Item{Kind: githubmirror.KindPullRequest, Number: 1287, Title: "local unscanned title", MergeCommit: "merge123", Commits: []githubmirror.Commit{{SHA: "aaa111"}, {SHA: "bbb222"}}}
+	n, err := IndexLocalGitHubItems(context.Background(), s, []githubmirror.Item{item})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	require.Equal(t, "Mirror GitHub activity onto the bulletin board", readPRRow(t, s, 1287).title)
+	require.Equal(t, "merge123", readPRRow(t, s, 1287).merge.String)
+	require.Equal(t, []string{"aaa111", "bbb222"}, prCommitSHAs(t, s, 1287))
+}
+
+func TestGitHubLocalAndRepoRowsSurviveOlderLedgerIndex(t *testing.T) {
+	for _, remote := range []bool{false, true} {
+		t.Run(fmt.Sprintf("repo=%t", remote), func(t *testing.T) {
+			s := openBoardStore(t)
+			now := time.Now().UTC().Truncate(time.Second)
+			dir := t.TempDir()
+			require.NoError(t, ledger.WriteGitHubPR(dir, &ledger.PRFile{Number: 37, Title: "old ledger", State: "merged", CreatedAt: now.Add(-48 * time.Hour), UpdatedAt: now.Add(-24 * time.Hour), Commits: []ledger.PRCommit{{SHA: "old"}}}))
+			item := githubmirror.Item{Kind: githubmirror.KindPullRequest, Number: 37, Title: "current", State: "merged", CreatedAt: now.Add(-48 * time.Hour), UpdatedAt: now, MergeCommit: "merge", Commits: []githubmirror.Commit{{SHA: "new"}}}
+			var err error
+			if remote {
+				_, err = IndexRepoGitHubItems(context.Background(), s, "repo_1:digest", []githubmirror.Item{item})
+			} else {
+				_, err = IndexLocalGitHubItems(context.Background(), s, []githubmirror.Item{item})
+			}
+			require.NoError(t, err)
+			_, err = IndexGitHubData(context.Background(), s, dir, nil)
+			require.NoError(t, err)
+			require.Equal(t, "current", readPRRow(t, s, 37).title)
+			require.Equal(t, "merge", readPRRow(t, s, 37).merge.String)
+			require.Equal(t, []string{"new"}, prCommitSHAs(t, s, 37))
+		})
+	}
+}
+
+func TestRepoGitHubItemsPreserveHistoricalCommitMetadata(t *testing.T) {
+	s := openBoardStore(t)
+	old := githubmirror.Item{Kind: githubmirror.KindPullRequest, Number: 37, Title: "old", State: "merged", MergeCommit: "merge", Commits: []githubmirror.Commit{{SHA: "one"}, {SHA: "two"}}}
+	_, err := IndexLocalGitHubItems(context.Background(), s, []githubmirror.Item{old})
+	require.NoError(t, err)
+	newer := githubmirror.Item{Kind: githubmirror.KindPullRequest, Number: 37, Title: "new board", State: "merged"}
+	_, err = IndexRepoGitHubItems(context.Background(), s, "repo_1:digest", []githubmirror.Item{newer})
+	require.NoError(t, err)
+	require.Equal(t, "new board", readPRRow(t, s, 37).title)
+	require.Equal(t, "merge", readPRRow(t, s, 37).merge.String)
+	require.Equal(t, []string{"one", "two"}, prCommitSHAs(t, s, 37))
+}
+
+func TestLocalBoardDoesNotReplaceRepoSelectedDifferentUpstream(t *testing.T) {
+	s := openBoardStore(t)
+	ctx := context.Background()
+	selected := githubmirror.Item{Kind: githubmirror.KindPullRequest, Number: 1287, Title: "watched", State: "open", URL: "https://github.com/upstream/api/pull/1287"}
+	_, err := IndexRepoGitHubItems(ctx, s, "repo_1:digest", []githubmirror.Item{selected})
+	require.NoError(t, err)
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, boardPRName), []byte(boardMemberPR), 0o600))
+	_, err = IndexGitHubBoard(ctx, s, dir, boardRepoFullName, nil)
+	require.NoError(t, err)
+	require.Equal(t, "watched", readPRRow(t, s, 1287).title)
+}
+
+func TestRepoGitHubItemsDoNotCarryForkCommitMetadata(t *testing.T) {
+	s := openBoardStore(t)
+	fork := githubmirror.Item{Kind: githubmirror.KindPullRequest, Number: 22, Title: "fork", State: "merged", URL: "https://github.com/fork/api/pull/22", MergeCommit: "forkmerge", Commits: []githubmirror.Commit{{SHA: "forksha"}}}
+	_, err := IndexLocalGitHubItems(context.Background(), s, []githubmirror.Item{fork})
+	require.NoError(t, err)
+	upstream := githubmirror.Item{Kind: githubmirror.KindPullRequest, Number: 22, Title: "upstream", State: "merged", URL: "https://github.com/upstream/api/pull/22"}
+	_, err = IndexRepoGitHubItems(context.Background(), s, "repo_1:digest", []githubmirror.Item{upstream})
+	require.NoError(t, err)
+	require.Equal(t, "upstream", readPRRow(t, s, 22).title)
+	require.False(t, readPRRow(t, s, 22).merge.Valid)
+	require.Empty(t, prCommitSHAs(t, s, 22))
+}
+
+func TestKnownLocalGitHubItemsRequiresSameRepoAndMergedMetadata(t *testing.T) {
+	s := openBoardStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	items := []githubmirror.Item{
+		{Kind: githubmirror.KindPullRequest, Number: 1, State: "merged", URL: "https://github.com/acme/api/pull/1", UpdatedAt: now, MergeCommit: "merge", Commits: []githubmirror.Commit{{SHA: "one"}}},
+		{Kind: githubmirror.KindPullRequest, Number: 2, State: "merged", URL: "https://github.com/acme/api/pull/2", UpdatedAt: now},
+		{Kind: githubmirror.KindIssue, Number: 3, State: "open", URL: "https://github.com/other/api/issues/3", UpdatedAt: now},
+		{Kind: githubmirror.KindIssue, Number: 4, State: "open", URL: "https://github.com/acme/api/issues/4", UpdatedAt: now},
+	}
+	_, err := IndexLocalGitHubItems(context.Background(), s, items)
+	require.NoError(t, err)
+	known, err := KnownLocalGitHubItems(context.Background(), s, "acme", "api")
+	require.NoError(t, err)
+	require.Len(t, known, 2)
+	require.Equal(t, now, known[githubmirror.SourceKey("acme", "api", githubmirror.KindPullRequest, 1)].UpdatedAt)
+	require.Contains(t, known, githubmirror.SourceKey("acme", "api", githubmirror.KindIssue, 4))
+}
+
+func TestLocalForkDoesNotSupplementSelectedUpstream(t *testing.T) {
+	s := openBoardStore(t)
+	upstream := githubmirror.Item{Kind: githubmirror.KindPullRequest, Number: 22, Title: "upstream", State: "merged", URL: "https://github.com/upstream/api/pull/22", MergeCommit: "upstreammerge", Commits: []githubmirror.Commit{{SHA: "upstreamsha"}}}
+	_, err := IndexRepoGitHubItems(context.Background(), s, "repo_1:digest", []githubmirror.Item{upstream})
+	require.NoError(t, err)
+	fork := githubmirror.Item{Kind: githubmirror.KindPullRequest, Number: 22, Title: "fork", State: "merged", URL: "https://github.com/fork/api/pull/22", MergeCommit: "forkmerge", Commits: []githubmirror.Commit{{SHA: "forksha"}}}
+	_, err = IndexLocalGitHubItems(context.Background(), s, []githubmirror.Item{fork})
+	require.NoError(t, err)
+	require.Equal(t, "upstream", readPRRow(t, s, 22).title)
+	require.Equal(t, "upstreammerge", readPRRow(t, s, 22).merge.String)
+	require.Equal(t, []string{"upstreamsha"}, prCommitSHAs(t, s, 22))
+}
+
+func TestMergedLocalMetadataSurvivesOlderOpenPrimary(t *testing.T) {
+	ctx := context.Background()
+	url := "https://github.com/acme/api/pull/1287"
+	for _, primary := range []string{"repo", "board"} {
+		for _, final := range []string{"repo", "board"} {
+			t.Run(primary+"/"+final, func(t *testing.T) {
+				s := openBoardStore(t)
+				open := githubmirror.Item{Kind: githubmirror.KindPullRequest, Number: 1287, State: "open", URL: url, MergeCommit: "test-merge"}
+				_, err := IndexRepoGitHubItems(ctx, s, "repo_1:open", []githubmirror.Item{open})
+				require.NoError(t, err)
+				if primary == "board" {
+					_, err = s.Exec("UPDATE pull_requests SET source_path = ? WHERE number = 1287", "/team/bulletin/github/posts/post.md")
+					require.NoError(t, err)
+				}
+				merged := githubmirror.Item{Kind: githubmirror.KindPullRequest, Number: 1287, State: "merged", URL: url, MergeCommit: "actual-merge", Commits: []githubmirror.Commit{{SHA: "actual-commit"}}}
+				_, err = IndexLocalGitHubItems(ctx, s, []githubmirror.Item{merged})
+				require.NoError(t, err)
+				row := readPRRow(t, s, 1287)
+				require.Equal(t, "open", row.state, "primary source keeps its content")
+				require.Equal(t, "actual-merge", row.merge.String)
+				require.Equal(t, []string{"actual-commit"}, prCommitSHAs(t, s, 1287))
+				if final == "repo" {
+					_, err = IndexRepoGitHubItems(ctx, s, "repo_1:merged", []githubmirror.Item{{Kind: githubmirror.KindPullRequest, Number: 1287, State: "merged", URL: url}})
+				} else {
+					dir := t.TempDir()
+					require.NoError(t, os.WriteFile(filepath.Join(dir, boardPRName), []byte(boardMemberPR), 0o600))
+					_, err = IndexGitHubBoard(ctx, s, dir, boardRepoFullName, nil)
+				}
+				require.NoError(t, err)
+				row = readPRRow(t, s, 1287)
+				require.Equal(t, "merged", row.state)
+				require.Equal(t, "actual-merge", row.merge.String)
+				require.Equal(t, []string{"actual-commit"}, prCommitSHAs(t, s, 1287))
+			})
+		}
+	}
+}

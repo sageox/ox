@@ -23,6 +23,7 @@ type ItemState struct {
 	Status               string    `json:"status"` // ResultAccepted, ResultCurrent, ResultRejected
 	Reason               string    `json:"reason,omitempty"`
 	RelayedAt            time.Time `json:"relayed_at"`
+	CommitMetadata       bool      `json:"commit_metadata,omitempty"`
 }
 
 // State is the daemon's local, derived relay state for one repo. It lives in

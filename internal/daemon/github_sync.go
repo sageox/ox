@@ -11,26 +11,21 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/endpoint"
 	gh "github.com/sageox/ox/internal/github"
-	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/ledger"
-	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/repotools"
 )
 
-// GitHubSyncManager handles automatic GitHub PR/issue sync in the daemon.
-// It fetches from the GitHub API, writes JSON files to the ledger, and
-// commits+pushes so the data is available for distillation and cross-coworker search.
+// GitHubSyncManager handles automatic GitHub PR/issue mirroring in the daemon.
 type GitHubSyncManager struct {
 	projectRoot string
 	logger      *slog.Logger
 	ledgerMu    *sync.Mutex // shared with SyncScheduler; guards all ledger git ops
 	issues      *IssueTracker
 	codedb      *CodeDBManager       // trigger indexing after extraction
-	mirror      *GitHubMirrorRelayer // bulletin-board mirror; independent of the Ledger sync below
+	mirror      *GitHubMirrorRelayer // bulletin-board mirror
 
 	// ledgerFetcher builds the GitHub reader for the Ledger sync; nil means the
 	// real client. A field so tests can run a full cycle without the network.
@@ -103,30 +98,21 @@ func (m *GitHubSyncManager) Status() GitHubSyncStats {
 		stats.LastError = m.lastErr.Error()
 	}
 	stats.Mirror = m.mirror.Stats()
+	if stats.Mirror != nil {
+		stats.LastSync = stats.Mirror.LastSuccess
+		stats.LastError = stats.Mirror.LastError
+	}
 	return stats
 }
 
 // CheckAndSync runs a non-blocking GitHub sync if conditions are met.
 func (m *GitHubSyncManager) CheckAndSync(ctx context.Context, ledgerPath string) {
 	m.mu.Lock()
-	if m.syncing {
+	if m.syncing || m.mirror == nil {
 		m.mu.Unlock()
 		return
 	}
-	// A Ledger sync in backoff or suspended must not silence the mirror: they
-	// fail for unrelated reasons, so the cycle still runs without the Ledger half.
-	ledgerBlocked := false
-	if time.Now().Before(m.backoffUntil) {
-		m.logger.Debug("github sync in backoff", "until", m.backoffUntil.Format(time.RFC3339))
-		ledgerBlocked = true
-	} else if m.failCount > 5 {
-		m.logger.Debug("github sync suspended after too many failures", "fail_count", m.failCount)
-		ledgerBlocked = true
-	}
-	if ledgerBlocked && m.mirror == nil {
-		m.mu.Unlock()
-		return
-	}
+
 	m.syncing = true
 	m.mu.Unlock()
 
@@ -137,21 +123,17 @@ func (m *GitHubSyncManager) CheckAndSync(ctx context.Context, ledgerPath string)
 			m.mu.Unlock()
 		}()
 
-		m.runCycle(ctx, ledgerPath, !ledgerBlocked)
+		m.runCycle(ctx, ledgerPath)
 	}()
 }
 
-// doSync runs a full cycle: the Ledger sync, then the mirror.
+// doSync runs one mirror cycle.
 func (m *GitHubSyncManager) doSync(ctx context.Context, ledgerPath string) {
-	m.runCycle(ctx, ledgerPath, true)
+	m.runCycle(ctx, ledgerPath)
 }
 
-// runCycle resolves what both halves share (config toggles, GitHub token,
-// remote), then runs the Ledger sync (unless includeLedger is false) and the
-// mirror. The mirror runs on every path out of the Ledger sync, failures
-// included, and shares none of its accounting: failCount, backoffUntil,
-// lastErr and the issue tracker belong to the Ledger sync alone.
-func (m *GitHubSyncManager) runCycle(ctx context.Context, ledgerPath string, includeLedger bool) {
+// runCycle resolves GitHub credentials and settings before relaying a mirror.
+func (m *GitHubSyncManager) runCycle(ctx context.Context, ledgerPath string) {
 	// check config toggle
 	if config.ResolveGitHubSync(m.projectRoot) == config.GitHubSyncDisabled {
 		m.logger.Debug("github sync disabled via config")
@@ -181,6 +163,7 @@ func (m *GitHubSyncManager) runCycle(ctx context.Context, ledgerPath string, inc
 	}
 
 	defer m.relayMirror(ctx, MirrorTarget{
+		RepoID:       config.GetRepoID(m.projectRoot),
 		LedgerPath:   ledgerPath,
 		Owner:        owner,
 		Repo:         repo,
@@ -189,20 +172,9 @@ func (m *GitHubSyncManager) runCycle(ctx context.Context, ledgerPath string, inc
 		Issues:       syncIssues,
 	})
 
-	if includeLedger {
-		m.syncLedger(ctx, ledgerPath, token, owner, repo, syncPRs, syncIssues)
-	}
 }
 
-// relayMirror runs the mirror, if one is set. It deliberately returns nothing
-// and touches none of the Ledger sync's state. A panic is contained here: the
-// mirror is feature-flagged and handles server and GitHub data, and the daemon
-// must outlive it.
-//
-// The mirror runs while m.syncing is held, so a slow mirror would make
-// CheckAndSync skip the Ledger's next cycle. Run therefore bounds itself
-// (githubMirrorCycleTimeout, below the sync interval) instead of this method
-// imposing a second deadline.
+// relayMirror contains panics so a failed mirror cannot terminate the daemon.
 func (m *GitHubSyncManager) relayMirror(ctx context.Context, target MirrorTarget) {
 	m.mu.Lock()
 	relayer := m.mirror
@@ -216,79 +188,6 @@ func (m *GitHubSyncManager) relayMirror(ctx context.Context, target MirrorTarget
 		}
 	}()
 	relayer.Run(ctx, target)
-}
-
-// syncLedger syncs PRs and issues into the Ledger's data/github and pushes.
-func (m *GitHubSyncManager) syncLedger(ctx context.Context, ledgerPath, token, owner, repo string, syncPRs, syncIssues bool) {
-	m.logger.Info("starting github sync", "owner", owner, "repo", repo)
-	start := time.Now()
-
-	newFetcher := m.ledgerFetcher
-	if newFetcher == nil {
-		newFetcher = func(token string) ledger.GitHubFetcher { return gh.NewFetcher(gh.NewClient(token)) }
-	}
-	fetcher := newFetcher(token)
-	maxDays := ledger.DefaultGitHubDataWindowDays
-	combined := &ledger.SyncResult{}
-
-	if syncPRs {
-		prResult, prErr := ledger.SyncPRs(ctx, fetcher, ledgerPath, owner, repo, maxDays, m.logger)
-		if prErr != nil {
-			m.handleError(fmt.Errorf("sync PRs: %w", prErr))
-			return
-		}
-		combined.PRTotal = prResult.PRTotal
-		combined.PRCreated = prResult.PRCreated
-		combined.PRUpdated = prResult.PRUpdated
-	}
-
-	if syncIssues {
-		issueResult, issueErr := ledger.SyncIssues(ctx, fetcher, ledgerPath, owner, repo, maxDays, m.logger)
-		if issueErr != nil {
-			m.handleError(fmt.Errorf("sync issues: %w", issueErr))
-			return
-		}
-		combined.IssueTotal = issueResult.IssueTotal
-		combined.IssueCreated = issueResult.IssueCreated
-		combined.IssueUpdated = issueResult.IssueUpdated
-	}
-
-	totalItems := combined.PRTotal + combined.IssueTotal
-	if totalItems > 0 {
-		// acquire ledger mutex before git operations
-		m.ledgerMu.Lock()
-		pushErr := func() error {
-			defer m.ledgerMu.Unlock()
-			return ledger.CommitAndPushGitHubData(ctx, ledgerPath, owner, repo, combined, m.pushLedger)
-		}()
-
-		if pushErr != nil {
-			m.handlePushError(pushErr)
-			return
-		}
-	}
-
-	duration := time.Since(start)
-	m.mu.Lock()
-	m.lastSync = time.Now()
-	m.lastErr = nil
-	m.failCount = 0
-	m.mu.Unlock()
-
-	// Clear any prior GitHub auth issue now that sync succeeded.
-	if m.issues != nil {
-		m.issues.ClearIssue(IssueTypeGitHubAuth, "")
-	}
-
-	m.logger.Info("github sync completed",
-		"prs", combined.PRTotal, "issues", combined.IssueTotal,
-		"duration", duration.Round(time.Millisecond))
-
-	// trigger immediate CodeDB indexing so new PRs/issues are searchable
-	// without waiting for the next 5m freshness check cycle
-	if totalItems > 0 && m.codedb != nil {
-		m.codedb.CheckFreshness(ctx)
-	}
 }
 
 // resolveRemote detects the GitHub owner/repo from git remotes.
@@ -399,34 +298,4 @@ func extractGitHubDetail(err error) string {
 	}
 
 	return ""
-}
-
-// pushLedger pushes the ledger with retry and conflict resolution.
-// This is the daemon's version — uses shared ledgerMu (already held by caller).
-func (m *GitHubSyncManager) pushLedger(ctx context.Context, ledgerPath string) error {
-	ep := endpoint.GetForProject(m.projectRoot)
-	return gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
-		ImmutablePaths:      true, // the Ledger never renames paths
-		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
-		Logger:              m.logger,
-		SuspendWhenWedged:   true,
-		PrePush: func(repoPath string) error {
-			if ep != "" {
-				if err := gitserver.RefreshRemoteCredentials(repoPath, ep); err != nil {
-					return fmt.Errorf("credential refresh: %w", err)
-				}
-			}
-			return nil
-		},
-		ReconcileLFS: func(repoPath string) (bool, error) {
-			if ep == "" {
-				return false, nil
-			}
-			result, err := lfs.ReconcileUnpushedPointers(ctx, repoPath, ep, m.logger)
-			if err != nil {
-				return false, err
-			}
-			return result.Changed(), nil
-		},
-	})
 }

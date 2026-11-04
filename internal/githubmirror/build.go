@@ -38,25 +38,32 @@ func (c *cleaner) cleanAll(ss []string) []string {
 func BuildPR(_ Repo, pr SourcePR, conversation, inline []SourceComment, reviews []SourceReview, files []string, filesTruncated bool) Item {
 	var c cleaner
 	it := Item{
-		Kind:      KindPullRequest,
-		Number:    pr.Number,
-		State:     pr.State,
-		Draft:     pr.Draft,
-		Title:     c.clean(pr.Title),
-		Body:      c.clean(pr.Body),
-		Author:    pr.Author,
-		Labels:    sortedStrings(c.cleanAll(pr.Labels)),
-		URL:       pr.HTMLURL,
-		CreatedAt: pr.CreatedAt,
-		ClosedAt:  cloneTime(pr.ClosedAt),
-		MergedAt:  cloneTime(pr.MergedAt),
-		UpdatedAt: pr.UpdatedAt,
+		Kind:        KindPullRequest,
+		Number:      pr.Number,
+		State:       pr.State,
+		Draft:       pr.Draft,
+		Title:       c.clean(pr.Title),
+		Body:        c.clean(pr.Body),
+		Author:      pr.Author,
+		Labels:      sortedStrings(c.cleanAll(pr.Labels)),
+		URL:         pr.HTMLURL,
+		CreatedAt:   pr.CreatedAt,
+		ClosedAt:    cloneTime(pr.ClosedAt),
+		MergedAt:    cloneTime(pr.MergedAt),
+		UpdatedAt:   pr.UpdatedAt,
+		MergeCommit: c.clean(pr.MergeCommit),
+		Commits:     append([]Commit(nil), pr.Commits...),
 	}
 	if pr.MergedAt != nil {
 		it.State = StateMerged
 	}
 
 	var botComments int
+	for i := range it.Commits {
+		it.Commits[i].SHA = c.clean(it.Commits[i].SHA)
+		it.Commits[i].Author = c.clean(it.Commits[i].Author)
+		it.Commits[i].Message = c.clean(it.Commits[i].Message)
+	}
 	it.Comments, botComments = humanComments(&c, conversation, inline)
 	it.Reviews = latestReviews(reviews)
 

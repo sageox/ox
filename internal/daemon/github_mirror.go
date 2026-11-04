@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -15,7 +14,6 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
-	"github.com/sageox/ox/internal/flags"
 	gh "github.com/sageox/ox/internal/github"
 	"github.com/sageox/ox/internal/githubmirror"
 	"github.com/sageox/ox/internal/ledger"
@@ -100,6 +98,7 @@ type GitHubMirrorDeps struct {
 // MirrorTarget is one relay cycle's input: the repo the Ledger sync already
 // resolved, the same GitHub token, and the same per-kind on/off config.
 type MirrorTarget struct {
+	RepoID       string
 	LedgerPath   string // holds the local-only state file
 	Owner, Repo  string
 	GitHubToken  string
@@ -124,9 +123,7 @@ type GitHubMirrorStats struct {
 }
 
 // GitHubMirrorRelayer mirrors a repo's pull requests and issues to the team's
-// github bulletin board through the SageOx mirror API. It runs beside the
-// Ledger GitHub sync and shares nothing with its failure accounting: it
-// returns nothing, so a failure here cannot reach the Ledger sync.
+// GitHub bulletin board through the SageOx mirror API.
 type GitHubMirrorRelayer struct {
 	deps GitHubMirrorDeps
 
@@ -156,20 +153,23 @@ func NewGitHubMirrorRelayer(deps GitHubMirrorDeps) *GitHubMirrorRelayer {
 }
 
 // newProjectGitHubMirrorRelayer wires the production dependencies for one
-// project: the server flag from the cached CLI settings, the heartbeat token
-// (then the on-disk token) for the SageOx API, and the project's team.
-func newProjectGitHubMirrorRelayer(projectRoot string, settings func() *flags.CLISettingsResponse, heartbeatToken func() string, logger *slog.Logger) *GitHubMirrorRelayer {
+// project: the heartbeat token (then the on-disk token) and the project team.
+func newProjectGitHubMirrorRelayer(projectRoot string, heartbeatToken func() string, logger *slog.Logger) *GitHubMirrorRelayer {
 	return NewGitHubMirrorRelayer(GitHubMirrorDeps{
-		Enabled: func() bool { return githubMirrorFeatureOn(settings) },
+		Enabled: func() bool { return true },
 		AuthToken: func() string {
 			return resolveMirrorAuthToken(heartbeatToken, endpoint.GetForProject(projectRoot))
 		},
 		Team: func() (string, string) {
-			tc := config.FindRepoTeamContext(projectRoot)
-			if tc == nil {
+			project, err := config.LoadProjectConfig(projectRoot)
+			if err != nil || project == nil {
 				return "", ""
 			}
-			return tc.TeamID, tc.Path
+			tc := config.FindRepoTeamContext(projectRoot)
+			if tc == nil {
+				return project.TeamID, ""
+			}
+			return project.TeamID, tc.Path
 		},
 		NewFetcher: func(githubToken string) githubmirror.Fetcher {
 			return gh.NewMirrorFetcher(gh.NewClient(githubToken))
@@ -179,19 +179,6 @@ func newProjectGitHubMirrorRelayer(projectRoot string, settings func() *flags.CL
 		},
 		Logger: logger,
 	})
-}
-
-// githubMirrorFeatureOn is the server's features.github_mirror verdict. No
-// settings yet, a server that does not send the flag, or cached settings too
-// old to trust (the refresh has been failing) all mean off: the shared
-// resolver treats a stale cache as "no opinion", so a flag the server has since
-// revoked cannot stay on indefinitely.
-func githubMirrorFeatureOn(settings func() *flags.CLISettingsResponse) bool {
-	if settings == nil {
-		return false
-	}
-	// DaemonProvider reads memory only, so there is nothing for a context to cancel
-	return flags.Resolve(context.Background(), flags.DaemonProvider{CachedSettings: settings()}).GitHubMirrorEnabled
 }
 
 // resolveMirrorAuthToken mirrors SettingsFetcher.resolveAuthToken: the
@@ -263,13 +250,9 @@ func (r *GitHubMirrorRelayer) Run(ctx context.Context, target MirrorTarget) {
 		log.Debug("github mirror skipped: no team lookup")
 		return
 	}
-	teamRef, teamPath := r.deps.Team()
-	if teamRef == "" || teamPath == "" {
-		log.Debug("github mirror skipped: no team context for this project")
-		return
-	}
-	if _, err := os.Stat(teamPath); err != nil {
-		log.Debug("github mirror skipped: team context checkout missing", "path", teamPath, "error", err)
+	teamRef, _ := r.deps.Team()
+	if teamRef == "" {
+		log.Debug("github mirror skipped: no team for this project")
 		return
 	}
 	var authToken string
@@ -453,15 +436,17 @@ type mirrorPending struct {
 
 // mirrorCycle is the state of one Run past the gates.
 type mirrorCycle struct {
-	relayer *GitHubMirrorRelayer
-	target  MirrorTarget
-	teamRef string
-	fetcher githubmirror.Fetcher
-	relay   MirrorRelayClient
-	st      *githubmirror.State
-	now     time.Time
-	timeout time.Duration // the cycle's time budget
-	log     *slog.Logger
+	relayer     *GitHubMirrorRelayer
+	target      MirrorTarget
+	teamRef     string
+	fetcher     githubmirror.Fetcher
+	relay       MirrorRelayClient
+	st          *githubmirror.State
+	now         time.Time
+	timeout     time.Duration // the cycle's time budget
+	log         *slog.Logger
+	manualSince time.Time
+	localOnly   bool
 
 	// newestPR and newestIssue are the newest updated_at listed for each kind
 	// this cycle; zero when the kind was not listed. They become the cursors
@@ -600,6 +585,9 @@ func (c *mirrorCycle) refreshRepo(ctx context.Context) error {
 // since is the listing lower bound for one kind: its cursor less the overlap,
 // never older than the post lifetime (anything older would be expired anyway).
 func (c *mirrorCycle) since(cursor time.Time) time.Time {
+	if !c.manualSince.IsZero() {
+		return c.manualSince
+	}
 	floor := c.now.Add(-githubmirror.Window)
 	if cursor.IsZero() {
 		return floor
@@ -657,6 +645,9 @@ func (c *mirrorCycle) list(ctx context.Context) ([]mirrorCandidate, error) {
 func (c *mirrorCycle) collect(ctx context.Context, candidates []mirrorCandidate) ([]mirrorPending, error) {
 	var pending []mirrorPending
 	windowStart := c.now.Add(-githubmirror.Window)
+	if c.localOnly {
+		windowStart = c.manualSince
+	}
 
 	for _, cand := range candidates {
 		// the canonical repo, not the remote's spelling, so a differently cased
@@ -664,7 +655,7 @@ func (c *mirrorCycle) collect(ctx context.Context, candidates []mirrorCandidate)
 		key := githubmirror.SourceKey(c.st.RepoMeta.Owner, c.st.RepoMeta.Name, cand.kind, cand.number)
 
 		prev, remembered := c.st.Items[key]
-		if remembered && prev.UpdatedAt.Equal(cand.updatedAt) {
+		if remembered && prev.UpdatedAt.Equal(cand.updatedAt) && (cand.kind != githubmirror.KindPullRequest || prev.CommitMetadata) {
 			c.skipped++
 			continue
 		}
@@ -701,22 +692,24 @@ func (c *mirrorCycle) collect(ctx context.Context, candidates []mirrorCandidate)
 			// a bot comment, a reaction or a label bumped updated_at; nothing a
 			// reader sees changed
 			prev.UpdatedAt = cand.updatedAt
+			prev.CommitMetadata = cand.kind == githubmirror.KindPullRequest
 			c.st.Items[key] = prev
 			c.unchanged++
 			continue
 		}
-		if githubmirror.Expired(item, c.now) {
+		if !c.localOnly && githubmirror.Expired(item, c.now) {
 			// Remembered so the next cycle skips it without per-item calls;
 			// otherwise enough expired-but-recently-touched items would eat the
 			// whole budget every cycle and a cold start would never finish.
 			// LastMaterialChangeAt is left zero on purpose: State.Prune then
 			// falls back to RelayedAt and keeps the marker for a full window.
 			c.st.Items[key] = githubmirror.ItemState{
-				UpdatedAt:  cand.updatedAt,
-				ChangeHash: item.ChangeHash,
-				Status:     githubmirror.ResultRejected,
-				Reason:     githubMirrorReasonExpired,
-				RelayedAt:  c.now,
+				UpdatedAt:      cand.updatedAt,
+				ChangeHash:     item.ChangeHash,
+				Status:         githubmirror.ResultRejected,
+				Reason:         githubMirrorReasonExpired,
+				RelayedAt:      c.now,
+				CommitMetadata: cand.kind == githubmirror.KindPullRequest,
 			}
 			c.expired++
 			continue
@@ -755,7 +748,19 @@ func (c *mirrorCycle) build(ctx context.Context, cand mirrorCandidate) (githubmi
 	if err != nil {
 		return githubmirror.Item{}, fmt.Errorf("list files for %s %d: %w", cand.kind, number, err)
 	}
-	return githubmirror.BuildPR(meta, *cand.pr, conversation, inline, reviews, files, truncated), nil
+	pr := *cand.pr
+	if pr.MergedAt != nil {
+		if cf, ok := c.fetcher.(interface {
+			ListPRCommits(context.Context, string, string, int) ([]githubmirror.Commit, error)
+		}); ok {
+			c.detailCalls++
+			pr.Commits, err = cf.ListPRCommits(ctx, owner, repo, number)
+			if err != nil {
+				return githubmirror.Item{}, fmt.Errorf("list commits for PR %d: %w", number, err)
+			}
+		}
+	}
+	return githubmirror.BuildPR(meta, pr, conversation, inline, reviews, files, truncated), nil
 }
 
 // relayPending sends the items in batches and records each result. A batch the
@@ -772,7 +777,7 @@ func (c *mirrorCycle) relayPending(ctx context.Context, pending []mirrorPending)
 		for i, p := range batch {
 			items[i] = p.item
 		}
-		resp, err := c.relay.RelayGitHubMirrorItems(ctx, c.teamRef, githubmirror.RelayRequest{Repo: *c.st.RepoMeta, Items: items})
+		resp, err := c.relay.RelayGitHubMirrorItems(ctx, c.teamRef, githubmirror.RelayRequest{RepoID: c.target.RepoID, Repo: *c.st.RepoMeta, Items: items})
 
 		if errors.Is(err, api.ErrGitHubMirrorTooLarge) || errors.Is(err, api.ErrGitHubMirrorValidation) {
 			if n > 1 {
@@ -866,6 +871,7 @@ func (c *mirrorCycle) remember(p mirrorPending, status, reason string) {
 		Status:               status,
 		Reason:               reason,
 		RelayedAt:            c.now,
+		CommitMetadata:       p.item.Kind == githubmirror.KindPullRequest,
 	}
 }
 
