@@ -67,19 +67,21 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          # changed_files reflects the PR's true total; the comparison
-          # below silently caps around 3,000 files regardless of pagination
-          # -- a documented GitHub API limit on diff listings generally,
-          # not a client-side pagination gap -- so a PR that large can't be
-          # fully verified by listing files and is treated the same as a
-          # touch (Devin).
+          # changed_files reflects the PR's true total. The Compare API's
+          # own docs are explicit that this is a hard, non-paginable cap --
+          # "up to 300 changed files for the entire comparison... shown
+          # only on the first page of results" -- unlike the pulls/files
+          # endpoint, which supports --paginate up to a separate 3,000-file
+          # limit. Devin's first pass here assumed the higher number still
+          # applied after the switch to Compare; it doesn't, and 300 is the
+          # real ceiling for this endpoint specifically.
           if ! total=$(gh api "repos/$REPO/pulls/$PR" --jq .changed_files); then
             echo "::error::Could not read this PR's changed-file count. Alerting conservatively."
             echo "touches=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [ "$total" -gt 3000 ]; then
-            echo "::warning::This PR changes $total files, beyond the API's file-listing cap; cannot verify .amp/ is untouched. Alerting conservatively."
+          if [ "$total" -gt 300 ]; then
+            echo "::warning::This PR changes $total files, beyond the Compare API's 300-file cap (not paginable for files); cannot verify .amp/ is untouched. Alerting conservatively."
             echo "touches=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
