@@ -10,10 +10,7 @@ name: amp-owner-check
 # For the same reason it never checks out or runs the PR's code -- everything
 # below comes from the GitHub API only, and CODEOWNERS is always read from
 # the base branch, never the PR's branch, so a PR cannot add itself as its
-# own owner either. pull_request_review re-runs the same check on an
-# approval or a dismissal, reading the workflow definition from the base
-# branch the same way, so revoking an approval invalidates the gate instead
-# of leaving a stale pass in place (Devin).
+# own owner either.
 #
 # Posts an explicit Check Run against the PR's head SHA instead of relying
 # on the job's own implicit status: pull_request_target's implicit
@@ -21,15 +18,23 @@ name: amp-owner-check
 # status check looking at the PR's head would never find one there, and no
 # PR -- not even an approved one -- could ever satisfy it (Devin).
 #
-# Known gap: a push carrying [skip ci] in its commit message skips this
-# entirely. That is a GitHub platform behavior, not something a workflow can
-# opt out of; it has no fix at this layer.
+# Known gaps, neither fixable at this layer:
+# - A push carrying [skip ci] in its commit message skips this entirely --
+#   a GitHub platform behavior, not a workflow opt-out.
+# - Dismissing an owner's approval after this check has already passed
+#   leaves that pass in place until the next push re-triggers the check
+#   (CodeRabbit). pull_request_review looked like the fix, but unlike
+#   pull_request_target it does NOT guarantee the workflow definition comes
+#   from main -- confirmed live: a pull_request_review run on this very PR
+#   picked up this file's own branch copy, permissions block included. That
+#   would hand a PR author a trigger whose logic they can tamper with on
+#   their own branch, which is strictly worse than the gap it would close.
+#   Accepted as-is rather than ship a weaker gate under the appearance of a
+#   stronger one.
 on:
   pull_request_target:
     branches: [main]
     types: [opened, synchronize, reopened, edited]
-  pull_request_review:
-    types: [submitted, dismissed]
 
 permissions:
   contents: read
@@ -39,11 +44,6 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    # pull_request_target already filters to base main via branches: above;
-    # pull_request_review has no such filter at the trigger level, so a
-    # review on a PR targeting some other branch would otherwise still fire
-    # this job.
-    if: github.event_name != 'pull_request_review' || github.event.pull_request.base.ref == 'main'
     defaults:
       run:
         shell: bash
@@ -151,5 +151,10 @@ jobs:
           elif [ "$TOUCHES" = "true" ] && [ "$APPROVE_RESULT" = "success" ]; then
             conclusion=success
           fi
-          gh api "repos/$REPO/check-runs/$CHECK_RUN_ID" -f status=completed -f conclusion="$conclusion" >/dev/null
+          # -X PATCH is required: gh api defaults to POST once any -f field
+          # is given, and POST has no route at /check-runs/{id} (only at
+          # /check-runs, for creating a new one) -- silently 404ing instead
+          # of concluding the run, discovered live against this PR's own
+          # pull_request_review test firing before that trigger was reverted.
+          gh api -X PATCH "repos/$REPO/check-runs/$CHECK_RUN_ID" -f status=completed -f conclusion="$conclusion" >/dev/null
           echo "Check run $CHECK_RUN_ID concluded: $conclusion"
