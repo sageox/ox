@@ -144,3 +144,14 @@ func insideWorkTree(ctx context.Context, dir string) (bool, error) {
 	}
 	return false, fmt.Errorf("locate the git work tree for %s: %w", dir, err)
 }
+
+// gitTracksFile reports whether git tracks exactly this repo-relative file.
+// Any failure answers false, which keeps the policy revision uncertified.
+func gitTracksFile(repoRoot, path string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), trackedProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "ls-files", "-z", "--", filepath.ToSlash(path))
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
+	return err == nil && len(bytes.TrimRight(out, "\x00")) > 0
+}
