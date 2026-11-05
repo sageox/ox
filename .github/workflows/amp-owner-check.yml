@@ -44,6 +44,11 @@ name: amp-owner-check
 #   or extend CODEOWNERS/ruleset review to all of .github/workflows/, not
 #   just this file and amp-dir-alert.yml -- a human call, flagged for the
 #   same required-status-checks wiring step.
+#
+# First live run on main: this comment was added by a deliberately trivial
+# PR whose only purpose was to put a real "amp-owner-approval" check run on
+# a real commit, so it would show up in the required-status-checks picker
+# -- offline/mocked testing can't produce that.
 on:
   pull_request_target:
     branches: [main]
