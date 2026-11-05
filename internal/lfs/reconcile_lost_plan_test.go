@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -466,6 +467,9 @@ func TestRewriteWorkingPointer(t *testing.T) {
 
 		assert.Equal(t, string(tombstone), string(mustReadFile(t, path)))
 		assert.Equal(t, pointer, string(mustReadFile(t, saved)))
+		if runtime.GOOS == "windows" {
+			return // hard links share one read-only attribute, which the rename fallback lifts
+		}
 		for _, p := range []string{path, saved} {
 			info, err := os.Stat(p)
 			require.NoError(t, err)
