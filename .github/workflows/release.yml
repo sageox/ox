@@ -230,6 +230,9 @@ jobs:
   build-release-assets:
     if: github.repository == 'sageox/ox'
     needs: [verify-draft, verify-inrepo, plan-release-stages]
+    # SAGEOX_CLI_SIGNING_KEY lives in the cli-release environment, whose
+    # deployment rules keep it from workflow runs on other branches.
+    environment: cli-release
     # 8 vCPU: goreleaser cross-compiles every platform binary, ~490s on 4 vCPU
     runs-on: blacksmith-8vcpu-ubuntu-2404
     permissions:
@@ -484,6 +487,8 @@ jobs:
   # lets a tap failure retry without rebuilding or changing the release.
   publish-homebrew:
     needs: [build-release-assets, publish-release]
+    # HOMEBREW_TAP_GITHUB_TOKEN lives in the same environment as the signing key.
+    environment: cli-release
     runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       actions: read
