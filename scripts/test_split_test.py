@@ -457,12 +457,15 @@ class CoverageOptionalTest(unittest.TestCase):
 
 class WeightsTest(unittest.TestCase):
     def test_repository_weights_file_loads(self):
-        path = Path(__file__).resolve().parents[1] / ".config/test-split-weights.json"
-        weights = test_split.load_weights(path)
-        self.assertIn("github.com/sageox/ox/cmd/ox", weights)
-        cmd_ox = weights["github.com/sageox/ox/cmd/ox"]
-        self.assertTrue(all(seconds >= test_split.WEIGHT_FLOOR_SECONDS for seconds in cmd_ox.tests.values()))
-        self.assertLess(cmd_ox.default_seconds, test_split.WEIGHT_FLOOR_SECONDS)
+        # one file per tier: the full tier's and the fast PR gate's
+        for name in ("test-split-weights.json", "test-split-weights-fast.json"):
+            with self.subTest(name=name):
+                path = Path(__file__).resolve().parents[1] / ".config" / name
+                weights = test_split.load_weights(path)
+                self.assertIn("github.com/sageox/ox/cmd/ox", weights)
+                cmd_ox = weights["github.com/sageox/ox/cmd/ox"]
+                self.assertTrue(all(seconds >= test_split.WEIGHT_FLOOR_SECONDS for seconds in cmd_ox.tests.values()))
+                self.assertLess(cmd_ox.default_seconds, test_split.WEIGHT_FLOOR_SECONDS)
 
     def test_rejects_unknown_version(self):
         with tempfile.TemporaryDirectory() as directory:

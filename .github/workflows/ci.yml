@@ -57,8 +57,14 @@ jobs:
 
       # The matrix comes from the Makefile so it cannot drift from the layout
       # the merge step expects; `coverage-merge-unit` refuses a missing slot.
+      # The fast tier has its own layout: it cuts cmd/ox finer.
       - id: slots
-        run: echo "slots=$(make -s test-split-slots)" >> "$GITHUB_OUTPUT"
+        env:
+          TIER: ${{ steps.tier.outputs.tier }}
+        run: |
+          target=test-fast-split-slots
+          if [ "$TIER" = full ]; then target=test-split-slots; fi
+          echo "slots=$(make -s "$target")" >> "$GITHUB_OUTPUT"
 
       # CI tooling's own tests: off the fast path, before merge.
       - name: Test harness contracts
