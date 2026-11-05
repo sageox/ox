@@ -6,15 +6,15 @@ name: amp-owner-check
 # CODEOWNERS entry, not just these).
 #
 # Protected paths: .amp/ itself, .github/CODEOWNERS (who the owners are),
-# and the two workflows that enforce and announce this rule
-# (amp-owner-check.yml, amp-dir-alert.yml). main requires 0 approvals, so
-# without the last three a PR could add a second account to the owner list
-# or weaken either workflow, merge unreviewed, and then change .amp/ with
-# nobody looking. Every protected path uses the owner list on the /.amp/
-# line of CODEOWNERS (read from the base branch): the CODEOWNERS lines for
-# the other three name one person, who could never approve their own PR.
-# Other workflow files stay outside this rule, so keep sensitive secrets in
-# environments that only protected branches can reach.
+# and every file under .github/workflows/. main requires 0 approvals, so
+# without the last two a PR could add a second account to the owner list or
+# weaken this workflow, merge unreviewed, and then change .amp/ with nobody
+# looking. Every workflow is protected, not just this one and
+# amp-dir-alert.yml: a job in ANY workflow on main can name the
+# amp-owner-check environment, read the App key and post its own "success"
+# (veria-ai). Every protected path uses the owner list on the /.amp/ line
+# of CODEOWNERS (read from the base branch): the CODEOWNERS lines for the
+# guard files name one person, who could never approve their own PR.
 #
 # Runs as pull_request_target, not pull_request: the workflow definition that
 # executes always comes from main, never from the PR's own (possibly edited)
@@ -58,7 +58,8 @@ name: amp-owner-check
 # job satisfies (pull_request_target's ref is always the base branch) but
 # ci.yml's pull_request-triggered job does not (its ref is the synthetic
 # refs/pull/<number>/merge, never main)
-# -- so only this job can reach the environment's secrets.
+# -- so no PR branch can reach the environment's secrets. A workflow
+# already on main can, which is why every workflow file is protected above.
 #
 # Known gaps, NEITHER fixable by editing this file:
 # - A push carrying [skip ci] in its commit message skips this entirely --
@@ -141,14 +142,14 @@ jobs:
           # rather than a directory (veria-ai). A rename's destination can
           # land outside .amp/ while the source was inside it
           # (previous_filename); .filename alone would miss that removal
-          # (CodeRabbit). The protected set is .amp/, CODEOWNERS and the two
-          # amp workflows (see the top of this file). Names compare
-          # lowercased: a macOS checkout maps .AMP/ onto .amp/, so a case
-          # variant must not slip past an exact match. The three files match
-          # by exact name, not prefix, so a sibling such as ci.yml stays out
-          # of scope. Names reach the log JSON-escaped, because a path under
-          # .amp/ is chosen by the PR author and a raw newline could forge
-          # a workflow command.
+          # (CodeRabbit). The protected set is .amp/, CODEOWNERS and every
+          # file under .github/workflows/ (see the top of this file). Names
+          # compare lowercased: a macOS checkout maps .AMP/ onto .amp/, so a
+          # case variant must not slip past an exact match. CODEOWNERS
+          # matches by exact name, so a sibling such as CODEOWNERS.bak stays
+          # out of scope. Names reach the log JSON-escaped, because a path
+          # under .amp/ is chosen by the PR author and a raw newline could
+          # forge a workflow command.
           files_json=$(mktemp); compare_err=$(mktemp)
           if ! gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq '.files' > "$files_json" 2>"$compare_err"; then
             echo "::error::Could not compare $BASE_SHA...$HEAD_SHA: $(cat "$compare_err"). Alerting conservatively."
@@ -165,8 +166,7 @@ jobs:
             def guarded: ascii_downcase
               | . == ".amp" or startswith(".amp/")
                 or . == ".github/codeowners"
-                or . == ".github/workflows/amp-owner-check.yml"
-                or . == ".github/workflows/amp-dir-alert.yml";
+                or . == ".github/workflows" or startswith(".github/workflows/");
             .[] | select((.filename | guarded) or ((.previous_filename // "") | guarded))
               | (.filename | @json)' "$files_json")
           if [ -n "$touches" ]; then
@@ -209,7 +209,7 @@ jobs:
             if printf '%s\n' "$approved" | grep -qx "$o"; then ok=1; fi
           done
           if [ "$ok" != 1 ]; then
-            echo "::error::This PR changes .amp/ or a file that defines this gate (CODEOWNERS, amp-owner-check.yml, amp-dir-alert.yml) and needs a current APPROVED review (on commit ${HEAD_SHA:0:8}) from one of: $owners. An approval given before this commit, or since dismissed, does not count."
+            echo "::error::This PR changes .amp/ or a file that defines this gate (CODEOWNERS or a workflow file) and needs a current APPROVED review (on commit ${HEAD_SHA:0:8}) from one of: $owners. An approval given before this commit, or since dismissed, does not count."
             echo "result=failure" >> "$GITHUB_OUTPUT"
             exit 1
           fi
