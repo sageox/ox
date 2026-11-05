@@ -26,6 +26,9 @@ const localTraceAuthorizationMaxAge = 30 * 24 * time.Hour
 type localTraceAuthorization struct {
 	Capture   *model.Capture `json:"capture"`
 	NativeIDs []string       `json:"native_ids,omitempty"`
+	// SessionDir lets pruning keep authorizations whose recording still
+	// awaits finalize, recovery, or upload retry.
+	SessionDir string `json:"session_dir,omitempty"`
 }
 
 // localTraceRecordingsDir sits beside the trace spool on purpose: the spool is
@@ -81,6 +84,7 @@ func writeLocalTraceAuthorization(sessionDir string, auth *localTraceAuthorizati
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
+	auth.SessionDir = filepath.Clean(sessionDir)
 	return fileutil.AtomicWriteJSON(path, auth, 0600)
 }
 
@@ -89,7 +93,8 @@ func writeLocalTraceCapture(sessionDir string, capture *model.Capture) error {
 }
 
 // pruneLocalTraceAuthorizations removes authorizations untouched for longer
-// than localTraceAuthorizationMaxAge; every boundary rewrites a live one.
+// than localTraceAuthorizationMaxAge whose recording directory is gone; a
+// recording still on disk can yet be recovered and upload its traces.
 func pruneLocalTraceAuthorizations(now time.Time) {
 	dir := localTraceRecordingsDir()
 	entries, err := os.ReadDir(dir)
@@ -101,8 +106,26 @@ func pruneLocalTraceAuthorizations(now time.Time) {
 			continue
 		}
 		info, err := entry.Info()
-		if err == nil && now.Sub(info.ModTime()) > localTraceAuthorizationMaxAge {
-			_ = os.Remove(filepath.Join(dir, entry.Name()))
+		if err != nil || now.Sub(info.ModTime()) <= localTraceAuthorizationMaxAge {
+			continue
 		}
+		full := filepath.Join(dir, entry.Name())
+		if localTraceRecordingPending(full) {
+			continue
+		}
+		_ = os.Remove(full)
 	}
+}
+
+func localTraceRecordingPending(authPath string) bool {
+	data, err := os.ReadFile(authPath)
+	if err != nil {
+		return false
+	}
+	var auth localTraceAuthorization
+	if json.Unmarshal(data, &auth) != nil || auth.SessionDir == "" {
+		return false
+	}
+	_, err = os.Stat(auth.SessionDir)
+	return err == nil
 }

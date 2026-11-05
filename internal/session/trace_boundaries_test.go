@@ -195,6 +195,7 @@ func TestTraceBoundariesPruneStaleAuthorizations(t *testing.T) {
 	require.NoError(t, err)
 	old := time.Now().Add(-localTraceAuthorizationMaxAge - time.Hour)
 	require.NoError(t, os.Chtimes(stalePath, old, old))
+	require.NoError(t, os.RemoveAll(stale))
 
 	pruneLocalTraceAuthorizations(time.Now())
 
@@ -202,4 +203,19 @@ func TestTraceBoundariesPruneStaleAuthorizations(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist)
 	_, err = readLocalTraceCapture(live)
 	require.NoError(t, err)
+}
+
+func TestTraceBoundariesPruneKeepsPendingRecording(t *testing.T) {
+	traceBoundaryEnvironment(t, true)
+	pending := t.TempDir()
+	require.NoError(t, writeLocalTraceCapture(pending, &model.Capture{}))
+	path, err := localTraceCapturePath(pending)
+	require.NoError(t, err)
+	old := time.Now().Add(-localTraceAuthorizationMaxAge - time.Hour)
+	require.NoError(t, os.Chtimes(path, old, old))
+
+	pruneLocalTraceAuthorizations(time.Now())
+
+	_, err = readLocalTraceCapture(pending)
+	require.NoError(t, err, "a recording still on disk must keep its trace authorization")
 }
