@@ -46,6 +46,13 @@ name: amp-owner-check
 # job satisfies (pull_request_target's ref is always the base branch) but
 # ci.yml's pull_request-triggered job does not (its ref is the synthetic
 # refs/pull/<number>/merge, never main)
+#
+# Second live run on main: this comment was added by another deliberately
+# trivial PR, for the same reason as the first one -- a real run is the
+# only way to confirm the App token mints correctly from the environment
+# and the check posts under the App's own identity, and the only way to
+# make that App selectable as a required check's pinned source in the
+# ruleset UI (which requires it to have "recently submitted a check run").
 # -- so only this job can reach the environment's secrets.
 #
 # Known gaps, NEITHER fixable by editing this file -- both need a human
