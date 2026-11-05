@@ -52,6 +52,14 @@ On macOS, the CLI requires macOS 13 Ventura or later.
 brew install sageox/tap/ox
 ```
 
+**npm (macOS / Linux / FreeBSD):**
+
+```bash
+npx @sageox/ox@latest install
+```
+
+This puts `ox` on PATH and logs you in. It changes no repository; run `ox init` inside each repo you want to link.
+
 **Install script (macOS / Linux / FreeBSD):**
 
 ```bash
