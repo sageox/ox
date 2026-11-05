@@ -311,6 +311,7 @@ func checkRemoteSageoxExists(gitRoot string) (found bool, stale bool, err error)
 // runInit configures AI coworker integrations and registers the authenticated
 // repository, then prints setup guidance when human-readable output is enabled.
 func runInit() error {
+	var registeredTeamID string
 	// warn if using non-default endpoint (subtle, informational)
 	if endpoint.Get() != endpoint.Default {
 		fmt.Println(ui.MutedStyle.Render(fmt.Sprintf("Using endpoint: %s", endpoint.Get())))
@@ -957,6 +958,7 @@ func runInit() error {
 		}
 		if resp.TeamID != "" {
 			cfg.TeamID = resp.TeamID
+			registeredTeamID = resp.TeamID
 		}
 		if selectedTeamName != "" {
 			cfg.TeamName = selectedTeamName
@@ -1078,13 +1080,15 @@ func runInit() error {
 
 		// step N: invite teammates — ox team invite sends the invitations directly,
 		// so this no longer sends people to the dashboard to copy a link.
-		if cfg.TeamID != "" {
+		// Only a team the server just confirmed may appear in a runnable command:
+		// cfg.TeamID can be a repository-controlled default.
+		if registeredTeamID != "" {
 			teamLabel := cfg.TeamName
 			if teamLabel == "" {
-				teamLabel = cfg.TeamID
+				teamLabel = registeredTeamID
 			}
 			fmt.Printf("  %d. Invite teammates (%s):\n", step, teamLabel)
-			fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox team invite alice@example.com,bob@example.com --team "+shellQuote(cfg.TeamID)))
+			fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox team invite alice@example.com,bob@example.com --team "+shellQuote(registeredTeamID)))
 		} else {
 			fmt.Printf("  %d. Invite teammates with %s\n", step, cli.StyleCommand.Render("ox team invite <email>... --team <slug>"))
 		}
