@@ -2202,6 +2202,27 @@ func validateMurmurRelPath(targetDir, relPath string) error {
 	return nil
 }
 
+// decodeMurmurPayload rejects malformed inner JSON before any filesystem write.
+// The stored path must agree with the schema's partition and ID, not just have
+// the data/murmurs/ prefix.
+func decodeMurmurPayload(payload MurmurPayload) (ledger.MurmurFile, error) {
+	var mf ledger.MurmurFile
+	if err := json.Unmarshal(payload.MurmurJSON, &mf); err != nil {
+		return mf, fmt.Errorf("invalid murmur JSON: %w", err)
+	}
+	if mf.SchemaVersion != "1" || mf.ID == "" || mf.Timestamp.IsZero() || mf.Topic == "" || mf.Content == "" {
+		return mf, fmt.Errorf("invalid murmur schema or missing required fields")
+	}
+	if mf.Importance != "critical" && mf.Importance != "normal" && mf.Importance != "ambient" {
+		return mf, fmt.Errorf("invalid murmur importance")
+	}
+	if strings.ContainsAny(mf.ID, `/\`) || mf.ID == "." || mf.ID == ".." ||
+		filepath.Clean(payload.RelPath) != ledger.MurmurFilePath(mf.Timestamp, mf.ID) {
+		return mf, fmt.Errorf("murmur path does not match timestamp and ID")
+	}
+	return mf, nil
+}
+
 // PublishMurmur writes the murmur file to disk and commits it asynchronously.
 // The CLI passes the full MurmurFile JSON so no temp file is needed on the CLI side.
 // Runs in a goroutine so the IPC handler returns immediately.
@@ -2250,6 +2271,9 @@ func (s *daemonServiceImpl) commitMurmur(ctx context.Context, payload MurmurPayl
 // neighbor's valid but unrelated staged edit under that directory must not
 // ride along into this murmur's commit.
 func writeAndCommitMurmur(ctx context.Context, targetDir string, payload MurmurPayload) error {
+	if _, err := decodeMurmurPayload(payload); err != nil {
+		return err
+	}
 	summary := payload.Content
 	if len(summary) > 50 {
 		summary = summary[:50] + "..."

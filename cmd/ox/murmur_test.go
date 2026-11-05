@@ -117,7 +117,9 @@ func TestMurmur_PostHogCaptureAfterDelivery(t *testing.T) {
 				baseCapture(event, props, opts)
 			}
 			if mode == "write fails" {
-				require.NoError(t, os.WriteFile(filepath.Join(target, ".sageox"), []byte("blocked"), 0o600))
+				outbox := daemon.MurmurOutboxDir(target)
+				require.NoError(t, os.MkdirAll(filepath.Dir(outbox), 0o700))
+				require.NoError(t, os.WriteFile(outbox, []byte("blocked"), 0o600))
 			}
 			if mode == "capture fails" {
 				capturePostHogUsage = func(string, map[string]any, telemetry.CaptureOpts) { panic("sender failed") }
@@ -386,7 +388,7 @@ func TestMurmurJSONOverridesDefaults(t *testing.T) {
 }
 
 // TestMurmurQueuesToOutboxWhenDaemonDown verifies the durable-outbox fix: when no
-// daemon is reachable, the murmur is queued to the ledger cache (never lost) and
+// daemon is reachable, the murmur is queued to the daemon cache (never lost) and
 // the command still succeeds. Failure prevented: the original bug where a murmur
 // emitted with the daemon down was dropped and its content gone forever.
 func TestMurmurQueuesToOutboxWhenDaemonDown(t *testing.T) {
@@ -429,7 +431,7 @@ func TestMurmurQueuesToOutboxWhenDaemonDown(t *testing.T) {
 		t.Errorf("expected 'queued' message, got: %q", buf.String())
 	}
 
-	outboxDir := filepath.Join(ledgerDir, ".sageox", "cache", "murmur-outbox")
+	outboxDir := daemon.MurmurOutboxDir(ledgerDir)
 	entries, err := os.ReadDir(outboxDir)
 	if err != nil {
 		t.Fatalf("read outbox dir %s: %v", outboxDir, err)

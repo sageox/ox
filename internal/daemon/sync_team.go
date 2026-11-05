@@ -675,6 +675,7 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamP
 		// the same way until it is resolved. The local edit is kept (in the
 		// worktree and the autostash), never discarded.
 		ImmutablePaths:     true,
+		NoSymlinks:         true,
 		RepoPath:           path,
 		RepoName:           repoName,
 		ProjectRoot:        s.config.ProjectRoot,

@@ -39,7 +39,7 @@ type ManagedRepoPullOpts struct {
 	ImmutablePaths bool
 
 	// NoSymlinks holds the fetch and pull until ledger.DisableSymlinks has
-	// saved core.symlinks=false (the Ledger). Its error becomes the result's
+	// saved core.symlinks=false. Its error becomes the result's
 	// Err, and the next cycle retries.
 	NoSymlinks bool
 
@@ -278,6 +278,19 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 			return nil
 		}
 
+		// Protect existing clones before recovery can check files out, and even
+		// when remote/FETCH_HEAD dedup would otherwise skip this cycle.
+		if opts.NoSymlinks {
+			disable := ledger.DisableSymlinks
+			if s.disableSymlinksTestHook != nil {
+				disable = s.disableSymlinksTestHook
+			}
+			if err := disable(path); err != nil {
+				result = ManagedRepoPullResult{Err: fmt.Errorf("pull held until symlink protection is saved: %w", err)}
+				return nil
+			}
+		}
+
 		// Re-check and recover stale rebases only after taking the same
 		// cross-process lock used by fetch/pull. Checking age before waiting
 		// could turn a live operation stale, then abort it after the lock was
@@ -311,16 +324,6 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 					result = ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRecentlyFetched}
 					return nil
 				}
-			}
-		}
-		if opts.NoSymlinks {
-			disable := ledger.DisableSymlinks
-			if s.disableSymlinksTestHook != nil {
-				disable = s.disableSymlinksTestHook
-			}
-			if err := disable(path); err != nil {
-				result = ManagedRepoPullResult{Err: fmt.Errorf("pull held until symlink protection is saved: %w", err)}
-				return nil
 			}
 		}
 		result = s.fetchAndPullLocked(ctx, opts, path, repoName, logger)
