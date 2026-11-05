@@ -114,3 +114,13 @@ func TestCheckNativeSourceBinding_PendingAmpThreadIsNotQuarantined(t *testing.T)
 		t.Fatalf("pending Amp recording quarantined: %v", err)
 	}
 }
+
+func TestCheckNativeSourceBinding_AmpThreadWithoutSidecarIsBound(t *testing.T) {
+	_, state := startAmpRecording(t, "")
+	if err := CheckNativeSourceBinding(state); err != nil {
+		t.Fatalf("a valid thread ID with no sidecar yet must stay bound: %v", err)
+	}
+	if state.SourceRejected {
+		t.Fatal("recording must not be quarantined")
+	}
+}

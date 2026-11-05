@@ -39,3 +39,34 @@ func TestValidateSessionSource(t *testing.T) {
 		})
 	}
 }
+func TestValidateSessionSource_AmpSidecarResolution(t *testing.T) {
+	dir := t.TempDir()
+	other := filepath.Join(dir, "T-other.jsonl")
+	if err := os.WriteFile(other, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "T-current.jsonl")
+	if err := os.Symlink(other, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateSessionSource("amp", link, "T-current"); err == nil {
+		t.Error("symlinked sidecar for another thread must be rejected")
+	}
+	notDir := filepath.Join(dir, "file")
+	if err := os.WriteFile(notDir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateSessionSource("amp", filepath.Join(notDir, "T-current.jsonl"), "T-current"); err == nil {
+		t.Error("unresolvable sidecar must be rejected")
+	}
+}
+
+func TestAmpThreadID_URLWithoutThreadPathPassesThrough(t *testing.T) {
+	const raw = "https://ampcode.com/settings"
+	if got := AmpThreadID(raw); got != raw {
+		t.Errorf("AmpThreadID(%q) = %q", raw, got)
+	}
+	if got := AmpThreadID("https://ampcode.com/threads/T-abc/"); got != "T-abc" {
+		t.Errorf("thread URL = %q", got)
+	}
+}
