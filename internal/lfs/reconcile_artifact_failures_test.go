@@ -13,9 +13,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// a blocked plan makes the full reconcile reach the staged-artifact repair.
-// Failure to preserve or upload an own recording must stop before any pointer,
-// metadata, staged content, or history is replaced.
+// an unrecoverable plan companion pointer makes the full reconcile reach the
+// staged-artifact repair. (A lost plan.html alone is repaired before that step,
+// see repairLostPlanRenders; a companion is never replaced.) Failure to
+// preserve or upload an own recording must stop before any pointer, metadata,
+// staged content, or history is replaced.
 func TestReconcile_OwnArtifactFailuresKeepOriginalState(t *testing.T) {
 	useBundledSessionRules(t)
 	if testing.Short() {
@@ -24,12 +26,12 @@ func TestReconcile_OwnArtifactFailuresKeepOriginalState(t *testing.T) {
 	for _, mode := range []string{"cache_parent_not_directory", "conflicting_cache", "store_drops_upload", "already_pointer", "registered_git_content", "unstaged_pointer", "unstaged_empty", "worktree_removed"} {
 		t.Run(mode, func(t *testing.T) {
 			ledger, bare := initLedgerWithRemote(t)
-			planDir := filepath.Join(ledger, "data", "plans", "blocked-plan")
+			planDir := filepath.Join(ledger, "data", "plans", "blocked-plan", "companions")
 			require.NoError(t, os.MkdirAll(planDir, 0o755))
-			missing := NewFileRef([]byte("unavailable prior plan render"))
-			require.NoError(t, os.WriteFile(filepath.Join(planDir, "plan.html"), []byte(FormatPointer(missing.OID, missing.Size)), 0o644))
-			git(t, ledger, "add", "--sparse", "data/plans/blocked-plan/plan.html")
-			git(t, ledger, "commit", "--no-verify", "-m", "retain unavailable plan pointer")
+			missing := NewFileRef([]byte("unavailable prior plan companion"))
+			require.NoError(t, os.WriteFile(filepath.Join(planDir, "page.html"), []byte(FormatPointer(missing.OID, missing.Size)), 0o644))
+			git(t, ledger, "add", "--sparse", "data/plans/blocked-plan/companions/page.html")
+			git(t, ledger, "commit", "--no-verify", "-m", "retain unavailable plan companion pointer")
 
 			content := []byte("recording retained until durable upload\n")
 			artifact := content
@@ -103,7 +105,7 @@ func TestReconcile_OwnArtifactFailuresKeepOriginalState(t *testing.T) {
 				assert.Equal(t, content, store.stored[ref.BareOID()])
 			case "already_pointer", "registered_git_content":
 				var blocked *UnrecoverablePointersError
-				require.True(t, errors.As(err, &blocked), "registered artifacts should reach the original missing-plan verdict: %v", err)
+				require.True(t, errors.As(err, &blocked), "registered artifacts should reach the original missing-pointer verdict: %v", err)
 				assert.Zero(t, store.putAttempts, "an existing pointer or Git artifact needs no upload")
 				assert.NoFileExists(t, cachePath)
 			}

@@ -82,3 +82,30 @@ func TestDoctorFix_RepairsConflictMarkersBeforeBranchStatusPush(t *testing.T) {
 	publishedTip, _ := runIsolatedGit(t, remote, "show", "main:"+markedUpstreamMeta)
 	assert.NotContains(t, publishedTip, "<<<<<<<", "the remote tip carries conflict markers")
 }
+
+// The plan-pointers repair squashes unpushed commits, so a bare
+// `ox doctor --fix` repairs conflict markers before it runs. Failure
+// prevented: the squash folded a conflict-marker commit into the push.
+func TestDoctorFix_RepairsConflictMarkersBeforePlanPointersRepair(t *testing.T) {
+	sandboxDoctorEnv(t)
+	ledger := newMarkedLedger(t, false)
+	newDoctorProjectWithLedger(t, ledger)
+
+	var sawMarkers *bool
+	planPointers := GetDoctorCheck(CheckSlugPlanPointersMissing)
+	require.NotNil(t, planPointers)
+	original := planPointers.Run
+	planPointers.Run = func(bool) checkResult {
+		tip, _ := runIsolatedGit(t, ledger, "show", "HEAD:"+markedUpstreamMeta)
+		saw := strings.Contains(tip, "<<<<<<<")
+		sawMarkers = &saw
+		return PassedCheck("stub", "stub")
+	}
+	t.Cleanup(func() { planPointers.Run = original })
+
+	_, err := runDoctorChecks(context.Background(), doctorOptions{fix: true, forceYes: true})
+	require.NoError(t, err)
+
+	require.NotNil(t, sawMarkers, "plan-pointers never ran")
+	assert.False(t, *sawMarkers, "plan-pointers ran while the unpushed commit still carried conflict markers")
+}

@@ -75,43 +75,6 @@ func fakeLFSDownloadServer(t *testing.T, codeByOID map[string]int) *Client {
 	return NewClient(srv.URL, "oauth2", "token")
 }
 
-// TestReconcile_MissingPlanPointerIsReportedNeverRemoved drives the recovery
-// core for a plan pointer: a 404 blob with no local bytes is reported with its
-// path and OID, the pointer file and history are untouched, and the push stays
-// paused. A plan cannot be regenerated, so reconcile never removes it, not even
-// when it is the only unrecoverable pointer.
-func TestReconcile_MissingPlanPointerIsReportedNeverRemoved(t *testing.T) {
-	useBundledSessionRules(t)
-	ledger, _ := initLedgerWithRemote(t)
-
-	oid := strings.Repeat("d", 64)
-	planDir := filepath.Join(ledger, "data", "plans", "2026-08-24-orphan")
-	require.NoError(t, os.MkdirAll(planDir, 0o755))
-	htmlPath := filepath.Join(planDir, "plan.html")
-	pointer := []byte(lfsPointerContent(oid, 500000))
-	require.NoError(t, os.WriteFile(htmlPath, pointer, 0o644))
-	git(t, ledger, "add", ".")
-	git(t, ledger, "commit", "-m", "plan: orphan pointer", "--no-verify")
-	headBefore := git(t, ledger, "rev-parse", "HEAD")
-
-	client := fakeLFSDownloadServer(t, map[string]int{oid: http.StatusNotFound})
-	result, err := reconcileUnpushedPointers(context.Background(), ledger, nil,
-		func() (*Client, error) { return client, nil })
-
-	var unrecoverable *UnrecoverablePointersError
-	require.ErrorAs(t, err, &unrecoverable)
-	require.Len(t, unrecoverable.Pointers, 1)
-	assert.Equal(t, filepath.Join("data", "plans", "2026-08-24-orphan", "plan.html"), unrecoverable.Pointers[0].Path)
-	assert.Contains(t, err.Error(), oid)
-	assert.False(t, result.Squashed)
-
-	got, readErr := os.ReadFile(htmlPath)
-	require.NoError(t, readErr)
-	assert.Equal(t, pointer, got, "the pointer file is untouched")
-	assert.Equal(t, headBefore, git(t, ledger, "rev-parse", "HEAD"), "no commit, no squash")
-	assert.Equal(t, 1, unpushedCount(t, ledger))
-}
-
 // TestReconcile_TransientErrorNeverBlanks pins the destructive-op guard for BOTH
 // the plan and session trees: only a 404 proves absence. A 401 (token expired) or
 // 5xx is inconclusive and must abort the reconcile, never zero out a live pointer

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -30,6 +31,7 @@ type ReconcileResult struct {
 	MissingOnRemote  int  // pointers whose LFS OIDs are not in the remote store
 	HistoryOnly      int  // missing OIDs referenced only by intermediate unpushed commits, not the tip
 	RecoveredUploads int  // missing OIDs restored from exact local recovery-cache content
+	LostPlanRenders  int  // plan.html pointers with no bytes anywhere, replaced by a tombstone page
 	Squashed         bool // whether unpushed history was squashed
 }
 
@@ -42,9 +44,11 @@ type UnrecoverablePointer struct {
 
 // UnrecoverablePointersError reports pointers whose blobs are missing from the
 // remote and cannot be restored from local recovery content. Reconcile never
-// removes a pointer: sessions and plans cannot be regenerated, so the push stays
-// paused until the bytes are restored. Recoverable blobs were already uploaded
-// when it is returned. One unrecoverable pointer is enough.
+// removes a session pointer: a recording cannot be regenerated, so the push
+// stays paused until the bytes are restored. A lost plan page is the one
+// exception, and only when it is the whole problem (see repairLostPlanRenders).
+// Recoverable blobs were already uploaded when it is returned. One
+// unrecoverable pointer is enough.
 type UnrecoverablePointersError struct {
 	Uploaded int
 	Pointers []UnrecoverablePointer
@@ -61,9 +65,10 @@ func (e *UnrecoverablePointersError) Error() string {
 }
 
 // Changed reports whether the reconcile rewrote anything a push retry can
-// benefit from: it restored a blob or rewrote unpushed history.
+// benefit from: it restored a blob, replaced a lost plan page, or rewrote
+// unpushed history.
 func (r *ReconcileResult) Changed() bool {
-	return r != nil && (r.RecoveredUploads > 0 || r.Squashed)
+	return r != nil && (r.RecoveredUploads > 0 || r.LostPlanRenders > 0 || r.Squashed)
 }
 
 // ReconcileUnpushedPointers repairs a ledger whose push is blocked by
@@ -81,10 +86,14 @@ func (r *ReconcileResult) Changed() bool {
 // For each in-range pointer whose blob the remote does not have (a 404 from the
 // LFS Batch API; any other answer aborts):
 //   - at the tip, under sessions/ or data/plans/: if exact local bytes exist (a
-//     session recovery cache) they are uploaded again, pointer untouched. If
-//     none do, reconcile returns *UnrecoverablePointersError after uploading
-//     every recoverable pointer, at any count, and removes nothing: the bytes
-//     are sacred and the push stays paused until they are restored;
+//     recovery cache) they are uploaded again, pointer untouched. If none do,
+//     reconcile returns *UnrecoverablePointersError after uploading every
+//     recoverable pointer, at any count, and removes nothing: the bytes are
+//     sacred and the push stays paused until they are restored;
+//   - except when the only thing wrong is one to maxLostPlanRenders plan pages
+//     (data/plans/<plan>/plan.html) with no bytes anywhere: each pointer is
+//     replaced by a tombstone page in unpushed history and the push resumes
+//     (repairLostPlanRenders);
 //   - only in an intermediate unpushed commit: nothing at the tip to repair, so
 //     squashing the unpushed commits alone drops it from the push pack.
 //
@@ -127,6 +136,9 @@ type pointerSet struct {
 	// historyOnly are pointers that appear in an unpushed commit but not at the
 	// tip, keyed by bare OID. Squashing is the whole repair.
 	historyOnly map[string]FileRef
+	// historyPaths names a path each historyOnly pointer was committed at,
+	// keyed by bare OID.
+	historyPaths map[string]string
 }
 
 func (p *pointerSet) total() int {
@@ -220,6 +232,20 @@ func reconcileUnpushedPointers(ctx context.Context, ledgerPath string, logger *s
 		}
 	}
 
+	// Lost plan pages: the coworker's own artifacts are uploaded first, as
+	// below, so one committed plain is not left for the tip validation to
+	// refuse on every run. But an artifact this run cannot upload (a
+	// teammate's, or one the secret guard refuses) is only logged: the
+	// lost-page repair never reads the index, and a page that exists nowhere
+	// must not keep wedging every push behind it.
+	if len(recoverable) == 0 && onlyLostPlanRenders(replaceable) {
+		if refused, err := uploadOwnStagedPlainArtifacts(ctx, ledgerPath, client, logger); err != nil || len(refused) > 0 {
+			logger.Warn("lfs reconcile: staged session artifacts left as they are; repairing lost plan pages anyway",
+				"refused", refused, "error", err)
+		}
+		return repairLostPlanRenders(ctx, ledgerPath, logger, result, set.upstream, replaceable)
+	}
+
 	// Plain content staged by a finalize whose upload failed would make the
 	// validation below refuse, and finalize waits for this very reconcile to
 	// un-wedge the push. Upload the current coworker's own staged artifacts first.
@@ -286,9 +312,10 @@ func squashHistoryOnly(ctx context.Context, ledgerPath string, logger *slog.Logg
 	if err != nil {
 		return result, err
 	}
+	dropped := result.HistoryOnly + result.LostPlanRenders
 	logger.Info("lfs reconcile: squashing unpushed commits to drop missing LFS objects referenced only by history",
-		"history_only", result.HistoryOnly)
-	msg := fmt.Sprintf("fix: squash unpushed commits to drop %d unrecoverable LFS references", result.HistoryOnly)
+		"history_only", result.HistoryOnly, "lost_plan_renders", result.LostPlanRenders)
+	msg := fmt.Sprintf("fix: squash unpushed commits to drop %d unrecoverable LFS references", dropped)
 	if err := squashUnpushed(ctx, ledgerPath, msg); err != nil {
 		return result, fmt.Errorf("squash unpushed history: %w", err)
 	}
@@ -297,7 +324,7 @@ func squashHistoryOnly(ctx context.Context, ledgerPath string, logger *slog.Logg
 		return result, err
 	}
 	result.Squashed = before != after
-	logger.Info("lfs reconcile complete", "squashed", result.Squashed, "history_only", result.HistoryOnly)
+	logger.Info("lfs reconcile complete", "squashed", result.Squashed, "history_only", result.HistoryOnly, "lost_plan_renders", result.LostPlanRenders)
 	return result, nil
 }
 
@@ -340,19 +367,49 @@ func preflightMissingPointer(ledgerPath string, p pointerEntry) ([]byte, error) 
 
 	// Both path families reconcile may repair (the caller has already refused
 	// every other path) have a recovery cache: session artifacts, kept there by
-	// finalize, and plans, kept there by a restore. The OID and size check
+	// finalize, and plan pages, kept there by the save that swapped in the
+	// pointer (plan.PointerizeHTML) or by `ox fetch`. The OID and size check
 	// below is what makes a cached file safe to re-upload.
 	session := strings.HasPrefix(p.relPath, "sessions"+string(filepath.Separator))
-	cachePath := filepath.Join(ledgerPath, ".sageox", "cache", p.relPath)
+	candidates := []string{RecoveryCachePath(ledgerPath, p.relPath)}
+	if isPlanRenderPath(p.relPath) {
+		// a save whose commit failed left the committed page's copy here
+		candidates = append(candidates, PreviousRecoveryCachePath(ledgerPath, p.relPath))
+	}
+	var mismatch error
+	for _, cachePath := range candidates {
+		content, err := readRecoveryCandidate(cachePath, p, session)
+		if errors.Is(err, errRecoveryCacheMismatch) {
+			mismatch = err
+			continue
+		}
+		if err != nil || content != nil {
+			return content, err
+		}
+	}
+	return nil, mismatch
+}
+
+var errRecoveryCacheMismatch = errors.New("session recovery cache does not match pointer OID and size")
+
+// readRecoveryCandidate returns the bytes at cachePath when they are exactly
+// the object p names, nil when no file is there, and an error for any other
+// state.
+func readRecoveryCandidate(cachePath string, p pointerEntry, session bool) ([]byte, error) {
 	info, err := os.Lstat(cachePath)
 	if err != nil {
-		// a session's cache that cannot be inspected fails closed, because
-		// finalize promised those bytes are there; a plan has no such promise
-		// and simply stays unrecoverable
-		if os.IsNotExist(err) || !session {
+		// A cache that cannot be inspected fails closed for a session, because
+		// finalize promised those bytes are there, and for a plan page, because
+		// "no copy" there gets the page replaced by a tombstone. Any other plan
+		// file has no such consequence and simply stays unrecoverable.
+		if os.IsNotExist(err) || (!session && !isPlanRenderPath(p.relPath)) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("inspect session recovery cache for %s: %w", p.relPath, err)
+		kind := "session"
+		if !session {
+			kind = "plan"
+		}
+		return nil, fmt.Errorf("inspect %s recovery cache for %s: %w", kind, p.relPath, err)
 	}
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("refusing to restore %s: session recovery cache is not a regular non-symlink file", p.relPath)
@@ -366,7 +423,7 @@ func preflightMissingPointer(ledgerPath string, p pointerEntry) ([]byte, error) 
 	}
 	actual := NewFileRef(content)
 	if actual.Size != p.ref.Size || actual.BareOID() != p.ref.BareOID() {
-		return nil, fmt.Errorf("refusing to restore %s: session recovery cache does not match pointer OID and size", p.relPath)
+		return nil, fmt.Errorf("refusing to restore %s: %w", p.relPath, errRecoveryCacheMismatch)
 	}
 	return content, nil
 }
@@ -583,14 +640,16 @@ func scanPushRange(ctx context.Context, ledgerPath string, logger *slog.Logger) 
 	}
 	var oids []string
 	seen := make(map[string]bool)
+	pathByGitOID := make(map[string]string)
 	for _, line := range strings.Split(string(objectsOut), "\n") {
-		oid, _, _ := strings.Cut(strings.TrimSpace(line), " ")
+		oid, objPath, _ := strings.Cut(strings.TrimSpace(line), " ")
 		if oid != "" && !seen[oid] {
 			seen[oid] = true
 			oids = append(oids, oid)
+			pathByGitOID[oid] = objPath
 		}
 	}
-	set := &pointerSet{upstream: upstream, historyOnly: make(map[string]FileRef)}
+	set := &pointerSet{upstream: upstream, historyOnly: make(map[string]FileRef), historyPaths: make(map[string]string)}
 	if len(oids) == 0 {
 		return set, nil
 	}
@@ -633,9 +692,12 @@ func scanPushRange(ctx context.Context, ledgerPath string, logger *slog.Logger) 
 		}
 		atTip[ref.BareOID()] = true
 	}
-	for _, ref := range refsByGitOID {
+	for gitOID, ref := range refsByGitOID {
 		if !atTip[ref.BareOID()] {
 			set.historyOnly[ref.BareOID()] = ref
+			if prior, ok := set.historyPaths[ref.BareOID()]; !ok || pathByGitOID[gitOID] < prior {
+				set.historyPaths[ref.BareOID()] = pathByGitOID[gitOID]
+			}
 		}
 	}
 
