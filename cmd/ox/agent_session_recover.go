@@ -573,17 +573,19 @@ func publishCachedRecording(inst *agentinstance.Instance, projectRoot string, st
 				return nil, fmt.Errorf("persist guarded recovered recording: %w", err)
 			}
 
-			// copy other artifacts if they exist in cache; cached artifacts of a
-			// paused recording may predate the mask, so they are never copied
+			// copy other artifacts if they exist in cache. A paused recording's
+			// artifacts are copied only when written after its mask, and stale
+			// ones in a reused Ledger directory are removed so none can publish.
 			cacheDir := filepath.Dir(rawPath)
-			var cachedArtifacts []string
-			if !recordingHasPause(state) {
-				cachedArtifacts = []string{ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"}
-			}
-			for _, name := range cachedArtifacts {
+			paused := recordingHasPause(state)
+			for _, name := range []string{ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"} {
 				src := filepath.Join(cacheDir, name)
+				dst := filepath.Join(ledgerSessionDir, name)
+				if paused && !artifactPostdatesMask(rawPath, src) {
+					_ = os.Remove(dst)
+					continue
+				}
 				if srcData, err := os.ReadFile(src); err == nil {
-					dst := filepath.Join(ledgerSessionDir, name)
 					_ = os.WriteFile(dst, srcData, 0644)
 				}
 			}
@@ -731,6 +733,17 @@ type publicationMask struct {
 }
 
 func publicationMaskPath(rawPath string) string { return rawPath + ".publication-mask" }
+
+// artifactPostdatesMask reports whether a cached artifact was written after
+// raw.jsonl was masked, and so derives from retained entries only.
+func artifactPostdatesMask(rawPath, artifactPath string) bool {
+	mask, err := os.Stat(publicationMaskPath(rawPath))
+	if err != nil {
+		return false
+	}
+	artifact, err := os.Stat(artifactPath)
+	return err == nil && !artifact.ModTime().Before(mask.ModTime())
+}
 
 func alreadyMasked(rawPath string, checkpoint, current int) bool {
 	data, err := os.ReadFile(publicationMaskPath(rawPath))
