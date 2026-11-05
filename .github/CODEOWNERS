@@ -6,7 +6,7 @@
 # Agent plugins and settings run with repo access, so every change needs owner review.
 # Keep two or more owners: GitHub never lets an author approve their own PR, so a lone
 # owner could never land their own change. Any one owner approving the latest commit passes.
-/.amp/ @faridun-m @galexy @shrimalmadhur @rsnodgrass @lpavel @vikgup @dedhaw @arrsingh @alex-sageox
+/.amp/ @faridun-m @galexy @shrimalmadhur @rsnodgrass @lpavel @vikgup @dedhaw @alex-sageox @realtobyfu
 # Owners also review this file, so the rule above cannot be dropped unseen.
 /.github/CODEOWNERS @faridun-m
 # A push that both changes .amp/ and deletes or edits this workflow in the
