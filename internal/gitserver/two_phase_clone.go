@@ -168,6 +168,8 @@ func phaseOneCloneArgs(cloneURL, repoPath string) []string {
 	args = append(args,
 		"-c", "protocol.ext.allow=never",
 		"clone",
+		// clone --config persists this before either phase checks files out.
+		"--config", "core.symlinks=false",
 		"--filter=blob:none",
 		"--depth=1",
 		"--sparse",

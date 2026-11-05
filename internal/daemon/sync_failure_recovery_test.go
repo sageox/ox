@@ -123,3 +123,42 @@ func TestDoPull_LedgerPullWaitsForSymlinkProtection(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, info.Mode().IsRegular(), "the pulled link must arrive as a plain file, got %s", info.Mode())
 }
+
+func TestPullTeamContext_ConvertsSymlinksBeforeRemoteUnchangedSkip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone and pull")
+	}
+	isolateCredentials(t)
+	bare, writer := initBareRepo(t, "team")
+	teamDir := filepath.Join(t.TempDir(), "team")
+	victim := filepath.Join(t.TempDir(), "victim")
+	require.NoError(t, os.WriteFile(victim, []byte("unchanged"), 0o644))
+	link := filepath.Join("data", "murmurs", "link.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(writer, link)), 0o755))
+	if err := os.Symlink(victim, filepath.Join(writer, link)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	gitInDir(t, writer, "config", "core.symlinks", "true")
+	gitInDir(t, writer, "add", link)
+	gitInDir(t, writer, "commit", "-m", "seed symlink")
+	gitInDir(t, writer, "push", "origin", "main")
+	gitInDir(t, filepath.Dir(teamDir), "clone", "--config", "core.symlinks=true", bare, teamDir)
+	info, err := os.Lstat(filepath.Join(teamDir, link))
+	require.NoError(t, err)
+	require.NotZero(t, info.Mode()&os.ModeSymlink)
+	s := newTestScheduler(t.TempDir())
+	require.True(t, s.remoteRefCheck(context.Background(), teamDir))
+	s.disableSymlinksTestHook = func(string) error { return errors.New("config not writable") }
+	_, err = s.pullTeamContext(context.Background(), teamDir)
+	require.ErrorContains(t, err, "symlink protection")
+	s.disableSymlinksTestHook = nil
+	outcome, err := s.pullTeamContext(context.Background(), teamDir)
+	require.NoError(t, err)
+	require.False(t, outcome.PullRan)
+	info, err = os.Lstat(filepath.Join(teamDir, link))
+	require.NoError(t, err)
+	require.True(t, info.Mode().IsRegular())
+	got, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	require.Equal(t, "unchanged", string(got))
+}
