@@ -1600,7 +1600,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	}
 
 	sessionID := session.ResolveOrMintSessionID(preservedID, state.SessionID)
-	traceCache, traceMeta, traceErr := session.MaterializeTraces(ledgerPath, sessionName, state.Trace)
+	traceCache, traceMeta, traceErr := session.MaterializeTraces(ledgerPath, state.SessionPath, state.Trace)
 	if traceErr != nil {
 		slog.Warn("trace materialization skipped", "error", traceErr)
 		traceMeta = nil
