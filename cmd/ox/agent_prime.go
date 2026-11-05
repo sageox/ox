@@ -429,7 +429,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// anti-entropy: ensure ox:prime marker exists in AGENTS.md/CLAUDE.md
 	// only run on properly initialized projects (config.json exists, not just .sageox/ dir)
 	if config.IsInitialized(projectRoot) {
-		_, _ = EnsureOxPrimeMarker(projectRoot)
+		if _, err := EnsureOxPrimeMarker(projectRoot); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to repair ox:prime markers: %v\n", err)
+		}
 	}
 
 	// anti-entropy: ensure Claude Code hooks are installed
