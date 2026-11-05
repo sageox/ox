@@ -442,17 +442,18 @@ func TestHeartbeatHandler_AuthTokenPropagation(t *testing.T) {
 	// send heartbeat with auth token
 	payload := HeartbeatPayload{
 		Credentials: &HeartbeatCreds{
-			Token:     "git-pat",
-			ServerURL: "https://git.example.com",
-			ExpiresAt: time.Now().Add(1 * time.Hour),
-			AuthToken: "oauth-access-token",
+			Token:        "git-pat",
+			ServerURL:    "https://git.example.com",
+			ExpiresAt:    time.Now().Add(1 * time.Hour),
+			AuthToken:    "oauth-access-token",
+			AuthEndpoint: "https://example.com",
 		},
 		Timestamp: time.Now(),
 	}
 	handler.Handle("", mustMarshal(payload))
 
 	// verify auth token is accessible
-	authToken := handler.GetAuthToken()
+	authToken := handler.GetAuthToken("https://example.com")
 	if authToken != "oauth-access-token" {
 		t.Errorf("expected auth token 'oauth-access-token', got %s", authToken)
 	}
@@ -463,7 +464,7 @@ func TestHeartbeatHandler_AuthToken_Empty(t *testing.T) {
 	handler := NewHeartbeatHandler(logger)
 
 	// no credentials set
-	authToken := handler.GetAuthToken()
+	authToken := handler.GetAuthToken("https://example.com")
 	if authToken != "" {
 		t.Errorf("expected empty auth token, got %s", authToken)
 	}
@@ -476,28 +477,30 @@ func TestHeartbeatHandler_AuthTokenUpdate(t *testing.T) {
 	// first heartbeat
 	payload1 := HeartbeatPayload{
 		Credentials: &HeartbeatCreds{
-			Token:     "git-pat",
-			AuthToken: "token-v1",
-			ExpiresAt: time.Now().Add(1 * time.Hour),
+			Token:        "git-pat",
+			AuthToken:    "token-v1",
+			AuthEndpoint: "https://example.com",
+			ExpiresAt:    time.Now().Add(1 * time.Hour),
 		},
 	}
 	handler.Handle("", mustMarshal(payload1))
 
-	if handler.GetAuthToken() != "token-v1" {
+	if handler.GetAuthToken("https://example.com") != "token-v1" {
 		t.Error("expected token-v1")
 	}
 
 	// second heartbeat with new token (refresh)
 	payload2 := HeartbeatPayload{
 		Credentials: &HeartbeatCreds{
-			Token:     "git-pat",
-			AuthToken: "token-v2",
-			ExpiresAt: time.Now().Add(1 * time.Hour),
+			Token:        "git-pat",
+			AuthToken:    "token-v2",
+			AuthEndpoint: "https://example.com",
+			ExpiresAt:    time.Now().Add(1 * time.Hour),
 		},
 	}
 	handler.Handle("", mustMarshal(payload2))
 
-	if handler.GetAuthToken() != "token-v2" {
+	if handler.GetAuthToken("https://example.com") != "token-v2" {
 		t.Error("expected token-v2 after update")
 	}
 }

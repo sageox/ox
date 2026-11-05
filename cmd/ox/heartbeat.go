@@ -97,6 +97,7 @@ func Heartbeat(repoPath string, teamIDs []string, agentID string) {
 			}
 			if token, err := auth.GetTokenForEndpoint(projectEndpoint); err == nil && token != nil {
 				hbCreds.AuthToken = token.AccessToken
+				hbCreds.AuthEndpoint = projectEndpoint
 				hbCreds.UserEmail = token.UserInfo.Email
 				hbCreds.UserID = token.UserInfo.UserID
 				// derive principal ID for teammate attribution
@@ -217,6 +218,7 @@ func HeartbeatWithCreds(repoPath string, teamIDs []string, agentID string, creds
 			projectEndpoint := endpoint.GetForProject(repoPath)
 			if token, err := auth.GetTokenForEndpoint(projectEndpoint); err == nil && token != nil {
 				hbCreds.AuthToken = token.AccessToken
+				hbCreds.AuthEndpoint = projectEndpoint
 				hbCreds.UserEmail = token.UserInfo.Email
 				hbCreds.UserID = token.UserInfo.UserID
 			}

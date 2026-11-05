@@ -5,6 +5,41 @@ import (
 	"testing"
 )
 
+func TestSameOrigin(t *testing.T) {
+	tests := []struct {
+		name        string
+		source      string
+		destination string
+		want        bool
+	}{
+		{"same", Default, Default, true},
+		{"case and default port", "https://SAGEOX.AI:443/", Default, true},
+		{"path", Default, Default + "/api/v1/cli/settings", true},
+		{"http default port", "http://localhost:80", "http://localhost", true},
+		{"IPv6", "http://[::1]:8080", "http://[::1]:8080/settings", true},
+		{"different host", Default, "https://attacker.example", false},
+		{"subdomain", Default, "https://attacker.sageox.ai", false},
+		{"no alias rewriting", Default, "https://api.sageox.ai", false},
+		{"different scheme", Default, "http://sageox.ai", false},
+		{"different port", Default, "https://sageox.ai:8443", false},
+		{"loopback ports", "http://localhost:8080", "http://localhost:8081", false},
+		{"missing source", "", Default, false},
+		{"missing destination", Default, "", false},
+		{"both missing", "", "", false},
+		{"userinfo", Default, "https://sageox.ai@attacker.example", false},
+		{"invalid URL", Default, "https://sageox.ai:bad", false},
+		{"bare host", Default, "sageox.ai", false},
+		{"non-HTTP", "ftp://sageox.ai", "ftp://sageox.ai", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SameOrigin(tt.source, tt.destination); got != tt.want {
+				t.Errorf("SameOrigin(%q, %q) = %v, want %v", tt.source, tt.destination, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsProduction(t *testing.T) {
 	tests := []struct {
 		name     string

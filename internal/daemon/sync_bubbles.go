@@ -295,7 +295,7 @@ func (s *SyncScheduler) buildKBLister() KBBubbleLister {
 	ep := endpoint.GetForProject(s.config.ProjectRoot)
 	var token string
 	if tokenGetter != nil {
-		token = tokenGetter()
+		token = tokenGetter(ep)
 	}
 
 	if factory != nil {
