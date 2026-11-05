@@ -2,6 +2,8 @@ package session
 
 import (
 	"log/slog"
+	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -33,39 +35,76 @@ func (r *RecordingState) initializeTraceCapture() {
 		return
 	}
 	r.Trace = &model.Capture{}
-	r.RecordTraceBoundary("start", r.StartedAt)
+	pruneLocalTraceAuthorizations(time.Now())
+	// Only a new local recording can establish trace authority. Never upgrade
+	// a raw carrier or a recovered .recording.json into trusted capture state.
+	if err := writeLocalTraceCapture(r.SessionPath, r.Trace); err != nil {
+		slog.Debug("local trace capture unavailable", "error", err)
+		r.Trace = nil
+		return
+	}
+	ids := []string{r.AgentSessionID}
+	for _, native := range r.NativeSessions {
+		ids = append(ids, native.ID)
+	}
+	r.recordTraceBoundary("start", r.StartedAt, ids...)
 }
 
 // RecordTraceBoundary takes a best-effort, immutable byte boundary. A failed
 // snapshot is still appended, with unknown offsets, so it cannot expose paused
 // or pre-recording data. Stop is idempotent for delayed finalization and retries.
 func (r *RecordingState) RecordTraceBoundary(action string, at time.Time) {
+	r.recordTraceBoundary(action, at)
+}
+
+func (r *RecordingState) recordTraceBoundary(action string, at time.Time, nativeIDs ...string) {
 	if r == nil || r.Trace == nil {
 		return
 	}
-	for _, b := range r.Trace.Boundaries {
+	auth, err := readLocalTraceAuthorization(r.SessionPath)
+	if err != nil || !reflect.DeepEqual(auth.Capture, r.Trace) {
+		slog.Debug("trace boundary lacks matching local capture", "action", action, "error", err)
+		r.Trace = nil
+		return
+	}
+	capture := auth.Capture
+	seen := map[string]bool{}
+	for _, id := range auth.NativeIDs {
+		seen[id] = true
+	}
+	for _, b := range capture.Boundaries {
 		if b.Action == "stop" {
 			return
 		}
-	}
-	ids := make([]string, 0, len(r.NativeSessions)+1)
-	seen := map[string]bool{}
-	for _, native := range r.NativeSessions {
-		id := strings.ToLower(native.ID)
-		if receiver.ValidSessionID(id) && !seen[id] {
-			ids = append(ids, id)
+		for id := range b.Offsets {
 			seen[id] = true
 		}
 	}
-	id := strings.ToLower(r.AgentSessionID)
-	if receiver.ValidSessionID(id) && !seen[id] {
+	// New IDs enter only through local recording start / native-session hooks,
+	// never through mutable NativeSessions fields in recovered shared files.
+	for _, nativeID := range nativeIDs {
+		id := strings.ToLower(nativeID)
+		if receiver.ValidSessionID(id) {
+			seen[id] = true
+		}
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
 		ids = append(ids, id)
 	}
+	sort.Strings(ids)
+	auth.NativeIDs = ids
 	offsets, err := receiver.SnapshotOffsets(paths.TraceSpoolDir(), ids)
 	if err != nil {
 		slog.Debug("trace boundary unavailable", "action", action, "error", err)
 		// Stable diagnostic only: raw filesystem paths and errors are local logs.
-		r.Trace.Errors = append(r.Trace.Errors, "boundary-unavailable:"+action)
+		capture.Errors = append(capture.Errors, "boundary-unavailable:"+action)
 	}
-	r.Trace.Boundaries = append(r.Trace.Boundaries, model.Boundary{Action: action, At: at.UTC(), Offsets: offsets})
+	capture.Boundaries = append(capture.Boundaries, model.Boundary{Action: action, At: at.UTC(), Offsets: offsets})
+	if err := writeLocalTraceAuthorization(r.SessionPath, auth); err != nil {
+		slog.Debug("persist local trace boundary failed", "action", action, "error", err)
+		r.Trace = nil
+		return
+	}
+	r.Trace = capture
 }

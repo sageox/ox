@@ -1,0 +1,60 @@
+---
+title: "ox install"
+description: "CLI reference for ox install"
+sidebar_position: 55
+---
+
+## ox install
+
+Install ox on this machine and log in
+
+### Synopsis
+
+Copy ox and its adapters into a directory on PATH, then log in to SageOx.
+
+This is what "npx @sageox/ox@latest install" runs. It sets up this machine
+only: it changes no repository and installs no AI coworker hooks. To link a
+repository afterwards, run ox init inside it.
+
+The binaries go to /usr/local/bin when it is writable, otherwise to
+~/.local/bin, the same places install.sh uses. An ox managed by Homebrew is
+left in place.
+
+```
+ox install [flags]
+```
+
+### Examples
+
+```
+  # Install from npm and log in
+  npx @sageox/ox@latest install
+
+  # Install into a specific directory without logging in
+  ox install --dir ~/bin --skip-login
+```
+
+### Options
+
+```
+      --dir string   directory to install into (default: /usr/local/bin if writable, else ~/.local/bin)
+  -h, --help         help for install
+      --skip-login   install without running ox login (default: false)
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
+      --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
+```
+
+### SEE ALSO
+
+* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
