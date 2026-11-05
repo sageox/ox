@@ -3,6 +3,7 @@ package session
 import (
 	"log/slog"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -34,6 +35,7 @@ func (r *RecordingState) initializeTraceCapture() {
 		return
 	}
 	r.Trace = &model.Capture{}
+	pruneLocalTraceAuthorizations(time.Now())
 	// Only a new local recording can establish trace authority. Never upgrade
 	// a raw carrier or a recovered .recording.json into trusted capture state.
 	if err := writeLocalTraceCapture(r.SessionPath, r.Trace); err != nil {
@@ -59,13 +61,17 @@ func (r *RecordingState) recordTraceBoundary(action string, at time.Time, native
 	if r == nil || r.Trace == nil {
 		return
 	}
-	capture, err := readLocalTraceCapture(r.SessionPath)
-	if err != nil || !reflect.DeepEqual(capture, r.Trace) {
+	auth, err := readLocalTraceAuthorization(r.SessionPath)
+	if err != nil || !reflect.DeepEqual(auth.Capture, r.Trace) {
 		slog.Debug("trace boundary lacks matching local capture", "action", action, "error", err)
 		r.Trace = nil
 		return
 	}
+	capture := auth.Capture
 	seen := map[string]bool{}
+	for _, id := range auth.NativeIDs {
+		seen[id] = true
+	}
 	for _, b := range capture.Boundaries {
 		if b.Action == "stop" {
 			return
@@ -86,6 +92,8 @@ func (r *RecordingState) recordTraceBoundary(action string, at time.Time, native
 	for id := range seen {
 		ids = append(ids, id)
 	}
+	sort.Strings(ids)
+	auth.NativeIDs = ids
 	offsets, err := receiver.SnapshotOffsets(paths.TraceSpoolDir(), ids)
 	if err != nil {
 		slog.Debug("trace boundary unavailable", "action", action, "error", err)
@@ -93,7 +101,7 @@ func (r *RecordingState) recordTraceBoundary(action string, at time.Time, native
 		capture.Errors = append(capture.Errors, "boundary-unavailable:"+action)
 	}
 	capture.Boundaries = append(capture.Boundaries, model.Boundary{Action: action, At: at.UTC(), Offsets: offsets})
-	if err := writeLocalTraceCapture(r.SessionPath, capture); err != nil {
+	if err := writeLocalTraceAuthorization(r.SessionPath, auth); err != nil {
 		slog.Debug("persist local trace boundary failed", "action", action, "error", err)
 		r.Trace = nil
 		return

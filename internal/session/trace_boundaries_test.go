@@ -170,3 +170,36 @@ func TestTraceBoundariesUnpersistableCaptureFailsClosed(t *testing.T) {
 		require.Nil(t, state.Trace)
 	})
 }
+
+func TestTraceBoundariesRetryNativeIDAfterFailedSnapshot(t *testing.T) {
+	traceBoundaryEnvironment(t, true)
+	now := time.Now().UTC()
+	require.NoError(t, os.MkdirAll(paths.TraceSpoolDir(), 0700))
+	unreadable := filepath.Join(paths.TraceSpoolDir(), traceBoundaryID)
+	require.NoError(t, os.Symlink(t.TempDir(), unreadable))
+	state := &RecordingState{SessionPath: t.TempDir(), AgentType: "claude-code", AgentSessionID: traceBoundaryID, StartedAt: now}
+	state.initializeTraceCapture()
+	require.NotContains(t, state.Trace.Boundaries[0].Offsets, traceBoundaryID)
+
+	require.NoError(t, os.Remove(unreadable))
+	state.RecordTraceBoundary("stop", now)
+	require.Contains(t, state.Trace.Boundaries[1].Offsets, traceBoundaryID)
+}
+
+func TestTraceBoundariesPruneStaleAuthorizations(t *testing.T) {
+	traceBoundaryEnvironment(t, true)
+	stale, live := t.TempDir(), t.TempDir()
+	require.NoError(t, writeLocalTraceCapture(stale, &model.Capture{}))
+	require.NoError(t, writeLocalTraceCapture(live, &model.Capture{}))
+	stalePath, err := localTraceCapturePath(stale)
+	require.NoError(t, err)
+	old := time.Now().Add(-localTraceAuthorizationMaxAge - time.Hour)
+	require.NoError(t, os.Chtimes(stalePath, old, old))
+
+	pruneLocalTraceAuthorizations(time.Now())
+
+	_, err = readLocalTraceCapture(stale)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	_, err = readLocalTraceCapture(live)
+	require.NoError(t, err)
+}
