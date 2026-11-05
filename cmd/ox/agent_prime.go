@@ -541,6 +541,25 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Reconcile before exposing session context. Approval-only changes must retire
+	// revoked executable content, and unreadable policy must not be ignored. This
+	// runs before recording starts, so a refusal never strands a recording without
+	// its session marker, and before the auth check, so degraded sessions are
+	// reconciled too.
+	skillReconcileStart := time.Now()
+	reconciled, withheldDecisions, err := reconcileSkillInventoryIfStale(projectRoot)
+	if err != nil {
+		return fmt.Errorf("cannot prime with an unverified skill inventory: %w", err)
+	}
+	if reconciled > 0 {
+		timing["skills_reconciled"] = int64(reconciled)
+	}
+	withheldTeamSkills := make([]prime.WithheldSkill, 0, len(withheldDecisions))
+	for _, d := range withheldDecisions {
+		withheldTeamSkills = append(withheldTeamSkills, prime.WithheldSkill{Name: d.Name, Reason: d.Reason})
+	}
+	timing["skills_reconcile"] = time.Since(skillReconcileStart).Milliseconds()
+
 	// attempt to start session recording if enabled (local, no auth needed)
 	phaseStart = time.Now()
 	continuedFromSessionID := recordingSessionIDFromMarker(existingMarker)
@@ -656,20 +675,6 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	// check auth status for attribution warning
 	isLoggedIn, _ := auth.IsAuthCredentialValidForEndpoint(projectEndpoint)
-
-	// Bring the managed skill inventory in line with this binary before the agent
-	// reads it. The healthy path is a lockfile read and two comparisons; a plan is
-	// only built once a mismatch is proven. Failures never reach the session.
-	skillReconcileStart := time.Now()
-	reconciled, withheldDecisions := reconcileSkillInventoryIfStale(projectRoot)
-	if reconciled > 0 {
-		timing["skills_reconciled"] = int64(reconciled)
-	}
-	withheldTeamSkills := make([]prime.WithheldSkill, 0, len(withheldDecisions))
-	for _, d := range withheldDecisions {
-		withheldTeamSkills = append(withheldTeamSkills, prime.WithheldSkill{Name: d.Name, Reason: d.Reason})
-	}
-	timing["skills_reconcile"] = time.Since(skillReconcileStart).Milliseconds()
 
 	// check for .needs-doctor-agent marker
 	needsDoctorAgent := doctor.NeedsDoctorAgent(projectRoot)

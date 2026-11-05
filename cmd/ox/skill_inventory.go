@@ -1,7 +1,7 @@
 package main
 
 import (
-	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/sageox/ox/internal/skillmanager"
@@ -9,8 +9,8 @@ import (
 )
 
 // reconcileSkillInventoryIfStale brings a project's managed skill files back in
-// line with the catalog compiled into the running binary, and does nothing at
-// all when they already match.
+// line with the catalog and current project approvals, and does nothing at all
+// when they already match.
 //
 // This is the mechanism that makes locally-materialized, gitignored skills
 // correct without a shared on-disk store. Staleness in a skill file is only ever
@@ -20,14 +20,13 @@ import (
 // before it scans its skill directory.
 //
 // Cost discipline matters because this runs on every session start:
-//   - the healthy path is one lockfile read plus two string comparisons;
+//   - the healthy path reads inventory state and approvals, then compares revisions;
 //   - skills.Digest() is memoized per process;
 //   - a full plan (which reads and digests every managed file across every
 //     target) is built only after a mismatch is already proven.
 //
-// Best-effort by construction. Every failure path returns without disturbing the
-// session: a project that cannot reconcile still primes, because a stale
-// playbook is a degraded session while a failed prime is no session at all.
+// Fail closed if policy cannot be read or a stale inventory cannot be reconciled:
+// continuing could expose executable content whose approval has been revoked.
 // It also returns the team skills the reconcile DECLINED to materialize, so
 // prime can say so once. A withheld skill leaves the repository looking exactly
 // as it would if nobody had authored it, and the team member who wrote it has no
@@ -37,9 +36,9 @@ import (
 // the catalog revision does, and the fast path proves that has not happened
 // without building a plan. Re-emitting a line into every prime forever would
 // spend context on an unchanged fact — the cost this whole path exists to avoid.
-func reconcileSkillInventoryIfStale(projectRoot string) (changed int, withheld []skillmanager.TeamSkillDecision) {
+func reconcileSkillInventoryIfStale(projectRoot string) (changed int, withheld []skillmanager.TeamSkillDecision, err error) {
 	if projectRoot == "" {
-		return 0, nil
+		return 0, nil, nil
 	}
 	revision, oxVersion, selected := skillmanager.InstalledSource(projectRoot)
 	if selected {
@@ -48,10 +47,15 @@ func reconcileSkillInventoryIfStale(projectRoot string) (changed int, withheld [
 		skillmanager.RememberRepo(projectRoot)
 	}
 	if !selected {
+		// A damaged lockfile also reads as "nothing selected", yet the files it
+		// managed may include runnable content whose approval was revoked.
+		if err := skillmanager.CheckInstalledState(projectRoot); err != nil {
+			return 0, nil, fmt.Errorf("verify skill inventory state (run `ox doctor` to repair): %w", err)
+		}
 		// No targets recorded: this project has never selected an AI coworker with
 		// native skills, or has never been initialized. `ox init` owns first
 		// install; prime must not silently install into a repo that never asked.
-		return 0, nil
+		return 0, nil, nil
 	}
 	// Must be the SAME value the planner records, hence one shared function.
 	// Comparing against the built-in catalog digest alone was the bug: once a
@@ -60,26 +64,20 @@ func reconcileSkillInventoryIfStale(projectRoot string) (changed int, withheld [
 	// session start in every repo with a team.
 	wantRevision, err := skillmanager.ExpectedRevision(projectRoot)
 	if err != nil {
-		slog.Debug("skills: catalog digest unavailable at prime", "error", err)
-		return 0, nil
+		return 0, nil, fmt.Errorf("verify skill inventory policy: %w", err)
 	}
 	if revision == wantRevision && oxVersion == version.Version {
-		return 0, nil // the common path
+		return 0, nil, nil // the common path
 	}
 
 	plan, err := reconcileCommittedSkillsNonBlocking(projectRoot)
 	if err != nil {
-		if errors.Is(err, skillmanager.ErrApplyInProgress) {
-			// Another ox process holds the apply lock and is doing this exact work.
-			// Skipping is the correct outcome, not a degraded one.
-			slog.Debug("skills: reconcile already in progress, skipping at prime")
-			return 0, nil
-		}
-		slog.Debug("skills: prime reconcile failed", "error", err)
-		return 0, nil
+		// Lock contention is not proof that the other process has removed revoked
+		// content yet. The caller must retry rather than start with stale policy.
+		return 0, nil, fmt.Errorf("reconcile skill inventory before prime: %w", err)
 	}
 	if plan == nil {
-		return 0, nil
+		return 0, nil, fmt.Errorf("skill inventory reconciliation returned no plan")
 	}
 	if len(plan.Warnings) > 0 {
 		// Apply refuses a plan with warnings (a newer ox owns this install, or the
@@ -88,8 +86,10 @@ func reconcileSkillInventoryIfStale(projectRoot string) (changed int, withheld [
 		// decisions on that plan, but none of them was acted on: reporting them
 		// would repeat the same line at every session start, and would blame a
 		// held-back skill for what is really a binary too old to touch the repo.
-		slog.Debug("skills: prime reconcile refused", "warnings", plan.Warnings)
-		return 0, nil
+		return 0, nil, fmt.Errorf("skill inventory reconciliation refused: %v", plan.Warnings)
+	}
+	if installed, _, _ := skillmanager.InstalledSource(projectRoot); installed != wantRevision {
+		return 0, nil, fmt.Errorf("skill inventory policy is not reconciled; run `ox doctor` and retry `ox agent prime`")
 	}
 	changed = len(plan.Creates) + len(plan.Updates) + len(plan.Removes)
 	withheld = plan.WithheldTeamSkills()
@@ -97,5 +97,5 @@ func reconcileSkillInventoryIfStale(projectRoot string) (changed int, withheld [
 		slog.Info("skills: reconciled inventory at prime",
 			"changed", changed, "withheld", len(withheld), "revision", wantRevision, "version", version.Version)
 	}
-	return changed, withheld
+	return changed, withheld, nil
 }
