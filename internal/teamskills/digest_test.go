@@ -107,3 +107,11 @@ func legacyDigestInput(s Skill) []byte {
 	}
 	return input.Bytes()
 }
+
+func TestDigest_CanonicalPathTiesAreOrderIndependent(t *testing.T) {
+	a := Skill{Name: "s", Files: []File{{Path: "a/b", Content: []byte("one")}, {Path: "a\\b", Content: []byte("two")}}}
+	b := Skill{Name: "s", Files: []File{a.Files[1], a.Files[0]}}
+	if Digest(a) != Digest(b) {
+		t.Fatal("reordering files that canonicalize alike must not change the digest")
+	}
+}

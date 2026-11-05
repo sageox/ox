@@ -23,6 +23,7 @@
 package teamskills
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -375,11 +376,26 @@ func normalizeManifest(content string) string {
 // The version tag deliberately invalidates legacy delimiter-based approvals,
 // including their script grants: those require a fresh approval, not migration.
 func Digest(s Skill) string {
-	files := make([]File, len(s.Files))
-	for i, f := range s.Files {
-		files[i] = File{Path: path.Clean(strings.ReplaceAll(f.Path, "\\", "/")), Content: f.Content}
+	type digestFile struct {
+		canonical, raw string
+		content        []byte
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	files := make([]digestFile, len(s.Files))
+	for i, f := range s.Files {
+		files[i] = digestFile{path.Clean(strings.ReplaceAll(f.Path, "\\", "/")), f.Path, f.Content}
+	}
+	// Raw path and bytes break ties between paths that canonicalize alike
+	// (a/b and a\b), so caller order never changes the digest.
+	sort.Slice(files, func(i, j int) bool {
+		a, b := files[i], files[j]
+		if a.canonical != b.canonical {
+			return a.canonical < b.canonical
+		}
+		if a.raw != b.raw {
+			return a.raw < b.raw
+		}
+		return bytes.Compare(a.content, b.content) < 0
+	})
 
 	h := sha256.New()
 	writeDigestField(h, []byte("ox-team-skill-digest-v2"))
@@ -388,8 +404,8 @@ func Digest(s Skill) string {
 	binary.BigEndian.PutUint64(count[:], uint64(len(files)))
 	_, _ = h.Write(count[:])
 	for _, f := range files {
-		writeDigestField(h, []byte(f.Path))
-		writeDigestField(h, f.Content)
+		writeDigestField(h, []byte(f.canonical))
+		writeDigestField(h, f.content)
 	}
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
 }
