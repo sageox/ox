@@ -167,6 +167,10 @@ func main() {
 	// toward the command's reported duration.
 	capturePostHogCommand(exitCode, os.Stderr)
 
+	// Right after the command's own output, before the trace flush below, so
+	// the one-line ask is not delayed by it.
+	showStarHint(exitCode, os.Stderr)
+
 	// Record cli.exit_code on the root OTel span and flush. This runs on
 	// both success and error paths so failed commands appear in traces
 	// with the right exit code — PersistentPostRunE only fires on success

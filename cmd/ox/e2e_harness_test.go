@@ -47,6 +47,18 @@ type oxE2E struct {
 	initBodies []api.RepoInitRequest                // every POST /api/v1/repo/init body, in order
 	register   func(api.RepoInitRequest) (int, any) // optional override of the init reply
 	onRequest  func(*http.Request)                  // optional observation of command progress
+	routes     map[string]http.HandlerFunc          // optional extra routes, served ahead of the stub's own
+}
+
+// Handle serves path with fn, ahead of the stub's own routes, so a test can
+// stand up an endpoint the harness does not model without forking it.
+func (e *oxE2E) Handle(path string, fn http.HandlerFunc) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.routes == nil {
+		e.routes = map[string]http.HandlerFunc{}
+	}
+	e.routes[path] = fn
 }
 
 func (e *oxE2E) OnRequest(fn func(*http.Request)) {
@@ -105,9 +117,14 @@ func newOxE2E(t *testing.T) *oxE2E {
 		env.mu.Lock()
 		env.requests = append(env.requests, r.URL.Path)
 		onRequest := env.onRequest
+		route := env.routes[r.URL.Path]
 		env.mu.Unlock()
 		if onRequest != nil {
 			onRequest(r)
+		}
+		if route != nil {
+			route(w, r)
+			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")

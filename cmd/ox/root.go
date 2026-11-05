@@ -108,6 +108,10 @@ var rootCmd = &cobra.Command{
 		// (triggers version mismatch restart when CLI is upgraded)
 		maybeHeartbeat(cmd)
 
+		// the rare "star us on GitHub" ask: decide now whether it can show and
+		// refresh its cached answer while the command runs; main prints it
+		beginStarHint()
+
 		// resolve feature flags: daemon cache → disk cache → env vars → defaults
 		initFeatureFlags(cmd)
 

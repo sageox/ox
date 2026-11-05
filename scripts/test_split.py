@@ -211,14 +211,16 @@ class Job:
         print(f"test-split: started {self.label}", flush=True)
 
 
-def gotestsum_command(gotestsum: list[str], job_paths: Job, go_flags: list[str], extra: list[str], packages: list[str]) -> list[str]:
+def gotestsum_command(gotestsum: list[str], job_paths: Job, go_flags: list[str], extra: list[str], packages: list[str],
+                      cover: bool = True) -> list[str]:
+    """Build one slot process's gotestsum command; cover=False runs it without a profile."""
     return [
         *gotestsum,
         "--junitfile", str(job_paths.junit),
         "--jsonfile", str(job_paths.timings),
         "--",
         *go_flags,
-        f"-coverprofile={job_paths.cover}",
+        *([f"-coverprofile={job_paths.cover}"] if cover else []),
         *extra,
         *packages,
     ]
@@ -320,7 +322,9 @@ class Layout:
         return names
 
 
-def build_jobs(layout: Layout, only: str | None, go: list[str], gotestsum: list[str], go_flags: list[str], packages: list[str], weights: dict[str, PackageWeights], work_dir: Path) -> list[Job]:
+def build_jobs(layout: Layout, only: str | None, go: list[str], gotestsum: list[str], go_flags: list[str], packages: list[str], weights: dict[str, PackageWeights], work_dir: Path,
+               cover: bool = True) -> list[Job]:
+    """Plan the processes for every slot (or only one), each with its own artifact paths."""
     if only is not None and only not in layout.slots():
         raise SystemExit(f"unknown slot {only!r}; slots are {layout.slots()}")
     wanted = lambda slot: only is None or only == slot  # noqa: E731
@@ -331,12 +335,12 @@ def build_jobs(layout: Layout, only: str | None, go: list[str], gotestsum: list[
         excluded = set(go_list(go, named)) if named else set()
         rest = [package for package in go_list(go, packages) if package not in excluded]
         job = Job(f"rest ({len(rest)} packages)", work_dir, "rest")
-        job.command = gotestsum_command(gotestsum, job, go_flags, [], rest)
+        job.command = gotestsum_command(gotestsum, job, go_flags, [], rest, cover)
         jobs.append(job)
     for name, group in layout.groups:
         if wanted(name):
             job = Job(f"{name} ({', '.join(group)})", work_dir, name)
-            job.command = gotestsum_command(gotestsum, job, go_flags, [], group)
+            job.command = gotestsum_command(gotestsum, job, go_flags, [], group, cover)
             jobs.append(job)
 
     # List a split package before starting anything: the listing compiles the
@@ -355,7 +359,7 @@ def build_jobs(layout: Layout, only: str | None, go: list[str], gotestsum: list[
                 print(f"test-split: {slot} has no tests in this plan", flush=True)
                 continue
             job = Job(f"{slot} ({package} slice {index + 1}/{len(shards)}, {len(shards[index])} tests)", work_dir, slot)
-            job.command = gotestsum_command(gotestsum, job, go_flags, ["-run", run_pattern(shards[index])], [package])
+            job.command = gotestsum_command(gotestsum, job, go_flags, ["-run", run_pattern(shards[index])], [package], cover)
             jobs.append(job)
     return jobs
 
@@ -371,7 +375,8 @@ def run(args: argparse.Namespace) -> int:
 
     layout = Layout(args.split, args.group)
     weights = load_weights(Path(args.weights) if args.weights else None)
-    jobs = build_jobs(layout, args.only, go, gotestsum, list(args.go_flags), args.packages, weights, work_dir)
+    cover = args.coverprofile is not None
+    jobs = build_jobs(layout, args.only, go, gotestsum, list(args.go_flags), args.packages, weights, work_dir, cover)
     for job in jobs:
         job.start()
 
@@ -403,13 +408,14 @@ def run(args: argparse.Namespace) -> int:
                 failed.append(job.label)
         time.sleep(0.5)
 
-    destination = Path(args.coverprofile)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    covers = [job.cover for job in jobs if job.cover.is_file() and job.cover.stat().st_size]
-    if covers:
-        merge_cover(covers, destination)
-    elif not jobs:
-        destination.write_text("mode: atomic\n", encoding="utf-8")
+    covers = [job.cover for job in jobs if cover and job.cover.is_file() and job.cover.stat().st_size]
+    if cover:
+        destination = Path(args.coverprofile)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if covers:
+            merge_cover(covers, destination)
+        elif not jobs:
+            destination.write_text("mode: atomic\n", encoding="utf-8")
     if args.junit:
         merge_junit([job.junit for job in jobs if job.junit.is_file() and job.junit.stat().st_size], Path(args.junit))
     if args.timings:
@@ -422,7 +428,7 @@ def run(args: argparse.Namespace) -> int:
     if failed:
         print(f"\ntest-split: {len(failed)} of {len(jobs)} processes failed: {', '.join(failed)}", file=sys.stderr)
         return 1
-    if len(covers) != len(jobs):
+    if cover and len(covers) != len(jobs):
         print("test-split: a process exited 0 without writing a coverage profile", file=sys.stderr)
         return 1
     return 0
@@ -492,7 +498,7 @@ def main() -> int:
     run_parser.add_argument("--gotestsum", required=True, help="gotestsum command plus format flags")
     run_parser.add_argument("--weights")
     run_parser.add_argument("--work-dir", required=True)
-    run_parser.add_argument("--coverprofile", required=True)
+    run_parser.add_argument("--coverprofile", help="merged coverage profile; omit to run without coverage")
     run_parser.add_argument("--junit")
     run_parser.add_argument("--timings")
     run_parser.add_argument("--packages", nargs="+", default=["./..."])

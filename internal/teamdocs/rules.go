@@ -1,7 +1,8 @@
 package teamdocs
 
 import (
-	"bufio"
+	"bytes"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -19,9 +20,9 @@ import (
 // delivered through one adapter-selected path: an ignored native projection
 // where the agent can preserve the rule's semantics, otherwise ox agent prime.
 //
-// Subdirectories under agents/rules/ are walked recursively. The relative
-// path is preserved so organization (e.g., backend/postgres.md) stays
-// meaningful for navigation and dedupe.
+// Subdirectories under agents/rules/ are walked recursively so a local session
+// still finds a nested rule, but the supported layout is flat, and RuleWarnings
+// reports anything nested.
 type TeamRule struct {
 	Name            string   `json:"name"`                       // kebab-case identifier; from frontmatter or filename
 	Description     string   `json:"description,omitempty"`      // one-line summary
@@ -35,6 +36,10 @@ type TeamRule struct {
 	FromDiscussion  string   `json:"from_discussion,omitempty"`  // optional provenance link
 	Body            string   `json:"body,omitempty"`             // markdown body (excluding frontmatter); only populated for visibility=always
 	EstimatedTokens int      `json:"estimated_tokens,omitempty"` // rough estimate (len(body)/4); only set when Body is loaded
+
+	// withheldReason is non-empty when the frontmatter could not be read safely.
+	// PublishedRules drops such a rule, so nothing that delivers a rule can see one.
+	withheldReason string
 }
 
 // Rule status values.
@@ -71,7 +76,8 @@ var RuleRoots = []string{"agents/rules", "coworkers/rules"}
 // DiscoverRules walks the team context for behavioral rule files under
 // agents/rules/**/*.md (preferred) and coworkers/rules/**/*.md (legacy
 // fallback for any teams that adopted that location early). Subdirectories
-// are walked recursively, mirroring how Claude Code walks .claude/rules/.
+// are walked recursively, mirroring how Claude Code walks .claude/rules/; see
+// RuleWarnings for why a nested rule is still worth flagging.
 //
 // Rules with audience: human are excluded (this scanner is for agent
 // consumption). Rules with status: draft and visibility: hidden are
@@ -132,6 +138,22 @@ func DiscoverRules(teamPath, repoSlug string) ([]TeamRule, error) {
 // repo-specific and stay here — a draft or human-only rule is not published
 // anywhere, so listing it as "available elsewhere" would be wrong too.
 func PublishedRules(teamPath string) ([]TeamRule, error) {
+	rules, err := scanRules(teamPath)
+	if err != nil {
+		return nil, err
+	}
+	published := rules[:0]
+	for _, r := range rules {
+		if r.withheldReason == "" {
+			published = append(published, r)
+		}
+	}
+	return published, nil
+}
+
+// scanRules is PublishedRules plus the rules withheld over unreadable frontmatter,
+// which only the warnings need.
+func scanRules(teamPath string) ([]TeamRule, error) {
 	if teamPath == "" {
 		return nil, nil
 	}
@@ -183,6 +205,76 @@ func PublishedRules(teamPath string) ([]TeamRule, error) {
 	})
 
 	return rules, nil
+}
+
+// Advisory rule-file budgets, in bytes. ox prime counts tokens as bytes/4, so these
+// are roughly 500 and 2,000 tokens.
+const (
+	// An always-on rule is paid in every session and shares prime's roughly 10 KB
+	// hook budget with everything else ox delivers, so one rule stays near a fifth
+	// of it.
+	alwaysRuleBudgetBytes = 2 * 1024
+	// An on-demand rule costs nothing until it is needed, then competes with the
+	// task it was loaded for. Past this it usually holds more than one concern.
+	onDemandRuleBudgetBytes = 8 * 1024
+)
+
+// RuleWarnings lists problems with the rules a team publishes, one line per problem.
+// A rule withheld over unreadable frontmatter comes first, because that rule reaches
+// nobody and the bound on these lines must not cut it. The rest are advisory, in
+// RelPath order: they ask the author to fix the source, and delivery carries on.
+//
+// It starts from the scan, not the list prime delivers, because a rule with a native
+// projection is dropped from that list while its cost remains. Sizes come from the
+// file on disk, frontmatter included, which is cheap and close enough for an
+// advisory.
+func RuleWarnings(teamPath string) ([]string, error) {
+	withheld, advisory, err := ruleWarnings(teamPath)
+	return append(withheld, advisory...), err
+}
+
+// WithheldRuleWarnings lists only the rules that reach nobody. A compact re-prime
+// carries these and not the advisories: a rule that broke since the full prime has
+// no other way to be reported, while size advice repeats what was already said.
+func WithheldRuleWarnings(teamPath string) ([]string, error) {
+	withheld, _, err := ruleWarnings(teamPath)
+	return withheld, err
+}
+
+func ruleWarnings(teamPath string) (withheld, advisory []string, err error) {
+	rules, err := scanRules(teamPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, r := range rules {
+		rel := filepath.ToSlash(r.RelPath)
+		if r.withheldReason != "" {
+			withheld = append(withheld, rel+": withheld from every session until its frontmatter is fixed: "+r.withheldReason)
+			continue
+		}
+		if strings.Contains(rel, "/") {
+			advisory = append(advisory, rel+": nested in a subdirectory, so it may not reach cloud sessions; move it to the top of the rules directory")
+		}
+		info, statErr := os.Stat(r.AbsPath)
+		if statErr != nil {
+			continue // a rule that vanished mid-walk has no size worth reporting
+		}
+		budget, tier := ruleBudget(r)
+		if info.Size() > budget {
+			advisory = append(advisory, fmt.Sprintf("%s: %d B, over the %d B budget for %s rules", rel, info.Size(), budget, tier))
+		}
+	}
+	return withheld, advisory, nil
+}
+
+// ruleBudget picks a rule's tier by when it is paid for. globs: outranks
+// visibility: always because the matcher owns activation (see ModeForAgent in
+// internal/teamrules), so a scoped rule is never paid in every session.
+func ruleBudget(r TeamRule) (budget int64, tier string) {
+	if r.Visibility == VisibilityAlways && len(r.Globs) == 0 {
+		return alwaysRuleBudgetBytes, "always-on"
+	}
+	return onDemandRuleBudgetBytes, "on-demand"
 }
 
 // AnyRuleRootOnDisk reports whether sparse checkout materialized a parent that
@@ -244,6 +336,7 @@ func walkRulesDir(absRoot string) ([]TeamRule, error) {
 		}
 
 		fm := parseRuleFrontmatter(path)
+		scope := ruleScope(fm)
 		if fm.Name == "" {
 			fm.Name = strings.TrimSuffix(name, filepath.Ext(name))
 		}
@@ -262,12 +355,13 @@ func walkRulesDir(absRoot string) ([]TeamRule, error) {
 			Description:    fm.Description,
 			RelPath:        rel,
 			AbsPath:        path,
-			Repos:          fm.Repos,
-			Globs:          fm.Globs,
+			Repos:          scope.Repos,
+			Globs:          scope.Globs,
 			Audience:       fm.Audience,
 			Visibility:     fm.Visibility,
 			Status:         fm.Status,
 			FromDiscussion: fm.FromDiscussion,
+			withheldReason: scope.Reason,
 		})
 		return nil
 	})
@@ -350,8 +444,7 @@ func estimateTokens(s string) int {
 type ruleFrontmatter struct {
 	Name           string
 	Description    string
-	Repos          []string
-	Globs          []string
+	Scope          Scope
 	Audience       string
 	Visibility     string
 	Status         string
@@ -361,17 +454,19 @@ type ruleFrontmatter struct {
 	// ignore it). See SkillRequirements for the semantics.
 	Requires         []string
 	RequiresDeclared bool
-	requiresBlock    bool // inside a `requires:` block list (`  - shell` lines)
+	// foreignScopeKey is a scope key another tool's format uses; see ruleScope.
+	foreignScopeKey string
+	// unreadable separates a file that could not be read from frontmatter that could
+	// not be understood. A skill's approval flow reports the first in its own terms.
+	unreadable bool
 }
 
-// parseRuleFrontmatter does minimal YAML extraction sufficient for the rule
-// frontmatter spec. Mirrors the line-based approach in frontmatter.go to
-// avoid a YAML dep. Multi-line scalars and complex YAML are not supported;
-// rule frontmatter is intentionally simple.
+// parseRuleFrontmatter reads a manifest from disk. An unreadable file comes back
+// Invalid rather than empty, because empty would mean "everywhere".
 func parseRuleFrontmatter(path string) ruleFrontmatter {
 	f, err := os.Open(path)
 	if err != nil {
-		return ruleFrontmatter{}
+		return ruleFrontmatter{Scope: invalidScope("file cannot be read"), unreadable: true}
 	}
 	defer f.Close()
 	return parseRuleFrontmatterFrom(f)
@@ -381,92 +476,31 @@ func parseRuleFrontmatter(path string) ruleFrontmatter {
 // manifest held in memory (`ox skills publish` reads the repository copy
 // before it exists in any Team Context) parses with exactly the same rules.
 func parseRuleFrontmatterFrom(r io.Reader) ruleFrontmatter {
-	scanner := bufio.NewScanner(r)
-	lineCount := 0
-	var fm ruleFrontmatter
-
-	for scanner.Scan() {
-		lineCount++
-		line := scanner.Text()
-
-		if lineCount == 1 {
-			if !IsFrontmatterFence(trimBOM(line)) {
-				return ruleFrontmatter{}
-			}
-			continue
+	// Discovery reads every published rule, drafts and other repos' rules included, so
+	// a Team Context writer must not be able to make it allocate a whole large file.
+	// Frontmatter is all this needs; a block that does not close within the bound is
+	// withheld, never read as unscoped.
+	data, err := io.ReadAll(io.LimitReader(r, maxFrontmatterReadBytes+1))
+	if err != nil {
+		return ruleFrontmatter{Scope: invalidScope("file cannot be read"), unreadable: true}
+	}
+	if len(data) > maxFrontmatterReadBytes {
+		// The bound can cut a line in half, and a cut "----" reads as a closing
+		// fence. Drop the partial line so only whole lines decide.
+		data = data[:maxFrontmatterReadBytes]
+		if cut := bytes.LastIndexByte(data, '\n'); cut >= 0 {
+			data = data[:cut+1]
 		}
-		if IsFrontmatterFence(line) {
-			break
-		}
-
-		// A `requires:` block list is the one multi-line form read here.
-		if fm.requiresBlock {
-			if item, isItem := blockListItem(line); isItem {
-				if item != "" {
-					fm.Requires = append(fm.Requires, item)
-					fm.RequiresDeclared = true
-				}
-				continue
-			}
-			fm.requiresBlock = false
-		}
-
-		// requires: is read on EVERY frontmatter line, not only inside the
-		// window below (trust contract v2, R4). It is the one key where a miss
-		// fails open: a declaration pushed past line 30 by a long folded
-		// description: read as "undeclared", so a skill whose author said it
-		// needs a shell could be offered where there is none. Every other key
-		// keeps the window, and with it the behavior teams already rely on.
-		if strings.HasPrefix(line, "requires:") {
-			fm.applyRequires(stripYAMLComment(strings.TrimSpace(strings.TrimPrefix(line, "requires:"))))
-			continue
-		}
-		// The window: the 30 lines after the opening fence.
-		if lineCount > 31 {
-			continue
-		}
-
-		switch {
-		case strings.HasPrefix(line, "name:"):
-			fm.Name = extractValue(line, "name:")
-		case strings.HasPrefix(line, "description:"):
-			fm.Description = extractValue(line, "description:")
-		case strings.HasPrefix(line, "audience:"):
-			fm.Audience = extractValue(line, "audience:")
-		case strings.HasPrefix(line, "visibility:"):
-			fm.Visibility = extractValue(line, "visibility:")
-		case strings.HasPrefix(line, "status:"):
-			fm.Status = extractValue(line, "status:")
-		case strings.HasPrefix(line, "valid-through:"):
-			fm.ValidThrough = extractValue(line, "valid-through:")
-		case strings.HasPrefix(line, "from-discussion:"):
-			fm.FromDiscussion = extractValue(line, "from-discussion:")
-		case strings.HasPrefix(line, "repos:"):
-			fm.Repos = parseInlineList(stripYAMLComment(strings.TrimSpace(strings.TrimPrefix(line, "repos:"))))
-		case strings.HasPrefix(line, "globs:"):
-			fm.Globs = parseGlobs(stripYAMLComment(strings.TrimSpace(strings.TrimPrefix(line, "globs:"))))
+		if _, state := splitFrontmatter(string(data)); state == frontmatterUnclosed {
+			return ruleFrontmatter{Scope: invalidScope("frontmatter does not close within %d bytes", maxFrontmatterReadBytes)}
 		}
 	}
-
-	return fm
+	return parseManifest(string(data))
 }
 
-// applyRequires records a `requires:` value. An empty value opens a block list.
-//
-// The block form is read here, unlike for repos:, because the safe default
-// points the other way. A block-form repos: read as absent means "every repo",
-// which only widens where prose lands. A block-form requires: read as absent
-// would let a skill whose author SAID it needs a shell be offered to chat hosts
-// that have none. Mirrors packages/teamskills applyRequires in sageox-mono, so
-// the server and the CLI classify the same manifest the same way.
-func (fm *ruleFrontmatter) applyRequires(value string) {
-	if value == "" {
-		fm.requiresBlock = true
-		return
-	}
-	fm.RequiresDeclared = true
-	fm.Requires = parseInlineList(value)
-}
+// maxFrontmatterReadBytes bounds what discovery reads from one rule. Real frontmatter
+// is under 2 KiB; 64 KiB leaves room for a long description and stays cheap.
+const maxFrontmatterReadBytes = 64 << 10
 
 // blockListItem parses one line of a YAML block sequence. The second return is
 // false for any line that is not an item, which ends the list.
@@ -493,14 +527,18 @@ func blockListItem(line string) (string, bool) {
 	return strings.Trim(item, `"'`), true
 }
 
-// parseGlobs parses the globs: field, accepting both the inline-list form that
-// repos: uses and the bare comma-separated form every other agent's rule format
-// uses (Cursor's globs:, Copilot's applyTo:, Cline's paths:).
+// parseGlobs parses a globs: value that YAML read as one string, which is the bare
+// comma-separated form some agents' rule formats use (Cursor's globs:, Copilot's
+// applyTo:). A value that YAML read as a list never reaches this.
 //
-// Accepting both is deliberate. An author copying a rule out of .cursor/rules
+// Accepting it is deliberate. An author copying a rule out of .cursor/rules
 // writes `globs: **/*.go,**/*.mod`, and rejecting that would mean the rule
 // silently applies everywhere — the failure mode is an unscoped rule loading in
 // every session, which is exactly what globs: exists to prevent.
+//
+// The outer quotes come off first because a quoted scalar here is still the comma
+// form: ox writes `globs: "a,b"` into Cursor's projections, and a rule copied back
+// from one must keep both patterns.
 func parseGlobs(v string) []string {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -510,7 +548,7 @@ func parseGlobs(v string) []string {
 		return parseInlineList(v)
 	}
 	var out []string
-	for _, part := range strings.Split(v, ",") {
+	for _, part := range splitListItems(strings.Trim(v, `"'`)) {
 		if trimmed := strings.Trim(strings.TrimSpace(part), `"'`); trimmed != "" {
 			out = append(out, trimmed)
 		}
@@ -518,11 +556,40 @@ func parseGlobs(v string) []string {
 	return out
 }
 
-// parseInlineList parses a YAML inline list like ["a", "b", "c"] or [a, b].
-// Handles only the inline (flow) form — the block form (- item) is not
-// supported here for simplicity. Rule frontmatter authors using the block
-// form will have repos: = nil, which means "all repos" — a safer default
-// than silently dropping the filter.
+// splitListItems splits on the commas that separate list items. A comma inside
+// quotes or a brace group belongs to the item: cutting src/*.{ts,tsx} in two leaves
+// a pair of patterns that match nothing, so the rule silently never loads.
+func splitListItems(v string) []string {
+	var items []string
+	start, braces := 0, 0
+	var quote byte
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		switch {
+		case quote != 0:
+			if c == '\\' && quote == '"' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+		// Only a quote that opens an item counts, so an apostrophe inside a bare
+		// path cannot swallow the commas after it.
+		case (c == '"' || c == '\'') && strings.TrimSpace(v[start:i]) == "":
+			quote = c
+		case c == '{':
+			braces++
+		case c == '}' && braces > 0:
+			braces--
+		case c == ',' && braces == 0:
+			items = append(items, v[start:i])
+			start = i + 1
+		}
+	}
+	return append(items, v[start:])
+}
+
+// parseInlineList parses a YAML inline list like ["a", "b", "c"] or [a, b], or a
+// single bare value, for the requires: lines YAML could not read.
 func parseInlineList(v string) []string {
 	v = strings.TrimSpace(v)
 	if v == "" || v == "[]" {
@@ -536,7 +603,7 @@ func parseInlineList(v string) []string {
 	if strings.TrimSpace(inner) == "" {
 		return nil
 	}
-	parts := strings.Split(inner, ",")
+	parts := splitListItems(inner)
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
 		p = strings.TrimSpace(p)

@@ -410,14 +410,63 @@ class DiagnosticArtifactsTest(unittest.TestCase):
                             job.handle.close()
 
 
+class CoverageOptionalTest(unittest.TestCase):
+    """The PR gate runs the fast tier through the same slots, without coverage."""
+
+    def run_slot(self, coverprofile):
+        """Run one fake gotestsum process that writes no coverage profile."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work = root / "work"
+            job = test_split.Job("rest", work, "rest")
+            producer = root / "gotestsum.py"
+            producer.write_text(
+                "import pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "pathlib.Path(args[args.index('--jsonfile')+1]).write_text('')\n", encoding="utf-8")
+            cover = coverprofile is not None
+            job.command = test_split.gotestsum_command([sys.executable, str(producer)], job, [], [], ["./internal/daemon"], cover)
+            args = test_split.argparse.Namespace(go="go", gotestsum="fake", work_dir=str(work), split=[], group=[], weights=None,
+                                                only="rest", go_flags=[], packages=[],
+                                                coverprofile=None if coverprofile is None else str(root / coverprofile),
+                                                junit=None, timings=None)
+            with mock.patch.object(test_split, "build_jobs", return_value=[job]), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
+                result = test_split.run(args)
+            return result, errors.getvalue(), (root / coverprofile).exists() if coverprofile else False
+
+    def test_without_coverprofile_a_passing_slot_passes(self):
+        """Failure prevented: the fast PR gate fails every slot for lacking a profile it never asked for."""
+        result, errors, _ = self.run_slot(None)
+        self.assertEqual(0, result, errors)
+
+    def test_with_coverprofile_a_missing_profile_still_fails(self):
+        """Failure prevented: making coverage optional lets the full tier lose a slot's coverage silently."""
+        result, errors, _ = self.run_slot("cover.out")
+        self.assertEqual(1, result)
+        self.assertIn("without writing a coverage profile", errors)
+
+    def test_coverage_flag_follows_the_cover_switch(self):
+        """Without coverage the go flags pass through untouched; with it, one -coverprofile per process."""
+        job = test_split.Job("rest", Path("w"), "rest")
+        with_cover = test_split.gotestsum_command(["gotestsum"], job, ["-race"], [], ["./..."])
+        without = test_split.gotestsum_command(["gotestsum"], job, ["-race"], [], ["./..."], cover=False)
+        self.assertIn(f"-coverprofile={job.cover}", with_cover)
+        self.assertFalse(any(arg.startswith("-coverprofile=") for arg in without))
+        self.assertEqual(["-race", "./..."], without[without.index("--") + 1:])
+
+
 class WeightsTest(unittest.TestCase):
     def test_repository_weights_file_loads(self):
-        path = Path(__file__).resolve().parents[1] / ".config/test-split-weights.json"
-        weights = test_split.load_weights(path)
-        self.assertIn("github.com/sageox/ox/cmd/ox", weights)
-        cmd_ox = weights["github.com/sageox/ox/cmd/ox"]
-        self.assertTrue(all(seconds >= test_split.WEIGHT_FLOOR_SECONDS for seconds in cmd_ox.tests.values()))
-        self.assertLess(cmd_ox.default_seconds, test_split.WEIGHT_FLOOR_SECONDS)
+        """Both tiers' committed weights files load and keep only tests at or over the floor."""
+        for name in ("test-split-weights.json", "test-split-weights-fast.json"):
+            with self.subTest(name=name):
+                path = Path(__file__).resolve().parents[1] / ".config" / name
+                weights = test_split.load_weights(path)
+                self.assertIn("github.com/sageox/ox/cmd/ox", weights)
+                cmd_ox = weights["github.com/sageox/ox/cmd/ox"]
+                self.assertTrue(all(seconds >= test_split.WEIGHT_FLOOR_SECONDS for seconds in cmd_ox.tests.values()))
+                self.assertLess(cmd_ox.default_seconds, test_split.WEIGHT_FLOOR_SECONDS)
 
     def test_rejects_unknown_version(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -413,6 +413,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// check if project is initialized (.sageox/ exists)
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
 	if _, err := os.Stat(sageoxDir); os.IsNotExist(err) {
+		// a clone of an open-source project that is public on SageOx primes
+		// read-only from its public thinking, member or not
+		if handled, err := emitPublicPrime(cmd, projectRoot, textMode || reviewMode); handled {
+			return err
+		}
 		// project not initialized - tell the agent to ask user to run ox init
 		output := agentPrimeOutput{
 			Status:  "unavailable",

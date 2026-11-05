@@ -242,7 +242,9 @@ after changing it.`,
 
 When enabled, ox displays helpful hints about features and workflows
 after command output. Useful for learning ox, but can be disabled
-once you're familiar with the tool.`,
+once you're familiar with the tool.
+
+Turning tips off also silences the rare one-line ask to star ox on GitHub.`,
 		Category:    "Display",
 		ValidValues: []string{"on", "off"},
 		Default:     "on",

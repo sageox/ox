@@ -52,9 +52,10 @@ type TeamSkill struct {
 	// Files are the skill's own files, relative to AbsDir, sorted. Populated so a
 	// caller can classify and materialize without re-walking the tree.
 	Files []string `json:"files,omitempty"`
-	// NameError is non-empty when ox REFUSES this skill's name. Such a skill is
-	// reported but never installed: DiscoverSkills filters it out, so nothing on
-	// the materialization or approval path can see it.
+	// NameError is non-empty when ox REFUSES this skill, over its name or over
+	// frontmatter it cannot read safely. Such a skill is reported but never
+	// installed: DiscoverSkills filters it out, so nothing on the materialization
+	// or approval path can see it.
 	//
 	// It is carried rather than dropped because a skill that silently disappears
 	// has no discoverable cause. A team that publishes `Deploy` today would watch
@@ -355,6 +356,12 @@ func walkSkillsDir(absRoot string) ([]TeamSkill, error) {
 			slog.Warn("team skill refused: unusable name",
 				"dir", e.Name(), "name", safeDisplayName(name), "pattern", TeamSkillNamePattern)
 			name = safeDisplayName(name)
+		} else if fm.Scope.Kind == ScopeInvalid && !fm.unreadable {
+			// A repos: nobody can read, taken as absent, would land this skill in
+			// every repository. A file that cannot be opened goes on: nothing can
+			// install it, and approval reports it as unreadable.
+			nameErr = "unusable frontmatter: " + fm.Scope.Reason + " — fix it in the Team Context"
+			slog.Warn("team skill refused: unusable frontmatter", "dir", e.Name(), "reason", fm.Scope.Reason)
 		}
 		files, filesErr := skillFiles(dir)
 		if filesErr != nil {
@@ -367,7 +374,7 @@ func walkSkillsDir(absRoot string) ([]TeamSkill, error) {
 			Description:      fm.Description,
 			RelPath:          filepath.ToSlash(filepath.Join(e.Name(), skillManifestName)),
 			AbsDir:           dir,
-			Repos:            fm.Repos,
+			Repos:            fm.Scope.Repos,
 			Audience:         fm.Audience,
 			Visibility:       defaultString(fm.Visibility, DefaultRuleVisibility),
 			Status:           fm.Status,
@@ -388,7 +395,7 @@ const (
 )
 
 // SkillRequirements reads `requires:` from a SKILL.md held in memory, with the
-// same line-based rules discovery uses on disk.
+// same rules discovery uses on disk.
 //
 // declared is true only when the key carried a value: an inline list
 // (`requires: [shell]`, including the explicit `requires: []`), a bare scalar
