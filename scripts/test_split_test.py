@@ -447,6 +447,7 @@ class CoverageOptionalTest(unittest.TestCase):
         self.assertIn("without writing a coverage profile", errors)
 
     def test_coverage_flag_follows_the_cover_switch(self):
+        """Without coverage the go flags pass through untouched; with it, one -coverprofile per process."""
         job = test_split.Job("rest", Path("w"), "rest")
         with_cover = test_split.gotestsum_command(["gotestsum"], job, ["-race"], [], ["./..."])
         without = test_split.gotestsum_command(["gotestsum"], job, ["-race"], [], ["./..."], cover=False)
@@ -457,7 +458,7 @@ class CoverageOptionalTest(unittest.TestCase):
 
 class WeightsTest(unittest.TestCase):
     def test_repository_weights_file_loads(self):
-        # one file per tier: the full tier's and the fast PR gate's
+        """Both tiers' committed weights files load and keep only tests at or over the floor."""
         for name in ("test-split-weights.json", "test-split-weights-fast.json"):
             with self.subTest(name=name):
                 path = Path(__file__).resolve().parents[1] / ".config" / name

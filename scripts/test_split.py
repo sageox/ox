@@ -213,6 +213,7 @@ class Job:
 
 def gotestsum_command(gotestsum: list[str], job_paths: Job, go_flags: list[str], extra: list[str], packages: list[str],
                       cover: bool = True) -> list[str]:
+    """Build one slot process's gotestsum command; cover=False runs it without a profile."""
     return [
         *gotestsum,
         "--junitfile", str(job_paths.junit),
@@ -323,6 +324,7 @@ class Layout:
 
 def build_jobs(layout: Layout, only: str | None, go: list[str], gotestsum: list[str], go_flags: list[str], packages: list[str], weights: dict[str, PackageWeights], work_dir: Path,
                cover: bool = True) -> list[Job]:
+    """Plan the processes for every slot (or only one), each with its own artifact paths."""
     if only is not None and only not in layout.slots():
         raise SystemExit(f"unknown slot {only!r}; slots are {layout.slots()}")
     wanted = lambda slot: only is None or only == slot  # noqa: E731
