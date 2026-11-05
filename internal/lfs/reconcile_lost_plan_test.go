@@ -400,12 +400,15 @@ func TestTombstoneLostPlanRenders_StagingFailureLeavesTheIndexAsItWas(t *testing
 	require.NoError(t, unstage(context.Background(), ledger, nil))
 }
 
-// TestRewriteWorkingPointer: only the exact committed pointer is replaced by
-// the tombstone. Failure prevented: overwriting a coworker's edit made while
-// the repair ran.
+// TestRewriteWorkingPointer: only the exact committed pointer, inside the
+// Ledger, is replaced by the tombstone. Failure prevented: overwriting a
+// coworker's edit made while the repair ran, or a file outside the Ledger that
+// a symlinked plan directory points at.
 func TestRewriteWorkingPointer(t *testing.T) {
 	ref := FileRef{OID: "sha256:" + strings.Repeat("2", 64), Size: 2196945}
+	pointer := FormatPointer(ref.OID, ref.Size)
 	tombstone := []byte("<!doctype html><title>tombstone</title>\n")
+	rel := filepath.Join("data", "plans", "p", "plan.html")
 	for _, tc := range []struct {
 		name    string
 		current *string
@@ -413,16 +416,18 @@ func TestRewriteWorkingPointer(t *testing.T) {
 		want    string
 	}{
 		{name: "absent stays absent"},
-		{name: "pointer is replaced", current: ptr(FormatPointer(ref.OID, ref.Size)), want: string(tombstone)},
+		{name: "pointer is replaced", current: ptr(pointer), want: string(tombstone)},
 		{name: "edit is kept", current: ptr("someone's edit\n"), wantErr: "working copy changed", want: "someone's edit\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "plan.html")
+			ledger := t.TempDir()
+			path := filepath.Join(ledger, rel)
+			require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 			if tc.current != nil {
 				require.NoError(t, os.WriteFile(path, []byte(*tc.current), 0o644))
 			}
 
-			err := rewriteWorkingPointer(path, ref, tombstone)
+			err := rewriteWorkingPointer(ledger, rel, ref, tombstone)
 
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
@@ -438,7 +443,23 @@ func TestRewriteWorkingPointer(t *testing.T) {
 		})
 	}
 	t.Run("unreadable", func(t *testing.T) {
-		require.Error(t, rewriteWorkingPointer(t.TempDir(), ref, tombstone), "a directory is not a working copy")
+		ledger := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(ledger, rel), 0o755))
+		require.Error(t, rewriteWorkingPointer(ledger, rel, ref, tombstone), "a directory is not a working copy")
+	})
+	t.Run("plan directory linked outside the Ledger", func(t *testing.T) {
+		ledger, outside := t.TempDir(), t.TempDir()
+		external := filepath.Join(outside, "plan.html")
+		require.NoError(t, os.WriteFile(external, []byte(pointer), 0o644))
+		require.NoError(t, os.MkdirAll(filepath.Join(ledger, "data", "plans"), 0o755))
+		if err := os.Symlink(outside, filepath.Join(ledger, "data", "plans", "p")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+
+		err := rewriteWorkingPointer(ledger, rel, ref, tombstone)
+
+		require.Error(t, err)
+		assert.Equal(t, pointer, string(mustReadFile(t, external)), "the tombstone escaped the Ledger")
 	})
 }
 

@@ -127,7 +127,7 @@ func tombstoneLostPlanRenders(ctx context.Context, ledgerPath string, lost []poi
 		planName := filepath.Base(filepath.Dir(p.relPath))
 		logger.Warn("lfs reconcile: plan page lost before it reached the store; replaced its pointer with a tombstone in unpushed history",
 			"plan", planName, "path", rel, "oid", p.ref.OID, "size", p.ref.Size)
-		if err := rewriteWorkingPointer(filepath.Join(ledgerPath, p.relPath), p.ref, planRenderTombstone(p.ref)); err != nil {
+		if err := rewriteWorkingPointer(ledgerPath, p.relPath, p.ref, planRenderTombstone(p.ref)); err != nil {
 			// the commit already landed and the push can proceed; a stale
 			// working copy only shows up as a local modification
 			logger.Warn("lfs reconcile: tombstone committed but the working copy was left as it is",
@@ -172,11 +172,19 @@ func unstage(ctx context.Context, ledgerPath string, paths []string) error {
 	return nil
 }
 
-// rewriteWorkingPointer replaces the file at path with content only while it
-// still holds exactly the pointer for ref; an absent file (outside the sparse
-// checkout) is left absent, and any other content is someone's edit.
-func rewriteWorkingPointer(path string, ref FileRef, content []byte) error {
-	current, err := os.ReadFile(path)
+// rewriteWorkingPointer replaces the Ledger file at relPath with content only
+// while it still holds exactly the pointer for ref; an absent file (outside the
+// sparse checkout) is left absent, and any other content is someone's edit.
+// Both the read and the write go through a Ledger-rooted os.Root, so a link
+// planted at the plan directory or the page cannot redirect the tombstone
+// outside the checkout.
+func rewriteWorkingPointer(ledgerPath, relPath string, ref FileRef, content []byte) error {
+	root, err := os.OpenRoot(ledgerPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	current, err := root.ReadFile(relPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -186,7 +194,7 @@ func rewriteWorkingPointer(path string, ref FileRef, content []byte) error {
 	if !bytes.Equal(current, []byte(FormatPointer(ref.OID, ref.Size))) {
 		return fmt.Errorf("working copy changed during reconcile")
 	}
-	return fileutil.AtomicWriteBytes(path, content, 0o644)
+	return fileutil.AtomicWriteBytesInRoot(root, relPath, content, 0o644)
 }
 
 // MissingPlanRender is a plan page pointer in unpushed history whose blob the
