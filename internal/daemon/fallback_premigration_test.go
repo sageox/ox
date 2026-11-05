@@ -47,6 +47,9 @@ func startPreMigrationServer(t *testing.T, workspacePath string) *atomic.Int32 {
 }
 
 func TestStopPreMigrationDaemons_StopsConfirmedWorkspace(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: a confirmed stop waits for the old daemon to exit")
+	}
 	cwd, err := os.Getwd()
 	require.NoError(t, err)
 	stops := startPreMigrationServer(t, cwd)
@@ -61,12 +64,17 @@ func TestStopPreMigrationDaemons_LeavesUnconfirmedWorkspace(t *testing.T) {
 	require.Zero(t, stops.Load(), "a daemon reporting another workspace must not be stopped")
 }
 
+// The daemon behind the symlink reports this workspace, so only the socket-type
+// check keeps it running.
 func TestStopPreMigrationDaemons_IgnoresSymlinkedSocket(t *testing.T) {
-	stops := startPreMigrationServer(t, "/somewhere/else")
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	stops := startPreMigrationServer(t, cwd)
 	socket := paths.PreMigrationDaemonSocketFile(CurrentWorkspaceID())
 	real := socket + ".real"
 	require.NoError(t, os.Rename(socket, real))
 	require.NoError(t, os.Symlink(real, socket))
 	stopPreMigrationDaemons()
-	require.Zero(t, stops.Load())
+	time.Sleep(100 * time.Millisecond)
+	require.Zero(t, stops.Load(), "a symlinked pre-migration socket must not be stopped")
 }
