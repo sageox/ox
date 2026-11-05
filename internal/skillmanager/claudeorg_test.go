@@ -285,7 +285,7 @@ func TestClaudeOrgDedupe_NoRecordBehavesExactlyAsBefore(t *testing.T) {
 		}
 		base, err := skills.Digest()
 		require.NoError(t, err)
-		want := base + "+team:" + teamRevision(team)
+		want := base + "+team:" + teamRevision(team) + "+approvals:" + digestBytes([]byte(`{"schema_version":1}`))
 		got, err := ExpectedRevision(repo)
 		require.NoError(t, err)
 		require.Equal(t, want, got, "the revision changed shape for a repository with no org sync")
@@ -535,7 +535,7 @@ func TestClaudeOrgDedupe_CoworkerWithoutThePluginKeepsOxsCopies(t *testing.T) {
 			require.NoError(t, err)
 			expected, err := ExpectedRevision(repo)
 			require.NoError(t, err)
-			require.Equal(t, base+"+team:"+teamRevision(team), expected,
+			require.Equal(t, base+"+team:"+teamRevision(team)+"+approvals:"+digestBytes([]byte(`{"schema_version":1}`)), expected,
 				"the revision claims a deferral this machine does not make")
 			recorded, _, _ := InstalledSource(repo)
 			require.Equal(t, expected, recorded, "prime would re-plan on every session start")

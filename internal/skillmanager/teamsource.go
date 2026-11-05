@@ -1,6 +1,7 @@
 package skillmanager
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -48,9 +49,13 @@ type TeamSkillDecision struct {
 // sparse refresh deletes tracked files), and a background `git pull` must never
 // silently change what a coding agent executes.
 type teamCatalog struct {
-	base      catalogSource
-	teamFiles []skills.Skill
-	teamPath  string
+	base        catalogSource
+	teamFiles   []skills.Skill
+	teamPath    string
+	projectRoot string
+	// approvals is the exact policy snapshot used to select teamFiles. Keep it
+	// for Digest so a later policy edit cannot mark an older projection current.
+	approvals *teamskills.ApprovalStore
 	// incomplete is non-empty when this source could NOT see the team's skills,
 	// as opposed to seeing that the team publishes none. The planner reads it to
 	// decide whether an absent skill means "retire it" or "we are blind right now".
@@ -90,7 +95,7 @@ func teamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string,
 		// empty team half, so the planner retires every team projection already
 		// on disk. A project whose daemon has not finished its first clone would
 		// have its team playbooks deleted for the crime of being early.
-		return &teamCatalog{base: base, teamPath: teamPath, incomplete: reason, claudeOrg: claudeOrg}, nil, nil
+		return &teamCatalog{base: base, teamPath: teamPath, projectRoot: projectRoot, incomplete: reason, claudeOrg: claudeOrg}, nil, nil
 	}
 
 	discovered, rejected, err := teamdocs.DiscoverSkillsWithRejections(teamPath, repoSlug)
@@ -136,7 +141,7 @@ func teamSkillSourceResolved(base catalogSource, teamPath, repoSlug, projectRoot
 		base = builtInCatalog{}
 	}
 	if reason := unseeableTeamSkills(teamPath, repoSlug); reason != "" {
-		return &teamCatalog{base: base, teamPath: teamPath, incomplete: reason, claudeOrg: claudeOrg}, nil, nil
+		return &teamCatalog{base: base, teamPath: teamPath, projectRoot: projectRoot, incomplete: reason, claudeOrg: claudeOrg}, nil, nil
 	}
 	// The NameError split mirrors teamdocs.DiscoverSkillsWithRejections exactly,
 	// applied to data already in hand rather than re-walked from disk.
@@ -165,23 +170,15 @@ func buildTeamCatalog(base catalogSource, teamPath, repoSlug, projectRoot string
 		retained = "this repository's slug could not be determined, so targeted team skills were left in place"
 	}
 
-	// Refusals are carried BEFORE the empty check and never gated on what else was
-	// found. A team whose only skill has an unusable name would otherwise get the
-	// silent empty result this decision list exists to prevent — the author would
-	// see their skill simply not appear, with nothing anywhere saying it was read.
+	// Refusals are never gated on what else was found. A team whose only skill
+	// has an unusable name would otherwise get a silent empty result — the author
+	// would see their skill simply not appear, with nothing saying it was read.
 	// InstalledAs stays empty and NeedsApprove stays false: `ox skills approve`
 	// cannot help here, and sending the human there is worse than saying nothing.
 	var decisions []TeamSkillDecision
 	for _, r := range rejected {
 		decisions = append(decisions, TeamSkillDecision{Name: r.Name, Reason: r.NameError})
 	}
-	if len(discovered) == 0 {
-		if retained != "" {
-			return &teamCatalog{base: base, teamPath: teamPath, incomplete: retained, claudeOrg: claudeOrg}, decisions, nil
-		}
-		return base, decisions, nil
-	}
-
 	approvals, err := teamskills.LoadApprovals(projectRoot)
 	if err != nil {
 		// A store ox cannot read is NOT an empty store. Materializing executable
@@ -268,6 +265,7 @@ func buildTeamCatalog(base catalogSource, teamPath, repoSlug, projectRoot string
 	sort.Slice(allowed, func(i, j int) bool { return allowed[i].Name < allowed[j].Name })
 	return &teamCatalog{
 		base: base, teamFiles: allowed, teamPath: teamPath, incomplete: retained,
+		projectRoot: projectRoot, approvals: approvals,
 		claudeOrg: claudeOrg, claudeOrgDelivered: claudeOrgDelivered,
 	}, decisions, nil
 }
@@ -303,7 +301,24 @@ func (c *teamCatalog) Digest() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Keyed on the checkout's commit, NOT on a hash of the skills it contains.
+	approvals := c.approvals
+	if approvals == nil {
+		// Empty/incomplete catalogs and the Prime fast path still have to read
+		// policy. An unreadable store must never validate an old installation.
+		approvals = &teamskills.ApprovalStore{}
+		if c.projectRoot != "" {
+			approvals, err = teamskills.LoadApprovals(c.projectRoot)
+			if err != nil {
+				return "", err
+			}
+		}
+	}
+	policy, err := json.Marshal(approvals)
+	if err != nil {
+		return "", fmt.Errorf("digest team skill approvals: %w", err)
+	}
+	// The team component is keyed on the checkout's commit, NOT on a hash of
+	// the skills it contains. The project policy is hashed separately above.
 	// Prime compares this against the recorded revision to decide whether to
 	// re-plan at all, and it must be able to compute the same value WITHOUT
 	// walking the team tree — otherwise the cheap path costs exactly what it was
@@ -313,7 +328,7 @@ func (c *teamCatalog) Digest() (string, error) {
 	// value. That is the right trade: the checkout is daemon-managed, the daemon
 	// reconciles off the pull that lands a commit, and the 30-minute drift check
 	// is the floor under anything else.
-	return base + teamComponent(c.teamPath, c.claudeOrg), nil
+	return base + teamComponent(c.teamPath, c.claudeOrg) + "+approvals:" + digestBytes(policy), nil
 }
 
 // teamComponent is the team half of the catalog revision, shared by Digest and
@@ -516,7 +531,8 @@ func anySkillRootOnDisk(teamPath string) bool {
 }
 
 // ExpectedRevision computes what Plan would record for this repo, without
-// walking the catalog or the team checkout.
+// walking the catalog or the team checkout. It reads project approvals so a
+// policy-only commit invalidates the fast path, and unreadable policy is an error.
 //
 // It exists so the prime fast path and the planner cannot disagree. Prime used
 // to compare against the BUILT-IN digest alone while the planner recorded the
@@ -524,10 +540,6 @@ func anySkillRootOnDisk(teamPath string) bool {
 // team context existed — turning the cheap path into a full plan on every
 // session start, silently, forever.
 func ExpectedRevision(repoRoot string) (string, error) {
-	base, err := skills.Digest()
-	if err != nil {
-		return "", err
-	}
 	var teamPath string
 	var claudeOrg teamskills.ClaudeOrgSync
 	if repoRoot != "" {
@@ -538,7 +550,9 @@ func ExpectedRevision(repoRoot string) (string, error) {
 			}
 		}
 	}
-	return base + teamComponent(teamPath, claudeOrg), nil
+	return (&teamCatalog{
+		base: builtInCatalog{}, teamPath: teamPath, projectRoot: repoRoot, claudeOrg: claudeOrg,
+	}).Digest()
 }
 
 // catalogForRepo resolves the catalog Plan should project into repoRoot: the
@@ -599,14 +613,14 @@ func catalogForRepoResolved(repoRoot string, resolved *TeamSkillsResolved) (cata
 
 	tc := config.FindRepoTeamContext(repoRoot)
 	if tc == nil || tc.Path == "" {
-		return &teamCatalog{base: base, incomplete: "no team context is configured for this project"}, nil, nil
+		return &teamCatalog{base: base, projectRoot: repoRoot, incomplete: "no team context is configured for this project"}, nil, nil
 	}
 	claudeOrg := claudeOrgSyncFor(repoRoot, tc.TeamID)
 	if _, err := os.Stat(tc.Path); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			// The daemon clones team contexts in the background; a repo that was
 			// just initialized legitimately has nothing here yet.
-			return &teamCatalog{base: base, teamPath: tc.Path, incomplete: "team context checkout is not on disk yet", claudeOrg: claudeOrg}, nil, nil
+			return &teamCatalog{base: base, teamPath: tc.Path, projectRoot: repoRoot, incomplete: "team context checkout is not on disk yet", claudeOrg: claudeOrg}, nil, nil
 		}
 		return nil, nil, fmt.Errorf("stat team context %s: %w", tc.Path, err)
 	}
