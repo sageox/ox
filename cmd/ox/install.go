@@ -28,6 +28,7 @@ var (
 	installRunLogin      = runInstalledLogin
 	installRetireDaemons = retireStaleDaemonsAfterUpgrade
 	installSystemBinDir  = "/usr/local/bin"
+	installInteractive   = cli.IsInteractive
 )
 
 var installCmd = &cobra.Command{
@@ -291,7 +292,9 @@ func installLogin(out io.Writer, oxPath string) (bool, error) {
 		fmt.Fprintln(out, "Already logged in to SageOx.")
 		return false, nil
 	}
-	if cli.NoInput() {
+	// A piped stdin (npx in CI, a script) cannot answer login's prompts and
+	// would leave it blocked before device-code polling starts.
+	if cli.NoInput() || !installInteractive() {
 		fmt.Fprintf(out, "Log in with: %s\n", cli.StyleCommand.Render("ox login"))
 		return false, nil
 	}

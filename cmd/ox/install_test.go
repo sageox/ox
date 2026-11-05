@@ -32,6 +32,9 @@ func stubInstall(t *testing.T, loggedIn bool) (src string, logins *[]string, ret
 		installExecutable, installLoggedIn, installRunLogin, installRetireDaemons, installSystemBinDir = origExe, origLogged, origLogin, origRetire, origSys
 		installDirFlag, installSkipLogin = origDir, origSkip
 	})
+	origInteractive := installInteractive
+	t.Cleanup(func() { installInteractive = origInteractive })
+	installInteractive = func() bool { return true }
 	installExecutable = func() (string, error) { return filepath.Join(src, "ox"), nil }
 	installLoggedIn = func() bool { return loggedIn }
 	installRunLogin = func(oxPath string) error { calls = append(calls, oxPath); return nil }
@@ -362,4 +365,16 @@ func TestRunInstallIgnoresRelativeHomebrewLink(t *testing.T) {
 
 func TestFishQuote(t *testing.T) {
 	assert.Equal(t, `'/tmp/a\\b it\'s'`, fishQuote(`/tmp/a\b it's`))
+}
+
+func TestRunInstallNonInteractiveStdinSkipsLogin(t *testing.T) {
+	_, logins, _ := stubInstall(t, false)
+	installDirFlag = t.TempDir()
+	t.Setenv("PATH", installDirFlag)
+	installInteractive = func() bool { return false }
+
+	out := runInstallCmd(t)
+
+	assert.Empty(t, *logins, "a piped stdin must not start an interactive login")
+	assert.Contains(t, out, "Log in with:")
 }
