@@ -203,6 +203,11 @@ func showStarHint(exitCode int, w io.Writer) {
 	if auth.LocalUserID(run.ident.endpoint) != run.ident.userID {
 		return
 	}
+	// A command can also turn tips off (`ox config set tips off`), which must
+	// silence this very run: read the setting as it is now, not as pre-run saw it.
+	if !starHintTipsEnabled() {
+		return
+	}
 
 	if _, err := fmt.Fprintln(w, line); err != nil {
 		return // nothing reached the terminal, so nothing is spent
@@ -214,6 +219,13 @@ func showStarHint(exitCode int, w io.Writer) {
 		slog.Debug("star hint stamp failed", "error", err)
 	}
 	reportStarHintSeen(run.ident, entry.Card.Token)
+}
+
+// starHintTipsEnabled reads the tips setting from disk on every call (the user
+// config is not cached), so a command that just changed it is honored.
+func starHintTipsEnabled() bool {
+	userCfg, err := config.LoadUserConfig()
+	return err == nil && userCfg != nil && userCfg.AreTipsEnabled()
 }
 
 // starHintAudience answers "is a person reading this command's stderr, and are
@@ -237,8 +249,7 @@ func starHintAudience(c *cli.Context) (starHintIdentity, bool) {
 	if starHintAutomated() {
 		return starHintIdentity{}, false
 	}
-	userCfg, err := config.LoadUserConfig()
-	if err != nil || userCfg == nil || !userCfg.AreTipsEnabled() {
+	if !starHintTipsEnabled() {
 		return starHintIdentity{}, false
 	}
 

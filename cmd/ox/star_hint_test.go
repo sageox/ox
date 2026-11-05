@@ -363,6 +363,30 @@ func TestStarHint_SilentWhenTheCommandChangedWhoIsSignedIn(t *testing.T) {
 	assert.Equal(t, 0, e.entry().Shown)
 }
 
+// Failure prevented: `ox config set tips off` answers by printing the very ask
+// the person just switched off.
+func TestStarHint_SilentWhenTheCommandTurnedTipsOff(t *testing.T) {
+	e := newStarHintEnv(t)
+
+	beginStarHint()
+	require.NotNil(t, starHintPending, "tips were on when the command started")
+	userCfg, err := config.LoadUserConfig()
+	require.NoError(t, err)
+	off := false
+	userCfg.TipsEnabled = &off
+	require.NoError(t, config.SaveUserConfig(userCfg))
+	t.Cleanup(func() {
+		userCfg.TipsEnabled = nil
+		require.NoError(t, config.SaveUserConfig(userCfg))
+	})
+	var stderr bytes.Buffer
+	showStarHint(0, &stderr)
+
+	assert.Empty(t, stderr.String())
+	assert.EqualValues(t, 0, e.srv.seens.Load())
+	assert.Equal(t, 0, e.entry().Shown)
+}
+
 // --- what the server may say ---
 
 // Failure prevented: a newer server's card, a malformed card, or hostile text
