@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/logger"
@@ -17,14 +18,14 @@ import (
 
 // getGiteaIdentity fetches the authenticated Gitea user identity.
 // It tries in order:
-//  1. GITEA_TOKEN environment variable
+//  1. GITEA_TOKEN environment variable, scoped to GITEA_URL
 //  2. tea CLI config file (~/.config/tea/config.yml)
 //
 // Since Gitea is self-hosted, we need the instance URL to know which
 // server to query. The function will look up the token for the given
 // instance URL.
 //
-// Privacy: Only called if a remote points to a Gitea instance.
+// Privacy: Only queries explicitly configured Gitea instances.
 func getGiteaIdentity(instanceURL string) (*Identity, error) {
 	token := getGiteaToken(instanceURL)
 	if token == "" {
@@ -35,11 +36,15 @@ func getGiteaIdentity(instanceURL string) (*Identity, error) {
 }
 
 // getGiteaToken retrieves Gitea token from environment or tea CLI config.
-// For environment variable, it will work for any instance.
-// For tea CLI config, it looks up the token for the specific instance URL.
+// Both sources must explicitly match the requested instance URL.
 func getGiteaToken(instanceURL string) string {
-	// 1. Environment variable (CI/CD friendly, works for any instance)
-	if t := os.Getenv("GITEA_TOKEN"); t != "" {
+	normalizedInstance := normalizeGiteaURL(instanceURL)
+	if normalizedInstance == "" {
+		return ""
+	}
+
+	// 1. Environment token must be bound to an explicit GITEA_URL.
+	if t := os.Getenv("GITEA_TOKEN"); t != "" && normalizeGiteaURL(os.Getenv("GITEA_URL")) == normalizedInstance {
 		return t
 	}
 
@@ -61,56 +66,53 @@ type teaConfig struct {
 // The tea CLI stores credentials at ~/.config/tea/config.yml.
 // Since Gitea is self-hosted, we need to match the instance URL.
 func readTeaConfig(instanceURL string) string {
-	configPath := filepath.Join(xdgConfigHome(), "tea", "config.yml")
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return ""
-	}
-
-	var config teaConfig
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		return ""
-	}
-
-	// normalize instance URL for comparison (remove trailing slash, handle http/https)
 	normalizedInstance := normalizeGiteaURL(instanceURL)
+	if normalizedInstance == "" {
+		return ""
+	}
 
-	// look for matching instance URL
+	config := readTeaConfigFile()
 	for _, login := range config.Logins {
 		if normalizeGiteaURL(login.URL) == normalizedInstance {
 			return login.Token
 		}
 	}
 
-	// if no match found, try to use default login (if there is one)
-	for _, login := range config.Logins {
-		if login.Default {
-			return login.Token
-		}
-	}
-
+	// A default login does not authorize sending its token to another instance.
 	return ""
 }
 
+func readTeaConfigFile() teaConfig {
+	configPath := filepath.Join(xdgConfigHome(), "tea", "config.yml")
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return teaConfig{}
+	}
+
+	var config teaConfig
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return teaConfig{}
+	}
+
+	return config
+}
+
 // normalizeGiteaURL normalizes a Gitea instance URL for comparison.
-// It handles both http/https and removes trailing slashes.
+// Scheme, port, and base path are part of the credential scope.
+// Invalid or ambiguous instance URLs must never match credentials.
 func normalizeGiteaURL(rawURL string) string {
-	if rawURL == "" {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return ""
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	if u.Scheme != "https" && u.Scheme != "http" {
 		return ""
 	}
 
-	// parse URL to normalize
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		// if parsing fails, just do basic cleanup
-		rawURL = trimTrailingSlash(rawURL)
-		return rawURL
-	}
-
-	// use host (with optional port) for comparison
-	// this handles both http://gitea.example.com and https://gitea.example.com
-	return u.Host
+	u.Host = strings.ToLower(u.Host)
+	return trimTrailingSlash(u.String())
 }
 
 // trimTrailingSlash removes trailing slash from URL.
@@ -154,7 +156,13 @@ func fetchGiteaUser(instanceURL, token string) (*Identity, error) {
 	logger.LogHTTPRequest("GET", apiURL)
 	start := time.Now()
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		// Do not forward credentials beyond the configured instance.
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := client.Do(req)
 	duration := time.Since(start)
 	if err != nil {
