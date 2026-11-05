@@ -1,7 +1,7 @@
 # Makefile for ox CLI tool
 
 .PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open check-test-tiers test-tiers
-.PHONY: test-all-split test-split-slots test-split-slot coverage-merge-unit warm-test-cache coverage-integration-profile coverage-merge
+.PHONY: test-all-split test-split-slots test-split-slot test-fast-split-slots test-fast-split-slot coverage-merge-unit warm-test-cache coverage-integration-profile coverage-merge
 .PHONY: help build build-ox build-adapters build-acceptance install install-adapters uninstall uninstall-ox uninstall-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-release-coverage release-stages test-agents test-agents-scoping test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish plan-review plan-review-check refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
@@ -359,15 +359,23 @@ test-all: check-test-tiers test-public-modules ## Run all unit tests including e
 # slot on its own runner (`test-split-slot`), because on a 4-vCPU runner the
 # tests are CPU-bound and processes sharing it only slow each other down.
 # Refresh .config/test-split-weights.json from CI test-timing-events artifacts
-# with `scripts/test_split.py update-weights`.
+# with `scripts/test_split.py update-weights`; the fast tier (the PR gate) has
+# its own layout and weights file, refreshed from a fast run's artifacts.
 TEST_SPLIT_LAYOUT := --split ./cmd/ox=4 --split ./internal/daemon=2 \
 	--group heavy=./internal/daemon/agentwork,./internal/ledger
+TEST_SPLIT_WEIGHTS := .config/test-split-weights.json
+# internal/plan and internal/session are the fast tier's longest packages and
+# run last in `rest`'s alphabetical order, so they ride with `heavy`.
+FAST_SPLIT_LAYOUT := --split ./cmd/ox=5 --split ./internal/daemon=2 \
+	--group heavy=./internal/daemon/agentwork,./internal/ledger,./internal/plan,./internal/session
+test-fast-split-slots test-fast-split-slot: TEST_SPLIT_LAYOUT := $(FAST_SPLIT_LAYOUT)
+test-fast-split-slot: TEST_SPLIT_WEIGHTS := .config/test-split-weights-fast.json
 TEST_SPLIT_ONLY ?=
 TEST_SPLIT_PARTS := tmp/unit-parts
 TEST_SPLIT_RUN = python3 scripts/test_split.py run $(TEST_SPLIT_LAYOUT) \
 		--go "$(GO)" \
 		--gotestsum "$(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN)" \
-		--weights .config/test-split-weights.json \
+		--weights $(TEST_SPLIT_WEIGHTS) \
 		$(if $(strip $(TEST_JUNIT)),--junit "$(TEST_JUNIT)",) \
 		$(if $(strip $(TEST_TIMINGS)),--timings "$(TEST_TIMINGS)",)
 
@@ -391,6 +399,18 @@ test-split-slot: check-test-tiers ## Run one slot of the full tier: make test-sp
 	  $(MAKE) --no-print-directory test-public-modules && \
 	  tail -n +2 $(PUBLIC_MODULES_COVER) >> $(TEST_SPLIT_PARTS)/coverage-rest.out; \
 	 fi
+
+test-fast-split-slots: ## Print the fast tier's slots as a JSON array (the PR unit matrix)
+	@python3 scripts/test_split.py slots $(TEST_SPLIT_LAYOUT)
+
+test-fast-split-slot: check-test-tiers ## Run one slot of the fast tier, the PR gate: make test-fast-split-slot TEST_SPLIT_ONLY=<slot>
+	@test -n "$(TEST_SPLIT_ONLY)" || { echo "Set TEST_SPLIT_ONLY to one of: $$($(MAKE) -s test-fast-split-slots)"; exit 1; }
+	@# Exactly `make test`'s flags, so the build cache the main push saves after
+	@# running `make test` serves these slots too. No coverage: the ratchets
+	@# run on the full tier, in the merge queue.
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(TEST_SPLIT_RUN) --only "$(TEST_SPLIT_ONLY)" --work-dir tmp/test-split \
+		-- $(FAST_TEST_FLAGS)
+	@if [ "$(TEST_SPLIT_ONLY)" = rest ]; then $(MAKE) --no-print-directory test-public-modules; fi
 
 coverage-merge-unit: ## Merge one coverage part per slot ($(TEST_SPLIT_PARTS)) into coverage.out; fails if a slot is missing
 	@python3 scripts/test_split.py merge-slots $(TEST_SPLIT_LAYOUT) --parts $(TEST_SPLIT_PARTS) --out coverage.out
