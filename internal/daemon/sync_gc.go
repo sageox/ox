@@ -1101,7 +1101,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 // Link retries without overwriting destination entries. Retire each source
 // after its link is durable so cleared retries cannot return from .old.
 func gcCarryPlanRetries(oldPath, newPath string) error {
-	for _, dir := range []string{ledger.PlanPushPendingDir, ledger.PlanReviewPendingDir} {
+	for _, dir := range []string{ledger.PlanPushPendingDir, ledger.PlanReviewPendingDir, murmurOutboxGitDir} {
 		srcDir, dstDir := filepath.Join(oldPath, dir), filepath.Join(newPath, dir)
 		entries, err := os.ReadDir(srcDir)
 		if errors.Is(err, fs.ErrNotExist) {

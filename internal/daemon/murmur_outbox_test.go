@@ -352,3 +352,30 @@ func TestDrainMurmurOutbox_TeamSymlinks(t *testing.T) {
 		}
 	}
 }
+
+func TestMurmurOutbox_DrainsMurmursQueuedBeforeClone(t *testing.T) {
+	isolateMurmurOutbox(t)
+	target := t.TempDir()
+	p := makeOutboxMurmur(t, target, "queued before clone", time.Now().UTC())
+	require.NoError(t, WriteOutboxMurmur(target, p))
+
+	require.NoError(t, os.Mkdir(filepath.Join(target, ".git"), 0o755))
+	entries, err := ReadOutboxMurmurs(target)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, p.RelPath, entries[0].payload.RelPath)
+}
+
+func TestGCCarriesMurmurOutbox(t *testing.T) {
+	isolateMurmurOutbox(t)
+	oldClone, newClone := t.TempDir(), t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(oldClone, ".git"), 0o755))
+	require.NoError(t, os.Mkdir(filepath.Join(newClone, ".git"), 0o755))
+	p := makeOutboxMurmur(t, oldClone, "queued during gc", time.Now().UTC())
+	require.NoError(t, WriteOutboxMurmur(oldClone, p))
+
+	require.NoError(t, gcCarryPlanRetries(oldClone, newClone))
+	entries, err := ReadOutboxMurmurs(newClone)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+}

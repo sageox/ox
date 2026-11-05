@@ -34,10 +34,34 @@ func MurmurOutboxDir(targetDir string) string {
 	}
 	targetDir = filepath.Clean(targetDir)
 	if info, err := os.Lstat(filepath.Join(targetDir, ".git")); err == nil && info.IsDir() {
-		return filepath.Join(targetDir, ".git", "sageox-murmur-outbox")
+		return filepath.Join(targetDir, murmurOutboxGitDir)
 	}
-	sum := sha256.Sum256([]byte(targetDir))
+	return murmurOutboxCacheDir(targetDir)
+}
+
+// murmurOutboxGitDir is checkout-relative so GC reclones can carry it over.
+const murmurOutboxGitDir = ".git/sageox-murmur-outbox"
+
+func murmurOutboxCacheDir(cleanTarget string) string {
+	sum := sha256.Sum256([]byte(cleanTarget))
 	return filepath.Join(paths.DaemonCacheDir(), "murmur-outbox", fmt.Sprintf("%x", sum))
+}
+
+// murmurOutboxDirs lists every queue a target may hold: murmurs queued before
+// the checkout was cloned sit in the cache fallback, so it is drained too.
+func murmurOutboxDirs(targetDir string) []string {
+	dir := MurmurOutboxDir(targetDir)
+	dirs := []string{dir}
+	if abs, err := filepath.Abs(targetDir); err == nil {
+		targetDir = abs
+	}
+	if real, err := filepath.EvalSymlinks(targetDir); err == nil {
+		targetDir = real
+	}
+	if cache := murmurOutboxCacheDir(filepath.Clean(targetDir)); cache != dir {
+		dirs = append(dirs, cache)
+	}
+	return dirs
 }
 
 // WriteOutboxMurmur persists a murmur payload to the outbox so it survives a
@@ -62,7 +86,18 @@ func WriteOutboxMurmur(targetDir string, p MurmurPayload) error {
 // ReadOutboxMurmurs returns all queued murmurs for a target. Unreadable or
 // malformed files are skipped (best-effort) rather than failing the whole drain.
 func ReadOutboxMurmurs(targetDir string) ([]outboxEntry, error) {
-	dir := MurmurOutboxDir(targetDir)
+	var entries []outboxEntry
+	for _, dir := range murmurOutboxDirs(targetDir) {
+		found, err := readOutboxDir(dir)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, found...)
+	}
+	return entries, nil
+}
+
+func readOutboxDir(dir string) ([]outboxEntry, error) {
 	files, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
