@@ -228,9 +228,9 @@ func replaceInRoot(root *os.Root, relPath string, content []byte) error {
 	err = errors.Join(err, tmp.Chmod(info.Mode().Perm()), tmp.Sync(), tmp.Close())
 	if err == nil {
 		err = parent.Rename(tmpName, base)
-	}
-	if err != nil && info.Mode().Perm()&0o200 == 0 {
-		err = renameOverReadOnly(parent, tmpName, base, info.Mode().Perm())
+		if err != nil && info.Mode().Perm()&0o200 == 0 {
+			err = renameOverReadOnly(parent, tmpName, base, info.Mode().Perm())
+		}
 	}
 	if err != nil {
 		_ = parent.Remove(tmpName)
