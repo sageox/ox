@@ -534,9 +534,13 @@ func download(ctx context.Context, client *http.Client, url string) ([]byte, err
 
 // codesignAdHoc re-signs a binary ad-hoc on macOS so Gatekeeper does not
 // slow-path it. Best-effort: absence of codesign or a failure is ignored.
+// The absolute path matters: npx prepends project node_modules/.bin to PATH,
+// so a PATH lookup could run a repository-controlled "codesign".
 func codesignAdHoc(path string) {
-	if _, err := exec.LookPath("codesign"); err != nil {
+	if _, err := os.Stat(codesignPath); err != nil {
 		return
 	}
-	_ = exec.Command("codesign", "--force", "--sign", "-", path).Run()
+	_ = exec.Command(codesignPath, "--force", "--sign", "-", path).Run()
 }
+
+const codesignPath = "/usr/bin/codesign"

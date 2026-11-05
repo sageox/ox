@@ -280,6 +280,7 @@ func init() {
 	releaseNotesCmd.GroupID = "diagnostics"
 	daemonCmd.GroupID = "diagnostics"
 	upgradeCmd.GroupID = "diagnostics"
+	installCmd.GroupID = "diagnostics"
 	guideCmd.GroupID = "diagnostics"
 	gcCmd.GroupID = "diagnostics"
 
@@ -308,6 +309,7 @@ func init() {
 	rootCmd.AddCommand(releaseNotesCmd)
 	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(upgradeCmd)
+	rootCmd.AddCommand(installCmd)
 	rootCmd.AddCommand(guideCmd)
 	rootCmd.AddCommand(gcCmd)
 

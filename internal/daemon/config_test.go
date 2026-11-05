@@ -69,13 +69,15 @@ func TestSocketPath_LegacyMode(t *testing.T) {
 }
 
 func TestSocketPath_DefaultModeWithoutRuntime(t *testing.T) {
+	stateHome := t.TempDir()
 	t.Setenv("OX_XDG_DISABLE", "")
 	t.Setenv("XDG_RUNTIME_DIR", "")
+	t.Setenv("XDG_STATE_HOME", stateHome)
 
 	workspaceID := CurrentWorkspaceID()
 	path := SocketPath()
-	// os.TempDir() returns platform-specific temp dir (e.g., /var/folders on macOS)
-	expected := filepath.Join(os.TempDir(), "sageox", "daemon", "daemon-"+workspaceID+".sock")
+	// Without a runtime directory, sockets use per-user state, not shared temp storage.
+	expected := filepath.Join(stateHome, "sageox", "daemon", "daemon-"+workspaceID+".sock")
 	assert.Equal(t, expected, path)
 }
 
