@@ -275,8 +275,20 @@ func urlPath(rawURL string) string {
 	return ""
 }
 
+// isDefaultPort treats a scheme-less remote's :443 or :80 as default too:
+// GetRemoteURLs strips the scheme but keeps explicit ports.
 func isDefaultPort(scheme, port string) bool {
-	return (scheme == "https" && port == "443") || (scheme == "http" && port == "80") || (scheme == "ssh" && port == "22")
+	switch scheme {
+	case "https":
+		return port == "443"
+	case "http":
+		return port == "80"
+	case "ssh":
+		return port == "22"
+	case "":
+		return port == "443" || port == "80"
+	}
+	return false
 }
 
 func parseRemoteURL(rawURL string) *url.URL {
@@ -300,11 +312,12 @@ func giteaRemoteBelongs(instanceURL, remoteURL string) bool {
 	if extractHost(instanceURL) != extractHost(remoteURL) {
 		return false
 	}
-	base := strings.Trim(urlPath(instanceURL), "/")
+	// GetRemoteURLs lowercases remotes, so compare paths case-insensitively.
+	base := strings.ToLower(strings.Trim(urlPath(instanceURL), "/"))
 	if base == "" {
 		return true
 	}
-	remotePath := strings.Trim(urlPath(remoteURL), "/")
+	remotePath := strings.ToLower(strings.Trim(urlPath(remoteURL), "/"))
 	return remotePath == base || strings.HasPrefix(remotePath, base+"/")
 }
 

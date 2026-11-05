@@ -143,3 +143,20 @@ func TestGetSageOxIdentity_NoToken(t *testing.T) {
 		assert.True(t, identity.Verified)
 	}
 }
+
+func TestGiteaRemoteBelongs_NormalizedRemotes(t *testing.T) {
+	for _, tc := range []struct {
+		instance, remote string
+		want             bool
+	}{
+		{"https://git.example.com", "git.example.com:443/team/repo", true},
+		{"http://git.example.com", "git.example.com:80/team/repo", true},
+		{"https://git.example.com/Gitea", "git.example.com/gitea/team/repo", true},
+		{"https://git.example.com/Gitea", "git.example.com/other/team/repo", false},
+		{"https://git.example.com", "git.example.com:8443/team/repo", false},
+	} {
+		if got := giteaRemoteBelongs(tc.instance, tc.remote); got != tc.want {
+			t.Errorf("giteaRemoteBelongs(%q, %q) = %v, want %v", tc.instance, tc.remote, got, tc.want)
+		}
+	}
+}
