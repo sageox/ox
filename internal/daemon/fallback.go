@@ -518,8 +518,20 @@ func stopPreMigrationDaemons() {
 		if socket == "" || socket == SocketPathForWorkspace(id) {
 			continue
 		}
+		// The shared temp directory is writable by others, so the name may be a
+		// symlink to some other daemon's socket. Stop only a real socket whose
+		// daemon reports this very workspace.
+		if info, err := os.Lstat(socket); err != nil || info.Mode().Type() != os.ModeSocket {
+			continue
+		}
 		client := NewClientWithSocket(socket)
 		if err := client.Ping(); err != nil {
+			continue
+		}
+		status, err := client.Status()
+		if err != nil || status.WorkspacePath == "" ||
+			(RepoBasedWorkspaceID(status.WorkspacePath) != id && WorkspaceID(status.WorkspacePath) != id) {
+			slog.Warn("leaving daemon on pre-migration socket: workspace not confirmed", "workspace_id", id, "socket", socket)
 			continue
 		}
 		slog.Info("stopping daemon on pre-migration socket", "workspace_id", id, "socket", socket)
