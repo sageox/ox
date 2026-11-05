@@ -364,8 +364,10 @@ test-all: check-test-tiers test-public-modules ## Run all unit tests including e
 TEST_SPLIT_LAYOUT := --split ./cmd/ox=4 --split ./internal/daemon=2 \
 	--group heavy=./internal/daemon/agentwork,./internal/ledger
 TEST_SPLIT_WEIGHTS := .config/test-split-weights.json
+# internal/plan and internal/session are the fast tier's longest packages and
+# run last in `rest`'s alphabetical order, so they ride with `heavy`.
 FAST_SPLIT_LAYOUT := --split ./cmd/ox=5 --split ./internal/daemon=2 \
-	--group heavy=./internal/daemon/agentwork,./internal/ledger
+	--group heavy=./internal/daemon/agentwork,./internal/ledger,./internal/plan,./internal/session
 test-fast-split-slots test-fast-split-slot: TEST_SPLIT_LAYOUT := $(FAST_SPLIT_LAYOUT)
 test-fast-split-slot: TEST_SPLIT_WEIGHTS := .config/test-split-weights-fast.json
 TEST_SPLIT_ONLY ?=

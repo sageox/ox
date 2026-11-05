@@ -27,7 +27,8 @@ env:
   MERGE_GATE: ${{ startsWith(github.head_ref, 'trunk-merge/') }}
 
 jobs:
-  # Two tiers, both cut into the same slots (see `make test-split-slots`):
+  # Two tiers, each cut into slots (`make test-split-slots`, `make
+  # test-fast-split-slots`):
   #
   #   fast  every push to a PR: lint plus the fast unit tier (-short), one
   #         runner per slot, no coverage. The goal is a verdict in under two
@@ -43,7 +44,6 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
-      slots: ${{ steps.slots.outputs.slots }}
       tier: ${{ steps.tier.outputs.tier }}
     steps:
       - id: tier
@@ -55,16 +55,15 @@ jobs:
           # .git/config would hand it to the test code this job runs.
           persist-credentials: false
 
-      # The matrix comes from the Makefile so it cannot drift from the layout
-      # the merge step expects; `coverage-merge-unit` refuses a missing slot.
-      # The fast tier has its own layout: it cuts cmd/ox finer.
-      - id: slots
-        env:
-          TIER: ${{ steps.tier.outputs.tier }}
+      # The unit matrix is written out below so its runners start without
+      # waiting for this job. This keeps it equal to the Makefile layouts
+      # (`coverage-merge-unit` also refuses a missing full-tier slot).
+      - name: Unit matrix matches the Makefile layouts
         run: |
-          target=test-fast-split-slots
-          if [ "$TIER" = full ]; then target=test-split-slots; fi
-          echo "slots=$(make -s "$target")" >> "$GITHUB_OUTPUT"
+          for target in test-split-slots test-fast-split-slots; do
+            slots=$(make -s "$target")
+            grep -qF "'$slots'" .github/workflows/ci.yml || { echo "::error::ci.yml unit matrix is missing $target: $slots"; exit 1; }
+          done
 
       # CI tooling's own tests: off the fast path, before merge.
       - name: Test harness contracts
@@ -72,13 +71,16 @@ jobs:
         run: make coverage-ratchet-test
 
   unit:
-    needs: plan
+    if: github.event_name == 'pull_request'
     # 8 vCPU: go test -race -p 8 -parallel 32 per slot; ox-4 is the PR long pole (~1300s on 4 vCPU)
     runs-on: blacksmith-8vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
-        slot: ${{ fromJSON(needs.plan.outputs.slots) }}
+        # Full tier (merge queue) first, fast tier second: `make -s
+        # test-split-slots` and `make -s test-fast-split-slots`, checked by
+        # the plan job. strategy cannot read env, hence the repeated test.
+        slot: ${{ fromJSON(startsWith(github.head_ref, 'trunk-merge/') && '["rest", "heavy", "ox-1", "ox-2", "ox-3", "ox-4", "daemon-1", "daemon-2"]' || '["rest", "heavy", "ox-1", "ox-2", "ox-3", "ox-4", "ox-5", "daemon-1", "daemon-2"]') }}
     name: unit (${{ matrix.slot }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -123,9 +125,9 @@ jobs:
       #   --junitfile                       structured artifact for digest + post-mortem
       # Verbose mode (humans/local debugging): OX_TEST_LOG=1 + run gotestsum without
       # these flags, or call `make test` with V=1.
-      - name: ${{ needs.plan.outputs.tier }} unit tier, slot ${{ matrix.slot }}
+      - name: ${{ env.MERGE_GATE == 'true' && 'full' || 'fast' }} unit tier, slot ${{ matrix.slot }}
         env:
-          TIER: ${{ needs.plan.outputs.tier }}
+          TIER: ${{ env.MERGE_GATE == 'true' && 'full' || 'fast' }}
         run: |
           target=test-fast-split-slot
           if [ "$TIER" = full ]; then target=test-split-slot; fi
@@ -141,7 +143,7 @@ jobs:
           python3 scripts/test_metrics.py test-timings.json >/dev/null
 
       - name: Upload unit coverage
-        if: needs.plan.outputs.tier == 'full'
+        if: env.MERGE_GATE == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: unit-coverage-${{ matrix.slot }}
@@ -491,7 +493,8 @@ jobs:
           fail_ci_if_error: false
 
   lint:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # 8 vCPU: on the fast path, and golangci-lint uses every core.
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -517,7 +520,9 @@ jobs:
 
       # Moved here from the test job, which no longer needs a plain build: the
       # unit tier compiles every package anyway, and this job finishes first.
+      # golangci-lint's typecheck catches a compile error on the fast path.
       - name: Build
+        if: github.event_name == 'push' || env.MERGE_GATE == 'true'
         run: go build -v ./...
 
       # Match the FreeBSD release target and catch platform-specific imports.
