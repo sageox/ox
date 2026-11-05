@@ -47,9 +47,9 @@ func startPreMigrationServer(t *testing.T, workspacePath string) *atomic.Int32 {
 }
 
 func TestStopPreMigrationDaemons_StopsConfirmedWorkspace(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: a confirmed stop waits for the old daemon to exit")
-	}
+	orig := preMigrationStopWait
+	preMigrationStopWait = 0
+	t.Cleanup(func() { preMigrationStopWait = orig })
 	cwd, err := os.Getwd()
 	require.NoError(t, err)
 	stops := startPreMigrationServer(t, cwd)

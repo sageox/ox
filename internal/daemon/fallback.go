@@ -539,9 +539,13 @@ func stopPreMigrationDaemons() {
 			slog.Warn("failed to stop pre-migration daemon", "workspace_id", id, "error", err)
 			continue
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(preMigrationStopWait)
 	}
 }
+
+// preMigrationStopWait gives a stopped pre-migration daemon time to release
+// its socket and lock before the new daemon starts; tests shorten it.
+var preMigrationStopWait = 500 * time.Millisecond
 
 // stopLegacyDaemon stops a daemon running under the old path-based workspace ID.
 // This handles migration from path-hash to repo_id-hash identity: when the new
