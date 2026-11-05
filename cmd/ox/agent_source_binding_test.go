@@ -37,3 +37,10 @@ func TestWriteRawHeader_RefusesUnboundSource(t *testing.T) {
 	require.True(t, errors.Is(err, adapterruntime.ErrUnboundSource))
 	require.NoFileExists(t, state.SessionPath+"/raw.jsonl")
 }
+
+func TestProcessAgentSession_RefusesQuarantinedSource(t *testing.T) {
+	state := &session.RecordingState{AgentID: "OxCla", AdapterName: "claude-code", SourceRejected: true}
+	result, err := processAgentSession(t.TempDir(), state)
+	require.Nil(t, result)
+	require.ErrorContains(t, err, "preserved for manual review")
+}
