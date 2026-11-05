@@ -81,6 +81,9 @@ type GitHubMirrorDeps struct {
 	Enabled func() bool
 	// AuthToken returns the SageOx token the mirror API call is made with.
 	AuthToken func() string
+	// Endpoint returns the SageOx API endpoint this cycle relays to, resolved
+	// by AuthToken. nil or "" leaves the saved history's endpoint unchecked.
+	Endpoint func() string
 	// Team returns the project's team id (or slug) and the on-disk path of
 	// its Team Context checkout. Either empty means "not set up here".
 	Team func() (teamRef, teamContextPath string)
@@ -158,11 +161,22 @@ func NewGitHubMirrorRelayer(deps GitHubMirrorDeps) *GitHubMirrorRelayer {
 // newProjectGitHubMirrorRelayer wires the production dependencies for one
 // project: the server flag from the cached CLI settings, the heartbeat token
 // (then the on-disk token) for the SageOx API, and the project's team.
-func newProjectGitHubMirrorRelayer(projectRoot string, settings func() *flags.CLISettingsResponse, heartbeatToken func() string, logger *slog.Logger) *GitHubMirrorRelayer {
+func newProjectGitHubMirrorRelayer(projectRoot string, settings func() *flags.CLISettingsResponse, heartbeatToken func(destination string) string, logger *slog.Logger) *GitHubMirrorRelayer {
+	// Resolve the endpoint once per cycle (AuthToken runs first) and reuse it
+	// for the relay client, so a config edit mid-cycle cannot send a token
+	// checked for one origin to another, yet the next cycle follows the edit.
+	var (
+		mu      sync.Mutex
+		cycleEP string
+	)
 	return NewGitHubMirrorRelayer(GitHubMirrorDeps{
 		Enabled: func() bool { return githubMirrorFeatureOn(settings) },
 		AuthToken: func() string {
-			return resolveMirrorAuthToken(heartbeatToken, endpoint.GetForProject(projectRoot))
+			ep := endpoint.GetForProject(projectRoot)
+			mu.Lock()
+			cycleEP = ep
+			mu.Unlock()
+			return resolveMirrorAuthToken(heartbeatToken, ep)
 		},
 		Team: func() (string, string) {
 			tc := config.FindRepoTeamContext(projectRoot)
@@ -174,8 +188,16 @@ func newProjectGitHubMirrorRelayer(projectRoot string, settings func() *flags.CL
 		NewFetcher: func(githubToken string) githubmirror.Fetcher {
 			return gh.NewMirrorFetcher(gh.NewClient(githubToken))
 		},
+		Endpoint: func() string {
+			mu.Lock()
+			defer mu.Unlock()
+			return cycleEP
+		},
 		NewRelay: func(authToken string) MirrorRelayClient {
-			return api.NewRepoClientWithEndpoint(endpoint.GetForProject(projectRoot)).WithAuthToken(authToken)
+			mu.Lock()
+			ep := cycleEP
+			mu.Unlock()
+			return api.NewRepoClientWithEndpoint(ep).WithAuthToken(authToken)
 		},
 		Logger: logger,
 	})
@@ -196,9 +218,9 @@ func githubMirrorFeatureOn(settings func() *flags.CLISettingsResponse) bool {
 
 // resolveMirrorAuthToken mirrors SettingsFetcher.resolveAuthToken: the
 // heartbeat's token first, then the on-disk token for the endpoint.
-func resolveMirrorAuthToken(heartbeatToken func() string, ep string) string {
+func resolveMirrorAuthToken(heartbeatToken func(destination string) string, ep string) string {
 	if heartbeatToken != nil {
-		if t := heartbeatToken(); t != "" {
+		if t := heartbeatToken(ep); t != "" {
 			return t
 		}
 	}
@@ -286,7 +308,11 @@ func (r *GitHubMirrorRelayer) Run(ctx context.Context, target MirrorTarget) {
 	}
 
 	fullName := target.Owner + "/" + target.Repo
-	st := r.loadState(target.LedgerPath, fullName, teamRef)
+	var apiEndpoint string
+	if r.deps.Endpoint != nil {
+		apiEndpoint = endpoint.NormalizeEndpoint(r.deps.Endpoint())
+	}
+	st := r.loadState(target.LedgerPath, fullName, teamRef, apiEndpoint)
 	if now.Before(st.NextAllowedAt) {
 		log.Debug("github mirror in backoff", "repo", fullName, "until", st.NextAllowedAt.Format(time.RFC3339))
 		r.publish(st)
@@ -338,7 +364,7 @@ func (r *GitHubMirrorRelayer) Run(ctx context.Context, target MirrorTarget) {
 // unreadable or belongs to another repo or team. Losing it only costs repeat
 // relays the server ignores, so it never blocks the mirror. A state that
 // records no team (written before teams were recorded) is adopted, not dropped.
-func (r *GitHubMirrorRelayer) loadState(ledgerPath, fullName, teamRef string) *githubmirror.State {
+func (r *GitHubMirrorRelayer) loadState(ledgerPath, fullName, teamRef, apiEndpoint string) *githubmirror.State {
 	st, err := githubmirror.LoadState(ledgerPath)
 	if err != nil {
 		r.deps.Logger.Warn("github mirror state unreadable, starting fresh", "repo", fullName, "error", mirrorText(err))
@@ -356,11 +382,19 @@ func (r *GitHubMirrorRelayer) loadState(ledgerPath, fullName, teamRef string) *g
 		r.deps.Logger.Info("github mirror state belongs to another team, starting fresh", "repo", fullName, "team", teamRef, "state_team", st.Team)
 		st = &githubmirror.State{Version: githubmirror.StateVersion}
 	}
+	if apiEndpoint != "" && st.Endpoint != "" && st.Endpoint != apiEndpoint {
+		// the new server has none of the history relayed to the old one
+		r.deps.Logger.Info("github mirror state belongs to another endpoint, starting fresh", "repo", fullName, "endpoint", apiEndpoint, "state_endpoint", st.Endpoint)
+		st = &githubmirror.State{Version: githubmirror.StateVersion}
+	}
 	if st.Items == nil {
 		st.Items = map[string]githubmirror.ItemState{}
 	}
 	st.Repo = fullName
 	st.Team = teamRef
+	if apiEndpoint != "" {
+		st.Endpoint = apiEndpoint
+	}
 	return st
 }
 

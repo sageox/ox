@@ -83,7 +83,12 @@ func TestNewFrictionCollector_SendsAuthToken(t *testing.T) {
 
 	logger := testLogger()
 	fc := NewFrictionCollector(logger, "")
-	fc.SetAuthTokenGetter(func() string { return "test-friction-token" })
+	handler := NewHeartbeatHandler(logger)
+	handler.SetInitialCredentials(&HeartbeatCreds{
+		AuthToken:    "test-friction-token",
+		AuthEndpoint: server.URL,
+	})
+	fc.SetAuthTokenGetter(handler.GetAuthToken)
 
 	fc.Record(friction.FrictionEvent{Kind: "unknown-command", Input: "test"})
 	fc.Stop()

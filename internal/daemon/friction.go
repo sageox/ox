@@ -31,7 +31,7 @@ type FrictionCollector struct {
 	mu           sync.Mutex
 	engine       *friction.Friction
 	logger       *slog.Logger
-	getAuthToken func() string
+	getAuthToken func(destination string) string
 }
 
 // NewFrictionCollector creates a new friction event collector.
@@ -59,7 +59,7 @@ func NewFrictionCollector(logger *slog.Logger, projectEndpoint string) *Friction
 		friction.WithTelemetry(ep, version.Version),
 		friction.WithAuth(func() string {
 			if fc.getAuthToken != nil {
-				return fc.getAuthToken()
+				return fc.getAuthToken(ep)
 			}
 			return ""
 		}),
@@ -83,9 +83,9 @@ func catalogCacheFile() string {
 	return filepath.Join(cacheDir, "sageox", "friction-catalog.json")
 }
 
-// SetAuthTokenGetter sets the callback to get auth token from heartbeat cache.
+// SetAuthTokenGetter sets the callback to get a destination-scoped heartbeat token.
 // Friction events are only accepted by the server from authenticated users.
-func (f *FrictionCollector) SetAuthTokenGetter(cb func() string) {
+func (f *FrictionCollector) SetAuthTokenGetter(cb func(destination string) string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.getAuthToken = cb

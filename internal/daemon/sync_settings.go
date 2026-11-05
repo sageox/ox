@@ -19,7 +19,7 @@ import (
 type SettingsFetcher struct {
 	logger       *slog.Logger
 	endpoint     string // normalized project endpoint
-	getAuthToken func() string
+	getAuthToken func(destination string) string
 
 	mu        sync.Mutex
 	last      *flags.CLISettingsResponse
@@ -35,8 +35,8 @@ func NewSettingsFetcher(logger *slog.Logger, projectEndpoint string) *SettingsFe
 	}
 }
 
-// SetAuthTokenGetter wires the auth token source (typically from heartbeat).
-func (f *SettingsFetcher) SetAuthTokenGetter(fn func() string) {
+// SetAuthTokenGetter wires a destination-scoped auth token source (typically heartbeat).
+func (f *SettingsFetcher) SetAuthTokenGetter(fn func(destination string) string) {
 	f.getAuthToken = fn
 }
 
@@ -111,11 +111,12 @@ func (f *SettingsFetcher) CachedSettings() *flags.CLISettingsResponse {
 // resolveAuthToken gets the auth token from heartbeat or falls back to disk.
 func (f *SettingsFetcher) resolveAuthToken() string {
 	if f.getAuthToken != nil {
-		if t := f.getAuthToken(); t != "" {
+		if t := f.getAuthToken(f.endpoint); t != "" {
 			return t
 		}
 	}
-	// fall back to on-disk auth token
+	// Only an explicit login or env token bound to this endpoint can authorize
+	// the fallback; never use a global/default token for a repository's host.
 	tok, err := auth.GetTokenForEndpoint(f.endpoint)
 	if err != nil || tok == nil {
 		return ""
