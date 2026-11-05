@@ -742,7 +742,7 @@ func artifactPostdatesMask(rawPath, artifactPath string) bool {
 		return false
 	}
 	artifact, err := os.Stat(artifactPath)
-	return err == nil && !artifact.ModTime().Before(mask.ModTime())
+	return err == nil && artifact.ModTime().After(mask.ModTime())
 }
 
 func alreadyMasked(rawPath string, checkpoint, current int) bool {
