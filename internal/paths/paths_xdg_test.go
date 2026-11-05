@@ -147,15 +147,15 @@ func TestXDGPartialConfiguration(t *testing.T) {
 		}
 	})
 
-	t.Run("XDG runtime dir fallback to tmp", func(t *testing.T) {
+	t.Run("XDG runtime dir fallback to per-user state", func(t *testing.T) {
 		clearXDGEnv()
 		os.Setenv("OX_XDG_ENABLE", "1")
 		// XDG_RUNTIME_DIR not set
 
 		stateDir := StateDir()
-		// should fall back to temp dir
-		if !strings.Contains(stateDir, "sageox") {
-			t.Errorf("StateDir() = %q, want to contain sageox", stateDir)
+		want := filepath.Join(getHomeDir(), ".local", "state", "sageox")
+		if stateDir != want {
+			t.Errorf("StateDir() = %q, want %q", stateDir, want)
 		}
 	})
 }
@@ -293,7 +293,7 @@ func TestCacheDir(t *testing.T) {
 }
 
 func TestStateDir(t *testing.T) {
-	saved := saveEnv("OX_XDG_ENABLE", "OX_XDG_DISABLE", "XDG_RUNTIME_DIR")
+	saved := saveEnv("OX_XDG_ENABLE", "OX_XDG_DISABLE", "XDG_RUNTIME_DIR", "XDG_STATE_HOME")
 	defer restoreEnv(saved)
 
 	t.Run("default mode uses XDG_RUNTIME_DIR", func(t *testing.T) {
@@ -306,13 +306,24 @@ func TestStateDir(t *testing.T) {
 		}
 	})
 
-	t.Run("default mode falls back to temp dir", func(t *testing.T) {
+	t.Run("default mode falls back to per-user state", func(t *testing.T) {
 		clearXDGEnv()
-		// no XDG_RUNTIME_DIR set, falls back to os.TempDir()
 		dir := StateDir()
-		// should contain "sageox" suffix
-		if !strings.HasSuffix(dir, "sageox") {
-			t.Errorf("StateDir() = %q, want suffix 'sageox'", dir)
+		want := filepath.Join(getHomeDir(), ".local", "state", "sageox")
+		if dir != want {
+			t.Errorf("StateDir() = %q, want %q", dir, want)
+		}
+	})
+
+	t.Run("fallback respects XDG_STATE_HOME and ignores relative runtime dir", func(t *testing.T) {
+		clearXDGEnv()
+		stateHome := t.TempDir()
+		t.Setenv("XDG_STATE_HOME", stateHome)
+		for _, runtimeDir := range []string{"", "relative/runtime"} {
+			t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+			if got, want := StateDir(), filepath.Join(stateHome, "sageox"); got != want {
+				t.Errorf("StateDir() with XDG_RUNTIME_DIR=%q = %q, want %q", runtimeDir, got, want)
+			}
 		}
 	})
 
