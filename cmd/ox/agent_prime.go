@@ -1943,6 +1943,10 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 // the daemon to start tailing it. Best-effort: if the file doesn't exist yet
 // or daemon isn't running, the doctor interval picks it up later.
 func sendSessionWatchStart(state *session.RecordingState, projectRoot string) {
+	if err := session.CheckNativeSourceBinding(state); err != nil {
+		slog.Warn("tail-mode: refusing unbound session source", "error", err)
+		return
+	}
 	// try to discover the agent's native session file
 	sessionFile := state.SessionFile
 	if state.AdapterName == "cursor" {
@@ -1977,6 +1981,10 @@ func sendSessionWatchStart(state *session.RecordingState, projectRoot string) {
 		sessionFile = sf
 		// persist the discovered session file so daemon can find it via DetectAndRestart
 		state.SessionFile = sf
+		if err := session.CheckNativeSourceBinding(state); err != nil {
+			slog.Warn("tail-mode: refusing unbound session source", "error", err)
+			return
+		}
 		if saveErr := session.UpdateRecordingStateForAgent(projectRoot, state.AgentID, func(s *session.RecordingState) {
 			s.SessionFile = sf
 		}); saveErr != nil {
