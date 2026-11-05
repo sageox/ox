@@ -246,3 +246,45 @@ func TestCachedPublicationRetriesMaskedCacheWithoutPausedArtifacts(t *testing.T)
 	requirePublicationMask(t, filepath.Join(f.ledgerSessionDir, ledgerFileRaw), true)
 	require.NoFileExists(t, filepath.Join(f.ledgerSessionDir, ledgerFileSummaryMD))
 }
+
+func TestPublicationMaskSkipsCursorAndUnpaused(t *testing.T) {
+	rawPath := filepath.Join(t.TempDir(), ledgerFileRaw)
+	require.NoError(t, os.WriteFile(rawPath, []byte(pausedPublicationRaw), 0600))
+	cursor := &session.RecordingState{AdapterName: "cursor", EntryCount: 3, Lifecycle: publicationPauseLifecycle(true)}
+	require.NoError(t, maskCachedRecordingForPublication(rawPath, t.TempDir(), cursor))
+	unpaused := &session.RecordingState{AdapterName: "claude-code", EntryCount: 3}
+	require.NoError(t, maskCachedRecordingForPublication(rawPath, t.TempDir(), unpaused))
+	data, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	require.Equal(t, pausedPublicationRaw, string(data), "nothing to mask must leave the cache untouched")
+}
+
+func TestPublicationMaskRejectsNonObjectAndUnmatchedMarker(t *testing.T) {
+	root := setupIncrementalTest(t)
+	state := &session.RecordingState{AdapterName: "claude-code", EntryCount: 3, Lifecycle: publicationPauseLifecycle(true)}
+	dir := t.TempDir()
+
+	nullPath := filepath.Join(dir, "null.jsonl")
+	require.NoError(t, os.WriteFile(nullPath, []byte("null\n"), 0600))
+	err := maskCachedRecordingForPublication(nullPath, root, state)
+	require.ErrorContains(t, err, "not a JSONL object")
+
+	// A marker from a different checkpoint must not excuse a shortened cache.
+	rawPath := filepath.Join(dir, ledgerFileRaw)
+	require.NoError(t, os.WriteFile(rawPath, []byte(pausedPublicationRaw), 0600))
+	require.NoError(t, os.WriteFile(publicationMaskPath(rawPath), []byte(`{"original":9,"retained":3}`), 0600))
+	state.EntryCount = 4
+	err = maskCachedRecordingForPublication(rawPath, root, state)
+	require.ErrorContains(t, err, "does not match lifecycle checkpoint")
+	require.False(t, alreadyMasked(filepath.Join(dir, "absent.jsonl"), 4, 3))
+}
+
+func TestArtifactPostdatesMaskRequiresMaskAndArtifact(t *testing.T) {
+	dir := t.TempDir()
+	rawPath := filepath.Join(dir, ledgerFileRaw)
+	artifact := filepath.Join(dir, ledgerFileSummaryMD)
+	require.NoError(t, os.WriteFile(artifact, []byte("summary"), 0600))
+	require.False(t, artifactPostdatesMask(rawPath, artifact), "no mask means no proof of provenance")
+	require.NoError(t, os.WriteFile(publicationMaskPath(rawPath), []byte(`{}`), 0600))
+	require.False(t, artifactPostdatesMask(rawPath, filepath.Join(dir, "missing.md")))
+}
