@@ -56,6 +56,25 @@ func TestGiteaIdentity_RemoteTrust(t *testing.T) {
 			wantToken: "tea-token",
 		},
 		{
+			name:      "explicit default port matches remote",
+			remote:    "git.example.com/team/repo",
+			teaURL:    "https://git.example.com:443/",
+			wantURL:   "https://git.example.com:443",
+			wantToken: "tea-token",
+		},
+		{
+			name:   "same host outside instance base path",
+			remote: "git.example.com/other/repo",
+			teaURL: "https://git.example.com/gitea",
+		},
+		{
+			name:      "same host inside instance base path",
+			remote:    "git.example.com/gitea/team/repo",
+			teaURL:    "https://git.example.com/gitea",
+			wantURL:   "https://git.example.com/gitea",
+			wantToken: "tea-token",
+		},
+		{
 			name:      "matching environment instance",
 			remote:    "git.example.com/team/repo",
 			envURL:    "https://git.example.com/",

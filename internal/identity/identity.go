@@ -257,7 +257,29 @@ func isGiteaInstance(url string) bool {
 
 // extractHost extracts the host from a git remote URL.
 func extractHost(rawURL string) string {
-	// handle SSH format: git@host:path
+	u := parseRemoteURL(rawURL)
+	if u == nil {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if port := u.Port(); port != "" && !isDefaultPort(u.Scheme, port) {
+		host += ":" + port
+	}
+	return host
+}
+
+func urlPath(rawURL string) string {
+	if u := parseRemoteURL(rawURL); u != nil {
+		return u.Path
+	}
+	return ""
+}
+
+func isDefaultPort(scheme, port string) bool {
+	return (scheme == "https" && port == "443") || (scheme == "http" && port == "80") || (scheme == "ssh" && port == "22")
+}
+
+func parseRemoteURL(rawURL string) *url.URL {
 	if strings.HasPrefix(rawURL, "git@") {
 		rawURL = "ssh://" + strings.Replace(rawURL, ":", "/", 1)
 	} else if !strings.Contains(rawURL, "://") && !strings.HasPrefix(rawURL, "//") {
@@ -266,9 +288,24 @@ func extractHost(rawURL string) string {
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Hostname() == "" {
-		return ""
+		return nil
 	}
-	return strings.ToLower(u.Host)
+	return u
+}
+
+// giteaRemoteBelongs reports whether remoteURL is a repository of the Gitea
+// instance at instanceURL: same host (default ports ignored) and a path under
+// the instance's base path, so a same-host remote elsewhere never gets the token.
+func giteaRemoteBelongs(instanceURL, remoteURL string) bool {
+	if extractHost(instanceURL) != extractHost(remoteURL) {
+		return false
+	}
+	base := strings.Trim(urlPath(instanceURL), "/")
+	if base == "" {
+		return true
+	}
+	remotePath := strings.Trim(urlPath(remoteURL), "/")
+	return remotePath == base || strings.HasPrefix(remotePath, base+"/")
 }
 
 // extractGiteaInstanceURL selects a configured instance whose host matches a
@@ -281,12 +318,12 @@ func extractGiteaInstanceURL(urls []string) string {
 		if host == "" {
 			continue
 		}
-		if envURL != "" && extractHost(envURL) == host && os.Getenv("GITEA_TOKEN") != "" {
+		if envURL != "" && giteaRemoteBelongs(envURL, remoteURL) && os.Getenv("GITEA_TOKEN") != "" {
 			return envURL
 		}
 		for _, login := range config.Logins {
 			instanceURL := normalizeGiteaURL(login.URL)
-			if instanceURL != "" && extractHost(instanceURL) == host && login.Token != "" {
+			if instanceURL != "" && giteaRemoteBelongs(instanceURL, remoteURL) && login.Token != "" {
 				return instanceURL
 			}
 		}
