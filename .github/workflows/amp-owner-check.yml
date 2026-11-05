@@ -196,14 +196,23 @@ jobs:
             echo "result=failure" >> "$GITHUB_OUTPUT"
             exit 1
           fi
-          # Only an APPROVED review submitted against the PR's current head
-          # commit counts: an approval given before later .amp/ changes, or
-          # since dismissed (a dismissed review's state is DISMISSED, not
-          # APPROVED, so it is already excluded by the state filter below),
-          # must not authorize those changes. gh api's own --jq takes one
-          # string and does not support --arg, so this goes through a
-          # separate real jq instead of gh api's built-in one.
-          approved=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate | jq -r --arg sha "$HEAD_SHA" '.[] | select(.state == "APPROVED" and .commit_id == $sha) | .user.login' | sort -u)
+          # Only an owner whose LATEST decision is an APPROVED review of the
+          # PR's current head commit counts: an approval given before later
+          # protected changes, since dismissed (state DISMISSED), or followed
+          # by that same owner's CHANGES_REQUESTED must not authorize them
+          # (CodeRabbit). COMMENTED reviews are informational: they neither
+          # grant nor revoke. Reviews are ordered by id, not by time, and
+          # slurped across every page (jq -s) so a later page cannot hide a
+          # later decision. gh api's own --jq takes one string and does not
+          # support --arg, so this goes through a separate real jq instead of
+          # gh api's built-in one.
+          approved=$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate | jq -rs --arg sha "$HEAD_SHA" '
+            add
+            | map(select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED"))
+            | group_by(.user.login)
+            | map(max_by(.id))
+            | .[] | select(.state == "APPROVED" and .commit_id == $sha)
+            | .user.login' | sort -u)
           ok=0
           for o in $owners; do
             if printf '%s\n' "$approved" | grep -qx "$o"; then ok=1; fi
