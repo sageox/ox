@@ -86,11 +86,11 @@ func xdgStateHome() string {
 }
 
 // xdgRuntimeDir returns the XDG runtime directory for ephemeral files.
-// Respects XDG_RUNTIME_DIR, falls back to /tmp
-// This is used for daemon sockets and locks that should not persist across reboots.
+// Respects an absolute XDG_RUNTIME_DIR, otherwise uses the per-user state home.
+// Never fall back to a shared temporary directory for daemon sockets and locks.
 func xdgRuntimeDir() string {
-	if xdg := os.Getenv("XDG_RUNTIME_DIR"); xdg != "" {
+	if xdg := os.Getenv("XDG_RUNTIME_DIR"); filepath.IsAbs(xdg) {
 		return xdg
 	}
-	return os.TempDir()
+	return xdgStateHome()
 }

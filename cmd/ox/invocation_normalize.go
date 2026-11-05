@@ -71,7 +71,7 @@ const wordSplitNote = "zsh does not split $var into words; use an array or ${=va
 // coworker typed a flag is not.
 var destructiveVerbs = map[string]bool{
 	"abort": true, "cancel": true, "clean": true, "close": true, "delete": true,
-	"destroy": true, "drop": true, "gc": true, "kill": true, "logout": true,
+	"destroy": true, "drop": true, "gc": true, "install": true, "kill": true, "logout": true,
 	"prune": true, "purge": true, "remove": true, "reset": true, "revoke": true,
 	"rm": true, "stop": true, "uninstall": true, "upgrade": true, "wipe": true,
 }
