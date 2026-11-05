@@ -30,8 +30,7 @@ import (
 // recording starts at. ok is false when either is unknown; the recording
 // then starts as before, and the stop looks the sidecar up itself.
 func ampRecordingStart(projectRoot, agentID, threadURL string) (sidecar string, offset int64, ok bool) {
-	// Only a named thread: without one the adapter falls back to the newest
-	// sidecar, which may be another thread's.
+	// Only a named thread can identify this recording's sidecar.
 	if threadURL == "" {
 		return "", 0, false
 	}
