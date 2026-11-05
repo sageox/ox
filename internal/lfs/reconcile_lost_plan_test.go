@@ -452,7 +452,7 @@ func TestRewriteWorkingPointer(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Join(ledger, rel), 0o755))
 		require.Error(t, rewriteWorkingPointer(ledger, rel, ref, tombstone), "a directory is not a working copy")
 	})
-	t.Run("read-only pointer hardlinked elsewhere keeps its other link", func(t *testing.T) {
+	t.Run("read-only pointer with another hard link keeps that link", func(t *testing.T) {
 		ledger, outside := t.TempDir(), t.TempDir()
 		path := filepath.Join(ledger, rel)
 		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
