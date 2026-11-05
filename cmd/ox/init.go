@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
@@ -1483,14 +1484,24 @@ By giving AI coworkers your team patterns **before** they write code, SageOx pre
 // Claude Code bug #10373 silently discards SessionStart hook output for new sessions.
 // The markers in AGENTS.md/CLAUDE.md tell agents to self-check and run ox agent prime.
 func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
-	agentsPath := filepath.Join(gitRoot, "AGENTS.md")
-	claudePath := filepath.Join(gitRoot, "CLAUDE.md")
+	root, err := os.OpenRoot(gitRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	agentsPath, claudePath := "AGENTS.md", "CLAUDE.md"
 
 	// check what exists (Lstat to detect symlinks)
-	_, agentsErr := os.Stat(agentsPath)
+	_, agentsErr := root.Stat(agentsPath)
+	if agentsErr != nil && !errors.Is(agentsErr, fs.ErrNotExist) {
+		return nil, agentsErr
+	}
 	agentsExists := agentsErr == nil
 
-	claudeInfo, claudeErr := os.Lstat(claudePath)
+	claudeInfo, claudeErr := root.Lstat(claudePath)
+	if claudeErr != nil && !errors.Is(claudeErr, fs.ErrNotExist) {
+		return nil, claudeErr
+	}
 	claudeExists := claudeErr == nil
 	claudeIsSymlink := claudeExists && claudeInfo.Mode()&os.ModeSymlink != 0
 	claudeIsRegularFile := claudeExists && !claudeIsSymlink
@@ -1501,13 +1512,13 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 	switch {
 	case agentsExists && claudeIsRegularFile:
 		// both exist as regular files - ensure markers in both
-		res1, err := ensurePrimeMarkersInAgentFile(agentsPath, "AGENTS.md")
+		res1, err := ensurePrimeMarkersInAgentFile(root, agentsPath)
 		if err != nil {
 			return nil, err
 		}
 		results = append(results, res1)
 
-		res2, err := ensurePrimeMarkersInAgentFile(claudePath, "CLAUDE.md")
+		res2, err := ensurePrimeMarkersInAgentFile(root, claudePath)
 		if err != nil {
 			return nil, err
 		}
@@ -1515,7 +1526,7 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 
 	case agentsExists:
 		// AGENTS.md exists - ensure markers
-		res, err := ensurePrimeMarkersInAgentFile(agentsPath, "AGENTS.md")
+		res, err := ensurePrimeMarkersInAgentFile(root, agentsPath)
 		if err != nil {
 			return nil, err
 		}
@@ -1523,7 +1534,7 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 
 	case claudeIsRegularFile:
 		// only CLAUDE.md exists - ensure markers
-		res, err := ensurePrimeMarkersInAgentFile(claudePath, "CLAUDE.md")
+		res, err := ensurePrimeMarkersInAgentFile(root, claudePath)
 		if err != nil {
 			return nil, err
 		}
@@ -1532,7 +1543,7 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 	default:
 		// neither exists - create AGENTS.md with both markers
 		content := OxPrimeCheckBlock + "\n# AI Agent Instructions\n\n" + OxPrimeLine + "\n"
-		if err := fileutil.AtomicWriteBytes(agentsPath, []byte(content), 0644); err != nil {
+		if err := fileutil.AtomicWriteBytesInRoot(root, agentsPath, []byte(content), 0644); err != nil {
 			return nil, fmt.Errorf("failed to write AGENTS.md: %w", err)
 		}
 		agentsExists = true
@@ -1541,11 +1552,11 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 
 	// step 2: ensure BOTH files exist (create missing one as symlink)
 	if !claudeExists && agentsExists {
-		if err := os.Symlink("AGENTS.md", claudePath); err == nil {
+		if err := root.Symlink("AGENTS.md", claudePath); err == nil {
 			results = append(results, fileInjectionResult{file: "CLAUDE.md", status: symlinkCreated})
 		}
 	} else if !agentsExists && (claudeIsRegularFile || claudeIsSymlink) {
-		if err := os.Symlink("CLAUDE.md", agentsPath); err == nil {
+		if err := root.Symlink("CLAUDE.md", agentsPath); err == nil {
 			results = append(results, fileInjectionResult{file: "AGENTS.md", status: symlinkCreated})
 		}
 	}
@@ -1555,8 +1566,8 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 
 // ensurePrimeMarkersInAgentFile ensures both ox:prime-check (header) and ox:prime (footer)
 // markers exist in a single agent config file. Returns injection status for display.
-func ensurePrimeMarkersInAgentFile(path, name string) (fileInjectionResult, error) {
-	content, err := os.ReadFile(path)
+func ensurePrimeMarkersInAgentFile(root *os.Root, name string) (fileInjectionResult, error) {
+	content, err := root.ReadFile(name)
 	if err != nil {
 		return fileInjectionResult{file: name}, fmt.Errorf("failed to read %s: %w", name, err)
 	}
@@ -1569,7 +1580,7 @@ func ensurePrimeMarkersInAgentFile(path, name string) (fileInjectionResult, erro
 		return fileInjectionResult{file: name, status: alreadyPresent}, nil
 	}
 
-	injected, err := ensureMarkersInFile(path, contentStr, needHeader, needFooter)
+	injected, err := ensureMarkersInRoot(root, name, contentStr, needHeader, needFooter)
 	if err != nil {
 		return fileInjectionResult{file: name}, err
 	}
