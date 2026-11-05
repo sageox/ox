@@ -589,14 +589,15 @@ func TestHeartbeatHandler_GetAuthToken(t *testing.T) {
 	h := NewHeartbeatHandler(testLogger())
 
 	// no credentials
-	assert.Empty(t, h.GetAuthToken())
+	assert.Empty(t, h.GetAuthToken("https://example.com"))
 
 	// set credentials
 	h.credMu.Lock()
-	h.credentials = &HeartbeatCreds{AuthToken: "my-auth-token"}
+	h.credentials = &HeartbeatCreds{AuthToken: "my-auth-token", AuthEndpoint: "https://example.com"}
 	h.credMu.Unlock()
 
-	assert.Equal(t, "my-auth-token", h.GetAuthToken())
+	assert.Equal(t, "my-auth-token", h.GetAuthToken("https://example.com"))
+	assert.Empty(t, h.GetAuthToken("https://other.example.com"))
 }
 
 func TestHeartbeatHandler_GetAuthenticatedUser(t *testing.T) {

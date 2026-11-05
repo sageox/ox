@@ -1387,7 +1387,10 @@ func TestGitHubMirrorFeatureOn(t *testing.T) {
 
 func TestResolveMirrorAuthToken_PrefersHeartbeatToken(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, "heartbeat-token", resolveMirrorAuthToken(func() string { return "heartbeat-token" }, "https://unused.example"))
+	assert.Equal(t, "heartbeat-token", resolveMirrorAuthToken(func(destination string) string {
+		assert.Equal(t, "https://unused.example", destination)
+		return "heartbeat-token"
+	}, "https://unused.example"))
 }
 
 func TestMirrorBackoff_NilAndUnclassified(t *testing.T) {

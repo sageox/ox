@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/sageox/ox/internal/endpoint"
 )
 
 // HeartbeatPayload is sent by CLI commands to the daemon.
@@ -117,7 +119,7 @@ type HeartbeatPayload struct {
 //
 // Two credential types are passed:
 //  1. Git credentials (Token/ServerURL): for clone/fetch/push operations
-//  2. Auth credentials (AuthToken): for REST API calls (e.g., GET /api/v1/cli/repos)
+//  2. Auth credentials (AuthToken/AuthEndpoint): for REST API calls (e.g., GET /api/v1/cli/repos)
 //
 // User identity (UserEmail/UserID) is included so daemon can:
 //   - Log authentication events (login, logout, user switch)
@@ -140,6 +142,11 @@ type HeartbeatCreds struct {
 	// Used to call endpoints like GET /api/v1/cli/repos to refresh git credentials.
 	// This is separate from Token because git and API auth are different systems.
 	AuthToken string `json:"auth_token"`
+
+	// AuthEndpoint is the canonical API endpoint the OAuth token was loaded for.
+	// Never infer this from repository config or ServerURL. Older clients that
+	// omit it cannot supply a usable API token.
+	AuthEndpoint string `json:"auth_endpoint,omitempty"`
 
 	// UserEmail is the authenticated user's email address.
 	// Used for logging auth events and displaying in `ox status`.
@@ -589,13 +596,14 @@ func (h *HeartbeatHandler) HasValidCredentials() bool {
 	return time.Now().Before(h.credentials.ExpiresAt)
 }
 
-// GetAuthToken returns the cached auth token for API calls.
-// Returns empty string if no auth token is available.
-func (h *HeartbeatHandler) GetAuthToken() string {
+// GetAuthToken returns the cached auth token only for its source origin.
+// A repository-selected destination cannot authorize forwarding a token loaded
+// for another endpoint. Missing provenance (including old CLI heartbeats) fails closed.
+func (h *HeartbeatHandler) GetAuthToken(destination string) string {
 	h.credMu.RLock()
 	defer h.credMu.RUnlock()
 
-	if h.credentials == nil {
+	if h.credentials == nil || !endpoint.SameOrigin(h.credentials.AuthEndpoint, destination) {
 		return ""
 	}
 	return h.credentials.AuthToken
