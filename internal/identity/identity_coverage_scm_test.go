@@ -108,7 +108,7 @@ func TestReadGLabConfig(t *testing.T) {
 }
 
 // --- readTeaConfig ---
-// Prevents token lookup failures when instance URL has scheme/slash variations
+// Credentials must match the configured instance, not the default login.
 
 func TestReadTeaConfig(t *testing.T) {
 	t.Run("matches instance URL", func(t *testing.T) {
@@ -131,9 +131,13 @@ func TestReadTeaConfig(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(teaDir, "config.yml"), []byte(content), 0o644))
 
 		assert.Equal(t, "tea_token_123", readTeaConfig("https://gitea.corp.com"))
+		assert.Equal(t, "tea_token_123", readTeaConfig("https://GITEA.CORP.COM/"))
+		assert.Empty(t, readTeaConfig("http://gitea.corp.com"))
+		assert.Empty(t, readTeaConfig("https://gitea.corp.com:3000"))
+		assert.Empty(t, readTeaConfig("https://gitea.corp.com/other"))
 	})
 
-	t.Run("falls back to default login when no match", func(t *testing.T) {
+	t.Run("does not use default login when no match", func(t *testing.T) {
 		dir := t.TempDir()
 		t.Setenv("XDG_CONFIG_HOME", dir)
 
@@ -148,7 +152,7 @@ func TestReadTeaConfig(t *testing.T) {
 `
 		require.NoError(t, os.WriteFile(filepath.Join(teaDir, "config.yml"), []byte(content), 0o644))
 
-		assert.Equal(t, "tea_default_tok", readTeaConfig("https://unknown.host.com"))
+		assert.Empty(t, readTeaConfig("https://unknown.host.com"))
 	})
 
 	t.Run("returns empty when no match and no default", func(t *testing.T) {
@@ -175,11 +179,13 @@ func TestReadTeaConfig(t *testing.T) {
 	})
 }
 
-// --- readTeaConfigToken ---
-// Prevents host matching failures (e.g., stored as URL vs bare host)
+// --- configured tea instance selection ---
 
-func TestReadTeaConfigToken(t *testing.T) {
-	t.Run("finds token for matching host", func(t *testing.T) {
+func TestExtractGiteaInstanceURL_TeaConfig(t *testing.T) {
+	t.Setenv("GITEA_TOKEN", "")
+	t.Setenv("GITEA_URL", "")
+
+	t.Run("uses configured URL for matching host", func(t *testing.T) {
 		dir := t.TempDir()
 		t.Setenv("XDG_CONFIG_HOME", dir)
 
@@ -187,12 +193,14 @@ func TestReadTeaConfigToken(t *testing.T) {
 		require.NoError(t, os.MkdirAll(teaDir, 0o755))
 
 		content := `logins:
-  - url: https://gitea.example.com
+  - url: https://git.example.com:3000/gitea/
     token: matched_token
 `
 		require.NoError(t, os.WriteFile(filepath.Join(teaDir, "config.yml"), []byte(content), 0o644))
 
-		assert.Equal(t, "matched_token", readTeaConfigToken("gitea.example.com"))
+		instanceURL := extractGiteaInstanceURL([]string{"git.example.com:3000/gitea/user/repo"})
+		assert.Equal(t, "https://git.example.com:3000/gitea", instanceURL)
+		assert.Equal(t, "matched_token", getGiteaToken(instanceURL))
 	})
 
 	t.Run("returns empty for non-matching host", func(t *testing.T) {
@@ -208,12 +216,12 @@ func TestReadTeaConfigToken(t *testing.T) {
 `
 		require.NoError(t, os.WriteFile(filepath.Join(teaDir, "config.yml"), []byte(content), 0o644))
 
-		assert.Empty(t, readTeaConfigToken("other.host.com"))
+		assert.Empty(t, extractGiteaInstanceURL([]string{"other.host.com/gitea/repo"}))
 	})
 
 	t.Run("returns empty when config missing", func(t *testing.T) {
 		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-		assert.Empty(t, readTeaConfigToken("any.host"))
+		assert.Empty(t, extractGiteaInstanceURL([]string{"gitea.example.com/user/repo"}))
 	})
 }
 
@@ -287,9 +295,23 @@ func TestGetAzureDevOpsToken_EnvVars(t *testing.T) {
 }
 
 func TestGetGiteaToken_EnvVars(t *testing.T) {
-	t.Run("GITEA_TOKEN from env", func(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	t.Run("GITEA_TOKEN requires matching GITEA_URL", func(t *testing.T) {
 		t.Setenv("GITEA_TOKEN", "tea_env_tok")
-		assert.Equal(t, "tea_env_tok", getGiteaToken("https://any.instance.com"))
+		t.Setenv("GITEA_URL", "https://git.example.com/")
+		assert.Equal(t, "tea_env_tok", getGiteaToken("https://git.example.com"))
+		assert.Empty(t, getGiteaToken("https://attacker.example"))
+		assert.Empty(t, getGiteaToken("http://git.example.com"))
+		assert.Empty(t, getGiteaToken("https://git.example.com:3000"))
+		assert.Empty(t, getGiteaToken("https://git.example.com/other"))
+		assert.Empty(t, getGiteaToken(""))
+	})
+
+	t.Run("unscoped GITEA_TOKEN is ignored", func(t *testing.T) {
+		t.Setenv("GITEA_TOKEN", "tea_env_tok")
+		t.Setenv("GITEA_URL", "")
+		assert.Empty(t, getGiteaToken("https://git.example.com"))
 	})
 
 	t.Run("falls back to tea config", func(t *testing.T) {
