@@ -1114,6 +1114,14 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		return nil, err
 	}
 	hasIncrementalEntries := session.HasSubstantiveEntries(rawPath)
+	for _, event := range state.Lifecycle {
+		if event.Action == session.LifecycleActionPause {
+			// Never fall back to unmasked native reconstruction for a paused
+			// cache, even if an earlier attempt excluded every entry.
+			hasIncrementalEntries = true
+			break
+		}
+	}
 
 	if hasIncrementalEntries {
 		// incremental hooks already wrote entries -- do final drain, write footer, and generate artifacts
