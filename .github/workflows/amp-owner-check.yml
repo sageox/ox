@@ -1,8 +1,20 @@
 name: amp-owner-check
 
-# .amp/ changes need a current approval from an .amp/ owner, enforced without
-# touching the repo-wide "require review from code owners" ruleset (that
-# covers every CODEOWNERS entry, not just .amp/).
+# .amp/ changes, and changes to the files that define this gate, need a
+# current approval from an .amp/ owner, enforced without touching the
+# repo-wide "require review from code owners" ruleset (that covers every
+# CODEOWNERS entry, not just these).
+#
+# Protected paths: .amp/ itself, .github/CODEOWNERS (who the owners are),
+# and every file under .github/workflows/. main requires 0 approvals, so
+# without the last two a PR could add a second account to the owner list or
+# weaken this workflow, merge unreviewed, and then change .amp/ with nobody
+# looking. Every workflow is protected, not just this one and
+# amp-dir-alert.yml: a job in ANY workflow on main can name the
+# amp-owner-check environment, read the App key and post its own "success"
+# (veria-ai). Every protected path uses the owner list on the /.amp/ line
+# of CODEOWNERS (read from the base branch): the CODEOWNERS lines for the
+# guard files name one person, who could never approve their own PR.
 #
 # Runs as pull_request_target, not pull_request: the workflow definition that
 # executes always comes from main, never from the PR's own (possibly edited)
@@ -46,12 +58,14 @@ name: amp-owner-check
 # job satisfies (pull_request_target's ref is always the base branch) but
 # ci.yml's pull_request-triggered job does not (its ref is the synthetic
 # refs/pull/<number>/merge, never main)
-# -- so only this job can reach the environment's secrets.
+# -- so no PR branch can reach the environment's secrets. A workflow
+# already on main can, which is why every workflow file is protected above.
 #
-# Known gaps, NEITHER fixable by editing this file -- both need a human
-# decision before this check is added to required_status_checks:
+# Known gaps, NEITHER fixable by editing this file:
 # - A push carrying [skip ci] in its commit message skips this entirely --
-#   a GitHub platform behavior, not a workflow opt-out.
+#   a GitHub platform behavior, not a workflow opt-out. The check is now
+#   required, so a skipped run leaves it unreported and the merge blocked:
+#   this fails closed, it does not let the change through.
 # - Dismissing an owner's approval after this check has already passed
 #   leaves that pass in place until the next push re-triggers the check
 #   (CodeRabbit). pull_request_review looked like the fix, but unlike
@@ -99,7 +113,7 @@ jobs:
           id=$(gh api "repos/$REPO/check-runs" -f name="amp-owner-approval" -f head_sha="$HEAD_SHA" -f status=in_progress --jq .id)
           echo "check_run_id=$id" >> "$GITHUB_OUTPUT"
 
-      - name: Does this PR touch .amp/?
+      - name: Does this PR touch a protected path?
         id: touch
         env:
           GH_TOKEN: ${{ github.token }}
@@ -128,7 +142,14 @@ jobs:
           # rather than a directory (veria-ai). A rename's destination can
           # land outside .amp/ while the source was inside it
           # (previous_filename); .filename alone would miss that removal
-          # (CodeRabbit).
+          # (CodeRabbit). The protected set is .amp/, CODEOWNERS and every
+          # file under .github/workflows/ (see the top of this file). Names
+          # compare lowercased: a macOS checkout maps .AMP/ onto .amp/, so a
+          # case variant must not slip past an exact match. CODEOWNERS
+          # matches by exact name, so a sibling such as CODEOWNERS.bak stays
+          # out of scope. Names reach the log JSON-escaped, because a path
+          # under .amp/ is chosen by the PR author and a raw newline could
+          # forge a workflow command.
           files_json=$(mktemp); compare_err=$(mktemp)
           if ! gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq '.files' > "$files_json" 2>"$compare_err"; then
             echo "::error::Could not compare $BASE_SHA...$HEAD_SHA: $(cat "$compare_err"). Alerting conservatively."
@@ -141,11 +162,18 @@ jobs:
             echo "touches=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          touches=$(jq -r '.[] | select(
-                (.filename == ".amp") or (.filename | startswith(".amp/")) or
-                ((.previous_filename // "") == ".amp") or ((.previous_filename // "") | startswith(".amp/"))
-              ) | .filename' "$files_json")
+          touches=$(jq -r '
+            def guarded: ascii_downcase
+              | . == ".amp" or startswith(".amp/")
+                or . == ".github/codeowners"
+                or . == ".github/workflows" or startswith(".github/workflows/");
+            .[] | select((.filename | guarded) or ((.previous_filename // "") | guarded))
+              | (.filename | @json)' "$files_json")
           if [ -n "$touches" ]; then
+            # sed, not head -5: head closes the pipe early, and under the
+            # runner's pipefail that SIGPIPE (141) would abort the step if
+            # this were ever turned into an assignment.
+            echo "::notice::Protected paths changed (first 5, JSON-escaped): $(printf '%s\n' "$touches" | sed -n '1,5p' | tr '\n' ' ')"
             echo "touches=true" >> "$GITHUB_OUTPUT"
           else
             echo "touches=false" >> "$GITHUB_OUTPUT"
@@ -168,20 +196,29 @@ jobs:
             echo "result=failure" >> "$GITHUB_OUTPUT"
             exit 1
           fi
-          # Only an APPROVED review submitted against the PR's current head
-          # commit counts: an approval given before later .amp/ changes, or
-          # since dismissed (a dismissed review's state is DISMISSED, not
-          # APPROVED, so it is already excluded by the state filter below),
-          # must not authorize those changes. gh api's own --jq takes one
-          # string and does not support --arg, so this goes through a
-          # separate real jq instead of gh api's built-in one.
-          approved=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate | jq -r --arg sha "$HEAD_SHA" '.[] | select(.state == "APPROVED" and .commit_id == $sha) | .user.login' | sort -u)
+          # Only an owner whose LATEST decision is an APPROVED review of the
+          # PR's current head commit counts: an approval given before later
+          # protected changes, since dismissed (state DISMISSED), or followed
+          # by that same owner's CHANGES_REQUESTED must not authorize them
+          # (CodeRabbit). COMMENTED reviews are informational: they neither
+          # grant nor revoke. Reviews are ordered by id, not by time, and
+          # slurped across every page (jq -s) so a later page cannot hide a
+          # later decision. gh api's own --jq takes one string and does not
+          # support --arg, so this goes through a separate real jq instead of
+          # gh api's built-in one.
+          approved=$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate | jq -rs --arg sha "$HEAD_SHA" '
+            add
+            | map(select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED"))
+            | group_by(.user.login)
+            | map(max_by(.id))
+            | .[] | select(.state == "APPROVED" and .commit_id == $sha)
+            | .user.login' | sort -u)
           ok=0
           for o in $owners; do
             if printf '%s\n' "$approved" | grep -qx "$o"; then ok=1; fi
           done
           if [ "$ok" != 1 ]; then
-            echo "::error::This PR changes .amp/ and needs a current APPROVED review (on commit ${HEAD_SHA:0:8}) from one of: $owners. An approval given before this commit, or since dismissed, does not count."
+            echo "::error::This PR changes .amp/ or a file that defines this gate (CODEOWNERS or a workflow file) and needs a current APPROVED review (on commit ${HEAD_SHA:0:8}) from one of: $owners. An approval given before this commit, or since dismissed, does not count."
             echo "result=failure" >> "$GITHUB_OUTPUT"
             exit 1
           fi
@@ -200,8 +237,8 @@ jobs:
           # Defaults to failure, not success: anything unexpected here (a
           # step that aborted before writing its output, an empty TOUCHES
           # from a step that never ran) fails this gate closed, not open --
-          # only two states explicitly earn success: "provably doesn't touch
-          # .amp/" and "touches .amp/ and has a valid current approval."
+          # only two states explicitly earn success: "provably touches no
+          # protected path" and "touches one and has a valid current approval."
           conclusion=failure
           if [ "$TOUCHES" = "false" ]; then
             conclusion=success
