@@ -266,8 +266,11 @@ jobs:
       # scripts/sign-manifest with the signing key (Devin, veria-ai).
       - name: Require the tagged commit to be on main
         run: |
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor HEAD origin/main || {
+          # Fully qualified on purpose: fetch-depth 0 imports every tag, and a tag
+          # named origin/main or main would win Git's short-name lookup over the
+          # real branch (veria-ai).
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main || {
             echo "::error::$RELEASE_TAG ($(git rev-parse --short HEAD)) is not on main. Only commits that landed on main are signed."
             exit 1
           }
