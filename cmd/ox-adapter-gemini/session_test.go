@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
+	"github.com/sageox/ox/pkg/adapterruntime"
 )
 
 // realSessionJSON is the on-disk fixture Gemini CLI 0.36.0 produced. Tests that
@@ -312,45 +314,35 @@ func TestFindGeminiBySessionID_PrefersTheMatchingSessionID(t *testing.T) {
 	}
 }
 
-// TestFindGeminiSession_TimestampFallback preserves most-recent-by-modtime
-// discovery when no session id is supplied.
-func TestFindGeminiSession_TimestampFallback(t *testing.T) {
+// Neither recency, a native ID match, nor an AgentID text match proves which
+// repository owns a Gemini project bucket.
+func TestFindGeminiSession_RequiresRepositoryBinding(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
 	data := realSessionJSON(t)
 	older := writeSessionTree(t, home, "project-1", "session-2026-04-03T21-59-6cc942fa.json", data)
-	newer := writeSessionTree(t, home, "project-2", "session-2026-04-03T22-06-4b1c7e02.json", data)
+	writeSessionTree(t, home, "project-2", "session-2026-04-03T22-06-4b1c7e02.json", data)
 
 	past := time.Now().Add(-1 * time.Hour)
 	if err := os.Chtimes(older, past, past); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := findGeminiSession("/tmp/repo", "", "", "")
-	if err != nil {
-		t.Fatalf("findGeminiSession: %v", err)
-	}
-	if got != newer {
-		t.Errorf("got %q, want %q (most recent)", got, newer)
-	}
-}
-
-// TestFindGeminiSession_UnknownIDFallsBackToScan keeps an unrecognized session
-// id from turning into a hard failure.
-func TestFindGeminiSession_UnknownIDFallsBackToScan(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	real := writeSessionTree(t, home, "project-1",
-		"session-2026-04-03T22-06-4b1c7e02.json", realSessionJSON(t))
-
-	got, err := findGeminiSession("/tmp/repo", "", "", "deadbeef-0000-4000-8000-000000000000")
-	if err != nil {
-		t.Fatalf("findGeminiSession: %v", err)
-	}
-	if got != real {
-		t.Errorf("got %q, want %q (fallback)", got, real)
+	for _, id := range []string{"", "deadbeef-0000-4000-8000-000000000000", "4b1c7e02-a3d9-4f18-9c26-7e5b0a1d2f34"} {
+		t.Run("id="+id, func(t *testing.T) {
+			// This text is present in both candidates, but is not ownership.
+			got, err := findGeminiSession("/tmp/repo", "list_directory", "", id)
+			if got != "" || !errors.Is(err, adapterruntime.ErrUnboundSource) {
+				t.Fatalf("unbound discovery = %q, %v", got, err)
+			}
+			if id != "" {
+				result, err := handleImportSession(adapterprotocol.ImportSessionParams{RepoRoot: "/tmp/repo", SessionID: id})
+				if result != nil || !errors.Is(err, adapterruntime.ErrUnboundSource) {
+					t.Fatalf("unbound import = %v, %v", result, err)
+				}
+			}
+		})
 	}
 }
 

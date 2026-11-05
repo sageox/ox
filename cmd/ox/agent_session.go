@@ -1059,6 +1059,9 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	if state.SourceRejected {
 		return nil, fmt.Errorf("claude source has untrusted repository ownership; recording preserved for manual review")
 	}
+	if err := session.CheckNativeSourceBinding(state); err != nil {
+		return nil, err
+	}
 	result := &agentSessionResult{}
 
 	// resolve project endpoint for auth lookups
@@ -1141,6 +1144,9 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to read session: %w", err)
+	}
+	if err := session.CheckNativeSourceBinding(state); err != nil {
+		return nil, err
 	}
 	if state.AdapterName == "claude-code" {
 		repoRoot := state.WorkspacePath
@@ -1556,6 +1562,9 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 }
 
 func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string, effects sessionUploadEffects) error {
+	if err := session.CheckNativeSourceBinding(state); err != nil {
+		return err
+	}
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
 

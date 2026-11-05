@@ -3273,11 +3273,11 @@ func rawCarriesRecordingState(rawPath string, state *session.RecordingState) boo
 	return state.Trace == nil || reflect.DeepEqual(stored.Meta.TraceCapture, state.Trace)
 }
 
-// sessionQuarantined reports whether the recording marker in sessionDir says
-// its native source was quarantined. An unreadable marker is not a quarantine.
+// sessionQuarantined checks persisted source bindings too, so recordings from
+// older discovery code cannot bypass quarantine at publication time.
 func sessionQuarantined(sessionDir string) bool {
 	state, err := session.ReadRecordingStateFile(sessionDir)
-	return err == nil && state != nil && state.SourceRejected
+	return err == nil && state != nil && session.CheckNativeSourceBinding(state) != nil
 }
 
 // recoverRawFromSessionFile recovers missing capture and drains a dead tail
@@ -3301,8 +3301,8 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	}
 	// Checked before the journal settles: a quarantined recording is kept
 	// exactly as it is, and settling would roll back or rewrite raw.jsonl.
-	if state.SourceRejected {
-		return false, fmt.Errorf("native source quarantined for manual ownership review")
+	if err := session.CheckNativeSourceBinding(&state); err != nil {
+		return false, err
 	}
 	if state.AdapterName == "cursor" {
 		adapter, err := adapters.GetAdapter("cursor")
@@ -3474,6 +3474,9 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 		}
 	}
 
+	if err := session.CheckNativeSourceBinding(&state); err != nil {
+		return false, err
+	}
 	var sourceSnapshot os.FileInfo
 	if state.AdapterName == "claude-code" {
 		sourceSnapshot, err = claudesource.Snapshot(state.SessionFile)
@@ -3502,6 +3505,9 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	}
 	if err != nil {
 		return false, fmt.Errorf("read native session: %w", err)
+	}
+	if err := session.CheckNativeSourceBinding(&state); err != nil {
+		return false, err
 	}
 	if state.AdapterName == "claude-code" {
 		// Cached paths are not permanent authorization: a live Claude session

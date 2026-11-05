@@ -20,10 +20,8 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -32,11 +30,6 @@ import (
 )
 
 // --- types ---
-
-type sessionCandidate struct {
-	path    string
-	modTime time.Time
-}
 
 type ampEntry struct {
 	Type         string `json:"type"`
@@ -190,19 +183,13 @@ func ampSessionsDirs(home string) []string {
 // thread id passes through; anything else is returned as given, for
 // ValidateSessionID to judge.
 func ampThreadID(id string) string {
-	u, err := url.Parse(strings.TrimSpace(id))
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return id
-	}
-	path := strings.TrimSuffix(u.Path, "/")
-	i := strings.LastIndex(path, "/threads/")
-	if i < 0 {
-		return id
-	}
-	return path[i+len("/threads/"):]
+	return adapterruntime.AmpThreadID(id)
 }
 
 func findAmpSession(_, agentID, since, agentSessionID string) (string, error) {
+	if err := adapterruntime.ValidateSessionSource(adapterName, "", agentSessionID); err != nil {
+		return "", err
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("cannot determine home directory: %w", err)
@@ -210,116 +197,18 @@ func findAmpSession(_, agentID, since, agentSessionID string) (string, error) {
 
 	dirs := ampSessionsDirs(home)
 
-	// direct lookup by session ID
-	if agentSessionID != "" {
-		threadID := ampThreadID(agentSessionID)
-		if threadID == "" {
-			return "", fmt.Errorf("invalid session ID %q: no thread id", agentSessionID)
-		}
-		if err := adapterruntime.ValidateSessionID(threadID); err != nil {
-			return "", err
-		}
-		// Search every candidate directory by ID — covers users mid-
-		// migration who have files in both locations.
-		for _, d := range dirs {
-			direct := filepath.Join(d, threadID+".jsonl")
-			if _, err := os.Stat(direct); err == nil {
-				return direct, nil
+	threadID := ampThreadID(agentSessionID)
+	// Search both locations, but never substitute a different thread.
+	for _, d := range dirs {
+		direct := filepath.Join(d, threadID+".jsonl")
+		if _, err := os.Stat(direct); err == nil {
+			if err := adapterruntime.ValidateSessionSource(adapterName, direct, agentSessionID); err != nil {
+				return "", err
 			}
-		}
-		// A named thread resolves to its own sidecar or to nothing. The
-		// newest-file search below would hand back another thread's
-		// conversation, which session stop would then upload under this one.
-		return "", fmt.Errorf("no sidecar for thread %s in %s", threadID, strings.Join(dirs, ", "))
-	}
-
-	sinceTime := time.Time{}
-	if since != "" {
-		if t, err := time.Parse(time.RFC3339, since); err == nil {
-			sinceTime = t
+			return direct, nil
 		}
 	}
-
-	// Walk each candidate dir in priority order; stop as soon as one
-	// yields usable session files. This makes the legacy fallback
-	// actually work when the bridge dir exists but is still empty
-	// (e.g. a fresh install where no session has flushed yet).
-	var candidates []sessionCandidate
-	var lastReadErr error
-	for _, sessionsDir := range dirs {
-		entries, err := os.ReadDir(sessionsDir)
-		if err != nil {
-			if !os.IsNotExist(err) {
-				lastReadErr = err
-			}
-			continue
-		}
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-				continue
-			}
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-			if !sinceTime.IsZero() && !info.ModTime().After(sinceTime) {
-				continue
-			}
-			candidates = append(candidates, sessionCandidate{
-				path:    filepath.Join(sessionsDir, entry.Name()),
-				modTime: info.ModTime(),
-			})
-		}
-		if len(candidates) > 0 {
-			break
-		}
-	}
-
-	if len(candidates) == 0 {
-		if lastReadErr != nil {
-			return "", fmt.Errorf("failed to read sessions dirs %v: %w "+
-				"(install the ox-bridge plugin via "+
-				"`ox-adapter-amp install-hooks --repo-root <path> --scope project`)",
-				dirs, lastReadErr)
-		}
-		return "", fmt.Errorf("no amp sessions found in %v "+
-			"(install the ox-bridge plugin via "+
-			"`ox-adapter-amp install-hooks --repo-root <path> --scope project`)",
-			dirs)
-	}
-
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].modTime.After(candidates[j].modTime)
-	})
-
-	if agentID != "" {
-		for _, c := range candidates {
-			if sessionContainsText(c.path, agentID) {
-				return c.path, nil
-			}
-		}
-	}
-
-	return candidates[0].path, nil
-}
-
-func sessionContainsText(path, text string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 10*1024*1024)
-
-	for scanner.Scan() {
-		if strings.Contains(scanner.Text(), text) {
-			return true
-		}
-	}
-	return false
+	return "", fmt.Errorf("no sidecar for thread %s in %s", threadID, strings.Join(dirs, ", "))
 }
 
 func extractAmpMetadata(path string) *adapterprotocol.SessionMetadata {
