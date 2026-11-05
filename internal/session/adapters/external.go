@@ -128,6 +128,9 @@ func (ea *ExternalAdapter) FindSessionFile(lookup SessionLookup) (string, error)
 	if err := lookup.Validate(); err != nil {
 		return "", fmt.Errorf("invalid session lookup: %w", err)
 	}
+	if err := adapterruntime.ValidateSessionSource(CanonicalAdapterName(ea.Name()), "", lookup.AgentSessionID); err != nil {
+		return "", err
+	}
 	args := []string{
 		"--agent-id", lookup.AgentID,
 		"--repo-root", lookup.RepoRoot,
@@ -148,6 +151,9 @@ func (ea *ExternalAdapter) FindSessionFile(lookup SessionLookup) (string, error)
 
 	if result.SessionFile == "" {
 		return "", ErrSessionNotFound
+	}
+	if err := adapterruntime.ValidateSessionSource(CanonicalAdapterName(ea.Name()), result.SessionFile, lookup.AgentSessionID); err != nil {
+		return "", err
 	}
 	return result.SessionFile, nil
 }
@@ -310,6 +316,9 @@ func (ea *ExternalAdapter) ReadFromOffsetWithContext(ctx context.Context, path s
 
 // ImportSession reads an entire session by its native session ID.
 func (ea *ExternalAdapter) ImportSession(sessionID, repoRoot string) (*adapterprotocol.ImportSessionResult, error) {
+	if err := adapterruntime.ValidateSessionSource(CanonicalAdapterName(ea.Name()), "", sessionID); err != nil {
+		return nil, err
+	}
 	out, err := ea.execOneShot("import-session",
 		"--session-id", sessionID,
 		"--repo-root", repoRoot,
@@ -327,6 +336,9 @@ func (ea *ExternalAdapter) ImportSession(sessionID, repoRoot string) (*adapterpr
 // CapturePrior delegates session capture to the adapter, which owns the
 // agent-specific session discovery and parsing logic.
 func (ea *ExternalAdapter) CapturePrior(params adapterprotocol.CapturePriorParams) (*adapterprotocol.CapturePriorResult, error) {
+	if err := adapterruntime.ValidateSessionSource(CanonicalAdapterName(ea.Name()), "", params.SessionID); err != nil {
+		return nil, err
+	}
 	args := []string{
 		"--repo-root", params.RepoRoot,
 		"--agent-id", params.AgentID,
