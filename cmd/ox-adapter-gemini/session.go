@@ -38,7 +38,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -79,63 +78,7 @@ func handleReadMetadata(p adapterprotocol.ReadParams) (*adapterprotocol.ReadMeta
 }
 
 func findGeminiSession(repoRoot, agentID, since, agentSessionID string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("cannot determine home directory: %w", err)
-	}
-
-	tmpDir := filepath.Join(home, ".gemini", "tmp")
-
-	if agentSessionID != "" {
-		if err := adapterruntime.ValidateSessionID(agentSessionID); err != nil {
-			return "", err
-		}
-		if path, err := findGeminiBySessionID(tmpDir, agentSessionID); err == nil {
-			return path, nil
-		}
-		// fall through to timestamp-based scanning
-	}
-
-	sinceTime := time.Time{}
-	if since != "" {
-		if t, err := time.Parse(time.RFC3339, since); err == nil {
-			sinceTime = t
-		}
-	}
-
-	candidates, err := listGeminiSessionFiles(tmpDir)
-	if err != nil {
-		return "", err
-	}
-
-	filtered := candidates[:0]
-	for _, c := range candidates {
-		if !sinceTime.IsZero() && !c.modTime.After(sinceTime) {
-			continue
-		}
-		filtered = append(filtered, c)
-	}
-	candidates = filtered
-
-	if len(candidates) == 0 {
-		return "", fmt.Errorf("no gemini sessions found")
-	}
-
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].modTime.After(candidates[j].modTime)
-	})
-
-	if agentID != "" {
-		for _, c := range candidates {
-			if data, err := os.ReadFile(c.path); err == nil {
-				if strings.Contains(string(data), agentID) {
-					return c.path, nil
-				}
-			}
-		}
-	}
-
-	return candidates[0].path, nil
+	return "", adapterruntime.ValidateSessionSource(adapterName, "", agentSessionID)
 }
 
 type geminiSessionFile struct {
