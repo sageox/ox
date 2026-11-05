@@ -12,6 +12,7 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/selfexec"
@@ -260,6 +261,7 @@ func startDaemonLocked(wait bool) error {
 
 	// migration: stop old path-based daemon if one exists on a legacy socket
 	stopLegacyDaemon()
+	stopPreMigrationDaemons()
 
 	pid, err := spawnDaemonFn(supersede)
 	if err != nil {
@@ -501,6 +503,44 @@ func findProjectRootForDaemon() string {
 	}
 	slog.Warn("findProjectRootForDaemon: no .sageox/ found, falling back to cwd", "cwd", cwd)
 	return cwd
+}
+
+// stopPreMigrationDaemons stops daemons an older ox left listening in the
+// shared temp directory. dial authenticates the peer UID, so another user's
+// socket planted there is never trusted.
+func stopPreMigrationDaemons() {
+	ids := []string{CurrentWorkspaceID()}
+	if legacyID := LegacyWorkspaceID(); legacyID != ids[0] {
+		ids = append(ids, legacyID)
+	}
+	for _, id := range ids {
+		socket := paths.PreMigrationDaemonSocketFile(id)
+		if socket == "" || socket == SocketPathForWorkspace(id) {
+			continue
+		}
+		// The shared temp directory is writable by others, so the name may be a
+		// symlink to some other daemon's socket. Stop only a real socket whose
+		// daemon reports this very workspace.
+		if info, err := os.Lstat(socket); err != nil || info.Mode().Type() != os.ModeSocket {
+			continue
+		}
+		client := NewClientWithSocket(socket)
+		if err := client.Ping(); err != nil {
+			continue
+		}
+		status, err := client.Status()
+		if err != nil || status.WorkspacePath == "" ||
+			(RepoBasedWorkspaceID(status.WorkspacePath) != id && WorkspaceID(status.WorkspacePath) != id) {
+			slog.Warn("leaving daemon on pre-migration socket: workspace not confirmed", "workspace_id", id, "socket", socket)
+			continue
+		}
+		slog.Info("stopping daemon on pre-migration socket", "workspace_id", id, "socket", socket)
+		if err := client.Stop(); err != nil {
+			slog.Warn("failed to stop pre-migration daemon", "workspace_id", id, "error", err)
+			continue
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // stopLegacyDaemon stops a daemon running under the old path-based workspace ID.
