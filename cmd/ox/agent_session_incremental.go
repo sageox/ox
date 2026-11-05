@@ -34,6 +34,9 @@ func writeRawHeaderWithAttribution(projectRoot string, state *session.RecordingS
 	if state.SessionPath == "" {
 		return fmt.Errorf("session path is empty")
 	}
+	if err := session.CheckNativeSourceBinding(state); err != nil {
+		return err
+	}
 
 	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
 
@@ -114,6 +117,9 @@ func writeRawHeaderWithAttribution(projectRoot string, state *session.RecordingS
 // by hooks. Does a final drain from the source file, then generates events,
 // and summary artifacts from the already-written raw.jsonl.
 func finalizeIncrementalSession(projectRoot string, state *session.RecordingState, rawPath string, adapter adapters.Adapter, result *agentSessionResult) (*agentSessionResult, error) {
+	if err := session.CheckNativeSourceBinding(state); err != nil {
+		return nil, err
+	}
 	if state.AdapterName == "cursor" {
 		reader, ok := adapter.(adapters.IncrementalReader)
 		if !ok {
@@ -173,6 +179,9 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 			entries, newOffset, readErr = reader.ReadFromOffset(state.SessionFile, readOffset)
 			if readErr != nil {
 				return nil, fmt.Errorf("read final session entries: %w", readErr)
+			}
+			if err := session.CheckNativeSourceBinding(state); err != nil {
+				return nil, err
 			}
 		}
 		if state.AdapterName == "claude-code" && !skipDrain {
