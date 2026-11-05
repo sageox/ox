@@ -1084,9 +1084,9 @@ func runInit() error {
 				teamLabel = cfg.TeamID
 			}
 			fmt.Printf("  %d. Invite teammates (%s):\n", step, teamLabel)
-			fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox team invite alice@example.com,bob@example.com"))
+			fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox team invite alice@example.com,bob@example.com --team "+shellQuote(cfg.TeamID)))
 		} else {
-			fmt.Printf("  %d. Invite teammates with %s\n", step, cli.StyleCommand.Render("ox team invite <email>..."))
+			fmt.Printf("  %d. Invite teammates with %s\n", step, cli.StyleCommand.Render("ox team invite <email>... --team <slug>"))
 		}
 		step++
 
