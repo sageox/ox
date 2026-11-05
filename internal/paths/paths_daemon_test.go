@@ -274,3 +274,23 @@ func resetHomeDir(t *testing.T) {
 		homeDir = old
 	})
 }
+
+func TestPreMigrationDaemonSocketFile(t *testing.T) {
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	want := filepath.Join(os.TempDir(), "sageox", "daemon", "daemon-ws1.sock")
+	if got := PreMigrationDaemonSocketFile("ws1"); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	if got := PreMigrationDaemonSocketFile("ws1"); got != "" {
+		t.Fatalf("absolute XDG_RUNTIME_DIR never used temp: got %q", got)
+	}
+
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	t.Setenv("OX_XDG_DISABLE", "1")
+	if got := PreMigrationDaemonSocketFile("ws1"); got != "" {
+		t.Fatalf("legacy mode never used temp: got %q", got)
+	}
+}

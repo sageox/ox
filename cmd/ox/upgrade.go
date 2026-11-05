@@ -24,6 +24,7 @@ type installMethod string
 
 const (
 	installHomebrew  installMethod = "homebrew"
+	installNpm       installMethod = "npm"
 	installGoInstall installMethod = "go-install"
 	installBinary    installMethod = "binary"
 	installSource    installMethod = "source"
@@ -140,6 +141,10 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		} else {
 			err = upgradeViaGoInstallWithTarget(jsonOutput, "v"+newVersion)
 		}
+	case installNpm:
+		result.Status = "manual"
+		result.Message = npmUpgradeMessage
+		return outputUpgradeResult(cmd, result, jsonOutput)
 	case installSource:
 		result.Status = "manual"
 		result.Message = "Dev build detected. Use 'make build && make install' to upgrade."
@@ -378,6 +383,9 @@ func detectInstallMethod() installMethod {
 	if isHomebrewInstall(oxPath) {
 		return installHomebrew
 	}
+	if isNpmInstall(oxPath) {
+		return installNpm
+	}
 
 	// go install check: binary is under GOBIN or GOPATH/bin
 	if isGoInstall(oxPath) {
@@ -394,6 +402,16 @@ func detectInstallMethod() installMethod {
 // a different install, and upgrading the brew copy would leave it unchanged.
 func isHomebrewInstall(oxPath string) bool {
 	return strings.Contains(oxPath, "/Cellar/ox/")
+}
+
+// npmUpgradeMessage covers both npm cohorts: an npx cache, which ox install
+// copies out of, and a global npm install, which npm itself upgrades.
+const npmUpgradeMessage = "ox is running from its npm package. Run 'npx @sageox/ox@latest install' to install the latest release, or 'npm install -g @sageox/ox@latest' if you installed it globally with npm."
+
+// isNpmInstall reports whether oxPath is the binary inside one of the
+// @sageox/ox-<os>-<arch> npm packages.
+func isNpmInstall(oxPath string) bool {
+	return strings.Contains(filepath.ToSlash(oxPath), "/node_modules/@sageox/ox-")
 }
 
 func isGoInstall(oxPath string) bool {

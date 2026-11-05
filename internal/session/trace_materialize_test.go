@@ -20,6 +20,9 @@ func TestMaterializeTracesUsesDurableRecordingWindows(t *testing.T) {
 	traceBoundaryEnvironment(t, true)
 	ledger := t.TempDir()
 	const name = "2026-09-24T10-00-test-OxTraceWindows"
+	store, err := NewStore(ledger)
+	require.NoError(t, err)
+	cache := store.CacheSessionPath(name)
 	spool := filepath.Join(paths.TraceSpoolDir(), traceBoundaryID)
 	require.NoError(t, os.MkdirAll(spool, 0700))
 	var exported []byte
@@ -29,7 +32,7 @@ func TestMaterializeTracesUsesDurableRecordingWindows(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(spool, "traces.jsonl"), exported, 0600))
 	}
 	appendSpan("BEFORE_RECORDING")
-	state := &RecordingState{AgentType: "claude-code", AgentSessionID: traceBoundaryID, StartedAt: time.Now().UTC(), NativeSessions: []NativeSession{{ID: strings.ToUpper(traceBoundaryID)}, {ID: traceBoundaryID}, {ID: "invalid"}}}
+	state := &RecordingState{SessionPath: cache, AgentType: "claude-code", AgentSessionID: traceBoundaryID, StartedAt: time.Now().UTC(), NativeSessions: []NativeSession{{ID: strings.ToUpper(traceBoundaryID)}, {ID: traceBoundaryID}, {ID: "invalid"}}}
 	state.initializeTraceCapture()
 	require.Len(t, state.Trace.Boundaries[0].Offsets, 1, "native IDs must be normalized, validated, and deduplicated")
 	appendSpan("kept-before-pause")
@@ -40,17 +43,15 @@ func TestMaterializeTracesUsesDurableRecordingWindows(t *testing.T) {
 	state.RecordTraceBoundary("stop", time.Now())
 	appendSpan("AFTER_RECORDING")
 
-	// Finalization sees only the durable raw carrier, after the marker is gone.
-	store, err := NewStore(ledger)
-	require.NoError(t, err)
-	cache := store.CacheSessionPath(name)
+	// Finalization checks the raw carrier against independent local capture
+	// state, even after the live recording marker is gone.
 	require.NoError(t, os.MkdirAll(cache, 0700))
 	raw := filepath.Join(cache, "raw.jsonl")
 	require.NoError(t, os.WriteFile(raw, []byte("{\"type\":\"header\",\"metadata\":{\"agent_type\":\"claude-code\"}}\n{\"type\":\"user\",\"content\":\"Preserve my recording\"}\n"), 0600))
 	require.NoError(t, StampRawCarrier(raw, CarrierStamp{TraceCapture: state.Trace}))
 	stored, err := ReadSessionFromPath(raw)
 	require.NoError(t, err)
-	gotCache, meta, err := MaterializeTraces(ledger, name, stored.Meta.TraceCapture)
+	gotCache, meta, err := MaterializeTraces(ledger, cache, stored.Meta.TraceCapture)
 	require.NoError(t, err)
 	require.Equal(t, cache, gotCache)
 	require.Equal(t, int64(2), meta.Spans)
@@ -79,7 +80,10 @@ func TestMaterializeTracesRejectsUnprovenOrCorruptCapture(t *testing.T) {
 			traceBoundaryEnvironment(t, true)
 			ledger := t.TempDir()
 			const name = "2026-09-24T10-00-test-OxTraceFailure"
-			state := &RecordingState{AgentType: "claude-code", AgentSessionID: traceBoundaryID, StartedAt: time.Now()}
+			store, err := NewStore(ledger)
+			require.NoError(t, err)
+			cache := store.CacheSessionPath(name)
+			state := &RecordingState{SessionPath: cache, AgentType: "claude-code", AgentSessionID: traceBoundaryID, StartedAt: time.Now()}
 			state.initializeTraceCapture()
 			spool := filepath.Join(paths.TraceSpoolDir(), traceBoundaryID)
 			require.NoError(t, os.MkdirAll(spool, 0700))
@@ -87,13 +91,10 @@ func TestMaterializeTracesRejectsUnprovenOrCorruptCapture(t *testing.T) {
 			if !missingStop {
 				state.RecordTraceBoundary("stop", time.Now())
 			}
-			store, err := NewStore(ledger)
-			require.NoError(t, err)
-			cache := store.CacheSessionPath(name)
 			require.NoError(t, os.MkdirAll(cache, 0700))
 			raw := []byte("{\"type\":\"user\",\"content\":\"Ordinary recording remains recoverable\"}\n")
 			require.NoError(t, os.WriteFile(filepath.Join(cache, "raw.jsonl"), raw, 0600))
-			_, meta, err := MaterializeTraces(ledger, name, state.Trace)
+			_, meta, err := MaterializeTraces(ledger, cache, state.Trace)
 			require.Error(t, err)
 			require.Nil(t, meta)
 			for _, filename := range []string{materialize.SpansFile, materialize.EventsFile} {
@@ -107,13 +108,14 @@ func TestMaterializeTracesRejectsUnprovenOrCorruptCapture(t *testing.T) {
 }
 
 func TestMaterializeTracesOptOutAndInvalidDestination(t *testing.T) {
+	traceBoundaryEnvironment(t, true)
 	ledger := filepath.Join(t.TempDir(), "absent")
 	cache, meta, err := MaterializeTraces(ledger, "recording", nil)
 	require.NoError(t, err)
 	require.Empty(t, cache)
 	require.Nil(t, meta)
 	require.NoDirExists(t, ledger, "opted-out recordings must not create trace storage")
-	for _, name := range []string{"", ".", "..", "../escape", "/absolute"} {
+	for _, name := range []string{"", ".", "..", "../escape", string(filepath.Separator)} {
 		t.Run(name, func(t *testing.T) {
 			cache, meta, err := MaterializeTraces(ledger, name, &model.Capture{})
 			require.Error(t, err)
@@ -122,10 +124,69 @@ func TestMaterializeTracesOptOutAndInvalidDestination(t *testing.T) {
 			require.NoDirExists(t, ledger)
 		})
 	}
-	cache, meta, err = MaterializeTraces("", "recording", &model.Capture{})
+	dir := t.TempDir()
+	require.NoError(t, writeLocalTraceCapture(dir, &model.Capture{}))
+	cache, meta, err = MaterializeTraces("", dir, &model.Capture{})
 	require.ErrorIs(t, err, ErrEmptyPath)
 	require.Empty(t, cache)
 	require.Nil(t, meta)
+}
+
+func TestMaterializeTracesRejectsForgedRecordingWindows(t *testing.T) {
+	traceBoundaryEnvironment(t, true)
+	ledger := t.TempDir()
+	store, err := NewStore(ledger)
+	require.NoError(t, err)
+	cache := store.CacheSessionPath("local-recording")
+	state := &RecordingState{SessionPath: cache, AgentType: "claude-code", AgentSessionID: traceBoundaryID, StartedAt: time.Now()}
+	state.initializeTraceCapture()
+	state.RecordTraceBoundary("pause", time.Now())
+	spool := filepath.Join(paths.TraceSpoolDir(), traceBoundaryID)
+	require.NoError(t, os.MkdirAll(spool, 0700))
+	private := []byte(`{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"PRIVATE_PAUSED_TRACE"}]}]}]}` + "\n")
+	require.NoError(t, os.WriteFile(filepath.Join(spool, "traces.jsonl"), private, 0600))
+	state.RecordTraceBoundary("resume", time.Now())
+	state.RecordTraceBoundary("stop", time.Now())
+	require.Len(t, state.Trace.Boundaries, 4)
+	forged := &model.Capture{Boundaries: []model.Boundary{state.Trace.Boundaries[0], state.Trace.Boundaries[3]}}
+
+	for _, tc := range []struct {
+		name, dir string
+		capture   *model.Capture
+	}{
+		{"shared-transcript", filepath.Join(ledger, "sessions", "teammate-recording"), forged},
+		{"same-name-in-ledger", filepath.Join(ledger, "sessions", "local-recording"), state.Trace},
+		{"forged-cache-transcript", cache, forged},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, meta, err := MaterializeTraces(ledger, tc.dir, tc.capture)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "local", "reject authorization before attempting to read the valid spool range")
+			require.Empty(t, got)
+			require.Nil(t, meta)
+			for _, filename := range []string{materialize.SpansFile, materialize.EventsFile} {
+				require.NoFileExists(t, filepath.Join(store.CacheSessionPath(filepath.Base(tc.dir)), filename))
+			}
+		})
+	}
+	// Neither an untrusted marker nor an ordinary boundary update may promote
+	// a forged history or introduce a different native session into local state.
+	untrusted := &RecordingState{SessionPath: filepath.Join(ledger, "sessions", "teammate-recording"), Trace: forged}
+	untrusted.RecordTraceBoundary("stop", time.Now())
+	require.Nil(t, untrusted.Trace)
+	_, err = readLocalTraceCapture(untrusted.SessionPath)
+	require.Error(t, err, "recovery cannot create local authorization")
+	state.NativeSessions = append(state.NativeSessions, NativeSession{ID: traceBoundarySecondID})
+	state.Trace = forged
+	state.RecordTraceBoundary("stop", time.Now())
+	require.Nil(t, state.Trace)
+	local, err := readLocalTraceCapture(cache)
+	require.NoError(t, err)
+	require.Len(t, local.Boundaries, 4)
+	_, meta, err := MaterializeTraces(ledger, cache, local)
+	require.NoError(t, err)
+	require.Zero(t, meta.Spans)
+	require.EqualValues(t, len(private), meta.PausedBytesSkipped)
 }
 
 func TestTraceBoundariesUnavailableConsentFailsClosed(t *testing.T) {

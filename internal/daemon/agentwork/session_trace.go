@@ -1,8 +1,6 @@
 package agentwork
 
 import (
-	"path/filepath"
-
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/trace/model"
@@ -22,7 +20,7 @@ func (h *SessionFinalizeHandler) prepareTraces(payload *SessionFinalizePayload, 
 	if stored.Meta == nil {
 		return "", nil
 	}
-	cache, meta, err := session.MaterializeTraces(payload.LedgerPath, filepath.Base(payload.SessionDir), stored.Meta.TraceCapture)
+	cache, meta, err := session.MaterializeTraces(payload.LedgerPath, payload.SessionDir, stored.Meta.TraceCapture)
 	if err != nil {
 		h.logger.Warn("trace materialization skipped", "error", err)
 		return "", nil
