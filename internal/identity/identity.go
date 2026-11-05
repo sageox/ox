@@ -12,13 +12,13 @@ package identity
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/repotools"
-	"gopkg.in/yaml.v3"
 )
 
 // ProviderType represents a git hosting provider.
@@ -169,7 +169,7 @@ func ResolveWithConfig(cfg *Config) (*ResolvedIdentities, error) {
 				result.AzureDevOps = identity
 			}
 		case ProviderGitea:
-			// Gitea needs the instance URL from the remote
+			// Gitea needs a configured instance matching the remote's host
 			instanceURL := extractGiteaInstanceURL(remoteURLs)
 			if instanceURL != "" {
 				identity, err = getGiteaIdentity(instanceURL)
@@ -250,89 +250,109 @@ func detectProvidersFromRemotes() ([]ProviderType, []string) {
 	return providers, urls
 }
 
-// isGiteaInstance checks if a URL might be a Gitea instance.
-// Since Gitea is self-hosted, we check for common patterns.
+// isGiteaInstance checks if a remote's host matches a configured Gitea instance.
 func isGiteaInstance(url string) bool {
-	// check for gitea in the URL (common for self-hosted)
-	if strings.Contains(strings.ToLower(url), "gitea") {
-		return true
-	}
-	// check if we have a tea config with a matching host
-	return hasTeaConfigForURL(url)
-}
-
-// hasTeaConfigForURL checks if tea CLI has a login for this URL's host.
-func hasTeaConfigForURL(url string) bool {
-	// extract host from URL
-	host := extractHost(url)
-	if host == "" {
-		return false
-	}
-	// check if tea config has this host
-	token := readTeaConfigToken(host)
-	return token != ""
+	return extractGiteaInstanceURL([]string{url}) != ""
 }
 
 // extractHost extracts the host from a git remote URL.
-func extractHost(url string) string {
-	// handle SSH format: git@host:path
-	if strings.HasPrefix(url, "git@") {
-		parts := strings.SplitN(url[4:], ":", 2)
-		if len(parts) > 0 {
-			return parts[0]
-		}
+func extractHost(rawURL string) string {
+	u := parseRemoteURL(rawURL)
+	if u == nil {
+		return ""
 	}
-	// handle HTTPS format: https://host/path
-	url = strings.TrimPrefix(url, "https://")
-	url = strings.TrimPrefix(url, "http://")
-	parts := strings.SplitN(url, "/", 2)
-	if len(parts) > 0 {
-		return parts[0]
+	host := strings.ToLower(u.Hostname())
+	if port := u.Port(); port != "" && !isDefaultPort(u.Scheme, port) {
+		host += ":" + port
+	}
+	return host
+}
+
+// samePort requires a scheme-less remote's explicit port to be the configured
+// instance's effective port, so :80 never selects an HTTPS instance or vice versa.
+func samePort(instanceURL, remoteURL string) bool {
+	inst, remote := parseRemoteURL(instanceURL), parseRemoteURL(remoteURL)
+	if inst == nil || remote == nil || remote.Scheme != "" || remote.Port() == "" {
+		return true
+	}
+	port := inst.Port()
+	if port == "" {
+		port = map[string]string{"https": "443", "http": "80"}[inst.Scheme]
+	}
+	return remote.Port() == port
+}
+
+func urlPath(rawURL string) string {
+	if u := parseRemoteURL(rawURL); u != nil {
+		return u.Path
 	}
 	return ""
 }
 
-// extractGiteaInstanceURL extracts the Gitea instance URL from remote URLs.
+// isDefaultPort treats a scheme-less remote's :443 or :80 as default too:
+// GetRemoteURLs strips the scheme but keeps explicit ports.
+func isDefaultPort(scheme, port string) bool {
+	switch scheme {
+	case "https":
+		return port == "443"
+	case "http":
+		return port == "80"
+	case "ssh":
+		return port == "22"
+	case "":
+		return port == "443" || port == "80"
+	}
+	return false
+}
+
+func parseRemoteURL(rawURL string) *url.URL {
+	if strings.HasPrefix(rawURL, "git@") {
+		rawURL = "ssh://" + strings.Replace(rawURL, ":", "/", 1)
+	} else if !strings.Contains(rawURL, "://") && !strings.HasPrefix(rawURL, "//") {
+		// GetRemoteURLs returns normalized host/path URLs without a scheme.
+		rawURL = "//" + rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" {
+		return nil
+	}
+	return u
+}
+
+// giteaRemoteBelongs reports whether remoteURL is a repository of the Gitea
+// instance at instanceURL: same host (default ports ignored) and a path under
+// the instance's base path, so a same-host remote elsewhere never gets the token.
+func giteaRemoteBelongs(instanceURL, remoteURL string) bool {
+	if extractHost(instanceURL) != extractHost(remoteURL) || !samePort(instanceURL, remoteURL) {
+		return false
+	}
+	// GetRemoteURLs lowercases remotes, so compare paths case-insensitively.
+	base := strings.ToLower(strings.Trim(urlPath(instanceURL), "/"))
+	if base == "" {
+		return true
+	}
+	remotePath := strings.ToLower(strings.Trim(urlPath(remoteURL), "/"))
+	return remotePath == base || strings.HasPrefix(remotePath, base+"/")
+}
+
+// extractGiteaInstanceURL selects a configured instance whose host matches a
+// remote. The request destination comes from trusted config, never the remote.
 func extractGiteaInstanceURL(urls []string) string {
-	for _, url := range urls {
-		if isGiteaInstance(url) {
-			host := extractHost(url)
-			if host != "" {
-				return "https://" + host
-			}
+	envURL := normalizeGiteaURL(os.Getenv("GITEA_URL"))
+	config := readTeaConfigFile()
+	for _, remoteURL := range urls {
+		host := extractHost(remoteURL)
+		if host == "" {
+			continue
 		}
-	}
-	return ""
-}
-
-// readTeaConfigToken reads the Gitea token for a host from tea CLI config.
-func readTeaConfigToken(host string) string {
-	configPath := filepath.Join(xdgConfigHome(), "tea", "config.yml")
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return ""
-	}
-
-	// simple yaml parsing for tea config
-	type teaLogin struct {
-		URL   string `yaml:"url"`
-		Token string `yaml:"token"`
-	}
-	type teaCfg struct {
-		Logins []teaLogin `yaml:"logins"`
-	}
-
-	var config teaCfg
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		return ""
-	}
-
-	// look for matching host
-	for _, login := range config.Logins {
-		loginHost := extractHost(login.URL)
-		if loginHost == host {
-			return login.Token
+		if envURL != "" && giteaRemoteBelongs(envURL, remoteURL) && os.Getenv("GITEA_TOKEN") != "" {
+			return envURL
+		}
+		for _, login := range config.Logins {
+			instanceURL := normalizeGiteaURL(login.URL)
+			if instanceURL != "" && giteaRemoteBelongs(instanceURL, remoteURL) && login.Token != "" {
+				return instanceURL
+			}
 		}
 	}
 
