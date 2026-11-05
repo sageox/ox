@@ -123,11 +123,12 @@ func CacheDir() string {
 //
 // Contains: daemon/ (sockets, PIDs, registry)
 //
-// XDG mode (default): $XDG_RUNTIME_DIR/sageox (ephemeral, doesn't persist across reboots)
+// XDG mode (default): $XDG_RUNTIME_DIR/sageox, falling back to $XDG_STATE_HOME/sageox
+// (default: ~/.local/state/sageox) when no absolute runtime directory is set.
 // Legacy mode (OX_XDG_DISABLE=1): ~/.sageox/state
 //
-// Despite the name, this is not $XDG_STATE_HOME in XDG mode. Daemon logs must
-// survive a reboot, so DaemonLogFile uses $XDG_STATE_HOME instead.
+// The runtime directory may be cleared on reboot. Daemon logs must survive a
+// reboot, so DaemonLogFile always uses $XDG_STATE_HOME in XDG mode.
 func StateDir() string {
 	if useXDGMode() {
 		// use runtime dir for ephemeral daemon state in XDG mode
@@ -356,7 +357,7 @@ func TempDir() string {
 }
 
 // DaemonLogFile returns the path to a specific daemon's log file. Logs are XDG
-// state data, kept across reboots, unlike TempDir and the XDG-mode StateDir:
+// state data, kept across reboots, unlike TempDir and an XDG runtime directory:
 //
 //	$XDG_STATE_HOME/sageox/logs/daemon_<repo_id>_<workspace_id>.log  (default: ~/.local/state)
 //	~/.sageox/state/logs/daemon_<repo_id>_<workspace_id>.log          (legacy mode)
@@ -661,6 +662,18 @@ func DaemonStateDir() string {
 // DaemonSocketFile returns the path to a daemon's Unix socket.
 func DaemonSocketFile(workspaceID string) string {
 	return filepath.Join(DaemonStateDir(), "daemon-"+workspaceID+".sock")
+}
+
+// PreMigrationDaemonSocketFile returns where releases before the shared-temp
+// fix put a daemon's socket ($TMPDIR/sageox/daemon), or "" when that location
+// was never used (legacy mode, or an absolute XDG_RUNTIME_DIR). A daemon still
+// listening there must be stopped so the new socket location does not spawn a
+// competing daemon for the same workspace.
+func PreMigrationDaemonSocketFile(workspaceID string) string {
+	if !useXDGMode() || filepath.IsAbs(os.Getenv("XDG_RUNTIME_DIR")) {
+		return ""
+	}
+	return filepath.Join(os.TempDir(), "sageox", "daemon", "daemon-"+workspaceID+".sock")
 }
 
 // DaemonPidFile returns the path to a daemon's PID file.
