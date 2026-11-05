@@ -64,7 +64,7 @@ Use during development. Not a release gate on its own — `test-all` subsumes it
 | **Command** | `make test-all` |
 | **Time** | ~1-2min |
 | **Prerequisites** | None |
-| **CI** | Trunk merge queue (sharded, with race detection and the coverage ratchets) |
+| **CI** | Trunk merge queue and push to main (sharded, with race detection and the coverage ratchets) |
 
 ### 4. Slow Tests
 
@@ -172,7 +172,7 @@ Report back in Slack with: pass/fail per step, OS/arch, ox version, and any roug
 |----------|---------|-------------|
 | `ci.yml` | Pull request push | Lint + fast tests (`-short`, race), one runner per slot; target under 2 minutes |
 | `ci.yml` | Trunk merge queue (`trunk-merge/*`) | Full tests with race detection and coverage ratchets, acceptance, twins, plan-review, Windows skills, FreeBSD build |
-| `ci.yml` | Push to main | Fast tests (`-short`), then warms the build cache PRs restore |
+| `ci.yml` | Push to main | The full tier again, after the merge (catches Direct Merge to Main and hand merges), plus fast tests and the build cache PRs restore |
 | `release.yml` | Published release / manual dispatch | GoReleaser (build, sign, upload binaries) |
 | `release-verify.yml` | *Currently disabled* | Post-release binary verification |
 

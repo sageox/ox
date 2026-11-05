@@ -21,10 +21,10 @@ env:
   # download then costs one minute, not ten, before the job carries on
   # without the cache.
   SEGMENT_DOWNLOAD_TIMEOUT_MINS: '1'
-  # Trunk's merge queue tests each merge candidate as a pull_request from a
-  # trunk-merge/* branch. Those runs carry the full tier; an author's own PR
+  # The full tier runs on Trunk's merge-queue candidates (pull_requests from
+  # trunk-merge/* branches) and on every push to main. An author's own PR
   # pushes get the fast tier. Jobs read the result as needs.plan.outputs.tier.
-  MERGE_GATE: ${{ startsWith(github.head_ref, 'trunk-merge/') }}
+  FULL_TIER: ${{ github.event_name == 'push' || startsWith(github.head_ref, 'trunk-merge/') }}
 
 jobs:
   # Two tiers, each cut into slots (`make test-split-slots`, `make
@@ -38,16 +38,20 @@ jobs:
   #         the coverage ratchets. A failure drops the PR from the queue
   #         before it reaches main.
   #
+  # Every push to main runs the full tier again, after the merge. Trunk can
+  # merge an up-to-date PR into an empty queue without a queue run (Direct
+  # Merge to Main), and a PR merged by hand skips the queue entirely; this
+  # is what still checks those.
+  #
   # The full tier used to run on every PR push, which made each push wait
   # 8-17 minutes for suites that only need to pass once, before merge.
   plan:
-    if: github.event_name == 'pull_request'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
       tier: ${{ steps.tier.outputs.tier }}
     steps:
       - id: tier
-        run: echo "tier=$([ "$MERGE_GATE" = true ] && echo full || echo fast)" >> "$GITHUB_OUTPUT"
+        run: echo "tier=$([ "$FULL_TIER" = true ] && echo full || echo fast)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -71,7 +75,6 @@ jobs:
         run: make coverage-ratchet-test
 
   unit:
-    if: github.event_name == 'pull_request'
     # 8 vCPU: go test -race -p 8 -parallel 32 per slot; ox-4 is the PR long pole (~1300s on 4 vCPU)
     runs-on: blacksmith-8vcpu-ubuntu-2404
     strategy:
@@ -80,7 +83,7 @@ jobs:
         # Full tier (merge queue) first, fast tier second: `make -s
         # test-split-slots` and `make -s test-fast-split-slots`, checked by
         # the plan job. strategy cannot read env, hence the repeated test.
-        slot: ${{ fromJSON(startsWith(github.head_ref, 'trunk-merge/') && '["rest", "heavy", "ox-1", "ox-2", "ox-3", "ox-4", "daemon-1", "daemon-2"]' || '["rest", "heavy", "ox-1", "ox-2", "ox-3", "ox-4", "ox-5", "daemon-1", "daemon-2"]') }}
+        slot: ${{ fromJSON((github.event_name == 'push' || startsWith(github.head_ref, 'trunk-merge/')) && '["rest", "heavy", "ox-1", "ox-2", "ox-3", "ox-4", "daemon-1", "daemon-2"]' || '["rest", "heavy", "ox-1", "ox-2", "ox-3", "ox-4", "ox-5", "daemon-1", "daemon-2"]') }}
     name: unit (${{ matrix.slot }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -125,9 +128,9 @@ jobs:
       #   --junitfile                       structured artifact for digest + post-mortem
       # Verbose mode (humans/local debugging): OX_TEST_LOG=1 + run gotestsum without
       # these flags, or call `make test` with V=1.
-      - name: ${{ env.MERGE_GATE == 'true' && 'full' || 'fast' }} unit tier, slot ${{ matrix.slot }}
+      - name: ${{ env.FULL_TIER == 'true' && 'full' || 'fast' }} unit tier, slot ${{ matrix.slot }}
         env:
-          TIER: ${{ env.MERGE_GATE == 'true' && 'full' || 'fast' }}
+          TIER: ${{ env.FULL_TIER == 'true' && 'full' || 'fast' }}
         run: |
           target=test-fast-split-slot
           if [ "$TIER" = full ]; then target=test-split-slot; fi
@@ -143,7 +146,7 @@ jobs:
           python3 scripts/test_metrics.py test-timings.json >/dev/null
 
       - name: Upload unit coverage
-        if: env.MERGE_GATE == 'true'
+        if: env.FULL_TIER == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: unit-coverage-${{ matrix.slot }}
@@ -187,8 +190,9 @@ jobs:
           retention-days: 14
           overwrite: true
 
-  # A push to main validates the merge with the fast tier, then compiles what
-  # PR jobs compile and saves it as the build cache every PR job restores.
+  # A push to main runs the fast tier (its compile outputs are what the fast PR
+  # slots restore), then compiles what full-tier jobs compile and saves it all
+  # as the build cache every PR job restores. The full tier runs beside it.
   main:
     if: github.event_name == 'push'
     # 8 vCPU: push-to-main fast tier plus build-cache warm-up: Go compile and test, ~740s on 4 vCPU
@@ -406,7 +410,7 @@ jobs:
   #
   # `main`'s branch protection requires this check alone, and the Trunk merge
   # queue takes its required statuses from there. A job a merge must wait for
-  # belongs in `needs` and in the pull_request results below.
+  # belongs in `needs` and in the tier's results below.
   test:
     if: always()
     needs: [plan, unit, main, acceptance, twins, lint, plan-review, skills-windows]
@@ -426,22 +430,22 @@ jobs:
           SKILLS_WINDOWS: ${{ needs.skills-windows.result }}
         run: |
           echo "tier=$TIER plan=$PLAN unit=$UNIT main=$MAIN acceptance=$ACCEPTANCE twins=$TWINS lint=$LINT plan-review=$PLAN_REVIEW skills-windows=$SKILLS_WINDOWS"
-          if [ "$EVENT" = pull_request ] && [ "$TIER" = full ]; then
-            for result in "$PLAN" "$UNIT" "$ACCEPTANCE" "$TWINS" "$LINT" "$PLAN_REVIEW" "$SKILLS_WINDOWS"; do test "$result" = success; done
-          elif [ "$EVENT" = pull_request ]; then
-            # A fast run must not pass with no tier: a failed plan leaves TIER empty.
-            test "$TIER" = fast
-            for result in "$PLAN" "$UNIT" "$LINT"; do test "$result" = success; done
-          else
-            test "$MAIN" = success
-          fi
+          case "$TIER/$EVENT" in
+            full/pull_request) results="$PLAN $UNIT $ACCEPTANCE $TWINS $LINT $PLAN_REVIEW $SKILLS_WINDOWS" ;;
+            full/push) results="$PLAN $UNIT $ACCEPTANCE $TWINS $LINT $PLAN_REVIEW $SKILLS_WINDOWS $MAIN" ;;
+            fast/pull_request) results="$PLAN $UNIT $LINT" ;;
+            # no tier means plan failed: never a pass
+            *) echo "::error::no test tier (plan=$PLAN)"; exit 1 ;;
+          esac
+          for result in $results; do test "$result" = success; done
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.plan.outputs.tier == 'full'
         with:
           persist-credentials: false
           # The changed-line coverage ratchet below diffs against the PR base
-          # commit, which a shallow clone does not contain.
+          # commit (on main, the previous tip), which a shallow clone does not
+          # contain.
           fetch-depth: 0
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -481,7 +485,7 @@ jobs:
 
       - name: Enforce changed-line coverage
         if: needs.plan.outputs.tier == 'full'
-        run: python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json --diff-base "${{ github.event.pull_request.base.sha }}"
+        run: python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json --diff-base "${{ github.event.pull_request.base.sha || github.event.before }}"
 
       - name: Upload coverage
         if: always() && needs.plan.outputs.tier == 'full' && hashFiles('coverage-all.out') != ''
@@ -522,13 +526,13 @@ jobs:
       # unit tier compiles every package anyway, and this job finishes first.
       # golangci-lint's typecheck catches a compile error on the fast path.
       - name: Build
-        if: github.event_name == 'push' || env.MERGE_GATE == 'true'
+        if: env.FULL_TIER == 'true'
         run: go build -v ./...
 
       # Match the FreeBSD release target and catch platform-specific imports.
       # A rare break that costs every PR push ~12s: checked before merge.
       - name: Cross-build FreeBSD CLI
-        if: github.event_name == 'push' || env.MERGE_GATE == 'true'
+        if: env.FULL_TIER == 'true'
         env:
           CGO_ENABLED: '0'
           GOOS: freebsd
