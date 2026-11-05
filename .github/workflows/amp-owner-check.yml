@@ -44,7 +44,8 @@ name: amp-owner-check
 # veria-ai, CodeRabbit -- all three independently). The amp-owner-check
 # environment's deployment branches are restricted to main, which this
 # job satisfies (pull_request_target's ref is always the base branch) but
-# ci.yml's pull_request-triggered job does not (its ref is the PR branch)
+# ci.yml's pull_request-triggered job does not (its ref is the synthetic
+# refs/pull/<number>/merge, never main)
 # -- so only this job can reach the environment's secrets.
 #
 # Known gaps, NEITHER fixable by editing this file -- both need a human
