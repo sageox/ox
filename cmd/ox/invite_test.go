@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -1591,6 +1592,75 @@ func TestRunInvite_NoTeamResolvableExitsSilentlyWithGuidance(t *testing.T) {
 				assert.Contains(t, stripANSI(buf.String()), "--team")
 			}
 		})
+	}
+}
+
+// Repository metadata may point at another cached team and spoof its name.
+// Neither that default nor confirmation suppression authorizes an invitation.
+func TestRunInvite_RepositoryTeamRequiresExplicitSelection(t *testing.T) {
+	tests := []struct {
+		name string
+		team string
+		yes  bool
+		json bool
+	}{
+		{"no flags", "", false, false},
+		{"yes", "", true, false},
+		{"json", "", false, true},
+		{"yes and json", "", true, true},
+		{"explicit team", "team_expected", true, false},
+	}
+
+	for _, fallback := range []bool{false, true} {
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("fallback=%v/%s", fallback, tt.name), func(t *testing.T) {
+				buf, log := newInviteCommandHarness(t, []inviteReply{{status: http.StatusCreated, body: createdInviteBody}})
+				t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+				projectRoot := os.Getenv(config.EnvProjectRoot)
+				cfg, err := config.LoadProjectConfig(projectRoot)
+				require.NoError(t, err)
+				cfg.TeamID = "team_other"
+				cfg.TeamName = "Expected Team"
+				require.NoError(t, config.SaveProjectConfig(projectRoot, cfg))
+
+				otherPath := config.DefaultTeamContextPath("team_other", cfg.Endpoint)
+				require.NotEmpty(t, otherPath)
+				require.NoError(t, os.MkdirAll(otherPath, 0755))
+				localCfg := &config.LocalConfig{TeamContexts: []config.TeamContext{
+					{TeamID: "team_expected", TeamName: "Expected Team", Path: t.TempDir()},
+				}}
+				if !fallback {
+					localCfg.TeamContexts = append(localCfg.TeamContexts, config.TeamContext{
+						TeamID: "team_other", TeamName: "Other Team", Path: otherPath,
+					})
+				}
+				require.NoError(t, config.SaveLocalConfig(projectRoot, localCfg))
+				// Both the local row and computed-path fallback must be reachable.
+				tc := config.FindRepoTeamContext(projectRoot)
+				require.NotNil(t, tc)
+				require.Equal(t, "team_other", tc.TeamID)
+
+				require.NoError(t, inviteCmd.Flags().Set("team", tt.team))
+				require.NoError(t, inviteCmd.Flags().Set("yes", fmt.Sprint(tt.yes)))
+				require.NoError(t, rootCmd.PersistentFlags().Set("json", fmt.Sprint(tt.json)))
+
+				err = runInvite(inviteCmd, []string{"alice@acme.com"})
+				if tt.team == "" {
+					require.Error(t, err)
+					assert.True(t, cli.IsSilent(err))
+					assert.Contains(t, stripANSI(buf.String()), "--team")
+					assert.Empty(t, log.emails(), "repository defaults must never create invitations")
+					return
+				}
+
+				require.NoError(t, err)
+				log.mu.Lock()
+				defer log.mu.Unlock()
+				assert.Equal(t, []string{"/api/v1/teams/team_expected/invites"}, log.paths,
+					"an explicit team must override the repository-controlled destination")
+			})
+		}
 	}
 }
 

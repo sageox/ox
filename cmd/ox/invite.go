@@ -160,16 +160,17 @@ separate arguments. SageOx then sends each person a link to join. Delivery is
 best-effort and happens after the invitation is created, so a reported
 invitation is not proof an email arrived. Invitations expire after 7 days.
 
-With no --team, the invitation targets this repository's team. Whether you
-may invite, list, or cancel is decided by the server and reported back.
+Creating invitations requires --team to choose the destination explicitly.
+With --list or --cancel, omitting --team uses this repository's team. Whether
+you may invite, list, or cancel is decided by the server and reported back.
 
 Examples:
-  ox team invite alice@acme.com
-  ox team invite alice@acme.com,bob@acme.com
+  ox team invite alice@acme.com --team sageox
+  ox team invite alice@acme.com,bob@acme.com --team sageox
   ox team invite alice@acme.com --team sageox --role admin
   ox team invite --list
   ox team invite --cancel 0198f3c2-6c1a-7e40-9a0b-2f8c4d5e6f70
-  ox team invite alice@acme.com --json`,
+  ox team invite alice@acme.com --team sageox --json`,
 	Args: cobra.ArbitraryArgs,
 	RunE: runInvite,
 }
@@ -191,7 +192,7 @@ var inviteAliasCmd = &cobra.Command{
 // addInviteFlags registers the invite flag set. It runs for both the canonical
 // `ox team invite` and the hidden `ox invite` alias so the two stay identical.
 func addInviteFlags(c *cobra.Command) {
-	c.Flags().String("team", "", "team slug, id, or name (defaults to the repo's active team)")
+	c.Flags().String("team", "", "team slug, id, or name (required to create invitations; defaults to the repo's team for --list/--cancel)")
 	c.Flags().String("role", api.RoleMember, "role to grant: member, admin, or owner")
 	c.Flags().BoolP("yes", "y", false, "skip the confirmation prompt")
 	c.Flags().Bool("list", false, "list invitations that are still outstanding")
@@ -272,6 +273,12 @@ func runInvite(cmd *cobra.Command, args []string) error {
 			return runInviteList(ctx, out, client, target, jsonOutput)
 		}
 		return runInviteCancel(ctx, out, client, target, cancelFlag, jsonOutput, skipConfirm)
+	}
+
+	// Repository metadata must never choose where new invitations grant access,
+	// even when confirmation is skipped with --yes, --json, or no TTY.
+	if teamFlag == "" {
+		return errInviteNoTeam(out, jsonOutput)
 	}
 
 	emails := splitEmails(args)
@@ -497,6 +504,7 @@ func outcomeForError(email string, err error) inviteOutcome {
 // Order: --team resolved locally -> --team passed through verbatim (the
 // server resolves slugs too, so a team this machine never synced still works)
 // -> this repo's team -> interactive picker -> an error naming the fix.
+// runInvite requires --team for creation; defaults are only for --list/--cancel.
 func resolveInviteTarget(ctx context.Context, client *api.RepoClient, projectRoot, teamFlag string, jsonOutput bool, out io.Writer) (inviteTarget, error) {
 	if teamFlag != "" {
 		if t := resolveTeamByQuery(projectRoot, teamFlag); t != nil {
@@ -1041,14 +1049,14 @@ func errInviteNoTeam(w io.Writer, jsonOutput bool) error {
 		if jerr := writeJSONIndent(w, map[string]string{
 			"error":    "no_team",
 			"message":  "no team to invite to",
-			"guidance": "This directory isn't linked to a team. Pass --team <slug>, or run 'ox teams' to list teams you belong to.",
+			"guidance": "Pass --team <slug> to choose a team explicitly, or run 'ox teams' to list teams you belong to.",
 		}); jerr != nil {
 			return jerr
 		}
 		return silentFailure(errkind.Usage, "no_team", nil)
 	}
 	fmt.Fprintf(w, "%s %s\n\n", inviteErrStyle.Render("✗"), "No team to invite to.")
-	fmt.Fprintf(w, "  %s\n\n", cli.StyleDim.Render("This directory isn't linked to a team, and --team wasn't given."))
+	fmt.Fprintf(w, "  %s\n\n", cli.StyleDim.Render("Pass --team to choose a team explicitly."))
 	cli.PrintActionHintTo(w, "ox teams", "List teams you belong to")
 	cli.PrintActionHintTo(w, "ox team invite <email> --team <slug>", "Name the team explicitly")
 	return silentFailure(errkind.Usage, "no_team", nil)
