@@ -12,6 +12,7 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/upgrade"
 	"github.com/spf13/cobra"
 )
@@ -29,7 +30,7 @@ var (
 	installRunLogin      = runInstalledLogin
 	installRetireDaemons = retireStaleDaemonsAfterUpgrade
 	installSystemBinDir  = "/usr/local/bin"
-	installInteractive   = stdinIsTerminal
+	installInteractive   = loginCanPrompt
 )
 
 var installCmd = &cobra.Command{
@@ -285,10 +286,14 @@ func sameFile(a, b string) bool {
 	return os.SameFile(ai, bi)
 }
 
-// stdinIsTerminal reports whether stdin can answer login's prompts. Unlike
-// cli.IsInteractive it ignores --no-interactive, which only turns off TUI
-// elements; --no-input is checked separately.
-func stdinIsTerminal() bool {
+// loginCanPrompt reports whether someone can answer login's prompts: stdin is
+// a terminal and this is not a CI job. Unlike cli.IsInteractive it ignores an
+// explicit --no-interactive, which only turns off TUI elements; --no-input is
+// checked separately.
+func loginCanPrompt() bool {
+	if config.IsCI() {
+		return false
+	}
 	return isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
 }
 
@@ -314,7 +319,11 @@ func installLogin(out io.Writer, oxPath string) (bool, error) {
 }
 
 func runInstalledLogin(oxPath string) error {
-	c := exec.Command(oxPath, "login")
+	args := []string{"login"}
+	if cli.NoInteractive() {
+		args = append(args, "--no-interactive")
+	}
+	c := exec.Command(oxPath, args...)
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 	err := c.Run()
 	var exitErr *exec.ExitError

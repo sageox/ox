@@ -390,3 +390,24 @@ func TestRunInstallNoInteractiveFlagStillLogsIn(t *testing.T) {
 
 	assert.Len(t, *logins, 1, "--no-interactive only turns off TUI elements; a terminal stdin can still log in")
 }
+
+func TestLoginCanPromptFalseInCI(t *testing.T) {
+	t.Setenv("CI", "true")
+	assert.False(t, loginCanPrompt(), "an unattended CI job must not wait on device authorization")
+}
+
+func TestRunInstalledLoginForwardsNoInteractive(t *testing.T) {
+	skipInstallOnWindows(t)
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	oxPath := filepath.Join(dir, "ox")
+	require.NoError(t, os.WriteFile(oxPath, []byte("#!/bin/sh\necho \"$@\" > \""+argsFile+"\"\n"), 0o755))
+	cli.SetNoInteractive(true)
+	t.Cleanup(func() { cli.SetNoInteractive(false) })
+
+	require.NoError(t, runInstalledLogin(oxPath))
+
+	got, err := os.ReadFile(argsFile)
+	require.NoError(t, err)
+	assert.Equal(t, "login --no-interactive\n", string(got))
+}
