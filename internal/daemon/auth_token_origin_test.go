@@ -10,6 +10,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/flags"
+	"github.com/sageox/ox/internal/githubmirror"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -132,4 +133,19 @@ func TestInitComponents_ColdStartTokenIsBoundToProjectEndpoint(t *testing.T) {
 
 	assert.Equal(t, "oauth-token", d.heartbeat.GetAuthToken(projectAPI))
 	assert.Empty(t, d.heartbeat.GetAuthToken(foreignAPI))
+}
+
+// A server switch with the same Ledger must not reuse history relayed to the
+// old server, or unchanged items never reach the new one.
+func TestGitHubMirrorLoadState_ResetsOnEndpointChange(t *testing.T) {
+	ledger := t.TempDir()
+	r := NewGitHubMirrorRelayer(GitHubMirrorDeps{Logger: testLogger()})
+	st := r.loadState(ledger, "acme/app", "team-1", "https://api.a.example")
+	st.Items["pr/42"] = githubmirror.ItemState{}
+	require.NoError(t, githubmirror.SaveState(ledger, st))
+
+	assert.Contains(t, r.loadState(ledger, "acme/app", "team-1", "https://api.a.example").Items, "pr/42")
+	moved := r.loadState(ledger, "acme/app", "team-1", "https://api.b.example")
+	assert.Empty(t, moved.Items)
+	assert.Equal(t, "https://api.b.example", moved.Endpoint)
 }

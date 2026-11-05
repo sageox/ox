@@ -81,6 +81,9 @@ type GitHubMirrorDeps struct {
 	Enabled func() bool
 	// AuthToken returns the SageOx token the mirror API call is made with.
 	AuthToken func() string
+	// Endpoint returns the SageOx API endpoint this cycle relays to, resolved
+	// by AuthToken. nil or "" leaves the saved history's endpoint unchecked.
+	Endpoint func() string
 	// Team returns the project's team id (or slug) and the on-disk path of
 	// its Team Context checkout. Either empty means "not set up here".
 	Team func() (teamRef, teamContextPath string)
@@ -184,6 +187,11 @@ func newProjectGitHubMirrorRelayer(projectRoot string, settings func() *flags.CL
 		},
 		NewFetcher: func(githubToken string) githubmirror.Fetcher {
 			return gh.NewMirrorFetcher(gh.NewClient(githubToken))
+		},
+		Endpoint: func() string {
+			mu.Lock()
+			defer mu.Unlock()
+			return cycleEP
 		},
 		NewRelay: func(authToken string) MirrorRelayClient {
 			mu.Lock()
@@ -300,7 +308,11 @@ func (r *GitHubMirrorRelayer) Run(ctx context.Context, target MirrorTarget) {
 	}
 
 	fullName := target.Owner + "/" + target.Repo
-	st := r.loadState(target.LedgerPath, fullName, teamRef)
+	var apiEndpoint string
+	if r.deps.Endpoint != nil {
+		apiEndpoint = endpoint.NormalizeEndpoint(r.deps.Endpoint())
+	}
+	st := r.loadState(target.LedgerPath, fullName, teamRef, apiEndpoint)
 	if now.Before(st.NextAllowedAt) {
 		log.Debug("github mirror in backoff", "repo", fullName, "until", st.NextAllowedAt.Format(time.RFC3339))
 		r.publish(st)
@@ -352,7 +364,7 @@ func (r *GitHubMirrorRelayer) Run(ctx context.Context, target MirrorTarget) {
 // unreadable or belongs to another repo or team. Losing it only costs repeat
 // relays the server ignores, so it never blocks the mirror. A state that
 // records no team (written before teams were recorded) is adopted, not dropped.
-func (r *GitHubMirrorRelayer) loadState(ledgerPath, fullName, teamRef string) *githubmirror.State {
+func (r *GitHubMirrorRelayer) loadState(ledgerPath, fullName, teamRef, apiEndpoint string) *githubmirror.State {
 	st, err := githubmirror.LoadState(ledgerPath)
 	if err != nil {
 		r.deps.Logger.Warn("github mirror state unreadable, starting fresh", "repo", fullName, "error", mirrorText(err))
@@ -370,11 +382,19 @@ func (r *GitHubMirrorRelayer) loadState(ledgerPath, fullName, teamRef string) *g
 		r.deps.Logger.Info("github mirror state belongs to another team, starting fresh", "repo", fullName, "team", teamRef, "state_team", st.Team)
 		st = &githubmirror.State{Version: githubmirror.StateVersion}
 	}
+	if apiEndpoint != "" && st.Endpoint != "" && st.Endpoint != apiEndpoint {
+		// the new server has none of the history relayed to the old one
+		r.deps.Logger.Info("github mirror state belongs to another endpoint, starting fresh", "repo", fullName, "endpoint", apiEndpoint, "state_endpoint", st.Endpoint)
+		st = &githubmirror.State{Version: githubmirror.StateVersion}
+	}
 	if st.Items == nil {
 		st.Items = map[string]githubmirror.ItemState{}
 	}
 	st.Repo = fullName
 	st.Team = teamRef
+	if apiEndpoint != "" {
+		st.Endpoint = apiEndpoint
+	}
 	return st
 }
 

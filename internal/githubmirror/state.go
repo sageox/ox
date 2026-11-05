@@ -36,6 +36,9 @@ type State struct {
 	// at another team, the new board has none of these posts, so the daemon
 	// starts over instead of skipping items it "already relayed".
 	Team string `json:"team,omitempty"`
+	// Endpoint is the normalized SageOx API endpoint the history was relayed
+	// to. A server switch starts over for the same reason a team switch does.
+	Endpoint string `json:"endpoint,omitempty"`
 	// PullRequestCursor and IssueCursor are per kind: list items of that kind
 	// updated at/after this. A kind that is switched off never moves its cursor,
 	// so turning it on later still lists its whole backlog inside the window.
