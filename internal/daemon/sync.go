@@ -22,7 +22,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1689,9 +1688,15 @@ func (s *SyncScheduler) drainMurmurOutbox(ctx context.Context) {
 				continue
 			}
 
+			mf, err := decodeMurmurPayload(payload)
+			if err != nil {
+				s.logger.Warn("dropping malformed queued murmur", "path", e.path, "error", err)
+				_ = RemoveOutboxMurmur(e.path)
+				continue
+			}
+
 			// drop stale murmurs (older than the 24h window) so old WIP never resurfaces
-			var mf ledger.MurmurFile
-			if json.Unmarshal(payload.MurmurJSON, &mf) == nil && !mf.Timestamp.IsZero() && mf.Timestamp.Before(cutoff) {
+			if mf.Timestamp.Before(cutoff) {
 				s.logger.Debug("dropping stale queued murmur", "path", e.path, "ts", mf.Timestamp)
 				_ = RemoveOutboxMurmur(e.path)
 				continue
