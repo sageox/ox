@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -77,4 +78,19 @@ func TestStopPreMigrationDaemons_IgnoresSymlinkedSocket(t *testing.T) {
 	stopPreMigrationDaemons()
 	time.Sleep(100 * time.Millisecond)
 	require.Zero(t, stops.Load(), "a symlinked pre-migration socket must not be stopped")
+}
+
+func TestStopPreMigrationDaemons_SkipsDeadSocket(t *testing.T) {
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	stops := startPreMigrationServer(t, cwd)
+	socket := paths.PreMigrationDaemonSocketFile(CurrentWorkspaceID())
+	require.NoError(t, os.Remove(socket))
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+	require.NoError(t, err)
+	ln.SetUnlinkOnClose(false)
+	require.NoError(t, ln.Close())
+
+	stopPreMigrationDaemons()
+	require.Zero(t, stops.Load(), "a socket nobody answers on must be left alone")
 }
