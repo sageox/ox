@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/mattn/go-isatty"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/upgrade"
@@ -28,7 +29,7 @@ var (
 	installRunLogin      = runInstalledLogin
 	installRetireDaemons = retireStaleDaemonsAfterUpgrade
 	installSystemBinDir  = "/usr/local/bin"
-	installInteractive   = cli.IsInteractive
+	installInteractive   = stdinIsTerminal
 )
 
 var installCmd = &cobra.Command{
@@ -282,6 +283,13 @@ func sameFile(a, b string) bool {
 		return filepath.Clean(a) == filepath.Clean(b)
 	}
 	return os.SameFile(ai, bi)
+}
+
+// stdinIsTerminal reports whether stdin can answer login's prompts. Unlike
+// cli.IsInteractive it ignores --no-interactive, which only turns off TUI
+// elements; --no-input is checked separately.
+func stdinIsTerminal() bool {
+	return isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
 }
 
 // installLogin runs `ox login` with the installed binary unless the user is

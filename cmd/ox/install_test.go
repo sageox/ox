@@ -378,3 +378,15 @@ func TestRunInstallNonInteractiveStdinSkipsLogin(t *testing.T) {
 	assert.Empty(t, *logins, "a piped stdin must not start an interactive login")
 	assert.Contains(t, out, "Log in with:")
 }
+
+func TestRunInstallNoInteractiveFlagStillLogsIn(t *testing.T) {
+	_, logins, _ := stubInstall(t, false)
+	installDirFlag = t.TempDir()
+	t.Setenv("PATH", installDirFlag)
+	cli.SetNoInteractive(true)
+	t.Cleanup(func() { cli.SetNoInteractive(false) })
+
+	runInstallCmd(t)
+
+	assert.Len(t, *logins, 1, "--no-interactive only turns off TUI elements; a terminal stdin can still log in")
+}
