@@ -3,6 +3,7 @@ package lfs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -303,4 +304,160 @@ func TestFindMissingPlanRenders_ReportsWithoutChanging(t *testing.T) {
 		{Path: "data/plans/kept/plan.html", OID: keptRef.OID, Size: keptRef.Size, Recoverable: true},
 	}, missing)
 	assert.Equal(t, head, git(t, ledger, "rev-parse", "HEAD"))
+}
+
+// TestFindMissingPlanRenders_FindsTheCommittedRevisionAndHistory: the report
+// covers a plan page whose pointer sits only in an earlier unpushed commit,
+// and finds the committed revision's copy after a later save replaced the
+// slot. Failure prevented: doctor reporting "every plan page is in the store"
+// while the push still refused, and a failed later commit leaving the
+// committed pointer with no copy.
+func TestFindMissingPlanRenders_FindsTheCommittedRevisionAndHistory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repositories and a mocked LFS store")
+	}
+	useBundledSessionRules(t)
+	ledger, _ := initLedgerWithRemote(t)
+	rel := "data/plans/" + lostPlan + "/plan.html"
+
+	earlierOID := strings.Repeat("5", 64)
+	writeAndCommit(t, ledger, "plan: first revision", lostPlanFiles(earlierOID))
+	committed := []byte("<!doctype html><title>committed</title>\n")
+	committedRef := NewFileRef(committed)
+	writeAndCommit(t, ledger, "plan: second revision", map[string]string{rel: FormatPointer(committedRef.OID, committedRef.Size)})
+	slot := RecoveryCachePath(ledger, rel)
+	require.NoError(t, os.MkdirAll(filepath.Dir(slot), 0o700))
+	require.NoError(t, os.WriteFile(slot, []byte("<!doctype html><title>uncommitted third</title>\n"), 0o600))
+	require.NoError(t, os.WriteFile(PreviousRecoveryCachePath(ledger, rel), committed, 0o600))
+	client := fakeLFSDownloadServer(t, map[string]int{earlierOID: http.StatusNotFound, committedRef.BareOID(): http.StatusNotFound})
+
+	missing, err := findMissingPlanRenders(context.Background(), ledger, func() (*Client, error) { return client, nil })
+
+	require.NoError(t, err)
+	assert.Equal(t, []MissingPlanRender{
+		{Path: rel, OID: committedRef.OID, Size: committedRef.Size, Recoverable: true},
+		{Path: rel, OID: "sha256:" + earlierOID, Size: 2196945, HistoryOnly: true},
+	}, missing)
+}
+
+// TestReconcile_LostPlanPageRepairKeepsAStagedEdit: a coworker's staged edit
+// of a lost page's plan.html stops the repair with the edit still staged.
+// Failure prevented: the tombstone overwrote the staged edit in the index, and
+// a failed commit then reset the path to HEAD, so the edit was gone.
+func TestReconcile_LostPlanPageRepairKeepsAStagedEdit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repositories and a mocked LFS store")
+	}
+	useBundledSessionRules(t)
+	ledger, _ := initLedgerWithRemote(t)
+	oid := strings.Repeat("4", 64)
+	writeAndCommit(t, ledger, "plan: lost page", lostPlanFiles(oid))
+	// staged while the working copy is still the committed pointer, which the
+	// working-copy check alone does not catch
+	pointer := mustReadFile(t, lostPlanHTML(ledger))
+	edit := filepath.Join(t.TempDir(), "edit.html")
+	require.NoError(t, os.WriteFile(edit, []byte("<!doctype html><title>staged edit</title>\n"), 0o644))
+	blob := git(t, ledger, "hash-object", "-w", edit)
+	git(t, ledger, "update-index", "--cacheinfo", "100644,"+blob+",data/plans/"+lostPlan+"/plan.html")
+	head := git(t, ledger, "rev-parse", "HEAD")
+	index := git(t, ledger, "write-tree")
+	client := fakeLFSDownloadServer(t, map[string]int{oid: http.StatusNotFound})
+
+	result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
+
+	require.ErrorContains(t, err, "has staged changes")
+	assert.Zero(t, result.LostPlanRenders)
+	assert.Equal(t, head, git(t, ledger, "rev-parse", "HEAD"))
+	assert.Equal(t, index, git(t, ledger, "write-tree"), "the staged edit must stay staged")
+	assert.Equal(t, pointer, mustReadFile(t, lostPlanHTML(ledger)))
+}
+
+// TestTombstoneLostPlanRenders_StagingFailureLeavesTheIndexAsItWas: a
+// tombstone that cannot be staged unstages the ones before it. Failure
+// prevented: an uncommitted tombstone left in the index, riding along with the
+// next commit.
+func TestTombstoneLostPlanRenders_StagingFailureLeavesTheIndexAsItWas(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repositories")
+	}
+	useBundledSessionRules(t)
+	ledger, _ := initLedgerWithRemote(t)
+	oid := strings.Repeat("3", 64)
+	writeAndCommit(t, ledger, "plan: lost page", lostPlanFiles(oid))
+	head := git(t, ledger, "rev-parse", "HEAD")
+	index := git(t, ledger, "write-tree")
+	ref := FileRef{OID: "sha256:" + oid, Size: 2196945}
+	lost := []pointerEntry{
+		{relPath: filepath.FromSlash("data/plans/" + lostPlan + "/plan.html"), ref: ref},
+		{relPath: filepath.FromSlash(".git/plans/x/plan.html"), ref: ref}, // git refuses to stage under .git
+	}
+
+	err := tombstoneLostPlanRenders(context.Background(), ledger, lost, slog.Default())
+
+	require.ErrorContains(t, err, "stage tombstone for .git/plans/x/plan.html")
+	assert.Equal(t, head, git(t, ledger, "rev-parse", "HEAD"))
+	assert.Equal(t, index, git(t, ledger, "write-tree"), "the first tombstone must be unstaged")
+	require.NoError(t, unstage(context.Background(), ledger, nil))
+}
+
+// TestRewriteWorkingPointer: only the exact committed pointer is replaced by
+// the tombstone. Failure prevented: overwriting a coworker's edit made while
+// the repair ran.
+func TestRewriteWorkingPointer(t *testing.T) {
+	ref := FileRef{OID: "sha256:" + strings.Repeat("2", 64), Size: 2196945}
+	tombstone := []byte("<!doctype html><title>tombstone</title>\n")
+	for _, tc := range []struct {
+		name    string
+		current *string
+		wantErr string
+		want    string
+	}{
+		{name: "absent stays absent"},
+		{name: "pointer is replaced", current: ptr(FormatPointer(ref.OID, ref.Size)), want: string(tombstone)},
+		{name: "edit is kept", current: ptr("someone's edit\n"), wantErr: "working copy changed", want: "someone's edit\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "plan.html")
+			if tc.current != nil {
+				require.NoError(t, os.WriteFile(path, []byte(*tc.current), 0o644))
+			}
+
+			err := rewriteWorkingPointer(path, ref, tombstone)
+
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			got, readErr := os.ReadFile(path)
+			if tc.current == nil {
+				assert.ErrorIs(t, readErr, os.ErrNotExist)
+				return
+			}
+			assert.Equal(t, tc.want, string(got))
+		})
+	}
+	t.Run("unreadable", func(t *testing.T) {
+		require.Error(t, rewriteWorkingPointer(t.TempDir(), ref, tombstone), "a directory is not a working copy")
+	})
+}
+
+func ptr(s string) *string { return &s }
+
+// TestFindMissingPlanRenders_InspectionFailureIsNotNothingMissing: a store
+// that cannot be reached is an error, never an empty report.
+func TestFindMissingPlanRenders_InspectionFailureIsNotNothingMissing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repositories")
+	}
+	useBundledSessionRules(t)
+	ledger, _ := initLedgerWithRemote(t)
+	writeAndCommit(t, ledger, "plan: lost page", lostPlanFiles(strings.Repeat("1", 64)))
+
+	missing, err := findMissingPlanRenders(context.Background(), ledger, func() (*Client, error) {
+		return nil, errors.New("no git credentials found")
+	})
+
+	require.ErrorContains(t, err, "no git credentials found")
+	assert.Nil(t, missing)
 }

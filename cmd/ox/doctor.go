@@ -1464,8 +1464,9 @@ func checkLedgerGitHealth(ctx context.Context, opts doctorOptions) []checkResult
 			continue
 		}
 
-		// branch-status pushes unpushed commits; the session repairs must have run first
-		if slug == CheckSlugLedgerBranchStatus {
+		// branch-status and plan-pointers both rewrite unpushed commits; the
+		// session repairs must have run first
+		if slug == CheckSlugLedgerBranchStatus || slug == CheckSlugPlanPointersMissing {
 			_ = opts.runSessionRepairs()
 		}
 

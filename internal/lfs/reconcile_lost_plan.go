@@ -106,6 +106,9 @@ func repairLostPlanRenders(ctx context.Context, ledgerPath string, logger *slog.
 func tombstoneLostPlanRenders(ctx context.Context, ledgerPath string, lost []pointerEntry, logger *slog.Logger) error {
 	pathspecs := make([]string, 0, len(lost))
 	staged := make([]string, 0, len(lost))
+	if err := refuseStagedEdits(ctx, ledgerPath, lost); err != nil {
+		return err
+	}
 	for _, p := range lost {
 		rel := filepath.ToSlash(p.relPath)
 		if _, err := gitutil.StageLedgerBlob(ctx, ledgerPath, rel, planRenderTombstone(p.ref)); err != nil {
@@ -130,6 +133,25 @@ func tombstoneLostPlanRenders(ctx context.Context, ledgerPath string, lost []poi
 			logger.Warn("lfs reconcile: tombstone committed but the working copy was left as it is",
 				"plan", planName, "path", rel, "error", err)
 		}
+	}
+	return nil
+}
+
+// refuseStagedEdits fails when the index holds anything but HEAD's entry at a
+// lost page's path: staging the tombstone would replace a coworker's staged
+// edit, and unstage would then reset it to HEAD.
+func refuseStagedEdits(ctx context.Context, ledgerPath string, lost []pointerEntry) error {
+	args := []string{"diff", "--cached", "--name-only", "-z", "HEAD", "--"}
+	for _, p := range lost {
+		args = append(args, ":(top,literal)"+filepath.ToSlash(p.relPath))
+	}
+	out, err := gitutil.RunGit(ctx, ledgerPath, args...)
+	if err != nil {
+		return fmt.Errorf("inspect staged plan pages: %s: %w", gitutil.SanitizeOutput(out), err)
+	}
+	if edited := strings.Trim(out, "\x00\n"); edited != "" {
+		return fmt.Errorf("refusing to replace lost plan page %s: it has staged changes; commit or unstage them first",
+			strings.ReplaceAll(edited, "\x00", ", "))
 	}
 	return nil
 }
@@ -176,11 +198,15 @@ type MissingPlanRender struct {
 	// Recoverable means the exact bytes are in the Ledger recovery cache, so
 	// the push repair uploads them again; otherwise the page is lost.
 	Recoverable bool
+	// HistoryOnly means only an earlier unpushed commit holds the pointer, so
+	// the push repair squashes it out of the push and the tip is untouched.
+	HistoryOnly bool
 }
 
-// FindMissingPlanRenders reports the plan page pointers at the unpushed tip
-// whose blobs the store does not have. It changes nothing, and asks the store
-// only when the push range holds a plan page pointer.
+// FindMissingPlanRenders reports the plan page pointers in unpushed commits,
+// at the tip or only in history, whose blobs the store does not have. It
+// changes nothing, and asks the store only when the push range holds a plan
+// page pointer.
 func FindMissingPlanRenders(ctx context.Context, ledgerPath, endpointURL string) ([]MissingPlanRender, error) {
 	return findMissingPlanRenders(ctx, ledgerPath, func() (*Client, error) {
 		return NewClientFromLedgerContext(ctx, ledgerPath, endpointURL)
@@ -192,13 +218,18 @@ func findMissingPlanRenders(ctx context.Context, ledgerPath string, newClient fu
 	if err != nil {
 		return nil, fmt.Errorf("scan push range for pointers: %w", err)
 	}
-	renders := &pointerSet{}
+	renders := &pointerSet{historyOnly: make(map[string]FileRef)}
 	for _, p := range set.repairable {
 		if isPlanRenderPath(p.relPath) {
 			renders.repairable = append(renders.repairable, p)
 		}
 	}
-	if len(renders.repairable) == 0 {
+	for bareOID, ref := range set.historyOnly {
+		if isPlanRenderPath(set.historyPaths[bareOID]) {
+			renders.historyOnly[bareOID] = ref
+		}
+	}
+	if renders.total() == 0 {
 		return nil, nil
 	}
 	client, err := newClient()
@@ -225,6 +256,20 @@ func findMissingPlanRenders(ctx context.Context, ledgerPath string, newClient fu
 			Recoverable: content != nil,
 		})
 	}
-	sort.Slice(missing, func(i, j int) bool { return missing[i].Path < missing[j].Path })
+	for bareOID, ref := range renders.historyOnly {
+		if missingOIDs[bareOID] {
+			missing = append(missing, MissingPlanRender{Path: set.historyPaths[bareOID], OID: ref.OID, Size: ref.Size, HistoryOnly: true})
+		}
+	}
+	sort.Slice(missing, func(i, j int) bool {
+		a, b := missing[i], missing[j]
+		if a.Path != b.Path {
+			return a.Path < b.Path
+		}
+		if a.HistoryOnly != b.HistoryOnly {
+			return b.HistoryOnly
+		}
+		return a.OID < b.OID
+	})
 	return missing, nil
 }

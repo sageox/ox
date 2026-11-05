@@ -102,6 +102,13 @@ func RecoveryCachePath(ledgerPath, relPath string) string {
 	return filepath.Join(ledgerPath, ".sageox", "cache", filepath.FromSlash(relPath))
 }
 
+// PreviousRecoveryCachePath is where a plan page's recovery copy goes when a
+// newer revision replaces it; plan.keepHTMLForRecovery writes both. A save swaps in the new pointer before its
+// commit, so a commit that fails leaves the committed pointer naming this one.
+func PreviousRecoveryCachePath(ledgerPath, relPath string) string {
+	return RecoveryCachePath(ledgerPath, relPath) + ".prev"
+}
+
 // PreserveInCache keeps content at cachePath (the ledger's hydration cache) without
 // overwriting a different copy already there, which fails closed.
 func PreserveInCache(cachePath string, content []byte) error {

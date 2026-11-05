@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -135,6 +136,9 @@ type pointerSet struct {
 	// historyOnly are pointers that appear in an unpushed commit but not at the
 	// tip, keyed by bare OID. Squashing is the whole repair.
 	historyOnly map[string]FileRef
+	// historyPaths names a path each historyOnly pointer was committed at,
+	// keyed by bare OID.
+	historyPaths map[string]string
 }
 
 func (p *pointerSet) total() int {
@@ -367,7 +371,31 @@ func preflightMissingPointer(ledgerPath string, p pointerEntry) ([]byte, error) 
 	// pointer (plan.PointerizeHTML) or by `ox fetch`. The OID and size check
 	// below is what makes a cached file safe to re-upload.
 	session := strings.HasPrefix(p.relPath, "sessions"+string(filepath.Separator))
-	cachePath := RecoveryCachePath(ledgerPath, p.relPath)
+	candidates := []string{RecoveryCachePath(ledgerPath, p.relPath)}
+	if isPlanRenderPath(p.relPath) {
+		// a save whose commit failed left the committed page's copy here
+		candidates = append(candidates, PreviousRecoveryCachePath(ledgerPath, p.relPath))
+	}
+	var mismatch error
+	for _, cachePath := range candidates {
+		content, err := readRecoveryCandidate(cachePath, p, session)
+		if errors.Is(err, errRecoveryCacheMismatch) {
+			mismatch = err
+			continue
+		}
+		if err != nil || content != nil {
+			return content, err
+		}
+	}
+	return nil, mismatch
+}
+
+var errRecoveryCacheMismatch = errors.New("session recovery cache does not match pointer OID and size")
+
+// readRecoveryCandidate returns the bytes at cachePath when they are exactly
+// the object p names, nil when no file is there, and an error for any other
+// state.
+func readRecoveryCandidate(cachePath string, p pointerEntry, session bool) ([]byte, error) {
 	info, err := os.Lstat(cachePath)
 	if err != nil {
 		// A cache that cannot be inspected fails closed for a session, because
@@ -395,7 +423,7 @@ func preflightMissingPointer(ledgerPath string, p pointerEntry) ([]byte, error) 
 	}
 	actual := NewFileRef(content)
 	if actual.Size != p.ref.Size || actual.BareOID() != p.ref.BareOID() {
-		return nil, fmt.Errorf("refusing to restore %s: session recovery cache does not match pointer OID and size", p.relPath)
+		return nil, fmt.Errorf("refusing to restore %s: %w", p.relPath, errRecoveryCacheMismatch)
 	}
 	return content, nil
 }
@@ -612,14 +640,16 @@ func scanPushRange(ctx context.Context, ledgerPath string, logger *slog.Logger) 
 	}
 	var oids []string
 	seen := make(map[string]bool)
+	pathByGitOID := make(map[string]string)
 	for _, line := range strings.Split(string(objectsOut), "\n") {
-		oid, _, _ := strings.Cut(strings.TrimSpace(line), " ")
+		oid, objPath, _ := strings.Cut(strings.TrimSpace(line), " ")
 		if oid != "" && !seen[oid] {
 			seen[oid] = true
 			oids = append(oids, oid)
+			pathByGitOID[oid] = objPath
 		}
 	}
-	set := &pointerSet{upstream: upstream, historyOnly: make(map[string]FileRef)}
+	set := &pointerSet{upstream: upstream, historyOnly: make(map[string]FileRef), historyPaths: make(map[string]string)}
 	if len(oids) == 0 {
 		return set, nil
 	}
@@ -662,9 +692,12 @@ func scanPushRange(ctx context.Context, ledgerPath string, logger *slog.Logger) 
 		}
 		atTip[ref.BareOID()] = true
 	}
-	for _, ref := range refsByGitOID {
+	for gitOID, ref := range refsByGitOID {
 		if !atTip[ref.BareOID()] {
 			set.historyOnly[ref.BareOID()] = ref
+			if prior, ok := set.historyPaths[ref.BareOID()]; !ok || pathByGitOID[gitOID] < prior {
+				set.historyPaths[ref.BareOID()] = pathByGitOID[gitOID]
+			}
 		}
 	}
 

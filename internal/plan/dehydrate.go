@@ -2,14 +2,16 @@ package plan
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
-	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/secretguard"
 )
@@ -84,25 +86,91 @@ func PointerizeHTML(dir string, uploaded ...lfs.UploadedRef) (bool, error) {
 }
 
 // keepHTMLForRecovery writes page to the recovery cache slot of dir's plan.html.
-// A copy of an earlier revision there is replaced: a revision rewrites plan.html
-// in place, and only the pointer at the tip ever needs its blob restored,
-// because the push repair squashes older ones out of the push.
+// The copy of the revision it replaces is kept at lfs.PreviousRecoveryCachePath
+// until the next revision: the save swaps in the pointer before its commit, so
+// a commit that fails leaves the committed pointer naming the older page. Every
+// directory below the Ledger root is opened without following a symlink, and
+// the slot is replaced by a rename, so a link planted anywhere in the cache
+// fails or is replaced rather than redirecting the write.
 func keepHTMLForRecovery(dir string, page []byte) error {
 	ledger, rel, ok := planHTMLLedgerPath(dir)
 	if !ok {
 		return fmt.Errorf("plan dir %s is not <ledger>/data/plans/<plan>, so plan.html has no recovery copy and stays plain", dir)
 	}
-	cachePath := lfs.RecoveryCachePath(ledger, rel)
-	if existing, err := os.ReadFile(cachePath); err == nil && bytes.Equal(existing, page) {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
-		return fmt.Errorf("keep plan.html in the Ledger recovery cache: %w", err)
-	}
-	if err := fileutil.AtomicWriteBytes(cachePath, page, 0o600); err != nil {
+	if err := writeRecoveryCopy(ledger, rel, page); err != nil {
 		return fmt.Errorf("keep plan.html in the Ledger recovery cache: %w", err)
 	}
 	return nil
+}
+
+func writeRecoveryCopy(ledger, rel string, page []byte) error {
+	root, err := os.OpenRoot(ledger)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	slot := filepath.Join(".sageox", "cache", filepath.FromSlash(rel))
+	slotDir := root
+	for _, name := range strings.Split(filepath.ToSlash(filepath.Dir(slot)), "/") {
+		sub, err := openDirNoFollow(slotDir, name)
+		if slotDir != root {
+			_ = slotDir.Close()
+		}
+		if err != nil {
+			return err
+		}
+		slotDir = sub
+	}
+	defer func() { _ = slotDir.Close() }()
+
+	name := filepath.Base(slot)
+	if info, err := slotDir.Lstat(name); err == nil && info.Mode().IsRegular() {
+		if existing, err := slotDir.ReadFile(name); err == nil && bytes.Equal(existing, page) {
+			return nil
+		}
+		if err := slotDir.Rename(name, name+".prev"); err != nil {
+			return fmt.Errorf("keep the previous revision: %w", err)
+		}
+	}
+
+	tag := make([]byte, 8)
+	_, _ = rand.Read(tag) // crypto/rand.Read does not fail
+	tmpName := ".tmp-" + hex.EncodeToString(tag)
+	tmp, err := slotDir.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = tmp.Write(page)
+	err = errors.Join(err, tmp.Sync(), tmp.Close())
+	if err == nil {
+		err = slotDir.Rename(tmpName, name)
+	}
+	if err != nil {
+		_ = slotDir.Remove(tmpName)
+	}
+	return err
+}
+
+// openDirNoFollow opens directory name inside r, making it when missing. A
+// symlink, or a directory swapped for one while it is opened, is an error.
+func openDirNoFollow(r *os.Root, name string) (*os.Root, error) {
+	info, err := r.Lstat(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		_ = r.Mkdir(name, 0o700) // a peer making it first is fine
+		info, err = r.Lstat(name)
+	}
+	if err != nil || !info.IsDir() {
+		return nil, errors.Join(fmt.Errorf("%s is not a plain directory", name), err)
+	}
+	sub, err := r.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	if opened, err := sub.Stat("."); err != nil || !os.SameFile(info, opened) {
+		_ = sub.Close()
+		return nil, fmt.Errorf("%s changed while it was opened", name)
+	}
+	return sub, nil
 }
 
 // planHTMLLedgerPath splits a plan dir, <ledger>/data/plans/<plan>, into the

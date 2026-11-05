@@ -317,4 +317,79 @@ func TestPointerizeHTML_RevisionReplacesTheOlderCopy(t *testing.T) {
 	if err != nil || !bytes.Equal(kept, second) {
 		t.Fatalf("recovery copy is not the latest revision (err=%v)", err)
 	}
+	// the save swaps in the pointer before its commit; until the revision is
+	// committed, the committed pointer still names the first page
+	rel := filepath.Join("data", "plans", filepath.Base(dir), planHTMLFile)
+	previous, err := os.ReadFile(lfs.PreviousRecoveryCachePath(ledger, rel))
+	if err != nil || !bytes.Equal(previous, first) {
+		t.Fatalf("the replaced revision's copy is gone (err=%v): a failed commit leaves its pointer unrecoverable", err)
+	}
+}
+
+// TestPointerizeHTML_RecoveryCopyNeverFollowsALink: a symlink planted in the
+// recovery cache never redirects the copy outside the Ledger. Failure
+// prevented: a linked cache directory or slot made ox write the page wherever
+// the link pointed.
+func TestPointerizeHTML_RecoveryCopyNeverFollowsALink(t *testing.T) {
+	client, _ := fakeLFSUploadServer(t)
+	page := largeHTMLWithHead()
+	ref, ok, err := UploadHTML(client, page)
+	if err != nil || !ok {
+		t.Fatalf("UploadHTML: ok=%v err=%v", ok, err)
+	}
+	for _, tc := range []struct {
+		name    string
+		link    func(ledger, dir string) string
+		wantErr bool
+	}{
+		{"linked cache directory", func(ledger, _ string) string {
+			return filepath.Join(ledger, ".sageox", "cache", "data")
+		}, true},
+		{"linked slot", func(ledger, dir string) string { return recoveryCopy(ledger, dir) }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger, dir := ledgerPlanDir(t)
+			outside := t.TempDir()
+			target := filepath.Join(outside, "target")
+			if tc.wantErr {
+				if err := os.Mkdir(target, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(target, []byte("outside\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			link := tc.link(ledger, dir)
+			if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			writePlanHTMLPlain(t, dir, page)
+
+			swapped, err := PointerizeHTML(dir, ref)
+
+			if tc.wantErr {
+				if err == nil || swapped {
+					t.Fatalf("swapped=%v err=%v, want an error and no pointer", swapped, err)
+				}
+				assertPlainHTML(t, dir, page)
+				entries, _ := os.ReadDir(target)
+				if len(entries) != 0 {
+					t.Fatalf("the copy escaped the Ledger into %s: %v", target, entries)
+				}
+				return
+			}
+			if err != nil || !swapped {
+				t.Fatalf("PointerizeHTML: swapped=%v err=%v", swapped, err)
+			}
+			if got, _ := os.ReadFile(target); string(got) != "outside\n" {
+				t.Fatal("the copy was written through the link")
+			}
+			info, err := os.Lstat(link)
+			if err != nil || !info.Mode().IsRegular() {
+				t.Fatalf("the slot is not a regular file (err=%v)", err)
+			}
+		})
+	}
 }

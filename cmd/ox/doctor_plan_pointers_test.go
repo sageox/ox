@@ -40,6 +40,7 @@ func ledgerWithUpstream(t *testing.T) string {
 type fakePlanStore struct {
 	before, after []lfs.MissingPlanRender
 	findErr       error
+	afterErr      error
 	repairErr     error
 	repairs       int
 }
@@ -50,7 +51,7 @@ func (f *fakePlanStore) install(t *testing.T) {
 	t.Cleanup(func() { findMissingPlanRenders, reconcileLedgerPush = prevFind, prevRepair })
 	findMissingPlanRenders = func(context.Context, string, string) ([]lfs.MissingPlanRender, error) {
 		if f.repairs > 0 {
-			return f.after, nil
+			return f.after, f.afterErr
 		}
 		return f.before, f.findErr
 	}
@@ -70,6 +71,10 @@ var lostLaunchMockup = lfs.MissingPlanRender{
 // without touching anything, repairs only under fix, and passes only when the
 // pages are verified present afterwards. Failure prevented: a check that says
 // "fixed" while the push stays refused, or repairs on a bare `ox doctor`.
+var historyLaunchMockup = lfs.MissingPlanRender{
+	Path: "data/plans/2026-10-24-launch-mockup/plan.html", OID: "sha256:" + strings.Repeat("5", 64), Size: 2196945, HistoryOnly: true,
+}
+
 func TestPlanPointersMissing_Outcomes(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -96,6 +101,53 @@ func TestPlanPointersMissing_Outcomes(t *testing.T) {
 			wantStatus:  "passed",
 			wantRepairs: 1,
 			wantText:    []string{"replaced 1 lost page(s) with a tombstone"},
+		},
+		{
+			name:       "earlier revision in history, report only",
+			store:      fakePlanStore{before: []lfs.MissingPlanRender{historyLaunchMockup}},
+			wantStatus: "failed",
+			wantText:   []string{"2026-10-24-launch-mockup: an earlier revision in unpushed history; the repair squashes it out of the push"},
+		},
+		{
+			name:        "earlier revision in history, fixed",
+			store:       fakePlanStore{before: []lfs.MissingPlanRender{historyLaunchMockup}},
+			fix:         true,
+			wantStatus:  "passed",
+			wantRepairs: 1,
+			wantText:    []string{"squashed 1 earlier revision(s) out of the push"},
+		},
+		{
+			name: "recoverable, lost and historical pages, fixed",
+			store: fakePlanStore{before: []lfs.MissingPlanRender{
+				{Path: "data/plans/kept/plan.html", OID: lostLaunchMockup.OID, Size: 10, Recoverable: true},
+				lostLaunchMockup, historyLaunchMockup,
+			}},
+			fix:         true,
+			wantStatus:  "passed",
+			wantRepairs: 1,
+			wantText:    []string{"re-uploaded 1 plan page(s) from this machine; replaced 1 lost page(s) with a tombstone; squashed 1 earlier revision(s)"},
+		},
+		{
+			name:       "recoverable and lost pages, report only",
+			store:      fakePlanStore{before: []lfs.MissingPlanRender{{Path: "data/plans/kept/plan.html", OID: lostLaunchMockup.OID, Size: 10, Recoverable: true}, lostLaunchMockup}},
+			wantStatus: "failed",
+			wantText:   []string{"kept: a copy is on this machine; the repair uploads it again\n       2026-10-24-launch-mockup: no copy anywhere"},
+		},
+		{
+			name:        "ledger busy",
+			store:       fakePlanStore{before: []lfs.MissingPlanRender{lostLaunchMockup}, repairErr: context.DeadlineExceeded},
+			fix:         true,
+			wantStatus:  "skipped",
+			wantRepairs: 1,
+			wantText:    []string{"ledger busy"},
+		},
+		{
+			name:        "re-check fails",
+			store:       fakePlanStore{before: []lfs.MissingPlanRender{lostLaunchMockup}, afterErr: errors.New("store unreachable")},
+			fix:         true,
+			wantStatus:  "warning",
+			wantRepairs: 1,
+			wantText:    []string{"could not re-check", "store unreachable"},
 		},
 		{
 			name:        "repair fails",

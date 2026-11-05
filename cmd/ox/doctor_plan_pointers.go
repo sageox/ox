@@ -90,16 +90,22 @@ func runPlanPointersMissing(ctx context.Context, ledgerPath, endpointURL string,
 			fmt.Sprintf("%d plan page(s) still missing from the content store after the repair", len(still)),
 			planPointersDetail(still))
 	}
-	restored, lost := 0, 0
+	restored, lost, squashed := 0, 0, 0
 	for _, m := range missing {
-		if m.Recoverable {
+		switch {
+		case m.HistoryOnly:
+			squashed++
+		case m.Recoverable:
 			restored++
-		} else {
+		default:
 			lost++
 		}
 	}
-	return PassedCheck(planPointersCheckName,
-		fmt.Sprintf("re-uploaded %d plan page(s) from this machine; replaced %d lost page(s) with a tombstone", restored, lost))
+	summary := fmt.Sprintf("re-uploaded %d plan page(s) from this machine; replaced %d lost page(s) with a tombstone", restored, lost)
+	if squashed > 0 {
+		summary += fmt.Sprintf("; squashed %d earlier revision(s) out of the push", squashed)
+	}
+	return PassedCheck(planPointersCheckName, summary)
 }
 
 // planPointersDetail names each plan and what the repair does with it.
@@ -110,9 +116,12 @@ func planPointersDetail(missing []lfs.MissingPlanRender) string {
 			b.WriteString("\n       ")
 		}
 		plan := strings.TrimSuffix(strings.TrimPrefix(m.Path, "data/plans/"), "/plan.html")
-		if m.Recoverable {
+		switch {
+		case m.HistoryOnly:
+			fmt.Fprintf(&b, "%s: an earlier revision in unpushed history; the repair squashes it out of the push", plan)
+		case m.Recoverable:
 			fmt.Fprintf(&b, "%s: a copy is on this machine; the repair uploads it again", plan)
-		} else {
+		default:
 			fmt.Fprintf(&b, "%s: no copy anywhere; the repair replaces the page with a tombstone and keeps plan.md, meta.json and events.jsonl", plan)
 		}
 	}
