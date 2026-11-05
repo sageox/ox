@@ -452,6 +452,26 @@ func TestRewriteWorkingPointer(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Join(ledger, rel), 0o755))
 		require.Error(t, rewriteWorkingPointer(ledger, rel, ref, tombstone), "a directory is not a working copy")
 	})
+	t.Run("read-only pointer hardlinked elsewhere keeps its other link", func(t *testing.T) {
+		ledger, outside := t.TempDir(), t.TempDir()
+		path := filepath.Join(ledger, rel)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(pointer), 0o444))
+		saved := filepath.Join(outside, "saved-pointer")
+		if err := os.Link(path, saved); err != nil {
+			t.Skipf("hardlinks unavailable: %v", err)
+		}
+
+		require.NoError(t, rewriteWorkingPointer(ledger, rel, ref, tombstone))
+
+		assert.Equal(t, string(tombstone), string(mustReadFile(t, path)))
+		assert.Equal(t, pointer, string(mustReadFile(t, saved)))
+		for _, p := range []string{path, saved} {
+			info, err := os.Stat(p)
+			require.NoError(t, err)
+			assert.Equal(t, os.FileMode(0o444), info.Mode().Perm(), p)
+		}
+	})
 	t.Run("plan directory linked outside the Ledger", func(t *testing.T) {
 		ledger, outside := t.TempDir(), t.TempDir()
 		external := filepath.Join(outside, "plan.html")

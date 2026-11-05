@@ -3,6 +3,7 @@ package lfs
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"html"
@@ -12,7 +13,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/sacred"
 )
@@ -194,19 +194,45 @@ func rewriteWorkingPointer(ledgerPath, relPath string, ref FileRef, content []by
 	if !bytes.Equal(current, []byte(FormatPointer(ref.OID, ref.Size))) {
 		return fmt.Errorf("working copy changed during reconcile")
 	}
-	// The shared writer refuses read-only files; a read-only copy of the dead
-	// pointer must still go, or the next add would recommit it.
-	info, err := root.Stat(relPath)
+	return replaceInRoot(root, relPath, content)
+}
+
+// replaceInRoot swaps the regular file at relPath for content by rename,
+// keeping its mode. Unlike fileutil.AtomicWriteBytesInRoot it accepts a
+// read-only file: the verified dead pointer must go, or the next add would
+// recommit it. The old inode is never modified, so its other hardlinks keep
+// their content and mode.
+func replaceInRoot(root *os.Root, relPath string, content []byte) error {
+	dir, base := filepath.Split(relPath)
+	if dir == "" {
+		dir = "."
+	}
+	parent, err := root.OpenRoot(dir)
 	if err != nil {
 		return err
 	}
-	if perm := info.Mode().Perm(); perm&0o200 == 0 {
-		if err := root.Chmod(relPath, perm|0o200); err != nil {
-			return err
-		}
-		defer func() { _ = root.Chmod(relPath, perm) }()
+	defer func() { _ = parent.Close() }()
+	info, err := parent.Lstat(base)
+	if err != nil {
+		return err
 	}
-	return fileutil.AtomicWriteBytesInRoot(root, relPath, content, 0o644)
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("refusing to replace non-regular file %q", relPath)
+	}
+	tmpName := ".tmp-" + rand.Text()
+	tmp, err := parent.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = tmp.Write(content)
+	err = errors.Join(err, tmp.Chmod(info.Mode().Perm()), tmp.Sync(), tmp.Close())
+	if err == nil {
+		err = parent.Rename(tmpName, base)
+	}
+	if err != nil {
+		_ = parent.Remove(tmpName)
+	}
+	return err
 }
 
 // MissingPlanRender is a plan page pointer in unpushed history whose blob the
