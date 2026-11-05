@@ -664,6 +664,18 @@ func DaemonSocketFile(workspaceID string) string {
 	return filepath.Join(DaemonStateDir(), "daemon-"+workspaceID+".sock")
 }
 
+// PreMigrationDaemonSocketFile returns where releases before the shared-temp
+// fix put a daemon's socket ($TMPDIR/sageox/daemon), or "" when that location
+// was never used (legacy mode, or an absolute XDG_RUNTIME_DIR). A daemon still
+// listening there must be stopped so the new socket location does not spawn a
+// competing daemon for the same workspace.
+func PreMigrationDaemonSocketFile(workspaceID string) string {
+	if !useXDGMode() || filepath.IsAbs(os.Getenv("XDG_RUNTIME_DIR")) {
+		return ""
+	}
+	return filepath.Join(os.TempDir(), "sageox", "daemon", "daemon-"+workspaceID+".sock")
+}
+
 // DaemonPidFile returns the path to a daemon's PID file.
 func DaemonPidFile(workspaceID string) string {
 	return filepath.Join(DaemonStateDir(), "daemon-"+workspaceID+".pid")
