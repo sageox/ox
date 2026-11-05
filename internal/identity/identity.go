@@ -268,6 +268,20 @@ func extractHost(rawURL string) string {
 	return host
 }
 
+// samePort requires a scheme-less remote's explicit port to be the configured
+// instance's effective port, so :80 never selects an HTTPS instance or vice versa.
+func samePort(instanceURL, remoteURL string) bool {
+	inst, remote := parseRemoteURL(instanceURL), parseRemoteURL(remoteURL)
+	if inst == nil || remote == nil || remote.Scheme != "" || remote.Port() == "" {
+		return true
+	}
+	port := inst.Port()
+	if port == "" {
+		port = map[string]string{"https": "443", "http": "80"}[inst.Scheme]
+	}
+	return remote.Port() == port
+}
+
 func urlPath(rawURL string) string {
 	if u := parseRemoteURL(rawURL); u != nil {
 		return u.Path
@@ -309,7 +323,7 @@ func parseRemoteURL(rawURL string) *url.URL {
 // instance at instanceURL: same host (default ports ignored) and a path under
 // the instance's base path, so a same-host remote elsewhere never gets the token.
 func giteaRemoteBelongs(instanceURL, remoteURL string) bool {
-	if extractHost(instanceURL) != extractHost(remoteURL) {
+	if extractHost(instanceURL) != extractHost(remoteURL) || !samePort(instanceURL, remoteURL) {
 		return false
 	}
 	// GetRemoteURLs lowercases remotes, so compare paths case-insensitively.

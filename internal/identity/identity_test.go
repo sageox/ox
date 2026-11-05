@@ -154,6 +154,8 @@ func TestGiteaRemoteBelongs_NormalizedRemotes(t *testing.T) {
 		{"https://git.example.com/Gitea", "git.example.com/gitea/team/repo", true},
 		{"https://git.example.com/Gitea", "git.example.com/other/team/repo", false},
 		{"https://git.example.com", "git.example.com:8443/team/repo", false},
+		{"https://git.example.com", "git.example.com:80/team/repo", false},
+		{"http://git.example.com", "git.example.com:443/team/repo", false},
 	} {
 		if got := giteaRemoteBelongs(tc.instance, tc.remote); got != tc.want {
 			t.Errorf("giteaRemoteBelongs(%q, %q) = %v, want %v", tc.instance, tc.remote, got, tc.want)
