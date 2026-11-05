@@ -124,3 +124,19 @@ func TestCheckNativeSourceBinding_AmpThreadWithoutSidecarIsBound(t *testing.T) {
 		t.Fatal("recording must not be quarantined")
 	}
 }
+
+func TestCheckNativeSourceBinding_ReportsQuarantinePersistFailure(t *testing.T) {
+	state := &RecordingState{
+		AgentID:     "OxGem",
+		AdapterName: "gemini",
+		SessionID:   "missing",
+		SessionPath: filepath.Join(t.TempDir(), "missing"),
+	}
+	err := CheckNativeSourceBinding(state)
+	if err == nil || !strings.Contains(err.Error(), "persist source quarantine") {
+		t.Fatalf("CheckNativeSourceBinding = %v, want persist failure", err)
+	}
+	if !state.SourceRejected {
+		t.Fatal("in-memory state must still be quarantined")
+	}
+}
