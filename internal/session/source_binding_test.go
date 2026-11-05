@@ -84,3 +84,33 @@ func TestCheckNativeSourceBinding_FallsBackToAgentType(t *testing.T) {
 		t.Fatal("legacy rejection not recorded")
 	}
 }
+
+// Turns captured before the sidecar was removed stay publishable.
+func TestCheckNativeSourceBinding_AcceptsRemovedSidecar(t *testing.T) {
+	sidecar := ampSidecar(t, boundAmpThread+".jsonl")
+	_, state := startAmpRecording(t, sidecar)
+	if err := os.Remove(sidecar); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckNativeSourceBinding(state); err != nil || state.SourceRejected {
+		t.Fatalf("removed bound sidecar quarantined: %v", err)
+	}
+}
+
+// A later thread switch must not quarantine the first thread's captured turns.
+func TestCheckNativeSourceBinding_AcceptsSidecarAfterThreadSwitch(t *testing.T) {
+	_, state := startAmpRecording(t, ampSidecar(t, boundAmpThread+".jsonl"))
+	state.RecordNativeSession(boundAmpThread, "startup", state.StartedAt)
+	state.AgentSessionID = "T-1c7b4d3f-8e52-4a3b-8d2f-6b9e0a1c2d3e"
+	if err := CheckNativeSourceBinding(state); err != nil || state.SourceRejected {
+		t.Fatalf("thread switch quarantined the original sidecar: %v", err)
+	}
+}
+
+// Amp may prime before its thread ID arrives; that recording is pending.
+func TestCheckNativeSourceBinding_PendingAmpThreadIsNotQuarantined(t *testing.T) {
+	state := &RecordingState{AdapterName: "amp"}
+	if err := CheckNativeSourceBinding(state); err != nil || state.SourceRejected {
+		t.Fatalf("pending Amp recording quarantined: %v", err)
+	}
+}

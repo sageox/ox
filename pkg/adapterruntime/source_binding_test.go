@@ -27,6 +27,8 @@ func TestValidateSessionSource(t *testing.T) {
 		{"amp", "T-current", path, false},
 		{"amp", "https://ampcode.com/threads/T-current?view=full", path, false},
 		{"amp", "T-current", "", false},
+		{"amp", "T-current", filepath.Join(filepath.Dir(path), "gone", "T-current.jsonl"), false},
+		{"amp", "T-foreign", filepath.Join(filepath.Dir(path), "gone", "T-current.jsonl"), true},
 		{"claude-code", "", path, false},
 	} {
 		t.Run(tc.adapter+"/"+tc.id+"/"+filepath.Base(tc.path), func(t *testing.T) {

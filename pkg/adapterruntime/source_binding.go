@@ -3,6 +3,7 @@ package adapterruntime
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -31,11 +32,19 @@ func ValidateSessionSource(adapter, path, nativeID string) error {
 			return fmt.Errorf("%w: %w", ErrUnboundSource, err)
 		}
 		if path != "" {
+			if filepath.Base(path) != id+".jsonl" {
+				return fmt.Errorf("%w: Amp sidecar does not match native thread ID", ErrUnboundSource)
+			}
 			resolved, err := filepath.EvalSymlinks(path)
+			if errors.Is(err, fs.ErrNotExist) {
+				// A removed sidecar yields no new entries; its name still binds
+				// the turns captured from it before it disappeared.
+				return nil
+			}
 			if err != nil {
 				return fmt.Errorf("%w: resolve Amp sidecar: %w", ErrUnboundSource, err)
 			}
-			if filepath.Base(path) != id+".jsonl" || filepath.Base(resolved) != id+".jsonl" {
+			if filepath.Base(resolved) != id+".jsonl" {
 				return fmt.Errorf("%w: Amp sidecar does not match native thread ID", ErrUnboundSource)
 			}
 		}

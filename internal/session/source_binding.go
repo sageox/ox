@@ -2,6 +2,8 @@ package session
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/pkg/adapterruntime"
@@ -18,7 +20,18 @@ func CheckNativeSourceBinding(state *RecordingState) error {
 	if name == "" {
 		name = state.AgentType
 	}
-	err := adapterruntime.ValidateSessionSource(adapters.CanonicalAdapterName(name), state.SessionFile, state.AgentSessionID)
+	adapter := adapters.CanonicalAdapterName(name)
+	nativeID := state.AgentSessionID
+	if adapter == "amp" {
+		if state.SessionFile == "" && nativeID == "" {
+			// The thread ID has not arrived yet (prime before SessionStart).
+			// Nothing native has been read, so wait for it instead of
+			// quarantining a recording a later hook will bind.
+			return nil
+		}
+		nativeID = boundAmpThreadID(state)
+	}
+	err := adapterruntime.ValidateSessionSource(adapter, state.SessionFile, nativeID)
 	if err == nil {
 		return nil
 	}
@@ -29,4 +42,25 @@ func CheckNativeSourceBinding(state *RecordingState) error {
 		}
 	}
 	return err
+}
+
+// boundAmpThreadID returns the thread the saved sidecar belongs to when the
+// recording observed that thread locally. A later thread switch updates
+// AgentSessionID but not the sidecar, so the sidecar's own thread must be
+// matched against every thread this recording recorded.
+func boundAmpThreadID(state *RecordingState) string {
+	if state.SessionFile == "" {
+		return state.AgentSessionID
+	}
+	sidecarID := strings.TrimSuffix(filepath.Base(state.SessionFile), ".jsonl")
+	ids := []string{state.AgentSessionID}
+	for _, native := range state.NativeSessions {
+		ids = append(ids, native.ID)
+	}
+	for _, id := range ids {
+		if adapterruntime.AmpThreadID(id) == sidecarID {
+			return id
+		}
+	}
+	return state.AgentSessionID
 }
