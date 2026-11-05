@@ -170,6 +170,11 @@ func (t *ReadTransport) validateConfig(ctx context.Context, dir string, env []st
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return ErrUnsafeReadTransport
 	}
+	// With a commondir file, Git reads its config from the directory it names
+	// instead of the files inspected below. A clone never writes one.
+	if _, err := os.Lstat(filepath.Join(gitDir, "commondir")); !errors.Is(err, os.ErrNotExist) {
+		return ErrUnsafeReadTransport
+	}
 	for _, name := range []string{"config", "config.worktree"} {
 		configPath := filepath.Join(gitDir, name)
 		info, err := os.Lstat(configPath)
