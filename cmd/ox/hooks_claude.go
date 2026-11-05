@@ -2,10 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
+	"github.com/sageox/ox/internal/fileutil"
 	claude "github.com/sageox/ox/internal/hooks/claude"
 
 	"github.com/sageox/ox/internal/constants"
@@ -24,13 +27,16 @@ type ClaudeSettings = claude.Settings
 // Returns typed hooks and a raw map of everything else, preventing data loss
 // when writing back (e.g., preserving "permissions" alongside "hooks").
 func readSettingsFileRaw(path string) (*ClaudeSettings, map[string]json.RawMessage, error) {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
+	return readSettingsFileRawFrom(os.ReadFile, path)
+}
+
+func readSettingsFileRawFrom(readFile func(string) ([]byte, error), path string) (*ClaudeSettings, map[string]json.RawMessage, error) {
+	data, err := readFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
 		return &ClaudeSettings{
 			Hooks: make(map[string][]ClaudeHookEntry),
 		}, make(map[string]json.RawMessage), nil
 	}
-
-	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read settings file: %w", err)
 	}
@@ -228,22 +234,42 @@ func hasUserLevelOxPrime() bool {
 
 // getSharedClaudeSettingsPath returns the path to .claude/settings.json (shared, git-tracked).
 func getSharedClaudeSettingsPath(gitRoot string) string {
-	return filepath.Join(gitRoot, ".claude", "settings.json")
+	return filepath.Join(gitRoot, projectClaudeSettingsFile)
 }
 
 // getLocalClaudeSettingsPath returns the path to .claude/settings.local.json (gitignored, personal).
 func getLocalClaudeSettingsPath(gitRoot string) string {
-	return filepath.Join(gitRoot, ".claude", "settings.local.json")
+	return filepath.Join(gitRoot, projectClaudeLocalSettingsFile)
+}
+
+const projectClaudeSettingsFile = ".claude/settings.json"
+const projectClaudeLocalSettingsFile = ".claude/settings.local.json"
+
+func readProjectSettingsFileRaw(gitRoot, name string) (*ClaudeSettings, map[string]json.RawMessage, error) {
+	root, err := os.OpenRoot(gitRoot)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer root.Close()
+	return readSettingsFileRawFrom(root.ReadFile, name)
+}
+
+// Keep creation and replacement relative to the opened checkout, not a joined
+// pathname: both .claude and the settings file can be repository symlinks.
+func writeSettingsFileRawInRoot(root *os.Root, name string, settings *ClaudeSettings, rawMap map[string]json.RawMessage, perm os.FileMode) error {
+	data, err := claude.MarshalSettings(settings, rawMap)
+	if err != nil {
+		return err
+	}
+	if err := root.MkdirAll(filepath.Dir(name), dirPerm); err != nil {
+		return fmt.Errorf("failed to create settings directory: %w", err)
+	}
+	return fileutil.AtomicWriteBytesInRoot(root, name, data, perm)
 }
 
 // readSharedClaudeSettings reads .claude/settings.json using raw-preserving parse.
 func readSharedClaudeSettings(gitRoot string) (*ClaudeSettings, map[string]json.RawMessage, error) {
-	return readSettingsFileRaw(getSharedClaudeSettingsPath(gitRoot))
-}
-
-// writeSharedClaudeSettings writes .claude/settings.json using raw-preserving write.
-func writeSharedClaudeSettings(gitRoot string, settings *ClaudeSettings, rawMap map[string]json.RawMessage) error {
-	return writeSettingsFileRaw(getSharedClaudeSettingsPath(gitRoot), settings, rawMap, sharedSettingsPerm)
+	return readProjectSettingsFileRaw(gitRoot, projectClaudeSettingsFile)
 }
 
 // readProjectClaudeSettings reads .claude/settings.json (shared) from the project.
@@ -260,8 +286,7 @@ func readProjectClaudeSettings(gitRoot string) (*ClaudeSettings, error) {
 	}
 
 	// fall back to local file for migration period
-	localPath := getLocalClaudeSettingsPath(gitRoot)
-	localSettings, _, err := readSettingsFileRaw(localPath)
+	localSettings, _, err := readProjectSettingsFileRaw(gitRoot, projectClaudeLocalSettingsFile)
 	if err != nil {
 		return settings, nil // return empty shared settings on local read error
 	}
@@ -293,7 +318,12 @@ func oxHookCommandForEvent(event string) string {
 // Uses raw JSON preservation to avoid dropping non-hook keys (permissions, etc.).
 // After successful install, cleans up stale ox hooks from settings.local.json.
 func InstallProjectClaudeHooks(gitRoot string) error {
-	settings, rawMap, err := readSharedClaudeSettings(gitRoot)
+	root, err := os.OpenRoot(gitRoot)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	settings, rawMap, err := readSettingsFileRawFrom(root.ReadFile, projectClaudeSettingsFile)
 	if err != nil {
 		return err
 	}
@@ -311,18 +341,20 @@ func InstallProjectClaudeHooks(gitRoot string) error {
 		settings.Hooks[event] = mergeHookEntries(existing, []ClaudeHookEntry{newEntry})
 	}
 
-	if err := writeSharedClaudeSettings(gitRoot, settings, rawMap); err != nil {
+	if err := writeSettingsFileRawInRoot(root, projectClaudeSettingsFile, settings, rawMap, sharedSettingsPerm); err != nil {
 		return err
 	}
 
 	// clean up stale ox hooks from settings.local.json
-	_ = cleanupLocalSettingsOxHooks(gitRoot)
+	if err := cleanupLocalSettingsOxHooksInRoot(root); err != nil {
+		return err
+	}
 
 	// The ox status line ships with the hooks: it is the one Claude Code
 	// surface that renders color. It is a per-coworker preference, so it goes
 	// in settings.local.json (see statusline_install.go), and a coworker's own
 	// statusLine is never replaced.
-	if _, err := syncProjectStatusLine(gitRoot); err != nil {
+	if _, err := syncProjectStatusLineInRoot(root); err != nil {
 		return err
 	}
 
@@ -376,9 +408,16 @@ func listProjectClaudeHooks(gitRoot string) map[string]bool {
 // cleanupLocalSettingsOxHooks removes ox hooks from settings.local.json,
 // preserving non-ox content. Deletes the file if it becomes empty.
 func cleanupLocalSettingsOxHooks(gitRoot string) error {
-	localPath := getLocalClaudeSettingsPath(gitRoot)
+	root, err := os.OpenRoot(gitRoot)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return cleanupLocalSettingsOxHooksInRoot(root)
+}
 
-	settings, rawMap, err := readSettingsFileRaw(localPath)
+func cleanupLocalSettingsOxHooksInRoot(root *os.Root) error {
+	settings, rawMap, err := readSettingsFileRawFrom(root.ReadFile, projectClaudeLocalSettingsFile)
 	if err != nil {
 		return err
 	}
@@ -426,16 +465,15 @@ func cleanupLocalSettingsOxHooks(gitRoot string) error {
 	}
 
 	if len(settings.Hooks) == 0 && !hasOtherKeys {
-		return os.Remove(localPath)
+		return root.Remove(projectClaudeLocalSettingsFile)
 	}
 
-	return writeSettingsFileRaw(localPath, settings, rawMap, settingsPerm)
+	return writeSettingsFileRawInRoot(root, projectClaudeLocalSettingsFile, settings, rawMap, settingsPerm)
 }
 
 // hasLocalSettingsOxHooks checks if settings.local.json contains any ox hooks.
 func hasLocalSettingsOxHooks(gitRoot string) bool {
-	localPath := getLocalClaudeSettingsPath(gitRoot)
-	settings, _, err := readSettingsFileRaw(localPath)
+	settings, _, err := readProjectSettingsFileRaw(gitRoot, projectClaudeLocalSettingsFile)
 	if err != nil {
 		return false
 	}
