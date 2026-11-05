@@ -22,6 +22,7 @@ import (
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/sageox/ox/internal/teamrules"
+	"github.com/sageox/ox/internal/teamskills"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 
 	"github.com/stretchr/testify/assert"
@@ -411,4 +412,35 @@ func TestRunAgentPrime_JSONCarriesTheHeldBackTeamSkill(t *testing.T) {
 	require.Len(t, parsed.Withheld, 1, "the held-back skill is missing from the JSON prime")
 	assert.Equal(t, "deploy-prod", parsed.Withheld[0].Name)
 	assert.NotEmpty(t, parsed.Withheld[0].Reason, "the reader cannot tell why it was held back")
+}
+
+// Prime must stop, not start the session, when the project's skill approval
+// policy cannot be read: starting would expose content the policy may revoke.
+func TestRunAgentPrime_RefusesUnreadableSkillApprovals(t *testing.T) {
+	env := initializedE2E(t)
+	// The seed `ox init` performs when the Claude Code adapter is present.
+	_, err := reconcileSelectedSkills(env.Root, []adapterprotocol.SkillTarget{{
+		Key: "claude-project", Root: ".claude/skills",
+		Format: adapterprotocol.SkillFormatAgentSkillsV1,
+		Scope:  adapterprotocol.SkillScopeProject,
+	}})
+	require.NoError(t, err, "harness setup: selecting a skills target must succeed")
+	path := teamskills.ApprovalPath(env.Root)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("{bad json"), 0o644))
+
+	var buf bytes.Buffer
+	cmd := agentPrimeCmd
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	require.NoError(t, cmd.Flags().Set("agent", "claude-code"))
+	t.Cleanup(func() {
+		_ = cmd.Flags().Set("agent", "")
+		cmd.SetOut(nil)
+		cmd.SetErr(nil)
+	})
+
+	err = runAgentPrime(cmd, nil)
+	require.ErrorContains(t, err, "cannot prime with an unverified skill inventory")
+	assert.NotContains(t, buf.String(), "\"agent_id\"", "a refused prime must not issue an agent identity")
 }
