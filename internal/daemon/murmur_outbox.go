@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -86,11 +87,18 @@ func WriteOutboxMurmur(targetDir string, p MurmurPayload) error {
 // ReadOutboxMurmurs returns all queued murmurs for a target. Unreadable or
 // malformed files are skipped (best-effort) rather than failing the whole drain.
 func ReadOutboxMurmurs(targetDir string) ([]outboxEntry, error) {
-	var entries []outboxEntry
-	for _, dir := range murmurOutboxDirs(targetDir) {
+	dirs := murmurOutboxDirs(targetDir)
+	entries, err := readOutboxDir(dirs[0])
+	if err != nil {
+		return nil, err
+	}
+	// The pre-clone fallback is secondary: a damaged one must not hold back
+	// the checkout's own queue.
+	for _, dir := range dirs[1:] {
 		found, err := readOutboxDir(dir)
 		if err != nil {
-			return nil, err
+			slog.Warn("skipping unreadable murmur outbox fallback", "dir", dir, "error", err)
+			continue
 		}
 		entries = append(entries, found...)
 	}
