@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "project": {
+    "name": "Readest",
+    "url": "https://sageox.test/team/team_readestproj01"
+  },
+  "as_of": "2026-10-19T18:00:00Z",
+  "viewer": "anonymous",
+  "plans": [
+    {
+      "stance": "decided",
+      "title": "Merge-safe sync"
+    },
+    {
+      "stance": "decided",
+      "title": "Reflow width set aside Fake forged row"
+    },
+    {
+      "stance": "proposed",
+      "title": "Annotation export"
+    },
+    {
+      "stance": "set-aside",
+      "title": "Dolt as the only remote"
+    }
+  ],
+  "activity": [
+    {
+      "start_utc": "2026-10-19T12:00:00Z",
+      "end_utc": "2026-10-19T18:00:00Z",
+      "headline": "Annotation export plan published."
+    },
+    {
+      "start_utc": "2026-10-19T06:00:00Z",
+      "end_utc": "2026-10-19T12:00:00Z",
+      "headline": "Reflow rendering work; two PRs on CSS width."
+    }
+  ],
+  "murmurs": [
+    {
+      "kind": "pr",
+      "text": "PR #6901 opened: Respect max-width in reflowed books",
+      "url": "https://github.com/readest/readest/pull/6901",
+      "at": "2026-10-19T17:56:00Z"
+    },
+    {
+      "kind": "work",
+      "text": "Tracing the reflow renderer for #6857",
+      "at": "2026-10-19T17:38:00Z"
+    },
+    {
+      "kind": "pr",
+      "text": "14 more PRs opened this hour",
+      "url": "https://github.com/readest/readest/pulls",
+      "at": "2026-10-19T16:00:00Z"
+    }
+  ]
+}
+
