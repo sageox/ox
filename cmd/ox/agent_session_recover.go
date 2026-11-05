@@ -333,6 +333,11 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 	if state.SourceRejected {
 		return fmt.Errorf("claude source has untrusted repository ownership; cache preserved for manual review")
 	}
+	// Recordings persisted by older discovery code may name a foreign source
+	// whose native file is gone; the binding still decides what may publish.
+	if err := session.CheckNativeSourceBinding(state); err != nil {
+		return fmt.Errorf("%w; cache preserved for manual review", err)
+	}
 	// A crash between a batch write and its cursor commit leaves unacknowledged
 	// bytes on raw.jsonl, possibly holding credential output whose redaction
 	// checkpoint never landed. Nothing reads the file before that is settled:

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
+	"github.com/sageox/ox/pkg/adapterruntime"
 )
 
 // fakeBinary creates a shell script that echoes canned responses.
@@ -460,5 +461,48 @@ func TestExternalAdapter_ReadStartupFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "read failed") {
 		t.Fatalf("error omits failed operation: %v", err)
+	}
+}
+
+func TestExternalAdapter_FindSessionFileRejectsForeignAmpSidecar(t *testing.T) {
+	binary := fakeBinary(t, map[string]string{
+		"info":         `{"protocol_version":1,"name":"amp","version":"0.1.0","type":"session"}`,
+		"find-session": `{"session_file":"/tmp/T-foreign.jsonl"}`,
+	})
+	ea, err := NewExternalAdapter(binary)
+	if err != nil {
+		t.Fatalf("NewExternalAdapter: %v", err)
+	}
+	repo := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repo, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err = ea.FindSessionFile(SessionLookup{RepoRoot: repo, AgentID: "OxAmp", AgentSessionID: "T-current", Since: time.Now()})
+	if !errors.Is(err, adapterruntime.ErrUnboundSource) {
+		t.Fatalf("a sidecar named for another thread must be rejected as unbound, got %v", err)
+	}
+}
+
+func TestExternalAdapter_FindSessionFileAcceptsMatchingAmpSidecar(t *testing.T) {
+	binary := fakeBinary(t, map[string]string{
+		"info":         `{"protocol_version":1,"name":"amp","version":"0.1.0","type":"session"}`,
+		"find-session": `{"session_file":"/tmp/T-current.jsonl"}`,
+	})
+	ea, err := NewExternalAdapter(binary)
+	if err != nil {
+		t.Fatalf("NewExternalAdapter: %v", err)
+	}
+	repo := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repo, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ea.FindSessionFile(SessionLookup{
+		RepoRoot:       repo,
+		AgentID:        "OxAmp",
+		AgentSessionID: "T-current",
+		Since:          time.Now(),
+	})
+	if err != nil || got != "/tmp/T-current.jsonl" {
+		t.Fatalf("FindSessionFile = %q, %v", got, err)
 	}
 }
