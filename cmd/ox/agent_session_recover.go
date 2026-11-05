@@ -573,9 +573,14 @@ func publishCachedRecording(inst *agentinstance.Instance, projectRoot string, st
 				return nil, fmt.Errorf("persist guarded recovered recording: %w", err)
 			}
 
-			// copy other artifacts if they exist in cache
+			// copy other artifacts if they exist in cache; cached artifacts of a
+			// paused recording may predate the mask, so they are never copied
 			cacheDir := filepath.Dir(rawPath)
-			for _, name := range []string{ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"} {
+			var cachedArtifacts []string
+			if !recordingHasPause(state) {
+				cachedArtifacts = []string{ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"}
+			}
+			for _, name := range cachedArtifacts {
 				src := filepath.Join(cacheDir, name)
 				if srcData, err := os.ReadFile(src); err == nil {
 					dst := filepath.Join(ledgerSessionDir, name)
@@ -703,12 +708,37 @@ func maskCachedRecordingForPublication(rawPath, projectRoot string, state *sessi
 	if state.AdapterName == "cursor" {
 		return nil // Cursor's native finalizer already applied the lifecycle.
 	}
+	if !recordingHasPause(state) {
+		return nil
+	}
+	return copyRawSessionForPublication(rawPath, rawPath, projectRoot, state)
+}
+
+func recordingHasPause(state *session.RecordingState) bool {
 	for _, event := range state.Lifecycle {
 		if event.Action == session.LifecycleActionPause {
-			return copyRawSessionForPublication(rawPath, rawPath, projectRoot, state)
+			return true
 		}
 	}
-	return nil
+	return false
+}
+
+// publicationMask records an in-place mask of raw.jsonl, so a retry after a
+// failed upload can tell its own masked cache from an unrelated shortened one.
+type publicationMask struct {
+	Original int `json:"original"`
+	Retained int `json:"retained"`
+}
+
+func publicationMaskPath(rawPath string) string { return rawPath + ".publication-mask" }
+
+func alreadyMasked(rawPath string, checkpoint, current int) bool {
+	data, err := os.ReadFile(publicationMaskPath(rawPath))
+	if err != nil {
+		return false
+	}
+	var m publicationMask
+	return json.Unmarshal(data, &m) == nil && m.Original == checkpoint && m.Retained == current
 }
 
 // copyRecoveredRawSession preserves every native record and framing field while
@@ -771,6 +801,9 @@ func copyRawSessionForPublication(sourcePath, destinationPath, projectRoot strin
 	originalCount := len(entryPositions)
 	retained := make(map[int]bool, originalCount)
 	if state != nil {
+		if sourcePath == destinationPath && originalCount != state.EntryCount && alreadyMasked(sourcePath, state.EntryCount, originalCount) {
+			return nil
+		}
 		if originalCount != state.EntryCount {
 			return fmt.Errorf("publication aborted: cached entry count does not match lifecycle checkpoint")
 		}
@@ -814,6 +847,14 @@ func copyRawSessionForPublication(sourcePath, destinationPath, projectRoot strin
 	}
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close recovered recording: %w", err)
+	}
+	if state != nil && sourcePath == destinationPath {
+		// Written before the rename: a crash in between leaves the unmasked
+		// cache, whose count still matches the checkpoint, so it is masked again.
+		mask, _ := json.Marshal(publicationMask{Original: originalCount, Retained: len(retained)})
+		if err := os.WriteFile(publicationMaskPath(destinationPath), mask, 0o600); err != nil {
+			return fmt.Errorf("record publication mask: %w", err)
+		}
 	}
 	if err := os.Rename(temporary.Name(), destinationPath); err != nil {
 		return fmt.Errorf("publish recovered recording snapshot: %w", err)

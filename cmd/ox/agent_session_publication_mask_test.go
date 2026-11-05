@@ -213,9 +213,36 @@ func TestPublicationMaskAllPausedAndShortenedCacheFailsClosed(t *testing.T) {
 	require.Empty(t, stored.Entries)
 	require.Equal(t, float64(0), stored.Footer["entry_count"])
 
-	// A checkpoint still referring to the original sequence is not authority
-	// to reinterpret a shortened cache, or fall back to the native source.
+	// A retry after a failed upload reuses its own masked cache.
+	result, err = processAgentSession(root, state)
+	require.NoError(t, err)
+	require.Zero(t, result.EntryCount)
+
+	// Without the mask record, a checkpoint still referring to the original
+	// sequence is not authority to reinterpret a shortened cache, or fall back
+	// to the native source.
+	require.NoError(t, os.Remove(publicationMaskPath(rawPath)))
 	result, err = processAgentSession(root, state)
 	require.ErrorContains(t, err, "cached entry count does not match lifecycle checkpoint")
 	require.Nil(t, result)
+}
+
+func TestCachedPublicationRetriesMaskedCacheWithoutPausedArtifacts(t *testing.T) {
+	f := newRecoverCollisionFixture(t, collisionRecoveredID, nil)
+	state, err := session.LoadRecordingStateForAgent(f.projectRoot, "OxRcvr")
+	require.NoError(t, err)
+	state.EntryCount = 3
+	state.Lifecycle = publicationPauseLifecycle(true)
+	rawPath := filepath.Join(f.sessionPath, ledgerFileRaw)
+	require.NoError(t, os.WriteFile(rawPath, []byte(pausedPublicationRaw), 0600))
+	stale := filepath.Join(f.sessionPath, ledgerFileSummaryMD)
+	require.NoError(t, os.WriteFile(stale, []byte(pausedPublicationContent), 0600))
+
+	// simulate a first attempt that masked the cache, then failed to upload
+	require.NoError(t, maskCachedRecordingForPublication(rawPath, f.projectRoot, state))
+
+	_, err = publishCachedRecording(&agentinstance.Instance{AgentID: "OxRcvr"}, f.projectRoot, state, rawPath)
+	require.NoError(t, err)
+	requirePublicationMask(t, filepath.Join(f.ledgerSessionDir, ledgerFileRaw), true)
+	require.NoFileExists(t, filepath.Join(f.ledgerSessionDir, ledgerFileSummaryMD))
 }
