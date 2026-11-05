@@ -412,11 +412,13 @@ func TestRewriteWorkingPointer(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		current *string
+		mode    os.FileMode
 		wantErr string
 		want    string
 	}{
 		{name: "absent stays absent"},
 		{name: "pointer is replaced", current: ptr(pointer), want: string(tombstone)},
+		{name: "read-only pointer is replaced", current: ptr(pointer), mode: 0o444, want: string(tombstone)},
 		{name: "edit is kept", current: ptr("someone's edit\n"), wantErr: "working copy changed", want: "someone's edit\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -425,6 +427,9 @@ func TestRewriteWorkingPointer(t *testing.T) {
 			require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 			if tc.current != nil {
 				require.NoError(t, os.WriteFile(path, []byte(*tc.current), 0o644))
+				if tc.mode != 0 {
+					require.NoError(t, os.Chmod(path, tc.mode))
+				}
 			}
 
 			err := rewriteWorkingPointer(ledger, rel, ref, tombstone)

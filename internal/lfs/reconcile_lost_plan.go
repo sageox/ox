@@ -194,6 +194,18 @@ func rewriteWorkingPointer(ledgerPath, relPath string, ref FileRef, content []by
 	if !bytes.Equal(current, []byte(FormatPointer(ref.OID, ref.Size))) {
 		return fmt.Errorf("working copy changed during reconcile")
 	}
+	// The shared writer refuses read-only files; a read-only copy of the dead
+	// pointer must still go, or the next add would recommit it.
+	info, err := root.Stat(relPath)
+	if err != nil {
+		return err
+	}
+	if perm := info.Mode().Perm(); perm&0o200 == 0 {
+		if err := root.Chmod(relPath, perm|0o200); err != nil {
+			return err
+		}
+		defer func() { _ = root.Chmod(relPath, perm) }()
+	}
 	return fileutil.AtomicWriteBytesInRoot(root, relPath, content, 0o644)
 }
 
