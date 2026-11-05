@@ -229,6 +229,15 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		}
 	}
 
+	// Cursor already masks its native capture. Other adapters keep paused
+	// entries locally, so mask the raw file itself before deriving or publishing
+	// anything from it (not just the in-memory summary input).
+	if state.AdapterName != "cursor" {
+		if err := maskCachedRecordingForPublication(rawPath, projectRoot, state); err != nil {
+			return nil, err
+		}
+	}
+
 	// The header was written at start, before any /clear or resume could add
 	// a native session id and before the stop time existed. Append both now
 	// as the footer so the ledger copy of raw.jsonl is self-describing on its
