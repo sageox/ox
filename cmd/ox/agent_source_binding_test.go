@@ -23,3 +23,17 @@ func TestSendSessionWatchStart_RefusesUnboundSource(t *testing.T) {
 	require.True(t, state.SourceRejected)
 	require.Empty(t, state.SessionFile, "no native file may be discovered for an unbound source")
 }
+
+func TestProcessAgentSession_RefusesUnboundSource(t *testing.T) {
+	state := &session.RecordingState{AgentID: "OxGem", AdapterName: "gemini"}
+	result, err := processAgentSession(t.TempDir(), state)
+	require.Nil(t, result)
+	require.True(t, errors.Is(err, adapterruntime.ErrUnboundSource))
+}
+
+func TestWriteRawHeader_RefusesUnboundSource(t *testing.T) {
+	state := &session.RecordingState{AgentID: "OxGem", AdapterName: "gemini", SessionPath: t.TempDir()}
+	err := writeRawHeader(t.TempDir(), state)
+	require.True(t, errors.Is(err, adapterruntime.ErrUnboundSource))
+	require.NoFileExists(t, state.SessionPath+"/raw.jsonl")
+}

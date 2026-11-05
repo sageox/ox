@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
+	"github.com/sageox/ox/pkg/adapterruntime"
 )
 
 // fakeBinary creates a shell script that echoes canned responses.
@@ -472,9 +473,13 @@ func TestExternalAdapter_FindSessionFileRejectsForeignAmpSidecar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewExternalAdapter: %v", err)
 	}
-	_, err = ea.FindSessionFile(SessionLookup{RepoRoot: t.TempDir(), AgentID: "OxAmp", AgentSessionID: "T-current", Since: time.Now()})
-	if err == nil {
-		t.Fatal("a sidecar named for another thread must be rejected")
+	repo := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repo, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err = ea.FindSessionFile(SessionLookup{RepoRoot: repo, AgentID: "OxAmp", AgentSessionID: "T-current", Since: time.Now()})
+	if !errors.Is(err, adapterruntime.ErrUnboundSource) {
+		t.Fatalf("a sidecar named for another thread must be rejected as unbound, got %v", err)
 	}
 }
 
