@@ -219,19 +219,15 @@ func TestReconcileSkillInventoryIfStale_NeverInstallsIntoAnUnselectedRepo(t *tes
 
 // TestReconcileSkillInventoryIfStale_ToleratesMalformedLockfile: a corrupt
 // lockfile is a degraded session, never a failed one. Prime must return quietly.
-func TestReconcileSkillInventoryIfStale_ToleratesMalformedLockfile(t *testing.T) {
+// A damaged lockfile hides what ox installed, including runnable team content
+// whose approval may since have been revoked, so prime must not pass over it.
+func TestReconcileSkillInventoryIfStale_RefusesMalformedLockfile(t *testing.T) {
 	repoRoot, _ := installSkillsForTest(t)
 	if err := os.WriteFile(skillmanager.LockPath(repoRoot), []byte("{not json"), 0o644); err != nil {
 		t.Fatalf("write malformed lockfile: %v", err)
 	}
-	// and the machine-local half, which is derived state and must also be
-	// survivable rather than fatal
-	if err := os.WriteFile(skillmanager.StatePath(repoRoot), []byte("{not json"), 0o600); err != nil {
-		t.Fatalf("write malformed state: %v", err)
-	}
-
-	if changed, _, err := reconcileSkillInventoryIfStale(repoRoot); changed != 0 || err != nil {
-		t.Errorf("malformed lockfile should yield no work, got changed=%d", changed)
+	if changed, _, err := reconcileSkillInventoryIfStale(repoRoot); changed != 0 || err == nil {
+		t.Errorf("malformed lockfile must fail closed, got changed=%d err=%v", changed, err)
 	}
 }
 

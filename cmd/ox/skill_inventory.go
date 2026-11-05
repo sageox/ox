@@ -47,6 +47,11 @@ func reconcileSkillInventoryIfStale(projectRoot string) (changed int, withheld [
 		skillmanager.RememberRepo(projectRoot)
 	}
 	if !selected {
+		// A damaged lockfile also reads as "nothing selected", yet the files it
+		// managed may include runnable content whose approval was revoked.
+		if err := skillmanager.CheckInstalledState(projectRoot); err != nil {
+			return 0, nil, fmt.Errorf("verify skill inventory state (run `ox doctor` to repair): %w", err)
+		}
 		// No targets recorded: this project has never selected an AI coworker with
 		// native skills, or has never been initialized. `ox init` owns first
 		// install; prime must not silently install into a repo that never asked.

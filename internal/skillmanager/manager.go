@@ -485,6 +485,13 @@ func InstalledSource(repoRoot string) (revision, oxVersion string, selected bool
 	return lock.Source.Revision, lock.Source.Version, len(lock.Targets) > 0
 }
 
+// CheckInstalledState reports why InstalledSource could not read this
+// project's skill state; nil means it is absent or readable.
+func CheckInstalledState(repoRoot string) error {
+	_, _, err := readLock(repoRoot)
+	return err
+}
+
 func desiredFromLock(lock lockFile) DesiredSkills {
 	desired := DesiredSkills{Names: append([]string(nil), lock.Desired.Names...), Targets: append([]string(nil), lock.Desired.Targets...)}
 	for _, id := range lock.Desired.Bundles {
@@ -718,11 +725,17 @@ func planWithCatalogs(repoRoot, version string, desired DesiredSkills, targets [
 	// A retained team file may still require an approval that was just revoked.
 	// Do not certify this policy revision until the projection can be reconciled;
 	// otherwise Prime's next fast path would hide the unresolved revocation.
+	// Files kept only because Git tracks them are the repository's own content,
+	// not an unresolved revocation; certifying past them keeps Prime usable.
 	for _, file := range next.ManagedFiles {
-		if _, wanted := desiredPaths[file.Path]; !wanted && isTeamOwnedPath(targetByKey, file) {
-			next.Source.Revision = ""
-			break
+		if _, wanted := desiredPaths[file.Path]; wanted || !isTeamOwnedPath(targetByKey, file) {
+			continue
 		}
+		if _, tracked := removalBlockedByGit(targetByKey, trackedDirs, file.Target, file.Path); tracked {
+			continue
+		}
+		next.Source.Revision = ""
+		break
 	}
 
 	neededTargets := stringSet(next.Desired.Targets)
