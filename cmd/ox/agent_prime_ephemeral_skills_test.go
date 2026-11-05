@@ -115,7 +115,8 @@ func TestEphemeralPrime_MaterializesTeamSkillsThroughTheApprovalGate(t *testing.
 	assert.Equal(t, "team-rules", info.TeamRules[0].Name)
 	assert.Contains(t, info.TeamRules[0].Body, "Be kind.")
 
-	_, withheld := reconcileSkillInventoryIfStale(h.project)
+	_, withheld, err := reconcileSkillInventoryIfStale(h.project)
+	require.NoError(t, err)
 
 	require.Equal(t, proseSkillManifest, stripStamp(t, h.projected("lint-guide", "SKILL.md")),
 		"prose team skill must install with no approval")
@@ -162,13 +163,15 @@ func indexOfStamp(content string) int {
 func TestEphemeralPrime_RetiresAndUpdatesSkillsAcrossPrimes(t *testing.T) {
 	h := newEphemeralSkillsHarness(t)
 	h.prime(t, &api.TeamContextContentResponse{Skills: []api.TeamContextSkill{proseSkill(), scriptSkill()}})
-	reconcileSkillInventoryIfStale(h.project)
+	_, _, err := reconcileSkillInventoryIfStale(h.project)
+	require.NoError(t, err)
 	require.FileExists(t, h.projected("deploy", "SKILL.md"))
 
 	edited := proseSkill()
 	edited.Files[0].Content = "---\nname: lint-guide\ndescription: How we lint.\n---\n\nRun the NEW linter.\n"
 	h.prime(t, &api.TeamContextContentResponse{Skills: []api.TeamContextSkill{edited}})
-	reconcileSkillInventoryIfStale(h.project)
+	_, _, err = reconcileSkillInventoryIfStale(h.project)
+	require.NoError(t, err)
 
 	require.NoDirExists(t, filepath.Join(h.teamDir, "agents", "skills", "deploy"), "an unlisted skill must be swept")
 	require.NoDirExists(t, h.projected("deploy"), "a retired team skill survived in the repository")
@@ -187,14 +190,16 @@ func TestEphemeralPrime_TruncatedResponseRetiresNothing(t *testing.T) {
 	h.prime(t, &api.TeamContextContentResponse{
 		Skills: []api.TeamContextSkill{proseSkill(), scriptSkill()}, Rules: []api.TeamContextRule{rule},
 	})
-	reconcileSkillInventoryIfStale(h.project)
+	_, _, err := reconcileSkillInventoryIfStale(h.project)
+	require.NoError(t, err)
 	require.FileExists(t, h.projected("deploy", "SKILL.md"))
 
 	for _, partial := range [][]api.TeamContextSkill{{proseSkill()}, {}} {
 		h.prime(t, &api.TeamContextContentResponse{
 			Skills: partial, SkillsTruncated: true, Rules: []api.TeamContextRule{},
 		})
-		reconcileSkillInventoryIfStale(h.project)
+		_, _, err = reconcileSkillInventoryIfStale(h.project)
+		require.NoError(t, err)
 		require.FileExists(t, filepath.Join(h.teamDir, "agents", "skills", "deploy", "SKILL.md"))
 		require.FileExists(t, filepath.Join(h.teamDir, "agents", "skills", "lint-guide", "SKILL.md"))
 		require.FileExists(t, filepath.Join(h.teamDir, "agents", "rules", "r.md"), "a truncated bundle retired a rule")
