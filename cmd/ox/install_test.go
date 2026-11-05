@@ -89,6 +89,7 @@ func TestRunInstallDirFlagReplacesAndWarnsOffPath(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dest, "ox"), []byte("old"), 0o755))
 	installDirFlag, installSkipLogin = dest, true
 	t.Setenv("PATH", t.TempDir())
+	t.Setenv("SHELL", "/bin/bash")
 
 	out := runInstallCmd(t)
 
@@ -240,7 +241,7 @@ func TestRunInstallFishPathHint(t *testing.T) {
 
 	out := runInstallCmd(t)
 
-	assert.Contains(t, out, "fish_add_path "+shellQuote(installDirFlag))
+	assert.Contains(t, out, "fish_add_path "+fishQuote(installDirFlag))
 	assert.NotContains(t, out, "export PATH")
 }
 
@@ -303,6 +304,7 @@ func TestShellPathHintsQuoteTheDirectory(t *testing.T) {
 	skipInstallOnWindows(t)
 	dir := filepath.Join(t.TempDir(), "$(id) it's")
 	t.Setenv("PATH", t.TempDir())
+	t.Setenv("SHELL", "/bin/bash")
 	var out bytes.Buffer
 	warnInstallPath(&out, dir, filepath.Join(dir, "ox"))
 	assert.Contains(t, out.String(), "export PATH="+shellQuote(dir)+`:"$PATH"`)
@@ -323,12 +325,41 @@ func TestShadowWarningSeesRelativePathEntries(t *testing.T) {
 	assert.Contains(t, out.String(), "Another ox at bin/ox comes first")
 }
 
-func TestLookPathSkipsRelativeNodeModules(t *testing.T) {
+func TestShadowWarningSeesRelativeNodeModules(t *testing.T) {
 	skipInstallOnWindows(t)
 	t.Chdir(t.TempDir())
 	shimDir := filepath.Join("node_modules", ".bin")
 	require.NoError(t, os.MkdirAll(shimDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(shimDir, "ox"), []byte("x"), 0o755))
-	t.Setenv("PATH", shimDir)
-	assert.Empty(t, lookPathOutsideNodeModules("ox"))
+	dest := t.TempDir()
+	oxPath := filepath.Join(dest, "ox")
+	require.NoError(t, os.WriteFile(oxPath, []byte("y"), 0o755))
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+dest)
+	var out bytes.Buffer
+	warnInstallPath(&out, dest, oxPath)
+	assert.Contains(t, out.String(), "Another ox at node_modules/.bin/ox comes first")
+}
+
+func TestRunInstallIgnoresRelativeHomebrewLink(t *testing.T) {
+	_, logins, _ := stubInstall(t, false)
+	cellar := filepath.Join(t.TempDir(), "Cellar", "ox", "0.25.0", "bin")
+	require.NoError(t, os.MkdirAll(cellar, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cellar, "ox"), []byte("repo"), 0o755))
+	t.Chdir(t.TempDir())
+	require.NoError(t, os.Mkdir("bin", 0o755))
+	require.NoError(t, os.Symlink(filepath.Join(cellar, "ox"), filepath.Join("bin", "ox")))
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "bin")
+
+	out := runInstallCmd(t)
+
+	assert.NotContains(t, out, "managed by Homebrew")
+	installed := filepath.Join(home, ".local", "bin", "ox")
+	assert.FileExists(t, installed)
+	assert.Equal(t, []string{installed}, *logins, "login runs the installed ox, never the repo's bin/ox")
+}
+
+func TestFishQuote(t *testing.T) {
+	assert.Equal(t, `'/tmp/a\\b it\'s'`, fishQuote(`/tmp/a\b it's`))
 }

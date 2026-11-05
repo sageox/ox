@@ -124,7 +124,8 @@ func installBinaries(out io.Writer, srcDir, dirFlag string) (installResult, erro
 		if existing := lookPathOutsideNodeModules("ox"); existing != "" {
 			resolved, err := filepath.EvalSymlinks(existing)
 			switch {
-			case err != nil:
+			// a relative PATH hit is repo-controlled; later steps may run OxPath
+			case err != nil, !filepath.IsAbs(existing):
 			case isHomebrewInstall(resolved):
 				fmt.Fprintf(out, "ox is managed by Homebrew at %s; update it with %s\n",
 					existing, cli.StyleCommand.Render("brew upgrade sageox/tap/ox"))
@@ -223,7 +224,7 @@ func warnInstallPath(out io.Writer, destDir, oxPath string) {
 	if !dirOnPath(destDir) {
 		if filepath.Base(os.Getenv("SHELL")) == "fish" {
 			cli.PrintWarningTo(out, destDir+" is not on your PATH. Add it with:")
-			fmt.Fprintf(out, "  fish_add_path %s\n", shellQuote(destDir))
+			fmt.Fprintf(out, "  fish_add_path %s\n", fishQuote(destDir))
 			return
 		}
 		cli.PrintWarningTo(out, destDir+" is not on your PATH. Add this line to your shell profile:")
@@ -235,6 +236,13 @@ func warnInstallPath(out io.Writer, destDir, oxPath string) {
 	}
 }
 
+// fishQuote single-quotes s for fish, where \\ and \' are escapes inside
+// single quotes.
+func fishQuote(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	return "'" + strings.ReplaceAll(s, "'", `\'`) + "'"
+}
+
 func dirOnPath(dir string) bool {
 	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
 		if d != "" && sameDir(d, dir) {
@@ -244,13 +252,14 @@ func dirOnPath(dir string) bool {
 	return false
 }
 
-// lookPathOutsideNodeModules is exec.LookPath that skips node_modules
-// directories, so the npx launcher on PATH is not mistaken for an install.
-// Relative entries are kept: the shell runs them too, so they can shadow the
-// install. The result is only reported, never executed or overwritten.
+// lookPathOutsideNodeModules is exec.LookPath that skips absolute
+// node_modules directories, so the launcher npx puts on PATH is not mistaken
+// for an install. Relative entries, node_modules/.bin included, are kept: the
+// shell runs them too, so they can shadow the install. Callers must not run
+// or replace a relative result.
 func lookPathOutsideNodeModules(name string) string {
 	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
-		if d == "" || strings.Contains("/"+filepath.ToSlash(d)+"/", "/node_modules/") {
+		if d == "" || (filepath.IsAbs(d) && strings.Contains(filepath.ToSlash(d)+"/", "/node_modules/")) {
 			continue
 		}
 		candidate := filepath.Join(d, name)
