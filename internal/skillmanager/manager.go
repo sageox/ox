@@ -733,8 +733,14 @@ func planWithCatalogs(repoRoot, version string, desired DesiredSkills, targets [
 		}
 		// The directory being tracked is not enough: an untracked script beside
 		// a tracked file is still revoked team content.
-		if _, tracked := removalBlockedByGit(targetByKey, trackedDirs, file.Target, file.Path); tracked && gitTracksFile(repoRoot, file.Path) {
-			continue
+		if _, tracked := removalBlockedByGit(targetByKey, trackedDirs, file.Target, file.Path); tracked {
+			if gitTracksFile(repoRoot, file.Path) {
+				continue
+			}
+			// An already-absent file leaves nothing runnable behind.
+			if _, err := os.Lstat(filepath.Join(repoRoot, filepath.FromSlash(file.Path))); errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
 		}
 		next.Source.Revision = ""
 		break
