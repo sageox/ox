@@ -48,6 +48,24 @@ func makeOutboxMurmur(t *testing.T, targetDir, content string, ts time.Time) Mur
 	}
 }
 
+// TestMurmurOutbox_SharedAcrossCacheEnvironments verifies a CLI and daemon with
+// different cache environments use the same queue for a git checkout. Failure
+// prevented: a murmur queued by the CLI is never drained and expires.
+func TestMurmurOutbox_SharedAcrossCacheEnvironments(t *testing.T) {
+	isolateMurmurOutbox(t)
+	target := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(target, ".git"), 0o755))
+	p := makeOutboxMurmur(t, target, "queued by cli", time.Now().UTC())
+	require.NoError(t, WriteOutboxMurmur(target, p))
+
+	t.Setenv("XDG_CACHE_HOME", t.TempDir()) // the daemon's environment
+	entries, err := ReadOutboxMurmurs(target)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, p.RelPath, entries[0].payload.RelPath)
+	require.True(t, strings.HasPrefix(entries[0].path, filepath.Join(target, ".git")+string(filepath.Separator)))
+}
+
 // TestMurmurOutbox_RoundTrip verifies a queued murmur can be written, read back
 // intact, and removed. Failure prevented: a serialization or path bug silently
 // drops queued murmurs the daemon was supposed to drain.

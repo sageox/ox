@@ -18,9 +18,12 @@ type outboxEntry struct {
 }
 
 // MurmurOutboxDir returns the outbox directory for a given ledger/team-context
-// checkout root, outside the checkout in daemon-owned cache state. Gitignored
-// checkout content is still remotely writable via a forced add. Deliberately
-// do not read or migrate the old .sageox/cache/murmur-outbox queue.
+// checkout root. It lives in the checkout's own .git directory: git never
+// materializes tracked content there, so remote repository content cannot plant
+// queue entries, and the CLI and daemon agree on it whatever their cache
+// environment. Checkouts without a real .git directory fall back to daemon-owned
+// cache state keyed by the canonical path. Deliberately do not read or migrate
+// the old .sageox/cache/murmur-outbox queue.
 func MurmurOutboxDir(targetDir string) string {
 	if abs, err := filepath.Abs(targetDir); err == nil {
 		targetDir = abs
@@ -29,7 +32,11 @@ func MurmurOutboxDir(targetDir string) string {
 	if real, err := filepath.EvalSymlinks(targetDir); err == nil {
 		targetDir = real
 	}
-	sum := sha256.Sum256([]byte(filepath.Clean(targetDir)))
+	targetDir = filepath.Clean(targetDir)
+	if info, err := os.Lstat(filepath.Join(targetDir, ".git")); err == nil && info.IsDir() {
+		return filepath.Join(targetDir, ".git", "sageox-murmur-outbox")
+	}
+	sum := sha256.Sum256([]byte(targetDir))
 	return filepath.Join(paths.DaemonCacheDir(), "murmur-outbox", fmt.Sprintf("%x", sum))
 }
 
