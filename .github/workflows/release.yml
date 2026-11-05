@@ -231,7 +231,9 @@ jobs:
     if: github.repository == 'sageox/ox'
     needs: [verify-draft, verify-inrepo, plan-release-stages]
     # SAGEOX_CLI_SIGNING_KEY lives in the cli-release environment, whose
-    # deployment rules keep it from workflow runs on other branches.
+    # deployment rules keep it from workflow runs on other branches. The
+    # environment only sees the dispatch ref, so "Require the tagged commit
+    # to be on main" below covers the code at the tag.
     environment: cli-release
     # 8 vCPU: goreleaser cross-compiles every platform binary, ~490s on 4 vCPU
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -257,6 +259,18 @@ jobs:
             echo "::error::$RELEASE_TAG names $head, but this release was planned for ${PLANNED_SHA:-no commit}. Dispatch the release again."
             exit 1
           fi
+
+      # The cli-release environment checks the ref the workflow was dispatched
+      # from, not this tag. Without this step, a collaborator could tag an
+      # unreviewed commit, dispatch from main, and run their own
+      # scripts/sign-manifest with the signing key (Devin, veria-ai).
+      - name: Require the tagged commit to be on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "::error::$RELEASE_TAG ($(git rev-parse --short HEAD)) is not on main. Only commits that landed on main are signed."
+            exit 1
+          }
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
