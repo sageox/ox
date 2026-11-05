@@ -144,10 +144,12 @@ func BuildHires(manifestJSON []byte, pixel map[string][]int, strip func(name str
 		for i := 0; i < n; i++ {
 			// A *image.Paletted slice re-encodes as a palette PNG with the
 			// strip's palette, so a frame stays as small as its share of the
-			// strip (about 4x smaller than RGBA).
+			// strip (about 4x smaller than RGBA). Default compression, not
+			// Best: on the embedded set Best saves 0.3% of ~50 MB and takes
+			// 6.5x as long, which every enable and doctor refresh pays.
 			var buf bytes.Buffer
 			frame := sub.SubImage(image.Rect(b.Min.X+i*a.Width, b.Min.Y, b.Min.X+(i+1)*a.Width, b.Max.Y))
-			if err := (&png.Encoder{CompressionLevel: png.BestCompression}).Encode(&buf, frame); err != nil {
+			if err := (&png.Encoder{CompressionLevel: png.DefaultCompression}).Encode(&buf, frame); err != nil {
 				return nil, fmt.Errorf("encode desktop %q frame %d: %w", name, i, err)
 			}
 			h.PNG[name] = append(h.PNG[name], buf.Bytes())

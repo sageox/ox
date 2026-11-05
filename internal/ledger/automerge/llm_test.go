@@ -3,6 +3,9 @@ package automerge
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +39,99 @@ func TestBuildPrompt_AppendsNewlineWhenMissing(t *testing.T) {
 	prompt := buildPrompt("a.txt", []byte("no-trailing-newline"))
 	if !strings.Contains(prompt, "no-trailing-newline\nEND_FILE") {
 		t.Errorf("expected newline before END_FILE, got: %s", prompt)
+	}
+}
+
+func TestRunClaudeBinary_PromptViaStdin(t *testing.T) {
+	// Keep process tests serial: concurrent forks can inherit a writable
+	// fixture descriptor and briefly make exec fail with ETXTBSY.
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell script")
+	}
+
+	// All configured binaries use the same Claude-compatible runner.
+	for _, name := range []string{"claude", "gemini", "codex", "custom-llm"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			binary := filepath.Join(dir, name)
+			body := `#!/bin/sh
+set -eu
+printf '%s\n' "$@" > "$0.args"
+cat > "$0.stdin"
+printf '%s\n' '{"type":"result","result":"merged\n"}'
+`
+			if err := os.WriteFile(binary, []byte(body), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			prompt := buildPrompt("private-ledger.md", []byte("context: \"private\" $(not-a-command)\n<<<<<<< HEAD\nours-only\n=======\ntheirs-only\n>>>>>>> branch\ntail\n\n"))
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			merged, err := runClaudeBinary(ctx, binary, prompt)
+			if err != nil {
+				t.Fatalf("runClaudeBinary: %v", err)
+			}
+			if merged != "merged\n" {
+				t.Errorf("merged = %q, want %q", merged, "merged\n")
+			}
+			const wantArgs = "--output-format\nstream-json\n--verbose\n--permission-mode\nplan\n-p\n"
+			if got := readFile(t, dir, name+".args"); got != wantArgs {
+				t.Errorf("argv = %q, want only fixed flags %q (no prompt)", got, wantArgs)
+			}
+			if got := readFile(t, dir, name+".stdin"); got != prompt {
+				t.Errorf("stdin = %q, want intact prompt %q", got, prompt)
+			}
+		})
+	}
+}
+
+func TestRunClaudeBinary_Cancellation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell script")
+	}
+
+	binary := filepath.Join(t.TempDir(), "llm")
+	body := `#!/bin/sh
+set -eu
+cat > /dev/null
+: > "$0.ready"
+exec sleep 30
+`
+	if err := os.WriteFile(binary, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := runClaudeBinary(ctx, binary, "private merge prompt")
+		done <- err
+	}()
+
+	// Cancel only after the child has consumed stdin, so the runner has
+	// started and cancellation exercises its output-pipe cleanup.
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(binary + ".ready"); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("runner exited before cancellation: %v", err)
+		case <-ctx.Done():
+			t.Fatal("fake LLM did not become ready")
+		case <-ticker.C:
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("runClaudeBinary error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner did not return after cancellation")
 	}
 }
 
@@ -355,5 +451,55 @@ func TestMergeOneWithLLM_ContentPreservation(t *testing.T) {
 				t.Errorf("file content = %q, want %q", got, tc.out)
 			}
 		})
+	}
+}
+
+func TestRunClaudeBinary_ResultSurvivesDescendantHoldingOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell script")
+	}
+
+	binary := filepath.Join(t.TempDir(), "llm")
+	body := `#!/bin/sh
+set -eu
+cat > /dev/null
+sleep 20 &
+printf '%s\n' '{"type":"result","result":"merged\n"}'
+`
+	if err := os.WriteFile(binary, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	merged, err := runClaudeBinary(ctx, binary, "private merge prompt")
+	if err != nil {
+		t.Fatalf("runClaudeBinary: %v (after %s)", err, time.Since(start).Round(time.Millisecond))
+	}
+	if merged != "merged\n" {
+		t.Errorf("merged = %q, want %q", merged, "merged\n")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("runner waited %s for a descendant after the CLI exited", elapsed)
+	}
+}
+
+func TestRunClaudeBinary_FailureCarriesStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell script")
+	}
+
+	binary := filepath.Join(t.TempDir(), "llm")
+	body := "#!/bin/sh\ncat > /dev/null\necho 'auth expired' >&2\nexit 3\n"
+	if err := os.WriteFile(binary, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := runClaudeBinary(ctx, binary, "private merge prompt")
+	if err == nil || err.Error() != "claude exited 3: auth expired" {
+		t.Fatalf("err = %v, want the exit code and stderr", err)
 	}
 }

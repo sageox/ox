@@ -118,6 +118,9 @@ type TeamContextInfo struct {
 	// inlined for prime emission; visibility: indexed rules carry only
 	// metadata and are read on demand by the agent.
 	TeamRules []teamdocs.TeamRule `json:"team_rules,omitempty"`
+	// RuleWarnings holds what discovery knows and the rule files cannot say, such as
+	// rules withheld because this checkout's repo could not be identified.
+	RuleWarnings []string `json:"rule_warnings,omitempty"`
 
 	// v4 Team Memory
 	MemoryContent string `json:"memory_content,omitempty"` // full MEMORY.md content (always inlined)

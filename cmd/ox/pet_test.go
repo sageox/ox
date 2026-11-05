@@ -49,15 +49,11 @@ type petEnv struct {
 	codexHome string
 }
 
-// setupPetEnv isolates XDG data and the Codex home, and puts a fake claude
-// first on PATH.
-func setupPetEnv(t *testing.T, withClaude bool) petEnv {
+// useTinyPetSheets makes every pet installer the commands build write tiny
+// sheets, so writing the pets takes milliseconds, not a full render of the
+// embedded art (minutes under -race).
+func useTinyPetSheets(t *testing.T) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake claude is a POSIX shell script")
-	}
-	root := t.TempDir()
-	// tiny sheets: writing the pets takes milliseconds, not a full render
 	orig := newPetInstaller
 	newPetInstaller = func() pet.Installer {
 		in := orig()
@@ -74,6 +70,17 @@ func setupPetEnv(t *testing.T, withClaude bool) petEnv {
 		newPetInstaller = orig
 		newCodexPetInstaller = origCodex
 	})
+}
+
+// setupPetEnv isolates XDG data and the Codex home, and puts a fake claude
+// first on PATH.
+func setupPetEnv(t *testing.T, withClaude bool) petEnv {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake claude is a POSIX shell script")
+	}
+	root := t.TempDir()
+	useTinyPetSheets(t)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
 	t.Setenv("OX_XDG_DISABLE", "")
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))

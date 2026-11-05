@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "source": "CI run 41943839852 (PR #1742), fast tier, one runner per slot, 2026-11-05",
+  "packages": {
+    "github.com/sageox/ox/cmd/ox": {
+      "default_seconds": 0.0184,
+      "tests": {
+        "TestPlanSaveFile_RevisionNeverOverwritesAnUnsnapshottedPrior": 10.4,
+        "TestPlanSaveFile_RetryAfterFailedUploadNeverCommitsPlainHTML": 9.1,
+        "TestPlanSaveFile_FailedHTMLUploadCommitsNothingAndKeepsPlainFile": 9.0,
+        "TestPlanSaveFile_RetitledResaveRevisesTheSamePlan": 7.0,
+        "TestPlanSaveFile_StampIsDeterministicAcrossSaves": 6.9,
+        "TestPlanSave_RoutesReportTheirOutcome": 6.8,
+        "TestPlanStatus_AfterAbandonAndResaveNamesTheLivePlan": 6.8,
+        "TestSavePlanArtifacts_NotifiesCreatedThenRevised": 6.8,
+        "TestPushSummary_MirrorsContextUseIntoSummaryJSON": 3.7,
+        "TestCommandRefs_ShippedTextNamesRealCommands": 2.5,
+        "TestCommandRefs_ScanReachesRealStrings": 2.4,
+        "TestImportTerminalExcerptCacheIsBoundedAndReloadsOnFocus": 2.0,
+        "TestBrowserRoundTrip_AgentResolveShowsAddressedAndBroadcasts": 1.5,
+        "TestSkillsPublish_FailedPushWithDaemonDisabledGivesTheManualPush": 1.3,
+        "TestSkillsPublish_RefusesAnythingItCannotSafelyOwnOrCopy": 1.3,
+        "TestSkillsPublish_ReportsAFailedPushTruthfully": 1.3,
+        "TestBrief_LiveUses_IncrementalCache": 1.2,
+        "TestUsage_HumanAndAgentOutput": 1.0,
+        "TestRunRedactHistoryWorkflow_RedactsLFSCachedContent": 0.9,
+        "TestCommands_ExplainedFailuresSayWhy": 0.8,
+        "TestBrief_AllowJudgedEvidenceFromConfig": 0.7,
+        "TestRunSyncConvergence_RepositoryAndTransportBoundaries": 0.7,
+        "TestTracePrimeInheritsPauseBeforeDurableHeader": 0.6,
+        "TestUsage_LedgerSessionView": 0.6,
+        "TestUsage_RecentFlagListsEveryCall": 0.6,
+        "TestImportContent_CanceledAdapterReadsReleasePreviewSlots": 0.5,
+        "TestPlanReviewDurability_OversizeBodyRejected413": 0.5,
+        "TestSessionLog_ConcurrentWrites": 0.5,
+        "TestStopDaemonAndWait": 0.5,
+        "TestUsage_SelfReportRoundTrip": 0.5
+      }
+    },
+    "github.com/sageox/ox/internal/daemon": {
+      "default_seconds": 0.0185,
+      "tests": {
+        "TestEnsureDaemonImpl_UnstoppableStaleDaemonBlocksSpawn": 4.0,
+        "TestEnsureDaemonImpl_LiveStartingChildNeverRespawned": 2.0,
+        "TestEnsureDaemonImpl_SpawnedButNeverRespondsErrors": 2.0,
+        "TestEnsureDaemonImpl_SeparateProcessesSpawnOnce": 1.3,
+        "TestSyncWithProgress_IdleTimeoutExtendsOnProgress": 1.3,
+        "TestLowerDaemonPriority_RaisesNiceness": 1.1,
+        "TestSyncScheduler_Start_Context": 1.0,
+        "TestRefreshDirtyOverlay_ContextCanceled": 0.7,
+        "TestBuildLedgerIndex_ConcurrentWithCheckFreshness": 0.6,
+        "TestSyncWithProgress_IdleTimeoutExpiresWithoutProgress": 0.6,
+        "TestCheckFreshness_WorktreeDeletedMidIndex_FlagReleased": 0.5
+      }
+    }
+  }
+}

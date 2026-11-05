@@ -326,7 +326,7 @@ func validateResolved(name string, resolved Resolved) ([]File, error) {
 	return files, nil
 }
 
-// cleanAddonPath validates a Provider-supplied destination path per
+// cleanAddonPath validates a provider-supplied or locked destination path per
 // types.go's File.Path contract: slash-separated, relative, non-escaping,
 // and inside agents/.
 func cleanAddonPath(p string) (string, error) {
@@ -477,6 +477,9 @@ func (tx *transaction) write(relPath string, content []byte, mode fs.FileMode) e
 // already-absent path — a human may have deleted it by hand, and Remove's
 // job is to make the lock stop owning it either way.
 func (tx *transaction) remove(relPath string) error {
+	if _, err := cleanAddonPath(relPath); err != nil {
+		return err
+	}
 	rel := filepath.FromSlash(relPath)
 	if err := tx.root.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("remove %s: %w", relPath, err)
@@ -488,6 +491,9 @@ func (tx *transaction) remove(relPath string) error {
 // readCurrent reads relPath's on-disk bytes, reporting ok=false (not an
 // error) when the path is simply absent.
 func (tx *transaction) readCurrent(relPath string) (content []byte, ok bool, err error) {
+	if _, err := cleanAddonPath(relPath); err != nil {
+		return nil, false, err
+	}
 	data, err := tx.root.ReadFile(filepath.FromSlash(relPath))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {

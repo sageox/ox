@@ -107,6 +107,41 @@ func TestRetractOrphanedDrafts_RemovesStaleCommittedDraft(t *testing.T) {
 		"retraction must land as a session-draft: commit so the daemon push carries it")
 }
 
+func TestRetractOrphanedDrafts_RejectsWildcardNames(t *testing.T) {
+	for _, name := range []string{"*", "victi?", "[v]ictim"} {
+		t.Run(name, func(t *testing.T) {
+			s, ledger := newRetractScheduler(t)
+			commitStaleDraft(t, ledger, name, 120*time.Hour)
+			sibling := filepath.Join(ledger, "sessions", "victim")
+			require.NoError(t, os.MkdirAll(sibling, 0755))
+			for _, file := range []string{"tracked.txt", "modified.txt", "staged.txt"} {
+				require.NoError(t, os.WriteFile(filepath.Join(sibling, file), []byte("original\n"), 0644))
+			}
+			mustGit(t, ledger, "add", "sessions/victim")
+			mustGit(t, ledger, "commit", "-m", "seed sibling")
+			// A valid orphan must still be removed in the same sweep.
+			commitStaleDraft(t, ledger, "ordinary", 120*time.Hour)
+			for _, file := range []string{"modified.txt", "staged.txt", "untracked.txt"} {
+				require.NoError(t, os.WriteFile(filepath.Join(sibling, file), []byte("local work\n"), 0644))
+			}
+			mustGit(t, ledger, "add", "sessions/victim/staged.txt")
+			staged := mustGit(t, ledger, "diff", "--cached", "--binary")
+			unstaged := mustGit(t, ledger, "diff", "--binary")
+
+			s.retractOrphanedDrafts(context.Background(), ledger)
+
+			assert.NoDirExists(t, filepath.Join(ledger, "sessions", "ordinary"))
+			assert.Equal(t, "sessions/ordinary/meta.json", mustGit(t, ledger, "diff", "--name-only", "HEAD^", "HEAD"))
+			assert.Equal(t, staged, mustGit(t, ledger, "diff", "--cached", "--binary"))
+			assert.Equal(t, unstaged, mustGit(t, ledger, "diff", "--binary"))
+			data, err := os.ReadFile(filepath.Join(sibling, "untracked.txt"))
+			require.NoError(t, err)
+			assert.Equal(t, "local work\n", string(data))
+			assert.FileExists(t, filepath.Join(ledger, "sessions", name, "meta.json"))
+		})
+	}
+}
+
 // TestRetractOrphanedDrafts_SkipsUnpushedDraft — a stale draft whose publish
 // commit is still LOCAL must never be retracted. Stacking a retraction on an
 // unpushed publish would make pushSessionDraftCommits ship both, manufacturing a
@@ -217,4 +252,71 @@ func TestRetractOrphanedDrafts_KeepsDraftWithLocalRecording(t *testing.T) {
 
 	assert.DirExists(t, filepath.Join(ledger, "sessions", name),
 		"a stale draft with a recoverable local recording must not be retracted")
+}
+
+// cancelAfterRunner cancels the retraction's context once the named git
+// subcommand succeeds, as a daemon shutdown or sync timeout would.
+type cancelAfterRunner struct {
+	gitutil.GitRunner
+	cancel context.CancelFunc
+	after  string
+}
+
+func (r *cancelAfterRunner) RunGit(ctx context.Context, repoPath string, args ...string) (string, error) {
+	out, err := r.GitRunner.RunGit(ctx, repoPath, args...)
+	if err == nil && args[0] == r.after {
+		r.cancel()
+	}
+	return out, err
+}
+
+// A retraction interrupted after git rm must leave the placeholder restored and
+// retryable. The restore used to run on the canceled context, fail too, and
+// leave the deletion staged for the next autostash to conflict on (#1648).
+func TestRetractOrphanedDrafts_CancellationRestoresAndRetries(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real Git repositories and a retry")
+	}
+	s, ledger := newRetractScheduler(t)
+	const name = "2026-01-01T00-00-testuser-OxRetry"
+	commitStaleDraft(t, ledger, name, 120*time.Hour)
+	metaPath := filepath.Join(ledger, "sessions", name, "meta.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.git = &cancelAfterRunner{GitRunner: gitutil.DefaultRunner(), cancel: cancel, after: "rm"}
+
+	s.retractOrphanedDrafts(ctx, ledger)
+
+	require.ErrorIs(t, ctx.Err(), context.Canceled, "the context must be canceled after git rm")
+	assert.FileExists(t, metaPath)
+	assert.Empty(t, mustGit(t, ledger, "status", "--porcelain"), "no staged deletion left behind")
+
+	s.git = gitutil.DefaultRunner()
+	s.retractOrphanedDrafts(context.Background(), ledger)
+	assert.NoFileExists(t, metaPath)
+	assert.Equal(t, "session-draft: retract "+name, mustGit(t, ledger, "log", "-1", "--format=%s"))
+}
+
+// The retry restore must address exactly one draft directory: a wildcard in
+// its name must not also match a sibling and unstage that sibling's work.
+func TestRestoreDraftForRetry_TouchesOnlyTheLiteralDraft(t *testing.T) {
+	s, ledger := newRetractScheduler(t)
+	const name = "*"
+	commitStaleDraft(t, ledger, name, 120*time.Hour)
+	sibling := filepath.Join(ledger, "sessions", "victim")
+	require.NoError(t, os.MkdirAll(sibling, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sibling, "work.txt"), []byte("original\n"), 0o644))
+	mustGit(t, ledger, "add", "sessions/victim")
+	mustGit(t, ledger, "commit", "-m", "seed sibling")
+	require.NoError(t, os.WriteFile(filepath.Join(sibling, "work.txt"), []byte("local work\n"), 0o644))
+	mustGit(t, ledger, "add", "sessions/victim/work.txt")
+	mustGit(t, ledger, "rm", "-r", "-q", "--", ":(literal)sessions/"+name)
+
+	s.restoreDraftForRetry(context.Background(), ledger, "sessions/"+name, name, nil)
+
+	assert.FileExists(t, filepath.Join(ledger, "sessions", name, "meta.json"))
+	assert.Equal(t, "sessions/victim/work.txt", mustGit(t, ledger, "diff", "--cached", "--name-only"))
+	data, err := os.ReadFile(filepath.Join(sibling, "work.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "local work\n", string(data))
 }

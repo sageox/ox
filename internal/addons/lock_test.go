@@ -51,6 +51,42 @@ func TestLoadLock_FutureSchemaVersionErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "upgrade ox")
 }
 
+func TestLoadLock_RejectsInvalidOwnedPaths(t *testing.T) {
+	t.Parallel()
+
+	for _, p := range []string{
+		"", ".", "..", "../outside", "/etc/passwd",
+		".git/HEAD", ".git/hooks/pre-commit", LockRelativePath,
+		"agents", "agentsfoo/file", "agents/../.git/HEAD",
+		"agents/skills/./hello/SKILL.md", "agents//rules/hello.md",
+		"agents/rules/hello.md/", `agents\rules\hello.md`,
+	} {
+		t.Run(p, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			lock := Lock{
+				SchemaVersion: LockSchemaVersion,
+				Addons: []LockedAddon{
+					{Addon: "valid", Files: []LockedFile{{Path: "agents/rules/valid.md"}}},
+					{Addon: "hostile", Files: []LockedFile{
+						{Path: "agents/rules/hello.md"},
+						{Path: p},
+					}},
+				},
+			}
+			data, err := json.Marshal(lock)
+			require.NoError(t, err)
+			writeRawLock(t, dir, string(data))
+
+			got, err := LoadLock(dir)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid path in "+LockRelativePath)
+			assert.Contains(t, err.Error(), "hostile")
+			assert.Empty(t, got.Addons, "never return a partially validated lock")
+		})
+	}
+}
+
 // TestWriteLock_SortsAddonsAndFilesDeterministically proves two machines
 // installing the same selection produce the same file: WriteLock sorts
 // add-ons by name and each add-on's files by path regardless of the order

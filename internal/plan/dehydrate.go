@@ -11,6 +11,7 @@ import (
 
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/secretguard"
 )
 
 // A large plan.html is stored as an LFS pointer, and only once its bytes are in
@@ -38,6 +39,11 @@ import (
 func UploadHTML(client *lfs.Client, page []byte) (ref lfs.UploadedRef, ok bool, err error) {
 	if int64(len(page)) <= htmlLFSThreshold || client == nil {
 		return lfs.UploadedRef{}, false, nil
+	}
+	// The CLI uploads before Save takes the Ledger lock. Do not let a rendered
+	// copy of refused plan text reach the remote before Save can inspect it.
+	if err := secretguard.ValidateContent(planHTMLFile, page); err != nil {
+		return lfs.UploadedRef{}, false, fmt.Errorf("upload plan.html refused: %w", err)
 	}
 	if ref, err = lfs.UploadBlob(client, page); err != nil {
 		return lfs.UploadedRef{}, false, fmt.Errorf("upload plan.html blob: %w", err)

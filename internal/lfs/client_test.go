@@ -469,6 +469,10 @@ func TestReadLFS_SignedStorageIsCredentialFreeAndVerified(t *testing.T) {
 	err = DownloadToFileContext(context.Background(), action, &out, false, "")
 	require.ErrorContains(t, err, "OID mismatch", "verification cannot be disabled for read actions")
 	assert.Equal(t, int32(3), hits.Load())
+	storage.Close()
+	_, err = DownloadObject(action)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "storage-signature", "transport errors drop the signed URL")
 }
 
 // Failure prevented: a malicious action broadens same-origin TAT authority or leaks it in URLs.

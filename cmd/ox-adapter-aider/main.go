@@ -6,7 +6,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
@@ -91,7 +90,7 @@ func handleFindSession(p adapterprotocol.FindSessionParams) (*adapterprotocol.Fi
 		return nil, fmt.Errorf("session not found: %w", err)
 	}
 	var offset int64
-	if info, err := os.Stat(sessionFile); err == nil {
+	if info, err := statAiderFile(sessionFile); err == nil {
 		offset = info.Size()
 	}
 	return &adapterprotocol.FindSessionResult{SessionFile: sessionFile, Offset: offset}, nil

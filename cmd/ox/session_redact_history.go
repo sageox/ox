@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,10 +16,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
@@ -279,6 +282,10 @@ type redactHistoryOptions struct {
 	// Use Scope{AllowAll: true} to opt back into the full-ledger sweep.
 	Scope *sessionScope
 
+	// LFSClient uploads redacted content behind LFS pointers. Nil uses the
+	// Ledger's own credentials.
+	LFSClient func() (*lfs.Client, error)
+
 	Stdin  io.Reader
 	Stdout io.Writer
 }
@@ -438,6 +445,12 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	// trail is correlatable; appliedAt is captured once so the records
 	// share a wall-clock instant.
 	answers := newAnswerReader(opts.Stdin)
+	lfsClient := opts.LFSClient
+	if lfsClient == nil {
+		lfsClient = sync.OnceValues(func() (*lfs.Client, error) {
+			return lfs.NewClientFromLedger(opts.LedgerPath, endpoint.GetForProject(opts.ProjectRoot))
+		})
+	}
 	redactedBySession := map[string][]lfs.RedactionEntry{}
 	// quarantineSessionsTouched tracks sessions whose quarantined files
 	// were redacted + moved back; used after the loop to clean up debt
@@ -491,11 +504,14 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 				if fileFindings[0].SessionName != "" {
 					quarantineSessionsTouched[fileFindings[0].SessionName] = true
 				}
-			} else {
-				abs := filepath.Join(opts.LedgerPath, path)
-				if err := redactFileInPlace(abs, redactor); err != nil {
-					return fmt.Errorf("redact %s: %w", path, err)
+			} else if abs := filepath.Join(opts.LedgerPath, path); lfs.IsPointerFile(abs) {
+				// The finding came from the cached content behind this pointer.
+				if err := redactLFSContent(context.Background(), opts.LedgerPath, path, lfsClient); err != nil {
+					fmt.Fprintf(opts.Stdout, "  Skipped (cannot publish redacted content): %v\n\n", err)
+					continue
 				}
+			} else if err := redactFileInPlace(abs, redactor); err != nil {
+				return fmt.Errorf("redact %s: %w", path, err)
 			}
 			repairedPaths = append(repairedPaths, path)
 			// Record per-finding entries against the session that owns
@@ -913,6 +929,15 @@ func snapshotLedger(ledgerPath, backupDir string) (string, string, error) {
 // Line-by-line because session raw.jsonl entries can be large; whole-
 // file decoding would blow memory on real captures.
 func redactFileInPlace(abs string, _ *session.Redactor) error {
+	tmpName := abs + ".redact.tmp"
+	if err := redactFileTo(abs, tmpName); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, abs)
+}
+
+// redactFileTo writes the redacted form of abs to tmpName with abs's mode.
+func redactFileTo(abs, tmpName string) error {
 	src, err := os.Open(abs)
 	if err != nil {
 		return err
@@ -923,7 +948,6 @@ func redactFileInPlace(abs string, _ *session.Redactor) error {
 		return err
 	}
 
-	tmpName := abs + ".redact.tmp"
 	rw, err := session.NewRawWriterTruncate(tmpName, "")
 	if err != nil {
 		return err
@@ -966,7 +990,93 @@ func redactFileInPlace(abs string, _ *session.Redactor) error {
 	if err := os.Chmod(tmpName, info.Mode()); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, abs)
+	return nil
+}
+
+// redactLFSContent redacts the cached content behind the LFS pointer at rel
+// and uploads it. Only after the upload succeeds are meta.json, the pointer
+// and the cache switched to the redacted blob; if any of those steps fails,
+// meta.json and the pointer are restored so nothing is left half-switched.
+func redactLFSContent(ctx context.Context, ledgerPath, rel string, newClient func() (*lfs.Client, error)) error {
+	sessionName, name, ok := splitSessionPath(rel)
+	if !ok {
+		return fmt.Errorf("not a session artifact: %s", rel)
+	}
+	if filepath.Ext(name) != ".jsonl" {
+		return fmt.Errorf("%s is not JSONL; redact it manually", name)
+	}
+	pointerPath := filepath.Join(ledgerPath, filepath.FromSlash(rel))
+	oldPointer, err := os.ReadFile(pointerPath)
+	if err != nil {
+		return err
+	}
+	oldOID, _, err := lfs.ParsePointer(string(oldPointer))
+	if err != nil {
+		return err
+	}
+	cachePath := filepath.Join(ledgerPath, ".sageox", "cache", filepath.FromSlash(rel))
+	cached, err := os.ReadFile(cachePath)
+	if err != nil {
+		return err
+	}
+	if "sha256:"+lfs.ComputeOID(cached) != oldOID {
+		return fmt.Errorf("cached content does not match the pointer for %s; rehydrate it first", rel)
+	}
+
+	tmpName := cachePath + ".redact.tmp"
+	defer os.Remove(tmpName)
+	if err := redactFileTo(cachePath, tmpName); err != nil {
+		return err
+	}
+	content, err := os.ReadFile(tmpName)
+	if err != nil {
+		return err
+	}
+	client, err := newClient()
+	if err != nil {
+		return fmt.Errorf("LFS client: %w", err)
+	}
+	uploaded, err := lfs.UploadBlob(client, content)
+	if err != nil {
+		return err
+	}
+
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	// swapRef sets (or, for nil, removes) the meta.json entry and returns
+	// the previous one so a failure can put it back exactly.
+	swapRef := func(ref *lfs.FileRef) (prev *lfs.FileRef, err error) {
+		err = lfs.MutateSessionMeta(ctx, sessionDir, func(m *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+			if m == nil {
+				return nil, errors.New("meta.json missing")
+			}
+			if m.Files == nil {
+				m.Files = map[string]lfs.FileRef{}
+			}
+			if old, ok := m.Files[name]; ok {
+				prev = &old
+			}
+			if ref == nil {
+				delete(m.Files, name)
+			} else {
+				m.Files[name] = *ref
+			}
+			return m, nil
+		})
+		return prev, err
+	}
+	newRef := uploaded.Ref()
+	prev, err := swapRef(&newRef)
+	if err != nil {
+		return fmt.Errorf("record OID in meta.json: %w", err)
+	}
+	if err = lfs.WritePointerFile(pointerPath, uploaded); err == nil {
+		err = os.Rename(tmpName, cachePath)
+	}
+	if err != nil {
+		_, restoreMeta := swapRef(prev)
+		return errors.Join(err, os.WriteFile(pointerPath, oldPointer, 0o600), restoreMeta)
+	}
+	return nil
 }
 
 // stageAndAmendRedactedFiles stages and amends only repaired files and metadata.

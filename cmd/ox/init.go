@@ -769,6 +769,15 @@ func runInit() error {
 		}
 	}
 
+	// A pre-existing .devin/config.json holds the user's own Devin settings:
+	// when init will write it, snapshot it so rollback restores it instead of
+	// deleting it.
+	devinConfig := devinConfigPath(gitRoot)
+	devinConfigExisted := selectedAgents["devin"] && !HasDevinPlugin(gitRoot) && fileExists(devinConfig)
+	if devinConfigExisted {
+		tracker.trackModifiedFile(devinConfig)
+	}
+
 	// detect and install agent hooks
 	// installAgentHooks returns absolute, existence-verified paths inside
 	// gitRoot — do NOT re-join against gitRoot here. Doing so was half of
@@ -816,9 +825,17 @@ func runInit() error {
 	// Every installed path is tracked for ROLLBACK, but only the non-reserved ones
 	// are staged — see stageableInstalledPaths for why.
 	for _, hookFile := range installedHooks {
+		if devinConfigExisted && hookFile == devinConfig {
+			continue
+		}
 		tracker.trackCreatedFile(hookFile)
 	}
 	for _, hookFile := range stageableInstalledPaths(gitRoot, installedHooks) {
+		// A pre-existing .devin/config.json the user keeps out of git may hold
+		// local secrets (e.g. mcpServers env): never force-add it.
+		if devinConfigExisted && hookFile == devinConfig && gitPathIsIgnoredRespectingIndex(gitRoot, devinConfig) {
+			continue
+		}
 		tracker.trackForceStage(hookFile)
 	}
 
@@ -2143,6 +2160,9 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 		if info, err := os.Stat(filepath.Join(gitRoot, ".opencode")); err == nil && info.IsDir() {
 			selected["opencode"] = true
 		}
+		if devinDetected(gitRoot) {
+			selected["devin"] = true
+		}
 		return selected, nil
 	}
 
@@ -2181,6 +2201,14 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 			Selected: true,
 		})
 	}
+
+	// Devin runs in the cloud, so there is nothing to detect locally; offer it
+	// always and preselect it when the repo or machine already uses Devin.
+	options = append(options, cli.MultiSelectOption{
+		Label:    "Devin",
+		Value:    "devin",
+		Selected: devinDetected(gitRoot),
+	})
 
 	if !initQuiet {
 		fmt.Println()
@@ -2356,6 +2384,21 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 					cli.PrintPreserved("AI coworker assets already up to date")
 				}
 			}
+		}
+	}
+
+	if selectedAgents["devin"] {
+		if HasDevinPlugin(gitRoot) {
+			if !quiet {
+				cli.PrintPreserved("Devin integration")
+			}
+		} else if err := InstallDevinPlugin(gitRoot); err != nil {
+			cli.PrintWarning(fmt.Sprintf("Could not install Devin integration: %v", err))
+		} else {
+			if !quiet {
+				cli.PrintSuccess("Installed Devin integration")
+			}
+			installedHooks = append(installedHooks, filepath.Join(".devin", "config.json"))
 		}
 	}
 
