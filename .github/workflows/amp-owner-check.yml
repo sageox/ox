@@ -33,6 +33,20 @@ name: amp-owner-check
 # CODEOWNERS, reviews) still uses the ambient GITHUB_TOKEN, since those
 # are reads with nothing to forge.
 #
+# The App's own credentials (AMP_OWNER_CHECK_APP_ID,
+# AMP_OWNER_CHECK_APP_PRIVATE_KEY) live in the amp-owner-check environment,
+# not as plain repository secrets -- a repository secret is readable by any
+# workflow a same-repo PR author can run (e.g. a step added to ci.yml,
+# which triggers on pull_request with full secret access, unlike a fork
+# PR), so a collaborator could otherwise mint the App's own token and post
+# a genuinely-signed "success" directly, defeating the identity check
+# entirely regardless of which app a required check is pinned to (Devin,
+# veria-ai, CodeRabbit -- all three independently). The amp-owner-check
+# environment's deployment branches are restricted to main, which this
+# job satisfies (pull_request_target's ref is always the base branch) but
+# ci.yml's pull_request-triggered job does not (its ref is the PR branch)
+# -- so only this job can reach the environment's secrets.
+#
 # Known gaps, NEITHER fixable by editing this file -- both need a human
 # decision before this check is added to required_status_checks:
 # - A push carrying [skip ci] in its commit message skips this entirely --
@@ -59,6 +73,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    environment: amp-owner-check
     defaults:
       run:
         shell: bash
