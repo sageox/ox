@@ -413,6 +413,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// check if project is initialized (.sageox/ exists)
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
 	if _, err := os.Stat(sageoxDir); os.IsNotExist(err) {
+		// a clone of an open-source project that is public on SageOx primes
+		// read-only from its public thinking, member or not
+		if handled, err := emitPublicPrime(cmd, projectRoot, textMode || reviewMode); handled {
+			return err
+		}
 		// project not initialized - tell the agent to ask user to run ox init
 		output := agentPrimeOutput{
 			Status:  "unavailable",
@@ -424,7 +429,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// anti-entropy: ensure ox:prime marker exists in AGENTS.md/CLAUDE.md
 	// only run on properly initialized projects (config.json exists, not just .sageox/ dir)
 	if config.IsInitialized(projectRoot) {
-		_, _ = EnsureOxPrimeMarker(projectRoot)
+		if _, err := EnsureOxPrimeMarker(projectRoot); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to repair ox:prime markers: %v\n", err)
+		}
 	}
 
 	// anti-entropy: ensure Claude Code hooks are installed

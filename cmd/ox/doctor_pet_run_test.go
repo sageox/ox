@@ -20,9 +20,12 @@ import (
 // `ox doctor` run ever reaches it.
 func TestDoctorRun_RefreshesStaleOxy(t *testing.T) {
 	if testing.Short() {
-		t.Skip("short: full doctor run plus rendering every Oxy frame")
+		t.Skip("short: full doctor run")
 	}
 	sandboxDoctorEnv(t)
+	// Which frames get written is the pet package's concern; this test is
+	// about doctor reaching the refresh at all.
+	useTinyPetSheets(t)
 	project := testGitRepo(t)
 	t.Chdir(project)
 	writePetMod("0.0.1")(t, pet.Dir())

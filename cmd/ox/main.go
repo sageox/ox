@@ -15,7 +15,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/joho/godotenv"
 	"github.com/mattn/go-isatty"
 	"github.com/sageox/agentx"
 	friction "github.com/sageox/frictionax"
@@ -130,15 +129,9 @@ func main() {
 	startedByOx = os.Getenv(envStartedByOx) != ""
 	_ = os.Setenv(envStartedByOx, "1") // Setenv fails only on an invalid name
 
-	// load .env files if present (silently ignore if not found)
-	// order: .env.local (highest priority), .env (base config)
-	// supports FEATURE_CLOUD, FEATURE_AUTH, SAGEOX_API, etc.
-	// A hosted read must not inherit endpoint or credential selection from
-	// whichever source checkout happens to be the working directory.
-	if !headlessLedgerReadRequested(os.Args[1:]) && !localMCPRequested(os.Args[1:]) {
-		_ = godotenv.Load(".env.local")
-		_ = godotenv.Load(".env")
-	}
+	// Do not load dotenv files from the working directory. A checkout must not
+	// choose where inherited credentials are sent or replace the user's telemetry
+	// preferences. Environment overrides must come from the invoking process.
 
 	// The Claude Code status line runs on every refresh and must stay local
 	// and fast, so it skips cobra's pre-run (daemon ping, feature flags).
@@ -166,6 +159,10 @@ func main() {
 	// Before the trace flush below, which can take seconds and must not count
 	// toward the command's reported duration.
 	capturePostHogCommand(exitCode, os.Stderr)
+
+	// Right after the command's own output, before the trace flush below, so
+	// the one-line ask is not delayed by it.
+	showStarHint(exitCode, os.Stderr)
 
 	// Record cli.exit_code on the root OTel span and flush. This runs on
 	// both success and error paths so failed commands appear in traces

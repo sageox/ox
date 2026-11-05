@@ -50,6 +50,58 @@ func approveViaStore(t *testing.T, repo, name string, allowScripts bool) {
 	require.NoError(t, store.Save(repo))
 }
 
+// TestApproval_ClaudeFrontmatterAutomaticProjection checks the automatic apply
+// path used after team sync, not host execution. Claude Code versions and managed
+// policies determine whether installed grants/hooks run; ox gates them regardless.
+func TestApproval_ClaudeFrontmatterAutomaticProjection(t *testing.T) {
+	for name, front := range map[string]string{
+		"bare tools":   "allowed-tools: Bash(*)\n",
+		"quoted tools": "\"allowed-tools\": \"Bash(*)\"\n",
+		"single quote": "'allowed-tools': [Bash]\n",
+		"hooks only":   "hooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: echo hook\n",
+		"malformed":    "description: [\n",
+		"unsupported":  "description: !custom notes\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo, team := t.TempDir(), t.TempDir()
+			writeTeamSkill(t, team, "frontmatter", front, nil)
+			stageTeamWiredProject(t, repo, team)
+			target := adapterprotocol.SkillTarget{
+				Key: "claude-project", Root: ".claude/skills",
+				Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject,
+				LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+			}
+			manifest := filepath.Join(repo, ".claude", "skills", "frontmatter"+TeamSuffix, "SKILL.md")
+			// Persist the target selection, as ox init does before automatic sync.
+			_, err := Reconcile(repo, "1.0.0", desiredFor(target), []adapterprotocol.SkillTarget{target})
+			require.NoError(t, err)
+			require.NoFileExists(t, manifest)
+			automatic := func() *ReconcilePlan {
+				t.Helper()
+				plan, err := ReconcileUpdateNonBlocking(repo, "1.0.0", func(desired DesiredSkills, targets []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
+					return desired, targets, nil
+				})
+				require.NoError(t, err)
+				return plan
+			}
+			plan := automatic()
+			require.Len(t, plan.WithheldTeamSkills(), 1)
+			require.Contains(t, plan.WithheldTeamSkills()[0].Reason, "manifest itself")
+			require.NoFileExists(t, manifest, "automatic projection wrote an unapproved manifest")
+
+			approveViaStore(t, repo, "frontmatter", false)
+			require.Empty(t, automatic().WithheldTeamSkills())
+			installed, err := os.ReadFile(manifest)
+			require.NoError(t, err)
+			require.Contains(t, string(installed), front, "approval should preserve the frontmatter, not strip its capability")
+
+			writeTeamSkill(t, team, "frontmatter", front+"changed: true\n", nil)
+			require.Len(t, automatic().WithheldTeamSkills(), 1, "changed bytes retained the previous approval")
+			require.NoFileExists(t, manifest, "automatic projection retained a manifest whose approval no longer matches")
+		})
+	}
+}
+
 // TestApproval_UnblocksAnExecutableTeamSkillEndToEnd is the proof that team
 // skills actually synchronize: authored in the team repo, installed as readable
 // prose with its script withheld, approved, and then fully present.

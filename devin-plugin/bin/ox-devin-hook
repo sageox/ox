@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+# Bridges Devin lifecycle hooks to an ox generic-adapter recording.
+# Usage: ox-devin-hook <SessionStart|UserPromptSubmit|PostToolUse|Stop>  (event JSON on stdin)
+# Fails open: Devin ignores hook failures, and so should we — never block the agent.
+set -u
+umask 077  # state holds prompts, tool output, and the token
+EVENT="${1:-}"
+STATE_ROOT="${OX_DEVIN_STATE:-$HOME/.ox-devin}"
+LOG="$STATE_ROOT/hook.log"
+mkdir -p "$STATE_ROOT"
+export PATH="$HOME/.local/bin:$PATH"
+# ox agent prime requires a detected coding agent; Devin sets none of the env
+# vars agentx looks for, so declare it (agentx's documented override).
+export AGENT_ENV="${AGENT_ENV:-devin}"
+PAYLOAD="$(cat)"
+# Hook stdout is parsed by Devin as a decision; keep ox chatter out of it.
+# fd 3 keeps the real stdout for the one deliberate reply (nudge_once).
+exec 3>&1 >>"$LOG" 2>&1
+log() { printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$EVENT" "$*" >> "$LOG"; }
+
+field() { printf '%s' "$PAYLOAD" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('$1') or '')" 2>/dev/null; }
+
+# session_id names a directory: keep it inside STATE_ROOT.
+SID="$(field session_id | tr -cd 'A-Za-z0-9_-')"; SID="${SID:-unknown}"
+SDIR="$STATE_ROOT/$SID"; mkdir -p "$SDIR"
+
+# Devin hook processes don't inherit secrets; a personal SAGEOX_TOKEN only
+# reaches us inside PostToolUse payloads (tool_input.injected_env of a tool
+# call). Cache it 0600, per Devin session, so later hooks in this session can
+# authenticate and no other session's user can ever inherit it.
+TOKEN_FILE="$SDIR/token"
+if [ -z "${SAGEOX_TOKEN:-}" ]; then
+  t=$(printf '%s' "$PAYLOAD" | python3 -c '
+import sys, json
+try:
+    e = (json.load(sys.stdin).get("tool_input") or {}).get("injected_env") or {}
+    print(e.get("SAGEOX_TOKEN", "") if isinstance(e, dict) else "")
+except Exception:
+    pass' 2>/dev/null)
+  if [ -n "$t" ]; then (umask 077; printf '%s' "$t" > "$TOKEN_FILE"); fi
+  [ -s "$TOKEN_FILE" ] && SAGEOX_TOKEN=$(cat "$TOKEN_FILE")
+fi
+export SAGEOX_TOKEN="${SAGEOX_TOKEN:-}"
+
+ensure_ox() {
+  command -v ox >/dev/null 2>&1 && return 0
+  # install.sh hits the GitHub API, which rate-limits shared Devin IPs (403);
+  # the releases/latest redirect is not rate-limited.
+  local tag tmp
+  tag=$(curl -fsSI https://github.com/sageox/ox/releases/latest | tr -d '\r' | awk -F/ 'tolower($0) ~ /^location:/ {print $NF}')
+  [ -n "$tag" ] || { log "ox install: no tag"; return 1; }
+  local base="https://github.com/sageox/ox/releases/download/$tag" asset="ox_${tag#v}_linux_amd64.tar.gz"
+  tmp=$(mktemp -d)
+  # Verify against the release's checksums.txt before running anything from it.
+  curl -fsSL -o "$tmp/$asset" "$base/$asset" && curl -fsSL -o "$tmp/checksums.txt" "$base/checksums.txt" &&
+    (cd "$tmp" && grep " $asset\$" checksums.txt | sha256sum -c --status) &&
+    tar xzf "$tmp/$asset" -C "$tmp" || { log "ox install failed (download or checksum)"; rm -rf "$tmp"; return 1; }
+  mkdir -p "$HOME/.local/bin" && cp "$tmp/ox" "$HOME/.local/bin/" || { log "ox install failed (copy)"; rm -rf "$tmp"; return 1; }
+  cp "$tmp"/ox-adapter-* "$HOME/.local/bin/" 2>/dev/null  # adapters are optional for the generic recorder
+  rm -rf "$tmp"; log "installed ox $tag"
+}
+
+# Record into the repo this Devin session works in: the one already chosen
+# this session, an explicit override, Devin's project dir, then the tool call's
+# workdir. Never guess from other checkouts on the VM: with an org-wide plugin
+# that could upload one team's session into another team's Ledger. A git repo
+# without .sageox/ is the real project and is not initialized, so stop there.
+find_repo() {
+  local d top wd
+  wd=$(printf '%s' "$PAYLOAD" | python3 -c 'import sys,json;i=json.load(sys.stdin).get("tool_input") or {};print(i.get("workdir") or i.get("cwd") or "" if isinstance(i,dict) else "")' 2>/dev/null)
+  for d in "$(cat "$SDIR/repo" 2>/dev/null)" "${OX_PROJECT_ROOT:-}" "${DEVIN_PROJECT_DIR:-}" "${CLAUDE_PROJECT_DIR:-}" "$wd"; do
+    [ -n "$d" ] || continue
+    top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || continue
+    [ -f "$top/.sageox/config.json" ] && { echo "$top"; return 0; }
+    return 1
+  done
+  return 1
+}
+
+# Honor recording opt-outs: only record where ox's effective policy is "auto"
+# (the default for ox-initialized repos). A user, repo, or OX_SESSION_RECORDING
+# set to manual or disabled means this session is not recorded.
+recording_allowed() {
+  # Checked on every event, never cached, so an opt-out applies mid-session.
+  local mode
+  mode=$( (cd "$1" && ox config get session_recording --json 2>/dev/null) |
+    python3 -c 'import sys,json;print(json.load(sys.stdin).get("value",""))' 2>/dev/null)
+  [ "$mode" = auto ] && return 0
+  log "skip: session_recording=${mode:-unknown}"
+  # 1 = explicit opt-out; 3 = lookup failed, which may be transient.
+  [ -n "$mode" ] && return 1 || return 3
+}
+
+# Hooks run concurrently: serialize start and stop so two hooks never create
+# competing recordings or stop one another mid-start. fd 9 holds the lock
+# until the hook process exits.
+lock_session() { exec 9>"$SDIR/init.lock" && flock -w 50 9; }
+
+# Returns 0 when recording, 1 when not ready yet (buffer the event), 2 when
+# this session must not be recorded (drop it).
+ensure_recording() {
+  ensure_ox || return 1
+  local repo id out sf
+  repo=$(find_repo) || { log "waiting: no initialized session repo yet"; return 1; }
+  recording_allowed "$repo" || return 2
+  if [ -f "$SDIR/session_file" ] && [ -f "$SDIR/agent_id" ]; then return 0; fi
+  lock_session || return 1
+  if [ -f "$SDIR/session_file" ] && [ -f "$SDIR/agent_id" ]; then return 0; fi
+  cd "$repo" || return 1
+  log "repo=$repo DEVIN_PROJECT_DIR=${DEVIN_PROJECT_DIR:-} PWD=$PWD"
+  # In auto mode prime would start its own recording with no generic drop file,
+  # and stop would upload nothing. Suppress that for this one call only (never
+  # persisted) and start the recording explicitly instead.
+  id=$(OX_SESSION_RECORDING=manual ox agent prime --agent devin 2>/dev/null | grep -oE 'agent_id="Ox[A-Za-z0-9]+"' | head -1 | cut -d'"' -f2)
+  [ -n "$id" ] || { log "prime failed"; return 1; }
+  out=$(ox agent "$id" session start --title "Devin session $SID" 2>&1)
+  # ox may print notices or team whispers around the JSON, and those can
+  # contain braces, so decode at each "{" until the session_start object.
+  sf=$(printf '%s' "$out" | python3 -c '
+import sys, json
+t = sys.stdin.read(); dec = json.JSONDecoder(); i = t.find("{")
+while i >= 0:
+    try:
+        o, _ = dec.raw_decode(t, i)
+        if isinstance(o, dict) and o.get("session_file"):
+            print(o["session_file"]); break
+    except ValueError:
+        pass
+    i = t.find("{", i + 1)' 2>/dev/null)
+  [ -n "$sf" ] || { log "session start failed"; return 1; }
+  echo "$repo" > "$SDIR/repo"; echo "$id" > "$SDIR/agent_id"; echo "$sf" > "$SDIR/session_file"
+  ox status --json 2>/dev/null | python3 -c 'import sys,json;print((json.load(sys.stdin).get("ledger") or {}).get("path") or "")' > "$SDIR/ledger" 2>/dev/null
+  log "recording agent=$id repo=$repo"
+}
+
+# A teammate without a personal token is never recorded, so tell them how to
+# opt in: once per session, only in repos that use SageOx, and only on exec
+# calls (the tool Devin injects secrets into, so a missing token is meaningful).
+nudge_once() {
+  [ "$EVENT" = PostToolUse ] && [ -z "$SAGEOX_TOKEN" ] || return 0
+  [ -f "$SDIR/nudged" ] && return 0
+  [ "$(field tool_name)" = exec ] || return 0
+  local repo; repo=$(find_repo) || return 0
+  # Don't invite users who opted out of recording to opt back in.
+  command -v ox >/dev/null && { recording_allowed "$repo" || return 0; }
+  touch "$SDIR/nudged"
+  log "nudged: no personal SAGEOX_TOKEN"
+  python3 -c '
+import json
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext":
+  "SageOx is not recording this Devin session: the user has no personal SAGEOX_TOKEN secret. "
+  "Mention this to the user once, in one short sentence at your next message, then never again: "
+  "to save their Devin sessions to their SageOx team, create a token at https://sageox.ai/settings/tokens "
+  "and add it at https://app.devin.ai/secrets as a Personal secret named SAGEOX_TOKEN "
+  "(Personal, not Organization, so sessions are attributed to them); new sessions then record automatically."}}))' >&3
+}
+
+# The first clone of a large ledger takes minutes on a fresh VM, and stopping
+# before it lands leaves the session stranded on a VM that may be deleted.
+# Wait briefly, then keep recording and retry at the next turn end instead.
+ledger_ready() {
+  local l i
+  l=$(cat "$SDIR/ledger" 2>/dev/null)
+  [ -n "$l" ] || return 0  # unknown path: let ox decide
+  for i in $(seq 1 15); do
+    git -C "$l" rev-parse --verify -q HEAD >/dev/null 2>&1 && return 0
+    sleep 3
+  done
+  return 1
+}
+
+# Prints one generic-adapter JSONL line for the current event.
+make_entry() {
+  printf '%s' "$PAYLOAD" | EVENT="$EVENT" python3 -c '
+import sys, json, datetime, os
+d = json.load(sys.stdin); ev = os.environ["EVENT"]
+# Sub-second precision: stop drops entries stamped before the recording started.
+ts = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+MAX = 20000  # keep huge tool outputs from bloating the recording
+def s(v): return v if isinstance(v, str) else json.dumps(v)
+SECRETS = []
+if ev == "UserPromptSubmit":
+    e = {"type": "user", "content": s(d.get("prompt", ""))}
+else:
+    name = d.get("tool_name", ""); inp = d.get("tool_input") or {}; resp = d.get("tool_response") or {}
+    # Devin puts the plaintext values of secrets bound to a tool call in
+    # tool_input.injected_env; they must never reach a recording.
+    if isinstance(inp, dict):
+        for k, v in inp.items():
+            if k == "injected_env" or k.startswith("__DEVIN"):
+                SECRETS.extend(x for x in (v.values() if isinstance(v, dict) else [v]) if isinstance(x, str) and len(x) >= 4)
+        inp = {k: v for k, v in inp.items() if k != "injected_env" and not k.startswith("__DEVIN")}
+    if name == "message_user" and isinstance(inp, dict):
+        e = {"type": "assistant", "content": s(inp.get("message", ""))}
+    else:
+        out = resp.get("output") if isinstance(resp, dict) else resp
+        if isinstance(resp, dict) and resp.get("error"): out = s(out or "") + "\n[error] " + s(resp["error"])
+        e = {"type": "tool", "tool_name": name, "tool_input": s(inp)[:MAX], "content": s(out or "")[:MAX]}
+# A command can echo a bound secret (e.g. a password the ox scanner would not
+# recognize), so scrub every injected value from the entry too.
+for k, v in e.items():
+    for x in SECRETS:
+        v = v.replace(x, "[REDACTED]").replace(json.dumps(x)[1:-1], "[REDACTED]")
+    e[k] = v
+e["timestamp"] = ts
+print(json.dumps(e))'
+}
+
+# Hooks can fire concurrently; serialize appends so JSONL lines never interleave.
+append_line() { flock "$1.lock" tee -a "$1" >/dev/null; }
+
+record_event() {
+  if [ -z "$SAGEOX_TOKEN" ]; then
+    # Personal-secret gate: never upload under anyone else's identity. Buffer
+    # until a tool call delivers the user's own token (or forever, if none).
+    make_entry | append_line "$SDIR/pending.jsonl"; log "buffered: no SAGEOX_TOKEN yet"; return 0
+  fi
+  local rc; ensure_recording; rc=$?
+  [ "$rc" -eq 2 ] && return 0
+  # Not recording yet (no initialized repo seen, ox not ready): keep the event.
+  [ "$rc" -eq 0 ] || { make_entry | append_line "$SDIR/pending.jsonl"; return 0; }
+  local sf; sf=$(cat "$SDIR/session_file")
+  if [ -s "$SDIR/pending.jsonl" ]; then
+    # Buffered entries predate the recording, and stop drops anything stamped
+    # before it started: restamp them to now, in order, keeping the original time.
+    flock "$SDIR/pending.jsonl.lock" sh -c 'cat "$1" && : > "$1"' _ "$SDIR/pending.jsonl" | python3 -c '
+import sys, json, datetime
+now = datetime.datetime.now(datetime.timezone.utc)
+for i, line in enumerate(l for l in sys.stdin if l.strip()):
+    e = json.loads(line)
+    e["original_timestamp"] = e.get("timestamp")
+    e["timestamp"] = (now + datetime.timedelta(microseconds=i)).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    print(json.dumps(e))' | append_line "$sf"
+  fi
+  make_entry | append_line "$sf"
+}
+
+stop_recording() {
+  [ -f "$SDIR/agent_id" ] || return 0
+  [ -n "$SAGEOX_TOKEN" ] || return 0
+  lock_session || return 0
+  [ -f "$SDIR/agent_id" ] || return 0
+  local id repo; id=$(cat "$SDIR/agent_id"); repo=$(cat "$SDIR/repo")
+  cd "$repo" || return 1
+  # Opted out mid-turn: discard this session's own local recording, don't upload it.
+  local policy; recording_allowed "$repo"; policy=$?
+  [ "$policy" -eq 3 ] && { log "deferred: recording policy unknown"; return 0; }
+  if [ "$policy" -ne 0 ]; then
+    ox agent "$id" session abort --force >/dev/null 2>&1
+    log "aborted agent=$id: recording opt-out"
+    rm -f "$SDIR/agent_id" "$SDIR/session_file" "$SDIR/stop_failed"
+    return 0
+  fi
+  ledger_ready || { log "deferred: ledger still cloning, upload at next turn end"; return 0; }
+  # Cloud Devin never fires SessionEnd and may delete a sleeping VM, so every
+  # turn end uploads; the next prompt starts a fresh recording.
+  out=$(timeout 70 ox agent "$id" session stop 2>&1); rc=$?
+  log "stop agent=$id rc=$rc url=$(printf '%s' "$out" | grep -oE 'https://[^"]*/c/ses_[A-Za-z0-9-]+' | head -1) $(printf '%s' "$out" | grep -oE '"(upload_warning|entry_count)": [^,]*' | tr '\n' ' ')"
+  # A failed stop keeps the recording so the next turn end retries; after a
+  # second failure, start fresh rather than append to a broken recording.
+  if [ "$rc" -ne 0 ] && [ ! -f "$SDIR/stop_failed" ]; then touch "$SDIR/stop_failed"; return 0; fi
+  rm -f "$SDIR/agent_id" "$SDIR/session_file" "$SDIR/stop_failed"
+}
+
+case "$EVENT" in
+  SessionStart) ensure_ox ;;
+  UserPromptSubmit|PostToolUse) record_event; nudge_once ;;
+  Stop) stop_recording ;;
+esac
+exit 0

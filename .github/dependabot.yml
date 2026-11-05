@@ -15,6 +15,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Version updates wait 7 days so a compromised release is caught before it reaches a
+    # PR. Security updates skip the wait.
+    cooldown:
+      default-days: 7
     groups:
       github-actions:
         patterns:

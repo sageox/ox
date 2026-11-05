@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/sageox/ox/internal/lfs"
 )
@@ -27,15 +28,24 @@ import (
 // git-removing a live session's placeholder, and that asymmetry says wait.
 const OrphanedDraftAge = 72 * time.Hour
 
-// ValidateDraftSessionName rejects empty and traversal-shaped names before any
-// path built from a session name is handed to `git rm` / os.RemoveAll. An
-// unvalidated name widens a pathspec to the whole sessions tree.
+// ValidateDraftSessionName requires a single path component free of control
+// characters and of the characters sanitizeFilename strips from generated
+// names (including the Git wildcards '*', '?', '[' and ']' and pathspec magic
+// ':').
+// Every name GenerateSessionName produces passes, including usernames with
+// spaces or non-ASCII letters. Ledger entries are untrusted, so Git callers
+// must still use literal pathspecs rather than rely on this check.
 func ValidateDraftSessionName(sessionName string) error {
 	if sessionName == "" || sessionName == "." || sessionName == ".." {
 		return fmt.Errorf("invalid session name %q", sessionName)
 	}
-	if strings.ContainsAny(sessionName, `/\`) || strings.Contains(sessionName, "..") {
+	if strings.ContainsAny(sessionName, `/\`) {
 		return fmt.Errorf("session name %q must be a single path component", sessionName)
+	}
+	for _, c := range sessionName {
+		if unicode.IsControl(c) || strings.ContainsRune(`:*?[]"<>|`, c) {
+			return fmt.Errorf("session name %q contains disallowed character %q", sessionName, c)
+		}
 	}
 	return nil
 }
@@ -75,6 +85,9 @@ func FindOrphanedDrafts(ledgerPath string, cacheDirs []string) ([]string, error)
 			continue
 		}
 		name := entry.Name()
+		if err := ValidateDraftSessionName(name); err != nil {
+			continue
+		}
 		meta, metaErr := lfs.ReadSessionMeta(filepath.Join(sessionsDir, name))
 		// Fail safe: an unreadable meta.json is not a draft we are willing to
 		// delete. Some other check owns diagnosing it.

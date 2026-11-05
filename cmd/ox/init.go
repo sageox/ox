@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
@@ -769,6 +770,15 @@ func runInit() error {
 		}
 	}
 
+	// A pre-existing .devin/config.json holds the user's own Devin settings:
+	// when init will write it, snapshot it so rollback restores it instead of
+	// deleting it.
+	devinConfig := devinConfigPath(gitRoot)
+	devinConfigExisted := selectedAgents["devin"] && !HasDevinPlugin(gitRoot) && fileExists(devinConfig)
+	if devinConfigExisted {
+		tracker.trackModifiedFile(devinConfig)
+	}
+
 	// detect and install agent hooks
 	// installAgentHooks returns absolute, existence-verified paths inside
 	// gitRoot — do NOT re-join against gitRoot here. Doing so was half of
@@ -816,9 +826,17 @@ func runInit() error {
 	// Every installed path is tracked for ROLLBACK, but only the non-reserved ones
 	// are staged — see stageableInstalledPaths for why.
 	for _, hookFile := range installedHooks {
+		if devinConfigExisted && hookFile == devinConfig {
+			continue
+		}
 		tracker.trackCreatedFile(hookFile)
 	}
 	for _, hookFile := range stageableInstalledPaths(gitRoot, installedHooks) {
+		// A pre-existing .devin/config.json the user keeps out of git may hold
+		// local secrets (e.g. mcpServers env): never force-add it.
+		if devinConfigExisted && hookFile == devinConfig && gitPathIsIgnoredRespectingIndex(gitRoot, devinConfig) {
+			continue
+		}
 		tracker.trackForceStage(hookFile)
 	}
 
@@ -1466,14 +1484,24 @@ By giving AI coworkers your team patterns **before** they write code, SageOx pre
 // Claude Code bug #10373 silently discards SessionStart hook output for new sessions.
 // The markers in AGENTS.md/CLAUDE.md tell agents to self-check and run ox agent prime.
 func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
-	agentsPath := filepath.Join(gitRoot, "AGENTS.md")
-	claudePath := filepath.Join(gitRoot, "CLAUDE.md")
+	root, err := os.OpenRoot(gitRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	agentsPath, claudePath := "AGENTS.md", "CLAUDE.md"
 
 	// check what exists (Lstat to detect symlinks)
-	_, agentsErr := os.Stat(agentsPath)
+	_, agentsErr := root.Stat(agentsPath)
+	if agentsErr != nil && !errors.Is(agentsErr, fs.ErrNotExist) {
+		return nil, agentsErr
+	}
 	agentsExists := agentsErr == nil
 
-	claudeInfo, claudeErr := os.Lstat(claudePath)
+	claudeInfo, claudeErr := root.Lstat(claudePath)
+	if claudeErr != nil && !errors.Is(claudeErr, fs.ErrNotExist) {
+		return nil, claudeErr
+	}
 	claudeExists := claudeErr == nil
 	claudeIsSymlink := claudeExists && claudeInfo.Mode()&os.ModeSymlink != 0
 	claudeIsRegularFile := claudeExists && !claudeIsSymlink
@@ -1484,13 +1512,13 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 	switch {
 	case agentsExists && claudeIsRegularFile:
 		// both exist as regular files - ensure markers in both
-		res1, err := ensurePrimeMarkersInAgentFile(agentsPath, "AGENTS.md")
+		res1, err := ensurePrimeMarkersInAgentFile(root, agentsPath)
 		if err != nil {
 			return nil, err
 		}
 		results = append(results, res1)
 
-		res2, err := ensurePrimeMarkersInAgentFile(claudePath, "CLAUDE.md")
+		res2, err := ensurePrimeMarkersInAgentFile(root, claudePath)
 		if err != nil {
 			return nil, err
 		}
@@ -1498,7 +1526,7 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 
 	case agentsExists:
 		// AGENTS.md exists - ensure markers
-		res, err := ensurePrimeMarkersInAgentFile(agentsPath, "AGENTS.md")
+		res, err := ensurePrimeMarkersInAgentFile(root, agentsPath)
 		if err != nil {
 			return nil, err
 		}
@@ -1506,7 +1534,7 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 
 	case claudeIsRegularFile:
 		// only CLAUDE.md exists - ensure markers
-		res, err := ensurePrimeMarkersInAgentFile(claudePath, "CLAUDE.md")
+		res, err := ensurePrimeMarkersInAgentFile(root, claudePath)
 		if err != nil {
 			return nil, err
 		}
@@ -1515,7 +1543,7 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 	default:
 		// neither exists - create AGENTS.md with both markers
 		content := OxPrimeCheckBlock + "\n# AI Agent Instructions\n\n" + OxPrimeLine + "\n"
-		if err := fileutil.AtomicWriteBytes(agentsPath, []byte(content), 0644); err != nil {
+		if err := fileutil.AtomicWriteBytesInRoot(root, agentsPath, []byte(content), 0644); err != nil {
 			return nil, fmt.Errorf("failed to write AGENTS.md: %w", err)
 		}
 		agentsExists = true
@@ -1524,11 +1552,11 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 
 	// step 2: ensure BOTH files exist (create missing one as symlink)
 	if !claudeExists && agentsExists {
-		if err := os.Symlink("AGENTS.md", claudePath); err == nil {
+		if err := root.Symlink("AGENTS.md", claudePath); err == nil {
 			results = append(results, fileInjectionResult{file: "CLAUDE.md", status: symlinkCreated})
 		}
 	} else if !agentsExists && (claudeIsRegularFile || claudeIsSymlink) {
-		if err := os.Symlink("CLAUDE.md", agentsPath); err == nil {
+		if err := root.Symlink("CLAUDE.md", agentsPath); err == nil {
 			results = append(results, fileInjectionResult{file: "AGENTS.md", status: symlinkCreated})
 		}
 	}
@@ -1538,8 +1566,8 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 
 // ensurePrimeMarkersInAgentFile ensures both ox:prime-check (header) and ox:prime (footer)
 // markers exist in a single agent config file. Returns injection status for display.
-func ensurePrimeMarkersInAgentFile(path, name string) (fileInjectionResult, error) {
-	content, err := os.ReadFile(path)
+func ensurePrimeMarkersInAgentFile(root *os.Root, name string) (fileInjectionResult, error) {
+	content, err := root.ReadFile(name)
 	if err != nil {
 		return fileInjectionResult{file: name}, fmt.Errorf("failed to read %s: %w", name, err)
 	}
@@ -1552,7 +1580,7 @@ func ensurePrimeMarkersInAgentFile(path, name string) (fileInjectionResult, erro
 		return fileInjectionResult{file: name, status: alreadyPresent}, nil
 	}
 
-	injected, err := ensureMarkersInFile(path, contentStr, needHeader, needFooter)
+	injected, err := ensureMarkersInRoot(root, name, contentStr, needHeader, needFooter)
 	if err != nil {
 		return fileInjectionResult{file: name}, err
 	}
@@ -2143,6 +2171,9 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 		if info, err := os.Stat(filepath.Join(gitRoot, ".opencode")); err == nil && info.IsDir() {
 			selected["opencode"] = true
 		}
+		if devinDetected(gitRoot) {
+			selected["devin"] = true
+		}
 		return selected, nil
 	}
 
@@ -2181,6 +2212,14 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 			Selected: true,
 		})
 	}
+
+	// Devin runs in the cloud, so there is nothing to detect locally; offer it
+	// always and preselect it when the repo or machine already uses Devin.
+	options = append(options, cli.MultiSelectOption{
+		Label:    "Devin",
+		Value:    "devin",
+		Selected: devinDetected(gitRoot),
+	})
 
 	if !initQuiet {
 		fmt.Println()
@@ -2356,6 +2395,21 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 					cli.PrintPreserved("AI coworker assets already up to date")
 				}
 			}
+		}
+	}
+
+	if selectedAgents["devin"] {
+		if HasDevinPlugin(gitRoot) {
+			if !quiet {
+				cli.PrintPreserved("Devin integration")
+			}
+		} else if err := InstallDevinPlugin(gitRoot); err != nil {
+			cli.PrintWarning(fmt.Sprintf("Could not install Devin integration: %v", err))
+		} else {
+			if !quiet {
+				cli.PrintSuccess("Installed Devin integration")
+			}
+			installedHooks = append(installedHooks, filepath.Join(".devin", "config.json"))
 		}
 	}
 

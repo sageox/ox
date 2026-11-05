@@ -268,7 +268,14 @@ func ClassifyRawFile(rawPath string) RawKind {
 		return RawPointerStub
 	}
 
-	f, err := os.Open(rawPath)
+	return classifyRawContent(os.Open(rawPath))
+}
+
+// classifyRawContent classifies an opened raw file and closes it. Unlike
+// ClassifyRawFile it treats LFS pointers as substantive content, which is also
+// non-disposable. Cleanup uses this with os.Root.Open to keep reads confined to
+// the scanned session directory, including when raw.jsonl is a symlink.
+func classifyRawContent(f *os.File, err error) RawKind {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return RawMissing

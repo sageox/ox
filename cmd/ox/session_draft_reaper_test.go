@@ -287,6 +287,48 @@ func TestCheckSessionDraftOrphan_FixRemovesFromRemote(t *testing.T) {
 	gitFsckClean(t, f.barePath)
 }
 
+// Nonconforming Ledger names are left for manual repair, not expanded by Git.
+func TestCheckSessionDraftOrphan_FixRejectsWildcardNames(t *testing.T) {
+	setTestCfg(t)
+	for _, name := range []string{"*", "victi?", "[v]ictim"} {
+		t.Run(name, func(t *testing.T) {
+			f := newDraftLedgerFixture(t)
+			t.Chdir(f.projectRoot)
+			agedDraft(t, f.ledgerPath, name, 120*time.Hour)
+			sibling := filepath.Join(f.ledgerPath, "sessions", "victim")
+			require.NoError(t, os.MkdirAll(sibling, 0755))
+			for _, file := range []string{"tracked.txt", "modified.txt", "staged.txt"} {
+				require.NoError(t, os.WriteFile(filepath.Join(sibling, file), []byte("original\n"), 0644))
+			}
+			runGit(t, f.ledgerPath, "add", "--sparse", "--", "sessions")
+			runGit(t, f.ledgerPath, "commit", "-m", "seed wildcard draft and sibling")
+			runGit(t, f.ledgerPath, "push", "origin", "HEAD")
+			for _, file := range []string{"modified.txt", "staged.txt", "untracked.txt"} {
+				require.NoError(t, os.WriteFile(filepath.Join(sibling, file), []byte("local work\n"), 0644))
+			}
+			runGit(t, f.ledgerPath, "add", "--sparse", "--", "sessions/victim/staged.txt")
+			head := runGit(t, f.ledgerPath, "rev-parse", "HEAD")
+			staged := runGit(t, f.ledgerPath, "diff", "--cached", "--binary")
+			unstaged := runGit(t, f.ledgerPath, "diff", "--binary")
+
+			res := checkSessionDraftOrphan(true)
+			require.False(t, res.skipped)
+			require.False(t, res.warning, "%s %s", res.message, res.detail)
+			assert.Equal(t, "no orphaned drafts", res.message)
+			_, err := deleteDraftFromLedger(f.ledgerPath, name)
+			require.Error(t, err, "explicit deletion must reject the same name")
+
+			assert.Equal(t, head, runGit(t, f.ledgerPath, "rev-parse", "HEAD"))
+			assert.Equal(t, staged, runGit(t, f.ledgerPath, "diff", "--cached", "--binary"))
+			assert.Equal(t, unstaged, runGit(t, f.ledgerPath, "diff", "--binary"))
+			data, err := os.ReadFile(filepath.Join(sibling, "untracked.txt"))
+			require.NoError(t, err)
+			assert.Equal(t, "local work\n", string(data))
+			assert.FileExists(t, filepath.Join(f.ledgerPath, "sessions", name, "meta.json"))
+		})
+	}
+}
+
 // TestHasLocalSessionData covers the helper's own decision, including the
 // XDG-vs-ledger-cache split that the table above exercises only indirectly.
 func TestHasLocalSessionData(t *testing.T) {
