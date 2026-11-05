@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/claudesource"
+	"github.com/sageox/ox/pkg/adapterruntime"
 )
 
 // ErrSessionFileShape is returned when a session file is neither an absolute
@@ -56,6 +57,7 @@ type activeWatcher struct {
 	cachePath   string
 	projectRoot string
 	agentID     string
+	nativeID    string
 	ledgerPath  string
 	startOffset int64 // byte offset in source file to resume from (0 for fresh start)
 	startedAt   time.Time
@@ -165,6 +167,11 @@ func (m *SessionWatcherManager) startWatchAt(
 	if state.SourceRejected {
 		return fmt.Errorf("native source quarantined for manual ownership review")
 	}
+	boundState := *state
+	boundState.SessionFile = sessionFile
+	if err := session.CheckNativeSourceBinding(&boundState); err != nil {
+		return err
+	}
 	if adapterName == "cursor" {
 		expected, err := session.ValidateCursorRecordingSource(m.homeDir(), state)
 		if err != nil {
@@ -199,6 +206,7 @@ func (m *SessionWatcherManager) startWatchAt(
 		cachePath:   cachePath,
 		projectRoot: state.WorkspacePath,
 		agentID:     state.AgentID,
+		nativeID:    state.AgentSessionID,
 		ledgerPath:  ledgerPath,
 		startOffset: offset,
 		startedAt:   time.Now(),
@@ -301,6 +309,10 @@ func (m *SessionWatcherManager) DetectAndRestart(ledgerPath string) int {
 		if state.WatchMode != "tail" || state.StoppedAt != nil || state.SourceRejected || session.HasExplicitStop(state.WorkspacePath, state.AgentID) {
 			continue
 		}
+		if err := session.CheckNativeSourceBinding(state); err != nil {
+			m.logger.Warn("refusing unbound session source", "session", sessionName, "error", err)
+			continue
+		}
 		if state.AdapterName == "" || ((state.AdapterName == "claude-code" || state.AdapterName == "pi") && state.WorkspacePath == "") {
 			// These adapters cannot validate repository ownership without a root.
 			continue
@@ -342,6 +354,11 @@ func (m *SessionWatcherManager) DetectAndRestart(ledgerPath string) int {
 			}
 			if _, err := adapters.SafeSessionFilePath(state.AdapterName, source, m.homeDir()); err != nil {
 				m.logger.Warn("refusing discovered session source", "session", sessionName, "error", err)
+				continue
+			}
+			state.SessionFile = source
+			if err := session.CheckNativeSourceBinding(state); err != nil {
+				m.logger.Warn("refusing unbound session source", "session", sessionName, "error", err)
 				continue
 			}
 			if err := session.UpdateRecordingStateForAgent(state.WorkspacePath, state.AgentID, func(s *session.RecordingState) {
@@ -502,7 +519,7 @@ func (m *SessionWatcherManager) runWatcher(
 			case len(entries) > 0:
 				if err := validateWatcherSourceFrom(aw, cursor, sourceSnapshot); err != nil {
 					m.rejectWatcherSource(aw, err)
-					if errors.Is(err, claudesource.ErrUntrustedSource) {
+					if errors.Is(err, claudesource.ErrUntrustedSource) || errors.Is(err, adapterruntime.ErrUnboundSource) {
 						return nil
 					}
 					// Retryable, as in pollSession: keep the cursor so the poll loop
@@ -591,7 +608,7 @@ func (m *SessionWatcherManager) runWatcher(
 
 func (m *SessionWatcherManager) rejectWatcherSource(aw *activeWatcher, err error) {
 	m.logger.Warn("session source failed ownership check; leaving cursor unchanged", "session", aw.sessionName, "error", err)
-	if errors.Is(err, claudesource.ErrUntrustedSource) {
+	if errors.Is(err, claudesource.ErrUntrustedSource) || errors.Is(err, adapterruntime.ErrUnboundSource) {
 		// by the watched recording's own folder: once quarantined it leaves the
 		// agent's active slot, and an agent lookup could find a newer recording
 		markErr := session.MutateRecordingStateFile(filepath.Join(aw.cachePath, recordingMarker), func(state *session.RecordingState) error {
@@ -607,6 +624,9 @@ func (m *SessionWatcherManager) rejectWatcherSource(aw *activeWatcher, err error
 // validateWatcherSource checks what the recording can have captured. Turns
 // before startOffset predate the recording and are never imported.
 func validateWatcherSource(aw *activeWatcher, startOffset int64) error {
+	if err := adapterruntime.ValidateSessionSource(adapters.CanonicalAdapterName(aw.adapterName), aw.sessionFile, aw.nativeID); err != nil {
+		return err
+	}
 	if aw.adapterName != "claude-code" {
 		return nil
 	}
@@ -617,6 +637,9 @@ func validateWatcherSource(aw *activeWatcher, startOffset int64) error {
 }
 
 func validateWatcherSourceFrom(aw *activeWatcher, offset int64, snapshot os.FileInfo) error {
+	if err := adapterruntime.ValidateSessionSource(adapters.CanonicalAdapterName(aw.adapterName), aw.sessionFile, aw.nativeID); err != nil {
+		return err
+	}
 	if aw.adapterName != "claude-code" {
 		return nil
 	}
@@ -675,6 +698,10 @@ func (m *SessionWatcherManager) pollSession(
 			return
 		}
 
+		if err := adapterruntime.ValidateSessionSource(adapters.CanonicalAdapterName(aw.adapterName), aw.sessionFile, aw.nativeID); err != nil {
+			m.rejectWatcherSource(aw, err)
+			return
+		}
 		var sourceSnapshot os.FileInfo
 		if aw.adapterName == "claude-code" {
 			var snapshotErr error
@@ -697,7 +724,7 @@ func (m *SessionWatcherManager) pollSession(
 			continue
 		}
 		if err := validateWatcherSourceFrom(aw, offset, sourceSnapshot); err != nil {
-			if errors.Is(err, claudesource.ErrUntrustedSource) {
+			if errors.Is(err, claudesource.ErrUntrustedSource) || errors.Is(err, adapterruntime.ErrUnboundSource) {
 				m.rejectWatcherSource(aw, err)
 				return
 			}

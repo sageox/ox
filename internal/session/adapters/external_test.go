@@ -462,3 +462,18 @@ func TestExternalAdapter_ReadStartupFailure(t *testing.T) {
 		t.Fatalf("error omits failed operation: %v", err)
 	}
 }
+
+func TestExternalAdapter_FindSessionFileRejectsForeignAmpSidecar(t *testing.T) {
+	binary := fakeBinary(t, map[string]string{
+		"info":         `{"protocol_version":1,"name":"amp","version":"0.1.0","type":"session"}`,
+		"find-session": `{"session_file":"/tmp/T-foreign.jsonl"}`,
+	})
+	ea, err := NewExternalAdapter(binary)
+	if err != nil {
+		t.Fatalf("NewExternalAdapter: %v", err)
+	}
+	_, err = ea.FindSessionFile(SessionLookup{RepoRoot: t.TempDir(), AgentID: "OxAmp", AgentSessionID: "T-current", Since: time.Now()})
+	if err == nil {
+		t.Fatal("a sidecar named for another thread must be rejected")
+	}
+}

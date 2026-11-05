@@ -723,6 +723,9 @@ func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expected
 		slog.Debug("hook: afterTool session changed since lock acquired, skipping", "agentID", agentID, "lockedPath", expectedSessionPath, "currentPath", state.SessionPath, "lockedSessionID", expectedSessionID, "currentSessionID", state.SessionID)
 		return nil
 	}
+	if err := session.CheckNativeSourceBinding(state); err != nil {
+		return err
+	}
 	if err := session.RecoverRawAppend(filepath.Join(state.SessionPath, "raw.jsonl"), state.SourceOffset); err != nil {
 		return err
 	}
@@ -769,6 +772,9 @@ func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expected
 			return nil // session file not available yet
 		}
 		state.SessionFile = sf
+		if err := session.CheckNativeSourceBinding(state); err != nil {
+			return err
+		}
 		_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
 			s.SessionFile = sf
 		})
@@ -796,6 +802,9 @@ func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expected
 		if findErr == nil && sf != "" && sf != state.SessionFile {
 			slog.Info("hook: rediscovered session file", "old", state.SessionFile, "new", sf)
 			state.SessionFile = sf
+			if err := session.CheckNativeSourceBinding(state); err != nil {
+				return err
+			}
 			// both offsets belong to the old file: a StartOffset left behind would
 			// make every read skip the first bytes of the new transcript, and
 			// every ownership check start mid-record
@@ -829,6 +838,9 @@ func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expected
 		slog.Info("hook: incremental read failed", "agentID", agentID, "adapter", state.AdapterName, "file", state.SessionFile, "offset", readOffset, "error", readErr)
 		recordHookStatus("read-error")
 		return nil // non-fatal, will catch up at stop
+	}
+	if err := session.CheckNativeSourceBinding(state); err != nil {
+		return err
 	}
 	if len(entries) == 0 {
 		recordHookStatus("no-new-entries")
