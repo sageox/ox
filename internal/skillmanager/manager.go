@@ -731,7 +731,9 @@ func planWithCatalogs(repoRoot, version string, desired DesiredSkills, targets [
 		if _, wanted := desiredPaths[file.Path]; wanted || !isTeamOwnedPath(targetByKey, file) {
 			continue
 		}
-		if _, tracked := removalBlockedByGit(targetByKey, trackedDirs, file.Target, file.Path); tracked {
+		// The directory being tracked is not enough: an untracked script beside
+		// a tracked file is still revoked team content.
+		if _, tracked := removalBlockedByGit(targetByKey, trackedDirs, file.Target, file.Path); tracked && gitTracksFile(repoRoot, file.Path) {
 			continue
 		}
 		next.Source.Revision = ""
