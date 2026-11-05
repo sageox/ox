@@ -1,10 +1,13 @@
 package gitserver
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,6 +39,10 @@ func TestPhaseOneCloneArgs_IncludesCredentialHelper(t *testing.T) {
 	assert.Contains(t, args, "--filter=blob:none")
 	assert.Contains(t, args, "--depth=1")
 	assert.Contains(t, args, "--no-checkout")
+	// Unlike a leading git -c, clone --config persists before the first checkout.
+	configIdx := indexOf(args, "--config")
+	require.Greater(t, configIdx, cloneIdx)
+	assert.Equal(t, "core.symlinks=false", args[configIdx+1])
 
 	// `--` terminates options; URL and path are the trailing positionals
 	assert.Equal(t, "https://git.sageox.ai/team/ctx.git", args[len(args)-2])
@@ -45,6 +52,45 @@ func TestPhaseOneCloneArgs_IncludesCredentialHelper(t *testing.T) {
 	// protocol hardening present by default
 	assert.Contains(t, args, "protocol.ext.allow=never")
 	assert.Contains(t, args, "protocol.file.allow=never")
+}
+
+func TestTwoPhaseClone_SymlinksAreFilesInBothPhases(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone")
+	}
+	source := setupGitRepoWithSageox(t)
+	runGit(t, source, "config", "core.symlinks", "true")
+	require.NoError(t, EnsureCheckoutGitignore(source))
+	require.NoError(t, os.WriteFile(filepath.Join(source, ".sageox", "sync.manifest"), []byte("version 1\ninclude /.sageox/\ninclude /data/murmurs/\n"), 0o644))
+	victim := filepath.Join(t.TempDir(), "victim")
+	require.NoError(t, os.WriteFile(victim, []byte("unchanged"), 0o644))
+	links := []string{filepath.Join(".sageox", "link"), filepath.Join("data", "murmurs", "link.json")}
+	for _, rel := range links {
+		full := filepath.Join(source, rel)
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+		if err := os.Symlink(victim, full); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		runGit(t, source, "add", "-f", "--", rel)
+	}
+	runGit(t, source, "add", ".sageox/sync.manifest")
+	runGit(t, source, "commit", "-m", "tracked symlinks")
+	TestAllowFileTransport = true
+	t.Cleanup(func() { TestAllowFileTransport = false })
+	clone := filepath.Join(t.TempDir(), "clone")
+	_, err := TwoPhaseClone(context.Background(), source, clone, manifest.RepoKindTeamContext)
+	require.NoError(t, err)
+	for _, rel := range links {
+		info, err := os.Lstat(filepath.Join(clone, rel))
+		require.NoError(t, err)
+		require.True(t, info.Mode().IsRegular(), "symlink materialized at %s", rel)
+	}
+	setting, err := gitutil.RunGit(context.Background(), clone, "config", "--local", "--get", "core.symlinks")
+	require.NoError(t, err)
+	require.Equal(t, "false", strings.TrimSpace(setting))
+	got, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	require.Equal(t, "unchanged", string(got))
 }
 
 // TestPhaseOneCloneArgs_FileTransportOverride verifies the test-only escape

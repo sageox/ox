@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -145,19 +146,14 @@ func WriteMurmur(baseDir string, m MurmurFile) (string, error) {
 	}
 
 	relPath := MurmurFilePath(m.Timestamp, m.ID)
-	fullPath := filepath.Join(baseDir, relPath)
-
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
-		return "", fmt.Errorf("create murmur dir: %w", err)
-	}
 
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal murmur: %w", err)
 	}
 
-	if err := os.WriteFile(fullPath, data, 0o644); err != nil {
-		return "", fmt.Errorf("write murmur: %w", err)
+	if err := WriteMurmurRaw(baseDir, relPath, data); err != nil {
+		return "", err
 	}
 
 	return relPath, nil
@@ -165,13 +161,75 @@ func WriteMurmur(baseDir string, m MurmurFile) (string, error) {
 
 // WriteMurmurRaw writes pre-serialized murmur JSON to the given relative path within baseDir.
 // Used by the daemon when the CLI delegates file I/O via IPC rather than writing to disk itself.
+// Rejects symlinks, including links to other files inside the workspace (e.g. .git/config).
 func WriteMurmurRaw(baseDir, relPath string, data []byte) error {
-	fullPath := filepath.Join(baseDir, relPath)
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
-		return fmt.Errorf("create murmur dir: %w", err)
+	if !filepath.IsLocal(relPath) {
+		return fmt.Errorf("murmur path must be relative and within the workspace")
 	}
-	if err := os.WriteFile(fullPath, data, 0o644); err != nil {
+	relPath = filepath.Clean(relPath)
+	if !strings.HasPrefix(filepath.ToSlash(relPath), "data/murmurs/") {
+		return fmt.Errorf("murmur path must be under data/murmurs/")
+	}
+	root, err := os.OpenRoot(baseDir)
+	if err != nil {
+		return fmt.Errorf("open murmur workspace: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	// Pin each directory before descending. OpenRoot alone allows in-root
+	// symlinks; Lstat plus SameFile verifies that the opened handle is the
+	// actual directory we inspected, not a link substituted between calls.
+	for _, name := range strings.Split(filepath.Dir(relPath), string(filepath.Separator)) {
+		if err := root.Mkdir(name, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("create murmur dir: %w", err)
+		}
+		info, err := root.Lstat(name)
+		if err != nil {
+			return fmt.Errorf("inspect murmur dir: %w", err)
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("murmur directory %q is not a real directory", name)
+		}
+		next, err := root.OpenRoot(name)
+		if err != nil {
+			return fmt.Errorf("open murmur dir: %w", err)
+		}
+		opened, err := next.Stat(".")
+		if err != nil || !os.SameFile(info, opened) {
+			_ = next.Close()
+			return fmt.Errorf("murmur directory %q changed while opening", name)
+		}
+		_ = root.Close()
+		root = next
+	}
+
+	name := filepath.Base(relPath)
+	info, err := root.Lstat(name)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect murmur file: %w", err)
+	}
+	if err == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("murmur destination is not a regular file")
+	}
+
+	// Exclusive creation cannot follow a link. Rename replaces the directory
+	// entry, never its target, even if a link appears after Lstat above. All
+	// operations stay relative to the verified, open parent directory.
+	tmpName := ".murmur-" + rand.Text()
+	f, err := root.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return fmt.Errorf("create murmur file: %w", err)
+	}
+	defer func() { _ = root.Remove(tmpName) }()
+	_, err = f.Write(data)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
 		return fmt.Errorf("write murmur: %w", err)
+	}
+	if err := root.Rename(tmpName, name); err != nil {
+		return fmt.Errorf("replace murmur: %w", err)
 	}
 	return nil
 }
