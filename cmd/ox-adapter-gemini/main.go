@@ -77,13 +77,7 @@ func handleImportSession(p adapterprotocol.ImportSessionParams) (*adapterprotoco
 		return nil, fmt.Errorf("--session-id is required")
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("cannot determine home directory: %w", err)
-	}
-
-	tmpDir := home + "/.gemini/tmp"
-	path, err := findGeminiBySessionID(tmpDir, p.SessionID)
+	path, err := findGeminiSession(p.RepoRoot, "", "", p.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("session %q not found: %w", p.SessionID, err)
 	}
