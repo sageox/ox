@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -176,6 +177,18 @@ func newStarHintEnv(t *testing.T) *starHintEnv {
 		starHintStatePath, starHintAutomated, startedByOx, starHintPending, cliCtx = oldPath, oldAutomated, oldStarted, oldPending, oldCtx
 	})
 
+	// The login and the user config both resolve under XDG_CONFIG_HOME, read on
+	// every call: point it at a temp dir, and prove it, so no case can write the
+	// real auth.json or config.yaml.
+	configHome := t.TempDir()
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv(config.EnvUserConfig, "")
+	authPath, err := auth.GetAuthFilePath()
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(authPath, configHome), "auth file %s is outside the test dir %s", authPath, configHome)
+	require.True(t, strings.HasPrefix(config.GetUserConfigDir(), configHome), "user config %s is outside the test dir %s", config.GetUserConfigDir(), configHome)
+
 	t.Setenv(endpoint.EnvVar, srv.URL)
 	t.Setenv(auth.EnvVarToken, "")
 	require.NoError(t, auth.SaveTokenForEndpoint(srv.URL, &auth.StoredToken{
@@ -188,6 +201,23 @@ func newStarHintEnv(t *testing.T) *starHintEnv {
 	e := &starHintEnv{t: t, srv: srv}
 	e.useCommand("status")
 	return e
+}
+
+// setTipsForTest saves the tips setting and restores whatever value (or
+// absence) it had before, so no case leaks its choice into the next.
+func setTipsForTest(t *testing.T, enabled bool) {
+	t.Helper()
+	userCfg, err := config.LoadUserConfig()
+	require.NoError(t, err)
+	original := userCfg.TipsEnabled
+	userCfg.TipsEnabled = &enabled
+	require.NoError(t, config.SaveUserConfig(userCfg))
+	t.Cleanup(func() {
+		restored, err := config.LoadUserConfig()
+		require.NoError(t, err)
+		restored.TipsEnabled = original
+		require.NoError(t, config.SaveUserConfig(restored))
+	})
 }
 
 // useCommand makes the current invocation `ox <path...>`.
@@ -284,17 +314,7 @@ func TestStarHint_SilentWhenNobodyIsReading(t *testing.T) {
 		}},
 		{name: "a service process", arm: func(t *testing.T, _ *starHintEnv) { cliCtx.LongRunning = true }},
 		{name: "--quiet", arm: func(t *testing.T, _ *starHintEnv) { cliCtx.Config.Quiet = true }},
-		{name: "tips are disabled", arm: func(t *testing.T, _ *starHintEnv) {
-			userCfg, err := config.LoadUserConfig()
-			require.NoError(t, err)
-			off := false
-			userCfg.TipsEnabled = &off
-			require.NoError(t, config.SaveUserConfig(userCfg))
-			t.Cleanup(func() {
-				userCfg.TipsEnabled = nil
-				require.NoError(t, config.SaveUserConfig(userCfg))
-			})
-		}},
+		{name: "tips are disabled", arm: func(t *testing.T, _ *starHintEnv) { setTipsForTest(t, false) }},
 		{name: "team (oxt_) token", arm: func(t *testing.T, _ *starHintEnv) { t.Setenv(auth.EnvVarToken, validTeamToken) }},
 		{name: "env-supplied personal token (automation has no local person)", arm: func(t *testing.T, _ *starHintEnv) {
 			t.Setenv(auth.EnvVarToken, validPersonalToken)
@@ -370,15 +390,7 @@ func TestStarHint_SilentWhenTheCommandTurnedTipsOff(t *testing.T) {
 
 	beginStarHint()
 	require.NotNil(t, starHintPending, "tips were on when the command started")
-	userCfg, err := config.LoadUserConfig()
-	require.NoError(t, err)
-	off := false
-	userCfg.TipsEnabled = &off
-	require.NoError(t, config.SaveUserConfig(userCfg))
-	t.Cleanup(func() {
-		userCfg.TipsEnabled = nil
-		require.NoError(t, config.SaveUserConfig(userCfg))
-	})
+	setTipsForTest(t, false)
 	var stderr bytes.Buffer
 	showStarHint(0, &stderr)
 
