@@ -94,10 +94,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		// ox login is interactive, so --json reports the login state instead
 		result.LoggedIn = installLoggedIn()
 		result.OnPath = dirOnPath(filepath.Dir(oxPath))
-		ox := "ox"
-		if found := lookPathOutsideNodeModules("ox"); found == "" || !sameFile(found, oxPath) {
-			ox = shellQuote(oxPath)
-		}
+		ox := installOxCommand(oxPath)
 		if !result.LoggedIn {
 			result.Next = append(result.Next, ox+" login")
 		}
@@ -115,7 +112,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// a completed `ox login` already ends by pointing at ox init
 	if !ranLogin {
 		fmt.Fprintln(out)
-		fmt.Fprintf(out, "To link a repo to SageOx: %s\n", cli.StyleCommand.Render("cd <repo> && ox init"))
+		fmt.Fprintf(out, "To link a repo to SageOx: %s\n", cli.StyleCommand.Render("cd <repo> && "+installOxCommand(oxPath)+" init"))
 	}
 	return nil
 }
@@ -273,6 +270,28 @@ func lookPathOutsideNodeModules(name string) string {
 	return ""
 }
 
+// installOxCommand is how printed next steps should invoke the installed ox:
+// bare "ox" when PATH already resolves to it, else its shell-quoted path.
+func installOxCommand(oxPath string) string {
+	if found := lookPathOutsideNodeModules("ox"); found != "" && sameFile(found, oxPath) {
+		return "ox"
+	}
+	return shellQuote(oxPath)
+}
+
+// pathWithoutNodeModules is PATH minus node_modules directories. npx puts the
+// current project's node_modules/.bin first, so a repo could otherwise supply
+// the open/xdg-open that login runs to launch the browser.
+func pathWithoutNodeModules() string {
+	var keep []string
+	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
+		if d != "" && !strings.Contains("/"+filepath.ToSlash(d)+"/", "/node_modules/") {
+			keep = append(keep, d)
+		}
+	}
+	return strings.Join(keep, string(os.PathListSeparator))
+}
+
 func sameDir(a, b string) bool {
 	return sameFile(a, b)
 }
@@ -308,7 +327,7 @@ func installLogin(out io.Writer, oxPath string) (bool, error) {
 	// A piped stdin (npx in CI, a script) cannot answer login's prompts and
 	// would leave it blocked before device-code polling starts.
 	if cli.NoInput() || !installInteractive() {
-		fmt.Fprintf(out, "Log in with: %s\n", cli.StyleCommand.Render("ox login"))
+		fmt.Fprintf(out, "Log in with: %s\n", cli.StyleCommand.Render(installOxCommand(oxPath)+" login"))
 		return false, nil
 	}
 	fmt.Fprintln(out)
@@ -325,6 +344,7 @@ func runInstalledLogin(oxPath string) error {
 	}
 	c := exec.Command(oxPath, args...)
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+	c.Env = append(os.Environ(), "PATH="+pathWithoutNodeModules())
 	err := c.Run()
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {

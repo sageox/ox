@@ -103,7 +103,7 @@ func TestRunInstallDirFlagReplacesAndWarnsOffPath(t *testing.T) {
 	assert.Empty(t, *logins)
 	assert.Contains(t, out, dest+" is not on your PATH")
 	assert.Contains(t, out, `export PATH=`+shellQuote(dest)+`:"$PATH"`)
-	assert.Contains(t, out, "cd <repo> && ox init")
+	assert.Contains(t, out, "cd <repo> && "+shellQuote(filepath.Join(dest, "ox"))+" init")
 }
 
 func TestRunInstallAlreadyInPlace(t *testing.T) {
@@ -410,4 +410,35 @@ func TestRunInstalledLoginForwardsNoInteractive(t *testing.T) {
 	got, err := os.ReadFile(argsFile)
 	require.NoError(t, err)
 	assert.Equal(t, "login --no-interactive\n", string(got))
+}
+
+func TestRunInstalledLoginDropsNodeModulesFromPath(t *testing.T) {
+	skipInstallOnWindows(t)
+	dir := t.TempDir()
+	pathFile := filepath.Join(dir, "path")
+	oxPath := filepath.Join(dir, "ox")
+	require.NoError(t, os.WriteFile(oxPath, []byte("#!/bin/sh\necho \"$PATH\" > \""+pathFile+"\"\n"), 0o755))
+	shim := filepath.Join(dir, "repo", "node_modules", ".bin")
+	t.Setenv("PATH", shim+string(os.PathListSeparator)+"node_modules/.bin"+string(os.PathListSeparator)+"/usr/bin"+string(os.PathListSeparator)+"/bin")
+
+	require.NoError(t, runInstalledLogin(oxPath))
+
+	got, err := os.ReadFile(pathFile)
+	require.NoError(t, err)
+	assert.Equal(t, "/usr/bin:/bin\n", string(got), "a repo's node_modules/.bin must not supply login's browser launcher")
+}
+
+func TestRunInstallHintsUseFullPathOffPath(t *testing.T) {
+	_, logins, _ := stubInstall(t, false)
+	installDirFlag = filepath.Join(t.TempDir(), "my bin")
+	require.NoError(t, os.MkdirAll(installDirFlag, 0o755))
+	t.Setenv("PATH", t.TempDir())
+	installInteractive = func() bool { return false }
+
+	out := runInstallCmd(t)
+
+	ox := shellQuote(filepath.Join(installDirFlag, "ox"))
+	assert.Empty(t, *logins)
+	assert.Contains(t, out, ox+" login")
+	assert.Contains(t, out, "cd <repo> && "+ox+" init")
 }
