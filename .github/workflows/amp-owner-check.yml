@@ -170,7 +170,10 @@ jobs:
             .[] | select((.filename | guarded) or ((.previous_filename // "") | guarded))
               | (.filename | @json)' "$files_json")
           if [ -n "$touches" ]; then
-            echo "::notice::Protected paths changed (first 5, JSON-escaped): $(printf '%s\n' "$touches" | head -5 | tr '\n' ' ')"
+            # sed, not head -5: head closes the pipe early, and under the
+            # runner's pipefail that SIGPIPE (141) would abort the step if
+            # this were ever turned into an assignment.
+            echo "::notice::Protected paths changed (first 5, JSON-escaped): $(printf '%s\n' "$touches" | sed -n '1,5p' | tr '\n' ' ')"
             echo "touches=true" >> "$GITHUB_OUTPUT"
           else
             echo "touches=false" >> "$GITHUB_OUTPUT"
