@@ -200,8 +200,8 @@ func rewriteWorkingPointer(ledgerPath, relPath string, ref FileRef, content []by
 // replaceInRoot swaps the regular file at relPath for content by rename,
 // keeping its mode. Unlike fileutil.AtomicWriteBytesInRoot it accepts a
 // read-only file: the verified dead pointer must go, or the next add would
-// recommit it. The old inode is never modified, so its other hardlinks keep
-// their content and mode.
+// recommit it. Where rename replaces read-only files (Unix) the old inode is
+// never modified, so its other hard links keep their content and mode.
 func replaceInRoot(root *os.Root, relPath string, content []byte) error {
 	dir, base := filepath.Split(relPath)
 	if dir == "" {
@@ -229,10 +229,27 @@ func replaceInRoot(root *os.Root, relPath string, content []byte) error {
 	if err == nil {
 		err = parent.Rename(tmpName, base)
 	}
+	if err != nil && info.Mode().Perm()&0o200 == 0 {
+		err = renameOverReadOnly(parent, tmpName, base, info.Mode().Perm())
+	}
 	if err != nil {
 		_ = parent.Remove(tmpName)
 	}
 	return err
+}
+
+// renameOverReadOnly is the fallback for platforms (Windows) whose rename
+// refuses a read-only destination: it lifts the read-only bit only for the
+// retry and puts it back if the retry fails too.
+func renameOverReadOnly(parent *os.Root, tmpName, base string, perm os.FileMode) error {
+	if err := parent.Chmod(base, perm|0o200); err != nil {
+		return err
+	}
+	if err := parent.Rename(tmpName, base); err != nil {
+		_ = parent.Chmod(base, perm)
+		return err
+	}
+	return nil
 }
 
 // MissingPlanRender is a plan page pointer in unpushed history whose blob the

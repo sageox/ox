@@ -507,3 +507,23 @@ func TestFindMissingPlanRenders_InspectionFailureIsNotNothingMissing(t *testing.
 	require.ErrorContains(t, err, "no git credentials found")
 	assert.Nil(t, missing)
 }
+
+// TestRenameOverReadOnly: the Windows fallback replaces a read-only
+// destination and leaves nothing writable behind when it cannot.
+func TestRenameOverReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "new"), []byte("tombstone"), 0o444))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "page"), []byte("pointer"), 0o444))
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer func() { _ = root.Close() }()
+
+	require.Error(t, renameOverReadOnly(root, "new", "gone", 0o444), "a missing destination is not replaced")
+	require.Error(t, renameOverReadOnly(root, "missing", "page", 0o444))
+	info, err := os.Stat(filepath.Join(dir, "page"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o444), info.Mode().Perm(), "a failed retry restores the read-only bit")
+
+	require.NoError(t, renameOverReadOnly(root, "new", "page", 0o444))
+	assert.Equal(t, "tombstone", string(mustReadFile(t, filepath.Join(dir, "page"))))
+}
