@@ -283,7 +283,10 @@ jobs:
       - name: Sign artifacts
         id: sign
         run: |
-          echo "Signing artifacts for release ${{ env.RELEASE_TAG }}..."
+          # Expand the tag from the environment, not with a workflow expression:
+          # expressions are pasted into the script text before bash runs, so a tag
+          # named v$(...) would execute with the signing key in scope (veria-ai).
+          echo "Signing artifacts for release $RELEASE_TAG..."
 
           # Sign all registered artifacts
           go run ./scripts/sign-manifest
