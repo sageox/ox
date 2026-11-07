@@ -8,8 +8,22 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/require"
 )
+
+// startTestRecording starts a recording for the given agent and returns the state.
+func startTestRecording(t *testing.T, projectRoot, agentID, adapterName string) *session.RecordingState {
+	t.Helper()
+	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+		AgentID:     agentID,
+		AdapterName: adapterName,
+		Username:    "testuser",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	return state
+}
 
 // skipIntegration skips tests that intentionally exercise process, git, or
 // filesystem boundaries. It lives in an untagged helper file because both

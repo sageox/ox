@@ -12,6 +12,7 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/selfexec"
@@ -260,6 +261,7 @@ func startDaemonLocked(wait bool) error {
 
 	// migration: stop old path-based daemon if one exists on a legacy socket
 	stopLegacyDaemon()
+	stopPreMigrationDaemons()
 
 	pid, err := spawnDaemonFn(supersede)
 	if err != nil {
@@ -326,19 +328,9 @@ func spawnDaemonProcess(supersede bool) (int, error) {
 // spawnDaemonProcess so tests can drive it with a stand-in executable; the real
 // os.Executable() under `go test` is the test binary, which selfexec refuses.
 func startDaemonProcess(exe string, supersede bool) (int, error) {
-	// create log directory
-	logPath := LogPath()
-	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
-		return 0, fmt.Errorf("failed to create log directory: %w", err)
-	}
-
-	// keep the log bounded: nothing rotates it while the daemon runs
-	RotateDaemonLog(logPath)
-
-	// open log file
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	logFile, err := OpenLog()
 	if err != nil {
-		return 0, fmt.Errorf("failed to open log file: %w", err)
+		return 0, err
 	}
 
 	// start daemon process
@@ -364,35 +356,6 @@ func startDaemonProcess(exe string, supersede bool) (int, error) {
 	// don't wait for the process
 	logFile.Close()
 	return cmd.Process.Pid, nil
-}
-
-// maxDaemonLogBytes is the size above which the daemon log is rotated at
-// startup. One week of an unthrottled daemon produced a 96 MB log; 10 MB keeps
-// roughly a day of normal output while bounding disk use to ~20 MB with the
-// single rotated generation.
-const maxDaemonLogBytes = 10 << 20
-
-// RotateDaemonLog renames the daemon log at path to path+".1" (replacing any
-// previous ".1") when it exceeds maxDaemonLogBytes. Call it before the log is
-// opened with O_APPEND: the new daemon's stdout/stderr then starts a fresh file
-// and the previous run's output survives one generation.
-//
-// Best effort by design — a log that cannot be rotated (permissions, a Windows
-// sharing violation from a lingering writer) must never block daemon startup,
-// so failures are logged at debug level and reported only as a false return.
-// Returns true when the log was rotated.
-func RotateDaemonLog(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil || info.Size() <= maxDaemonLogBytes {
-		return false
-	}
-	rotated := path + ".1"
-	if err := os.Rename(path, rotated); err != nil {
-		slog.Debug("daemon log rotation failed", "path", path, "size", info.Size(), "error", err)
-		return false
-	}
-	slog.Debug("rotated daemon log", "path", path, "rotated_to", rotated, "size", info.Size())
-	return true
 }
 
 // signalProcessFn is the process-signaling seam KillStaleDaemon uses.
@@ -541,6 +504,48 @@ func findProjectRootForDaemon() string {
 	slog.Warn("findProjectRootForDaemon: no .sageox/ found, falling back to cwd", "cwd", cwd)
 	return cwd
 }
+
+// stopPreMigrationDaemons stops daemons an older ox left listening in the
+// shared temp directory. dial authenticates the peer UID, so another user's
+// socket planted there is never trusted.
+func stopPreMigrationDaemons() {
+	ids := []string{CurrentWorkspaceID()}
+	if legacyID := LegacyWorkspaceID(); legacyID != ids[0] {
+		ids = append(ids, legacyID)
+	}
+	for _, id := range ids {
+		socket := paths.PreMigrationDaemonSocketFile(id)
+		if socket == "" || socket == SocketPathForWorkspace(id) {
+			continue
+		}
+		// The shared temp directory is writable by others, so the name may be a
+		// symlink to some other daemon's socket. Stop only a real socket whose
+		// daemon reports this very workspace.
+		if info, err := os.Lstat(socket); err != nil || info.Mode().Type() != os.ModeSocket {
+			continue
+		}
+		client := NewClientWithSocket(socket)
+		if err := client.Ping(); err != nil {
+			continue
+		}
+		status, err := client.Status()
+		if err != nil || status.WorkspacePath == "" ||
+			(RepoBasedWorkspaceID(status.WorkspacePath) != id && WorkspaceID(status.WorkspacePath) != id) {
+			slog.Warn("leaving daemon on pre-migration socket: workspace not confirmed", "workspace_id", id, "socket", socket)
+			continue
+		}
+		slog.Info("stopping daemon on pre-migration socket", "workspace_id", id, "socket", socket)
+		if err := client.Stop(); err != nil {
+			slog.Warn("failed to stop pre-migration daemon", "workspace_id", id, "error", err)
+			continue
+		}
+		time.Sleep(preMigrationStopWait)
+	}
+}
+
+// preMigrationStopWait gives a stopped pre-migration daemon time to release
+// its socket and lock before the new daemon starts; tests shorten it.
+var preMigrationStopWait = 500 * time.Millisecond
 
 // stopLegacyDaemon stops a daemon running under the old path-based workspace ID.
 // This handles migration from path-hash to repo_id-hash identity: when the new

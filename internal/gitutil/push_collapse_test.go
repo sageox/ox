@@ -15,11 +15,12 @@ import (
 // TestPushWithRetry_CollapsesLargeBacklogAfterLosingRace proves that a push
 // which loses the non-fast-forward race with a large local backlog lands as a
 // single snapshot commit holding every file, with the pre-collapse tip kept
-// under refs/ox-backup/.
+// under refs/ox-backup/, and without a plan file that was only staged.
 //
 // Failure prevented (#1261): replaying hundreds of commits took longer than
 // the interval between coworkers' pushes, so every retry lost the same race
-// and the Ledger never pushed.
+// and the Ledger never pushed. And (#1442): the collapse committed the whole
+// index, publishing the staged plan file.
 func TestPushWithRetry_CollapsesLargeBacklogAfterLosingRace(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git push with retry")
@@ -39,6 +40,9 @@ func TestPushWithRetry_CollapsesLargeBacklogAfterLosingRace(t *testing.T) {
 	for i := 0; i < backlog; i++ {
 		addCommit(t, repo, fmt.Sprintf("draft-%03d.txt", i), "x", fmt.Sprintf("session-draft: %d", i))
 	}
+	const stagedPlan = "data/plans/p/plan.md"
+	writeGitutilFixture(t, repo, stagedPlan, "# not saved\n")
+	run(t, repo, "git", "add", stagedPlan)
 
 	err := PushWithRetry(context.Background(), repo, PushOpts{MaxRetries: 3, OpTimeout: 60 * time.Second})
 	require.NoError(t, err)
@@ -50,6 +54,8 @@ func TestPushWithRetry_CollapsesLargeBacklogAfterLosingRace(t *testing.T) {
 	tree := gitOut(t, bare, "ls-tree", "-r", "--name-only", "HEAD")
 	assert.Equal(t, backlog, strings.Count(tree, "draft-"), "every drafted file must survive the collapse")
 	assert.Contains(t, tree, "coworker.txt")
+	assert.NotContains(t, tree, stagedPlan, "the collapse published a staged plan file")
+	assert.Equal(t, stagedPlan, strings.TrimSpace(gitOut(t, repo, "diff", "--cached", "--name-only")), "the plan file must stay staged")
 
 	backup := strings.TrimSpace(gitOut(t, repo, "for-each-ref", "--format=%(refname)", "refs/ox-backup/"))
 	require.NotEmpty(t, backup, "the pre-collapse tip must be kept under refs/ox-backup/")

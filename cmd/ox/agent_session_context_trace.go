@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,11 +20,13 @@ type sessionContextTraceOutput struct {
 	AgentID    string `json:"agent_id"`
 	TracePath  string `json:"trace_path"`
 	EventCount int    `json:"event_count"`
+	Appended   int    `json:"appended"`
 	Message    string `json:"message,omitempty"`
 }
 
-// runAgentSessionContextTrace appends a context-trace event to the current session.
-// Reads a JSON event from stdin.
+// runAgentSessionContextTrace appends context-trace events to the current
+// session. Reads one JSON event, or JSONL (one event per line) from stdin; a
+// batch is all-or-nothing — one malformed line rejects every line.
 // Usage: echo '{"type":"influenced","source":"team-context","doc":"AGENTS.md","decision":"..."}' | ox agent <id> session context-trace
 func runAgentSessionContextTrace(inst *agentinstance.Instance, _ []string) error {
 	projectRoot, err := findProjectRoot()
@@ -46,18 +49,9 @@ func runAgentSessionContextTrace(inst *agentinstance.Instance, _ []string) error
 		return fmt.Errorf("empty input\nUsage: echo '{\"type\":\"influenced\",...}' | ox agent %s session context-trace", inst.AgentID)
 	}
 
-	// parse the event
-	var event contexttrace.Event
-	if err := json.Unmarshal(data, &event); err != nil {
-		return fmt.Errorf("invalid JSON event: %w", err)
-	}
-
-	// validate required fields
-	if event.Type == "" {
-		return fmt.Errorf("event must have a 'type' field (provided or influenced)")
-	}
-	if event.Source == "" {
-		return fmt.Errorf("event must have a 'source' field")
+	events, err := parseContextTraceInput(data)
+	if err != nil {
+		return err
 	}
 
 	// find active session
@@ -70,15 +64,15 @@ func runAgentSessionContextTrace(inst *agentinstance.Instance, _ []string) error
 		return fmt.Errorf("could not load recording state for agent %s", inst.AgentID)
 	}
 
-	// append the event
+	// append the batch in one write: all lines or none
 	writer := contexttrace.NewWriter(state.SessionPath)
-	if err := writer.Append(event); err != nil {
+	if err := writer.AppendAll(events); err != nil {
 		return fmt.Errorf("append context-trace event: %w", err)
 	}
 
 	// count events for output
-	events, _ := contexttrace.ReadEvents(writer.Path())
-	eventCount := len(events)
+	all, _ := contexttrace.ReadEvents(writer.Path())
+	eventCount := len(all)
 
 	// output JSON
 	output := sessionContextTraceOutput{
@@ -87,8 +81,58 @@ func runAgentSessionContextTrace(inst *agentinstance.Instance, _ []string) error
 		AgentID:    inst.AgentID,
 		TracePath:  writer.Path(),
 		EventCount: eventCount,
+		Appended:   len(events),
 	}
 	jsonOut, _ := cli.MarshalJSONIndent(output)
 	trackContextBytes(int64(len(jsonOut)))
 	return cli.WriteJSONBytes(os.Stdout, jsonOut)
+}
+
+// parseContextTraceInput parses stdin as one JSON event or as JSONL. Every
+// line must be a valid event with type and source; any failure rejects the
+// whole batch so a self-report is never half-written.
+func parseContextTraceInput(data []byte) ([]contexttrace.Event, error) {
+	trimmed := bytes.TrimSpace(data)
+	// A single (possibly pretty-printed, multi-line) object.
+	var single contexttrace.Event
+	if err := json.Unmarshal(trimmed, &single); err == nil {
+		if err := validateContextTraceEvent(single, 0); err != nil {
+			return nil, err
+		}
+		return []contexttrace.Event{single}, nil
+	}
+
+	var events []contexttrace.Event
+	for i, line := range bytes.Split(trimmed, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var ev contexttrace.Event
+		if err := json.Unmarshal(line, &ev); err != nil {
+			return nil, fmt.Errorf("invalid JSON event on line %d (nothing written): %w", i+1, err)
+		}
+		if err := validateContextTraceEvent(ev, i+1); err != nil {
+			return nil, err
+		}
+		events = append(events, ev)
+	}
+	if len(events) == 0 {
+		return nil, fmt.Errorf("invalid JSON event: no events in input")
+	}
+	return events, nil
+}
+
+func validateContextTraceEvent(ev contexttrace.Event, line int) error {
+	where := ""
+	if line > 0 {
+		where = fmt.Sprintf(" (line %d; nothing written)", line)
+	}
+	if ev.Type == "" {
+		return fmt.Errorf("event must have a 'type' field (provided or influenced)%s", where)
+	}
+	if ev.Source == "" {
+		return fmt.Errorf("event must have a 'source' field%s", where)
+	}
+	return nil
 }

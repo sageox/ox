@@ -352,7 +352,9 @@ func (c *KBClient) do(ctx context.Context, method, reqURL string, body []byte) (
 		// 403 and 404 are the "kb feature flag is off / endpoint missing /
 		// non-member scope" signal — all surface as the same non-fatal
 		// sentinel so callers can treat them uniformly via errors.Is.
-		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
+		// 405 is the same signal from a server whose route does not accept this
+		// method: it does not offer the operation, so it is unavailable here
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
 			return nil, fmt.Errorf("%w: HTTP %d from %s", ErrKBAPIUnavailable, resp.StatusCode, reqURL)
 		}
 		if resp.StatusCode == http.StatusUnauthorized {

@@ -24,34 +24,45 @@ import (
 // Failure prevented: the stop publishes the author's unsaved edit to plan.md
 // with them.
 func TestReconcileProducedPlansAtStop_CommitsOnlyTheFilesItWrites(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: real git clone + push")
-	}
-	root := newPlanCaptureTestRepo(t)
-	ledger, remote := newSharedLedger(t, root, true)
-	meta := plan.Meta{Topic: "Stop commit scope", CreatedAt: time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)}
-	dir, _, err := plan.Save(root, plan.Input{Raw: "# Stop commit scope\n"}, plan.Result{}, nil, meta)
-	if err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	runGitInDir(t, ledger, "add", "data")
-	runGitInDir(t, ledger, "commit", "-q", "-m", "plan: stop commit scope")
-	runGitInDir(t, ledger, "push", "-q")
-	if err := os.WriteFile(filepath.Join(dir, "plan.md"), []byte("# Stop commit scope\n\nhalf-written\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	for _, state := range []string{"unstaged", "staged"} {
+		t.Run(state, func(t *testing.T) {
+			if testing.Short() {
+				t.Skip("short: real git clone + push")
+			}
+			root := newPlanCaptureTestRepo(t)
+			ledger, remote := newSharedLedger(t, root, true)
+			meta := plan.Meta{Topic: "Stop commit scope", CreatedAt: time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)}
+			dir, _, err := plan.Save(root, plan.Input{Raw: "# Stop commit scope\n"}, plan.Result{}, nil, meta)
+			if err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			runGitInDir(t, ledger, "add", "data")
+			runGitInDir(t, ledger, "commit", "-q", "-m", "plan: stop commit scope")
+			runGitInDir(t, ledger, "push", "-q")
+			if err := os.WriteFile(filepath.Join(dir, "plan.md"), []byte("# Stop commit scope\n\nhalf-written\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 
-	reconcileProducedPlansAtStop(root, []string{"stop-commit-scope"}, "ses_stopscope01")
+			if state == "staged" {
+				runGitInDir(t, ledger, "add", filepath.ToSlash(filepath.Join("data", "plans", filepath.Base(dir), "plan.md")))
+			}
 
-	rel := "data/plans/" + filepath.Base(dir)
-	if got := strings.Fields(runGitInDir(t, remote, "show", "--name-only", "--format=", "main")); !slices.Equal(got, []string{rel + "/meta.json"}) {
-		t.Fatalf("the stop's commit on the remote carries %v, want only its meta.json", got)
-	}
-	if got := runGitInDir(t, remote, "show", "main:"+rel+"/plan.md"); got != "# Stop commit scope" {
-		t.Fatalf("the stop published the author's unsaved plan.md: %q", got)
-	}
-	if got := runGitInDir(t, ledger, "diff", "--name-only"); got != rel+"/plan.md" {
-		t.Fatalf("the author's edit must stay uncommitted, unstaged changes %q", got)
+			reconcileProducedPlansAtStop(root, []string{"stop-commit-scope"}, "ses_stopscope01")
+
+			rel := "data/plans/" + filepath.Base(dir)
+			if got := strings.Fields(runGitInDir(t, remote, "show", "--name-only", "--format=", "main")); !slices.Equal(got, []string{rel + "/meta.json"}) {
+				t.Fatalf("the stop's commit on the remote carries %v, want only its meta.json", got)
+			}
+			if got := runGitInDir(t, remote, "show", "main:"+rel+"/plan.md"); got != "# Stop commit scope" {
+				t.Fatalf("the stop published the author's unsaved plan.md: %q", got)
+			}
+			if got := runGitInDir(t, ledger, "diff", "HEAD", "--name-only"); got != rel+"/plan.md" {
+				t.Fatalf("the author's edit must stay uncommitted, changed paths %q", got)
+			}
+			if got, err := os.ReadFile(filepath.Join(dir, "plan.md")); err != nil || string(got) != "# Stop commit scope\n\nhalf-written\n" {
+				t.Fatalf("the author's edit changed: %q (%v)", got, err)
+			}
+		})
 	}
 }
 

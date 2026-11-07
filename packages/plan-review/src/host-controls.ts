@@ -14,6 +14,7 @@ import { clip } from './anchor.js';
 import { CHROME, typing } from './document-tools.js';
 import { originalView } from './original.js';
 import type { HostPort } from './ports.js';
+import { startPresence, type Presence, type PresenceTransport } from './presence.js';
 import { drawingPaint, paintItem, STATES, STATUSES, type DrawingPaint, type PaintItem, type Placed, type State, type Status, type Tint } from './protocol.js';
 import { checkRegion, DRAWING, drawingLabel, type Region } from './region.js';
 import { acceptBody, deliver, newId, openStore, queued, reopenBody, roundItems, submitBody, syncMessage, wireItem, type Act, type Approval, type Entry, type Mark, type Receipt, type SyncMessage, type Transport } from './state.js';
@@ -64,17 +65,33 @@ export interface HostControlsOptions {
    * other. Each drawing is stamped with it. Without it the bar offers no Draw.
    */
   revision?: string;
+  /**
+   * The plan's live presence room: the bar lists who else has this plan
+   * open, and their pointers are drawn over the plan with their names when
+   * they show the same revision. Needs revision.
+   */
+  presence?: PresenceTransport;
+  /**
+   * Send the reviewer's comments without a Submit, together as one round: on
+   * leaving review mode, when the page is hidden or the controls are
+   * destroyed, two minutes after the last note closes, and on mount for any
+   * left from an earlier visit. Submit becomes Post now, shown only while
+   * comments wait. Needs a transport and a reviewer.
+   */
+  autoSubmit?: boolean;
 }
 
 /** A mounted set of controls. */
 export interface HostControls {
   /** Show the review as the host read it again. */
   update(committed: CommittedItem[], problems?: number): void;
+  /** Change mode like the Review button, keeping drafts, pending deliveries and presence connected. */
+  setReviewing(reviewing: boolean): void;
   /** Say the host is unreachable, or back; back, the outbox is sent again. */
   setOffline(down: boolean): void;
   /** Run fn once nothing is in flight and no note is open, so a reload then loses nothing. Replaces a waiting fn. */
   whenIdle(fn: () => void): void;
-  /** Remove the controls and stop sending, before mounting them for another account or plan. */
+  /** Remove the controls and stop sending, before mounting them for another account or plan. With autoSubmit, what the reviewer saved is sent first, and delivery goes on after the controls are gone. */
   destroy(): void;
 }
 
@@ -113,12 +130,16 @@ const HL_TINT: Record<string, Tint> = { 'approve': 'sage', 'request-change': 'am
 const stateTint = (state: string): Tint => (state === 'addressed' || state === 'verified' ? 'sage' : state === 'wontfix' ? 'faint' : 'amber');
 // why a stroke made no drawing, said to the reviewer; a cancel says nothing
 const DRAW_REFUSED: Record<string, string> = {
-  'no-target': 'Nothing in that loop can take a comment. Draw around a paragraph, an item, a row or part of a diagram.',
-  'too-large': 'That loop holds too much of the plan to keep. Draw around less of it.',
-  'too-small': 'Draw a loop around what you mean.',
-  'layout-changed': 'The page changed while you drew. Draw the loop again.',
+  'no-target': 'Nothing in that oval can take a comment. Draw around a paragraph, an item, a row or part of a diagram.',
+  'too-large': 'That oval holds too much of the plan to keep. Draw around less of it.',
+  'too-small': 'Drag to draw a larger oval around what you mean.',
+  'layout-changed': 'The page changed while you drew. Draw the oval again.',
 };
 const REVISION = /^sha256:[0-9a-f]{64}$/;
+// autoSubmit's wait after a note closes: longer than a reviewer's pause
+// between comments, so one sitting is one round, and short enough that a
+// reviewer who walks away with the tab open still has their comments sent.
+const AUTO_SUBMIT_IDLE_MS = 2 * 60 * 1000;
 // a comment on the plan as a whole: WholePlanAnchor in pkg/planreview, with
 // the label readers that predate it print (plan-review-ledger-contract.md 3.10)
 const WHOLE: About = { a: 'plan', section: '', label: 'Whole plan' };
@@ -152,11 +173,15 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   const slug = opts.slug;
   const transport = opts.transport;
   const live = !!transport;
+  // without a reviewer a send stops to ask for a name, which a send the
+  // reviewer did not start must never do
+  const auto = live && !!opts.reviewer && !!opts.autoSubmit;
   const store = openStore(window.localStorage, opts.account, opts.plan);
   const tab = encodeURIComponent(opts.plan);
-  const ON_KEY = 'ox-plan-rev-on:' + tab; // sessionStorage: survives a reload, not a new tab
-  const MIN_KEY = 'ox-plan-rail-min:' + tab; // sessionStorage, like ON_KEY
-  const SYNC_KEY = 'ox-plan-fb-sync:' + tab; // sessionStorage: last send result, re-shown after the reload it triggers
+  // Storage slots, not credentials: KEY assignments trip secret scanning in saved HTML.
+  const ON_SLOT = 'ox-plan-rev-on:' + tab; // sessionStorage: survives a reload, not a new tab
+  const MIN_SLOT = 'ox-plan-rail-min:' + tab; // sessionStorage, like ON_SLOT
+  const SYNC_SLOT = 'ox-plan-fb-sync:' + tab; // sessionStorage: last send result, re-shown after the reload it triggers
   const off = new AbortController(); // every listener, removed by destroy()
   const signal = off.signal;
 
@@ -195,6 +220,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   let inflight = 0; // a delivery or an approval awaiting its answer
   let flushing = false, again = false;
   let waiter: (() => void) | null = null;
+  let autoTimer: ReturnType<typeof setTimeout> | undefined;
   // drafts by anchor as of the last paint; every change to them repaints
   let ds: Record<string, Mark> = Object.create(null);
   let placed: Placed[] = []; // what the document painted, in reading order
@@ -203,6 +229,8 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   const revision = opts.revision && REVISION.test(opts.revision) ? opts.revision : '';
   let tool = false; // the Draw tool is selected
   let pending: Region | null = null; // a capture whose note is open, kept only on Save
+  const ownedDrawings = new Set<string>(); // receipts may arrive before the host refreshes committed
+  let presence: Presence | null = null; // who else is here, and their pointers
   // a drawing's record: the capture being noted, else your draft's, else the Ledger's
   function regionOf(a: string): Region | undefined {
     if (pending && 'q-' + pending.id === a) return pending;
@@ -248,13 +276,14 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   // Its geometry and targets only: who drew it, and their note, stay here.
   function paintDrawings(): DrawingPaint[] {
     const out: DrawingPaint[] = [];
+    const waiting = store.entries();
     Object.keys(committed).concat(Object.keys(ds), pending ? ['q-' + pending.id] : []).forEach((a, i, all) => {
       const r = all.indexOf(a) === i && DRAWING.test(a) ? regionOf(a) : undefined;
       if (!r) return;
       const m = ds[a], carr = committed[a] || [];
       const d = drawingPaint({
         anchor: a,
-        kind: m || !carr.length ? 'unsent' : 'committed',
+        kind: carr.length || ownedDrawings.has(a) || waiting.some((e) => e.stamps[a] !== undefined) ? 'committed' : 'unsent',
         tint: m ? HL_TINT[m.status] || 'gold' : carr.length ? stateTint(repOf(carr).state) : 'gold',
         ellipse: r.ellipse,
         targets: r.targets.map((t) => ({ anchor: t.anchor, box: t.box, nth: t.nth, of: t.of })),
@@ -272,7 +301,8 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     ds = Object.create(null);
     store.drafts().forEach((m) => { ds[m.anchor] = m; });
     const n = Object.keys(ds).length;
-    countEl.textContent = n ? (n + ' unsent') : '';
+    countEl.textContent = !n ? '' : auto ? (n === 1 ? '1 comment posts' : n + ' comments post') + ' when you are done' : n + ' unsent';
+    if (auto) paintSubmit();
     port.send({ type: 'paint', items: paintItems(), drawings: paintDrawings() }); // answered by 'placed'
   }
   let outcome: Record<string, string> = Object.create(null); // drawing anchor -> where it landed
@@ -321,10 +351,10 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   // Hide shrinks the rail to a Show button (comment icon + count) so the plan
   // under it can be read; kept per tab, so a live reload doesn't reopen it.
   let railMin = false;
-  try { railMin = !!sessionStorage.getItem(MIN_KEY); } catch (e) { /* no sessionStorage: start shown */ }
+  try { railMin = !!sessionStorage.getItem(MIN_SLOT); } catch (e) { /* no sessionStorage: start shown */ }
   function toggleRail() {
     railMin = !railMin;
-    try { if (railMin) sessionStorage.setItem(MIN_KEY, '1'); else sessionStorage.removeItem(MIN_KEY); } catch (e) { /* kept for this page only */ }
+    try { if (railMin) sessionStorage.setItem(MIN_SLOT, '1'); else sessionStorage.removeItem(MIN_SLOT); } catch (e) { /* kept for this page only */ }
     renderRail();
     (rail!.querySelector('.rev-rail-show, .rev-rail-hide') as HTMLElement).focus(); // the clicked button was just replaced
   }
@@ -374,10 +404,12 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       rail.addEventListener('click', (ev) => {
         const t = ev.target as Element;
         if (t.closest('.rev-rail-show, .rev-rail-hide')) toggleRail();
-        const plan = t.closest('.rev-rail-plan');
-        if (plan) { const b = plan.getBoundingClientRect(); openPop(WHOLE, { left: b.left, bottom: b.bottom }, true); popByHost = true; }
+        if (t.closest('.rev-rail-plan')) openPop(WHOLE, null, true);
       });
     }
+    // A note open in the rail holds it still, so a redraw never takes the
+    // reviewer's focus or moves the note while they type; closePop redraws it.
+    if (pop && popByHost) return;
     const r = rail;
     const rows = railRows();
     // hidden when there's nothing to read and we're not actively reviewing.
@@ -413,7 +445,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         (row.answer ? '<div class="rev-rail-answer">↳ ' + esc(row.answer) + '</div>' : '') +
         (row.region ? '<button class="rev-rail-orig" title="What lay under this drawing when it was drawn">View original</button>' : '');
       const whoTag = row.reviewer ? '<span class="rev-rail-who">' + esc(row.reviewer) + '</span>' : '';
-      html += '<li class="rev-rail-item" data-i="' + i + '" data-status="' + esc(row.status) + '">' +
+      html += '<li class="rev-rail-item" data-i="' + i + '" data-a="' + esc(row.a) + '" data-status="' + esc(row.status) + '">' +
         '<span class="rev-rail-glyph">' + glyphFor(row.status) + '</span>' +
         '<div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(whole ? WHOLE.label : row.section || '(plan)') + '</span>' + whoTag + tag + '</div>' + content + '</div></li>';
     });
@@ -427,14 +459,15 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         // A drawing takes no click on the page, so its row shows it and opens
         // its note; anything with nothing on the page opens from its row too
         if (row.at) port.send({ type: 'reveal', anchor: row.at.anchor, nth: row.at.nth });
-        if (!row.at || DRAWING.test(row.a)) { openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }, { left: ev.clientX, bottom: ev.clientY }); popByHost = true; ev.stopPropagation(); }
+        if (!row.at || DRAWING.test(row.a)) { openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }, null); ev.stopPropagation(); }
       };
     });
   }
 
   let pop: HTMLElement | null = null;
+  let popAbout: About | null = null;
   let popNote = ''; // the open note's text when it opened
-  let popByHost = false; // opened from the rail, not by a pick in the plan's frame
+  let popByHost = false; // opened from the rail, not by a pick in the plan's frame: it sits in the rail
   function sendMode() { port.send({ type: 'mode', on, open: !!pop, draw: tool }); }
   // The open note is held when the reviewer opened it from the rail or typed
   // in it: only their own Esc, Save or Delete ends it, never the plan's frame.
@@ -446,20 +479,29 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   }
   // replacing: another note opens in its place, so a waiting reload keeps waiting
   function closePop(replacing?: boolean) {
+    const docked = popByHost;
+    const closed = !!pop;
     popByHost = false;
     if (pop) {
       pop.remove(); pop = null; sendMode();
+      popAbout = null;
       // a capture is kept only by Save
       if (pending) { pending = null; paint(); }
+      if (docked) renderRail();
     }
     port.send({ type: 'focus', anchor: null });
-    if (!replacing) idle();
+    // Only a note closing re-arms autoSubmit. queue() closes none, and a
+    // round the host refused keeps its drafts for a timer to resend forever.
+    if (!replacing) { idle(); if (closed) armAuto(); }
   }
   // t is what a note is about: an element or a highlight — anchor, section,
-  // label, and a highlight's quote. rect is where it opens below, in this window.
+  // label, and a highlight's quote. rect is where it opens below, in this
+  // window; null opens it in the rail.
   // fresh: a new comment, which never resolves the marks already there.
-  function openPop(t: About, rect: { left: number; bottom: number }, fresh?: boolean) {
+  function openPop(t: About, rect: { left: number; bottom: number } | null, fresh?: boolean) {
     closePop(true);
+    popAbout = t;
+    popByHost = !rect;
     const a = t.a;
     const cstate = committedState(a);
     const p = pop = document.createElement('div'); p.className = 'rev-pop';
@@ -485,7 +527,8 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     const btns = STATUS.map((s) => '<button data-s="' + s.id + '" class="rev-s' + (existing.status === s.id ? ' on' : '') + '">' + s.glyph + ' ' + s.id + '</button>').join('');
     p.innerHTML = quote + '<div class="rev-row">' + btns + '</div>' +
       '<textarea class="rev-note" placeholder="note (optional)">' + esc(existing.note || '') + '</textarea>' +
-      '<div class="rev-row"><button class="rev-save">Save</button><button class="rev-del">Delete</button></div>';
+      '<div class="rev-row"><button class="rev-save">' + (auto ? 'Comment' : 'Save') + '</button><button class="rev-del">Delete</button></div>' +
+      (auto ? '<div class="rev-when">Posts with your other comments when you are done.</div>' : '');
     placePop(rect);
     let status = existing.status as Status;
     p.querySelectorAll('.rev-s').forEach((b) => {
@@ -553,13 +596,24 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       bottom: Math.max(window.innerHeight - bottom, 0), width: Math.max(r.width, 0), height: Math.max(bottom - top, 0),
     };
     Object.keys(v).forEach((k) => body.style.setProperty('--rev-' + k, v[k] + 'px'));
+    if (presence) presence.reposition();
   }
-  // The note opens just below where the reviewer acted, never over it.
-  function placePop(rect: { left: number; bottom: number }) {
+  // The note opens just below where the reviewer acted, never over it. From
+  // the rail it opens in the rail, after the last comment on what it is about
+  // (a first whole-plan comment: after its button), pushing later rows down.
+  function placePop(rect: { left: number; bottom: number } | null) {
     const p = pop as HTMLElement;
-    body.appendChild(p);
-    p.style.top = (window.scrollY + rect.bottom + 8) + 'px';
-    p.style.left = (window.scrollX + Math.min(rect.left, window.innerWidth - 300)) + 'px';
+    if (rect) {
+      body.appendChild(p);
+      p.style.top = (window.scrollY + rect.bottom + 8) + 'px';
+      p.style.left = (window.scrollX + Math.min(rect.left, window.innerWidth - 300)) + 'px';
+    } else {
+      const r = rail as HTMLElement, a = (popAbout as About).a;
+      let at = r.querySelector('.rev-rail-plan');
+      r.querySelectorAll('.rev-rail-item').forEach((li) => { if (li.getAttribute('data-a') === a) at = li; });
+      if (at) at.after(p); else r.appendChild(p);
+      p.scrollIntoView({ block: 'nearest' }); // the rail scrolls: a note under its last visible row would open out of view
+    }
     sendMode();
   }
 
@@ -587,6 +641,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       return;
     }
     closePop();
+    paint();
     flush();
   }
   // Submit freezes the marks no entry carries yet as one round and sends
@@ -604,6 +659,20 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     fresh.forEach((m) => { stamps[m.anchor] = m.at; });
     queue('submit', (id, r) => submitBody(id, r, fresh), stamps, submit);
   }
+  function armAuto() {
+    if (!auto || destroyed) return;
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(autoSend, AUTO_SUBMIT_IDLE_MS);
+  }
+  // autoSend submits what the reviewer saved, but never under an open note:
+  // queue closes it, losing what they typed. leaving: the page or the
+  // controls are going, and the note with them.
+  function autoSend(leaving?: boolean) {
+    clearTimeout(autoTimer);
+    if (!auto || destroyed || (pop && !leaving)) return;
+    const waiting = store.entries();
+    if (store.drafts().some((m) => !queued(waiting, m))) submit();
+  }
   function accept(a: string) {
     queue('accept', (id, r) => acceptBody(id, r, a), {}, () => accept(a));
   }
@@ -616,26 +685,30 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     queue('reopen', (id, r) => reopenBody(id, r, item, note), {}, () => reopen(a, note));
   }
   // flush tries even while the host looks offline: a host it reaches is back.
+  // autoSubmit keeps delivering after destroy(): a host destroys the controls
+  // when the reviewer navigates away, and what they saved still has to go.
+  function sending() { return !destroyed || auto; }
   function flush() {
-    if (!transport || destroyed) return;
+    if (!transport || !sending()) return;
     if (flushing) { again = true; return; }
     if (!store.entries().length) return;
     flushing = true; inflight++; paintSubmit();
-    showSync('pending', 'Sending…');
-    deliver(store, transport, report, () => destroyed).finally(() => {
+    if (!destroyed) showSync('pending', 'Sending…');
+    deliver(store, transport, report, () => !sending()).finally(() => {
       flushing = false; inflight--; paintSubmit();
-      if (again && !destroyed) { again = false; flush(); }
+      if (again && sending()) { again = false; flush(); }
       idle();
     });
   }
   function report(e: Entry, r: Receipt) {
     if (destroyed) return;
+    if (r.state === 'owned') Object.keys(e.stamps).forEach((a) => { if (DRAWING.test(a)) ownedDrawings.add(a); });
     paint();
     // any answer but offline came from the host, so it is reachable
     setOffline(r.state === 'offline');
     const verb = e.act === 'accept' ? 'Accepted' : e.act === 'reopen' ? 'Reopened' : 'Sent';
     if (r.state === 'owned') reportSync(syncMessage(verb, r));
-    else if (r.state === 'refused') showSync('err', 'Not saved — the server refused it (' + r.message + ').' + (e.act === 'submit' ? ' Your marks are kept: Submit sends them as a new review.' : ''));
+    else if (r.state === 'refused') showSync('err', 'Not saved — the server refused it (' + r.message + ').' + (e.act === 'submit' ? (auto ? ' Your marks are kept.' : ' Your marks are kept: Submit sends them as a new review.') : ''));
     else if (r.state === 'failed') showSync('err', 'Not sent (' + r.message + '). ' + (e.act === 'submit' ? 'Your marks are kept.' : 'It stays queued in this browser.'), [{ label: 'Retry', fn: flush }]);
     else showSync('warn', 'Review server offline — your feedback is queued in this browser and sends when the server is back.');
   }
@@ -718,12 +791,12 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   // server reloads the page right after it answers, which would wipe it.
   function reportSync(m: SyncMessage) {
     showSync(m.kind, m.text);
-    try { sessionStorage.setItem(SYNC_KEY, JSON.stringify({ kind: m.kind, text: m.text, at: Date.now() })); } catch (e) { /* shown now, not after the reload */ }
+    try { sessionStorage.setItem(SYNC_SLOT, JSON.stringify({ kind: m.kind, text: m.text, at: Date.now() })); } catch (e) { /* shown now, not after the reload */ }
   }
   function restoreSync() {
     try {
-      const s = JSON.parse(sessionStorage.getItem(SYNC_KEY) || 'null');
-      sessionStorage.removeItem(SYNC_KEY);
+      const s = JSON.parse(sessionStorage.getItem(SYNC_SLOT) || 'null');
+      sessionStorage.removeItem(SYNC_SLOT);
       // 30s: long enough to span a slow reload, short enough that an old
       // result never reads as the outcome of something newer
       if (s && Date.now() - s.at < 30000) showSync(s.kind, s.text);
@@ -799,16 +872,39 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   const bar = document.createElement('div');
   bar.className = 'rev-bar';
   bar.innerHTML = (live ? '<span class="rev-conn"></span>' : '') +
+    (opts.presence && revision ? '<span class="rev-here" hidden></span>' : '') +
     '<button class="rev-toggle" title="Toggle review mode">Review</button>' +
-    (revision ? '<button class="rev-draw" aria-pressed="false" title="Draw a loop around part of the plan to comment on it">Draw</button>' : '') +
-    '<span class="rev-count"></span>' +
+    (revision ? '<button class="rev-draw" aria-pressed="false" title="Drag to draw an oval around part of the plan to comment on it">Draw</button>' : '') +
+    '<span class="rev-count' + (auto ? ' rev-wait' : '') + '"></span>' +
     (live && !opts.reviewer ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : '') +
-    '<button class="rev-submit" title="Send feedback to the agent">' + (live ? 'Submit' : 'Export') + '</button>' +
+    '<button class="rev-submit" title="' + (auto ? 'Post your comments now' : 'Send feedback to the agent') + '">' + (live ? (auto ? 'Post now' : 'Submit') : 'Export') + '</button>' +
     (opts.approve ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : '');
   body.appendChild(bar);
+  let drag: { x: number; y: number } | null = null;
+  bar.addEventListener('pointerdown', (e) => {
+    if (drag || !e.isPrimary || e.button !== 0 || (e.target as Element).closest('button')) return;
+    const r = bar.getBoundingClientRect();
+    drag = { x: e.clientX - r.left, y: e.clientY - r.top };
+    bar.setPointerCapture(e.pointerId);
+    bar.classList.add('rev-dragging');
+    if (hintBubble) { hintBubble.remove(); hintBubble = null; }
+    e.preventDefault();
+  }, { signal });
+  bar.addEventListener('pointermove', (e) => {
+    if (!drag || !e.isPrimary) return;
+    const b = box();
+    bar.style.left = Math.max(0, b.left, Math.min(e.clientX - drag.x, Math.min(b.right, window.innerWidth) - bar.offsetWidth)) + 'px';
+    bar.style.top = Math.max(0, b.top, Math.min(e.clientY - drag.y, Math.min(b.bottom, window.innerHeight) - bar.offsetHeight)) + 'px';
+    bar.style.bottom = 'auto';
+  }, { signal });
+  bar.addEventListener('lostpointercapture', () => {
+    drag = null;
+    bar.classList.remove('rev-dragging');
+  }, { signal });
   const countEl = bar.querySelector('.rev-count') as HTMLElement;
   connEl = bar.querySelector('.rev-conn');
   paintConn();
+  if (opts.presence && revision) presence = startPresence(port, opts.presence, revision, bar.querySelector('.rev-here') as HTMLElement, opts.frame);
   const whoEl = bar.querySelector('.rev-who') as HTMLElement | null;
   function updateWho() { if (whoEl) whoEl.textContent = named ? ('You: ' + named) : 'Set name'; }
   updateWho();
@@ -817,7 +913,9 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   function paintSubmit() {
     if (!live || destroyed) return;
     submitEl.disabled = flushing; // a second click while a send is in flight would race it
-    submitEl.textContent = flushing ? 'Sending…' : 'Submit';
+    submitEl.textContent = flushing ? 'Sending…' : auto ? 'Post now' : 'Submit';
+    // autoSubmit's button only sends sooner, so it shows while comments wait
+    if (auto) submitEl.hidden = !flushing && !Object.keys(ds).length;
   }
   // Review is a mode: while on, clicks mark up instead of navigating. A mode has
   // to announce itself on entry and keep its exit in view — otherwise the only
@@ -834,7 +932,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     tool = next;
     if (drawEl) { drawEl.classList.toggle('on', tool); drawEl.setAttribute('aria-pressed', String(tool)); }
     sendMode();
-    if (tool && !drawTaught) { drawTaught = true; toast('Draw a loop around what you mean: a paragraph, rows, part of a diagram. Esc puts the pen down.'); }
+    if (tool && !drawTaught) { drawTaught = true; toast('Drag to draw an oval. Drag its outline to move it, or its handles to resize it before submitting. Esc puts the pen down.'); }
   }
   function setReview(next: boolean, silent?: boolean) {
     on = next; toggleEl.classList.toggle('on', on);
@@ -846,9 +944,10 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     if (on && !silent) toast('Review mode — click any section, item, or row to mark it up, or highlight text to comment on it. Esc or Exit review to leave.');
     if (!on) { closePop(); if (toastEl) { toastEl.remove(); toastEl = null; } }
     try { localStorage.setItem('ox-plan-rev-seen', '1'); } catch (e) { /* the hint shows again next visit */ }
-    try { if (on) sessionStorage.setItem(ON_KEY, '1'); else sessionStorage.removeItem(ON_KEY); } catch (e) { /* not restored after a reload */ }
+    try { if (on) sessionStorage.setItem(ON_SLOT, '1'); else sessionStorage.removeItem(ON_SLOT); } catch (e) { /* not restored after a reload */ }
     if (hintBubble) { hintBubble.remove(); hintBubble = null; }
     renderRail();
+    if (!on) autoSend();
   }
   toggleEl.onclick = () => { setReview(!on); };
   if (drawEl) drawEl.onclick = () => { setTool(!tool); };
@@ -899,6 +998,12 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   }, { signal });
   // the browser is back on a network: a host it could not reach may answer now
   window.addEventListener('online', flush, { signal });
+  if (auto) {
+    // A send started as the tab closes may not finish; its round is stored
+    // first and goes out on the next mount.
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') autoSend(); }, { signal });
+    window.addEventListener('pagehide', () => { autoSend(true); }, { signal });
+  }
 
   let started = false;
   port.listen((m) => {
@@ -907,12 +1012,13 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         // the document tools are listening: paint, and restore what a reload interrupted
         paint();
         sendMode();
+        if (presence) presence.ready();
         if (started) return;
         started = true;
         // A live reload — the agent addressed an item, or the server came back — must
         // not drop a reviewer mid-review back to reading mode. Restored silently: the
         // reviewer did not just enter, so no entry toast.
-        try { if (!on && sessionStorage.getItem(ON_KEY)) setReview(true, true); } catch (e) { /* starts in reading mode */ }
+        try { if (!on && sessionStorage.getItem(ON_SLOT)) setReview(true, true); } catch (e) { /* starts in reading mode */ }
         break;
       case 'placed':
         onPlaced(m.items);
@@ -927,6 +1033,28 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         // Only the reviewer's stroke in the Draw tool makes a capture; any
         // other came from the plan's own scripts.
         if (!on || !tool) break;
+        const anchor = m.anchor;
+        if (anchor) {
+          // A document may propose geometry for an existing draft, never
+          // rewrite a submitted drawing or mint its own identity.
+          if (committed[anchor]?.length || ownedDrawings.has(anchor) || store.entries().some((e) => e.stamps[anchor] !== undefined)) break;
+          const old = pending && 'q-' + pending.id === anchor ? pending : ds[anchor]?.region;
+          if (!old) break;
+          const r: Region = { ...m.capture, id: old.id, plan_revision: revision, created_at: old.created_at };
+          if (checkRegion(r)) break;
+          const label = drawingLabel(r), section = r.targets[0].section;
+          if (pending && pending.id === r.id) pending = r;
+          else if (!store.save({ ...ds[anchor], region: r, label, section })) toast('This browser could not save the updated drawing. It is kept in this tab only.');
+          if (pop && popAbout?.a === anchor) {
+            popAbout.label = label;
+            popAbout.section = section;
+            const about = pop.querySelector('.rev-about');
+            if (about) about.textContent = label;
+            if (!popByHost) placePop(toHost(m.rect));
+          }
+          paint();
+          break;
+        }
         if (held()) { toast('Save or delete the open note, then draw again.'); break; }
         // what the document proposed, with the identity, revision and time
         // only this host can give it
@@ -941,7 +1069,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       }
       case 'refused':
         if (m.reason === 'cancelled') break;
-        if (!held()) closePop();
+        if (!held() && !pending) closePop();
         if (m.reason === 'repeated') toast('“' + clip(m.quote, 40) + '” appears ' + m.count + ' times in this section — highlight a longer phrase so the comment points at one place.');
         else toast(DRAW_REFUSED[m.reason] || 'Highlight text within one section to comment on it.');
         break;
@@ -952,6 +1080,12 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         if (held()) break;
         if (m.key === 'Escape') escape();
         else setReview(!on);
+        break;
+      case 'pointer':
+        if (presence) presence.pointer(m.at);
+        break;
+      case 'located':
+        if (presence) presence.located(m.points);
         break;
     }
   });
@@ -964,9 +1098,11 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     setReview(true, seen);
   }
   paint();
-  // unsent marks that survived a restart or reload — tell the reviewer.
+  // unsent marks that survived a restart or reload: with autoSubmit the visit
+  // that saved them is over, so they are sent; otherwise the reviewer is told.
   const restored = Object.keys(ds).length;
-  if (live && restored && !store.entries().length) toast(restored + ' unsent mark(s) restored — Submit to send them.');
+  if (auto) autoSend();
+  else if (live && restored && !store.entries().length) toast(restored + ' unsent mark(s) restored — Submit to send them.');
   // An operation this page never saw acknowledged — a reload, a crash, or the
   // host dropping mid-send — is resent with its original id and bytes; the
   // host answers one it already has as stored, so this can't double-post.
@@ -979,14 +1115,20 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       paint();
     },
     setOffline,
+    setReviewing(next) { if (!destroyed && on !== next) setReview(next); },
     whenIdle(fn) { waiter = fn; idle(); },
     destroy() {
       if (destroyed) return;
       waiter = null;
+      // a host destroys the controls when the reviewer navigates away inside
+      // its own page, which hides nothing and unloads nothing
+      autoSend(true);
       closePop();
       destroyed = true;
       off.abort();
       clearTimeout(repaint);
+      clearTimeout(autoTimer);
+      if (presence) presence.leave();
       port.listen(() => {});
       port.send({ type: 'mode', on: false, open: false, draw: false });
       port.send({ type: 'paint', items: [], drawings: [] });

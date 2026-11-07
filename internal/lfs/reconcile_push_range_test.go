@@ -204,7 +204,8 @@ func TestReconcile_PushRangeIgnoresPointerLookalikes(t *testing.T) {
 // pointers with empty stubs" commit, but history still carried the pointers.
 //
 // Observable difference: the pre-receive hook declines the push before reconcile
-// and accepts it after.
+// and accepts it after. A plan edit someone only staged stays staged and off
+// the remote: the squash once committed the whole index (#1442).
 func TestReconcile_SquashesMissingObjectReferencedOnlyByIntermediateCommit(t *testing.T) {
 	useBundledSessionRules(t)
 	if testing.Short() {
@@ -223,6 +224,10 @@ func TestReconcile_SquashesMissingObjectReferencedOnlyByIntermediateCommit(t *te
 	writeAndCommit(t, ledger, "drop orphaned pointer", map[string]string{"sessions/s1/meta.json": `{"title":"t"}`})
 	writeAndCommit(t, ledger, "unrelated murmur", map[string]string{"data/murmurs/m1.json": `{"content":"m"}`})
 	require.Equal(t, 3, unpushedCount(t, ledger))
+	const stagedPlan = "data/plans/p/plan.md"
+	require.NoError(t, os.MkdirAll(filepath.Join(ledger, "data", "plans", "p"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ledger, filepath.FromSlash(stagedPlan)), []byte("# not saved\n"), 0o644))
+	git(t, ledger, "add", stagedPlan)
 
 	installMissingPointerHook(t, bare, deadOID)
 	ok, out := tryPush(t, ledger)
@@ -241,6 +246,8 @@ func TestReconcile_SquashesMissingObjectReferencedOnlyByIntermediateCommit(t *te
 	ok, out = tryPush(t, ledger)
 	assert.True(t, ok, "push must be accepted once the poisoned commit is squashed away: %s", out)
 	assert.FileExists(t, filepath.Join(ledger, "data", "murmurs", "m1.json"), "squash must keep every unpushed change")
+	assert.NotContains(t, git(t, bare, "ls-tree", "-r", "--name-only", "HEAD"), stagedPlan, "the squash published a staged plan edit")
+	assert.Equal(t, stagedPlan, git(t, ledger, "diff", "--cached", "--name-only"), "the plan edit must stay staged")
 }
 
 // Failure prevented: the repair rewrites the user's working copy, so it must not
@@ -336,8 +343,8 @@ func TestReconcile_InRangeMetadataDisagreementIsReportedInSortedOrder(t *testing
 	}
 }
 
-// Failure prevented: reset --soft to an upstream HEAD does not contain commits
-// the index back over whatever HEAD lacks, reverting a coworker's work.
+// Failure prevented: a squash onto an upstream HEAD does not contain commits
+// HEAD's tree over whatever HEAD lacks, reverting a coworker's work.
 func TestSquashUnpushed_RefusesDivergedBranch(t *testing.T) {
 	useBundledSessionRules(t)
 	if testing.Short() {

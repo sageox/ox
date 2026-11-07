@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +19,9 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/flags"
+	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/telemetry"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -45,6 +49,13 @@ var rootCmd = &cobra.Command{
 	Long:  `Shared team context between your AI and human coworkers. Sessions, ledgers, and team knowledge that make agentic engineering multiplayer.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		preRunReached = true
+		if !cli.IsLongRunning(cmd) && (isFeedbackCommand(cmd) || isHeadlessLedgerRead(cmd)) {
+			actor, agentType := cli.DetectActor(nil)
+			useragent.SetActor(actor, agentType)
+		}
+		if isFeedbackCommand(cmd) {
+			return applyConfigFlag(cmd, args)
+		}
 		if isHeadlessLedgerRead(cmd) {
 			// Hosted reads never consult local preferences. Sync rejects this
 			// flag in RunE using its own receipt; the other protocols refuse it here.
@@ -56,10 +67,18 @@ var rootCmd = &cobra.Command{
 					return &commandExitError{ExitCode: 2, Message: "config is not supported for hosted reads"}
 				}
 			}
+			// Hosted reads build no cfg, so the parsed flag is the resolved value.
+			jsonOutput, _ := cmd.Flags().GetBool("json")
+			publishJSONFlag(cmd, jsonOutput)
 			return nil
 		}
 		if err := applyConfigFlag(cmd, args); err != nil {
 			return err
+		}
+		if config.DisposableMachineEnabled() {
+			if err := gitserver.IsolateManagedClones(); err != nil {
+				slog.Warn("disposable_machine: git in ox's clones still runs their hooks and credential helpers", "error", err)
+			}
 		}
 
 		// initialize CLI context (centralizes config, logger, telemetry)
@@ -72,17 +91,14 @@ var rootCmd = &cobra.Command{
 		// store config in global for backward compatibility
 		cfg = cliCtx.Config
 
-		// Legacy handlers read JSON from local or root flags instead of cfg.
-		// Publish the resolved value without treating an environment default as
-		// an explicit flag. Cobra may retain an inherited flag across ResetFlags,
-		// so the root flag also needs the parsed flag's explicitness.
-		jsonChanged := cmd.Flags().Changed("json")
-		for _, flags := range []*pflag.FlagSet{cmd.Flags(), cmd.Root().PersistentFlags()} {
-			if flag := flags.Lookup("json"); flag != nil {
-				_ = flag.Value.Set(strconv.FormatBool(cfg.JSON))
-				flag.Changed = jsonChanged
-			}
+		// Command telemetry names the person as of the start (see postHogCaptureOpts).
+		if !cliCtx.LongRunning && telemetry.Enabled() && telemetry.PostHogConfigured() {
+			startPostHogIdentity(cliCtx)
 		}
+
+		// Publish the resolved value without treating an environment default as
+		// an explicit flag.
+		publishJSONFlag(cmd, cfg.JSON)
 
 		// Daemon is started by `ox agent prime` as a child process of the coding agent.
 		// No auto-start here — when the agent exits, the daemon gets cleaned up automatically.
@@ -91,6 +107,10 @@ var rootCmd = &cobra.Command{
 		// fire-and-forget heartbeat so daemon always knows current CLI version
 		// (triggers version mismatch restart when CLI is upgraded)
 		maybeHeartbeat(cmd)
+
+		// the rare "star us on GitHub" ask: decide now whether it can show and
+		// refresh its cached answer while the command runs; main prints it
+		beginStarHint()
 
 		// resolve feature flags: daemon cache → disk cache → env vars → defaults
 		initFeatureFlags(cmd)
@@ -112,6 +132,9 @@ var rootCmd = &cobra.Command{
 		return nil
 	},
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
+		if isFeedbackCommand(cmd) {
+			return nil
+		}
 		if isHeadlessLedgerRead(cmd) {
 			return nil
 		}
@@ -164,6 +187,21 @@ func applyConfigFlag(cmd *cobra.Command, _ []string) error {
 	}
 	// Reuse the same selection for reads, writes, caches, and child processes.
 	return os.Setenv(config.EnvUserConfig, path)
+}
+
+// publishJSONFlag sets --json on the flag Cobra parsed and on root's persistent
+// flag, with the parsed flag's explicitness. Legacy handlers read JSON from
+// either one instead of cfg, and the two can be different flags: friction
+// recovery gives root new flags before a retry, while Cobra keeps parsing into
+// the copy it merged into the subcommand earlier.
+func publishJSONFlag(cmd *cobra.Command, value bool) {
+	changed := cmd.Flags().Changed("json")
+	for _, flags := range []*pflag.FlagSet{cmd.Flags(), cmd.Root().PersistentFlags()} {
+		if flag := flags.Lookup("json"); flag != nil {
+			_ = flag.Value.Set(strconv.FormatBool(value))
+			flag.Changed = changed
+		}
+	}
 }
 
 // registerPersistentFlags registers all global persistent flags on rootCmd.
@@ -242,6 +280,7 @@ func init() {
 	releaseNotesCmd.GroupID = "diagnostics"
 	daemonCmd.GroupID = "diagnostics"
 	upgradeCmd.GroupID = "diagnostics"
+	installCmd.GroupID = "diagnostics"
 	guideCmd.GroupID = "diagnostics"
 	gcCmd.GroupID = "diagnostics"
 
@@ -250,6 +289,7 @@ func init() {
 	rootCmd.AddCommand(importCmd)
 	rootCmd.AddCommand(queryCmd)
 	rootCmd.AddCommand(recapCmd)
+	rootCmd.AddCommand(usageDeprecatedCmd) // hidden `ox brief` alias for one release
 	// scoutCmd is feature-gated; registered dynamically in syncFeatureGatedCommands
 	// when FEATURE_SCOUT is enabled (off by default).
 	// bulletinCmd is feature-gated; registered dynamically in syncFeatureGatedCommands
@@ -269,6 +309,7 @@ func init() {
 	rootCmd.AddCommand(releaseNotesCmd)
 	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(upgradeCmd)
+	rootCmd.AddCommand(installCmd)
 	rootCmd.AddCommand(guideCmd)
 	rootCmd.AddCommand(gcCmd)
 

@@ -83,9 +83,12 @@ test('a capture keeps only the fields a region names', () => {
   forged.context.items[0].html = '<img onerror=alert(1)>';
   forged.layout.extra = 1;
   forged.ellipse.color = 'red';
+  // no check refuses runs: only the well-formed ones are kept, as text and box
+  forged.context.runs = [{ text: 'Queue', box: [1, 2, 3, 4], html: '<b>' }, { text: 7, box: [1, 2, 3, 4] }, { text: 'x', box: [1, 2] }];
   const c = captureOf(forged);
   const want = clone(r);
   for (const k of ['id', 'plan_revision', 'created_at']) delete want[k];
+  want.context.runs = [{ text: 'Queue', box: [1, 2, 3, 4] }];
   assert.deepEqual(c, want);
   assert.equal(captureOf({ ...forged, v: 2 }), null);
   assert.equal(captureOf({ ...forged, path: [[0, 0]] }), null);

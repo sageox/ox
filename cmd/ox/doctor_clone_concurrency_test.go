@@ -47,7 +47,7 @@ func startDoctorRepair(t *testing.T, root, ledgerURL, ledgerPath string) (wait f
 	go func() {
 		defer close(done)
 		output = captureStdoutForPlanCLI(t, func() {
-			result = fixRepoPathIssues(root, &config.LocalConfig{}, []repoPathIssue{missing})
+			result = fixRepoPathIssues(t.Context(), root, &config.LocalConfig{}, []repoPathIssue{missing})
 		})
 	}()
 	t.Cleanup(func() { <-done })
@@ -190,7 +190,7 @@ func TestDoctorFix_LedgerAlreadyBeingClonedIsReportedAsCloning(t *testing.T) {
 			var result checkResult
 			start := time.Now()
 			output := captureStdoutForPlanCLI(t, func() {
-				result = fixRepoPathIssues(root, &config.LocalConfig{}, []repoPathIssue{missing})
+				result = fixRepoPathIssues(t.Context(), root, &config.LocalConfig{}, []repoPathIssue{missing})
 			})
 			elapsed := time.Since(start)
 
@@ -217,7 +217,7 @@ func TestDoctorFix_TeamContextAlreadyBeingClonedIsNotAFailure(t *testing.T) {
 
 	var err error
 	output := captureStdoutForPlanCLI(t, func() {
-		err = cloneViaDaemon("http://127.0.0.1:1/team.git", teamPath, "team-context", endpoint.GetForProject(root))
+		err = cloneViaDaemon(t.Context(), "http://127.0.0.1:1/team.git", teamPath, "team-context", endpoint.GetForProject(root))
 	})
 	require.ErrorIs(t, err, daemon.ErrCheckoutInProgress, "callers count it as cloning in the background")
 	assert.NotContains(t, err.Error(), "did not finish")
@@ -312,7 +312,7 @@ func TestDirectCloneLedger_TargetStates(t *testing.T) {
 			target := filepath.Join(t.TempDir(), "ledger")
 			tt.prepare(t, target)
 
-			cloned, err := directCloneLedger(unreachable, target, endpoint.GetForProject(""))
+			cloned, err := directCloneLedger(t.Context(), unreachable, target, endpoint.GetForProject(""))
 			assert.Equal(t, tt.wantCloned, cloned)
 			if tt.wantErr == "" {
 				require.NoError(t, err)
@@ -339,7 +339,7 @@ func TestDoctorFix_DirectCloneOfAFinishedLedgerSaysSo(t *testing.T) {
 
 	var err error
 	output := captureStdoutForPlanCLI(t, func() {
-		err = cloneViaDaemon("http://127.0.0.1:1/ledger.git", target, "ledger", endpoint.GetForProject(root))
+		err = cloneViaDaemon(t.Context(), "http://127.0.0.1:1/ledger.git", target, "ledger", endpoint.GetForProject(root))
 	})
 	require.NoError(t, err)
 	assert.Contains(t, output, "Repository already exists.")
@@ -380,7 +380,7 @@ func TestDoctorFix_FirstRunTeamContextAlreadyBeingClonedIsCloning(t *testing.T) 
 	holdPreCloneLock(t, paths.TeamContextDir(teamID, endpoint.GetForProject(root)))
 
 	var result checkResult
-	output := captureStdoutForPlanCLI(t, func() { result = fixMissingRepos(root, &config.LocalConfig{}) })
+	output := captureStdoutForPlanCLI(t, func() { result = fixMissingRepos(t.Context(), root, &config.LocalConfig{}) })
 
 	require.True(t, result.passed && result.warning, "%s / %s\n%s", result.message, result.detail, output)
 	assert.Contains(t, result.message, "1 repo(s) still cloning in the background")

@@ -19,6 +19,11 @@ import (
 // ErrInstanceNotFound is returned when an operation targets an agent ID that doesn't exist in the store.
 var ErrInstanceNotFound = errors.New("instance not found")
 
+// ErrInstanceExpired is returned by Get when the agent ID's record is still in
+// the store but has expired. Expired records are pruned, so a lookup after the
+// prune reports ErrInstanceNotFound instead.
+var ErrInstanceExpired = errors.New("instance expired")
+
 // Design decision: JSONL storage format
 // Rationale: Append-only enables concurrent writes; scan newest-first for O(recent) lookups;
 // simpler than SQLite for this use case. Abstracted behind Store interface for future migration.
@@ -69,9 +74,17 @@ type Instance struct {
 	PrimeCallCount int `json:"prime_call_count,omitempty"` // number of times prime was called
 }
 
-// IsExpired checks if the instance has expired
+// IsExpired reports whether the instance is past ExpiresAt and its agent
+// process is gone. ExpiresAt bounds how long an abandoned instance lingers; it
+// must not end a live agent's identity, which stays in its context and
+// environment for as long as the agent runs. A desktop session lasting more
+// than a day otherwise could not stop its own recording.
 func (i *Instance) IsExpired() bool {
-	return time.Now().After(i.ExpiresAt)
+	return i.isExpiredAt(time.Now())
+}
+
+func (i *Instance) isExpiredAt(now time.Time) bool {
+	return now.After(i.ExpiresAt) && !i.IsProcessAlive()
 }
 
 // IsProcessAlive checks if the parent agent process is still running.
@@ -105,7 +118,8 @@ type Store struct {
 	instancesPath string
 	userSlug      string
 	mu            sync.RWMutex
-	pruneWG       sync.WaitGroup // tracks background Prune goroutines launched by Get/List
+
+	expiryCheckTestHook func() // called between Get's read and its reply on a miss; tests use it to run a prune in that window
 }
 
 // NewStore initializes an instance store for the given project root.
@@ -131,19 +145,33 @@ func NewStoreForUser(projectRoot string, userSlug string) (*Store, error) {
 		return nil, fmt.Errorf("failed to resolve project root: %w", err)
 	}
 
-	// new path: .sageox/agent_instances/<user-slug>/
-	storePath := filepath.Join(absRoot, sageoxDir, subDir, userSlug)
-	if err := os.MkdirAll(storePath, 0755); err != nil {
+	instancesPath := StorePath(absRoot, userSlug)
+	if err := os.MkdirAll(filepath.Dir(instancesPath), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create instance directory: %w", err)
 	}
 
 	store := &Store{
 		projectRoot:   absRoot,
-		instancesPath: filepath.Join(storePath, fileName),
+		instancesPath: instancesPath,
 		userSlug:      userSlug,
 	}
 
 	return store, nil
+}
+
+// StorePath returns the JSONL file holding userSlug's instances under
+// projectRoot, without creating anything. An empty userSlug means "anonymous",
+// as in NewStoreForUser.
+func StorePath(projectRoot, userSlug string) string {
+	if userSlug == "" {
+		userSlug = "anonymous"
+	}
+	return filepath.Join(projectRoot, sageoxDir, subDir, userSlug, fileName)
+}
+
+// Path returns the JSONL file backing this store.
+func (s *Store) Path() string {
+	return s.instancesPath
 }
 
 // Add appends a new instance to the JSONL file
@@ -287,24 +315,35 @@ func (s *Store) IncrementPrimeCallCount(agentID string) (*Instance, bool, error)
 }
 
 // Get retrieves an instance by agent ID, pruning expired instances during read.
+// A miss wraps ErrInstanceExpired when the agent ID's records are present but
+// expired, and ErrInstanceNotFound otherwise. Both are decided from one read
+// of the file, so a prune that lands afterwards — Get's own compaction, or
+// another ox process's — cannot turn "expired" into "not found".
 //
 // Design decision: Prune on read
 // Rationale: Amortizes cleanup cost; ensures Get() never returns expired instances
-// without extra syscall. Triggers async compaction if thresholds exceeded.
+// without extra syscall. Compacts when thresholds are exceeded (compactIfIdle).
 func (s *Store) Get(agentID string) (*Instance, error) {
 	if agentID == "" {
 		return nil, fmt.Errorf("agent_id cannot be empty")
 	}
 
-	instances, totalCount, expiredCount, err := s.readInstances()
+	var newest *Instance // agentID's last record, live or expired
+	s.mu.RLock()
+	instances, totalCount, expiredCount, err := s.scanInstancesNoLock(func(inst *Instance) {
+		if inst.AgentID == agentID {
+			newest = inst
+		}
+	})
+	s.mu.RUnlock()
 
 	if err != nil {
 		return nil, err
 	}
 
-	// trigger compaction if needed after read
+	// compact if needed after read
 	if s.shouldCompact(totalCount, expiredCount) {
-		s.launchBackgroundPrune()
+		s.compactIfIdle()
 	}
 
 	// scan backwards (newest first) for the matching agent_id
@@ -314,7 +353,14 @@ func (s *Store) Get(agentID string) (*Instance, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("instance not found for agent_id: %s", agentID)
+	if s.expiryCheckTestHook != nil {
+		s.expiryCheckTestHook()
+	}
+	// no live record: any record the read saw had expired
+	if newest != nil {
+		return nil, fmt.Errorf("%w: %s expired at %s", ErrInstanceExpired, agentID, newest.ExpiresAt.Format(time.RFC3339))
+	}
+	return nil, fmt.Errorf("%w for agent_id: %s", ErrInstanceNotFound, agentID)
 }
 
 // List returns all active (non-expired) instances
@@ -325,22 +371,35 @@ func (s *Store) List() ([]*Instance, error) {
 		return nil, err
 	}
 
-	// trigger compaction if needed
+	// compact if needed
 	if s.shouldCompact(totalCount, expiredCount) {
-		s.launchBackgroundPrune()
+		s.compactIfIdle()
 	}
 
 	return instances, nil
 }
 
-// launchBackgroundPrune fires Prune() in a goroutine and tracks it on pruneWG
-// so callers (and tests) can wait for in-flight compactions to complete.
-func (s *Store) launchBackgroundPrune() {
-	s.pruneWG.Add(1)
-	go func() {
-		defer s.pruneWG.Done()
-		_, _ = s.Prune()
-	}()
+// compactIfIdle prunes in the caller's goroutine when no other writer holds the
+// store's mutex or file lock, and otherwise leaves compaction to a later read
+// rather than wait for it: a writer can hold the mutex for up to lockTimeout
+// while it waits on the file lock. It used to run in a background goroutine: a
+// short-lived ox command exited before that finished, and a goroutine that
+// outlived its Get raced whatever removed the store next (a test's temp-dir
+// cleanup).
+func (s *Store) compactIfIdle() {
+	if !s.mu.TryLock() {
+		return
+	}
+	defer s.mu.Unlock()
+
+	lock := flock.New(s.instancesPath + ".lock")
+	locked, err := lock.TryLock()
+	if err != nil || !locked {
+		return
+	}
+	defer lock.Unlock()
+
+	_, _ = s.pruneNoLock()
 }
 
 // Count returns the number of active instances
@@ -371,6 +430,11 @@ func (s *Store) Prune() (int, error) {
 	}
 	defer lock.Unlock()
 
+	return s.pruneNoLock()
+}
+
+// pruneNoLock is Prune's body; the caller holds s.mu and the file lock.
+func (s *Store) pruneNoLock() (int, error) {
 	instances, _, expiredCount, err := s.readInstancesNoLock()
 	if err != nil {
 		return 0, err
@@ -407,6 +471,12 @@ func (s *Store) readInstances() ([]*Instance, int, int, error) {
 // readInstancesNoLock reads instances without acquiring the mutex (caller must hold lock).
 // Deduplicates by AgentID, keeping the latest entry (last-write-wins in append-only JSONL).
 func (s *Store) readInstancesNoLock() ([]*Instance, int, int, error) {
+	return s.scanInstancesNoLock(nil)
+}
+
+// scanInstancesNoLock is readInstancesNoLock that also hands visit, when set,
+// every decoded record in file order, expired or not.
+func (s *Store) scanInstancesNoLock(visit func(*Instance)) ([]*Instance, int, int, error) {
 	f, err := os.Open(s.instancesPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -429,8 +499,11 @@ func (s *Store) readInstancesNoLock() ([]*Instance, int, int, error) {
 		if err := json.Unmarshal(scanner.Bytes(), &inst); err != nil {
 			continue
 		}
+		if visit != nil {
+			visit(&inst)
+		}
 
-		if now.After(inst.ExpiresAt) {
+		if inst.isExpiredAt(now) {
 			continue
 		}
 

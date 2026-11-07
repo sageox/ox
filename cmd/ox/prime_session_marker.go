@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -39,12 +40,17 @@ func SessionMarkerDir() string {
 //   - Idempotency: re-priming the same session reuses the ox agent ID
 //   - Hook context: agent_hook.go reads markers to pass agent state to handlers
 type SessionMarker struct {
-	AgentID              string                `json:"agent_id"`
-	SessionID            string                `json:"session_id,omitempty"`           // ox-generated agent-instance server session ID
-	RecordingSessionID   string                `json:"recording_session_id,omitempty"` // durable ses_ recording ID for resume linkage
-	AgentSessionID       string                `json:"agent_session_id"`               // coding agent's native session identifier
-	PrimedAt             time.Time             `json:"primed_at"`                      // when session was primed
-	ParentPID            int                   `json:"parent_pid,omitempty"`           // parent agent process ID
+	AgentID            string    `json:"agent_id"`
+	SessionID          string    `json:"session_id,omitempty"`           // ox-generated agent-instance server session ID
+	RecordingSessionID string    `json:"recording_session_id,omitempty"` // durable ses_ recording ID for resume linkage
+	AgentSessionID     string    `json:"agent_session_id"`               // coding agent's native session identifier
+	PrimedAt           time.Time `json:"primed_at"`                      // when session was primed
+	// FullPrimeViaHook records that this native session received a full prime
+	// through its SessionStart hook, the one channel known to land in the AI
+	// coworker's context. Only then may a repeat prime be compact; a bare prime
+	// can be piped through head or otherwise never read.
+	FullPrimeViaHook     bool                  `json:"full_prime_via_hook,omitempty"`
+	ParentPID            int                   `json:"parent_pid,omitempty"` // parent agent process ID
 	CursorSourceBoundary *CursorSourceBoundary `json:"cursor_source_boundary,omitempty"`
 }
 
@@ -69,6 +75,36 @@ type CursorSourceBoundary struct {
 // writes the normal prime marker.
 func (m *SessionMarker) IsPrimed() bool {
 	return m != nil && m.AgentID != "" && !m.PrimedAt.IsZero()
+}
+
+// hookStdinWait bounds how long a bare `ox agent prime` waits for a hook
+// payload. A real hook writes its JSON and closes stdin at once; a harness's
+// background shell hands over a pipe or socket that never reaches EOF.
+const hookStdinWait = 2 * time.Second
+
+// readHookInputBounded is agentx.ReadHookInput on stdin with a deadline.
+// agentx reads stdin to EOF, so on an inherited stdin that stays open it never
+// returns and the whole prime hangs. On timeout the payload is treated as
+// absent; the abandoned read ends with the process.
+//
+// The stdin handle is captured before the goroutine starts so the abandoned
+// read never touches the os.Stdin global after this function has returned.
+func readHookInputBounded(wait time.Duration) *agentx.HookInput {
+	stdin := os.Stdin
+	stat, err := stdin.Stat()
+	if err != nil || stat.Mode()&os.ModeCharDevice != 0 {
+		return nil // unreadable or a terminal: no hook payload
+	}
+
+	done := make(chan *agentx.HookInput, 1)
+	go func() { done <- agentx.ReadHookInput(stdin) }()
+	select {
+	case input := <-done:
+		return input
+	case <-time.After(wait):
+		slog.Debug("prime: no hook payload on stdin within deadline, continuing without one", "wait", wait)
+		return nil
+	}
 }
 
 // AgentHookInput is an alias for agentx.HookInput.
@@ -322,7 +358,7 @@ func DeleteSessionMarker(agentSessionID string) error {
 // Delegates to agentx.ReadHookInputFromStdin and validates session_id is present.
 // Works for any coding agent that pipes hook context via stdin JSON.
 func ReadAgentHookInput() *AgentHookInput {
-	input := agentx.ReadHookInputFromStdin()
+	input := readHookInputBounded(hookStdinWait)
 	if input == nil {
 		return nil
 	}

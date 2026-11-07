@@ -27,7 +27,7 @@ func TestCommittedSessionScanCannotTrustWorktreeOrFinalDiff(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			useFreshFixtureRules(t)
 			rel := "sessions/synthetic/raw.jsonl"
-			ledger := publicationLedger(t, rel, `{"content":"AKIAIOSFODNN7EXAMPLE"}`)
+			ledger := publicationLedger(t, rel, `{"content":"`+syntheticAWSKey+`"}`)
 			abs := filepath.Join(ledger, rel)
 			if mode == "deleted later commit" {
 				require.NoError(t, os.Remove(abs))
@@ -38,7 +38,7 @@ func TestCommittedSessionScanCannotTrustWorktreeOrFinalDiff(t *testing.T) {
 				gitInRepo(t, ledger, "add", "--", rel)
 				gitInRepo(t, ledger, "commit", "-m", "redact synthetic session")
 			}
-			require.ErrorContains(t, ValidateSessionPublication(context.Background(), ledger), "committed session content refused")
+			require.ErrorContains(t, ValidateSessionPublication(context.Background(), ledger), "committed session/plan content refused")
 		})
 	}
 }
@@ -48,7 +48,7 @@ func TestCommittedSessionScanFreshnessAndPositiveControl(t *testing.T) {
 	ledger := publicationLedger(t, "sessions/synthetic/raw.jsonl", `{"content":"ordinary notes"}`)
 	require.NoError(t, ValidateSessionPublication(context.Background(), ledger))
 	freshSessionPublicationRules = func(context.Context) (*secretguard.RuleSet, error) { return nil, errors.New("catalog unavailable") }
-	require.ErrorContains(t, ValidateSessionPublication(context.Background(), ledger), "current session rules required")
+	require.ErrorContains(t, ValidateSessionPublication(context.Background(), ledger), "current session/plan rules required")
 }
 
 func TestCommittedSessionScanRejectsNewUpstreamFormat(t *testing.T) {
@@ -76,12 +76,12 @@ func TestPushWithRetryCannotOmitSessionSecretGuard(t *testing.T) {
 			remoteBefore := gitInRepo(t, bare, "rev-parse", "HEAD")
 			rel := "sessions/synthetic/raw.jsonl"
 			require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(ledger, rel)), 0700))
-			addCommit(t, ledger, rel, `{"content":"AKIAIOSFODNN7EXAMPLE"}`, "synthetic import")
+			addCommit(t, ledger, rel, `{"content":"`+syntheticAWSKey+`"}`, "synthetic import")
 			opts := PushOpts{}
 			if withCallback {
 				opts.ValidatePush = func(context.Context, string) (bool, error) { return false, nil }
 			}
-			require.ErrorContains(t, PushWithRetry(context.Background(), ledger, opts), "committed session content refused")
+			require.ErrorContains(t, PushWithRetry(context.Background(), ledger, opts), "committed session/plan content refused")
 			require.Equal(t, remoteBefore, gitInRepo(t, bare, "rev-parse", "HEAD"), "the remote must never receive a refused blob")
 		})
 	}
@@ -95,7 +95,7 @@ func TestPushWithRetryCurrentRulesUnavailableKeepsSessionLocal(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(ledger, rel)), 0700))
 	addCommit(t, ledger, rel, `{"content":"ordinary notes"}`, "synthetic import")
 	freshSessionPublicationRules = func(context.Context) (*secretguard.RuleSet, error) { return nil, errors.New("upstream unavailable") }
-	require.ErrorContains(t, PushWithRetry(context.Background(), ledger, PushOpts{}), "current session rules required")
+	require.ErrorContains(t, PushWithRetry(context.Background(), ledger, PushOpts{}), "current session/plan rules required")
 	require.Equal(t, remoteBefore, gitInRepo(t, bare, "rev-parse", "HEAD"))
 	_, err := os.Stat(filepath.Join(ledger, rel))
 	require.NoError(t, err, "pending content must stay available")
@@ -109,13 +109,13 @@ func TestCommittedSessionScanIncludesMergedDeletedSideHistory(t *testing.T) {
 	gitInRepo(t, ledger, "checkout", "-b", "synthetic-side")
 	rel := "sessions/synthetic/raw.jsonl"
 	require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(ledger, rel)), 0700))
-	addCommit(t, ledger, rel, `{"content":"AKIAIOSFODNN7EXAMPLE"}`, "synthetic side capture")
+	addCommit(t, ledger, rel, `{"content":"`+syntheticAWSKey+`"}`, "synthetic side capture")
 	gitInRepo(t, ledger, "rm", "--", rel)
 	gitInRepo(t, ledger, "commit", "-m", "remove side capture")
 	gitInRepo(t, ledger, "checkout", main)
 	addCommit(t, ledger, "ordinary.txt", "ordinary notes", "main change")
 	gitInRepo(t, ledger, "merge", "--no-ff", "synthetic-side", "-m", "merge side history")
-	require.ErrorContains(t, PushWithRetry(context.Background(), ledger, PushOpts{}), "committed session content refused")
+	require.ErrorContains(t, PushWithRetry(context.Background(), ledger, PushOpts{}), "committed session/plan content refused")
 	require.Equal(t, remoteBefore, gitInRepo(t, bare, "rev-parse", "HEAD"))
 }
 
@@ -148,5 +148,67 @@ func TestCommittedSessionScanChecksFilenamesWhenNoBlobIsNew(t *testing.T) {
 	require.NoError(t, ValidateSessionPublication(context.Background(), ledger), "control: nothing unpushed is sensitive")
 
 	addCommit(t, ledger, "sessions/synthetic/archive.p12", "", "same empty blob, sensitive name")
-	require.ErrorContains(t, ValidateSessionPublication(context.Background(), ledger), "session filename refused")
+	require.ErrorContains(t, ValidateSessionPublication(context.Background(), ledger), "session/plan filename refused")
+}
+
+func TestCommittedSessionScanAcceptsProducedCommits(t *testing.T) {
+	useFreshFixtureRules(t)
+	ledger := publicationLedger(t, "sessions/synthetic/meta.json", `{"produced_commits":["`+syntheticCommitSHA+`"]}`)
+	require.NoError(t, ValidateSessionPublication(context.Background(), ledger))
+
+	leaked := publicationLedger(t, "sessions/synthetic/meta.json", `{"produced_commits":["`+syntheticCommitSHA+`","`+syntheticAWSKey+`"]}`)
+	require.ErrorContains(t, ValidateSessionPublication(context.Background(), leaked), "committed session/plan content refused")
+}
+
+// rev-list names one path per blob; the meta.json exemption must not reach the
+// same bytes published under another session or plan filename. The current catalog
+// gates its bare-hex rule on keywords, so the fresh rules add a keyword-less
+// one, as a later upstream catalog could.
+func TestCommittedSessionScanSharedBlobKeepsFullScan(t *testing.T) {
+	data, err := os.ReadFile("../secretguard/gitleaks.toml")
+	require.NoError(t, err)
+	rules, err := secretguard.NewRules(append(data, "\n[[rules]]\nid = \"future-bare-hex\"\nregex = '''\\b[a-f0-9]{40}\\b'''\n"...))
+	require.NoError(t, err)
+	original := freshSessionPublicationRules
+	freshSessionPublicationRules = func(context.Context) (*secretguard.RuleSet, error) { return rules, nil }
+	t.Cleanup(func() { freshSessionPublicationRules = original })
+
+	exempt, _ := initBareRemoteRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(exempt, "sessions", "synthetic"), 0700))
+	addCommit(t, exempt, "sessions/synthetic/meta.json", `{"produced_commits":["`+syntheticCommitSHA+`"]}`, "synthetic meta")
+	require.NoError(t, ValidateSessionPublication(context.Background(), exempt))
+
+	content := `{"produced_commits":["` + syntheticCommitSHA + `"]}`
+	for _, otherPath := range []string{"sessions/synthetic/summary.json", "data/plans/draft/plan.md"} {
+		ledger, _ := initBareRemoteRepo(t)
+		for _, rel := range []string{"sessions/synthetic/meta.json", otherPath} {
+			require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(ledger, rel)), 0700))
+			addCommit(t, ledger, rel, content, "synthetic shared blob")
+		}
+		require.ErrorContains(t, ValidateSessionPublication(context.Background(), ledger), "committed session/plan content refused")
+	}
+}
+
+// A current catalog is the bundled one plus what upstream added since; after
+// the bundled check, publication validates only the additions.
+// Failure prevented: that narrower second check drops a rule the bundled
+// catalog lacks, and a credential format or sensitive filename added after
+// this release reaches the Ledger.
+func TestCommittedSessionScanRefusesWhatOnlyCurrentRulesCatch(t *testing.T) {
+	data, err := os.ReadFile("../secretguard/gitleaks.toml")
+	require.NoError(t, err)
+	rules, err := secretguard.NewRules(append(data, "\n[[rules]]\nid = \"future-format\"\nregex = '''future_[a-z]{8}'''\n[[rules]]\nid = \"future-file\"\npath = '''\\.futurekey$'''\n"...))
+	require.NoError(t, err)
+	original := freshSessionPublicationRules
+	freshSessionPublicationRules = func(context.Context) (*secretguard.RuleSet, error) { return rules, nil }
+	t.Cleanup(func() { freshSessionPublicationRules = original })
+
+	require.NoError(t, ValidateSessionPublication(context.Background(), publicationLedger(t, "sessions/synthetic/summary.md", "ordinary notes")))
+	for _, tc := range []struct{ rel, content, refusal string }{
+		{"sessions/synthetic/summary.md", "ordinary notes, then future_qzxwvjkp", "committed session/plan content refused by current rules"},
+		{"sessions/synthetic/notes.futurekey", "ordinary notes", "session/plan filename refused by current rules"},
+	} {
+		ledger := publicationLedger(t, tc.rel, tc.content)
+		require.ErrorContains(t, ValidateSessionPublication(context.Background(), ledger), tc.refusal)
+	}
 }

@@ -3,9 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/gitutil"
 )
 
 const (
@@ -213,26 +214,17 @@ func allHookSpecs() []hookSpec {
 	}
 }
 
-// resolveHooksDir returns the git hooks directory, respecting core.hooksPath.
+// resolveHooksDir returns the directory git runs hooks from; see
+// gitutil.HooksDir for the resolution rules (core.hooksPath, then the git
+// common dir, which is what makes linked worktrees work).
 func resolveHooksDir(gitRoot string) string {
-	cmd := exec.Command("git", "-C", gitRoot, "config", "--get", "core.hooksPath")
-	output, err := cmd.Output()
-	if err == nil {
-		hooksPath := strings.TrimSpace(string(output))
-		if hooksPath != "" {
-			if filepath.IsAbs(hooksPath) {
-				return hooksPath
-			}
-			return filepath.Join(gitRoot, hooksPath)
-		}
-	}
-	return filepath.Join(gitRoot, ".git", "hooks")
+	return gitutil.HooksDir(gitRoot)
 }
 
 // InstallGitHooks installs every ox-managed git hook into the resolved hooks
 // directory: prepare-commit-msg (trailer injection), post-commit (reverse
 // index append), and post-rewrite (reverse index SHA rewrite on amend/
-// rebase). Idempotent across all three. If a hook file already exists, the
+// rebase), and pre-push (PR and issue linkage). If a hook file already exists, the
 // ox section is appended without disturbing existing content.
 //
 // post-commit / post-rewrite are best-effort CLI-side: they no-op silently
@@ -328,6 +320,13 @@ func uninstallHookSection(hooksDir string, spec hookSpec) error {
 			result = append(result, line)
 		}
 	}
+	if inSection {
+		// A start marker with no end marker can only come from a hand edit (ox
+		// has always written both). The section's extent is unknown: cutting to
+		// end of file, or handing the file to a heuristic scan, could delete the
+		// user's own commands. Leave the file untouched and say which hook.
+		return fmt.Errorf("%s hook has an ox section with no %q line; remove it by hand: %s", spec.name, oxHookMarkerEnd, hookPath)
+	}
 
 	cleaned := strings.TrimSpace(strings.Join(result, "\n"))
 	if cleaned == "" || cleaned == "#!/bin/sh" || cleaned == "#!/bin/bash" {
@@ -349,16 +348,19 @@ func hasValidHookSection(content string, spec hookSpec) bool {
 // prepare-commit-msg present from a previous ox version) returns false so
 // `ox doctor --fix` can complete the install.
 func HasGitHooks(gitRoot string) bool {
+	return len(missingGitHooks(gitRoot)) == 0
+}
+
+// missingGitHooks returns managed hook names whose ox sections are absent or incomplete.
+func missingGitHooks(gitRoot string) []string {
 	hooksDir := resolveHooksDir(gitRoot)
+	var missing []string
 	for _, spec := range allHookSpecs() {
 		hookPath := filepath.Join(hooksDir, spec.name)
 		content, err := os.ReadFile(hookPath)
-		if err != nil {
-			return false
-		}
-		if !hasValidHookSection(string(content), spec) {
-			return false
+		if err != nil || !hasValidHookSection(string(content), spec) {
+			missing = append(missing, spec.name)
 		}
 	}
-	return true
+	return missing
 }

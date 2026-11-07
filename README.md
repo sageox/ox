@@ -52,6 +52,14 @@ On macOS, the CLI requires macOS 13 Ventura or later.
 brew install sageox/tap/ox
 ```
 
+**npm (macOS / Linux / FreeBSD):**
+
+```bash
+npx @sageox/ox@latest install
+```
+
+This puts `ox` on PATH and logs you in. It changes no repository; run `ox init` inside each repo you want to link.
+
 **Install script (macOS / Linux / FreeBSD):**
 
 ```bash
@@ -80,6 +88,7 @@ ox login                # authenticate with sageox.ai
 ox init                 # one-time per repo: creates .sageox/
 git add .sageox/ && git commit -m "initialize SageOx"
 ox doctor               # diagnose (ox doctor --fix auto-repairs)
+ox feedback --file report.txt  # send private feedback to SageOx Support
 ox status               # auth, project, sync state, and daemon health
 ```
 

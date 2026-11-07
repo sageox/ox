@@ -176,7 +176,13 @@ The CLI reads and writes review records only through `pkg/planreview`.
   revision's snapshot, the writes (companion pages included), the pointer swap
   and the commit run in that one hold, so a daemon pull never finds a save
   half written. The push follows outside it. The pointer replaces plan.html
-  only while the file holds exactly the uploaded bytes; when the store did not
+  only while the file holds exactly the uploaded bytes, and only once those
+  bytes are kept in the Ledger recovery cache
+  (`.sageox/cache/data/plans/<plan>/plan.html`): GitLab housekeeping deletes
+  an uploaded object no pushed ref points at yet, and the push repair
+  re-uploads it from that copy. When no copy exists anywhere (a page saved by
+  an older build), the push repair replaces the pointer with a tombstone page
+  in unpushed commits so the push resumes. When the store did not
   take the page, or the page changed after its upload, the save commits
   nothing. With no store reachable it commits everything but the page. Each of
   these, and a failed commit or push, leaves a whole-dir marker in a Ledger
@@ -184,6 +190,32 @@ The CLI reads and writes review records only through `pkg/planreview`.
   it uploads a page still awaiting upload before it takes the lock, and while
   the page stays unstored it commits and pushes the rest of the dir and keeps
   the marker.
+- **Whole-index commits** (`commitLedgerSnapshot` in `cmd/ox`: the commit
+  that uploads a session, at stop and in `ox doctor`'s upload retry, the
+  automatic doctor sweeps `ledger-clean-workdir`, `ledger-cache-tracked` and
+  `ledger-rej-tracked`, and the `--fix`-only GitHub data migration) commit
+  everything but `data/plans/`, through
+  `CommitLedgerSnapshot` with an exclude pathspec, and the sweeps stage nothing
+  there. A plan file stays as it was, staged or not, as do its retry marker
+  and review entries: the plan's own writers and their retries commit it.
+  Plan files alone make `ledger-clean-workdir` commit nothing. The `--fix`-only
+  session-id backfill commits only the `meta.json` files it rewrote, and H12's
+  squash commits the tree of the commits it collapses, so neither carries a
+  staged plan file (#1442). The mass-deletion guard does not count removed
+  `*.rej` and `*.needs-summary` files (#1443).
+- **Redaction amendments** (#1355): amend only repaired paths, retaining all parents, author and message. Amendment errors hold publication.
+- **Plan title backfill** (#1355): update session references only after the plan moves succeed, under the Ledger and metadata locks. A commit failure restores the original working metadata and its independently staged version before releasing the locks; push failure retains the completed commit.
+- **Plan changes no retry owns** (`ox doctor`, just before
+  `plan-pending-writes`): a plan dir with uncommitted changes, no plan retry
+  marker, and changes outside the review records an entry lands. If its
+  `events.jsonl` holds more `created` or `revised` events than HEAD's, the
+  save ran and never committed (a crash, an older ox, a lost marker):
+  `plan-stranded-saves`, automatic, gives it a whole-dir marker and this run's
+  retry publishes it. Otherwise the change was never saved:
+  `plan-unsaved-edits` lists it in plain `ox doctor` output, and publishes it
+  as it is (a whole-dir marker, then the retry) only when
+  `ox doctor --fix-slug=plan-unsaved-edits` is confirmed at a terminal or with
+  `--yes`. `ox agent prime` retries only what is already queued.
 - **Pushes** (`pushLedger`) ignore their caller's cancellation: a cancel
   during the pull-rebase that a rejected push runs kills git and skips its
   abort, leaving the clone mid-rebase. `PushWithRetry`'s own timeouts bound
@@ -241,7 +273,10 @@ ended, so neither holds that lock for long. Still open:
   trusting it.
 - H5 remains only where picking a side would drop entries: `events.jsonl`
   without its union attribute, and review records.
-- H10–H12 are unchanged.
+- H10 and H11 are unchanged.
+
+**Since #1442:** H12 is fixed: `SquashUnpushed` commits the unpushed tip's tree,
+never the index.
 
 **Reproductions** (real clones of one Ledger with a bare remote, publishing
 through `commitAndPushPlanDir`; one-off, not kept as tests because they assert
@@ -534,6 +569,9 @@ under `region` (`plan-review-drawn-context.md`, section 7; fixture
 
 ## 4. Compatibility
 
+The tables describe older builds. Current test results and release dependencies
+are in [the certification matrix](../guides/plan-review-certification.md).
+
 Measured on the official `ox_0.20.0_darwin_arm64` release asset (checksum
 verified, commit `5428a78a`) and on a build of main at `651ac29a` (unreleased;
 it also reports 0.20.0). Each of the four #1287 fixtures was installed as a plan in a scratch
@@ -542,32 +580,33 @@ Ledger and read with `ox plan feedback show <slug> --json` and
 dir, `SAGEOX_DAEMON=false` and `DO_NOT_TRACK=1`. Both commands agreed on every
 fixture.
 
-| Fixture | v0.20.0 | main |
+| Fixture | v0.20.0 | prototype `651ac29a` |
 |---|---|---|
 | `resolution-layouts` | h2 **open**: per-entry resolutions are invisible | as `expect.json` |
 | `same-id` | h1 **reopened** by the repeated acceptance; h3 from the conflicting payload shown | as `expect.json`; h3 hidden (H4) |
 | `corrupt-records` | same items; the torn round is not reported (bare-array JSON) | reports the torn round; resolution and remaps failures unreported (H6) |
 | `unknown-fields` | as `expect.json` | as `expect.json` |
 
-| Writer | v0.20.0 | main |
+| Writer | v0.20.0 | prototype `651ac29a` |
 |---|---|---|
 | `feedback resolve` | rewrites the shared legacy array (H1) and drops unknown fields of every existing entry | writes a per-entry file; legacy array untouched |
 | `feedback apply` twice | two rounds; drops `id` and unknown fields | one round; keeps `id`; drops unknown fields |
 | `remaps.json` (from code; `remap.go` is unchanged since v0.20.0) | read-modify-write, drops unknown fields, resets an unreadable file | same |
 | `show --json` shape | bare array | `{items, corrupt_rounds}` |
 
-Neither build rewrites a round or a per-entry resolution, so those records and
-their unknown fields survive on disk. Mixed teams today: v0.20.0 users see
+Neither measured build rewrites rounds or per-entry resolutions, so their
+unknown fields survive on disk. Mixed teams with v0.20.0 users see
 items resolved by newer clients as open, can see a retried round reopen a
 resolved item, and write the shared legacy array, so their resolutions are
 subject to H1.
 
-**First fully supported release: none yet.** main reads every fixture as
-`expect.json` says but is not released, and still carries H1–H9. A release is
-fully supported when it reads every fixture as `expect.json` says, its writers
-keep unknown fields and write no shared review file, H1–H9 are fixed, and
-conflicts and failed reads are reported. #1294 records that release by
-repeating the measurement above against its binary.
+**First fully supported release: none certified yet.** Current `feedback apply`
+preserves unknown fields and drawing records
+(`TestRunPlanFeedbackApply_StoresAnExportedDrawingWhole`). The released
+Go module is v0.4.0 and the browser package is 0.6.0 (protocol 3); the latest
+released CLI at the 2026-10-20 audit is v0.23.0, whose page predates drawing
+writers. H1–H9 describe the older builds. #1294 still needs recovery fixes,
+owner review, a fully capable CLI release and consuming-host test results.
 
 ---
 

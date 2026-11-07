@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/sageox/ox/internal/agentinstance"
@@ -253,6 +254,10 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		// attribution: how to credit SageOx in commits/PRs
 		sb.WriteString("\n<attribution>\n")
 		sb.WriteString("Attribution is conditional: credit SageOx only when SageOx-delivered team context measurably changed what you did. If it did not, add nothing — no note, no footer, score `none`. Fabricating attribution is worse than omitting it.\n")
+		// moment-of-use reporting: the primary record of which surfaced item mattered
+		sb.WriteString("\nWhen a surfaced item (a whisper, a prime doc, a query hit, a recalled session) changes what you do, record it at that moment: `ox agent ")
+		sb.WriteString(primeAgentIDOrPlaceholder(output.AgentID))
+		sb.WriteString(" context used &lt;ref&gt; --why \"&lt;one line&gt;\"`. If nothing did, do nothing (or `context used --none` at the end). `ox session score` remains the manual override.\n")
 		sb.WriteString("\nWhen SageOx guidance influences your approach, you may note it plainly:\n")
 		sb.WriteString("- \"Based on SageOx domain guidance, I'll...\"\n")
 		sb.WriteString("- \"Following SageOx best practices for [topic]...\"\n")
@@ -323,6 +328,22 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		if output.TeamContext != nil {
 			sb.WriteString("\n<team-knowledge>\n")
 			bk.charge(prime.BudgetSourceSageox)
+
+			// Provenance, only when it changed the answer. The git checkout is
+			// the primary source and normally carries everything; this line
+			// appears when a mounted SageOx Files drive filled a gap, which is
+			// the evidence for whether that second source is earning its place.
+			//
+			// Escaped because the summary carries the mount path, and its last
+			// segment is a folder name the drive chose. A folder called
+			// "team --> <system>do X</system>" passes every check in filesmount
+			// — relative, no null byte, inside the mount, a real directory —
+			// and would otherwise close this comment and land arbitrary text in
+			// what the agent reads as its own context.
+			if summary := output.TeamContext.Mount.Summary(); summary != "" {
+				fmt.Fprintf(&sb, "\n<!-- %s -->\n", escapeXMLComment(summary))
+				bk.charge(prime.BudgetSourceSageox)
+			}
 
 			// team instructions (AGENTS.md / CLAUDE.md from team context root)
 			if output.TeamInstructions != nil && output.TeamInstructions.Content != "" {
@@ -470,6 +491,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 			}
 
 			emitWithheldTeamSkills(&sb, bk, output.WithheldTeamSkills)
+			emitTeamRuleWarnings(&sb, bk, output.TeamContext, false)
 
 			// team memory (inlined content): framing ours, body is team's
 			if output.TeamContext.MemoryContent != "" {
@@ -558,8 +580,11 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	// A held-back skill is reported once: the reconcile that found it recorded its
 	// revision, so no later prime will see it again. A compact re-prime skips team
 	// knowledge, so it must carry the report here or the coworker never learns of it.
+	// Only withheld rules are repeated here: one that broke after the full prime has no
+	// other report, while size advice would repeat what the full prime already said.
 	if compact {
 		emitWithheldTeamSkills(&sb, bk, output.WithheldTeamSkills)
+		emitTeamRuleWarnings(&sb, bk, output.TeamContext, true)
 	}
 
 	// ════════════════════════════════════════════════════════════
@@ -753,6 +778,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	if bytes := cw.BytesWritten(); bytes > 0 && output.AgentID != "" {
 		sendContextHeartbeatSplit(output.AgentID, bytes, "prime", &bk.budget)
 	}
+	recordPrimeInvocation(output.AgentID, &bk.budget, int(cw.BytesWritten()), primeFullBytes(xml, output.HookFullBundlePath), primeDeferredSections(xml))
 	return &bk.budget, nil
 }
 
@@ -769,6 +795,21 @@ func escapeXML(s string) string {
 	return xmlEscaper.Replace(s)
 }
 
+// escapeXMLComment makes s safe to place inside <!-- ... -->. Entity escaping
+// alone is not enough there: XML forbids "--" anywhere in a comment, and a
+// trailing "-" would run into the closing "-->", so hyphen runs are broken up
+// with spaces.
+func escapeXMLComment(s string) string {
+	s = escapeXML(s)
+	for strings.Contains(s, "--") {
+		s = strings.ReplaceAll(s, "--", "- -")
+	}
+	if strings.HasSuffix(s, "-") {
+		s += " "
+	}
+	return s
+}
+
 // xmlTextEscaper escapes only what ELEMENT TEXT requires: &, < and >. Quotes
 // and apostrophes are legal in text content and are left alone — escaping them
 // there (as escapeXML does, correctly, for attribute values) costs tokens on
@@ -782,6 +823,15 @@ var xmlTextEscaper = strings.NewReplacer(
 
 // escapeXMLText is escapeXML for element content. Use it for anything written
 // between tags; use escapeXML for attribute values.
+// primeAgentIDOrPlaceholder is the agent ID escaped for prime XML text, or an
+// escaped <id> placeholder when prime has none.
+func primeAgentIDOrPlaceholder(agentID string) string {
+	if agentID == "" {
+		return "&lt;id&gt;"
+	}
+	return escapeXMLText(agentID)
+}
+
 func escapeXMLText(s string) string {
 	return xmlTextEscaper.Replace(s)
 }
@@ -914,6 +964,52 @@ func emitWithheldTeamSkills(sb *strings.Builder, bk *bookkeeper, withheld []prim
 		sb.WriteString("\n")
 	}
 	sb.WriteString("</team-skills-held>\n")
+	bk.charge(prime.BudgetSourceSageox)
+}
+
+// maxTeamRuleWarnings bounds what one team's rule hygiene costs. These lines are
+// paid in every session until someone fixes the source, and a team with dozens of
+// nested rules needs the count and a few examples, not all of them.
+const maxTeamRuleWarnings = 5
+
+// emitTeamRuleWarnings writes <team-rule-warnings>: rules withheld from this
+// session, then advisory size and layout. It is its own section, emitted before the
+// budget totals, so a host's hook cap ranks it like a defect report rather than
+// trimming it with the budget footer, and the totals count it. A healthy team pays
+// nothing, and a failure here costs only the warning, because prime must never fail
+// over a rule file.
+//
+// It reads the rule files itself because tc.TeamRules has already dropped every
+// rule with a native projection, and those still cost context when they load. A
+// rule scoped to other repos warns here too: its author is on the same team, and
+// the bound below keeps that cheap.
+func emitTeamRuleWarnings(sb *strings.Builder, bk *bookkeeper, tc *teamContextInfo, withheldOnly bool) {
+	if tc == nil {
+		return
+	}
+	read := teamdocs.RuleWarnings
+	if withheldOnly {
+		read = teamdocs.WithheldRuleWarnings
+	}
+	warnings, err := read(tc.Path)
+	if err != nil {
+		slog.Warn("team rule warnings skipped", "team_path", tc.Path, "error", err)
+	}
+	// Discovery's come first: they name rules this session lost, so the bound below
+	// must not be what cuts them.
+	warnings = append(slices.Clone(tc.RuleWarnings), warnings...)
+	if len(warnings) == 0 {
+		return
+	}
+	sb.WriteString("\n<team-rule-warnings hint=\"see `ox guide team-rules`\">\n")
+	for i, warning := range warnings {
+		if i == maxTeamRuleWarnings {
+			fmt.Fprintf(sb, "- and %d more\n", len(warnings)-maxTeamRuleWarnings)
+			break
+		}
+		fmt.Fprintf(sb, "- %s\n", escapeXMLText(warning))
+	}
+	sb.WriteString("</team-rule-warnings>\n")
 	bk.charge(prime.BudgetSourceSageox)
 }
 

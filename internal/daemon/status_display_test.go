@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -404,13 +405,18 @@ func TestHumanizeError(t *testing.T) {
 	}
 }
 
+// TestGetErrorHint covers the one-line remedy shown under a daemon sync error.
+// Failure prevented: an error that has a known remedy shows none, or shows one
+// that names a command a coworker cannot run (push failures point at `ox sync`,
+// which is what pulls the remote changes that caused the rejection).
 func TestGetErrorHint(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		err      string
-		wantHint bool
+		name        string
+		err         string
+		wantHint    bool
+		wantCommand string // whole words, so "ox synch" does not satisfy "ox sync"
 	}{
 		{
 			name:     "timeout gets retry hint",
@@ -428,6 +434,24 @@ func TestGetErrorHint(t *testing.T) {
 			wantHint: true,
 		},
 		{
+			name:        "permission denied points at the SSH key",
+			err:         "Permission denied (publickey)",
+			wantHint:    true,
+			wantCommand: "ssh -T",
+		},
+		{
+			name:        "push failed points at ox sync",
+			err:         "push failed: remote contains work you do not have locally",
+			wantHint:    true,
+			wantCommand: "ox sync",
+		},
+		{
+			name:        "push failed match ignores case",
+			err:         "Push Failed",
+			wantHint:    true,
+			wantCommand: "ox sync",
+		},
+		{
 			name:     "unknown error gets no hint",
 			err:      "something else",
 			wantHint: false,
@@ -443,6 +467,30 @@ func TestGetErrorHint(t *testing.T) {
 			} else {
 				assert.Empty(t, hint)
 			}
+			if tt.wantCommand != "" {
+				assert.True(t, mentionsCommand(hint, tt.wantCommand), "hint %q must name %q as whole words", hint, tt.wantCommand)
+			}
 		})
 	}
+}
+
+// mentionsCommand reports whether hint contains command as consecutive whole
+// words, ignoring trailing sentence punctuation.
+func mentionsCommand(hint, command string) bool {
+	words := hintWords(hint)
+	want := strings.Fields(command)
+	for i := 0; i+len(want) <= len(words); i++ {
+		if slices.Equal(words[i:i+len(want)], want) {
+			return true
+		}
+	}
+	return false
+}
+
+func hintWords(hint string) []string {
+	words := strings.Fields(hint)
+	for i, word := range words {
+		words[i] = strings.TrimRight(word, ".,;:")
+	}
+	return words
 }

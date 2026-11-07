@@ -27,6 +27,8 @@ import (
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/proc"
+	"github.com/sageox/ox/internal/secretguard"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/claudesource"
@@ -164,8 +166,7 @@ type SessionFinalizeHandler struct {
 	quota quotaPause
 	// now is the clock for the quota pause; tests replace it.
 	now func() time.Time
-	// quality thresholds (configurable via AgentWorkerConfig)
-	qualityUploadThreshold  float64
+	// legacy numeric quality threshold (configurable via AgentWorkerConfig)
 	qualityDiscardThreshold float64
 	// judgeCompleter, when non-nil and OX_SUMMARY_JUDGE=on is set, runs
 	// a post-summary LLM-as-judge evaluation. Nil disables judging.
@@ -221,16 +222,14 @@ func NewSessionFinalizeHandler(logger *slog.Logger) *SessionFinalizeHandler {
 	}
 	return &SessionFinalizeHandler{
 		logger:                  logger,
-		qualityUploadThreshold:  0.3,
 		qualityDiscardThreshold: 0.1,
 		captureLockWait:         defaultCaptureLockWait,
 		now:                     time.Now,
 	}
 }
 
-// SetQualityThresholds configures the quality score thresholds for upload/discard.
-func (h *SessionFinalizeHandler) SetQualityThresholds(upload, discard float64) {
-	h.qualityUploadThreshold = upload
+// SetQualityDiscardThreshold configures the legacy numeric discard threshold.
+func (h *SessionFinalizeHandler) SetQualityDiscardThreshold(discard float64) {
 	h.qualityDiscardThreshold = discard
 }
 
@@ -390,68 +389,92 @@ func (h *SessionFinalizeHandler) Cleanup(ledgerPath string) {
 	}
 }
 
+// SessionFinalizeInspection describes local finalization work without repairing
+// recordings or changing their publication state. Names in Recovery need
+// recording recovery before their raw data is safe to summarize; Automatic
+// names need deterministic settlement without summarization.
+type SessionFinalizeInspection struct {
+	Items     []*WorkItem
+	Automatic []string
+	Recovery  []string
+	Held      []string
+	Refused   []string
+	Blocked   []string
+}
+
+// Inspect applies the daemon's finalization rules without changing session
+// files. A partial result is returned alongside any inspection errors.
+func (h *SessionFinalizeHandler) Inspect(ledgerPath string) (SessionFinalizeInspection, error) {
+	if _, err := os.ReadDir(ledgerPath); err != nil {
+		return SessionFinalizeInspection{}, fmt.Errorf("read ledger directory: %w", err)
+	}
+	items, skips, err := h.scan(ledgerPath, false)
+	result := SessionFinalizeInspection{
+		Recovery: slices.Sorted(maps.Keys(skips.recovery)),
+		Held:     slices.Sorted(maps.Keys(skips.held)),
+		Refused:  slices.Sorted(maps.Keys(skips.refused)),
+		Blocked:  skips.names(),
+	}
+	// A recorded manual choice or a pending recovery in one cache must also
+	// protect another copy of the same session. Detect makes that choice durable
+	// during recovery; inspection leaves the recording and hold markers alone.
+	for _, item := range items {
+		payload := item.Payload.(*SessionFinalizePayload)
+		name := filepath.Base(payload.SessionDir)
+		if skips.held[name] || skips.recovery[name] {
+			continue
+		}
+		if !payload.UploadOnly && isEmptyLedgerTranscript(payload.SessionDir, payload.RawPath, payload.LedgerPath) {
+			result.Automatic = append(result.Automatic, name)
+		} else {
+			result.Items = append(result.Items, item)
+		}
+	}
+	slices.Sort(result.Automatic)
+	return result, err
+}
+
 // Detect scans all locations where sessions can live for sessions missing artifacts.
 // Sessions are initially written to ledgerPath/.sageox/cache/sessions/ (primary),
 // and moved to ledgerPath/sessions/ after finalization/upload. XDG cache paths
 // are also scanned for sessions written by older ox versions or different environments.
 func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) {
+	// Detection is best-effort, as before: an unreadable directory does not
+	// prevent the daemon processing work it found in another cache location.
+	items, _, _ := h.scan(ledgerPath, true)
+	return items, nil
+}
+
+func (h *SessionFinalizeHandler) scan(ledgerPath string, repair bool) ([]*WorkItem, detectSkipStats, error) {
 	// deduplicate across all scan dirs (prefer earlier-found copy)
 	seen := make(map[string]bool)
 	var items []*WorkItem
 	var skips detectSkipStats
+	var scanErrors []error
 
-	mergeItems := func(newItems []*WorkItem) {
-		for _, item := range newItems {
+	// Preserve scan precedence: primary cache, Ledger, then XDG/legacy caches.
+	dirs := slices.Insert(session.HeldSessionDirs(ledgerPath), 1, filepath.Join(ledgerPath, "sessions"))
+	for i, dir := range dirs {
+		if i > 1 && (dir == dirs[0] || dir == dirs[1]) {
+			continue
+		}
+		if repair {
+			if ghosts := session.CleanupGhostSessionsInDir(dir); ghosts.Removed > 0 {
+				h.logger.Info("ghost cleanup: removed abandoned recordings", "dir", dir, "count", ghosts.Removed, "sessions", ghosts.Names)
+			}
+		}
+		found, skipped, err := h.detectInDir(dir, ledgerPath, repair)
+		if err != nil {
+			scanErrors = append(scanErrors, err)
+			if repair {
+				continue
+			}
+		}
+		skips.merge(skipped)
+		for _, item := range found {
 			if !seen[item.DedupKey] {
 				seen[item.DedupKey] = true
 				items = append(items, item)
-			}
-		}
-	}
-
-	// 1. primary ledger cache — where StartRecording writes sessions
-	ledgerCacheSessionsDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions")
-	if ghostResult := session.CleanupGhostSessionsInDir(ledgerCacheSessionsDir); ghostResult.Removed > 0 {
-		h.logger.Info("ghost cleanup (ledger cache): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
-	}
-	if cacheItems, cacheSkips, err := h.detectInDir(ledgerCacheSessionsDir, ledgerPath); err == nil {
-		mergeItems(cacheItems)
-		skips.merge(cacheSkips)
-	}
-
-	// 2. git-tracked ledger sessions — uploaded/finalized sessions
-	ledgerSessionsDir := filepath.Join(ledgerPath, "sessions")
-	if ghostResult := session.CleanupGhostSessionsInDir(ledgerSessionsDir); ghostResult.Removed > 0 {
-		h.logger.Info("ghost cleanup (ledger): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
-	}
-	if ledgerItems, ledgerSkips, err := h.detectInDir(ledgerSessionsDir, ledgerPath); err == nil {
-		mergeItems(ledgerItems)
-		skips.merge(ledgerSkips)
-	}
-
-	// 3. XDG/legacy cache paths — older ox versions or different XDG_CACHE_HOME environments
-	repoID := filepath.Base(ledgerPath)
-	if repoID != "" && repoID != "." {
-		xdgDirs := append(
-			[]string{filepath.Join(paths.SessionCacheDir(repoID), "sessions")},
-			func() []string {
-				var out []string
-				for _, d := range paths.AlternateSessionCacheDirs(repoID) {
-					out = append(out, filepath.Join(d, "sessions"))
-				}
-				return out
-			}()...,
-		)
-		for _, dir := range xdgDirs {
-			if dir == ledgerCacheSessionsDir || dir == ledgerSessionsDir {
-				continue
-			}
-			if ghostResult := session.CleanupGhostSessionsInDir(dir); ghostResult.Removed > 0 {
-				h.logger.Info("ghost cleanup (xdg cache): removed abandoned recordings", "dir", dir, "count", ghostResult.Removed, "sessions", ghostResult.Names)
-			}
-			if xdgItems, xdgSkips, err := h.detectInDir(dir, ledgerPath); err == nil {
-				mergeItems(xdgItems)
-				skips.merge(xdgSkips)
 			}
 		}
 	}
@@ -469,6 +492,7 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 		"items", len(items),
 		"upload_only", uploadOnly,
 		"held", len(skips.held),
+		"refused", len(skips.refused),
 		"skipped_with_content", skips.total(),
 	)
 	// A separate Warn rather than more keys on the line above: `items=0` is
@@ -483,21 +507,22 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 			"sessions", skips.names(),
 		)
 	}
-	return items, nil
+	return items, skips, errors.Join(scanErrors...)
 }
 
 // detectInDir scans a single sessions directory for sessions needing
 // finalization. The second return value reports sessions it deliberately
 // skipped while they still held transcript bytes — see detectSkipStats.
-func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]*WorkItem, detectSkipStats, error) {
+func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string, repair bool) ([]*WorkItem, detectSkipStats, error) {
 	var skips detectSkipStats
+	var scanErrors []error
 
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, skips, nil
 		}
-		return nil, skips, fmt.Errorf("read sessions dir: %w", err)
+		return nil, skips, fmt.Errorf("read sessions dir %s: %w", sessionsDir, err)
 	}
 
 	var items []*WorkItem
@@ -524,7 +549,29 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		// costs one stat for sessions that have no marker.
 		recPath := filepath.Join(sessionDir, recordingMarker)
 		recInfo, recStatErr := os.Stat(recPath)
+		if !repair && recStatErr != nil && !os.IsNotExist(recStatErr) {
+			scanErrors = append(scanErrors, fmt.Errorf("inspect recording %s: %w", name, recStatErr))
+			continue
+		}
 		hasRecordingMarker := recStatErr == nil
+		var recorded *session.RecordingState
+		if hasRecordingMarker && !repair {
+			// ReadRecordingStateFile repairs stale JSON tails on read. An
+			// inspection must report that state without rewriting the marker.
+			data, readErr := os.ReadFile(recPath)
+			recorded = &session.RecordingState{}
+			if readErr == nil {
+				readErr = json.Unmarshal(data, recorded)
+			}
+			if readErr != nil {
+				scanErrors = append(scanErrors, fmt.Errorf("inspect recording %s: %w", name, readErr))
+				continue
+			}
+			if recorded.SourceRejected {
+				scanErrors = append(scanErrors, fmt.Errorf("session %s is quarantined for source ownership review", name))
+				continue
+			}
+		}
 		var (
 			recStale  bool
 			recAge    time.Duration
@@ -532,6 +579,14 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		)
 		if hasRecordingMarker {
 			recStale, recAge, recMethod = isStaleRecording(recPath, recInfo, h.pidLookup, h.logger)
+		}
+		if !repair && hasRecordingMarker && !recStale {
+			// A failed stop can leave the owner alive after capture has stopped.
+			// Otherwise a live recording (including its draft) needs no repair.
+			if session.HasExplicitStop(h.projectRoot, recorded.AgentID) {
+				skips.addRecovery(name)
+			}
+			continue
 		}
 		// Keyed on the METHOD, not on recStale. recStale is ALSO true for
 		// stalenessTimeThreshold, which fires exactly when no PID could be
@@ -562,6 +617,9 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		// Debug line between them is part of why #966 was unreadable in the
 		// logs.
 		if metaErr != nil {
+			if !repair {
+				scanErrors = append(scanErrors, fmt.Errorf("inspect session %s metadata: %w", name, metaErr))
+			}
 			// Warn only when bytes are actually stranded. A corrupt meta.json
 			// over an empty directory is a nuisance, not lost work, and this
 			// scan repeats every detectCooldown — warning on both would train
@@ -630,6 +688,9 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 				continue
 			}
 			hasRaw = true
+		} else if !repair && !os.IsNotExist(statErr) {
+			scanErrors = append(scanErrors, fmt.Errorf("inspect session %s raw: %w", name, statErr))
+			continue
 		}
 
 		// Reuse the liveness probe above; do not let a second probe race with
@@ -647,6 +708,16 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			}
 			if !recStale {
 				h.logger.Debug("skipping session with active recording", "session", name)
+				continue
+			}
+			if !repair {
+				if recorded.RecordedManualPublishing() || session.HeldAnywhere(name, heldDirs...) {
+					skips.addHeld(name)
+				} else {
+					// Recovery drains native entries and reconciles the capture
+					// cursor. Existing raw may only be a partial session.
+					skips.addRecovery(name)
+				}
 				continue
 			}
 			// Recovery also fills an eager header and drains the final native
@@ -700,6 +771,11 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			continue
 		}
 
+		if refusedUnchanged(sessionDir) {
+			skips.addRefused(name)
+			continue
+		}
+
 		if !hasRaw {
 			continue
 		}
@@ -724,7 +800,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		// discarded. It covers what no stop or recovery held: a cache-only
 		// session from a second recording (GH #1077), or one stopped before
 		// holds existed. After the download check: a download is not ours.
-		if manual && h.holdIfUnpublished(sessionDir, ledgerPath) {
+		if manual && h.holdIfUnpublished(sessionDir, ledgerPath, repair) {
 			skips.addHeld(name)
 			continue
 		}
@@ -830,7 +906,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		})
 	}
 
-	return items, skips, nil
+	return items, skips, errors.Join(scanErrors...)
 }
 
 // detectSkipStats accumulates sessions detectInDir refused to queue even though
@@ -857,6 +933,19 @@ type detectSkipStats struct {
 	// manual). Skipping them is the intended outcome, not an anomaly, so they
 	// are reported as a count and never in the Warn line.
 	held map[string]bool
+	// refused: the secret guard refused these and their files still match the
+	// refusal's fingerprint. They wait for a redaction, so they are a count
+	// like held.
+	refused map[string]bool
+	// Inspection defers these sessions until their recordings are recovered.
+	recovery map[string]bool
+}
+
+func (s *detectSkipStats) addRecovery(name string) {
+	if s.recovery == nil {
+		s.recovery = make(map[string]bool)
+	}
+	s.recovery[name] = true
 }
 
 func (s *detectSkipStats) addHeld(name string) {
@@ -864,6 +953,13 @@ func (s *detectSkipStats) addHeld(name string) {
 		s.held = make(map[string]bool)
 	}
 	s.held[name] = true
+}
+
+func (s *detectSkipStats) addRefused(name string) {
+	if s.refused == nil {
+		s.refused = make(map[string]bool)
+	}
+	s.refused[name] = true
 }
 
 func (s *detectSkipStats) addUnprovenDraft(name string) {
@@ -889,6 +985,12 @@ func (s *detectSkipStats) merge(other detectSkipStats) {
 	}
 	for name := range other.held {
 		s.addHeld(name)
+	}
+	for name := range other.refused {
+		s.addRefused(name)
+	}
+	for name := range other.recovery {
+		s.addRecovery(name)
 	}
 }
 
@@ -1122,7 +1224,7 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 
 			// held on this machine: recovered locally, never finalized, and so
 			// is an unpublished session while publishing is manual (GH #1093)
-			if session.IsHeldInLedger(ledgerPath, name) || (manual && h.holdIfUnpublished(sessionDir, ledgerPath)) {
+			if session.IsHeldInLedger(ledgerPath, name) || (manual && h.holdIfUnpublished(sessionDir, ledgerPath, true)) {
 				continue
 			}
 
@@ -1604,7 +1706,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	//
 	// Three-way precedence:
 	//   1. QualityCategory (canonical, categorical) — used when present.
-	//      Maps cleanly to QualityDiscard/LocalOnly/Upload via
+	//      Maps cleanly to QualityDiscard/Upload via
 	//      EvaluateQualityCategory. This is how new summaries flow.
 	//   2. QualityScore (legacy numeric) — used when category is absent
 	//      and the summary was scored. Reads existing summary.json files
@@ -1617,7 +1719,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	case summaryResp.QualityCategory != "":
 		disposition = session.EvaluateQualityCategory(summaryResp.QualityCategory)
 	case scored:
-		disposition = session.EvaluateQuality(summaryResp.QualityScore, h.qualityUploadThreshold, h.qualityDiscardThreshold)
+		disposition = session.EvaluateQuality(summaryResp.QualityScore, h.qualityDiscardThreshold)
 	default:
 		disposition = session.QualityUpload
 	}
@@ -1700,16 +1802,6 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		h.emitSummarizationTelemetry(sessionName, "delegated", result, summaryResp, scored)
 	}
 
-	if disposition == session.QualityLocalOnly {
-		h.logger.Info("session below upload threshold, keeping locally",
-			"session", sessionName,
-			"quality_score", summaryResp.QualityScore,
-			"threshold", h.qualityUploadThreshold,
-			"reason", summaryResp.ScoreReason,
-		)
-		return nil
-	}
-
 	// Persist metadata and confirm LFS uploads before staging pointer files.
 	// Keep the cache recoverable if metadata or upload preparation fails.
 	fileRefs, err := h.writeMetaAndUploadLFS(payload, stored, summaryResp)
@@ -1718,29 +1810,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		return nil
 	}
 
-	// stage in ledger/sessions/ if the session is still in the cache dir
-	// (.sageox/cache/ is gitignored in the ledger, so we must copy first)
-	origCacheDir, err := h.stageSessionInLedger(payload)
-	if err != nil {
-		h.logger.Warn("failed to stage session in ledger, skipping commit", "session", sessionName, "err", err)
-		return nil
-	}
-
-	// ensure sessions/.gitignore before commit
-	sessionsDir := filepath.Dir(payload.SessionDir)
-	if err := lfs.EnsureSessionsGitignore(sessionsDir); err != nil {
-		h.logger.Warn("gitignore setup failed", "err", err)
-	}
-
-	pushed, pushErr := h.gitCommitAndPush(payload, fileRefs)
-
-	// prune cache dir only after a successful push — on push failure the cache
-	// is the only surviving copy of the session content
-	if pushed && origCacheDir != "" {
-		if err := os.RemoveAll(origCacheDir); err != nil {
-			h.logger.Debug("prune cache after finalize", "dir", origCacheDir, "err", err)
-		}
-	}
+	_, pushErr := h.gitCommitAndPush(payload, fileRefs, nil)
 
 	// A push that fails for an ordinary reason leaves the session in the cache,
 	// where detection re-queues it as upload-only. But a ledger-wide blocker will
@@ -1756,6 +1826,22 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		"artifacts_generated", len(requiredArtifacts),
 	)
 	return nil
+}
+
+// allowJudgedEvidence resolves attribution.allow_judged_evidence for the
+// handler's project (project config over user config, default false). With no
+// project root, or an unreadable config, judged evidence stays excluded.
+func (h *SessionFinalizeHandler) allowJudgedEvidence() bool {
+	var projAttr, userAttr *config.Attribution
+	if h.projectRoot != "" {
+		if projCfg, err := config.LoadProjectConfig(h.projectRoot); err == nil && projCfg != nil {
+			projAttr = projCfg.Attribution
+		}
+	}
+	if userCfg, err := config.LoadUserConfig(); err == nil && userCfg != nil {
+		userAttr = userCfg.Attribution
+	}
+	return config.MergeAttribution(projAttr, userAttr).AllowJudgedEvidence
 }
 
 // writeMetaAndUploadLFS persists metadata and confirms LFS uploads before any
@@ -1833,6 +1919,14 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	if agentID != "" {
 		score, _ = session.ReadSageoxScore(agentID)
 	}
+
+	// Context-use rollup inputs. The trace is read from the directory that
+	// holds the REAL raw.jsonl bytes (payload.RawPath: the ledger cache or the
+	// local recording dir) — never from a ledger path whose artifacts may
+	// already be LFS pointer stubs; ContextUseRollupFromDir refuses a stub.
+	// Resolved before the mutation so the closure stays side-effect free.
+	traceDir := filepath.Dir(payload.RawPath)
+	allowJudged := h.allowJudgedEvidence()
 
 	// Write meta.json as a locked READ-MODIFY-WRITE, touching only the
 	// fields this path owns.
@@ -1956,6 +2050,14 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 			next.SageoxScore = &s
 			next.SageoxScoreCategory = string(score.Category)
 			next.SageoxScoreReason = score.Reason
+			next.SageoxScoreSource = lfs.SageoxScoreSourceSelfReported
+		}
+
+		// Derived context-use rollup. Recomputed from the trace on every
+		// finalize (deterministic); when the trace is gone or already a
+		// pointer stub the rollup is nil and whatever a CLI door wrote stays.
+		if rollup := lfs.ContextUseRollupFromDir(traceDir, len(next.ProducedCommits), allowJudged); rollup != nil {
+			next.ContextUse = rollup
 		}
 
 		meta = next
@@ -2134,6 +2236,37 @@ func ledgerMetaForDownload(payload *SessionFinalizePayload) *lfs.SessionMeta {
 	return meta
 }
 
+// preserveDraftIdentity copies the ses_ id of a draft placeholder in the ledger
+// into the cache's meta.json, and reports whether the ledger holds a draft.
+// The draft is an extra durable carrier of that id, and it is the only carrier
+// for a recording whose raw.jsonl header predates the field (legacy or
+// imported). A retry after a failed upload starts from a fresh Detect with no
+// payload, so the id must reach the cache before anything can fail; minting a
+// fresh one would 404 a /c/ link already published in a PR body.
+func (h *SessionFinalizeHandler) preserveDraftIdentity(payload *SessionFinalizePayload) (bool, error) {
+	cacheDir := payload.SessionDir
+	sessionName := filepath.Base(cacheDir)
+	draftID, wasDraft, err := lfs.PreservedSessionIDAndDraft(filepath.Join(payload.LedgerPath, "sessions", sessionName))
+	if err != nil || !wasDraft {
+		return false, nil
+	}
+	if draftID != "" {
+		if err := lfs.MutateSessionMeta(context.Background(), cacheDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+			if current == nil {
+				current = h.synthesizeMeta(cacheDir, sessionName)
+				current.SessionID = session.ResolveSessionID(session.ReadHeaderSessionID(filepath.Join(cacheDir, "raw.jsonl")), draftID)
+			} else if current.SessionID == "" {
+				current.SessionID = draftID
+			}
+			return current, nil
+		}); err != nil {
+			return true, fmt.Errorf("preserve draft session identity: %w", err)
+		}
+		payload.PreservedSessionID = draftID
+	}
+	return true, nil
+}
+
 // stageSessionInLedger prepares a ledger copy and returns the cache to retain
 // until push succeeds. Sessions already in the ledger are backed up to the same
 // cache before their content can be replaced with pointers.
@@ -2154,6 +2287,12 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 		return store.PreserveSessionCache(payload.SessionDir, payload.SessionDir)
 	}
 
+	if !h.skipGit {
+		if err := gitutil.IsSafeForGitOps(payload.LedgerPath); err != nil {
+			return "", err
+		}
+	}
+
 	// Supersede any draft placeholder wholesale before copying (ADR-029).
 	// This loop copies every file from the cache dir over the destination, but
 	// a copy is not a purge: a server-authored summary.json sitting in the
@@ -2165,28 +2304,11 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 	// Best-effort: the copy below rewrites everything this path owns anyway,
 	// so a purge failure degrades to the pre-draft behavior rather than
 	// blocking finalization.
-	if draftID, wasDraft, err := lfs.PreservedSessionIDAndDraft(destDir); err == nil && wasDraft {
-		// Capture the draft's ses_ id BEFORE deleting the file that carries it.
-		// The draft is an extra durable carrier of that id, and it is the only
-		// carrier for a recording whose raw.jsonl header predates the field
-		// (legacy or imported). Purging first and resolving later would mint a
-		// fresh id and 404 a /c/ link already published in a PR body.
-		if draftID != "" {
-			// The payload does not survive a failed upload and a fresh Detect.
-			// Make the cache a durable identity carrier before purging the draft.
-			if err := lfs.MutateSessionMeta(context.Background(), cacheDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
-				if current == nil {
-					current = h.synthesizeMeta(cacheDir, sessionName)
-					current.SessionID = session.ResolveSessionID(session.ReadHeaderSessionID(filepath.Join(cacheDir, "raw.jsonl")), draftID)
-				} else if current.SessionID == "" {
-					current.SessionID = draftID
-				}
-				return current, nil
-			}); err != nil {
-				return "", fmt.Errorf("preserve draft session identity: %w", err)
-			}
-			payload.PreservedSessionID = draftID
-		}
+	wasDraft, err := h.preserveDraftIdentity(payload)
+	if err != nil {
+		return "", err
+	}
+	if wasDraft {
 		if rmErr := h.runGit(payload.LedgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--",
 			filepath.ToSlash(filepath.Join("sessions", sessionName))); rmErr != nil {
 			h.logger.Warn("draft purge (git rm) failed; staging over the draft", "session", sessionName, "err", rmErr)
@@ -2292,12 +2414,14 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 		}
 	}
 
-	// copy all artifacts from cache to ledger/sessions/<name>/
-	origCacheDir, err := h.stageSessionInLedger(payload)
-	if err != nil {
-		h.logger.Warn("upload-only: failed to stage session", "session", sessionName, "err", err)
-		return fmt.Errorf("upload-only: stage session %s: %w", sessionName, err)
+	if _, err := h.preserveDraftIdentity(payload); err != nil {
+		return fmt.Errorf("upload-only: %w", err)
 	}
+
+	// Fingerprint after the identity write and before the upload: it must match
+	// what the guard scans, and an edit made after it must not be recorded as
+	// what the guard refused.
+	fingerprint, fingerprintErr := refusalFingerprint(payload.SessionDir)
 
 	// Failed LFS uploads defer publication; keep source content for retry.
 	var fileRefs map[string]lfs.FileRef
@@ -2309,79 +2433,82 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 		} else {
 			refs, err := lfs.UploadSessionFilesContext(h.rootContext(), client, payload.SessionDir, h.logger)
 			if err != nil {
+				var refused *secretguard.RefusedError
+				if errors.As(err, &refused) && fingerprintErr == nil {
+					markPublicationRefused(payload.SessionDir, fingerprint, h.logger)
+				}
 				return fmt.Errorf("upload-only: upload session content: %w", err)
 			} else {
 				fileRefs = refs
 				if !payload.omitTraces {
 					traceMeta = h.uploadPreparedTraces(client, traceCache, traceMeta, fileRefs)
 				}
-				// update meta.json with LFS refs. Goes through
-				// MutateSessionMeta so it serializes against the CLI's
-				// concurrent artifact registration — the unlocked
-				// read/unmarshal/write this replaced could lose whichever
-				// mutation landed first.
-				if len(fileRefs) > 0 {
-					if err := lfs.MutateSessionMeta(context.Background(), payload.SessionDir,
-						func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
-							if current == nil {
-								// No meta.json on disk. Detect() cannot mark this
-								// session landed without one, so bailing here (as
-								// this used to) left it re-queued every cycle
-								// forever. Seed one — there is nothing to preserve
-								// when the file is absent, so seeding strips
-								// nothing.
-								current = h.synthesizeMeta(payload.SessionDir, sessionName)
-							}
-							// merge, never replace: UploadSessionFiles omits
-							// summary.json, so assigning the LFS list wholesale
-							// would drop its Storage=git registration — the same
-							// field-stripping class GH #710 exists to fix.
-							current.Files = h.mergeFileRefs(current.Files, fileRefs, sessionName)
-							if traceMeta != nil {
-								current.Trace = traceMeta
-							}
-							return current, nil
-						}); err != nil {
-						return fmt.Errorf("upload-only: write uploaded references: %w", err)
+			}
+		}
+	}
+
+	// Runs on the staged copy under the commit's locks: the cache may hold no
+	// meta.json while the ledger already does, and that one must be kept.
+	finishStaged := func() error {
+		// update meta.json with LFS refs. Goes through
+		// MutateSessionMeta so it serializes against the CLI's
+		// concurrent artifact registration — the unlocked
+		// read/unmarshal/write this replaced could lose whichever
+		// mutation landed first.
+		if len(fileRefs) > 0 {
+			if err := lfs.MutateSessionMeta(context.Background(), payload.SessionDir,
+				func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+					if current == nil {
+						// No meta.json on disk. Detect() cannot mark this
+						// session landed without one, so bailing here (as
+						// this used to) left it re-queued every cycle
+						// forever. Seed one — there is nothing to preserve
+						// when the file is absent, so seeding strips
+						// nothing.
+						current = h.synthesizeMeta(payload.SessionDir, sessionName)
 					}
+					// A cached meta.json can be a copy of the draft
+					// placeholder (PreserveSessionCache copies it). Validation
+					// refuses a draft that names files, so without this the
+					// session never publishes.
+					current.ClearDraft()
+					// merge, never replace: UploadSessionFiles omits
+					// summary.json, so assigning the LFS list wholesale
+					// would drop its Storage=git registration — the same
+					// field-stripping class GH #710 exists to fix.
+					current.Files = h.mergeFileRefs(current.Files, fileRefs, sessionName)
+					if traceMeta != nil {
+						current.Trace = traceMeta
+					}
+					return current, nil
+				}); err != nil {
+				return fmt.Errorf("upload-only: write uploaded references: %w", err)
+			}
+		}
+
+		// A session must reach git carrying a meta.json, whatever happened above: it
+		// is the record of what the session WAS, and the LFS branch that writes one
+		// is skipped whenever LFS is disabled or produced no refs.
+		//
+		// Goes through MutateSessionMeta under the same lock as every other writer,
+		// and seeds ONLY when the file is genuinely absent — it never rebuilds an
+		// existing one, which is the field-stripping class GH #710 fixed.
+		if err := lfs.MutateSessionMeta(context.Background(), payload.SessionDir,
+			func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+				if current != nil {
+					return nil, nil // already present; leave every field alone
 				}
-			}
+				seeded := h.synthesizeMeta(payload.SessionDir, sessionName)
+				seeded.Files = h.mergeFileRefs(nil, fileRefs, sessionName)
+				return seeded, nil
+			}); err != nil {
+			h.logger.Warn("upload-only: meta.json seed failed", "session", sessionName, "err", err)
 		}
+		return nil
 	}
 
-	// A session must reach git carrying a meta.json, whatever happened above: it
-	// is the record of what the session WAS, and the LFS branch that writes one
-	// is skipped whenever LFS is disabled or produced no refs.
-	//
-	// Goes through MutateSessionMeta under the same lock as every other writer,
-	// and seeds ONLY when the file is genuinely absent — it never rebuilds an
-	// existing one, which is the field-stripping class GH #710 fixed.
-	if err := lfs.MutateSessionMeta(context.Background(), payload.SessionDir,
-		func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
-			if current != nil {
-				return nil, nil // already present; leave every field alone
-			}
-			seeded := h.synthesizeMeta(payload.SessionDir, sessionName)
-			seeded.Files = h.mergeFileRefs(nil, fileRefs, sessionName)
-			return seeded, nil
-		}); err != nil {
-		h.logger.Warn("upload-only: meta.json seed failed", "session", sessionName, "err", err)
-	}
-
-	sessionsDir := filepath.Dir(payload.SessionDir)
-	if err := lfs.EnsureSessionsGitignore(sessionsDir); err != nil {
-		h.logger.Warn("upload-only: gitignore setup failed", "err", err)
-	}
-
-	pushed, pushErr := h.gitCommitAndPush(payload, fileRefs)
-
-	// Keep the source cache until the pointer commit reaches the remote.
+	pushed, pushErr := h.gitCommitAndPush(payload, fileRefs, finishStaged)
 	if pushed {
-		if origCacheDir != "" {
-			if err := os.RemoveAll(origCacheDir); err != nil {
-				h.logger.Debug("upload-only: prune cache", "dir", origCacheDir, "err", err)
-			}
-		}
 		h.logger.Info("session uploaded via anti-entropy (upload-only)", "session", sessionName)
 		return nil
 	}
@@ -2402,21 +2529,20 @@ func isLedgerWideBlocker(err error) bool {
 	return errors.Is(err, ErrLedgerUnresolved) || errors.Is(err, ErrLedgerPushWedged)
 }
 
-// gitCommitAndPush stages, commits, and pushes the finalized session.
-// Returns true if the push succeeded, false otherwise. The error says why when
-// the cause is a ledger-wide blocker (ErrLedgerUnresolved, ErrLedgerPushWedged)
-// that the manager pauses the work type on; it is non-nil for any other failure
-// too, for the caller's message, but only the sentinels are acted on.
-// Uploaded files become pointers before the first commit. Callers retain the
-// source cache until this returns true.
+// gitCommitAndPush copies the session into sessions/<name>/, commits, and
+// pushes it. Returns true if the push succeeded, false otherwise. The error
+// says why when the cause is a ledger-wide blocker (ErrLedgerUnresolved,
+// ErrLedgerPushWedged) that the manager pauses the work type on; it is non-nil
+// for any other failure too, for the caller's message, but only the sentinels
+// are acted on. Uploaded files become pointers before the first commit. The
+// source cache is removed only after the push succeeds. finishStaged, when not
+// nil, edits the staged copy after the copy and before the commit, under the
+// same locks.
 //
 // Every git step runs under the daemon's context, so shutdown cancels a stuck
 // push instead of leaving this goroutine holding ledgerMu past the daemon's
 // goroutine-wait deadline.
-func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayload, fileRefs map[string]lfs.FileRef) (bool, error) {
-	if h.skipGit {
-		return true, nil // treat skip as success so tests can prune cache
-	}
+func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayload, fileRefs map[string]lfs.FileRef, finishStaged func() error) (bool, error) {
 	ctx := h.rootContext()
 
 	// serialize with daemon's ledger git ops (sync, murmur push, github sync)
@@ -2428,20 +2554,18 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	ledgerPath := payload.LedgerPath
 	sessionName := filepath.Base(payload.SessionDir)
 
-	// stageSessionInLedger leaves a session outside the ledger (an XDG cache
-	// dir) where it is, so the git add below fails for it. Refuse before the
-	// pointer write: pointerizing that dir would turn its only copy of the
-	// content into stubs that Detect and doctor both skip.
-	if !isGitTrackedLedgerSession(payload.SessionDir, ledgerPath) {
-		h.logger.Warn("session dir is outside the ledger sessions tree; skipping commit", "session", sessionName, "dir", payload.SessionDir)
-		return false, nil
-	}
-
-	// relative path from ledger root for git add
-	relDir, err := filepath.Rel(ledgerPath, payload.SessionDir)
-	if err != nil {
-		h.logger.Warn("could not compute relative session path", "err", err)
-		return false, nil
+	if h.skipGit {
+		cacheDir, err := h.stageSessionInLedger(payload)
+		if err == nil && finishStaged != nil {
+			err = finishStaged()
+		}
+		if err != nil {
+			return false, err
+		}
+		if cacheDir != "" {
+			_ = os.RemoveAll(cacheDir) // treat skip as success so tests can prune cache
+		}
+		return true, nil
 	}
 
 	// A zero-delta commit is the NORMAL outcome for a session whose files already
@@ -2452,24 +2576,52 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	// .sageox/cache/ for Detect() to re-enqueue five minutes later, forever. The
 	// content is in git either way; that is what the caller needs.
 	msg := fmt.Sprintf("finalize session %s", sessionName)
-	var staged bool
+	var staged, outsideLedger bool
+	var cacheDir string
 	// ADR-030's repo lock is cross-process; ledgerMu above only coordinates
-	// goroutines in this daemon. Holding both across pointer write, stage, and
-	// commit prevents a CLI pull from restoring an autostash between those
-	// steps. Release before PushWithRetry, which takes the same non-reentrant
-	// lock if a non-fast-forward retry needs to pull.
+	// goroutines in this daemon. Holding both from the copy into the ledger
+	// through the commit keeps a pull's autostash or a GC swap from rewriting
+	// the directory in between, which can restore the committed draft
+	// meta.json beside the new transcript (#1648). Release before
+	// PushWithRetry, which takes the same non-reentrant lock if a
+	// non-fast-forward retry needs to pull.
 	if err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
 		// Index removals for optional traces must never resolve a real conflict.
 		// Check before either pointer writes or staging mutate this transaction.
-		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
-			return err
-		}
 		unmerged, err := gitutil.HasUnmergedEntries(ctx, ledgerPath)
 		if err != nil {
 			return err
 		}
 		if unmerged {
 			return fmt.Errorf("commit blocked: %w", ErrLedgerUnresolved)
+		}
+		// Keep the conflict classification above so a merge marker cannot hide
+		// the ledger-wide blocker that pauses finalization retries.
+		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+			return err
+		}
+		if cacheDir, err = h.stageSessionInLedger(payload); err != nil {
+			return fmt.Errorf("stage session in ledger: %w", err)
+		}
+		// stageSessionInLedger leaves a session outside the ledger (an XDG cache
+		// dir) where it is, so the git add below fails for it. Refuse before the
+		// pointer write: pointerizing that dir would turn its only copy of the
+		// content into stubs that Detect and doctor both skip.
+		if !isGitTrackedLedgerSession(payload.SessionDir, ledgerPath) {
+			outsideLedger = true
+			return nil
+		}
+		relDir, err := filepath.Rel(ledgerPath, payload.SessionDir)
+		if err != nil {
+			return fmt.Errorf("relative session path: %w", err)
+		}
+		if err := lfs.EnsureSessionsGitignore(filepath.Dir(payload.SessionDir)); err != nil {
+			h.logger.Warn("gitignore setup failed", "err", err)
+		}
+		if finishStaged != nil {
+			if err := finishStaged(); err != nil {
+				return err
+			}
 		}
 		// A raw-only first push can trigger GitLab GC before a second pointer
 		// push, unlinking the newly uploaded objects from the project. Publish
@@ -2510,6 +2662,10 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		h.logger.Warn("session commit transaction failed", "session", sessionName, "err", err)
 		return false, err
 	}
+	if outsideLedger {
+		h.logger.Warn("session dir is outside the ledger sessions tree; skipping commit", "session", sessionName, "dir", payload.SessionDir)
+		return false, nil
+	}
 	if !staged {
 		// Fall through to the push: the commit may exist locally from an earlier
 		// cycle and still be unpushed.
@@ -2542,6 +2698,12 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		}
 		h.logger.Warn("git push failed (non-fatal)", "err", err)
 		return false, fmt.Errorf("git push: %w", err)
+	}
+	// prune only after the push: until then the cache is the only full copy
+	if cacheDir != "" {
+		if err := os.RemoveAll(cacheDir); err != nil {
+			h.logger.Debug("prune cache after finalize", "dir", cacheDir, "err", err)
+		}
 	}
 	return true, nil
 }
@@ -2676,10 +2838,11 @@ func extractPayload(item *WorkItem) (*SessionFinalizePayload, error) {
 // callers that need to know how strong the evidence is compare the method.
 //
 // Only stalenessPIDDead rests on an actual liveness check: a PID was available
-// and kill(pid, 0) refused it. That check reads ANY signal error as death,
-// which on Unix means ESRCH (gone) or EPERM — and EPERM can only arise here
-// from PID reuse by another user's process, in which case the original owner is
-// gone too.
+// and kill(pid, 0) refused it, or the process holding it started at another
+// time than the one recorded in parent_start_time. That check reads ANY signal
+// error as death, which on Unix means ESRCH (gone) or EPERM — and EPERM can
+// only arise here from PID reuse by another user's process, in which case the
+// original owner is gone too.
 //
 // stalenessTimeThreshold is the opposite: it fires precisely when there was no
 // PID to ask (unreadable/unparseable marker, or a legacy marker predating
@@ -2712,12 +2875,13 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	}
 
 	var state struct {
-		StartedAt   time.Time  `json:"started_at"`
-		AgentID     string     `json:"agent_id"`
-		ParentPID   int        `json:"parent_pid"`
-		AdapterName string     `json:"adapter_name"`
-		LastHookAt  *time.Time `json:"last_hook_at,omitempty"`
-		StoppedAt   *time.Time `json:"stopped_at,omitempty"`
+		StartedAt       time.Time  `json:"started_at"`
+		AgentID         string     `json:"agent_id"`
+		ParentPID       int        `json:"parent_pid"`
+		ParentStartTime int64      `json:"parent_start_time"` // set only under disposable_machine
+		AdapterName     string     `json:"adapter_name"`
+		LastHookAt      *time.Time `json:"last_hook_at,omitempty"`
+		StoppedAt       *time.Time `json:"stopped_at,omitempty"`
 	}
 	if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
 		age = time.Since(info.ModTime())
@@ -2757,8 +2921,8 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	// if we have a PID, check liveness — dead process = stale immediately,
 	// live process = never stale (wait for next cycle)
 	if pid > 0 {
-		proc, procErr := os.FindProcess(pid)
-		if procErr != nil || proc.Signal(syscall.Signal(0)) != nil {
+		p, procErr := os.FindProcess(pid)
+		if procErr != nil || p.Signal(syscall.Signal(0)) != nil || proc.IsReused(pid, state.ParentStartTime) {
 			// grace period: young recordings with dead PIDs may have stored a
 			// transient shell PID. Don't mark stale until grace period expires.
 			if age < session.GhostGracePeriod {
@@ -2862,6 +3026,54 @@ func (h *SessionFinalizeHandler) shouldRetryEmptySummary(sessionDir string) bool
 		return false
 	}
 	return strings.TrimSpace(head.Title) == ""
+}
+
+// publicationRefusedMarker sits in a ledger-cache session folder whose upload
+// the secret guard refused. It holds the folder's refusalFingerprint from just
+// before that attempt staged it. Under the same rules the guard refuses
+// unchanged bytes again, so Detect skips the session while the fingerprint
+// still matches: a file added or removed, or a change in any file's size or
+// modification time, re-queues it; a rule change alone does not. Like every
+// dotfile there, stageSessionInLedger never copies it to the Ledger.
+const publicationRefusedMarker = ".publication-refused"
+
+// refusalFingerprint lists each file directly in dir with its size and mtime.
+// It skips dotfiles and trace files: staging leaves both out of the copy the
+// guard scans, and prepareTraces can rewrite the trace files on any attempt.
+func refusalFingerprint(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || pipeline.IsTraceFile(e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "%s %d %d\n", e.Name(), info.Size(), info.ModTime().UnixNano())
+	}
+	return b.String(), nil
+}
+
+func markPublicationRefused(dir, fingerprint string, logger *slog.Logger) {
+	if err := os.WriteFile(filepath.Join(dir, publicationRefusedMarker), []byte(fingerprint), 0o644); err != nil {
+		logger.Warn("could not record the secret guard refusal; the session will be retried", "dir", dir, "err", err)
+	}
+}
+
+// refusedUnchanged reports whether the secret guard refused the session in dir
+// and its refusalFingerprint still matches the one recorded then.
+func refusedUnchanged(dir string) bool {
+	refused, err := os.ReadFile(filepath.Join(dir, publicationRefusedMarker))
+	if err != nil {
+		return false
+	}
+	current, err := refusalFingerprint(dir)
+	return err == nil && current == string(refused)
 }
 
 // isDownloadedCopy reports whether a ledger-cache folder is a read-only copy
@@ -3061,11 +3273,11 @@ func rawCarriesRecordingState(rawPath string, state *session.RecordingState) boo
 	return state.Trace == nil || reflect.DeepEqual(stored.Meta.TraceCapture, state.Trace)
 }
 
-// sessionQuarantined reports whether the recording marker in sessionDir says
-// its native source was quarantined. An unreadable marker is not a quarantine.
+// sessionQuarantined checks persisted source bindings too, so recordings from
+// older discovery code cannot bypass quarantine at publication time.
 func sessionQuarantined(sessionDir string) bool {
 	state, err := session.ReadRecordingStateFile(sessionDir)
-	return err == nil && state != nil && state.SourceRejected
+	return err == nil && state != nil && session.CheckNativeSourceBinding(state) != nil
 }
 
 // recoverRawFromSessionFile recovers missing capture and drains a dead tail
@@ -3089,8 +3301,8 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	}
 	// Checked before the journal settles: a quarantined recording is kept
 	// exactly as it is, and settling would roll back or rewrite raw.jsonl.
-	if state.SourceRejected {
-		return false, fmt.Errorf("native source quarantined for manual ownership review")
+	if err := session.CheckNativeSourceBinding(&state); err != nil {
+		return false, err
 	}
 	if state.AdapterName == "cursor" {
 		adapter, err := adapters.GetAdapter("cursor")
@@ -3262,6 +3474,9 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 		}
 	}
 
+	if err := session.CheckNativeSourceBinding(&state); err != nil {
+		return false, err
+	}
 	var sourceSnapshot os.FileInfo
 	if state.AdapterName == "claude-code" {
 		sourceSnapshot, err = claudesource.Snapshot(state.SessionFile)
@@ -3291,6 +3506,9 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	if err != nil {
 		return false, fmt.Errorf("read native session: %w", err)
 	}
+	if err := session.CheckNativeSourceBinding(&state); err != nil {
+		return false, err
+	}
 	if state.AdapterName == "claude-code" {
 		// Cached paths are not permanent authorization: a live Claude session
 		// can append foreign-repo turns after discovery or the last watcher poll.
@@ -3299,9 +3517,13 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 		}
 	}
 
+	// An Amp recording starts at its prompt's line, which the bridge wrote
+	// before the prime: the offset read above already bounds it.
+	_, incremental := adapter.(adapters.IncrementalReader)
+	startsAtPrompt := incremental && state.AmpStartsAtPrompt()
 	var filtered []adapters.RawEntry
 	for _, e := range rawEntries {
-		if !e.Timestamp.IsZero() && e.Timestamp.Before(state.StartedAt) {
+		if !startsAtPrompt && !e.Timestamp.IsZero() && e.Timestamp.Before(state.StartedAt) {
 			continue
 		}
 		filtered = append(filtered, e)
@@ -3730,14 +3952,11 @@ func (h *SessionFinalizeHandler) manualPublishing() bool {
 	return config.GetSessionPublishing(h.projectRoot) == config.SessionPublishingManual
 }
 
-// holdIfUnpublished holds a session that is not in the Ledger yet, for a
-// project that publishes manually, and reports whether the session must stay
-// on this machine. A session already in the Ledger (a coworker published it,
-// and it is waiting for its summary) is not held: summarizing it publishes
-// nothing new. An unreadable Ledger entry counts as not published. The hold is
-// written on the cache folder; if that fails, the session is still kept here,
-// and the next pass tries again (GH #1093).
-func (h *SessionFinalizeHandler) holdIfUnpublished(sessionDir, ledgerPath string) bool {
+// holdIfUnpublished reports whether a manually published session must remain
+// local. Already-published sessions may still receive summaries. Missing or
+// unreadable Ledger metadata counts as unpublished. When repair is true,
+// persist a cache hold; a failed write still keeps the session local (GH #1093).
+func (h *SessionFinalizeHandler) holdIfUnpublished(sessionDir, ledgerPath string, repair bool) bool {
 	if isGitTrackedLedgerSession(sessionDir, ledgerPath) {
 		return false // the Ledger's shared tree: in the Ledger by definition
 	}
@@ -3746,8 +3965,10 @@ func (h *SessionFinalizeHandler) holdIfUnpublished(sessionDir, ledgerPath string
 	if err == nil && !meta.IsDraft() {
 		return false
 	}
-	if err := writeHoldMarker(sessionDir, session.HoldManualPublishing, "daemon"); err != nil {
-		h.logger.Warn("session kept on this machine, but its hold could not be written", "session", name, "err", err)
+	if repair {
+		if err := writeHoldMarker(sessionDir, session.HoldManualPublishing, "daemon"); err != nil {
+			h.logger.Warn("session kept on this machine, but its hold could not be written", "session", name, "err", err)
+		}
 	}
 	return true
 }
@@ -3756,5 +3977,5 @@ func (h *SessionFinalizeHandler) holdIfUnpublished(sessionDir, ledgerPath string
 // is held, or the project publishes manually and the session is not in the
 // Ledger yet. Every entry point (scan, IPC, prompt, result) asks it.
 func (h *SessionFinalizeHandler) keepLocal(p *SessionFinalizePayload) bool {
-	return sessionHeldLocally(p) || (h.manualPublishing() && h.holdIfUnpublished(p.SessionDir, p.LedgerPath))
+	return sessionHeldLocally(p) || (h.manualPublishing() && h.holdIfUnpublished(p.SessionDir, p.LedgerPath, true))
 }

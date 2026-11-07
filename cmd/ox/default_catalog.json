@@ -82,14 +82,6 @@
       "description": "Unix convention: ls -> list"
     },
     {
-      "pattern": "daemon stop",
-      "target": "daemon kill",
-      "has_regex": false,
-      "auto_execute": false,
-      "confidence": 0.80,
-      "description": "Synonym: stop -> kill (suggest only, not auto-execute)"
-    },
-    {
       "pattern": "agent start",
       "target": "agent prime",
       "has_regex": false,
@@ -162,20 +154,12 @@
       "description": "Wrong verb: agent <id> finish -> agent <id> session stop"
     },
     {
-      "pattern": "^agent list$",
-      "target": "daemon list",
+      "pattern": "agent ls",
+      "target": "agent list",
       "has_regex": false,
-      "auto_execute": false,
-      "confidence": 0.70,
-      "description": "Wrong subcommand: agent list -> daemon list (suggest only)"
-    },
-    {
-      "pattern": "^agent ls$",
-      "target": "daemon list",
-      "has_regex": false,
-      "auto_execute": false,
-      "confidence": 0.70,
-      "description": "Wrong subcommand: agent ls -> daemon list (suggest only)"
+      "auto_execute": true,
+      "confidence": 0.95,
+      "description": "Unix convention: agent ls -> agent list"
     },
     {
       "pattern": "log",
@@ -226,22 +210,6 @@
       "description": "Synonym: changelog -> release-notes"
     },
     {
-      "pattern": "integrate",
-      "target": "init",
-      "has_regex": false,
-      "auto_execute": false,
-      "confidence": 0.70,
-      "description": "Ambiguous: integrate might mean init or the integrate command (suggest only)"
-    },
-    {
-      "pattern": "teams",
-      "target": "team",
-      "has_regex": false,
-      "auto_execute": true,
-      "confidence": 0.95,
-      "description": "Pluralization: teams -> team"
-    },
-    {
       "pattern": "sessions",
       "target": "session",
       "has_regex": false,
@@ -251,11 +219,11 @@
     },
     {
       "pattern": "ledgers",
-      "target": "ledger",
+      "target": "status",
       "has_regex": false,
       "auto_execute": true,
-      "confidence": 0.95,
-      "description": "Pluralization: ledgers -> ledger"
+      "confidence": 0.85,
+      "description": "Wrong noun: ledgers -> status (there is no ledger command; status reports ledger sync state)"
     },
     {
       "pattern": "configs",
@@ -277,7 +245,7 @@
       "pattern": "signout",
       "target": "logout",
       "has_regex": false,
-      "auto_execute": true,
+      "auto_execute": false,
       "confidence": 0.90,
       "description": "Synonym: signout -> logout"
     },
@@ -285,7 +253,7 @@
       "pattern": "disconnect",
       "target": "logout",
       "has_regex": false,
-      "auto_execute": true,
+      "auto_execute": false,
       "confidence": 0.85,
       "description": "Synonym: disconnect -> logout (session termination)"
     },
@@ -352,6 +320,158 @@
       "auto_execute": true,
       "confidence": 0.90,
       "description": "Moved: invite -> team invite (bare form only; the hidden ox invite alias carries emails and --cancel <id> across the rename)"
+    },
+    {
+      "pattern": "plan show",
+      "target": "plan view",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.95,
+      "description": "Synonym: plan show -> plan view (view is the read verb)"
+    },
+    {
+      "pattern": "skill",
+      "target": "skills",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.95,
+      "description": "Pluralization: skill -> skills"
+    },
+    {
+      "pattern": "auth status",
+      "target": "status",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.9,
+      "description": "gcloud/gh pattern: auth status -> status (who am I logged in as)"
+    },
+    {
+      "pattern": "agent status",
+      "target": "session status",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.9,
+      "description": "Wrong namespace: agent status -> session status"
+    },
+    {
+      "pattern": "^agent ([a-zA-Z0-9]+) status$",
+      "target": "session status",
+      "has_regex": true,
+      "auto_execute": true,
+      "confidence": 0.9,
+      "description": "Wrong namespace: agent <id> status -> session status"
+    },
+    {
+      "pattern": "^agent ([a-zA-Z0-9]+) session score$",
+      "target": "session score",
+      "has_regex": true,
+      "auto_execute": true,
+      "confidence": 0.9,
+      "description": "Wrong namespace: agent <id> session score -> session score"
+    },
+    {
+      "pattern": "agent score",
+      "target": "session score",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.9,
+      "description": "Wrong namespace: agent score -> session score"
+    },
+    {
+      "pattern": "ledger",
+      "target": "status",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.85,
+      "description": "Wrong noun: ledger -> status (there is no ledger command; status reports ledger sync state)"
+    },
+    {
+      "pattern": "ledger status",
+      "target": "status",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.9,
+      "description": "Wrong namespace: ledger status -> status"
+    },
+    {
+      "pattern": "ledger sync",
+      "target": "sync",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.9,
+      "description": "Wrong namespace: ledger sync -> sync"
+    },
+    {
+      "pattern": "conventions",
+      "target": "agent team-ctx",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.9,
+      "description": "Missing subcommand: conventions -> agent team-ctx (team conventions live in Team Context)"
+    },
+    {
+      "pattern": "discussion",
+      "target": "conversation",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.9,
+      "description": "Synonym: discussion -> conversation"
+    },
+    {
+      "pattern": "discussions",
+      "target": "conversation",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.9,
+      "description": "Synonym: discussions -> conversation"
+    },
+    {
+      "pattern": "session start",
+      "target": "agent session start",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.9,
+      "description": "Missing namespace: session start -> agent session start (recording is driven through the agent dispatcher)"
+    },
+    {
+      "pattern": "agent session-list",
+      "target": "session list",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.9,
+      "description": "Wrong namespace: agent session-list -> session list"
+    },
+    {
+      "pattern": "agent skills",
+      "target": "skills",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.9,
+      "description": "Wrong namespace: agent skills -> skills"
+    },
+    {
+      "pattern": "update",
+      "target": "upgrade",
+      "has_regex": false,
+      "auto_execute": false,
+      "confidence": 0.8,
+      "description": "Synonym: update -> upgrade (suggest only: upgrade replaces the installed binary)"
+    },
+    {
+      "pattern": "mural",
+      "target": "murmur",
+      "has_regex": false,
+      "auto_execute": false,
+      "confidence": 0.8,
+      "description": "Typo: mural -> murmur (suggest only: mural could be a different word)"
+    },
+    {
+      "pattern": "^([a-z][a-z-]*) help$",
+      "target": "$1 --help",
+      "has_regex": true,
+      "auto_execute": true,
+      "confidence": 0.9,
+      "description": "Convention: <command> help -> <command> --help"
     }
   ],
   "tokens": [
@@ -379,6 +499,22 @@
       "kind": "unknown-flag",
       "confidence": 0.75,
       "_comment": "Suggestion-only (bare flag name, no fixed value to rewrite to): hints '--team' on `ox query`, where --scope is unrecognized. Distinct from ox murmur's own --scope flag (ledger vs. team scope) -- no collision since this entry only ever engages where --scope is unrecognized, and murmur registers its own --scope so it never hits this path."
+    },
+    {
+      "pattern": "--text",
+      "target": "--json=false",
+      "kind": "unknown-flag",
+      "confidence": 0.9,
+      "rewrite": true,
+      "_comment": "Bare boolean rewrite: agents ask for human-readable output with --text. Skipped by the runtime rewrite on any command that owns its own --text (agent), so that flag keeps its meaning."
+    },
+    {
+      "pattern": "--full-json",
+      "target": "--json",
+      "kind": "unknown-flag",
+      "confidence": 0.9,
+      "rewrite": true,
+      "_comment": "Bare boolean rewrite: --full-json -> --json (there is one JSON shape; no summary/full split)."
     }
   ]
 }

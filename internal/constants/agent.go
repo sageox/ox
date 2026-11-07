@@ -131,6 +131,16 @@ const (
 	OxHookCommandGeminiTemplate = "if command -v ox >/dev/null 2>&1; then AGENT_ENV=gemini ox agent hook %s 2>&1 || true; " + oxNotOnPathFallback
 )
 
+// OxStatuslineCommandClaudeCode is the Claude Code statusLine command ox
+// installs in a project's .claude/settings.json. Unlike the hook commands it
+// has no off-PATH fallback: whatever it prints is drawn in the status bar, so
+// it stays silent when ox is missing or fails.
+const OxStatuslineCommandClaudeCode = "if command -v ox >/dev/null 2>&1; then ox statusline 2>/dev/null || true; fi"
+
+// OxStatuslineRefreshSeconds is the statusLine refreshInterval ox installs, so
+// a teammate's murmur appears even while the AI coworker is idle.
+const OxStatuslineRefreshSeconds = 15
+
 // HookCommand fills an OxHookCommand*Template with the native event name.
 // Only the first %s is the event placeholder; the rest belong to the shell.
 func HookCommand(template, event string) string {

@@ -36,6 +36,11 @@ func TestValidateSettingsBytes(t *testing.T) {
 			why:  "Valid intermediate state when hooks have been intentionally cleared.",
 		},
 		{
+			name: "hook with a timeout",
+			body: `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"x","timeout":30}]}]}}`,
+			why:  "Claude Code documents a per-hook timeout. A user's valid hook must not read as broken in ox doctor just because ox does not model the field.",
+		},
+		{
 			name: "canonical SessionStart entry",
 			body: `{"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":"ox agent prime"}]}]}}`,
 			why:  "Exact shape ox emits during init. If the validator rejects this, init is broken.",

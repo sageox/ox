@@ -141,6 +141,8 @@ func TestConverge_DefersSkillChangesUntilSessionBoundary(t *testing.T) {
 	require.Len(t, report.Outcomes, 1)
 	require.Equal(t, StatePending, report.Outcomes[0].State)
 	require.Contains(t, report.Outcomes[0].Detail, "active AI coworker session")
+	require.Equal(t, DeferralActiveSession, report.Outcomes[0].Deferral,
+		"a session hold must be recognizable without parsing Detail")
 	during, err := os.ReadFile(installed)
 	require.NoError(t, err)
 	require.Contains(t, string(during), "Version one", "background convergence changed live session behavior")
@@ -226,6 +228,7 @@ func TestConverge_ProjectsTeamRuleExactlyOnceAndConvergesFilteringAndRemoval(t *
 		ProjectRoot: project, TeamPath: team, RepoSlug: "acme/api", Mode: ModeAutomatic,
 	})
 	require.ErrorContains(t, err, "current rule snapshot")
+	require.ErrorIs(t, err, ErrSessionHold, "the whole-pass hold must stay recognizable as a deferral")
 	require.FileExists(t, native, "background convergence retired a rule during an active session")
 	require.NoError(t, session.ClearRecordingStateForAgent(project, recording.AgentID))
 

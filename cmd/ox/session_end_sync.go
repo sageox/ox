@@ -15,6 +15,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"regexp"
@@ -22,6 +24,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/session"
@@ -139,7 +142,62 @@ func runSessionStopWith(oxPath, projectRoot, agentID string, wait time.Duration)
 	if err != nil {
 		return fmt.Errorf("read session stop output: %w", err)
 	}
-	return sessionStopOutcome(printed)
+	outcome := sessionStopOutcome(printed)
+	// A failed upload still exits 0 and says why only on stderr, which this
+	// hook deletes on return. Keep the reason in the hook log, or the next
+	// failure in an orb is as blind as the first one (sageox/ox#1425).
+	if errors.Is(outcome, errSessionUploadFailed) {
+		if said, readErr := os.ReadFile(diag.Name()); readErr == nil {
+			if tail := stopDiagnosticsTail(said); tail != "" {
+				outcome = fmt.Errorf("%w: %s", outcome, tail)
+			}
+		}
+	}
+	return outcome
+}
+
+// sessionUploadRetryWaits are the pauses between attempts when a session's
+// Ledger upload fails on a host the daemon won't outlive (an Amp orb).
+// Nothing else retries there before the host pauses: the daemon freezes with
+// it, and ox doctor runs only after it wakes. A real orb session sat unpushed
+// for 23 minutes that way (sageox/ox#1425). Three attempts in all, each wait
+// jittered to between half and one and a half times its base, fit well
+// inside the SessionEnd hook's wait (sessionEndStopWait).
+var sessionUploadRetryWaits = []time.Duration{2 * time.Second, 6 * time.Second}
+
+// uploadSessionBeforeHostEnds runs upload once and, when the daemon won't
+// outlive this host, retries a failure that another attempt could fix. The
+// upload is safe to repeat: it keeps the session ID in meta.json and
+// re-publishes a pointer commit a failed push left behind
+// (uploadSessionToLedgerWithEffects, commitAndPushLedger). Retrying here
+// replaces the daemon's retry rather than adding a second layer, because
+// that daemon is frozen by the time it would run.
+func uploadSessionBeforeHostEnds(sessionName string, daemonOutlivesHost bool, upload func() error, sleep func(time.Duration)) error {
+	err := upload()
+	if err == nil || daemonOutlivesHost {
+		return err
+	}
+	for i, base := range sessionUploadRetryWaits {
+		if !retryableSessionUploadError(err) {
+			return err
+		}
+		wait := base/2 + rand.N(base)
+		slog.Warn("session upload failed, retrying before the host pauses",
+			"session", sessionName, "attempt", i+2, "wait_ms", wait.Milliseconds(), "error", err)
+		sleep(wait)
+		if err = upload(); err == nil {
+			slog.Info("session upload succeeded on retry", "session", sessionName, "attempt", i+2)
+			return nil
+		}
+	}
+	return err
+}
+
+// retryableSessionUploadError reports whether another attempt could succeed.
+// Read-only access and revoked or expired credentials fail the same way every
+// time.
+func retryableSessionUploadError(err error) bool {
+	return !errors.Is(err, api.ErrReadOnly) && !pipeline.IsAuthRelatedError(err.Error())
 }
 
 func removeTemp(f *os.File) {

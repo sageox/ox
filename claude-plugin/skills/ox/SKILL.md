@@ -31,7 +31,7 @@ ox is a CLI that gives AI coworkers shared team context: conventions, architectu
 | `ox status` | Check auth, sync, daemon health |
 | `ox doctor` | Run diagnostic checks |
 | `ox init` | Initialize SageOx in a repository |
-| `ox conventions` | Get verified team coding standards |
+| `ox agent team-ctx` | Get distilled team conventions and decisions |
 | `ox session list` | List recent sessions from ledger |
 
 ## Searching Code, History, PRs

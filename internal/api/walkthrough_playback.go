@@ -83,10 +83,13 @@ func DownloadWalkthroughImage(ctx context.Context, rawURL string, maxBytes int64
 	if u.Scheme != "https" && (u.Scheme != "http" || !isLoopbackHost(u.Hostname())) {
 		return nil, fmt.Errorf("image link must use https")
 	}
-	req, err := useragent.NewRequest(ctx, http.MethodGet, rawURL, nil)
+	// A presigned object-store URL, not a SageOx endpoint: send the User-Agent
+	// only, never the X-Sageox-* repo or actor headers.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("image link is not a usable URL")
 	}
+	req.Header.Set("User-Agent", useragent.String())
 	client := &http.Client{
 		Timeout:       walkthroughImageTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },

@@ -9,6 +9,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/sessionid"
+	"github.com/sageox/ox/internal/weblink"
 )
 
 // buildSessionURL constructs the canonical web URL for viewing a session.
@@ -52,7 +53,7 @@ func buildConversationURL(cfg *config.ProjectConfig, sessionID string) string {
 	if strings.ContainsFunc(ep, func(r rune) bool { return r <= ' ' || r == 0x7f }) {
 		return ""
 	}
-	return fmt.Sprintf("%s/c/%s", ep, url.PathEscape(sessionID))
+	return weblink.ArtifactURL(ep, sessionID, "/c/", "ses_")
 }
 
 // sessionLinkOutputs derives the prime session URL and the exact-literal PR

@@ -49,6 +49,7 @@ func runConversationTopics(cmd *cobra.Command, args []string) error {
 		return finishConversationEnvelope(cmd.OutOrStdout(), format, read.ErrorEnvelope(shareErr), nil)
 	}
 	env := reader.Topics(idArg)
+	traceConversationRead(env, reader, idArg)
 	return finishConversationEnvelope(cmd.OutOrStdout(), format, env, renderConversationTopicsText)
 }
 

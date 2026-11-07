@@ -1,0 +1,42 @@
+# Zero-start eval: how a coding agent meets ox with no context at all.
+# Kept apart from ../../firegoat.yaml so the local ox build is never on this
+# test's PATH. Run from this folder: npx -y firegoat@latest eval
+# Note: the agent still inherits your shell's PATH, so an ox you installed
+# yourself stays reachable; run on a machine without ox for a fully cold read.
+
+runs: 1
+
+build: cp -R ../../fixtures/starter-app ../../fixtures/seed-repo.sh "$FIREGOAT_OUT"
+
+env:
+  SAGEOX_TOKEN: ""
+  SAGEOX_API: ""
+  SAGEOX_AGENT_ID: ""
+  SAGEOX_SESSION_ID: ""
+
+install: seed-repo.sh
+
+tests:
+  # The user's problem only, as the README states it: humans repeat themselves
+  # and AI coworkers rebuild the same lost context every session.
+  - name: zero-start
+    prompt: >-
+      Every coding session my AI agent starts from zero. My team keeps
+      repeating our decisions and conventions to it. Set this repo up so our
+      agents start with what the team already figured out. Keep it minimal.
+    end_goal: >-
+      The agent finds SageOx/ox, runs it in this repo, and either initializes the
+      repo with no human step, or stops at the first real blocker (ox login /
+      SAGEOX_TOKEN) and tells the user that one step, instead of inventing a
+      homegrown notes file or claiming success.
+    checks:
+      - run: >-
+          grep -Eq '^\[[0-9]+\] \$ (.*[ /])?ox +(init|login|status|doctor)' "$FIREGOAT_TRANSCRIPT"
+      - run: >-
+          test -d "$FIREGOAT_WORKDIR/.sageox" ||
+          grep -Eiq '^agent: .*(ox login|SAGEOX_TOKEN)' "$FIREGOAT_TRANSCRIPT"
+      # FIREGOAT_REPO is this folder; guard the whole ox checkout
+      - run: |
+          repo_root=$(cd "$FIREGOAT_REPO/../.." && pwd)
+          test -s "$FIREGOAT_TRANSCRIPT" && ! grep -E '^\[[0-9]+\] ' "$FIREGOAT_TRANSCRIPT" | grep -qF "$repo_root"
+    timeout: 900

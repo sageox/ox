@@ -8,12 +8,11 @@ import (
 // Prefilter thresholds. Tuned conservatively — the goal is to skip
 // sessions whose LLM-generated summary would be hallucinated, not to
 // aggressively skip anything that *might* be thin. Err on the side of
-// letting the LLM try; the existing quality gate (EvaluateQuality with
-// thresholds at 0.1 / 0.3) will discard or local-only the result if the
-// LLM correctly assesses it as low value.
+// letting the LLM try; the existing quality gate will skip the result if
+// the LLM correctly assesses it as low value.
 //
 // Tighten these only with telemetry data showing the prefilter's skip
-// rate stays well below the LLM's "quality_score < 0.3" rate (i.e. we
+// rate stays well below the LLM's skip rate (i.e. we
 // only skip what the LLM was going to discard anyway).
 const (
 	// minMeaningfulEntries is the floor below which any summary would be
@@ -61,8 +60,7 @@ const (
 // belong in the team ledger. Today every such session pays the full
 // summarization cost: the prompt template's ~5KB of guidelines, the
 // optimized session bytes, the Haiku call, the validation pass — all to
-// produce an LLM summary that the quality gate then routes to "discard"
-// or "local-only" anyway.
+// produce an LLM summary that the quality gate then routes to "discard" anyway.
 //
 // This function short-circuits that path for sessions whose schema
 // fields (chapter_titles, decisions, aha_moments) cannot meaningfully

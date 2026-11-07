@@ -285,7 +285,7 @@ func TestGitCommitAndPush_IgnoresOtherSessionsStagedFiles(t *testing.T) {
 	handler.gitCommitAndPush(&SessionFinalizePayload{
 		SessionDir: targetDir,
 		LedgerPath: clonePath,
-	}, nil)
+	}, nil, nil)
 
 	// the other session's file must still be staged and uncommitted
 	committed := gitOutput(t, clonePath, "log", "-1", "--name-only", "--pretty=format:")
@@ -349,7 +349,7 @@ func TestGitCommitAndPush_CommitExcludesOtherSessionsWhenStaged(t *testing.T) {
 		"raw.jsonl":  lfs.NewFileRef([]byte("target content")),
 		"summary.md": lfs.NewFileRef([]byte("target content")),
 		"session.md": lfs.NewFileRef([]byte("target content")),
-	})
+	}, nil)
 
 	committed := gitOutput(t, clonePath, "log", "-1", "--name-only", "--pretty=format:")
 	if !strings.Contains(committed, target) {

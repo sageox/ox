@@ -235,6 +235,9 @@ func TestValidateStagedLedgerCommit(t *testing.T) {
 				cmd := exec.Command("git", "merge", "other")
 				cmd.Dir = repo
 				require.Error(t, cmd.Run(), "fixture must leave an unmerged index")
+				// Keep the conflicts but quit the merge so this exercises index
+				// validation independently of the unfinished-merge guard.
+				gitInRepo(t, repo, "merge", "--quit")
 			},
 		},
 	} {

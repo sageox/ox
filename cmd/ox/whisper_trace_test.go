@@ -3,8 +3,15 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/tokens"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
 
@@ -66,4 +73,29 @@ func TestTraceWhisperDelivery_OnlyMurmurEntries(t *testing.T) {
 	if found {
 		t.Error("context-trace.jsonl should not be created when no recording session is active")
 	}
+}
+
+// TestTraceWhisperDelivery_RecordsInlineTokens drives a real recording.
+// Failure prevented: whisper volume is invisible to the usage report — a
+// delivered murmur lands in the AI coworker's context but its size is never
+// recorded, so "context injected" undercounts.
+func TestTraceWhisperDelivery_RecordsInlineTokens(t *testing.T) {
+	projectRoot := setupSessionTestProject(t)
+	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{AgentID: "OxWh01", AdapterName: "claude-code"})
+	require.NoError(t, err)
+
+	content := strings.Repeat("x", 400)
+	traceWhisperDelivery(projectRoot, "OxWh01", []whisperstore.WhisperEntry{
+		{ID: "m1", Source: "murmur", Topic: "wip", Content: content, AgentID: "OxOther", Scope: "team", PrincipalID: "dana-smith"},
+	})
+
+	events, err := contexttrace.ReadEvents(filepath.Join(state.SessionPath, contexttrace.FileName))
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, contexttrace.EventProvided, events[0].Type, "whisper delivery stays a provided event")
+	assert.Equal(t, tokens.EstimateTokens(content), events[0].InlineTokens)
+	assert.Equal(t, 100, events[0].InlineTokens)
+	assert.Equal(t, "m1", events[0].Ref)
+	assert.NotEmpty(t, events[0].FromName, "sender name travels with the delivery so a used murmur can be credited")
+	assert.Equal(t, whisperFromName(whisperstore.WhisperEntry{PrincipalID: "dana-smith"}), events[0].FromName)
 }

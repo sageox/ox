@@ -1,0 +1,26 @@
+{
+  "claude_version": "2.1.317 (Claude Code)",
+  "baseline_tag": "v0.25.0",
+  "builds": {
+    "head": {
+      "projections": {
+        "control-beacon-804cf28b-team.md": "---\ndescription: \"control-beacon rules.\"\npaths:\n  - \"control/**\"\n---\n\nControl rule. MARKER-MATRIX-CONTROL\n\u003c!-- ox-team-rule-sha256:cd731452cb993e8260285e5422e90e50e2670f37a97f1458ddea29afe5a48ace; managed by ox from Team Context; edit the source rule, not this projection. --\u003e\n",
+        "scoped-kiosk-f888cb53-team.md": "---\ndescription: \"scoped-kiosk rules.\"\npaths:\n  - \"site/app/kiosk/**\"\n---\n\n# scoped-kiosk\n\nMARKER-MATRIX-KIOSK\n\n- Keep page components small.\n- Fetch data in the route, never in a leaf.\n- Handle the empty state on purpose.\n\u003c!-- ox-team-rule-sha256:e39a8d02ed3d70fe9d12c1c1fbdc2e0c61b6eaf5812b53b0fc1646ca52656ae2; managed by ox from Team Context; edit the source rule, not this projection. --\u003e\n",
+        "scoped-pages-6e53b996-team.md": "---\ndescription: \"scoped-pages rules.\"\npaths:\n  - \"site/app/(shop)/**/*.tsx\"\n  - \"site/app/(shop)/**/*.css\"\n  - \"site/app/(account)/**/*.tsx\"\n  - \"site/app/(account)/**/*.css\"\n---\n\n# scoped-pages\n\nMARKER-MATRIX-PAGES\n\n- Keep page components small.\n- Fetch data in the route, never in a leaf.\n- Handle the empty state on purpose.\n\u003c!-- ox-team-rule-sha256:58803d3b1cb84f05de1c3fd85b5c9d0c5290094bdca6fd745c0c40183929cecf; managed by ox from Team Context; edit the source rule, not this projection. --\u003e\n",
+        "scoped-site-dc85c8a3-team.md": "---\ndescription: \"scoped-site rules.\"\npaths:\n  - \"site/**/*.tsx\"\n  - \"site/**/*.css\"\n  - \"lib/ui/**/*.tsx\"\n  - \"lib/ui/**/*.css\"\n---\n\n# scoped-site\n\nMARKER-MATRIX-SITE\n\n- Keep page components small.\n- Fetch data in the route, never in a leaf.\n- Handle the empty state on purpose.\n\u003c!-- ox-team-rule-sha256:3587d42bd4c01faa6bb835a2e42b97a57dfacfa40776c6c4ca19b797e644516a; managed by ox from Team Context; edit the source rule, not this projection. --\u003e\n"
+      },
+      "always_loaded_scoped_bytes": 0,
+      "prime_scoped_rule_lines": 0
+    },
+    "v0.25.0": {
+      "projections": {
+        "control-beacon-804cf28b-team.md": "---\ndescription: \"control-beacon rules.\"\nglobs: \"control/**\"\n---\n\nControl rule. MARKER-MATRIX-CONTROL\n\u003c!-- ox-team-rule-sha256:e5b05804254fafa0b51220d904c7e81607c2d991bdad6446c1dc299956d9174c; managed by ox from Team Context; edit the source rule, not this projection. --\u003e\n",
+        "scoped-kiosk-f888cb53-team.md": "---\ndescription: \"scoped-kiosk rules.\"\nglobs: \"site/app/kiosk/**\"\n---\n\n# scoped-kiosk\n\nMARKER-MATRIX-KIOSK\n\n- Keep page components small.\n- Fetch data in the route, never in a leaf.\n- Handle the empty state on purpose.\n\u003c!-- ox-team-rule-sha256:11a91f8609a83dcda0f2e574bf119d2bca0bd8a04ca9d443af2907cb0b33a636; managed by ox from Team Context; edit the source rule, not this projection. --\u003e\n",
+        "scoped-pages-6e53b996-team.md": "---\ndescription: \"scoped-pages rules.\"\nglobs: \"site/app/(shop)/**/*.{tsx,css},site/app/(account)/**/*.{tsx,css}\"\n---\n\n# scoped-pages\n\nMARKER-MATRIX-PAGES\n\n- Keep page components small.\n- Fetch data in the route, never in a leaf.\n- Handle the empty state on purpose.\n\u003c!-- ox-team-rule-sha256:e81af28ae92daf33090311acae08e37020abe4dfcb8c73186bf3e0242dc34766; managed by ox from Team Context; edit the source rule, not this projection. --\u003e\n",
+        "scoped-site-dc85c8a3-team.md": "---\ndescription: \"scoped-site rules.\"\nglobs: \"site/**/*.{tsx,css},lib/ui/**/*.{tsx,css}\"\n---\n\n# scoped-site\n\nMARKER-MATRIX-SITE\n\n- Keep page components small.\n- Fetch data in the route, never in a leaf.\n- Handle the empty state on purpose.\n\u003c!-- ox-team-rule-sha256:0ea875300fbba9d805fe13a7c52ed4ed3eeb7e45d284516f3e5cf83206eb8b75; managed by ox from Team Context; edit the source rule, not this projection. --\u003e\n"
+      },
+      "always_loaded_scoped_bytes": 439,
+      "prime_scoped_rule_lines": 0
+    }
+  }
+}

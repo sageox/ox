@@ -304,9 +304,9 @@ func openSQLite(root string) (*sql.DB, bool, error) {
 	}
 
 	// WAL: concurrent readers + one writer. busy_timeout: wait up to 5s for
-	// write locks instead of failing immediately. This matters when multiple
-	// daemons (one per worktree) share the same index. Long-term fix is
-	// one-daemon-per-repo; until then busy_timeout provides best-effort safety.
+	// write locks instead of failing immediately. One index serves the whole
+	// repo: its daemon (one for every worktree) and ox commands such as ox code
+	// and ox index code open it from separate processes.
 	// cache_size(-65536): 64 MB page cache. mmap_size(268435456): map up to
 	// 256 MB of the DB into memory for faster reads; SQLite silently falls back
 	// to normal I/O for pages beyond the mmap region or on unsupported systems.

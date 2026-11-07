@@ -188,8 +188,21 @@ func TestPrior_AnswersARetryFromWhatIsStored(t *testing.T) {
 	res, _ := ParseResolutionRequest([]byte(`{"id":"accept-0001","anchor":"h1","state":"verified"}`))
 	accepted, _ := res.Record("Ana", at(2))
 	again, _ := res.Record("Ana", at(5))
-	if r, found := Prior(Inventory{Files: []File{stored, accepted}}, again); !found || r.State != ReceiptAlreadyPublished || r.Path != accepted.Path {
-		t.Errorf("resolution retry: Prior = %+v %v, want already_published at %s", r, found, accepted.Path)
+	acceptedByOtherReviewer, _ := res.Record("Ben", at(5))
+	changedResolution, _ := ParseResolutionRequest([]byte(`{"id":"accept-0001","anchor":"h1","state":"wontfix"}`))
+	acceptedWithOtherPayload, _ := changedResolution.Record("Ana", at(5))
+	for _, c := range []struct {
+		name  string
+		rec   File
+		state string
+	}{
+		{"resolution retry", again, ReceiptAlreadyPublished},
+		{"resolution under another reviewer", acceptedByOtherReviewer, ReceiptConflict},
+		{"resolution with another payload", acceptedWithOtherPayload, ReceiptConflict},
+	} {
+		if r, found := Prior(Inventory{Files: []File{stored, accepted}}, c.rec); !found || r.State != c.state || r.Path != accepted.Path {
+			t.Errorf("%s: Prior = %+v %v, want %s at %s", c.name, r, found, c.state, accepted.Path)
+		}
 	}
 	if _, found := Prior(inv, File{Path: "feedback/remaps.json"}); found {
 		t.Error("Prior looked up a file that is no operation's record")

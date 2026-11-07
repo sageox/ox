@@ -22,6 +22,12 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 
 	var results []checkResult
 
+	// a damaged record of aborted sessions stops import and auto-recording;
+	// shown only when it needed repair
+	if abortRecord := checkAbortRecord(opts.shouldFix(CheckSlugSessionAbortRecord)); !abortRecord.skipped && abortRecord.message != "readable" {
+		results = append(results, abortRecord)
+	}
+
 	// sessions kept on this machine, or waiting in the cache (GH #1095, #1077).
 	// First: in manual mode it holds unmarked cache sessions, and the upload
 	// retry below would otherwise publish them in this same run.
@@ -119,12 +125,8 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 		results = append(results, convertDoctorResult(pushResult))
 	}
 
-	// add incomplete sessions check (context-aware: human vs agent guidance)
-	incompleteResult := checkSessionIncomplete(opts.shouldFix(CheckSlugSessionIncomplete))
-	// only include if not a pass with "all sessions complete" (reduce noise)
-	if !incompleteResult.passed || incompleteResult.message != "all sessions complete" {
-		results = append(results, incompleteResult)
-	}
+	// Retain a successful inspection too: it acknowledges a stale agent chore.
+	results = append(results, checkSessionIncomplete(opts.shouldFix(CheckSlugSessionIncomplete)))
 
 	// draft placeholders whose recording is gone
 	orphanResult := checkSessionDraftOrphanViaRegistry(opts)

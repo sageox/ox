@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -44,7 +46,6 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/sessionid"
-	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/sageox/ox/internal/teamrules"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/tips"
@@ -346,9 +347,16 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// match a stale marker from an unrelated prior session and silently
 	// cross-link identities. Requiring a live agent detection keeps the
 	// fallback limited to the scenario it was designed for.
+	//
+	// markerIsThisSession: identity may be shared across native sessions under
+	// one agent process, but "this session already received a full prime" is a
+	// per-native-session fact. A PID-matched marker only speaks for this call
+	// when the call carries no session ID of its own.
+	markerIsThisSession := existingMarker != nil
 	if !isCursor && existingMarker == nil && agentx.CurrentAgent() != nil {
 		if agentPID := proc.FindAgentAncestorPID(); agentPID > 0 {
 			existingMarker = FindSessionMarkerByPID(agentPID)
+			markerIsThisSession = existingMarker != nil && agentSessionID == ""
 			if existingMarker != nil && agentSessionID == "" {
 				// promote the marker's native session ID so downstream
 				// marker writes reuse the same key
@@ -405,6 +413,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// check if project is initialized (.sageox/ exists)
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
 	if _, err := os.Stat(sageoxDir); os.IsNotExist(err) {
+		// a clone of an open-source project that is public on SageOx primes
+		// read-only from its public thinking, member or not
+		if handled, err := emitPublicPrime(cmd, projectRoot, textMode || reviewMode); handled {
+			return err
+		}
 		// project not initialized - tell the agent to ask user to run ox init
 		output := agentPrimeOutput{
 			Status:  "unavailable",
@@ -416,7 +429,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// anti-entropy: ensure ox:prime marker exists in AGENTS.md/CLAUDE.md
 	// only run on properly initialized projects (config.json exists, not just .sageox/ dir)
 	if config.IsInitialized(projectRoot) {
-		_, _ = EnsureOxPrimeMarker(projectRoot)
+		if _, err := EnsureOxPrimeMarker(projectRoot); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to repair ox:prime markers: %v\n", err)
+		}
 	}
 
 	// anti-entropy: ensure Claude Code hooks are installed
@@ -525,6 +540,25 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
+
+	// Reconcile before exposing session context. Approval-only changes must retire
+	// revoked executable content, and unreadable policy must not be ignored. This
+	// runs before recording starts, so a refusal never strands a recording without
+	// its session marker, and before the auth check, so degraded sessions are
+	// reconciled too.
+	skillReconcileStart := time.Now()
+	reconciled, withheldDecisions, err := reconcileSkillInventoryIfStale(projectRoot)
+	if err != nil {
+		return fmt.Errorf("cannot prime with an unverified skill inventory: %w", err)
+	}
+	if reconciled > 0 {
+		timing["skills_reconciled"] = int64(reconciled)
+	}
+	withheldTeamSkills := make([]prime.WithheldSkill, 0, len(withheldDecisions))
+	for _, d := range withheldDecisions {
+		withheldTeamSkills = append(withheldTeamSkills, prime.WithheldSkill{Name: d.Name, Reason: d.Reason})
+	}
+	timing["skills_reconcile"] = time.Since(skillReconcileStart).Milliseconds()
 
 	// attempt to start session recording if enabled (local, no auth needed)
 	phaseStart = time.Now()
@@ -642,20 +676,6 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// check auth status for attribution warning
 	isLoggedIn, _ := auth.IsAuthCredentialValidForEndpoint(projectEndpoint)
 
-	// Bring the managed skill inventory in line with this binary before the agent
-	// reads it. The healthy path is a lockfile read and two comparisons; a plan is
-	// only built once a mismatch is proven. Failures never reach the session.
-	skillReconcileStart := time.Now()
-	reconciled, withheldDecisions := reconcileSkillInventoryIfStale(projectRoot)
-	if reconciled > 0 {
-		timing["skills_reconciled"] = int64(reconciled)
-	}
-	withheldTeamSkills := make([]prime.WithheldSkill, 0, len(withheldDecisions))
-	for _, d := range withheldDecisions {
-		withheldTeamSkills = append(withheldTeamSkills, prime.WithheldSkill{Name: d.Name, Reason: d.Reason})
-	}
-	timing["skills_reconcile"] = time.Since(skillReconcileStart).Milliseconds()
-
 	// check for .needs-doctor-agent marker
 	needsDoctorAgent := doctor.NeedsDoctorAgent(projectRoot)
 	var doctorHint string
@@ -762,7 +782,14 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// (primeCallCount==1, set above), always yields compactReprime=false
 	// (full preamble). See prime.ShouldCompactReprime for the full
 	// belt-and-suspenders rationale.
-	compactReprime := prime.ShouldCompactReprimeForEvent(primeCallCount, hookEventName, hookSource)
+	//
+	// Compact additionally requires proof that THIS native session already
+	// received a full prime through its hook. primeCallCount counts invocations
+	// per shared agent identity, not deliveries: a bare prime piped through
+	// head, or a second Claude Code session under the same parent process, would
+	// otherwise be told "you were already primed" and never see team knowledge.
+	fullPrimeDelivered := existingMarker != nil && markerIsThisSession && existingMarker.FullPrimeViaHook
+	compactReprime := fullPrimeDelivered && prime.ShouldCompactReprimeForEvent(primeCallCount, hookEventName, hookSource)
 
 	contentWithAttribution := withAttributionGuidance("", isLoggedIn, attribution)
 
@@ -1093,6 +1120,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			AgentSessionID:     agentSessionID,
 			PrimedAt:           time.Now(),
 			ParentPID:          proc.FindAgentAncestorPID(),
+			FullPrimeViaHook:   fullPrimeDelivered || (hookInput != nil && !compactReprime),
 		}
 		if isCursor && hookInput != nil {
 			marker.PrimedAt = time.Time{} // completed by the successful hook parent
@@ -1141,7 +1169,29 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	output.ElapsedMs = time.Since(primeStart).Milliseconds()
 	output.Timing = timing
 
+	// A capped hook prime reaches the model as a trimmed preview with sections
+	// deferred to a file, so it must not license a later compact prime. The
+	// marker above optimistically records delivery; revoke it unless the output
+	// path confirms the full prime went out untrimmed.
+	var emitted bytes.Buffer
+	revokeCandidate := agentSessionID != "" && hookInput != nil && output.HookOutputBudget > 0
+	if revokeCandidate {
+		origOut := cmd.OutOrStdout()
+		cmd.SetOut(io.MultiWriter(origOut, &emitted))
+		defer cmd.SetOut(origOut)
+	}
+
 	err = outputAgentPrime(cmd, textMode, reviewMode, output)
+
+	if revokeCandidate && (err != nil || strings.Contains(emitted.String(), hookCapDeferredOpen)) {
+		_, revokeErr := UpdateSessionMarker(agentSessionID, func(m *SessionMarker) error {
+			m.FullPrimeViaHook = false
+			return nil
+		})
+		if revokeErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to update session marker: %v\n", revokeErr)
+		}
+	}
 
 	// Emit PAT expiry warning to stderr (post-output so structured stdout is
 	// never polluted). Internally skipped in ephemeral mode and when stderr
@@ -1175,6 +1225,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	return err
 }
+
+// hookCapDeferredOpen is the start of the pointer fitPrimeToHookCap appends when
+// it trims a hook prime; its presence in emitted output means the model got a
+// partial prime.
+const hookCapDeferredOpen = `<deferred path="`
 
 // resolveAgentIDFromStates returns envID if it matches an alive recording, otherwise "".
 // Intentionally does not fall back to a sole active recording: two concurrent Claude Code
@@ -1498,6 +1553,19 @@ func associateCursorStartupRecording(projectRoot, agentID, agentSessionID string
 	return fmt.Errorf("published Cursor recording is unavailable for source association")
 }
 
+// recordBeforeLedgerClone reports whether recording may start before the
+// Ledger is cloned. On a host that ends with the agent (an Amp orb), the first
+// prime always runs before the clone: prime starts the daemon only after its
+// output, and that daemon does the cloning. The agent usually primes once per
+// thread, so waiting for a later prime records nothing (seen in a real orb,
+// sageox/ox#1425). Starting now is safe: the recording lives under the
+// Ledger's .sageox/cache, which the clone adopts (gitserver.AdoptCacheOnlyTarget),
+// and the upload at session end comes minutes later, after the clone. With the
+// daemon disabled nothing would ever clone, so keep the old answer there.
+func recordBeforeLedgerClone() bool {
+	return runtime.Caps().HostEndsWithAgent && !daemon.IsDaemonDisabled()
+}
+
 func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string, cursorStartup *cursorRecordingStartup, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
 	var cursorBoundary *CursorSourceBoundary
 	if len(cursorBoundaries) > 0 {
@@ -1529,7 +1597,7 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 	} else {
 		ledgerExists = ledger.Exists("")
 	}
-	if !ledgerExists {
+	if !ledgerExists && !recordBeforeLedgerClone() {
 		// return status indicating ledger needed
 		return &sessionStatus{
 			Recording:    false,
@@ -1625,6 +1693,19 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 			UserNotification: "[ox] Cursor recording is waiting for the next prompt to establish its source boundary."}
 	}
 
+	// A coworker who aborted ox's recording of this native conversation
+	// discarded it; resuming the conversation must not quietly record and
+	// publish it again. An explicit session start still can. An unreadable
+	// record fails closed, as import does.
+	if aborted, ok, err := abortedNativeSession(projectRoot, agentSessionID); err != nil || ok {
+		notice := "[ox] Not recording: the record of conversations you aborted cannot be read. Run 'ox doctor' to repair it."
+		if err == nil {
+			notice = fmt.Sprintf("[ox] Not recording: you aborted ox's recording of this conversation on %s. To record it anyway, run 'ox agent %s session start'.",
+				aborted.AbortedAt.Local().Format("2006-01-02"), agentID)
+		}
+		return &sessionStatus{Recording: false, Mode: resolved.Mode, Source: string(resolved.Source), UserNotification: notice}
+	}
+
 	// generate session file path
 	timestamp := time.Now().Format("2006-01-02-150405")
 	outputFile := filepath.Join(projectRoot, ".sageox", "sessions", fmt.Sprintf("%s-%s.md", timestamp, agentID))
@@ -1669,6 +1750,13 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 	}
 	if cursorStartup != nil {
 		opts.PreparedIdentity = cursorStartup.preparedIdentity
+	}
+	if canonicalAgentType(agentType) == string(agentx.AgentTypeAmp) {
+		if sidecar, offset, ok := ampRecordingStart(projectRoot, agentID, agentSessionID); ok {
+			opts.SessionFile = sidecar
+			opts.StartOffset = offset
+			opts.StartOffsetKnown = true
+		}
 	}
 	if canonicalAgentType(agentType) == string(agentx.AgentTypeCursor) && cursorBoundary != nil {
 		opts.StartOffset = cursorBoundary.Offset
@@ -1860,6 +1948,10 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 // the daemon to start tailing it. Best-effort: if the file doesn't exist yet
 // or daemon isn't running, the doctor interval picks it up later.
 func sendSessionWatchStart(state *session.RecordingState, projectRoot string) {
+	if err := session.CheckNativeSourceBinding(state); err != nil {
+		slog.Warn("tail-mode: refusing unbound session source", "error", err)
+		return
+	}
 	// try to discover the agent's native session file
 	sessionFile := state.SessionFile
 	if state.AdapterName == "cursor" {
@@ -1894,6 +1986,10 @@ func sendSessionWatchStart(state *session.RecordingState, projectRoot string) {
 		sessionFile = sf
 		// persist the discovered session file so daemon can find it via DetectAndRestart
 		state.SessionFile = sf
+		if err := session.CheckNativeSourceBinding(state); err != nil {
+			slog.Warn("tail-mode: refusing unbound session source", "error", err)
+			return
+		}
 		if saveErr := session.UpdateRecordingStateForAgent(projectRoot, state.AgentID, func(s *session.RecordingState) {
 			s.SessionFile = sf
 		}); saveErr != nil {
@@ -2131,7 +2227,7 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 				"Ledger Required for Sessions",
 				fmt.Sprintf("Session recording is set to %q (from %s) but the ledger has not been provisioned by cloud.\nRun 'ox doctor --fix' to clone repos from cloud.",
 					output.Session.Mode, output.Session.Source),
-				"ox ledger sync",
+				"ox doctor --fix",
 			)
 		} else if output.Session.Recording {
 			fmt.Fprintln(cmd.OutOrStdout())
@@ -2519,23 +2615,47 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 		ReadCommand: "ox agent team-ctx", // not quoted: this is a machine-parsed command field
 	}
 
-	// if team context directory hasn't synced yet, return partial info
+	// Read the team's documents from every source that carries them, checkout
+	// first.
+	//
+	// A mounted SageOx Files drive is a SECOND source, not a replacement. It
+	// hydrates from the Drive API on access rather than at the last sync, so it
+	// answers where a checkout that missed a pull would be stale — or, on a
+	// machine that never cloned, missing entirely. It does not get to overrule
+	// the checkout on the way there: where both carry a document, the checkout's
+	// copy is the one that ships.
+	//
+	// Reading both is what keeps either from hiding the other. A stale checkout
+	// cannot hide a document the drive has; an unreachable drive cannot hide a
+	// document the checkout has, so a mounted read that fails costs nothing that
+	// was not already going to be missing.
+	//
+	// Only reads gain a source. info.Path, sync state, the ledger, and
+	// everything that writes stay on the checkout — the mount refuses every
+	// write at the OS boundary.
+	sources := newTeamReadSources(tc.Path, tc.TeamID)
+	mount := sources.mountSource()
+	info.Mount = mount
+
+	// if no source carries the team yet, return partial info
 	// so agents still see the "team context available" section
-	if _, err := os.Stat(tc.Path); os.IsNotExist(err) {
+	if !sources.anyExists() {
 		return info
 	}
 
 	// check for human escalation roster
-	escalationPath := filepath.Join(tc.Path, "capabilities", "team", "index.md")
-	if _, err := os.Stat(escalationPath); err == nil {
+	if _, ok := firstRootWith(sources, filepath.Join("capabilities", "team", "index.md")); ok {
 		info.Escalation = "capabilities/team/index.md"
 	}
 
 	// discover coworker customizations
 	// profiles in agents/profiles/, commands in agents/commands/
 	// (legacy coworkers/agents/ and coworkers/commands/ are still read)
-	customizations, err := claude.DiscoverAll(tc.Path)
-	if err == nil && customizations != nil && customizations.HasAnyCustomizations() {
+	customizations, mountAgents, mountCommands := discoverCustomizationsAcross(sources)
+	if mount != nil {
+		mount.Agents, mount.Commands = mountAgents, mountCommands
+	}
+	if customizations != nil && customizations.HasAnyCustomizations() {
 		// populate instruction file paths
 		if customizations.HasInstructionFiles() {
 			info.CoworkerInstructions = &teamCoworkerInstructions{
@@ -2578,8 +2698,12 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 	// frontmatter is a markdown convention, and token estimation is
 	// trivial for text. Non-markdown assets need entirely different
 	// disclosure mechanisms and are out of scope for this catalog.
-	if docs, _ := teamdocs.DiscoverDocs(tc.Path); len(docs) > 0 {
+	docs, mountDocs := discoverTeamDocsAcross(sources)
+	if len(docs) > 0 {
 		info.TeamDocs = docs
+	}
+	if mount != nil {
+		mount.Docs = mountDocs
 	}
 
 	// discover team rules from agents/rules/ (preferred) and coworkers/rules/
@@ -2592,12 +2716,20 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 	// of these rules out to .claude/sageox-team-<slug>/rules/ inside the
 	// current repo so Claude's native paths:-scoped lazy loading kicks in
 	// for free. See cmd/ox/guides/team-rules.md for the rationale.
-	if rules, _ := teamdocs.DiscoverRules(tc.Path, repoSlug); len(rules) > 0 {
+	rules, mountRules := discoverTeamRulesAcross(sources, repoSlug)
+	if len(rules) > 0 {
 		info.TeamRules = rules
 	}
+	if mount != nil {
+		mount.Rules = mountRules
+	}
 
-	// v4 team memory loading
+	// v4 team memory loading: the checkout first, then only what the mounted
+	// drive carries and it does not.
 	loadTeamMemory(info, tc.Path)
+	if mount != nil {
+		mount.Memory = fillTeamMemoryGapsFromMount(info, sources)
+	}
 
 	// github mirror board — a pointer, only when this repo has live posts
 	loadGitHubBoard(info, tc.Path, projectRoot, getLedgerPath, time.Now())
@@ -2616,10 +2748,9 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 
 	// check for agent-context/distilled-discussions.md
 	agentContextRelPath := filepath.Join("agent-context", "distilled-discussions.md")
-	agentContextPath := filepath.Join(tc.Path, agentContextRelPath)
-	if content, err := os.ReadFile(agentContextPath); err == nil {
+	if root, content, ok := readFileAcross(sources, agentContextRelPath); ok {
 		info.HasAgentContext = true
-		info.AgentContextPath = agentContextPath
+		info.AgentContextPath = filepath.Join(root, agentContextRelPath)
 		info.AgentContextRelPath = agentContextRelPath
 		// compute hash for context deduplication
 		hash := sha256.Sum256(content)

@@ -22,7 +22,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -208,7 +207,9 @@ type SyncScheduler struct {
 	// callbacks
 	onActivity   func()                                                           // called on any sync activity
 	onTelemetry  func(syncType, operation, status string, duration time.Duration) // called on sync complete for telemetry
-	getAuthToken func() string                                                    // returns cached auth token from heartbeat
+	getAuthToken func(destination string) string                                  // returns cached auth token scoped to the destination
+
+	onLedgerCloned func(ledgerPath string)
 
 	// issues tracker for health check system
 	issues *IssueTracker
@@ -384,9 +385,9 @@ func (s *SyncScheduler) SetTelemetryCallback(cb func(syncType, operation, status
 	s.onTelemetry = cb
 }
 
-// SetAuthTokenGetter sets the callback to get auth token from heartbeat cache.
+// SetAuthTokenGetter sets the callback to get a destination-scoped heartbeat token.
 // Used for lazy credential refresh via /api/v1/cli/repos.
-func (s *SyncScheduler) SetAuthTokenGetter(cb func() string) {
+func (s *SyncScheduler) SetAuthTokenGetter(cb func(destination string) string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.getAuthToken = cb
@@ -456,6 +457,24 @@ func (s *SyncScheduler) SetTracer(t *observability.DaemonTracer) {
 // SetEventBus sets the event bus for emitting sync events.
 func (s *SyncScheduler) SetEventBus(bus *hooks.EventBus) {
 	s.eventBus = bus
+}
+
+// gcCheckInterval is how often Start checks for workspaces due a GC reclone,
+// or 0 for never. Never under disposable_machine: an hour into a job, the
+// first check would reclone the Ledger, because the daemon's first clone is a
+// full clone and GC upgrades every full clone to a partial one.
+func (s *SyncScheduler) gcCheckInterval() time.Duration {
+	if s.config.ProjectRoot == "" || s.config.DisposableMachine {
+		return 0
+	}
+	return s.config.GCCheckInterval
+}
+
+// SetLedgerClonedCallback registers fn to run when a background clone lands
+// the Ledger this scheduler started without (config.LedgerPath empty). Call it
+// before Start.
+func (s *SyncScheduler) SetLedgerClonedCallback(fn func(ledgerPath string)) {
+	s.onLedgerCloned = fn
 }
 
 // SetGlobalSyncLease wires the per-endpoint global-sync leader-election
@@ -895,8 +914,8 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	// GC reclone ticker — checks hourly if any workspace needs a fresh reclone
 	var gcTicker *time.Ticker
 	var gcChan <-chan time.Time
-	if s.config.GCCheckInterval > 0 && s.config.ProjectRoot != "" {
-		gcTicker = time.NewTicker(s.config.GCCheckInterval)
+	if every := s.gcCheckInterval(); every > 0 {
+		gcTicker = time.NewTicker(every)
 		gcChan = gcTicker.C
 		defer gcTicker.Stop()
 	}
@@ -1470,6 +1489,11 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		}
 
 		s.clearDisprovedBySkip("ledger", result.SkipReason)
+		if s.issues != nil {
+			// a skipped pull still found a cloned ledger; a clone_failed issue
+			// from before an out-of-band repair (`ox doctor --fix`) is stale
+			s.issues.ClearIssue(IssueTypeCloneFailed, "ledger")
+		}
 
 		// remote-unchanged or recently-fetched: update sync timestamps
 		if result.SkipReason == "remote unchanged" || result.SkipReason == "recently fetched" {
@@ -1664,9 +1688,15 @@ func (s *SyncScheduler) drainMurmurOutbox(ctx context.Context) {
 				continue
 			}
 
+			mf, err := decodeMurmurPayload(payload)
+			if err != nil {
+				s.logger.Warn("dropping malformed queued murmur", "path", e.path, "error", err)
+				_ = RemoveOutboxMurmur(e.path)
+				continue
+			}
+
 			// drop stale murmurs (older than the 24h window) so old WIP never resurfaces
-			var mf ledger.MurmurFile
-			if json.Unmarshal(payload.MurmurJSON, &mf) == nil && !mf.Timestamp.IsZero() && mf.Timestamp.Before(cutoff) {
+			if mf.Timestamp.Before(cutoff) {
 				s.logger.Debug("dropping stale queued murmur", "path", e.path, "ts", mf.Timestamp)
 				_ = RemoveOutboxMurmur(e.path)
 				continue
@@ -1939,6 +1969,7 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 				continue
 			}
 			rel := filepath.ToSlash(filepath.Join("sessions", name))
+			pathspec := ":(literal)" + rel
 
 			// Only retract drafts that are ALREADY on the remote. If a draft's publish
 			// commit is still local/unpushed, stacking a retraction on top of it would
@@ -1949,7 +1980,7 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 				continue
 			}
 
-			if _, err := s.git.RunGit(ctx, ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", rel); err != nil {
+			if _, err := s.git.RunGit(ctx, ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", pathspec); err != nil {
 				s.logger.Warn("retract orphaned draft: git rm failed", "session", name, "error", err)
 				continue
 			}
@@ -1967,12 +1998,12 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 			// commit — restore the index + worktree from HEAD so a dangling staged
 			// deletion can't be swept into an unrelated commit, and the next scan
 			// rediscovers the orphan to retry.
-			staged, diffErr := s.git.RunGit(ctx, ledgerPath, "diff", "--cached", "--name-only", "--", rel)
+			staged, diffErr := s.git.RunGit(ctx, ledgerPath, "diff", "--cached", "--name-only", "--", pathspec)
 			if diffErr != nil || strings.TrimSpace(staged) == "" {
 				s.restoreDraftForRetry(ctx, ledgerPath, rel, name, diffErr)
 				continue
 			}
-			committed, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, sessionDraftCommitPrefix+"retract "+name, rel)
+			committed, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, sessionDraftCommitPrefix+"retract "+name, pathspec)
 			if err != nil {
 				// Commit failed: the deletion is staged and the dir is gone, which
 				// would orphan the candidate. Restore so the next scan retries.
@@ -2019,10 +2050,15 @@ func (s *SyncScheduler) draftPublishedOnRemote(ctx context.Context, ledgerPath, 
 // message) and the next scan can rediscover the orphan and retry it.
 func (s *SyncScheduler) restoreDraftForRetry(ctx context.Context, ledgerPath, rel, name string, cause error) {
 	s.logger.Warn("retract orphaned draft: restoring after failed retraction", "session", name, "error", cause)
-	if _, err := s.git.RunGit(ctx, ledgerPath, "reset", "-q", "--", rel); err != nil {
+	// Not the caller's ctx: when it is what failed the retraction, a restore on
+	// it fails too and leaves the deletion staged for the next autostash (#1648).
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	pathspec := ":(literal)" + rel
+	if _, err := s.git.RunGit(ctx, ledgerPath, "reset", "-q", "--", pathspec); err != nil {
 		s.logger.Warn("retract orphaned draft: reset failed", "session", name, "error", err)
 	}
-	if _, err := s.git.RunGit(ctx, ledgerPath, "checkout", "-q", "HEAD", "--", rel); err != nil {
+	if _, err := s.git.RunGit(ctx, ledgerPath, "checkout", "-q", "HEAD", "--", pathspec); err != nil {
 		s.logger.Warn("retract orphaned draft: checkout restore failed", "session", name, "error", err)
 	}
 }
@@ -2457,6 +2493,15 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 	// `ox doctor --fix` runs during one Ledger download used to fill every
 	// slot, and team-context clones failed with ErrCloneSemaphoreTimeout.
 	acquired, err := gitutil.TryWithPreCloneLock(payload.RepoPath, func() error {
+		// A symlinked target is a coworker's relocation. Moving it aside or
+		// renaming a clone over it could replace the link (and the data behind
+		// it), so refuse before any rename and surface it through doctor.
+		// A symlink to a complete checkout never reaches here (AlreadyExists).
+		if symErr := gitserver.RejectSymlinkTarget(payload.RepoPath); symErr != nil && !checkoutComplete(payload) {
+			s.logger.Error("checkout: refusing symlinked clone target", "path", payload.RepoPath, "error", symErr)
+			s.recordError(filepath.Base(payload.RepoPath), fmt.Sprintf("clone %s failed: %v", payload.RepoType, symErr))
+			return symErr
+		}
 		// Re-verify directory state now that we hold the lock — a peer
 		// that held it may have finished cloning since the check above.
 		if info, statErr := os.Stat(payload.RepoPath); statErr == nil && info.IsDir() {
@@ -2590,7 +2635,23 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 			if progress != nil {
 				_ = progress.WriteStage("cloning", "Fetching repository structure...")
 			}
-			mCfg, err := s.twoPhaseClone(cloneCtx, cloneURL, payload.RepoPath, progress)
+			// Clone into a hidden temp sibling and move it into place, like the
+			// ledger: the clone refuses a non-empty target, and a local-only
+			// skeleton (a whisper cache created before the first clone) is
+			// adopted by MoveCloneIntoPlace instead of being set aside in the
+			// teams directory where enumerators would list it as a team.
+			sweepStaleTeamCloneTemps(payload.RepoPath)
+			teamTemp := teamCloneTempPath(payload.RepoPath)
+			defer func() { _ = os.RemoveAll(teamTemp) }() // no-op once renamed away
+			if markErr := markTeamCloneStaging(teamTemp); markErr != nil {
+				// unmarked staging is never swept; the clone itself is unaffected
+				s.logger.Warn("checkout: could not mark team clone staging", "path", teamTemp, "error", markErr)
+			}
+			defer unmarkTeamCloneStaging(teamTemp)
+			mCfg, err := s.twoPhaseClone(cloneCtx, cloneURL, teamTemp, progress)
+			if err == nil {
+				err = gitserver.MoveCloneIntoPlace(teamTemp, payload.RepoPath)
+			}
 			if err != nil {
 				s.logger.Error("checkout: two-phase clone failed", "error", err)
 				// Keyed by pullTeamContext's repoName, the key clearErrors is

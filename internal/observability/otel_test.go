@@ -138,15 +138,19 @@ func TestInit_BearerAttachedPerRequest(t *testing.T) {
 
 	var (
 		mu   sync.Mutex
-		seen []string
+		seen []http.Header
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		seen = append(seen, r.Header.Get("Authorization"))
+		seen = append(seen, r.Header.Clone())
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
+	t.Cleanup(func() {
+		Shutdown(context.Background())
+		resetGlobals()
+	})
 
 	var tokenMu sync.Mutex
 	current := "tok-A"
@@ -168,7 +172,10 @@ func TestInit_BearerAttachedPerRequest(t *testing.T) {
 	current = "tok-B"
 	tokenMu.Unlock()
 
-	require.NoError(t, Init(context.Background(), "ox-cli-test", srv.URL, tokenFunc))
+	headers := http.Header{"X-Sageox-Actor": {"agent"}, "X-Sageox-Agent-Type": {"codex"}}
+	require.NoError(t, InitWithHeaders(context.Background(), "ox-cli-test", srv.URL, tokenFunc, headers))
+	headers["X-Sageox-Actor"][0] = "changed"
+	headers.Set("X-Sageox-Agent-Type", "changed")
 	_, span2 := StartCommand(context.Background(), "ox test-cmd-2")
 	span2.End()
 	Shutdown(context.Background())
@@ -176,12 +183,22 @@ func TestInit_BearerAttachedPerRequest(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.NotEmpty(t, seen, "exporter should have made at least one request")
+	bearers := make([]string, 0, len(seen))
 	for _, h := range seen {
-		assert.True(t, strings.HasPrefix(h, "Bearer "), "every export must carry Bearer header, got %q", h)
+		bearer := h.Get("Authorization")
+		bearers = append(bearers, bearer)
+		assert.True(t, strings.HasPrefix(bearer, "Bearer "), "every export must carry Bearer header, got %q", bearer)
+		if bearer == "Bearer tok-A" {
+			assert.Empty(t, h.Get("X-Sageox-Actor"), "Init keeps daemon exports actor-free")
+			assert.Empty(t, h.Get("X-Sageox-Agent-Type"))
+		} else {
+			assert.Equal(t, "agent", h.Get("X-Sageox-Actor"))
+			assert.Equal(t, "codex", h.Get("X-Sageox-Agent-Type"))
+		}
 	}
 	// At least one batch from each phase should reflect its rotated token.
-	assert.Contains(t, seen, "Bearer tok-A")
-	assert.Contains(t, seen, "Bearer tok-B")
+	assert.Contains(t, bearers, "Bearer tok-A")
+	assert.Contains(t, bearers, "Bearer tok-B")
 }
 
 // TestInit_NilTokenFuncSendsUnauthenticated verifies that passing nil

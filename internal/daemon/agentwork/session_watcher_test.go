@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/secretguard/secretguardtest"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
@@ -99,7 +100,15 @@ func TestMain(m *testing.M) {
 	// coworker's own config or environment must not make these tests manual.
 	_ = os.Unsetenv("OX_SESSION_PUBLISHING")
 	_ = os.Setenv("OX_USER_CONFIG", filepath.Join(os.TempDir(), "ox-agentwork-tests-no-user-config.yaml"))
+	// Capture and finalize tests upload and push for real; serve the publication
+	// catalog offline rather than depend on raw.githubusercontent.com.
+	secretguardtest.InstallOfflineCatalog()
 	os.Exit(m.Run())
+}
+
+// Failure prevented: agentwork publication tests depend on raw.githubusercontent.com.
+func TestPublicationCatalogIsServedOffline(t *testing.T) {
+	secretguardtest.RequireOfflineCatalog(t)
 }
 
 // newTestWatcherManager returns a manager whose session-file allow-list is

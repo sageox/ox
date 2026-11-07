@@ -285,34 +285,3 @@ func TestForegroundRefusesOccupiedPort(t *testing.T) {
 	defer listener.Close()
 	require.ErrorContains(t, Run(context.Background(), listener.Addr().(*net.TCPAddr).Port, nil), "listen for traces")
 }
-
-// Predictable private paths must not follow planted symlinks or retain broad
-// permissions from an older receiver installation.
-func TestPrivateReceiverPathsRejectSymlinks(t *testing.T) {
-	base := t.TempDir()
-	dir := filepath.Join(base, "state")
-	require.NoError(t, os.Mkdir(dir, 0755))
-	require.NoError(t, ensurePrivateDir(dir))
-	info, err := os.Stat(dir)
-	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0700), info.Mode().Perm())
-	target := filepath.Join(base, "target")
-	require.NoError(t, os.WriteFile(target, []byte("untouched"), 0600))
-	log := filepath.Join(dir, "trace.log")
-	require.NoError(t, os.Symlink(target, log))
-	_, err = openPrivateLog(log)
-	require.ErrorContains(t, err, "not a regular file")
-	content, err := os.ReadFile(target)
-	require.NoError(t, err)
-	require.Equal(t, "untouched", string(content))
-	link := filepath.Join(base, "linked-state")
-	require.NoError(t, os.Symlink(dir, link))
-	require.ErrorContains(t, ensurePrivateDir(link), "not a real directory")
-	require.NoError(t, os.Remove(log))
-	file, err := openPrivateLog(log)
-	require.NoError(t, err)
-	require.NoError(t, file.Close())
-	info, err = os.Stat(log)
-	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0600), info.Mode().Perm())
-}

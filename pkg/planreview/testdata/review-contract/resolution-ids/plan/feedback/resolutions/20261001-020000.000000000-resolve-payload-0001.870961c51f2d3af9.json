@@ -1,0 +1,9 @@
+{
+  "anchor": "hpayload",
+  "at": "2026-10-01T02:00:00Z",
+  "id": "resolve-payload-0001",
+  "note": "Owner named.",
+  "request_sha256": "21b3be2f7ea728895ce5314eb1479433bcb36b2f4b1c93d7d519f6aa50642664",
+  "reviewer": "Ana",
+  "state": "addressed"
+}

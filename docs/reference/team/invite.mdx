@@ -1,7 +1,7 @@
 ---
 title: "ox team invite"
 description: "CLI reference for ox team invite"
-sidebar_position: 112
+sidebar_position: 120
 ---
 
 ## ox team invite
@@ -17,16 +17,17 @@ separate arguments. SageOx then sends each person a link to join. Delivery is
 best-effort and happens after the invitation is created, so a reported
 invitation is not proof an email arrived. Invitations expire after 7 days.
 
-With no --team, the invitation targets this repository's team. Whether you
-may invite, list, or cancel is decided by the server and reported back.
+Creating invitations requires --team to choose the destination explicitly.
+With --list or --cancel, omitting --team uses this repository's team. Whether
+you may invite, list, or cancel is decided by the server and reported back.
 
 Examples:
-  ox team invite alice@acme.com
-  ox team invite alice@acme.com,bob@acme.com
+  ox team invite alice@acme.com --team sageox
+  ox team invite alice@acme.com,bob@acme.com --team sageox
   ox team invite alice@acme.com --team sageox --role admin
   ox team invite --list
   ox team invite --cancel 0198f3c2-6c1a-7e40-9a0b-2f8c4d5e6f70
-  ox team invite alice@acme.com --json
+  ox team invite alice@acme.com --team sageox --json
 
 ```
 ox team invite [email]... [flags]
@@ -39,7 +40,7 @@ ox team invite [email]... [flags]
   -h, --help            help for invite
       --list            list invitations that are still outstanding
       --role string     role to grant: member, admin, or owner (default "member")
-      --team string     team slug, id, or name (defaults to the repo's active team)
+      --team string     team slug, id, or name (required to create invitations; defaults to the repo's team for --list/--cancel)
   -y, --yes             skip the confirmation prompt
 ```
 

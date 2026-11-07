@@ -44,14 +44,15 @@ type ConfigSetting struct {
 
 	// Deprecated marks a setting kept only for backward compatibility: it
 	// remains resolvable and settable (existing config files and scripts
-	// must not break), but is not wired to any behavior. Never wire new
+	// must not break), but is either not wired to any behavior or is an old
+	// name that reads and writes its replacement's value. Never wire new
 	// behavior to a deprecated setting — remove the deprecation instead.
 	Deprecated bool
 	// DeprecationNotice is the honest, specific explanation surfaced by
-	// 'ox config get/set/list' for a Deprecated setting: it must say the
-	// setting never took effect (not merely that it's "no longer used"),
-	// and name the setting that actually does the job. Empty unless
-	// Deprecated is true.
+	// 'ox config get/set/list' for a Deprecated setting: it must say what
+	// the setting actually does (that it never took effect, not merely that
+	// it's "no longer used"; or that it is a renamed alias), and name the
+	// setting that does the job. Empty unless Deprecated is true.
 	DeprecationNotice string
 }
 
@@ -172,22 +173,65 @@ When on, ox sends:
     person, an AI coworker (and which one), or CI ran it; why ox
     runs in ephemeral mode, if it does; and, inside a repository set
     up for SageOx, the repository's and team's SageOx IDs. Events
-    carry a random ID made for this install, the client_id file in
-    ox's config directory (~/.config/sageox by default), and no
-    names, emails, or login details. Delete that file to get a new
-    ID.
+    carry a random install ID from the client_id file in ox's config
+    directory (~/.config/sageox by default). When signed in to
+    production, they also carry your SageOx user ID. No names,
+    emails or tokens are sent. Deleting client_id gives a new
+    install ID, but does not change your person ID.
   - To SageOx: command, session, and AI coworker events tagged with
     the repository's SageOx ID; timing traces while you are logged
     in; and what was typed when ox cannot parse a command.
 
+PostHog also receives context.used after a context-use trace is written:
+the reference only when it is a SageOx conversation, recording or plan
+ID, its fixed type, reported/none evidence, the recording session (only
+while one is recording and session_publishing is not manual; nothing is
+sent while a recording is paused) and AI coworker type, and
+repository/team IDs when present. It receives murmur.published after a
+murmur is handed to the daemon or queued: its ID, importance, scope and
+team ID. Topic is general, wip, lint, architecture, conflict, or other;
+a custom topic is never sent. Both carry the CLI surface, actor, event version and
+production/test label, plus the install and signed-in person IDs
+described above. Neither includes titles, URLs, why text, murmur text,
+files or principal details.
+
 Telemetry never includes your code, file contents, or session
-conversations. Nothing sent to PostHog includes command arguments,
-file paths, or values from an error message.
+conversations. Nothing sent to PostHog includes free-text command
+arguments, file paths, or values from an error message: only exact
+SageOx IDs and the fixed values listed above.
 
 DO_NOT_TRACK=1 turns all of it off, the same as setting this to off.`,
 		Category:    "Privacy",
 		ValidValues: []string{"on", "off"},
 		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
+		Key:         "disposable_machine",
+		Label:       "Disposable machine",
+		Description: "This machine runs one job and goes away; only its home directory persists.",
+		LongDescription: `Turn on for a machine that runs ox for one job and then goes away,
+keeping only its home directory, such as a pod with a persistent home
+volume. Leave it off on a laptop or a long-lived server.
+
+When on:
+  - The daemon's first start on a machine removes the Ledger's git lock
+    files, which a machine that went away mid-command leaves behind.
+  - The daemon runs no periodic auto-fix and no clone garbage collection.
+  - The daemon restarts once the Ledger's first clone lands, so the work
+    that needs a Ledger starts.
+  - A recording stores when its AI coworker's process started, so a
+    process on a later machine that reuses the same PID is not taken
+    for it.
+  - Git commands that ox runs in its own clones (the Ledger, team
+    contexts, Knowledge Bubbles) run no hooks and get credentials only
+    from ox.
+
+The daemon reads this setting when it starts: run 'ox daemon restart'
+after changing it.`,
+		Category:    "Machine",
+		ValidValues: []string{"on", "off"},
+		Default:     "off",
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
@@ -198,8 +242,82 @@ DO_NOT_TRACK=1 turns all of it off, the same as setting this to off.`,
 
 When enabled, ox displays helpful hints about features and workflows
 after command output. Useful for learning ox, but can be disabled
-once you're familiar with the tool.`,
+once you're familiar with the tool.
+
+Turning tips off also silences the rare one-line ask to star ox on GitHub.`,
 		Category:    "Display",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
+		Key:         "statusline",
+		Label:       "Status line",
+		Description: "Show how much team context shaped your session in Claude Code's status line.",
+		LongDescription: `Controls ox's row in Claude Code's status line.
+
+When enabled, the row counts the team context that influenced this AI
+coworker session — "● ox  3 discussions · 1 plan · 1 murmur" — with a red
+"● rec" while the session records. Turn it off to remove the row.`,
+		Category:    "Display",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
+		Key:         "session_report_pane",
+		Label:       "Session report pane",
+		Description: "Show the /ox-session-report pane in Claude Code (installs the ox-cli-brief-pane plugin)",
+		LongDescription: `Controls whether ox keeps the /ox-session-report pane installed in Claude Code.
+
+The pane lists this session's ox calls under the ox session report summary.
+It is the Claude Code plugin ox-cli-brief-pane@ox-cli-brief, installed at
+user scope; /ox-session-report opens it and /ox-session-report off closes it.
+
+  on  - ox installs the plugin (ox init, ox doctor --fix, and right away
+        when you set this) and keeps it on this ox's version (default).
+  off - ox removes the plugin and its files.
+
+Replaces brief_pane, which it falls back to when unset.`,
+		Category:    "Display",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
+		Key:         "brief_pane",
+		Label:       "Brief pane (deprecated)",
+		Description: "DEPRECATED — renamed to session_report_pane",
+		LongDescription: `DEPRECATED: brief_pane is the old name of session_report_pane, from before
+` + "`ox brief`" + ` became ` + "`ox session report`" + `. It still reads and sets the same value, so
+existing config files and scripts keep working.
+
+Use instead:
+    ox config set session_report_pane on|off`,
+		Category:          "Display",
+		ValidValues:       []string{"on", "off"},
+		Default:           "on",
+		Levels:            []ConfigLevel{ConfigLevelUser},
+		Deprecated:        true,
+		DeprecationNotice: "brief_pane is renamed to session_report_pane; it still sets the same value.\nUse instead:\n    ox config set session_report_pane on|off",
+	},
+	{
+		Key:         "recap.trace_consultations",
+		Label:       "Trace consultations",
+		Description: "Record what your AI coworker read and which ox calls it made.",
+		LongDescription: `Controls whether ox records, in your own session trace, which team
+knowledge your AI coworker consulted and which ox commands it ran (with the
+size of what each returned). The trace syncs to your team's Ledger with the
+session, so this is the switch for whether your reads reach the team.
+
+  on  - Record consultations and ox calls (default). Powers ox recap and
+        the per-session usage report.
+  off - Record neither. Context ox delivered (team context at prime,
+        teammate whispers) is still noted, since that is ox's own output.
+
+Only refs are ever recorded — a command's subcommand words, a doc path, a
+query subject — never a murmur body, prompt text, or command output.`,
+		Category:    "Privacy",
 		ValidValues: []string{"on", "off"},
 		Default:     "on",
 		Levels:      []ConfigLevel{ConfigLevelUser},
@@ -428,6 +546,31 @@ values).`,
 		ValidValues: []string{config.PlanOpenNever, config.PlanOpenAsk, config.PlanOpenAlways},
 		Default:     config.DefaultPlanOpen,
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
+	},
+	{
+		Key:         "skills.claude_org_dedupe",
+		Label:       "Skip skills your Claude org delivers",
+		Description: "Stop copying team skills into .claude/skills when your Claude organization's plugin already gives them to Claude Code here.",
+		LongDescription: `Controls whether ox skips its own copy of a team skill in .claude/skills
+when Claude Code on this machine already gets that skill from your team's
+Claude organization plugin, so Claude Code does not list it twice.
+
+  on  - Skip a team skill only when Claude Code here is signed in to the
+        claude.ai account that has your organization's plugin, and that
+        plugin carries the skill. Anything ox cannot confirm keeps its
+        copy. (default)
+  off - Always copy every team skill into .claude/skills.
+
+Turn this off if your Claude Code sessions sign in some way ox cannot see
+from Claude Code's files, such as an API key, Bedrock or Vertex set only in
+your shell. Those sessions never load organization plugins, so without
+ox's copy they would have no team skills at all.
+
+Other AI coworkers (Codex, Cursor, ...) always get ox's copies.`,
+		Category:    "Skills",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
 		Key:         "pr_visuals.rich",
@@ -736,6 +879,37 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			}
 		}
 
+	case "statusline":
+		// Unlike tips, only an explicit value counts as a user layer, so an
+		// unset key reports source "default" rather than a phantom "user".
+		if userCfg != nil && userCfg.StatuslineEnabled != nil {
+			cv.UserVal = boolToOnOff(*userCfg.StatuslineEnabled)
+		}
+
+	case "session_report_pane", "brief_pane":
+		// only an explicit value counts as a user layer (see statusline);
+		// brief_pane is session_report_pane's deprecated name, and an old
+		// brief_pane_enabled still counts until session_report_pane is set
+		if v := userCfg.SessionReportPaneSetting(); v != nil {
+			cv.UserVal = boolToOnOff(*v)
+		}
+
+	case "recap.trace_consultations":
+		// only an explicit value counts as a user layer (see statusline)
+		if userCfg != nil && userCfg.Recap != nil && userCfg.Recap.TraceConsultations != nil {
+			cv.UserVal = boolToOnOff(*userCfg.Recap.TraceConsultations)
+		}
+
+	case "disposable_machine":
+		if userCfg != nil && userCfg.DisposableMachine != nil {
+			cv.UserVal = boolToOnOff(*userCfg.DisposableMachine)
+		}
+
+	case "skills.claude_org_dedupe":
+		if userCfg != nil && userCfg.Skills != nil && userCfg.Skills.ClaudeOrgDedupe != nil {
+			cv.UserVal = boolToOnOff(*userCfg.Skills.ClaudeOrgDedupe)
+		}
+
 	case "view_format":
 		if userCfg != nil && userCfg.ViewFormat != "" {
 			cv.UserVal = userCfg.ViewFormat
@@ -915,7 +1089,13 @@ func UnsetConfigValue(key string, level ConfigLevel, projectRoot string) error {
 
 	switch level {
 	case ConfigLevelUser:
-		return unsetUserConfig(key)
+		if err := unsetUserConfig(key); err != nil {
+			return err
+		}
+		if key == "statusline" {
+			applyStatuslineSetting()
+		}
+		return nil
 	case ConfigLevelRepo:
 		return unsetRepoConfig(key, projectRoot)
 	case ConfigLevelTeam:
@@ -965,7 +1145,13 @@ func SetConfigValue(key, value string, level ConfigLevel, projectRoot string) er
 
 	switch level {
 	case ConfigLevelUser:
-		return setUserConfig(key, value)
+		if err := setUserConfig(key, value); err != nil {
+			return err
+		}
+		if key == "statusline" {
+			applyStatuslineSetting()
+		}
+		return nil
 	case ConfigLevelRepo:
 		return setRepoConfig(key, value, projectRoot)
 	case ConfigLevelTeam:
@@ -1018,6 +1204,35 @@ func setUserConfig(key, value string) error {
 	case "tips":
 		enabled := value == "on"
 		cfg.TipsEnabled = &enabled
+
+	case "statusline":
+		enabled := value == "on"
+		cfg.StatuslineEnabled = &enabled
+
+	case "session_report_pane", "brief_pane":
+		// both names write session_report_pane_enabled and drop the old key,
+		// so the two can never disagree
+		enabled := value == "on"
+		cfg.SessionReportPaneEnabled = &enabled
+		cfg.BriefPaneEnabled = nil
+
+	case "recap.trace_consultations":
+		enabled := value == "on"
+		if cfg.Recap == nil {
+			cfg.Recap = &config.RecapConfig{}
+		}
+		cfg.Recap.TraceConsultations = &enabled
+
+	case "disposable_machine":
+		enabled := value == "on"
+		cfg.DisposableMachine = &enabled
+
+	case "skills.claude_org_dedupe":
+		if cfg.Skills == nil {
+			cfg.Skills = &config.SkillsConfig{}
+		}
+		enabled := value == "on"
+		cfg.Skills.ClaudeOrgDedupe = &enabled
 
 	case "view_format":
 		cfg.ViewFormat = value
@@ -1331,6 +1546,32 @@ func unsetUserConfig(key string) error {
 
 	case "tips":
 		cfg.TipsEnabled = nil
+
+	case "statusline":
+		cfg.StatuslineEnabled = nil
+
+	case "session_report_pane", "brief_pane":
+		cfg.SessionReportPaneEnabled = nil
+		cfg.BriefPaneEnabled = nil
+
+	case "recap.trace_consultations":
+		if cfg.Recap != nil {
+			cfg.Recap.TraceConsultations = nil
+			if *cfg.Recap == (config.RecapConfig{}) {
+				cfg.Recap = nil
+			}
+		}
+
+	case "disposable_machine":
+		cfg.DisposableMachine = nil
+
+	case "skills.claude_org_dedupe":
+		if cfg.Skills != nil {
+			cfg.Skills.ClaudeOrgDedupe = nil
+			if *cfg.Skills == (config.SkillsConfig{}) {
+				cfg.Skills = nil
+			}
+		}
 
 	case "view_format":
 		cfg.ViewFormat = ""

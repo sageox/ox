@@ -61,11 +61,35 @@ func (m *Manager) produceAgentTasks(cfg *config.AgentWorkerConfig) {
 func (m *Manager) produceDoctorTask() {
 	markerPath := filepath.Join(m.projectRoot, ".sageox", markers.NeedsDoctorAgent)
 	if _, err := os.Stat(markerPath); err != nil {
-		return // no marker (or unreadable) — nothing to schedule
+		if !os.IsNotExist(err) || !agenttask.QueueExists(m.projectRoot) {
+			return // unreadable marker, or no queue to reconcile
+		}
+		// A completed inspection can clear the marker after this chore was
+		// queued. Retire only this producer's still-ready chore; never cancel
+		// work already claimed by an AI coworker.
+		store, err := agenttask.NewStore(m.projectRoot)
+		if err != nil {
+			m.logger.Debug("task producer: open doctor task store failed", "error", err)
+			return
+		}
+		defer store.Close()
+		tasks, err := store.List(false)
+		if err != nil {
+			m.logger.Debug("task producer: list doctor tasks failed", "error", err)
+			return
+		}
+		for _, task := range tasks {
+			if task.Status == agenttask.StatusReady && task.Kind == agenttask.KindDoctor && task.Source == "daemon" && task.DedupKey == "doctor-agent" {
+				if err := store.CancelReady(task.ID, "doctor marker cleared; repair no longer requested"); err != nil {
+					m.logger.Debug("task producer: cancel stale doctor task failed", "error", err)
+				}
+			}
+		}
+		return
 	}
 	added, err := agenttask.Enqueue(m.projectRoot, &agenttask.Task{
 		Title:    "Finalize incomplete SageOx sessions",
-		Body:     "Incomplete coding sessions need finalization. In a fresh-context subagent, run `ox agent <id> doctor` to inspect, then follow its finalize/recover steps. This clears the .needs-doctor-agent marker.",
+		Body:     "SageOx session work needs attention. In a fresh-context subagent, run `ox agent <id> doctor` to inspect, then follow its finalize/recover steps. Run doctor again after repairs; a successful inspection with no pending work clears the .needs-doctor-agent marker.",
 		Kind:     "doctor",
 		Priority: 20,
 		Source:   "daemon",

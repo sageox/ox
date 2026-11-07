@@ -28,7 +28,7 @@ jobs:
   # credential inside `make test-release`.
   verify-draft:
     if: github.repository == 'sageox/ox'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       contents: write
     outputs:
@@ -94,7 +94,7 @@ jobs:
   # records the commit the tag names so every later job can refuse a moved tag.
   plan-release-stages:
     if: github.repository == 'sageox/ox'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
       stages: ${{ steps.plan.outputs.stages }}
       sha: ${{ steps.plan.outputs.sha }}
@@ -129,7 +129,8 @@ jobs:
   verify-inrepo:
     if: github.repository == 'sageox/ox'
     needs: [verify-draft, plan-release-stages]
-    runs-on: ubuntu-latest
+    # 8 vCPU: release gate stages run the -race suite at -p 8; one stage is ~3400s at worst on 4 vCPU
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     strategy:
       # Every stage reports even when another fails, and re-running failed
       # jobs repeats only the stage that failed.
@@ -186,9 +187,42 @@ jobs:
         # Split slots each own a runner in PR CI. Packing all eight processes
         # onto this one runner oversubscribes indexing and preview timeouts.
         # One full-suite process preserves every package, flag, and coverage gate.
+        # Unsplit, cmd/ox runs as one package against a timeout sized for a
+        # quarter of it: v0.24.0's attempt hit 25m after #1434's redaction
+        # slowdown. The flags still come from the tagged tier config; only the
+        # per-package timeout changes. Drop the override once sageox/ox#1457
+        # brings cmd/ox back under the tier timeout.
         run: |
           if [ "$STAGE" = test-release-coverage ]; then
-            make "$STAGE" TEST_SPLIT_LAYOUT=
+            full_flags="$(python3 scripts/test_tiers.py flags full)"
+            timeout="$(grep -oE '(^| )-timeout=[^ ]+' <<<"$full_flags" | head -n 1 | sed -E 's/^ ?-timeout=//')"
+            if [ -z "$timeout" ]; then
+              echo "::error::full tier flags carry no -timeout to raise: $full_flags"
+              exit 1
+            fi
+            # Sum the Go duration (test_tiers.py SAFE_TIMEOUT: integer parts in
+            # h/m/s/ms/us/µs/ns) in nanoseconds; anything else fails closed.
+            rest="$timeout"; ns=0
+            while [[ "$rest" =~ ^([0-9]+)(ns|us|µs|ms|h|m|s)(.*)$ ]]; do
+              n="${BASH_REMATCH[1]}"; rest="${BASH_REMATCH[3]}"
+              case "${BASH_REMATCH[2]}" in
+                h) ns=$((ns + 10#$n * 3600000000000)) ;;
+                m) ns=$((ns + 10#$n * 60000000000)) ;;
+                s) ns=$((ns + 10#$n * 1000000000)) ;;
+                ms) ns=$((ns + 10#$n * 1000000)) ;;
+                us|µs) ns=$((ns + 10#$n * 1000)) ;;
+                ns) ns=$((ns + 10#$n)) ;;
+              esac
+            done
+            if [ -n "$rest" ]; then
+              echo "::error::cannot parse full tier -timeout=$timeout"
+              exit 1
+            fi
+            # Raise only: a tier timeout of 50m or more stays as configured.
+            if [ "$ns" -lt 3000000000000 ]; then
+              full_flags="$(sed -E 's/(^| )-timeout=[^ ]+/\1-timeout=50m/' <<<"$full_flags")"
+            fi
+            make "$STAGE" TEST_SPLIT_LAYOUT= FULL_TEST_FLAGS="$full_flags"
           else
             make "$STAGE"
           fi
@@ -196,7 +230,13 @@ jobs:
   build-release-assets:
     if: github.repository == 'sageox/ox'
     needs: [verify-draft, verify-inrepo, plan-release-stages]
-    runs-on: ubuntu-latest
+    # SAGEOX_CLI_SIGNING_KEY lives in the cli-release environment, whose
+    # deployment rules keep it from workflow runs on other branches. The
+    # environment only sees the dispatch ref, so "Require the tagged commit
+    # to be on main" below covers the code at the tag.
+    environment: cli-release
+    # 8 vCPU: goreleaser cross-compiles every platform binary, ~490s on 4 vCPU
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     permissions:
       contents: write
     outputs:
@@ -220,6 +260,21 @@ jobs:
             exit 1
           fi
 
+      # The cli-release environment checks the ref the workflow was dispatched
+      # from, not this tag. Without this step, a collaborator could tag an
+      # unreviewed commit, dispatch from main, and run their own
+      # scripts/sign-manifest with the signing key (Devin, veria-ai).
+      - name: Require the tagged commit to be on main
+        run: |
+          # Fully qualified on purpose: fetch-depth 0 imports every tag, and a tag
+          # named origin/main or main would win Git's short-name lookup over the
+          # real branch (veria-ai).
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main || {
+            echo "::error::$RELEASE_TAG ($(git rev-parse --short HEAD)) is not on main. Only commits that landed on main are signed."
+            exit 1
+          }
+
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -228,7 +283,10 @@ jobs:
       - name: Sign artifacts
         id: sign
         run: |
-          echo "Signing artifacts for release ${{ env.RELEASE_TAG }}..."
+          # Expand the tag from the environment, not with a workflow expression:
+          # expressions are pasted into the script text before bash runs, so a tag
+          # named v$(...) would execute with the signing key in scope (veria-ai).
+          echo "Signing artifacts for release $RELEASE_TAG..."
 
           # Sign all registered artifacts
           go run ./scripts/sign-manifest
@@ -258,7 +316,7 @@ jobs:
       # do not let GoReleaser choose or publish a release by name. The next
       # step uploads assets directly to the reviewed release ID.
       - name: Build release artifacts
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           distribution: goreleaser
           version: '~> v2'
@@ -274,7 +332,7 @@ jobs:
       # Keep formula publication independently retryable after the release is
       # immutable. This artifact is private to the workflow run.
       - name: Save the Homebrew formula
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: homebrew-formula
           path: dist/homebrew/ox.rb
@@ -358,7 +416,7 @@ jobs:
   publish-release:
     if: github.repository == 'sageox/ox'
     needs: [verify-draft, plan-release-stages, build-release-assets]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       contents: write
     steps:
@@ -449,7 +507,9 @@ jobs:
   # lets a tap failure retry without rebuilding or changing the release.
   publish-homebrew:
     needs: [build-release-assets, publish-release]
-    runs-on: ubuntu-latest
+    # HOMEBREW_TAP_GITHUB_TOKEN lives in the same environment as the signing key.
+    environment: cli-release
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       actions: read
       contents: read
@@ -480,6 +540,65 @@ jobs:
             --arg sha "$current_sha" \
             '{message: $message, content: $content, sha: $sha}' |
             gh api --method PUT repos/sageox/homebrew-tap/contents/ox.rb --input - >/dev/null
+
+  # npm publishes the binaries of the public release as @sageox/ox, so
+  # `npx @sageox/ox@latest install` never ships what GitHub does not. The token
+  # reaches only the last step, which runs no repository code; reruns skip
+  # versions npm already has. NPM_TOKEN lives in the npm environment, whose
+  # deployment rules keep it from workflow runs on other branches.
+  publish-npm:
+    if: github.repository == 'sageox/ox'
+    needs: publish-release
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download and verify the release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir "$RUNNER_TEMP/archives"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/archives" --pattern 'ox_*.tar.gz' --pattern checksums.txt
+          cd "$RUNNER_TEMP/archives"
+          sha256sum --check --strict --ignore-missing checksums.txt
+
+      - name: Build the npm packages
+        run: node scripts/npm-packages.mjs --version "${RELEASE_TAG#v}" --archives "$RUNNER_TEMP/archives" --out "$RUNNER_TEMP/npm"
+
+      # Platform packages first, so the launcher never points at a missing one.
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::warning::NPM_TOKEN is not set; @sageox/ox was not published."
+            exit 0
+          fi
+          version=${RELEASE_TAG#v}
+          tag=latest
+          case "$version" in *-*) tag=next ;; esac
+          for dir in "$RUNNER_TEMP"/npm/ox-*/ "$RUNNER_TEMP/npm/ox/"; do
+            name=$(jq -r .name "$dir/package.json")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already on npm"
+              continue
+            fi
+            npm publish "$dir" --access public --provenance --tag "$tag" --ignore-scripts
+          done
 
   publish-docs:
     needs: publish-release

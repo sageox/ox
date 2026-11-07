@@ -1,83 +1,9 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
-
-func TestCheckSessionCompleteness(t *testing.T) {
-	t.Parallel()
-
-	t.Run("missing raw returns nil", func(t *testing.T) {
-		t.Parallel()
-		tmpDir := t.TempDir()
-		sessionDir := filepath.Join(tmpDir, "test-session")
-		if err := os.MkdirAll(sessionDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-
-		// no raw.jsonl - should return nil (invalid session)
-		missing := checkSessionCompleteness(sessionDir)
-		if missing != nil {
-			t.Errorf("expected nil for missing raw, got %v", missing)
-		}
-	})
-
-	t.Run("complete session returns empty", func(t *testing.T) {
-		t.Parallel()
-		tmpDir := t.TempDir()
-		sessionDir := filepath.Join(tmpDir, "test-session")
-		if err := os.MkdirAll(sessionDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-
-		// create all expected files (including summary.json)
-		files := []string{ledgerFileRaw, ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"}
-		for _, f := range files {
-			if err := os.WriteFile(filepath.Join(sessionDir, f), []byte("test"), 0644); err != nil {
-				t.Fatal(err)
-			}
-		}
-
-		missing := checkSessionCompleteness(sessionDir)
-		if len(missing) != 0 {
-			t.Errorf("expected empty missing list, got %v", missing)
-		}
-	})
-
-	t.Run("partial session returns missing artifacts", func(t *testing.T) {
-		t.Parallel()
-		tmpDir := t.TempDir()
-		sessionDir := filepath.Join(tmpDir, "test-session")
-		if err := os.MkdirAll(sessionDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-
-		// create only raw.jsonl
-		if err := os.WriteFile(filepath.Join(sessionDir, ledgerFileRaw), []byte("test"), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		missing := checkSessionCompleteness(sessionDir)
-		if len(missing) != 3 {
-			t.Errorf("expected 3 missing artifacts, got %d: %v", len(missing), missing)
-		}
-
-		// verify expected items are in missing list
-		expectedMissing := map[string]bool{
-			"summary":      true,
-			"session_md":   true,
-			"summary_json": true,
-		}
-		for _, m := range missing {
-			if !expectedMissing[m] {
-				t.Errorf("unexpected missing artifact: %s", m)
-			}
-		}
-	})
-}
 
 func TestBuildFinalizeCommands(t *testing.T) {
 	t.Parallel()

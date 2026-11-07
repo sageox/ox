@@ -381,7 +381,21 @@ func checkUninstallAuth(endpoints []string, allEndpoints bool, selectedEndpoint 
 // selectEndpointForUninstall handles endpoint selection when multiple endpoints are configured.
 // Returns: selected endpoint, whether to uninstall from all endpoints, error.
 // If only one endpoint exists or --all flag is set, returns immediately.
-func selectEndpointForUninstall(gitRoot string, endpoints []string) (string, bool, error) {
+func selectEndpointForUninstall(gitRoot string, endpoints []string) (selected string, all bool, err error) {
+	// Usage telemetry classifies the command by every endpoint chosen here, so
+	// uninstalling from a test endpoint is not counted as production activity.
+	defer func() {
+		if err != nil {
+			return
+		}
+		recordPostHogEndpoint(selected)
+		if all {
+			for _, ep := range endpoints {
+				recordPostHogEndpoint(ep)
+			}
+		}
+	}()
+
 	// handle --all flag
 	if uninstallAll {
 		if len(endpoints) == 0 {
@@ -666,7 +680,25 @@ func removeHooks(gitRoot string) error {
 		return nil
 	}
 
-	// remove the hooks
+	// Current ox sections first, cut at their end marker so user content around
+	// them survives. Only hook files the scan found are touched: a stray
+	// directory at another hook's path must not stop the removal. The scan
+	// below then removes what older ox versions and beads left behind.
+	if !uninstallDryRun {
+		found := make(map[string]bool, len(hooks))
+		for _, hook := range hooks {
+			found[hook.Name] = true
+		}
+		hooksDir := resolveHooksDir(gitRoot)
+		for _, spec := range allHookSpecs() {
+			if !found[spec.name] {
+				continue
+			}
+			if err := uninstallHookSection(hooksDir, spec); err != nil {
+				return fmt.Errorf("removing hooks: %w", err)
+			}
+		}
+	}
 	if err := uninstall.RemoveRepoHooks(gitRoot, uninstallDryRun); err != nil {
 		return fmt.Errorf("removing hooks: %w", err)
 	}

@@ -1052,7 +1052,7 @@ func autoDiscoverSingleTeam(ep string) *config.TeamContext {
 
 	var dirs []os.DirEntry
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() && !paths.IsHiddenTeamsEntry(e.Name()) {
 			dirs = append(dirs, e)
 		}
 	}

@@ -329,6 +329,35 @@ func ValidateEndpoint(ep string) error {
 	return nil
 }
 
+// SameOrigin reports whether two HTTP(S) URLs have the same scheme, hostname,
+// and effective port. Missing or invalid origins never match. Unlike endpoint
+// normalization and storage slugs, this must not merge hosts or discard ports:
+// it is used to decide whether a credential may be sent to a destination.
+func SameOrigin(source, destination string) bool {
+	origin := func(raw string) (scheme, host, port string) {
+		u, err := url.Parse(raw)
+		if err != nil || u.User != nil || u.Hostname() == "" {
+			return "", "", ""
+		}
+		scheme = strings.ToLower(u.Scheme)
+		if scheme != "https" && scheme != "http" {
+			return "", "", ""
+		}
+		port = u.Port()
+		if port == "" {
+			if scheme == "https" {
+				port = "443"
+			} else {
+				port = "80"
+			}
+		}
+		return scheme, strings.ToLower(u.Hostname()), port
+	}
+	scheme, host, port := origin(source)
+	destScheme, destHost, destPort := origin(destination)
+	return scheme != "" && scheme == destScheme && host == destHost && port == destPort
+}
+
 // errInvalidEndpoint is a typed error so callers can recognize the
 // validation failure and surface a tailored UX (e.g., the login flow
 // prints a specific remediation message rather than a generic

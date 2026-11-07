@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -239,5 +240,73 @@ func TestFindSessionFile_AbsentProjectDirectoryDoesNotGuess(t *testing.T) {
 		if err == nil || got != "" {
 			t.Fatalf("missing Claude project directory returned %q for native ID %q: %v", got, id, err)
 		}
+	}
+}
+
+// Claude Code desktop runs a session in a linked worktree inside the repo
+// (.claude/worktrees/<name>) and files its transcript in the worktree's own
+// project bucket, while ox records the main checkout as the repo root. Failure
+// prevented: `ox agent session stop` finds no session file for any worktree
+// session and uploads nothing.
+func TestFindSessionFile_SessionInALinkedWorktreeOfTheRepo(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"}, args...)...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	repo := filepath.Join(home, "work", "repo")
+	other := filepath.Join(home, "work", "other")
+	for _, dir := range []string{repo, other} {
+		// an Ox project commits .sageox/config.json, so every worktree checks it out
+		if err := os.MkdirAll(filepath.Join(dir, ".sageox"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".sageox", "config.json"), []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		git(dir, "init", "-q")
+		git(dir, "add", ".sageox")
+		git(dir, "commit", "-q", "-m", "init")
+	}
+	wt := filepath.Join(repo, ".claude", "worktrees", "wt")
+	git(repo, "worktree", "add", "-q", "-b", "wt", wt)
+
+	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	bucket := filepath.Join(home, ".claude", "projects", claudeProjectHash(wt))
+	if err := os.MkdirAll(bucket, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(bucket, id+".jsonl")
+	writeTurns := func() {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(wt, "internal"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		turns := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, wt) +
+			fmt.Sprintf("{\"type\":\"assistant\",\"sessionId\":%q,\"cwd\":%q}\n", id, filepath.Join(wt, "internal"))
+		if err := os.WriteFile(path, []byte(turns), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTurns()
+	got, _, err := findSessionFile(repo, "", "", id)
+	if err != nil || got != path {
+		t.Fatalf("worktree session: got %q, %v; want %q", got, err, path)
+	}
+
+	// the same path checked out as a worktree of another repository is not ours
+	git(repo, "worktree", "remove", "--force", wt)
+	git(other, "worktree", "add", "-q", "-b", "wt", wt)
+	writeTurns()
+	if got, _, err := findSessionFile(repo, "", "", id); err == nil {
+		t.Fatalf("another repository's worktree inside this one returned %q", got)
 	}
 }

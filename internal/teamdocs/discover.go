@@ -192,12 +192,12 @@ func extractTitleFromContent(path string) string {
 		line := scanner.Text()
 
 		// skip frontmatter block
-		if lineCount == 1 && line == "---" {
+		if lineCount == 1 && IsFrontmatterFence(trimBOM(line)) {
 			inFrontmatter = true
 			continue
 		}
 		if inFrontmatter {
-			if line == "---" {
+			if IsFrontmatterFence(line) {
 				inFrontmatter = false
 			}
 			continue
@@ -240,12 +240,12 @@ func extractDescriptionFromContent(path string) string {
 		line := scanner.Text()
 
 		// skip frontmatter
-		if lineCount == 1 && line == "---" {
+		if lineCount == 1 && IsFrontmatterFence(trimBOM(line)) {
 			inFrontmatter = true
 			continue
 		}
 		if inFrontmatter {
-			if line == "---" {
+			if IsFrontmatterFence(line) {
 				inFrontmatter = false
 			}
 			continue

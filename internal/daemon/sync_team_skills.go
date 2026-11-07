@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"path"
 	"strings"
@@ -120,7 +121,7 @@ func (s *SyncScheduler) reconcileTeamSkills(changed []string) {
 		Mode:        teamconverge.ModeAutomatic,
 	})
 	if err != nil {
-		s.logger.Warn("team context convergence failed", "repo", repoRoot, "error", err)
+		logConvergenceError(s.logger, repoRoot, err)
 		retryReport := teamconverge.Report{Snapshot: teamconverge.Snapshot{Path: team.Path}}
 		if pending != nil {
 			retryReport.Snapshot.Commit = pending.TeamCommit
@@ -156,27 +157,88 @@ func (s *SyncScheduler) reconcileTeamSkills(changed []string) {
 		"converged", report.Converged())
 }
 
-// logConvergenceOutcomes reports each artifact that did not converge and
-// returns the per-state counts for the cycle summary. Error, conflict and
-// unsupported are warnings: something needs a human. Pending and
-// pending-approval are deferrals by design (an active coworker session keeps
-// the snapshot stable; an approval is awaited) and are logged at Debug: at
-// 29 skills per cycle they otherwise drown the log in WARN lines that read
-// like incidents (87 in half an hour, 2026-10-08).
+// logConvergenceError reports a convergence pass that produced no per-artifact
+// outcomes. A live AI coworker session holding the snapshot is the designed
+// steady state while anyone works, so it is INFO; anything else is a failure
+// worth a WARN (ox#1242).
+func logConvergenceError(logger *slog.Logger, repoRoot string, err error) {
+	if errors.Is(err, teamconverge.ErrSessionHold) {
+		logger.Info("team context convergence deferred", "repo", repoRoot, "reason", teamconverge.DeferralActiveSession)
+		return
+	}
+	logger.Warn("team context convergence failed", "repo", repoRoot, "error", err)
+}
+
+// logConvergenceOutcomes reports what did not converge and returns the
+// per-state counts for the cycle summary.
+//
+// Error and conflict are per-artifact WARNs: each needs a human, usually for
+// its own reason. Everything that shares one reason is ONE line naming the
+// artifacts, because a repository with N team skills hits that reason N times
+// in the same pass:
+//
+//   - pending because a live AI coworker session holds the snapshot is the
+//     designed steady state, so it is a single INFO summary (ox#1242: 90 WARN
+//     lines in one pass, burying the real warnings around them);
+//   - pending for any other reason is a stall, so it stays a WARN;
+//   - unsupported is a skip this repository cannot take, WARN once per reason.
+//
+// Pending-approval is a deferral awaiting a human decision and stays at Debug.
 func logConvergenceOutcomes(logger *slog.Logger, repoRoot string, report teamconverge.Report) map[teamconverge.OutcomeState]int {
 	counts := map[teamconverge.OutcomeState]int{}
+	held := 0
+	pending := newReasonGroups()
+	skipped := newReasonGroups()
 	for _, outcome := range report.Outcomes {
 		counts[outcome.State]++
-		attrs := []any{
-			"repo", repoRoot, "kind", outcome.Kind, "name", outcome.Name,
-			"state", outcome.State, "detail", outcome.Detail, "commit", outcome.SourceCommit,
-		}
 		switch outcome.State {
-		case teamconverge.StateError, teamconverge.StateConflict, teamconverge.StateUnsupported:
-			logger.Warn("team artifact not converged", attrs...)
-		case teamconverge.StatePending, teamconverge.StatePendingApproval:
-			logger.Debug("team artifact deferred", attrs...)
+		case teamconverge.StateError, teamconverge.StateConflict:
+			logger.Warn("team artifact not converged",
+				"repo", repoRoot, "kind", outcome.Kind, "name", outcome.Name,
+				"state", outcome.State, "detail", outcome.Detail, "commit", outcome.SourceCommit)
+		case teamconverge.StatePending:
+			if outcome.Deferral == teamconverge.DeferralActiveSession {
+				held++
+				continue
+			}
+			pending.add(outcome)
+		case teamconverge.StateUnsupported:
+			skipped.add(outcome)
+		case teamconverge.StatePendingApproval:
+			logger.Debug("team artifact deferred",
+				"repo", repoRoot, "kind", outcome.Kind, "name", outcome.Name,
+				"state", outcome.State, "detail", outcome.Detail, "commit", outcome.SourceCommit)
 		}
 	}
+	if held > 0 {
+		logger.Info("team_artifacts_pending", "repo", repoRoot, "count", held,
+			"reason", teamconverge.DeferralActiveSession, "commit", report.Snapshot.Commit)
+	}
+	pending.log(logger, "team artifacts pending", repoRoot, report.Snapshot.Commit)
+	skipped.log(logger, "team artifacts skipped", repoRoot, report.Snapshot.Commit)
 	return counts
+}
+
+// reasonGroups collects artifact names by outcome detail, keeping first-seen
+// order so log lines are stable across passes.
+type reasonGroups struct {
+	order []string
+	names map[string][]string
+}
+
+func newReasonGroups() *reasonGroups { return &reasonGroups{names: map[string][]string{}} }
+
+func (g *reasonGroups) add(outcome teamconverge.Outcome) {
+	if _, seen := g.names[outcome.Detail]; !seen {
+		g.order = append(g.order, outcome.Detail)
+	}
+	g.names[outcome.Detail] = append(g.names[outcome.Detail], string(outcome.Kind)+"/"+outcome.Name)
+}
+
+func (g *reasonGroups) log(logger *slog.Logger, msg, repoRoot, commit string) {
+	for _, reason := range g.order {
+		names := g.names[reason]
+		logger.Warn(msg, "repo", repoRoot, "count", len(names), "reason", reason,
+			"artifacts", strings.Join(names, ","), "commit", commit)
+	}
 }

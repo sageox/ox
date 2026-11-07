@@ -32,6 +32,7 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
 	"github.com/sageox/ox/internal/status"
+	"github.com/sageox/ox/internal/tokens"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 	"github.com/spf13/cobra"
 )
@@ -114,6 +115,11 @@ Check for team whispers:
 
 Query team knowledge:
   ox agent <agent_id> query "search text"   # Semantic search (--limit, --team, --repo)
+
+Report which surfaced context you used:
+  ox agent <agent_id> context used <ref> --why "<one line>"  # When a surfaced item changes what you do
+  ox agent <agent_id> context used --none   # Nothing surfaced changed your work
+  ox agent <agent_id> context list          # Surfaced items and their use evidence
 
 Redaction policy:
   ox agent redact                           # View full redaction policy (all sources)
@@ -210,6 +216,41 @@ func init() {
 		"generic note, alternate spelling for --result/--reason (tasks done, tasks cancel)")
 	_ = agentCmd.PersistentFlags().MarkHidden("note")
 
+	// Same reinjection mechanism for every other flag a dispatched handler
+	// parses by hand. Each name below is consumed by a manual parser, so
+	// without a registration here cobra rejects it with "unknown flag" before
+	// the dispatcher runs. TestAgentDispatchedFlagsAreRegistered scans the
+	// handler sources so a new manual flag cannot ship unregistered.
+	//
+	// session log: parseSessionLogArgs. ox's own next-action guidance tells AI
+	// coworkers to run `session log --role user --content ...`.
+	registerHiddenAgentFlag("role", "entry role: user, assistant, system, tool (session log)")
+	registerHiddenAgentFlag("content", "entry content (session log)")
+	registerHiddenAgentFlag("tool-name", "tool name for a tool entry (session log)")
+	registerHiddenAgentFlag("tool-input", "tool input for a tool entry (session log)")
+	registerHiddenAgentBoolFlag("stdin", "read entry content from stdin (session log)")
+	// session record / session subagent-complete
+	registerHiddenAgentFlag("entries", "JSON array of entries (session record)")
+	registerHiddenAgentFlag("parent", "parent session path (session subagent-complete)")
+	registerHiddenAgentFlag("summary", "subagent summary (session subagent-complete)")
+	// query: parseQueryArgs. The agent help text advertises --limit/--team/--repo.
+	registerHiddenAgentFlag("mode", "search mode (query)")
+	registerHiddenAgentFlag("limit", "max results (query)")
+	registerHiddenAgentFlag("k", "alias for --limit (query)")
+	registerHiddenAgentFlag("team", "team ID filter (query)")
+	registerHiddenAgentFlag("repo", "repo ID filter (query)")
+	registerHiddenAgentFlag("source", "source filter (query)")
+	registerHiddenAgentBoolFlag("local", "search local data only (query)")
+	// context used: parseContextUsedArgs
+	registerHiddenAgentFlag("why", "one line on how the context changed your work (context used)")
+	registerHiddenAgentFlag("ref-type", "ref type to match, e.g. murmur, doc, session (context used)")
+	registerHiddenAgentBoolFlag("none", "report that no surfaced context was used (context used)")
+
+	// Explicit identity for the agent-ID-free shorthands. `ox agent heartbeat
+	// --agent-id OxA1b2` mirrors `ox murmur list --agent-id`, so AI coworkers
+	// reach for it; see runAgentDispatcher.
+	registerHiddenAgentFlag("agent-id", "explicit AI coworker ID when none is given positionally")
+
 	// Session-stop escape hatch: skip the summary-input optimization pass
 	// entirely and hand raw.jsonl directly to the summarizer. Useful as a
 	// per-session opt-out while the optimized path is still being proven,
@@ -301,6 +342,18 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 		// the env-var lookup so even the "missing agent id" error
 		// path gets the correct span name.
 		renameDispatcherSpan(dispatchedCommandPath(args)...)
+		// an explicit --agent-id outranks implicit resolution: the caller
+		// named the coworker, so guessing from env or process ancestry could
+		// only pick a different one. A malformed value is an error rather
+		// than a fall-through, since acting on another coworker's session
+		// after a typo is worse than failing.
+		explicitID, err := explicitAgentIDFlag(cmd)
+		if err != nil {
+			return err
+		}
+		if explicitID != "" {
+			return runWithAgentID(cmd, explicitID, args)
+		}
 		if agentID := resolveImplicitAgentID(); agentID != "" {
 			return runWithAgentID(cmd, agentID, args)
 		}
@@ -473,6 +526,9 @@ func dispatchedCommandPath(subargs []string) []string {
 	if subcmd == "whisper" && len(subargs) > 1 && subargs[1] == "history" {
 		return []string{subcmd, subargs[1]}
 	}
+	if subcmd == "context" && len(subargs) > 1 && (subargs[1] == "used" || subargs[1] == "list") {
+		return []string{subcmd, subargs[1]}
+	}
 	return []string{subcmd}
 }
 
@@ -504,6 +560,7 @@ func renameDispatcherSpan(parts ...string) {
 // Used to distinguish `ox agent session start` (missing agent ID)
 // from `ox agent typo` (genuinely unknown command).
 var agentSubcommands = map[string]bool{
+	"context":   true,
 	"doctor":    true,
 	"heartbeat": true,
 	"query":     true,
@@ -516,6 +573,76 @@ func isAgentSubcommand(name string) bool {
 		return auth.IsMemoryEnabled()
 	}
 	return agentSubcommands[name]
+}
+
+// Flags the dispatcher hands back to each verb's manual parser. Cobra strips
+// registered flags from args before the dispatcher runs, so every name here
+// must also be registered on agentCmd (see init) or it is rejected as unknown.
+var (
+	agentSessionStringFlags = []string{
+		"title", "file", "session-id", "adapter", // start, import, capture-prior, summarize
+		"role", "content", "tool-name", "tool-input", // log
+		"entries",           // record
+		"parent", "summary", // subagent-complete
+	}
+	agentSessionBoolFlags = []string{"stdin"} // log
+	agentTasksStringFlags = []string{"result", "reason", "note"}
+	agentQueryStringFlags = []string{"mode", "limit", "k", "team", "repo", "source"}
+	agentQueryBoolFlags   = []string{"local"}
+	agentContextStrFlags  = []string{"why", "ref-type"}
+	agentContextBoolFlags = []string{"none"}
+)
+
+// registerHiddenAgentFlag registers a hidden string flag on agentCmd for a
+// flag that a dispatched handler parses by hand. Hidden because each applies to
+// one verb and would clutter agent-level help.
+//
+// Local, not persistent: a dispatched invocation (`ox agent <id> query …`)
+// resolves to agentCmd itself, so a local flag is enough, while a persistent
+// one would leak into real subcommands. `ox agent list` inheriting --repo, for
+// one, would look like a hosted ledger read to isHeadlessLedgerRead.
+func registerHiddenAgentFlag(name, usage string) {
+	agentCmd.Flags().String(name, "", usage)
+	_ = agentCmd.Flags().MarkHidden(name)
+}
+
+// registerHiddenAgentBoolFlag is registerHiddenAgentFlag for presence flags.
+func registerHiddenAgentBoolFlag(name, usage string) {
+	agentCmd.Flags().Bool(name, false, usage)
+	_ = agentCmd.Flags().MarkHidden(name)
+}
+
+// explicitAgentIDFlag returns the AI coworker ID passed via --agent-id, or ""
+// when the flag is absent. A present but malformed value is a usage error.
+func explicitAgentIDFlag(cmd *cobra.Command) (string, error) {
+	raw, err := cmd.Flags().GetString("agent-id")
+	if err != nil || !cmd.Flags().Changed("agent-id") {
+		return "", nil
+	}
+	id := strings.TrimSpace(raw)
+	if agentinstance.IsValidAgentID(id) {
+		return id, nil
+	}
+	msg := agentinstance.ClassifyBadID(id)
+	if msg == "" {
+		msg = fmt.Sprintf("%q is not an ox agent ID\nRun 'ox agent prime' to get your Ox<4-char> agent ID", id)
+	}
+	return "", errkind.WithDetail(errkind.Usage, "invalid --agent-id", errors.New(msg))
+}
+
+// reinjectBoolFlags appends "--name" for each named bool flag the caller set
+// true. Counterpart of reinjectFlags for presence flags such as --stdin.
+func reinjectBoolFlags(cmd *cobra.Command, args []string, flagNames ...string) []string {
+	if cmd == nil {
+		return args
+	}
+	flags := cmd.Flags()
+	for _, name := range flagNames {
+		if set, err := flags.GetBool(name); err == nil && set {
+			args = append(args, "--"+name)
+		}
+	}
+	return args
 }
 
 // reinjectFlags appends cobra-parsed values for the named string flags back
@@ -604,7 +731,8 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		// parseSessionID/parseAdapter helpers expect them as positional
 		// tokens. This preserves the manual-parser call pattern without a
 		// wider refactor of every session handler signature.
-		sessionArgs = reinjectFlags(cmd, sessionArgs, "title", "file", "session-id", "adapter")
+		sessionArgs = reinjectFlags(cmd, sessionArgs, agentSessionStringFlags...)
+		sessionArgs = reinjectBoolFlags(cmd, sessionArgs, agentSessionBoolFlags...)
 		// --no-optimize on session stop is plumbed via env var so the deep
 		// writeOptimizedJSONLForSummary call site can read it without a
 		// signature refactor. Same variable serves as a raw env override.
@@ -659,10 +787,17 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		// parseTaskIDAndNote expects --result/--reason/--note as positional
 		// tokens, but cobra already stripped them from subargs while parsing
 		// agentCmd's registered flags.
-		subargs = reinjectFlags(cmd, subargs, "result", "reason", "note")
+		subargs = reinjectFlags(cmd, subargs, agentTasksStringFlags...)
 		return runAgentTasks(cmd.OutOrStdout(), inst, subargs)
 	case "query":
+		// same reinjection as above for parseQueryArgs' manual flags
+		subargs = reinjectFlags(cmd, subargs, agentQueryStringFlags...)
+		subargs = reinjectBoolFlags(cmd, subargs, agentQueryBoolFlags...)
 		return runAgentQuery(inst, subargs)
+	case "context":
+		subargs = reinjectFlags(cmd, subargs, agentContextStrFlags...)
+		subargs = reinjectBoolFlags(cmd, subargs, agentContextBoolFlags...)
+		return runAgentContext(cmd.OutOrStdout(), inst, subargs)
 	case "distill":
 		if !auth.IsMemoryEnabled() {
 			return fmt.Errorf("memory features are not enabled\nSet FEATURE_MEMORY=true to enable")
@@ -683,7 +818,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	case "hook":
 		return runAgentHook(subargs)
 	default:
-		available := "doctor, heartbeat, hook, query, session, tasks, whisper"
+		available := "context, doctor, heartbeat, hook, query, session, tasks, whisper"
 		if auth.IsMemoryEnabled() {
 			available = "distill, " + available
 		}
@@ -691,7 +826,8 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	}
 }
 
-// resolveInstance looks up an agent instance by agent_id
+// resolveInstance looks up an agent instance by agent_id in the store every
+// worktree of the repository shares, then in this checkout's own store.
 func resolveInstance(agentID string) (*agentinstance.Instance, error) {
 	// find project root (look for .sageox directory)
 	projectRoot, err := findProjectRoot()
@@ -699,17 +835,43 @@ func resolveInstance(agentID string) (*agentinstance.Instance, error) {
 		return nil, fmt.Errorf("could not find project root: %w\nRun 'ox agent prime' to initialize an instance", err)
 	}
 
-	store, err := getInstanceStore(projectRoot)
+	userSlug := getUserSlug()
+	sharedRoot := instanceStoreRoot(projectRoot)
+	store, err := agentinstance.NewStoreForUser(sharedRoot, userSlug)
 	if err != nil {
 		return nil, fmt.Errorf("failed to access instance store: %w", err)
 	}
-
-	inst, err := store.Get(agentID)
-	if err != nil {
-		return nil, errkind.Errorf(errkind.Other, "instance not found: %s\nRun 'ox agent prime' to create a new instance", agentID)
+	stores := []*agentinstance.Store{store}
+	if local := checkoutInstanceStore(projectRoot, sharedRoot, userSlug); local != nil {
+		stores = append(stores, local)
 	}
 
-	return inst, nil
+	var searched []string
+	expired := false
+	var readErr error
+	for _, s := range stores {
+		inst, err := s.Get(agentID)
+		if err == nil {
+			return inst, nil
+		}
+		searched = append(searched, s.Path())
+		switch {
+		case errors.Is(err, agentinstance.ErrInstanceExpired):
+			expired = true
+		case !errors.Is(err, agentinstance.ErrInstanceNotFound) && readErr == nil:
+			readErr = err // a store that could not be read cannot rule the instance out
+		}
+	}
+
+	// The first line of each format is the telemetry detail: keep "instance
+	// not found: %s" stable, and count expiry and unreadable stores on their own.
+	if readErr != nil {
+		return nil, fmt.Errorf("failed to read instance store: %w", readErr)
+	}
+	if expired {
+		return nil, errkind.Errorf(errkind.Other, "instance expired: %s\nAn instance expires 24 hours after 'ox agent prime' creates it once its AI coworker's process has exited\nRun 'ox agent prime' to create a new instance", agentID)
+	}
+	return nil, errkind.Errorf(errkind.Other, "instance not found: %s\nSearched: %s\nRun 'ox agent prime' to create a new instance", agentID, strings.Join(searched, ", "))
 }
 
 // findProjectRoot walks up from cwd looking for .sageox directory.
@@ -762,9 +924,10 @@ func getUserSlug() string {
 	return identity.Slug()
 }
 
-// getInstanceStore returns an instance store for the current user
+// getInstanceStore returns the current user's instance store, shared by every
+// worktree of projectRoot's repository (see instanceStoreRoot).
 func getInstanceStore(projectRoot string) (*agentinstance.Store, error) {
-	return agentinstance.NewStoreForUser(projectRoot, getUserSlug())
+	return agentinstance.NewStoreForUser(instanceStoreRoot(projectRoot), getUserSlug())
 }
 
 // runAgentList lists active AI coworkers with context consumption and session info.
@@ -1171,7 +1334,7 @@ func runAgentWhisper(w io.Writer, inst *agentinstance.Instance) error {
 		return nil
 	}
 
-	formatWhispersWithEdits(w, entries, checkoutEditedFiles(projectRoot))
+	formatWhispersForAgent(w, inst.AgentID, entries, checkoutEditedFiles(projectRoot))
 	traceWhisperDelivery(projectRoot, inst.AgentID, entries)
 	return nil
 }
@@ -1225,7 +1388,7 @@ func emitWhispers(w io.Writer, agentID string) {
 		return
 	}
 
-	formatWhispersWithEdits(w, entries, checkoutEditedFiles(projectRoot))
+	formatWhispersForAgent(w, agentID, entries, checkoutEditedFiles(projectRoot))
 
 	// best-effort context-trace for whisper delivery observability
 	traceWhisperDelivery(projectRoot, agentID, entries)
@@ -1254,7 +1417,11 @@ func traceWhisperDelivery(projectRoot, agentID string, entries []whisperstore.Wh
 			Type:   contexttrace.EventProvided,
 			Source: source,
 			From:   e.AgentID,
-			Topic:  e.Topic,
+			// FromName is the sender's first name, derived exactly as the
+			// whisper XML's from= attribute is, so a report can say whose
+			// murmur was used. A name, not content (ADR-027).
+			FromName: whisperFromName(e),
+			Topic:    e.Topic,
 			// Injection provenance (epic ox-bcgb, tier 1): a delivered whisper is
 			// SageOx context injected into the turn. Mechanism grades it as
 			// deterministic; WhisperID joins it back to its murmur; Seq anchors it
@@ -1262,13 +1429,23 @@ func traceWhisperDelivery(projectRoot, agentID string, entries []whisperstore.Wh
 			// recap can place "teammate's murmur reached your work" on the right
 			// turn. Additive — the event stays a `provided` whisper for existing
 			// consumers.
-			Mechanism: contexttrace.MechanismInjection,
-			WhisperID: e.ID,
-			Ref:       e.ID,
-			RefType:   "murmur",
-			Seq:       state.EntryCount,
+			Mechanism:    contexttrace.MechanismInjection,
+			InlineTokens: tokens.EstimateTokens(e.Content),
+			WhisperID:    e.ID,
+			Ref:          e.ID,
+			RefType:      "murmur",
+			Seq:          state.EntryCount,
 		})
 	}
+}
+
+// whisperFromName is the sender's first name as the whisper XML's from=
+// attribute shows it, or "" when the entry has no principal.
+func whisperFromName(e whisperstore.WhisperEntry) string {
+	if e.PrincipalID == "" {
+		return ""
+	}
+	return identity.FirstNameFromSlug(e.PrincipalID)
 }
 
 // capMurmurWhispers limits murmur-sourced whispers to avoid blowing out agent context.
@@ -1491,6 +1668,13 @@ func formatWhispers(w io.Writer, entries []whisperstore.WhisperEntry) bool {
 // editing, so outside news that changes one of them carries a collision hint.
 // edited runs at most once, and only when outside news lists files.
 func formatWhispersWithEdits(w io.Writer, entries []whisperstore.WhisperEntry, edited editedFilesFunc) bool {
+	return formatWhispersForAgent(w, "", entries, edited)
+}
+
+// formatWhispersForAgent is formatWhispersWithEdits for a known AI coworker,
+// so the murmur framing names the exact `context used` command to cite an
+// entry with. An empty agentID falls back to a placeholder.
+func formatWhispersForAgent(w io.Writer, agentID string, entries []whisperstore.WhisperEntry, edited editedFilesFunc) bool {
 	if len(entries) == 0 {
 		return false
 	}
@@ -1504,7 +1688,7 @@ func formatWhispersWithEdits(w io.Writer, entries []whisperstore.WhisperEntry, e
 		}
 	}
 	if len(team) > 0 {
-		writeTeamWhispers(w, team)
+		writeTeamWhispers(w, agentID, team)
 	}
 	if len(outside) > 0 {
 		writeOutsideNews(w, outside, edited)
@@ -1512,8 +1696,9 @@ func formatWhispersWithEdits(w io.Writer, entries []whisperstore.WhisperEntry, e
 	return true
 }
 
-// writeTeamWhispers writes teammates' whispers inside <system-reminder>.
-func writeTeamWhispers(w io.Writer, entries []whisperstore.WhisperEntry) {
+// writeTeamWhispers writes teammates' whispers inside <system-reminder>. Each
+// entry carries its id so the AI coworker can cite it with `context used`.
+func writeTeamWhispers(w io.Writer, agentID string, entries []whisperstore.WhisperEntry) {
 	// scan for murmur entries and collect unique topics
 	hasMurmurs := false
 	seenTopics := make(map[string]bool)
@@ -1539,6 +1724,7 @@ func writeTeamWhispers(w io.Writer, entries []whisperstore.WhisperEntry) {
 	if hasMurmurs {
 		fmt.Fprintln(w, `<murmur-context>Signals from coworkers delivered by SageOx. Most are ambient awareness — note and continue.`)
 		fmt.Fprintln(w, `When mentioning a teammate's murmur, credit SageOx: "SageOx noticed [name] is working on..."`)
+		writeMurmurUseLine(w, agentID)
 		fmt.Fprintln(w, `CRITICAL entries (importance="critical") may affect your current work. If files overlap with yours, pause and reassess your plan before continuing.</murmur-context>`)
 		for _, topic := range murmurTopics {
 			if hint := murmurTopicHint(topic); hint != "" {
@@ -1551,16 +1737,17 @@ func writeTeamWhispers(w io.Writer, entries []whisperstore.WhisperEntry) {
 
 	for _, e := range entries {
 		fmt.Fprint(w, "<entry")
+		if e.ID != "" {
+			writeXMLAttribute(w, "id", e.ID)
+		}
 		writeXMLAttribute(w, "importance", string(e.Importance))
 		writeXMLAttribute(w, "topic", e.Topic)
 		writeXMLAttribute(w, "source", e.Source)
 		if e.Source == "murmur" && e.AgentID != "" {
 			writeXMLAttribute(w, "agent", e.AgentID)
 		}
-		if e.PrincipalID != "" {
-			if firstName := identity.FirstNameFromSlug(e.PrincipalID); firstName != "" {
-				writeXMLAttribute(w, "from", firstName)
-			}
+		if firstName := whisperFromName(e); firstName != "" {
+			writeXMLAttribute(w, "from", firstName)
 		}
 		if files, ok := e.Metadata["files"]; ok && files != "" {
 			writeXMLAttribute(w, "files", files)
@@ -1573,6 +1760,19 @@ func writeTeamWhispers(w io.Writer, entries []whisperstore.WhisperEntry) {
 		fmt.Fprint(w, "</entry>\n")
 	}
 	fmt.Fprintln(w, "</system-reminder>")
+}
+
+// writeMurmurUseLine tells the AI coworker how to record that a murmur changed
+// its work, at the moment it happens. The agent ID is XML-escaped like any
+// other text; without one, the line names a placeholder.
+func writeMurmurUseLine(w io.Writer, agentID string) {
+	fmt.Fprint(w, "If a murmur changes what you do, record it right then: ox agent ")
+	if agentID == "" {
+		fmt.Fprint(w, "&lt;id&gt;")
+	} else {
+		_ = xml.EscapeText(w, []byte(agentID))
+	}
+	fmt.Fprintln(w, ` context used &lt;entry id&gt; --why "&lt;one line&gt;"`)
 }
 
 // writeXMLAttribute keeps Team Context metadata data-only in the XML hook

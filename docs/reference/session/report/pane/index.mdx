@@ -1,0 +1,53 @@
+---
+title: "ox session report pane"
+description: "CLI reference for ox session report pane"
+sidebar_position: 101
+---
+
+## ox session report pane
+
+Show this session's ox calls in a Claude Code pane
+
+### Synopsis
+
+Show this session's ox calls in a Claude Code pane.
+
+The pane keeps the ox session report summary on top (ox calls, estimated context
+tokens, team items surfaced and used) and a scrollable list of every ox call
+your AI coworker made in this session underneath.
+
+In the Claude desktop app, VS Code and mobile, the same plugin draws a one-line
+flow lane in the transcript under each ox call that moves team data (a search,
+a murmur, a plan, a session upload; not status or config) and under each prompt
+that carried Team Context in: what moved between SageOx and the session, in which direction,
+and how much. /ox-session-report flow still draws the lanes without motion, and
+/ox-session-report flow off hides them.
+
+The pane is installed as a Claude Code plugin (ox-cli-brief-pane@ox-cli-brief) at
+user scope. Inside Claude Code, /ox-session-report opens it and /ox-session-report off closes it.
+
+### Options
+
+```
+  -h, --help   help for pane
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
+      --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
+```
+
+### SEE ALSO
+
+* [ox session report](/session/report)	 - Show what SageOx gave this session
+* [ox session report pane disable](/session/report/pane/disable)	 - Remove the session report pane from Claude Code
+* [ox session report pane enable](/session/report/pane/enable)	 - Install the session report pane into Claude Code, or refresh it after an ox upgrade
+* [ox session report pane status](/session/report/pane/status)	 - Show whether the session report pane is installed in Claude Code

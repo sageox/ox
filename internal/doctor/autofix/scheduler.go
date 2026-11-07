@@ -108,7 +108,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 // RunOnce runs a single round of all eligible checks across all
 // workspaces and returns the results. Synchronous; intended for tests
-// and for `ox doctor --run-autofix-now` if we ever want a CLI hook.
+// and for a CLI hook if we ever want one (no such command exists today).
 //
 // Like tick(), non-Clean results are routed through emit (when set)
 // so callers get the same observable side-effects whether the

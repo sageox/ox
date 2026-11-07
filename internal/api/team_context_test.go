@@ -123,3 +123,88 @@ func TestGetTeamContextContent_EmptyTeamID(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, resp)
 }
+
+// TestGetTeamContextContent_DecodesSkillsAndRules pins the additive contract
+// fields (sageox-monorepo D5) against the server's exact JSON shape.
+// Failure prevented: a renamed key decodes as an empty field, and ephemeral
+// prime silently materializes no team skills or rules.
+func TestGetTeamContextContent_DecodesSkillsAndRules(t *testing.T) {
+	t.Parallel()
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"team_id": "team_abc",
+			"team_name": "Test Team",
+			"docs": [],
+			"agents_md": "",
+			"claude_md": "",
+			"memory": "",
+			"skills": [
+				{
+					"name": "ledger-wedge-triage",
+					"root": "agents/skills",
+					"dir": "ledger-wedge-triage",
+					"digest": "sha256:abc",
+					"files": [
+						{"path": "SKILL.md", "content": "---\nname: ledger-wedge-triage\n---\n", "executable": false},
+						{"path": "scripts/collect.sh", "content": "#!/bin/sh\n", "executable": true}
+					]
+				}
+			],
+			"skills_truncated": true,
+			"rules": [
+				{"name": "team-rules", "path": "agents/rules/team-rules.md", "content": "# Rules\n"}
+			]
+		}`))
+	}))
+	defer mockServer.Close()
+
+	client := &RepoClient{baseURL: mockServer.URL, httpClient: &http.Client{Timeout: 10 * time.Second}}
+	resp, err := client.GetTeamContextContent(context.Background(), "team_abc")
+	require.NoError(t, err)
+
+	require.Equal(t, []TeamContextSkill{{
+		Name: "ledger-wedge-triage", Root: "agents/skills", Dir: "ledger-wedge-triage", Digest: "sha256:abc",
+		Files: []TeamContextSkillFile{
+			{Path: "SKILL.md", Content: "---\nname: ledger-wedge-triage\n---\n"},
+			{Path: "scripts/collect.sh", Content: "#!/bin/sh\n", Executable: true},
+		},
+	}}, resp.Skills)
+	assert.True(t, resp.SkillsTruncated)
+	require.Equal(t, []TeamContextRule{{Name: "team-rules", Path: "agents/rules/team-rules.md", Content: "# Rules\n"}}, resp.Rules)
+}
+
+// TestGetTeamContextContent_OldServerLeavesSkillsAbsent — a server that predates
+// the fields must decode as "not reported" (nil), never as "the team has none"
+// (empty): ox sweeps materialized skills and rules only for the latter.
+func TestGetTeamContextContent_OldServerLeavesSkillsAbsent(t *testing.T) {
+	t.Parallel()
+	for name, body := range map[string]string{
+		"absent": `{"team_id":"team_abc","docs":[]}`,
+		"null":   `{"team_id":"team_abc","docs":[],"skills":null,"rules":null}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(body))
+			}))
+			defer mockServer.Close()
+			client := &RepoClient{baseURL: mockServer.URL, httpClient: &http.Client{Timeout: 10 * time.Second}}
+			resp, err := client.GetTeamContextContent(context.Background(), "team_abc")
+			require.NoError(t, err)
+			assert.Nil(t, resp.Skills)
+			assert.Nil(t, resp.Rules)
+			assert.False(t, resp.SkillsTruncated)
+		})
+	}
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"team_id":"team_abc","docs":[],"skills":[],"rules":[]}`))
+	}))
+	defer mockServer.Close()
+	client := &RepoClient{baseURL: mockServer.URL, httpClient: &http.Client{Timeout: 10 * time.Second}}
+	resp, err := client.GetTeamContextContent(context.Background(), "team_abc")
+	require.NoError(t, err)
+	assert.NotNil(t, resp.Skills, "an empty list is the server saying the team has no servable skills")
+	assert.NotNil(t, resp.Rules)
+}

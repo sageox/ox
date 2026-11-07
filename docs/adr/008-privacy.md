@@ -11,7 +11,7 @@
 **Status:** Accepted (aspirational in parts — see banner and checklist above)
 **Date:** 2025-12-22
 **Deciders:** SageOx Engineering
-**Amended:** 2026-09-27 — usage events also go to PostHog, keyed by a persistent install ID and tagged with the repository's and team's SageOx IDs (see "Addendum (2026-09-27): PostHog usage events" at the end); 2026-09-30 — the plan-review commands say how they ended (D7 in that addendum)
+**Amended:** 2026-10-31 — signed-in production usage names the SageOx person, with per-event UUIDs and raw murmur-list facts (see the 2026-10-31 addendum); 2026-09-27 — usage events also go to PostHog, keyed by a persistent install ID and tagged with the repository's and team's SageOx IDs (see "Addendum (2026-09-27): PostHog usage events" at the end); 2026-09-30 — the plan-review commands say how they ended (D7 in that addendum)
 
 ## Implementation status (added 2026-09-10)
 
@@ -26,7 +26,7 @@ not an exhaustive line-by-line reconciliation.
 | `~/.config/sageox/telemetry.json` state file, `{"enabled": ..., "disabled_at": ...}` | **Does not exist.** The opt-out is a field (`telemetry_enabled`) in the ordinary user config file, `~/.config/sageox/config.yaml` — no dedicated telemetry state file, no `disabled_at` timestamp. |
 | `ox init --offline` | **Not implemented.** `ox init` has no `--offline` flag today. |
 | `ox deregister` | **Not implemented.** No such command exists. |
-| First-run telemetry notice ("ox collects anonymous usage telemetry...") | **Implemented 2026-09-27, with different text.** A two-line notice goes to stderr once per install, the first time a person runs ox at a terminal; AI coworker transcripts and `--json` output never get it (`showTelemetryNoticeOnce` in `cmd/ox/telemetry_posthog.go`). It points to `ox config get telemetry`, since `ox telemetry` does not exist. |
+| First-run telemetry notice ("ox collects anonymous usage telemetry...") | **Implemented 2026-09-27, with different text; revised 2026-10-31.** A three-line notice goes to stderr once per notice version (the `telemetry_notice_v2_shown` flag, so people who saw the earlier notice see the new one; see the 2026-10-31 addendum), the first time a person runs ox at a terminal; AI coworker transcripts and `--json` output never get it (`showTelemetryNoticeOnce` in `cmd/ox/telemetry_posthog.go`). It points to `ox config get telemetry`, since `ox telemetry` does not exist. |
 | Quarterly transparency report | **Not implemented.** Never published. |
 | "What We NEVER Collect" table: **Machine identifiers** | **Inaccurate as written.** `internal/telemetry/types.go`'s `Event.RepoID` is sent on every telemetry event — a per-repository identifier that lets events be correlated over time for that repo. It is not a hardware ID, but the table's blanket "machine identifiers: never" reads stronger than what the code actually does. Since 2026-09-27, PostHog events also carry a persistent random install ID and, inside an initialized repository, its repo and team IDs; see the addendum. |
 | **Precedence:** "Config file > Environment variable > Default" | **Backwards.** `internal/telemetry/client.go`'s `NewClient` checks `DO_NOT_TRACK` and `SAGEOX_TELEMETRY` **before** falling back to the config file — env wins, not config. |
@@ -496,3 +496,96 @@ ADR-027 (consultation-attribution privacy) governs who-read-what data in the Led
 - `cmd/ox/telemetry_posthog.go`: what an event contains, the skip list, and the first-run notice
 - `cmd/ox/telemetry_posthog_e2e_test.go`: a release-style build reporting commands under one install ID and honoring `DO_NOT_TRACK`
 - `cmd/ox/plan_review.go` (`reportReviewSession`) and `cmd/ox/plan_review_await.go` (`emitAwait`): the outcome properties of D7, recorded through `cli.Context.SetOutcome`
+
+
+## Addendum (2026-10-31): Person, actor and event identity
+
+**Decided by:** Scott ("option 1"). Amends D2 and D3 of the PostHog addendum.
+
+This also supersedes that addendum's "No names, emails, or login details"
+statement and its deferral of identifying logged-in users. Names and emails
+remain excluded; signed-in production events now carry the SageOx user ID.
+
+- **D2 amended.** Events from signed-in production accounts use the person's
+  SageOx user ID as `distinct_id` and `user_id`. Every event also carries
+  `install_id`, the existing random `client_id`. Signed-out, team-token,
+  environment-token and non-production runs keep the install as `distinct_id`
+  without `user_id`. Identity lookup is local and makes no network request.
+  The person is read when the command starts, so `ox logout` names who logged
+  out; `ox login`, and a command that picks another endpoint mid-run, read it
+  when they end.
+  Deleting `client_id` changes the install ID, not the signed-in person ID.
+- **D3 amended.** The closed property list also includes `user_id`, `install_id`,
+  `cli_version`, `env` (`production` or `test`), `surface` (`cli`), `cli_actor`,
+  `event_version`, `murmur_count` and `newest_murmur_at`. `actor` uses `person`,
+  `ai_coworker` or `ci`; `cli_actor` retains `human`, `agent` or `ci` for
+  existing dashboards. Murmur-list facts contain only the count matched in the
+  window (before `--limit`) and the newest UTC RFC 3339 instant, never content,
+  topic or author.
+- Each event has its own UUID and UTC capture timestamp. A caller may supply
+  both to preserve an occurrence during replay. Command capture remains after
+  the command returns: start time is the end timestamp minus `duration_ms`.
+- The allowed event names also include `context.used` and `murmur.published`;
+  their senders are added separately. Their property lists are below.
+- Events still create no person profile (`$process_person_profile: false`),
+  disable GeoIP (`$geoip_disable: true`), and carry no email, name, path,
+  prompt, token, free-text argument values or free text (an argument is sent
+  only as an exact SageOx ID or one of the fixed values listed here). Product usage is not gated by
+  marketing-site consent or region. The existing telemetry switches and
+  `DO_NOT_TRACK=1` still stop collection.
+- The updated notice is shown once to people who saw the earlier notice,
+  using the versioned `telemetry_notice_v2_shown` flag.
+
+Session metadata synced to the Ledger also starts carrying the filled-in
+SageOx user ID (for a login stored before this change, read from the access
+token's `usr_` subject until the next sign-in). That is the intended repair to identity loading, separate
+from the PostHog property contract.
+
+### Clarification (2026-11-01): Context use and murmur publication
+
+The two event names approved above now have CLI senders. They use the same
+person rule, telemetry switches and detached sender as `ox command run`.
+They create no person profile, disable GeoIP, make no retries and drop an
+event when all sender slots are occupied. A failed capture never changes
+the command's output or exit code.
+
+- `context.used` is sent after a successful context-use trace append. Its
+  closed property list is `ref` (optional), `ref_type`, `evidence` (`reported`
+  or `none`), `session_id` (only while a SageOx recording is active: the
+  recording's ID), `agent_type`, and optional `repo_id` / `team_id`.
+  `ref` is included only for an exact canonical SageOx conversation,
+  recording or plan ID; paths, URLs and free-text slugs are excluded.
+  `ref_type` is empty, `session`, `discussion`, `doc`, `file`, `murmur`,
+  `plan`, `kb` or `other`. Unknown types become `other`. Titles, aliases,
+  URLs and the reader's `--why` text are never sent.
+  No `context.used` is sent while the recording is paused (ADR-020): pause
+  is fail-closed, and an event key derived from the session ID could be
+  re-linked once the session is published. While `session_publishing` is
+  manual (resolved now, or recorded when the session started), the event
+  omits `session_id`, so a held session is never named to the server. A
+  recording without a session ID (started by an older ox) also omits
+  `session_id`.
+- `murmur.published` is sent after a successful IPC hand-off or outbox
+  write. Its closed property list is `murmur_id`, `importance`, `scope`,
+  optional `team_id` and `topic`. The allowed topics are `general`, `wip`,
+  `lint`, `architecture` and `conflict`; every other value becomes `other`.
+  Murmur text, files and principal details are never sent.
+- Both events also carry `actor`, `cli_actor`, `surface: cli`, `env` and
+  `event_version: 1`, plus the sender's existing `install_id`, optional
+  `user_id`, `cli_version`, `$lib`, `$lib_version`, `os`, `arch`,
+  `$process_person_profile` and `$geoip_disable` properties.
+- The fixed UUIDv5 namespace is `6d8961b7-070a-585f-aeae-ae2b06ad2ce1`
+  (UUIDv5 of the URL namespace and `https://sageox.ai/ox/telemetry`).
+  Context-use occurrence names are `session_id:occurrence_seq`; the
+  occurrence ordinal is persisted under a file lock independently of the
+  existing turn `seq`. A trace without a recording retains a random session
+  scope until that cache trace is removed; that scope keys the event UUID
+  only and is never sent as `session_id`. Murmur occurrence names are the
+  murmur ID. Both use the stored occurrence timestamp on replay. PostHog
+  collapses a replay only when the distinct ID also matches, and the person
+  ID is resolved at send time: a replay after signing in or out is counted
+  again in PostHog. The layer dedupes on the UUID alone.
+
+This fills in the already-approved event names and preserves the existing
+no-free-text promise. The notice's wording now includes context use and
+murmur publication; its version remains unchanged.

@@ -325,3 +325,55 @@ func TestFetchTokenMetaCached_DoesNotRetryAFailedFetchAtOnce(t *testing.T) {
 	}
 	assert.Equal(t, int32(1), calls.Load())
 }
+
+// TestFetchTokenMetaCached_KeepsTheTokenOwner — Failure prevented: /auth/me
+// names the person behind a personal token, the CLI drops it, and an Amp
+// project orb (git identity "Amp") credits that person's sessions to "Amp".
+func TestFetchTokenMetaCached_KeepsTheTokenOwner(t *testing.T) {
+	withTempCacheDir(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"user":{"id":"usr_avery","email":"avery@test.sageox.ai","name":"Avery Quinn"},"token_prefix":"oxp_AAAA","name":"orb"}`)
+	}))
+	defer srv.Close()
+
+	meta, err := FetchTokenMetaCached(context.Background(), srv.URL, "oxp_test_token")
+	require.NoError(t, err)
+	require.NotNil(t, meta.User)
+	assert.Equal(t, TokenUser{ID: "usr_avery", Email: "avery@test.sageox.ai", Name: "Avery Quinn"}, *meta.User)
+
+	cached, err := FetchTokenMetaCached(context.Background(), srv.URL, "oxp_test_token")
+	require.NoError(t, err)
+	require.NotNil(t, cached.User, "the owner must survive the on-disk cache")
+	assert.Equal(t, "avery@test.sageox.ai", cached.User.Email)
+}
+
+// TestPersonalTokenUser — Failure prevented: an Amp project orb credits a
+// person's sessions to its git identity ("Amp") because the owner of their
+// SAGEOX_TOKEN is never looked up, or a team token's coworker is mistaken for
+// a person.
+func TestPersonalTokenUser(t *testing.T) {
+	withUser := `{"user":{"id":"usr_avery","email":"avery@test.sageox.ai","name":"Avery Quinn"}}`
+	for _, tc := range []struct {
+		name  string
+		token string
+		body  string
+		want  *TokenUser
+	}{
+		{"personal token names its owner", "oxp_test_4bDZfN", withUser, &TokenUser{ID: "usr_avery", Email: "avery@test.sageox.ai", Name: "Avery Quinn"}},
+		{"server without a user field", "oxp_test_4bDZfN", `{"token_prefix":"oxp_AAAA"}`, nil},
+		{"team token is not a person", "oxt_test_1ljPfr", withUser, nil},
+		{"no SAGEOX_TOKEN", "", withUser, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withTempCacheDir(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			t.Setenv("SAGEOX_ENDPOINT", srv.URL)
+			t.Setenv("SAGEOX_TOKEN", tc.token)
+
+			assert.Equal(t, tc.want, PersonalTokenUser(srv.URL))
+		})
+	}
+}

@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
+
+	"github.com/sageox/ox/internal/useragent"
 )
 
 // Control messages stay below the service's 7 KiB admission limit; evidence
@@ -141,7 +143,7 @@ func (c *ControlClient) request(ctx context.Context, method, path string, body a
 			return fmt.Errorf("attest control body is %d bytes, exceeds %d-byte limit", len(raw), maxControlBytes)
 		}
 	}
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(c.BaseURL, "/")+path, bytes.NewReader(raw))
+	req, err := useragent.NewRequest(ctx, method, strings.TrimSuffix(c.BaseURL, "/")+path, bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}

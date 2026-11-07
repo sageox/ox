@@ -290,17 +290,9 @@ func checkGitHooks() checkResult {
 		return SkippedCheck("Git hooks", "not in git repo", "")
 	}
 
-	// check core.hooksPath configuration
-	hooksPath := getGitConfigValue("core.hooksPath")
-
-	// check default hooks directory
-	defaultHooksDir := gitRoot + "/.git/hooks"
-	if hooksPath != "" {
-		defaultHooksDir = hooksPath
-	}
-
-	// look for active hooks (executable files without .sample extension)
-	entries, err := os.ReadDir(defaultHooksDir)
+	// look for active hooks (executable files without .sample extension) where
+	// git runs them: core.hooksPath, or the common dir from a linked worktree
+	entries, err := os.ReadDir(resolveHooksDir(gitRoot))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return PassedCheck("Git hooks", "no hooks directory")
@@ -717,6 +709,12 @@ func gitLockFilesResult(name, gitDir string, now time.Time) checkResult {
 // Detects legacy sibling directory structure and suggests migration.
 // With fix=true, prompts user to fix issues.
 func checkGitRepoPaths(fix bool) checkResult {
+	return gitRepoPathsCheck(context.Background(), fix)
+}
+
+// gitRepoPathsCheck is checkGitRepoPaths for a doctor run, whose ctx stops
+// the repairs.
+func gitRepoPathsCheck(ctx context.Context, fix bool) checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
 		return SkippedCheck("git repo paths", "not in git repo", "")
@@ -848,7 +846,7 @@ func checkGitRepoPaths(fix bool) checkResult {
 					}
 					// authenticated + .sageox exists but no repos configured = problem
 					if fix {
-						return fixMissingRepos(gitRoot, localCfg)
+						return fixMissingRepos(ctx, gitRoot, localCfg)
 					}
 					return WarningCheck("git repo paths", "no repos configured",
 						"Run `ox doctor --fix` to fetch and clone repos from cloud")
@@ -865,7 +863,7 @@ func checkGitRepoPaths(fix bool) checkResult {
 
 	// issues found
 	if fix {
-		return fixRepoPathIssues(gitRoot, localCfg, issues)
+		return fixRepoPathIssues(ctx, gitRoot, localCfg, issues)
 	}
 
 	// during the post-init bootstrap window, the daemon is still cloning repos,

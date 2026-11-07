@@ -24,12 +24,16 @@ type SessionFacts struct {
 	Mine            bool
 	ProducedCommits []string
 	LinkedPRs       []string
+	AgentType       string // harness: "claude-code", "codex", ...
+	ScoreCategory   string // SageOx contribution score category, "" when unscored
 }
 
 // ScanSessions reads every session under <ledgerPath>/sessions, filters to the
 // half-open window [since, until), and marks which belong to the given
 // identity. Fail-open: an unreadable or unparseable session dir is skipped, not
-// fatal — a value report must never error on one bad meta.json.
+// fatal — a value report must never error on one bad meta.json. Draft
+// placeholders (ADR-029) are skipped: a draft is a live recording's meta-only
+// stand-in with no turn data, not a recorded session.
 func ScanSessions(ledgerPath string, since, until time.Time, id Identity) []SessionFacts {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	entries, err := os.ReadDir(sessionsDir)
@@ -48,6 +52,9 @@ func ScanSessions(ledgerPath string, since, until time.Time, id Identity) []Sess
 		if err != nil || meta == nil {
 			continue
 		}
+		if meta.IsDraft() {
+			continue
+		}
 		if !inWindow(meta.CreatedAt, since, until) {
 			continue
 		}
@@ -63,6 +70,8 @@ func ScanSessions(ledgerPath string, since, until time.Time, id Identity) []Sess
 			Mine:            id.Matches(meta, name),
 			ProducedCommits: meta.ProducedCommits,
 			LinkedPRs:       meta.LinkedPRs,
+			AgentType:       meta.AgentType,
+			ScoreCategory:   meta.SageoxScoreCategory,
 		})
 	}
 	return facts

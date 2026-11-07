@@ -59,7 +59,7 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 					Slug:     "amp:hooks-missing",
 					Severity: "warning",
 					Title:    "Amp hooks not installed",
-					Detail:   "AGENTS.md does not contain ox prime marker.",
+					Detail:   "AGENTS.md does not contain the ox agent prime marker.",
 					Fix:      installFix,
 					FixArgv:  installFixArgv,
 					FixSafe:  true,

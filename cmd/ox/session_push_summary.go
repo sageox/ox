@@ -37,6 +37,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -50,6 +51,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/telemetry"
@@ -85,7 +87,7 @@ type pushSummaryOutput struct {
 	SummaryPath  string  `json:"summary_path,omitempty"`
 	Message      string  `json:"message,omitempty"`
 	Error        string  `json:"error,omitempty"`
-	Disposition  string  `json:"disposition,omitempty"`   // "upload", "local_only", "discard"
+	Disposition  string  `json:"disposition,omitempty"`   // "upload", "discard"
 	QualityScore float64 `json:"quality_score,omitempty"` // 0.0-1.0 from LLM
 }
 
@@ -177,6 +179,17 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 	// Read meta once; reused below for richness validation and sageox score injection.
 	meta, _ := lfs.ReadSessionMeta(sessionDir)
 
+	// A draft folder means the transcript has not been published. Committing
+	// the summary there left draft=true beside real content (#1648), so leave
+	// the session to the finalize that publishes it.
+	if meta.IsDraft() {
+		return &pushSummaryOutput{
+			Success: true,
+			Type:    "push_summary",
+			Message: "session not published yet; nothing pushed",
+		}
+	}
+
 	// Enforce richness schema on non-trivial sessions. The prompt asks for
 	// key_actions / aha_moments / etc.; rejecting summaries that skip them
 	// is essentially free quality — output tokens cost nothing compared to
@@ -204,20 +217,20 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
-	// load quality thresholds from user config
-	userCfg, _ := config.LoadUserConfig()
-	awCfg := userCfg.GetAgentWorkerConfig()
-	uploadThreshold := (&config.AgentWorkerConfig{}).GetQualityUploadThreshold()
-	discardThreshold := (&config.AgentWorkerConfig{}).GetQualityDiscardThreshold()
-	if awCfg != nil {
-		uploadThreshold = awCfg.GetQualityUploadThreshold()
-		discardThreshold = awCfg.GetQualityDiscardThreshold()
+	// mirror the finalize-time context-use rollup from meta.json so
+	// summary.json readers see the same derived evidence (never LLM-authored)
+	if meta != nil && meta.ContextUse != nil {
+		summaryParsed.ContextUse = meta.ContextUse
 	}
+
+	// load the legacy numeric discard threshold from user config
+	userCfg, _ := config.LoadUserConfig()
+	discardThreshold := userCfg.GetAgentWorkerConfig().GetQualityDiscardThreshold()
 
 	// Disposition routing — three-way precedence:
 	//   1. QualityCategory (canonical, categorical) — used when present.
 	//      LLMs emitting the new schema set this; deterministic prefilter
-	//      sets it to "skip" on local-only stub generation.
+	//      sets it to "skip" on brief-session stub generation.
 	//   2. QualityScore (legacy numeric) — used when category is absent
 	//      and the score field was present in the JSON. Reads existing
 	//      summary.json files written before categorical scoring shipped.
@@ -228,7 +241,7 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 	case summaryParsed.QualityCategory != "":
 		disposition = session.EvaluateQualityCategory(summaryParsed.QualityCategory)
 	case qualityScorePresent:
-		disposition = session.EvaluateQuality(summaryParsed.QualityScore, uploadThreshold, discardThreshold)
+		disposition = session.EvaluateQuality(summaryParsed.QualityScore, discardThreshold)
 	default:
 		disposition = session.QualityUpload
 	}
@@ -331,68 +344,60 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 	// extract session name from session dir path for commit message
 	sessionName := filepath.Base(sessionDir)
 
-	// if below upload threshold, keep locally but don't push
-	if disposition == session.QualityLocalOnly {
-		slog.Info("session below upload threshold, keeping locally",
-			"session", sessionName,
-			"quality_score", summaryParsed.QualityScore,
-			"threshold", uploadThreshold,
-			"reason", summaryParsed.ScoreReason,
-		)
-		clearNeedsSummaryMarkerForSession(sessionName)
-		return &pushSummaryOutput{
-			Success:      true,
-			Type:         "push_summary",
-			SummaryPath:  summaryDst,
-			Message:      "summary saved locally (below upload threshold)",
-			Disposition:  string(session.QualityLocalOnly),
-			QualityScore: summaryParsed.QualityScore,
-		}
-	}
-
 	// disposition == QualityUpload — commit and push to ledger
-	// ensure .gitignore is in place before any commit to prevent cache file leakage
-	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
-
 	// git add the summary file (and meta.json if updated)
 	// --sparse: ledger repos use sparse-checkout
 	addArgs := []string{"-C", ledgerPath, "add", "--sparse", summaryDst}
 	if metaUpdated {
 		addArgs = append(addArgs, filepath.Join(sessionDir, "meta.json"))
 	}
-	addCmd := exec.Command("git", addArgs...)
-	if output, err := addCmd.CombinedOutput(); err != nil {
-		return &pushSummaryOutput{
-			Success: false,
-			Type:    "push_summary",
-			Error:   fmt.Sprintf("git add: %s: %v", strings.TrimSpace(string(output)), err),
-		}
-	}
-
-	// git commit
 	commitMsg := fmt.Sprintf("summary: %s", sessionName)
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		outStr := string(output)
-		if strings.Contains(outStr, "nothing to commit") {
-			clearNeedsSummaryMarkerForSession(sessionName)
-			return &pushSummaryOutput{
-				Success:      true,
-				Type:         "push_summary",
-				SummaryPath:  summaryDst,
-				Message:      "summary already committed",
-				Disposition:  string(session.QualityUpload),
-				QualityScore: summaryParsed.QualityScore,
-			}
+
+	// Hold the repo lock from the first index write through commit, as daemon
+	// pulls do, so this commit queues behind a sync rebase instead of moving
+	// main under it (sageox/ox#1541). Under the lock a rebase in progress is a
+	// wedge, and staging into it would mark its conflicts resolved.
+	var addOutput []byte
+	var addErr, commitErr error
+	lockErr := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		if gitutil.IsRebaseInProgress(ledgerPath) {
+			return errors.New("repo in broken rebase state (run 'ox doctor --fix')")
 		}
+		// ensure .gitignore is in place before any commit to prevent cache file leakage
+		gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
+		addOutput, addErr = exec.Command("git", addArgs...).CombinedOutput()
+		if addErr != nil {
+			return nil
+		}
+		// validated snapshot, not a bare commit: the lock keeps the index still,
+		// but entries staged before it would otherwise ride along unchecked
+		_, commitErr = commitLedgerSnapshot(context.Background(), ledgerPath, commitMsg)
+		return nil
+	})
+	if lockErr != nil {
 		return &pushSummaryOutput{
 			Success: false,
 			Type:    "push_summary",
-			Error:   wrapCommitError(outStr, err),
+			Error:   fmt.Sprintf("ledger not safe for summary commit: %v", lockErr),
 		}
 	}
-
-	// push using existing retry logic
+	if addErr != nil {
+		return &pushSummaryOutput{
+			Success: false,
+			Type:    "push_summary",
+			Error:   fmt.Sprintf("git add: %s: %v", strings.TrimSpace(string(addOutput)), addErr),
+		}
+	}
+	if commitErr != nil {
+		// an unmerged index reads "unresolved conflict", which wrapCommitError
+		// turns into the `ox doctor --fix` guidance
+		return &pushSummaryOutput{
+			Success: false,
+			Type:    "push_summary",
+			Error:   wrapCommitError(commitErr.Error(), errors.New("ledger snapshot commit failed")),
+		}
+	}
+	// An identical retry must push a commit whose earlier publication failed.
 	slog.Info("pushing summary to ledger", "session", sessionName)
 	if err := pushLedger(context.Background(), ledgerPath); err != nil {
 		return &pushSummaryOutput{

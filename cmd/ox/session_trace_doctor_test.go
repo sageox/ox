@@ -21,14 +21,33 @@ import (
 
 const doctorTraceID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 
+func startLocalTraceRecording(t *testing.T, ledger, agentID, nativeID string) *session.RecordingState {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("trace:\n  enabled: true\n"), 0600))
+	t.Setenv("OX_USER_CONFIG", configPath)
+	state, err := session.StartRecording(t.TempDir(), session.StartRecordingOptions{
+		AgentID: agentID, AgentSessionID: nativeID, AdapterName: "claude-code", Username: "test",
+		RepoContextPath: filepath.Join(ledger, ".sageox", "cache"),
+		BeforePublish: func(state *session.RecordingState) error {
+			state.StartedAt = time.Now().UTC().Add(-48 * time.Hour)
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, state.Trace)
+	require.NoError(t, os.Remove(filepath.Join(state.SessionPath, ".recording.json")))
+	return state
+}
+
 func doctorTraceFixture(t *testing.T, headerCapture bool) (string, string, *model.Capture, []byte) {
 	t.Helper()
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("OX_XDG_DISABLE", "")
 	ledger := t.TempDir()
-	cache := filepath.Join(ledger, ".sageox", "cache", "sessions", "2026-09-22T10-00-test-OxTraceDoctor")
-	require.NoError(t, os.MkdirAll(cache, 0700))
-	capture := &model.Capture{Boundaries: []model.Boundary{{Action: "start", At: time.Now().UTC().Add(-48 * time.Hour), Offsets: map[string]model.Offsets{doctorTraceID: {}}}}}
+	state := startLocalTraceRecording(t, ledger, "OxTraceDoctor", doctorTraceID)
+	cache := state.SessionPath
+	capture := state.Trace
 	meta := session.StoreMeta{Version: "1.0", AgentID: "OxTraceDoctor", AgentType: "claude-code", CreatedAt: capture.Boundaries[0].At, NativeSessions: []lfs.NativeSession{{ID: doctorTraceID}}}
 	if headerCapture {
 		meta.TraceCapture = capture
@@ -79,7 +98,7 @@ func TestTraceDoctorReclaimDoesNotCaptureLaterRecording(t *testing.T) {
 		t.Run(fmt.Sprintf("durable-stop=%t", durableStop), func(t *testing.T) {
 			ledger, cache, capture, first := doctorTraceFixture(t, false)
 			stoppedAt := capture.Boundaries[0].At.Add(time.Minute)
-			state := session.RecordingState{AgentID: "OxTraceDoctor", StartedAt: capture.Boundaries[0].At, StoppedAt: &stoppedAt, NativeSessions: []session.NativeSession{{ID: doctorTraceID}}, Trace: capture}
+			state := session.RecordingState{SessionPath: cache, AgentID: "OxTraceDoctor", StartedAt: capture.Boundaries[0].At, StoppedAt: &stoppedAt, NativeSessions: []session.NativeSession{{ID: doctorTraceID}}, Trace: capture}
 			if durableStop {
 				state.RecordTraceBoundary("stop", stoppedAt)
 			}
@@ -87,8 +106,7 @@ func TestTraceDoctorReclaimDoesNotCaptureLaterRecording(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(filepath.Join(cache, ".recording.json"), data, 0600))
 
-			later := session.RecordingState{NativeSessions: state.NativeSessions, Trace: &model.Capture{}}
-			later.RecordTraceBoundary("start", time.Now().Add(-time.Minute))
+			later := startLocalTraceRecording(t, ledger, "OxTraceLater", doctorTraceID)
 			second := bytes.ReplaceAll(first, []byte("before-crash"), []byte("LATER_RECORDING_PRIVATE"))
 			require.NoError(t, os.WriteFile(filepath.Join(paths.TraceSpoolDir(), doctorTraceID, "traces.jsonl"), append(append([]byte(nil), first...), second...), 0600))
 			later.RecordTraceBoundary("stop", time.Now())
@@ -117,7 +135,7 @@ func TestTraceDoctorReclaimDoesNotCaptureLaterRecording(t *testing.T) {
 				require.Empty(t, traceCache)
 				require.Len(t, orphans[0].Meta.TraceCapture.Boundaries, 1)
 			}
-			_, next, err := session.MaterializeTraces(ledger, "2026-09-24T10-00-test-OxTraceLater", later.Trace)
+			_, next, err := session.MaterializeTraces(ledger, later.SessionPath, later.Trace)
 			require.NoError(t, err)
 			require.Equal(t, int64(1), next.Spans)
 			require.Equal(t, []model.ByteRange{{int64(len(first)), int64(len(first) + len(second))}}, next.NativeSessions[0].SpansBytes)
@@ -194,9 +212,12 @@ func TestTraceDoctorHookStampFailureOmitsPausedTrace(t *testing.T) {
 			t.Setenv("XDG_CACHE_HOME", t.TempDir())
 			t.Setenv("OX_XDG_DISABLE", "")
 			t.Setenv("SAGEOX_DAEMON", "false")
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(configPath, []byte("trace:\n  enabled: true\n"), 0600))
+			t.Setenv("OX_USER_CONFIG", configPath)
 			state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{AgentID: "OxTraceFailedHook", AdapterName: "claude-code", Username: "test", AgentSessionID: doctorTraceID})
 			require.NoError(t, err)
-			state.Trace = &model.Capture{Boundaries: []model.Boundary{{Action: "start", At: state.StartedAt, Offsets: map[string]model.Offsets{doctorTraceID: {}}}}}
+			require.NotNil(t, state.Trace)
 			meta := session.StoreMeta{Version: "1.0", AgentID: state.AgentID, AgentType: "claude-code", CreatedAt: state.StartedAt, NativeSessions: state.NativeSessions, TraceCapture: state.Trace}
 			header, err := json.Marshal(map[string]any{"type": "header", "metadata": meta})
 			require.NoError(t, err)

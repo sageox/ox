@@ -20,6 +20,7 @@ type sessionUploadEffects struct {
 	commitRetry     func(ledgerPath, sessionName string, includeSummary bool) error
 	reconcilePlans  func(projectRoot string, slugs []string, sessionID string)
 	finalizeLinkage func(projectRoot, sessionDir string, meta *lfs.SessionMeta, sessionName string) []api.PRLinkMiss
+	notifyUploaded  func(projectRoot string, meta *lfs.SessionMeta, sessionName string) ([]api.PRLinkMiss, bool)
 }
 
 func productionSessionUploadEffects() sessionUploadEffects {
@@ -30,5 +31,6 @@ func productionSessionUploadEffects() sessionUploadEffects {
 		commitRetry:     commitAndPushLedgerWithExtras,
 		reconcilePlans:  reconcileProducedPlansAtStop,
 		finalizeLinkage: finalizeLinkageAfterPush,
+		notifyUploaded:  notifySessionUploaded,
 	}
 }

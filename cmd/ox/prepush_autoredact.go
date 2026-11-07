@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -21,9 +20,8 @@ import (
 
 // Pre-push auto-redact + quarantine pipeline (ox-y3ok).
 //
-// The pre-push secret gate (cmd/ox/prepush_scan.go::runPrePushSecretGate)
-// MUST NOT block the push. This file implements the recovery path it
-// runs instead:
+// The pre-push secret gate repairs content before publication. If repair
+// fails, publication stays pending. Its recovery path is:
 //
 //   1. autoRedactSessionFindings — for each affected session, redact
 //      JSONL files in-place via the canonical chokepoint, append a
@@ -88,6 +86,24 @@ type autoRedactResult struct {
 	CatalogHash    string
 }
 
+// checkRedactionIndex refuses before a repair can overwrite a Git operation's
+// staged resolution or modify files while another operation is incomplete.
+func checkRedactionIndex(ctx context.Context, ledgerPath string) error {
+	ctx, cancel := context.WithTimeout(ctx, lockedCommitTimeout)
+	defer cancel()
+	if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+		return err
+	}
+	unmerged, err := gitutil.HasUnmergedEntries(ctx, ledgerPath)
+	if err != nil {
+		return err
+	}
+	if unmerged {
+		return errors.New("ledger has unresolved conflicts; run ox doctor --fix")
+	}
+	return nil
+}
+
 // autoRedactSessionFindings groups findings by session, redacts each
 // JSONL file in-place via the canonical chokepoint (redactFileInPlace),
 // appends a RedactionPass to each affected session's meta.json, and
@@ -98,13 +114,17 @@ type autoRedactResult struct {
 // the caller's re-scan — they get the quarantine path instead.
 //
 // Returns a summary so the caller can format a user-facing message.
-// Errors are returned only for catastrophic failures (commit amend
-// rejected, meta.json mutation failed). Per-file errors degrade
-// gracefully: that file stays in the "remaining findings" bucket and
-// the caller quarantines it.
+// The caller must hold the repo lock when amendCommit is true.
+// Metadata or amendment failures stop publication. Individual rewrite
+// failures remain findings for quarantine.
 func autoRedactSessionFindings(ctx context.Context, ledgerPath string, result *PrePushScanResult, amendCommit bool) (*autoRedactResult, error) {
 	if result == nil || len(result.Findings) == 0 {
 		return &autoRedactResult{}, nil
+	}
+	if amendCommit {
+		if err := checkRedactionIndex(ctx, ledgerPath); err != nil {
+			return nil, err
+		}
 	}
 
 	redactor := session.NewRedactor()
@@ -177,18 +197,9 @@ func autoRedactSessionFindings(ctx context.Context, ledgerPath string, result *P
 		return out, fmt.Errorf("write redaction passes: %w", err)
 	}
 
-	// Stage + amend in one go. Reuses the same primitive `ox session
-	// redact` uses; auditors get one consistent shape regardless of
-	// whether the redaction was interactive or automatic.
+	// Include the audit metadata in the same scoped amendment.
 	if amendCommit {
-		byPath := map[string][]redactHistoryFinding{}
-		for _, rel := range redactedRels {
-			byPath[rel] = nil
-		}
-		for _, mp := range metaPaths {
-			byPath[mp] = nil
-		}
-		if err := stageAndAmendRedactedFiles(ledgerPath, byPath); err != nil {
+		if err := stageAndAmendRedactedFiles(ctx, ledgerPath, append(redactedRels, metaPaths...)); err != nil {
 			return out, fmt.Errorf("stage/amend redacted files: %w", err)
 		}
 	}
@@ -228,19 +239,32 @@ type quarantineResult struct {
 //     `ox doctor` can surface the persistent state. One marker per
 //     affected session aggregates all that session's quarantined files.
 //
-// Returns the carved-out paths + marker locations. Per-file errors are
-// logged and skipped — the goal is to never block the push; partial
-// quarantine is better than full block. Before upload, index or rename
-// failures stop the operation after recording any completed quarantines.
-func quarantineUnredactableFindings(ledgerPath string, findings []PrePushFinding, amendCommit bool) (*quarantineResult, error) {
+// Returns the carved-out paths + marker locations. Partial progress is
+// recorded even on failure; the caller must verify content before publishing.
+// The caller holds the repo lock when amending. Before upload, this function
+// takes it to protect index updates against concurrent Ledger operations.
+func quarantineUnredactableFindings(ctx context.Context, ledgerPath string, findings []PrePushFinding, amendCommit bool) (*quarantineResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, lockedCommitTimeout)
+	defer cancel()
+	if amendCommit {
+		return quarantineUnredactableFindingsLocked(ctx, ledgerPath, findings, true)
+	}
+	out := &quarantineResult{}
+	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		if err := checkRedactionIndex(ctx, ledgerPath); err != nil {
+			return err
+		}
+		var err error
+		out, err = quarantineUnredactableFindingsLocked(ctx, ledgerPath, findings, false)
+		return err
+	})
+	return out, err
+}
+
+func quarantineUnredactableFindingsLocked(ctx context.Context, ledgerPath string, findings []PrePushFinding, amendCommit bool) (*quarantineResult, error) {
 	out := &quarantineResult{}
 	if len(findings) == 0 {
 		return out, nil
-	}
-	if !amendCommit {
-		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
-			return out, fmt.Errorf("prepare quarantine index: %w", err)
-		}
 	}
 
 	// Group findings by session for the marker write.
@@ -306,7 +330,9 @@ quarantineFiles:
 			if !amendCommit {
 				// Preserve the index's bytes and mode, which may differ from the
 				// working file. An empty snapshot means the path is untracked.
-				indexEntries, err = exec.Command("git", "-C", ledgerPath, "ls-files", "--stage", "-z", "--", fromRel).Output()
+				indexRead := gitutil.NewNetworkCmd(ctx, "-C", ledgerPath, "ls-files", "--stage", "-z", "--", ":(literal)"+fromRel)
+				indexRead.Dir = ledgerPath
+				indexEntries, err = indexRead.Output()
 				if err != nil {
 					quarantineErr = fmt.Errorf("read quarantined path from index %s: %w", fromRel, err)
 					break quarantineFiles
@@ -314,9 +340,9 @@ quarantineFiles:
 				// A previous attempt may already have staged these bytes. Moving
 				// only the working file would leave that secret-bearing blob in
 				// the next commit, invisible to the working-tree scanner.
-				gitOutput, err := exec.Command("git", "-C", ledgerPath, "rm", "--cached", "--ignore-unmatch", "--force", "--sparse", "--", fromRel).CombinedOutput()
+				_, err := gitutil.RunGit(ctx, ledgerPath, "rm", "--cached", "--ignore-unmatch", "--force", "--sparse", "--", ":(literal)"+fromRel)
 				if err != nil {
-					quarantineErr = fmt.Errorf("remove quarantined path from index %s: %s: %w", fromRel, strings.TrimSpace(string(gitOutput)), err)
+					quarantineErr = fmt.Errorf("remove quarantined path from index %s: %w", fromRel, err)
 					break quarantineFiles
 				}
 			}
@@ -324,10 +350,16 @@ quarantineFiles:
 				if !amendCommit {
 					quarantineErr = fmt.Errorf("quarantine %s: %w", fromRel, err)
 					if len(indexEntries) > 0 {
-						restore := exec.Command("git", "-C", ledgerPath, "update-index", "-z", "--index-info")
+						// Cancellation must not skip restoring the staged bytes, but
+						// cleanup still has a bounded time to release the repo lock.
+						restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+						restore := gitutil.NewNetworkCmd(restoreCtx, "-C", ledgerPath, "update-index", "-z", "--index-info")
+						restore.Dir = ledgerPath
 						restore.Stdin = strings.NewReader(string(indexEntries))
-						if gitOutput, restoreErr := restore.CombinedOutput(); restoreErr != nil {
-							quarantineErr = errors.Join(quarantineErr, fmt.Errorf("restore quarantined path in index %s: %s: %w", fromRel, strings.TrimSpace(string(gitOutput)), restoreErr))
+						_, restoreErr := restore.Output()
+						cancel()
+						if restoreErr != nil {
+							quarantineErr = errors.Join(quarantineErr, fmt.Errorf("restore quarantined path in index %s: %w", fromRel, restoreErr))
 						}
 					}
 					break quarantineFiles
@@ -337,12 +369,10 @@ quarantineFiles:
 				continue
 			}
 			if amendCommit {
-				if err := unstagePath(ledgerPath, fromRel); err != nil {
+				if err := unstagePath(ctx, ledgerPath, fromRel); err != nil {
 					slog.Warn("pre-push quarantine: unstage failed; bytes are quarantined but path may remain in commit",
 						"path", fromRel, "error", err)
-					// Don't return — best-effort. The push will still likely
-					// succeed because the moved-aside file no longer exists
-					// at the staged path; git may auto-detect the deletion.
+					quarantineErr = errors.Join(quarantineErr, err)
 				}
 			}
 			g.quarantineLocs = append(g.quarantineLocs, redactionDebtLocation{
@@ -356,9 +386,12 @@ quarantineFiles:
 	// If we unstaged anything, amend the holding commit once so its
 	// tree matches the now-quarantined working state.
 	if amendCommit && len(out.QuarantinedRels) > 0 {
-		if err := amendDroppingPaths(ledgerPath); err != nil {
-			slog.Warn("pre-push quarantine: amend failed; push may still surface the bad paths",
-				"error", err)
+		paths := make([]string, 0, len(out.QuarantinedRels))
+		for _, p := range out.QuarantinedRels {
+			paths = append(paths, ":(literal)"+p)
+		}
+		if _, err := gitutil.AmendLedgerSnapshot(ctx, ledgerPath, paths...); err != nil {
+			quarantineErr = errors.Join(quarantineErr, fmt.Errorf("amend quarantined paths: %w", err))
 		}
 	}
 
@@ -412,40 +445,18 @@ quarantineFiles:
 // unstagePath removes a single path from the index, leaving the working
 // tree alone. Uses `git reset HEAD~` when a parent commit exists, falling
 // back to `git rm --cached --ignore-unmatch` for the first-commit case.
-func unstagePath(ledgerPath, rel string) error {
+func unstagePath(ctx context.Context, ledgerPath, rel string) error {
 	// Try to resolve HEAD~ first. If it doesn't exist (single-commit
 	// repo), fall back to the cached-remove path.
-	if err := exec.Command("git", "-C", ledgerPath, "rev-parse", "--verify", "HEAD~").Run(); err == nil {
+	if _, err := gitutil.RunGit(ctx, ledgerPath, "rev-parse", "--verify", "HEAD~"); err == nil {
 		// `git reset HEAD~ -- <path>` rewinds the index entry for this
 		// path to its HEAD~ state. WT untouched (the file is already
 		// moved aside; this just rewrites the staged tree).
-		if out, err := exec.Command("git", "-C", ledgerPath, "reset", "HEAD~", "--", rel).CombinedOutput(); err != nil {
-			return fmt.Errorf("git reset HEAD~ %s: %s: %w", rel, strings.TrimSpace(string(out)), err)
-		}
-		return nil
+		_, err := gitutil.RunGit(ctx, ledgerPath, "reset", "HEAD~", "--", ":(literal)"+rel)
+		return err
 	}
-	if out, err := exec.Command("git", "-C", ledgerPath, "rm", "--cached", "--ignore-unmatch", "--", rel).CombinedOutput(); err != nil {
-		return fmt.Errorf("git rm --cached %s: %s: %w", rel, strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-// amendDroppingPaths runs `git commit --amend --no-edit --no-verify`
-// after the caller has already mutated the index (via unstagePath calls).
-// `--no-verify` matches stageAndAmendRedactedFiles' behavior; the secret
-// gate is the verifier and it's the one driving this flow.
-func amendDroppingPaths(ledgerPath string) error {
-	out, err := exec.Command("git", "-C", ledgerPath, "commit", "--amend", "--no-edit", "--no-verify").CombinedOutput()
-	if err != nil {
-		// "nothing to commit" can happen if the amend would produce an
-		// empty commit (we dropped every staged path). Tolerate it —
-		// the push will simply carry nothing new, which is correct.
-		if strings.Contains(string(out), "nothing to commit") {
-			return nil
-		}
-		return fmt.Errorf("git commit --amend: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
+	_, err := gitutil.RunGit(ctx, ledgerPath, "rm", "--cached", "--ignore-unmatch", "--", ":(literal)"+rel)
+	return err
 }
 
 // writeFileAtomic writes data to path via a tmpfile + rename so a reader

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -27,24 +28,31 @@ func ShowErrorBannerIfNeeded() {
 		return
 	}
 
-	if len(errors) == 0 {
+	printErrorBanner(os.Stderr, errors)
+}
+
+// printErrorBanner renders the unviewed-error banner: the most recent error,
+// plus a pointer to the full log when there is more than one. Split out of
+// ShowErrorBannerIfNeeded so it can be driven without a running daemon.
+func printErrorBanner(w io.Writer, errs []daemon.StoredError) {
+	if len(errs) == 0 {
 		return
 	}
 
 	// show banner with most recent error (errors are sorted by timestamp desc)
-	mostRecent := errors[0]
+	mostRecent := errs[0]
 	age := timeSinceError(mostRecent.Timestamp)
 
 	// format based on severity
 	switch mostRecent.Severity {
 	case "error":
-		fmt.Fprintf(os.Stderr, "%s %s (%s ago)\n",
+		fmt.Fprintf(w, "%s %s (%s ago)\n",
 			cli.StyleError.Render("[!]"),
 			mostRecent.Message,
 			age,
 		)
 	default: // warning
-		fmt.Fprintf(os.Stderr, "%s %s (%s ago)\n",
+		fmt.Fprintf(w, "%s %s (%s ago)\n",
 			cli.StyleWarning.Render("[!]"),
 			mostRecent.Message,
 			age,
@@ -52,9 +60,9 @@ func ShowErrorBannerIfNeeded() {
 	}
 
 	// if multiple errors, mention the count
-	if len(errors) > 1 {
-		fmt.Fprintf(os.Stderr, "%s\n",
-			cli.StyleDim.Render(fmt.Sprintf("    Run 'ox daemon errors' to see all %d errors", len(errors))),
+	if len(errs) > 1 {
+		fmt.Fprintf(w, "%s\n",
+			cli.StyleDim.Render(fmt.Sprintf("    Run 'ox daemon logs' to see all %d errors", len(errs))),
 		)
 	}
 }

@@ -2,6 +2,7 @@ package logger
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -184,18 +185,36 @@ func TestReplaceAttr_Backstop(t *testing.T) {
 	var buf bytes.Buffer
 	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{
 		Level:       slog.LevelDebug,
-		ReplaceAttr: redactAttr,
+		ReplaceAttr: RedactAttr,
 	})
 	l := slog.New(h)
 
 	// Simulate LogHTTPResponseBody on the GetRepos success path.
 	l.Debug("http response body", "body", `{"token":"glpat-LIVEPATVALUE123456","username":"oauth2"}`)
+	// an error value is not a string attr, but slog prints its message
+	l.Debug("clone failed", "error", errors.New("unable to access 'https://oauth2:glpat-ERRVALUE1234567@git.sageox.ai/t/l.git/'"))
 
 	out := buf.String()
 	if strings.Contains(out, "glpat-LIVEPATVALUE123456") {
 		t.Fatalf("PAT reached the log sink despite ReplaceAttr backstop:\n%s", out)
 	}
+	if strings.Contains(out, "glpat-ERRVALUE1234567") {
+		t.Fatalf("PAT in an error value reached the log sink:\n%s", out)
+	}
+
+	// a typed-nil error, e.g. the target of an errors.As that did not match:
+	// its Error method dereferences nil, and slog does not recover panics in
+	// ReplaceAttr, so the hook must not call it bare
+	var typedNil *nilDerefError
+	l.Debug("command failed", "error", typedNil)
+	if !strings.Contains(buf.String(), "error=<nil>") {
+		t.Fatalf("typed-nil error not logged as <nil>:\n%s", buf.String())
+	}
 	if !strings.Contains(out, "[REDACTED]") {
 		t.Fatalf("expected redaction marker in sink output:\n%s", out)
 	}
 }
+
+type nilDerefError struct{ msg string }
+
+func (e *nilDerefError) Error() string { return e.msg }

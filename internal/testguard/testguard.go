@@ -29,12 +29,19 @@ import (
 var allowedBaseEnv = []string{
 	"PATH", "HOME", "TMPDIR", "USER", "LANG", "LC_ALL",
 	"GOPATH", "GOROOT",
+	// the toolchain's home-derived locations, so a subprocess under a test's HOME
+	// keeps the build cache and `go env -w` settings; a re-executed cmd/ox test
+	// binary also finds them pinned and does not run `go env` in that HOME
+	"GOCACHE", "GOMODCACHE", "GOENV",
 	// git needs these for commits
 	"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
 	"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
 	// keeps ox's git credentials out of the OS keychain, which is not under HOME
 	// and so not isolated by a test's home sandbox
 	"OX_GIT_CREDENTIALS_FILE",
+	// the daemon registry and sockets follow it, not HOME; without it a
+	// subprocess falls back to the system temp dir, outside a test's sandbox
+	"XDG_RUNTIME_DIR",
 }
 
 // TestOxBinaryEnv selects a prebuilt ox binary for compiled-binary tests.

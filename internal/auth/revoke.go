@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/useragent"
 )
 
 // RevokeToken revokes token and removes from local storage.
@@ -104,12 +106,15 @@ func (c *AuthClient) revokeOnServer(token *StoredToken) bool {
 	logger.LogHTTPRequest("POST", revokeURL)
 	start := time.Now()
 
+	req, err := useragent.NewRequest(context.Background(), http.MethodPost, revokeURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		logger.LogHTTPError("POST", revokeURL, err, time.Since(start))
+		return false
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
 	// make POST request to revocation endpoint
-	resp, err := client.Post(
-		revokeURL,
-		"application/x-www-form-urlencoded",
-		strings.NewReader(data.Encode()),
-	)
+	resp, err := client.Do(req)
 	duration := time.Since(start)
 	if err != nil {
 		logger.LogHTTPError("POST", revokeURL, err, duration)
@@ -222,6 +227,12 @@ func (c *AuthClient) revokeOnServerStatus(token *StoredToken) RevocationStatus {
 	if baseURL == "" {
 		baseURL = endpoint.Get()
 	}
+	return revokeOnServerAt(context.Background(), baseURL, token)
+}
+
+// revokeOnServerAt is revokeOnServerStatus against baseURL, for callers with
+// no AuthClient such as the package-level token refresh.
+func revokeOnServerAt(ctx context.Context, baseURL string, token *StoredToken) RevocationStatus {
 	baseURL = strings.TrimSuffix(baseURL, "/")
 	revokeURL := baseURL + RevokeEndpoint
 
@@ -241,14 +252,16 @@ func (c *AuthClient) revokeOnServerStatus(token *StoredToken) RevocationStatus {
 		Timeout: 10 * time.Second,
 	}
 
+	req, err := useragent.NewRequest(ctx, http.MethodPost, revokeURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return RevocationNetworkError
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
 	logger.LogHTTPRequest("POST", revokeURL)
 	start := time.Now()
 
-	resp, err := client.Post(
-		revokeURL,
-		"application/x-www-form-urlencoded",
-		strings.NewReader(data.Encode()),
-	)
+	resp, err := client.Do(req)
 	duration := time.Since(start)
 	if err != nil {
 		logger.LogHTTPError("POST", revokeURL, err, duration)

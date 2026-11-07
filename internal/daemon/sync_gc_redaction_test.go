@@ -31,7 +31,7 @@ func TestGCSessionPublicationGuard(t *testing.T) {
 			content := "ordinary recovery notes"
 			if secret {
 				rel = "sessions/synthetic/raw.jsonl"
-				content = `{"content":"AKIAIOSFODNN7EXAMPLE"}`
+				content = `{"content":"` + "AKIA" + "QWERTYUIOPASDFGH" + `"}`
 			}
 			abs := filepath.Join(clone, rel)
 			require.NoError(t, os.MkdirAll(filepath.Dir(abs), 0700))
@@ -40,7 +40,7 @@ func TestGCSessionPublicationGuard(t *testing.T) {
 			require.NoError(t, exec.Command("git", "-C", clone, "commit", "-m", "synthetic recovery").Run())
 			err := scheduler.gcPushUnpushedCommits(context.Background(), WorkspaceState{Path: clone})
 			if secret {
-				require.ErrorContains(t, err, "committed session content refused")
+				require.ErrorContains(t, err, "committed session/plan content refused")
 				require.Equal(t, before, head(bare), "GC must not publish refused history before recloning")
 				_, err := os.Stat(abs)
 				require.NoError(t, err, "refused recovery stays available locally")

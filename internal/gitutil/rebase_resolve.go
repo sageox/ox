@@ -28,7 +28,9 @@ import (
 //
 // Returns nil if the rebase was successfully continued after resolution.
 // Returns an error if any conflicted file fails the safety check (the
-// rebase is NOT aborted — caller should abort if needed).
+// rebase is NOT aborted — caller should abort if needed). Returns
+// ErrRebaseBranchMoved, also without aborting, when another writer moved the
+// rebase's branch: no resolution can finish that rebase.
 // A rebase replays commits one at a time, so `rebase --continue` stops at EVERY
 // conflicting commit in the range. maxResolvePasses bounds the resulting loop.
 // A ledger that has been wedged for weeks can carry hundreds of conflicting
@@ -61,6 +63,12 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 		// rules below resolve without help.
 		if err := ctx.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			return err
+		}
+		// A rebase whose branch moved can never finish, and on a step with
+		// nothing to resolve the advance below would --skip it. Hand it back
+		// for a re-anchored abort instead.
+		if RebaseBranchMoved(ctx, repoPath) {
+			return ErrRebaseBranchMoved
 		}
 		stepCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resolveStepTimeout)
 		// an explicit cancellation (daemon shutdown) still reaches the active
@@ -278,6 +286,11 @@ func resolveOneRebaseStep(ctx context.Context, repoPath string, safePrefixes []s
 // says the step is empty. It deliberately never skips blindly: `--skip` DROPS
 // the current commit, so guessing here would silently discard a real session.
 func advanceNonConflictRebaseStep(ctx context.Context, repoPath string) (done bool, err error) {
+	// a branch moved during this pass's --continue reads as an empty step, and
+	// --skip cannot finish it either
+	if RebaseBranchMoved(ctx, repoPath) {
+		return false, ErrRebaseBranchMoved
+	}
 	contOut, contErr := runRebaseStep(ctx, repoPath, "--continue")
 	if !IsRebaseInProgress(repoPath) {
 		return true, nil
@@ -308,6 +321,10 @@ func advanceNonConflictRebaseStep(ctx context.Context, repoPath string) (done bo
 	if !rebaseStepIsEmpty(ctx, repoPath) {
 		return false, fmt.Errorf("rebase halted with nothing to resolve: %s",
 			SanitizeOutput(strings.TrimSpace(contOut)))
+	}
+	// the branch can also move during the --continue above
+	if RebaseBranchMoved(ctx, repoPath) {
+		return false, ErrRebaseBranchMoved
 	}
 
 	skipOut, skipErr := runRebaseStep(ctx, repoPath, "--skip")

@@ -4,18 +4,24 @@ export type Renderer = 'image' | 'cells'
 // How big Oxy is drawn; a fixed height in rows, as wide as the art needs.
 export type Size = 'small' | 'medium' | 'large'
 
+// Where Oxy stands on the desktop app: under each of Claude's replies, or in
+// a side pane.
+export type Placement = 'reply' | 'pane'
+
 declare module 'claude-code' {
   interface PluginState {
     'ox-cli-oxy': {
       // This session's choices; null until made. A /clear or an in-app resume
       // starts a session with none, and the mod falls back to what the
       // terminal and $.store say.
-      /** `/hatch-pet off` hides Oxy and restores Claude Code's own spinner. */
+      /** `/oxy off` hides Oxy and restores Claude Code's own spinner. */
       hidden: boolean | null
       renderer: Renderer | null
       size: Size | null
-      /** `/hatch-pet <animation>` pins one animation; null follows Claude. */
+      /** `/oxy <animation>` pins one animation; null follows Claude. */
       pinned: string | null
+      /** `/oxy reply` or `/oxy pane`; null falls back to what was saved. */
+      placement: Placement | null
     }
   }
 }

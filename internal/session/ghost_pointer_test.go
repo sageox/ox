@@ -36,7 +36,7 @@ func ghostState(t *testing.T, sessionPath string) *RecordingState {
 		ParentPID: 0x7FFFFFFF,
 		StartedAt: time.Now().Add(-2 * GhostGracePeriod),
 	}
-	require.NoError(t, os.WriteFile(recordingStatePath(sessionPath), []byte("{}"), 0o644))
+	require.NoError(t, os.WriteFile(recordingStatePath(sessionPath), mustMarshal(t, state), 0o644))
 	return state
 }
 
@@ -45,10 +45,10 @@ func ghostState(t *testing.T, sessionPath string) *RecordingState {
 // straight through HasSubstantiveEntries.
 func TestGhostCleanup_PointerStubIsNotAGhost(t *testing.T) {
 	sessionPath := filepath.Join(t.TempDir(), "2026-05-01T20-04-testuser-OxGHST")
-	state := ghostState(t, sessionPath)
+	ghostState(t, sessionPath)
 	writePointerStub(t, filepath.Join(sessionPath, "raw.jsonl"))
 
-	result := cleanupGhosts([]*RecordingState{state})
+	result := CleanupGhostSessionsInDir(filepath.Dir(sessionPath))
 
 	assert.Equal(t, 0, result.Removed,
 		"a session whose transcript lives in the content store must never be deleted as a ghost")
@@ -63,14 +63,14 @@ func TestGhostCleanup_StillRemovesRealGhosts(t *testing.T) {
 	base := t.TempDir()
 
 	headerOnly := filepath.Join(base, "2026-05-01T20-04-testuser-OxHDR")
-	headerState := ghostState(t, headerOnly)
+	ghostState(t, headerOnly)
 	require.NoError(t, os.WriteFile(filepath.Join(headerOnly, "raw.jsonl"),
 		[]byte(`{"metadata":{},"type":"header"}`+"\n"), 0o644))
 
 	noRaw := filepath.Join(base, "2026-05-01T20-04-testuser-OxNON")
-	noRawState := ghostState(t, noRaw)
+	ghostState(t, noRaw)
 
-	result := cleanupGhosts([]*RecordingState{headerState, noRawState})
+	result := CleanupGhostSessionsInDir(base)
 
 	assert.Equal(t, 2, result.Removed,
 		"header-only and raw-less recordings are genuine ghosts and must still be cleaned")
@@ -80,11 +80,11 @@ func TestGhostCleanup_StillRemovesRealGhosts(t *testing.T) {
 // contract, restated so a future refactor cannot quietly drop it.
 func TestGhostCleanup_KeepsSessionsWithRealContent(t *testing.T) {
 	sessionPath := filepath.Join(t.TempDir(), "2026-05-01T20-04-testuser-OxREAL")
-	state := ghostState(t, sessionPath)
+	ghostState(t, sessionPath)
 	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"),
 		[]byte(`{"metadata":{},"type":"header"}`+"\n"+`{"type":"user","content":"hi"}`+"\n"), 0o644))
 
-	result := cleanupGhosts([]*RecordingState{state})
+	result := CleanupGhostSessionsInDir(filepath.Dir(sessionPath))
 
 	assert.Equal(t, 0, result.Removed, "a recording with entries is an orphan to recover, not a ghost")
 	assert.DirExists(t, sessionPath)

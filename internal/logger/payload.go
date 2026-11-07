@@ -41,7 +41,7 @@ func InitPayloadMode(verbose bool, logPath string) {
 
 	stderr := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level:       slog.LevelError,
-		ReplaceAttr: redactAttr,
+		ReplaceAttr: RedactAttr,
 	})
 
 	quiet := payloadQuietHandler(logPath)
@@ -60,7 +60,7 @@ func payloadQuietHandler(logPath string) slog.Handler {
 	}
 	return slog.NewTextHandler(f, &slog.HandlerOptions{
 		Level:       slog.LevelWarn,
-		ReplaceAttr: redactAttr,
+		ReplaceAttr: RedactAttr,
 	})
 }
 

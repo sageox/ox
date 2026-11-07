@@ -464,16 +464,9 @@ func TestDaemonStart_UnwritableRestartHistoryIsNonFatal(t *testing.T) {
 }
 
 func TestStartDaemonProcess(t *testing.T) {
-	// LogPath() derives from paths.TempDir(), which is keyed on $USER: without this
-	// the subtests below RemoveAll the developer's REAL daemon log directory
-	// (/tmp/<user>/sageox/logs) and every running daemon loses its log file
-	// (2026-10-07: the directory vanished twice, each time while this package's
-	// tests ran). Point the whole test at a throwaway identity and prove it.
-	t.Setenv("USER", "ox-test-"+filepath.Base(t.TempDir()))
-	t.Setenv("USERNAME", os.Getenv("USER"))
-	require.Contains(t, LogPath(), "ox-test-", "LogPath must point at the isolated test identity, never the developer's")
+	// the subtests below remove and replace the daemon log directories
+	persistent, temp := isolateDaemonLogs(t)
 	singleflightEnv(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 
 	// stand-in daemon: records whether the supersede marker reached it
@@ -513,20 +506,33 @@ func TestStartDaemonProcess(t *testing.T) {
 		require.ErrorContains(t, err, "failed to start daemon")
 	})
 
-	t.Run("log path that is a directory is an error", func(t *testing.T) {
-		logPath := LogPath()
-		require.NoError(t, os.RemoveAll(logPath))
-		require.NoError(t, os.MkdirAll(logPath, 0700))
-		t.Cleanup(func() { _ = os.RemoveAll(logPath) })
-		_, err := startDaemonProcess(script, false)
-		require.ErrorContains(t, err, "failed to open log file")
-	})
-
-	t.Run("log directory that is a file is an error", func(t *testing.T) {
-		logDir := filepath.Dir(LogPath())
+	// e.g. ~/.local/state left owned by root after a sudo-run tool created it
+	t.Run("unusable log directory falls back to the /tmp log", func(t *testing.T) {
+		logDir := filepath.Dir(persistent)
+		require.NoError(t, os.MkdirAll(filepath.Dir(logDir), 0700))
 		require.NoError(t, os.RemoveAll(logDir))
 		require.NoError(t, os.WriteFile(logDir, []byte("x"), 0600))
 		t.Cleanup(func() { _ = os.Remove(logDir) })
+
+		pid, err := startDaemonProcess(script, false)
+		require.NoError(t, err, "a log ox cannot write must never stop the daemon from starting")
+		assert.Positive(t, pid)
+		assert.Equal(t, "", readMarker(t))
+		assert.FileExists(t, temp)
+		assert.Equal(t, temp, LogPath(), "`ox daemon logs` must find the log the daemon writes")
+	})
+
+	t.Run("no usable log location is an error", func(t *testing.T) {
+		require.NoError(t, os.MkdirAll(persistent, 0700)) // opening a directory as the log fails
+		tempDir := filepath.Dir(temp)
+		require.NoError(t, os.MkdirAll(filepath.Dir(tempDir), 0700))
+		require.NoError(t, os.RemoveAll(tempDir))
+		require.NoError(t, os.WriteFile(tempDir, []byte("x"), 0600))
+		t.Cleanup(func() {
+			_ = os.RemoveAll(persistent)
+			_ = os.Remove(tempDir)
+		})
+
 		_, err := startDaemonProcess(script, false)
 		require.ErrorContains(t, err, "failed to create log directory")
 	})

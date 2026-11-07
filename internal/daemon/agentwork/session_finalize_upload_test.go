@@ -2,6 +2,7 @@ package agentwork
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/require"
@@ -159,7 +161,7 @@ func TestBuildPrompt_UploadOnly_SkipsLLM(t *testing.T) {
 // is gitignored in the ledger.
 func TestStageSessionInLedger_CopiesFiles(t *testing.T) {
 	handler := NewSessionFinalizeHandler(slog.Default())
-	ledgerPath := t.TempDir()
+	ledgerPath := initTestGitRepo(t)
 
 	sessionName := "2026-01-10T14-00-testuser-OxSTAGE"
 	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
@@ -660,7 +662,7 @@ func TestGitCommitAndPush_LeavesOutOfLedgerSessionIntact(t *testing.T) {
 
 			handler := NewSessionFinalizeHandler(slog.Default())
 			payload := &SessionFinalizePayload{SessionDir: sessionDir, RawPath: filepath.Join(sessionDir, "raw.jsonl"), LedgerPath: ledgerPath}
-			if pushed, _ := handler.gitCommitAndPush(payload, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef(raw)}); pushed {
+			if pushed, _ := handler.gitCommitAndPush(payload, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef(raw)}, nil); pushed {
 				t.Fatal("a session outside the ledger must not report a successful push")
 			}
 
@@ -708,7 +710,7 @@ func TestGitCommitAndPush_RefusesConflictMarkers(t *testing.T) {
 		SessionDir: sessionDir,
 		RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
 		LedgerPath: ledgerPath,
-	}, nil)
+	}, nil, nil)
 	if pushed {
 		t.Fatal("marker-laden metadata must not report a successful publication")
 	}
@@ -759,7 +761,7 @@ func TestGitCommitAndPush_CommitsStagedBytesNotWorktree(t *testing.T) {
 		SessionDir: sessionDir,
 		RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
 		LedgerPath: ledgerPath,
-	}, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef([]byte(testRawContent))})
+	}, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef([]byte(testRawContent))}, nil)
 	if !pushed {
 		t.Fatal("a clean staged session must commit and push")
 	}
@@ -785,10 +787,112 @@ func TestGitCommitAndPush_RefusesUnuploadedArtifacts(t *testing.T) {
 	require.NoError(t, os.WriteFile(rawPath, []byte(testRawContent), 0o644))
 	before := gitOutput(t, ledgerPath, "rev-parse", "HEAD")
 	handler := newGitBackedHandler()
-	pushed, _ := handler.gitCommitAndPush(&SessionFinalizePayload{SessionDir: sessionDir, RawPath: rawPath, LedgerPath: ledgerPath}, nil)
+	pushed, _ := handler.gitCommitAndPush(&SessionFinalizePayload{SessionDir: sessionDir, RawPath: rawPath, LedgerPath: ledgerPath}, nil, nil)
 	require.False(t, pushed)
 	require.Equal(t, before, gitOutput(t, ledgerPath, "rev-parse", "HEAD"))
 	content, err := os.ReadFile(rawPath)
 	require.NoError(t, err)
 	require.Equal(t, testRawContent, string(content))
+}
+
+// TestUploadOnly_SecretGuardRefusalWaitsForAChange: the secret guard refuses
+// the same bytes every time.
+// Failure prevented: the daemon re-detected and retried a refused session every
+// few minutes, forever, re-scanning the whole transcript each time. Any change
+// to the refused files, including a deletion or an edit stamped older than the
+// refusal, must make the session eligible again, and a redacted transcript must
+// then publish.
+func TestUploadOnly_SecretGuardRefusalWaitsForAChange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	// a synthetic credential the bundled rules refuse, so no rule download is needed
+	const withSecret = `{"metadata":{"schema_version":"1","agent_type":"claude-code","username":"testuser","agent_id":"OxSECR"}}
+{"type":"user","content":"MAILLAB_API_KEY=syntheticOpaqueLFSBoundarySentinel39xyAZ","seq":1}
+{"type":"assistant","content":"world","seq":2}
+{"entry_count":2}
+`
+	rewrite := func(t *testing.T, cacheDir string) {
+		require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"), []byte(testRawContent), 0o644))
+	}
+	for _, tc := range []struct {
+		name      string
+		change    func(t *testing.T, cacheDir string)
+		publishes bool // the change removed the credential
+		draft     bool // the Ledger still holds the session's draft placeholder
+	}{
+		{"transcript rewritten", rewrite, true, false},
+		// copying the draft's ses_ id into the cache rewrites meta.json, which the
+		// refusal fingerprint covers
+		{"transcript rewritten under a draft placeholder", rewrite, true, true},
+		{"transcript edited with an older timestamp", func(t *testing.T, cacheDir string) {
+			rawPath := filepath.Join(cacheDir, "raw.jsonl")
+			require.NoError(t, os.WriteFile(rawPath, []byte(testRawContent), 0o644))
+			earlier := time.Now().Add(-time.Hour)
+			require.NoError(t, os.Chtimes(rawPath, earlier, earlier))
+		}, true, false},
+		{"artifact deleted", func(t *testing.T, cacheDir string) {
+			require.NoError(t, os.Remove(filepath.Join(cacheDir, requiredArtifacts[0])))
+		}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bare, ledger := setupBareAndCloneLedger(t)
+			handler := NewSessionFinalizeHandler(slog.Default())
+			handler.skipGit = false
+			handler.ledgerMu = &sync.Mutex{}
+			enableLocalFinalizeLFS(t, handler, ledger)
+
+			const name = "2026-10-16T22-52-testuser-OxSECR"
+			cacheDir := filepath.Join(ledger, ".sageox", "cache", "sessions", name)
+			require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"), []byte(withSecret), 0o644))
+			for _, artifact := range requiredArtifacts {
+				require.NoError(t, os.WriteFile(filepath.Join(cacheDir, artifact), []byte("artifact"), 0o644))
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "meta.json"), []byte(`{"session_name":"`+name+`"}`), 0o644))
+			if tc.draft {
+				writeDraftMeta(t, filepath.Join(ledger, "sessions", name))
+				runGitCmd(t, ledger, "add", "sessions")
+				runGitCmd(t, ledger, "commit", "-m", "session-draft: "+name)
+				runGitCmd(t, ledger, "push", "origin", "HEAD")
+			}
+
+			detected := func() *WorkItem {
+				t.Helper()
+				items, err := handler.Detect(ledger)
+				require.NoError(t, err)
+				for _, item := range items {
+					if item.DedupKey == sessionFinalizeType+":"+name {
+						return item
+					}
+				}
+				return nil
+			}
+
+			item := detected()
+			require.NotNil(t, item, "precondition: the finalized cache session is queued for upload")
+			err := handler.ProcessResult(item, &RunResult{})
+			require.ErrorContains(t, err, "content contains credentials")
+			require.Nil(t, detected(), "a refused session must not be retried until it changes")
+			require.NoFileExists(t, filepath.Join(ledger, "sessions", name, publicationRefusedMarker),
+				"the refusal marker must stay in the cache, never in the Ledger's tracked sessions/")
+
+			tc.change(t, cacheDir)
+			item = detected()
+			require.NotNil(t, item, "a session changed since the refusal must be retried")
+			if !tc.publishes {
+				return
+			}
+			require.NoError(t, handler.ProcessResult(item, &RunResult{}), "the redacted session must publish")
+			require.Equal(t, gitOutput(t, ledger, "rev-parse", "HEAD"), gitOutput(t, bare, "rev-parse", "HEAD"),
+				"the publication must reach the remote")
+			oid, size, err := lfs.ParsePointer(gitOutput(t, bare, "show", "HEAD:sessions/"+name+"/raw.jsonl"))
+			require.NoError(t, err, "the published transcript must be an LFS pointer")
+			require.Equal(t, "sha256:"+lfs.ComputeOID([]byte(testRawContent)), oid, "the pointer must name the redacted transcript")
+			require.Equal(t, int64(len(testRawContent)), size)
+			var meta lfs.SessionMeta
+			require.NoError(t, json.Unmarshal([]byte(gitOutput(t, bare, "show", "HEAD:sessions/"+name+"/meta.json")), &meta))
+			require.Equal(t, oid, meta.Files["raw.jsonl"].OID, "the published manifest must name the redacted transcript")
+		})
+	}
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamdocs"
+	"github.com/sageox/ox/internal/teamskills"
 	"github.com/spf13/cobra"
 )
 
@@ -117,6 +118,7 @@ func publishRepoSkillsToTeam(repoRoot string, names []string) (skillsChangeOutpu
 	defer func() { _ = repo.Close() }()
 
 	seeds := make([]teamSkillSeed, 0, len(names))
+	var warnings []string
 	for _, name := range names {
 		files, foundRoots, readErr := findPublishSkill(repo, roots, name)
 		if readErr != nil {
@@ -130,6 +132,9 @@ func publishRepoSkillsToTeam(repoRoot string, names []string) (skillsChangeOutpu
 			return out, fmt.Errorf("cannot publish %q from %s: %w%s",
 				name, strings.Join(foundRoots, ", "), err, allOrNothingSuffix(names, "changed"))
 		}
+		if warning := publishRuntimeWarning(name, manifestOf(files)); warning != "" {
+			warnings = append(warnings, warning)
+		}
 		seeds = append(seeds, teamSkillSeed{
 			name: name, relDir: path.Join(teamSkillsPublishRoot, name), files: files,
 		})
@@ -138,8 +143,8 @@ func publishRepoSkillsToTeam(repoRoot string, names []string) (skillsChangeOutpu
 	if err != nil {
 		return published, err
 	}
-	published.Guidance = fmt.Sprintf("%s published to your Team Context without changing the repository copies. Their `repos:` metadata controls where they arrive; without `repos:` they reach every team repository. Distribution is automatic; run `ox sync` only if you need it immediately, verify with `ox skills status`, then remove any redundant repository copy.",
-		strings.Join(names, ", "))
+	published.Warnings = append(published.Warnings, warnings...)
+	published.Guidance = teamPublishGuidance(names, published)
 	return published, nil
 }
 
@@ -300,14 +305,54 @@ func sameSkillFiles(a, b []skills.File) bool {
 	return true
 }
 
-func validatePublishManifest(name string, files []skills.File) error {
-	var manifest []byte
+// manifestOf returns the skill's SKILL.md bytes, or nil when it has none.
+func manifestOf(files []skills.File) []byte {
 	for _, file := range files {
 		if file.Path == skills.SkillFileName {
-			manifest = file.Content
-			break
+			return file.Content
 		}
 	}
+	return nil
+}
+
+// publishRuntimeWarning flags a skill whose instructions run commands while its
+// frontmatter says nothing about needing a terminal.
+//
+// SageOx infers the requirement anyway (teamskills.BodyRuntimeSignals) and keeps
+// such a skill to coding agents: no chat hosts, no Claude organization plugin.
+// Publishing still succeeds — the inference is the safe side — but the author
+// should learn it HERE, where one line of frontmatter settles it, rather than
+// later from a console that says "Coding agents" with no obvious cause. An
+// explicit `requires:` (even `[]`) replaces the inference, so it ends the
+// warning either way.
+func publishRuntimeWarning(name string, manifest []byte) string {
+	if _, declared := teamdocs.SkillRequirements(manifest); declared {
+		return ""
+	}
+	signals := teamskills.BodyRuntimeSignals(teamdocs.ManifestBody(string(manifest)))
+	if len(signals) == 0 {
+		return ""
+	}
+	// Evidence is quoted from a teammate's skill body: strip control bytes so an
+	// escape sequence in it cannot repaint the publisher's terminal.
+	var found, needs []string
+	for _, signal := range signals {
+		switch signal.Code {
+		case teamskills.SignalRunsOxCommands:
+			found = append(found, "runs `"+sanitizeCell(signal.Evidence)+"`")
+			needs = append(needs, teamdocs.RequiresOxCLI)
+		case teamskills.SignalShellFence:
+			found = append(found, "has a shell code block ("+sanitizeCell(signal.Evidence)+")")
+			needs = append(needs, teamdocs.RequiresShell)
+		}
+	}
+	return fmt.Sprintf("%s %s but declares no requires:, so SageOx keeps it to coding agents (not chat, not your Claude organization). "+
+		"Add `requires: [%s]` to say so, or `requires: []` if those commands are only examples.",
+		name, strings.Join(found, " and "), strings.Join(needs, ", "))
+}
+
+func validatePublishManifest(name string, files []skills.File) error {
+	manifest := manifestOf(files)
 	if manifest == nil {
 		return fmt.Errorf("the skill has no %s", skills.SkillFileName)
 	}
@@ -359,12 +404,15 @@ func publishManifestField(content []byte, key string) (string, bool) {
 	for line := 0; scanner.Scan() && line < 30; line++ {
 		text := strings.TrimRight(scanner.Text(), "\r")
 		if line == 0 {
-			if text != "---" {
+			// One leading BOM, as the Team Context reader strips it (teamdocs
+			// trimBOM): otherwise a BOM-saved manifest fails the name check here
+			// while the team side reads it fine.
+			if !teamdocs.IsFrontmatterFence(strings.TrimPrefix(text, "\ufeff")) {
 				return "", false
 			}
 			continue
 		}
-		if text == "---" {
+		if teamdocs.IsFrontmatterFence(text) {
 			return "", false
 		}
 		if value, ok := strings.CutPrefix(text, prefix); ok {
@@ -412,11 +460,19 @@ type skillChangeRow struct {
 type skillsChangeOutput struct {
 	Skills  []skillChangeRow `json:"skills"`
 	Written []string         `json:"written"`
+	// Pushed is true only once the publish commit is on the Team Context's
+	// remote, which is where every coworker's sync reads it from.
+	Pushed bool `json:"pushed"`
+	// NotPushedReason says why the commit is still only local; empty when pushed.
+	NotPushedReason string `json:"not_pushed_reason,omitempty"`
+	pushRetried     bool
 	// TeamContext is the checkout this publish wrote into, and empty otherwise.
 	// Always present, so a reader can tell "published nowhere" from "this ox
 	// does not report where."
 	TeamContext string `json:"team_context"`
-	Guidance    string `json:"guidance"`
+	// Warnings are advisories about what was published; none of them stopped it.
+	Warnings []string `json:"warnings"`
+	Guidance string   `json:"guidance"`
 }
 
 // teamSkillSeed is one complete skill ready to copy into the canonical Team
@@ -428,7 +484,7 @@ type teamSkillSeed struct {
 }
 
 func newSkillsChangeOutput() skillsChangeOutput {
-	return skillsChangeOutput{Skills: []skillChangeRow{}, Written: []string{}}
+	return skillsChangeOutput{Skills: []skillChangeRow{}, Written: []string{}, Warnings: []string{}}
 }
 
 // publishTeamSkillSeeds performs the Team Context transaction shared by every
@@ -556,6 +612,8 @@ func publishTeamSkillSeeds(repoRoot string, names []string, seeds []teamSkillSee
 		}
 		return out, lockErr
 	}
+	// After the lock is released, not under it: the push takes it itself.
+	out.applyPush(pushTeamPublish(repoRoot, tc.Path))
 	return out, nil
 }
 
@@ -615,14 +673,13 @@ func rollbackTeamSeeds(teamPath string, relDirs []string) {
 	}
 }
 
-// recordTeamPublish writes the new files into the Team Context's own history so
-// a teammate's next sync sees them. The caller holds the repository lock and owns
-// the deadline; this takes neither.
+// recordTeamPublish writes the new files into the Team Context's own history.
+// The caller holds the repository lock and owns the deadline; this takes neither.
 //
-// Deliberately does NOT push. Nothing in cmd/ox pushes a team context; the
-// daemon owns that leg, and a command that pushed here would fail on every
-// machine whose credentials are not loaded — after having already written the
-// files, leaving the human with a half-finished publish and a git error.
+// It does not push: the push needs the repository lock this caller holds, and a
+// push failure must not undo a commit that is already correct. The caller pushes
+// once the lock is released (pushTeamPublish), and reports a failed push as
+// "committed, not pushed" rather than as a failed publish.
 //
 // NOT gitutil.CommitLedgerSnapshot, which looks like the same job: that helper
 // carries Ledger blob validation and the ADR-024 sacred-deletion backstop, and
@@ -649,7 +706,7 @@ func recordTeamPublish(ctx context.Context, teamPath string, relPaths, names []s
 	// bare `git commit` would carry that into the team's history under a message
 	// about a skill, authored by them and pushed by the daemon. `--` keeps a path
 	// that happens to look like a revision from being read as one.
-	message := "add team skill: " + strings.Join(names, ", ")
+	message := teamPublishCommitMessage(names)
 	args := append([]string{"commit", "-m", message, "--"}, relPaths...)
 	if _, err := gitutil.RunGit(ctx, teamPath, args...); err != nil {
 		return fmt.Errorf("record the published skills in the Team Context: %w", err)
@@ -693,6 +750,11 @@ func emitSkillsChange(w io.Writer, out skillsChangeOutput, asJSON bool) error {
 		if row.Detail != "" {
 			p("  into        %s", row.Detail)
 		}
+	}
+
+	if len(out.Warnings) > 0 {
+		p("")
+		writeSkillsProblems(w, cli.StyleWarning.Render("Published, with a note"), out.Warnings)
 	}
 
 	if out.Guidance != "" {

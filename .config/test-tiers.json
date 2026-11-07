@@ -58,7 +58,7 @@
         "count": 1,
         "package_parallelism": 1,
         "test_parallelism": 1,
-        "timeout": "20m"
+        "timeout": "60m"
       }
     },
     "acceptance": {

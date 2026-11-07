@@ -104,3 +104,36 @@ func TestShowTypedErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestConversationTitle: the title-only lookup a context trace uses agrees
+// with Show's title chain and reports a miss rather than inventing a title.
+// Failure prevented: a transcript read traces a different (or empty) label
+// than the show read of the same conversation.
+func TestConversationTitle(t *testing.T) {
+	r := testReader(t)
+	tests := []struct {
+		name   string
+		id     string
+		want   string
+		wantOK bool
+	}{
+		{name: "folder-name fallback", id: fullCnv, want: "2026-08-11-22-32-full", wantOK: true},
+		{name: "rec twin", id: fullRec, want: "2026-08-11-22-32-full", wantOK: true},
+		{name: "index title", id: legacyCnv, want: "Legacy Era Discussion", wantOK: true},
+		{name: "invalid id", id: "not-an-id"},
+		{name: "valid but unindexed", id: unknownCnv},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := r.ConversationTitle(tt.id)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("ConversationTitle(%q) = (%q, %v), want (%q, %v)", tt.id, got, ok, tt.want, tt.wantOK)
+			}
+			if ok {
+				if shown := r.Show(tt.id).Data.(*ShowData).Title; shown != got {
+					t.Errorf("Show title %q != ConversationTitle %q", shown, got)
+				}
+			}
+		})
+	}
+}

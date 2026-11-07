@@ -47,7 +47,7 @@ type SizeSpec struct {
 	Rows int
 }
 
-// Sizes are the boxes `/hatch-pet small|medium|large` draw in, small first.
+// Sizes are the boxes `/oxy small|medium|large` draw in, small first.
 var Sizes = []SizeSpec{{"small", 8}, {"medium", 12}, {"large", 16}}
 
 // Codepoints and colors of the Raster cell encoding (Claude Code RasterProps).
@@ -134,6 +134,9 @@ type Frames struct {
 	Aspect     float64                  `json:"aspect"`
 	Sizes      map[string]Box           `json:"sizes"`
 	Animations map[string]AnimationData `json:"animations"`
+	// Hires is the desktop's high-resolution set, index-aligned with
+	// Animations; nil draws the pixel set everywhere.
+	Hires *Hires `json:"-"`
 }
 
 // AnimationData holds one animation's frames, index-aligned across encodings.
@@ -181,6 +184,9 @@ var oxyFrames = sync.OnceValues(func() (*Frames, error) {
 	frames, err := BuildFrames(sheet, m)
 	if err != nil {
 		return nil, fmt.Errorf("oxy: %w", err)
+	}
+	if frames.Hires, err = oxyHires(m); err != nil {
+		return nil, err
 	}
 	return frames, nil
 })

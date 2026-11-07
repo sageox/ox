@@ -372,10 +372,10 @@ func TestValidateAcceptsOwnSubmoduleButNotOtherGitlinks(t *testing.T) {
 		t.Fatalf("a submodule checked out in the repo belongs to it: %v", err)
 	}
 
-	// a linked worktree and a clone elsewhere have a .git file too, but their
-	// git dir is not under this repo's modules directory
+	// other gitlinks have a .git file too, but their git dir is not one this repo
+	// has: another repository's, one git has pruned, or not a submodule's at all
 	for name, gitlink := range map[string]string{
-		"linked worktree":          "gitdir: " + filepath.Join(root, ".git", "worktrees", "other") + "\n",
+		"pruned linked worktree":   "gitdir: " + filepath.Join(root, ".git", "worktrees", "other") + "\n",
 		"another repository":       "gitdir: " + filepath.Join(t.TempDir(), ".git", "modules", "lib") + "\n",
 		"the modules dir itself":   "gitdir: ../../.git/modules\n",
 		"escaping the modules dir": "gitdir: ../../.git/modules/../worktrees/x\n",
@@ -597,4 +597,187 @@ func TestValidateDefersWhenAMarkerCannotBeInspected(t *testing.T) {
 			t.Fatalf("ordinary subdirectory: %v", err)
 		}
 	})
+}
+
+// Claude Code runs most sessions in a linked worktree inside the repo
+// (.claude/worktrees/<name>). Its .git file names a git dir inside this repo's
+// own, and its checkout carries the repo's own .sageox config, so a session
+// there belongs to this repo. Failure prevented: every worktree session stops
+// with session-file-not-found and uploads nothing, while a worktree or clone of
+// another repository checked out inside the tree is still refused.
+func TestValidateOwnsLinkedWorktreesOfTheSameRepository(t *testing.T) {
+	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	write := func(t *testing.T, path, data string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// newRepo lays out a main checkout as git and ox init leave it and returns
+	// its git dir
+	newRepo := func(t *testing.T, dir string) string {
+		t.Helper()
+		write(t, filepath.Join(dir, ".git", "HEAD"), "ref: refs/heads/main\n")
+		write(t, filepath.Join(dir, ".sageox", "config.json"), "{}")
+		return filepath.Join(dir, ".git")
+	}
+	// addWorktree mirrors `git worktree add [--relative-paths] <dir>`: the .git
+	// file names <common>/worktrees/<name>, which points back and carries a
+	// commondir file, and the checkout carries the repo's own .sageox config
+	addWorktree := func(t *testing.T, common, name, dir string, relative bool) string {
+		t.Helper()
+		gitDir := filepath.Join(common, "worktrees", name)
+		write(t, filepath.Join(gitDir, "commondir"), "../..\n")
+		write(t, filepath.Join(gitDir, "gitdir"), filepath.Join(dir, ".git")+"\n")
+		write(t, filepath.Join(gitDir, "HEAD"), "ref: refs/heads/"+name+"\n")
+		link := gitDir
+		if relative {
+			var err error
+			if link, err = filepath.Rel(dir, gitDir); err != nil {
+				t.Fatal(err)
+			}
+		}
+		write(t, filepath.Join(dir, ".git"), "gitdir: "+link+"\n")
+		write(t, filepath.Join(dir, ".sageox", "config.json"), "{}")
+		return gitDir
+	}
+	// repoWithWorktree is the Claude Code desktop layout: a worktree inside the
+	// main checkout
+	repoWithWorktree := func(t *testing.T, outer string) (root, common, wt string) {
+		root = filepath.Join(outer, "repo")
+		common = newRepo(t, root)
+		wt = filepath.Join(root, ".claude", "worktrees", "wt")
+		addWorktree(t, common, "wt", wt, false)
+		return root, common, wt
+	}
+	// worktreeRoot makes the repo root itself a linked worktree of a main
+	// checkout elsewhere
+	worktreeRoot := func(t *testing.T, outer string) (root, common string) {
+		common = newRepo(t, filepath.Join(outer, "main"))
+		root = filepath.Join(outer, "wt-root")
+		addWorktree(t, common, "wt-root", root, false)
+		return root, common
+	}
+
+	for name, tt := range map[string]struct {
+		// layout builds the tree under outer and returns the repo root and the
+		// directory the session worked in
+		layout func(t *testing.T, outer string) (root, cwd string)
+		owned  bool
+	}{
+		"own linked worktree": {owned: true, layout: func(t *testing.T, outer string) (string, string) {
+			root, _, wt := repoWithWorktree(t, outer)
+			return root, filepath.Join(wt, "internal", "pkg")
+		}},
+		"own linked worktree with a relative gitdir": {owned: true, layout: func(t *testing.T, outer string) (string, string) {
+			root := filepath.Join(outer, "repo")
+			wt := filepath.Join(root, ".claude", "worktrees", "wt")
+			addWorktree(t, newRepo(t, root), "wt", wt, true)
+			return root, wt
+		}},
+		"submodule of an own linked worktree": {owned: true, layout: func(t *testing.T, outer string) (string, string) {
+			root, common, wt := repoWithWorktree(t, outer)
+			// git keeps a worktree's submodules under that worktree's git dir
+			modDir := filepath.Join(common, "worktrees", "wt", "modules", "tools", "lib")
+			write(t, filepath.Join(modDir, "HEAD"), "0000000000000000000000000000000000000000\n")
+			submodule := filepath.Join(wt, "tools", "lib")
+			rel, err := filepath.Rel(submodule, modDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			write(t, filepath.Join(submodule, ".git"), "gitdir: "+rel+"\n")
+			return root, filepath.Join(submodule, "src")
+		}},
+		"own linked worktree when the root is itself a worktree": {owned: true, layout: func(t *testing.T, outer string) (string, string) {
+			root, common := worktreeRoot(t, outer)
+			inner := filepath.Join(root, ".claude", "worktrees", "inner")
+			addWorktree(t, common, "inner", inner, false)
+			return root, filepath.Join(inner, "pkg")
+		}},
+		"another repository's worktree checked out inside": {layout: func(t *testing.T, outer string) (string, string) {
+			root := filepath.Join(outer, "repo")
+			newRepo(t, root)
+			other := filepath.Join(root, "vendor", "other")
+			addWorktree(t, newRepo(t, filepath.Join(outer, "other")), "other", other, false)
+			return root, filepath.Join(other, "pkg")
+		}},
+		"another repository's worktree inside a worktree root": {layout: func(t *testing.T, outer string) (string, string) {
+			root, _ := worktreeRoot(t, outer)
+			other := filepath.Join(root, "vendor", "other")
+			addWorktree(t, newRepo(t, filepath.Join(outer, "other")), "other", other, false)
+			return root, other
+		}},
+		"nested clone": {layout: func(t *testing.T, outer string) (string, string) {
+			root := filepath.Join(outer, "repo")
+			newRepo(t, root)
+			clone := filepath.Join(root, "third_party", "clone")
+			newRepo(t, clone)
+			return root, filepath.Join(clone, "src")
+		}},
+		"nested clone inside an own worktree": {layout: func(t *testing.T, outer string) (string, string) {
+			root, _, wt := repoWithWorktree(t, outer)
+			clone := filepath.Join(wt, "third_party", "clone")
+			newRepo(t, clone)
+			return root, filepath.Join(clone, "src")
+		}},
+		"Ox project nested inside an own worktree": {layout: func(t *testing.T, outer string) (string, string) {
+			root, _, wt := repoWithWorktree(t, outer)
+			write(t, filepath.Join(wt, "sub", ".sageox", "config.json"), "{}")
+			return root, filepath.Join(wt, "sub", "pkg")
+		}},
+		"linked worktree git has pruned": {layout: func(t *testing.T, outer string) (string, string) {
+			root, common, wt := repoWithWorktree(t, outer)
+			if err := os.RemoveAll(filepath.Join(common, "worktrees", "wt")); err != nil {
+				t.Fatal(err)
+			}
+			return root, wt
+		}},
+		"gitlink naming the worktrees dir itself": {layout: func(t *testing.T, outer string) (string, string) {
+			root, common, wt := repoWithWorktree(t, outer)
+			write(t, filepath.Join(wt, ".git"), "gitdir: "+filepath.Join(common, "worktrees")+"\n")
+			return root, wt
+		}},
+		"gitlink naming a directory inside a worktree's git dir": {layout: func(t *testing.T, outer string) (string, string) {
+			root, common, wt := repoWithWorktree(t, outer)
+			modules := filepath.Join(common, "worktrees", "wt", "modules")
+			if err := os.MkdirAll(modules, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			write(t, filepath.Join(wt, ".git"), "gitdir: "+modules+"\n")
+			return root, wt
+		}},
+		"relative gitdir that resolves nowhere": {layout: func(t *testing.T, outer string) (string, string) {
+			root, _, wt := repoWithWorktree(t, outer)
+			write(t, filepath.Join(wt, ".git"), "gitdir: ../.git/worktrees/wt\n")
+			return root, wt
+		}},
+		"malformed gitlink": {layout: func(t *testing.T, outer string) (string, string) {
+			root, _, wt := repoWithWorktree(t, outer)
+			write(t, filepath.Join(wt, ".git"), "worktree wt\n")
+			return root, wt
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			outer, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			root, cwd := tt.layout(t, outer)
+			if err := os.MkdirAll(cwd, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), id+".jsonl")
+			write(t, path, fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, cwd))
+			err = Validate(path, root, id)
+			if tt.owned && err != nil {
+				t.Fatalf("a session in this repository's own checkout belongs to it: %v", err)
+			}
+			if !tt.owned && !errors.Is(err, ErrUntrustedSource) {
+				t.Fatalf("must be refused as foreign, got %v", err)
+			}
+		})
+	}
 }

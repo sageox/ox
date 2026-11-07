@@ -141,10 +141,13 @@ func TestLoadPending_RejectsCorruptState(t *testing.T) {
 func TestPendingStatusFor_DistinguishesRetryFromHumanFailure(t *testing.T) {
 	retry := Report{Outcomes: []Outcome{{State: StatePending, Required: true}}}
 	require.Equal(t, PendingRetry, PendingStatusFor(retry))
-	for _, state := range []OutcomeState{StateError, StateConflict, StatePendingApproval, StateUnsupported} {
+	for _, state := range []OutcomeState{StateError, StateConflict, StatePendingApproval} {
 		report := Report{Outcomes: []Outcome{{State: state, Required: true}}}
 		require.Equal(t, PendingFailed, PendingStatusFor(report), state)
 	}
+	// Skipped beside a transient wait: the wait decides, so the retry still runs.
+	mixed := Report{Outcomes: []Outcome{{State: StateUnsupported, Required: true}, {State: StatePending, Required: true}}}
+	require.Equal(t, PendingRetry, PendingStatusFor(mixed))
 }
 
 func TestPendingHelpers_ReportMalformedAndFilesystemState(t *testing.T) {
@@ -175,14 +178,12 @@ func TestFailureReason_CoversTypedFallbacks(t *testing.T) {
 	require.Equal(t, "pending: skill/deploy", FailureReason(Report{Outcomes: []Outcome{{
 		State: StatePending, Kind: KindSkill, Name: "deploy",
 	}}}))
-	require.Equal(t, "unsupported: skill/deploy", FailureReason(Report{Outcomes: []Outcome{{
-		State: StateUnsupported, Kind: KindSkill, Name: "deploy", Required: true,
-	}}}))
 	require.Equal(t, "explicit detail", FailureReason(Report{Outcomes: []Outcome{{
-		State: StateUnsupported, Kind: KindSkill, Name: "deploy", Required: true, Detail: "explicit detail",
+		State: StateConflict, Kind: KindSkill, Name: "deploy", Detail: "explicit detail",
 	}}}))
+	// A skipped artifact is not the reason anything failed, so it never becomes one.
 	require.Equal(t, "Team Context convergence is incomplete", FailureReason(Report{Outcomes: []Outcome{{
-		State: StateUnsupported, Required: false,
+		State: StateUnsupported, Kind: KindSkill, Name: "deploy", Required: true, Detail: "no native skill target",
 	}}}))
 }
 

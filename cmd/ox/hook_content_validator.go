@@ -102,7 +102,8 @@ type hookValidationFinding struct {
 // path so the doctor output is stable across runs.
 //
 // Locations scanned:
-//   - <gitRoot>/.git/hooks/* — git-level hooks (prepare-commit-msg, etc.)
+//   - the git hooks directory (resolveHooksDir: core.hooksPath or the common
+//     dir, so a linked worktree scans the hooks git actually runs)
 //   - <gitRoot>/.claude/hooks/* — Claude Code adapter hooks
 //   - <gitRoot>/.gemini/, .codex/, .opencode/, .amp/ — other adapters
 //   - <gitRoot>/.agents/plugins/*/{hooks,scripts} — Open Plugins directories
@@ -118,7 +119,7 @@ func validateInstalledHooks(gitRoot string) ([]hookValidationFinding, error) {
 		return nil, nil
 	}
 	hookDirs := []string{
-		filepath.Join(gitRoot, ".git", "hooks"),
+		resolveHooksDir(gitRoot),
 		filepath.Join(gitRoot, ".claude", "hooks"),
 		filepath.Join(gitRoot, ".claude", "commands"),
 		filepath.Join(gitRoot, ".gemini", "hooks"),
@@ -152,9 +153,14 @@ func validateInstalledHooks(gitRoot string) ([]hookValidationFinding, error) {
 			if len(warnings) == 0 {
 				continue
 			}
-			rel, _ := filepath.Rel(gitRoot, abs)
+			// a linked worktree's git hooks live in the common dir, outside
+			// gitRoot: show those by absolute path, not as "../../…"
+			shown := abs
+			if rel, err := filepath.Rel(gitRoot, abs); err == nil && !strings.HasPrefix(rel, "..") {
+				shown = rel
+			}
 			findings = append(findings, hookValidationFinding{
-				Path:     rel,
+				Path:     shown,
 				Warnings: warnings,
 			})
 		}

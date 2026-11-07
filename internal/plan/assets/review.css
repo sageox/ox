@@ -35,11 +35,17 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
    then draws instead of scrolling. */
 .rev-ink{position:absolute;left:0;top:0;overflow:visible;pointer-events:none;z-index:calc(var(--rev-z, 2147483000) - 1)}
 .rev-ink.rev-drawing{pointer-events:auto;cursor:crosshair;touch-action:none}
+.rev-ink:focus{outline:none}
 .rev-ink-sage{color:var(--sage, #99c693)} .rev-ink-amber{color:var(--amber, #c6a23c)} .rev-ink-red{color:var(--red, #d77e6c)}
 .rev-ink-gold{color:var(--gold, #d9b654)} .rev-ink-faint{color:var(--faint, #8c8e7e)}
-/* a drawing's ink, committed or unsent; and the faint line of a stroke still being drawn */
+/* A live oval uses the same ink as its saved shape. Draft outlines can be
+   grabbed; the selected oval has corner and edge handles. */
 .rev-ink>g>g{opacity:.92} .rev-ink>g>g.rev-ink-unsent{opacity:.7}
-.rev-ink-live{fill:none;stroke:var(--gold, #d9b654);stroke-width:2;stroke-linecap:round;stroke-linejoin:round;opacity:.5}
+.rev-ink>g>g.rev-ink-live{opacity:.7}
+.rev-ink-hit{fill:none;stroke:transparent;stroke-width:16;pointer-events:stroke;cursor:grab}
+.rev-ink-bounds{fill:none;stroke:var(--gold, #d9b654);stroke-width:1;stroke-dasharray:4 4;pointer-events:none}
+.rev-ink-handle{fill:var(--bg, #111411);stroke:var(--gold, #d9b654);stroke-width:1.5;pointer-events:all}
+.rev-ink.rev-dragging,.rev-ink.rev-dragging *{cursor:grabbing!important}
 /* a drawing whose targets reflowed: a thin dashed outline of them, never the drawing */
 .rev-ink-reflowed{fill:none;stroke:currentColor;stroke-width:1.2;stroke-dasharray:5 5}
 /* while a capture reads the text the reader saw, glyphs review marks painted in are not part of it */
@@ -53,14 +59,19 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
    above it. A host that frames the plan can set --rev-z to keep its own
    dialogs above the controls. */
 
-.rev-bar{position:fixed;left:16px;bottom:16px;z-index:calc(var(--rev-z, 2147483000) + 2);display:flex;align-items:center;gap:8px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:9px;padding:6px 8px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
+.rev-bar{position:fixed;left:16px;bottom:16px;z-index:calc(var(--rev-z, 2147483000) + 2);display:flex;align-items:center;gap:8px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:9px;padding:6px 8px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35));cursor:grab;user-select:none;touch-action:none}
 .rev-bar button{background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+.rev-bar.rev-dragging,.rev-bar.rev-dragging button{cursor:grabbing}
+/* Keep pointer input in the host while dragging across a sandboxed frame. */
+.rev-bar.rev-dragging::before{content:"";position:fixed;inset:0;z-index:-1}
 .rev-bar button:hover{color:var(--ink, #f4f2ef)}
 .rev-bar .rev-toggle.on{background:var(--sage, #99c693);border-color:var(--sage, #99c693);color:#111411}
 /* the Draw tool, selected: the bar shows which tool a stroke on the plan uses */
 .rev-bar .rev-draw.on{background:var(--gold, #d9b654);border-color:var(--gold, #d9b654);color:#111411}
 .rev-bar .rev-submit{border-color:var(--sage, #99c693);color:var(--sage, #99c693)}
 .rev-bar .rev-count{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--faint, #8c8e7e)}
+/* autoSubmit: the count is the sentence saying when comments post */
+.rev-bar .rev-count.rev-wait{font-family:inherit;font-size:12px;color:var(--dim, #b7b6a3)}
 .rev-bar .rev-who{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--faint, #8c8e7e)}
 .rev-bar .rev-who:hover{color:var(--sage, #99c693);border-color:var(--sage, #99c693)}
 /* top-level Approve (closes the loop) */
@@ -70,7 +81,7 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
    cursor and get no target outline — clicks there never mark up. The li
    rules outrank the document's generic li:hover target rule. */
 body.rev-on .rev-bar{border-color:var(--sage, #99c693)}
-body.rev-on .rev-bar,body.rev-on .rev-rail,body.rev-on .rev-pop,body.rev-on .rev-orphans,body.rev-on .rev-toast,body.rev-on .rev-sync,body.rev-on .rev-offline-bar,body.rev-on .rev-original{cursor:auto}
+body.rev-on .rev-rail,body.rev-on .rev-pop,body.rev-on .rev-orphans,body.rev-on .rev-toast,body.rev-on .rev-sync,body.rev-on .rev-offline-bar,body.rev-on .rev-original{cursor:auto}
 body.rev-on .rev-rail li:hover{outline:none;cursor:pointer}
 body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 
@@ -83,14 +94,17 @@ body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 .rev-pop .rev-s[data-s="request-change"].on{background:var(--amber, #c6a23c);border-color:var(--amber, #c6a23c);color:#111411}
 .rev-pop .rev-s[data-s="flag"].on{background:var(--red, #d77e6c);border-color:var(--red, #d77e6c);color:#fff}
 .rev-pop .rev-s[data-s="comment"].on{background:var(--gold, #d9b654);border-color:var(--gold, #d9b654);color:#111411}
-.rev-pop .rev-note{width:100%;min-height:54px;background:var(--bg, #0b0d0b);border:1px solid var(--hair2, var(--hair, #212620));border-radius:5px;color:var(--ink, #f4f2ef);font-family:Inter,system-ui,sans-serif;font-size:12.5px;padding:6px;resize:vertical}
+.rev-pop .rev-note{box-sizing:border-box;width:100%;min-height:54px;background:var(--bg, #0b0d0b);border:1px solid var(--hair2, var(--hair, #212620));border-radius:5px;color:var(--ink, #f4f2ef);font-family:Inter,system-ui,sans-serif;font-size:12.5px;padding:6px;resize:vertical}
 .rev-pop .rev-save{flex:1;background:var(--sage, #99c693);border:1px solid var(--sage, #99c693);color:#111411;border-radius:5px;padding:4px;font-size:11px;cursor:pointer}
 .rev-pop .rev-del{background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:5px;padding:4px 8px;font-size:11px;cursor:pointer}
+.rev-pop .rev-when{margin:6px 2px 0;font-size:11px;color:var(--dim, #b7b6a3)}
 .rev-pop .rev-cap{font-size:11.5px;color:var(--dim, #b7b6a3);margin-bottom:6px}
 .rev-pop .rev-accept{flex:1;background:var(--sage, #99c693);border:1px solid var(--sage, #99c693);color:#111411;border-radius:5px;padding:4px;font-size:11px;cursor:pointer}
 .rev-pop .rev-reopen{background:var(--panel2, #171b17);border:1px solid var(--amber, #c6a23c);color:var(--amber, #c6a23c);border-radius:5px;padding:4px 8px;font-size:11px;cursor:pointer}
 .rev-pop .rev-about{font-size:12px;line-height:1.4;color:var(--dim, #b7b6a3);margin:0 0 6px;overflow-wrap:anywhere}
 .rev-pop .rev-quote{font-size:12px;line-height:1.4;color:var(--ink, #f4f2ef);border-left:2px solid var(--gold, #d9b654);padding:1px 0 1px 8px;margin:0 0 6px;overflow-wrap:anywhere}
+/* opened from the rail, the composer sits in it, after the comments it answers */
+.rev-rail .rev-pop{position:static;width:auto;padding:8px;box-shadow:none}
 
 /* orphaned-note banner — feedback whose anchored text changed */
 .rev-orphans{max-height:40vh;overflow-y:auto;position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:calc(var(--rev-z, 2147483000) + 4);max-width:680px;background:var(--panel, #111411);border:1px solid var(--amber, #c6a23c);border-left:3px solid var(--amber, #c6a23c);border-radius:9px;padding:10px 14px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35));font-size:13px;color:var(--dim, #b7b6a3)}
@@ -133,8 +147,10 @@ body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 .rev-rail-item[data-status="comment"]{border-left-color:var(--gold, #d9b654)} .rev-rail-item[data-status="comment"] .rev-rail-glyph{color:var(--gold, #d9b654)}
 .rev-rail-glyph{flex:none;font-size:12px;line-height:1.4;color:var(--dim, #b7b6a3)}
 .rev-rail-body{min-width:0;flex:1}
-.rev-rail-sec{display:flex;align-items:center;gap:6px;margin-bottom:3px}
-.rev-rail-sec-t{flex:1;min-width:0;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;color:var(--faint, #8c8e7e);text-transform:uppercase;letter-spacing:.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* the section, then the reviewer and tags, which wrap below it rather than
+   crush it or run out of the row */
+.rev-rail-sec{display:flex;flex-wrap:wrap;align-items:center;gap:3px 6px;margin-bottom:3px}
+.rev-rail-sec-t{flex:1 1 auto;min-width:0;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;color:var(--faint, #8c8e7e);text-transform:uppercase;letter-spacing:.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rev-rail-who{flex:none;font-size:9px;border-radius:6px;padding:0 5px;border:1px solid var(--hair2, var(--hair, #212620));color:var(--sage, #99c693);text-transform:none;letter-spacing:0;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rev-rail-note{font-size:12.5px;color:var(--ink, #f4f2ef);line-height:1.45;overflow-wrap:anywhere}
 .rev-rail-answer{font-size:12px;color:var(--dim, #b7b6a3);line-height:1.45;margin-top:3px;overflow-wrap:anywhere}
@@ -158,9 +174,15 @@ body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 .rev-orig-box{fill:none;stroke:var(--faint, #8c8e7e);stroke-width:.5}
 .rev-orig-label-box{fill:none;stroke:var(--teal, #97aebd);stroke-width:.5}
 .rev-orig-label{fill:var(--teal, #97aebd);font-size:11px}
-.rev-orig-text{fill:var(--dim, #b7b6a3);font-size:12px}
+/* a run's font-size is an attribute, sized from its box: no rule may set one */
+.rev-orig-run{fill:var(--dim, #b7b6a3)}
 .rev-orig-ink{color:var(--gold, #d9b654);opacity:.95}
 .rev-orig-cut{fill:var(--amber, #c6a23c);font-size:11px}
+/* the text View original cannot place, kept about as wide as a small picture
+   rather than stretching the dialog to its widest */
+.rev-orig-unplaced{max-width:420px;margin-top:8px}
+.rev-orig-unplaced-h{font:11px/1.4 "Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--faint, #8c8e7e)}
+.rev-orig-unplaced blockquote{margin:4px 0 0;padding:1px 0 1px 8px;border-left:2px solid var(--gold, #d9b654);font-size:12.5px;line-height:1.45;color:var(--ink, #f4f2ef);overflow-wrap:anywhere}
 /* narrow viewports: the fixed rail would cover the prose, so drop it into flow;
    the bottom margin keeps it above the fixed review bar when scrolled to the end */
 @media(max-width:1400px){.rev-rail{position:static;width:auto;max-height:none;margin:24px 16px 72px;right:auto;top:auto}}
@@ -179,9 +201,29 @@ body.rev-offline .rev-bar .rev-submit,body.rev-offline .rev-bar .rev-approve{opa
 /* sync status: what happened to the reviewer's feedback; sits above the toast so both read */
 .rev-sync{position:fixed;left:16px;bottom:104px;z-index:calc(var(--rev-z, 2147483000) + 3);max-width:min(560px,calc(100vw - 32px));display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-left-width:3px;color:var(--ink, #f4f2ef);border-radius:9px;padding:8px 10px 8px 12px;font-size:12.5px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
 .rev-sync.ok{border-color:var(--sage, #99c693)}.rev-sync.warn,.rev-sync.ask{border-color:var(--amber, #c6a23c)}.rev-sync.err{border-color:var(--red, #d77e6c)}.rev-sync.pending{border-color:var(--hair, #212620);color:var(--dim, #b7b6a3)}
-.rev-sync-msg{flex:1 1 220px}
+/* Chrome sizes the box from the message's text width, not its 220px basis: a
+   shorter message would wrap the button or × after it onto a second line */
+.rev-sync-msg{flex:1 1 220px}.rev-sync-msg:not(:last-child){min-width:220px}
 .rev-sync button,.rev-sync-input{background:var(--panel2, #171b17);border:1px solid var(--hair, #212620);color:var(--ink, #f4f2ef);border-radius:6px;padding:3px 9px;font-size:12px;font-family:inherit}
 .rev-sync button{cursor:pointer}.rev-sync button:hover{color:var(--ink, #f4f2ef)}.rev-sync .rev-sync-x{border:0;background:none;padding:0 4px;font-size:15px;line-height:1}
+
+/* live presence: who else has the plan open, one chip per person, and their
+   pointers, each a cursor in that person's color with their name. A person on
+   another revision is an outlined chip; their pointer is never drawn. The
+   cursors take no pointer input, and sit over the plan but under the controls. */
+.rev-here{display:inline-flex;align-items:center;gap:3px}
+.rev-here[hidden]{display:none}
+.rev-peer{width:18px;height:18px;border-radius:50%;background:var(--c);color:#111411;font:600 10px/18px Inter,system-ui,sans-serif;text-align:center;cursor:default}
+.rev-peer-other{background:none;color:var(--c);box-shadow:inset 0 0 0 1px var(--c)}
+.rev-here-note{margin-left:3px;font-size:11px;color:var(--faint, #8c8e7e);white-space:nowrap}
+.rev-cursors{position:fixed;inset:0;overflow:hidden;pointer-events:none;z-index:var(--rev-z, 2147483000)}
+.rev-cursor{position:absolute;left:0;top:0;color:var(--c);will-change:transform}
+.rev-cursor svg{display:block}
+.rev-cursor.rev-glide{transition:transform .2s linear}
+.rev-cursor-name{position:absolute;left:12px;top:16px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:1px 6px;border-radius:4px;background:var(--c);color:#111411;font:600 11px/16px Inter,system-ui,sans-serif}
+.rev-c0{--c:#99c693} .rev-c1{--c:#7fb3d5} .rev-c2{--c:#e2a36f} .rev-c3{--c:#b39ddb}
+.rev-c4{--c:#6cc4b8} .rev-c5{--c:#e49ac0} .rev-c6{--c:#d9b654} .rev-c7{--c:#a3b8ef}
+@media (prefers-reduced-motion:reduce){.rev-cursor.rev-glide{transition:none}}
 
 /* a framed plan: the controls sit over the frame's box, which mountHostControls
    tracks into --rev-top/left/right/bottom/width/height, so the host's own
@@ -197,4 +239,4 @@ body.rev-framed .rev-offline-bar{top:var(--rev-top);left:var(--rev-left);right:v
 body.rev-framed .rev-original{left:calc(var(--rev-left) + var(--rev-width) / 2);top:calc(var(--rev-top) + var(--rev-height) / 2);max-width:min(900px,calc(var(--rev-width) - 32px));max-height:calc(var(--rev-height) - 32px)}
 
 /* print: the controls are a review surface, never part of the printed plan */
-@media print{.rev-bar,.rev-rail,.rev-orphans,.rev-hint,.rev-pop,.rev-offline-bar,.rev-toast,.rev-sync,.rev-original{display:none!important}}
+@media print{.rev-bar,.rev-rail,.rev-orphans,.rev-hint,.rev-pop,.rev-offline-bar,.rev-toast,.rev-sync,.rev-original,.rev-cursors{display:none!important}}

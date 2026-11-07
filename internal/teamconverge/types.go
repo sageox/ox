@@ -113,7 +113,16 @@ type Outcome struct {
 	InstalledAs  string       `json:"installed_as,omitempty"`
 	Detail       string       `json:"detail,omitempty"`
 	Required     bool         `json:"required"`
+	// Deferral names why a pending outcome is waiting when the wait is by
+	// design rather than a fault (DeferralActiveSession). Empty for every other
+	// outcome, so a reader never has to parse Detail to tell the two apart.
+	Deferral string `json:"deferral,omitempty"`
 }
+
+// DeferralActiveSession marks an artifact held back because a live AI coworker
+// session is using the current projection — the steady state whenever anyone
+// is working, not a convergence failure (ox#1242).
+const DeferralActiveSession = "active-session"
 
 type Report struct {
 	SchemaVersion int       `json:"schema_version"`
@@ -126,21 +135,34 @@ type Report struct {
 // Converged is false for every state that needs action or retry. A filtered
 // artifact is intentionally absent here, and indexed content is a valid
 // delivery mode rather than a lesser success.
+//
+// Unsupported is a SKIP, not a failure, whatever Required says: it means this
+// repository cannot receive the artifact at all (no native skill target, or
+// reconcile could not place it), which no retry changes. Treating it as a
+// failure made `ox sync` exit non-zero over one skill a repository could never
+// take, hiding a healthy Ledger and Team Context sync behind it (ox#1270).
+// Skipped lists them so every surface still names them.
 func (r Report) Converged() bool {
 	for _, outcome := range r.Outcomes {
 		switch outcome.State {
-		case StateApplied, StateIndexed, StateFiltered:
+		case StateApplied, StateIndexed, StateFiltered, StateUnsupported:
 			continue
-		case StateUnsupported:
-			if !outcome.Required {
-				continue
-			}
-			return false
 		default:
 			return false
 		}
 	}
 	return true
+}
+
+// Skipped returns the outcomes this repository cannot receive, in report order.
+func (r Report) Skipped() []Outcome {
+	var skipped []Outcome
+	for _, outcome := range r.Outcomes {
+		if outcome.State == StateUnsupported {
+			skipped = append(skipped, outcome)
+		}
+	}
+	return skipped
 }
 
 // Discovery finds this repository's applicable Team Context artifacts.

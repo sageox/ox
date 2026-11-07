@@ -51,25 +51,32 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 	}
 
 	var issues []adapterprotocol.DiagnoseIssue
-	if p.RepoRoot != "" {
-		// Only report missing hooks for a project that actually uses Codex.
-		// Detection is deliberately broad (a `codex` on PATH is enough) so
-		// `ox init` can offer to set Codex up, but the CLI merely being
-		// installed is not consent to create project config: without this
-		// gate every repo on the machine warns, and `ox doctor --fix` writes
-		// .codex/ into repos that never touch Codex. ox doctor's core check
-		// draws the same line — see checkAgentHooks, which returns a silent
-		// skip for "CLI detected, no project config".
-		if projectUsesCodex(p.RepoRoot) {
-			hooksPath := filepath.Join(p.RepoRoot, codexProjectPath, codexHooksFileName)
-			hooksMap, _, err := readHooksFile(hooksPath)
-			hooksOK := err == nil
-			if hooksOK {
-				for _, event := range codexHookEvents {
-					if !eventHasOxHook(hooksMap[event]) {
-						hooksOK = false
-						break
-					}
+	for _, scope := range []string{"project", "user"} {
+		if scope == "project" && p.RepoRoot == "" {
+			continue
+		}
+		hooksPath := resolveHooksPath(p.RepoRoot, scope)
+		hooks, _, err := readHooksFile(hooksPath)
+		if err != nil {
+			slug := "codex:hooks-invalid"
+			if scope == "user" {
+				slug += "-user"
+			}
+			issues = append(issues, adapterprotocol.DiagnoseIssue{
+				Slug:     slug,
+				Severity: "warning",
+				Title:    "Codex hook file could not be parsed (" + scope + ")",
+				Detail:   fmt.Sprintf("Repair %s before refreshing SageOx hooks: %v", hooksPath, err),
+			})
+			continue
+		}
+		// A CLI on PATH is not consent to create project configuration.
+		if scope == "project" && projectUsesCodex(p.RepoRoot) {
+			hooksOK := true
+			for _, event := range codexHookEvents {
+				if !eventHasOxHook(hooks[event]) {
+					hooksOK = false
+					break
 				}
 			}
 			if !hooksOK {
@@ -84,7 +91,28 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 				})
 			}
 		}
-
+		if !hookLabelsOutdated(hooks) {
+			continue
+		}
+		slug := "codex:hook-labels-outdated"
+		fix := "ox integrate install --codex"
+		argv := []string{"ox", "integrate", "install", "--codex"}
+		if scope == "user" {
+			slug += "-user"
+			fix += " --user"
+			argv = append(argv, "--user")
+		}
+		issues = append(issues, adapterprotocol.DiagnoseIssue{
+			Slug:     slug,
+			Severity: "warning",
+			Title:    "SageOx hook labels need updating (" + scope + ")",
+			Detail:   "Refresh the labels so Codex explains each SageOx hook. Updated definitions require review and trust in Codex again.",
+			Fix:      fix,
+			FixArgv:  argv,
+			FixSafe:  true,
+		})
+	}
+	if p.RepoRoot != "" {
 		legacyFeatureFlag, err := hasLegacyFeatureFlag(p.RepoRoot, p.Scope)
 		if err != nil {
 			issues = append(issues, adapterprotocol.DiagnoseIssue{

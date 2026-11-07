@@ -125,6 +125,17 @@ func oxConfigSetUser(t *testing.T, key, value string) {
 	require.NoError(t, runConfigSet(configSetCmd, []string{key, value}))
 }
 
+// provisionDefaultLedger makes the ledger gate in startSessionRecording pass.
+// The gate checks the default ledger location, not the fixture's configured
+// path, so a test that expects a recording must create it itself rather than
+// rely on a sibling test having left one in the shared sandbox home.
+func provisionDefaultLedger(t *testing.T) {
+	t.Helper()
+	lp, err := ledger.DefaultPath()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(lp, ".git"), 0o755))
+}
+
 // TestConfigE2E_SessionRecordingGateControlsRecording proves the master switch:
 // what a coworker sets for session_recording decides whether an agent session
 // is actually recorded to disk — not just what a resolver returns.
@@ -147,11 +158,9 @@ func TestConfigE2E_SessionRecordingGateControlsRecording(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, st, "no recording state may exist when recording is disabled")
 
-	// Provision a ledger at its default location so the auto path can record —
-	// the disabled path short-circuits (at the !IsAuto gate) before this check.
-	lp, derr := ledger.DefaultPath()
-	require.NoError(t, derr)
-	require.NoError(t, os.MkdirAll(filepath.Join(lp, ".git"), 0o755))
+	// The auto path needs a ledger; the disabled path short-circuits (at the
+	// !IsAuto gate) before that check.
+	provisionDefaultLedger(t)
 
 	// Auto via the real command: the gate creates a recording with a transcript.
 	oxConfigSetRepo(t, "session_recording", "auto")
@@ -173,6 +182,7 @@ func TestConfigE2E_ResumeLinksNewRecordingToPriorSession(t *testing.T) {
 	t.Chdir(f.projectRoot)
 	cfg = &config.Config{}
 	oxConfigSetRepo(t, "session_recording", "auto")
+	provisionDefaultLedger(t)
 
 	const (
 		agentID        = "OxResume"
@@ -229,6 +239,7 @@ func TestConfigE2E_CodexReprimePreservesPendingStop(t *testing.T) {
 	cfg = &config.Config{}
 	t.Cleanup(func() { cfg = oldCfg })
 	oxConfigSetRepo(t, "session_recording", "auto")
+	provisionDefaultLedger(t)
 	const agentID = "OxCodexStop"
 	require.NotNil(t, startSessionRecording(f.projectRoot, agentID, "codex", "", "", "codex-stop-retry"))
 	state, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)

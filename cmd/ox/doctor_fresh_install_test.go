@@ -60,6 +60,9 @@ func TestDoctorFreshInstall_NoWarnings(t *testing.T) {
 	// simulate ox init by creating the minimal required structure
 	// (we can't call initCmd directly due to auth requirements, so we create the structure)
 	createFreshSageoxStructure(t, tmpDir)
+	// Failure prevented: the fresh-init fixture omits the Git hooks installed by init.
+	require.NoError(t, InstallGitHooks(tmpDir))
+	require.True(t, HasGitHooks(tmpDir))
 
 	// run doctor checks with default options (no fix)
 	opts := doctorOptions{
@@ -461,10 +464,6 @@ func filterTestEnvironmentIssues(issues []string) []string {
 		}
 		// NOTE: "uncommitted change" filter was intentionally removed —
 		// it was hiding a real bug where init didn't properly re-stage files.
-		// skip git hooks — fresh installs don't have hooks until `ox integrate install`
-		if strings.Contains(issue, "hook not installed") {
-			continue
-		}
 		// skip credential helper warning — CI runners typically have no helper configured
 		if strings.Contains(issue, "credential helper") {
 			continue

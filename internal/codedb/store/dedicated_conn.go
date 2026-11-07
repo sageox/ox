@@ -25,14 +25,18 @@ var (
 	// with temp_store=MEMORY, which suits small sorts but not VACUUM (it builds
 	// its whole rewritten copy there) or a stash of a full tree snapshot.
 	fileTempStore = pragmaOverride{set: "PRAGMA temp_store=FILE", restore: "PRAGMA temp_store=MEMORY"}
+
+	// queryOnly makes SQLite refuse every write with SQLITE_READONLY, so a job
+	// can find out whether it would write without taking the write lock.
+	queryOnly = pragmaOverride{set: "PRAGMA query_only=ON", restore: "PRAGMA query_only=OFF"}
 )
 
-// withConn runs fn on a connection reserved from the pool with overrides
+// withConn runs fn on a connection reserved from db's pool with overrides
 // applied, then restores them. A connection whose settings cannot be restored is
 // discarded rather than returned: handing back one with foreign keys off would
 // quietly weaken every later writer.
-func (s *Store) withConn(ctx context.Context, overrides []pragmaOverride, fn func(conn *sql.Conn) error) (err error) {
-	conn, err := s.db.Conn(ctx)
+func withConn(ctx context.Context, db *sql.DB, overrides []pragmaOverride, fn func(conn *sql.Conn) error) (err error) {
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
 	}

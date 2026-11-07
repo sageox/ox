@@ -1,0 +1,6 @@
+{
+  "name": "ox-cli-brief",
+  "description": "The SageOx brief pane for Claude Code, installed by ox.",
+  "owner": { "name": "SageOx" },
+  "plugins": [{ "name": "ox-cli-brief-pane", "source": "./" }]
+}

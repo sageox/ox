@@ -175,3 +175,17 @@ func TestDetectProfile_ForcedColorToNonTTY(t *testing.T) {
 		})
 	}
 }
+
+// TestAdaptTo_IgnoresDetectedProfile covers harness output: ox's stdout is a
+// pipe (NoTTY), but the harness paints the bytes on a real terminal.
+// Failure prevented: AdaptTo follows the detected profile and drops color, or
+// passes 24-bit color that a 256-color terminal misreads as a background.
+func TestAdaptTo_IgnoresDetectedProfile(t *testing.T) {
+	withProfile(t, colorprofile.NoTTY)
+
+	got := lipgloss.NewStyle().Foreground(AdaptTo(colorprofile.ANSI256, ColorSuccess)).Render("x")
+	assert.Contains(t, got, "38;5;")
+	assert.NotContains(t, got, "38;2;")
+
+	assert.Nil(t, AdaptTo(colorprofile.ASCII, ColorSuccess))
+}

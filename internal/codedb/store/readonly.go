@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -107,14 +108,14 @@ func openSQLiteReadOnly(dbPath string) (*sql.DB, error) {
 	// CreateSchema on every open. Here it cannot, so a stale store would answer
 	// some queries and fail others with "no such column".
 	//
-	// CreateSchema is reused as the check rather than a hand-listed set of
-	// required objects: every statement in it is guarded (CREATE ... IF NOT
-	// EXISTS, addColumnsIfMissing, the issue-474 sentinel), so against a
-	// fully-migrated store it writes nothing and succeeds on a read-only
-	// connection, and against a stale one it attempts the missing DDL and fails
-	// naming the object. A parallel list would drift from the migrations the
-	// first time someone adds one.
-	if err := CreateSchema(db); err != nil {
+	// applySchema (the statements CreateSchema applies) is reused as the check
+	// rather than a hand-listed set of required objects: every statement in it is
+	// guarded (CREATE ... IF NOT EXISTS, addColumnsIfMissing, the issue-474
+	// sentinel), so against a fully-migrated store it writes nothing and succeeds
+	// on a read-only connection, and against a stale one it attempts the missing
+	// DDL and fails, naming the column when a column is missing. A parallel list
+	// would drift from the migrations the first time someone adds one.
+	if err := applySchema(context.Background(), db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: %s needs a schema migration that cannot be applied without write access: %w", ErrReadOnly, dbPath, err)
 	}

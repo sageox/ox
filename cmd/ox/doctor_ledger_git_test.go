@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,10 +13,63 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestCheckLedgerRemoteReachable_AccessDeniedOnlyForHTTP403 runs the doctor
+// check against a real `git ls-remote`. A 401 from a server whose URL
+// contains 403 must read as a sign-in failure, not "not a member of this team".
+// The remote carries dummy credentials so git's 401 message prints the full
+// URL, /403/ path included; without them it prints only scheme://host:port.
+func TestCheckLedgerRemoteReachable_AccessDeniedOnlyForHTTP403(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		want   string
+	}{
+		{"401 with a URL containing 403", http.StatusUnauthorized, "auth failed"},
+		{"real 403", http.StatusForbidden, "access denied"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gitRoot, cleanup := setupTempGitRepo(t)
+			defer cleanup()
+			t.Setenv("GIT_ALLOW_PROTOCOL", "file:http")
+			t.Setenv("GIT_TERMINAL_PROMPT", "0")
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
+				http.Error(w, http.StatusText(tt.status), tt.status)
+			}))
+			t.Cleanup(server.Close)
+			remote := strings.Replace(server.URL, "http://", "http://user:wrong@", 1) + "/403/ledger.git"
+
+			ledgerPath := t.TempDir()
+			for _, args := range [][]string{
+				{"init", "--quiet"},
+				{"remote", "add", "origin", remote},
+				{"config", "credential.helper", ""},
+				{"config", "http.proxy", ""},
+			} {
+				out, err := exec.Command("git", append([]string{"-C", ledgerPath}, args...)...).CombinedOutput()
+				require.NoError(t, err, "git %v: %s", args, out)
+			}
+			requireSageoxDir(t, gitRoot)
+			require.NoError(t, config.SaveLocalConfig(gitRoot, &config.LocalConfig{
+				Ledger: &config.LedgerConfig{Path: ledgerPath},
+			}))
+			restoreCwd := changeToDir(t, gitRoot)
+			defer restoreCwd()
+
+			res := checkLedgerRemoteReachable()
+
+			assert.Equal(t, tt.want, res.message)
+		})
+	}
+}
 
 func TestCheckLedgerURLAPIMatch_Skip_NoLedger(t *testing.T) {
 	// run in a temp dir with no ledger configured

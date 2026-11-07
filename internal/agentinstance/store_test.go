@@ -5,9 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 func TestNewStoreForUser(t *testing.T) {
@@ -101,8 +106,11 @@ func TestGetNotFound(t *testing.T) {
 	}
 
 	_, err = store.Get("OxNoSh")
-	if err == nil {
-		t.Error("expected error for non-existent instance")
+	if !errors.Is(err, ErrInstanceNotFound) {
+		t.Errorf("Get(unknown) error = %v, want ErrInstanceNotFound", err)
+	}
+	if errors.Is(err, ErrInstanceExpired) {
+		t.Errorf("Get(unknown) error = %v, must not report expiry", err)
 	}
 }
 
@@ -121,8 +129,188 @@ func TestGetExpired(t *testing.T) {
 		t.Fatalf("failed to add instance: %v", err)
 	}
 
-	if _, err := store.Get("OxOld1"); err == nil {
-		t.Error("expected error for expired instance")
+	// callers tell an instance that outlived its 24 hours apart from one that
+	// never existed in this store
+	_, err := store.Get("OxOld1")
+	if !errors.Is(err, ErrInstanceExpired) {
+		t.Errorf("Get(expired) error = %v, want ErrInstanceExpired", err)
+	}
+	if errors.Is(err, ErrInstanceNotFound) {
+		t.Errorf("Get(expired) error = %v, must not report not-found", err)
+	}
+}
+
+// TestGetReportsExpiryWhatEverPrunesAfterItsRead: a lookup of an expired
+// instance must answer "expired" from what it read, however soon a prune drops
+// the record afterwards: the compaction the lookup itself runs (it found
+// enough expired records to trigger one), or a prune from another ox process
+// sharing the store.
+// Failure prevented: `ox agent <id> …` for an expired agent intermittently says
+// "instance not found" instead of "instance expired" (seen as a CI flake in
+// TestLiveAgentOutlivesExpiresAt and TestGetExpired).
+func TestGetReportsExpiryWhatEverPrunesAfterItsRead(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// live records beside the expired one: with nine, one record in ten has
+		// expired, too few for Get to compact on its own (shouldCompact)
+		live  int
+		prune func(t *testing.T, store *Store)
+	}{
+		{"Get's own compaction", 0, func(t *testing.T, store *Store) {
+			// it runs before the reply; make sure the window really held a prune
+			if data, err := os.ReadFile(store.Path()); err != nil || strings.Contains(string(data), "OxOld2") {
+				t.Errorf("Get's compaction must already have dropped the record: %q, %v", data, err)
+			}
+		}},
+		{"another process's prune", 9, func(t *testing.T, store *Store) {
+			other, err := NewStoreForUser(store.projectRoot, store.userSlug)
+			if err != nil {
+				t.Errorf("open the store as another process: %v", err)
+				return
+			}
+			if n, err := other.Prune(); err != nil || n != 1 {
+				t.Errorf("another process's prune = %d, %v; want the expired record dropped", n, err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+			store.expiryCheckTestHook = func() { tc.prune(t, store) }
+			past := time.Now().Add(-time.Hour)
+			if err := store.Add(&Instance{AgentID: "OxOld2", ServerSessionID: "oxsid_old", CreatedAt: past.Add(-24 * time.Hour), ExpiresAt: past}); err != nil {
+				t.Fatalf("add: %v", err)
+			}
+			for i := range tc.live {
+				if err := store.Add(activeInstance(fmt.Sprintf("OxLiv%d", i))); err != nil {
+					t.Fatalf("add live: %v", err)
+				}
+			}
+
+			if _, err := store.Get("OxOld2"); !errors.Is(err, ErrInstanceExpired) {
+				t.Fatalf("Get(expired) = %v, want ErrInstanceExpired", err)
+			}
+
+			// the prune ran and dropped the record; the next lookup finds nothing
+			store.expiryCheckTestHook = nil
+			data, err := os.ReadFile(store.Path())
+			if err != nil {
+				t.Fatalf("read store: %v", err)
+			}
+			if strings.Contains(string(data), "OxOld2") {
+				t.Errorf("the prune must still drop the expired record; store holds %q", data)
+			}
+			if _, err := store.Get("OxOld2"); !errors.Is(err, ErrInstanceNotFound) {
+				t.Errorf("Get after the prune = %v, want ErrInstanceNotFound", err)
+			}
+		})
+	}
+}
+
+// TestCompactionNeverOutlivesOrStallsItsCaller: a read that triggers
+// compaction finishes it before returning, so nothing is left running when a
+// short-lived ox command exits or its caller removes the store. A store whose
+// lock another writer holds is left for a later read instead of making the
+// lookup wait.
+// Failure prevented: a background prune outlived Get and raced t.TempDir
+// cleanup ("directory not empty" in TestResolveInstanceReportsExpiry, which
+// pulled sageox/ox#1556 from the merge queue); a synchronous prune that waited
+// on the lock would instead stall `ox agent <id> …` for up to lockTimeout.
+func TestCompactionNeverOutlivesOrStallsItsCaller(t *testing.T) {
+	seed := func(t *testing.T) *Store {
+		t.Helper()
+		store := newTestStore(t)
+		past := time.Now().Add(-time.Hour)
+		if err := store.Add(&Instance{AgentID: "OxOld3", ServerSessionID: "oxsid_old", CreatedAt: past.Add(-24 * time.Hour), ExpiresAt: past}); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+		return store
+	}
+	storeHolds := func(t *testing.T, store *Store, agentID string) bool {
+		t.Helper()
+		data, err := os.ReadFile(store.Path())
+		if err != nil {
+			t.Fatalf("read store: %v", err)
+		}
+		return strings.Contains(string(data), agentID)
+	}
+	reads := map[string]func(*Store) error{
+		"Get": func(s *Store) error {
+			if _, err := s.Get("OxOld3"); !errors.Is(err, ErrInstanceExpired) {
+				return fmt.Errorf("Get(expired) = %v, want ErrInstanceExpired", err)
+			}
+			return nil
+		},
+		"List": func(s *Store) error { _, err := s.List(); return err },
+	}
+	t.Run("a busy store mutex skips compaction", func(t *testing.T) {
+		// another goroutine's writer holding the mutex while it waits on the
+		// file lock, the way Prune can for up to lockTimeout
+		store := seed(t)
+		store.mu.Lock()
+		done := make(chan struct{})
+		go func() {
+			store.compactIfIdle()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(lockTimeout / 2):
+			t.Error("compaction waited for a busy store mutex; it must skip instead")
+		}
+		store.mu.Unlock()
+		<-done
+		if !storeHolds(t, store, "OxOld3") {
+			t.Error("compaction must not run while another writer holds the store mutex")
+		}
+	})
+	for name, read := range reads {
+		t.Run(name+" compacts before returning", func(t *testing.T) {
+			store := seed(t)
+			if err := read(store); err != nil {
+				t.Fatal(err)
+			}
+			if storeHolds(t, store, "OxOld3") {
+				t.Error("the expired record must be compacted away by the time the read returns")
+			}
+			if leftovers, _ := filepath.Glob(store.Path() + ".tmp"); len(leftovers) > 0 {
+				t.Errorf("compaction left %v behind", leftovers)
+			}
+		})
+		t.Run(name+" skips compaction while another writer holds the lock", func(t *testing.T) {
+			store := seed(t)
+			held := flock.New(store.Path() + ".lock")
+			if err := held.Lock(); err != nil {
+				t.Fatalf("hold the store lock: %v", err)
+			}
+			defer func() { _ = held.Unlock() }()
+
+			start := time.Now()
+			if err := read(store); err != nil {
+				t.Fatal(err)
+			}
+			if elapsed := time.Since(start); elapsed > lockTimeout/2 {
+				t.Errorf("the read waited %s for the lock; it must skip compaction instead", elapsed)
+			}
+			if !storeHolds(t, store, "OxOld3") {
+				t.Error("compaction must not run while another writer holds the lock")
+			}
+		})
+	}
+}
+
+// TestStorePathMatchesStore pins StorePath to the file a store reads and
+// writes: callers use it to check for a store without creating one.
+func TestStorePathMatchesStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStoreForUser(tmpDir, "testuser")
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	if got, want := StorePath(tmpDir, "testuser"), store.Path(); got != want {
+		t.Errorf("StorePath = %q, store.Path() = %q", got, want)
+	}
+	if got, want := StorePath(tmpDir, ""), StorePath(tmpDir, "anonymous"); got != want {
+		t.Errorf("StorePath with empty slug = %q, want %q", got, want)
 	}
 }
 
@@ -255,6 +443,64 @@ func TestInstanceIsExpired(t *testing.T) {
 			inst := &Instance{ExpiresAt: tt.expiresAt}
 			if got := inst.IsExpired(); got != tt.expected {
 				t.Errorf("IsExpired() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestLiveAgentOutlivesExpiresAt: an AI coworker's session can run for days
+// (a desktop app session, resumed overnight), and its agent ID stays in its
+// context and environment the whole time. Past ExpiresAt, an instance whose
+// agent process is still running must keep resolving; only an instance whose
+// process is gone (or was never recorded) expires.
+// Failure prevented: after 24 hours every `ox agent <id> …` call, including the
+// `session stop` that uploads the recording, fails with "instance not found".
+func TestLiveAgentOutlivesExpiresAt(t *testing.T) {
+	exited := exec.Command("true")
+	if err := exited.Run(); err != nil {
+		t.Skipf("cannot start a short-lived process: %v", err)
+	}
+	past := time.Now().Add(-time.Hour)
+	tests := []struct {
+		name      string
+		parentPID int
+		resolves  bool
+	}{
+		{"agent process still running", os.Getpid(), true},
+		{"agent process exited", exited.Process.Pid, false},
+		{"agent process never recorded", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore(t)
+			inst := &Instance{
+				AgentID: "OxLong1", ServerSessionID: "oxsid_long",
+				CreatedAt: past.Add(-24 * time.Hour), ExpiresAt: past, ParentPID: tt.parentPID,
+			}
+			if err := store.Add(inst); err != nil {
+				t.Fatalf("add: %v", err)
+			}
+			if got := inst.IsExpired(); got == tt.resolves {
+				t.Errorf("IsExpired() = %v, want %v", got, !tt.resolves)
+			}
+
+			_, err := store.Get("OxLong1")
+			if tt.resolves && err != nil {
+				t.Fatalf("Get(live agent past ExpiresAt) = %v, want the instance", err)
+			}
+			if !tt.resolves && !errors.Is(err, ErrInstanceExpired) {
+				t.Fatalf("Get(exited agent past ExpiresAt) = %v, want ErrInstanceExpired", err)
+			}
+
+			if _, err := store.Prune(); err != nil {
+				t.Fatalf("prune: %v", err)
+			}
+			listed, err := store.List()
+			if err != nil {
+				t.Fatalf("list: %v", err)
+			}
+			if got := len(listed) == 1; got != tt.resolves {
+				t.Errorf("after prune, listed %d instances; want the instance kept = %v", len(listed), tt.resolves)
 			}
 		})
 	}
@@ -473,9 +719,6 @@ func newTestStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
-	// Get/List fire go s.Prune() which creates flock/tmp files in the temp
-	// dir; wait for them to finish so t.TempDir() cleanup doesn't race.
-	t.Cleanup(func() { store.pruneWG.Wait() })
 	return store
 }
 
@@ -940,5 +1183,110 @@ func TestPruneEmptyStore(t *testing.T) {
 	}
 	if pruned != 0 {
 		t.Errorf("expected 0 pruned on empty store, got %d", pruned)
+	}
+}
+
+// TestSharedStoreConcurrentSessions runs what every worktree of a repository
+// now does against one shared store: sessions priming, re-priming, and looking
+// themselves up at the same time, while a prune compacts expired records.
+// Each Store stands in for a separate ox process, so only the file lock
+// serializes them.
+// Failure prevented: a concurrent write drops another session's record, or a
+// lookup during a rewrite misses an instance that exists — "instance not
+// found" for a live session.
+func TestSharedStoreConcurrentSessions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: contended file locks retry every 100ms")
+	}
+	root := t.TempDir()
+	open := func() *Store {
+		s, err := NewStoreForUser(root, "testuser")
+		if err != nil {
+			t.Fatalf("failed to create store: %v", err)
+		}
+		return s
+	}
+
+	seed := open()
+	now := time.Now()
+	if err := seed.Add(&Instance{AgentID: "OxLive", ServerSessionID: "oxsid_live", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatalf("seed live: %v", err)
+	}
+	for i := range 20 {
+		if err := seed.Add(&Instance{AgentID: fmt.Sprintf("OxOld%d", i), ServerSessionID: "oxsid_old", CreatedAt: now.Add(-48 * time.Hour), ExpiresAt: now.Add(-time.Hour)}); err != nil {
+			t.Fatalf("seed expired: %v", err)
+		}
+	}
+
+	const sessions, reprimes = 8, 3
+	var wg sync.WaitGroup
+	errs := make(chan error, sessions*(reprimes+1)+100)
+	done := make(chan struct{})
+
+	wg.Add(1)
+	go func() { // a session in yet another worktree keeps looking itself up
+		defer wg.Done()
+		reader := open()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if _, err := reader.Get("OxLive"); err != nil {
+				errs <- fmt.Errorf("lookup of a live instance during writes: %w", err)
+				return
+			}
+		}
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if _, err := open().Prune(); err != nil {
+			errs <- fmt.Errorf("prune: %w", err)
+		}
+	}()
+
+	var writers sync.WaitGroup
+	for i := range sessions {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			s := open()
+			id := fmt.Sprintf("OxW%03d", i)
+			if err := s.Add(&Instance{AgentID: id, ServerSessionID: "oxsid_" + id, CreatedAt: now, ExpiresAt: now.Add(time.Hour), PrimeCallCount: 1}); err != nil {
+				errs <- fmt.Errorf("add %s: %w", id, err)
+				return
+			}
+			for range reprimes {
+				if _, _, err := s.IncrementPrimeCallCount(id); err != nil {
+					errs <- fmt.Errorf("re-prime %s: %w", id, err)
+					return
+				}
+			}
+		}()
+	}
+	writers.Wait()
+	close(done)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+
+	check := open()
+	for i := range sessions {
+		id := fmt.Sprintf("OxW%03d", i)
+		inst, err := check.Get(id)
+		if err != nil {
+			t.Errorf("session %s lost: %v", id, err)
+			continue
+		}
+		if inst.PrimeCallCount != 1+reprimes {
+			t.Errorf("session %s prime count = %d, want %d (a concurrent rewrite lost an update)", id, inst.PrimeCallCount, 1+reprimes)
+		}
+	}
+	if _, err := check.Get("OxLive"); err != nil {
+		t.Errorf("live instance lost: %v", err)
 	}
 }

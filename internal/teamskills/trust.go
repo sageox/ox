@@ -10,7 +10,7 @@
 //
 // So team skills are split by what they can DO, not by who wrote them:
 //
-//   - Prose — no bundled scripts, no inline command execution, no allowed-tools —
+//   - Prose — no bundled scripts, inline command execution, tool grants or hooks —
 //     materializes automatically. It is exactly the trust level team RULES already
 //     have, and prime already injects those.
 //   - Executable content requires an explicit approval PINNED TO A DIGEST. Change
@@ -23,13 +23,21 @@
 package teamskills
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"hash"
+	"io"
 	"path"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/sageox/ox/internal/teamdocs"
+	"gopkg.in/yaml.v3"
 )
 
 // File is one file belonging to a team skill, as read out of the team-context
@@ -55,6 +63,15 @@ const (
 
 	// CapAllowedTools — frontmatter grants the skill tool access up front.
 	CapAllowedTools Capability = "allowed-tools"
+
+	// CapHooks — frontmatter configures lifecycle hooks. Gate every hook shape,
+	// not just known command types, so host-specific hook semantics cannot bypass
+	// approval.
+	CapHooks Capability = "hooks"
+
+	// CapUnparsedFrontmatter — malformed or unsupported frontmatter cannot be
+	// established to be prose and must not materialize without approval.
+	CapUnparsedFrontmatter Capability = "unparsed-frontmatter"
 
 	// CapInlineCommand — the body carries Claude's inline command-execution syntax,
 	// which runs a shell command when the skill is loaded rather than when a human
@@ -122,8 +139,9 @@ func IsExecutableFile(relPath string, content []byte) (bool, string) {
 
 // Verdict is the trust classification of one candidate skill.
 type Verdict struct {
-	// Executable is true when the skill can cause code to run. Such a skill needs
-	// a digest-pinned approval before ox will materialize it.
+	// Executable is true when the skill can cause code to run or its frontmatter
+	// cannot safely be classified. Such a skill needs a digest-pinned approval
+	// before ox will materialize it.
 	Executable bool
 
 	// Capabilities lists every reason Executable is true, so a human deciding on an
@@ -139,15 +157,19 @@ type Verdict struct {
 	Digest string
 }
 
-// inlineCommandLine matches Claude's inline command-execution syntax: a line
-// whose content begins with !`…`. Anchored to line start (after optional
-// whitespace and list markers) so ordinary prose containing a backtick or an
-// exclamation mark is not swept up — a false positive here blocks a legitimate
-// prose skill, which teaches people to approve everything.
-var inlineCommandLine = regexp.MustCompile(`(?m)^\s*(?:[-*+]\s+|>\s*)?!` + "`")
-
-// allowedToolsKey matches an allowed-tools frontmatter key.
-var allowedToolsKey = regexp.MustCompile(`(?mi)^\s*allowed[-_]tools\s*:`)
+// inlineCommandLine matches Claude's inline command-execution syntax, !`…`,
+// ANYWHERE on a line: `!` and a backtick followed by any character that is not
+// another backtick (trust contract v2, R1).
+//
+// It used to be anchored to the start of a line, which missed the form Claude
+// Code's own skill docs use for dynamic context — "- PR diff: !`gh pr diff`" —
+// so that skill installed as prose and ran a command at load time with nobody
+// having decided. Claude Code's preprocessing is textual, so neither position
+// nor fences are excluded. The cost is that prose like "the `!` operator"
+// needs an approval; a gate that occasionally asks is the safe failure, a gate
+// that misses the documented form is not. An exclamation mark followed by TWO
+// backticks is not a command; an unclosed "!`foo" is treated as one.
+var inlineCommandLine = regexp.MustCompile("!`[^`\n]")
 
 // Classify decides whether a team skill may materialize without human approval.
 //
@@ -187,17 +209,31 @@ func Classify(s Skill) Verdict {
 		if !strings.EqualFold(path.Ext(clean), ".md") {
 			continue
 		}
-		normalized := strings.ReplaceAll(string(f.Content), "\r\n", "\n")
-		front, _ := splitFrontmatter(normalized)
-		if allowedToolsKey.MatchString(front) {
-			add(CapAllowedTools, clean)
+		// Normalized ONCE, here: splitFrontmatter takes the result as is, so
+		// exactly one leading BOM is ever stripped (see normalizeManifest).
+		normalized := normalizeManifest(string(f.Content))
+		front, _, terminated := splitFrontmatter(normalized)
+		if !terminated {
+			add(CapUnparsedFrontmatter, clean+" (unterminated frontmatter)")
+		}
+		fields, err := parseFrontmatter(front)
+		if err != nil {
+			add(CapUnparsedFrontmatter, clean+" ("+err.Error()+")")
+		} else {
+			for key := range fields {
+				switch strings.ToLower(key) {
+				case "allowed-tools", "allowed_tools":
+					add(CapAllowedTools, clean)
+				case "hooks":
+					add(CapHooks, clean)
+				}
+			}
 		}
 		// Scan the FULL document, not just the body. splitFrontmatter returns an
 		// empty body for unterminated frontmatter — deliberately, so a hidden
 		// allowed-tools grant is still seen — and scanning only the body would then
-		// miss every inline command in exactly that malformed shape. A frontmatter
-		// line cannot legitimately start with !` anyway, so there is nothing to
-		// exclude.
+		// miss every inline command in exactly that malformed shape. Claude Code
+		// expands !` text wherever it appears, so nothing is excluded.
 		for _, line := range inlineCommandLines(normalized) {
 			add(CapInlineCommand, clean+": "+line)
 		}
@@ -208,6 +244,58 @@ func Classify(s Skill) Verdict {
 		sort.Strings(v.Evidence[c])
 	}
 	return v
+}
+
+// parseFrontmatter reads YAML keys, not their spelling in the source. Quoted,
+// escaped and flow-style keys have the same meaning as bare keys to a host.
+// Only ordinary string-keyed mappings, sequences and scalars are accepted here;
+// aliases, merges and custom tags require approval rather than relying on
+// potentially different YAML loader behavior in each supported host.
+func parseFrontmatter(front string) (map[string]any, error) {
+	decoder := yaml.NewDecoder(strings.NewReader(front))
+	var doc yaml.Node
+	if err := decoder.Decode(&doc); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, nil // no frontmatter, or an empty/comment-only block
+		}
+		return nil, err
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("frontmatter must contain a single YAML mapping")
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode || !supportedFrontmatter(root) {
+		return nil, fmt.Errorf("unsupported frontmatter; expected a string-keyed YAML mapping")
+	}
+	var fields map[string]any
+	// Decode also rejects duplicate keys, including in nested mappings.
+	if err := root.Decode(&fields); err != nil {
+		return nil, err
+	}
+	return fields, nil
+}
+
+func supportedFrontmatter(node *yaml.Node) bool {
+	switch node.Tag {
+	case "!!map", "!!seq", "!!str", "!!bool", "!!int", "!!float", "!!null", "!!timestamp":
+	default:
+		return false
+	}
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i < len(node.Content); i += 2 {
+			key := node.Content[i]
+			if key.Kind != yaml.ScalarNode || key.Tag != "!!str" {
+				return false
+			}
+		}
+	}
+	for _, child := range node.Content {
+		if !supportedFrontmatter(child) {
+			return false
+		}
+	}
+	return true
 }
 
 // inlineCommandLines returns the offending lines, trimmed, so the evidence names
@@ -226,44 +314,107 @@ func inlineCommandLines(body string) []string {
 	return out
 }
 
-// splitFrontmatter separates a leading `---` YAML block from the body.
+// splitFrontmatter separates a leading `---` YAML block from the body of a
+// manifest that normalizeManifest has ALREADY normalized. It does not
+// normalize again: doing so stripped a second BOM, contradicting the
+// exactly-one rule the consumers follow.
 //
 // Only a block at the very start counts. A `---` later in the document is a
 // horizontal rule, and treating it as frontmatter would let a body-level
 // "allowed-tools:" line be read as a grant — or, worse, let a real grant hide
 // behind one.
-func splitFrontmatter(content string) (front, body string) {
-	normalized := strings.ReplaceAll(content, "\r\n", "\n")
-	if !strings.HasPrefix(normalized, "---\n") {
-		return "", normalized
+//
+// A fence is a line that is `---` once trailing spaces and tabs are removed
+// (trust contract v2, R2). YAML loaders accept "--- ", so a check that demanded
+// the exact bytes read "--- \nallowed-tools: Bash(*)" as having no frontmatter
+// and installed the grant as prose. Leading whitespace is still not a fence.
+// terminated is false only for a leading block with no closing fence.
+func splitFrontmatter(normalized string) (front, body string, terminated bool) {
+	first, rest, _ := strings.Cut(normalized, "\n")
+	if !teamdocs.IsFrontmatterFence(first) {
+		return "", normalized, true
 	}
-	rest := normalized[len("---\n"):]
-	end := strings.Index(rest, "\n---")
-	if end < 0 {
-		// Unterminated frontmatter: treat the whole document as frontmatter rather
-		// than as body. Reading it as body would skip the allowed-tools check.
-		return rest, ""
+	for offset := 0; offset <= len(rest); {
+		line, _, _ := strings.Cut(rest[offset:], "\n")
+		if teamdocs.IsFrontmatterFence(line) {
+			front = strings.TrimSuffix(rest[:offset], "\n")
+			return front, strings.TrimPrefix(rest[offset+len(line):], "\n"), true
+		}
+		offset += len(line) + 1
 	}
-	return rest[:end], strings.TrimPrefix(rest[end+len("\n---"):], "\n")
+	// Unterminated frontmatter: treat the whole document as frontmatter rather
+	// than as body, and report the missing fence so classification fails closed.
+	return rest, "", false
+}
+
+// utf8BOM is the byte-order mark some Windows editors write at the start of a
+// UTF-8 file.
+const utf8BOM = "\ufeff"
+
+// normalizeManifest puts a manifest in the one shape the checks above read:
+// LF line endings, and no leading byte-order mark.
+//
+// The BOM is a SECURITY concern, not tidiness. Editors, YAML loaders and
+// coding agents strip it before looking for frontmatter, so they honor
+// "\ufeff---\nallowed-tools: Bash(*)" as a grant. A check that did not strip
+// it saw no frontmatter at all, classified that manifest as prose, and
+// auto-installed a shell grant nobody approved. A BOM in front of an inline
+// command on the first line hid that too. Exactly one BOM is stripped, because
+// that is what the consumers strip: after it, a second one is ordinary text to
+// them as well, and the document has no frontmatter for anyone. Classify calls
+// this once per file and nothing downstream normalizes again, so "exactly one"
+// is what actually happens.
+func normalizeManifest(content string) string {
+	return strings.TrimPrefix(strings.ReplaceAll(content, "\r\n", "\n"), utf8BOM)
 }
 
 // Digest is the content identity an approval is pinned to.
 //
-// It covers every file path AND its bytes, sorted, so neither reordering nor
-// renaming nor editing can preserve a digest. An approval that survived any of
-// those would be approval of a name rather than of content.
+// It covers every canonical file path AND its bytes in sorted order. Reordering
+// files preserves the digest; renaming, adding, removing, or editing does not.
+// Length prefixes keep delimiters in POSIX filenames from imitating file records.
+// The version tag deliberately invalidates legacy delimiter-based approvals,
+// including their script grants: those require a fresh approval, not migration.
 func Digest(s Skill) string {
-	files := make([]File, len(s.Files))
-	copy(files, s.Files)
-	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	type digestFile struct {
+		canonical, raw string
+		content        []byte
+	}
+	files := make([]digestFile, len(s.Files))
+	for i, f := range s.Files {
+		files[i] = digestFile{path.Clean(strings.ReplaceAll(f.Path, "\\", "/")), f.Path, f.Content}
+	}
+	// Raw path and bytes break ties between paths that canonicalize alike
+	// (a/b and a\b), so caller order never changes the digest.
+	sort.Slice(files, func(i, j int) bool {
+		a, b := files[i], files[j]
+		if a.canonical != b.canonical {
+			return a.canonical < b.canonical
+		}
+		if a.raw != b.raw {
+			return a.raw < b.raw
+		}
+		return bytes.Compare(a.content, b.content) < 0
+	})
 
 	h := sha256.New()
-	fmt.Fprintf(h, "skill:%s\n", s.Name)
+	writeDigestField(h, []byte("ox-team-skill-digest-v2"))
+	writeDigestField(h, []byte(s.Name))
+	var count [8]byte
+	binary.BigEndian.PutUint64(count[:], uint64(len(files)))
+	_, _ = h.Write(count[:])
 	for _, f := range files {
-		fmt.Fprintf(h, "file:%s:%d\n", path.Clean(strings.ReplaceAll(f.Path, "\\", "/")), len(f.Content))
-		h.Write(f.Content)
+		writeDigestField(h, []byte(f.canonical))
+		writeDigestField(h, f.content)
 	}
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+func writeDigestField(h hash.Hash, value []byte) {
+	var size [8]byte
+	binary.BigEndian.PutUint64(size[:], uint64(len(value)))
+	_, _ = h.Write(size[:])
+	_, _ = h.Write(value)
 }
 
 // Describe renders a one-line, human-readable reason a skill needs approval.

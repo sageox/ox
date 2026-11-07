@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/conversation/read"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/weblink"
 	"github.com/spf13/cobra"
 )
 
@@ -100,7 +101,7 @@ func resolveConversationIDArg(ctx context.Context, raw string) (string, *read.Er
 	if idErr != nil {
 		return "", shareUnresolvable(raw, "the server returned a recording id ox does not recognize")
 	}
-	return "https://" + host + "/c/" + id.RecordingID, nil
+	return weblink.ArtifactURL("https://"+host, id.RecordingID, "/c/", "rec_"), nil
 }
 
 // conversationContext returns the command's context, or Background when the

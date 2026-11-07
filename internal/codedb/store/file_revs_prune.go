@@ -81,7 +81,7 @@ func (s *Store) pruneDeadFileRevs(ctx context.Context) (DeadSnapshotPrune, error
 // snapshot per live ref and belongs on disk, not in RAM.
 func (s *Store) rebuildFileRevsFromRefs(ctx context.Context, deadSnapshots int) (DeadSnapshotPrune, error) {
 	var pruned DeadSnapshotPrune
-	err := s.withConn(ctx, []pragmaOverride{noForeignKeys, fileTempStore}, func(conn *sql.Conn) error {
+	err := withConn(ctx, s.db, []pragmaOverride{noForeignKeys, fileTempStore}, func(conn *sql.Conn) error {
 		return inImmediateTx(ctx, conn, func() error {
 			if _, err := conn.ExecContext(ctx, `CREATE TEMP TABLE live_file_revs AS
 				SELECT id, commit_id, path, blob_id FROM file_revs

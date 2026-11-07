@@ -13,7 +13,7 @@ jobs:
   notify-release:
     # Only run on actual release events, not push
     if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Get release details
         id: release

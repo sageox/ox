@@ -229,11 +229,30 @@ func TestRebaseAge(t *testing.T) {
 }
 
 func TestIsSafeForGitOps(t *testing.T) {
+	t.Run("linked worktree", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("short: real git worktree and merge")
+		}
+		repo := newSnapshotRepo(t)
+		worktree := filepath.Join(t.TempDir(), "linked")
+		gitInRepo(t, repo, "worktree", "add", "-b", "linked", worktree)
+		require.NoError(t, IsSafeForGitOps(worktree), "a healthy linked checkout must remain writable")
+
+		gitInRepo(t, repo, "commit", "--allow-empty", "-m", "advance main")
+		gitInRepo(t, worktree, "merge", "--no-ff", "--no-commit", "main")
+		require.Empty(t, gitInRepo(t, worktree, "ls-files", "--unmerged"))
+		require.ErrorContains(t, IsSafeForGitOps(worktree), "merge in progress")
+		gitInRepo(t, worktree, "merge", "--abort")
+		require.NoError(t, IsSafeForGitOps(worktree), "finishing the operation must unblock writes")
+	})
+
 	t.Run("clean repo", func(t *testing.T) {
-		repo := t.TempDir()
-		require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0755))
+		repo := newSnapshotRepo(t)
 
 		assert.NoError(t, IsSafeForGitOps(repo))
+		// An unreadable ref lookup must not be treated as an absent operation.
+		require.NoError(t, os.WriteFile(filepath.Join(repo, ".git", "config"), []byte("[invalid\n"), 0644))
+		assert.ErrorContains(t, IsSafeForGitOps(repo), "inspect git operation")
 	})
 
 	t.Run("lock files present", func(t *testing.T) {
@@ -509,7 +528,8 @@ func TestLockSweep_PidSuffixedAndSelfHealing(t *testing.T) {
 	})
 
 	t.Run("IsSafeForGitOps self-heals an abandoned lock", func(t *testing.T) {
-		repo, gitDir := newGitDir(t)
+		repo := newSnapshotRepo(t)
+		gitDir := filepath.Join(repo, ".git")
 		p := writeLock(t, gitDir, "index.lock", stale)
 
 		assert.NoError(t, IsSafeForGitOps(repo),
@@ -657,4 +677,38 @@ func TestLockSweep_OwnerlessLockSurvivesTheStaleWindow(t *testing.T) {
 				"the repo must stay blocked while a writer may still hold the index")
 		})
 	}
+}
+
+// Failure prevented: a lock that a machine which went away left in a git
+// directory survives the clear, so every later command in the clone fails on
+// it; or the clear removes a file that is not a lock, or follows a symlink out
+// of the git directory.
+func TestRemoveAllLockFiles(t *testing.T) {
+	gitDir := filepath.Join(t.TempDir(), ".git")
+	locks := []string{"index.lock", "HEAD.lock", "packed-refs.lock", "refs/heads/main.lock", "objects/info/commit-graph.lock"}
+	for _, name := range append([]string{"index", "refs/heads/main", "objects/pack/pack-1.pack"}, locks...) {
+		path := filepath.Join(gitDir, filepath.FromSlash(name))
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, nil, 0o644))
+	}
+	outside := filepath.Join(t.TempDir(), "outside.lock")
+	require.NoError(t, os.WriteFile(outside, nil, 0o644))
+	if err := os.Symlink(outside, filepath.Join(gitDir, "link.lock")); err != nil {
+		t.Logf("no symlink on this platform (%v); the symlink case is not exercised", err)
+	}
+
+	removed, errs := RemoveAllLockFiles(gitDir)
+
+	require.Empty(t, errs)
+	assert.ElementsMatch(t, locks, removed)
+	for _, name := range locks {
+		assert.NoFileExists(t, filepath.Join(gitDir, filepath.FromSlash(name)))
+	}
+	for _, kept := range []string{"index", "refs/heads/main", "objects/pack/pack-1.pack"} {
+		assert.FileExists(t, filepath.Join(gitDir, filepath.FromSlash(kept)))
+	}
+	assert.FileExists(t, outside, "a symlink's target is not the clone's to remove")
+
+	_, errs = RemoveAllLockFiles(filepath.Join(t.TempDir(), "missing"))
+	assert.NotEmpty(t, errs, "a git directory that cannot be opened is reported, not read as lock-free")
 }

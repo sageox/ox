@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,16 +62,23 @@ func TestPartialClone_OnDemandFetch_OutsideSparse(t *testing.T) {
 	require.True(t, os.IsNotExist(err), "src/ should not be materialized")
 
 	// but git show should still work via on-demand fetch
-	cmd = exec.Command("git", "-C", cloneDir, "show", "HEAD:src/main.go")
-	out, err = cmd.CombinedOutput()
-	require.NoError(t, err, "git show should fetch blob on demand: %s", string(out))
-	assert.Contains(t, string(out), "package main", "should get file content via on-demand fetch")
+	assert.Contains(t, gitShowBlob(t, cloneDir, "HEAD:src/main.go"), "package main", "should get file content via on-demand fetch")
 
 	// git show for assets/ too
-	cmd = exec.Command("git", "-C", cloneDir, "show", "HEAD:assets/large-file.bin")
-	out, err = cmd.CombinedOutput()
-	require.NoError(t, err, "git show on assets should work: %s", string(out))
-	assert.Len(t, strings.TrimSpace(string(out)), 1024, "should get full content of large file")
+	assert.Len(t, strings.TrimSpace(gitShowBlob(t, cloneDir, "HEAD:assets/large-file.bin")), 1024, "should get full content of large file")
+}
+
+// gitShowBlob returns only git show's stdout. The on-demand fetch can print
+// warnings such as "redirecting to <url>" on stderr, which are not part of the
+// blob; mixing them in failed the exact-length check in a release run.
+func gitShowBlob(t *testing.T, dir, rev string) string {
+	t.Helper()
+	var stderr bytes.Buffer
+	cmd := exec.Command("git", "-C", dir, "show", rev)
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	require.NoError(t, err, "git show %s should fetch the blob on demand: %s", rev, stderr.String())
+	return string(out)
 }
 
 // --- B. Git log works without fetching blobs ---

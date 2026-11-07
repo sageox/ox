@@ -526,9 +526,11 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 			Type:          "session_stop_retry",
 			AgentID:       inst.AgentID,
 			SessionFile:   state.SessionFile,
-			RetryGuidance: fmt.Sprintf("No session data captured. Use 'ox agent %s session log --stdin' to write your conversation, then re-run this command.", inst.AgentID),
+			RetryGuidance: fmt.Sprintf("No session data captured. Record your conversation with 'ox agent %s session log --role user --content \"...\"' (one entry per call) or pipe a JSON array of entries to 'ox agent %s session record', then re-run this command.", inst.AgentID, inst.AgentID),
 			NextActions: []string{
-				fmt.Sprintf("Dump conversation as JSONL: ox agent %s session log --role user --stdin", inst.AgentID),
+				// session log requires --role and writes ONE entry per call; the
+				// batch form is session record, which takes a JSON array.
+				fmt.Sprintf("Record many entries at once: echo '[{\"type\":\"user\",\"content\":\"...\"}]' | ox agent %s session record", inst.AgentID),
 				fmt.Sprintf("Re-run: ox agent %s session stop", inst.AgentID),
 			},
 		}
@@ -636,9 +638,15 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		}
 	}
 
-	// process session: read, redact secrets, extract events, save
+	// process session: read, redact secrets, extract events, save. With no
+	// native file to read, what the cache already holds (hook batches,
+	// capture-prior, session log) is still the session: finalize it, as recover
+	// would, rather than leave the recording live for 'ox session upload' to
+	// refuse. An empty cache keeps the recording: an undiscovered source does
+	// not prove the session empty, and a later stop can still find it.
+	cacheHasEntries := state.SessionPath != "" && session.HasSubstantiveEntries(filepath.Join(state.SessionPath, "raw.jsonl"))
 	var processResult *agentSessionResult
-	if state.SessionFile != "" || state.AdapterName == "cursor" {
+	if state.SessionFile != "" || state.AdapterName == "cursor" || cacheHasEntries {
 		processStart := time.Now()
 		// Serialize with the raw.jsonl writer's file lock so processAgentSession
 		// (RecoverRawAppend + drain) never runs concurrently with a hook or
@@ -1051,6 +1059,9 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	if state.SourceRejected {
 		return nil, fmt.Errorf("claude source has untrusted repository ownership; recording preserved for manual review")
 	}
+	if err := session.CheckNativeSourceBinding(state); err != nil {
+		return nil, err
+	}
 	result := &agentSessionResult{}
 
 	// resolve project endpoint for auth lookups
@@ -1103,6 +1114,14 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		return nil, err
 	}
 	hasIncrementalEntries := session.HasSubstantiveEntries(rawPath)
+	for _, event := range state.Lifecycle {
+		if event.Action == session.LifecycleActionPause {
+			// Never fall back to unmasked native reconstruction for a paused
+			// cache, even if an earlier attempt excluded every entry.
+			hasIncrementalEntries = true
+			break
+		}
+	}
 
 	if hasIncrementalEntries {
 		// incremental hooks already wrote entries -- do final drain, write footer, and generate artifacts
@@ -1122,13 +1141,20 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// offset it is validated from: entries before it are never imported, so a
 	// foreign turn in that window can neither condemn nor ride along.
 	var rawEntries []adapters.RawEntry
-	if reader, ok := adapter.(adapters.IncrementalReader); ok && state.AdapterName == "claude-code" && state.StartOffset > 0 {
+	reader, incremental := adapter.(adapters.IncrementalReader)
+	// An Amp recording's offset is the line of the prompt that began it, which
+	// ox-bridge.ts wrote before the prime: the offset alone bounds it.
+	startsAtPrompt := incremental && state.AmpStartsAtPrompt()
+	if incremental && (startsAtPrompt || (state.AdapterName == "claude-code" && state.StartOffset > 0)) {
 		rawEntries, _, err = reader.ReadFromOffset(state.SessionFile, state.StartOffset)
 	} else {
 		rawEntries, err = adapter.Read(state.SessionFile)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to read session: %w", err)
+	}
+	if err := session.CheckNativeSourceBinding(state); err != nil {
+		return nil, err
 	}
 	if state.AdapterName == "claude-code" {
 		repoRoot := state.WorkspacePath
@@ -1150,7 +1176,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// filter out entries from before session recording started.
 	// the adapter reads ALL entries from the JSONL file, but we only want
 	// entries created after ox session start was called.
-	if !state.StartedAt.IsZero() {
+	if !state.StartedAt.IsZero() && !startsAtPrompt {
 		rawEntries = pipeline.FilterEntriesAfterStart(rawEntries, state.StartedAt)
 	}
 
@@ -1278,7 +1304,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		Summary: localSummary,
 	}
 
-	result.Summary = localSummary
+	result.Summary = publishableSummary(localSummary)
 
 	// use the session name from recording state (generated at start time)
 	// to ensure cache and ledger directories always match
@@ -1464,7 +1490,9 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		}
 	} else {
 		uploadStart := time.Now()
-		uploadErr := uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
+		uploadErr := uploadSessionBeforeHostEnds(sessionName, daemonOutlivesSession(), func() error {
+			return uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
+		}, time.Sleep)
 		result.UploadMs = time.Since(uploadStart).Milliseconds()
 		if uploadErr != nil {
 			if errors.Is(uploadErr, api.ErrReadOnly) {
@@ -1518,6 +1546,21 @@ func daemonOutlivesSession() bool {
 	return !daemon.IsDaemonDisabled() && !runtime.Caps().HostEndsWithAgent
 }
 
+// publishableSummary drops a local summary that is only a stats line. With no
+// user message to name a topic, session.LocalSummary returns just "0 user
+// messages, 1 assistant responses. ...", which meta.json's writer rejects as
+// a leaked failure stub (ox-qqka). That failed every upload of an Amp orb
+// session, whose recording starts after the thread's first prompt
+// (sageox/ox#1318, #1425). The stop result carries the normalized value, so
+// the stop's JSON and the team-memory observation don't repeat the stub
+// either. An empty summary is legal, and the summarizer fills it later.
+func publishableSummary(summary string) string {
+	if lfs.IsLeakySummaryString(summary) {
+		return ""
+	}
+	return summary
+}
+
 // uploadSessionToLedger uploads cached blobs to LFS, then commits and pushes
 // their pointers together with session metadata.
 // If this fails, the session data is safe in the local cache and doctor can retry.
@@ -1527,6 +1570,9 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 }
 
 func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string, effects sessionUploadEffects) error {
+	if err := session.CheckNativeSourceBinding(state); err != nil {
+		return err
+	}
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
 
@@ -1571,7 +1617,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	}
 
 	sessionID := session.ResolveOrMintSessionID(preservedID, state.SessionID)
-	traceCache, traceMeta, traceErr := session.MaterializeTraces(ledgerPath, sessionName, state.Trace)
+	traceCache, traceMeta, traceErr := session.MaterializeTraces(ledgerPath, state.SessionPath, state.Trace)
 	if traceErr != nil {
 		slog.Warn("trace materialization skipped", "error", traceErr)
 		traceMeta = nil
@@ -1608,7 +1654,14 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		return fmt.Errorf("record pending session upload: %w", err)
 	}
 
-	meta, err := writeInitialSessionMeta(sessionDir, state.AgentID, metaBuilder)
+	meta, err := writeInitialSessionMeta(sessionDir, state.AgentID, metaBuilder, contextUseSource{
+		// the trace lives beside the LOCAL raw.jsonl (recording cache), which
+		// still holds real bytes here — the ledger copy becomes a pointer stub
+		// after upload and can never be read for this.
+		TraceDir:        sourceCacheDir,
+		ProducedCommits: len(state.ProducedCommits),
+		AllowJudged:     allowJudgedEvidenceForProject(projectRoot),
+	})
 	if err != nil {
 		return fmt.Errorf("write meta.json: %w", err)
 	}
@@ -1724,23 +1777,33 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 // consuming the per-agent contribution score. If the write fails, the score
 // remains available for a retry instead of being silently lost alongside the
 // failed meta.json write.
-func writeInitialSessionMeta(sessionDir, agentID string, builder *lfs.SessionMetaBuilder) (*lfs.SessionMeta, error) {
+//
+// ctxUse names the directory holding the session's real context-trace.jsonl;
+// when it carries at least one event the derived context-use rollup is stamped
+// on the meta (lfs.ContextUseRollupFromDir), otherwise the field is omitted.
+func writeInitialSessionMeta(sessionDir, agentID string, builder *lfs.SessionMetaBuilder, ctxUse contextUseSource) (*lfs.SessionMeta, error) {
 	scoreFile, err := session.ReadSageoxScore(agentID)
 	if err != nil {
 		return nil, fmt.Errorf("read SageOx score: %w", err)
 	}
 	if scoreFile != nil {
-		builder.SageoxScore(scoreFile.Score, string(scoreFile.Category), scoreFile.Reason)
+		builder.SageoxScore(scoreFile.Score, string(scoreFile.Category), scoreFile.Reason).
+			SageoxScoreSource(lfs.SageoxScoreSourceSelfReported)
 	} else {
 		// A prior attempt may have persisted metadata and consumed the score
 		// carrier before a later LFS/push failure. Preserve that durable score on
 		// retry instead of overwriting meta.json with an unscored rebuild.
 		existing, readErr := lfs.ReadSessionMeta(sessionDir)
 		if readErr == nil && existing.SageoxScore != nil {
-			builder.SageoxScore(*existing.SageoxScore, existing.SageoxScoreCategory, existing.SageoxScoreReason)
+			builder.SageoxScore(*existing.SageoxScore, existing.SageoxScoreCategory, existing.SageoxScoreReason).
+				SageoxScoreSource(existing.SageoxScoreSource)
 		} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 			return nil, fmt.Errorf("read existing session metadata: %w", readErr)
 		}
+	}
+
+	if rollup := lfs.ContextUseRollupFromDir(ctxUse.TraceDir, ctxUse.ProducedCommits, ctxUse.AllowJudged); rollup != nil {
+		builder.ContextUse(rollup)
 	}
 
 	meta := builder.Build()
@@ -1755,6 +1818,25 @@ func writeInitialSessionMeta(sessionDir, agentID string, builder *lfs.SessionMet
 		_ = session.CleanupSageoxScore(agentID)
 	}
 	return meta, nil
+}
+
+// contextUseSource tells writeInitialSessionMeta where the recording's
+// context-trace.jsonl lives and the inputs contextuse.Build needs.
+type contextUseSource struct {
+	TraceDir        string // directory holding the REAL trace bytes; "" = no rollup
+	ProducedCommits int
+	AllowJudged     bool // attribution.allow_judged_evidence
+}
+
+// allowJudgedEvidenceForProject resolves attribution.allow_judged_evidence
+// through the same project-over-user merge as every other attribution knob.
+// An unreadable project config resolves to the default (false).
+func allowJudgedEvidenceForProject(projectRoot string) bool {
+	projCfg, _ := config.LoadProjectConfig(projectRoot)
+	if projCfg == nil {
+		projCfg = &config.ProjectConfig{}
+	}
+	return resolveProjectAttribution(projCfg).AllowJudgedEvidence
 }
 
 // reconcileProducedPlansAtStop records the session id + a "stopped" outcome
@@ -1941,12 +2023,20 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 			if err != nil {
 				return fmt.Errorf("adapter not found: %w", err)
 			}
-			rawEntries, err := adapter.Read(state.SessionFile)
+			// an Amp recording reads from its prompt's line, as the stop does
+			var rawEntries []adapters.RawEntry
+			reader, incremental := adapter.(adapters.IncrementalReader)
+			startsAtPrompt := incremental && state.AmpStartsAtPrompt()
+			if startsAtPrompt {
+				rawEntries, _, err = reader.ReadFromOffset(state.SessionFile, state.StartOffset)
+			} else {
+				rawEntries, err = adapter.Read(state.SessionFile)
+			}
 			if err != nil {
 				return fmt.Errorf("failed to read session: %w", err)
 			}
 			// filter out entries from before session recording started
-			if !state.StartedAt.IsZero() {
+			if !state.StartedAt.IsZero() && !startsAtPrompt {
 				rawEntries = pipeline.FilterEntriesAfterStart(rawEntries, state.StartedAt)
 			}
 			entries = convertRawEntries(rawEntries)

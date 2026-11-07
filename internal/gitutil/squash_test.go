@@ -35,9 +35,9 @@ func TestSquashUnpushed_SingleCommitIsLeftAlone(t *testing.T) {
 	assert.Empty(t, strings.TrimSpace(gitOut(t, repo, "for-each-ref", "refs/ox-backup/")), "no backup ref for a no-op")
 }
 
-// A branch that is behind its upstream must be pulled, never squashed: a soft
-// reset to the upstream tip would commit the index back over the coworker's
-// commits and silently revert them.
+// A branch that is behind its upstream must be pulled, never squashed: HEAD's
+// tree committed onto the upstream tip would land over the coworker's commits
+// and silently revert them.
 func TestSquashUnpushed_RefusesDivergedBranch(t *testing.T) {
 	repo, bare := initBareRemoteRepo(t)
 	second := filepath.Join(t.TempDir(), "second")
@@ -56,10 +56,9 @@ func TestSquashUnpushed_RefusesDivergedBranch(t *testing.T) {
 	assert.Equal(t, before, gitOut(t, repo, "rev-parse", "HEAD"))
 }
 
-// When the collapsed snapshot is refused by Ledger validation, HEAD goes back
-// to the original tip so the unpushed commits are not left collapsed into the
-// index, and the backup ref still points at that tip.
-func TestSquashUnpushed_RestoresHeadWhenCommitIsRefused(t *testing.T) {
+// When Ledger validation refuses the collapsed commit, HEAD stays at the
+// original tip, and the backup ref points at that tip too.
+func TestSquashUnpushed_KeepsHeadWhenCommitIsRefused(t *testing.T) {
 	repo, _ := initBareRemoteRepo(t)
 	addCommit(t, repo, "fine.txt", "ok", "fine")
 	sessionDir := filepath.Join(repo, "sessions", "2026-01-01T00-00-test-Ox0000")
@@ -72,7 +71,7 @@ func TestSquashUnpushed_RestoresHeadWhenCommitIsRefused(t *testing.T) {
 
 	err := SquashUnpushed(context.Background(), repo, "squash")
 	require.ErrorContains(t, err, "validate squash or commit")
-	assert.Equal(t, original, strings.TrimSpace(gitOut(t, repo, "rev-parse", "HEAD")), "HEAD is restored")
+	assert.Equal(t, original, strings.TrimSpace(gitOut(t, repo, "rev-parse", "HEAD")), "HEAD stays put")
 	backup := strings.TrimSpace(gitOut(t, repo, "for-each-ref", "--format=%(objectname)", "refs/ox-backup/"))
 	assert.Equal(t, original, backup, "the backup ref keeps the original tip")
 }
@@ -84,7 +83,6 @@ func TestSquashUnpushed_ReportsGitFailuresAndKeepsHead(t *testing.T) {
 	cases := []struct{ mode, want string }{
 		{"revlistfail", "count unpushed commits"},
 		{"updatereffail", "keep pre-squash tip"},
-		{"resetfail", "reset --soft"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.mode, func(t *testing.T) {
@@ -112,13 +110,10 @@ func TestSquashBudget_ScalesWithDeltaSize(t *testing.T) {
 	assert.Equal(t, 15*time.Minute, squashBudget(1_000_000), "capped")
 }
 
-// The caller's context dying between the soft reset and the snapshot commit
-// must not leave HEAD at upstream with the whole delta merely staged. Measured
-// 2026-10-08 02:35: the GitHub-sync context expired mid-validation, the
-// commit was killed, the rollback ran on the same dead context and failed,
-// and the Ledger sat at upstream with 6,308 files staged until a human moved
-// HEAD back. Once the pre-checks pass, the reset+commit section and its
-// rollback run detached from the caller's cancellation, on their own budget.
+// The caller's context dying just before the squash commit must not stop it:
+// on 2026-10-08 02:35 the GitHub-sync context expired mid-validation and
+// killed the commit. The validation and commit run detached from the caller's
+// cancellation, on their own budget.
 func TestSquashUnpushed_FinishesWhenCallerContextDiesMidSquash(t *testing.T) {
 	repo, _ := initBareRemoteRepo(t)
 	addCommit(t, repo, "one.txt", "1", "one")

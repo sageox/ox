@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"fmt"
 	"log/slog"
 	"regexp"
 )
@@ -65,12 +66,21 @@ var (
 // never sees.
 func RedactSecrets(s string) string { return redactSecrets(s) }
 
-// redactAttr is the slog ReplaceAttr hook: scrub every string-valued attribute
-// (body, response, url, error, …) through redactSecrets. Non-string attrs are
-// passed through untouched.
-func redactAttr(_ []string, a slog.Attr) slog.Attr {
-	if a.Value.Kind() == slog.KindString {
+// RedactAttr is the slog ReplaceAttr hook: scrub every string-valued attribute
+// (body, response, url, …) through redactSecrets, and every error value, which
+// slog prints as its message — `"error", err` is the commonest way ox logs a
+// failure. Other attrs pass through untouched. Exported for handlers built
+// outside this package, such as the daemon's (newDaemonLogger in cmd/ox).
+func RedactAttr(_ []string, a slog.Attr) slog.Attr {
+	switch a.Value.Kind() {
+	case slog.KindString:
 		a.Value = slog.StringValue(redactSecrets(a.Value.String()))
+	case slog.KindAny:
+		if err, ok := a.Value.Any().(error); ok {
+			// fmt, not err.Error(): slog does not recover panics in this hook, and
+			// fmt prints a typed-nil error as <nil>, as slog did before this hook
+			a.Value = slog.StringValue(redactSecrets(fmt.Sprint(err)))
+		}
 	}
 	return a
 }

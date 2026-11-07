@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/testguard"
 	"github.com/stretchr/testify/require"
 )
@@ -158,6 +159,109 @@ func TestBackgroundDaemonSurvivesCommandCleanup(t *testing.T) {
 			require.Equal(t, daemonPID, status.PID, "the original daemon must survive")
 		})
 	}
+}
+
+// Failure prevented: a version-upgrade re-exec starts from HOME and replaces
+// the project's daemon with one that has neither its workspace nor its Ledger.
+func TestDaemonUpgradeRetainsProject(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: builds ox and exercises a real daemon re-exec")
+	}
+	oxBin := testguard.BuildOxBinary(t, filepath.Dir(filepath.Dir(packageDir)))
+	runtimeDir, err := os.MkdirTemp("/tmp", "ox-upgrade-")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(runtimeDir)) })
+	repo, home := t.TempDir(), t.TempDir()
+	env := []string{
+		"HOME=" + home, "USER=" + filepath.Base(runtimeDir),
+		"XDG_CONFIG_HOME=" + filepath.Join(home, "config"),
+		"XDG_CACHE_HOME=" + filepath.Join(home, "cache"),
+		"XDG_DATA_HOME=" + filepath.Join(home, "data"),
+		"XDG_STATE_HOME=" + filepath.Join(home, "state"),
+		"XDG_RUNTIME_DIR=" + runtimeDir,
+		"OX_XDG_ENABLE=1", "OX_XDG_DISABLE=",
+		"OX_USER_CONFIG=" + filepath.Join(home, "config.yaml"),
+		"OX_GIT_CREDENTIALS_FILE=" + filepath.Join(home, "git-creds.json"),
+		"SAGEOX_ENDPOINT=http://127.0.0.1:1",
+		"SAGEOX_DAEMON=true", "OX_NO_DAEMON=0",
+		"HTTP_PROXY=http://127.0.0.1:1", "HTTPS_PROXY=http://127.0.0.1:1",
+		"NO_PROXY=127.0.0.1,localhost",
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + filepath.Join(home, ".gitconfig"),
+	}
+	for _, kv := range env {
+		key, value, _ := strings.Cut(kv, "=")
+		t.Setenv(key, value)
+	}
+	// disposable_machine is deliberately unset, as on an ordinary laptop.
+	require.NoError(t, os.WriteFile(filepath.Join(home, "config.yaml"), []byte("agent_worker:\n  agent: none\n"), 0o600))
+	initGitRepo(t, repo)
+	repoID := filepath.Base(runtimeDir)
+	require.NoError(t, config.SaveProjectConfig(repo, &config.ProjectConfig{
+		RepoID: repoID, Endpoint: "http://127.0.0.1:1",
+	}))
+	ledgerPath := config.DefaultLedgerPath(repoID, "http://127.0.0.1:1")
+	require.NoError(t, os.MkdirAll(ledgerPath, 0o700))
+	initGitRepo(t, ledgerPath)
+
+	log, err := os.Create(filepath.Join(home, "daemon.log"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = log.Close() })
+	t.Cleanup(func() {
+		if t.Failed() {
+			data, _ := os.ReadFile(log.Name())
+			t.Logf("test daemon log:\n%s", data)
+		}
+	})
+	command := testguard.OxCmd(t, oxBin, repo, env, "daemon", "start", "--foreground")
+	command.Stdout, command.Stderr = log, log
+	require.NoError(t, command.Start())
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	// Re-exec keeps this PID. Kill only our child, including on a failed check
+	// where it incorrectly restarted under HOME and repo-scoped stop misses it.
+	t.Cleanup(func() {
+		_ = command.Process.Kill()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("test daemon did not exit")
+		}
+	})
+	var status daemon.StatusJSON
+	readStatus := func() bool {
+		out, err := testguard.OxCmd(t, oxBin, repo, env, "daemon", "status", "--json").Output()
+		status = daemon.StatusJSON{}
+		return err == nil && json.Unmarshal(out, &status) == nil && status.Running
+	}
+	require.Eventually(t, readStatus, 30*time.Second, 50*time.Millisecond, "daemon must start before the upgrade")
+	require.Equal(t, command.Process.Pid, status.Pid)
+	require.Equal(t, ledgerPath, status.LedgerPath)
+
+	workspaceID := daemon.RepoBasedWorkspaceID(repo)
+	payload, err := json.Marshal(daemon.HeartbeatPayload{
+		RepoPath: repo, WorkspaceID: workspaceID, Timestamp: time.Now(), CLIVersion: "999.0.0",
+	})
+	require.NoError(t, err)
+	client := daemon.NewClientWithSocket(daemon.SocketPathForWorkspace(workspaceID))
+	require.NoError(t, client.SendOneWay(daemon.Message{
+		Type: daemon.MsgTypeHeartbeat, WorkspaceID: workspaceID, CallerID: "upgrade-test", Payload: payload,
+	}))
+	// Wait until a second Start actually runs; seeing the original daemon's
+	// status immediately after the heartbeat would make this pass without exec.
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(log.Name())
+		return err == nil && strings.Count(string(data), "daemon starting") >= 2
+	}, 30*time.Second, 50*time.Millisecond, "version mismatch must really re-exec")
+	require.Eventually(t, readStatus, 10*time.Second, 50*time.Millisecond, "restarted daemon must retain the project's socket")
+	require.Equal(t, command.Process.Pid, status.Pid, "re-exec must preserve the daemon PID")
+	require.Equal(t, ledgerPath, status.LedgerPath, "the restarted daemon must still serve the project's Ledger")
+
+	out, code, _ := testguard.RunOx(t, oxBin, repo, env, "daemon", "start")
+	require.Zero(t, code, "%s", out)
+	require.True(t, readStatus())
+	require.Equal(t, command.Process.Pid, status.Pid, "the next CLI must not spawn a replacement daemon")
+	out, code, _ = testguard.RunOx(t, oxBin, repo, env, "daemon", "stop")
+	require.Zero(t, code, "%s", out)
 }
 
 // Process discovery must distinguish an unavailable ps from a successful empty list.

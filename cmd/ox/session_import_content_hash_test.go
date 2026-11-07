@@ -93,9 +93,9 @@ func TestImportContent_HashPinsOnlyPreviewedFilesAndRejectsRewrites(t *testing.T
 // from producing a preview or a review pin for different native bytes.
 func TestImportContent_HashRejectsRewriteDuringPreviewRead(t *testing.T) {
 	f, env, _, c, load := reviewedImportHashFixture(t)
-	env.deps.readNative = func(ctx context.Context, agent nativeimport.Agent, path string) ([]adapters.RawEntry, error) {
-		raw, err := f.readNative(ctx, agent, path)
-		rewriteImportReplyPreservingMetadata(t, path)
+	env.deps.readNative = func(ctx context.Context, s nativeimport.Session) ([]adapters.RawEntry, error) {
+		raw, err := f.readNative(ctx, s)
+		rewriteImportReplyPreservingMetadata(t, s.Path)
 		return raw, err
 	}
 	preview, err := load(context.Background(), c.Session.NativeID)
@@ -144,9 +144,9 @@ func TestImportPrepare_HashChecksBeforeAndAfterNativeRead(t *testing.T) {
 			if boundary == "before native read" {
 				rewriteImportReplyPreservingMetadata(t, c.Session.Path)
 			} else {
-				env.deps.readNative = func(ctx context.Context, agent nativeimport.Agent, path string) ([]adapters.RawEntry, error) {
-					raw, err := f.readNative(ctx, agent, path)
-					rewriteImportReplyPreservingMetadata(t, path)
+				env.deps.readNative = func(ctx context.Context, s nativeimport.Session) ([]adapters.RawEntry, error) {
+					raw, err := f.readNative(ctx, s)
+					rewriteImportReplyPreservingMetadata(t, s.Path)
 					return raw, err
 				}
 			}
@@ -258,8 +258,8 @@ func TestImportPrepare_HashCancellationPreservesInterrupt(t *testing.T) {
 			ctx := importCancelDuringDigest(t, 4)
 			if boundary == "after native read" {
 				ctx.cancelAt = -1
-				env.deps.readNative = func(readCtx context.Context, agent nativeimport.Agent, path string) ([]adapters.RawEntry, error) {
-					raw, err := f.readNative(readCtx, agent, path)
+				env.deps.readNative = func(readCtx context.Context, s nativeimport.Session) ([]adapters.RawEntry, error) {
+					raw, err := f.readNative(readCtx, s)
 					ctx.cancelAt = ctx.checks + 3
 					return raw, err
 				}

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/sageox/ox/internal/pet"
@@ -14,16 +15,23 @@ import (
 // TestDoctorRun_RefreshesStaleOxy drives the real doctor runner, the way a
 // coworker's plain `ox doctor` does. Doctor executes an explicit list, so a
 // check that is only registered never runs.
+// The Claude Code mod and the Codex pet are both stale, so both refresh.
 // Failure prevented: the refresh exists and passes its unit test, yet no
 // `ox doctor` run ever reaches it.
 func TestDoctorRun_RefreshesStaleOxy(t *testing.T) {
 	if testing.Short() {
-		t.Skip("short: full doctor run plus rendering every Oxy frame")
+		t.Skip("short: full doctor run")
 	}
 	sandboxDoctorEnv(t)
+	// Which frames get written is the pet package's concern; this test is
+	// about doctor reaching the refresh at all.
+	useTinyPetSheets(t)
 	project := testGitRepo(t)
 	t.Chdir(project)
 	writePetMod("0.0.1")(t, pet.Dir())
+	codexHome := filepath.Join(t.TempDir(), "codex")
+	t.Setenv("CODEX_HOME", codexHome)
+	writeCodexPet("0.0.1")(t, codexHome)
 
 	categories, err := runDoctorChecks(context.Background(), doctorOptions{})
 	require.NoError(t, err)
@@ -41,4 +49,7 @@ func TestDoctorRun_RefreshesStaleOxy(t *testing.T) {
 	got, err := pet.WrittenVersion(pet.Dir())
 	require.NoError(t, err)
 	assert.NotEqual(t, "0.0.1", got, "plain `ox doctor` must refresh a stale Oxy")
+	got, err = pet.CodexWrittenVersion(pet.CodexDir(codexHome))
+	require.NoError(t, err)
+	assert.NotEqual(t, "0.0.1", got, "plain `ox doctor` must refresh a stale Codex Oxy")
 }

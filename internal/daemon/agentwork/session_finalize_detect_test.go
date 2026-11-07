@@ -773,22 +773,16 @@ func TestDetect_ConcurrentRemoval(t *testing.T) {
 	}
 }
 
-func TestSetQualityThresholds(t *testing.T) {
+func TestSetQualityDiscardThreshold(t *testing.T) {
 	handler := NewSessionFinalizeHandler(slog.Default())
 
 	// defaults
-	if handler.qualityUploadThreshold != 0.3 {
-		t.Errorf("expected default upload threshold 0.3, got %f", handler.qualityUploadThreshold)
-	}
 	if handler.qualityDiscardThreshold != 0.1 {
 		t.Errorf("expected default discard threshold 0.1, got %f", handler.qualityDiscardThreshold)
 	}
 
 	// custom
-	handler.SetQualityThresholds(0.6, 0.2)
-	if handler.qualityUploadThreshold != 0.6 {
-		t.Errorf("expected upload threshold 0.6, got %f", handler.qualityUploadThreshold)
-	}
+	handler.SetQualityDiscardThreshold(0.2)
 	if handler.qualityDiscardThreshold != 0.2 {
 		t.Errorf("expected discard threshold 0.2, got %f", handler.qualityDiscardThreshold)
 	}

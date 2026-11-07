@@ -50,7 +50,7 @@ func TestCursorWatcherInactivityReleasesOwnershipForFinalization(t *testing.T) {
 	err = fileutil.WithFileLockTimeout(context.Background(), rawPath, time.Second, func() error { return nil })
 	require.NoError(t, err, "the finalizer can acquire ownership after Cleanup joins the watcher")
 	handler := NewSessionFinalizeHandlerForTest(mgr.logger)
-	items, _, err := handler.detectInDir(filepath.Dir(f.cachePath), f.ledgerPath)
+	items, _, err := handler.detectInDir(filepath.Dir(f.cachePath), f.ledgerPath, true)
 	require.NoError(t, err)
 	require.Len(t, items, 1, "inactivity must queue finalization without a sessionEnd hook")
 	assert.NoFileExists(t, recPath)

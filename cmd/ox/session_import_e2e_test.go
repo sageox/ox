@@ -239,10 +239,17 @@ type importFixture struct {
 	ctx            context.Context // the run's context; nil means context.Background()
 	progress       bytes.Buffer    // what a JSON run reports while it works
 
-	mu       sync.Mutex
-	native   map[string][]adapters.RawEntry // adapter output by native file
-	reads    []string
-	notified []string
+	mu         sync.Mutex
+	native     map[string][]adapters.RawEntry     // adapter output by native file
+	nativeFrom map[nativeRead][]adapters.RawEntry // adapter output from a byte offset into it
+	reads      []string
+	notified   []string
+}
+
+// nativeRead is one adapter read: a native file, from a byte offset into it.
+type nativeRead struct {
+	path   string
+	offset int64
 }
 
 func newImportFixture(t *testing.T) *importFixture {
@@ -273,6 +280,7 @@ func newImportFixture(t *testing.T) *importFixture {
 		summarizer:         &fakeSummarizer{},
 		store:              newFakeLFSStore(t),
 		native:             map[string][]adapters.RawEntry{},
+		nativeFrom:         map[nativeRead][]adapters.RawEntry{},
 	}
 }
 
@@ -386,15 +394,19 @@ func (f *importFixture) add(t *testing.T, s pastSession) string {
 	return path
 }
 
-// readNative is the adapter: it answers only for the exact file it is given.
-func (f *importFixture) readNative(_ context.Context, _ nativeimport.Agent, path string) ([]adapters.RawEntry, error) {
+// readNative is the adapter: it answers only for the exact file it is given,
+// and from the exact offset it is given.
+func (f *importFixture) readNative(_ context.Context, s nativeimport.Session) ([]adapters.RawEntry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.reads = append(f.reads, path)
+	f.reads = append(f.reads, s.Path)
 	if f.readErr != nil {
 		return nil, f.readErr
 	}
-	entries, ok := f.native[path]
+	entries, ok := f.native[s.Path]
+	if s.Offset > 0 {
+		entries, ok = f.nativeFrom[nativeRead{s.Path, s.Offset}]
+	}
 	if !ok {
 		return nil, errors.New("adapter: no such session file")
 	}
@@ -534,6 +546,8 @@ func optionsFromCommand(t *testing.T, command string) importOptions {
 		switch fields[i] {
 		case "--yes":
 			opts.yes = true
+		case "--include-aborted":
+			opts.includeAborted = true
 		case "--session":
 			i++
 			opts.sessions = append(opts.sessions, strings.Split(fields[i], ",")...)
@@ -965,29 +979,28 @@ func TestImportE2E_UploadCommandPinsWhatWasPreviewed(t *testing.T) {
 		"only the previewed session is uploaded")
 }
 
-// Live recording discards a session its summarizer judges "skip" and keeps a
-// "local_only" one off the Ledger; the import routes the same way, whether the
-// verdict came from the summarizer or from the brief-session prefilter, and a
-// rerun remembers it instead of summarizing again.
+// The import shares substantive work, including routine configuration,
+// while preserving skips from both the summarizer and the brief-session
+// prefilter. A rerun remembers skipped sessions instead of summarizing again.
 //
 // Failure prevented: trivial sessions filling the Ledger, and a skip reply,
 // which has no title, committed as the empty-title meta.json that the daemon
 // rewrites on every tick (#1105).
-func TestImportE2E_SessionsNotWorthSharingStayLocal(t *testing.T) {
+func TestImportE2E_ShareOrSkip(t *testing.T) {
 	f := newImportFixture(t)
 	start := time.Date(2026, 9, 8, 13, 0, 0, 0, time.UTC)
 	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: start, prompt: loginPrompt, reply: "Fixed the cookie."})
 	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexA, start: start.Add(time.Hour), prompt: pushPrompt, reply: "Never mind."})
 	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeB, start: start.Add(2 * time.Hour), prompt: "fix the typo", reply: "Done."})
 	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexB, start: start.Add(3 * time.Hour), prompt: tokenPrompt, reply: "Checked."})
-	longReason := strings.Repeat("Personal scratch work on a local credential setup. ", 5)
+	longReason := strings.Repeat("Repeated housekeeping with no new work or decisions. ", 5)
 	f.summarizer.reply = func(prompt string) string {
 		switch {
 		case strings.Contains(prompt, pushPrompt):
-			return `{"quality_category":"skip","score_reason":"Asked one question and left before any work."}`
+			return jsonLine(t, map[string]any{"quality_category": "skip", "score_reason": longReason})
 		case strings.Contains(prompt, tokenPrompt):
 			return jsonLine(t, map[string]any{"title": "Check the CLI account", "summary": "Looked at which account the CLI uses.",
-				"key_actions": []string{"Checked the account"}, "outcome": "success", "quality_category": "local_only", "score_reason": longReason})
+				"key_actions": []string{"Checked the account"}, "outcome": "success", "quality_category": "share", "score_reason": "Routine local account setup"})
 		}
 		return ""
 	}
@@ -1000,11 +1013,12 @@ func TestImportE2E_SessionsNotWorthSharingStayLocal(t *testing.T) {
 		assert.Equal(t, "skipped", s.Outcome, id)
 		assert.Contains(t, s.Detail, "not worth sharing", id)
 	}
-	local := r.session(t, e2eCodexB)
-	assert.Equal(t, "skipped", local.Outcome)
-	assert.True(t, strings.HasPrefix(local.Detail, "kept local: Personal scratch work"), local.Detail)
-	assert.True(t, strings.HasSuffix(local.Detail, "…"), "a long reason is clipped: %q", local.Detail)
-	assert.Equal(t, []string{r.session(t, e2eClaudeA).SessionName}, remoteSessionDirs(t, f.barePath))
+	assert.Equal(t, "uploaded", r.session(t, e2eCodexB).Outcome, "routine configuration work is shared")
+	skipped := r.session(t, e2eCodexA)
+	assert.True(t, strings.HasPrefix(skipped.Detail, "not worth sharing: Repeated housekeeping"), skipped.Detail)
+	assert.True(t, strings.HasSuffix(skipped.Detail, "…"), "a long reason is clipped: %q", skipped.Detail)
+	assert.ElementsMatch(t, []string{r.session(t, e2eClaudeA).SessionName, r.session(t, e2eCodexB).SessionName}, remoteSessionDirs(t, f.barePath))
+	assert.Positive(t, f.store.holding(tokenPrompt), "shared content reaches the store")
 	assert.Zero(t, f.store.holding(pushPrompt), "nothing of a skipped session is uploaded")
 	calls := f.summarizer.calls()
 	assert.Equal(t, 3, calls, "a brief session is judged without the summarizer")

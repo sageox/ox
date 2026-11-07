@@ -175,6 +175,8 @@ func importBrowserReason(state importState) string {
 		return "A summarizer must be installed and logged in before this session can be imported."
 	case stateNotShared:
 		return "An earlier import review kept this session local."
+	case stateAborted:
+		return "You aborted this session's recording. It will not be uploaded."
 	case stateIneligible:
 		return "This session does not meet the import requirements."
 	default:

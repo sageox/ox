@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	claude "github.com/sageox/ox/internal/hooks/claude"
 )
 
 // TestAllInstalledHooksHaveOxGuard verifies that every ox hook command installed
@@ -723,6 +725,7 @@ func TestMigrationCleansUpLocalSettings(t *testing.T) {
 // TestMigrationDeletesEmptyLocalSettings verifies that settings.local.json is
 // deleted entirely when it only contained ox hooks.
 func TestMigrationDeletesEmptyLocalSettings(t *testing.T) {
+	isolateUserConfig(t)
 	tmpDir := t.TempDir()
 	claudeDir := filepath.Join(tmpDir, ".claude")
 	require.NoError(t, os.MkdirAll(claudeDir, 0755))
@@ -751,7 +754,17 @@ func TestMigrationDeletesEmptyLocalSettings(t *testing.T) {
 	err := InstallProjectClaudeHooks(tmpDir)
 	require.NoError(t, err)
 
-	// local file should be deleted (was empty after removing ox hooks)
+	// the migrated hooks are gone from the local file; what remains is the
+	// per-coworker ox statusLine the installer puts there on purpose
+	_, localMap, err := readSettingsFileRaw(localPath)
+	require.NoError(t, err)
+	assert.NotContains(t, localMap, "hooks", "ox hooks were migrated out of settings.local.json")
+	assert.Equal(t, claude.StatusLineCurrent, claude.ClassifyStatusLine(localMap))
+
+	// with the status line off, nothing is left and the file goes away
+	require.NoError(t, SetConfigValue("statusline", "off", ConfigLevelUser, ""))
+	require.NoError(t, os.WriteFile(localPath, data, 0644))
+	require.NoError(t, InstallProjectClaudeHooks(tmpDir))
 	_, statErr := os.Stat(localPath)
 	assert.True(t, os.IsNotExist(statErr), "empty local settings should be deleted")
 }
@@ -796,8 +809,10 @@ func TestSharedHookValueValidation(t *testing.T) {
 }
 
 // TestInstallWritesToSharedNotLocal verifies hooks are written to settings.json,
-// not settings.local.json.
+// not settings.local.json. The per-coworker ox statusLine is the one key the
+// installer does put in settings.local.json; it must never bring hooks along.
 func TestInstallWritesToSharedNotLocal(t *testing.T) {
+	isolateUserConfig(t)
 	tmpDir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0755))
 
@@ -812,10 +827,15 @@ func TestInstallWritesToSharedNotLocal(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "ox agent hook", "hooks should be in settings.json")
 
-	// settings.local.json should NOT be created
+	// settings.local.json carries only the coworker's statusLine, never hooks
 	localPath := filepath.Join(tmpDir, ".claude", "settings.local.json")
-	_, statErr := os.Stat(localPath)
-	assert.True(t, os.IsNotExist(statErr), "settings.local.json should not be created")
+	local, localMap, err := readSettingsFileRaw(localPath)
+	require.NoError(t, err)
+	assert.Empty(t, local.Hooks, "hooks must not be written to settings.local.json")
+	assert.NotContains(t, string(localMap["statusLine"]), "ox agent hook")
+	for key := range localMap {
+		assert.Equal(t, "statusLine", key, "settings.local.json should hold nothing but the statusLine")
+	}
 }
 
 // TestMigrationRealisticOldFormat reproduces the real-world settings.local.json

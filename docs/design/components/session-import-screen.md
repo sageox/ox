@@ -27,7 +27,7 @@ If another command needs a reusable part of this screen, extract that part with 
 
 ## Anatomy
 
-The destination and its visibility appear above the selection. Ready sessions start selected unless `--session` narrows the initial choice. Skipped sessions remain readable and cannot be selected. The last AI reply is an excerpt from the recording, without an inferred completion claim.
+The destination and its visibility appear above the selection. Ready sessions start selected unless `--session` narrows the initial choice. Skipped sessions remain readable and cannot be selected. A session whose ox recording the coworker aborted is skipped as `aborted`; it becomes selectable only when named with `--session` and `--include-aborted`. The last AI reply is an excerpt from the recording, without an inferred completion claim.
 
 At 92 columns or wider, the session list and excerpts appear side by side. At 80 columns, the list sits above the excerpts. Both layouts keep output within the terminal width and height; page keys scroll the excerpts.
 

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -38,6 +39,27 @@ func TestGetToken_NoFile(t *testing.T) {
 	token, err := client.GetToken()
 	require.NoError(t, err)
 	assert.Nil(t, token, "want nil when no token file exists")
+}
+
+// Failure prevented: OIDC sub is lost at sign-in or reload, leaving direct UserID readers blank.
+func TestUserInfo_SubPopulatesUserID(t *testing.T) {
+	for _, tt := range []struct{ name, raw, want string }{
+		{"sub only", `{"sub":"usr_subject"}`, "usr_subject"},
+		{"legacy id wins", `{"user_id":"usr_legacy","sub":"usr_subject"}`, "usr_legacy"},
+		{"missing", `{}`, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var info UserInfo
+			require.NoError(t, json.Unmarshal([]byte(tt.raw), &info))
+			assert.Equal(t, tt.want, info.UserID)
+			client := NewTestClient(t)
+			require.NoError(t, client.SaveToken(&StoredToken{UserInfo: info}))
+			stored, err := client.GetToken()
+			require.NoError(t, err)
+			require.NotNil(t, stored)
+			assert.Equal(t, tt.want, stored.UserInfo.UserID)
+		})
+	}
 }
 
 func TestSaveAndGetToken(t *testing.T) {
@@ -263,6 +285,81 @@ func TestRemoveTokenIfUnchanged_UnreadableStoreIsAnError(t *testing.T) {
 	data, err := os.ReadFile(authPath)
 	require.NoError(t, err)
 	assert.Equal(t, "not-json", string(data), "an unreadable store must be left as it was")
+}
+
+// TestSaveTokenIfUnchanged_SavesOnlyOverTheRefreshedLogin covers every pairing
+// of the login on disk with the login a refresh started from.
+// Failure prevented: a refresh saved over whatever auth.json held when the
+// server answered, bringing back a removed login or overwriting a newer one.
+func TestSaveTokenIfUnchanged_SavesOnlyOverTheRefreshedLogin(t *testing.T) {
+	t.Parallel()
+	const ep = "https://sageox.ai"
+	login := func(access, refresh string) *StoredToken {
+		return &StoredToken{AccessToken: access, RefreshToken: refresh, ExpiresAt: time.Now().Add(time.Hour)}
+	}
+	refreshed := login("t2-access", "t2-refresh")
+
+	for _, tt := range []struct {
+		name       string
+		onDisk     *StoredToken
+		from       *StoredToken
+		wantStored string // access token stored afterwards; "" for none
+	}{
+		{name: "the refreshed login is replaced", onDisk: login("t1-access", "t1-refresh"), from: login("t1-access", "t1-refresh"), wantStored: "t2-access"},
+		{name: "a Better Auth session login is replaced", onDisk: login("s1", "s1"), from: login("s1", "s1"), wantStored: "t2-access"},
+		{name: "a login that replaced it is kept", onDisk: login("other-access", "other-refresh"), from: login("t1-access", "t1-refresh"), wantStored: "other-access"},
+		{name: "a newer JWT on the same session is kept", onDisk: login("jwt-b", "s1"), from: login("jwt-a", "s1"), wantStored: "jwt-b"},
+		{name: "a removed login stays removed", from: login("t1-access", "t1-refresh")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			client := NewTestClient(t).WithEndpoint(ep)
+			if tt.onDisk != nil {
+				require.NoError(t, client.SaveToken(tt.onDisk))
+			}
+
+			got, err := client.saveTokenIfUnchanged(ep, tt.from, refreshed)
+			require.NoError(t, err)
+
+			stored, err := client.GetToken()
+			require.NoError(t, err)
+			if tt.wantStored == "" {
+				assert.Nil(t, stored, "a removed login came back")
+				assert.Nil(t, got)
+				return
+			}
+			if assert.NotNil(t, stored) {
+				assert.Equal(t, tt.wantStored, stored.AccessToken)
+			}
+			if assert.NotNil(t, got, "the stored login must be returned") {
+				assert.Equal(t, tt.wantStored, got.AccessToken)
+			}
+		})
+	}
+}
+
+// TestSaveTokenIfUnchanged_UnreadableAuthFileIsAnError proves an auth.json the
+// helper cannot parse fails the save and is left as it was.
+// Failure prevented: an unreadable store read as "login removed", which would
+// discard a refresh and report a logout that never happened.
+func TestSaveTokenIfUnchanged_UnreadableAuthFileIsAnError(t *testing.T) {
+	t.Parallel()
+	const ep = "https://sageox.ai"
+	client := NewTestClient(t).WithEndpoint(ep)
+	authPath, err := client.GetAuthFilePath()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0o700))
+	corrupt := []byte("{ invalid json }")
+	require.NoError(t, os.WriteFile(authPath, corrupt, 0o600))
+
+	from := createTestTokenForTest(-time.Hour)
+	got, err := client.saveTokenIfUnchanged(ep, from, createTestTokenForTest(time.Hour))
+	require.Error(t, err)
+	assert.Nil(t, got)
+
+	after, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+	assert.Equal(t, corrupt, after, "a failed save must not rewrite auth.json")
 }
 
 func TestIsExpired(t *testing.T) {
@@ -854,6 +951,22 @@ func TestGetUserID_EmptyUserInfo(t *testing.T) {
 	assert.Equal(t, "", uid, "empty UserInfo should return empty user ID")
 }
 
+// Failure prevented: a login stored before user_id was filled keeps sending
+// an empty person to session metadata until the next sign-in.
+func TestGetUserID_LegacyLoginFromJWTSubject(t *testing.T) {
+	// Isolated from legacy-mode paths and an endpoint-bound SAGEOX_TOKEN.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("SAGEOX_TOKEN", "")
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"usr_legacy","email":"private"}`))
+	require.NoError(t, SaveToken(&StoredToken{AccessToken: "header." + payload + ".sig", ExpiresAt: time.Now().Add(time.Hour)}))
+	assert.Equal(t, "usr_legacy", GetUserID(""))
+
+	coworker := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"agt_coworker"}`))
+	require.NoError(t, SaveToken(&StoredToken{AccessToken: "header." + coworker + ".sig", ExpiresAt: time.Now().Add(time.Hour)}))
+	assert.Equal(t, "", GetUserID(""), "only a usr_ subject names a person")
+}
+
 func TestGetUserID_NoToken(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	uid := GetUserID("")
@@ -1294,4 +1407,40 @@ func TestAuthClientAuthChecks_MalformedEnvTokenSurfacesReason(t *testing.T) {
 			"only ErrEnvTokenMalformed is worth surfacing here — reporting every resolution failure "+
 				"would make a corrupt auth.json a hard error for callers that only wanted to know whether to show a login hint")
 	})
+}
+
+// Failure prevented: analytics attributes an environment/team token to a local person or performs auth IO.
+func TestLocalUserID_OnlyLocalPerson(t *testing.T) {
+	jwt := func(payload string) string {
+		return "header." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
+	}
+	for _, tt := range []struct{ name, rawInfo, token, env, want string }{
+		{name: "signed out"},
+		{name: "stored person", rawInfo: `{"user_id":"usr_stored"}`, token: "opaque", want: "usr_stored"},
+		{name: "sub only", rawInfo: `{"sub":"usr_subject"}`, token: "opaque", want: "usr_subject"},
+		{name: "jwt subject", rawInfo: `{}`, token: jwt(`{"sub":"usr_jwt","ignored":"private"}`), want: "usr_jwt"},
+		{name: "non-person subject", rawInfo: `{}`, token: jwt(`{"sub":"agt_coworker"}`)},
+		{name: "bad payload", rawInfo: `{}`, token: "header.%.signature"},
+		{name: "bad json", rawInfo: `{}`, token: jwt(`{`)},
+		{name: "opaque token", rawInfo: `{}`, token: "opaque"},
+		{name: "team token", rawInfo: `{"user_id":"usr_stored"}`, token: "oxt_invalid_fixture"},
+		{name: "env shadows login", rawInfo: `{"user_id":"usr_stored"}`, token: "opaque", env: jwt(`{"sub":"usr_env"}`)},
+		{name: "malformed env shadows login", rawInfo: `{"user_id":"usr_stored"}`, token: "opaque", env: "oxt_invalid_fixture"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			t.Setenv("SAGEOX_ENDPOINT", "https://local.test")
+			t.Setenv("SAGEOX_TOKEN", tt.env)
+			if tt.rawInfo != "" {
+				path, err := GetAuthFilePath()
+				require.NoError(t, err)
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+				token, _ := json.Marshal(tt.token)
+				raw := `{"tokens":{"https://local.test":{"access_token":` + string(token) + `,"user_info":` + tt.rawInfo + `}}}`
+				require.NoError(t, os.WriteFile(path, []byte(raw), 0o600))
+			}
+			assert.Equal(t, tt.want, LocalUserID("https://local.test"))
+		})
+	}
 }

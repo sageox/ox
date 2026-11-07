@@ -1,9 +1,11 @@
 package skillmanager
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/sageox/ox/internal/config"
@@ -46,6 +48,58 @@ func approveViaStore(t *testing.T, repo, name string, allowScripts bool) {
 	}
 	require.True(t, found, "ClassifyTeamSkills did not see %q, so nothing could be approved", name)
 	require.NoError(t, store.Save(repo))
+}
+
+// TestApproval_ClaudeFrontmatterAutomaticProjection checks the automatic apply
+// path used after team sync, not host execution. Claude Code versions and managed
+// policies determine whether installed grants/hooks run; ox gates them regardless.
+func TestApproval_ClaudeFrontmatterAutomaticProjection(t *testing.T) {
+	for name, front := range map[string]string{
+		"bare tools":   "allowed-tools: Bash(*)\n",
+		"quoted tools": "\"allowed-tools\": \"Bash(*)\"\n",
+		"single quote": "'allowed-tools': [Bash]\n",
+		"hooks only":   "hooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: echo hook\n",
+		"malformed":    "description: [\n",
+		"unsupported":  "description: !custom notes\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo, team := t.TempDir(), t.TempDir()
+			writeTeamSkill(t, team, "frontmatter", front, nil)
+			stageTeamWiredProject(t, repo, team)
+			target := adapterprotocol.SkillTarget{
+				Key: "claude-project", Root: ".claude/skills",
+				Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject,
+				LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+			}
+			manifest := filepath.Join(repo, ".claude", "skills", "frontmatter"+TeamSuffix, "SKILL.md")
+			// Persist the target selection, as ox init does before automatic sync.
+			_, err := Reconcile(repo, "1.0.0", desiredFor(target), []adapterprotocol.SkillTarget{target})
+			require.NoError(t, err)
+			require.NoFileExists(t, manifest)
+			automatic := func() *ReconcilePlan {
+				t.Helper()
+				plan, err := ReconcileUpdateNonBlocking(repo, "1.0.0", func(desired DesiredSkills, targets []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
+					return desired, targets, nil
+				})
+				require.NoError(t, err)
+				return plan
+			}
+			plan := automatic()
+			require.Len(t, plan.WithheldTeamSkills(), 1)
+			require.Contains(t, plan.WithheldTeamSkills()[0].Reason, "manifest itself")
+			require.NoFileExists(t, manifest, "automatic projection wrote an unapproved manifest")
+
+			approveViaStore(t, repo, "frontmatter", false)
+			require.Empty(t, automatic().WithheldTeamSkills())
+			installed, err := os.ReadFile(manifest)
+			require.NoError(t, err)
+			require.Contains(t, string(installed), front, "approval should preserve the frontmatter, not strip its capability")
+
+			writeTeamSkill(t, team, "frontmatter", front+"changed: true\n", nil)
+			require.Len(t, automatic().WithheldTeamSkills(), 1, "changed bytes retained the previous approval")
+			require.NoFileExists(t, manifest, "automatic projection retained a manifest whose approval no longer matches")
+		})
+	}
 }
 
 // TestApproval_UnblocksAnExecutableTeamSkillEndToEnd is the proof that team
@@ -180,6 +234,54 @@ func removedPaths(plan *ReconcilePlan) []string {
 		out = append(out, action.Path)
 	}
 	return out
+}
+
+func TestApproval_AmbiguousInventoryRequiresFreshScriptsGrant(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires POSIX filenames containing colons and newlines")
+	}
+	t.Parallel()
+
+	const skillName = "deploy"
+	const script = "echo unreviewed\n"
+	// Under the legacy digest this one inert file encoded a, b.sh, and c.
+	// Keep the reviewed script identical so only the inventory framing changes.
+	oddPath := fmt.Sprintf("a:0\nfile:b.sh:%d\n%sfile:c", len(script), script)
+	repo, team := t.TempDir(), t.TempDir()
+	writeTeamSkill(t, team, skillName, "", map[string]string{
+		oddPath:          "",
+		"scripts/run.sh": "echo reviewed\n",
+	})
+	stageTeamWiredProject(t, repo, team)
+	approveViaStore(t, repo, skillName, true)
+	require.Empty(t, reconcileOnce(t, repo).WithheldTeamSkills())
+	installed := filepath.Join(repo, ".agents", "skills", skillName+TeamSuffix)
+	require.FileExists(t, filepath.Join(installed, "scripts", "run.sh"))
+
+	source := filepath.Join(team, "agents", "skills", skillName)
+	require.NoError(t, os.Remove(filepath.Join(source, oddPath)))
+	for name, content := range map[string]string{"a": "", "b.sh": script, "c": ""} {
+		require.NoError(t, os.WriteFile(filepath.Join(source, name), []byte(content), 0o644))
+	}
+
+	plan := reconcileOnce(t, repo)
+	require.Len(t, plan.WithheldTeamSkills(), 1, "an ambiguous inventory reused its prior approval")
+	require.FileExists(t, filepath.Join(installed, "SKILL.md"))
+	require.NoFileExists(t, filepath.Join(installed, "b.sh"), "an unreviewed script reached disk")
+	require.NoFileExists(t, filepath.Join(installed, "scripts", "run.sh"), "the stale script grant survived")
+
+	// Reapproval without an explicit scripts grant must not restore the old one.
+	approveViaStore(t, repo, skillName, false)
+	require.Len(t, reconcileOnce(t, repo).WithheldTeamSkills(), 1)
+	require.NoFileExists(t, filepath.Join(installed, "b.sh"))
+	approveViaStore(t, repo, skillName, true)
+	require.Empty(t, reconcileOnce(t, repo).WithheldTeamSkills())
+	content, err := os.ReadFile(filepath.Join(installed, "b.sh"))
+	require.NoError(t, err)
+	require.Equal(t, script, string(content))
+	info, err := os.Stat(filepath.Join(installed, "b.sh"))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
 }
 
 // TestApproval_FlippingBackToWithheldSweepsTheStaleCopy is the other half of the

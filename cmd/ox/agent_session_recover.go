@@ -333,6 +333,11 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 	if state.SourceRejected {
 		return fmt.Errorf("claude source has untrusted repository ownership; cache preserved for manual review")
 	}
+	// Recordings persisted by older discovery code may name a foreign source
+	// whose native file is gone; the binding still decides what may publish.
+	if err := session.CheckNativeSourceBinding(state); err != nil {
+		return fmt.Errorf("%w; cache preserved for manual review", err)
+	}
 	// A crash between a batch write and its cursor commit leaves unacknowledged
 	// bytes on raw.jsonl, possibly holding credential output whose redaction
 	// checkpoint never landed. Nothing reads the file before that is settled:
@@ -526,6 +531,9 @@ func checkRecoveryDestination(ledgerSessionDir, sessionName, recoveredID string)
 // it until this returns: the bytes read here are the bytes published, and the
 // recording cleared is the one they came from.
 func publishCachedRecording(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState, rawPath string) (*sessionRecoverOutput, error) {
+	if err := maskCachedRecordingForPublication(rawPath, projectRoot, state); err != nil {
+		return nil, err
+	}
 	stored, err := session.ReadSessionFromPath(rawPath)
 	if err != nil {
 		return nil, unreadableCachedSessionError(projectRoot, state, err)
@@ -570,12 +578,19 @@ func publishCachedRecording(inst *agentinstance.Instance, projectRoot string, st
 				return nil, fmt.Errorf("persist guarded recovered recording: %w", err)
 			}
 
-			// copy other artifacts if they exist in cache
+			// copy other artifacts if they exist in cache. A paused recording's
+			// artifacts are copied only when written after its mask, and stale
+			// ones in a reused Ledger directory are removed so none can publish.
 			cacheDir := filepath.Dir(rawPath)
+			paused := recordingHasPause(state)
 			for _, name := range []string{ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"} {
 				src := filepath.Join(cacheDir, name)
+				dst := filepath.Join(ledgerSessionDir, name)
+				if paused && !artifactPostdatesMask(rawPath, src) {
+					_ = os.Remove(dst)
+					continue
+				}
 				if srcData, err := os.ReadFile(src); err == nil {
-					dst := filepath.Join(ledgerSessionDir, name)
 					_ = os.WriteFile(dst, srcData, 0644)
 				}
 			}
@@ -691,9 +706,67 @@ func publishCachedRecording(inst *agentinstance.Instance, projectRoot string, st
 	return output, nil
 }
 
+// maskCachedRecordingForPublication is shared by incremental stop and cache-only
+// recovery. Lifecycle seqs count entries, not header/footer records or a native
+// record's optional seq field. Refuse a shortened or malformed cache rather than
+// apply those boundaries to a different entry sequence. The atomic replacement
+// leaves the cache intact on parsing, policy, or lifecycle validation failure.
+func maskCachedRecordingForPublication(rawPath, projectRoot string, state *session.RecordingState) error {
+	if state.AdapterName == "cursor" {
+		return nil // Cursor's native finalizer already applied the lifecycle.
+	}
+	if !recordingHasPause(state) {
+		return nil
+	}
+	return copyRawSessionForPublication(rawPath, rawPath, projectRoot, state)
+}
+
+func recordingHasPause(state *session.RecordingState) bool {
+	for _, event := range state.Lifecycle {
+		if event.Action == session.LifecycleActionPause {
+			return true
+		}
+	}
+	return false
+}
+
+// publicationMask records an in-place mask of raw.jsonl, so a retry after a
+// failed upload can tell its own masked cache from an unrelated shortened one.
+type publicationMask struct {
+	Original int `json:"original"`
+	Retained int `json:"retained"`
+}
+
+func publicationMaskPath(rawPath string) string { return rawPath + ".publication-mask" }
+
+// artifactPostdatesMask reports whether a cached artifact was written after
+// raw.jsonl was masked, and so derives from retained entries only.
+func artifactPostdatesMask(rawPath, artifactPath string) bool {
+	mask, err := os.Stat(publicationMaskPath(rawPath))
+	if err != nil {
+		return false
+	}
+	artifact, err := os.Stat(artifactPath)
+	return err == nil && artifact.ModTime().After(mask.ModTime())
+}
+
+func alreadyMasked(rawPath string, checkpoint, current int) bool {
+	data, err := os.ReadFile(publicationMaskPath(rawPath))
+	if err != nil {
+		return false
+	}
+	var m publicationMask
+	return json.Unmarshal(data, &m) == nil && m.Original == checkpoint && m.Retained == current
+}
+
 // copyRecoveredRawSession preserves every native record and framing field while
-// applying current policy. Parse/policy failures leave the destination intact.
+// applying current policy. Lifecycle masking happens before any recovery preview
+// or copy. Parse/policy failures leave the destination intact.
 func copyRecoveredRawSession(sourcePath, destinationPath, projectRoot string) error {
+	return copyRawSessionForPublication(sourcePath, destinationPath, projectRoot, nil)
+}
+
+func copyRawSessionForPublication(sourcePath, destinationPath, projectRoot string, state *session.RecordingState) error {
 	source, err := os.Open(sourcePath)
 	if err != nil {
 		return fmt.Errorf("open cached recording: %w", err)
@@ -711,6 +784,8 @@ func copyRecoveredRawSession(sourcePath, destinationPath, projectRoot string) er
 	}
 	decoder := json.NewDecoder(source)
 	decoder.UseNumber()
+	var records []map[string]any
+	var entryPositions []int
 	for {
 		var record map[string]any
 		if err := decoder.Decode(&record); err == io.EOF {
@@ -719,6 +794,67 @@ func copyRecoveredRawSession(sourcePath, destinationPath, projectRoot string) er
 			// Decoder errors may quote source bytes. A malformed recording is
 			// repairable local data, never safe content for a terminal diagnostic.
 			return fmt.Errorf("cached recording is not valid JSONL")
+		}
+		if record == nil {
+			return fmt.Errorf("cached recording is not a JSONL object")
+		}
+		if state == nil {
+			if err := writer.WriteRaw(record); err != nil {
+				return fmt.Errorf("redact recovered recording: %w", err)
+			}
+			continue
+		}
+		records = append(records, record)
+		if record["type"] == "header" || record["type"] == "footer" {
+			continue
+		}
+		if _, ok := record["_meta"].(map[string]any); ok {
+			continue
+		}
+		// Track record positions separately from lifecycle entry positions,
+		// preserving native fields and integer precision in the original maps.
+		entryPositions = append(entryPositions, len(records)-1)
+	}
+
+	originalCount := len(entryPositions)
+	retained := make(map[int]bool, originalCount)
+	if state != nil {
+		if sourcePath == destinationPath && originalCount != state.EntryCount && alreadyMasked(sourcePath, state.EntryCount, originalCount) {
+			return nil
+		}
+		if originalCount != state.EntryCount {
+			return fmt.Errorf("publication aborted: cached entry count does not match lifecycle checkpoint")
+		}
+		previousSeq := 0
+		for _, event := range state.Lifecycle {
+			if event.Seq < previousSeq || event.Seq > originalCount {
+				return fmt.Errorf("publication aborted: invalid lifecycle sequence")
+			}
+			previousSeq = event.Seq
+		}
+		ranges := session.BuildSegmentRanges(state.Lifecycle)
+		for entryIndex, recordIndex := range entryPositions {
+			if !session.IsSeqExcluded(entryIndex, ranges) {
+				retained[recordIndex] = true
+			}
+		}
+		if msg := validateMaskInvariant(originalCount, len(retained), state.Lifecycle); msg != "" {
+			return fmt.Errorf("publication aborted: %s", msg)
+		}
+	}
+
+	// Headers and carrier footers are not part of the lifecycle sequence.
+	// Keep their relative order, but replace the entry stream with the mask's
+	// retained maps. Never serialize an excluded entry, even as a placeholder.
+	for i, record := range records {
+		_, meta := record["_meta"].(map[string]any)
+		if record["type"] != "header" && record["type"] != "footer" && !meta && !retained[i] {
+			continue
+		}
+		if state != nil && record["type"] == "footer" {
+			if _, ok := record["entry_count"]; ok {
+				record["entry_count"] = len(retained)
+			}
 		}
 		if err := writer.WriteRaw(record); err != nil {
 			return fmt.Errorf("redact recovered recording: %w", err)
@@ -729,6 +865,14 @@ func copyRecoveredRawSession(sourcePath, destinationPath, projectRoot string) er
 	}
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close recovered recording: %w", err)
+	}
+	if state != nil && sourcePath == destinationPath {
+		// Written before the rename: a crash in between leaves the unmasked
+		// cache, whose count still matches the checkpoint, so it is masked again.
+		mask, _ := json.Marshal(publicationMask{Original: originalCount, Retained: len(retained)})
+		if err := os.WriteFile(publicationMaskPath(destinationPath), mask, 0o600); err != nil {
+			return fmt.Errorf("record publication mask: %w", err)
+		}
 	}
 	if err := os.Rename(temporary.Name(), destinationPath); err != nil {
 		return fmt.Errorf("publish recovered recording snapshot: %w", err)

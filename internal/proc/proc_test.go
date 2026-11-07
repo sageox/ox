@@ -94,6 +94,50 @@ func TestIsAlive(t *testing.T) {
 	}
 }
 
+// Failure prevented: a recording left by a machine that went away names a PID
+// that a process on the next machine reuses, and liveness checks take that
+// process for the recording's AI coworker for as long as it runs.
+func TestIsReused(t *testing.T) {
+	self := os.Getpid()
+	start, ok := StartTime(self)
+	if !ok {
+		t.Skip("this platform cannot report a process start time")
+	}
+	if again, _ := StartTime(self); again != start {
+		t.Fatalf("a running process's start time changed: %d then %d", start, again)
+	}
+	if IsReused(self, start) {
+		t.Error("the process that recorded its start time is not a reuse of its PID")
+	}
+	if !IsReused(self, start-1) {
+		t.Error("a process with another start time under the same PID is a reuse")
+	}
+	if IsReused(self, 0) {
+		t.Error("with no start time recorded, PID liveness alone decides")
+	}
+	if _, ok := StartTime(0); ok {
+		t.Error("PID 0 names no process")
+	}
+
+	child := exec.Command(os.Args[0], "-test.run=^$")
+	if err := child.Start(); err != nil {
+		t.Fatalf("spawn helper: %v", err)
+	}
+	childStart, ok := StartTime(child.Process.Pid)
+	if err := child.Wait(); err != nil {
+		t.Fatalf("helper: %v", err)
+	}
+	if !ok || childStart == start {
+		t.Errorf("a later process must report a different start time: ok=%v child=%d self=%d", ok, childStart, start)
+	}
+	if _, ok := StartTime(child.Process.Pid); ok {
+		t.Error("a reaped process has no start time")
+	}
+	if IsReused(child.Process.Pid, childStart) {
+		t.Error("an unknown start time leaves the answer to PID liveness")
+	}
+}
+
 func TestTerminateRejectsInvalidPID(t *testing.T) {
 	for _, pid := range []int{0, -1} {
 		if err := Terminate(pid); err == nil {

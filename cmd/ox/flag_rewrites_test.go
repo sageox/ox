@@ -14,6 +14,12 @@ var formatAliases = map[string]string{
 	"--format=text": "--json=false",
 }
 
+// bareAliases mirrors the catalog's bare-boolean rewrite tokens ("rewrite": true).
+var bareAliases = map[string]string{
+	"--text":      "--json=false",
+	"--full-json": "--json",
+}
+
 // TestApplyCatalogTokenRewrites covers the runtime rewrite layer that turns
 // catalog-declared flag aliases into canonical flags before cobra sees them.
 // Failure prevented: agent invocations that match a catalog alias falling
@@ -130,6 +136,48 @@ func TestApplyCatalogTokenRewrites(t *testing.T) {
 			},
 			want: []string{"foo", "--baz", "tail"},
 		},
+		{
+			name:    "bare boolean: --text becomes --json=false",
+			in:      []string{"status", "--text"},
+			aliases: bareAliases,
+			want:    []string{"status", "--json=false"},
+		},
+		{
+			name:    "bare boolean: --full-json becomes --json",
+			in:      []string{"status", "--full-json"},
+			aliases: bareAliases,
+			want:    []string{"status", "--json"},
+		},
+		{
+			name:    "bare boolean consumes nothing after it",
+			in:      []string{"status", "--text", "extra"},
+			aliases: bareAliases,
+			want:    []string{"status", "--json=false", "extra"},
+		},
+		{
+			name:    "bare boolean between other flags",
+			in:      []string{"status", "--verbose", "--text", "--quiet"},
+			aliases: bareAliases,
+			want:    []string{"status", "--verbose", "--json=false", "--quiet"},
+		},
+		{
+			name:    "a command that owns --text keeps its own flag",
+			in:      []string{"agent", "Oxa7b3", "status", "--text"},
+			aliases: bareAliases,
+			want:    []string{"agent", "Oxa7b3", "status", "--text"},
+		},
+		{
+			name:    "after -- everything is literal",
+			in:      []string{"status", "--", "--text", "--full-json"},
+			aliases: bareAliases,
+			want:    []string{"status", "--", "--text", "--full-json"},
+		},
+		{
+			name:    "a value that merely starts like a bare token is not rewritten",
+			in:      []string{"status", "--text=yes"},
+			aliases: bareAliases,
+			want:    []string{"status", "--text=yes"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -192,6 +240,36 @@ func TestLoadFlagAliases(t *testing.T) {
 			},
 		},
 		{
+			name: "includes bare patterns that opt in with rewrite",
+			catalog: `{
+				"tokens":[
+					{"pattern":"--text","target":"--json=false","kind":"unknown-flag","rewrite":true},
+					{"pattern":"--format","target":"--json","kind":"unknown-flag"}
+				]
+			}`,
+			want: map[string]string{
+				"--text": "--json=false",
+			},
+		},
+		{
+			name: "rewrite does not make a non-flag pattern a rewrite",
+			catalog: `{
+				"tokens":[
+					{"pattern":"text","target":"--json=false","kind":"unknown-flag","rewrite":true}
+				]
+			}`,
+			want: nil,
+		},
+		{
+			name: "rewrite on a non unknown-flag kind is still skipped",
+			catalog: `{
+				"tokens":[
+					{"pattern":"--text","target":"--json=false","kind":"invalid-arg","rewrite":true}
+				]
+			}`,
+			want: nil,
+		},
+		{
 			name: "skips non unknown-flag kinds",
 			catalog: `{
 				"tokens":[
@@ -237,6 +315,8 @@ func TestLoadFlagAliases_EmbeddedCatalog(t *testing.T) {
 	for pattern, want := range map[string]string{
 		"--format=json": "--json",
 		"--format=text": "--json=false",
+		"--text":        "--json=false",
+		"--full-json":   "--json",
 	} {
 		if got[pattern] != want {
 			t.Errorf("embedded catalog: aliases[%q] = %q, want %q", pattern, got[pattern], want)

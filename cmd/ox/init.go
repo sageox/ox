@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
@@ -311,6 +312,7 @@ func checkRemoteSageoxExists(gitRoot string) (found bool, stale bool, err error)
 // runInit configures AI coworker integrations and registers the authenticated
 // repository, then prints setup guidance when human-readable output is enabled.
 func runInit() error {
+	var registeredTeamID string
 	// warn if using non-default endpoint (subtle, informational)
 	if endpoint.Get() != endpoint.Default {
 		fmt.Println(ui.MutedStyle.Render(fmt.Sprintf("Using endpoint: %s", endpoint.Get())))
@@ -326,7 +328,7 @@ func runInit() error {
 	// find git root
 	gitRoot, err := repotools.FindRepoRoot(repotools.VCSGit)
 	if err != nil {
-		return fmt.Errorf("not a git repository\n\nox init requires a git repository. Run:\n  git init\n  git commit --allow-empty -m \"Initial commit\"\n  ox init")
+		return fmt.Errorf("not a git repository\n\nox init links a git repository to SageOx. Run it inside the repo you want to link:\n  cd <repo>\n  ox init\n\nTo start a new repository here instead:\n  git init\n  git commit --allow-empty -m \"Initial commit\"\n  ox init")
 	}
 
 	// check if remote already has .sageox/ (prevents duplicate init race condition)
@@ -769,6 +771,15 @@ func runInit() error {
 		}
 	}
 
+	// A pre-existing .devin/config.json holds the user's own Devin settings:
+	// when init will write it, snapshot it so rollback restores it instead of
+	// deleting it.
+	devinConfig := devinConfigPath(gitRoot)
+	devinConfigExisted := selectedAgents["devin"] && !HasDevinPlugin(gitRoot) && fileExists(devinConfig)
+	if devinConfigExisted {
+		tracker.trackModifiedFile(devinConfig)
+	}
+
 	// detect and install agent hooks
 	// installAgentHooks returns absolute, existence-verified paths inside
 	// gitRoot — do NOT re-join against gitRoot here. Doing so was half of
@@ -776,6 +787,10 @@ func runInit() error {
 	// <root><root>/.codex/hooks.json, and one such entry failed the whole
 	// `git add`, leaving even .claude/settings.json unstaged.
 	installedHooks := installAgentHooks(gitRoot, true, selectedAgents) // quiet — summarized below
+	if selectedAgents["claude-code"] {
+		// user-scope Claude Code plugin, not a repo file: nothing to stage or roll back
+		ensureUsagePane(initQuiet)
+	}
 
 	// Snapshot every scoped ignore file that ALREADY EXISTS, before writing any of
 	// them. trackModifiedFile snapshots eagerly, at call time — so calling it after
@@ -812,9 +827,17 @@ func runInit() error {
 	// Every installed path is tracked for ROLLBACK, but only the non-reserved ones
 	// are staged — see stageableInstalledPaths for why.
 	for _, hookFile := range installedHooks {
+		if devinConfigExisted && hookFile == devinConfig {
+			continue
+		}
 		tracker.trackCreatedFile(hookFile)
 	}
 	for _, hookFile := range stageableInstalledPaths(gitRoot, installedHooks) {
+		// A pre-existing .devin/config.json the user keeps out of git may hold
+		// local secrets (e.g. mcpServers env): never force-add it.
+		if devinConfigExisted && hookFile == devinConfig && gitPathIsIgnoredRespectingIndex(gitRoot, devinConfig) {
+			continue
+		}
 		tracker.trackForceStage(hookFile)
 	}
 
@@ -953,6 +976,7 @@ func runInit() error {
 		}
 		if resp.TeamID != "" {
 			cfg.TeamID = resp.TeamID
+			registeredTeamID = resp.TeamID
 		}
 		if selectedTeamName != "" {
 			cfg.TeamName = selectedTeamName
@@ -1033,14 +1057,17 @@ func runInit() error {
 	}
 
 	if !initQuiet {
-		// success message with visual emphasis
+		// the docking box: what is now connected to what, and who can read the
+		// sessions that flow between them. Framed only at a terminal.
+		onTeam := resp != nil && resp.RepoID != "" && resp.TeamID != ""
 		fmt.Println()
-		fmt.Println(ui.MutedStyle.Render(ui.SeparatorHeavy))
-		fmt.Println(cli.StyleBold.Render("SageOx initialized successfully!"))
-		fmt.Println(ui.MutedStyle.Render(ui.SeparatorHeavy))
+		fmt.Println(initDockFor(gitRoot, cfg, onTeam).Render(isTerminalWriter(os.Stdout)))
+
+		// the first thing to try, above the steps: the steps are chores, this is the payoff
+		fmt.Println()
+		fmt.Println(ui.RenderTryFirst())
 
 		// next steps - THE primary call to action
-		fmt.Println()
 		fmt.Println(ui.RenderCategory("Next Steps"))
 		fmt.Println()
 
@@ -1069,17 +1096,19 @@ func runInit() error {
 			step++
 		}
 
-		// step N: invite teammates — ox invite sends the invitations directly,
+		// step N: invite teammates — ox team invite sends the invitations directly,
 		// so this no longer sends people to the dashboard to copy a link.
-		if cfg.TeamID != "" {
+		// Only a team the server just confirmed may appear in a runnable command:
+		// cfg.TeamID can be a repository-controlled default.
+		if registeredTeamID != "" {
 			teamLabel := cfg.TeamName
 			if teamLabel == "" {
-				teamLabel = cfg.TeamID
+				teamLabel = registeredTeamID
 			}
 			fmt.Printf("  %d. Invite teammates (%s):\n", step, teamLabel)
-			fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox invite alice@example.com,bob@example.com"))
+			fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox team invite alice@example.com,bob@example.com --team "+shellQuote(registeredTeamID)))
 		} else {
-			fmt.Printf("  %d. Invite teammates with %s\n", step, cli.StyleCommand.Render("ox invite <email>..."))
+			fmt.Printf("  %d. Invite teammates with %s\n", step, cli.StyleCommand.Render("ox team invite <email>... --team <slug>"))
 		}
 		step++
 
@@ -1092,6 +1121,9 @@ func runInit() error {
 		if resp != nil && resp.RepoID != "" && resp.TeamID != "" {
 			printInitSessionImportStep(gitRoot, cfg, step)
 		}
+
+		// the optional Claude Code add-ons, offered once per machine
+		offerInitAddons(os.Stdout)
 
 		// show team context sync status so user knows what's happening in the background
 		if cfg.TeamID != "" {
@@ -1456,14 +1488,24 @@ By giving AI coworkers your team patterns **before** they write code, SageOx pre
 // Claude Code bug #10373 silently discards SessionStart hook output for new sessions.
 // The markers in AGENTS.md/CLAUDE.md tell agents to self-check and run ox agent prime.
 func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
-	agentsPath := filepath.Join(gitRoot, "AGENTS.md")
-	claudePath := filepath.Join(gitRoot, "CLAUDE.md")
+	root, err := os.OpenRoot(gitRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	agentsPath, claudePath := "AGENTS.md", "CLAUDE.md"
 
 	// check what exists (Lstat to detect symlinks)
-	_, agentsErr := os.Stat(agentsPath)
+	_, agentsErr := root.Stat(agentsPath)
+	if agentsErr != nil && !errors.Is(agentsErr, fs.ErrNotExist) {
+		return nil, agentsErr
+	}
 	agentsExists := agentsErr == nil
 
-	claudeInfo, claudeErr := os.Lstat(claudePath)
+	claudeInfo, claudeErr := root.Lstat(claudePath)
+	if claudeErr != nil && !errors.Is(claudeErr, fs.ErrNotExist) {
+		return nil, claudeErr
+	}
 	claudeExists := claudeErr == nil
 	claudeIsSymlink := claudeExists && claudeInfo.Mode()&os.ModeSymlink != 0
 	claudeIsRegularFile := claudeExists && !claudeIsSymlink
@@ -1474,13 +1516,13 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 	switch {
 	case agentsExists && claudeIsRegularFile:
 		// both exist as regular files - ensure markers in both
-		res1, err := ensurePrimeMarkersInAgentFile(agentsPath, "AGENTS.md")
+		res1, err := ensurePrimeMarkersInAgentFile(root, agentsPath)
 		if err != nil {
 			return nil, err
 		}
 		results = append(results, res1)
 
-		res2, err := ensurePrimeMarkersInAgentFile(claudePath, "CLAUDE.md")
+		res2, err := ensurePrimeMarkersInAgentFile(root, claudePath)
 		if err != nil {
 			return nil, err
 		}
@@ -1488,7 +1530,7 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 
 	case agentsExists:
 		// AGENTS.md exists - ensure markers
-		res, err := ensurePrimeMarkersInAgentFile(agentsPath, "AGENTS.md")
+		res, err := ensurePrimeMarkersInAgentFile(root, agentsPath)
 		if err != nil {
 			return nil, err
 		}
@@ -1496,7 +1538,7 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 
 	case claudeIsRegularFile:
 		// only CLAUDE.md exists - ensure markers
-		res, err := ensurePrimeMarkersInAgentFile(claudePath, "CLAUDE.md")
+		res, err := ensurePrimeMarkersInAgentFile(root, claudePath)
 		if err != nil {
 			return nil, err
 		}
@@ -1505,7 +1547,7 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 	default:
 		// neither exists - create AGENTS.md with both markers
 		content := OxPrimeCheckBlock + "\n# AI Agent Instructions\n\n" + OxPrimeLine + "\n"
-		if err := fileutil.AtomicWriteBytes(agentsPath, []byte(content), 0644); err != nil {
+		if err := fileutil.AtomicWriteBytesInRoot(root, agentsPath, []byte(content), 0644); err != nil {
 			return nil, fmt.Errorf("failed to write AGENTS.md: %w", err)
 		}
 		agentsExists = true
@@ -1514,11 +1556,11 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 
 	// step 2: ensure BOTH files exist (create missing one as symlink)
 	if !claudeExists && agentsExists {
-		if err := os.Symlink("AGENTS.md", claudePath); err == nil {
+		if err := root.Symlink("AGENTS.md", claudePath); err == nil {
 			results = append(results, fileInjectionResult{file: "CLAUDE.md", status: symlinkCreated})
 		}
 	} else if !agentsExists && (claudeIsRegularFile || claudeIsSymlink) {
-		if err := os.Symlink("CLAUDE.md", agentsPath); err == nil {
+		if err := root.Symlink("CLAUDE.md", agentsPath); err == nil {
 			results = append(results, fileInjectionResult{file: "AGENTS.md", status: symlinkCreated})
 		}
 	}
@@ -1528,8 +1570,8 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 
 // ensurePrimeMarkersInAgentFile ensures both ox:prime-check (header) and ox:prime (footer)
 // markers exist in a single agent config file. Returns injection status for display.
-func ensurePrimeMarkersInAgentFile(path, name string) (fileInjectionResult, error) {
-	content, err := os.ReadFile(path)
+func ensurePrimeMarkersInAgentFile(root *os.Root, name string) (fileInjectionResult, error) {
+	content, err := root.ReadFile(name)
 	if err != nil {
 		return fileInjectionResult{file: name}, fmt.Errorf("failed to read %s: %w", name, err)
 	}
@@ -1542,7 +1584,7 @@ func ensurePrimeMarkersInAgentFile(path, name string) (fileInjectionResult, erro
 		return fileInjectionResult{file: name, status: alreadyPresent}, nil
 	}
 
-	injected, err := ensureMarkersInFile(path, contentStr, needHeader, needFooter)
+	injected, err := ensureMarkersInRoot(root, name, contentStr, needHeader, needFooter)
 	if err != nil {
 		return fileInjectionResult{file: name}, err
 	}
@@ -2133,6 +2175,9 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 		if info, err := os.Stat(filepath.Join(gitRoot, ".opencode")); err == nil && info.IsDir() {
 			selected["opencode"] = true
 		}
+		if devinDetected(gitRoot) {
+			selected["devin"] = true
+		}
 		return selected, nil
 	}
 
@@ -2171,6 +2216,14 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 			Selected: true,
 		})
 	}
+
+	// Devin runs in the cloud, so there is nothing to detect locally; offer it
+	// always and preselect it when the repo or machine already uses Devin.
+	options = append(options, cli.MultiSelectOption{
+		Label:    "Devin",
+		Value:    "devin",
+		Selected: devinDetected(gitRoot),
+	})
 
 	if !initQuiet {
 		fmt.Println()
@@ -2349,6 +2402,21 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 		}
 	}
 
+	if selectedAgents["devin"] {
+		if HasDevinPlugin(gitRoot) {
+			if !quiet {
+				cli.PrintPreserved("Devin integration")
+			}
+		} else if err := InstallDevinPlugin(gitRoot); err != nil {
+			cli.PrintWarning(fmt.Sprintf("Could not install Devin integration: %v", err))
+		} else {
+			if !quiet {
+				cli.PrintSuccess("Installed Devin integration")
+			}
+			installedHooks = append(installedHooks, filepath.Join(".devin", "config.json"))
+		}
+	}
+
 	// install git commit hooks (prepare-commit-msg for trailers)
 	if HasGitHooks(gitRoot) {
 		if !quiet {
@@ -2503,10 +2571,37 @@ type initEndpointInfo struct {
 	IsValid   bool
 }
 
+// soleLoggedInEndpoint returns the one endpoint ox init can default to without
+// asking: the only stored login, whatever the age of its access token. An
+// expired access token is the normal state of a login not used recently (the
+// auth gate refreshes it), so expiry must not rank logins against each other.
+// storedSlugs marks endpoints that came from stored logins, so the injected
+// production row is not mistaken for one.
+func soleLoggedInEndpoint(endpoints []initEndpointInfo, storedSlugs map[string]bool) (initEndpointInfo, bool) {
+	var stored []initEndpointInfo
+	for _, ep := range endpoints {
+		if storedSlugs[ep.Slug] {
+			stored = append(stored, ep)
+		}
+	}
+	if len(stored) == 1 {
+		return stored[0], true
+	}
+	return initEndpointInfo{}, false
+}
+
 // selectInitEndpoint shows endpoint selection UI for ox init.
 // needsLogin is true if the user must log in first. Cancellation returns an
 // empty endpoint; --no-input returns an error when a choice is needed.
-func selectInitEndpoint() (string, bool, error) {
+//
+// The chosen endpoint is recorded for usage telemetry, so initializing against
+// a test endpoint is not counted under the production person.
+func selectInitEndpoint() (chosen string, needsLogin bool, err error) {
+	defer func() {
+		if err == nil {
+			recordPostHogEndpoint(chosen)
+		}
+	}()
 	// get all endpoints with stored tokens (including expired)
 	storedEndpoints, err := auth.ListEndpoints()
 	if err != nil {
@@ -2533,6 +2628,12 @@ func selectInitEndpoint() (string, bool, error) {
 		seenSlugs[info.Slug] = true
 	}
 
+	// remember which endpoints are real logins before the production row is injected
+	storedSlugs := make(map[string]bool, len(seenSlugs))
+	for slug := range seenSlugs {
+		storedSlugs[slug] = true
+	}
+
 	// add production endpoint if not already present
 	prodSlug := endpoint.NormalizeSlug(endpoint.Default)
 	if !seenSlugs[prodSlug] {
@@ -2553,6 +2654,13 @@ func selectInitEndpoint() (string, bool, error) {
 		return "", false, nil
 	}
 	if cli.NoInput() {
+		// logged in to exactly one endpoint: there is no choice to make. The
+		// injected production row is not a login, so it does not count. Not
+		// needsLogin even when the access token expired: the auth gate that
+		// follows refreshes it, or reports the login problem itself.
+		if only, ok := soleLoggedInEndpoint(endpoints, storedSlugs); ok {
+			return only.URL, false, nil
+		}
 		return "", false, fmt.Errorf("--no-input requires --endpoint <endpoint> to choose where to initialize")
 	}
 

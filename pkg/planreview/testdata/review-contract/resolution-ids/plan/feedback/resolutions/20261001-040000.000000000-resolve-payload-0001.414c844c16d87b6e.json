@@ -1,0 +1,9 @@
+{
+  "anchor": "hpayload",
+  "at": "2026-10-01T04:00:00Z",
+  "id": "resolve-payload-0001",
+  "note": "Changed disposition under the same id.",
+  "request_sha256": "26e1008cce846b902c0775c0312564a1c7395d51ea5bf18910d935dfe7a71a83",
+  "reviewer": "Ana",
+  "state": "wontfix"
+}

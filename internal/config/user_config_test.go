@@ -653,22 +653,17 @@ func TestAgentWorkerConfig_SessionFinalizeRequiresEnabled(t *testing.T) {
 
 func TestAgentWorkerConfig_QualityThresholdDefaults(t *testing.T) {
 	var nilCfg *AgentWorkerConfig
-	assert.InDelta(t, 0.3, nilCfg.GetQualityUploadThreshold(), 0.001)
 	assert.InDelta(t, 0.1, nilCfg.GetQualityDiscardThreshold(), 0.001)
 
 	cfg := (&AgentWorkerConfig{}).WithDefaults()
-	assert.InDelta(t, 0.3, cfg.GetQualityUploadThreshold(), 0.001)
 	assert.InDelta(t, 0.1, cfg.GetQualityDiscardThreshold(), 0.001)
 }
 
 func TestAgentWorkerConfig_QualityThresholdCustom(t *testing.T) {
-	upload := 0.6
 	discard := 0.2
 	cfg := &AgentWorkerConfig{
-		QualityUploadThreshold:  &upload,
 		QualityDiscardThreshold: &discard,
 	}
-	assert.InDelta(t, 0.6, cfg.GetQualityUploadThreshold(), 0.001)
 	assert.InDelta(t, 0.2, cfg.GetQualityDiscardThreshold(), 0.001)
 }
 
@@ -678,13 +673,12 @@ func TestAgentWorkerConfig_WithDefaults_SessionFinalizeTrue(t *testing.T) {
 	assert.True(t, *cfg.SessionFinalize, "WithDefaults should set SessionFinalize to true")
 }
 
-func TestLoadUserConfig_QualityThresholds(t *testing.T) {
+func TestLoadUserConfig_QualityDiscardThreshold(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
 
 	content := []byte(`agent_worker:
   enabled: true
-  quality_upload_threshold: 0.5
   quality_discard_threshold: 0.15
 `)
 	require.NoError(t, os.WriteFile(configPath, content, 0644))
@@ -692,7 +686,6 @@ func TestLoadUserConfig_QualityThresholds(t *testing.T) {
 	cfg, err := LoadUserConfigFrom(tmpDir)
 	require.NoError(t, err)
 	require.NotNil(t, cfg.AgentWorker)
-	assert.InDelta(t, 0.5, cfg.AgentWorker.GetQualityUploadThreshold(), 0.001)
 	assert.InDelta(t, 0.15, cfg.AgentWorker.GetQualityDiscardThreshold(), 0.001)
 }
 
@@ -710,4 +703,143 @@ func TestUserConfig_TelemetryNoticeShownSurvivesSaveAndLoad(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.True(t, reloaded.HasSeenTelemetryNotice())
+}
+
+// Failure prevented: the flag does not survive a save and load (a wrong YAML
+// tag), so `ox init` offers Oxy and the session report pane again in every
+// repo instead of once per machine.
+func TestUserConfig_InitOffersShownSurvivesSaveAndLoad(t *testing.T) {
+	t.Setenv(EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
+	cfg, err := LoadUserConfig()
+	require.NoError(t, err)
+	require.False(t, cfg.HasSeenInitOffers(), "a machine that was never offered anything")
+
+	cfg.SetInitOffersShown(true)
+	require.NoError(t, SaveUserConfig(cfg))
+	reloaded, err := LoadUserConfig()
+
+	require.NoError(t, err)
+	assert.True(t, reloaded.HasSeenInitOffers())
+}
+
+// Failure prevented: a machine without the disposable_machine setting, or with
+// a config ox cannot read, takes the disposable-machine behaviors.
+func TestDisposableMachineEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"unset", "tips_enabled: true\n", false},
+		{"on", "disposable_machine: true\n", true},
+		{"off", "disposable_machine: false\n", false},
+		{"unreadable", "disposable_machine: [true\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(tc.content), 0o600))
+			t.Setenv(EnvUserConfig, path)
+			assert.Equal(t, tc.want, DisposableMachineEnabled())
+		})
+	}
+}
+
+// TestIsStatuslineEnabled reads the statusline_enabled key from a real config
+// file. Failure prevented: a coworker who never touched the setting loses the
+// activity line, or one who turned it off still sees it.
+func TestIsStatuslineEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"no config file", "", true},
+		{"key absent", "tips_enabled: false\n", true},
+		{"off", "statusline_enabled: false\n", false},
+		{"on", "statusline_enabled: true\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.content != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(tc.content), 0o600))
+			}
+			cfg, err := LoadUserConfigFrom(dir)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.IsStatuslineEnabled())
+		})
+	}
+}
+
+// TestIsSessionReportPaneEnabled reads the session_report_pane_enabled key,
+// and its deprecated brief_pane_enabled fallback, from a real config file. Failure prevented: a
+// coworker who never touched the setting misses the /ox-session-report pane, or one
+// who turned the pane off before the rename gets it reinstalled.
+func TestIsSessionReportPaneEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"no config file", "", true},
+		{"key absent", "tips_enabled: false\n", true},
+		{"off", "session_report_pane_enabled: false\n", false},
+		{"on", "session_report_pane_enabled: true\n", true},
+		{"deprecated brief_pane off", "brief_pane_enabled: false\n", false},
+		{"deprecated brief_pane on", "brief_pane_enabled: true\n", true},
+		{"session_report_pane wins over brief_pane (on)", "session_report_pane_enabled: true\nbrief_pane_enabled: false\n", true},
+		{"session_report_pane wins over brief_pane (off)", "session_report_pane_enabled: false\nbrief_pane_enabled: true\n", false},
+		{"retired usage_pane is ignored", "usage_pane_enabled: false\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.content != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(tc.content), 0o600))
+			}
+			cfg, err := LoadUserConfigFrom(dir)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.IsSessionReportPaneEnabled())
+		})
+	}
+	var nilCfg *UserConfig
+	assert.True(t, nilCfg.IsSessionReportPaneEnabled())
+	assert.Nil(t, nilCfg.SessionReportPaneSetting())
+}
+
+// TestIsTraceConsultationsEnabled reads recap.trace_consultations from a real
+// config file. Failure prevented: ADR-027's opt-out is ignored, or a coworker
+// who never set it silently stops getting consultation receipts.
+func TestIsTraceConsultationsEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"no config file", "", true},
+		{"recap block absent", "tips_enabled: false\n", true},
+		{"key absent", "recap: {}\n", true},
+		{"off", "recap:\n  trace_consultations: false\n", false},
+		{"on", "recap:\n  trace_consultations: true\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.content != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(tc.content), 0o600))
+			}
+			cfg, err := LoadUserConfigFrom(dir)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.IsTraceConsultationsEnabled())
+		})
+	}
+}
+
+// TestTraceConsultationsEnabled_UnreadableConfigIsOff checks the fail-safe
+// direction of the privacy opt-out. Failure prevented: a corrupt config file
+// that held "off" is read as the default and the coworker's reads sync anyway.
+func TestTraceConsultationsEnabled_UnreadableConfigIsOff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv(EnvUserConfig, path)
+	assert.True(t, TraceConsultationsEnabled(), "absent file is the default")
+
+	require.NoError(t, os.WriteFile(path, []byte("recap: [not, a, map\n"), 0o600))
+	assert.False(t, TraceConsultationsEnabled())
 }

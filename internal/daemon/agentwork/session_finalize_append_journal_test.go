@@ -139,7 +139,7 @@ func TestAbandonedRecordingDetect_SettlesAppendJournal(t *testing.T) {
 }
 
 func TestStageSessionInLedger_LeavesAppendJournalBehind(t *testing.T) {
-	ledgerPath := t.TempDir()
+	ledgerPath := initTestGitRepo(t)
 	sessionName := "2026-09-29T10-00-user-OxJRNL"
 	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
 	_, journalPath := writeInterruptedBatch(t, cacheDir)

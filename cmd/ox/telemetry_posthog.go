@@ -12,8 +12,11 @@ import (
 	"syscall"
 	"time"
 
+	friction "github.com/sageox/frictionax"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ephemeral"
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/telemetry"
@@ -33,8 +36,9 @@ const envStartedByOx = "OX_STARTED_BY_OX"
 // startedByOx records whether this process inherited envStartedByOx.
 var startedByOx bool
 
-// capturePostHogCommand sends the invocation that just finished to PostHog,
-// then shows the one-time telemetry notice on stderr. main calls it after the
+// capturePostHogCommand shows the one-time telemetry notice on stderr, then
+// sends the invocation that just finished to PostHog. The notice comes first
+// so a person reads it before an event names them. main calls it after the
 // command returns, on success and failure alike, because the exit code and
 // duration are known only then.
 //
@@ -56,10 +60,76 @@ func capturePostHogCommand(exitCode int, stderr io.Writer) {
 	if skipPostHogCommand(path) {
 		return
 	}
-	if telemetry.PostHogConfigured() {
-		telemetry.CapturePostHog(postHogCommandEvent, postHogCommandProps(cliCtx, path, exitCode))
-	}
+	// The notice comes first, so a person at a terminal reads that events carry
+	// their user ID before the first one goes out.
 	showTelemetryNoticeOnce(stderr)
+	if telemetry.PostHogConfigured() {
+		props := postHogCommandProps(cliCtx, path, exitCode)
+		telemetry.CapturePostHog(postHogCommandEvent, props, postHogCaptureOpts(cliCtx))
+	}
+}
+
+func postHogCaptureOpts(c *cli.Context) telemetry.CaptureOpts {
+	opts := telemetry.CaptureOpts{}
+	ep := postHogCommandEndpoint(c)
+	if !endpoint.IsProduction(ep) {
+		return opts
+	}
+	// The person as of the command's start, so a logout still names who logged
+	// out. `ox login` creates the person, and a command that picked another
+	// endpoint mid-run has no start snapshot for it: both resolve at the end.
+	if c.TelemetryStartEndpoint != "" && c.TelemetryStartEndpoint == ep && c.CommandPath(c.Cmd) != "login" {
+		opts.PersonID = c.TelemetryStartPersonID
+	} else {
+		opts.PersonID = auth.LocalUserID(ep)
+	}
+	return opts
+}
+
+// startPostHogIdentity records, at command start, the endpoint the command
+// resolves to and its signed-in person (local read, no network).
+func startPostHogIdentity(c *cli.Context) {
+	if c == nil || c.Cmd == nil {
+		return
+	}
+	ep := postHogCommandEndpoint(c)
+	c.TelemetryStartEndpoint = ep
+	if endpoint.IsProduction(ep) {
+		c.TelemetryStartPersonID = auth.LocalUserID(ep)
+	}
+}
+
+// recordPostHogEndpoint keeps late command selections separate from event
+// properties. A command that touches any test endpoint remains install-only.
+func recordPostHogEndpoint(ep string) {
+	if cliCtx != nil && ep != "" {
+		cliCtx.TelemetryEndpoints = append(cliCtx.TelemetryEndpoints, ep)
+	}
+}
+
+func postHogCommandEndpoint(c *cli.Context) string {
+	for _, ep := range c.TelemetryEndpoints {
+		if !endpoint.IsProduction(ep) {
+			return ep
+		}
+	}
+	if len(c.TelemetryEndpoints) > 0 {
+		return c.TelemetryEndpoints[0]
+	}
+	if c.Cmd != nil {
+		if ep, err := c.Cmd.Flags().GetString("endpoint"); err == nil && ep != "" {
+			if normalized := endpoint.NormalizeEndpoint(ep); normalized != "" {
+				return normalized
+			}
+			return ep // An invalid selection must not default to production.
+		}
+	}
+	if c.ProjectRoot != "" {
+		return endpoint.GetForProject(c.ProjectRoot)
+	}
+	// Global commands have no project configuration; use the same sole-login
+	// fallback as their CLI bootstrap instead of defaulting to production.
+	return endpoint.Get()
 }
 
 // skipPostHogCommand reports commands that run automatically: coding-agent
@@ -87,8 +157,10 @@ func skipPostHogCommand(path string) bool {
 // replacing a property above.
 func postHogCommandProps(c *cli.Context, path string, exitCode int) map[string]any {
 	actor, agentType := oxActorDetector{}.DetectActor()
-	if agentType == "ci" { // friction files CI under the agent actor
-		actor, agentType = "ci", ""
+	specActor, legacyActor, agentType := postHogActors(actor, agentType)
+	env := "test"
+	if endpoint.IsProduction(postHogCommandEndpoint(c)) {
+		env = "production"
 	}
 	initialized := c.ProjectRoot != "" && config.IsInitialized(c.ProjectRoot)
 	props := map[string]any{
@@ -97,7 +169,11 @@ func postHogCommandProps(c *cli.Context, path string, exitCode int) map[string]a
 		"success":          exitCode == 0,
 		"exit_code":        exitCode,
 		"duration_ms":      time.Since(c.CommandStartTime).Milliseconds(),
-		"actor":            string(actor),
+		"actor":            specActor,
+		"cli_actor":        legacyActor,
+		"surface":          "cli",
+		"env":              env,
+		"event_version":    1,
 		"agent_type":       agentType,
 		"repo_initialized": initialized,
 		"ephemeral":        ephemeral.Reason(),
@@ -124,6 +200,16 @@ func postHogCommandProps(c *cli.Context, path string, exitCode int) map[string]a
 		}
 	}
 	return props
+}
+
+func postHogActors(actor friction.Actor, agentType string) (string, string, string) {
+	if agentType == "ci" {
+		return "ci", "ci", ""
+	}
+	if actor == friction.ActorAgent {
+		return "ai_coworker", "agent", agentType
+	}
+	return "person", "human", agentType
 }
 
 // setFlagNames lists the flags given on the command line, by name.
@@ -221,7 +307,8 @@ func postHogErrorDetail(err error) string {
 
 // telemetryNotice is shown once per install, the first time a person runs ox
 // at a terminal.
-const telemetryNotice = "ox sends usage data (which commands run and whether they worked) to improve it.\n" +
+const telemetryNotice = "ox sends usage data (commands, context use and murmur publication) to improve it.\n" +
+	"When signed in to production, events include your SageOx user ID and this install's ID.\n" +
 	"Details: ox config get telemetry · Turn off: ox config set telemetry off"
 
 // showTelemetryNoticeOnce prints telemetryNotice unless it was shown before or

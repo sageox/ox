@@ -34,6 +34,9 @@ func writeRawHeaderWithAttribution(projectRoot string, state *session.RecordingS
 	if state.SessionPath == "" {
 		return fmt.Errorf("session path is empty")
 	}
+	if err := session.CheckNativeSourceBinding(state); err != nil {
+		return err
+	}
 
 	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
 
@@ -114,6 +117,9 @@ func writeRawHeaderWithAttribution(projectRoot string, state *session.RecordingS
 // by hooks. Does a final drain from the source file, then generates events,
 // and summary artifacts from the already-written raw.jsonl.
 func finalizeIncrementalSession(projectRoot string, state *session.RecordingState, rawPath string, adapter adapters.Adapter, result *agentSessionResult) (*agentSessionResult, error) {
+	if err := session.CheckNativeSourceBinding(state); err != nil {
+		return nil, err
+	}
 	if state.AdapterName == "cursor" {
 		reader, ok := adapter.(adapters.IncrementalReader)
 		if !ok {
@@ -174,6 +180,9 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 			if readErr != nil {
 				return nil, fmt.Errorf("read final session entries: %w", readErr)
 			}
+			if err := session.CheckNativeSourceBinding(state); err != nil {
+				return nil, err
+			}
 		}
 		if state.AdapterName == "claude-code" && !skipDrain {
 			repoRoot := state.WorkspacePath
@@ -226,6 +235,15 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 				state.EntryCount += len(entries)
 
 			}
+		}
+	}
+
+	// Cursor already masks its native capture. Other adapters keep paused
+	// entries locally, so mask the raw file itself before deriving or publishing
+	// anything from it (not just the in-memory summary input).
+	if state.AdapterName != "cursor" {
+		if err := maskCachedRecordingForPublication(rawPath, projectRoot, state); err != nil {
+			return nil, err
 		}
 	}
 
@@ -330,7 +348,7 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	summaryResp := &session.SummarizeResponse{
 		Summary: localSummary,
 	}
-	result.Summary = localSummary
+	result.Summary = publishableSummary(localSummary)
 
 	ledgerPath, ledgerErr := resolveLedgerPath()
 	if ledgerErr == nil {
@@ -391,7 +409,9 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		result.UploadWarning = "Session saved locally but ledger upload skipped (no ledger). Run 'ox doctor' to retry."
 	} else {
 		uploadStart := time.Now()
-		uploadErr := uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
+		uploadErr := uploadSessionBeforeHostEnds(sessionName, daemonOutlivesSession(), func() error {
+			return uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
+		}, time.Sleep)
 		result.UploadMs = time.Since(uploadStart).Milliseconds()
 		if uploadErr != nil {
 			if errors.Is(uploadErr, api.ErrReadOnly) {

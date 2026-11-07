@@ -27,19 +27,19 @@ If you're editing a `.claude/rules/` file and the rule is generally applicable (
 
 ## File format
 
-Rules live at `<team-context>/agents/rules/<topic>.md`. Subdirectories are walked recursively, so organize as your library grows:
+Rules live at `<team-context>/agents/rules/<topic>.md`. **Keep the directory flat:** group related rules with a shared name prefix, not a subdirectory.
 
 ```
 agents/rules/
-├── backend/
-│   ├── postgres.md
-│   └── api-conventions.md
-├── frontend/
-│   ├── react.md
-│   └── styling.md
+├── backend-postgres.md
+├── backend-api-conventions.md
+├── frontend-react.md
+├── frontend-styling.md
 ├── escalation-policy.md
 └── integration-tests-no-db-mocks.md
 ```
+
+Flat is the supported layout. A rule in a subdirectory still reaches a local session, but it may not reach cloud sessions, so `ox agent prime` warns about it.
 
 Each file is markdown with YAML frontmatter:
 
@@ -75,7 +75,7 @@ repo including the frontend ones, or copy it into each Go repo's local rules and
 copies drift. That second option is the problem team rules exist to solve, so the first
 was the honest choice — and it spent context in every session that never touched Go.
 
-Write globs either way; both forms parse:
+Write globs any of these ways; all of them parse:
 
 The inline-list form matches the style `repos:` already uses:
 
@@ -90,9 +90,27 @@ copied out of `.cursor/rules` works unchanged:
 globs: **/*.go,**/*.mod
 ```
 
+The block list reads best for a long scope. `repos:` accepts it too:
+
+```yaml
+globs:
+  - "src/client/**/*.{tsx,css}"
+  - "lib/widgets/**/*.{tsx,css}"
+```
+
+A comma inside a brace group stays part of its pattern in every form. Frontmatter is
+parsed as one YAML document, so every key is read wherever it sits. If it cannot be read
+safely, the rule is withheld from every session and `ox agent prime` says why. That
+covers a broken list, a repeated scope key, and a scope written as `paths:`, `Globs:` or
+any spelling ox does not read: reading those as absent would apply the rule everywhere.
+
 When the active tool has a faithful native glob field, ox projects the rule into its
-existing rule root and the tool activates it for matching files. Claude, Cursor,
-Copilot, Cline, and Kiro support that path. Droid and Windsurf have native rule roots
+existing rule root and the tool activates it for matching files. Claude gets `paths:`,
+Cursor `globs:`, Copilot `applyTo:`, Cline `paths:`, and Kiro `fileMatchPattern:` with
+`inclusion: fileMatch`. Every tool gets brace groups expanded, so `*.{ts,css}` arrives as
+`*.ts` and `*.css`, and a nested group cannot lose an option on the way.
+
+Droid and Windsurf have native rule roots
 but no glob field, so ox keeps a scoped rule indexed through prime rather than
 silently turning it into an always-on rule. Tools without a native rule root use the
 same prime fallback.
@@ -110,6 +128,7 @@ same prime fallback.
 | `status` | no | `active` \| `draft` \| `superseded-by:<other-name>` | Default `active`. |
 | `valid-through` | no | `YYYY-MM-DD` | Shelf life. Empty means evergreen. Parsed and reported, never enforced by deletion — see below. |
 | `from-discussion` | no | discussion id | Optional provenance link into `<team-context>/discussions/`. |
+| `requires` | no (skills only) | list of `shell`, `ox-cli` | What a skill needs to run. See below. |
 
 ### Visibility tiers
 
@@ -145,6 +164,30 @@ Two clocks are worth keeping distinct:
   individually. ox does not read those; the skill's own body should tell an agent to
   check them and say so when one has passed.
 
+### `requires:` — skills that need a terminal (skills only)
+
+A team skill can also reach coworkers who have no terminal: AI chat through the SageOx
+connector, and Claude, when an admin connects the team's Claude organization. A skill
+that runs commands is no use there, so say so:
+
+```yaml
+requires: [shell]    # runs shell commands
+requires: [ox-cli]   # runs ox commands
+requires: []         # runs anywhere; the commands in its body are only examples
+```
+
+Without the key, SageOx infers it: a skill whose body runs `` `ox <verb>` `` (or has an
+`ox` line inside a code block) or opens a `bash`/`sh`/`shell`/`zsh` code block stays with
+coding agents. `ox skills publish` warns when it makes that inference, so you can make it
+explicit. A block list (`requires:` followed by `  - shell` lines) is read too.
+
+When Claude Code on your machine already has a skill from your Claude organization's
+plugin, ox stops copying it into `.claude/skills` so Claude Code does not list it twice.
+A coworker whose Claude Code is signed in elsewhere (another account, an API key,
+Bedrock or Vertex) keeps ox's copy. Codex, Cursor and every other agent always keep it.
+`ox skills status` shows which source each skill comes from, and
+`ox config set skills.claude_org_dedupe off` makes ox always copy.
+
 ### One source, one delivery path
 
 The Team Context file is always canonical. During `ox sync` and after Team Context
@@ -160,7 +203,14 @@ flattened into an unscoped native format.
 
 ## Size guidance
 
-There are no hard limits, but every `always`-tier rule loads on every session — its tokens compete with the user's actual work. Discipline:
+Nothing is ever blocked over size, but every `always`-tier rule loads on every session — its tokens compete with the user's actual work. `ox agent prime` warns in its `<team-rule-warnings>` section when a rule file goes over its budget:
+
+| Rule | Budget | Paid |
+|---|---|---|
+| `visibility: always`, no `globs:` | 2 KB | every session |
+| Anything else | 8 KB | only when it is read or a matching file opens |
+
+Discipline:
 
 - **`always` rules** — keep small. A paragraph or two at most. If it's substantive, it belongs in `indexed`.
 - **`indexed` rules** — can be longer; they only load when the agent decides they're relevant.

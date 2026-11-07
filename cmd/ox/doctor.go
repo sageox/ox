@@ -379,13 +379,20 @@ read summary.has_failed for the result and the process exit code for scripting.`
 			_ = doctor.ClearNeedsDoctorHuman(gitRoot)
 		}
 
-		// set or clear .needs-doctor-agent marker based on whether any check
-		// requires agent intervention (e.g., incomplete sessions)
+		// Clear a stale agent chore only after session inspection succeeds.
+		// Recovery/upload work and failed or skipped scans must keep their
+		// existing marker even when they cannot request a summary yet.
 		if gitRoot != "" {
 			if hasRequiresAgentIssues(categories) {
 				_ = doctor.SetNeedsDoctorAgent(gitRoot)
 			} else {
-				_ = doctor.ClearNeedsDoctorAgent(gitRoot)
+				for _, category := range categories {
+					for _, check := range category.checks {
+						if check.slug == CheckSlugSessionIncomplete && check.passed && !check.warning && !check.skipped {
+							_ = doctor.ClearNeedsDoctorAgent(gitRoot)
+						}
+					}
+				}
 			}
 		}
 
@@ -868,6 +875,11 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 		if !sharedValuesCheck.skipped {
 			integrationChecks = append(integrationChecks, sharedValuesCheck)
 		}
+		// ox status line in the shared settings (a custom one is left alone)
+		statusLineCheck := checkClaudeStatusLine(opts.shouldFix(CheckSlugClaudeStatusLine))
+		if !statusLineCheck.skipped {
+			integrationChecks = append(integrationChecks, statusLineCheck)
+		}
 		// detect stale ox hooks in settings.local.json
 		staleLocalCheck := checkStaleLocalHooks(opts.shouldFix(CheckSlugStaleLocalHooks))
 		if !staleLocalCheck.skipped {
@@ -903,6 +915,13 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	// on machines that never enabled it.
 	if check := GetDoctorCheck(CheckSlugPetOxy); check != nil {
 		if res := check.Run(opts.shouldFix(CheckSlugPetOxy)); !res.skipped {
+			integrationChecks = append(integrationChecks, res)
+		}
+	}
+	// The /ox-session-report pane follows the session_report_pane setting (default on); silent
+	// on machines without the claude CLI.
+	if check := GetDoctorCheck(CheckSlugUsagePane); check != nil {
+		if res := check.Run(opts.shouldFix(CheckSlugUsagePane)); !res.skipped {
 			integrationChecks = append(integrationChecks, res)
 		}
 	}
@@ -986,9 +1005,12 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 
 	// git repo paths check - suppress individual warnings when not logged in
 	if state.isAuthenticated {
-		check := checkGitRepoPaths(opts.shouldFix(CheckSlugGitRepoPaths))
+		check := gitRepoPathsCheck(ctx, opts.shouldFix(CheckSlugGitRepoPaths))
 		if errors.Is(check.err, tea.ErrInterrupted) {
 			return categories, check.err
+		}
+		if err := ctx.Err(); err != nil {
+			return categories, err
 		}
 		gitRepoChecks = append(gitRepoChecks, check)
 	} else {
@@ -1049,7 +1071,10 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 			},
 		})
 	} else {
-		ledgerGitChecks := checkLedgerGitHealth(opts)
+		ledgerGitChecks := checkLedgerGitHealth(ctx, opts)
+		if err := ctx.Err(); err != nil {
+			return categories, err
+		}
 		if len(ledgerGitChecks) > 0 {
 			categories = append(categories, checkCategory{
 				name:   "Ledger Git Health",
@@ -1376,7 +1401,15 @@ var ledgerGitHealthOrder = []string{
 	// instead of pulling on top of the wedge.
 	CheckSlugLedgerStuckOperation,
 	CheckSlugLedgerCleanWorkdir,
+	// before branch-status: a plan page pointer the store lost makes that push
+	// fail, so the repair (which rewrites only unpushed commits) runs first
+	CheckSlugPlanPointersMissing,
 	CheckSlugLedgerBranchStatus,
+	// plan-stranded-saves before plan-unsaved-edits and plan-pending-writes: a
+	// save it queues is not also listed as an unsaved edit, and lands in this
+	// run's retry.
+	CheckSlugPlanStrandedSaves,
+	CheckSlugPlanUnsavedEdits,
 	// after branch-status, whose push can land review records still waiting
 	// in the retry queue, so their entries are cleared instead of reported.
 	CheckSlugPlanPendingWrites,
@@ -1403,8 +1436,9 @@ var ledgerGitHealthOrder = []string{
 
 // checkLedgerGitHealth runs every check registered in the "Ledger Git Health"
 // category, in ledgerGitHealthOrder, resolving each check's fix flag through
-// opts.shouldFix(slug). Returns nil when there is no ledger to check.
-func checkLedgerGitHealth(opts doctorOptions) []checkResult {
+// opts.shouldFix(slug). Returns nil when there is no ledger to check, and
+// starts no further check once ctx is canceled.
+func checkLedgerGitHealth(ctx context.Context, opts doctorOptions) []checkResult {
 	ledgerPath := getLedgerPath()
 	if ledgerPath == "" {
 		return nil // no ledger found, skip entire category
@@ -1416,6 +1450,9 @@ func checkLedgerGitHealth(opts doctorOptions) []checkResult {
 
 	checks := make([]checkResult, 0, len(ledgerGitHealthOrder))
 	for _, slug := range ledgerGitHealthOrder {
+		if ctx.Err() != nil {
+			break
+		}
 		check := DoctorCheckRegistry[slug]
 		if check == nil {
 			continue // registration removed; the coverage test catches the reverse
@@ -1427,12 +1464,19 @@ func checkLedgerGitHealth(opts doctorOptions) []checkResult {
 			continue
 		}
 
-		// branch-status pushes unpushed commits; the session repairs must have run first
-		if slug == CheckSlugLedgerBranchStatus {
+		// branch-status and plan-pointers both rewrite unpushed commits; the
+		// session repairs must have run first
+		if slug == CheckSlugLedgerBranchStatus || slug == CheckSlugPlanPointersMissing {
 			_ = opts.runSessionRepairs()
 		}
 
-		result := check.Run(opts.shouldFix(slug))
+		var result checkResult
+		if slug == CheckSlugLedgerInvalidHead {
+			// its repair re-clones the Ledger, which Ctrl-C must be able to stop
+			result = invalidHeadCheck(ctx, ledgerPath, opts.shouldFix(slug))
+		} else {
+			result = check.Run(opts.shouldFix(slug))
+		}
 		// the checkout .gitignore check reports "skipped" when no checkout
 		// exists; that is not a finding worth a row. The GitHub mirror check
 		// reports "skipped" when the mirror never ran on this machine, which

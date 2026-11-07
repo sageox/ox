@@ -14,6 +14,7 @@ import (
 	"fmt"
 
 	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/session/contextuse"
 )
 
 // Grade is the evidence tier of a flow, derived from the event mechanism.
@@ -35,7 +36,7 @@ type Flow struct {
 	Ref     string `json:"ref,omitempty"`
 	RefType string `json:"ref_type,omitempty"`
 	Grade   Grade  `json:"grade"`
-	Kind    string `json:"kind"` // consult | cross-session | distillation | injection | attribution
+	Kind    string `json:"kind"` // consult | cross-session | distillation | injection | attribution | use
 }
 
 // Build turns one session's context-trace events into flow items. Only the
@@ -61,6 +62,8 @@ func flowFor(session string, ev contexttrace.Event) (Flow, bool) {
 	case contexttrace.EventConsulted:
 		base.Kind, base.Text = consultPhrasing(ev)
 		return base, true
+	case contexttrace.EventUsed:
+		return usePhrasing(base, ev)
 	case contexttrace.EventInfluenced:
 		base.Kind = "attribution"
 		base.Text = fmt.Sprintf("You attributed this work to %s (self-assessed)", refLabel(ev))
@@ -106,10 +109,59 @@ func consultPhrasing(ev contexttrace.Event) (kind, text string) {
 	}
 }
 
-// gradeOf maps an event mechanism to a rendering grade.
+// usePhrasing renders a used event at exactly its evidence grade: observed
+// use (read/requery/cited) is provable; a self-report and a judge verdict are
+// inferred and say so. A "nothing used" report is not a flow.
+func usePhrasing(base Flow, ev contexttrace.Event) (Flow, bool) {
+	evidence := ev.Evidence
+	if evidence == "" {
+		evidence = evidenceForMechanism(ev.Mechanism)
+	}
+	if evidence == contexttrace.EvidenceNone {
+		return Flow{}, false
+	}
+	base.Kind = "use"
+	switch contextuse.GradeOf(evidence) {
+	case contextuse.GradeProvable:
+		base.Grade = GradeProvable
+		base.Text = fmt.Sprintf("You used %s (%s", refLabel(ev), contextuse.BucketOf(evidence))
+		if ev.Seq > 0 {
+			base.Text += fmt.Sprintf(", turn %d", ev.Seq)
+		}
+		base.Text += ")"
+	case contextuse.GradeReported:
+		base.Grade = GradeInferred
+		base.Text = fmt.Sprintf("You reported using %s", refLabel(ev))
+		if ev.Decision != "" {
+			base.Text += fmt.Sprintf(": “%s”", ev.Decision)
+		}
+	case contextuse.GradeJudged:
+		base.Grade = GradeInferred
+		base.Text = fmt.Sprintf("Judged used: %s", refLabel(ev))
+	default:
+		return Flow{}, false // unknown evidence from a newer writer
+	}
+	return base, true
+}
+
+// evidenceForMechanism is the fallback for a used event with no evidence.
+func evidenceForMechanism(m contexttrace.Mechanism) string {
+	switch m {
+	case contexttrace.MechanismRetrieval:
+		return contexttrace.EvidenceRead
+	case contexttrace.MechanismCitation:
+		return contexttrace.EvidenceCited
+	case contexttrace.MechanismJudge:
+		return contexttrace.EvidenceJudged
+	}
+	return contexttrace.EvidenceReported
+}
+
+// gradeOf maps an event mechanism to a rendering grade. Retrieval, injection
+// and citation are observed, so provable; self-report and judge are inferred.
 func gradeOf(m contexttrace.Mechanism) Grade {
 	switch m {
-	case contexttrace.MechanismRetrieval, contexttrace.MechanismInjection:
+	case contexttrace.MechanismRetrieval, contexttrace.MechanismInjection, contexttrace.MechanismCitation:
 		return GradeProvable
 	default:
 		return GradeInferred

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/prime"
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/sageox/ox/internal/tokens"
@@ -222,5 +225,87 @@ func TestEmitProvidedContextTrace_WithTeamDocs(t *testing.T) {
 		if events[i].Doc != name {
 			t.Errorf("event[%d]: doc=%q, want %q", i, events[i].Doc, name)
 		}
+	}
+}
+
+// Failure prevented: prime's provided docs sit outside the seq frame every
+// other trace writer uses, so "used after surfaced" comparisons go wrong, and
+// team docs from nested folders collapse to an ambiguous bare filename.
+func TestEmitProvidedContextTrace_SeqTitleAndRelativeRefs(t *testing.T) {
+	teamRoot := filepath.Join(t.TempDir(), "team-ctx")
+	teamCtx := &prime.TeamContextInfo{
+		TeamName:        "SageOx",
+		Path:            teamRoot,
+		MemoryContent:   "# Memory",
+		HasAgentContext: true,
+		TeamDocs: []teamdocs.TeamDoc{
+			{Name: "principles.md", Path: filepath.Join(teamRoot, "docs", "eng", "principles.md")},
+			{Name: "glossary.md"}, // no path: keeps the name
+			{Name: "outside.md", Path: filepath.Join(t.TempDir(), "outside.md")},
+		},
+	}
+	instructions := &prime.TeamInstructions{TeamName: "SageOx", Files: []string{"AGENTS.md"}}
+
+	cases := []struct {
+		name    string
+		setup   func(t *testing.T) string
+		wantSeq int
+	}{
+		{"recording dir carries entry count", func(t *testing.T) string {
+			dir := t.TempDir()
+			data, err := json.Marshal(session.RecordingState{AgentID: "OxPrm", SessionPath: dir, EntryCount: 11})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".recording.json"), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return dir
+		}, 11},
+		{"cache dir without recording is seq 0", func(t *testing.T) string { return t.TempDir() }, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tc.setup(t)
+			emitProvidedContextTrace(dir, teamCtx, instructions)
+			events, err := contexttrace.ReadEvents(contexttrace.NewWriter(dir).Path())
+			if err != nil {
+				t.Fatal(err)
+			}
+			// instructions + memory + agent context + 3 docs
+			if len(events) != 6 {
+				t.Fatalf("got %d events, want 6", len(events))
+			}
+			for i, ev := range events {
+				if ev.Seq != tc.wantSeq {
+					t.Errorf("event[%d] seq=%d want %d", i, ev.Seq, tc.wantSeq)
+				}
+			}
+			wantDocs := []struct{ doc, title string }{
+				{"", "AGENTS.md"},
+				{"MEMORY.md", "MEMORY.md"},
+				{"distilled-discussions.md", "distilled-discussions.md"},
+				{"docs/eng/principles.md", "principles.md"},
+				{"glossary.md", "glossary.md"},
+				{"outside.md", "outside.md"},
+			}
+			for i, w := range wantDocs {
+				if events[i].Doc != w.doc || events[i].Title != w.title {
+					t.Errorf("event[%d] doc=%q title=%q, want doc=%q title=%q", i, events[i].Doc, events[i].Title, w.doc, w.title)
+				}
+			}
+		})
+	}
+}
+
+func TestEmitProvidedContextTrace_MultiFileInstructionsHaveNoTitle(t *testing.T) {
+	dir := t.TempDir()
+	emitProvidedContextTrace(dir, nil, &prime.TeamInstructions{Files: []string{"AGENTS.md", "CLAUDE.md"}})
+	events, err := contexttrace.ReadEvents(contexttrace.NewWriter(dir).Path())
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events=%v err=%v", events, err)
+	}
+	if events[0].Title != "" {
+		t.Errorf("a title for one of two docs would mislabel the other: got %q", events[0].Title)
 	}
 }

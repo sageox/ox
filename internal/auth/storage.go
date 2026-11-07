@@ -1,9 +1,12 @@
 package auth
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/endpoint"
@@ -24,8 +27,64 @@ var ErrEnvTokenMalformed = errkind.Errorf(errkind.Auth, "SAGEOX_TOKEN is set but
 // UserInfo contains user information from the authentication provider
 type UserInfo struct {
 	UserID string `json:"user_id"`
+	Sub    string `json:"sub"`
 	Email  string `json:"email"`
 	Name   string `json:"name"`
+}
+
+// UnmarshalJSON accepts the OIDC subject on sign-in and when loading auth.json.
+// Normalize here so direct UserID readers see the same identity as GetUserID.
+func (u *UserInfo) UnmarshalJSON(data []byte) error {
+	type plain UserInfo
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if decoded.UserID == "" {
+		decoded.UserID = decoded.Sub
+	}
+	*u = UserInfo(decoded)
+	return nil
+}
+
+// LocalUserID returns only the signed-in person's SageOx ID without network IO.
+// An unverified JWT subject is an analytics hint, never an authorization claim.
+// Environment and team credentials must never inherit the laptop's person.
+func LocalUserID(ep string) string {
+	if ep == "" {
+		ep = endpoint.Get()
+	}
+	if _, state := EnvTokenFor(ep); state != EnvTokenAbsent {
+		return ""
+	}
+	token, err := GetTokenForEndpoint(ep)
+	if err != nil || token == nil || strings.HasPrefix(token.AccessToken, TeamTokenPrefix) {
+		return ""
+	}
+	if strings.HasPrefix(token.UserInfo.UserID, "usr_") {
+		return token.UserInfo.UserID
+	}
+	return jwtPersonSubject(token.AccessToken)
+}
+
+// jwtPersonSubject reads only an unverified usr_ subject from a JWT access
+// token, locally; anything else in the token is never parsed or kept.
+func jwtPersonSubject(accessToken string) string {
+	parts := strings.Split(accessToken, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		Sub string `json:"sub"`
+	}
+	if json.Unmarshal(payload, &claims) != nil || !strings.HasPrefix(claims.Sub, "usr_") {
+		return ""
+	}
+	return claims.Sub
 }
 
 // StoredToken represents the authentication token stored locally
@@ -198,6 +257,11 @@ func GetUserID(ep string) string {
 	token, err := GetTokenForEndpoint(ep)
 	if err != nil || token == nil {
 		return ""
+	}
+	// Logins stored before user_id was filled carry the person only in the
+	// access token's subject until the next sign-in.
+	if token.UserInfo.UserID == "" && !strings.HasPrefix(token.AccessToken, TeamTokenPrefix) {
+		return jwtPersonSubject(token.AccessToken)
 	}
 	return token.UserInfo.UserID
 }
@@ -540,6 +604,60 @@ func (c *AuthClient) removeTokenIfUnchanged(ep string, want *StoredToken) error 
 		delete(store.Tokens, ep)
 		return h.save(store)
 	}, legacyOpt, trackerOpt)
+}
+
+// saveTokenIfUnchanged stores to as ep's login only if the entry still holds
+// from, the login a token refresh started from. A refresh waits seconds on the
+// server; saving blindly afterwards would bring back a login `ox logout`
+// deleted meanwhile, or overwrite one a concurrent `ox login` or refresh saved.
+// Checking and saving under one write lock leaves both alone.
+//
+// It returns the login stored for ep when it is done: to if it was saved, the
+// login that replaced from if the entry changed, or nil if the entry is gone.
+// ep must already be normalized.
+func (c *AuthClient) saveTokenIfUnchanged(ep string, from, to *StoredToken) (*StoredToken, error) {
+	authPath, err := c.GetAuthFilePath()
+	if err != nil {
+		return nil, err
+	}
+	return saveTokenIfUnchangedAt(authPath, ep, from, to, withLegacyMigrationEndpoint(c.endpoint), withEndpointTracker(c))
+}
+
+// saveTokenForEndpointIfUnchanged is saveTokenIfUnchanged for the package-level
+// refresh, which has no AuthClient.
+func saveTokenForEndpointIfUnchanged(ep string, from, to *StoredToken) (*StoredToken, error) {
+	authPath, err := GetAuthFilePath()
+	if err != nil {
+		return nil, err
+	}
+	return saveTokenIfUnchangedAt(authPath, endpoint.NormalizeEndpoint(ep), from, to)
+}
+
+// saveTokenIfUnchangedAt implements saveTokenIfUnchanged for the auth file at
+// authPath.
+func saveTokenIfUnchangedAt(authPath, ep string, from, to *StoredToken, opts ...authFileOption) (*StoredToken, error) {
+	var stored *StoredToken
+	err := withAuthFileLocked(authPath, func(h *authFileHandle) error {
+		store, loadErr := h.load()
+		if loadErr != nil {
+			return loadErr
+		}
+		cur := store.Tokens[ep]
+		if cur == nil || !sameCredential(cur, from) {
+			stored = cur
+			return nil
+		}
+		store.Tokens[ep] = to
+		if err := h.save(store); err != nil {
+			return err
+		}
+		stored = to
+		return nil
+	}, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return stored, nil
 }
 
 // IsAuthenticated checks if a locally valid token exists for this client's endpoint.

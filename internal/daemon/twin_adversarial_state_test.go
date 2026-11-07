@@ -21,50 +21,66 @@ import (
 )
 
 // --- A. Leftover GC artifacts from a previous crash ---
+//
+// A crashed GC leaves different residue depending on when it died, and the
+// next GC must tell the cases apart. Before the clone finished, ws.Path still
+// holds the original tree, so .new/.gc-diff/.gc-untracked are redundant copies
+// and are swept. After the swap, an .old sits next to ws.Path and the backups
+// are the only copy of the coworker's changes, so they are restored, or kept
+// for manual recovery when they cannot be.
 
-// TestGC_LeftoverArtifacts_CleanedBeforeReclone verifies that stale artifacts
-// from a previous GC crash (.new, .old, .gc-lock, .gc-diff, .gc-untracked)
-// are cleaned up before the next GC proceeds.
+// seedGiteaLedger creates a Gitea repo holding the ledger structure and
+// returns its clone URL and a working clone at <tmp>/repo.
+func seedGiteaLedger(t *testing.T, g *giteaFixture, name string) (cloneURL, cloneDir string) {
+	t.Helper()
+	cloneURL = g.createRepo(t, name)
+	cloneDir = filepath.Join(t.TempDir(), "repo")
+	g.cloneRepo(t, cloneURL, cloneDir)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, "sessions"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "sessions", ".gitkeep"), []byte(""), 0o644))
+	for _, args := range [][]string{
+		{"add", "sessions/.gitkeep"},
+		{"commit", "-m", "add ledger structure"},
+		{"push"},
+	} {
+		out, err := exec.Command("git", append([]string{"-C", cloneDir}, args...)...).CombinedOutput()
+		require.NoError(t, err, "git %s failed: %s", args[0], string(out))
+	}
+	return cloneURL, cloneDir
+}
+
+// plantStaleGCLock leaves the lock a crashed GC would have held, aged past
+// acquireGCLock's stale-lock reclaim window.
+func plantStaleGCLock(t *testing.T, cloneDir string) string {
+	t.Helper()
+	lockPath := cloneDir + ".gc-lock"
+	require.NoError(t, os.WriteFile(lockPath, []byte("stale"), 0o644))
+	staleTime := time.Now().Add(-10 * time.Minute)
+	require.NoError(t, os.Chtimes(lockPath, staleTime, staleTime))
+	return lockPath
+}
+
+// TestGC_LeftoverArtifacts_CleanedBeforeReclone verifies that the residue of
+// a GC that crashed before cloning finished (.new, a stale .gc-lock, .gc-diff,
+// .gc-untracked, and no .old) is swept and the next GC succeeds. The diff is
+// not a valid patch: with no .old it is a redundant copy, never applied.
 // Failure prevented: leftover .gc-lock from a crashed GC permanently blocks
-// all future GC cycles; leftover .new/.old waste disk and confuse the swap.
+// all future GC cycles; leftover .new/.gc-diff waste disk and confuse the swap.
 func TestGC_LeftoverArtifacts_CleanedBeforeReclone(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: Gitea digital twin")
 	}
 
 	g := getSharedGitea(t)
-	cloneURL := g.createRepo(t, "gc-leftover-artifacts")
-
-	cloneDir := filepath.Join(t.TempDir(), "repo")
-	g.cloneRepo(t, cloneURL, cloneDir)
-
-	// add ledger structure
-	require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, "sessions"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "sessions", ".gitkeep"), []byte(""), 0o644))
-	cmd := exec.Command("git", "-C", cloneDir, "add", "sessions/.gitkeep")
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "git add failed: %s", string(out))
-	cmd = exec.Command("git", "-C", cloneDir, "commit", "-m", "add ledger structure")
-	out, err = cmd.CombinedOutput()
-	require.NoError(t, err, "git commit failed: %s", string(out))
-	cmd = exec.Command("git", "-C", cloneDir, "push")
-	out, err = cmd.CombinedOutput()
-	require.NoError(t, err, "git push failed: %s", string(out))
+	cloneURL, cloneDir := seedGiteaLedger(t, g, "gc-leftover-artifacts")
 
 	// create fake leftover artifacts from a "crashed" previous GC
 	newDir := cloneDir + ".new"
 	require.NoError(t, os.MkdirAll(newDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(newDir, "partial-clone"), []byte("stale"), 0o644))
 
-	oldDir := cloneDir + ".old"
-	require.NoError(t, os.MkdirAll(oldDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(oldDir, "old-repo"), []byte("stale"), 0o644))
-
-	lockPath := cloneDir + ".gc-lock"
-	require.NoError(t, os.WriteFile(lockPath, []byte("stale"), 0o644))
-	// set mtime to 10 minutes ago so the lock is considered stale
-	staleTime := time.Now().Add(-10 * time.Minute)
-	require.NoError(t, os.Chtimes(lockPath, staleTime, staleTime))
+	lockPath := plantStaleGCLock(t, cloneDir)
 
 	diffFile := cloneDir + ".gc-diff"
 	require.NoError(t, os.WriteFile(diffFile, []byte("old diff"), 0o644))
@@ -88,19 +104,143 @@ func TestGC_LeftoverArtifacts_CleanedBeforeReclone(t *testing.T) {
 	result := s.runBlueGreenGC(context.Background(), ws)
 	assert.Equal(t, gcSuccess, result, "GC should succeed after cleaning leftover artifacts")
 
-	// all leftover artifacts should be gone
-	for _, artifact := range []string{newDir, oldDir, lockPath, diffFile, untrackedDir} {
-		_, statErr := os.Stat(artifact)
-		assert.True(t, os.IsNotExist(statErr),
-			"leftover artifact should be cleaned up: %s", artifact)
+	// all leftover artifacts should be gone, and the swap left none of its own
+	for _, artifact := range []string{newDir, lockPath, diffFile, untrackedDir, cloneDir + ".old", cloneDir + ".gc-swap-done"} {
+		assert.NoFileExists(t, artifact, "leftover artifact should be cleaned up")
+		assert.NoDirExists(t, artifact, "leftover artifact should be cleaned up")
 	}
 
 	// repo should be valid and contain committed content
-	_, err = os.Stat(filepath.Join(cloneDir, ".git", "HEAD"))
+	_, err := os.Stat(filepath.Join(cloneDir, ".git", "HEAD"))
 	require.NoError(t, err, ".git/HEAD should exist after GC")
 
 	_, err = os.Stat(filepath.Join(cloneDir, "sessions", ".gitkeep"))
 	require.NoError(t, err, "sessions/.gitkeep should exist after GC")
+}
+
+// TestGC_InterruptedSwap_RestoresOrphanedBackups verifies that a GC which
+// crashed after its swap, leaving .old next to the fresh clone, has its
+// captured diff and untracked files restored by the next GC, which then
+// succeeds and leaves no artifacts behind. The backups are taken with the
+// production capture helpers, from a real edit, so they are in the exact
+// format the restore expects.
+// Failure prevented: an interrupted swap's .gc-diff/.gc-untracked swept as
+// ordinary leftovers, silently discarding the only copy of a coworker's
+// uncommitted Ledger edits.
+func TestGC_InterruptedSwap_RestoresOrphanedBackups(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: Gitea digital twin")
+	}
+
+	g := getSharedGitea(t)
+	cloneURL, cloneDir := seedGiteaLedger(t, g, "gc-interrupted-swap-restore")
+
+	isolateCredentials(t)
+	projectDir := setupProjectWithConfig(t, "")
+	s := newTestScheduler(projectDir)
+	ctx := context.Background()
+
+	// phase 0 of the crashed GC: capture a tracked edit and an untracked file
+	const editedReadme = "edited before the crash\n"
+	const untrackedName, untrackedContent = "notes-before-crash.txt", "untracked before the crash\n"
+	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "README.md"), []byte(editedReadme), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, untrackedName), []byte(untrackedContent), 0o644))
+
+	diffFile := cloneDir + ".gc-diff"
+	untrackedDir := cloneDir + ".gc-untracked"
+	hasDiff, err := s.gcCaptureDiff(ctx, cloneDir, diffFile, "HEAD")
+	require.NoError(t, err)
+	require.True(t, hasDiff, "the edit must produce a real diff")
+	hasUntracked, err := s.gcCaptureUntracked(ctx, cloneDir, untrackedDir)
+	require.NoError(t, err)
+	require.True(t, hasUntracked, "the untracked file must be captured")
+
+	// the swap completed: ws.Path is a clean fresh clone, the pre-swap tree
+	// sits at .old, and the crashed process still holds its lock
+	out, err := exec.Command("git", "-C", cloneDir, "checkout", "--", "README.md").CombinedOutput()
+	require.NoError(t, err, "git checkout failed: %s", string(out))
+	require.NoError(t, os.Remove(filepath.Join(cloneDir, untrackedName)))
+	oldDir := cloneDir + ".old"
+	g.cloneRepo(t, cloneURL, oldDir)
+	lockPath := plantStaleGCLock(t, cloneDir)
+
+	ws := WorkspaceState{
+		ID:       "interrupted-swap-restore",
+		Type:     WorkspaceTypeLedger,
+		Path:     cloneDir,
+		CloneURL: cloneURL,
+		Exists:   true,
+	}
+
+	result := s.runBlueGreenGC(ctx, ws)
+	require.Equal(t, gcSuccess, result, "GC should recover the interrupted swap and then succeed")
+
+	readme, err := os.ReadFile(filepath.Join(cloneDir, "README.md"))
+	require.NoError(t, err)
+	assert.Equal(t, editedReadme, string(readme), "the orphaned diff must be restored, not discarded")
+	untracked, err := os.ReadFile(filepath.Join(cloneDir, untrackedName))
+	require.NoError(t, err, "the orphaned untracked file must be restored, not discarded")
+	assert.Equal(t, untrackedContent, string(untracked))
+
+	for _, artifact := range []string{oldDir, cloneDir + ".new", lockPath, diffFile, untrackedDir, cloneDir + ".gc-swap-done", cloneDir + ".gc-swap-lock"} {
+		assert.NoFileExists(t, artifact, "recovered artifact should be cleaned up")
+		assert.NoDirExists(t, artifact, "recovered artifact should be cleaned up")
+	}
+
+	_, err = os.Stat(filepath.Join(cloneDir, "sessions", ".gitkeep"))
+	require.NoError(t, err, "sessions/.gitkeep should exist after GC")
+}
+
+// TestGC_InterruptedSwap_UnappliableDiffPreserved verifies that when an
+// interrupted swap's .gc-diff cannot be applied, GC fails closed: the diff,
+// .old and the swap marker are kept for manual recovery and the next attempt,
+// and no new clone is started over the half-recovered tree.
+// Failure prevented: the only copy of a coworker's changes deleted, or a fresh
+// GC cycle run on top of it, because the restore failed.
+func TestGC_InterruptedSwap_UnappliableDiffPreserved(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: Gitea digital twin")
+	}
+
+	g := getSharedGitea(t)
+	cloneURL, cloneDir := seedGiteaLedger(t, g, "gc-interrupted-swap-bad-diff")
+
+	readmeBefore, err := os.ReadFile(filepath.Join(cloneDir, "README.md"))
+	require.NoError(t, err)
+
+	oldDir := cloneDir + ".old"
+	g.cloneRepo(t, cloneURL, oldDir)
+	plantStaleGCLock(t, cloneDir)
+	diffFile := cloneDir + ".gc-diff"
+	const unappliable = "old diff"
+	require.NoError(t, os.WriteFile(diffFile, []byte(unappliable), 0o644))
+
+	isolateCredentials(t)
+	projectDir := setupProjectWithConfig(t, "")
+	s := newTestScheduler(projectDir)
+
+	ws := WorkspaceState{
+		ID:       "interrupted-swap-bad-diff",
+		Type:     WorkspaceTypeLedger,
+		Path:     cloneDir,
+		CloneURL: cloneURL,
+		Exists:   true,
+	}
+
+	result := s.runBlueGreenGC(context.Background(), ws)
+	assert.Equal(t, gcFailed, result, "an unappliable orphaned diff must fail closed")
+
+	diff, err := os.ReadFile(diffFile)
+	require.NoError(t, err, "the unappliable diff must be preserved for manual recovery")
+	assert.Equal(t, unappliable, string(diff), "the preserved diff must be byte-for-byte intact")
+	assert.DirExists(t, oldDir, ".old must be kept so the next GC retries the recovery")
+	assert.FileExists(t, cloneDir+".gc-swap-done", "the swap marker must stay so the next GC retries the recovery")
+	assert.NoDirExists(t, cloneDir+".new", "no new clone may start over a half-recovered tree")
+	assert.NoFileExists(t, cloneDir+".gc-swap-lock", "the swap lock must not outlive the failed recovery")
+
+	readmeAfter, err := os.ReadFile(filepath.Join(cloneDir, "README.md"))
+	require.NoError(t, err)
+	assert.Equal(t, string(readmeBefore), string(readmeAfter), "the workspace must be left as it was")
 }
 
 // --- B. Empty working tree (rogue agent deleted everything) ---

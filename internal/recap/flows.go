@@ -19,7 +19,7 @@ func gatherFlows(ledgerPath string, sessions []SessionFacts) []string {
 		if len(out) >= maxFlows {
 			break
 		}
-		events, _ := readTrace(ledgerPath, s.Name)
+		events, _ := ReadTrace(ledgerPath, s.Name)
 		infl := influenceEvents(events)
 		if len(infl) == 0 {
 			continue

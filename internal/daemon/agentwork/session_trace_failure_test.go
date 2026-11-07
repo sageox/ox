@@ -35,7 +35,7 @@ func TestTracePointerWriteFailureStillPublishesOrdinarySession(t *testing.T) {
 	// -f: a coworker's global gitignore (e.g. "*.gz") must not decide what this fixture stages
 	runGitCmd(t, ledger, "add", "--sparse", "-f", filepath.Join("sessions", "trace-write-failure", pipeline.LedgerFileTraceSpans))
 	handler := newGitBackedHandler()
-	pushed, pushErr := handler.gitCommitAndPush(&SessionFinalizePayload{SessionDir: dir, RawPath: filepath.Join(dir, "raw.jsonl"), LedgerPath: ledger}, refs)
+	pushed, pushErr := handler.gitCommitAndPush(&SessionFinalizePayload{SessionDir: dir, RawPath: filepath.Join(dir, "raw.jsonl"), LedgerPath: ledger}, refs, nil)
 	require.NoError(t, pushErr)
 	require.True(t, pushed)
 	committed := gitOutput(t, ledger, "show", "HEAD:sessions/trace-write-failure/raw.jsonl")
@@ -126,7 +126,7 @@ func TestTraceOmissionPreservesUnmergedIndex(t *testing.T) {
 	require.NoError(t, err, string(output))
 	before := gitOutput(t, ledger, "ls-files", "--stage")
 	payload := &SessionFinalizePayload{SessionDir: dir, RawPath: rawPath, LedgerPath: ledger, omitTraces: true}
-	pushed, _ := newGitBackedHandler().gitCommitAndPush(payload, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef([]byte(testRawContent))})
+	pushed, _ := newGitBackedHandler().gitCommitAndPush(payload, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef([]byte(testRawContent))}, nil)
 	require.False(t, pushed)
 	require.Equal(t, before, gitOutput(t, ledger, "ls-files", "--stage"))
 	content, err := os.ReadFile(rawPath)

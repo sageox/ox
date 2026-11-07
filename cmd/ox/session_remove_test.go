@@ -25,7 +25,7 @@ func TestBatchDeleteSessionsFromLedger_SingleSession(t *testing.T) {
 	require.NoError(t, err, "session should exist on remote before deletion")
 
 	// delete it
-	removed, err := batchDeleteSessionsFromLedger(clonePath, []string{sessionName})
+	removed, err := batchDeleteSessionsFromLedger(clonePath, []string{"../invalid", sessionName, "nonexistent-OxGone"})
 	require.NoError(t, err)
 	assert.Equal(t, 1, removed)
 
@@ -74,7 +74,7 @@ func TestBatchDeleteSessionsFromLedger_NonexistentSession(t *testing.T) {
 	isolatePushEnv(t, clonePath)
 
 	// try to delete a session that was never created
-	removed, err := batchDeleteSessionsFromLedger(clonePath, []string{"nonexistent-OxGone"})
+	removed, err := batchDeleteSessionsFromLedger(clonePath, []string{"nonexistent-OxGone", "../invalid"})
 	assert.Error(t, err, "should error when no sessions could be staged")
 	assert.Equal(t, 0, removed)
 	assert.Contains(t, err.Error(), "no sessions could be staged")

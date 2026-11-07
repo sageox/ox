@@ -9,13 +9,34 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
-	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/teamdocs"
 )
+
+// ephemeralMaterializeLockTimeout bounds how long a prime waits for another
+// prime writing the same team context. A write lands at most a 4 MiB bundle
+// and takes well under a second; 15s absorbs a slow disk without letting one
+// stuck prime stall every later one.
+const ephemeralMaterializeLockTimeout = 15 * time.Second
+
+// materializeTeamContext is fetchTeamContextViaAPI behind a seam so a test can
+// observe the lock held around it.
+var materializeTeamContext = fetchTeamContextViaAPI
+
+// writeTeamContextLocked runs the whole materialization under a lock keyed by
+// teamCtxDir.
+func writeTeamContextLocked(ctx context.Context, teamCtxDir string, resp *api.TeamContextContentResponse) error {
+	return fileutil.WithFileLockTimeout(ctx, teamCtxDir, ephemeralMaterializeLockTimeout, func() error {
+		return materializeTeamContext(teamCtxDir, resp)
+	})
+}
 
 // tryHTTPTeamContextFallback fetches a team's context over HTTP and writes
 // it to the canonical team-context directory, then re-invokes the normal
@@ -63,20 +84,59 @@ func tryHTTPTeamContextFallback(ctx context.Context, projectRoot, teamID string)
 		return nil, fmt.Errorf("could not resolve team-context dir for team_id=%s", teamID)
 	}
 
-	if err := fetchTeamContextViaAPI(teamCtxDir, resp); err != nil {
+	// Two primes on one machine share teamCtxDir. The whole write is one
+	// transaction under a lock keyed by that directory, so one prime never
+	// clears a stage or .old directory the other is still using.
+	if err := writeTeamContextLocked(ctx, teamCtxDir, resp); err != nil {
+		// Warn, not debug: the caller still falls back to whatever is on disk,
+		// which may now be only part of this response.
+		slog.Warn("ephemeral team-context fallback: team context only partly written",
+			"team_id", teamID, "dir", teamCtxDir,
+			"impact", "prime may read a partial team context from disk", "err", err)
 		return nil, fmt.Errorf("failed to write team context: %w", err)
 	}
 
 	slog.Debug("ephemeral team-context fallback: wrote context",
 		"team_id", teamID, "dir", teamCtxDir, "docs", len(resp.Docs))
 
-	// re-invoke the existing loader path now that files are on disk
-	repoSlug := ""
-	if pc, err := config.LoadProjectConfig(projectRoot); err == nil && pc != nil {
-		repoSlug = repoSlugFromProjectConfig(pc)
-	}
+	// re-invoke the existing loader path now that files are on disk.
+	//
+	// Origin is the only repo identity a repos: filter may use, the same answer
+	// prime and convergence get on a local checkout. A committed .sageox/config.json
+	// names the repo by ID and hash alone, so nothing else here can say which repo
+	// this is.
+	repoSlug, slugKnown := repotools.RepoSlugFromRemote(projectRoot)
 	info := discoverTeamContextLocalOnly(projectRoot, repoSlug)
+	if info != nil && !slugKnown {
+		info.RuleWarnings = unknownRepoRuleWarnings(info.Path)
+	}
 	return info, nil
+}
+
+// unknownRepoRuleWarnings says what a session lost because its checkout has no origin
+// to match repos: against. Those rules stay out, since delivering them could hand a
+// repo another repo's rules, but losing them silently reads as the rules not existing.
+func unknownRepoRuleWarnings(teamPath string) []string {
+	rules, err := teamdocs.PublishedRules(teamPath)
+	if err != nil {
+		slog.Warn("ephemeral team-context fallback: could not count withheld rules", "team_path", teamPath, "err", err)
+		return nil
+	}
+	withheld := 0
+	for _, rule := range rules {
+		if !teamdocs.RuleAppliesToRepo(rule, "") {
+			withheld++
+		}
+	}
+	const reason = "this checkout has no origin remote to match them against"
+	switch withheld {
+	case 0:
+		return nil
+	case 1:
+		return []string{"1 team rule names specific repositories and was withheld: " + reason}
+	default:
+		return []string{fmt.Sprintf("%d team rules name specific repositories and were withheld: %s", withheld, reason)}
+	}
 }
 
 // fetchTeamContextViaAPI writes the HTTP-fetched team context to disk
@@ -171,7 +231,7 @@ func fetchTeamContextViaAPI(teamCtxDir string, resp *api.TeamContextContentRespo
 			"dir", docsRoot, "err", openErr.Error())
 	}
 
-	return nil
+	return materializeTeamSkillsAndRules(teamCtxDir, resp)
 }
 
 // atomicWriteFile writes content to path via a temp file in the same
@@ -214,18 +274,4 @@ func atomicWriteFile(path string, content []byte, mode os.FileMode) error {
 // fact that the second call must NOT recurse back into the HTTP fallback.
 func discoverTeamContextLocalOnly(projectRoot, repoSlug string) *teamContextInfo {
 	return discoverTeamContextWithFallback(projectRoot, repoSlug, false)
-}
-
-// repoSlugFromProjectConfig assembles an "owner/repo" slug from the
-// project config fields that exist. Returns empty when no useful slug
-// can be derived — the caller treats empty as "skip repo-scoped rule
-// filtering" which is the safe default.
-func repoSlugFromProjectConfig(pc *config.ProjectConfig) string {
-	if pc == nil {
-		return ""
-	}
-	if pc.Org != "" && pc.Project != "" {
-		return pc.Org + "/" + pc.Project
-	}
-	return ""
 }

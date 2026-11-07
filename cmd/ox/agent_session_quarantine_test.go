@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
@@ -48,53 +49,56 @@ func moveToEarlierMinute(t *testing.T, state *session.RecordingState) *session.R
 // agent starts a new native file; if the held recording kept the agent's slot,
 // nothing would ever capture it and its content would never reach the Ledger.
 func TestQuarantinedRecordingDoesNotBlockTheNextRecording(t *testing.T) {
-	projectRoot, agentID, source := setupHandleAfterToolTest(t)
-	held, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
-	require.NoError(t, err)
-	first := held.StartedAt.Add(time.Second)
-	appendClaudeEntries(t, source, first,
-		`{"type":"user","timestamp":"`+first.Format(time.RFC3339Nano)+`","message":{"role":"user","content":"captured before the quarantine"}}`,
-	)
-	require.NoError(t, handleAfterTool(&HookContext{Phase: phaseAfterTool, AgentType: "claude-code", ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}))
-	require.NoError(t, session.MarkSourceRejected(projectRoot, agentID))
+	// Both recording starts must use the same minute-granular folder name.
+	synctest.Test(t, func(t *testing.T) {
+		projectRoot, agentID, source := setupHandleAfterToolTest(t)
+		held, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+		require.NoError(t, err)
+		first := held.StartedAt.Add(time.Second)
+		appendClaudeEntries(t, source, first,
+			`{"type":"user","timestamp":"`+first.Format(time.RFC3339Nano)+`","message":{"role":"user","content":"captured before the quarantine"}}`,
+		)
+		require.NoError(t, handleAfterTool(&HookContext{Phase: phaseAfterTool, AgentType: "claude-code", ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}))
+		require.NoError(t, session.MarkSourceRejected(projectRoot, agentID))
 
-	rawPath := filepath.Join(held.SessionPath, "raw.jsonl")
-	rawBefore, err := os.ReadFile(rawPath)
-	require.NoError(t, err)
-	markerBefore, err := os.ReadFile(filepath.Join(held.SessionPath, ".recording.json"))
-	require.NoError(t, err)
+		rawPath := filepath.Join(held.SessionPath, "raw.jsonl")
+		rawBefore, err := os.ReadFile(rawPath)
+		require.NoError(t, err)
+		markerBefore, err := os.ReadFile(filepath.Join(held.SessionPath, ".recording.json"))
+		require.NoError(t, err)
 
-	opts := session.StartRecordingOptions{AgentID: agentID, AdapterName: "claude-code", Username: "testuser"}
-	_, err = session.StartRecording(projectRoot, opts)
-	require.ErrorIs(t, err, session.ErrQuarantinedSessionPath, "a new recording must never be written over the quarantined one's folder")
-	markerAfter, err := os.ReadFile(filepath.Join(held.SessionPath, ".recording.json"))
-	require.NoError(t, err)
-	assert.Equal(t, string(markerBefore), string(markerAfter), "the refused start must leave the quarantine untouched")
+		opts := session.StartRecordingOptions{AgentID: agentID, AdapterName: "claude-code", Username: "testuser"}
+		_, err = session.StartRecording(projectRoot, opts)
+		require.ErrorIs(t, err, session.ErrQuarantinedSessionPath, "a new recording must never be written over the quarantined one's folder")
+		markerAfter, err := os.ReadFile(filepath.Join(held.SessionPath, ".recording.json"))
+		require.NoError(t, err)
+		assert.Equal(t, string(markerBefore), string(markerAfter), "the refused start must leave the quarantine untouched")
 
-	// /clear later: nothing active to stop, the held recording stays put
-	moved := moveToEarlierMinute(t, held)
-	stopSessionForClear(&HookContext{Phase: phaseStart, AgentType: "claude-code", ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}, agentID)
-	stillHeld, err := session.LoadQuarantinedRecordingsForAgent(projectRoot, agentID)
-	require.NoError(t, err)
-	require.Len(t, stillHeld, 1, "/clear must not finalize or clear a quarantined recording")
+		// /clear later: nothing active to stop, the held recording stays put
+		moved := moveToEarlierMinute(t, held)
+		stopSessionForClear(&HookContext{Phase: phaseStart, AgentType: "claude-code", ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}, agentID)
+		stillHeld, err := session.LoadQuarantinedRecordingsForAgent(projectRoot, agentID)
+		require.NoError(t, err)
+		require.Len(t, stillHeld, 1, "/clear must not finalize or clear a quarantined recording")
 
-	fresh, err := session.StartRecording(projectRoot, opts)
-	require.NoError(t, err, "the agent must be free to record again while the old recording waits for review")
-	assert.NotEqual(t, moved.SessionID, fresh.SessionID)
-	active, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
-	require.NoError(t, err)
-	require.NotNil(t, active)
-	assert.Equal(t, fresh.SessionID, active.SessionID, "the agent's active recording is the new one")
+		fresh, err := session.StartRecording(projectRoot, opts)
+		require.NoError(t, err, "the agent must be free to record again while the old recording waits for review")
+		assert.NotEqual(t, moved.SessionID, fresh.SessionID)
+		active, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+		require.NoError(t, err)
+		require.NotNil(t, active)
+		assert.Equal(t, fresh.SessionID, active.SessionID, "the agent's active recording is the new one")
 
-	// the agent exiting finalizes the new recording and only that one
-	require.NoError(t, handleEnd(&HookContext{Phase: phaseEnd, AgentType: "claude-code", ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}))
-	stillHeld, err = session.LoadQuarantinedRecordingsForAgent(projectRoot, agentID)
-	require.NoError(t, err)
-	require.Len(t, stillHeld, 1, "SessionEnd must not take the held recording with it")
-	assert.True(t, stillHeld[0].SourceRejected)
-	rawAfter, err := os.ReadFile(filepath.Join(moved.SessionPath, "raw.jsonl"))
-	require.NoError(t, err)
-	assert.Equal(t, string(rawBefore), string(rawAfter), "the held recording's captured data must be untouched")
+		// the agent exiting finalizes the new recording and only that one
+		require.NoError(t, handleEnd(&HookContext{Phase: phaseEnd, AgentType: "claude-code", ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}))
+		stillHeld, err = session.LoadQuarantinedRecordingsForAgent(projectRoot, agentID)
+		require.NoError(t, err)
+		require.Len(t, stillHeld, 1, "SessionEnd must not take the held recording with it")
+		assert.True(t, stillHeld[0].SourceRejected)
+		rawAfter, err := os.ReadFile(filepath.Join(moved.SessionPath, "raw.jsonl"))
+		require.NoError(t, err)
+		assert.Equal(t, string(rawBefore), string(rawAfter), "the held recording's captured data must be untouched")
+	})
 }
 
 // Prime is where a coworker learns whether they are being recorded. It must

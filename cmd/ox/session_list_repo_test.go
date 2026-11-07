@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/session"
@@ -175,4 +177,124 @@ func TestRunSessionList_NoRepoFlag_UsesCwd(t *testing.T) {
 	assert.Equal(t, "repo_test_cwd_only", out.RepoID)
 	require.Len(t, out.Sessions, 1)
 	assert.Equal(t, "2026-01-04T00-00-testuser-OxCCCC", out.Sessions[0].Name)
+}
+
+// --- runSessionList --since / --until / --window ---
+
+// sessionNameAgo names a session directory as production does, with a UTC
+// minute-resolution prefix the store parses back into the session's start time.
+func sessionNameAgo(age time.Duration, suffix string) string {
+	return time.Now().UTC().Add(-age).Format("2006-01-02T15-04") + "-testuser-" + suffix
+}
+
+// runSessionListWindow drives the production flag surface and RunE and
+// returns the decoded JSON.
+func runSessionListWindow(t *testing.T, args ...string) (sessionListOutput, error) {
+	t.Helper()
+	root := &cobra.Command{Use: "ox", SilenceUsage: true, SilenceErrors: true}
+	root.PersistentFlags().Bool("json", false, "")
+	cmd := &cobra.Command{Use: "list", RunE: runSessionList}
+	registerSessionListFlags(cmd)
+	root.AddCommand(cmd)
+
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs(append([]string{"list", "--json"}, args...))
+	if err := root.Execute(); err != nil {
+		return sessionListOutput{}, err
+	}
+	var out sessionListOutput
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &out), "stdout must be one JSON document: %q", buf.String())
+	return out, nil
+}
+
+func sessionNames(out sessionListOutput) []string {
+	names := make([]string, 0, len(out.Sessions))
+	for _, s := range out.Sessions {
+		names = append(names, s.Name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// TestRunSessionList_SinceUntilWindow: `session list` answers to --since and
+// --until, and an explicit window replaces the 7-day default instead of being
+// clipped by it.
+// Failure prevented: `session list --since 2d` / `--window 2d` is "unknown
+// flag", or `--since 30d` is silently answered from the last week only.
+func TestRunSessionList_SinceUntilWindow(t *testing.T) {
+	sandboxSessionCache(t)
+	t.Setenv(config.EnvProjectRoot, "")
+
+	dir := createInitializedProjectWithConfig(t, &config.ProjectConfig{RepoID: "repo_test_session_window"})
+	recent := sessionNameAgo(30*time.Minute, "OxNew1")
+	lastWeek := sessionNameAgo(3*24*time.Hour, "OxMid2")
+	old := sessionNameAgo(20*24*time.Hour, "OxOld3")
+	for _, name := range []string{recent, lastWeek, old} {
+		createSessionInDir(t, session.GetContextPath("repo_test_session_window"), name)
+	}
+	t.Chdir(dir)
+
+	tests := []struct {
+		name       string
+		args       []string
+		want       []string
+		wantWindow string
+	}{
+		{"default is the last 7 days", nil, []string{lastWeek, recent}, "7d"},
+		{"all shows everything", []string{"--all"}, []string{lastWeek, old, recent}, "all"},
+		{"since 2d", []string{"--since", "2d"}, []string{recent}, "since=2d"},
+		{"since reaches past the default week", []string{"--since", "30d"}, []string{lastWeek, old, recent}, "since=30d"},
+		{"window is an alias of since", []string{"--window", "2d"}, []string{recent}, "since=2d"},
+		{"window alias also reaches past the default week", []string{"--window", "30d"}, []string{lastWeek, old, recent}, "since=30d"},
+		{"since wins when both are given", []string{"--since", "2d", "--window", "30d"}, []string{recent}, "since=2d"},
+		{"until alone replaces the default week", []string{"--until", "1d"}, []string{lastWeek, old}, "until=1d"},
+		{"since and until bound both ends", []string{"--since", "30d", "--until", "10d"}, []string{old}, "since=30d until=10d"},
+		{"limit applies inside the window", []string{"--since", "30d", "--limit", "1"}, nil, "since=30d"},
+		{"window with no match", []string{"--since", "5m"}, []string{}, "since=5m"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := runSessionListWindow(t, tt.args...)
+			require.NoError(t, err)
+			got := sessionNames(out)
+			if tt.want == nil {
+				// limit case: the page size is the claim, not which row ModTime ordering picks
+				assert.Len(t, got, 1)
+			} else {
+				assert.ElementsMatch(t, tt.want, got)
+			}
+			assert.Equal(t, tt.wantWindow, out.Window, "window must describe what was actually listed")
+		})
+	}
+}
+
+// TestRunSessionList_InvalidWindowIsAUsageError: a bad value names its flag
+// and an example; an inverted window is refused rather than listed empty.
+func TestRunSessionList_InvalidWindowIsAUsageError(t *testing.T) {
+	sandboxSessionCache(t)
+	t.Setenv(config.EnvProjectRoot, "")
+	dir := createInitializedProjectWithConfig(t, &config.ProjectConfig{RepoID: "repo_test_session_window_bad"})
+	t.Chdir(dir)
+
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{"bad since", []string{"--since", "lately"}, []string{"--since", "lately", "2026-10-01"}},
+		{"bad window alias", []string{"--window", "lately"}, []string{"--since", "lately"}},
+		{"bad until", []string{"--until", "soon"}, []string{"--until", "soon", "2026-10-01"}},
+		{"inverted window", []string{"--since", "1d", "--until", "7d"}, []string{"--since", "--until"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := runSessionListWindow(t, tt.args...)
+			require.Error(t, err)
+			for _, want := range tt.want {
+				assert.Contains(t, err.Error(), want)
+			}
+		})
+	}
 }

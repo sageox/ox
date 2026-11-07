@@ -8,6 +8,10 @@ type Attribution struct {
 	PR             *string  `yaml:"pr,omitempty" json:"pr,omitempty"`
 	Session        *string  `yaml:"session,omitempty" json:"session,omitempty"`                 // session URL trailer; nil=auto, ""=disabled
 	ScoreThreshold *float64 `yaml:"score_threshold,omitempty" json:"score_threshold,omitempty"` // minimum sageox_score for commit/PR attribution
+	// AllowJudgedEvidence lets an LLM judge's inference (evidence "judged")
+	// count toward the derived context-use category. Default false: only
+	// provable (read/cited) and self-reported evidence drive the category.
+	AllowJudgedEvidence *bool `yaml:"allow_judged_evidence,omitempty" json:"allow_judged_evidence,omitempty"`
 }
 
 // default attribution values - friendly for humans, concise for git
@@ -20,6 +24,7 @@ var (
 	defaultCommitAttribution     = "Co-Authored-By: SageOx <ox@sageox.ai>"
 	defaultPRAttribution         = "Co-Authored-By: [SageOx](https://github.com/SageOx)"
 	defaultScoreThreshold        = 0.5
+	defaultAllowJudgedEvidence   = false
 )
 
 // DefaultAttribution returns the default attribution settings.
@@ -45,6 +50,9 @@ type ResolvedAttribution struct {
 	PR             string  `json:"pr"`
 	Session        string  `json:"session"`         // "auto" = append when recording, "" = disabled
 	ScoreThreshold float64 `json:"score_threshold"` // minimum sageox_score for commit/PR attribution
+	// AllowJudgedEvidence: whether judged (LLM-inferred) context-use evidence
+	// may drive the derived attribution category. Default false.
+	AllowJudgedEvidence bool `json:"allow_judged_evidence"`
 }
 
 // GetPlan returns the plan attribution value, or empty string if nil
@@ -77,6 +85,19 @@ func (a *Attribution) GetScoreThreshold() float64 {
 		return 0
 	}
 	return *a.ScoreThreshold
+}
+
+// GetAllowJudgedEvidence returns the allow_judged_evidence value, or false if nil
+func (a *Attribution) GetAllowJudgedEvidence() bool {
+	if a == nil || a.AllowJudgedEvidence == nil {
+		return false
+	}
+	return *a.AllowJudgedEvidence
+}
+
+// IsAllowJudgedEvidenceSet returns true if allow_judged_evidence is explicitly set
+func (a *Attribution) IsAllowJudgedEvidenceSet() bool {
+	return a != nil && a.AllowJudgedEvidence != nil
 }
 
 // IsPlanSet returns true if plan attribution is explicitly set (including to empty string)
@@ -124,12 +145,13 @@ func (a *Attribution) IsSessionSet() bool {
 // Leaving a field unset (nil) means "use lower priority config or default".
 func MergeAttribution(project, user *Attribution) ResolvedAttribution {
 	result := ResolvedAttribution{
-		Plan:           defaultPlanAttribution,
-		PlanFooter:     defaultPlanFooterAttribution,
-		Commit:         defaultCommitAttribution,
-		PR:             defaultPRAttribution,
-		Session:        defaultSessionAttribution,
-		ScoreThreshold: defaultScoreThreshold,
+		Plan:                defaultPlanAttribution,
+		PlanFooter:          defaultPlanFooterAttribution,
+		Commit:              defaultCommitAttribution,
+		PR:                  defaultPRAttribution,
+		Session:             defaultSessionAttribution,
+		ScoreThreshold:      defaultScoreThreshold,
+		AllowJudgedEvidence: defaultAllowJudgedEvidence,
 	}
 
 	// apply user config first (lower priority)
@@ -148,6 +170,9 @@ func MergeAttribution(project, user *Attribution) ResolvedAttribution {
 		}
 		if user.ScoreThreshold != nil {
 			result.ScoreThreshold = *user.ScoreThreshold
+		}
+		if user.AllowJudgedEvidence != nil {
+			result.AllowJudgedEvidence = *user.AllowJudgedEvidence
 		}
 	}
 
@@ -168,6 +193,9 @@ func MergeAttribution(project, user *Attribution) ResolvedAttribution {
 		if project.ScoreThreshold != nil {
 			result.ScoreThreshold = *project.ScoreThreshold
 		}
+		if project.AllowJudgedEvidence != nil {
+			result.AllowJudgedEvidence = *project.AllowJudgedEvidence
+		}
 	}
 
 	return result
@@ -182,6 +210,11 @@ func DefaultPlanFooterAttribution() string {
 // StringPtr is a helper to create a pointer to a string value
 func StringPtr(s string) *string {
 	return &s
+}
+
+// BoolPtr is a helper to create a pointer to a bool value
+func BoolPtr(b bool) *bool {
+	return &b
 }
 
 // Float64Ptr is a helper to create a pointer to a float64 value

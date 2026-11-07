@@ -46,7 +46,7 @@ via plan.Title/plan.Slugify, rewrites meta.json + re-stamps plan.html + appends
 a 'revised' event, and renames the plan directory to the corrected slug WHILE
 KEEPING ITS ORIGINAL DATE PREFIX — the plan's identity, not today's date. Any
 sessions/*/meta.json produced_plans entry pointing at an old slug is rewritten
-too, so 'ox agent stop' reconciliation keeps resolving it.
+too, so 'ox agent <id> session stop' reconciliation keeps resolving it.
 
 Always run --dry-run first: it prints the full retitle/rename table and
 touches nothing — that table is the reviewable artifact before a real run.
@@ -161,10 +161,6 @@ func runPlanBackfillTitlesOnLedger(cmd *cobra.Command, ledgerPath string, dryRun
 
 	var touchedSessionDirs []string
 	for _, r := range sessionRewrites {
-		if err := plan.ApplyProducedPlansRewrite(ctx, r.SessionDir, renamed); err != nil {
-			slog.Warn("plan backfill: produced_plans rewrite failed, skipping", "dir", r.SessionDir, "error", err)
-			continue
-		}
 		touchedSessionDirs = append(touchedSessionDirs, r.SessionDir)
 	}
 	writeSessionRewriteTable(out, sessionRewrites)
@@ -174,7 +170,7 @@ func runPlanBackfillTitlesOnLedger(cmd *cobra.Command, ledgerPath string, dryRun
 		return nil
 	}
 
-	if err := commitPlanBackfillToLedger(ledgerPath, renames, touchedPlanDirs, touchedSessionDirs); err != nil {
+	if err := commitPlanBackfillToLedger(ledgerPath, renames, touchedPlanDirs, touchedSessionDirs, renamed); err != nil {
 		if errors.Is(err, errBackfillCommitFailed) {
 			// The mv/edit work above already landed on disk but never made it
 			// into a commit — a materially different, worse state than "committed

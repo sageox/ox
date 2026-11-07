@@ -147,15 +147,15 @@ func TestXDGPartialConfiguration(t *testing.T) {
 		}
 	})
 
-	t.Run("XDG runtime dir fallback to tmp", func(t *testing.T) {
+	t.Run("XDG runtime dir fallback to per-user state", func(t *testing.T) {
 		clearXDGEnv()
 		os.Setenv("OX_XDG_ENABLE", "1")
 		// XDG_RUNTIME_DIR not set
 
 		stateDir := StateDir()
-		// should fall back to temp dir
-		if !strings.Contains(stateDir, "sageox") {
-			t.Errorf("StateDir() = %q, want to contain sageox", stateDir)
+		want := filepath.Join(getHomeDir(), ".local", "state", "sageox")
+		if stateDir != want {
+			t.Errorf("StateDir() = %q, want %q", stateDir, want)
 		}
 	})
 }
@@ -293,7 +293,7 @@ func TestCacheDir(t *testing.T) {
 }
 
 func TestStateDir(t *testing.T) {
-	saved := saveEnv("OX_XDG_ENABLE", "OX_XDG_DISABLE", "XDG_RUNTIME_DIR")
+	saved := saveEnv("OX_XDG_ENABLE", "OX_XDG_DISABLE", "XDG_RUNTIME_DIR", "XDG_STATE_HOME")
 	defer restoreEnv(saved)
 
 	t.Run("default mode uses XDG_RUNTIME_DIR", func(t *testing.T) {
@@ -306,13 +306,24 @@ func TestStateDir(t *testing.T) {
 		}
 	})
 
-	t.Run("default mode falls back to temp dir", func(t *testing.T) {
+	t.Run("default mode falls back to per-user state", func(t *testing.T) {
 		clearXDGEnv()
-		// no XDG_RUNTIME_DIR set, falls back to os.TempDir()
 		dir := StateDir()
-		// should contain "sageox" suffix
-		if !strings.HasSuffix(dir, "sageox") {
-			t.Errorf("StateDir() = %q, want suffix 'sageox'", dir)
+		want := filepath.Join(getHomeDir(), ".local", "state", "sageox")
+		if dir != want {
+			t.Errorf("StateDir() = %q, want %q", dir, want)
+		}
+	})
+
+	t.Run("fallback respects XDG_STATE_HOME and ignores relative runtime dir", func(t *testing.T) {
+		clearXDGEnv()
+		stateHome := t.TempDir()
+		t.Setenv("XDG_STATE_HOME", stateHome)
+		for _, runtimeDir := range []string{"", "relative/runtime"} {
+			t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+			if got, want := StateDir(), filepath.Join(stateHome, "sageox"); got != want {
+				t.Errorf("StateDir() with XDG_RUNTIME_DIR=%q = %q, want %q", runtimeDir, got, want)
+			}
 		}
 	})
 
@@ -331,15 +342,11 @@ func TestXDGStateHome(t *testing.T) {
 
 	t.Run("respects XDG_STATE_HOME", func(t *testing.T) {
 		clearXDGEnv()
-		os.Setenv("XDG_STATE_HOME", "/custom/state")
-		// xdgStateHome is not exported, but we can test it indirectly via StateDir
-		// when OX_XDG_DISABLE is NOT set (XDG mode), StateDir uses xdgRuntimeDir
-		// so we need legacy mode where StateDir uses SageoxDir()/state
-		// Actually xdgStateHome is used nowhere in production currently...
-		// Let's test it directly since we're in the same package
+		custom := filepath.Join(os.TempDir(), "custom-state") // absolute on every OS, as XDG requires
+		os.Setenv("XDG_STATE_HOME", custom)
 		result := xdgStateHome()
-		if result != "/custom/state" {
-			t.Errorf("xdgStateHome() = %q, want /custom/state", result)
+		if result != custom {
+			t.Errorf("xdgStateHome() = %q, want %q", result, custom)
 		}
 	})
 
@@ -349,6 +356,17 @@ func TestXDGStateHome(t *testing.T) {
 		result := xdgStateHome()
 		if !strings.HasSuffix(result, filepath.Join(".local", "state")) {
 			t.Errorf("xdgStateHome() = %q, want suffix .local/state", result)
+		}
+	})
+
+	// Failure prevented: an unexpanded "~/.local/state" (pam_env does not expand
+	// ~) made the daemon log path relative, so every daemon logged to /tmp,
+	// which a reboot clears
+	t.Run("ignores a relative XDG_STATE_HOME", func(t *testing.T) {
+		clearXDGEnv()
+		os.Setenv("XDG_STATE_HOME", "~/.local/state")
+		if got, want := xdgStateHome(), filepath.Join(getHomeDir(), ".local", "state"); got != want {
+			t.Errorf("xdgStateHome() = %q, want %q", got, want)
 		}
 	})
 }

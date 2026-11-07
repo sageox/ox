@@ -18,7 +18,6 @@ const (
 	adapterName    = "codex"
 	adapterDisplay = "OpenAI Codex CLI"
 	adapterVersion = "0.1.0"
-	searchDays     = 14
 )
 
 func main() {

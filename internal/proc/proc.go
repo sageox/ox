@@ -93,6 +93,29 @@ func matchesAgent(name, hint string, known []string) bool {
 	return false
 }
 
+// StartTime returns a value that identifies when pid started, so a process
+// can be told apart from a later one that reuses its PID, including one on
+// another machine. Compare it only with another StartTime result: its unit
+// differs by platform. ok is false when the process does not exist or the
+// platform cannot say (only Linux and macOS can).
+func StartTime(pid int) (start int64, ok bool) {
+	if pid <= 0 {
+		return 0, false
+	}
+	return startTime(pid)
+}
+
+// IsReused reports whether pid now names a different process than the one
+// whose StartTime was start. It is false when start is 0 or pid's start time
+// is unknown, which leaves a caller with the answer PID liveness gives.
+func IsReused(pid int, start int64) bool {
+	if start == 0 {
+		return false
+	}
+	now, ok := StartTime(pid)
+	return ok && now != start
+}
+
 // IsAlive returns true if the process with the given PID is still running.
 func IsAlive(pid int) bool {
 	if pid <= 0 {

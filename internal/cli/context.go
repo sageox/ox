@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/agentx"
+	_ "github.com/sageox/agentx/setup"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
@@ -58,6 +60,17 @@ type Context struct {
 	// or "". A .sageox/ directory alone does not make a project initialized;
 	// see config.IsInitialized.
 	ProjectRoot string
+
+	// TelemetryEndpoints records endpoints explicitly selected during this
+	// invocation. It is only used to classify command telemetry, never emitted.
+	TelemetryEndpoints []string
+
+	// TelemetryStartEndpoint and TelemetryStartPersonID are the endpoint the
+	// command resolved when it started and that endpoint's signed-in person
+	// then (a local read). Command telemetry names the person as of the start,
+	// so `ox logout` still names who logged out. Never emitted themselves.
+	TelemetryStartEndpoint string
+	TelemetryStartPersonID string
 
 	// Err is what the command returned, set by cmd/ox's
 	// executeWithFrictionRecovery after Execute so usage telemetry can report
@@ -129,24 +142,26 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	// if in a project context, uses disk-based queue for persistence
 	projectRoot := config.FindProjectRoot()
 	cliCtx.ProjectRoot = projectRoot
+	// Command identity must be set before Start can flush queued HTTP work.
+	// A service serves many workspaces and must not inherit one command's actor.
+	// Git runs the credential helper for the daemon's syncs with the daemon's
+	// inherited environment, so it would stamp whoever started the daemon on
+	// every workspace: credential plumbing sends no actor (the server writes unknown).
+	if !cliCtx.LongRunning {
+		if cmd.Name() != gitCredentialHelperCommand {
+			actor, agentType := DetectActor(nil)
+			useragent.SetActor(actor, agentType)
+		}
+		if projectRoot != "" {
+			useragent.SetRepoID(config.GetRepoID(projectRoot))
+		}
+	}
 	if projectRoot != "" {
 		cliCtx.TelemetryClient = telemetry.NewClient(auth.NewServerSessionID(), telemetry.WithProjectRoot(projectRoot))
 	} else {
 		cliCtx.TelemetryClient = telemetry.NewClient(auth.NewServerSessionID())
 	}
 	cliCtx.TelemetryClient.Start()
-
-	// Tag outbound SageOx API requests with the repo this invocation is
-	// working in, so server-side CLI activity can be attributed to a repo on
-	// routes whose URL does not name one. Set before any request is made.
-	//
-	// Deliberately skipped for service processes: the daemon serves every
-	// workspace on the machine from one process, so a process-global repo ID
-	// would misattribute all its traffic to whichever repo it started in.
-	// Leaving it unset keeps daemon rows honestly repo-less.
-	if !cliCtx.LongRunning && projectRoot != "" {
-		useragent.SetRepoID(config.GetRepoID(projectRoot))
-	}
 
 	// check signature and warn if unsigned/invalid (non-blocking)
 	signature.CheckAndWarn()
@@ -221,7 +236,9 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 		OnSpan: perf.PerSpanSlog(cliCtx.Logger),
 		OnTree: perf.CLITreeSink(os.Stderr, cfg.Verbose),
 	}))
-	if err := observability.Init(cliCtx.Ctx, "ox-cli", apiEndpoint, tokenFunc, resourceAttrs...); err != nil {
+	// OTLP bypasses useragent's request builder. Pass only its validated actor
+	// metadata so exports identify the command without freezing trace headers.
+	if err := initTracing(cliCtx.Ctx, "ox-cli", apiEndpoint, tokenFunc, useragent.ActorHeaders(), resourceAttrs...); err != nil {
 		slog.Debug("otel init failed, continuing without tracing", "error", err)
 	}
 
@@ -244,6 +261,55 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 
 	return cliCtx, nil
 }
+
+// DetectActor resolves command identity from agent environment signals, then CI.
+// A nil environment uses the process environment. This shared path serves
+// request headers, command events and friction attribution.
+func DetectActor(env agentx.Environment) (string, string) {
+	if env == nil {
+		env = agentx.NewSystemEnvironment()
+	}
+	if a, _ := agentx.NewDetectorWithEnv(envSignalsOnly{env}).Detect(context.Background()); a != nil {
+		return "agent", string(a.Type())
+	}
+	if env.GetEnv("CI") != "" || agentx.DetectOrigin(jenkinsBuildsOnly{env}, "") == agentx.OriginAgent {
+		return "agent", "ci"
+	}
+	return "human", ""
+}
+
+// initTracing is observability.InitWithHeaders; tests swap it to observe the
+// actor headers NewContext hands the OTLP exporter.
+var initTracing = observability.InitWithHeaders
+
+// gitCredentialHelperCommand is the command git starts for credentials,
+// including on the daemon's behalf.
+const gitCredentialHelperCommand = "git-credential-helper"
+
+// JENKINS_URL is also the Jenkins CLI's server setting, often exported in a
+// person's shell; only a running build (BUILD_NUMBER or EXECUTOR_NUMBER) is CI.
+type jenkinsBuildsOnly struct{ agentx.Environment }
+
+func (e jenkinsBuildsOnly) GetEnv(key string) string {
+	if key == "JENKINS_URL" && e.Environment.GetEnv("BUILD_NUMBER") == "" && e.Environment.GetEnv("EXECUTOR_NUMBER") == "" {
+		return ""
+	}
+	return e.Environment.GetEnv(key)
+}
+
+func (e jenkinsBuildsOnly) LookupEnv(key string) (string, bool) {
+	if key == "JENKINS_URL" {
+		v := e.GetEnv(key)
+		return v, v != ""
+	}
+	return e.Environment.LookupEnv(key)
+}
+
+// A repository's .codex directory is configuration, not evidence of an actor.
+type envSignalsOnly struct{ agentx.Environment }
+
+func (envSignalsOnly) IsDir(string) bool      { return false }
+func (envSignalsOnly) FileExists(string) bool { return false }
 
 // otlpTokenFunc builds the TokenFunc passed to observability.Init.
 //

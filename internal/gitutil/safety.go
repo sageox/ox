@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -250,6 +251,36 @@ func RemoveStaleLockFiles(gitDir string) (removed []string, errs []error) {
 	return removed, errs
 }
 
+// RemoveAllLockFiles removes every *.lock file under gitDir, whatever its age
+// or the PID it names, including the ref and packed-refs locks
+// RemoveStaleLockFiles never touches. Call it only when no git process can
+// hold one: the locks were left by a machine that has gone away, and no ox
+// process on this machine runs git in the clone yet.
+func RemoveAllLockFiles(gitDir string) (removed []string, errs []error) {
+	root, err := os.OpenRoot(gitDir)
+	if err != nil {
+		return nil, []error{err}
+	}
+	defer root.Close()
+	// The callback never returns an error, so WalkDir's own result is nil.
+	_ = fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			errs = append(errs, err)
+			return nil
+		}
+		if !d.Type().IsRegular() || !strings.HasSuffix(d.Name(), ".lock") {
+			return nil
+		}
+		if err := root.Remove(filepath.FromSlash(path)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("remove %s: %w", path, err))
+		} else if err == nil {
+			removed = append(removed, path)
+		}
+		return nil
+	})
+	return removed, errs
+}
+
 // IsRebaseInProgress checks whether the repo is stuck in a broken rebase state.
 // Returns true if .git/rebase-merge or .git/rebase-apply exists.
 func IsRebaseInProgress(repoPath string) bool {
@@ -305,11 +336,20 @@ func RebaseAge(repoPath string) (time.Duration, bool) {
 	return 0, false
 }
 
-// IsSafeForGitOps combines lock file and rebase state checks into a single
-// pre-flight check. Returns nil if safe to proceed, or an error describing
-// why the repo is blocked.
+// IsSafeForGitOps checks lock files and unfinished Git operations before
+// automatic writes. Returns nil if safe to proceed, or why the repo is blocked.
 func IsSafeForGitOps(repoPath string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), inspectTimeout)
+	defer cancel()
 	gitDir := filepath.Join(repoPath, ".git")
+	if info, err := os.Stat(gitDir); err == nil && !info.IsDir() {
+		// Explicitly configured checkouts can be linked worktrees. All state
+		// checks must use their Git directory, not the .git pointer file.
+		gitDir, err = RunGit(ctx, repoPath, "rev-parse", "--absolute-git-dir")
+		if err != nil {
+			return fmt.Errorf("resolve git directory: %w", err)
+		}
+	}
 
 	// Sweep abandoned locks before reporting them as blocking. Without this the
 	// push path is asymmetric with the pull path (which already sweeps before
@@ -324,8 +364,38 @@ func IsSafeForGitOps(repoPath string) error {
 		return fmt.Errorf("git lock files detected: %s (remove stale locks or wait for in-progress operation)", strings.Join(locks, ", "))
 	}
 
-	if IsRebaseInProgress(repoPath) {
-		return fmt.Errorf("repo in broken rebase state (run 'git rebase --abort' in %s)", repoPath)
+	// A resolved index can still belong to an unfinished operation. Unlike
+	// git commit, commit-tree would leave its markers blocking later writes.
+	for _, op := range []struct{ marker, name string }{
+		{"rebase-merge", "rebase"},
+		{"rebase-apply", "rebase"},
+		{"MERGE_HEAD", "merge"},
+		{"CHERRY_PICK_HEAD", "cherry-pick"},
+		{"REVERT_HEAD", "revert"},
+		{"sequencer", "cherry-pick or revert"},
+	} {
+		_, err := os.Stat(filepath.Join(gitDir, op.marker))
+		present := err == nil
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect git state: %w", err)
+		}
+		if !present && (op.marker == "CHERRY_PICK_HEAD" || op.marker == "REVERT_HEAD") {
+			// These refs can live in reftable instead of individual files.
+			tip, err := branchTip(ctx, repoPath, op.marker)
+			if err != nil {
+				return fmt.Errorf("inspect git operation: %w", err)
+			}
+			present = tip != ""
+		}
+		if present {
+			if op.name == "rebase" {
+				return fmt.Errorf("repo in broken rebase state (run 'git rebase --abort' in %s)", repoPath)
+			}
+			if op.marker == "sequencer" {
+				return fmt.Errorf("repo has a %s in progress in %s; finish or abort it", op.name, repoPath)
+			}
+			return fmt.Errorf("repo has a %s in progress in %s; finish or abort it, or run 'ox doctor --fix'", op.name, repoPath)
+		}
 	}
 
 	return nil

@@ -136,11 +136,11 @@ func ClearPending(projectRoot string) error {
 // PendingStatusFor distinguishes transient work from content or capability
 // failures that need human action. Only PendingRetry is eligible for the
 // scheduler's bounded anti-entropy retry; settled failures wait for an explicit
-// sync or a new Team Context artifact change.
+// sync or a new Team Context artifact change. An unsupported artifact is a
+// skip (see Report.Converged), so it never settles a report as failed.
 func PendingStatusFor(report Report) PendingStatus {
 	for _, outcome := range report.Outcomes {
-		if outcome.State == StateError || outcome.State == StateConflict ||
-			(outcome.State == StateUnsupported && outcome.Required) || outcome.State == StatePendingApproval {
+		if outcome.State == StateError || outcome.State == StateConflict || outcome.State == StatePendingApproval {
 			return PendingFailed
 		}
 	}
@@ -155,13 +155,6 @@ func FailureReason(report Report) string {
 				return outcome.Detail
 			}
 			return string(outcome.State) + ": " + string(outcome.Kind) + "/" + outcome.Name
-		case StateUnsupported:
-			if outcome.Required {
-				if outcome.Detail != "" {
-					return outcome.Detail
-				}
-				return "unsupported: " + string(outcome.Kind) + "/" + outcome.Name
-			}
 		}
 	}
 	return "Team Context convergence is incomplete"

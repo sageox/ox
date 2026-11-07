@@ -237,6 +237,25 @@ var permanentPatterns = []string{
 	"HTTP 403",
 }
 
+// http403Markers are the lowercase forms an HTTP 403 status takes in git and
+// git-lfs output. A bare "403" also matches ports, hashes and URL paths, which
+// turned a 401 from 127.0.0.1:40303 into "access denied".
+var http403Markers = []string{
+	"the requested url returned error: 403",
+	"http 403",
+}
+
+// IsHTTP403 reports whether git or git-lfs output carries an HTTP 403 status.
+func IsHTTP403(output string) bool {
+	lower := strings.ToLower(output)
+	for _, marker := range http403Markers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // lfsObjectsMissing is the GitLab pre-receive error for orphaned LFS pointers.
 // Handled separately from permanentPatterns because ReconcileLFS can fix it.
 const lfsObjectsMissing = "LFS objects are missing"
@@ -262,6 +281,15 @@ const lfsObjectsMissing = "LFS objects are missing"
 // is slower than the team and every retry loses (#1261). The pre-collapse tip
 // is kept under refs/ox-backup/.
 const collapseBacklogAbove = 100
+
+// abortRetryRebase clears the rebase a push retry left behind, if any. The
+// audited abort outlives the caller's deadline, so it must not be spent on a
+// clone with no rebase to clear.
+func abortRetryRebase(ctx context.Context, repoPath, reason string, log *slog.Logger) {
+	if IsRebaseInProgress(repoPath) {
+		_ = AuditAndAbort(ctx, repoPath, AuditOpRebase, reason, log)
+	}
+}
 
 func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 	log := opts.logger()
@@ -364,7 +392,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 		// fail fast on permanent errors
 		for _, pattern := range permanentPatterns {
 			if strings.Contains(outStr, pattern) {
-				if strings.Contains(outStr, "403") {
+				if IsHTTP403(outStr) {
 					return fmt.Errorf("git push failed: access denied (HTTP 403). Try 'ox login' to refresh credentials, or verify you have push access to this repository: %s", outStr)
 				}
 				return fmt.Errorf("git push failed (not retryable): %s", outStr)
@@ -445,7 +473,8 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 							// (e.g. LLM merge) before we abort. The hook owns the
 							// rebase --continue if it succeeds.
 							hookResolved := false
-							if opts.OnUnresolvedConflicts != nil {
+							// a moved branch cannot finish whatever the hook resolves
+							if opts.OnUnresolvedConflicts != nil && !errors.Is(resolveErr, ErrRebaseBranchMoved) {
 								pathsCtx, pathsCancel := context.WithTimeout(ctx, opTimeout)
 								conflicted, listErr := listConflictedFiles(pathsCtx, repoPath)
 								pathsCancel()
@@ -456,9 +485,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 								// rather than guess.
 								if listErr != nil {
 									log.Warn("listing conflicted files failed; skipping resolve hook", "error", listErr)
-									abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-									_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
-									abortCancel()
+									abortRetryRebase(ctx, repoPath, "push retry: conflicts could not be listed", log)
 									return fmt.Errorf("git rebase failed during retry: %s (could not list conflicts: %w)", pullOut, listErr)
 								}
 								hookCtx, hookCancel := context.WithTimeout(ctx, opTimeout)
@@ -477,9 +504,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 							}
 
 							if !hookResolved {
-								abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-								_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
-								abortCancel()
+								abortRetryRebase(ctx, repoPath, "push retry: conflicts unresolved", log)
 								return fmt.Errorf("%w: git rebase failed during retry: %s", ErrNeedsPullCycle, pullOut)
 							}
 						} else {
@@ -487,9 +512,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 						}
 					} else {
 						// no auto-resolve configured — abort and fail
-						abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-						_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
-						abortCancel()
+						abortRetryRebase(ctx, repoPath, "push retry: rebase failed", log)
 						return fmt.Errorf("%w: git rebase failed during retry: %s", ErrNeedsPullCycle, pullOut)
 					}
 				}

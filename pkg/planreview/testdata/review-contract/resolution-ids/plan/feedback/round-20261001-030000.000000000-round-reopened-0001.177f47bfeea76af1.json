@@ -1,0 +1,16 @@
+{
+  "created_at": "2026-10-01T03:00:00Z",
+  "id": "round-reopened-0001",
+  "items": [
+    {
+      "anchor": "hretry",
+      "label": "Retry remains reopened",
+      "note": "The fix still misses a case.",
+      "reviewer": "Ana",
+      "status": "request-change"
+    }
+  ],
+  "request_sha256": "f4d7f70c24e27e9b0170088db017e3d1d6fe9a5317d68c85dcd8f5f3be7ec7c1",
+  "reviewer": "Ana",
+  "slug": "rc-resolution-ids"
+}

@@ -126,11 +126,6 @@ type AgentWorkerConfig struct {
 	// Default: true (runs automatically when daemon is enabled)
 	SessionFinalize *bool `yaml:"session_finalize,omitempty"`
 
-	// QualityUploadThreshold is the minimum quality score (0.0-1.0) for a
-	// session to be uploaded to the team ledger. Sessions below this score
-	// are kept locally but not shared. Default: 0.3 (capture more initially)
-	QualityUploadThreshold *float64 `yaml:"quality_upload_threshold,omitempty"`
-
 	// QualityDiscardThreshold is the quality score (0.0-1.0) below which a
 	// session is deleted entirely. Only truly empty/abandoned sessions should
 	// score this low. Default: 0.1
@@ -210,14 +205,6 @@ func (c *AgentWorkerConfig) IsSessionFinalizeEnabled() bool {
 	return *c.SessionFinalize && c.IsEnabled()
 }
 
-// GetQualityUploadThreshold returns the minimum quality score for ledger upload (default: 0.3).
-func (c *AgentWorkerConfig) GetQualityUploadThreshold() float64 {
-	if c == nil || c.QualityUploadThreshold == nil {
-		return 0.3
-	}
-	return *c.QualityUploadThreshold
-}
-
 // GetQualityDiscardThreshold returns the quality score below which sessions are deleted (default: 0.1).
 func (c *AgentWorkerConfig) GetQualityDiscardThreshold() float64 {
 	if c == nil || c.QualityDiscardThreshold == nil {
@@ -290,10 +277,6 @@ func (c *AgentWorkerConfig) WithDefaults() *AgentWorkerConfig {
 		t := true
 		out.SessionFinalize = &t
 	}
-	if out.QualityUploadThreshold == nil {
-		v := 0.3
-		out.QualityUploadThreshold = &v
-	}
 	if out.QualityDiscardThreshold == nil {
 		v := 0.1
 		out.QualityDiscardThreshold = &v
@@ -308,6 +291,14 @@ type UserConfig struct {
 	Trace             *TraceConfig `yaml:"trace,omitempty"`
 	DisplayName       string       `yaml:"display_name,omitempty"`
 	TipsEnabled       *bool        `yaml:"tips_enabled,omitempty"`
+	StatuslineEnabled *bool        `yaml:"statusline_enabled,omitempty"` // ox row in the Claude Code status line; nil = on
+	// SessionReportPaneEnabled is the /ox-session-report pane in Claude Code;
+	// nil = BriefPaneEnabled, then on.
+	SessionReportPaneEnabled *bool `yaml:"session_report_pane_enabled,omitempty"`
+	// BriefPaneEnabled is DEPRECATED: session_report_pane_enabled's name before
+	// `ox brief` became `ox session report`. Read only as
+	// SessionReportPaneEnabled's fallback.
+	BriefPaneEnabled  *bool        `yaml:"brief_pane_enabled,omitempty"`
 	TelemetryEnabled  *bool        `yaml:"telemetry_enabled,omitempty"`
 	SessionTermsShown *bool        `yaml:"session_terms_shown,omitempty"`
 	Attribution       *Attribution `yaml:"attribution,omitempty"`
@@ -352,9 +343,16 @@ type UserConfig struct {
 	// Pointer so an absent block is distinguishable from explicit zero-values.
 	Plan *PlanConfig `yaml:"plan,omitempty"`
 
+	// Recap holds the user-level `recap.*` settings (ADR-027).
+	Recap *RecapConfig `yaml:"recap,omitempty"`
+
 	// PRVisuals holds the user-level `pr_visuals.*` settings for rich GitHub
 	// pull-request visuals. Pointer preserves inheritance from repo/team.
 	PRVisuals *PRVisualsConfig `yaml:"pr_visuals,omitempty"`
+
+	// Skills holds the user-level `skills.*` settings. Pointer so an absent
+	// block stays distinct from explicit values.
+	Skills *SkillsConfig `yaml:"skills,omitempty"`
 
 	// Ephemeral is the persisted user preference for ephemeral mode (no
 	// daemon, no local ledger clone, HTTP-only reads). Pointer so we can
@@ -364,6 +362,13 @@ type UserConfig struct {
 	// lowest-precedence signal — any env var, venue marker, or CI
 	// signal still overrides it. See docs/adr/adr-ephemeral-mode.md.
 	Ephemeral *bool `yaml:"ephemeral,omitempty"`
+
+	// DisposableMachine marks a machine that runs ox for one job and then
+	// goes away, keeping only the home directory, such as a pod with a
+	// persistent home volume. Unlike Ephemeral, the daemon runs and the Ledger
+	// is cloned. Read through DisposableMachineEnabled. Pointer so unset stays
+	// distinct from an explicit false.
+	DisposableMachine *bool `yaml:"disposable_machine,omitempty"`
 
 	// PATExpiryWarningThresholdPct is the fraction of token lifetime remaining
 	// at which to emit a single-line stderr warning during interactive
@@ -378,8 +383,30 @@ type UserConfig struct {
 	// via max(). Set to 0 with pct==0 to disable warnings entirely.
 	PATExpiryWarningMinDays *int `yaml:"pat_expiry_warning_min_days,omitempty"`
 
-	// TelemetryNoticeShown records that the one-time telemetry notice was shown.
-	TelemetryNoticeShown *bool `yaml:"telemetry_notice_shown,omitempty"`
+	// TelemetryNoticeShown records that the current person-ID notice was shown.
+	// The old telemetry_notice_shown flag does not cover this disclosure.
+	TelemetryNoticeShown *bool `yaml:"telemetry_notice_v2_shown,omitempty"`
+
+	// InitOffersShown records that `ox init` has offered the optional Claude
+	// Code add-ons (Oxy, the session report pane) on this machine. The offer is
+	// made once per machine, not once per repo.
+	InitOffersShown *bool `yaml:"init_offers_shown,omitempty"`
+}
+
+// SkillsConfig holds the user-level `skills.*` settings.
+type SkillsConfig struct {
+	// ClaudeOrgDedupe lets ox skip copying a team skill into .claude/skills
+	// when this machine's Claude Code already gets it from the team's Claude
+	// organization plugin. Unset means on. Per user, because whether Claude
+	// Code loads org plugins depends on how THIS coworker signs in: off is for
+	// sessions ox cannot see from disk, such as an API key or Bedrock exported
+	// only in the shell.
+	ClaudeOrgDedupe *bool `yaml:"claude_org_dedupe,omitempty"`
+}
+
+// ClaudeOrgDedupeEnabled reports skills.claude_org_dedupe: on unless set off.
+func (c *UserConfig) ClaudeOrgDedupeEnabled() bool {
+	return c == nil || c.Skills == nil || c.Skills.ClaudeOrgDedupe == nil || *c.Skills.ClaudeOrgDedupe
 }
 
 // PATExpiryWarningDefaults returns the default warning threshold (5%) and
@@ -436,6 +463,68 @@ func (c *UserConfig) AreTipsEnabled() bool {
 	return *c.TipsEnabled
 }
 
+// IsStatuslineEnabled reports whether ox should show its team-context counts
+// in the Claude Code status line (default: true).
+func (c *UserConfig) IsStatuslineEnabled() bool {
+	if c.StatuslineEnabled == nil {
+		return true
+	}
+	return *c.StatuslineEnabled
+}
+
+// IsSessionReportPaneEnabled reports whether ox should keep the
+// /ox-session-report pane installed in Claude Code:
+// session_report_pane_enabled when set, else the deprecated
+// brief_pane_enabled, else true.
+func (c *UserConfig) IsSessionReportPaneEnabled() bool {
+	if v := c.SessionReportPaneSetting(); v != nil {
+		return *v
+	}
+	return true
+}
+
+// SessionReportPaneSetting is the explicit session report pane value —
+// session_report_pane_enabled, falling back to the deprecated
+// brief_pane_enabled — or nil when neither is set.
+func (c *UserConfig) SessionReportPaneSetting() *bool {
+	if c == nil {
+		return nil
+	}
+	if c.SessionReportPaneEnabled != nil {
+		return c.SessionReportPaneEnabled
+	}
+	return c.BriefPaneEnabled
+}
+
+// RecapConfig holds the user-level `recap.*` settings.
+type RecapConfig struct {
+	// TraceConsultations is ADR-027's opt-out: when false, ox writes no
+	// record of what this coworker's AI coworker read or which ox calls it
+	// made (`consulted` and `invoked` context-trace events). nil = on.
+	TraceConsultations *bool `yaml:"trace_consultations,omitempty"`
+}
+
+// IsTraceConsultationsEnabled reports whether ox records this coworker's
+// consultations and ox calls into the session trace (default: true).
+func (c *UserConfig) IsTraceConsultationsEnabled() bool {
+	if c == nil || c.Recap == nil || c.Recap.TraceConsultations == nil {
+		return true
+	}
+	return *c.Recap.TraceConsultations
+}
+
+// TraceConsultationsEnabled resolves the `recap.trace_consultations` setting
+// from the user config. An unreadable config file resolves to OFF: this is a
+// privacy opt-out, and skipping a trace write is harmless while writing after
+// a coworker opted out is not.
+func TraceConsultationsEnabled() bool {
+	cfg, err := LoadUserConfig()
+	if err != nil {
+		return false
+	}
+	return cfg.IsTraceConsultationsEnabled()
+}
+
 // HasSeenSessionTerms returns true if the user has seen the session recording notice.
 func (c *UserConfig) HasSeenSessionTerms() bool {
 	if c.SessionTermsShown == nil {
@@ -459,6 +548,18 @@ func (c *UserConfig) SetTelemetryNoticeShown(shown bool) {
 	c.TelemetryNoticeShown = &shown
 }
 
+// HasSeenInitOffers returns true if `ox init` has already offered the optional
+// Claude Code add-ons on this machine.
+func (c *UserConfig) HasSeenInitOffers() bool {
+	return c.InitOffersShown != nil && *c.InitOffersShown
+}
+
+// SetInitOffersShown records whether `ox init` has offered the optional Claude
+// Code add-ons on this machine.
+func (c *UserConfig) SetInitOffersShown(shown bool) {
+	c.InitOffersShown = &shown
+}
+
 // IsTelemetryEnabled returns true if telemetry is enabled (default: true)
 func (c *UserConfig) IsTelemetryEnabled() bool {
 	if c.TelemetryEnabled == nil {
@@ -470,6 +571,13 @@ func (c *UserConfig) IsTelemetryEnabled() bool {
 // SetTelemetryEnabled sets the telemetry preference
 func (c *UserConfig) SetTelemetryEnabled(enabled bool) {
 	c.TelemetryEnabled = &enabled
+}
+
+// DisposableMachineEnabled reports the user's disposable_machine setting. It
+// is off unless set, and an unreadable user config reads as off.
+func DisposableMachineEnabled() bool {
+	cfg, err := LoadUserConfig()
+	return err == nil && cfg != nil && cfg.DisposableMachine != nil && *cfg.DisposableMachine
 }
 
 // AreSessionsEnabled returns whether session recording is enabled.

@@ -1,9 +1,11 @@
 package skillmanager
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -27,6 +29,10 @@ type TeamSkillDecision struct {
 	NeedsApprove       bool
 	AutoInstalledProse bool
 	Reason             string
+	// ClaudeOrgDelivered is true when Claude Code gets this skill from the
+	// team's Claude organization plugin, so ox does not copy it into
+	// .claude/skills. Other agents' targets still receive InstalledAs.
+	ClaudeOrgDelivered bool
 }
 
 // teamCatalog unions the binary's built-in catalog with the team skills this
@@ -43,13 +49,22 @@ type TeamSkillDecision struct {
 // sparse refresh deletes tracked files), and a background `git pull` must never
 // silently change what a coding agent executes.
 type teamCatalog struct {
-	base      catalogSource
-	teamFiles []skills.Skill
-	teamPath  string
+	base        catalogSource
+	teamFiles   []skills.Skill
+	teamPath    string
+	projectRoot string
+	// approvals is the exact policy snapshot used to select teamFiles. Keep it
+	// for Digest so a later policy edit cannot mark an older projection current.
+	approvals *teamskills.ApprovalStore
 	// incomplete is non-empty when this source could NOT see the team's skills,
 	// as opposed to seeing that the team publishes none. The planner reads it to
 	// decide whether an absent skill means "retire it" or "we are blind right now".
 	incomplete string
+	// claudeOrg is what the team's Claude organization delivers, as last
+	// reported; it feeds Digest so a change re-plans. claudeOrgDelivered holds
+	// the INSTALLED names withheld from the Claude Code target because of it.
+	claudeOrg          teamskills.ClaudeOrgSync
+	claudeOrgDelivered map[string]struct{}
 }
 
 // TeamSkillSource builds a catalog source that adds approved team skills.
@@ -65,6 +80,12 @@ type teamCatalog struct {
 // to be current must take ADR-030's per-clone lease around their own refresh
 // before calling.
 func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string) (catalogSource, []TeamSkillDecision, error) {
+	return teamSkillSource(base, teamPath, repoSlug, projectRoot, teamskills.ClaudeOrgSync{})
+}
+
+// teamSkillSource is TeamSkillSource with the team's Claude org sync record,
+// which only catalogForRepoResolved can resolve (it needs the team ID).
+func teamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string, claudeOrg teamskills.ClaudeOrgSync) (catalogSource, []TeamSkillDecision, error) {
 	if base == nil {
 		base = builtInCatalog{}
 	}
@@ -74,14 +95,14 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 		// empty team half, so the planner retires every team projection already
 		// on disk. A project whose daemon has not finished its first clone would
 		// have its team playbooks deleted for the crime of being early.
-		return &teamCatalog{base: base, teamPath: teamPath, incomplete: reason}, nil, nil
+		return &teamCatalog{base: base, teamPath: teamPath, projectRoot: projectRoot, incomplete: reason, claudeOrg: claudeOrg}, nil, nil
 	}
 
 	discovered, rejected, err := teamdocs.DiscoverSkillsWithRejections(teamPath, repoSlug)
 	if err != nil {
 		return nil, nil, fmt.Errorf("discover team skills: %w", err)
 	}
-	return buildTeamCatalog(base, teamPath, repoSlug, projectRoot, discovered, rejected)
+	return buildTeamCatalog(base, teamPath, repoSlug, projectRoot, discovered, rejected, claudeOrg)
 }
 
 // TeamSkillsResolved carries a team-skill discovery a caller already performed
@@ -115,12 +136,12 @@ type TeamSkillsResolved struct {
 // content walk this seam exists to avoid repeating, and it is what stops a
 // not-yet-materialized sparse checkout from reading as "the team publishes
 // nothing" and retiring every team projection already on disk.
-func teamSkillSourceResolved(base catalogSource, teamPath, repoSlug, projectRoot string, resolved []teamdocs.TeamSkill) (catalogSource, []TeamSkillDecision, error) {
+func teamSkillSourceResolved(base catalogSource, teamPath, repoSlug, projectRoot string, resolved []teamdocs.TeamSkill, claudeOrg teamskills.ClaudeOrgSync) (catalogSource, []TeamSkillDecision, error) {
 	if base == nil {
 		base = builtInCatalog{}
 	}
 	if reason := unseeableTeamSkills(teamPath, repoSlug); reason != "" {
-		return &teamCatalog{base: base, teamPath: teamPath, incomplete: reason}, nil, nil
+		return &teamCatalog{base: base, teamPath: teamPath, projectRoot: projectRoot, incomplete: reason, claudeOrg: claudeOrg}, nil, nil
 	}
 	// The NameError split mirrors teamdocs.DiscoverSkillsWithRejections exactly,
 	// applied to data already in hand rather than re-walked from disk.
@@ -132,7 +153,7 @@ func teamSkillSourceResolved(base catalogSource, teamPath, repoSlug, projectRoot
 		}
 		discovered = append(discovered, s)
 	}
-	return buildTeamCatalog(base, teamPath, repoSlug, projectRoot, discovered, rejected)
+	return buildTeamCatalog(base, teamPath, repoSlug, projectRoot, discovered, rejected, claudeOrg)
 }
 
 // buildTeamCatalog turns a repo-filtered installable/rejected split into the
@@ -140,7 +161,7 @@ func teamSkillSourceResolved(base catalogSource, teamPath, repoSlug, projectRoot
 // human-facing diagnostic renders. Shared by TeamSkillSource, which computes
 // the split by walking the checkout, and teamSkillSourceResolved, which
 // receives it already computed.
-func buildTeamCatalog(base catalogSource, teamPath, repoSlug, projectRoot string, discovered, rejected []teamdocs.TeamSkill) (catalogSource, []TeamSkillDecision, error) {
+func buildTeamCatalog(base catalogSource, teamPath, repoSlug, projectRoot string, discovered, rejected []teamdocs.TeamSkill, claudeOrg teamskills.ClaudeOrgSync) (catalogSource, []TeamSkillDecision, error) {
 	// An unknown slug is partial visibility, not an empty team source. Untargeted
 	// skills are still authoritative and may be added; targeted skills cannot be
 	// evaluated, so removals must remain suppressed until identity returns.
@@ -149,23 +170,15 @@ func buildTeamCatalog(base catalogSource, teamPath, repoSlug, projectRoot string
 		retained = "this repository's slug could not be determined, so targeted team skills were left in place"
 	}
 
-	// Refusals are carried BEFORE the empty check and never gated on what else was
-	// found. A team whose only skill has an unusable name would otherwise get the
-	// silent empty result this decision list exists to prevent — the author would
-	// see their skill simply not appear, with nothing anywhere saying it was read.
+	// Refusals are never gated on what else was found. A team whose only skill
+	// has an unusable name would otherwise get a silent empty result — the author
+	// would see their skill simply not appear, with nothing saying it was read.
 	// InstalledAs stays empty and NeedsApprove stays false: `ox skills approve`
 	// cannot help here, and sending the human there is worse than saying nothing.
 	var decisions []TeamSkillDecision
 	for _, r := range rejected {
 		decisions = append(decisions, TeamSkillDecision{Name: r.Name, Reason: r.NameError})
 	}
-	if len(discovered) == 0 {
-		if retained != "" {
-			return &teamCatalog{base: base, teamPath: teamPath, incomplete: retained}, decisions, nil
-		}
-		return base, decisions, nil
-	}
-
 	approvals, err := teamskills.LoadApprovals(projectRoot)
 	if err != nil {
 		// A store ox cannot read is NOT an empty store. Materializing executable
@@ -175,6 +188,7 @@ func buildTeamCatalog(base catalogSource, teamPath, repoSlug, projectRoot string
 	}
 
 	var allowed []skills.Skill
+	claudeOrgDelivered := map[string]struct{}{}
 	for _, ts := range discovered {
 		loaded, loadErr := loadTeamSkill(ts)
 		if loadErr != nil {
@@ -222,6 +236,21 @@ func buildTeamCatalog(base catalogSource, teamPath, repoSlug, projectRoot string
 		decision := TeamSkillDecision{
 			Name: ts.Name, InstalledAs: installed, AutoInstalledProse: !verdict.Executable,
 		}
+		// The org copy wins in Claude Code. Withheld from that ONE target only,
+		// and only when this checkout agrees the skill is the portable kind the
+		// org plugin carries; a copy already in .claude/skills then leaves through
+		// the ordinary retirement path, which never fires on a blind source.
+		if claudeOrg.Has(ts.Name) {
+			if why := claudeOrgCannotCarry(ts, loaded, verdict); why == "" {
+				claudeOrgDelivered[installed] = struct{}{}
+				decision.ClaudeOrgDelivered = true
+				decision.Reason = "Claude Code gets this skill from your Claude organization" + claudeOrgAs(claudeOrg) +
+					", so ox does not copy it into .claude/skills"
+			} else {
+				slog.Info("skills: claude org lists a team skill ox still copies for Claude Code",
+					"skill", ts.Name, "reason", why)
+			}
+		}
 		if scriptsNeedApproval {
 			// Installed, minus its scripts. Still surfaced: the author expects the
 			// scripts to be there, and silence would read as "it all arrived."
@@ -234,7 +263,28 @@ func buildTeamCatalog(base catalogSource, teamPath, repoSlug, projectRoot string
 	}
 
 	sort.Slice(allowed, func(i, j int) bool { return allowed[i].Name < allowed[j].Name })
-	return &teamCatalog{base: base, teamFiles: allowed, teamPath: teamPath, incomplete: retained}, decisions, nil
+	return &teamCatalog{
+		base: base, teamFiles: allowed, teamPath: teamPath, incomplete: retained,
+		projectRoot: projectRoot, approvals: approvals,
+		claudeOrg: claudeOrg, claudeOrgDelivered: claudeOrgDelivered,
+	}, decisions, nil
+}
+
+// claudeOrgAs names the plugin the skills arrive in, when the server said.
+func claudeOrgAs(claudeOrg teamskills.ClaudeOrgSync) string {
+	if claudeOrg.TeamSlug == "" {
+		return ""
+	}
+	return " (as " + claudeOrg.TeamSlug + ")"
+}
+
+// withheldFromTarget reports the installed team skills the Claude Code target
+// must not receive because the team's Claude organization delivers them.
+func (c *teamCatalog) withheldFromTarget(targetKey string) map[string]struct{} {
+	if targetKey != ClaudeProjectTargetKey {
+		return nil
+	}
+	return c.claudeOrgDelivered
 }
 
 func verdictHasCapability(v teamskills.Verdict, want teamskills.Capability) bool {
@@ -251,7 +301,24 @@ func (c *teamCatalog) Digest() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Keyed on the checkout's commit, NOT on a hash of the skills it contains.
+	approvals := c.approvals
+	if approvals == nil {
+		// Empty/incomplete catalogs and the Prime fast path still have to read
+		// policy. An unreadable store must never validate an old installation.
+		approvals = &teamskills.ApprovalStore{}
+		if c.projectRoot != "" {
+			approvals, err = teamskills.LoadApprovals(c.projectRoot)
+			if err != nil {
+				return "", err
+			}
+		}
+	}
+	policy, err := json.Marshal(approvals)
+	if err != nil {
+		return "", fmt.Errorf("digest team skill approvals: %w", err)
+	}
+	// The team component is keyed on the checkout's commit, NOT on a hash of
+	// the skills it contains. The project policy is hashed separately above.
 	// Prime compares this against the recorded revision to decide whether to
 	// re-plan at all, and it must be able to compute the same value WITHOUT
 	// walking the team tree — otherwise the cheap path costs exactly what it was
@@ -261,7 +328,19 @@ func (c *teamCatalog) Digest() (string, error) {
 	// value. That is the right trade: the checkout is daemon-managed, the daemon
 	// reconciles off the pull that lands a commit, and the 30-minute drift check
 	// is the floor under anything else.
-	return base + "+team:" + teamRevision(c.teamPath), nil
+	return base + teamComponent(c.teamPath, c.claudeOrg) + "+approvals:" + digestBytes(policy), nil
+}
+
+// teamComponent is the team half of the catalog revision, shared by Digest and
+// ExpectedRevision so the two cannot drift. The Claude org part is appended
+// only while ox is deferring to an org plugin: every other repository keeps
+// the exact revision string it had before org sync existed.
+func teamComponent(teamPath string, claudeOrg teamskills.ClaudeOrgSync) string {
+	component := "+team:" + teamRevision(teamPath)
+	if rev := claudeOrg.Revision(); rev != "" {
+		component += "+claude-org:" + rev
+	}
+	return component
 }
 
 func (c *teamCatalog) Select(version string, desired DesiredSkills) ([]skills.Skill, error) {
@@ -400,7 +479,7 @@ func teamRevision(teamPath string) string {
 	}
 	head, err := os.ReadFile(filepath.Join(teamPath, ".git", "HEAD"))
 	if err != nil {
-		return ""
+		return httpSnapshotRevision(teamPath)
 	}
 	line := strings.TrimSpace(string(head))
 	ref, isSymbolic := strings.CutPrefix(line, "ref: ")
@@ -414,6 +493,22 @@ func teamRevision(teamPath string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(sha))
+}
+
+// HTTPSnapshotFile is where ephemeral-mode prime records which skill set it
+// materialized into a Team Context directory fetched over HTTP. That directory
+// has no git HEAD, so without this its revision is a constant "" and a skill the
+// team changed or retired would never re-plan in a long-lived environment.
+const HTTPSnapshotFile = ".sageox/http-snapshot"
+
+// httpSnapshotRevision is teamRevision for a directory with no git checkout.
+// Prefixed so it can never equal a commit SHA.
+func httpSnapshotRevision(teamPath string) string {
+	snapshot, err := os.ReadFile(filepath.Join(teamPath, filepath.FromSlash(HTTPSnapshotFile)))
+	if err != nil {
+		return ""
+	}
+	return "http:" + strings.TrimSpace(string(snapshot))
 }
 
 // anySkillRootOnDisk reports whether any directory discovery would walk exists.
@@ -436,7 +531,8 @@ func anySkillRootOnDisk(teamPath string) bool {
 }
 
 // ExpectedRevision computes what Plan would record for this repo, without
-// walking the catalog or the team checkout.
+// walking the catalog or the team checkout. It reads project approvals so a
+// policy-only commit invalidates the fast path, and unreadable policy is an error.
 //
 // It exists so the prime fast path and the planner cannot disagree. Prime used
 // to compare against the BUILT-IN digest alone while the planner recorded the
@@ -444,17 +540,19 @@ func anySkillRootOnDisk(teamPath string) bool {
 // team context existed — turning the cheap path into a full plan on every
 // session start, silently, forever.
 func ExpectedRevision(repoRoot string) (string, error) {
-	base, err := skills.Digest()
-	if err != nil {
-		return "", err
-	}
 	var teamPath string
+	var claudeOrg teamskills.ClaudeOrgSync
 	if repoRoot != "" {
 		if tc := config.FindRepoTeamContext(repoRoot); tc != nil {
 			teamPath = tc.Path
+			if tc.Path != "" {
+				claudeOrg = claudeOrgSyncFor(repoRoot, tc.TeamID)
+			}
 		}
 	}
-	return base + "+team:" + teamRevision(teamPath), nil
+	return (&teamCatalog{
+		base: builtInCatalog{}, teamPath: teamPath, projectRoot: repoRoot, claudeOrg: claudeOrg,
+	}).Digest()
 }
 
 // catalogForRepo resolves the catalog Plan should project into repoRoot: the
@@ -515,19 +613,20 @@ func catalogForRepoResolved(repoRoot string, resolved *TeamSkillsResolved) (cata
 
 	tc := config.FindRepoTeamContext(repoRoot)
 	if tc == nil || tc.Path == "" {
-		return &teamCatalog{base: base, incomplete: "no team context is configured for this project"}, nil, nil
+		return &teamCatalog{base: base, projectRoot: repoRoot, incomplete: "no team context is configured for this project"}, nil, nil
 	}
+	claudeOrg := claudeOrgSyncFor(repoRoot, tc.TeamID)
 	if _, err := os.Stat(tc.Path); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			// The daemon clones team contexts in the background; a repo that was
 			// just initialized legitimately has nothing here yet.
-			return &teamCatalog{base: base, teamPath: tc.Path, incomplete: "team context checkout is not on disk yet"}, nil, nil
+			return &teamCatalog{base: base, teamPath: tc.Path, projectRoot: repoRoot, incomplete: "team context checkout is not on disk yet", claudeOrg: claudeOrg}, nil, nil
 		}
 		return nil, nil, fmt.Errorf("stat team context %s: %w", tc.Path, err)
 	}
 
 	if resolved != nil && resolved.TeamPath == tc.Path {
-		return teamSkillSourceResolved(base, tc.Path, resolved.RepoSlug, repoRoot, resolved.Skills)
+		return teamSkillSourceResolved(base, tc.Path, resolved.RepoSlug, repoRoot, resolved.Skills, claudeOrg)
 	}
 
 	// The slug costs a `git remote get-url`, so it is resolved only once a team
@@ -536,7 +635,7 @@ func catalogForRepoResolved(repoRoot string, resolved *TeamSkillsResolved) (cata
 	// evaluate repos: filters: treating it as a negative match would retire every
 	// targeted team skill when origin is temporarily unavailable.
 	repoSlug, _ := repotools.RepoSlugFromRemote(repoRoot)
-	return TeamSkillSource(base, tc.Path, repoSlug, repoRoot)
+	return teamSkillSource(base, tc.Path, repoSlug, repoRoot, claudeOrg)
 }
 
 // WithheldTeamSkills returns every team skill with an outstanding approval:

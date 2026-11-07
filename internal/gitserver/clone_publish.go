@@ -2,6 +2,7 @@ package gitserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,22 @@ import (
 // CLI command then treat as a real repository. The daemon's Checkout and
 // doctor's direct Ledger clone both publish through these helpers, so the two
 // cannot drift.
+
+// ErrTargetIsSymlink reports a clone target that is a symlink. A symlinked
+// target is a coworker's relocation of the checkout; moving it aside or
+// renaming a clone over it would undo that move (and could replace a link to
+// data the clone knows nothing about), so nothing touches it.
+var ErrTargetIsSymlink = errors.New("clone target is a symlink")
+
+// RejectSymlinkTarget returns ErrTargetIsSymlink when target is itself a
+// symlink (including a dangling one). It uses Lstat on purpose: os.Stat would
+// follow the link and describe whatever it points at.
+func RejectSymlinkTarget(target string) error {
+	if fi, err := os.Lstat(target); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: %s (remove or repoint the link, then re-run `ox doctor --fix`)", ErrTargetIsSymlink, target)
+	}
+	return nil
+}
 
 // VerifyClone checks that the clone at dir is complete: it has a .git and its
 // HEAD resolves. An early-EOF clone usually exits non-zero, but can also exit
@@ -41,6 +58,9 @@ func VerifyClone(ctx context.Context, dir string) error {
 // carried into the clone (AdoptCacheOnlyTarget) so the rename can land instead
 // of failing "file exists" forever, and handed back if the rename fails.
 func MoveCloneIntoPlace(tempPath, target string) error {
+	if err := RejectSymlinkTarget(target); err != nil {
+		return err
+	}
 	restoreCache, adoptErr := AdoptCacheOnlyTarget(tempPath, target)
 	if err := os.Rename(tempPath, target); err != nil {
 		// the caller deletes the temp clone; give the adopted cache back
@@ -53,20 +73,71 @@ func MoveCloneIntoPlace(tempPath, target string) error {
 	return nil
 }
 
-// IsCacheOnlyDir reports whether dir holds nothing except
-// .sageox/cache (optionally empty), all real directories. That is what CodeDB
-// leaves when it opens its shared index before the first clone lands; it is
-// not a clone and must not be treated as one, nor moved aside as corrupt.
+// IsCacheOnlyDir reports whether dir is a local-only skeleton: nothing except
+// .sageox/cache (optionally empty) plus, at most, empty directories (an empty
+// sessions/ folder is what a recording leaves before the first clone). All
+// entries must be real directories. That is what CodeDB, the whisper store and
+// session recording leave when they run before the first clone lands; it is not
+// a clone and must not be treated as one, nor moved aside as corrupt.
 func IsCacheOnlyDir(dir string) bool {
+	// a symlinked target is a coworker's relocation, not a skeleton: adopting
+	// it would remove the link and the clone would silently undo the move
+	if fi, err := os.Lstat(dir); err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 || entries[0].Name() != ".sageox" || !entries[0].IsDir() {
+	if err != nil || len(entries) == 0 {
 		return false
 	}
-	inner, err := os.ReadDir(filepath.Join(dir, ".sageox"))
-	if err != nil || len(inner) > 1 {
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			return false
+		}
+		if entry.Name() != ".sageox" {
+			if !onlyEmptyDirs(filepath.Join(dir, entry.Name())) {
+				return false
+			}
+			continue
+		}
+		inner, err := os.ReadDir(filepath.Join(dir, ".sageox"))
+		if err != nil || len(inner) > 1 {
+			return false
+		}
+		if len(inner) == 1 && (inner[0].Name() != "cache" || !inner[0].IsDir()) {
+			return false
+		}
+	}
+	return true
+}
+
+// onlyEmptyDirs reports whether dir is a tree of real directories holding no
+// files, symlinks, or anything else.
+func onlyEmptyDirs(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		return false
 	}
-	return len(inner) == 0 || (inner[0].Name() == "cache" && inner[0].IsDir())
+	for _, entry := range entries {
+		if !entry.IsDir() || !onlyEmptyDirs(filepath.Join(dir, entry.Name())) {
+			return false
+		}
+	}
+	return true
+}
+
+// removeEmptyDirs removes an empty-directory tree bottom-up with os.Remove only,
+// so unexpected content makes it fail instead of being deleted.
+func removeEmptyDirs(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := removeEmptyDirs(filepath.Join(dir, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return os.Remove(dir)
 }
 
 // AdoptCacheOnlyTarget handles a clone target that exists but holds nothing
@@ -85,7 +156,7 @@ func AdoptCacheOnlyTarget(tempPath, target string) (restore func(), err error) {
 	}
 	sageoxDir := filepath.Join(target, ".sageox")
 	inner, err := os.ReadDir(sageoxDir)
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return restore, err
 	}
 	if len(inner) == 1 {
@@ -119,9 +190,16 @@ func AdoptCacheOnlyTarget(tempPath, target string) (restore func(), err error) {
 		}
 	}
 	// remove only empty directories; never recurse into unexpected content
-	if err := os.Remove(sageoxDir); err != nil {
+	top, err := os.ReadDir(target)
+	if err != nil {
 		restore()
 		return func() {}, err
+	}
+	for _, entry := range top {
+		if err := removeEmptyDirs(filepath.Join(target, entry.Name())); err != nil {
+			restore()
+			return func() {}, err
+		}
 	}
 	if err := os.Remove(target); err != nil {
 		restore()

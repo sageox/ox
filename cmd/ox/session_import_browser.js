@@ -23,7 +23,7 @@
     const label = Array.from(text.slice(0, text.length > 240 ? 239 : 240)).join('');
     return text.length > 240 ? label + '…' : label;
   };
-  const labels = { ready: 'Ready', ineligible: 'Unavailable', in_progress: 'In progress', already_imported: 'Already imported', recorded_live: 'Recorded by ox', needs_summarizer: 'Needs a summarizer', not_shared: 'Kept local' };
+  const labels = { ready: 'Ready', ineligible: 'Unavailable', in_progress: 'In progress', already_imported: 'Already imported', recorded_live: 'Recorded by ox', needs_summarizer: 'Needs a summarizer', not_shared: 'Kept local', aborted: 'Aborted' };
   let observer, detailAbort, scanAbort;
   const agentLabel = agent => agent === 'claude' ? 'Claude Code' : agent === 'codex' ? 'Codex' : agent;
   const dateLabel = value => value && !Number.isNaN(Date.parse(value)) ? new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(new Date(value)) : 'Date unavailable';

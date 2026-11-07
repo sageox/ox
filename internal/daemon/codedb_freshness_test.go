@@ -109,7 +109,7 @@ func TestCheckFreshness_NoDoubleGoroutine(t *testing.T) {
 		mgr.mu.Lock()
 		defer mgr.mu.Unlock()
 		return !mgr.indexing
-	}, 5*time.Second, 10*time.Millisecond, "indexing flag must be released after goroutine exits")
+	}, codedbBuildWait, 10*time.Millisecond, "indexing flag must be released after goroutine exits")
 	assert.Equal(t, int64(1), maxConcurrent.Load(), "exactly one goroutine ran doIndex in total")
 }
 
@@ -132,7 +132,7 @@ func TestCheckFreshness_FlagReleasedOnFailure(t *testing.T) {
 		mgr.mu.Lock()
 		defer mgr.mu.Unlock()
 		return !mgr.indexing
-	}, 5*time.Second, 10*time.Millisecond, "indexing flag must be released after failure")
+	}, codedbBuildWait, 10*time.Millisecond, "indexing flag must be released after failure")
 }
 
 // --- IssueTracker integration ---

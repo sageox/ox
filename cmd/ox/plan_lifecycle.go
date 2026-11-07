@@ -126,6 +126,7 @@ superseded), one line per event. Pure reader — never writes.`,
 		if err != nil {
 			return fmt.Errorf("load plan %q: %w", args[0], err)
 		}
+		tracePlanSurfaced(gitRoot, info)
 		return runPlanStatusOnDir(cmd, info.Dir, info.Topic, info.Slug, planShareURL(gitRoot, planIDForDir(info.Dir)), jsonOut)
 	},
 }

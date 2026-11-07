@@ -58,6 +58,30 @@ ox doctor      # verifies hooks + context injection
 ```
 No extra setup needed — Claude Code is the reference implementation.
 
+**Status line.** Alongside the hooks, `ox init` and `ox doctor` set the `statusLine`
+in the project's `.claude/settings.local.json` to `ox statusline`. It counts the team
+context that influenced this session — `● ox  3 discussions · 1 plan · 1 murmur  ● rec`
+— each item once; with nothing used yet it reads `● ox  ● rec`. It reads local files
+only (no network, no daemon). A `statusLine` already in the project file is never
+replaced; one in your own `~/.claude/settings.json` keeps working, on its own row
+beneath ox's. In the Claude desktop app's Claude Code tab, which has no status bar, the
+same line is drawn directly above the prompt by the session report pane plugin (below), fed by
+`ox statusline --json`. Turn it off everywhere with `ox config set statusline off`.
+
+**Session report pane.** `/ox-session-report` opens a pane beside the chat with what SageOx gave this
+session (calls, estimated context tokens, what was read and what was useful) and a
+scrollable list of every ox call, refreshed as they happen. It is a Claude Code plugin,
+`ox-cli-brief-pane`, that `ox init` and `ox doctor` install at user scope when the
+`claude` CLI is on PATH (Claude Code 2.1.309 or newer); the same mechanism ships Oxy
+(`ox pet`). The pane is a thin view over `ox session report --json`, so it shows exactly what
+`/ox-cli-session-report` reports. `/ox-session-report off` closes it, `ox config set session_report_pane off`
+removes it, and `ox session report pane status` shows whether it is installed. In the Claude desktop app's
+Claude Code tab the pane opens by itself, docked beside the chat; close it and it
+stays closed in later sessions until you run `/ox-session-report` again. Outside the
+terminal the plugin also draws a one-line flow lane under each ox call that moves team
+data and each prompt that carried Team Context in; `/ox-session-report flow still` stops its motion and
+`/ox-session-report flow off` hides it.
+
 ## Canonical Agent Skills
 
 ox authors every portable playbook once in `extensions/skills/`, in the open
@@ -67,6 +91,15 @@ receive the same managed skill under `.agents/skills/`. `ox doctor --fix`
 reconciles the project-selected native targets, including updates, missing
 skills, and retired ox-owned files, while preserving user-authored additions
 and modified retired files.
+
+Run `/ox-cli-session-report` (Claude Code slash command, or pick it in Codex's skill
+picker) to see what SageOx gave the current session: the ox calls your AI
+coworker made, the team context ox put in front of it and from where, the
+decisions, rules, murmurs and sessions it read, and which of those the coworker
+reports were useful. `/ox-cli-session-report me` rolls up your recent sessions in this
+repo; `/ox-cli-session-report team` shows team-wide totals only, never per-person reads.
+The skill is a thin relay over `ox session report --json`, so other AI coworkers get the
+same report by running that command.
 
 ### Codex
 ```bash
@@ -104,7 +137,9 @@ Installs a user-scope plugin, `ox-bridge.ts`, in Amp's system plugin directory
 (`$XDG_CONFIG_HOME/amp/plugins/` when `XDG_CONFIG_HOME` is set to an absolute path,
 otherwise `~/.config/amp/plugins/`) that records the session, and an `AGENTS.md`
 marker that primes it. Amp does not persist transcripts itself, so the plugin is
-what makes recording possible.
+what makes recording possible. In an Amp orb, the plugin ends a thread's session
+before the orb pauses, and when you reply in that thread later it starts a new
+session, linked as continued from the first.
 
 ### Pi
 ```bash

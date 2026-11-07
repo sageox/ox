@@ -12,6 +12,7 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/paths"
@@ -136,7 +137,7 @@ func (r *WorkspaceRegistry) loadFromConfigLocked() error {
 	if r.projectRoot != "" {
 		if projectCfg, err := config.LoadProjectConfig(r.projectRoot); err == nil && projectCfg != nil {
 			if r.endpoint == "" {
-				r.endpoint = projectCfg.GetEndpoint()
+				r.endpoint = endpoint.GetForProject(r.projectRoot)
 				slog.Debug("workspace registry: loaded endpoint from project config",
 					"endpoint", r.endpoint,
 					"repo_id", projectCfg.RepoID)
@@ -441,6 +442,9 @@ func isGCStagingPath(p string) bool {
 		return false
 	}
 	base := filepath.Base(p)
+	if paths.IsHiddenTeamsEntry(base) && strings.Contains(base, ".tmp-") {
+		return true // team-context clone staging, see teamCloneTempPath
+	}
 	switch {
 	case strings.HasSuffix(base, ".new"),
 		strings.HasSuffix(base, ".old"),

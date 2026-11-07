@@ -104,12 +104,14 @@ func (r *GeminiRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 
 	r.logger.Debug("gemini process started", "pid", cmd.Process.Pid)
 
-	// read stderr in background
+	// read stderr in background, keeping its end, where an error is
 	var stderrBuf []byte
 	stderrDone := make(chan struct{})
 	go func() {
 		defer close(stderrDone)
-		stderrBuf, _ = io.ReadAll(io.LimitReader(stderrPipe, 64*1024))
+		stderr := &tailBuffer{limit: 64 * 1024}
+		_, _ = io.Copy(stderr, stderrPipe)
+		stderrBuf = stderr.Bytes()
 	}()
 
 	// read stdout (gemini outputs plain text)
@@ -138,7 +140,7 @@ func (r *GeminiRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
 			exitCode = exitErr.ExitCode()
-			r.logger.Warn("gemini exited with non-zero status", "exit_code", exitCode, "stderr", string(stderrBuf))
+			r.logger.Warn("gemini exited with non-zero status", "exit_code", exitCode, "stderr", failureTail(string(stderrBuf)))
 		} else {
 			return nil, fmt.Errorf("wait gemini: %w", waitErr)
 		}

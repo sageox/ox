@@ -141,7 +141,7 @@ func fixLegacyStructure(gitRoot string, localCfg *config.LocalConfig, issue repo
 }
 
 // fixBrokenSymlink offers to recreate a broken symlink for team contexts.
-func fixBrokenSymlink(localCfg *config.LocalConfig, issue repoPathIssue) bool {
+func fixBrokenSymlink(ctx context.Context, localCfg *config.LocalConfig, issue repoPathIssue) bool {
 	fmt.Println("  The symlink for this team context is broken.")
 	fmt.Println()
 
@@ -158,7 +158,7 @@ func fixBrokenSymlink(localCfg *config.LocalConfig, issue repoPathIssue) bool {
 	}
 
 	// clone fresh from cloud
-	if err := cloneRepoForFix(repoPathIssue{
+	if err := cloneRepoForFix(ctx, repoPathIssue{
 		repoType: "team-context",
 		path:     issue.path,
 		teamID:   issue.teamID,
@@ -186,8 +186,9 @@ func fixBrokenSymlink(localCfg *config.LocalConfig, issue repoPathIssue) bool {
 //   - broken-symlink: Offer to recreate symlink
 //   - other: Enter new path or skip
 //
-// Returns appropriate check result.
-func fixRepoPathIssues(gitRoot string, localCfg *config.LocalConfig, issues []repoPathIssue) checkResult {
+// Returns appropriate check result. Once ctx is canceled no further issue is
+// repaired, and the repairs already made are saved.
+func fixRepoPathIssues(ctx context.Context, gitRoot string, localCfg *config.LocalConfig, issues []repoPathIssue) checkResult {
 	fmt.Println()
 	cli.PrintWarning("Git repository issue(s) detected")
 	fmt.Println()
@@ -216,6 +217,9 @@ func fixRepoPathIssues(gitRoot string, localCfg *config.LocalConfig, issues []re
 	var fixed, skipped, cloning int
 
 	for _, issue := range issues {
+		if ctx.Err() != nil {
+			break
+		}
 		var repoLabel string
 		switch issue.repoType {
 		case "ledger":
@@ -274,7 +278,7 @@ func fixRepoPathIssues(gitRoot string, localCfg *config.LocalConfig, issues []re
 				skipped++
 			}
 		case "broken-symlink", "invalid-symlink":
-			if fixBrokenSymlink(localCfg, issue) {
+			if fixBrokenSymlink(ctx, localCfg, issue) {
 				fixed++
 			} else {
 				skipped++
@@ -291,7 +295,7 @@ func fixRepoPathIssues(gitRoot string, localCfg *config.LocalConfig, issues []re
 			}
 
 			// attempt clone
-			if err := cloneRepoForFix(issue); err != nil {
+			if err := cloneRepoForFix(ctx, issue); err != nil {
 				if errors.Is(err, daemon.ErrCheckoutInProgress) {
 					cloning++
 					fmt.Println()
@@ -346,7 +350,7 @@ func fixRepoPathIssues(gitRoot string, localCfg *config.LocalConfig, issues []re
 
 // fixMissingRepos fetches repos from cloud and clones them when no repos are configured.
 // This is called when authenticated + .sageox exists but no ledger/team contexts are set up.
-func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
+func fixMissingRepos(ctx context.Context, gitRoot string, localCfg *config.LocalConfig) checkResult {
 	fmt.Println()
 
 	// get the endpoint for this project (checks project config, env var, then default)
@@ -412,7 +416,7 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 		if err := os.MkdirAll(filepath.Dir(ledgerPath), 0755); err != nil {
 			fmt.Printf("    Error creating directory: %v\n", err)
 			skipped++
-		} else if err := cloneViaDaemon(repoDetail.Ledger.RepoURL, ledgerPath, "ledger", projectEndpoint); errors.Is(err, daemon.ErrCheckoutInProgress) {
+		} else if err := cloneViaDaemon(ctx, repoDetail.Ledger.RepoURL, ledgerPath, "ledger", projectEndpoint); errors.Is(err, daemon.ErrCheckoutInProgress) {
 			cloning++
 		} else if err != nil {
 			fmt.Printf("    Clone failed: %v\n", err)
@@ -484,7 +488,7 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 			continue
 		}
 
-		if err := cloneViaDaemon(tc.cloneURL, tcPath, "team-context", projectEndpoint); errors.Is(err, daemon.ErrCheckoutInProgress) {
+		if err := cloneViaDaemon(ctx, tc.cloneURL, tcPath, "team-context", projectEndpoint); errors.Is(err, daemon.ErrCheckoutInProgress) {
 			cloning++
 			fmt.Println()
 			continue
@@ -611,6 +615,7 @@ func stillCloningSuffix(cloning int) string {
 
 // cloneViaDaemon clones a repo using the daemon's checkout capability.
 // Clone operations go through daemon for centralized credential handling.
+// runCtx is the doctor run's context; canceling it stops a direct clone.
 //
 // ┌─────────────────────────────────────────────────────────────────────────────┐
 // │ CRITICAL PATH EXCEPTION: This function has a direct clone fallback.        │
@@ -627,7 +632,7 @@ func stillCloningSuffix(cloning int) string {
 // │ Therefore, this function FALLS BACK to direct git clone when daemon is     │
 // │ unavailable. This is an INTENTIONAL EXCEPTION to the normal pattern.       │
 // └─────────────────────────────────────────────────────────────────────────────┘
-func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
+func cloneViaDaemon(runCtx context.Context, cloneURL, targetPath, repoType, endpointURL string) error {
 	// Try daemon first (preferred path - centralized credential handling)
 	if daemon.IsRunning() {
 		client := daemon.NewClientForCurrentRepoWithTimeout(doctorCheckoutIdle)
@@ -677,7 +682,7 @@ func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
 	fmt.Println("    Note: Daemon not running, using direct clone")
 
 	// the team-context budget; a Ledger clone brings its own (directCloneLedger)
-	ctx, cancel := context.WithTimeout(context.Background(), directTeamContextCloneTimeout)
+	ctx, cancel := context.WithTimeout(runCtx, directTeamContextCloneTimeout)
 	defer cancel()
 
 	if repoType == "team-context" {
@@ -700,8 +705,9 @@ func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
 		}
 		gitserver.ValidateTeamContextClone(targetPath, result.ManifestConfig)
 	} else {
-		// ledger: full clone, on a backstop and curl's stall check, not ctx
-		cloned, err := directCloneLedger(cloneURL, targetPath, endpointURL)
+		// ledger: full clone, on its own backstop and curl's stall check, not
+		// the team-context budget
+		cloned, err := directCloneLedger(runCtx, cloneURL, targetPath, endpointURL)
 		if errors.Is(err, daemon.ErrCloneAlreadyRunning) {
 			fmt.Println(alreadyCloningNote)
 			return err
@@ -765,7 +771,7 @@ const curlLowSpeedAbort = "Operation too slow"
 // cloned is false with a nil error when a complete Ledger was already at
 // targetPath once the lock was held. The error is ErrCloneAlreadyRunning when
 // another ox process holds the lock.
-func directCloneLedger(cloneURL, targetPath, endpointURL string) (cloned bool, err error) {
+func directCloneLedger(ctx context.Context, cloneURL, targetPath, endpointURL string) (cloned bool, err error) {
 	acquired, err := gitutil.TryWithPreCloneLock(targetPath, func() error {
 		// a peer that held the lock may have finished while doctor looked
 		if _, statErr := os.Stat(filepath.Join(targetPath, ".git")); statErr == nil {
@@ -775,7 +781,7 @@ func directCloneLedger(cloneURL, targetPath, endpointURL string) (cloned bool, e
 			return err
 		}
 		cloned = true
-		return directCloneLedgerLocked(cloneURL, targetPath, endpointURL)
+		return directCloneLedgerLocked(ctx, cloneURL, targetPath, endpointURL)
 	})
 	if err != nil {
 		return false, err
@@ -805,11 +811,11 @@ func clearCloneTarget(targetPath string) error {
 	return fmt.Errorf("%w: %s", gitserver.ErrPathExists, targetPath)
 }
 
-// directCloneLedgerLocked is directCloneLedger's clone, with the pre-clone
-// lock held.
-func directCloneLedgerLocked(cloneURL, targetPath, endpointURL string) error {
+// directCloneLedgerLocked clones a Ledger the way directCloneLedger does, for
+// a caller that already holds the pre-clone lock for targetPath.
+func directCloneLedgerLocked(ctx context.Context, cloneURL, targetPath, endpointURL string) error {
 	budget := directLedgerCloneTimeout
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
 	tempPath := fmt.Sprintf("%s.tmp-%d", targetPath, time.Now().UnixNano())
@@ -868,6 +874,8 @@ func watchDirectClone(dir string, start time.Time) (stop func() int64) {
 // describes the abort, not the server, so it is replaced with what happened.
 func directLedgerCloneError(ctx context.Context, budget time.Duration, received int64, gitOutput string, err error) error {
 	switch {
+	case errors.Is(ctx.Err(), context.Canceled):
+		return fmt.Errorf("clone ledger interrupted: %w", ctx.Err())
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return fmt.Errorf("clone ledger timed out after %s (%s received)", budget, humanSize(received))
 	case strings.Contains(gitOutput, curlLowSpeedAbort):
@@ -883,7 +891,7 @@ func directLedgerCloneError(ctx context.Context, budget time.Duration, received 
 // If directory exists but is not a git repo, asks for confirmation before removing.
 // IMPORTANT: Checks cloud has repo URL BEFORE deleting anything to avoid data loss.
 // NOTE: Clone operations go through daemon; CLI handles add/commit/push for session uploads.
-func cloneRepoForFix(issue repoPathIssue) error {
+func cloneRepoForFix(ctx context.Context, issue repoPathIssue) error {
 	// FIRST: fetch the repo URL from cloud API BEFORE any directory operations
 	// This prevents deleting directories when cloud has no repo to clone
 	var repoURL string
@@ -907,6 +915,10 @@ func cloneRepoForFix(issue repoPathIssue) error {
 			return fmt.Errorf("ledger not available yet - no changes made: %w", fetchErr)
 		}
 		return fmt.Errorf("team context not available yet - no changes made: %w", fetchErr)
+	}
+	// Ctrl-C during the lookup: move nothing aside and start no clone
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// Now that we know cloud has the repo, proceed with directory cleanup if needed
@@ -952,7 +964,7 @@ func cloneRepoForFix(issue repoPathIssue) error {
 		fmt.Printf("  Cloning team context from: %s\n", repoURL)
 	}
 	fmt.Printf("  Cloning to: %s\n", issue.path)
-	return cloneViaDaemon(repoURL, issue.path, issue.repoType, issue.endpoint)
+	return cloneViaDaemon(ctx, repoURL, issue.path, issue.repoType, issue.endpoint)
 }
 
 // fetchLedgerURLWithError fetches the ledger git URL from the cloud API with error details.

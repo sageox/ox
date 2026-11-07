@@ -344,12 +344,67 @@ func (d *Daemon) hasPendingWork() bool {
 	return false
 }
 
-// RestartRequested returns true if the daemon stopped due to a version mismatch
-// and should be re-executed with the updated binary.
+// RestartRequested returns true if the daemon stopped to be re-executed: after
+// a version mismatch, to run the updated binary, or under disposable_machine
+// once the Ledger's first clone lands.
 func (d *Daemon) RestartRequested() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.restartRequested
+}
+
+// startAutofix starts the periodic auto-fix scheduler (ox-0xgx). It runs the
+// registered auto-fix-safe doctor checks on a slow cadence so silent drift
+// (init artifacts reverted from git, legacy hook formats in settings.json,
+// etc.) gets repaired without anyone typing `ox doctor`. The set of checks
+// lives in internal/doctor/autofix/default_checks.go and is intentionally
+// small at first — incremental migration of cmd/ox/doctor_*.go auto-safe
+// checks happens in follow-up beads.
+//
+// Off under disposable_machine: the machine runs one job, and the checks
+// rewrite files in every Ledger under the home, not only this job's.
+func (d *Daemon) startAutofix() {
+	if d.config.ProjectRoot == "" || d.config.DisposableMachine {
+		return
+	}
+	autofixReg := autofix.Default()
+	d.autofixSched = autofix.NewScheduler(autofixReg, d.logger,
+		func() []string { return []string{d.config.ProjectRoot} },
+		d.routeAutofixResult)
+	d.autofixSched.SetLedgerPaths(d.autofixLedgerPaths)
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		d.autofixSched.Run(d.ctx)
+	}()
+}
+
+// restartAfterFirstLedgerClone restarts the daemon, under disposable_machine,
+// once a background clone lands the Ledger it started without: LedgerPath is
+// fixed at start, and a disposable machine's daemon runs for the whole job.
+// This machine made the clone, so none of its locks are another machine's.
+func (d *Daemon) restartAfterFirstLedgerClone() {
+	if !d.config.DisposableMachine || d.config.LedgerPath != "" {
+		return
+	}
+	d.scheduler.SetLedgerClonedCallback(func(ledgerPath string) {
+		if err := writeLedgerLockMarker(ledgerLocksClearedMarker(ledgerPath)); err != nil {
+			d.logger.Warn("could not record that the Ledger's git locks were cleared", "path", ledgerPath, "error", err)
+			return
+		}
+		d.logger.Info("restarting to pick up the Ledger's first clone", "path", ledgerPath)
+		d.requestRestart()
+	})
+}
+
+// requestRestart stops the daemon so that runDaemonForeground re-executes it.
+func (d *Daemon) requestRestart() {
+	d.mu.Lock()
+	d.restartRequested = true
+	d.mu.Unlock()
+	go func() {
+		_ = d.Stop() // best-effort; caller checks RestartRequested() and re-execs regardless
+	}()
 }
 
 // Start starts the daemon in the foreground.
@@ -1120,23 +1175,29 @@ func (d *Daemon) ensureLedgerSparseCheckout(ctx context.Context) {
 	d.logger.Info("ledger sparse-checkout verified at startup")
 }
 
+// removeLedgerLocksAtStart cleans up git lock files that crashed processes left
+// in the Ledger, before sync starts.
+func (d *Daemon) removeLedgerLocksAtStart() {
+	if d.config.LedgerPath == "" {
+		return
+	}
+	if d.config.DisposableMachine {
+		clearLedgerLocksOnFirstStart(d.ctx, d.config.LedgerPath, d.logger)
+	}
+	gitDir := filepath.Join(d.config.LedgerPath, ".git")
+	if removed, _ := gitutil.RemoveStaleLockFiles(gitDir); len(removed) > 0 {
+		d.logger.Info("removed stale git lock files at startup", "path", d.config.LedgerPath, "locks", removed)
+	}
+}
+
 // initComponents creates and wires all daemon subsystems. Returns setup duration.
 func (d *Daemon) initComponents() time.Duration {
 	startSetup := time.Now()
 
 	// load project endpoint early - needed by friction collector and credential loading
-	var projectEndpoint string
-	if projectCfg, err := config.LoadProjectConfig(d.config.ProjectRoot); err == nil && projectCfg != nil {
-		projectEndpoint = projectCfg.GetEndpoint()
-	}
+	projectEndpoint := endpoint.GetForProject(d.config.ProjectRoot)
 
-	// clean up stale git lock files left by crashed processes before starting sync
-	if d.config.LedgerPath != "" {
-		gitDir := filepath.Join(d.config.LedgerPath, ".git")
-		if removed, _ := gitutil.RemoveStaleLockFiles(gitDir); len(removed) > 0 {
-			d.logger.Info("removed stale git lock files at startup", "path", d.config.LedgerPath, "locks", removed)
-		}
-	}
+	d.removeLedgerLocksAtStart()
 
 	// ensure ledger sparse-checkout cone is correct before any sync or indexing.
 	// without this, a corrupt cone from a previous session causes every sync cycle
@@ -1220,12 +1281,7 @@ func (d *Daemon) initComponents() time.Duration {
 			"cli_version", cliVersion,
 			"daemon_version", daemonVersion,
 		)
-		d.mu.Lock()
-		d.restartRequested = true
-		d.mu.Unlock()
-		go func() {
-			_ = d.Stop() // best-effort; caller checks RestartRequested() and re-execs regardless
-		}()
+		d.requestRestart()
 	})
 	// pre-populate credentials from credential store (cold-start)
 	if creds, err := gitserver.LoadCredentialsForEndpoint(projectEndpoint); err == nil && creds != nil {
@@ -1236,6 +1292,7 @@ func (d *Daemon) initComponents() time.Duration {
 		}
 		if token, err := auth.GetTokenForEndpoint(projectEndpoint); err == nil && token != nil {
 			hbCreds.AuthToken = token.AccessToken
+			hbCreds.AuthEndpoint = projectEndpoint
 		}
 		d.heartbeat.SetInitialCredentials(hbCreds)
 	}
@@ -1255,6 +1312,7 @@ func (d *Daemon) initComponents() time.Duration {
 	d.scheduler = NewSyncScheduler(d.config, d.logger)
 	d.scheduler.SetTracer(d.tracer)
 	d.scheduler.SetEventBus(d.eventBus)
+	d.restartAfterFirstLedgerClone()
 
 	// Per-(user, endpoint) global-sync leader election (ox-6zme).
 	// Acquire the flock lease BEFORE the scheduler runs so the first
@@ -1314,7 +1372,7 @@ func (d *Daemon) initComponents() time.Duration {
 			sfh.SetTelemetry(d.telemetry)
 		}
 		awCfg := configLoader()
-		sfh.SetQualityThresholds(awCfg.GetQualityUploadThreshold(), awCfg.GetQualityDiscardThreshold())
+		sfh.SetQualityDiscardThreshold(awCfg.GetQualityDiscardThreshold())
 		d.sessionFinalizeHandler = sfh
 		d.agentWorker.RegisterHandler(sfh)
 		d.agentWorker.SetOnComplete(func(result agentwork.WorkResult) {
@@ -1486,26 +1544,7 @@ func (d *Daemon) startWorkers() {
 		d.scheduler.Start(d.ctx)
 	}()
 
-	// ox-0xgx: periodic auto-fix scheduler. Runs the registered
-	// auto-fix-safe doctor checks on a slow cadence so silent drift
-	// (init artifacts reverted from git, legacy hook formats in
-	// settings.json, etc.) gets repaired without anyone typing
-	// `ox doctor`. The set of checks lives in
-	// internal/doctor/autofix/default_checks.go and is intentionally
-	// small at first — incremental migration of cmd/ox/doctor_*.go
-	// auto-safe checks happens in follow-up beads.
-	if d.config.ProjectRoot != "" {
-		autofixReg := autofix.Default()
-		d.autofixSched = autofix.NewScheduler(autofixReg, d.logger,
-			func() []string { return []string{d.config.ProjectRoot} },
-			d.routeAutofixResult)
-		d.autofixSched.SetLedgerPaths(d.autofixLedgerPaths)
-		d.wg.Add(1)
-		go func() {
-			defer d.wg.Done()
-			d.autofixSched.Run(d.ctx)
-		}()
-	}
+	d.startAutofix()
 
 	// unified DB maintenance: prune, vacuum, integrity check for all SQLite databases
 	d.dbMaintenance = NewDBMaintenanceScheduler(d.logger)
@@ -2163,6 +2202,27 @@ func validateMurmurRelPath(targetDir, relPath string) error {
 	return nil
 }
 
+// decodeMurmurPayload rejects malformed inner JSON before any filesystem write.
+// The stored path must agree with the schema's partition and ID, not just have
+// the data/murmurs/ prefix.
+func decodeMurmurPayload(payload MurmurPayload) (ledger.MurmurFile, error) {
+	var mf ledger.MurmurFile
+	if err := json.Unmarshal(payload.MurmurJSON, &mf); err != nil {
+		return mf, fmt.Errorf("invalid murmur JSON: %w", err)
+	}
+	if mf.SchemaVersion != "1" || mf.ID == "" || mf.Timestamp.IsZero() || mf.Topic == "" || mf.Content == "" {
+		return mf, fmt.Errorf("invalid murmur schema or missing required fields")
+	}
+	if mf.Importance != "critical" && mf.Importance != "normal" && mf.Importance != "ambient" {
+		return mf, fmt.Errorf("invalid murmur importance")
+	}
+	if strings.ContainsAny(mf.ID, `/\`) || mf.ID == "." || mf.ID == ".." ||
+		filepath.Clean(payload.RelPath) != ledger.MurmurFilePath(mf.Timestamp, mf.ID) {
+		return mf, fmt.Errorf("murmur path does not match timestamp and ID")
+	}
+	return mf, nil
+}
+
 // PublishMurmur writes the murmur file to disk and commits it asynchronously.
 // The CLI passes the full MurmurFile JSON so no temp file is needed on the CLI side.
 // Runs in a goroutine so the IPC handler returns immediately.
@@ -2211,6 +2271,9 @@ func (s *daemonServiceImpl) commitMurmur(ctx context.Context, payload MurmurPayl
 // neighbor's valid but unrelated staged edit under that directory must not
 // ride along into this murmur's commit.
 func writeAndCommitMurmur(ctx context.Context, targetDir string, payload MurmurPayload) error {
+	if _, err := decodeMurmurPayload(payload); err != nil {
+		return err
+	}
 	summary := payload.Content
 	if len(summary) > 50 {
 		summary = summary[:50] + "..."

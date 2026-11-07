@@ -128,6 +128,9 @@ func (ea *ExternalAdapter) FindSessionFile(lookup SessionLookup) (string, error)
 	if err := lookup.Validate(); err != nil {
 		return "", fmt.Errorf("invalid session lookup: %w", err)
 	}
+	if err := adapterruntime.ValidateSessionSource(CanonicalAdapterName(ea.Name()), "", lookup.AgentSessionID); err != nil {
+		return "", err
+	}
 	args := []string{
 		"--agent-id", lookup.AgentID,
 		"--repo-root", lookup.RepoRoot,
@@ -148,6 +151,9 @@ func (ea *ExternalAdapter) FindSessionFile(lookup SessionLookup) (string, error)
 
 	if result.SessionFile == "" {
 		return "", ErrSessionNotFound
+	}
+	if err := adapterruntime.ValidateSessionSource(CanonicalAdapterName(ea.Name()), result.SessionFile, lookup.AgentSessionID); err != nil {
+		return "", err
 	}
 	return result.SessionFile, nil
 }
@@ -286,7 +292,13 @@ func (ea *ExternalAdapter) Watch(ctx context.Context, sessionPath string) (<-cha
 
 // ReadFromOffset implements IncrementalReader via one-shot subprocess call.
 func (ea *ExternalAdapter) ReadFromOffset(path string, offset int64) ([]RawEntry, int64, error) {
-	out, err := ea.execOneShot("read-from-offset",
+	return ea.ReadFromOffsetWithContext(context.Background(), path, offset, ea.oneShotTimeout)
+}
+
+// ReadFromOffsetWithContext is ReadFromOffset within the caller's lifetime and
+// a caller-chosen deadline, as ReadWithContext is for Read.
+func (ea *ExternalAdapter) ReadFromOffsetWithContext(ctx context.Context, path string, offset int64, timeout time.Duration) ([]RawEntry, int64, error) {
+	out, err := ea.execOneShotContext(ctx, timeout, "read-from-offset",
 		"--session-file", path,
 		"--offset", fmt.Sprintf("%d", offset),
 	)
@@ -304,6 +316,9 @@ func (ea *ExternalAdapter) ReadFromOffset(path string, offset int64) ([]RawEntry
 
 // ImportSession reads an entire session by its native session ID.
 func (ea *ExternalAdapter) ImportSession(sessionID, repoRoot string) (*adapterprotocol.ImportSessionResult, error) {
+	if err := adapterruntime.ValidateSessionSource(CanonicalAdapterName(ea.Name()), "", sessionID); err != nil {
+		return nil, err
+	}
 	out, err := ea.execOneShot("import-session",
 		"--session-id", sessionID,
 		"--repo-root", repoRoot,
@@ -321,6 +336,9 @@ func (ea *ExternalAdapter) ImportSession(sessionID, repoRoot string) (*adapterpr
 // CapturePrior delegates session capture to the adapter, which owns the
 // agent-specific session discovery and parsing logic.
 func (ea *ExternalAdapter) CapturePrior(params adapterprotocol.CapturePriorParams) (*adapterprotocol.CapturePriorResult, error) {
+	if err := adapterruntime.ValidateSessionSource(CanonicalAdapterName(ea.Name()), "", params.SessionID); err != nil {
+		return nil, err
+	}
 	args := []string{
 		"--repo-root", params.RepoRoot,
 		"--agent-id", params.AgentID,

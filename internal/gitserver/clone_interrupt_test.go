@@ -119,34 +119,70 @@ func TestCloneRepo_CanceledCloneLeavesNothingBehind(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real Git clone over HTTP")
 	}
-	srv := serveStallingRepo(t, 512<<10, 64<<10)
-	target := filepath.Join(t.TempDir(), "ledger")
+	for _, name := range []string{"direct", "child ignores interrupt", "Git requires forced termination"} {
+		t.Run(name, func(t *testing.T) {
+			srv := serveStallingRepo(t, 512<<10, 64<<10)
+			target := filepath.Join(t.TempDir(), "ledger")
+			var pidFile string
+			if name == "Git requires forced termination" {
+				realGit, err := exec.LookPath("git")
+				require.NoError(t, err)
+				bin := t.TempDir()
+				pidFile = filepath.Join(bin, "git.pid")
+				// exec keeps the real Git PID so it can be paused below,
+				// forcing cancellation's existing SIGKILL fallback.
+				script := "#!/bin/sh\necho $$ > \"$CLONE_TEST_PID\"\nexec \"$CLONE_TEST_GIT\" \"$@\"\n"
+				require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755))
+				t.Setenv("CLONE_TEST_GIT", realGit)
+				t.Setenv("CLONE_TEST_PID", pidFile)
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			}
+			if name == "child ignores interrupt" {
+				gitExec, err := exec.Command("git", "--exec-path").Output()
+				require.NoError(t, err)
+				bin := t.TempDir()
+				// Keep Git itself as the parent so Run waits for its cleanup;
+				// only its HTTP transport ignores SIGINT.
+				script := "#!/bin/sh\ntrap '' INT\nexec \"$CLONE_TEST_REMOTE_HTTP\" \"$@\"\n"
+				require.NoError(t, os.WriteFile(filepath.Join(bin, "git-remote-http"), []byte(script), 0o755))
+				t.Setenv("CLONE_TEST_REMOTE_HTTP", filepath.Join(strings.TrimSpace(string(gitExec)), "git-remote-http"))
+				t.Setenv("GIT_EXEC_PATH", bin)
+			}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var output bytes.Buffer
-	done := make(chan error, 1)
-	go func() {
-		done <- cloneRepo(ctx, srv.URL, target, nil, &CheckoutOptions{Quiet: true, Output: &output})
-	}()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var output bytes.Buffer
+			done := make(chan error, 1)
+			go func() {
+				done <- cloneRepo(ctx, srv.URL, target, nil, &CheckoutOptions{Quiet: true, Output: &output})
+			}()
 
-	select {
-	case <-srv.streaming:
-	case err := <-done:
-		t.Fatalf("the clone ended before the download stalled: %v; output: %s", err, output.String())
-	case <-time.After(30 * time.Second):
-		t.Fatal("the download never started")
+			select {
+			case <-srv.streaming:
+			case err := <-done:
+				t.Fatalf("the clone ended before the download stalled: %v; output: %s", err, output.String())
+			case <-time.After(30 * time.Second):
+				t.Fatal("the download never started")
+			}
+			require.DirExists(t, filepath.Join(target, ".git"), "git writes the clone's .git before the pack arrives")
+			if pidFile != "" {
+				pid, err := os.ReadFile(pidFile)
+				require.NoError(t, err)
+				require.NoError(t, exec.Command("kill", "-STOP", strings.TrimSpace(string(pid))).Run())
+			}
+			cancel()
+
+			// Under the 5s WaitDelay: had cancellation stopped only Git, its
+			// surviving transport child would hold the output pipe until then.
+			select {
+			case err := <-done:
+				require.ErrorIs(t, err, ErrCloneFailed)
+			case <-time.After(4 * time.Second):
+				t.Fatal("the canceled clone did not exit before WaitDelay")
+			}
+			assert.NoDirExists(t, target, "an interrupted clone must remove its half-written repo")
+		})
 	}
-	require.DirExists(t, filepath.Join(target, ".git"), "git writes the clone's .git before the pack arrives")
-	cancel()
-
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, ErrCloneFailed)
-	case <-time.After(2 * cloneInterruptGrace):
-		t.Fatal("the canceled clone did not exit")
-	}
-	assert.NoDirExists(t, target, "an interrupted clone must remove its half-written repo")
 }
 
 // TestCloneRepo_OutputReceivesGitErrors verifies git's error text goes to
@@ -164,4 +200,18 @@ func TestCloneRepo_OutputReceivesGitErrors(t *testing.T) {
 
 	require.ErrorIs(t, err, ErrCloneFailed)
 	assert.Contains(t, output.String(), "not found", "git's own reason must reach Output")
+}
+
+// A failed clone must not remove a target directory that existed beforehand.
+func TestCloneRepo_FailurePreservesExistingTarget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real Git clone over HTTP")
+	}
+	srv := serveStallingRepo(t, 1<<10, 64<<10)
+	target := t.TempDir()
+	var output bytes.Buffer
+	err := cloneRepo(context.Background(), strings.TrimSuffix(srv.URL, "ledger.git")+"missing.git",
+		target, nil, &CheckoutOptions{Quiet: true, Output: &output})
+	require.ErrorIs(t, err, ErrCloneFailed)
+	assert.DirExists(t, target)
 }

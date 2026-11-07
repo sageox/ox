@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	_ "embed"
 	"encoding/json"
 	"log/slog"
@@ -13,6 +12,8 @@ import (
 	"github.com/sageox/agentx"
 	friction "github.com/sageox/frictionax"
 	frictioncobra "github.com/sageox/frictionax/adapters/cobra"
+	"github.com/sageox/frictionax/redactors/secrets"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/spf13/cobra"
@@ -36,6 +37,10 @@ func initFriction(rootCmd *cobra.Command) {
 		friction.WithCatalog("ox"),
 		friction.WithCachePath(getCatalogCachePath()),
 		friction.WithActorDetector(&oxActorDetector{}),
+		// credential patterns run when the event is built, before truncation can
+		// cut a token in half; sendFrictionEventTo then reduces the rest of the
+		// text to command structure (friction_redact.go)
+		friction.WithRedactor(secrets.New()),
 	)
 
 	// load embedded default catalog (baseline patterns for offline/first-run)
@@ -81,28 +86,9 @@ type oxActorDetector struct {
 }
 
 func (d oxActorDetector) DetectActor() (friction.Actor, string) {
-	env := d.env
-	if env == nil {
-		env = agentx.NewSystemEnvironment()
-	}
-	if a, _ := agentx.NewDetectorWithEnv(envSignalsOnly{env}).Detect(context.Background()); a != nil {
-		return friction.ActorAgent, string(a.Type())
-	}
-	if env.GetEnv("CI") != "" {
-		return friction.ActorAgent, "ci"
-	}
-	return friction.ActorHuman, ""
+	actor, agentType := cli.DetectActor(d.env)
+	return friction.Actor(actor), agentType
 }
-
-// envSignalsOnly hides the filesystem from agent detection, so only
-// environment variables an agent sets can name the actor. agentx's Codex
-// detector otherwise falls back to a .codex/ directory in the working
-// directory, which ox itself writes into repositories, and would file every
-// person working there as an AI coworker.
-type envSignalsOnly struct{ agentx.Environment }
-
-func (envSignalsOnly) IsDir(string) bool      { return false }
-func (envSignalsOnly) FileExists(string) bool { return false }
 
 // sendFrictionEvent sends a friction event to the daemon via IPC for telemetry.
 // Fire-and-forget with a 5ms timeout — must complete synchronously so os.Exit()
@@ -138,16 +124,25 @@ func sendFrictionEventTo(event *friction.FrictionEvent, socketPath string) {
 		client = daemon.NewClientForCurrentRepoWithTimeout(5 * time.Millisecond)
 	}
 
+	// the event carries what the coworker typed (paths, names, free text), so
+	// only its command structure is sent. frictionax's default redactor is a
+	// no-op, and the daemon forwards these strings to the cloud verbatim.
+	redacted, ok := redactFrictionEvent(rootCmd, event)
+	if !ok {
+		return
+	}
+
 	payload := daemon.FrictionPayload{
 		Timestamp:  event.Timestamp,
 		Kind:       string(event.Kind),
-		Command:    event.Command,
-		Subcommand: event.Subcommand,
+		Command:    redacted.Command,
+		Subcommand: redacted.Subcommand,
 		Actor:      event.Actor,
 		AgentType:  event.AgentType,
 		PathBucket: event.PathBucket,
-		Input:      event.Input,
-		ErrorMsg:   event.ErrorMsg,
+		Input:      redacted.Input,
+		ErrorMsg:   redacted.ErrorMsg,
+		Suggestion: redacted.Suggestion,
 	}
 
 	data, err := json.Marshal(payload)

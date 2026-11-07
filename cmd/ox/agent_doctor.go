@@ -1,15 +1,18 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
-	"os"
+	"log/slog"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/session"
@@ -26,12 +29,18 @@ type AgentDoctorOutput struct {
 	// HeldSessions are kept on this machine (session_publishing: manual);
 	// CacheOnlySessions wait in the cache for the daemon to reclaim them.
 	// Neither is published by doctor (GH #1095, #1077).
-	HeldSessions      []string `json:"held_sessions,omitempty"`
-	CacheOnlySessions []string `json:"cache_only_sessions,omitempty"`
-	StagedCount       int      `json:"staged_count"`
-	CommitNeeded      bool     `json:"commit_needed"`
-	PushNeeded        bool     `json:"push_needed"`
-	NextSteps         []string `json:"next_steps,omitempty"`
+	HeldSessions        []string `json:"held_sessions,omitempty"`
+	CacheOnlySessions   []string `json:"cache_only_sessions,omitempty"`
+	PendingUploads      []string `json:"pending_uploads,omitempty"`
+	PendingFinalization []string `json:"pending_finalization,omitempty"`
+	RecoverySessions    []string `json:"recovery_sessions,omitempty"`
+	BlockedSessions     []string `json:"blocked_sessions,omitempty"`
+	RefusedSessions     []string `json:"refused_sessions,omitempty"`
+	SessionScanError    string   `json:"session_scan_error,omitempty"`
+	StagedCount         int      `json:"staged_count"`
+	CommitNeeded        bool     `json:"commit_needed"`
+	PushNeeded          bool     `json:"push_needed"`
+	NextSteps           []string `json:"next_steps,omitempty"`
 }
 
 // IncompleteSessionInfo describes a session missing artifacts
@@ -54,10 +63,12 @@ func runAgentDoctor(w io.Writer, inst *agentinstance.Instance) error {
 	// gather session health info
 	output := buildAgentDoctorOutput(inst.AgentID, projectRoot)
 
-	// clear .needs-doctor-agent marker on successful completion
-	// (agent doctor always succeeds if we reach this point)
+	// Inspection must succeed before acknowledging the marker. Recovery and
+	// blocked work still need attention even when no summary can be generated.
 	gitRoot := findGitRoot()
-	if gitRoot != "" {
+	if gitRoot != "" && output.Success && len(output.IncompleteSessions) == 0 &&
+		len(output.PendingUploads) == 0 && len(output.RecoverySessions) == 0 &&
+		len(output.PendingFinalization) == 0 && len(output.BlockedSessions) == 0 && !output.CommitNeeded && !output.PushNeeded {
 		_ = doctor.ClearNeedsDoctorAgent(gitRoot)
 	}
 
@@ -91,122 +102,71 @@ func buildAgentDoctorOutput(agentID, projectRoot string) *AgentDoctorOutput {
 	// check ledger path
 	ledgerPath := getLedgerPath()
 	if ledgerPath == "" {
+		output.Success = false
 		output.NextSteps = append(output.NextSteps, "ox doctor --fix (ledger not found)")
 		return output
 	}
 
-	// find incomplete sessions in ledger
-	sessionsDir := filepath.Join(ledgerPath, "sessions")
-	incompleteSessions := findIncompleteSessions(sessionsDir, agentID)
-	output.IncompleteSessions = incompleteSessions
+	// Share the daemon's eligibility rules, including cache-only work and
+	// explicit summary requests. Inspection never recovers or publishes data.
+	handler := agentwork.NewSessionFinalizeHandler(slog.New(slog.DiscardHandler))
+	handler.SetProjectRoot(projectRoot)
+	inspection, scanErr := handler.Inspect(ledgerPath)
+	output.RecoverySessions = inspection.Recovery
+	output.BlockedSessions = inspection.Blocked
+	output.RefusedSessions = inspection.Refused
+	output.PendingFinalization = inspection.Automatic
+	for _, item := range inspection.Items {
+		payload := item.Payload.(*agentwork.SessionFinalizePayload)
+		name := filepath.Base(payload.SessionDir)
+		if payload.UploadOnly {
+			output.PendingUploads = append(output.PendingUploads, name)
+			continue
+		}
+		info := IncompleteSessionInfo{SessionID: name, Path: payload.SessionDir}
+		for _, artifact := range payload.Missing {
+			switch artifact {
+			case ledgerFileSummaryMD:
+				info.Missing = append(info.Missing, "summary")
+			case "summary.json":
+				info.Missing = append(info.Missing, "summary_json")
+			case ledgerFileSessionMD:
+				info.Missing = append(info.Missing, "session_md")
+			}
+		}
+		info.FinalizeCommands = buildFinalizeCommands(name, agentID, info.Missing, info.Path)
+		if containsString(info.Missing, "summary") || containsString(info.Missing, "summary_json") {
+			info.SummarizePrompt = buildSummarizePromptForSession(info.Path)
+		}
+		output.IncompleteSessions = append(output.IncompleteSessions, info)
+	}
 
 	unpublished := listUnpublishedCacheSessions(ledgerPath)
-	output.HeldSessions = unpublished.Held
-	output.CacheOnlySessions = unpublished.Waiting
-	for _, name := range unpublished.Held {
+	output.HeldSessions = append(inspection.Held, unpublished.Held...)
+	slices.Sort(output.HeldSessions)
+	output.HeldSessions = slices.Compact(output.HeldSessions)
+	output.CacheOnlySessions = slices.DeleteFunc(unpublished.Waiting, func(name string) bool {
+		return slices.Contains(output.HeldSessions, name)
+	})
+	for _, name := range output.HeldSessions {
 		output.NextSteps = append(output.NextSteps,
 			fmt.Sprintf("Held on this machine: %s. Publish only if the coworker asks: 'ox session upload %s'", name, name))
 	}
 
-	// check for orphaned/stale recordings
-	if session.IsRecordingForAgent(projectRoot, agentID) {
-		state, _ := session.LoadRecordingStateForAgent(projectRoot, agentID)
-		if state != nil {
-			age := state.Duration()
-			if age.Hours() > 24 {
-				output.NextSteps = append(output.NextSteps,
-					fmt.Sprintf("Orphaned session (%s old). Upload: 'ox agent %s session recover', or discard: 'ox agent %s session abort --force'",
-						formatDurationHuman(age), agentID, agentID))
-			}
-		}
-	}
-
 	// check git status for staged/pending changes
-	stagedCount, commitNeeded, pushNeeded := checkLedgerGitStatus(ledgerPath)
+	stagedCount, commitNeeded, pushNeeded, gitErr := checkLedgerGitStatus(ledgerPath)
 	output.StagedCount = stagedCount
 	output.CommitNeeded = commitNeeded
 	output.PushNeeded = pushNeeded
+	if err := errors.Join(scanErr, gitErr); err != nil {
+		output.Success = false
+		output.SessionScanError = err.Error()
+	}
 
 	// build next steps based on state, preserving any steps already appended above
 	output.NextSteps = append(output.NextSteps, buildNextSteps(output)...)
 
 	return output
-}
-
-// findIncompleteSessions scans the sessions directory for incomplete sessions
-func findIncompleteSessions(sessionsDir, agentID string) []IncompleteSessionInfo {
-	var incomplete []IncompleteSessionInfo
-
-	// list session folders
-	entries, err := os.ReadDir(sessionsDir)
-	if err != nil {
-		return incomplete
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		// skip legacy subdirs
-		name := entry.Name()
-		if name == "raw" || name == "events" {
-			continue
-		}
-
-		sessionPath := filepath.Join(sessionsDir, name)
-		missing := checkSessionCompleteness(sessionPath)
-
-		if len(missing) > 0 {
-			info := IncompleteSessionInfo{
-				SessionID:        name,
-				Path:             sessionPath,
-				Missing:          missing,
-				FinalizeCommands: buildFinalizeCommands(name, agentID, missing, sessionPath),
-			}
-
-			// if summary is missing, build a prompt for the agent
-			if containsString(missing, "summary") || containsString(missing, "summary_json") {
-				info.SummarizePrompt = buildSummarizePromptForSession(sessionPath)
-			}
-
-			incomplete = append(incomplete, info)
-		}
-	}
-
-	return incomplete
-}
-
-// checkSessionCompleteness returns list of missing artifacts for a session folder
-func checkSessionCompleteness(sessionPath string) []string {
-	var missing []string
-
-	// expected files in a complete session
-	expectedFiles := map[string]string{
-		ledgerFileRaw:       "raw",
-		ledgerFileSummaryMD: "summary",
-		ledgerFileSessionMD: "session_md",
-		"summary.json":      "summary_json",
-	}
-
-	// raw.jsonl is required - if missing, the session is invalid
-	rawPath := filepath.Join(sessionPath, ledgerFileRaw)
-	if _, err := os.Stat(rawPath); os.IsNotExist(err) {
-		// no raw file means no session data to process
-		return nil
-	}
-
-	// check each expected file
-	for filename, key := range expectedFiles {
-		path := filepath.Join(sessionPath, filename)
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			// skip raw since we already checked it above
-			if key != "raw" {
-				missing = append(missing, key)
-			}
-		}
-	}
-
-	return missing
 }
 
 // buildFinalizeCommands returns commands to generate missing artifacts
@@ -269,11 +229,11 @@ func convertStoredMapEntries(stored []map[string]any) []session.Entry {
 }
 
 // checkLedgerGitStatus checks git status for the ledger repo
-func checkLedgerGitStatus(ledgerPath string) (staged int, commitNeeded bool, pushNeeded bool) {
+func checkLedgerGitStatus(ledgerPath string) (staged int, commitNeeded bool, pushNeeded bool, err error) {
 	// check for uncommitted changes
 	output, err := runAgentDoctorGitCommand(ledgerPath, "status", "--porcelain")
 	if err != nil {
-		return 0, false, false
+		return 0, false, false, fmt.Errorf("read ledger git status: %w", err)
 	}
 
 	lines := strings.Split(strings.TrimSpace(output), "\n")
@@ -312,7 +272,7 @@ func checkLedgerGitStatus(ledgerPath string) (staged int, commitNeeded bool, pus
 		}
 	}
 
-	return staged, commitNeeded, pushNeeded
+	return staged, commitNeeded, pushNeeded, nil
 }
 
 // runAgentDoctorGitCommand runs a git command and returns output
@@ -326,6 +286,21 @@ func runAgentDoctorGitCommand(repoPath string, args ...string) (string, error) {
 // buildNextSteps returns recommended actions based on doctor findings
 func buildNextSteps(output *AgentDoctorOutput) []string {
 	var steps []string
+	for _, name := range output.PendingUploads {
+		steps = append(steps, fmt.Sprintf("Retry upload for session %s: ox session upload %s", name, name))
+	}
+	for _, name := range output.PendingFinalization {
+		steps = append(steps, fmt.Sprintf("Session %s needs deterministic finalization by a running daemon with an enabled background worker. Run ox doctor to check availability; enable a worker with ox config set agent_worker auto. No summary generation is needed", name))
+	}
+	for _, name := range output.RecoverySessions {
+		steps = append(steps, fmt.Sprintf("Session %s needs recording recovery; run ox doctor for recovery diagnostics", name))
+	}
+	for _, name := range output.BlockedSessions {
+		steps = append(steps, fmt.Sprintf("Automatic finalization blocked for session %s; inspect its recording state and meta.json", name))
+	}
+	for _, name := range output.RefusedSessions {
+		steps = append(steps, fmt.Sprintf("Publication refused for session %s; resolve the refusal before retrying", name))
+	}
 
 	// prioritize incomplete sessions
 	if len(output.IncompleteSessions) > 0 {
@@ -362,7 +337,10 @@ func outputAgentDoctorJSON(w io.Writer, output *AgentDoctorOutput) error {
 
 // outputAgentDoctorText outputs the doctor results as human-readable text
 func outputAgentDoctorText(w io.Writer, output *AgentDoctorOutput) {
-	if len(output.IncompleteSessions) == 0 && !output.CommitNeeded && !output.PushNeeded {
+	if output.SessionScanError != "" {
+		fmt.Fprintf(w, "Session inspection failed: %s\n", output.SessionScanError)
+	}
+	if output.Success && len(output.NextSteps) == 0 && len(output.IncompleteSessions) == 0 && !output.CommitNeeded && !output.PushNeeded {
 		cli.PrintSuccessTo(w, "Session health: all good")
 		return
 	}

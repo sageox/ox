@@ -169,7 +169,7 @@ func newImportPreviewLoader(env *importEnv, cands []*importCandidate) importPrev
 			}
 			return cached, nil
 		}
-		raw, err := env.deps.readNative(ctx, c.Session.Agent, c.Session.Path)
+		raw, err := env.deps.readNative(ctx, c.Session)
 		if err != nil {
 			if err := ctx.Err(); err != nil {
 				return nil, err

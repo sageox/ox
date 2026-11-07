@@ -231,6 +231,57 @@ func TestCancel(t *testing.T) {
 	}
 }
 
+// A task claimed after a producer listed it must survive stale-work cleanup.
+func TestCancelReady_PreservesClaimsAndTerminalTasks(t *testing.T) {
+	for _, state := range []string{"ready", "claimed", "completed", "canceled"} {
+		t.Run(state, func(t *testing.T) {
+			store := newTestStore(t)
+			if added, err := store.Add(&Task{Title: "doctor"}); err != nil || !added {
+				t.Fatalf("Add: added=%v err=%v", added, err)
+			}
+			listed, err := store.List(false)
+			if err != nil || len(listed) != 1 {
+				t.Fatalf("List: tasks=%v err=%v", listed, err)
+			}
+			id := listed[0].ID
+			switch state {
+			case "claimed":
+				if _, err := store.Claim(ClaimOptions{AgentID: "OxLive", PID: os.Getpid(), Lease: time.Hour}); err != nil {
+					t.Fatalf("Claim: %v", err)
+				}
+			case "completed":
+				if err := store.Complete(id, "finished"); err != nil {
+					t.Fatal(err)
+				}
+			case "canceled":
+				if err := store.Cancel(id, "already canceled"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := store.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CancelReady(id, "marker cleared"); err != nil {
+				t.Fatalf("CancelReady: %v", err)
+			}
+			got, err := store.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state == "ready" {
+				if got.Status != StatusCanceled || got.Result != "marker cleared" || got.CompletedAt.IsZero() {
+					t.Fatalf("ready task not canceled: %+v", got)
+				}
+			} else if got.Status != before.Status || got.Result != before.Result ||
+				got.ClaimedByAgentID != before.ClaimedByAgentID || got.ClaimedByPID != before.ClaimedByPID ||
+				!got.LeaseExpiresAt.Equal(before.LeaseExpiresAt) || !got.CompletedAt.Equal(before.CompletedAt) {
+				t.Fatalf("non-ready task changed: before=%+v after=%+v", before, got)
+			}
+		})
+	}
+}
+
 func TestReclaimExpiredLease(t *testing.T) {
 	store := newTestStore(t)
 	_, _ = store.Add(&Task{Title: "leased"})

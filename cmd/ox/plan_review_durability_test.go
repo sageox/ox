@@ -99,7 +99,7 @@ func newDurableReviewFixture(t *testing.T) *durableReviewFixture {
 	rounds := make(chan int, 64)
 	activity := make(chan struct{}, 1)
 	h := liveReviewHandlerWithActivity("root", "durable", planDir, "http://x", "secret",
-		newBroadcaster(), rounds, make(chan struct{}, 1), activity)
+		newBroadcaster(), rounds, make(chan struct{}, 1), activity, nil)
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	return &durableReviewFixture{ledger: ledger, origin: origin, planDir: planDir, srv: srv,

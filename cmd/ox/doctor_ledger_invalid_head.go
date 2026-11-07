@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/endpoint"
-	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 )
 
@@ -35,11 +34,6 @@ const CheckSlugLedgerInvalidHead = "ledger-invalid-head"
 // invalidHeadCheckTimeout bounds the local git plumbing this check runs
 // (rev-parse, check-ref-format, status) — all local, no network.
 const invalidHeadCheckTimeout = 30 * time.Second
-
-// invalidHeadRepairTimeout bounds the --fix path, which re-clones the whole
-// ledger from origin — real ledgers observed in the field run to hundreds of
-// MB, so this needs far more headroom than the read-only detection above.
-const invalidHeadRepairTimeout = 10 * time.Minute
 
 func init() {
 	RegisterDoctorCheck(&DoctorCheck{
@@ -96,14 +90,14 @@ func detectInvalidHead(ctx context.Context, ledgerPath string) (invalidRef strin
 }
 
 func checkLedgerInvalidHead(fix bool) checkResult {
-	return invalidHeadCheck(getLedgerPath(), fix)
+	return invalidHeadCheck(context.Background(), getLedgerPath(), fix)
 }
 
 // invalidHeadCheck is the testable core: it takes the ledger path as a
 // parameter instead of reading it from ambient config, the same split
 // checkLedgerStrandedCommits/strandedCommitsCheck uses and for the same
 // reason — a test should be able to point this at a fixture directly.
-func invalidHeadCheck(ledgerPath string, fix bool) checkResult {
+func invalidHeadCheck(ctx context.Context, ledgerPath string, fix bool) checkResult {
 	const name = "Ledger HEAD integrity"
 	if ledgerPath == "" {
 		return SkippedCheck(name, "no ledger found", "")
@@ -112,16 +106,16 @@ func invalidHeadCheck(ledgerPath string, fix bool) checkResult {
 		return SkippedCheck(name, "ledger not a git repo", "")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), invalidHeadCheckTimeout)
+	detectCtx, cancel := context.WithTimeout(context.Background(), invalidHeadCheckTimeout)
 	defer cancel()
 
-	invalidRef, corrupted := detectInvalidHead(ctx, ledgerPath)
+	invalidRef, corrupted := detectInvalidHead(detectCtx, ledgerPath)
 	if !corrupted {
 		return PassedCheck(name, "HEAD resolves")
 	}
 
 	staged := 0
-	if out, err := exec.CommandContext(ctx, "git", "-C", ledgerPath, "status", "--porcelain").Output(); err == nil {
+	if out, err := exec.CommandContext(detectCtx, "git", "-C", ledgerPath, "status", "--porcelain").Output(); err == nil {
 		if s := strings.TrimSpace(string(out)); s != "" {
 			staged = len(strings.Split(s, "\n"))
 		}
@@ -137,13 +131,9 @@ func invalidHeadCheck(ledgerPath string, fix bool) checkResult {
 		return r
 	}
 
-	// The repair re-clones the whole ledger from origin — needs far more
-	// headroom than the read-only detection above, which is why this gets
-	// its own context rather than reusing the 30s one this function started
-	// with.
-	repairCtx, repairCancel := context.WithTimeout(context.Background(), invalidHeadRepairTimeout)
-	defer repairCancel()
-	return fixLedgerInvalidHead(repairCtx, ledgerPath, invalidRef)
+	// The repair re-clones the whole Ledger on the direct clone's own budget,
+	// so it gets ctx, not the 30s detection context above.
+	return fixLedgerInvalidHead(ctx, ledgerPath, invalidRef)
 }
 
 // fixLedgerInvalidHead repairs an unresolvable HEAD. The whole operation
@@ -154,7 +144,6 @@ func invalidHeadCheck(ledgerPath string, fix bool) checkResult {
 // own) on this exact path at the same moment this runs.
 func fixLedgerInvalidHead(ctx context.Context, ledgerPath, invalidRef string) checkResult {
 	const name = "Ledger HEAD integrity"
-
 	var result checkResult
 	if lockErr := gitutil.WithPreCloneLock(ctx, ledgerPath, func() error {
 		result = repairInvalidHead(ctx, ledgerPath, invalidRef)
@@ -206,7 +195,7 @@ func repairInvalidHead(ctx context.Context, ledgerPath, invalidRef string) check
 		return FailedCheck(name, reason, "The original is left exactly as it was; nothing was published, nothing was lost.")
 	}
 
-	if err := gitserver.CloneFromURLWithEndpoint(ctx, remoteURL, ledgerPath, projectEndpoint, nil); err != nil {
+	if err := directCloneLedgerLocked(ctx, remoteURL, ledgerPath, projectEndpoint); err != nil {
 		return rollback(fmt.Sprintf("reclone failed: %v", err))
 	}
 
@@ -242,7 +231,9 @@ func repairInvalidHead(ctx context.Context, ledgerPath, invalidRef string) check
 		restoredDirs++
 	}
 
-	statusOut, _ := exec.CommandContext(ctx, "git", "-C", ledgerPath, "status", "--porcelain").Output()
+	// Past the reclone, Ctrl-C must not stop the repair: a canceled status
+	// would count nothing to restore and skip committing the restored files.
+	statusOut, _ := exec.CommandContext(context.WithoutCancel(ctx), "git", "-C", ledgerPath, "status", "--porcelain").Output()
 	fileCount := 0
 	if s := strings.TrimSpace(string(statusOut)); s != "" {
 		fileCount = len(strings.Split(s, "\n"))

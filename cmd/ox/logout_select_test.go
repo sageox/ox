@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -161,4 +162,34 @@ func TestSelectLogoutEndpoints_PipedSelection(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []string{"https://sageox.ai"}, got)
 	})
+}
+
+// Failure prevented: a logout from a test endpoint is counted as production activity under the cached production person.
+func TestSelectLogoutEndpoints_RecordsEndpointsForTelemetry(t *testing.T) {
+	two := []string{"https://sageox.ai", "https://test.sageox.ai"}
+	previous := cliCtx
+	t.Cleanup(func() { cliCtx = previous })
+	for _, tt := range []struct {
+		name      string
+		all       bool
+		specified string
+		want      []string
+	}{
+		{name: "--all records every endpoint", all: true, want: two},
+		{name: "--endpoint records the named one", specified: "test.sageox.ai", want: []string{"https://test.sageox.ai"}},
+		{name: "a failed selection records nothing", specified: "https://other.example"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cliCtx = &cli.Context{}
+			silenceStdout(t, func() {
+				withStdin(t, "", func() {
+					_, _ = selectLogoutEndpoints(two, tt.all, tt.specified, false)
+				})
+			})
+			assert.Equal(t, tt.want, cliCtx.TelemetryEndpoints)
+			if len(tt.want) > 0 {
+				assert.Empty(t, postHogCaptureOpts(cliCtx).PersonID, "a test endpoint makes the event install-only")
+			}
+		})
+	}
 }

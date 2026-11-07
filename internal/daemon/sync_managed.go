@@ -39,7 +39,7 @@ type ManagedRepoPullOpts struct {
 	ImmutablePaths bool
 
 	// NoSymlinks holds the fetch and pull until ledger.DisableSymlinks has
-	// saved core.symlinks=false (the Ledger). Its error becomes the result's
+	// saved core.symlinks=false. Its error becomes the result's
 	// Err, and the next cycle retries.
 	NoSymlinks bool
 
@@ -278,6 +278,19 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 			return nil
 		}
 
+		// Protect existing clones before recovery can check files out, and even
+		// when remote/FETCH_HEAD dedup would otherwise skip this cycle.
+		if opts.NoSymlinks {
+			disable := ledger.DisableSymlinks
+			if s.disableSymlinksTestHook != nil {
+				disable = s.disableSymlinksTestHook
+			}
+			if err := disable(path); err != nil {
+				result = ManagedRepoPullResult{Err: fmt.Errorf("pull held until symlink protection is saved: %w", err)}
+				return nil
+			}
+		}
+
 		// Re-check and recover stale rebases only after taking the same
 		// cross-process lock used by fetch/pull. Checking age before waiting
 		// could turn a live operation stale, then abort it after the lock was
@@ -311,16 +324,6 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 					result = ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRecentlyFetched}
 					return nil
 				}
-			}
-		}
-		if opts.NoSymlinks {
-			disable := ledger.DisableSymlinks
-			if s.disableSymlinksTestHook != nil {
-				disable = s.disableSymlinksTestHook
-			}
-			if err := disable(path); err != nil {
-				result = ManagedRepoPullResult{Err: fmt.Errorf("pull held until symlink protection is saved: %w", err)}
-				return nil
 			}
 		}
 		result = s.fetchAndPullLocked(ctx, opts, path, repoName, logger)
@@ -873,7 +876,11 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 		pullOutput    []byte
 		pullErr       error
 		ahead         int
+		resolveRan    bool
+		resolveErr    error
 	)
+	autoPaths := manifest.AutoResolvePaths(opts.ResolveRules)
+	denyPaths := manifest.AutoResolveDenyPaths(opts.ResolveRules)
 	for attempt := 1; attempt <= maxFetchPullAttempts; attempt++ {
 		// git fetch
 		fetchCtx, fetchSpan := perf.Start(ctx, "git_fetch")
@@ -983,6 +990,16 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 				return result
 			}
 		}
+		// Another writer committed to the branch while this rebase replayed,
+		// so git refused to finish it (sageox/ox#1541). No resolution can, so
+		// restart from the moved branch and pull again under the same lock.
+		if gitutil.RebaseBranchMoved(ctx, path) {
+			abortErr := abortMovedRebase(ctx, path, repoName, logger)
+			if abortErr == nil && attempt < maxFetchPullAttempts {
+				continue
+			}
+			return branchMovedResult(ManagedRepoPullResult{FetchHeadTime: fetchHeadTime, Diverged: diverged}, abortErr, pullErr, repoName)
+		}
 		// A non-ox git took index.lock mid-pull. That is a busy repo, not a
 		// conflict: wait for it, retry once, and if it will not clear return a
 		// busy skip rather than climbing the conflict ladder, whose final rung
@@ -1006,6 +1023,21 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 				"repo", repoName, "attempt", attempt)
 			continue
 		}
+		// Tier 2, auto-resolving conflicts in safe paths, runs inside the
+		// loop: a branch that moves while conflicts are resolved restarts the
+		// pull the same way as one that moved during the replay.
+		resolveRan = len(autoPaths) > 0 && gitutil.IsRebaseInProgress(path)
+		resolveErr = nil
+		if resolveRan {
+			resolveErr = gitutil.ResolveRebaseAcceptTheirs(ctx, path, autoPaths, denyPaths)
+			if errors.Is(resolveErr, gitutil.ErrRebaseBranchMoved) {
+				abortErr := abortMovedRebase(ctx, path, repoName, logger)
+				if abortErr == nil && attempt < maxFetchPullAttempts {
+					continue
+				}
+				return branchMovedResult(ManagedRepoPullResult{FetchHeadTime: fetchHeadTime, Diverged: diverged}, abortErr, pullErr, repoName)
+			}
+		}
 		break
 	}
 
@@ -1019,11 +1051,8 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 		err := pullErr
 		logger.Warn("pull failed", "error", err, "output", detail, "repo", repoName)
 
-		// Try auto-resolving conflicts in safe paths before giving up
-		autoPaths := manifest.AutoResolvePaths(opts.ResolveRules)
-		denyPaths := manifest.AutoResolveDenyPaths(opts.ResolveRules)
-		if len(autoPaths) > 0 && gitutil.IsRebaseInProgress(path) {
-			resolveErr := gitutil.ResolveRebaseAcceptTheirs(ctx, path, autoPaths, denyPaths)
+		// The loop already tried auto-resolving conflicts in safe paths
+		if resolveRan {
 			if resolveErr == nil {
 				logger.Info("auto-resolved rebase conflicts", "repo", repoName, "strategy", "accept-theirs")
 				result.AutoResolved = true
@@ -1135,6 +1164,35 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 		result.Err = fmt.Errorf("%s: %w", errMsg, err)
 		return result
 	}
+}
+
+// abortMovedRebase clears a pull's rebase after another writer moved the
+// branch it was replaying onto. AuditAndAbort re-anchors the abort on the
+// moved branch, so the commit that landed mid-rebase stays on it and the next
+// pull replays it with everything else.
+func abortMovedRebase(ctx context.Context, path, repoName string, logger *slog.Logger) error {
+	logger.Warn("branch moved during pull rebase, restarting from the moved branch",
+		"op", "pull_branch_moved", "repo", repoName, "path", path)
+	return gitutil.AuditAndAbort(ctx, path, gitutil.AuditOpRebase, "branch moved during pull rebase", logger)
+}
+
+// branchMovedResult reports a pull that lost the race with another writer
+// and will retry next cycle. Losing a race is not a conflict or a divergence,
+// so it raises no issue unless the abort itself failed and left the rebase.
+func branchMovedResult(result ManagedRepoPullResult, abortErr, pullErr error, repoName string) ManagedRepoPullResult {
+	result.Err = fmt.Errorf("pull failed: another writer moved the branch during the rebase: %w", pullErr)
+	if abortErr != nil {
+		// No manual `git rebase --abort` hint: a plain abort rewinds the moved
+		// branch and drops the other writer's commit. Doctor re-anchors first.
+		result.Issue = &DaemonIssue{
+			Type:            IssueTypeRebaseStuck,
+			Severity:        SeverityError,
+			Repo:            repoName,
+			Summary:         fmt.Sprintf("%s is stuck in a rebase that another writer raced. Run 'ox doctor --fix' to recover without losing commits.", repoName),
+			RequiresConfirm: true,
+		}
+	}
+	return result
 }
 
 // sessionConflictPaths returns the subset of unmerged (conflicted) paths

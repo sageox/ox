@@ -8,5 +8,6 @@ export { connectFrame } from './ports.js';
 export type { DocumentPort, HostPort, Port } from './ports.js';
 export { mountHostControls } from './host-controls.js';
 export type { CommittedItem, HostControls, HostControlsOptions } from './host-controls.js';
+export type { Peer, PresenceEvent, PresenceLink, PresenceTransport } from './presence.js';
 export { forgetAccount } from './state.js';
 export type { Approval, Operation, Receipt, Transport } from './state.js';

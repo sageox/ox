@@ -34,10 +34,27 @@ import (
 // exfiltration vector — and pre-signed cloud-storage URLs (the
 // legitimate use case for action.Href) never 302 anyway.
 var lfsHTTPClient = &http.Client{
-	Timeout: 5 * time.Minute,
+	Timeout:   5 * time.Minute,
+	Transport: dropRedirect{},
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
+}
+
+// dropRedirect strips a 3xx response's Location and body, both of which
+// can carry a signed URL. Redirects are never followed, and net/http
+// quotes a malformed Location in its error before CheckRedirect runs.
+// http.DefaultTransport is read per request, as a nil Transport would.
+type dropRedirect struct{}
+
+func (dropRedirect) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if resp != nil && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		resp.Header.Del("Location")
+		resp.Body.Close()
+		resp.Body = http.NoBody
+	}
+	return resp, err
 }
 
 // validateActionHref enforces the ox-90gh trust contract on an action:
@@ -198,6 +215,9 @@ func prepareUploads(ctx context.Context, files map[string][]byte) (map[string]gu
 	if err != nil {
 		return nil, fmt.Errorf("LFS publication pending: %w", err)
 	}
+	// The bundled rules already passed these exact bytes; only the rules the
+	// bundled catalog lacks can still refuse them.
+	rules = rules.Delta(secretguard.Bundled())
 	for name, proof := range proofs {
 		if err := rules.ValidateContent(name, proof.content); err != nil {
 			return nil, fmt.Errorf("LFS publication refused: %w", err)
@@ -236,7 +256,7 @@ func putObject(action *Action, proof guardedUpload) error {
 
 	resp, err := lfsHTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("upload failed: %w", err)
+		return fmt.Errorf("upload failed: %w", withoutURL(err))
 	}
 	defer resp.Body.Close()
 
@@ -245,6 +265,16 @@ func putObject(action *Action, proof guardedUpload) error {
 		return fmt.Errorf("upload returned HTTP %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
+}
+
+// withoutURL drops the request URL from a transport error: action hrefs
+// can carry signed credentials in their query string.
+func withoutURL(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return urlErr.Err
+	}
+	return err
 }
 
 // isConnectionReset reports a transport failure that happened mid-request
@@ -286,7 +316,7 @@ func VerifyObject(action *Action, oid string, size int64) error {
 
 	resp, err := lfsHTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("verify request failed: %w", err)
+		return fmt.Errorf("verify request failed: %w", withoutURL(err))
 	}
 	defer resp.Body.Close()
 
@@ -324,9 +354,8 @@ func DownloadObject(action *Action) ([]byte, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		var urlErr *url.Error
-		if action.readClient != nil && errors.As(err, &urlErr) {
-			err = urlErr.Err // signed storage URLs are credentials too
+		if action.readClient != nil {
+			err = withoutURL(err) // signed storage URLs are credentials too
 		}
 		return nil, fmt.Errorf("download failed: %w", err)
 	}
@@ -403,9 +432,8 @@ func DownloadToFileContext(ctx context.Context, action *Action, dst io.Writer, v
 
 	resp, err := lfsHTTPClient.Do(req)
 	if err != nil {
-		var urlErr *url.Error
-		if action.readClient != nil && errors.As(err, &urlErr) {
-			err = urlErr.Err // keep signed query parameters out of diagnostics
+		if action.readClient != nil {
+			err = withoutURL(err) // signed storage URLs are credentials too
 		}
 		return fmt.Errorf("download failed: %w", err)
 	}

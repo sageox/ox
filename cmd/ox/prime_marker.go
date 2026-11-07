@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,8 +90,8 @@ func refreshStalePrimeCheckBlock(content string) (string, bool) {
 
 // refreshPrimeCheckBlockInFile applies refreshStalePrimeCheckBlock to a single file, writing
 // atomically only when the body actually changed. Missing files are a no-op.
-func refreshPrimeCheckBlockInFile(filePath string) (bool, error) {
-	content, err := os.ReadFile(filePath)
+func refreshPrimeCheckBlockInFile(root *os.Root, filePath string) (bool, error) {
+	content, err := root.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
@@ -110,7 +112,7 @@ func refreshPrimeCheckBlockInFile(filePath string) (bool, error) {
 	// overwrite a file the user deliberately made read-only. This best-effort self-heal
 	// declines rather than fights the user — mirrors ensureInstructionFileMarker.
 	mode := os.FileMode(0644)
-	if info, statErr := os.Stat(filePath); statErr == nil {
+	if info, statErr := root.Stat(filePath); statErr == nil {
 		if info.Mode().Perm()&0o200 == 0 {
 			return false, nil // read-only: leave it for the user / doctor to resolve
 		}
@@ -118,10 +120,10 @@ func refreshPrimeCheckBlockInFile(filePath string) (bool, error) {
 	}
 	// guard against a lost update: if the file changed since we read it (a concurrent editor
 	// save), skip rather than clobber the newer content — the next prime retries the refresh.
-	if cur, rerr := os.ReadFile(filePath); rerr != nil || string(cur) != string(content) {
+	if cur, rerr := root.ReadFile(filePath); rerr != nil || string(cur) != string(content) {
 		return false, nil
 	}
-	if err := fileutil.AtomicWriteBytes(filePath, []byte(updated), mode); err != nil {
+	if err := fileutil.AtomicWriteBytesInRoot(root, filePath, []byte(updated), mode); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -130,47 +132,29 @@ func refreshPrimeCheckBlockInFile(filePath string) (bool, error) {
 // HasOxPrimeMarker checks if the ox:prime footer marker exists in AGENTS.md or CLAUDE.md.
 // Designed for frequent anti-entropy calls - minimal I/O, fast return on first match.
 func HasOxPrimeMarker(gitRoot string) bool {
-	if gitRoot == "" {
-		return false
-	}
-
-	// check AGENTS.md first (primary file)
-	agentsPath := filepath.Join(gitRoot, "AGENTS.md")
-	if content, err := os.ReadFile(agentsPath); err == nil {
-		if strings.Contains(string(content), OxPrimeMarker) {
-			return true
-		}
-	}
-
-	// check CLAUDE.md as fallback
-	claudePath := filepath.Join(gitRoot, "CLAUDE.md")
-	if content, err := os.ReadFile(claudePath); err == nil {
-		if strings.Contains(string(content), OxPrimeMarker) {
-			return true
-		}
-	}
-
-	return false
+	return hasPrimeMarker(gitRoot, OxPrimeMarker)
 }
 
 // HasOxPrimeCheckMarker checks if the ox:prime-check header marker exists in AGENTS.md or CLAUDE.md.
 func HasOxPrimeCheckMarker(gitRoot string) bool {
+	return hasPrimeMarker(gitRoot, OxPrimeCheckMarker)
+}
+
+func hasPrimeMarker(gitRoot, marker string) bool {
 	if gitRoot == "" {
 		return false
 	}
-
-	// check AGENTS.md first (primary file)
-	agentsPath := filepath.Join(gitRoot, "AGENTS.md")
-	if content, err := os.ReadFile(agentsPath); err == nil {
-		if strings.Contains(string(content), OxPrimeCheckMarker) {
-			return true
-		}
+	root, err := os.OpenRoot(gitRoot)
+	if err != nil {
+		return false
 	}
+	defer root.Close()
+	return hasPrimeMarkerInRoot(root, marker)
+}
 
-	// check CLAUDE.md as fallback
-	claudePath := filepath.Join(gitRoot, "CLAUDE.md")
-	if content, err := os.ReadFile(claudePath); err == nil {
-		if strings.Contains(string(content), OxPrimeCheckMarker) {
+func hasPrimeMarkerInRoot(root *os.Root, marker string) bool {
+	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+		if content, err := root.ReadFile(name); err == nil && strings.Contains(string(content), marker) {
 			return true
 		}
 	}
@@ -207,15 +191,19 @@ func EnsureOxPrimeMarker(gitRoot string) (bool, error) {
 		return false, nil
 	}
 
-	agentsPath := filepath.Join(gitRoot, "AGENTS.md")
-	claudePath := filepath.Join(gitRoot, "CLAUDE.md")
+	root, err := os.OpenRoot(gitRoot)
+	if err != nil {
+		return false, err
+	}
+	defer root.Close()
+	agentsPath, claudePath := "AGENTS.md", "CLAUDE.md"
 
 	// anti-entropy: refresh a stale prime-check header body (e.g. the old BLOCKING wording)
 	// in place. Runs before the fast path so a repo that already has both markers still
 	// upgrades to the current, non-preemptive block (#809/#778).
 	refreshed := false
 	for _, p := range []string{agentsPath, claudePath} {
-		if changed, err := refreshPrimeCheckBlockInFile(p); err != nil {
+		if changed, err := refreshPrimeCheckBlockInFile(root, p); err != nil {
 			return false, err
 		} else if changed {
 			refreshed = true
@@ -223,28 +211,28 @@ func EnsureOxPrimeMarker(gitRoot string) (bool, error) {
 	}
 
 	// fast path: both markers already present in either file → nothing to inject.
-	if HasOxPrimeMarker(gitRoot) && HasOxPrimeCheckMarker(gitRoot) {
+	if hasPrimeMarkerInRoot(root, OxPrimeMarker) && hasPrimeMarkerInRoot(root, OxPrimeCheckMarker) {
 		return refreshed, nil
 	}
 
 	// try AGENTS.md first (primary file)
-	if injected, err := ensureMarkersInExistingFile(agentsPath); err != nil {
+	if injected, err := ensureMarkersInExistingFile(root, agentsPath); err != nil {
 		return false, err
 	} else if injected {
 		return true, nil
 	}
 
 	// try CLAUDE.md
-	if injected, err := ensureMarkersInExistingFile(claudePath); err != nil {
+	if injected, err := ensureMarkersInExistingFile(root, claudePath); err != nil {
 		return false, err
 	} else if injected {
 		return true, nil
 	}
 
 	// neither file exists — seed AGENTS.md with both markers.
-	if _, err := os.Stat(agentsPath); os.IsNotExist(err) {
+	if _, err := root.Stat(agentsPath); errors.Is(err, fs.ErrNotExist) {
 		content := OxPrimeCheckBlock + "\n# AI Agent Instructions\n\n" + OxPrimeLine + "\n"
-		if err := fileutil.AtomicWriteBytes(agentsPath, []byte(content), 0644); err != nil {
+		if err := fileutil.AtomicWriteBytesInRoot(root, agentsPath, []byte(content), 0644); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -256,8 +244,8 @@ func EnsureOxPrimeMarker(gitRoot string) (bool, error) {
 // ensureMarkersInExistingFile reads filePath, computes marker presence,
 // and only invokes the rewrite path when injection is genuinely needed.
 // Idempotent — repeated calls converge.
-func ensureMarkersInExistingFile(filePath string) (bool, error) {
-	content, err := os.ReadFile(filePath)
+func ensureMarkersInExistingFile(root *os.Root, filePath string) (bool, error) {
+	content, err := root.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil // caller will try the other file or seed
@@ -269,7 +257,7 @@ func ensureMarkersInExistingFile(filePath string) (bool, error) {
 	if !needHeader && !needFooter {
 		return false, nil
 	}
-	return ensureMarkersInFile(filePath, string(content), needHeader, needFooter)
+	return ensureMarkersInRoot(root, filePath, string(content), needHeader, needFooter)
 }
 
 // ensureMarkersInFile adds header and/or footer markers to a file.
@@ -282,6 +270,16 @@ func ensureMarkersInExistingFile(filePath string) (bool, error) {
 //
 // Returns (injected bool, error).
 func ensureMarkersInFile(filePath, content string, needHeader, needFooter bool) (bool, error) {
+	// This pathname entry point is only for top-level instruction files.
+	root, err := os.OpenRoot(filepath.Dir(filePath))
+	if err != nil {
+		return false, err
+	}
+	defer root.Close()
+	return ensureMarkersInRoot(root, filepath.Base(filePath), content, needHeader, needFooter)
+}
+
+func ensureMarkersInRoot(root *os.Root, filePath, content string, needHeader, needFooter bool) (bool, error) {
 	if !needHeader && !needFooter {
 		return false, nil
 	}
@@ -365,7 +363,7 @@ func ensureMarkersInFile(filePath, content string, needHeader, needFooter bool) 
 		return false, fmt.Errorf("safety check failed: modified content (%d bytes) is less than half of original (%d bytes), aborting to protect user content", len(cleaned), len(content))
 	}
 
-	if err := fileutil.AtomicWriteBytes(filePath, []byte(cleaned), 0644); err != nil {
+	if err := fileutil.AtomicWriteBytesInRoot(root, filePath, []byte(cleaned), 0644); err != nil {
 		return false, err
 	}
 

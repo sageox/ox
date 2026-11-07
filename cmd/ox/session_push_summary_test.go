@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -101,6 +102,40 @@ func TestPushSummaryToLedger_DiscardLowQuality(t *testing.T) {
 	assert.True(t, result.Success)
 	assert.Equal(t, "discard", result.Disposition)
 	assert.Equal(t, 0.05, result.QualityScore)
+}
+
+// A summary pushed while the session's ledger folder was still the draft
+// placeholder was committed beside it, leaving draft=true on a session with
+// content (#1648). push-summary must leave an unpublished session alone.
+func TestPushSummaryToLedger_LeavesUnpublishedDraftAlone(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	ledger := t.TempDir()
+	cmd := exec.Command("git", "init", "-q")
+	cmd.Dir = ledger
+	require.NoError(t, cmd.Run())
+	sessionDir := filepath.Join(ledger, "sessions", "2026-10-22T16-08-test-OxDraft")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	updated := time.Now().UTC()
+	require.NoError(t, lfs.WriteSessionMetaOnly(sessionDir, &lfs.SessionMeta{
+		Version: "1.0", SessionName: filepath.Base(sessionDir), Draft: true,
+		CreatedAt: updated, UpdatedAt: &updated, Files: map[string]lfs.FileRef{},
+	}))
+	summaryFile := filepath.Join(t.TempDir(), "summary.json")
+	data, _ := json.Marshal(map[string]any{
+		"title":            "Weighing a product launch date",
+		"summary":          "Compared launch options against the team's prior debrief and recommended one dated story.",
+		"outcome":          "success",
+		"key_actions":      []string{"compared launch options"},
+		"quality_category": "upload",
+	})
+	require.NoError(t, os.WriteFile(summaryFile, data, 0o644))
+
+	result := pushSummaryToLedger(summaryFile, sessionDir)
+
+	assert.True(t, result.Success, result.Error)
+	assert.NoFileExists(t, filepath.Join(sessionDir, "summary.json"))
 }
 
 func TestPushSummaryToLedger_NoGitRoot(t *testing.T) {

@@ -119,8 +119,9 @@ func validateHookEntry(data json.RawMessage) error {
 		Matcher *string           `json:"matcher"`
 		Hooks   []json.RawMessage `json:"hooks"`
 	}
-	// disallow unknown fields so a typo (e.g., "matchers") is caught here
-	// instead of silently producing a hook that never fires.
+	// strict-reader-ok: an entry has exactly matcher + hooks, so a typo
+	// (e.g., "matchers") is caught here instead of silently producing a hook
+	// that never fires.
 	dec := json.NewDecoder(newReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&entry); err != nil {
@@ -136,9 +137,10 @@ func validateHookEntry(data json.RawMessage) error {
 			Type    string `json:"type"`
 			Command string `json:"command"`
 		}
-		hdec := json.NewDecoder(newReader(hookRaw))
-		hdec.DisallowUnknownFields()
-		if err := hdec.Decode(&h); err != nil {
+		// A hook object carries fields ox does not model (Claude Code's
+		// per-hook "timeout", and whatever it adds next), so unknown fields
+		// are ignored; type and command are still checked below.
+		if err := json.Unmarshal(hookRaw, &h); err != nil {
 			return &SchemaError{Index: -1, Reason: fmt.Sprintf("hooks[%d] shape invalid: %v", j, err)}
 		}
 		if h.Type != "command" {

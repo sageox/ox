@@ -52,7 +52,7 @@ Optional (not a release gate):
 | **Command** | `make test` |
 | **Time** | <30s |
 | **Prerequisites** | None |
-| **CI** | Push to main |
+| **CI** | Every PR push (sharded, the PR gate) and push to main |
 
 Use during development. Not a release gate on its own — `test-all` subsumes it.
 
@@ -64,7 +64,7 @@ Use during development. Not a release gate on its own — `test-all` subsumes it
 | **Command** | `make test-all` |
 | **Time** | ~1-2min |
 | **Prerequisites** | None |
-| **CI** | PR gate (with race detection) |
+| **CI** | Trunk merge queue and push to main (sharded, with race detection and the coverage ratchets) |
 
 ### 4. Slow Tests
 
@@ -170,8 +170,9 @@ Report back in Slack with: pass/fail per step, OS/arch, ox version, and any roug
 
 | Workflow | Trigger | What it runs |
 |----------|---------|-------------|
-| `ci.yml` | Push to main | Fast tests (`-short`) |
-| `ci.yml` | Pull request | Full tests with race detection |
+| `ci.yml` | Pull request push | Lint + fast tests (`-short`, race), one runner per slot; target under 2 minutes |
+| `ci.yml` | Trunk merge queue (`trunk-merge/*`) | Full tests with race detection and coverage ratchets, acceptance, twins, plan-review, Windows skills, FreeBSD build |
+| `ci.yml` | Push to main | The full tier again, after the merge (catches Direct Merge to Main and hand merges), plus fast tests and the build cache PRs restore |
 | `release.yml` | Published release / manual dispatch | GoReleaser (build, sign, upload binaries) |
 | `release-verify.yml` | *Currently disabled* | Post-release binary verification |
 

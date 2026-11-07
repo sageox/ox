@@ -7,14 +7,12 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/sageox/agentx"
@@ -57,6 +55,15 @@ Up to 3 sessions are summarized at once; --parallel 1 runs one at a time.
 Running the import again uploads nothing twice: sessions already imported,
 and sessions ox recorded live, are recognized and skipped.
 
+A session whose ox recording you aborted is listed as aborted and never
+uploaded. To upload one anyway, name it with --session and add
+--include-aborted; the confirmation says it was aborted.
+
+With --json, each session's state is one of ready, in_progress,
+already_imported, recorded_live, aborted, not_shared, needs_summarizer or
+ineligible, and counts has a key for each state present. Only ready sessions
+are uploaded; treat any other value, including one added later, as skipped.
+
 This is not 'ox agent <id> session import', which adds a planning
 conversation to the current recording.`,
 	Example: `  ox session import                    # preview, then confirm
@@ -64,7 +71,8 @@ conversation to the current recording.`,
   ox session import --preview --session 3f9a1c2b
   ox session import --dry-run --json   # preview only, machine-readable
   ox session import --agent codex --since 30d
-  ox session import --session 3f9a1c2b --yes`,
+  ox session import --session 3f9a1c2b --yes
+  ox session import --session 3f9a1c2b --include-aborted`,
 	Args: cobra.NoArgs,
 	RunE: runSessionImport,
 }
@@ -84,6 +92,7 @@ func addSessionImportFlags(f *pflag.FlagSet) {
 	f.Bool("dry-run", false, "preview only; never upload")
 	f.Bool("browse", false, "review session content in a local browser; return to the terminal to confirm")
 	f.Bool("preview", false, "read one session's content without importing; requires --session")
+	f.Bool("include-aborted", false, "also upload the sessions named with --session whose ox recording you aborted")
 	// Test-only: <dir>/claude stands in for ~/.claude and <dir>/codex for ~/.codex.
 	f.String("from-test-data", "", "read sessions from this test-data directory instead of this machine's Claude Code and Codex stores")
 	_ = f.MarkHidden("from-test-data")
@@ -100,11 +109,14 @@ type importCandidate struct {
 	SessionID  string
 	Summarizer nativeimport.Agent
 	Selected   bool
-	Outcome    string
-	Detail     string
-	Retry      string
-	URL        string
-	meta       *lfs.SessionMeta
+	// IncludedAborted marks a session the coworker aborted, uploaded only
+	// because --include-aborted named it.
+	IncludedAborted bool
+	Outcome         string
+	Detail          string
+	Retry           string
+	URL             string
+	meta            *lfs.SessionMeta
 	// Filled only by an actual content preview, then carried across the final
 	// replan. The immutable pointer is safe for concurrent visible-row reads.
 	reviewedSnapshot atomic.Pointer[importSourceSnapshot]
@@ -132,7 +144,10 @@ type importOptions struct {
 	testData   string // absolute; stands in for this machine's native stores when set
 	browse     bool
 	preview    bool
-	reviewed   map[string]importSourceSnapshot // pins the content reviewed before confirmation
+	// includeAborted lets the sessions named with --session through although
+	// the coworker aborted their recording. Never set by default or by --yes.
+	includeAborted bool
+	reviewed       map[string]importSourceSnapshot // pins the content reviewed before confirmation
 }
 
 type importDestination struct {
@@ -156,8 +171,10 @@ const (
 	importErrInProgress        = "import_in_progress"
 	importErrLedgerWedged      = "ledger_wedged"
 	importErrLedgerUnreadable  = "ledger_unreadable"
-	importErrNativeUnreadable  = "native_store_unreadable"
-	importErrBadFlag           = "invalid_flag"
+	// the record of aborted sessions exists but cannot be read; ox doctor repairs it
+	importErrAbortRecordUnreadable = "abort_record_unreadable"
+	importErrNativeUnreadable      = "native_store_unreadable"
+	importErrBadFlag               = "invalid_flag"
 )
 
 type importFailure struct {
@@ -179,7 +196,7 @@ func (f importFailure) kind() errkind.Kind {
 		return errkind.Auth
 	case importErrBadFlag, importErrRecordingDisabled, importErrRedactionRules, importErrInProgress:
 		return errkind.Usage
-	default: // destination unverified, Ledger wedged or unreadable, native store unreadable
+	default: // destination unverified, Ledger wedged or unreadable, abort record or native store unreadable
 		return errkind.Other
 	}
 }
@@ -190,10 +207,12 @@ const (
 		"Rerun with --yes only after they confirm. Never add --yes on your own."
 	importNothingGuidance = "Nothing to upload. Tell the coworker why each session was skipped; " +
 		"a session in progress can be imported once it finishes."
+	// importAbortedGuidance is added only when the preview lists an aborted session.
+	importAbortedGuidance = " A session listed as aborted is one the coworker discarded by aborting its recording: " +
+		"never offer it for upload, and never add --include-aborted on your own."
 )
 
-// runSessionImport validates the Cobra invocation, keeps preflight and review
-// inside the interrupt lifetime, and delegates the import flow.
+// runSessionImport validates the Cobra invocation and delegates the import flow.
 func runSessionImport(cmd *cobra.Command, _ []string) error {
 	opts, failure := parseImportOptions(cmd)
 	out := cmd.OutOrStdout()
@@ -204,8 +223,6 @@ func runSessionImport(cmd *cobra.Command, _ []string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, stop := importSignalContext(ctx)
-	defer stop()
 	env, dest, failure := importPreflight(ctx, opts)
 	if failure != nil {
 		return renderImportFailure(out, opts.jsonOut, *failure)
@@ -216,14 +233,6 @@ func runSessionImport(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), "Reading sessions from test data in "+opts.testData)
 	}
 	return runSessionImportFlow(ctx, out, opts, env, dest)
-}
-
-// importSignalContext covers preflight and review as well as the import. Its
-// signal registration must end on cancellation while final publication drains.
-func importSignalContext(parent context.Context) (context.Context, context.CancelFunc) {
-	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
-	context.AfterFunc(ctx, stop)
-	return ctx, stop
 }
 
 // importInvocationEnvironment excludes installed project integrations from runtime
@@ -258,6 +267,7 @@ func parseImportOptions(cmd *cobra.Command) (importOptions, *importFailure) {
 	o.dryRun, _ = cmd.Flags().GetBool("dry-run")
 	o.browse, _ = cmd.Flags().GetBool("browse")
 	o.preview, _ = cmd.Flags().GetBool("preview")
+	o.includeAborted, _ = cmd.Flags().GetBool("include-aborted")
 	o.sessions, _ = cmd.Flags().GetStringSlice("session")
 	o.parallel, _ = cmd.Flags().GetInt("parallel")
 	bad := func(msg string) (importOptions, *importFailure) {
@@ -271,6 +281,9 @@ func parseImportOptions(cmd *cobra.Command) (importOptions, *importFailure) {
 	}
 	if o.parallel < 1 {
 		return bad("--parallel must be at least 1")
+	}
+	if o.includeAborted && len(o.sessions) == 0 {
+		return bad("--include-aborted requires --session naming each aborted session to upload")
 	}
 	if dir, _ := cmd.Flags().GetString("from-test-data"); dir != "" {
 		abs, err := filepath.Abs(dir)
@@ -521,7 +534,7 @@ func runSessionImportFlow(ctx context.Context, out io.Writer, opts importOptions
 		if err := renderImportPreview(out, opts, dest, cands, ignored, false); err != nil {
 			return err
 		}
-		prompt := fmt.Sprintf("Upload %d session%s to %s (%s)?", len(result.IDs), plural(len(result.IDs)), ledgerLabel(dest), dest.Visibility)
+		prompt := importUploadPrompt(selectedCandidates(cands), dest)
 		confirmed, err := env.deps.confirm(prompt)
 		if err != nil {
 			return err
@@ -611,7 +624,7 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 		if err := renderImportPreview(out, opts, dest, cands, ignored, false); err != nil {
 			return err
 		}
-		prompt := fmt.Sprintf("Upload %d session%s to %s (%s)?", len(selected), plural(len(selected)), ledgerLabel(dest), dest.Visibility)
+		prompt := importUploadPrompt(selected, dest)
 		confirmed, err := env.deps.confirm(prompt)
 		if err != nil || !confirmed {
 			fmt.Fprintln(out, "Nothing was uploaded.")
@@ -632,10 +645,6 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 	}
 	// From here an interrupt finishes cleanly: the session being summarized
 	// stops in every worker, no new one starts, and committed work is pushed.
-	// The first interrupt restores default handling, so a second quits at once.
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	context.AfterFunc(ctx, stop)
 	progress := io.Discard
 	if !opts.jsonOut {
 		progress = out
@@ -779,6 +788,11 @@ func planImport(ctx context.Context, opts importOptions, env *importEnv) ([]*imp
 	if err != nil {
 		return nil, ignored, &importFailure{Code: importErrLedgerUnreadable, Message: err.Error(), Guidance: "Run ox doctor, then retry."}
 	}
+	if idx.aborted, err = loadAbortRecords(env.ledgerPath, getRepoIDOrDefault(env.projectRoot)); err != nil {
+		return nil, ignored, &importFailure{Code: importErrAbortRecordUnreadable, Message: err.Error(),
+			Guidance: "It lists sessions a coworker aborted on this machine. Run ox doctor to repair it; the repair keeps every session it names. " +
+				"Never delete the file to proceed: that offers those sessions for upload again."}
+	}
 	sessions, err := discoverImportSessions(opts, scope, &ignored)
 	if err != nil {
 		return nil, ignored, &importFailure{Code: importErrNativeUnreadable, Message: err.Error()}
@@ -803,8 +817,11 @@ func planImport(ctx context.Context, opts importOptions, env *importEnv) ([]*imp
 			c.State, c.Reason = stateIneligible, group.problem
 		default:
 			c.State, c.Covered = idx.classify(s, now)
+			if c.State == stateAborted && opts.includeAborted && importNamesSession(opts.sessions, s.NativeID) {
+				c.State, c.Reason, c.Covered, c.IncludedAborted = stateReady, c.Covered+"; included by --include-aborted", "", true
+			}
 			switch c.State {
-			case stateInProgress:
+			case stateInProgress, stateAborted:
 				c.Reason, c.Covered = c.Covered, ""
 			case stateAlreadyImported, stateRecordedLive:
 				c.Reason = idx.coverageNote(s, c.State)
@@ -1025,13 +1042,50 @@ func importUploadCommand(opts importOptions, selected []*importCandidate) string
 	for _, c := range selected {
 		ids = append(ids, c.Session.NativeID)
 	}
-	return "ox session import --yes" + summarizerFlag(opts) + parallelFlag(opts) + testDataFlag(opts) + " --session " + strings.Join(ids, ",")
+	return "ox session import --yes" + summarizerFlag(opts) + parallelFlag(opts) + testDataFlag(opts) + includeAbortedFlag(selected) + " --session " + strings.Join(ids, ",")
 }
 
 // importRetryCommand retries one session by its full ID: two Codex sessions
 // started within a minute share their first eight characters.
 func importRetryCommand(opts importOptions, c *importCandidate) string {
-	return "ox session import --session " + c.Session.NativeID + summarizerFlag(opts) + parallelFlag(opts) + testDataFlag(opts)
+	return "ox session import --session " + c.Session.NativeID + summarizerFlag(opts) + parallelFlag(opts) + testDataFlag(opts) + includeAbortedFlag([]*importCandidate{c})
+}
+
+// includeAbortedFlag carries --include-aborted only into commands that upload
+// a session the coworker aborted, so it never widens another command.
+func includeAbortedFlag(cands []*importCandidate) string {
+	for _, c := range cands {
+		if c.IncludedAborted {
+			return " --include-aborted"
+		}
+	}
+	return ""
+}
+
+// importUploadPrompt asks to upload exactly these sessions, and says how many
+// of them the coworker aborted.
+func importUploadPrompt(selected []*importCandidate, dest importDestination) string {
+	aborted := 0
+	for _, c := range selected {
+		if c.IncludedAborted {
+			aborted++
+		}
+	}
+	what := fmt.Sprintf("%d session%s", len(selected), plural(len(selected)))
+	if aborted > 0 {
+		what += fmt.Sprintf(", including %d whose recording you aborted,", aborted)
+	}
+	return fmt.Sprintf("Upload %s to %s (%s)?", what, ledgerLabel(dest), dest.Visibility)
+}
+
+// importNamesSession reports whether a --session prefix names this session.
+func importNamesSession(prefixes []string, nativeID string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(nativeID, strings.ToLower(prefix)) {
+			return true
+		}
+	}
+	return false
 }
 
 // parallelFlag preserves the configured worker limit in preview and retry commands.

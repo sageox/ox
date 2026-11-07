@@ -105,7 +105,14 @@ func strandedCommitsCheck(ledgerPath string, fix, interactive bool) checkResult 
 
 	// The destructive path: rescue AND clear the wedge. Interactive only.
 	if rebaseWedged && interactive {
-		rescueRef, err := gitutil.RescueThenAbort(ctx, ledgerPath, "doctor: stranded commits on wedged ledger", log)
+		// under the repo lock, like the other doctor fixes, so no ox writer can
+		// move the branch between the abort's re-anchor and its reset
+		var rescueRef string
+		err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+			var rescueErr error
+			rescueRef, rescueErr = gitutil.RescueThenAbort(ctx, ledgerPath, "doctor: stranded commits on wedged ledger", log)
+			return rescueErr
+		})
 		if rescueRef != "" && err != nil {
 			// Data is safe even though the wedge persists. Lead with the branch.
 			return FailedCheck(name,

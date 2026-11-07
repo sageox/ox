@@ -48,19 +48,42 @@ func runMurmurDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// git rm handles both disk deletion and staging
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	if _, err := gitutil.RunGit(ctx, targetDir, "rm", "-f", relPath); err != nil {
-		return fmt.Errorf("git rm: %w", err)
-	}
-
-	commitMsg := fmt.Sprintf("murmur: delete %s", murmurID)
-	if _, err := gitutil.RunGit(ctx, targetDir, "commit", "-m", commitMsg); err != nil {
-		return fmt.Errorf("git commit: %w", err)
+	if err := commitMurmurDeletion(ctx, targetDir, relPath, murmurID); err != nil {
+		return err
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Murmur deleted: %s\n", murmurID)
 	return nil
+}
+
+// murmurDeleteGitTimeout bounds the preflight and rm once the repo lock is held.
+const murmurDeleteGitTimeout = 30 * time.Second
+
+// commitMurmurDeletion removes relPath and commits the removal under the repo
+// lock, so the commit cannot move the branch under a daemon sync rebase
+// (sageox/ox#1541). git rm handles both disk deletion and staging. ctx bounds
+// only the lock wait. Snapshot validation has no fixed deadline, like session
+// upload, because the index may contain many other staged sessions.
+func commitMurmurDeletion(ctx context.Context, targetDir, relPath, murmurID string) error {
+	return gitutil.WithRepoLock(ctx, targetDir, func() error {
+		gitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), murmurDeleteGitTimeout)
+		defer cancel()
+		if err := gitutil.IsSafeForGitOps(targetDir); err != nil {
+			return err
+		}
+		if unmerged, err := gitutil.HasUnmergedEntries(gitCtx, targetDir); err != nil {
+			return err
+		} else if unmerged {
+			return fmt.Errorf("cannot commit Ledger with unresolved conflicts (run 'ox doctor --fix')")
+		}
+		if _, err := gitutil.RunGit(gitCtx, targetDir, "rm", "-f", relPath); err != nil {
+			return fmt.Errorf("git rm: %w", err)
+		}
+		if _, err := commitLedgerSnapshot(context.WithoutCancel(gitCtx), targetDir, fmt.Sprintf("murmur: delete %s", murmurID)); err != nil {
+			return fmt.Errorf("git commit: %w", err)
+		}
+		return nil
+	})
 }

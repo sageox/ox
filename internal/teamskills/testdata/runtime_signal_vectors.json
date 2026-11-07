@@ -1,0 +1,197 @@
+{
+  "comment": "Shared vectors for the coding-agent body inference. ox (internal/teamskills/runtime.go) and the SageOx server must both pass every vector; change them together.",
+  "vectors": [
+    {
+      "name": "inline span runs an ox verb",
+      "body": "Run `ox sync` before you start.\n",
+      "runs_ox_commands": true,
+      "shell_fence": false
+    },
+    {
+      "name": "inline span inside a blockquote still runs ox",
+      "body": "> Then `ox agent prime`.\n",
+      "runs_ox_commands": true,
+      "shell_fence": false
+    },
+    {
+      "name": "prose naming the CLI is not a command",
+      "body": "ox keeps your coworkers in sync.\n",
+      "runs_ox_commands": false,
+      "shell_fence": false
+    },
+    {
+      "name": "prose line that starts with ox and a word is not a command",
+      "body": "ox is the CLI your team installs.\n",
+      "runs_ox_commands": false,
+      "shell_fence": false
+    },
+    {
+      "name": "bare ox in a code span is the CLI's name, not a command",
+      "body": "Install the `ox` CLI first.\n",
+      "runs_ox_commands": false,
+      "shell_fence": false
+    },
+    {
+      "name": "unquoted instruction in prose is not flagged",
+      "body": "Run ox sync to refresh.\n",
+      "runs_ox_commands": false,
+      "shell_fence": false
+    },
+    {
+      "name": "ox option without a verb is not a command",
+      "body": "See `ox --help`.\n",
+      "runs_ox_commands": false,
+      "shell_fence": false
+    },
+    {
+      "name": "a longer word starting with ox is not ox",
+      "body": "Bring an `oxygen` tank.\n",
+      "runs_ox_commands": false,
+      "shell_fence": false
+    },
+    {
+      "name": "uppercase OX is not the CLI",
+      "body": "Say `OX SYNC` loudly.\n",
+      "runs_ox_commands": false,
+      "shell_fence": false
+    },
+    {
+      "name": "untagged fence on its own is not a shell fence",
+      "body": "```\necho hello\n```\n",
+      "runs_ox_commands": false,
+      "shell_fence": false
+    },
+    {
+      "name": "ox line inside an untagged fence runs ox",
+      "body": "```\nox sync\n```\n",
+      "runs_ox_commands": true,
+      "shell_fence": false
+    },
+    {
+      "name": "prompted ox line inside a fence runs ox",
+      "body": "```\n$ ox agent prime\n```\n",
+      "runs_ox_commands": true,
+      "shell_fence": false
+    },
+    {
+      "name": "ox line inside a non-shell fence runs ox",
+      "body": "```python\nox sync\n```\n",
+      "runs_ox_commands": true,
+      "shell_fence": false
+    },
+    {
+      "name": "non-shell fence without ox is clean",
+      "body": "```python\nprint('ox')\n```\n",
+      "runs_ox_commands": false,
+      "shell_fence": false
+    },
+    {
+      "name": "ox inside a fence must start the line",
+      "body": "```\necho `ox sync`\n```\n",
+      "runs_ox_commands": false,
+      "shell_fence": false
+    },
+    {
+      "name": "bash fence",
+      "body": "```bash\nmake test\n```\n",
+      "runs_ox_commands": false,
+      "shell_fence": true
+    },
+    {
+      "name": "shell tag is case-insensitive",
+      "body": "```BASH\nmake test\n```\n",
+      "runs_ox_commands": false,
+      "shell_fence": true
+    },
+    {
+      "name": "tilde fence with sh",
+      "body": "~~~sh\nls\n~~~\n",
+      "runs_ox_commands": false,
+      "shell_fence": true
+    },
+    {
+      "name": "space before the language tag",
+      "body": "``` shell\nls\n```\n",
+      "runs_ox_commands": false,
+      "shell_fence": true
+    },
+    {
+      "name": "zsh fence",
+      "body": "```zsh\nls\n```\n",
+      "runs_ox_commands": false,
+      "shell_fence": true
+    },
+    {
+      "name": "shell-session counts as shell",
+      "body": "```shell-session\n$ ls\n```\n",
+      "runs_ox_commands": false,
+      "shell_fence": true
+    },
+    {
+      "name": "bashrc is not a shell language tag",
+      "body": "```bashrc\nexport A=1\n```\n",
+      "runs_ox_commands": false,
+      "shell_fence": false
+    },
+    {
+      "name": "console is not one of the shell tags",
+      "body": "```console\nls\n```\n",
+      "runs_ox_commands": false,
+      "shell_fence": false
+    },
+    {
+      "name": "indented fence inside a list item",
+      "body": "1. Step:\n   ```bash\n   ls\n   ```\n",
+      "runs_ox_commands": false,
+      "shell_fence": true
+    },
+    {
+      "name": "bash fence that also runs ox reports both",
+      "body": "```bash\nox sync\n```\n",
+      "runs_ox_commands": true,
+      "shell_fence": true
+    },
+    {
+      "name": "one-line triple backticks are an inline span",
+      "body": "```ox sync```\n",
+      "runs_ox_commands": true,
+      "shell_fence": false
+    },
+    {
+      "name": "unterminated fence runs to the end",
+      "body": "```\nox sync\n",
+      "runs_ox_commands": true,
+      "shell_fence": false
+    },
+    {
+      "name": "prose after a closed fence is prose again",
+      "body": "```\necho hi\n```\nox sync is great\n",
+      "runs_ox_commands": false,
+      "shell_fence": false
+    },
+    {
+      "name": "a tilde line does not close a backtick fence",
+      "body": "```\n~~~\nox sync\n```\n",
+      "runs_ox_commands": true,
+      "shell_fence": false
+    },
+    {
+      "name": "a shorter run does not close a longer fence",
+      "body": "````\n```\nox sync\n````\n",
+      "runs_ox_commands": true,
+      "shell_fence": false
+    },
+    {
+      "name": "CRLF line endings",
+      "body": "```bash\r\nls\r\n```\r\n",
+      "runs_ox_commands": false,
+      "shell_fence": true
+    },
+    {
+      "name": "empty body",
+      "body": "",
+      "runs_ox_commands": false,
+      "shell_fence": false
+    }
+  ]
+}

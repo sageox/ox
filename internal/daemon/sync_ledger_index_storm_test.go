@@ -33,13 +33,14 @@ func newLedgerStormScheduler(t *testing.T) (*SyncScheduler, string, *atomic.Int3
 }
 
 // waitLedgerBuildIdle blocks until no ledger build goroutine is in flight.
+// See codedbBuildWait for why the budget is 30s, not 5s.
 func waitLedgerBuildIdle(t *testing.T, s *SyncScheduler) {
 	t.Helper()
 	require.Eventually(t, func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		return !s.ledgerBuildRunning
-	}, 5*time.Second, 5*time.Millisecond)
+	}, codedbBuildWait, 5*time.Millisecond)
 }
 
 // TestLedgerIndexRebuild_StormCoalesced reproduces the production storm: every

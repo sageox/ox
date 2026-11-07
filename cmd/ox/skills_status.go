@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/status"
 	"github.com/sageox/ox/internal/teamconverge"
 	"github.com/sageox/ox/internal/teamdocs"
+	"github.com/sageox/ox/internal/teamskills"
 	"github.com/sageox/ox/internal/version"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/spf13/cobra"
@@ -88,9 +89,42 @@ type skillsStatusOutput struct {
 	Convergence *teamconverge.PendingRecord `json:"convergence,omitempty"`
 	Repo        repoSkillStatus             `json:"repo"`
 	Summary     teamSkillSummary            `json:"summary"`
-	TeamSkills  []teamSkillStatus           `json:"team_skills"`
-	Problems    []string                    `json:"problems,omitempty"`
-	Guidance    string                      `json:"guidance,omitempty"`
+	// ClaudeOrg is present only when this repository uses Claude Code AND ox
+	// has a record of the team's Claude organization delivering skills. Absent,
+	// nothing about where Claude Code gets team skills has changed.
+	ClaudeOrg  *claudeOrgStatus  `json:"claude_org,omitempty"`
+	TeamSkills []teamSkillStatus `json:"team_skills"`
+	Problems   []string          `json:"problems,omitempty"`
+	Guidance   string            `json:"guidance,omitempty"`
+}
+
+// claudeOrgStatus says where Claude Code gets each team skill in this
+// repository: the team's Claude organization plugin, or ox's own copy.
+type claudeOrgStatus struct {
+	// Connected is true while the server's report is current: it arrived
+	// within teamskills.ClaudeOrgSyncMaxAge. ox defers only when PluginHere
+	// is true as well.
+	Connected bool `json:"connected"`
+	// PluginHere is true when Claude Code on this machine loads the org plugin
+	// (synced for the claude.ai account signed in here, not turned off) and
+	// it carries at least one skill.
+	PluginHere bool `json:"plugin_here"`
+	// ClaudeCode is the one line saying whether ox leaves any team skill to
+	// the org plugin in Claude Code here, and why.
+	ClaudeCode string `json:"claude_code"`
+	// TeamSlug is the plugin name the skills arrive under in Claude.
+	TeamSlug string `json:"team_slug,omitempty"`
+	// Synced counts the skills the org plugin delivers.
+	Synced int `json:"synced"`
+	// OxCopies counts team skills Claude Code reads from ox's copy here.
+	OxCopies int `json:"ox_copies"`
+	// Withheld counts team skills waiting on an approval (same as summary).
+	Withheld int `json:"withheld"`
+	// Duplicates names skills Claude Code currently lists twice: delivered by
+	// the org AND present as ox's copy in the Claude Code skills directory.
+	Duplicates []string `json:"duplicates"`
+	// LastReported is when the server last confirmed the list (RFC3339).
+	LastReported string `json:"last_reported,omitempty"`
 }
 
 type teamSkillSummary struct {
@@ -131,6 +165,7 @@ const (
 	skillUnavailable   = "unavailable"    // discovered but ox could not use it
 	skillNotApplicable = "not applicable" // published, but its repos: excludes this repo
 	skillConflict      = "conflict"       // something ox does not own already holds the name
+	skillFromClaudeOrg = "claude org"     // Claude Code gets it from the org plugin; no other target here
 )
 
 type teamSkillStatus struct {
@@ -144,6 +179,9 @@ type teamSkillStatus struct {
 	State         string `json:"state"`
 	NeedsApproval bool   `json:"needs_approval"`
 	Detail        string `json:"detail,omitempty"`
+	// ClaudeOrg is true when Claude Code gets this skill from the team's Claude
+	// organization rather than from ox's copy.
+	ClaudeOrg bool `json:"claude_org,omitempty"`
 }
 
 func runSkillsStatus(cmd *cobra.Command, _ []string) error {
@@ -323,6 +361,7 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 		}
 	}
 
+	claudeRoot := claudeSkillRoot(gitRoot)
 	for _, sk := range published {
 		row := teamSkillStatus{Name: sk.Name, AppliesHere: teamdocs.SkillAppliesToRepo(sk, slug)}
 		switch {
@@ -339,7 +378,23 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 			decision := decisions[sk.Name]
 			row.InstalledAs = decision.InstalledAs
 			row.NeedsApproval = decision.NeedsApprove
-			row.State, row.Detail = installedState(gitRoot, targets, decision, planned)
+			row.ClaudeOrg = decision.ClaudeOrgDelivered
+			// A skill Claude Code gets from the org plugin is not expected in
+			// Claude Code's directory. Judging it there would report "pending —
+			// run ox doctor --fix" forever for a skill that is exactly where it
+			// belongs.
+			rowTargets := targets
+			if decision.ClaudeOrgDelivered && claudeRoot != "" {
+				rowTargets = withoutString(targets, claudeRoot)
+			}
+			if decision.ClaudeOrgDelivered && len(rowTargets) == 0 {
+				row.State, row.Detail = skillFromClaudeOrg, decision.Reason
+			} else {
+				row.State, row.Detail = installedState(gitRoot, rowTargets, decision, planned)
+				if decision.ClaudeOrgDelivered && row.Detail == "" {
+					row.Detail = decision.Reason
+				}
+			}
 			if row.State == skillInstalled && decision.AutoInstalledProse {
 				out.Summary.AutoInstalledProse++
 			}
@@ -350,7 +405,109 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 		out.TeamSkills = append(out.TeamSkills, row)
 	}
 
+	out.ClaudeOrg = collectClaudeOrgStatus(gitRoot, claudeRoot, out, plan, &out.Problems)
 	out.Guidance = skillsStatusGuidance(out)
+	return out
+}
+
+// collectClaudeOrgStatus counts where Claude Code gets each team skill. nil
+// when this repository does not use Claude Code, or ox has no record of an org
+// delivering anything: in both cases nothing about Claude Code has changed and
+// the section would be noise.
+func collectClaudeOrgStatus(gitRoot, claudeRoot string, out skillsStatusOutput, plan *skillmanager.ReconcilePlan, problems *[]string) *claudeOrgStatus {
+	if claudeRoot == "" {
+		return nil
+	}
+	orgSync, err := skillmanager.ClaudeOrgSyncForRepo(gitRoot)
+	if err != nil {
+		*problems = append(*problems, fmt.Sprintf(
+			"ox could not read its record of the skills your Claude organization delivers, so it copies every team skill into %s and Claude Code may list some twice: %v", claudeRoot, err))
+		return nil
+	}
+	if len(orgSync.Skills) == 0 {
+		return nil
+	}
+
+	plugin := skillmanager.ClaudeOrgPluginHere(gitRoot, orgSync)
+	status := &claudeOrgStatus{
+		Connected:  orgSync.Active(),
+		PluginHere: plugin.Found,
+		TeamSlug:   orgSync.TeamSlug,
+		Synced:     len(orgSync.Skills),
+		Withheld:   out.Summary.Withheld,
+		Duplicates: []string{},
+	}
+	_, status.ClaudeCode = claudeCodeSkillSource(status.Connected, orgSync, plugin)
+	if !orgSync.FetchedAt.IsZero() {
+		status.LastReported = orgSync.FetchedAt.Format(time.RFC3339)
+	}
+	if !status.Connected {
+		when := "was last confirmed " + roundedAge(orgSync.FetchedAt) + " ago"
+		if orgSync.FetchedAt.After(time.Now()) {
+			when = "is dated in the future (the clock moved back)"
+		}
+		*problems = append(*problems, fmt.Sprintf(
+			"your Claude organization's skill list %s, so ox is copying every team skill into %s again and Claude Code may list some twice — check that the ox daemon is running (`ox status`)",
+			when, claudeRoot))
+	}
+	for _, row := range out.TeamSkills {
+		if row.ClaudeOrg || row.InstalledAs == "" || !row.AppliesHere {
+			continue
+		}
+		if manifestPresent(gitRoot, path.Join(claudeRoot, row.InstalledAs)+"/") {
+			status.OxCopies++
+		}
+	}
+
+	// Duplicates are judged from the disk, not from the plan: the question is
+	// what Claude Code lists right now, which is the plugin THIS machine has
+	// beside ox's copy. With no plugin here there is nothing to list twice.
+	removing := map[string]bool{}
+	if plan != nil {
+		for _, p := range plan.RemovedPaths() {
+			removing[p] = true
+		}
+	}
+	pendingRemoval := 0
+	for _, name := range plugin.Skills {
+		manifest := path.Join(claudeRoot, name+skillmanager.TeamSuffix, "SKILL.md")
+		if !manifestPresent(gitRoot, path.Dir(manifest)+"/") {
+			continue
+		}
+		status.Duplicates = append(status.Duplicates, name)
+		if removing[manifest] {
+			pendingRemoval++
+		}
+	}
+	if pendingRemoval > 0 {
+		*problems = append(*problems, fmt.Sprintf(
+			"Claude Code lists %d team skill(s) twice until ox removes its own copies (your Claude organization now delivers them) — run `ox doctor --fix`", pendingRemoval))
+	}
+	return status
+}
+
+// claudeSkillRoot is the Claude Code target's skills root when this repository
+// selects it, else "".
+func claudeSkillRoot(gitRoot string) string {
+	_, targets, err := skillmanager.LoadDesired(gitRoot)
+	if err != nil {
+		return ""
+	}
+	for _, t := range targets {
+		if t.Key == skillmanager.ClaudeProjectTargetKey && t.Format == adapterprotocol.SkillFormatAgentSkillsV1 {
+			return t.Root
+		}
+	}
+	return ""
+}
+
+func withoutString(values []string, drop string) []string {
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if v != drop {
+			out = append(out, v)
+		}
+	}
 	return out
 }
 
@@ -614,6 +771,21 @@ func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsSta
 		kv("targets", "none — run `ox init`")
 	}
 
+	if org := out.ClaudeOrg; org != nil {
+		p("")
+		section("Sources", "%s", claudeOrgHeadline(*org))
+		kv("claude code", "%s", org.ClaudeCode)
+		kv("ox copies", "%s", pluralSkills(org.OxCopies))
+		if org.Withheld > 0 {
+			kv("withheld", "%s", pluralSkills(org.Withheld))
+		}
+		if len(org.Duplicates) == 0 {
+			kv("duplicates", "none")
+		} else {
+			kv("duplicates", "%s", strings.Join(org.Duplicates, ", "))
+		}
+	}
+
 	p("")
 	if len(out.TeamSkills) == 0 {
 		section("Team skills", "none found")
@@ -642,6 +814,48 @@ func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsSta
 		p("")
 		writeSkillsProblems(w, cli.StyleWarning.Render("Why something may be missing"), out.Problems)
 	}
+}
+
+// claudeOrgHeadline is the one line that says whether Claude Code is getting
+// team skills from the org plugin, and under which name.
+func claudeOrgHeadline(org claudeOrgStatus) string {
+	state := "claude org sync connected"
+	if !org.Connected {
+		state = "claude org sync not confirmed recently"
+	}
+	return state + " · " + skillsArriveAs(org.Synced, org.TeamSlug)
+}
+
+// claudeCodeSkillSource is the one line saying whether ox leaves any team
+// skill to the org plugin in Claude Code here, and why. deferred counts the
+// skills it leaves, by the planner's own rule
+// (skillmanager.DeferOnlyWhatClaudeCodeHolds), so the line and the plan
+// cannot disagree.
+func claudeCodeSkillSource(connected bool, orgSync teamskills.ClaudeOrgSync, plugin skillmanager.ClaudeCodeOrgPlugin) (deferred int, line string) {
+	switch {
+	case !plugin.Found:
+		return 0, "ox copies every team skill: " + plugin.Why
+	case !connected:
+		return 0, "ox copies every team skill: your organization's skill list was not confirmed recently"
+	}
+	deferred = len(skillmanager.DeferOnlyWhatClaudeCodeHolds(orgSync, plugin).Skills)
+	if deferred == 0 {
+		return 0, "ox copies every team skill: Claude Code's copy of the " + orgSync.TeamSlug + " plugin has none of the listed skills yet"
+	}
+	return deferred, plugin.Why + " · ox skips the " + pluralSkills(deferred) + " it carries"
+}
+
+// skillsArriveAs renders "6 skills arrive as acme" / "1 skill arrives".
+func skillsArriveAs(n int, slug string) string {
+	verb := " arrive"
+	if n == 1 {
+		verb = " arrives"
+	}
+	line := pluralSkills(n) + verb
+	if slug != "" {
+		line += " as " + slug
+	}
+	return line
 }
 
 // trustSummary states what still needs a human, and says so in as few words as

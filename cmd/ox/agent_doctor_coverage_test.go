@@ -9,88 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// --- findIncompleteSessions ---
-
-func TestFindIncompleteSessions_NonexistentDir(t *testing.T) {
-	t.Parallel()
-	result := findIncompleteSessions("/nonexistent/path/sessions", "agent-1")
-	assert.Empty(t, result)
-}
-
-func TestFindIncompleteSessions_EmptyDir(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	result := findIncompleteSessions(dir, "agent-1")
-	assert.Empty(t, result)
-}
-
-func TestFindIncompleteSessions_SkipsLegacyDirs(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	// create legacy subdirs that should be skipped
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "raw"), 0o755))
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "events"), 0o755))
-
-	result := findIncompleteSessions(dir, "agent-1")
-	assert.Empty(t, result, "legacy dirs 'raw' and 'events' should be skipped")
-}
-
-func TestFindIncompleteSessions_SkipsFiles(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	// regular files (not dirs) should be skipped
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "readme.txt"), []byte("hi"), 0o644))
-
-	result := findIncompleteSessions(dir, "agent-1")
-	assert.Empty(t, result)
-}
-
-func TestFindIncompleteSessions_IdentifiesIncomplete(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	// create a session dir with only raw.jsonl (missing other artifacts)
-	sessionDir := filepath.Join(dir, "2026-03-15-user-abc1")
-	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(`{}`), 0o644))
-
-	result := findIncompleteSessions(dir, "agent-1")
-	require.Len(t, result, 1)
-	assert.Equal(t, "2026-03-15-user-abc1", result[0].SessionID)
-	assert.Equal(t, sessionDir, result[0].Path)
-	assert.NotEmpty(t, result[0].Missing)
-	assert.NotEmpty(t, result[0].FinalizeCommands)
-}
-
-func TestFindIncompleteSessions_SkipsCompleteSession(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	sessionDir := filepath.Join(dir, "complete-session")
-	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
-	for _, f := range []string{"raw.jsonl", "session.html", "summary.md", "session.md", "summary.json"} {
-		require.NoError(t, os.WriteFile(filepath.Join(sessionDir, f), []byte("content"), 0o644))
-	}
-
-	result := findIncompleteSessions(dir, "agent-1")
-	assert.Empty(t, result, "complete sessions should not appear in results")
-}
-
-func TestFindIncompleteSessions_SkipsSessionWithoutRaw(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	// session dir with HTML but no raw.jsonl = invalid session, not incomplete
-	sessionDir := filepath.Join(dir, "no-raw-session")
-	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "session.html"), []byte("<html>"), 0o644))
-
-	result := findIncompleteSessions(dir, "agent-1")
-	assert.Empty(t, result, "session without raw.jsonl should be treated as invalid, not incomplete")
-}
-
 // --- checkLedgerGitStatus ---
 // uses real git, so we create a temp git repo
 
@@ -98,7 +16,8 @@ func TestCheckLedgerGitStatus_NotAGitRepo(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	staged, commitNeeded, pushNeeded := checkLedgerGitStatus(dir)
+	staged, commitNeeded, pushNeeded, err := checkLedgerGitStatus(dir)
+	require.Error(t, err)
 	assert.Equal(t, 0, staged)
 	assert.False(t, commitNeeded)
 	assert.False(t, pushNeeded)
@@ -111,7 +30,8 @@ func TestCheckLedgerGitStatus_CleanRepo(t *testing.T) {
 	// init a git repo with an initial commit
 	initDoctorTestGitRepo(t, dir)
 
-	staged, commitNeeded, pushNeeded := checkLedgerGitStatus(dir)
+	staged, commitNeeded, pushNeeded, err := checkLedgerGitStatus(dir)
+	require.NoError(t, err)
 	assert.Equal(t, 0, staged)
 	assert.False(t, commitNeeded)
 	assert.False(t, pushNeeded)
@@ -127,7 +47,8 @@ func TestCheckLedgerGitStatus_StagedFiles(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "newfile.txt"), []byte("content"), 0o644))
 	runDoctorGitInDir(t, dir, "add", "newfile.txt")
 
-	staged, commitNeeded, _ := checkLedgerGitStatus(dir)
+	staged, commitNeeded, _, err := checkLedgerGitStatus(dir)
+	require.NoError(t, err)
 	assert.Equal(t, 1, staged)
 	assert.True(t, commitNeeded)
 }
@@ -145,7 +66,8 @@ func TestCheckLedgerGitStatus_UnstagedChanges(t *testing.T) {
 	runDoctorGitInDir(t, dir, "commit", "-m", "add tracked")
 	require.NoError(t, os.WriteFile(fpath, []byte("v2"), 0o644))
 
-	_, commitNeeded, _ := checkLedgerGitStatus(dir)
+	_, commitNeeded, _, err := checkLedgerGitStatus(dir)
+	require.NoError(t, err)
 	// modified tracked file means there's work to commit
 	assert.True(t, commitNeeded, "modified tracked file means commit needed")
 }

@@ -222,10 +222,10 @@ func TestSaveGitCredentialsFromRepos_BindsBearer(t *testing.T) {
 					assert.False(t, result.passed)
 					assert.Contains(t, result.detail, "Rotate or re-mint")
 				}
-				result := fixRepoPathIssues(root, &config.LocalConfig{}, []repoPathIssue{{repoType: "ledger", path: filepath.Join(root, "missing"), issue: "missing"}})
+				result := fixRepoPathIssues(t.Context(), root, &config.LocalConfig{}, []repoPathIssue{{repoType: "ledger", path: filepath.Join(root, "missing"), issue: "missing"}})
 				assert.Contains(t, result.detail, "Rotate or re-mint")
 				t.Setenv("SAGEOX_TOKEN", "")
-				assert.Contains(t, fixMissingRepos(root, &config.LocalConfig{}).detail, "ox login")
+				assert.Contains(t, fixMissingRepos(t.Context(), root, &config.LocalConfig{}).detail, "ox login")
 			}
 		})
 	}

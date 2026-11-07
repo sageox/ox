@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/stretchr/testify/require"
 )
 
@@ -83,9 +84,18 @@ func TestWalkthroughPlaybackRefusesOversizedAndMalformedScope(t *testing.T) {
 // login to whatever host the link names), and the link must not leak into
 // errors.
 func TestDownloadWalkthroughImageSendsNoLoginAndKeepsTheLinkOutOfErrors(t *testing.T) {
+	useragent.ResetForTesting()
+	t.Cleanup(useragent.ResetForTesting)
+	useragent.SetActor("agent", "claude")
 	var sawAuth, sawQuery string
+	var sawSageox []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawAuth, sawQuery = r.Header.Get("Authorization"), r.URL.RawQuery
+		for k := range r.Header {
+			if strings.HasPrefix(strings.ToLower(k), "x-sageox-") {
+				sawSageox = append(sawSageox, k)
+			}
+		}
 		if r.URL.Path == "/denied" {
 			http.Error(w, "denied", http.StatusForbidden)
 			return
@@ -97,6 +107,8 @@ func TestDownloadWalkthroughImageSendsNoLoginAndKeepsTheLinkOutOfErrors(t *testi
 	require.NoError(t, err)
 	require.Equal(t, "image-bytes", string(body))
 	require.Empty(t, sawAuth)
+	// The presigned host is an object store: no repo or actor metadata goes there.
+	require.Empty(t, sawSageox)
 	require.Equal(t, "sig=SIGNED-SECRET", sawQuery)
 
 	_, err = DownloadWalkthroughImage(context.Background(), srv.URL+"/denied?sig=SIGNED-SECRET", 1024)

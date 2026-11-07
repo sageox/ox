@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
@@ -723,6 +724,38 @@ func TestHandleAfterTool_QuarantinesForeignClaudeTurn(t *testing.T) {
 	after, err := os.ReadFile(filepath.Join(state.SessionPath, "raw.jsonl"))
 	require.NoError(t, err)
 	require.Equal(t, before, after)
+}
+
+// Failure prevented: on a disposable machine, a hook leaves in place a
+// parent_pid that a later process has taken, so the recording keeps reading
+// as live; or it adopts the agent's PID without its start time, so the next
+// reuse goes undetected.
+func TestHandleAfterTool_ReplacesAReusedParentPID(t *testing.T) {
+	projectRoot, agentID, sourceFile := setupHandleAfterToolTest(t)
+	self, ok := proc.StartTime(os.Getpid())
+	if !ok {
+		t.Skip("this platform cannot report a process start time")
+	}
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte("disposable_machine: true\n"), 0o600))
+	t.Setenv("OX_USER_CONFIG", cfgPath)
+	require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
+		s.ParentPID, s.ParentStartTime = os.Getpid(), self-1 // alive, but not the process that started the recording
+	}))
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	now := state.StartedAt.Add(time.Second)
+	appendClaudeEntries(t, sourceFile, now,
+		`{"type":"user","timestamp":"`+now.Format(time.RFC3339Nano)+`","message":{"role":"user","content":"a turn"}}`)
+
+	require.NoError(t, handleAfterTool(&HookContext{Phase: phaseAfterTool, ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}))
+
+	after, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	agentPID := proc.FindAgentAncestorPID()
+	require.Equal(t, agentPID, after.ParentPID, "the hook adopts the live agent process")
+	want, _ := proc.StartTime(agentPID)
+	require.Equal(t, want, after.ParentStartTime, "with that process's start time")
 }
 
 // --- Session recording lifecycle regression tests ---

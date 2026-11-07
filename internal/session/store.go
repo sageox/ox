@@ -116,6 +116,8 @@ func sanitizeFilename(s string) string {
 	s = strings.ReplaceAll(s, ":", "-")
 	s = strings.ReplaceAll(s, "*", "-")
 	s = strings.ReplaceAll(s, "?", "-")
+	s = strings.ReplaceAll(s, "[", "-")
+	s = strings.ReplaceAll(s, "]", "-")
 	s = strings.ReplaceAll(s, "\"", "-")
 	s = strings.ReplaceAll(s, "<", "-")
 	s = strings.ReplaceAll(s, ">", "-")
@@ -347,6 +349,7 @@ type SessionInfo struct {
 	EntryCount      int                 `json:"entry_count,omitempty"`        // from .recording.json or meta.json
 	IsSubagent      bool                `json:"is_subagent,omitempty"`        // true if spawned by a parent session
 	ParentPID       int                 `json:"parent_pid,omitempty"`         // from .recording.json for liveness detection
+	ParentStartTime int64               `json:"parent_start_time,omitempty"`  // from .recording.json; see RecordingState.ParentStartTime
 	Origin          string              `json:"origin,omitempty"`             // session origin: "human", "subagent", "agent"
 	HasRawData      bool                `json:"has_raw_data,omitempty"`       // true if raw.jsonl exists with content on disk
 	StopReason      string              `json:"stop_reason,omitempty"`        // how session ended (StopReason* constants)
@@ -456,6 +459,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		var recordingEntryCount int
 		var isSubagent bool
 		var parentPID int
+		var parentStartTime int64
 		var origin string
 		var suspendedAt *time.Time
 		recPath := filepath.Join(sessionPath, recordingFile)
@@ -468,6 +472,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 				recordingEntryCount = recState.EntryCount
 				isSubagent = recState.IsSubagent()
 				parentPID = recState.ParentPID
+				parentStartTime = recState.ParentStartTime
 				origin = recState.Origin
 				// ADR-020: ClassifySession branches on SessionInfo.SuspendedAt to
 				// return StatusSuspended; without this propagation, suspended
@@ -562,6 +567,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			EntryCount:      entryCount(isRecording, recordingEntryCount, meta),
 			IsSubagent:      isSubagent,
 			ParentPID:       parentPID,
+			ParentStartTime: parentStartTime,
 			Origin:          origin,
 			HasRawData:      hasRawData,
 			StopReason:      stopReason(meta),
@@ -1270,10 +1276,17 @@ func (s *Store) GetLatestRaw() (*SessionInfo, error) {
 	return &sessions[0], nil
 }
 
-// Delete removes a session folder by name.
+// Delete removes a session folder by its exact directory name, not a legacy filename.
 func (s *Store) Delete(name string) error {
-	sessionName := strings.TrimSuffix(name, jsonlExt)
-	sessionPath := filepath.Join(s.basePath, sessionName)
+	// Only a single, non-traversal component: names may contain ".." (the name
+	// sanitizer keeps periods), but never "..", ".", or a separator.
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("session name %q must be a single path component", name)
+	}
+
+	// Never normalize a name (e.g. strip .jsonl) into the store root or a
+	// different session. A single component cannot leave basePath.
+	sessionPath := filepath.Join(s.basePath, name)
 	if info, err := os.Stat(sessionPath); err == nil && info.IsDir() {
 		if err := os.RemoveAll(sessionPath); err != nil {
 			return fmt.Errorf("delete session folder=%s: %w", sessionPath, err)

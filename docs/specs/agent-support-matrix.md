@@ -267,7 +267,7 @@ a skills root.
 
 **The unverified row is load-bearing, not a footnote.** Codex, Gemini, and OMP
 share one `.agents/skills` projection. If they do not honor
-`disable-model-invocation`, 13 lifecycle and diagnostic skills enter their context
+`disable-model-invocation`, 14 lifecycle and diagnostic skills enter their context
 with descriptions and become model-invocable — so ADR-023's "lifecycle stays
 explicit" ruling would silently fail on exactly the agents the fold was meant to
 help. Treat these cells as unverified until observed on a real client.

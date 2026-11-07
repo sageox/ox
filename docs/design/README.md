@@ -43,8 +43,8 @@ Composite patterns showing how multiple components compose into the real CLI sur
 - [patterns/session-timeline.md](patterns/session-timeline.md) — how session views compose
 - [patterns/dashboard.md](patterns/dashboard.md) — `ox dashboard` 4-pane TUI (Pane + Nav tree + Timeline + Inspector + Status bar + Modal)
 - [patterns/config-editor.md](patterns/config-editor.md) — `ox config` full-screen TUI form (scoped editor with categorized fields)
-- [patterns/init-wizard.md](patterns/init-wizard.md) — `ox init` inline multi-step wizard (Select + Multi-select + Confirm + Timeline)
-- [patterns/login-flow.md](patterns/login-flow.md) — `ox login` OAuth flow (Box + Spinner)
+- [patterns/init-wizard.md](patterns/init-wizard.md) — `ox init` inline multi-step wizard (Select + Multi-select + Confirm + Timeline, ending on the [init dock](components/init-dock.md))
+- [patterns/login-flow.md](patterns/login-flow.md) — `ox login` device flow (code to match + Spinner + three-line success block)
 
 ## Theming
 

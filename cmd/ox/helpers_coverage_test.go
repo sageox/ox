@@ -2,8 +2,6 @@ package main
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -416,39 +414,6 @@ func TestEscapeXML_MixedContent(t *testing.T) {
 	assert.Contains(t, got, "&apos;")
 }
 
-// --- checkSessionCompleteness ---
-
-func TestCheckSessionCompleteness_NoRawFile(t *testing.T) {
-	// no raw.jsonl means no session data; should return nil (not list as missing)
-	dir := t.TempDir()
-	missing := checkSessionCompleteness(dir)
-	assert.Nil(t, missing)
-}
-
-func TestCheckSessionCompleteness_AllPresent(t *testing.T) {
-	dir := t.TempDir()
-	// create all expected files
-	files := []string{"raw.jsonl", "summary.md", "session.md", "summary.json"}
-	for _, f := range files {
-		require.NoError(t, writeTestFile(t, dir, f, "content"))
-	}
-
-	missing := checkSessionCompleteness(dir)
-	assert.Empty(t, missing)
-}
-
-func TestCheckSessionCompleteness_SomeMissing(t *testing.T) {
-	dir := t.TempDir()
-	// only raw.jsonl present - everything else missing
-	require.NoError(t, writeTestFile(t, dir, "raw.jsonl", "{}"))
-
-	missing := checkSessionCompleteness(dir)
-	assert.NotEmpty(t, missing)
-	assert.True(t, containsString(missing, "summary"))
-	assert.True(t, containsString(missing, "session_md"))
-	assert.True(t, containsString(missing, "summary_json"))
-}
-
 // --- resolvePhase ---
 
 // TestResolvePhase_UnknownAgent pins the cross-agent fallback.
@@ -516,10 +481,4 @@ func TestDispatchPhase_UnknownPhaseReturnsNil(t *testing.T) {
 	ctx := &HookContext{Phase: "unknown-phase"}
 	err := dispatchPhase(ctx)
 	assert.NoError(t, err)
-}
-
-// helper to write test files
-func writeTestFile(t *testing.T, dir, name, content string) error {
-	t.Helper()
-	return os.WriteFile(filepath.Join(dir, name), []byte(content), 0644)
 }

@@ -890,6 +890,44 @@ func TestBrowser_CommentsRailMinimizes(t *testing.T) {
 	}
 }
 
+// TestBrowser_NoteFromTheRailCoversNoComment: Devon has three comments in the
+// rail and opens the first from its row. The note opens in the rail, right
+// after that comment, with every comment still in view beside it; saved, it
+// closes and the rail shows the edit.
+// Failure prevented: a note opened from the rail floats over the rail at the
+// click, hiding the comments around the one being answered.
+func TestBrowser_NoteFromTheRailCoversNoComment(t *testing.T) {
+	ctx := frameBrowser(t)
+	// wide enough that the rail is fixed beside the plan, not after it
+	if err := chromedp.Run(ctx, chromedp.EmulateViewport(1600, 900)); err != nil {
+		t.Fatalf("size the window: %v", err)
+	}
+	base, _, _ := serveLivePlanReview(t)
+	openReviewer(t, ctx, base)
+	markSection(t, ctx, ".rev-rail-plan", "Split the rollout into two sprints.")
+	markSection(t, ctx, "section#sec-1", "Bound the retries.")
+	markSection(t, ctx, "section#sec-2", "Which flag?")
+	if err := chromedp.Run(ctx, chromedp.Click(".rev-rail-item", chromedp.ByQuery), chromedp.WaitVisible(".rev-pop .rev-note", chromedp.ByQuery)); err != nil {
+		t.Fatalf("open the whole plan's comment from its row: %v", err)
+	}
+	// rows, whether the note follows the first, and how many rows it covers
+	got := evalString(t, ctx, `(function(){var p=document.querySelector('.rev-pop'),rows=document.querySelectorAll('.rev-rail-item');`+
+		`var covered=[].filter.call(rows,function(li){var r=li.getBoundingClientRect(),e=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);return !e||!li.contains(e)}).length;`+
+		`return rows.length+'|'+(p.previousElementSibling===rows[0])+'|'+covered})()`)
+	if got != "3|true|0" {
+		t.Fatalf("the note must open in the rail after the comment it answers and cover none (rows|after it|covered): %s", got)
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`document.querySelector('.rev-pop .rev-note').value='Two sprints, not one.'`, nil),
+		chromedp.Click(".rev-pop .rev-save", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("save the edit: %v", err)
+	}
+	if got := evalString(t, ctx, `!!document.querySelector('.rev-pop')+'|'+document.querySelector('.rev-rail-item .rev-rail-note').textContent`); got != "false|Two sprints, not one." {
+		t.Fatalf("saved, the note must close and the rail show the edit (open|first note): %s", got)
+	}
+}
+
 // TestBrowser_HighlightCommentsOnExactWords proves a reviewer can comment on
 // exactly the words they highlight and still mark a whole section with a click:
 // in real Chrome, a drag-selection opens a note quoting those words — whole

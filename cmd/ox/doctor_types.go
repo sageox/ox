@@ -157,6 +157,7 @@ const (
 	CheckSlugHookCompleteness    = "hook-completeness"
 	CheckSlugSharedHookValues    = "shared-hook-values"
 	CheckSlugStaleLocalHooks     = "stale-local-hooks"
+	CheckSlugClaudeStatusLine    = "claude-status-line"
 	CheckSlugSessionStartHookBug = "session-start-hook-bug"
 	CheckSlugGitCommitHooks      = "git-commit-hooks"
 	CheckSlugAdapterPrimeBlocks  = "adapter-prime-blocks"

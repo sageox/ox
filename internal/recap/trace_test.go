@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// --- readTrace ---
+// --- ReadTrace ---
 //
 // Failure prevented: hydrating an LFS stub on the recap read path (recap is
 // supposed to be offline/fast) or silently dropping evidence instead of
@@ -26,7 +26,7 @@ func TestReadTrace_CacheFirst(t *testing.T) {
 	// in-place is a pointer — cache must still win without ever consulting it.
 	f.WritePointerTrace("s1")
 
-	events, dehydrated := readTrace(f.Ledger, "s1")
+	events, dehydrated := ReadTrace(f.Ledger, "s1")
 	require.False(t, dehydrated)
 	require.Len(t, events, 1)
 	assert.Equal(t, "principles.md", events[0].Doc)
@@ -38,7 +38,7 @@ func TestReadTrace_PointerInPlaceRejectedAsDehydrated(t *testing.T) {
 
 	f.WritePointerTrace("s1") // no cache copy at all
 
-	events, dehydrated := readTrace(f.Ledger, "s1")
+	events, dehydrated := ReadTrace(f.Ledger, "s1")
 	assert.True(t, dehydrated, "an LFS pointer with no cache copy must be reported dehydrated, never hydrated on the read path")
 	assert.Nil(t, events)
 }
@@ -52,7 +52,7 @@ func TestReadTrace_RealInPlaceContent(t *testing.T) {
 		Source: contexttrace.SourceTeamDocs, Doc: "glossary.md",
 	})
 
-	events, dehydrated := readTrace(f.Ledger, "s1")
+	events, dehydrated := ReadTrace(f.Ledger, "s1")
 	require.False(t, dehydrated)
 	require.Len(t, events, 1)
 	assert.Equal(t, "glossary.md", events[0].Doc)
@@ -63,7 +63,7 @@ func TestReadTrace_NoTraceArtifactAtAll(t *testing.T) {
 	f := newFixture(t)
 	f.WriteSession("s1") // meta.json only, no context-trace.jsonl
 
-	events, dehydrated := readTrace(f.Ledger, "s1")
+	events, dehydrated := ReadTrace(f.Ledger, "s1")
 	assert.False(t, dehydrated, "a session that simply has no trace file is not the same as a dehydrated one")
 	assert.Nil(t, events)
 }

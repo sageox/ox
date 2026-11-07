@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flow lane · states</title>
+<!--
+  States harness for the SageOx flow lane (internal/usagepane/mod/hooks/scene.ts).
+    ?state=<name>   one state alone
+    ?grid           every state, labelled
+    (no params)     Play: a real ox query with real timings, redrawn every 500ms as the desktop redraws rows
+    &bare           hides the harness bar
+  Every lane is mounted as an <img> from a data: URL, exactly as the desktop draws <Svg source>: never
+  inlined, so what you see is what the host shows (SMIL runs, no script, no hover).
+  Rebuild scene.js after editing the mod:
+    bun build design/sageox-flow/entry.ts --outfile design/sageox-flow/scene.js --format iife
+-->
+<style>
+  :root { color-scheme: light dark; --page: #faf9f5; --row: #3d3d3a; --rowq: #73726c; --line: #e8e6dc; }
+  @media (prefers-color-scheme: dark) { :root { --page: #262624; --row: #e8e6dc; --rowq: #a3a29c; --line: #3a3a37; } }
+  body { margin: 0; background: var(--page); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--row); }
+  [data-harness] { position: sticky; top: 0; z-index: 50; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    padding: 10px 16px; background: var(--page); border-bottom: 1px solid var(--line); color: var(--rowq); }
+  [data-harness] button { font: inherit; color: var(--row); background: transparent; border: 1px solid var(--line); border-radius: 6px;
+    padding: 4px 10px; cursor: pointer; }
+  [data-harness] button[aria-pressed="true"] { background: var(--row); border-color: var(--row); color: var(--page); }
+  [data-harness] .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
+  .h-stage { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; padding: 40px 16px 64px; }
+  .h-stage > * { width: min(100%, var(--h-width, 640px)); }
+  .h-grid { display: grid; gap: 28px 24px; padding: 28px 16px 64px;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--h-width, 640px)), 1fr)); }
+  .h-cell > .h-label { margin: 0 0 8px; font: 500 11px/1.2 ui-monospace, Menlo, monospace; color: var(--rowq); }
+  .bare [data-harness] { display: none; }
+</style>
+
+<!-- 1. The host's row, drawn plainly so the lane can be judged as its second line -->
+<style>
+  .row { display: flex; gap: 8px; align-items: baseline; font-size: 13px; line-height: 20px; }
+  .row .tool { font-weight: 500; }
+  .row .arg { color: var(--rowq); font-family: ui-monospace, Menlo, monospace; font-size: 12px; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .dur { color: var(--rowq); margin-left: auto; font-variant-numeric: tabular-nums; }
+  .lane { display: block; margin-top: 2px; height: 24px; }
+  .caption { margin: 4px 0 0; font-size: 11px; color: var(--rowq); }
+</style>
+</head>
+<body>
+<div data-harness>
+  <button type="button" data-mode="play">Play</button>
+  <button type="button" data-mode="grid">All states</button>
+  <span class="sep"></span>
+  <span data-state-buttons></span>
+</div>
+<main id="root"></main>
+
+<script src="scene.js"></script>
+<script type="module">
+const S = window.scene
+
+// 2. Every state as data. Times are relative: `age` is ms since the call ended at mount (undefined = running),
+// `took` how long it ran. The same lane function, different input.
+const ev = (o) => ({ id: o.id ?? 'toolu_01' + (o.label ?? 'x'), lane: 'team-context', direction: 'in',
+  label: 'searched team', step: 'searching team discussions', tokens: 1180, took: 820, ...o })
+
+const STATES = {
+  running: { row: ['ox query', '"auth retry decisions"'], ev: ev({ age: undefined, took: 1400 }) },
+  'done-small': { row: ['ox murmur list', '--since 1h'], ev: ev({ lane: 'murmurs', label: 'read murmurs', step: 'reading murmurs', tokens: 80, items: 1, itemsNoun: 'murmur', took: 310, age: 9000 }) },
+  'in-flight': { row: ['ox query', '"auth retry decisions"'], ev: ev({ items: 5, itemsNoun: 'discussions', age: 250 }) },
+  typical: { row: ['ox query', '"auth retry decisions"'], ev: ev({ items: 5, itemsNoun: 'discussions', age: 9000 }) },
+  large: { row: ['ox agent prime', ''], ev: ev({ label: 'loaded team context', step: 'loading team context', tokens: 14820, took: 1130, age: 9000 }) },
+  'large-flight': { row: ['ox agent prime', ''], ev: ev({ label: 'loaded team context', step: 'loading team context', tokens: 14820, took: 1130, age: 300 }) },
+  'out-murmur': { row: ['ox murmur', '--topic=wip "retry backoff in internal/sync"'], ev: ev({ lane: 'murmurs', direction: 'out', label: 'posted murmur', step: 'posting murmur', tokens: 64, took: 420, age: 9000 }) },
+  'out-flight': { row: ['ox murmur', '--topic=wip "retry backoff in internal/sync"'], ev: ev({ lane: 'murmurs', direction: 'out', label: 'posted murmur', step: 'posting murmur', tokens: 64, took: 420, age: 200 }) },
+  'out-plan': { row: ['ox plan save', '--file plan.html'], ev: ev({ lane: 'ledger', direction: 'out', label: 'saved plan', step: 'saving plan to the ledger', tokens: 3410, items: 1, itemsNoun: 'plan', took: 1640, age: 9000 }) },
+  failed: { row: ['ox query', '"auth retry decisions"'], ev: ev({ failed: true, tokens: 0, took: 1210, age: 9000 }) },
+  interrupted: { row: ['ox query', '"auth retry decisions"'], ev: ev({ interrupted: true, tokens: 0, took: 3380, age: 9000 }) },
+  'zero-tokens': { row: ['ox code search', '"RetryPolicy"'], ev: ev({ lane: 'code', label: 'searched code', step: 'searching code', tokens: 0, took: 290, age: 9000 }) },
+  'prompt-1': { row: ['prompt', 'fix the flaky retry test'], evs: [ev({ id: 'a1', label: 'loaded team context', tokens: 14820, took: 60, age: 9000 })] },
+  'prompt-3': { row: ['prompt', 'fix the flaky retry test'], evs: [
+    ev({ id: 'a1', label: 'loaded team context', tokens: 14820, took: 60, age: 9000 }),
+    ev({ id: 'a2', lane: 'murmurs', label: 'read murmurs', tokens: 310, items: 3, itemsNoun: 'murmurs', took: 40, age: 9000 }),
+    ev({ id: 'a3', lane: 'ledger', label: 'recalled ledger', tokens: 520, items: 1, itemsNoun: 'ledger match', took: 90, age: 9000 }),
+  ] },
+  'reduced-motion': { row: ['ox query', '"auth retry decisions"'], ev: ev({ items: 5, itemsNoun: 'discussions', age: 250 }), reduced: true },
+  'narrow-320': { row: ['ox query', '"auth retry decisions"'], ev: ev({ items: 5, itemsNoun: 'discussions', age: 9000 }), width: 320 },
+  'narrow-scaled': { row: ['ox query', '"auth retry decisions"'], ev: ev({ items: 5, itemsNoun: 'discussions', age: 9000 }), cssWidth: 360 },
+  'long-label': { row: ['mcp__sageox__Search', ''], ev: ev({ label: 'searched team for "why did we move retry backoff out of the daemon"', items: 12, itemsNoun: 'discussions', tokens: 4210, age: 9000 }) },
+}
+
+function absolute(e, now) {
+  const { age, took, ...rest } = e
+  if (age === undefined) return { ...rest, startedAt: now - took }
+  const endedAt = now - age
+  return { ...rest, startedAt: endedAt - took, endedAt }
+}
+
+const toSrc = (svg) => 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg)
+
+// 3. The component: a host row with the lane image under it. update() swaps the image source, as the host does
+// when it redraws a row (the image is re-created; the SVG resumes in phase from `now`).
+function mount(el) {
+  el.innerHTML = '<div class="row"><span class="tool"></span><span class="arg"></span><span class="dur"></span></div>'
+    + '<img class="lane" alt=""><p class="caption"></p>'
+  const [tool, arg, dur] = el.querySelectorAll('.row span')
+  const img = el.querySelector('img')
+  const cap = el.querySelector('.caption')
+  return {
+    update(state, { now = Date.now() } = {}) {
+      tool.textContent = state.row[0]
+      arg.textContent = state.row[1]
+      const opts = { width: state.width, reducedMotion: state.reduced }
+      let svg, text
+      if (state.evs) {
+        const evs = state.evs.map((e) => absolute(e, now))
+        svg = S.promptSvg(evs, now, opts); text = S.caption(evs)
+        dur.textContent = ''
+      } else {
+        const e = state.ev.endedAt !== undefined || state.ev.startedAt !== undefined ? state.ev : absolute(state.ev, now)
+        svg = S.laneSvg(e, now, opts); text = S.caption(e)
+        dur.textContent = e.endedAt === undefined ? '' : S.formatDuration(e.endedAt - e.startedAt)
+      }
+      const w = state.cssWidth ?? state.width ?? 640
+      img.style.width = w + 'px'
+      img.style.height = (state.cssWidth ? Math.round(24 * state.cssWidth / 640) : 24) + 'px'
+      img.alt = text
+      img.src = toSrc(svg)
+      cap.textContent = 'alt: ' + text
+    },
+  }
+}
+
+// Play: an ox query opens, runs 1.4s, lands ~1.2k from 5 discussions, settles. Redraw every 500ms, as the
+// host re-creates the row's image; the motion must not restart or jump on a redraw.
+async function play(el, signal) {
+  const wait = (ms) => new Promise((r, x) => {
+    const abort = () => { clearTimeout(t); x(signal.reason) }
+    const t = setTimeout(() => { signal.removeEventListener('abort', abort); r() }, ms)
+    signal.addEventListener('abort', abort, { once: true })
+  })
+  const c = mount(el)
+  for (;;) {
+    const t0 = Date.now()
+    const e = { id: 'toolu_play', lane: 'team-context', direction: 'in', label: 'searched team', step: 'searching team discussions',
+      tokens: 1180, items: 5, itemsNoun: 'discussions', startedAt: t0 }
+    const state = { row: ['ox query', '"auth retry decisions"'], ev: e }
+    while (Date.now() - t0 < 1400) { c.update(state); await wait(500) }
+    e.endedAt = t0 + 1400
+    while (Date.now() - e.endedAt < S.ANIM_MS + 600) { c.update(state); await wait(500) }
+    await wait(1600)
+  }
+}
+
+// ---- harness (from the template) ----
+const params = new URLSearchParams(location.search)
+if (params.has('bare')) document.documentElement.classList.add('bare')
+const root = document.getElementById('root')
+let controller
+
+function show(mode, stateName) {
+  controller?.abort('switch')
+  root.className = ''
+  root.innerHTML = ''
+  document.querySelectorAll('[data-harness] button').forEach((b) =>
+    b.setAttribute('aria-pressed', String(b.dataset.mode === mode || (mode === 'state' && b.dataset.state === stateName))))
+  if (mode === 'grid') {
+    root.className = 'h-grid'
+    for (const [name, state] of Object.entries(STATES)) {
+      const cell = document.createElement('section')
+      cell.className = 'h-cell'
+      cell.innerHTML = `<p class="h-label">${name}</p><div></div>`
+      root.append(cell)
+      mount(cell.lastElementChild).update(state)
+    }
+    return
+  }
+  root.className = 'h-stage'
+  const el = document.createElement('div')
+  root.append(el)
+  if (mode === 'state') return mount(el).update(STATES[stateName])
+  controller = new AbortController()
+  play(el, controller.signal).catch(() => {})
+}
+
+const holder = document.querySelector('[data-state-buttons]')
+for (const name of Object.keys(STATES)) {
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.dataset.state = name
+  b.textContent = name
+  b.style.marginRight = '6px'
+  holder.append(b)
+}
+document.querySelector('[data-harness]').addEventListener('click', (e) => {
+  const b = e.target.closest('button')
+  if (!b) return
+  if (b.dataset.mode) show(b.dataset.mode)
+  else if (b.dataset.state) show('state', b.dataset.state)
+})
+if (params.has('grid')) show('grid')
+else if (params.get('state') && STATES[params.get('state')]) show('state', params.get('state'))
+else show('play')
+</script>
+</body>
+</html>

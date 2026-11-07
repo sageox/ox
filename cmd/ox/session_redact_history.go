@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,10 +16,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
@@ -279,6 +282,10 @@ type redactHistoryOptions struct {
 	// Use Scope{AllowAll: true} to opt back into the full-ledger sweep.
 	Scope *sessionScope
 
+	// LFSClient uploads redacted content behind LFS pointers. Nil uses the
+	// Ledger's own credentials.
+	LFSClient func() (*lfs.Client, error)
+
 	Stdin  io.Reader
 	Stdout io.Writer
 }
@@ -413,6 +420,11 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 		return nil
 	}
 
+	// Refuse before rewriting files or moving them out of quarantine.
+	if err := checkRedactionIndex(context.Background(), opts.LedgerPath); err != nil {
+		return fmt.Errorf("prepare redaction: %w", err)
+	}
+
 	// Snapshot BEFORE any modification. This is the most important safety
 	// rail in the entire tool — operator can always recover from "the
 	// scrubber broke my ledger" by extracting the snapshot.
@@ -433,6 +445,12 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	// trail is correlatable; appliedAt is captured once so the records
 	// share a wall-clock instant.
 	answers := newAnswerReader(opts.Stdin)
+	lfsClient := opts.LFSClient
+	if lfsClient == nil {
+		lfsClient = sync.OnceValues(func() (*lfs.Client, error) {
+			return lfs.NewClientFromLedger(opts.LedgerPath, endpoint.GetForProject(opts.ProjectRoot))
+		})
+	}
 	redactedBySession := map[string][]lfs.RedactionEntry{}
 	// quarantineSessionsTouched tracks sessions whose quarantined files
 	// were redacted + moved back; used after the loop to clean up debt
@@ -443,9 +461,9 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	// rather than as a silent skip — the operator needs to know which
 	// files require the manual scrub path.
 	var quarantineSkipped []string
-	redactedFiles := 0
-	for _, fileFindings := range byPath {
-		path := fileFindings[0].Path
+	var repairedPaths []string
+	for _, path := range sortedKeys(byPath) {
+		fileFindings := byPath[path]
 		quarantined := fileFindings[0].Quarantined
 		quarantineRel := fileFindings[0].QuarantinePath
 		header := path
@@ -486,13 +504,16 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 				if fileFindings[0].SessionName != "" {
 					quarantineSessionsTouched[fileFindings[0].SessionName] = true
 				}
-			} else {
-				abs := filepath.Join(opts.LedgerPath, path)
-				if err := redactFileInPlace(abs, redactor); err != nil {
-					return fmt.Errorf("redact %s: %w", path, err)
+			} else if abs := filepath.Join(opts.LedgerPath, path); lfs.IsPointerFile(abs) {
+				// The finding came from the cached content behind this pointer.
+				if err := redactLFSContent(context.Background(), opts.LedgerPath, path, lfsClient); err != nil {
+					fmt.Fprintf(opts.Stdout, "  Skipped (cannot publish redacted content): %v\n\n", err)
+					continue
 				}
+			} else if err := redactFileInPlace(abs, redactor); err != nil {
+				return fmt.Errorf("redact %s: %w", path, err)
 			}
-			redactedFiles++
+			repairedPaths = append(repairedPaths, path)
 			// Record per-finding entries against the session that owns
 			// this file. Detector + line + filename only — never bytes.
 			if sess, fname, ok := splitSessionPath(path); ok {
@@ -510,7 +531,7 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 		}
 	}
 
-	if redactedFiles == 0 {
+	if len(repairedPaths) == 0 {
 		fmt.Fprintln(opts.Stdout, "No files redacted. Snapshot remains for reference.")
 		return nil
 	}
@@ -525,17 +546,15 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	if err != nil {
 		return fmt.Errorf("write redaction pass: %w", err)
 	}
-	// Stage the modified meta.json files alongside the redacted content
-	// files so the amend commit captures both.
-	for _, mp := range metaPaths {
-		if _, ok := byPath[mp]; !ok {
-			byPath[mp] = nil
+	// Leave skipped files alone, including files still in quarantine.
+	ctx, cancel := context.WithTimeout(context.Background(), lockedCommitTimeout)
+	defer cancel()
+	if err := gitutil.WithRepoLock(ctx, opts.LedgerPath, func() error {
+		if err := checkRedactionIndex(ctx, opts.LedgerPath); err != nil {
+			return err
 		}
-	}
-
-	// Stage + amend in a single holding commit. The operator can review
-	// the amended diff before running `ox session push`.
-	if err := stageAndAmendRedactedFiles(opts.LedgerPath, byPath); err != nil {
+		return stageAndAmendRedactedFiles(ctx, opts.LedgerPath, append(repairedPaths, metaPaths...))
+	}); err != nil {
 		return fmt.Errorf("stage/amend: %w", err)
 	}
 
@@ -572,7 +591,7 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	remainingQuarantine, _ := enumerateQuarantineFindings(opts.LedgerPath, matcher)
 	remaining := len(postScan.Findings) + len(remainingQuarantine)
 	fmt.Fprintf(opts.Stdout, "\nRedaction complete. Files modified: %d. Remaining findings in scope: %d.\n",
-		redactedFiles, remaining)
+		len(repairedPaths), remaining)
 	if remaining > 0 {
 		fmt.Fprintln(opts.Stdout, "Re-run to address remaining findings.")
 	}
@@ -731,9 +750,8 @@ func classifyFindingsByPushStatus(ledgerPath string, findings []redactHistoryFin
 	// reachable from origin/main?" — one git call per distinct path.
 	// Quarantined paths are unconditionally treated as unpushed: the
 	// pre-push gate carved them out of the holding commit before any
-	// push could reference the bytes (prepush_autoredact.go:309
-	// amendDroppingPaths). Doing the git lookup for a path that no
-	// commit references would return "not tracked" → "unpushed" anyway,
+	// push could reference the bytes (quarantineUnredactableFindings).
+	// Looking up a path that no commit references would return "unpushed",
 	// but skipping the exec saves a fork per quarantined file.
 	pushedFiles := map[string]bool{}
 	for _, f := range findings {
@@ -911,6 +929,15 @@ func snapshotLedger(ledgerPath, backupDir string) (string, string, error) {
 // Line-by-line because session raw.jsonl entries can be large; whole-
 // file decoding would blow memory on real captures.
 func redactFileInPlace(abs string, _ *session.Redactor) error {
+	tmpName := abs + ".redact.tmp"
+	if err := redactFileTo(abs, tmpName); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, abs)
+}
+
+// redactFileTo writes the redacted form of abs to tmpName with abs's mode.
+func redactFileTo(abs, tmpName string) error {
 	src, err := os.Open(abs)
 	if err != nil {
 		return err
@@ -921,7 +948,6 @@ func redactFileInPlace(abs string, _ *session.Redactor) error {
 		return err
 	}
 
-	tmpName := abs + ".redact.tmp"
 	rw, err := session.NewRawWriterTruncate(tmpName, "")
 	if err != nil {
 		return err
@@ -964,38 +990,109 @@ func redactFileInPlace(abs string, _ *session.Redactor) error {
 	if err := os.Chmod(tmpName, info.Mode()); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, abs)
+	return nil
 }
 
-// stageAndAmendRedactedFiles stages each redacted path and creates an
-// amend commit. The amend lets the original commit retain its identity
-// in the operator's mental model ("the session-stop commit") while the
-// scrubbed bytes replace the leaked ones. Push pipeline will refuse if
-// the amend touches commits already on origin/main (we filtered those
-// out earlier; this is defense in depth).
-func stageAndAmendRedactedFiles(ledgerPath string, byPath map[string][]redactHistoryFinding) error {
-	if len(byPath) == 0 {
-		return nil
+// redactLFSContent redacts the cached content behind the LFS pointer at rel
+// and uploads it. Only after the upload succeeds are meta.json, the pointer
+// and the cache switched to the redacted blob; if any of those steps fails,
+// meta.json and the pointer are restored so nothing is left half-switched.
+func redactLFSContent(ctx context.Context, ledgerPath, rel string, newClient func() (*lfs.Client, error)) error {
+	sessionName, name, ok := splitSessionPath(rel)
+	if !ok {
+		return fmt.Errorf("not a session artifact: %s", rel)
 	}
-	// stage each modified path
-	paths := make([]string, 0, len(byPath))
-	for p := range byPath {
-		paths = append(paths, p)
+	if filepath.Ext(name) != ".jsonl" {
+		return fmt.Errorf("%s is not JSONL; redact it manually", name)
 	}
-	sort.Strings(paths)
-	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, paths...)
-	if output, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
-		return fmt.Errorf("git add: %s: %w", strings.TrimSpace(string(output)), err)
+	pointerPath := filepath.Join(ledgerPath, filepath.FromSlash(rel))
+	oldPointer, err := os.ReadFile(pointerPath)
+	if err != nil {
+		return err
 	}
-	// amend without changing message — keep the original session commit's identity
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--amend", "--no-edit", "--no-verify")
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(output), "nothing to commit") {
-			return nil
-		}
-		return fmt.Errorf("git commit --amend: %s: %w", strings.TrimSpace(string(output)), err)
+	oldOID, _, err := lfs.ParsePointer(string(oldPointer))
+	if err != nil {
+		return err
+	}
+	cachePath := filepath.Join(ledgerPath, ".sageox", "cache", filepath.FromSlash(rel))
+	cached, err := os.ReadFile(cachePath)
+	if err != nil {
+		return err
+	}
+	if "sha256:"+lfs.ComputeOID(cached) != oldOID {
+		return fmt.Errorf("cached content does not match the pointer for %s; rehydrate it first", rel)
+	}
+
+	tmpName := cachePath + ".redact.tmp"
+	defer os.Remove(tmpName)
+	if err := redactFileTo(cachePath, tmpName); err != nil {
+		return err
+	}
+	content, err := os.ReadFile(tmpName)
+	if err != nil {
+		return err
+	}
+	client, err := newClient()
+	if err != nil {
+		return fmt.Errorf("LFS client: %w", err)
+	}
+	uploaded, err := lfs.UploadBlob(client, content)
+	if err != nil {
+		return err
+	}
+
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	// swapRef sets (or, for nil, removes) the meta.json entry and returns
+	// the previous one so a failure can put it back exactly.
+	swapRef := func(ref *lfs.FileRef) (prev *lfs.FileRef, err error) {
+		err = lfs.MutateSessionMeta(ctx, sessionDir, func(m *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+			if m == nil {
+				return nil, errors.New("meta.json missing")
+			}
+			if m.Files == nil {
+				m.Files = map[string]lfs.FileRef{}
+			}
+			if old, ok := m.Files[name]; ok {
+				prev = &old
+			}
+			if ref == nil {
+				delete(m.Files, name)
+			} else {
+				m.Files[name] = *ref
+			}
+			return m, nil
+		})
+		return prev, err
+	}
+	newRef := uploaded.Ref()
+	prev, err := swapRef(&newRef)
+	if err != nil {
+		return fmt.Errorf("record OID in meta.json: %w", err)
+	}
+	if err = lfs.WritePointerFile(pointerPath, uploaded); err == nil {
+		err = os.Rename(tmpName, cachePath)
+	}
+	if err != nil {
+		_, restoreMeta := swapRef(prev)
+		return errors.Join(err, os.WriteFile(pointerPath, oldPointer, 0o600), restoreMeta)
 	}
 	return nil
+}
+
+// stageAndAmendRedactedFiles stages and amends only repaired files and metadata.
+// The caller holds the repo lock and checks Git state before staging.
+func stageAndAmendRedactedFiles(ctx context.Context, ledgerPath string, repairedPaths []string) error {
+	paths := make([]string, 0, len(repairedPaths))
+	for _, p := range repairedPaths {
+		paths = append(paths, ":(literal)"+p)
+	}
+	sort.Strings(paths)
+	addArgs := append([]string{"add", "--sparse", "--"}, paths...)
+	if _, err := gitutil.RunGit(ctx, ledgerPath, addArgs...); err != nil {
+		return err
+	}
+	_, err := gitutil.AmendLedgerSnapshot(ctx, ledgerPath, paths...)
+	return err
 }
 
 // groupFindingsByPath buckets findings by file so the interactive prompt

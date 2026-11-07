@@ -1,52 +1,14 @@
 package store
 
 import (
+	"context"
 	"database/sql"
-	"errors"
 	"fmt"
-	"strings"
-	"time"
+	"sync"
 
-	sqlite "modernc.org/sqlite"
-	sqlite3 "modernc.org/sqlite/lib"
+	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
+	"github.com/sageox/ox/internal/sqliteerr"
 )
-
-// isDuplicateColumnError reports whether err is SQLite's "duplicate column
-// name: <column>" error for the exact column just attempted — the signature a
-// losing `ALTER TABLE ADD COLUMN` gets when a concurrent caller already added
-// that column. SQLite has no `ADD COLUMN IF NOT EXISTS`, so every migration
-// checks column existence and then ALTERs in two separate statements; on a
-// brand-new database two openers (e.g. `ox index code` racing another
-// `Open`/`OpenSQLOnly` of the same freshly created codedb — see #758) can both
-// observe the column missing and both attempt the ALTER. The loser's failure
-// here means the column exists now, which is exactly what was wanted, so it must
-// not fail the whole CreateSchema call.
-//
-// The match is deliberately narrow: a typed *sqlite.Error carrying the generic
-// SQLITE_ERROR code whose message names the column we tried to add. Requiring
-// the column name stops a duplicate on some *other* column (a real schema bug)
-// from being silently swallowed; the type+code check stops an unrelated error
-// whose text merely contains the phrase from slipping through.
-func isDuplicateColumnError(err error, column string) bool {
-	var sqErr *sqlite.Error
-	if !errors.As(err, &sqErr) || sqErr.Code() != sqlite3.SQLITE_ERROR {
-		return false
-	}
-	// SQLite formats this as "duplicate column name: <col>" (modernc appends a
-	// trailing " (code)"). Compare the column exactly — a substring check would
-	// let "sign" match "signature".
-	const marker = "duplicate column name: "
-	msg := sqErr.Error()
-	idx := strings.Index(msg, marker)
-	if idx < 0 {
-		return false
-	}
-	reported := msg[idx+len(marker):]
-	if end := strings.IndexAny(reported, " \t\r\n"); end >= 0 {
-		reported = reported[:end]
-	}
-	return reported == column
-}
 
 // columnDDL pairs a column name with the ALTER statement that adds it.
 type columnDDL struct {
@@ -54,33 +16,18 @@ type columnDDL struct {
 	ddl  string
 }
 
-const schemaBusyAttempts = 3
-
-// testMigrationBusyHook lets lock-contention tests release a real writer only
-// after the migration has received SQLITE_BUSY. Sequential tests only.
-var testMigrationBusyHook func(error)
-
 // addColumnsIfMissing adds each of cols to table that is not already present.
 // It reads the current column set once, then issues ALTERs only for the columns
-// still missing. This makes a multi-column migration resumable: a process that
-// crashed (or an older ox) after adding only some of its columns adds the rest
-// on the next run, instead of a single guard column short-circuiting the whole
-// migration and leaving the schema permanently partial.
+// still missing. This makes a multi-column migration resumable: an older ox ran
+// each ALTER as its own transaction, so one that crashed partway left some
+// columns added, and the next run adds the rest instead of a single guard
+// column short-circuiting the whole migration.
 //
-// The single up-front read is deliberate. Checking each column immediately
-// before its own ALTER interleaves schema reads with the concurrent ALTERs of
-// other openers on a fresh codedb, and that contention corrupted a 16-way
-// fresh-open race in testing. Reading once keeps the hot path as cheap as the
-// original single guarded check while still recovering a partial schema.
-//
-// The check-then-ALTER is not atomic, so two openers can both observe a column
-// missing and both ALTER; the loser's "duplicate column name" is success, not
-// failure (see isDuplicateColumnError and #758).
 // addColumnsIfMissing reports whether it added any column (added), which callers
 // use to gate one-shot backfills that must run only when the migration did real
 // work — not on every reopen of an already-current schema.
-func addColumnsIfMissing(db *sql.DB, table string, cols []columnDDL) (added bool, err error) {
-	existing, err := existingColumns(db, table)
+func addColumnsIfMissing(ctx context.Context, q codedbsqlc.DBTX, table string, cols []columnDDL) (added bool, err error) {
+	existing, err := existingColumns(ctx, q, table)
 	if err != nil {
 		return false, err
 	}
@@ -88,35 +35,17 @@ func addColumnsIfMissing(db *sql.DB, table string, cols []columnDDL) (added bool
 		if existing[c.name] {
 			continue
 		}
-		// A column observed missing here is being applied by this call, whether
-		// our own ALTER wins or a concurrent caller's does; either way the
-		// migration is doing real work.
-		added = true
-		addColumnRaceHook(c.name)
-		// Each Exec is its own transaction. A BUSY_SNAPSHOT cannot be repaired
-		// by retrying inside the same read transaction; these attempts obtain a
-		// fresh statement snapshot instead. Another opener may finish the ALTER
-		// while we wait, in which case the exact duplicate-column result wins.
-		for attempt := range schemaBusyAttempts {
-			_, execErr := db.Exec(c.ddl)
-			if execErr == nil || isDuplicateColumnError(execErr, c.name) {
-				break
-			}
-			if !IsSQLiteBusy(execErr) || attempt == schemaBusyAttempts-1 {
-				return added, fmt.Errorf("add column %s.%s: %w", table, c.name, execErr)
-			}
-			if testMigrationBusyHook != nil {
-				testMigrationBusyHook(execErr)
-			}
-			time.Sleep(20 * time.Millisecond)
+		if _, err := q.ExecContext(ctx, c.ddl); err != nil {
+			return added, fmt.Errorf("add column %s.%s: %w", table, c.name, err)
 		}
+		added = true
 	}
 	return added, nil
 }
 
 // existingColumns returns the set of column names currently defined on table.
-func existingColumns(db *sql.DB, table string) (map[string]bool, error) {
-	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+func existingColumns(ctx context.Context, q codedbsqlc.DBTX, table string) (map[string]bool, error) {
+	rows, err := q.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
 	if err != nil {
 		return nil, fmt.Errorf("read columns of %s: %w", table, err)
 	}
@@ -130,26 +59,6 @@ func existingColumns(db *sql.DB, table string) (map[string]bool, error) {
 		cols[name] = true
 	}
 	return cols, rows.Err()
-}
-
-// testAddColumnRaceHook, when non-nil, is invoked by addColumnsIfMissing
-// immediately before it attempts the ALTER for a still-missing column, passed
-// that column's name. Production always leaves this nil
-// (a lock-free read of a package global, effectively zero cost). Tests use it to
-// force the #758 race window deterministically — pausing N goroutines right
-// after they have all observed "missing" and releasing them together — rather
-// than betting on goroutine scheduling to hit a microsecond-wide window.
-//
-// It MUST only ever be set from a test that does NOT call t.Parallel():
-// production reads this global lock-free from concurrent migration goroutines,
-// so a parallel test that writes it while another test's migrations read it is a
-// data race on this variable.
-var testAddColumnRaceHook func(column string)
-
-func addColumnRaceHook(column string) {
-	if testAddColumnRaceHook != nil {
-		testAddColumnRaceHook(column)
-	}
 }
 
 const schemaDDL = `
@@ -346,58 +255,124 @@ CREATE INDEX IF NOT EXISTS idx_issues_created_at ON issues(created_at);
 CREATE INDEX IF NOT EXISTS idx_commits_timestamp ON commits(timestamp);
 `
 
-// CreateSchema initializes the SQLite tables and indexes, and runs all
-// pending migrations. "Migrations" here include both schema migrations
-// (idempotent ALTER/CREATE) and one-shot data repairs that recover from
-// historical bugs (see migrateInvalidateGitHubMtimesForIssue474). New
-// migrations should be appended at the end and gated by their own
-// idempotency check (column existence, sentinel row, etc.).
+// CreateSchema brings db's schema up to date: the tables and indexes in
+// schemaDDL, then every migration in applySchema.
+//
+// It first runs applySchema on a query_only connection, which never takes the
+// write lock. On a current schema every statement is a guarded no-op, so the pass
+// succeeds and the open does not queue behind a writer such as the daemon's
+// indexer. When a statement would write, SQLite refuses it with SQLITE_READONLY,
+// and only then does CreateSchema take the write lock, once, and run applySchema
+// again in a single BEGIN IMMEDIATE transaction. (A connection whose cached
+// schema predates another opener's commit can be refused for a statement that is
+// now a no-op; it takes the write path and commits nothing.)
+//
+// The single transaction replaces a convoy. While each statement was its own
+// transaction, every opener took the write lock for each statement it found
+// missing, so concurrent openers of a new or outdated codedb handed the lock back
+// and forth dozens of times each, and under load one wait outlasted busy_timeout:
+// "create schema: database is locked". Now an opener takes the lock at most once,
+// and one that gets it after another opener committed finds every statement a
+// no-op.
 func CreateSchema(db *sql.DB) error {
-	_, err := db.Exec(schemaDDL)
-	if err != nil {
+	ctx := context.Background()
+	needsWrite := false
+	err := withConn(ctx, db, []pragmaOverride{queryOnly}, func(conn *sql.Conn) error {
+		err := applySchema(ctx, conn)
+		if sqliteerr.IsReadOnly(err) {
+			needsWrite = true
+			return nil
+		}
+		return err
+	})
+	if err != nil || !needsWrite {
 		return err
 	}
-	if err := migrateAddTypeInfo(db); err != nil {
+	schemaMu.Lock()
+	defer schemaMu.Unlock()
+	return withConn(ctx, db, nil, func(conn *sql.Conn) error {
+		return inImmediateTx(ctx, conn, func() error {
+			if err := applySchema(ctx, conn); err != nil {
+				return err
+			}
+			if testSchemaAppliedHook != nil {
+				testSchemaAppliedHook()
+			}
+			return nil
+		})
+	})
+}
+
+// schemaMu makes openers in this process take turns at the write lock for a
+// schema change, of any codedb. Waiting for SQLite's write lock means polling
+// it, each poll takes SQLite's process-wide VFS mutex, and the opener holding the
+// write lock needs that same mutex to commit, so many connections in one process
+// waiting on each other can stall that commit past their busy_timeout. Openers in
+// other processes still meet at SQLite's lock, one per process.
+var schemaMu sync.Mutex
+
+// testSchemaAppliedHook, when non-nil, runs inside CreateSchema's write
+// transaction after applySchema and before COMMIT, so a test can hold the
+// transaction open and inspect what other connections see. CreateSchema reads
+// it without a lock: set it only from tests that do not call t.Parallel().
+var testSchemaAppliedHook func()
+
+// applySchema runs schemaDDL and then every migration, oldest first.
+// "Migrations" include both schema migrations (idempotent ALTER/CREATE) and
+// one-shot data repairs that recover from historical bugs (see
+// migrateInvalidateGitHubMtimesForIssue474).
+//
+// Every statement is guarded (CREATE ... IF NOT EXISTS, a table or column
+// existence check, a sentinel row), so against a current schema none of them
+// writes. CreateSchema's query_only pass and the read-only open
+// (openSQLiteReadOnly) both rely on that. Append new migrations at the end with
+// their own guard: one that writes unconditionally would make every open take
+// the write lock.
+func applySchema(ctx context.Context, q codedbsqlc.DBTX) error {
+	if _, err := q.ExecContext(ctx, schemaDDL); err != nil {
 		return err
 	}
-	if err := migrateAddComments(db); err != nil {
+	if err := migrateAddTypeInfo(ctx, q); err != nil {
 		return err
 	}
-	if err := migrateAddGitHubTables(db); err != nil {
+	if err := migrateAddComments(ctx, q); err != nil {
 		return err
 	}
-	if err := migrateAddPRCommits(db); err != nil {
+	if err := migrateAddGitHubTables(ctx, q); err != nil {
 		return err
 	}
-	if err := migrateAddEdgeVersion(db); err != nil {
+	if err := migrateAddPRCommits(ctx, q); err != nil {
 		return err
 	}
-	return migrateInvalidateGitHubMtimesForIssue474(db)
+	if err := migrateAddEdgeVersion(ctx, q); err != nil {
+		return err
+	}
+	return migrateInvalidateGitHubMtimesForIssue474(ctx, q)
 }
 
 // migrateAddEdgeVersion adds the blobs.edge_version column used by the ADR-019
 // resolver. Existing rows default to 0; the backfill routine bumps them to the
 // current resolver version after edges are populated, and ParseSymbols stamps
 // new blobs at the current version inline.
-func migrateAddEdgeVersion(db *sql.DB) error {
-	if _, err := addColumnsIfMissing(db, "blobs", []columnDDL{
+func migrateAddEdgeVersion(ctx context.Context, q codedbsqlc.DBTX) error {
+	if _, err := addColumnsIfMissing(ctx, q, "blobs", []columnDDL{
 		{"edge_version", `ALTER TABLE blobs ADD COLUMN edge_version INTEGER NOT NULL DEFAULT 0`},
 	}); err != nil {
 		return err
 	}
 	// Index supports the backfill scan: find blobs needing edges fast.
-	_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_blobs_edge_version ON blobs(edge_version)`)
+	_, err := q.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_blobs_edge_version ON blobs(edge_version)`)
 	return err
 }
 
 // migrateAddTypeInfo adds signature, return_type, and params columns to the
 // symbols table for databases created before those columns existed.
-func migrateAddTypeInfo(db *sql.DB) error {
+func migrateAddTypeInfo(ctx context.Context, q codedbsqlc.DBTX) error {
 	// Each column is added independently (see addColumnsIfMissing) so the
 	// migration is resumable: the previous single-guard-on-signature form left
 	// return_type/params permanently absent if a process died (or was an older
 	// ox) after only the first ALTER landed.
-	added, err := addColumnsIfMissing(db, "symbols", []columnDDL{
+	added, err := addColumnsIfMissing(ctx, q, "symbols", []columnDDL{
 		{"signature", `ALTER TABLE symbols ADD COLUMN signature TEXT`},
 		{"return_type", `ALTER TABLE symbols ADD COLUMN return_type TEXT`},
 		{"params", `ALTER TABLE symbols ADD COLUMN params TEXT`},
@@ -413,7 +388,7 @@ func migrateAddTypeInfo(db *sql.DB) error {
 	if !added {
 		return nil
 	}
-	if _, err := db.Exec(`UPDATE blobs SET parsed = 0 WHERE language IS NOT NULL`); err != nil {
+	if _, err := q.ExecContext(ctx, `UPDATE blobs SET parsed = 0 WHERE language IS NOT NULL`); err != nil {
 		return fmt.Errorf("invalidate parsed blobs after type-info migration: %w", err)
 	}
 	return nil
@@ -421,9 +396,9 @@ func migrateAddTypeInfo(db *sql.DB) error {
 
 // migrateAddComments creates the comments table and adds the comments_parsed
 // column to blobs for databases created before comment indexing existed.
-func migrateAddComments(db *sql.DB) error {
+func migrateAddComments(ctx context.Context, q codedbsqlc.DBTX) error {
 	var exists bool
-	err := db.QueryRow(`SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='comments'`).Scan(&exists)
+	err := q.QueryRowContext(ctx, `SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='comments'`).Scan(&exists)
 	if err != nil {
 		return err
 	}
@@ -443,21 +418,21 @@ func migrateAddComments(db *sql.DB) error {
 			`CREATE INDEX IF NOT EXISTS idx_comments_kind ON comments(kind)`,
 		}
 		for _, s := range stmts {
-			if _, err := db.Exec(s); err != nil {
+			if _, err := q.ExecContext(ctx, s); err != nil {
 				return err
 			}
 		}
 	}
 
 	// add comments_parsed column to blobs if missing
-	if _, err := addColumnsIfMissing(db, "blobs", []columnDDL{
+	if _, err := addColumnsIfMissing(ctx, q, "blobs", []columnDDL{
 		{"comments_parsed", `ALTER TABLE blobs ADD COLUMN comments_parsed INTEGER NOT NULL DEFAULT 0`},
 	}); err != nil {
 		return err
 	}
 
 	// index for fast unparsed-comments lookups
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_blobs_comments_parsed ON blobs(comments_parsed)`); err != nil {
+	if _, err := q.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_blobs_comments_parsed ON blobs(comments_parsed)`); err != nil {
 		return err
 	}
 
@@ -466,9 +441,9 @@ func migrateAddComments(db *sql.DB) error {
 
 // migrateAddGitHubTables adds pull_requests, pr_comments, issues, and
 // issue_comments tables for databases created before GitHub data indexing.
-func migrateAddGitHubTables(db *sql.DB) error {
+func migrateAddGitHubTables(ctx context.Context, q codedbsqlc.DBTX) error {
 	var exists bool
-	err := db.QueryRow(`SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='pull_requests'`).Scan(&exists)
+	err := q.QueryRowContext(ctx, `SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='pull_requests'`).Scan(&exists)
 	if err != nil {
 		return err
 	}
@@ -543,7 +518,7 @@ func migrateAddGitHubTables(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_commits_timestamp ON commits(timestamp)`,
 	}
 	for _, s := range stmts {
-		if _, err := db.Exec(s); err != nil {
+		if _, err := q.ExecContext(ctx, s); err != nil {
 			return err
 		}
 	}
@@ -566,15 +541,16 @@ func migrateAddGitHubTables(db *sql.DB) error {
 // per database. The sentinel uses an invalid filesystem path so it can't
 // collide with a real source_path.
 //
-// The DELETE and sentinel INSERT run inside a transaction so a crash between
-// them can't strand the cache in a "deleted but not marked done" state, which
-// would otherwise wipe the freshly-rebuilt cache on every subsequent Open().
-func migrateInvalidateGitHubMtimesForIssue474(db *sql.DB) error {
+// CreateSchema writes only inside its one transaction, so the DELETE and the
+// sentinel INSERT commit together: a crash between them can't strand the cache
+// in a "deleted but not marked done" state, which would otherwise wipe the
+// freshly-rebuilt cache on every subsequent Open().
+func migrateInvalidateGitHubMtimesForIssue474(ctx context.Context, q codedbsqlc.DBTX) error {
 	const sentinelPath = "__migration_474_indexer_lex_order__"
 
 	// idempotent: skip if sentinel already present
 	var done bool
-	err := db.QueryRow(
+	err := q.QueryRowContext(ctx,
 		`SELECT COUNT(*) > 0 FROM github_file_mtimes WHERE source_path = ?`,
 		sentinelPath,
 	).Scan(&done)
@@ -585,29 +561,21 @@ func migrateInvalidateGitHubMtimesForIssue474(db *sql.DB) error {
 		return nil
 	}
 
-	tx, err := db.Begin()
-	if err != nil {
+	if _, err := q.ExecContext(ctx, `DELETE FROM github_file_mtimes`); err != nil {
 		return err
 	}
-	defer tx.Rollback() //nolint:errcheck // rollback after successful commit is a no-op
-
-	if _, err := tx.Exec(`DELETE FROM github_file_mtimes`); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(
+	_, err = q.ExecContext(ctx,
 		`INSERT INTO github_file_mtimes (source_path, mtime_unix) VALUES (?, 0)`,
 		sentinelPath,
-	); err != nil {
-		return err
-	}
-	return tx.Commit()
+	)
+	return err
 }
 
 // migrateAddPRCommits creates the pr_commits table for databases created
 // before PR commit indexing existed.
-func migrateAddPRCommits(db *sql.DB) error {
+func migrateAddPRCommits(ctx context.Context, q codedbsqlc.DBTX) error {
 	var exists bool
-	err := db.QueryRow(`SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='pr_commits'`).Scan(&exists)
+	err := q.QueryRowContext(ctx, `SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='pr_commits'`).Scan(&exists)
 	if err != nil {
 		return err
 	}
@@ -625,7 +593,7 @@ func migrateAddPRCommits(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_pr_commits_sha ON pr_commits(sha)`,
 	}
 	for _, s := range stmts {
-		if _, err := db.Exec(s); err != nil {
+		if _, err := q.ExecContext(ctx, s); err != nil {
 			return err
 		}
 	}

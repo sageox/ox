@@ -1,6 +1,8 @@
 package autofix
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -42,6 +44,15 @@ func seedSession(t *testing.T, sessionsDir, name string, m *lfs.SessionMeta, sum
 	return dir
 }
 
+// commitTitleLedger makes ledger a git repo with its seeded sessions/ committed,
+// so a title repair has a HEAD to compare against and commit onto.
+func commitTitleLedger(t *testing.T, ledger string) {
+	t.Helper()
+	afGit(t, ledger, "init", "--initial-branch=main")
+	afGit(t, ledger, "add", "sessions")
+	afGit(t, ledger, "commit", "-m", "seed sessions")
+}
+
 // TestRepairLedgerSessionTitles_HealthyLedgerIsClean is the
 // idempotency floor for the autofix check. A ledger whose sessions all
 // have populated titles must emit StatusClean — anything else would
@@ -53,7 +64,7 @@ func TestRepairLedgerSessionTitles_HealthyLedgerIsClean(t *testing.T) {
 	seedSession(t, sessionsDir, "2026-05-01T10-00-test-OxAAAA", &lfs.SessionMeta{Title: "Real one"}, "")
 	seedSession(t, sessionsDir, "2026-05-01T11-00-test-OxBBBB", &lfs.SessionMeta{Title: "Another real"}, "")
 
-	res := repairLedgerSessionTitles(sessionsDir, "/fake/repo")
+	res := repairLedgerSessionTitles(context.Background(), sessionsDir, "/fake/repo")
 	assert.Equal(t, StatusClean, res.Status, "all-healthy ledger must report clean")
 }
 
@@ -68,7 +79,7 @@ func TestRepairLedgerSessionTitles_PendingLedgerIsClean(t *testing.T) {
 	require.NoError(t, err)
 
 	for range lfs.MaxSummaryAttempts + 1 {
-		res := repairLedgerSessionTitles(sessionsDir, "/fake/repo")
+		res := repairLedgerSessionTitles(context.Background(), sessionsDir, "/fake/repo")
 		assert.Equal(t, StatusClean, res.Status, "pending summary belongs to the summarization path")
 		after, err := os.ReadFile(metaPath)
 		require.NoError(t, err)
@@ -80,6 +91,9 @@ func TestRepairLedgerSessionTitles_PendingLedgerIsClean(t *testing.T) {
 // path proof that the daemon's autofix scheduler can fix the user's
 // existing broken sessions on its own once a clean summary.json
 // exists alongside the empty-title meta.
+// Failure prevented: the repair left as an uncommitted meta.json edit on
+// every clone, which wedges a clone's Ledger sync when a teammate pushes a
+// different summary for the same session.
 func TestRepairLedgerSessionTitles_RecoversFromSummaryJSON(t *testing.T) {
 	ledger := t.TempDir()
 	sessionsDir := filepath.Join(ledger, "sessions")
@@ -87,10 +101,14 @@ func TestRepairLedgerSessionTitles_RecoversFromSummaryJSON(t *testing.T) {
 	dir := seedSession(t, sessionsDir, "2026-05-01T10-00-test-OxRECO",
 		&lfs.SessionMeta{Title: "", SummaryStatus: "failed_validation", SummaryAttempts: 1},
 		"Recovered Title From summary.json")
+	commitTitleLedger(t, ledger)
+	countBefore := commitCount(t, ledger)
 
-	res := repairLedgerSessionTitles(sessionsDir, "/fake/repo")
+	res := repairLedgerSessionTitles(context.Background(), sessionsDir, ledger)
 	assert.Equal(t, StatusFixed, res.Status, "recovery must surface as Fixed")
 	assert.Contains(t, res.Summary, "recovered=1")
+	assert.Empty(t, afGit(t, ledger, "status", "--porcelain"), "the repair must be committed, not left as a local edit")
+	assert.Equal(t, countBefore+1, commitCount(t, ledger), "exactly one commit")
 
 	got, err := lfs.ReadSessionMeta(dir)
 	require.NoError(t, err)
@@ -116,7 +134,7 @@ func TestRepairLedgerSessionTitles_NeverCountsSummaryAttempts(t *testing.T) {
 			require.NoError(t, err)
 
 			for range lfs.MaxSummaryAttempts + 1 {
-				res := repairLedgerSessionTitles(sessionsDir, "/fake/repo")
+				res := repairLedgerSessionTitles(context.Background(), sessionsDir, "/fake/repo")
 				assert.Equal(t, StatusClean, res.Status)
 			}
 
@@ -130,14 +148,16 @@ func TestRepairLedgerSessionTitles_NeverCountsSummaryAttempts(t *testing.T) {
 // TestRepairLedgerSessionTitles_MovesLeakedDiagnostic: the tidy-up that
 // survives the attempt counter's removal still runs, without counting.
 func TestRepairLedgerSessionTitles_MovesLeakedDiagnostic(t *testing.T) {
-	sessionsDir := t.TempDir()
+	ledger := t.TempDir()
+	sessionsDir := filepath.Join(ledger, "sessions")
 	dir := filepath.Join(sessionsDir, "2026-05-01T10-00-test-OxLEAK")
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	const leaked = "Summary failed content validation: title too short"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"),
 		[]byte(`{"version":"1.0","session_name":"2026-05-01T10-00-test-OxLEAK","summary":"`+leaked+`","summary_status":"failed_validation","summary_attempts":1}`), 0o644))
+	commitTitleLedger(t, ledger)
 
-	res := repairLedgerSessionTitles(sessionsDir, "/fake/repo")
+	res := repairLedgerSessionTitles(context.Background(), sessionsDir, ledger)
 	assert.Equal(t, StatusFixed, res.Status)
 	assert.Contains(t, res.Summary, "moved_diagnostic=1")
 
@@ -147,7 +167,31 @@ func TestRepairLedgerSessionTitles_MovesLeakedDiagnostic(t *testing.T) {
 	assert.Equal(t, leaked, got.ValidationError)
 	assert.Equal(t, "failed_validation", got.SummaryStatus)
 	assert.Equal(t, 1, got.SummaryAttempts, "moving a diagnostic is not a summary attempt")
-	assert.Equal(t, StatusClean, repairLedgerSessionTitles(sessionsDir, "/fake/repo").Status, "second pass must be a no-op")
+	assert.Equal(t, StatusClean, repairLedgerSessionTitles(context.Background(), sessionsDir, ledger).Status, "second pass must be a no-op")
+}
+
+// Failure prevented: restoreRepairedMetas runs `git checkout --` on a failed
+// commit, which would destroy an edit that existed before the repair.
+func TestRepairLedgerSessionTitles_SkipsMetaThatDiffersFromHead(t *testing.T) {
+	ledger := t.TempDir()
+	sessionsDir := filepath.Join(ledger, "sessions")
+	dir := seedSession(t, sessionsDir, "2026-05-01T10-00-test-OxDIRT",
+		&lfs.SessionMeta{SummaryStatus: "failed_validation", SummaryAttempts: 1}, "Recovered title")
+	commitTitleLedger(t, ledger)
+	metaFile := filepath.Join(dir, "meta.json")
+	data, err := os.ReadFile(metaFile)
+	require.NoError(t, err)
+	dirty := append(bytes.TrimRight(data, "\n"), []byte("\n\n")...)
+	require.NoError(t, os.WriteFile(metaFile, dirty, 0o644))
+	headBefore := afGit(t, ledger, "rev-parse", "HEAD")
+
+	res := repairLedgerSessionTitles(context.Background(), sessionsDir, ledger)
+
+	assert.Equal(t, StatusClean, res.Status, res.Summary)
+	after, err := os.ReadFile(metaFile)
+	require.NoError(t, err)
+	assert.Equal(t, dirty, after, "pre-existing edit must be untouched")
+	assert.Equal(t, headBefore, afGit(t, ledger, "rev-parse", "HEAD"))
 }
 
 // TestRepairLedgerSessionTitles_MissingDirIsClean covers the common
@@ -155,29 +199,31 @@ func TestRepairLedgerSessionTitles_MovesLeakedDiagnostic(t *testing.T) {
 // NOT surface "read sessions dir: no such file" as an error every
 // 30 minutes for every workspace whose ledger isn't ready yet.
 func TestRepairLedgerSessionTitles_MissingDirIsClean(t *testing.T) {
-	res := repairLedgerSessionTitles(filepath.Join(t.TempDir(), "no-such-dir"), "/fake/repo")
+	res := repairLedgerSessionTitles(context.Background(), filepath.Join(t.TempDir(), "no-such-dir"), "/fake/repo")
 	assert.Equal(t, StatusClean, res.Status, "missing sessions dir is normal during clone — must not error")
 }
 
 // Successful repairs must not clear the warning for remaining corrupt sessions.
 func TestRepairLedgerSessionTitles_PartialRepairKeepsWarning(t *testing.T) {
-	sessionsDir := t.TempDir()
+	ledger := t.TempDir()
+	sessionsDir := filepath.Join(ledger, "sessions")
 	seedSession(t, sessionsDir, "recoverable", &lfs.SessionMeta{}, "Recovered title")
 	corruptDir := filepath.Join(sessionsDir, "corrupt")
 	require.NoError(t, os.Mkdir(corruptDir, 0o700))
 	corruptPath := filepath.Join(corruptDir, "meta.json")
 	const corrupt = "{\n<<<<<<< HEAD\n"
 	require.NoError(t, os.WriteFile(corruptPath, []byte(corrupt), 0o600))
+	commitTitleLedger(t, ledger)
 
-	res := repairLedgerSessionTitles(sessionsDir, "/fake/repo")
+	res := repairLedgerSessionTitles(context.Background(), sessionsDir, ledger)
 	assert.Equal(t, StatusFound, res.Status, "one successful repair must not hide another session's error")
 	assert.Contains(t, res.Summary, "recovered=1")
 	assert.Contains(t, res.Summary, "errored=1")
-	assert.Equal(t, StatusFound, repairLedgerSessionTitles(sessionsDir, "/fake/repo").Status)
+	assert.Equal(t, StatusFound, repairLedgerSessionTitles(context.Background(), sessionsDir, ledger).Status)
 	meta, err := lfs.ReadSessionMeta(filepath.Join(sessionsDir, "recoverable"))
 	require.NoError(t, err)
 	assert.Equal(t, "Recovered title", meta.Title)
-	bytes, err := os.ReadFile(corruptPath)
+	content, err := os.ReadFile(corruptPath)
 	require.NoError(t, err)
-	assert.Equal(t, corrupt, string(bytes))
+	assert.Equal(t, corrupt, string(content))
 }

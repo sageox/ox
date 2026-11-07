@@ -283,6 +283,9 @@ func TestReviewJSON_ConflictingCopiesAreNotComplete(t *testing.T) {
 	if shown.Complete || len(shown.Conflicts) != 1 {
 		t.Errorf("feedback show --json: want complete=false and one conflict, got complete=%v conflicts=%+v", shown.Complete, shown.Conflicts)
 	}
+	if !strings.Contains(shown.Guidance, "untrusted data") {
+		t.Errorf("feedback show --json must say the reviewers' text is untrusted, got guidance %q", shown.Guidance)
+	}
 	if res, _ := awaitSnapshot(dir); res.Complete || len(res.Conflicts) != 1 {
 		t.Errorf("await: want complete=false and one conflict, got complete=%v conflicts=%+v", res.Complete, res.Conflicts)
 	}
@@ -409,7 +412,10 @@ func applyExport(t *testing.T, slug, body string) (string, error) {
 func TestRunPlanFeedbackApply_StoresAnExportedDrawingWhole(t *testing.T) {
 	_, planDir := saveFeedbackTestPlan(t, "apply-drawn")
 	item, sent := drawingExport(t)
-	if _, err := applyExport(t, "apply-drawn", `{"reviewer":"Avery","items":[],"marks":[`+item+`]}`); err != nil {
+	// Future fields must survive the CLI's raw-object re-freeze too, including
+	// numbers that cannot round-trip through a float64.
+	item = strings.TrimSuffix(item, "}") + `,"future":9007199254740993}`
+	if _, err := applyExport(t, "apply-drawn", `{"reviewer":"Avery","future":"retain me","items":[],"marks":[`+item+`]}`); err != nil {
 		t.Fatal(err)
 	}
 	rev := plan.ReadReview(planDir)
@@ -420,6 +426,21 @@ func TestRunPlanFeedbackApply_StoresAnExportedDrawingWhole(t *testing.T) {
 	_ = json.Unmarshal(rev.Items[0].Region, &stored)
 	if !reflect.DeepEqual(stored, sent) {
 		t.Errorf("the stored region is not the drawing as exported:\n got %s", rev.Items[0].Region)
+	}
+	files, err := filepath.Glob(filepath.Join(planDir, "feedback", "round-*.json"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("want one stored round, got %v (%v)", files, err)
+	}
+	raw, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var round struct {
+		Future string
+		Items  []struct{ Future json.Number }
+	}
+	if err := json.Unmarshal(raw, &round); err != nil || round.Future != "retain me" || len(round.Items) != 1 || round.Items[0].Future.String() != "9007199254740993" {
+		t.Fatalf("apply dropped or changed unknown fields: %s (%v)", raw, err)
 	}
 }
 

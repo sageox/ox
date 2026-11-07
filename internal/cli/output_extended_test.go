@@ -56,9 +56,11 @@ func TestSetNoInteractive(t *testing.T) {
 
 	SetNoInteractive(true)
 	assert.True(t, noInteractive)
+	assert.True(t, NoInteractive(), "getter must report what the setter stored")
 
 	SetNoInteractive(false)
 	assert.False(t, noInteractive)
+	assert.False(t, NoInteractive(), "getter must report what the setter stored")
 }
 
 func TestIsInteractive_NoInteractiveFlag(t *testing.T) {

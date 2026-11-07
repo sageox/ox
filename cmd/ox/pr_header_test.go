@@ -13,36 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestArtifactURL(t *testing.T) {
-	const ep = "https://sageox.ai"
-	tests := []struct {
-		name, raw, prefix, idPrefix, want string
-	}{
-		{"full https passthrough", "https://test.sageox.ai/c/ses_x", "/c/", "ses_", "https://test.sageox.ai/c/ses_x"},
-		{"full http passthrough", "http://localhost:3000/plan/pln_x", "/plan/", "pln_", "http://localhost:3000/plan/pln_x"},
-		{"bare session id", "ses_9f2a3c", "/c/", "ses_", "https://sageox.ai/c/ses_9f2a3c"},
-		{"bare plan id", "pln_4d8e2f", "/plan/", "pln_", "https://sageox.ai/plan/pln_4d8e2f"},
-		{"prefixless id still resolves", "abc", "/plan/", "pln_", "https://sageox.ai/plan/abc"},
-		{"mismatched type prefix is rejected", "ses_9f2a3c", "/plan/", "pln_", ""},
-		{"empty is dropped", "  ", "/c/", "ses_", ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := artifactURL(ep, tc.raw, tc.prefix, tc.idPrefix); got != tc.want {
-				t.Errorf("artifactURL(%q) = %q, want %q", tc.raw, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestArtifactURL_noEndpointDropsBareID(t *testing.T) {
-	// A bare id with no endpoint has no way to become a real URL — drop it
-	// rather than emit a relative link.
-	if got := artifactURL("", "ses_x", "/c/", "ses_"); got != "" {
-		t.Errorf("want empty for bare id + no endpoint, got %q", got)
-	}
-}
-
 // --- Command-level proofs: drive the real runPRHeader against a real project ---
 //
 // These exercise the JOIN the unit tests above cannot: a coworker standing in

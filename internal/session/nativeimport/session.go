@@ -36,10 +36,15 @@ func IsNativeID(id string) bool { return uuidPattern.MatchString(id) }
 // Session is one native session file, read structurally.
 type Session struct {
 	Agent    Agent
-	NativeID string // lowercase UUID; the filename and every record agree on it
+	NativeID string // lowercase UUID; the filename and every record of its own carry it
 	Path     string
 	Size     int64
 	ModTime  time.Time
+
+	// Offset is where the session's own records begin. It is past zero only
+	// for a resumed or forked Claude Code transcript, whose file opens with a
+	// copy of the conversation it continues; the import reads from here.
+	Offset int64
 
 	StartedAt    time.Time // first timestamped record, UTC
 	LastActivity time.Time // latest timestamped record, UTC

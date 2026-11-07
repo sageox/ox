@@ -15,9 +15,9 @@ import (
 
 func TestSessionSecretGateCannotBypassFailedVerification(t *testing.T) {
 	t.Setenv("OX_ALLOW_SECRETS", "1")
+	ledger := newLedgerTestRepo(t)
 	for _, amend := range []bool{false, true} {
 		for _, failOn := range []int{1, 2} {
-			ledger := t.TempDir()
 			calls := 0
 			failure := errors.New("synthetic scanner failure")
 			err := runSessionSecretGate(context.Background(), ledger, func() (*PrePushScanResult, error) {
@@ -34,10 +34,39 @@ func TestSessionSecretGateCannotBypassFailedVerification(t *testing.T) {
 	}
 }
 
+// Failure prevented: a clean working-tree rescan hides a failed amend, leaving
+// the secret-bearing holding commit unchanged.
+func TestSessionSecretGate_RejectsIncompleteAutoRedaction(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real Ledger history and canonical redaction")
+	}
+	t.Setenv("OX_ALLOW_SECRETS", "1")
+	const rel = "sessions/incomplete/raw.jsonl"
+	const canary = "AKIAIOSFODNN7EXAMPLE"
+	work := makeLedgerWithCommit(t, map[string]string{
+		rel:                             `{"type":"text","value":"` + canary + `"}` + "\n",
+		"sessions/incomplete/meta.json": `{"version":"1.0","session_name":"incomplete","agent_id":"OxHold","created_at":"2026-05-11T00:00:00Z","files":{}}`,
+	})
+	head := mustGitCapture(t, work, "rev-parse", "HEAD")
+
+	err := runPrePushSecretGate(context.Background(), work)
+
+	require.Error(t, err, "working-tree cleanup cannot substitute for a successful commit repair")
+	assert.Contains(t, err.Error(), "auto-redact")
+	assert.Contains(t, err.Error(), "LFS pointer", "unregistered raw content must use the canonical storage boundary")
+	assert.Equal(t, head, mustGitCapture(t, work, "rev-parse", "HEAD"))
+	assert.True(t, strings.Contains(mustGitCapture(t, work, "show", "HEAD:"+rel), canary), "the original commit remains pending")
+	working, readErr := os.ReadFile(filepath.Join(work, rel))
+	require.NoError(t, readErr)
+	assert.False(t, strings.Contains(string(working), canary), "clean local bytes must not hide the earlier failure")
+}
+
 func TestSessionSecretGateRequiresVerifiedCleanAfterQuarantine(t *testing.T) {
 	t.Setenv("OX_ALLOW_SECRETS", "")
+	ledger := t.TempDir()
+	initGitRepo(t, ledger)
 	calls := 0
-	err := runSessionSecretGate(context.Background(), t.TempDir(), func() (*PrePushScanResult, error) {
+	err := runSessionSecretGate(context.Background(), ledger, func() (*PrePushScanResult, error) {
 		calls++
 		return &PrePushScanResult{Findings: []PrePushFinding{{Detector: "synthetic", Path: "sessions/unrecoverable.txt", Line: 1}}}, nil
 	}, false)
@@ -127,7 +156,7 @@ func TestSessionSecretGate_ScanErrorsKeepUploadsPending(t *testing.T) {
 			{name: "rescan", failOn: 2},
 		} {
 			t.Run(mode.name+"/"+phase.name, func(t *testing.T) {
-				ledger := t.TempDir()
+				ledger := newLedgerTestRepo(t)
 				const rel = "sessions/scan-error/summary.md"
 				path := filepath.Join(ledger, filepath.FromSlash(rel))
 				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
@@ -345,24 +374,21 @@ func TestInPrePushScannerScope(t *testing.T) {
 			assert.Equal(t, want, inPrePushScannerScope(path))
 		})
 	}
+	for _, path := range []string{"data/plans/draft/plan.md", "data/plans/group/draft/plan.md", "data/plans/plan.md"} {
+		assert.True(t, inPrePushScannerScope(path), path)
+	}
+	for _, path := range []string{"data/plans/draft/annotations.json", "data/plans-other/draft/plan.md", "docs/plan.md"} {
+		assert.False(t, inPrePushScannerScope(path), path)
+	}
 }
 
-// TestFormatPrePushFindings_RecoveryMatchesScannerScope encodes the
-// writer-vs-message contract that the original bug exposed: the recovery
-// message tells the user to run `ox session audit` and `ox session redact`.
-// Those commands operate on the same path prefix that the scanner inspects.
-// If a future change widens prePushScannerScopePrefixes beyond what the
-// recovery commands can fix, the user is again handed instructions that
-// don't apply to the flagged path — exactly the symptom that prompted this
-// fix.
-//
-// We pin both directions: every scope prefix must appear in some recovery
-// command surface, and the recovery message must continue to reference
-// session-scoped tooling.
+// Recovery must cover both session tooling and the plan history cleanup that
+// session audit/redact cannot perform.
 func TestFormatPrePushFindings_RecoveryMatchesScannerScope(t *testing.T) {
 	r := &PrePushScanResult{
 		Findings: []PrePushFinding{
 			{Detector: "aws_access_key", Path: "sessions/x/raw.jsonl", Line: 1},
+			{Detector: "aws_access_key", Path: "data/plans/draft/plan.md", Line: 1},
 		},
 	}
 	msg := FormatPrePushFindings(r)
@@ -370,8 +396,31 @@ func TestFormatPrePushFindings_RecoveryMatchesScannerScope(t *testing.T) {
 		"recovery message must reference the audit command that covers sessions/")
 	assert.Contains(t, msg, "ox session redact",
 		"recovery message must reference the redact command that covers sessions/")
-	// If the scanner is ever widened, the recovery surface must widen too.
-	// Today only "sessions/" is in scope.
+	assert.Contains(t, msg, "data/plans/**/plan.md")
+	assert.Contains(t, msg, "unpushed history")
+	// Whole-prefix scanning remains session-only; plans use a Markdown predicate.
 	assert.Equal(t, []string{"sessions/"}, prePushScannerScopePrefixes,
 		"scope widened without updating recovery message; see ox-cqdo")
+}
+
+func TestPrePushPlanFindingsHoldPublicationWithoutSessionRepair(t *testing.T) {
+	const rel = "data/plans/draft/plan.md"
+	const canary = "AKIA" + "QWERTYUIOPASDFGH"
+	work := makeLedgerWithCommit(t, map[string]string{rel: "# Plan\n" + canary + "\n"})
+	result, err := scanPrePushForSecrets(context.Background(), work)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.FilesScanned)
+	require.NotEmpty(t, result.Findings)
+	for _, finding := range result.Findings {
+		require.Equal(t, rel, finding.Path)
+		require.Equal(t, 2, finding.Line)
+	}
+	head := mustGitCapture(t, work, "rev-parse", "HEAD")
+	err = runPrePushSecretGate(context.Background(), work)
+	require.ErrorContains(t, err, "unpushed history")
+	require.NotContains(t, err.Error(), canary)
+	require.Equal(t, head, mustGitCapture(t, work, "rev-parse", "HEAD"))
+	data, err := os.ReadFile(filepath.Join(work, rel))
+	require.NoError(t, err)
+	require.Contains(t, string(data), canary, "session repair must not rewrite or quarantine a plan")
 }

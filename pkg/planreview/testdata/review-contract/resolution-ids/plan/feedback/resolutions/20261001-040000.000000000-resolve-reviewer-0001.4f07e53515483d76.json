@@ -1,0 +1,9 @@
+{
+  "anchor": "hreviewer",
+  "at": "2026-10-01T04:00:00Z",
+  "id": "resolve-reviewer-0001",
+  "note": "Verified by Ana.",
+  "request_sha256": "3b434d7612dc8dfa66f4d9abe4bbda907f296b52f39d365a959ed934d630d2fe",
+  "reviewer": "Ben",
+  "state": "verified"
+}

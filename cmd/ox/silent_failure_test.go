@@ -182,8 +182,10 @@ func TestSessionImport_EveryRefusalSaysWhy(t *testing.T) {
 		importErrInProgress:        errkind.Usage,
 		importErrLedgerWedged:      errkind.Other,
 		importErrLedgerUnreadable:  errkind.Other,
-		importErrNativeUnreadable:  errkind.Other,
-		importErrBadFlag:           errkind.Usage,
+		// a damaged local record, repaired by ox doctor; not the user's usage
+		importErrAbortRecordUnreadable: errkind.Other,
+		importErrNativeUnreadable:      errkind.Other,
+		importErrBadFlag:               errkind.Usage,
 	}
 	for _, code := range constStrings(t, "session_import.go", "importErr") {
 		kind, filed := want[code]

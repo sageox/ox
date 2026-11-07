@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/pkg/sessionsummary"
@@ -1039,22 +1039,31 @@ func commitAndPushLedgerBatch(ledgerPath string, sessionNames []string) error {
 	}
 	filesToAdd = append(filesToAdd, filepath.Join(sessionsDir, ".gitignore"))
 
-	// git add
-	addArgs := append([]string{"-C", ledgerPath, "add"}, filesToAdd...)
-	addCmd := exec.Command("git", addArgs...)
-	if output, err := addCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git add failed: %s: %w", string(output), err)
-	}
-
-	// git commit
-	commitMsg := fmt.Sprintf("session: re-redact %d sessions", len(sessionNames))
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(output), "nothing to commit") {
-			return nil
+	var committed bool
+	err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+			return err
 		}
-		return fmt.Errorf("git commit failed: %s: %w", string(output), err)
+		if unmerged, err := gitutil.HasUnmergedEntries(ctx, ledgerPath); err != nil {
+			return err
+		} else if unmerged {
+			return fmt.Errorf("cannot commit Ledger with unresolved conflicts (run 'ox doctor --fix')")
+		}
+		if _, err := gitutil.RunGit(ctx, ledgerPath, append([]string{"add", "--sparse", "--"}, filesToAdd...)...); err != nil {
+			return fmt.Errorf("git add: %w", err)
+		}
+		// Keep other staged sessions, but leave plans for their own save.
+		// A large snapshot can take longer than the staging timeout to validate.
+		var commitErr error
+		committed, commitErr = commitLedgerSnapshot(context.WithoutCancel(ctx), ledgerPath, fmt.Sprintf("session: re-redact %d sessions", len(sessionNames)))
+		return commitErr
+	})
+	if err != nil || !committed {
+		return err
 	}
 
+	// pushLedger acquires the same lock, so push only after releasing it.
 	return pushLedger(context.Background(), ledgerPath)
 }

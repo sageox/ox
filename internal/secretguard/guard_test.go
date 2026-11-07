@@ -2,7 +2,9 @@ package secretguard
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -35,8 +37,13 @@ func TestRulesFailClosed(t *testing.T) {
 		}
 	}
 	var missing *RuleSet
-	if missing.ValidateContent("raw.jsonl", []byte("clean")) == nil {
+	err := missing.ValidateContent("raw.jsonl", []byte("clean"))
+	if err == nil {
 		t.Fatal("missing guard accepted")
+	}
+	var refused *RefusedError
+	if errors.As(err, &refused) {
+		t.Fatal("a missing catalog is not a refusal: callers retry it")
 	}
 }
 func TestContextualSecretsAndJSONEncoding(t *testing.T) {
@@ -99,13 +106,14 @@ func TestRefreshedCatalogIsAdditiveAndImmutable(t *testing.T) {
 	}
 }
 func TestPathOnlyRuleAndErrorPrivacy(t *testing.T) {
-	if err := ValidateContent("archive.p12", []byte("opaque binary")); err == nil {
-		t.Fatal("path-only upstream rule bypassed")
+	var refused *RefusedError
+	if err := ValidateContent("archive.p12", []byte("opaque binary")); !errors.As(err, &refused) {
+		t.Fatal("path-only upstream rule bypassed or not reported as a refusal")
 	}
 	secret := "opaqueSentinel72w89qq"
 	err := ValidateContent("sensitive-name-"+secret, []byte("MAILLAB_API_KEY="+secret))
-	if err == nil || strings.Contains(err.Error(), secret) {
-		t.Fatal("error exposed content or accepted secret")
+	if !errors.As(err, &refused) || strings.Contains(err.Error(), secret) {
+		t.Fatal("error exposed content, accepted a secret, or was not reported as a refusal")
 	}
 }
 func TestBenignJSONFramingAndNumbersPreserved(t *testing.T) {
@@ -226,5 +234,87 @@ func TestGuardedRenderingCannotSuppressUncoveredOrEncodedSecret(t *testing.T) {
 	out, _, used = RedactTextWithReplacements(encoded, []TextReplacement{{Start: 0, End: 5, Marker: "[REDACTED_PREFIX]"}})
 	if used || strings.Contains(out, "sentinel") {
 		t.Fatal("encoded value received an assumed coverage proof")
+	}
+}
+
+// --- Built-in expression screens (sageox/ox#1457) ---
+
+// TestBuiltinScreensStayProvable pins the literal each built-in expression
+// proves. Failure prevented: a regex edit that loses its literal silently
+// unscreens the built-in, and every large string pays its full NFA pass again.
+func TestBuiltinScreensStayProvable(t *testing.T) {
+	want := [][]string{
+		{"extraenv["},
+		{"key", "token", "secret", "passw", "credentials"},
+		{"ox"},
+		{"mk_"},
+	}
+	if len(builtins) != len(want) {
+		t.Fatalf("%d built-ins, want %d", len(builtins), len(want))
+	}
+	for i, b := range builtins {
+		if !slices.Equal(b.keywords, want[i]) {
+			t.Errorf("built-in %d screen = %q, want %q", i, b.keywords, want[i])
+		}
+	}
+}
+
+// TestBuiltinScreensKeepRE2CaseFolding covers spellings the (?i) expressions
+// match but a byte-wise ASCII screen would miss. Failure prevented: a screen
+// that skips text its own expression would redact.
+func TestBuiltinScreensKeepRE2CaseFolding(t *testing.T) {
+	for name, input := range map[string]string{
+		"kelvin sign":     "API_\u212AEY=opaqueSentinel93xY",
+		"long s":          "MAILLAB_\u017FECRET=opaqueSentinel93xY",
+		"upper-case helm": "--set EXTRAENV[0].name=API_TOKEN --set EXTRAENV[0].value=opaqueSentinel93xY",
+	} {
+		out, found := RedactText(input)
+		if strings.Contains(out, "opaqueSentinel93xY") || !slices.Contains(found, "sensitive-env-value") {
+			t.Errorf("%s: value not redacted: %v", name, found)
+		}
+	}
+}
+
+// TestBuiltinsFireInsideLargeUnrelatedText puts each built-in's credential at
+// the start, middle and end of text that proves none of their literals.
+// Failure prevented: a screen that drops a real credential in a large session.
+func TestBuiltinsFireInsideLargeUnrelatedText(t *testing.T) {
+	filler := strings.Repeat("review this request ", 1000)
+	for _, tc := range []struct{ credential, secret, finding string }{
+		{"--set extraEnv[0].name=API_TOKEN --set extraEnv[0].value=opaqueSentinel95xQ", "opaqueSentinel95xQ", "sensitive-env-value"},
+		{"MAILLAB_SECRET=opaqueSentinel96xR", "opaqueSentinel96xR", "sensitive-env-value"},
+		{"oxp_Ab3zAb3zAb3zAb3z", "Ab3zAb3zAb3zAb3z", "sageox-bearer-token"},
+		{"mk_" + strings.Repeat("Ab3z", 6), strings.Repeat("Ab3z", 6), "sageox-api-key"},
+	} {
+		for where, input := range map[string]string{"start": tc.credential + " " + filler, "middle": filler + tc.credential + " " + filler, "end": filler + tc.credential} {
+			out, found := RedactText(input)
+			if strings.Contains(out, tc.secret) || !slices.Contains(found, tc.finding) {
+				t.Errorf("%s at %s: not redacted: %v", tc.finding, where, found)
+			}
+		}
+	}
+}
+
+// TestBuiltinMarkerIsVisibleToLaterScreens arms a rule only with text a
+// built-in's replacement inserted. Failure prevented: a screen computed before
+// the replacement skips a rule that scans the replaced text.
+func TestBuiltinMarkerIsVisibleToLaterScreens(t *testing.T) {
+	s, err := NewRules([]byte("[[rules]]\nid='marker-adjacent'\nregex='(?i)secret\\]:[a-z]{8}'\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, found := s.RedactText("MAILLAB_API_KEY='opaque':abcdefgh")
+	if strings.Contains(out, "abcdefgh") || !slices.Contains(found, "marker-adjacent") {
+		t.Fatalf("rule armed by marker text skipped: %q %v", out, found)
+	}
+}
+
+// BenchmarkRedactTextLargePrompt is the 7 MB prompt from the large-session
+// import test, which proves no built-in or catalog literal.
+func BenchmarkRedactTextLargePrompt(b *testing.B) {
+	input := strings.Repeat("review this request ", 350000)
+	b.SetBytes(int64(len(input)))
+	for i := 0; i < b.N; i++ {
+		RedactText(input)
 	}
 }

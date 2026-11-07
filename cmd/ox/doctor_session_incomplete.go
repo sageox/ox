@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/sageox/agentx"
@@ -16,12 +14,12 @@ func init() {
 		Name:        "incomplete sessions",
 		Category:    "Sessions",
 		FixLevel:    FixLevelCheckOnly, // requires agent context to fix
-		Description: "Detects sessions missing summaries or HTML viewers",
+		Description: "Reports session finalization, recovery, and uploads pending on this machine",
 		Run:         func(fix bool) checkResult { return checkSessionIncomplete(fix) },
 	})
 }
 
-// checkSessionIncomplete detects sessions that are missing summary.md or session.html.
+// checkSessionIncomplete reports work using the daemon's finalization rules.
 // When running outside agent context, provides human-friendly guidance.
 // When running inside agent context, provides commands to finalize.
 func checkSessionIncomplete(_ bool) checkResult {
@@ -30,28 +28,46 @@ func checkSessionIncomplete(_ bool) checkResult {
 		return SkippedCheck("incomplete sessions", "no ledger found", "")
 	}
 
-	sessionsDir := filepath.Join(ledgerPath, "sessions")
-	if _, err := os.Stat(sessionsDir); os.IsNotExist(err) {
-		return SkippedCheck("incomplete sessions", "no sessions directory", "")
+	output := buildAgentDoctorOutput("", findGitRoot())
+	result := PassedCheck("incomplete sessions", "no sessions need local finalization")
+	if len(output.IncompleteSessions) > 0 {
+		if agentx.IsAgentContext() {
+			result = buildIncompleteSessionAgentResult(output.IncompleteSessions)
+		} else {
+			result = buildIncompleteSessionHumanResult(output.IncompleteSessions)
+		}
 	}
-
-	// reuse the existing findIncompleteSessions from agent_doctor.go
-	// (it's in the same package, so we can call it directly)
-	incomplete := findIncompleteSessions(sessionsDir, "")
-	if len(incomplete) == 0 {
-		return PassedCheck("incomplete sessions", "all sessions complete")
+	for _, group := range []struct {
+		label string
+		names []string
+	}{
+		{"Awaiting upload", output.PendingUploads},
+		{"Awaiting automatic finalization", output.PendingFinalization},
+		{"Awaiting recovery", output.RecoverySessions},
+		{"Automatic finalization blocked", output.BlockedSessions},
+		{"Publication refused", output.RefusedSessions},
+	} {
+		if len(group.names) > 0 {
+			result.warning = true
+			result.detail += fmt.Sprintf("\n%s: %s", group.label, strings.Join(group.names, ", "))
+			if len(output.IncompleteSessions) == 0 {
+				result.message = "session work pending"
+			}
+		}
 	}
-
-	// check if we're in agent context
-	inAgentContext := agentx.IsAgentContext()
-
-	if inAgentContext {
-		// agent context: provide commands to finalize
-		return buildIncompleteSessionAgentResult(incomplete)
+	if output.CommitNeeded || output.PushNeeded {
+		result.warning = true
+		result.detail += "\nLedger changes await commit or push; run ox agent <id> doctor for next steps"
+		if len(output.IncompleteSessions) == 0 {
+			result.message = "session work pending"
+		}
 	}
-
-	// human context: provide helpful guidance with agent-required flag
-	return buildIncompleteSessionHumanResult(incomplete)
+	if output.SessionScanError != "" {
+		result.passed = false
+		result.message = "session inspection failed"
+		result.detail += "\n" + output.SessionScanError
+	}
+	return result
 }
 
 // buildIncompleteSessionHumanResult creates human-friendly guidance for incomplete sessions.

@@ -98,6 +98,9 @@ func validateDraftShape(meta *SessionMeta) error {
 	if strings.TrimSpace(meta.SummaryStatus) != "" {
 		return fmt.Errorf("draft meta.json must not carry summary_status %q; the absence of a summary is the signal that one is still owed", meta.SummaryStatus)
 	}
+	if meta.ContextUse != nil {
+		return fmt.Errorf("draft meta.json must not carry context_use; the rollup is derived at finalize and a draft is a counters-only placeholder")
+	}
 	return nil
 }
 

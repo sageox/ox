@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,12 +19,14 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/conversation/read"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/updatenotice"
 	"github.com/spf13/cobra"
@@ -602,4 +606,272 @@ func TestConversationErrorKind_EveryCodeFiled(t *testing.T) {
 	err := conversationUsageExit(io.Discard, "json", conversationUsageErrorCode, "--since: bad value")
 	assert.Equal(t, errkind.Usage, errkind.Of(err))
 	assert.Equal(t, conversationUsageErrorCode, errkind.DetailOf(err))
+}
+
+// Failure prevented: staging or non-person credentials reach the production analytics person column.
+func TestPostHogCaptureOpts_PersonBoundary(t *testing.T) {
+	for _, tt := range []struct{ name, ep, info, token, env, want string }{
+		{name: "signed out", ep: endpoint.Default},
+		{name: "production person", ep: endpoint.Default, info: `{"user_id":"usr_person"}`, want: "usr_person"},
+		{name: "production sub", ep: endpoint.Default, info: `{"sub":"usr_subject"}`, want: "usr_subject"},
+		{name: "staging", ep: "https://test.sageox.ai", info: `{"user_id":"usr_staging"}`},
+		{name: "team token", ep: endpoint.Default, info: `{"user_id":"usr_person"}`, token: "oxt_invalid_fixture"},
+		{name: "environment token", ep: endpoint.Default, info: `{"user_id":"usr_person"}`, env: "opaque_env"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			withIsolatedConfig(t)
+			t.Setenv("SAGEOX_ENDPOINT", tt.ep)
+			t.Setenv("SAGEOX_TOKEN", tt.env)
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			if tt.info != "" {
+				path, err := auth.GetAuthFilePath()
+				require.NoError(t, err)
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+				token := tt.token
+				if token == "" {
+					token = "opaque_fixture"
+				}
+				raw := `{"tokens":{` + fmt.Sprintf("%q", tt.ep) + `:{"access_token":` + fmt.Sprintf("%q", token) + `,"user_info":` + tt.info + `}}}`
+				require.NoError(t, os.WriteFile(path, []byte(raw), 0o600))
+			}
+			c := &cli.Context{Cmd: &cobra.Command{Use: "version"}, CommandStartTime: time.Now()}
+			assert.Equal(t, tt.want, postHogCaptureOpts(c).PersonID)
+			props := postHogCommandProps(c, "version", 0)
+			wantEnv := "test"
+			if tt.ep == endpoint.Default {
+				wantEnv = "production"
+			}
+			assert.Equal(t, wantEnv, props["env"])
+		})
+	}
+}
+
+// Failure prevented: `ox logout` is counted under the install instead of the
+// person who logged out, and `ox login` keeps the person who was signed in
+// before it (or none) instead of the one it signed in.
+func TestPostHogCaptureOpts_PersonAtCommandStart(t *testing.T) {
+	save := func(t *testing.T, id string) {
+		t.Helper()
+		require.NoError(t, auth.SaveTokenForEndpoint(endpoint.Default, &auth.StoredToken{
+			AccessToken: "opaque_fixture", ExpiresAt: time.Now().Add(time.Hour), UserInfo: auth.UserInfo{UserID: id},
+		}))
+	}
+	for _, tt := range []struct {
+		name, use, before, after, want string
+	}{
+		{name: "logout keeps the person", use: "logout", before: "usr_alice", want: "usr_alice"},
+		{name: "login sends the new person", use: "login", after: "usr_alice", want: "usr_alice"},
+		{name: "login switch sends the new account", use: "login", before: "usr_alice", after: "usr_bob", want: "usr_bob"},
+		{name: "other commands keep the start person", use: "status", before: "usr_alice", after: "usr_bob", want: "usr_alice"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			withIsolatedConfig(t)
+			t.Setenv("SAGEOX_ENDPOINT", endpoint.Default)
+			t.Setenv("SAGEOX_TOKEN", "")
+			t.Setenv("OX_XDG_DISABLE", "")
+			if tt.before != "" {
+				save(t, tt.before)
+			}
+			c := &cli.Context{Cmd: &cobra.Command{Use: tt.use}, CommandStartTime: time.Now()}
+			startPostHogIdentity(c)
+			if tt.after != "" {
+				save(t, tt.after)
+			} else {
+				require.NoError(t, auth.RemoveTokenForEndpoint(endpoint.Default))
+			}
+			assert.Equal(t, tt.want, postHogCaptureOpts(c).PersonID)
+		})
+	}
+}
+
+// Failure prevented: a selected staging operation inherits a cached production person's identity.
+func TestPostHogCaptureOpts_InvocationEndpoint(t *testing.T) {
+	const staging = "https://test.sageox.ai"
+	for _, tt := range []struct {
+		name, flag, env, project, wantPerson, wantEnv string
+		selected                                      []string
+		stagingOnly                                   bool
+	}{
+		{name: "production global", wantPerson: "usr_production", wantEnv: "production"},
+		{name: "sole staging login", stagingOnly: true, wantEnv: "test"},
+		{name: "staging project", project: staging, wantEnv: "test"},
+		{name: "explicit staging", flag: staging, wantEnv: "test"},
+		{name: "explicit production overrides environment", flag: endpoint.Default, env: staging, wantPerson: "usr_production", wantEnv: "production"},
+		{name: "selected staging overrides flag", flag: endpoint.Default, selected: []string{staging}, wantEnv: "test"},
+		{name: "selected production", flag: staging, selected: []string{endpoint.Default}, wantPerson: "usr_production", wantEnv: "production"},
+		{name: "login fallback to staging", selected: []string{endpoint.Default, staging}, wantEnv: "test"},
+		{name: "mixed logout", selected: []string{staging, endpoint.Default}, wantEnv: "test"},
+		{name: "invalid explicit endpoint", flag: " ", wantEnv: "test"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			withIsolatedConfig(t)
+			t.Setenv("SAGEOX_ENDPOINT", tt.env)
+			t.Setenv("SAGEOX_TOKEN", "")
+			t.Setenv("OX_XDG_DISABLE", "")
+			for _, ep := range []string{endpoint.Default, staging} {
+				if tt.stagingOnly && ep == endpoint.Default {
+					continue
+				}
+				id := "usr_staging"
+				if ep == endpoint.Default {
+					id = "usr_production"
+				}
+				require.NoError(t, auth.SaveTokenForEndpoint(ep, &auth.StoredToken{
+					AccessToken: "opaque_fixture", ExpiresAt: time.Now().Add(time.Hour),
+					UserInfo: auth.UserInfo{UserID: id},
+				}))
+			}
+			oldGetter := endpoint.ProjectEndpointGetter
+			endpoint.ProjectEndpointGetter = func(string) string { return tt.project }
+			t.Cleanup(func() { endpoint.ProjectEndpointGetter = oldGetter })
+			cmd := &cobra.Command{Use: "login"}
+			cmd.Flags().String("endpoint", "", "")
+			if tt.flag != "" {
+				require.NoError(t, cmd.Flags().Set("endpoint", tt.flag))
+			}
+			c := &cli.Context{Cmd: cmd, TelemetryEndpoints: tt.selected, CommandStartTime: time.Now()}
+			if tt.project != "" {
+				c.ProjectRoot = t.TempDir()
+			}
+			assert.Equal(t, tt.wantPerson, postHogCaptureOpts(c).PersonID)
+			props := postHogCommandProps(c, "login", 0)
+			assert.Equal(t, tt.wantEnv, props["env"])
+			for _, value := range props {
+				assert.NotEqual(t, staging, value, "endpoint values must not become event properties")
+			}
+		})
+	}
+}
+
+// Failure prevented: a usage mistake Cobra rejects in a staging repository is counted under the production person.
+func TestRejectedInvocationContext_ClassifiedByProject(t *testing.T) {
+	const staging = "https://test.sageox.ai"
+	withIsolatedConfig(t)
+	t.Setenv("SAGEOX_ENDPOINT", "")
+	t.Setenv("SAGEOX_TOKEN", "")
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv(config.EnvProjectRoot, "")
+	for ep, id := range map[string]string{endpoint.Default: "usr_production", staging: "usr_staging"} {
+		require.NoError(t, auth.SaveTokenForEndpoint(ep, &auth.StoredToken{
+			AccessToken: "opaque_fixture", ExpiresAt: time.Now().Add(time.Hour),
+			UserInfo: auth.UserInfo{UserID: id},
+		}))
+	}
+	oldGetter := endpoint.ProjectEndpointGetter
+	endpoint.ProjectEndpointGetter = func(string) string { return staging }
+	t.Cleanup(func() { endpoint.ProjectEndpointGetter = oldGetter })
+	project := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(project, ".sageox"), 0o755))
+	t.Chdir(project)
+
+	c := rejectedInvocationContext(&cobra.Command{Use: "status"}, time.Now())
+	require.NotEmpty(t, c.ProjectRoot, "the fallback context must find the project like cli.NewContext")
+	assert.Empty(t, postHogCaptureOpts(c).PersonID)
+	assert.Equal(t, "test", postHogCommandProps(c, "status", 2)["env"])
+}
+
+// Failure prevented: login's runtime selection is lost when a device request fails before storing a token.
+func TestPostHogCaptureOpts_LoginRecordsSelectedEndpoint(t *testing.T) {
+	withIsolatedConfig(t)
+	t.Setenv("SAGEOX_ENDPOINT", "")
+	t.Setenv("SAGEOX_TOKEN", "")
+	t.Setenv("SKIP_BROWSER", "1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/auth/device/code", r.URL.Path)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	previous := cliCtx
+	cmd := &cobra.Command{Use: "login"}
+	cmd.SetOut(io.Discard)
+	cliCtx = &cli.Context{Cmd: cmd, CommandStartTime: time.Now()}
+	t.Cleanup(func() { cliCtx = previous })
+	require.Error(t, runLoginFlow(cmd, server.URL))
+	assert.Equal(t, []string{server.URL}, cliCtx.TelemetryEndpoints)
+	assert.Empty(t, postHogCaptureOpts(cliCtx).PersonID)
+	assert.Equal(t, "test", postHogCommandProps(cliCtx, "login", 1)["env"])
+}
+
+// Failure prevented: shared view/team endpoint selection is omitted from command attribution.
+func TestPostHogCaptureOpts_ResolvedEndpointRecordsSelection(t *testing.T) {
+	previous := cliCtx
+	cliCtx = &cli.Context{Cmd: &cobra.Command{Use: "view"}, CommandStartTime: time.Now()}
+	t.Cleanup(func() { cliCtx = previous })
+	selected, err := resolveEndpoint(t.TempDir(), "https://test.sageox.ai", "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{selected}, cliCtx.TelemetryEndpoints)
+	assert.Empty(t, postHogCaptureOpts(cliCtx).PersonID)
+	assert.Equal(t, "test", postHogCommandProps(cliCtx, "view repo", 0)["env"])
+}
+
+// Failure prevented: changing the actor enum breaks either the signed contract or the historical dashboard.
+func TestPostHogActors_ContractAndLegacy(t *testing.T) {
+	for _, tt := range []struct {
+		name                string
+		vars                map[string]string
+		actor, legacy, kind string
+	}{
+		{name: "person", actor: "person", legacy: "human"},
+		{name: "agent", vars: map[string]string{"CLAUDECODE": "1"}, actor: "ai_coworker", legacy: "agent", kind: "claude"},
+		{name: "CI", vars: map[string]string{"CI": "true"}, actor: "ci", legacy: "ci"},
+		{name: "agent wins over CI", vars: map[string]string{"CI": "true", "CLAUDECODE": "1"}, actor: "ai_coworker", legacy: "agent", kind: "claude"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			actor, kind := oxActorDetector{env: agentx.NewMockEnvironment(tt.vars)}.DetectActor()
+			spec, legacy, kind := postHogActors(actor, kind)
+			assert.Equal(t, tt.actor, spec)
+			assert.Equal(t, tt.legacy, legacy)
+			assert.Equal(t, tt.kind, kind)
+		})
+	}
+}
+
+// Failure prevented: command duration omits elapsed work, or undeclared properties enter the payload.
+func TestPostHogCommandProps_DurationAndClosedProperties(t *testing.T) {
+	withIsolatedConfig(t)
+	start := time.Now().Add(-1500 * time.Millisecond)
+	c := &cli.Context{Cmd: &cobra.Command{Use: "version"}, CommandStartTime: start}
+	before := time.Now()
+	props := postHogCommandProps(c, "version", 0)
+	end := time.Now()
+	duration := time.Duration(props["duration_ms"].(int64)) * time.Millisecond
+	assert.WithinDuration(t, start, end.Add(-duration), end.Sub(before)+time.Millisecond)
+	raw, err := json.Marshal(props)
+	require.NoError(t, err)
+	var closed struct {
+		Command     string   `json:"command"`
+		Flags       []string `json:"flags"`
+		Success     bool     `json:"success"`
+		ExitCode    int      `json:"exit_code"`
+		Duration    int64    `json:"duration_ms"`
+		Actor       string   `json:"actor"`
+		CLIActor    string   `json:"cli_actor"`
+		AgentType   string   `json:"agent_type"`
+		Surface     string   `json:"surface"`
+		Env         string   `json:"env"`
+		Version     int      `json:"event_version"`
+		Initialized bool     `json:"repo_initialized"`
+		Ephemeral   string   `json:"ephemeral"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	// strict-reader-ok: verifies the closed command property list ox itself writes.
+	decoder.DisallowUnknownFields()
+	require.NoError(t, decoder.Decode(&closed))
+	assert.Equal(t, "cli", closed.Surface)
+	assert.Equal(t, 1, closed.Version)
+}
+
+// Failure prevented: the old notice suppresses disclosure of person IDs, or the new notice repeats on every run.
+func TestShowTelemetryNoticeOnce_OldFlagDoesNotHidePersonNotice(t *testing.T) {
+	withIsolatedConfig(t)
+	atTerminal(t)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("telemetry_notice_shown: true\n"), 0o600))
+	t.Setenv(config.EnvUserConfig, path)
+	var first, second bytes.Buffer
+	showTelemetryNoticeOnce(&first)
+	showTelemetryNoticeOnce(&second)
+	assert.Contains(t, first.String(), "SageOx user ID")
+	assert.Empty(t, second.String())
 }
