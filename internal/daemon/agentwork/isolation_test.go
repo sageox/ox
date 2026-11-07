@@ -132,6 +132,11 @@ func TestCodexRunnerIsolated(t *testing.T) {
 			want: "exec\n--sandbox\nread-only\n--ephemeral\n--color\nnever\n-c\nfeatures.hooks=false\n-",
 		},
 		{
+			name: "the fallback skips the Git check in ox's empty directory", ifSupported: true,
+			help: "--sandbox --ephemeral --color --config --disable --skip-git-repo-check", features: features,
+			want: "exec\n--sandbox\nread-only\n--ephemeral\n--color\nnever\n-c\nfeatures.hooks=false\n--skip-git-repo-check\n-",
+		},
+		{
 			name: "a Codex that cannot isolate is refused, never widened",
 			help: "--sandbox --ephemeral --color --config --disable", features: features,
 			wantErr: "--ignore-user-config",
