@@ -326,11 +326,11 @@ var regeneratedArtifactFiles = []string{ledgerFileSessionMD, ledgerFileSummaryMD
 // Ledger cache, records the new refs in meta.json, and writes pointers into
 // the tracked sessions/<name>/ directory. Real content is never written there,
 // so a failed upload or commit cannot leave plain content where a pointer
-// belongs. On failure the tracked files and meta.json are restored.
+// belongs. A failed pointer write restores the tracked files and the refs.
 //
 // Returns false, with no error, when the session has nothing on the Ledger to
 // update: no meta.json, a draft placeholder, or a session held on this machine.
-func prepareRegeneratedArtifacts(projectRoot, ledgerPath, sessionName, artifactDir string) (prepared bool, err error) {
+func prepareRegeneratedArtifacts(projectRoot, ledgerPath, sessionName, artifactDir string) (bool, error) {
 	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
 	meta, err := lfs.ReadSessionMeta(sessionDir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -391,18 +391,9 @@ func prepareRegeneratedArtifacts(projectRoot, ledgerPath, sessionName, artifactD
 		}
 	}
 
-	restore, err := snapshotFiles(sessionDir, append([]string{"meta.json"}, regeneratedArtifactFiles...))
-	if err != nil {
-		return false, err
-	}
-	defer func() {
-		if err != nil {
-			if restoreErr := restore(); restoreErr != nil {
-				err = errors.Join(err, restoreErr)
-			}
-		}
-	}()
-
+	// prior holds what meta.Files named before this update; a missing entry
+	// was absent.
+	prior := make(map[string]*lfs.FileRef, len(uploaded))
 	if err := lfs.MutateSessionMeta(context.Background(), sessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
 		if current == nil {
 			return nil, errors.New("session metadata disappeared during regeneration")
@@ -411,6 +402,11 @@ func prepareRegeneratedArtifacts(projectRoot, ledgerPath, sessionName, artifactD
 			current.Files = make(map[string]lfs.FileRef, len(uploaded))
 		}
 		for name, ref := range uploaded {
+			if old, ok := current.Files[name]; ok {
+				prior[name] = &old
+			} else {
+				prior[name] = nil
+			}
 			current.Files[name] = ref
 		}
 		return current, nil
@@ -418,47 +414,40 @@ func prepareRegeneratedArtifacts(projectRoot, ledgerPath, sessionName, artifactD
 		return false, fmt.Errorf("update meta.json with LFS refs: %w", err)
 	}
 	// AssertUploaded: uploadSessionLFS uploaded these exact bytes above.
+	// WritePointerFiles restores the files it touched when it fails.
 	if _, err := lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(uploaded)); err != nil {
-		return false, fmt.Errorf("write LFS pointer files: %w", err)
+		err = fmt.Errorf("write LFS pointer files: %w", err)
+		if revertErr := revertRegeneratedRefs(sessionDir, uploaded, prior); revertErr != nil {
+			err = errors.Join(err, revertErr)
+		}
+		return false, err
 	}
 	return true, nil
 }
 
-// snapshotFiles records the named files in dir and returns a function that
-// puts each back as it was, removing any that did not exist.
-func snapshotFiles(dir string, names []string) (func() error, error) {
-	type original struct {
-		data   []byte
-		exists bool
-	}
-	originals := make(map[string]original, len(names))
-	for _, name := range names {
-		data, err := os.ReadFile(filepath.Join(dir, name))
-		switch {
-		case err == nil:
-			originals[name] = original{data: data, exists: true}
-		case errors.Is(err, fs.ErrNotExist):
-			originals[name] = original{}
-		default:
-			return nil, fmt.Errorf("snapshot %s: %w", name, err)
+// revertRegeneratedRefs puts back the meta.Files entries prepareRegeneratedArtifacts
+// replaced, under the metadata lock, leaving entries another writer changed since.
+func revertRegeneratedRefs(sessionDir string, uploaded map[string]lfs.FileRef, prior map[string]*lfs.FileRef) error {
+	err := lfs.MutateSessionMeta(context.Background(), sessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+		if current == nil || current.Files == nil {
+			return nil, nil
 		}
-	}
-	return func() error {
-		var errs []error
-		for name, o := range originals {
-			path := filepath.Join(dir, name)
-			if !o.exists {
-				if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-					errs = append(errs, fmt.Errorf("restore %s: %w", name, err))
-				}
+		for name, ref := range uploaded {
+			if current.Files[name].OID != ref.OID {
 				continue
 			}
-			if err := fileutil.AtomicWriteBytes(path, o.data, 0o644); err != nil {
-				errs = append(errs, fmt.Errorf("restore %s: %w", name, err))
+			if old := prior[name]; old != nil {
+				current.Files[name] = *old
+			} else {
+				delete(current.Files, name)
 			}
 		}
-		return errors.Join(errs...)
-	}, nil
+		return current, nil
+	})
+	if err != nil {
+		return fmt.Errorf("revert meta.json LFS refs: %w", err)
+	}
+	return nil
 }
 
 // hasSubstantiveTurns reports whether the session has at least one user OR
@@ -1248,14 +1237,18 @@ func commitAndPushLedgerBatch(ledgerPath, message string, sessionNames []string)
 		} else if unmerged {
 			return fmt.Errorf("cannot commit Ledger with unresolved conflicts (run 'ox doctor --fix')")
 		}
+		priorIndex, err := ledgerIndexEntries(ledgerPath, filesToAdd)
+		if err != nil {
+			return err
+		}
 		if _, err := gitutil.RunGit(ctx, ledgerPath, append([]string{"add", "--sparse", "--"}, filesToAdd...)...); err != nil {
-			unstageLedgerPaths(ledgerPath, filesToAdd)
+			restoreLedgerIndex(ledgerPath, filesToAdd, priorIndex)
 			return fmt.Errorf("git add: %w", err)
 		}
 		// Keep other staged sessions, but leave plans for their own save.
 		// A large snapshot can take longer than the staging timeout to validate.
 		if _, err := commitLedgerSnapshot(context.WithoutCancel(ctx), ledgerPath, message); err != nil {
-			unstageLedgerPaths(ledgerPath, filesToAdd)
+			restoreLedgerIndex(ledgerPath, filesToAdd, priorIndex)
 			return err
 		}
 		return nil

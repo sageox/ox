@@ -181,14 +181,22 @@ func TestRegenerateSession_RefusedCommitUnstagesItsFiles(t *testing.T) {
 	poisoned := filepath.Join("sessions", other, ledgerFileSessionMD)
 	require.NoError(t, os.WriteFile(filepath.Join(f.ledgerPath, poisoned), []byte("# plain content\n"), 0o644))
 	runGit(t, f.ledgerPath, "add", poisoned)
+	// a pending change at a path this command stages too
+	pending := filepath.Join("sessions", ".gitignore")
+	body, err := os.ReadFile(filepath.Join(f.ledgerPath, pending))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(f.ledgerPath, pending), append(body, []byte("# pending\n")...), 0o644))
+	runGit(t, f.ledgerPath, "add", pending)
 	store := f.newStore(t)
 
-	var err error
 	silenceStdout(t, func() { err = regenerateSingleSessionArtifacts(store, f.projectRoot, name) })
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must contain an LFS pointer")
-	assert.Equal(t, []string{filepath.ToSlash(poisoned)}, f.staged(t), "only the other command's entry may remain staged")
+	assert.ElementsMatch(t, []string{filepath.ToSlash(pending), filepath.ToSlash(poisoned)}, f.staged(t),
+		"only what was staged before the command may remain staged")
+	assert.Contains(t, runGit(t, f.ledgerPath, "show", ":"+filepath.ToSlash(pending)), "# pending",
+		"a change staged before the command must keep its staged content")
 }
 
 // --all publishes the sessions it regenerated in one commit, fails when the
