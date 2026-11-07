@@ -170,7 +170,15 @@ request_token_once() {
     # the session repo is usually unknown here. Only for this prompt, accept
     # any ox-initialized checkout where Devin clones repos; the recording
     # repo still comes from find_repo or the save-token command's workdir.
-    compgen -G "$HOME/repos/*/.sageox/config.json" >/dev/null || return 0
+    # Ask only if one of them would record under the effective policy, so an
+    # opt-out (user, repo, or OX_SESSION_RECORDING) is never asked for a token.
+    local c ok=1
+    for c in "$HOME"/repos/*/.sageox/config.json; do
+      [ -f "$c" ] || continue
+      command -v ox >/dev/null || { ok=0; break; }
+      recording_allowed "${c%/.sageox/config.json}" && { ok=0; break; }
+    done
+    [ "$ok" -eq 0 ] || return 0
   fi
   touch "$SDIR/token_requested"
   log "requested: personal SAGEOX_TOKEN"
