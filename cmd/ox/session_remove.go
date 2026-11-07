@@ -195,6 +195,9 @@ func removeSessionByPattern(store *session.Store, pattern string, force bool) er
 	for _, m := range matches {
 		if m.isLedger {
 			hasLedger = true
+			if err := refuseLedgerDeleteForTeamToken(findGitRoot(), m.ledgerPath, matchName(m)); err != nil {
+				return err
+			}
 			break
 		}
 	}
