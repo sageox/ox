@@ -446,6 +446,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// get project-specific endpoint (single source of truth)
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 
+	// anti-entropy: an AI coworker commits its work as itself
+	if config.IsInitialized(projectRoot) {
+		stampProjectCoworker(projectRoot, projectEndpoint)
+	}
+
 	// resolve current user's identity early so all output paths (fresh, degraded, unavailable)
 	// can include it. Agents use this to distinguish self vs teammate in attribution.
 	currentUserName, currentUserAliases, currentUserKind := currentUserIdentity(projectEndpoint)

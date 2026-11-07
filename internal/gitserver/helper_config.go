@@ -199,26 +199,23 @@ func DisableCommitSigning(repoPath string) (changed bool, err error) {
 	return changed, nil
 }
 
-// TeamCoworkerGetter reports the endpoint SAGEOX_TOKEN is bound to and, when
-// that token is a team token acting as an AI coworker, the coworker's name and
-// agt_ id; id is "" otherwise. Set by the auth package to avoid circular
-// imports. Nil reads as no coworker.
-var TeamCoworkerGetter func() (ep, name, id string)
+// LedgerAuthorGetter reports who authors the commits ox makes in a clone whose
+// origin is remoteURL: the AI coworker a team token acts as, else the SageOx
+// account signed in, on that clone's git server. Both are "" when neither
+// applies there. Set by cmd/ox, which can reach auth, identity and user
+// config. Nil reads as nobody.
+var LedgerAuthorGetter func(remoteURL string) (name, email string)
 
-// SignedInUserGetter reports the commit identity of the SageOx account signed
-// in on the git server remoteURL is on: the name teammates see and an address
-// that names the account. Both are "" when nobody is signed in there. Set by
-// cmd/ox, which can reach auth, identity and user config. Nil reads as nobody
-// signed in.
-var SignedInUserGetter func(remoteURL string) (name, email string)
-
-// coworkerEmailDomain ends the user.email stampLedgerAuthor writes for an AI
-// coworker. ".invalid" (RFC 2606) never resolves, so the address belongs to no
-// one. Stamps written before authorStampKey existed are recognized by it.
+// coworkerEmailDomain ends an AI coworker's git address. ".invalid" (RFC 2606)
+// never resolves, so the address belongs to no one. Stamps written before
+// authorStampKey existed are recognized by it.
 const coworkerEmailDomain = "@ai-coworker.invalid"
 
-// authorStampKey marks a clone whose user.name and user.email stampLedgerAuthor
-// wrote, so it removes only its own identity and never one a person set.
+// CoworkerEmail is the git address of the AI coworker whose agt_ id is id.
+func CoworkerEmail(id string) string { return id + coworkerEmailDomain }
+
+// authorStampKey marks a repository whose user.name and user.email ox wrote,
+// so it removes only its own identity and never one a person set.
 const authorStampKey = "sageox.authorstamp"
 
 // stampLedgerAuthor sets who authors the commits ox makes in the clone at
@@ -227,30 +224,39 @@ const authorStampKey = "sageox.authorstamp"
 // from the clone's own config ahead of the machine's global one (GIT_AUTHOR_*
 // and GIT_COMMITTER_* still override both).
 //
-// The identity is, in order: the AI coworker a team token acts as, then the
-// SageOx account signed in on the clone's server — so a machine with no git
-// identity can still save sessions — then nothing, which leaves git's own
-// identity in charge. Each applies only when the clone's origin is on the
-// server it belongs to. With nothing to stamp, it removes an identity it
-// stamped earlier, such as one a team token or a signed-out account left on the
-// machine, and leaves any other alone.
+// The identity comes from LedgerAuthorGetter, so a machine with no git
+// identity can still save sessions; with none, git's own identity applies.
+// The clone is ox's, so the stamp replaces any identity set in it.
 func stampLedgerAuthor(repoPath, remoteURL string) error {
 	var name, email string
-	if TeamCoworkerGetter != nil {
-		if ep, n, id := TeamCoworkerGetter(); id != "" && endpointHostsEqual(ep, endpointFromRemoteURL(remoteURL)) {
-			name, email = n, id+coworkerEmailDomain
-		}
+	if LedgerAuthorGetter != nil {
+		name, email = LedgerAuthorGetter(remoteURL)
 	}
-	if email == "" && SignedInUserGetter != nil {
-		name, email = SignedInUserGetter(remoteURL)
-	}
+	return stampAuthor(repoPath, name, email, true)
+}
+
+// StampProjectAuthor makes name and email the commit identity of the person's
+// repository at repoPath, so an AI coworker working there commits as itself,
+// or, with email "", removes an identity ox stamped there earlier. The
+// repository is the person's: an identity someone else set in its local
+// config is never replaced or removed.
+func StampProjectAuthor(repoPath, name, email string) error {
+	return stampAuthor(repoPath, name, email, false)
+}
+
+// stampAuthor writes name and email as repoPath's local commit identity, or,
+// with email "", removes an identity ox stamped earlier and leaves any other.
+// replaceForeign says whether an identity ox did not stamp may be replaced.
+func stampAuthor(repoPath, name, email string, replaceForeign bool) error {
 	// A failed read counts as unset: removal waits for the next call, and a
 	// write reports its own failure.
 	current, _ := readGitConfigLocal(repoPath, "user.email")
+	currentName, _ := readGitConfigLocal(repoPath, "user.name")
 	stamped, _ := readGitConfigLocal(repoPath, authorStampKey)
+	ours := stamped != "" || strings.HasSuffix(current, coworkerEmailDomain)
 
 	if email == "" {
-		if stamped == "" && !strings.HasSuffix(current, coworkerEmailDomain) {
+		if !ours {
 			return nil
 		}
 		// The marker goes last: if removing user.name or user.email fails,
@@ -268,7 +274,10 @@ func stampLedgerAuthor(repoPath, remoteURL string) error {
 		return nil
 	}
 
-	if currentName, _ := readGitConfigLocal(repoPath, "user.name"); current == email && currentName == name && stamped != "" {
+	if !ours && !replaceForeign && (current != "" || currentName != "") {
+		return nil
+	}
+	if current == email && currentName == name && stamped != "" {
 		return nil
 	}
 	// The marker goes first, so a stamp interrupted partway is still ox's to remove.
