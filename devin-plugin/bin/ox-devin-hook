@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Bridges Devin lifecycle hooks to an ox generic-adapter recording.
 # Usage: ox-devin-hook <SessionStart|UserPromptSubmit|PostToolUse|Stop>  (event JSON on stdin)
+#        ox-devin-hook save-token <devin-session-id>  (run by Devin, with SAGEOX_TOKEN bound)
 # Fails open: Devin ignores hook failures, and so should we — never block the agent.
 set -u
 umask 077  # state holds prompts, tool output, and the token
@@ -12,9 +13,30 @@ export PATH="$HOME/.local/bin:$PATH"
 # ox agent prime requires a detected coding agent; Devin sets none of the env
 # vars agentx looks for, so declare it (agentx's documented override).
 export AGENT_ENV="${AGENT_ENV:-devin}"
+
+# Devin gives secrets only to the commands it runs, never to hooks: a gated
+# personal secret bound with exec's env reaches the hook payload as the
+# reference string, not its value. So the hook asks Devin (request_token_once)
+# to run this with the secret bound; it caches the token where the hooks read
+# it, and remembers the repo Devin ran it in as the session's recording repo.
+if [ "$EVENT" = save-token ]; then
+  sid=$(printf '%s' "${2:-}" | tr -cd 'A-Za-z0-9_-')
+  [ -n "$sid" ] || { echo "usage: ox-devin-hook save-token <devin-session-id>" >&2; exit 2; }
+  case "${SAGEOX_TOKEN:-}" in
+    "" | secret:*) echo "SageOx: SAGEOX_TOKEN is not set in this command; bind it with env {\"SAGEOX_TOKEN\": \"secret:personal:SAGEOX_TOKEN\"}." >&2; exit 1 ;;
+  esac
+  dir="$STATE_ROOT/$sid"; mkdir -p "$dir"
+  printf '%s' "$SAGEOX_TOKEN" > "$dir/token"
+  top=$(git rev-parse --show-toplevel 2>/dev/null)
+  if [ -n "$top" ] && [ -f "$top/.sageox/config.json" ] && [ ! -s "$dir/repo" ]; then echo "$top" > "$dir/repo"; fi
+  printf '%s %s saved token for %s repo=%s\n' "$(date -u +%FT%TZ)" "$EVENT" "$sid" "$(cat "$dir/repo" 2>/dev/null)" >> "$LOG"
+  echo "SageOx: token saved; this Devin session will be recorded."
+  exit 0
+fi
+
 PAYLOAD="$(cat)"
 # Hook stdout is parsed by Devin as a decision; keep ox chatter out of it.
-# fd 3 keeps the real stdout for the one deliberate reply (nudge_once).
+# fd 3 keeps the real stdout for the one deliberate reply (request_token_once).
 exec 3>&1 >>"$LOG" 2>&1
 log() { printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$EVENT" "$*" >> "$LOG"; }
 
@@ -24,10 +46,10 @@ field() { printf '%s' "$PAYLOAD" | python3 -c "import sys,json;d=json.load(sys.s
 SID="$(field session_id | tr -cd 'A-Za-z0-9_-')"; SID="${SID:-unknown}"
 SDIR="$STATE_ROOT/$SID"; mkdir -p "$SDIR"
 
-# Devin hook processes don't inherit secrets; a personal SAGEOX_TOKEN only
-# reaches us inside PostToolUse payloads (tool_input.injected_env of a tool
-# call). Cache it 0600, per Devin session, so later hooks in this session can
-# authenticate and no other session's user can ever inherit it.
+# Devin hook processes don't inherit secrets. The token arrives via save-token
+# (above) or, where Devin includes plaintext values, a PostToolUse payload's
+# tool_input.injected_env. Cache it 0600, per Devin session, so later hooks in
+# this session can authenticate and no other session's user can inherit it.
 TOKEN_FILE="$SDIR/token"
 if [ -z "${SAGEOX_TOKEN:-}" ]; then
   t=$(printf '%s' "$PAYLOAD" | python3 -c '
@@ -133,26 +155,35 @@ while i >= 0:
   log "recording agent=$id repo=$repo"
 }
 
-# A teammate without a personal token is never recorded, so tell them how to
-# opt in: once per session, only in repos that use SageOx, and only on exec
-# calls (the tool Devin injects secrets into, so a missing token is meaningful).
-nudge_once() {
+# Without a token nothing is recorded, so ask Devin, once per session, to run
+# save-token with the secret bound; the same message tells a user who has no
+# secret how to add one.
+request_token_once() {
   [ "$EVENT" = PostToolUse ] && [ -z "$SAGEOX_TOKEN" ] || return 0
-  [ -f "$SDIR/nudged" ] && return 0
-  [ "$(field tool_name)" = exec ] || return 0
-  local repo; repo=$(find_repo) || return 0
-  # Don't invite users who opted out of recording to opt back in.
-  command -v ox >/dev/null && { recording_allowed "$repo" || return 0; }
-  touch "$SDIR/nudged"
-  log "nudged: no personal SAGEOX_TOKEN"
-  python3 -c '
-import json
+  [ -f "$SDIR/token_requested" ] && return 0
+  local repo
+  if repo=$(find_repo); then
+    # Don't invite users who opted out of recording to opt back in.
+    command -v ox >/dev/null && { recording_allowed "$repo" || return 0; }
+  else
+    # Devin's project dir is often "/" and most commands carry no workdir, so
+    # the session repo is usually unknown here. Only for this prompt, accept
+    # any ox-initialized checkout where Devin clones repos; the recording
+    # repo still comes from find_repo or the save-token command's workdir.
+    compgen -G "$HOME/repos/*/.sageox/config.json" >/dev/null || return 0
+  fi
+  touch "$SDIR/token_requested"
+  log "requested: personal SAGEOX_TOKEN"
+  HOOK_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")" SID="$SID" python3 -c '
+import json, os, shlex
+cmd = "bash %s save-token %s" % (shlex.quote(os.environ["HOOK_PATH"]), os.environ["SID"])
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext":
-  "SageOx is not recording this Devin session: the user has no personal SAGEOX_TOKEN secret. "
-  "Mention this to the user once, in one short sentence at your next message, then never again: "
-  "to save their Devin sessions to their SageOx team, create a token at https://sageox.ai/settings/tokens "
-  "and add it at https://app.devin.ai/secrets as a Personal secret named SAGEOX_TOKEN "
-  "(Personal, not Organization, so sessions are attributed to them); new sessions then record automatically."}}))' >&3
+  "SageOx records this Devin session only once it has the user'"'"'s personal SAGEOX_TOKEN, and Devin passes secrets only to commands. "
+  "Before your next step, run this once with the exec tool, with env {\"SAGEOX_TOKEN\": \"secret:personal:SAGEOX_TOKEN\"} "
+  "and workdir set to the repository you are working in: " + cmd + " . It prints no secret; do not mention it to the user if it succeeds. "
+  "If the SAGEOX_TOKEN secret does not exist, tell the user once, in one short sentence: to save their Devin sessions to their SageOx team, "
+  "create a token at https://sageox.ai/settings/tokens and add it at https://app.devin.ai/secrets as a Personal secret named SAGEOX_TOKEN "
+  "(Personal, not Organization, so sessions are attributed to them)."}}))' >&3
 }
 
 # The first clone of a large ledger takes minutes on a fresh VM, and stopping
@@ -178,7 +209,8 @@ d = json.load(sys.stdin); ev = os.environ["EVENT"]
 ts = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 MAX = 20000  # keep huge tool outputs from bloating the recording
 def s(v): return v if isinstance(v, str) else json.dumps(v)
-SECRETS = []
+# The cached token must never reach a recording, even if a command echoes it.
+SECRETS = [os.environ["SAGEOX_TOKEN"]] if len(os.environ.get("SAGEOX_TOKEN", "")) >= 4 else []
 if ev == "UserPromptSubmit":
     e = {"type": "user", "content": s(d.get("prompt", ""))}
 else:
@@ -264,7 +296,7 @@ stop_recording() {
 
 case "$EVENT" in
   SessionStart) ensure_ox ;;
-  UserPromptSubmit|PostToolUse) record_event; nudge_once ;;
+  UserPromptSubmit|PostToolUse) record_event; request_token_once ;;
   Stop) stop_recording ;;
 esac
 exit 0
