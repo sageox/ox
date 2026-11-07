@@ -3,6 +3,7 @@ package claude
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -291,6 +292,7 @@ func TestValidateAgentName(t *testing.T) {
 		{`sub\name`, true},
 		{"/etc/passwd", true},
 		{"nul\x00byte", true},
+		{"C:profile", runtime.GOOS == "windows"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

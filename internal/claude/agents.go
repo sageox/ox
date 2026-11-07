@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/sageox/ox/internal/constants"
@@ -274,9 +275,11 @@ func LoadAgent(teamPath, name string) (*AgentContent, error) {
 // ValidateAgentName requires a coworker name to be a single path element, so
 // joining it under a profile directory can never select a file elsewhere in
 // (or outside) the Team Context: filepath.Join cleans "../../README" into the
-// repo root's README.md. Both separators are rejected on every platform.
+// repo root's README.md. Both separators are rejected on every platform; a
+// colon is also rejected on Windows, where it names a drive or an NTFS stream.
 func ValidateAgentName(name string) error {
-	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") ||
+		(runtime.GOOS == "windows" && strings.ContainsRune(name, ':')) {
 		return fmt.Errorf("invalid coworker name %q: must be a single name without path separators", name)
 	}
 	return nil

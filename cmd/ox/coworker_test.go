@@ -813,6 +813,42 @@ func TestCoworkerRemoveLiteralPathspec(t *testing.T) {
 	}
 }
 
+func TestCoworkerAddLiteralPathspec(t *testing.T) {
+	_, teamDir := setupCoworkerGitProject(t, map[string]string{
+		"coworkers/agents/reviews.md": "---\ndescription: sibling\n---\n",
+	})
+	// an unstaged sibling edit that the glob "review[s].md" would match
+	sibling := filepath.Join(teamDir, "coworkers", "agents", "reviews.md")
+	if err := os.WriteFile(sibling, []byte("---\ndescription: edited\n---\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	src := filepath.Join(t.TempDir(), "review[s].md")
+	if err := os.WriteFile(src, []byte("---\ndescription: glob-named\n---\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd, _ := newCoworkerCmd(nil)
+	if err := runCoworkerAdd(cmd, []string{src}); err != nil {
+		t.Fatalf("runCoworkerAdd: %v", err)
+	}
+
+	git := func(args ...string) string {
+		c := exec.Command("git", args...)
+		c.Dir = teamDir
+		out, err := c.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if got := git("show", "--name-only", "--format=", "HEAD"); got != "coworkers/agents/review[s].md" {
+		t.Errorf("commit files = %q, want only coworkers/agents/review[s].md", got)
+	}
+	if got := git("status", "--porcelain"); got != "M coworkers/agents/reviews.md" {
+		t.Errorf("status = %q, want the sibling edit left unstaged", got)
+	}
+}
+
 func TestCoworkerLoadRejectsTraversalName(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "test-session")
 	setupCoworkerGitProject(t, map[string]string{"notes.md": "team notes\n"})
