@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -174,4 +176,58 @@ touch "`+prompted+`"
 	out, err := exec.Command("git", "-C", f.barePath, "show", "HEAD:sessions/"+sessionName+"/summary.json").Output()
 	require.NoError(t, err)
 	assert.True(t, strings.Contains(string(out), "shipped kill"), "the old summary stays")
+}
+
+type stubSummaryRunner struct {
+	available bool
+	result    *agentwork.RunResult
+}
+
+func (s stubSummaryRunner) Available() bool { return s.available }
+
+func (s stubSummaryRunner) Run(context.Context, agentwork.RunRequest) (*agentwork.RunResult, error) {
+	return s.result, nil
+}
+
+// Failure prevented: a worker that is missing, crashes, or answers with
+// something other than a summary overwrites the session's good summary.
+func TestRegenerateSummary_KeepsTheOldSummaryWhenTheWorkerFails(t *testing.T) {
+	tests := []struct {
+		name    string
+		runner  stubSummaryRunner
+		wantErr string
+	}{
+		{"claude not installed", stubSummaryRunner{}, "claude binary not found"},
+		{"claude exits non-zero", stubSummaryRunner{available: true, result: &agentwork.RunResult{ExitCode: 1, Output: "rate limited"}}, "exited with code 1"},
+		{"claude answers with prose", stubSummaryRunner{available: true, result: &agentwork.RunResult{Output: "I can't summarize this session."}}, "rejected"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const sessionName = "2026-01-01T00-00-testuser-OxRegen4"
+			setTestCfg(t)
+			f := newDraftLedgerFixture(t)
+			t.Chdir(f.projectRoot)
+			seedFinalizedLedgerSessionWithArtifacts(t, f.ledgerPath, sessionName)
+			commitAndPushFinalized(t, f, sessionName)
+			cacheDir := filepath.Join(f.ledgerPath, ".sageox", "cache", "sessions", sessionName)
+			require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"),
+				[]byte("{\"type\":\"header\"}\n{\"type\":\"user\",\"content\":\"hi\"}\n{\"type\":\"assistant\",\"content\":\"hello\"}\n"), 0o644))
+			prev := newRegenerateSummaryRunner
+			newRegenerateSummaryRunner = func() interface {
+				agentwork.Runner
+				Available() bool
+			} {
+				return tt.runner
+			}
+			t.Cleanup(func() { newRegenerateSummaryRunner = prev })
+
+			var runErr error
+			captureStdoutForPlanCLI(t, func() { runErr = regenerateSingleSessionSummary(sessionName) })
+			require.ErrorContains(t, runErr, tt.wantErr)
+			out, err := exec.Command("git", "-C", f.barePath, "show", "HEAD:sessions/"+sessionName+"/summary.json").Output()
+			require.NoError(t, err)
+			assert.Contains(t, string(out), "shipped kill", "the old summary stays")
+		})
+	}
 }

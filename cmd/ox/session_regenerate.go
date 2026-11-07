@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,7 +15,6 @@ import (
 	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
-	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/pkg/sessionsummary"
 	"github.com/spf13/cobra"
@@ -368,24 +368,12 @@ func regenerateSingleSessionSummary(nameArg string) error {
 	if !runner.Available() {
 		return fmt.Errorf("claude binary not found in PATH — ensure Claude Code CLI is installed")
 	}
-	// An empty directory under the user's cache, never the project: Claude Code
-	// loads a project's settings (including env overrides like
-	// ANTHROPIC_BASE_URL) and parent-directory CLAUDE.md files, and /tmp is
-	// writable by every account on the machine.
-	workBase := filepath.Join(paths.CacheDir(), "agent-worker")
-	if err := os.MkdirAll(workBase, 0o700); err != nil {
-		return fmt.Errorf("summary worker directory: %w", err)
-	}
-	workDir, err := os.MkdirTemp(workBase, "run-*")
-	if err != nil {
-		return fmt.Errorf("summary worker directory: %w", err)
-	}
-	defer os.RemoveAll(workDir)
-
+	// No WorkDir: the runner makes a fresh empty one under the user's cache,
+	// never the project, whose settings (including env overrides like
+	// ANTHROPIC_BASE_URL) Claude Code would load.
 	result, err := runner.Run(context.Background(), agentwork.RunRequest{
 		Prompt:   prompt,
 		Model:    sessionsummary.DefaultSummaryModel(),
-		WorkDir:  workDir,
 		Isolated: true,
 	})
 	if err != nil {
@@ -399,11 +387,6 @@ func regenerateSingleSessionSummary(nameArg string) error {
 		return fmt.Errorf("summary for %s rejected: %w", sessionName, err)
 	}
 
-	summaryFile, err := os.CreateTemp("", "ox-regenerate-summary-*.json")
-	if err != nil {
-		return fmt.Errorf("summary temp file: %w", err)
-	}
-	defer func() { _ = os.Remove(summaryFile.Name()) }()
 	// quality_score is omitempty, so a model's 0 would vanish and
 	// pushSummaryToLedger would read the summary as unscored and publish it.
 	// A model's answer is always scored, as in the daemon's finalize.
@@ -412,11 +395,14 @@ func regenerateSingleSessionSummary(nameArg string) error {
 		_ = json.Unmarshal(data, &fields)
 	}
 	fields["quality_score"] = freshSummary.QualityScore
-	if err := json.NewEncoder(summaryFile).Encode(fields); err != nil {
-		_ = summaryFile.Close()
-		return fmt.Errorf("write summary temp file: %w", err)
+	data, _ := json.Marshal(fields)
+	summaryFile, err := os.CreateTemp("", "ox-regenerate-summary-*.json")
+	if err != nil {
+		return fmt.Errorf("summary temp file: %w", err)
 	}
-	if err := summaryFile.Close(); err != nil {
+	defer func() { _ = os.Remove(summaryFile.Name()) }()
+	_, writeErr := summaryFile.Write(data)
+	if err := errors.Join(writeErr, summaryFile.Close()); err != nil {
 		return fmt.Errorf("write summary temp file: %w", err)
 	}
 	pushed := pushSummaryToLedger(summaryFile.Name(), sessionPath)
