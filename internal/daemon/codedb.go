@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -102,6 +103,9 @@ type CodeDBManager struct {
 	// worktreeIndexRepoFn replaces db.IndexLocalRepo for the worktree index (both
 	// passes) in tests, to observe or fail a pass; nil in production.
 	worktreeIndexRepoFn func(ctx context.Context, db *codedb.DB, repoPath string, opts index.IndexOptions) error
+	// removeIndexEntryFn replaces os.RemoveAll for each entry discardCorruptIndex
+	// deletes, so a test can fail a removal partway; nil in production.
+	removeIndexEntryFn func(path string) error
 
 	// dirty-only refresh state (separate lifecycle from full indexing)
 	dirtyRefreshing  bool
@@ -626,8 +630,10 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	historyOwed := false
 	if local {
 		headBeforeIndex = readHeadFingerprint(ctx, projectRoot)
-		// read after any --full wipe above, so a wiped index owes nothing
-		historyOwed = loadIndexState(m.logger, dataDir).HistoryPending
+		// read after any --full wipe above, so a wiped index owes nothing. Only
+		// this worktree's own ref counts: debt other worktrees recorded on other
+		// refs is theirs to pay and this pass would not walk those refs.
+		historyOwed = loadIndexState(m.logger, dataDir).owes(refOfFingerprint(headBeforeIndex))
 	}
 
 	// progress also records the newest message when nobody is listening: background
@@ -664,19 +670,19 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	// Pass 1 takes only the newest commits so the tip is searchable quickly. When
 	// it stops short, older history is owed to pass 2 below.
 	opts := index.IndexOptions{Progress: progress}
-	var truncated atomic.Bool
+	var truncated truncatedRefs
 	if local {
 		depth := m.priorityDepth()
 		opts.MaxHistoryDepth = depth
 		opts.OnHistoryTruncated = func(ref string) {
-			if truncated.Swap(true) {
+			if !truncated.add(ref) {
 				return
 			}
 			// persisted before pass 1 commits its first batch: if the daemon dies
 			// after those commits land, the restart finds them all "known", sees
 			// no truncation, and would never learn that older history is missing
 			m.logger.Info("codedb history truncated at priority depth, backfill will follow", "ref", ref, "depth", depth)
-			m.markHistoryPending(dataDir, true)
+			m.addHistoryDebt(dataDir, ref)
 		}
 	}
 
@@ -687,8 +693,8 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	// can't break when the whole process is being restarted from scratch).
 	indexStart := time.Now()
 	indexFn := func(ctx context.Context, db *codedb.DB) error {
-		// a heal retry re-runs this on a wiped dir, which took the pending mark with it
-		truncated.Store(false)
+		// a heal retry re-runs this on a wiped dir, which took the debt with it
+		truncated.reset()
 		if payload.URL != "" {
 			if pw != nil {
 				_ = pw.WriteStage("indexing", fmt.Sprintf("Indexing %s...", payload.URL))
@@ -710,7 +716,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 			// nothing can ever be indexed here; record the head so the check does
 			// not retry the open every interval
 			if local {
-				m.recordIndexed(dataDir, headBeforeIndex, false)
+				m.recordIndexed(dataDir, headBeforeIndex, nil, []string{refOfFingerprint(headBeforeIndex)})
 			}
 			return nil, nil
 		}
@@ -870,9 +876,18 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	// The tip is searchable and the stages are done: that is what freshness
 	// records, even while pass 2 still owes older history. A restart between
 	// here and pass 2's end must still find history_pending=true on disk.
-	backfillOwed := local && (truncated.Load() || historyOwed)
+	//
+	// owedRefs is what pass 2 will pay: the refs pass 1 just truncated, plus this
+	// worktree's own ref when an earlier run left it owing. Pass 2 walks this
+	// worktree's default ref, which is the only ref either source can name.
+	reportedRefs := truncated.list()
+	owedRefs := reportedRefs
+	if historyOwed {
+		owedRefs = normalizeRefs(append(slices.Clone(owedRefs), refOfFingerprint(headBeforeIndex)))
+	}
+	backfillOwed := local && len(owedRefs) > 0
 	if local {
-		m.recordIndexed(dataDir, headBeforeIndex, backfillOwed)
+		m.recordIndexed(dataDir, headBeforeIndex, reportedRefs, nil)
 	}
 
 	logArgs := []any{
@@ -903,7 +918,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	// pass 2 reuses the open db: reopening through OpenIndexWithHeal would, on a
 	// corrupt-looking failure, wipe the pass 1 index this run just made usable
 	if backfillOwed {
-		if err := m.backfillHistory(ctx, db, dataDir, projectRoot, pw, progress); err != nil {
+		if err := m.backfillHistory(ctx, db, dataDir, projectRoot, owedRefs, pw, progress); err != nil {
 			if index.IsCorruptionError(err) {
 				// damage is the one failure that does cost the index: every later
 				// pass would hit the same page, so it is discarded for a rebuild
@@ -921,7 +936,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 }
 
 // backfillHistory is pass 2: it indexes the history pass 1 skipped and, on
-// success, clears history_pending. Background runs (pw == nil) are paced so a
+// success, clears the debt on walkedRefs (and only those). Background runs (pw == nil) are paced so a
 // multi-hour walk yields to load, battery power and an active user; a run
 // someone is waiting on is not slowed down.
 //
@@ -931,7 +946,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 // and wipes them. maxIndexDuration still caps each run; the work is
 // checkpointed every few dozen commits, so the next run resumes where this
 // one stopped.
-func (m *CodeDBManager) backfillHistory(ctx context.Context, db *codedb.DB, dataDir, projectRoot string, pw *ProgressWriter, progress index.ProgressFunc) error {
+func (m *CodeDBManager) backfillHistory(ctx context.Context, db *codedb.DB, dataDir, projectRoot string, walkedRefs []string, pw *ProgressWriter, progress index.ProgressFunc) error {
 	ctx, cancel := context.WithTimeout(ctx, maxIndexDuration)
 	defer cancel()
 
@@ -950,7 +965,7 @@ func (m *CodeDBManager) backfillHistory(ctx context.Context, db *codedb.DB, data
 		return fmt.Errorf("backfill history: %w", err)
 	}
 
-	m.markHistoryPending(dataDir, false)
+	m.clearHistoryDebt(dataDir, walkedRefs)
 	cached := queryStatsFromDB(db, dataDir)
 	m.mu.Lock()
 	m.stats = cached
@@ -1252,13 +1267,13 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 	// cheap pre-check: read HEAD from filesystem (~0.1ms) and compare against cache.
 	// Also verify the index still exists on disk — if someone wiped .sageox/cache/
 	// while the daemon was running, the cached fingerprint would be stale.
-	// Owed history forces the pipeline even when nothing moved: pass 2 is what
-	// finishes it.
+	// History owed on this worktree's ref forces the pipeline even when nothing
+	// moved: pass 2 is what finishes it.
 	if fingerprint := readHeadFingerprint(ctx, projectRoot); fingerprint != "" {
 		m.mu.Lock()
 		cached := m.lastIndexedHead
 		m.mu.Unlock()
-		if cached != "" && cached == fingerprint && !m.boardChanged() && !m.historyPending() {
+		if cached != "" && cached == fingerprint && !m.boardChanged() && !m.historyOwedFor(fingerprint) {
 			dataDir := m.resolveSharedDataDir()
 			if _, err := os.Stat(dataDir); err == nil {
 				m.logger.Debug("codedb freshness check skipped, HEAD unchanged")
@@ -1385,8 +1400,9 @@ func (m *CodeDBManager) discardIfCorrupt(db *codedb.DB, dir string, err error) {
 }
 
 // discardCorruptIndex removes a codedb cache that a real statement or a
-// maintenance scan proved damaged, and forgets the freshness fingerprint so the
-// next CheckFreshness rebuilds instead of trusting the HEAD it last indexed.
+// maintenance scan proved damaged, and forgets the freshness fingerprints (HEAD
+// and board) so the next CheckFreshness rebuilds instead of trusting what it
+// last indexed. The whole history debt goes with the state file.
 // Callers must not hold the database open: the files are about to disappear.
 //
 // The ledger index lives inside the shared index's directory
@@ -1394,10 +1410,19 @@ func (m *CodeDBManager) discardIfCorrupt(db *codedb.DB, dir string, err error) {
 // not cost a 5 GB ledger rebuild, so that subdirectory is left alone.
 func (m *CodeDBManager) discardCorruptIndex(dir string, cause error) {
 	m.logger.Warn("codedb index is damaged; discarding it for a clean rebuild", "data_dir", dir, "error", cause)
-	// first, so a partial discard below cannot leave a state file vouching for a
-	// damaged index
+	// Forget freshness before touching the index, not after: the loop below gives
+	// up at the first entry it cannot remove, and a running daemon that kept its
+	// fingerprint (with the debt gone from the removed state file) would see an
+	// unchanged HEAD over a damaged, half-discarded index and never rebuild it.
+	// The state file goes first for the same reason, so a restart cannot trust it.
 	if err := os.Remove(indexStatePath(dir)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		m.logger.Warn("codedb discard of index state failed", "data_dir", dir, "error", err)
+	}
+	if dir == m.resolveSharedDataDir() {
+		m.mu.Lock()
+		m.lastIndexedHead = ""
+		m.lastIndexedBoard = ""
+		m.mu.Unlock()
 	}
 	ledger := m.resolveLedgerDataDir()
 	entries, err := os.ReadDir(dir)
@@ -1410,16 +1435,18 @@ func (m *CodeDBManager) discardCorruptIndex(dir string, cause error) {
 		if path == ledger {
 			continue
 		}
-		if err := os.RemoveAll(path); err != nil {
+		if err := m.removeIndexEntry(path); err != nil {
 			m.logger.Warn("codedb discard of damaged index failed", "data_dir", dir, "path", path, "error", err)
 			return
 		}
 	}
-	if dir == m.resolveSharedDataDir() {
-		m.mu.Lock()
-		m.lastIndexedHead = ""
-		m.mu.Unlock()
+}
+
+func (m *CodeDBManager) removeIndexEntry(path string) error {
+	if m.removeIndexEntryFn != nil {
+		return m.removeIndexEntryFn(path)
 	}
+	return os.RemoveAll(path)
 }
 
 // buildActiveFor reports whether an index build or overlay refresh is writing

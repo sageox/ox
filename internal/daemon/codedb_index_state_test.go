@@ -3,9 +3,11 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,16 +41,23 @@ func TestLoadIndexState(t *testing.T) {
 		{
 			name: "valid state",
 			setup: func(t *testing.T, dataDir string) {
-				writeStateFile(t, dataDir, `{"ox_version":"v1","head":"refs/heads/main:abc","board":"b1","history_pending":true}`)
+				writeStateFile(t, dataDir, `{"ox_version":"v1","head":"refs/heads/main:abc","board":"b1","history_pending_refs":["refs/heads/main","refs/heads/topic"]}`)
 			},
-			want: codeDBIndexState{OxVersion: "v1", Head: "refs/heads/main:abc", Board: "b1", HistoryPending: true},
+			want: codeDBIndexState{OxVersion: "v1", Head: "refs/heads/main:abc", Board: "b1", HistoryPendingRefs: []string{"refs/heads/main", "refs/heads/topic"}},
 		},
 		{
 			name: "contract shape without the version field",
 			setup: func(t *testing.T, dataDir string) {
-				writeStateFile(t, dataDir, `{"head":"refs/heads/main:abc","board":"","history_pending":false}`)
+				writeStateFile(t, dataDir, `{"head":"refs/heads/main:abc","board":"","history_pending_refs":null}`)
 			},
 			want: codeDBIndexState{Head: "refs/heads/main:abc"},
+		},
+		{
+			name: "the shared bool from before the debt was per ref is ignored",
+			setup: func(t *testing.T, dataDir string) {
+				writeStateFile(t, dataDir, `{"head":"h","history_pending":true}`)
+			},
+			want: codeDBIndexState{Head: "h"},
 		},
 		{
 			name: "unknown fields from a newer build are ignored",
@@ -113,7 +122,7 @@ func TestSaveIndexState(t *testing.T) {
 	t.Run("round trip", func(t *testing.T) {
 		t.Parallel()
 		dataDir := t.TempDir()
-		want := codeDBIndexState{OxVersion: "v9", Head: "refs/heads/main:abc", Board: "board-fp", HistoryPending: true}
+		want := codeDBIndexState{OxVersion: "v9", Head: "refs/heads/main:abc", Board: "board-fp", HistoryPendingRefs: []string{"refs/heads/main"}}
 		require.NoError(t, saveIndexState(dataDir, want))
 		assert.Equal(t, want, loadIndexState(codedbTestLogger(), dataDir))
 	})
@@ -121,7 +130,7 @@ func TestSaveIndexState(t *testing.T) {
 	t.Run("replaces an earlier state completely", func(t *testing.T) {
 		t.Parallel()
 		dataDir := t.TempDir()
-		require.NoError(t, saveIndexState(dataDir, codeDBIndexState{Head: "old", Board: "old", HistoryPending: true}))
+		require.NoError(t, saveIndexState(dataDir, codeDBIndexState{Head: "old", Board: "old", HistoryPendingRefs: []string{"refs/heads/old"}}))
 		require.NoError(t, saveIndexState(dataDir, codeDBIndexState{Head: "new"}))
 		assert.Equal(t, codeDBIndexState{Head: "new"}, loadIndexState(codedbTestLogger(), dataDir))
 	})
@@ -182,7 +191,7 @@ func TestSaveIndexState_ReadersNeverSeeAPartialWrite(t *testing.T) {
 	dataDir := t.TempDir()
 	long := strings.Repeat("x", 4096) // large enough that a non-atomic write would span several syscalls
 	states := []codeDBIndexState{
-		{Head: "refs/heads/a:" + long, Board: "a", HistoryPending: true},
+		{Head: "refs/heads/a:" + long, Board: "a", HistoryPendingRefs: []string{"refs/heads/a", "refs/heads/b"}},
 		{Head: "refs/heads/b:" + long, Board: "b"},
 	}
 	require.NoError(t, saveIndexState(dataDir, states[0]))
@@ -216,7 +225,7 @@ func TestSaveIndexState_ReadersNeverSeeAPartialWrite(t *testing.T) {
 			continue
 		}
 		var got codeDBIndexState
-		if json.Unmarshal(data, &got) != nil || (got != states[0] && got != states[1]) {
+		if json.Unmarshal(data, &got) != nil || (!reflect.DeepEqual(got, states[0]) && !reflect.DeepEqual(got, states[1])) {
 			torn.Add(1)
 		}
 	}
@@ -234,8 +243,9 @@ func TestUpdateIndexState_WriteFailureIsLoggedNotFatal(t *testing.T) {
 	logger, logs := captureLogger()
 	mgr := NewCodeDBManager(t.TempDir(), logger, nil)
 
-	mgr.markHistoryPending(dataDir, true) // must return, not panic or block
-	mgr.recordIndexed(dataDir, "refs/heads/main:abc", false)
+	mgr.addHistoryDebt(dataDir, "refs/heads/main") // must return, not panic or block
+	mgr.clearHistoryDebt(dataDir, []string{"refs/heads/main"})
+	mgr.recordIndexed(dataDir, "refs/heads/main:abc", nil, nil)
 
 	assert.Contains(t, logs.String(), "codedb index state not saved")
 	mgr.mu.Lock()
@@ -244,17 +254,78 @@ func TestUpdateIndexState_WriteFailureIsLoggedNotFatal(t *testing.T) {
 	assert.Equal(t, "refs/heads/main:abc", head, "in-memory freshness still advances when the disk write fails")
 }
 
-func TestMarkHistoryPending_KeepsRecordedFreshness(t *testing.T) {
+func TestAddHistoryDebt_KeepsRecordedFreshness(t *testing.T) {
 	t.Parallel()
 
 	dataDir := t.TempDir()
 	mgr := NewCodeDBManager(t.TempDir(), codedbTestLogger(), nil)
 	require.NoError(t, saveIndexState(dataDir, codeDBIndexState{OxVersion: "v1", Head: "h", Board: "b"}))
 
-	mgr.markHistoryPending(dataDir, true)
+	mgr.addHistoryDebt(dataDir, "refs/heads/main")
 
-	assert.Equal(t, codeDBIndexState{OxVersion: "v1", Head: "h", Board: "b", HistoryPending: true}, loadIndexState(mgr.logger, dataDir),
+	assert.Equal(t, codeDBIndexState{OxVersion: "v1", Head: "h", Board: "b", HistoryPendingRefs: []string{"refs/heads/main"}}, loadIndexState(mgr.logger, dataDir),
 		"head and board describe the last completed pipeline, not the one that just started")
+}
+
+// --- The per-ref history debt ---
+
+func TestCodeDBIndexState_DebtHelpers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		start []string
+		do    func(s *codeDBIndexState)
+		want  []string
+	}{
+		{name: "add to empty", do: func(s *codeDBIndexState) { s.addPending("refs/heads/b") }, want: []string{"refs/heads/b"}},
+		{name: "add keeps sorted order", start: []string{"refs/heads/b"}, do: func(s *codeDBIndexState) { s.addPending("refs/heads/a", "refs/heads/c") }, want: []string{"refs/heads/a", "refs/heads/b", "refs/heads/c"}},
+		{name: "add is idempotent", start: []string{"refs/heads/a"}, do: func(s *codeDBIndexState) { s.addPending("refs/heads/a", "refs/heads/a") }, want: []string{"refs/heads/a"}},
+		{name: "empty ref names are never recorded", do: func(s *codeDBIndexState) { s.addPending("") }, want: nil},
+		{name: "clear removes only the named ref", start: []string{"refs/heads/a", "refs/heads/b"}, do: func(s *codeDBIndexState) { s.clearPending("refs/heads/a") }, want: []string{"refs/heads/b"}},
+		{name: "clear of an absent ref changes nothing", start: []string{"refs/heads/a"}, do: func(s *codeDBIndexState) { s.clearPending("refs/heads/zzz") }, want: []string{"refs/heads/a"}},
+		{name: "clearing the last ref leaves no debt", start: []string{"refs/heads/a"}, do: func(s *codeDBIndexState) { s.clearPending("refs/heads/a") }, want: nil},
+		{name: "unsorted duplicated input is normalized", start: []string{"refs/heads/b", "refs/heads/a", "refs/heads/b"}, do: func(s *codeDBIndexState) { s.addPending() }, want: []string{"refs/heads/a", "refs/heads/b"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			start := slices.Clone(tt.start)
+			s := codeDBIndexState{HistoryPendingRefs: start}
+			tt.do(&s)
+			assert.Equal(t, tt.want, s.HistoryPendingRefs)
+			assert.Equal(t, tt.start, start, "the caller's slice must not be modified in place")
+		})
+	}
+
+	t.Run("owes", func(t *testing.T) {
+		t.Parallel()
+		s := codeDBIndexState{HistoryPendingRefs: []string{"refs/heads/main"}}
+		assert.True(t, s.owes("refs/heads/main"))
+		assert.False(t, s.owes("refs/heads/other"))
+		assert.False(t, s.owes(""), "an unknown ref owes nothing")
+		assert.False(t, codeDBIndexState{}.owes("refs/heads/main"))
+	})
+}
+
+func TestRefOfFingerprint(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		fingerprint string
+		want        string
+	}{
+		{"refs/heads/main:0123456789012345678901234567890123456789", "refs/heads/main"},
+		{"refs/heads/feature/x-1:0123456789012345678901234567890123456789", "refs/heads/feature/x-1"},
+		{"HEAD:0123456789012345678901234567890123456789", "HEAD"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.fingerprint, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, refOfFingerprint(tt.fingerprint))
+		})
+	}
 }
 
 // --- Lazy seeding of lastIndexedHead / lastIndexedBoard ---
@@ -384,10 +455,19 @@ func TestCheckFreshness_RestartSkipsFinishedPipeline(t *testing.T) {
 			name: "history still owed",
 			whileDown: func(t *testing.T, repoDir, dataDir string) {
 				state := loadIndexState(codedbTestLogger(), dataDir)
-				state.HistoryPending = true
+				state.addPending(mainRef)
 				require.NoError(t, saveIndexState(dataDir, state))
 			},
 			wantRuns: 1,
+		},
+		{
+			name: "history owed on another worktree's ref is not this daemon's debt",
+			whileDown: func(t *testing.T, repoDir, dataDir string) {
+				state := loadIndexState(codedbTestLogger(), dataDir)
+				state.addPending("refs/heads/another-worktrees-branch")
+				require.NoError(t, saveIndexState(dataDir, state))
+			},
+			wantRuns: 0,
 		},
 		{
 			name: "recorded by a different ox build",
@@ -515,32 +595,31 @@ func TestCheckFreshness_RestartRunsWhenBoardMovedWhileDown(t *testing.T) {
 	assert.Equal(t, int64(1), restart(t), "board moved while down: indexed")
 }
 
-// TestIndexState_DiscardCorruptIndexRemovesStateFirst: a discard that fails partway must
-// not leave a state file vouching for a damaged index. "aaa-stuck" sorts before
-// the state file, so a discard that deleted entries in directory order would stop
-// there with the state file still in place.
-func TestIndexState_DiscardCorruptIndexRemovesStateFirst(t *testing.T) {
-	// the stuck entry needs chmod to take effect, which it does not on Windows or as root
-	if runtime.GOOS == "windows" {
-		t.Skip("windows: chmod cannot make a directory undeletable")
-	}
-	if os.Getuid() == 0 {
-		t.Skip("root ignores directory permissions")
-	}
+// TestIndexState_DiscardCorruptIndexForgetsFreshnessFirst: a discard that fails
+// partway (a file held open, a permissions error) must still leave the daemon
+// distrusting what it had recorded. The removal failure is injected on the first
+// entry, the earliest the loop can give up.
+func TestIndexState_DiscardCorruptIndexForgetsFreshnessFirst(t *testing.T) {
 	t.Parallel()
 
 	dataDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dataDir, "codedb.sqlite"), []byte("damaged"), 0o600))
 	mgr := NewCodeDBManager(t.TempDir(), codedbTestLogger(), nil)
 	mgr.dataDir = dataDir
-	require.NoError(t, saveIndexState(dataDir, codeDBIndexState{OxVersion: version.Full(), Head: "h", HistoryPending: true}))
-
-	stuck := filepath.Join(dataDir, "aaa-stuck")
-	require.NoError(t, os.MkdirAll(filepath.Join(stuck, "child"), 0o755))
-	require.NoError(t, os.Chmod(stuck, 0o500))
-	t.Cleanup(func() { _ = os.Chmod(stuck, 0o755) })
+	mgr.lastIndexedHead, mgr.lastIndexedBoard = "refs/heads/main:abc", "board-fp"
+	require.NoError(t, saveIndexState(dataDir, codeDBIndexState{OxVersion: version.Full(), Head: "h", HistoryPendingRefs: []string{mainRef}}))
+	var attempted []string
+	mgr.removeIndexEntryFn = func(path string) error {
+		attempted = append(attempted, path)
+		return errors.New("resource busy")
+	}
 
 	mgr.discardCorruptIndex(dataDir, context.DeadlineExceeded)
 
-	require.DirExists(t, stuck, "precondition: the discard really did stop at the stuck entry")
-	assert.NoFileExists(t, indexStatePath(dataDir))
+	require.NotEmpty(t, attempted, "precondition: the discard reached the removal loop and failed there")
+	assert.Equal(t, 1, len(attempted), "the loop gives up at the first failure")
+	assert.FileExists(t, filepath.Join(dataDir, "codedb.sqlite"), "precondition: the index really was left half-discarded")
+	assert.NoFileExists(t, indexStatePath(dataDir), "a restart must not trust the state of a damaged index")
+	assert.Empty(t, mgr.lastIndexedHead, "a running daemon must not trust its fingerprint either")
+	assert.Empty(t, mgr.lastIndexedBoard)
 }

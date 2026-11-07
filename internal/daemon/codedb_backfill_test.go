@@ -28,6 +28,9 @@ import (
 // Failure class: a deep repo indexed oldest-first has nothing searchable at the
 // tip for hours, and a daemon restart in that window forgot the rest was owed.
 
+// mainRef is the default ref of every fixture repo (seedGitRepo inits on main).
+const mainRef = "refs/heads/main"
+
 // oldestSentinel lives in a file added by the repo's second commit and still
 // present at the tip. Finding it after pass 1 proves the tip's content is
 // searchable although the commit that introduced it is not indexed yet.
@@ -77,7 +80,7 @@ type passRecord struct {
 	commitsBefore  int
 	fileRevsBefore int
 	sentinelHits   int
-	pendingOnDisk  bool
+	debtOnDisk     []string
 }
 
 // recordPasses wraps both passes of the worktree index and returns what each one
@@ -93,7 +96,7 @@ func recordPasses(t *testing.T, mgr *CodeDBManager, dataDir string, fail func(op
 		hits, err := db.Search(ctx, oldestSentinel)
 		require.NoError(t, err)
 		rec.sentinelHits = len(hits)
-		rec.pendingOnDisk = loadIndexState(mgr.logger, dataDir).HistoryPending
+		rec.debtOnDisk = loadIndexState(mgr.logger, dataDir).HistoryPendingRefs
 		mu.Lock()
 		passes = append(passes, rec)
 		mu.Unlock()
@@ -180,12 +183,12 @@ func TestBackfill_TipFirstThenBackfill(t *testing.T) {
 				assert.Equal(t, depth, pass2.commitsBefore, "pass 1 indexes exactly the newest depth commits")
 				assert.Positive(t, pass2.fileRevsBefore, "the tip's files exist before pass 2 starts")
 				assert.Positive(t, pass2.sentinelHits, "tip content is searchable although its commit is not indexed yet")
-				assert.True(t, pass2.pendingOnDisk, "history_pending is on disk before pass 2 starts")
+				assert.Equal(t, []string{mainRef}, pass2.debtOnDisk, "the debt is on disk before pass 2 starts")
 			}
 
 			assert.Equal(t, tt.commits, countCommits(t, dataDir), "the whole history is indexed in the end")
 			state := loadIndexState(mgr.logger, dataDir)
-			assert.False(t, state.HistoryPending, "nothing is owed once the run finishes")
+			assert.Empty(t, state.HistoryPendingRefs, "nothing is owed once the run finishes")
 			assert.Equal(t, readHeadFingerprint(context.Background(), repoDir), state.Head)
 		})
 	}
@@ -268,7 +271,7 @@ func TestBackfill_Pass2FailureKeepsPass1Index(t *testing.T) {
 			assert.Equal(t, depth, countCommits(t, dataDir), "pass 1's commits are still there")
 			stats := mgr.Stats()
 			assert.Empty(t, stats.LastError, "the status must not report the usable index as failed")
-			assert.True(t, loadIndexState(mgr.logger, dataDir).HistoryPending, "the debt stays on disk")
+			assert.Equal(t, []string{mainRef}, loadIndexState(mgr.logger, dataDir).HistoryPendingRefs, "the debt stays on disk")
 
 			// the tip is searchable
 			db, err := codedb.Open(dataDir)
@@ -283,7 +286,7 @@ func TestBackfill_Pass2FailureKeepsPass1Index(t *testing.T) {
 			_, err = mgr.Index(indexCtx(t), CodeIndexPayload{}, nil)
 			require.NoError(t, err)
 			assert.Equal(t, 10, countCommits(t, dataDir))
-			assert.False(t, loadIndexState(mgr.logger, dataDir).HistoryPending)
+			assert.Empty(t, loadIndexState(mgr.logger, dataDir).HistoryPendingRefs)
 			assert.Len(t, records(), 2, "the retry replaced the recording hook")
 		})
 	}
@@ -332,7 +335,7 @@ func TestBackfill_HistoryPendingPersistedBeforePass1Commits(t *testing.T) {
 	mgr, dataDir := newBackfillManager(t, repoDir, depth)
 
 	var atTruncation struct {
-		pending bool
+		debt    []string
 		commits int
 		fired   int
 	}
@@ -342,7 +345,7 @@ func TestBackfill_HistoryPendingPersistedBeforePass1Commits(t *testing.T) {
 			opts.OnHistoryTruncated = func(ref string) {
 				orig(ref)
 				atTruncation.fired++
-				atTruncation.pending = loadIndexState(mgr.logger, dataDir).HistoryPending
+				atTruncation.debt = loadIndexState(mgr.logger, dataDir).HistoryPendingRefs
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM commits").Scan(&atTruncation.commits)
 			}
 			// the process dies right after pass 1's commits are durable
@@ -357,7 +360,7 @@ func TestBackfill_HistoryPendingPersistedBeforePass1Commits(t *testing.T) {
 	_, err := mgr.Index(indexCtx(t), CodeIndexPayload{}, nil)
 	require.Error(t, err)
 	require.Equal(t, 1, atTruncation.fired)
-	assert.True(t, atTruncation.pending, "history_pending must be on disk the moment truncation is reported")
+	assert.Equal(t, []string{mainRef}, atTruncation.debt, "the debt must be on disk the moment truncation is reported")
 	assert.Zero(t, atTruncation.commits, "...before any pass 1 commit is durable")
 	assert.Equal(t, depth, countCommits(t, dataDir), "pass 1's commits did land")
 
@@ -370,7 +373,7 @@ func TestBackfill_HistoryPendingPersistedBeforePass1Commits(t *testing.T) {
 	waitForIndexingDone(t, restarted)
 
 	assert.Equal(t, 9, countCommits(t, dataDir), "the restarted daemon finished the backfill")
-	assert.False(t, loadIndexState(restarted.logger, dataDir).HistoryPending)
+	assert.Empty(t, loadIndexState(restarted.logger, dataDir).HistoryPendingRefs)
 }
 
 // TestBackfill_HealRetryReportsTruncationAgain: when pass 1 hits a corrupt cache,
@@ -388,7 +391,7 @@ func TestBackfill_HealRetryReportsTruncationAgain(t *testing.T) {
 	mgr, dataDir := newBackfillManager(t, repoDir, 3)
 
 	attempts := 0
-	pendingAfterRetryReport := false
+	var debtAfterRetryReport []string
 	mgr.worktreeIndexRepoFn = func(ctx context.Context, db *codedb.DB, repoPath string, opts index.IndexOptions) error {
 		if opts.BackfillHistory {
 			return db.IndexLocalRepo(ctx, repoPath, opts)
@@ -401,7 +404,7 @@ func TestBackfill_HealRetryReportsTruncationAgain(t *testing.T) {
 		orig := opts.OnHistoryTruncated
 		opts.OnHistoryTruncated = func(ref string) {
 			orig(ref)
-			pendingAfterRetryReport = loadIndexState(mgr.logger, dataDir).HistoryPending
+			debtAfterRetryReport = loadIndexState(mgr.logger, dataDir).HistoryPendingRefs
 		}
 		return db.IndexLocalRepo(ctx, repoPath, opts)
 	}
@@ -409,7 +412,7 @@ func TestBackfill_HealRetryReportsTruncationAgain(t *testing.T) {
 	_, err := mgr.Index(indexCtx(t), CodeIndexPayload{}, nil)
 	require.NoError(t, err)
 	require.Equal(t, 2, attempts, "the corrupt first attempt was retried on a clean cache")
-	assert.True(t, pendingAfterRetryReport, "the retry must persist history_pending itself")
+	assert.Equal(t, []string{mainRef}, debtAfterRetryReport, "the retry must persist the debt itself")
 	assert.Equal(t, 9, countCommits(t, dataDir))
 }
 
@@ -434,7 +437,7 @@ func TestBackfill_FullReindexClearsOwedHistory(t *testing.T) {
 			t.Parallel()
 			repoDir := seedLinearHistory(t, tt.commits)
 			mgr, dataDir := newBackfillManager(t, repoDir, 4)
-			require.NoError(t, saveIndexState(dataDir, codeDBIndexState{Head: "stale", HistoryPending: true}))
+			require.NoError(t, saveIndexState(dataDir, codeDBIndexState{Head: "stale", HistoryPendingRefs: []string{mainRef}}))
 			records := recordPasses(t, mgr, dataDir, nil)
 
 			_, err := mgr.Index(indexCtx(t), CodeIndexPayload{Full: true}, nil)
@@ -443,7 +446,7 @@ func TestBackfill_FullReindexClearsOwedHistory(t *testing.T) {
 			assert.Len(t, records(), tt.wantPasses)
 			assert.Equal(t, tt.commits, countCommits(t, dataDir))
 			state := loadIndexState(mgr.logger, dataDir)
-			assert.False(t, state.HistoryPending)
+			assert.Empty(t, state.HistoryPendingRefs)
 			assert.NotEqual(t, "stale", state.Head)
 		})
 	}
@@ -463,9 +466,12 @@ func TestCheckFreshness_AlternatesRepoIsNotRetriedEveryCheck(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(alternates), 0o755))
 	require.NoError(t, os.WriteFile(alternates, []byte(filepath.Join(t.TempDir(), "objects")+"\n"), 0o600))
 
-	mgr, _ := newBackfillManager(t, repoDir, 100)
+	mgr, dataDir := newBackfillManager(t, repoDir, 100)
 	var runs atomic.Int64
 	mgr.testHook = func() { runs.Add(1) }
+	// debt recorded before the repo gained alternates can never be paid; left in
+	// place it would force the pipeline on every check
+	require.NoError(t, saveIndexState(dataDir, codeDBIndexState{HistoryPendingRefs: []string{mainRef}}))
 
 	mgr.CheckFreshness(indexCtx(t))
 	waitForIndexingDone(t, mgr)
@@ -473,6 +479,252 @@ func TestCheckFreshness_AlternatesRepoIsNotRetriedEveryCheck(t *testing.T) {
 	waitForIndexingDone(t, mgr)
 
 	assert.Equal(t, int64(1), runs.Load(), "the second check must be skipped")
+	assert.Empty(t, loadIndexState(mgr.logger, dataDir).HistoryPendingRefs)
+}
+
+// addLinkedWorktree runs `git worktree add <path> <args...>` and returns path.
+func addLinkedWorktree(t *testing.T, repoDir string, args ...string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "linked")
+	backfillGit(t, repoDir, append([]string{"worktree", "add", "-q", path}, args...)...)
+	return path
+}
+
+// revParse returns git's answer for rev in repoDir.
+func revParse(t *testing.T, repoDir, rev string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", repoDir, "rev-parse", rev).Output()
+	require.NoError(t, err)
+	return strings.TrimSpace(string(out))
+}
+
+// TestBackfill_AnotherWorktreesBackfillDoesNotClearMyDebt: worktrees of one repo
+// share one data dir, and a backfill walks only its own worktree's ref. A
+// worktree on a short branch finishing its (empty) backfill says nothing about
+// the long branch another worktree is still owed.
+// Failure prevented: worktree B clears the shared debt, worktree A then sees an
+// unchanged HEAD and no debt, and main's older commits stay unindexed forever.
+func TestBackfill_AnotherWorktreesBackfillDoesNotClearMyDebt(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: real git + SQLite + Bleve indexing")
+	}
+
+	const depth = 4
+	mainDir := seedLinearHistory(t, 10)
+	// B: a short branch forked near the root, one commit of its own on top
+	shortDir := addLinkedWorktree(t, mainDir, "-b", "short", revParse(t, mainDir, "HEAD~8"))
+	backfillCommitFile(t, shortDir, "short.go", "package main\n")
+	require.Equal(t, "refs/heads/short", refOfFingerprint(readHeadFingerprint(context.Background(), shortDir)))
+
+	dataDir := t.TempDir() // shared by both worktrees' daemons
+	newDaemon := func(root string) *CodeDBManager {
+		mgr := NewCodeDBManager(root, codedbTestLogger(), nil)
+		mgr.dataDir = dataDir
+		mgr.priorityDepthOverride = depth
+		return mgr
+	}
+
+	// A indexes main, truncated; its backfill is interrupted so main's debt stays on disk
+	daemonA := newDaemon(mainDir)
+	var aRuns atomic.Int64
+	var failABackfill atomic.Bool
+	failABackfill.Store(true)
+	daemonA.testHook = func() { aRuns.Add(1) }
+	daemonA.worktreeIndexRepoFn = func(ctx context.Context, db *codedb.DB, repoPath string, opts index.IndexOptions) error {
+		if opts.BackfillHistory && failABackfill.Load() {
+			return fmt.Errorf("walk: %w", context.DeadlineExceeded)
+		}
+		return db.IndexLocalRepo(ctx, repoPath, opts)
+	}
+	daemonA.CheckFreshness(indexCtx(t))
+	waitForIndexingDone(t, daemonA)
+	require.Equal(t, []string{mainRef}, loadIndexState(daemonA.logger, dataDir).HistoryPendingRefs, "precondition: main owes history")
+	require.Equal(t, int64(1), aRuns.Load())
+
+	// B (another daemon, same data dir) indexes its branch. It owes nothing itself,
+	// so it must not run a backfill, and it must leave main's debt as it found it.
+	daemonB := newDaemon(shortDir)
+	var bBackfills atomic.Int64
+	daemonB.worktreeIndexRepoFn = func(ctx context.Context, db *codedb.DB, repoPath string, opts index.IndexOptions) error {
+		if opts.BackfillHistory {
+			bBackfills.Add(1)
+		}
+		return db.IndexLocalRepo(ctx, repoPath, opts)
+	}
+	daemonB.CheckFreshness(indexCtx(t))
+	waitForIndexingDone(t, daemonB)
+
+	assert.Zero(t, bBackfills.Load(), "B owes no history on its own ref and must not backfill for A's")
+	state := loadIndexState(daemonB.logger, dataDir)
+	assert.Equal(t, []string{mainRef}, state.HistoryPendingRefs, "B must leave main's debt in place")
+	assert.Equal(t, readHeadFingerprint(context.Background(), shortDir), state.Head, "B did record its own freshness")
+
+	// A's next check still runs the backfill although its HEAD did not move
+	failABackfill.Store(false)
+	daemonA.CheckFreshness(indexCtx(t))
+	waitForIndexingDone(t, daemonA)
+
+	assert.Equal(t, int64(2), aRuns.Load(), "A must not skip: main still owes history")
+	assert.Empty(t, loadIndexState(daemonA.logger, dataDir).HistoryPendingRefs, "paid, and only now cleared")
+	assert.Equal(t, 11, countCommits(t, dataDir), "main's 10 commits plus short's own")
+}
+
+// TestBackfill_DebtAddedByAnotherDaemonSurvivesAnyWrite: the debt is shared
+// state that other daemons edit while this run is in flight. Every write (the
+// record after pass 1, the clear after pass 2) must apply on top of what is on
+// disk right then, never on top of what this run read when it started.
+// Failure prevented: daemon A's clear writes back its stale snapshot and erases
+// the debt daemon B added meanwhile.
+func TestBackfill_DebtAddedByAnotherDaemonSurvivesAnyWrite(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: real git + SQLite + Bleve indexing")
+	}
+
+	const otherRef = "refs/heads/added-by-another-daemon"
+	tests := []struct {
+		name string
+		// injectDuring says which pass the other daemon writes during
+		injectDuring func(opts index.IndexOptions) bool
+		afterPass    bool // inject after the pass has run instead of before
+	}{
+		{name: "during pass 1, before this run records", injectDuring: func(o index.IndexOptions) bool { return !o.BackfillHistory }, afterPass: true},
+		{name: "during pass 2, before this run clears", injectDuring: func(o index.IndexOptions) bool { return o.BackfillHistory }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			repoDir := seedLinearHistory(t, 8)
+			mgr, dataDir := newBackfillManager(t, repoDir, 3)
+			addOtherDebt := func() {
+				state := loadIndexState(mgr.logger, dataDir)
+				state.addPending(otherRef)
+				require.NoError(t, saveIndexState(dataDir, state))
+			}
+			mgr.worktreeIndexRepoFn = func(ctx context.Context, db *codedb.DB, repoPath string, opts index.IndexOptions) error {
+				inject := tt.injectDuring(opts)
+				if inject && !tt.afterPass {
+					addOtherDebt()
+				}
+				err := db.IndexLocalRepo(ctx, repoPath, opts)
+				if inject && tt.afterPass {
+					addOtherDebt()
+				}
+				return err
+			}
+
+			_, err := mgr.Index(indexCtx(t), CodeIndexPayload{}, nil)
+			require.NoError(t, err)
+
+			assert.Equal(t, []string{otherRef}, loadIndexState(mgr.logger, dataDir).HistoryPendingRefs,
+				"this run's own debt is paid; the other daemon's is untouched")
+			assert.Equal(t, 8, countCommits(t, dataDir))
+		})
+	}
+}
+
+// TestBackfill_DiscardAfterPass2CorruptionRebuildsEvenWhenRemovalFails: pass 2
+// finds damage, the discard deletes the state file and then cannot remove the
+// rest. The running daemon must still rebuild on its next check, not trust an
+// unchanged HEAD over a half-discarded index.
+func TestBackfill_DiscardAfterPass2CorruptionRebuildsEvenWhenRemovalFails(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: real git + SQLite + Bleve indexing")
+	}
+
+	repoDir := seedLinearHistory(t, 8)
+	mgr, dataDir := newBackfillManager(t, repoDir, 3)
+	var runs atomic.Int64
+	mgr.testHook = func() { runs.Add(1) }
+	mgr.worktreeIndexRepoFn = func(ctx context.Context, db *codedb.DB, repoPath string, opts index.IndexOptions) error {
+		if opts.BackfillHistory {
+			return fmt.Errorf("walk: %w", index.ErrBleveCorrupt)
+		}
+		return db.IndexLocalRepo(ctx, repoPath, opts)
+	}
+	mgr.removeIndexEntryFn = func(string) error { return errors.New("resource busy") }
+
+	mgr.CheckFreshness(indexCtx(t))
+	waitForIndexingDone(t, mgr)
+	require.Equal(t, int64(1), runs.Load())
+	require.DirExists(t, dataDir, "precondition: the failed discard left the index directory in place")
+	require.NoFileExists(t, indexStatePath(dataDir), "precondition: the state file went first")
+
+	mgr.worktreeIndexRepoFn, mgr.removeIndexEntryFn = nil, nil
+	mgr.CheckFreshness(indexCtx(t))
+	waitForIndexingDone(t, mgr)
+
+	assert.Equal(t, int64(2), runs.Load(), "the next check must rebuild, not skip on an unchanged HEAD")
+}
+
+// TestBackfill_TruncatedRefIsTheRefHeadNames pins the naming contract the
+// per-ref debt rests on: the ref the indexer reports as truncated must equal the
+// ref a later CheckFreshness derives from readHeadFingerprint, for every way a
+// worktree can have HEAD. A mismatch would record debt no check ever matches.
+func TestBackfill_TruncatedRefIsTheRefHeadNames(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: real git + SQLite + Bleve indexing")
+	}
+
+	tests := []struct {
+		name    string
+		root    func(t *testing.T) string
+		wantRef string
+	}{
+		{
+			name:    "branch",
+			root:    func(t *testing.T) string { return seedLinearHistory(t, 6) },
+			wantRef: "refs/heads/main",
+		},
+		{
+			name: "detached HEAD",
+			root: func(t *testing.T) string {
+				repoDir := seedLinearHistory(t, 6)
+				backfillGit(t, repoDir, "checkout", "-q", "--detach")
+				return repoDir
+			},
+			wantRef: "HEAD",
+		},
+		{
+			name: "linked worktree on a branch",
+			root: func(t *testing.T) string {
+				return addLinkedWorktree(t, seedLinearHistory(t, 6), "-b", "linked-branch")
+			},
+			wantRef: "refs/heads/linked-branch",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := tt.root(t)
+			mgr, dataDir := newBackfillManager(t, root, 2)
+			var reported []string
+			mgr.worktreeIndexRepoFn = func(ctx context.Context, db *codedb.DB, repoPath string, opts index.IndexOptions) error {
+				if !opts.BackfillHistory {
+					orig := opts.OnHistoryTruncated
+					opts.OnHistoryTruncated = func(ref string) {
+						reported = append(reported, ref)
+						orig(ref)
+					}
+				}
+				// fail pass 1 once it ran so no backfill clears the debt it recorded
+				if err := db.IndexLocalRepo(ctx, repoPath, opts); err != nil {
+					return err
+				}
+				return errors.New("stop before any backfill")
+			}
+			_, _ = mgr.Index(indexCtx(t), CodeIndexPayload{}, nil)
+
+			require.Equal(t, []string{tt.wantRef}, reported)
+			fingerprint := readHeadFingerprint(context.Background(), root)
+			assert.Equal(t, tt.wantRef, refOfFingerprint(fingerprint))
+			assert.True(t, loadIndexState(mgr.logger, dataDir).owes(refOfFingerprint(fingerprint)),
+				"the debt the indexer's ref name recorded must be visible to this worktree's check")
+		})
+	}
 }
 
 // TestBackfill_RecordsHeadFromBeforeTheRun: pass 2 can run for hours. A commit

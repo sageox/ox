@@ -178,25 +178,74 @@ func TestPartialCloneConfigured(t *testing.T) {
 	})
 }
 
+// A blob a partial clone recorded without content (it was history-only) can
+// reach the tip in a later run, for example when a commit restores an old
+// version and checkout fetches the blob. Its row already exists, so only the
+// missing code document tells ensureBlob that the content still needs indexing.
+//
+// Failure prevented: the restored file staying out of code search for good,
+// because every later lookup takes the same "row exists" path.
+func TestIndexLocalRepo_PartialCloneTipRestoresHistoryOnlyBlob(t *testing.T) {
+	t.Parallel()
+	dir := pcBuildPartialClone(t)
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	// run 1: a.txt v1 ("tokenone") and v2 are history-only, so they have a row
+	// and no document; v3 is the tip
+	require.NoError(t, IndexLocalRepo(ctx, s, dir, IndexOptions{}))
+	require.Zero(t, pcSearchTotal(t, s, "tokenone"))
+	require.Zero(t, pcSearchTotal(t, s, "tokentwo"))
+	require.Equal(t, uint64(1), pcSearchTotal(t, s, "tokenthree"))
+
+	// run 2: a new tip restores v1. Writing the same bytes recreates the blob
+	// locally, which is what a checkout of the restored file does.
+	bfCommit(t, dir, "restore a.txt v1", map[string]string{"a.txt": "alpha tokenone\n"})
+	require.NoError(t, IndexLocalRepo(ctx, s, dir, IndexOptions{}))
+
+	require.Equal(t, uint64(1), pcSearchTotal(t, s, "tokenone"), "the restored tip blob must be searchable")
+	require.Equal(t, uint64(1), pcSearchTotal(t, s, "tokenthree"), "the previous tip's document is kept")
+	require.Zero(t, pcSearchTotal(t, s, "tokentwo"), "a blob that stays history-only stays unindexed")
+
+	// run 3: nothing moved; indexing again changes nothing
+	docs := pcCodeDocs(t, s)
+	require.NoError(t, IndexLocalRepo(ctx, s, dir, IndexOptions{}))
+	require.Equal(t, docs, pcCodeDocs(t, s))
+}
+
 // ensureBlob in isolation. The blob is readable in every case, so a skipped
-// read shows as indexed=false.
+// read shows as indexed=false. A step with newRun drops the in-memory caches,
+// as a later index run starts with, so the blob is found through SQL.
 func TestEnsureBlob_PartialClone(t *testing.T) {
 	t.Parallel()
 	const content = "package p\nvar X = 1\n"
 
+	type step struct {
+		tip         bool // readingTip while ensureBlob runs
+		newRun      bool // start of a later index run: empty in-memory caches
+		flush       bool // make the queued document visible, as a checkpoint does
+		wantIndexed bool
+	}
 	tests := []struct {
-		name         string
-		partial      bool
-		readingTip   []bool // one ensureBlob call per entry, readingTip set to it
-		wantIndexed  []bool
-		wantCodeDocs int
+		name    string
+		partial bool
+		steps   []step
 	}{
-		{"complete repo reads history", false, []bool{false}, []bool{true}, 1},
-		{"partial clone skips history", true, []bool{false}, []bool{false}, 0},
-		{"partial clone reads tip", true, []bool{true}, []bool{true}, 1},
-		{"tip read repairs a blob first seen in history", true, []bool{false, true}, []bool{false, true}, 1},
-		{"tip read repairs only once", true, []bool{false, true, true}, []bool{false, true, false}, 1},
-		{"complete repo does not re-read at tip", false, []bool{false, true}, []bool{true, false}, 1},
+		{"complete repo reads history", false, []step{{wantIndexed: true}}},
+		{"partial clone skips history", true, []step{{wantIndexed: false}}},
+		{"partial clone reads tip", true, []step{{tip: true, wantIndexed: true}}},
+		{"a blob new at the tip is read once, however many paths reach it", true, []step{{tip: true, wantIndexed: true}, {tip: true}}},
+		{"tip read repairs a blob first seen in history", true, []step{{}, {tip: true, wantIndexed: true}}},
+		{"tip read repairs only once in a run", true, []step{{}, {tip: true, wantIndexed: true}, {tip: true}}},
+		{"a later run repairs a blob an earlier run left without content", true, []step{{}, {newRun: true, tip: true, wantIndexed: true}}},
+		{"a later run leaves a blob that has its document", true, []step{
+			{},
+			{tip: true, flush: true, wantIndexed: true},
+			{newRun: true, tip: true},
+		}},
+		{"history reads never repair, even in a later run", true, []step{{}, {newRun: true}}},
+		{"complete repo does not re-read at tip", false, []step{{wantIndexed: true}, {tip: true}}},
+		{"complete repo does not repair in a later run", false, []step{{wantIndexed: true}, {newRun: true, tip: true}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -229,22 +278,28 @@ func TestEnsureBlob_PartialClone(t *testing.T) {
 			oid := writeBlobToRepo(t, repo, content)
 
 			var firstID int64
-			for i, tip := range tt.readingTip {
-				st.readingTip = tip
+			for i, step := range tt.steps {
+				if step.newRun {
+					st.blobIDCache = make(map[string]int64)
+					st.tipBlobsSeen = nil
+				}
+				st.readingTip = step.tip
 				id, text, indexed, err := st.ensureBlob(oid, "p.go")
 				require.NoError(t, err)
-				require.Equal(t, tt.wantIndexed[i], indexed, "call %d", i)
+				require.Equal(t, step.wantIndexed, indexed, "step %d", i)
 				if indexed {
-					require.Equal(t, content, text, "call %d", i)
+					require.Equal(t, content, text, "step %d", i)
 				} else {
-					require.Empty(t, text, "call %d", i)
+					require.Empty(t, text, "step %d", i)
 				}
 				if i == 0 {
 					firstID = id
 				}
 				require.Equal(t, firstID, id, "one row per blob")
+				if step.flush {
+					require.NoError(t, st.flushCodeBatch(true))
+				}
 			}
-			require.Equal(t, tt.wantCodeDocs, st.codeBatchN)
 		})
 	}
 }

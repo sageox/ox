@@ -7,6 +7,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
 
 	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/version"
@@ -22,16 +25,98 @@ const indexStateFileName = "index-state.json"
 type codeDBIndexState struct {
 	// OxVersion is the build that recorded Head and Board. A different build may
 	// ship new indexing stages, so it re-runs the pipeline once instead of
-	// trusting a fingerprint recorded by code that did less. HistoryPending is
+	// trusting a fingerprint recorded by code that did less. HistoryPendingRefs is
 	// exempt: unfinished backfill is owed regardless of which build owes it.
 	OxVersion string `json:"ox_version,omitempty"`
 	// Head is the readHeadFingerprint ("ref:commit") indexed before the run began.
 	Head string `json:"head"`
 	// Board is index.BoardFingerprint for this repo's team board posts.
 	Board string `json:"board"`
-	// HistoryPending means a depth-limited pass left older commits unindexed and
-	// a backfill pass still owes them.
-	HistoryPending bool `json:"history_pending"`
+	// HistoryPendingRefs lists the refs whose older commits a depth-limited pass
+	// left unindexed and a backfill pass still owes, sorted and without
+	// duplicates.
+	//
+	// It is per ref, not one flag, because the data dir is shared by every
+	// worktree of a repo and a backfill walks only the ref its own worktree has
+	// checked out: a worktree on a short branch finishing its backfill says
+	// nothing about the long branch another worktree is still owed. A worktree
+	// owes a backfill only while its own ref is listed.
+	//
+	// Known residual, deliberately not solved: a worktree that moves from a
+	// pending branch to one whose walk stops at already-indexed commits does not
+	// inherit the debt. It stays recorded on the original ref and is paid the
+	// next time a worktree has that ref checked out.
+	HistoryPendingRefs []string `json:"history_pending_refs,omitempty"`
+}
+
+// owes reports whether ref still has history to backfill. An unknown ref
+// (empty) owes nothing: with no ref there is no walk to blame it on.
+func (s codeDBIndexState) owes(ref string) bool {
+	return ref != "" && slices.Contains(s.HistoryPendingRefs, ref)
+}
+
+// addPending records debt on refs, keeping the list sorted and unique.
+func (s *codeDBIndexState) addPending(refs ...string) {
+	s.HistoryPendingRefs = normalizeRefs(append(s.HistoryPendingRefs, refs...))
+}
+
+// clearPending removes only refs from the debt; every other ref keeps its own.
+func (s *codeDBIndexState) clearPending(refs ...string) {
+	s.HistoryPendingRefs = normalizeRefs(slices.DeleteFunc(slices.Clone(s.HistoryPendingRefs), func(ref string) bool {
+		return slices.Contains(refs, ref)
+	}))
+}
+
+// normalizeRefs sorts, dedupes and drops empty names; nil when nothing is left,
+// so an empty debt is omitted from the file instead of written as [].
+func normalizeRefs(refs []string) []string {
+	refs = slices.DeleteFunc(slices.Clone(refs), func(ref string) bool { return ref == "" })
+	slices.Sort(refs)
+	refs = slices.Compact(refs)
+	if len(refs) == 0 {
+		return nil
+	}
+	return refs
+}
+
+// refOfFingerprint returns the ref of a readHeadFingerprint ("ref:commit"). It
+// is the name the indexer gives the worktree's default ref (go-git's resolved
+// HEAD, "refs/heads/main", or "HEAD" when detached), so a ref the indexer
+// reports as truncated and the ref a later CheckFreshness derives from HEAD
+// compare equal. Git ref names cannot contain ':', so the first one splits it.
+func refOfFingerprint(fingerprint string) string {
+	ref, _, _ := strings.Cut(fingerprint, ":")
+	return ref
+}
+
+// truncatedRefs collects the refs a pass reports as depth-truncated. The indexer
+// calls back from inside its walk, so access is locked.
+type truncatedRefs struct {
+	mu   sync.Mutex
+	refs []string
+}
+
+// add records ref and reports whether it is new this attempt.
+func (t *truncatedRefs) add(ref string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if slices.Contains(t.refs, ref) {
+		return false
+	}
+	t.refs = append(t.refs, ref)
+	return true
+}
+
+func (t *truncatedRefs) reset() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.refs = nil
+}
+
+func (t *truncatedRefs) list() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return slices.Clone(t.refs)
 }
 
 func indexStatePath(dataDir string) string {
@@ -86,9 +171,12 @@ func saveIndexState(dataDir string, state codeDBIndexState) error {
 	return nil
 }
 
-// updateIndexState read-modify-writes the state file. A failed write is logged
-// and dropped: the state only saves work on the next restart, so losing it must
-// never fail the index run it describes.
+// updateIndexState read-modify-writes the state file. The read happens here,
+// immediately before the write, never earlier in the run: another daemon on the
+// same data dir may have added a ref's debt meanwhile, and writing back an older
+// snapshot would erase it. A failed write is logged and dropped: the state only
+// saves work on the next restart, so losing it must never fail the index run it
+// describes.
 func (m *CodeDBManager) updateIndexState(dataDir string, update func(*codeDBIndexState)) {
 	state := loadIndexState(m.logger, dataDir)
 	update(&state)
@@ -98,10 +186,12 @@ func (m *CodeDBManager) updateIndexState(dataDir string, update func(*codeDBInde
 }
 
 // recordIndexed marks head (the fingerprint taken before the run started) and
-// the current board fingerprint as indexed, in memory and on disk. An empty
-// head means the HEAD could not be read; it is left unrecorded so the next
-// check re-runs instead of trusting nothing.
-func (m *CodeDBManager) recordIndexed(dataDir, head string, historyPending bool) {
+// the current board fingerprint as indexed, in memory and on disk, and applies
+// the run's changes to the history debt: addPending refs are owed, clearPending
+// refs are not (nothing can be backfilled there). Debt on any other ref is left
+// as found. An empty head means the HEAD could not be read; it is left
+// unrecorded so the next check re-runs instead of trusting nothing.
+func (m *CodeDBManager) recordIndexed(dataDir, head string, addPending, clearPending []string) {
 	m.mu.Lock()
 	if head != "" {
 		m.lastIndexedHead = head
@@ -113,22 +203,29 @@ func (m *CodeDBManager) recordIndexed(dataDir, head string, historyPending bool)
 		s.OxVersion = version.Full()
 		s.Head = head
 		s.Board = board
-		s.HistoryPending = historyPending
+		s.clearPending(clearPending...)
+		s.addPending(addPending...)
 	})
 }
 
-// markHistoryPending persists that older history is still owed, leaving the
-// recorded head and board alone: they describe the last completed pipeline,
-// not this one.
-func (m *CodeDBManager) markHistoryPending(dataDir string, pending bool) {
-	m.updateIndexState(dataDir, func(s *codeDBIndexState) { s.HistoryPending = pending })
+// addHistoryDebt persists that ref's older history is owed, leaving the recorded
+// head and board alone: they describe the last completed pipeline, not this one.
+func (m *CodeDBManager) addHistoryDebt(dataDir, ref string) {
+	m.updateIndexState(dataDir, func(s *codeDBIndexState) { s.addPending(ref) })
 }
 
-// historyPending reports whether a backfill is owed. It reads the file on each
-// call instead of caching: several daemons share one data dir, and whichever
-// finishes the backfill clears it for all of them.
-func (m *CodeDBManager) historyPending() bool {
-	return loadIndexState(m.logger, m.resolveSharedDataDir()).HistoryPending
+// clearHistoryDebt records that a backfill walked refs to the end. Other refs'
+// debt stays: this worktree's walk proves nothing about them.
+func (m *CodeDBManager) clearHistoryDebt(dataDir string, refs []string) {
+	m.updateIndexState(dataDir, func(s *codeDBIndexState) { s.clearPending(refs...) })
+}
+
+// historyOwedFor reports whether the ref in fingerprint (this worktree's HEAD)
+// has a backfill owed. It reads the file on each call instead of caching:
+// several daemons share one data dir, and whichever finishes a ref's backfill
+// clears it for all of them.
+func (m *CodeDBManager) historyOwedFor(fingerprint string) bool {
+	return loadIndexState(m.logger, m.resolveSharedDataDir()).owes(refOfFingerprint(fingerprint))
 }
 
 // seedFreshnessFromDisk fills lastIndexedHead and lastIndexedBoard from the
@@ -186,7 +283,7 @@ func (m *CodeDBManager) seedFreshnessFromDisk() bool {
 		m.lastIndexedBoard = state.Board
 	}
 	if seededHead {
-		m.logger.Info("codedb freshness restored from disk", "head", state.Head, "history_pending", state.HistoryPending)
+		m.logger.Info("codedb freshness restored from disk", "head", state.Head, "history_pending_refs", strings.Join(state.HistoryPendingRefs, ","))
 	}
 	return seededHead
 }

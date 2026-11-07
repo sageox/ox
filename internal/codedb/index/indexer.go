@@ -153,9 +153,9 @@ type indexState struct {
 	// History content reads are skipped (see ensureBlob); only tip blobs are read.
 	partialClone bool
 	readingTip   bool // buildTipFileRevs is running; its blobs are always read
-	// contentSkipped holds blobs inserted without Bleve content because of
-	// partialClone, so the tip build can still index the ones the tip keeps.
-	contentSkipped map[string]struct{}
+	// tipBlobsSeen holds the blobs the tip build already looked at this run, so
+	// a blob that appears under several paths is checked and indexed once.
+	tipBlobsSeen map[string]struct{}
 
 	// pendingParentLinks maps a parent hash that was not indexed yet to the
 	// children (by hash) waiting to be linked to it. See insertParentLinks.
@@ -1414,6 +1414,34 @@ func (st *indexState) skipsBlobContent() bool {
 	return st.partialClone && !st.readingTip
 }
 
+// tipContentMissing reports whether the tip build must index the content of a
+// blob that already has a row: a partial clone while building tip file_revs,
+// and no code document for the blob. History indexing in a partial clone
+// records blobs without content, in this run or an earlier one, and the tip may
+// keep or later restore such a blob once checkout has fetched it. The row says
+// nothing about the document, so the index itself is asked, once per blob.
+//
+// A blob with no document for a good reason (binary, empty) is read again each
+// time the tip moves; the read finds nothing and indexes nothing.
+func (st *indexState) tipContentMissing(contentHash string, blobDBID int64) bool {
+	if !st.partialClone || !st.readingTip {
+		return false
+	}
+	if _, seen := st.tipBlobsSeen[contentHash]; seen {
+		return false
+	}
+	st.markTipBlobSeen(contentHash)
+	doc, err := st.store.CodeIndex.Document("blob_" + strconv.FormatInt(blobDBID, 10))
+	return err == nil && doc == nil
+}
+
+func (st *indexState) markTipBlobSeen(contentHash string) {
+	if st.tipBlobsSeen == nil {
+		st.tipBlobsSeen = make(map[string]struct{})
+	}
+	st.tipBlobsSeen[contentHash] = struct{}{}
+}
+
 // ensureBlob inserts a blob record if not already present and indexes its content
 // in Bleve only for newly inserted blobs. Uses an in-memory cache to avoid
 // repeated SQL lookups for the same content_hash within a single indexing run.
@@ -1422,16 +1450,15 @@ func (st *indexState) skipsBlobContent() bool {
 // callers can reuse it to avoid a second git object read (e.g. in generateDiffText).
 //
 // In a partial clone the row is inserted without reading content while history
-// is indexed (the same outcome as a blob that is missing from disk), and the
-// blob is remembered so that buildTipFileRevs can still index its content if
-// the tip keeps it.
+// is indexed (the same outcome as a blob that is missing from disk). The tip
+// build then indexes the content of every blob it keeps that has no document
+// yet, whether the row came from this run or an earlier one.
 func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, string, bool, error) {
 	contentHash := blobOID.String()
 
 	// fast path: check in-memory cache first (avoids SQL roundtrip)
 	if cachedID, ok := st.blobIDCache[contentHash]; ok {
-		if _, skipped := st.contentSkipped[contentHash]; skipped && st.readingTip {
-			delete(st.contentSkipped, contentHash)
+		if st.tipContentMissing(contentHash, cachedID) {
 			text, indexed, err := st.indexBlobContent(cachedID, blobOID)
 			return cachedID, text, indexed, err
 		}
@@ -1444,6 +1471,10 @@ func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, str
 	blobDBID, err := q.GetBlobIDByHash(ctx, contentHash)
 	if err == nil {
 		st.blobIDCache[contentHash] = blobDBID
+		if st.tipContentMissing(contentHash, blobDBID) {
+			text, indexed, err := st.indexBlobContent(blobDBID, blobOID)
+			return blobDBID, text, indexed, err
+		}
 		return blobDBID, "", false, nil
 	}
 
@@ -1464,11 +1495,11 @@ func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, str
 	st.blobIDCache[contentHash] = blobDBID
 
 	if st.skipsBlobContent() {
-		if st.contentSkipped == nil {
-			st.contentSkipped = make(map[string]struct{})
-		}
-		st.contentSkipped[contentHash] = struct{}{}
 		return blobDBID, "", false, nil
+	}
+	if st.partialClone {
+		// read now, at the tip; a later path to the same blob must not re-read it
+		st.markTipBlobSeen(contentHash)
 	}
 
 	blobText, indexed, err := st.indexBlobContent(blobDBID, blobOID)
