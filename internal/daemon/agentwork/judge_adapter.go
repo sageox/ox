@@ -15,17 +15,22 @@ import (
 // runs as a plain prompt through whichever Runner (Claude / Codex /
 // Gemini) the user has configured.
 //
+// projectRoot picks the endpoint whose credential decides how strictly the
+// judge isolates (see summaryWorkerIsolation).
+//
 // The returned Completer is safe to call concurrently if the underlying
 // Runner is concurrency-safe.
-func NewRunnerCompleter(r Runner) summaryeval.Completer {
+func NewRunnerCompleter(r Runner, projectRoot string) summaryeval.Completer {
 	return func(ctx context.Context, prompt string) (summaryeval.CompletionResult, error) {
 		// Judging a summary is a short, bounded task — cap the timeout
 		// conservatively so a stuck judge never blocks the finalize path.
 		// The summary under judgment comes from an untrusted transcript.
+		isolated, ifSupported := summaryWorkerIsolation(projectRoot)
 		res, err := r.Run(ctx, RunRequest{
 			Prompt:             prompt,
 			TimeoutOverride:    2 * time.Minute,
-			IsolateIfSupported: true,
+			Isolated:           isolated,
+			IsolateIfSupported: ifSupported,
 		})
 		if err != nil {
 			return summaryeval.CompletionResult{}, err
