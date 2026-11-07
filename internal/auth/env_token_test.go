@@ -633,13 +633,14 @@ func TestGetUserIDAndUsername_TeamCoworker(t *testing.T) {
 // a revoked team token in CI tells the operator to run `ox login`, which cannot
 // replace a token supplied through SAGEOX_TOKEN.
 func TestReauthenticationRemedy_TeamTokenNamesTheSecretStore(t *testing.T) {
-	const ep = "https://api.sageox.ai/"
+	const ep = "https://api.sageox.ai"
+	t.Setenv(endpoint.EnvVar, ep)
 
 	t.Setenv(EnvVarToken, validSageOxTestToken(TeamTokenPrefix, "svc"))
 	remedy := ReauthenticationRemedy(ep)
 	assert.Contains(t, remedy, "SAGEOX_TOKEN")
 	assert.NotContains(t, remedy, "ox login")
 
-	t.Setenv(EnvVarToken, "oxp_test_4bDZfN")
-	assert.Contains(t, ReauthenticationRemedy(ep), "ox login")
+	t.Setenv(EnvVarToken, "")
+	assert.Contains(t, ReauthenticationRemedy(ep), "ox login", "a stored login recovers with ox login")
 }
