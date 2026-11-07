@@ -230,3 +230,256 @@ func TestRegenerateAll_PublishesAndRetriesFailedPush(t *testing.T) {
 	assert.Contains(t, f.remoteSessionMD(t, name), "Fix the worktree upload bug")
 	assert.Equal(t, "session: regenerate 1 sessions", runGit(t, f.barePath, "log", "-1", "--format=%s"))
 }
+
+// Sessions the Ledger has no place for are skipped, not failed.
+func TestPrepareRegeneratedArtifacts_SkipsSessionsWithNothingToPublish(t *testing.T) {
+	f := newRegenerateLedgerFixture(t)
+	published := recentSessionName("OxRgnG")
+	f.publishSession(t, published, "Skip me")
+	draft := recentSessionName("OxRgnH")
+	draftDir := filepath.Join(f.ledgerPath, "sessions", draft)
+	require.NoError(t, os.MkdirAll(draftDir, 0o755))
+	require.NoError(t, lfs.WriteSessionMetaOnly(draftDir, &lfs.SessionMeta{Version: "1.0", SessionName: draft, Draft: true}))
+
+	withContent := func(t *testing.T, held bool) string {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, ledgerFileSessionMD), []byte("# regenerated\n"), 0o600))
+		if held {
+			require.NoError(t, os.WriteFile(filepath.Join(dir, session.HeldMarkerFile), nil, 0o600))
+		}
+		return dir
+	}
+	pointerOnly := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(pointerOnly, ledgerFileSessionMD),
+		[]byte(lfs.FormatPointer(lfs.NewFileRef([]byte("x")).OID, 1)), 0o600))
+
+	tests := []struct {
+		name, session, dir string
+	}{
+		{"not on the Ledger", recentSessionName("OxRgnI"), withContent(t, false)},
+		{"draft placeholder", draft, withContent(t, false)},
+		{"held on this machine", published, withContent(t, true)},
+		{"nothing regenerated", published, pointerOnly},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ok, err := prepareRegeneratedArtifacts(f.projectRoot, f.ledgerPath, tt.session, tt.dir)
+			require.NoError(t, err)
+			assert.False(t, ok)
+		})
+	}
+	assert.Empty(t, f.staged(t))
+	assert.Empty(t, runGit(t, f.ledgerPath, "status", "--porcelain", "--", filepath.Join("sessions", published)))
+}
+
+// A pointer that cannot be written fails and leaves meta.json naming the old refs.
+func TestPrepareRegeneratedArtifacts_FailedPointerWriteRevertsRefs(t *testing.T) {
+	f := newRegenerateLedgerFixture(t)
+	name := recentSessionName("OxRgnJ")
+	f.publishSession(t, name, "Break the pointer")
+	sessionDir := filepath.Join(f.ledgerPath, "sessions", name)
+	before, err := lfs.ReadSessionMeta(sessionDir)
+	require.NoError(t, err)
+	// summary.md cannot be replaced: a non-empty directory sits in its place
+	require.NoError(t, os.MkdirAll(filepath.Join(sessionDir, ledgerFileSummaryMD, "x"), 0o755))
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ledgerFileSessionMD), []byte("# new session\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ledgerFileSummaryMD), []byte("# new summary\n"), 0o600))
+
+	ok, err := prepareRegeneratedArtifacts(f.projectRoot, f.ledgerPath, name, dir)
+
+	require.Error(t, err)
+	assert.False(t, ok)
+	after, err := lfs.ReadSessionMeta(sessionDir)
+	require.NoError(t, err)
+	assert.Equal(t, before.Files, after.Files, "meta.json must name the refs it had before")
+	pointer, err := os.ReadFile(filepath.Join(sessionDir, ledgerFileSessionMD))
+	require.NoError(t, err)
+	assert.Equal(t, runGit(t, f.ledgerPath, "show", "HEAD:sessions/"+name+"/"+ledgerFileSessionMD),
+		strings.TrimSpace(string(pointer)), "the session.md pointer must be restored")
+}
+
+// The revert restores only the refs this run set.
+func TestRevertRegeneratedRefs(t *testing.T) {
+	dir := t.TempDir()
+	old, mine, theirs := lfs.NewFileRef([]byte("old")), lfs.NewFileRef([]byte("mine")), lfs.NewFileRef([]byte("theirs"))
+	require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{Version: "1.0", SessionName: "s", Files: map[string]lfs.FileRef{
+		ledgerFileSessionMD: mine,   // set by this run over old
+		ledgerFileSummaryMD: mine,   // set by this run, absent before
+		ledgerFileRaw:       theirs, // changed by another writer since
+	}}))
+	uploaded := map[string]lfs.FileRef{ledgerFileSessionMD: mine, ledgerFileSummaryMD: mine, ledgerFileRaw: mine}
+	prior := map[string]*lfs.FileRef{ledgerFileSessionMD: &old, ledgerFileSummaryMD: nil, ledgerFileRaw: &old}
+
+	require.NoError(t, revertRegeneratedRefs(dir, uploaded, prior))
+
+	meta, err := lfs.ReadSessionMeta(dir)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]lfs.FileRef{ledgerFileSessionMD: old, ledgerFileRaw: theirs}, meta.Files)
+
+	empty := t.TempDir()
+	require.NoError(t, lfs.WriteSessionMetaOnly(empty, &lfs.SessionMeta{Version: "1.0", SessionName: "e"}))
+	require.NoError(t, revertRegeneratedRefs(empty, uploaded, prior), "no refs is nothing to revert")
+}
+
+// --all fails, and stages nothing, when a session cannot be uploaded or the
+// batch commit is refused.
+func TestRegenerateAll_FailedPublicationFails(t *testing.T) {
+	t.Run("upload fails", func(t *testing.T) {
+		f := newRegenerateLedgerFixture(t)
+		name := recentSessionName("OxRgnK")
+		f.publishSession(t, name, "Upload will fail")
+		store := f.newStore(t)
+		writeSessionFiles(t, filepath.Dir(store.BasePath()), name)
+		f.store.mu.Lock()
+		f.store.failBatch = true
+		f.store.mu.Unlock()
+
+		var err error
+		silenceStdout(t, func() { err = regenerateAllSessionsArtifacts(store, f.projectRoot, true) })
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "LFS upload")
+		assert.Empty(t, f.staged(t))
+	})
+	t.Run("commit refused", func(t *testing.T) {
+		f := newRegenerateLedgerFixture(t)
+		name, other := recentSessionName("OxRgnL"), recentSessionName("OxRgnM")
+		f.publishSession(t, name, "Commit will be refused")
+		f.publishSession(t, other, "Holds the poisoned entry")
+		poisoned := filepath.Join("sessions", other, ledgerFileSessionMD)
+		require.NoError(t, os.WriteFile(filepath.Join(f.ledgerPath, poisoned), []byte("# plain content\n"), 0o644))
+		runGit(t, f.ledgerPath, "add", poisoned)
+		store := f.newStore(t)
+		writeSessionFiles(t, filepath.Dir(store.BasePath()), name)
+
+		var err error
+		silenceStdout(t, func() { err = regenerateAllSessionsArtifacts(store, f.projectRoot, true) })
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must contain an LFS pointer")
+		assert.Equal(t, []string{filepath.ToSlash(poisoned)}, f.staged(t))
+	})
+}
+
+// Without a Ledger, regenerated artifacts stay local and nothing fails.
+func TestRegenerate_NoLedgerKeepsArtifactsLocal(t *testing.T) {
+	t.Chdir(t.TempDir())
+	oldCfg := cfg
+	cfg = &config.Config{}
+	t.Cleanup(func() { cfg = oldCfg })
+	_, err := resolveLedgerPath()
+	require.Error(t, err)
+
+	src, out := artifactDirs(nil, "s")
+	assert.Equal(t, "s", src)
+	assert.Equal(t, "s", out)
+	store, err := session.NewStore(t.TempDir())
+	require.NoError(t, err)
+	src, out = artifactDirs(store, "s")
+	assert.Equal(t, store.GetSessionPath("s"), src)
+	assert.Equal(t, src, out)
+	ok, err := publishRegeneratedSession(t.TempDir(), "s", t.TempDir())
+	require.NoError(t, err)
+	assert.False(t, ok)
+	n, err := publishRegeneratedSessions(t.TempDir(), []regeneratedSession{{name: "s", dir: t.TempDir()}})
+	require.NoError(t, err)
+	assert.Zero(t, n)
+}
+
+// A session held on this machine regenerates locally and publishes nothing.
+func TestRegenerateSession_HeldSessionStaysLocal(t *testing.T) {
+	f := newRegenerateLedgerFixture(t)
+	name := recentSessionName("OxRgnN")
+	f.publishSession(t, name, "Keep this local")
+	store := f.newStore(t)
+	writeSessionFiles(t, filepath.Dir(store.BasePath()), name)
+	require.NoError(t, os.WriteFile(filepath.Join(store.GetSessionPath(name), session.HeldMarkerFile), nil, 0o600))
+	head := runGit(t, f.ledgerPath, "rev-parse", "HEAD")
+
+	silenceStdout(t, func() { require.NoError(t, regenerateSingleSessionArtifacts(store, f.projectRoot, name)) })
+
+	assert.FileExists(t, filepath.Join(store.GetSessionPath(name), ledgerFileSessionMD))
+	assert.Equal(t, head, runGit(t, f.ledgerPath, "rev-parse", "HEAD"))
+	assert.Empty(t, f.staged(t))
+}
+
+// Inputs that cannot be read or cached fail before anything is staged.
+func TestPrepareRegeneratedArtifacts_FailsOnUnusableInputs(t *testing.T) {
+	f := newRegenerateLedgerFixture(t)
+	regenerated := func(t *testing.T) string {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, ledgerFileSessionMD), []byte("# regenerated\n"), 0o600))
+		return dir
+	}
+	tests := []struct {
+		name, wantErr string
+		setup         func(t *testing.T, session string) string
+	}{
+		{"corrupt meta.json", "read meta.json", func(t *testing.T, session string) string {
+			require.NoError(t, os.WriteFile(filepath.Join(f.ledgerPath, "sessions", session, "meta.json"), []byte("{"), 0o644))
+			return regenerated(t)
+		}},
+		{"unreadable artifact", "read regenerated", func(t *testing.T, _ string) string {
+			dir := t.TempDir()
+			require.NoError(t, os.MkdirAll(filepath.Join(dir, ledgerFileSessionMD), 0o700))
+			return dir
+		}},
+		{"Ledger cache blocked", "create Ledger cache", func(t *testing.T, session string) string {
+			cacheDir := ledgerSessionCacheDir(f.ledgerPath, session)
+			require.NoError(t, os.RemoveAll(cacheDir))
+			require.NoError(t, os.WriteFile(cacheDir, nil, 0o600))
+			return regenerated(t)
+		}},
+		{"cached file blocked", "cache regenerated", func(t *testing.T, session string) string {
+			require.NoError(t, os.MkdirAll(filepath.Join(ledgerSessionCacheDir(f.ledgerPath, session), ledgerFileSessionMD, "x"), 0o700))
+			return regenerated(t)
+		}},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := recentSessionName("OxRgP" + string(rune('a'+i)))
+			f.publishSession(t, session, "Unusable input")
+			dir := tt.setup(t, session)
+
+			ok, err := prepareRegeneratedArtifacts(f.projectRoot, f.ledgerPath, session, dir)
+
+			require.ErrorContains(t, err, tt.wantErr)
+			assert.False(t, ok)
+			assert.Empty(t, f.staged(t))
+		})
+	}
+}
+
+// Unusable directories and indexes fail with an error instead of being skipped.
+func TestRegenerateHelpers_ReportUnusablePaths(t *testing.T) {
+	blocked := filepath.Join(t.TempDir(), "file")
+	require.NoError(t, os.WriteFile(blocked, nil, 0o600))
+	require.ErrorContains(t, regenerateArtifactsInto(t.TempDir(), filepath.Join(blocked, "out"), &session.StoredSession{}), "create")
+
+	corrupt := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(corrupt, "meta.json"), []byte("{"), 0o600))
+	require.ErrorContains(t, revertRegeneratedRefs(corrupt, map[string]lfs.FileRef{}, nil), "revert meta.json LFS refs")
+
+	notRepo := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(notRepo))
+	_, err := ledgerIndexEntries(notRepo, []string{"meta.json"})
+	require.ErrorContains(t, err, "read Ledger index")
+	restoreLedgerIndex(notRepo, []string{"meta.json"}, nil) // logs and returns
+
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-q")
+	restoreLedgerIndex(repo, []string{"meta.json"}, []byte("not an index entry\x00"))
+	assert.Empty(t, runGit(t, repo, "ls-files", "--stage"), "a bad prior entry must not be written")
+}
+
+// A batch naming a session that is not on disk fails at git add and stages nothing.
+func TestCommitAndPushLedgerBatch_FailedAddStagesNothing(t *testing.T) {
+	f := newRegenerateLedgerFixture(t)
+	f.publishSession(t, recentSessionName("OxRgnQ"), "Already published")
+
+	err := commitAndPushLedgerBatch(f.ledgerPath, "session: regenerate 1 sessions", []string{recentSessionName("OxRgnR")})
+
+	require.ErrorContains(t, err, "git add")
+	assert.Empty(t, f.staged(t))
+}
