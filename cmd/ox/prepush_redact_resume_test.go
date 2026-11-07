@@ -124,6 +124,7 @@ func TestPrePushGate_ResumesFailedRedactionAmend(t *testing.T) {
 		mustGit(t, work, "reset", "-q", "--", rel)
 
 		require.NoError(t, runGate(t, work))
+		assert.Contains(t, mustGitCapture(t, work, "ls-tree", "HEAD", "--", rel), "100644 blob ", "the withdrawn mode change is not committed")
 		assert.NoFileExists(t, filepath.Join(work, filepath.FromSlash(pendingRedactionAmendRel)))
 		require.NoError(t, gitutil.PushWithRetry(context.Background(), work, gitutil.PushOpts{}))
 		assertRemoteObjectsCleanOf(t, remote, canary)

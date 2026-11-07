@@ -139,7 +139,13 @@ func applyPendingRedactionAmend(ctx context.Context, ledgerPath string, rec *pen
 		if !pendingRedactionOwnsIndexEntry(p, stagedMode, staged) {
 			return fmt.Errorf("refusing to replace staged changes to %s; commit or unstage them, then retry", p.Path)
 		}
-		fmt.Fprintf(&info, "%s %s\t%s\x00", p.Mode, p.Blob, p.Path)
+		// Keep the owned entry's current mode, so a mode change withdrawn
+		// since the record was written is not committed.
+		mode := p.Mode
+		if stagedMode != "" {
+			mode = stagedMode
+		}
+		fmt.Fprintf(&info, "%s %s\t%s\x00", mode, p.Blob, p.Path)
 		pathspecs = append(pathspecs, ":(literal)"+p.Path)
 	}
 	if _, err := redactGit(ctx, ledgerPath, info.Bytes(), "update-index", "-z", "--index-info"); err != nil {
