@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -497,15 +498,20 @@ func setAsideCommittedArtifacts(sessionDir string, uploaded map[string]lfs.FileR
 }
 
 // unchangedSinceHEAD reports whether HEAD tracks dir/name and neither the
-// index nor the worktree changed it. git compares, so its filters (such as
-// core.autocrlf) apply.
+// index nor the worktree changed it. git hashes the worktree file itself, so
+// its filters (such as core.autocrlf) apply and index flags like
+// assume-unchanged or skip-worktree cannot hide an edit.
 func unchangedSinceHEAD(dir, name string) bool {
 	rel := "./" + name
-	if exec.Command("git", "-C", dir, "rev-parse", "--verify", "-q", "HEAD:"+rel).Run() != nil {
+	head, err := exec.Command("git", "-C", dir, "rev-parse", "--verify", "-q", "HEAD:"+rel).Output()
+	if err != nil {
 		return false
 	}
-	return exec.Command("git", "-C", dir, "diff", "--quiet", "HEAD", "--", rel).Run() == nil &&
-		exec.Command("git", "-C", dir, "diff", "--quiet", "--cached", "--", rel).Run() == nil
+	worktree, err := exec.Command("git", "-C", dir, "hash-object", "--path="+name, "--", name).Output()
+	if err != nil || !bytes.Equal(bytes.TrimSpace(head), bytes.TrimSpace(worktree)) {
+		return false
+	}
+	return exec.Command("git", "-C", dir, "diff", "--quiet", "--cached", "--", rel).Run() == nil
 }
 
 // revertRegeneratedRefs puts back the meta.Files entries prepareRegeneratedArtifacts

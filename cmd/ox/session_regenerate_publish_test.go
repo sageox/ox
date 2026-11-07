@@ -612,3 +612,20 @@ func TestCommittedArtifacts_RestoreKeepsNewerFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "restored\n", string(body))
 }
+
+// An edit hidden from git diff by assume-unchanged is still an edit.
+func TestSetAsideCommittedArtifacts_KeepsAssumeUnchangedEdit(t *testing.T) {
+	f := newRegenerateLedgerFixture(t)
+	name := recentSessionName("OxRgnV")
+	f.publishSession(t, name, "Keep my hidden edit")
+	sessionDir := commitLegacySessionMD(t, f, name)
+	runGit(t, f.ledgerPath, "update-index", "--assume-unchanged", filepath.Join("sessions", name, ledgerFileSessionMD))
+	path := filepath.Join(sessionDir, ledgerFileSessionMD)
+	require.NoError(t, os.WriteFile(path, []byte("# hidden edit\n"), 0o644))
+
+	setAside, err := setAsideCommittedArtifacts(sessionDir, map[string]lfs.FileRef{ledgerFileSessionMD: lfs.NewFileRef([]byte("new"))})
+
+	require.NoError(t, err)
+	assert.Empty(t, setAside.files)
+	assert.FileExists(t, path)
+}
