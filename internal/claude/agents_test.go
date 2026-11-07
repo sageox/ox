@@ -273,3 +273,48 @@ func containsSubstr(s, sub string) bool {
 	}
 	return false
 }
+
+func TestValidateAgentName(t *testing.T) {
+	tests := []struct {
+		name    string
+		wantErr bool
+	}{
+		{"code-reviewer", false},
+		{"security_expert.v2", false},
+		{"weird*name[1]", false},
+		{"", true},
+		{".", true},
+		{"..", true},
+		{"../../README", true},
+		{`..\..\README`, true},
+		{"sub/name", true},
+		{`sub\name`, true},
+		{"/etc/passwd", true},
+		{"nul\x00byte", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateAgentName(tt.name)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateAgentName(%q) error = %v, wantErr %v", tt.name, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadAgent_RejectsTraversalName(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, AgentsDir), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# not a coworker\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"../../README", `..\..\README`} {
+		agent, err := LoadAgent(tmpDir, name)
+		if err == nil || agent != nil {
+			t.Errorf("LoadAgent(%q) = %+v, %v; want rejection", name, agent, err)
+		}
+	}
+}

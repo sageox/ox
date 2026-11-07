@@ -245,6 +245,9 @@ func LoadAgent(teamPath, name string) (*AgentContent, error) {
 	if teamPath == "" || name == "" {
 		return nil, nil
 	}
+	if err := ValidateAgentName(name); err != nil {
+		return nil, err
+	}
 
 	agentPath, ok := findInProfileDirs(teamPath, name+".md")
 	if !ok {
@@ -266,6 +269,17 @@ func LoadAgent(teamPath, name string) (*AgentContent, error) {
 		Path:        agentPath,
 		Content:     string(data),
 	}, nil
+}
+
+// ValidateAgentName requires a coworker name to be a single path element, so
+// joining it under a profile directory can never select a file elsewhere in
+// (or outside) the Team Context: filepath.Join cleans "../../README" into the
+// repo root's README.md. Both separators are rejected on every platform.
+func ValidateAgentName(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
+		return fmt.Errorf("invalid coworker name %q: must be a single name without path separators", name)
+	}
+	return nil
 }
 
 // ValidateAgentFile validates that a file is a valid coworker agent definition.

@@ -670,3 +670,180 @@ func newCoworkerLoadEntryForTest(name, model string) struct {
 		CoworkerModel: model,
 	}
 }
+
+// coworkerGitState captures HEAD and the index tree so a test can prove a
+// rejected command neither committed nor staged anything.
+func coworkerGitState(t *testing.T, repo string) (head, index string) {
+	t.Helper()
+	run := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	return run("rev-parse", "HEAD"), run("write-tree")
+}
+
+func commitTeamFiles(t *testing.T, repo string, files map[string]string) {
+	t.Helper()
+	for rel, content := range files {
+		if err := os.WriteFile(filepath.Join(repo, filepath.FromSlash(rel)), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitEnv := append(os.Environ(), // safe: git identity for temp dir only
+		"GIT_AUTHOR_NAME=Test User", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=Test User", "GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-m", "seed team context"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = gitEnv
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
+func setupCoworkerGitProject(t *testing.T, files map[string]string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	teamDir := filepath.Join(dir, "team-context")
+	if err := os.MkdirAll(filepath.Join(teamDir, "coworkers", "agents"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	initTeamGitRepo(t, teamDir)
+	commitTeamFiles(t, teamDir, files)
+
+	requireSageoxDir(t, dir)
+	if err := config.SaveProjectConfig(dir, &config.ProjectConfig{TeamID: "test-team"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveLocalConfig(dir, &config.LocalConfig{
+		TeamContexts: []config.TeamContext{{TeamID: "test-team", Path: teamDir}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	return dir, teamDir
+}
+
+func TestCoworkerRemoveRejectsTraversalName(t *testing.T) {
+	_, teamDir := setupCoworkerGitProject(t, map[string]string{
+		"coworkers/agents/code-reviewer.md": "---\ndescription: reviewer\n---\n# Reviewer\n",
+		"notes.md":                          "original\n",
+	})
+
+	// an unrelated staged edit must survive untouched
+	notes := filepath.Join(teamDir, "notes.md")
+	if err := os.WriteFile(notes, []byte("staged edit\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stage := exec.Command("git", "add", "notes.md")
+	stage.Dir = teamDir
+	if out, err := stage.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+
+	readme := filepath.Join(teamDir, "README.md")
+	readmeBefore, err := os.ReadFile(readme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headBefore, indexBefore := coworkerGitState(t, teamDir)
+
+	for _, name := range []string{"../../README", `..\..\README`, "..", ".", "", "../agents/code-reviewer", "nul\x00byte"} {
+		t.Run(name, func(t *testing.T) {
+			cmd, buf := newCoworkerCmd(map[string]string{"force": "true"})
+			err := runCoworkerRemove(cmd, []string{name})
+			if err == nil || !strings.Contains(err.Error(), "invalid coworker name") {
+				t.Fatalf("runCoworkerRemove(%q) error = %v, want invalid coworker name", name, err)
+			}
+			if strings.Contains(buf.String(), "Removed") {
+				t.Errorf("output = %q, want no removal", buf.String())
+			}
+		})
+	}
+
+	readmeAfter, err := os.ReadFile(readme)
+	if err != nil {
+		t.Fatalf("README.md must survive a traversal attempt: %v", err)
+	}
+	if !bytes.Equal(readmeBefore, readmeAfter) {
+		t.Errorf("README.md changed: %q -> %q", readmeBefore, readmeAfter)
+	}
+	if _, err := os.Stat(filepath.Join(teamDir, "coworkers", "agents", "code-reviewer.md")); err != nil {
+		t.Errorf("code-reviewer.md must survive: %v", err)
+	}
+	headAfter, indexAfter := coworkerGitState(t, teamDir)
+	if headAfter != headBefore {
+		t.Errorf("HEAD moved: %s -> %s", headBefore, headAfter)
+	}
+	if indexAfter != indexBefore {
+		t.Errorf("index changed: %s -> %s", indexBefore, indexAfter)
+	}
+}
+
+func TestCoworkerRemoveLiteralPathspec(t *testing.T) {
+	_, teamDir := setupCoworkerGitProject(t, map[string]string{
+		"coworkers/agents/review*.md":     "---\ndescription: glob-named\n---\n",
+		"coworkers/agents/review-sec.md":  "---\ndescription: sibling\n---\n",
+		"coworkers/agents/review-perf.md": "---\ndescription: sibling\n---\n",
+	})
+
+	cmd, _ := newCoworkerCmd(map[string]string{"force": "true"})
+	if err := runCoworkerRemove(cmd, []string{"review*"}); err != nil {
+		t.Fatalf("runCoworkerRemove: %v", err)
+	}
+
+	agentsDir := filepath.Join(teamDir, "coworkers", "agents")
+	if _, err := os.Stat(filepath.Join(agentsDir, "review*.md")); !os.IsNotExist(err) {
+		t.Errorf("review*.md should be removed, stat err = %v", err)
+	}
+	for _, sibling := range []string{"review-sec.md", "review-perf.md"} {
+		if _, err := os.Stat(filepath.Join(agentsDir, sibling)); err != nil {
+			t.Errorf("%s must not match a literal name: %v", sibling, err)
+		}
+	}
+}
+
+func TestCoworkerLoadRejectsTraversalName(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "test-session")
+	setupCoworkerGitProject(t, map[string]string{"notes.md": "team notes\n"})
+
+	for _, name := range []string{"../../README", `..\..\README`} {
+		cmd, buf := newCoworkerCmd(nil)
+		err := runCoworkerLoad(cmd, []string{name})
+		if err == nil || !strings.Contains(err.Error(), "invalid coworker name") {
+			t.Errorf("runCoworkerLoad(%q) error = %v, want invalid coworker name", name, err)
+		}
+		if strings.Contains(buf.String(), "team context") {
+			t.Errorf("runCoworkerLoad(%q) leaked README content: %q", name, buf.String())
+		}
+	}
+}
+
+func TestCoworkerAddRejectsSeparatorInName(t *testing.T) {
+	_, teamDir := setupCoworkerGitProject(t, map[string]string{"notes.md": "team notes\n"})
+	headBefore, indexBefore := coworkerGitState(t, teamDir)
+
+	// filepath.Base keeps a backslash on Unix, so the derived name still
+	// carries a separator that would traverse on Windows.
+	src := filepath.Join(t.TempDir(), `..\..\README.md`)
+	if err := os.WriteFile(src, []byte("---\ndescription: sneaky\n---\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd, _ := newCoworkerCmd(nil)
+	err := runCoworkerAdd(cmd, []string{src})
+	if err == nil || !strings.Contains(err.Error(), "invalid coworker name") {
+		t.Fatalf("runCoworkerAdd error = %v, want invalid coworker name", err)
+	}
+
+	headAfter, indexAfter := coworkerGitState(t, teamDir)
+	if headAfter != headBefore || indexAfter != indexBefore {
+		t.Errorf("git state changed: HEAD %s -> %s, index %s -> %s", headBefore, headAfter, indexBefore, indexAfter)
+	}
+}
