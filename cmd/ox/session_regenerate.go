@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
@@ -303,10 +304,17 @@ func hasSubstantiveTurns(entries []map[string]any) bool {
 
 // --- Summary regeneration (--summary) ---
 
-// regenerateSingleSessionSummary re-generates summary.json for a session by
-// invoking Claude with the current summary prompt template. The raw.jsonl is
-// read (downloaded from LFS if needed), a prompt is built using the shared
-// template, and Claude produces a new summary. Downstream artifacts
+// newRegenerateSummaryRunner is the summary worker for --summary; tests swap it.
+var newRegenerateSummaryRunner = func() interface {
+	agentwork.Runner
+	Available() bool
+} {
+	return agentwork.NewClaudeRunner(slog.Default())
+}
+
+// regenerateSingleSessionSummary re-generates summary.json for a session with
+// an isolated Claude Code run over the inline summary prompt. The raw.jsonl is
+// read (downloaded from LFS if needed) and ox publishes the parsed summary. Downstream artifacts
 // (summary.md, session.md) are regenerated from the result.
 func regenerateSingleSessionSummary(nameArg string) error {
 	projectRoot, err := requireProjectRoot()
@@ -345,62 +353,50 @@ func regenerateSingleSessionSummary(nameArg string) error {
 		return fmt.Errorf("session %s has no substantive user/assistant turns; nothing to summarize", sessionName)
 	}
 
-	// Mirror the live `ox session stop` path: tokenopt-compress raw.jsonl
-	// into the ledger cache before building the prompt. ConversationOnly
-	// keeps user+assistant turns verbatim, compacts tool entries, drops
-	// system entries — typically 50-80% smaller. Without this, large
-	// sessions (>100k tokens) can blow Claude's context on regenerate.
-	// Falls back to rawPath on any failure (helper returns "").
-	summaryInputPath := writeOptimizedJSONLForSummary(rawPath, ledgerPath, sessionName)
-	if summaryInputPath == "" {
-		summaryInputPath = rawPath
-	}
-
-	// Build the prompt with sessionPath as ledgerSessionDir so the LLM is
-	// instructed to run `ox session push-summary` itself once it's saved
-	// the JSON. push-summary handles validation (content + richness),
-	// summary.json write, meta.json title update, git add/commit/push.
-	//
-	// Why delegate to push-summary instead of parsing inline JSON: the
-	// shared prompt template tells the LLM to *save* the JSON to a temp
-	// file, not return it inline. In Claude Code's `-p` non-interactive
-	// mode the result text is prose narration of the work, not the JSON.
-	// Trying to ParseSummaryJSON from that prose fails (we tried — both
-	// sessions in the Phase 2 driver failed identically with "no valid
-	// summary JSON found in LLM output"). Routing through push-summary
-	// gets us the same path the rest of the system already trusts.
-	summaryPathBefore := filepath.Join(sessionPath, "summary.json")
-	mtimeBefore := fileMtime(summaryPathBefore)
-
+	// The transcript is untrusted text, so the summary is generated the way the
+	// daemon and import do it: the content goes inline, the worker runs
+	// isolated with no tools in an empty directory, and ox parses and publishes
+	// the JSON itself. A Claude Code too old to isolate fails here; a person is
+	// at the terminal to see it.
 	entries := sessionsummary.EntriesFromRaw(rawSession.Entries)
-	prompt := sessionsummary.BuildSummaryPrompt(entries, summaryInputPath, sessionPath)
+	prompt := sessionsummary.BuildInlineSummaryPrompt(sessionsummary.TrimEntriesForBudget(entries, sessionsummary.ImportPromptBudget))
 
 	cli.PrintInfo(fmt.Sprintf("Generating summary for %s...", sessionName))
 
-	if _, err := sessionsummary.InvokeClaude(context.Background(), prompt, sessionPath, sessionsummary.DefaultSummaryModel()); err != nil {
+	runner := newRegenerateSummaryRunner()
+	if !runner.Available() {
+		return fmt.Errorf("claude binary not found in PATH — ensure Claude Code CLI is installed")
+	}
+	result, err := runner.Run(context.Background(), agentwork.RunRequest{
+		Prompt:   prompt,
+		Model:    sessionsummary.DefaultSummaryModel(),
+		Isolated: true,
+	})
+	if err != nil {
 		return fmt.Errorf("claude invocation: %w", err)
 	}
-
-	// Verify push-summary actually wrote a fresh summary.json. If the LLM
-	// silently failed to save / push, mtime won't have advanced and we'd
-	// be regenerating downstream artifacts from stale content.
-	mtimeAfter := fileMtime(summaryPathBefore)
-	if mtimeAfter.IsZero() {
-		return fmt.Errorf("summary.json missing after claude run — push-summary did not complete for %s", sessionName)
+	if result.ExitCode != 0 {
+		return fmt.Errorf("claude exited with code %d%s", result.ExitCode, cliMessage(result.Output))
 	}
-	if !mtimeBefore.IsZero() && !mtimeAfter.After(mtimeBefore) {
-		return fmt.Errorf("summary.json not refreshed for %s — push-summary may have rejected the LLM output (check validation logs)", sessionName)
-	}
-
-	// Read the just-written summary so we can regenerate downstream
-	// artifacts (summary.md, session.md) and report the quality score.
-	freshData, err := os.ReadFile(summaryPathBefore)
+	freshSummary, err := sessionsummary.ParseAndValidate(result.Output, len(entries))
 	if err != nil {
-		return fmt.Errorf("read fresh summary.json for %s: %w", sessionName, err)
+		return fmt.Errorf("summary for %s rejected: %w", sessionName, err)
 	}
-	var freshSummary sessionsummary.SummarizeResponse
-	if err := json.Unmarshal(freshData, &freshSummary); err != nil {
-		return fmt.Errorf("parse fresh summary.json for %s: %w", sessionName, err)
+
+	summaryFile, err := os.CreateTemp("", "ox-regenerate-summary-*.json")
+	if err != nil {
+		return fmt.Errorf("summary temp file: %w", err)
+	}
+	defer func() { _ = os.Remove(summaryFile.Name()) }()
+	if err := json.NewEncoder(summaryFile).Encode(freshSummary); err != nil {
+		_ = summaryFile.Close()
+		return fmt.Errorf("write summary temp file: %w", err)
+	}
+	if err := summaryFile.Close(); err != nil {
+		return fmt.Errorf("write summary temp file: %w", err)
+	}
+	if pushed := pushSummaryToLedger(summaryFile.Name(), sessionPath); !pushed.Success {
+		return fmt.Errorf("push summary for %s: %s", sessionName, pushed.Error)
 	}
 
 	// regenerate downstream artifacts (summary.md, session.md)
@@ -416,17 +412,6 @@ func regenerateSingleSessionSummary(nameArg string) error {
 
 	cli.PrintSuccess(fmt.Sprintf("Regenerated summary for %s (quality: %.2f)", sessionName, freshSummary.QualityScore))
 	return nil
-}
-
-// fileMtime returns the mtime of path or the zero time if the file doesn't
-// exist. Used to detect "did this file get rewritten" without needing a
-// content diff.
-func fileMtime(path string) time.Time {
-	info, err := os.Stat(path)
-	if err != nil {
-		return time.Time{}
-	}
-	return info.ModTime()
 }
 
 // --- Redaction mode (--redact) ---
