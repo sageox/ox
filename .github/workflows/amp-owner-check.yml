@@ -195,13 +195,15 @@ jobs:
             # The Security read paths from the steward workspace instructions,
             # plus the release, signing and self-update surface that review of
             # this PR found missing: .config/goreleaser.yml (release.yml runs
-            # it), the upgrade and install commands, the npm launcher, and the
-            # release signature manifest and embedded public keys. Directory
-            # prefixes carry the trailing slash so internal/sessions/ does not
-            # match internal/session/; cmd/ox/upgrade and cmd/ox/install are
-            # file-name prefixes on purpose (upgrade_daemons.go, tests).
-            # Manifests, lockfiles and goreleaser configs match at any depth;
-            # the three cmd/ox files match by exact name.
+            # it), the upgrade and install commands, the npm launcher, the
+            # release signature manifest and embedded public keys, and the npm
+            # lockfile behind make plan-review (its output ships in the binary).
+            # Directory prefixes carry the trailing slash so internal/sessions/
+            # does not match internal/session/; cmd/ox/upgrade and
+            # cmd/ox/install are file-name prefixes on purpose
+            # (upgrade_daemons.go, tests). Manifests, lockfiles and goreleaser
+            # configs match at any depth; the three cmd/ox files match by exact
+            # name.
             def sensitive: ascii_downcase
               | startswith("scripts/") or startswith(".github/actions/")
                 or startswith("npm/") or startswith("cmd/ox/upgrade")
@@ -216,7 +218,8 @@ jobs:
                 or (leaf | startswith(".goreleaser") or startswith("goreleaser")
                   or . == "makefile" or startswith("dockerfile")
                   or . == "go.mod" or . == "go.sum"
-                  or . == "package.json" or . == "pnpm-lock.yaml");
+                  or . == "package.json" or . == "package-lock.json"
+                  or . == "pnpm-lock.yaml");
             .[] | select((.filename | guarded) or ((.previous_filename // "") | guarded)
                 or ($bot and ((.filename | sensitive) or ((.previous_filename // "") | sensitive))))
               | (.filename | @json)' "$files_json")
