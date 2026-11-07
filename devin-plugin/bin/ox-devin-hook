@@ -38,10 +38,12 @@ if [ "$EVENT" = save-token ]; then
     python3 -c 'import sys,json;print(json.load(sys.stdin).get("value",""))' 2>/dev/null)
   if [ -z "$repo" ]; then
     echo "SageOx: token saved, but this directory is not a SageOx-initialized repo, so nothing is being recorded yet."
-  elif [ "$mode" = auto ] || [ -z "$mode" ]; then
+  elif [ -z "$mode" ]; then
+    echo "SageOx: token saved, but the recording policy for $(basename "$repo") could not be read, so recording status is unknown."
+  elif [ "$mode" = auto ]; then
     echo "SageOx: token saved; this Devin session is being recorded in $(basename "$repo")."
   else
-    echo "SageOx: token saved, but session recording is ${mode:-unknown} for $(basename "$repo"), so nothing is being recorded."
+    echo "SageOx: token saved, but session recording is $mode for $(basename "$repo"), so nothing is being recorded."
   fi
   exit 0
 fi

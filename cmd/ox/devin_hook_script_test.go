@@ -58,7 +58,7 @@ func newHookEnv(t *testing.T) *hookEnv {
 	// prime leaves a background process behind, as the real ox daemon does.
 	fakeOx := `#!/bin/sh
 case "$1 $2" in
-  "config get") printf '{"value":"%s"}\n' "${OX_SESSION_RECORDING:-auto}" ;;
+  "config get") [ "${OX_SESSION_RECORDING:-}" = unreadable ] && exit 1; printf '{"value":"%s"}\n' "${OX_SESSION_RECORDING:-auto}" ;;
   "agent prime") sleep 120 </dev/null >/dev/null 2>&1 & echo 'agent_id="OxTest1"' ;;
   "status --json") echo '{}' ;;
   "agent OxTest1") case "$3 $4" in
@@ -170,7 +170,7 @@ func TestDevinHookSaveTokenCachesTokenAndRepo(t *testing.T) {
 // TestDevinHookSaveTokenReportsRecordingStatus verifies save-token's one-line
 // status, which Devin relays to the user, matches what will actually happen.
 // Failure prevented: the user is told the session is recording when it was run
-// outside an initialized repo or recording is turned off.
+// outside an initialized repo, recording is turned off, or the policy is unreadable.
 func TestDevinHookSaveTokenReportsRecordingStatus(t *testing.T) {
 	e := newHookEnv(t)
 	for _, tc := range []struct {
@@ -179,6 +179,7 @@ func TestDevinHookSaveTokenReportsRecordingStatus(t *testing.T) {
 		{"initialized repo", e.repo, "auto", "is being recorded"},
 		{"recording disabled", e.repo, "disabled", "session recording is disabled"},
 		{"uninitialized dir", e.home, "auto", "not a SageOx-initialized repo"},
+		{"policy unreadable", e.repo, "unreadable", "recording status is unknown"},
 	} {
 		env := []string{"SAGEOX_TOKEN=" + hookTestToken, "OX_SESSION_RECORDING=" + tc.policy}
 		out, code := e.run(tc.dir, env, "", "save-token", "devin-"+strings.ReplaceAll(tc.name, " ", "-"))
