@@ -263,11 +263,15 @@ record_event() {
   if [ -s "$SDIR/pending.jsonl" ]; then
     # Buffered entries predate the recording, and stop drops anything stamped
     # before it started: restamp them to now, in order, keeping the original time.
+    # They were buffered before the token was known, so scrub it from them now.
     flock "$SDIR/pending.jsonl.lock" sh -c 'cat "$1" && : > "$1"' _ "$SDIR/pending.jsonl" | python3 -c '
-import sys, json, datetime
+import sys, json, datetime, os
 now = datetime.datetime.now(datetime.timezone.utc)
+tok = os.environ.get("SAGEOX_TOKEN", "")
 for i, line in enumerate(l for l in sys.stdin if l.strip()):
     e = json.loads(line)
+    if len(tok) >= 4:
+        e = {k: v.replace(tok, "[REDACTED]").replace(json.dumps(tok)[1:-1], "[REDACTED]") if isinstance(v, str) else v for k, v in e.items()}
     e["original_timestamp"] = e.get("timestamp")
     e["timestamp"] = (now + datetime.timedelta(microseconds=i)).isoformat(timespec="microseconds").replace("+00:00", "Z")
     print(json.dumps(e))' | append_line "$sf"
