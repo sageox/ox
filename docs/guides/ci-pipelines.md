@@ -120,6 +120,7 @@ A team token (`oxt_…`) belongs to one AI coworker on the team. Set it as `SAGE
 
 ```bash
 export SAGEOX_TOKEN="$OX_TEAM_TOKEN"   # from your CI secret store
+JOB_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # kept for `ox session wait` below
 ox agent prime
 ```
 
@@ -128,19 +129,19 @@ ox agent prime
 - Sessions have the coworker's `agt_…` ID as `user_id`, and their origin is `agent`.
 - Murmurs carry `principal_type: "ai"`.
 - Plans are authored by the coworker.
-- Ledger commits are authored as `<Name> <agt_…@ai-coworker.invalid>`, never as the machine's git user.
+- Ledger commits are authored as `<Name> <agt_…@ai-coworker.invalid>`, not as the machine's git user. Git's own `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables still override this, so don't set them in the job.
 
 A team token with no AI coworker attached is refused: ox records no session and sends no murmur rather than use the machine's git identity.
 
-**Git credentials.** ox exchanges the token for a short-lived Git PAT, tied to that token. A Git 401 makes ox fetch a fresh PAT. If the token was revoked, nothing is minted, and the error says to rotate or re-mint the team token and update `SAGEOX_TOKEN`.
+**Git credentials.** ox exchanges the token for a short-lived Git PAT, tied to that token. A Git 401 makes ox fetch a fresh PAT. If the token was revoked, nothing is minted. ox's API calls then fail with a message to rotate or re-mint the team token and update `SAGEOX_TOKEN`; Git itself reports only an authentication failure.
 
-**Before the machine goes away.** Wait until every session from this job is in the Ledger:
+**Before the machine goes away.** In each project the job recorded sessions in, wait until they are in the Ledger:
 
 ```bash
 ox session wait --since "$JOB_STARTED_AT" --timeout 10m --json
 ```
 
-The report counts `in_ledger` and lists `older_pending` (sessions from earlier jobs) and `failed`. The command exits 0 only when every session is uploaded.
+The command checks the current project only, and exits 0 only when every session this machine recorded there is uploaded. The report lists `older_pending` (sessions from earlier jobs) and `failed`. `in_ledger` counts every session the coworker published since `--since`, so parallel jobs under the same coworker are counted too.
 
 **Machines that live for one job.** Set `disposable_machine: true` in the user config (`OX_USER_CONFIG`) when the machine is thrown away after each job but its home directory persists.
 
