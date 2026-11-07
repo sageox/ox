@@ -375,22 +375,28 @@ func syncGitHubIndex(ctx context.Context, run githubIndexRun) error {
 		cli.PrintWarning(fmt.Sprintf("%d item(s) skipped because their comments could not be fetched; they are retried on the next sync", failed))
 	}
 
-	// Index what is now in the Ledger, pushed or not: --no-push skips the
-	// push, not the extract.
+	// Push before indexing: the Ledger push is the durable record, the search
+	// index is a local convenience. A cold daemon's first index pass on a large
+	// repo can outlast a caller's timeout, and indexing first lost every synced
+	// item when that caller killed ox mid-pass.
+	var pushErr error
+	if !run.NoPush {
+		pushErr = ledger.CommitAndPushGitHubData(context.Background(), run.LedgerPath, run.Owner, run.Repo, combined, pushLedger)
+		if pushErr == nil {
+			fmt.Println("GitHub data pushed to ledger.")
+		}
+	}
+
+	// Index what is now in the Ledger, pushed or not: --no-push and a failed
+	// push skip the push, not the extract.
 	fmt.Fprintln(os.Stderr, "Indexing GitHub data for search...")
 	if err := indexGitHubCodeDB(ctx, run); err != nil {
 		cli.PrintWarning(fmt.Sprintf("GitHub data synced but not indexed for search: %v", err))
 	}
 
-	if run.NoPush {
-		return nil
+	if pushErr != nil {
+		return fmt.Errorf("push to ledger: %w", pushErr)
 	}
-
-	if err := ledger.CommitAndPushGitHubData(context.Background(), run.LedgerPath, run.Owner, run.Repo, combined, pushLedger); err != nil {
-		return fmt.Errorf("push to ledger: %w", err)
-	}
-
-	fmt.Println("GitHub data pushed to ledger.")
 	return nil
 }
 
