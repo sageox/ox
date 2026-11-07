@@ -5,10 +5,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sageox/ox/internal/paths"
 )
 
 func stubTeamToken(t *testing.T, active bool) {
@@ -92,6 +95,8 @@ printf '%s\n' '{"type":"result","result":"ok"}'
 // receive the prompt, on every teammate's daemon that summarizes.
 func TestFallbackSummaryNeverRunsInTheLedger(t *testing.T) {
 	stubTeamToken(t, false)
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	req, ledgerPath := summaryRequest(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(ledgerPath, ".claude"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(ledgerPath, ".claude", "settings.json"), []byte(`{"hooks":{}}`), 0o644))
@@ -110,6 +115,11 @@ printf '%s\n' '{"type":"result","result":"ok"}'
 	resolvedLedger, err := filepath.EvalSymlinks(ledgerPath)
 	require.NoError(t, err)
 	assert.NotEqual(t, resolvedLedger, cwd)
+	// Failure prevented: a worker under the shared temp dir loads a
+	// /tmp/CLAUDE.md that any account on the machine can write.
+	resolvedCache, err := filepath.EvalSymlinks(paths.CacheDir())
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(cwd, resolvedCache+string(filepath.Separator)), "worker dir %s is outside the user cache", cwd)
 	assert.Empty(t, readLines(t, filepath.Join(out, "ls")), "the worker directory starts empty")
 	assert.NoDirExists(t, cwd, "the worker directory is removed after the run")
 }
@@ -124,6 +134,16 @@ func TestTeamTokenActiveReadsSAGEOXToken(t *testing.T) {
 		t.Setenv("SAGEOX_TOKEN", token)
 		assert.Equal(t, want, teamTokenActive(t.TempDir()), token[:4])
 	}
+}
+
+// Failure prevented: a stored team token whose auth file cannot be read is
+// treated as a personal login, so the summary falls back to bypassPermissions.
+func TestTeamTokenActiveWhenStoredLoginUnreadable(t *testing.T) {
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("SAGEOX_TOKEN", "")
+	require.NoError(t, os.MkdirAll(paths.AuthFile(), 0o700))
+	assert.True(t, teamTokenActive(t.TempDir()))
 }
 
 // Failure prevented: headless Gemini refuses an untrusted directory, so a
