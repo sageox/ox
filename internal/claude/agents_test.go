@@ -304,6 +304,31 @@ func TestValidateAgentName(t *testing.T) {
 	}
 }
 
+func TestDiscoverAgents_SkipsInvalidNames(t *testing.T) {
+	tmpDir := t.TempDir()
+	agentsDir := filepath.Join(tmpDir, AgentsDir)
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	files := []string{"code-reviewer.md", "..md"}
+	if runtime.GOOS != "windows" {
+		files = append(files, `review\ops.md`)
+	}
+	for _, f := range files {
+		if err := os.WriteFile(filepath.Join(agentsDir, f), []byte("---\ndescription: x\n---\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	agents, err := DiscoverAgents(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 || agents[0].Name != "code-reviewer" {
+		t.Errorf("DiscoverAgents = %+v, want only code-reviewer", agents)
+	}
+}
+
 func TestLoadAgent_RejectsTraversalName(t *testing.T) {
 	tmpDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpDir, AgentsDir), 0755); err != nil {

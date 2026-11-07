@@ -3,6 +3,7 @@ package claude
 import (
 	"bufio"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -160,6 +161,11 @@ func discoverAgentsIn(agentsDir string) ([]Agent, error) {
 
 		name := strings.TrimSuffix(entry.Name(), ".md")
 		agentPath := filepath.Join(agentsDir, entry.Name())
+		// a profile `ox coworker load` would refuse must not be advertised
+		if err := ValidateAgentName(name); err != nil {
+			slog.Warn("skipping coworker profile with invalid name; rename it", "path", agentPath, "error", err)
+			continue
+		}
 
 		agent := Agent{
 			Name: name,
