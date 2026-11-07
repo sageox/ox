@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -116,8 +117,8 @@ func TestLedgerCommitAuthor_SignedInAccountThenGitIdentity(t *testing.T) {
 }
 
 // isolateSignIns gives a test its own auth store and git-credential records,
-// and no SAGEOX_TOKEN.
-func isolateSignIns(t *testing.T) {
+// and no SAGEOX_TOKEN. It returns the config home the records are under.
+func isolateSignIns(t *testing.T) string {
 	t.Helper()
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
@@ -126,6 +127,7 @@ func isolateSignIns(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(xdg, "sageox"), 0o755))
 	t.Setenv("SAGEOX_TOKEN", "")
 	require.NoError(t, os.Unsetenv("SAGEOX_TOKEN"))
+	return xdg
 }
 
 func saveSignIn(t *testing.T, serverURL, accessToken, userID, name string) {
@@ -169,8 +171,8 @@ func TestSignedInAuthor_RefreshedLoginKeepsItsGitServer(t *testing.T) {
 	skipIntegration(t)
 	const gitServer = "http://source.example.net"
 	for name, fetchedWith := range map[string]string{
-		"refreshed since the fetch":  gitserver.BearerTokenFingerprint("token-before-refresh"),
-		"saved before bearer hashes": "",
+		"refreshed since the fetch":   gitserver.BearerTokenFingerprint("token-before-refresh"),
+		"saved without a bearer hash": "",
 	} {
 		t.Run(name, func(t *testing.T) {
 			isolateSignIns(t)
@@ -185,5 +187,77 @@ func TestSignedInAuthor_RefreshedLoginKeepsItsGitServer(t *testing.T) {
 
 			assert.Equal(t, "Devon E. <usr_devon@sageox-account.invalid>", author+" <"+email+">")
 		})
+	}
+}
+
+// Failure prevented: credentials fetched for one local stack (say with a
+// SAGEOX_TOKEN since unset) are read by the only remaining sign-in, on another
+// port of the same host, which then authors the first stack's Ledger commits.
+func TestSignedInAuthor_OnlySignInDoesNotOwnAnotherOriginsRecord(t *testing.T) {
+	skipIntegration(t)
+	isolateSignIns(t)
+	signedInServer := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(signedInServer.Close)
+	otherServer := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(otherServer.Close)
+	saveSignIn(t, signedInServer.URL, "token-devon", "usr_devon", "Devon Example")
+	require.NoError(t, gitserver.SaveCredentialsForEndpoint(otherServer.URL, gitserver.GitCredentials{
+		Token: "pat", ServerURL: otherServer.URL, ExpiresAt: time.Now().Add(time.Hour),
+		BearerTokenHash: gitserver.BearerTokenFingerprint("an-unset-sageox-token"),
+	}))
+
+	name, email := identity.SignedInAuthor(otherServer.URL+"/team/ledger.git", "")
+
+	assert.Empty(t, name+email, "a sign-in on another port must not author this server's commits")
+}
+
+// Failure prevented: a git-credential record older ox wrote, with no API
+// origin, either loses a distinct git host its own token fetched, or is
+// trusted after a refresh when nothing says which server owns it.
+func TestSignedInAuthor_LegacyRecordTrustedOnlyForItsOwnToken(t *testing.T) {
+	skipIntegration(t)
+	const gitServer = "http://source.example.net"
+	for name, tc := range map[string]struct {
+		fetchedWith string
+		wantEmail   string
+	}{
+		"fetched with the current token": {"token-current", "usr_devon@sageox-account.invalid"},
+		"fetched with an earlier token":  {"token-earlier", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			xdg := isolateSignIns(t)
+			api := httptest.NewServer(http.NotFoundHandler())
+			t.Cleanup(api.Close)
+			saveSignIn(t, api.URL, "token-current", "usr_devon", "Devon Example")
+			require.NoError(t, gitserver.SaveCredentialsForEndpoint(api.URL, gitserver.GitCredentials{
+				Token: "pat", ServerURL: gitServer, ExpiresAt: time.Now().Add(time.Hour),
+				BearerTokenHash: gitserver.BearerTokenFingerprint(tc.fetchedWith),
+			}))
+			stripAPIOrigin(t, xdg)
+
+			_, email := identity.SignedInAuthor(gitServer+"/team/ledger.git", "")
+
+			assert.Equal(t, tc.wantEmail, email)
+		})
+	}
+}
+
+// stripAPIOrigin rewrites every git-credential record under xdg the way older
+// ox wrote them, without api_origin.
+func stripAPIOrigin(t *testing.T, xdg string) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(xdg, "sageox", "git-credentials*.json"))
+	require.NoError(t, err)
+	require.NotEmpty(t, files, "no git-credential record to rewrite")
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		require.NoError(t, err)
+		var record map[string]any
+		require.NoError(t, json.Unmarshal(data, &record))
+		require.Contains(t, record, "api_origin")
+		delete(record, "api_origin")
+		data, err = json.Marshal(record)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(f, data, 0o600))
 	}
 }

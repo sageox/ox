@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/auth"
-	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/runtime"
@@ -216,9 +215,8 @@ const accountEmailDomain = "@sageox-account.invalid"
 // ends it. Both results are "" when no signed-in account owns that git server,
 // which leaves git's own identity in charge.
 func SignedInAuthor(remoteURL, configDisplayName string) (name, email string) {
-	signedIn := signedInEndpoints()
-	for _, ep := range signedIn {
-		if !gitserver.RemoteOnGitServer(remoteURL, ep, gitServerFor(ep, signedIn)) {
+	for _, ep := range signedInEndpoints() {
+		if !gitserver.RemoteOnGitServer(remoteURL, ep, gitServerFor(ep)) {
 			continue
 		}
 		id, accountEmail, fullName := signedInUser(ep)
@@ -237,25 +235,24 @@ func SignedInAuthor(remoteURL, configDisplayName string) (name, email string) {
 // gitServerFor returns the git server the API named for ep, or "" when that is
 // unknown, so two servers on one host (local stacks on different ports) never
 // match each other's clones. Credential records are keyed by host, so such
-// stacks share one. A record ep's own token fetched is ep's. One fetched with
-// an earlier token (a refreshed or pre-hash login) is trusted only when no
-// other sign-in shares the host and could own it.
-func gitServerFor(ep string, signedIn []string) string {
+// stacks share one: it is ep's when it was saved for ep's exact origin, or, in
+// a record older ox wrote without one, when ep's own token fetched it.
+func gitServerFor(ep string) string {
 	creds, err := gitserver.LoadCredentialsForEndpoint(ep)
 	if err != nil || creds == nil {
 		return ""
 	}
-	if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil &&
+	if creds.APIOrigin != "" {
+		if creds.SavedFor(ep) {
+			return creds.ServerURL
+		}
+		return ""
+	}
+	if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil && creds.BearerTokenHash != "" &&
 		creds.BearerTokenHash == gitserver.BearerTokenFingerprint(token.AccessToken) {
 		return creds.ServerURL
 	}
-	host := endpoint.NormalizeSlug(ep)
-	for _, other := range signedIn {
-		if other != ep && endpoint.NormalizeSlug(other) == host {
-			return ""
-		}
-	}
-	return creds.ServerURL
+	return ""
 }
 
 // signedInEndpoints lists every endpoint with a sign-in: a usable SAGEOX_TOKEN
