@@ -167,6 +167,27 @@ func TestDevinHookSaveTokenCachesTokenAndRepo(t *testing.T) {
 	}
 }
 
+// TestDevinHookSaveTokenReportsRecordingStatus verifies save-token's one-line
+// status, which Devin relays to the user, matches what will actually happen.
+// Failure prevented: the user is told the session is recording when it was run
+// outside an initialized repo or recording is turned off.
+func TestDevinHookSaveTokenReportsRecordingStatus(t *testing.T) {
+	e := newHookEnv(t)
+	for _, tc := range []struct {
+		name, dir, policy, want string
+	}{
+		{"initialized repo", e.repo, "auto", "is being recorded"},
+		{"recording disabled", e.repo, "disabled", "session recording is disabled"},
+		{"uninitialized dir", e.home, "auto", "not a SageOx-initialized repo"},
+	} {
+		env := []string{"SAGEOX_TOKEN=" + hookTestToken, "OX_SESSION_RECORDING=" + tc.policy}
+		out, code := e.run(tc.dir, env, "", "save-token", "devin-"+strings.ReplaceAll(tc.name, " ", "-"))
+		if code != 0 || !strings.Contains(out, tc.want) {
+			t.Errorf("%s: exit %d, output %q, want %q", tc.name, code, out, tc.want)
+		}
+	}
+}
+
 // TestDevinHookRequestsTokenOnce verifies a tokenless session is asked once to
 // run save-token, even when Devin's project dir is "/" and no workdir is known,
 // and that a recording opt-out suppresses the request.

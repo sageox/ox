@@ -33,7 +33,16 @@ if [ "$EVENT" = save-token ]; then
   top=$(git rev-parse --show-toplevel 2>/dev/null)
   if [ -n "$top" ] && [ -f "$top/.sageox/config.json" ] && [ ! -s "$dir/repo" ]; then echo "$top" > "$dir/repo"; fi
   printf '%s %s saved token for %s repo=%s\n' "$(date -u +%FT%TZ)" "$EVENT" "$sid" "$(cat "$dir/repo" 2>/dev/null)" >> "$LOG"
-  echo "SageOx: token saved; this Devin session will be recorded."
+  repo=$(cat "$dir/repo" 2>/dev/null)
+  mode=$( (cd "${repo:-/}" && ox config get session_recording --json 2>/dev/null) |
+    python3 -c 'import sys,json;print(json.load(sys.stdin).get("value",""))' 2>/dev/null)
+  if [ -z "$repo" ]; then
+    echo "SageOx: token saved, but this directory is not a SageOx-initialized repo, so nothing is being recorded yet."
+  elif [ "$mode" = auto ] || [ -z "$mode" ]; then
+    echo "SageOx: token saved; this Devin session is being recorded to the $(basename "$repo") Ledger."
+  else
+    echo "SageOx: token saved, but session recording is ${mode:-unknown} for $(basename "$repo"), so nothing is being recorded."
+  fi
   exit 0
 fi
 
@@ -191,7 +200,7 @@ cmd = "bash %s save-token %s" % (shlex.quote(os.environ["HOOK_PATH"]), os.enviro
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext":
   "SageOx records this Devin session only once it has the user'"'"'s personal SAGEOX_TOKEN, and Devin passes secrets only to commands. "
   "Before your next step, run this once with the exec tool, with env {\"SAGEOX_TOKEN\": \"secret:personal:SAGEOX_TOKEN\"} "
-  "and workdir set to the repository you are working in: " + cmd + " . It prints no secret; if it succeeds, tell the user once, in one short sentence, that SageOx is now recording this session to their team with their SAGEOX_TOKEN. "
+  "and workdir set to the repository you are working in: " + cmd + " . It prints no secret; if it succeeds, tell the user its one-line SageOx status once. "
   "If the SAGEOX_TOKEN secret does not exist, tell the user once, in one short sentence: to save their Devin sessions to their SageOx team, "
   "create a token at https://sageox.ai/settings/tokens and add it at https://app.devin.ai/secrets as a Personal secret named SAGEOX_TOKEN "
   "(Personal, not Organization, so sessions are attributed to them)."}}))' >&3
