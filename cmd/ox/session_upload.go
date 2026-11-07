@@ -359,6 +359,7 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 		addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, filesToAdd...)
 		addCmd := exec.Command("git", addArgs...)
 		if output, err := addCmd.CombinedOutput(); err != nil {
+			unstageLedgerPaths(ledgerPath, filesToAdd)
 			return fmt.Errorf("git add failed: %s: %w", string(output), err)
 		}
 
@@ -371,6 +372,7 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 		// staged after the snapshot is neither vetted-away nor swept in. See #749 and
 		// the PR #811 review (validation↔commit TOCTOU).
 		if _, err := commitLedgerSnapshot(context.Background(), ledgerPath, fmt.Sprintf("session: %s", sessionName)); err != nil {
+			unstageLedgerPaths(ledgerPath, filesToAdd)
 			return fmt.Errorf("committing ledger: %w", err)
 		}
 		return nil
@@ -381,6 +383,16 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 	// An identical retry may have no new commit but still owe the remote the
 	// pointer commit from a failed push. Always retry publication.
 	return pushLedger(context.Background(), ledgerPath)
+}
+
+// unstageLedgerPaths resets the index entries a refused commit staged back to
+// HEAD, so the refusal does not leave them staged for the next Ledger commit.
+// The worktree is untouched. Best-effort: the caller is already failing.
+func unstageLedgerPaths(ledgerPath string, paths []string) {
+	args := append([]string{"-C", ledgerPath, "reset", "-q", "--"}, paths...)
+	if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+		slog.Warn("unstage refused Ledger commit", "error", err, "output", strings.TrimSpace(string(output)))
+	}
 }
 
 // commitAndPushLedgerWithExtras is a thin compatibility shim around
