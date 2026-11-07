@@ -234,8 +234,15 @@ func treeBlob(ctx context.Context, ledgerPath, commit, rel string) (string, erro
 // isAncestor reports whether commit is in head's history. A commit that no
 // longer exists is not.
 func isAncestor(ctx context.Context, ledgerPath, commit, head string) (bool, error) {
-	if _, err := redactGit(ctx, ledgerPath, nil, "cat-file", "-e", commit+"^{commit}"); err != nil {
-		return false, nil
+	if _, err := redactGit(ctx, ledgerPath, nil, "rev-parse", "--verify", "--quiet", commit+"^{commit}"); err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		var missing *exec.ExitError
+		if errors.As(err, &missing) && missing.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("check holding commit %s: %w", shortOID(commit), err)
 	}
 	_, err := redactGit(ctx, ledgerPath, nil, "merge-base", "--is-ancestor", commit, head)
 	var exitErr *exec.ExitError
