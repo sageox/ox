@@ -78,7 +78,8 @@ func newFakeLFSStore(t *testing.T) *fakeLFSStore {
 				return
 			}
 			var request struct {
-				Objects []lfs.BatchObject `json:"objects"`
+				Operation string            `json:"operation"`
+				Objects   []lfs.BatchObject `json:"objects"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -86,16 +87,28 @@ func newFakeLFSStore(t *testing.T) *fakeLFSStore {
 			}
 			response := lfs.BatchResponse{Transfer: "basic"}
 			for _, obj := range request.Objects {
+				actions := &lfs.Actions{
+					Upload: &lfs.Action{Href: s.url + "/upload/" + obj.OID},
+					Verify: &lfs.Action{Href: s.url + "/verify"},
+				}
+				if request.Operation == "download" {
+					actions = &lfs.Actions{Download: &lfs.Action{Href: s.url + "/download/" + obj.OID}}
+				}
 				response.Objects = append(response.Objects, lfs.BatchResponseObject{
-					OID: obj.OID, Size: obj.Size,
-					Actions: &lfs.Actions{
-						Upload: &lfs.Action{Href: s.url + "/upload/" + obj.OID},
-						Verify: &lfs.Action{Href: s.url + "/verify"},
-					},
+					OID: obj.OID, Size: obj.Size, Actions: actions,
 				})
 			}
 			w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
 			_ = json.NewEncoder(w).Encode(response)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/download/"):
+			s.mu.Lock()
+			data, ok := s.objects[strings.TrimPrefix(r.URL.Path, "/download/")]
+			s.mu.Unlock()
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write(data)
 		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/upload/"):
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
