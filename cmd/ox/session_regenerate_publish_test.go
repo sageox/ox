@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -628,4 +629,27 @@ func TestSetAsideCommittedArtifacts_KeepsAssumeUnchangedEdit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, setAside.files)
 	assert.FileExists(t, path)
+}
+
+// A cached raw.jsonl that predates a synced redaction must not feed the
+// published session.md: regenerate rehydrates the redacted transcript first.
+func TestRegenerateSession_RehydratesStaleCachedTranscript(t *testing.T) {
+	f := newRegenerateLedgerFixture(t)
+	name := recentSessionName("OxRgnW")
+	f.publishSession(t, name, "token is [REDACTED]")
+	cachedRaw := filepath.Join(ledgerSessionCacheDir(f.ledgerPath, name), ledgerFileRaw)
+	redacted, err := os.ReadFile(cachedRaw)
+	require.NoError(t, err)
+	stale := bytes.Replace(redacted, []byte("[REDACTED]"), []byte("hunter2-secret"), 1)
+	require.NotEqual(t, redacted, stale)
+	require.NoError(t, os.WriteFile(cachedRaw, stale, 0o600))
+
+	require.NoError(t, regenerateSingleSessionArtifacts(f.newStore(t), f.projectRoot, name))
+
+	md := f.remoteSessionMD(t, name)
+	assert.Contains(t, md, "[REDACTED]")
+	assert.NotContains(t, md, "hunter2-secret")
+	cached, err := os.ReadFile(cachedRaw)
+	require.NoError(t, err)
+	assert.Equal(t, redacted, cached, "the stale cache must be replaced with the meta.json object")
 }

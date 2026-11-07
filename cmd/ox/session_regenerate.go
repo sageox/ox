@@ -187,7 +187,45 @@ func readSessionViaCache(projectRoot string, store *session.Store, sessionName s
 	if err != nil {
 		return nil, err
 	}
+	// A cached raw.jsonl can predate a redaction synced from a coworker.
+	// Regenerating from it would republish the removed content.
+	if stale, err := staleCachedRaw(ledgerPath, sessionName, rawPath); err != nil {
+		return nil, err
+	} else if stale {
+		if err := os.Remove(rawPath); err != nil {
+			return nil, fmt.Errorf("drop stale cached %s: %w", ledgerFileRaw, err)
+		}
+		if rawPath, err = openSessionContent(projectRoot, ledgerPath, sessionName, ledgerFileRaw); err != nil {
+			return nil, err
+		}
+		if stale, err := staleCachedRaw(ledgerPath, sessionName, rawPath); err != nil {
+			return nil, err
+		} else if stale {
+			return nil, fmt.Errorf("cached %s for %s does not match meta.json after rehydrating", ledgerFileRaw, sessionName)
+		}
+	}
 	return session.ReadSessionFromPath(rawPath)
+}
+
+// staleCachedRaw reports whether rawPath is a cached raw.jsonl whose bytes no
+// longer match the LFS ref meta.json records for it.
+func staleCachedRaw(ledgerPath, sessionName, rawPath string) (bool, error) {
+	if filepath.Dir(rawPath) != ledgerSessionCacheDir(ledgerPath, sessionName) {
+		return false, nil
+	}
+	meta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", sessionName))
+	if err != nil {
+		return false, fmt.Errorf("read meta.json for %s: %w", sessionName, err)
+	}
+	ref, ok := meta.Files[ledgerFileRaw]
+	if !ok || !ref.IsLFS() || ref.OID == "" {
+		return false, nil
+	}
+	data, err := os.ReadFile(rawPath)
+	if err != nil {
+		return false, fmt.Errorf("read cached %s: %w", ledgerFileRaw, err)
+	}
+	return lfs.ComputeOID(data) != ref.BareOID(), nil
 }
 
 func regenerateAllSessionsArtifacts(store *session.Store, projectRoot string, force bool) error {
