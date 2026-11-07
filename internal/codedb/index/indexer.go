@@ -23,9 +23,10 @@ import (
 
 	"github.com/blevesearch/bleve/v2"
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
+	cfgformat "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/object"
-	"github.com/go-git/go-git/v6/utils/merkletrie"
 
 	"github.com/sageox/ox/internal/codedb/comments"
 	"github.com/sageox/ox/internal/codedb/diffformat"
@@ -45,6 +46,20 @@ type IndexOptions struct {
 	Progress        ProgressFunc
 	SkipDirs        map[string]bool // directories to skip in worktree indexing; nil = use defaultSkipDirs
 	TreeCacheLimit  int             // max tree snapshots cached during commit walking; 0 = default (128)
+
+	// BackfillHistory indexes history an earlier depth-limited pass skipped.
+	// The walk runs even when the default branch tip is unchanged, passes
+	// through already-indexed commits to reach unindexed ancestors, and links
+	// boundary commits to parents that were missing when they were indexed.
+	BackfillHistory bool
+	// OnHistoryTruncated is called when MaxHistoryDepth stopped a ref's walk
+	// before it reached indexed or root commits, so older history still needs a
+	// BackfillHistory pass. nil = ignored.
+	OnHistoryTruncated func(ref string)
+	// Pace is called after each checkpoint flush, between batches of commits.
+	// It may sleep to yield the machine; a non-nil error aborts indexing.
+	// nil = no pacing.
+	Pace func(ctx context.Context) error
 }
 
 // defaultTreeCacheLimit is the default max entries in the tree cache.
@@ -71,6 +86,10 @@ type commitData struct {
 	timestamp int64
 	treeHash  plumbing.Hash
 	parentIDs []plumbing.Hash
+	// parentTree is the first parent's tree when the walk decoded that commit,
+	// so indexCommit can diff without a second CommitObject decode. Zero means
+	// unknown (a root commit, or a parent the walk never reached).
+	parentTree plumbing.Hash
 }
 
 // refInfo holds a resolved ref name and its tip commit hash.
@@ -124,6 +143,30 @@ type indexState struct {
 	newCommits      int
 	newBlobs        int
 	report          func(string)
+
+	differ      treeDiffer // file-level tree diffs; nil falls back to go-git (tests build indexState by hand)
+	backfill    bool       // IndexOptions.BackfillHistory: the walk steps through indexed commits
+	onTruncated func(ref string)
+	pace        func(ctx context.Context) error
+
+	// partialClone marks a repo whose history blobs may be absent locally.
+	// History content reads are skipped (see ensureBlob); only tip blobs are read.
+	partialClone bool
+	readingTip   bool // buildTipFileRevs is running; its blobs are always read
+	// tipBlobsSeen holds the blobs the tip build already looked at this run, so
+	// a blob that appears under several paths is checked and indexed once.
+	tipBlobsSeen map[string]struct{}
+
+	// pendingParentLinks maps a parent hash that was not indexed yet to the
+	// children (by hash) waiting to be linked to it. See insertParentLinks.
+	pendingParentLinks map[string][]string
+}
+
+// applyOptions copies the per-run IndexOptions behavior switches onto the state.
+func (st *indexState) applyOptions(opts IndexOptions) {
+	st.backfill = opts.BackfillHistory
+	st.onTruncated = opts.OnHistoryTruncated
+	st.pace = opts.Pace
 }
 
 // flushCodeBatch commits the code batch if it has reached the threshold.
@@ -263,18 +306,24 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 		commitIDCache:  make(map[string]int64),
 		report:         report,
 	}
+	st.applyOptions(opts)
+	st.partialClone = isPartialClone(repo)
+	// the bare clone at repoPath is itself the git directory
+	st.differ = newTreeDiffer(ctx, repo, gitDirOf(repoPath))
+	defer st.differ.Close()
 	// defer on st.tx (not the original tx pointer) so checkpointFlush's
 	// new transactions are also rolled back on failure.
 	defer func() { st.tx.Rollback() }()
 
-	// 6. Check if default branch tip has changed
+	// 6. Check if default branch tip has changed. A backfill pass must still
+	// walk: the tip is current, it is the older history that is missing.
 	existingRefs, err := loadExistingRefs(ctx, s, repoID)
 	if err != nil {
 		return fmt.Errorf("load existing refs: %w", err)
 	}
 
 	t2 := time.Now()
-	if prev, ok := existingRefs[defaultRef.name]; ok && prev == defaultRef.tipOID.String() {
+	if prev, ok := existingRefs[defaultRef.name]; ok && prev == defaultRef.tipOID.String() && !opts.BackfillHistory {
 		report(fmt.Sprintf("  default branch unchanged, skipping (%s)", time.Since(t2).Round(time.Millisecond)))
 	} else {
 		if err := st.processRef(ctx, defaultRef, 0, 1, opts.MaxHistoryDepth, existingRefs); err != nil {
@@ -395,18 +444,23 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 		commitIDCache:  make(map[string]int64),
 		report:         report,
 	}
+	st.applyOptions(opts)
+	st.partialClone = isPartialClone(repo)
+	st.differ = newTreeDiffer(ctx, repo, gitDirOf(repoOpenPath))
+	defer st.differ.Close()
 	// defer on st.tx (not the original tx pointer) so checkpointFlush's
 	// new transactions are also rolled back on failure.
 	defer func() { st.tx.Rollback() }()
 
-	// 6. Check if default branch tip has changed
+	// 6. Check if default branch tip has changed (a backfill pass walks anyway,
+	// see IndexRepo)
 	existingRefs, err := loadExistingRefs(ctx, s, repoID)
 	if err != nil {
 		return fmt.Errorf("load existing refs: %w", err)
 	}
 
 	t2 := time.Now()
-	if prev, ok := existingRefs[defaultRef.name]; ok && prev == defaultRef.tipOID.String() {
+	if prev, ok := existingRefs[defaultRef.name]; ok && prev == defaultRef.tipOID.String() && !opts.BackfillHistory {
 		report(fmt.Sprintf("  default branch unchanged (%s)", time.Since(t2).Round(time.Millisecond)))
 	} else {
 		if err := st.processRef(ctx, defaultRef, 0, 1, opts.MaxHistoryDepth, existingRefs); err != nil {
@@ -770,32 +824,127 @@ func resolveGitDir(repoPath string) (string, bool) {
 	return gitopen.ResolveGitDir(repoPath)
 }
 
+// isPartialClone reports whether repo is a partial clone: its config names a
+// promisor remote, so objects it lacks (typically history blobs under
+// --filter=blob:none) are expected, not corruption. An unreadable config reads
+// as "not partial", which only costs the read attempts this check saves.
+func isPartialClone(repo *git.Repository) bool {
+	cfg, err := repo.Config()
+	if err != nil {
+		return false
+	}
+	return partialCloneConfigured(cfg)
+}
+
+// partialCloneConfigured checks the two markers git writes for a partial clone:
+// extensions.partialclone (older git) and remote.<name>.promisor=true (every git).
+func partialCloneConfigured(cfg *config.Config) bool {
+	if cfg == nil || cfg.Raw == nil {
+		return false
+	}
+	for _, section := range cfg.Raw.Sections {
+		switch {
+		case section.IsName("extensions"):
+			if section.Options.Get("partialclone") != "" {
+				return true
+			}
+		case section.IsName("remote"):
+			for _, remote := range section.Subsections {
+				if configBoolTrue(remote.Options, "promisor") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// configBoolTrue reads a git boolean option. A bare key (no "=") is true.
+func configBoolTrue(opts cfgformat.Options, key string) bool {
+	if !opts.Has(key) {
+		return false
+	}
+	switch strings.ToLower(opts.Get(key)) {
+	case "", "true", "yes", "on", "1":
+		return true
+	}
+	return false
+}
+
+// walkResult is the outcome of walking one ref's history.
+type walkResult struct {
+	// commits are the unindexed commits, oldest first.
+	commits []commitData
+	// truncated is true when maxDepth stopped the walk while an unindexed,
+	// readable commit was still unvisited.
+	truncated bool
+	// boundary (backfill only) maps an unindexed parent hash to the indexed
+	// children that reference it. Their commit_parents rows could not be
+	// written when the children were indexed, because the parent was missing.
+	boundary map[string][]string
+}
+
 // walkNewCommits discovers commits reachable from tip that aren't in knownCommits.
-// Returns commits in oldest-first (topological) order. Respects maxDepth (0 = unlimited).
-// Uses BFS so that after reversal, parents always appear before children even with merges.
+// Returns commits in oldest-first order. Respects maxDepth (0 = unlimited).
+// The order is BFS reversed: parents come before children except where a merge
+// reaches a parent over a shorter path than its child (a long branch merged
+// shortly after it forked). That is not fatal: insertParentLinks parks the
+// missing link and writes it once the parent is indexed.
 func walkNewCommits(repo *git.Repository, tip plumbing.Hash, knownCommits map[string]bool, maxDepth int) ([]commitData, bool) {
-	var newCommits []commitData
-	visited := make(map[plumbing.Hash]bool)
+	res := walkCommits(repo, tip, knownCommits, maxDepth, false)
+	return res.commits, res.truncated
+}
+
+// walkCommits is walkNewCommits with a backfill mode.
+//
+// By default the walk stops at indexed commits: everything behind one was
+// indexed with it. A depth-limited pass breaks that assumption, because it
+// indexes the newest N commits and leaves their ancestors behind. With backfill
+// set the walk steps through indexed commits (queueing their parents without
+// collecting them) so it can reach those ancestors, and records the edges from
+// indexed children to unindexed parents in walkResult.boundary.
+func walkCommits(repo *git.Repository, tip plumbing.Hash, knownCommits map[string]bool, maxDepth int, backfill bool) walkResult {
+	var res walkResult
+	if backfill {
+		res.boundary = make(map[string][]string)
+	}
+	// seen holds every commit decoded so far with its tree hash. Presence is the
+	// visited set; the tree lets indexCommit skip decoding the parent again.
+	seen := make(map[plumbing.Hash]plumbing.Hash)
 	queue := []plumbing.Hash{tip}
-	depthTruncated := false
 
 	for len(queue) > 0 {
-		if maxDepth > 0 && len(newCommits) >= maxDepth {
-			depthTruncated = true
-			break
-		}
 		oid := queue[0]
 		queue = queue[1:]
 
 		oidHex := oid.String()
-		if knownCommits[oidHex] || visited[oid] {
+		known := knownCommits[oidHex]
+		if _, visited := seen[oid]; visited || (known && !backfill) {
 			continue
 		}
-		visited[oid] = true
+		seen[oid] = plumbing.ZeroHash
 
 		commitObj, err := repo.CommitObject(oid)
 		if err != nil {
 			continue
+		}
+		seen[oid] = commitObj.TreeHash
+
+		if known {
+			for _, p := range commitObj.ParentHashes {
+				queue = append(queue, p)
+				if parentHex := p.String(); !knownCommits[parentHex] {
+					res.boundary[parentHex] = append(res.boundary[parentHex], oidHex)
+				}
+			}
+			continue
+		}
+
+		// stop on the first unindexed commit past the limit, so a walk that ends
+		// exactly at the limit with nothing unindexed left is not "truncated"
+		if maxDepth > 0 && len(res.commits) >= maxDepth {
+			res.truncated = true
+			break
 		}
 
 		var parentIDs []plumbing.Hash
@@ -804,7 +953,7 @@ func walkNewCommits(repo *git.Repository, tip plumbing.Hash, knownCommits map[st
 			queue = append(queue, p)
 		}
 
-		newCommits = append(newCommits, commitData{
+		res.commits = append(res.commits, commitData{
 			oid:       oid,
 			author:    commitObj.Author.Name,
 			message:   commitObj.Message,
@@ -815,24 +964,38 @@ func walkNewCommits(repo *git.Repository, tip plumbing.Hash, knownCommits map[st
 	}
 
 	// Reverse for oldest-first (topological) processing
-	for i, j := 0, len(newCommits)-1; i < j; i, j = i+1, j-1 {
-		newCommits[i], newCommits[j] = newCommits[j], newCommits[i]
+	commits := res.commits
+	for i, j := 0, len(commits)-1; i < j; i, j = i+1, j-1 {
+		commits[i], commits[j] = commits[j], commits[i]
 	}
 
-	return newCommits, depthTruncated
+	for i := range commits {
+		if len(commits[i].parentIDs) > 0 {
+			commits[i].parentTree = seen[commits[i].parentIDs[0]]
+		}
+	}
+
+	return res
 }
 
 // processRef walks a single ref's history and indexes new commits, diffs, and file_revs.
 func (st *indexState) processRef(ctx context.Context, ri refInfo, refIdx, totalRefs, maxDepth int, existingRefs map[string]string) error {
-	newCommits, depthTruncated := walkNewCommits(st.repo, ri.tipOID, st.knownCommits, maxDepth)
+	walk := walkCommits(st.repo, ri.tipOID, st.knownCommits, maxDepth, st.backfill)
+	newCommits := walk.commits
+	for parentHex, children := range walk.boundary {
+		st.addPendingParentLinks(parentHex, children...)
+	}
 
 	if len(newCommits) > 0 {
 		st.report(fmt.Sprintf("Ref %d/%d: %s — %d new commits",
 			refIdx+1, totalRefs, ri.name, len(newCommits)))
 	}
-	if depthTruncated {
+	if walk.truncated {
 		st.report(fmt.Sprintf("Warning: history depth limit (%d) reached for ref %s.",
 			maxDepth, ri.name))
+		if st.onTruncated != nil {
+			st.onTruncated(ri.name)
+		}
 	}
 
 	for i, cd := range newCommits {
@@ -847,6 +1010,13 @@ func (st *indexState) processRef(ctx context.Context, ri refInfo, refIdx, totalR
 			st.report(fmt.Sprintf("Checkpoint: %d/%d commits indexed and searchable", i, len(newCommits)))
 			if err := st.checkpointFlush(ctx); err != nil {
 				return fmt.Errorf("checkpoint flush at commit %d: %w", i, err)
+			}
+			// everything before this commit is durable and searchable, so a pause
+			// here costs nothing but time
+			if st.pace != nil {
+				if err := st.pace(ctx); err != nil {
+					return fmt.Errorf("pace after commit %d: %w", i, err)
+				}
 			}
 		}
 	}
@@ -888,57 +1058,36 @@ func (st *indexState) indexCommit(ctx context.Context, cd commitData) error {
 		st.report(fmt.Sprintf("Processed %d commits, %d new blobs...", st.newCommits, st.newBlobs))
 	}
 
-	// Insert parent links
-	if err := st.insertParentLinks(commitDBID, cd.parentIDs); err != nil {
+	// Insert parent links, and the links of children that were waiting for this commit
+	if err := st.insertParentLinks(commitDBID, oidHex, cd.parentIDs); err != nil {
+		return err
+	}
+	if err := st.resolvePendingParentLinks(ctx, oidHex, commitDBID); err != nil {
 		return err
 	}
 
-	// Use DiffTree for O(changed_files) tree reads instead of O(all_files)×2.
-	// DiffTree uses merkle-trie hash comparison: only descends into subtrees
-	// whose hash changed, identical to git diff-tree semantics.
-	childTree, err := st.repo.TreeObject(cd.treeHash)
-	if err != nil {
-		return fmt.Errorf("get child tree: %w", err)
+	// Diff against the first parent only: O(changed_files) tree reads instead of
+	// O(all_files)x2, with the same semantics as git diff-tree.
+	if st.differ == nil {
+		st.differ = newTreeDiffer(ctx, st.repo, "")
 	}
-
-	var parentTree *object.Tree
-	if len(cd.parentIDs) > 0 {
-		parentCommit, pErr := st.repo.CommitObject(cd.parentIDs[0])
-		if pErr == nil {
-			parentTree, _ = st.repo.TreeObject(parentCommit.TreeHash)
-		}
-	}
-
-	changes, err := object.DiffTreeContext(ctx, parentTree, childTree)
+	changes, err := st.differ.DiffTrees(ctx, st.parentTreeHash(cd), cd.treeHash)
 	if err != nil {
 		return fmt.Errorf("diff tree: %w", err)
 	}
 
 	for _, change := range changes {
-		action, aErr := change.Action()
-		if aErr != nil {
-			continue
-		}
-		switch action {
-		case merkletrie.Insert:
-			if !change.To.TreeEntry.Mode.IsFile() {
-				continue // skip submodules and directories
-			}
-			if err := st.indexChangeEntry(commitDBID, change.To.Name, change.To.TreeEntry.Hash, plumbing.ZeroHash, false); err != nil {
+		switch change.Kind {
+		case treeChangeInsert:
+			if err := st.indexChangeEntry(commitDBID, change.Path, change.NewHash, plumbing.ZeroHash, false); err != nil {
 				return err
 			}
-		case merkletrie.Modify:
-			if !change.To.TreeEntry.Mode.IsFile() {
-				continue // skip submodules and directories
-			}
-			if err := st.indexChangeEntry(commitDBID, change.To.Name, change.To.TreeEntry.Hash, change.From.TreeEntry.Hash, true); err != nil {
+		case treeChangeModify:
+			if err := st.indexChangeEntry(commitDBID, change.Path, change.NewHash, change.OldHash, true); err != nil {
 				return err
 			}
-		case merkletrie.Delete:
-			if !change.From.TreeEntry.Mode.IsFile() {
-				continue // skip submodules and directories
-			}
-			if err := st.indexDeletionEntry(commitDBID, change.From.Name, change.From.TreeEntry.Hash); err != nil {
+		case treeChangeDelete:
+			if err := st.indexDeletionEntry(commitDBID, change.Path, change.OldHash); err != nil {
 				return err
 			}
 		}
@@ -948,8 +1097,31 @@ func (st *indexState) indexCommit(ctx context.Context, cd commitData) error {
 	return nil
 }
 
-// insertParentLinks records commit parent relationships.
-func (st *indexState) insertParentLinks(commitDBID int64, parentIDs []plumbing.Hash) error {
+// parentTreeHash returns the tree to diff cd against: the first parent's tree
+// from the walk when it decoded that commit, otherwise a CommitObject decode.
+// Zero (diff against the empty tree) for a root commit, and for a parent that
+// cannot be read, as indexCommit always treated it.
+func (st *indexState) parentTreeHash(cd commitData) plumbing.Hash {
+	if len(cd.parentIDs) == 0 {
+		return plumbing.ZeroHash
+	}
+	if !cd.parentTree.IsZero() {
+		return cd.parentTree
+	}
+	parentCommit, err := st.repo.CommitObject(cd.parentIDs[0])
+	if err != nil {
+		return plumbing.ZeroHash
+	}
+	return parentCommit.TreeHash
+}
+
+// insertParentLinks records commit parent relationships. A parent that is not
+// in the DB yet cannot be linked now; the edge is parked in pendingParentLinks
+// and written by resolvePendingParentLinks when that parent is indexed. Two
+// cases land there: the BFS walk indexes a child before a parent reachable over
+// a longer path (typical for a feature branch forked before main advanced), and
+// a depth-limited pass stops above a parent that a later backfill indexes.
+func (st *indexState) insertParentLinks(commitDBID int64, commitHex string, parentIDs []plumbing.Hash) error {
 	ctx := context.Background()
 	q := codedbsqlc.New(st.tx)
 	for _, parentOID := range parentIDs {
@@ -962,7 +1134,8 @@ func (st *indexState) insertParentLinks(commitDBID int64, parentIDs []plumbing.H
 			parentDBID, err = q.GetCommitIDByHash(ctx, parentHex)
 			if err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
-					continue // parent not yet in DB; skip link
+					st.addPendingParentLinks(parentHex, commitHex)
+					continue
 				}
 				return fmt.Errorf("get parent commit id %s: %w", parentHex, err)
 			}
@@ -973,6 +1146,49 @@ func (st *indexState) insertParentLinks(commitDBID int64, parentIDs []plumbing.H
 			ParentID: parentDBID,
 		}); err != nil {
 			return fmt.Errorf("insert commit parent: %w", err)
+		}
+	}
+	return nil
+}
+
+// addPendingParentLinks parks children (by hash) waiting for parentHex to be indexed.
+func (st *indexState) addPendingParentLinks(parentHex string, childHexes ...string) {
+	if st.pendingParentLinks == nil {
+		st.pendingParentLinks = make(map[string][]string)
+	}
+	st.pendingParentLinks[parentHex] = append(st.pendingParentLinks[parentHex], childHexes...)
+}
+
+// resolvePendingParentLinks writes the commit_parents rows of children that were
+// waiting for parentHex, now that it has parentDBID. It runs in the same
+// transaction as the parent's own insert, so a checkpoint or rollback never
+// separates a parent from the links that depend on it.
+func (st *indexState) resolvePendingParentLinks(ctx context.Context, parentHex string, parentDBID int64) error {
+	children, ok := st.pendingParentLinks[parentHex]
+	if !ok {
+		return nil
+	}
+	delete(st.pendingParentLinks, parentHex)
+
+	q := codedbsqlc.New(st.tx)
+	for _, childHex := range children {
+		childDBID, cached := st.commitIDCache[childHex]
+		if !cached {
+			var err error
+			childDBID, err = q.GetCommitIDByHash(ctx, childHex)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					continue
+				}
+				return fmt.Errorf("get child commit id %s: %w", childHex, err)
+			}
+			st.commitIDCache[childHex] = childDBID
+		}
+		if err := q.InsertCommitParent(ctx, codedbsqlc.InsertCommitParentParams{
+			CommitID: childDBID,
+			ParentID: parentDBID,
+		}); err != nil {
+			return fmt.Errorf("insert pending commit parent: %w", err)
 		}
 	}
 	return nil
@@ -1047,7 +1263,13 @@ func (st *indexState) insertDiff(commitDBID int64, path string, oldBlobDBID sql.
 		return fmt.Errorf("get diff id: %w", err)
 	}
 
-	diffText := generateDiffText(st.repo, path, oldOID, newOID, hasOld, hasNew, oldText, newText)
+	var diffText string
+	if st.skipsBlobContent() {
+		// generateDiffText would re-read the blobs ensureBlob just declined to read
+		diffText = diffformat.Format(path, oldText, newText)
+	} else {
+		diffText = generateDiffText(st.repo, path, oldOID, newOID, hasOld, hasNew, oldText, newText)
+	}
 	if diffText != "" {
 		if err := st.diffBatch.Index("diff_"+strconv.FormatInt(diffDBID, 10), BleveDiffDoc{Content: diffText}); err != nil {
 			return fmt.Errorf("index diff: %w", err)
@@ -1071,6 +1293,11 @@ const maxSnapshotsPrunedPerBuild = 8
 // moved away from — so file_revs stays at one snapshot per live ref.
 func (st *indexState) buildTipFileRevs(ctx context.Context, ri refInfo) error {
 	q := codedbsqlc.New(st.tx)
+
+	// tip blobs are the ones symbol parsing and search read, so a partial clone
+	// still reads them from disk
+	st.readingTip = true
+	defer func() { st.readingTip = false }()
 
 	tipHex := ri.tipOID.String()
 	tipCommitDBID, err := q.GetCommitIDByHash(ctx, tipHex)
@@ -1179,17 +1406,62 @@ func getTreeEntries(repo *git.Repository, treeHash plumbing.Hash, cache map[plum
 	return entries, nil
 }
 
+// skipsBlobContent reports whether blob content reads are skipped right now: a
+// partial clone while indexing history. Missing history blobs are the norm
+// there, and every read of one is a wasted lookup (or, for a git-backed reader,
+// a lazy network fetch).
+func (st *indexState) skipsBlobContent() bool {
+	return st.partialClone && !st.readingTip
+}
+
+// tipContentMissing reports whether the tip build must index the content of a
+// blob that already has a row: a partial clone while building tip file_revs,
+// and no code document for the blob. History indexing in a partial clone
+// records blobs without content, in this run or an earlier one, and the tip may
+// keep or later restore such a blob once checkout has fetched it. The row says
+// nothing about the document, so the index itself is asked, once per blob.
+//
+// A blob with no document for a good reason (binary, empty) is read again each
+// time the tip moves; the read finds nothing and indexes nothing.
+func (st *indexState) tipContentMissing(contentHash string, blobDBID int64) bool {
+	if !st.partialClone || !st.readingTip {
+		return false
+	}
+	if _, seen := st.tipBlobsSeen[contentHash]; seen {
+		return false
+	}
+	st.markTipBlobSeen(contentHash)
+	doc, err := st.store.CodeIndex.Document("blob_" + strconv.FormatInt(blobDBID, 10))
+	return err == nil && doc == nil
+}
+
+func (st *indexState) markTipBlobSeen(contentHash string) {
+	if st.tipBlobsSeen == nil {
+		st.tipBlobsSeen = make(map[string]struct{})
+	}
+	st.tipBlobsSeen[contentHash] = struct{}{}
+}
+
 // ensureBlob inserts a blob record if not already present and indexes its content
 // in Bleve only for newly inserted blobs. Uses an in-memory cache to avoid
 // repeated SQL lookups for the same content_hash within a single indexing run.
 // Returns (blobDBID, blobText, indexedInBleve, error).
 // blobText is the decoded UTF-8 content when the blob was read for Bleve indexing;
 // callers can reuse it to avoid a second git object read (e.g. in generateDiffText).
+//
+// In a partial clone the row is inserted without reading content while history
+// is indexed (the same outcome as a blob that is missing from disk). The tip
+// build then indexes the content of every blob it keeps that has no document
+// yet, whether the row came from this run or an earlier one.
 func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, string, bool, error) {
 	contentHash := blobOID.String()
 
 	// fast path: check in-memory cache first (avoids SQL roundtrip)
 	if cachedID, ok := st.blobIDCache[contentHash]; ok {
+		if st.tipContentMissing(contentHash, cachedID) {
+			text, indexed, err := st.indexBlobContent(cachedID, blobOID)
+			return cachedID, text, indexed, err
+		}
 		return cachedID, "", false, nil
 	}
 
@@ -1199,6 +1471,10 @@ func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, str
 	blobDBID, err := q.GetBlobIDByHash(ctx, contentHash)
 	if err == nil {
 		st.blobIDCache[contentHash] = blobDBID
+		if st.tipContentMissing(contentHash, blobDBID) {
+			text, indexed, err := st.indexBlobContent(blobDBID, blobOID)
+			return blobDBID, text, indexed, err
+		}
 		return blobDBID, "", false, nil
 	}
 
@@ -1218,29 +1494,48 @@ func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, str
 
 	st.blobIDCache[contentHash] = blobDBID
 
-	var blobText string
-	indexed := false
-	blobObj, bErr := st.repo.BlobObject(blobOID)
-	if bErr == nil {
-		reader, rErr := blobObj.Reader()
-		if rErr == nil {
-			content, readErr := io.ReadAll(reader)
-			reader.Close()
-			if readErr == nil && utf8.Valid(content) && len(content) > 0 {
-				blobText = string(content)
-				if err := st.codeBatch.Index("blob_"+strconv.FormatInt(blobDBID, 10), BleveCodeDoc{Content: blobText}); err != nil {
-					return 0, "", false, fmt.Errorf("index blob: %w", err)
-				}
-				st.codeBatchN++
-				indexed = true
-				if err := st.flushCodeBatch(false); err != nil {
-					return 0, "", false, err
-				}
-			}
-		}
+	if st.skipsBlobContent() {
+		return blobDBID, "", false, nil
+	}
+	if st.partialClone {
+		// read now, at the tip; a later path to the same blob must not re-read it
+		st.markTipBlobSeen(contentHash)
 	}
 
+	blobText, indexed, err := st.indexBlobContent(blobDBID, blobOID)
+	if err != nil {
+		return 0, "", false, err
+	}
 	return blobDBID, blobText, indexed, nil
+}
+
+// indexBlobContent reads a blob and queues its text for the code Bleve index.
+// An unreadable, binary or empty blob is not an error: it just has no content
+// document, as for any blob the index could not read.
+func (st *indexState) indexBlobContent(blobDBID int64, blobOID plumbing.Hash) (string, bool, error) {
+	blobObj, err := st.repo.BlobObject(blobOID)
+	if err != nil {
+		return "", false, nil
+	}
+	reader, err := blobObj.Reader()
+	if err != nil {
+		return "", false, nil
+	}
+	content, readErr := io.ReadAll(reader)
+	reader.Close()
+	if readErr != nil || !utf8.Valid(content) || len(content) == 0 {
+		return "", false, nil
+	}
+
+	blobText := string(content)
+	if err := st.codeBatch.Index("blob_"+strconv.FormatInt(blobDBID, 10), BleveCodeDoc{Content: blobText}); err != nil {
+		return "", false, fmt.Errorf("index blob: %w", err)
+	}
+	st.codeBatchN++
+	if err := st.flushCodeBatch(false); err != nil {
+		return "", false, err
+	}
+	return blobText, true, nil
 }
 
 // generateDiffText creates simple diff text for full-text search indexing.

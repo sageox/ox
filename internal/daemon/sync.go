@@ -175,6 +175,13 @@ type SyncScheduler struct {
 	cloneWg       sync.WaitGroup // tracks in-flight background clone goroutines
 	checkouts     atomic.Int32   // Checkout calls running, background or over IPC
 
+	// cloneClock is the clock for clone retry windows (nil = time.Now); tests inject one.
+	cloneClock func() time.Time
+	// cloneBackoffLogged remembers, per team context, the retry time whose
+	// "clone backoff" line was already written, so a context waiting out its
+	// backoff logs once per failure instead of on every sync cycle.
+	cloneBackoffLogged sync.Map // workspace ID -> time.Time
+
 	// cloneMu guards cloneWg.Add against a concurrent Wait during shutdown.
 	// Without this, a pullChanges goroutine still running after ctx cancel
 	// can race Add(1) with Wait() and trip WaitGroup's reuse panic.
@@ -2653,6 +2660,11 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 				err = gitserver.MoveCloneIntoPlace(teamTemp, payload.RepoPath)
 			}
 			if err != nil {
+				err = s.teamContextCloneError(cloneCtx, cloneBudget, err)
+				if errors.Is(err, errCloneInterrupted) {
+					s.logger.Info("checkout: clone stopped, daemon is shutting down", "type", payload.RepoType)
+					return err
+				}
 				s.logger.Error("checkout: two-phase clone failed", "error", err)
 				// Keyed by pullTeamContext's repoName, the key clearErrors is
 				// called with once this team context syncs.

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -18,6 +19,68 @@ const cloneBackoffMax = 1 * time.Hour
 // clonePermanentBackoffMax caps backoff for permanent errors (auth, permissions).
 // Kept short so that when the user runs 'ox login', the daemon retries quickly.
 const clonePermanentBackoffMax = 5 * time.Minute
+
+// teamContextCloneBackoffMax caps the retry delay for a failing team context.
+// It is a small partial clone, so a failure that outlasts half an hour is not
+// about its size, and an hour of silence after a fixed network hiccup is too long.
+const teamContextCloneBackoffMax = 30 * time.Minute
+
+// cloneBackoffDelay is how long a clone that has failed `failures` times in a
+// row waits before its next attempt: 1m, 2m, 4m, ... up to the cap for the
+// kind of failure.
+func cloneBackoffDelay(repoType string, permanent bool, failures int) time.Duration {
+	maxBackoff := cloneBackoffMax
+	switch {
+	case permanent:
+		maxBackoff = clonePermanentBackoffMax
+	case repoType == "team-context":
+		maxBackoff = teamContextCloneBackoffMax
+	}
+	return exponentialBackoff(failures, time.Minute, maxBackoff)
+}
+
+// cloneNow is the clock for clone retry windows.
+func (s *SyncScheduler) cloneNow() time.Time {
+	if s.cloneClock != nil {
+		return s.cloneClock()
+	}
+	return time.Now()
+}
+
+// cloneRetryWait reports how long a failed clone must still wait before its
+// next attempt (zero once it may run, or if it never failed), how many
+// consecutive failures put it there, and when the wait ends.
+func (s *SyncScheduler) cloneRetryWait(id string) (wait time.Duration, failures int, next time.Time) {
+	failures, next = s.workspaceRegistry.GetCloneRetryInfo(id)
+	if failures == 0 || next.IsZero() {
+		return 0, failures, next
+	}
+	return max(next.Sub(s.cloneNow()), 0), failures, next
+}
+
+// logCloneBackoff says a team context's clone is waiting out its backoff.
+// triggerMissingClones runs every sync cycle, so the line is written once per
+// failure: the next failure moves the retry time and earns a new line.
+func (s *SyncScheduler) logCloneBackoff(ws WorkspaceState, wait time.Duration, failures int, next time.Time) {
+	if logged, ok := s.cloneBackoffLogged.Load(ws.ID); ok && logged.(time.Time).Equal(next) {
+		return
+	}
+	s.cloneBackoffLogged.Store(ws.ID, next)
+	s.logger.Info("team context clone backoff",
+		"team_id", cmp.Or(ws.TeamID, ws.ID), "next_attempt_in", shortDuration(wait), "failures", failures)
+}
+
+// shortDuration renders a wait the way a person says it: "4m", not "4m0s".
+func shortDuration(d time.Duration) string {
+	text := d.Round(time.Second).String()
+	if strings.HasSuffix(text, "m0s") {
+		text = strings.TrimSuffix(text, "0s")
+	}
+	if strings.HasSuffix(text, "h0m") {
+		text = strings.TrimSuffix(text, "0m")
+	}
+	return text
+}
 
 // backgroundCloneContext keeps clones tied to the daemon rather than the
 // request that triggered them. Unstarted schedulers have no lifecycle yet.
@@ -67,7 +130,8 @@ func isClonePermanentError(msg string) bool {
 }
 
 // cloneInBackground clones a repo in the background without blocking the sync loop.
-// Implements exponential backoff on failure: 1min, 2min, 4min, 8min, ..., max 1 hour.
+// Implements exponential backoff on failure: 1min, 2min, 4min, 8min, ..., max 1 hour
+// (30 min for a team context).
 // After successful clone, clears retry state and invalidates the workspace registry cache
 // so the next sync will see the newly cloned repo.
 //
@@ -121,7 +185,10 @@ func (s *SyncScheduler) cloneInBackground(ctx context.Context, cloneURL, repoPat
 		// result.InProgress (below), not as an error. This still catches an
 		// error that wraps a lock timeout or a context error — same "not our
 		// fault, just wait" shape as the semaphore case above, not a real
-		// clone failure worth escalating backoff over.
+		// clone failure worth escalating backoff over. Checkout must never
+		// hand it the clone's own budget kill (ledgerCloneError,
+		// teamContextCloneError): that is a failure, and matching it here
+		// meant it was retried every cycle with no backoff.
 		if gitutil.IsPreCloneLockBusy(err) {
 			s.logger.Info("another clone already in progress for this path, will retry next cycle", "type", repoType, "path", repoPath)
 			return
@@ -133,15 +200,12 @@ func (s *SyncScheduler) cloneInBackground(ctx context.Context, cloneURL, repoPat
 		// classify error to choose backoff strategy
 		permanent := isClonePermanentError(err.Error())
 
-		// exponential backoff: 1min, 2min, 4min, 8min, ..., max 1 hour
-		// permanent errors cap at 5 min — user may fix creds and we should retry soon
-		maxBack := cloneBackoffMax
-		if permanent {
-			maxBack = clonePermanentBackoffMax
-		}
-		backoff := exponentialBackoff(newAttempts, time.Minute, maxBack)
+		// exponential backoff: 1min, 2min, 4min, 8min, ..., max 1 hour (30 min
+		// for a team context); permanent errors cap at 5 min — user may fix
+		// creds and we should retry soon
+		backoff := cloneBackoffDelay(repoType, permanent, newAttempts)
 
-		nextRetry := time.Now().Add(backoff)
+		nextRetry := s.cloneNow().Add(backoff)
 		s.workspaceRegistry.SetCloneRetry(workspaceID, newAttempts, nextRetry)
 
 		hint := "will retry"
@@ -263,12 +327,14 @@ func (s *SyncScheduler) triggerMissingClones(ctx context.Context) {
 	// check team contexts
 	for _, ws := range s.workspaceRegistry.GetTeamContexts() {
 		if !ws.Exists && ws.CloneURL != "" && ws.Path != "" {
-			if s.workspaceRegistry.ShouldRetryClone(ws.ID) {
-				s.logger.Info("triggering immediate team context clone (self-healing)",
-					"team", ws.TeamName, "path", ws.Path)
-				if s.addClone() {
-					go s.cloneInBackground(s.backgroundCloneContext(), ws.CloneURL, ws.Path, "team-context", ws.ID)
-				}
+			if wait, failures, next := s.cloneRetryWait(ws.ID); wait > 0 {
+				s.logCloneBackoff(ws, wait, failures, next)
+				continue
+			}
+			s.logger.Info("triggering immediate team context clone (self-healing)",
+				"team", ws.TeamName, "path", ws.Path)
+			if s.addClone() {
+				go s.cloneInBackground(s.backgroundCloneContext(), ws.CloneURL, ws.Path, "team-context", ws.ID)
 			}
 		}
 	}
