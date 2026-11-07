@@ -21,9 +21,9 @@ A user without the secret isn't recorded; Devin tells them once per session how 
 | `UserPromptSubmit`, `PostToolUse` | Appends the prompt, tool call, or Devin's message to an ox recording (`ox agent prime --agent devin`, generic adapter) |
 | `Stop` | Stops the recording, which uploads it to the repo's Ledger |
 
-- **Token:** Devin doesn't pass secrets to hooks; it includes them with each command's `tool_input.injected_env`. The hook caches the token (mode 0600) and strips `injected_env` and `__DEVIN*` keys before anything is recorded. Events before the first command are buffered.
+- **Token:** Devin doesn't pass secrets to hooks, and for a gated secret the hook payload carries only the reference (`secret:personal:SAGEOX_TOKEN`), never the value. So on the first tool call without a token, the hook asks Devin to run `ox-devin-hook save-token <session-id>` once, with the secret bound and the working repo as `workdir`. That command caches the token (mode 0600, per Devin session) and records the repo as the session's recording repo. A plaintext `tool_input.injected_env` value is also accepted. `injected_env`, `__DEVIN*` keys and the cached token are scrubbed before anything is recorded. Events before the token arrives are buffered.
 - **One SageOx session per turn:** cloud Devin never sends `SessionEnd` and may delete a sleeping VM, so every turn end uploads.
 - **Ledger clone:** a fresh VM clones the Ledger first. If it isn't ready at turn end, the recording stays open and uploads at the next turn end.
-- **Which repo:** the session's repo comes from Devin's project dir or the command's working directory, never from other checkouts on the VM. A repo without `.sageox/` is not recorded.
+- **Which repo:** the session's repo comes from the `save-token` command's working directory, Devin's project dir, or a command's working directory, never from other checkouts on the VM. A repo without `.sageox/` is not recorded.
 - **Opt-outs:** recording only happens where `ox config get session_recording` is `auto` (the default in `ox init`ed repos). `manual` or `disabled`, at any level or via `OX_SESSION_RECORDING`, turns it off.
 - **Fails open:** any error is logged to `~/.ox-devin/hook.log` and never blocks Devin.

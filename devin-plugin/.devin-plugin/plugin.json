@@ -1,5 +1,5 @@
 {
   "name": "sageox-devin",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Records Devin sessions to SageOx with the ox CLI, each under the session creator's own SAGEOX_TOKEN personal secret."
 }
