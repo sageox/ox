@@ -82,9 +82,12 @@ func (r *GeminiRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
 	cmd.Stdin = strings.NewReader(req.Prompt)
 	cmd.Env = env
-	if workDir != "" {
-		cmd.Dir = workDir
+	dir, cleanup, err := workerDir(workDir)
+	if err != nil {
+		return nil, err
 	}
+	defer cleanup()
+	cmd.Dir = dir
 	setProcAttr(cmd)
 
 	stdoutPipe, err := cmd.StdoutPipe()

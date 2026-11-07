@@ -1406,13 +1406,16 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 	// Embed the session content directly in the prompt instead.
 	prompt := sessionsummary.BuildInlineSummaryPrompt(entries)
 
+	// The transcript holds whatever the session read, prompt injection
+	// included, and the summary needs no tools. No WorkDir: the worker runs
+	// in an empty directory, never the Ledger, whose project config a CLI
+	// too old to isolate would load.
+	isolated, ifSupported := summaryWorkerIsolation(h.projectRoot)
 	return RunRequest{
-		Prompt:  prompt,
-		WorkDir: payload.LedgerPath,
-		Model:   sessionsummary.DefaultSummaryModel(),
-		// The transcript holds whatever the session read, prompt injection
-		// included, and the summary needs no tools.
-		IsolateIfSupported: true,
+		Prompt:             prompt,
+		Model:              sessionsummary.DefaultSummaryModel(),
+		Isolated:           isolated,
+		IsolateIfSupported: ifSupported,
 	}, nil
 }
 

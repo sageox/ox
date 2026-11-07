@@ -88,9 +88,12 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
 	cmd.Stdin = strings.NewReader(req.Prompt)
 	cmd.Env = workerEnv("OPENAI_", "CODEX_")
-	if req.WorkDir != "" {
-		cmd.Dir = req.WorkDir
+	dir, cleanup, err := workerDir(req.WorkDir)
+	if err != nil {
+		return nil, err
 	}
+	defer cleanup()
+	cmd.Dir = dir
 	setProcAttr(cmd)
 
 	// Drain both streams even after their limits: stopping a pipe reader can
