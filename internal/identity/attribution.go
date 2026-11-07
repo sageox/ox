@@ -188,9 +188,10 @@ func signedInUser(ep string) (id, email, name string) {
 	if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil {
 		id, email, name = token.UserInfo.UserID, token.UserInfo.Email, token.UserInfo.Name
 		if id == "" {
-			// a login stored before user_id existed names the account only in
-			// its access token's subject; GetUserID recovers it
-			id = auth.GetUserID(ep)
+			// A login stored before user_id existed names the account only in
+			// its access token's subject; LocalUserID recovers it without
+			// treating a team token's AI coworker as a signed-in account.
+			id = auth.LocalUserID(ep)
 		}
 	}
 	// A personal SAGEOX_TOKEN carries no UserInfo; the server names its owner.
@@ -217,9 +218,14 @@ func SignedInAuthor(remoteURL, configDisplayName string) (name, email string) {
 	for _, ep := range signedInEndpoints() {
 		// The git server the API named for this endpoint, when known, so two
 		// servers on one host (local stacks on different ports) never match.
+		// Credential records are keyed by host, so such stacks share one: trust
+		// its server only when this endpoint's own token fetched it.
 		var serverURL string
-		if creds, err := gitserver.LoadCredentialsForEndpoint(ep); err == nil && creds != nil {
-			serverURL = creds.ServerURL
+		if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil {
+			if creds, err := gitserver.LoadCredentialsForEndpoint(ep); err == nil && creds != nil &&
+				creds.BearerTokenHash == gitserver.BearerTokenFingerprint(token.AccessToken) {
+				serverURL = creds.ServerURL
+			}
 		}
 		if !gitserver.RemoteOnGitServer(remoteURL, ep, serverURL) {
 			continue

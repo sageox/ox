@@ -201,3 +201,22 @@ func TestLedgerCommitAuthor_TeamToken(t *testing.T) {
 	t.Setenv("SAGEOX_TOKEN", "") // the same machine, now signed in with ox login
 	assert.Equal(t, "Devon <devon@example.com>", commitAuthor("by-devon.md"))
 }
+
+// Failure prevented: where the git server has its own host, so the coworker
+// stamp's host match misses, a coworker's Ledger commits are authored as an
+// Anonymous person under an account address built from its agt_ id.
+func TestSignedInAuthor_TeamTokenIsNotAPerson(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_GIT_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "git-credentials.json"))
+	serveTeamCoworker(t, ripCoworker)
+	const gitServer = "http://source.example.net"
+	require.NoError(t, gitserver.SaveCredentialsForEndpoint(os.Getenv("SAGEOX_ENDPOINT"), gitserver.GitCredentials{
+		Token: "pat", ServerURL: gitServer, ExpiresAt: time.Now().Add(time.Hour),
+		BearerTokenHash: gitserver.BearerTokenFingerprint(os.Getenv("SAGEOX_TOKEN")),
+	}))
+
+	name, email := identity.SignedInAuthor(gitServer+"/team/ledger.git", "")
+
+	assert.Empty(t, name+email, "a team token's AI coworker is not a signed-in person")
+}

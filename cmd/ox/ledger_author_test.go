@@ -30,6 +30,7 @@ func TestLedgerCommitAuthor_SignedInAccountThenGitIdentity(t *testing.T) {
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("OX_GIT_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "git-credentials.json"))
 	require.NoError(t, os.MkdirAll(filepath.Join(xdg, "sageox"), 0o755))
 	ledgerServer := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(ledgerServer.Close)
@@ -70,12 +71,18 @@ func TestLedgerCommitAuthor_SignedInAccountThenGitIdentity(t *testing.T) {
 	}
 	signIn := func(serverURL, userID, name string, expiresAt time.Time) {
 		require.NoError(t, auth.SaveTokenForEndpoint(serverURL, &auth.StoredToken{
-			AccessToken: "test-access-token",
+			AccessToken: "token-" + userID,
 			ExpiresAt:   expiresAt,
 			UserInfo:    auth.UserInfo{UserID: userID, Email: userID + "@example.com", Name: name},
 		}))
 	}
 
+	// Git credentials are stored per host, so both local servers read this
+	// one record, which names the Ledger's git server.
+	require.NoError(t, gitserver.SaveCredentialsForEndpoint(ledgerServer.URL, gitserver.GitCredentials{
+		Token: "pat", ServerURL: ledgerServer.URL, ExpiresAt: time.Now().Add(time.Hour),
+		BearerTokenHash: gitserver.BearerTokenFingerprint("token-usr_devon"),
+	}))
 	machineGit(personB)
 	signIn(otherServer.URL, "usr_quinn", "Quinn Other", time.Now().Add(time.Hour))
 	author, err := commitAuthor("other-server.md")
