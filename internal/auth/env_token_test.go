@@ -618,6 +618,22 @@ func TestGetUserIDAndUsername_TeamCoworker(t *testing.T) {
 	assert.Empty(t, GetUsername(ep))
 }
 
+// TestReauthenticationRemedy_TeamTokenNamesTheSecretStore — Failure prevented:
+// a revoked team token in CI tells the operator to run `ox login`, which cannot
+// replace a token supplied through SAGEOX_TOKEN.
+func TestReauthenticationRemedy_TeamTokenNamesTheSecretStore(t *testing.T) {
+	const ep = "https://api.sageox.ai"
+	t.Setenv(endpoint.EnvVar, ep)
+
+	t.Setenv(EnvVarToken, validSageOxTestToken(TeamTokenPrefix, "svc"))
+	remedy := ReauthenticationRemedy(ep)
+	assert.Contains(t, remedy, "SAGEOX_TOKEN")
+	assert.NotContains(t, remedy, "ox login")
+
+	t.Setenv(EnvVarToken, "")
+	assert.Contains(t, ReauthenticationRemedy(ep), "ox login", "a stored login recovers with ox login")
+}
+
 // Failure prevented: a path that must stay instant (the hooks' idempotent
 // re-prime) waits up to five seconds on an unreachable server to learn a team
 // token's coworker; or it forgets a coworker it already learned because the
