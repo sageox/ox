@@ -207,7 +207,7 @@ func TestDevinHookRedactsTokenInBufferedEvents(t *testing.T) {
 		t.Fatalf("no recording: %v", err)
 	}
 	if strings.Contains(string(rec), hookTestToken) {
-		t.Fatalf("token in recording:\n%s", rec)
+		t.Fatalf("token in recording:\n%s", strings.ReplaceAll(string(rec), hookTestToken, "<TOKEN>"))
 	}
 	if n := strings.Count(string(rec), "[REDACTED]"); n != 2 {
 		t.Fatalf("want 2 redacted entries (buffered + live), got %d:\n%s", n, rec)
