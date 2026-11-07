@@ -1361,7 +1361,7 @@ func (d *Daemon) initComponents() time.Duration {
 		// by OX_SUMMARY_JUDGE=on — configuring the completer unconditionally
 		// here keeps the daemon ready for per-run judging without paying
 		// any LLM cost until operators flip the env switch.
-		sfh.SetJudgeCompleter(agentwork.NewRunnerCompleter(runner))
+		sfh.SetJudgeCompleter(agentwork.NewRunnerCompleter(runner, d.config.ProjectRoot))
 		// Supply the daemon's root context so judge work cancels promptly
 		// on daemon shutdown instead of blocking up to its 3-minute
 		// deadline and triggering ErrShutdownTimeout.

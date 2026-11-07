@@ -79,12 +79,20 @@ func (r *GeminiRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	// `-p` argv value so the (potentially sensitive) session transcript does not
 	// appear in ps / /proc/<pid>/cmdline / sysctl kern.procargs2 (security
 	// finding #10).
+	if workDir == "" {
+		// ox's own empty directory holds no settings to trust, and headless
+		// Gemini refuses an untrusted one.
+		env = append(env, "GEMINI_CLI_TRUST_WORKSPACE=true")
+	}
+	dir, cleanup, err := workerDir(workDir)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
 	cmd.Stdin = strings.NewReader(req.Prompt)
 	cmd.Env = env
-	if workDir != "" {
-		cmd.Dir = workDir
-	}
+	cmd.Dir = dir
 	setProcAttr(cmd)
 
 	stdoutPipe, err := cmd.StdoutPipe()
