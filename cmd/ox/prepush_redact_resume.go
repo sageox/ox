@@ -122,8 +122,8 @@ func resumePendingRedactionAmend(ctx context.Context, ledgerPath string) (bool, 
 
 // applyPendingRedactionAmend stages the recorded blobs and amends HEAD with
 // only those paths. An index entry holding anything other than the holding
-// commit's blob or the recorded blob belongs to another writer and is never
-// replaced. The record is kept until the amendment succeeds.
+// commit's blob or the recorded blob, or a different mode, belongs to another
+// writer and is never replaced. The record is kept until the amendment succeeds.
 func applyPendingRedactionAmend(ctx context.Context, ledgerPath string, rec *pendingRedactionAmend) error {
 	var info bytes.Buffer
 	pathspecs := make([]string, 0, len(rec.Paths))
@@ -131,11 +131,11 @@ func applyPendingRedactionAmend(ctx context.Context, ledgerPath string, rec *pen
 		if _, err := redactGit(ctx, ledgerPath, nil, "cat-file", "-e", p.Blob+"^{blob}"); err != nil {
 			return fmt.Errorf("redacted content for %s is missing from the object store: %w", p.Path, err)
 		}
-		_, staged, err := indexEntry(ctx, ledgerPath, p.Path)
+		stagedMode, staged, err := indexEntry(ctx, ledgerPath, p.Path)
 		if err != nil {
 			return err
 		}
-		if staged != p.Blob && staged != p.HoldingBlob {
+		if (staged != p.Blob && staged != p.HoldingBlob) || (stagedMode != "" && stagedMode != p.Mode) {
 			return fmt.Errorf("refusing to replace staged changes to %s; commit or unstage them, then retry", p.Path)
 		}
 		fmt.Fprintf(&info, "%s %s\t%s\x00", p.Mode, p.Blob, p.Path)

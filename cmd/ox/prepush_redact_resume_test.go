@@ -113,6 +113,18 @@ func TestPrePushGate_ResumesFailedRedactionAmend(t *testing.T) {
 		require.Error(t, gitutil.PushWithRetry(context.Background(), work, gitutil.PushOpts{}))
 		assertRemoteObjectsCleanOf(t, remote, canary)
 	})
+
+	t.Run("another writer's staged mode is kept", func(t *testing.T) {
+		work, remote, holding := setup(t)
+		mustGit(t, work, "update-index", "--chmod=+x", "--", rel)
+
+		err := runGate(t, work)
+		require.ErrorContains(t, err, "refusing to replace staged changes")
+		assert.Equal(t, holding, mustGitCapture(t, work, "rev-parse", "HEAD"))
+		assert.Contains(t, mustGitCapture(t, work, "ls-files", "--stage", "--", rel), "100755")
+		require.Error(t, gitutil.PushWithRetry(context.Background(), work, gitutil.PushOpts{}))
+		assertRemoteObjectsCleanOf(t, remote, canary)
+	})
 }
 
 func runGate(t *testing.T, work string) error {
