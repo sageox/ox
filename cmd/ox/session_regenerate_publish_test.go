@@ -29,6 +29,8 @@ type regenerateLedgerFixture struct {
 	store *fakeLFSStore
 }
 
+// newRegenerateLedgerFixture builds the fixture with isolated XDG dirs and
+// stored credentials for the fake store.
 func newRegenerateLedgerFixture(t *testing.T) *regenerateLedgerFixture {
 	t.Helper()
 	f := &regenerateLedgerFixture{draftLedgerFixture: newDraftLedgerFixture(t), store: newFakeLFSStore(t)}
@@ -109,6 +111,7 @@ func (f *regenerateLedgerFixture) remoteSessionMD(t *testing.T, name string) str
 	return string(content)
 }
 
+// staged lists the Ledger paths staged in the index.
 func (f *regenerateLedgerFixture) staged(t *testing.T) []string {
 	t.Helper()
 	out := runGit(t, f.ledgerPath, "diff", "--cached", "--name-only")
@@ -118,6 +121,7 @@ func (f *regenerateLedgerFixture) staged(t *testing.T) []string {
 	return strings.Split(out, "\n")
 }
 
+// newStore opens the project's managed session store.
 func (f *regenerateLedgerFixture) newStore(t *testing.T) *session.Store {
 	t.Helper()
 	store, _, err := newSessionStore()
