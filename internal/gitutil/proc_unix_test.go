@@ -3,6 +3,7 @@
 package gitutil
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"os"
@@ -94,4 +95,36 @@ func TestGitCommandsKillWholeProcessGroupOnTimeout(t *testing.T) {
 			require.False(t, pidExists(childPid), "grandchild %d survived the context timeout", childPid)
 		})
 	}
+}
+
+// A canceled git must not leave its lock files behind: a SIGKILLed git cannot
+// remove them, and the next fetch then fails with "cannot lock ref ... File
+// exists" (#1569). update-ref --stdin holds refs/heads/main.lock between
+// "prepare" and "commit", so canceling there is deterministic.
+func TestCanceledGitRemovesItsRefLock(t *testing.T) {
+	repo, head := initRepoWithCommits(t, 1)
+	lock := filepath.Join(repo, ".git", "refs", "heads", "main.lock")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := NewNetworkCmd(ctx, "-C", repo, "update-ref", "--stdin")
+	stdin, err := cmd.StdinPipe()
+	require.NoError(t, err)
+	stdout, err := cmd.StdoutPipe()
+	require.NoError(t, err)
+	require.NoError(t, cmd.Start())
+	_, err = stdin.Write([]byte("start\nupdate refs/heads/main " + head + "\nprepare\n"))
+	require.NoError(t, err)
+
+	reply := bufio.NewReader(stdout)
+	for _, want := range []string{"start: ok", "prepare: ok"} {
+		line, err := reply.ReadString('\n')
+		require.NoError(t, err)
+		require.Equal(t, want, strings.TrimSpace(line))
+	}
+	require.FileExists(t, lock, "fixture must hold the ref lock when canceled")
+
+	cancel()
+	require.Error(t, cmd.Wait())
+	require.NoFileExists(t, lock, "canceled git left a stale ref lock")
 }
