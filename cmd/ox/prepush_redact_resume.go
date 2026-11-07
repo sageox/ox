@@ -57,7 +57,11 @@ type pendingRedactionPath struct {
 // The caller holds the repo lock and checks Git state before staging. The
 // repair is recorded first so a failed amendment can be completed on retry.
 func stageAndAmendRedactedFiles(ctx context.Context, ledgerPath string, repairedPaths []string) error {
-	if _, err := resumePendingRedactionAmend(ctx, ledgerPath); err != nil {
+	recordPath, err := pendingRedactionAmendPath(ctx, ledgerPath)
+	if err != nil {
+		return err
+	}
+	if _, err := resumePendingRedactionAmendAt(ctx, ledgerPath, recordPath); err != nil {
 		return err
 	}
 	tip, err := redactGit(ctx, ledgerPath, nil, "rev-parse", "--verify", "HEAD^{commit}")
@@ -84,10 +88,10 @@ func stageAndAmendRedactedFiles(ctx context.Context, ledgerPath string, repaired
 		}
 		rec.Paths = append(rec.Paths, pendingRedactionPath{Path: rel, Mode: mode, Blob: blob, HoldingMode: holdingMode, HoldingBlob: holding})
 	}
-	if err := writePendingRedactionAmend(ctx, ledgerPath, &rec); err != nil {
+	if err := writePendingRedactionAmend(recordPath, &rec); err != nil {
 		return fmt.Errorf("record pending redaction: %w", err)
 	}
-	return applyPendingRedactionAmend(ctx, ledgerPath, &rec)
+	return applyPendingRedactionAmend(ctx, ledgerPath, recordPath, &rec)
 }
 
 // resumePendingRedactionAmend completes a recorded repair whose amendment
@@ -97,7 +101,15 @@ func stageAndAmendRedactedFiles(ctx context.Context, ledgerPath string, repaired
 // outgoing-object validator still checks whatever replaced it.
 // The caller holds the repo lock.
 func resumePendingRedactionAmend(ctx context.Context, ledgerPath string) (bool, error) {
-	rec, err := readPendingRedactionAmend(ctx, ledgerPath)
+	recordPath, err := pendingRedactionAmendPath(ctx, ledgerPath)
+	if err != nil {
+		return false, err
+	}
+	return resumePendingRedactionAmendAt(ctx, ledgerPath, recordPath)
+}
+
+func resumePendingRedactionAmendAt(ctx context.Context, ledgerPath, recordPath string) (bool, error) {
+	rec, err := readPendingRedactionAmend(recordPath)
 	if err != nil || rec == nil {
 		return false, err
 	}
@@ -120,9 +132,9 @@ func resumePendingRedactionAmend(ctx context.Context, ledgerPath string) (bool, 
 		}
 		slog.Info("pre-push redaction: dropping obsolete pending amendment",
 			"holding_tip", rec.HoldingTip, "head", head)
-		return false, removePendingRedactionAmend(ctx, ledgerPath)
+		return false, removePendingRedactionAmend(recordPath)
 	}
-	if err := applyPendingRedactionAmend(ctx, ledgerPath, rec); err != nil {
+	if err := applyPendingRedactionAmend(ctx, ledgerPath, recordPath, rec); err != nil {
 		return false, fmt.Errorf("complete pending redaction: %w", err)
 	}
 	slog.Info("pre-push redaction: completed pending amendment",
@@ -133,7 +145,7 @@ func resumePendingRedactionAmend(ctx context.Context, ledgerPath string) (bool, 
 // applyPendingRedactionAmend stages the recorded blobs and amends HEAD with
 // only those paths. An index entry other than the holding commit's entry or
 // the recorded blob and mode belongs to another writer and is never replaced. The record is kept until the amendment succeeds.
-func applyPendingRedactionAmend(ctx context.Context, ledgerPath string, rec *pendingRedactionAmend) error {
+func applyPendingRedactionAmend(ctx context.Context, ledgerPath, recordPath string, rec *pendingRedactionAmend) error {
 	var info bytes.Buffer
 	pathspecs := make([]string, 0, len(rec.Paths))
 	for _, p := range rec.Paths {
@@ -162,14 +174,10 @@ func applyPendingRedactionAmend(ctx context.Context, ledgerPath string, rec *pen
 	if _, err := gitutil.AmendLedgerSnapshot(ctx, ledgerPath, pathspecs...); err != nil {
 		return err
 	}
-	return removePendingRedactionAmend(ctx, ledgerPath)
+	return removePendingRedactionAmend(recordPath)
 }
 
-func readPendingRedactionAmend(ctx context.Context, ledgerPath string) (*pendingRedactionAmend, error) {
-	path, err := pendingRedactionAmendPath(ctx, ledgerPath)
-	if err != nil {
-		return nil, err
-	}
+func readPendingRedactionAmend(path string) (*pendingRedactionAmend, error) {
 	buf, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -182,34 +190,26 @@ func readPendingRedactionAmend(ctx context.Context, ledgerPath string) (*pending
 		// Unusable record: nothing can be replayed from it, and the
 		// outgoing-object validator still refuses any unredacted blob.
 		slog.Warn("pre-push redaction: discarding unreadable pending amendment", "path", path, "error", err)
-		return nil, removePendingRedactionAmend(ctx, ledgerPath)
+		return nil, removePendingRedactionAmend(path)
 	}
 	for _, p := range rec.Paths {
 		if p.Path == "" || p.Blob == "" || p.Mode == "" || strings.ContainsAny(p.Path+p.Mode+p.Blob, "\x00\t\n") {
 			slog.Warn("pre-push redaction: discarding malformed pending amendment", "path", path)
-			return nil, removePendingRedactionAmend(ctx, ledgerPath)
+			return nil, removePendingRedactionAmend(path)
 		}
 	}
 	return &rec, nil
 }
 
-func writePendingRedactionAmend(ctx context.Context, ledgerPath string, rec *pendingRedactionAmend) error {
-	abs, err := pendingRedactionAmendPath(ctx, ledgerPath)
-	if err != nil {
-		return err
-	}
+func writePendingRedactionAmend(path string, rec *pendingRedactionAmend) error {
 	buf, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(abs, buf, 0o600)
+	return writeFileAtomic(path, buf, 0o600)
 }
 
-func removePendingRedactionAmend(ctx context.Context, ledgerPath string) error {
-	path, err := pendingRedactionAmendPath(ctx, ledgerPath)
-	if err != nil {
-		return err
-	}
+func removePendingRedactionAmend(path string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("clear pending redaction: %w", err)
 	}
@@ -305,10 +305,7 @@ func redactGit(ctx context.Context, ledgerPath string, stdin []byte, args ...str
 }
 
 func shortOID(oid string) string {
-	if len(oid) > 12 {
-		return oid[:12]
-	}
-	return oid
+	return oid[:min(len(oid), 12)]
 }
 
 func slicesSortedUnique(in []string) []string {

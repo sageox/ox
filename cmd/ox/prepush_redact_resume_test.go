@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -158,4 +161,179 @@ func pendingRecordPath(t *testing.T, work string) string {
 	require.NoError(t, err)
 	require.NotContains(t, p, filepath.Join(work, ".sageox"), "the record must not live in Ledger content")
 	return p
+}
+
+// Failure prevented: a recovery record that cannot be replayed safely must
+// never amend HEAD. An unusable or obsolete record is dropped so it cannot hold
+// publication forever; a record whose repair bytes are gone keeps publication
+// held, since the outgoing-object validator alone cannot repair HEAD.
+func TestResumePendingRedactionAmend_RecordsThatCannotReplay(t *testing.T) {
+	const rel = "sessions/s/raw.jsonl"
+	valid := func(tip, blob string) []byte {
+		buf, err := json.Marshal(pendingRedactionAmend{HoldingTip: tip, Paths: []pendingRedactionPath{{Path: rel, Mode: "100644", Blob: blob}}})
+		require.NoError(t, err)
+		return buf
+	}
+	missingOID := "0123456789abcdef0123456789abcdef01234567"
+	tests := []struct {
+		name    string
+		record  func(work, head string) []byte
+		prep    func(t *testing.T, work string)
+		wantErr string
+		kept    bool
+	}{
+		{name: "unreadable JSON is dropped", record: func(_, _ string) []byte { return []byte("{") }},
+		{name: "record without paths is dropped", record: func(_, head string) []byte { return []byte(`{"holding_tip":"` + head + `"}`) }},
+		{name: "path that cannot be staged literally is dropped", record: func(_, head string) []byte {
+			buf, err := json.Marshal(pendingRedactionAmend{HoldingTip: head, Paths: []pendingRedactionPath{{Path: "a\tb", Mode: "100644", Blob: missingOID}}})
+			require.NoError(t, err)
+			return buf
+		}},
+		{name: "holding commit absent from the repository is dropped", record: func(work, _ string) []byte {
+			return valid(missingOID, mustGitCapture(t, work, "rev-parse", "HEAD:"+rel))
+		}},
+		{name: "holding commit outside HEAD's history is dropped", record: func(work, _ string) []byte {
+			side := mustGitCapture(t, work, "commit-tree", "-p", "HEAD~1", "-m", "side", "HEAD^{tree}")
+			return valid(side, mustGitCapture(t, work, "rev-parse", "HEAD:"+rel))
+		}},
+		{name: "missing repair bytes keep publication held", record: func(_, head string) []byte {
+			return valid(head, missingOID)
+		}, wantErr: "missing from the object store", kept: true},
+		{name: "unresolved conflicts keep publication held", record: func(work, head string) []byte {
+			return valid(head, mustGitCapture(t, work, "rev-parse", "HEAD:"+rel))
+		}, prep: func(t *testing.T, work string) { conflictIndexEntry(t, work, rel) }, wantErr: "unresolved conflicts", kept: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			work := makeLedgerWithCommit(t, map[string]string{rel: "{}\n"})
+			head := mustGitCapture(t, work, "rev-parse", "HEAD")
+			path := pendingRecordPath(t, work)
+			require.NoError(t, os.WriteFile(path, tt.record(work, head), 0o600))
+			if tt.prep != nil {
+				tt.prep(t, work)
+			}
+
+			resumed, err := resumePendingRedactionAmend(context.Background(), work)
+			assert.False(t, resumed)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, head, mustGitCapture(t, work, "rev-parse", "HEAD"), "HEAD is never amended")
+			if tt.kept {
+				assert.FileExists(t, path)
+			} else {
+				assert.NoFileExists(t, path)
+			}
+		})
+	}
+
+	t.Run("outside a Git repository fails closed", func(t *testing.T) {
+		_, err := resumePendingRedactionAmend(context.Background(), t.TempDir())
+		require.ErrorContains(t, err, "resolve pending redaction path")
+	})
+
+	t.Run("unborn HEAD keeps publication held", func(t *testing.T) {
+		work := t.TempDir()
+		mustGit(t, work, "init", "--initial-branch=main")
+		path := pendingRecordPath(t, work)
+		require.NoError(t, os.WriteFile(path, valid(missingOID, missingOID), 0o600))
+		_, err := resumePendingRedactionAmend(context.Background(), work)
+		require.ErrorContains(t, err, "resolve Ledger HEAD")
+		assert.FileExists(t, path)
+	})
+}
+
+// Failure prevented: a repair that cannot be recorded exactly must fail before
+// anything is written, and a repair file new to the holding commit (such as a
+// freshly written meta.json) must still be amended in.
+func TestStageAndAmendRedactedFiles_RecordsExactRepair(t *testing.T) {
+	const rel = "sessions/s/raw.jsonl"
+	t.Run("file new to the holding commit is amended in", func(t *testing.T) {
+		work := makeLedgerWithCommit(t, map[string]string{rel: "{}\n"})
+		holding := mustGitCapture(t, work, "rev-parse", "HEAD")
+		added := "sessions/s/meta.json"
+		require.NoError(t, os.WriteFile(filepath.Join(work, added), []byte("{}\n"), 0o644))
+
+		require.NoError(t, stageAndAmendRedactedFiles(context.Background(), work, []string{added, added}))
+		assert.Equal(t, mustGitCapture(t, work, "rev-parse", holding+"~1"), mustGitCapture(t, work, "rev-parse", "HEAD~1"), "HEAD is the amended holding commit")
+		assert.Equal(t, mustGitCapture(t, work, "hash-object", filepath.Join(work, added)), mustGitCapture(t, work, "rev-parse", "HEAD:"+added))
+		assert.NoFileExists(t, pendingRecordPath(t, work))
+	})
+
+	tests := []struct {
+		name    string
+		prep    func(t *testing.T, work string)
+		paths   []string
+		wantErr string
+	}{
+		{name: "vanished repair file", paths: []string{"sessions/s/gone.jsonl"}, wantErr: "record redacted"},
+		{name: "conflicted repair path", paths: []string{rel}, prep: func(t *testing.T, work string) { conflictIndexEntry(t, work, rel) }, wantErr: "unexpected index entry"},
+		{name: "unreplayable earlier record", paths: []string{rel}, prep: func(t *testing.T, work string) {
+			head := mustGitCapture(t, work, "rev-parse", "HEAD")
+			buf, err := json.Marshal(pendingRedactionAmend{HoldingTip: head, Paths: []pendingRedactionPath{{Path: rel, Mode: "100644", Blob: "0123456789abcdef0123456789abcdef01234567"}}})
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(pendingRecordPath(t, work), buf, 0o600))
+		}, wantErr: "missing from the object store"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			work := makeLedgerWithCommit(t, map[string]string{rel: "{}\n"})
+			head := mustGitCapture(t, work, "rev-parse", "HEAD")
+			if tt.prep != nil {
+				tt.prep(t, work)
+			}
+			_, before := os.Stat(pendingRecordPath(t, work))
+
+			require.ErrorContains(t, stageAndAmendRedactedFiles(context.Background(), work, tt.paths), tt.wantErr)
+			assert.Equal(t, head, mustGitCapture(t, work, "rev-parse", "HEAD"), "HEAD is never amended")
+			_, after := os.Stat(pendingRecordPath(t, work))
+			assert.Equal(t, before == nil, after == nil, "no new record is written")
+		})
+	}
+
+	t.Run("outside a Git repository fails closed", func(t *testing.T) {
+		require.ErrorContains(t, stageAndAmendRedactedFiles(context.Background(), t.TempDir(), []string{rel}), "resolve pending redaction path")
+	})
+
+	t.Run("unborn HEAD fails closed", func(t *testing.T) {
+		work := t.TempDir()
+		mustGit(t, work, "init", "--initial-branch=main")
+		require.ErrorContains(t, stageAndAmendRedactedFiles(context.Background(), work, []string{rel}), "resolve holding commit")
+	})
+}
+
+// conflictIndexEntry replaces rel's index entry with unmerged stages.
+func conflictIndexEntry(t *testing.T, work, rel string) {
+	t.Helper()
+	blob := mustGitCapture(t, work, "rev-parse", "HEAD:"+rel)
+	mustGit(t, work, "rm", "--cached", "-q", "--", rel)
+	cmd := exec.Command("git", "-C", work, "update-index", "--index-info")
+	cmd.Stdin = strings.NewReader("100644 " + blob + " 1\t" + rel + "\n100644 " + blob + " 2\t" + rel + "\n100644 " + blob + " 3\t" + rel + "\n")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+}
+
+func TestPendingRedactionOwnsIndexEntry(t *testing.T) {
+	tracked := pendingRedactionPath{Mode: "100644", Blob: "repair", HoldingMode: "100644", HoldingBlob: "holding"}
+	added := pendingRedactionPath{Mode: "100644", Blob: "repair"}
+	tests := []struct {
+		name       string
+		p          pendingRedactionPath
+		mode, blob string
+		want       bool
+	}{
+		{"holding entry", tracked, "100644", "holding", true},
+		{"recorded repair already staged", tracked, "100644", "repair", true},
+		{"another writer's bytes", tracked, "100644", "other", false},
+		{"another writer's mode", tracked, "100755", "holding", false},
+		{"another writer unstaged the path", tracked, "", "", false},
+		{"path new in the holding commit, absent from the index", added, "", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, pendingRedactionOwnsIndexEntry(tt.p, tt.mode, tt.blob))
+		})
+	}
 }
