@@ -50,7 +50,7 @@ func TestSessionLedgerWriters_RefuseToStageIntoWedgedRebase(t *testing.T) {
 			return commitAndPushLedger(ledgerPath, sessionName)
 		}},
 		{"batch re-redaction", func(t *testing.T, ledgerPath, sessionName, _ string) error {
-			return commitAndPushLedgerBatch(ledgerPath, []string{sessionName})
+			return commitAndPushLedgerBatch(ledgerPath, "session: re-redact 1 sessions", []string{sessionName})
 		}},
 		{"session remove", func(t *testing.T, ledgerPath, sessionName, _ string) error {
 			_, err := batchDeleteSessionsFromLedger(ledgerPath, []string{sessionName})
@@ -266,7 +266,9 @@ func TestLedgerWriters_QueueBehindRepoLock(t *testing.T) {
 		}},
 		{"batch re-redaction", func(t *testing.T, clonePath, name string) func() error {
 			writeSessionFiles(t, clonePath, name)
-			return func() error { return commitAndPushLedgerBatch(clonePath, []string{name}) }
+			return func() error {
+				return commitAndPushLedgerBatch(clonePath, "session: re-redact 1 sessions", []string{name})
+			}
 		}},
 		{"push-summary", func(t *testing.T, clonePath, name string) func() error {
 			sessionDir := writeSessionFiles(t, clonePath, name)
@@ -421,7 +423,7 @@ func TestLedgerMaintenance_LeavesPlansStagedAndIncludesOtherSessions(t *testing.
 			runGit(t, clonePath, "add", "sessions/"+otherName)
 			switch tt.writer {
 			case "batch re-redaction":
-				require.NoError(t, commitAndPushLedgerBatch(clonePath, []string{batchName}))
+				require.NoError(t, commitAndPushLedgerBatch(clonePath, "session: re-redact 1 sessions", []string{batchName}))
 			case "session remove":
 				removed, err := batchDeleteSessionsFromLedger(clonePath, []string{deletedName})
 				require.NoError(t, err)
@@ -495,7 +497,7 @@ func TestLedgerMaintenance_PreservesIndexAndWorksAfterRecovery(t *testing.T) {
 			write := func() error {
 				switch writer {
 				case "batch re-redaction":
-					return commitAndPushLedgerBatch(clonePath, []string{name})
+					return commitAndPushLedgerBatch(clonePath, "session: re-redact 1 sessions", []string{name})
 				case "session remove":
 					_, err := batchDeleteSessionsFromLedger(clonePath, []string{name})
 					return err

@@ -67,7 +67,7 @@ func TestNativeRecovery_AmpKeepsThePromptThatStartedTheRecording(t *testing.T) {
 	state := session.RecordingState{
 		AgentID: "OxAmp", AdapterName: "amp", WatchMode: "hook", WorkspacePath: t.TempDir(),
 		AgentSessionID: "https://ampcode.com/threads/T-1",
-		SessionFile: sidecar, StartOffset: int64(len(earlier)), StartOffsetKnown: true, SourceOffset: int64(len(earlier)),
+		SessionFile:    sidecar, StartOffset: int64(len(earlier)), StartOffsetKnown: true, SourceOffset: int64(len(earlier)),
 		SessionPath: sessionDir, ParentPID: 99999999, StartedAt: startedAt,
 	}
 	writeRecordingState(t, filepath.Join(sessionDir, recordingMarker), state)
