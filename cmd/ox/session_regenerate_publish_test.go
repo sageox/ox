@@ -272,31 +272,69 @@ func TestPrepareRegeneratedArtifacts_SkipsSessionsWithNothingToPublish(t *testin
 	assert.Empty(t, runGit(t, f.ledgerPath, "status", "--porcelain", "--", filepath.Join("sessions", published)))
 }
 
-// A pointer that cannot be written fails and leaves meta.json naming the old refs.
+// A pointer that cannot be written fails and leaves meta.json naming the old
+// refs and the session's files as they were.
 func TestPrepareRegeneratedArtifacts_FailedPointerWriteRevertsRefs(t *testing.T) {
-	f := newRegenerateLedgerFixture(t)
-	name := recentSessionName("OxRgnJ")
-	f.publishSession(t, name, "Break the pointer")
+	tests := []struct {
+		name, wantErr string
+		block         func(t *testing.T, sessionDir string)
+		wantSummary   string
+	}{
+		{"uncommitted content blocks the pointer", "write LFS pointer files", func(t *testing.T, sessionDir string) {
+			require.NoError(t, os.WriteFile(filepath.Join(sessionDir, ledgerFileSummaryMD), []byte("# local edit\n"), 0o644))
+		}, "# local edit\n"},
+		{"unreadable artifact", "replace committed artifacts", func(t *testing.T, sessionDir string) {
+			require.NoError(t, os.MkdirAll(filepath.Join(sessionDir, ledgerFileSummaryMD, "x"), 0o755))
+		}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newRegenerateLedgerFixture(t)
+			name := recentSessionName("OxRgnJ")
+			f.publishSession(t, name, "Break the pointer")
+			sessionDir := commitLegacySessionMD(t, f, name)
+			before, err := lfs.ReadSessionMeta(sessionDir)
+			require.NoError(t, err)
+			tt.block(t, sessionDir)
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, ledgerFileSessionMD), []byte("# new session\n"), 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, ledgerFileSummaryMD), []byte("# new summary\n"), 0o600))
+
+			ok, err := prepareRegeneratedArtifacts(f.projectRoot, f.ledgerPath, name, dir)
+
+			require.ErrorContains(t, err, tt.wantErr)
+			assert.False(t, ok)
+			after, err := lfs.ReadSessionMeta(sessionDir)
+			require.NoError(t, err)
+			assert.Equal(t, before.Files, after.Files, "meta.json must name the refs it had before")
+			legacy, err := os.ReadFile(filepath.Join(sessionDir, ledgerFileSessionMD))
+			require.NoError(t, err)
+			assert.Equal(t, legacyPlainSessionMD, string(legacy), "the committed session.md must be put back")
+			if tt.wantSummary != "" {
+				summary, err := os.ReadFile(filepath.Join(sessionDir, ledgerFileSummaryMD))
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantSummary, string(summary))
+			}
+		})
+	}
+}
+
+const legacyPlainSessionMD = "# legacy plain session.md\n"
+
+// commitLegacySessionMD turns the session into a pre-LFS one that tracks plain
+// session.md in git, and pushes it.
+func commitLegacySessionMD(t *testing.T, f *regenerateLedgerFixture, name string) string {
+	t.Helper()
 	sessionDir := filepath.Join(f.ledgerPath, "sessions", name)
-	before, err := lfs.ReadSessionMeta(sessionDir)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, ledgerFileSessionMD), []byte(legacyPlainSessionMD), 0o644))
+	meta, err := lfs.ReadSessionMeta(sessionDir)
 	require.NoError(t, err)
-	// summary.md cannot be replaced: a non-empty directory sits in its place
-	require.NoError(t, os.MkdirAll(filepath.Join(sessionDir, ledgerFileSummaryMD, "x"), 0o755))
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ledgerFileSessionMD), []byte("# new session\n"), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ledgerFileSummaryMD), []byte("# new summary\n"), 0o600))
-
-	ok, err := prepareRegeneratedArtifacts(f.projectRoot, f.ledgerPath, name, dir)
-
-	require.Error(t, err)
-	assert.False(t, ok)
-	after, err := lfs.ReadSessionMeta(sessionDir)
-	require.NoError(t, err)
-	assert.Equal(t, before.Files, after.Files, "meta.json must name the refs it had before")
-	pointer, err := os.ReadFile(filepath.Join(sessionDir, ledgerFileSessionMD))
-	require.NoError(t, err)
-	assert.Equal(t, runGit(t, f.ledgerPath, "show", "HEAD:sessions/"+name+"/"+ledgerFileSessionMD),
-		strings.TrimSpace(string(pointer)), "the session.md pointer must be restored")
+	delete(meta.Files, ledgerFileSessionMD)
+	require.NoError(t, lfs.WriteSessionMetaOnly(sessionDir, meta))
+	runGit(t, f.ledgerPath, "add", "sessions")
+	runGit(t, f.ledgerPath, "commit", "--no-verify", "-q", "-m", "legacy session")
+	runGit(t, f.ledgerPath, "push", "-q", "origin", "HEAD")
+	return sessionDir
 }
 
 // The revert restores only the refs this run set.
@@ -482,4 +520,49 @@ func TestCommitAndPushLedgerBatch_FailedAddStagesNothing(t *testing.T) {
 
 	require.ErrorContains(t, err, "git add")
 	assert.Empty(t, f.staged(t))
+}
+
+// A legacy session that tracks plain session.md in git publishes the
+// regenerated one as a pointer; git keeps the old copy.
+// Failure prevented: the pointer guard refused to replace the committed plain
+// file, so regenerating any pre-LFS session failed.
+func TestRegenerateSession_ReplacesCommittedPlainArtifact(t *testing.T) {
+	f := newRegenerateLedgerFixture(t)
+	name := recentSessionName("OxRgnS")
+	f.publishSession(t, name, "Migrate the legacy session")
+	commitLegacySessionMD(t, f, name)
+	store := f.newStore(t)
+
+	silenceStdout(t, func() { require.NoError(t, regenerateSingleSessionArtifacts(store, f.projectRoot, name)) })
+
+	assert.Contains(t, f.remoteSessionMD(t, name), "Migrate the legacy session")
+	assert.Empty(t, runGit(t, f.ledgerPath, "status", "--porcelain", "--", "sessions"))
+}
+
+// Plain content that differs from HEAD is never removed to make way for a pointer.
+func TestSetAsideCommittedArtifacts_KeepsUncommittedContent(t *testing.T) {
+	f := newRegenerateLedgerFixture(t)
+	name := recentSessionName("OxRgnT")
+	f.publishSession(t, name, "Keep my edit")
+	sessionDir := filepath.Join(f.ledgerPath, "sessions", name)
+	edited := filepath.Join(sessionDir, ledgerFileSessionMD)
+	require.NoError(t, os.WriteFile(edited, []byte("# uncommitted edit\n"), 0o644))
+
+	setAside, err := setAsideCommittedArtifacts(sessionDir, map[string]lfs.FileRef{
+		ledgerFileSessionMD: lfs.NewFileRef([]byte("new")), ledgerFileRaw: lfs.NewFileRef([]byte("new")), "missing.md": {},
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, setAside.files)
+	body, err := os.ReadFile(edited)
+	require.NoError(t, err)
+	assert.Equal(t, "# uncommitted edit\n", string(body))
+}
+
+// A restore that cannot write reports the file it lost.
+func TestCommittedArtifacts_RestoreReportsFailure(t *testing.T) {
+	blocked := filepath.Join(t.TempDir(), "file")
+	require.NoError(t, os.WriteFile(blocked, nil, 0o600))
+	err := committedArtifacts{dir: blocked, files: map[string]committedArtifact{ledgerFileSessionMD: {perm: 0o644}}}.restore()
+	require.ErrorContains(t, err, "restore "+ledgerFileSessionMD)
 }

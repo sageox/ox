@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -413,16 +415,92 @@ func prepareRegeneratedArtifacts(projectRoot, ledgerPath, sessionName, artifactD
 	}); err != nil {
 		return false, fmt.Errorf("update meta.json with LFS refs: %w", err)
 	}
+	setAside, err := setAsideCommittedArtifacts(sessionDir, uploaded)
+	if err != nil {
+		err = fmt.Errorf("replace committed artifacts: %w", err)
+		if revertErr := revertRegeneratedRefs(sessionDir, uploaded, prior); revertErr != nil {
+			err = errors.Join(err, revertErr)
+		}
+		return false, err
+	}
 	// AssertUploaded: uploadSessionLFS uploaded these exact bytes above.
 	// WritePointerFiles restores the files it touched when it fails.
 	if _, err := lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(uploaded)); err != nil {
 		err = fmt.Errorf("write LFS pointer files: %w", err)
+		if restoreErr := setAside.restore(); restoreErr != nil {
+			err = errors.Join(err, restoreErr)
+		}
 		if revertErr := revertRegeneratedRefs(sessionDir, uploaded, prior); revertErr != nil {
 			err = errors.Join(err, revertErr)
 		}
 		return false, err
 	}
 	return true, nil
+}
+
+// committedArtifacts holds the plain artifacts removed from dir so pointers
+// can replace them.
+type committedArtifacts struct {
+	dir   string
+	files map[string]committedArtifact
+}
+
+type committedArtifact struct {
+	data []byte
+	perm os.FileMode
+}
+
+// restore writes the removed artifacts back.
+func (c committedArtifacts) restore() error {
+	var errs []error
+	for name, f := range c.files {
+		if err := fileutil.AtomicWriteBytes(filepath.Join(c.dir, name), f.data, f.perm); err != nil {
+			errs = append(errs, fmt.Errorf("restore %s: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// setAsideCommittedArtifacts removes the plain (non-pointer) artifacts a
+// legacy session tracks in git, so their regenerated pointers can replace
+// them. Only content identical to HEAD is removed: git keeps that copy. Plain
+// content that differs is left for WritePointerFiles to refuse.
+func setAsideCommittedArtifacts(sessionDir string, uploaded map[string]lfs.FileRef) (committedArtifacts, error) {
+	setAside := committedArtifacts{dir: sessionDir, files: map[string]committedArtifact{}}
+	for name := range uploaded {
+		path := filepath.Join(sessionDir, name)
+		info, err := os.Stat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return setAside, errors.Join(err, setAside.restore())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return setAside, errors.Join(err, setAside.restore())
+		}
+		if _, _, perr := lfs.ParsePointer(string(data)); perr == nil || !matchesHEAD(sessionDir, name, data) {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			return setAside, errors.Join(err, setAside.restore())
+		}
+		setAside.files[name] = committedArtifact{data: data, perm: info.Mode().Perm()}
+	}
+	return setAside, nil
+}
+
+// matchesHEAD reports whether data is the blob HEAD records for dir/name.
+func matchesHEAD(dir, name string, data []byte) bool {
+	head, err := exec.Command("git", "-C", dir, "rev-parse", "--verify", "-q", "HEAD:./"+name).Output()
+	if err != nil {
+		return false
+	}
+	hash := exec.Command("git", "-C", dir, "hash-object", "--stdin")
+	hash.Stdin = bytes.NewReader(data)
+	blob, err := hash.Output()
+	return err == nil && bytes.Equal(bytes.TrimSpace(head), bytes.TrimSpace(blob))
 }
 
 // revertRegeneratedRefs puts back the meta.Files entries prepareRegeneratedArtifacts
