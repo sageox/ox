@@ -279,6 +279,17 @@ func prepareSessionUpload(ctx context.Context, ledgerPath, sessionName string) e
 }
 
 func runSessionSecretGate(ctx context.Context, ledgerPath string, scan func() (*PrePushScanResult, error), amendCommit bool) error {
+	if amendCommit {
+		// A failed amendment leaves clean working files, so the scan below
+		// cannot rediscover it. Finish the recorded repair first.
+		resumed, err := resumePendingRedactionAmend(ctx, ledgerPath)
+		if err != nil {
+			return fmt.Errorf("auto-redact session content: %w", err)
+		}
+		if resumed {
+			fmt.Fprintln(os.Stderr, "ox pre-push: completed a pending auto-redaction of the holding commit.")
+		}
+	}
 	result, err := scan()
 	if err != nil {
 		return fmt.Errorf("scan session content for secrets: %w", err)

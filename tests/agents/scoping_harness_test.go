@@ -554,8 +554,8 @@ func removeClaudeTranscript(path string) {
 // agentEnvironment hands a real agent the developer's own environment for auth,
 // minus everything that would connect the run to a live ox session or a parent agent.
 func agentEnvironment() []string {
-	env := make([]string, 0, len(os.Environ()))
-	for _, entry := range os.Environ() {
+	env := make([]string, 0, len(os.Environ())) // safe: real agent needs the developer auth env, filtered below
+	for _, entry := range os.Environ() { // safe: filtered of ox/agent session vars
 		name, _, _ := strings.Cut(entry, "=")
 		if strings.HasPrefix(name, "SAGEOX_") || strings.HasPrefix(name, "OX_") || strings.HasPrefix(name, "FEATURE_") ||
 			name == "AGENT_ENV" || name == "CLAUDE_ENV_FILE" || name == "CLAUDECODE" {
