@@ -192,20 +192,29 @@ jobs:
             # previous_filename of a non-rename would make startswith() fail
             # and abort the step for every bot PR that touches nothing listed.
             def leaf: split("/") | (last // "");
-            # The Security read paths from the steward workspace instructions.
-            # Directory prefixes carry the trailing slash so internal/sessions/
-            # does not match internal/session/. Manifests and lockfiles match
-            # at any depth (npm/ox/package.json); the three cmd/ox files match
-            # by exact name.
+            # The Security read paths from the steward workspace instructions,
+            # plus the release, signing and self-update surface that review of
+            # this PR found missing: .config/goreleaser.yml (release.yml runs
+            # it), the upgrade and install commands, the npm launcher, and the
+            # release signature manifest and embedded public keys. Directory
+            # prefixes carry the trailing slash so internal/sessions/ does not
+            # match internal/session/; cmd/ox/upgrade and cmd/ox/install are
+            # file-name prefixes on purpose (upgrade_daemons.go, tests).
+            # Manifests, lockfiles and goreleaser configs match at any depth;
+            # the three cmd/ox files match by exact name.
             def sensitive: ascii_downcase
               | startswith("scripts/") or startswith(".github/actions/")
-                or startswith(".goreleaser")
+                or startswith("npm/") or startswith("cmd/ox/upgrade")
+                or startswith("cmd/ox/install")
                 or startswith("internal/upgrade/") or startswith("internal/auth/")
                 or startswith("internal/mcp/") or startswith("internal/session/")
-                or startswith("internal/daemon/") or startswith("security/")
+                or startswith("internal/daemon/") or startswith("internal/signature/")
+                or startswith("security/")
+                or . == ".github/release-signatures.json"
                 or . == "cmd/ox/redaction.go" or . == "cmd/ox/prepush_scan.go"
                 or . == "cmd/ox/adapter.go"
-                or (leaf | . == "makefile" or startswith("dockerfile")
+                or (leaf | startswith(".goreleaser") or startswith("goreleaser")
+                  or . == "makefile" or startswith("dockerfile")
                   or . == "go.mod" or . == "go.sum"
                   or . == "package.json" or . == "pnpm-lock.yaml");
             .[] | select((.filename | guarded) or ((.previous_filename // "") | guarded)
