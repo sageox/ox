@@ -21,6 +21,7 @@ import (
 // ModelUsed attribution so judge verdicts can record which model
 // produced them.
 func TestNewRunnerCompleter_ForwardsPromptAndExtractsOutput(t *testing.T) {
+	stubTeamToken(t, false)
 	var lastPrompt string
 	var isolated bool
 	mock := NewMockRunner(true)
@@ -34,7 +35,7 @@ func TestNewRunnerCompleter_ForwardsPromptAndExtractsOutput(t *testing.T) {
 			ModelUsed: "haiku-4-5-test",
 		}, nil
 	}
-	c := NewRunnerCompleter(mock)
+	c := NewRunnerCompleter(mock, "")
 	res, err := c(context.Background(), "please judge me")
 	if err != nil {
 		t.Fatalf("completer: %v", err)
@@ -70,7 +71,7 @@ func TestNewRunnerCompleter_NonZeroExitCodeIsError(t *testing.T) {
 			ExitCode: 2,
 		}, nil
 	}
-	c := NewRunnerCompleter(mock)
+	c := NewRunnerCompleter(mock, "")
 	_, err := c(context.Background(), "judge this")
 	if err == nil {
 		t.Fatal("expected error on non-zero ExitCode, got nil")
