@@ -39,7 +39,7 @@ if [ "$EVENT" = save-token ]; then
   if [ -z "$repo" ]; then
     echo "SageOx: token saved, but this directory is not a SageOx-initialized repo, so nothing is being recorded yet."
   elif [ "$mode" = auto ] || [ -z "$mode" ]; then
-    echo "SageOx: token saved; this Devin session is being recorded to the $(basename "$repo") Ledger."
+    echo "SageOx: token saved; this Devin session is being recorded in $(basename "$repo")."
   else
     echo "SageOx: token saved, but session recording is ${mode:-unknown} for $(basename "$repo"), so nothing is being recorded."
   fi
