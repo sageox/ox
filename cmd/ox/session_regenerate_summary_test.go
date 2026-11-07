@@ -91,6 +91,52 @@ cat "`+resultFile+`"
 	assert.Contains(t, string(out), "Fix the login retry loop", "the fresh summary.json lands on the remote")
 }
 
+// Failure prevented: a summary the model scored 0 is published because the
+// score vanished on the way to push-summary, or a discarded summary is
+// reported as saved after rebuilding the artifacts from the old one.
+func TestRegenerateSummary_DiscardsAZeroScoreSummary(t *testing.T) {
+	const sessionName = "2026-01-01T00-00-testuser-OxRegen3"
+	setTestCfg(t)
+	f := newDraftLedgerFixture(t)
+	t.Chdir(f.projectRoot)
+	dir := seedFinalizedLedgerSessionWithArtifacts(t, f.ledgerPath, sessionName)
+	commitAndPushFinalized(t, f, sessionName)
+	cacheDir := filepath.Join(f.ledgerPath, ".sageox", "cache", "sessions", sessionName)
+	require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"),
+		[]byte("{\"type\":\"header\"}\n{\"type\":\"user\",\"content\":\"hi\"}\n{\"type\":\"assistant\",\"content\":\"hello\"}\n"), 0o644))
+
+	summary, err := json.Marshal(map[string]any{
+		"title":         "Said hello",
+		"summary":       "The user greeted the assistant and the assistant greeted the user back; no work was done in this session.",
+		"key_actions":   []string{"Greeted the assistant", "Got a greeting back", "Ended the session"},
+		"outcome":       "success",
+		"quality_score": 0,
+	})
+	require.NoError(t, err)
+	result, err := json.Marshal(map[string]string{"type": "result", "result": string(summary)})
+	require.NoError(t, err)
+	bin := t.TempDir()
+	resultFile := filepath.Join(bin, "result")
+	require.NoError(t, os.WriteFile(resultFile, append(result, '\n'), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "claude"), []byte(`#!/bin/sh
+if [ "$1" = "--help" ]; then echo "--safe-mode --tools --no-session-persistence"; exit; fi
+cat > /dev/null
+cat "`+resultFile+`"
+`), 0o755))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var runErr error
+	captureStdoutForPlanCLI(t, func() { runErr = regenerateSingleSessionSummary(sessionName) })
+	require.ErrorContains(t, runErr, "not saved")
+	md, err := os.ReadFile(filepath.Join(dir, "summary.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "REAL SUMMARY MARKDOWN", string(md), "the artifacts are not rebuilt from the old summary")
+	out, err := exec.Command("git", "-C", f.barePath, "show", "HEAD:sessions/"+sessionName+"/summary.json").Output()
+	require.NoError(t, err)
+	assert.Contains(t, string(out), "shipped kill", "the old summary stays")
+}
+
 func TestRegenerateSummary_RefusesAClaudeThatCannotIsolate(t *testing.T) {
 	const sessionName = "2026-01-01T00-00-testuser-OxRegen2"
 	setTestCfg(t)

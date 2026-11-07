@@ -388,15 +388,29 @@ func regenerateSingleSessionSummary(nameArg string) error {
 		return fmt.Errorf("summary temp file: %w", err)
 	}
 	defer func() { _ = os.Remove(summaryFile.Name()) }()
-	if err := json.NewEncoder(summaryFile).Encode(freshSummary); err != nil {
+	// quality_score is omitempty, so a model's 0 would vanish and
+	// pushSummaryToLedger would read the summary as unscored and publish it.
+	// A model's answer is always scored, as in the daemon's finalize.
+	fields := map[string]any{}
+	if data, err := json.Marshal(freshSummary); err == nil {
+		_ = json.Unmarshal(data, &fields)
+	}
+	fields["quality_score"] = freshSummary.QualityScore
+	if err := json.NewEncoder(summaryFile).Encode(fields); err != nil {
 		_ = summaryFile.Close()
 		return fmt.Errorf("write summary temp file: %w", err)
 	}
 	if err := summaryFile.Close(); err != nil {
 		return fmt.Errorf("write summary temp file: %w", err)
 	}
-	if pushed := pushSummaryToLedger(summaryFile.Name(), sessionPath); !pushed.Success {
+	pushed := pushSummaryToLedger(summaryFile.Name(), sessionPath)
+	if !pushed.Success {
 		return fmt.Errorf("push summary for %s: %s", sessionName, pushed.Error)
+	}
+	// A discarded or draft session succeeds without writing summary.json;
+	// the artifacts below would then be rebuilt from the old summary.
+	if pushed.SummaryPath == "" {
+		return fmt.Errorf("summary for %s not saved: %s", sessionName, pushed.Message)
 	}
 
 	// regenerate downstream artifacts (summary.md, session.md)
