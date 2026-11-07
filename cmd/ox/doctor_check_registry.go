@@ -143,7 +143,7 @@ func init() {
 		Name:        "Git config",
 		Category:    "Git Repository Health",
 		FixLevel:    FixLevelCheckOnly,
-		Description: "Verifies git user.name and user.email are set",
+		Description: "Warns when git has no user.name and user.email to commit with",
 		Run:         checkGitConfig,
 	})
 
