@@ -141,7 +141,7 @@ A team token with no AI coworker attached is refused: ox records no session and 
 ox session wait --since "$JOB_STARTED_AT" --timeout 10m --json
 ```
 
-The command checks the current project only, and exits 0 only when every session this machine recorded there is uploaded. The report lists `older_pending` (sessions from earlier jobs) and `failed`. `in_ledger` counts every session the coworker published since `--since`, so parallel jobs under the same coworker are counted too.
+The command checks the current project only. `--since` is compared with each session's stop time, or its creation time if it never recorded one. It exits 0 once every session it can read is uploaded; a session whose recording state is unreadable is not counted, so check the log before discarding the machine if a job crashed mid-recording. The report lists `older_pending` (sessions from earlier jobs) and `failed`. `in_ledger` counts every session the coworker published since `--since`, so parallel jobs under the same coworker are counted too.
 
 **Machines that live for one job.** Set `disposable_machine: true` in the user config (`OX_USER_CONFIG`) when the machine is thrown away after each job but its home directory persists.
 
