@@ -366,7 +366,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 	if existingMarker != nil && existingMarker.IsPrimed() && idempotent {
 		// idempotent mode: session already primed, output nothing
-		// this saves ~1k tokens on redundant prime calls
+		// this saves ~1k tokens on redundant prime calls. The project's commit
+		// author still follows SAGEOX_TOKEN, which can change mid-session.
+		reconcileProjectCoworker(projectRoot)
 		return nil
 	}
 
@@ -447,9 +449,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 
 	// anti-entropy: an AI coworker commits its work as itself
-	if config.IsInitialized(projectRoot) {
-		stampProjectCoworker(projectRoot, projectEndpoint)
-	}
+	reconcileProjectCoworker(projectRoot)
 
 	// resolve current user's identity early so all output paths (fresh, degraded, unavailable)
 	// can include it. Agents use this to distinguish self vs teammate in attribution.

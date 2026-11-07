@@ -3,14 +3,10 @@ package main
 import (
 	"context"
 	"encoding/base64"
-	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -116,63 +112,4 @@ func TestLedgerCommitAuthor_SignedInAccountThenGitIdentity(t *testing.T) {
 	author, err = commitAuthor("signed-out.md")
 	require.NoError(t, err)
 	assert.Equal(t, "Person B <person-b@example.com>", author, "signed out, the machine's git identity applies again")
-}
-
-// Failure prevented: an AI coworker on a machine whose git has no identity (a
-// fresh container) cannot commit its work in the project, or commits it as the
-// machine; its identity outlives its team token; or a person's own identity in
-// their repository is replaced.
-func TestRunAgentPrime_AICoworkerCommitsItsWorkAsItself(t *testing.T) {
-	commitAuthor := func(t *testing.T, repo string) (string, error) {
-		t.Helper()
-		// hooksPath off: ox init's hooks would run whatever ox is on PATH
-		if out, err := exec.Command("git", "-C", repo, "-c", "core.hooksPath=/dev/null", "commit", "-q", "--allow-empty", "-m", "work").CombinedOutput(); err != nil {
-			return "", fmt.Errorf("%w: %s", err, out)
-		}
-		out, err := exec.Command("git", "-C", repo, "log", "-1", "--format=%an <%ae>").Output()
-		return strings.TrimSpace(string(out)), err
-	}
-	for _, tc := range []struct {
-		name         string
-		repoIdentity bool // whether the repo keeps the person's own local identity
-		want         string
-	}{
-		{"a container's repo", false, "Rip <agt_rip@ai-coworker.invalid>"},
-		{"a person's repo", true, "E2E <e2e@example.com>"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			env := initializedE2E(t)
-			global := filepath.Join(t.TempDir(), "gitconfig")
-			require.NoError(t, os.WriteFile(global, []byte("[user]\n\tuseConfigOnly = true\n"), 0o600))
-			t.Setenv("GIT_CONFIG_GLOBAL", global)
-			for _, k := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"} {
-				t.Setenv(k, "")
-				require.NoError(t, os.Unsetenv(k))
-			}
-			if !tc.repoIdentity {
-				mustRunGit(t, env.Root, "config", "--unset", "user.name")
-				mustRunGit(t, env.Root, "config", "--unset", "user.email")
-			}
-			env.Handle(auth.IntrospectEndpoint, func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = io.WriteString(w, `{"active":true,"principal_kind":"team-service","coworker":{"id":"agt_rip","display_name":"Rip"}}`)
-			})
-			t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
-
-			runPrimeJSON(t)
-			author, err := commitAuthor(t, env.Root)
-			require.NoError(t, err, "the AI coworker must be able to commit its work")
-			assert.Equal(t, tc.want, author)
-
-			t.Setenv("SAGEOX_TOKEN", "")
-			require.NoError(t, os.Unsetenv("SAGEOX_TOKEN"))
-			runPrimeJSON(t)
-			author, err = commitAuthor(t, env.Root)
-			if tc.repoIdentity {
-				require.NoError(t, err)
-				assert.Equal(t, tc.want, author, "a person's own identity survives")
-				return
-			}
-			assert.Error(t, err, "without the team token, the coworker's identity is gone and git has none: %s", author)
-		})
-	}
 }

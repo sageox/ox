@@ -206,18 +206,21 @@ func localIdentity(t *testing.T, dir string) [2]string {
 }
 
 // setLocalIdentity writes before as dir's local user.name and user.email, and
-// ox's stamp marker when stamped.
-func setLocalIdentity(t *testing.T, dir string, before [2]string, stamped bool) {
+// stamp as ox's stamp when it is not "".
+func setLocalIdentity(t *testing.T, dir string, before [2]string, stamp string) {
 	t.Helper()
 	for i, key := range []string{"user.name", "user.email"} {
 		if before[i] != "" {
 			require.NoError(t, exec.Command("git", "-C", dir, "config", key, before[i]).Run())
 		}
 	}
-	if stamped {
-		require.NoError(t, exec.Command("git", "-C", dir, "config", authorStampKey, "true").Run())
+	if stamp != "" {
+		require.NoError(t, exec.Command("git", "-C", dir, "config", authorStampKey, stamp).Run())
 	}
 }
+
+// stampOf is the stamp ox leaves for the identity id.
+func stampOf(id [2]string) string { return stampValue(id[0], id[1]) }
 
 // Failure prevented: an AI coworker's git address changes shape, so ox no
 // longer recognizes the stamps it wrote and never removes them.
@@ -237,33 +240,40 @@ var (
 // identity a person set or their other user settings.
 func TestMigrateLedgerCredentials_StampsTheLedgerAuthor(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		author  [2]string // what LedgerAuthorGetter reports
-		before  [2]string // the clone's own user.name and user.email
-		stamped bool      // whether before was ox's stamp
-		want    [2]string
+		name   string
+		author [2]string // what LedgerAuthorGetter reports
+		before [2]string // the clone's own user.name and user.email
+		stamp  string    // ox's stamp in the clone, or ""
+		want   [2]string
 	}{
-		{"stamps the coworker", coworkerAuthor, [2]string{}, false, coworkerAuthor},
-		{"stamps the account", accountAuthor, [2]string{}, false, accountAuthor},
-		{"a renamed author replaces its old stamp", coworkerAuthor, [2]string{"Old Rip", coworkerAuthor[1]}, false, coworkerAuthor},
-		{"replaces a person's identity in ox's clone", accountAuthor, personAuthor, false, accountAuthor},
-		{"no author removes the stamp", [2]string{}, accountAuthor, true, [2]string{}},
-		{"no author removes a stamp from before the marker", [2]string{}, coworkerAuthor, false, [2]string{}},
-		{"no author finishes a half-removed stamp", [2]string{}, [2]string{}, true, [2]string{}},
-		{"no author finishes a half-removed old stamp", [2]string{}, [2]string{"", coworkerAuthor[1]}, false, [2]string{}},
-		{"no author keeps a person's identity", [2]string{}, personAuthor, false, personAuthor},
+		{"stamps the coworker", coworkerAuthor, [2]string{}, "", coworkerAuthor},
+		{"stamps the account", accountAuthor, [2]string{}, "", accountAuthor},
+		{"a renamed author replaces its old stamp", coworkerAuthor, [2]string{"Old Rip", coworkerAuthor[1]}, "", coworkerAuthor},
+		{"replaces a person's identity in ox's clone", accountAuthor, personAuthor, "", accountAuthor},
+		{"replaces a person's edit of ox's stamp", accountAuthor, personAuthor, stampOf(accountAuthor), accountAuthor},
+		{"no author removes the stamp", [2]string{}, accountAuthor, stampOf(accountAuthor), [2]string{}},
+		{"no author removes a stamp that did not record its identity", [2]string{}, accountAuthor, "true", [2]string{}},
+		{"no author removes a stamp from before the marker", [2]string{}, coworkerAuthor, "", [2]string{}},
+		{"no author finishes a half-removed stamp", [2]string{}, [2]string{}, stampOf(accountAuthor), [2]string{}},
+		{"no author finishes a half-removed old stamp", [2]string{}, [2]string{"", coworkerAuthor[1]}, "", [2]string{}},
+		{"no author keeps a person's identity", [2]string{}, personAuthor, "", personAuthor},
+		{"no author keeps a person's edit of ox's stamp", [2]string{}, personAuthor, stampOf(accountAuthor), personAuthor},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := ledgerCloneOf(t, "https://git.sageox.ai/team/ledger.git", tc.author)
 			require.NoError(t, exec.Command("git", "-C", dir, "config", "user.signingkey", "keep").Run())
-			setLocalIdentity(t, dir, tc.before, tc.stamped)
+			setLocalIdentity(t, dir, tc.before, tc.stamp)
 
 			_, err := MigrateLedgerCredentials(dir, "!ox git-credential-helper")
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, localIdentity(t, dir))
-			marker, err := readGitConfigLocal(dir, authorStampKey)
+			stamp, err := readGitConfigLocal(dir, authorStampKey)
 			require.NoError(t, err)
-			assert.Equal(t, tc.author != [2]string{}, marker != "", "the marker must be present exactly when ox's stamp is")
+			wantStamp := ""
+			if tc.author != [2]string{} {
+				wantStamp = stampOf(tc.author)
+			}
+			assert.Equal(t, wantStamp, stamp, "the stamp must name exactly the identity ox wrote")
 			signingKey, err := readGitConfigLocal(dir, "user.signingkey")
 			require.NoError(t, err)
 			assert.Equal(t, "keep", signingKey, "only user.name and user.email are ox's to change")
@@ -273,32 +283,40 @@ func TestMigrateLedgerCredentials_StampsTheLedgerAuthor(t *testing.T) {
 
 // Failure prevented: an AI coworker's commits in a person's repository fail on
 // a machine without a git identity or carry the machine's identity; or ox
-// overwrites or deletes an identity the person set in their own repository.
+// overwrites or deletes an identity the person set in their own repository,
+// including one they set over an identity ox stamped.
 func TestStampProjectAuthor_NeverTouchesAPersonsIdentity(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		author  [2]string
-		before  [2]string
-		stamped bool
-		want    [2]string
+		name   string
+		author [2]string
+		before [2]string
+		stamp  string
+		want   [2]string
 	}{
-		{"stamps the coworker", coworkerAuthor, [2]string{}, false, coworkerAuthor},
-		{"replaces its own earlier stamp", coworkerAuthor, [2]string{"Old Rip", "agt_old@ai-coworker.invalid"}, true, coworkerAuthor},
-		{"keeps a person's identity", coworkerAuthor, personAuthor, false, personAuthor},
-		{"keeps a person's partial identity", coworkerAuthor, [2]string{personAuthor[0], ""}, false, [2]string{personAuthor[0], ""}},
-		{"no coworker removes its stamp", [2]string{}, coworkerAuthor, true, [2]string{}},
-		{"no coworker keeps a person's identity", [2]string{}, personAuthor, false, personAuthor},
+		{"stamps the coworker", coworkerAuthor, [2]string{}, "", coworkerAuthor},
+		{"replaces its own earlier stamp", coworkerAuthor, [2]string{"Old Rip", "agt_old@ai-coworker.invalid"}, stampOf([2]string{"Old Rip", "agt_old@ai-coworker.invalid"}), coworkerAuthor},
+		{"keeps a person's identity", coworkerAuthor, personAuthor, "", personAuthor},
+		{"keeps a person's partial identity", coworkerAuthor, [2]string{personAuthor[0], ""}, "", [2]string{personAuthor[0], ""}},
+		{"keeps a person's edit of its stamp", coworkerAuthor, personAuthor, stampOf(coworkerAuthor), personAuthor},
+		{"keeps a person's edit of only the name", coworkerAuthor, [2]string{personAuthor[0], coworkerAuthor[1]}, stampOf(coworkerAuthor), [2]string{personAuthor[0], coworkerAuthor[1]}},
+		{"no coworker removes its stamp", [2]string{}, coworkerAuthor, stampOf(coworkerAuthor), [2]string{}},
+		{"no coworker keeps a person's identity", [2]string{}, personAuthor, "", personAuthor},
+		{"no coworker keeps a person's edit of its stamp", [2]string{}, personAuthor, stampOf(coworkerAuthor), personAuthor},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			require.NoError(t, exec.Command("git", "-C", dir, "init", "--quiet").Run())
-			setLocalIdentity(t, dir, tc.before, tc.stamped)
+			setLocalIdentity(t, dir, tc.before, tc.stamp)
 
 			require.NoError(t, StampProjectAuthor(dir, tc.author[0], tc.author[1]))
 			assert.Equal(t, tc.want, localIdentity(t, dir))
-			marker, err := readGitConfigLocal(dir, authorStampKey)
+			stamp, err := readGitConfigLocal(dir, authorStampKey)
 			require.NoError(t, err)
-			assert.Equal(t, tc.want == coworkerAuthor, marker != "", "the marker must be present exactly when ox's stamp is")
+			wantStamp := ""
+			if tc.want == coworkerAuthor {
+				wantStamp = stampOf(coworkerAuthor)
+			}
+			assert.Equal(t, wantStamp, stamp, "the stamp must name exactly the identity ox wrote, or be gone")
 		})
 	}
 }
