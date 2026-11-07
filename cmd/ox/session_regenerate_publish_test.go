@@ -652,4 +652,7 @@ func TestRegenerateSession_RehydratesStaleCachedTranscript(t *testing.T) {
 	cached, err := os.ReadFile(cachedRaw)
 	require.NoError(t, err)
 	assert.Equal(t, redacted, cached, "the stale cache must be replaced with the meta.json object")
+	kept, err := os.ReadFile(cachedRaw + ".stale-" + lfs.ComputeOID(stale)[:12])
+	require.NoError(t, err, "the stale cache must be moved aside, not deleted")
+	assert.Equal(t, stale, kept)
 }
