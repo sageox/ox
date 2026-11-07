@@ -1,3 +1,14 @@
+# Design
+
+The SageOx palette and type are the brief: keep them. Layout, spacing and component rules: read design/musts.md, then design/<surface>.md for your file; skip any already loaded as a rule.
+
+- ox-cli: internal/theme, internal/ui, internal/cli
+
+| Doing | Load only |
+|---|---|
+| Pick a color or a component | design/<surface>.md |
+| Change a token | sageox-design, never here |
+
 # ox · Design
 
 > Calm, precise terminal output for humans and AI coworkers.
