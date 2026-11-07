@@ -159,9 +159,26 @@ type GitCredentials struct {
 	BearerTokenHash string               `json:"bearer_token_hash,omitempty"` // binds the PAT to the bearer that fetched it
 	Token           string               `json:"token"`
 	ServerURL       string               `json:"server_url"`
+	// APIOrigin is the exact scheme://host:port of the SageOx API these were
+	// saved for. Records are keyed by host, so API servers on different ports
+	// share one; this names the server that owns it, across token refreshes.
+	// Empty in records older ox wrote.
+	APIOrigin string `json:"api_origin,omitempty"`
 	Username        string               `json:"username"`
 	ExpiresAt       time.Time            `json:"expires_at"`
 	Repos           map[string]RepoEntry `json:"repos,omitempty"` // indexed by team ID
+}
+
+// SavedFor reports whether these credentials were saved for the API at
+// endpointURL exactly, not merely for another server on the same host.
+func (c *GitCredentials) SavedFor(endpointURL string) bool {
+	return c.APIOrigin != "" && c.APIOrigin == apiOrigin(endpointURL)
+}
+
+// apiOrigin is the exact origin of a SageOx API endpoint, after the same
+// normalization endpoints get everywhere else.
+func apiOrigin(endpointURL string) string {
+	return urlOrigin(endpoint.NormalizeEndpoint(endpointURL))
 }
 
 // BearerTokenFingerprint identifies the bearer without storing it in the Git cache.
@@ -520,6 +537,7 @@ func LoadCredentialsForEndpoint(endpointURL string) (*GitCredentials, error) {
 // Uses OS keychain as primary storage (with endpoint-specific key).
 // Falls back to file storage for CI/headless environments.
 func SaveCredentialsForEndpoint(endpointURL string, creds GitCredentials) error {
+	creds.APIOrigin = apiOrigin(endpointURL)
 	// marshal credentials to JSON for storage
 	data, err := json.Marshal(creds)
 	if err != nil {

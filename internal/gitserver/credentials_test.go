@@ -689,3 +689,31 @@ func TestMultiEndpointCredentials_DaemonSwitchProject(t *testing.T) {
 	assert.Contains(t, daemonBCreds.Repos, "team_xyz789")
 	assert.NotContains(t, daemonBCreds.Repos, "team_abc123")
 }
+
+// Failure prevented: two API servers on one host (local stacks on different
+// ports) share a host-keyed credential record, and neither can tell whose git
+// server it names, so one account authors the other server's Ledger commits.
+func TestSaveCredentialsForEndpoint_RecordsTheExactAPIOrigin(t *testing.T) {
+	setupTestDir(t)
+	require.NoError(t, SaveCredentialsForEndpoint("http://localhost:3000", createTestCredentials(time.Hour)))
+
+	loaded, err := LoadCredentialsForEndpoint("http://localhost:3001") // same host, same record
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+
+	assert.Equal(t, "http://localhost:3000", loaded.APIOrigin)
+	assert.True(t, loaded.SavedFor("http://localhost:3000"))
+	assert.False(t, loaded.SavedFor("http://localhost:3001"), "another port on the host does not own the record")
+	assert.False(t, (&GitCredentials{}).SavedFor("http://localhost:3000"), "a record older ox wrote names no owner")
+}
+
+// Failure prevented: an endpoint written with a prefix (api., www.) or a
+// default port reads as a different origin than the one it was saved under.
+func TestGitCredentialsSavedFor_NormalizesTheEndpoint(t *testing.T) {
+	creds := GitCredentials{APIOrigin: apiOrigin("https://sageox.ai")}
+	for _, ep := range []string{"https://sageox.ai", "https://api.sageox.ai", "https://sageox.ai:443/", "HTTPS://SAGEOX.AI"} {
+		assert.True(t, creds.SavedFor(ep), ep)
+	}
+	assert.False(t, creds.SavedFor("http://sageox.ai"), "another scheme is another origin")
+	assert.False(t, creds.SavedFor("https://test.sageox.ai"))
+}

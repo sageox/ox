@@ -136,38 +136,52 @@ func checkGitConnectivity() checkResult {
 	return PassedCheck("Git connectivity", "reachable")
 }
 
-// checkGitConfig verifies local git configuration is properly set.
-// Checks for user.name and user.email which are required for commits.
+// checkGitConfig warns when git cannot make commits in this repo, which blocks
+// committing .sageox/. It asks git rather than reading user.name/user.email:
+// git fills a missing identity from the OS account and hostname, a guess that
+// works on most Macs and fails on most Linux containers. Only a warning, since
+// ox's own Ledger commits use the signed-in SageOx account (stampLedgerAuthor).
 func checkGitConfig(fix bool) checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
 		return SkippedCheck("Git config", "not in git repo", "")
 	}
 
-	identity, err := repotools.DetectGitIdentity()
-	if err != nil {
-		return WarningCheck("Git config", "detection failed", err.Error())
+	if !gitCanFormIdentity(gitRoot) {
+		return WarningCheck("Git config", "git cannot commit here",
+			"Your commits fail until git knows who you are. Run `git config --global user.name 'Your Name'` and `git config --global user.email 'you@example.com'`")
 	}
+	return PassedCheck("Git config", "commit identity set")
+}
 
-	if identity == nil || (identity.Name == "" && identity.Email == "") {
-		return FailedCheck("Git config", "incomplete",
-			"Run `git config --global user.name 'Name'` and `git config --global user.email 'email@example.com'`")
-	}
+// gitRepoLocationEnv names the variables that point git at a repository other
+// than the one -C selects. A git hook running ox doctor inherits them.
+// GIT_AUTHOR_*, GIT_COMMITTER_* and GIT_CONFIG_* stay: they are identity and
+// config the person chose, which a commit here would use too.
+var gitRepoLocationEnv = []string{
+	"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+}
 
-	var issues []string
-	if identity.Name == "" {
-		issues = append(issues, "user.name not set")
+// gitCanFormIdentity reports whether git can form both the author and the
+// committer identity for a commit in repoPath. `git var` fails exactly when a
+// commit would.
+func gitCanFormIdentity(repoPath string) bool {
+	env := slices.DeleteFunc(os.Environ(), func(entry string) bool {
+		name, _, _ := strings.Cut(entry, "=")
+		return slices.Contains(gitRepoLocationEnv, name)
+	})
+	for _, ident := range []string{"GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "var", ident)
+		cmd.Env = env
+		err := cmd.Run()
+		cancel()
+		if err != nil {
+			return false
+		}
 	}
-	if identity.Email == "" {
-		issues = append(issues, "user.email not set")
-	}
-
-	if len(issues) > 0 {
-		return WarningCheck("Git config", strings.Join(issues, ", "),
-			"Configure missing git settings for proper commit attribution")
-	}
-
-	return PassedCheck("Git config", "user.name and user.email set")
+	return true
 }
 
 // checkGitRepoState checks for uncommitted SageOx config under .sageox/.
