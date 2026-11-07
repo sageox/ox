@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Tests for devin-plugin/bin/ox-devin-hook, driven as Devin drives it: event
@@ -53,12 +55,16 @@ func newHookEnv(t *testing.T) *hookEnv {
 		t.Fatalf("git init: %v %s", err, out)
 	}
 	// Fake ox: the policy follows OX_SESSION_RECORDING, as ox's effective config does.
+	// prime leaves a background process behind, as the real ox daemon does.
 	fakeOx := `#!/bin/sh
 case "$1 $2" in
   "config get") printf '{"value":"%s"}\n' "${OX_SESSION_RECORDING:-auto}" ;;
-  "agent prime") echo 'agent_id="OxTest1"' ;;
+  "agent prime") sleep 120 </dev/null >/dev/null 2>&1 & echo 'agent_id="OxTest1"' ;;
   "status --json") echo '{}' ;;
-  "agent OxTest1") [ "$3 $4" = "session start" ] && printf '{"session_file":"%s"}\n' "$FAKE_SESSION_FILE" ;;
+  "agent OxTest1") case "$3 $4" in
+    "session start") printf '{"session_file":"%s"}\n' "$FAKE_SESSION_FILE" ;;
+    "session stop") echo '"entry_count": 2,' ;;
+  esac ;;
 esac
 `
 	bin := filepath.Join(e.home, ".local", "bin")
@@ -93,8 +99,13 @@ func (e *hookEnv) run(dir string, extraEnv []string, stdin string, args ...strin
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
+	// Don't wait on output pipes a leftover background process may hold open.
+	cmd.WaitDelay = 2 * time.Second
 	err := cmd.Run()
 	code := 0
+	if errors.Is(err, exec.ErrWaitDelay) {
+		e.t.Fatalf("hook left a background process holding its output: %v", err)
+	}
 	if ee, ok := err.(*exec.ExitError); ok {
 		code = ee.ExitCode()
 	} else if err != nil {
@@ -200,5 +211,29 @@ func TestDevinHookRedactsTokenInBufferedEvents(t *testing.T) {
 	}
 	if n := strings.Count(string(rec), "[REDACTED]"); n != 2 {
 		t.Fatalf("want 2 redacted entries (buffered + live), got %d:\n%s", n, rec)
+	}
+}
+
+// TestDevinHookStopUploadsAfterOxSpawnsDaemon verifies the turn-end upload
+// runs even when starting the recording left a long-lived ox process behind.
+// Failure prevented: the daemon inherits the session lock, every Stop times
+// out on it silently, and no session ever uploads.
+func TestDevinHookStopUploadsAfterOxSpawnsDaemon(t *testing.T) {
+	e := newHookEnv(t)
+	if out, code := e.run(e.repo, []string{"SAGEOX_TOKEN=" + hookTestToken}, "", "save-token", "devin-hooktest"); code != 0 {
+		t.Fatalf("save-token: %d %s", code, out)
+	}
+	e.run("/", nil, postToolUse(t, "hello"), "PostToolUse")
+	start := time.Now()
+	e.run("/", nil, `{"session_id":"devin-hooktest"}`, "Stop")
+	if d := time.Since(start); d > 20*time.Second {
+		t.Errorf("Stop took %s; it waited on a lock held by ox's background process", d)
+	}
+	log, err := os.ReadFile(filepath.Join(e.state, "hook.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "stop agent=OxTest1 rc=0") {
+		t.Fatalf("Stop did not upload; hook.log:\n%s", log)
 	}
 }

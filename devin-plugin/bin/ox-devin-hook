@@ -13,6 +13,9 @@ export PATH="$HOME/.local/bin:$PATH"
 # ox agent prime requires a detected coding agent; Devin sets none of the env
 # vars agentx looks for, so declare it (agentx's documented override).
 export AGENT_ENV="${AGENT_ENV:-devin}"
+# ox may spawn its long-lived daemon, which would inherit the session lock
+# (fd 9) and hold it forever, and Devin's hook stdout (fd 3).
+ox() { command ox "$@" 9>&- 3>&-; }
 
 # Devin gives secrets only to the commands it runs, never to hooks: a gated
 # personal secret bound with exec's env reaches the hook payload as the
@@ -65,7 +68,7 @@ fi
 export SAGEOX_TOKEN="${SAGEOX_TOKEN:-}"
 
 ensure_ox() {
-  command -v ox >/dev/null 2>&1 && return 0
+  type -P ox >/dev/null 2>&1 && return 0
   # install.sh hits the GitHub API, which rate-limits shared Devin IPs (403);
   # the releases/latest redirect is not rate-limited.
   local tag tmp
@@ -164,7 +167,7 @@ request_token_once() {
   local repo
   if repo=$(find_repo); then
     # Don't invite users who opted out of recording to opt back in.
-    command -v ox >/dev/null && { recording_allowed "$repo" || return 0; }
+    type -P ox >/dev/null && { recording_allowed "$repo" || return 0; }
   else
     # Devin's project dir is often "/" and most commands carry no workdir, so
     # the session repo is usually unknown here. Only for this prompt, accept
@@ -175,7 +178,7 @@ request_token_once() {
     local c ok=1
     for c in "$HOME"/repos/*/.sageox/config.json; do
       [ -f "$c" ] || continue
-      command -v ox >/dev/null || { ok=0; break; }
+      type -P ox >/dev/null || { ok=0; break; }
       recording_allowed "${c%/.sageox/config.json}" && { ok=0; break; }
     done
     [ "$ok" -eq 0 ] || return 0
@@ -282,7 +285,7 @@ for i, line in enumerate(l for l in sys.stdin if l.strip()):
 stop_recording() {
   [ -f "$SDIR/agent_id" ] || return 0
   [ -n "$SAGEOX_TOKEN" ] || return 0
-  lock_session || return 0
+  lock_session || { log "deferred: session lock busy, upload at next turn end"; return 0; }
   [ -f "$SDIR/agent_id" ] || return 0
   local id repo; id=$(cat "$SDIR/agent_id"); repo=$(cat "$SDIR/repo")
   cd "$repo" || return 1
