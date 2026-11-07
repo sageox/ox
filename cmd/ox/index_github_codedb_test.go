@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -153,6 +154,88 @@ func TestIndexGitHub_WarnsAboutSkippedItemsAndUnindexedData(t *testing.T) {
 	})
 	require.Contains(t, stderr, "2 item(s) skipped because their comments could not be fetched")
 	require.Contains(t, stderr, "GitHub data synced but not indexed for search")
+}
+
+// remoteHasGitHubPR reports whether the Ledger remote at barePath holds the
+// synced file for PR number.
+func remoteHasGitHubPR(t *testing.T, barePath string, number int) bool {
+	t.Helper()
+	clone := cloneBare(t, barePath)
+	pattern := filepath.Join(clone, "data", "github", "*", "*", "*", "pr", fmt.Sprintf("%d-*.json", number))
+	matches, err := filepath.Glob(pattern)
+	require.NoError(t, err)
+	return len(matches) > 0
+}
+
+// TestIndexGitHub_PushesBeforeTheSearchIndexPass verifies synced PRs and issues
+// are on the Ledger remote before the search-index pass starts.
+//
+// Failure prevented: the index pass ran first, so a slow pass (a cold daemon
+// indexing a large repo's code for the first time) held back the push. When
+// the caller's timeout killed ox, every PR and issue the sync had already
+// fetched was missing from the Ledger, and the next run hit the same wall.
+func TestIndexGitHub_PushesBeforeTheSearchIndexPass(t *testing.T) {
+	barePath, ledgerPath := createBareAndClone(t)
+	isolatePushEnv(t, ledgerPath)
+
+	indexed := false
+	onRemoteWhenIndexing := false
+	prev := indexGitHubViaDaemon
+	indexGitHubViaDaemon = func() error {
+		indexed = true
+		onRemoteWhenIndexing = remoteHasGitHubPR(t, barePath, 41)
+		return nil
+	}
+	t.Cleanup(func() { indexGitHubViaDaemon = prev })
+
+	now := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, syncGitHubIndex(context.Background(), githubIndexRun{
+		Fetcher:    stubGitHubFetcher{at: now.Add(-time.Hour)},
+		LedgerPath: ledgerPath,
+		Owner:      "o",
+		Repo:       "r",
+		MaxDays:    30,
+		SyncPRs:    true,
+		SyncIssues: true,
+	}))
+
+	require.True(t, indexed, "the search-index pass never ran")
+	require.True(t, onRemoteWhenIndexing, "PR 41 was not on the Ledger remote when the search-index pass started")
+}
+
+// TestIndexGitHub_FailedPushStillIndexesAndFails verifies a push failure is
+// reported as the command's error and the synced data is still made
+// searchable locally.
+//
+// Failure prevented: moving the push first must not turn a failed push into a
+// skipped index (search stays stale until the next run) or into a success
+// (the operator believes the Ledger has data it does not).
+func TestIndexGitHub_FailedPushStillIndexesAndFails(t *testing.T) {
+	_, ledgerPath := createBareAndClone(t)
+	isolatePushEnv(t, ledgerPath)
+	runGit(t, ledgerPath, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing.git"))
+
+	indexed := false
+	prev := indexGitHubViaDaemon
+	indexGitHubViaDaemon = func() error {
+		indexed = true
+		return nil
+	}
+	t.Cleanup(func() { indexGitHubViaDaemon = prev })
+
+	now := time.Now().UTC().Truncate(time.Second)
+	err := syncGitHubIndex(context.Background(), githubIndexRun{
+		Fetcher:    stubGitHubFetcher{at: now.Add(-time.Hour)},
+		LedgerPath: ledgerPath,
+		Owner:      "o",
+		Repo:       "r",
+		MaxDays:    30,
+		SyncPRs:    true,
+		SyncIssues: true,
+	})
+
+	require.ErrorContains(t, err, "push to ledger")
+	require.True(t, indexed, "a failed push skipped the search-index pass")
 }
 
 // TestGitHubFallbackCodeDBDir_IsTheDaemonsDirectory verifies the fallback
