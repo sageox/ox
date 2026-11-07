@@ -320,11 +320,11 @@ func TestHostSampler_CachesFailuresToo(t *testing.T) {
 	assert.Equal(t, 2, pc.idleCalls)
 }
 
-// TestHostSampler_CancelledProbeIsNotCached verifies a probe interrupted by
+// TestHostSampler_CanceledProbeIsNotCached verifies a probe interrupted by
 // cancellation is retried next time instead of poisoning the cache.
-// Failure prevented: one cancelled subprocess hiding a working battery signal
+// Failure prevented: one canceled subprocess hiding a working battery signal
 // for a full minute.
-func TestHostSampler_CancelledProbeIsNotCached(t *testing.T) {
+func TestHostSampler_CanceledProbeIsNotCached(t *testing.T) {
 	t.Parallel()
 
 	clock := newPaceTestClock()
@@ -337,10 +337,10 @@ func TestHostSampler_CancelledProbeIsNotCached(t *testing.T) {
 	}
 	sampler := newHostSampler(probes, 4, clock.Now)
 
-	cancelled, cancel := context.WithCancel(t.Context())
+	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
-	s := sampler.sample(cancelled)
-	assert.False(t, s.OnBattery, "result of a cancelled probe is discarded")
+	s := sampler.sample(canceled)
+	assert.False(t, s.OnBattery, "result of a canceled probe is discarded")
 
 	s = sampler.sample(t.Context())
 	assert.True(t, s.OnBattery, "next sample probes again")
@@ -399,11 +399,11 @@ func TestPace_SleepsFollowThePolicy(t *testing.T) {
 	assert.Equal(t, 10, h.samples)
 }
 
-// TestPace_CancelledContextReturnsBeforeSampling verifies a dead ctx short
+// TestPace_CanceledContextReturnsBeforeSampling verifies a dead ctx short
 // circuits Pace.
-// Failure prevented: a cancelled index run still shelling out to pmset/ioreg
+// Failure prevented: a canceled index run still shelling out to pmset/ioreg
 // and logging after it was told to stop.
-func TestPace_CancelledContextReturnsBeforeSampling(t *testing.T) {
+func TestPace_CanceledContextReturnsBeforeSampling(t *testing.T) {
 	t.Parallel()
 
 	h := newPacerHarness(nil, paceSigHot)
@@ -416,11 +416,11 @@ func TestPace_CancelledContextReturnsBeforeSampling(t *testing.T) {
 	assert.Empty(t, h.sleeps)
 }
 
-// TestPace_ContextCancelledWhileSampling verifies cancellation during the
+// TestPace_ContextCanceledWhileSampling verifies cancellation during the
 // sample is reported even when the computed delay is zero.
-// Failure prevented: Pace returning nil for a cancelled run, so the indexer
+// Failure prevented: Pace returning nil for a canceled run, so the indexer
 // keeps going for another 50 commits.
-func TestPace_ContextCancelledWhileSampling(t *testing.T) {
+func TestPace_ContextCanceledWhileSampling(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -449,7 +449,7 @@ func TestPace_SleepErrorIsReturned(t *testing.T) {
 }
 
 // TestPace_RealSleepHonorsContextCancel uses the production sleep under a fake
-// clock: a 60s sleep must end the moment ctx is cancelled, not 60s later.
+// clock: a 60s sleep must end the moment ctx is canceled, not 60s later.
 // Failure prevented: daemon shutdown blocked for up to a minute behind a
 // sleeping backfill.
 func TestPace_RealSleepHonorsContextCancel(t *testing.T) {
@@ -1014,9 +1014,9 @@ func TestRealHostProbes_Smoke(t *testing.T) {
 	assert.Equal(t, s.UserIdle, again.UserIdle)
 	assert.Equal(t, s.UserIdleKnown, again.UserIdleKnown)
 
-	// the production pacer constructs and, with an already-cancelled ctx,
+	// the production pacer constructs and, with an already-canceled ctx,
 	// returns without sleeping
-	cancelled, stop := context.WithCancel(t.Context())
+	canceled, stop := context.WithCancel(t.Context())
 	stop()
-	assert.ErrorIs(t, newIndexPacer(nil).Pace(cancelled), context.Canceled)
+	assert.ErrorIs(t, newIndexPacer(nil).Pace(canceled), context.Canceled)
 }

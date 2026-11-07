@@ -130,6 +130,25 @@ func (s *SyncScheduler) ledgerCloneError(cloneCtx context.Context, repoType stri
 	return fmt.Errorf("git clone failed: %w", err)
 }
 
+// teamContextCloneError turns a failed team-context clone into the error the
+// retry loop and `ox status` report. Like ledgerCloneError, it never wraps a
+// context error. The clone budget runs out inside git, and what surfaces is
+// often "phase 2 checkout HEAD: git checkout: : context deadline exceeded"
+// (the budget was already spent by phase 1, so git never started). That wraps
+// context.DeadlineExceeded, which IsPreCloneLockBusy reads as lock contention:
+// the daemon logged "another clone already in progress", recorded no failure,
+// and started the same clone again on the next sync cycle, forever.
+func (s *SyncScheduler) teamContextCloneError(cloneCtx context.Context, budget time.Duration, err error) error {
+	switch {
+	case errors.Is(cloneCtx.Err(), context.DeadlineExceeded):
+		s.logger.Debug("checkout: team context clone budget spent", "budget", budget, "cause", err)
+		return fmt.Errorf("clone team-context timed out after %s", budget)
+	case errors.Is(cloneCtx.Err(), context.Canceled):
+		return fmt.Errorf("clone team-context interrupted: %w", errCloneInterrupted)
+	}
+	return err
+}
+
 // formatCloneBytes renders a clone size for a status line, e.g. "412.3 MB".
 func formatCloneBytes(n int64) string {
 	return fmt.Sprintf("%.1f MB", float64(n)/1e6)

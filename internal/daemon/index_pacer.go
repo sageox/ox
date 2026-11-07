@@ -281,7 +281,7 @@ func (c *ttlSignal[T]) get(ctx context.Context) (T, bool) {
 	}
 	val, ok := c.probe(ctx)
 	if ctx.Err() != nil {
-		// a cancelled subprocess looks like a probe failure; caching it would
+		// a canceled subprocess looks like a probe failure; caching it would
 		// hide a working signal for a full TTL.
 		return zero, false
 	}

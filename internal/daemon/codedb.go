@@ -10,6 +10,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-git/go-git/v6/plumbing"
@@ -77,6 +78,9 @@ type CodeDBManager struct {
 	// the board through the Team Context pull without touching this repo's git
 	// state. Other repos' posts are not part of it.
 	lastIndexedBoard string
+	// freshnessSeeded records that lastIndexedHead/lastIndexedBoard already had
+	// their one chance to be restored from index-state.json.
+	freshnessSeeded bool
 	// boardFailedFingerprint and boardFailedAttempts count consecutive board
 	// stages that left posts unindexed for one board state, so a persistent
 	// failure is retried maxBoardIndexAttempts times and then left alone.
@@ -85,6 +89,19 @@ type CodeDBManager struct {
 	// githubRepo caches "owner/name" of the project's GitHub remote, used to pick
 	// this repo's posts off the shared board. Cleared when the project root moves.
 	githubRepo string
+
+	// lastProgress is the newest progress message of the running index. It is kept
+	// even when no ProgressWriter is attached (background runs), so the periodic
+	// "in progress" log can say where a multi-hour run is, not just how long.
+	lastProgress atomic.Pointer[string]
+	// priorityDepthOverride replaces priorityHistoryDepth when > 0; zero in
+	// production. Tests shrink it so a small fixture repo truncates.
+	priorityDepthOverride int
+	// progressLogInterval replaces the 30s "in progress" cadence when > 0.
+	progressLogInterval time.Duration
+	// worktreeIndexRepoFn replaces db.IndexLocalRepo for the worktree index (both
+	// passes) in tests, to observe or fail a pass; nil in production.
+	worktreeIndexRepoFn func(ctx context.Context, db *codedb.DB, repoPath string, opts index.IndexOptions) error
 
 	// dirty-only refresh state (separate lifecycle from full indexing)
 	dirtyRefreshing  bool
@@ -443,6 +460,36 @@ func isLedgerRepoChanged(err error) bool {
 // canceled. 21h+ runaway burns were observed when a worktree was deleted mid-index.
 const maxIndexDuration = 2 * time.Hour
 
+// priorityHistoryDepth is how many of the newest unindexed commits pass 1 takes
+// per ref. A 100k-commit repo indexed oldest-first had nothing searchable at the
+// tip for hours; capping pass 1 makes the tip searchable in minutes, and pass 2
+// (backfillHistory) fills in the rest in the background.
+const priorityHistoryDepth = 1000
+
+func (m *CodeDBManager) priorityDepth() int {
+	if m.priorityDepthOverride > 0 {
+		return m.priorityDepthOverride
+	}
+	return priorityHistoryDepth
+}
+
+// indexLocalRepo runs one pass of the worktree index. Both passes go through it
+// so a test can observe or fail either one.
+func (m *CodeDBManager) indexLocalRepo(ctx context.Context, db *codedb.DB, repoPath string, opts index.IndexOptions) error {
+	if m.worktreeIndexRepoFn != nil {
+		return m.worktreeIndexRepoFn(ctx, db, repoPath, opts)
+	}
+	return db.IndexLocalRepo(ctx, repoPath, opts)
+}
+
+// progressSnapshot returns the newest progress message, or "" before the first.
+func (m *CodeDBManager) progressSnapshot() string {
+	if msg := m.lastProgress.Load(); msg != nil {
+		return *msg
+	}
+	return ""
+}
+
 // Index runs indexing with progress reporting. Only one indexing operation runs at a time.
 // If indexing is already in progress, returns an error immediately.
 //
@@ -568,28 +615,69 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 
 	totalStart := time.Now()
 
+	// Only the worktree index has freshness and history state: a URL index puts
+	// some other repo's commits into the same db and must not touch either.
+	local := payload.URL == ""
+
+	// Freshness is recorded against the HEAD read now, not the one at the end:
+	// with a backfill pass that can run for hours, a commit made meanwhile has to
+	// read as "changed" on the next check, not be recorded as already indexed.
+	var headBeforeIndex string
+	historyOwed := false
+	if local {
+		headBeforeIndex = readHeadFingerprint(ctx, projectRoot)
+		// read after any --full wipe above, so a wiped index owes nothing
+		historyOwed = loadIndexState(m.logger, dataDir).HistoryPending
+	}
+
+	// progress also records the newest message when nobody is listening: background
+	// runs have no ProgressWriter, and the periodic log below is then the only
+	// way to tell a stuck run from a slow one.
+	m.lastProgress.Store(nil)
+	progress := func(msg string) {
+		m.lastProgress.Store(&msg)
+		if pw != nil {
+			_ = pw.WriteMessage(msg)
+		}
+	}
+
 	// periodic progress logging for long-running indexing
+	logInterval := 30 * time.Second
+	if m.progressLogInterval > 0 {
+		logInterval = m.progressLogInterval
+	}
 	progressCtx, progressCancel := context.WithCancel(ctx)
 	defer progressCancel()
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(logInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-progressCtx.Done():
 				return
 			case <-ticker.C:
-				m.logger.Info("codedb indexing in progress", "elapsed", time.Since(totalStart).Round(time.Second), "target", target)
+				m.logger.Info("codedb indexing in progress", "elapsed", time.Since(totalStart).Round(time.Second), "target", target, "last_progress", m.progressSnapshot())
 			}
 		}
 	}()
 
-	opts := index.IndexOptions{
-		Progress: func(msg string) {
-			if pw != nil {
-				_ = pw.WriteMessage(msg)
+	// Pass 1 takes only the newest commits so the tip is searchable quickly. When
+	// it stops short, older history is owed to pass 2 below.
+	opts := index.IndexOptions{Progress: progress}
+	var truncated atomic.Bool
+	if local {
+		depth := m.priorityDepth()
+		opts.MaxHistoryDepth = depth
+		opts.OnHistoryTruncated = func(ref string) {
+			if truncated.Swap(true) {
+				return
 			}
-		},
+			// persisted before pass 1 commits its first batch: if the daemon dies
+			// after those commits land, the restart finds them all "known", sees
+			// no truncation, and would never learn that older history is missing
+			m.logger.Info("codedb history truncated at priority depth, backfill will follow", "ref", ref, "depth", depth)
+			m.markHistoryPending(dataDir, true)
+		}
 	}
 
 	// stage 1: git indexing (committed content only). OpenIndexWithHeal discards
@@ -599,6 +687,8 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	// can't break when the whole process is being restarted from scratch).
 	indexStart := time.Now()
 	indexFn := func(ctx context.Context, db *codedb.DB) error {
+		// a heal retry re-runs this on a wiped dir, which took the pending mark with it
+		truncated.Store(false)
 		if payload.URL != "" {
 			if pw != nil {
 				_ = pw.WriteStage("indexing", fmt.Sprintf("Indexing %s...", payload.URL))
@@ -608,7 +698,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 		if pw != nil {
 			_ = pw.WriteStage("indexing", fmt.Sprintf("Indexing local repo %s...", projectRoot))
 		}
-		return db.IndexLocalRepo(ctx, projectRoot, opts)
+		return m.indexLocalRepo(ctx, db, projectRoot, opts)
 	}
 	db, err := codedb.OpenIndexWithHeal(ctx, dataDir, indexFn)
 	if err != nil {
@@ -616,6 +706,11 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 			m.logger.Info("codedb local: skipped (alternates configured)", "path", projectRoot)
 			if pw != nil {
 				_ = pw.WriteStage("indexing", "codedb: skipped (git alternates not supported)")
+			}
+			// nothing can ever be indexed here; record the head so the check does
+			// not retry the open every interval
+			if local {
+				m.recordIndexed(dataDir, headBeforeIndex, false)
 			}
 			return nil, nil
 		}
@@ -634,11 +729,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	if pw != nil {
 		_ = pw.WriteStage("symbols", "Parsing symbols...")
 	}
-	stats, err := db.ParseSymbols(ctx, func(msg string) {
-		if pw != nil {
-			_ = pw.WriteMessage(msg)
-		}
-	})
+	stats, err := db.ParseSymbols(ctx, progress)
 	if err != nil {
 		m.setError(err)
 		m.discardIfCorrupt(db, dataDir, err)
@@ -652,11 +743,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	if pw != nil {
 		_ = pw.WriteStage("comments", "Extracting comments...")
 	}
-	cStats, err := db.ParseComments(ctx, func(msg string) {
-		if pw != nil {
-			_ = pw.WriteMessage(msg)
-		}
-	})
+	cStats, err := db.ParseComments(ctx, progress)
 	if err != nil {
 		m.setError(err)
 		m.discardIfCorrupt(db, dataDir, err)
@@ -670,11 +757,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	// no-op on freshly-indexed codedbs (ParseSymbols stamps the version
 	// inline). Best-effort: a failure here logs a warning but doesn't fail
 	// the indexing run — search still works on symbol_refs without edges.
-	if backfillStats, bfErr := db.BackfillSymbolEdges(ctx, func(msg string) {
-		if pw != nil {
-			_ = pw.WriteMessage(msg)
-		}
-	}); bfErr != nil {
+	if backfillStats, bfErr := db.BackfillSymbolEdges(ctx, progress); bfErr != nil {
 		m.logger.Warn("codedb symbol-edge backfill failed (non-fatal)", "error", bfErr)
 	} else if backfillStats.BlobsProcessed > 0 {
 		m.logger.Info("codedb stage complete", "stage", "edge-backfill",
@@ -735,11 +818,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 			_ = pw.WriteStage("github", "Indexing GitHub data from ledger...")
 		}
 		ghStart := time.Now()
-		ghStats, ghErr := db.IndexGitHubData(ctx, lp, func(msg string) {
-			if pw != nil {
-				_ = pw.WriteMessage(msg)
-			}
-		})
+		ghStats, ghErr := db.IndexGitHubData(ctx, lp, progress)
 		if ghErr != nil {
 			m.logger.Warn("github data indexing failed", "error", ghErr)
 			// non-fatal: don't fail the whole index for GitHub data
@@ -788,6 +867,14 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	// transient marker-clear failure doesn't trigger the deferred restore.
 	indexSucceeded = true
 
+	// The tip is searchable and the stages are done: that is what freshness
+	// records, even while pass 2 still owes older history. A restart between
+	// here and pass 2's end must still find history_pending=true on disk.
+	backfillOwed := local && (truncated.Load() || historyOwed)
+	if local {
+		m.recordIndexed(dataDir, headBeforeIndex, backfillOwed)
+	}
+
 	logArgs := []any{
 		"blobs_parsed", stats.BlobsParsed,
 		"symbols_extracted", stats.SymbolsExtracted,
@@ -800,9 +887,10 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	if dirtyDuration > 0 {
 		logArgs = append(logArgs, "dirty_ms", dirtyDuration.Milliseconds())
 	}
+	logArgs = append(logArgs, "history_pending", backfillOwed)
 	m.logger.Info("codedb indexing complete", logArgs...)
 
-	return &CodeIndexResult{
+	result := &CodeIndexResult{
 		BlobsParsed:       stats.BlobsParsed,
 		SymbolsExtracted:  stats.SymbolsExtracted,
 		CommentsExtracted: cStats.CommentsExtracted,
@@ -810,7 +898,65 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 		SymbolDurationMs:  symbolDuration.Milliseconds(),
 		CommentDurationMs: commentDuration.Milliseconds(),
 		TotalDurationMs:   totalDuration.Milliseconds(),
-	}, nil
+	}
+
+	// pass 2 reuses the open db: reopening through OpenIndexWithHeal would, on a
+	// corrupt-looking failure, wipe the pass 1 index this run just made usable
+	if backfillOwed {
+		if err := m.backfillHistory(ctx, db, dataDir, projectRoot, pw, progress); err != nil {
+			if index.IsCorruptionError(err) {
+				// damage is the one failure that does cost the index: every later
+				// pass would hit the same page, so it is discarded for a rebuild
+				m.setError(err)
+				m.discardIfCorrupt(db, dataDir, err)
+				return nil, err
+			}
+			// the tip is searchable and the next check resumes from the commits
+			// already checkpointed, so this is not a failed run
+			m.logger.Warn("codedb history backfill stopped, will resume on the next freshness check", "error", err)
+		}
+	}
+
+	return result, nil
+}
+
+// backfillHistory is pass 2: it indexes the history pass 1 skipped and, on
+// success, clears history_pending. Background runs (pw == nil) are paced so a
+// multi-hour walk yields to load, battery power and an active user; a run
+// someone is waiting on is not slowed down.
+//
+// It shares the caller's m.indexing claim and so keeps the dirty overlay and
+// the ledger build waiting for as long as it runs: both open the same bleve
+// files, and an open that times out against this writer reads as corruption
+// and wipes them. maxIndexDuration still caps each run; the work is
+// checkpointed every few dozen commits, so the next run resumes where this
+// one stopped.
+func (m *CodeDBManager) backfillHistory(ctx context.Context, db *codedb.DB, dataDir, projectRoot string, pw *ProgressWriter, progress index.ProgressFunc) error {
+	ctx, cancel := context.WithTimeout(ctx, maxIndexDuration)
+	defer cancel()
+
+	start := time.Now()
+	m.logger.Info("codedb history backfill started", "paced", pw == nil)
+	if pw != nil {
+		_ = pw.WriteStage("history", "Backfilling older history...")
+	}
+
+	// MaxHistoryDepth stays 0: this pass exists to walk all of it
+	opts := index.IndexOptions{BackfillHistory: true, Progress: progress}
+	if pw == nil {
+		opts.Pace = newIndexPacer(m.logger).Pace
+	}
+	if err := m.indexLocalRepo(ctx, db, projectRoot, opts); err != nil {
+		return fmt.Errorf("backfill history: %w", err)
+	}
+
+	m.markHistoryPending(dataDir, false)
+	cached := queryStatsFromDB(db, dataDir)
+	m.mu.Lock()
+	m.stats = cached
+	m.mu.Unlock()
+	m.logger.Info("codedb history backfill complete", "duration", time.Since(start).Round(time.Second), "commits", cached.Commits)
+	return nil
 }
 
 // maxBoardIndexAttempts bounds how many times the board stage runs for one
@@ -1100,17 +1246,27 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 	projectRoot := m.projectRoot
 	m.mu.Unlock()
 
+	// a restarted daemon trusts what the previous one recorded (once)
+	seededFromDisk := m.seedFreshnessFromDisk()
+
 	// cheap pre-check: read HEAD from filesystem (~0.1ms) and compare against cache.
 	// Also verify the index still exists on disk — if someone wiped .sageox/cache/
 	// while the daemon was running, the cached fingerprint would be stale.
+	// Owed history forces the pipeline even when nothing moved: pass 2 is what
+	// finishes it.
 	if fingerprint := readHeadFingerprint(ctx, projectRoot); fingerprint != "" {
 		m.mu.Lock()
 		cached := m.lastIndexedHead
 		m.mu.Unlock()
-		if cached != "" && cached == fingerprint && !m.boardChanged() {
+		if cached != "" && cached == fingerprint && !m.boardChanged() && !m.historyPending() {
 			dataDir := m.resolveSharedDataDir()
 			if _, err := os.Stat(dataDir); err == nil {
 				m.logger.Debug("codedb freshness check skipped, HEAD unchanged")
+				if seededFromDisk {
+					// the skipped pipeline would have rebuilt this worktree's dirty
+					// overlay, which can predate edits made while the daemon was down
+					m.RefreshDirtyOverlay(ctx)
+				}
 				return
 			}
 			// index was wiped — clear cache and fall through to rebuild
@@ -1207,14 +1363,8 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 			m.telemetry.RecordCodeIndexComplete(result, "success")
 		}
 
-		// update HEAD cache on success so next CheckFreshness can skip
-		if err == nil {
-			if fp := readHeadFingerprint(ctx, projectRoot); fp != "" {
-				m.mu.Lock()
-				m.lastIndexedHead = fp
-				m.mu.Unlock()
-			}
-		}
+		// doIndex records the HEAD it started from, so there is no cache update here:
+		// reading HEAD again now would mark commits made during a long run as indexed.
 
 		// GC stale dirty overlays for worktrees that no longer exist.
 		// Run after indexing so the new overlay (if any) is in place before we inspect.
@@ -1244,6 +1394,11 @@ func (m *CodeDBManager) discardIfCorrupt(db *codedb.DB, dir string, err error) {
 // not cost a 5 GB ledger rebuild, so that subdirectory is left alone.
 func (m *CodeDBManager) discardCorruptIndex(dir string, cause error) {
 	m.logger.Warn("codedb index is damaged; discarding it for a clean rebuild", "data_dir", dir, "error", cause)
+	// first, so a partial discard below cannot leave a state file vouching for a
+	// damaged index
+	if err := os.Remove(indexStatePath(dir)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		m.logger.Warn("codedb discard of index state failed", "data_dir", dir, "error", err)
+	}
 	ledger := m.resolveLedgerDataDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {

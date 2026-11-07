@@ -590,44 +590,72 @@ func (d *Daemon) Start() error {
 
 			inactiveDuration := d.timeSinceLastActivity()
 			uptime := time.Since(d.startTime)
-			minUptime := time.Minute // don't exit before 1 minute of runtime
-			if inactiveDuration >= d.config.InactivityTimeout && uptime >= minUptime {
-				// check for pending work before exiting
-				if d.hasPendingWork() {
-					d.mu.Lock()
-					if d.pendingWorkSince.IsZero() {
-						d.pendingWorkSince = time.Now()
-						d.mu.Unlock()
-						d.logger.Info("inactivity timeout reached but pending work exists, delaying exit",
-							"inactive_duration", inactiveDuration,
-							"grace_period", d.config.PendingWorkGracePeriod,
-						)
-						continue
-					}
-					graceElapsed := time.Since(d.pendingWorkSince)
-					d.mu.Unlock()
-					if graceElapsed < d.config.PendingWorkGracePeriod {
-						d.logger.Debug("pending work grace period active",
-							"elapsed", graceElapsed,
-							"grace_period", d.config.PendingWorkGracePeriod,
-						)
-						continue
-					}
-					d.logger.Warn("pending work grace period exceeded, shutting down anyway",
-						"grace_elapsed", graceElapsed,
-						"grace_period", d.config.PendingWorkGracePeriod,
-					)
-				}
+			if d.inactivityExitDue(inactiveDuration, uptime) {
 				d.logger.Info("shutting down due to inactivity", "inactive_duration", inactiveDuration, "timeout", d.config.InactivityTimeout, "uptime", uptime)
 				return d.shutdown()
 			}
-			// reset pending work tracker when not past inactivity timeout
-			d.mu.Lock()
-			d.pendingWorkSince = time.Time{}
-			d.mu.Unlock()
-			d.logger.Debug("inactivity check", "inactive_duration", inactiveDuration, "timeout", d.config.InactivityTimeout)
 		}
 	}
+}
+
+// inactivityExitDue decides one inactivity tick: true means the daemon should
+// shut down now. It also keeps the pending-work grace bookkeeping.
+func (d *Daemon) inactivityExitDue(inactiveDuration, uptime time.Duration) bool {
+	minUptime := time.Minute // don't exit before 1 minute of runtime
+	if inactiveDuration < d.config.InactivityTimeout || uptime < minUptime {
+		// reset pending work tracker when not past inactivity timeout
+		d.mu.Lock()
+		d.pendingWorkSince = time.Time{}
+		d.mu.Unlock()
+		d.logger.Debug("inactivity check", "inactive_duration", inactiveDuration, "timeout", d.config.InactivityTimeout)
+		return false
+	}
+
+	// Indexing outranks the pending-work grace period below: a first index of
+	// a large repo runs for an hour or more, so exiting when the grace period
+	// lapsed would cancel it just as the inactivity timeout did (a live daemon
+	// lost a 55 minute index this way). The pass ends on its own, capped by
+	// maxIndexDuration, so this cannot keep the daemon alive indefinitely.
+	if d.codedbIndexing() {
+		d.logger.Info("inactivity timeout reached but codedb indexing is running, delaying exit",
+			"inactive_duration", inactiveDuration,
+		)
+		return false
+	}
+
+	// check for pending work before exiting
+	if d.hasPendingWork() {
+		d.mu.Lock()
+		if d.pendingWorkSince.IsZero() {
+			d.pendingWorkSince = time.Now()
+			d.mu.Unlock()
+			d.logger.Info("inactivity timeout reached but pending work exists, delaying exit",
+				"inactive_duration", inactiveDuration,
+				"grace_period", d.config.PendingWorkGracePeriod,
+			)
+			return false
+		}
+		graceElapsed := time.Since(d.pendingWorkSince)
+		d.mu.Unlock()
+		if graceElapsed < d.config.PendingWorkGracePeriod {
+			d.logger.Debug("pending work grace period active",
+				"elapsed", graceElapsed,
+				"grace_period", d.config.PendingWorkGracePeriod,
+			)
+			return false
+		}
+		d.logger.Warn("pending work grace period exceeded, shutting down anyway",
+			"grace_elapsed", graceElapsed,
+			"grace_period", d.config.PendingWorkGracePeriod,
+		)
+	}
+	return true
+}
+
+// codedbIndexing reports whether the code index manager has an index pass in
+// flight. The manager exists only when the daemon has a project root.
+func (d *Daemon) codedbIndexing() bool {
+	return d.codedb != nil && d.codedb.IsIndexing()
 }
 
 // getAgentSessions returns active agent sessions from the heartbeat handler.
