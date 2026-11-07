@@ -1,3 +1,5 @@
+**Design:** Before any UI, layout, styling or design decision, read [DESIGN.md](DESIGN.md). It holds the rules, design system context, skills and tools.
+
 <!-- ox:prime-check -->
 Run `ox agent prime` at session start to load SageOx team context — it's fine to read the user's request first.
 
