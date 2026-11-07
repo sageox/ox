@@ -183,6 +183,37 @@ func TestCloneWithSparseCheckout_CacheSurvivesReconfigure(t *testing.T) {
 			"if missing, the sync scheduler is destroying codedb indexes on every pull cycle")
 }
 
+func TestConfigureSparseCheckout_StatusFailurePreservesConeAndLocalFiles(t *testing.T) {
+	t.Parallel()
+	clone := filepath.Join(t.TempDir(), "clone")
+	require.NoError(t, CloneWithSparseCheckoutContext(context.Background(), clone, initBareRepo(t)))
+	require.NoError(t, exec.Command("git", "-C", clone, "sparse-checkout", "add", "data/custom").Run())
+	local := filepath.Join(clone, "data", "custom", "local.txt")
+	require.NoError(t, os.MkdirAll(filepath.Dir(local), 0755))
+	require.NoError(t, os.WriteFile(local, []byte("only local content"), 0600))
+	index := filepath.Join(clone, ".git", "index")
+	indexBefore, err := os.ReadFile(index)
+	require.NoError(t, err)
+	cone := filepath.Join(clone, ".git", "info", "sparse-checkout")
+	coneBefore, err := os.ReadFile(cone)
+	require.NoError(t, err)
+	// A corrupt index makes real Git status fail. Reconfiguration must stop
+	// before changing the cone when it cannot identify paths to protect.
+	require.NoError(t, os.WriteFile(index, []byte("invalid index"), 0600))
+	require.ErrorContains(t, ConfigureSparseCheckout(clone), "inspect dirty paths before sparse checkout")
+	coneAfter, err := os.ReadFile(cone)
+	require.NoError(t, err)
+	require.Equal(t, coneBefore, coneAfter)
+	got, err := os.ReadFile(local)
+	require.NoError(t, err)
+	require.Equal(t, "only local content", string(got))
+	require.NoError(t, os.WriteFile(index, indexBefore, 0600))
+	require.NoError(t, ConfigureSparseCheckout(clone))
+	got, err = os.ReadFile(local)
+	require.NoError(t, err)
+	require.Equal(t, "only local content", string(got), "retry must retain the protected local path")
+}
+
 // TestRefreshSparseCheckout_WaitsForTheRepoLock: `git sparse-checkout`
 // rewrites the index. A refresh run while another ox process held the repo
 // lock to commit failed that commit on index.lock and left its files

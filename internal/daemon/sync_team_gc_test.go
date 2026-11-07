@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -14,6 +15,83 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// A replacement's destination links must never redirect restored bytes into
+// the still-authoritative original, even when GC stops before the swap.
+func TestBlueGreenGC_RestoreSymlinkKeepsOriginalAndRetries(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real Team Context clones")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks needs a privilege Windows test runners lack")
+	}
+	for _, tc := range []struct {
+		name, local, link, target string
+		cache                     bool
+	}{
+		{"untracked file", "memory/note.txt", "memory/note.txt", "SOUL.md", false},
+		{"untracked parent", "memory/redirect/SOUL.md", "memory/redirect", ".", false},
+		{"cache file", ".sageox/cache/note.txt", ".sageox/cache/note.txt", "SOUL.md", true},
+		{"cache parent", ".sageox/cache/SOUL.md", ".sageox/cache", ".", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude TEAM.md\ninclude memory/\n"
+			bare, clone, scheduler := setupClonedTeamContext(t, manifest, nil)
+			// Clone setup commits its gitignore; publish it before the remote
+			// changes so GC does not stop at the unrelated safety-push gate.
+			require.NoError(t, exec.Command("git", "-C", clone, "push", "origin", "HEAD:main").Run())
+			original, err := os.ReadFile(filepath.Join(clone, "SOUL.md"))
+			require.NoError(t, err)
+			originalGit, err := os.Stat(filepath.Join(clone, ".git"))
+			require.NoError(t, err)
+			local := filepath.Join(clone, tc.local)
+			require.NoError(t, os.MkdirAll(filepath.Dir(local), 0755))
+			require.NoError(t, os.WriteFile(local, []byte("local content"), 0600))
+			writer := filepath.Join(t.TempDir(), "writer")
+			require.NoError(t, exec.Command("git", "clone", bare, writer).Run())
+			gitConfig(t, writer)
+			link := filepath.Join(writer, tc.link)
+			require.NoError(t, os.MkdirAll(filepath.Dir(link), 0755))
+			require.NoError(t, os.Symlink(filepath.Join(clone, tc.target), link))
+			require.NoError(t, os.MkdirAll(filepath.Join(writer, "memory"), 0755))
+			require.NoError(t, os.Symlink("../SOUL.md", filepath.Join(writer, "memory", "soul-link")))
+			require.NoError(t, exec.Command("git", "-C", writer, "add", "-f", "--", tc.link, "memory/soul-link").Run())
+			require.NoError(t, exec.Command("git", "-C", writer, "commit", "-m", "add destination links").Run())
+			require.NoError(t, exec.Command("git", "-C", writer, "push", "origin", "HEAD:main").Run())
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			scheduler.gcSwapWindowTestHook = cancel
+			ws := WorkspaceState{ID: "synthetic-team", Type: WorkspaceTypeTeamContext, Path: clone, CloneURL: "file://" + bare, Exists: true}
+			require.Equal(t, gcFailed, scheduler.runBlueGreenGC(ctx, ws))
+			currentGit, err := os.Stat(filepath.Join(clone, ".git"))
+			require.NoError(t, err)
+			require.True(t, os.SameFile(originalGit, currentGit))
+			current, err := os.ReadFile(filepath.Join(clone, "SOUL.md"))
+			require.NoError(t, err)
+			require.Equal(t, original, current, "failed preparation must preserve original bytes")
+			backup := filepath.Join(clone+".gc-untracked", tc.local)
+			if tc.cache {
+				backup = filepath.Join(clone+".gc-cache", strings.TrimPrefix(tc.local, ".sageox/cache/"))
+			}
+			for _, path := range []string{local, backup} {
+				data, err := os.ReadFile(path)
+				require.NoError(t, err)
+				require.Equal(t, "local content", string(data))
+			}
+			require.NoError(t, exec.Command("git", "-C", writer, "rm", "--", tc.link).Run())
+			require.NoError(t, exec.Command("git", "-C", writer, "commit", "-m", "remove destination collision").Run())
+			require.NoError(t, exec.Command("git", "-C", writer, "push", "origin", "HEAD:main").Run())
+			scheduler.gcSwapWindowTestHook = nil
+			require.Equal(t, gcSuccess, scheduler.runBlueGreenGC(context.Background(), ws))
+			data, err := os.ReadFile(local)
+			require.NoError(t, err)
+			require.Equal(t, "local content", string(data), "retry must restore the preserved content")
+			target, err := os.Readlink(filepath.Join(clone, "memory", "soul-link"))
+			require.NoError(t, err)
+			require.Equal(t, "../SOUL.md", target, "unrelated Team Context links remain supported")
+		})
+	}
+}
 
 func TestBlueGreenGC_Success(t *testing.T) {
 	if testing.Short() {
@@ -1034,8 +1112,12 @@ func TestBlueGreenGC_DiffApplyConflictPreservesDiffFile(t *testing.T) {
 	}
 
 	result := scheduler.runBlueGreenGC(context.Background(), ws)
-	// reclone succeeds even if diff apply fails — the repo is valid
-	assert.Equal(t, gcSuccess, result)
+	assert.Equal(t, gcFailed, result, "a conflicting replacement must not replace local edits")
+	content, err := os.ReadFile(filepath.Join(teamDir, "SOUL.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "local user edit\nwith different content\nthat also conflicts\n", string(content))
+	assert.NoDirExists(t, teamDir+".new")
+	assert.NoDirExists(t, teamDir+".old")
 
 	// the .gc-diff file should be preserved for manual recovery
 	diffFile := teamDir + ".gc-diff"
