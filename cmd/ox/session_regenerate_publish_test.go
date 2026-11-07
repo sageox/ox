@@ -33,26 +33,34 @@ type regenerateLedgerFixture struct {
 // stored credentials for the fake store.
 func newRegenerateLedgerFixture(t *testing.T) *regenerateLedgerFixture {
 	t.Helper()
-	f := &regenerateLedgerFixture{draftLedgerFixture: newDraftLedgerFixture(t), store: newFakeLFSStore(t)}
-	t.Chdir(f.projectRoot)
+	draft := newDraftLedgerFixture(t)
+	t.Chdir(draft.projectRoot)
 	oldCfg := cfg
 	cfg = &config.Config{}
 	t.Cleanup(func() { cfg = oldCfg })
 	for _, key := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
 		t.Setenv(key, t.TempDir())
 	}
+	return &regenerateLedgerFixture{draftLedgerFixture: draft, store: useFakeLFSStore(t, draft)}
+}
+
+// useFakeLFSStore points the fixture's Ledger at a fake LFS store, with stored
+// credentials for it, while pushes still go to the bare remote.
+func useFakeLFSStore(t *testing.T, f *draftLedgerFixture) *fakeLFSStore {
+	t.Helper()
+	store := newFakeLFSStore(t)
 	priorDir := gitserver.TestSetConfigDirOverride(t.TempDir())
 	t.Cleanup(func() { gitserver.TestSetConfigDirOverride(priorDir) })
 	priorStorage := gitserver.TestSetForceFileStorage(true)
 	t.Cleanup(func() { gitserver.TestSetForceFileStorage(priorStorage) })
 
-	t.Setenv("SAGEOX_ENDPOINT", f.store.url)
-	runGit(t, f.ledgerPath, "remote", "set-url", "origin", f.store.url+"/ledger.git")
+	t.Setenv("SAGEOX_ENDPOINT", store.url)
+	runGit(t, f.ledgerPath, "remote", "set-url", "origin", store.url+"/ledger.git")
 	runGit(t, f.ledgerPath, "remote", "set-url", "--push", "origin", f.barePath)
-	require.NoError(t, gitserver.SaveCredentialsForEndpoint(f.store.url, gitserver.GitCredentials{
-		Username: "testuser", Token: "test-token", ServerURL: f.store.url, ExpiresAt: time.Now().Add(time.Hour),
+	require.NoError(t, gitserver.SaveCredentialsForEndpoint(store.url, gitserver.GitCredentials{
+		Username: "testuser", Token: "test-token", ServerURL: store.url, ExpiresAt: time.Now().Add(time.Hour),
 	}))
-	return f
+	return store
 }
 
 // publishSession commits and pushes a session the way `ox session stop`
