@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 )
@@ -83,14 +84,22 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 			r.logger.Warn("running codex without isolation; update Codex", "error", err)
 		}
 	}
+	if req.WorkDir == "" && !slices.Contains(args, "--skip-git-repo-check") && strings.Contains(help, "--skip-git-repo-check") {
+		// ox's own empty directory is not a Git repository, which codex exec
+		// otherwise refuses.
+		args = append(args, "--skip-git-repo-check")
+	}
 	args = append(args, "-")
 
+	dir, cleanup, err := workerDir(req.WorkDir)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
 	cmd.Stdin = strings.NewReader(req.Prompt)
 	cmd.Env = workerEnv("OPENAI_", "CODEX_")
-	if req.WorkDir != "" {
-		cmd.Dir = req.WorkDir
-	}
+	cmd.Dir = dir
 	setProcAttr(cmd)
 
 	// Drain both streams even after their limits: stopping a pipe reader can

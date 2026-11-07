@@ -43,8 +43,8 @@ func TestBuildPrompt(t *testing.T) {
 	if req.Prompt == "" {
 		t.Error("expected non-empty prompt")
 	}
-	if req.WorkDir != ledgerPath {
-		t.Errorf("expected WorkDir=%q, got %q", ledgerPath, req.WorkDir)
+	if req.WorkDir != "" {
+		t.Errorf("the summary worker must not run in the Ledger, got WorkDir=%q", req.WorkDir)
 	}
 	// daemon embeds session content inline — prompt must contain the actual
 	// session text, not a file-read instruction. The file-read approach
