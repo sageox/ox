@@ -1,12 +1,12 @@
 # Design
 
-The SageOx palette and type are the brief: keep them. Layout, spacing and component rules: read design/musts.md, then design/<surface>.md for your file; skip any already loaded as a rule.
+The SageOx palette and type are the brief: keep them. Layout, spacing and component rules: read `design/musts.md`, then `design/<surface>.md` for your file; skip any already loaded as a rule.
 
-- ox-cli: internal/theme, internal/ui, internal/cli
+- ox-cli: internal/theme, internal/ui, internal/cli, internal/tui, internal/dashboard, internal/uicatalog, cmd/ox
 
 | Doing | Load only |
 |---|---|
-| Pick a color or a component | design/<surface>.md |
+| Pick a color or a component | `design/<surface>.md` |
 | Change a token | sageox-design, never here |
 
 # ox · Design
