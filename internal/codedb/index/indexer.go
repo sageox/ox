@@ -45,6 +45,20 @@ type IndexOptions struct {
 	Progress        ProgressFunc
 	SkipDirs        map[string]bool // directories to skip in worktree indexing; nil = use defaultSkipDirs
 	TreeCacheLimit  int             // max tree snapshots cached during commit walking; 0 = default (128)
+
+	// BackfillHistory indexes history an earlier depth-limited pass skipped.
+	// The walk runs even when the default branch tip is unchanged, passes
+	// through already-indexed commits to reach unindexed ancestors, and links
+	// boundary commits to parents that were missing when they were indexed.
+	BackfillHistory bool
+	// OnHistoryTruncated is called when MaxHistoryDepth stopped a ref's walk
+	// before it reached indexed or root commits, so older history still needs a
+	// BackfillHistory pass. nil = ignored.
+	OnHistoryTruncated func(ref string)
+	// Pace is called after each checkpoint flush, between batches of commits.
+	// It may sleep to yield the machine; a non-nil error aborts indexing.
+	// nil = no pacing.
+	Pace func(ctx context.Context) error
 }
 
 // defaultTreeCacheLimit is the default max entries in the tree cache.
