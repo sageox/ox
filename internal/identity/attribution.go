@@ -235,6 +235,17 @@ func LedgerAuthor(remoteURL, configDisplayName string) (name, email string) {
 	return "", ""
 }
 
+// CachedCoworkerAuthor is CoworkerAuthor without asking the server, for a path
+// that must not wait on the network. known is false when a team token's
+// metadata was never fetched on this machine.
+func CachedCoworkerAuthor(ep string) (name, email string, known bool) {
+	c, known := auth.CachedTeamCoworker(ep)
+	if c == nil || c.ID == "" {
+		return "", "", known
+	}
+	return c.Name(), gitserver.CoworkerEmail(c.ID), true
+}
+
 // CoworkerAuthor is the commit identity of the AI coworker a team token at ep
 // acts as: its name and its agt_ address. Both are "" for any other credential,
 // including a team token the server names no coworker for.

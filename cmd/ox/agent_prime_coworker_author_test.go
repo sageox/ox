@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -119,4 +120,32 @@ func TestRunAgentPrime_IdempotentRePrimeFollowsTheToken(t *testing.T) {
 
 	author, err = commitInProject(t, env.Root)
 	assert.Error(t, err, "the removed token's coworker still authors the project's commits: %s", author)
+}
+
+// Failure prevented: every idempotent re-prime with a team token asks the
+// server about it, stalling up to five seconds each when the server is
+// unreachable and nothing fresh is cached.
+func TestRunAgentPrime_IdempotentRePrimeNeverWaitsOnTheServer(t *testing.T) {
+	env := coworkerMachine(t, false)
+	session := uniqueSessionID(t, "coworker-offline")
+	primeWithHook(t, session, "startup")
+	author, err := commitInProject(t, env.Root)
+	require.NoError(t, err)
+	require.Equal(t, "Rip <agt_rip@ai-coworker.invalid>", author)
+
+	var introspections atomic.Int32
+	env.OnRequest(func(r *http.Request) {
+		if r.URL.Path == auth.IntrospectEndpoint {
+			introspections.Add(1)
+		}
+	})
+	t.Setenv("SAGEOX_TOKEN", "oxt_rotated_1lKvCA") // a team token this machine never fetched
+	require.NoError(t, agentPrimeCmd.Flags().Set("idempotent", "true"))
+	t.Cleanup(func() { _ = agentPrimeCmd.Flags().Set("idempotent", "false") })
+	primeWithHook(t, session, "resume")
+
+	assert.Zero(t, introspections.Load(), "the idempotent re-prime asked the server about the token")
+	author, err = commitInProject(t, env.Root)
+	require.NoError(t, err)
+	assert.Equal(t, "Rip <agt_rip@ai-coworker.invalid>", author, "an unknown token changes nothing until a full prime learns it")
 }

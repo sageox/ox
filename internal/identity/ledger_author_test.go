@@ -271,3 +271,19 @@ func stripAPIOrigin(t *testing.T, xdg string) {
 		require.NoError(t, os.WriteFile(f, data, 0o600))
 	}
 }
+
+// Failure prevented: the no-network coworker lookup claims to know a team
+// token it never fetched (so prime strips a coworker's stamp), or forgets one
+// it has.
+func TestCachedCoworkerAuthor(t *testing.T) {
+	isolateSignIns(t)
+	api := serveTeamToken(t, `{"id":"agt_rip","display_name":"Rip"}`)
+
+	_, _, known := CachedCoworkerAuthor(api)
+	assert.False(t, known, "a team token never fetched here is unknown")
+
+	CoworkerAuthor(api) // the fetch a full prime makes
+	name, email, known := CachedCoworkerAuthor(api)
+	assert.True(t, known)
+	assert.Equal(t, "Rip <agt_rip@ai-coworker.invalid>", name+" <"+email+">")
+}

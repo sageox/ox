@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -615,4 +616,47 @@ func TestGetUserIDAndUsername_TeamCoworker(t *testing.T) {
 	t.Setenv(EnvVarToken, "")
 	assert.Empty(t, GetUserID(ep))
 	assert.Empty(t, GetUsername(ep))
+}
+
+// Failure prevented: a path that must stay instant (the hooks' idempotent
+// re-prime) waits up to five seconds on an unreachable server to learn a team
+// token's coworker; or it forgets a coworker it already learned because the
+// answer is old.
+func TestCachedTeamCoworker_NeverAsksTheServer(t *testing.T) {
+	withTempCacheDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		_, _ = io.WriteString(w, teamAnswer(`{"id":"agt_rip","display_name":"Rip"}`))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv(endpoint.EnvVar, srv.URL)
+
+	t.Setenv(EnvVarToken, "")
+	c, known := CachedTeamCoworker(srv.URL)
+	assert.True(t, known && c == nil, "no team token: no coworker, known without asking")
+
+	t.Setenv(EnvVarToken, "oxt_test_1ljPfr")
+	c, known = CachedTeamCoworker(srv.URL)
+	assert.False(t, known, "never fetched here: unknown")
+	assert.Nil(t, c)
+
+	_, err := TeamCoworker(srv.URL) // the one fetch, as a full prime makes
+	require.NoError(t, err)
+	require.EqualValues(t, 1, calls.Load())
+
+	cache, err := loadTokenMetaCache()
+	require.NoError(t, err)
+	key := tokenMetaCacheKey(endpoint.NormalizeEndpoint(srv.URL), "oxt_test_1ljPfr")
+	entry := cache.Entries[key]
+	entry.FetchedAt = time.Now().Add(-365 * 24 * time.Hour) // long past any TTL
+	cache.Entries[key] = entry
+	require.NoError(t, saveTokenMetaCache(cache))
+
+	c, known = CachedTeamCoworker(srv.URL)
+	require.True(t, known)
+	require.NotNil(t, c)
+	assert.Equal(t, "agt_rip", c.ID, "an old answer is still the last one this machine learned")
+	assert.EqualValues(t, 1, calls.Load(), "the cached lookup must never call the server")
 }
