@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -21,6 +22,7 @@ import (
 // instructions inside the session run commands with the coworker's
 // credentials.
 func TestRegenerateSummary_IsolatedInlineRun(t *testing.T) {
+	skipFakeClaudeOnWindows(t)
 	const sessionName = "2026-01-01T00-00-testuser-OxRegen1"
 	setTestCfg(t)
 	f := newDraftLedgerFixture(t)
@@ -107,6 +109,7 @@ cat "`+resultFile+`"
 // score vanished on the way to push-summary, or a discarded summary is
 // reported as saved after rebuilding the artifacts from the old one.
 func TestRegenerateSummary_DiscardsAZeroScoreSummary(t *testing.T) {
+	skipFakeClaudeOnWindows(t)
 	const sessionName = "2026-01-01T00-00-testuser-OxRegen3"
 	setTestCfg(t)
 	f := newDraftLedgerFixture(t)
@@ -150,6 +153,7 @@ cat "`+resultFile+`"
 }
 
 func TestRegenerateSummary_RefusesAClaudeThatCannotIsolate(t *testing.T) {
+	skipFakeClaudeOnWindows(t)
 	const sessionName = "2026-01-01T00-00-testuser-OxRegen2"
 	setTestCfg(t)
 	f := newDraftLedgerFixture(t)
@@ -229,5 +233,13 @@ func TestRegenerateSummary_KeepsTheOldSummaryWhenTheWorkerFails(t *testing.T) {
 			require.NoError(t, err)
 			assert.Contains(t, string(out), "shipped kill", "the old summary stays")
 		})
+	}
+}
+
+// The fake claude is a shell script, which exec.LookPath does not find on Windows.
+func skipFakeClaudeOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake claude is a shell script")
 	}
 }
