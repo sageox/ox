@@ -27,13 +27,16 @@ func TestPrePushGate_ResumesFailedRedactionAmend(t *testing.T) {
 	const canary = "AKIA" + "QWERTYUIOPASDFGH"
 	rel := "sessions/" + name + "/raw.jsonl"
 
-	setup := func(t *testing.T) (work, remote, holding string) {
+	setup := func(t *testing.T, prep func(work string)) (work, remote, holding string) {
 		work = makeLedgerWithCommit(t, map[string]string{rel: `{"text":"` + canary + `"}` + "\n"})
 		seedSessionMeta(t, filepath.Join(work, "sessions", name), name)
 		mustGit(t, work, "add", "--sparse", "sessions/"+name+"/meta.json")
 		mustGit(t, work, "commit", "--amend", "--no-edit", "--no-verify")
 		holding = mustGitCapture(t, work, "rev-parse", "HEAD")
 		remote = mustGitCapture(t, work, "remote", "get-url", "origin")
+		if prep != nil {
+			prep(work)
+		}
 
 		// Blank committer identity so the scoped amendment cannot be written.
 		t.Setenv("GIT_COMMITTER_NAME", "")
@@ -50,7 +53,7 @@ func TestPrePushGate_ResumesFailedRedactionAmend(t *testing.T) {
 	}
 
 	t.Run("retry completes the repair", func(t *testing.T) {
-		work, remote, holding := setup(t)
+		work, remote, holding := setup(t, nil)
 		redacted := mustGitCapture(t, work, "hash-object", rel)
 		// Without the record the outgoing-object validator holds publication.
 		require.Error(t, gitutil.PushWithRetry(context.Background(), work, gitutil.PushOpts{}))
@@ -79,7 +82,7 @@ func TestPrePushGate_ResumesFailedRedactionAmend(t *testing.T) {
 	})
 
 	t.Run("newer HEAD is never amended", func(t *testing.T) {
-		work, remote, _ := setup(t)
+		work, remote, _ := setup(t, nil)
 		other := filepath.Join(work, "sessions", "other", "summary.md")
 		require.NoError(t, os.MkdirAll(filepath.Dir(other), 0o755))
 		require.NoError(t, os.WriteFile(other, []byte("unrelated\n"), 0o644))
@@ -101,7 +104,7 @@ func TestPrePushGate_ResumesFailedRedactionAmend(t *testing.T) {
 	})
 
 	t.Run("another writer's staged bytes are kept", func(t *testing.T) {
-		work, remote, holding := setup(t)
+		work, remote, holding := setup(t, nil)
 		require.NoError(t, os.WriteFile(filepath.Join(work, rel), []byte(`{"text":"other writer"}`+"\n"), 0o644))
 		mustGit(t, work, "add", "--sparse", rel)
 		staged := mustGitCapture(t, work, "rev-parse", ":"+rel)
@@ -114,8 +117,20 @@ func TestPrePushGate_ResumesFailedRedactionAmend(t *testing.T) {
 		assertRemoteObjectsCleanOf(t, remote, canary)
 	})
 
+	t.Run("unstaging a mode change before retry still completes the repair", func(t *testing.T) {
+		work, remote, _ := setup(t, func(work string) {
+			mustGit(t, work, "update-index", "--chmod=+x", "--", rel)
+		})
+		mustGit(t, work, "reset", "-q", "--", rel)
+
+		require.NoError(t, runGate(t, work))
+		assert.NoFileExists(t, filepath.Join(work, filepath.FromSlash(pendingRedactionAmendRel)))
+		require.NoError(t, gitutil.PushWithRetry(context.Background(), work, gitutil.PushOpts{}))
+		assertRemoteObjectsCleanOf(t, remote, canary)
+	})
+
 	t.Run("another writer's staged mode is kept", func(t *testing.T) {
-		work, remote, holding := setup(t)
+		work, remote, holding := setup(t, nil)
 		mustGit(t, work, "update-index", "--chmod=+x", "--", rel)
 
 		err := runGate(t, work)

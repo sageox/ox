@@ -39,7 +39,9 @@ type pendingRedactionPath struct {
 	Path string `json:"path"`
 	Mode string `json:"mode"`
 	Blob string `json:"blob"`
-	// HoldingBlob is the path's blob in HoldingTip; empty when absent there.
+	// HoldingMode and HoldingBlob are the path's entry in HoldingTip; empty
+	// when absent there.
+	HoldingMode string `json:"holding_mode,omitempty"`
 	HoldingBlob string `json:"holding_blob,omitempty"`
 }
 
@@ -68,11 +70,11 @@ func stageAndAmendRedactedFiles(ctx context.Context, ledgerPath string, repaired
 		if mode == "" {
 			mode = "100644"
 		}
-		holding, err := treeBlob(ctx, ledgerPath, tip, rel)
+		holdingMode, holding, err := treeEntry(ctx, ledgerPath, tip, rel)
 		if err != nil {
 			return err
 		}
-		rec.Paths = append(rec.Paths, pendingRedactionPath{Path: rel, Mode: mode, Blob: blob, HoldingBlob: holding})
+		rec.Paths = append(rec.Paths, pendingRedactionPath{Path: rel, Mode: mode, Blob: blob, HoldingMode: holdingMode, HoldingBlob: holding})
 	}
 	if err := writePendingRedactionAmend(ledgerPath, &rec); err != nil {
 		return fmt.Errorf("record pending redaction: %w", err)
@@ -121,9 +123,8 @@ func resumePendingRedactionAmend(ctx context.Context, ledgerPath string) (bool, 
 }
 
 // applyPendingRedactionAmend stages the recorded blobs and amends HEAD with
-// only those paths. An index entry holding anything other than the holding
-// commit's blob or the recorded blob, or a different mode, belongs to another
-// writer and is never replaced. The record is kept until the amendment succeeds.
+// only those paths. An index entry other than the holding commit's entry or
+// the recorded blob and mode belongs to another writer and is never replaced. The record is kept until the amendment succeeds.
 func applyPendingRedactionAmend(ctx context.Context, ledgerPath string, rec *pendingRedactionAmend) error {
 	var info bytes.Buffer
 	pathspecs := make([]string, 0, len(rec.Paths))
@@ -135,7 +136,7 @@ func applyPendingRedactionAmend(ctx context.Context, ledgerPath string, rec *pen
 		if err != nil {
 			return err
 		}
-		if (staged != p.Blob && staged != p.HoldingBlob) || (stagedMode != "" && stagedMode != p.Mode) {
+		if !pendingRedactionOwnsIndexEntry(p, stagedMode, staged) {
 			return fmt.Errorf("refusing to replace staged changes to %s; commit or unstage them, then retry", p.Path)
 		}
 		fmt.Fprintf(&info, "%s %s\t%s\x00", p.Mode, p.Blob, p.Path)
@@ -213,22 +214,36 @@ func indexEntry(ctx context.Context, ledgerPath, rel string) (mode, blob string,
 	return fields[0], fields[1], nil
 }
 
-// treeBlob returns rel's blob in commit, or "" when the commit lacks it.
-func treeBlob(ctx context.Context, ledgerPath, commit, rel string) (string, error) {
+// pendingRedactionOwnsIndexEntry reports whether the index entry is still the
+// holding commit's or the recorded repair's, so staging the repair replaces
+// nothing another writer staged.
+func pendingRedactionOwnsIndexEntry(p pendingRedactionPath, mode, blob string) bool {
+	if blob == "" {
+		return p.HoldingBlob == ""
+	}
+	if blob == p.HoldingBlob && mode == p.HoldingMode {
+		return true
+	}
+	return (blob == p.Blob || blob == p.HoldingBlob) && mode == p.Mode
+}
+
+// treeEntry returns rel's mode and blob in commit, or empty strings when the
+// commit lacks it.
+func treeEntry(ctx context.Context, ledgerPath, commit, rel string) (mode, blob string, err error) {
 	out, err := redactGit(ctx, ledgerPath, nil, "ls-tree", "-z", commit, "--", ":(literal)"+rel)
 	if err != nil {
-		return "", fmt.Errorf("read %s in holding commit: %w", rel, err)
+		return "", "", fmt.Errorf("read %s in holding commit: %w", rel, err)
 	}
 	entry, _, _ := strings.Cut(out, "\x00")
 	if entry == "" {
-		return "", nil
+		return "", "", nil
 	}
 	meta, _, _ := strings.Cut(entry, "\t")
 	fields := strings.Fields(meta)
 	if len(fields) != 3 || fields[1] != "blob" {
-		return "", fmt.Errorf("unexpected tree entry for %s", rel)
+		return "", "", fmt.Errorf("unexpected tree entry for %s", rel)
 	}
-	return fields[2], nil
+	return fields[0], fields[2], nil
 }
 
 // isAncestor reports whether commit is in head's history. A commit that no
