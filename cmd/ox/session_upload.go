@@ -9,6 +9,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -356,9 +357,14 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 
 		// --sparse: ledger repos use sparse-checkout (cone mode); this flag
 		// prevents git from blocking adds if sparse rules change or edge cases arise
+		priorIndex, err := ledgerIndexEntries(ledgerPath, filesToAdd)
+		if err != nil {
+			return err
+		}
 		addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, filesToAdd...)
 		addCmd := exec.Command("git", addArgs...)
 		if output, err := addCmd.CombinedOutput(); err != nil {
+			restoreLedgerIndex(ledgerPath, filesToAdd, priorIndex)
 			return fmt.Errorf("git add failed: %s: %w", string(output), err)
 		}
 
@@ -371,6 +377,7 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 		// staged after the snapshot is neither vetted-away nor swept in. See #749 and
 		// the PR #811 review (validation↔commit TOCTOU).
 		if _, err := commitLedgerSnapshot(context.Background(), ledgerPath, fmt.Sprintf("session: %s", sessionName)); err != nil {
+			restoreLedgerIndex(ledgerPath, filesToAdd, priorIndex)
 			return fmt.Errorf("committing ledger: %w", err)
 		}
 		return nil
@@ -381,6 +388,37 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 	// An identical retry may have no new commit but still owe the remote the
 	// pointer commit from a failed push. Always retry publication.
 	return pushLedger(context.Background(), ledgerPath)
+}
+
+// ledgerIndexEntries records the index entries at paths, in the -z form
+// `git update-index --index-info` reads back.
+func ledgerIndexEntries(ledgerPath string, paths []string) ([]byte, error) {
+	args := append([]string{"-C", ledgerPath, "ls-files", "--stage", "-z", "--"}, paths...)
+	out, err := exec.Command("git", args...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("read Ledger index: %w", err)
+	}
+	return out, nil
+}
+
+// restoreLedgerIndex puts the index entries at paths back to prior, as
+// recorded by ledgerIndexEntries, so a refused commit neither leaves what it
+// staged for the next Ledger commit nor drops changes staged before it. The
+// worktree is untouched. Best-effort: the caller is already failing.
+func restoreLedgerIndex(ledgerPath string, paths []string, prior []byte) {
+	args := append([]string{"-C", ledgerPath, "reset", "-q", "--"}, paths...)
+	if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+		slog.Warn("unstage refused Ledger commit", "error", err, "output", strings.TrimSpace(string(output)))
+		return
+	}
+	if len(prior) == 0 {
+		return
+	}
+	cmd := exec.Command("git", "-C", ledgerPath, "update-index", "-z", "--index-info")
+	cmd.Stdin = bytes.NewReader(prior)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		slog.Warn("restore Ledger index after refused commit", "error", err, "output", strings.TrimSpace(string(output)))
+	}
 }
 
 // commitAndPushLedgerWithExtras is a thin compatibility shim around
