@@ -100,7 +100,7 @@ server applies caps at projection time):
 {"v":1, "conversation_id":"cnv_<uuidv7>", "seq":42, "revision":0, "kind":"turn",
  "turn":{
    "entry_seq":37,
-   "role":"assistant", "author_kind":"coworker", "participant_kind":"agent",
+   "role":"assistant", "author_kind":"agent",
    "content":"…redacted content…", "ts":"2026-07-17T01:02:03.456Z",
    "client_turn_id":"<eid>", "redacted":false,
    "tool_calls":[{"tool_use_id":"…", "name":"Bash", "summary":"…",
@@ -159,12 +159,17 @@ Frame-kind idempotency beyond the dedup key: `open` is additionally idempotent b
 
 ### Mapping `SessionEntry` → `turn`
 
+`author_kind` uses the conversation turn format's closed actor set: `human`, `agent`, `service`,
+`automation`. There is no separate `participant_kind`: participants are derived from turn
+authors, never stored. A resolved identity, when known, is `usr_` for a person or `agt_` for an AI
+coworker.
+
 | `SessionEntry` (raw.jsonl) | stream `turn` |
 |---|---|
-| `type: user` | `role: user`, `author_kind: human`, `participant_kind: human` |
-| `type: assistant` | `role: assistant`, `author_kind: coworker`, `participant_kind: agent` |
-| `type: tool` | `role: tool`, `author_kind: tool`, `participant_kind: agent` |
-| `type: system` | `role: tool`, `author_kind: tool`, `participant_kind: service` |
+| `type: user` | `role: user`, `author_kind: human` |
+| `type: assistant` | `role: assistant`, `author_kind: agent` |
+| `type: tool` | `role: tool`, `author_kind: agent` (the agent is the effective actor of its own tool calls) |
+| `type: system` | `role: tool`, `author_kind: service` |
 | `content` | `content` (already redacted) |
 | `ts` | `ts` |
 | `seq` (entry) | `turn.entry_seq` |
