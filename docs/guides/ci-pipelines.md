@@ -1,6 +1,6 @@
 # Using ox in CI/CD Pipelines
 
-> **Work in progress.** Full CI/CD pipeline support is not yet available. As of March 2026, `ox login` requires interactive browser-based authentication — there is no service account or token-based auth for headless environments yet. The environment variables below are available now and useful for **devroot workflows** (running ox from a parent directory) and **local automation** (scripts on an already-authenticated machine).
+> **Headless auth:** a machine with no browser authenticates with a team token in `SAGEOX_TOKEN`. See [Running ox under a team token](#running-ox-under-a-team-token). The other variables below also help **devroot workflows** (running ox from a parent directory) and **local automation** (scripts on an already-authenticated machine).
 
 ---
 
@@ -111,6 +111,38 @@ The JSON report is still written on check failures, with `summary.has_failed`
 and individual check details. Invocation errors or interruption can stop the
 command before a complete report is available. Scripts that previously relied
 on JSON mode always exiting 0 should handle its exit status explicitly.
+
+---
+
+## Running ox under a team token
+
+A team token (`oxt_…`) belongs to one AI coworker on the team. Set it as `SAGEOX_TOKEN` and ox acts as that coworker, with no `ox login`:
+
+```bash
+export SAGEOX_TOKEN="$OX_TEAM_TOKEN"   # from your CI secret store
+ox agent prime
+```
+
+**Who the work belongs to.** ox asks the server which AI coworker the token belongs to, then records everything as that coworker:
+
+- Sessions have the coworker's `agt_…` ID as `user_id`, and their origin is `agent`.
+- Murmurs carry `principal_type: "ai"`.
+- Plans are authored by the coworker.
+- Ledger commits are authored as `<Name> <agt_…@ai-coworker.invalid>`, never as the machine's git user.
+
+A team token with no AI coworker attached is refused: ox records no session and sends no murmur rather than use the machine's git identity.
+
+**Git credentials.** ox exchanges the token for a short-lived Git PAT, tied to that token. A Git 401 makes ox fetch a fresh PAT. If the token was revoked, nothing is minted, and the error says to rotate or re-mint the team token and update `SAGEOX_TOKEN`.
+
+**Before the machine goes away.** Wait until every session from this job is in the Ledger:
+
+```bash
+ox session wait --since "$JOB_STARTED_AT" --timeout 10m --json
+```
+
+The report counts `in_ledger` and lists `older_pending` (sessions from earlier jobs) and `failed`. The command exits 0 only when every session is uploaded.
+
+**Machines that live for one job.** Set `disposable_machine: true` in the user config (`OX_USER_CONFIG`) when the machine is thrown away after each job but its home directory persists.
 
 ---
 

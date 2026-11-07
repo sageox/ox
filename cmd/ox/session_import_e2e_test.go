@@ -61,7 +61,8 @@ type fakeLFSStore struct {
 	mu        sync.Mutex
 	objects   map[string][]byte // bare sha256 hex -> bytes
 	url       string
-	failBatch bool // answer every batch request with a server error
+	failBatch bool             // answer every batch request with a server error
+	fallback  http.HandlerFunc // answers every path the store does not serve
 }
 
 func newFakeLFSStore(t *testing.T) *fakeLFSStore {
@@ -109,7 +110,13 @@ func newFakeLFSStore(t *testing.T) *fakeLFSStore {
 		case r.URL.Path == "/verify":
 			w.WriteHeader(http.StatusOK)
 		default:
-			http.NotFound(w, r)
+			s.mu.Lock()
+			fallback := s.fallback
+			s.mu.Unlock()
+			if fallback == nil {
+				fallback = http.NotFound
+			}
+			fallback(w, r)
 		}
 	}))
 	t.Cleanup(server.Close)

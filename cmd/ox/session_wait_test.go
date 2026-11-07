@@ -32,6 +32,7 @@ type waitFixture struct {
 	projectRoot string
 	ledgerPath  string
 	barePath    string
+	store       *fakeLFSStore
 }
 
 func newWaitFixture(t *testing.T) *waitFixture {
@@ -87,7 +88,7 @@ func newWaitFixture(t *testing.T) *waitFixture {
 	runGit(t, ledgerPath, "remote", "set-url", "--push", "origin", barePath)
 
 	t.Chdir(projectRoot)
-	return &waitFixture{projectRoot: projectRoot, ledgerPath: ledgerPath, barePath: barePath}
+	return &waitFixture{projectRoot: projectRoot, ledgerPath: ledgerPath, barePath: barePath, store: store}
 }
 
 // record starts a recording owned by ownerPID, with two captured turns.
