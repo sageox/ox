@@ -162,13 +162,18 @@ func TestPullManagedRepo_ConcurrentFetchDoesNotCorruptFETCH_HEAD(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// peer fetcher: the post-ADR-030 shape of every other ox fetch site.
+	// peer fetcher: the post-ADR-030 shape of every other ox fetch site,
+	// including its cancellation. cancel() below interrupts a fetch in flight;
+	// a bare exec.CommandContext would SIGKILL it, and a git killed while
+	// updating refs/remotes/origin/main leaves main.lock behind for the final
+	// pull to trip over (#1569). NewNetworkCmd sends SIGTERM, which git
+	// handles by removing its lock files.
 	peerDone := make(chan struct{})
 	go func() {
 		defer close(peerDone)
 		for ctx.Err() == nil {
 			_ = gitutil.WithRepoLock(ctx, local, func() error {
-				cmd := exec.CommandContext(ctx, "git", "-C", local, "fetch", "--quiet") // safe: git in a temp dir
+				cmd := gitutil.NewNetworkCmd(ctx, "-C", local, "fetch", "--quiet")
 				cmd.Env = gitEnv()
 				_, _ = cmd.CombinedOutput()
 				return nil

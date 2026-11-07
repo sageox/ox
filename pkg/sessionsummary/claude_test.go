@@ -32,7 +32,7 @@ func TestDefaultSummaryModel_Override(t *testing.T) {
 }
 
 // TestDefaultSummaryModel_EmptyOverride verifies that OX_SUMMARY_MODEL=
-// (set to empty) is distinct from unset — it returns "" so InvokeClaude
+// (set to empty) is distinct from unset — it returns "" so the summary run
 // omits --model and defers to the user's local default. Failure
 // prevented: rollback to pre-Haiku behavior unavailable, blocking ops
 // from fast-rolling back if Haiku quality regresses.

@@ -199,63 +199,168 @@ func DisableCommitSigning(repoPath string) (changed bool, err error) {
 	return changed, nil
 }
 
-// TeamCoworkerGetter reports the endpoint SAGEOX_TOKEN is bound to and, when
-// that token is a team token acting as an AI coworker, the coworker's name and
-// agt_ id; id is "" otherwise. Set by the auth package to avoid circular
-// imports. Nil reads as no coworker.
-var TeamCoworkerGetter func() (ep, name, id string)
+// LedgerAuthorGetter reports who authors the commits ox makes in a clone whose
+// origin is remoteURL: the AI coworker a team token acts as, else the SageOx
+// account signed in, on that clone's git server. Both are "" when neither
+// applies there. Set by cmd/ox, which can reach auth, identity and user
+// config. Nil reads as nobody.
+var LedgerAuthorGetter func(remoteURL string) (name, email string)
 
-// coworkerEmailDomain ends the user.email stampCoworkerAuthor writes, and is
-// how it recognizes its own stamp. ".invalid" (RFC 2606) never resolves, so
-// the address belongs to no one.
+// coworkerEmailDomain ends an AI coworker's git address. ".invalid" (RFC 2606)
+// never resolves, so the address belongs to no one. Stamps written before
+// authorStampKey existed are recognized by it.
 const coworkerEmailDomain = "@ai-coworker.invalid"
 
-// stampCoworkerAuthor makes the AI coworker a team token acts as the git
-// identity of the clone at repoPath. ox's Ledger writers commit through several
-// git paths, and all of them take author and committer from user.name and
-// user.email, which git reads from the clone's own config ahead of the
-// machine's global one (GIT_AUTHOR_* and GIT_COMMITTER_* still override both).
-// It stamps a clone only when its origin is on the server the token is bound
-// to. Otherwise it removes an identity it stamped earlier, such as one a team
-// token left on a person's machine, and leaves any other alone.
-func stampCoworkerAuthor(repoPath, remoteURL string) error {
-	var name, email string
-	if TeamCoworkerGetter != nil {
-		if ep, n, id := TeamCoworkerGetter(); id != "" && endpointHostsEqual(ep, endpointFromRemoteURL(remoteURL)) {
-			name, email = n, id+coworkerEmailDomain
-		}
+// CoworkerEmail is the git address of the AI coworker whose agt_ id is id.
+func CoworkerEmail(id string) string { return id + coworkerEmailDomain }
+
+// authorStampKey records the identity ox wrote into a repository's local
+// config, as "name <email>", so ox changes or removes only that identity and
+// never one a person set, even after someone edits what ox wrote.
+const authorStampKey = "sageox.authorstamp"
+
+// stampValue is what authorStampKey holds for an identity ox writes.
+func stampValue(name, email string) string { return name + " <" + email + ">" }
+
+// ownsIdentity reports whether the local identity name and email in a
+// repository is the one ox stamped there, given the repository's stamp. A field
+// may be empty: ox writes and removes the two separately, so an interrupted
+// stamp leaves one of them unset, and is still ox's to finish.
+func ownsIdentity(stamp, name, email string) bool {
+	switch stamp {
+	case "true": // Ledger clones stamped before the stamp recorded the identity
+		return true
+	case "": // a coworker stamp from before there was a stamp at all
+		return strings.HasSuffix(email, coworkerEmailDomain)
 	}
+	i := strings.LastIndex(stamp, " <")
+	if i < 0 || !strings.HasSuffix(stamp, ">") {
+		return false
+	}
+	stampedName, stampedEmail := stamp[:i], stamp[i+2:len(stamp)-1]
+	return (name == "" || name == stampedName) && (email == "" || email == stampedEmail)
+}
+
+// failConfigWrite, set only by tests, can fail a local config write to
+// simulate a stamp interrupted partway.
+var failConfigWrite func() error
+
+// stampLedgerAuthor sets who authors the commits ox makes in the clone at
+// repoPath. ox's Ledger writers commit through several git paths, and all of
+// them take author and committer from user.name and user.email, which git reads
+// from the clone's own config ahead of the machine's global one (GIT_AUTHOR_*
+// and GIT_COMMITTER_* still override both).
+//
+// The identity comes from LedgerAuthorGetter, so a machine with no git
+// identity can still save sessions; with none, git's own identity applies.
+// The clone is ox's, so the stamp replaces any identity set in it.
+func stampLedgerAuthor(repoPath, remoteURL string) error {
+	var name, email string
+	if LedgerAuthorGetter != nil {
+		name, email = LedgerAuthorGetter(remoteURL)
+	}
+	return stampAuthor(repoPath, name, email, true)
+}
+
+// StampProjectAuthor makes name and email the commit identity of the person's
+// repository at repoPath, so an AI coworker working there commits as itself,
+// or, with email "", removes an identity ox stamped there earlier. The
+// repository is the person's: an identity someone else set in its local
+// config is never replaced or removed.
+func StampProjectAuthor(repoPath, name, email string) error {
+	return stampAuthor(repoPath, name, email, false)
+}
+
+// stampAuthor writes name and email as repoPath's local commit identity, or,
+// with email "", removes an identity ox stamped earlier and leaves any other.
+// replaceForeign says whether an identity ox did not stamp may be replaced.
+// An identity someone changed after ox stamped it is theirs: ox drops its
+// stamp and treats the identity as foreign.
+func stampAuthor(repoPath, name, email string, replaceForeign bool) error {
 	// A failed read counts as unset: removal waits for the next call, and a
 	// write reports its own failure.
 	current, _ := readGitConfigLocal(repoPath, "user.email")
+	currentName, _ := readGitConfigLocal(repoPath, "user.name")
+	stamp, _ := readGitConfigLocal(repoPath, authorStampKey)
+	ours := ownsIdentity(stamp, currentName, current)
+	if stamp != "" && !ours {
+		if err := unsetLocalConfig(repoPath, authorStampKey); err != nil {
+			return err
+		}
+		stamp = ""
+	}
 
 	if email == "" {
-		if !strings.HasSuffix(current, coworkerEmailDomain) {
+		if !ours {
 			return nil
 		}
-		// user.email goes last because it marks the stamp: if removing
-		// user.name fails, the next call still finds the stamp and finishes.
-		for _, key := range []string{"user.name", "user.email"} {
-			out, err := exec.Command("git", "-C", repoPath, "config", "--local", "--unset-all", key).CombinedOutput()
-			var exitErr *exec.ExitError
-			if asErr(err, &exitErr) && exitErr.ExitCode() == 5 {
-				continue // already unset
-			}
-			if err != nil {
-				return fmt.Errorf("git config --unset-all %s: %s: %w", key, strings.TrimSpace(string(out)), err)
+		// The stamp goes last: if removing user.name or user.email fails,
+		// the next call still finds it and finishes.
+		for _, key := range []string{"user.name", "user.email", authorStampKey} {
+			if err := unsetLocalConfig(repoPath, key); err != nil {
+				return err
 			}
 		}
 		return nil
 	}
 
-	if currentName, _ := readGitConfigLocal(repoPath, "user.name"); current == email && currentName == name {
+	if !ours && !replaceForeign && (current != "" || currentName != "") {
 		return nil
 	}
-	for _, kv := range [][2]string{{"user.name", name}, {"user.email", email}} {
-		out, err := exec.Command("git", "-C", repoPath, "config", "--local", "--replace-all", kv[0], kv[1]).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("git config %s: %s: %w", kv[0], strings.TrimSpace(string(out)), err)
+	want := stampValue(name, email)
+	if current == email && currentName == name && stamp == want {
+		return nil
+	}
+	// Each step below leaves a state ownsIdentity still reads as ox's, so a
+	// write interrupted after any of them is finished by the next call rather
+	// than taken for a person's. Replacing ox's own identity therefore clears
+	// it first, under the stamp that names it; then the stamp names the new
+	// identity before either field holds it.
+	if ours && stamp != want {
+		for _, key := range []string{"user.name", "user.email"} {
+			if err := unsetLocalConfig(repoPath, key); err != nil {
+				return err
+			}
 		}
+	}
+	for _, kv := range [][2]string{{authorStampKey, want}, {"user.name", name}, {"user.email", email}} {
+		if err := setLocalConfig(repoPath, kv[0], kv[1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// setLocalConfig sets key to value in repoPath's local config, replacing every
+// earlier value.
+func setLocalConfig(repoPath, key, value string) error {
+	if failConfigWrite != nil {
+		if err := failConfigWrite(); err != nil {
+			return err
+		}
+	}
+	out, err := exec.Command("git", "-C", repoPath, "config", "--local", "--replace-all", key, value).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git config %s: %s: %w", key, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// unsetLocalConfig removes every value of key from repoPath's local config;
+// a key that is already absent is not an error.
+func unsetLocalConfig(repoPath, key string) error {
+	if failConfigWrite != nil {
+		if err := failConfigWrite(); err != nil {
+			return err
+		}
+	}
+	out, err := exec.Command("git", "-C", repoPath, "config", "--local", "--unset-all", key).CombinedOutput()
+	var exitErr *exec.ExitError
+	if asErr(err, &exitErr) && exitErr.ExitCode() == 5 {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("git config --unset-all %s: %s: %w", key, strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
@@ -263,7 +368,7 @@ func stampCoworkerAuthor(repoPath, remoteURL string) error {
 // MigrateLedgerCredentials performs the one-shot migration for a single
 // ledger: disable commit signing, strip any embedded oauth2:TOKEN from the
 // origin URL, then install the ox credential helper for the resulting bare
-// host. It also sets who authors the clone's commits (stampCoworkerAuthor).
+// host. It also sets who authors the clone's commits (stampLedgerAuthor).
 // Idempotent — safe to invoke on every daemon startup.
 //
 // Returns ok=true if the migration ran (signing disabled, stripped, or
@@ -294,8 +399,8 @@ func MigrateLedgerCredentials(repoPath string, helperCmd string) (changed bool, 
 
 	// Logged, not returned: RefreshRemoteCredentials runs this before Ledger
 	// pushes, and a push must not fail over who authored it.
-	if err := stampCoworkerAuthor(repoPath, remoteURL); err != nil {
-		slog.Warn("set AI coworker as commit author failed", "repo", repoPath, "error", err)
+	if err := stampLedgerAuthor(repoPath, remoteURL); err != nil {
+		slog.Warn("set Ledger commit author failed", "repo", repoPath, "error", err)
 	}
 
 	// Only migrate https:// remotes with the ox-managed oauth2 prefix. A

@@ -3,8 +3,10 @@ package claude
 import (
 	"bufio"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/sageox/ox/internal/constants"
@@ -159,6 +161,11 @@ func discoverAgentsIn(agentsDir string) ([]Agent, error) {
 
 		name := strings.TrimSuffix(entry.Name(), ".md")
 		agentPath := filepath.Join(agentsDir, entry.Name())
+		// a profile `ox coworker load` would refuse must not be advertised
+		if err := ValidateAgentName(name); err != nil {
+			slog.Warn("skipping coworker profile with invalid name; rename it", "path", agentPath, "error", err)
+			continue
+		}
 
 		agent := Agent{
 			Name: name,
@@ -245,6 +252,9 @@ func LoadAgent(teamPath, name string) (*AgentContent, error) {
 	if teamPath == "" || name == "" {
 		return nil, nil
 	}
+	if err := ValidateAgentName(name); err != nil {
+		return nil, err
+	}
 
 	agentPath, ok := findInProfileDirs(teamPath, name+".md")
 	if !ok {
@@ -266,6 +276,19 @@ func LoadAgent(teamPath, name string) (*AgentContent, error) {
 		Path:        agentPath,
 		Content:     string(data),
 	}, nil
+}
+
+// ValidateAgentName requires a coworker name to be a single path element, so
+// joining it under a profile directory can never select a file elsewhere in
+// (or outside) the Team Context: filepath.Join cleans "../../README" into the
+// repo root's README.md. Both separators are rejected on every platform; a
+// colon is also rejected on Windows, where it names a drive or an NTFS stream.
+func ValidateAgentName(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") ||
+		(runtime.GOOS == "windows" && strings.ContainsRune(name, ':')) {
+		return fmt.Errorf("invalid coworker name %q: must be a single name without path separators", name)
+	}
+	return nil
 }
 
 // ValidateAgentFile validates that a file is a valid coworker agent definition.

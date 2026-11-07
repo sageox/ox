@@ -24,3 +24,9 @@ extensions/packs/**/*.md text eol=lf
 # fail both checks on Windows.
 internal/plan/assets/review.* text eol=lf
 packages/plan-review/** text eol=lf
+
+# >>> sageox-design: written by ox-design sync; edits inside this block are overwritten
+/design/musts.md linguist-generated=true
+/design/ox-cli.md linguist-generated=true
+/internal/theme/generated.go linguist-generated=true
+# <<< sageox-design

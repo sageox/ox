@@ -1,6 +1,7 @@
 package gitserver
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -174,13 +175,17 @@ func TestMigrateLedgerCredentials_DisablesSigningWithoutRemote(t *testing.T) {
 }
 
 // ledgerCloneOf returns a repo whose origin is the Ledger URL remoteURL, with
-// TeamCoworkerGetter reporting id (and the name "Rip") for a token bound to
-// tokenEp.
-func ledgerCloneOf(t *testing.T, remoteURL, tokenEp, id string) string {
+// LedgerAuthorGetter reporting author for it.
+func ledgerCloneOf(t *testing.T, remoteURL string, author [2]string) string {
 	t.Helper()
-	orig := TeamCoworkerGetter
-	t.Cleanup(func() { TeamCoworkerGetter = orig })
-	TeamCoworkerGetter = func() (string, string, string) { return tokenEp, "Rip", id }
+	orig := LedgerAuthorGetter
+	t.Cleanup(func() { LedgerAuthorGetter = orig })
+	LedgerAuthorGetter = func(got string) (string, string) {
+		if got != remoteURL {
+			return "", ""
+		}
+		return author[0], author[1]
+	}
 
 	dir := t.TempDir()
 	for _, args := range [][]string{{"init", "--quiet"}, {"remote", "add", "origin", remoteURL}} {
@@ -201,38 +206,75 @@ func localIdentity(t *testing.T, dir string) [2]string {
 	return id
 }
 
-// Failure prevented: a team token's Ledger commits carry the machine's git
-// identity, a clone on another server takes the coworker's, a renamed coworker
-// keeps its old name, or a person's clone keeps an AI coworker's identity or
-// loses its own identity or other user settings.
-func TestMigrateLedgerCredentials_StampsCoworkerAuthor(t *testing.T) {
-	coworker := [2]string{"Rip", "agt_rip@ai-coworker.invalid"}
-	person := [2]string{"Devon", "devon@example.com"}
+// setLocalIdentity writes before as dir's local user.name and user.email, and
+// stamp as ox's stamp when it is not "".
+func setLocalIdentity(t *testing.T, dir string, before [2]string, stamp string) {
+	t.Helper()
+	for i, key := range []string{"user.name", "user.email"} {
+		if before[i] != "" {
+			require.NoError(t, exec.Command("git", "-C", dir, "config", key, before[i]).Run())
+		}
+	}
+	if stamp != "" {
+		require.NoError(t, exec.Command("git", "-C", dir, "config", authorStampKey, stamp).Run())
+	}
+}
+
+// stampOf is the stamp ox leaves for the identity id.
+func stampOf(id [2]string) string { return stampValue(id[0], id[1]) }
+
+// Failure prevented: an AI coworker's git address changes shape, so ox no
+// longer recognizes the stamps it wrote and never removes them.
+func TestCoworkerEmail_EndsInTheStampDomain(t *testing.T) {
+	assert.Equal(t, "agt_rip@ai-coworker.invalid", CoworkerEmail("agt_rip"))
+}
+
+var (
+	coworkerAuthor = [2]string{"Rip", "agt_rip@ai-coworker.invalid"}
+	accountAuthor  = [2]string{"Devon E.", "usr_devon@sageox-account.invalid"}
+	personAuthor   = [2]string{"Person B", "person-b@example.com"}
+)
+
+// Failure prevented: a Ledger commit carries the machine's git identity
+// instead of the coworker or account ox resolved, a renamed author keeps its
+// old name, a stamp outlives its token or sign-in, or removing one strips an
+// identity a person set or their other user settings.
+func TestMigrateLedgerCredentials_StampsTheLedgerAuthor(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		tokenEp, id string    // what TeamCoworkerGetter reports
-		before      [2]string // the clone's own user.name and user.email
-		want        [2]string
+		name   string
+		author [2]string // what LedgerAuthorGetter reports
+		before [2]string // the clone's own user.name and user.email
+		stamp  string    // ox's stamp in the clone, or ""
+		want   [2]string
 	}{
-		{"coworker for this server", "https://sageox.ai", "agt_rip", [2]string{}, coworker},
-		{"coworker renamed", "https://sageox.ai", "agt_rip", [2]string{"Old Rip", coworker[1]}, coworker},
-		{"coworker for another server", "https://test.sageox.ai", "agt_rip", [2]string{}, [2]string{}},
-		{"no coworker removes the stamp", "https://sageox.ai", "", coworker, [2]string{}},
-		{"no coworker finishes a half-removed stamp", "https://sageox.ai", "", [2]string{"", coworker[1]}, [2]string{}},
-		{"no coworker keeps a person's identity", "https://sageox.ai", "", person, person},
+		{"stamps the coworker", coworkerAuthor, [2]string{}, "", coworkerAuthor},
+		{"stamps the account", accountAuthor, [2]string{}, "", accountAuthor},
+		{"a renamed author replaces its old stamp", coworkerAuthor, [2]string{"Old Rip", coworkerAuthor[1]}, "", coworkerAuthor},
+		{"replaces a person's identity in ox's clone", accountAuthor, personAuthor, "", accountAuthor},
+		{"replaces a person's edit of ox's stamp", accountAuthor, personAuthor, stampOf(accountAuthor), accountAuthor},
+		{"no author removes the stamp", [2]string{}, accountAuthor, stampOf(accountAuthor), [2]string{}},
+		{"no author removes a stamp that did not record its identity", [2]string{}, accountAuthor, "true", [2]string{}},
+		{"no author removes a stamp from before the marker", [2]string{}, coworkerAuthor, "", [2]string{}},
+		{"no author finishes a half-removed stamp", [2]string{}, [2]string{}, stampOf(accountAuthor), [2]string{}},
+		{"no author finishes a half-removed old stamp", [2]string{}, [2]string{"", coworkerAuthor[1]}, "", [2]string{}},
+		{"no author keeps a person's identity", [2]string{}, personAuthor, "", personAuthor},
+		{"no author keeps a person's edit of ox's stamp", [2]string{}, personAuthor, stampOf(accountAuthor), personAuthor},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := ledgerCloneOf(t, "https://git.sageox.ai/team/ledger.git", tc.tokenEp, tc.id)
+			dir := ledgerCloneOf(t, "https://git.sageox.ai/team/ledger.git", tc.author)
 			require.NoError(t, exec.Command("git", "-C", dir, "config", "user.signingkey", "keep").Run())
-			for i, key := range []string{"user.name", "user.email"} {
-				if tc.before[i] != "" {
-					require.NoError(t, exec.Command("git", "-C", dir, "config", key, tc.before[i]).Run())
-				}
-			}
+			setLocalIdentity(t, dir, tc.before, tc.stamp)
 
 			_, err := MigrateLedgerCredentials(dir, "!ox git-credential-helper")
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, localIdentity(t, dir))
+			stamp, err := readGitConfigLocal(dir, authorStampKey)
+			require.NoError(t, err)
+			wantStamp := ""
+			if tc.author != [2]string{} {
+				wantStamp = stampOf(tc.author)
+			}
+			assert.Equal(t, wantStamp, stamp, "the stamp must name exactly the identity ox wrote")
 			signingKey, err := readGitConfigLocal(dir, "user.signingkey")
 			require.NoError(t, err)
 			assert.Equal(t, "keep", signingKey, "only user.name and user.email are ox's to change")
@@ -240,16 +282,114 @@ func TestMigrateLedgerCredentials_StampsCoworkerAuthor(t *testing.T) {
 	}
 }
 
+// Failure prevented: an AI coworker's commits in a person's repository fail on
+// a machine without a git identity or carry the machine's identity; or ox
+// overwrites or deletes an identity the person set in their own repository,
+// including one they set over an identity ox stamped.
+func TestStampProjectAuthor_NeverTouchesAPersonsIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		author [2]string
+		before [2]string
+		stamp  string
+		want   [2]string
+	}{
+		{"stamps the coworker", coworkerAuthor, [2]string{}, "", coworkerAuthor},
+		{"replaces its own earlier stamp", coworkerAuthor, [2]string{"Old Rip", "agt_old@ai-coworker.invalid"}, stampOf([2]string{"Old Rip", "agt_old@ai-coworker.invalid"}), coworkerAuthor},
+		{"keeps a person's identity", coworkerAuthor, personAuthor, "", personAuthor},
+		{"keeps a person's partial identity", coworkerAuthor, [2]string{personAuthor[0], ""}, "", [2]string{personAuthor[0], ""}},
+		{"keeps a person's edit of its stamp", coworkerAuthor, personAuthor, stampOf(coworkerAuthor), personAuthor},
+		{"keeps a person's edit of only the name", coworkerAuthor, [2]string{personAuthor[0], coworkerAuthor[1]}, stampOf(coworkerAuthor), [2]string{personAuthor[0], coworkerAuthor[1]}},
+		{"no coworker removes its stamp", [2]string{}, coworkerAuthor, stampOf(coworkerAuthor), [2]string{}},
+		{"no coworker keeps a person's identity", [2]string{}, personAuthor, "", personAuthor},
+		{"no coworker keeps a person's edit of its stamp", [2]string{}, personAuthor, stampOf(coworkerAuthor), personAuthor},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, exec.Command("git", "-C", dir, "init", "--quiet").Run())
+			setLocalIdentity(t, dir, tc.before, tc.stamp)
+
+			require.NoError(t, StampProjectAuthor(dir, tc.author[0], tc.author[1]))
+			assert.Equal(t, tc.want, localIdentity(t, dir))
+			stamp, err := readGitConfigLocal(dir, authorStampKey)
+			require.NoError(t, err)
+			wantStamp := ""
+			if tc.want == coworkerAuthor {
+				wantStamp = stampOf(coworkerAuthor)
+			}
+			assert.Equal(t, wantStamp, stamp, "the stamp must name exactly the identity ox wrote, or be gone")
+		})
+	}
+}
+
 // Failure prevented: a Ledger push fails because its author could not be
 // stamped — here because another writer holds the lock on .git/config.
 func TestMigrateLedgerCredentials_StampFailureDoesNotFail(t *testing.T) {
-	dir := ledgerCloneOf(t, "https://git.sageox.ai/team/ledger.git", "https://sageox.ai", "")
+	dir := ledgerCloneOf(t, "https://git.sageox.ai/team/ledger.git", [2]string{})
 	_, err := MigrateLedgerCredentials(dir, "!ox git-credential-helper") // nothing left to write but the stamp
 	require.NoError(t, err)
-	TeamCoworkerGetter = func() (string, string, string) { return "https://sageox.ai", "Rip", "agt_rip" }
+	LedgerAuthorGetter = func(string) (string, string) { return coworkerAuthor[0], coworkerAuthor[1] }
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git", "config.lock"), nil, 0o644))
 
 	_, err = MigrateLedgerCredentials(dir, "!ox git-credential-helper")
 	require.NoError(t, err)
 	assert.Equal(t, [2]string{}, localIdentity(t, dir), "the stamp should have failed on the held lock")
+}
+
+// Failure prevented: a stamp interrupted between two git config writes (a
+// crash, a held lock) leaves ox's own partial identity, which the next call
+// takes for a person's: a project prime never finishes writing the coworker,
+// or a sign-out leaves the account's address behind. Each case interrupts
+// after every individual write, then runs again and expects the finished state.
+func TestStampAuthor_FinishesAfterAnInterruptionAtEveryStep(t *testing.T) {
+	oldAuthor := [2]string{"Old Rip", "agt_old@ai-coworker.invalid"}
+	for _, tc := range []struct {
+		name    string
+		before  [2]string
+		stamp   string
+		author  [2]string
+		project bool
+	}{
+		{"project: first stamp", [2]string{}, "", coworkerAuthor, true},
+		{"project: replacing its own stamp", oldAuthor, stampOf(oldAuthor), coworkerAuthor, true},
+		{"project: removing its stamp", coworkerAuthor, stampOf(coworkerAuthor), [2]string{}, true},
+		{"ledger: first stamp", [2]string{}, "", accountAuthor, false},
+		{"ledger: replacing its own stamp", accountAuthor, stampOf(accountAuthor), coworkerAuthor, false},
+		{"ledger: removing its stamp", accountAuthor, stampOf(accountAuthor), [2]string{}, false},
+	} {
+		for failAt := 1; ; failAt++ {
+			dir := t.TempDir()
+			require.NoError(t, exec.Command("git", "-C", dir, "init", "--quiet").Run())
+			setLocalIdentity(t, dir, tc.before, tc.stamp)
+			stamp := func() error {
+				if tc.project {
+					return StampProjectAuthor(dir, tc.author[0], tc.author[1])
+				}
+				return stampAuthor(dir, tc.author[0], tc.author[1], true)
+			}
+
+			writes := 0
+			failConfigWrite = func() error {
+				if writes++; writes == failAt {
+					return errors.New("interrupted")
+				}
+				return nil
+			}
+			interrupted := stamp() != nil
+			failConfigWrite = nil
+			require.NoError(t, stamp(), "%s, interrupted at write %d", tc.name, failAt)
+
+			assert.Equal(t, tc.author, localIdentity(t, dir), "%s, interrupted at write %d", tc.name, failAt)
+			got, err := readGitConfigLocal(dir, authorStampKey)
+			require.NoError(t, err)
+			want := ""
+			if tc.author != [2]string{} {
+				want = stampOf(tc.author)
+			}
+			assert.Equal(t, want, got, "%s, interrupted at write %d", tc.name, failAt)
+			if !interrupted {
+				break // failAt is past the last write: every step has been interrupted
+			}
+		}
+	}
 }

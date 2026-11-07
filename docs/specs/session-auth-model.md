@@ -110,7 +110,8 @@ sequenceDiagram
 | Ledger `meta.json` `username` field | `DisplayName` | Team-visible, privacy-safe |
 | Session folder names | `Username` | Filesystem-safe slug |
 | Murmur `principal_id` | `Username` | Stable identifier for matching |
-| Git commit author | `Name` + `Email` | Local-only git config |
+| Git commit author, project repo | The person's own git config. With a team token that acts as an AI coworker, `ox agent prime` stamps the coworker (`<name>` + `agt_<id>@ai-coworker.invalid`) into the repo's local config and removes it when the token is gone | The coworker's work is attributed to it, and commits succeed on a machine whose git has no identity; an identity a person set in the repo is never replaced |
+| Git commit author, Ledger and Team Context | The AI coworker a team token acts as, else `DisplayName` + `<account id>@sageox-account.invalid` of the account signed in on the clone's git server (`identity.LedgerAuthor`); git's own identity when neither applies | Commits reach teammates, so neither the full name nor the real email; stamped into the clone's local config, so a machine whose git has no identity can still save sessions |
 | Login display ("Signed in as...") | `Name` | Shown only to the authenticated user |
 
 ### Fallback Chain

@@ -15,8 +15,9 @@ import (
 //     migration for ledgers cloned by pre-eeqi ox versions),
 //   - installs/refreshes the ox credential helper in .git/config so future
 //     fetch/push operations resolve auth via the helper, and
-//   - makes a team token's AI coworker the author of the repo's commits
-//     (stampCoworkerAuthor).
+//   - makes the AI coworker a team token acts as, or else the signed-in
+//     SageOx account, the author of the repo's commits
+//     (stampLedgerAuthor, via LedgerAuthorGetter).
 //
 // The endpointURL parameter is retained for API compatibility with existing
 // callers (login.go, session_upload.go, import.go) but is now used only to

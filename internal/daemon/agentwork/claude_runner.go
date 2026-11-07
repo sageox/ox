@@ -178,9 +178,12 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	// model reads as @.
 	cmd.Stdin = strings.NewReader(strings.ReplaceAll(req.Prompt, "@", "&#64;"))
 	cmd.Env = workerEnv(claudeEnvPrefixes()...)
-	if req.WorkDir != "" {
-		cmd.Dir = req.WorkDir
+	dir, cleanup, err := workerDir(req.WorkDir)
+	if err != nil {
+		return nil, err
 	}
+	defer cleanup()
+	cmd.Dir = dir
 	setProcAttr(cmd)
 	// Let os/exec own the pipes and copy into always-draining capped writers.
 	// WaitDelay closes those pipes if an orphaned descendant inherits them,

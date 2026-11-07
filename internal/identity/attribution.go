@@ -2,9 +2,11 @@ package identity
 
 import (
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/runtime"
 )
@@ -109,26 +111,10 @@ func ResolveAttribution(ep, configDisplayName string) Attribution {
 		return Attribution{Username: c.Username(), Name: c.Name(), DisplayName: c.Name(), AI: true}
 	}
 
-	var email, name, username string
+	var username string
 
-	// 1. Try SageOx OAuth (verified identity)
-	if ep != "" {
-		if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil {
-			if token.UserInfo.Email != "" {
-				email = token.UserInfo.Email
-			}
-			if token.UserInfo.Name != "" {
-				name = token.UserInfo.Name
-			}
-		}
-	}
-
-	// 1b. A personal SAGEOX_TOKEN carries no UserInfo; the server names its owner.
-	if ep != "" && email == "" && name == "" {
-		if u := auth.PersonalTokenUser(ep); u != nil {
-			email, name = u.Email, u.Name
-		}
-	}
+	// 1. SageOx account (verified identity)
+	_, email, name := signedInUser(ep)
 	verified := &repotools.GitIdentity{Email: email, Name: name}
 
 	// 2. Try git config identity (local, no network)
@@ -191,6 +177,121 @@ func ResolveAttribution(ep, configDisplayName string) Attribution {
 		Name:        name,
 		DisplayName: displayName,
 	}
+}
+
+// signedInUser returns the account ID, email and full name of the SageOx
+// account signed in at ep, or "" for all three.
+func signedInUser(ep string) (id, email, name string) {
+	if ep == "" {
+		return "", "", ""
+	}
+	if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil {
+		id, email, name = token.UserInfo.UserID, token.UserInfo.Email, token.UserInfo.Name
+		if id == "" {
+			// A login stored before user_id existed names the account only in
+			// its access token's subject; LocalUserID recovers it without
+			// treating a team token's AI coworker as a signed-in account.
+			id = auth.LocalUserID(ep)
+		}
+	}
+	// A personal SAGEOX_TOKEN carries no UserInfo; the server names its owner.
+	if email == "" && name == "" {
+		if u := auth.PersonalTokenUser(ep); u != nil {
+			id, email, name = u.ID, u.Email, u.Name
+		}
+	}
+	return id, email, name
+}
+
+// accountEmailDomain ends the address LedgerAuthor commits a person under. The
+// account's real email stays local (PRIVACY RULE); ".invalid" (RFC 2606) never
+// resolves, so the address reaches no one.
+const accountEmailDomain = "@sageox-account.invalid"
+
+// LedgerAuthor is who ox commits as in a clone whose origin is remoteURL, on
+// that clone's git server: the AI coworker a team token acts as, else the
+// signed-in person, named by their DisplayName and an address built from
+// their account ID, because those commits reach teammates (PRIVACY RULE). An
+// expired sign-in still counts; only signing out ends it. Both results are ""
+// when neither owns that git server, which leaves git's own identity in charge.
+func LedgerAuthor(remoteURL, configDisplayName string) (name, email string) {
+	for _, ep := range signedInEndpoints() {
+		if !gitserver.RemoteOnGitServer(remoteURL, ep, gitServerFor(ep)) {
+			continue
+		}
+		if name, email := CoworkerAuthor(ep); email != "" {
+			return name, email
+		}
+		id, accountEmail, fullName := signedInUser(ep)
+		if id == "" {
+			return "", ""
+		}
+		name = strings.TrimSpace(configDisplayName)
+		if name == "" {
+			name = deriveDisplayName(accountEmail, fullName, "")
+		}
+		return name, id + accountEmailDomain
+	}
+	return "", ""
+}
+
+// CachedCoworkerAuthor is CoworkerAuthor without asking the server, for a path
+// that must not wait on the network. known is false when a team token's
+// metadata was never fetched on this machine.
+func CachedCoworkerAuthor(ep string) (name, email string, known bool) {
+	c, known := auth.CachedTeamCoworker(ep)
+	if c == nil || c.ID == "" {
+		return "", "", known
+	}
+	return c.Name(), gitserver.CoworkerEmail(c.ID), true
+}
+
+// CoworkerAuthor is the commit identity of the AI coworker a team token at ep
+// acts as: its name and its agt_ address. Both are "" for any other credential,
+// including a team token the server names no coworker for.
+func CoworkerAuthor(ep string) (name, email string) {
+	c, _ := auth.TeamCoworker(ep)
+	if c == nil || c.ID == "" {
+		return "", ""
+	}
+	return c.Name(), gitserver.CoworkerEmail(c.ID)
+}
+
+// gitServerFor returns the git server the API named for ep, or "" when that is
+// unknown, so two servers on one host (local stacks on different ports) never
+// match each other's clones. Credential records are keyed by host, so such
+// stacks share one: it is ep's when it was saved for ep's exact origin, or, in
+// a record older ox wrote without one, when ep's own token fetched it.
+func gitServerFor(ep string) string {
+	creds, err := gitserver.LoadCredentialsForEndpoint(ep)
+	if err != nil || creds == nil {
+		return ""
+	}
+	if creds.APIOrigin != "" {
+		if creds.SavedFor(ep) {
+			return creds.ServerURL
+		}
+		return ""
+	}
+	if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil && creds.BearerTokenHash != "" &&
+		creds.BearerTokenHash == gitserver.BearerTokenFingerprint(token.AccessToken) {
+		return creds.ServerURL
+	}
+	return ""
+}
+
+// signedInEndpoints lists every endpoint with a sign-in: a usable SAGEOX_TOKEN
+// and each stored token, expired or not. GetLoggedInEndpoints alone drops an
+// expired token that a refresh would renew, and with it the commit author.
+func signedInEndpoints() []string {
+	endpoints := auth.GetLoggedInEndpoints()
+	stored, _ := auth.ListEndpoints()
+	for _, ep := range stored {
+		if !slices.Contains(endpoints, ep) {
+			endpoints = append(endpoints, ep)
+		}
+	}
+	return endpoints
 }
 
 // AttributionUsername returns a lowercase, filesystem-safe slug for the current user.

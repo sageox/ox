@@ -1079,22 +1079,6 @@ func redactLFSContent(ctx context.Context, ledgerPath, rel string, newClient fun
 	return nil
 }
 
-// stageAndAmendRedactedFiles stages and amends only repaired files and metadata.
-// The caller holds the repo lock and checks Git state before staging.
-func stageAndAmendRedactedFiles(ctx context.Context, ledgerPath string, repairedPaths []string) error {
-	paths := make([]string, 0, len(repairedPaths))
-	for _, p := range repairedPaths {
-		paths = append(paths, ":(literal)"+p)
-	}
-	sort.Strings(paths)
-	addArgs := append([]string{"add", "--sparse", "--"}, paths...)
-	if _, err := gitutil.RunGit(ctx, ledgerPath, addArgs...); err != nil {
-		return err
-	}
-	_, err := gitutil.AmendLedgerSnapshot(ctx, ledgerPath, paths...)
-	return err
-}
-
 // groupFindingsByPath buckets findings by file so the interactive prompt
 // asks once per file rather than once per (file, line, detector). Returns
 // a deterministic-order map by sorting via the slice the caller iterates.

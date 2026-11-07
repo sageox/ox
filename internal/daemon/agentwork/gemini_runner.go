@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -79,22 +78,30 @@ func (r *GeminiRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	// `-p` argv value so the (potentially sensitive) session transcript does not
 	// appear in ps / /proc/<pid>/cmdline / sysctl kern.procargs2 (security
 	// finding #10).
+	if workDir == "" {
+		// ox's own empty directory holds no settings to trust, and headless
+		// Gemini refuses an untrusted one.
+		env = append(env, "GEMINI_CLI_TRUST_WORKSPACE=true")
+	}
+	dir, cleanup, err := workerDir(workDir)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
 	cmd.Stdin = strings.NewReader(req.Prompt)
 	cmd.Env = env
-	if workDir != "" {
-		cmd.Dir = workDir
-	}
+	cmd.Dir = dir
 	setProcAttr(cmd)
 
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("stdout pipe: %w", err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("stderr pipe: %w", err)
-	}
+	// Let os/exec own the pipes: Wait closes a pipe the caller reads, so
+	// reading one concurrently with Wait loses a fast process's output.
+	// WaitDelay closes them if an orphaned descendant inherits them.
+	stdout := cappedBuffer{limit: 1024 * 1024}
+	stderr := tailBuffer{limit: 64 * 1024}
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.WaitDelay = claudePipeWait
 
 	start := time.Now()
 
@@ -104,28 +111,9 @@ func (r *GeminiRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 
 	r.logger.Debug("gemini process started", "pid", cmd.Process.Pid)
 
-	// read stderr in background, keeping its end, where an error is
-	var stderrBuf []byte
-	stderrDone := make(chan struct{})
-	go func() {
-		defer close(stderrDone)
-		stderr := &tailBuffer{limit: 64 * 1024}
-		_, _ = io.Copy(stderr, stderrPipe)
-		stderrBuf = stderr.Bytes()
-	}()
-
-	// read stdout (gemini outputs plain text)
-	outputDone := make(chan []byte, 1)
-	go func() {
-		data, _ := io.ReadAll(io.LimitReader(stdoutPipe, 1024*1024))
-		outputDone <- data
-	}()
-
 	waitErr := cmd.Wait()
 	elapsed := time.Since(start)
-
-	<-stderrDone
-	output := <-outputDone
+	stderrBuf, output := stderr.Bytes(), stdout.Bytes()
 
 	if len(stderrBuf) > 0 {
 		r.logger.Debug("gemini stderr", "output", string(stderrBuf))
