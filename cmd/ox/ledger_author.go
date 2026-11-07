@@ -11,7 +11,7 @@ import (
 // here because only package main reaches auth, identity and user config
 // together; gitserver falls back to git's own identity when nobody is signed in.
 func init() {
-	gitserver.SignedInUserGetter = func(ep string) (name, email string) {
-		return identity.SignedInAuthor(ep, config.GetDisplayName())
+	gitserver.SignedInUserGetter = func(remoteURL string) (name, email string) {
+		return identity.SignedInAuthor(remoteURL, config.GetDisplayName())
 	}
 }

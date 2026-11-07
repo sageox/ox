@@ -2,10 +2,11 @@ package identity
 
 import (
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/sageox/ox/internal/auth"
-	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/runtime"
 )
@@ -113,7 +114,7 @@ func ResolveAttribution(ep, configDisplayName string) Attribution {
 	var username string
 
 	// 1. SageOx account (verified identity)
-	email, name := signedInUser(ep)
+	_, email, name := signedInUser(ep)
 	verified := &repotools.GitIdentity{Email: email, Name: name}
 
 	// 2. Try git config identity (local, no network)
@@ -178,50 +179,71 @@ func ResolveAttribution(ep, configDisplayName string) Attribution {
 	}
 }
 
-// signedInUser returns the email and full name of the SageOx account signed in
-// at ep, or "" for both.
-func signedInUser(ep string) (email, name string) {
+// signedInUser returns the account ID, email and full name of the SageOx
+// account signed in at ep, or "" for all three.
+func signedInUser(ep string) (id, email, name string) {
 	if ep == "" {
-		return "", ""
+		return "", "", ""
 	}
 	if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil {
-		email, name = token.UserInfo.Email, token.UserInfo.Name
+		id, email, name = token.UserInfo.UserID, token.UserInfo.Email, token.UserInfo.Name
 	}
 	// A personal SAGEOX_TOKEN carries no UserInfo; the server names its owner.
 	if email == "" && name == "" {
 		if u := auth.PersonalTokenUser(ep); u != nil {
-			email, name = u.Email, u.Name
+			id, email, name = u.ID, u.Email, u.Name
 		}
 	}
-	return email, name
+	return id, email, name
 }
 
-// SignedInAuthor is who ox commits as in the repos it syncs from the SageOx
-// server at ep: the signed-in account's email, under its DisplayName, because
-// those commits reach the Ledger (see PRIVACY RULE). ep may name the server by
-// any URL on the same host, such as one derived from a git remote. Both results
-// are "" when no account with an email is signed in there, which leaves git's
-// own identity in charge.
-func SignedInAuthor(ep, configDisplayName string) (name, email string) {
-	host := endpoint.NormalizeSlug(ep)
-	if host == "" || host == "unknown" {
-		return "", ""
-	}
-	for _, signedIn := range auth.GetLoggedInEndpoints() {
-		if endpoint.NormalizeSlug(signedIn) != host {
+// accountEmailDomain ends the address SignedInAuthor commits under. The
+// account's real email stays local (PRIVACY RULE); ".invalid" (RFC 2606) never
+// resolves, so the address reaches no one.
+const accountEmailDomain = "@sageox-account.invalid"
+
+// SignedInAuthor is who ox commits as in a clone whose origin is remoteURL: the
+// SageOx account signed in on that clone's git server, named by its DisplayName
+// and an address built from its account ID, because those commits reach
+// teammates (PRIVACY RULE). An expired sign-in still counts; only signing out
+// ends it. Both results are "" when no signed-in account owns that git server,
+// which leaves git's own identity in charge.
+func SignedInAuthor(remoteURL, configDisplayName string) (name, email string) {
+	for _, ep := range signedInEndpoints() {
+		// The git server the API named for this endpoint, when known, so two
+		// servers on one host (local stacks on different ports) never match.
+		var serverURL string
+		if creds, err := gitserver.LoadCredentialsForEndpoint(ep); err == nil && creds != nil {
+			serverURL = creds.ServerURL
+		}
+		if !gitserver.RemoteOnGitServer(remoteURL, ep, serverURL) {
 			continue
 		}
-		email, fullName := signedInUser(signedIn)
-		if email == "" {
+		id, accountEmail, fullName := signedInUser(ep)
+		if id == "" {
 			return "", ""
 		}
 		name = strings.TrimSpace(configDisplayName)
 		if name == "" {
-			name = deriveDisplayName(email, fullName, "")
+			name = deriveDisplayName(accountEmail, fullName, "")
 		}
-		return name, email
+		return name, id + accountEmailDomain
 	}
 	return "", ""
+}
+
+// signedInEndpoints lists every endpoint with a sign-in: a usable SAGEOX_TOKEN
+// and each stored token, expired or not. GetLoggedInEndpoints alone drops an
+// expired token that a refresh would renew, and with it the commit author.
+func signedInEndpoints() []string {
+	endpoints := auth.GetLoggedInEndpoints()
+	stored, _ := auth.ListEndpoints()
+	for _, ep := range stored {
+		if !slices.Contains(endpoints, ep) {
+			endpoints = append(endpoints, ep)
+		}
+	}
+	return endpoints
 }
 
 // AttributionUsername returns a lowercase, filesystem-safe slug for the current user.

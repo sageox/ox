@@ -206,10 +206,11 @@ func DisableCommitSigning(repoPath string) (changed bool, err error) {
 var TeamCoworkerGetter func() (ep, name, id string)
 
 // SignedInUserGetter reports the commit identity of the SageOx account signed
-// in on the server at ep: the name teammates see and the account's email. Both
-// are "" when nobody is signed in there. Set by cmd/ox, which can reach auth,
-// identity and user config. Nil reads as nobody signed in.
-var SignedInUserGetter func(ep string) (name, email string)
+// in on the git server remoteURL is on: the name teammates see and an address
+// that names the account. Both are "" when nobody is signed in there. Set by
+// cmd/ox, which can reach auth, identity and user config. Nil reads as nobody
+// signed in.
+var SignedInUserGetter func(remoteURL string) (name, email string)
 
 // coworkerEmailDomain ends the user.email stampLedgerAuthor writes for an AI
 // coworker. ".invalid" (RFC 2606) never resolves, so the address belongs to no
@@ -234,15 +235,14 @@ const authorStampKey = "sageox.authorstamp"
 // stamped earlier, such as one a team token or a signed-out account left on the
 // machine, and leaves any other alone.
 func stampLedgerAuthor(repoPath, remoteURL string) error {
-	repoEp := endpointFromRemoteURL(remoteURL)
 	var name, email string
 	if TeamCoworkerGetter != nil {
-		if ep, n, id := TeamCoworkerGetter(); id != "" && endpointHostsEqual(ep, repoEp) {
+		if ep, n, id := TeamCoworkerGetter(); id != "" && endpointHostsEqual(ep, endpointFromRemoteURL(remoteURL)) {
 			name, email = n, id+coworkerEmailDomain
 		}
 	}
-	if email == "" && SignedInUserGetter != nil && repoEp != "" {
-		name, email = SignedInUserGetter(repoEp)
+	if email == "" && SignedInUserGetter != nil {
+		name, email = SignedInUserGetter(remoteURL)
 	}
 	// A failed read counts as unset: removal waits for the next call, and a
 	// write reports its own failure.

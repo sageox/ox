@@ -464,6 +464,30 @@ func TestCheckGitConfig_WarnsExactlyWhenGitCannotCommit(t *testing.T) {
 	}
 }
 
+// Failure prevented: ox doctor run from a git hook, which exports GIT_DIR,
+// judges the hook's repository instead of this one and passes a repo whose
+// commits fail.
+func TestCheckGitConfig_IgnoresInheritedRepoLocation(t *testing.T) {
+	skipIntegration(t)
+	isolateGitIdentity(t)
+	other := t.TempDir()
+	runGit(t, other, "init", "-q")
+	runGit(t, other, "config", "user.name", "Person B")
+	runGit(t, other, "config", "user.email", "person-b@example.com")
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-q")
+	runGit(t, repo, "config", "user.useConfigOnly", "true")
+	restoreCwd := changeToDir(t, repo)
+	defer restoreCwd()
+	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
+
+	result := checkGitConfig(false)
+
+	if !result.warning {
+		t.Fatalf("expected a warning for a repo git cannot commit in, got %+v", result)
+	}
+}
+
 // isolateGitIdentity leaves git no identity source but the ones a test sets:
 // no global or system config, and none of the variables git reads one from.
 // The variables are unset, not blanked, because git treats an empty one as set.

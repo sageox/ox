@@ -246,7 +246,7 @@ func TestMigrateLedgerCredentials_StampsCoworkerAuthor(t *testing.T) {
 // strips an identity the person set themselves.
 func TestMigrateLedgerCredentials_StampsSignedInAuthor(t *testing.T) {
 	coworker := [2]string{"Rip", "agt_rip@ai-coworker.invalid"}
-	account := [2]string{"Devon E.", "devon@example.com"}
+	account := [2]string{"Devon E.", "usr_devon@sageox-account.invalid"}
 	person := [2]string{"Person B", "person-b@example.com"}
 	for _, tc := range []struct {
 		name      string
@@ -269,8 +269,8 @@ func TestMigrateLedgerCredentials_StampsSignedInAuthor(t *testing.T) {
 			dir := ledgerCloneOf(t, tc.remoteURL, "https://sageox.ai", tc.coworker)
 			orig := SignedInUserGetter
 			t.Cleanup(func() { SignedInUserGetter = orig })
-			SignedInUserGetter = func(ep string) (string, string) {
-				if tc.signedIn && endpointHostsEqual(ep, "https://sageox.ai") {
+			SignedInUserGetter = func(remoteURL string) (string, string) {
+				if tc.signedIn && RemoteOnGitServer(remoteURL, "https://sageox.ai", "") {
 					return account[0], account[1]
 				}
 				return "", ""

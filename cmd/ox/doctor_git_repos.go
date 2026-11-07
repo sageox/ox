@@ -154,12 +154,30 @@ func checkGitConfig(fix bool) checkResult {
 	return PassedCheck("Git config", "commit identity set")
 }
 
+// gitRepoLocationEnv names the variables that point git at a repository other
+// than the one -C selects. A git hook running ox doctor inherits them.
+// GIT_AUTHOR_*, GIT_COMMITTER_* and GIT_CONFIG_* stay: they are identity and
+// config the person chose, which a commit here would use too.
+var gitRepoLocationEnv = []string{
+	"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+}
+
 // gitCanFormIdentity reports whether git can form both the author and the
 // committer identity for a commit in repoPath. `git var` fails exactly when a
 // commit would.
 func gitCanFormIdentity(repoPath string) bool {
+	env := slices.DeleteFunc(os.Environ(), func(entry string) bool {
+		name, _, _ := strings.Cut(entry, "=")
+		return slices.Contains(gitRepoLocationEnv, name)
+	})
 	for _, ident := range []string{"GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"} {
-		if err := exec.Command("git", "-C", repoPath, "var", ident).Run(); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "var", ident)
+		cmd.Env = env
+		err := cmd.Run()
+		cancel()
+		if err != nil {
 			return false
 		}
 	}
