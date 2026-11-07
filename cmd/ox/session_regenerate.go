@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -451,11 +450,16 @@ type committedArtifact struct {
 	perm os.FileMode
 }
 
-// restore writes the removed artifacts back.
+// restore writes the removed artifacts back, except where another writer has
+// created the file since.
 func (c committedArtifacts) restore() error {
 	var errs []error
 	for name, f := range c.files {
-		if err := fileutil.AtomicWriteBytes(filepath.Join(c.dir, name), f.data, f.perm); err != nil {
+		path := filepath.Join(c.dir, name)
+		if _, err := os.Lstat(path); err == nil {
+			continue
+		}
+		if err := fileutil.AtomicWriteBytes(path, f.data, f.perm); err != nil {
 			errs = append(errs, fmt.Errorf("restore %s: %w", name, err))
 		}
 	}
@@ -464,8 +468,8 @@ func (c committedArtifacts) restore() error {
 
 // setAsideCommittedArtifacts removes the plain (non-pointer) artifacts a
 // legacy session tracks in git, so their regenerated pointers can replace
-// them. Only content identical to HEAD is removed: git keeps that copy. Plain
-// content that differs is left for WritePointerFiles to refuse.
+// them. Only a file whose worktree and index both match HEAD is removed: git
+// keeps that copy. Anything else is left for WritePointerFiles to refuse.
 func setAsideCommittedArtifacts(sessionDir string, uploaded map[string]lfs.FileRef) (committedArtifacts, error) {
 	setAside := committedArtifacts{dir: sessionDir, files: map[string]committedArtifact{}}
 	for name := range uploaded {
@@ -481,7 +485,7 @@ func setAsideCommittedArtifacts(sessionDir string, uploaded map[string]lfs.FileR
 		if err != nil {
 			return setAside, errors.Join(err, setAside.restore())
 		}
-		if _, _, perr := lfs.ParsePointer(string(data)); perr == nil || !matchesHEAD(sessionDir, name, data) {
+		if _, _, perr := lfs.ParsePointer(string(data)); perr == nil || !unchangedSinceHEAD(sessionDir, name) {
 			continue
 		}
 		if err := os.Remove(path); err != nil {
@@ -492,16 +496,16 @@ func setAsideCommittedArtifacts(sessionDir string, uploaded map[string]lfs.FileR
 	return setAside, nil
 }
 
-// matchesHEAD reports whether data is the blob HEAD records for dir/name.
-func matchesHEAD(dir, name string, data []byte) bool {
-	head, err := exec.Command("git", "-C", dir, "rev-parse", "--verify", "-q", "HEAD:./"+name).Output()
-	if err != nil {
+// unchangedSinceHEAD reports whether HEAD tracks dir/name and neither the
+// index nor the worktree changed it. git compares, so its filters (such as
+// core.autocrlf) apply.
+func unchangedSinceHEAD(dir, name string) bool {
+	rel := "./" + name
+	if exec.Command("git", "-C", dir, "rev-parse", "--verify", "-q", "HEAD:"+rel).Run() != nil {
 		return false
 	}
-	hash := exec.Command("git", "-C", dir, "hash-object", "--stdin")
-	hash.Stdin = bytes.NewReader(data)
-	blob, err := hash.Output()
-	return err == nil && bytes.Equal(bytes.TrimSpace(head), bytes.TrimSpace(blob))
+	return exec.Command("git", "-C", dir, "diff", "--quiet", "HEAD", "--", rel).Run() == nil &&
+		exec.Command("git", "-C", dir, "diff", "--quiet", "--cached", "--", rel).Run() == nil
 }
 
 // revertRegeneratedRefs puts back the meta.Files entries prepareRegeneratedArtifacts

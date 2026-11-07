@@ -574,3 +574,41 @@ func TestCommittedArtifacts_RestoreReportsFailure(t *testing.T) {
 	err := committedArtifacts{dir: blocked, files: map[string]committedArtifact{ledgerFileSessionMD: {perm: 0o644}}}.restore()
 	require.ErrorContains(t, err, "restore "+ledgerFileSessionMD)
 }
+
+// A legacy file with a staged edit is not removed, even when its worktree copy
+// matches HEAD: git add would replace the staged edit with the pointer.
+func TestSetAsideCommittedArtifacts_KeepsStagedEdit(t *testing.T) {
+	f := newRegenerateLedgerFixture(t)
+	name := recentSessionName("OxRgnU")
+	f.publishSession(t, name, "Keep my staged edit")
+	sessionDir := commitLegacySessionMD(t, f, name)
+	path := filepath.Join(sessionDir, ledgerFileSessionMD)
+	require.NoError(t, os.WriteFile(path, []byte("# staged edit\n"), 0o644))
+	runGit(t, f.ledgerPath, "add", filepath.Join("sessions", name, ledgerFileSessionMD))
+	require.NoError(t, os.WriteFile(path, []byte(legacyPlainSessionMD), 0o644))
+
+	setAside, err := setAsideCommittedArtifacts(sessionDir, map[string]lfs.FileRef{ledgerFileSessionMD: lfs.NewFileRef([]byte("new"))})
+
+	require.NoError(t, err)
+	assert.Empty(t, setAside.files)
+	assert.FileExists(t, path)
+}
+
+// A restore never overwrites a file another writer created since.
+func TestCommittedArtifacts_RestoreKeepsNewerFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ledgerFileSessionMD)
+	require.NoError(t, os.WriteFile(path, []byte("newer\n"), 0o600))
+
+	require.NoError(t, committedArtifacts{dir: dir, files: map[string]committedArtifact{
+		ledgerFileSessionMD: {data: []byte("older\n"), perm: 0o644},
+		ledgerFileSummaryMD: {data: []byte("restored\n"), perm: 0o644},
+	}}.restore())
+
+	body, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "newer\n", string(body))
+	body, err = os.ReadFile(filepath.Join(dir, ledgerFileSummaryMD))
+	require.NoError(t, err)
+	assert.Equal(t, "restored\n", string(body))
+}
