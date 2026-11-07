@@ -17,7 +17,7 @@ import (
 //     fetch/push operations resolve auth via the helper, and
 //   - makes the AI coworker a team token acts as, or else the signed-in
 //     SageOx account, the author of the repo's commits
-//     (stampLedgerAuthor).
+//     (stampLedgerAuthor, via LedgerAuthorGetter).
 //
 // The endpointURL parameter is retained for API compatibility with existing
 // callers (login.go, session_upload.go, import.go) but is now used only to

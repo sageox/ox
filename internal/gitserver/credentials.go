@@ -156,17 +156,17 @@ func (r RepoEntry) StableID() string {
 // The PAT is refreshed lazily by the daemon when near expiry.
 // Repos contains team-context repos indexed by team ID. Ledger URLs are NOT stored here.
 type GitCredentials struct {
-	BearerTokenHash string               `json:"bearer_token_hash,omitempty"` // binds the PAT to the bearer that fetched it
-	Token           string               `json:"token"`
-	ServerURL       string               `json:"server_url"`
+	BearerTokenHash string `json:"bearer_token_hash,omitempty"` // binds the PAT to the bearer that fetched it
+	Token           string `json:"token"`
+	ServerURL       string `json:"server_url"`
 	// APIOrigin is the exact scheme://host:port of the SageOx API these were
 	// saved for. Records are keyed by host, so API servers on different ports
 	// share one; this names the server that owns it, across token refreshes.
 	// Empty in records older ox wrote.
-	APIOrigin string `json:"api_origin,omitempty"`
-	Username        string               `json:"username"`
-	ExpiresAt       time.Time            `json:"expires_at"`
-	Repos           map[string]RepoEntry `json:"repos,omitempty"` // indexed by team ID
+	APIOrigin string               `json:"api_origin,omitempty"`
+	Username  string               `json:"username"`
+	ExpiresAt time.Time            `json:"expires_at"`
+	Repos     map[string]RepoEntry `json:"repos,omitempty"` // indexed by team ID
 }
 
 // SavedFor reports whether these credentials were saved for the API at

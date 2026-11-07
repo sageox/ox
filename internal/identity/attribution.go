@@ -203,21 +203,24 @@ func signedInUser(ep string) (id, email, name string) {
 	return id, email, name
 }
 
-// accountEmailDomain ends the address SignedInAuthor commits under. The
+// accountEmailDomain ends the address LedgerAuthor commits a person under. The
 // account's real email stays local (PRIVACY RULE); ".invalid" (RFC 2606) never
 // resolves, so the address reaches no one.
 const accountEmailDomain = "@sageox-account.invalid"
 
-// SignedInAuthor is who ox commits as in a clone whose origin is remoteURL: the
-// SageOx account signed in on that clone's git server, named by its DisplayName
-// and an address built from its account ID, because those commits reach
-// teammates (PRIVACY RULE). An expired sign-in still counts; only signing out
-// ends it. Both results are "" when no signed-in account owns that git server,
-// which leaves git's own identity in charge.
-func SignedInAuthor(remoteURL, configDisplayName string) (name, email string) {
+// LedgerAuthor is who ox commits as in a clone whose origin is remoteURL, on
+// that clone's git server: the AI coworker a team token acts as, else the
+// signed-in person, named by their DisplayName and an address built from
+// their account ID, because those commits reach teammates (PRIVACY RULE). An
+// expired sign-in still counts; only signing out ends it. Both results are ""
+// when neither owns that git server, which leaves git's own identity in charge.
+func LedgerAuthor(remoteURL, configDisplayName string) (name, email string) {
 	for _, ep := range signedInEndpoints() {
 		if !gitserver.RemoteOnGitServer(remoteURL, ep, gitServerFor(ep)) {
 			continue
+		}
+		if name, email := CoworkerAuthor(ep); email != "" {
+			return name, email
 		}
 		id, accountEmail, fullName := signedInUser(ep)
 		if id == "" {
@@ -230,6 +233,28 @@ func SignedInAuthor(remoteURL, configDisplayName string) (name, email string) {
 		return name, id + accountEmailDomain
 	}
 	return "", ""
+}
+
+// CachedCoworkerAuthor is CoworkerAuthor without asking the server, for a path
+// that must not wait on the network. known is false when a team token's
+// metadata was never fetched on this machine.
+func CachedCoworkerAuthor(ep string) (name, email string, known bool) {
+	c, known := auth.CachedTeamCoworker(ep)
+	if c == nil || c.ID == "" {
+		return "", "", known
+	}
+	return c.Name(), gitserver.CoworkerEmail(c.ID), true
+}
+
+// CoworkerAuthor is the commit identity of the AI coworker a team token at ep
+// acts as: its name and its agt_ address. Both are "" for any other credential,
+// including a team token the server names no coworker for.
+func CoworkerAuthor(ep string) (name, email string) {
+	c, _ := auth.TeamCoworker(ep)
+	if c == nil || c.ID == "" {
+		return "", ""
+	}
+	return c.Name(), gitserver.CoworkerEmail(c.ID)
 }
 
 // gitServerFor returns the git server the API named for ep, or "" when that is

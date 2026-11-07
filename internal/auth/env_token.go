@@ -284,6 +284,32 @@ func TeamCoworker(ep string) (*Coworker, error) {
 	return meta.Coworker, nil
 }
 
+// CachedTeamCoworker is TeamCoworker without asking the server: the AI
+// coworker this machine last learned the team token at ep acts as, however old
+// that answer is. known is false only when a team token's metadata was never
+// fetched here, so the caller cannot tell. Any other credential has no
+// coworker, which is known without asking.
+func CachedTeamCoworker(ep string) (c *Coworker, known bool) {
+	if !EnvTokenIsTeamFamily(ep) {
+		return nil, true
+	}
+	tok, state := EnvTokenFor(ep)
+	if state != EnvTokenValid || tok == nil {
+		return nil, true
+	}
+	tokenMetaCacheMu.Lock()
+	defer tokenMetaCacheMu.Unlock()
+	cache, err := loadTokenMetaCache()
+	if err != nil {
+		return nil, false
+	}
+	entry, ok := cache.Entries[tokenMetaCacheKey(endpoint.NormalizeEndpoint(ep), tok.AccessToken)]
+	if !ok {
+		return nil, false
+	}
+	return entry.Coworker, true
+}
+
 // PersonalTokenUser returns the person a personal SAGEOX_TOKEN belongs to, as
 // the server's /auth/me names them. An env token carries no UserInfo (there
 // was no login to learn it from), so without this, work done where git's
