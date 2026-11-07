@@ -9,11 +9,14 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sageox/ox/internal/daemon/agentwork"
+	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -29,6 +32,7 @@ func TestRegenerateSummary_IsolatedInlineRun(t *testing.T) {
 	t.Chdir(f.projectRoot)
 	seedFinalizedLedgerSessionWithArtifacts(t, f.ledgerPath, sessionName)
 	commitAndPushFinalized(t, f, sessionName)
+	lfsStore := useFakeLFSStore(t, f)
 
 	cacheDir := filepath.Join(f.ledgerPath, ".sageox", "cache", "sessions", sessionName)
 	require.NoError(t, os.MkdirAll(cacheDir, 0o755))
@@ -64,7 +68,13 @@ cat > "`+promptFile+`"
 cat "`+resultFile+`"
 `), 0o755))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("SAGEOX_TOKEN", "oxp_test_regen")
+	t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
+	// the stored Ledger credentials were issued for this token, so the LFS
+	// upload uses them without asking the server
+	require.NoError(t, gitserver.SaveCredentialsForEndpoint(lfsStore.url, gitserver.GitCredentials{
+		Username: "testuser", Token: "test-token", ServerURL: lfsStore.url, ExpiresAt: time.Now().Add(24 * time.Hour),
+		BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
+	}))
 	t.Setenv("OX_SUMMARY_MODEL", "claude-haiku-4-5")
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
@@ -103,6 +113,11 @@ cat "`+resultFile+`"
 	out, err := exec.Command("git", "-C", f.barePath, "show", "HEAD:sessions/"+sessionName+"/summary.json").Output()
 	require.NoError(t, err)
 	assert.Contains(t, string(out), "Fix the login retry loop", "the fresh summary.json lands on the remote")
+	pointer, err := exec.Command("git", "-C", f.barePath, "show", "HEAD:sessions/"+sessionName+"/summary.md").Output()
+	require.NoError(t, err)
+	oid, _, err := lfs.ParsePointer(string(pointer))
+	require.NoError(t, err, "the regenerated summary.md lands on the remote as a pointer")
+	assert.Contains(t, string(lfsStore.object(oid)), "backs off instead of spinning")
 }
 
 // Failure prevented: a summary the model scored 0 is published because the

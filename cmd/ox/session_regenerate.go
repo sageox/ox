@@ -1,18 +1,22 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/daemon/agentwork"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
@@ -113,49 +117,54 @@ func regenerateSingleSessionArtifacts(store *session.Store, projectRoot, name st
 		return fmt.Errorf("session %q: %w\nRun 'ox session list' to see available sessions", name, err)
 	}
 
-	// Resolve the artifact-write path. For sessions authored locally,
-	// store.GetSessionPath returns the local managed-store path. For
-	// sessions authored by other team members and synced via the ledger,
-	// that path doesn't exist on this machine — write directly to the
-	// ledger sessions/<name>/ path instead, matching the --summary path.
-	sessionPath := artifactWriteDir(store, sessionName)
-	if err := regenerateSessionArtifacts(storedSession, sessionPath); err != nil {
+	sourceDir, outDir := artifactDirs(store, sessionName)
+	if err := regenerateSessionArtifacts(storedSession, sourceDir, outDir); err != nil {
 		return err
 	}
 
-	if err := syncRegeneratedSession(projectRoot, sessionPath, sessionName); err != nil {
-		slog.Warn("ledger sync skipped", "session", sessionName, "error", err)
+	published, err := publishRegeneratedSession(projectRoot, sessionName, outDir)
+	if err != nil {
+		return fmt.Errorf("regenerated artifacts for %s, but publishing them to the Ledger failed: %w", sessionName, err)
 	}
 
 	cli.PrintSuccess(fmt.Sprintf("Regenerated artifacts for %s", sessionName))
+	if !published {
+		cli.PrintInfo(fmt.Sprintf("%s is not published on the Ledger; the regenerated artifacts stay on this machine", sessionName))
+	}
 	return nil
 }
 
-// artifactWriteDir returns the directory where regenerated .md artifacts
-// should be written for a session. Locally-authored sessions live in the
-// project's managed store; team-uploaded sessions only exist in the ledger.
+// artifactDirs returns where a session's regeneration reads summary.json
+// (sourceDir) and writes its markdown artifacts (outDir).
 //
-// We prefer the local managed-store path when it exists (so an in-progress
-// recording's artifacts stay co-located with raw.jsonl). Otherwise we fall
-// back to the ledger sessions/<name>/ directory, which is where any
-// team-synced session lives.
-func artifactWriteDir(store *session.Store, sessionName string) string {
+// A locally-authored session regenerates in its managed-store directory, so an
+// in-progress recording's artifacts stay co-located with raw.jsonl. A
+// team-synced session only exists in the Ledger: it reads the git-stored
+// summary.json there and writes into the Ledger cache, because the tracked
+// sessions/<name>/ files must stay LFS pointers (cache-only design).
+func artifactDirs(store *session.Store, sessionName string) (sourceDir, outDir string) {
 	if store != nil {
 		local := store.GetSessionPath(sessionName)
 		if _, err := os.Stat(local); err == nil {
-			return local
+			return local, local
 		}
 	}
 	ledgerPath, err := resolveLedgerPath()
 	if err != nil {
-		// last resort — return the local path even if missing; caller's
-		// write will fail with a clear error.
+		// last resort — use the local path even if missing; the write fails
+		// with a clear error.
 		if store != nil {
-			return store.GetSessionPath(sessionName)
+			local := store.GetSessionPath(sessionName)
+			return local, local
 		}
-		return sessionName
+		return sessionName, sessionName
 	}
-	return filepath.Join(ledgerPath, "sessions", sessionName)
+	return filepath.Join(ledgerPath, "sessions", sessionName), ledgerSessionCacheDir(ledgerPath, sessionName)
+}
+
+// ledgerSessionCacheDir is where a Ledger session's real content lives.
+func ledgerSessionCacheDir(ledgerPath, sessionName string) string {
+	return filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
 }
 
 // readSessionViaCache reads raw.jsonl through the cache-only resolver,
@@ -178,7 +187,45 @@ func readSessionViaCache(projectRoot string, store *session.Store, sessionName s
 	if err != nil {
 		return nil, err
 	}
+	// A cached raw.jsonl can predate a redaction synced from a coworker.
+	// Regenerating from it would republish the removed content.
+	if stale, err := staleCachedRaw(ledgerPath, sessionName, rawPath); err != nil {
+		return nil, err
+	} else if stale {
+		if err := os.Remove(rawPath); err != nil {
+			return nil, fmt.Errorf("drop stale cached %s: %w", ledgerFileRaw, err)
+		}
+		if rawPath, err = openSessionContent(projectRoot, ledgerPath, sessionName, ledgerFileRaw); err != nil {
+			return nil, err
+		}
+		if stale, err := staleCachedRaw(ledgerPath, sessionName, rawPath); err != nil {
+			return nil, err
+		} else if stale {
+			return nil, fmt.Errorf("cached %s for %s does not match meta.json after rehydrating", ledgerFileRaw, sessionName)
+		}
+	}
 	return session.ReadSessionFromPath(rawPath)
+}
+
+// staleCachedRaw reports whether rawPath is a cached raw.jsonl whose bytes no
+// longer match the LFS ref meta.json records for it.
+func staleCachedRaw(ledgerPath, sessionName, rawPath string) (bool, error) {
+	if filepath.Dir(rawPath) != ledgerSessionCacheDir(ledgerPath, sessionName) {
+		return false, nil
+	}
+	meta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", sessionName))
+	if err != nil {
+		return false, fmt.Errorf("read meta.json for %s: %w", sessionName, err)
+	}
+	ref, ok := meta.Files[ledgerFileRaw]
+	if !ok || !ref.IsLFS() || ref.OID == "" {
+		return false, nil
+	}
+	data, err := os.ReadFile(rawPath)
+	if err != nil {
+		return false, fmt.Errorf("read cached %s: %w", ledgerFileRaw, err)
+	}
+	return lfs.ComputeOID(data) != ref.BareOID(), nil
 }
 
 func regenerateAllSessionsArtifacts(store *session.Store, projectRoot string, force bool) error {
@@ -203,7 +250,8 @@ func regenerateAllSessionsArtifacts(store *session.Store, projectRoot string, fo
 		}
 	}
 
-	var regenerated, skipped int
+	var skipped int
+	var regenerated []regeneratedSession
 	for _, info := range sessions {
 		sessionName := info.SessionName
 		if sessionName == "" {
@@ -218,68 +266,314 @@ func regenerateAllSessionsArtifacts(store *session.Store, projectRoot string, fo
 			continue
 		}
 
-		sessionPath := artifactWriteDir(store, sessionName)
-		if regenErr := regenerateSessionArtifacts(storedSession, sessionPath); regenErr != nil {
+		sourceDir, outDir := artifactDirs(store, sessionName)
+		if regenErr := regenerateSessionArtifacts(storedSession, sourceDir, outDir); regenErr != nil {
 			slog.Warn("failed to regenerate session", "session", sessionName, "error", regenErr)
 			skipped++
 			continue
 		}
 
-		regenerated++
+		regenerated = append(regenerated, regeneratedSession{name: sessionName, dir: outDir})
 	}
 
-	// batch ledger sync: single commit+push for all regenerated sessions
-	if regenerated > 0 {
-		ledgerPath, ledgerErr := resolveLedgerPath()
-		if ledgerErr == nil {
-			for _, info := range sessions {
-				if info.SessionName == "" {
-					continue
-				}
-				sessionPath := store.GetSessionPath(info.SessionName)
-				if _, lfsErr := uploadSessionLFS(projectRoot, sessionPath); lfsErr != nil {
-					slog.Debug("LFS re-upload skipped", "session", info.SessionName, "error", lfsErr)
-				}
-			}
-			if pushErr := commitAndPushLedger(ledgerPath, "batch-regenerate"); pushErr != nil {
-				slog.Warn("ledger push skipped", "error", pushErr)
+	published, publishErr := publishRegeneratedSessions(projectRoot, regenerated)
+
+	cli.PrintSuccess(fmt.Sprintf("Regenerated %d session(s)", len(regenerated)))
+	if skipped > 0 {
+		cli.PrintWarning(fmt.Sprintf("Skipped %d session(s) (unreadable or missing raw data)", skipped))
+	}
+	if published > 0 {
+		cli.PrintInfo(fmt.Sprintf("Published %d session(s) to the Ledger", published))
+	}
+	return publishErr
+}
+
+// regeneratedSession is a session whose artifacts were regenerated into dir.
+type regeneratedSession struct {
+	name, dir string
+}
+
+// publishRegeneratedSessions publishes the sessions regenerated by --all in
+// one Ledger commit. Sessions not published on the Ledger are skipped; any
+// session that cannot be prepared, and a failed commit or push, is an error.
+func publishRegeneratedSessions(projectRoot string, sessions []regeneratedSession) (int, error) {
+	if len(sessions) == 0 {
+		return 0, nil
+	}
+	ledgerPath, err := resolveLedgerPath()
+	if err != nil {
+		slog.Debug("no Ledger; regenerated artifacts stay local", "error", err)
+		return 0, nil
+	}
+
+	var names []string
+	var errs []error
+	for _, s := range sessions {
+		ok, prepErr := prepareRegeneratedArtifacts(projectRoot, ledgerPath, s.name, s.dir)
+		if prepErr != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", s.name, prepErr))
+			continue
+		}
+		if ok {
+			names = append(names, s.name)
+		}
+	}
+	if len(names) > 0 {
+		if err := commitAndPushLedgerBatch(ledgerPath, fmt.Sprintf("session: regenerate %d sessions", len(names)), names); err != nil {
+			return 0, errors.Join(append(errs, fmt.Errorf("publish regenerated sessions to the Ledger: %w", err))...)
+		}
+	}
+	if len(errs) > 0 {
+		return len(names), fmt.Errorf("publish regenerated artifacts to the Ledger: %w", errors.Join(errs...))
+	}
+	return len(names), nil
+}
+
+// regenerateSessionArtifacts regenerates markdown artifacts for a session.
+func regenerateSessionArtifacts(storedSession *session.StoredSession, sourceDir, outDir string) error {
+	if err := regenerateArtifactsInto(sourceDir, outDir, storedSession); err != nil {
+		return fmt.Errorf("regenerate artifacts: %w", err)
+	}
+
+	slog.Debug("regenerated session artifacts", "path", outDir)
+	return nil
+}
+
+// publishRegeneratedSession publishes one session's regenerated artifacts to
+// the Ledger. It returns false, with no error, when there is nothing on the
+// Ledger to update (no Ledger, an unpublished or draft session, or a session
+// held on this machine).
+func publishRegeneratedSession(projectRoot, sessionName, artifactDir string) (bool, error) {
+	ledgerPath, err := resolveLedgerPath()
+	if err != nil {
+		slog.Debug("no Ledger; regenerated artifacts stay local", "session", sessionName, "error", err)
+		return false, nil
+	}
+	ok, err := prepareRegeneratedArtifacts(projectRoot, ledgerPath, sessionName, artifactDir)
+	if err != nil || !ok {
+		return false, err
+	}
+	if err := commitAndPushLedger(ledgerPath, sessionName); err != nil {
+		return false, fmt.Errorf("commit and push: %w", err)
+	}
+	return true, nil
+}
+
+// regeneratedArtifactFiles are the LFS artifacts regenerateArtifacts writes.
+var regeneratedArtifactFiles = []string{ledgerFileSessionMD, ledgerFileSummaryMD}
+
+// prepareRegeneratedArtifacts readies a Ledger commit for the artifacts
+// regenerated into artifactDir: it uploads them, keeps their bytes in the
+// Ledger cache, records the new refs in meta.json, and writes pointers into
+// the tracked sessions/<name>/ directory. Real content is never written there,
+// so a failed upload or commit cannot leave plain content where a pointer
+// belongs. A failed pointer write restores the tracked files and the refs.
+//
+// Returns false, with no error, when the session has nothing on the Ledger to
+// update: no meta.json, a draft placeholder, or a session held on this machine.
+func prepareRegeneratedArtifacts(projectRoot, ledgerPath, sessionName, artifactDir string) (bool, error) {
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	meta, err := lfs.ReadSessionMeta(sessionDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read meta.json: %w", err)
+	}
+	if meta.IsDraft() {
+		return false, nil
+	}
+	if sessionHeldByName(artifactDir) || sessionHeldByName(sessionDir) {
+		slog.Info("regenerated artifacts not published; session is held on this machine", "session", sessionName)
+		return false, nil
+	}
+
+	content := make(map[string][]byte)
+	for _, name := range regeneratedArtifactFiles {
+		path := filepath.Join(artifactDir, name)
+		if lfs.IsPointerFile(path) {
+			continue
+		}
+		data, readErr := os.ReadFile(path)
+		if errors.Is(readErr, fs.ErrNotExist) {
+			continue
+		}
+		if readErr != nil {
+			return false, fmt.Errorf("read regenerated %s: %w", name, readErr)
+		}
+		content[name] = data
+	}
+	if len(content) == 0 {
+		return false, nil
+	}
+
+	refs, err := uploadSessionLFS(projectRoot, artifactDir)
+	if err != nil {
+		return false, fmt.Errorf("LFS upload: %w", err)
+	}
+	uploaded := make(map[string]lfs.FileRef, len(content))
+	for name, data := range content {
+		ref, ok := refs[name]
+		if !ok || ref.OID != lfs.NewFileRef(data).OID {
+			return false, fmt.Errorf("LFS upload returned no ref for %s", name)
+		}
+		uploaded[name] = ref
+	}
+
+	cacheDir := ledgerSessionCacheDir(ledgerPath, sessionName)
+	if filepath.Clean(artifactDir) != filepath.Clean(cacheDir) {
+		if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+			return false, fmt.Errorf("create Ledger cache: %w", err)
+		}
+		for name, data := range content {
+			if err := fileutil.AtomicWriteBytes(filepath.Join(cacheDir, name), data, 0o600); err != nil {
+				return false, fmt.Errorf("cache regenerated %s: %w", name, err)
 			}
 		}
 	}
 
-	cli.PrintSuccess(fmt.Sprintf("Regenerated %d session(s)", regenerated))
-	if skipped > 0 {
-		cli.PrintWarning(fmt.Sprintf("Skipped %d session(s) (unreadable or missing raw data)", skipped))
+	// prior holds what meta.Files named before this update; a missing entry
+	// was absent.
+	prior := make(map[string]*lfs.FileRef, len(uploaded))
+	if err := lfs.MutateSessionMeta(context.Background(), sessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+		if current == nil {
+			return nil, errors.New("session metadata disappeared during regeneration")
+		}
+		if current.Files == nil {
+			current.Files = make(map[string]lfs.FileRef, len(uploaded))
+		}
+		for name, ref := range uploaded {
+			if old, ok := current.Files[name]; ok {
+				prior[name] = &old
+			} else {
+				prior[name] = nil
+			}
+			current.Files[name] = ref
+		}
+		return current, nil
+	}); err != nil {
+		return false, fmt.Errorf("update meta.json with LFS refs: %w", err)
 	}
-
-	return nil
-}
-
-// regenerateSessionArtifacts regenerates markdown artifacts for a session.
-func regenerateSessionArtifacts(storedSession *session.StoredSession, sessionPath string) error {
-	if err := regenerateArtifacts(sessionPath, storedSession); err != nil {
-		return fmt.Errorf("regenerate artifacts: %w", err)
-	}
-
-	slog.Debug("regenerated session artifacts", "path", sessionPath)
-	return nil
-}
-
-// syncRegeneratedSession re-uploads to LFS and pushes to the ledger for a single session.
-func syncRegeneratedSession(projectRoot, sessionPath, sessionName string) error {
-	if _, err := uploadSessionLFS(projectRoot, sessionPath); err != nil {
-		return fmt.Errorf("LFS upload: %w", err)
-	}
-
-	ledgerPath, err := resolveLedgerPath()
+	setAside, err := setAsideCommittedArtifacts(sessionDir, uploaded)
 	if err != nil {
-		return fmt.Errorf("resolve ledger: %w", err)
+		err = fmt.Errorf("replace committed artifacts: %w", err)
+		if revertErr := revertRegeneratedRefs(sessionDir, uploaded, prior); revertErr != nil {
+			err = errors.Join(err, revertErr)
+		}
+		return false, err
 	}
-
-	if err := commitAndPushLedger(ledgerPath, sessionName); err != nil {
-		return fmt.Errorf("commit and push: %w", err)
+	// AssertUploaded: uploadSessionLFS uploaded these exact bytes above.
+	// WritePointerFiles restores the files it touched when it fails.
+	if _, err := lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(uploaded)); err != nil {
+		err = fmt.Errorf("write LFS pointer files: %w", err)
+		if restoreErr := setAside.restore(); restoreErr != nil {
+			err = errors.Join(err, restoreErr)
+		}
+		if revertErr := revertRegeneratedRefs(sessionDir, uploaded, prior); revertErr != nil {
+			err = errors.Join(err, revertErr)
+		}
+		return false, err
 	}
+	return true, nil
+}
 
+// committedArtifacts holds the plain artifacts removed from dir so pointers
+// can replace them.
+type committedArtifacts struct {
+	dir   string
+	files map[string]committedArtifact
+}
+
+type committedArtifact struct {
+	data []byte
+	perm os.FileMode
+}
+
+// restore writes the removed artifacts back, except where another writer has
+// created the file since.
+func (c committedArtifacts) restore() error {
+	var errs []error
+	for name, f := range c.files {
+		path := filepath.Join(c.dir, name)
+		if _, err := os.Lstat(path); err == nil {
+			continue
+		}
+		if err := fileutil.AtomicWriteBytes(path, f.data, f.perm); err != nil {
+			errs = append(errs, fmt.Errorf("restore %s: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// setAsideCommittedArtifacts removes the plain (non-pointer) artifacts a
+// legacy session tracks in git, so their regenerated pointers can replace
+// them. Only a file whose worktree and index both match HEAD is removed: git
+// keeps that copy. Anything else is left for WritePointerFiles to refuse.
+func setAsideCommittedArtifacts(sessionDir string, uploaded map[string]lfs.FileRef) (committedArtifacts, error) {
+	setAside := committedArtifacts{dir: sessionDir, files: map[string]committedArtifact{}}
+	for name := range uploaded {
+		path := filepath.Join(sessionDir, name)
+		info, err := os.Stat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return setAside, errors.Join(err, setAside.restore())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return setAside, errors.Join(err, setAside.restore())
+		}
+		if _, _, perr := lfs.ParsePointer(string(data)); perr == nil || !unchangedSinceHEAD(sessionDir, name) {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			return setAside, errors.Join(err, setAside.restore())
+		}
+		setAside.files[name] = committedArtifact{data: data, perm: info.Mode().Perm()}
+	}
+	return setAside, nil
+}
+
+// unchangedSinceHEAD reports whether HEAD tracks dir/name and neither the
+// index nor the worktree changed it. git hashes the worktree file itself, so
+// its filters (such as core.autocrlf) apply and index flags like
+// assume-unchanged or skip-worktree cannot hide an edit.
+func unchangedSinceHEAD(dir, name string) bool {
+	rel := "./" + name
+	head, err := exec.Command("git", "-C", dir, "rev-parse", "--verify", "-q", "HEAD:"+rel).Output()
+	if err != nil {
+		return false
+	}
+	worktree, err := exec.Command("git", "-C", dir, "hash-object", "--path="+name, "--", name).Output()
+	if err != nil || !bytes.Equal(bytes.TrimSpace(head), bytes.TrimSpace(worktree)) {
+		return false
+	}
+	return exec.Command("git", "-C", dir, "diff", "--quiet", "--cached", "--", rel).Run() == nil
+}
+
+// revertRegeneratedRefs puts back the meta.Files entries prepareRegeneratedArtifacts
+// replaced, under the metadata lock, leaving entries another writer changed since.
+func revertRegeneratedRefs(sessionDir string, uploaded map[string]lfs.FileRef, prior map[string]*lfs.FileRef) error {
+	err := lfs.MutateSessionMeta(context.Background(), sessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+		if current == nil || current.Files == nil {
+			return nil, nil
+		}
+		for name, ref := range uploaded {
+			if current.Files[name].OID != ref.OID {
+				continue
+			}
+			if old := prior[name]; old != nil {
+				current.Files[name] = *old
+			} else {
+				delete(current.Files, name)
+			}
+		}
+		return current, nil
+	})
+	if err != nil {
+		return fmt.Errorf("revert meta.json LFS refs: %w", err)
+	}
 	return nil
 }
 
@@ -415,15 +709,21 @@ func regenerateSingleSessionSummary(nameArg string) error {
 		return fmt.Errorf("summary for %s not saved: %s", sessionName, pushed.Message)
 	}
 
-	// regenerate downstream artifacts (summary.md, session.md)
-	if err := regenerateArtifacts(sessionPath, rawSession); err != nil {
+	// regenerate downstream artifacts (summary.md, session.md) into the
+	// Ledger cache; the tracked files must stay pointers.
+	cacheDir := ledgerSessionCacheDir(ledgerPath, sessionName)
+	if err := regenerateArtifactsInto(sessionPath, cacheDir, rawSession); err != nil {
 		slog.Warn("artifact regeneration partially failed", "session", sessionName, "error", err)
 	}
 
 	// push-summary already ran git add/commit/push for summary.json +
-	// meta.json, but not for the regenerated .md files. Stage them too.
-	if err := commitAndPushLedger(ledgerPath, sessionName); err != nil {
-		slog.Warn("md-artifact ledger push skipped", "error", err)
+	// meta.json, but not for the regenerated .md files. Publish them too.
+	if ok, err := prepareRegeneratedArtifacts(projectRoot, ledgerPath, sessionName, cacheDir); err != nil {
+		return fmt.Errorf("summary for %s was pushed, but publishing its regenerated artifacts failed: %w", sessionName, err)
+	} else if ok {
+		if err := commitAndPushLedger(ledgerPath, sessionName); err != nil {
+			return fmt.Errorf("summary for %s was pushed, but publishing its regenerated artifacts failed: commit and push: %w", sessionName, err)
+		}
 	}
 
 	cli.PrintSuccess(fmt.Sprintf("Regenerated summary for %s (quality: %.2f)", sessionName, freshSummary.QualityScore))
@@ -590,7 +890,7 @@ func regenerateAllSessionsRedact(projectRoot, ledgerPath, sessionsDir string, re
 	// batch commit + push for all modified sessions
 	if len(modifiedNames) > 0 {
 		fmt.Fprintf(os.Stderr, "\nCommitting and pushing %d updated sessions...\n", len(modifiedNames))
-		if err := commitAndPushLedgerBatch(ledgerPath, modifiedNames); err != nil {
+		if err := commitAndPushLedgerBatch(ledgerPath, fmt.Sprintf("session: re-redact %d sessions", len(modifiedNames)), modifiedNames); err != nil {
 			return fmt.Errorf("commit/push failed: %w", err)
 		}
 	}
@@ -822,17 +1122,26 @@ func rewriteRawJSONL(path string, sess *session.StoredSession) error {
 
 // regenerateArtifacts regenerates session.md and summary.md from raw session data.
 func regenerateArtifacts(sessionPath string, rawSession *session.StoredSession) error {
+	return regenerateArtifactsInto(sessionPath, sessionPath, rawSession)
+}
+
+// regenerateArtifactsInto regenerates session.md and summary.md into outDir,
+// reading summary.json from sourceDir.
+func regenerateArtifactsInto(sourceDir, outDir string, rawSession *session.StoredSession) error {
+	if err := os.MkdirAll(outDir, 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", outDir, err)
+	}
 	var errs []string
 
 	// session.md
 	mdGen := session.NewMarkdownGenerator()
-	mdPath := filepath.Join(sessionPath, ledgerFileSessionMD)
+	mdPath := filepath.Join(outDir, ledgerFileSessionMD)
 	if err := mdGen.GenerateToFile(rawSession, mdPath); err != nil {
 		errs = append(errs, fmt.Sprintf("%s: %s", ledgerFileSessionMD, err))
 	}
 
 	// summary.md — regenerate from summary.json if available
-	summaryJSONPath := filepath.Join(sessionPath, "summary.json")
+	summaryJSONPath := filepath.Join(sourceDir, "summary.json")
 	if data, err := os.ReadFile(summaryJSONPath); err == nil {
 		var summaryResp session.SummarizeResponse
 		if json.Unmarshal(data, &summaryResp) == nil {
@@ -840,7 +1149,7 @@ func regenerateArtifacts(sessionPath string, rawSession *session.StoredSession) 
 			summaryMdGen := session.NewSummaryMarkdownGenerator()
 			summaryMdBytes, err := summaryMdGen.Generate(rawSession.Meta, summaryView, rawSession.Entries)
 			if err == nil {
-				summaryMdPath := filepath.Join(sessionPath, ledgerFileSummaryMD)
+				summaryMdPath := filepath.Join(outDir, ledgerFileSummaryMD)
 				if writeErr := os.WriteFile(summaryMdPath, summaryMdBytes, 0644); writeErr != nil {
 					errs = append(errs, fmt.Sprintf("%s: %s", ledgerFileSummaryMD, writeErr))
 				}
@@ -1023,13 +1332,16 @@ func redactSummaryJSON(path string, redactor *session.Redactor) (bool, error) {
 	return true, os.Rename(tmpPath, path)
 }
 
-// commitAndPushLedgerBatch commits all modified meta.json files in one commit and pushes.
+// commitAndPushLedgerBatch commits the named sessions in one commit and pushes.
 //
 // Staging strategy mirrors commitAndPushLedger: derive the per-session
 // artifact list from meta.Files (manifest-driven), with the historical
 // glob as fallback for legacy sessions or torn writes. summary.json is
 // staged automatically when meta.Files records it (Storage=git).
-func commitAndPushLedgerBatch(ledgerPath string, sessionNames []string) error {
+//
+// Like commitAndPushLedger it always pushes: an identical retry has no new
+// commit but may still owe the remote one from an earlier failed push.
+func commitAndPushLedgerBatch(ledgerPath, message string, sessionNames []string) error {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 
 	var filesToAdd []string
@@ -1040,7 +1352,6 @@ func commitAndPushLedgerBatch(ledgerPath string, sessionNames []string) error {
 	}
 	filesToAdd = append(filesToAdd, filepath.Join(sessionsDir, ".gitignore"))
 
-	var committed bool
 	err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -1052,16 +1363,23 @@ func commitAndPushLedgerBatch(ledgerPath string, sessionNames []string) error {
 		} else if unmerged {
 			return fmt.Errorf("cannot commit Ledger with unresolved conflicts (run 'ox doctor --fix')")
 		}
+		priorIndex, err := ledgerIndexEntries(ledgerPath, filesToAdd)
+		if err != nil {
+			return err
+		}
 		if _, err := gitutil.RunGit(ctx, ledgerPath, append([]string{"add", "--sparse", "--"}, filesToAdd...)...); err != nil {
+			restoreLedgerIndex(ledgerPath, filesToAdd, priorIndex)
 			return fmt.Errorf("git add: %w", err)
 		}
 		// Keep other staged sessions, but leave plans for their own save.
 		// A large snapshot can take longer than the staging timeout to validate.
-		var commitErr error
-		committed, commitErr = commitLedgerSnapshot(context.WithoutCancel(ctx), ledgerPath, fmt.Sprintf("session: re-redact %d sessions", len(sessionNames)))
-		return commitErr
+		if _, err := commitLedgerSnapshot(context.WithoutCancel(ctx), ledgerPath, message); err != nil {
+			restoreLedgerIndex(ledgerPath, filesToAdd, priorIndex)
+			return err
+		}
+		return nil
 	})
-	if err != nil || !committed {
+	if err != nil {
 		return err
 	}
 
