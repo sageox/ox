@@ -1,6 +1,7 @@
 package gitserver
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -333,4 +334,62 @@ func TestMigrateLedgerCredentials_StampFailureDoesNotFail(t *testing.T) {
 	_, err = MigrateLedgerCredentials(dir, "!ox git-credential-helper")
 	require.NoError(t, err)
 	assert.Equal(t, [2]string{}, localIdentity(t, dir), "the stamp should have failed on the held lock")
+}
+
+// Failure prevented: a stamp interrupted between two git config writes (a
+// crash, a held lock) leaves ox's own partial identity, which the next call
+// takes for a person's: a project prime never finishes writing the coworker,
+// or a sign-out leaves the account's address behind. Each case interrupts
+// after every individual write, then runs again and expects the finished state.
+func TestStampAuthor_FinishesAfterAnInterruptionAtEveryStep(t *testing.T) {
+	oldAuthor := [2]string{"Old Rip", "agt_old@ai-coworker.invalid"}
+	for _, tc := range []struct {
+		name    string
+		before  [2]string
+		stamp   string
+		author  [2]string
+		project bool
+	}{
+		{"project: first stamp", [2]string{}, "", coworkerAuthor, true},
+		{"project: replacing its own stamp", oldAuthor, stampOf(oldAuthor), coworkerAuthor, true},
+		{"project: removing its stamp", coworkerAuthor, stampOf(coworkerAuthor), [2]string{}, true},
+		{"ledger: first stamp", [2]string{}, "", accountAuthor, false},
+		{"ledger: replacing its own stamp", accountAuthor, stampOf(accountAuthor), coworkerAuthor, false},
+		{"ledger: removing its stamp", accountAuthor, stampOf(accountAuthor), [2]string{}, false},
+	} {
+		for failAt := 1; ; failAt++ {
+			dir := t.TempDir()
+			require.NoError(t, exec.Command("git", "-C", dir, "init", "--quiet").Run())
+			setLocalIdentity(t, dir, tc.before, tc.stamp)
+			stamp := func() error {
+				if tc.project {
+					return StampProjectAuthor(dir, tc.author[0], tc.author[1])
+				}
+				return stampAuthor(dir, tc.author[0], tc.author[1], true)
+			}
+
+			writes := 0
+			failConfigWrite = func() error {
+				if writes++; writes == failAt {
+					return errors.New("interrupted")
+				}
+				return nil
+			}
+			interrupted := stamp() != nil
+			failConfigWrite = nil
+			require.NoError(t, stamp(), "%s, interrupted at write %d", tc.name, failAt)
+
+			assert.Equal(t, tc.author, localIdentity(t, dir), "%s, interrupted at write %d", tc.name, failAt)
+			got, err := readGitConfigLocal(dir, authorStampKey)
+			require.NoError(t, err)
+			want := ""
+			if tc.author != [2]string{} {
+				want = stampOf(tc.author)
+			}
+			assert.Equal(t, want, got, "%s, interrupted at write %d", tc.name, failAt)
+			if !interrupted {
+				break // failAt is past the last write: every step has been interrupted
+			}
+		}
+	}
 }

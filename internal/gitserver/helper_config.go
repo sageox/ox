@@ -223,17 +223,27 @@ const authorStampKey = "sageox.authorstamp"
 func stampValue(name, email string) string { return name + " <" + email + ">" }
 
 // ownsIdentity reports whether the local identity name and email in a
-// repository is the one ox stamped there, given the repository's stamp.
+// repository is the one ox stamped there, given the repository's stamp. A field
+// may be empty: ox writes and removes the two separately, so an interrupted
+// stamp leaves one of them unset, and is still ox's to finish.
 func ownsIdentity(stamp, name, email string) bool {
 	switch stamp {
 	case "true": // Ledger clones stamped before the stamp recorded the identity
 		return true
 	case "": // a coworker stamp from before there was a stamp at all
 		return strings.HasSuffix(email, coworkerEmailDomain)
-	default:
-		return stamp == stampValue(name, email)
 	}
+	i := strings.LastIndex(stamp, " <")
+	if i < 0 || !strings.HasSuffix(stamp, ">") {
+		return false
+	}
+	stampedName, stampedEmail := stamp[:i], stamp[i+2:len(stamp)-1]
+	return (name == "" || name == stampedName) && (email == "" || email == stampedEmail)
 }
+
+// failConfigWrite, set only by tests, can fail a local config write to
+// simulate a stamp interrupted partway.
+var failConfigWrite func() error
 
 // stampLedgerAuthor sets who authors the commits ox makes in the clone at
 // repoPath. ox's Ledger writers commit through several git paths, and all of
@@ -301,13 +311,37 @@ func stampAuthor(repoPath, name, email string, replaceForeign bool) error {
 	if current == email && currentName == name && stamp == want {
 		return nil
 	}
-	// The stamp goes first, so a stamp interrupted partway is still ox's to
-	// finish: the identity it names is the one being written.
-	for _, kv := range [][2]string{{authorStampKey, want}, {"user.name", name}, {"user.email", email}} {
-		out, err := exec.Command("git", "-C", repoPath, "config", "--local", "--replace-all", kv[0], kv[1]).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("git config %s: %s: %w", kv[0], strings.TrimSpace(string(out)), err)
+	// Each step below leaves a state ownsIdentity still reads as ox's, so a
+	// write interrupted after any of them is finished by the next call rather
+	// than taken for a person's. Replacing ox's own identity therefore clears
+	// it first, under the stamp that names it; then the stamp names the new
+	// identity before either field holds it.
+	if ours && stamp != want {
+		for _, key := range []string{"user.name", "user.email"} {
+			if err := unsetLocalConfig(repoPath, key); err != nil {
+				return err
+			}
 		}
+	}
+	for _, kv := range [][2]string{{authorStampKey, want}, {"user.name", name}, {"user.email", email}} {
+		if err := setLocalConfig(repoPath, kv[0], kv[1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// setLocalConfig sets key to value in repoPath's local config, replacing every
+// earlier value.
+func setLocalConfig(repoPath, key, value string) error {
+	if failConfigWrite != nil {
+		if err := failConfigWrite(); err != nil {
+			return err
+		}
+	}
+	out, err := exec.Command("git", "-C", repoPath, "config", "--local", "--replace-all", key, value).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git config %s: %s: %w", key, strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
@@ -315,6 +349,11 @@ func stampAuthor(repoPath, name, email string, replaceForeign bool) error {
 // unsetLocalConfig removes every value of key from repoPath's local config;
 // a key that is already absent is not an error.
 func unsetLocalConfig(repoPath, key string) error {
+	if failConfigWrite != nil {
+		if err := failConfigWrite(); err != nil {
+			return err
+		}
+	}
 	out, err := exec.Command("git", "-C", repoPath, "config", "--local", "--unset-all", key).CombinedOutput()
 	var exitErr *exec.ExitError
 	if asErr(err, &exitErr) && exitErr.ExitCode() == 5 {
