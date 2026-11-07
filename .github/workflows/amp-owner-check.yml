@@ -193,27 +193,32 @@ jobs:
             # and abort the step for every bot PR that touches nothing listed.
             def leaf: split("/") | (last // "");
             # The Security read paths from the steward workspace instructions,
-            # plus the release, signing and self-update surface that review of
-            # this PR found missing: .config/goreleaser.yml (release.yml runs
-            # it), the upgrade and install commands, the npm launcher, the
-            # release signature manifest and embedded public keys, and the npm
-            # lockfile behind make plan-review (its output ships in the binary).
+            # plus what review of this PR found missing, grouped by concern:
+            # release and self-update (.config/goreleaser.yml, which release.yml
+            # runs; the upgrade and install commands; the npm launcher and the
+            # lockfile behind make plan-review, whose output ships in the
+            # binary), signing (internal/signing, internal/signature and the
+            # release signature manifest), credentials (login, logout, the git
+            # credential helper), secret redaction and scanning, never-delete
+            # ledger paths (internal/sacred) and team access checks.
             # Directory prefixes carry the trailing slash so internal/sessions/
-            # does not match internal/session/; cmd/ox/upgrade and
-            # cmd/ox/install are file-name prefixes on purpose
-            # (upgrade_daemons.go, tests). Manifests, lockfiles and goreleaser
-            # configs match at any depth; the three cmd/ox files match by exact
-            # name.
+            # does not match internal/session/; cmd/ox/ names are file-name
+            # prefixes on purpose (upgrade_daemons.go, tests). Manifests,
+            # lockfiles and goreleaser configs match at any depth.
             def sensitive: ascii_downcase
               | startswith("scripts/") or startswith(".github/actions/")
                 or startswith("npm/") or startswith("cmd/ox/upgrade")
-                or startswith("cmd/ox/install")
+                or startswith("cmd/ox/install") or startswith("cmd/ox/login")
+                or startswith("cmd/ox/logout") or startswith("cmd/ox/git_credential")
+                or startswith("cmd/ox/prepush")
+                or (startswith("cmd/ox/") and (leaf | contains("redact")))
                 or startswith("internal/upgrade/") or startswith("internal/auth/")
                 or startswith("internal/mcp/") or startswith("internal/session/")
                 or startswith("internal/daemon/") or startswith("internal/signature/")
-                or startswith("security/")
+                or startswith("internal/signing/") or startswith("internal/redaction/")
+                or startswith("internal/secretguard/") or startswith("internal/sacred/")
+                or startswith("internal/teamaccess/") or startswith("security/")
                 or . == ".github/release-signatures.json"
-                or . == "cmd/ox/redaction.go" or . == "cmd/ox/prepush_scan.go"
                 or . == "cmd/ox/adapter.go"
                 or (leaf | startswith(".goreleaser") or startswith("goreleaser")
                   or . == "makefile" or startswith("dockerfile")
