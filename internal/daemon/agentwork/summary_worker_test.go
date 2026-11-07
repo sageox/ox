@@ -125,3 +125,20 @@ func TestTeamTokenActiveReadsSAGEOXToken(t *testing.T) {
 		assert.Equal(t, want, teamTokenActive(t.TempDir()), token[:4])
 	}
 }
+
+// Failure prevented: headless Gemini refuses an untrusted directory, so a
+// fallback moved into ox's empty one would fail every summary.
+func TestGeminiFallbackTrustsOxsEmptyDirectory(t *testing.T) {
+	script := fakeCLI(t, "gemini", `if [ "$1" = "--help" ]; then echo "--policy"; exit; fi
+echo "trust=$GEMINI_CLI_TRUST_WORKSPACE"
+`)
+	r := &GeminiRunner{binaryPath: script, logger: slog.Default()}
+	result, err := r.Run(context.Background(), RunRequest{Prompt: "p", IsolateIfSupported: true})
+	require.NoError(t, err)
+	assert.Contains(t, result.Output, "trust=true")
+
+	ledger := t.TempDir()
+	result, err = r.Run(context.Background(), RunRequest{Prompt: "p", WorkDir: ledger, IsolateIfSupported: true})
+	require.NoError(t, err)
+	assert.NotContains(t, result.Output, "trust=true", "a caller's directory is never trusted on its behalf")
+}
