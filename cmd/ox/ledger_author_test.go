@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -91,6 +92,18 @@ func TestLedgerCommitAuthor_SignedInAccountThenGitIdentity(t *testing.T) {
 	signIn(ledgerServer.URL, "usr_devon", "Devon Example", time.Now().Add(-time.Hour))
 	author, err = commitAuthor("expired.md")
 	require.NoError(t, err, "an expired sign-in is still a sign-in until the person signs out")
+	assert.Equal(t, "Devon E. <usr_devon@sageox-account.invalid>", author)
+
+	// A login stored before user_id existed: the account ID is only in the
+	// access token's subject.
+	legacyJWT := "e30." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"usr_devon"}`)) + ".sig"
+	require.NoError(t, auth.SaveTokenForEndpoint(ledgerServer.URL, &auth.StoredToken{
+		AccessToken: legacyJWT,
+		ExpiresAt:   time.Now().Add(time.Hour),
+		UserInfo:    auth.UserInfo{Email: "usr_devon@example.com", Name: "Devon Example"},
+	}))
+	author, err = commitAuthor("legacy-login.md")
+	require.NoError(t, err, "a login stored before user_id existed is still a sign-in")
 	assert.Equal(t, "Devon E. <usr_devon@sageox-account.invalid>", author)
 
 	require.NoError(t, auth.RemoveTokenForEndpoint(ledgerServer.URL))

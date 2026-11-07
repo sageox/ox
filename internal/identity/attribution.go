@@ -187,6 +187,11 @@ func signedInUser(ep string) (id, email, name string) {
 	}
 	if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil {
 		id, email, name = token.UserInfo.UserID, token.UserInfo.Email, token.UserInfo.Name
+		if id == "" {
+			// a login stored before user_id existed names the account only in
+			// its access token's subject; GetUserID recovers it
+			id = auth.GetUserID(ep)
+		}
 	}
 	// A personal SAGEOX_TOKEN carries no UserInfo; the server names its owner.
 	if email == "" && name == "" {
