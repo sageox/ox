@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/pkg/sessionsummary"
 	"github.com/spf13/cobra"
@@ -367,9 +368,24 @@ func regenerateSingleSessionSummary(nameArg string) error {
 	if !runner.Available() {
 		return fmt.Errorf("claude binary not found in PATH — ensure Claude Code CLI is installed")
 	}
+	// An empty directory under the user's cache, never the project: Claude Code
+	// loads a project's settings (including env overrides like
+	// ANTHROPIC_BASE_URL) and parent-directory CLAUDE.md files, and /tmp is
+	// writable by every account on the machine.
+	workBase := filepath.Join(paths.CacheDir(), "agent-worker")
+	if err := os.MkdirAll(workBase, 0o700); err != nil {
+		return fmt.Errorf("summary worker directory: %w", err)
+	}
+	workDir, err := os.MkdirTemp(workBase, "run-*")
+	if err != nil {
+		return fmt.Errorf("summary worker directory: %w", err)
+	}
+	defer os.RemoveAll(workDir)
+
 	result, err := runner.Run(context.Background(), agentwork.RunRequest{
 		Prompt:   prompt,
 		Model:    sessionsummary.DefaultSummaryModel(),
+		WorkDir:  workDir,
 		Isolated: true,
 	})
 	if err != nil {

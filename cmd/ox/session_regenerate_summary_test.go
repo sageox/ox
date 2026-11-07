@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sageox/ox/internal/paths"
 )
 
 // Failure prevented: a session's transcript is untrusted text. Regenerating
@@ -60,6 +62,8 @@ cat "`+resultFile+`"
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("SAGEOX_TOKEN", "oxp_test_regen")
 	t.Setenv("OX_SUMMARY_MODEL", "claude-haiku-4-5")
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
 	var runErr error
 	captureStdoutForPlanCLI(t, func() { runErr = regenerateSingleSessionSummary(sessionName) })
@@ -78,6 +82,12 @@ cat "`+resultFile+`"
 	cwd, err := os.ReadFile(cwdFile)
 	require.NoError(t, err)
 	assert.NotContains(t, string(cwd), f.ledgerPath, "the worker never runs in the Ledger")
+	// Failure prevented: the worker runs in the project and loads its
+	// .claude/settings.json env (ANTHROPIC_BASE_URL), or in the shared /tmp
+	// under a CLAUDE.md any account can write.
+	resolvedCache, err := filepath.EvalSymlinks(paths.CacheDir())
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(strings.TrimSpace(string(cwd)), resolvedCache+string(filepath.Separator)), "worker ran in %s, outside the user cache", cwd)
 
 	prompt, err := os.ReadFile(promptFile)
 	require.NoError(t, err)
