@@ -54,3 +54,17 @@ Feature: Aborting a Session is a Total Kill
       When Avery aborts or deletes the session named ".." with --force
       Then ox refuses the name
       And every session in the Ledger and on Devon's machine is left untouched
+
+  Rule: A team token never deletes a session from the Ledger
+
+    Scenario: Avery, running under the team's token, tries to delete a finalized session
+      Given Avery runs under the "Acme Engineering" team token
+      And a finalized session exists in the "Acme Engineering" Ledger
+      When Avery aborts, deletes, or removes that session by its exact name
+      Then ox refuses and links the session's page on the web, where a person deletes it
+      And the session stays in the Ledger for everyone
+
+    Scenario: Devon, signed in with their own login, deletes a finalized session
+      Given a finalized session of Devon's exists in the "Acme Engineering" Ledger
+      When Devon deletes it by its exact name
+      Then ox removes it from the Ledger
