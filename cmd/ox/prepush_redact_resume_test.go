@@ -47,7 +47,7 @@ func TestPrePushGate_ResumesFailedRedactionAmend(t *testing.T) {
 		raw, err := os.ReadFile(filepath.Join(work, rel))
 		require.NoError(t, err)
 		require.NotContains(t, string(raw), canary, "working file is redacted before the amendment")
-		require.FileExists(t, filepath.Join(work, filepath.FromSlash(pendingRedactionAmendRel)))
+		require.FileExists(t, pendingRecordPath(t, work))
 		t.Setenv("GIT_COMMITTER_NAME", "ox-test")
 		return work, remote, holding
 	}
@@ -74,7 +74,7 @@ func TestPrePushGate_ResumesFailedRedactionAmend(t *testing.T) {
 		assert.Contains(t, mustGitCapture(t, work, "show", "HEAD:sessions/"+name+"/meta.json"), "redactions")
 		assert.Equal(t, rel, mustGitCapture(t, work, "diff", "--name-only"), "the later append stays uncommitted")
 		assert.Empty(t, mustGitCapture(t, work, "diff", "--cached", "--name-only"))
-		assert.NoFileExists(t, filepath.Join(work, filepath.FromSlash(pendingRedactionAmendRel)))
+		assert.NoFileExists(t, pendingRecordPath(t, work))
 
 		require.NoError(t, gitutil.PushWithRetry(context.Background(), work, gitutil.PushOpts{}))
 		assert.Equal(t, mustGitCapture(t, work, "rev-parse", "HEAD"), mustGitCapture(t, remote, "rev-parse", "main"))
@@ -93,14 +93,14 @@ func TestPrePushGate_ResumesFailedRedactionAmend(t *testing.T) {
 		err := runGate(t, work)
 		require.ErrorContains(t, err, "newer Ledger commits")
 		assert.Equal(t, newer, mustGitCapture(t, work, "rev-parse", "HEAD"))
-		assert.FileExists(t, filepath.Join(work, filepath.FromSlash(pendingRedactionAmendRel)))
+		assert.FileExists(t, pendingRecordPath(t, work))
 		require.Error(t, gitutil.PushWithRetry(context.Background(), work, gitutil.PushOpts{}))
 		assertRemoteObjectsCleanOf(t, remote, canary)
 
 		// Once history no longer contains the holding commit the record is obsolete.
 		mustGit(t, work, "reset", "--hard", "origin/main")
 		require.NoError(t, runGate(t, work))
-		assert.NoFileExists(t, filepath.Join(work, filepath.FromSlash(pendingRedactionAmendRel)))
+		assert.NoFileExists(t, pendingRecordPath(t, work))
 	})
 
 	t.Run("another writer's staged bytes are kept", func(t *testing.T) {
@@ -125,7 +125,7 @@ func TestPrePushGate_ResumesFailedRedactionAmend(t *testing.T) {
 
 		require.NoError(t, runGate(t, work))
 		assert.Contains(t, mustGitCapture(t, work, "ls-tree", "HEAD", "--", rel), "100644 blob ", "the withdrawn mode change is not committed")
-		assert.NoFileExists(t, filepath.Join(work, filepath.FromSlash(pendingRedactionAmendRel)))
+		assert.NoFileExists(t, pendingRecordPath(t, work))
 		require.NoError(t, gitutil.PushWithRetry(context.Background(), work, gitutil.PushOpts{}))
 		assertRemoteObjectsCleanOf(t, remote, canary)
 	})
@@ -150,4 +150,12 @@ func runGate(t *testing.T, work string) error {
 	return gitutil.WithRepoLock(ctx, work, func() error {
 		return runPrePushSecretGate(ctx, work)
 	})
+}
+
+func pendingRecordPath(t *testing.T, work string) string {
+	t.Helper()
+	p, err := pendingRedactionAmendPath(context.Background(), work)
+	require.NoError(t, err)
+	require.NotContains(t, p, filepath.Join(work, ".sageox"), "the record must not live in Ledger content")
+	return p
 }

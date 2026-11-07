@@ -25,9 +25,17 @@ import (
 // the exact blobs the canonical writer produced, so a retry stages those bytes,
 // never newer working-tree content, and never amends a different HEAD.
 
-// pendingRedactionAmendRel is ledger-relative and gitignored with the rest of
-// .sageox/cache/.
-var pendingRedactionAmendRel = filepath.ToSlash(filepath.Join(".sageox", "cache", "redaction-pending", "amend.json"))
+// pendingRedactionAmendName lives in the Git directory, never the worktree, so
+// Ledger content arriving through checkout cannot supply a recovery record.
+const pendingRedactionAmendName = "ox-redaction-pending-amend.json"
+
+func pendingRedactionAmendPath(ctx context.Context, ledgerPath string) (string, error) {
+	p, err := redactGit(ctx, ledgerPath, nil, "rev-parse", "--path-format=absolute", "--git-path", pendingRedactionAmendName)
+	if err != nil {
+		return "", fmt.Errorf("resolve pending redaction path: %w", err)
+	}
+	return p, nil
+}
 
 type pendingRedactionAmend struct {
 	HoldingTip string                 `json:"holding_tip"`
@@ -76,7 +84,7 @@ func stageAndAmendRedactedFiles(ctx context.Context, ledgerPath string, repaired
 		}
 		rec.Paths = append(rec.Paths, pendingRedactionPath{Path: rel, Mode: mode, Blob: blob, HoldingMode: holdingMode, HoldingBlob: holding})
 	}
-	if err := writePendingRedactionAmend(ledgerPath, &rec); err != nil {
+	if err := writePendingRedactionAmend(ctx, ledgerPath, &rec); err != nil {
 		return fmt.Errorf("record pending redaction: %w", err)
 	}
 	return applyPendingRedactionAmend(ctx, ledgerPath, &rec)
@@ -89,7 +97,7 @@ func stageAndAmendRedactedFiles(ctx context.Context, ledgerPath string, repaired
 // outgoing-object validator still checks whatever replaced it.
 // The caller holds the repo lock.
 func resumePendingRedactionAmend(ctx context.Context, ledgerPath string) (bool, error) {
-	rec, err := readPendingRedactionAmend(ledgerPath)
+	rec, err := readPendingRedactionAmend(ctx, ledgerPath)
 	if err != nil || rec == nil {
 		return false, err
 	}
@@ -107,12 +115,12 @@ func resumePendingRedactionAmend(ctx context.Context, ledgerPath string) (bool, 
 		}
 		if ancestor {
 			return false, fmt.Errorf("pending redaction for holding commit %s cannot be completed: newer Ledger commits were added on top of it, and ox amends only the holding commit. "+
-				"Publication stays held; remove the unredacted content from unpushed history, then retry (record: %s)",
-				shortOID(rec.HoldingTip), pendingRedactionAmendRel)
+				"Publication stays held; remove the unredacted content from unpushed history, then retry (record: .git/%s)",
+				shortOID(rec.HoldingTip), pendingRedactionAmendName)
 		}
 		slog.Info("pre-push redaction: dropping obsolete pending amendment",
 			"holding_tip", rec.HoldingTip, "head", head)
-		return false, removePendingRedactionAmend(ledgerPath)
+		return false, removePendingRedactionAmend(ctx, ledgerPath)
 	}
 	if err := applyPendingRedactionAmend(ctx, ledgerPath, rec); err != nil {
 		return false, fmt.Errorf("complete pending redaction: %w", err)
@@ -154,11 +162,15 @@ func applyPendingRedactionAmend(ctx context.Context, ledgerPath string, rec *pen
 	if _, err := gitutil.AmendLedgerSnapshot(ctx, ledgerPath, pathspecs...); err != nil {
 		return err
 	}
-	return removePendingRedactionAmend(ledgerPath)
+	return removePendingRedactionAmend(ctx, ledgerPath)
 }
 
-func readPendingRedactionAmend(ledgerPath string) (*pendingRedactionAmend, error) {
-	buf, err := os.ReadFile(filepath.Join(ledgerPath, filepath.FromSlash(pendingRedactionAmendRel)))
+func readPendingRedactionAmend(ctx context.Context, ledgerPath string) (*pendingRedactionAmend, error) {
+	path, err := pendingRedactionAmendPath(ctx, ledgerPath)
+	if err != nil {
+		return nil, err
+	}
+	buf, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -169,21 +181,21 @@ func readPendingRedactionAmend(ledgerPath string) (*pendingRedactionAmend, error
 	if err := json.Unmarshal(buf, &rec); err != nil || rec.HoldingTip == "" || len(rec.Paths) == 0 {
 		// Unusable record: nothing can be replayed from it, and the
 		// outgoing-object validator still refuses any unredacted blob.
-		slog.Warn("pre-push redaction: discarding unreadable pending amendment", "path", pendingRedactionAmendRel, "error", err)
-		return nil, removePendingRedactionAmend(ledgerPath)
+		slog.Warn("pre-push redaction: discarding unreadable pending amendment", "path", path, "error", err)
+		return nil, removePendingRedactionAmend(ctx, ledgerPath)
 	}
 	for _, p := range rec.Paths {
 		if p.Path == "" || p.Blob == "" || p.Mode == "" || strings.ContainsAny(p.Path+p.Mode+p.Blob, "\x00\t\n") {
-			slog.Warn("pre-push redaction: discarding malformed pending amendment", "path", pendingRedactionAmendRel)
-			return nil, removePendingRedactionAmend(ledgerPath)
+			slog.Warn("pre-push redaction: discarding malformed pending amendment", "path", path)
+			return nil, removePendingRedactionAmend(ctx, ledgerPath)
 		}
 	}
 	return &rec, nil
 }
 
-func writePendingRedactionAmend(ledgerPath string, rec *pendingRedactionAmend) error {
-	abs := filepath.Join(ledgerPath, filepath.FromSlash(pendingRedactionAmendRel))
-	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
+func writePendingRedactionAmend(ctx context.Context, ledgerPath string, rec *pendingRedactionAmend) error {
+	abs, err := pendingRedactionAmendPath(ctx, ledgerPath)
+	if err != nil {
 		return err
 	}
 	buf, err := json.MarshalIndent(rec, "", "  ")
@@ -193,9 +205,12 @@ func writePendingRedactionAmend(ledgerPath string, rec *pendingRedactionAmend) e
 	return writeFileAtomic(abs, buf, 0o600)
 }
 
-func removePendingRedactionAmend(ledgerPath string) error {
-	err := os.Remove(filepath.Join(ledgerPath, filepath.FromSlash(pendingRedactionAmendRel)))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+func removePendingRedactionAmend(ctx context.Context, ledgerPath string) error {
+	path, err := pendingRedactionAmendPath(ctx, ledgerPath)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("clear pending redaction: %w", err)
 	}
 	return nil
