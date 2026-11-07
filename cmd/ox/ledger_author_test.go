@@ -17,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/identity"
 )
 
 // Failure prevented: on a machine whose git has no identity (a fresh Linux
@@ -77,12 +78,6 @@ func TestLedgerCommitAuthor_SignedInAccountThenGitIdentity(t *testing.T) {
 		}))
 	}
 
-	// Git credentials are stored per host, so both local servers read this
-	// one record, which names the Ledger's git server.
-	require.NoError(t, gitserver.SaveCredentialsForEndpoint(ledgerServer.URL, gitserver.GitCredentials{
-		Token: "pat", ServerURL: ledgerServer.URL, ExpiresAt: time.Now().Add(time.Hour),
-		BearerTokenHash: gitserver.BearerTokenFingerprint("token-usr_devon"),
-	}))
 	machineGit(personB)
 	signIn(otherServer.URL, "usr_quinn", "Quinn Other", time.Now().Add(time.Hour))
 	author, err := commitAuthor("other-server.md")
@@ -118,4 +113,77 @@ func TestLedgerCommitAuthor_SignedInAccountThenGitIdentity(t *testing.T) {
 	author, err = commitAuthor("signed-out.md")
 	require.NoError(t, err)
 	assert.Equal(t, "Person B <person-b@example.com>", author, "signed out, the machine's git identity applies again")
+}
+
+// isolateSignIns gives a test its own auth store and git-credential records,
+// and no SAGEOX_TOKEN.
+func isolateSignIns(t *testing.T) {
+	t.Helper()
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("OX_GIT_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "git-credentials.json"))
+	require.NoError(t, os.MkdirAll(filepath.Join(xdg, "sageox"), 0o755))
+	t.Setenv("SAGEOX_TOKEN", "")
+	require.NoError(t, os.Unsetenv("SAGEOX_TOKEN"))
+}
+
+func saveSignIn(t *testing.T, serverURL, accessToken, userID, name string) {
+	t.Helper()
+	require.NoError(t, auth.SaveTokenForEndpoint(serverURL, &auth.StoredToken{
+		AccessToken: accessToken,
+		ExpiresAt:   time.Now().Add(time.Hour),
+		UserInfo:    auth.UserInfo{UserID: userID, Email: userID + "@example.com", Name: name},
+	}))
+}
+
+// Failure prevented: two local stacks on one host share a git-credential
+// record (records are keyed by host), so the account signed in on one server
+// authors the other server's Ledger commits.
+func TestSignedInAuthor_SharedCredentialRecordBelongsToItsFetcher(t *testing.T) {
+	skipIntegration(t)
+	isolateSignIns(t)
+	ledgerServer := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(ledgerServer.Close)
+	otherServer := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(otherServer.Close)
+	saveSignIn(t, ledgerServer.URL, "token-devon", "usr_devon", "Devon Example")
+	saveSignIn(t, otherServer.URL, "token-quinn", "usr_quinn", "Quinn Other")
+	require.NoError(t, gitserver.SaveCredentialsForEndpoint(ledgerServer.URL, gitserver.GitCredentials{
+		Token: "pat", ServerURL: ledgerServer.URL, ExpiresAt: time.Now().Add(time.Hour),
+		BearerTokenHash: gitserver.BearerTokenFingerprint("token-devon"),
+	}))
+
+	// Sign-ins are visited in random order; enough calls visit Quinn's first.
+	for range 32 {
+		_, email := identity.SignedInAuthor(ledgerServer.URL+"/team/ledger.git", "")
+		require.Equal(t, "usr_devon@sageox-account.invalid", email, "another server's account must not author")
+	}
+}
+
+// Failure prevented: on a deployment whose git server has its own host, an
+// OAuth refresh (or a record saved before bearer hashes existed) drops the
+// Ledger author until git credentials are fetched again, and Ledger commits
+// fail on a machine without a git identity.
+func TestSignedInAuthor_RefreshedLoginKeepsItsGitServer(t *testing.T) {
+	skipIntegration(t)
+	const gitServer = "http://source.example.net"
+	for name, fetchedWith := range map[string]string{
+		"refreshed since the fetch":  gitserver.BearerTokenFingerprint("token-before-refresh"),
+		"saved before bearer hashes": "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolateSignIns(t)
+			api := httptest.NewServer(http.NotFoundHandler())
+			t.Cleanup(api.Close)
+			saveSignIn(t, api.URL, "token-after-refresh", "usr_devon", "Devon Example")
+			require.NoError(t, gitserver.SaveCredentialsForEndpoint(api.URL, gitserver.GitCredentials{
+				Token: "pat", ServerURL: gitServer, ExpiresAt: time.Now().Add(time.Hour), BearerTokenHash: fetchedWith,
+			}))
+
+			author, email := identity.SignedInAuthor(gitServer+"/team/ledger.git", "")
+
+			assert.Equal(t, "Devon E. <usr_devon@sageox-account.invalid>", author+" <"+email+">")
+		})
+	}
 }

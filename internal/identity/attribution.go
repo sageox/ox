@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/runtime"
@@ -215,19 +216,9 @@ const accountEmailDomain = "@sageox-account.invalid"
 // ends it. Both results are "" when no signed-in account owns that git server,
 // which leaves git's own identity in charge.
 func SignedInAuthor(remoteURL, configDisplayName string) (name, email string) {
-	for _, ep := range signedInEndpoints() {
-		// The git server the API named for this endpoint, when known, so two
-		// servers on one host (local stacks on different ports) never match.
-		// Credential records are keyed by host, so such stacks share one: trust
-		// its server only when this endpoint's own token fetched it.
-		var serverURL string
-		if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil {
-			if creds, err := gitserver.LoadCredentialsForEndpoint(ep); err == nil && creds != nil &&
-				creds.BearerTokenHash == gitserver.BearerTokenFingerprint(token.AccessToken) {
-				serverURL = creds.ServerURL
-			}
-		}
-		if !gitserver.RemoteOnGitServer(remoteURL, ep, serverURL) {
+	signedIn := signedInEndpoints()
+	for _, ep := range signedIn {
+		if !gitserver.RemoteOnGitServer(remoteURL, ep, gitServerFor(ep, signedIn)) {
 			continue
 		}
 		id, accountEmail, fullName := signedInUser(ep)
@@ -241,6 +232,30 @@ func SignedInAuthor(remoteURL, configDisplayName string) (name, email string) {
 		return name, id + accountEmailDomain
 	}
 	return "", ""
+}
+
+// gitServerFor returns the git server the API named for ep, or "" when that is
+// unknown, so two servers on one host (local stacks on different ports) never
+// match each other's clones. Credential records are keyed by host, so such
+// stacks share one. A record ep's own token fetched is ep's. One fetched with
+// an earlier token (a refreshed or pre-hash login) is trusted only when no
+// other sign-in shares the host and could own it.
+func gitServerFor(ep string, signedIn []string) string {
+	creds, err := gitserver.LoadCredentialsForEndpoint(ep)
+	if err != nil || creds == nil {
+		return ""
+	}
+	if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil &&
+		creds.BearerTokenHash == gitserver.BearerTokenFingerprint(token.AccessToken) {
+		return creds.ServerURL
+	}
+	host := endpoint.NormalizeSlug(ep)
+	for _, other := range signedIn {
+		if other != ep && endpoint.NormalizeSlug(other) == host {
+			return ""
+		}
+	}
+	return creds.ServerURL
 }
 
 // signedInEndpoints lists every endpoint with a sign-in: a usable SAGEOX_TOKEN
