@@ -293,6 +293,9 @@ func runCoworkerLoad(cmd *cobra.Command, args []string) error {
 	}
 
 	name := args[0]
+	if err := claude.ValidateAgentName(name); err != nil {
+		return err
+	}
 	modelOverride, _ := cmd.Flags().GetString("model")
 	jsonMode, _ := cmd.Flags().GetBool("json")
 
@@ -388,6 +391,9 @@ func runCoworkerAdd(cmd *cobra.Command, args []string) error {
 
 	// derive coworker name from filename (strip .md extension)
 	name := strings.TrimSuffix(filepath.Base(srcPath), ".md")
+	if err := claude.ValidateAgentName(name); err != nil {
+		return err
+	}
 
 	// ensure coworkers/agents/ directory exists
 	agentsDir := filepath.Join(tc.Path, claude.AgentsDir)
@@ -413,8 +419,8 @@ func runCoworkerAdd(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	relPath := filepath.Join(claude.AgentsDir, name+".md")
-	if _, err := gitutil.RunGit(ctx, tc.Path, "add", relPath); err != nil {
+	relPath := filepath.ToSlash(filepath.Join(claude.AgentsDir, name+".md"))
+	if _, err := gitutil.RunGit(ctx, tc.Path, "add", "--", ":(literal)"+relPath); err != nil {
 		return fmt.Errorf("git add: %w", err)
 	}
 
@@ -435,6 +441,9 @@ func runCoworkerAdd(cmd *cobra.Command, args []string) error {
 
 func runCoworkerRemove(cmd *cobra.Command, args []string) error {
 	name := args[0]
+	if err := claude.ValidateAgentName(name); err != nil {
+		return err
+	}
 	force, _ := cmd.Flags().GetBool("force")
 
 	projectRoot, err := findProjectRoot()
@@ -468,8 +477,8 @@ func runCoworkerRemove(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	relPath := filepath.Join(claude.AgentsDir, name+".md")
-	if _, err := gitutil.RunGit(ctx, tc.Path, "rm", relPath); err != nil {
+	relPath := filepath.ToSlash(filepath.Join(claude.AgentsDir, name+".md"))
+	if _, err := gitutil.RunGit(ctx, tc.Path, "rm", "--", ":(literal)"+relPath); err != nil {
 		return fmt.Errorf("git rm: %w", err)
 	}
 
