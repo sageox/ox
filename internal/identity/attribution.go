@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/runtime"
 )
@@ -109,26 +110,10 @@ func ResolveAttribution(ep, configDisplayName string) Attribution {
 		return Attribution{Username: c.Username(), Name: c.Name(), DisplayName: c.Name(), AI: true}
 	}
 
-	var email, name, username string
+	var username string
 
-	// 1. Try SageOx OAuth (verified identity)
-	if ep != "" {
-		if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil {
-			if token.UserInfo.Email != "" {
-				email = token.UserInfo.Email
-			}
-			if token.UserInfo.Name != "" {
-				name = token.UserInfo.Name
-			}
-		}
-	}
-
-	// 1b. A personal SAGEOX_TOKEN carries no UserInfo; the server names its owner.
-	if ep != "" && email == "" && name == "" {
-		if u := auth.PersonalTokenUser(ep); u != nil {
-			email, name = u.Email, u.Name
-		}
-	}
+	// 1. SageOx account (verified identity)
+	email, name := signedInUser(ep)
 	verified := &repotools.GitIdentity{Email: email, Name: name}
 
 	// 2. Try git config identity (local, no network)
@@ -191,6 +176,52 @@ func ResolveAttribution(ep, configDisplayName string) Attribution {
 		Name:        name,
 		DisplayName: displayName,
 	}
+}
+
+// signedInUser returns the email and full name of the SageOx account signed in
+// at ep, or "" for both.
+func signedInUser(ep string) (email, name string) {
+	if ep == "" {
+		return "", ""
+	}
+	if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil {
+		email, name = token.UserInfo.Email, token.UserInfo.Name
+	}
+	// A personal SAGEOX_TOKEN carries no UserInfo; the server names its owner.
+	if email == "" && name == "" {
+		if u := auth.PersonalTokenUser(ep); u != nil {
+			email, name = u.Email, u.Name
+		}
+	}
+	return email, name
+}
+
+// SignedInAuthor is who ox commits as in the repos it syncs from the SageOx
+// server at ep: the signed-in account's email, under its DisplayName, because
+// those commits reach the Ledger (see PRIVACY RULE). ep may name the server by
+// any URL on the same host, such as one derived from a git remote. Both results
+// are "" when no account with an email is signed in there, which leaves git's
+// own identity in charge.
+func SignedInAuthor(ep, configDisplayName string) (name, email string) {
+	host := endpoint.NormalizeSlug(ep)
+	if host == "" || host == "unknown" {
+		return "", ""
+	}
+	for _, signedIn := range auth.GetLoggedInEndpoints() {
+		if endpoint.NormalizeSlug(signedIn) != host {
+			continue
+		}
+		email, fullName := signedInUser(signedIn)
+		if email == "" {
+			return "", ""
+		}
+		name = strings.TrimSpace(configDisplayName)
+		if name == "" {
+			name = deriveDisplayName(email, fullName, "")
+		}
+		return name, email
+	}
+	return "", ""
 }
 
 // AttributionUsername returns a lowercase, filesystem-safe slug for the current user.

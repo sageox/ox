@@ -110,7 +110,8 @@ sequenceDiagram
 | Ledger `meta.json` `username` field | `DisplayName` | Team-visible, privacy-safe |
 | Session folder names | `Username` | Filesystem-safe slug |
 | Murmur `principal_id` | `Username` | Stable identifier for matching |
-| Git commit author | `Name` + `Email` | Local-only git config |
+| Git commit author, project repo | the person's own git config | ox does not set it |
+| Git commit author, Ledger and Team Context | `DisplayName` + `Email` of the signed-in SageOx account (`identity.SignedInAuthor`); git's own identity when nobody is signed in | Commits reach teammates; stamped into the clone's local config, so a machine whose git has no identity can still save sessions |
 | Login display ("Signed in as...") | `Name` | Shown only to the authenticated user |
 
 ### Fallback Chain

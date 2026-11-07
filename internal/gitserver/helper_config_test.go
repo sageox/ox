@@ -240,6 +240,61 @@ func TestMigrateLedgerCredentials_StampsCoworkerAuthor(t *testing.T) {
 	}
 }
 
+// Failure prevented: a signed-in person's Ledger commits fail on a machine whose
+// git has no identity, carry that machine's identity instead of their SageOx
+// account, outlive sign-out, or overwrite a coworker's stamp; or sign-out
+// strips an identity the person set themselves.
+func TestMigrateLedgerCredentials_StampsSignedInAuthor(t *testing.T) {
+	coworker := [2]string{"Rip", "agt_rip@ai-coworker.invalid"}
+	account := [2]string{"Devon E.", "devon@example.com"}
+	person := [2]string{"Person B", "person-b@example.com"}
+	for _, tc := range []struct {
+		name      string
+		remoteURL string
+		coworker  string    // agt_ id TeamCoworkerGetter reports, or ""
+		signedIn  bool      // whether account is signed in on sageox.ai
+		before    [2]string // the clone's own user.name and user.email
+		stamped   bool      // whether before was ox's stamp
+		want      [2]string
+	}{
+		{"signed in", "https://git.sageox.ai/team/ledger.git", "", true, [2]string{}, false, account},
+		{"signed in replaces a person's identity", "https://git.sageox.ai/team/ledger.git", "", true, person, false, account},
+		{"signed in on another server", "https://git.test.sageox.ai/team/ledger.git", "", true, [2]string{}, false, [2]string{}},
+		{"coworker comes first", "https://git.sageox.ai/team/ledger.git", "agt_rip", true, [2]string{}, false, coworker},
+		{"signed out removes the stamp", "https://git.sageox.ai/team/ledger.git", "", false, account, true, [2]string{}},
+		{"signed out finishes a half-removed stamp", "https://git.sageox.ai/team/ledger.git", "", false, [2]string{}, true, [2]string{}},
+		{"signed out keeps a person's identity", "https://git.sageox.ai/team/ledger.git", "", false, person, false, person},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := ledgerCloneOf(t, tc.remoteURL, "https://sageox.ai", tc.coworker)
+			orig := SignedInUserGetter
+			t.Cleanup(func() { SignedInUserGetter = orig })
+			SignedInUserGetter = func(ep string) (string, string) {
+				if tc.signedIn && endpointHostsEqual(ep, "https://sageox.ai") {
+					return account[0], account[1]
+				}
+				return "", ""
+			}
+			for i, key := range []string{"user.name", "user.email"} {
+				if tc.before[i] != "" {
+					require.NoError(t, exec.Command("git", "-C", dir, "config", key, tc.before[i]).Run())
+				}
+			}
+			if tc.stamped {
+				require.NoError(t, exec.Command("git", "-C", dir, "config", authorStampKey, "true").Run())
+			}
+
+			_, err := MigrateLedgerCredentials(dir, "!ox git-credential-helper")
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, localIdentity(t, dir))
+			marker, err := readGitConfigLocal(dir, authorStampKey)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want != [2]string{} && tc.want != person, marker != "",
+				"the marker must be present exactly when ox's stamp is")
+		})
+	}
+}
+
 // Failure prevented: a Ledger push fails because its author could not be
 // stamped — here because another writer holds the lock on .git/config.
 func TestMigrateLedgerCredentials_StampFailureDoesNotFail(t *testing.T) {

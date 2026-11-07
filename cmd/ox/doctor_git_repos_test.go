@@ -383,6 +383,104 @@ func TestCheckGitConfig_Complete(t *testing.T) {
 	}
 }
 
+// Failure prevented: doctor warns about git config on a machine that commits
+// fine (a Mac where git fills the identity in), or passes one where commits
+// fail (a Linux container with only user.name set). Each case also makes a real
+// commit, so the verdict is measured against git, not the check's reasoning.
+func TestCheckGitConfig_WarnsExactlyWhenGitCannotCommit(t *testing.T) {
+	skipIntegration(t)
+
+	tests := []struct {
+		name     string
+		config   map[string]string // repo-local git config
+		env      map[string]string
+		wantWarn bool
+	}{
+		{
+			name:     "name and email configured",
+			config:   map[string]string{"user.name": "Person A", "user.email": "person-a@example.com"},
+			wantWarn: false,
+		},
+		{
+			name: "identity from GIT_* variables, as in CI",
+			env: map[string]string{
+				"GIT_AUTHOR_NAME": "Person A", "GIT_AUTHOR_EMAIL": "person-a@example.com",
+				"GIT_COMMITTER_NAME": "Person A", "GIT_COMMITTER_EMAIL": "person-a@example.com",
+			},
+			wantWarn: false,
+		},
+		{
+			// a Linux container: the email git would guess is user@host.(none),
+			// which git refuses; useConfigOnly reproduces the refusal anywhere
+			name:     "name configured, email unknown",
+			config:   map[string]string{"user.name": "Person A", "user.useConfigOnly": "true"},
+			wantWarn: true,
+		},
+		{
+			name:     "nothing configured, nothing to guess from",
+			config:   map[string]string{"user.useConfigOnly": "true"},
+			wantWarn: true,
+		},
+		{
+			// a Mac with no git config: git fills the identity in itself and
+			// commits; EMAIL is the deterministic stand-in for the hostname guess
+			name: "nothing configured, git fills the identity in",
+			env: map[string]string{
+				"GIT_AUTHOR_NAME": "Person A", "GIT_COMMITTER_NAME": "Person A",
+				"EMAIL": "person-a@example.com",
+			},
+			wantWarn: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateGitIdentity(t)
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			repo := t.TempDir()
+			runGit(t, repo, "init", "-q")
+			for k, v := range tt.config {
+				runGit(t, repo, "config", k, v)
+			}
+			restoreCwd := changeToDir(t, repo)
+			defer restoreCwd()
+
+			result := checkGitConfig(false)
+
+			if !result.passed {
+				t.Fatalf("a missing git identity must not fail doctor: ox commits to the Ledger without it (result %+v)", result)
+			}
+			if result.warning != tt.wantWarn {
+				t.Fatalf("warning = %v, want %v (result %+v)", result.warning, tt.wantWarn, result)
+			}
+
+			commitErr := exec.Command("git", "-C", repo, "commit", "-q", "--allow-empty", "-m", "probe").Run()
+			if gitCommitted := commitErr == nil; gitCommitted == result.warning {
+				t.Fatalf("warning = %v disagrees with git: commit error = %v", result.warning, commitErr)
+			}
+		})
+	}
+}
+
+// isolateGitIdentity leaves git no identity source but the ones a test sets:
+// no global or system config, and none of the variables git reads one from.
+// The variables are unset, not blanked, because git treats an empty one as set.
+func isolateGitIdentity(t *testing.T) {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	for _, name := range []string{
+		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL",
+	} {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("unset %s: %v", name, err)
+		}
+	}
+}
+
 func TestCheckGitRemotes_NotInGitRepo(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "ox-test-*")
 	if err != nil {
