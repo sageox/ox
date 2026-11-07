@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -687,6 +688,7 @@ func coworkerGitState(t *testing.T, repo string) (head, index string) {
 	return run("rev-parse", "HEAD"), run("write-tree")
 }
 
+// commitTeamFiles writes files (slash-relative paths) into repo and commits them.
 func commitTeamFiles(t *testing.T, repo string, files map[string]string) {
 	t.Helper()
 	for rel, content := range files {
@@ -708,6 +710,8 @@ func commitTeamFiles(t *testing.T, repo string, files map[string]string) {
 	}
 }
 
+// setupCoworkerGitProject builds a project whose Team Context is a real git
+// repo seeded with files, chdirs into it, and returns (projectDir, teamDir).
 func setupCoworkerGitProject(t *testing.T, files map[string]string) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -789,24 +793,23 @@ func TestCoworkerRemoveRejectsTraversalName(t *testing.T) {
 
 func TestCoworkerRemoveLiteralPathspec(t *testing.T) {
 	_, teamDir := setupCoworkerGitProject(t, map[string]string{
-		"coworkers/agents/review*.md":     "---\ndescription: glob-named\n---\n",
-		"coworkers/agents/review-sec.md":  "---\ndescription: sibling\n---\n",
-		"coworkers/agents/review-perf.md": "---\ndescription: sibling\n---\n",
+		// "[s]" is a glob character class that is still a valid filename on
+		// Windows, unlike "*".
+		"coworkers/agents/review[s].md": "---\ndescription: glob-named\n---\n",
+		"coworkers/agents/reviews.md":   "---\ndescription: sibling\n---\n",
 	})
 
 	cmd, _ := newCoworkerCmd(map[string]string{"force": "true"})
-	if err := runCoworkerRemove(cmd, []string{"review*"}); err != nil {
+	if err := runCoworkerRemove(cmd, []string{"review[s]"}); err != nil {
 		t.Fatalf("runCoworkerRemove: %v", err)
 	}
 
 	agentsDir := filepath.Join(teamDir, "coworkers", "agents")
-	if _, err := os.Stat(filepath.Join(agentsDir, "review*.md")); !os.IsNotExist(err) {
-		t.Errorf("review*.md should be removed, stat err = %v", err)
+	if _, err := os.Stat(filepath.Join(agentsDir, "review[s].md")); !os.IsNotExist(err) {
+		t.Errorf("review[s].md should be removed, stat err = %v", err)
 	}
-	for _, sibling := range []string{"review-sec.md", "review-perf.md"} {
-		if _, err := os.Stat(filepath.Join(agentsDir, sibling)); err != nil {
-			t.Errorf("%s must not match a literal name: %v", sibling, err)
-		}
+	if _, err := os.Stat(filepath.Join(agentsDir, "reviews.md")); err != nil {
+		t.Errorf("reviews.md must not match a literal name: %v", err)
 	}
 }
 
@@ -827,6 +830,9 @@ func TestCoworkerLoadRejectsTraversalName(t *testing.T) {
 }
 
 func TestCoworkerAddRejectsSeparatorInName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a backslash is a separator on Windows, so filepath.Base cannot return a name containing one")
+	}
 	_, teamDir := setupCoworkerGitProject(t, map[string]string{"notes.md": "team notes\n"})
 	headBefore, indexBefore := coworkerGitState(t, teamDir)
 
