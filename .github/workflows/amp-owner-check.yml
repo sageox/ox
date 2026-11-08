@@ -23,9 +23,13 @@ name: amp-owner-check
 # the self-updater or the build scripts with nobody looking. The list mirrors
 # the "Security read" paths in the steward's workspace instructions; keep the
 # two in step. It is keyed on the PR's author login, which the author cannot
-# choose. Devin is deliberately not listed: to cover another bot, add its login
-# to the case statement in the "touch" step. Known gap: a human-opened PR that
-# carries the steward's commits is not treated as steward-authored.
+# choose, and on the open PRs at the same head commit: a check run belongs to
+# the commit, not the PR, so a PR from anyone else at the steward's commit
+# would otherwise publish a "success" the steward's own PR inherits
+# (veria-ai). Devin is deliberately not listed: to cover another bot, add its
+# login to is_bot in the "touch" step. Known gap: a human-opened PR at a
+# different commit that carries the steward's commits is not treated as
+# steward-authored.
 #
 # Runs as pull_request_target, not pull_request: the workflow definition that
 # executes always comes from main, never from the PR's own (possibly edited)
@@ -178,12 +182,17 @@ jobs:
           # (see the top of this file). The whole login is compared,
           # lowercased: a login that merely contains the steward's name must
           # not match. Add another bot's login here to cover it too.
-          author=$(printf '%s' "$PR_AUTHOR" | tr '[:upper:]' '[:lower:]')
+          is_bot() {
+            case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+              'sageox-amp-steward') return 0 ;;
+            esac
+            return 1
+          }
           bot=false
-          case "$author" in
-            'sageox-amp-steward') bot=true ;;
-          esac
-          touches=$(jq -r --argjson bot "$bot" '
+          if is_bot "$PR_AUTHOR"; then bot=true; fi
+          # Every hit is tagged: "guarded" applies to every author,
+          # "sensitive" only to the steward (decided after the query).
+          hits=$(jq -r '
             def guarded: ascii_downcase
               | . == ".amp" or startswith(".amp/")
                 or . == ".github/codeowners"
@@ -200,24 +209,31 @@ jobs:
             # binary), signing (internal/signing, internal/signature and the
             # release signature manifest), credentials (login, logout, the git
             # credential helper), secret redaction and scanning, never-delete
-            # ledger paths (internal/sacred) and team access checks.
-            # Directory prefixes carry the trailing slash so internal/sessions/
-            # does not match internal/session/; cmd/ox/ names are file-name
-            # prefixes on purpose (upgrade_daemons.go, tests). Manifests,
-            # lockfiles and goreleaser configs match at any depth.
+            # ledger paths (internal/sacred), team access checks and the
+            # session commands, which upload and publish recorded sessions
+            # and so decide what leaves the machine (cmd/ox/session*,
+            # cmd/ox/agent_session*, internal/gitutil/session_publication*).
+            # A directory matches by its bare name or as a parent (dir), so
+            # internal/sessions/ does not match internal/session and a
+            # symlink or submodule named scripts still counts; cmd/ox/ names
+            # are file-name prefixes on purpose (upgrade_daemons.go, tests).
+            # Manifests, lockfiles and goreleaser configs match at any depth.
+            def dir($d): . == $d or startswith($d + "/");
             def sensitive: ascii_downcase
-              | startswith("scripts/") or startswith(".github/actions/")
-                or startswith("npm/") or startswith("cmd/ox/upgrade")
+              | dir("scripts") or dir(".github/actions")
+                or dir("npm") or startswith("cmd/ox/upgrade")
                 or startswith("cmd/ox/install") or startswith("cmd/ox/login")
                 or startswith("cmd/ox/logout") or startswith("cmd/ox/git_credential")
                 or startswith("cmd/ox/prepush")
+                or startswith("cmd/ox/session") or startswith("cmd/ox/agent_session")
+                or startswith("internal/gitutil/session_publication")
                 or (startswith("cmd/ox/") and (leaf | contains("redact")))
-                or startswith("internal/upgrade/") or startswith("internal/auth/")
-                or startswith("internal/mcp/") or startswith("internal/session/")
-                or startswith("internal/daemon/") or startswith("internal/signature/")
-                or startswith("internal/signing/") or startswith("internal/redaction/")
-                or startswith("internal/secretguard/") or startswith("internal/sacred/")
-                or startswith("internal/teamaccess/") or startswith("security/")
+                or dir("internal/upgrade") or dir("internal/auth")
+                or dir("internal/mcp") or dir("internal/session")
+                or dir("internal/daemon") or dir("internal/signature")
+                or dir("internal/signing") or dir("internal/redaction")
+                or dir("internal/secretguard") or dir("internal/sacred")
+                or dir("internal/teamaccess") or dir("security")
                 or . == ".github/release-signatures.json"
                 or . == "cmd/ox/adapter.go"
                 or (leaf | startswith(".goreleaser") or startswith("goreleaser")
@@ -225,9 +241,33 @@ jobs:
                   or . == "go.mod" or . == "go.sum"
                   or . == "package.json" or . == "package-lock.json"
                   or . == "pnpm-lock.yaml");
-            .[] | select((.filename | guarded) or ((.previous_filename // "") | guarded)
-                or ($bot and ((.filename | sensitive) or ((.previous_filename // "") | sensitive))))
-              | (.filename | @json)' "$files_json")
+            .[] | (((.filename | guarded) or ((.previous_filename // "") | guarded)) as $g
+              | ((.filename | sensitive) or ((.previous_filename // "") | sensitive)) as $s
+              | select($g or $s)
+              | (if $g then "guarded " else "sensitive " end) + (.filename | @json))' "$files_json")
+          touches=$(printf '%s\n' "$hits" | sed -n 's/^guarded //p')
+          sensitive=$(printf '%s\n' "$hits" | sed -n 's/^sensitive //p')
+          if [ -z "$touches" ] && [ -n "$sensitive" ]; then
+            # A check run belongs to the commit, not the PR: every PR at this
+            # head SHA shares one amp-owner-approval result, the latest one
+            # posted. So a PR from anyone else at a commit that has an open
+            # steward PR counts as the steward's too; otherwise its "success"
+            # would be inherited by the steward's own PR (veria-ai). Asked only
+            # when the answer matters: nothing guarded, something sensitive,
+            # author not the steward. Failing to ask alerts, like a failing
+            # compare above.
+            if [ "$bot" = false ]; then
+              if ! at_commit=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --paginate --jq '.[].user.login' 2>"$compare_err"); then
+                echo "::error::Could not list the PRs at $HEAD_SHA: $(cat "$compare_err"). Alerting conservatively."
+                echo "touches=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              while IFS= read -r login; do
+                if is_bot "$login"; then bot=true; fi
+              done <<< "$at_commit"
+            fi
+            if [ "$bot" = true ]; then touches="$sensitive"; fi
+          fi
           if [ -n "$touches" ]; then
             # sed, not head -5: head closes the pipe early, and under the
             # runner's pipefail that SIGPIPE (141) would abort the step if
@@ -277,7 +317,7 @@ jobs:
             if printf '%s\n' "$approved" | grep -qx "$o"; then ok=1; fi
           done
           if [ "$ok" != 1 ]; then
-            echo "::error::This PR changes .amp/, a file that defines this gate (CODEOWNERS or a workflow file), or, for a PR from the Amp steward, a sensitive path. It needs a current APPROVED review (on commit ${HEAD_SHA:0:8}) from one of: $owners. An approval given before this commit, or since dismissed, does not count."
+            echo "::error::This PR changes .amp/, a file that defines this gate (CODEOWNERS or a workflow file), or, for a PR from the Amp steward (or at a commit that has one), a sensitive path. It needs a current APPROVED review (on commit ${HEAD_SHA:0:8}) from one of: $owners. An approval given before this commit, or since dismissed, does not count."
             echo "result=failure" >> "$GITHUB_OUTPUT"
             exit 1
           fi
