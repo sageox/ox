@@ -319,3 +319,36 @@ func TestHoldStoppedSession_FailedHoldStillRecordsManual(t *testing.T) {
 	require.NoError(t, session.HoldRecordedManual(kept, "daemon_recovery"))
 	assert.True(t, session.IsHeld(state.SessionPath))
 }
+
+// TestHandleEnd_DrainsTranscriptOfKilledTurn: Claude Code killed mid-turn
+// writes the prompt and the in-flight tool call to its transcript, then fires
+// only SessionEnd — no Stop, no PostToolUse for that call.
+// Failure prevented: raw.jsonl closes holding only its header, the daemon
+// skips it as header-only, and the session never reaches the Ledger (ox#1825).
+func TestHandleEnd_DrainsTranscriptOfKilledTurn(t *testing.T) {
+	projectRoot, agentID, sourceFile := setupHandleAfterToolTest(t)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+
+	now := time.Now().Add(time.Second)
+	ts := now.Format(time.RFC3339Nano)
+	appendClaudeEntries(t, sourceFile, now,
+		`{"type":"user","timestamp":"`+ts+`","message":{"role":"user","content":"Run sleep 120"}}`,
+	)
+
+	require.NoError(t, handleEnd(&HookContext{
+		Phase:       phaseEnd,
+		AgentType:   "claude-code",
+		ProjectRoot: projectRoot,
+		Marker:      &SessionMarker{AgentID: agentID},
+	}))
+
+	var contents []any
+	for _, line := range readJSONLFile(t, rawPath) {
+		if line["type"] != "header" && line["type"] != "footer" {
+			contents = append(contents, line["content"])
+		}
+	}
+	assert.Equal(t, []any{"Run sleep 120"}, contents)
+}
