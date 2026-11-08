@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/fileutil"
@@ -33,6 +34,7 @@ import (
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/claudesource"
 	"github.com/sageox/ox/internal/session/pipeline"
+	"github.com/sageox/ox/internal/sessionupload"
 	"github.com/sageox/ox/pkg/sessionsummary"
 	"github.com/sageox/ox/pkg/summaryeval"
 )
@@ -155,6 +157,9 @@ type SessionFinalizeHandler struct {
 	skipLFS bool
 	// projectRoot is the workspace root for endpoint/credential resolution
 	projectRoot string
+	// notifyUploaded sends the upload-confirmed signal after a push lands;
+	// a field so tests observe it without a server
+	notifyUploaded func(projectRoot string, meta *lfs.SessionMeta, sessionName string) ([]api.PRLinkMiss, bool)
 	// ledgerMu guards concurrent git operations on the ledger repo.
 	// Shared with SyncScheduler to prevent index.lock races.
 	ledgerMu *sync.Mutex
@@ -225,6 +230,7 @@ func NewSessionFinalizeHandler(logger *slog.Logger) *SessionFinalizeHandler {
 		qualityDiscardThreshold: 0.1,
 		captureLockWait:         defaultCaptureLockWait,
 		now:                     time.Now,
+		notifyUploaded:          sessionupload.Notify,
 	}
 }
 
@@ -1813,7 +1819,10 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		return nil
 	}
 
-	_, pushErr := h.gitCommitAndPush(payload, fileRefs, nil)
+	pushed, pushErr := h.gitCommitAndPush(payload, fileRefs, nil)
+	if pushed {
+		h.announceUploaded(payload)
+	}
 
 	// A push that fails for an ordinary reason leaves the session in the cache,
 	// where detection re-queues it as upload-only. But a ledger-wide blocker will
@@ -2512,6 +2521,7 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 
 	pushed, pushErr := h.gitCommitAndPush(payload, fileRefs, finishStaged)
 	if pushed {
+		h.announceUploaded(payload)
 		h.logger.Info("session uploaded via anti-entropy (upload-only)", "session", sessionName)
 		return nil
 	}
@@ -2524,6 +2534,32 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 		return fmt.Errorf("upload-only: session %s not committed or pushed: %w", sessionName, pushErr)
 	}
 	return fmt.Errorf("upload-only: session %s not committed or pushed", sessionName)
+}
+
+// announceUploaded tells the server a just-pushed session is uploaded, the
+// signal the CLI's stop and recover paths send after their push. Without it
+// the session's /c/ page stays "in progress" though it is on the Ledger.
+// Best-effort and called outside ledgerMu: the push already landed, and a
+// failed notify leaves nothing for the daemon to retry. PR-link misses are
+// logged, not surfaced — the daemon has no live agent to task.
+func (h *SessionFinalizeHandler) announceUploaded(payload *SessionFinalizePayload) {
+	if h.notifyUploaded == nil || h.projectRoot == "" || h.skipGit {
+		return
+	}
+	sessionName := filepath.Base(payload.SessionDir)
+	meta, err := lfs.ReadSessionMeta(filepath.Join(payload.LedgerPath, "sessions", sessionName))
+	if err != nil || meta == nil {
+		h.logger.Debug("uploaded notify skipped: no ledger meta.json", "session", sessionName, "err", err)
+		return
+	}
+	misses, ok := h.notifyUploaded(h.projectRoot, meta, sessionName)
+	if !ok {
+		h.logger.Debug("uploaded notify failed", "session", sessionName)
+		return
+	}
+	if len(misses) > 0 {
+		h.logger.Info("uploaded session has PR-link misses", "session", sessionName, "count", len(misses))
+	}
 }
 
 // isLedgerWideBlocker reports whether err means every later push of this ledger

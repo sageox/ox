@@ -3,14 +3,10 @@ package main
 import (
 	"context"
 	"log/slog"
-	"net/url"
-	"strings"
 
 	"github.com/sageox/ox/internal/api"
-	"github.com/sageox/ox/internal/auth"
-	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/sessionupload"
 )
 
 // finalizeLinkageAfterPush runs the M5 upload-confirmed transition after a
@@ -68,64 +64,12 @@ func finalizeLinkageAfterPush(projectRoot, sessionDir string, meta *lfs.SessionM
 	return misses
 }
 
-// notifySessionUploaded sends the upload-confirmed notification to the
-// SageOx server. Returns the server-reported PR-link misses plus true on
-// success (including 404/409 graceful cases, which the API client maps to
-// nil error), false on transient failure that should be retried by doctor.
+// notifySessionUploaded sends the upload-confirmed notification; see
+// sessionupload.Notify.
 func notifySessionUploaded(projectRoot string, meta *lfs.SessionMeta, sessionName string) ([]api.PRLinkMiss, bool) {
-	cfg, err := config.LoadProjectConfig(projectRoot)
-	if err != nil || cfg == nil || cfg.RepoID == "" {
-		return nil, false
-	}
-
-	ep := endpoint.GetForProject(projectRoot)
-	token, err := auth.GetTokenForEndpoint(ep)
-	if err != nil || token == nil || token.AccessToken == "" {
-		// no credentials — can't notify; doctor retries once auth is present
-		return nil, false
-	}
-
-	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(token.AccessToken)
-	notification := api.SessionUploadedNotification{
-		SessionID:       meta.EffectiveSessionID(),
-		RepoID:          cfg.RepoID,
-		SessionName:     sessionName,
-		SessionURL:      buildConversationURL(cfg, meta.EffectiveSessionID()),
-		LinkedPRs:       meta.LinkedPRs,
-		LinkedIssues:    meta.LinkedIssues,
-		ProducedCommits: meta.ProducedCommits,
-	}
-	misses, err := client.NotifySessionUploaded(notification)
-	if err != nil {
-		slog.Debug("linkage finalize: notify failed", "error", err, "session", sessionName)
-		return nil, false
-	}
-	return filterPRLinkMisses(misses, "SageOx-Session: "+notification.SessionURL), true
+	return sessionupload.Notify(projectRoot, meta, sessionName)
 }
 
-// filterPRLinkMisses guards the trust boundary between the server and agent
-// guidance: misses are server-controlled input that gets formatted into a
-// "REPAIR REQUIRED" instruction the agent will act on. Accept only misses
-// whose ExpectedLine exactly equals the locally-derived trailer for THIS
-// session and whose PR URL is a clean https link — the server confirms a
-// miss, it never gets to author the instruction.
 func filterPRLinkMisses(misses []api.PRLinkMiss, expectedLine string) []api.PRLinkMiss {
-	if strings.TrimPrefix(expectedLine, "SageOx-Session: ") == "" {
-		return nil
-	}
-	var out []api.PRLinkMiss
-	for _, m := range misses {
-		if m.ExpectedLine != expectedLine {
-			continue
-		}
-		if strings.ContainsAny(m.PRURL, " \t\r\n") {
-			continue
-		}
-		u, err := url.Parse(m.PRURL)
-		if err != nil || u.Scheme != "https" || u.Host == "" {
-			continue
-		}
-		out = append(out, m)
-	}
-	return out
+	return sessionupload.FilterPRLinkMisses(misses, expectedLine)
 }
