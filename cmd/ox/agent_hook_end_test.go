@@ -345,7 +345,7 @@ func TestHandleEnd_DrainsTranscriptOfKilledTurn(t *testing.T) {
 	}))
 
 	var contents []any
-	for _, line := range readJSONLFile(t, rawPath) {
+	for _, line := range readJSONLEntries(t, rawPath) {
 		if line["type"] != "header" && line["type"] != "footer" {
 			contents = append(contents, line["content"])
 		}
