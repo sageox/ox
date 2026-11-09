@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/fileutil"
@@ -33,6 +34,7 @@ import (
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/claudesource"
 	"github.com/sageox/ox/internal/session/pipeline"
+	"github.com/sageox/ox/internal/sessionupload"
 	"github.com/sageox/ox/pkg/sessionsummary"
 	"github.com/sageox/ox/pkg/summaryeval"
 )
@@ -112,6 +114,12 @@ type SessionFinalizePayload struct {
 	// (see isEmptyLedgerTranscript). ProcessResult settles it as a brief
 	// session without the LLM.
 	emptyTranscript bool `json:"-"`
+
+	// pushedMeta is the session's meta.json as pushed, after any rebase onto a
+	// concurrent edit. gitCommitAndPush reads it while still holding ledgerMu:
+	// once that is released a GC swap can remove the ledger directory before
+	// announceUploaded runs.
+	pushedMeta *lfs.SessionMeta `json:"-"`
 }
 
 // SessionFinalizeHandler detects and finalizes incomplete sessions in the ledger.
@@ -155,6 +163,9 @@ type SessionFinalizeHandler struct {
 	skipLFS bool
 	// projectRoot is the workspace root for endpoint/credential resolution
 	projectRoot string
+	// notifyUploaded sends the upload-confirmed signal after a push lands;
+	// a field so tests observe it without a server
+	notifyUploaded func(projectRoot string, meta *lfs.SessionMeta, sessionName string) ([]api.PRLinkMiss, bool)
 	// ledgerMu guards concurrent git operations on the ledger repo.
 	// Shared with SyncScheduler to prevent index.lock races.
 	ledgerMu *sync.Mutex
@@ -225,6 +236,7 @@ func NewSessionFinalizeHandler(logger *slog.Logger) *SessionFinalizeHandler {
 		qualityDiscardThreshold: 0.1,
 		captureLockWait:         defaultCaptureLockWait,
 		now:                     time.Now,
+		notifyUploaded:          sessionupload.Notify,
 	}
 }
 
@@ -1813,7 +1825,10 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		return nil
 	}
 
-	_, pushErr := h.gitCommitAndPush(payload, fileRefs, nil)
+	pushed, pushErr := h.gitCommitAndPush(payload, fileRefs, nil)
+	if pushed {
+		h.announceUploaded(payload)
+	}
 
 	// A push that fails for an ordinary reason leaves the session in the cache,
 	// where detection re-queues it as upload-only. But a ledger-wide blocker will
@@ -2512,6 +2527,7 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 
 	pushed, pushErr := h.gitCommitAndPush(payload, fileRefs, finishStaged)
 	if pushed {
+		h.announceUploaded(payload)
 		h.logger.Info("session uploaded via anti-entropy (upload-only)", "session", sessionName)
 		return nil
 	}
@@ -2524,6 +2540,31 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 		return fmt.Errorf("upload-only: session %s not committed or pushed: %w", sessionName, pushErr)
 	}
 	return fmt.Errorf("upload-only: session %s not committed or pushed", sessionName)
+}
+
+// announceUploaded tells the server a just-pushed session is uploaded, the
+// signal the CLI's stop and recover paths send after their push. Without it
+// the session's /c/ page stays "in progress" though it is on the Ledger.
+// Best-effort and called outside ledgerMu: the push already landed, and a
+// failed notify leaves nothing for the daemon to retry. PR-link misses are
+// logged, not surfaced — the daemon has no live agent to task.
+func (h *SessionFinalizeHandler) announceUploaded(payload *SessionFinalizePayload) {
+	if h.notifyUploaded == nil || h.projectRoot == "" || h.skipGit {
+		return
+	}
+	sessionName := filepath.Base(payload.SessionDir)
+	if payload.pushedMeta == nil {
+		h.logger.Debug("uploaded notify skipped: no committed meta.json", "session", sessionName)
+		return
+	}
+	misses, ok := h.notifyUploaded(h.projectRoot, payload.pushedMeta, sessionName)
+	if !ok {
+		h.logger.Debug("uploaded notify failed", "session", sessionName)
+		return
+	}
+	if len(misses) > 0 {
+		h.logger.Info("uploaded session has PR-link misses", "session", sessionName, "count", len(misses))
+	}
 }
 
 // isLedgerWideBlocker reports whether err means every later push of this ledger
@@ -2702,6 +2743,7 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		h.logger.Warn("git push failed (non-fatal)", "err", err)
 		return false, fmt.Errorf("git push: %w", err)
 	}
+	payload.pushedMeta = h.pushedSessionMeta(ctx, ledgerPath, payload.SessionDir)
 	// prune only after the push: until then the cache is the only full copy
 	if cacheDir != "" {
 		if err := os.RemoveAll(cacheDir); err != nil {
@@ -2709,6 +2751,27 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		}
 	}
 	return true, nil
+}
+
+// pushedSessionMeta reads the session's meta.json from HEAD, not the worktree:
+// a stray writer can rewrite the file after staging (see CommitLedgerSnapshot),
+// and HEAD after the push includes any concurrent edit the push rebased onto.
+func (h *SessionFinalizeHandler) pushedSessionMeta(ctx context.Context, ledgerPath, sessionDir string) *lfs.SessionMeta {
+	relDir, err := filepath.Rel(ledgerPath, sessionDir)
+	if err != nil {
+		return nil
+	}
+	blob, err := gitutil.ReadBlob(ctx, ledgerPath, "HEAD", filepath.ToSlash(filepath.Join(relDir, "meta.json")))
+	if err != nil {
+		h.logger.Debug("pushed meta.json unreadable", "dir", sessionDir, "err", err)
+		return nil
+	}
+	meta, err := lfs.ParseSessionMeta(blob)
+	if err != nil {
+		h.logger.Debug("pushed meta.json unparseable", "dir", sessionDir, "err", err)
+		return nil
+	}
+	return meta
 }
 
 // synthesizeMeta builds a minimal meta.json from the raw.jsonl header for a
