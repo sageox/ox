@@ -121,3 +121,27 @@ func TestProcessResult_FailedPushSendsNoUploadedSignal(t *testing.T) {
 	require.Error(t, err)
 	assert.Empty(t, *calls)
 }
+
+// The signal must describe the bytes that were pushed. A writer that rewrites
+// meta.json in the worktree after staging (here, leaving conflict markers)
+// changes nothing on the Ledger, so it must not stop or alter the signal.
+func TestProcessResult_UploadedSignalUsesPushedMetaNotWorktree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	_, clonePath := setupBareAndCloneLedger(t)
+	sessionName := "2026-11-08T10-10-testuser-OxWORKTREE"
+	cacheDir := cacheSession(t, clonePath, sessionName, true)
+	handler, calls := gitBackedNotifyHandler(t, clonePath)
+	handler.afterStageTestHook = func() {
+		path := filepath.Join(clonePath, "sessions", sessionName, "meta.json")
+		require.NoError(t, os.WriteFile(path, []byte("<<<<<<< ours\n{}\n=======\n{}\n>>>>>>> theirs\n"), 0o644))
+	}
+
+	require.NoError(t, handler.ProcessResult(&WorkItem{ID: "worktree", Type: sessionFinalizeType, Payload: &SessionFinalizePayload{
+		SessionDir: cacheDir, RawPath: filepath.Join(cacheDir, "raw.jsonl"), LedgerPath: clonePath, UploadOnly: true,
+	}}, &RunResult{}))
+
+	require.Len(t, *calls, 1)
+	assert.Equal(t, draftTestSessionID, (*calls)[0].sessionID)
+}

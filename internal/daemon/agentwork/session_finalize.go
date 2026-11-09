@@ -2743,7 +2743,7 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		h.logger.Warn("git push failed (non-fatal)", "err", err)
 		return false, fmt.Errorf("git push: %w", err)
 	}
-	payload.pushedMeta, _ = lfs.ReadSessionMeta(payload.SessionDir)
+	payload.pushedMeta = h.pushedSessionMeta(ctx, ledgerPath, payload.SessionDir)
 	// prune only after the push: until then the cache is the only full copy
 	if cacheDir != "" {
 		if err := os.RemoveAll(cacheDir); err != nil {
@@ -2751,6 +2751,27 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		}
 	}
 	return true, nil
+}
+
+// pushedSessionMeta reads the session's meta.json from HEAD, not the worktree:
+// a stray writer can rewrite the file after staging (see CommitLedgerSnapshot),
+// and HEAD after the push includes any concurrent edit the push rebased onto.
+func (h *SessionFinalizeHandler) pushedSessionMeta(ctx context.Context, ledgerPath, sessionDir string) *lfs.SessionMeta {
+	relDir, err := filepath.Rel(ledgerPath, sessionDir)
+	if err != nil {
+		return nil
+	}
+	blob, err := gitutil.RunGit(ctx, ledgerPath, "cat-file", "blob", "HEAD:"+filepath.ToSlash(filepath.Join(relDir, "meta.json")))
+	if err != nil {
+		h.logger.Debug("pushed meta.json unreadable", "dir", sessionDir, "err", err)
+		return nil
+	}
+	meta, err := lfs.ParseSessionMeta([]byte(blob))
+	if err != nil {
+		h.logger.Debug("pushed meta.json unparseable", "dir", sessionDir, "err", err)
+		return nil
+	}
+	return meta
 }
 
 // synthesizeMeta builds a minimal meta.json from the raw.jsonl header for a
