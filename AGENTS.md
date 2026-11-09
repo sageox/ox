@@ -172,7 +172,7 @@ Devin, Amp, Claude Code and any other agent open PRs in one shape, so agents and
 - **Branch:** `<agent>/<slug>`; for work on an issue, `<agent>/<issue-number>-<slug>`, for example `steward/1507-name-traversal`.
 - **Title:** `type(scope): summary`, one line.
 - **Issue line:** the first line of the body or of `## Summary` is `Fixes #N` (or `Closes #N`) when the failing test covers the whole report, or `Part of #N` for a partial fix. Omit it when there is no issue. A bare `#N`, never a URL. One issue per PR; when the branch names an issue, it is the same number.
-- **Sections:** `## Summary`, `### What broke`, `## What this PR ships`, `## Test Plan`, then the template's checklist.
+- **Sections:** the template's `## Summary`, `## Test Plan` and checklist, plus `## What this PR ships` before the test plan, and `### What broke` under Summary for a bug fix.
 - **Last line:** `Requested by: <the person who asked>`, then the agent's session link if people can open it.
 - **Review replies:** answer a thread with `Fixed in <sha>.` (the pushed commit) or `Not changed: <reason>.` An agent that cannot post comments leaves the reply and the resolving to a person.
 
