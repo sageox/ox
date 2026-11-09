@@ -1,0 +1,72 @@
+name: pr-contract
+
+# Warn-only check that a PR from an agent has the shape AGENTS.md ("Agent PRs") asks
+# for: an issue line when the branch names an issue (and the same number in both), and a
+# `Requested by:` line. It annotates the PR and never fails, so an agent keeps working
+# while the habit forms. Make it required only after it has run clean for a few weeks.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # The agents are named on purpose. To cover another one, add its login here.
+    if: contains(fromJSON('["devin-ai-integration[bot]","sageox-amp-steward"]'), github.event.pull_request.user.login)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the PR body
+        env:
+          # The body and the branch name are the PR author's text: they reach the
+          # script through the environment and are never echoed into a workflow command.
+          BODY: ${{ github.event.pull_request.body }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          body=$(printf '%s' "$BODY" | tr -d '\r' | perl -0pe 's/<!--.*?-->//gs')
+          bad=0
+          warn() { echo "::warning title=PR contract::$1 (AGENTS.md, Agent PRs)"; bad=1; }
+          # Refs is deliberately absent: it neither closes the issue nor marks a partial fix.
+          kw='(fix(es|ed)?|close[sd]?|resolve[sd]?|part of)'
+          if ! printf '%s\n' "$body" | grep -Eq '^## Summary[[:space:]]*$'; then
+            warn 'The body has no "## Summary" heading'
+          fi
+          # An issue number in the branch (<agent>/<number>-<slug>; up to six digits, so a
+          # timestamp such as devin/1794044517-x is not one). sed keeps only the number: a
+          # name with digits, such as gpt4/1507-x, must not leak into it.
+          want=$(printf '%s\n' "$HEAD_REF" | sed -nE 's#^[^/]+/([0-9]{1,6})-.*$#\1#p')
+          # The issue line is the first line of the body or the first line under "## Summary".
+          top=$(printf '%s\n' "$body" | awk 'NF { print; exit }')
+          first=$(printf '%s\n' "$body" | awk '/^## Summary[[:space:]]*$/ { f = 1; next } f && NF { print; exit }')
+          linked=""
+          linked_partial=0
+          for line in "$top" "$first"; do
+            if printf '%s\n' "$line" | grep -Eiq "^${kw}[: ]+https?://"; then
+              warn 'The issue line uses a URL: write a bare #N'
+            fi
+            n=""
+            # The number must end the token: "Fixes #1507x" is a typo, not issue 1507.
+            if printf '%s\n' "$line" | grep -Eiq "^${kw}[: ]+#[0-9]+([^0-9A-Za-z_]|$)"; then
+              n=$(printf '%s\n' "$line" | grep -Eio "^${kw}[: ]+#[0-9]+" | grep -Eo '[0-9]+$' || true)
+            fi
+            # Part of keeps the issue open and a closing keyword closes it: both, for one
+            # issue, contradict each other.
+            partial=0
+            if [ -n "$n" ] && printf '%s\n' "$line" | grep -Eiq '^part of'; then partial=1; fi
+            if [ -z "$linked" ]; then
+              linked=$n
+              linked_partial=$partial
+            elif [ -n "$n" ] && [ "$n" != "$linked" ]; then
+              warn "The body links two issues (#$linked and #$n): one issue per PR"
+            elif [ -n "$n" ] && [ "$partial" != "$linked_partial" ]; then
+              warn "The body says both Part of #$n and a closing keyword for #$n: pick one"
+            fi
+          done
+          if [ -n "$want" ] && [ -z "$linked" ]; then
+            warn "The branch names issue #$want but no issue line (Fixes #$want or Part of #$want) opens the body or the Summary"
+          elif [ -n "$want" ] && [ "$linked" != "$want" ]; then
+            warn "The branch names issue #$want but the issue line links #$linked"
+          fi
+          printf '%s\n' "$body" | grep -Eiq '^Requested by:[[:space:]]*[^[:space:]]' || warn 'The body has no "Requested by:" line'
+          if [ "$bad" = 0 ]; then echo "PR contract: ok"; fi
