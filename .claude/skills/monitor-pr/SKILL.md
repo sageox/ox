@@ -197,9 +197,10 @@ Reply after the push, so `<sha>` is the commit that holds the fix. A
 decide.
 
 ```bash
-# Reply (the in_reply_to form of the review comments API)
+# Reply (the in_reply_to form of the review comments API). The && keeps the
+# thread open if the reply fails.
 gh api repos/<owner>/<repo>/pulls/<pr>/comments/<comment-databaseId>/replies \
-  -f body="Fixed in <sha>."
+  -f body="Fixed in <sha>." &&
 
 # Resolve
 gh api graphql -f query='
