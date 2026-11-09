@@ -44,8 +44,11 @@ jobs:
             if printf '%s\n' "$line" | grep -Eiq "^${kw}[: ]+https?://"; then
               warn 'The issue line uses a URL: write a bare #N'
             fi
+            n=$(printf '%s\n' "$line" | grep -Eio "^${kw}[: ]+#[0-9]+" | grep -Eo '[0-9]+$' || true)
             if [ -z "$linked" ]; then
-              linked=$(printf '%s\n' "$line" | grep -Eio "^${kw}[: ]+#[0-9]+" | grep -Eo '[0-9]+$' || true)
+              linked=$n
+            elif [ -n "$n" ] && [ "$n" != "$linked" ]; then
+              warn "The body links two issues (#$linked and #$n): one issue per PR"
             fi
           done
           if [ -n "$want" ] && [ -z "$linked" ]; then
