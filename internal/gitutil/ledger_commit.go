@@ -364,6 +364,14 @@ func assertNoSacredMassDeletion(ctx context.Context, repoPath, parent, tree stri
 		len(deleted), strings.Join(sacred.Prefixes, ", "), sacred.MassDeleteThreshold)
 }
 
+// ReadBlob returns the exact bytes rev tracks at path (for example "HEAD"
+// and "sessions/<name>/meta.json"). Unlike RunGit, it does not sanitize the
+// output: credential patterns can span JSON fields, so sanitizing would
+// corrupt content that holds no credential.
+func ReadBlob(ctx context.Context, repoPath, rev, path string) ([]byte, error) {
+	return cleanGitOutput(ctx, repoPath, "cat-file", "blob", rev+":"+path)
+}
+
 // cacheHoldsBlob reports whether .sageox/cache/<path> holds exactly the bytes
 // of the blob parent tracks at path (sha256 equal), i.e. deleting the tracked
 // path loses nothing. Any read failure answers false so the path stays counted.

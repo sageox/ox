@@ -2761,12 +2761,12 @@ func (h *SessionFinalizeHandler) pushedSessionMeta(ctx context.Context, ledgerPa
 	if err != nil {
 		return nil
 	}
-	blob, err := gitutil.RunGit(ctx, ledgerPath, "cat-file", "blob", "HEAD:"+filepath.ToSlash(filepath.Join(relDir, "meta.json")))
+	blob, err := gitutil.ReadBlob(ctx, ledgerPath, "HEAD", filepath.ToSlash(filepath.Join(relDir, "meta.json")))
 	if err != nil {
 		h.logger.Debug("pushed meta.json unreadable", "dir", sessionDir, "err", err)
 		return nil
 	}
-	meta, err := lfs.ParseSessionMeta([]byte(blob))
+	meta, err := lfs.ParseSessionMeta(blob)
 	if err != nil {
 		h.logger.Debug("pushed meta.json unparseable", "dir", sessionDir, "err", err)
 		return nil

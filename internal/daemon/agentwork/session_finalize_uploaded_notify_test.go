@@ -145,3 +145,25 @@ func TestProcessResult_UploadedSignalUsesPushedMetaNotWorktree(t *testing.T) {
 	require.Len(t, *calls, 1)
 	assert.Equal(t, draftTestSessionID, (*calls)[0].sessionID)
 }
+
+// meta.json is read verbatim. Output sanitizing would match "oauth2:" in one
+// field through the "@" of a later one and leave JSON that no longer parses.
+func TestProcessResult_UploadedSignalReadsMetaVerbatim(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	_, clonePath := setupBareAndCloneLedger(t)
+	sessionName := "2026-11-08T10-15-testuser-OxVERBATIM"
+	cacheDir := cacheSession(t, clonePath, sessionName, true)
+	meta := `{"session_name":"` + sessionName + `","session_id":"` + draftTestSessionID +
+		`","title":"rotate the oauth2: refresh token","user_email":"dev@example.com"}`
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "meta.json"), []byte(meta), 0o644))
+	handler, calls := gitBackedNotifyHandler(t, clonePath)
+
+	require.NoError(t, handler.ProcessResult(&WorkItem{ID: "verbatim", Type: sessionFinalizeType, Payload: &SessionFinalizePayload{
+		SessionDir: cacheDir, RawPath: filepath.Join(cacheDir, "raw.jsonl"), LedgerPath: clonePath, UploadOnly: true,
+	}}, &RunResult{}))
+
+	require.Len(t, *calls, 1)
+	assert.Equal(t, draftTestSessionID, (*calls)[0].sessionID)
+}
