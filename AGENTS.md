@@ -165,6 +165,17 @@ Always confirm with human before doing a git commit or a git push in this repo.
 
 **Review bots (`greptile.json`, `.coderabbit.yaml`):** Neither blocks a merge. CodeRabbit re-reviews every push; **Greptile reviews at PR-open only** (`triggerOnUpdates: false`), so before merging you must re-trigger it on the final state — `gh pr comment <n> --body "@greptileai"`. Never merge on a Greptile read of the first draft. Label a PR `no-greptile` to skip it entirely (large mechanical diffs only). `CONTRIBUTING.md` carries the human-facing version.
 
+### Agent PRs
+
+Devin, Amp, Claude Code and any other agent open PRs in one shape, so agents and people read each other's PRs the same way. `.github/workflows/pr-contract.yml` warns, and never fails, when an agent's PR drifts.
+
+- **Branch:** `<agent>/<slug>`; for work on an issue, `<agent>/<issue-number>-<slug>`, for example `steward/1507-name-traversal`.
+- **Title:** `type(scope): summary`, one line.
+- **Issue line:** the first line of the body or of `## Summary` is `Fixes #N` (or `Closes #N`) when the failing test covers the whole report, or `Part of #N` for a partial fix. Omit it when there is no issue. A bare `#N`, never a URL. One issue per PR, and the same number as the branch.
+- **Sections:** `## Summary`, `### What broke`, `## What this PR ships`, `## Test Plan`, then the template's checklist.
+- **Last line:** `Requested by: <the person who asked>`, then the agent's session link if people can open it.
+- **Review replies:** answer a thread with `Fixed in <sha>.` or `Not changed: <reason>.` An agent that cannot post comments leaves the reply and the resolving to a person.
+
 ### Key Practices
 
 - **Simplicity**: Minimum complexity for current needs
