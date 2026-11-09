@@ -3292,12 +3292,16 @@ func enrichKBTokensFromInstance(kbInfos []prime.KBInfo, tokensByType map[string]
 // ensureClaudeHooks auto-installs Claude Code hooks if Claude Code is detected
 // and hooks are missing. Returns true if hooks were newly installed.
 // Idempotent: merges with existing hooks, preserves non-ox hooks.
+// When hooks are already installed (a teammate's clone of a repo with ox hooks
+// committed), it still brings the coworker's status line in line with their
+// setting, so they get it on session start without running `ox doctor`.
 // Non-fatal: logs warning to stderr on failure.
 func ensureClaudeHooks(projectRoot string) bool {
 	if !detectClaudeCode() {
 		return false
 	}
 	if HasProjectClaudeHooks(projectRoot) {
+		ensureClaudeStatusLine(projectRoot)
 		return false // already installed
 	}
 	if err := InstallProjectClaudeHooks(projectRoot); err != nil {
@@ -3305,4 +3309,22 @@ func ensureClaudeHooks(projectRoot string) bool {
 		return false
 	}
 	return true
+}
+
+// ensureClaudeStatusLine syncs the coworker's status line under the same
+// precondition as doctor's status-line check: ox hooks in the shared
+// settings.json. It writes nothing when the line is already current. It may
+// also move a legacy ox statusLine out of the shared settings.json, as doctor
+// does.
+// Non-fatal and log-only: hooks pipe prime's stderr into the AI coworker's
+// context, so a failure (unreadable or malformed settings) would repeat there
+// every session start. `ox doctor` surfaces it instead.
+func ensureClaudeStatusLine(projectRoot string) {
+	settings, _, err := readSharedClaudeSettings(projectRoot)
+	if err != nil || !settingsHaveOxHook(settings) {
+		return
+	}
+	if _, err := syncProjectStatusLine(projectRoot); err != nil {
+		slog.Warn("prime: update Claude Code status line failed", "error", err)
+	}
 }
