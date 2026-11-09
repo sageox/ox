@@ -47,7 +47,7 @@ jobs:
             fi
             n=""
             # The number must end the token: "Fixes #1507x" is a typo, not issue 1507.
-            if printf '%s\n' "$line" | grep -Eiq "^${kw}[: ]+#[0-9]+([^0-9A-Za-z]|$)"; then
+            if printf '%s\n' "$line" | grep -Eiq "^${kw}[: ]+#[0-9]+([^0-9A-Za-z_]|$)"; then
               n=$(printf '%s\n' "$line" | grep -Eio "^${kw}[: ]+#[0-9]+" | grep -Eo '[0-9]+$' || true)
             fi
             # Part of keeps the issue open and a closing keyword closes it: both, for one
