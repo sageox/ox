@@ -171,6 +171,9 @@ push or a resolve.
 
 ### 5. Commit + push
 
+Skip this step when the round changed no code, for example when you
+declined every thread.
+
 Bundle the round into one commit following repo style (`CLAUDE.md`:
 one-line `type(scope): summary`, ≤72 chars).
 
@@ -189,7 +192,9 @@ Greptile does not. That is what step 7 is for.
 
 ### 6. Reply + resolve each addressed thread
 
-Reply after the push, so `<sha>` is the commit that holds the fix.
+Reply after the push, so `<sha>` is the commit that holds the fix. A
+`Not changed: <reason>.` reply names no commit: post it as soon as you
+decide.
 
 ```bash
 # Reply (the in_reply_to form of the review comments API)
