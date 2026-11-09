@@ -49,7 +49,7 @@ func ConversationURL(cfg *config.ProjectConfig, sessionID string) string {
 // 404/409 graceful cases, which the API client maps to nil error), false on
 // transient failure that should be retried by doctor.
 func Notify(projectRoot string, meta *lfs.SessionMeta, sessionName string) ([]api.PRLinkMiss, bool) {
-	if meta == nil {
+	if !canNotify(meta) {
 		return nil, false
 	}
 	cfg, err := config.LoadProjectConfig(projectRoot)
@@ -80,6 +80,14 @@ func Notify(projectRoot string, meta *lfs.SessionMeta, sessionName string) ([]ap
 		return nil, false
 	}
 	return FilterPRLinkMisses(misses, "SageOx-Session: "+notification.SessionURL), true
+}
+
+// canNotify reports whether meta's session ID is safe to put in the signal's
+// URL path. The ID comes from meta.json on the Ledger, which any teammate can
+// edit, and an ID like "ses_x/aborted?" would send the authenticated POST to a
+// different endpoint.
+func canNotify(meta *lfs.SessionMeta) bool {
+	return meta != nil && sessionid.IsValidSessionID(meta.EffectiveSessionID())
 }
 
 // FilterPRLinkMisses guards the trust boundary between the server and agent
