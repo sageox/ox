@@ -169,7 +169,27 @@ design decision the user should own, stop your own work and ask — but
 nothing, and will resume emitting as soon as the discussion ends in a
 push or a resolve.
 
-### 5. Reply + resolve each addressed thread
+### 5. Commit + push
+
+Bundle the round into one commit following repo style (`CLAUDE.md`:
+one-line `type(scope): summary`, ≤72 chars).
+
+This repo's `CLAUDE.md` says: **"Always confirm with human before doing
+a git commit or a git push."** Honor that unless the user has explicitly
+told you to run autonomously.
+
+**Do not stop the monitor after pushing.** A new push triggers new CI
+runs and may draw new CodeRabbit follow-ups; the monitor will fire again
+when they land, and the loop continues naturally.
+
+**Greptile will not follow up on its own.** This repo's `greptile.json`
+sets `triggerOnUpdates: false`, so Greptile reads the PR when it opens and
+then not again until someone asks. CodeRabbit still re-reviews every push;
+Greptile does not. That is what step 7 is for.
+
+### 6. Reply + resolve each addressed thread
+
+Reply after the push, so `<sha>` is the commit that holds the fix.
 
 ```bash
 # Reply (the in_reply_to form of the review comments API)
@@ -188,24 +208,6 @@ mutation($threadId:ID!) {
 For threads you intentionally skipped (e.g., a nitpick that's wrong),
 reply `Not changed: <reason>.` in one sentence, then still resolve the thread.
 
-### 6. Commit + push
-
-Bundle the round into one commit following repo style (`CLAUDE.md`:
-one-line `type(scope): summary`, ≤72 chars).
-
-This repo's `CLAUDE.md` says: **"Always confirm with human before doing
-a git commit or a git push."** Honor that unless the user has explicitly
-told you to run autonomously.
-
-**Do not stop the monitor after pushing.** A new push triggers new CI
-runs and may draw new CodeRabbit follow-ups; the monitor will fire again
-when they land, and the loop continues naturally.
-
-**Greptile will not follow up on its own.** This repo's `greptile.json`
-sets `triggerOnUpdates: false`, so Greptile reads the PR when it opens and
-then not again until someone asks. CodeRabbit still re-reviews every push;
-Greptile does not. That is what step 7 is for.
-
 ### 7. Re-trigger Greptile on the final state
 
 Once every thread is addressed and CI is green — i.e. right before you
@@ -219,7 +221,7 @@ gh pr comment <n> --body "@greptileai"
 Greptile's own comment footer.)
 
 Then wait for the new review and triage whatever it returns exactly like
-any other round: fix, reply, resolve, push, re-trigger. A PR should be
+any other round: fix, push, reply, resolve, re-trigger. A PR should be
 merged on a Greptile review of the code that is actually merging, not of
 the first draft of it.
 
