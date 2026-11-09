@@ -174,7 +174,7 @@ push or a resolve.
 ```bash
 # Reply (the in_reply_to form of the review comments API)
 gh api repos/<owner>/<repo>/pulls/<pr>/comments/<comment-databaseId>/replies \
-  -f body="Fixed."
+  -f body="Fixed in <sha>."
 
 # Resolve
 gh api graphql -f query='
@@ -186,7 +186,7 @@ mutation($threadId:ID!) {
 ```
 
 For threads you intentionally skipped (e.g., a nitpick that's wrong),
-reply with one sentence explaining why, then still resolve the thread.
+reply `Not changed: <reason>.` in one sentence, then still resolve the thread.
 
 ### 6. Commit + push
 

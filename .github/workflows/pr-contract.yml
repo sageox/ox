@@ -41,11 +41,11 @@ jobs:
           first=$(printf '%s\n' "$body" | awk '/^## Summary[[:space:]]*$/ { f = 1; next } f && NF { print; exit }')
           linked=""
           for line in "$top" "$first"; do
-            if printf '%s\n' "$line" | grep -Eiq "^$kw[: ]+https?://"; then
+            if printf '%s\n' "$line" | grep -Eiq "^${kw}[: ]+https?://"; then
               warn 'The issue line uses a URL: write a bare #N'
             fi
             if [ -z "$linked" ]; then
-              linked=$(printf '%s\n' "$line" | grep -Eio "^$kw[: ]+#[0-9]+" | grep -Eo '[0-9]+$' || true)
+              linked=$(printf '%s\n' "$line" | grep -Eio "^${kw}[: ]+#[0-9]+" | grep -Eo '[0-9]+$' || true)
             fi
           done
           if [ -n "$want" ] && [ -z "$linked" ]; then

@@ -167,7 +167,7 @@ Always confirm with human before doing a git commit or a git push in this repo.
 
 ### Agent PRs
 
-Devin, Amp, Claude Code and any other agent open PRs in one shape, so agents and people read each other's PRs the same way. `.github/workflows/pr-contract.yml` warns, and never fails, when an agent's PR drifts.
+Devin, Amp, Claude Code and any other agent open PRs in one shape, so agents and people read each other's PRs the same way. `.github/workflows/pr-contract.yml` checks only Devin's and the Amp steward's PRs, and only for the `## Summary` heading, the issue line the branch asks for, and `Requested by:`. It warns and never fails.
 
 - **Branch:** `<agent>/<slug>`; for work on an issue, `<agent>/<issue-number>-<slug>`, for example `steward/1507-name-traversal`.
 - **Title:** `type(scope): summary`, one line.
