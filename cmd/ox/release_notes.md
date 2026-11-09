@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Transcripts import as discussions, like audio** — `ox import talk.vtt` (or `.srt`) now creates a discussion directly, dated by `--date`, with no audio and no transcription step. Before, a `.vtt` was filed as a team context document and never became a discussion.
 - **Install ox with npx** — `npx @sageox/ox@latest install` copies ox and its adapters onto your PATH and runs `ox login`, without touching any repository. Run `ox init` inside a repo to link it. `ox install` does the same from any ox binary, and `ox upgrade` on an npm copy tells you how to update it.
 - **A one-time ask to star ox on GitHub** — once you've been using ox for a while (recent use and at least 3 uploaded sessions), ox may print one line after a command you typed, asking for a star on GitHub. It shows at most twice, a week apart, never inside an AI coworker, CI, `--json` output or a non-terminal, and never after a failed command. Turning tips off (`ox config set tips off`) silences it.
 - **Record Devin sessions** — the new Devin plugin (`devin-plugin/`) records each Devin session to your team's Ledger under the Devin user who started it, using their own `SAGEOX_TOKEN` personal secret. `ox init` offers Devin and adds the plugin to `.devin/config.json`; on its first tool call Devin saves the user's token for the hooks with one command, and users without a token get a one-time hint on how to add one.
