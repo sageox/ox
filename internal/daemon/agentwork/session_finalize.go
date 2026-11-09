@@ -115,9 +115,10 @@ type SessionFinalizePayload struct {
 	// session without the LLM.
 	emptyTranscript bool `json:"-"`
 
-	// pushedMeta is the meta.json gitCommitAndPush committed, read under the
-	// repo lock: once the lock is released a GC swap can remove the ledger
-	// directory before announceUploaded runs.
+	// pushedMeta is the session's meta.json as pushed, after any rebase onto a
+	// concurrent edit. gitCommitAndPush reads it while still holding ledgerMu:
+	// once that is released a GC swap can remove the ledger directory before
+	// announceUploaded runs.
 	pushedMeta *lfs.SessionMeta `json:"-"`
 }
 
@@ -2621,7 +2622,6 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	msg := fmt.Sprintf("finalize session %s", sessionName)
 	var staged, outsideLedger bool
 	var cacheDir string
-	var committedMeta *lfs.SessionMeta
 	// ADR-030's repo lock is cross-process; ledgerMu above only coordinates
 	// goroutines in this daemon. Holding both from the copy into the ledger
 	// through the commit keeps a pull's autostash or a GC swap from rewriting
@@ -2701,7 +2701,6 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 			}
 			return fmt.Errorf("commit session snapshot: %w", err)
 		}
-		committedMeta, _ = lfs.ReadSessionMeta(payload.SessionDir)
 		return nil
 	}); err != nil {
 		h.logger.Warn("session commit transaction failed", "session", sessionName, "err", err)
@@ -2744,7 +2743,7 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		h.logger.Warn("git push failed (non-fatal)", "err", err)
 		return false, fmt.Errorf("git push: %w", err)
 	}
-	payload.pushedMeta = committedMeta
+	payload.pushedMeta, _ = lfs.ReadSessionMeta(payload.SessionDir)
 	// prune only after the push: until then the cache is the only full copy
 	if cacheDir != "" {
 		if err := os.RemoveAll(cacheDir); err != nil {
