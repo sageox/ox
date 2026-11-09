@@ -53,9 +53,10 @@ var importCmd = &cobra.Command{
 Audio and video files (m4a, mp3, wav, webm, ogg, opus, flac, aac, wma, mp4,
 mov, m4v) upload to SageOx as recordings, which are transcribed and
 summarized server-side. Large files upload in parallel parts with retries,
-and files over 50 MB report progress on stderr. Other files are stored with
-LFS-backed content and git-tracked metadata in the team context repo.
-Supports Loom, Cap, and direct video URLs.
+and files over 50 MB report progress on stderr. Transcripts (vtt, srt) become
+discussions the same way, with no audio and no transcription step. Other files
+are stored with LFS-backed content and git-tracked metadata in the team
+context repo. Supports Loom, Cap, and direct video URLs.
 
 Team context is a conversation store; Knowledge Bubbles are Curator-authored
 syntheses and are not an import target (ox ADR-028).
@@ -64,6 +65,7 @@ syntheses and are not an import target (ox ADR-028).
   ox import report.pdf --title "Q2 Review"        # override the filename-derived title
   ox import notes.md --date 2026-01-15
   ox import ./standup.mp4                       # recording upload, then transcribed and summarized
+  ox import keynote.vtt --date 2024-04-20       # a discussion dated when it happened
   ox import https://www.loom.com/share/abc123 --title "Architecture Review"
   ox import https://cap.link/abc123 --title "Sprint Retro"
   ox import --list                              # find import IDs
@@ -79,9 +81,9 @@ go in agents/rules/, not through ox import.`,
 }
 
 func init() {
-	importCmd.Flags().StringVar(&importFlags.text, "text", "", "path to pre-extracted text/markdown for indexing (optional; keeps audio/video on the document path)")
+	importCmd.Flags().StringVar(&importFlags.text, "text", "", "path to pre-extracted text/markdown for indexing (optional; keeps audio/video/transcripts on the document path)")
 	importCmd.Flags().SetAnnotation("text", "cobra_annotation_flag_value_name", []string{"file"})
-	importCmd.Flags().StringVar(&importFlags.date, "date", "", "date for filing, or when audio/video was recorded (YYYY-MM-DD, default: auto-detect from metadata)")
+	importCmd.Flags().StringVar(&importFlags.date, "date", "", "date for filing, or when audio/video/a transcript was recorded (YYYY-MM-DD, default: auto-detect from metadata)")
 	importCmd.Flags().BoolVar(&importFlags.force, "force", false, "re-import even if content hash already exists")
 	importCmd.Flags().StringVar(&importFlags.team, "team", "", "team ID (or slug/name when inside a repo)")
 	importCmd.Flags().StringVar(&importFlags.title, "title", "", "display title (defaults to filename for file imports)")
@@ -211,28 +213,42 @@ func runImport(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	var recordedAt *time.Time
+	if importFlags.date != "" {
+		recordedAt = &importDate
+	}
+	recordingImport := mediaImport{
+		srcPath:     srcPath,
+		size:        srcInfo.Size(),
+		tc:          tc,
+		ep:          ep,
+		docsBaseDir: filepath.Join(tc.Path, "data", "docs"),
+		recordedAt:  recordedAt,
+		jsonOutput:  jsonOutput,
+	}
+
 	// audio and video go straight to the recording pipeline. --text keeps a
 	// media file on the document path, which is the only one with a sidecar.
 	if isMediaImportFile(srcPath) && importFlags.text == "" {
-		var recordedAt *time.Time
-		if importFlags.date != "" {
-			recordedAt = &importDate
-		}
-		err := runImportMedia(ctx, cmd, mediaImport{
-			srcPath:     srcPath,
-			size:        srcInfo.Size(),
-			tc:          tc,
-			ep:          ep,
-			docsBaseDir: filepath.Join(tc.Path, "data", "docs"),
-			recordedAt:  recordedAt,
-			jsonOutput:  jsonOutput,
-		})
+		err := runImportMedia(ctx, cmd, recordingImport)
 		if !errors.Is(err, api.ErrRecordingUploadUnsupported) {
 			return err
 		}
 		// nothing was uploaded; an older server still takes media through the
 		// document path and transcribes it from there
 		cli.PrintWarningTo(cmd.ErrOrStderr(), "This server does not accept recording uploads (HTTP 404); importing through the team context document path instead")
+	}
+
+	// a transcript is a Discussion's other source format: it becomes one
+	// directly, the way audio does, instead of a team context document
+	if format, ok := transcriptImportFormat(srcPath); ok && importFlags.text == "" {
+		err := runImportTranscript(ctx, cmd, recordingImport, format)
+		if !errors.Is(err, api.ErrRecordingUploadUnsupported) {
+			return err
+		}
+		// nothing was created; the document path still routes a transcript to
+		// the server's import-transcript workflow by its content type
+		cli.PrintWarningTo(cmd.ErrOrStderr(), "This server does not accept transcript discussions (HTTP 404); importing through the team context document path instead")
 	}
 
 	// data/ is excluded from the team context sparse checkout (deny list in
@@ -977,6 +993,13 @@ func detectContentType(filename string, content []byte) string {
 		return "text/markdown"
 	case ".txt":
 		return "text/plain"
+	// transcripts: api-go routes a document import to its transcript workflow
+	// only on these exact types (sageox/contentkind); the sniffed fallback,
+	// "text/plain; charset=utf-8", matches nothing and the import is skipped
+	case ".vtt":
+		return "text/vtt"
+	case ".srt":
+		return "application/x-subrip"
 	case ".html", ".htm":
 		return "text/html"
 	case ".json":
