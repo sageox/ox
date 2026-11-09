@@ -1,8 +1,10 @@
 package agentwork
 
 import (
+	"context"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -146,24 +148,28 @@ func TestProcessResult_UploadedSignalUsesPushedMetaNotWorktree(t *testing.T) {
 	assert.Equal(t, draftTestSessionID, (*calls)[0].sessionID)
 }
 
-// meta.json is read verbatim. Output sanitizing would match "oauth2:" in one
-// field through the "@" of a later one and leave JSON that no longer parses.
-func TestProcessResult_UploadedSignalReadsMetaVerbatim(t *testing.T) {
+// meta.json is read verbatim. RunGit's sanitizer would match "oauth2:" in one
+// field through the "@" of a later one and drop the JSON between them, here
+// the brace that closes context_use, so the pushed meta would not parse and
+// the signal would be skipped.
+func TestPushedSessionMeta_ReadsBlobVerbatim(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git operations")
 	}
 	_, clonePath := setupBareAndCloneLedger(t)
-	sessionName := "2026-11-08T10-15-testuser-OxVERBATIM"
-	cacheDir := cacheSession(t, clonePath, sessionName, true)
-	meta := `{"session_name":"` + sessionName + `","session_id":"` + draftTestSessionID +
-		`","title":"rotate the oauth2: refresh token","user_email":"dev@example.com"}`
-	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "meta.json"), []byte(meta), 0o644))
-	handler, calls := gitBackedNotifyHandler(t, clonePath)
+	sessionDir := filepath.Join(clonePath, "sessions", "2026-11-08T10-15-testuser-OxVERBATIM")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	meta := `{"session_id":"` + draftTestSessionID + `","title":"rotate the oauth2: token","context_use":{"note":"dev@example.com"},"summary":"done"}`
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "meta.json"), []byte(meta), 0o644))
+	for _, args := range [][]string{{"add", "-A"}, {"-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "meta"}} {
+		out, err := exec.Command("git", append([]string{"-C", clonePath}, args...)...).CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
 
-	require.NoError(t, handler.ProcessResult(&WorkItem{ID: "verbatim", Type: sessionFinalizeType, Payload: &SessionFinalizePayload{
-		SessionDir: cacheDir, RawPath: filepath.Join(cacheDir, "raw.jsonl"), LedgerPath: clonePath, UploadOnly: true,
-	}}, &RunResult{}))
+	got := NewSessionFinalizeHandler(slog.Default()).pushedSessionMeta(context.Background(), clonePath, sessionDir)
 
-	require.Len(t, *calls, 1)
-	assert.Equal(t, draftTestSessionID, (*calls)[0].sessionID)
+	require.NotNil(t, got)
+	assert.Equal(t, draftTestSessionID, got.SessionID)
+	assert.Equal(t, "rotate the oauth2: token", got.Title)
+	assert.Equal(t, "done", got.Summary)
 }
