@@ -27,13 +27,15 @@ jobs:
           body=$(printf '%s' "$BODY" | tr -d '\r' | perl -0pe 's/<!--.*?-->//gs')
           bad=0
           warn() { echo "::warning title=PR contract::$1 (AGENTS.md, Agent PRs)"; bad=1; }
-          kw='(fix(es|ed)?|close[sd]?|resolve[sd]?|part of|refs?)'
+          # Refs is deliberately absent: it neither closes the issue nor marks a partial fix.
+          kw='(fix(es|ed)?|close[sd]?|resolve[sd]?|part of)'
           if ! printf '%s\n' "$body" | grep -Eq '^## Summary[[:space:]]*$'; then
             warn 'The body has no "## Summary" heading'
           fi
           # An issue number in the branch (<agent>/<number>-<slug>; up to six digits, so a
-          # timestamp such as devin/1794044517-x is not one).
-          want=$(printf '%s\n' "$HEAD_REF" | grep -Eo '^[^/]+/[0-9]{1,6}-' | grep -Eo '[0-9]+' || true)
+          # timestamp such as devin/1794044517-x is not one). sed keeps only the number: a
+          # name with digits, such as gpt4/1507-x, must not leak into it.
+          want=$(printf '%s\n' "$HEAD_REF" | sed -nE 's#^[^/]+/([0-9]{1,6})-.*$#\1#p')
           # The issue line is the first line of the body or the first line under "## Summary".
           top=$(printf '%s\n' "$body" | awk 'NF { print; exit }')
           first=$(printf '%s\n' "$body" | awk '/^## Summary[[:space:]]*$/ { f = 1; next } f && NF { print; exit }')
