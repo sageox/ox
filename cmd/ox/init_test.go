@@ -347,6 +347,22 @@ func TestSelectAgentsForInit_ExplicitDevinIsAccepted(t *testing.T) {
 	assert.Equal(t, map[string]bool{"devin": true, "claude-code": true}, selected)
 }
 
+func TestSelectAgentsForInit_ExplicitInstructionFileAgentsAreAccepted(t *testing.T) {
+	t.Setenv("OX_ADAPTER_PATH", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+
+	previousAgentsFlag := initAgentsFlag
+	initAgentsFlag = "kiro, Cursor, windsurf, copilot, cline"
+	t.Cleanup(func() { initAgentsFlag = previousAgentsFlag })
+
+	selected, err := selectAgentsForInit(t.TempDir())
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{
+		"kiro": true, "cursor": true, "windsurf": true, "copilot": true, "cline": true,
+	}, selected)
+}
+
 func TestSelectAgentsForInit_RejectsUnknownNamesWithValidValues(t *testing.T) {
 	t.Setenv("OX_ADAPTER_PATH", t.TempDir())
 	t.Setenv("HOME", t.TempDir())

@@ -2201,6 +2201,12 @@ func parseInitAgentsFlag(value string, externalAdapters []*adapters.ExternalAdap
 			valid[name] = name
 		}
 	}
+	// Instruction-file agents (Cursor, Windsurf, Copilot, Kiro, Cline, ...) have no
+	// adapter, but init configures their files for every detected agent whatever
+	// --agents says, so naming one must not be an error.
+	for _, spec := range InstructionFileRegistry {
+		valid[spec.AgentType] = spec.AgentType
+	}
 	for _, ea := range externalAdapters {
 		name := ea.Name()
 		key := strings.ToLower(name)
