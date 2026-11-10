@@ -2190,6 +2190,10 @@ func parseInitAgentsFlag(value string, externalAdapters []*adapters.ExternalAdap
 	valid := map[string]string{
 		"claude-code": "claude-code",
 		"opencode":    "opencode",
+		// Devin is a built-in choice that is neither in SupportedAgents nor an
+		// external adapter. It runs in the cloud, so non-interactive init cannot
+		// detect it and `--agents devin` is the only way to enable it there.
+		"devin": "devin",
 	}
 	externalNames := make(map[string]string, len(externalAdapters))
 	for name, supported := range prime.SupportedAgents {

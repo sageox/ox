@@ -333,6 +333,20 @@ func TestSelectAgentsForInit_ExplicitAliasPreservesDynamicAdapterName(t *testing
 	assert.Equal(t, map[string]bool{"pi-coding-agent": true}, selected)
 }
 
+func TestSelectAgentsForInit_ExplicitDevinIsAccepted(t *testing.T) {
+	t.Setenv("OX_ADAPTER_PATH", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+
+	previousAgentsFlag := initAgentsFlag
+	initAgentsFlag = "Devin, claude"
+	t.Cleanup(func() { initAgentsFlag = previousAgentsFlag })
+
+	selected, err := selectAgentsForInit(t.TempDir())
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"devin": true, "claude-code": true}, selected)
+}
+
 func TestSelectAgentsForInit_RejectsUnknownNamesWithValidValues(t *testing.T) {
 	t.Setenv("OX_ADAPTER_PATH", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
