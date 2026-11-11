@@ -262,10 +262,74 @@ func withGuardHook(t *testing.T, hooks json.RawMessage) json.RawMessage {
 	return out
 }
 
+// assertFileUnchanged proves a prime run did not rewrite path: same bytes and
+// the backdated mtime the test set before the run.
 func assertFileUnchanged(t *testing.T, path string, before []byte, beforeMod time.Time) {
 	t.Helper()
 	assert.Equal(t, string(before), string(mustRead(t, path)))
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	assert.True(t, info.ModTime().Equal(beforeMod), "file was rewritten: mtime %v, want %v", info.ModTime(), beforeMod)
+}
+
+// TestEnsureClaudeStatusLine_SkipsWithoutOxHooks: prime leaves the coworker's
+// local settings alone when the shared settings.json carries no ox hook or
+// cannot be read, matching the doctor check's precondition.
+func TestEnsureClaudeStatusLine_SkipsWithoutOxHooks(t *testing.T) {
+	tests := []struct {
+		name   string
+		shared string
+	}{
+		{name: "only a coworker's own hook", shared: `{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"node guard.js"}]}]}}`},
+		{name: "malformed shared file", shared: `{"hooks":`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateUserConfig(t)
+			gitRoot := t.TempDir()
+			writeProjectSettings(t, gitRoot, tt.shared)
+
+			ensureClaudeStatusLine(gitRoot)
+
+			assert.NoFileExists(t, getLocalClaudeSettingsPath(gitRoot))
+			assert.Equal(t, tt.shared, string(mustRead(t, getSharedClaudeSettingsPath(gitRoot))), "the shared file is not rewritten")
+		})
+	}
+}
+
+// TestWriteSettingsRawInRoot_Errors: a value that cannot be encoded, or a
+// .claude path that cannot be a directory, is reported and leaves no file.
+func TestWriteSettingsRawInRoot_Errors(t *testing.T) {
+	tests := []struct {
+		name   string
+		setup  func(t *testing.T, gitRoot string)
+		rawMap map[string]json.RawMessage
+	}{
+		{
+			name:   "invalid raw value",
+			setup:  func(*testing.T, string) {},
+			rawMap: map[string]json.RawMessage{"statusLine": json.RawMessage(`{"type":`)},
+		},
+		{
+			name: ".claude is a regular file",
+			setup: func(t *testing.T, gitRoot string) {
+				require.NoError(t, os.WriteFile(filepath.Join(gitRoot, ".claude"), []byte("not a directory"), 0o644))
+			},
+			rawMap: map[string]json.RawMessage{"statusLine": json.RawMessage(`{"type":"command","command":"ox statusline"}`)},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gitRoot := t.TempDir()
+			tt.setup(t, gitRoot)
+			root, err := os.OpenRoot(gitRoot)
+			require.NoError(t, err)
+			defer root.Close()
+
+			err = writeSettingsRawInRoot(root, projectClaudeLocalSettingsFile, tt.rawMap, settingsPerm)
+
+			require.Error(t, err)
+			assert.NoFileExists(t, getLocalClaudeSettingsPath(gitRoot))
+		})
+	}
 }

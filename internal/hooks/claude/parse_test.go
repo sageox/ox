@@ -314,3 +314,55 @@ func TestParseAndMarshalRoundtrip(t *testing.T) {
 	assert.Equal(t, len(rawMap), len(rawMap2))
 	assert.Contains(t, rawMap2, "other")
 }
+
+// TestMarshalSettingsRaw covers the writer used when only a non-hook key such
+// as statusLine changes: hooks must come back out exactly as they went in,
+// including fields Claude Code supports but the Hook struct does not model.
+func TestMarshalSettingsRaw(t *testing.T) {
+	const guard = `{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"node","args":["guard.js"],"timeout":30,"onFailure":"block"}]}]}`
+
+	tests := []struct {
+		name    string
+		rawMap  map[string]json.RawMessage
+		want    string
+		wantErr bool
+	}{
+		{
+			name:   "nil map is an empty document",
+			rawMap: nil,
+			want:   "{}\n",
+		},
+		{
+			name: "hook fields the Hook struct does not model survive",
+			rawMap: map[string]json.RawMessage{
+				"hooks":      json.RawMessage(guard),
+				"statusLine": json.RawMessage(`{"type":"command","command":"ox statusline"}`),
+			},
+		},
+		{
+			name:    "invalid raw value is an error, not a corrupt file",
+			rawMap:  map[string]json.RawMessage{"hooks": json.RawMessage(`{"PreToolUse":`)},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := MarshalSettingsRaw(tt.rawMap)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			if tt.want != "" {
+				assert.Equal(t, tt.want, string(data))
+				return
+			}
+			var out map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(data, &out))
+			for key, raw := range tt.rawMap {
+				assert.JSONEq(t, string(raw), string(out[key]), key)
+			}
+		})
+	}
+}
