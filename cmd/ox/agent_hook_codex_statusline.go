@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/sageox/ox/internal/oxactivity"
+	"github.com/sageox/ox/internal/session"
 )
 
 // Codex status line digest.
@@ -45,8 +46,13 @@ func emitCodexStopDigest(w io.Writer, ctx *HookContext) {
 		return
 	}
 	key := oxactivity.StateKey(ctx.Marker.AgentID, ctx.Input.SessionID)
+	recordingID := ""
+	if rec, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, ctx.Marker.AgentID); err == nil && rec != nil {
+		recordingID = rec.SessionID
+	}
 	changed := false
 	err := oxactivity.UpdateState(ctx.ProjectRoot, key, func(s *oxactivity.State) bool {
+		s.BindRecording(recordingID)
 		if s.ShownLine == digest {
 			return false
 		}

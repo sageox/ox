@@ -293,10 +293,17 @@ func buildOxStatusline(in statuslineInput, dir string) (line oxStatusline, show 
 
 	// Keyed by this harness session, not the agent ID alone: another
 	// window's counts must not show up on this bar.
-	line.counts = oxactivity.LoadState(root, oxactivity.StateKey(agentID, in.SessionID)).Counts()
+	state := oxactivity.LoadState(root, oxactivity.StateKey(agentID, in.SessionID))
 	if rec, err := session.LoadRecordingStateForAgent(root, agentID); err == nil {
 		line.recording = rec != nil && !rec.IsSuspended()
+		// Counts left by an earlier recording of this harness session are not
+		// this recording's: the writers reset them on their next write, and
+		// until then the bar shows what `ox session report` would, zero.
+		if rec != nil && !state.BelongsTo(rec.SessionID) {
+			state = oxactivity.State{}
+		}
 	}
+	line.counts = state.Counts()
 	return line, true
 }
 

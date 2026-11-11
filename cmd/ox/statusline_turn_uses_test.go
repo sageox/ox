@@ -145,3 +145,39 @@ func TestStop_CodexDigestShowsTurnUses(t *testing.T) {
 	doc := decodeCodexHookDoc(t, out)
 	assert.Equal(t, "● ox  1 discussion · 1 used  ● rec", doc.SystemMessage, "the cited discussion counts as used, and as a discussion")
 }
+
+// TestStatusline_NewRecordingStartsOver: one Claude Code session can span
+// several ox recordings (a resume, a pause, an idle finalize), while `ox
+// session report` counts only the current one. The bar must agree with it:
+// when a new recording starts, the line goes back to zero and then counts
+// the new recording's work only. Failure prevented: "4 discussions · 5 used"
+// on the bar beside "used 3 of 13" in the pane, the two extra being a
+// recording that closed yesterday.
+func TestStatusline_NewRecordingStartsOver(t *testing.T) {
+	root, first := turnUsesEnv(t)
+	runStopFor(t, root, usageAgentID)
+	require.Contains(t, statuslineFor(t, root), "1 used")
+	key := oxactivity.StateKey(usageAgentID, liveHarnessSess)
+	require.Equal(t, first.SessionID, oxactivity.LoadState(root, key).Recording)
+
+	// The recording ends and a new one starts for the same harness session.
+	_, err := session.StopRecording(root, usageAgentID)
+	require.NoError(t, err)
+	second, err := session.StartRecording(root, session.StartRecordingOptions{
+		AgentID: usageAgentID, AdapterName: "claude-code", AgentSessionID: liveHarnessSess,
+	})
+	require.NoError(t, err)
+	require.NotEqual(t, first.SessionID, second.SessionID)
+
+	line := statuslineFor(t, root)
+	assert.NotContains(t, line, "used", "a new recording starts at zero before anything is written: %q", line)
+
+	// The first write of the new recording resets the file, then counts.
+	traceConversations(t, second, 1, [2]string{liveCnvA, liveTitleA})
+	writeLiveRaw(t, second, liveUser("again"), liveAssistant("as the "+liveTitleA+" put it"))
+	runStopFor(t, root, usageAgentID)
+	got := oxactivity.LoadState(root, key)
+	assert.Equal(t, second.SessionID, got.Recording)
+	assert.Equal(t, oxactivity.Counts{Discussions: 1, Used: 1}, got.Counts(), "only the new recording's use")
+	assert.Contains(t, statuslineFor(t, root), "1 discussion · 1 used")
+}

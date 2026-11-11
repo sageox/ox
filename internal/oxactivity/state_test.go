@@ -584,3 +584,54 @@ func TestState_ShownLineSurvivesBumps(t *testing.T) {
 	assert.Equal(t, "● ox  1 plan", got.ShownLine)
 	assert.Equal(t, Counts{Plans: 2}, got.Counts())
 }
+
+// TestState_BindRecording: counts belong to one ox recording. Binding to a
+// different one starts them over; binding to the same one, or to none, keeps
+// them. Failure prevented: a harness session resumed across recordings
+// showing last recording's "5 used" while the session report says 3.
+func TestState_BindRecording(t *testing.T) {
+	t.Parallel()
+	s := State{Discussions: 2, Used: 1, SeenRefs: []string{"a"}, UsedRefs: []string{"a"}, ShownLine: "x"}
+
+	assert.False(t, s.BindRecording(""), "no live recording: nothing to bind to")
+	assert.Equal(t, 2, s.Discussions)
+	assert.True(t, s.BelongsTo("ses_one"), "unbound counts show for any recording")
+
+	assert.True(t, s.BindRecording("ses_one"), "the first binding adopts the counts")
+	assert.Equal(t, 2, s.Discussions)
+	assert.Equal(t, "ses_one", s.Recording)
+
+	assert.False(t, s.BindRecording(" ses_one "), "same recording keeps its counts")
+	assert.Equal(t, 2, s.Discussions)
+	assert.False(t, s.BelongsTo("ses_two"))
+	assert.True(t, s.BelongsTo(""), "no live recording accepts any state")
+
+	assert.True(t, s.BindRecording("ses_two"))
+	assert.Equal(t, State{Recording: "ses_two"}, s, "a new recording starts at zero")
+}
+
+// TestRecordInfluenceIn_NewRecordingStartsOver: the writers reset a state
+// file left by an earlier recording of the same harness session, and a file
+// that names no recording (written before the field existed, or with no live
+// recording) is adopted, not reset.
+func TestRecordInfluenceIn_NewRecordingStartsOver(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	key := StateKey(testAgentID, "claude-1")
+
+	require.NoError(t, RecordInfluence(root, testAgentID, "claude-1", "discussion", "cnv_old")) // pre-field file
+	require.NoError(t, RecordInfluenceIn(root, testAgentID, "claude-1", "ses_one", "discussion", "cnv_a"))
+	require.NoError(t, RecordUseIn(root, testAgentID, "claude-1", "ses_one", "discussion", "cnv_a"))
+	got := LoadState(root, key)
+	assert.Equal(t, Counts{Discussions: 2, Used: 1}, got.Counts(), "an unbound file joins the first recording")
+	assert.Equal(t, "ses_one", got.Recording)
+
+	require.NoError(t, RecordUseIn(root, testAgentID, "claude-1", "ses_two", "discussion", "cnv_a"))
+	got = LoadState(root, key)
+	assert.Equal(t, Counts{Discussions: 1, Used: 1}, got.Counts(), "the next recording counts only its own")
+	assert.Equal(t, "ses_two", got.Recording)
+
+	// Rebinding alone is a change worth saving, even when the ref is a repeat.
+	require.NoError(t, RecordInfluenceIn(root, testAgentID, "claude-1", "ses_three", "discussion", "cnv_a"))
+	assert.Equal(t, "ses_three", LoadState(root, key).Recording)
+}
