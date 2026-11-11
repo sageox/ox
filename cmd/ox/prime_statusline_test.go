@@ -211,6 +211,7 @@ func TestEnsureClaudeHooks_SyncsStatusLineWhenHooksPresent(t *testing.T) {
 
 			home := t.TempDir()
 			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 			if tt.detected {
 				require.NoError(t, os.Mkdir(filepath.Join(home, ".claude"), 0o755))
 			}
