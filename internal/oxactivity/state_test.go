@@ -561,3 +561,26 @@ func TestLoadState_PreUsedSchema(t *testing.T) {
 	require.NoError(t, RecordUse(root, testAgentID, "s1", "plan", "p"))
 	assert.Equal(t, Counts{Discussions: 2, Plans: 1, Used: 1}, LoadState(root, key).Counts())
 }
+
+// TestState_ShownLineSurvivesBumps keeps the last line shown to the coworker
+// across later counts. Failure prevented: a host that shows the line as a
+// turn-end notice (Codex) forgetting what it showed and repeating itself, or
+// an old state file reading as "already shown".
+func TestState_ShownLineSurvivesBumps(t *testing.T) {
+	root := t.TempDir()
+	const agentID, sessionID = "OxSh01", "thread-1"
+	key := StateKey(agentID, sessionID)
+
+	require.NoError(t, RecordInfluence(root, agentID, sessionID, "plan", "x"))
+	assert.Empty(t, LoadState(root, key).ShownLine, "nothing shown yet")
+
+	require.NoError(t, UpdateState(root, key, func(s *State) bool {
+		s.ShownLine = "● ox  1 plan"
+		return true
+	}))
+	require.NoError(t, RecordInfluence(root, agentID, sessionID, "plan", "y"))
+
+	got := LoadState(root, key)
+	assert.Equal(t, "● ox  1 plan", got.ShownLine)
+	assert.Equal(t, Counts{Plans: 2}, got.Counts())
+}

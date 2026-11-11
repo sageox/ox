@@ -61,6 +61,13 @@ const minCitedTitleLen = 12
 //     quotes the surfaced title. User/system/tool entries never count — they
 //     carry the injected context itself.
 func ScanUses(entries []Entry, surfaced []contextuse.SurfacedRef, roots Roots) []contexttrace.Event {
+	return ScanUsesFrom(entries, 0, surfaced, roots)
+}
+
+// ScanUsesFrom is ScanUses for a tail of the transcript: entries[0] is entry
+// number base in the EntryCount frame, so an incremental caller that has
+// already scanned base entries passes only the new ones and pays for those.
+func ScanUsesFrom(entries []Entry, base int, surfaced []contextuse.SurfacedRef, roots Roots) []contexttrace.Event {
 	if len(entries) == 0 || len(surfaced) == 0 {
 		return nil
 	}
@@ -86,7 +93,8 @@ func ScanUses(entries []Entry, surfaced []contextuse.SurfacedRef, roots Roots) [
 		})
 	}
 
-	for i, e := range entries {
+	for idx, e := range entries {
+		i := base + idx
 		switch {
 		case readToolNames[e.ToolName]:
 			path := extractPath(e.ToolInput)
