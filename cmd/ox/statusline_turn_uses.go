@@ -30,6 +30,13 @@ func recordTurnUses(projectRoot, agentID string) {
 	if err != nil || state == nil || state.SessionPath == "" {
 		return // not recording: no reply to scan
 	}
+	if state.AgentSessionID == "" {
+		// The status line is keyed by the harness session, and
+		// recordStatuslineUse counts nothing for a recording not yet bound to
+		// one. Scanning now would still cache what it found as seen, so the
+		// first scan after the binding would never count it. Wait.
+		return
+	}
 	events, err := contexttrace.ReadEvents(filepath.Join(state.SessionPath, contexttrace.FileName))
 	if err != nil {
 		slog.Debug("statusline: read trace for turn uses", "agent_id", agentID, "err", err)
