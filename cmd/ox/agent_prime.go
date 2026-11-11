@@ -430,8 +430,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	// anti-entropy: ensure ox:prime marker exists in AGENTS.md/CLAUDE.md
-	if _, err := EnsureOxPrimeMarker(projectRoot); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to repair ox:prime markers: %v\n", err)
+	// only run on properly initialized projects (config.json exists, not just .sageox/ dir)
+	if config.IsInitialized(projectRoot) {
+		if _, err := EnsureOxPrimeMarker(projectRoot); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to repair ox:prime markers: %v\n", err)
+		}
 	}
 
 	// anti-entropy: ensure Claude Code hooks are installed
@@ -439,7 +442,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	// anti-entropy: retry plan commits/pushes a review session could not land
 	// (detached; a no-op ReadDir when nothing is pending — plan_push_pending.go)
-	kickPendingPlanPushes(projectRoot)
+	if config.IsInitialized(projectRoot) {
+		kickPendingPlanPushes(projectRoot)
+	}
 
 	// get project-specific endpoint (single source of truth)
 	projectEndpoint := endpoint.GetForProject(projectRoot)
