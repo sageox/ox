@@ -48,7 +48,11 @@ type State struct {
 	Used int `json:"used,omitempty"`
 	// UsedRefs dedups Used the way SeenRefs dedups the kind buckets, with the
 	// same key format and cap.
-	UsedRefs  []string  `json:"used_refs,omitempty"`
+	UsedRefs []string `json:"used_refs,omitempty"`
+	// ShownLine is the last line shown to the coworker by a host that has no
+	// status bar and shows the line as a turn-end notice instead (Codex). It
+	// is how that notice stays silent on turns where nothing changed.
+	ShownLine string    `json:"shown_line,omitempty"`
 	UpdatedAt time.Time `json:"updated_at,omitzero"`
 }
 

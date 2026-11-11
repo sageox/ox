@@ -25,7 +25,9 @@ import (
 // This file runs the same deterministic scan (consultscan.ScanUses, same
 // roots, same surfaced set) over the live raw.jsonl and adds what it finds to
 // the brief IN MEMORY. It never writes the trace; finalize re-scans from zero
-// and writes the identical events.
+// and writes the identical events. The Stop hook runs the same scan once per
+// turn (recordTurnUses) so the status line's "used" count is current whether
+// or not anything ever asks for the brief.
 
 // briefUsesCacheSubdir holds the incremental scan cache, one file per AI
 // coworker, under the ledger's local-only .sageox/cache/ (ledger-cache rule).

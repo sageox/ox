@@ -687,9 +687,15 @@ func handleAfterTool(ctx *HookContext) error {
 	// is discarded anyway, and handlePrompt remains its primary delivery.
 	pageNudged := ctx.AgentType == "claude-code" && ctx.Input != nil &&
 		emitWrittenPageNudge(os.Stdout, ctx.ProjectRoot, agentID, ctx.Input.ToolName, ctx.Input.ToolInput)
-	if ctx.AgentType == "codex" {
-		emitCodexAfterTool(os.Stdout, agentID) // whispers must ride in Codex's JSON envelope
-	} else if !pageNudged {
+	switch {
+	case ctx.AgentType == "codex":
+		// Whispers must ride in Codex's PostToolUse JSON envelope. handleStop
+		// drains through here too, and Codex's Stop schema rejects that
+		// envelope, so at Stop they stay pending for the next prompt.
+		if ctx.Phase != phaseStop {
+			emitCodexAfterTool(os.Stdout, agentID)
+		}
+	case !pageNudged:
 		// emit pending whispers (fallback — primary delivery is handlePrompt)
 		emitWhispers(os.Stdout, agentID)
 	}
@@ -993,6 +999,8 @@ func handleStop(ctx *HookContext) error {
 	// Codex's only plan-exit signal is a <proposed_plan> block at turn end.
 	if ctx.AgentType == "codex" && ctx.Marker != nil {
 		maybeCaptureCodexPlan(ctx, ctx.Marker.AgentID)
+		// Codex has no status line; the ox line is shown at turn end instead.
+		emitCodexStopDigest(os.Stdout, ctx)
 	}
 	return nil
 }

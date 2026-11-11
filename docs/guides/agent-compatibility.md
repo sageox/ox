@@ -68,6 +68,10 @@ beneath ox's. In the Claude desktop app's Claude Code tab, which has no status b
 same line is drawn directly above the prompt by the session report pane plugin (below), fed by
 `ox statusline --json`. Turn it off everywhere with `ox config set statusline off`.
 
+Codex CLI and the ChatGPT desktop app's Codex surface have no status bar a command
+can draw, so there the same line appears as a single notice at the end of a turn, and
+only when it changed during that turn. See [Codex hooks](codex-hooks.md#status-line).
+
 **Session report pane.** `/ox-session-report` opens a pane beside the chat with what SageOx gave this
 session (calls, estimated context tokens, what was read and what was useful) and a
 scrollable list of every ox call, refreshed as they happen. It is a Claude Code plugin,
