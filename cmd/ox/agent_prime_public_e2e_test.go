@@ -125,3 +125,21 @@ func TestRunAgentPrime_PublicLookupOutageKeepsTheUsualAnswer(t *testing.T) {
 	assert.NotContains(t, out, "SageOx primed from")
 	assert.Contains(t, env.Requested(), "/api/v1/public/prime")
 }
+
+// TestRunAgentPrime_SageoxDirWithoutConfigIsNotInitialized — Failure
+// prevented (#1835): after .sageox/ is deleted, ox doctor leaves behind
+// .sageox/cache and .sageox/config.local.toml without config.json, and prime
+// answered fresh with an agent id in a repo doctor calls not initialized.
+func TestRunAgentPrime_SageoxDirWithoutConfigIsNotInitialized(t *testing.T) {
+	env := newOxE2E(t)
+	sageoxDir := filepath.Join(env.Root, ".sageox")
+	require.NoError(t, os.MkdirAll(filepath.Join(sageoxDir, "cache"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.local.toml"), []byte(""), 0o644))
+
+	out := runUninitializedPrime(t, env, "git@gitlab.com:someone/thing.git")
+
+	assert.Contains(t, out, `<session-context agent_id="" status="unavailable">`)
+	assert.NotContains(t, out, `status="fresh"`)
+	_, err := os.Stat(filepath.Join(sageoxDir, "agent_instances"))
+	assert.True(t, os.IsNotExist(err), "prime must not register an AI coworker in an uninitialized repo")
+}

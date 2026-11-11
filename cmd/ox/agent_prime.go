@@ -413,9 +413,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// load attribution from user and project configs
 	attribution := loadResolvedAttributionFor(projectRoot)
 
-	// check if project is initialized (.sageox/ exists)
-	sageoxDir := filepath.Join(projectRoot, ".sageox")
-	if _, err := os.Stat(sageoxDir); os.IsNotExist(err) {
+	// check if project is initialized (config.json or config.yaml exists, not just
+	// .sageox/ dir: doctor can leave .sageox/cache and config.local.toml behind)
+	if !config.IsInitialized(projectRoot) {
 		// a clone of an open-source project that is public on SageOx primes
 		// read-only from its public thinking, member or not
 		if handled, err := emitPublicPrime(cmd, projectRoot, textMode || reviewMode); handled {
@@ -430,11 +430,8 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	// anti-entropy: ensure ox:prime marker exists in AGENTS.md/CLAUDE.md
-	// only run on properly initialized projects (config.json exists, not just .sageox/ dir)
-	if config.IsInitialized(projectRoot) {
-		if _, err := EnsureOxPrimeMarker(projectRoot); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to repair ox:prime markers: %v\n", err)
-		}
+	if _, err := EnsureOxPrimeMarker(projectRoot); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to repair ox:prime markers: %v\n", err)
 	}
 
 	// anti-entropy: ensure Claude Code hooks are installed
@@ -442,9 +439,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	// anti-entropy: retry plan commits/pushes a review session could not land
 	// (detached; a no-op ReadDir when nothing is pending — plan_push_pending.go)
-	if config.IsInitialized(projectRoot) {
-		kickPendingPlanPushes(projectRoot)
-	}
+	kickPendingPlanPushes(projectRoot)
 
 	// get project-specific endpoint (single source of truth)
 	projectEndpoint := endpoint.GetForProject(projectRoot)
