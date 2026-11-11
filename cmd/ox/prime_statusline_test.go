@@ -23,6 +23,8 @@ type primeStatusLineRun struct {
 	localMod    time.Time
 	// sharedHooks is the shared settings.json "hooks" value before prime.
 	sharedHooks json.RawMessage
+	// localHooks is the settings.local.json "hooks" value before prime.
+	localHooks json.RawMessage
 	// logs is everything prime sent to slog at WARN and above.
 	logs string
 }
@@ -49,7 +51,11 @@ func TestEnsureClaudeHooks_SyncsStatusLineWhenHooksPresent(t *testing.T) {
 		current bool
 		// sharedStatusLine is a statusLine to put in the shared settings.json.
 		sharedStatusLine string
-		check            func(t *testing.T, run primeStatusLineRun)
+		// richHooks adds a coworker's own PreToolUse guard, with the hook
+		// fields ox does not model (args, timeout, onFailure), to the shared
+		// file and, when local is set, to settings.local.json too.
+		richHooks bool
+		check     func(t *testing.T, run primeStatusLineRun)
 	}{
 		{
 			name:     "hooks present, no status line: prime installs it",
@@ -68,6 +74,28 @@ func TestEnsureClaudeHooks_SyncsStatusLineWhenHooksPresent(t *testing.T) {
 				assert.JSONEq(t, string(run.sharedHooks), string(shared["hooks"]), "ox hooks in the shared file are kept")
 				assert.JSONEq(t, `"opus"`, string(shared["model"]), "other shared keys are kept")
 				assert.Equal(t, claude.StatusLineCurrent, claude.ClassifyStatusLine(readLocalSettingsMap(t, run.gitRoot)))
+			},
+		},
+		{
+			name:      "coworker's own hook fields survive the status line write",
+			detected:  true,
+			richHooks: true,
+			local:     `{"model":"opus"}`,
+			check: func(t *testing.T, run primeStatusLineRun) {
+				local := readLocalSettingsMap(t, run.gitRoot)
+				assert.Equal(t, claude.StatusLineCurrent, claude.ClassifyStatusLine(local))
+				assert.JSONEq(t, string(run.localHooks), string(local["hooks"]), "a guard's args, timeout and onFailure must not be stripped")
+			},
+		},
+		{
+			name:             "legacy move keeps every field of the shared hooks",
+			detected:         true,
+			richHooks:        true,
+			sharedStatusLine: `{"type":"command","command":"ox statusline"}`,
+			check: func(t *testing.T, run primeStatusLineRun) {
+				shared := readProjectSettingsMap(t, run.gitRoot)
+				assert.NotContains(t, shared, "statusLine")
+				assert.JSONEq(t, string(run.sharedHooks), string(shared["hooks"]), "a guard's args, timeout and onFailure must not be stripped")
 			},
 		},
 		{
@@ -133,9 +161,14 @@ func TestEnsureClaudeHooks_SyncsStatusLineWhenHooksPresent(t *testing.T) {
 			require.NoError(t, os.Remove(getLocalClaudeSettingsPath(run.gitRoot)))
 			require.True(t, HasProjectClaudeHooks(run.gitRoot))
 
-			if tt.sharedStatusLine != "" {
+			if tt.sharedStatusLine != "" || tt.richHooks {
 				shared := readProjectSettingsMap(t, run.gitRoot)
-				shared["statusLine"] = json.RawMessage(tt.sharedStatusLine)
+				if tt.sharedStatusLine != "" {
+					shared["statusLine"] = json.RawMessage(tt.sharedStatusLine)
+				}
+				if tt.richHooks {
+					shared["hooks"] = withGuardHook(t, shared["hooks"])
+				}
 				shared["model"] = json.RawMessage(`"opus"`)
 				data, err := json.Marshal(shared)
 				require.NoError(t, err)
@@ -145,7 +178,19 @@ func TestEnsureClaudeHooks_SyncsStatusLineWhenHooksPresent(t *testing.T) {
 			require.NotEmpty(t, run.sharedHooks)
 
 			if tt.local != "" {
-				writeLocalSettings(t, run.gitRoot, tt.local)
+				local := tt.local
+				if tt.richHooks {
+					var m map[string]json.RawMessage
+					require.NoError(t, json.Unmarshal([]byte(local), &m))
+					m["hooks"] = withGuardHook(t, nil)
+					data, err := json.Marshal(m)
+					require.NoError(t, err)
+					local = string(data)
+				}
+				writeLocalSettings(t, run.gitRoot, local)
+				if tt.richHooks {
+					run.localHooks = readLocalSettingsMap(t, run.gitRoot)["hooks"]
+				}
 			}
 			if tt.current {
 				_, err := syncProjectStatusLine(run.gitRoot)
@@ -193,6 +238,28 @@ func TestEnsureClaudeHooks_SyncsStatusLineWhenHooksPresent(t *testing.T) {
 			tt.check(t, run)
 		})
 	}
+}
+
+// withGuardHook adds a coworker's PreToolUse policy guard to a hooks value,
+// carrying the fields Claude Code supports but ox's Hook struct does not
+// (args, timeout, onFailure). hooks may be nil for a file with no hooks yet.
+func withGuardHook(t *testing.T, hooks json.RawMessage) json.RawMessage {
+	t.Helper()
+	events := map[string]json.RawMessage{}
+	if hooks != nil {
+		require.NoError(t, json.Unmarshal(hooks, &events))
+	}
+	var pre []json.RawMessage
+	if raw, ok := events["PreToolUse"]; ok {
+		require.NoError(t, json.Unmarshal(raw, &pre))
+	}
+	pre = append(pre, json.RawMessage(`{"matcher":"Bash","hooks":[{"type":"command","command":"node","args":["guard.js"],"timeout":30,"onFailure":"block"}]}`))
+	raw, err := json.Marshal(pre)
+	require.NoError(t, err)
+	events["PreToolUse"] = raw
+	out, err := json.Marshal(events)
+	require.NoError(t, err)
+	return out
 }
 
 func assertFileUnchanged(t *testing.T, path string, before []byte, beforeMod time.Time) {
