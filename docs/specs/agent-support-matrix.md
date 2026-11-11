@@ -34,6 +34,7 @@ Agent-specific hooks (`ox integrate install --<agent>`) are *additive* — they 
 | ox-used hook events | 6 | 4 | 6 (SessionStart, PreToolUse, PostToolUse, UserPromptSubmit, Stop, SessionEnd) | 0 (AGENTS.md marker only) | 1 (session.created) |
 | Phase mapping (agentx) | Full (in agentx) | Local fallback (pending agentx) | Local fallback (pending agentx) | N/A | N/A |
 | Startup banner (JSON stdout) | Yes | Yes | No | No | No |
+| ox status line | Yes (status bar; above the prompt in the desktop app) | No | Turn-end notice (Stop `systemMessage`; CLI and ChatGPT desktop app) | No | No |
 | Hook install/uninstall | `ox integrate install` | `ox integrate install --gemini` | `ox integrate install --codex` | `ox integrate install --amp` |
 | `ox doctor` detection + auto-fix | Yes | Yes | Yes | Yes | Yes |
 | **Silver: Daemon Sub-Agent** | | | | | |

@@ -22,7 +22,7 @@ logic are in [`cmd/ox-adapter-codex/hooks.go`](../../cmd/ox-adapter-codex/hooks.
 | `PreToolUse` | SageOx: pre-tool hook (currently inactive) | Maps to `phaseBeforeTool`, which is absent from `activePhaseBehavior`. Returns before dispatch, heartbeat, or recording work. Kept as an existing integration entry; it does not inspect or block tool calls. |
 | `PostToolUse` | SageOx: capturing activity for session recording | Delivers pending team updates as a fallback and, when a recording exists, drains new native session entries through the recording writer and its redaction pipeline. Captures conversation activity as well as tool activity. |
 | `UserPromptSubmit` | SageOx: recalling context and delivering team updates | Looks up local recall context and delivers pending team updates, task notices, recording-pause reminders, and plan/artifact reminders. The opt-in cloud-query gate currently computes a decision; this handler does not dispatch a cloud query. |
-| `Stop` | SageOx: saving turns and plans; publishing drafts if configured | Drains recording entries, counts the completed turn, registers the session link and publishes draft metadata according to publishing policy, and saves a completed Codex `<proposed_plan>` through the plan capture path. It does not end the recording. |
+| `Stop` | SageOx: saving turns and plans; publishing drafts if configured | Drains recording entries, counts the completed turn, registers the session link and publishes draft metadata according to publishing policy, and saves a completed Codex `<proposed_plan>` through the plan capture path. When the ox status line changed during the turn, it prints that line once as a `systemMessage` (see [Status line](#status-line)). It does not end the recording. |
 | `SessionEnd` | SageOx: finalizing recordings; publishing if configured | Stops an active recording and finalizes it directly or hands it to the daemon. Publishing follows configuration; manual publishing holds the recording locally. Repeated calls are safe when the recording is already stopped. |
 
 Active phases also send a heartbeat to the local daemon when an AI coworker ID
@@ -63,3 +63,25 @@ with `/hooks` in the CLI. SageOx does not grant trust on the coworker's behalf.
 project/user installations, duplicate prevention, repeat-install stability,
 preservation of unrelated MCP handlers and unknown configuration fields, and
 read-only diagnosis followed by a scoped repair for each event.
+
+
+## Status line
+
+Codex has no status line a command can draw: the CLI's `tui.status_line` accepts
+built-in items only, and the ChatGPT desktop app has no status bar. The one hook
+field both show a coworker is `systemMessage`. So the line Claude Code keeps in
+its status bar appears in Codex as a notice at the end of a turn:
+
+```text
+● ox  1 discussion · 1 plan · 2 used  ● rec
+```
+
+- It is printed only when the line differs from the last one shown in this
+  Codex session. A turn that used no new team context prints nothing, and so
+  does a session that has not used any yet.
+- It counts the same items as the Claude Code status line, from the same local
+  state (no network, no daemon).
+- `Stop` output is this one JSON document or nothing. Whispers still pending at
+  the end of a turn wait for the next `UserPromptSubmit`; Codex's `Stop` schema
+  has no field that reaches the model.
+- `ox config set statusline off` turns it off.
