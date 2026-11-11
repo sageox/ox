@@ -101,6 +101,26 @@ func TestStop_TurnUsesSilentCases(t *testing.T) {
 		_, err := os.Stat(briefUsesCachePath(consultRoots(root).Ledger, state.AgentID))
 		assert.True(t, os.IsNotExist(err), "no scan ran")
 	})
+	t.Run("recording not yet bound to a harness session", func(t *testing.T) {
+		// A manual `ox session start` can record before ox knows the harness
+		// session. Scanning then would cache the use as already seen while
+		// counting nothing, so it must not scan at all.
+		isolateSessionMarkerDir(t)
+		root := usageTraceEnv(t, nil)
+		t.Setenv("SAGEOX_ENDPOINT", "")
+		t.Setenv("XDG_DATA_HOME", t.TempDir())
+		require.NoError(t, os.WriteFile(filepath.Join(root, ".sageox", "config.json"),
+			[]byte(`{"config_version":"2","repo_id":"repo_brief_live","endpoint":"`+liveEndpoint+`"}`), 0o644))
+		state, err := session.StartRecording(root, session.StartRecordingOptions{AgentID: usageAgentID, AdapterName: "claude-code"})
+		require.NoError(t, err)
+		require.Empty(t, state.AgentSessionID)
+		traceConversations(t, state, 1, [2]string{liveCnvB, liveTitleB})
+		writeLiveRaw(t, state, liveUser("hi"), liveAssistant("the "+liveTitleB+" raised it"))
+
+		runStopFor(t, root, usageAgentID)
+		_, err = os.Stat(briefUsesCachePath(consultRoots(root).Ledger, state.AgentID))
+		assert.True(t, os.IsNotExist(err), "no scan may run before the binding")
+	})
 	t.Run("not recording", func(t *testing.T) {
 		root, _ := turnUsesEnv(t)
 		runStopFor(t, root, "OxOthr1") // an AI coworker with no recording
