@@ -388,3 +388,26 @@ func TestMatchesRef_Aliases(t *testing.T) {
 		})
 	}
 }
+
+// TestScanUsesFrom_TailKeepsTheSeqFrame: an incremental caller passes only
+// the entries past what it already scanned, with their real entry numbers.
+// Failure prevented: a tail scan that renumbers entries from zero misses a
+// citation made after the item surfaced (it looks like it came before), or
+// an incremental caller pads the tail with empty entries and walks the whole
+// recording again on every turn.
+func TestScanUsesFrom_TailKeepsTheSeqFrame(t *testing.T) {
+	surfaced := []contextuse.SurfacedRef{{Ref: "Ox7f2a", RefType: "murmur", Seq: 3}}
+	tail := []Entry{assistant("Ox7f2a")} // entry number 3: at the surfacing turn, counts
+
+	got := ScanUsesFrom(tail, 3, surfaced, testRoots())
+	if len(got) != 1 || got[0].Seq != 3 || got[0].Evidence != contexttrace.EvidenceCited {
+		t.Fatalf("tail at base 3: got %+v", got)
+	}
+	if got := ScanUsesFrom(tail, 2, surfaced, testRoots()); len(got) != 0 {
+		t.Fatalf("entry 2 is before the item surfaced at 3: got %+v", got)
+	}
+	padded := append(make([]Entry, 3), tail...)
+	if full := ScanUses(padded, surfaced, testRoots()); len(full) != 1 || full[0].Seq != got[0].Seq {
+		t.Fatalf("ScanUses over the padded window must agree with the tail scan: %+v", full)
+	}
+}
