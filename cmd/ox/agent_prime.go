@@ -413,9 +413,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// load attribution from user and project configs
 	attribution := loadResolvedAttributionFor(projectRoot)
 
-	// check if project is initialized (.sageox/ exists)
-	sageoxDir := filepath.Join(projectRoot, ".sageox")
-	if _, err := os.Stat(sageoxDir); os.IsNotExist(err) {
+	// check if project is initialized (config.json or config.yaml exists, not just
+	// .sageox/ dir: doctor can leave .sageox/cache and config.local.toml behind)
+	if !config.IsInitialized(projectRoot) {
 		// a clone of an open-source project that is public on SageOx primes
 		// read-only from its public thinking, member or not
 		if handled, err := emitPublicPrime(cmd, projectRoot, textMode || reviewMode); handled {
