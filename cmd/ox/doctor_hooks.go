@@ -511,6 +511,19 @@ func checkClaudeStatusLine(fix bool) checkResult {
 
 const claudeStatusLineCheckName = "Claude status line"
 
+// settingsHaveOxHook reports whether shared settings carry any ox hook: the
+// precondition under which both doctor and prime manage the status line.
+func settingsHaveOxHook(settings *ClaudeSettings) bool {
+	for _, entries := range settings.Hooks {
+		for _, entry := range entries {
+			if hasAnyOxHook(entry) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func checkClaudeStatusLineAt(gitRoot string, fix bool) checkResult {
 	settingsPath := getSharedClaudeSettingsPath(gitRoot)
 	if _, err := os.Stat(settingsPath); os.IsNotExist(err) {
@@ -520,15 +533,7 @@ func checkClaudeStatusLineAt(gitRoot string, fix bool) checkResult {
 	if err != nil {
 		return WarningCheck(claudeStatusLineCheckName, "read error", err.Error())
 	}
-	hasOx := false
-	for _, entries := range settings.Hooks {
-		for _, entry := range entries {
-			if hasAnyOxHook(entry) {
-				hasOx = true
-			}
-		}
-	}
-	if !hasOx {
+	if !settingsHaveOxHook(settings) {
 		// the status line ships with the hooks; the hook checks install both
 		return SkippedCheck(claudeStatusLineCheckName, "no ox hooks in settings.json", "")
 	}
