@@ -267,6 +267,19 @@ func writeSettingsFileRawInRoot(root *os.Root, name string, settings *ClaudeSett
 	return fileutil.AtomicWriteBytesInRoot(root, name, data, perm)
 }
 
+// writeSettingsRawInRoot writes a settings file from its raw map alone, hooks
+// untouched. For writes that change only non-hook keys such as statusLine.
+func writeSettingsRawInRoot(root *os.Root, name string, rawMap map[string]json.RawMessage, perm os.FileMode) error {
+	data, err := claude.MarshalSettingsRaw(rawMap)
+	if err != nil {
+		return err
+	}
+	if err := root.MkdirAll(filepath.Dir(name), dirPerm); err != nil {
+		return fmt.Errorf("failed to create settings directory: %w", err)
+	}
+	return fileutil.AtomicWriteBytesInRoot(root, name, data, perm)
+}
+
 // readSharedClaudeSettings reads .claude/settings.json using raw-preserving parse.
 func readSharedClaudeSettings(gitRoot string) (*ClaudeSettings, map[string]json.RawMessage, error) {
 	return readProjectSettingsFileRaw(gitRoot, projectClaudeSettingsFile)

@@ -77,11 +77,11 @@ coworker reported using or cited in a commit. Nothing yet reads "● ox".
 smallest count is dropped first and "used" last. It reads local files only — never the network or the
 ox daemon — and never prints an error into the bar.
 
-` + "`ox init`" + ` and ` + "`ox doctor`" + ` install it as the statusLine in the project's
-.claude/settings.local.json. A statusLine already set there is never
-replaced. If your own ~/.claude/settings.json sets a statusLine, ox runs it
-and prints its line beneath ox's, since the project setting would otherwise
-hide yours.
+` + "`ox init`" + `, ` + "`ox doctor`" + ` and starting a new Claude Code session install
+it as the statusLine in the project's .claude/settings.local.json. A
+statusLine already set there is never replaced. If your own
+~/.claude/settings.json sets a statusLine, ox runs it and prints its line
+beneath ox's, since the project setting would otherwise hide yours.
 
 The Claude desktop app has no status bar. There, the ox session report pane plugin
 runs ` + "`ox statusline --json`" + ` and draws the same line as a band above the

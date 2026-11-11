@@ -109,6 +109,23 @@ func MarshalSettings(settings *Settings, rawMap map[string]json.RawMessage) ([]b
 	return data, nil
 }
 
+// MarshalSettingsRaw serializes a raw settings map exactly as parsed, hooks
+// included. Use it when a write changes keys other than "hooks" (a statusLine
+// install or removal): MarshalSettings rebuilds "hooks" from the typed Hook
+// struct, which keeps only type and command, so a coworker's own hook fields
+// Claude Code supports but ox does not model (args, timeout, onFailure) would
+// be stripped from a file ox had no reason to touch there.
+func MarshalSettingsRaw(rawMap map[string]json.RawMessage) ([]byte, error) {
+	if rawMap == nil {
+		rawMap = make(map[string]json.RawMessage)
+	}
+	data, err := marshalIndentedNoHTMLEscape(rawMap, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal settings: %w", err)
+	}
+	return data, nil
+}
+
 // marshalNoHTMLEscape encodes v as compact JSON with HTML escaping disabled.
 // The trailing newline that json.Encoder always appends is stripped so callers
 // can embed the result inside larger JSON values (e.g. as a json.RawMessage).
