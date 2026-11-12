@@ -587,10 +587,10 @@ jobs:
           DBUS_SESSION_BUS_ADDRESS: /dev/null
         run: |
           go test -tags=browser -count=1 -v -run 'TestBrowser_(DocumentToolsMatchSharedPageVectors|DocumentToolsAnchorADiagramOnceItDraws|ReviewClicksWaitForDiagrams|HostControlsAroundAFramedPlan|UnstorableReviewIsNeverSent|LostAnswerAndAnEditDuringSendDeliverOnce|TwoTabsKeepEachOthersMarks|ReopenedHighlightKeepsItsWords|PlanControlsWorkInReviewMode|ResolveOfferedOnlyToReviewersWhoMay|WholePlanCommentReachesTheLedger|NoteFromTheRailCoversNoComment|AutoSubmitPostsWhenTheReviewerIsDone|FirstVisitHintLeavesTheBarClickable|ReviewBarDrag|FramedControlsStayOverTheFrame|PlanCannotDriveTheComposer|LedgerTextCannotStyleOrScriptTheRail|DrawingsLandByTheirTargets|DrawAroundReachesTheHostStamped|ViewOriginalAfterAnEdit|ViewOriginalDrawsWordsWhereTheyWere|DrawingsStayIndependentThroughEditAndReopen|ForgedCapturesAreCheckedAndRestamped|DrawOnTheLocalReviewPage|DrawingNeverEnclosesTheReviewControls|SyncStatusTellsTheTruth|OvalsDrawMoveAndResize|OvalGeometryFreezesAtSubmit|LocalAndFramedReviewersSeeEachOthersPointers|PointerOnAnotherRevisionIsNeverDrawn|PointerMovesNeverOverlap|ChangingPlanIsNotRehashedEveryFrame)$' ./cmd/ox/ > browser.log 2>&1 || status=$?
-          # -v output is kept in browser.log: dumped on failure or when GitHub debug logging is on, otherwise one summary line
-          if [ "${status:-0}" -ne 0 ] || [ "${RUNNER_DEBUG:-}" = 1 ]; then cat browser.log; fi
+          # -v output is kept in browser.log: dumped on failure, on a wrong pass count (skips exit 0), or under debug logging
+          passed=$(grep -c -E '^--- PASS: TestBrowser_' browser.log || true)
+          if [ "${status:-0}" -ne 0 ] || [ "$passed" -ne 33 ] || [ "${RUNNER_DEBUG:-}" = 1 ]; then cat browser.log; fi
           test "${status:-0}" -eq 0
-          passed=$(grep -c -E '^--- PASS: TestBrowser_' browser.log)
           test "$passed" -eq 33
           echo "ok browser tests: $passed passed"
 

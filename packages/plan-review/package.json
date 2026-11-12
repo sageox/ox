@@ -40,7 +40,8 @@
   "scripts": {
     "build": "node build.mjs",
     "check": "node build.mjs --check",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "test:quiet": "node --test --test-reporter=./test/quiet-reporter.mjs test/*.test.mjs"
   },
   "devDependencies": {
     "esbuild": "0.28.2",
