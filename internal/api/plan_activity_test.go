@@ -15,16 +15,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// planActivityWireBody is the endpoint's documented request shape, spelled out
+// independently of PlanActivityNotification. Decoding into the client's own
+// type would accept a mistyped json tag on both ends and prove nothing.
+type planActivityWireBody struct {
+	Event  string `json:"event"`
+	Status string `json:"status"`
+	RepoID string `json:"repo_id"`
+	Dir    string `json:"dir"`
+}
+
 func TestNotifyPlanActivity_Success(t *testing.T) {
 	t.Parallel()
 	var receivedPath, receivedAuth string
-	var receivedBody PlanActivityNotification
+	var receivedBody planActivityWireBody
+	var decodeErr error
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
 		receivedAuth = r.Header.Get("Authorization")
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&receivedBody))
-		w.WriteHeader(http.StatusOK)
+		dec := json.NewDecoder(r.Body)
+		// strict-reader-ok: asserting what ox itself writes, and the server
+		// rejects unknown fields with a 400 — mirror it so a new field fails here.
+		dec.DisallowUnknownFields()
+		decodeErr = dec.Decode(&receivedBody)
+		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer mockServer.Close()
 
@@ -34,13 +49,23 @@ func TestNotifyPlanActivity_Success(t *testing.T) {
 		authToken:  "test-auth-token",
 	}
 
-	err := client.NotifyPlanActivity("team_abc", "pln_xyz", PlanActivityNotification{Event: "approved", Status: "approved"})
+	err := client.NotifyPlanActivity("team_abc", "pln_xyz", PlanActivityNotification{
+		Event:  "approved",
+		Status: "approved",
+		RepoID: "repo_123",
+		Dir:    "2026-10-29-plan-links-open",
+	})
 	require.NoError(t, err)
+	require.NoError(t, decodeErr, "request body must decode strictly into the endpoint's documented shape")
 
 	assert.Equal(t, "/api/v1/teams/team_abc/plans/pln_xyz/activity", receivedPath)
 	assert.Equal(t, "Bearer test-auth-token", receivedAuth)
-	assert.Equal(t, "approved", receivedBody.Event)
-	assert.Equal(t, "approved", receivedBody.Status)
+	assert.Equal(t, planActivityWireBody{
+		Event:  "approved",
+		Status: "approved",
+		RepoID: "repo_123",
+		Dir:    "2026-10-29-plan-links-open",
+	}, receivedBody)
 }
 
 // TestNotifyPlanActivity_NotFoundIsNotAnError mirrors the stub's contract: an

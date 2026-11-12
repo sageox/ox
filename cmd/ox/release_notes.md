@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A just-saved plan's link opens on the first click** — `ox plan save` and the plan lifecycle commands now tell SageOx which repo and plan folder hold the plan, so its link can open right away instead of showing "not found" until SageOx finds it on its own.
 - **`ox agent prime` answers "not initialized" when the project config is missing** — prime now checks for `.sageox/config.json` (or `config.yaml`), the same check `ox doctor` uses, instead of only for a `.sageox/` folder. Before, after `.sageox/` was deleted and `ox doctor` left `.sageox/cache` and `config.local.toml` behind, prime answered `fresh` with an agent id and registered an AI coworker in a repo that is not initialized.
 - **Sessions the daemon uploads show as uploaded** — after the daemon pushes a session to the Ledger, it now sends the same upload-confirmed signal `ox agent session stop` and `ox session recover` send. Before, a Claude Code session, which always uploads through the daemon, stayed "in progress" on its `/c/` page and as `recording` in the API after it reached the Ledger.
 - **A Claude Code session killed mid-turn keeps that turn** — when an AI coworker's run ends without finishing its turn, for example on a timeout or SIGTERM, ox now records what Claude Code had already logged for that turn before the session closes. Before, it kept nothing after the last completed tool call, and a session killed during its first tool call wasn't uploaded at all.
