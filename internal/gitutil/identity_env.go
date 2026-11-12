@@ -1,32 +1,48 @@
 package gitutil
 
 import (
+	"context"
 	"os"
-	"os/exec"
 	"slices"
 	"strings"
+	"time"
 )
 
-// identityEnvVars override user.name and user.email for every commit git
-// makes, ahead of any config.
+// identityEnvVars override user.name and user.email (and author.* and
+// committer.*) for every commit git makes, ahead of any config.
 var identityEnvVars = []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"}
 
 // authorStampKey mirrors gitserver's stamp key; gitserver imports gitutil,
 // so the constant cannot be shared.
 const authorStampKey = "sageox.authorstamp"
 
-// oxIdentityEnv returns env without the inherited commit identity when ox
-// stamped repoPath's own identity (a Ledger or Team Context clone, or a repo
-// where an AI coworker works). ox's hooks run inside the coding agent's
-// environment, and a runner that hands the agent GIT_AUTHOR_* for its code
-// commits would otherwise author ox's Ledger commits too (sageox/ox#1845).
+// identityReadTimeout bounds the config read even when the caller's context
+// has no deadline; the read is local and normally takes milliseconds.
+const identityReadTimeout = 5 * time.Second
+
+// oxIdentityEnv returns env with the inherited commit identity replaced by
+// the one ox stamped into repoPath's local config (a Ledger or Team Context
+// clone, or a repo where an AI coworker works). ox's hooks run inside the
+// coding agent's environment, and a runner that hands the agent GIT_AUTHOR_*
+// for its code commits would otherwise author ox's Ledger commits too
+// (sageox/ox#1845). The stamped identity is set rather than the variables
+// removed, because a global author.email or committer.email would otherwise
+// outrank the local user.email and publish that address to the Ledger.
 // A repo ox never stamped keeps the inherited identity: it may be the only
 // one git has, and removing it would fail the commit.
-func oxIdentityEnv(repoPath string, env []string) []string {
-	if repoPath == "" || !slices.ContainsFunc(env, isIdentityEntry) || !hasAuthorStamp(repoPath) {
+func oxIdentityEnv(ctx context.Context, repoPath string, env []string) []string {
+	if repoPath == "" || !slices.ContainsFunc(env, isIdentityEntry) {
 		return env
 	}
-	return slices.DeleteFunc(slices.Clone(env), isIdentityEntry)
+	name, email, ok := stampedIdentity(ctx, repoPath)
+	if !ok {
+		return env
+	}
+	out := slices.DeleteFunc(slices.Clone(env), isIdentityEntry)
+	if name != "" {
+		out = append(out, "GIT_AUTHOR_NAME="+name, "GIT_COMMITTER_NAME="+name)
+	}
+	return append(out, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
 }
 
 func isIdentityEntry(entry string) bool {
@@ -34,19 +50,33 @@ func isIdentityEntry(entry string) bool {
 	return slices.Contains(identityEnvVars, name)
 }
 
-// hasAuthorStamp reports whether repoPath's local config holds ox's identity
-// stamp alongside a user.email for it to stand behind.
-func hasAuthorStamp(repoPath string) bool {
-	for _, key := range []string{authorStampKey, "user.email"} {
-		cmd := exec.Command("git", "-C", repoPath, "config", "--local", "--get", key)
-		cmd.Dir = repoPath
-		cmd.Env = append(slices.DeleteFunc(os.Environ(), isRepoLocationEntry), "GIT_TERMINAL_PROMPT=0")
-		out, err := cmd.Output()
-		if err != nil || strings.TrimSpace(string(out)) == "" {
-			return false
+// stampedIdentity reads repoPath's local user.name and user.email in one git
+// call, and reports ok only when ox's stamp and a user.email are both there.
+func stampedIdentity(ctx context.Context, repoPath string) (name, email string, ok bool) {
+	ctx, cancel := context.WithTimeout(ctx, identityReadTimeout)
+	defer cancel()
+	cmd := commandContext(ctx, "git", "-C", repoPath, "config", "--local", "--get-regexp",
+		`^(user\.name|user\.email|sageox\.authorstamp)$`)
+	cmd.Dir = repoPath
+	cmd.Env = append(slices.DeleteFunc(os.Environ(), isRepoLocationEntry), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", "", false
+	}
+	var stamped bool
+	for line := range strings.SplitSeq(string(out), "\n") {
+		key, value, _ := strings.Cut(strings.TrimSpace(line), " ")
+		value = strings.TrimSpace(value)
+		switch key {
+		case "user.name":
+			name = value
+		case "user.email":
+			email = value
+		case authorStampKey:
+			stamped = value != ""
 		}
 	}
-	return true
+	return name, email, stamped && email != ""
 }
 
 // isRepoLocationEntry matches variables that would point git config at a
@@ -58,6 +88,15 @@ func isRepoLocationEntry(entry string) bool {
 
 // OxIdentityEnv is oxIdentityEnv over this process's environment, for a
 // caller that builds its own git command in an ox-owned clone.
-func OxIdentityEnv(repoPath string) []string {
-	return oxIdentityEnv(repoPath, os.Environ())
+func OxIdentityEnv(ctx context.Context, repoPath string) []string {
+	return oxIdentityEnv(ctx, repoPath, os.Environ())
+}
+
+// networkCmdRepo is the repository a NewNetworkCmd argument list names with a
+// leading -C, or "" for one that names none (a clone).
+func networkCmdRepo(args []string) string {
+	if len(args) >= 2 && args[0] == "-C" {
+		return args[1]
+	}
+	return ""
 }

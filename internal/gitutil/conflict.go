@@ -479,7 +479,7 @@ func runPlumbing(ctx context.Context, repoPath string, stdin []byte, extraEnv []
 	full = append(full, args...)
 	cmd := commandContext(ctx, "git", full...)
 	cmd.Dir = repoPath
-	cmd.Env = append(oxIdentityEnv(repoPath, os.Environ()), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
+	cmd.Env = append(oxIdentityEnv(ctx, repoPath, os.Environ()), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
 	cmd.Env = append(cmd.Env, extraEnv...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)

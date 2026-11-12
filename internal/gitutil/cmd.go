@@ -60,7 +60,9 @@ func NewNetworkCmd(ctx context.Context, args ...string) *exec.Cmd {
 		"-c", "filter.lfs.process=", "-c", "filter.lfs.required=false",
 	}, args...)
 	cmd := commandContext(ctx, "git", gitArgs...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
+	// A pull --rebase rewrites local commits, so their committer needs the
+	// same identity filter as RunGit.
+	cmd.Env = append(oxIdentityEnv(ctx, networkCmdRepo(args), os.Environ()), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
 	return cmd
 }
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -92,5 +93,66 @@ func TestRunGitUnstampedRepoKeepsInheritedIdentity(t *testing.T) {
 	want := "Paul Bunyan <bunyan@sageox.ai>|Paul Bunyan <bunyan@sageox.ai>"
 	if got := headIdents(t, dir); got != want {
 		t.Fatalf("commit identity = %q, want %q", got, want)
+	}
+}
+
+// A global author.email outranks a local user.email, so ox must set the
+// stamped identity rather than only drop the inherited one.
+func TestRunGitStampedCloneOutranksGlobalAuthorEmail(t *testing.T) {
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(global, []byte("[author]\n\temail = personal@example.com\n[committer]\n\temail = personal@example.com\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	dir := initIdentityRepo(t, true)
+	setHarnessIdentity(t)
+	if _, err := RunGit(context.Background(), dir, "commit", "-q", "-m", "x"); err != nil {
+		t.Fatal(err)
+	}
+	want := "Bunyan <agt_bunyan@coworkers.sageox.ai>|Bunyan <agt_bunyan@coworkers.sageox.ai>"
+	if got := headIdents(t, dir); got != want {
+		t.Fatalf("commit identity = %q, want %q", got, want)
+	}
+}
+
+// The daemon's pull --rebase runs through NewNetworkCmd and rewrites local
+// commits; the rewritten committer must be the stamped identity.
+func TestNewNetworkCmdRebaseUsesStampedCommitter(t *testing.T) {
+	dir := initIdentityRepo(t, true)
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	git("commit", "-q", "-m", "base")
+	git("checkout", "-q", "-b", "upstream")
+	git("commit", "-q", "--allow-empty", "-m", "upstream")
+	git("checkout", "-q", "main")
+	git("commit", "-q", "--allow-empty", "-m", "local")
+	setHarnessIdentity(t)
+	if out, err := NewNetworkCmd(context.Background(), "-C", dir, "rebase", "-q", "upstream").CombinedOutput(); err != nil {
+		t.Fatalf("rebase: %v: %s", err, out)
+	}
+	cmd := exec.Command("git", "log", "-1", "--format=%cn <%ce>")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(out)), "Bunyan <agt_bunyan@coworkers.sageox.ai>"; got != want {
+		t.Fatalf("rebased committer = %q, want %q", got, want)
+	}
+}
+
+func TestOxIdentityEnvCanceledContextSkipsRead(t *testing.T) {
+	dir := initIdentityRepo(t, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	env := []string{"GIT_AUTHOR_NAME=Paul Bunyan"}
+	if got := oxIdentityEnv(ctx, dir, env); !slices.Equal(got, env) {
+		t.Fatalf("oxIdentityEnv with canceled context = %v, want %v", got, env)
 	}
 }
