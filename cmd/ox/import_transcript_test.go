@@ -286,6 +286,43 @@ func TestImportTranscript_RefusalShowsServerMessage(t *testing.T) {
 	}
 }
 
+// TestImportTranscript_JSONOutput: --json reports the Discussion like a media import.
+func TestImportTranscript_JSONOutput(t *testing.T) {
+	tt := transcriptCases[1]
+	f := newTranscriptFixture(t, tt.file, tt.content)
+	newFakeRecordingServer(t, f.importRetryFixture, "single")
+
+	stdout, _, err := f.importMedia(false, true)
+	require.NoError(t, err)
+
+	var res importResult
+	dec := json.NewDecoder(strings.NewReader(stdout))
+	dec.DisallowUnknownFields()
+	require.NoError(t, dec.Decode(&res))
+	assert.Equal(t, importResult{
+		Status:      "imported",
+		Title:       "retro",
+		TeamID:      importRetryTeamID,
+		SourceOID:   "sha256:" + f.sha256Hex(),
+		ContentType: tt.contentType,
+		RecordingID: fakeRecordingID,
+	}, res)
+}
+
+// TestImportTranscript_RejectsEmptyFile: an empty transcript is refused before
+// anything reaches the server.
+// Failure prevented: an empty Discussion, or an empty document on fallback.
+func TestImportTranscript_RejectsEmptyFile(t *testing.T) {
+	f := newTranscriptFixture(t, "standup.vtt", "")
+	srv := newFakeRecordingServer(t, f.importRetryFixture, "single")
+
+	_, _, err := f.importMedia(false, false)
+
+	require.ErrorContains(t, err, "transcript file is empty")
+	assert.Empty(t, srv.snapshot().transcripts)
+	f.assertNoDocumentPath(t)
+}
+
 // TestImportTranscript_RejectsNonUTF8: a UTF-16 export fails locally instead
 // of arriving as replacement characters.
 // Failure prevented: a Discussion whose transcript is unreadable garbage.
