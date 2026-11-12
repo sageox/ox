@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -74,9 +73,10 @@ func TestCreateTranscriptRecording_Errors(t *testing.T) {
 			require.Error(t, err)
 			assert.Nil(t, resp)
 			if tt.wantIs != nil {
-				assert.True(t, errors.Is(err, tt.wantIs), "got %v", err)
+				assert.ErrorIs(t, err, tt.wantIs)
 				return
 			}
+			assert.NotErrorIs(t, err, ErrRecordingUploadUnsupported, "a refusal must not fall back to the document path")
 			assert.Contains(t, err.Error(), tt.wantMsg)
 		})
 	}
