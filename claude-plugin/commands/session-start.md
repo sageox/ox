@@ -1,3 +1,7 @@
+---
+description: Start recording this agent session to the project ledger.
+allowed-tools: Bash(ox:*)
+---
 Start recording this agent session to the project ledger.
 
 Use when:

@@ -1,3 +1,7 @@
+---
+description: Initialize SageOx for this repository.
+allowed-tools: Bash(ox:*)
+---
 Initialize SageOx for this repository.
 
 Use when:
