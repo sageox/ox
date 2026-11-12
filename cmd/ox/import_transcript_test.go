@@ -182,6 +182,31 @@ func TestImportTranscript_SecondImportIsRecognized(t *testing.T) {
 	assert.NotEqual(t, snap.transcriptHdrs[0].Get("Idempotency-Key"), snap.transcriptHdrs[1].Get("Idempotency-Key"))
 }
 
+// TestImportTranscript_EarlierDocumentImportStillBecomesDiscussion: a
+// transcript already filed as a team context document still becomes a
+// Discussion once the server has the transcript route.
+// Failure prevented: a .vtt imported by an older ox (stored as a document the
+// server never turned into a Discussion) answering "Already imported" forever.
+func TestImportTranscript_EarlierDocumentImportStillBecomesDiscussion(t *testing.T) {
+	f := newTranscriptFixture(t, transcriptCases[0].file, transcriptCases[0].content)
+	srv := newFakeRecordingServer(t, f.importRetryFixture, "unsupported")
+
+	_, _, err := f.importMedia(false, false)
+	require.NoError(t, err)
+	srv.strictNotify(t)
+
+	srv.set(func(s *fakeRecordingServer) { s.mode = "single" })
+	stdout, _, err := f.importMedia(false, false)
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "Recording: "+fakeRecordingID)
+	assert.Len(t, srv.snapshot().transcripts, 2, "the document manifest does not stop the transcript route")
+
+	stdout, _, err = f.importMedia(false, false)
+	require.NoError(t, err)
+	assert.Equal(t, "Already imported (id: "+fakeRecordingID+"). Use --force to reimport.\n", stdout)
+	assert.Len(t, srv.snapshot().transcripts, 2, "the Discussion is recognized once it exists")
+}
+
 // TestImportTranscript_UnsupportedServerFallsBackToDocumentPath: a server
 // without the transcript route gets the document path, declared with the
 // content type its dispatcher routes to the import-transcript workflow.

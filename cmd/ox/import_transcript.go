@@ -60,12 +60,12 @@ func runImportTranscript(ctx context.Context, cmd *cobra.Command, m mediaImport,
 	bareOID := hex.EncodeToString(digest[:])
 	sourceOID := "sha256:" + bareOID
 
+	// only a Discussion this route created counts: a document import of the
+	// same bytes may never have become one, or never been pushed, and the
+	// document path dedups (and resumes) its own imports on fallback
 	if !importFlags.force {
 		if rec, found := findMediaImportByOID(m.tc.Path, bareOID); found {
 			return printAlreadyImported(cmd, m.jsonOutput, rec.RecordingID, rec.RecordingID)
-		}
-		if existing, found := findExistingDocByOID(m.docsBaseDir, sourceOID); found {
-			return printAlreadyImported(cmd, m.jsonOutput, existing, "")
 		}
 	}
 
