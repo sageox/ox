@@ -169,26 +169,10 @@ design decision the user should own, stop your own work and ask — but
 nothing, and will resume emitting as soon as the discussion ends in a
 push or a resolve.
 
-### 5. Reply + resolve each addressed thread
+### 5. Commit + push
 
-```bash
-# Reply (the in_reply_to form of the review comments API)
-gh api repos/<owner>/<repo>/pulls/<pr>/comments/<comment-databaseId>/replies \
-  -f body="Fixed."
-
-# Resolve
-gh api graphql -f query='
-mutation($threadId:ID!) {
-  resolveReviewThread(input:{threadId:$threadId}) {
-    thread { isResolved }
-  }
-}' -f threadId=<thread-node-id>
-```
-
-For threads you intentionally skipped (e.g., a nitpick that's wrong),
-reply with one sentence explaining why, then still resolve the thread.
-
-### 6. Commit + push
+Skip this step when the round changed no code, for example when you
+declined every thread.
 
 Bundle the round into one commit following repo style (`CLAUDE.md`:
 one-line `type(scope): summary`, ≤72 chars).
@@ -206,6 +190,30 @@ sets `triggerOnUpdates: false`, so Greptile reads the PR when it opens and
 then not again until someone asks. CodeRabbit still re-reviews every push;
 Greptile does not. That is what step 7 is for.
 
+### 6. Reply + resolve each addressed thread
+
+Reply after the push, so `<sha>` is the commit that holds the fix. A
+`Not changed: <reason>.` reply names no commit: post it as soon as you
+decide.
+
+```bash
+# Reply (the in_reply_to form of the review comments API). The && keeps the
+# thread open if the reply fails.
+gh api repos/<owner>/<repo>/pulls/<pr>/comments/<comment-databaseId>/replies \
+  -f body="Fixed in <sha>." &&
+
+# Resolve
+gh api graphql -f query='
+mutation($threadId:ID!) {
+  resolveReviewThread(input:{threadId:$threadId}) {
+    thread { isResolved }
+  }
+}' -f threadId=<thread-node-id>
+```
+
+For threads you intentionally skipped (e.g., a nitpick that's wrong),
+reply `Not changed: <reason>.` in one sentence, then still resolve the thread.
+
 ### 7. Re-trigger Greptile on the final state
 
 Once every thread is addressed and CI is green — i.e. right before you
@@ -219,7 +227,7 @@ gh pr comment <n> --body "@greptileai"
 Greptile's own comment footer.)
 
 Then wait for the new review and triage whatever it returns exactly like
-any other round: fix, reply, resolve, push, re-trigger. A PR should be
+any other round: fix, push, reply, resolve, re-trigger. A PR should be
 merged on a Greptile review of the code that is actually merging, not of
 the first draft of it.
 

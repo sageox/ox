@@ -38,18 +38,21 @@ func syncProjectStatusLine(gitRoot string) (bool, error) {
 func syncProjectStatusLineInRoot(root *os.Root) (bool, error) {
 	changed := false
 
-	shared, sharedMap, err := readSettingsFileRawFrom(root.ReadFile, projectClaudeSettingsFile)
+	// Only statusLine changes here, so both files are written from their raw
+	// maps: rebuilding "hooks" from the typed struct would strip a coworker's
+	// own hook fields (args, timeout, onFailure) ox does not model.
+	_, sharedMap, err := readSettingsFileRawFrom(root.ReadFile, projectClaudeSettingsFile)
 	if err != nil {
 		return false, err
 	}
 	if claude.RemoveOxStatusLine(sharedMap) {
-		if err := writeSettingsFileRawInRoot(root, projectClaudeSettingsFile, shared, sharedMap, sharedSettingsPerm); err != nil {
+		if err := writeSettingsRawInRoot(root, projectClaudeSettingsFile, sharedMap, sharedSettingsPerm); err != nil {
 			return false, err
 		}
 		changed = true
 	}
 
-	local, localMap, err := readSettingsFileRawFrom(root.ReadFile, projectClaudeLocalSettingsFile)
+	_, localMap, err := readSettingsFileRawFrom(root.ReadFile, projectClaudeLocalSettingsFile)
 	if err != nil {
 		return changed, err
 	}
@@ -69,13 +72,13 @@ func syncProjectStatusLineInRoot(root *os.Root) (bool, error) {
 	if !localChanged {
 		return changed, nil
 	}
-	if len(localMap) == 0 && len(local.Hooks) == 0 {
+	if len(localMap) == 0 {
 		if err := root.Remove(projectClaudeLocalSettingsFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return changed, err
 		}
 		return true, nil
 	}
-	if err := writeSettingsFileRawInRoot(root, projectClaudeLocalSettingsFile, local, localMap, settingsPerm); err != nil {
+	if err := writeSettingsRawInRoot(root, projectClaudeLocalSettingsFile, localMap, settingsPerm); err != nil {
 		return changed, err
 	}
 	return true, nil

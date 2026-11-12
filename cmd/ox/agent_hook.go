@@ -448,6 +448,9 @@ func handleEnd(ctx *HookContext) error {
 		slog.Debug("hook: session stop at agent end did not run, handing off to the daemon", "agent_id", agentID, "error", err)
 	}
 
+	// the stop above drains on its own; the daemon reads only raw.jsonl
+	drainTranscriptAtEnd(ctx, agentID, state)
+
 	// a held stop saves the manual choice with StoppedAt (see stopSessionForClear)
 	held := stopHoldsSession(ctx.ProjectRoot, state)
 	now := time.Now()
@@ -481,6 +484,21 @@ func handleEnd(ctx *HookContext) error {
 
 	slog.Info("hook: finalized session on agent end", "agent_id", agentID)
 	return nil
+}
+
+// drainTranscriptAtEnd copies what the agent wrote since the last hook into
+// raw.jsonl before the recording goes to the daemon. A session killed mid-turn gets
+// SessionEnd but neither Stop nor the in-flight call's PostToolUse, so
+// without this its last turn — or, killed during the first tool call, the
+// whole session — is lost (ox#1825). Same locked capture as handleAfterTool;
+// best-effort, since a failed drain must not keep the recording open.
+func drainTranscriptAtEnd(ctx *HookContext, agentID string, state *session.RecordingState) {
+	err := fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
+		return captureHookEntries(ctx, agentID, state.SessionPath, state.SessionID)
+	})
+	if err != nil {
+		slog.Debug("hook: end drain failed", "agent_id", agentID, "error", err)
+	}
 }
 
 // handlePrompt handles the user prompt submission phase.

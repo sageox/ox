@@ -3,13 +3,11 @@ package main
 import (
 	"fmt"
 	"net/url"
-	"strings"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/session"
-	"github.com/sageox/ox/internal/sessionid"
-	"github.com/sageox/ox/internal/weblink"
+	"github.com/sageox/ox/internal/sessionupload"
 )
 
 // buildSessionURL constructs the canonical web URL for viewing a session.
@@ -31,29 +29,10 @@ func buildSessionURL(cfg *config.ProjectConfig, sessionName string) string {
 	)
 }
 
-// buildConversationURL constructs the universal conversation link for a
-// session: <endpoint>/c/<ses_id>. This is the durable canonical URL for
-// artifacts that outlive the recording (commit trailers, PR bodies, plan
-// footers) — unlike buildSessionURL it does not depend on repo_id or the
-// mutable session directory name. Returns "" when the endpoint is missing
-// or sessionID is not a valid ses_ identifier (e.g. recordings started
-// under an older binary), so callers can fall back to the name-based URL.
+// buildConversationURL constructs the universal /c/<ses_id> link; see
+// sessionupload.ConversationURL.
 func buildConversationURL(cfg *config.ProjectConfig, sessionID string) string {
-	if cfg == nil || !sessionid.IsValidSessionID(sessionID) {
-		return ""
-	}
-	ep := endpoint.NormalizeEndpoint(cfg.GetEndpoint())
-	if ep == "" {
-		return ""
-	}
-	// the endpoint comes from committed, team-editable config and this URL
-	// is handed to `git interpret-trailers` as a --trailer value: any
-	// whitespace or control character would smuggle extra trailer lines
-	// into commit messages, so reject the endpoint outright
-	if strings.ContainsFunc(ep, func(r rune) bool { return r <= ' ' || r == 0x7f }) {
-		return ""
-	}
-	return weblink.ArtifactURL(ep, sessionID, "/c/", "ses_")
+	return sessionupload.ConversationURL(cfg, sessionID)
 }
 
 // sessionLinkOutputs derives the prime session URL and the exact-literal PR
