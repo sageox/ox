@@ -57,7 +57,6 @@ func stampedIdentity(ctx context.Context, repoPath string) (name, email string, 
 	defer cancel()
 	cmd := commandContext(ctx, "git", "-C", repoPath, "config", "--local", "--get-regexp",
 		`^(user\.name|user\.email|sageox\.authorstamp)$`)
-	cmd.Dir = repoPath
 	cmd.Env = append(slices.DeleteFunc(os.Environ(), isRepoLocationEntry), "GIT_TERMINAL_PROMPT=0")
 	out, err := cmd.Output()
 	if err != nil {

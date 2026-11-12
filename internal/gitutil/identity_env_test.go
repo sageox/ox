@@ -156,3 +156,12 @@ func TestOxIdentityEnvCanceledContextSkipsRead(t *testing.T) {
 		t.Fatalf("oxIdentityEnv with canceled context = %v, want %v", got, env)
 	}
 }
+
+func TestStampedIdentityRelativePath(t *testing.T) {
+	dir := initIdentityRepo(t, true)
+	t.Chdir(filepath.Dir(dir))
+	name, email, ok := stampedIdentity(context.Background(), filepath.Base(dir))
+	if !ok || name != "Bunyan" || email != "agt_bunyan@coworkers.sageox.ai" {
+		t.Fatalf("stampedIdentity(relative) = %q, %q, %v", name, email, ok)
+	}
+}
