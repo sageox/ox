@@ -952,9 +952,10 @@ plan-review: ## Build packages/plan-review and regenerate internal/plan/assets/r
 	cd packages/plan-review && npm ci --ignore-scripts && npm run build
 
 # failures-only reporter unless V=1; the reporter itself goes verbose under RUNNER_DEBUG=1
-PLAN_REVIEW_TEST_SCRIPT = $(if $(filter 1,$(V)),test,test:quiet)
+# (not an npm script: package.json is hashed into the committed asset manifest)
+PLAN_REVIEW_TEST = $(if $(filter 1,$(V)),npm test,node --test --test-reporter=./test/quiet-reporter.mjs test/*.test.mjs)
 plan-review-check: ## Fail when internal/plan/assets/review.* is stale; test and clean-install the package
-	cd packages/plan-review && npm ci --ignore-scripts && npm run check && npm run build && npm run $(PLAN_REVIEW_TEST_SCRIPT) && node pack-check.mjs
+	cd packages/plan-review && npm ci --ignore-scripts && npm run check && npm run build && $(PLAN_REVIEW_TEST) && node pack-check.mjs
 
 docs-publish: docs ## Publish docs to GitHub Packages
 	@echo "Publishing docs to GitHub Packages..."
