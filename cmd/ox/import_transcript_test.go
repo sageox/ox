@@ -194,6 +194,9 @@ func TestImportTranscript_EarlierDocumentImportStillBecomesDiscussion(t *testing
 	_, _, err := f.importMedia(false, false)
 	require.NoError(t, err)
 	srv.strictNotify(t)
+	// an older ox kept only the document manifest, and its server skipped the
+	// sniffed text/plain type, so no Discussion was ever recorded
+	require.NoError(t, os.Remove(mediaImportRecordPath(f.tcPath(), f.sha256Hex())))
 
 	srv.set(func(s *fakeRecordingServer) { s.mode = "single" })
 	stdout, _, err := f.importMedia(false, false)
@@ -205,6 +208,26 @@ func TestImportTranscript_EarlierDocumentImportStillBecomesDiscussion(t *testing
 	require.NoError(t, err)
 	assert.Equal(t, "Already imported (id: "+fakeRecordingID+"). Use --force to reimport.\n", stdout)
 	assert.Len(t, srv.snapshot().transcripts, 2, "the Discussion is recognized once it exists")
+}
+
+// TestImportTranscript_FallbackDiscussionIsRecognizedAfterUpgrade: a
+// transcript the document fallback turned into a Discussion is recognized once
+// the server gains the transcript route.
+// Failure prevented: a server upgrade making a retried import create a second
+// Discussion of the same talk.
+func TestImportTranscript_FallbackDiscussionIsRecognizedAfterUpgrade(t *testing.T) {
+	f := newTranscriptFixture(t, transcriptCases[0].file, transcriptCases[0].content)
+	srv := newFakeRecordingServer(t, f.importRetryFixture, "unsupported")
+
+	_, _, err := f.importMedia(false, false)
+	require.NoError(t, err)
+	srv.strictNotify(t)
+
+	srv.set(func(s *fakeRecordingServer) { s.mode = "single" })
+	stdout, _, err := f.importMedia(false, false)
+	require.NoError(t, err)
+	assert.Equal(t, "Already imported (id: rec_legacy_path). Use --force to reimport.\n", stdout)
+	assert.Len(t, srv.snapshot().transcripts, 1, "only the first, unrouted, transcript request")
 }
 
 // TestImportTranscript_UnsupportedServerFallsBackToDocumentPath: a server

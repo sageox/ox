@@ -278,7 +278,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("resume import: %w", err)
 			}
 			if resumed {
-				return finishDocImport(cmd, jsonOutput, tc.TeamID, ep, meta)
+				return finishDocImport(cmd, jsonOutput, tc.Path, tc.TeamID, ep, meta)
 			}
 			docID := filepath.Base(filepath.Dir(existing))
 			if jsonOutput {
@@ -437,7 +437,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("commit and push: %w", err)
 	}
 
-	return finishDocImport(cmd, jsonOutput, tc.TeamID, ep, meta)
+	return finishDocImport(cmd, jsonOutput, tc.Path, tc.TeamID, ep, meta)
 }
 
 // writeDocPointerFiles is a test seam: retry tests swap it to fail a write after docDir exists.
@@ -456,11 +456,12 @@ func discardDocDir(docDir string, written ...string) {
 }
 
 // finishDocImport reports a published import using its saved manifest.
-func finishDocImport(cmd *cobra.Command, jsonOutput bool, teamID, ep string, meta docMeta) error {
+func finishDocImport(cmd *cobra.Command, jsonOutput bool, tcPath, teamID, ep string, meta docMeta) error {
 	// cloud notification — uses team_id since imports target team contexts, not
 	// project repos. Returns a recording ID when the server routes the file to
 	// transcription; failures degrade silently and never fail the import.
 	recordingID := notifyImport(teamID, ep, meta)
+	recordTranscriptFallback(tcPath, recordingID, meta)
 
 	if jsonOutput {
 		return emitImportJSON(cmd, importResult{
@@ -479,6 +480,31 @@ func finishDocImport(cmd *cobra.Command, jsonOutput bool, teamID, ep string, met
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\n  Track progress: ox import --status %s --watch%s\n", recordingID, importContextFlagHint())
 	}
 	return nil
+}
+
+// recordTranscriptFallback remembers the Discussion the document path made of
+// a transcript, so the direct transcript route recognizes it after a server
+// upgrade instead of creating a second one.
+func recordTranscriptFallback(tcPath, recordingID string, meta docMeta) {
+	if recordingID == "" {
+		return
+	}
+	if _, ok := transcriptImportFormat(meta.SourceFilename); !ok {
+		return
+	}
+	rec := mediaImportRecord{
+		SourceOID:      meta.SourceOID,
+		RecordingID:    recordingID,
+		Title:          meta.Title,
+		SourceFilename: meta.SourceFilename,
+		ContentType:    meta.ContentType,
+		SourceSize:     meta.SourceSize,
+		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := writeMediaImportRecord(tcPath, rec); err != nil {
+		slog.Warn("transcript import record not written; a reimport will not be detected",
+			"recording_id", recordingID, "error", err)
+	}
 }
 
 // emitImportJSON writes an importResult as indented JSON to stdout.
