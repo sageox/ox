@@ -109,6 +109,10 @@ func writePublicPrime(cmd *cobra.Command, bundle *api.PublicPrimeResponse, textM
 	rules := ""
 	if initialized {
 		rules = renderPublicRules(bundle.Rules, publicRulesBudget-len(block), bundle.Project.URL)
+	} else {
+		unbound := *bundle
+		unbound.Rules = nil
+		bundle = &unbound
 	}
 	out := cmd.OutOrStdout()
 	if textMode {

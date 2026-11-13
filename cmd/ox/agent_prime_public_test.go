@@ -185,6 +185,9 @@ func TestEmitPublicPrime_Formats(t *testing.T) {
 	assert.Equal(t, "public", payload.Status)
 	assert.True(t, strings.HasPrefix(payload.Content, "SageOx primed from Readest, public, as of "))
 	assert.Equal(t, "Readest", payload.PublicPrime.Project.Name)
+	require.NotEmpty(t, goldenPublicPrime(t).Rules)
+	assert.Empty(t, payload.PublicPrime.Rules, "an uninitialized clone has no repo-side binding for rules")
+	assert.NotContains(t, payload.Content, "Rule: ")
 
 	cmd, out = primeTestCmd(t, "")
 	handled, err = emitPublicPrime(cmd, t.TempDir(), false)
