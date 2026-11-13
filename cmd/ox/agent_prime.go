@@ -433,8 +433,12 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// no Team Context for them (non-members are not given one), so it primes
 	// from the project's public slice instead, before any repair writes into
 	// a repo that is not theirs.
-	if handled, err := emitPublicPrimeForNonMember(cmd, projectRoot, textMode || reviewMode); handled {
-		return err
+	// Cursor's hook requires the prime to register an AI coworker, which the
+	// read-only public prime never does, so Cursor keeps the ordinary prime.
+	if canonicalAgentType(agentType) != "cursor" {
+		if handled, err := emitPublicPrimeForNonMember(cmd, projectRoot, textMode || reviewMode); handled {
+			return err
+		}
 	}
 
 	// anti-entropy: ensure ox:prime marker exists in AGENTS.md/CLAUDE.md
