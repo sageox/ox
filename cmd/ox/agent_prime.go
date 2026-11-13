@@ -429,6 +429,14 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		return outputAgentPrime(cmd, textMode, reviewMode, output)
 	}
 
+	// An outside contributor's clone of an initialized open-source project has
+	// no Team Context for them (non-members are not given one), so it primes
+	// from the project's public slice instead, before any repair writes into
+	// a repo that is not theirs.
+	if handled, err := emitPublicPrimeForNonMember(cmd, projectRoot, textMode || reviewMode); handled {
+		return err
+	}
+
 	// anti-entropy: ensure ox:prime marker exists in AGENTS.md/CLAUDE.md
 	// only run on properly initialized projects (config.json exists, not just .sageox/ dir)
 	if config.IsInitialized(projectRoot) {

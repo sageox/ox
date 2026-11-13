@@ -124,7 +124,7 @@ same prime fallback.
 | `repos` | no | list of `owner/repo` slugs | Empty/absent = all team repos. Non-empty = only those repos. |
 | `globs` | no | path patterns | Which FILES the rule is about. Empty/absent = any file. |
 | `audience` | no | `ai` \| `human` \| `both` | Default `ai`. Filters out human-only rules from agent context. |
-| `visibility` | no | `always` \| `indexed` \| `hidden` | Default `indexed`. See below. |
+| `visibility` | no | `always` \| `indexed` \| `hidden` \| `public` | Default `indexed`. See below. |
 | `status` | no | `active` \| `draft` \| `superseded-by:<other-name>` | Default `active`. |
 | `valid-through` | no | `YYYY-MM-DD` | Shelf life. Empty means evergreen. Parsed and reported, never enforced by deletion — see below. |
 | `from-discussion` | no | discussion id | Optional provenance link into `<team-context>/discussions/`. |
@@ -135,6 +135,7 @@ same prime fallback.
 - **`always`** — full body is delivered every session, natively where possible and otherwise inline through `ox agent prime`. Reserve for hot, short, universally-applicable rules (security, escalation).
 - **`indexed`** (default, recommended) — only `name + description + path` appears in prime, unless `globs:` enables faithful native path activation. AI coworkers read indexed rules on demand.
 - **`hidden`** — not surfaced unless explicitly named. Use for drafts, archived rules, work-in-progress.
+- **`public`** — for a team that is public on SageOx: the rule is also published, with its name, `globs:` and body, in the project's public context, so outside contributors' AI coworkers follow it too (`ox agent prime` primes them from it). Members get it like `indexed`. Anyone can read it, so never put anything private in a public rule. Only `visibility: public` publishes; `repos:`-scoped, `audience: human`, draft and superseded rules never do.
 
 ### `valid-through:` — shelf life for knowledge that rots
 
