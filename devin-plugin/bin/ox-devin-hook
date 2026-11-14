@@ -242,8 +242,9 @@ def user_text(p):
     if not msgs:
         return p
     def attachment(m):
-        path = re.split(r"[?#]", m.group(1), maxsplit=1)[0]
-        return "[attachment: " + urllib.parse.unquote(path.rsplit("/", 1)[-1]) + "]"
+        # Drop scheme, host and any user:password before taking the last path part.
+        path = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*", "", re.split(r"[?#]", m.group(1), maxsplit=1)[0])
+        return "[attachment: " + (urllib.parse.unquote(path.rsplit("/", 1)[-1]) or "file") + "]"
     out = []
     for m in msgs:
         m = re.sub(r"<!--.*?-->", "", m, flags=re.S)
