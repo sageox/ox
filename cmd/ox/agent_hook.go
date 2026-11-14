@@ -298,6 +298,17 @@ func handleStart(ctx *HookContext) error {
 		return nil
 	}
 
+	if ctx.Input != nil && ctx.Input.SessionID != "" {
+		release, handled := claimSessionStart(ctx.Input.SessionID, ctx.Marker)
+		defer release()
+		if handled {
+			// a duplicate SessionStart hook primed while this one waited
+			ctx.Marker, _ = ReadSessionMarker(ctx.Input.SessionID)
+			startSessionRecordingIfConfigured(ctx)
+			return nil
+		}
+	}
+
 	agentID := ""
 	if ctx.Marker != nil {
 		agentID = ctx.Marker.AgentID
