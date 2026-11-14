@@ -330,6 +330,10 @@ func UpdateSessionMarker(agentSessionID string, update func(*SessionMarker) erro
 // outliving the coding agent's hook timeout.
 var sessionStartWait = 30 * time.Second
 
+// sessionStartWaiting is a test hook, called when a SessionStart hook finds
+// the session already claimed and starts waiting.
+var sessionStartWaiting = func() {}
+
 // claimSessionStart serializes the SessionStart hooks of one native session.
 // A coding agent that gets ox's hooks from two places (a repo's tracked
 // settings plus --settings or user settings) runs both entries in parallel,
@@ -353,7 +357,11 @@ func claimSessionStart(agentSessionID string, seen *SessionMarker) (release func
 	lock := flock.New(markerPath(agentSessionID) + ".start.lock")
 	ctx, cancel := context.WithTimeout(context.Background(), sessionStartWait)
 	defer cancel()
-	locked, err := lock.TryLockContext(ctx, 50*time.Millisecond)
+	locked, err := lock.TryLock()
+	if err == nil && !locked {
+		sessionStartWaiting()
+		locked, err = lock.TryLockContext(ctx, 50*time.Millisecond)
+	}
 	if err != nil || !locked {
 		slog.Warn("session start: could not claim the session, priming without it",
 			"agent_session_id", agentSessionID, "error", err)

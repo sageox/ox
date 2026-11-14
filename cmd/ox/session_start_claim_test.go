@@ -17,6 +17,11 @@ func TestClaimSessionStart_DuplicateHookJoinsTheWinner(t *testing.T) {
 	isolateSessionMarkerDir(t)
 	const sid = "claude-session-dup"
 
+	waiting := make(chan struct{})
+	prevWaiting := sessionStartWaiting
+	t.Cleanup(func() { sessionStartWaiting = prevWaiting })
+	sessionStartWaiting = func() { close(waiting) }
+
 	release, handled := claimSessionStart(sid, nil)
 	require.False(t, handled, "the first hook must prime")
 
@@ -30,7 +35,11 @@ func TestClaimSessionStart_DuplicateHookJoinsTheWinner(t *testing.T) {
 		loserHandled = h
 	}()
 
-	time.Sleep(200 * time.Millisecond) // the duplicate is now waiting on the claim
+	select {
+	case <-waiting:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the duplicate hook never waited on the claim")
+	}
 	require.NoError(t, WriteSessionMarker(&SessionMarker{AgentID: "OxAAAA", AgentSessionID: sid, PrimedAt: time.Now()}))
 	release()
 	wg.Wait()
