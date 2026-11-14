@@ -798,7 +798,7 @@ coverage-ratchet-diff: test-all ## Enforce package + changed-line coverage vs CO
 	@python3 scripts/coverage_ratchet.py coverage.out --require-provenance coverage.out.provenance.json --diff-base $(COVERAGE_BASE)
 
 coverage-ratchet-test: ## Test the coverage ratchet parser and failure semantics
-	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py test_split_test.py session_import_testbed_test.py session_import_fixture_test.py make_install_test.py
+	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest $(if $(or $(filter 1,$(V)),$(filter 1,$(RUNNER_DEBUG))),-v,) coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py test_split_test.py session_import_testbed_test.py session_import_fixture_test.py make_install_test.py
 
 # The instrumented binary lands in its OWN directory, not shared bin/, because
 # ox discovers adapters as siblings of the running binary. In bin/ it saw every
@@ -951,8 +951,11 @@ docs-check: ## Fail when committed CLI reference docs differ from Cobra
 plan-review: ## Build packages/plan-review and regenerate internal/plan/assets/review.*
 	cd packages/plan-review && npm ci --ignore-scripts && npm run build
 
+# failures-only reporter unless V=1; the reporter itself goes verbose under RUNNER_DEBUG=1
+# (not an npm script: package.json is hashed into the committed asset manifest)
+PLAN_REVIEW_TEST = $(if $(filter 1,$(V)),npm test,node --test --test-reporter=./test/quiet-reporter.mjs test/*.test.mjs)
 plan-review-check: ## Fail when internal/plan/assets/review.* is stale; test and clean-install the package
-	cd packages/plan-review && npm ci --ignore-scripts && npm run check && npm run build && npm test && node pack-check.mjs
+	cd packages/plan-review && npm ci --ignore-scripts && npm run check && npm run build && $(PLAN_REVIEW_TEST) && node pack-check.mjs
 
 docs-publish: docs ## Publish docs to GitHub Packages
 	@echo "Publishing docs to GitHub Packages..."
