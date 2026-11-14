@@ -2591,9 +2591,8 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		// context.DeadlineExceeded) — masking a real clone failure as a
 		// harmless retry-next-cycle.
 		//
-		// The budget depends on what is being cloned: a team context is a
-		// small partial clone, a Ledger is its whole history. See
-		// ledgerCloneTimeout.
+		// Both budgets are long backstops; a stalled transfer is aborted by
+		// curl's stall check instead. See ledgerCloneTimeout.
 		cloneBudget := teamContextCloneTimeout
 		if payload.RepoType != "team-context" {
 			cloneBudget = ledgerCloneTimeout
