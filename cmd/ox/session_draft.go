@@ -299,7 +299,9 @@ func stageAndCommitDraft(ledgerPath, sessionName string) error {
 	}
 	commitArgs = append(commitArgs, "-m", subject, "--")
 	commitArgs = append(commitArgs, paths...)
-	if out, err := exec.Command("git", commitArgs...).CombinedOutput(); err != nil {
+	commitCmd := exec.Command("git", commitArgs...)
+	commitCmd.Env = gitutil.OxIdentityEnv(context.Background(), ledgerPath)
+	if out, err := commitCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git commit draft:%s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
@@ -472,7 +474,9 @@ func commitDraftRemoval(ledgerPath, sessionName, verb string) error {
 		"-m", fmt.Sprintf("session-draft: %s %s", verb, sessionName),
 		"--", pathspec,
 	}
-	if out, err := exec.Command("git", commitArgs...).CombinedOutput(); err != nil {
+	commitCmd := exec.Command("git", commitArgs...)
+	commitCmd.Env = gitutil.OxIdentityEnv(context.Background(), ledgerPath)
+	if out, err := commitCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git commit draft %s: %s: %w", verb, strings.TrimSpace(string(out)), err)
 	}
 	return nil
