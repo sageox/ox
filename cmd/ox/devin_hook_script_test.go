@@ -63,7 +63,7 @@ case "$1 $2" in
   "status --json") echo '{}' ;;
   "agent OxTest1") case "$3 $4" in
     "session start") printf '{"session_file":"%s"}\n' "$FAKE_SESSION_FILE" ;;
-    "session stop") echo '"entry_count": 2,' ;;
+    "session stop") if [ -n "${FAKE_STOP_OUT:-}" ]; then printf '%s\n' "$FAKE_STOP_OUT"; else echo '"entry_count": 2,'; fi ;;
   esac ;;
 esac
 `
@@ -257,5 +257,58 @@ func TestDevinHookStopUploadsAfterOxSpawnsDaemon(t *testing.T) {
 	}
 	if !strings.Contains(string(log), "stop agent=OxTest1 rc=0") {
 		t.Fatalf("Stop did not upload; hook.log:\n%s", log)
+	}
+}
+
+// TestDevinHookStopHandsDevinTheSummaryPrompt verifies Stop passes ox's
+// summary_prompt back to Devin, as Claude Code and Codex run it, and that the
+// summarizing turn is neither recorded nor asked to summarize again.
+// Failure prevented: Devin sessions reach SageOx with no title or summary, or
+// Devin loops summarizing its own summary turns.
+func TestDevinHookStopHandsDevinTheSummaryPrompt(t *testing.T) {
+	e := newHookEnv(t)
+	if out, code := e.run(e.repo, []string{"SAGEOX_TOKEN=" + hookTestToken}, "", "save-token", "devin-hooktest"); code != 0 {
+		t.Fatalf("save-token: %d %s", code, out)
+	}
+	stopOut := func(entries int) string {
+		b, _ := json.Marshal(map[string]any{"success": true, "entry_count": entries, "summary_prompt": "# Summarize Session\nrun ox session push-summary"})
+		return "warning: whispers {not json}\n" + string(b)
+	}
+	stop := `{"session_id":"devin-hooktest","stop_hook_active":false}`
+	reentered := `{"session_id":"devin-hooktest","stop_hook_active":true}`
+
+	e.run("/", nil, postToolUse(t, "hello"), "PostToolUse")
+	out, _ := e.run("/", []string{"FAKE_STOP_OUT=" + stopOut(5)}, stop, "Stop")
+	var reply struct{ Decision, Reason string }
+	if err := json.Unmarshal([]byte(out), &reply); err != nil || reply.Decision != "block" {
+		t.Fatalf("Stop did not block for the summary: %v %q", err, out)
+	}
+	for _, want := range []string{"# Summarize Session", "secret:personal:SAGEOX_TOKEN", e.repo} {
+		if !strings.Contains(reply.Reason, want) {
+			t.Errorf("reason lacks %q:\n%s", want, reply.Reason)
+		}
+	}
+
+	before, _ := os.ReadFile(e.sf)
+	e.run("/", nil, postToolUse(t, "summarizing"), "PostToolUse")
+	if after, _ := os.ReadFile(e.sf); !bytes.Equal(before, after) {
+		t.Fatalf("summary turn was recorded:\n%s", after)
+	}
+	if out, _ := e.run("/", []string{"FAKE_STOP_OUT=" + stopOut(5)}, reentered, "Stop"); out != "" {
+		t.Fatalf("summary turn asked to summarize again: %s", out)
+	}
+
+	// A trivial turn and a re-entered Stop both end without a summary turn.
+	e.run("/", nil, `{"session_id":"devin-hooktest","prompt":"next"}`, "UserPromptSubmit")
+	if out, _ := e.run("/", []string{"FAKE_STOP_OUT=" + stopOut(1)}, stop, "Stop"); out != "" {
+		t.Fatalf("trivial turn asked for a summary: %s", out)
+	}
+	e.run("/", nil, postToolUse(t, "again"), "PostToolUse")
+	if out, _ := e.run("/", []string{"FAKE_STOP_OUT=" + stopOut(5)}, reentered, "Stop"); out != "" {
+		t.Fatalf("re-entered Stop asked for a summary: %s", out)
+	}
+	log, _ := os.ReadFile(filepath.Join(e.state, "hook.log"))
+	if n := strings.Count(string(log), "stop agent=OxTest1 rc=0"); n != 3 {
+		t.Fatalf("want 3 uploads (summary turn skipped), got %d:\n%s", n, log)
 	}
 }
