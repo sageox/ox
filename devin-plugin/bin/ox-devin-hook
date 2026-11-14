@@ -233,8 +233,22 @@ MAX = 20000  # keep huge tool outputs from bloating the recording
 def s(v): return v if isinstance(v, str) else json.dumps(v)
 # The cached token must never reach a recording, even if a command echoes it.
 SECRETS = [os.environ["SAGEOX_TOKEN"]] if len(os.environ.get("SAGEOX_TOKEN", "")) >= 4 else []
+# Devin wraps each chat message in <received_chat_message> next to rules,
+# skills and knowledge it injects; record only what the person wrote.
+def user_text(p):
+    import re, html, urllib.parse
+    msgs = re.findall(r"<received_chat_message\b[^>]*>(.*?)</received_chat_message>", p, re.S)
+    if not msgs:
+        return p
+    def attachment(m): return "[attachment: " + urllib.parse.unquote(m.group(1).rsplit("/", 1)[-1]) + "]"
+    out = []
+    for m in msgs:
+        m = re.sub(r"<!--.*?-->", "", m, flags=re.S)
+        m = re.sub(r"ATTACHMENT:\"([^\"]*)\"", attachment, m)
+        out.append(html.unescape(m).strip())
+    return "\n\n".join(x for x in out if x)
 if ev == "UserPromptSubmit":
-    e = {"type": "user", "content": s(d.get("prompt", ""))}
+    e = {"type": "user", "content": user_text(s(d.get("prompt", "")))}
 else:
     name = d.get("tool_name", ""); inp = d.get("tool_input") or {}; resp = d.get("tool_response") or {}
     # Devin puts the plaintext values of secrets bound to a tool call in

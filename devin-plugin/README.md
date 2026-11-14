@@ -18,7 +18,7 @@ A user without the secret isn't recorded; Devin tells them once per session how 
 | Event | What happens |
 |-------|--------------|
 | `SessionStart` | Installs the latest ox release if missing |
-| `UserPromptSubmit`, `PostToolUse` | Appends the prompt, tool call, or Devin's message to an ox recording (`ox agent prime --agent devin`, generic adapter) |
+| `UserPromptSubmit`, `PostToolUse` | Appends the person's chat message (without Devin's `<received_chat_message>` wrapper and injected context), tool call, or Devin's message to an ox recording (`ox agent prime --agent devin`, generic adapter) |
 | `Stop` | Stops the recording, which uploads it to the repo's Ledger, then hands Devin ox's `summary_prompt` so Devin writes the session's title and summary and runs `ox session push-summary`, as Claude Code and Codex do. That summary step is not recorded |
 
 - **Token:** Devin doesn't pass secrets to hooks, and for a gated secret the hook payload carries only the reference (`secret:personal:SAGEOX_TOKEN`), never the value. So on the first tool call without a token, the hook asks Devin to run `ox-devin-hook save-token <session-id>` once, with the secret bound and the working repo as `workdir`. That command caches the token (mode 0600, per Devin session) and records the repo as the session's recording repo. A plaintext `tool_input.injected_env` value is also accepted. `injected_env`, `__DEVIN*` keys and the cached token are scrubbed before anything is recorded. Events before the token arrives are buffered.
