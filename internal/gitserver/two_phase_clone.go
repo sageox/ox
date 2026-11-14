@@ -97,7 +97,10 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string, kind manifest
 	if _, err := gitutil.RunGit(ctx, repoPath, "sparse-checkout", "set", "--no-cone", ".sageox/"); err != nil {
 		return nil, fmt.Errorf("phase 1 sparse-checkout set .sageox: %w", err)
 	}
-	if _, err := gitutil.RunGit(ctx, repoPath, "checkout", "HEAD"); err != nil {
+	// checkout fetches missing blobs from the promisor remote, so it needs
+	// the same stall check as the clone: the caller's budget is a backstop.
+	checkoutArgs := append(gitutil.GitHTTPTimeoutFlags(), "checkout", "HEAD")
+	if _, err := gitutil.RunGit(ctx, repoPath, checkoutArgs...); err != nil {
 		return nil, fmt.Errorf("phase 1 checkout HEAD: %w", err)
 	}
 
@@ -117,7 +120,7 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string, kind manifest
 	}
 
 	// checkout HEAD to materialize the newly declared paths
-	if _, err := gitutil.RunGit(ctx, repoPath, "checkout", "HEAD"); err != nil {
+	if _, err := gitutil.RunGit(ctx, repoPath, checkoutArgs...); err != nil {
 		return nil, fmt.Errorf("phase 2 checkout HEAD: %w", err)
 	}
 
