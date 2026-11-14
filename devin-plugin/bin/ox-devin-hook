@@ -237,10 +237,13 @@ SECRETS = [os.environ["SAGEOX_TOKEN"]] if len(os.environ.get("SAGEOX_TOKEN", "")
 # skills and knowledge it injects; record only what the person wrote.
 def user_text(p):
     import re, html, urllib.parse
-    msgs = re.findall(r"<received_chat_message\b[^>]*>(.*?)</received_chat_message>", p, re.S)
+    # The Devin tag always carries message_id; a bare tag is text the person quoted.
+    msgs = re.findall(r"<received_chat_message\b[^>]*\bmessage_id=\"[^>]*>(.*?)</received_chat_message>", p, re.S)
     if not msgs:
         return p
-    def attachment(m): return "[attachment: " + urllib.parse.unquote(m.group(1).rsplit("/", 1)[-1]) + "]"
+    def attachment(m):
+        path = urllib.parse.urlsplit(m.group(1)).path
+        return "[attachment: " + urllib.parse.unquote(path.rsplit("/", 1)[-1]) + "]"
     out = []
     for m in msgs:
         m = re.sub(r"<!--.*?-->", "", m, flags=re.S)

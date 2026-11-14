@@ -327,7 +327,7 @@ func TestDevinHookRecordsOnlyTheChatMessage(t *testing.T) {
 		t.Fatalf("save-token: %d %s", code, out)
 	}
 	prompt := "[Image 1]\n\n<received_chat_message from=\"Madhur\" source=\"web\" message_id=\"event-1\">\n" +
-		"fix the &lt;received_chat_message> text\nATTACHMENT:\"https://app.devin.ai/attachments/abc/Clean%20Shot%26copy.png\"\n" +
+		"fix the &lt;received_chat_message> text\nATTACHMENT:\"https://app.devin.ai/attachments/abc/Clean%20Shot%26copy.png?download=1&next=/a/b\"\n" +
 		"<!-- downloaded to /home/ubuntu/attachments/abc/Clean_Shot.png -->\n</received_chat_message>\n\n" +
 		"<rules type=\"always-on\">team rules</rules>\n" +
 		"<received_chat_message from=\"Madhur\" source=\"web\" message_id=\"event-2\">option 3</received_chat_message>"
@@ -335,6 +335,10 @@ func TestDevinHookRecordsOnlyTheChatMessage(t *testing.T) {
 	require.NoError(t, err)
 	e.run("/", nil, string(b), "UserPromptSubmit")
 	e.run("/", nil, `{"session_id":"devin-hooktest","prompt":"plain prompt from the Devin CLI"}`, "UserPromptSubmit")
+	quoted := "Fix this example: <received_chat_message>hello</received_chat_message>. Add a test."
+	b, err = json.Marshal(map[string]string{"session_id": "devin-hooktest", "prompt": quoted})
+	require.NoError(t, err)
+	e.run("/", nil, string(b), "UserPromptSubmit")
 
 	raw, err := os.ReadFile(e.sf)
 	require.NoError(t, err)
@@ -349,5 +353,6 @@ func TestDevinHookRecordsOnlyTheChatMessage(t *testing.T) {
 	require.Equal(t, []string{
 		"fix the <received_chat_message> text\n[attachment: Clean Shot&copy.png]\n\noption 3",
 		"plain prompt from the Devin CLI",
+		quoted,
 	}, got)
 }
