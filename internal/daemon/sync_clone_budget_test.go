@@ -397,6 +397,8 @@ func TestTeamContextClone_StalledCheckoutIsStillAborted(t *testing.T) {
 	// the sparse set later, so the clone may report success; what matters is
 	// that the dead link did not hold it until the backstop
 	t.Logf("clone over a dead link ended after %s: %v", elapsed, err)
+	require.Greater(t, elapsed, 10*time.Second,
+		"the clone ended before curl's 15s stall window, so it never reached the dead download")
 	require.Less(t, elapsed, backstop-time.Minute,
 		"the stall check, not the backstop, must end a dead team context download")
 }
