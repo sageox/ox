@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Devin sessions get a real title and summary** — at the end of each turn the Devin plugin hands Devin the same summary prompt Claude Code and Codex follow, so Devin writes the session's title and summary and pushes them to the Ledger with `ox session push-summary`. Before, Devin sessions reached SageOx titled "Devin session <id>" with no description of the work. Turns with fewer than 2 entries are skipped.
 - **`ox login` always shows the code to match** — the terminal prints the code beside the link, so you can check it against the one the approval page shows. A first sign-in now says "Welcome" instead of "Welcome back", a denied or expired request tells you to run `ox login` again, and success ends on three lines: who, where, and `ox init`. At a color terminal, a small Oxy celebrates.
 - **`ox init` tells you who can read your sessions** — it ends on a box showing your repo, your team, and whether sessions go to the team's Ledger, then a plan prompt to try first. The first time on a machine, it also offers Oxy and the session report pane.
 - **Routine coding work is shared consistently** — feature implementation, straightforward fixes and setup sessions now follow the same sharing decision as other substantive work. Manual publishing and skipped sessions keep their existing behavior.
