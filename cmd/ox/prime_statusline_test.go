@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -219,10 +218,7 @@ func TestEnsureClaudeHooks_SyncsStatusLineWhenHooksPresent(t *testing.T) {
 
 			// prime's stdout and stderr both reach the AI coworker's context
 			// (hooks run it with 2>&1); its slog WARNs go to a file instead.
-			var logs bytes.Buffer
-			prev := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
-			t.Cleanup(func() { slog.SetDefault(prev) })
+			logs := captureSlog(t, slog.LevelWarn)
 
 			var installed bool
 			var stdout []byte

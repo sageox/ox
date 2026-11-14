@@ -279,13 +279,10 @@ func TestEnqueuePlanFeedbackTask_SurfacesEnqueueFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var logs bytes.Buffer
-	previous := slog.Default()
 	// Gate the handler at Warn: if the failure is still logged at Debug (the
 	// bug), nothing lands in `logs` and the assertion below fails — proving
 	// the level was actually raised, not just that some log call exists.
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logs := captureSlog(t, slog.LevelWarn)
 
 	err := enqueuePlanFeedbackTask(root, planDir, "p", 1)
 	if err == nil {

@@ -97,10 +97,7 @@ func TestLedgerReadCredentialHelperRejectionLogsAreSanitized(t *testing.T) {
 	resource := "api/v1/cli/repos/" + repoID + "/ledger.git"
 	t.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
 	t.Setenv("SAGEOX_TOKEN", "private-credential")
-	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logs := captureSlog(t, slog.LevelDebug)
 	for _, tc := range []struct{ request, reason string }{
 		{"path=" + strings.Repeat("private-input", 1<<17), "malformed_request"},
 		{"protocol=https\nhost=private-host.example\npath=private-path\n\n", "unsafe_scope"},
