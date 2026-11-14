@@ -330,7 +330,7 @@ func TestDevinHookRecordsOnlyTheChatMessage(t *testing.T) {
 		"fix the &lt;received_chat_message> text\nATTACHMENT:\"https://app.devin.ai/attachments/abc/Clean%20Shot%26copy.png?download=1&next=/a/b\"\n" +
 		"<!-- downloaded to /home/ubuntu/attachments/abc/Clean_Shot.png -->\n</received_chat_message>\n\n" +
 		"<rules type=\"always-on\">team rules</rules>\n" +
-		"<received_chat_message from=\"Madhur\" source=\"web\" message_id=\"event-2\">option 3</received_chat_message>"
+		"<received_chat_message from=\"Madhur\" source=\"web\" message_id=\"event-2\">option 3 ATTACHMENT:\"https://[HOST]/a.png\"</received_chat_message>"
 	b, err := json.Marshal(map[string]string{"session_id": "devin-hooktest", "prompt": prompt})
 	require.NoError(t, err)
 	e.run("/", nil, string(b), "UserPromptSubmit")
@@ -351,7 +351,7 @@ func TestDevinHookRecordsOnlyTheChatMessage(t *testing.T) {
 		}
 	}
 	require.Equal(t, []string{
-		"fix the <received_chat_message> text\n[attachment: Clean Shot&copy.png]\n\noption 3",
+		"fix the <received_chat_message> text\n[attachment: Clean Shot&copy.png]\n\noption 3 [attachment: a.png]",
 		"plain prompt from the Devin CLI",
 		quoted,
 	}, got)
