@@ -244,8 +244,8 @@ def user_text(p):
     out = []
     for m in msgs:
         m = re.sub(r"<!--.*?-->", "", m, flags=re.S)
-        m = re.sub(r"ATTACHMENT:\"([^\"]*)\"", attachment, m)
-        out.append(html.unescape(m).strip())
+        m = re.sub(r"ATTACHMENT:\"([^\"]*)\"", attachment, html.unescape(m))
+        out.append(m.strip())
     return "\n\n".join(x for x in out if x)
 if ev == "UserPromptSubmit":
     e = {"type": "user", "content": user_text(s(d.get("prompt", "")))}

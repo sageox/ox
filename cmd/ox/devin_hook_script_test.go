@@ -327,7 +327,7 @@ func TestDevinHookRecordsOnlyTheChatMessage(t *testing.T) {
 		t.Fatalf("save-token: %d %s", code, out)
 	}
 	prompt := "[Image 1]\n\n<received_chat_message from=\"Madhur\" source=\"web\" message_id=\"event-1\">\n" +
-		"fix the &lt;received_chat_message> text\nATTACHMENT:\"https://app.devin.ai/attachments/abc/Clean%20Shot.png\"\n" +
+		"fix the &lt;received_chat_message> text\nATTACHMENT:\"https://app.devin.ai/attachments/abc/Clean%20Shot%26copy.png\"\n" +
 		"<!-- downloaded to /home/ubuntu/attachments/abc/Clean_Shot.png -->\n</received_chat_message>\n\n" +
 		"<rules type=\"always-on\">team rules</rules>\n" +
 		"<received_chat_message from=\"Madhur\" source=\"web\" message_id=\"event-2\">option 3</received_chat_message>"
@@ -347,7 +347,7 @@ func TestDevinHookRecordsOnlyTheChatMessage(t *testing.T) {
 		}
 	}
 	require.Equal(t, []string{
-		"fix the <received_chat_message> text\n[attachment: Clean Shot.png]\n\noption 3",
+		"fix the <received_chat_message> text\n[attachment: Clean Shot&copy.png]\n\noption 3",
 		"plain prompt from the Devin CLI",
 	}, got)
 }
