@@ -112,8 +112,18 @@ func TestHandleStart_DuplicateHookJoinsWithoutPriming(t *testing.T) {
 	primedAt := time.Now().Add(-time.Minute).Truncate(time.Second)
 	require.NoError(t, WriteSessionMarker(&SessionMarker{AgentID: "OxAAAA", AgentSessionID: sid, PrimedAt: primedAt}))
 
+	primes := 0
+	prevPrime := primeForHook
+	t.Cleanup(func() { primeForHook = prevPrime })
+	primeForHook = func(string, *HookContext) error { primes++; return nil }
+
+	first := &HookContext{AgentType: "claude-code", ProjectRoot: t.TempDir(), Input: &agentx.HookInput{SessionID: "claude-session-first", Source: "startup"}}
+	require.NoError(t, handleStart(first))
+	require.Equal(t, 1, primes, "a first start must prime")
+
 	ctx := &HookContext{AgentType: "claude-code", ProjectRoot: t.TempDir(), Input: &agentx.HookInput{SessionID: sid, Source: "startup"}}
 	require.NoError(t, handleStart(ctx))
+	require.Equal(t, 1, primes, "the duplicate must join, not prime again")
 
 	require.NotNil(t, ctx.Marker, "the hook must join the duplicate's marker")
 	require.Equal(t, "OxAAAA", ctx.Marker.AgentID)

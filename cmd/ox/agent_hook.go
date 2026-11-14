@@ -324,7 +324,7 @@ func handleStart(ctx *HookContext) error {
 	}
 
 	// prime auto-starts recording internally; call again as safety net
-	if err := runPrimeForHook(agentID, ctx); err != nil {
+	if err := primeForHook(agentID, ctx); err != nil {
 		return err
 	}
 
@@ -1051,6 +1051,9 @@ func appendRedactedEntries(rawPath string, entries []session.Entry) error {
 // runPrimeForHook runs ox agent prime as a subprocess.
 // Reuses all existing prime logic cleanly via subprocess invocation.
 // Passes the original raw stdin bytes to prime to preserve unknown/agent-specific fields.
+// primeForHook is the prime handleStart runs; tests replace it to count runs.
+var primeForHook = runPrimeForHook
+
 func runPrimeForHook(agentID string, ctx *HookContext) error {
 	oxPath, err := selfexec.Path()
 	if errors.Is(err, selfexec.ErrUnderTest) {
