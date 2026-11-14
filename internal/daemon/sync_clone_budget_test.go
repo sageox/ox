@@ -364,3 +364,39 @@ func TestTeamContextClone_ProgressingCheckoutOutlivesOldFixedBudget(t *testing.T
 	require.Equal(t, fmt.Sprint(ledgerFixtureBytes), strings.TrimSpace(string(size)))
 	require.FileExists(t, filepath.Join(teamPath, "agents", "history.bin"), "phase 2 must materialize the blob")
 }
+
+// TestTeamContextClone_StalledCheckoutIsStillAborted verifies a team context
+// whose phase-2 blob download goes dead is stopped by curl's stall check, not
+// held until the backstop. Failure prevented: with a long backstop, a
+// sparse-checkout or checkout that fetches blobs without the stall flags held
+// its clone slot for the whole hour over a dead link.
+func TestTeamContextClone_StalledCheckoutIsStillAborted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real paced Git clone")
+	}
+	const backstop = 3 * time.Minute
+	prev := teamContextCloneTimeout
+	t.Cleanup(func() { teamContextCloneTimeout = prev })
+	teamContextCloneTimeout = backstop
+
+	// phase 1 fetches no blobs outside .sageox/; the phase-2 blob stops after
+	// 96 KiB and the connection stays open
+	srv := servePacedRepo(t, "agents/history.bin", ledgerFixtureBytes, ledgerPace, 96<<10)
+	s, _ := newCloneLifecycleScheduler(t, srv.URL)
+	teamPath := filepath.Join(t.TempDir(), "team")
+
+	start := time.Now()
+	_, err := s.Checkout(CheckoutPayload{
+		CloneURL: srv.URL,
+		RepoPath: teamPath,
+		RepoType: "team-context",
+	}, nil)
+	elapsed := time.Since(start)
+
+	// a failed phase-2 sparse-checkout is only a warning and sync re-applies
+	// the sparse set later, so the clone may report success; what matters is
+	// that the dead link did not hold it until the backstop
+	t.Logf("clone over a dead link ended after %s: %v", elapsed, err)
+	require.Less(t, elapsed, backstop-time.Minute,
+		"the stall check, not the backstop, must end a dead team context download")
+}

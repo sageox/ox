@@ -94,11 +94,13 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string, kind manifest
 
 	// materialize only .sageox/ to read the manifest.
 	// use --no-cone mode to support both file and directory patterns in Phase 2.
-	if _, err := gitutil.RunGit(ctx, repoPath, "sparse-checkout", "set", "--no-cone", ".sageox/"); err != nil {
+	// sparse-checkout set and checkout fetch missing blobs from the promisor
+	// remote, so they need the clone's stall check: the caller's budget is
+	// only a backstop.
+	phaseOneSparse := append(gitutil.GitHTTPTimeoutFlags(), "sparse-checkout", "set", "--no-cone", ".sageox/")
+	if _, err := gitutil.RunGit(ctx, repoPath, phaseOneSparse...); err != nil {
 		return nil, fmt.Errorf("phase 1 sparse-checkout set .sageox: %w", err)
 	}
-	// checkout fetches missing blobs from the promisor remote, so it needs
-	// the same stall check as the clone: the caller's budget is a backstop.
 	checkoutArgs := append(gitutil.GitHTTPTimeoutFlags(), "checkout", "HEAD")
 	if _, err := gitutil.RunGit(ctx, repoPath, checkoutArgs...); err != nil {
 		return nil, fmt.Errorf("phase 1 checkout HEAD: %w", err)
@@ -113,7 +115,8 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string, kind manifest
 		sparsePaths = []string{"/.sageox/"}
 	}
 
-	args := append([]string{"sparse-checkout", "set", "--no-cone"}, sparsePaths...)
+	args := append(gitutil.GitHTTPTimeoutFlags(), "sparse-checkout", "set", "--no-cone")
+	args = append(args, sparsePaths...)
 	if _, err := gitutil.RunGit(ctx, repoPath, args...); err != nil {
 		slog.Warn("phase 2 sparse-checkout set failed, continuing with .sageox only",
 			"path", repoPath, "error", err)
