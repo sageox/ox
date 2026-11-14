@@ -1,10 +1,12 @@
 package main
 
 import (
+	"os"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/sageox/agentx"
 	"github.com/stretchr/testify/require"
 )
 
@@ -99,4 +101,37 @@ func TestClaimSessionStart_StuckClaimDoesNotWedgeTheHook(t *testing.T) {
 	release()
 	require.False(t, handled, "a hook that could not claim must prime as before")
 	require.Less(t, time.Since(start), 2*time.Second, "a stuck claim must not hold the hook")
+}
+
+// TestHandleStart_DuplicateHookJoinsWithoutPriming verifies the SessionStart
+// hook itself takes the claim: a hook that finds the session already primed
+// by its duplicate joins that marker and does not prime again (GH #1844).
+func TestHandleStart_DuplicateHookJoinsWithoutPriming(t *testing.T) {
+	isolateSessionMarkerDir(t)
+	const sid = "claude-session-hook"
+	primedAt := time.Now().Add(-time.Minute).Truncate(time.Second)
+	require.NoError(t, WriteSessionMarker(&SessionMarker{AgentID: "OxAAAA", AgentSessionID: sid, PrimedAt: primedAt}))
+
+	ctx := &HookContext{AgentType: "claude-code", ProjectRoot: t.TempDir(), Input: &agentx.HookInput{SessionID: sid, Source: "startup"}}
+	require.NoError(t, handleStart(ctx))
+
+	require.NotNil(t, ctx.Marker, "the hook must join the duplicate's marker")
+	require.Equal(t, "OxAAAA", ctx.Marker.AgentID)
+	require.True(t, primedAt.Equal(ctx.Marker.PrimedAt), "the hook must not prime the session a second time")
+}
+
+// TestClaimSessionStart_NoClaimWithoutASession verifies a hook with no native
+// session ID, or no marker directory, primes as before instead of failing.
+func TestClaimSessionStart_NoClaimWithoutASession(t *testing.T) {
+	isolateSessionMarkerDir(t)
+	release, handled := claimSessionStart("", nil)
+	release()
+	require.False(t, handled)
+
+	require.NoError(t, os.RemoveAll(SessionMarkerDir()))
+	require.NoError(t, os.WriteFile(SessionMarkerDir(), nil, 0o600))
+	t.Cleanup(func() { _ = os.Remove(SessionMarkerDir()) })
+	release, handled = claimSessionStart("claude-session-nodir", nil)
+	release()
+	require.False(t, handled)
 }
