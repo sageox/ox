@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"log/slog"
 	"os"
@@ -328,10 +327,7 @@ func TestMaterializeTeamSkills_AFailedSwapKeepsThePreviousVersion(t *testing.T) 
 // whole bundle, and the rules beside it are still retired.
 func TestMaterializeTeamSkills_AnUndeletableStaleRuleIsLoggedNotFatal(t *testing.T) {
 	skipUnlessPermissionsBite(t)
-	var logs bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	logs := captureSlog(t, slog.LevelDebug)
 
 	teamCtxDir := t.TempDir()
 	locked := filepath.Join(teamCtxDir, "agents", "rules", "locked")
@@ -361,10 +357,7 @@ func TestTryHTTPTeamContextFallback_WarnsWhenTeamContextIsOnlyPartlyWritten(t *t
 	})
 	writeFixture(t, filepath.Join(h.teamDir, "agents", "skills"), "not a dir")
 
-	var logs bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	logs := captureSlog(t, slog.LevelWarn)
 
 	info, err := tryHTTPTeamContextFallback(context.Background(), h.project, "team_abc")
 

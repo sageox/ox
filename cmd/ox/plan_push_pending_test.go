@@ -529,10 +529,7 @@ func TestKickPendingPlanPushes_EarlyReturnsLeaveMarkers(t *testing.T) {
 	// a temp file a crash left behind is not pending work, so no retry is
 	// attempted; the entry above is, so one is (the log is the only witness:
 	// the retry cannot start under go test)
-	var logs bytes.Buffer
-	prevLog := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prevLog) })
+	logs := captureSlog(t, slog.LevelDebug)
 	tmpOnly := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpOnly, filepath.FromSlash(planReviewPendingDir)), 0o755); err != nil {
 		t.Fatal(err)

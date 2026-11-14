@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -54,10 +53,7 @@ func TestRunSessionCommit_GuardsHydratedArtifacts(t *testing.T) {
 	unknownContent := "{\"role\":\"user\",\"note\":\"no oid anywhere\"}\n"
 	writeSessionFixture(t, sessionsDir, "2026-10-06T12-00-cy-OxCCCC", unknownContent, nil)
 
-	var logs bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	logs := captureSlog(t, slog.LevelWarn)
 
 	require.NoError(t, runSessionCommit(sessionCommitCmd, nil))
 
