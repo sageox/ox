@@ -149,7 +149,7 @@ ensure_recording() {
   # persisted) and start the recording explicitly instead.
   id=$(OX_SESSION_RECORDING=manual ox agent prime --agent devin 2>/dev/null | grep -oE 'agent_id="Ox[A-Za-z0-9]+"' | head -1 | cut -d'"' -f2)
   [ -n "$id" ] || { log "prime failed"; return 1; }
-  out=$(ox agent "$id" session start --title "Devin session $SID" 2>&1)
+  out=$(ox agent "$id" session start 2>&1)
   # ox may print notices or team whispers around the JSON, and those can
   # contain braces, so decode at each "{" until the session_start object.
   sf=$(printf '%s' "$out" | python3 -c '
@@ -318,11 +318,48 @@ stop_recording() {
   # second failure, start fresh rather than append to a broken recording.
   if [ "$rc" -ne 0 ] && [ ! -f "$SDIR/stop_failed" ]; then touch "$SDIR/stop_failed"; return 0; fi
   rm -f "$SDIR/agent_id" "$SDIR/session_file" "$SDIR/stop_failed"
+  [ "$rc" -eq 0 ] && request_summary "$out" "$repo"
+  return 0
+}
+
+# Claude Code and Codex summarize a session by running the summary_prompt that
+# session stop returns, then piping the JSON to ox session push-summary. Devin
+# has no local LLM CLI for ox's daemon to summarize with either, so hand Devin
+# the same prompt: a Stop hook that blocks keeps Devin working with the reason
+# as its instruction. The summarizing marker keeps that follow-up turn out of
+# the next recording and stops it from being asked to summarize itself.
+request_summary() {
+  [ "$(field stop_hook_active)" = True ] && return 0
+  printf '%s' "$1" | REPO="$2" python3 -c '
+import sys, json, os
+t = sys.stdin.read(); dec = json.JSONDecoder(); i = t.find("{")
+while i >= 0:
+    try:
+        o, _ = dec.raw_decode(t, i)
+        if isinstance(o, dict) and "summary_prompt" in o:
+            break
+    except ValueError:
+        pass
+    i = t.find("{", i + 1)
+else:
+    sys.exit(1)
+# Below 2 entries ox itself skips the LLM (sessionsummary prefilter).
+if not o.get("summary_prompt") or (o.get("entry_count") or 0) < 2:
+    sys.exit(1)
+env = json.dumps({"SAGEOX_TOKEN": "secret:personal:SAGEOX_TOKEN"})
+print(json.dumps({"decision": "block", "reason":
+  "SageOx saved this turn to the team Ledger and needs its summary, the same one Claude Code and Codex write. "
+  "Do it now without messaging the user, then stop. Run the ox session push-summary command with the exec tool, "
+  "with env " + env + " and workdir " + os.environ["REPO"] + ". If it reports a validation error, fix the JSON and retry once.\n\n"
+  + o["summary_prompt"]}))' >&3 || return 0
+  touch "$SDIR/summarizing"
+  log "requested summary"
 }
 
 case "$EVENT" in
   SessionStart) ensure_ox ;;
-  UserPromptSubmit|PostToolUse) record_event; request_token_once ;;
-  Stop) stop_recording ;;
+  UserPromptSubmit) rm -f "$SDIR/summarizing"; record_event ;;
+  PostToolUse) [ -f "$SDIR/summarizing" ] || record_event; request_token_once ;;
+  Stop) if [ -f "$SDIR/summarizing" ]; then rm -f "$SDIR/summarizing"; log "summary turn done"; else stop_recording; fi ;;
 esac
 exit 0
