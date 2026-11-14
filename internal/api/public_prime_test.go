@@ -52,6 +52,10 @@ func wantGoldenBundle() *PublicPrimeResponse {
 			{Kind: "work", Text: "Tracing the reflow renderer for #6857", At: time.Date(2026, 10, 19, 17, 38, 0, 0, time.UTC)},
 			{Kind: "pr", Text: "14 more PRs opened this hour", URL: "https://github.com/readest/readest/pulls", At: time.Date(2026, 10, 19, 16, 0, 0, 0, time.UTC)},
 		},
+		Rules: []PublicPrimeRule{
+			{Name: "contributing", Content: "Open an issue before a large PR.\nRun make test before you push."},
+			{Name: "go-style", Globs: []string{"**/*.go"}, Content: "Run gofmt."},
+		},
 	}
 }
 
