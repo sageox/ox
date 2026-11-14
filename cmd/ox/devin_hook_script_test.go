@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // Tests for devin-plugin/bin/ox-devin-hook, driven as Devin drives it: event
@@ -289,11 +291,13 @@ func TestDevinHookStopHandsDevinTheSummaryPrompt(t *testing.T) {
 		}
 	}
 
-	before, _ := os.ReadFile(e.sf)
+	before, err := os.ReadFile(e.sf)
+	require.NoError(t, err)
+	require.Contains(t, string(before), "hello", "the turn before the summary was not recorded")
 	e.run("/", nil, postToolUse(t, "summarizing"), "PostToolUse")
-	if after, _ := os.ReadFile(e.sf); !bytes.Equal(before, after) {
-		t.Fatalf("summary turn was recorded:\n%s", after)
-	}
+	after, err := os.ReadFile(e.sf)
+	require.NoError(t, err)
+	require.Equal(t, string(before), string(after), "summary turn was recorded")
 	if out, _ := e.run("/", []string{"FAKE_STOP_OUT=" + stopOut(5)}, reentered, "Stop"); out != "" {
 		t.Fatalf("summary turn asked to summarize again: %s", out)
 	}
