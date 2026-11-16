@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from urllib.parse import urlparse
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -128,7 +129,7 @@ class InstallFromReleaseTest(unittest.TestCase):
         self.assertIn(f"Latest version: {VERSION}", result.stdout)
         self.assertIn("Verifying checksum...", result.stdout)
         urls = self.requested_urls()
-        self.assertFalse([u for u in urls if "api.github.com" in u], urls)
+        self.assertFalse([u for u in urls if urlparse(u).hostname == "api.github.com"], urls)
         self.assertIn(f"{RELEASES}/download/{VERSION}/{ARCHIVE}", urls)
         self.assertIn(f"{RELEASES}/download/{VERSION}/checksums.txt", urls)
 
