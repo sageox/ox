@@ -211,10 +211,15 @@ latest_release_tag() {
 
     local api_url="https://api.github.com/repos/$REPO/releases/latest"
     local release_json=""
+    # A GITHUB_TOKEN, when set, gets the fallback the authenticated quota.
+    local auth=()
+    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        auth=("Authorization: Bearer $GITHUB_TOKEN")
+    fi
     if command -v curl &> /dev/null; then
-        release_json=$(curl -fsSL "$api_url" || true)
+        release_json=$(curl -fsSL ${auth[@]+-H "${auth[0]}"} "$api_url" || true)
     elif command -v wget &> /dev/null; then
-        release_json=$(wget -qO- "$api_url" || true)
+        release_json=$(wget -qO- ${auth[@]+--header="${auth[0]}"} "$api_url" || true)
     fi
     echo "$release_json" | grep '"tag_name"' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/'
 }
