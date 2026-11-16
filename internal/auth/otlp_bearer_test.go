@@ -1,11 +1,16 @@
 package auth
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/sageox/ox/internal/useragent"
 )
 
 // The exporter must never send a bearer the server is guaranteed to reject:
@@ -79,4 +84,31 @@ func TestExportBearerNoting_LogoutDoesNotResume(t *testing.T) {
 	assert.True(t, paused(), "unreadable store must not read as a resume")
 	assert.Equal(t, "tok-fresh", exportBearerNoting(ep, fresh, nil))
 	assert.False(t, paused(), "a usable bearer resumes")
+}
+
+// A short-lived CLI process starts with no yield state, so it sees the
+// expired-token transition on every run: at WARN that line printed on every
+// command a person (or a coding tool) ran (issue #1388). Only the daemon,
+// which never refreshes its own token, needs the transition loud.
+func TestNoteExportYield_WarnsOnlyInDaemon(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev); useragent.ResetForTesting() })
+
+	useragent.ResetForTesting()
+	const cliEP = "https://api.yield-cli.sageox.ai"
+	require.True(t, noteExportYield(cliEP, true))
+	require.True(t, noteExportYield(cliEP, false))
+	assert.NotContains(t, buf.String(), "level=WARN", "CLI process must not warn")
+	assert.Contains(t, buf.String(), "level=DEBUG msg=\"otel export paused")
+	assert.Contains(t, buf.String(), "level=DEBUG msg=\"otel export resumed")
+
+	buf.Reset()
+	useragent.SetDaemonMode()
+	const daemonEP = "https://api.yield-daemon.sageox.ai"
+	require.True(t, noteExportYield(daemonEP, true))
+	require.True(t, noteExportYield(daemonEP, false))
+	assert.Contains(t, buf.String(), "level=WARN msg=\"otel export paused")
+	assert.Contains(t, buf.String(), "level=WARN msg=\"otel export resumed")
 }

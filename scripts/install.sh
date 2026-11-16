@@ -189,15 +189,46 @@ print_doctor_hint() {
     echo ""
 }
 
-release_has_asset() {
-    local release_json=$1
-    local asset_name=$2
+# Latest release tag (e.g. v0.25.0), read from the redirect behind
+# github.com/<repo>/releases/latest. The REST API allows 60 anonymous
+# requests per hour per IP, which shared NATs and CI runners exhaust (#1333);
+# the redirect is not rate limited the same way. The API stays as a fallback.
+latest_release_tag() {
+    local latest_url="https://github.com/$REPO/releases/latest"
+    local tag_url=""
 
-    if echo "$release_json" | grep -Fq "\"name\": \"$asset_name\""; then
+    if command -v curl &> /dev/null; then
+        tag_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$latest_url" 2>/dev/null || true)
+    elif command -v wget &> /dev/null; then
+        tag_url=$(wget -qS --max-redirect=0 -O /dev/null "$latest_url" 2>&1 |
+            sed -nE 's/^[[:space:]]*[Ll]ocation:[[:space:]]*([^[:space:]]+).*/\1/p' | tail -n 1)
+    fi
+
+    if [[ "$tag_url" == */releases/tag/* && -n "${tag_url##*/releases/tag/}" ]]; then
+        echo "${tag_url##*/releases/tag/}"
         return 0
     fi
 
-    return 1
+    local api_url="https://api.github.com/repos/$REPO/releases/latest"
+    local release_json=""
+    if command -v curl &> /dev/null; then
+        release_json=$(curl -fsSL "$api_url" || true)
+    elif command -v wget &> /dev/null; then
+        release_json=$(wget -qO- "$api_url" || true)
+    fi
+    echo "$release_json" | grep '"tag_name"' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/'
+}
+
+# Whether a release asset exists, checked with a HEAD request to the same
+# github.com download URL the archive is fetched from (no API quota).
+release_has_asset() {
+    local asset_url=$1
+
+    if command -v curl &> /dev/null; then
+        curl -fsSLI -o /dev/null "$asset_url" 2>/dev/null
+    else
+        wget -q --spider "$asset_url" 2>/dev/null
+    fi
 }
 
 # Re-sign binary for macOS to avoid slow Gatekeeper checks
@@ -264,6 +295,16 @@ detect_platform() {
     echo "${os}_${arch}"
 }
 
+# Where release binaries go: /usr/local/bin when writable, else ~/.local/bin.
+default_install_dir() {
+    if [[ -w /usr/local/bin ]]; then
+        echo "/usr/local/bin"
+    else
+        mkdir -p "$HOME/.local/bin"
+        echo "$HOME/.local/bin"
+    fi
+}
+
 # Download and install from GitHub releases
 install_from_release() {
     log_info "Installing $BINARY from GitHub releases..."
@@ -272,22 +313,14 @@ install_from_release() {
     local tmp_dir
     tmp_dir=$(mktemp -d)
 
-    # Get latest release version
     log_info "Fetching latest release..."
-    local latest_url="https://api.github.com/repos/$REPO/releases/latest"
-    local version
-    local release_json
-
-    if command -v curl &> /dev/null; then
-        release_json=$(curl -fsSL "$latest_url")
-    elif command -v wget &> /dev/null; then
-        release_json=$(wget -qO- "$latest_url")
-    else
+    if ! command -v curl &> /dev/null && ! command -v wget &> /dev/null; then
         log_error "Neither curl nor wget found. Please install one of them."
         return 1
     fi
 
-    version=$(echo "$release_json" | grep '"tag_name"' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/')
+    local version
+    version=$(latest_release_tag)
 
     if [ -z "$version" ]; then
         log_error "Failed to fetch latest version"
@@ -300,7 +333,7 @@ install_from_release() {
     local archive_name="ox_${version#v}_${platform}.tar.gz"
     local download_url="https://github.com/$REPO/releases/download/${version}/${archive_name}"
 
-    if ! release_has_asset "$release_json" "$archive_name"; then
+    if ! release_has_asset "$download_url"; then
         log_warning "No prebuilt archive available for platform ${platform}. Falling back to source installation methods."
         rm -rf "$tmp_dir"
         return 1
@@ -382,14 +415,8 @@ install_from_release() {
         return 1
     fi
 
-    # Determine install location
     local install_dir
-    if [[ -w /usr/local/bin ]]; then
-        install_dir="/usr/local/bin"
-    else
-        install_dir="$HOME/.local/bin"
-        mkdir -p "$install_dir"
-    fi
+    install_dir=$(default_install_dir)
 
     # Install ox binary and bundled adapter binaries
     log_info "Installing to $install_dir..."
@@ -639,4 +666,8 @@ main() {
     exit 1
 }
 
-main "$@"
+# Run unless sourced (the installer tests source it to call its functions).
+# Piped through `curl | bash`, BASH_SOURCE is empty, so main still runs.
+if [[ -z "${BASH_SOURCE[0]:-}" || "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
