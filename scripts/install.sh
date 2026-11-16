@@ -223,7 +223,9 @@ latest_release_tag() {
         if [[ -n "${GITHUB_TOKEN:-}" ]]; then
             local wgetrc
             wgetrc=$(mktemp)
-            printf 'header = Authorization: Bearer %s\n' "$GITHUB_TOKEN" > "$wgetrc"
+            # WGETRC replaces ~/.wgetrc, so carry its proxy/CA settings over.
+            cat "${WGETRC:-$HOME/.wgetrc}" > "$wgetrc" 2>/dev/null || true
+            printf '\nheader = Authorization: Bearer %s\n' "$GITHUB_TOKEN" >> "$wgetrc"
             release_json=$(WGETRC="$wgetrc" wget -qO- "$api_url" || true)
             rm -f "$wgetrc"
         else
