@@ -211,15 +211,24 @@ latest_release_tag() {
 
     local api_url="https://api.github.com/repos/$REPO/releases/latest"
     local release_json=""
-    # A GITHUB_TOKEN, when set, gets the fallback the authenticated quota.
-    local auth=()
-    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-        auth=("Authorization: Bearer $GITHUB_TOKEN")
-    fi
+    # A GITHUB_TOKEN, when set, gets the fallback the authenticated quota. It
+    # goes through stdin or a 0600 file, never argv, so `ps` can't show it.
     if command -v curl &> /dev/null; then
-        release_json=$(curl -fsSL ${auth[@]+-H "${auth[0]}"} "$api_url" || true)
+        if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+            release_json=$(printf 'Authorization: Bearer %s\n' "$GITHUB_TOKEN" | curl -fsSL -H @- "$api_url" || true)
+        else
+            release_json=$(curl -fsSL "$api_url" || true)
+        fi
     elif command -v wget &> /dev/null; then
-        release_json=$(wget -qO- ${auth[@]+--header="${auth[0]}"} "$api_url" || true)
+        if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+            local wgetrc
+            wgetrc=$(mktemp)
+            printf 'header = Authorization: Bearer %s\n' "$GITHUB_TOKEN" > "$wgetrc"
+            release_json=$(WGETRC="$wgetrc" wget -qO- "$api_url" || true)
+            rm -f "$wgetrc"
+        else
+            release_json=$(wget -qO- "$api_url" || true)
+        fi
     fi
     echo "$release_json" | grep '"tag_name"' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/'
 }
