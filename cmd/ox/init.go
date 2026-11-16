@@ -465,7 +465,7 @@ func runInit() error {
 		}
 		selectedTeamID = resolvedID
 		selectedTeamName = resolvedName
-		if resolvedName == "" {
+		if len(resolveTeamMembership(memberships, initTeamFlag)) == 0 {
 			unresolvedTeamCandidates = usableTeams(memberships)
 		}
 	} else {
