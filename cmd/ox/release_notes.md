@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`ox init --team <slug>` works right after a fresh login** — when the team isn't in the team list ox fetched, ox now fetches the list once more before sending the value to the server as typed, since a list fetched right after login can be empty or miss a team you just joined. If the server still rejects the value, the error lists your teams so you can pick the right one.
 - **The install script works when GitHub's API rate limit is used up** — `install.sh` now reads the latest version from the `github.com/sageox/ox/releases/latest` redirect instead of GitHub's API, which allows 60 requests an hour per IP and failed on shared networks and CI runners. Downloads and checksum verification are unchanged.
 - **No "otel export paused" warning on every command** — with an expired stored token, each `ox` command printed this warning. The CLI now logs it at debug level; the daemon, which cannot refresh its own token, still warns.
 - **`ox init` no longer commits your other teams into the repo** — the committed `.sageox/.repo_*` marker now gets only the repo's Ledger URL. Before, it got the name and git URL of every team in your saved credentials, including teams the repo has nothing to do with, and every collaborator could read them. Markers written by older versions keep their `team_urls` until you remove them.

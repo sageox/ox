@@ -429,6 +429,9 @@ func runInit() error {
 	// Fetch user's teams and prompt for selection if multiple teams exist
 	var selectedTeamID string
 	var selectedTeamName string
+	// the user's teams, kept when --team is passed through unresolved, so a
+	// server rejection can say what would have worked
+	var unresolvedTeamCandidates []api.TeamMembership
 	if initTeamFlag != "" {
 		// --team has always taken the raw flag value and sent it to the API. Resolving
 		// it against the user's teams first means the slug `ox team list` prints and the
@@ -448,12 +451,23 @@ func runInit() error {
 			cli.PrintWarning(fmt.Sprintf("Could not check --team against your teams: %s",
 				cli.SanitizeTerminalText(fetchErr.Error())))
 		}
+		if fetchErr == nil && len(resolveTeamMembership(memberships, initTeamFlag)) == 0 {
+			// Right after a fresh login the list can be empty or miss a team just
+			// joined (#1335), so ask once more before passing the value through.
+			slog.Debug("--team not in the fetched team list; fetching it once more", "team", strings.TrimSpace(initTeamFlag))
+			if again, againErr := fetchTeamMemberships(); againErr == nil {
+				memberships = again
+			}
+		}
 		resolvedID, resolvedName, err := resolveTeamFlag(initTeamFlag, memberships, fetchErr)
 		if err != nil {
 			return err
 		}
 		selectedTeamID = resolvedID
 		selectedTeamName = resolvedName
+		if len(resolveTeamMembership(memberships, initTeamFlag)) == 0 {
+			unresolvedTeamCandidates = usableTeams(memberships)
+		}
 	} else {
 		// fetch teams from API to determine if selection is needed
 		teamClient := api.NewRepoClient()
@@ -971,6 +985,10 @@ func runInit() error {
 	if err != nil {
 		// API registration failed - rollback all tracked files
 		tracker.rollback(initQuiet)
+		if len(unresolvedTeamCandidates) > 0 {
+			return fmt.Errorf("failed to register with SageOx API: %w\n\n--team %q matched none of your teams: %s",
+				err, strings.TrimSpace(initTeamFlag), formatTeamCandidates(unresolvedTeamCandidates))
+		}
 		return fmt.Errorf("failed to register with SageOx API: %w", err)
 	} else if resp == nil {
 		// 404 - endpoint not yet deployed
