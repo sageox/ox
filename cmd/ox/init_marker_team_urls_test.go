@@ -19,6 +19,8 @@ import (
 func TestUpdateMarkerWithCachedURLs_WritesNoTeamURLs(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	prevForceFile := gitserver.TestSetForceFileStorage(true)
+	t.Cleanup(func() { gitserver.TestSetForceFileStorage(prevForceFile) })
 
 	const endpointURL = "https://api.sageox.ai"
 	const ledgerURL = "https://git.sageox.ai/ledgers/repo.git"
