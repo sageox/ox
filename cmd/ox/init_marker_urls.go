@@ -41,26 +41,15 @@ func updateMarkerWithCachedURLs(sageoxDir, repoID, endpointURL string) error {
 		return fmt.Errorf("no git credentials available")
 	}
 
-	// extract URLs from credentials
-	urls := &repoMarkerURLs{
-		TeamURLs: make(map[string]string),
-	}
-
+	// Only the ledger URL. The marker is committed, and the credentials list
+	// every team the user belongs to, so team URLs stay out of it (#1336).
+	var ledgerURL string
 	for _, repo := range creds.Repos {
-		switch repo.Type {
-		case "ledger":
-			urls.LedgerURL = repo.URL
-		case "team-context":
-			// extract team ID from repo name (e.g., "team-abc123" -> "abc123")
-			teamID := strings.TrimPrefix(repo.Name, "team-")
-			if teamID != "" {
-				urls.TeamURLs[teamID] = repo.URL
-			}
+		if repo.Type == "ledger" {
+			ledgerURL = repo.URL
 		}
 	}
-
-	// if no URLs found, nothing to update
-	if urls.LedgerURL == "" && len(urls.TeamURLs) == 0 {
+	if ledgerURL == "" {
 		return nil
 	}
 
@@ -79,14 +68,8 @@ func updateMarkerWithCachedURLs(sageoxDir, repoID, endpointURL string) error {
 		return fmt.Errorf("failed to parse marker: %w", err)
 	}
 
-	// update URLs and timestamp
-	marker.LedgerURL = urls.LedgerURL
-	if marker.TeamURLs == nil {
-		marker.TeamURLs = make(map[string]string)
-	}
-	for teamID, url := range urls.TeamURLs {
-		marker.TeamURLs[teamID] = url
-	}
+	// update URL and timestamp
+	marker.LedgerURL = ledgerURL
 	now := time.Now().UTC()
 	marker.URLsCachedAt = now.Format(time.RFC3339)
 	marker.UpdatedAt = now.Format(time.RFC3339)
