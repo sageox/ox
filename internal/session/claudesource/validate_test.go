@@ -718,6 +718,17 @@ func TestValidateOwnsLinkedWorktreesOfTheSameRepository(t *testing.T) {
 			addWorktree(t, newRepo(t, root), "repo-wt", wt, false)
 			return root, filepath.Join(wt, "pkg")
 		}},
+		"outside worktree registered with a relative path (git --relative-paths)": {owned: true, layout: func(t *testing.T, outer string) (string, string) {
+			root := filepath.Join(outer, "repo")
+			wt := filepath.Join(outer, "repo-wt")
+			gitDir := addWorktree(t, newRepo(t, root), "repo-wt", wt, true)
+			rel, err := filepath.Rel(gitDir, filepath.Join(wt, ".git"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			write(t, filepath.Join(gitDir, "gitdir"), rel+"\n")
+			return root, wt
+		}},
 		"main checkout when the root is a worktree": {owned: true, layout: func(t *testing.T, outer string) (string, string) {
 			root, _ := worktreeRoot(t, outer)
 			return root, filepath.Join(outer, "main", "pkg")

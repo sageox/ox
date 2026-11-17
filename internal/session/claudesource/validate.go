@@ -325,16 +325,23 @@ func checkoutContaining(repoRoot, cwd string) (string, error) {
 		return "", err
 	}
 	for _, entry := range entries {
-		data, readErr := os.ReadFile(filepath.Join(commonDir, "worktrees", entry.Name(), "gitdir"))
+		registry := filepath.Join(commonDir, "worktrees", entry.Name())
+		data, readErr := os.ReadFile(filepath.Join(registry, "gitdir"))
 		if errors.Is(readErr, fs.ErrNotExist) {
 			continue
 		}
 		if readErr != nil {
 			return "", readErr
 		}
-		if dotGit := strings.TrimSpace(string(data)); filepath.IsAbs(dotGit) {
-			checkouts = append(checkouts, checkout{root: filepath.Dir(filepath.Clean(dotGit))})
+		dotGit := strings.TrimSpace(string(data))
+		if dotGit == "" {
+			continue
 		}
+		// git 2.48+ (--relative-paths) records it relative to the registry dir
+		if !filepath.IsAbs(dotGit) {
+			dotGit = filepath.Join(registry, dotGit)
+		}
+		checkouts = append(checkouts, checkout{root: filepath.Dir(filepath.Clean(dotGit))})
 	}
 
 	best := ""

@@ -583,6 +583,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// re-discover session file if it was empty at start time
 	// (Claude Code session JSONL may not have existed yet when recording started)
+	cacheHasEntries := state.SessionPath != "" && session.HasSubstantiveEntries(filepath.Join(state.SessionPath, "raw.jsonl"))
 	var discoveryErr error
 	if state.SessionFile == "" && state.AdapterName != "" && state.AdapterName != "generic" && state.AdapterName != "cursor" {
 		if sf, findErr := discoverNativeSessionFile(projectRoot, state); findErr == nil {
@@ -593,7 +594,11 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 			if repoRoot == "" {
 				repoRoot = projectRoot
 			}
-			fmt.Fprintf(os.Stderr, "\nThe %s session file was not found for this repo, so nothing from it was uploaded yet.\n  %v\n%s\n", state.AdapterName, findErr, undiscoveredSessionNextSteps(state))
+			if cacheHasEntries {
+				fmt.Fprintf(os.Stderr, "\nThe %s session file was not found for this repo; saving the turns already captured instead.\n  %v\n", state.AdapterName, findErr)
+			} else {
+				fmt.Fprintf(os.Stderr, "\nThe %s session file was not found for this repo, so nothing from it was uploaded yet.\n  %v\n%s\n", state.AdapterName, findErr, undiscoveredSessionNextSteps(state))
+			}
 			_ = doctor.SetSessionRecoveryInfo(projectRoot, doctor.SessionRecoveryInfo{
 				AgentID:       state.AgentID,
 				AdapterName:   state.AdapterName,
@@ -612,7 +617,6 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// would, rather than leave the recording live for 'ox session upload' to
 	// refuse. An empty cache keeps the recording: an undiscovered source does
 	// not prove the session empty, and a later stop can still find it.
-	cacheHasEntries := state.SessionPath != "" && session.HasSubstantiveEntries(filepath.Join(state.SessionPath, "raw.jsonl"))
 	var processResult *agentSessionResult
 	if state.SessionFile != "" || state.AdapterName == "cursor" || cacheHasEntries {
 		processStart := time.Now()

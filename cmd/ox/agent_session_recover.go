@@ -199,6 +199,7 @@ func recoverRecording(inst *agentinstance.Instance, projectRoot string, state *s
 	// waits for retry. A cache that already holds captured turns is another
 	// matter: each batch was ownership-checked as it was appended, so it
 	// recovers from the cache like any other recording.
+	discovered := false
 	if state.AdapterName == "claude-code" && state.SessionFile == "" && state.WatchMode != "tail" &&
 		(state.SessionPath == "" || !session.HasSubstantiveEntries(filepath.Join(state.SessionPath, ledgerFileRaw))) {
 		sf, findErr := discoverNativeSessionFile(projectRoot, state)
@@ -207,15 +208,23 @@ func recoverRecording(inst *agentinstance.Instance, projectRoot string, state *s
 				firstNonEmpty(state.WorkspacePath, projectRoot), findErr, undiscoveredSessionNextSteps(state))
 		}
 		state.SessionFile = sf
+		discovered = true
 	}
 
 	slog.Info("recovering stale session", "agent_id", state.AgentID, "session_path", state.SessionPath)
 
 	// strategy 1: adapter session file still exists -- use normal processing
 	if state.SessionFile != "" {
-		if _, err := os.Stat(state.SessionFile); err == nil {
+		_, err := os.Stat(state.SessionFile)
+		if err == nil {
 			slog.Info("adapter session file found, using normal stop flow")
 			return recoverViaNormalStop(inst, projectRoot, state)
+		}
+		if discovered {
+			// the cache holds no turns, so it cannot stand in for a transcript
+			// that vanished after discovery
+			return fmt.Errorf("claude session file %s cannot be read (%w); nothing was published.\n%s",
+				state.SessionFile, err, undiscoveredSessionNextSteps(state))
 		}
 	}
 

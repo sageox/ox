@@ -321,6 +321,7 @@ func TestFindSessionFile_SessionInAWorktreeOutsideTheRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	git := func(dir string, args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", append([]string{"-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"}, args...)...)
