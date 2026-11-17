@@ -271,6 +271,43 @@ func StampProjectAuthor(repoPath, name, email string) error {
 	return stampAuthor(repoPath, name, email, false)
 }
 
+// identityOverrideKeys outrank user.name and user.email in every config scope,
+// so a machine's global author.email or committer.email would otherwise
+// author the commits ox makes under its stamp. ox writes them locally with the
+// identity, which outranks the global values.
+var identityOverrideKeys = []string{"author.name", "author.email", "committer.name", "committer.email"}
+
+// overrideValue is what ox writes to an identityOverrideKeys key for name and
+// email; "" means the key is left unset (git rejects an empty name).
+func overrideValue(key, name, email string) string {
+	if strings.HasSuffix(key, ".email") {
+		return email
+	}
+	return name
+}
+
+// readOverrides reads repoPath's local identityOverrideKeys values.
+func readOverrides(repoPath string) map[string]string {
+	got := make(map[string]string, len(identityOverrideKeys))
+	for _, key := range identityOverrideKeys {
+		got[key], _ = readGitConfigLocal(repoPath, key)
+	}
+	return got
+}
+
+// unsetOverrides removes the local identityOverrideKeys values that name and
+// email would have written, leaving any value someone else set.
+func unsetOverrides(repoPath string, overrides map[string]string, name, email string) error {
+	for _, key := range identityOverrideKeys {
+		if v := overrides[key]; v != "" && v == overrideValue(key, name, email) {
+			if err := unsetLocalConfig(repoPath, key); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // stampAuthor writes name and email as repoPath's local commit identity, or,
 // with email "", removes an identity ox stamped earlier and leaves any other.
 // replaceForeign says whether an identity ox did not stamp may be replaced.
@@ -282,6 +319,7 @@ func stampAuthor(repoPath, name, email string, replaceForeign bool) error {
 	current, _ := readGitConfigLocal(repoPath, "user.email")
 	currentName, _ := readGitConfigLocal(repoPath, "user.name")
 	stamp, _ := readGitConfigLocal(repoPath, authorStampKey)
+	overrides := readOverrides(repoPath)
 	ours := ownsIdentity(stamp, currentName, current)
 	if stamp != "" && !ours {
 		if err := unsetLocalConfig(repoPath, authorStampKey); err != nil {
@@ -296,6 +334,9 @@ func stampAuthor(repoPath, name, email string, replaceForeign bool) error {
 		}
 		// The stamp goes last: if removing user.name or user.email fails,
 		// the next call still finds it and finishes.
+		if err := unsetOverrides(repoPath, overrides, currentName, current); err != nil {
+			return err
+		}
 		for _, key := range []string{"user.name", "user.email", authorStampKey} {
 			if err := unsetLocalConfig(repoPath, key); err != nil {
 				return err
@@ -304,11 +345,19 @@ func stampAuthor(repoPath, name, email string, replaceForeign bool) error {
 		return nil
 	}
 
-	if !ours && !replaceForeign && (current != "" || currentName != "") {
+	foreignOverride := false
+	for _, v := range overrides {
+		foreignOverride = foreignOverride || v != ""
+	}
+	if !ours && !replaceForeign && (current != "" || currentName != "" || foreignOverride) {
 		return nil
 	}
 	want := stampValue(name, email)
-	if current == email && currentName == name && stamp == want {
+	overridesMatch := true
+	for _, key := range identityOverrideKeys {
+		overridesMatch = overridesMatch && overrides[key] == overrideValue(key, name, email)
+	}
+	if current == email && currentName == name && stamp == want && overridesMatch {
 		return nil
 	}
 	// Each step below leaves a state ownsIdentity still reads as ox's, so a
@@ -317,6 +366,9 @@ func stampAuthor(repoPath, name, email string, replaceForeign bool) error {
 	// it first, under the stamp that names it; then the stamp names the new
 	// identity before either field holds it.
 	if ours && stamp != want {
+		if err := unsetOverrides(repoPath, overrides, currentName, current); err != nil {
+			return err
+		}
 		for _, key := range []string{"user.name", "user.email"} {
 			if err := unsetLocalConfig(repoPath, key); err != nil {
 				return err
@@ -325,6 +377,19 @@ func stampAuthor(repoPath, name, email string, replaceForeign bool) error {
 	}
 	for _, kv := range [][2]string{{authorStampKey, want}, {"user.name", name}, {"user.email", email}} {
 		if err := setLocalConfig(repoPath, kv[0], kv[1]); err != nil {
+			return err
+		}
+	}
+	for _, key := range identityOverrideKeys {
+		v := overrideValue(key, name, email)
+		var err error
+		switch {
+		case v != "":
+			err = setLocalConfig(repoPath, key, v)
+		case overrides[key] != "":
+			err = unsetLocalConfig(repoPath, key)
+		}
+		if err != nil {
 			return err
 		}
 	}
