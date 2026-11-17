@@ -51,6 +51,11 @@ jobs:
             echo "::error::Release tags start with v."
             exit 1
           fi
+          # Only main's reviewed copy of this workflow may run.
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Dispatch from main: gh workflow run npm-publish.yml --ref main -f tag=$RELEASE_TAG"
+            exit 1
+          fi
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft \
             | jq -e '.isDraft == false' >/dev/null || {
             echo "::error::$RELEASE_TAG is not a published release. Publish it through release.yml first."
@@ -60,8 +65,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           ref: refs/tags/${{ env.RELEASE_TAG }}
           persist-credentials: false
+
+      # The npm environment checks the ref this workflow was dispatched from,
+      # not the tag. Without this step, a collaborator could publish a release
+      # for an unreviewed commit and dispatch from main to put it on npm.
+      - name: Require the tagged commit to be on main
+        run: |
+          # Fully qualified: a tag named main or origin/main would otherwise win
+          # Git's short-name lookup over the real branch.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main || {
+            echo "::error::$RELEASE_TAG ($(git rev-parse --short HEAD)) is not on main. Only commits that landed on main are published."
+            exit 1
+          }
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
