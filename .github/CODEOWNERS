@@ -7,6 +7,3 @@
 /.amp/ @faridun-m @galexy @shrimalmadhur @rsnodgrass @lpavel @vikgup @dedhaw @alex-sageox @realtobyfu @port8080 @scott-sageox
 # Owners also review this file.
 /.github/CODEOWNERS @faridun-m
-# A push that both changes .amp/ and deletes or edits this workflow in the
-# same commit would silence its own alert before anyone can review it.
-/.github/workflows/amp-dir-alert.yml @faridun-m
