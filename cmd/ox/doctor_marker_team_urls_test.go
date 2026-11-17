@@ -50,6 +50,12 @@ func TestCheckMarkerTeamURLsIn(t *testing.T) {
 			wantKeep:    []string{".repo_01abc"},
 		},
 		{
+			name:        "unreadable marker warns instead of ok",
+			markers:     map[string]string{".repo_04jkl": `{not json`, ".repo_02def": cleanMarker},
+			wantPassed:  true, // WarningCheck reports passed=true
+			wantWarning: true,
+		},
+		{
 			name:       "team_urls removed with fix",
 			markers:    map[string]string{".repo_01abc": legacyMarker, ".repo_02def": cleanMarker},
 			fix:        true,

@@ -34,7 +34,7 @@ func checkMarkerTeamURLsIn(sageoxDir string, fix bool) checkResult {
 		return WarningCheck(markerTeamURLsCheckName, "read error", err.Error())
 	}
 
-	var found, stripped, failed []string
+	var found, stripped, failed, unreadable []string
 	markers := 0
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasPrefix(entry.Name(), ".repo_") {
@@ -45,11 +45,13 @@ func checkMarkerTeamURLsIn(sageoxDir string, fix bool) checkResult {
 		markerPath := filepath.Join(sageoxDir, entry.Name())
 		data, err := os.ReadFile(markerPath)
 		if err != nil {
+			unreadable = append(unreadable, entry.Name())
 			continue
 		}
 		// Generic map so fields this ox version doesn't know about survive the rewrite.
 		var fields map[string]json.RawMessage
 		if json.Unmarshal(data, &fields) != nil {
+			unreadable = append(unreadable, entry.Name())
 			continue
 		}
 		if _, ok := fields["team_urls"]; !ok {
@@ -90,6 +92,10 @@ func checkMarkerTeamURLsIn(sageoxDir string, fix bool) checkResult {
 		return WarningCheck(markerTeamURLsCheckName,
 			fmt.Sprintf("%s lists the names of the user's teams", strings.Join(found, ", ")),
 			"Run `ox doctor --fix` to remove team_urls from the committed marker")
+	}
+	if len(unreadable) > 0 {
+		sort.Strings(unreadable)
+		return WarningCheck(markerTeamURLsCheckName, "could not read marker", strings.Join(unreadable, ", "))
 	}
 	return PassedCheck(markerTeamURLsCheckName, "ok")
 }
