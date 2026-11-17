@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/go-connections/nat"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -176,8 +177,8 @@ func createGiteaFixture() (*giteaFixture, error) {
 			"GITEA__security__INSTALL_LOCK":   "true",
 		},
 		HostConfigModifier: func(hc *container.HostConfig) {
-			hc.PortBindings = nat.PortMap{
-				"3000/tcp": []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: giteaHostPort}},
+			hc.PortBindings = network.PortMap{
+				network.MustParsePort("3000/tcp"): []network.PortBinding{{HostIP: netip.IPv4Unspecified(), HostPort: giteaHostPort}},
 			}
 		},
 		WaitingFor: wait.ForHTTP("/api/v1/version").
