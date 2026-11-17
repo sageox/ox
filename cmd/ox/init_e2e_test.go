@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,6 +78,41 @@ func TestRunInit_PlainDoctorLeavesReadmeAndIndexAlone(t *testing.T) {
 	doctor(CheckSlugReadme)
 	assert.Empty(t, git("status", "--porcelain", "--", ".sageox/README.md"))
 	assert.Equal(t, []string{".sageox/notes.md"}, stagedPaths(t, env.Root))
+}
+
+// Skipped registration must still stage the README that plain doctor expects.
+func TestRunInit_RegistrationSkippedFinalizesReadme(t *testing.T) {
+	env := newOxE2E(t)
+	withInitFlags(t, env.TeamID)
+	initAgentsFlag = "claude-code"
+	env.OnRegister(func(api.RepoInitRequest) (int, any) {
+		return http.StatusNotFound, nil
+	})
+	require.NoError(t, runInit())
+	require.Len(t, env.InitRequests(), 1)
+
+	cfg, err := config.LoadProjectConfig(env.Root)
+	require.NoError(t, err)
+	require.NotEmpty(t, cfg.RepoID)
+	canonical := GetSageoxReadmeContent(cfg)
+	require.Contains(t, canonical, "/repo/"+cfg.RepoID)
+
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = env.Root
+		out, err := cmd.CombinedOutput()
+		require.NoErrorf(t, err, "git %v: %s", args, out)
+		return string(out)
+	}
+	assert.Equal(t, canonical, git("show", ":.sageox/README.md"))
+	git("commit", "-qm", "SageOx init without registration")
+
+	checks, err := runDoctorChecks(context.Background(), doctorOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", doctorLine(t, checks, ".sageox/README.md").message)
+	assert.Empty(t, git("status", "--porcelain", "--", ".sageox/README.md"))
+	assert.Empty(t, stagedPaths(t, env.Root))
 }
 
 // withInitFlags sets runInit's package-level flag vars and restores them, so a

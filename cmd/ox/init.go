@@ -1030,11 +1030,6 @@ func runInit() error {
 			cli.PrintSuccess(fmt.Sprintf("Registered with SageOx (team: %s)", formatTeamLabel(selectedTeamName, resp.TeamID)))
 		}
 
-		// update README.md with SageOx links now that we have repo_id and team_id
-		if err := finalizeGeneratedSageoxReadme(readmePath, cfg); err != nil {
-			cli.PrintWarning(fmt.Sprintf("Could not update README.md with links: %v", err))
-		}
-
 		// fetch git credentials from /api/v1/cli/repos (source of truth for team context URLs)
 		if err := fetchAndSaveGitCredentials(regClient); err != nil {
 			slog.Warn("failed to fetch git credentials", "error", err)
@@ -1087,13 +1082,15 @@ func runInit() error {
 				}
 			}
 		}
+	}
 
-		// re-stage .sageox/ files after API registration updated config.json
-		// and README.md with team_id, repo_id, and dashboard links
-		if isGitRepo(gitRoot) {
-			if err := ForceAddSageoxFiles(); err != nil {
-				cli.PrintWarning(fmt.Sprintf("Could not re-stage .sageox files: %v", err))
-			}
+	// Both successful paths have a repo ID, even if registration was skipped.
+	if err := finalizeGeneratedSageoxReadme(readmePath, cfg); err != nil {
+		cli.PrintWarning(fmt.Sprintf("Could not update README.md with links: %v", err))
+	}
+	if isGitRepo(gitRoot) {
+		if err := ForceAddSageoxFiles(); err != nil {
+			cli.PrintWarning(fmt.Sprintf("Could not re-stage .sageox files: %v", err))
 		}
 	}
 
