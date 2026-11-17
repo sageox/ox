@@ -39,7 +39,7 @@ Record Devin sessions, install ox with npx, import transcripts as discussions, a
 
 ### Security
 
-- **Plan review notes reach your AI coworker as untrusted text** — it weighs them as feedback and never follows them as instructions.
+- **Plan review notes reach your AI coworker as untrusted text** — it weighs them as feedback and is instructed not to follow instructions in them.
 - **Ledger recall stays inside its reminder** — Ledger text cannot end the reminder early or pass as an instruction.
 - **Credentials stay out of logs and terminal output** — error messages are scrubbed too, and failed uploads no longer print signed storage links.
 - **`ox coworker` commands only touch coworkers** — names that reach outside the coworkers folder are refused.
