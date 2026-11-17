@@ -88,51 +88,6 @@ func updateMarkerWithCachedURLs(sageoxDir, repoID, endpointURL string) error {
 	return nil
 }
 
-// UpdateMarkerTeamURL updates the marker file with a new team context URL.
-// This is called when a team context is added to the repository.
-// Exported for use by other commands (e.g., team context add).
-func UpdateMarkerTeamURL(sageoxDir, repoID, teamID, gitURL string) error {
-	if repoID == "" || teamID == "" || gitURL == "" {
-		return fmt.Errorf("missing required parameters")
-	}
-
-	uuidPart := extractUUIDSuffix(repoID)
-	markerPath := filepath.Join(sageoxDir, ".repo_"+uuidPart)
-
-	// read existing marker
-	data, err := os.ReadFile(markerPath)
-	if err != nil {
-		return fmt.Errorf("failed to read marker: %w", err)
-	}
-
-	var marker repoMarkerWithURLs
-	if err := json.Unmarshal(data, &marker); err != nil {
-		return fmt.Errorf("failed to parse marker: %w", err)
-	}
-
-	// update team URL and timestamp
-	if marker.TeamURLs == nil {
-		marker.TeamURLs = make(map[string]string)
-	}
-	marker.TeamURLs[teamID] = gitURL
-	now := time.Now().UTC()
-	marker.URLsCachedAt = now.Format(time.RFC3339)
-	marker.UpdatedAt = now.Format(time.RFC3339)
-	marker.Version = version.Version
-
-	// write updated marker
-	updatedData, err := json.MarshalIndent(marker, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal marker: %w", err)
-	}
-
-	if err := os.WriteFile(markerPath, updatedData, 0644); err != nil {
-		return fmt.Errorf("failed to write marker: %w", err)
-	}
-
-	return nil
-}
-
 // ReadMarkerURLs reads cached URLs from the marker file for the given endpoint.
 // Returns nil if no marker found or no URLs cached.
 // Does NOT check cache expiry - use ReadMarkerURLsWithExpiry for that.

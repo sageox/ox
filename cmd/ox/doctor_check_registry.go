@@ -103,6 +103,15 @@ func init() {
 		Run:         func(fix bool) checkResult { return checkRepoMarker() },
 	})
 
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugMarkerTeamURLs,
+		Name:        "Marker team URLs",
+		Category:    "Project Structure",
+		FixLevel:    FixLevelSuggested,
+		Description: "Removes team_urls (names of every team the user belongs to) from committed .repo_* markers",
+		Run:         checkMarkerTeamURLs,
+	})
+
 	// ============================================================
 	// Git Status checks
 	// ============================================================
