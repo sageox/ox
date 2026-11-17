@@ -179,3 +179,79 @@ func TestMarkerTeamURLsCheckRegistered(t *testing.T) {
 		t.Errorf("FixLevel = %v, want FixLevelSuggested (applied by ox doctor --fix)", check.FixLevel)
 	}
 }
+
+const legacyTeamURLsMarker = `{"repo_id": "repo_01abc", "team_urls": {"Acme Platform": "https://git.sageox.ai/a.git"}}`
+
+func TestCheckMarkerTeamURLs_DoesNotFollowSymlinkedMarker(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(outside, []byte(legacyTeamURLsMarker), 0644); err != nil {
+		t.Fatal(err)
+	}
+	sageoxDir := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(sageoxDir, ".repo_01abc")); err != nil {
+		t.Fatal(err)
+	}
+
+	result := checkMarkerTeamURLsIn(sageoxDir, true)
+
+	if !result.warning || !strings.Contains(result.message+result.detail, ".repo_01abc") {
+		t.Errorf("want warning naming .repo_01abc, got passed=%v warning=%v (%s: %s)",
+			result.passed, result.warning, result.message, result.detail)
+	}
+	if data, _ := os.ReadFile(outside); string(data) != legacyTeamURLsMarker {
+		t.Errorf("file outside .sageox/ was rewritten through the symlink:\n%s", data)
+	}
+}
+
+func TestCheckMarkerTeamURLs_DoesNotRewriteThroughSymlinkedSageoxDir(t *testing.T) {
+	realDir := t.TempDir()
+	marker := filepath.Join(realDir, ".repo_01abc")
+	if err := os.WriteFile(marker, []byte(legacyTeamURLsMarker), 0644); err != nil {
+		t.Fatal(err)
+	}
+	sageoxDir := filepath.Join(t.TempDir(), ".sageox")
+	if err := os.Symlink(realDir, sageoxDir); err != nil {
+		t.Fatal(err)
+	}
+
+	result := checkMarkerTeamURLsIn(sageoxDir, true)
+
+	if !result.warning {
+		t.Errorf("want warning, got passed=%v (%s: %s)", result.passed, result.message, result.detail)
+	}
+	if data, _ := os.ReadFile(marker); string(data) != legacyTeamURLsMarker {
+		t.Errorf("marker behind a symlinked .sageox/ was rewritten:\n%s", data)
+	}
+}
+
+func TestCheckMarkerTeamURLs_PartialFailureReportsCleanupAndProblems(t *testing.T) {
+	sageoxDir := t.TempDir()
+	write := func(name, content string, perm os.FileMode) {
+		t.Helper()
+		path := filepath.Join(sageoxDir, name)
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, perm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(".repo_01abc", legacyTeamURLsMarker, 0644)
+	write(".repo_02def", legacyTeamURLsMarker, 0444) // cannot be replaced
+	write(".repo_03ghi", `{not json`, 0644)
+
+	result := checkMarkerTeamURLsIn(sageoxDir, true)
+
+	if !result.warning {
+		t.Fatalf("want warning, got passed=%v (%s: %s)", result.passed, result.message, result.detail)
+	}
+	got := result.message + " " + result.detail
+	for _, want := range []string{".repo_01abc", "commit .sageox/", ".repo_02def", ".repo_03ghi"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("result missing %q: %s", want, got)
+		}
+	}
+	if data, _ := os.ReadFile(filepath.Join(sageoxDir, ".repo_02def")); string(data) != legacyTeamURLsMarker {
+		t.Errorf("marker that could not be replaced was changed:\n%s", data)
+	}
+}
