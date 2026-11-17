@@ -22,8 +22,9 @@ on:
         required: true
         type: string
 
+# One run at a time across all tags, so two runs cannot race over `latest`.
 concurrency:
-  group: npm-publish-${{ inputs.tag }}
+  group: npm-publish
   cancel-in-progress: false
 
 permissions:
@@ -112,6 +113,14 @@ jobs:
           version=${RELEASE_TAG#v}
           tag=latest
           case "$version" in *-*) tag=next ;; esac
+          # A retry of an older release must not move `latest` back to it.
+          if [ "$tag" = latest ]; then
+            current=$(npm view @sageox/ox dist-tags.latest 2>/dev/null || true)
+            if [ -n "$current" ] && [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -1)" != "$version" ]; then
+              echo "@sageox/ox@latest is $current, newer than $version; publishing $version under the previous tag"
+              tag=previous
+            fi
+          fi
           for dir in "$RUNNER_TEMP"/npm/ox-*/ "$RUNNER_TEMP/npm/ox/"; do
             name=$(jq -r .name "$dir/package.json")
             if npm view "$name@$version" version >/dev/null 2>&1; then
