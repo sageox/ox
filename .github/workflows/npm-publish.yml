@@ -1,0 +1,142 @@
+name: Publish to npm
+
+# npm publishes the binaries of a public release as @sageox/ox, so
+# `npx @sageox/ox@latest install` never ships what GitHub does not. release.yml
+# calls this after it publishes a release. Dispatch it by hand only to publish a
+# release whose npm job failed:
+#   gh workflow run npm-publish.yml --ref main -f tag=v0.26.0
+# The token reaches only the last step, which runs no repository code; runs skip
+# versions npm already has. NPM_TOKEN lives in the npm environment, whose
+# deployment rules admit main alone (release.yml's verify-draft checks that).
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Published release tag (e.g., v0.8.0)'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Published release tag (e.g., v0.8.0)'
+        required: true
+        type: string
+
+# One run at a time across all tags, so two runs cannot race over `latest`.
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ inputs.tag }}
+
+jobs:
+  publish-npm:
+    if: github.repository == 'sageox/ox'
+    # npm accepts --provenance only from GitHub-hosted runners; it rejects
+    # Blacksmith's as self-hosted (E422, v0.26.0).
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - name: Require a published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$RELEASE_TAG" != v* ]]; then
+            echo "::error::Release tags start with v."
+            exit 1
+          fi
+          # Only main's reviewed copy of this workflow may run.
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Dispatch from main: gh workflow run npm-publish.yml --ref main -f tag=$RELEASE_TAG"
+            exit 1
+          fi
+          # Immutable, like release.yml requires: otherwise a release editor could
+          # swap both the archives and checksums.txt after publication.
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable \
+            | jq -e '.isDraft == false and .isImmutable == true' >/dev/null || {
+            echo "::error::$RELEASE_TAG is not a published, immutable release. Publish it through release.yml first."
+            exit 1
+          }
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      # The npm environment checks the ref this workflow was dispatched from,
+      # not the tag. Without this step, a collaborator could publish a release
+      # for an unreviewed commit and dispatch from main to put it on npm.
+      - name: Require the tagged commit to be on main
+        run: |
+          # Fully qualified: a tag named main or origin/main would otherwise win
+          # Git's short-name lookup over the real branch.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main || {
+            echo "::error::$RELEASE_TAG ($(git rev-parse --short HEAD)) is not on main. Only commits that landed on main are published."
+            exit 1
+          }
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download and verify the release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir "$RUNNER_TEMP/archives"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/archives" --pattern 'ox_*.tar.gz' --pattern checksums.txt
+          cd "$RUNNER_TEMP/archives"
+          sha256sum --check --strict --ignore-missing checksums.txt
+
+      - name: Build the npm packages
+        run: node scripts/npm-packages.mjs --version "${RELEASE_TAG#v}" --archives "$RUNNER_TEMP/archives" --out "$RUNNER_TEMP/npm"
+
+      # Platform packages first, so the launcher never points at a missing one.
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::warning::NPM_TOKEN is not set; @sageox/ox was not published."
+            exit 0
+          fi
+          version=${RELEASE_TAG#v}
+          tag=latest
+          case "$version" in *-*) tag=next ;; esac
+          # A retry of an older release must not move `latest` back to it.
+          if [ "$tag" = latest ]; then
+            # Only a missing package counts as "no latest yet"; any other lookup
+            # failure stops the run rather than guess.
+            if ! current=$(npm view @sageox/ox dist-tags.latest 2>"$RUNNER_TEMP/npm-view.err"); then
+              grep -q E404 "$RUNNER_TEMP/npm-view.err" || {
+                cat "$RUNNER_TEMP/npm-view.err" >&2
+                echo "::error::Could not read @sageox/ox@latest from npm; nothing was published. Dispatch again."
+                exit 1
+              }
+              current=
+            fi
+            if [ -n "$current" ] && [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -1)" != "$version" ]; then
+              echo "@sageox/ox@latest is $current, newer than $version; publishing $version under the previous tag"
+              tag=previous
+            fi
+          fi
+          for dir in "$RUNNER_TEMP"/npm/ox-*/ "$RUNNER_TEMP/npm/ox/"; do
+            name=$(jq -r .name "$dir/package.json")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already on npm"
+              continue
+            fi
+            npm publish "$dir" --access public --provenance --tag "$tag" --ignore-scripts
+          done
