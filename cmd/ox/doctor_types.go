@@ -113,6 +113,7 @@ const (
 	CheckSlugSageoxGitignore = "sageox-gitignore"
 	CheckSlugReadme          = "readme"
 	CheckSlugRepoMarker      = "repo-marker"
+	CheckSlugMarkerTeamURLs  = "marker-team-urls"
 
 	// Git Repository Health checks
 	CheckSlugLedgerPath         = "ledger-path"
