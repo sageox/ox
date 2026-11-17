@@ -76,6 +76,31 @@ func TestStampProjectAuthor_Overrides(t *testing.T) {
 		assert.Equal(t, [2]string{}, localIdentity(t, dir))
 	})
 
+	t.Run("a person's replacement of the stamp drops the overrides", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, exec.Command("git", "-C", dir, "init", "--quiet").Run())
+		require.NoError(t, StampProjectAuthor(dir, coworkerAuthor[0], coworkerAuthor[1]))
+		setLocalIdentity(t, dir, personAuthor, "")
+		require.NoError(t, StampProjectAuthor(dir, coworkerAuthor[0], coworkerAuthor[1]))
+		for _, key := range identityOverrideKeys {
+			v, err := readGitConfigLocal(dir, key)
+			require.NoError(t, err)
+			assert.Empty(t, v, key)
+		}
+		assert.Equal(t, personAuthor, localIdentity(t, dir))
+	})
+
+	t.Run("a person's edit of only author.email is kept", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, exec.Command("git", "-C", dir, "init", "--quiet").Run())
+		require.NoError(t, StampProjectAuthor(dir, coworkerAuthor[0], coworkerAuthor[1]))
+		require.NoError(t, exec.Command("git", "-C", dir, "config", "author.email", "mine@example.com").Run())
+		require.NoError(t, StampProjectAuthor(dir, coworkerAuthor[0], coworkerAuthor[1]))
+		v, err := readGitConfigLocal(dir, "author.email")
+		require.NoError(t, err)
+		assert.Equal(t, "mine@example.com", v)
+	})
+
 	t.Run("a rename replaces the overrides", func(t *testing.T) {
 		dir := t.TempDir()
 		require.NoError(t, exec.Command("git", "-C", dir, "init", "--quiet").Run())

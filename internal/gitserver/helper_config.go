@@ -295,6 +295,26 @@ func readOverrides(repoPath string) map[string]string {
 	return got
 }
 
+// overridesEdited reports whether someone changed a local identityOverrideKeys
+// value away from the identity name and email ox stamped.
+func overridesEdited(overrides map[string]string, name, email string) bool {
+	for _, key := range identityOverrideKeys {
+		if v := overrides[key]; v != "" && v != overrideValue(key, name, email) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseStamp splits an authorStampKey value "name <email>" into its parts.
+func parseStamp(stamp string) (name, email string, ok bool) {
+	i := strings.LastIndex(stamp, " <")
+	if i < 0 || !strings.HasSuffix(stamp, ">") {
+		return "", "", false
+	}
+	return stamp[:i], stamp[i+2 : len(stamp)-1], true
+}
+
 // unsetOverrides removes the local identityOverrideKeys values that name and
 // email would have written, leaving any value someone else set.
 func unsetOverrides(repoPath string, overrides map[string]string, name, email string) error {
@@ -320,8 +340,20 @@ func stampAuthor(repoPath, name, email string, replaceForeign bool) error {
 	currentName, _ := readGitConfigLocal(repoPath, "user.name")
 	stamp, _ := readGitConfigLocal(repoPath, authorStampKey)
 	overrides := readOverrides(repoPath)
-	ours := ownsIdentity(stamp, currentName, current)
+	ours := ownsIdentity(stamp, currentName, current) && !overridesEdited(overrides, currentName, current)
 	if stamp != "" && !ours {
+		// The overrides ox wrote with the stamp go with it, so they never
+		// outrank the identity someone replaced it with.
+		if name, email, ok := parseStamp(stamp); ok {
+			if err := unsetOverrides(repoPath, overrides, name, email); err != nil {
+				return err
+			}
+			for _, key := range identityOverrideKeys {
+				if overrides[key] == overrideValue(key, name, email) {
+					overrides[key] = ""
+				}
+			}
+		}
 		if err := unsetLocalConfig(repoPath, authorStampKey); err != nil {
 			return err
 		}
