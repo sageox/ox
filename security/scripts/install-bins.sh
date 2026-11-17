@@ -98,6 +98,9 @@ fetch_tarball() {
 if have_cached opengrep; then
   echo "✓ opengrep cached"; link_into_bin opengrep
 else
+  # Pinned: v2.0.0 renamed the Linux assets (manylinux_* -> linux_*), so
+  # releases/latest broke every install. Bump deliberately.
+  OPENGREP_VERSION="v1.33.1"
   case "${OS}-${ARCH}" in
     linux-amd64)  OPENGREP_ASSET="opengrep_manylinux_x86" ;;
     linux-arm64)  OPENGREP_ASSET="opengrep_manylinux_aarch64" ;;
@@ -106,7 +109,7 @@ else
     *) echo "unsupported opengrep platform: ${OS}-${ARCH}" >&2; exit 1 ;;
   esac
   fetch_tarball "opengrep" \
-    "https://github.com/opengrep/opengrep/releases/latest/download/${OPENGREP_ASSET}" \
+    "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/${OPENGREP_ASSET}" \
     "bin" "opengrep"
 fi
 
