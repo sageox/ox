@@ -1,6 +1,7 @@
 package gitserver
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -110,4 +111,51 @@ func TestStampProjectAuthor_Overrides(t *testing.T) {
 		want := stampOf(coworkerAuthor)
 		assert.Equal(t, want+"|"+want, commitIdentity(t, dir))
 	})
+}
+
+// Failure prevented: a config write that fails while ox clears or rewrites its
+// overrides is swallowed, or leaves a state the next call cannot finish.
+func TestStampAuthor_OverrideWriteFailuresAreReported(t *testing.T) {
+	oldAuthor := [2]string{"Old Rip", "agt_old@ai-coworker.invalid"}
+	for _, tc := range []struct {
+		name    string
+		person  bool      // a person replaces user.* after the first stamp
+		then    [2]string // the second stamp call's identity
+		project bool
+	}{
+		{"person replaces the stamp", true, coworkerAuthor, true},
+		{"removing the stamp", false, [2]string{}, true},
+		{"replacing its own stamp", false, coworkerAuthor, true},
+		{"an empty name drops the name overrides", false, [2]string{"", coworkerAuthor[1]}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, exec.Command("git", "-C", dir, "init", "--quiet").Run())
+			require.NoError(t, stampAuthor(dir, oldAuthor[0], oldAuthor[1], true))
+			if tc.person {
+				setLocalIdentity(t, dir, personAuthor, "")
+			}
+			failConfigWrite = func() error { return errors.New("interrupted") }
+			err := stampAuthor(dir, tc.then[0], tc.then[1], !tc.project)
+			failConfigWrite = nil
+			require.Error(t, err)
+			require.NoError(t, stampAuthor(dir, tc.then[0], tc.then[1], !tc.project))
+			if tc.then[0] == "" && tc.then[1] != "" {
+				v, err := readGitConfigLocal(dir, "author.name")
+				require.NoError(t, err)
+				assert.Empty(t, v)
+			}
+		})
+	}
+}
+
+// Failure prevented: a malformed stamp is read as an identity ox wrote.
+func TestParseStamp_RejectsMalformed(t *testing.T) {
+	for _, s := range []string{"true", "no-email", "Rip <agt_rip"} {
+		_, _, ok := parseStamp(s)
+		assert.False(t, ok, s)
+	}
+	name, email, ok := parseStamp(stampOf(coworkerAuthor))
+	assert.True(t, ok)
+	assert.Equal(t, coworkerAuthor, [2]string{name, email})
 }
