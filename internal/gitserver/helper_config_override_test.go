@@ -128,24 +128,38 @@ func TestStampAuthor_OverrideWriteFailuresAreReported(t *testing.T) {
 		{"replacing its own stamp", false, coworkerAuthor, true},
 		{"an empty name drops the name overrides", false, [2]string{"", coworkerAuthor[1]}, false},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		for failAt := 1; ; failAt++ {
 			dir := t.TempDir()
 			require.NoError(t, exec.Command("git", "-C", dir, "init", "--quiet").Run())
 			require.NoError(t, stampAuthor(dir, oldAuthor[0], oldAuthor[1], true))
 			if tc.person {
 				setLocalIdentity(t, dir, personAuthor, "")
 			}
-			failConfigWrite = func() error { return errors.New("interrupted") }
-			err := stampAuthor(dir, tc.then[0], tc.then[1], !tc.project)
-			failConfigWrite = nil
-			require.Error(t, err)
-			require.NoError(t, stampAuthor(dir, tc.then[0], tc.then[1], !tc.project))
-			if tc.then[0] == "" && tc.then[1] != "" {
-				v, err := readGitConfigLocal(dir, "author.name")
-				require.NoError(t, err)
-				assert.Empty(t, v)
+			writes := 0
+			failConfigWrite = func() error {
+				if writes++; writes == failAt {
+					return errors.New("interrupted")
+				}
+				return nil
 			}
-		})
+			interrupted := stampAuthor(dir, tc.then[0], tc.then[1], !tc.project) != nil
+			failConfigWrite = nil
+			require.NoError(t, stampAuthor(dir, tc.then[0], tc.then[1], !tc.project), "%s, interrupted at write %d", tc.name, failAt)
+
+			wantIdentity, wantOverrides := tc.then, tc.then
+			if tc.person {
+				wantIdentity, wantOverrides = personAuthor, [2]string{}
+			}
+			assert.Equal(t, wantIdentity, localIdentity(t, dir), "%s, interrupted at write %d", tc.name, failAt)
+			for _, key := range identityOverrideKeys {
+				v, err := readGitConfigLocal(dir, key)
+				require.NoError(t, err)
+				assert.Equal(t, overrideValue(key, wantOverrides[0], wantOverrides[1]), v, "%s: %s, interrupted at write %d", tc.name, key, failAt)
+			}
+			if !interrupted {
+				break // failAt is past the last write: every step has been interrupted
+			}
+		}
 	}
 }
 
