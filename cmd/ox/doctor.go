@@ -830,6 +830,11 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	projectChecks = append(projectChecks, checkReadmeFile(opts.shouldFix(CheckSlugReadme)))
 	// repo marker file
 	projectChecks = append(projectChecks, checkRepoMarker())
+	// legacy team_urls in markers (only show when found or just removed)
+	teamURLsCheck := checkMarkerTeamURLs(opts.shouldFix(CheckSlugMarkerTeamURLs))
+	if !teamURLsCheck.skipped && teamURLsCheck.message != "ok" {
+		projectChecks = append(projectChecks, teamURLsCheck)
+	}
 	// multiple endpoints check (only show if multiple endpoints detected)
 	multiEndpointCheck := checkMultipleEndpoints()
 	if multiEndpointCheck.warning {
