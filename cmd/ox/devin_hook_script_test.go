@@ -88,7 +88,7 @@ func (e *hookEnv) run(dir string, extraEnv []string, stdin string, args ...strin
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(stdin)
 	env := []string{}
-	for _, kv := range os.Environ() {
+	for _, kv := range os.Environ() { // safe: credential and state vars are filtered out below
 		k, _, _ := strings.Cut(kv, "=")
 		switch k {
 		case "HOME", "SAGEOX_TOKEN", "OX_SESSION_RECORDING", "OX_PROJECT_ROOT", "DEVIN_PROJECT_DIR", "CLAUDE_PROJECT_DIR", "OX_DEVIN_STATE":
