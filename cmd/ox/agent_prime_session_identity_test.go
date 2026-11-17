@@ -174,3 +174,61 @@ func TestRunAgentPrime_CappedHookPrimeDoesNotLicenseCompact(t *testing.T) {
 	repeat := primeWithHook(t, "", "")
 	requireFullPrime(t, repeat, "a bare prime after a capped hook prime must be full so the deferred context reaches the model")
 }
+
+// primedAgentID returns the AI coworker identity a prime recorded for one
+// native session.
+func primedAgentID(t *testing.T, sessionID string) (agentID string, parentPID int) {
+	t.Helper()
+	marker, err := ReadSessionMarker(sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, marker, "prime wrote no marker for native session %s", sessionID)
+	require.NotEmpty(t, marker.AgentID)
+	return marker.AgentID, marker.ParentPID
+}
+
+// asDetectedCodex makes every prime in the test run as a detected Codex under
+// the test's own ancestor process, the way every chat in the Codex desktop app
+// runs under one long-lived app-server process.
+func asDetectedCodex(t *testing.T) {
+	t.Helper()
+	isolateAgentDetection(t)
+	isolateSessionMarkerDir(t)
+	t.Setenv("AGENT_ENV", "codex")
+}
+
+// Failure prevented (#1385): in the Codex desktop app every chat is a child of
+// one app-server process. Chat B's SessionStart carries its own session_id but
+// has no marker yet, so the PID fallback matched chat A's marker and reused its
+// agent_id: two chats shared one AI coworker and one recording, and one chat's
+// history was lost from the Ledger.
+func TestRunAgentPrime_TwoNativeSessionsUnderOneAgentProcessGetTwoAgents(t *testing.T) {
+	initializedE2E(t)
+	asDetectedCodex(t)
+	chatA, chatB := uniqueSessionID(t, "codex-chat-a"), uniqueSessionID(t, "codex-chat-b")
+
+	primeWithHookAs(t, "codex", chatA, "startup")
+	primeWithHookAs(t, "codex", chatB, "startup")
+
+	agentA, pidA := primedAgentID(t, chatA)
+	agentB, pidB := primedAgentID(t, chatB)
+	require.Positive(t, pidA)
+	require.Equal(t, pidA, pidB, "harness: both chats must resolve the same agent ancestor PID")
+	assert.NotEqual(t, agentA, agentB, "two native sessions under one agent process were merged into one AI coworker")
+}
+
+// Failure prevented: the over-correction of #1385. A second prime inside the
+// same session with no hook stdin and no native session id (#527/#529) must
+// still find the hook prime's marker by PID and keep its AI coworker identity.
+func TestRunAgentPrime_BarePrimeWithoutSessionIDReusesAgentByPID(t *testing.T) {
+	initializedE2E(t)
+	asDetectedCodex(t)
+	chat := uniqueSessionID(t, "codex-chat")
+
+	primeWithHookAs(t, "codex", chat, "startup")
+	agentID, _ := primedAgentID(t, chat)
+
+	repeat := primeWithHookAs(t, "codex", "", "")
+	assert.Contains(t, repeat, agentID, "a bare repeat prime in the same agent process lost the session's AI coworker identity")
+	again, _ := primedAgentID(t, chat)
+	assert.Equal(t, agentID, again)
+}
