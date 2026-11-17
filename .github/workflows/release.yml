@@ -30,6 +30,8 @@ jobs:
     if: github.repository == 'sageox/ox'
     runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
+      # actions: read lets the environment check below see deployment policies.
+      actions: read
       contents: write
     outputs:
       release_id: ${{ steps.draft.outputs.release_id }}
@@ -40,6 +42,14 @@ jobs:
         run: |
           if [[ "$RELEASE_TAG" != v* ]]; then
             echo "::error::Release tags must start with v so the immutable release-tag ruleset applies."
+            exit 1
+          fi
+
+          # Only main's reviewed copy of this workflow may run: the release
+          # environments admit main alone, and a run from any other ref would
+          # execute that ref's copy of this file.
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Dispatch from main: gh workflow run release.yml --ref main -f tag=$RELEASE_TAG"
             exit 1
           fi
 
@@ -68,6 +78,26 @@ jobs:
             echo "::error::The Immutable release tags ruleset must block this workflow from updating or deleting refs/tags/v*."
             exit 1
           }
+
+      # The publishing credentials live in these environments. A job naming a
+      # missing environment silently creates an unprotected one, so each
+      # policy is checked, not assumed: deployments from branch main only.
+      - name: Require main-only release environments
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for name in cli-release npm; do
+            environment=$(gh api "repos/$GITHUB_REPOSITORY/environments/$name") || {
+              echo "::error::The $name environment is missing."
+              exit 1
+            }
+            policies=$(gh api "repos/$GITHUB_REPOSITORY/environments/$name/deployment-branch-policies")
+            jq -e '.deployment_branch_policy.custom_branch_policies == true and .deployment_branch_policy.protected_branches == false' <<<"$environment" >/dev/null &&
+            jq -e '[.branch_policies[] | {type: (.type // "branch"), name}] == [{type: "branch", name: "main"}]' <<<"$policies" >/dev/null || {
+              echo "::error::The $name environment must admit deployments from branch main only."
+              exit 1
+            }
+          done
 
       - name: Require an existing human-reviewed draft
         id: draft
@@ -120,7 +150,7 @@ jobs:
           stages=$(make -s release-stages) || stages=""
           echo "Release stages: $stages"
           jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and test("^[a-z][a-z0-9-]*$"))' <<<"$stages" >/dev/null || {
-            echo "::error::make release-stages did not return a non-empty list of target names. A tag cut before release stages existed releases with its own workflow: gh workflow run release.yml --ref $RELEASE_TAG -f tag=$RELEASE_TAG"
+            echo "::error::make release-stages did not return a non-empty list of target names. A tag cut before release stages existed cannot be released; release a new version from main."
             exit 1
           }
           echo "stages=$stages" >> "$GITHUB_OUTPUT"
@@ -545,7 +575,7 @@ jobs:
   # `npx @sageox/ox@latest install` never ships what GitHub does not. The token
   # reaches only the last step, which runs no repository code; reruns skip
   # versions npm already has. NPM_TOKEN lives in the npm environment, whose
-  # deployment rules keep it from workflow runs on other branches.
+  # deployment rules admit main alone (verify-draft checks that).
   publish-npm:
     if: github.repository == 'sageox/ox'
     needs: publish-release
