@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`ox doctor` no longer rewrites or stages the README by default** — Init writes the same README that doctor expects. README repairs and staging missing SageOx files require an explicit fix; doctor no longer reports unstaged changes as staged.
 - **`ox doctor --fix` removes team names from old repo markers** — `.sageox/.repo_*` markers written by earlier `ox init` runs listed every team the person belonged to under `team_urls`. Doctor now flags it, and `--fix` removes the key; commit `.sageox/` afterwards.
 
 ## [0.26.0] - 2026-11-17

@@ -972,7 +972,7 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	gitignoreCheck := checks.NewGitignoreCheck(git, nil)
 	gitStatusChecks := []checkResult{
 		checkGitStatus(),
-		checkSageoxFilesTracked(opts.shouldFix(CheckSlugGitignore)),
+		checkSageoxFilesTracked(opts.shouldFix(CheckSlugSageoxFilesTracked)),
 		convertDoctorResult(gitignoreCheck.Run(ctx, opts.shouldFix(CheckSlugGitignore))),
 		checkRootKBGitignoreLine(opts.shouldFix(CheckSlugRootKBGitignore)),
 		checkGitattributes(opts.shouldFix(CheckSlugGitattributes)),

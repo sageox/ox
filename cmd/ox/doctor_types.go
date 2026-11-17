@@ -103,17 +103,18 @@ func (d *DoctorCheck) IsAutoFixable() bool {
 // These can be used by other parts of the codebase to reference specific checks.
 const (
 	// Project Health checks
-	CheckSlugSageoxDir       = "sageox-dir"
-	CheckSlugConfigJSON      = "config-json"
-	CheckSlugInitReverted    = "init-reverted"
-	CheckSlugClaudeHooksFmt  = "claude-hooks-format"
-	CheckSlugGitignore       = "gitignore"
-	CheckSlugRootKBGitignore = "root-kb-gitignore"
-	CheckSlugGitattributes   = "gitattributes"
-	CheckSlugSageoxGitignore = "sageox-gitignore"
-	CheckSlugReadme          = "readme"
-	CheckSlugRepoMarker      = "repo-marker"
-	CheckSlugMarkerTeamURLs  = "marker-team-urls"
+	CheckSlugSageoxDir          = "sageox-dir"
+	CheckSlugConfigJSON         = "config-json"
+	CheckSlugInitReverted       = "init-reverted"
+	CheckSlugClaudeHooksFmt     = "claude-hooks-format"
+	CheckSlugGitignore          = "gitignore"
+	CheckSlugRootKBGitignore    = "root-kb-gitignore"
+	CheckSlugGitattributes      = "gitattributes"
+	CheckSlugSageoxGitignore    = "sageox-gitignore"
+	CheckSlugReadme             = "readme"
+	CheckSlugSageoxFilesTracked = "sageox-files-tracked"
+	CheckSlugRepoMarker         = "repo-marker"
+	CheckSlugMarkerTeamURLs     = "marker-team-urls"
 
 	// Git Repository Health checks
 	CheckSlugLedgerPath         = "ledger-path"
