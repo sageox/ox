@@ -57,9 +57,11 @@ jobs:
             echo "::error::Dispatch from main: gh workflow run npm-publish.yml --ref main -f tag=$RELEASE_TAG"
             exit 1
           fi
-          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft \
-            | jq -e '.isDraft == false' >/dev/null || {
-            echo "::error::$RELEASE_TAG is not a published release. Publish it through release.yml first."
+          # Immutable, like release.yml requires: otherwise a release editor could
+          # swap both the archives and checksums.txt after publication.
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable \
+            | jq -e '.isDraft == false and .isImmutable == true' >/dev/null || {
+            echo "::error::$RELEASE_TAG is not a published, immutable release. Publish it through release.yml first."
             exit 1
           }
 
