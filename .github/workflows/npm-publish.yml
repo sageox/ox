@@ -117,7 +117,16 @@ jobs:
           case "$version" in *-*) tag=next ;; esac
           # A retry of an older release must not move `latest` back to it.
           if [ "$tag" = latest ]; then
-            current=$(npm view @sageox/ox dist-tags.latest 2>/dev/null || true)
+            # Only a missing package counts as "no latest yet"; any other lookup
+            # failure stops the run rather than guess.
+            if ! current=$(npm view @sageox/ox dist-tags.latest 2>"$RUNNER_TEMP/npm-view.err"); then
+              grep -q E404 "$RUNNER_TEMP/npm-view.err" || {
+                cat "$RUNNER_TEMP/npm-view.err" >&2
+                echo "::error::Could not read @sageox/ox@latest from npm; nothing was published. Dispatch again."
+                exit 1
+              }
+              current=
+            fi
             if [ -n "$current" ] && [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -1)" != "$version" ]; then
               echo "@sageox/ox@latest is $current, newer than $version; publishing $version under the previous tag"
               tag=previous
