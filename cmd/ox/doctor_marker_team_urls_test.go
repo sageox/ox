@@ -319,13 +319,13 @@ func TestCheckMarkerTeamURLs_DetectionListsProblemsToo(t *testing.T) {
 }
 
 func TestCheckMarkerTeamURLs_UnreadableFileWarns(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can read a mode-0000 file")
-	}
 	sageoxDir := t.TempDir()
 	path := filepath.Join(sageoxDir, ".repo_01abc")
 	if err := os.WriteFile(path, []byte(legacyTeamURLsMarker), 0o000); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.ReadFile(path); err == nil {
+		t.Skip("mode 0000 does not block reads here (root or Windows)")
 	}
 
 	got := checkMarkerTeamURLsIn(sageoxDir, true)
