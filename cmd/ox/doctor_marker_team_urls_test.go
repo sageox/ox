@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -253,5 +254,83 @@ func TestCheckMarkerTeamURLs_PartialFailureReportsCleanupAndProblems(t *testing.
 	}
 	if data, _ := os.ReadFile(filepath.Join(sageoxDir, ".repo_02def")); string(data) != legacyTeamURLsMarker {
 		t.Errorf("marker that could not be replaced was changed:\n%s", data)
+	}
+}
+
+func TestCheckMarkerTeamURLs_FindsMarkersFromGitRoot(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if got := checkMarkerTeamURLs(true); !got.skipped {
+		t.Errorf("outside a git repo: want skipped, got %+v", got)
+	}
+
+	repo := t.TempDir()
+	cmd := exec.Command("git", "init", "-q")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	t.Chdir(repo)
+	if got := checkMarkerTeamURLs(true); !got.skipped {
+		t.Errorf("without .sageox/: want skipped, got %+v", got)
+	}
+
+	sageoxDir := filepath.Join(repo, ".sageox")
+	if err := os.Mkdir(sageoxDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sageoxDir, ".repo_01abc"), []byte(legacyTeamURLsMarker), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := checkMarkerTeamURLs(true)
+	if !got.passed || got.warning || !strings.Contains(got.message, "removed team_urls from .repo_01abc") {
+		t.Errorf("with a legacy marker: want cleanup, got %+v", got)
+	}
+}
+
+func TestCheckMarkerTeamURLs_MissingSageoxDirSkips(t *testing.T) {
+	if got := checkMarkerTeamURLsIn(filepath.Join(t.TempDir(), ".sageox"), true); !got.skipped {
+		t.Errorf("want skipped, got %+v", got)
+	}
+}
+
+func TestCheckMarkerTeamURLs_SageoxPathErrorWarns(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := checkMarkerTeamURLsIn(filepath.Join(file, ".sageox"), true); !got.warning {
+		t.Errorf("want warning for a path under a regular file, got %+v", got)
+	}
+}
+
+func TestCheckMarkerTeamURLs_DetectionListsProblemsToo(t *testing.T) {
+	sageoxDir := t.TempDir()
+	for name, content := range map[string]string{".repo_01abc": legacyTeamURLsMarker, ".repo_02def": `{not json`, "config.json": `{}`} {
+		if err := os.WriteFile(filepath.Join(sageoxDir, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := checkMarkerTeamURLsIn(sageoxDir, false)
+
+	if !got.warning || !strings.Contains(got.message, ".repo_01abc") || !strings.Contains(got.detail, "could not read .repo_02def") {
+		t.Errorf("want warning naming both markers, got %+v", got)
+	}
+}
+
+func TestCheckMarkerTeamURLs_UnreadableFileWarns(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read a mode-0000 file")
+	}
+	sageoxDir := t.TempDir()
+	path := filepath.Join(sageoxDir, ".repo_01abc")
+	if err := os.WriteFile(path, []byte(legacyTeamURLsMarker), 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	got := checkMarkerTeamURLsIn(sageoxDir, true)
+
+	if !got.warning || !strings.Contains(got.message, "could not read .repo_01abc") {
+		t.Errorf("want warning naming the unreadable marker, got %+v", got)
 	}
 }
