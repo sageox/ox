@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ox doctor --fix` removes team names from old repo markers** — `.sageox/.repo_*` markers written by earlier `ox init` runs listed every team the person belonged to under `team_urls`. Doctor now flags it, and `--fix` removes the key; commit `.sageox/` afterwards.
+
 ## [0.26.0] - 2026-11-17
 
 Record Devin sessions, install ox with npx, import transcripts as discussions, and watch team context reach your AI coworker as it works. AI coworkers on disposable machines now get one complete, correctly credited session per run.
