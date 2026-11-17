@@ -2,8 +2,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -194,6 +197,7 @@ func runAgentSessionPlanHistory(inst *agentinstance.Instance, args []string) err
 		DiagramCount: len(diagrams),
 		Diagrams:     diagrams,
 		PlanExtract:  planExtract,
+		Message:      "Planning history captured as a planning session; it does not hold the full Claude Code or Codex conversation. To upload that conversation, run: ox session import",
 	}
 
 	if cfg.Review {
@@ -251,7 +255,7 @@ func parsePlanHistoryFile(args []string) string {
 
 // readPlanHistoryEntries reads JSONL entries from file or stdin.
 func readPlanHistoryEntries(filePath string) ([]planHistoryEntry, *planHistoryMeta, error) {
-	var reader *bufio.Scanner
+	var input io.Reader
 
 	if filePath != "" {
 		f, err := os.Open(filePath)
@@ -259,7 +263,7 @@ func readPlanHistoryEntries(filePath string) ([]planHistoryEntry, *planHistoryMe
 			return nil, nil, fmt.Errorf("open file: %w", err)
 		}
 		defer f.Close()
-		reader = bufio.NewScanner(f)
+		input = f
 	} else {
 		// check if stdin has data
 		stat, err := os.Stdin.Stat()
@@ -269,50 +273,42 @@ func readPlanHistoryEntries(filePath string) ([]planHistoryEntry, *planHistoryMe
 		if (stat.Mode() & os.ModeCharDevice) != 0 {
 			return nil, nil, fmt.Errorf("no input piped to stdin and no --file specified")
 		}
-		reader = bufio.NewScanner(os.Stdin)
+		input = os.Stdin
 	}
 
-	// increase buffer for large entries
-	reader.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// no line cap: one entry holding a screenshot or long tool output can pass
+	// any fixed limit, and a scanner fails the whole import there
+	reader := bufio.NewReaderSize(input, 64*1024)
 
 	var entries []planHistoryEntry
 	var meta *planHistoryMeta
 
-	for reader.Scan() {
-		line := reader.Text()
-		if strings.TrimSpace(line) == "" {
-			continue
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return nil, nil, fmt.Errorf("read input: %w", readErr)
 		}
-
-		// try to parse as metadata line first
-		var metaLine struct {
-			Meta *planHistoryMeta `json:"_meta"`
+		if len(bytes.TrimSpace(line)) > 0 {
+			// try to parse as metadata line first
+			var metaLine struct {
+				Meta *planHistoryMeta `json:"_meta"`
+			}
+			var entry planHistoryEntry
+			switch {
+			case json.Unmarshal(line, &metaLine) == nil && metaLine.Meta != nil:
+				meta = metaLine.Meta
+			case json.Unmarshal(line, &entry) != nil:
+				// skip invalid lines
+			case entry.Type == "" || entry.Content == "":
+				// skip entries without required fields
+			default:
+				entries = append(entries, entry)
+			}
 		}
-		if err := json.Unmarshal([]byte(line), &metaLine); err == nil && metaLine.Meta != nil {
-			meta = metaLine.Meta
-			continue
+		if readErr != nil {
+			return entries, meta, nil
 		}
-
-		// parse as entry
-		var entry planHistoryEntry
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			// skip invalid lines
-			continue
-		}
-
-		// validate entry has required fields
-		if entry.Type == "" || entry.Content == "" {
-			continue
-		}
-
-		entries = append(entries, entry)
 	}
-
-	if err := reader.Err(); err != nil {
-		return nil, nil, fmt.Errorf("read input: %w", err)
-	}
-
-	return entries, meta, nil
 }
 
 // extractPlanFromEntries scans entries for plan content.

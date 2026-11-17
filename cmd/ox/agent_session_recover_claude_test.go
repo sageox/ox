@@ -36,7 +36,9 @@ func TestRecover_KeepsAnUndiscoveredClaudeRecordingInsteadOfPublishingItEmpty(t 
 	require.False(t, session.HasSubstantiveEntries(filepath.Join(state.SessionPath, "raw.jsonl")), "precondition: nothing captured")
 
 	err = runAgentSessionRecover(&agentinstance.Instance{AgentID: agentID})
-	require.ErrorContains(t, err, "not yet verified", "an undiscovered source does not prove the session empty")
+	require.ErrorContains(t, err, "nothing was published", "an undiscovered source does not prove the session empty")
+	require.ErrorContains(t, err, "session recover", "the error says how to retry")
+	require.ErrorContains(t, err, "ox session import", "the error names the full-session import")
 
 	kept, loadErr := session.LoadRecordingStateForAgent(projectRoot, agentID)
 	require.NoError(t, loadErr)

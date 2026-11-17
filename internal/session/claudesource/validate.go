@@ -278,22 +278,124 @@ func resolveVanished(path string, strict bool) (string, error) {
 }
 
 // withinRepo reports whether cwd, already symlink-resolved, lies inside
-// repoRoot and outside any nested repository.
+// repoRoot, or inside another checkout of the same repository, and outside any
+// nested repository.
 func withinRepo(repoRoot, cwd string) (bool, error) {
 	if !filepath.IsAbs(cwd) {
 		return false, nil
 	}
-	rel, err := filepath.Rel(repoRoot, cwd)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+	root := repoRoot
+	if !isWithin(repoRoot, cwd) {
+		other, err := checkoutContaining(repoRoot, cwd)
+		if err != nil || other == "" {
+			return false, err
+		}
+		root = other
+	}
+	return outsideNestedRepos(repoRoot, root, cwd)
+}
+
+func isWithin(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+// checkoutContaining returns the checkout of repoRoot's repository, other than
+// repoRoot, that holds cwd: a linked worktree outside the main checkout (such
+// as one under ~/.claude-worktrees or beside the repo), or the main checkout
+// when repoRoot is a linked worktree. Git's own registry in the common dir
+// names them, so a worktree that has since been deleted still counts, as it
+// does for 'ox session import'. A checkout that still exists must point back
+// at this repository. "" means no checkout of this repository holds cwd.
+func checkoutContaining(repoRoot, cwd string) (string, error) {
+	commonDir, ok, err := gitCommonDir(repoRoot)
+	if err != nil || !ok {
+		return "", err
+	}
+	type checkout struct {
+		root string
+		main bool
+	}
+	var checkouts []checkout
+	if filepath.Base(commonDir) == ".git" {
+		checkouts = append(checkouts, checkout{root: filepath.Dir(commonDir), main: true})
+	}
+	entries, err := os.ReadDir(filepath.Join(commonDir, "worktrees"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	for _, entry := range entries {
+		data, readErr := os.ReadFile(filepath.Join(commonDir, "worktrees", entry.Name(), "gitdir"))
+		if errors.Is(readErr, fs.ErrNotExist) {
+			continue
+		}
+		if readErr != nil {
+			return "", readErr
+		}
+		if dotGit := strings.TrimSpace(string(data)); filepath.IsAbs(dotGit) {
+			checkouts = append(checkouts, checkout{root: filepath.Dir(filepath.Clean(dotGit))})
+		}
+	}
+
+	best := ""
+	for _, c := range checkouts {
+		root, resolveErr := resolveVanished(c.root, false)
+		if resolveErr != nil || root == repoRoot || !isWithin(root, cwd) || len(root) <= len(best) {
+			continue
+		}
+		if _, statErr := os.Lstat(root); statErr == nil {
+			if owned, ownErr := checkoutOfRepo(repoRoot, commonDir, root, c.main); ownErr != nil {
+				return "", ownErr
+			} else if !owned {
+				continue
+			}
+		} else if !errors.Is(statErr, fs.ErrNotExist) {
+			return "", statErr
+		}
+		best = root
+	}
+	return best, nil
+}
+
+// checkoutOfRepo reports whether the existing directory root is still the
+// checkout git's registry says it is: the main checkout whose .git directory
+// is the common dir, or a linked worktree whose .git file points back into it.
+func checkoutOfRepo(repoRoot, commonDir, root string, main bool) (bool, error) {
+	if !main {
+		info, err := os.Lstat(filepath.Join(root, ".git"))
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if info.IsDir() {
+			// a clone now stands where the worktree was registered
+			return false, nil
+		}
+		owner, err := classifyGitlink(repoRoot, root)
+		return owner == ownWorktree, err
+	}
+	dotGit, err := filepath.EvalSymlinks(filepath.Join(root, ".git"))
+	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
 	}
+	if err != nil {
+		return false, err
+	}
+	return dotGit == commonDir, nil
+}
+
+// outsideNestedRepos reports whether nothing between cwd and root, a checkout
+// of repoRoot's repository that holds cwd, makes cwd part of another project.
+func outsideNestedRepos(repoRoot, root, cwd string) (bool, error) {
 	// A nested clone, another repository's worktree, or an initialized Ox project
 	// owns its own ledger; containment in the parent's filesystem tree does not
 	// imply ownership. A linked worktree of this repo (where Claude Code desktop
 	// runs sessions, under .claude/worktrees) is this repo checked out again. Only
 	// "not there" counts as absence: any other failure to look (EACCES, I/O) is an
 	// error, because a marker that cannot be seen cannot be ruled out.
-	for dir := cwd; dir != repoRoot; {
+	for dir := cwd; dir != root; {
 		for _, marker := range []string{".git", filepath.Join(".sageox", "config.json"), filepath.Join(".sageox", "config.yaml")} {
 			info, err := os.Lstat(filepath.Join(dir, marker))
 			if errors.Is(err, fs.ErrNotExist) {

@@ -201,7 +201,12 @@ func recoverRecording(inst *agentinstance.Instance, projectRoot string, state *s
 	// recovers from the cache like any other recording.
 	if state.AdapterName == "claude-code" && state.SessionFile == "" && state.WatchMode != "tail" &&
 		(state.SessionPath == "" || !session.HasSubstantiveEntries(filepath.Join(state.SessionPath, ledgerFileRaw))) {
-		return fmt.Errorf("claude hook source not yet verified; recording and cache preserved for retry")
+		sf, findErr := discoverNativeSessionFile(projectRoot, state)
+		if findErr != nil {
+			return fmt.Errorf("claude session file not found or not accepted for %s (%w); nothing was published.\n%s",
+				firstNonEmpty(state.WorkspacePath, projectRoot), findErr, undiscoveredSessionNextSteps(state))
+		}
+		state.SessionFile = sf
 	}
 
 	slog.Info("recovering stale session", "agent_id", state.AgentID, "session_path", state.SessionPath)
