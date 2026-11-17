@@ -96,6 +96,10 @@ func ForceAddSageoxFiles() error {
 		return err
 	}
 
+	return forceAddSageoxPaths(repoRoot, vcs, files)
+}
+
+func forceAddSageoxPaths(repoRoot string, vcs repotools.VCS, files []string) error {
 	var cmd *exec.Cmd
 	switch vcs {
 	case repotools.VCSGit:
@@ -161,7 +165,7 @@ func checkGitStatus() checkResult {
 	if len(output) > 0 {
 		// parse porcelain output to distinguish staged vs unstaged
 		// format: XY filename (X=index, Y=worktree)
-		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		lines := strings.Split(string(output), "\n")
 		hasUnstaged := false
 		for _, line := range lines {
 			if len(line) < 2 {
@@ -254,7 +258,7 @@ func checkSageoxFilesTracked(fix bool) checkResult {
 
 	if len(untrackedFiles) > 0 {
 		if fix {
-			if err := ForceAddSageoxFiles(); err != nil {
+			if err := forceAddSageoxPaths(repoRoot, vcs, untrackedFiles); err != nil {
 				return checkResult{
 					name:    ".sageox/ files staged",
 					passed:  false,
@@ -272,7 +276,7 @@ func checkSageoxFilesTracked(fix bool) checkResult {
 			name:    ".sageox/ files staged",
 			passed:  false,
 			message: "untracked files",
-			detail:  "Run `ox init` to add files to VCS",
+			detail:  "Run `ox doctor --fix-slug " + CheckSlugSageoxFilesTracked + "` to add files to VCS",
 		}
 	}
 

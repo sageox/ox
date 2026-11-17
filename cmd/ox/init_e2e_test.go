@@ -3,8 +3,10 @@
 package main
 
 import (
+	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,6 +20,64 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRunInit_PlainDoctorLeavesReadmeAndIndexAlone(t *testing.T) {
+	env := newOxE2E(t)
+	withInitFlags(t, env.TeamID)
+	initAgentsFlag = "claude-code"
+	require.NoError(t, runInit())
+
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = env.Root
+		out, err := cmd.CombinedOutput()
+		require.NoErrorf(t, err, "git %v: %s", args, out)
+		return string(out)
+	}
+	readme := filepath.Join(env.Root, ".sageox", "README.md")
+	cfg, err := config.LoadProjectConfig(env.Root)
+	require.NoError(t, err)
+	canonical := GetSageoxReadmeContent(cfg)
+	require.Contains(t, canonical, "/repo/"+env.RepoID)
+	require.Contains(t, canonical, "/team/"+env.TeamID)
+	require.Equal(t, canonical, git("show", ":.sageox/README.md"))
+	git("commit", "-qm", "SageOx init")
+
+	doctor := func(slugs ...string) []checkCategory {
+		t.Helper()
+		categories, err := runDoctorChecks(context.Background(), doctorOptions{fix: len(slugs) > 0, fixSlugs: slugs})
+		require.NoError(t, err)
+		return categories
+	}
+	checks := doctor()
+	assert.Equal(t, "ok", doctorLine(t, checks, ".sageox/README.md").message)
+	assert.Empty(t, git("status", "--porcelain", "--", ".sageox/README.md"))
+	assert.Empty(t, stagedPaths(t, env.Root))
+
+	old := GetSageoxReadmeContent(nil)
+	require.NoError(t, os.WriteFile(readme, []byte(old), 0644))
+	checks = doctor()
+	assert.Equal(t, "outdated", doctorLine(t, checks, ".sageox/README.md").message)
+	assert.Equal(t, "unstaged", doctorLine(t, checks, ".sageox/ changes").message)
+	assert.Equal(t, "1 uncommitted change(s) in .sageox/", doctorLine(t, checks, "Repo state").message)
+	assert.Equal(t, " M .sageox/README.md\n", git("status", "--porcelain", "--", ".sageox"))
+
+	require.NoError(t, os.WriteFile(filepath.Join(env.Root, ".sageox", "notes.md"), []byte("# Notes\n"), 0644))
+	checks = doctor()
+	assert.Equal(t, "untracked files", doctorLine(t, checks, ".sageox/ files staged").message)
+	assert.Empty(t, stagedPaths(t, env.Root))
+
+	doctor(CheckSlugSageoxFilesTracked)
+	assert.Equal(t, []string{".sageox/notes.md"}, stagedPaths(t, env.Root))
+	got, err := os.ReadFile(readme)
+	require.NoError(t, err)
+	assert.Equal(t, old, string(got))
+
+	doctor(CheckSlugReadme)
+	assert.Empty(t, git("status", "--porcelain", "--", ".sageox/README.md"))
+	assert.Equal(t, []string{".sageox/notes.md"}, stagedPaths(t, env.Root))
+}
 
 // withInitFlags sets runInit's package-level flag vars and restores them, so a
 // test cannot leak flag state into the rest of the package.

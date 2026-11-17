@@ -644,7 +644,7 @@ func runInit() error {
 	}
 
 	// create README.md if it doesn't exist
-	// Note: README is created without links initially; links are added after API registration
+	// The generated README is rendered again after API registration supplies the dashboard IDs.
 	readmePath := filepath.Join(sageoxDir, "README.md")
 	if _, err := os.Stat(readmePath); os.IsNotExist(err) {
 		if err := createSageoxReadme(readmePath, nil); err != nil {
@@ -1031,7 +1031,7 @@ func runInit() error {
 		}
 
 		// update README.md with SageOx links now that we have repo_id and team_id
-		if err := updateSageoxReadmeWithLinks(readmePath, cfg); err != nil {
+		if err := finalizeGeneratedSageoxReadme(readmePath, cfg); err != nil {
 			cli.PrintWarning(fmt.Sprintf("Could not update README.md with links: %v", err))
 		}
 
@@ -1316,9 +1316,9 @@ func createSageoxReadme(path string, cfg *config.ProjectConfig) error {
 	return os.WriteFile(path, []byte(GetSageoxReadmeContent(cfg)), 0644)
 }
 
-// updateSageoxReadmeWithLinks updates an existing README.md with SageOx links section
-// This is called after API registration when we have repo_id and team_id
-func updateSageoxReadmeWithLinks(path string, cfg *config.ProjectConfig) error {
+// finalizeGeneratedSageoxReadme adds dashboard links to the generated README
+// after registration, without overwriting an existing customized README.
+func finalizeGeneratedSageoxReadme(path string, cfg *config.ProjectConfig) error {
 	if cfg == nil {
 		return nil
 	}
@@ -1329,36 +1329,16 @@ func updateSageoxReadmeWithLinks(path string, cfg *config.ProjectConfig) error {
 		return fmt.Errorf("failed to read README.md: %w", err)
 	}
 
-	// check if links section already exists
-	if strings.Contains(string(existingContent), "## SageOx Links") {
-		return nil // already has links section
-	}
-
-	// generate links section
-	linksSection := generateSageoxLinksSection(cfg)
-	if linksSection == "" {
-		return nil // no links to add
-	}
-
-	// insert links section after the first "---" separator (after the agent instructions)
 	content := string(existingContent)
-	insertPoint := strings.Index(content, "---")
-	if insertPoint == -1 {
-		// no separator found, append to end
-		content = content + "\n" + linksSection
-	} else {
-		// find the end of the separator line
-		endOfSeparator := insertPoint + 3
-		// skip any trailing newlines after separator
-		for endOfSeparator < len(content) && content[endOfSeparator] == '\n' {
-			endOfSeparator++
-		}
-		// insert links section after the separator
-		content = content[:endOfSeparator] + "\n" + linksSection + "\n" + content[endOfSeparator:]
+	if content != GetSageoxReadmeContent(nil) && content != initialCommitReadmeContent {
+		return nil
+	}
+	expected := GetSageoxReadmeContent(cfg)
+	if content == expected {
+		return nil
 	}
 
-	// write updated content
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(expected), 0644); err != nil {
 		return fmt.Errorf("failed to write README.md: %w", err)
 	}
 
