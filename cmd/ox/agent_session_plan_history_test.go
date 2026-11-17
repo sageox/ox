@@ -257,6 +257,18 @@ func TestReadPlanHistoryEntries_LineOverOneMiB(t *testing.T) {
 	assert.Equal(t, "after", entries[1].Content, "an unterminated last line is still read")
 }
 
+// An entry past the saved-session reader's limit fails the import by line
+// rather than saving a session that cannot be read back.
+func TestReadPlanHistoryEntries_LineOverSessionLimit(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "history.jsonl")
+	content := `{"type":"user","content":"ok"}` + "\n" +
+		`{"type":"user","content":"` + strings.Repeat("x", planHistoryMaxLineBytes) + `"}` + "\n"
+	require.NoError(t, os.WriteFile(filePath, []byte(content), 0o600))
+
+	_, _, err := readPlanHistoryEntries(filePath)
+	require.ErrorContains(t, err, "line 2")
+}
+
 func TestReadPlanHistoryEntries_FileNotFound(t *testing.T) {
 	_, _, err := readPlanHistoryEntries("/nonexistent/path/file.jsonl")
 	assert.Error(t, err)

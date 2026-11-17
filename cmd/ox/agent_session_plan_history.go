@@ -254,6 +254,9 @@ func parsePlanHistoryFile(args []string) string {
 }
 
 // readPlanHistoryEntries reads JSONL entries from file or stdin.
+// planHistoryMaxLineBytes matches the line limit of session.ReadSessionFromPath.
+const planHistoryMaxLineBytes = 10 * 1024 * 1024
+
 func readPlanHistoryEntries(filePath string) ([]planHistoryEntry, *planHistoryMeta, error) {
 	var input io.Reader
 
@@ -276,17 +279,23 @@ func readPlanHistoryEntries(filePath string) ([]planHistoryEntry, *planHistoryMe
 		input = os.Stdin
 	}
 
-	// no line cap: one entry holding a screenshot or long tool output can pass
-	// any fixed limit, and a scanner fails the whole import there
+	// One entry holding a screenshot or long tool output passes 1 MiB. Entries
+	// are read up to the 10 MiB a saved session's reader accepts; a longer one
+	// fails the import here, by line, instead of saving a session that cannot
+	// be read back.
 	reader := bufio.NewReaderSize(input, 64*1024)
 
 	var entries []planHistoryEntry
 	var meta *planHistoryMeta
 
-	for {
+	for lineNo := 1; ; lineNo++ {
 		line, readErr := reader.ReadBytes('\n')
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return nil, nil, fmt.Errorf("read input: %w", readErr)
+		}
+		if len(bytes.TrimRight(line, "\r\n")) > planHistoryMaxLineBytes {
+			return nil, nil, fmt.Errorf("read input: line %d is %.1f MiB; a session entry holds at most %d MiB",
+				lineNo, float64(len(line))/(1<<20), planHistoryMaxLineBytes>>20)
 		}
 		if len(bytes.TrimSpace(line)) > 0 {
 			// try to parse as metadata line first
