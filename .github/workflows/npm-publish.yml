@@ -1,0 +1,103 @@
+name: Publish to npm
+
+# npm publishes the binaries of a public release as @sageox/ox, so
+# `npx @sageox/ox@latest install` never ships what GitHub does not. release.yml
+# calls this after it publishes a release. Dispatch it by hand only to publish a
+# release whose npm job failed:
+#   gh workflow run npm-publish.yml --ref main -f tag=v0.26.0
+# The token reaches only the last step, which runs no repository code; runs skip
+# versions npm already has. NPM_TOKEN lives in the npm environment, whose
+# deployment rules admit main alone (release.yml's verify-draft checks that).
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Published release tag (e.g., v0.8.0)'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Published release tag (e.g., v0.8.0)'
+        required: true
+        type: string
+
+concurrency:
+  group: npm-publish-${{ inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ inputs.tag }}
+
+jobs:
+  publish-npm:
+    if: github.repository == 'sageox/ox'
+    # npm accepts --provenance only from GitHub-hosted runners; it rejects
+    # Blacksmith's as self-hosted (E422, v0.26.0).
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - name: Require a published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$RELEASE_TAG" != v* ]]; then
+            echo "::error::Release tags start with v."
+            exit 1
+          fi
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft \
+            | jq -e '.isDraft == false' >/dev/null || {
+            echo "::error::$RELEASE_TAG is not a published release. Publish it through release.yml first."
+            exit 1
+          }
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download and verify the release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir "$RUNNER_TEMP/archives"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/archives" --pattern 'ox_*.tar.gz' --pattern checksums.txt
+          cd "$RUNNER_TEMP/archives"
+          sha256sum --check --strict --ignore-missing checksums.txt
+
+      - name: Build the npm packages
+        run: node scripts/npm-packages.mjs --version "${RELEASE_TAG#v}" --archives "$RUNNER_TEMP/archives" --out "$RUNNER_TEMP/npm"
+
+      # Platform packages first, so the launcher never points at a missing one.
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::warning::NPM_TOKEN is not set; @sageox/ox was not published."
+            exit 0
+          fi
+          version=${RELEASE_TAG#v}
+          tag=latest
+          case "$version" in *-*) tag=next ;; esac
+          for dir in "$RUNNER_TEMP"/npm/ox-*/ "$RUNNER_TEMP/npm/ox/"; do
+            name=$(jq -r .name "$dir/package.json")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already on npm"
+              continue
+            fi
+            npm publish "$dir" --access public --provenance --tag "$tag" --ignore-scripts
+          done
