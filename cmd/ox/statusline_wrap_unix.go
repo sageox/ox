@@ -39,20 +39,18 @@ func runStatuslineWrap(ctx context.Context, argv []string) (int, error) {
 		cmd.Env = append(cmd.Env, envStatuslineWrapSession+"="+sessionFile)
 	}
 	if !term.IsTerminal(stdinFd) || !term.IsTerminal(stdoutFd) {
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-		return wrappedExitCode(cmd.Run())
+		return runUnwrapped(cmd, os.Stdout, os.Stderr)
 	}
 	cols, rows, err := term.GetSize(stdoutFd)
 	if err != nil || rows < 4 {
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-		return wrappedExitCode(cmd.Run())
+		return runUnwrapped(cmd, os.Stdout, os.Stderr)
 	}
 
 	// Free the bottom row before the app starts: if the cursor is on it,
 	// scroll once, then step back up so the app begins above ox's row.
 	var mu sync.Mutex
 	filter := &wrapFilter{rows: rows - 1, dirty: true}
-	_, _ = io.WriteString(os.Stdout, "\n\x1b[A\x1b7"+filter.region()+"\x1b8")
+	_, _ = io.WriteString(os.Stdout, "\n\x1b[A"+filter.setRegion())
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(rows - 1), Cols: uint16(cols)}) //nolint:gosec // terminal sizes fit uint16
 	if err != nil {
@@ -60,6 +58,10 @@ func runStatuslineWrap(ctx context.Context, argv []string) (int, error) {
 		return 127, fmt.Errorf("start %s: %w", argv[0], err)
 	}
 	defer ptmx.Close()
+	// The app's exit is watched on its own: the pseudo-terminal stays open
+	// for as long as anything the app started still holds it.
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
 
 	restore := func() {}
 	if old, rawErr := term.MakeRaw(stdinFd); rawErr == nil {
@@ -82,6 +84,7 @@ func runStatuslineWrap(ctx context.Context, argv []string) (int, error) {
 			if n > 0 {
 				mu.Lock()
 				_, _ = os.Stdout.Write(filter.write(buf[:n]))
+				_, _ = io.WriteString(os.Stdout, filter.flushRegion())
 				lastOutput = time.Now()
 				mu.Unlock()
 			}
@@ -129,18 +132,28 @@ func runStatuslineWrap(ctx context.Context, argv []string) (int, error) {
 	wait := statuslineWatchInterval
 	timer := time.NewTimer(0)
 	defer timer.Stop()
+	var waitErr error
+	appExited := false
 loop:
 	for {
 		select {
 		case <-done:
 			break loop
+		case waitErr = <-exited:
+			// The app is gone. Take what it last wrote, but do not wait on a
+			// background process it left holding the terminal.
+			appExited = true
+			select {
+			case <-done:
+			case <-time.After(wrapDrainGrace):
+			}
+			break loop
 		case <-winch:
 			if c, r, sizeErr := term.GetSize(stdoutFd); sizeErr == nil && r >= 4 {
 				mu.Lock()
 				cols, rows = c, r
-				filter.rows, filter.dirty = r-1, true
 				_ = pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(r - 1), Cols: uint16(c)}) //nolint:gosec // terminal sizes fit uint16
-				_, _ = io.WriteString(os.Stdout, "\x1b7"+filter.region()+"\x1b8")
+				_, _ = io.WriteString(os.Stdout, filter.resized(r-1))
 				mu.Unlock()
 			}
 			timer.Reset(wrapQuiet)
@@ -153,12 +166,23 @@ loop:
 		}
 	}
 
+	// Nothing more is passed through: a process still holding the
+	// pseudo-terminal must not write over the terminal ox is giving back.
+	_ = ptmx.Close()
+	if !appExited {
+		waitErr = <-exited
+	}
+
 	// Give the terminal back whole: full scroll region, ox's row cleared.
 	mu.Lock()
 	_, _ = io.WriteString(os.Stdout, "\x1b7\x1b[r"+fmt.Sprintf("\x1b[%d;1H\x1b[2K", rows)+"\x1b8")
 	mu.Unlock()
-	return wrappedExitCode(cmd.Wait())
+	return wrappedExitCode(waitErr)
 }
+
+// wrapDrainGrace is how long ox keeps passing output through after the app
+// has exited, for what the app wrote last.
+const wrapDrainGrace = 250 * time.Millisecond
 
 // wrapStopGrace is how long the wrapped app has to exit after it is asked to
 // before it is killed.
@@ -182,6 +206,28 @@ func wrappedCommand(ctx context.Context, argv []string) *exec.Cmd {
 	}
 	cmd.WaitDelay = wrapStopGrace
 	return cmd
+}
+
+// unwrappedDrainGrace is how long ox keeps forwarding output after a command
+// run without a row has exited.
+const unwrappedDrainGrace = time.Second
+
+// runUnwrapped runs the command with no row to hold (no terminal on one end)
+// and returns its exit code. Its output is copied through rather than handed
+// ox's own stdout and stderr: a background process the command leaves behind
+// would otherwise keep those open, and ox could not exit until it did. What
+// the command itself wrote is still delivered; the copy stops
+// unwrappedDrainGrace after it exits.
+func runUnwrapped(cmd *exec.Cmd, stdout, stderr io.Writer) (int, error) {
+	cmd.Stdin = os.Stdin
+	// Not *os.File values: os/exec then owns the pipes and bounds the copy.
+	cmd.Stdout, cmd.Stderr = struct{ io.Writer }{stdout}, struct{ io.Writer }{stderr}
+	cmd.WaitDelay = unwrappedDrainGrace
+	err := cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		err = nil // it exited 0; only something it left behind still held the pipe
+	}
+	return wrappedExitCode(err)
 }
 
 // wrappedEnv is the environment the wrapped app runs in: ox's own, with

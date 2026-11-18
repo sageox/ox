@@ -90,10 +90,12 @@ no attachment events (`promptSvg([])` draws a stub and "nothing came back").
 - Converge, never radiate: dots end inside the receiving node and vanish there. `[B]`
 - Every animation of a finished call plays once, `fill="freeze"`. `[DS]` rule 2.
 - The one loop: while a call runs, 3 dots (in) or rings (out) cross from the origin to the ring,
-  evenly spaced, each in 1920ms (the terminal lane's speed), `repeatCount="indefinite"`. A coworker
+  evenly spaced, each in 1920ms (the terminal lane's speed), repeating. A coworker
   asked to see which way a call in progress is moving data, and the step text cannot show that. It
-  is an exception to `[DS]` rule 2, bounded by the call: the finish redraws the row without it, and
-  a call open for 10 minutes is drawn without it. Each `begin` is set back by the time already
+  is an exception to `[DS]` rule 2, bounded by the call: the finish redraws the row without it.
+  Nothing redraws an open row, so the bound for a call whose end never comes is in the SVG
+  itself: `repeatCount` is the crossings left until 10 minutes after the start, never
+  `indefinite`, and with no `fill="freeze"` the dots then return to invisible. Each `begin` is set back by the time already
   run, so a redraw does not restart the march. `[B]`
 - `ANIM_MS = 2400` ≥ 1400 + 11 × 90. After it, a finished lane's SVG holds no `<animate>` at all. `[B]`
 - Redraw continuity: every `begin` is `(stagger − (now − endedAt))`, negative once under way;

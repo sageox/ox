@@ -73,6 +73,37 @@ func TestWrapFilter_SequencesSplitAcrossReads(t *testing.T) {
 	}
 }
 
+// TestWrapFilter_ResizeWaitsForTheAppsSequence: a resize must set the new
+// scroll region, but never in the middle of something the app is writing.
+// Failure prevented: ox's escape codes landing inside an unfinished title,
+// link or image command and corrupting it.
+func TestWrapFilter_ResizeWaitsForTheAppsSequence(t *testing.T) {
+	const region = "\x1b7\x1b[1;29r\x1b8"
+
+	idle := &wrapFilter{rows: 23}
+	assert.Equal(t, region, idle.resized(29), "between sequences: written at once")
+	assert.True(t, idle.dirty, "ox's row is redrawn at its new place")
+	assert.Empty(t, idle.flushRegion(), "and only once")
+
+	for _, start := range []string{"\x1b]0;a long ti", "\x1b", "\x1b[38;5", "\x1b]8;;https://exam", "\x1bPq#0;2"} {
+		f := &wrapFilter{rows: 23}
+		_ = f.write([]byte("text" + start))
+		require.False(t, f.idle(), "%q is an unfinished sequence", start)
+		assert.Empty(t, f.resized(29), "%q: nothing may be written inside it", start)
+		assert.Empty(t, f.flushRegion(), "%q: still unfinished", start)
+		assert.Equal(t, 29, f.rows, "the filter already clamps to the new height")
+
+		// The app finishes its sequence; the region follows, once.
+		_ = f.write([]byte("\x07"))
+		if !f.idle() {
+			_ = f.write([]byte("m"))
+		}
+		require.True(t, f.idle(), "%q", start)
+		assert.Equal(t, region, f.flushRegion(), "%q", start)
+		assert.Empty(t, f.flushRegion(), "%q", start)
+	}
+}
+
 // Failure prevented: a runaway sequence making the filter hold output back forever.
 func TestWrapFilter_OverlongSequenceIsFlushed(t *testing.T) {
 	f := &wrapFilter{rows: 23}

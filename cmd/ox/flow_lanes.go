@@ -245,7 +245,7 @@ func flowItems(command, out string) (int, string) {
 	if noun == "" || len(out) > maxFlowItemsParseBytes {
 		return 0, ""
 	}
-	trimmed := strings.TrimSpace(out)
+	trimmed := mcpResultText(strings.TrimSpace(out))
 	if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') {
 		return 0, ""
 	}
@@ -289,6 +289,53 @@ func flowItems(command, out string) (int, string) {
 		return 0, ""
 	}
 	return n, pluralNoun(noun, n)
+}
+
+// mcpResultText unwraps an MCP tool reply to the JSON it carries: the text of
+// a content array ([{"type":"text","text":"<json>"}]) or of a
+// {"content":[…]} result, or a {"structuredContent":{…}} object. Without
+// it the content blocks themselves would be counted as the results. Anything
+// else is returned as it came.
+func mcpResultText(trimmed string) string {
+	if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return trimmed
+	}
+	firstJSON := func(blocks []any) (string, bool) {
+		texts := contentTexts(blocks)
+		if len(texts) == 0 || len(texts) != len(blocks) {
+			return "", false // not a content array: a plain list of results
+		}
+		for _, s := range texts {
+			if s = strings.TrimSpace(s); s != "" && (s[0] == '{' || s[0] == '[') {
+				return s, true
+			}
+		}
+		return "", true // content blocks holding prose only: nothing to count
+	}
+	if trimmed[0] == '[' {
+		var blocks []any
+		if json.Unmarshal([]byte(trimmed), &blocks) != nil {
+			return trimmed
+		}
+		if text, ok := firstJSON(blocks); ok {
+			return text
+		}
+		return trimmed
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal([]byte(trimmed), &obj) != nil {
+		return trimmed
+	}
+	if sc := strings.TrimSpace(string(obj["structuredContent"])); strings.HasPrefix(sc, "{") {
+		return sc
+	}
+	var blocks []any
+	if len(obj["content"]) > 0 && json.Unmarshal(obj["content"], &blocks) == nil {
+		if text, ok := firstJSON(blocks); ok {
+			return text
+		}
+	}
+	return trimmed
 }
 
 // addFlowFacts fills the flow lane's fields on an invoked event: how long
@@ -370,10 +417,10 @@ func flowTracePath(projectRoot, agentID string) string {
 	return filepath.Join(agentTraceCacheDir(projectRoot), agentID+".jsonl")
 }
 
-// finishedFlows are agentID's finished flow lanes, oldest first. A missing
-// or unreadable trace is no lanes: a lane is decoration, never an error.
-func finishedFlows(projectRoot, agentID string) []finishedFlow {
-	path := flowTracePath(projectRoot, agentID)
+// finishedFlowsAt are the finished flow lanes in the trace at path (see
+// flowTracePath), oldest first. A missing or unreadable trace is no lanes: a
+// lane is decoration, never an error.
+func finishedFlowsAt(path, agentID string) []finishedFlow {
 	if path == "" {
 		return nil
 	}

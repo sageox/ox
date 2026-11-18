@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/signal"
@@ -73,6 +74,9 @@ type watchFrame struct {
 	status string
 	lanes  []string
 	log    []string
+	// trace names the file the log rows were read from: a new one (a
+	// recording started or ended) is a new list, printed from its start.
+	trace string
 	// moving is true while a lane is still animating: the caller redraws
 	// soon rather than at the idle pace.
 	moving bool
@@ -99,20 +103,47 @@ type flowWatch struct {
 	trace  string
 	seenAt []time.Time
 	primed bool
+	// wantLog asks for the settled row of every finished call, for output
+	// that cannot redraw (a pipe). A terminal never reads them.
+	wantLog bool
+	// The trace as last parsed, reused while the file is unchanged: a pane
+	// redraws every 80ms while a lane moves, and a long recording's trace
+	// must not be re-read and re-parsed for each frame.
+	flowsStamp string
+	flows      []finishedFlow
+}
+
+// traceStamp identifies a trace file's contents cheaply: its size and
+// modification time. "" (missing or unreadable) never matches a cached stamp.
+func traceStamp(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
+}
+
+// finished is the trace's finished calls, parsed again only when it changed.
+func (w *flowWatch) finished(trace, agentID string) []finishedFlow {
+	stamp := traceStamp(trace)
+	if stamp == "" || stamp != w.flowsStamp {
+		w.flows, w.flowsStamp = finishedFlowsAt(trace, agentID), stamp
+	}
+	return w.flows
 }
 
 // lanes draws agentID's flow lanes for the pane: the most recent finished
 // calls that fit rows, then the calls still running.
 func (w *flowWatch) lanes(root, agentID string, now time.Time, rows int, opts statuslineOptions) (shown, log []string, moving bool) {
 	if agentID == "" || !flowLanesEnabled() {
-		*w = flowWatch{}
+		*w = flowWatch{wantLog: w.wantLog}
 		return nil, nil, false
 	}
 	trace := flowTracePath(root, agentID)
 	if agentID != w.agentID || trace != w.trace {
-		*w = flowWatch{agentID: agentID, trace: trace}
+		*w = flowWatch{agentID: agentID, trace: trace, wantLog: w.wantLog}
 	}
-	flows := finishedFlows(root, agentID)
+	flows := w.finished(trace, agentID)
 	if len(flows) < len(w.seenAt) {
 		w.seenAt, w.primed = nil, false // the trace was rewritten
 	}
@@ -133,16 +164,25 @@ func (w *flowWatch) lanes(root, agentID string, now time.Time, rows int, opts st
 		if !w.seenAt[i].IsZero() {
 			since = now.Sub(w.seenAt[i])
 		}
-		log = append(log, flowlane.Render(f.lane, flowlane.AnimDuration, flowlane.Options{Columns: opts.width, Still: true}))
+		if w.wantLog {
+			if row := flowlane.Render(f.lane, flowlane.AnimDuration, flowlane.Options{Columns: opts.width, Still: true}); row != "" {
+				log = append(log, row)
+			}
+		}
 		if i < first {
 			continue
 		}
-		moving = moving || flowlane.Moving(f.lane, since)
-		shown = append(shown, flowlane.Render(f.lane, since, lane))
+		// A pane too narrow for the track gets no lane rather than a wrapped one.
+		if row := flowlane.Render(f.lane, since, lane); row != "" {
+			moving = moving || flowlane.Moving(f.lane, since)
+			shown = append(shown, row)
+		}
 	}
 	for _, r := range running {
-		moving = moving || flowlane.Moving(r.lane, r.elapsed)
-		shown = append(shown, flowlane.Render(r.lane, r.elapsed, lane))
+		if row := flowlane.Render(r.lane, r.elapsed, lane); row != "" {
+			moving = moving || flowlane.Moving(r.lane, r.elapsed)
+			shown = append(shown, row)
+		}
 	}
 	if len(shown) > rows {
 		shown = shown[len(shown)-rows:]
@@ -180,6 +220,7 @@ func buildWatchFrameFor(w *flowWatch, dir, sid string, opts statuslineOptions, r
 		agentID = marker.AgentID
 	}
 	f.lanes, f.log, f.moving = w.lanes(root, agentID, now, rows, opts)
+	f.trace = w.trace
 	return f
 }
 
@@ -190,7 +231,7 @@ func buildWatchFrameFor(w *flowWatch, dir, sid string, opts statuslineOptions, r
 // once, settled.
 func watchStatusline(ctx context.Context, w io.Writer, frame func() watchFrame, tick <-chan time.Time, inPlace bool) {
 	last, lastStatus, first := "", "", true
-	lastLines, logged := 1, 0
+	lastLines, logged, loggedTrace := 1, 0, ""
 	draw := func() {
 		f := frame()
 		if !inPlace {
@@ -198,8 +239,8 @@ func watchStatusline(ctx context.Context, w io.Writer, frame func() watchFrame, 
 				_, _ = io.WriteString(w, f.status+"\n")
 			}
 			first, lastStatus = false, f.status
-			if logged > len(f.log) {
-				logged = 0
+			if logged > len(f.log) || f.trace != loggedTrace {
+				logged, loggedTrace = 0, f.trace // a new trace: its rows are all new
 			}
 			for _, row := range f.log[logged:] {
 				_, _ = io.WriteString(w, row+"\n")
@@ -273,7 +314,7 @@ func runStatuslineWatch(stdout io.Writer) {
 	// One timer paces the pane: the idle interval while nothing moves, the
 	// motion interval for the 2.4s after an ox call lands. Nothing is written
 	// unless the frame changed.
-	var watch flowWatch
+	watch := flowWatch{wantLog: !inPlace}
 	tick := make(chan time.Time)
 	pace := make(chan bool, 1)
 	go func() {

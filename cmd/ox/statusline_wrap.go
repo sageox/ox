@@ -37,6 +37,9 @@ type wrapFilter struct {
 	// dirty is set when the app did something that may have erased ox's row
 	// (cleared the screen, switched screens, reset the terminal).
 	dirty bool
+	// regionPending is set when the terminal was resized while the app was
+	// mid-sequence: the new scroll region is written once it finishes.
+	regionPending bool
 
 	state wrapState
 	seq   []byte
@@ -59,6 +62,36 @@ const maxWrapSeq = 64
 // region is the scroll region that leaves ox's row alone.
 func (f *wrapFilter) region() string {
 	return fmt.Sprintf("\x1b[1;%dr", max(1, f.rows))
+}
+
+// setRegion is the bytes that set the scroll region without moving the app's
+// cursor.
+func (f *wrapFilter) setRegion() string {
+	return "\x1b7" + f.region() + "\x1b8"
+}
+
+// resized records the app's new height and returns what to write now: the
+// new scroll region, or nothing while the app is inside a control sequence
+// (a title, a link, an image), where ox's bytes would become part of it. The
+// region then comes from flushRegion once the sequence has ended.
+func (f *wrapFilter) resized(rows int) string {
+	f.rows, f.dirty = rows, true
+	if !f.idle() {
+		f.regionPending = true
+		return ""
+	}
+	f.regionPending = false
+	return f.setRegion()
+}
+
+// flushRegion returns the scroll region a resize left pending, once the app
+// is between sequences; "" otherwise.
+func (f *wrapFilter) flushRegion() string {
+	if !f.regionPending || !f.idle() {
+		return ""
+	}
+	f.regionPending = false
+	return f.setRegion()
 }
 
 // idle reports whether the app is between control sequences.

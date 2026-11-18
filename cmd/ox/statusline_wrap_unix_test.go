@@ -3,8 +3,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os/exec"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -74,4 +76,60 @@ func TestWrappedEnv_AppKeepsItsColor(t *testing.T) {
 	statuslineNoColor, statuslineHasNoC = "1", true
 	assert.Equal(t, []string{"TERM=xterm", "NO_COLOR=1"}, wrappedEnv([]string{"NO_COLOR=1", "TERM=xterm"}),
 		"the coworker did set it: the app honors it too")
+}
+
+// syncBuffer is a bytes.Buffer safe for the copying goroutines to write to
+// while the test reads it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestRunUnwrapped_DoesNotWaitOnWhatTheCommandLeftBehind: with output
+// redirected there is no row to hold and the command is simply run. Failure
+// prevented: a background process it started keeps the output open, and ox
+// hangs (for as long as that process lives) before reporting the exit code.
+func TestRunUnwrapped_DoesNotWaitOnWhatTheCommandLeftBehind(t *testing.T) {
+	tests := []struct {
+		name, script string
+		wantCode     int
+	}{
+		{"a failure, with a background child", "echo out; echo err >&2; sleep 30 & exit 7", 7},
+		{"a success, with a background child", "echo out; echo err >&2; sleep 30 & exit 0", 0},
+		{"a plain failure", "echo out; echo err >&2; exit 3", 3},
+	}
+	if testing.Short() {
+		t.Skip("short: waits out the 1s output drain after each command")
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr syncBuffer
+			cmd := wrappedCommand(context.Background(), []string{"sh", "-c", tt.script})
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			t.Cleanup(func() {
+				if cmd.Process != nil {
+					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // the sleep left behind
+				}
+			})
+			start := time.Now()
+			code, err := runUnwrapped(cmd, &stdout, &stderr)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantCode, code)
+			assert.Less(t, time.Since(start), 10*time.Second, "ox must not wait for the 30s background child")
+			assert.Equal(t, "out\n", stdout.String(), "what the command wrote is delivered")
+			assert.Equal(t, "err\n", stderr.String())
+		})
+	}
 }

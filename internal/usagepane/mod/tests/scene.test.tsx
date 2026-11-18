@@ -89,18 +89,36 @@ describe('a pure function of (event, now)', () => {
     expect(svg).toContain('class="flow"')
   })
 
-  test('only a running lane loops: a finished one plays once', () => {
+  test('only a running lane repeats, and never without end: a finished one plays once', () => {
     for (const now of [T0 + 100, T0 + 900, T0 + 2000]) {
-      expect(laneSvg(ev({ endedAt: undefined }), now)).toContain('indefinite')
-      expect(laneSvg(ev({ tokens: 9000 }), now)).not.toContain('indefinite')
-      expect(laneSvg(ev({ failed: true, tokens: 0 }), now)).not.toContain('indefinite')
+      expect(laneSvg(ev({ endedAt: undefined }), now)).toContain('repeatCount="')
+      expect(laneSvg(ev({ tokens: 9000 }), now)).not.toContain('repeatCount')
+      expect(laneSvg(ev({ failed: true, tokens: 0 }), now)).not.toContain('repeatCount')
     }
+    for (const now of [T0, T0 + 100, T0 + 5 * 60_000, T0 + 10 * 60_000 - 1]) {
+      expect(laneSvg(ev({ endedAt: undefined }), now)).not.toContain('indefinite')
+    }
+  })
+
+  // Failure prevented: a call whose end never arrives (a stall, a lost finish
+  // event) leaves dots moving in the app for good: nothing redraws an open row.
+  test('the march runs out by itself ten minutes after the call started', () => {
+    const repeats = (now: number) => [...laneSvg(ev({ endedAt: undefined }), now).matchAll(/repeatCount="(\d+)"/g)].map((m) => Number(m[1]))
+    // 600s of 1.92s crossings from the start; fewer the later the row is drawn.
+    expect(repeats(T0)).toEqual([313, 313, 313, 313, 313, 313])
+    expect(repeats(T0 + 5 * 60_000).every((n) => n === 157)).toBe(true)
+    expect(repeats(T0 + 10 * 60_000 - 1000).every((n) => n === 1)).toBe(true)
+    expect(repeats(T0 + 10 * 60_000)).toEqual([])
+    // No freeze: when the count runs out the dots return to their base, invisible.
+    const svg = laneSvg(ev({ endedAt: undefined }), T0)
+    expect(svg).not.toMatch(/repeatCount="\d+"[^>]*fill="freeze"/)
+    expect(svg).toMatch(/<circle class="dot-in" cx="[\d.]+" cy="12" r="2.5" opacity="0">/)
   })
 
   // Failure prevented: a call in progress looks idle in the app, or a push is
   // drawn moving the same way as a pull (the terminal lane marches too).
   test('a running lane marches toward the destination: a pull left to right, a push right to left', () => {
-    const cx = (svg: string) => [...svg.matchAll(/attributeName="cx" values="([\d.]+);([\d.]+)"[^>]*repeatCount="indefinite"/g)].map((m) => [Number(m[1]), Number(m[2])])
+    const cx = (svg: string) => [...svg.matchAll(/attributeName="cx" values="([\d.]+);([\d.]+)"[^>]*repeatCount="\d+"/g)].map((m) => [Number(m[1]), Number(m[2])])
     const pull = laneSvg(ev({ endedAt: undefined }), T0 + 500)
     expect(cx(pull).length).toBe(3)
     expect(cx(pull).every(([a, b]) => a < b)).toBe(true)
@@ -116,7 +134,7 @@ describe('a pure function of (event, now)', () => {
     expect(laneSvg(ev({ endedAt: undefined }), T0 + 700)).toContain('begin="-0.7s"')
     // Asked for no motion, or a start too old to believe: the dotted line alone.
     expect(laneSvg(ev({ endedAt: undefined }), T0 + 500, { reducedMotion: true })).not.toContain('<animate')
-    expect(laneSvg(ev({ endedAt: undefined }), T0 + 10 * 60_000)).not.toContain('indefinite')
+    expect(laneSvg(ev({ endedAt: undefined }), T0 + 10 * 60_000)).not.toContain('repeatCount')
   })
 
   test('static values are end states: dots wait at the destination, invisible', () => {

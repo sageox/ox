@@ -295,6 +295,14 @@ func TestFlowItems(t *testing.T) {
 		{"broken JSON", "query", `{"results":[1,2`, 0, ""},
 		{"a command with no noun", "plan view", `{"results":[1,2]}`, 0, ""},
 		{"results that is not a list", "query", `{"results":"none"}`, 0, ""},
+		// An MCP reply wraps its JSON in content blocks: the results are
+		// counted, never the blocks.
+		{"mcp content array", "mcp ListMurmurs", `[{"type":"text","text":"{\"murmurs\":[1,2,3,4,5,6]}"}]`, 6, "murmurs"},
+		{"mcp content array, empty result", "mcp ListMurmurs", `[{"type":"text","text":"{\"murmurs\":[]}"}]`, 0, ""},
+		{"mcp content array, prose only", "mcp Search", `[{"type":"text","text":"no matches"}]`, 0, ""},
+		{"mcp content object", "mcp Search", `{"content":[{"type":"text","text":"{\"results\":[1,2]}"}]}`, 2, "discussions"},
+		{"mcp structuredContent", "mcp Search", `{"structuredContent":{"results":[1,2,3]},"content":[{"type":"text","text":"3 results"}]}`, 3, "discussions"},
+		{"a result list of objects with text is still a list", "code search", `[{"text":"a","file":"x.go"},{"file":"y.go"}]`, 2, "matches"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -303,6 +311,25 @@ func TestFlowItems(t *testing.T) {
 			assert.Equal(t, tt.noun, noun)
 		})
 	}
+}
+
+// TestCodexFlowNotice_NewRecordingShowsItsFirstCall: the lanes already shown
+// are a position in one trace, and the trace changes when a recording starts.
+// Failure prevented: the first ox call of a new recording shown nowhere,
+// because one call made before recording had already been counted as shown.
+func TestCodexFlowNotice_NewRecordingShowsItsFirstCall(t *testing.T) {
+	root := codexDigestEnv(t, nil)
+	cache := t.TempDir()
+	t.Setenv("HOME", cache)
+	t.Setenv("XDG_CACHE_HOME", cache)
+
+	before := runCodexCall(t, root, "ox plan view x", "# plan", 300*time.Millisecond)
+	require.Len(t, before, 1, "not recording yet: the call's lane is shown under it")
+
+	startWorktreeRecording(t, root, codexDigestAgentID, codexDigestSessionID)
+	after := runCodexCall(t, root, `ox query "x"`, searchJSON, 300*time.Millisecond)
+	require.Len(t, after, 1, "the new recording's first call must show its lane")
+	assert.Contains(t, after[0], "searched team memory")
 }
 
 // --- D. The watch pane ---
@@ -361,6 +388,12 @@ func TestStatuslineWatch_DrawsLanesLive(t *testing.T) {
 	one := buildWatchFrame(&w, root, opts, 1, seen.Add(3*time.Second))
 	require.Len(t, one.lanes, 1)
 	assert.Contains(t, one.lanes[0], "searched team memory")
+
+	// A pane too narrow for the track draws no lane rather than a wrapped one.
+	narrow := statuslineOptions{width: 17} // one short of the 18-cell track
+	thin := buildWatchFrame(&w, root, narrow, 6, seen.Add(3*time.Second))
+	assert.Empty(t, thin.lanes)
+	assert.False(t, thin.moving)
 
 	// Lanes off: the pane is the status line alone.
 	require.NoError(t, SetConfigValue("flow_lanes", "off", ConfigLevelUser, ""))

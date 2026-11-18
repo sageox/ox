@@ -360,7 +360,12 @@ func fit(segs []seg, room int) []seg {
 // long ago the call ended, or for a running lane how long ago it started.
 // Anything at or past AnimDuration after the end (or opts.Still) draws the
 // settled frame; opts.Still draws a running lane without its marching dots.
+// A width too narrow for the track draws nothing: a wrapped lane would break
+// a pane that redraws in place.
 func Render(l Lane, sinceEnd time.Duration, opts Options) string {
+	if opts.Columns > 0 && opts.Columns < Track {
+		return ""
+	}
 	labels := opts.Columns <= 0 || opts.Columns >= NarrowColumns
 	room := math.MaxInt32
 	if opts.Columns > 0 {

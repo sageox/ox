@@ -57,6 +57,10 @@ type State struct {
 	// team data) that turn-end notice has already shown, so each is shown
 	// once. Like the counts it starts over with a new recording.
 	ShownFlows int `json:"shown_flows,omitempty"`
+	// ShownFlowsTrace names the trace ShownFlows counts into. The trace
+	// changes when a recording starts or ends; a position in the old one says
+	// nothing about the new one.
+	ShownFlowsTrace string `json:"shown_flows_trace,omitempty"`
 	// Recording is the ox recording (session.RecordingState.SessionID, a
 	// ses_ id) the counts belong to. A harness session outlives a recording
 	// on every resume, pause or idle finalize, and `ox session report` counts

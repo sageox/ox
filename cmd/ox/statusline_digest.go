@@ -143,8 +143,10 @@ func pendingDigest(ctx *HookContext) string {
 	}
 	withLine := digestShowsStatusline(ctx)
 	var flows []finishedFlow
+	trace := ""
 	if flowLanesEnabled() {
-		flows = finishedFlows(ctx.ProjectRoot, ctx.Marker.AgentID)
+		trace = flowTracePath(ctx.ProjectRoot, ctx.Marker.AgentID)
+		flows = finishedFlowsAt(trace, ctx.Marker.AgentID)
 	}
 	showsLine := withLine && counted
 	if !showsLine && len(flows) == 0 {
@@ -158,6 +160,12 @@ func pendingDigest(ctx *HookContext) string {
 	var message string
 	err := oxactivity.UpdateState(ctx.ProjectRoot, key, func(s *oxactivity.State) bool {
 		changed := s.BindRecording(recordingID)
+		if trace != "" && s.ShownFlowsTrace != trace {
+			// A recording started or ended: these are another trace's lanes,
+			// and none of them has been shown.
+			s.ShownFlows, s.ShownFlowsTrace = 0, trace
+			changed = true
+		}
 		firstNotice := s.ShownLine == "" && s.ShownFlows == 0
 		lanes := digestLanes(flows, s.ShownFlows, firstNotice, time.Now())
 		if s.ShownFlows != len(flows) {

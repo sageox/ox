@@ -397,14 +397,16 @@ function draw(m: Model, now: number, opts: SceneOpts, level: Level): string {
     parts.push(`<g>${fade}<line class="open" x1="${x0}" y1="${y}" x2="${end}" y2="${y}"/>`)
     parts.push(`<circle class="ring" cx="${ringX}" cy="${y}" r="${T.ringR}"/></g>`)
     // While the call runs, dots (in) or rings (out) march from the origin to
-    // the ring, over and over: the one loop in the lane, there to show which
+    // the ring, over and over: the one repeat in the lane, there to show which
     // way a call in progress moves data. Each begin is set back by the time
     // already run, so a redraw carries on where the last frame was. Static
-    // frame: invisible. It ends with the call, or with a start too old to believe.
+    // frame: invisible. It ends with the call's redraw; for a call whose end
+    // never comes, the repeat count itself runs out at marchMaxMs, since
+    // nothing redraws an open row, and the dots return to invisible.
     if (!reduced && sinceStart < T.marchMaxMs) {
       const cls = inbound ? 'dot-in' : 'dot-out'
       const r = inbound ? T.dotR : T.ringDotR
-      const loop = ' repeatCount="indefinite"'
+      const loop = ` repeatCount="${Math.ceil((T.marchMaxMs - sinceStart) / T.marchMs)}"`
       for (let i = 0; i < T.marchDots; i++) {
         const begin = -((sinceStart + (i * T.marchMs) / T.marchDots) % T.marchMs)
         parts.push(

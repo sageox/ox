@@ -147,6 +147,18 @@ func TestRender_NeverWiderThanColumns(t *testing.T) {
 	}
 }
 
+// Failure prevented: a pane narrower than the track gets a wrapped lane, and
+// the in-place redraw (which counts lines, not wrapped rows) leaves fragments.
+func TestRender_TooNarrowForTheTrackDrawsNothing(t *testing.T) {
+	for _, l := range []Lane{search(), murmur(), with(search(), func(l *Lane) { l.Running = true }), with(search(), func(l *Lane) { l.Failed = true })} {
+		for cols := 1; cols < Track; cols++ {
+			assert.Empty(t, Render(l, settled, Options{Columns: cols}), "cols=%d", cols)
+		}
+		assert.Equal(t, Track, ansi.StringWidth(Render(l, settled, Options{Columns: Track})))
+		assert.NotEmpty(t, Render(l, settled, Options{}), "0 is unlimited, not narrow")
+	}
+}
+
 func TestRender_NarrowDropsLabelsKeepsTrack(t *testing.T) {
 	wide := Render(search(), settled, Options{Columns: NarrowColumns})
 	narrow := Render(search(), settled, Options{Columns: NarrowColumns - 1})
