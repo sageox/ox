@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
@@ -29,6 +31,9 @@ export const OxPrimePlugin: Plugin = async ({ $, directory }) => {
   }
 }
 `
+
+// Older ox versions wrote the same plugin without OpenCode's shell tag.
+var legacyOpenCodePlugin = strings.Replace(openCodePluginTemplate, "await $", "await ", 1)
 
 func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallHooksResponse, error) {
 	pluginPath := resolvePluginPath(p.RepoRoot, p.Scope)
@@ -61,8 +66,11 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooksResponse, error) {
 	pluginPath := resolvePluginPath(p.RepoRoot, p.Scope)
 
-	_, err := os.Stat(pluginPath)
-	installed := err == nil
+	content, err := os.ReadFile(pluginPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read OpenCode plugin: %w", err)
+	}
+	installed := err == nil && string(content) != legacyOpenCodePlugin
 
 	return &adapterprotocol.CheckHooksResponse{
 		Installed: installed,
