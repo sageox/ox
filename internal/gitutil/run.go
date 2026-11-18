@@ -13,6 +13,9 @@ import (
 // Output is auto-sanitized to remove credentials. Use repoPath="" for
 // commands that don't need -C.
 func RunGit(ctx context.Context, repoPath string, args ...string) (string, error) {
+	if len(args) == 0 {
+		return "", errors.New("git: missing subcommand")
+	}
 	output, err := localGitCommand(ctx, repoPath, args...).CombinedOutput()
 	sanitized := SanitizeOutput(strings.TrimSpace(string(output)))
 	if err != nil {
@@ -24,6 +27,9 @@ func RunGit(ctx context.Context, repoPath string, args ...string) (string, error
 // RunGitStdout returns Git's stdout without stderr diagnostics or sanitization.
 // Use it to parse machine-readable output. Error messages sanitize stderr.
 func RunGitStdout(ctx context.Context, repoPath string, args ...string) ([]byte, error) {
+	if len(args) == 0 {
+		return nil, errors.New("git: missing subcommand")
+	}
 	output, err := localGitCommand(ctx, repoPath, args...).Output()
 	if err == nil {
 		return output, nil

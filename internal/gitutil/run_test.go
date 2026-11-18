@@ -205,3 +205,10 @@ func TestRunGit(t *testing.T) {
 		}
 	})
 }
+
+func TestRunGit_MissingSubcommand(t *testing.T) {
+	_, err := RunGit(t.Context(), "")
+	require.ErrorContains(t, err, "missing subcommand")
+	_, err = RunGitStdout(t.Context(), "")
+	require.ErrorContains(t, err, "missing subcommand")
+}
