@@ -217,7 +217,7 @@ func (t *ReadTransport) validateConfig(ctx context.Context, dir string, env []st
 
 func (t *ReadTransport) safeConfig(key, value string) bool {
 	switch key {
-	case "", "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates", "core.ignorecase", "core.precomposeunicode", "core.sparsecheckout", "core.sparsecheckoutcone", "index.sparse", "extensions.worktreeconfig", "extensions.partialclone", "remote.origin.promisor", "remote.origin.partialclonefilter", "user.name", "user.email", "commit.gpgsign", "tag.gpgsign":
+	case "", "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates", "core.ignorecase", "core.precomposeunicode", "core.sparsecheckout", "core.sparsecheckoutcone", "index.sparse", "extensions.worktreeconfig", "extensions.partialclone", "remote.origin.promisor", "remote.origin.partialclonefilter", "user.name", "user.email", "author.name", "author.email", "committer.name", "committer.email", "commit.gpgsign", "tag.gpgsign":
 		return true
 	case "remote.origin.url":
 		return value == t.readURL
