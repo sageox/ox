@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
@@ -315,29 +316,39 @@ func TestProcessResult_RetriesLegacyEmptyLedgerDownload(t *testing.T) {
 }
 
 func TestProcessResult_ReplaysPendingEmptyLedgerRepair(t *testing.T) {
-	for _, state := range []string{"legacy", "backfilled", "already repaired", "different recording"} {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	for _, state := range []string{"legacy", "backfilled", "already repaired", "interrupted staging", "different recording"} {
 		t.Run(state, func(t *testing.T) {
 			const name = "2026-09-24T23-03-riley-OxRiLy"
-			ledgerPath := t.TempDir()
+			bare, ledgerPath := setupBareAndCloneLedger(t)
+			branch := gitOutput(t, ledgerPath, "branch", "--show-current")
 			f := cacheFixture{
 				name: name, ledgerPath: ledgerPath,
 				cacheDir: filepath.Join(ledgerPath, ".sageox", "cache", "sessions", name),
 			}
 			destDir := filepath.Join(ledgerPath, "sessions", name)
 			f.ledgerEntry(t, emptyRaw, false)
+			rawRef := lfs.NewFileRef([]byte(emptyRaw))
+			require.NoError(t, os.WriteFile(filepath.Join(destDir, "raw.jsonl"), []byte(lfs.FormatPointer(rawRef.OID, rawRef.Size)), 0o644))
+			cachedStop := time.Date(2026, 9, 24, 23, 14, 0, 0, time.UTC)
+			newerStop := cachedStop.Add(time.Minute)
 			require.NoError(t, lfs.MutateSessionMeta(t.Context(), destDir, func(meta *lfs.SessionMeta) (*lfs.SessionMeta, error) {
 				meta.RepoID = "repo_empty_test"
 				meta.SessionName = name
 				meta.UserID = "usr_updated_while_upload_pending"
 				switch state {
-				case "backfilled":
+				case "backfilled", "interrupted staging":
 					meta.SessionID = meta.EffectiveSessionID()
 				case "already repaired":
+					meta.SessionID = meta.EffectiveSessionID()
 					meta.Title = "Newer title"
 					meta.Summary = "Newer summary"
 					meta.SummaryStatus = "ok"
 					meta.SummaryAttempts = 0
 					meta.ValidationError = ""
+					meta.StoppedAt = &newerStop
 				case "different recording":
 					meta.SessionID = "ses_01950000-0000-7000-8000-000000001106"
 				}
@@ -347,22 +358,45 @@ func TestProcessResult_ReplaysPendingEmptyLedgerRepair(t *testing.T) {
 			// The first attempt produced its deterministic summary in the
 			// cache, then failed to upload before it could stage the repair.
 			f.write(t, "raw.jsonl", emptyRaw)
-			f.write(t, "meta.json", `{"version":"1.0","title":"Brief session","summary":"No conversation was recorded in this session.","summary_status":"ok"}`)
+			f.write(t, "meta.json", `{"version":"1.0","title":"Brief session","summary":"No conversation was recorded in this session.","summary_status":"ok","stopped_at":"2026-09-24T23:14:00Z"}`)
+			const cachedJSON, newerJSON = `{"title":"Brief session"}`, `{"title":"Newer title"}`
+			const cachedMD, newerMD = "cached brief summary", "newer Ledger summary"
+			f.write(t, artifactSummJSON, cachedJSON)
+			f.write(t, artifactSummaryMD, cachedMD)
+			newerRef := lfs.NewFileRef([]byte(newerMD))
+			if state == "already repaired" {
+				require.NoError(t, os.WriteFile(filepath.Join(destDir, artifactSummJSON), []byte(newerJSON), 0o644))
+				require.NoError(t, os.WriteFile(filepath.Join(destDir, artifactSummaryMD), []byte(lfs.FormatPointer(newerRef.OID, newerRef.Size)), 0o644))
+			}
+			runGitCmd(t, ledgerPath, "add", "sessions/"+name)
+			runGitCmd(t, ledgerPath, "commit", "-m", "existing empty recording")
+			runGitCmd(t, ledgerPath, "push")
+			headBefore := gitOutput(t, bare, "rev-parse", branch)
+
 			h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
-			item := &WorkItem{Payload: &SessionFinalizePayload{
-				SessionDir: f.cacheDir, LedgerPath: ledgerPath, UploadOnly: true,
-			}}
+			h.skipGit = false
+			enableLocalFinalizeLFS(t, h, ledgerPath)
+			retry := func() *SessionFinalizePayload {
+				return &SessionFinalizePayload{SessionDir: f.cacheDir, LedgerPath: ledgerPath, UploadOnly: true}
+			}
+			if state == "interrupted staging" {
+				_, err := h.stageSessionInLedger(retry())
+				require.NoError(t, err)
+			}
+			item := &WorkItem{Payload: retry()}
 			req, err := h.BuildPrompt(item)
 			require.NoError(t, err)
 			require.True(t, req.SkipLLM)
 			err = h.ProcessResult(item, &RunResult{})
-			got, readErr := lfs.ReadSessionMeta(destDir)
+			committed := gitOutput(t, bare, "show", branch+":sessions/"+name+"/meta.json")
+			got, readErr := lfs.ParseSessionMeta([]byte(committed))
 			require.NoError(t, readErr)
 			require.Equal(t, "usr_updated_while_upload_pending", got.UserID)
 			if state == "different recording" {
 				require.ErrorIs(t, err, session.ErrLedgerSessionOverwrite)
 				require.Equal(t, "unrecoverable", got.SummaryStatus)
 				require.DirExists(t, f.cacheDir)
+				require.Equal(t, headBefore, gitOutput(t, bare, "rev-parse", branch))
 				return
 			}
 			require.NoError(t, err)
@@ -373,9 +407,17 @@ func TestProcessResult_ReplaysPendingEmptyLedgerRepair(t *testing.T) {
 			if state == "already repaired" {
 				require.Equal(t, "Newer title", got.Title)
 				require.Equal(t, "Newer summary", got.Summary)
+				require.Equal(t, &newerStop, got.StoppedAt)
+				require.Equal(t, headBefore, gitOutput(t, bare, "rev-parse", branch))
+				require.Equal(t, newerJSON, gitOutput(t, bare, "show", branch+":sessions/"+name+"/"+artifactSummJSON))
+				require.Equal(t, strings.TrimSpace(lfs.FormatPointer(newerRef.OID, newerRef.Size)), gitOutput(t, bare, "show", branch+":sessions/"+name+"/"+artifactSummaryMD))
 			} else {
 				require.Equal(t, "Brief session", got.Title)
 				require.Equal(t, "No conversation was recorded in this session.", got.Summary)
+				require.Equal(t, &cachedStop, got.StoppedAt)
+				cachedRef := lfs.NewFileRef([]byte(cachedMD))
+				require.Equal(t, cachedJSON, gitOutput(t, bare, "show", branch+":sessions/"+name+"/"+artifactSummJSON))
+				require.Equal(t, strings.TrimSpace(lfs.FormatPointer(cachedRef.OID, cachedRef.Size)), gitOutput(t, bare, "show", branch+":sessions/"+name+"/"+artifactSummaryMD))
 			}
 			require.Equal(t, "ok", got.SummaryStatus)
 			require.Empty(t, got.ValidationError)
