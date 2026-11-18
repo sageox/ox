@@ -378,8 +378,8 @@ var cliRules = []cliRule{
 	{words: []string{"decision", "enrich"}, label: "checked decisions", kind: KindRetrieval},
 
 	{words: []string{"session", "report"}, label: "checked session report", kind: KindOther},
-	// `ox brief` is the hidden alias of `ox session report`, kept for one
-	// release; `ox usage` is its older name, still found in recorded traces.
+	// `ox brief` and `ox usage` are older names of `ox session report`. Neither
+	// is a command any more; both are still found in recorded traces.
 	{words: []string{"brief"}, label: "checked session report", kind: KindOther},
 	{words: []string{"usage"}, label: "checked session report", kind: KindOther},
 }
