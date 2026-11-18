@@ -112,8 +112,8 @@ func runMemoryPut(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// redaction is caller-side: the agent redacts content before calling ox memory put,
-	// using guidance from REDACT.md files (same pattern as session summary prompts).
+	// Callers redact content using REDACT.md guidance. Publication also checks
+	// the committed bytes before pushing.
 
 	if err := writeObservation(tc.Path, observations); err != nil {
 		return err
@@ -155,11 +155,7 @@ func writeObservation(teamContextPath string, observations []observation) error 
 		}
 	}
 
-	summary := observations[0].Content
-	if len(summary) > 50 {
-		summary = summary[:50] + "..."
-	}
-	commitMsg := daemon.TeamObservationCommitPrefix + summary
+	const commitMsg = daemon.TeamObservationCommitPrefix + "record team memory"
 	relPath := filepath.Join("memory", observationDirName, dateDir, filename)
 	pending := daemon.TeamObservationDir
 

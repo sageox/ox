@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 
 	"github.com/sageox/ox/internal/addons"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/perf"
+	"github.com/sageox/ox/internal/secretguard"
 )
 
 // TeamPublishCommitPrefix is the subject `ox skills publish` gives the commit
@@ -22,7 +24,7 @@ const TeamPublishCommitPrefix = "add team skill: "
 // paths written by the Team Context observation recorder.
 const (
 	TeamObservationCommitPrefix = "observation: "
-	TeamObservationDir          = "memory/.observations"
+	TeamObservationDir          = gitutil.TeamObservationDir
 )
 
 type teamPublishScope int
@@ -109,40 +111,47 @@ var ErrForeignCommitAhead = errors.New("a commit outside the Team Context publis
 // PushWithRetry holds through the push, so a commit made after the caller's own
 // check, or during a retry's rebase, can never ride a publish out.
 func ValidateTeamPublishPush(ctx context.Context, repoPath string) (alreadyPublished bool, err error) {
-	out, err := gitutil.RunGit(ctx, repoPath, "log", "--format=%H%x00%P%x00%s%x00", "@{upstream}..HEAD")
+	// Read Git's local plumbing output directly. RunGit sanitizes human-facing
+	// output, which can remove or rewrite records that must be checked here.
+	out, err := exec.CommandContext(ctx, "git", "-C", repoPath, "log", "-z",
+		"--format=%H%x00%P%x00%s%x00%B", "@{upstream}..HEAD").Output()
 	if err != nil {
 		return false, fmt.Errorf("list unpushed commits: %w", err)
 	}
-	if out == "" {
+	if len(out) == 0 {
 		return true, nil // a concurrent sync already pushed it
 	}
-	records := strings.Split(out, "\x00")
-	if len(records)%3 != 1 || records[len(records)-1] != "" {
+	records := strings.Split(string(out), "\x00")
+	if len(records)%4 != 1 || records[len(records)-1] != "" {
 		return false, fmt.Errorf("%w: could not read the unpushed history", ErrForeignCommitAhead)
 	}
-	for i := 0; i < len(records)-1; i += 3 {
-		hash, parents, subject := strings.TrimPrefix(records[i], "\n"), records[i+1], strings.TrimSpace(records[i+2])
+	for i := 0; i < len(records)-1; i += 4 {
+		hash, parents, subject := records[i], records[i+1], strings.TrimSpace(records[i+2])
 		scope := teamPublishScopeForSubject(subject)
 		// These writers never create merge commits. A merge can carry changes
 		// hidden from a per-commit path listing, so it must stay local.
 		if scope == foreignCommit || len(strings.Fields(parents)) != 1 {
-			return false, fmt.Errorf("%w: %q", ErrForeignCommitAhead, subject)
+			return false, fmt.Errorf("%w: commit %s", ErrForeignCommitAhead, hash)
+		}
+		if scope == observationCommit {
+			if err := secretguard.ValidateContent("observation-commit.txt", []byte(records[i+3])); err != nil {
+				return false, fmt.Errorf("observation commit message refused: %w", err)
+			}
 		}
 		// Validate each commit against its own scope. --no-renames exposes
-		// both source and destination. Keep the hash before the NUL-terminated
-		// paths so RunGit's outer whitespace trim cannot alter the first path.
-		paths, err := gitutil.RunGit(ctx, repoPath, "diff-tree", "--name-only", "-r", "-z", "--no-renames",
-			"--ignore-submodules=none", hash, "--")
+		// both source and destination.
+		paths, err := exec.CommandContext(ctx, "git", "-C", repoPath, "diff-tree", "--name-only", "-r", "-z", "--no-renames",
+			"--ignore-submodules=none", hash, "--").Output()
 		if err != nil {
 			return false, fmt.Errorf("list paths of unpushed commit %s: %w", hash, err)
 		}
-		changed := strings.Split(paths, "\x00")
+		changed := strings.Split(string(paths), "\x00")
 		if len(changed) < 3 || changed[0] != hash || changed[len(changed)-1] != "" {
-			return false, fmt.Errorf("%w: no verifiable paths for %q", ErrForeignCommitAhead, subject)
+			return false, fmt.Errorf("%w: no verifiable paths for commit %s", ErrForeignCommitAhead, hash)
 		}
 		for _, path := range changed[1 : len(changed)-1] {
 			if !scope.allowsPath(path) {
-				return false, fmt.Errorf("%w: %q changes %q outside its publish scope", ErrForeignCommitAhead, subject, path)
+				return false, fmt.Errorf("%w: commit %s changes a path outside its publish scope", ErrForeignCommitAhead, hash)
 			}
 		}
 	}
@@ -181,10 +190,11 @@ func (s *SyncScheduler) pushTeamPublishCommits(ctx context.Context, teamPath str
 	if err := gitutil.PushWithRetry(ctx, teamPath, gitutil.PushOpts{
 		// Matches this daemon's pull of the same clone (pullTeamContext): its
 		// look-alike discussion dirs pair as false renames.
-		ImmutablePaths:    true,
-		Logger:            s.logger,
-		SuspendWhenWedged: true,
-		ValidatePush:      ValidateTeamPublishPush,
+		ImmutablePaths:        true,
+		Logger:                s.logger,
+		SuspendWhenWedged:     true,
+		ValidatePush:          ValidateTeamPublishPush,
+		PreserveCommitHistory: true,
 		PrePush: func(repoPath string) error {
 			if ep != "" {
 				return gitserver.RefreshRemoteCredentials(repoPath, ep)

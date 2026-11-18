@@ -11,6 +11,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/secretguard"
 )
 
 // Coworkers sync from the remote, so Team Context writers push after committing.
@@ -33,11 +34,13 @@ type teamPublishPush struct {
 	reason string
 	// retried is true when ox's own sync will push it later: the commit is
 	// ox's to push and only the attempt failed. False means a human must act.
-	retried bool
+	retried           bool
+	requiresRedaction bool
 }
 
 func (o *skillsChangeOutput) applyPush(p teamPublishPush) {
 	o.Pushed, o.NotPushedReason, o.pushRetried = p.pushed, p.reason, p.retried
+	o.requiresRedaction = p.requiresRedaction
 }
 
 // teamPublishCommitMessage names the skills in the commit subject the push
@@ -70,12 +73,16 @@ func pushTeamPublish(repoRoot, teamPath string) teamPublishPush {
 	opts.MaxRetries = teamPublishPushAttempts
 	opts.OpTimeout = teamPublishPushOpTimeout
 	opts.ValidatePush = daemon.ValidateTeamPublishPush
+	opts.PreserveCommitHistory = true
 	if err := gitutil.PushWithRetry(context.Background(), teamPath, opts); err != nil {
 		if errors.Is(err, daemon.ErrForeignCommitAhead) {
 			// Re-checked under the push lock: a commit landed after the check
 			// above. The daemon refuses it too, so no retry is promised.
 			return teamPublishPush{reason: fmt.Sprintf(
 				"another unpushed commit landed ahead of the publish (%s), and ox pushes only its own publish commits", err)}
+		}
+		if _, refused := errors.AsType[*secretguard.RefusedError](err); refused {
+			return teamPublishPush{reason: err.Error(), requiresRedaction: true}
 		}
 		slog.Warn("team context publish push failed", "team_context", teamPath, "error", err)
 		reason := strings.Join(strings.Fields(err.Error()), " ")
@@ -100,6 +107,8 @@ func teamWritePushGuidance(teamPath string, result teamPublishPush) string {
 	switch {
 	case result.pushed:
 		return "Pushed to the Team Context remote."
+	case result.requiresRedaction:
+		return fmt.Sprintf("Committed locally. Clean the sensitive content from the unpushed history before retrying. %s", result.reason)
 	case result.retried:
 		return fmt.Sprintf("Committed locally, not pushed: %s. Run `ox sync` to retry now.", result.reason)
 	default:
@@ -115,6 +124,8 @@ func teamPublishGuidance(names []string, out skillsChangeOutput) string {
 	switch {
 	case out.Pushed:
 		return fmt.Sprintf("%s published to your Team Context and pushed, without changing the repository copies; coworkers receive it on their next sync. %s", subject, after)
+	case out.requiresRedaction:
+		return fmt.Sprintf("%s committed locally. Clean the sensitive content from the unpushed history before retrying. %s", subject, out.NotPushedReason)
 	case out.pushRetried:
 		return fmt.Sprintf("%s committed to your Team Context but NOT pushed yet, so no coworker has it: %s. ox retries the push on its next Team Context sync; run `ox sync` to retry now. %s", subject, out.NotPushedReason, after)
 	default:

@@ -20,6 +20,9 @@ const sessionPublicationScanLimit = 8 << 20
 // Match the same canonical plan Markdown paths as IsPlanTextPath.
 const planTextPathspec = ":(glob)data/plans/**/plan.md"
 
+// TeamObservationDir contains the observation records written to Team Context.
+const TeamObservationDir = "memory/.observations"
+
 var freshSessionPublicationRules = secretguard.LatestRules
 
 // sessionBlobPaths maps each blob the unpushed session/plan history adds or changes
@@ -31,7 +34,7 @@ func sessionBlobPaths(ctx context.Context, ledgerPath string) (map[string][]stri
 	if exec.CommandContext(ctx, "git", "-C", ledgerPath, "rev-parse", "--verify", "@{upstream}").Run() == nil {
 		args = append(args, "^@{upstream}")
 	}
-	args = append(args, "--", "sessions/", planTextPathspec)
+	args = append(args, "--", "sessions/", planTextPathspec, TeamObservationDir+"/")
 	out, err := exec.CommandContext(ctx, "git", args...).Output()
 	if err != nil {
 		return nil, err
@@ -59,9 +62,9 @@ func metaOnlyPath(paths []string) string {
 	return paths[0]
 }
 
-// ValidateSessionPublication checks every newly reachable session or plan
-// Markdown blob, not the working tree or only the final diff. A later redaction/
-// deletion commit does not remove an earlier credential-bearing blob from the pack.
+// ValidateSessionPublication checks every newly reachable session, plan
+// Markdown or Team Context observation blob. A later redaction or deletion
+// commit leaves earlier credential-bearing blobs reachable.
 func ValidateSessionPublication(ctx context.Context, ledgerPath string) error {
 	args := []string{"-C", ledgerPath, "rev-list", "--full-history", "--objects", "HEAD"}
 	if exec.CommandContext(ctx, "git", "-C", ledgerPath, "rev-parse", "--verify", "@{upstream}").Run() == nil {
@@ -70,7 +73,7 @@ func ValidateSessionPublication(ctx context.Context, ledgerPath string) error {
 	// rev-list's object walk does not descend into a ":(glob)" "**" pathspec, so
 	// it would list no plan blobs at all. Walk the plans directory and keep only
 	// plan-text blobs below.
-	args = append(args, "--", "sessions/", "data/plans/")
+	args = append(args, "--", "sessions/", "data/plans/", TeamObservationDir+"/")
 	out, err := exec.CommandContext(ctx, "git", args...).Output()
 	if err != nil {
 		return errors.New("cannot enumerate committed session/plan objects; publication pending")
@@ -84,7 +87,8 @@ func ValidateSessionPublication(ctx context.Context, ledgerPath string) error {
 		id, path, _ := strings.Cut(line, " ")
 		// rev-list names one path per blob; a blob also committed at a plan
 		// path is still in blobPaths.
-		if _, changed := blobPaths[id]; changed || strings.HasPrefix(path, "sessions/") || IsPlanTextPath(path) {
+		if _, changed := blobPaths[id]; changed || strings.HasPrefix(path, "sessions/") ||
+			IsPlanTextPath(path) || strings.HasPrefix(path, TeamObservationDir+"/") {
 			ids = append(ids, id)
 		}
 	}
@@ -160,7 +164,7 @@ func ValidateSessionPublication(ctx context.Context, ledgerPath string) error {
 		if exec.CommandContext(ctx, "git", "-C", ledgerPath, "rev-parse", "--verify", "@{upstream}").Run() == nil {
 			pathArgs = append(pathArgs, "^@{upstream}")
 		}
-		pathArgs = append(pathArgs, "--", "sessions/", planTextPathspec)
+		pathArgs = append(pathArgs, "--", "sessions/", planTextPathspec, TeamObservationDir+"/")
 		paths, err := exec.CommandContext(ctx, "git", pathArgs...).Output()
 		if err != nil {
 			return errors.New("cannot inspect session/plan filenames; publication pending")

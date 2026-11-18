@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +48,28 @@ func TestShouldPushTeamPublishes(t *testing.T) {
 			assert.Equal(t, tt.wantBlocker, blocker)
 		})
 	}
+}
+
+func TestTeamPublishRetriesWithoutCollapsingCommitScopes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: large Git backlog")
+	}
+	clone := filepath.Join(t.TempDir(), "team")
+	require.NoError(t, os.MkdirAll(clone, 0o755))
+	setupGitRepo(t, clone)
+	bare := bareRepoPath(clone)
+	for i := range 101 {
+		name := "skill-" + strconv.Itoa(i)
+		commitLocal(t, clone, "agents/skills/"+name+"/SKILL.md", "add team skill: "+name)
+	}
+	pushFromSeparateClone(t, bare, "remote-doc.md", "coworker's doc")
+	upstream := gitCmd(t, bare, "rev-parse", "HEAD")
+
+	require.NoError(t, gitutil.PushWithRetry(t.Context(), clone, gitutil.PushOpts{
+		ValidatePush:          ValidateTeamPublishPush,
+		PreserveCommitHistory: true,
+	}))
+	require.Equal(t, "101", gitCmd(t, bare, "rev-list", "--count", upstream+"..HEAD"))
 }
 
 // commitLocal writes one file and commits it in the clone with subject.
@@ -316,7 +339,7 @@ func TestValidateTeamPublishPush_RefusesAPublishSubjectOutsideTheSkillsRoot(t *t
 	before := strings.TrimSpace(gitCmd(t, bare, "rev-parse", "HEAD"))
 	err = gitutil.PushWithRetry(ctx, clone, gitutil.PushOpts{ValidatePush: ValidateTeamPublishPush, MaxRetries: 1})
 	require.ErrorIs(t, err, ErrForeignCommitAhead)
-	require.Contains(t, err.Error(), "docs/onboarding.md")
+	require.Contains(t, err.Error(), gitCmd(t, clone, "rev-parse", "HEAD"))
 	require.Equal(t, before, strings.TrimSpace(gitCmd(t, bare, "rev-parse", "HEAD")), "a disguised commit reached the remote")
 }
 
