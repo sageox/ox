@@ -57,7 +57,7 @@ func RunGit(ctx context.Context, repoPath string, args ...string) (string, error
 	// git subprocess this codebase spawns, closes that whole class instead
 	// of patching each match site individually. Does not affect git's
 	// handling of file content or paths, which are UTF-8 regardless.
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
+	cmd.Env = append(oxIdentityEnv(ctx, repoPath, os.Environ()), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
 	output, err := cmd.CombinedOutput()
 	sanitized := SanitizeOutput(strings.TrimSpace(string(output)))
 

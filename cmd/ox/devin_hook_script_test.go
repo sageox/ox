@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // Tests for devin-plugin/bin/ox-devin-hook, driven as Devin drives it: event
@@ -63,7 +65,7 @@ case "$1 $2" in
   "status --json") echo '{}' ;;
   "agent OxTest1") case "$3 $4" in
     "session start") printf '{"session_file":"%s"}\n' "$FAKE_SESSION_FILE" ;;
-    "session stop") echo '"entry_count": 2,' ;;
+    "session stop") if [ -n "${FAKE_STOP_OUT:-}" ]; then printf '%s\n' "$FAKE_STOP_OUT"; else echo '"entry_count": 2,'; fi ;;
   esac ;;
 esac
 `
@@ -86,7 +88,7 @@ func (e *hookEnv) run(dir string, extraEnv []string, stdin string, args ...strin
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(stdin)
 	env := []string{}
-	for _, kv := range os.Environ() { // safe: bash hook script, not ox; ox-related vars filtered below
+	for _, kv := range os.Environ() { // safe: HOME, token and project selectors are filtered below
 		k, _, _ := strings.Cut(kv, "=")
 		switch k {
 		case "HOME", "SAGEOX_TOKEN", "OX_SESSION_RECORDING", "OX_PROJECT_ROOT", "DEVIN_PROJECT_DIR", "CLAUDE_PROJECT_DIR", "OX_DEVIN_STATE":
@@ -258,4 +260,99 @@ func TestDevinHookStopUploadsAfterOxSpawnsDaemon(t *testing.T) {
 	if !strings.Contains(string(log), "stop agent=OxTest1 rc=0") {
 		t.Fatalf("Stop did not upload; hook.log:\n%s", log)
 	}
+}
+
+// TestDevinHookStopHandsDevinTheSummaryPrompt verifies Stop passes ox's
+// summary_prompt back to Devin, as Claude Code and Codex run it, and that the
+// summarizing turn is neither recorded nor asked to summarize again.
+// Failure prevented: Devin sessions reach SageOx with no title or summary, or
+// Devin loops summarizing its own summary turns.
+func TestDevinHookStopHandsDevinTheSummaryPrompt(t *testing.T) {
+	e := newHookEnv(t)
+	if out, code := e.run(e.repo, []string{"SAGEOX_TOKEN=" + hookTestToken}, "", "save-token", "devin-hooktest"); code != 0 {
+		t.Fatalf("save-token: %d %s", code, out)
+	}
+	stopOut := func(entries int) string {
+		b, _ := json.Marshal(map[string]any{"success": true, "entry_count": entries, "summary_prompt": "# Summarize Session\nrun ox session push-summary"})
+		return "warning: whispers {not json}\n" + string(b)
+	}
+	stop := `{"session_id":"devin-hooktest","stop_hook_active":false}`
+	reentered := `{"session_id":"devin-hooktest","stop_hook_active":true}`
+
+	e.run("/", nil, postToolUse(t, "hello"), "PostToolUse")
+	out, _ := e.run("/", []string{"FAKE_STOP_OUT=" + stopOut(5)}, stop, "Stop")
+	var reply struct{ Decision, Reason string }
+	if err := json.Unmarshal([]byte(out), &reply); err != nil || reply.Decision != "block" {
+		t.Fatalf("Stop did not block for the summary: %v %q", err, out)
+	}
+	for _, want := range []string{"# Summarize Session", "secret:personal:SAGEOX_TOKEN", e.repo} {
+		if !strings.Contains(reply.Reason, want) {
+			t.Errorf("reason lacks %q:\n%s", want, reply.Reason)
+		}
+	}
+
+	before, err := os.ReadFile(e.sf)
+	require.NoError(t, err)
+	require.Contains(t, string(before), "hello", "the turn before the summary was not recorded")
+	e.run("/", nil, postToolUse(t, "summarizing"), "PostToolUse")
+	after, err := os.ReadFile(e.sf)
+	require.NoError(t, err)
+	require.Equal(t, string(before), string(after), "summary turn was recorded")
+	if out, _ := e.run("/", []string{"FAKE_STOP_OUT=" + stopOut(5)}, reentered, "Stop"); out != "" {
+		t.Fatalf("summary turn asked to summarize again: %s", out)
+	}
+
+	// A trivial turn and a re-entered Stop both end without a summary turn.
+	e.run("/", nil, `{"session_id":"devin-hooktest","prompt":"next"}`, "UserPromptSubmit")
+	if out, _ := e.run("/", []string{"FAKE_STOP_OUT=" + stopOut(1)}, stop, "Stop"); out != "" {
+		t.Fatalf("trivial turn asked for a summary: %s", out)
+	}
+	e.run("/", nil, postToolUse(t, "again"), "PostToolUse")
+	if out, _ := e.run("/", []string{"FAKE_STOP_OUT=" + stopOut(5)}, reentered, "Stop"); out != "" {
+		t.Fatalf("re-entered Stop asked for a summary: %s", out)
+	}
+	log, _ := os.ReadFile(filepath.Join(e.state, "hook.log"))
+	if n := strings.Count(string(log), "stop agent=OxTest1 rc=0"); n != 3 {
+		t.Fatalf("want 3 uploads (summary turn skipped), got %d:\n%s", n, log)
+	}
+}
+
+// TestDevinHookRecordsOnlyTheChatMessage verifies a user entry holds what the
+// person wrote, not Devin's <received_chat_message> wrapper or injected context.
+// Failure prevented: Activity shows "<received_chat_message from=..." as the
+// session's text when no summary was written.
+func TestDevinHookRecordsOnlyTheChatMessage(t *testing.T) {
+	e := newHookEnv(t)
+	if out, code := e.run(e.repo, []string{"SAGEOX_TOKEN=" + hookTestToken}, "", "save-token", "devin-hooktest"); code != 0 {
+		t.Fatalf("save-token: %d %s", code, out)
+	}
+	prompt := "[Image 1]\n\n<received_chat_message from=\"Madhur\" source=\"web\" message_id=\"event-1\">\n" +
+		"fix the &lt;received_chat_message> text\nATTACHMENT:\"https://app.devin.ai/attachments/abc/Clean%20Shot%26copy.png?download=1&next=/a/b\"\n" +
+		"<!-- downloaded to /home/ubuntu/attachments/abc/Clean_Shot.png -->\n</received_chat_message>\n\n" +
+		"<rules type=\"always-on\">team rules</rules>\n" +
+		"<received_chat_message from=\"Madhur\" source=\"web\" message_id=\"event-2\">option 3 ATTACHMENT:\"https://[HOST]/a.png\" ATTACHMENT:\"https://user:hunter2@example.com\" ATTACHMENT:\"//user:hunter2@example.com\"</received_chat_message>"
+	b, err := json.Marshal(map[string]string{"session_id": "devin-hooktest", "prompt": prompt})
+	require.NoError(t, err)
+	e.run("/", nil, string(b), "UserPromptSubmit")
+	e.run("/", nil, `{"session_id":"devin-hooktest","prompt":"plain prompt from the Devin CLI"}`, "UserPromptSubmit")
+	quoted := "Fix this example: <received_chat_message>hello</received_chat_message>. Add a test."
+	b, err = json.Marshal(map[string]string{"session_id": "devin-hooktest", "prompt": quoted})
+	require.NoError(t, err)
+	e.run("/", nil, string(b), "UserPromptSubmit")
+
+	raw, err := os.ReadFile(e.sf)
+	require.NoError(t, err)
+	var got []string
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var entry struct{ Type, Content string }
+		require.NoError(t, json.Unmarshal([]byte(line), &entry))
+		if entry.Type == "user" {
+			got = append(got, entry.Content)
+		}
+	}
+	require.Equal(t, []string{
+		"fix the <received_chat_message> text\n[attachment: Clean Shot&copy.png]\n\noption 3 [attachment: a.png] [attachment: file] [attachment: file]",
+		"plain prompt from the Devin CLI",
+		quoted,
+	}, got)
 }

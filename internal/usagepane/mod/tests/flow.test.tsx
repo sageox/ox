@@ -233,35 +233,20 @@ describe('classifyAttachment', () => {
     expect(a.step).toBe('reloading team context')
     expect(a.tokens).toBe(Math.round(compact.length / 4))
   })
-  test('a murmur block counts its entries', () => {
-    const [a] = classifyAttachment(MURMURS, 'UserPromptSubmit')
-    expect(a.lane).toBe('murmurs')
-    expect(a.items).toBe(3)
-    expect(a.itemsNoun).toBe('murmurs')
-    expect(a.tokens > 0).toBe(true)
-  })
-  // Failure prevented: a lane appears under a prompt when nothing came from a
-  // coworker, only ox's own reminders riding in the same block.
-  test('a murmur block holding only ox reminders draws no lane; a mixed one counts the coworker murmurs alone', () => {
-    const head = [
-      '<system-reminder>',
-      'Team whispers from SageOx coworkers:',
-      '<murmur-context>Signals from coworkers delivered by SageOx.</murmur-context>',
-    ]
-    const upgrade = '<entry id="u1" importance="normal" topic="upgrade" source="version-check">ox v0.25.0 → v0.26.0 available. Run `ox upgrade` to update.</entry>'
+  // Failure prevented: a lane appears under a prompt when no ox call was
+  // made and nothing the person cares to see came in: murmurs, or ox's own
+  // reminders riding in the same block.
+  test('a murmur block draws no lane, whoever posted its entries', () => {
+    const block = (...entries: string[]) =>
+      ['<system-reminder>', 'Team whispers from SageOx coworkers:', '<murmur-context>Signals from coworkers delivered by SageOx.</murmur-context>', ...entries, '</system-reminder>'].join('\n')
     const nudge = '<entry id="n1" importance="normal" topic="murmur-nudge" source="auto-murmur">Run now: ox murmur --topic=wip &#34;...&#34;</entry>'
+    const upgrade = '<entry id="u1" importance="normal" topic="upgrade" source="version-check">ox v0.25.0 → v0.26.0 available.</entry>'
     const posted = '<entry id="m1" importance="normal" topic="file-changes" source="murmur" agent="OxxjtT" from="Avery" files="a.go">2 files</entry>'
-    const block = (...entries: string[]) => [...head, ...entries, '</system-reminder>'].join('\n')
-
-    expect(classifyAttachment(block(nudge), 'UserPromptSubmit')).toEqual([])
-    expect(classifyAttachment(block(upgrade, nudge), 'UserPromptSubmit')).toEqual([])
-    expect(classifyAttachment(block(), 'UserPromptSubmit')).toEqual([])
-
-    for (const mixed of [block(upgrade, nudge, posted), block(posted, nudge), block(nudge, posted, upgrade)]) {
-      expect(classifyAttachment(mixed, 'UserPromptSubmit')).toEqual([
-        { lane: 'murmurs', label: 'received murmurs', step: 'reading murmurs', tokens: finishTokens(posted), items: 1, itemsNoun: 'murmur' },
-      ])
+    for (const text of [MURMURS, block(nudge), block(upgrade, nudge), block(posted), block(nudge, posted, upgrade), block()]) {
+      expect(classifyAttachment(text, 'UserPromptSubmit')).toEqual([])
     }
+    // What came in beside the murmurs still draws.
+    expect(classifyAttachment(`${MURMURS}\n${RECALL}`, 'UserPromptSubmit').map(a => a.lane)).toEqual(['ledger'])
   })
   test('ledger recall counts its match lines', () => {
     expect(classifyAttachment(RECALL, 'UserPromptSubmit')).toEqual([
@@ -272,7 +257,6 @@ describe('classifyAttachment', () => {
     const all = classifyAttachment(`${PRIME}\n${MURMURS}\n${RECALL}`, 'SessionStart')
     expect(all.map(a => [a.lane, a.items])).toEqual([
       ['team-context', undefined],
-      ['murmurs', 3],
       ['ledger', 2],
     ])
     expect(all[0].tokens).toBe(4817)
@@ -361,13 +345,13 @@ describe('flow reducer', () => {
     expect(s.byId.tu_0).toBeUndefined()
   })
   test('attachments become finished in-events under the prompt id', () => {
-    const atts = classifyAttachment(`${PRIME}\n${MURMURS}`, 'SessionStart')
+    const atts = classifyAttachment(`${PRIME}\n${RECALL}`, 'SessionStart')
     const s = attachEvents(EMPTY_FLOW, { id: 'att:msg_1', now: 42, attachments: atts })
     expect(s.order).toEqual(['att:msg_1#0', 'att:msg_1#1'])
     const evs = promptEvents(s, 'msg_1')
     expect(evs.map(e => [e.lane, e.direction, e.startedAt, e.endedAt, e.items])).toEqual([
       ['team-context', 'in', 42, 42, undefined],
-      ['murmurs', 'in', 42, 42, 3],
+      ['ledger', 'in', 42, 42, 2],
     ])
     expect(promptEvents(s, 'att:msg_1').length).toBe(2)
     expect(attachEvents(s, { id: 'att:msg_1', now: 50, attachments: atts })).toBe(s)

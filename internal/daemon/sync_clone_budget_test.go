@@ -57,6 +57,13 @@ type pacedGitServer struct {
 // dead link looks to curl, until the client hangs up.
 func servePacedLedger(t *testing.T, blobBytes, bytesPerSec, stallAfter int) *pacedGitServer {
 	t.Helper()
+	return servePacedRepo(t, "sessions/history.bin", blobBytes, bytesPerSec, stallAfter)
+}
+
+// servePacedRepo is servePacedLedger with the blob at blobPath, so a team
+// context fixture can put it under a directory its sparse checkout includes.
+func servePacedRepo(t *testing.T, blobPath string, blobBytes, bytesPerSec, stallAfter int) *pacedGitServer {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("CGI Git HTTP fixture requires Unix process semantics")
 	}
@@ -69,8 +76,8 @@ func servePacedLedger(t *testing.T, blobBytes, bytesPerSec, stallAfter int) *pac
 	// run moves the same bytes
 	blob := make([]byte, blobBytes)
 	_, _ = rand.NewChaCha8([32]byte{'o', 'x'}).Read(blob)
-	require.NoError(t, os.MkdirAll(filepath.Join(work, "sessions"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(work, "sessions", "history.bin"), blob, 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(work, filepath.Dir(blobPath)), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(work, blobPath), blob, 0o600))
 	gitInDir(t, work, "add", ".")
 	gitInDir(t, work, "commit", "-m", "seed Ledger history")
 	gitInDir(t, work, "push", "origin", "HEAD:main")
@@ -167,8 +174,8 @@ func requireNoClone(t *testing.T, ledgerPath string) {
 }
 
 // setCloneBudgets shrinks the clone budgets for one test: fixed is the
-// team-context budget, the fixed 60s a Ledger clone used to share; backstop is
-// the Ledger's own wall-clock limit. Progress is sampled often enough to see
+// team-context budget, the fixed 60s both clones used to have; backstop is the
+// Ledger's own wall-clock limit. Progress is sampled often enough to see
 // a download that only lasts a few seconds.
 func setCloneBudgets(t *testing.T, fixed, backstop time.Duration) {
 	t.Helper()
@@ -321,4 +328,77 @@ func TestLedgerClone_DaemonShutdownStopsDownload(t *testing.T) {
 	lastErr, _ := s.LastError()
 	require.Empty(t, lastErr, "a shutdown is not a clone failure to show in ox status")
 	require.Empty(t, s.workspaceRegistry.GetLedger().LastErr, "a shutdown must not mark the Ledger as failing")
+}
+
+// TestTeamContextClone_ProgressingCheckoutOutlivesOldFixedBudget verifies a
+// team context whose phase-2 checkout is still fetching blobs is not killed by
+// a fixed budget. Failure prevented (GH #1846): a large team context's checkout
+// fetched more blobs than fit in the fixed 60s, every attempt failed with
+// "phase 2 checkout HEAD: ... context deadline exceeded", each retry started
+// over, and the team context never arrived. The old 60s is scaled to 2s here;
+// the fixture's checkout downloads for ~5s.
+func TestTeamContextClone_ProgressingCheckoutOutlivesOldFixedBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real paced Git clone")
+	}
+	const oldFixedBudget = 2 * time.Second
+	prev := teamContextCloneTimeout
+	t.Cleanup(func() { teamContextCloneTimeout = prev })
+	require.GreaterOrEqual(t, prev, time.Hour, "the team-context budget must be a backstop, not a fixed limit")
+	teamContextCloneTimeout = 2 * time.Minute
+
+	// agents/ is always in a team context's sparse set, so phase 2 fetches it
+	srv := servePacedRepo(t, "agents/history.bin", ledgerFixtureBytes, ledgerPace, 0)
+	s, _ := newCloneLifecycleScheduler(t, srv.URL)
+	teamPath := filepath.Join(t.TempDir(), "team")
+
+	start := time.Now()
+	_, err := s.Checkout(CheckoutPayload{CloneURL: srv.URL, RepoPath: teamPath, RepoType: "team-context"}, nil)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err, "a team context checkout that is still downloading must not be killed")
+	require.Greater(t, elapsed, oldFixedBudget,
+		"the download finished inside the old fixed budget, so this run proved nothing; slow the pace")
+	size, err := exec.Command("git", "-C", teamPath, "cat-file", "-s", "HEAD:agents/history.bin").Output()
+	require.NoError(t, err)
+	require.Equal(t, fmt.Sprint(ledgerFixtureBytes), strings.TrimSpace(string(size)))
+	require.FileExists(t, filepath.Join(teamPath, "agents", "history.bin"), "phase 2 must materialize the blob")
+}
+
+// TestTeamContextClone_StalledCheckoutIsStillAborted verifies a team context
+// whose phase-2 blob download goes dead is stopped by curl's stall check, not
+// held until the backstop. Failure prevented: with a long backstop, a
+// sparse-checkout or checkout that fetches blobs without the stall flags held
+// its clone slot for the whole hour over a dead link.
+func TestTeamContextClone_StalledCheckoutIsStillAborted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real paced Git clone")
+	}
+	const backstop = 3 * time.Minute
+	prev := teamContextCloneTimeout
+	t.Cleanup(func() { teamContextCloneTimeout = prev })
+	teamContextCloneTimeout = backstop
+
+	// phase 1 fetches no blobs outside .sageox/; the phase-2 blob stops after
+	// 96 KiB and the connection stays open
+	srv := servePacedRepo(t, "agents/history.bin", ledgerFixtureBytes, ledgerPace, 96<<10)
+	s, _ := newCloneLifecycleScheduler(t, srv.URL)
+	teamPath := filepath.Join(t.TempDir(), "team")
+
+	start := time.Now()
+	_, err := s.Checkout(CheckoutPayload{
+		CloneURL: srv.URL,
+		RepoPath: teamPath,
+		RepoType: "team-context",
+	}, nil)
+	elapsed := time.Since(start)
+
+	// a failed phase-2 sparse-checkout is only a warning and sync re-applies
+	// the sparse set later, so the clone may report success; what matters is
+	// that the dead link did not hold it until the backstop
+	t.Logf("clone over a dead link ended after %s: %v", elapsed, err)
+	require.Greater(t, elapsed, 10*time.Second,
+		"the clone ended before curl's 15s stall window, so it never reached the dead download")
+	require.Less(t, elapsed, backstop-time.Minute,
+		"the stall check, not the backstop, must end a dead team context download")
 }

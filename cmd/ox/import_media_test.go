@@ -100,6 +100,9 @@ type fakeRecordingServer struct {
 	storageHdrs   []http.Header
 	apiHdrs       []http.Header
 	notifyBodies  [][]byte // POST …/context/import, the document path's notification
+	// POST …/recordings/transcript, a transcript-only Discussion
+	transcriptBodies [][]byte
+	transcriptHdrs   []http.Header
 }
 
 func newFakeRecordingServer(t *testing.T, f *importRetryFixture, mode string) *fakeRecordingServer {
@@ -124,6 +127,8 @@ func (s *fakeRecordingServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		s.serveUpload(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == base+"/recordings/"+fakeRecordingID+"/confirm":
 		s.serveConfirm(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == base+"/recordings/transcript":
+		s.serveTranscript(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == base+"/context/import":
 		body, _ := io.ReadAll(r.Body)
 		s.mu.Lock()
@@ -334,14 +339,16 @@ func (a confirmAnswer) serve(w http.ResponseWriter, r *http.Request) {
 // that fails for good cancels its siblings, whose handlers may still be
 // running when the import returns.
 type fakeSnapshot struct {
-	uploads      []uploadRequestWire
-	uploadBodies [][]byte
-	idemKeys     []string
-	attempts     map[int]int
-	storage      []http.Header
-	api          []http.Header
-	confirms     [][]byte
-	notifies     [][]byte
+	uploads        []uploadRequestWire
+	uploadBodies   [][]byte
+	idemKeys       []string
+	attempts       map[int]int
+	storage        []http.Header
+	api            []http.Header
+	confirms       [][]byte
+	notifies       [][]byte
+	transcripts    [][]byte
+	transcriptHdrs []http.Header
 }
 
 func (s *fakeRecordingServer) snapshot() fakeSnapshot {
@@ -352,14 +359,16 @@ func (s *fakeRecordingServer) snapshot() fakeSnapshot {
 		attempts[k] = v
 	}
 	return fakeSnapshot{
-		uploads:      append([]uploadRequestWire(nil), s.uploadReqs...),
-		uploadBodies: append([][]byte(nil), s.uploadBodies...),
-		idemKeys:     append([]string(nil), s.idemKeys...),
-		attempts:     attempts,
-		storage:      append([]http.Header(nil), s.storageHdrs...),
-		api:          append([]http.Header(nil), s.apiHdrs...),
-		confirms:     append([][]byte(nil), s.confirmBodies...),
-		notifies:     append([][]byte(nil), s.notifyBodies...),
+		uploads:        append([]uploadRequestWire(nil), s.uploadReqs...),
+		uploadBodies:   append([][]byte(nil), s.uploadBodies...),
+		idemKeys:       append([]string(nil), s.idemKeys...),
+		attempts:       attempts,
+		storage:        append([]http.Header(nil), s.storageHdrs...),
+		api:            append([]http.Header(nil), s.apiHdrs...),
+		confirms:       append([][]byte(nil), s.confirmBodies...),
+		notifies:       append([][]byte(nil), s.notifyBodies...),
+		transcripts:    append([][]byte(nil), s.transcriptBodies...),
+		transcriptHdrs: append([]http.Header(nil), s.transcriptHdrs...),
 	}
 }
 
@@ -808,48 +817,6 @@ func TestImportMedia_UnsupportedServerFallsBackToDocumentPath(t *testing.T) {
 			assert.Equal(t, tt.contentType, meta.ContentType, "the content type the server routes media on")
 			assert.Equal(t, "sha256:"+f.sha256Hex(), meta.SourceOID)
 			assert.Contains(t, stdout, "Track progress: ox import --status rec_legacy_path")
-		})
-	}
-}
-
-// TestImport_TranscriptsKeepDocumentPath: .vtt and .srt files are not media.
-// They take LFS + /context/import exactly as before, which the server routes
-// to its import-transcript workflow, even when the recording upload route
-// is available.
-// Failure prevented: a transcript sent to the media upload route, which only
-// accepts audio and video, or transcript imports silently changing storage.
-func TestImport_TranscriptsKeepDocumentPath(t *testing.T) {
-	tests := []struct {
-		file    string
-		content string
-	}{
-		{"standup.vtt", "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nPerson A: good morning\n"},
-		{"retro.srt", "1\n00:00:00,000 --> 00:00:02,000\nPerson B: let's start\n"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.file, func(t *testing.T) {
-			f := newMediaFixture(t, tt.file, 1)
-			require.NoError(t, os.WriteFile(f.media, []byte(tt.content), 0o644))
-			f.content = []byte(tt.content)
-			srv := newFakeRecordingServer(t, f.importRetryFixture, "single")
-
-			stdout, stderr, err := f.importMedia(false, false)
-			require.NoError(t, err)
-
-			snap := srv.snapshot()
-			assert.Empty(t, snap.uploads, "the recording upload route must not be called")
-			assert.Empty(t, snap.storage)
-			assert.Empty(t, stderr, "no fallback warning: this is the transcript's own path")
-			assert.Positive(t, f.uploads.Load(), "the transcript goes through LFS")
-			slug := strings.TrimSuffix(tt.file, filepath.Ext(tt.file))
-			assert.Equal(t, "import: doc "+slug, runGit(t, f.bare, "log", "-1", "--format=%s"))
-			assert.FileExists(t, filepath.Join(f.docsDir, "2026", "09", "19", slug, tt.file), "the pointer file is committed")
-
-			meta := srv.strictNotify(t)
-			assert.Equal(t, tt.file, meta.SourceFilename, "the server routes transcripts by this file")
-			assert.Equal(t, "sha256:"+f.sha256Hex(), meta.SourceOID)
-			assert.Equal(t, int64(len(tt.content)), meta.SourceSize)
-			assert.Contains(t, stdout, "Imported: "+slug)
 		})
 	}
 }

@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"context"
 	"log/slog"
 	"sync"
+
+	"github.com/sageox/ox/internal/useragent"
 )
 
 // ExportBearerForEndpoint returns the bearer to attach to a telemetry (OTLP)
@@ -87,11 +90,17 @@ func noteExportYield(ep string, expired bool) bool {
 		return false
 	}
 	exportYield.expired[ep] = expired
+	// Loud only in the daemon. A CLI process starts with no yield state, so at
+	// WARN every command run with an expired token would print it (#1388).
+	level := slog.LevelDebug
+	if useragent.IsDaemonMode() {
+		level = slog.LevelWarn
+	}
 	if expired {
-		slog.Warn("otel export paused: stored token expired; dropping batches until a refresh lands on disk",
+		slog.Log(context.Background(), level, "otel export paused: stored token expired; dropping batches until a refresh lands on disk",
 			"endpoint", ep)
 	} else {
-		slog.Warn("otel export resumed: fresh token on disk", "endpoint", ep)
+		slog.Log(context.Background(), level, "otel export resumed: fresh token on disk", "endpoint", ep)
 	}
 	return true
 }

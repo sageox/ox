@@ -45,29 +45,15 @@ In the session view, calls.recent in the JSON lists the 10 newest ox calls;
 	RunE: runUsage,
 }
 
-// usageDeprecatedCmd keeps `ox brief` working for one release after the
-// rename to `ox session report`. Hidden, and without the pane subcommand, so
-// help and generated docs show only `ox session report`.
-var usageDeprecatedCmd = &cobra.Command{
-	Use:        "brief",
-	Short:      "Show what SageOx gave this session (use 'ox session report' instead)",
-	Hidden:     true,
-	Deprecated: "use 'ox session report' instead",
-	Args:       cobra.NoArgs,
-	RunE:       runUsage,
-}
-
 func init() {
-	for _, c := range []*cobra.Command{usageCmd, usageDeprecatedCmd} {
-		c.Flags().String("session", "", "report a recorded session by name instead of the current one")
-		c.Flags().Bool("me", false, "roll up your recent sessions, one row each")
-		c.Flags().Bool("team", false, "team-wide aggregate across all coworkers' sessions (no per-person data)")
-		c.Flags().String("since", "7d", "window for --me and --team (e.g. 7d, 24h, or an ISO date)")
-		c.Flags().Int("limit", 10, "maximum sessions for --me")
-		c.Flags().Int("recent", 10, "session view: ox calls listed in the JSON calls.recent (0 = all)")
-		c.Flags().Bool("json", false, "structured JSON report for AI coworkers")
-		c.MarkFlagsMutuallyExclusive("session", "me", "team")
-	}
+	usageCmd.Flags().String("session", "", "report a recorded session by name instead of the current one")
+	usageCmd.Flags().Bool("me", false, "roll up your recent sessions, one row each")
+	usageCmd.Flags().Bool("team", false, "team-wide aggregate across all coworkers' sessions (no per-person data)")
+	usageCmd.Flags().String("since", "7d", "window for --me and --team (e.g. 7d, 24h, or an ISO date)")
+	usageCmd.Flags().Int("limit", 10, "maximum sessions for --me")
+	usageCmd.Flags().Int("recent", 10, "session view: ox calls listed in the JSON calls.recent (0 = all)")
+	usageCmd.Flags().Bool("json", false, "structured JSON report for AI coworkers")
+	usageCmd.MarkFlagsMutuallyExclusive("session", "me", "team")
 }
 
 func runUsage(cmd *cobra.Command, _ []string) error {

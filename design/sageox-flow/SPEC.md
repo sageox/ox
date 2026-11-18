@@ -48,8 +48,9 @@ end labels. `[B]`
 - Failed: `failed` (danger) ` while searching team discussions · 1.2s` `[H]` `[DS]` rule 3.
 - Interrupted: `interrupted while searching team discussions · 3.4s`, no danger `[B]`.
 - Zero tokens: `searched code · nothing came back · 0.3s` (out: `nothing sent`) `[B]`.
-- Prompt strip: `team context ~15k · 3 murmurs · 1 ledger match`, no duration (nobody waits on
-  it) `[H]` group-line pattern.
+- Prompt strip: `team context ~15k · 1 ledger match`, no duration (nobody waits on it) `[H]`
+  group-line pattern. Murmurs that arrive with a prompt draw nothing: they are for the AI
+  coworker to read, and most are a coworker's own other sessions or ox's reminders.
 - Too long: the label shrinks with `…`; if even that does not fit, the label goes (the host row
   above names the call) and numbers stay; only then is the tail cut. `[C]` long-and-many.
 - Alt and caption, the same sentence `[DS]` rule 18:
@@ -57,7 +58,7 @@ end labels. `[B]`
   `posted murmur: ~64 tokens sent to murmurs, 0.4s` ·
   `failed while searching team discussions after 1.2s; nothing came back` ·
   `searching team discussions, still running` ·
-  `with this prompt: team context ~15k tokens, 3 murmurs, 1 ledger match; ~16k tokens in all`.
+  `with this prompt: team context ~15k tokens, 1 ledger match; ~15k tokens in all`.
 
 ## States
 
@@ -163,6 +164,48 @@ nothing   SAGEOX ●╶─              ● SESSION  failed while searching team
   the row on its still frame. `ox statusline --watch` redraws its pane at 80ms while a lane moves.
 - Still: `/ox-session-report flow still` (plugin) and the Codex and Conductor notices (always)
   draw the settled frame.
+
+## Terminal lane
+
+A terminal has no `Svg`, so there the plugin draws the lane as one row of text cells
+(`internal/usagepane/mod/hooks/textlane.ts`), under each ox call and each prompt that carried
+Team Context in.
+
+```
+running   SAGEOX ●┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄○ SESSION  searching team discussions
+flight    SAGEOX ●━━━━━━•━•━•━━━━━● SESSION  searched team memory · ~3k from 5 discussions · 0.8s
+settled   SAGEOX ●━━━━━━━━━━━━━━━━● SESSION  searched team memory · ~1.2k from 5 discussions · 0.8s
+out       SAGEOX ●━━━━━◦━◦━━━━━━━━● SESSION  saved plan · ~2k in 1 plan · 1.6s
+nothing   SAGEOX ●╶─              ● SESSION  failed while searching team discussions · 1.2s
+```
+
+- Track: 18 cells on every row, both end nodes included, so stacked rows read as small
+  multiples `[DS]`. SageOx is always the left end; `out` reverses the cells. `[B]`
+- Marks, one cell each (width-1 BMP, as the plugin's `Raster` requires): node `●`, open ring `○`,
+  open line `┄`, settled line `─` under 1k tokens and `━` from 1k (two weights; text has no third),
+  stub `╶─`, dot in `•`, ring out `◦`. Filled against hollow is the direction's second channel
+  `[DS]` rule 3.
+- Flight, over the same `ANIM_MS = 2400`: the line draws in from the origin over 600ms; dots leave
+  180ms apart (two cells at their speed, so they never touch) and cross in 1400ms. At most 5 dots:
+  `min(5, ceil(tokens / 1000))`, since 12 would fill a 16-cell lane. `[C]`
+- Running, failed, interrupted and empty lanes never move. Everything plays once.
+- Digest: the SVG's wording (`laneDigest`), fitted in cells: the label shrinks with `…`, then goes,
+  and the numbers stay.
+- Under 60 columns the `SAGEOX` / `SESSION` end labels go. `[B]`
+- Colour: `Raster` takes RGB, not theme keys, and cannot ask whether the terminal is light or
+  dark, so the track uses one mid sage `#5f9a5b` for what flowed and one mid grey `#8a8a8a` for
+  the rest (each ≥ 3:1 on white and on `#1e1e1e`); the labels and digest are theme text
+  (`dimColor`, `error` for "failed"). With no colour the glyphs alone carry every state. `[DS]`
+  rules 5 and 18.
+- Motion is a repaint of the track in place (`$.ui.blit`, one shared 50ms ticker that runs only
+  while a lane is in flight), never a transcript redraw; one redraw at `ANIM_MS` leaves the row
+  on its still frame.
+- Still: `/ox-session-report flow still` draws the settled frame.
+- Folded tool groups stay folded in the terminal. The desktop app, VS Code and mobile unfold a
+  group holding an ox call so its lane shows; a terminal group would unfold into every call's
+  command and output, so it stays one line and the lanes of its ox calls draw directly beneath
+  it: the newest 3, each with its own track, and above them one dim line counting the rest
+  (`+2 more ox calls`). An expanded group draws nothing of its own; each row draws its lane.
 
 ## Size guard
 
