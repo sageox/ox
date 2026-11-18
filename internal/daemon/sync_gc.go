@@ -35,40 +35,41 @@ const (
 	gcFailed                        // reclone attempted but failed (clone, validation, or swap error)
 )
 
-// startPeriodicGC keeps reclone I/O off the scheduler loop. Track it for the
-// same bounded shutdown drain as manually triggered GC.
-func (s *SyncScheduler) startPeriodicGC(ctx context.Context) <-chan struct{} {
-	if atomic.LoadInt32(&s.gcInProgress) != 0 || !s.addClone() {
+// checkAndRunGC runs the Ledger phase on the scheduler loop so watcher
+// validation and outbox draining cannot interleave with preservation or
+// the swap. Team Context reclones run in a tracked background worker.
+func (s *SyncScheduler) checkAndRunGC(ctx context.Context) (teamDone <-chan struct{}) {
+	// only one GC at a time
+	if !atomic.CompareAndSwapInt32(&s.gcInProgress, 0, 1) {
+		s.logger.Debug("gc: already in progress, skipping check")
+		return nil
+	}
+	defer func() {
+		if teamDone == nil {
+			atomic.StoreInt32(&s.gcInProgress, 0)
+		}
+	}()
+
+	if err := s.workspaceRegistry.LoadFromConfig(); err != nil {
+		s.logger.Warn("gc: failed to load workspace registry", "error", err)
+		return nil
+	}
+
+	s.checkLedgerAndBubbleGC(ctx)
+	teams := s.workspaceRegistry.GetTeamContexts()
+	if len(teams) == 0 || ctx.Err() != nil || !s.addClone() {
 		return nil
 	}
 	done := make(chan struct{})
 	go func() {
 		defer s.cloneWg.Done()
 		defer close(done)
-		taskCtx, span := s.tracer.StartTask(ctx, "daemon:gc_check")
+		defer atomic.StoreInt32(&s.gcInProgress, 0)
+		taskCtx, span := s.tracer.StartTask(ctx, "daemon:team_context_gc")
 		defer span.End()
-		s.checkAndRunGC(taskCtx)
+		s.checkTeamContextGC(taskCtx, teams)
 	}()
 	return done
-}
-
-// checkAndRunGC reclones workspaces due for garbage collection.
-func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
-	// only one GC at a time
-	if !atomic.CompareAndSwapInt32(&s.gcInProgress, 0, 1) {
-		s.logger.Debug("gc: already in progress, skipping check")
-		return
-	}
-	defer atomic.StoreInt32(&s.gcInProgress, 0)
-
-	if err := s.workspaceRegistry.LoadFromConfig(); err != nil {
-		s.logger.Warn("gc: failed to load workspace registry", "error", err)
-		return
-	}
-
-	s.checkTeamContextGC(ctx, s.workspaceRegistry.GetTeamContexts())
-
-	s.checkLedgerAndBubbleGC(ctx)
 }
 
 func (s *SyncScheduler) checkTeamContextGC(ctx context.Context, teamContexts []WorkspaceState) {

@@ -632,7 +632,9 @@ func TestBlueGreenGC_SkipsCloneInFlight(t *testing.T) {
 	scheduler.cloneInFlight.Store(ws.ID, true)
 
 	ctx := context.Background()
-	scheduler.checkAndRunGC(ctx)
+	if done := scheduler.checkAndRunGC(ctx); done != nil {
+		awaitStartupCompletion(t, done)
+	}
 
 	// GC should have been skipped — no .new or .old dirs
 	assert.NoDirExists(t, teamDir+".new")

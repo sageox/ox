@@ -332,3 +332,63 @@ func TestSyncScheduler_WatcherPullContinuesDuringTeamGC(t *testing.T) {
 		return err == nil
 	}, 3*time.Second, 10*time.Millisecond, "Team Context GC blocked the Ledger watcher sync")
 }
+
+func TestSyncScheduler_WatcherWaitsForLedgerGC(t *testing.T) {
+	isolateCredentials(t)
+	bare, ledger, writer := setupRacingLedger(t)
+	require.NoError(t, os.Mkdir(filepath.Join(writer, "sessions"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(writer, "sessions", ".gitkeep"), nil, 0o644))
+	advanceRemote(t, writer, 0)
+	scheduler := gcTestScheduler(t)
+	scheduler.config.LedgerPath = ledger
+	scheduler.config.SyncIntervalRead = time.Hour
+	scheduler.config.TeamContextSyncInterval = 0
+	scheduler.config.VersionCheckInterval = 0
+	scheduler.config.GCCheckInterval = 100 * time.Millisecond
+	scheduler.config.CodeDBCheckInterval = 0
+	scheduler.config.LedgerCheckInterval = 0
+	scheduler.config.GitHubSyncInterval = 0
+	t.Setenv("OX_KB_DISABLE", "1")
+
+	registry := scheduler.WorkspaceRegistry()
+	registry.mu.Lock()
+	registry.ledger = &WorkspaceState{
+		ID: "ledger", Type: WorkspaceTypeLedger, Path: ledger, CloneURL: "file://" + bare, Exists: true,
+	}
+	registry.workspaces["ledger"] = registry.ledger
+	primeConfigCacheLocked(registry)
+	registry.mu.Unlock()
+
+	swapStarted, releaseSwap := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseSwap) }) }
+	var swapOnce sync.Once
+	scheduler.gcSwapWindowTestHook = func() {
+		swapOnce.Do(func() { close(swapStarted) })
+		<-releaseSwap
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		release()
+		awaitStartupCompletion(t, done)
+	})
+	go func() {
+		defer close(done)
+		scheduler.Start(ctx)
+	}()
+	awaitStartupCompletion(t, swapStarted)
+
+	advanceRemote(t, writer, 1)
+	scheduler.TriggerSync()
+	require.Never(t, func() bool {
+		return len(scheduler.triggerChan) == 0
+	}, 250*time.Millisecond, 5*time.Millisecond, "watcher sync entered the Ledger during its swap")
+
+	release()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(ledger, "c001.txt"))
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond, "queued watcher sync must run after the swap")
+}

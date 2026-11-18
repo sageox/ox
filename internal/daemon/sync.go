@@ -985,12 +985,15 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 
 	// immediate initial pull so last_sync gets populated right away
 	// (don't wait 5 minutes for the first readTicker)
-	go s.pullChanges(ctx)
+	startupPullDone := make(chan struct{})
+	go func() {
+		defer close(startupPullDone)
+		s.pullChanges(ctx)
+	}()
 
 	// initial codedb check on startup (don't wait for CodeDBCheckInterval)
 	go s.checkCodeDBFreshness(ctx)
 
-	var periodicGCDone <-chan struct{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -1005,11 +1008,7 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 
 		case <-readTicker.C:
 			// not traced: high-frequency sync dominates span volume with little diagnostic value
-			// Periodic GC may own the Ledger lock during preservation.
-			// Keep the event loop responsive and resume on the next tick.
-			if periodicGCDone == nil {
-				s.pullChanges(ctx)
-			}
+			s.pullChanges(ctx)
 			readTicker.Reset(jitteredDuration(s.config.SyncIntervalRead, 0.10))
 
 		case <-teamContextChan:
@@ -1047,12 +1046,14 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			span.End()
 
 		case <-gcChan:
-			if periodicGCDone == nil {
-				periodicGCDone = s.startPeriodicGC(ctx)
+			select {
+			case <-startupPullDone:
+				taskCtx, span := s.tracer.StartTask(ctx, "daemon:gc_check")
+				s.checkAndRunGC(taskCtx)
+				span.End()
+			default:
+				// The initial pull runs outside the loop and may still be using the Ledger.
 			}
-
-		case <-periodicGCDone:
-			periodicGCDone = nil
 
 		case <-githubSyncChan:
 			if s.githubSync != nil {
@@ -1721,8 +1722,19 @@ func (s *SyncScheduler) drainMurmurOutbox(ctx context.Context) {
 				continue
 			}
 
-			if err := writeAndCommitMurmur(ctx, payload.TargetDir, payload); err != nil {
-				s.logger.Warn("queued murmur commit failed (will retry)", "path", e.path, "error", err)
+			commit := func() error { return writeAndCommitMurmur(ctx, ws.Path, payload) }
+			var commitErr error
+			if ws.Type == WorkspaceTypeTeamContext {
+				var acquired bool
+				acquired, commitErr = gitutil.TryWithPreCloneLock(ws.Path, commit)
+				if !acquired && commitErr == nil {
+					continue // leave the outbox entry until the checkout is available
+				}
+			} else {
+				commitErr = commit()
+			}
+			if commitErr != nil {
+				s.logger.Warn("queued murmur commit failed (will retry)", "path", e.path, "error", commitErr)
 				continue // leave for next cycle
 			}
 			s.logger.Debug("drained queued murmur", "path", e.path, "rel_path", payload.RelPath)
