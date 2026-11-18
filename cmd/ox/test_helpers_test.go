@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sageox/ox/internal/session"
@@ -23,6 +26,42 @@ func startTestRecording(t *testing.T, projectRoot, agentID, adapterName string) 
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	return state
+}
+
+// captureSlog sends slog's default logger to the returned buffer until the test
+// ends. Heartbeat goroutines an earlier test started (outputAgentPrimeXML) keep
+// logging after it returns, so they are drained first and writes are locked.
+func captureSlog(t *testing.T, level slog.Level) *lockedLogBuffer {
+	t.Helper()
+	DrainHeartbeats()
+	logs := &lockedLogBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: level})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return logs
+}
+
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *lockedLogBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
 }
 
 // skipIntegration skips tests that intentionally exercise process, git, or

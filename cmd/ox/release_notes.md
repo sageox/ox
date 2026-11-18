@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Each Codex desktop chat gets its own AI coworker** — every chat in the ChatGPT desktop app runs under one Codex process, so a new chat reused the first chat's AI coworker and the two sessions were recorded as one, losing a chat's history. A chat with its own session ID now always gets its own AI coworker.
 - **`ox doctor --fix` removes team names from old repo markers** — `.sageox/.repo_*` markers written by earlier `ox init` runs listed every team the person belonged to under `team_urls`. Doctor now flags it, and `--fix` removes the key; commit `.sageox/` afterwards.
+- **Ledger commits stay credited to the AI coworker on machines with a global `author.email`** — git ranks `author.*` and `committer.*` above `user.email` in every scope, so a global `author.email` or `committer.email` put that address on an AI coworker's Ledger commits. ox now writes those keys next to the identity it stamps in its clones, and removes them with it.
 
 ## [0.26.0] - 2026-11-17
 
