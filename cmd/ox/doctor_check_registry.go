@@ -89,7 +89,7 @@ func init() {
 		Slug:        CheckSlugReadme,
 		Name:        ".sageox/README.md",
 		Category:    "Project Structure",
-		FixLevel:    FixLevelAuto,
+		FixLevel:    FixLevelSuggested,
 		Description: "Checks if .sageox/README.md exists and is up to date",
 		Run:         checkReadmeFile,
 	})
@@ -115,6 +115,15 @@ func init() {
 	// ============================================================
 	// Git Status checks
 	// ============================================================
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugSageoxFilesTracked,
+		Name:        ".sageox/ files staged",
+		Category:    "Git Status",
+		FixLevel:    FixLevelSuggested,
+		Description: "Checks that SageOx configuration files are tracked",
+		Run:         checkSageoxFilesTracked,
+	})
 
 	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugGitignore,
