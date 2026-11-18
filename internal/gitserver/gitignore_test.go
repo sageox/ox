@@ -101,6 +101,7 @@ func TestEnsureCheckoutGitignore_RestoresTrackedSparsePolicy(t *testing.T) {
 	require.NoFileExists(t, ignorePath)
 
 	t.Chdir(filepath.Dir(dir))
+	t.Setenv("GIT_TRACE", "1")
 	require.NoError(t, EnsureCheckoutGitignore(filepath.Base(dir)))
 
 	after, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()

@@ -105,7 +105,7 @@ func EnsureCheckoutGitignoreCtx(ctx context.Context, repoPath string) error {
 		return err
 	}
 	root, err := os.OpenRoot(repoPath)
-	if os.IsNotExist(err) {
+	if errors.Is(err, os.ErrNotExist) {
 		return nil // no .sageox dir, nothing to protect
 	}
 	if err != nil {
@@ -114,7 +114,7 @@ func EnsureCheckoutGitignoreCtx(ctx context.Context, repoPath string) error {
 	defer root.Close()
 
 	sageoxDir, err := root.Lstat(".sageox")
-	if os.IsNotExist(err) {
+	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
@@ -126,13 +126,16 @@ func EnsureCheckoutGitignoreCtx(ctx context.Context, repoPath string) error {
 
 	var data []byte
 	policy, err := root.Lstat(checkoutGitignorePath)
-	if os.IsNotExist(err) {
-		tracked, listErr := gitutil.RunGit(ctx, repoPath, "ls-files", "--stage", "--", checkoutGitignorePath)
+	if errors.Is(err, os.ErrNotExist) {
+		// Parse stdout only. GIT_TRACE and other diagnostics go to stderr.
+		cmd := exec.CommandContext(ctx, "git", "ls-files", "--stage", "--", checkoutGitignorePath)
+		cmd.Dir = repoPath
+		indexEntry, listErr := cmd.Output()
 		if listErr != nil {
 			return fmt.Errorf("check tracked checkout gitignore: %w", listErr)
 		}
-		if tracked != "" {
-			fields := strings.Fields(tracked)
+		if len(indexEntry) != 0 {
+			fields := strings.Fields(string(indexEntry))
 			if len(fields) != 4 || (fields[0] != "100644" && fields[0] != "100755") || fields[2] != "0" {
 				return fmt.Errorf("tracked checkout gitignore must be a regular file at stage zero")
 			}
