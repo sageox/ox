@@ -285,6 +285,27 @@ func TestProcessResult_SettlesEmptyLedgerDownload(t *testing.T) {
 	}
 }
 
+func TestProcessResult_RetriesLegacyEmptyLedgerDownload(t *testing.T) {
+	name := "2026-09-24T23-03-riley-OxRiLy"
+	ledgerPath := t.TempDir()
+	f := cacheFixture{
+		name: name, ledgerPath: ledgerPath,
+		cacheDir: filepath.Join(ledgerPath, ".sageox", "cache", "sessions", name),
+	}
+	f.ledgerEntry(t, emptyRaw, false)
+	f.write(t, "raw.jsonl", emptyRaw)
+	f.write(t, ".needs-summary", "{}")
+	h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
+	item := &WorkItem{Payload: &SessionFinalizePayload{
+		SessionDir: f.cacheDir, LedgerPath: ledgerPath, UploadOnly: true,
+	}}
+	req, err := h.BuildPrompt(item)
+	require.NoError(t, err)
+	require.True(t, req.SkipLLM)
+	_, err = h.stageSessionInLedger(item.Payload.(*SessionFinalizePayload))
+	require.NoError(t, err)
+}
+
 // TestProcessResult_PrefilterSkipDiscardsLocalCopy: a thin local recording the
 // prefilter judged not worth summarizing is discarded without the LLM and never
 // staged into the Ledger. It shares ProcessResult's summary switch with the

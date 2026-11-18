@@ -1579,7 +1579,12 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	if recordingID == "" {
 		recordingID = session.ReadHeaderSessionID(result.RawPath)
 	}
-	if err := session.CheckFinalizedLedgerSessionDestination(sessionDir, sessionName, recordingID); err != nil {
+	sourceCacheDir := filepath.Dir(result.RawPath)
+	publicationID := pendingSessionUploadID(sourceCacheDir)
+	if publicationID == "" {
+		publicationID = recordingID
+	}
+	if err := session.CheckFinalizedLedgerSessionDestination(sessionDir, sessionName, publicationID); err != nil {
 		return err
 	}
 
@@ -1656,7 +1661,6 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	// Record retry ownership before the ledger gains a final meta.json: once
 	// that file exists, findOrphanedSessionsInDir skips this session unless
 	// the marker is present, so every failure below must leave it behind.
-	sourceCacheDir := filepath.Dir(result.RawPath)
 	if err := writeSessionUploadRetryPending(sourceCacheDir, sessionID); err != nil {
 		return fmt.Errorf("record pending session upload: %w", err)
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -400,11 +401,11 @@ func resolveOrphanSessionID(sessionDir string, orphan orphanedSession, draftPres
 }
 
 func orphanUploadIdentity(orphan orphanedSession) string {
-	// A prior attempt can adopt a published draft ID or mint one for an
-	// older header. Its cache marker independently proves that identity.
 	if orphan.CachePath != "" {
-		marker, err := os.ReadFile(filepath.Join(orphan.CachePath, sessionUploadRetryPendingFile))
-		if id := strings.TrimSpace(string(marker)); err == nil && sessionid.IsValidSessionID(id) {
+		if id := pendingSessionUploadID(orphan.CachePath); id != "" {
+			return id
+		}
+		if id := session.ReadHeaderSessionID(filepath.Join(orphan.CachePath, ledgerFileRaw)); id != "" {
 			return id
 		}
 	}
@@ -745,7 +746,48 @@ func writeSessionUploadRetryPending(cachePath, sessionID string) error {
 		return err
 	}
 	defer root.Close()
-	return fileutil.AtomicWriteBytesInRoot(root, sessionUploadRetryPendingFile, []byte(sessionID+"\n"), 0o600)
+	digest, err := sessionUploadRawDigest(root)
+	if err != nil {
+		return err
+	}
+	return fileutil.AtomicWriteBytesInRoot(root, sessionUploadRetryPendingFile, []byte(sessionID+"\n"+digest+"\n"), 0o600)
+}
+
+// A failed attempt can adopt a draft ID or mint one for an older raw header.
+// Bind that publication ID to the exact cache bytes, since a same-minute
+// recording can reuse the cache directory and leave an earlier marker behind.
+func pendingSessionUploadID(cachePath string) string {
+	root, err := os.OpenRoot(cachePath)
+	if err != nil {
+		return ""
+	}
+	defer root.Close()
+	marker, err := root.ReadFile(sessionUploadRetryPendingFile)
+	if err != nil {
+		return ""
+	}
+	id, expected, ok := strings.Cut(strings.TrimSpace(string(marker)), "\n")
+	if !ok || !sessionid.IsValidSessionID(id) {
+		return ""
+	}
+	digest, err := sessionUploadRawDigest(root)
+	if err != nil || digest != expected {
+		return ""
+	}
+	return id
+}
+
+func sessionUploadRawDigest(root *os.Root) (string, error) {
+	raw, err := root.Open(ledgerFileRaw)
+	if err != nil {
+		return "", err
+	}
+	defer raw.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, raw); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 // copyFile copies a file from src to dst.

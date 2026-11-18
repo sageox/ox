@@ -28,14 +28,21 @@ type sessionUploadFixture struct {
 }
 
 func TestSessionFinalizersRefuseDifferentFinalizedSession(t *testing.T) {
-	for _, operation := range []string{"stop", "doctor retry"} {
+	for _, operation := range []string{"stop", "doctor retry", "doctor retry after same-minute restart"} {
 		t.Run(operation, func(t *testing.T) {
 			f := newSessionUploadFixture(t)
 			dest := filepath.Join(f.ledgerPath, "sessions", f.sessionName)
 			require.NoError(t, os.MkdirAll(dest, 0o755))
+			const priorID = "ses_019d0000-0000-7000-8000-000000000099"
+			if operation == "doctor retry after same-minute restart" {
+				require.NoError(t, writeSessionUploadRetryPending(f.state.SessionPath, priorID))
+				require.NoError(t, os.WriteFile(f.result.RawPath, []byte(
+					"{\"type\":\"header\",\"metadata\":{\"session_id\":\""+f.state.SessionID+"\"}}\n"+
+						"{\"type\":\"user\",\"content\":\"replacement\"}\n"), 0o600))
+			}
 			require.NoError(t, lfs.WriteSessionMetaOnly(dest, &lfs.SessionMeta{
 				Version: "1.0", SessionName: f.sessionName, Title: "prior recording",
-				SessionID: "ses_019d0000-0000-7000-8000-000000000099",
+				SessionID: priorID,
 			}))
 			metaPath := filepath.Join(dest, "meta.json")
 			metaBefore, err := os.ReadFile(metaPath)
@@ -48,7 +55,7 @@ func TestSessionFinalizersRefuseDifferentFinalizedSession(t *testing.T) {
 			switch operation {
 			case "stop":
 				err = uploadSessionToLedgerWithEffects(f.projectRoot, f.result, f.state, f.ledgerPath, f.sessionName, effects)
-			case "doctor retry":
+			case "doctor retry", "doctor retry after same-minute restart":
 				err = retrySessionUploadWithEffects(f.projectRoot, f.ledgerPath, f.orphan(), effects)
 			}
 			rawAfter, readErr := os.ReadFile(rawPath)
@@ -61,6 +68,27 @@ func TestSessionFinalizersRefuseDifferentFinalizedSession(t *testing.T) {
 			require.ErrorContains(t, err, "refused to overwrite a Ledger session")
 		})
 	}
+}
+
+func TestUploadSessionToLedger_RetriesWithAdoptedDraftID(t *testing.T) {
+	fixture := newSessionUploadFixture(t)
+	initTestGitRepo(t, fixture.ledgerPath)
+	dir := filepath.Join(fixture.ledgerPath, "sessions", fixture.sessionName)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	const draftID = "ses_019d0000-0000-7000-8000-000000000099"
+	require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
+		Version: "1.0", SessionName: fixture.sessionName, SessionID: draftID, Draft: true,
+	}))
+	var calls []string
+	upload := func(failAt string) error {
+		return uploadSessionToLedgerWithEffects(fixture.projectRoot, fixture.result, fixture.state,
+			fixture.ledgerPath, fixture.sessionName, scriptedSessionUploadEffects(&calls, fixture.refs, failAt))
+	}
+	require.ErrorContains(t, upload("upload_lfs"), "LFS upload")
+	require.NoError(t, upload(""))
+	meta, err := lfs.ReadSessionMeta(dir)
+	require.NoError(t, err)
+	require.Equal(t, draftID, meta.SessionID)
 }
 
 func (f sessionUploadFixture) orphan() orphanedSession {
