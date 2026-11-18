@@ -54,6 +54,32 @@ func TestInstallHooksUnderLinkedProjectRoot(t *testing.T) {
 	}
 }
 
+func TestRepairHooksFromLinkedWorkingDirectory(t *testing.T) {
+	project := t.TempDir()
+	link := filepath.Join(t.TempDir(), "project")
+	if err := os.Symlink(project, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	path := resolvePluginPath(project, "project")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(legacyOpenCodePlugin), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+	t.Setenv("PWD", link)
+	if _, err := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: ".", Scope: "project"}); err != nil {
+		t.Fatal(err)
+	}
+	if content, err := os.ReadFile(path); err != nil || string(content) != openCodePluginTemplate {
+		t.Fatalf("repair did not write the generated plugin: %v", err)
+	}
+}
+
 func TestLinkedOpenCodePluginCanBeUninstalled(t *testing.T) {
 	params := adapterprotocol.HookParams{RepoRoot: t.TempDir(), Scope: "project"}
 	target := filepath.Join(t.TempDir(), "shared-plugin.ts")

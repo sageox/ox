@@ -113,7 +113,10 @@ func writeOpenCodePlugin(rootPath string, plugin openCodePlugin) error {
 	if err != nil {
 		return err
 	}
-	target := plugin.path
+	target, err := filepath.Abs(plugin.path)
+	if err != nil {
+		return err
+	}
 	if plugin.info != nil {
 		// Resolve both paths when locating an existing inode. For a fresh
 		// install, compute the path relative to the requested root as
@@ -126,10 +129,6 @@ func writeOpenCodePlugin(rootPath string, plugin openCodePlugin) error {
 		if err != nil {
 			return err
 		}
-	}
-	target, err = filepath.Abs(target)
-	if err != nil {
-		return err
 	}
 	rel, err := filepath.Rel(rootPath, target)
 	if err != nil || !filepath.IsLocal(rel) {
