@@ -31,9 +31,9 @@ type OpenParams struct {
 }
 
 // Open registers the endpoint's signing key, opens the stream on a new layer and
-// writes live.json (status streaming). Calling it again for an already open
-// session re-registers and re-opens on the same layer (both idempotent), keeping
-// the acknowledged offset. A key conflict writes status disabled and returns
+// writes the stream state (status streaming). Calling it again for an already
+// open session re-registers and re-opens on the same layer (both idempotent),
+// keeping the acknowledged offset. A key conflict writes status disabled and returns
 // ErrKeyConflict; any other failure writes nothing, so the session simply does
 // not stream.
 func Open(ctx context.Context, cfg Config, dir string, p OpenParams) (State, error) {
@@ -54,7 +54,7 @@ func Open(ctx context.Context, cfg Config, dir string, p OpenParams) (State, err
 	return st, err
 }
 
-// Prepare writes a local pending live state without any network call, so a hook
+// Prepare writes a local pending stream state without any network call, so a hook
 // can start spooling at once and the daemon (or stop) opens the stream later. It
 // is idempotent: an existing state is returned untouched.
 func Prepare(ctx context.Context, cfg Config, dir string, p OpenParams) (State, error) {

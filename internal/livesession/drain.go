@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	// aliased: this package's own session type would shadow it
+	oxsession "github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/sessionstream"
 )
 
@@ -64,7 +66,7 @@ func (s *session) log() *slog.Logger {
 	return s.cfg.Logger.With("session_id", s.st.SessionID, "conversation_id", s.st.ConversationID, "layer_id", s.st.LayerID)
 }
 
-// loadSession reads live.json; it builds no client (see connect).
+// loadSession reads the stream state; it builds no client (see connect).
 func loadSession(cfg Config, dir string) (*session, error) {
 	st, err := ReadState(dir)
 	if err != nil {
@@ -261,8 +263,10 @@ func retryable(api *sessionstream.APIError) bool {
 }
 
 // terminal handles the answers that end a stream for good: session_closed and
-// stop_and_wipe (410). A wipe deletes the spool only; raw.jsonl and the v1 path
-// are never touched.
+// stop_and_wipe (410). A server-side delete holds the session on this machine,
+// then wipes the spool: raw.jsonl stays (it is the person's own copy), but no
+// automatic path may publish it to the Ledger after someone deleted it on
+// SageOx.
 func (s *session) terminal(ctx context.Context, api *sessionstream.APIError) bool {
 	switch {
 	case api.Body.Reason == sessionstream.ReasonSessionClosed:
@@ -271,10 +275,22 @@ func (s *session) terminal(ctx context.Context, api *sessionstream.APIError) boo
 		return true
 	case api.Body.Action == sessionstream.ActionStopAndWipe || api.Status == http.StatusGone:
 		s.log().InfoContext(ctx, "live_session_deleted_by_server")
+		s.holdOnThisMachine(ctx)
+		s.st.DeletedOnServer = true
 		s.wipe(ctx)
 		return true
 	}
 	return false
+}
+
+// holdOnThisMachine writes the hold marker before anything else, because it is
+// what every automatic publisher checks (session stop, the hooks, the daemon's
+// finalize and recovery, doctor) and it outlives the stream state. A failure is
+// logged only: session stop writes the hold again from DeletedOnServer.
+func (s *session) holdOnThisMachine(ctx context.Context) {
+	if err := oxsession.WriteHoldMarker(s.dir, oxsession.HoldDeletedOnServer, "live_stream"); err != nil {
+		s.log().WarnContext(ctx, "live_session_hold_failed", "error", err)
+	}
 }
 
 func (s *session) wipe(ctx context.Context) {

@@ -79,7 +79,7 @@ func (l *LiveSessions) Run(ctx context.Context) {
 	}
 }
 
-// Tick handles every session dir with an active live state, then retries queued
+// Tick handles every session dir with an active stream state, then retries queued
 // abort deletes.
 func (l *LiveSessions) Tick(ctx context.Context) {
 	entries, err := os.ReadDir(l.sessionsDir)

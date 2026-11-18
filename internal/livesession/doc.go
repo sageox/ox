@@ -4,11 +4,15 @@
 // to the server (Drain, Close); `session abort` deletes it everywhere (Abort).
 //
 // Nothing here may break or slow the v1 git push: every network call is bounded
-// by a caller-supplied budget, and every failure degrades to "retry later".
+// by a caller-supplied budget, and every failure degrades to "retry later". One
+// outcome stops it on purpose: when the server says the session was deleted,
+// the session is held on this machine (session.HoldDeletedOnServer), so the v1
+// push never publishes what someone deleted on SageOx.
 //
 // Per-session files (all 0600, in the session directory):
 //
-//	live.ndjson  the spool: append-only, whole NDJSON lines
-//	live.json    State: ids, endpoint, acked offset, status
-//	live.lock    advisory lock taken by whoever appends to or drains the spool
+//	spool.jsonl        the spool: append-only, whole JSONL lines; byte-identical
+//	                   to the server's copy once drained
+//	stream-state.json  stream state: ids, endpoint, acked offset, status
+//	live.lock          advisory lock taken by whoever appends to or drains the spool
 package livesession

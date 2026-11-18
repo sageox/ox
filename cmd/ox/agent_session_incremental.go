@@ -375,14 +375,22 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 
 	// A held session gets its hold before anything the daemon reacts to, and
 	// no summary prompt: push-summary publishes (GH #1093). If the hold cannot
-	// be recorded, the stop fails and the recording state is kept.
+	// be recorded, the stop fails and the recording state is kept. A session
+	// deleted on SageOx while it streamed (the close above may be what learned
+	// it) is held the same way, for its own reason.
 	sessionCacheDir := filepath.Dir(result.RawPath)
+	deletedOnServer := liveDeletedOnServer(state.SessionPath)
 	held := stopHoldsSession(projectRoot, state)
-	if held {
+	switch {
+	case deletedOnServer:
+		if err := holdDeletedOnServer(result, state.SessionPath, "session_stop"); err != nil {
+			return nil, err
+		}
+	case held:
 		if err := holdStoppedSession(result, state, sessionCacheDir, "session_stop"); err != nil {
 			return nil, err
 		}
-	} else {
+	default:
 		result.SummaryPrompt = session.BuildSummaryPrompt(sessionEntries, result.RawPath, result.LedgerSessionDir)
 		_ = session.WriteNeedsSummaryMarker(sessionCacheDir, result.RawPath, result.LedgerSessionDir)
 	}
@@ -413,6 +421,12 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	}
 
 	// ledger upload
+	if deletedOnServer {
+		slog.Info("session deleted on SageOx while streaming, skipping upload", "session", sessionName)
+		result.LedgerSessionDir = ""
+		result.UploadWarning = deletedOnServerWarning
+		return result, nil
+	}
 	if held {
 		slog.Info("session held on this machine, skipping upload", "session", sessionName)
 		result.LedgerSessionDir = ""

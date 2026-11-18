@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"time"
@@ -27,7 +28,9 @@ import (
 // stop (bounded by livesession.CloseBudget) and abort touch the network
 // themselves. Every failure here degrades to "not streaming" and is logged on one
 // line; none may fail a hook, a start, a stop or an abort, and none may touch the
-// v1 Ledger push.
+// v1 Ledger push. The one exception is deliberate: a session deleted on SageOx
+// while it streamed is held on this machine and never published
+// (liveDeletedOnServer). Hooks stay silent about it; stop says so once.
 
 const (
 	// liveSettingsFetchBound caps the one-off CLI settings fetch when no cache
@@ -101,9 +104,9 @@ func fetchLiveSettings(ep string) *flags.CLISettingsResponse {
 	}
 }
 
-// liveSessionBegin prepares a pending live state for a just-started recording
+// liveSessionBegin prepares a pending stream state for a just-started recording
 // and spools its raw.jsonl header, with no network call. It is a no-op when
-// streaming is off, when the session already has live state (a re-written
+// streaming is off, when the session already has stream state (a re-written
 // header must not reach an already-streaming spool), or on any failure.
 func liveSessionBegin(projectRoot string, state *session.RecordingState, header []byte) {
 	if state == nil || state.SessionID == "" || state.SessionPath == "" || state.RecordedManualPublishing() {
@@ -190,6 +193,34 @@ func liveSessionClose(projectRoot, sessionDir, summary string, budget time.Durat
 	default:
 		log.Info("live_session_close_done", "status", string(res.Status), "acked", res.Acked)
 	}
+}
+
+// deletedOnServerWarning is the one notice a person gets about a session
+// deleted on SageOx while it streamed. Its owner or a team admin can delete it,
+// so the text does not guess which.
+const deletedOnServerWarning = "This session was deleted on SageOx while it was recording (by you or a team admin), so it was not shared. It stays on this machine only."
+
+// deletedOnServerGuidance replaces the stop guidance for such a session.
+const deletedOnServerGuidance = "This session was deleted on SageOx while it was recording, so it was not uploaded or shared. Tell the user once, in plain words, using upload_warning. Do not upload or publish it."
+
+// liveDeletedOnServer reports whether the server deleted this session while it
+// streamed: the live stream was rejected, and the v1 copy must stay off the
+// Ledger too.
+func liveDeletedOnServer(sessionDir string) bool {
+	return sessionDir != "" && livesession.WasDeletedOnServer(sessionDir)
+}
+
+// holdDeletedOnServer keeps a session deleted on SageOx on this machine. The
+// stream wrote the hold when it heard of the delete; writing it again covers a
+// hold that failed then (WriteHoldMarker keeps an existing one). On error the
+// caller must keep .recording.json, as for any hold (see holdStoppedSession).
+func holdDeletedOnServer(result *agentSessionResult, sessionDir, source string) error {
+	if err := writeSessionHold(sessionDir, session.HoldDeletedOnServer, source); err != nil {
+		return fmt.Errorf("keep deleted session on this machine: %w", err)
+	}
+	result.Held = true
+	result.DeletedOnServer = true
+	return nil
 }
 
 // liveSessionAbort deletes the session on the server BEFORE the caller removes

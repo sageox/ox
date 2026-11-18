@@ -72,7 +72,7 @@ func (e *env) mustDrain() livesession.DrainResult {
 
 func (e *env) spoolBytes() []byte {
 	e.t.Helper()
-	b, err := os.ReadFile(filepath.Join(e.dir, "live.ndjson"))
+	b, err := os.ReadFile(filepath.Join(e.dir, "spool.jsonl"))
 	if err != nil {
 		e.t.Fatalf("read spool: %v", err)
 	}

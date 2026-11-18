@@ -89,7 +89,7 @@ func newLiveFixture(t *testing.T, o liveOpts) *liveFixture {
 	header := fmt.Sprintf("{\"type\":\"session\",\"sessionId\":\"session\",\"cwd\":%q}\n", projectRoot)
 	require.NoError(t, os.WriteFile(f.sourceFile, []byte(header), 0o644))
 	require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, f.agentID, func(s *session.RecordingState) { s.SessionFile = f.sourceFile }))
-	// the start path: writes raw.jsonl's header, which is where live state is prepared
+	// the start path: writes raw.jsonl's header, which is where stream state is prepared
 	require.NoError(t, writeRawHeader(projectRoot, state))
 	f.state = state
 
@@ -109,7 +109,7 @@ func (f *liveFixture) rawBytes() []byte {
 
 func (f *liveFixture) spoolBytes() []byte {
 	f.t.Helper()
-	b, err := os.ReadFile(filepath.Join(f.dir(), "live.ndjson"))
+	b, err := os.ReadFile(filepath.Join(f.dir(), "spool.jsonl"))
 	require.NoError(f.t, err)
 	return b
 }
@@ -138,6 +138,18 @@ func (f *liveFixture) stop() {
 	require.NoError(f.t, err)
 	_, err = finalizeIncrementalSession(f.projectRoot, state, filepath.Join(state.SessionPath, "raw.jsonl"), adapter, &agentSessionResult{})
 	require.NoError(f.t, err)
+}
+
+// stopResult is stop, returning what the stop command would report.
+func (f *liveFixture) stopResult() *agentSessionResult {
+	f.t.Helper()
+	state, err := session.LoadRecordingStateForAgent(f.projectRoot, f.agentID)
+	require.NoError(f.t, err)
+	adapter, err := adapters.GetAdapter(state.AdapterName)
+	require.NoError(f.t, err)
+	result, err := finalizeIncrementalSession(f.projectRoot, state, filepath.Join(state.SessionPath, "raw.jsonl"), adapter, &agentSessionResult{})
+	require.NoError(f.t, err)
+	return result
 }
 
 func (f *liveFixture) liveState() livesession.State {
@@ -217,7 +229,7 @@ func TestLiveFlagOffMakesNoLiveCallsAndWritesNoLiveState(t *testing.T) {
 	assert.Empty(t, f.srv.Calls())
 	_, err := livesession.ReadState(f.dir())
 	assert.ErrorIs(t, err, livesession.ErrNotStreaming)
-	assert.NoFileExists(t, filepath.Join(f.dir(), "live.ndjson"))
+	assert.NoFileExists(t, filepath.Join(f.dir(), "spool.jsonl"))
 }
 
 func TestLiveManualPublishingMakesNoLiveCalls(t *testing.T) {
@@ -259,6 +271,76 @@ func TestLiveAbortOnlineDeletesTheServerCopy(t *testing.T) {
 
 	assert.True(t, f.srv.IsDeleted(st.ConversationID), "abort must delete the server copy")
 	assert.NoDirExists(t, f.dir())
+}
+
+// A session deleted on SageOx while it streams is rejected end to end: the
+// stream answers 410, later turns stay local and quiet, and stop keeps raw.jsonl
+// on this machine but never hands the session to the Ledger. Failure prevented:
+// the v1 push re-publishing a session someone deleted on SageOx.
+func TestLiveSessionDeletedOnServerIsNeverPublishedAtStop(t *testing.T) {
+	f := newLiveFixture(t, liveOpts{streaming: true})
+	f.turn("before the delete")
+	st := f.openAndDrain()
+	f.srv.DeleteSession(st.ConversationID)
+
+	f.turn("after the delete")
+	// the daemon's next drain hears the 410
+	_, err := livesession.Drain(context.Background(), liveConfig(f.projectRoot), f.dir(), 5*time.Second)
+	require.NoError(t, err)
+	calls := len(f.srv.Calls())
+	f.turn("one more after the delete")
+	assert.Len(t, f.srv.Calls(), calls, "a turn after the delete must not reach the server")
+	assert.NoFileExists(t, filepath.Join(f.dir(), "spool.jsonl"), "a turn after the delete must not start a new spool")
+
+	result := f.stopResult()
+
+	assert.True(t, result.Held, "stop must keep the deleted session on this machine")
+	assert.True(t, result.DeletedOnServer)
+	assert.Equal(t, deletedOnServerWarning, result.UploadWarning, "stop must say once why it was not shared")
+	assert.Empty(t, result.LedgerSessionDir, "nothing may go to the Ledger")
+	assert.Empty(t, result.SummaryPrompt, "a summary prompt leads to push-summary, which publishes")
+	assert.NoFileExists(t, filepath.Join(f.dir(), ".needs-summary"), "the daemon publishes a session marked for summary")
+	hold, err := session.ReadHoldMarker(f.dir())
+	require.NoError(t, err, "every automatic publisher (daemon, doctor, hooks) checks the hold")
+	assert.Equal(t, session.HoldDeletedOnServer, hold.Reason)
+	assert.Contains(t, string(f.rawBytes()), "one more after the delete", "raw.jsonl is the person's own copy and stays")
+}
+
+// The /clear and SessionEnd hooks hand a stopped recording to the daemon, which
+// summarizes and uploads it. A session deleted on SageOx must not be handed off.
+func TestLiveHookStopNeverHandsADeletedSessionToTheDaemon(t *testing.T) {
+	f := newLiveFixture(t, liveOpts{streaming: true})
+	f.turn("before the delete")
+	st := f.openAndDrain()
+	f.srv.DeleteSession(st.ConversationID)
+	f.turn("after the delete")
+	_, err := livesession.Drain(context.Background(), liveConfig(f.projectRoot), f.dir(), 5*time.Second)
+	require.NoError(t, err)
+	var sent int
+	orig := sendHookFinalizeIPC
+	sendHookFinalizeIPC = func(daemon.SessionFinalizeIPCPayload) error { sent++; return nil }
+	t.Cleanup(func() { sendHookFinalizeIPC = orig })
+	require.NotEmpty(t, deriveLedgerPath(f.dir()), "precondition: a live session would be handed off")
+
+	require.NoError(t, finalizeOrHoldOnHookStop(&HookContext{ProjectRoot: f.projectRoot}, f.state, "end"))
+
+	assert.Zero(t, sent, "a deleted session must not reach the daemon's finalize")
+	hold, err := session.ReadHoldMarker(f.dir())
+	require.NoError(t, err)
+	assert.Equal(t, session.HoldDeletedOnServer, hold.Reason)
+}
+
+// A local abort also ends in status deleted, but it must not read as a
+// server-side delete: only the server's answer carries that meaning.
+func TestLiveAbortIsNotADeleteOnServer(t *testing.T) {
+	f := newLiveFixture(t, liveOpts{streaming: true})
+	f.turn("to be discarded")
+	f.openAndDrain()
+	_, err := livesession.Abort(context.Background(), liveConfig(f.projectRoot), f.dir(), livesession.AbortBudget)
+	require.NoError(t, err)
+	require.Equal(t, livesession.StatusDeleted, f.liveState().Status)
+	assert.False(t, liveDeletedOnServer(f.dir()))
+	assert.False(t, session.IsHeld(f.dir()))
 }
 
 func TestLiveAbortOfflineQueuesTheDeleteAndTheDaemonTickRetiresIt(t *testing.T) {

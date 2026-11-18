@@ -84,6 +84,14 @@ func finalizeOrHoldOnHookStop(ctx *HookContext, state *session.RecordingState, p
 	if state.SessionPath == "" {
 		return nil
 	}
+	if liveDeletedOnServer(state.SessionPath) {
+		// deleted on SageOx while it streamed: no finalize request, which would
+		// summarize and upload it. Silent: a hook has no one to tell.
+		if err := writeSessionHold(state.SessionPath, session.HoldDeletedOnServer, "hook_"+phase); err != nil {
+			return fmt.Errorf("keep deleted session on this machine: %w", err)
+		}
+		return nil
+	}
 	if stopHoldsSession(ctx.ProjectRoot, state) {
 		recordErr := recordManualPublishing(state)
 		if err := writeSessionHold(state.SessionPath, session.HoldManualPublishing, "hook_"+phase); err != nil {

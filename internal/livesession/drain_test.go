@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/livesession"
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/sessionstream"
 )
 
@@ -142,11 +143,32 @@ func TestDrainSessionDeletedWipesSpoolAndLeavesOtherFiles(t *testing.T) {
 	if res.Status != livesession.StatusDeleted || !res.Done {
 		t.Fatalf("result = %+v, want deleted and done", res)
 	}
-	if _, err := os.Stat(filepath.Join(e.dir, "live.ndjson")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(e.dir, "spool.jsonl")); !os.IsNotExist(err) {
 		t.Fatalf("spool still exists after 410: %v", err)
 	}
 	if b, err := os.ReadFile(raw); err != nil || string(b) != "v1 raw\n" {
 		t.Fatalf("raw.jsonl was touched: %q, %v", b, err)
+	}
+}
+
+// A server-side delete must reach every v1 publisher, including ones in other
+// processes (the daemon's finalize and recovery): the drain that hears the 410
+// records it in the stream state and holds the session on this machine.
+func TestDrainSessionDeletedHoldsTheSessionOffTheLedger(t *testing.T) {
+	e := newEnv(t)
+	e.spool(lines(0, 5))
+	e.srv.DeleteSession(e.st.ConversationID)
+
+	e.mustDrain()
+	if !livesession.WasDeletedOnServer(e.dir) {
+		t.Fatalf("stream state = %+v, want deleted on server", e.state())
+	}
+	hold, err := session.ReadHoldMarker(e.dir)
+	if err != nil {
+		t.Fatalf("no hold after a server-side delete: %v", err)
+	}
+	if hold.Reason != session.HoldDeletedOnServer {
+		t.Fatalf("hold reason = %q, want %q", hold.Reason, session.HoldDeletedOnServer)
 	}
 }
 
@@ -188,7 +210,7 @@ func TestDrainSessionClosedByServerMarksClosed(t *testing.T) {
 	st := e.state()
 	st.Status = livesession.StatusStreaming
 	raw, _ := json.Marshal(st)
-	if err := os.WriteFile(filepath.Join(e.dir, "live.json"), raw, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(e.dir, "stream-state.json"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	e.spool(lines(3, 4))

@@ -7,11 +7,12 @@ import (
 	"strings"
 )
 
-// Object layout in the S3 session store (ADR-247 D4). Keys lead with the
-// owning team so a later bring-your-own-bucket is a prefix move.
+// Object layout in the environment's data bucket (ADR-247 D4), beside the
+// team's recordings. Keys lead with the owning team so a later
+// bring-your-own-bucket is a move of the whole team/<team>/ prefix.
 //
 //	team/<team>/conversations/<cnv>/conversation.json
-//	team/<team>/conversations/<cnv>/layers/session-jsonl.<clyr>/bytes/<offset:016d>.ndjson
+//	team/<team>/conversations/<cnv>/layers/session-jsonl.<clyr>/bytes/<offset:016d>.jsonl
 //	team/<team>/conversations/<cnv>/layers/session-jsonl.<clyr>/layer.json
 //	team/<team>/conversations/<cnv>/layers/session-jsonl.<clyr>/index.json
 //	team/<team>/conversations/<cnv>/attachments/sha256/<hex>
@@ -29,6 +30,11 @@ var (
 // offsetDigits zero-pads offsets so a lexicographic S3 listing is offset order.
 // 16 digits covers 10 PB per layer.
 const offsetDigits = 16
+
+// bytesKeySuffix names stream objects .jsonl, the extension every other JSON
+// Lines file in SageOx uses. The HTTP wire still says application/x-ndjson
+// (ContentTypeNDJSON): the format is the same, only the object name differs.
+const bytesKeySuffix = ".jsonl"
 
 // ValidConversationID reports whether s is a cnv_ UUIDv7 id.
 func ValidConversationID(s string) bool { return conversationIDRe.MatchString(s) }
@@ -81,16 +87,16 @@ func BytesKey(teamID, cnv, layer string, offset int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return p + fmt.Sprintf("%0*d", offsetDigits, offset) + ".ndjson", nil
+	return p + fmt.Sprintf("%0*d", offsetDigits, offset) + bytesKeySuffix, nil
 }
 
 // ParseBytesKeyOffset returns the start offset encoded in a BytesKey.
 func ParseBytesKeyOffset(key string) (int64, bool) {
 	i := strings.LastIndex(key, "/bytes/")
-	if i < 0 || !strings.HasSuffix(key, ".ndjson") {
+	if i < 0 || !strings.HasSuffix(key, bytesKeySuffix) {
 		return 0, false
 	}
-	digits := strings.TrimSuffix(key[i+len("/bytes/"):], ".ndjson")
+	digits := strings.TrimSuffix(key[i+len("/bytes/"):], bytesKeySuffix)
 	if len(digits) != offsetDigits {
 		return 0, false
 	}

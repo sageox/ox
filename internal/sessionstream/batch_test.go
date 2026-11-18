@@ -52,8 +52,15 @@ func TestKeysAreTeamScopedAndOrdered(t *testing.T) {
 	if !strings.HasPrefix(k1, "team/"+team+"/conversations/"+cnv+"/layers/session-jsonl."+layer+"/bytes/") {
 		t.Fatalf("unexpected layout: %s", k1)
 	}
+	if want := "/bytes/0000000000000010.jsonl"; !strings.HasSuffix(k2, want) {
+		t.Fatalf("stream object key %s does not end in %s", k2, want)
+	}
 	if off, ok := ParseBytesKeyOffset(k2); !ok || off != 10 {
 		t.Fatalf("parse offset: %d %v", off, ok)
+	}
+	// Only .jsonl names a stream object; any other suffix is not one of ours.
+	if _, ok := ParseBytesKeyOffset(strings.TrimSuffix(k2, ".jsonl") + ".ndjson"); ok {
+		t.Fatal("an .ndjson key parsed as a stream object")
 	}
 	for name, args := range map[string][3]string{
 		"traversal team":   {"team_../../x", cnv, layer},

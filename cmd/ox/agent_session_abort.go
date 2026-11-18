@@ -102,9 +102,9 @@ func runAgentSessionAbortActive(inst *agentinstance.Instance, cmd *cobra.Command
 		return fmt.Errorf("failed to clear recording state: %w", err)
 	}
 
-	// real-time streaming: delete the live copy from the server while live.json
-	// and the signing key's ids still exist; bounded, queued for the daemon on
-	// failure, and never fails the abort
+	// real-time streaming: delete the live copy from the server while the stream
+	// state and the signing key's ids still exist; bounded, queued for the daemon
+	// on failure, and never fails the abort
 	if state.SessionPath != "" {
 		liveSessionAbort(projectRoot, state.SessionPath)
 	}

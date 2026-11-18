@@ -38,7 +38,7 @@ func (w testLogWriter) Write(p []byte) (int, error) {
 }
 
 // newLiveEnv builds a daemon-side manager over a fake server and one session
-// dir holding a pending live state, the way a hook leaves it.
+// dir holding a pending stream state, the way a hook leaves it.
 func newLiveEnv(t *testing.T) *liveEnv {
 	t.Helper()
 	srv := livesessiontest.New(t)
@@ -80,7 +80,7 @@ func (e *liveEnv) stored() string {
 }
 
 func (e *liveEnv) spooled() string {
-	b, err := os.ReadFile(filepath.Join(e.dir, "live.ndjson"))
+	b, err := os.ReadFile(filepath.Join(e.dir, "spool.jsonl"))
 	if err != nil {
 		e.t.Fatal(err)
 	}

@@ -42,8 +42,9 @@ type AbortResult struct {
 
 // Abort deletes the session's conversation on the server, signed and bounded by
 // budget, BEFORE the caller removes local state (the key and ids are needed). On
-// failure the delete is queued. It marks live.json deleted and removes the spool;
-// it never touches raw.jsonl. A session that never streamed is a no-op.
+// failure the delete is queued. It marks the stream state deleted and removes
+// the spool; it never touches raw.jsonl. A session that never streamed is a
+// no-op.
 func Abort(ctx context.Context, cfg Config, dir string, budget time.Duration) (AbortResult, error) {
 	cfg, err := cfg.withDefaults()
 	if err != nil {

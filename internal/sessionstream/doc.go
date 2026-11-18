@@ -1,6 +1,7 @@
 // Package sessionstream is the wire contract for real-time session capture
 // (ADR-247): a client streams one append-only byte stream per conversation
-// layer to api-go, which stores it in the S3 session store before answering.
+// layer to api-go, which stores it in the environment's S3 data bucket before
+// answering.
 //
 // The package is dependency-free on purpose. api-go, the Temporal worker, the
 // session-capture twin and the reference client all import it, so the shapes

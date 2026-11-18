@@ -25,7 +25,7 @@ func TestSpoolPausedBytesNeverReachTheSpool(t *testing.T) {
 	if err != nil || !res.Skipped {
 		t.Fatalf("paused spool: %+v %v", res, err)
 	}
-	if _, err := os.Stat(filepath.Join(e.dir, "live.ndjson")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(e.dir, "spool.jsonl")); !os.IsNotExist(err) {
 		t.Fatalf("paused bytes created a spool: %v", err)
 	}
 	e.spool(lines(5, 6))
@@ -84,7 +84,7 @@ func TestSpoolCapWritesOneSpoolFullGapThenResumesAfterAck(t *testing.T) {
 func TestSpoolTornTailIsDroppedAndDeclared(t *testing.T) {
 	e := newEnv(t)
 	e.spool(lines(0, 2))
-	f, err := os.OpenFile(filepath.Join(e.dir, "live.ndjson"), os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(filepath.Join(e.dir, "spool.jsonl"), os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}

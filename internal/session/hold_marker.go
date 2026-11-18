@@ -16,7 +16,7 @@ import (
 )
 
 // HeldMarkerFile marks a session folder the coworker chose to keep on this
-// machine. A held session is never summarized, uploaded, or deleted by any
+// machine, or one deleted on SageOx while it streamed. A held session is never summarized, uploaded, or deleted by any
 // automatic path — the daemon's finalize scan, the /clear and SessionEnd hooks,
 // ox doctor, session recover, push-summary, or prune. Only an explicit
 // `ox session upload <name>` publishes it, and that removes the marker after
@@ -41,6 +41,11 @@ type HoldReason string
 // HoldManualPublishing: the coworker stopped the session with
 // session_publishing: manual.
 const HoldManualPublishing HoldReason = "manual_publishing"
+
+// HoldDeletedOnServer: the session was deleted on SageOx while it streamed
+// live (ADR-247), so its live stream was rejected. Holding it keeps raw.jsonl
+// on this machine and every automatic path off the Ledger.
+const HoldDeletedOnServer HoldReason = "deleted_on_server"
 
 // HoldInfo is the content of a .held marker.
 type HoldInfo struct {
