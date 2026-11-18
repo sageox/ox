@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`ox init` offers an open-source project's team in your own clone** — when you're a member of a project's public SageOx team (a claimed seat counts) and run `ox init` in your clone of it, the team picker pre-selects that team, marked "(this project's team)". Picking it joins the repo the project already registered, so your work there counts as the project's. Fork clones are covered through the `upstream` remote. `--team` and a team already in `.sageox/config.json` still win. A shallow clone gets `git fetch --unshallow` advice instead, because its hashes can't match.
+
 ### Changed
 
 - **`ox brief` is gone; use `ox session report`** — the alias kept for one release after the rename is removed. `ox session report` takes the same flags, and the `brief_pane` setting still works as the old name of `session_report_pane`.
