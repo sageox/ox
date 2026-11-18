@@ -3060,13 +3060,15 @@ func (s *SyncScheduler) recordSyncState(ctx context.Context, workspacePath strin
 	lock.Lock()
 	defer lock.Unlock()
 
+	ctx, cancel := s.localSyncCompletionContext(ctx)
+	defer cancel()
+	state := LoadSyncState(workspacePath)
 	sha, err := gitHeadSHA(ctx, workspacePath)
 	if err != nil {
 		s.logger.Debug("failed to get HEAD SHA for sync state", "path", workspacePath, "error", err)
-		sha = ""
+		sha = state.LastSyncCommit
 	}
 
-	state := LoadSyncState(workspacePath)
 	state.RecordSuccess(sha)
 	if err := SaveSyncState(workspacePath, state); err != nil {
 		s.logger.Warn("failed to save sync state", "path", workspacePath, "error", err)
