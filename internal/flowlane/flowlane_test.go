@@ -276,7 +276,7 @@ func TestRender_TraceTextReachesTheTerminalAsPlainText(t *testing.T) {
 					assert.NotContains(t, row, "\x1b]", "%q: no OSC", bad)
 				}
 				for _, r := range text {
-					assert.Truef(t, r == ' ' || (r >= 0x20 && r != 0x7f && !(r >= 0x80 && r <= 0x9f)), "%q left %U in %q", bad, r, text)
+					assert.Falsef(t, r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f), "%q left the control character %U in %q", bad, r, text)
 				}
 				assert.NotContains(t, text, "\n", "%q: one line", bad)
 			}
