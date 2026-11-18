@@ -11,7 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Sessions in a Git worktree beside the repo are saved** — a Claude Code session run in a worktree outside the main checkout is now found and uploaded at stop. When nothing is found, `session stop` reports failure, says why, and gives the exact `recover` or `ox session import` command instead of claiming success; `session recover` does the same.
 - **Long sessions import** — `ox agent <id> session import` reads entries up to 10 MiB; one over 1 MiB (a screenshot, long tool output) no longer fails the import, and one too large to save names its line. Its help and output now say it adds planning history, and point to `ox session import` for the full conversation.
+- **`ox doctor` no longer rewrites or stages the README by default** — Init writes the same README that doctor expects. README repairs and staging missing SageOx files require an explicit fix; doctor no longer reports unstaged changes as staged.
 - **`ox doctor --fix` removes team names from old repo markers** — `.sageox/.repo_*` markers written by earlier `ox init` runs listed every team the person belonged to under `team_urls`. Doctor now flags it, and `--fix` removes the key; commit `.sageox/` afterwards.
+- **Ledger commits stay credited to the AI coworker on machines with a global `author.email`** — git ranks `author.*` and `committer.*` above `user.email` in every scope, so a global `author.email` or `committer.email` put that address on an AI coworker's Ledger commits. ox now writes those keys next to the identity it stamps in its clones, and removes them with it.
 
 ## [0.26.0] - 2026-11-17
 

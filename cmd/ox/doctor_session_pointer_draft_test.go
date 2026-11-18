@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"log/slog"
 	"os"
@@ -158,10 +157,7 @@ func TestSessionStageGuard_RefusesDraftArtifacts(t *testing.T) {
 	for name, content := range draftArtifacts {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
 	}
-	var logs bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	logs := captureSlog(t, slog.LevelWarn)
 
 	out, err := newSessionStageGuard(project, sessionsDir).stage(context.Background())
 
