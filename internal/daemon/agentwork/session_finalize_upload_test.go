@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -549,13 +550,15 @@ func TestProcessResult_UploadOnly_AlreadyCommitted_PrunesCache(t *testing.T) {
 	_, clonePath := setupBareAndCloneLedger(t)
 
 	sessionName := "2026-01-15T14-00-testuser-OxDUP"
+	const sessionID = "ses_01950000-0000-7000-8000-000000001106"
+	raw := strings.Replace(testRawContent, `{"metadata":{`, `{"type":"header","metadata":{"session_id":"`+sessionID+`",`, 1)
 	cacheDir := filepath.Join(clonePath, ".sageox", "cache", "sessions", sessionName)
 	ledgerDir := filepath.Join(clonePath, "sessions", sessionName)
 	for _, dir := range []string{cacheDir, ledgerDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(testRawContent), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw), 0644); err != nil {
 			t.Fatal(err)
 		}
 		for _, name := range requiredArtifacts {
@@ -565,15 +568,11 @@ func TestProcessResult_UploadOnly_AlreadyCommitted_PrunesCache(t *testing.T) {
 		}
 	}
 
-	// meta.json goes into the LEDGER copy only, never the cache copy. Without it
-	// the handler synthesizes one during ProcessResult — a genuinely new file, so
-	// `git add` stages a real diff and the run takes the ordinary commit path.
-	// The no-op branch this test exists to guard would never execute and the
-	// assertions below would pass for the wrong reason. Keeping it out of the
-	// cache dir matters too: stageSessionInLedger copies cache over ledger, so a
-	// cache-side meta.json would overwrite this one and reintroduce a diff.
-	if err := os.WriteFile(filepath.Join(ledgerDir, "meta.json"),
-		[]byte(`{"version":"1.0","session_name":"`+sessionName+`"}`), 0644); err != nil {
+	// Put meta.json only in the Ledger, with the same ID as the raw header.
+	// This lets the retry prove ownership without changing the committed tree.
+	if err := lfs.WriteSessionMetaOnly(ledgerDir, &lfs.SessionMeta{
+		Version: "1.0", SessionName: sessionName, SessionID: sessionID,
+	}); err != nil {
 		t.Fatal(err)
 	}
 
