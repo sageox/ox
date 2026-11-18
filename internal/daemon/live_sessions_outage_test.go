@@ -347,7 +347,8 @@ func TestLiveCloseThatLostTheLockStillHappens(t *testing.T) {
 	}
 	res, err := livesession.Close(t.Context(), e.cfg, e.dir, "", 200*time.Millisecond)
 	var lockTimeout *fileutil.ErrLockTimeout
-	if res.Done || !(errors.As(err, &lockTimeout) || errors.Is(err, context.DeadlineExceeded)) {
+	gaveUp := errors.As(err, &lockTimeout) || errors.Is(err, context.DeadlineExceeded)
+	if res.Done || !gaveUp {
 		t.Fatalf("close = %+v, %v; want it to give up waiting for the session the drain holds", res, err)
 	}
 	e.live.Wait()
