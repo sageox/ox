@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -311,6 +312,77 @@ func TestProcessResult_RetriesLegacyEmptyLedgerDownload(t *testing.T) {
 	got, err := os.ReadFile(metaPath)
 	require.NoError(t, err)
 	require.Equal(t, latestMeta, got, "retry must preserve current Ledger metadata")
+}
+
+func TestProcessResult_ReplaysPendingEmptyLedgerRepair(t *testing.T) {
+	for _, state := range []string{"legacy", "backfilled", "already repaired", "different recording"} {
+		t.Run(state, func(t *testing.T) {
+			const name = "2026-09-24T23-03-riley-OxRiLy"
+			ledgerPath := t.TempDir()
+			f := cacheFixture{
+				name: name, ledgerPath: ledgerPath,
+				cacheDir: filepath.Join(ledgerPath, ".sageox", "cache", "sessions", name),
+			}
+			destDir := filepath.Join(ledgerPath, "sessions", name)
+			f.ledgerEntry(t, emptyRaw, false)
+			require.NoError(t, lfs.MutateSessionMeta(t.Context(), destDir, func(meta *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+				meta.RepoID = "repo_empty_test"
+				meta.SessionName = name
+				meta.UserID = "usr_updated_while_upload_pending"
+				switch state {
+				case "backfilled":
+					meta.SessionID = meta.EffectiveSessionID()
+				case "already repaired":
+					meta.Title = "Newer title"
+					meta.Summary = "Newer summary"
+					meta.SummaryStatus = "ok"
+					meta.SummaryAttempts = 0
+					meta.ValidationError = ""
+				case "different recording":
+					meta.SessionID = "ses_01950000-0000-7000-8000-000000001106"
+				}
+				return meta, nil
+			}))
+
+			// The first attempt produced its deterministic summary in the
+			// cache, then failed to upload before it could stage the repair.
+			f.write(t, "raw.jsonl", emptyRaw)
+			f.write(t, "meta.json", `{"version":"1.0","title":"Brief session","summary":"No conversation was recorded in this session.","summary_status":"ok"}`)
+			h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
+			item := &WorkItem{Payload: &SessionFinalizePayload{
+				SessionDir: f.cacheDir, LedgerPath: ledgerPath, UploadOnly: true,
+			}}
+			req, err := h.BuildPrompt(item)
+			require.NoError(t, err)
+			require.True(t, req.SkipLLM)
+			err = h.ProcessResult(item, &RunResult{})
+			got, readErr := lfs.ReadSessionMeta(destDir)
+			require.NoError(t, readErr)
+			require.Equal(t, "usr_updated_while_upload_pending", got.UserID)
+			if state == "different recording" {
+				require.ErrorIs(t, err, session.ErrLedgerSessionOverwrite)
+				require.Equal(t, "unrecoverable", got.SummaryStatus)
+				require.DirExists(t, f.cacheDir)
+				return
+			}
+			require.NoError(t, err)
+			if state == "backfilled" {
+				legacy := &lfs.SessionMeta{RepoID: got.RepoID, SessionName: name}
+				require.Equal(t, legacy.EffectiveSessionID(), got.SessionID)
+			}
+			if state == "already repaired" {
+				require.Equal(t, "Newer title", got.Title)
+				require.Equal(t, "Newer summary", got.Summary)
+			} else {
+				require.Equal(t, "Brief session", got.Title)
+				require.Equal(t, "No conversation was recorded in this session.", got.Summary)
+			}
+			require.Equal(t, "ok", got.SummaryStatus)
+			require.Empty(t, got.ValidationError)
+			require.Zero(t, got.SummaryAttempts)
+			require.NoDirExists(t, f.cacheDir)
+		})
+	}
 }
 
 // TestProcessResult_PrefilterSkipDiscardsLocalCopy: a thin local recording the

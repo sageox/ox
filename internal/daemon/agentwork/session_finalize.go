@@ -2327,18 +2327,25 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 	// The empty-session repair can have no ID on legacy downloads. For that
 	// path, verify the cached transcript against the current Ledger manifest
 	// again while staging holds the repository lock.
-	var preserveLedgerMeta bool
+	var legacyEmptyMeta *lfs.SessionMeta
 	if err := session.CheckFinalizedLedgerSessionDestination(destDir, sessionName, recordingID); err != nil {
 		if recordingID != "" || (!payload.emptyTranscript && !payload.UploadOnly) {
 			return "", err
 		}
 		meta := emptyLedgerTranscriptMeta(cacheDir, filepath.Join(cacheDir, "raw.jsonl"), payload.LedgerPath)
-		if meta == nil || meta.SessionID != "" {
+		if meta == nil {
 			return "", err
 		}
-		// An upload retry starts from the already-staged Ledger metadata.
-		// finishStaged merges storage references into that current record.
-		preserveLedgerMeta = payload.UploadOnly
+		legacy := *meta
+		legacy.SessionID = ""
+		// Doctor can persist the same ID that all readers already derived.
+		// Any other explicit ID still requires an exact match.
+		if meta.SessionID != "" && (!payload.UploadOnly || meta.SessionID != legacy.EffectiveSessionID()) {
+			return "", err
+		}
+		if payload.UploadOnly {
+			legacyEmptyMeta = meta
+		}
 	}
 
 	// Supersede any draft placeholder wholesale before copying (ADR-029).
@@ -2379,7 +2386,7 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 		if entry.IsDir() || pipeline.IsTraceFile(entry.Name()) {
 			continue
 		}
-		if preserveLedgerMeta && entry.Name() == "meta.json" {
+		if legacyEmptyMeta != nil && entry.Name() == "meta.json" {
 			continue
 		}
 		// Machine-local capture state never enters the shared Ledger. Every
@@ -2396,9 +2403,43 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 		}
 	}
 
+	if legacyEmptyMeta != nil {
+		if err := replayEmptyLedgerRepair(h.rootContext(), cacheDir, destDir, legacyEmptyMeta); err != nil {
+			return "", fmt.Errorf("replay empty session repair: %w", err)
+		}
+	}
+
 	// update payload to point at the staged location
 	payload.SessionDir = destDir
 	return cacheDir, nil
+}
+
+// Replay just the deterministic repair if the first upload failed before
+// staging it. Keep newer fields and an already completed summary in place.
+func replayEmptyLedgerRepair(ctx context.Context, cacheDir, destDir string, verified *lfs.SessionMeta) error {
+	cached, _ := lfs.ReadSessionMeta(cacheDir)
+	summary := emptyTranscriptSummary()
+	if cached == nil || cached.SummaryStatus != summary.SummaryStatus ||
+		cached.Title != summary.Title || cached.Summary != summary.Summary {
+		return nil
+	}
+	return lfs.MutateSessionMeta(ctx, destDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+		if current == nil || current.IsDraft() ||
+			current.EffectiveSessionID() != verified.EffectiveSessionID() ||
+			current.Files["raw.jsonl"] != verified.Files["raw.jsonl"] {
+			return nil, session.ErrLedgerSessionOverwrite
+		}
+		if current.SummaryStatus == summary.SummaryStatus || (current.SummaryStatus == "" && current.Title != "") {
+			return nil, nil
+		}
+		current.Title = summary.Title
+		current.Summary = summary.Summary
+		current.SummaryStatus = summary.SummaryStatus
+		current.ValidationError = ""
+		current.SummaryAttempts = 0
+		current.EntryCount = 0
+		return current, nil
+	})
 }
 
 // logStaleRecoveryDeferred warns the first time a session's stale-recording
