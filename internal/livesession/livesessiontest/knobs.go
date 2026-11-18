@@ -106,6 +106,14 @@ func (s *Server) CallsTo(method, suffix string) int {
 	return n
 }
 
+// InFlight is how many requests the fake is handling right now, so a test can
+// act while a client is mid-request (and holding whatever it locked for it).
+func (s *Server) InFlight() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inflight
+}
+
 // MaxConcurrent is the most requests that were in flight at once.
 func (s *Server) MaxConcurrent() int {
 	s.mu.Lock()

@@ -24,10 +24,25 @@ const (
 	// goroutine for longer than a tick or two.
 	liveDrainBudget = 30 * time.Second
 	// liveBackoffBase and liveBackoffCap shape the per-session retry delay after
-	// an error: 15 s doubling to 5 min, so a down server is probed, not hammered
-	// by a hook kick after every tool call.
+	// an error: 15 s doubling to 30 s, so a down server is probed at most twice a
+	// minute per session, never by a hook kick after every tool call. The cap is
+	// what bounds recovery: once the network is back, the next tick-driven attempt
+	// comes within the cap (plus one tick when the last failure came from a hook
+	// kick between ticks), inside ADR-247 D6's 60 s from write to visible. A cap
+	// in minutes left an outage's backlog unsent for minutes after the network
+	// returned.
 	liveBackoffBase = 15 * time.Second
-	liveBackoffCap  = 5 * time.Minute
+	liveBackoffCap  = 30 * time.Second
+	// liveBackoffSlack lets a tick that lands a hair before a backoff deadline
+	// retry. Ticks keep a fixed phase with a few ms of jitter; without slack the
+	// tick exactly one delay later could look early and the retry waited a whole
+	// extra tick (a 30 s cap acted like 45 s). Far below the 15 s base, so the
+	// server never sees a retry meaningfully early.
+	liveBackoffSlack = time.Second
+	// liveStepStuckAfter: the longest a step can legitimately run is an open
+	// plus a drain, each bounded by liveDrainBudget (a close is shorter). An
+	// attempt older than that plus a tick is wedged where no budget reaches.
+	liveStepStuckAfter = 2*liveDrainBudget + liveTickInterval
 )
 
 // LiveSessions opens, drains and closes session spools in the background.
@@ -43,10 +58,17 @@ type LiveSessions struct {
 	now    func() time.Time
 
 	mu      sync.Mutex
-	running map[string]bool // a drain goroutine owns this session dir
-	rerun   map[string]bool // another request arrived while it ran
+	running map[string]*liveAttempt // a drain goroutine owns this session dir
+	rerun   map[string]bool         // another request arrived while it ran
 	backoff map[string]liveBackoff
 	wg      sync.WaitGroup
+}
+
+// liveAttempt is the step a drain goroutine is running for one session.
+type liveAttempt struct {
+	started time.Time
+	// reported: the attempt outlived liveStepStuckAfter and was logged once.
+	reported bool
 }
 
 type liveBackoff struct {
@@ -60,7 +82,7 @@ func NewLiveSessions(logger *slog.Logger, sessionsDir, endpoint string) *LiveSes
 		logger: logger, sessionsDir: sessionsDir, endpoint: endpoint,
 		config:  func(ep string) livesession.Config { return livesession.Config{Endpoint: ep, Logger: logger} },
 		now:     time.Now,
-		running: map[string]bool{}, rerun: map[string]bool{}, backoff: map[string]liveBackoff{},
+		running: map[string]*liveAttempt{}, rerun: map[string]bool{}, backoff: map[string]liveBackoff{},
 	}
 }
 
@@ -155,26 +177,35 @@ func (l *LiveSessions) trusted(path string) (string, bool) {
 }
 
 // request runs a drain for dir unless one is running (it then reruns once) or
-// the session is backing off after an error.
+// the session is backing off after an error. A running attempt that outlived
+// every budget is reported once (reportStuck).
 func (l *LiveSessions) request(ctx context.Context, dir string) {
 	l.mu.Lock()
-	if l.running[dir] {
+	now := l.now()
+	if a := l.running[dir]; a != nil {
 		l.rerun[dir] = true
+		ran := now.Sub(a.started)
+		stuck := !a.reported && ran >= liveStepStuckAfter
+		a.reported = a.reported || stuck
+		l.mu.Unlock()
+		if stuck {
+			l.reportStuck(ctx, dir, ran)
+		}
+		return
+	}
+	if b, ok := l.backoff[dir]; ok && now.Add(liveBackoffSlack).Before(b.next) {
 		l.mu.Unlock()
 		return
 	}
-	if b, ok := l.backoff[dir]; ok && l.now().Before(b.next) {
-		l.mu.Unlock()
-		return
-	}
-	l.running[dir] = true
+	a := &liveAttempt{started: now}
+	l.running[dir] = a
 	l.mu.Unlock()
 
 	l.wg.Add(1)
 	go func() {
 		defer l.wg.Done()
 		for {
-			l.step(ctx, dir)
+			l.step(ctx, dir, a.started)
 			l.mu.Lock()
 			again := l.rerun[dir]
 			delete(l.rerun, dir)
@@ -184,57 +215,84 @@ func (l *LiveSessions) request(ctx context.Context, dir string) {
 				l.mu.Unlock()
 				return
 			}
+			a = &liveAttempt{started: l.now()}
+			l.running[dir] = a
 			l.mu.Unlock()
 		}
 	}()
 }
 
+// reportStuck names a session whose drain attempt outlived every budget, so a
+// session the daemon has stopped trying is never silent. The attempt is not
+// abandoned: it most likely holds live.lock, so a second one would only queue
+// behind it. This line plus a goroutine dump (SIGQUIT) is what finds the wedge.
+func (l *LiveSessions) reportStuck(ctx context.Context, dir string, ran time.Duration) {
+	args := []any{"session", filepath.Base(dir), "running_ms", ran.Milliseconds(), "stuck_after_ms", liveStepStuckAfter.Milliseconds()}
+	if st, err := livesession.ReadState(dir); err == nil {
+		args = append(args, "session_id", st.SessionID, "conversation_id", st.ConversationID, "layer_id", st.LayerID, "status", string(st.Status))
+	}
+	l.logger.ErrorContext(ctx, "live_session_step_stuck", args...)
+}
+
 // step does whatever the session's status calls for and records the outcome.
-func (l *LiveSessions) step(ctx context.Context, dir string) {
+// Every way it ends is logged: a session the daemon quietly stops trying is
+// the one failure nobody can see. started is when the attempt began; backoff
+// is measured from it, not from when a slow failure finally returned.
+func (l *LiveSessions) step(ctx context.Context, dir string, started time.Time) {
 	st, err := livesession.ReadState(dir)
-	if err != nil || !liveActive(st) {
+	switch {
+	case errors.Is(err, livesession.ErrNotStreaming):
+		l.logger.InfoContext(ctx, "live_session_step_skipped", "session", filepath.Base(dir), "reason", "no_stream_state")
+		return
+	case err != nil:
+		l.logger.WarnContext(ctx, "live_session_step_skipped", "session", filepath.Base(dir), "reason", "state_unreadable", "error", err)
+		return
+	case !liveActive(st):
+		l.logger.InfoContext(ctx, "live_session_step_skipped", "session", filepath.Base(dir), "reason", "not_active", "status", string(st.Status))
 		return
 	}
 	log := l.logger.With("session_id", st.SessionID, "conversation_id", st.ConversationID, "layer_id", st.LayerID)
-	cfg := l.config(st.Endpoint)
-	var (
-		retryAfter time.Duration
-		done       bool
-	)
+	res, err := l.attempt(ctx, dir, st)
 	switch {
-	case st.Status == livesession.StatusClosing, st.Status == livesession.StatusPending && st.CloseRequested:
-		var res livesession.DrainResult
-		res, err = livesession.Close(ctx, cfg, dir, "", livesession.CloseBudget)
-		done, retryAfter = res.Done, res.RetryAfter
-	default:
-		if st.Status == livesession.StatusPending {
-			if _, err = livesession.Open(ctx, cfg, dir, livesession.OpenParams{
-				SessionID: st.SessionID, SessionName: st.SessionName, RepoID: st.RepoID, Agent: st.Agent, StartedAt: st.StartedAt,
-			}); err != nil {
-				if errors.Is(err, livesession.ErrKeyConflict) {
-					log.WarnContext(ctx, "live_session_disabled", "reason", "key_conflict", "action", "run ox login to enroll a new signing key")
-					l.clearBackoff(dir)
-					return
-				}
-				break
-			}
-		}
-		var res livesession.DrainResult
-		res, err = livesession.Drain(ctx, cfg, dir, liveDrainBudget)
-		done, retryAfter = res.Done, res.RetryAfter
-	}
-	if err != nil {
-		delay := l.fail(dir, retryAfter)
+	case errors.Is(err, livesession.ErrKeyConflict):
+		log.WarnContext(ctx, "live_session_disabled", "reason", "key_conflict", "action", "run ox login to enroll a new signing key")
+		l.clearBackoff(dir)
+	case err != nil:
+		delay := l.fail(dir, res.RetryAfter, started)
 		log.WarnContext(ctx, "live_session_step_failed", "status", string(st.Status), "retry_in_ms", delay.Milliseconds(), "error", err)
-		return
-	}
-	l.clearBackoff(dir)
-	if done {
+	case res.Done:
+		l.clearBackoff(dir)
 		log.InfoContext(ctx, "live_session_step_done", "status_before", string(st.Status))
+	default:
+		// no error and bytes left: more was spooled while it drained (a kick
+		// reruns it), or the spool holds something no batch can carry
+		l.clearBackoff(dir)
+		log.InfoContext(ctx, "live_session_step_partial", "status_before", string(st.Status), "status", string(res.Status), "acked", res.Acked)
 	}
 }
 
-func (l *LiveSessions) fail(dir string, retryAfter time.Duration) time.Duration {
+// attempt runs one open-and-drain, or a close once stop asked for one.
+func (l *LiveSessions) attempt(ctx context.Context, dir string, st livesession.State) (livesession.DrainResult, error) {
+	cfg := l.config(st.Endpoint)
+	if st.Status == livesession.StatusClosing || st.CloseRequested {
+		return livesession.Close(ctx, cfg, dir, "", livesession.CloseBudget)
+	}
+	if st.Status == livesession.StatusPending {
+		// bounded like a drain: a token refresh inside open is otherwise held only
+		// by its per-request timeouts, and no step may outlive its budget
+		octx, cancel := context.WithTimeout(ctx, liveDrainBudget)
+		_, err := livesession.Open(octx, cfg, dir, livesession.OpenParams{
+			SessionID: st.SessionID, SessionName: st.SessionName, RepoID: st.RepoID, Agent: st.Agent, StartedAt: st.StartedAt,
+		})
+		cancel()
+		if err != nil {
+			return livesession.DrainResult{}, err
+		}
+	}
+	return livesession.Drain(ctx, cfg, dir, liveDrainBudget)
+}
+
+func (l *LiveSessions) fail(dir string, retryAfter time.Duration, started time.Time) time.Duration {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	b := l.backoff[dir]
@@ -244,7 +302,7 @@ func (l *LiveSessions) fail(dir string, retryAfter time.Duration) time.Duration 
 		b.delay = min(b.delay*2, liveBackoffCap)
 	}
 	delay := max(b.delay, retryAfter)
-	b.next = l.now().Add(delay)
+	b.next = started.Add(delay)
 	l.backoff[dir] = b
 	return delay
 }

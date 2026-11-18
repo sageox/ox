@@ -15,4 +15,6 @@
 //	                   to the server's copy once drained
 //	stream-state.json  stream state: ids, endpoint, acked offset, status
 //	live.lock          advisory lock taken by whoever appends to or drains the spool
+//	close-requested    stop asked for the close; kept until the stream ends, so
+//	                   a close that could not take live.lock is never lost
 package livesession

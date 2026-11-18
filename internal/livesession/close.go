@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/sessionstream"
 )
 
@@ -26,6 +28,9 @@ func Close(ctx context.Context, cfg Config, dir, summary string, budget time.Dur
 	}
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
+	if err := requestClose(dir); err != nil {
+		cfg.Logger.WarnContext(ctx, "live_session_close_request_failed", "session", filepath.Base(dir), "error", err)
+	}
 	var res DrainResult
 	err = withLock(ctx, dir, budget, func() error {
 		if err := openPending(ctx, cfg, dir); err != nil {
@@ -46,9 +51,30 @@ func Close(ctx context.Context, cfg Config, dir, summary string, budget time.Dur
 		}
 		res.Acked, res.Status = s.st.Acked, s.st.Status
 		res.Done = !s.st.active()
+		if res.Done {
+			if rerr := removeIfExists(filepath.Join(dir, closeRequestFileName)); rerr != nil {
+				s.log().WarnContext(ctx, "live_session_close_request_remove_failed", "error", rerr)
+			}
+		}
 		return err
 	})
 	return res, err
+}
+
+// requestClose durably records that stop asked for the close before Close
+// waits for the session. It takes no lock: a daemon drain can hold live.lock
+// longer than stop's budget, and a close lost to that wait left the stream
+// open on the server for good, since the daemon only finishes closes it knows
+// about. The next locked Close, this one or the daemon's, acts on it.
+func requestClose(dir string) error {
+	st, err := ReadState(dir)
+	if err != nil || st.CloseRequested || (st.Status != StatusPending && st.Status != StatusStreaming) {
+		return nil // loadSession reports a missing state; nothing else needs the marker
+	}
+	if err := fileutil.AtomicWriteBytes(filepath.Join(dir, closeRequestFileName), nil, 0o600); err != nil {
+		return fmt.Errorf("record close request: %w", err)
+	}
+	return nil
 }
 
 // openPending opens a session that never reached the server so Close can drain

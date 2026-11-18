@@ -17,6 +17,11 @@ const (
 	stateFileName = "stream-state.json"
 	spoolFileName = "spool.jsonl"
 	lockFileName  = "live.lock"
+	// closeRequestFileName marks that stop asked for the close. It is a file of
+	// its own, written without live.lock, because a drain may hold the lock for
+	// longer than stop can wait, and a drain persisting stream-state.json would
+	// overwrite a request written into it.
+	closeRequestFileName = "close-requested"
 )
 
 // Status is where a session's live stream stands.
@@ -58,8 +63,10 @@ type State struct {
 	Agent       string    `json:"agent,omitempty"`
 	StartedAt   time.Time `json:"started_at,omitzero"`
 
-	// CloseRequested is set when stop ran while the session was still pending and
-	// the server was unreachable; the daemon opens, drains and closes it.
+	// CloseRequested is set when stop asked for the close but could not finish
+	// it: the server was unreachable, or a drain held the session longer than
+	// stop could wait. The daemon opens (if pending), drains and closes it.
+	// ReadState also reports it while the close-requested file exists.
 	CloseRequested bool `json:"close_requested,omitempty"`
 
 	// DeletedOnServer is set with StatusDeleted when the server answered that the
@@ -98,6 +105,10 @@ func ReadState(dir string) (State, error) {
 	var st State
 	if err := json.Unmarshal(raw, &st); err != nil {
 		return State{}, fmt.Errorf("parse stream state: %w", err)
+	}
+	if !st.CloseRequested {
+		_, err := os.Stat(filepath.Join(dir, closeRequestFileName))
+		st.CloseRequested = err == nil
 	}
 	return st, nil
 }

@@ -125,3 +125,67 @@ func TestAbortWithoutLiveStateDoesNothing(t *testing.T) {
 		t.Fatalf("abort of a never-streamed session: %+v %v", res, err)
 	}
 }
+
+// TestCloseThatCannotTakeTheSessionStillRecordsTheRequest: stop's close gave
+// up waiting for a drain that held the session (a slow link, a short budget)
+// and nothing remembered that stop had happened, so the stream stayed open on
+// the server for good. The request must survive the lost lock.
+func TestCloseThatCannotTakeTheSessionStillRecordsTheRequest(t *testing.T) {
+	e := newEnv(t)
+	e.spool(lines(0, 4))
+	e.srv.Latency(1500 * time.Millisecond)
+
+	drained := make(chan error, 1)
+	go func() { _, err := e.drain(); drained <- err }()
+	deadline := time.Now().Add(10 * time.Second)
+	for e.srv.InFlight() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the drain never reached the server")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if res, err := livesession.Close(t.Context(), e.cfg, e.dir, "", 200*time.Millisecond); err == nil || res.Done {
+		t.Fatalf("close finished while a drain held the session: %+v %v", res, err)
+	}
+	if err := <-drained; err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	e.srv.Latency(0)
+
+	if st := e.state(); !st.CloseRequested || st.Status != livesession.StatusStreaming {
+		t.Fatalf("after the lost close: status=%s close_requested=%v, want the request kept for the daemon", st.Status, st.CloseRequested)
+	}
+	// the daemon's next step, which closes whatever stop asked to close
+	res, err := livesession.Close(t.Context(), e.cfg, e.dir, "", testBudget)
+	if err != nil || res.Status != livesession.StatusClosed {
+		t.Fatalf("daemon close: %+v %v", res, err)
+	}
+	if _, ok := e.srv.ClosedWith(e.st.ConversationID); !ok {
+		t.Fatal("the server never saw the close")
+	}
+	if _, err := os.Stat(filepath.Join(e.dir, "close-requested")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the close request outlived the close: %v", err)
+	}
+}
+
+// TestDrainAgainstALinkThatNeverAnswersStaysWithinBudget pins the hypothesis
+// the outage BDD first raised: a server (or proxy) that accepts the connection
+// and never answers must not hold a drain past its budget, or the session's
+// one drain slot would be gone for good.
+func TestDrainAgainstALinkThatNeverAnswersStaysWithinBudget(t *testing.T) {
+	e := newEnv(t)
+	e.spool(lines(0, 2))
+	e.srv.Hang(true)
+	start := time.Now()
+	res, err := livesession.Drain(t.Context(), e.cfg, e.dir, 300*time.Millisecond)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("drain blocked %s past a 300ms budget", elapsed)
+	}
+	if err == nil || res.Done || res.Acked != 0 {
+		t.Fatalf("res=%+v err=%v, want a retryable error with nothing acked", res, err)
+	}
+	e.srv.Hang(false)
+	if res := e.mustDrain(); !res.Done {
+		t.Fatalf("drain after the link answered again: %+v", res)
+	}
+}

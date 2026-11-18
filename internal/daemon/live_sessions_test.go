@@ -163,7 +163,7 @@ func TestLiveTickFinishesAClosingSessionAfterTheServerComesBack(t *testing.T) {
 	}
 }
 
-func TestLiveBackoffSpacesRetriesAndCapsAtFiveMinutes(t *testing.T) {
+func TestLiveBackoffSpacesRetriesAndCaps(t *testing.T) {
 	e := newLiveEnv(t)
 	e.spool(lineN(1))
 	e.srv.SetDown(true)
@@ -192,6 +192,53 @@ func TestLiveBackoffSpacesRetriesAndCapsAtFiveMinutes(t *testing.T) {
 	}
 	if delay != liveBackoffCap {
 		t.Fatalf("backoff delay = %s after many failures, want the %s cap", delay, liveBackoffCap)
+	}
+}
+
+// reconnectNoticeBudget is how long after SageOx comes back the daemon may take
+// to deliver what it spooled during an outage. ADR-247 D6 promises a teammate
+// sees a line within 60 s of it being written; about 15 s of that belongs to the
+// server's notice and the web page's fetch, so the client gets the rest.
+const reconnectNoticeBudget = 45 * time.Second
+
+// TestLiveDeliversAfterALongOutageWithinTheVisibilityBudget is the failure the
+// "Marcus keeps working through a network outage" scenario caught: backoff that
+// doubled toward minutes left a backlog sitting long after the network was
+// back, however long the outage lasted.
+func TestLiveDeliversAfterALongOutageWithinTheVisibilityBudget(t *testing.T) {
+	for _, outage := range []time.Duration{2 * time.Minute, 4 * time.Minute, 20 * time.Minute} {
+		t.Run(outage.String(), func(t *testing.T) {
+			e := newLiveEnv(t)
+			e.spool(lineN(1))
+			e.srv.SetDown(true)
+			// the real daemon sweeps every liveTickInterval; so does this outage
+			for elapsed := time.Duration(0); elapsed < outage; elapsed += liveTickInterval {
+				e.live.Tick(t.Context())
+				e.live.Wait()
+				e.clock = e.clock.Add(liveTickInterval)
+			}
+			if st := e.state(); st.Acked != 0 {
+				t.Fatalf("acked %d bytes while the server was down", st.Acked)
+			}
+
+			e.srv.SetDown(false)
+			back := e.clock
+			for {
+				e.live.Tick(t.Context())
+				e.live.Wait()
+				if st := e.state(); st.Status == livesession.StatusStreaming && st.Acked > 0 {
+					break
+				}
+				if waited := e.clock.Sub(back); waited > reconnectNoticeBudget {
+					t.Fatalf("after a %s outage the backlog was still undelivered %s after the server came back (budget %s)",
+						outage, waited, reconnectNoticeBudget)
+				}
+				e.clock = e.clock.Add(liveTickInterval)
+			}
+			if got := e.stored(); got != lineN(1) {
+				t.Fatalf("server holds %q, want the spooled line once", got)
+			}
+		})
 	}
 }
 
