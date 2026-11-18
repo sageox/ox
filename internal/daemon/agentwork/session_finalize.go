@@ -1966,7 +1966,7 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		next := current
 		fromLedger := false
 		if next == nil {
-			next = ledgerMetaForDownload(payload)
+			next = ledgerMetaForDownload(payload, headerID)
 			fromLedger = next != nil
 		}
 		if next == nil {
@@ -2230,22 +2230,23 @@ func emptyLedgerTranscriptMeta(sessionDir, rawPath, ledgerPath string) *lfs.Sess
 	if err != nil || ledgerMeta == nil || ledgerMeta.IsDraft() {
 		return nil
 	}
-	ref, ok := ledgerMeta.Files["raw.jsonl"]
-	if !ok || ref.OID == "" {
-		return nil
-	}
-	info, err := os.Stat(rawPath)
-	if err != nil || info.Size() != ref.Size {
-		return nil
-	}
-	data, err := os.ReadFile(rawPath)
-	if err != nil || lfs.NewFileRef(data).BareOID() != ref.BareOID() {
-		return nil
-	}
-	if session.ClassifyRawFile(rawPath) != session.RawHeaderOnly {
+	if !ledgerRawMatches(ledgerMeta, rawPath) || session.ClassifyRawFile(rawPath) != session.RawHeaderOnly {
 		return nil
 	}
 	return ledgerMeta
+}
+
+func ledgerRawMatches(meta *lfs.SessionMeta, rawPath string) bool {
+	ref := meta.Files["raw.jsonl"]
+	if ref.OID == "" {
+		return false
+	}
+	info, err := os.Stat(rawPath)
+	if err != nil || info.Size() != ref.Size {
+		return false
+	}
+	data, err := os.ReadFile(rawPath)
+	return err == nil && lfs.NewFileRef(data).BareOID() == ref.BareOID()
 }
 
 // ledgerMetaForDownload returns the Ledger's meta.json when the folder being
@@ -2254,12 +2255,17 @@ func emptyLedgerTranscriptMeta(sessionDir, rawPath, ledgerPath string) *lfs.Sess
 // folder over sessions/<name>/, so a blank start would erase every field this
 // path does not own (repo_id, user_id, model, linkage). Drafts are left to the
 // draft purge in stageSessionInLedger.
-func ledgerMetaForDownload(payload *SessionFinalizePayload) *lfs.SessionMeta {
+func ledgerMetaForDownload(payload *SessionFinalizePayload, headerID string) *lfs.SessionMeta {
 	if payload.LedgerPath == "" || !isInLedgerCacheDir(payload.SessionDir, payload.LedgerPath) {
 		return nil
 	}
 	meta, err := lfs.ReadSessionMeta(filepath.Join(payload.LedgerPath, "sessions", filepath.Base(payload.SessionDir)))
 	if err != nil || meta == nil || meta.IsDraft() {
+		return nil
+	}
+	// A same-name recording can also arrive here without cache metadata.
+	// Establish its identity before copying any fields from the Ledger.
+	if (headerID == "" || headerID != meta.SessionID) && !ledgerRawMatches(meta, payload.RawPath) {
 		return nil
 	}
 	return meta
@@ -2781,6 +2787,14 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 			return nil
 		}
 		if payload.useExistingLedgerCopy {
+			path := filepath.ToSlash(filepath.Join("sessions", sessionName))
+			status, err := gitutil.RunGit(ctx, ledgerPath, "status", "--porcelain=v1", "--untracked-files=all", "--", path)
+			if err != nil {
+				return fmt.Errorf("check existing Ledger session status: %w", err)
+			}
+			if status != "" {
+				return fmt.Errorf("Ledger session still has uncommitted changes: %s", sessionName)
+			}
 			return nil
 		}
 		relDir, err := filepath.Rel(ledgerPath, payload.SessionDir)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/require"
 )
 
@@ -409,6 +410,59 @@ func TestProcessResult_RegularFinalize_StagesToLedger(t *testing.T) {
 	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
 		t.Error("cache dir should be pruned after finalize+commit")
 	}
+}
+
+func TestProcessResult_RegularFinalizePreservesDifferentLedgerRecording(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	barePath, clonePath := setupBareAndCloneLedger(t)
+	const name = "2026-01-15T11-00-testuser-OxCOLLIDE"
+	const ledgerID = "ses_01950000-0000-7000-8000-000000000101"
+	const cachedID = "ses_01950000-0000-7000-8000-000000000102"
+	ledgerRaw := strings.Replace(testRawContent, `{"metadata":{`, `{"type":"header","metadata":{"session_id":"`+ledgerID+`",`, 1)
+	cachedRaw := strings.Replace(ledgerRaw, ledgerID, cachedID, 1)
+	f := cacheFixture{
+		ledgerPath: clonePath,
+		name:       name,
+		cacheDir:   filepath.Join(clonePath, ".sageox", "cache", "sessions", name),
+	}
+	f.write(t, "raw.jsonl", cachedRaw)
+	f.write(t, ".needs-summary", "{}")
+	ref := lfs.NewFileRef([]byte(ledgerRaw))
+	metadata, err := json.Marshal(lfs.SessionMeta{
+		SessionID: ledgerID,
+		Title:     "Original Ledger recording",
+		Files:     map[string]lfs.FileRef{"raw.jsonl": ref},
+	})
+	require.NoError(t, err)
+	f.ledgerMeta(t, string(metadata))
+	dir := filepath.Join(clonePath, "sessions", name)
+	pointer := lfs.FormatPointer(ref.OID, ref.Size)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(pointer), 0644))
+	runGitCmd(t, clonePath, "add", "--", "sessions")
+	runGitCmd(t, clonePath, "commit", "-m", "publish original recording")
+	runGitCmd(t, clonePath, "push")
+	branch := gitOutput(t, clonePath, "branch", "--show-current")
+	before := gitOutput(t, barePath, "rev-parse", branch)
+
+	handler := NewSessionFinalizeHandler(slog.Default())
+	handler.ledgerMu = &sync.Mutex{}
+	enableLocalFinalizeLFS(t, handler, clonePath)
+	items := detectCacheOnly(t, handler, clonePath)
+	require.Len(t, items, 1)
+	item := items[0]
+	require.Equal(t, cachedID, session.ReadHeaderSessionID(filepath.Join(f.cacheDir, "raw.jsonl")))
+	require.NoError(t, handler.ProcessResult(item, &RunResult{Output: "{}"}))
+
+	require.Equal(t, before, gitOutput(t, barePath, "rev-parse", branch))
+	got, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	require.NoError(t, err)
+	require.Equal(t, metadata, got)
+	gotRaw, err := os.ReadFile(filepath.Join(dir, "raw.jsonl"))
+	require.NoError(t, err)
+	require.Equal(t, pointer, string(gotRaw))
+	require.DirExists(t, f.cacheDir)
 }
 
 // --- F. Cache survival on push failure ---

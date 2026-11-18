@@ -319,7 +319,7 @@ func TestProcessResult_ReplaysPendingEmptyLedgerRepair(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git operations")
 	}
-	for _, state := range []string{"legacy", "backfilled", "already repaired", "interrupted staging", "different recording"} {
+	for _, state := range []string{"legacy", "backfilled", "already repaired", "interrupted staging", "dirty after staging", "different recording"} {
 		t.Run(state, func(t *testing.T) {
 			const name = "2026-09-24T23-03-riley-OxRiLy"
 			bare, ledgerPath := setupBareAndCloneLedger(t)
@@ -339,7 +339,7 @@ func TestProcessResult_ReplaysPendingEmptyLedgerRepair(t *testing.T) {
 				meta.SessionName = name
 				meta.UserID = "usr_updated_while_upload_pending"
 				switch state {
-				case "backfilled", "interrupted staging":
+				case "backfilled", "interrupted staging", "dirty after staging":
 					meta.SessionID = meta.EffectiveSessionID()
 				case "already repaired":
 					meta.SessionID = meta.EffectiveSessionID()
@@ -379,9 +379,12 @@ func TestProcessResult_ReplaysPendingEmptyLedgerRepair(t *testing.T) {
 			retry := func() *SessionFinalizePayload {
 				return &SessionFinalizePayload{SessionDir: f.cacheDir, LedgerPath: ledgerPath, UploadOnly: true}
 			}
-			if state == "interrupted staging" {
+			if state == "interrupted staging" || state == "dirty after staging" {
 				_, err := h.stageSessionInLedger(retry())
 				require.NoError(t, err)
+				if state == "dirty after staging" {
+					require.NoError(t, os.WriteFile(filepath.Join(destDir, artifactSummaryMD), []byte(newerMD), 0o644))
+				}
 			}
 			item := &WorkItem{Payload: retry()}
 			req, err := h.BuildPrompt(item)
@@ -392,6 +395,13 @@ func TestProcessResult_ReplaysPendingEmptyLedgerRepair(t *testing.T) {
 			got, readErr := lfs.ParseSessionMeta([]byte(committed))
 			require.NoError(t, readErr)
 			require.Equal(t, "usr_updated_while_upload_pending", got.UserID)
+			if state == "dirty after staging" {
+				require.ErrorContains(t, err, "Ledger session still has uncommitted changes")
+				require.Equal(t, "unrecoverable", got.SummaryStatus)
+				require.DirExists(t, f.cacheDir)
+				require.Equal(t, headBefore, gitOutput(t, bare, "rev-parse", branch))
+				return
+			}
 			if state == "different recording" {
 				require.ErrorIs(t, err, session.ErrLedgerSessionOverwrite)
 				require.Equal(t, "unrecoverable", got.SummaryStatus)
