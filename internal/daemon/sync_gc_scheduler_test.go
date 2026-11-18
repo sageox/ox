@@ -121,7 +121,9 @@ func TestPeriodicGC_HeartbeatContinuesDuringRejectedLedgerPush(t *testing.T) {
 		}
 		await(initialHeartbeat, "scheduler did not start")
 		await(pushStarted, "periodic GC did not reach the preservation push")
+		s.TriggerSync()
 		await(nextHeartbeat, "periodic GC blocked the scheduler's next heartbeat")
+		require.Len(t, s.triggerChan, 1, "watcher must stay queued while GC is preserving Ledger commits")
 		release.Do(func() { close(releasePush) })
 		select {
 		case err := <-pushError:
@@ -131,6 +133,7 @@ func TestPeriodicGC_HeartbeatContinuesDuringRejectedLedgerPush(t *testing.T) {
 		}
 		synctest.Wait()
 		require.Zero(t, atomic.LoadInt32(&s.gcInProgress), "GC must release single-flight after rejection")
+		require.Empty(t, s.triggerChan, "watcher must run after GC releases the checkout")
 	})
 	gotLocal, err := runGitOut(t, local, "rev-parse", "HEAD")
 	require.NoError(t, err, gotLocal)

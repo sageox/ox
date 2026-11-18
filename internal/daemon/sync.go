@@ -987,12 +987,17 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 
 	// immediate initial pull so last_sync gets populated right away
 	// (don't wait 5 minutes for the first readTicker)
-	go s.pullChanges(ctx)
+	startupPullDone := make(chan struct{})
+	go func(done chan struct{}) {
+		defer close(done)
+		s.pullChanges(ctx)
+	}(startupPullDone)
 
 	// initial codedb check on startup (don't wait for CodeDBCheckInterval)
 	go s.checkCodeDBFreshness(ctx)
 
 	var periodicGCDone <-chan struct{}
+	var watcherTrigger <-chan struct{} = s.triggerChan
 	for {
 		select {
 		case <-ctx.Done():
@@ -1042,16 +1047,25 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			s.checkLatestVersion(taskCtx)
 			span.End()
 
+		case <-startupPullDone:
+			startupPullDone = nil
+
 		case <-gcChan:
-			if periodicGCDone == nil {
+			if periodicGCDone == nil && startupPullDone == nil {
 				periodicGCDone = s.startPeriodicGC(ctx)
+				if periodicGCDone != nil {
+					// Leave one coalesced watcher event queued until GC releases
+					// the checkout. Heartbeats must still run during preservation.
+					watcherTrigger = nil
+				}
 			}
 
 		case <-periodicGCDone:
 			periodicGCDone = nil
+			watcherTrigger = s.triggerChan
 
 		case <-githubSyncChan:
-			if s.githubSync != nil {
+			if periodicGCDone == nil && s.githubSync != nil {
 				if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
 					taskCtx, span := s.tracer.StartTask(ctx, "daemon:github_sync")
 					s.githubSync.CheckAndSync(taskCtx, l.Path)
@@ -1081,7 +1095,7 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 				}()
 			}
 
-		case <-s.triggerChan:
+		case <-watcherTrigger:
 			// watcher-triggered sync: skip sparse-checkout refresh to avoid
 			// feedback loop where .sageox/cache/ writes trigger sync which
 			// runs ConfigureSparseCheckout which could wipe cache
