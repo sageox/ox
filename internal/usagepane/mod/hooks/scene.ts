@@ -34,7 +34,7 @@ export type SceneOpts = {
 }
 
 export type Phase = 'running' | 'flight' | 'settled'
-type Outcome = 'open' | 'flowed' | 'failed' | 'interrupted' | 'empty'
+export type Outcome = 'open' | 'flowed' | 'failed' | 'interrupted' | 'empty'
 
 const LANE_NAMES: Record<FlowLane, string> = {
   'team-context': 'team context',
@@ -86,7 +86,7 @@ export function phaseOf(e: { endedAt?: number }, now: number, reducedMotion = fa
   return now - e.endedAt < ANIM_MS ? 'flight' : 'settled'
 }
 
-function outcomeOf(e: FlowEvent): Outcome {
+export function outcomeOf(e: FlowEvent): Outcome {
   if (e.endedAt === undefined) {
     return 'open'
   }
@@ -127,9 +127,9 @@ function hash(s: string): string {
 // ---- words ---------------------------------------------------------------
 
 /** A run of digest text; `n` is a number (mono, tabular), `bad` is danger. */
-type Seg = { text: string; cls?: 'n' | 'bad' }
+export type Seg = { text: string; cls?: 'n' | 'bad' }
 
-const SEP: Seg = { text: ' · ' }
+export const SEP: Seg = { text: ' · ' }
 
 function itemsPhrase(e: FlowEvent): string | null {
   if (e.items === undefined || e.items <= 0) {
@@ -139,7 +139,7 @@ function itemsPhrase(e: FlowEvent): string | null {
 }
 
 /** The digest beside a single lane, by outcome. */
-function laneDigest(e: FlowEvent): Seg[] {
+export function laneDigest(e: FlowEvent): Seg[] {
   const outcome = outcomeOf(e)
   const dur = e.endedAt === undefined ? '' : formatDuration(e.endedAt - e.startedAt)
   switch (outcome) {
@@ -291,7 +291,7 @@ function fitDigest(segs: Seg[], room: number): Seg[] {
 // ---- drawing -------------------------------------------------------------
 
 /** Everything the drawing needs, from one event or a prompt's several. */
-type Model = {
+export type Model = {
   key: string
   direction: FlowDirection
   tokens: number
@@ -478,7 +478,8 @@ export function fitSource(render: (level: Level) => string, cap = SVG_SOURCE_CAP
   return render(2)
 }
 
-function eventModel(e: FlowEvent): Model {
+/** One tool row's lane as a model: shared by the SVG and the terminal's text lane. */
+export function eventModel(e: FlowEvent): Model {
   return {
     key: e.id,
     direction: e.direction,
@@ -503,6 +504,12 @@ export function laneSvg(event: FlowEvent, now: number, opts: SceneOpts = {}): st
  */
 export function promptSvg(events: FlowEvent[], now: number, opts: SceneOpts = {}): string {
   const label = caption(events)
+  const m = promptModel(events, now)
+  return fitSource((level) => wrap(m, now, opts, level, label))
+}
+
+/** A prompt's attachment events as one inbound model: shared by the SVG and the text lane. */
+export function promptModel(events: FlowEvent[], now: number): Model {
   const running = events.find((e) => e.endedAt === undefined)
   const ok = events.filter((e) => !e.failed && !e.interrupted && e.tokens > 0)
   const bad = events.length - ok.length
@@ -534,7 +541,7 @@ export function promptSvg(events: FlowEvent[], now: number, opts: SceneOpts = {}
   } else {
     outcome = events.some((e) => e.failed) ? 'failed' : 'empty'
   }
-  const m: Model = {
+  return {
     key: events.map((e) => e.id).join('|') || 'prompt',
     direction: 'in',
     tokens: ok.reduce((n, e) => n + e.tokens, 0),
@@ -543,5 +550,4 @@ export function promptSvg(events: FlowEvent[], now: number, opts: SceneOpts = {}
     outcome,
     digest: running ? [{ text: running.step }] : digest.length ? digest : [{ text: 'nothing came back' }],
   }
-  return fitSource((level) => wrap(m, now, opts, level, label))
 }

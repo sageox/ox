@@ -7,8 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### New
 
+- **Flow lanes in Claude Code's terminal** — the lane that shows team context reaching your AI coworker now draws in the terminal too, as one row of text under each ox call that moves team data and each prompt that carried Team Context in, such as `SAGEOX ●━━━━━━•━•━•━━━━━● SESSION  searched team memory · ~3k from 5 discussions · 0.8s`. Folded groups of tool calls stay folded, with the lane shown beneath the group. `/ox-session-report flow still` stops the motion and `/ox-session-report flow off` hides the lanes.
 - **`ox init` offers an open-source project's team in your own clone** — when you're a member of a project's public SageOx team (a claimed seat counts) and run `ox init` in your clone of it, the team picker pre-selects that team, marked "(this project's team)". Picking it joins the repo the project already registered, so your work there counts as the project's. Fork clones are covered through the `upstream` remote. `--team` and a team already in `.sageox/config.json` still win. A shallow clone gets `git fetch --unshallow` advice instead, because its hashes can't match.
 
 ### Changed
