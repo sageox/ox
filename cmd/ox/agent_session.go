@@ -26,6 +26,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
@@ -1465,7 +1466,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 			// the header-only raw.jsonl written at session start (plus any footer a
 			// finalize door stamped) is not worth committing.
 			slog.Info("async upload skipped: session has no entries", "session", sessionName)
-		} else if copyErr := copySessionCacheToLedger(result, ledgerPath, sessionName); copyErr != nil {
+		} else if copyErr := copySessionCacheToLedger(result, state, ledgerPath, sessionName); copyErr != nil {
 			slog.Warn("async copy to ledger failed", "error", copyErr)
 			_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			result.UploadWarning = "Session saved locally but async copy failed. Run 'ox doctor' to retry."
@@ -1575,11 +1576,8 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	}
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
-	recordingID := state.SessionID
-	if recordingID == "" {
-		recordingID = session.ReadHeaderSessionID(result.RawPath)
-	}
 	sourceCacheDir := filepath.Dir(result.RawPath)
+	recordingID := stopRecordingID(result, state)
 	publicationID := pendingSessionUploadID(sourceCacheDir)
 	if publicationID == "" {
 		publicationID = recordingID
@@ -1875,9 +1873,24 @@ func reconcileProducedPlansAtStop(projectRoot string, slugs []string, sessionID 
 	}
 }
 
-// copySessionCacheToLedger delegates to pipeline.CopySessionToLedger with the real filesystem.
-func copySessionCacheToLedger(result *agentSessionResult, ledgerPath, sessionName string) error {
-	return pipeline.CopySessionToLedger(pipeline.OSFileSystem{}, result, ledgerPath, sessionName)
+func stopRecordingID(result *agentSessionResult, state *session.RecordingState) string {
+	if state.SessionID != "" {
+		return state.SessionID
+	}
+	return session.ReadHeaderSessionID(result.RawPath)
+}
+
+// Delegated stop can write into the Ledger before the daemon sees the session.
+// Protect that write with the same ownership check and lock as daemon staging.
+func copySessionCacheToLedger(result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string) error {
+	waitForGCSwap(ledgerPath)
+	return gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+		if err := session.CheckFinalizedLedgerSessionDestination(sessionDir, sessionName, stopRecordingID(result, state)); err != nil {
+			return err
+		}
+		return pipeline.CopySessionToLedger(pipeline.OSFileSystem{}, result, ledgerPath, sessionName)
+	})
 }
 
 // signalDaemonSessionFinalize sends a fire-and-forget IPC message to the daemon

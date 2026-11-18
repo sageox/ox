@@ -28,7 +28,7 @@ type sessionUploadFixture struct {
 }
 
 func TestSessionFinalizersRefuseDifferentFinalizedSession(t *testing.T) {
-	for _, operation := range []string{"stop", "doctor retry", "doctor retry after same-minute restart"} {
+	for _, operation := range []string{"stop", "delegated stop", "doctor retry", "doctor retry after same-minute restart"} {
 		t.Run(operation, func(t *testing.T) {
 			f := newSessionUploadFixture(t)
 			dest := filepath.Join(f.ledgerPath, "sessions", f.sessionName)
@@ -55,6 +55,8 @@ func TestSessionFinalizersRefuseDifferentFinalizedSession(t *testing.T) {
 			switch operation {
 			case "stop":
 				err = uploadSessionToLedgerWithEffects(f.projectRoot, f.result, f.state, f.ledgerPath, f.sessionName, effects)
+			case "delegated stop":
+				err = copySessionCacheToLedger(f.result, f.state, f.ledgerPath, f.sessionName)
 			case "doctor retry", "doctor retry after same-minute restart":
 				err = retrySessionUploadWithEffects(f.projectRoot, f.ledgerPath, f.orphan(), effects)
 			}
