@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -10,11 +11,11 @@ import (
 
 // runStatuslineWrap on Windows runs the command without ox's row: holding a
 // row needs a pseudo-terminal, which this build does not drive.
-func runStatuslineWrap(argv []string) (int, error) {
+func runStatuslineWrap(ctx context.Context, argv []string) (int, error) {
 	if len(argv) == 0 {
 		return 2, errors.New("usage: ox statusline --wrap -- <command> [args]")
 	}
-	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	err := cmd.Run()
 	if err == nil {

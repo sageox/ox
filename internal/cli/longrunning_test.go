@@ -49,6 +49,12 @@ func TestIsLongRunning(t *testing.T) {
 		{"flag form, flag unset", "flag:foreground", nil, false},
 		{"flag form, flag explicitly false", "flag:foreground", []string{"--foreground=false"}, false},
 
+		// `ox statusline` is a service under either of two flags.
+		{"flag list, first set", "flag:foreground,other", []string{"--foreground"}, true},
+		{"flag list, second set", "flag:other,foreground", []string{"--foreground"}, true},
+		{"flag list, none set", "flag:foreground,other", nil, false},
+		{"flag list of unknown flags", "flag:nope,nada", []string{"--foreground"}, false},
+
 		{"always form", "true", nil, true},
 		{"always form ignores flags", "true", []string{"--foreground"}, true},
 

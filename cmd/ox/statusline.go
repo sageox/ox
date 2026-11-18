@@ -61,6 +61,9 @@ var statuslineCmd = &cobra.Command{
 	Use:    "statusline",
 	Short:  "Print ox's team-context counts for the Claude Code status bar",
 	Hidden: true,
+	// --watch and --wrap run for as long as the pane or the wrapped app does:
+	// that lifetime is not a command's latency.
+	Annotations: map[string]string{cli.AnnotationLongRunning: "flag:watch,wrap"},
 	Args: func(cmd *cobra.Command, args []string) error {
 		if wrap, _ := cmd.Flags().GetBool("wrap"); wrap {
 			return cobra.MinimumNArgs(1)(cmd, args)
@@ -120,12 +123,14 @@ row shorter and is otherwise untouched; when it exits, the row is given back.
 Turn it off with: ox config set statusline off`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if wrap, _ := cmd.Flags().GetBool("wrap"); wrap {
-			code, err := runStatuslineWrap(args)
+			code, err := runStatuslineWrap(cmd.Context(), args)
 			if err != nil {
 				return err
 			}
 			if code != 0 {
-				os.Exit(code) // the wrapped app's own exit code
+				// The wrapped app's own exit code, returned (not os.Exit) so
+				// main still drains its output pipes.
+				return &commandExitError{ExitCode: code}
 			}
 			return nil
 		}

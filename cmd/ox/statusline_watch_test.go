@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/oxactivity"
 	"github.com/sageox/ox/internal/session"
 )
@@ -134,4 +135,23 @@ func TestStatuslineWatch_IgnoresExitedChats(t *testing.T) {
 	startWorktreeRecording(t, root, codexDigestAgentID, codexDigestSessionID)
 
 	assert.Equal(t, codexDigestSessionID, resolveStatuslineSessionForDir(root))
+}
+
+// TestStatusline_LivePanesAreLongRunning: --watch and --wrap run for as long
+// as the pane or the wrapped app does. Failure prevented: a pane left open for
+// hours reported as one command's latency, while the status bar's own
+// invocations must stay measured.
+func TestStatusline_LivePanesAreLongRunning(t *testing.T) {
+	for flag, want := range map[string]bool{"watch": true, "wrap": true, "json": false, "": false} {
+		for _, name := range []string{"watch", "wrap", "json"} {
+			require.NoError(t, statuslineCmd.Flags().Set(name, "false"))
+		}
+		if flag != "" {
+			require.NoError(t, statuslineCmd.Flags().Set(flag, "true"))
+		}
+		assert.Equal(t, want, cli.IsLongRunning(statuslineCmd), "flag=%q", flag)
+	}
+	for _, name := range []string{"watch", "wrap", "json"} {
+		require.NoError(t, statuslineCmd.Flags().Set(name, "false"))
+	}
 }

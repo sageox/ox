@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -139,6 +140,46 @@ func TestConductorRunScript_StatuslineOff(t *testing.T) {
 	res := checkConductorRunScriptAt(repo, true)
 	assert.True(t, res.passed, "%+v", res)
 	assert.Empty(t, readConductorLocal(t, repo))
+
+	// Nor does doctor ask for a script by hand when the repository has run
+	// scripts of its own: the line is off, there is nothing to set up.
+	writeConductorSettings(t, repo, conductorSharedSettings, "[scripts.run.dev]\ncommand = \"pnpm dev\"\n")
+	res = checkConductorRunScriptAt(repo, true)
+	assert.True(t, res.passed, "%+v", res)
+	assert.False(t, res.warning, "%+v", res)
+	assert.Empty(t, readConductorLocal(t, repo))
+}
+
+// TestConductorRunScript_KeepsSettingsPrivate: settings.local.toml can hold
+// a coworker's environment values. Failure prevented: installing ox's run
+// script turns a 0600 file world-readable, or creates a new one that way.
+func TestConductorRunScript_KeepsSettingsPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits do not hold on Windows")
+	}
+	modeOf := func(repo string) os.FileMode {
+		info, err := os.Stat(filepath.Join(repo, ".conductor", conductorLocalSettings))
+		require.NoError(t, err)
+		return info.Mode().Perm()
+	}
+
+	private := conductorRepo(t)
+	writeConductorSettings(t, private, conductorLocalSettings, "[env]\nTOKEN = \"x\"\n")
+	local := filepath.Join(private, ".conductor", conductorLocalSettings)
+	require.NoError(t, os.Chmod(local, 0o600))
+	require.Equal(t, os.FileMode(0o600), modeOf(private), "precondition: the file starts private")
+	require.True(t, checkConductorRunScriptAt(private, true).passed)
+	assert.Contains(t, readConductorLocal(t, private), "[scripts.run.ox]")
+	assert.Equal(t, os.FileMode(0o600), modeOf(private))
+
+	fresh := conductorRepo(t)
+	require.True(t, checkConductorRunScriptAt(fresh, true).passed)
+	assert.Equal(t, os.FileMode(0o600), modeOf(fresh), "a new file is private")
+
+	shared := conductorRepo(t)
+	writeConductorSettings(t, shared, conductorLocalSettings, "# mine\n")
+	require.True(t, checkConductorRunScriptAt(shared, true).passed)
+	assert.Equal(t, os.FileMode(0o644), modeOf(shared), "a mode the coworker chose is kept")
 }
 
 // TestConductorRepoRoot_FromAWorkspaceWorktree finds the repository root, not

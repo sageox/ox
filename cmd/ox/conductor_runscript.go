@@ -170,7 +170,13 @@ func installConductorRunScript(repoRoot string) error {
 	if err := toml.Unmarshal([]byte(next), &probe); err != nil {
 		return fmt.Errorf("%s would not be valid TOML: %w", path, err)
 	}
-	if err := fileutil.AtomicWriteBytes(path, []byte(next), 0o644); err != nil {
+	// The file can hold a coworker's environment values: keep the mode they
+	// gave it, and make a new one private.
+	mode := os.FileMode(0o600)
+	if info, statErr := os.Stat(path); statErr == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := fileutil.AtomicWriteBytes(path, []byte(next), mode); err != nil {
 		return err
 	}
 	return excludeFromGit(repoRoot, ".conductor/"+conductorLocalSettings)
@@ -234,6 +240,10 @@ func checkConductorRunScriptAt(gitRoot string, fix bool) checkResult {
 	if !conductorInUse(repoRoot) {
 		return SkippedCheck(conductorRunScriptCheck, "not a Conductor repository", "")
 	}
+	// Before anything is asked of the coworker: a line turned off needs no script.
+	if !statuslineEnabled() {
+		return PassedCheck(conductorRunScriptCheck, "status line off (ox config set statusline on to show it)")
+	}
 	status, err := classifyConductorRunScript(repoRoot)
 	localPath := filepath.Join(repoRoot, ".conductor", conductorLocalSettings)
 	switch status {
@@ -246,9 +256,6 @@ func checkConductorRunScriptAt(gitRoot string, fix bool) checkResult {
 	case conductorRunScriptBlocked:
 		return WarningCheck(conductorRunScriptCheck, "not added: this repository has its own run scripts",
 			"To see ox's line in Conductor's Run pane, add to "+localPath+":\n"+conductorRunScriptBlock)
-	}
-	if !statuslineEnabled() {
-		return PassedCheck(conductorRunScriptCheck, "status line off (ox config set statusline on to show it)")
 	}
 	if !fix {
 		return WarningCheck(conductorRunScriptCheck, "ox's line is not in Conductor's Run pane",

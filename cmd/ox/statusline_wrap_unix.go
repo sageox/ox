@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -24,13 +25,12 @@ import (
 // with ox's row at the bottom of the terminal and returns its exit code.
 // Without a terminal on both ends there is no row to hold, so the command is
 // simply run.
-func runStatuslineWrap(argv []string) (int, error) {
+func runStatuslineWrap(ctx context.Context, argv []string) (int, error) {
 	if len(argv) == 0 {
 		return 2, errors.New("usage: ox statusline --wrap -- <command> [args]")
 	}
 	stdinFd, stdoutFd := int(os.Stdin.Fd()), int(os.Stdout.Fd())
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = wrappedEnv(os.Environ())
+	cmd := wrappedCommand(ctx, argv)
 	// The app's hooks tell ox which session this terminal holds (see
 	// noteWrapSession), so the row shows that session and no other.
 	sessionFile := newWrapSessionFile()
@@ -158,6 +158,30 @@ loop:
 	_, _ = io.WriteString(os.Stdout, "\x1b7\x1b[r"+fmt.Sprintf("\x1b[%d;1H\x1b[2K", rows)+"\x1b8")
 	mu.Unlock()
 	return wrappedExitCode(cmd.Wait())
+}
+
+// wrapStopGrace is how long the wrapped app has to exit after it is asked to
+// before it is killed.
+const wrapStopGrace = 5 * time.Second
+
+// wrappedCommand is the app ox wraps. When ctx ends (ox was sent SIGTERM or
+// SIGINT) the app is asked to stop too, then killed after wrapStopGrace: ox
+// must not outlive the request, nor leave the app behind holding a terminal
+// ox has not given back. Once the app exits, the caller's own cleanup runs.
+func wrappedCommand(ctx context.Context, argv []string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Env = wrappedEnv(os.Environ())
+	cmd.Cancel = func() error {
+		// In its pseudo-terminal the app leads its own process group: signal
+		// the group so its children stop with it. Run without one, it shares
+		// ox's group, and only the app itself is signaled.
+		if pgid, err := syscall.Getpgid(cmd.Process.Pid); err == nil && pgid == cmd.Process.Pid {
+			return syscall.Kill(-pgid, syscall.SIGTERM)
+		}
+		return cmd.Process.Signal(syscall.SIGTERM)
+	}
+	cmd.WaitDelay = wrapStopGrace
+	return cmd
 }
 
 // wrappedEnv is the environment the wrapped app runs in: ox's own, with
