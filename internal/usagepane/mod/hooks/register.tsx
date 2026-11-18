@@ -36,17 +36,20 @@
 import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, Register } from 'claude-code'
 
-import type { FlowEvent, FlowState, Statusline, UsageReport } from '../types'
+import type { FiledAttachments, FlowEvent, FlowState, Statusline, UsageReport } from '../types'
 import { attachEvents, classifyAttachment, classifyBash, classifyMcp, EMPTY_FLOW, eventsFor, finishEvent, promptEvents, startEvent } from './flow'
 import type { FlowAttachment, FlowStart } from './flow'
 import {
   arrived,
+  attachmentKey,
   drawn,
+  fileAttachment,
   finishOf,
   FLOW_KEY,
   flowMode,
   flowStored,
   isMcpName,
+  isReplay,
   laneWidth,
   newBinder,
   parseFlowArg,
@@ -98,6 +101,8 @@ const report = atom({ plugin: 'ox-cli-brief-pane', key: 'report' } as const, nul
 const status = atom({ plugin: 'ox-cli-brief-pane', key: 'status' } as const, INITIAL_STATUS, { shape: 'status-2' })
 // flow-1: FlowState, the session's flow events (hooks/flow.ts).
 const flow = atom({ plugin: 'ox-cli-brief-pane', key: 'flow' } as const, EMPTY_FLOW, { shape: 'flow-1' })
+// filed-1: FiledAttachments, the hook attachments already filed under a prompt.
+const filed = atom({ plugin: 'ox-cli-brief-pane', key: 'filed' } as const, {} as FiledAttachments, { shape: 'filed-1' })
 
 const TITLE = 'ox session report'
 const USAGE = '/ox-session-report [off|refresh|flow on|off|still]'
@@ -301,6 +306,9 @@ const FLOW_CACHE_MS = 5_000
 let flowCache: { mode: FlowMode; at: number } | null = null
 const settling = new Map<string, { cancel: () => void }>()
 let binder = newBinder<FlowAttachment[]>()
+// How many times each attachment has been raised to this module instance
+// (see flowwire.ts, isReplay). A reload starts it over; `filed` does not.
+const raised = new Map<string, number>()
 
 async function modeOf($: EngineInterface, now: number): Promise<FlowMode> {
   if (flowCache !== null && now - flowCache.at < FLOW_CACHE_MS) {
@@ -471,6 +479,7 @@ function resetFlow() {
   laneTicker = null
   lanes.clear()
   binder = newBinder<FlowAttachment[]>()
+  raised.clear()
   flowCache = null
 }
 
@@ -680,6 +689,16 @@ export const register: Register = on => {
       if (attachments.length === 0) {
         return out
       }
+      // After a reload or a resume the engine asks about every earlier
+      // attachment again. One already filed under its own prompt is not the
+      // next prompt's context.
+      const key = attachmentKey(out.text, e.origin.event)
+      const nth = (raised.get(key) ?? 0) + 1
+      raised.set(key, nth)
+      if (isReplay((await read($, filed))[key], nth)) {
+        return out
+      }
+      await update($, filed, f => fileAttachment(f, key, nth))
       const now = await $.clock.now()
       if ((await modeOf($, now)) === 'off') {
         return out

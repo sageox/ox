@@ -177,12 +177,21 @@ export type FlowState = {
   order: string[]
 }
 
+/**
+ * How many times each hook attachment (by attachmentKey) has been filed under
+ * a prompt this session. The engine asks about every earlier attachment again
+ * after a plugin reload or a resume; this is how one already filed is told
+ * from one that is new.
+ */
+export type FiledAttachments = Record<string, number>
+
 declare module 'claude-code' {
   interface PluginState {
     'ox-cli-brief-pane': {
       report: Shaped<UsageReport | null>
       status: Shaped<UsageStatus>
       flow: Shaped<FlowState>
+      filed: Shaped<FiledAttachments>
     }
   }
 }

@@ -176,6 +176,44 @@ export function finishOf(ran: RanLike, start: FlowStart): FinishFields {
 // never claim. Before any submit has been seen (a reload mid-turn), the
 // first composer row drawn claims, so nothing is stranded.
 
+// The engine asks `prompt.attachment` about each attachment once per process,
+// and again about ALL of a conversation's earlier attachments after a plugin
+// reload or a resume, as the next request carries them. Those are not this
+// prompt's news: the session-start Team Context would be drawn under whatever
+// prompt came next. So each attachment filed is counted by its text, in state
+// that outlives a reload (FiledAttachments), and each one raised is counted
+// in the module: the nth raise of a text is a replay while n filings of it
+// are already on record.
+
+/** MAX_FILED caps FiledAttachments; the oldest keys go first. */
+export const MAX_FILED = 300
+
+/** attachmentKey: a short key for one attachment's text from one hook event. */
+export function attachmentKey(text: string, event: string): string {
+  let h = 5381
+  for (let i = 0; i < text.length; i++) {
+    h = ((h << 5) + h + text.charCodeAt(i)) >>> 0
+  }
+  return `${event}:${text.length}:${h.toString(36)}`
+}
+
+/** isReplay: whether the nth raise of an attachment was already filed (`filed` times) before. */
+export function isReplay(filed: number | undefined, nth: number): boolean {
+  return nth <= (filed ?? 0)
+}
+
+/** fileAttachment: `filed` with `key` filed `nth` times, capped at MAX_FILED keys. */
+export function fileAttachment(filed: Readonly<Record<string, number>>, key: string, nth: number): Record<string, number> {
+  const next: Record<string, number> = { ...filed }
+  delete next[key] // re-added last: the newest keys are the ones kept
+  next[key] = Math.max(nth, filed[key] ?? 0)
+  const keys = Object.keys(next)
+  for (const old of keys.slice(0, Math.max(0, keys.length - MAX_FILED))) {
+    delete next[old]
+  }
+  return next
+}
+
 export type Binder<T> = {
   /** Rows (message ids) seen drawn, so a redraw never claims. */
   seen: Set<string>

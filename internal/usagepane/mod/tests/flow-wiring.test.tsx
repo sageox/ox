@@ -10,7 +10,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { ANIM_MS } from '../hooks/scene'
 import { TRACK } from '../hooks/textlane'
-import { arrived, drawn, finishOf, laneWidth, LANE_DEFAULT_PX, LANE_MAX_PX, LANE_MIN_PX, newBinder, settleDelay, startOf, submitted } from '../hooks/flowwire'
+import { arrived, attachmentKey, drawn, fileAttachment, finishOf, isReplay, laneWidth, MAX_FILED, LANE_DEFAULT_PX, LANE_MAX_PX, LANE_MIN_PX, newBinder, settleDelay, startOf, submitted } from '../hooks/flowwire'
 
 const PLUGIN = 'ox-cli-brief-pane'
 const SURFACES = ['desktop', 'vscode'] as const
@@ -395,6 +395,41 @@ describe('the strip under a prompt that carried team context in', () => {
     await term.unmount()
   })
 
+  // Failure prevented: after `/reload-plugins` or a resume the engine asks
+  // about every earlier attachment again, and the session-start Team Context
+  // (already drawn under the first prompt) appears under whatever prompt is
+  // sent next, with no ox call anywhere near it.
+  test('an attachment the engine asks about again after a reload is not the next prompt\'s context', async ($, on) => {
+    mockEngine(on)
+    const hook = (text: string, event: string) => $.prompt.attachment({ type: 'hook_additional_context', text, origin: { kind: 'hook', event } } as never)
+
+    await $.prompt.submit({ text: 'one', wait: false } as never)
+    await hook(PRIME, 'SessionStart')
+    const one = await mountPrompt($, 'desktop', 'r1')
+    expect(String((await one.find({ type: 'Svg' }))?.props.alt)).toMatch(/team context/)
+
+    // A reload: the module's own memory starts over; the session's state stays.
+    await $.session.end({} as never)
+
+    await $.prompt.submit({ text: 'two', wait: false } as never)
+    await hook(PRIME, 'SessionStart') // asked again, as the next request carries it
+    const two = await mountPrompt($, 'desktop', 'r2')
+    expect(await two.find({ type: 'Svg' })).toBeUndefined()
+
+    // What is new with this prompt still draws under it...
+    await hook(RECALL, 'UserPromptSubmit')
+    expect(String((await two.find({ type: 'Svg' }))?.props.alt)).toBe('with this prompt: 2 ledger matches')
+
+    // ...and so does the very same recall arriving fresh with a later prompt.
+    await $.prompt.submit({ text: 'three', wait: false } as never)
+    await hook(RECALL, 'UserPromptSubmit')
+    const three = await mountPrompt($, 'desktop', 'r3')
+    expect(String((await three.find({ type: 'Svg' }))?.props.alt)).toBe('with this prompt: 2 ledger matches')
+    for (const ui of [one, two, three]) {
+      await ui.unmount()
+    }
+  })
+
   test('the attachment text the model reads passes through untouched', async ($, on) => {
     mockEngine(on)
     const out = await $.prompt.attachment({ type: 'hook_additional_context', text: MURMURS, origin: { kind: 'hook', event: 'UserPromptSubmit' } } as never)
@@ -537,6 +572,28 @@ describe('flowwire helpers', () => {
     expect(settleDelay([ev(0)], ANIM_MS + 1)).toBeNull()
     expect(settleDelay([ev(1000)], 1000)).toBe(ANIM_MS + 50)
     expect(settleDelay([ev(0), ev(1000)], 1500)).toBe(ANIM_MS - 500 + 50)
+  })
+
+  test('replays: the nth raise of an attachment is a replay while n filings are on record', () => {
+    const key = attachmentKey('<ox-prime>…</ox-prime>', 'SessionStart')
+    expect(key).toBe(attachmentKey('<ox-prime>…</ox-prime>', 'SessionStart'))
+    expect(key).not.toBe(attachmentKey('<ox-prime>…</ox-prime>', 'PreCompact'))
+    expect(key).not.toBe(attachmentKey('<ox-prime>….</ox-prime>', 'SessionStart'))
+    expect(isReplay(undefined, 1)).toBe(false)
+    let filed = fileAttachment({}, key, 1)
+    expect(isReplay(filed[key], 1)).toBe(true)
+    expect(isReplay(filed[key], 2)).toBe(false)
+    filed = fileAttachment(filed, key, 2)
+    expect(filed[key]).toBe(2)
+    expect(fileAttachment(filed, key, 1)[key]).toBe(2)
+    // Capped: the oldest keys go, the newest stay.
+    let many: Record<string, number> = {}
+    for (let i = 0; i < MAX_FILED + 5; i++) {
+      many = fileAttachment(many, `k${i}`, 1)
+    }
+    expect(Object.keys(many).length).toBe(MAX_FILED)
+    expect(many.k0).toBeUndefined()
+    expect(many[`k${MAX_FILED + 4}`]).toBe(1)
   })
 
   test('the binder: both arrival orders, redraws and repeats', () => {
