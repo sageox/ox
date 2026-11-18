@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -98,6 +99,30 @@ func TestLinkedOpenCodePluginCanBeRepaired(t *testing.T) {
 	}
 }
 
+func TestProjectOpenCodeRepairLeavesExternalPluginUnchanged(t *testing.T) {
+	params := adapterprotocol.HookParams{RepoRoot: t.TempDir(), Scope: "project"}
+	target := filepath.Join(t.TempDir(), "shared.ts")
+	if err := os.WriteFile(target, []byte(legacyOpenCodePlugin), 0644); err != nil {
+		t.Fatal(err)
+	}
+	path := resolvePluginPath(params.RepoRoot, params.Scope)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if _, err := handleInstallHooks(params); err == nil {
+		t.Error("project hook repair accepted a linked plugin outside the checkout")
+	}
+	if content, err := os.ReadFile(target); err != nil || string(content) != legacyOpenCodePlugin {
+		t.Fatalf("external plugin changed: %v", err)
+	}
+}
+
 func TestOpenCodePluginCheckReportsLinkLookupFailure(t *testing.T) {
 	params := adapterprotocol.HookParams{RepoRoot: t.TempDir(), Scope: "project"}
 	path := resolvePluginPath(params.RepoRoot, params.Scope)
@@ -183,16 +208,26 @@ func checkLegacyPluginRepair(t *testing.T, crlf bool) {
 	if !status.HasOwnedHooks {
 		t.Fatal("legacy hook must remain visible to bulk uninstall")
 	}
-	before, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
+	var before *os.File
+	if runtime.GOOS != "windows" {
+		before, err = os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer before.Close()
 	}
 	if _, err := handleInstallHooks(params); err != nil {
 		t.Fatal(err)
 	}
-	after, err := os.Stat(path)
-	if err != nil || !os.SameFile(before, after) {
-		t.Fatalf("repair should retain the original file and its ownership: %v", err)
+	if before != nil {
+		content, err := io.ReadAll(before)
+		if err != nil || string(content) != legacy {
+			t.Fatalf("an open reader should still see the complete original plugin: %v", err)
+		}
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != openCodePluginTemplate {
+		t.Fatalf("a new reader should see the complete replacement: %v", err)
 	}
 	status, err = handleCheckHooks(params)
 	if err != nil || !status.Installed {

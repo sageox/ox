@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -93,7 +94,7 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 		return nil, fmt.Errorf("read OpenCode plugin: %w", err)
 	}
 	if plugin.content != openCodePluginTemplate {
-		if err := writeOpenCodePlugin(plugin); err != nil {
+		if err := writeOpenCodePlugin(openCodeHookRoot(p), plugin); err != nil {
 			return nil, fmt.Errorf("write OpenCode plugin: %w", err)
 		}
 	}
@@ -104,15 +105,44 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 	}, nil
 }
 
-func writeOpenCodePlugin(plugin openCodePlugin) error {
+func writeOpenCodePlugin(rootPath string, plugin openCodePlugin) error {
 	if plugin.linked && plugin.content != legacyOpenCodePlugin {
 		return errors.New("linked OpenCode plugin is missing or is not a generated hook")
 	}
-	if plugin.info == nil {
-		if err := os.MkdirAll(filepath.Dir(plugin.path), 0755); err != nil {
+	rootPath, err := filepath.EvalSymlinks(rootPath)
+	if err != nil {
+		return err
+	}
+	rootPath, err = filepath.Abs(rootPath)
+	if err != nil {
+		return err
+	}
+	target := plugin.path
+	if plugin.info != nil {
+		target, err = filepath.EvalSymlinks(target)
+		if err != nil {
 			return err
 		}
-		f, err := os.OpenFile(plugin.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	}
+	target, err = filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(rootPath, target)
+	if err != nil || !filepath.IsLocal(rel) {
+		return fmt.Errorf("OpenCode plugin is outside the hook scope: %s", plugin.path)
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	dir, name := filepath.Dir(rel), filepath.Base(rel)
+	if plugin.info == nil {
+		if err := root.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+		f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 		if err != nil {
 			return err
 		}
@@ -122,24 +152,56 @@ func writeOpenCodePlugin(plugin openCodePlugin) error {
 	if !plugin.info.Mode().IsRegular() || plugin.info.Mode().Perm()&0222 == 0 {
 		return fmt.Errorf("expected a writable regular OpenCode plugin file at %s", plugin.path)
 	}
-	// Keep the existing inode so repairs retain file ownership and access.
-	f, err := openPluginFile(plugin.path, os.O_WRONLY)
+	parent, err := root.OpenRoot(dir)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	opened, err := f.Stat()
+	defer parent.Close()
+	f, err := openRootPluginFile(parent, name, os.O_WRONLY)
 	if err != nil {
+		return err
+	}
+	opened, err := f.Stat()
+	if err := errors.Join(err, f.Close()); err != nil {
 		return err
 	}
 	if !os.SameFile(plugin.info, opened) {
 		return fmt.Errorf("OpenCode plugin changed while being checked: %s", plugin.path)
 	}
-	n, err := f.WriteString(openCodePluginTemplate)
+	return replaceOpenCodePlugin(parent, name, opened)
+}
+
+func replaceOpenCodePlugin(parent *os.Root, name string, existing os.FileInfo) error {
+	tempName := ".ox-plugin-" + rand.Text()
+	tmp, err := parent.OpenFile(tempName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}
-	return f.Truncate(int64(n))
+	defer func() { _ = parent.Remove(tempName) }()
+	defer tmp.Close()
+	if err := preservePluginOwner(tmp, existing); err != nil {
+		return err
+	}
+	if _, err := tmp.WriteString(openCodePluginTemplate); err != nil {
+		return err
+	}
+	if err := tmp.Chmod(existing.Mode().Perm()); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	current, err := parent.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(existing, current) {
+		return fmt.Errorf("OpenCode plugin changed during repair: %s", name)
+	}
+	return parent.Rename(tempName, name)
 }
 
 func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooksResponse, error) {
@@ -176,13 +238,22 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 }
 
 func resolvePluginPath(repoRoot, scope string) string {
+	root := openCodeHookRoot(adapterprotocol.HookParams{RepoRoot: repoRoot, Scope: scope})
 	if scope == "user" {
+		return filepath.Join(root, openCodeUserPath, openCodePluginFileName)
+	}
+	return filepath.Join(root, openCodeProjectPath, openCodePluginFileName)
+}
+
+func openCodeHookRoot(p adapterprotocol.HookParams) string {
+	if p.Scope == "user" {
 		home, _ := os.UserHomeDir()
-		return filepath.Join(home, openCodeUserPath, openCodePluginFileName)
+		return home
 	}
-	if repoRoot == "" {
+	if p.RepoRoot == "" {
 		log.Println("WARN: resolvePluginPath called with empty repoRoot, falling back to cwd")
-		repoRoot, _ = os.Getwd()
+		cwd, _ := os.Getwd()
+		return cwd
 	}
-	return filepath.Join(repoRoot, openCodeProjectPath, openCodePluginFileName)
+	return p.RepoRoot
 }
