@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -40,6 +41,12 @@ var fetchPublicPrime = func(ctx context.Context, projectRoot string) (*api.Publi
 	if !ok {
 		return nil, nil
 	}
+	return fetchPublicPrimeForRepo(ctx, projectRoot, owner, name)
+}
+
+// fetchPublicPrimeForRepo asks SageOx about one named GitHub repo. A seam so
+// tests can drive `ox init`'s team suggestion without a network.
+var fetchPublicPrimeForRepo = func(ctx context.Context, projectRoot, owner, name string) (*api.PublicPrimeResponse, error) {
 	ep := endpoint.GetForProject(projectRoot)
 	client := api.NewRepoClientWithEndpoint(ep).WithTimeout(publicPrimeTimeout)
 	// Signed in: the bundle also links each plan. Signed out, or a token that
@@ -136,7 +143,12 @@ func renderPublicPrime(p *api.PublicPrimeResponse, loc *time.Location) string {
 	}
 	switch p.Viewer {
 	case api.PublicPrimeViewerMember:
-		fmt.Fprintf(&b, "You're a member of %s. Run `ox init` here for full priming.\n", project)
+		if team := p.MemberTeam(); team != nil && teamIDPattern.MatchString(team.ID) {
+			// The id, not the slug: it never changes, and --team accepts it.
+			fmt.Fprintf(&b, "You're a member of %s. Run `ox init --team %s` here to link this clone to the project's team, so your work here counts as the project's.\n", project, team.ID)
+		} else {
+			fmt.Fprintf(&b, "You're a member of %s. Run `ox init` here for full priming.\n", project)
+		}
 	case api.PublicPrimeViewerSignedIn:
 		b.WriteString("Sessions are for members only.\n")
 	default:
@@ -144,6 +156,10 @@ func renderPublicPrime(p *api.PublicPrimeResponse, loc *time.Location) string {
 	}
 	return b.String()
 }
+
+// teamIDPattern guards the team id before it goes into a command an AI
+// coworker may run: a server value, but never pasted unchecked.
+var teamIDPattern = regexp.MustCompile(`^team_[a-z0-9]+$`)
 
 func writePublicPrimeLine(b *strings.Builder, label, text, url string) {
 	text = oneLine(text)

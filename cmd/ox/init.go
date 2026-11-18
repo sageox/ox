@@ -498,7 +498,14 @@ func runInit() error {
 			if existingCfg, cfgErr := config.LoadProjectConfig(gitRoot); cfgErr == nil && existingCfg != nil {
 				currentTeamID = existingCfg.TeamID
 			}
-			selectedTeamID, selectedTeamName, err = selectTeam(reposResp.TeamMembershipsFromRepos(), currentTeamID)
+			// A fresh clone of an open-source project the caller is a member
+			// of: offer that team, so this clone joins the repo the project
+			// already registered instead of minting a new one elsewhere.
+			var suggestedTeamID string
+			if currentTeamID == "" {
+				suggestedTeamID = suggestOpenSourceTeam(context.Background(), gitRoot, reposResp.TeamMembershipsFromRepos())
+			}
+			selectedTeamID, selectedTeamName, err = selectTeamWithSuggestion(reposResp.TeamMembershipsFromRepos(), currentTeamID, suggestedTeamID)
 			if err != nil {
 				return fmt.Errorf("team selection canceled: %w", err)
 			}
@@ -2808,6 +2815,17 @@ func teamSortKey(t api.TeamMembership) string {
 // Returns the selected team ID, team name (may be empty), or error if
 // canceled or if no interactive input was available to choose from.
 func selectTeam(teams []api.TeamMembership, currentTeamID string) (string, string, error) {
+	return selectTeamWithSuggestion(teams, currentTeamID, "")
+}
+
+// selectTeamWithSuggestion is selectTeam with one more default: when the repo
+// has no current team, suggestedTeamID (the open-source project's team, see
+// suggestOpenSourceTeam) is pre-selected and marked. The current team always
+// wins; the person still confirms or picks another row.
+func selectTeamWithSuggestion(teams []api.TeamMembership, currentTeamID, suggestedTeamID string) (string, string, error) {
+	if currentTeamID != "" {
+		suggestedTeamID = ""
+	}
 	if len(teams) == 0 {
 		return "", "", fmt.Errorf("no teams available")
 	}
@@ -2855,6 +2873,10 @@ func selectTeam(teams []api.TeamMembership, currentTeamID string) (string, strin
 			label += "  (current)"
 			defaultIdx = i
 		}
+		if suggestedTeamID != "" && team.ID == suggestedTeamID {
+			label += "  (this project's team)"
+			defaultIdx = i
+		}
 		options[i] = label
 	}
 	options[len(teams)] = "+ Create new team"
@@ -2865,6 +2887,9 @@ func selectTeam(teams []api.TeamMembership, currentTeamID string) (string, strin
 	selected, err := cli.SelectOneRequired("Team:", options, defaultIdx)
 	if err != nil {
 		if errors.Is(err, cli.ErrNoInteractiveInput) {
+			if suggestedTeamID != "" {
+				return "", "", fmt.Errorf("cannot choose a team without interactive input — pass --team %s to link this clone to the project's team, or --team <id> for another (run 'ox team list' to see available teams)", suggestedTeamID)
+			}
 			return "", "", fmt.Errorf("cannot choose a team without interactive input — pass --team <id> (run 'ox team list' to see available teams)")
 		}
 		return "", "", err
@@ -2978,4 +3003,51 @@ func confirmContinueWithoutTeam(currentEP string) error {
 		return fmt.Errorf("team selection canceled")
 	}
 	return nil
+}
+
+// openSourceSuggestTimeout bounds the team suggestion: it runs once, before
+// the picker, and a miss (most repos) must never hold up ox init.
+const openSourceSuggestTimeout = 1500 * time.Millisecond
+
+// suggestOpenSourceTeam returns the team of the open-source project this
+// clone belongs to, when SageOx says the caller is a member of it and it is
+// one of teams. "" otherwise: not on SageOx, not a member, offline, an older
+// server. Asks about origin, then upstream (a contributor's fork clone has
+// the project on upstream).
+//
+// A shallow clone gets no suggestion: its salted remote hashes are built on
+// the shallow boundary instead of the real first commit, so the server
+// can't match the project's repo and picking the team would mint a duplicate
+// repo inside it. It gets a hint to unshallow instead.
+func suggestOpenSourceTeam(ctx context.Context, gitRoot string, teams []api.TeamMembership) string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, openSourceSuggestTimeout)
+	defer cancel()
+
+	var team *api.PublicPrimeTeam
+	for _, lookup := range []func(string) (string, string, bool){repotools.GitHubOrigin, repotools.GitHubUpstream} {
+		owner, name, ok := lookup(gitRoot)
+		if !ok {
+			continue
+		}
+		bundle, err := fetchPublicPrimeForRepo(ctx, gitRoot, owner, name)
+		if err != nil {
+			slog.Debug("open-source team suggestion unavailable", "error", err)
+			return ""
+		}
+		if team = bundle.MemberTeam(); team != nil {
+			break
+		}
+	}
+	if team == nil || !slices.ContainsFunc(teams, func(t api.TeamMembership) bool { return t.ID == team.ID }) {
+		return ""
+	}
+	if repotools.IsShallowClone(gitRoot) {
+		cli.PrintWarning(fmt.Sprintf("This is a shallow clone of a project you're on (team %s), so ox can't match it to the project's repo. Run %s first, then re-run %s.",
+			team.ID, cli.StyleCommand.Render("git fetch --unshallow"), cli.StyleCommand.Render("ox init")))
+		return ""
+	}
+	return team.ID
 }

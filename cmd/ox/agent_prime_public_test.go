@@ -72,6 +72,19 @@ func TestRenderPublicPrime_ViewerFooters(t *testing.T) {
 	got := renderPublicPrime(member, time.UTC)
 	assert.Contains(t, got, "You're a member of Readest. Run `ox init` here for full priming.\n")
 
+	// A server that names the team: the member is told the exact command
+	// that links this clone to it.
+	member.Team = &api.PublicPrimeTeam{ID: "team_readestproj01", Slug: "readest"}
+	got = renderPublicPrime(member, time.UTC)
+	assert.Contains(t, got, "You're a member of Readest. Run `ox init --team team_readestproj01` here to link this clone to the project's team")
+	assert.NotContains(t, got, "for full priming")
+
+	// A team id that isn't one is never pasted into a command.
+	member.Team = &api.PublicPrimeTeam{ID: "team_x; rm -rf ~"}
+	got = renderPublicPrime(member, time.UTC)
+	assert.Contains(t, got, "Run `ox init` here for full priming.\n")
+	assert.NotContains(t, got, "rm -rf")
+
 	signedIn := goldenPublicPrime(t)
 	signedIn.Viewer = api.PublicPrimeViewerSignedIn
 	signedIn.Plans[0].URL = "https://sageox.test/plan/pln_1"
