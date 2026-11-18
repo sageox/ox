@@ -78,6 +78,21 @@ func ValidateDraftSessionName(sessionName string) error {
 	return nil
 }
 
+// validDraftSessionEntries filters the untrusted ledger directory entries
+// before any metadata is read. Keeping this gate separate makes it testable on
+// platforms (such as Windows) that cannot create filenames containing Git
+// wildcards like '*'.
+func validDraftSessionEntries(entries []os.DirEntry) []os.DirEntry {
+	valid := make([]os.DirEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || ValidateDraftSessionName(entry.Name()) != nil {
+			continue
+		}
+		valid = append(valid, entry)
+	}
+	return valid
+}
+
 // FindOrphanedDrafts returns the names of ledger draft placeholders that have no
 // live or recoverable recording behind them, oldest first. cacheDirs are the
 // local cache session directories to consult for an in-flight recording.
@@ -108,14 +123,8 @@ func FindOrphanedDrafts(ledgerPath string, cacheDirs []string, localUserID strin
 	}
 	var found []candidate
 
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
+	for _, entry := range validDraftSessionEntries(entries) {
 		name := entry.Name()
-		if err := ValidateDraftSessionName(name); err != nil {
-			continue
-		}
 		meta, metaErr := lfs.ReadSessionMeta(filepath.Join(sessionsDir, name))
 		// Fail safe: an unreadable meta.json is not a draft we are willing to
 		// delete. Some other check owns diagnosing it.

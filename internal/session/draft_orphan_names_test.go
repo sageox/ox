@@ -1,6 +1,7 @@
 package session
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +11,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type namedDraftDir string
+
+func (d namedDraftDir) Name() string               { return string(d) }
+func (d namedDraftDir) IsDir() bool                { return true }
+func (d namedDraftDir) Type() fs.FileMode          { return fs.ModeDir }
+func (d namedDraftDir) Info() (fs.FileInfo, error) { return nil, os.ErrNotExist }
 
 // Ledger directory names arrive from teammates by git. Every name ox
 // generates must pass; separators, control characters, and the wildcard and
@@ -40,4 +48,14 @@ func TestFindOrphanedDrafts_SkipsNonconformingNames(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"2026-01-01T00-00-localuser-OxOrphan"}, orphans)
+}
+
+func TestDraftDiscoveryFiltersMalformedCandidates(t *testing.T) {
+	valid := "2026-01-01T00-00-localuser-OxOrphan"
+	malformed := "2026-01-01T00-00-localuser*-OxOrphan"
+	entries := []os.DirEntry{namedDraftDir(valid), namedDraftDir(malformed)}
+
+	filtered := validDraftSessionEntries(entries)
+	require.Len(t, filtered, 1, "a malformed candidate with the matching agent suffix must still be excluded")
+	assert.Equal(t, valid, filtered[0].Name())
 }

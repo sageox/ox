@@ -162,6 +162,7 @@ func TestFindOrphanedDrafts_OnlyReapsTrulyAbandoned(t *testing.T) {
 				require.NoError(t, os.MkdirAll(dir, 0755))
 				require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
 					Version: "1.0", SessionName: name, SessionID: draftTestSessionID,
+					UserID: "test-user", AgentID: "OxOrph1",
 					CreatedAt: time.Now().Add(-120 * time.Hour), Draft: true,
 					Files: map[string]lfs.FileRef{},
 				}))
