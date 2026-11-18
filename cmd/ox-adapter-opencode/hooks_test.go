@@ -66,6 +66,55 @@ func TestLinkedOpenCodePluginCanBeUninstalled(t *testing.T) {
 	}
 }
 
+func TestLinkedOpenCodePluginCanBeRepaired(t *testing.T) {
+	params := adapterprotocol.HookParams{RepoRoot: t.TempDir(), Scope: "project"}
+	target := filepath.Join(params.RepoRoot, "shared-plugin.ts")
+	if err := os.WriteFile(target, []byte(legacyOpenCodePlugin), 0640); err != nil {
+		t.Fatal(err)
+	}
+	path := resolvePluginPath(params.RepoRoot, params.Scope)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	status, err := handleCheckHooks(params)
+	if err != nil || status.Installed || !status.HasOwnedHooks {
+		t.Fatalf("linked legacy hook should require repair: %+v, %v", status, err)
+	}
+	if _, err := handleInstallHooks(params); err != nil {
+		t.Fatal(err)
+	}
+	status, err = handleCheckHooks(params)
+	if err != nil || !status.Installed {
+		t.Fatalf("linked hook should be healthy after repair: %+v, %v", status, err)
+	}
+	if link, err := os.Readlink(path); err != nil || link != target {
+		t.Fatalf("plugin link changed: %q, %v", link, err)
+	}
+}
+
+func TestOpenCodePluginCheckReportsLinkLookupFailure(t *testing.T) {
+	params := adapterprotocol.HookParams{RepoRoot: t.TempDir(), Scope: "project"}
+	path := resolvePluginPath(params.RepoRoot, params.Scope)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Base(path), path); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if _, err := handleCheckHooks(params); err == nil {
+		t.Fatal("hook check hid a linked plugin lookup error")
+	}
+}
+
 func TestInstalledOpenCodePluginPrimesOnSessionCreated(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -134,8 +183,16 @@ func checkLegacyPluginRepair(t *testing.T, crlf bool) {
 	if !status.HasOwnedHooks {
 		t.Fatal("legacy hook must remain visible to bulk uninstall")
 	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := handleInstallHooks(params); err != nil {
 		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("repair should retain the original file and its ownership: %v", err)
 	}
 	status, err = handleCheckHooks(params)
 	if err != nil || !status.Installed {

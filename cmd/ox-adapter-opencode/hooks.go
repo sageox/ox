@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
@@ -37,89 +36,66 @@ export const OxPrimePlugin: Plugin = async ({ $, directory }) => {
 // Older ox versions wrote the same plugin without OpenCode's shell tag.
 var legacyOpenCodePlugin = strings.Replace(openCodePluginTemplate, "await $", "await ", 1)
 
-// readOpenCodePlugin only needs enough bytes to compare generated templates.
-// A larger regular file is a custom plugin and cannot equal either template.
-func readOpenCodePlugin(path string) (string, os.FileInfo, error) {
+type openCodePlugin struct {
+	path    string
+	linked  bool
+	info    os.FileInfo
+	content string
+}
+
+// readOpenCodePlugin reads only enough bytes to recognize generated templates.
+func readOpenCodePlugin(path string) (openCodePlugin, error) {
+	plugin := openCodePlugin{path: path}
 	info, err := os.Lstat(path)
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		plugin.linked = true
+		plugin.path, err = filepath.EvalSymlinks(path)
+		if err == nil {
+			info, err = os.Lstat(plugin.path)
+		}
+	}
 	if errors.Is(err, os.ErrNotExist) {
-		return "", nil, nil
+		return plugin, nil
 	}
 	if err != nil {
-		return "", nil, err
+		return plugin, err
 	}
-	if !info.Mode().IsRegular() {
-		return "", info, nil
-	}
+	plugin.info = info
 	limit := int64(len(openCodePluginTemplate) + strings.Count(openCodePluginTemplate, "\n"))
-	if info.Size() > limit {
-		return "", info, nil
+	if !info.Mode().IsRegular() || info.Size() > limit {
+		return plugin, nil
 	}
-	f, err := openPluginFile(path, os.O_RDONLY)
+	f, err := openPluginFile(plugin.path, os.O_RDONLY)
 	if err != nil {
-		return "", nil, err
+		return plugin, err
 	}
 	defer f.Close()
 	opened, err := f.Stat()
 	if err != nil {
-		return "", nil, err
+		return plugin, err
 	}
 	if !os.SameFile(info, opened) || !opened.Mode().IsRegular() {
-		return "", nil, fmt.Errorf("OpenCode plugin changed while being checked: %s", path)
+		return plugin, fmt.Errorf("OpenCode plugin changed while being checked: %s", path)
 	}
 	data, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
-		return "", nil, err
+		return plugin, err
 	}
-	return strings.ReplaceAll(string(data), "\r\n", "\n"), info, nil
+	plugin.content = strings.ReplaceAll(string(data), "\r\n", "\n")
+	return plugin, nil
 }
 
 func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallHooksResponse, error) {
 	pluginPath := resolvePluginPath(p.RepoRoot, p.Scope)
 
-	// check if already installed with same content
-	existing, info, err := readOpenCodePlugin(pluginPath)
+	plugin, err := readOpenCodePlugin(pluginPath)
 	if err != nil {
 		return nil, fmt.Errorf("read OpenCode plugin: %w", err)
 	}
-	if existing == openCodePluginTemplate {
-		return &adapterprotocol.InstallHooksResponse{
-			Installed:    true,
-			FilesWritten: []string{pluginPath},
-		}, nil
-	}
-
-	perm := os.FileMode(0644)
-	if info != nil {
-		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("expected a regular OpenCode plugin file at %s", pluginPath)
+	if plugin.content != openCodePluginTemplate {
+		if err := writeOpenCodePlugin(plugin); err != nil {
+			return nil, fmt.Errorf("write OpenCode plugin: %w", err)
 		}
-		perm = info.Mode().Perm()
-		if perm&0222 == 0 {
-			return nil, fmt.Errorf("OpenCode plugin is read-only: %s", pluginPath)
-		}
-		// Check write access before atomic replacement. Rename alone only
-		// checks directory permissions and can bypass the file's permissions.
-		f, err := openPluginFile(pluginPath, os.O_WRONLY)
-		if err != nil {
-			return nil, fmt.Errorf("open existing OpenCode plugin for writing: %w", err)
-		}
-		opened, err := f.Stat()
-		_ = f.Close()
-		if err != nil {
-			return nil, fmt.Errorf("stat existing OpenCode plugin: %w", err)
-		}
-		if !os.SameFile(info, opened) {
-			return nil, fmt.Errorf("OpenCode plugin changed while being checked: %s", pluginPath)
-		}
-	}
-
-	dir := filepath.Dir(pluginPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create plugin directory: %w", err)
-	}
-
-	if err := fileutil.AtomicWriteBytes(pluginPath, []byte(openCodePluginTemplate), perm); err != nil {
-		return nil, fmt.Errorf("failed to write plugin file: %w", err)
 	}
 
 	return &adapterprotocol.InstallHooksResponse{
@@ -128,29 +104,58 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 	}, nil
 }
 
+func writeOpenCodePlugin(plugin openCodePlugin) error {
+	if plugin.linked && plugin.content != legacyOpenCodePlugin {
+		return errors.New("linked OpenCode plugin is missing or is not a generated hook")
+	}
+	if plugin.info == nil {
+		if err := os.MkdirAll(filepath.Dir(plugin.path), 0755); err != nil {
+			return err
+		}
+		f, err := os.OpenFile(plugin.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+		if err != nil {
+			return err
+		}
+		_, err = f.WriteString(openCodePluginTemplate)
+		return errors.Join(err, f.Close())
+	}
+	if !plugin.info.Mode().IsRegular() || plugin.info.Mode().Perm()&0222 == 0 {
+		return fmt.Errorf("expected a writable regular OpenCode plugin file at %s", plugin.path)
+	}
+	// Keep the existing inode so repairs retain file ownership and access.
+	f, err := openPluginFile(plugin.path, os.O_WRONLY)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(plugin.info, opened) {
+		return fmt.Errorf("OpenCode plugin changed while being checked: %s", plugin.path)
+	}
+	n, err := f.WriteString(openCodePluginTemplate)
+	if err != nil {
+		return err
+	}
+	return f.Truncate(int64(n))
+}
+
 func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooksResponse, error) {
 	pluginPath := resolvePluginPath(p.RepoRoot, p.Scope)
 
-	content, info, err := readOpenCodePlugin(pluginPath)
+	plugin, err := readOpenCodePlugin(pluginPath)
 	if err != nil {
 		return nil, fmt.Errorf("read OpenCode plugin: %w", err)
 	}
-	status := &adapterprotocol.CheckHooksResponse{Scope: p.Scope, HookFiles: []string{pluginPath}}
-	if info == nil {
-		return status, nil
-	}
-	switch {
-	case info.Mode().IsRegular():
-		status.HasOwnedHooks = true
-		status.Installed = content != legacyOpenCodePlugin
-	case info.Mode()&os.ModeSymlink != 0:
-		// A linked plugin is user-managed. Inspect only target metadata and
-		// report the link as removable even if its target is missing.
-		target, err := os.Stat(pluginPath)
-		status.HasOwnedHooks = true
-		status.Installed = err == nil && target.Mode().IsRegular()
-	}
-	return status, nil
+	regular := plugin.info != nil && plugin.info.Mode().IsRegular()
+	return &adapterprotocol.CheckHooksResponse{
+		Scope:         p.Scope,
+		HookFiles:     []string{pluginPath},
+		HasOwnedHooks: regular || plugin.linked,
+		Installed:     regular && plugin.content != legacyOpenCodePlugin,
+	}, nil
 }
 
 func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.UninstallHooksResponse, error) {
