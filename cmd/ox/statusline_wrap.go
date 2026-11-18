@@ -316,12 +316,30 @@ func noteWrapSession(sessionID string) {
 	if cur, err := os.ReadFile(path); err == nil && string(cur) == sessionID {
 		return
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
+	_ = overwriteChecked(path, info, sessionID)
+}
+
+// overwriteChecked replaces the contents of the file at path with content,
+// but only if what opens there is the very file `checked` describes (the
+// caller's Lstat). It is opened without truncating, then compared: between
+// the caller's check and this open, the name could have been swapped for a
+// link to another file this user can write, and that file must not be
+// truncated. It reports whether it wrote.
+func overwriteChecked(path string, checked os.FileInfo, content string) bool {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
-		return
+		return false
 	}
-	_, _ = f.WriteString(sessionID)
-	_ = f.Close()
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(checked, opened) {
+		return false
+	}
+	if err := f.Truncate(0); err != nil {
+		return false
+	}
+	_, err = f.WriteString(content)
+	return err == nil
 }
 
 // readWrapSession is the wrapper side: the session its app's hooks last

@@ -284,6 +284,32 @@ func TestNoteWrapSession_WritesOnlyTheWrappersOwnFile(t *testing.T) {
 			}
 		})
 	}
+	// The name is swapped after it was checked (a symbolic link to another
+	// file put in its place): what opens there is not the file that was
+	// checked, and the other file is neither truncated nor written.
+	checkedPath := filepath.Join(dir, "ox-wrap-checked.session")
+	require.NoError(t, os.WriteFile(checkedPath, nil, 0o600))
+	checked, err := os.Lstat(checkedPath)
+	require.NoError(t, err)
+	victim := filepath.Join(dir, "victim.txt")
+	require.NoError(t, os.WriteFile(victim, []byte("keep"), 0o600))
+	assert.False(t, overwriteChecked(victim, checked, "thread-1"), "a different file than the one checked")
+	if err := os.Remove(checkedPath); err == nil && os.Symlink(victim, checkedPath) == nil {
+		assert.False(t, overwriteChecked(checkedPath, checked, "thread-1"), "the checked name now leads elsewhere")
+	}
+	kept, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	assert.Equal(t, "keep", string(kept))
+	// The file that was checked is written.
+	same := filepath.Join(dir, "ox-wrap-same.session")
+	require.NoError(t, os.WriteFile(same, []byte("old and longer"), 0o600))
+	sameInfo, err := os.Lstat(same)
+	require.NoError(t, err)
+	require.True(t, overwriteChecked(same, sameInfo, "thread-2"))
+	got, err := os.ReadFile(same)
+	require.NoError(t, err)
+	assert.Equal(t, "thread-2", string(got))
+
 	// An absurdly long "session id" is not one.
 	p := newWrapSessionFile()
 	t.Cleanup(func() { _ = os.Remove(p) })
