@@ -15,19 +15,12 @@ type GitIdentity struct {
 // DetectGitIdentity reads git user configuration
 // Returns nil if no identity is configured (both name and email empty)
 func DetectGitIdentity() (*GitIdentity, error) {
-	return DetectGitIdentityAt("")
-}
-
-// DetectGitIdentityAt reads the Git identity visible from dir. It is useful
-// when a background process operates on a project without changing its own
-// working directory.
-func DetectGitIdentityAt(dir string) (*GitIdentity, error) {
 	if err := RequireVCS(VCSGit); err != nil {
 		return nil, err
 	}
 
-	name := getGitConfigAt(dir, "user.name")
-	email := getGitConfigAt(dir, "user.email")
+	name := getGitConfig("user.name")
+	email := getGitConfig("user.email")
 
 	if name == "" && email == "" {
 		return nil, nil

@@ -118,8 +118,7 @@ func ResolveAttribution(ep, configDisplayName string) Attribution {
 	verified := &repotools.GitIdentity{Email: email, Name: name}
 
 	// 2. Try git config identity (local, no network)
-	gitIdent, _ := repotools.DetectGitIdentity()
-	if gitIdent != nil {
+	if gitIdent, err := repotools.DetectGitIdentity(); err == nil && gitIdent != nil {
 		if email == "" {
 			email = gitIdent.Email
 		}
@@ -166,7 +165,7 @@ func ResolveAttribution(ep, configDisplayName string) Attribution {
 	displayName := strings.TrimSpace(configDisplayName)
 	if displayName == "" {
 		gitUsername := ""
-		if gitIdent != nil {
+		if gitIdent, err := repotools.DetectGitIdentity(); err == nil && gitIdent != nil {
 			gitUsername = gitIdent.Slug()
 		}
 		displayName = deriveDisplayName(email, name, gitUsername)
@@ -180,41 +179,20 @@ func ResolveAttribution(ep, configDisplayName string) Attribution {
 	}
 }
 
-// LocalAttributionUsernameForProject resolves the recording owner from the
-// same project-local sources used when a session name is generated. It does
-// not fetch token metadata: a team token with uncached coworker metadata fails
-// closed so a background cleanup cannot substitute the daemon's identity.
-func LocalAttributionUsernameForProject(ep, projectRoot string) (string, bool) {
-	if projectRoot == "" {
-		return "", false
-	}
+// LocalAttributionUserID resolves the stable owner ID written to draft
+// metadata. It never fetches token metadata: team-token ownership is known only
+// when a coworker identity is cached, and anonymous or unresolved identities
+// fail closed.
+func LocalAttributionUserID(ep string) (string, bool) {
 	if auth.EnvTokenIsTeamFamily(ep) {
 		coworker, known := auth.CachedTeamCoworker(ep)
-		if !known {
+		if !known || coworker == nil || coworker.ID == "" {
 			return "", false
 		}
-		if coworker != nil {
-			if username := coworker.Username(); username != "" && username != "anonymous" {
-				return username, true
-			}
-			return "", false
-		}
+		return coworker.ID, true
 	}
-	if runtime.IsAmpOrb() {
-		_, email, name := signedInUser(ep)
-		if email != "" || name != "" {
-			if username := (&repotools.GitIdentity{Email: email, Name: name}).Slug(); username != "" && username != "anonymous" {
-				return username, true
-			}
-		}
-	}
-	if gitIdent, err := repotools.DetectGitIdentityAt(projectRoot); err == nil && gitIdent != nil {
-		if username := gitIdent.Slug(); username != "" && username != "anonymous" {
-			return username, true
-		}
-	}
-	if username := osUsername(); username != "" {
-		return strings.ToLower(username), true
+	if userID := auth.GetUserID(ep); userID != "" {
+		return userID, true
 	}
 	return "", false
 }

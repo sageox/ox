@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -232,19 +232,23 @@ func TestLocalAttributionUsername_NoGit_FallsBackToOS(t *testing.T) {
 	assert.Equal(t, "anonymous", LocalAttributionUsername())
 }
 
-func TestLocalAttributionUsernameForProject_UsesProjectGitIdentity(t *testing.T) {
-	project := t.TempDir()
-	require.NoError(t, exec.Command("git", "-C", project, "init", "--quiet").Run())
-	require.NoError(t, exec.Command("git", "-C", project, "config", "user.name", "Project Owner").Run())
-	require.NoError(t, exec.Command("git", "-C", project, "config", "user.email", "project-owner@example.com").Run())
-
-	username, known := LocalAttributionUsernameForProject("", project)
-	assert.True(t, known)
-	assert.Equal(t, "project-owner", username)
+func TestLocalAttributionUserID_UnknownWithoutAuth(t *testing.T) {
+	userID, known := LocalAttributionUserID("https://identity-test.invalid")
+	assert.False(t, known)
+	assert.Empty(t, userID)
 }
 
-func TestLocalAttributionUsernameForProject_UnknownWithoutProject(t *testing.T) {
-	username, known := LocalAttributionUsernameForProject("", "")
-	assert.False(t, known)
-	assert.Empty(t, username)
+func TestLocalAttributionUserID_UsesStoredAccountID(t *testing.T) {
+	const ep = "https://identity-test.invalid"
+	t.Setenv("SAGEOX_TOKEN", "")
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	require.NoError(t, auth.SaveTokenForEndpoint(ep, &auth.StoredToken{
+		AccessToken: "identity-test-token",
+		UserInfo:    auth.UserInfo{UserID: "user-stable-123"},
+	}))
+
+	userID, known := LocalAttributionUserID(ep)
+	assert.True(t, known)
+	assert.Equal(t, "user-stable-123", userID)
 }

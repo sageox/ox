@@ -16,19 +16,17 @@ import (
 // GenerateSessionName writes ahead of the username slug.
 const draftTimestampLen = len("2006-01-02T15-04")
 
-// draftOwnedByLocalUser reports whether the generated session name identifies
-// the supplied recording owner. The ledger username is a display name, not an
-// ownership key, so it must never authorize deleting a draft. AgentID marks
-// the end of the username slug and prevents prefix matches (for example, ann
-// matching ann-smith). Unknown identities and legacy names without AgentID
-// fail closed.
-func draftOwnedByLocalUser(sessionName string, meta *lfs.SessionMeta, owner string) bool {
-	if owner == "" || owner == "anonymous" || meta == nil || meta.AgentID == "" {
+// draftOwnedByLocalUser requires the stable user ID recorded when the draft
+// was published. Username is a display name and the session-name slug is not
+// globally unique, so neither proves ownership. AgentID must also match the
+// generated name shape. Unknown owners and legacy metadata without UserID or
+// AgentID fail closed.
+func draftOwnedByUserID(sessionName string, meta *lfs.SessionMeta, ownerID string) bool {
+	if ownerID == "" || meta == nil || meta.UserID == "" || meta.UserID != ownerID || meta.AgentID == "" {
 		return false
 	}
-	slug := sanitizeFilename(owner)
 	agentID := sanitizeFilename(meta.AgentID)
-	if slug == "" || agentID == "" || len(sessionName) <= draftTimestampLen+1 || sessionName[draftTimestampLen] != '-' {
+	if agentID == "" || len(sessionName) <= draftTimestampLen+1 || sessionName[draftTimestampLen] != '-' {
 		return false
 	}
 	if _, err := time.Parse("2006-01-02T15-04", sessionName[:draftTimestampLen]); err != nil {
@@ -39,7 +37,7 @@ func draftOwnedByLocalUser(sessionName string, meta *lfs.SessionMeta, owner stri
 	if !strings.HasSuffix(remaining, suffix) || len(remaining) <= len(suffix) {
 		return false
 	}
-	return remaining[:len(remaining)-len(suffix)] == slug
+	return true
 }
 
 // OrphanedDraftAge is how long a committed draft placeholder must go without a
@@ -94,7 +92,7 @@ func ValidateDraftSessionName(sessionName string) error {
 //
 // This is the single source of truth for "orphaned draft"; both `ox doctor` and
 // the daemon's periodic retraction call it.
-func FindOrphanedDrafts(ledgerPath string, cacheDirs []string, localOwner string) ([]string, error) {
+func FindOrphanedDrafts(ledgerPath string, cacheDirs []string, localUserID string) ([]string, error) {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
@@ -131,10 +129,10 @@ func FindOrphanedDrafts(ledgerPath string, cacheDirs []string, localOwner string
 			continue
 		}
 		// Owner-only reaping: only the owning user's machine can see that
-		// owner's cache, so only it can evaluate condition 3. The session name
-		// records the attribution slug used when recording began. meta.Username
-		// is a privacy-safe display name and is not an ownership key.
-		if !draftOwnedByLocalUser(name, meta, localOwner) {
+		// owner's cache, so only it can evaluate condition 3. meta.UserID records
+		// the stable account/coworker ID used when recording began.
+		// meta.Username is a privacy-safe display name and is not an ownership key.
+		if !draftOwnedByUserID(name, meta, localUserID) {
 			continue
 		}
 		if DraftHasLocalSessionData(cacheDirs, name) {

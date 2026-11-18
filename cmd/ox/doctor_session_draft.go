@@ -105,11 +105,11 @@ func checkSessionDraftOrphan(fix bool) checkResult {
 // session.FindOrphanedDrafts (the shared source of truth). Thin wrapper: the
 // detection logic lives in internal/session so the daemon shares it verbatim.
 func findOrphanedDrafts(projectRoot, ledgerPath string) ([]string, error) {
-	owner, known := identity.LocalAttributionUsernameForProject(endpoint.GetForProject(projectRoot), projectRoot)
+	ownerID, known := identity.LocalAttributionUserID(endpoint.GetForProject(projectRoot))
 	if !known {
-		owner = ""
+		ownerID = ""
 	}
-	return session.FindOrphanedDrafts(ledgerPath, draftCacheDirs(projectRoot, ledgerPath), owner)
+	return session.FindOrphanedDrafts(ledgerPath, draftCacheDirs(projectRoot, ledgerPath), ownerID)
 }
 
 // draftCacheDirs returns the local cache session directories a draft's recording

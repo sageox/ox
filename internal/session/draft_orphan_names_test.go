@@ -32,11 +32,11 @@ func TestFindOrphanedDrafts_SkipsNonconformingNames(t *testing.T) {
 		require.NoError(t, os.MkdirAll(dir, 0o755))
 		require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
 			Version: "1.0", SessionName: name, SessionID: "ses_orphan_test", AgentID: "OxOrphan",
-			Username: "Local User", CreatedAt: aged, Draft: true, UpdatedAt: &aged, Files: map[string]lfs.FileRef{},
+			UserID: "user-local", Username: "Local User", CreatedAt: aged, Draft: true, UpdatedAt: &aged, Files: map[string]lfs.FileRef{},
 		}))
 	}
 
-	orphans, err := FindOrphanedDrafts(ledger, nil, "localuser")
+	orphans, err := FindOrphanedDrafts(ledger, nil, "user-local")
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"2026-01-01T00-00-localuser-OxOrphan"}, orphans)

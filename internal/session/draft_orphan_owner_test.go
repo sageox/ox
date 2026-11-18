@@ -17,22 +17,20 @@ import (
 // cannot see, so a stale heartbeat alone proves nothing about it.
 func TestFindOrphanedDrafts_OnlyReapsLocalUsersDrafts(t *testing.T) {
 	ledger := t.TempDir()
-	const local = "ann"
+	const localUserID = "user-local"
 
 	// Distinct ages keep the oldest-first ordering deterministic.
 	cases := []struct {
-		name, owner string
-		age         time.Duration
+		name, userID, displayName string
+		age                       time.Duration
 	}{
-		{"2026-01-01T00-00-" + local + "-OxMine1", local, 4 * OrphanedDraftAge},
-		// The display name is deliberately identical to the local owner. It must
-		// not authorize reaping another user's draft.
-		{"2026-01-01T00-00-someoneelse-OxTheirs", local, 3 * OrphanedDraftAge},
-		{"2026-01-01T00-00-ann-smith-OxPrefix", local, 3*OrphanedDraftAge + time.Hour},
-		// Pre-attribution draft (no meta.username) owned by the local user: reaped via name slug.
-		{"2026-01-01T00-00-" + local + "-OxLegacy", "", 2 * OrphanedDraftAge},
-		// Pre-attribution draft named for another coworker: never reaped from here.
-		{"2026-01-01T00-00-someoneelse-OxLegacyTheirs", "", OrphanedDraftAge + time.Hour},
+		{"2026-01-01T00-00-ann-OxMine1", localUserID, "Private User", 4 * OrphanedDraftAge},
+		// Display names and colliding username slugs cannot identify an owner.
+		{"2026-01-01T00-00-ann-OxOther", "user-foreign", "Private User", 3 * OrphanedDraftAge},
+		{"2026-01-01T00-00-ann-smith-OxPrefix", "user-foreign", "", 3*OrphanedDraftAge + time.Hour},
+		// Old drafts without a stable user ID fail closed, even when their slug matches.
+		{"2026-01-01T00-00-ann-OxLegacy", "", "", 2 * OrphanedDraftAge},
+		{"2026-01-01T00-00-someoneelse-OxLegacyTheirs", "user-foreign", "", OrphanedDraftAge + time.Hour},
 	}
 	for _, c := range cases {
 		aged := time.Now().Add(-c.age).UTC()
@@ -40,20 +38,19 @@ func TestFindOrphanedDrafts_OnlyReapsLocalUsersDrafts(t *testing.T) {
 		require.NoError(t, os.MkdirAll(dir, 0o755))
 		require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
 			Version: "1.0", SessionName: c.name, SessionID: "ses_owner_test", AgentID: c.name[strings.LastIndex(c.name, "-")+1:],
-			Username: c.owner, CreatedAt: aged, Draft: true, UpdatedAt: &aged,
+			UserID: c.userID, Username: c.displayName, CreatedAt: aged, Draft: true, UpdatedAt: &aged,
 			Files: map[string]lfs.FileRef{},
 		}))
 	}
 
-	orphans, err := FindOrphanedDrafts(ledger, nil, local)
+	orphans, err := FindOrphanedDrafts(ledger, nil, localUserID)
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{
-		"2026-01-01T00-00-" + local + "-OxMine1",
-		"2026-01-01T00-00-" + local + "-OxLegacy",
+		"2026-01-01T00-00-ann-OxMine1",
 	}, orphans,
 		"a stale draft owned by another coworker must not be reaped from this machine, "+
-			"and a legacy draft must be reaped only when its name carries the local user")
+			"display names and username slugs do not authorize deletion; legacy drafts without user IDs fail closed")
 }
 
 func TestFindOrphanedDrafts_UnknownOwnerFailsClosed(t *testing.T) {
@@ -63,13 +60,29 @@ func TestFindOrphanedDrafts_UnknownOwnerFailsClosed(t *testing.T) {
 	dir := filepath.Join(ledger, "sessions", name)
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
-		Version: "1.0", SessionName: name, AgentID: "OxOwner", Username: "ann",
+		Version: "1.0", SessionName: name, AgentID: "OxOwner", UserID: "user-local", Username: "ann",
 		CreatedAt: aged, Draft: true, UpdatedAt: &aged, Files: map[string]lfs.FileRef{},
 	}))
 
-	for _, owner := range []string{"", "anonymous"} {
-		orphans, err := FindOrphanedDrafts(ledger, nil, owner)
+	for _, ownerID := range []string{"", "user-other"} {
+		orphans, err := FindOrphanedDrafts(ledger, nil, ownerID)
 		require.NoError(t, err)
-		assert.Empty(t, orphans, "unknown owner %q must reap nothing", owner)
+		assert.Empty(t, orphans, "unknown or different owner %q must reap nothing", ownerID)
 	}
+}
+
+func TestFindOrphanedDrafts_RequiresAgentID(t *testing.T) {
+	ledger := t.TempDir()
+	aged := time.Now().Add(-2 * OrphanedDraftAge).UTC()
+	name := "2026-01-01T00-00-ann-OxOwner"
+	dir := filepath.Join(ledger, "sessions", name)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
+		Version: "1.0", SessionName: name, UserID: "user-local", Username: "ann",
+		CreatedAt: aged, Draft: true, UpdatedAt: &aged, Files: map[string]lfs.FileRef{},
+	}))
+
+	orphans, err := FindOrphanedDrafts(ledger, nil, "user-local")
+	require.NoError(t, err)
+	assert.Empty(t, orphans)
 }
