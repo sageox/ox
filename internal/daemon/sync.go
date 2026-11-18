@@ -990,6 +990,7 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	// initial codedb check on startup (don't wait for CodeDBCheckInterval)
 	go s.checkCodeDBFreshness(ctx)
 
+	var periodicGCDone <-chan struct{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -1004,7 +1005,11 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 
 		case <-readTicker.C:
 			// not traced: high-frequency sync dominates span volume with little diagnostic value
-			s.pullChanges(ctx)
+			// Periodic GC may own the Ledger lock during preservation.
+			// Keep the event loop responsive and resume on the next tick.
+			if periodicGCDone == nil {
+				s.pullChanges(ctx)
+			}
 			readTicker.Reset(jitteredDuration(s.config.SyncIntervalRead, 0.10))
 
 		case <-teamContextChan:
@@ -1042,9 +1047,12 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			span.End()
 
 		case <-gcChan:
-			taskCtx, span := s.tracer.StartTask(ctx, "daemon:gc_check")
-			s.checkAndRunGC(taskCtx)
-			span.End()
+			if periodicGCDone == nil {
+				periodicGCDone = s.startPeriodicGC(ctx)
+			}
+
+		case <-periodicGCDone:
+			periodicGCDone = nil
 
 		case <-githubSyncChan:
 			if s.githubSync != nil {

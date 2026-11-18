@@ -268,3 +268,67 @@ func TestSyncScheduler_WatcherPullContinuesDuringPeriodicTeamSync(t *testing.T) 
 	releaseOnce.Do(func() { close(releasePull) })
 	awaitStartupCompletion(t, done)
 }
+
+func TestSyncScheduler_WatcherPullContinuesDuringTeamGC(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits for a Team Context reclone")
+	}
+	const manifest = "version 1\ninclude .sageox/\ninclude SOUL.md\n"
+	bare, teamPath, scheduler := setupClonedTeamContext(t, manifest, nil)
+	_, ledger, writer := setupRacingLedger(t)
+	advanceRemote(t, writer, 0)
+	scheduler.config.LedgerPath = ledger
+	scheduler.config.SyncIntervalRead = time.Hour
+	scheduler.config.TeamContextSyncInterval = 0
+	scheduler.config.VersionCheckInterval = 0
+	scheduler.config.GCCheckInterval = 100 * time.Millisecond
+	scheduler.config.CodeDBCheckInterval = 0
+	scheduler.config.LedgerCheckInterval = 0
+	scheduler.config.GitHubSyncInterval = 0
+	t.Setenv("OX_KB_DISABLE", "1")
+
+	registry := scheduler.WorkspaceRegistry()
+	registry.mu.Lock()
+	registry.workspaces["team_gc"] = &WorkspaceState{
+		ID: "team_gc", Type: WorkspaceTypeTeamContext, Path: teamPath, CloneURL: "file://" + bare, Exists: true,
+	}
+	primeConfigCacheLocked(registry)
+	registry.mu.Unlock()
+
+	swapStarted, releaseSwap := make(chan struct{}), make(chan struct{})
+	var swapOnce sync.Once
+	scheduler.gcSwapWindowTestHook = func() {
+		swapOnce.Do(func() { close(swapStarted) })
+		<-releaseSwap
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		close(releaseSwap)
+		awaitStartupCompletion(t, done)
+	})
+	go func() {
+		defer close(done)
+		scheduler.Start(ctx)
+	}()
+	select {
+	case <-swapStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("periodic Team Context GC did not reach the checkout swap")
+	}
+	fetchHead := filepath.Join(ledger, ".git", "FETCH_HEAD")
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(fetchHead)
+		scheduler.mu.Lock()
+		defer scheduler.mu.Unlock()
+		return err == nil && !scheduler.pullInProgress
+	}, 3*time.Second, 10*time.Millisecond, "initial Ledger fetch must finish")
+	advanceRemote(t, writer, 1)
+	require.NoError(t, os.Remove(fetchHead))
+	scheduler.TriggerSync()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(ledger, "c001.txt"))
+		return err == nil
+	}, 3*time.Second, 10*time.Millisecond, "Team Context GC blocked the Ledger watcher sync")
+}
