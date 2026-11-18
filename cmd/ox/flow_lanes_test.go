@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
@@ -390,6 +391,28 @@ func TestCodexFlowNotice_NewRecordingShowsItsFirstCall(t *testing.T) {
 	after := runCodexCall(t, root, `ox query "x"`, searchJSON, 300*time.Millisecond)
 	require.Len(t, after, 1, "the new recording's first call must show its lane")
 	assert.Contains(t, after[0], "searched team memory")
+}
+
+// TestCodexFlowNotice_StoppingARecordingDoesNotRepeatOldLanes: when a
+// recording stops, the not-recording trace is current again, and it still
+// holds the calls made before the recording. Failure prevented: those calls,
+// shown once already, shown again under the next ox call.
+func TestCodexFlowNotice_StoppingARecordingDoesNotRepeatOldLanes(t *testing.T) {
+	root := codexDigestEnv(t, nil)
+	cache := t.TempDir()
+	t.Setenv("HOME", cache)
+	t.Setenv("XDG_CACHE_HOME", cache)
+
+	require.Len(t, runCodexCall(t, root, "ox plan view x", "# plan", 300*time.Millisecond), 1, "before recording")
+	startWorktreeRecording(t, root, codexDigestAgentID, codexDigestSessionID)
+	require.Len(t, runCodexCall(t, root, `ox query "x"`, searchJSON, 300*time.Millisecond), 1, "while recording")
+
+	// The recording ends: the trace is the per-agent file again.
+	require.NoError(t, session.ClearRecordingStateForAgent(root, codexDigestAgentID))
+	after := runCodexCall(t, root, "ox session list", `{"sessions":[1,2]}`, 300*time.Millisecond)
+	require.Len(t, after, 1, "only the new call's lane: %v", after)
+	assert.Contains(t, after[0], "read sessions")
+	assert.NotContains(t, strings.Join(after, "\n"), "pulled plan", "the call shown before the recording is not shown again")
 }
 
 // --- D. The watch pane ---

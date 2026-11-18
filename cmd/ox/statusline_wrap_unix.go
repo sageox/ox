@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -255,6 +256,7 @@ func runUnwrapped(cmd *exec.Cmd, stdout, stderr io.Writer) (int, error) {
 	var copies sync.WaitGroup
 	var copyMu sync.Mutex
 	var copyErr error // the first failure to write the command's output on
+	var progress copyProgress
 	attach := func(dst io.Writer) (io.Writer, error) {
 		if f, ok := dst.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
 			return f, nil
@@ -267,7 +269,7 @@ func runUnwrapped(cmd *exec.Cmd, stdout, stderr io.Writer) (int, error) {
 		copies.Add(1)
 		go func() {
 			defer copies.Done()
-			_, err := io.Copy(dst, r)
+			_, err := io.Copy(progress.watch(dst), r)
 			// Closed here, not only at the end: with nobody reading, a command
 			// still writing would fill the pipe and never exit. Closed, its
 			// next write fails and it stops.
@@ -304,24 +306,38 @@ func runUnwrapped(cmd *exec.Cmd, stdout, stderr io.Writer) (int, error) {
 		copies.Wait()
 		close(copied)
 	}()
-	select {
-	case <-copied:
-	case <-time.After(unwrappedDrainGrace):
+	// The command has exited. What it wrote may still be on its way to a slow
+	// reader, and that is waited for: the grace runs only while nothing moves.
+	// Then either the pipe is drained and held open by something the command
+	// left behind (the copy is ended, nothing is lost), or a write has
+	// stopped being accepted (the output is undelivered: a failure).
+	stuck := false
+drain:
+	for last := progress.written.Load(); ; {
+		select {
+		case <-copied:
+			break drain
+		case <-time.After(unwrappedDrainGrace):
+		}
+		now := progress.written.Load()
+		if now != last {
+			last = now
+			continue
+		}
+		stuck = progress.writing.Load() > 0
+		break
 	}
 	closeAll(readers) // ends a copy still waiting on what the command left behind
-	// A copy can also be stuck writing: a destination nobody reads (a full
-	// pipe downstream) never returns from Write, and closing ox's read end
-	// does not interrupt it. ox does not wait on it past the same grace; the
-	// stuck copy ends with the process.
-	select {
-	case <-copied:
-	case <-time.After(unwrappedDrainGrace):
+	if stuck {
+		// Closing ox's read end does not interrupt a blocked write. ox does
+		// not wait on it; the stuck copy ends with the process.
 		code, exitErr := wrappedExitCode(cmd, err)
 		if code == 0 && exitErr == nil {
 			return 1, errors.New("write the command's output: the destination stopped accepting it")
 		}
 		return code, exitErr
 	}
+	<-copied
 	code, err := wrappedExitCode(cmd, err)
 	// Output that could not be delivered is a failure even when the command
 	// was content: its caller did not get what it wrote.
@@ -330,6 +346,27 @@ func runUnwrapped(cmd *exec.Cmd, stdout, stderr io.Writer) (int, error) {
 	}
 	return code, err
 }
+
+// copyProgress watches output being forwarded: how many writes have been
+// accepted, and whether one is waiting to be.
+type copyProgress struct {
+	written atomic.Int64
+	writing atomic.Int32
+}
+
+func (p *copyProgress) watch(dst io.Writer) io.Writer {
+	return writerFunc(func(b []byte) (int, error) {
+		p.writing.Add(1)
+		n, err := dst.Write(b)
+		p.writing.Add(-1)
+		p.written.Add(1)
+		return n, err
+	})
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
 
 // wrappedEnv is the environment the wrapped app runs in: ox's own, with
 // NO_COLOR as the coworker had it. main's init may force NO_COLOR=1 for ox's

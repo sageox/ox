@@ -61,6 +61,10 @@ type State struct {
 	// changes when a recording starts or ends; a position in the old one says
 	// nothing about the new one.
 	ShownFlowsTrace string `json:"shown_flows_trace,omitempty"`
+	// ShownFlowsByTrace keeps the position reached in each trace this
+	// session has left, so coming back to one (a recording stops, and the
+	// not-recording trace is current again) does not show its lanes twice.
+	ShownFlowsByTrace map[string]int `json:"shown_flows_by_trace,omitempty"`
 	// Recording is the ox recording (session.RecordingState.SessionID, a
 	// ses_ id) the counts belong to. A harness session outlives a recording
 	// on every resume, pause or idle finalize, and `ox session report` counts
@@ -97,6 +101,39 @@ func (s *State) BindRecording(recordingID string) bool {
 	}
 	s.Recording = recordingID
 	return true
+}
+
+// maxShownFlowTraces caps State.ShownFlowsByTrace: a session moves between
+// a handful of traces, never many.
+const maxShownFlowTraces = 8
+
+// SwitchFlowTrace makes trace the one ShownFlows counts into, remembering
+// the position reached in the trace it leaves and resuming at the position
+// last reached in the one it enters (zero for a trace not seen before). It
+// reports whether anything changed; an empty trace changes nothing.
+func (s *State) SwitchFlowTrace(trace string) bool {
+	if trace == "" || s.ShownFlowsTrace == trace {
+		return false
+	}
+	s.RememberFlowTrace(s.ShownFlowsTrace, s.ShownFlows)
+	s.ShownFlows, s.ShownFlowsTrace = s.ShownFlowsByTrace[trace], trace
+	delete(s.ShownFlowsByTrace, trace)
+	return true
+}
+
+// RememberFlowTrace records shown as the position reached in trace. It is
+// how a position survives the reset a new recording brings (BindRecording).
+func (s *State) RememberFlowTrace(trace string, shown int) {
+	if trace == "" || shown <= 0 {
+		return
+	}
+	if s.ShownFlowsByTrace == nil {
+		s.ShownFlowsByTrace = map[string]int{}
+	}
+	if _, known := s.ShownFlowsByTrace[trace]; !known && len(s.ShownFlowsByTrace) >= maxShownFlowTraces {
+		clear(s.ShownFlowsByTrace) // far more traces than a session has: start over
+	}
+	s.ShownFlowsByTrace[trace] = shown
 }
 
 // MaxSeenRefs caps State.SeenRefs and State.UsedRefs; the oldest entries are

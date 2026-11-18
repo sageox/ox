@@ -162,11 +162,20 @@ func pendingDigest(ctx *HookContext) string {
 			trace = flowTracePath(ctx.ProjectRoot, ctx.Marker.AgentID)
 			flows = finishedFlowsAt(trace, ctx.Marker.AgentID)
 		}
+		// A new recording starts the counts over (BindRecording); the lane
+		// positions reached in the traces so far are carried across that.
+		before := *s
 		changed := s.BindRecording(recordingID)
-		if trace != "" && s.ShownFlowsTrace != trace {
-			// A recording started or ended: these are another trace's lanes,
-			// and none of them has been shown.
-			s.ShownFlows, s.ShownFlowsTrace = 0, trace
+		if s.ShownFlowsTrace == "" && before.ShownFlowsTrace != "" {
+			for t, n := range before.ShownFlowsByTrace {
+				s.RememberFlowTrace(t, n)
+			}
+			s.RememberFlowTrace(before.ShownFlowsTrace, before.ShownFlows)
+		}
+		// A recording started or ended: the lanes are another trace's. One
+		// not seen before starts at zero; one this session is returning to
+		// (the not-recording trace, after a stop) resumes where it left off.
+		if s.SwitchFlowTrace(trace) {
 			changed = true
 		}
 		// Only the not-recording trace holds earlier sittings; a recording's

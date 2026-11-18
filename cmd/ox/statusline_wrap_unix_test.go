@@ -261,3 +261,32 @@ func TestRunUnwrapped_DoesNotWaitOnADestinationThatStoppedReading(t *testing.T) 
 		t.Fatal("ox waited on a destination that will never accept the output")
 	}
 }
+
+// slowWriter accepts every write, slowly: a reader that is behind but reading.
+type slowWriter struct {
+	delay time.Duration
+	buf   syncBuffer
+}
+
+func (w *slowWriter) Write(p []byte) (int, error) {
+	time.Sleep(w.delay)
+	return w.buf.Write(p)
+}
+
+// TestRunUnwrapped_WaitsForASlowReader: the grace after the command exits is
+// for a pipe nothing is moving through. Failure prevented: a reader that is
+// slow but reading has the rest of the output cut off one second after the
+// command exits, and ox reports success.
+func TestRunUnwrapped_WaitsForASlowReader(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: the reader takes about 3s by design")
+	}
+	// 200 KiB exits the command at once (it fits the pipe plus one read); the
+	// reader then takes well over the one-second grace to take it all.
+	dst := &slowWriter{delay: 400 * time.Millisecond}
+	var stderr syncBuffer
+	code, err := runUnwrapped(wrappedCommand(context.Background(), []string{"sh", "-c", "head -c 204800 /dev/zero"}), dst, &stderr)
+	require.NoError(t, err)
+	assert.Equal(t, 0, code)
+	assert.Equal(t, 204800, len(dst.buf.String()), "every byte the command wrote is delivered")
+}
