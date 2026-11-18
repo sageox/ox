@@ -337,8 +337,13 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		}
 		s.workspaceRegistry.SetSyncInProgress(r.ws.ID, false)
 		if r.busy {
-			addResult(r.ws, "skipped", "checkout is busy with clone or cleanup")
-			skippedCount++
+			const busyMsg = "checkout is busy with clone or cleanup"
+			if forceSync {
+				addResult(r.ws, "error", busyMsg)
+			} else {
+				addResult(r.ws, "skipped", busyMsg)
+				skippedCount++
+			}
 			continue
 		}
 

@@ -76,18 +76,22 @@ func resultsByPath(results []TeamSyncResult) map[string]TeamSyncResult {
 	return byPath
 }
 
-func TestDoTeamSync_BusyCheckoutSkipsWithoutBackoff(t *testing.T) {
+func TestTeamSync_BusyCheckoutReportsManualFailureWithoutBackoff(t *testing.T) {
 	scheduler, ids, _ := newTeamBudgetScheduler(t, 1)
 	require.NoError(t, scheduler.workspaceRegistry.LoadFromConfig())
 	ws := scheduler.workspaceRegistry.GetTeamContexts()[0]
 	overrideTeamBudgets(t, 50*time.Millisecond, 5*time.Second, scheduler.pullTeamContext)
 
 	require.NoError(t, gitutil.WithPreCloneLock(t.Context(), ws.Path, func() error {
-		results, err := scheduler.doTeamSync(t.Context(), nil, true)
+		results, err := scheduler.doTeamSync(t.Context(), nil, false)
 		require.NoError(t, err)
 		require.Len(t, results, 1)
 		assert.Equal(t, "skipped", results[0].Status)
 		assert.Contains(t, results[0].Error, "checkout is busy")
+		results, err = scheduler.TeamSync(nil)
+		require.ErrorContains(t, err, "checkout is busy")
+		require.Len(t, results, 1)
+		assert.Equal(t, "error", results[0].Status)
 		failures, _ := scheduler.workspaceRegistry.GetSyncRetryInfo(ids[0])
 		assert.Zero(t, failures)
 		return nil
