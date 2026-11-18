@@ -2209,32 +2209,39 @@ func emptyTranscriptSummary() *session.SummarizeResponse {
 //     local copy can never settle a session that has a conversation;
 //   - the classifier #1082 uses finds no conversation in it.
 func isEmptyLedgerTranscript(sessionDir, rawPath, ledgerPath string) bool {
+	return emptyLedgerTranscriptMeta(sessionDir, rawPath, ledgerPath) != nil
+}
+
+func emptyLedgerTranscriptMeta(sessionDir, rawPath, ledgerPath string) *lfs.SessionMeta {
 	if ledgerPath == "" || !isInLedgerCacheDir(sessionDir, ledgerPath) {
-		return false
+		return nil
 	}
 	if !session.HasNeedsSummaryMarker(sessionDir) {
 		own, err := lfs.ReadSessionMeta(sessionDir)
 		if err != nil || own == nil || own.SummaryStatus != sessionsummary.SummaryStatusOK {
-			return false
+			return nil
 		}
 	}
 	ledgerMeta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", filepath.Base(sessionDir)))
 	if err != nil || ledgerMeta == nil || ledgerMeta.IsDraft() {
-		return false
+		return nil
 	}
 	ref, ok := ledgerMeta.Files["raw.jsonl"]
 	if !ok || ref.OID == "" {
-		return false
+		return nil
 	}
 	info, err := os.Stat(rawPath)
 	if err != nil || info.Size() != ref.Size {
-		return false
+		return nil
 	}
 	data, err := os.ReadFile(rawPath)
 	if err != nil || lfs.NewFileRef(data).BareOID() != ref.BareOID() {
-		return false
+		return nil
 	}
-	return session.ClassifyRawFile(rawPath) == session.RawHeaderOnly
+	if session.ClassifyRawFile(rawPath) != session.RawHeaderOnly {
+		return nil
+	}
+	return ledgerMeta
 }
 
 // ledgerMetaForDownload returns the Ledger's meta.json when the folder being
@@ -2320,10 +2327,18 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 	// The empty-session repair can have no ID on legacy downloads. For that
 	// path, verify the cached transcript against the current Ledger manifest
 	// again while staging holds the repository lock.
-	verifiedEmptyDownload := recordingID == "" && (payload.emptyTranscript || payload.UploadOnly) &&
-		isEmptyLedgerTranscript(cacheDir, filepath.Join(cacheDir, "raw.jsonl"), payload.LedgerPath)
-	if err := session.CheckFinalizedLedgerSessionDestination(destDir, sessionName, recordingID); err != nil && !verifiedEmptyDownload {
-		return "", err
+	var preserveLedgerMeta bool
+	if err := session.CheckFinalizedLedgerSessionDestination(destDir, sessionName, recordingID); err != nil {
+		if recordingID != "" || (!payload.emptyTranscript && !payload.UploadOnly) {
+			return "", err
+		}
+		meta := emptyLedgerTranscriptMeta(cacheDir, filepath.Join(cacheDir, "raw.jsonl"), payload.LedgerPath)
+		if meta == nil || meta.SessionID != "" {
+			return "", err
+		}
+		// An upload retry starts from the already-staged Ledger metadata.
+		// finishStaged merges storage references into that current record.
+		preserveLedgerMeta = payload.UploadOnly
 	}
 
 	// Supersede any draft placeholder wholesale before copying (ADR-029).
@@ -2362,6 +2377,9 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 
 	for _, entry := range entries {
 		if entry.IsDir() || pipeline.IsTraceFile(entry.Name()) {
+			continue
+		}
+		if preserveLedgerMeta && entry.Name() == "meta.json" {
 			continue
 		}
 		// Machine-local capture state never enters the shared Ledger. Every

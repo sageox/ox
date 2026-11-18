@@ -208,18 +208,21 @@ func findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath string) ([]orphanedS
 			}
 
 			recState.SessionPath = sessionDir
-			stoppedAt := session.ResolveStoppedAt(recState.StoppedAt, filepath.Join(sessionDir, ledgerFileRaw), time.Now())
-			// Reclaim can happen hours after the recording died. A stop timestamp
-			// cannot identify its spool EOF: another recording may already share
-			// the native session. Preserve only boundaries captured while live;
-			// a missing durable stop makes trace materialization fail closed.
-			if err := session.StampRawCarrier(filepath.Join(sessionDir, ledgerFileRaw), session.CarrierStamp{
-				NativeSessions: recState.NativeSessions,
-				StoppedAt:      stoppedAt,
-				TraceCapture:   recState.Trace,
-			}); err != nil && recState.Trace != nil {
-				slog.Warn("trace recovery carrier not persisted", "session", sessionName, "error", err)
-				continue
+			// A matching pending upload already finalized this carrier before
+			// writing its marker. Appending again would invalidate that binding.
+			if pendingSessionUploadID(sessionDir) == "" {
+				rawPath := filepath.Join(sessionDir, ledgerFileRaw)
+				stoppedAt := session.ResolveStoppedAt(recState.StoppedAt, rawPath, time.Now())
+				// A reclaim-time timestamp cannot identify the trace spool EOF.
+				// Preserve only trace boundaries captured while the source was live.
+				if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
+					NativeSessions: recState.NativeSessions,
+					StoppedAt:      stoppedAt,
+					TraceCapture:   recState.Trace,
+				}); err != nil && recState.Trace != nil {
+					slog.Warn("trace recovery carrier not persisted", "session", sessionName, "error", err)
+					continue
+				}
 			}
 			// A manual-mode recording is held before its marker goes: this scan
 			// runs on every `ox doctor` and would otherwise upload it below.

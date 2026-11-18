@@ -71,6 +71,19 @@ func TestSessionFinalizersRefuseDifferentFinalizedSession(t *testing.T) {
 }
 
 func TestUploadSessionToLedger_RetriesWithAdoptedDraftID(t *testing.T) {
+	for _, doctor := range []bool{false, true} {
+		name := "foreground"
+		if doctor {
+			name = "doctor_after_interrupted_stop"
+		}
+		t.Run(name, func(t *testing.T) {
+			testRetryWithAdoptedDraftID(t, doctor)
+		})
+	}
+}
+
+func testRetryWithAdoptedDraftID(t *testing.T, doctor bool) {
+	t.Helper()
 	fixture := newSessionUploadFixture(t)
 	initTestGitRepo(t, fixture.ledgerPath)
 	dir := filepath.Join(fixture.ledgerPath, "sessions", fixture.sessionName)
@@ -85,7 +98,21 @@ func TestUploadSessionToLedger_RetriesWithAdoptedDraftID(t *testing.T) {
 			fixture.ledgerPath, fixture.sessionName, scriptedSessionUploadEffects(&calls, fixture.refs, failAt))
 	}
 	require.ErrorContains(t, upload("upload_lfs"), "LFS upload")
-	require.NoError(t, upload(""))
+	if doctor {
+		fixture.state.StartedAt = time.Now().Add(-2 * session.StaleRecordingThreshold)
+		recData, err := json.Marshal(fixture.state)
+		require.NoError(t, err)
+		recordingPath := filepath.Join(fixture.state.SessionPath, ".recording.json")
+		require.NoError(t, os.WriteFile(recordingPath, recData, 0o600))
+		orphans, err := findOrphanedSessionsInDir(filepath.Dir(fixture.state.SessionPath), fixture.ledgerPath)
+		require.NoError(t, err)
+		require.Len(t, orphans, 1)
+		require.NoFileExists(t, recordingPath)
+		effects := scriptedSessionUploadEffects(&calls, fixture.refs, "")
+		require.NoError(t, retrySessionUploadWithEffects(fixture.projectRoot, fixture.ledgerPath, orphans[0], effects))
+	} else {
+		require.NoError(t, upload(""))
+	}
 	meta, err := lfs.ReadSessionMeta(dir)
 	require.NoError(t, err)
 	require.Equal(t, draftID, meta.SessionID)

@@ -295,6 +295,10 @@ func TestProcessResult_RetriesLegacyEmptyLedgerDownload(t *testing.T) {
 	f.ledgerEntry(t, emptyRaw, false)
 	f.write(t, "raw.jsonl", emptyRaw)
 	f.write(t, ".needs-summary", "{}")
+	f.write(t, "meta.json", `{"version":"1.0","title":"Older cached title"}`)
+	metaPath := filepath.Join(ledgerPath, "sessions", name, "meta.json")
+	latestMeta, err := os.ReadFile(metaPath)
+	require.NoError(t, err)
 	h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
 	item := &WorkItem{Payload: &SessionFinalizePayload{
 		SessionDir: f.cacheDir, LedgerPath: ledgerPath, UploadOnly: true,
@@ -304,6 +308,9 @@ func TestProcessResult_RetriesLegacyEmptyLedgerDownload(t *testing.T) {
 	require.True(t, req.SkipLLM)
 	_, err = h.stageSessionInLedger(item.Payload.(*SessionFinalizePayload))
 	require.NoError(t, err)
+	got, err := os.ReadFile(metaPath)
+	require.NoError(t, err)
+	require.Equal(t, latestMeta, got, "retry must preserve current Ledger metadata")
 }
 
 // TestProcessResult_PrefilterSkipDiscardsLocalCopy: a thin local recording the
