@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/identity"
+	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/claudesource"
@@ -108,6 +109,12 @@ func writeRawHeaderWithAttribution(projectRoot string, state *session.RecordingS
 	}
 	if err := w.CloseAndSync(); err != nil {
 		return fmt.Errorf("sync raw.jsonl header: %w", err)
+	}
+
+	// real-time streaming: spool exactly the header bytes just written. Local
+	// only and best-effort; it can never fail the start.
+	if liveHeader, readErr := os.ReadFile(rawPath); readErr == nil {
+		liveSessionBegin(projectRoot, state, liveHeader)
 	}
 
 	return nil
@@ -231,6 +238,7 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 				if closeErr != nil {
 					return nil, closeErr
 				}
+				liveSessionSpool(state.SessionPath, writer)
 				state.SourceOffset = newOffset
 				state.EntryCount += len(entries)
 
@@ -349,6 +357,16 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		Summary: localSummary,
 	}
 	result.Summary = publishableSummary(localSummary)
+
+	// real-time streaming: the final drain above is spooled, so finish the live
+	// stream now, before the v1 upload below may prune this cache dir. Bounded by
+	// livesession.CloseBudget; a held (manual) session is deleted from the server
+	// instead, since nothing about it may leave the machine.
+	if stopHoldsSession(projectRoot, state) {
+		liveSessionAbort(projectRoot, state.SessionPath)
+	} else {
+		liveSessionClose(projectRoot, state.SessionPath, result.Summary, livesession.CloseBudget)
+	}
 
 	ledgerPath, ledgerErr := resolveLedgerPath()
 	if ledgerErr == nil {

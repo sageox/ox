@@ -44,6 +44,16 @@ type SessionWatcherManager struct {
 	watchers map[string]*activeWatcher // keyed by session name
 	stopped  bool                      // set by StopAll to prevent new watchers and defer re-insertion
 	home     string                    // root for the session-file allow-list; see homeDir
+	// liveSpool, when set, receives every batch committed to raw.jsonl so the
+	// daemon can stream it (ADR-247). It runs after the append succeeded.
+	liveSpool func(sessionDir string, batch session.AppendedBatch)
+}
+
+// SetLiveSpooler wires real-time session streaming into the tail watcher.
+func (m *SessionWatcherManager) SetLiveSpooler(fn func(sessionDir string, batch session.AppendedBatch)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.liveSpool = fn
 }
 
 // activeWatcher tracks a running TailWatcher goroutine.
@@ -793,7 +803,20 @@ func (m *SessionWatcherManager) persistOffset(aw *activeWatcher, offset int64, e
 }
 
 func (m *SessionWatcherManager) appendBatch(aw *activeWatcher, rw *session.RawWriter, entries []session.Entry, newOffset int64) error {
-	return rw.AppendRecordingBatch(filepath.Join(aw.cachePath, recordingMarker), entries, newOffset)
+	if err := rw.AppendRecordingBatch(filepath.Join(aw.cachePath, recordingMarker), entries, newOffset); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	spool := m.liveSpool
+	m.mu.Unlock()
+	if spool != nil {
+		if batch, ok, err := rw.LastAppended(); err != nil {
+			m.logger.Warn("live spool: could not read the appended batch", "session", aw.sessionName, "error", err)
+		} else if ok {
+			spool(aw.cachePath, batch)
+		}
+	}
+	return nil
 }
 
 // resolveAdapter returns the adapter for the given name.

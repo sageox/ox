@@ -102,6 +102,13 @@ func runAgentSessionAbortActive(inst *agentinstance.Instance, cmd *cobra.Command
 		return fmt.Errorf("failed to clear recording state: %w", err)
 	}
 
+	// real-time streaming: delete the live copy from the server while live.json
+	// and the signing key's ids still exist; bounded, queued for the daemon on
+	// failure, and never fails the abort
+	if state.SessionPath != "" {
+		liveSessionAbort(projectRoot, state.SessionPath)
+	}
+
 	// remove entire session cache folder (raw.jsonl, plan.md, etc.)
 	// guard against empty path — os.RemoveAll("") would delete cwd
 	if state.SessionPath != "" {
@@ -248,6 +255,8 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 		undoAbortRecord()
 		return fmt.Errorf("failed to clear recording state: %w", err)
 	}
+
+	liveSessionAbort(projectRoot, sessionPath) // delete the live copy while its ids still exist
 
 	// remove entire session folder
 	if err := os.RemoveAll(sessionPath); err != nil {

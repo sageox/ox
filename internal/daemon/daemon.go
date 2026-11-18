@@ -203,6 +203,7 @@ type Daemon struct {
 	agentWorker            *agentwork.Manager
 	sessionFinalizeHandler *agentwork.SessionFinalizeHandler
 	sessionWatcher         *agentwork.SessionWatcherManager
+	liveSessions           *LiveSessions // real-time session streaming (ADR-247); nil without a ledger/endpoint
 	whisperRegistry        *WhisperRegistry
 	murmurNudgeSource      *MurmurNudgeSource
 	projectWatcher         *GitPollWatcher
@@ -1485,6 +1486,17 @@ func (d *Daemon) initComponents() time.Duration {
 		d.scheduler.SetSettingsFetcher(d.settingsFetcher)
 	}
 
+	// real-time session streaming: drains the spools hooks and the tail watcher fill.
+	// The session cache is keyed by repo id and endpoint, the same path the hooks
+	// write to, and exists before the Ledger is cloned: a fresh repo's daemon
+	// starts before its Ledger clone and must still stream.
+	if cacheBase := paths.LedgerSessionCacheBase(config.GetRepoID(d.config.ProjectRoot), projectEndpoint); cacheBase != "" {
+		d.liveSessions = NewLiveSessions(d.logger, filepath.Join(cacheBase, "sessions"), endpoint.NormalizeEndpoint(projectEndpoint))
+		d.sessionWatcher.SetLiveSpooler(func(sessionDir string, batch session.AppendedBatch) {
+			d.liveSessions.Capture(d.ctx, sessionDir, batch)
+		})
+	}
+
 	return time.Since(startSetup)
 }
 
@@ -1602,6 +1614,14 @@ func (d *Daemon) startWorkers() {
 		go func() {
 			defer d.wg.Done()
 			d.agentWorker.Start(d.ctx)
+		}()
+	}
+
+	if d.liveSessions != nil {
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			d.liveSessions.Run(d.ctx)
 		}()
 	}
 
@@ -2114,6 +2134,13 @@ func (s *daemonServiceImpl) SessionWatchStop(payload SessionWatchStopPayload) {
 		return
 	}
 	s.d.sessionWatcher.StopWatch(payload.SessionName)
+}
+
+func (s *daemonServiceImpl) LiveSessionDrain(payload LiveSessionDrainPayload) {
+	if s.d.liveSessions == nil {
+		return
+	}
+	s.d.liveSessions.Drain(s.d.ctx, payload.SessionPath)
 }
 
 func (s *daemonServiceImpl) Activity() {
