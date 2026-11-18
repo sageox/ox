@@ -84,6 +84,32 @@ func TestEnsureCheckoutGitignore_Idempotent(t *testing.T) {
 	}
 }
 
+// A sparse Team Context mirror can lose the worktree copy while HEAD still
+// owns the policy. Rebuilding it from defaults loses team rules and leaves a
+// housekeeping commit ahead of the remote.
+func TestEnsureCheckoutGitignore_RestoresTrackedSparsePolicy(t *testing.T) {
+	dir := setupGitRepoWithSageox(t)
+	const rel = ".sageox/.gitignore"
+	ignorePath := filepath.Join(dir, rel)
+	policy := strings.Join(append([]string{"# team policy", "!team-custom.json"}, checkoutRequiredEntries...), "\n") + "\n"
+	require.NoError(t, os.WriteFile(ignorePath, []byte(policy), 0o644))
+	runGit(t, dir, "add", "--", rel)
+	runGit(t, dir, "commit", "-m", "track the team's ignore policy", "--", rel)
+	before, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	require.NoError(t, err)
+	runGit(t, dir, "sparse-checkout", "set", "--no-cone", "/.sageox/sync.manifest")
+	require.NoFileExists(t, ignorePath)
+
+	require.NoError(t, EnsureCheckoutGitignore(dir))
+
+	after, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	require.NoError(t, err)
+	require.Equal(t, string(before), string(after), "a lost worktree file must not create a new commit")
+	restored, err := os.ReadFile(ignorePath)
+	require.NoError(t, err)
+	require.Equal(t, policy, string(restored))
+}
+
 func TestEnsureCheckoutGitignore_PreservesExisting(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

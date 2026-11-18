@@ -12,7 +12,10 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/addons"
+	"github.com/sageox/ox/internal/gitutil"
 )
+
+const checkoutGitignorePath = ".sageox/.gitignore"
 
 // checkoutRequiredEntries are the entries that must be present in .sageox/.gitignore
 // inside ledger and team context checkout directories. These prevent daemon-written
@@ -102,15 +105,30 @@ func EnsureCheckoutGitignoreCtx(ctx context.Context, repoPath string) error {
 		return nil // no .sageox dir, nothing to protect
 	}
 
-	gitignorePath := filepath.Join(sageoxDir, ".gitignore")
+	gitignorePath := filepath.Join(repoPath, checkoutGitignorePath)
 
-	var existing string
 	data, err := os.ReadFile(gitignorePath)
-	if err == nil {
-		existing = string(data)
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("read .sageox/.gitignore: %w", err)
+	if os.IsNotExist(err) {
+		tracked, listErr := gitutil.RunGit(ctx, repoPath, "ls-files", "--", checkoutGitignorePath)
+		if listErr != nil {
+			return fmt.Errorf("check tracked checkout gitignore: %w", listErr)
+		}
+		if tracked != "" {
+			// Sparse checkout can omit a tracked policy. Restore it from the
+			// index so team exclusions survive and no replacement commit lands.
+			if _, restoreErr := gitutil.RunGit(ctx, repoPath, "restore",
+				"--worktree", "--ignore-skip-worktree-bits", "--", checkoutGitignorePath); restoreErr != nil {
+				return fmt.Errorf("restore tracked checkout gitignore: %w", restoreErr)
+			}
+			data, err = os.ReadFile(gitignorePath)
+			if err != nil {
+				return fmt.Errorf("read restored checkout gitignore: %w", err)
+			}
+		}
+	} else if err != nil {
+		return fmt.Errorf("read checkout gitignore: %w", err)
 	}
+	existing := string(data)
 
 	// find which required entries are missing
 	lines := make(map[string]bool)
@@ -161,7 +179,7 @@ func CheckoutGitignoreNeedsFix(repoPath string) bool {
 		return false // no .sageox dir, nothing to fix
 	}
 
-	gitignorePath := filepath.Join(sageoxDir, ".gitignore")
+	gitignorePath := filepath.Join(repoPath, checkoutGitignorePath)
 	data, err := os.ReadFile(gitignorePath)
 	if err != nil {
 		return true // missing or unreadable
@@ -300,7 +318,7 @@ func commitCheckoutGitignore(ctx context.Context, repoPath string) error {
 	// without this flag git blocks staging new files even inside included paths.
 	// -f: the root .gitignore may exclude .sageox/ to hide daemon-created local state;
 	// force-add overrides this so the committed .gitignore inside .sageox/ is tracked.
-	addCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "add", "--sparse", "-f", ".sageox/.gitignore")
+	addCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "add", "--sparse", "-f", checkoutGitignorePath)
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add .sageox/.gitignore: %s: %w", strings.TrimSpace(string(output)), err)
 	}
@@ -314,7 +332,7 @@ func commitCheckoutGitignore(ctx context.Context, repoPath string) error {
 	// pushed them. See ADR-024 and the assertNoSacredMassDeletion backstop.
 	commitCmd := exec.CommandContext(ctx, "git", "-C", repoPath,
 		"commit", "-m", "chore: add .sageox/.gitignore to exclude daemon cache files",
-		"--", ".sageox/.gitignore")
+		"--", checkoutGitignorePath)
 	if output, err := commitCmd.CombinedOutput(); err != nil {
 		// exit code 1 = nothing to commit (file already committed)
 		var exitErr *exec.ExitError
