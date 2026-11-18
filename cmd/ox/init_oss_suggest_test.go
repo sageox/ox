@@ -247,19 +247,23 @@ func TestSuggestOpenSourceTeam_OriginTeamImNotOnDoesNotHideUpstream(t *testing.T
 	assert.Equal(t, ossTeamID, suggestOpenSourceTeam(context.Background(), dir, contributorTeams))
 }
 
-// TestShallowTeamFlagWarning_AlreadyLinkedCloneIsNotWarned — Failure
-// prevented: re-running `ox init --team` in a shallow clone that already has
-// a repo id is told it registers a separate repo, when init re-sends the
-// existing id and nothing is duplicated.
-func TestShallowTeamFlagWarning_AlreadyLinkedCloneIsNotWarned(t *testing.T) {
+// TestShallowTeamFlagWarning_CloneWithARepoIDIsStillWarned — Failure
+// prevented: a shallow clone holding a repo id that was never registered (a
+// skipped registration still saves it) gets no warning and silently
+// registers a duplicate. A clone with an id is warned that it may happen.
+func TestShallowTeamFlagWarning_CloneWithARepoIDIsStillWarned(t *testing.T) {
 	full := contributorClone(t)
 	shallow := filepath.Join(t.TempDir(), "shallow")
 	out, err := exec.Command("git", "clone", "-q", "--depth", "1", "file://"+full, shallow).CombinedOutput()
 	require.NoError(t, err, string(out))
-	require.NotEmpty(t, shallowTeamFlagWarning(shallow), "unlinked shallow clone is warned")
 
-	require.NoError(t, os.MkdirAll(filepath.Join(shallow, ".sageox"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(shallow, ".sageox", "config.json"),
-		[]byte(`{"repo_id":"repo_019a0000-0000-7000-8000-000000000001"}`), 0o600))
-	assert.Empty(t, shallowTeamFlagWarning(shallow))
+	for _, dir := range []string{full, shallow} {
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, ".sageox"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, ".sageox", "config.json"),
+			[]byte(`{"repo_id":"repo_019a0000-0000-7000-8000-000000000001"}`), 0o600))
+	}
+	assert.Empty(t, shallowTeamFlagWarning(full), "a full clone stays silent")
+	warning := shallowTeamFlagWarning(shallow)
+	assert.Contains(t, warning, "If this clone's repo id isn't registered yet, this run registers it as a separate repo")
+	assert.Contains(t, warning, "git fetch --unshallow")
 }

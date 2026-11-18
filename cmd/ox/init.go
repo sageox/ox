@@ -3068,8 +3068,8 @@ func suggestOpenSourceTeam(ctx context.Context, gitRoot string, teams []api.Team
 }
 
 // cloneHasRepoID reports whether this clone already carries a repo id (a
-// .sageox config or repo marker): init then re-sends that id, so the server
-// finds the existing repo and no duplicate is made, shallow or not.
+// .sageox config or repo marker). Init re-sends it, which only avoids a
+// duplicate if the server has seen it: a skipped registration saves one too.
 func cloneHasRepoID(gitRoot string) bool {
 	if cfg, err := config.LoadProjectConfig(gitRoot); err == nil && cfg != nil && cfg.RepoID != "" {
 		return true
@@ -3084,8 +3084,13 @@ func cloneHasRepoID(gitRoot string) bool {
 // repo the team already registered can't be matched and this run registers
 // the clone as a separate repo.
 func shallowTeamFlagWarning(gitRoot string) string {
-	if !repotools.IsShallowClone(gitRoot) || cloneHasRepoID(gitRoot) {
+	if !repotools.IsShallowClone(gitRoot) {
 		return ""
+	}
+	// A repo id here may or may not be registered (a skipped registration
+	// still saves the local one), so it softens the claim, never silences it.
+	if cloneHasRepoID(gitRoot) {
+		return "This is a shallow clone, so ox can't match it to a repo the team already registered. If this clone's repo id isn't registered yet, this run registers it as a separate repo. To be sure of joining the team's existing repo, run `git fetch --unshallow` before `ox init`."
 	}
 	return "This is a shallow clone, so ox can't match it to a repo the team already registered: this run registers it as a separate repo. To join the team's existing repo instead, run `git fetch --unshallow` before `ox init`."
 }
