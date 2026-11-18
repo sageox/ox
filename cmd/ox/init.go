@@ -3043,14 +3043,20 @@ func suggestOpenSourceTeam(ctx context.Context, gitRoot string, teams []api.Team
 		if err != nil {
 			// One remote failing (a 503, a timeout on a slow origin) says
 			// nothing about the other: a fork clone's project is on upstream.
-			slog.Debug("open-source team suggestion unavailable", "remote_repo", owner+"/"+name, "error", err)
+			// No owner/name: this also runs for private repos, and the lookup
+			// itself only ever sends a hash of the name.
+			slog.Debug("open-source team suggestion unavailable", "error", err)
 			continue
 		}
-		if team = bundle.MemberTeam(); team != nil {
+		// Accept a remote's team only if it is one of mine; otherwise keep
+		// looking, so an origin team I'm not on can't hide upstream's.
+		if candidate := bundle.MemberTeam(); candidate != nil &&
+			slices.ContainsFunc(teams, func(t api.TeamMembership) bool { return t.ID == candidate.ID }) {
+			team = candidate
 			break
 		}
 	}
-	if team == nil || !slices.ContainsFunc(teams, func(t api.TeamMembership) bool { return t.ID == team.ID }) {
+	if team == nil {
 		return ""
 	}
 	if repotools.IsShallowClone(gitRoot) {
@@ -3061,13 +3067,24 @@ func suggestOpenSourceTeam(ctx context.Context, gitRoot string, teams []api.Team
 	return team.ID
 }
 
+// cloneHasRepoID reports whether this clone already carries a repo id (a
+// .sageox config or repo marker): init then re-sends that id, so the server
+// finds the existing repo and no duplicate is made, shallow or not.
+func cloneHasRepoID(gitRoot string) bool {
+	if cfg, err := config.LoadProjectConfig(gitRoot); err == nil && cfg != nil && cfg.RepoID != "" {
+		return true
+	}
+	markers, _ := detectExistingRepoMarkers(filepath.Join(gitRoot, ".sageox"))
+	return len(markers) > 0
+}
+
 // shallowTeamFlagWarning is the explicit --team path's warning for a shallow
 // clone; "" for a full clone. --team is honored, so it says what this run
 // does: a shallow clone's hashes are salted with the shallow boundary, so a
 // repo the team already registered can't be matched and this run registers
 // the clone as a separate repo.
 func shallowTeamFlagWarning(gitRoot string) string {
-	if !repotools.IsShallowClone(gitRoot) {
+	if !repotools.IsShallowClone(gitRoot) || cloneHasRepoID(gitRoot) {
 		return ""
 	}
 	return "This is a shallow clone, so ox can't match it to a repo the team already registered: this run registers it as a separate repo. To join the team's existing repo instead, run `git fetch --unshallow` before `ox init`."

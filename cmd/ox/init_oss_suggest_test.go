@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -226,4 +227,39 @@ func TestSuggestOpenSourceTeam_SlowOriginLeavesUpstreamItsOwnBudget(t *testing.T
 	t.Cleanup(func() { fetchPublicPrimeForRepo = orig })
 
 	assert.Equal(t, ossTeamID, suggestOpenSourceTeam(context.Background(), dir, contributorTeams))
+}
+
+// TestSuggestOpenSourceTeam_OriginTeamImNotOnDoesNotHideUpstream — Failure
+// prevented: origin names a team I'm not on, the loop stops there, and the
+// project team on upstream (which I am on) is never offered.
+func TestSuggestOpenSourceTeam_OriginTeamImNotOnDoesNotHideUpstream(t *testing.T) {
+	dir := contributorClone(t)
+	orig := fetchPublicPrimeForRepo
+	fetchPublicPrimeForRepo = func(_ context.Context, _, owner, _ string) (*api.PublicPrimeResponse, error) {
+		id := ossTeamID
+		if owner == "some-contributor" {
+			id = "team_someoneelse01"
+		}
+		return &api.PublicPrimeResponse{Version: 1, Viewer: api.PublicPrimeViewerMember, Team: &api.PublicPrimeTeam{ID: id}}, nil
+	}
+	t.Cleanup(func() { fetchPublicPrimeForRepo = orig })
+
+	assert.Equal(t, ossTeamID, suggestOpenSourceTeam(context.Background(), dir, contributorTeams))
+}
+
+// TestShallowTeamFlagWarning_AlreadyLinkedCloneIsNotWarned — Failure
+// prevented: re-running `ox init --team` in a shallow clone that already has
+// a repo id is told it registers a separate repo, when init re-sends the
+// existing id and nothing is duplicated.
+func TestShallowTeamFlagWarning_AlreadyLinkedCloneIsNotWarned(t *testing.T) {
+	full := contributorClone(t)
+	shallow := filepath.Join(t.TempDir(), "shallow")
+	out, err := exec.Command("git", "clone", "-q", "--depth", "1", "file://"+full, shallow).CombinedOutput()
+	require.NoError(t, err, string(out))
+	require.NotEmpty(t, shallowTeamFlagWarning(shallow), "unlinked shallow clone is warned")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(shallow, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(shallow, ".sageox", "config.json"),
+		[]byte(`{"repo_id":"repo_019a0000-0000-7000-8000-000000000001"}`), 0o600))
+	assert.Empty(t, shallowTeamFlagWarning(shallow))
 }
