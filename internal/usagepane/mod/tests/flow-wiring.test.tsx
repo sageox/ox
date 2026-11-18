@@ -3,11 +3,13 @@
 // carried team context in; it animates once and settles. Failure prevented:
 // a coworker cannot see what SageOx moved into or out of the session, a lane
 // keeps animating (or never settles), the wrong prompt is credited with team
-// context, or terminal sessions get drawings they cannot show.
+// context, or the terminal (which has no Svg) is handed an image instead of
+// the text lane it can show.
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { ANIM_MS } from '../hooks/scene'
+import { TRACK } from '../hooks/textlane'
 import { arrived, drawn, finishOf, laneWidth, LANE_DEFAULT_PX, LANE_MAX_PX, LANE_MIN_PX, newBinder, settleDelay, startOf, submitted } from '../hooks/flowwire'
 
 const PLUGIN = 'ox-cli-brief-pane'
@@ -193,17 +195,63 @@ describe('the lane under an ox tool row', () => {
     })
   }
 
-  test('terminal: the same ox call draws no lane', async ($, on) => {
-    mockEngine(on)
+  test('terminal: the same ox call draws a text lane, repaints it in place while in flight, then settles', async ($, on) => {
+    const s = mockEngine(on)
+    let blits = 0
+    on('ui.blit', () => {
+      blits++
+      return { value: {} }
+    })
+    s.answers.t1 = { result: { stdout: PRIME, stderr: '', interrupted: false }, text: PRIME }
     await $.tool.call({ tool: 'Bash', command: 'ox agent prime', tool_use_id: 't1' } as never)
-    const ui = await $.ui.mount({
-      plugin: PLUGIN,
-      surface: 'terminal',
-      component: 'ToolUse',
-      requestId: 't1',
-      props: { ...toolRow('Bash', { command: 'ox agent prime' }), tool_use_id: 't1' },
-    } as never)
-    expect(await ui.drawn()).toMatchObject({ type: 'Text' })
+    const ui = await mountTool($, 'terminal', 't1', 'Bash', { command: 'ox agent prime' })
+    // No image on the surface that cannot show one; the engine's row stays.
+    expect(await ui.find({ type: 'Svg' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: 'engine' })).toBeDefined()
+    const track = await ui.find({ type: 'Raster', key: 'ox-flow-track' })
+    expect(track?.props.columns).toBe(TRACK)
+    expect(track?.props.rows).toBe(1)
+    const first = String(track?.props.cells)
+    expect(await ui.find({ type: 'Text', text: 'SAGEOX ' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'loaded team context' })).toBeDefined()
+
+    // In flight the track is repainted by blits, not redraws.
+    await s.clock.advance(400)
+    expect(blits).toBeGreaterThan(0)
+
+    // After the animation the row redraws once on its still frame and the
+    // ticker stops: no more blits however long the session runs.
+    await s.clock.advance(ANIM_MS)
+    const settled = String((await ui.find({ type: 'Raster', key: 'ox-flow-track' }))?.props.cells)
+    expect(settled).not.toBe(first)
+    const after = blits
+    await s.clock.advance(5_000)
+    expect(blits).toBe(after)
+    await ui.unmount()
+  })
+
+  test('terminal: flow still draws the settled track at once and never blits', async ($, on) => {
+    const s = mockEngine(on, { flow: 'still' })
+    let blits = 0
+    on('ui.blit', () => {
+      blits++
+      return { value: {} }
+    })
+    s.answers.t1 = { result: { stdout: PRIME, stderr: '', interrupted: false }, text: PRIME }
+    await $.tool.call({ tool: 'Bash', command: 'ox agent prime', tool_use_id: 't1' } as never)
+    const ui = await mountTool($, 'terminal', 't1', 'Bash', { command: 'ox agent prime' })
+    const first = String((await ui.find({ type: 'Raster', key: 'ox-flow-track' }))?.props.cells)
+    await s.clock.advance(ANIM_MS + 500)
+    expect(blits).toBe(0)
+    expect(String((await ui.find({ type: 'Raster', key: 'ox-flow-track' }))?.props.cells)).toBe(first)
+    await ui.unmount()
+  })
+
+  test('terminal: flow off draws no lane', async ($, on) => {
+    const s = mockEngine(on, { flow: false })
+    s.answers.t1 = { result: { stdout: PRIME, stderr: '', interrupted: false }, text: PRIME }
+    await $.tool.call({ tool: 'Bash', command: 'ox agent prime', tool_use_id: 't1' } as never)
+    const ui = await mountTool($, 'terminal', 't1', 'Bash', { command: 'ox agent prime' })
     expect(await ui.find({ type: 'Box', key: 'ox-flow' })).toBeUndefined()
     await ui.unmount()
   })
@@ -311,7 +359,7 @@ describe('the strip under a prompt that carried team context in', () => {
     }
   })
 
-  test('engine and plugin attachments, local nudges and the terminal draw nothing', async ($, on) => {
+  test('engine and plugin attachments and local nudges draw nothing; the terminal draws the strip as text', async ($, on) => {
     mockEngine(on)
     await $.prompt.submit({ text: 'x', wait: false } as never)
     await $.prompt.attachment({ type: 'todo_reminder', text: PRIME, origin: { kind: 'engine' } } as never)
@@ -329,7 +377,9 @@ describe('the strip under a prompt that carried team context in', () => {
       requestId: 'q2',
       props: { text: 'y', origin: { kind: 'composer' }, isExpanded: true },
     } as never)
-    expect(await term.drawn()).toMatchObject({ type: 'Text' })
+    expect(await term.find({ type: 'Svg' })).toBeUndefined()
+    expect(await term.find({ type: 'Raster', key: 'ox-flow-track' })).toBeDefined()
+    expect(await term.find({ type: 'Text', text: '2 murmurs' })).toBeDefined()
     await term.unmount()
   })
 
@@ -366,6 +416,89 @@ describe('tool groups', () => {
   test('terminal: groups stay folded', async ($, on) => {
     const s = mockEngine(on)
     const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'ToolGroup', props: group([call('Bash', { command: 'ox query "x"' })]) } as never)
+    expect(s.seen.filter(x => x.component === 'ToolGroup').map(x => x.props.isExpanded)).toEqual([false])
+    await ui.unmount()
+  })
+
+  // The terminal leaves a group folded, and its ToolUse rows (with their
+  // lanes) are not drawn while it is. Failure prevented: an ox call inside a
+  // folded group shows no lane until the person unfolds it.
+  const oxCall = (id: string, command = 'ox agent prime') => ({ ...call('Bash', { command }), tool_use_id: id })
+  const mountGroup = ($: any, calls: Array<Record<string, unknown>>, isExpanded = false) =>
+    $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'ToolGroup', requestId: 'grp1', props: group(calls, isExpanded), viewport: { columns: 90, rows: 40 } } as never)
+  const runOx = async ($: any, s: ReturnType<typeof mockEngine>, id: string) => {
+    s.answers[id] = { result: { stdout: PRIME, stderr: '', interrupted: false }, text: PRIME }
+    await $.tool.call({ tool: 'Bash', command: 'ox agent prime', tool_use_id: id } as never)
+  }
+
+  test('terminal: a folded group stays folded and draws its ox call lane beneath it, animated then settled', async ($, on) => {
+    const s = mockEngine(on)
+    let blits = 0
+    on('ui.blit', () => {
+      blits++
+      return { value: {} }
+    })
+    await runOx($, s, 'g1')
+    const ui = await mountGroup($, [call('Read', { file_path: '/a' }), oxCall('g1')])
+    expect(s.seen.filter(x => x.component === 'ToolGroup').map(x => x.props.isExpanded)).toEqual([false])
+    expect(await ui.find({ type: 'Text', text: 'engine' })).toBeDefined()
+    const track = await ui.find({ type: 'Raster', key: 'ox-flow-track:g1' })
+    expect(track?.props.columns).toBe(TRACK)
+    expect(await ui.find({ type: 'Text', text: 'loaded team context' })).toBeDefined()
+    const first = String(track?.props.cells)
+
+    await s.clock.advance(400)
+    expect(blits).toBeGreaterThan(0)
+    await s.clock.advance(ANIM_MS)
+    expect(String((await ui.find({ type: 'Raster', key: 'ox-flow-track:g1' }))?.props.cells)).not.toBe(first)
+    const after = blits
+    await s.clock.advance(5_000)
+    expect(blits).toBe(after)
+    await ui.unmount()
+  })
+
+  test('terminal: an expanded group draws no group-level lane; its rows draw their own', async ($, on) => {
+    const s = mockEngine(on)
+    await runOx($, s, 'g2')
+    const ui = await mountGroup($, [oxCall('g2')], true)
+    expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+    expect(await ui.drawn()).toMatchObject({ type: 'Text' })
+    await ui.unmount()
+  })
+
+  test('terminal: a folded group with no ox call event is drawn untouched', async ($, on) => {
+    mockEngine(on)
+    await $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'p1' } as never)
+    const ui = await mountGroup($, [{ ...call('Bash', { command: 'ls' }), tool_use_id: 'p1' }, call('Read', { file_path: '/a' }), oxCall('never-called')])
+    expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+    expect(await ui.drawn()).toMatchObject({ type: 'Text' })
+    await ui.unmount()
+  })
+
+  test('terminal: a folded group with five ox calls draws the newest three lanes and counts the rest', async ($, on) => {
+    const s = mockEngine(on)
+    const ids = ['m1', 'm2', 'm3', 'm4', 'm5']
+    for (const id of ids) {
+      await runOx($, s, id)
+    }
+    const ui = await mountGroup($, ids.map(id => oxCall(id)))
+    const rasters = await ui.findAll({ type: 'Raster' })
+    expect(rasters.map((r: any) => r.key)).toEqual(['ox-flow-track:m3', 'ox-flow-track:m4', 'ox-flow-track:m5'])
+    expect(await ui.find({ type: 'Text', text: '+2 more ox calls' })).toBeDefined()
+    await ui.unmount()
+
+    // One hidden call reads singular.
+    const four = await mountGroup($, ids.slice(1).map(id => oxCall(id)))
+    expect(await four.find({ type: 'Text', text: '+1 more ox call' })).toBeDefined()
+    await four.unmount()
+  })
+
+  test('terminal: flow off draws no lane under a folded group', async ($, on) => {
+    const s = mockEngine(on)
+    await runOx($, s, 'g3')
+    await $.command.run({ command: 'ox-session-report', args: 'flow off', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 }, surface: 'desktop' } as never)
+    const ui = await mountGroup($, [oxCall('g3')])
+    expect(await ui.find({ type: 'Raster' })).toBeUndefined()
     expect(s.seen.filter(x => x.component === 'ToolGroup').map(x => x.props.isExpanded)).toEqual([false])
     await ui.unmount()
   })
