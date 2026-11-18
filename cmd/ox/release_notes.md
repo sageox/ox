@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`ox brief` is gone; use `ox session report`** — the alias kept for one release after the rename is removed. `ox session report` takes the same flags, and the `brief_pane` setting still works as the old name of `session_report_pane`.
+
 ### Fixed
 
 - **Each Codex desktop chat gets its own AI coworker** — every chat in the ChatGPT desktop app runs under one Codex process, so a new chat reused the first chat's AI coworker and the two sessions were recorded as one, losing a chat's history. A chat with its own session ID now always gets its own AI coworker.
