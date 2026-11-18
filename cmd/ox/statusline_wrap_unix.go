@@ -91,7 +91,6 @@ func runStatuslineWrap(ctx context.Context, argv []string) (int, error) {
 					return // the terminal has been given back: nothing more is passed through
 				}
 				_, _ = os.Stdout.Write(filter.write(buf[:n]))
-				_, _ = io.WriteString(os.Stdout, filter.flushRegion())
 				lastOutput = time.Now()
 				switch {
 				case !filter.cursorSaved:
@@ -99,6 +98,7 @@ func runStatuslineWrap(ctx context.Context, argv []string) (int, error) {
 				case savedSince.IsZero():
 					savedSince = lastOutput
 				}
+				_, _ = io.WriteString(os.Stdout, filter.flushRegion(time.Since(savedSince)))
 				mu.Unlock()
 			}
 			if readErr != nil {
@@ -132,6 +132,9 @@ func runStatuslineWrap(ctx context.Context, argv []string) (int, error) {
 		content := wrapRow(f.status, lane, cols)
 		mu.Lock()
 		defer mu.Unlock()
+		// A resize the app's saved cursor held back is finished here too: the
+		// app may write nothing more before it restores.
+		_, _ = io.WriteString(os.Stdout, filter.flushRegion(time.Since(savedSince)))
 		if !filter.canDraw(time.Since(savedSince)) || time.Since(lastOutput) < wrapQuiet {
 			return f.moving || filter.dirty // the app is mid-draw: try again shortly
 		}
@@ -172,7 +175,7 @@ loop:
 				mu.Lock()
 				cols, rows = c, r
 				_ = pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(r - 1), Cols: uint16(c)}) //nolint:gosec // terminal sizes fit uint16
-				_, _ = io.WriteString(os.Stdout, filter.resized(r-1))
+				_, _ = io.WriteString(os.Stdout, filter.resized(r-1, time.Since(savedSince)))
 				mu.Unlock()
 			}
 			timer.Reset(wrapQuiet)

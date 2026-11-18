@@ -79,12 +79,14 @@ func (f *wrapFilter) setRegion() string {
 }
 
 // resized records the app's new height and returns what to write now: the
-// new scroll region, or nothing while the app is inside a control sequence
-// (a title, a link, an image), where ox's bytes would become part of it. The
-// region then comes from flushRegion once the sequence has ended.
-func (f *wrapFilter) resized(rows int) string {
+// new scroll region, or nothing while ox may not write (canDraw): the app is
+// inside a control sequence (a title, a link, an image), where ox's bytes
+// would become part of it, or holds a saved cursor that setting the region
+// (which saves and restores one too) would replace. The region then comes
+// from flushRegion. savedFor is how long the app has held its save.
+func (f *wrapFilter) resized(rows int, savedFor time.Duration) string {
 	f.rows, f.dirty = rows, true
-	if !f.idle() {
+	if !f.canDraw(savedFor) {
 		f.regionPending = true
 		return ""
 	}
@@ -92,10 +94,10 @@ func (f *wrapFilter) resized(rows int) string {
 	return f.setRegion()
 }
 
-// flushRegion returns the scroll region a resize left pending, once the app
-// is between sequences; "" otherwise.
-func (f *wrapFilter) flushRegion() string {
-	if !f.regionPending || !f.idle() {
+// flushRegion returns the scroll region a resize left pending, once ox may
+// write it (canDraw); "" otherwise.
+func (f *wrapFilter) flushRegion(savedFor time.Duration) string {
+	if !f.regionPending || !f.canDraw(savedFor) {
 		return ""
 	}
 	f.regionPending = false
