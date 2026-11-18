@@ -8,7 +8,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { FlowEvent } from '../types'
-import { ANIM_MS, eventModel, promptModel } from '../hooks/scene'
+import { ANIM_MS, eventModel } from '../hooks/scene'
 import { encodeCells, fitCells, lanePlain, MARCH_MAX_MS, MAX_TEXT_DOTS, NARROW_COLUMNS, RGB_BAD, RGB_DEFAULT, RGB_QUIET, RGB_STREAM, textLane, TRACK, trackCells, trackString } from '../hooks/textlane'
 
 const T0 = 1_760_000_000_000
@@ -191,16 +191,5 @@ describe('fitting the row', () => {
     expect(text(34)).toBe('~1.2k from 5 discussions · 0.8s')
     expect(text(10)).toMatch(/…$/)
     expect(text(0)).toBe('')
-  })
-})
-
-describe('the prompt strip', () => {
-  test('several attachments sum into one inbound lane', () => {
-    const evs = [
-      ev({ id: 'att:p#b0#0', label: 'team context', tokens: 15_000, items: undefined, endedAt: T0 }),
-      ev({ id: 'att:p#b0#1', lane: 'murmurs', tokens: 300, items: 3, itemsNoun: 'murmurs', endedAt: T0 }),
-    ]
-    const lane = textLane(promptModel(evs, T0 + ANIM_MS + 1), T0 + ANIM_MS + 1, { columns: 120 })
-    expect(lanePlain(lane)).toBe('SAGEOX ●━━━━━━━━━━━━━━━━● SESSION  team context ~15k · 3 murmurs')
   })
 })

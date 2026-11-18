@@ -166,29 +166,11 @@ export function laneDigest(e: FlowEvent): Seg[] {
 }
 
 /** "3 murmurs" when items are known, else "team context ~15k". */
-function attachmentPart(e: FlowEvent): Seg[] {
-  const items = itemsPhrase(e)
-  if (items) {
-    return [{ text: items }]
-  }
-  return [{ text: `${LANE_NAMES[e.lane]} ` }, { text: formatTokens(e.tokens), cls: 'n' }]
-}
-
-function attachmentWords(e: FlowEvent): string {
-  return itemsPhrase(e) ?? `${LANE_NAMES[e.lane]} ${formatTokens(e.tokens)} tokens`
-}
-
 /**
  * The sentence for the non-visual channel, used as both the image's alt and
- * its aria-label. One event: "searched team: ~1.2k tokens from 5 discussions,
- * 0.8s". Several (a prompt's attachments): "with this prompt: team context
- * ~15k tokens, 3 murmurs, 1 ledger match; ~16k tokens in all".
+ * its aria-label: "searched team: ~1.2k tokens from 5 discussions, 0.8s".
  */
-export function caption(input: FlowEvent | FlowEvent[]): string {
-  if (Array.isArray(input)) {
-    return promptCaption(input)
-  }
-  const e = input
+export function caption(e: FlowEvent): string {
   const dur = e.endedAt === undefined ? '' : formatDuration(e.endedAt - e.startedAt)
   switch (outcomeOf(e)) {
     case 'open':
@@ -215,27 +197,6 @@ export function caption(input: FlowEvent | FlowEvent[]): string {
 
 function nothingMoved(e: FlowEvent): string {
   return e.direction === 'in' ? 'nothing came back' : 'nothing sent'
-}
-
-function promptCaption(events: FlowEvent[]): string {
-  if (events.length === 0) {
-    return 'nothing from SageOx with this prompt'
-  }
-  const running = events.find((e) => e.endedAt === undefined)
-  if (running) {
-    return `${running.step}, still running`
-  }
-  const ok = events.filter((e) => !e.failed && !e.interrupted && e.tokens > 0)
-  const bad = events.length - ok.length
-  const parts = ok.map(attachmentWords)
-  let s = parts.length ? `with this prompt: ${parts.join(', ')}` : 'nothing from SageOx with this prompt'
-  if (ok.length > 1) {
-    s += `; ${formatTokens(ok.reduce((n, e) => n + e.tokens, 0))} tokens in all`
-  }
-  if (bad > 0) {
-    s += `; ${bad} failed`
-  }
-  return s
 }
 
 // ---- layout --------------------------------------------------------------
@@ -290,7 +251,7 @@ function fitDigest(segs: Seg[], room: number): Seg[] {
 
 // ---- drawing -------------------------------------------------------------
 
-/** Everything the drawing needs, from one event or a prompt's several. */
+/** Everything the drawing needs, from one event. */
 export type Model = {
   key: string
   direction: FlowDirection
@@ -521,58 +482,4 @@ export function laneSvg(event: FlowEvent, now: number, opts: SceneOpts = {}): st
   const m = eventModel(event)
   const label = caption(event)
   return fitSource((level) => wrap(m, now, opts, level, label))
-}
-
-/**
- * The prompt row's strip: every attachment event of one prompt summed into one
- * inbound lane. Open while any is open; settled when all have ended.
- */
-export function promptSvg(events: FlowEvent[], now: number, opts: SceneOpts = {}): string {
-  const label = caption(events)
-  const m = promptModel(events, now)
-  return fitSource((level) => wrap(m, now, opts, level, label))
-}
-
-/** A prompt's attachment events as one inbound model: shared by the SVG and the text lane. */
-export function promptModel(events: FlowEvent[], now: number): Model {
-  const running = events.find((e) => e.endedAt === undefined)
-  const ok = events.filter((e) => !e.failed && !e.interrupted && e.tokens > 0)
-  const bad = events.length - ok.length
-  const startedAt = events.reduce((t, e) => Math.min(t, e.startedAt), events[0]?.startedAt ?? now)
-  const endedAt = running || events.length === 0 ? undefined : events.reduce((t, e) => Math.max(t, e.endedAt ?? t), startedAt)
-
-  const digest: Seg[] = []
-  ok.forEach((e, i) => {
-    if (i > 0) {
-      digest.push(SEP)
-    }
-    digest.push(...attachmentPart(e))
-  })
-  if (bad > 0) {
-    if (digest.length) {
-      digest.push(SEP)
-    }
-    digest.push({ text: `${bad} failed`, cls: 'bad' })
-  }
-
-  // No events at all draws as an empty lane that ended now.
-  let outcome: Outcome
-  if (events.length === 0) {
-    outcome = 'empty'
-  } else if (running) {
-    outcome = 'open'
-  } else if (ok.length) {
-    outcome = 'flowed'
-  } else {
-    outcome = events.some((e) => e.failed) ? 'failed' : 'empty'
-  }
-  return {
-    key: events.map((e) => e.id).join('|') || 'prompt',
-    direction: 'in',
-    tokens: ok.reduce((n, e) => n + e.tokens, 0),
-    startedAt,
-    endedAt: events.length === 0 ? now : endedAt,
-    outcome,
-    digest: running ? [{ text: running.step }] : digest.length ? digest : [{ text: 'nothing came back' }],
-  }
 }

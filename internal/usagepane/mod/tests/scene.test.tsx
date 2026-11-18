@@ -8,7 +8,6 @@ import {
   formatDuration,
   fitSource,
   laneSvg,
-  promptSvg,
   strokeWeight,
   SVG_SOURCE_CAP,
 } from '../hooks/scene'
@@ -145,8 +144,6 @@ describe('a pure function of (event, now)', () => {
 
   test('same input, same string', () => {
     expect(laneSvg(ev(), T0 + 1000)).toBe(laneSvg(ev(), T0 + 1000))
-    const evs = [ev({ id: 'a' }), ev({ id: 'b', lane: 'murmurs', items: 3, itemsNoun: 'murmurs' })]
-    expect(promptSvg(evs, T0 + 1000)).toBe(promptSvg(evs, T0 + 1000))
   })
 })
 
@@ -212,18 +209,6 @@ describe('states', () => {
     expect(svg).toContain('0.8s')
   })
 
-  test('prompt strip sums its sources', () => {
-    const svg = promptSvg(
-      [
-        ev({ id: 'a', label: 'loaded team context', tokens: 14_820, items: undefined }),
-        ev({ id: 'b', lane: 'murmurs', tokens: 310, items: 3, itemsNoun: 'murmurs' }),
-        ev({ id: 'c', lane: 'ledger', tokens: 520, items: 1, itemsNoun: 'ledger match' }),
-      ],
-      T0 + 60_000,
-    )
-    expect(svg).toContain('team context <tspan class="n">~15k</tspan> · 3 murmurs · 1 ledger match')
-    expect(svg).toContain('stroke-width="3"')
-  })
 })
 
 describe('safe as a plain <img>', () => {
@@ -231,7 +216,6 @@ describe('safe as a plain <img>', () => {
     laneSvg(ev(), T0 + 900),
     laneSvg(ev({ endedAt: undefined }), T0 + 100),
     laneSvg(ev({ failed: true, label: '<script>alert(1)</script> onload="x"' }), T0 + 900),
-    promptSvg([ev({ id: 'a' }), ev({ id: 'b' })], T0 + 900),
   ]
 
   test('no script, no handlers, no images, no external refs', () => {
@@ -253,10 +237,8 @@ describe('safe as a plain <img>', () => {
     }
   })
 
-  test('a 12-dot lane and a 3-source strip are well under the cap', () => {
+  test('a 12-dot lane is well under the cap', () => {
     expect(bytes(laneSvg(ev({ tokens: 14_820 }), T0 + 800))).toBeLessThan(SVG_SOURCE_CAP / 10)
-    const evs = [ev({ id: 'a', tokens: 14_820 }), ev({ id: 'b', tokens: 310 }), ev({ id: 'c', tokens: 520 })]
-    expect(bytes(promptSvg(evs, T0 + 800))).toBeLessThan(SVG_SOURCE_CAP / 10)
   })
 
   test('a huge label stays bounded', () => {
@@ -314,17 +296,6 @@ describe('the non-visual channel', () => {
     expect(formatDuration(59_600)).toBe('1m 0s')
     expect(formatDuration(72_000)).toBe('1m 12s')
     expect(formatDuration(119_600)).toBe('2m 0s')
-  })
-
-  test('a prompt strip sums its sources in words', () => {
-    expect(
-      caption([
-        ev({ id: 'a', tokens: 14_820, items: undefined }),
-        ev({ id: 'b', lane: 'murmurs', tokens: 310, items: 3, itemsNoun: 'murmurs' }),
-        ev({ id: 'c', lane: 'ledger', tokens: 520, items: 1, itemsNoun: 'ledger match' }),
-      ]),
-    ).toBe('with this prompt: team context ~15k tokens, 3 murmurs, 1 ledger match; ~16k tokens in all')
-    expect(caption([])).toBe('nothing from SageOx with this prompt')
   })
 
   test('text is escaped', () => {

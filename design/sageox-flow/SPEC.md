@@ -48,17 +48,17 @@ end labels. `[B]`
 - Failed: `failed` (danger) ` while searching team discussions · 1.2s` `[H]` `[DS]` rule 3.
 - Interrupted: `interrupted while searching team discussions · 3.4s`, no danger `[B]`.
 - Zero tokens: `searched code · nothing came back · 0.3s` (out: `nothing sent`) `[B]`.
-- Prompt strip: `team context ~15k · 1 ledger match`, no duration (nobody waits on it) `[H]`
-  group-line pattern. Murmurs that arrive with a prompt draw nothing: they are for the AI
-  coworker to read, and most are a coworker's own other sessions or ox's reminders.
+- No prompt strip. Context a hook injects with a prompt (the session-start prime, murmurs,
+  ledger recall) draws nothing: only an ox call gets a lane. A lane under a prompt nobody made
+  an ox call for read as noise, and the engine raises every earlier attachment again after a
+  plugin reload or a resume, so old context kept appearing under new prompts.
 - Too long: the label shrinks with `…`; if even that does not fit, the label goes (the host row
   above names the call) and numbers stay; only then is the tail cut. `[C]` long-and-many.
 - Alt and caption, the same sentence `[DS]` rule 18:
   `searched team: ~1.2k tokens from 5 discussions, 0.8s` ·
   `posted murmur: ~64 tokens sent to murmurs, 0.4s` ·
   `failed while searching team discussions after 1.2s; nothing came back` ·
-  `searching team discussions, still running` ·
-  `with this prompt: team context ~15k tokens, 1 ledger match; ~15k tokens in all`.
+  `searching team discussions, still running`.
 
 ## States
 
@@ -70,7 +70,6 @@ end labels. `[B]`
 | failed | stub off the origin, danger `[B]` | both danger | words, "failed" in danger |
 | interrupted / zero | stub off the origin `[B]` | both quiet | words |
 | out | same marks, travel right → left as hollow rings `[DS]` r3 | SageOx end fills | "posted murmur" |
-| prompt strip | one inbound lane summing every attachment | as above | parts joined by ` · ` |
 | reduced motion (caller flag) | settled frame, no animation elements `[DS]` r2 | | |
 | narrow / long label / dark | see Anatomy, Content, Tokens | | |
 
@@ -170,8 +169,7 @@ nothing   SAGEOX ●╶─              ● SESSION  failed while searching team
 ## Terminal lane
 
 A terminal has no `Svg`, so there the plugin draws the lane as one row of text cells
-(`internal/usagepane/mod/hooks/textlane.ts`), under each ox call and each prompt that carried
-Team Context in.
+(`internal/usagepane/mod/hooks/textlane.ts`), under each ox call.
 
 ```
 running   SAGEOX ●┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄○ SESSION  searching team discussions
@@ -213,7 +211,7 @@ nothing   SAGEOX ●╶─              ● SESSION  failed while searching team
 
 `SVG_SOURCE_CAP = 131072` bytes. `fitSource` renders level 0 (everything), then level 1 (at most
 3 dots, no end labels, no digest on a flowed lane), then level 2 (no animation, no text). A
-12-dot lane is ~4.5 KB and a 3-source prompt strip ~2.5 KB; truncation keeps text bounded, so that
+12-dot lane is ~4.5 KB; truncation keeps text bounded, so that
 guard is a backstop. `[B]`
 
 ## Choices worth recording

@@ -22,16 +22,6 @@ export type FlowStart = {
   sent?: number
 }
 
-/** One block of hook-injected team context; always direction `in`. */
-export type FlowAttachment = {
-  lane: FlowLane
-  label: string
-  step: string
-  tokens: number
-  items?: number
-  itemsNoun?: string
-}
-
 export type FlowItems = { items: number; itemsNoun: string }
 
 // --- Bash: finding the ox words in a shell line -----------------------------
@@ -616,97 +606,6 @@ export function finishItems(text: string | undefined, start: FlowStart): FlowIte
   return n === undefined ? undefined : { items: n, itemsNoun: plural(noun, n) }
 }
 
-// --- Hook-injected context --------------------------------------------------
-
-const ATTACHMENT_EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'PreCompact'])
-const REMINDER_OPEN = '<system-reminder>'
-const REMINDER_CLOSE = '</system-reminder>'
-
-type Found = { pos: number; att: FlowAttachment }
-
-function endOf(text: string, from: number, ...markers: string[]): number {
-  let end = text.length
-  for (const m of markers) {
-    const i = text.indexOf(m, from)
-    if (i >= 0) {
-      end = Math.min(end, m === REMINDER_CLOSE || m === '</ox-prime>' ? i + m.length : i)
-    }
-  }
-  return end
-}
-
-function primeBlocks(text: string, found: Found[]): [number, number][] {
-  const spans: [number, number][] = []
-  for (let i = text.indexOf('<ox-prime'); i >= 0; i = text.indexOf('<ox-prime', i + 1)) {
-    const next = text[i + '<ox-prime'.length]
-    if (next !== ' ' && next !== '>' && next !== '\n') {
-      continue
-    }
-    const end = endOf(text, i, '</ox-prime>')
-    const block = text.slice(i, end)
-    const budget = BUDGET_TOTAL.exec(block)
-    const compact = /^<ox-prime\b[^>]*\bmode="compact"/.test(block)
-    found.push({
-      pos: i,
-      att: {
-        lane: 'team-context',
-        label: compact ? 'reloaded team context' : 'loaded team context',
-        step: compact ? 'reloading team context' : 'loading team context',
-        tokens: budget ? Number(budget[1]) : byteTokens(block),
-      },
-    })
-    spans.push([i, end])
-    i = end - 1
-  }
-  return spans
-}
-
-function inside(spans: [number, number][], pos: number): boolean {
-  return spans.some(([a, b]) => pos >= a && pos < b)
-}
-
-/**
- * classifyAttachment: the team-context blocks one hook attachment brought in,
- * in text order: an `<ox-prime>` document (team-context) and `[ox-recall]`
- * ledger matches (ledger). A murmur block draws nothing: murmurs are for the
- * AI coworker to read, and most that arrive with a prompt are a coworker's
- * own other sessions or ox's reminders. Local nudges (`<agent-tasks>`,
- * `[ox] …`) and hooks other than SessionStart, UserPromptSubmit and
- * PreCompact yield none.
- */
-export function classifyAttachment(text: string, event: string): FlowAttachment[] {
-  if (typeof text !== 'string' || !ATTACHMENT_EVENTS.has(event)) {
-    return []
-  }
-  const found: Found[] = []
-  const prime = primeBlocks(text, found)
-
-  for (let i = text.indexOf('[ox-recall'); i >= 0; i = text.indexOf('[ox-recall', i + 1)) {
-    if (inside(prime, i)) {
-      continue
-    }
-    const end = endOf(text, i + 1, REMINDER_CLOSE, '[ox-recall')
-    const block = text.slice(i, end)
-    const n = block.split('\n').filter(l => l.startsWith('- ')).length
-    if (n === 0) {
-      continue
-    }
-    found.push({
-      pos: i,
-      att: {
-        lane: 'ledger',
-        label: 'recalled ledger matches',
-        step: 'searching the ledger',
-        tokens: byteTokens(block),
-        items: n,
-        itemsNoun: plural('ledger match', n),
-      },
-    })
-  }
-
-  return found.sort((a, b) => a.pos - b.pos).map(f => f.att)
-}
-
 // --- State ------------------------------------------------------------------
 
 export const MAX_EVENTS = 60
@@ -784,53 +683,7 @@ export function finishEvent(state: FlowState, f: FlowFinish): FlowState {
   return { byId: { ...state.byId, [f.id]: done }, order: state.order }
 }
 
-/** attachmentId: the event id of a prompt attachment's nth block. */
-export function attachmentId(id: string, index: number): string {
-  return `${id}#${index}`
-}
-
-/**
- * attachEvents: records a prompt attachment's blocks as finished `in` events,
- * ids `<id>#0`, `<id>#1`, … (id is `att:<message id>`). Recording the same id
- * twice is a no-op, so call it once per attachment message.
- */
-export function attachEvents(
-  state: FlowState,
-  { id, now, attachments }: { id: string; now: number; attachments: readonly FlowAttachment[] },
-): FlowState {
-  if (!id || attachments.length === 0 || Object.prototype.hasOwnProperty.call(state.byId, attachmentId(id, 0))) {
-    return state
-  }
-  const byId = { ...state.byId }
-  const order = [...state.order]
-  attachments.forEach((a, i) => {
-    const eid = attachmentId(id, i)
-    const ev: FlowEvent = {
-      id: eid,
-      lane: a.lane,
-      direction: 'in',
-      label: a.label,
-      step: a.step,
-      tokens: a.tokens,
-      startedAt: now,
-      endedAt: now,
-    }
-    if (a.items !== undefined && a.itemsNoun) {
-      ev.items = a.items
-      ev.itemsNoun = a.itemsNoun
-    }
-    byId[eid] = ev
-    order.push(eid)
-  })
-  return capped(byId, order)
-}
-
-/** eventsFor: the events under one id (a tool_use_id, or an attachment id and its `#n` blocks), oldest first. */
+/** eventsFor: the events under one tool_use_id, oldest first. */
 export function eventsFor(state: FlowState, id: string): FlowEvent[] {
-  return state.order.filter(e => e === id || e.startsWith(`${id}#`)).map(e => state.byId[e])
-}
-
-/** promptEvents: the attachment events of one prompt, by message id (`att:` prefix optional). */
-export function promptEvents(state: FlowState, id: string): FlowEvent[] {
-  return eventsFor(state, id.startsWith('att:') ? id : `att:${id}`)
+  return state.order.filter(e => e === id).map(e => state.byId[e])
 }
