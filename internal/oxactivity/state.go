@@ -53,6 +53,10 @@ type State struct {
 	// status bar and shows the line as a turn-end notice instead (Codex). It
 	// is how that notice stays silent on turns where nothing changed.
 	ShownLine string `json:"shown_line,omitempty"`
+	// ShownFlows is how many of the session's flow lanes (ox calls that moved
+	// team data) that turn-end notice has already shown, so each is shown
+	// once. Like the counts it starts over with a new recording.
+	ShownFlows int `json:"shown_flows,omitempty"`
 	// Recording is the ox recording (session.RecordingState.SessionID, a
 	// ses_ id) the counts belong to. A harness session outlives a recording
 	// on every resume, pause or idle finalize, and `ox session report` counts

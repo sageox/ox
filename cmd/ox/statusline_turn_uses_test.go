@@ -128,14 +128,16 @@ func TestStop_TurnUsesSilentCases(t *testing.T) {
 	})
 }
 
-// TestStop_CodexDigestShowsTurnUses pins the order inside Stop for Codex: the
-// turn's uses are counted before the digest reads the counts, so the notice
-// says "1 used" on the very turn that used it. Failure prevented: Codex,
-// which has no pane to run the scan for it, never showing a use at all.
-func TestStop_CodexDigestShowsTurnUses(t *testing.T) {
+// TestStop_DigestShowsTurnUses pins the order inside Stop for a host that
+// shows the status line as a turn-end notice (Claude Code inside Conductor):
+// the turn's uses are counted before the digest reads the counts, so the
+// notice says "1 used" on the very turn that used it. Failure prevented: a
+// host with no pane to run the scan for it never showing a use at all.
+func TestStop_DigestShowsTurnUses(t *testing.T) {
 	root, _ := turnUsesEnv(t)
+	stubOrchestrator(t, "conductor")
 	ctx := &HookContext{
-		Phase: phaseStop, AgentType: "codex", ProjectRoot: root,
+		Phase: phaseStop, AgentType: "claude-code", ProjectRoot: root,
 		Input:  &agentx.HookInput{SessionID: liveHarnessSess},
 		Marker: &SessionMarker{AgentID: usageAgentID, AgentSessionID: liveHarnessSess},
 	}
@@ -143,7 +145,7 @@ func TestStop_CodexDigestShowsTurnUses(t *testing.T) {
 	out := string(captureRealStdout(t, func() { hookErr = handleStop(ctx) }))
 	require.NoError(t, hookErr)
 	doc := decodeCodexHookDoc(t, out)
-	assert.Equal(t, "● ox  1 discussion · 1 used  ● rec", doc.SystemMessage, "the cited discussion counts as used, and as a discussion")
+	assert.Equal(t, "● ox  1 discussion · 1 used  ● rec", digestStatusLine(doc.SystemMessage), "the cited discussion counts as used, and as a discussion")
 }
 
 // TestStatusline_NewRecordingStartsOver: one Claude Code session can span

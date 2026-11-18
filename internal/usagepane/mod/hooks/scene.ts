@@ -34,7 +34,7 @@ export type SceneOpts = {
 }
 
 export type Phase = 'running' | 'flight' | 'settled'
-type Outcome = 'open' | 'flowed' | 'failed' | 'interrupted' | 'empty'
+export type Outcome = 'open' | 'flowed' | 'failed' | 'interrupted' | 'empty'
 
 const LANE_NAMES: Record<FlowLane, string> = {
   'team-context': 'team context',
@@ -86,7 +86,7 @@ export function phaseOf(e: { endedAt?: number }, now: number, reducedMotion = fa
   return now - e.endedAt < ANIM_MS ? 'flight' : 'settled'
 }
 
-function outcomeOf(e: FlowEvent): Outcome {
+export function outcomeOf(e: FlowEvent): Outcome {
   if (e.endedAt === undefined) {
     return 'open'
   }
@@ -127,9 +127,9 @@ function hash(s: string): string {
 // ---- words ---------------------------------------------------------------
 
 /** A run of digest text; `n` is a number (mono, tabular), `bad` is danger. */
-type Seg = { text: string; cls?: 'n' | 'bad' }
+export type Seg = { text: string; cls?: 'n' | 'bad' }
 
-const SEP: Seg = { text: ' · ' }
+export const SEP: Seg = { text: ' · ' }
 
 function itemsPhrase(e: FlowEvent): string | null {
   if (e.items === undefined || e.items <= 0) {
@@ -139,7 +139,7 @@ function itemsPhrase(e: FlowEvent): string | null {
 }
 
 /** The digest beside a single lane, by outcome. */
-function laneDigest(e: FlowEvent): Seg[] {
+export function laneDigest(e: FlowEvent): Seg[] {
   const outcome = outcomeOf(e)
   const dur = e.endedAt === undefined ? '' : formatDuration(e.endedAt - e.startedAt)
   switch (outcome) {
@@ -291,7 +291,7 @@ function fitDigest(segs: Seg[], room: number): Seg[] {
 // ---- drawing -------------------------------------------------------------
 
 /** Everything the drawing needs, from one event or a prompt's several. */
-type Model = {
+export type Model = {
   key: string
   direction: FlowDirection
   tokens: number
@@ -312,6 +312,8 @@ function css(p: Palette): string {
     `.nq{fill:${p.quiet}}`,
     `.nd{fill:${p.node}}`,
     `.s0,.s1{stop-color:${p.quiet}}`,
+    `.nb{fill:${p.danger}}`,
+    `.b0,.b1{stop-color:${p.danger}}`,
   ].join('')
 }
 
@@ -326,7 +328,7 @@ function style(): string {
     `.open{fill:none;stroke-width:${T.quietW};stroke-dasharray:${T.openDash};stroke-linecap:round}` +
     `.ring{fill:none;stroke-width:${T.quietW}}` +
     '.dot-out{fill:none;stroke-width:1.25}' +
-    '.s0{stop-opacity:1}.s1{stop-opacity:0}' +
+    '.s0,.b0{stop-opacity:1}.s1,.b1{stop-opacity:0}' +
     css(LIGHT) +
     `@media (prefers-color-scheme: dark){${css(DARK)}}` +
     '@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}' +
@@ -382,8 +384,10 @@ function draw(m: Model, now: number, opts: SceneOpts, level: Level): string {
   }
 
   // The origin node is quiet; the destination fills once something landed.
+  // A failure draws both nodes and its stub in the danger colour.
   const landed = m.outcome === 'flowed'
-  parts.push(`<circle class="nq" cx="${from}" cy="${y}" r="${T.nodeR}"/>`)
+  const failed = m.outcome === 'failed'
+  parts.push(`<circle class="${failed ? 'nb' : 'nq'}" cx="${from}" cy="${y}" r="${T.nodeR}"/>`)
 
   if (m.outcome === 'open') {
     // Dotted line to a ring where it would land. Fades in once, from startedAt.
@@ -392,6 +396,25 @@ function draw(m: Model, now: number, opts: SceneOpts, level: Level): string {
     const fade = reduced ? '' : fadeIn(sinceStart)
     parts.push(`<g>${fade}<line class="open" x1="${x0}" y1="${y}" x2="${end}" y2="${y}"/>`)
     parts.push(`<circle class="ring" cx="${ringX}" cy="${y}" r="${T.ringR}"/></g>`)
+    // While the call runs, dots (in) or rings (out) march from the origin to
+    // the ring, over and over: the one loop in the lane, there to show which
+    // way a call in progress moves data. Each begin is set back by the time
+    // already run, so a redraw carries on where the last frame was. Static
+    // frame: invisible. It ends with the call, or with a start too old to believe.
+    if (!reduced && sinceStart < T.marchMaxMs) {
+      const cls = inbound ? 'dot-in' : 'dot-out'
+      const r = inbound ? T.dotR : T.ringDotR
+      const loop = ' repeatCount="indefinite"'
+      for (let i = 0; i < T.marchDots; i++) {
+        const begin = -((sinceStart + (i * T.marchMs) / T.marchDots) % T.marchMs)
+        parts.push(
+          `<circle class="${cls}" cx="${x0}" cy="${y}" r="${r}" opacity="0">` +
+            `<animate attributeName="cx" values="${x0};${end}" dur="${sec(T.marchMs)}" begin="${sec(begin)}"${loop}/>` +
+            `<animate attributeName="opacity" values="0;0.9;0.9;0" keyTimes="0;0.1;0.9;1" dur="${sec(T.marchMs)}" begin="${sec(begin)}"${loop}/>` +
+            '</circle>',
+        )
+      }
+    }
   } else if (m.outcome === 'flowed') {
     parts.push(`<circle class="nd" cx="${to}" cy="${y}" r="${T.nodeR}"/>`)
     const w = strokeWeight(m.tokens)
@@ -435,10 +458,10 @@ function draw(m: Model, now: number, opts: SceneOpts, level: Level): string {
     const grad = inbound ? 'x1="0" x2="1"' : 'x1="1" x2="0"'
     parts.push(
       `<defs><linearGradient id="${id}" ${grad} y1="0" y2="0">` +
-        '<stop offset="0" class="s0"/><stop offset="1" class="s1"/></linearGradient></defs>',
+        `<stop offset="0" class="${failed ? 'b0' : 's0'}"/><stop offset="1" class="${failed ? 'b1' : 's1'}"/></linearGradient></defs>`,
     )
     const fade = animate ? fadeIn(sinceEnd) : ''
-    parts.push(`<circle class="nq" cx="${to}" cy="${y}" r="${T.nodeR}"/>`)
+    parts.push(`<circle class="${failed ? 'nb' : 'nq'}" cx="${to}" cy="${y}" r="${T.nodeR}"/>`)
     parts.push(
       `<rect x="${sx}" y="${y - T.stubH / 2}" width="${T.stubLen}" height="${T.stubH}" fill="url(#${id})">${fade}</rect>`,
     )
@@ -478,7 +501,8 @@ export function fitSource(render: (level: Level) => string, cap = SVG_SOURCE_CAP
   return render(2)
 }
 
-function eventModel(e: FlowEvent): Model {
+/** One tool row's lane as a model: shared by the SVG and the terminal's text lane. */
+export function eventModel(e: FlowEvent): Model {
   return {
     key: e.id,
     direction: e.direction,
@@ -503,6 +527,12 @@ export function laneSvg(event: FlowEvent, now: number, opts: SceneOpts = {}): st
  */
 export function promptSvg(events: FlowEvent[], now: number, opts: SceneOpts = {}): string {
   const label = caption(events)
+  const m = promptModel(events, now)
+  return fitSource((level) => wrap(m, now, opts, level, label))
+}
+
+/** A prompt's attachment events as one inbound model: shared by the SVG and the text lane. */
+export function promptModel(events: FlowEvent[], now: number): Model {
   const running = events.find((e) => e.endedAt === undefined)
   const ok = events.filter((e) => !e.failed && !e.interrupted && e.tokens > 0)
   const bad = events.length - ok.length
@@ -534,7 +564,7 @@ export function promptSvg(events: FlowEvent[], now: number, opts: SceneOpts = {}
   } else {
     outcome = events.some((e) => e.failed) ? 'failed' : 'empty'
   }
-  const m: Model = {
+  return {
     key: events.map((e) => e.id).join('|') || 'prompt',
     direction: 'in',
     tokens: ok.reduce((n, e) => n + e.tokens, 0),
@@ -543,5 +573,4 @@ export function promptSvg(events: FlowEvent[], now: number, opts: SceneOpts = {}
     outcome,
     digest: running ? [{ text: running.step }] : digest.length ? digest : [{ text: 'nothing came back' }],
   }
-  return fitSource((level) => wrap(m, now, opts, level, label))
 }

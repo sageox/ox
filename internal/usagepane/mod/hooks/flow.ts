@@ -622,6 +622,9 @@ const ATTACHMENT_EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'PreCompa
 const REMINDER_OPEN = '<system-reminder>'
 const REMINDER_CLOSE = '</system-reminder>'
 
+/** One murmur a coworker posted: an `<entry>` whose source is "murmur", to its close (or the next entry). */
+const COWORKER_MURMUR = /<entry\b[^>]*\bsource="murmur"[^>]*>[\s\S]*?(?:<\/entry>|(?=<entry[\s>])|$)/g
+
 type Found = { pos: number; att: FlowAttachment }
 
 function endOf(text: string, from: number, ...markers: string[]): number {
@@ -668,8 +671,10 @@ function inside(spans: [number, number][], pos: number): boolean {
 /**
  * classifyAttachment: the team-context blocks one hook attachment brought in,
  * in text order: an `<ox-prime>` document (team-context), a murmur block
- * (murmurs, its `<entry>` elements counted, never read) and `[ox-recall]`
- * ledger matches (ledger). Local nudges (`<agent-tasks>`, `[ox] …`) and
+ * (murmurs: its `<entry source="murmur">` elements, the ones a coworker
+ * posted, counted and sized, never read) and `[ox-recall]` ledger matches
+ * (ledger). Local nudges (`<agent-tasks>`, `[ox] …`, a murmur block holding
+ * only ox's own reminders such as the murmur nudge or an upgrade notice) and
  * hooks other than SessionStart, UserPromptSubmit and PreCompact yield none.
  */
 export function classifyAttachment(text: string, event: string): FlowAttachment[] {
@@ -687,17 +692,22 @@ export function classifyAttachment(text: string, event: string): FlowAttachment[
     const start = open >= 0 && !inside(prime, open) ? open : i
     const end = endOf(text, i, REMINDER_CLOSE)
     const block = text.slice(start, end)
-    const n = (block.match(/<entry[\s>]/g) ?? []).length
-    found.push({
-      pos: start,
-      att: {
-        lane: 'murmurs',
-        label: 'received murmurs',
-        step: 'reading murmurs',
-        tokens: byteTokens(block),
-        ...(n > 0 ? { items: n, itemsNoun: plural('murmur', n) } : {}),
-      },
-    })
+    // Only what a coworker posted moved team data: ox's own entries in the
+    // same block (source="auto-murmur", "version-check") are local reminders.
+    const posted = block.match(COWORKER_MURMUR) ?? []
+    if (posted.length > 0) {
+      found.push({
+        pos: start,
+        att: {
+          lane: 'murmurs',
+          label: 'received murmurs',
+          step: 'reading murmurs',
+          tokens: byteTokens(posted.join('\n')),
+          items: posted.length,
+          itemsNoun: plural('murmur', posted.length),
+        },
+      })
+    }
     i = end - 1
   }
 

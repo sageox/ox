@@ -92,6 +92,29 @@ print(f'session_file={session_file}')
 
 ---
 
+## Phase 3S: ox Status Line in Conductor
+
+Conductor has no status bar, so ox shows its line in the Run pane and as a turn-end notice. Run these while the session is still recording:
+
+```bash
+# 3b. The "ox" run script is installed in the repository root's machine-local settings
+ox doctor --fix >/dev/null 2>&1
+grep -A3 '\[scripts.run.ox\]' "$CONDUCTOR_ROOT_PATH/.conductor/settings.local.toml"
+# PASS if it shows command = "ox statusline --watch"
+# SKIP (not FAIL) if `ox doctor` says "not added: this repository has its own run scripts"
+
+# 3c. The watched line finds THIS session from the worktree
+ox query "team conventions" >/dev/null 2>&1
+ox statusline --watch > /tmp/ox-watch.txt 2>/dev/null & p=$!; sleep 3; kill -INT $p; wait $p
+cat /tmp/ox-watch.txt
+# PASS if the line shows a count (e.g. "● ox  1 discussion") and "● rec"
+# FAIL if it shows "● ox" alone while 2b reported recording=true
+```
+
+**3d. Turn-end notice (ask the human):** after this reply finishes, the human checks whether a line starting with "● ox" appears at the end of the turn in Conductor's chat. Record PASS/FAIL from their answer, or SKIP if they are not watching.
+
+---
+
 ## Phase 4: Shared Ledger Verification
 
 Verify the ledger is accessible from this worktree and shows sessions from multiple agents/workspaces.
@@ -280,6 +303,9 @@ After completing all phases, print a summary table exactly like this (fill in re
 | 2b | Session recording active | PASS/FAIL | |
 | 2c | workspace_path matches Conductor workspace | PASS/FAIL | |
 | 3a | entry_count increased after tool use | PASS/FAIL | |
+| 3b | ox run script in settings.local.toml | PASS/FAIL/SKIP | |
+| 3c | Watched line shows this session | PASS/FAIL | |
+| 3d | Turn-end ox notice in chat | PASS/FAIL/SKIP | |
 | 4a | Ledger available from worktree | PASS/FAIL | |
 | 4b | Sessions from multiple agents visible | PASS/FAIL/SKIP | |
 | 4c | Ledger path resolves correctly | PASS/FAIL | |
@@ -291,7 +317,7 @@ After completing all phases, print a summary table exactly like this (fill in re
 | 6c | No active recording after abort | PASS/FAIL | |
 | 6d | Aborted session not in list | PASS/FAIL | |
 
-**Overall: X/18 PASS, Y/18 FAIL, Z/18 SKIP**
+**Overall: X/21 PASS, Y/21 FAIL, Z/21 SKIP**
 
 ### Failures (if any)
 <Detail each failure with the command output that shows the problem>

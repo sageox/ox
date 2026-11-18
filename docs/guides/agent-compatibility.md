@@ -69,8 +69,22 @@ same line is drawn directly above the prompt by the session report pane plugin (
 `ox statusline --json`. Turn it off everywhere with `ox config set statusline off`.
 
 Codex CLI and the ChatGPT desktop app's Codex surface have no status bar a command
-can draw, so there the same line appears as a single notice at the end of a turn, and
-only when it changed during that turn. See [Codex hooks](codex-hooks.md#status-line).
+can draw, so the line is not shown inside Codex. What Codex does show is a flow lane
+under each ox call that moved team data: one line with the call's direction, size and
+duration. See [Codex hooks](codex-hooks.md#flow-lanes).
+
+`ox statusline --watch` keeps the line live in any terminal pane (a split beside Codex
+CLI, a tmux pane) and draws the flow lanes beneath it as they happen: dotted while a
+call runs, dots travelling while it lands, then still. `ox config set flow_lanes off`
+hides the lanes there and in Codex.
+
+[Conductor](https://conductor.build) runs Claude Code and Codex through their SDKs and
+draws its own chat, so no status bar ever draws there. Inside Conductor, Claude Code
+shows the line as the same turn-end notice, and `ox init` / `ox doctor --fix` add an
+`ox` run script to the machine-local `.conductor/settings.local.toml` that runs
+`ox statusline --watch` in Conductor's Run pane, keeping the line live for the
+workspace's session. ox adds it only when the repository has no run scripts of its
+own; otherwise `ox doctor` prints the table to paste.
 
 **Session report pane.** `/ox-session-report` opens a pane beside the chat with what SageOx gave this
 session (calls, estimated context tokens, what was read and what was useful) and a
@@ -81,10 +95,11 @@ scrollable list of every ox call, refreshed as they happen. It is a Claude Code 
 `/ox-cli-session-report` reports. `/ox-session-report off` closes it, `ox config set session_report_pane off`
 removes it, and `ox session report pane status` shows whether it is installed. In the Claude desktop app's
 Claude Code tab the pane opens by itself, docked beside the chat; close it and it
-stays closed in later sessions until you run `/ox-session-report` again. Outside the
-terminal the plugin also draws a one-line flow lane under each ox call that moves team
-data and each prompt that carried Team Context in; `/ox-session-report flow still` stops its motion and
-`/ox-session-report flow off` hides it.
+stays closed in later sessions until you run `/ox-session-report` again. The plugin
+also draws a one-line flow lane under each ox call that moves team data and each prompt
+that carried Team Context in: an animated image in the desktop app, VS Code and mobile,
+and the same lane as a row of text in the terminal. `/ox-session-report flow still` stops
+its motion and `/ox-session-report flow off` hides it.
 
 ## Canonical Agent Skills
 

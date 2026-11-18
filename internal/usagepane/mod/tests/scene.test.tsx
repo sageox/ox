@@ -89,11 +89,34 @@ describe('a pure function of (event, now)', () => {
     expect(svg).toContain('class="flow"')
   })
 
-  test('nothing ever loops', () => {
+  test('only a running lane loops: a finished one plays once', () => {
     for (const now of [T0 + 100, T0 + 900, T0 + 2000]) {
-      expect(laneSvg(ev({ endedAt: undefined }), now)).not.toContain('indefinite')
+      expect(laneSvg(ev({ endedAt: undefined }), now)).toContain('indefinite')
       expect(laneSvg(ev({ tokens: 9000 }), now)).not.toContain('indefinite')
+      expect(laneSvg(ev({ failed: true, tokens: 0 }), now)).not.toContain('indefinite')
     }
+  })
+
+  // Failure prevented: a call in progress looks idle in the app, or a push is
+  // drawn moving the same way as a pull (the terminal lane marches too).
+  test('a running lane marches toward the destination: a pull left to right, a push right to left', () => {
+    const cx = (svg: string) => [...svg.matchAll(/attributeName="cx" values="([\d.]+);([\d.]+)"[^>]*repeatCount="indefinite"/g)].map((m) => [Number(m[1]), Number(m[2])])
+    const pull = laneSvg(ev({ endedAt: undefined }), T0 + 500)
+    expect(cx(pull).length).toBe(3)
+    expect(cx(pull).every(([a, b]) => a < b)).toBe(true)
+    expect(pull).toContain('<circle class="dot-in"')
+    expect(pull).not.toContain('class="dot-out"')
+    const push = laneSvg(ev({ direction: 'out', endedAt: undefined }), T0 + 500)
+    expect(cx(push).length).toBe(3)
+    expect(cx(push).every(([a, b]) => a > b)).toBe(true)
+    expect(push).toContain('<circle class="dot-out"')
+    expect(push).not.toContain('class="dot-in"')
+    // A redraw carries on where the last frame was: begins move back with time.
+    expect(pull).toContain('begin="-0.5s"')
+    expect(laneSvg(ev({ endedAt: undefined }), T0 + 700)).toContain('begin="-0.7s"')
+    // Asked for no motion, or a start too old to believe: the dotted line alone.
+    expect(laneSvg(ev({ endedAt: undefined }), T0 + 500, { reducedMotion: true })).not.toContain('<animate')
+    expect(laneSvg(ev({ endedAt: undefined }), T0 + 10 * 60_000)).not.toContain('indefinite')
   })
 
   test('static values are end states: dots wait at the destination, invisible', () => {
@@ -110,13 +133,13 @@ describe('a pure function of (event, now)', () => {
 })
 
 describe('states', () => {
-  test('running: dotted lane, a ring, the step, no dots', () => {
+  test('running: dotted lane, a ring, the step, three marching dots and no solid lane', () => {
     const svg = laneSvg(ev({ endedAt: undefined }), T0 + 1200)
     expect(svg).toContain('class="open"')
     expect(svg).toContain('stroke-dasharray:1.5 4')
     expect(svg).toContain('class="ring"')
     expect(svg).toContain('searching team discussions')
-    expect(dots(svg)).toBe(0)
+    expect(dots(svg)).toBe(3)
     expect(svg).not.toContain('class="flow"')
   })
 
@@ -136,12 +159,19 @@ describe('states', () => {
     expect(svg).toContain('<tspan class="bad">failed</tspan>')
     expect(svg).toContain('.bad{fill:#9f4838}')
     expect(svg).not.toContain('class="flow"')
+    // The stub and both nodes are in the danger colour too, not the quiet one.
+    expect(svg).toContain('.nb{fill:#9f4838}')
+    expect(svg).toContain('<stop offset="0" class="b0"/><stop offset="1" class="b1"/>')
+    expect((svg.match(/<circle class="nb"/g) ?? []).length).toBe(2)
+    expect(svg).not.toContain('<circle class="nq"')
   })
 
   test('interrupted and zero tokens: a stub, no danger', () => {
     const interrupted = laneSvg(ev({ interrupted: true, tokens: 0 }), T0 + 60_000)
     expect(interrupted).toContain('<rect')
     expect(interrupted).not.toContain('class="bad"')
+    expect(interrupted).not.toContain('class="nb"')
+    expect(interrupted).not.toContain('class="b0"')
     const zero = laneSvg(ev({ tokens: 0, items: undefined }), T0 + 60_000)
     expect(zero).toContain('nothing came back')
     expect(zero).toContain('<rect')

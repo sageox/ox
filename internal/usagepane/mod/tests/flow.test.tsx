@@ -240,6 +240,29 @@ describe('classifyAttachment', () => {
     expect(a.itemsNoun).toBe('murmurs')
     expect(a.tokens > 0).toBe(true)
   })
+  // Failure prevented: a lane appears under a prompt when nothing came from a
+  // coworker, only ox's own reminders riding in the same block.
+  test('a murmur block holding only ox reminders draws no lane; a mixed one counts the coworker murmurs alone', () => {
+    const head = [
+      '<system-reminder>',
+      'Team whispers from SageOx coworkers:',
+      '<murmur-context>Signals from coworkers delivered by SageOx.</murmur-context>',
+    ]
+    const upgrade = '<entry id="u1" importance="normal" topic="upgrade" source="version-check">ox v0.25.0 → v0.26.0 available. Run `ox upgrade` to update.</entry>'
+    const nudge = '<entry id="n1" importance="normal" topic="murmur-nudge" source="auto-murmur">Run now: ox murmur --topic=wip &#34;...&#34;</entry>'
+    const posted = '<entry id="m1" importance="normal" topic="file-changes" source="murmur" agent="OxxjtT" from="Avery" files="a.go">2 files</entry>'
+    const block = (...entries: string[]) => [...head, ...entries, '</system-reminder>'].join('\n')
+
+    expect(classifyAttachment(block(nudge), 'UserPromptSubmit')).toEqual([])
+    expect(classifyAttachment(block(upgrade, nudge), 'UserPromptSubmit')).toEqual([])
+    expect(classifyAttachment(block(), 'UserPromptSubmit')).toEqual([])
+
+    for (const mixed of [block(upgrade, nudge, posted), block(posted, nudge), block(nudge, posted, upgrade)]) {
+      expect(classifyAttachment(mixed, 'UserPromptSubmit')).toEqual([
+        { lane: 'murmurs', label: 'received murmurs', step: 'reading murmurs', tokens: finishTokens(posted), items: 1, itemsNoun: 'murmur' },
+      ])
+    }
+  })
   test('ledger recall counts its match lines', () => {
     expect(classifyAttachment(RECALL, 'UserPromptSubmit')).toEqual([
       { lane: 'ledger', label: 'recalled ledger matches', step: 'searching the ledger', tokens: finishTokens(RECALL.slice(RECALL.indexOf('[ox-recall'))), items: 2, itemsNoun: 'ledger matches' },

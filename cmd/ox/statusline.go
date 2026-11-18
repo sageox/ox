@@ -61,7 +61,12 @@ var statuslineCmd = &cobra.Command{
 	Use:    "statusline",
 	Short:  "Print ox's team-context counts for the Claude Code status bar",
 	Hidden: true,
-	Args:   cobra.NoArgs,
+	Args: func(cmd *cobra.Command, args []string) error {
+		if wrap, _ := cmd.Flags().GetBool("wrap"); wrap {
+			return cobra.MinimumNArgs(1)(cmd, args)
+		}
+		return cobra.NoArgs(cmd, args)
+	},
 	Long: `Print how much team context influenced this AI coworker session, for the
 Claude Code status bar.
 
@@ -89,8 +94,45 @@ prompt. --json prints the line's data (show, counts, recording) as one JSON
 document instead of text, never runs your own statusLine command, and reads
 the session from CLAUDE_CODE_SESSION_ID when stdin carries none.
 
+Conductor runs Claude Code through its SDK, so the status bar never draws
+there. Inside Conductor, ox shows the line as a notice at the end of a turn
+when it changes, and ` + "`ox doctor --fix`" + ` adds an "ox" run script to
+.conductor/settings.local.toml that runs ` + "`ox statusline --watch`" + ` in
+Conductor's Run pane. --watch keeps the line live in place, finding the
+session recording in the current worktree; it shows "● ox" alone when no
+session, or more than one, records there.
+
+--watch works in any terminal pane, so it is also how to keep the line beside
+Codex CLI, which has no status bar a command can draw. Beneath the line it
+draws a flow lane for each ox call that moves team data: dotted while the call
+runs, dots traveling from SageOx to the session (or rings back, for a murmur
+or a saved plan) as it lands, then a still line saying what moved. Hide the
+lanes with: ox config set flow_lanes off
+
+--wrap puts the line inside the app's own terminal instead of a second pane:
+
+  ox statusline --wrap -- codex
+
+runs Codex with the bottom row of that terminal kept for ox: the status line,
+then the flow lane of the latest ox call, moving as it lands. The app runs one
+row shorter and is otherwise untouched; when it exits, the row is given back.
+
 Turn it off with: ox config set statusline off`,
-	RunE: func(cmd *cobra.Command, _ []string) error {
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if wrap, _ := cmd.Flags().GetBool("wrap"); wrap {
+			code, err := runStatuslineWrap(args)
+			if err != nil {
+				return err
+			}
+			if code != 0 {
+				os.Exit(code) // the wrapped app's own exit code
+			}
+			return nil
+		}
+		if watch, _ := cmd.Flags().GetBool("watch"); watch {
+			runStatuslineWatch(statuslineStdout)
+			return nil
+		}
 		if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
 			runStatuslineJSON(cmd.InOrStdin(), cmd.OutOrStdout(), defaultStatuslineOptions())
 			return nil
@@ -102,6 +144,9 @@ Turn it off with: ox config set statusline off`,
 
 func init() {
 	statuslineCmd.Flags().Bool("json", false, "print the line's data as JSON, for the Claude desktop app band")
+	statuslineCmd.Flags().Bool("watch", false, "keep the line live in a terminal pane, for hosts without a status bar (Conductor's Run pane)")
+	statuslineCmd.Flags().Bool("wrap", false, "run a terminal app (after --) with ox's line on the bottom row of its terminal, for apps with no status bar a command can draw (Codex)")
+	statuslineCmd.MarkFlagsMutuallyExclusive("json", "watch", "wrap")
 	rootCmd.AddCommand(statuslineCmd)
 }
 
@@ -240,6 +285,11 @@ func buildStatuslineJSON(raw []byte, opts statuslineOptions) statuslineJSON {
 	in, dir := parseStatuslineInput(raw)
 	if in.SessionID == "" && opts.getenv != nil {
 		in.SessionID = strings.TrimSpace(opts.getenv(envClaudeCodeSessionID))
+	}
+	if in.SessionID == "" {
+		// No harness session at all (a pane or page outside the harness):
+		// the one session recording in this worktree, if there is one.
+		in.SessionID = resolveStatuslineSessionForDir(statuslineProjectRoot(dir))
 	}
 	line, show := buildOxStatusline(in, dir)
 	if !show {

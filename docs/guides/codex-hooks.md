@@ -19,10 +19,10 @@ logic are in [`cmd/ox-adapter-codex/hooks.go`](../../cmd/ox-adapter-codex/hooks.
 | Event | Review label | Actual behavior |
 | --- | --- | --- |
 | `SessionStart` | SageOx: loading context; auto-recording if configured | Primes Team Context, starts recording when recording mode is `auto`, and handles recording boundaries on clear or compaction. An already-primed session skips redundant priming. |
-| `PreToolUse` | SageOx: pre-tool hook (currently inactive) | Maps to `phaseBeforeTool`, which is absent from `activePhaseBehavior`. Returns before dispatch, heartbeat, or recording work. Kept as an existing integration entry; it does not inspect or block tool calls. |
-| `PostToolUse` | SageOx: capturing activity for session recording | Delivers pending team updates as a fallback and, when a recording exists, drains new native session entries through the recording writer and its redaction pipeline. Captures conversation activity as well as tool activity. |
+| `PreToolUse` | SageOx: timing ox calls | Notes the start of an `ox` call that moves team data (a search, a murmur, a plan), so its [flow lane](#flow-lanes) can show it running and say how long it took. Every other tool call returns after classification, before dispatch, heartbeat, or recording work. It never inspects arguments beyond the command words, prints nothing, and does not block tool calls. |
+| `PostToolUse` | SageOx: capturing activity for session recording | Shows a [flow lane](#flow-lanes) under an `ox` call that moved team data, delivers pending team updates as a fallback and, when a recording exists, drains new native session entries through the recording writer and its redaction pipeline. Captures conversation activity as well as tool activity. |
 | `UserPromptSubmit` | SageOx: recalling context and delivering team updates | Looks up local recall context and delivers pending team updates, task notices, recording-pause reminders, and plan/artifact reminders. The opt-in cloud-query gate currently computes a decision; this handler does not dispatch a cloud query. |
-| `Stop` | SageOx: saving turns and plans; publishing drafts if configured | Drains recording entries, counts the completed turn, registers the session link and publishes draft metadata according to publishing policy, and saves a completed Codex `<proposed_plan>` through the plan capture path. When the ox status line changed during the turn, it prints that line once as a `systemMessage` (see [Status line](#status-line)). It does not end the recording. |
+| `Stop` | SageOx: saving turns and plans; publishing drafts if configured | Drains recording entries, counts the completed turn, registers the session link and publishes draft metadata according to publishing policy, and saves a completed Codex `<proposed_plan>` through the plan capture path. It prints nothing unless a [flow lane](#flow-lanes) could not be shown under its call. It does not end the recording. |
 | `SessionEnd` | SageOx: finalizing recordings; publishing if configured | Stops an active recording and finalizes it directly or hands it to the daemon. Publishing follows configuration; manual publishing holds the recording locally. Repeated calls are safe when the recording is already stopped. |
 
 Active phases also send a heartbeat to the local daemon when an AI coworker ID
@@ -65,23 +65,42 @@ preservation of unrelated MCP handlers and unknown configuration fields, and
 read-only diagnosis followed by a scoped repair for each event.
 
 
-## Status line
+## Flow lanes
 
 Codex has no status line a command can draw: the CLI's `tui.status_line` accepts
 built-in items only, and the ChatGPT desktop app has no status bar. The one hook
-field both show a coworker is `systemMessage`. So the line Claude Code keeps in
-its status bar appears in Codex as a notice at the end of a turn:
+field both show a coworker is `systemMessage`. ox uses it for one thing: under
+each `ox` call (or SageOx MCP tool) that moved team data, a single line saying
+which way the data went, how much, and how long it took.
 
 ```text
-● ox  1 discussion · 1 plan · 2 used  ● rec
+SAGEOX ●━━━━━━━━━━━━━━━━● SESSION  searched team memory · ~1.2k from 5 discussions · 0.8s
+SAGEOX ●────────────────● SESSION  pulled plan · ~420 · 0.3s
+SAGEOX ●────────────────● SESSION  posted murmur · size unknown · 0.4s
 ```
 
-- It is printed only when the line differs from the last one shown in this
-  Codex session. A turn that used no new team context prints nothing, and so
-  does a session that has not used any yet.
-- It counts the same items as the Claude Code status line, from the same local
-  state (no network, no daemon).
-- `Stop` output is this one JSON document or nothing. Whispers still pending at
-  the end of a turn wait for the next `UserPromptSubmit`; Codex's `Stop` schema
-  has no field that reaches the model.
-- `ox config set statusline off` turns it off.
+- The lane is printed by `PostToolUse`, so it appears under the call that made
+  it, once. A solid line is data that flowed: thin under 1k tokens, thick from
+  1k. A short stub (`●╶─`) is a call that failed or returned nothing.
+- Every other tool call prints no notice: ordinary shell commands, and `ox`
+  calls that move no team data (`ox doctor`, `ox status`, `ox session report`).
+- Sizes are estimates (about four characters per token) of what the call returned.
+  For a call that sends data out through the CLI, ox cannot see the payload and
+  says `size unknown`. Only labels, counts and sizes are recorded, never a query's
+  results or a murmur's text.
+- The duration comes from the `PreToolUse` hook noting when the call started.
+- `PostToolUse` output is one JSON document or nothing. When a whisper is also
+  pending, the lane (`systemMessage`) and the whisper (`additionalContext`)
+  share that document.
+- `Stop` prints nothing in the usual case. If a lane could not be shown under
+  its call, `Stop` shows it then (the newest five, the rest counted), as one
+  `systemMessage`; Codex's `Stop` schema has no field that reaches the model,
+  so whispers pending at the end of a turn wait for the next `UserPromptSubmit`.
+- Codex shows a notice as text, so these lanes are still. To watch them move,
+  run `ox statusline --watch` in a terminal split beside Codex: it draws each
+  call as it runs (a dotted lane), lands (dots travel from SageOx to the
+  session, or rings back the other way) and settles, under ox's status line.
+- ox's status line (`● ox  1 discussion · 1 plan · 2 used  ● rec`) is not shown
+  inside Codex. `ox statusline --watch` shows it.
+- `ox config set flow_lanes off` hides the lanes; `ox config set statusline off`
+  turns off everything here.

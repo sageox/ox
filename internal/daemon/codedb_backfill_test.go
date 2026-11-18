@@ -42,7 +42,7 @@ func backfillGit(t *testing.T, repoDir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = repoDir
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(os.Environ(), // safe: git subprocess with HOME and system config isolated
 		"HOME="+t.TempDir(),
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_AUTHOR_NAME=ox-test", "GIT_AUTHOR_EMAIL=ox@test",
