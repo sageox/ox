@@ -198,7 +198,7 @@ func checkGitRepoState() checkResult {
 	statusCmd.Dir = gitRoot
 	output, err := statusCmd.Output()
 	if err == nil && len(output) > 0 {
-		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		lines := strings.Split(string(output), "\n")
 		hasUnstaged := false
 		count := 0
 		var perMachine []string
