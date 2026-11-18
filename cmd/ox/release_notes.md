@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### New
+
+- **Flow lanes in Claude Code's terminal** — the lane that shows team context reaching your AI coworker now draws in the terminal too, as one row of text under each ox call that moves team data and each prompt that carried Team Context in, such as `SAGEOX ●━━━━━━•━•━•━━━━━● SESSION  searched team memory · ~3k from 5 discussions · 0.8s`. Folded groups of tool calls stay folded, with the lane shown beneath the group. `/ox-session-report flow still` stops the motion and `/ox-session-report flow off` hides the lanes.
+
 ### Changed
 
 - **`ox brief` is gone; use `ox session report`** — the alias kept for one release after the rename is removed. `ox session report` takes the same flags, and the `brief_pane` setting still works as the old name of `session_report_pane`.
