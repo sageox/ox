@@ -128,9 +128,7 @@ func EnsureCheckoutGitignoreCtx(ctx context.Context, repoPath string) error {
 	policy, err := root.Lstat(checkoutGitignorePath)
 	if errors.Is(err, os.ErrNotExist) {
 		// Parse stdout only. GIT_TRACE and other diagnostics go to stderr.
-		cmd := exec.CommandContext(ctx, "git", "ls-files", "--stage", "--", checkoutGitignorePath)
-		cmd.Dir = repoPath
-		indexEntry, listErr := cmd.Output()
+		indexEntry, listErr := gitutil.RunGitStdout(ctx, repoPath, "ls-files", "--stage", "--", checkoutGitignorePath)
 		if listErr != nil {
 			return fmt.Errorf("check tracked checkout gitignore: %w", listErr)
 		}

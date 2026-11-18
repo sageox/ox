@@ -1,11 +1,14 @@
 package gitserver
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -110,6 +113,49 @@ func TestEnsureCheckoutGitignore_RestoresTrackedSparsePolicy(t *testing.T) {
 	restored, err := os.ReadFile(ignorePath)
 	require.NoError(t, err)
 	require.Equal(t, policy, string(restored))
+}
+
+func TestEnsureCheckoutGitignore_ReportsCorruptIndex(t *testing.T) {
+	dir := setupGitRepoWithSageox(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git", "index"), []byte("invalid git index\n"), 0o644))
+
+	err := EnsureCheckoutGitignore(dir)
+	require.ErrorContains(t, err, "check tracked checkout gitignore")
+	require.ErrorContains(t, err, "index file")
+	require.NoFileExists(t, filepath.Join(dir, checkoutGitignorePath))
+}
+
+func TestEnsureCheckoutGitignore_CancelsWhileHelperHoldsStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a shell Git wrapper")
+	}
+	dir := setupGitRepoWithSageox(t)
+	bin := t.TempDir()
+	started := filepath.Join(bin, "started")
+	t.Setenv("OX_TEST_GIT_STARTED", started)
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte(`#!/bin/sh
+sleep 6 >/dev/null &
+touch "$OX_TEST_GIT_STARTED"
+wait
+`), 0o755))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- EnsureCheckoutGitignoreCtx(ctx, dir) }()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(started)
+		return err == nil
+	}, 3*time.Second, 10*time.Millisecond, "Git wrapper never started its helper")
+	cancel()
+
+	select {
+	case err := <-result:
+		require.Error(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("checkout waited for the canceled Git helper")
+	}
 }
 
 func TestEnsureCheckoutGitignore_RejectsNonRegularTrackedPolicy(t *testing.T) {

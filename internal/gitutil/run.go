@@ -2,8 +2,10 @@ package gitutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -11,6 +13,29 @@ import (
 // Output is auto-sanitized to remove credentials. Use repoPath="" for
 // commands that don't need -C.
 func RunGit(ctx context.Context, repoPath string, args ...string) (string, error) {
+	output, err := localGitCommand(ctx, repoPath, args...).CombinedOutput()
+	sanitized := SanitizeOutput(strings.TrimSpace(string(output)))
+	if err != nil {
+		return sanitized, fmt.Errorf("git %s: %s: %w", args[0], sanitized, err)
+	}
+	return sanitized, nil
+}
+
+// RunGitStdout returns Git's stdout without stderr diagnostics or sanitization.
+// Use it to parse machine-readable output. Error messages sanitize stderr.
+func RunGitStdout(ctx context.Context, repoPath string, args ...string) ([]byte, error) {
+	output, err := localGitCommand(ctx, repoPath, args...).Output()
+	if err == nil {
+		return output, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && len(exitErr.Stderr) != 0 {
+		return nil, fmt.Errorf("git %s: %s: %w", args[0], SanitizeOutput(strings.TrimSpace(string(exitErr.Stderr))), err)
+	}
+	return nil, fmt.Errorf("git %s: %w", args[0], err)
+}
+
+func localGitCommand(ctx context.Context, repoPath string, args ...string) *exec.Cmd {
 	var cmdArgs []string
 	if repoPath != "" {
 		cmdArgs = append(cmdArgs, "-C", repoPath)
@@ -58,11 +83,5 @@ func RunGit(ctx context.Context, repoPath string, args ...string) (string, error
 	// of patching each match site individually. Does not affect git's
 	// handling of file content or paths, which are UTF-8 regardless.
 	cmd.Env = append(oxIdentityEnv(ctx, repoPath, os.Environ()), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
-	output, err := cmd.CombinedOutput()
-	sanitized := SanitizeOutput(strings.TrimSpace(string(output)))
-
-	if err != nil {
-		return sanitized, fmt.Errorf("git %s: %s: %w", args[0], sanitized, err)
-	}
-	return sanitized, nil
+	return cmd
 }
