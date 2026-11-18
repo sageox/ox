@@ -23,8 +23,6 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/utils/merkletrie"
-
-	"github.com/sageox/ox/internal/testguard"
 )
 
 // --- fixture repos -----------------------------------------------------------
@@ -61,9 +59,8 @@ func tdfGit(tb testing.TB, dir string, stdin []byte, args ...string) string {
 	tb.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Env = testguard.MinimalEnv([]string{
-		"GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
-	})
+	cmd.Env = append(os.Environ(), // safe: git subprocess, global/system config isolated below
+		"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}

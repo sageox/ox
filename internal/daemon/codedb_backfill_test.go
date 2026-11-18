@@ -21,7 +21,6 @@ import (
 
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/index"
-	"github.com/sageox/ox/internal/testguard"
 )
 
 // --- Two-pass indexing: tip first, history in the background ---
@@ -43,12 +42,12 @@ func backfillGit(t *testing.T, repoDir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = repoDir
-	cmd.Env = testguard.MinimalEnv([]string{
-		"HOME=" + t.TempDir(),
+	cmd.Env = append(os.Environ(), // safe: git subprocess, HOME and git identity overridden below
+		"HOME="+t.TempDir(),
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_AUTHOR_NAME=ox-test", "GIT_AUTHOR_EMAIL=ox@test",
 		"GIT_COMMITTER_NAME=ox-test", "GIT_COMMITTER_EMAIL=ox@test",
-	})
+	)
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "git %v: %s", args, out)
 }
