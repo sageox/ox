@@ -175,9 +175,9 @@ func TestRunAgentPrime_CappedHookPrimeDoesNotLicenseCompact(t *testing.T) {
 	requireFullPrime(t, repeat, "a bare prime after a capped hook prime must be full so the deferred context reaches the model")
 }
 
-// primedAgentID returns the AI coworker identity a prime recorded for one
+// nativeSessionAgentID returns the AI coworker identity a prime recorded for one
 // native session.
-func primedAgentID(t *testing.T, sessionID string) (agentID string, parentPID int) {
+func nativeSessionAgentID(t *testing.T, sessionID string) (agentID string, parentPID int) {
 	t.Helper()
 	marker, err := ReadSessionMarker(sessionID)
 	require.NoError(t, err)
@@ -209,8 +209,8 @@ func TestRunAgentPrime_TwoNativeSessionsUnderOneAgentProcessGetTwoAgents(t *test
 	primeWithHookAs(t, "codex", chatA, "startup")
 	primeWithHookAs(t, "codex", chatB, "startup")
 
-	agentA, pidA := primedAgentID(t, chatA)
-	agentB, pidB := primedAgentID(t, chatB)
+	agentA, pidA := nativeSessionAgentID(t, chatA)
+	agentB, pidB := nativeSessionAgentID(t, chatB)
 	require.Positive(t, pidA)
 	require.Equal(t, pidA, pidB, "harness: both chats must resolve the same agent ancestor PID")
 	assert.NotEqual(t, agentA, agentB, "two native sessions under one agent process were merged into one AI coworker")
@@ -225,10 +225,10 @@ func TestRunAgentPrime_BarePrimeWithoutSessionIDReusesAgentByPID(t *testing.T) {
 	chat := uniqueSessionID(t, "codex-chat")
 
 	primeWithHookAs(t, "codex", chat, "startup")
-	agentID, _ := primedAgentID(t, chat)
+	agentID, _ := nativeSessionAgentID(t, chat)
 
 	repeat := primeWithHookAs(t, "codex", "", "")
 	assert.Contains(t, repeat, agentID, "a bare repeat prime in the same agent process lost the session's AI coworker identity")
-	again, _ := primedAgentID(t, chat)
+	again, _ := nativeSessionAgentID(t, chat)
 	assert.Equal(t, agentID, again)
 }
