@@ -7,10 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### New
+
+- **Flow lanes in Claude Code's terminal** — the lane that shows team context reaching your AI coworker now draws in the terminal too, as one row of text under each ox call that moves team data and each prompt that carried Team Context in, such as `SAGEOX ●━━━━━━•━•━•━━━━━● SESSION  searched team memory · ~3k from 5 discussions · 0.8s`. Folded groups of tool calls stay folded, with the lane shown beneath the group. `/ox-session-report flow still` stops the motion and `/ox-session-report flow off` hides the lanes.
+
+### Changed
+
+- **`ox brief` is gone; use `ox session report`** — the alias kept for one release after the rename is removed. `ox session report` takes the same flags, and the `brief_pane` setting still works as the old name of `session_report_pane`.
+
 ### Fixed
 
 - **Sessions in a Git worktree beside the repo are saved** — a Claude Code session run in a worktree outside the main checkout is now found and uploaded at stop. When nothing is found, `session stop` reports failure, says why, and gives the exact `recover` or `ox session import` command instead of claiming success; `session recover` does the same.
 - **Long sessions import** — `ox agent <id> session import` reads entries up to 10 MiB; one over 1 MiB (a screenshot, long tool output) no longer fails the import, and one too large to save names its line. Its help and output now say it adds planning history, and point to `ox session import` for the full conversation.
+- **`ox session list` no longer reports an uncloned Ledger as available** — the Ledger folder can exist before its first clone lands, and `ledger_available` read it as ready. An AI coworker runner then recorded work that could never upload. It now reports `false` until the Ledger is a checkout.
+- **Each Codex desktop chat gets its own AI coworker** — every chat in the ChatGPT desktop app runs under one Codex process, so a new chat reused the first chat's AI coworker and the two sessions were recorded as one, losing a chat's history. A chat with its own session ID now always gets its own AI coworker.
 - **`ox doctor` no longer rewrites or stages the README by default** — Init writes the same README that doctor expects. README repairs and staging missing SageOx files require an explicit fix; doctor no longer reports unstaged changes as staged.
 - **`ox doctor --fix` removes team names from old repo markers** — `.sageox/.repo_*` markers written by earlier `ox init` runs listed every team the person belonged to under `team_urls`. Doctor now flags it, and `--fix` removes the key; commit `.sageox/` afterwards.
 - **Ledger commits stay credited to the AI coworker on machines with a global `author.email`** — git ranks `author.*` and `committer.*` above `user.email` in every scope, so a global `author.email` or `committer.email` put that address on an AI coworker's Ledger commits. ox now writes those keys next to the identity it stamps in its clones, and removes them with it.

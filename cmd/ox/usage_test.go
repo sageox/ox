@@ -449,41 +449,21 @@ func TestUsage_ViewFlagsAreExclusive(t *testing.T) {
 	assert.Contains(t, err.Error(), "none of the others can be")
 }
 
-// TestUsage_DeprecatedAliasStillRuns drives the hidden `ox brief` alias of
-// `ox session report` through the root command. Failure prevented: a coworker's
-// script or muscle memory hits "unknown command" the release `ox brief` became
-// `ox session report`, or keeps using the old name without being told the new one.
-func TestUsage_DeprecatedAliasStillRuns(t *testing.T) {
-	root := usageTraceEnv(t, nil)
-	runAfterTool(t, root, "claude-code", usageAgentID, &agentx.HookInput{
-		ToolName: "Bash", ToolInput: shellInput(t, "command", "ox murmur list"), ToolResponse: bashStdout(t, "[]"),
-	})
-	reset := func() {
-		usageDeprecatedCmd.Flags().VisitAll(func(f *pflag.Flag) {
-			_ = f.Value.Set(f.DefValue)
-			f.Changed = false
-		})
+// TestUsage_BriefAliasIsGone verifies `ox brief`, the alias `ox session report`
+// kept for one release after its rename, is no longer a command. Failure
+// prevented: the retired name comes back, hidden, and help, docs and the
+// activity lanes drift from the one name coworkers are told to use.
+func TestUsage_BriefAliasIsGone(t *testing.T) {
+	usageTraceEnv(t, nil)
+	resetUsageFlags(t)
+
+	_, err := executeRootCLI(t, "brief", "--json")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown command "brief"`)
+
+	for _, c := range rootCmd.Commands() {
+		assert.NotEqual(t, "brief", c.Name())
 	}
-	reset()
-	t.Cleanup(reset)
-	t.Setenv("SAGEOX_AGENT_ID", usageAgentID)
-
-	out, err := executeRootCLI(t, "brief", "--json")
-	require.NoError(t, err)
-
-	// cobra prints the notice on the command's output writer, which the
-	// real CLI leaves as stderr; the test harness routes it to out.
-	notice, body, ok := strings.Cut(out, "\n")
-	require.True(t, ok, out)
-	assert.Contains(t, notice, `Command "brief" is deprecated, use 'ox session report' instead`)
-	var r usage.Report
-	require.NoError(t, json.Unmarshal([]byte(body), &r), "the alias must print the same JSON report: %s", body)
-	assert.Equal(t, 1, r.Calls.Total)
-
-	assert.True(t, usageDeprecatedCmd.Hidden, "only `ox session report` shows in help and docs")
-	usageCmd.Flags().VisitAll(func(f *pflag.Flag) {
-		assert.NotNil(t, usageDeprecatedCmd.Flags().Lookup(f.Name), "alias lacks --%s", f.Name)
-	})
 }
 
 // TestUsage_PausedRecordingSaysPaused: a recording suspended by

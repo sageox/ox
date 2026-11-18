@@ -59,7 +59,7 @@ func tdfGit(tb testing.TB, dir string, stdin []byte, args ...string) string {
 	tb.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), // safe: git subprocess, global and system config isolated
+	cmd.Env = append(os.Environ(), // safe: git subprocess, global/system config isolated below
 		"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
