@@ -20,7 +20,7 @@ export const OxPrimePlugin: Plugin = async ({ $, directory }) => {
     event: async ({ event }) => {
       if (event.type === "session.created") {
         try {
-          await ` + "`ox agent prime`" + `.cwd(directory).quiet()
+          await $` + "`ox agent prime`" + `.cwd(directory).quiet()
         } catch {
           // ox not installed or failed - continue silently
         }

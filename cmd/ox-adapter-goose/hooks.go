@@ -90,15 +90,18 @@ type hookAction struct {
 
 // hookCommand builds the shell command for an event.
 //
-// Goose sends working_dir only on TOOL events, so SessionStart alone gives ox
-// nothing to locate the repo with and it would fall back to walking up from
-// whatever cwd Goose happens to use. For project scope we bake the absolute
-// root in via OX_PROJECT_ROOT, which ox checks before the cwd walk. User scope
-// has no single root to bake in and relies on the walk, like every other adapter.
-func hookCommand(event, repoRoot, scope string) string {
+// Goose exposes the installed plugin's directory as PLUGIN_ROOT. For project
+// scope, walk from .agents/plugins/sageox back to the checkout at runtime.
+// User scope relies on the ordinary project discovery and explicit override.
+func hookCommand(event, scope string) string {
 	prefix := "AGENT_ENV=goose"
-	if scope != scopeUser && repoRoot != "" {
-		prefix = fmt.Sprintf("OX_PROJECT_ROOT=%s %s", shellQuote(repoRoot), prefix)
+	if scope != scopeUser {
+		return fmt.Sprintf(`if command -v ox >/dev/null 2>&1; then
+  if [ -z "$OX_PROJECT_ROOT" ] && [ -n "$PLUGIN_ROOT" ]; then
+    OX_PROJECT_ROOT=$(CDPATH= cd "$PLUGIN_ROOT/../../.." && pwd)
+  fi
+  OX_PROJECT_ROOT="$OX_PROJECT_ROOT" AGENT_ENV=goose ox agent hook %s 2>&1 || true
+fi`, event)
 	}
 	return fmt.Sprintf(
 		`if command -v ox >/dev/null 2>&1; then %s ox agent hook %s 2>&1 || true; fi`,
@@ -106,10 +109,10 @@ func hookCommand(event, repoRoot, scope string) string {
 	)
 }
 
-// shellQuote single-quotes a path for `sh -c`. Goose runs hook commands through
-// a shell, so a repo path containing a space or a quote would otherwise split.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+// legacyProjectHook matches the wrapper emitted by prior ox releases.
+func legacyProjectHook(command, event string) bool {
+	return strings.HasPrefix(command, "if command -v ox >/dev/null 2>&1; then OX_PROJECT_ROOT='") &&
+		strings.HasSuffix(command, "' AGENT_ENV=goose ox agent hook "+event+" 2>&1 || true; fi")
 }
 
 // --- paths ---
@@ -228,13 +231,23 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 	hf := loadHooksFile(hooksPath)
 
 	for _, event := range hookEvents {
+		if p.Scope != scopeUser {
+			for _, rule := range hf.Hooks[event] {
+				for i := range rule.Hooks {
+					action := &rule.Hooks[i]
+					if legacyProjectHook(action.Command, event) {
+						action.Command = hookCommand(event, p.Scope)
+					}
+				}
+			}
+		}
 		if eventHasOxHook(hf.Hooks[event]) {
 			continue
 		}
 		hf.Hooks[event] = append(hf.Hooks[event], hookRule{
 			Hooks: []hookAction{{
 				Type:    "command",
-				Command: hookCommand(event, p.RepoRoot, p.Scope),
+				Command: hookCommand(event, p.Scope),
 				Timeout: timeoutFor(event),
 			}},
 		})
