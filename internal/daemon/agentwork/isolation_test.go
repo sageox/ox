@@ -225,6 +225,9 @@ if [ "$1" = "features" ]; then ` + big + `; exit; fi`, "output exceeds limit"},
 }
 
 func TestIsolationProbeTimeoutFailsClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits for subprocess probe timeout")
+	}
 	prior := codexProbeTimeout
 	codexProbeTimeout = 2 * time.Second
 	t.Cleanup(func() { codexProbeTimeout = prior })

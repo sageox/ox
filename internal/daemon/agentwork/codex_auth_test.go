@@ -48,6 +48,9 @@ func TestCodexAuthenticationStreamsAndExitStatus(t *testing.T) {
 }
 
 func TestCodexAuthenticationTimeoutIsNotAuthenticated(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits for subprocess probe timeout")
+	}
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "codex"), []byte("#!/bin/sh\nprintf 'Logged in using ChatGPT\\n'\nexec sleep 30\n"), 0700))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
