@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -297,4 +299,34 @@ func TestRunSessionList_InvalidWindowIsAUsageError(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Failure prevented: a Ledger folder that exists before the daemon's first
+// clone lands (its whisper and session caches live under it) reads as an
+// available Ledger, so a runner records passes that can never upload and its
+// `ox session wait` fails without a report; or the fix hides the recordings
+// cached there.
+func TestRunSessionList_UnclonedLedgerIsNotAvailable(t *testing.T) {
+	sandboxSessionCache(t)
+	t.Setenv(config.EnvProjectRoot, "")
+
+	dir := createInitializedProjectWithConfig(t, &config.ProjectConfig{RepoID: "repo_test_uncloned"})
+	runGit(t, dir, "init")
+	ledger := filepath.Join(t.TempDir(), "ledger")
+	require.NoError(t, os.MkdirAll(filepath.Join(ledger, ".sageox", "cache", "whisper"), 0o755))
+	// a recording cached before the first clone is still listed
+	cached := sessionNameAgo(time.Hour, "OxCach")
+	createSessionInDir(t, filepath.Join(ledger, ".sageox", "cache"), cached)
+	require.NoError(t, config.SaveLocalConfig(dir, &config.LocalConfig{Ledger: &config.LedgerConfig{Path: ledger}}))
+	t.Chdir(dir)
+
+	out, err := runSessionListWindow(t, "--all")
+	require.NoError(t, err)
+	assert.False(t, out.LedgerAvailable, "a folder with no checkout is not a Ledger")
+	assert.Contains(t, sessionNames(out), cached, "a recording cached before the first clone is still listed")
+
+	require.NoError(t, exec.Command("git", "init", "--quiet", ledger).Run())
+	out, err = runSessionListWindow(t, "--all")
+	require.NoError(t, err)
+	assert.True(t, out.LedgerAvailable)
 }
