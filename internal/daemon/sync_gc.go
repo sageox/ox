@@ -43,14 +43,19 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 		s.logger.Debug("gc: already in progress, skipping check")
 		return
 	}
+	defer atomic.StoreInt32(&s.gcInProgress, 0)
 
 	if err := s.workspaceRegistry.LoadFromConfig(); err != nil {
 		s.logger.Warn("gc: failed to load workspace registry", "error", err)
-		atomic.StoreInt32(&s.gcInProgress, 0)
 		return
 	}
 
-	teamContexts := s.workspaceRegistry.GetTeamContexts()
+	s.checkTeamContextGC(ctx, s.workspaceRegistry.GetTeamContexts())
+
+	s.checkLedgerAndBubbleGC(ctx)
+}
+
+func (s *SyncScheduler) checkTeamContextGC(ctx context.Context, teamContexts []WorkspaceState) {
 	for _, ws := range teamContexts {
 		interruptedSwap := gitutil.IsGitRepo(ws.Path + ".old")
 		if (!ws.Exists && !interruptedSwap) || ws.CloneURL == "" {
@@ -89,6 +94,9 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 
 		// run GC synchronously (one at a time) then release the flag
 		result := s.runBlueGreenGC(ctx, ws)
+		if result == gcSkippedLocked {
+			continue // no reclone started, so try the next due checkout
+		}
 
 		repoName := ws.TeamName
 		if repoName == "" {
@@ -120,7 +128,9 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 
 		break // one GC per check cycle to avoid overloading
 	}
+}
 
+func (s *SyncScheduler) checkLedgerAndBubbleGC(ctx context.Context) {
 	// ledger GC reclone — same blue-green pattern as team contexts
 	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(l.Path+".old")) && l.CloneURL != "" {
 		if _, loaded := s.cloneInFlight.Load(l.ID); !loaded {
@@ -239,8 +249,6 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 
 	// knowledge-bubble GC — independent of ledger / team-context GC.
 	s.TriggerKBGC(ctx)
-
-	atomic.StoreInt32(&s.gcInProgress, 0)
 }
 
 // ledgerSyncWedgeAge is how long a ledger must be simultaneously ahead

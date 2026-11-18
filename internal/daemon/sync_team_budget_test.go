@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -73,6 +74,24 @@ func resultsByPath(results []TeamSyncResult) map[string]TeamSyncResult {
 		byPath[r.Path] = r
 	}
 	return byPath
+}
+
+func TestDoTeamSync_BusyCheckoutSkipsWithoutBackoff(t *testing.T) {
+	scheduler, ids, _ := newTeamBudgetScheduler(t, 1)
+	require.NoError(t, scheduler.workspaceRegistry.LoadFromConfig())
+	ws := scheduler.workspaceRegistry.GetTeamContexts()[0]
+	overrideTeamBudgets(t, 50*time.Millisecond, 5*time.Second, scheduler.pullTeamContext)
+
+	require.NoError(t, gitutil.WithPreCloneLock(t.Context(), ws.Path, func() error {
+		results, err := scheduler.doTeamSync(t.Context(), nil, true)
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		assert.Equal(t, "skipped", results[0].Status)
+		assert.Contains(t, results[0].Error, "checkout is busy")
+		failures, _ := scheduler.workspaceRegistry.GetSyncRetryInfo(ids[0])
+		assert.Zero(t, failures)
+		return nil
+	}))
 }
 
 // One slow team must exhaust only its own budget. On the shared-budget code

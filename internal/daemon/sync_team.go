@@ -257,6 +257,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		ws         WorkspaceState
 		err        error
 		pullRan    bool
+		busy       bool // checkout lock held by a clone or GC
 		skipped    bool // cycle budget ran out before this team started
 		duration   time.Duration
 		prePullSHA string
@@ -308,7 +309,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			pullCtx, cancelPull := context.WithTimeout(ctx, teamPullTimeout)
 			defer cancelPull()
 			outcome, pullErr := runTeamPull(s, pullCtx, ws.Path)
-			results[idx] = syncResult{ws: ws, err: pullErr, pullRan: outcome.PullRan, duration: time.Since(start), prePullSHA: preSHA}
+			results[idx] = syncResult{ws: ws, err: pullErr, pullRan: outcome.PullRan, busy: outcome.CheckoutBusy, duration: time.Since(start), prePullSHA: preSHA}
 			reportProgress("syncing", fmt.Sprintf("Pulled team: %s", ws.TeamName))
 		}(i, t.ws)
 	}
@@ -335,6 +336,11 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			continue
 		}
 		s.workspaceRegistry.SetSyncInProgress(r.ws.ID, false)
+		if r.busy {
+			addResult(r.ws, "skipped", "checkout is busy with clone or cleanup")
+			skippedCount++
+			continue
+		}
 
 		if r.err != nil {
 			s.refreshAfterAuthFailure(ctx, r.err)
@@ -636,7 +642,8 @@ type teamPullOutcome struct {
 	// PullRan mirrors ManagedRepoPullResult.PullRan for this cycle. False for
 	// every path that returns before the fetch+pull — including a corrupt-repo
 	// move-aside and every skip.
-	PullRan bool
+	PullRan      bool
+	CheckoutBusy bool
 }
 
 // pullTeamContext performs a git pull on a single team context repo.
@@ -657,11 +664,16 @@ type teamPullOutcome struct {
 // so that CLI commands can "whisper" updates to agents.
 func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamPullOutcome, error) {
 	var outcome teamPullOutcome
+	var acquired bool
 	err := gitutil.WithPreCloneLock(ctx, path, func() error {
+		acquired = true
 		var err error
 		outcome, err = s.pullTeamContextWithCheckout(ctx, path)
 		return err
 	})
+	if !acquired && gitutil.IsPreCloneLockBusy(err) {
+		return teamPullOutcome{CheckoutBusy: true}, nil
+	}
 	return outcome, err
 }
 

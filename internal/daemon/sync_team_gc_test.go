@@ -82,6 +82,31 @@ func TestBlueGreenGC_TeamCheckoutBusy(t *testing.T) {
 	}))
 }
 
+func TestCheckTeamContextGC_SkipsBusyCheckoutAndReclonesNext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	manifest := "version 1\ninclude .sageox/\ninclude SOUL.md\n"
+	bareDir, openPath, scheduler := setupClonedTeamContext(t, manifest, nil)
+	busyPath := filepath.Join(t.TempDir(), "busy")
+	_, err := scheduler.twoPhaseClone(t.Context(), "file://"+bareDir, busyPath, nil)
+	require.NoError(t, err)
+
+	busy := WorkspaceState{ID: "busy", Type: WorkspaceTypeTeamContext, Path: busyPath, CloneURL: "file://" + bareDir, Exists: true}
+	open := WorkspaceState{ID: "open", Type: WorkspaceTypeTeamContext, Path: openPath, CloneURL: "file://" + bareDir, Exists: true}
+	registry := scheduler.WorkspaceRegistry()
+	registry.mu.Lock()
+	registry.workspaces[busy.ID] = &busy
+	registry.workspaces[open.ID] = &open
+	registry.mu.Unlock()
+	require.NoError(t, gitutil.WithPreCloneLock(t.Context(), busyPath, func() error {
+		scheduler.checkTeamContextGC(t.Context(), []WorkspaceState{busy, open})
+		require.True(t, registry.GetLastGCTime(busy.ID).IsZero())
+		require.False(t, registry.GetLastGCTime(open.ID).IsZero())
+		return nil
+	}))
+}
+
 func TestBlueGreenGC_PreservesUncommittedTrackedChanges(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git clone operations")
