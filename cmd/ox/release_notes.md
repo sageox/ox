@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Add-ons and team memory reach the team** — `ox addons` changes and `ox memory put` push to Team Context and report when a change is still local. The daemon retries on the next sync.
 - **`ox doctor --fix` removes team names from old repo markers** — `.sageox/.repo_*` markers written by earlier `ox init` runs listed every team the person belonged to under `team_urls`. Doctor now flags it, and `--fix` removes the key; commit `.sageox/` afterwards.
 - **Ledger commits stay credited to the AI coworker on machines with a global `author.email`** — git ranks `author.*` and `committer.*` above `user.email` in every scope, so a global `author.email` or `committer.email` put that address on an AI coworker's Ledger commits. ox now writes those keys next to the identity it stamps in its clones, and removes them with it.
 

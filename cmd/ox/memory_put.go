@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/facts"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/spf13/cobra"
@@ -31,8 +32,8 @@ var memoryPutCmd = &cobra.Command{
 	Short: "Record an observation into team memory",
 	Long: `Record an observation into the team context memory pipeline.
 
-Observations are committed to the team context on this machine;
-` + "`ox memory distill`" + ` sends them to SageOx.
+Observations are committed and pushed to the Team Context;
+` + "`ox memory distill`" + ` sends them to SageOx for distillation.
 Each observation must have a "content" field.
 
 Input formats:
@@ -119,6 +120,7 @@ func runMemoryPut(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Recorded %d observation(s)\n", len(observations))
+	fmt.Fprintln(cmd.OutOrStdout(), teamWritePushGuidance(tc.Path, pushTeamPublish(projectRoot, tc.Path)))
 	return nil
 }
 
@@ -157,9 +159,9 @@ func writeObservation(teamContextPath string, observations []observation) error 
 	if len(summary) > 50 {
 		summary = summary[:50] + "..."
 	}
-	commitMsg := fmt.Sprintf("observation: %s", summary)
+	commitMsg := daemon.TeamObservationCommitPrefix + summary
 	relPath := filepath.Join("memory", observationDirName, dateDir, filename)
-	pending := "memory/" + observationDirName
+	pending := daemon.TeamObservationDir
 
 	if err := writeObservationFile(teamContextPath, filePath, header, factSlice); err != nil {
 		return fmt.Errorf("write observation file: %w", err)

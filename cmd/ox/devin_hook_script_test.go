@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/testguard"
 	"github.com/stretchr/testify/require"
 )
 
@@ -87,16 +88,9 @@ func (e *hookEnv) run(dir string, extraEnv []string, stdin string, args ...strin
 	cmd := exec.Command("bash", append([]string{hook}, args...)...)
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(stdin)
-	env := []string{}
-	for _, kv := range os.Environ() {
-		k, _, _ := strings.Cut(kv, "=")
-		switch k {
-		case "HOME", "SAGEOX_TOKEN", "OX_SESSION_RECORDING", "OX_PROJECT_ROOT", "DEVIN_PROJECT_DIR", "CLAUDE_PROJECT_DIR", "OX_DEVIN_STATE":
-			continue
-		}
-		env = append(env, kv)
-	}
-	cmd.Env = append(env, "HOME="+e.home, "OX_DEVIN_STATE="+e.state, "FAKE_SESSION_FILE="+e.sf)
+	cmd.Env = testguard.MinimalEnv([]string{
+		"HOME=" + e.home, "OX_DEVIN_STATE=" + e.state, "FAKE_SESSION_FILE=" + e.sf,
+	})
 	cmd.Env = append(cmd.Env, extraEnv...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
