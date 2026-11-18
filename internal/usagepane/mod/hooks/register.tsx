@@ -19,10 +19,12 @@
 //
 // It also draws SageOx's data flow into the transcript, on every surface: a
 // one-line lane under each ox tool row (a Bash `ox …` command or a SageOx MCP
-// tool) and under each prompt whose hooks brought
-// team context in (prime, murmurs, ledger recall). Context arriving travels
-// the lane as filled dots, anything sent back as hollow rings, once; then the
-// lane settles to a still line that says what moved. Outside the terminal,
+// tool). Only ox calls get one: context a hook injects with a prompt (the
+// session-start prime, murmurs, ledger recall) draws nothing, since nobody
+// asked for it at that moment and the engine sends it again after every
+// reload. Context arriving travels the lane as filled dots, anything sent
+// back as hollow rings: marching while the call runs, then once across as it
+// lands; then the lane settles to a still line that says what moved. Outside the terminal,
 // folded tool groups holding an ox call unfold so the lane shows; the
 // terminal keeps them folded and draws the lanes of their ox calls beneath
 // the group (the newest three, then a count). `/ox-session-report flow off`
@@ -36,23 +38,19 @@
 import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, Register } from 'claude-code'
 
-import type { FlowEvent, FlowState, Statusline, UsageReport } from '../types'
-import { attachEvents, classifyAttachment, classifyBash, classifyMcp, EMPTY_FLOW, eventsFor, finishEvent, promptEvents, startEvent } from './flow'
-import type { FlowAttachment, FlowStart } from './flow'
+import type { FlowEvent, Statusline, UsageReport } from '../types'
+import { classifyBash, classifyMcp, EMPTY_FLOW, eventsFor, finishEvent, startEvent } from './flow'
+import type { FlowStart } from './flow'
 import {
-  arrived,
-  drawn,
   finishOf,
   FLOW_KEY,
   flowMode,
   flowStored,
   isMcpName,
   laneWidth,
-  newBinder,
   parseFlowArg,
   settleDelay,
   startOf,
-  submitted,
   withSent,
   type FlowMode,
   type RanLike,
@@ -85,7 +83,7 @@ import {
   truncate,
   usedRows,
 } from './logic'
-import { caption, eventModel, laneSvg, promptModel, promptSvg, type Model } from './scene'
+import { caption, eventModel, laneSvg, type Model } from './scene'
 import { encodeCells, LABEL_SAGEOX, LABEL_SESSION, DIGEST_GAP, textLane, TRACK } from './textlane'
 import { TOKENS } from './tokens'
 
@@ -293,14 +291,12 @@ function refreshStatusline($: EngineInterface): Promise<void> {
 }
 
 // Module state for the flow lanes: the setting as last read (re-read after
-// FLOW_CACHE_MS; the command sets it at once), one settle timer per row
-// still animating, and the binder tying hook attachments to their prompt row
-// (hooks/flowwire.ts states the rule). A reload drops all of it: the events
-// themselves live in the `flow` atom, and the next draw settles what it finds.
+// FLOW_CACHE_MS; the command sets it at once) and one settle timer per row
+// still animating. A reload drops both: the events themselves live in the
+// `flow` atom, and the next draw settles what it finds.
 const FLOW_CACHE_MS = 5_000
 let flowCache: { mode: FlowMode; at: number } | null = null
 const settling = new Map<string, { cancel: () => void }>()
-let binder = newBinder<FlowAttachment[]>()
 
 async function modeOf($: EngineInterface, now: number): Promise<FlowMode> {
   if (flowCache !== null && now - flowCache.at < FLOW_CACHE_MS) {
@@ -470,7 +466,6 @@ function resetFlow() {
   laneTicker?.cancel()
   laneTicker = null
   lanes.clear()
-  binder = newBinder<FlowAttachment[]>()
   flowCache = null
 }
 
@@ -511,25 +506,6 @@ async function endFlow($: EngineInterface, id: string, start: FlowStart | null, 
   } catch {
     // The call already ran; a lane that cannot close changes nothing.
   }
-}
-
-// withAttachments files one hook attachment's blocks under a prompt row.
-// Each attachment gets its own batch id (`att:<msg>#b<n>`), n above every
-// batch still retained, so a prompt holding both SessionStart and
-// UserPromptSubmit context keeps both, even after the cap evicted some.
-function withAttachments(s: FlowState, msg: string, attachments: FlowAttachment[], now: number): FlowState {
-  let next = 0
-  for (const e of promptEvents(s, msg)) {
-    const m = /#b(\d+)#/.exec(e.id)
-    if (m) {
-      next = Math.max(next, Number(m[1]) + 1)
-    }
-  }
-  return attachEvents(s, { id: `att:${msg}#b${next}`, now, attachments })
-}
-
-async function recordAttachments($: EngineInterface, msg: string, attachments: FlowAttachment[], now: number) {
-  await update($, flow, s => withAttachments(s, msg, attachments, now))
 }
 
 // settleLater redraws a row once its animation has played, so it settles to
@@ -659,42 +635,6 @@ export const register: Register = on => {
     return ran
   }).catch(($, e, next) => next(e))
 
-  // A prompt submit opens the window its hook attachments belong to.
-  on('prompt.submit', async ($, e, next) => {
-    if (e.isMeta !== true) {
-      submitted(binder)
-    }
-    return next(e)
-  }).catch(($, e, next) => next(e))
-
-  // Hook-injected team context (prime, murmurs, ledger recall): filed under
-  // the prompt row it came in with, now or once that row draws. The text the
-  // model reads passes through untouched.
-  on('prompt.attachment', async ($, e, next) => {
-    const out = await next(e)
-    try {
-      if (e.origin.kind !== 'hook' || e.agentId !== undefined || typeof out.text !== 'string') {
-        return out
-      }
-      const attachments = classifyAttachment(out.text, e.origin.event)
-      if (attachments.length === 0) {
-        return out
-      }
-      const now = await $.clock.now()
-      if ((await modeOf($, now)) === 'off') {
-        return out
-      }
-      const target = arrived(binder, out.text, attachments)
-      if (target !== null) {
-        await recordAttachments($, target, attachments, now)
-        $.ui.invalidate('ui.render')
-      }
-    } catch {
-      // Context still reaches the model; only its lane is lost.
-    }
-    return out
-  }).catch(($, e, next) => next(e))
-
   on('turn.start', async ($, e, next) => {
     void refreshStatusline($)
     return next(e)
@@ -803,60 +743,6 @@ export const register: Register = on => {
         {own}
         <Box key="ox-flow" flexDirection="row">
           <Svg key="ox-flow-lane" source={laneSvg(ev, now, { width, reducedMotion: still })} alt={caption(ev)} width={width} height={TOKENS.height} />
-        </Box>
-      </Box>
-    )
-  }).catch(($, e, next) => next(e))
-
-  // The flow strip under a prompt that carried team context in. Every
-  // UserMessage draw also lets the binder claim pending attachments.
-  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
-    const own = await next(e)
-    const composer = e.props.origin.kind === 'composer'
-    const now = await $.clock.now()
-    // Drawing is pure: the claim is written from a timer, and this draw folds
-    // it in locally so the strip shows at once.
-    const claimed = drawn(binder, e.requestId, composer)
-    if (claimed.length > 0) {
-      const id = e.requestId
-      $.clock.after(0, () => {
-        void (async () => {
-          for (const attachments of claimed) {
-            await recordAttachments($, id, attachments, now)
-          }
-          $.ui.invalidate('ui.render')
-        })().catch(() => undefined)
-      })
-    }
-    if (!composer) {
-      return own
-    }
-    const mode = await modeOf($, now)
-    if (mode === 'off') {
-      return own
-    }
-    let state = await read($, flow)
-    for (const attachments of claimed) {
-      state = withAttachments(state, e.requestId, attachments, now)
-    }
-    const evs: FlowEvent[] = promptEvents(state, e.requestId)
-    if (evs.length === 0) {
-      return own
-    }
-    const still = mode === 'still' || e.props.onScreen === null
-    if (!still) {
-      settleLater($, `att:${e.requestId}`, settleDelay(evs, now))
-    }
-    if (e.surface === 'terminal') {
-      return terminalLane($, e, own, promptModel(evs, now), now, still)
-    }
-    const width = laneWidth(e.viewport)
-    const { Box, Svg } = $.ui.resolve(e)
-    return (
-      <Box flexDirection="column">
-        {own}
-        <Box key="ox-flow" flexDirection="row">
-          <Svg key="ox-flow-lane" source={promptSvg(evs, now, { width, reducedMotion: still })} alt={caption(evs)} width={width} height={TOKENS.height} />
         </Box>
       </Box>
     )

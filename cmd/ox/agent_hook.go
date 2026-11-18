@@ -115,6 +115,9 @@ func runAgentHook(args []string) error {
 
 	// 3. read stdin
 	input := ReadHookInput()
+	if input != nil {
+		noteWrapSession(input.SessionID) // no-op outside `ox statusline --wrap`
+	}
 	if agentType == "cursor" {
 		return runCursorAgentHook(eventName, input, projectRoot)
 	}
@@ -124,6 +127,15 @@ func runAgentHook(args []string) error {
 	if phase == "" {
 		slog.Debug("hook: unknown event", "agent", agentType, "event", eventName)
 		return nil // silent noop
+	}
+
+	// 4b. the pre-tool phase does one thing, and only for an ox call that
+	// moves team data: note its start, so the flow lane can show it running
+	// and say how long it took (flow_lanes.go). Every other tool call returns
+	// after classification, with no marker read, heartbeat or output.
+	if phase == phaseBeforeTool {
+		recordFlowStart(projectRoot, input, time.Now())
+		return nil
 	}
 
 	// 5. fast-path: phase has no behavior?
@@ -698,9 +710,22 @@ func handleAfterTool(ctx *HookContext) error {
 	// is discarded anyway, and handlePrompt remains its primary delivery.
 	pageNudged := ctx.AgentType == "claude-code" && ctx.Input != nil &&
 		emitWrittenPageNudge(os.Stdout, ctx.ProjectRoot, agentID, ctx.Input.ToolName, ctx.Input.ToolInput)
-	if ctx.AgentType == "codex" {
-		emitCodexAfterTool(os.Stdout, agentID) // whispers must ride in Codex's JSON envelope
-	} else if !pageNudged {
+	switch {
+	case ctx.AgentType == "codex":
+		// Whispers must ride in Codex's PostToolUse JSON envelope. handleStop
+		// drains through here too, and Codex's Stop schema rejects that
+		// envelope, so at Stop they stay pending for the next prompt.
+		if ctx.Phase != phaseStop {
+			// recordOxToolCall above has traced this call, so its flow lane
+			// is ready to show under it.
+			emitCodexAfterTool(os.Stdout, agentID, codexFlowNotice(ctx))
+		}
+	case ctx.Phase == phaseStop && stopDigestEnabled(ctx):
+		// Stop's stdout is the digest's one JSON document: plain whisper
+		// text ahead of it would make the host drop both. Claude Code's
+		// model never reads Stop stdout anyway, so whispers stay pending
+		// for the next prompt.
+	case !pageNudged:
 		// emit pending whispers (fallback — primary delivery is handlePrompt)
 		emitWhispers(os.Stdout, agentID)
 	}
@@ -995,6 +1020,11 @@ func handleStop(ctx *HookContext) error {
 	if err := handleAfterTool(ctx); err != nil {
 		slog.Debug("hook: stop drain failed", "error", err)
 	}
+	// The reply just drained is where use evidence lands: count it on the
+	// status line now, before the digest below reads the counts.
+	if ctx.Marker != nil {
+		recordTurnUses(ctx.ProjectRoot, ctx.Marker.AgentID)
+	}
 	// Turn counting and the early draft placeholder live HERE and nowhere
 	// else. PhaseStop fires once per completed response turn; handleAfterTool
 	// also fires on PostToolUse, so incrementing there would count tool calls.
@@ -1004,6 +1034,12 @@ func handleStop(ctx *HookContext) error {
 	// Codex's only plan-exit signal is a <proposed_plan> block at turn end.
 	if ctx.AgentType == "codex" && ctx.Marker != nil {
 		maybeCaptureCodexPlan(ctx, ctx.Marker.AgentID)
+	}
+	// Claude Code inside Conductor has no status bar and shows the ox line
+	// and the turn's flow lanes here. Codex shows each lane under its call
+	// (handleAfterTool), so its Stop is silent unless one was missed.
+	if stopDigestEnabled(ctx) {
+		emitStopDigest(os.Stdout, ctx)
 	}
 	return nil
 }

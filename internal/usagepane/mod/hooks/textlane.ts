@@ -1,18 +1,22 @@
 // The flow lane as text, for the terminal: the surface with no Svg. The same
 // model the SVG draws (hooks/scene.ts) becomes one row of cells:
 //
-//   SAGEOX ●┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄○ SESSION  searching team discussions      running
+//   SAGEOX ●┄┄•┄┄┄┄┄•┄┄┄┄┄•┄○ SESSION  searching team discussions      running
 //   SAGEOX ●━━━━━•━•━•┄┄┄┄┄┄● SESSION  searched team memory · ~1.2k…   in flight
 //   SAGEOX ●━━━━━━━━━━━━━━━━● SESSION  searched team memory · ~1.2k…   settled
 //   SAGEOX ●╶─              ● SESSION  failed while searching team…    nothing moved
 //
 // Context arriving travels left to right as filled dots; anything sent back
-// travels right to left as hollow rings. The track is a fixed TRACK cells on
+// travels right to left as hollow rings: marching along the dotted line while
+// the call runs, then landing. A call that failed leaves its stub and both
+// ends in the error colour. The track is a fixed TRACK cells on
 // every row so stacked rows read as small multiples.
 //
 // Everything here is a pure function of (model, now): the plugin redraws the
 // row on events and repaints the track in place between them ($.ui.blit).
-// design/sageox-flow/SPEC.md, "Terminal lane", is the record.
+// `ox statusline --watch` and the Codex turn-end notice draw the same grammar
+// from Go (internal/flowlane); design/sageox-flow/SPEC.md, "Terminal lane",
+// is the record for both, and the two test suites share their golden rows.
 
 import { ANIM_MS, dotCount, strokeWeight, SEP, type Model, type Seg } from './scene'
 import { TOKENS as T } from './tokens'
@@ -27,6 +31,11 @@ export const MAX_TEXT_DOTS = 5
 export const TEXT_DOT_STAGGER_MS = 180
 /** Columns the host's own row indent takes; kept free so the row never wraps. */
 export const ROW_MARGIN = 6
+/** A running lane's dots: one every MARCH_PERIOD cells, each stepping a cell per MARCH_STEP_MS. */
+export const MARCH_PERIOD = 6
+export const MARCH_STEP_MS = 120
+/** How long a running lane keeps moving: a call whose end never came must not tick forever. */
+export const MARCH_MAX_MS = T.marchMaxMs
 
 export const LABEL_SAGEOX = 'SAGEOX '
 export const LABEL_SESSION = ' SESSION'
@@ -43,13 +52,14 @@ const STUB_START = '╶'
 const DOT_IN = '•'
 const DOT_OUT = '◦'
 
-/** Raster colours. One mid sage and one mid grey that hold 3:1 on light and dark. */
+/** Raster colours. One mid sage, one mid grey and one mid red that hold 3:1 on light and dark. */
 export const RGB_STREAM = 0x5f9a5b
 export const RGB_QUIET = 0x8a8a8a
+export const RGB_BAD = 0xd0503c
 /** Bit 24 alone: the terminal's own default colour. */
 export const RGB_DEFAULT = 0x01000000
 
-export type Tone = 'stream' | 'quiet'
+export type Tone = 'stream' | 'quiet' | 'bad'
 export type Cell = { ch: string; tone: Tone }
 
 export type TextLaneOpts = {
@@ -83,15 +93,21 @@ export function trackCells(m: Model, now: number, still = false): { cells: Cell[
   let moving = false
   const quiet = (ch: string): Cell => ({ ch, tone: 'quiet' })
   const stream = (ch: string): Cell => ({ ch, tone: 'stream' })
+  const dot = m.direction === 'in' ? DOT_IN : DOT_OUT
 
   switch (m.outcome) {
-    case 'open':
+    case 'open': {
+      // Dots march from the origin toward the destination while the call runs.
+      const t = now - m.startedAt
+      moving = !still && t >= 0 && t < MARCH_MAX_MS
+      const step = Math.floor(t / MARCH_STEP_MS) % MARCH_PERIOD
       along.push(quiet(NODE))
-      for (let k = 0; k < INNER; k++) {
-        along.push(quiet(DOTTED))
+      for (let k = 1; k <= INNER; k++) {
+        along.push(moving && (k - 1 - step + MARCH_PERIOD) % MARCH_PERIOD === 0 ? stream(dot) : quiet(DOTTED))
       }
       along.push(quiet(RING))
       break
+    }
     case 'flowed': {
       const line = lineGlyph(m.tokens)
       const t = m.endedAt === undefined ? ANIM_MS : now - m.endedAt
@@ -103,7 +119,6 @@ export function trackCells(m: Model, now: number, still = false): { cells: Cell[
       }
       along.push(stream(NODE))
       if (flight) {
-        const dot = m.direction === 'in' ? DOT_IN : DOT_OUT
         const n = Math.min(MAX_TEXT_DOTS, dotCount(m.tokens))
         for (let i = 0; i < n; i++) {
           const ti = t - i * TEXT_DOT_STAGGER_MS
@@ -115,13 +130,16 @@ export function trackCells(m: Model, now: number, still = false): { cells: Cell[
       }
       break
     }
-    default:
-      // failed, interrupted, empty: a short stub off the origin, both ends quiet.
-      along.push(quiet(NODE), quiet(STUB_START), quiet(THIN))
+    default: {
+      // failed, interrupted, empty: a short stub off the origin. A failure is
+      // drawn in the error colour, ends included; the others stay quiet.
+      const end = m.outcome === 'failed' ? (ch: string): Cell => ({ ch, tone: 'bad' }) : quiet
+      along.push(end(NODE), end(STUB_START), end(THIN))
       for (let k = 3; k <= INNER; k++) {
         along.push(quiet(' '))
       }
-      along.push(quiet(NODE))
+      along.push(end(NODE))
+    }
   }
   return { cells: m.direction === 'in' ? along : along.reverse(), moving }
 }
@@ -218,7 +236,7 @@ export function encodeCells(cells: readonly Cell[]): string {
   const view = new DataView(bytes.buffer)
   cells.forEach((c, i) => {
     view.setUint32(i * 12, c.ch.codePointAt(0) ?? 0x20, true)
-    view.setUint32(i * 12 + 4, c.tone === 'stream' ? RGB_STREAM : RGB_QUIET, true)
+    view.setUint32(i * 12 + 4, c.tone === 'stream' ? RGB_STREAM : c.tone === 'bad' ? RGB_BAD : RGB_QUIET, true)
     view.setUint32(i * 12 + 8, RGB_DEFAULT, true)
   })
   return base64(bytes)
