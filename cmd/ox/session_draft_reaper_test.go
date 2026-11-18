@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +44,8 @@ func draftReaperFixture(t *testing.T) (projectRoot, ledgerPath string) {
 	// shells out to `git rev-parse --show-toplevel`. Cheap (~10ms) and it keeps
 	// these tests in the fast loop, unlike the full bare-remote fixture.
 	require.NoError(t, exec.Command("git", "-C", projectRoot, "init", "--quiet").Run())
+	require.NoError(t, exec.Command("git", "-C", projectRoot, "config", "user.name", "Test User").Run())
+	require.NoError(t, exec.Command("git", "-C", projectRoot, "config", "user.email", "testuser@example.com").Run())
 
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
 	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
@@ -73,7 +76,7 @@ func agedDraft(t *testing.T, ledgerPath, sessionName string, age time.Duration) 
 	updated := time.Now().Add(-age).UTC()
 	require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
 		Version: "1.0", SessionName: sessionName, SessionID: draftTestSessionID,
-		AgentID: "OxOrphan", Username: identity.LocalAttributionUsername(), CreatedAt: updated,
+		AgentID: sessionName[strings.LastIndex(sessionName, "-")+1:], Username: identity.LocalAttributionUsername(), CreatedAt: updated,
 		Draft: true, TurnCount: 2, UpdatedAt: &updated,
 		Files: map[string]lfs.FileRef{},
 	}))

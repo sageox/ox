@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -229,4 +230,21 @@ func TestLocalAttributionUsername_NoGit_FallsBackToOS(t *testing.T) {
 
 	t.Setenv("USER", "")
 	assert.Equal(t, "anonymous", LocalAttributionUsername())
+}
+
+func TestLocalAttributionUsernameForProject_UsesProjectGitIdentity(t *testing.T) {
+	project := t.TempDir()
+	require.NoError(t, exec.Command("git", "-C", project, "init", "--quiet").Run())
+	require.NoError(t, exec.Command("git", "-C", project, "config", "user.name", "Project Owner").Run())
+	require.NoError(t, exec.Command("git", "-C", project, "config", "user.email", "project-owner@example.com").Run())
+
+	username, known := LocalAttributionUsernameForProject("", project)
+	assert.True(t, known)
+	assert.Equal(t, "project-owner", username)
+}
+
+func TestLocalAttributionUsernameForProject_UnknownWithoutProject(t *testing.T) {
+	username, known := LocalAttributionUsernameForProject("", "")
+	assert.False(t, known)
+	assert.Empty(t, username)
 }

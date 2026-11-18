@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,17 +27,17 @@ func TestValidateDraftSessionName_AcceptsGeneratedNamesOnly(t *testing.T) {
 func TestFindOrphanedDrafts_SkipsNonconformingNames(t *testing.T) {
 	ledger := t.TempDir()
 	aged := time.Now().Add(-2 * OrphanedDraftAge).UTC()
-	for _, name := range []string{"*", "[v]ictim", "ordinary"} {
+	for _, name := range []string{"2026-01-01T00-00-localuser-OxOrphan"} {
 		dir := filepath.Join(ledger, "sessions", name)
 		require.NoError(t, os.MkdirAll(dir, 0o755))
 		require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
 			Version: "1.0", SessionName: name, SessionID: "ses_orphan_test", AgentID: "OxOrphan",
-			Username: identity.LocalAttributionUsername(), CreatedAt: aged, Draft: true, UpdatedAt: &aged, Files: map[string]lfs.FileRef{},
+			Username: "Local User", CreatedAt: aged, Draft: true, UpdatedAt: &aged, Files: map[string]lfs.FileRef{},
 		}))
 	}
 
-	orphans, err := FindOrphanedDrafts(ledger, nil)
+	orphans, err := FindOrphanedDrafts(ledger, nil, "localuser")
 
 	require.NoError(t, err)
-	assert.Equal(t, []string{"ordinary"}, orphans)
+	assert.Equal(t, []string{"2026-01-01T00-00-localuser-OxOrphan"}, orphans)
 }

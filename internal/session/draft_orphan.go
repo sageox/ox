@@ -9,38 +9,37 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 )
-
-// localOwner is the attribution username of the user running this machine. It
-// is local-only (git identity, then $USER), so the reaper never reaches the network.
-func localOwner() string {
-	return identity.LocalAttributionUsername()
-}
 
 // draftTimestampLen is len("2006-01-02T15-04"), the timestamp prefix that
 // GenerateSessionName writes ahead of the username slug.
 const draftTimestampLen = len("2006-01-02T15-04")
 
-// draftOwnedByLocalUser reports whether a draft belongs to the user running this
-// machine. A draft is owned when its meta.username equals the local owner, or
-// when its session name carries the local owner's slug right after the
-// timestamp (<timestamp>-<username>-<sessionID>). The name check covers drafts
-// written without attribution. An unknown local owner owns nothing.
-func draftOwnedByLocalUser(sessionName, metaUsername string) bool {
-	owner := localOwner()
-	if owner == "" {
+// draftOwnedByLocalUser reports whether the generated session name identifies
+// the supplied recording owner. The ledger username is a display name, not an
+// ownership key, so it must never authorize deleting a draft. AgentID marks
+// the end of the username slug and prevents prefix matches (for example, ann
+// matching ann-smith). Unknown identities and legacy names without AgentID
+// fail closed.
+func draftOwnedByLocalUser(sessionName string, meta *lfs.SessionMeta, owner string) bool {
+	if owner == "" || owner == "anonymous" || meta == nil || meta.AgentID == "" {
 		return false
-	}
-	if metaUsername != "" && metaUsername == owner {
-		return true
 	}
 	slug := sanitizeFilename(owner)
-	if slug == "" || len(sessionName) <= draftTimestampLen+1 || sessionName[draftTimestampLen] != '-' {
+	agentID := sanitizeFilename(meta.AgentID)
+	if slug == "" || agentID == "" || len(sessionName) <= draftTimestampLen+1 || sessionName[draftTimestampLen] != '-' {
 		return false
 	}
-	return strings.HasPrefix(sessionName[draftTimestampLen+1:], slug+"-")
+	if _, err := time.Parse("2006-01-02T15-04", sessionName[:draftTimestampLen]); err != nil {
+		return false
+	}
+	remaining := sessionName[draftTimestampLen+1:]
+	suffix := "-" + agentID
+	if !strings.HasSuffix(remaining, suffix) || len(remaining) <= len(suffix) {
+		return false
+	}
+	return remaining[:len(remaining)-len(suffix)] == slug
 }
 
 // OrphanedDraftAge is how long a committed draft placeholder must go without a
@@ -95,7 +94,7 @@ func ValidateDraftSessionName(sessionName string) error {
 //
 // This is the single source of truth for "orphaned draft"; both `ox doctor` and
 // the daemon's periodic retraction call it.
-func FindOrphanedDrafts(ledgerPath string, cacheDirs []string) ([]string, error) {
+func FindOrphanedDrafts(ledgerPath string, cacheDirs []string, localOwner string) ([]string, error) {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
@@ -132,10 +131,10 @@ func FindOrphanedDrafts(ledgerPath string, cacheDirs []string) ([]string, error)
 			continue
 		}
 		// Owner-only reaping: only the owning user's machine can see that
-		// owner's cache, so only it can evaluate condition 3. Ownership is the
-		// attribution username or the username slug embedded in the session
-		// name, so drafts written before attribution existed still match.
-		if !draftOwnedByLocalUser(name, meta.Username) {
+		// owner's cache, so only it can evaluate condition 3. The session name
+		// records the attribution slug used when recording began. meta.Username
+		// is a privacy-safe display name and is not an ownership key.
+		if !draftOwnedByLocalUser(name, meta, localOwner) {
 			continue
 		}
 		if DraftHasLocalSessionData(cacheDirs, name) {
