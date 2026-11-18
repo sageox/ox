@@ -76,7 +76,7 @@ func emitPublicPrime(cmd *cobra.Command, projectRoot string, textMode bool) (han
 	if bundle == nil {
 		return false, nil
 	}
-	block := renderPublicPrime(bundle, time.Local)
+	block := renderPublicPrimeFor(bundle, time.Local, repotools.IsShallowClone(projectRoot))
 	out := cmd.OutOrStdout()
 	if textMode {
 		_, err = fmt.Fprint(out, block)
@@ -122,6 +122,14 @@ func publicPrimeXML(block string) string {
 //
 // Ranking and selection are the server's; this only lays the bundle out.
 func renderPublicPrime(p *api.PublicPrimeResponse, loc *time.Location) string {
+	return renderPublicPrimeFor(p, loc, false)
+}
+
+// renderPublicPrimeFor is renderPublicPrime for a clone that may be shallow.
+// A shallow clone must not be told to run `ox init --team`: its first commit
+// is the shallow boundary, so its salted remote hashes match no registration
+// and init would mint a duplicate repo inside the project's team.
+func renderPublicPrimeFor(p *api.PublicPrimeResponse, loc *time.Location, shallow bool) string {
 	var b strings.Builder
 	project := oneLine(p.Project.Name)
 	fmt.Fprintf(&b, "SageOx primed from %s, public, as of %s\n", project, p.AsOf.In(loc).Format("3:04 PM"))
@@ -143,10 +151,14 @@ func renderPublicPrime(p *api.PublicPrimeResponse, loc *time.Location) string {
 	}
 	switch p.Viewer {
 	case api.PublicPrimeViewerMember:
-		if team := p.MemberTeam(); team != nil && teamIDPattern.MatchString(team.ID) {
+		team := p.MemberTeam()
+		switch {
+		case team != nil && teamIDPattern.MatchString(team.ID) && shallow:
+			fmt.Fprintf(&b, "You're a member of %s. This is a shallow clone, so ox can't match it to the project's repo yet: run `git fetch --unshallow`, then `ox init --team %s` to link it to the project's team.\n", project, team.ID)
+		case team != nil && teamIDPattern.MatchString(team.ID):
 			// The id, not the slug: it never changes, and --team accepts it.
 			fmt.Fprintf(&b, "You're a member of %s. Run `ox init --team %s` here to link this clone to the project's team, so your work here counts as the project's.\n", project, team.ID)
-		} else {
+		default:
 			fmt.Fprintf(&b, "You're a member of %s. Run `ox init` here for full priming.\n", project)
 		}
 	case api.PublicPrimeViewerSignedIn:

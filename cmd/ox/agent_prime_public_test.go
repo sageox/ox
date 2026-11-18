@@ -79,6 +79,12 @@ func TestRenderPublicPrime_ViewerFooters(t *testing.T) {
 	assert.Contains(t, got, "You're a member of Readest. Run `ox init --team team_readestproj01` here to link this clone to the project's team")
 	assert.NotContains(t, got, "for full priming")
 
+	// A shallow clone is never told to run `ox init --team` bare: its
+	// hashes can't match the project's repo, so it is told to unshallow first.
+	got = renderPublicPrimeFor(member, time.UTC, true)
+	assert.Contains(t, got, "This is a shallow clone, so ox can't match it to the project's repo yet: run `git fetch --unshallow`, then `ox init --team team_readestproj01`")
+	assert.NotContains(t, got, "Run `ox init --team")
+
 	// A team id that isn't one is never pasted into a command.
 	member.Team = &api.PublicPrimeTeam{ID: "team_x; rm -rf ~"}
 	got = renderPublicPrime(member, time.UTC)

@@ -465,6 +465,10 @@ func runInit() error {
 		}
 		selectedTeamID = resolvedID
 		selectedTeamName = resolvedName
+		// --team is honored as given; a shallow clone is only warned.
+		if warning := shallowCloneTeamWarning(gitRoot); warning != "" && !initQuiet {
+			cli.PrintWarning(warning)
+		}
 		if len(resolveTeamMembership(memberships, initTeamFlag)) == 0 {
 			unresolvedTeamCandidates = usableTeams(memberships)
 		}
@@ -3034,8 +3038,10 @@ func suggestOpenSourceTeam(ctx context.Context, gitRoot string, teams []api.Team
 		}
 		bundle, err := fetchPublicPrimeForRepo(ctx, gitRoot, owner, name)
 		if err != nil {
-			slog.Debug("open-source team suggestion unavailable", "error", err)
-			return ""
+			// One remote failing (a 503, a timeout on a slow origin) says
+			// nothing about the other: a fork clone's project is on upstream.
+			slog.Debug("open-source team suggestion unavailable", "remote_repo", owner+"/"+name, "error", err)
+			continue
 		}
 		if team = bundle.MemberTeam(); team != nil {
 			break
@@ -3044,10 +3050,20 @@ func suggestOpenSourceTeam(ctx context.Context, gitRoot string, teams []api.Team
 	if team == nil || !slices.ContainsFunc(teams, func(t api.TeamMembership) bool { return t.ID == team.ID }) {
 		return ""
 	}
-	if repotools.IsShallowClone(gitRoot) {
-		cli.PrintWarning(fmt.Sprintf("This is a shallow clone of a project you're on (team %s), so ox can't match it to the project's repo. Run %s first, then re-run %s.",
-			team.ID, cli.StyleCommand.Render("git fetch --unshallow"), cli.StyleCommand.Render("ox init")))
+	if warning := shallowCloneTeamWarning(gitRoot); warning != "" {
+		cli.PrintWarning(fmt.Sprintf("You're on this project's team (%s). %s", team.ID, warning))
 		return ""
 	}
 	return team.ID
+}
+
+// shallowCloneTeamWarning explains, for a shallow clone, why binding it to a
+// team that already registered the repo would mint a duplicate instead; ""
+// for a full clone. Shared by the suggestion and the explicit --team path.
+func shallowCloneTeamWarning(gitRoot string) string {
+	if !repotools.IsShallowClone(gitRoot) {
+		return ""
+	}
+	return fmt.Sprintf("This is a shallow clone, so ox can't match it to a repo the team already registered and would register a separate one. Run %s first, then re-run %s.",
+		cli.StyleCommand.Render("git fetch --unshallow"), cli.StyleCommand.Render("ox init"))
 }

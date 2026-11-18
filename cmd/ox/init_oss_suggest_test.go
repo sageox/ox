@@ -166,3 +166,38 @@ func TestSelectTeam_NoInputNamesTheProjectsTeam(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--team "+ossTeamID)
 }
+
+// TestSuggestOpenSourceTeam_OriginErrorStillTriesUpstream — Failure
+// prevented: a 503 or timeout on the contributor's fork (origin) hides the
+// project on upstream, and they're offered nothing.
+func TestSuggestOpenSourceTeam_OriginErrorStillTriesUpstream(t *testing.T) {
+	dir := contributorClone(t)
+	var asked []string
+	orig := fetchPublicPrimeForRepo
+	fetchPublicPrimeForRepo = func(_ context.Context, _, owner, name string) (*api.PublicPrimeResponse, error) {
+		asked = append(asked, owner+"/"+name)
+		if owner == "some-contributor" {
+			return nil, errors.New("public prime fetch failed: status=503")
+		}
+		return &api.PublicPrimeResponse{Version: 1, Viewer: api.PublicPrimeViewerMember, Team: &api.PublicPrimeTeam{ID: ossTeamID}}, nil
+	}
+	t.Cleanup(func() { fetchPublicPrimeForRepo = orig })
+
+	assert.Equal(t, ossTeamID, suggestOpenSourceTeam(context.Background(), dir, contributorTeams))
+	assert.Equal(t, []string{"some-contributor/readest", "readest/readest"}, asked)
+}
+
+// TestShallowCloneTeamWarning — Failure prevented: `ox init --team <oss>` in
+// a --depth clone (an agent sandbox, CI) silently registers a duplicate repo
+// in the project's team. --team is still honored; the person is warned.
+func TestShallowCloneTeamWarning(t *testing.T) {
+	full := contributorClone(t)
+	assert.Empty(t, shallowCloneTeamWarning(full), "a full clone gets no warning")
+
+	shallow := filepath.Join(t.TempDir(), "shallow")
+	out, err := exec.Command("git", "clone", "-q", "--depth", "1", "file://"+full, shallow).CombinedOutput()
+	require.NoError(t, err, string(out))
+	warning := shallowCloneTeamWarning(shallow)
+	assert.Contains(t, warning, "shallow clone")
+	assert.Contains(t, warning, "git fetch --unshallow")
+}
