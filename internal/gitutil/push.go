@@ -424,7 +424,10 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 				ahead := CommitsAhead(ctx, repoPath)
 				baseCtx, baseCancel := context.WithTimeout(ctx, opTimeout)
 				defer baseCancel()
-				pullCtx, pullCancel := PullContext(baseCtx, ahead, nil)
+				pullCtx, pullCancel := baseCtx, baseCancel
+				if ahead >= longBacklogAhead {
+					pullCtx, pullCancel = PullContext(baseCtx, ahead, nil)
+				}
 				if opts.ValidatePush != nil {
 					// autostash restoration does not preserve differing staged
 					// and working copies, so validated publication must stop here.

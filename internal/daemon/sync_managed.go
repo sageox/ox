@@ -68,6 +68,10 @@ type ManagedRepoPullOpts struct {
 	// Purely informational — pull --rebase handles it either way.
 	DetectDivergence bool
 
+	// pullTimeout overrides the pull subprocess budget in the timeout recovery
+	// test, which exercises a deliberately stalled process.
+	pullTimeout time.Duration
+
 	// ResolveRules maps path prefixes to conflict resolution modes.
 	// Empty means no auto-resolve — conflicts become errors.
 	// Most specific prefix wins: `resolve none data/proprietary/` overrides
@@ -959,7 +963,13 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 		pullArgs = append(pullArgs, gitutil.RenameDetectionFlags(ctx)...)
 		pullArgs = append(pullArgs, "pull", "--rebase", "--autostash", "--quiet")
 		ahead = gitutil.CommitsAhead(ctx, path)
+		budget := gitutil.PullBudget(ahead)
 		pullCtx, pullCancel := gitutil.PullContext(ctx, ahead, s.ctx)
+		if opts.pullTimeout > 0 {
+			pullCancel()
+			budget = opts.pullTimeout
+			pullCtx, pullCancel = context.WithTimeout(ctx, budget)
+		}
 		pullCmd := gitutil.NewNetworkCmd(pullCtx, pullArgs...)
 		pullOutput, pullErr = pullCmd.CombinedOutput()
 		pullTimedOut := gitutil.PullTimedOut(pullCtx, pullErr)
@@ -977,7 +987,7 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 			// repo is never wedged going into the next cycle
 			if found, abortErr := gitutil.RecoverPullTimeoutInRebase(ctx, path, repoName, ahead, logger); found {
 				result := ManagedRepoPullResult{FetchHeadTime: fetchHeadTime, Diverged: diverged}
-				result.Err = fmt.Errorf("pull timed out after %s with %d commits ahead: %w", gitutil.PullBudget(ahead), ahead, pullErr)
+				result.Err = fmt.Errorf("pull timed out after %s with %d commits ahead: %w", budget, ahead, pullErr)
 				if abortErr != nil {
 					result.Issue = &DaemonIssue{
 						Type:            IssueTypeRebaseStuck,
