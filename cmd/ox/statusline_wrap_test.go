@@ -86,23 +86,39 @@ func TestWrapFilter_ResizeWaitsForTheAppsSequence(t *testing.T) {
 	assert.True(t, idle.dirty, "ox's row is redrawn at its new place")
 	assert.Empty(t, idle.flushRegion(), "and only once")
 
-	for _, start := range []string{"\x1b]0;a long ti", "\x1b", "\x1b[38;5", "\x1b]8;;https://exam", "\x1bPq#0;2"} {
+	// Each unfinished sequence with the bytes that properly end it: BEL ends
+	// an OSC, ST (ESC \) ends an OSC or a DCS, a final byte ends a CSI.
+	for _, tt := range []struct{ start, end string }{
+		{"\x1b]0;a long ti", "\x07"},
+		{"\x1b]8;;https://exam", "\x1b\\"},
+		{"\x1b[38;5", "m"},
+		{"\x1bPq#0;2", "\x1b\\"},
+		{"\x1b_Gf=100;", "\x1b\\"},
+	} {
 		f := &wrapFilter{rows: 23}
-		_ = f.write([]byte("text" + start))
-		require.False(t, f.idle(), "%q is an unfinished sequence", start)
-		assert.Empty(t, f.resized(29), "%q: nothing may be written inside it", start)
-		assert.Empty(t, f.flushRegion(), "%q: still unfinished", start)
+		_ = f.write([]byte("text" + tt.start))
+		require.False(t, f.idle(), "%q is an unfinished sequence", tt.start)
+		assert.Empty(t, f.resized(29), "%q: nothing may be written inside it", tt.start)
+		assert.Empty(t, f.flushRegion(), "%q: still unfinished", tt.start)
 		assert.Equal(t, 29, f.rows, "the filter already clamps to the new height")
 
 		// The app finishes its sequence; the region follows, once.
-		_ = f.write([]byte("\x07"))
-		if !f.idle() {
-			_ = f.write([]byte("m"))
-		}
-		require.True(t, f.idle(), "%q", start)
-		assert.Equal(t, region, f.flushRegion(), "%q", start)
-		assert.Empty(t, f.flushRegion(), "%q", start)
+		_ = f.write([]byte(tt.end))
+		require.True(t, f.idle(), "%q", tt.start)
+		assert.Equal(t, region, f.flushRegion(), "%q", tt.start)
+		assert.Empty(t, f.flushRegion(), "%q", tt.start)
 	}
+
+	// BEL ends an OSC only. Inside a DCS (sixel image data) it is data: the
+	// sequence is still open and nothing of ox's may be written yet.
+	dcs := &wrapFilter{rows: 23}
+	_ = dcs.write([]byte("\x1bPq#0;2"))
+	_ = dcs.resized(29)
+	_ = dcs.write([]byte("\x07"))
+	assert.False(t, dcs.idle(), "BEL does not end a DCS")
+	assert.Empty(t, dcs.flushRegion())
+	_ = dcs.write([]byte("\x1b\\"))
+	assert.Equal(t, region, dcs.flushRegion())
 }
 
 // TestWrapFilter_EscapeWithIntermediatesStaysOpen: ESC ( B selects a

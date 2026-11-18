@@ -361,6 +361,8 @@ func TestFlowItems(t *testing.T) {
 		{"mcp content object", "mcp Search", `{"content":[{"type":"text","text":"{\"results\":[1,2]}"}]}`, 2, "discussions"},
 		{"mcp structuredContent", "mcp Search", `{"structuredContent":{"results":[1,2,3]},"content":[{"type":"text","text":"3 results"}]}`, 3, "discussions"},
 		{"a result list of objects with text is still a list", "code search", `[{"text":"a","file":"x.go"},{"file":"y.go"}]`, 2, "matches"},
+		{"records that all have text but no type are results", "code search", `[{"text":"a"},{"text":"b"},{"text":"c"}]`, 3, "matches"},
+		{"records typed as something other than text are results", "code search", `[{"type":"match","text":"a"},{"type":"match","text":"b"}]`, 2, "matches"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

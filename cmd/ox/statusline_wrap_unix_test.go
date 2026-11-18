@@ -5,12 +5,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"os/exec"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -132,4 +134,45 @@ func TestRunUnwrapped_DoesNotWaitOnWhatTheCommandLeftBehind(t *testing.T) {
 			assert.Equal(t, "err\n", stderr.String())
 		})
 	}
+}
+
+// TestRunUnwrapped_AppKeepsTheGraceToStop: told to stop, the command gets
+// wrapStopGrace to finish, whatever the output drain allows after it exits.
+// Failure prevented: a command saving its state on SIGTERM killed one second
+// in, because the drain timeout had replaced the stop allowance.
+func TestRunUnwrapped_AppKeepsTheGraceToStop(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: the command takes 2s to stop, by design")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// `wait` returns when the signal arrives; the trap then takes two seconds.
+	cmd := wrappedCommand(ctx, []string{"sh", "-c", `trap 'sleep 2; echo saved; exit 0' TERM; sleep 30 & wait`})
+	var stdout, stderr syncBuffer
+	time.AfterFunc(300*time.Millisecond, cancel)
+	code, err := runUnwrapped(cmd, &stdout, &stderr)
+	require.NoError(t, err)
+	assert.Equal(t, 0, code, "it exited by itself, after its cleanup")
+	assert.Equal(t, "saved\n", stdout.String(), "the two-second cleanup ran to its end")
+}
+
+// TestRunUnwrapped_TerminalOutputStaysATerminal: with only stdin piped, a
+// pager must still see the terminal it draws on. Failure prevented: every
+// output replaced by a pipe, so `less` dumps its input instead of paging.
+func TestRunUnwrapped_TerminalOutputStaysATerminal(t *testing.T) {
+	ptmx, tty, err := pty.Open()
+	require.NoError(t, err)
+	defer ptmx.Close()
+	defer tty.Close()
+	go func() { _, _ = io.Copy(io.Discard, ptmx) }()
+
+	// `test -t` asks the command itself what it was given.
+	var redirected syncBuffer
+	code, err := runUnwrapped(wrappedCommand(context.Background(), []string{"sh", "-c", "test -t 1 && ! test -t 2"}), tty, &redirected)
+	require.NoError(t, err)
+	assert.Equal(t, 0, code, "stdout is the terminal; redirected stderr is not")
+
+	code, err = runUnwrapped(wrappedCommand(context.Background(), []string{"sh", "-c", "test -t 1"}), &redirected, &redirected)
+	require.NoError(t, err)
+	assert.Equal(t, 1, code, "a redirected stdout is not presented as a terminal")
 }

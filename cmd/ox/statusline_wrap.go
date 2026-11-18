@@ -44,6 +44,9 @@ type wrapFilter struct {
 	// ANSI.SYS save) and not yet restored it. The terminal keeps one saved
 	// position; ox's own save and restore would replace the app's.
 	cursorSaved bool
+	// stringEndsOnBEL is set inside an OSC, the one string sequence BEL also
+	// ends; a DCS, APC or PM runs to its ST.
+	stringEndsOnBEL bool
 
 	state wrapState
 	seq   []byte
@@ -132,6 +135,7 @@ func (f *wrapFilter) write(in []byte) []byte {
 				f.state = wrapCSI
 			case ']', 'P', '_', '^':
 				out, f.state = append(out, f.seq...), wrapString
+				f.stringEndsOnBEL = b == ']'
 			case 'c':
 				// RIS, a full reset: it drops the scroll region and clears
 				// the screen. Let it through, then put the region back.
@@ -169,7 +173,9 @@ func (f *wrapFilter) write(in []byte) []byte {
 			out = append(out, b)
 			switch b {
 			case 0x07:
-				f.state = wrapText
+				if f.stringEndsOnBEL {
+					f.state = wrapText
+				}
 			case 0x1b:
 				f.state = wrapStringEsc
 			}

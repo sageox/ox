@@ -335,9 +335,19 @@ func mcpResultText(trimmed string) string {
 		return trimmed
 	}
 	firstJSON := func(blocks []any) (string, bool) {
-		texts := contentTexts(blocks)
-		if len(texts) == 0 || len(texts) != len(blocks) {
-			return "", false // not a content array: a plain list of results
+		// Content blocks say what they are: {"type":"text","text":…}. A list
+		// of results whose records merely have a `text` field is not one.
+		var texts []string
+		for _, b := range blocks {
+			m, _ := b.(map[string]any)
+			text, isText := m["text"].(string)
+			if kind, _ := m["type"].(string); kind != "text" || !isText {
+				return "", false // a plain list of results
+			}
+			texts = append(texts, text)
+		}
+		if len(texts) == 0 {
+			return "", false
 		}
 		for _, s := range texts {
 			if s = strings.TrimSpace(s); s != "" && (s[0] == '{' || s[0] == '[') {
