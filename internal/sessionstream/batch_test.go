@@ -46,7 +46,7 @@ func TestKeysAreTeamScopedAndOrdered(t *testing.T) {
 		t.Fatal(err)
 	}
 	k2, _ := BytesKey(team, cnv, layer, 10)
-	if !(k1 < k2) {
+	if k1 >= k2 {
 		t.Fatalf("keys must sort in offset order: %s !< %s", k1, k2)
 	}
 	if !strings.HasPrefix(k1, "team/"+team+"/conversations/"+cnv+"/layers/session-jsonl."+layer+"/bytes/") {

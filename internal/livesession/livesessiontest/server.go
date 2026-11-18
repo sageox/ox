@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -210,7 +211,7 @@ func (s *Server) verify(r *http.Request, body []byte, pub ed25519.PublicKey) *re
 	}
 	if err := sessionstream.Verify(pub, sig, r.Method, r.URL.RequestURI(), body, time.Now()); err != nil {
 		reason := sessionstream.ReasonBadSignature
-		if err == sessionstream.ErrSignatureExpired {
+		if errors.Is(err, sessionstream.ErrSignatureExpired) {
 			reason = sessionstream.ReasonSignatureExpired
 		}
 		x := refusal(http.StatusUnauthorized, reason, sessionstream.ActionReauth, nil)
