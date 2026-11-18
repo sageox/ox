@@ -253,6 +253,8 @@ func runUnwrapped(cmd *exec.Cmd, stdout, stderr io.Writer) (int, error) {
 		}
 	}
 	var copies sync.WaitGroup
+	var copyMu sync.Mutex
+	var copyErr error // the first failure to write the command's output on
 	attach := func(dst io.Writer) (io.Writer, error) {
 		if f, ok := dst.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
 			return f, nil
@@ -265,7 +267,19 @@ func runUnwrapped(cmd *exec.Cmd, stdout, stderr io.Writer) (int, error) {
 		copies.Add(1)
 		go func() {
 			defer copies.Done()
-			_, _ = io.Copy(dst, r)
+			_, err := io.Copy(dst, r)
+			// Closed here, not only at the end: with nobody reading, a command
+			// still writing would fill the pipe and never exit. Closed, its
+			// next write fails and it stops.
+			_ = r.Close()
+			// os.ErrClosed is ox ending the copy itself after the drain grace.
+			if err != nil && !errors.Is(err, os.ErrClosed) {
+				copyMu.Lock()
+				if copyErr == nil {
+					copyErr = err
+				}
+				copyMu.Unlock()
+			}
 		}()
 		return w, nil
 	}
@@ -296,7 +310,13 @@ func runUnwrapped(cmd *exec.Cmd, stdout, stderr io.Writer) (int, error) {
 	}
 	closeAll(readers) // ends a copy still waiting on what the command left behind
 	<-copied
-	return wrappedExitCode(cmd, err)
+	code, err := wrappedExitCode(cmd, err)
+	// Output that could not be delivered is a failure even when the command
+	// was content: its caller did not get what it wrote.
+	if code == 0 && err == nil && copyErr != nil {
+		return 1, fmt.Errorf("write the command's output: %w", copyErr)
+	}
+	return code, err
 }
 
 // wrappedEnv is the environment the wrapped app runs in: ox's own, with

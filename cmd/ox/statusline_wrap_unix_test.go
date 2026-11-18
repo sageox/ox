@@ -176,3 +176,39 @@ func TestRunUnwrapped_TerminalOutputStaysATerminal(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, code, "a redirected stdout is not presented as a terminal")
 }
+
+// TestRunUnwrapped_UndeliveredOutputIsAFailure: the redirect target can
+// refuse the output, as a full disk does (failingWriter refuses every write). Failure prevented: ox reporting success after losing
+// what the command wrote; or, for output larger than a pipe holds, the
+// command blocked forever on a pipe nobody reads.
+func TestRunUnwrapped_UndeliveredOutputIsAFailure(t *testing.T) {
+	tests := []struct{ name, script string }{
+		{"short output", "printf hello"},
+		{"more output than a pipe holds", "head -c 1048576 /dev/zero"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr syncBuffer
+			type result struct {
+				code int
+				err  error
+			}
+			done := make(chan result, 1)
+			go func() {
+				code, err := runUnwrapped(wrappedCommand(context.Background(), []string{"sh", "-c", tt.script}), failingWriter{}, &stderr)
+				done <- result{code, err}
+			}()
+			select {
+			case r := <-done:
+				assert.NotEqual(t, 0, r.code, "lost output must not report success (err=%v)", r.err)
+			case <-time.After(20 * time.Second):
+				t.Fatal("the command hung on output nobody was reading")
+			}
+		})
+	}
+
+	// A command that itself failed keeps its own exit code.
+	code, err := runUnwrapped(wrappedCommand(context.Background(), []string{"sh", "-c", "printf hello; exit 7"}), failingWriter{}, failingWriter{})
+	require.NoError(t, err)
+	assert.Equal(t, 7, code)
+}
