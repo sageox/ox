@@ -651,6 +651,9 @@ func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
 // LoadQuarantinedRecordingsForAgent to find it.
 // If recovery temporarily releases an older recording, the newer recording
 // keeps the agent's active slot.
+// LoadQuarantinedRecordingsForAgent to find it.
+// If recovery temporarily releases an older recording, the newer recording
+// keeps the agent's active slot.
 func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, error) {
 	if agentID == "" {
 		return nil, fmt.Errorf("%w: agent ID", ErrEmptyPath)

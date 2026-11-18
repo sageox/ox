@@ -48,7 +48,9 @@ var (
 )
 
 // recoverForRelease is the recovery a release attempts once its re-check passes.
-var recoverForRelease = recoverRecording
+var recoverForRelease = func(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
+	return recoverViaNormalStopWithRelease(inst, projectRoot, state, true)
+}
 
 // quarantineHeldMessage tells a coworker why a recording was not recovered and
 // how to get it back.
@@ -83,9 +85,8 @@ func recheckQuarantinedSource(projectRoot string, state *session.RecordingState)
 }
 
 // releaseAndRecover re-checks a quarantined recording and, only if the check
-// passes, recovers that recording. The quarantine is lifted just for the
-// attempt and put back if the recovery does not finish, so a recording is never
-// left half-released. Nothing is deleted.
+// passes, recovers that recording. Its persisted quarantine stays in place
+// until recovery clears the recording, keeping it out of active lookups.
 func releaseAndRecover(inst *agentinstance.Instance, projectRoot string) error {
 	held, err := session.LoadQuarantinedRecordingsForAgent(projectRoot, inst.AgentID)
 	if err != nil {
@@ -98,28 +99,7 @@ func releaseAndRecover(inst *agentinstance.Instance, projectRoot string) error {
 	if err := recheckQuarantinedSource(projectRoot, state); err != nil {
 		return err
 	}
-	if err := session.SetSourceRejectedAt(state.SessionPath, state.SessionID, false); err != nil {
-		return fmt.Errorf("release source quarantine: %w", err)
-	}
-	state.SourceRejected = false
-	slog.Info("released source quarantine for recovery", "agent_id", inst.AgentID, "session_path", state.SessionPath)
-	recoverErr := recoverForRelease(inst, projectRoot, state)
-	// Only a recording that was published and cleared leaves the quarantine
-	// behind. A failure, or a recovery that returned success without publishing
-	// (the coworker declined both upload and discard at the prompt), puts it back.
-	if recoverErr != nil || !recordingCleared(state) {
-		if restoreErr := session.SetSourceRejectedAt(state.SessionPath, state.SessionID, true); restoreErr != nil && !errors.Is(restoreErr, os.ErrNotExist) {
-			slog.Warn("could not restore source quarantine after recovery that did not publish", "agent_id", inst.AgentID, "error", restoreErr)
-		}
-	}
-	return recoverErr
-}
-
-// recordingCleared reports whether the recording's marker is gone or now names a
-// different recording, which is what a finished recovery leaves behind.
-func recordingCleared(state *session.RecordingState) bool {
-	current, err := session.ReadRecordingStateFile(state.SessionPath)
-	return err == nil && (current == nil || current.SessionID != state.SessionID)
+	return recoverForRelease(inst, projectRoot, state)
 }
 
 // runAgentSessionRecover recovers a stale/crashed session.
@@ -237,6 +217,10 @@ func recoverRecording(inst *agentinstance.Instance, projectRoot string, state *s
 
 // recoverViaNormalStop uses the adapter's normal finalization and session stop flow.
 func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
+	return recoverViaNormalStopWithRelease(inst, projectRoot, state, false)
+}
+
+func recoverViaNormalStopWithRelease(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState, releaseQuarantine bool) error {
 	// process session through the normal pipeline. Hold the raw.jsonl writer's
 	// file lock so this never races a hook or watcher still appending a batch
 	// under the same lock -- the recording may not actually be dead.
@@ -251,6 +235,12 @@ func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, stat
 		latest, reloadErr := reloadRecordingForFinalDrain(projectRoot, state)
 		if reloadErr != nil {
 			return reloadErr
+		}
+		if releaseQuarantine {
+			if err := recheckQuarantinedSource(projectRoot, latest); err != nil {
+				return err
+			}
+			latest.SourceRejected = false
 		}
 		var processErr error
 		if result, processErr = processAgentSession(projectRoot, latest); processErr != nil {
