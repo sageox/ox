@@ -396,7 +396,7 @@ func TestProcessResult_ReplaysPendingEmptyLedgerRepair(t *testing.T) {
 			require.NoError(t, readErr)
 			require.Equal(t, "usr_updated_while_upload_pending", got.UserID)
 			if state == "dirty after staging" {
-				require.ErrorContains(t, err, "Ledger session still has uncommitted changes")
+				require.ErrorContains(t, err, "uncommitted changes in Ledger session")
 				require.Equal(t, "unrecoverable", got.SummaryStatus)
 				require.DirExists(t, f.cacheDir)
 				require.Equal(t, headBefore, gitOutput(t, bare, "rev-parse", branch))

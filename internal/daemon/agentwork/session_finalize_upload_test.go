@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/require"
@@ -463,6 +464,54 @@ func TestProcessResult_RegularFinalizePreservesDifferentLedgerRecording(t *testi
 	require.NoError(t, err)
 	require.Equal(t, pointer, string(gotRaw))
 	require.DirExists(t, f.cacheDir)
+}
+
+func TestProcessResult_LegacySummaryRepairUsesTrackedRawPointer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	bare, ledger := setupBareAndCloneLedger(t)
+	const name = "2026-01-15T11-00-testuser-OxLEGACY"
+	const userID = "usr_legacy_owner"
+	f := cacheFixture{
+		ledgerPath: ledger,
+		name:       name,
+		cacheDir:   filepath.Join(ledger, ".sageox", "cache", "sessions", name),
+	}
+	f.write(t, "raw.jsonl", testRawContent)
+	f.write(t, ".needs-summary", "{}")
+	f.ledgerMeta(t, `{"version":"1.0","repo_id":"repo_legacy","session_name":"`+name+`","user_id":"`+userID+`"}`)
+	dir := filepath.Join(ledger, "sessions", name)
+	ref := lfs.NewFileRef([]byte(testRawContent))
+	pointer := lfs.FormatPointer(ref.OID, ref.Size)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(pointer), 0644))
+	runGitCmd(t, ledger, "add", "--", "sessions")
+	runGitCmd(t, ledger, "commit", "-m", "publish legacy recording")
+	runGitCmd(t, ledger, "push")
+	branch := gitOutput(t, ledger, "branch", "--show-current")
+	before := gitOutput(t, bare, "rev-parse", branch)
+
+	h := NewSessionFinalizeHandler(slog.Default())
+	h.ledgerMu = &sync.Mutex{}
+	enableLocalFinalizeLFS(t, h, ledger)
+	items := detectCacheOnly(t, h, ledger)
+	require.Len(t, items, 1)
+	output := `{"title":"Legacy Session Repair","summary":"Restored the missing summary for a legacy recording.","quality_score":0.8,"score_reason":"fine","outcome":"success","key_actions":["restored the summary"]}`
+	require.NoError(t, h.ProcessResult(items[0], &RunResult{Output: output}))
+
+	require.NotEqual(t, before, gitOutput(t, bare, "rev-parse", branch))
+	meta, err := lfs.ParseSessionMeta([]byte(gitOutput(t, bare, "show", branch+":sessions/"+name+"/meta.json")))
+	require.NoError(t, err)
+	require.Empty(t, meta.SessionID)
+	require.Equal(t, userID, meta.UserID)
+	require.Equal(t, "Legacy Session Repair", meta.Title)
+	require.Equal(t, strings.TrimSpace(pointer), gitOutput(t, bare, "show", branch+":sessions/"+name+"/raw.jsonl"))
+	for _, artifact := range []string{"summary.md", "summary.json", "session.md"} {
+		content, err := gitutil.ReadBlob(t.Context(), bare, branch, "sessions/"+name+"/"+artifact)
+		require.NoError(t, err)
+		require.NotEmpty(t, content, "published %s", artifact)
+	}
+	require.NoDirExists(t, f.cacheDir)
 }
 
 // --- F. Cache survival on push failure ---
