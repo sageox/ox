@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -127,6 +129,9 @@ func (h *startupPullGateHandler) Handle(ctx context.Context, record slog.Record)
 // real startup callback before its git work and prove Start cannot return until
 // that callback is released, without guessing when another goroutine will run.
 func TestSyncScheduler_StartJoinsCanceledStartupTeamSync(t *testing.T) {
+	// Keep the startup credential lookup off the host keyring. Its DBus
+	// reader is real I/O and would keep the synctest clock from advancing.
+	t.Setenv("OX_GIT_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "git-credentials.json"))
 	scheduler, _, _ := newTeamBudgetScheduler(t, 1)
 	scheduler.config.SyncIntervalRead = time.Hour
 	scheduler.config.TeamContextSyncInterval = time.Hour
@@ -187,4 +192,76 @@ func TestSyncScheduler_StartJoinsCanceledStartupTeamSync(t *testing.T) {
 			t.Fatal("Start did not return after its startup team sync completed")
 		}
 	})
+}
+
+func TestSyncScheduler_WatcherPullContinuesDuringPeriodicTeamSync(t *testing.T) {
+	t.Setenv("OX_GIT_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "git-credentials.json"))
+	scheduler, _, _ := newTeamBudgetScheduler(t, 1)
+	_, ledger, writer := setupRacingLedger(t)
+	scheduler.config.LedgerPath = ledger
+	scheduler.config.SyncIntervalRead = time.Hour
+	scheduler.config.TeamContextSyncInterval = 6 * time.Second
+	scheduler.config.VersionCheckInterval = 0
+	scheduler.config.GCCheckInterval = 0
+	scheduler.config.CodeDBCheckInterval = 0
+	scheduler.config.LedgerCheckInterval = 0
+	scheduler.config.GitHubSyncInterval = 0
+	t.Setenv("OX_KB_DISABLE", "1")
+	advanceRemote(t, writer, 0)
+
+	var calls atomic.Int32
+	pullStarted, pullCanceled, releasePull := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	overrideTeamBudgets(t, time.Minute, time.Minute, func(ctx context.Context, _ string) (teamPullOutcome, error) {
+		if calls.Add(1) == 2 {
+			close(pullStarted)
+			<-ctx.Done()
+			close(pullCanceled)
+			<-releasePull
+		}
+		return teamPullOutcome{}, ctx.Err()
+	})
+
+	// Wait for the startup pull to finish before triggering the watcher.
+	// The watcher must advance the Ledger while the team pull is blocked.
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() {
+		cancel()
+		releaseOnce.Do(func() { close(releasePull) })
+		awaitStartupCompletion(t, done)
+	})
+	go func() {
+		scheduler.Start(ctx)
+		close(done)
+	}()
+	select {
+	case <-pullStarted:
+	case <-time.After(12 * time.Second):
+		t.Fatal("periodic team pull did not start after the startup pull")
+	}
+	fetchHead := filepath.Join(ledger, ".git", "FETCH_HEAD")
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(fetchHead)
+		scheduler.mu.Lock()
+		defer scheduler.mu.Unlock()
+		return err == nil && !scheduler.pullInProgress
+	}, 2*time.Second, 10*time.Millisecond, "initial ledger fetch must finish")
+	advanceRemote(t, writer, 1)
+	require.NoError(t, os.Remove(fetchHead), "allow the watcher pull to fetch immediately")
+	scheduler.TriggerSync()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(ledger, "c001.txt"))
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond, "a slow Team Context pull blocked the Ledger watcher sync")
+	require.EqualValues(t, 2, calls.Load())
+	cancel()
+	awaitStartupCompletion(t, pullCanceled)
+	select {
+	case <-done:
+		t.Fatal("Start returned while a periodic team pull still held scheduler resources")
+	default:
+	}
+	releaseOnce.Do(func() { close(releasePull) })
+	awaitStartupCompletion(t, done)
 }
