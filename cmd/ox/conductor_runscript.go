@@ -188,10 +188,16 @@ func installConductorRunScript(repoRoot string) error {
 // conductorLocalPattern is settings.local.toml as git names it.
 const conductorLocalPattern = ".conductor/" + conductorLocalSettings
 
-// conductorLocalTracked reports whether settings.local.toml is committed in
-// this repository. git ignores no tracked file, so ox does not write to one:
-// its machine-local run script would ride along in the next commit.
+// conductorLocalTracked reports whether writing to settings.local.toml would
+// change a file git tracks. git ignores no tracked file, so ox does not
+// write to one: its machine-local run script would ride along in the next
+// commit. A path that is not a regular file counts too: a symbolic link
+// there can lead to the shared, committed settings.toml, and the write
+// follows it.
 func conductorLocalTracked(repoRoot string) bool {
+	if info, err := os.Lstat(filepath.Join(repoRoot, ".conductor", conductorLocalSettings)); err == nil && !info.Mode().IsRegular() {
+		return true
+	}
 	return exec.Command("git", "-C", repoRoot, "ls-files", "--error-unmatch", "--", conductorLocalPattern).Run() == nil
 }
 
@@ -277,8 +283,8 @@ func checkConductorRunScriptAt(gitRoot string, fix bool) checkResult {
 			"To see ox's line in Conductor's Run pane, add to "+localPath+":\n"+conductorRunScriptBlock)
 	}
 	if conductorLocalTracked(repoRoot) {
-		return WarningCheck(conductorRunScriptCheck, "not added: "+conductorLocalPattern+" is committed in this repository",
-			"ox does not edit a tracked file. To see ox's line in Conductor's Run pane, add to "+localPath+":\n"+conductorRunScriptBlock)
+		return WarningCheck(conductorRunScriptCheck, "not added: "+conductorLocalPattern+" is committed in this repository, or is not a regular file",
+			"ox does not edit a tracked file or write through a link. To see ox's line in Conductor's Run pane, add to "+localPath+":\n"+conductorRunScriptBlock)
 	}
 	if !fix {
 		return WarningCheck(conductorRunScriptCheck, "ox's line is not in Conductor's Run pane",

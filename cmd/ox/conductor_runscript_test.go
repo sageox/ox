@@ -259,3 +259,28 @@ func TestConductorRunScript_ExclusionFailureIsRetried(t *testing.T) {
 	require.True(t, checkConductorRunScriptAt(old, true).passed)
 	assert.True(t, ignored(old))
 }
+
+// TestConductorRunScript_DoesNotWriteThroughALink: an untracked
+// settings.local.toml can be a symbolic link to the committed settings.toml.
+// Failure prevented: the write following the link and putting ox's
+// machine-local run script into the file the whole team shares.
+func TestConductorRunScript_DoesNotWriteThroughALink(t *testing.T) {
+	repo := conductorRepo(t)
+	const shared = "# the team's settings\n"
+	writeConductorSettings(t, repo, conductorSharedSettings, shared)
+	link := filepath.Join(repo, ".conductor", conductorLocalSettings)
+	if err := os.Symlink(conductorSharedSettings, link); err != nil {
+		t.Skipf("symbolic links are not available here: %v", err)
+	}
+	info, err := os.Lstat(link)
+	require.NoError(t, err)
+	require.NotZero(t, info.Mode()&os.ModeSymlink, "precondition: the local settings are a link")
+
+	res := checkConductorRunScriptAt(repo, true)
+	assert.True(t, res.warning, "%+v", res)
+	ensureConductorRunScript(repo, true)
+
+	data, err := os.ReadFile(filepath.Join(repo, ".conductor", conductorSharedSettings))
+	require.NoError(t, err)
+	assert.Equal(t, shared, string(data), "the shared settings are untouched")
+}

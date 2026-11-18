@@ -7,6 +7,7 @@ import (
 	"context"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -147,13 +148,23 @@ func TestRunUnwrapped_AppKeepsTheGraceToStop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// `wait` returns when the signal arrives; the trap then takes two seconds.
-	cmd := wrappedCommand(ctx, []string{"sh", "-c", `trap 'sleep 2; echo saved; exit 0' TERM; sleep 30 & wait`})
+	// The shell says "ready" once its handler is installed; ox is told to stop
+	// only then, so the signal always meets the handler.
+	cmd := wrappedCommand(ctx, []string{"sh", "-c", `trap 'sleep 2; echo saved; exit 0' TERM; echo ready; sleep 30 & wait`})
 	var stdout, stderr syncBuffer
-	time.AfterFunc(300*time.Millisecond, cancel)
+	go func() {
+		for !strings.Contains(stdout.String(), "ready") {
+			if ctx.Err() != nil {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+	}()
 	code, err := runUnwrapped(cmd, &stdout, &stderr)
 	require.NoError(t, err)
 	assert.Equal(t, 0, code, "it exited by itself, after its cleanup")
-	assert.Equal(t, "saved\n", stdout.String(), "the two-second cleanup ran to its end")
+	assert.Equal(t, "ready\nsaved\n", stdout.String(), "the two-second cleanup ran to its end")
 }
 
 // TestRunUnwrapped_TerminalOutputStaysATerminal: with only stdin piped, a
@@ -211,4 +222,42 @@ func TestRunUnwrapped_UndeliveredOutputIsAFailure(t *testing.T) {
 	code, err := runUnwrapped(wrappedCommand(context.Background(), []string{"sh", "-c", "printf hello; exit 7"}), failingWriter{}, failingWriter{})
 	require.NoError(t, err)
 	assert.Equal(t, 7, code)
+}
+
+// blockedWriter never returns from Write until released: a destination whose
+// reader has stopped reading.
+type blockedWriter struct{ release chan struct{} }
+
+func (w blockedWriter) Write(p []byte) (int, error) {
+	<-w.release
+	return len(p), nil
+}
+
+// TestRunUnwrapped_DoesNotWaitOnADestinationThatStoppedReading: the bound on
+// forwarding must hold when the destination blocks, not only when it fails.
+// Failure prevented: the command has exited, and ox never returns because a
+// copy is stuck in a write nobody will accept.
+func TestRunUnwrapped_DoesNotWaitOnADestinationThatStoppedReading(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits out the output drain grace twice")
+	}
+	dst := blockedWriter{release: make(chan struct{})}
+	t.Cleanup(func() { close(dst.release) }) // let the stuck copy end with the test
+	var stderr syncBuffer
+	type result struct {
+		code int
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		code, err := runUnwrapped(wrappedCommand(context.Background(), []string{"sh", "-c", "printf hello"}), dst, &stderr)
+		done <- result{code, err}
+	}()
+	select {
+	case r := <-done:
+		assert.NotEqual(t, 0, r.code, "output that was never accepted is not a success")
+		assert.Error(t, r.err)
+	case <-time.After(4*unwrappedDrainGrace + 5*time.Second):
+		t.Fatal("ox waited on a destination that will never accept the output")
+	}
 }

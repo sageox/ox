@@ -211,3 +211,36 @@ func TestConductorClaudeStop_WhispersWaitForThePrompt(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out), &doc), "stdout must be one JSON document: %q", out)
 	assert.Equal(t, "● ox  1 plan", doc["systemMessage"])
 }
+
+// TestConductorClaudeStop_LanesOffKeepsWhatWasShown: turning the lanes off
+// must not forget which were shown. Failure prevented: a notice sent while
+// they are off resets the position, and turning them back on repeats every
+// lane of the session.
+func TestConductorClaudeStop_LanesOffKeepsWhatWasShown(t *testing.T) {
+	root := codexDigestEnv(t, nil)
+	stubOrchestrator(t, "conductor")
+	message := func() string {
+		out := runStopHook(t, root, "claude-code")
+		if out == "" {
+			return ""
+		}
+		var doc map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &doc))
+		m, _ := doc["systemMessage"].(string)
+		return m
+	}
+
+	// The call's lane is shown under it as it lands (PostToolUse), and counted.
+	runOxCall(t, root, "ox plan view x")
+	require.NotContains(t, message(), "pulled plan", "already shown: Stop does not repeat it")
+
+	require.NoError(t, SetConfigValue("flow_lanes", "off", ConfigLevelUser, ""))
+	runOxCall(t, root, "ox agent "+codexDigestAgentID+" team-ctx")
+	off := message()
+	require.NotEmpty(t, off, "the status line changed: a notice is still sent")
+	assert.NotContains(t, off, "SAGEOX", "lanes are off")
+
+	require.NoError(t, SetConfigValue("flow_lanes", "on", ConfigLevelUser, ""))
+	on := message()
+	assert.NotContains(t, on, "pulled plan", "the lane shown before they were turned off is not shown again")
+}

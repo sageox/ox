@@ -309,7 +309,19 @@ func runUnwrapped(cmd *exec.Cmd, stdout, stderr io.Writer) (int, error) {
 	case <-time.After(unwrappedDrainGrace):
 	}
 	closeAll(readers) // ends a copy still waiting on what the command left behind
-	<-copied
+	// A copy can also be stuck writing: a destination nobody reads (a full
+	// pipe downstream) never returns from Write, and closing ox's read end
+	// does not interrupt it. ox does not wait on it past the same grace; the
+	// stuck copy ends with the process.
+	select {
+	case <-copied:
+	case <-time.After(unwrappedDrainGrace):
+		code, exitErr := wrappedExitCode(cmd, err)
+		if code == 0 && exitErr == nil {
+			return 1, errors.New("write the command's output: the destination stopped accepting it")
+		}
+		return code, exitErr
+	}
 	code, err := wrappedExitCode(cmd, err)
 	// Output that could not be delivered is a failure even when the command
 	// was content: its caller did not get what it wrote.

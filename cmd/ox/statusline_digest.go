@@ -172,10 +172,15 @@ func pendingDigest(ctx *HookContext) string {
 		// Only the not-recording trace holds earlier sittings; a recording's
 		// trace is this session's own, however long its first turn ran.
 		firstNotice := recordingID == "" && s.ShownLine == "" && s.ShownFlows == 0
-		lanes := digestLanes(flows, s.ShownFlows, firstNotice, time.Now())
-		if s.ShownFlows != len(flows) {
-			s.ShownFlows = len(flows)
-			changed = true
+		var lanes []string
+		if lanesOn {
+			// With lanes off the trace was not read: the position stays where
+			// it was, or turning them back on would show old lanes again.
+			lanes = digestLanes(flows, s.ShownFlows, firstNotice, time.Now())
+			if s.ShownFlows != len(flows) {
+				s.ShownFlows = len(flows)
+				changed = true
+			}
 		}
 		lineChanged := withLine && counted && s.ShownLine != line
 		if !lineChanged && len(lanes) == 0 {
