@@ -2281,27 +2281,23 @@ func ledgerMetaForDownload(ctx context.Context, payload *SessionFinalizePayload,
 	relRaw := filepath.Join(relDir, "raw.jsonl")
 	workingRaw := filepath.Join(payload.LedgerPath, relRaw)
 	ref := meta.Files["raw.jsonl"]
-	if lfs.IsPointerFile(workingRaw) {
-		workingRef, err := lfs.ReadPointerFile(workingRaw)
+	if ref.OID == "" {
+		// Older metadata can lack a manifest. Verify against the committed
+		// pointer even when an interrupted copy has restored full local bytes.
+		blob, err := gitutil.ReadBlob(ctx, payload.LedgerPath, "HEAD", filepath.ToSlash(relRaw))
 		if err != nil {
 			return nil
 		}
-		if ref.OID != "" {
-			if ref.BareOID() != workingRef.BareOID() || ref.Size != workingRef.Size {
-				return nil
-			}
-		} else {
-			// Hydration also accepts a pointer when older metadata lacks a
-			// manifest. Require the current pointer to match the committed one.
-			blob, err := gitutil.ReadBlob(ctx, payload.LedgerPath, "HEAD", filepath.ToSlash(relRaw))
-			if err != nil {
-				return nil
-			}
-			oid, size, err := lfs.ParsePointer(string(blob))
-			if err != nil || oid != workingRef.OID || size != workingRef.Size {
-				return nil
-			}
-			ref = workingRef
+		oid, size, err := lfs.ParsePointer(string(blob))
+		if err != nil {
+			return nil
+		}
+		ref = lfs.FileRef{OID: oid, Size: size}
+	}
+	if lfs.IsPointerFile(workingRaw) {
+		workingRef, err := lfs.ReadPointerFile(workingRaw)
+		if err != nil || ref.BareOID() != workingRef.BareOID() || ref.Size != workingRef.Size {
+			return nil
 		}
 	} else if !rawMatchesRef(workingRaw, ref) {
 		return nil
@@ -2495,11 +2491,13 @@ func copySessionArtifacts(source, dest string, keepMeta bool) error {
 		return fmt.Errorf("read session dir: %w", err)
 	}
 
+	hasMeta := false
 	for _, entry := range entries {
 		if entry.IsDir() || pipeline.IsTraceFile(entry.Name()) {
 			continue
 		}
-		if keepMeta && entry.Name() == "meta.json" {
+		if entry.Name() == "meta.json" {
+			hasMeta = true
 			continue
 		}
 		// Machine-local capture state never enters the shared Ledger. Every
@@ -2513,6 +2511,13 @@ func copySessionArtifacts(source, dest string, keepMeta bool) error {
 		dst := filepath.Join(dest, entry.Name())
 		if err := copySessionFile(src, dst); err != nil {
 			return fmt.Errorf("copy %s: %w", entry.Name(), err)
+		}
+	}
+	// SummaryStatus becomes authoritative only after copying its artifacts.
+	// A retry can then distinguish an incomplete copy from a complete summary.
+	if hasMeta && !keepMeta {
+		if err := copySessionFile(filepath.Join(source, "meta.json"), filepath.Join(dest, "meta.json")); err != nil {
+			return fmt.Errorf("copy meta.json: %w", err)
 		}
 	}
 	return nil

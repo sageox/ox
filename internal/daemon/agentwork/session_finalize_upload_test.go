@@ -471,7 +471,7 @@ func TestProcessResult_LegacySummaryRepairUsesTrackedRawPointer(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git operations")
 	}
-	for _, state := range []string{"missing summary", "retry after stub", "newer summary", "changed recording"} {
+	for _, state := range []string{"missing summary", "retry after stub", "interrupted copy", "newer summary", "changed recording"} {
 		t.Run(state, func(t *testing.T) {
 			checkLegacySummaryRepair(t, state)
 		})
@@ -494,8 +494,14 @@ func checkLegacySummaryRepair(t *testing.T, state string) {
 		f.write(t, "meta.json", `{"version":"1.0","session_name":"`+name+`","user_id":"`+userID+`","summary_status":"failed_validation","summary_attempts":1}`)
 	}
 	ledgerMeta := fmt.Sprintf(`"version":"1.0","repo_id":"repo_legacy","session_name":%q,"user_id":%q`, name, userID)
-	if state == "newer summary" {
+	var existingTitle string
+	switch state {
+	case "newer summary":
+		existingTitle = "New summary"
 		ledgerMeta += `,"title":"New summary","summary":"A newer summary from the Ledger.","summary_status":"ok"`
+	case "interrupted copy":
+		existingTitle = "Previous stub"
+		ledgerMeta += `,"title":"Previous stub","summary_status":"failed_validation"`
 	}
 	dir := filepath.Join(ledger, "sessions", name)
 	ref := lfs.NewFileRef([]byte(testRawContent))
@@ -506,10 +512,10 @@ func checkLegacySummaryRepair(t *testing.T, state string) {
 		ref = lfs.NewFileRef([]byte(strings.Replace(testRawContent, "hello", "new message", 1)))
 	}
 	f.ledgerMeta(t, "{"+ledgerMeta+"}")
-	if state == "newer summary" {
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "summary.json"), []byte(`{"title":"New summary"}`), 0644))
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "summary.md"), []byte("# New summary"), 0644))
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "session.md"), []byte("# New session"), 0644))
+	if existingTitle != "" {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "summary.json"), fmt.Appendf(nil, `{"title":%q}`, existingTitle), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "summary.md"), []byte("# "+existingTitle), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "session.md"), []byte("# Previous session"), 0644))
 	}
 	pointer := lfs.FormatPointer(ref.OID, ref.Size)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(pointer), 0644))
@@ -525,7 +531,35 @@ func checkLegacySummaryRepair(t *testing.T, state string) {
 	items := detectCacheOnly(t, h, ledger)
 	require.Len(t, items, 1)
 	output := `{"title":"Legacy Session Repair","summary":"Restored the missing summary for a legacy recording.","quality_score":0.8,"score_reason":"fine","outcome":"success","key_actions":["restored the summary"]}`
-	err := h.ProcessResult(items[0], &RunResult{Output: output})
+	var err error
+	var resumedSummaryPointer string
+	if state == "interrupted copy" {
+		// Force the atomic replacement of summary.md to fail after staging
+		// started, then restore the old file before anti-entropy retries.
+		artifact := filepath.Join(dir, "summary.md")
+		original, readErr := os.ReadFile(artifact)
+		require.NoError(t, readErr)
+		require.NoError(t, os.Remove(artifact))
+		require.NoError(t, os.Mkdir(artifact, 0755))
+		require.NoError(t, h.ProcessResult(items[0], &RunResult{Output: output}))
+		require.Equal(t, before, gitOutput(t, bare, "rev-parse", branch))
+		require.DirExists(t, f.cacheDir)
+		cached, readErr := os.ReadFile(filepath.Join(f.cacheDir, "summary.md"))
+		require.NoError(t, readErr)
+		ref := lfs.NewFileRef(cached)
+		resumedSummaryPointer = strings.TrimSpace(lfs.FormatPointer(ref.OID, ref.Size))
+		require.NoError(t, os.Remove(artifact))
+		require.NoError(t, os.WriteFile(artifact, original, 0644))
+
+		items = detectCacheOnly(t, h, ledger)
+		require.Len(t, items, 1)
+		req, buildErr := h.BuildPrompt(items[0])
+		require.NoError(t, buildErr)
+		require.True(t, req.SkipLLM)
+		err = h.ProcessResult(items[0], &RunResult{})
+	} else {
+		err = h.ProcessResult(items[0], &RunResult{Output: output})
+	}
 	if state == "changed recording" {
 		require.ErrorIs(t, err, session.ErrLedgerSessionOverwrite)
 	} else {
@@ -547,6 +581,9 @@ func checkLegacySummaryRepair(t *testing.T, state string) {
 	require.Equal(t, userID, meta.UserID)
 	require.Equal(t, "Legacy Session Repair", meta.Title)
 	require.Equal(t, strings.TrimSpace(pointer), gitOutput(t, bare, "show", branch+":sessions/"+name+"/raw.jsonl"))
+	if state == "interrupted copy" {
+		require.Equal(t, resumedSummaryPointer, gitOutput(t, bare, "show", branch+":sessions/"+name+"/summary.md"))
+	}
 	for _, artifact := range []string{"summary.md", "summary.json", "session.md"} {
 		content, err := gitutil.ReadBlob(t.Context(), bare, branch, "sessions/"+name+"/"+artifact)
 		require.NoError(t, err)
