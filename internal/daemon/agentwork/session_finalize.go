@@ -1224,7 +1224,7 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			}
 			if !hasRaw {
 				if session.ClassifyRawFile(rawPath) == session.RawHeaderOnly {
-					h.logger.Debug("orphaned recording ended without captured entries", "session", name, "agent_id", agentID)
+					h.logger.Debug("orphaned recording ended without captured entries", "session", name, "agent_id", agentID, "reason", "header_only")
 					continue
 				}
 				h.logger.Warn("orphaned recording unrecoverable for agent",

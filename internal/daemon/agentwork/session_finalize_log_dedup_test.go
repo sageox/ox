@@ -158,7 +158,8 @@ func TestDetectOrphanedForAgent_WarnsOncePerSession(t *testing.T) {
 // An exited coworker with only a recording header has no turns to recover.
 // The daemon should clear the stale marker without alarming the operator.
 func TestDetectOrphanedForAgent_HeaderOnlyIsQuiet(t *testing.T) {
-	logger, buf := capturedLogger()
+	buf := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	handler := NewSessionFinalizeHandler(logger)
 	ledgerPath := t.TempDir()
 	agentID := "OxEMPT"
@@ -175,6 +176,7 @@ func TestDetectOrphanedForAgent_HeaderOnlyIsQuiet(t *testing.T) {
 	require.Empty(t, handler.DetectOrphanedForAgent(ledgerPath, agentID, 0))
 	require.NoFileExists(t, marker)
 	require.Zero(t, countLogLines(buf, "WARN", "orphaned recording unrecoverable for agent"))
+	require.Equal(t, 1, countLogLines(buf, "DEBUG", "reason=header_only"))
 	raw, err := os.ReadFile(rawPath)
 	require.NoError(t, err)
 	require.Equal(t, header, string(raw))
