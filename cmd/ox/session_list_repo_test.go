@@ -326,7 +326,13 @@ func TestRunSessionList_UnclonedLedgerIsNotAvailable(t *testing.T) {
 	assert.Contains(t, sessionNames(out), cached, "a recording cached before the first clone is still listed")
 
 	require.NoError(t, exec.Command("git", "init", "--quiet", ledger).Run())
+	uploaded := sessionNameAgo(2*time.Hour, "OxLedg")
+	createSessionInDir(t, ledger, uploaded)
+	draft := sessionNameAgo(3*time.Hour, "OxDraf")
+	require.NoError(t, os.MkdirAll(filepath.Join(ledger, "sessions", draft), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ledger, "sessions", draft, "meta.json"), []byte(`{"draft":true}`), 0o644))
 	out, err = runSessionListWindow(t, "--all")
 	require.NoError(t, err)
 	assert.True(t, out.LedgerAvailable)
+	assert.Subset(t, sessionNames(out), []string{cached, uploaded, draft}, "a checkout lists its own sessions and the cached ones")
 }

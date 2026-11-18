@@ -303,46 +303,43 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 	ledgerPath, ledgerErr := resolveLedgerPath()
 	// The path exists before the daemon's first clone lands, because recordings
 	// cache under it, so those are still listed. Only a checkout is reported as
-	// an available Ledger.
+	// an available Ledger, and only a checkout's sessions count as uploaded.
 	ledgerFound := ledgerErr == nil
 	ledgerAvailable := ledgerFound && isGitRepo(ledgerPath)
 	if ledgerFound {
-		// Only a checkout's sessions/ are on the Ledger's remote.
-		if ledgerAvailable {
-			ledgerStore, storeErr := session.NewStore(ledgerPath)
-			if storeErr == nil {
-				ledgerSessions, _ := window.list(ledgerStore, showAll)
+		ledgerStore, storeErr := session.NewStore(ledgerPath)
+		if storeErr == nil {
+			ledgerSessions, _ := window.list(ledgerStore, showAll)
 
-				// mark ledger sessions as uploaded using merge key.
-				// Drafts are excluded: a meta.json-only placeholder means the
-				// session is still recording, not that its turn data landed.
-				for _, ls := range ledgerSessions {
-					if ls.Draft {
-						continue
-					}
-					uploadedSessions[sessionMergeKey(ls)] = true
+			// mark ledger sessions as uploaded using merge key.
+			// Drafts are excluded: a meta.json-only placeholder means the
+			// session is still recording, not that its turn data landed.
+			for _, ls := range ledgerSessions {
+				if ls.Draft || !ledgerAvailable {
+					continue
 				}
-
-				// merge local sessions with ledger sessions (local wins on duplicates)
-				sessions = mergeSessionSources(sessions, ledgerSessions)
-			} else {
-				slog.Debug("skipping ledger sessions", "err", storeErr)
-				ledgerAvailable = false
+				uploadedSessions[sessionMergeKey(ls)] = true
 			}
-		}
 
-		// scan every cache location for in-progress or unuploaded sessions:
-		// recordings are written to {ledger}/.sageox/cache/sessions/ before
-		// upload, and a held session may sit in any XDG cache (GH #1095)
-		for _, cacheSessionsDir := range session.HeldSessionDirs(ledgerPath) {
-			cacheStore, cacheErr := session.NewStore(filepath.Dir(cacheSessionsDir))
-			if cacheErr != nil {
-				continue
+			// merge local sessions with ledger sessions (local wins on duplicates)
+			sessions = mergeSessionSources(sessions, ledgerSessions)
+
+			// scan every cache location for in-progress or unuploaded sessions:
+			// recordings are written to {ledger}/.sageox/cache/sessions/ before
+			// upload, and a held session may sit in any XDG cache (GH #1095)
+			for _, cacheSessionsDir := range session.HeldSessionDirs(ledgerPath) {
+				cacheStore, cacheErr := session.NewStore(filepath.Dir(cacheSessionsDir))
+				if cacheErr != nil {
+					continue
+				}
+				cacheSessions, _ := window.list(cacheStore, showAll)
+
+				// merge cache sessions (lowest priority)
+				sessions = mergeSessionSources(sessions, cacheSessions)
 			}
-			cacheSessions, _ := window.list(cacheStore, showAll)
-
-			// merge cache sessions (lowest priority)
-			sessions = mergeSessionSources(sessions, cacheSessions)
+		} else {
+			slog.Debug("skipping ledger sessions", "err", storeErr)
+			ledgerAvailable = false
 		}
 	} else {
 		slog.Debug("ledger not available for session list", "err", ledgerErr)
