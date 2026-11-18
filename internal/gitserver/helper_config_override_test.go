@@ -144,6 +144,7 @@ func TestStampAuthor_OverrideWriteFailuresAreReported(t *testing.T) {
 			}
 			interrupted := stampAuthor(dir, tc.then[0], tc.then[1], !tc.project) != nil
 			failConfigWrite = nil
+			require.Equal(t, writes >= failAt, interrupted, "%s: a failed write at %d must be reported", tc.name, failAt)
 			require.NoError(t, stampAuthor(dir, tc.then[0], tc.then[1], !tc.project), "%s, interrupted at write %d", tc.name, failAt)
 
 			wantIdentity, wantOverrides := tc.then, tc.then
