@@ -25,6 +25,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	lipgloss "charm.land/lipgloss/v2"
@@ -356,6 +357,25 @@ func fit(segs []seg, room int) []seg {
 	return out
 }
 
+// printable is s as plain text on one line: escape sequences and control
+// characters removed, any other space made a plain space. Without it a label
+// carrying an OSC (a clipboard write, a title, a link) or a cursor move would
+// be handed to the terminal the lane is drawn in.
+func printable(s string) string {
+	s = ansi.Strip(s)
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case unicode.IsSpace(r):
+			b.WriteRune(' ')
+		case unicode.IsPrint(r):
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // Render draws the lane as one line with no trailing newline. sinceEnd is how
 // long ago the call ended, or for a running lane how long ago it started.
 // Anything at or past AnimDuration after the end (or opts.Still) draws the
@@ -366,6 +386,9 @@ func Render(l Lane, sinceEnd time.Duration, opts Options) string {
 	if opts.Columns > 0 && opts.Columns < Track {
 		return ""
 	}
+	// A lane's words can come from a trace file, which a command line can
+	// write: they reach a terminal only as plain single-line text.
+	l.Label, l.Step, l.ItemsNoun = printable(l.Label), printable(l.Step), printable(l.ItemsNoun)
 	labels := opts.Columns <= 0 || opts.Columns >= NarrowColumns
 	room := math.MaxInt32
 	if opts.Columns > 0 {

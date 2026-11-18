@@ -241,3 +241,50 @@ func TestRender_FailedTrackIsRed(t *testing.T) {
 	assert.NotContains(t, empty, "196", "nothing came back is not a failure")
 	assert.Equal(t, quietStyle.Render("●╶─              ●"), empty)
 }
+
+// --- F. Text that came from a trace file ---
+
+// TestRender_TraceTextReachesTheTerminalAsPlainText: a label, step or noun
+// can be written into the trace from a command line. Failure prevented: an
+// escape sequence in it (OSC 52 sets the clipboard, others retitle the
+// window, move the cursor or clear the screen) run by the terminal the watch
+// pane or the wrapped row draws in.
+func TestRender_TraceTextReachesTheTerminalAsPlainText(t *testing.T) {
+	hostile := []string{
+		"\x1b]52;c;WA==\x07",           // clipboard write, BEL-terminated
+		"\x1b]52;c;WA==\x1b\\",         // the same, ST-terminated
+		"\x1b]0;owned\x07",             // window title
+		"\x1b[2J\x1b[H",                // clear screen, home
+		"\x1b[31m",                     // a color of its own
+		"\x9b2J",                       // C1 CSI
+		"\x07\x08\x7f\x00",             // bell, backspace, delete, NUL
+		"line one\nline two\r\ttabbed", // more than one line
+	}
+	for _, bad := range hostile {
+		lanes := []Lane{
+			with(search(), func(l *Lane) { l.Label = "searched " + bad + "team memory" }),
+			with(search(), func(l *Lane) { l.ItemsNoun = "discussions" + bad }),
+			with(search(), func(l *Lane) { l.Running, l.Step = true, "searching "+bad }),
+			with(search(), func(l *Lane) { l.Failed, l.Step = true, bad+"searching" }),
+		}
+		for _, l := range lanes {
+			for _, color := range []bool{false, true} {
+				row := Render(l, settled, Options{Columns: 200, Color: color})
+				text := row
+				if color {
+					text = ansi.Strip(row) // the renderer's own styling is the only escape allowed
+					assert.NotContains(t, row, "\x1b]", "%q: no OSC", bad)
+				}
+				for _, r := range text {
+					assert.Truef(t, r == ' ' || (r >= 0x20 && r != 0x7f && !(r >= 0x80 && r <= 0x9f)), "%q left %U in %q", bad, r, text)
+				}
+				assert.NotContains(t, text, "\n", "%q: one line", bad)
+			}
+		}
+	}
+	// What a coworker would actually see: the words, with the payload gone.
+	got := Render(with(search(), func(l *Lane) { l.Label = "searched\x1b]52;c;WA==\x07 team memory" }), settled, Options{Columns: 200})
+	assert.Contains(t, got, "searched team memory · ~1.2k")
+	// Ordinary text, accents and all, is untouched.
+	assert.Contains(t, Render(with(search(), func(l *Lane) { l.Label = "búsqueda de équipe · 検索" }), settled, Options{Columns: 200}), "búsqueda de équipe · 検索")
+}
