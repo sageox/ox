@@ -656,6 +656,16 @@ type teamPullOutcome struct {
 // agent definitions, etc.). When changes are detected, a notification marker is written
 // so that CLI commands can "whisper" updates to agents.
 func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamPullOutcome, error) {
+	var outcome teamPullOutcome
+	err := gitutil.WithPreCloneLock(ctx, path, func() error {
+		var err error
+		outcome, err = s.pullTeamContextWithCheckout(ctx, path)
+		return err
+	})
+	return outcome, err
+}
+
+func (s *SyncScheduler) pullTeamContextWithCheckout(ctx context.Context, path string) (teamPullOutcome, error) {
 	repoName := filepath.Base(path)
 
 	// read manifest before pull to get auto-resolve prefixes. The manifest

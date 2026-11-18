@@ -595,6 +595,26 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 // value specifically, not on gcSuccess or on their own pre-call wedge
 // sample.
 func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) (result gcResult, recovered bool) {
+	if ws.Type != WorkspaceTypeTeamContext {
+		return s.recloneWorkspaceForGC(ctx, ws, captureUnpushedOnDiverge)
+	}
+	// The Git lock lives in the clone being replaced. Use the stable path
+	// lock shared by Team Context pulls and clone setup across the swap.
+	acquired, err := gitutil.TryWithPreCloneLock(ws.Path, func() error {
+		result, recovered = s.recloneWorkspaceForGC(ctx, ws, captureUnpushedOnDiverge)
+		return nil
+	})
+	if err != nil {
+		s.logger.Warn("gc: cannot lock Team Context checkout", "path", ws.Path, "error", err)
+		return gcFailed, false
+	}
+	if !acquired {
+		return gcSkippedLocked, false
+	}
+	return result, recovered
+}
+
+func (s *SyncScheduler) recloneWorkspaceForGC(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) (result gcResult, recovered bool) {
 	newPath := ws.Path + ".new"
 	oldPath := ws.Path + ".old"
 	diffFile := ws.Path + ".gc-diff"

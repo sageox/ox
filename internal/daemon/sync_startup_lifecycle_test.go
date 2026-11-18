@@ -195,6 +195,9 @@ func TestSyncScheduler_StartJoinsCanceledStartupTeamSync(t *testing.T) {
 }
 
 func TestSyncScheduler_WatcherPullContinuesDuringPeriodicTeamSync(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits for periodic Team Context sync")
+	}
 	t.Setenv("OX_GIT_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "git-credentials.json"))
 	scheduler, _, _ := newTeamBudgetScheduler(t, 1)
 	_, ledger, writer := setupRacingLedger(t)

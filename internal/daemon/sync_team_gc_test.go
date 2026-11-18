@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -63,6 +64,22 @@ func TestBlueGreenGC_Success(t *testing.T) {
 	// verify LastGCTime was updated
 	lastGC := scheduler.WorkspaceRegistry().GetLastGCTime("team_test")
 	assert.False(t, lastGC.IsZero(), "LastGCTime should be set after GC")
+}
+
+func TestBlueGreenGC_TeamCheckoutBusy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	manifest := "version 1\ninclude .sageox/\ninclude SOUL.md\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifest, nil)
+	ws := WorkspaceState{Type: WorkspaceTypeTeamContext, Path: teamDir, CloneURL: "file://" + bareDir}
+	ctx := t.Context()
+	require.NoError(t, gitutil.WithPreCloneLock(ctx, teamDir, func() error {
+		result, _ := scheduler.runBlueGreenGCOpts(ctx, ws, false)
+		require.Equal(t, gcSkippedLocked, result)
+		require.NoDirExists(t, teamDir+".new")
+		return nil
+	}))
 }
 
 func TestBlueGreenGC_PreservesUncommittedTrackedChanges(t *testing.T) {
