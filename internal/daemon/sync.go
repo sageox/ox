@@ -1038,9 +1038,7 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			span.End()
 
 		case <-gcChan:
-			taskCtx, span := s.tracer.StartTask(ctx, "daemon:gc_check")
-			s.checkAndRunGC(taskCtx)
-			span.End()
+			s.startPeriodicGC(ctx)
 
 		case <-githubSyncChan:
 			if s.githubSync != nil {

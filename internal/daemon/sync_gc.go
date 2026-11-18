@@ -35,18 +35,31 @@ const (
 	gcFailed                        // reclone attempted but failed (clone, validation, or swap error)
 )
 
-// checkAndRunGC iterates team context workspaces and triggers blue-green reclone
-// for any that are past their gc_interval_days cadence.
+// startPeriodicGC keeps reclone I/O off the scheduler loop. Track it for the
+// same bounded shutdown drain as manually triggered GC.
+func (s *SyncScheduler) startPeriodicGC(ctx context.Context) {
+	if atomic.LoadInt32(&s.gcInProgress) != 0 || !s.addClone() {
+		return
+	}
+	go func() {
+		defer s.cloneWg.Done()
+		taskCtx, span := s.tracer.StartTask(ctx, "daemon:gc_check")
+		defer span.End()
+		s.checkAndRunGC(taskCtx)
+	}()
+}
+
+// checkAndRunGC reclones workspaces due for garbage collection.
 func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 	// only one GC at a time
 	if !atomic.CompareAndSwapInt32(&s.gcInProgress, 0, 1) {
 		s.logger.Debug("gc: already in progress, skipping check")
 		return
 	}
+	defer atomic.StoreInt32(&s.gcInProgress, 0)
 
 	if err := s.workspaceRegistry.LoadFromConfig(); err != nil {
 		s.logger.Warn("gc: failed to load workspace registry", "error", err)
-		atomic.StoreInt32(&s.gcInProgress, 0)
 		return
 	}
 
@@ -239,8 +252,6 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 
 	// knowledge-bubble GC — independent of ledger / team-context GC.
 	s.TriggerKBGC(ctx)
-
-	atomic.StoreInt32(&s.gcInProgress, 0)
 }
 
 // ledgerSyncWedgeAge is how long a ledger must be simultaneously ahead
