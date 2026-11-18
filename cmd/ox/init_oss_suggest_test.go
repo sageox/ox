@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/stretchr/testify/assert"
@@ -190,14 +191,39 @@ func TestSuggestOpenSourceTeam_OriginErrorStillTriesUpstream(t *testing.T) {
 // TestShallowCloneTeamWarning — Failure prevented: `ox init --team <oss>` in
 // a --depth clone (an agent sandbox, CI) silently registers a duplicate repo
 // in the project's team. --team is still honored; the person is warned.
-func TestShallowCloneTeamWarning(t *testing.T) {
+func TestShallowTeamFlagWarning(t *testing.T) {
 	full := contributorClone(t)
-	assert.Empty(t, shallowCloneTeamWarning(full), "a full clone gets no warning")
+	assert.Empty(t, shallowTeamFlagWarning(full), "a full clone gets no warning")
 
 	shallow := filepath.Join(t.TempDir(), "shallow")
 	out, err := exec.Command("git", "clone", "-q", "--depth", "1", "file://"+full, shallow).CombinedOutput()
 	require.NoError(t, err, string(out))
-	warning := shallowCloneTeamWarning(shallow)
-	assert.Contains(t, warning, "shallow clone")
+	warning := shallowTeamFlagWarning(shallow)
+	assert.Contains(t, warning, "this run registers it as a separate repo")
 	assert.Contains(t, warning, "git fetch --unshallow")
+}
+
+// TestSuggestOpenSourceTeam_SlowOriginLeavesUpstreamItsOwnBudget — Failure
+// prevented: an origin that times out spends the whole lookup budget, so
+// upstream (where a fork clone's project lives) is asked with a dead context.
+func TestSuggestOpenSourceTeam_SlowOriginLeavesUpstreamItsOwnBudget(t *testing.T) {
+	dir := contributorClone(t)
+	origBudget := openSourceSuggestPerRemote
+	openSourceSuggestPerRemote = 50 * time.Millisecond
+	t.Cleanup(func() { openSourceSuggestPerRemote = origBudget })
+
+	orig := fetchPublicPrimeForRepo
+	fetchPublicPrimeForRepo = func(ctx context.Context, _, owner, _ string) (*api.PublicPrimeResponse, error) {
+		if owner == "some-contributor" {
+			<-ctx.Done() // a slow origin: answers only by timing out
+			return nil, ctx.Err()
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err // upstream asked with a spent budget
+		}
+		return &api.PublicPrimeResponse{Version: 1, Viewer: api.PublicPrimeViewerMember, Team: &api.PublicPrimeTeam{ID: ossTeamID}}, nil
+	}
+	t.Cleanup(func() { fetchPublicPrimeForRepo = orig })
+
+	assert.Equal(t, ossTeamID, suggestOpenSourceTeam(context.Background(), dir, contributorTeams))
 }

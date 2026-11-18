@@ -466,8 +466,10 @@ func runInit() error {
 		selectedTeamID = resolvedID
 		selectedTeamName = resolvedName
 		// --team is honored as given; a shallow clone is only warned.
-		if warning := shallowCloneTeamWarning(gitRoot); warning != "" && !initQuiet {
-			cli.PrintWarning(warning)
+		// To stderr even under --quiet: agents and CI run `ox init -q --team`
+		// in --depth clones, the exact population this warns.
+		if warning := shallowTeamFlagWarning(gitRoot); warning != "" {
+			cli.PrintWarningTo(os.Stderr, warning)
 		}
 		if len(resolveTeamMembership(memberships, initTeamFlag)) == 0 {
 			unresolvedTeamCandidates = usableTeams(memberships)
@@ -3009,9 +3011,11 @@ func confirmContinueWithoutTeam(currentEP string) error {
 	return nil
 }
 
-// openSourceSuggestTimeout bounds the team suggestion: it runs once, before
-// the picker, and a miss (most repos) must never hold up ox init.
-const openSourceSuggestTimeout = 1500 * time.Millisecond
+// openSourceSuggestPerRemote bounds each remote's lookup (origin, then
+// upstream) on its own deadline, so a slow origin can't spend upstream's
+// budget. Worst case 2.4s before the picker; a miss (most repos) usually
+// answers in one round trip. A var so tests can shorten it.
+var openSourceSuggestPerRemote = 1200 * time.Millisecond
 
 // suggestOpenSourceTeam returns the team of the open-source project this
 // clone belongs to, when SageOx says the caller is a member of it and it is
@@ -3027,16 +3031,15 @@ func suggestOpenSourceTeam(ctx context.Context, gitRoot string, teams []api.Team
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(ctx, openSourceSuggestTimeout)
-	defer cancel()
-
 	var team *api.PublicPrimeTeam
 	for _, lookup := range []func(string) (string, string, bool){repotools.GitHubOrigin, repotools.GitHubUpstream} {
 		owner, name, ok := lookup(gitRoot)
 		if !ok {
 			continue
 		}
-		bundle, err := fetchPublicPrimeForRepo(ctx, gitRoot, owner, name)
+		remoteCtx, cancel := context.WithTimeout(ctx, openSourceSuggestPerRemote)
+		bundle, err := fetchPublicPrimeForRepo(remoteCtx, gitRoot, owner, name)
+		cancel()
 		if err != nil {
 			// One remote failing (a 503, a timeout on a slow origin) says
 			// nothing about the other: a fork clone's project is on upstream.
@@ -3050,20 +3053,22 @@ func suggestOpenSourceTeam(ctx context.Context, gitRoot string, teams []api.Team
 	if team == nil || !slices.ContainsFunc(teams, func(t api.TeamMembership) bool { return t.ID == team.ID }) {
 		return ""
 	}
-	if warning := shallowCloneTeamWarning(gitRoot); warning != "" {
-		cli.PrintWarning(fmt.Sprintf("You're on this project's team (%s). %s", team.ID, warning))
+	if repotools.IsShallowClone(gitRoot) {
+		cli.PrintWarning(fmt.Sprintf("You're on this project's team (%s), but this is a shallow clone, so ox can't match it to the project's repo. Run %s first, then re-run %s.",
+			team.ID, cli.StyleCommand.Render("git fetch --unshallow"), cli.StyleCommand.Render("ox init")))
 		return ""
 	}
 	return team.ID
 }
 
-// shallowCloneTeamWarning explains, for a shallow clone, why binding it to a
-// team that already registered the repo would mint a duplicate instead; ""
-// for a full clone. Shared by the suggestion and the explicit --team path.
-func shallowCloneTeamWarning(gitRoot string) string {
+// shallowTeamFlagWarning is the explicit --team path's warning for a shallow
+// clone; "" for a full clone. --team is honored, so it says what this run
+// does: a shallow clone's hashes are salted with the shallow boundary, so a
+// repo the team already registered can't be matched and this run registers
+// the clone as a separate repo.
+func shallowTeamFlagWarning(gitRoot string) string {
 	if !repotools.IsShallowClone(gitRoot) {
 		return ""
 	}
-	return fmt.Sprintf("This is a shallow clone, so ox can't match it to a repo the team already registered and would register a separate one. Run %s first, then re-run %s.",
-		cli.StyleCommand.Render("git fetch --unshallow"), cli.StyleCommand.Render("ox init"))
+	return "This is a shallow clone, so ox can't match it to a repo the team already registered: this run registers it as a separate repo. To join the team's existing repo instead, run `git fetch --unshallow` before `ox init`."
 }
