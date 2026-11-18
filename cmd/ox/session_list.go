@@ -301,7 +301,9 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 	// case); wrong if they use different ledgers. Resolving the ledger
 	// relative to --repo too is a larger change, deferred for now.
 	ledgerPath, ledgerErr := resolveLedgerPath()
-	ledgerAvailable := ledgerErr == nil
+	// The path can exist before the daemon's first clone lands (recordings
+	// cache under it), so only a checkout counts as an available Ledger.
+	ledgerAvailable := ledgerErr == nil && isGitRepo(ledgerPath)
 	if ledgerAvailable {
 		ledgerStore, storeErr := session.NewStore(ledgerPath)
 		if storeErr == nil {
