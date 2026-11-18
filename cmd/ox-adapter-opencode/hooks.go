@@ -3,11 +3,13 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
@@ -35,17 +37,55 @@ export const OxPrimePlugin: Plugin = async ({ $, directory }) => {
 // Older ox versions wrote the same plugin without OpenCode's shell tag.
 var legacyOpenCodePlugin = strings.Replace(openCodePluginTemplate, "await $", "await ", 1)
 
+// readOpenCodePlugin only needs enough bytes to compare generated templates.
+// A larger regular file is a custom plugin and cannot equal either template.
+func readOpenCodePlugin(path string) (content string, exists bool, err error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if !info.Mode().IsRegular() {
+		return "", false, fmt.Errorf("expected a regular OpenCode plugin file at %s", path)
+	}
+	limit := int64(len(openCodePluginTemplate) + strings.Count(openCodePluginTemplate, "\n"))
+	if info.Size() > limit {
+		return "", true, nil
+	}
+	f, err := openPluginForCheck(path)
+	if err != nil {
+		return "", false, err
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil {
+		return "", false, err
+	}
+	if !os.SameFile(info, opened) || !opened.Mode().IsRegular() {
+		return "", false, fmt.Errorf("OpenCode plugin changed while being checked: %s", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return "", false, err
+	}
+	return strings.ReplaceAll(string(data), "\r\n", "\n"), true, nil
+}
+
 func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallHooksResponse, error) {
 	pluginPath := resolvePluginPath(p.RepoRoot, p.Scope)
 
 	// check if already installed with same content
-	if existing, err := os.ReadFile(pluginPath); err == nil {
-		if string(existing) == openCodePluginTemplate {
-			return &adapterprotocol.InstallHooksResponse{
-				Installed:    true,
-				FilesWritten: []string{pluginPath},
-			}, nil
-		}
+	existing, _, err := readOpenCodePlugin(pluginPath)
+	if err != nil {
+		return nil, fmt.Errorf("read OpenCode plugin: %w", err)
+	}
+	if existing == openCodePluginTemplate {
+		return &adapterprotocol.InstallHooksResponse{
+			Installed:    true,
+			FilesWritten: []string{pluginPath},
+		}, nil
 	}
 
 	dir := filepath.Dir(pluginPath)
@@ -53,7 +93,7 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 		return nil, fmt.Errorf("failed to create plugin directory: %w", err)
 	}
 
-	if err := os.WriteFile(pluginPath, []byte(openCodePluginTemplate), 0644); err != nil {
+	if err := fileutil.AtomicWriteBytes(pluginPath, []byte(openCodePluginTemplate), 0644); err != nil {
 		return nil, fmt.Errorf("failed to write plugin file: %w", err)
 	}
 
@@ -66,16 +106,15 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooksResponse, error) {
 	pluginPath := resolvePluginPath(p.RepoRoot, p.Scope)
 
-	content, err := os.ReadFile(pluginPath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	content, exists, err := readOpenCodePlugin(pluginPath)
+	if err != nil {
 		return nil, fmt.Errorf("read OpenCode plugin: %w", err)
 	}
-	installed := err == nil && string(content) != legacyOpenCodePlugin
-
 	return &adapterprotocol.CheckHooksResponse{
-		Installed: installed,
-		Scope:     p.Scope,
-		HookFiles: []string{pluginPath},
+		Installed:     exists && content != legacyOpenCodePlugin,
+		HasOwnedHooks: exists,
+		Scope:         p.Scope,
+		HookFiles:     []string{pluginPath},
 	}, nil
 }
 

@@ -48,11 +48,23 @@ assert.deepEqual(calls, [["ox agent prime", process.cwd()]]);
 }
 
 func TestCheckHooksDetectsAndRepairsLegacyPlugin(t *testing.T) {
+	for _, newline := range []string{"lf", "crlf"} {
+		t.Run(newline, func(t *testing.T) {
+			checkLegacyPluginRepair(t, newline == "crlf")
+		})
+	}
+}
+
+func checkLegacyPluginRepair(t *testing.T, crlf bool) {
+	t.Helper()
 	params := adapterprotocol.HookParams{RepoRoot: t.TempDir(), Scope: "project"}
 	path := resolvePluginPath(params.RepoRoot, params.Scope)
 	legacy := strings.Replace(openCodePluginTemplate, "await $", "await ", 1)
 	if legacy == openCodePluginTemplate {
 		t.Fatal("fixture must contain the legacy invocation")
+	}
+	if crlf {
+		legacy = strings.ReplaceAll(legacy, "\n", "\r\n")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatal(err)
@@ -63,6 +75,9 @@ func TestCheckHooksDetectsAndRepairsLegacyPlugin(t *testing.T) {
 	status, err := handleCheckHooks(params)
 	if err != nil || status.Installed {
 		t.Fatalf("legacy hook should require repair: %+v, %v", status, err)
+	}
+	if !status.HasOwnedHooks {
+		t.Fatal("legacy hook must remain visible to bulk uninstall")
 	}
 	if _, err := handleInstallHooks(params); err != nil {
 		t.Fatal(err)
