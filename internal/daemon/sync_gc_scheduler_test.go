@@ -43,7 +43,7 @@ func TestPeriodicGC_HeartbeatContinuesDuringRejectedLedgerPush(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(bare, "hooks", "pre-receive"), []byte("#!/bin/sh\nexit 1\n"), 0o700))
 	s := gcTestScheduler(t)
 	s.config.LedgerPath = local
-	s.config.SyncIntervalRead = time.Hour
+	s.config.SyncIntervalRead = time.Minute
 	s.config.TeamContextSyncInterval = 0
 	s.config.VersionCheckInterval = 0
 	s.config.GCCheckInterval = time.Minute

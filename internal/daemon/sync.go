@@ -992,6 +992,7 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	// initial codedb check on startup (don't wait for CodeDBCheckInterval)
 	go s.checkCodeDBFreshness(ctx)
 
+	var periodicGCDone <-chan struct{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -1003,7 +1004,11 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 
 		case <-readTicker.C:
 			// not traced: high-frequency sync dominates span volume with little diagnostic value
-			s.pullChanges(ctx)
+			// Periodic GC may own the Ledger lock during preservation.
+			// Keep the event loop responsive and resume on the next tick.
+			if periodicGCDone == nil {
+				s.pullChanges(ctx)
+			}
 			readTicker.Reset(jitteredDuration(s.config.SyncIntervalRead, 0.10))
 
 		case <-teamContextChan:
@@ -1015,7 +1020,7 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			// owner keeps fresh — every daemon still resolves its own
 			// per-project KB symlinks from whatever is on disk via the
 			// existing reconciler.
-			if s.IsGlobalSyncOwner() {
+			if periodicGCDone == nil && s.IsGlobalSyncOwner() {
 				s.pullTeamContexts(ctx)
 				// kb bubbles share the team-context cadence (15s). Per-bubble
 				// FETCH_HEAD dedup inside pullManagedRepo (threshold =
@@ -1038,7 +1043,12 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			span.End()
 
 		case <-gcChan:
-			s.startPeriodicGC(ctx)
+			if periodicGCDone == nil {
+				periodicGCDone = s.startPeriodicGC(ctx)
+			}
+
+		case <-periodicGCDone:
+			periodicGCDone = nil
 
 		case <-githubSyncChan:
 			if s.githubSync != nil {

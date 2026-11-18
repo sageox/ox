@@ -37,16 +37,19 @@ const (
 
 // startPeriodicGC keeps reclone I/O off the scheduler loop. Track it for the
 // same bounded shutdown drain as manually triggered GC.
-func (s *SyncScheduler) startPeriodicGC(ctx context.Context) {
+func (s *SyncScheduler) startPeriodicGC(ctx context.Context) <-chan struct{} {
 	if atomic.LoadInt32(&s.gcInProgress) != 0 || !s.addClone() {
-		return
+		return nil
 	}
+	done := make(chan struct{})
 	go func() {
 		defer s.cloneWg.Done()
+		defer close(done)
 		taskCtx, span := s.tracer.StartTask(ctx, "daemon:gc_check")
 		defer span.End()
 		s.checkAndRunGC(taskCtx)
 	}()
+	return done
 }
 
 // checkAndRunGC reclones workspaces due for garbage collection.
