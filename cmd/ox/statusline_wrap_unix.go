@@ -70,6 +70,7 @@ func runStatuslineWrap(ctx context.Context, argv []string) (int, error) {
 	defer restore()
 
 	lastOutput := time.Now()
+	var savedSince time.Time // when the app saved the cursor it still holds
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
 	defer signal.Stop(winch)
@@ -86,6 +87,12 @@ func runStatuslineWrap(ctx context.Context, argv []string) (int, error) {
 				_, _ = os.Stdout.Write(filter.write(buf[:n]))
 				_, _ = io.WriteString(os.Stdout, filter.flushRegion())
 				lastOutput = time.Now()
+				switch {
+				case !filter.cursorSaved:
+					savedSince = time.Time{}
+				case savedSince.IsZero():
+					savedSince = lastOutput
+				}
 				mu.Unlock()
 			}
 			if readErr != nil {
@@ -119,7 +126,7 @@ func runStatuslineWrap(ctx context.Context, argv []string) (int, error) {
 		content := wrapRow(f.status, lane, cols)
 		mu.Lock()
 		defer mu.Unlock()
-		if !filter.idle() || time.Since(lastOutput) < wrapQuiet {
+		if !filter.canDraw(time.Since(savedSince)) || time.Since(lastOutput) < wrapQuiet {
 			return f.moving || filter.dirty // the app is mid-draw: try again shortly
 		}
 		if content != shown || filter.dirty {
@@ -143,6 +150,12 @@ loop:
 			// The app is gone. Take what it last wrote, but do not wait on a
 			// background process it left holding the terminal.
 			appExited = true
+			if ctx.Err() != nil && cmd.Process != nil {
+				// ox was told to stop and the app is gone, by itself or
+				// killed after the grace period: nothing it started may be
+				// left holding the terminal ox is giving back.
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
 			select {
 			case <-done:
 			case <-time.After(wrapDrainGrace):

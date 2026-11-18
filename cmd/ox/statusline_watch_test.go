@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os/exec"
+	"runtime"
 	"testing"
 	"time"
 
@@ -115,6 +116,9 @@ func TestWatchStatusline_RedrawsOnlyOnChange(t *testing.T) {
 // markRecordingExited points agentID's recording at a process that has exited.
 func markRecordingExited(t *testing.T, root, agentID string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("needs the POSIX `true` utility to make a process that has exited")
+	}
 	cmd := exec.Command("true")
 	require.NoError(t, cmd.Run())
 	require.NoError(t, session.UpdateRecordingStateForAgent(root, agentID, func(s *session.RecordingState) {

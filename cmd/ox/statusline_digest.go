@@ -142,14 +142,8 @@ func pendingDigest(ctx *HookContext) string {
 		return ""
 	}
 	withLine := digestShowsStatusline(ctx)
-	var flows []finishedFlow
-	trace := ""
-	if flowLanesEnabled() {
-		trace = flowTracePath(ctx.ProjectRoot, ctx.Marker.AgentID)
-		flows = finishedFlowsAt(trace, ctx.Marker.AgentID)
-	}
-	showsLine := withLine && counted
-	if !showsLine && len(flows) == 0 {
+	lanesOn := flowLanesEnabled()
+	if showsLine := withLine && counted; !showsLine && !lanesOn {
 		return "" // nothing to show: no state write, no notice
 	}
 	key := oxactivity.StateKey(ctx.Marker.AgentID, ctx.Input.SessionID)
@@ -159,6 +153,15 @@ func pendingDigest(ctx *HookContext) string {
 	}
 	var message string
 	err := oxactivity.UpdateState(ctx.ProjectRoot, key, func(s *oxactivity.State) bool {
+		// The trace is read here, under the state's lock: two hooks finishing
+		// together must not move the shown position from snapshots taken in
+		// one order and applied in the other.
+		var flows []finishedFlow
+		trace := ""
+		if lanesOn {
+			trace = flowTracePath(ctx.ProjectRoot, ctx.Marker.AgentID)
+			flows = finishedFlowsAt(trace, ctx.Marker.AgentID)
+		}
 		changed := s.BindRecording(recordingID)
 		if trace != "" && s.ShownFlowsTrace != trace {
 			// A recording started or ended: these are another trace's lanes,
@@ -166,7 +169,9 @@ func pendingDigest(ctx *HookContext) string {
 			s.ShownFlows, s.ShownFlowsTrace = 0, trace
 			changed = true
 		}
-		firstNotice := s.ShownLine == "" && s.ShownFlows == 0
+		// Only the not-recording trace holds earlier sittings; a recording's
+		// trace is this session's own, however long its first turn ran.
+		firstNotice := recordingID == "" && s.ShownLine == "" && s.ShownFlows == 0
 		lanes := digestLanes(flows, s.ShownFlows, firstNotice, time.Now())
 		if s.ShownFlows != len(flows) {
 			s.ShownFlows = len(flows)

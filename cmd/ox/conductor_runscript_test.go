@@ -178,6 +178,9 @@ func TestConductorRunScript_KeepsSettingsPrivate(t *testing.T) {
 
 	shared := conductorRepo(t)
 	writeConductorSettings(t, shared, conductorLocalSettings, "# mine\n")
+	// Set, not assumed: the mode a file is created with depends on the umask.
+	require.NoError(t, os.Chmod(filepath.Join(shared, ".conductor", conductorLocalSettings), 0o644))
+	require.Equal(t, os.FileMode(0o644), modeOf(shared), "precondition: the file starts shared")
 	require.True(t, checkConductorRunScriptAt(shared, true).passed)
 	assert.Equal(t, os.FileMode(0o644), modeOf(shared), "a mode the coworker chose is kept")
 }
@@ -199,4 +202,60 @@ func TestConductorRepoRoot_FromAWorkspaceWorktree(t *testing.T) {
 	assert.Equal(t, repo, conductorRepoRoot(wt))
 	t.Setenv("CONDUCTOR_ROOT_PATH", "/conductor/root")
 	assert.Equal(t, "/conductor/root", conductorRepoRoot(wt), "Conductor's own answer wins")
+}
+
+// TestConductorRunScript_LeavesATrackedLocalFileAlone: git ignores no tracked
+// file. Failure prevented: ox writing its machine-local run script into a
+// settings.local.toml the team committed, to ride along in the next commit.
+func TestConductorRunScript_LeavesATrackedLocalFileAlone(t *testing.T) {
+	repo := conductorRepo(t)
+	writeConductorSettings(t, repo, conductorLocalSettings, "# committed by the team\n")
+	git := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"}, args...)...)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+	git("add", "-f", ".conductor/"+conductorLocalSettings)
+	git("commit", "-q", "-m", "settings")
+	require.True(t, conductorLocalTracked(repo), "precondition: the file is tracked")
+
+	res := checkConductorRunScriptAt(repo, true)
+	assert.True(t, res.warning, "%+v", res)
+	assert.Contains(t, res.detail, "[scripts.run.ox]", "the coworker is told what to add by hand")
+	assert.Equal(t, "# committed by the team\n", readConductorLocal(t, repo))
+
+	ensureConductorRunScript(repo, true)
+	assert.Equal(t, "# committed by the team\n", readConductorLocal(t, repo), "ox init leaves it alone too")
+}
+
+// TestConductorRunScript_ExclusionFailureIsRetried: the file must be kept out
+// of git. Failure prevented: the settings written, the exclusion failed, and
+// every later run reporting "installed" with the file still open to a commit.
+func TestConductorRunScript_ExclusionFailureIsRetried(t *testing.T) {
+	ignored := func(repo string) bool {
+		return exec.Command("git", "-C", repo, "check-ignore", "-q", ".conductor/"+conductorLocalSettings).Run() == nil
+	}
+
+	// The exclude file cannot be written (a directory stands in its place, on
+	// every platform): nothing is installed, and the failure is reported.
+	repo := conductorRepo(t)
+	exclude := filepath.Join(repo, ".git", "info", "exclude")
+	require.NoError(t, os.RemoveAll(exclude))
+	require.NoError(t, os.MkdirAll(exclude, 0o755))
+	res := checkConductorRunScriptAt(repo, true)
+	assert.False(t, res.passed, "%+v", res)
+	assert.Empty(t, readConductorLocal(t, repo), "no settings are written before the file is kept out of git")
+
+	// Repaired, the next run installs and excludes.
+	require.NoError(t, os.RemoveAll(exclude))
+	require.True(t, checkConductorRunScriptAt(repo, true).passed)
+	assert.Contains(t, readConductorLocal(t, repo), "[scripts.run.ox]")
+	assert.True(t, ignored(repo))
+
+	// An install an older ox left without its exclusion is finished by --fix.
+	old := conductorRepo(t)
+	writeConductorSettings(t, old, conductorLocalSettings, conductorRunScriptBlock)
+	require.False(t, ignored(old), "precondition: installed, not excluded")
+	require.True(t, checkConductorRunScriptAt(old, true).passed)
+	assert.True(t, ignored(old))
 }

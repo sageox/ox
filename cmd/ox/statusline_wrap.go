@@ -40,6 +40,10 @@ type wrapFilter struct {
 	// regionPending is set when the terminal was resized while the app was
 	// mid-sequence: the new scroll region is written once it finishes.
 	regionPending bool
+	// cursorSaved is set while the app has saved the cursor (DECSC, or the
+	// ANSI.SYS save) and not yet restored it. The terminal keeps one saved
+	// position; ox's own save and restore would replace the app's.
+	cursorSaved bool
 
 	state wrapState
 	seq   []byte
@@ -50,6 +54,7 @@ type wrapState int
 const (
 	wrapText      wrapState = iota
 	wrapEsc                 // after ESC
+	wrapEscInter            // after ESC and intermediate bytes (ESC ( B), until the final byte
 	wrapCSI                 // after ESC [
 	wrapString              // inside OSC / DCS / APC / PM, until BEL or ST
 	wrapStringEsc           // ESC inside one of those: ST if followed by \
@@ -97,6 +102,18 @@ func (f *wrapFilter) flushRegion() string {
 // idle reports whether the app is between control sequences.
 func (f *wrapFilter) idle() bool { return f.state == wrapText }
 
+// wrapSaveHold is how long ox leaves its row undrawn for an app that holds a
+// saved cursor. An app saves and restores within one piece of work; one that
+// saved and never restores must not stop ox's row for good.
+const wrapSaveHold = time.Second
+
+// canDraw reports whether ox may draw its row now: the app is between
+// sequences, and holds no saved cursor that ox's own save would replace.
+// savedFor is how long the app has held its save.
+func (f *wrapFilter) canDraw(savedFor time.Duration) bool {
+	return f.idle() && (!f.cursorSaved || savedFor >= wrapSaveHold)
+}
+
 // write filters one chunk of the app's output.
 func (f *wrapFilter) write(in []byte) []byte {
 	out := make([]byte, 0, len(in)+16)
@@ -120,7 +137,24 @@ func (f *wrapFilter) write(in []byte) []byte {
 				// the screen. Let it through, then put the region back.
 				out = append(append(out, f.seq...), f.region()...)
 				f.dirty, f.state = true, wrapText
+			case '7':
+				f.cursorSaved = true
+				out, f.state = append(out, f.seq...), wrapText
+			case '8':
+				f.cursorSaved = false
+				out, f.state = append(out, f.seq...), wrapText
 			default:
+				if b >= 0x20 && b <= 0x2f {
+					// An intermediate byte (ESC ( B, ESC # 8): the sequence
+					// runs on to its final byte.
+					f.state = wrapEscInter
+					continue
+				}
+				out, f.state = append(out, f.seq...), wrapText
+			}
+		case wrapEscInter:
+			f.seq = append(f.seq, b)
+			if b < 0x20 || b > 0x2f || len(f.seq) > maxWrapSeq {
 				out, f.state = append(out, f.seq...), wrapText
 			}
 		case wrapCSI:
@@ -174,6 +208,14 @@ func (f *wrapFilter) csi() []byte {
 			t = 1
 		}
 		return fmt.Appendf(nil, "\x1b[%d;%dr", t, bt)
+	case 's':
+		if params == "" {
+			f.cursorSaved = true // the ANSI.SYS save; with parameters it is DECSLRM
+		}
+	case 'u':
+		if params == "" {
+			f.cursorSaved = false
+		}
 	case 'J':
 		f.dirty = true // erase in display: ox's row may be among the erased
 	case 'h', 'l':

@@ -224,14 +224,18 @@ func TestRender_ColorOnlyAddsEscapes(t *testing.T) {
 // Failure prevented: a failed call's lane is as grey as one that simply found
 // nothing, so the failure goes unseen; or an empty result is painted as an error.
 func TestRender_FailedTrackIsRed(t *testing.T) {
-	red := badStyle.Render("●╶─")
+	// Spelled out, not taken from badStyle: the style under test must not
+	// also be the expectation. ANSI 196 is the status line's own red.
+	const redOn, off = "\x1b[38;5;196m", "\x1b[m"
+	red := redOn + "●╶─" + off
 	trackOf := func(l Lane) string {
 		row := Render(l, settled, Options{Columns: Track + 2, Color: true})
 		return row[:strings.LastIndex(row, "●")+len("●")+len("\x1b[m")]
 	}
 	failed := trackOf(with(search(), func(l *Lane) { l.Failed, l.Tokens = true, 0 }))
 	assert.True(t, strings.HasPrefix(failed, red), "stub and origin in the error color: %q", failed)
-	assert.True(t, strings.HasSuffix(failed, badStyle.Render("●")), "far end too: %q", failed)
+	assert.True(t, strings.HasSuffix(failed, redOn+"●"+off), "far end too: %q", failed)
+	assert.NotContains(t, failed, quietStyle.Render("●"), "no grey node on a failed lane")
 
 	empty := trackOf(with(search(), func(l *Lane) { l.Tokens, l.Items = 0, 0 }))
 	assert.NotContains(t, empty, "196", "nothing came back is not a failure")

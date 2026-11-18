@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
@@ -102,6 +103,49 @@ func TestWrapFilter_ResizeWaitsForTheAppsSequence(t *testing.T) {
 		assert.Equal(t, region, f.flushRegion(), "%q", start)
 		assert.Empty(t, f.flushRegion(), "%q", start)
 	}
+}
+
+// TestWrapFilter_EscapeWithIntermediatesStaysOpen: ESC ( B selects a
+// character set in three bytes. Failure prevented: a read ending after
+// "ESC (" leaves the filter "idle", ox draws its row there, and the app's
+// sequence is broken in two.
+func TestWrapFilter_EscapeWithIntermediatesStaysOpen(t *testing.T) {
+	for _, seq := range []string{"\x1b(B", "\x1b)0", "\x1b#8", "\x1b%G", "\x1b $F"} {
+		f := &wrapFilter{rows: 23}
+		for i := 0; i < len(seq)-1; i++ {
+			assert.Empty(t, f.write([]byte{seq[i]}), "%q: held back until it is whole", seq)
+			assert.False(t, f.idle(), "%q: open after %d bytes", seq, i+1)
+			assert.False(t, f.canDraw(0), "%q", seq)
+		}
+		assert.Equal(t, seq, string(f.write([]byte{seq[len(seq)-1]})), "passed through unchanged")
+		assert.True(t, f.idle(), "%q", seq)
+	}
+}
+
+// TestWrapFilter_LeavesTheAppsSavedCursorAlone: the terminal keeps one saved
+// cursor, and ox's row is drawn between a save and a restore of its own.
+// Failure prevented: the app saves at A, moves to B and pauses; ox draws,
+// saving B over A; the app's restore then lands on B and it writes in the
+// wrong place.
+func TestWrapFilter_LeavesTheAppsSavedCursorAlone(t *testing.T) {
+	for _, pair := range [][2]string{{"\x1b7", "\x1b8"}, {"\x1b[s", "\x1b[u"}} {
+		f := &wrapFilter{rows: 23}
+		require.True(t, f.canDraw(0))
+		_ = f.write([]byte("at A" + pair[0] + "\x1b[5;1Hat B"))
+		require.True(t, f.idle(), "between sequences, which used to be enough to draw")
+		assert.False(t, f.canDraw(0), "%q: the app holds a saved cursor", pair[0])
+		assert.False(t, f.canDraw(wrapSaveHold-time.Millisecond))
+		_ = f.write([]byte(pair[1]))
+		assert.True(t, f.canDraw(0), "%q: restored, ox may draw", pair[1])
+	}
+	// An app that saves and never restores does not stop ox's row for good.
+	stuck := &wrapFilter{rows: 23}
+	_ = stuck.write([]byte("\x1b7"))
+	assert.True(t, stuck.canDraw(wrapSaveHold))
+	// CSI s with parameters sets margins; it is not a cursor save.
+	margins := &wrapFilter{rows: 23}
+	_ = margins.write([]byte("\x1b[1;80s"))
+	assert.True(t, margins.canDraw(0))
 }
 
 // Failure prevented: a runaway sequence making the filter hold output back forever.

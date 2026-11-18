@@ -250,19 +250,19 @@ func TestFlowStart_OnlyOxCallsThatMoveTeamData(t *testing.T) {
 	assert.Equal(t, time.Second, running[0].elapsed, "the marching dots are drawn from when the call started")
 
 	// Another command's finish does not take it; its own does, once.
-	_, ok := takeFlowStart(root, codexDigestAgentID, "plan view", now.Add(time.Second))
+	_, ok := takeFlowStart(root, codexDigestAgentID, "plan view", "", now.Add(time.Second))
 	assert.False(t, ok)
-	took, ok := takeFlowStart(root, codexDigestAgentID, "query", now.Add(1500*time.Millisecond))
+	took, ok := takeFlowStart(root, codexDigestAgentID, "query", "", now.Add(1500*time.Millisecond))
 	require.True(t, ok)
 	assert.Equal(t, 1500*time.Millisecond, took)
-	_, ok = takeFlowStart(root, codexDigestAgentID, "query", now.Add(2*time.Second))
+	_, ok = takeFlowStart(root, codexDigestAgentID, "query", "", now.Add(2*time.Second))
 	assert.False(t, ok)
 	assert.NoFileExists(t, flowMarkerPath(root, codexDigestAgentID), "an empty marker is removed")
 
 	// A start whose finish never came (the call was denied, the harness died) ages out.
 	recordFlowStart(root, codexToolInput(t, `ox query "x"`, ""), now)
 	assert.Empty(t, runningFlowLanes(root, codexDigestAgentID, now.Add(flowRunningMaxAge+time.Second)))
-	_, ok = takeFlowStart(root, codexDigestAgentID, "query", now.Add(flowRunningMaxAge+time.Second))
+	_, ok = takeFlowStart(root, codexDigestAgentID, "query", "", now.Add(flowRunningMaxAge+time.Second))
 	assert.False(t, ok)
 
 	// A corrupt marker reads as empty rather than failing the hook.
@@ -273,6 +273,64 @@ func TestFlowStart_OnlyOxCallsThatMoveTeamData(t *testing.T) {
 	assert.Len(t, runningFlowLanes(root, codexDigestAgentID, now), 1)
 
 	assert.Empty(t, flowMarkerPath(root, "../escape"), "an agent ID names a file: only a well-formed one may")
+}
+
+// TestFlowMarker_ALaterHooksStartSurvivesAnEarlierClock: each hook reads its
+// clock before it takes the marker's lock. Failure prevented: the hook that
+// read first but locked second finding the other's start "in the future" and
+// deleting it, so that call's lane vanishes and its finish has no duration.
+func TestFlowMarker_ALaterHooksStartSurvivesAnEarlierClock(t *testing.T) {
+	root := codexDigestEnv(t, nil)
+	early := time.Now().Truncate(time.Millisecond) // the marker keeps milliseconds
+	later := early.Add(40 * time.Millisecond)
+
+	recordFlowStart(root, codexToolInput(t, `ox query "x"`, ""), later) // locked first
+	recordFlowStart(root, codexToolInput(t, "ox plan view x", ""), early)
+
+	running := runningFlowLanes(root, codexDigestAgentID, early)
+	require.Len(t, running, 2, "both calls are running")
+	took, ok := takeFlowStart(root, codexDigestAgentID, "query", "", later.Add(time.Second))
+	require.True(t, ok)
+	assert.Equal(t, time.Second, took)
+
+	// A start far ahead of the clock is not believed: a corrupt or foreign value.
+	ahead := []flowRunning{{Command: "query", StartedAt: early.Add(flowRunningMaxAge + time.Minute).UnixMilli()}}
+	assert.Empty(t, liveFlowRunning(ahead, early))
+}
+
+// TestFlowMarker_AFinishTakesItsOwnStart: a harness names each tool call.
+// Failure prevented: a call whose finish never came (denied, killed) lending
+// its start to the next call of the same command, which then reports the
+// wrong duration and leaves itself shown as running.
+func TestFlowMarker_AFinishTakesItsOwnStart(t *testing.T) {
+	root := codexDigestEnv(t, nil)
+	now := time.Now().Truncate(time.Millisecond) // the marker keeps milliseconds
+	call := func(id string) *agentx.HookInput {
+		in := codexToolInput(t, `ox query "x"`, "")
+		if id != "" {
+			in.RawBytes = []byte(`{"tool_use_id":"` + id + `","unknown_field":1}`)
+		}
+		return in
+	}
+	require.Equal(t, "call_b", hookToolCallID(call("call_b")))
+	require.Empty(t, hookToolCallID(call("")))
+
+	recordFlowStart(root, call("call_a"), now)                    // abandoned: no finish ever comes
+	recordFlowStart(root, call("call_b"), now.Add(5*time.Minute)) // the call that finishes
+
+	took, ok := takeFlowStart(root, codexDigestAgentID, "query", "call_b", now.Add(5*time.Minute+2*time.Second))
+	require.True(t, ok)
+	assert.Equal(t, 2*time.Second, took, "its own start, not the abandoned one's five minutes")
+	left := readFlowMarker(flowMarkerPath(root, codexDigestAgentID)).Running
+	require.Len(t, left, 1)
+	assert.Equal(t, "call_a", left[0].ID, "the abandoned start stays until it ages out")
+
+	// A finish that names a call never takes another call's start...
+	_, ok = takeFlowStart(root, codexDigestAgentID, "query", "call_c", now.Add(6*time.Minute))
+	assert.False(t, ok)
+	// ...and one that names none (a harness without ids) takes the oldest, as before.
+	_, ok = takeFlowStart(root, codexDigestAgentID, "query", "", now.Add(6*time.Minute))
+	assert.True(t, ok)
 }
 
 // --- C. Counting what came back ---

@@ -57,7 +57,10 @@ const flowRunningMaxAge = flowlane.MarchMax
 // flowRunning is one ox call that has started and not yet finished.
 type flowRunning struct {
 	// Command is the classified command words only, never arguments.
-	Command   string `json:"command"`
+	Command string `json:"command"`
+	// ID is the harness's own id for the tool call, when its hooks give one:
+	// what ties a finish to its own start.
+	ID        string `json:"id,omitempty"`
 	Label     string `json:"label"`
 	StartedAt int64  `json:"started_at"` // unix milliseconds
 }
@@ -110,7 +113,9 @@ func updateFlowMarker(path string, now time.Time, fn func(*flowMarker)) error {
 func liveFlowRunning(in []flowRunning, now time.Time) []flowRunning {
 	out := in[:0:0]
 	for _, r := range in {
-		if age := now.Sub(time.UnixMilli(r.StartedAt)); age >= 0 && age < flowRunningMaxAge {
+		// A start a little ahead of now is another hook's, which read its
+		// clock after this one did and took the lock first: it is live.
+		if age := now.Sub(time.UnixMilli(r.StartedAt)); age > -flowRunningMaxAge && age < flowRunningMaxAge {
 			out = append(out, r)
 		}
 	}
@@ -141,17 +146,35 @@ func recordFlowStart(projectRoot string, input *agentx.HookInput, now time.Time)
 		return
 	}
 	err = updateFlowMarker(path, now, func(m *flowMarker) {
-		m.Running = append(m.Running, flowRunning{Command: act.Command, Label: act.Label, StartedAt: now.UnixMilli()})
+		m.Running = append(m.Running, flowRunning{Command: act.Command, ID: hookToolCallID(input), Label: act.Label, StartedAt: now.UnixMilli()})
 	})
 	if err != nil {
 		slog.Debug("flow: record start failed", "agent_id", marker.AgentID, "command", act.Command, "err", err)
 	}
 }
 
-// takeFlowStart removes the oldest running start of command and reports how
-// long ago it began. ok is false when there was none: the harness fires no
-// pre-tool hook, or the start aged out.
-func takeFlowStart(projectRoot, agentID, command string, now time.Time) (elapsed time.Duration, ok bool) {
+// hookToolCallID is the harness's id for the tool call a hook reports
+// ("tool_use_id"), or "" when its payload carries none.
+func hookToolCallID(input *agentx.HookInput) string {
+	if input == nil || len(input.RawBytes) == 0 {
+		return ""
+	}
+	var raw struct {
+		ToolUseID string `json:"tool_use_id"`
+	}
+	if json.Unmarshal(input.RawBytes, &raw) != nil {
+		return ""
+	}
+	return strings.TrimSpace(raw.ToolUseID)
+}
+
+// takeFlowStart removes the running start of this call and reports how long
+// ago it began: the start with the call's own id when the harness gives one,
+// else the oldest start of command that names no other call. ok is false
+// when there was none: the harness fires no pre-tool hook, or the start aged
+// out. Matching by id keeps a call whose finish never came (denied, killed)
+// from lending its start, and its duration, to the next call of that command.
+func takeFlowStart(projectRoot, agentID, command, id string, now time.Time) (elapsed time.Duration, ok bool) {
 	path := flowMarkerPath(projectRoot, agentID)
 	if path == "" {
 		return 0, false
@@ -160,13 +183,24 @@ func takeFlowStart(projectRoot, agentID, command string, now time.Time) (elapsed
 		return 0, false // the common case (no pre-tool hook): no lock, no write
 	}
 	err := updateFlowMarker(path, now, func(m *flowMarker) {
+		at := -1
 		for i, r := range m.Running {
-			if r.Command == command {
-				elapsed, ok = now.Sub(time.UnixMilli(r.StartedAt)), true
-				m.Running = append(m.Running[:i:i], m.Running[i+1:]...)
-				return
+			if r.Command != command {
+				continue
+			}
+			if id != "" && r.ID == id {
+				at = i
+				break
+			}
+			if at < 0 && (id == "" || r.ID == "") {
+				at = i // the oldest start that is not known to be another call's
 			}
 		}
+		if at < 0 {
+			return
+		}
+		elapsed, ok = now.Sub(time.UnixMilli(m.Running[at].StartedAt)), true
+		m.Running = append(m.Running[:at:at], m.Running[at+1:]...)
 	})
 	if err != nil {
 		slog.Debug("flow: take start failed", "agent_id", agentID, "command", command, "err", err)

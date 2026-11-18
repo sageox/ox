@@ -98,10 +98,13 @@ Conductor has no status bar, so ox shows its line in the Run pane and as a turn-
 
 ```bash
 # 3b. The "ox" run script is installed in the repository root's machine-local settings
-ox doctor --fix >/dev/null 2>&1
-grep -A3 '\[scripts.run.ox\]' "$CONDUCTOR_ROOT_PATH/.conductor/settings.local.toml"
+ox doctor --fix 2>&1 | grep -i -A3 'conductor' || echo "doctor printed nothing about Conductor"
+# ox uses CONDUCTOR_ROOT_PATH, else the repository that owns this worktree
+ROOT="${CONDUCTOR_ROOT_PATH:-$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")}"
+grep -A3 '\[scripts.run.ox\]' "$ROOT/.conductor/settings.local.toml"
 # PASS if it shows command = "ox statusline --watch"
-# SKIP (not FAIL) if `ox doctor` says "not added: this repository has its own run scripts"
+# SKIP (not FAIL) if the doctor output above says "not added: …" (the repository
+# has its own run scripts, or settings.local.toml is committed)
 
 # 3c. The watched line finds THIS session from the worktree
 ox query "team conventions" >/dev/null 2>&1

@@ -155,6 +155,12 @@ func installConductorRunScript(repoRoot string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	// Keep the file out of git before it exists: a write that succeeded and
+	// an exclusion that then failed would leave it ready to be committed,
+	// with the next run seeing the script as installed and stopping there.
+	if err := excludeFromGit(repoRoot, conductorLocalPattern); err != nil {
+		return err
+	}
 	path := filepath.Join(dir, conductorLocalSettings)
 	existing, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -176,10 +182,17 @@ func installConductorRunScript(repoRoot string) error {
 	if info, statErr := os.Stat(path); statErr == nil {
 		mode = info.Mode().Perm()
 	}
-	if err := fileutil.AtomicWriteBytes(path, []byte(next), mode); err != nil {
-		return err
-	}
-	return excludeFromGit(repoRoot, ".conductor/"+conductorLocalSettings)
+	return fileutil.AtomicWriteBytes(path, []byte(next), mode)
+}
+
+// conductorLocalPattern is settings.local.toml as git names it.
+const conductorLocalPattern = ".conductor/" + conductorLocalSettings
+
+// conductorLocalTracked reports whether settings.local.toml is committed in
+// this repository. git ignores no tracked file, so ox does not write to one:
+// its machine-local run script would ride along in the next commit.
+func conductorLocalTracked(repoRoot string) bool {
+	return exec.Command("git", "-C", repoRoot, "ls-files", "--error-unmatch", "--", conductorLocalPattern).Run() == nil
 }
 
 // excludeFromGit adds pattern to the repository's .git/info/exclude unless
@@ -213,7 +226,7 @@ func ensureConductorRunScript(gitRoot string, quiet bool) {
 	if !conductorInUse(repoRoot) || !statuslineEnabled() {
 		return
 	}
-	if status, _ := classifyConductorRunScript(repoRoot); status != conductorRunScriptMissing {
+	if status, _ := classifyConductorRunScript(repoRoot); status != conductorRunScriptMissing || conductorLocalTracked(repoRoot) {
 		return
 	}
 	if err := installConductorRunScript(repoRoot); err != nil {
@@ -250,12 +263,22 @@ func checkConductorRunScriptAt(gitRoot string, fix bool) checkResult {
 	case conductorRunScriptUnreadable:
 		return WarningCheck(conductorRunScriptCheck, "settings unreadable", err.Error())
 	case conductorRunScriptCurrent:
+		// An install whose exclusion did not land is finished here.
+		if fix && !conductorLocalTracked(repoRoot) {
+			if err := excludeFromGit(repoRoot, conductorLocalPattern); err != nil {
+				return WarningCheck(conductorRunScriptCheck, "ox run script installed, but not kept out of git", err.Error())
+			}
+		}
 		return PassedCheck(conductorRunScriptCheck, "ox run script installed (Run pane → ox)")
 	case conductorRunScriptForeign:
 		return PassedCheck(conductorRunScriptCheck, "custom [scripts.run.ox] kept; ox's line is not in the Run pane")
 	case conductorRunScriptBlocked:
 		return WarningCheck(conductorRunScriptCheck, "not added: this repository has its own run scripts",
 			"To see ox's line in Conductor's Run pane, add to "+localPath+":\n"+conductorRunScriptBlock)
+	}
+	if conductorLocalTracked(repoRoot) {
+		return WarningCheck(conductorRunScriptCheck, "not added: "+conductorLocalPattern+" is committed in this repository",
+			"ox does not edit a tracked file. To see ox's line in Conductor's Run pane, add to "+localPath+":\n"+conductorRunScriptBlock)
 	}
 	if !fix {
 		return WarningCheck(conductorRunScriptCheck, "ox's line is not in Conductor's Run pane",

@@ -51,7 +51,7 @@ func recordOxToolCall(projectRoot, agentID string, input *agentx.HookInput) {
 	var elapsed time.Duration
 	timed := false
 	if moves {
-		elapsed, timed = takeFlowStart(projectRoot, agentID, act.Command, time.Now())
+		elapsed, timed = takeFlowStart(projectRoot, agentID, act.Command, hookToolCallID(input), time.Now())
 	}
 
 	// prime records its own richer event (recordPrimeInvocation) — a second,
