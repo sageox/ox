@@ -284,10 +284,25 @@ func TestReleaseQuarantine_RecoversTheHeldRecordingNotTheActiveOne(t *testing.T)
 	require.NoError(t, err)
 	require.NoError(t, session.MarkSourceRejected(projectRoot, agentID))
 	moved := moveToEarlierMinute(t, held)
+	require.NoError(t, session.UpdateRecordingStateAt(moved.SessionPath, moved.SessionID, func(state *session.RecordingState) {
+		state.StartedAt = state.StartedAt.Add(-time.Minute)
+	}))
 
 	fresh, err := session.StartRecording(projectRoot, session.StartRecordingOptions{AgentID: agentID, AdapterName: "claude-code", Username: "testuser", SessionFile: source})
 	require.NoError(t, err)
 
+	// Observe the active lookup after release has lifted the quarantine and
+	// before recovery acquires the released recording's capture lock.
+	originalRecover := recoverForRelease
+	t.Cleanup(func() { recoverForRelease = originalRecover })
+	recoverForRelease = func(inst *agentinstance.Instance, root string, state *session.RecordingState) error {
+		require.Equal(t, moved.SessionID, state.SessionID)
+		active, err := session.LoadRecordingStateForAgent(root, inst.AgentID)
+		require.NoError(t, err)
+		require.NotNil(t, active)
+		require.Equal(t, fresh.SessionID, active.SessionID, "release must leave the newer recording active throughout recovery")
+		return originalRecover(inst, root, state)
+	}
 	require.NoError(t, recoverAgentSession(&agentinstance.Instance{AgentID: agentID}, true))
 
 	_, statErr := os.Stat(filepath.Join(moved.SessionPath, ".recording.json"))

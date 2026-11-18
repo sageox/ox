@@ -649,6 +649,8 @@ func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
 // not the agent's active recording: it neither captures nor blocks a new one,
 // so the agent's next recording can start while it waits. Use
 // LoadQuarantinedRecordingsForAgent to find it.
+// If recovery temporarily releases an older recording, the newer recording
+// keeps the agent's active slot.
 func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, error) {
 	if agentID == "" {
 		return nil, fmt.Errorf("%w: agent ID", ErrEmptyPath)
@@ -657,19 +659,23 @@ func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, e
 	if err != nil {
 		return nil, err
 	}
+	var active *RecordingState
 	for _, s := range states {
-		if s.AgentID == agentID && !s.SourceRejected {
-			if s.CacheDir != "" && s.CacheDir != paths.CacheDir() {
-				slog.Debug("recording found in different cache dir",
-					"agent_id", agentID,
-					"recording_cache_dir", s.CacheDir,
-					"current_cache_dir", paths.CacheDir(),
-				)
-			}
-			return s, nil
+		if s.AgentID != agentID || s.SourceRejected {
+			continue
+		}
+		if active == nil || s.StartedAt.After(active.StartedAt) {
+			active = s
 		}
 	}
-	return nil, nil
+	if active != nil && active.CacheDir != "" && active.CacheDir != paths.CacheDir() {
+		slog.Debug("recording found in different cache dir",
+			"agent_id", agentID,
+			"recording_cache_dir", active.CacheDir,
+			"current_cache_dir", paths.CacheDir(),
+		)
+	}
+	return active, nil
 }
 
 // LoadQuarantinedRecordingsForAgent returns the agent's recordings held back for
