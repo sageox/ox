@@ -334,12 +334,13 @@ func TestSyncScheduler_WatcherPullContinuesDuringTeamGC(t *testing.T) {
 }
 
 func TestSyncScheduler_WatcherWaitsForLedgerGC(t *testing.T) {
-	isolateCredentials(t)
+	const manifest = "version 1\ninclude .sageox/\ninclude SOUL.md\n"
+	teamRemote, teamPath, scheduler := setupClonedTeamContext(t, manifest, nil)
+	require.NoError(t, os.Rename(teamPath, teamPath+".old"))
 	bare, ledger, writer := setupRacingLedger(t)
 	require.NoError(t, os.Mkdir(filepath.Join(writer, "sessions"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(writer, "sessions", ".gitkeep"), nil, 0o644))
 	advanceRemote(t, writer, 0)
-	scheduler := gcTestScheduler(t)
 	scheduler.config.LedgerPath = ledger
 	scheduler.config.SyncIntervalRead = time.Hour
 	scheduler.config.TeamContextSyncInterval = 0
@@ -356,15 +357,16 @@ func TestSyncScheduler_WatcherWaitsForLedgerGC(t *testing.T) {
 		ID: "ledger", Type: WorkspaceTypeLedger, Path: ledger, CloneURL: "file://" + bare, Exists: true,
 	}
 	registry.workspaces["ledger"] = registry.ledger
+	registry.workspaces["team_gc"] = &WorkspaceState{
+		ID: "team_gc", Type: WorkspaceTypeTeamContext, Path: teamPath, CloneURL: "file://" + teamRemote, Exists: true,
+	}
 	primeConfigCacheLocked(registry)
 	registry.mu.Unlock()
 
-	swapStarted, releaseSwap := make(chan struct{}), make(chan struct{})
+	releaseSwap := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(releaseSwap) }) }
-	var swapOnce sync.Once
 	scheduler.gcSwapWindowTestHook = func() {
-		swapOnce.Do(func() { close(swapStarted) })
 		<-releaseSwap
 	}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -378,7 +380,17 @@ func TestSyncScheduler_WatcherWaitsForLedgerGC(t *testing.T) {
 		defer close(done)
 		scheduler.Start(ctx)
 	}()
-	awaitStartupCompletion(t, swapStarted)
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(ledger + ".gc-swap-lock")
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond, "periodic Ledger GC did not reach the swap")
+
+	// The interrupted Team Context checkout must be restored while the
+	// Ledger swap is still blocked.
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(teamPath, "SOUL.md"))
+		return err == nil
+	}, 3*time.Second, 10*time.Millisecond, "Ledger GC blocked interrupted Team Context recovery")
 
 	advanceRemote(t, writer, 1)
 	scheduler.TriggerSync()

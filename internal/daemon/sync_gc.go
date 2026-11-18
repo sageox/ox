@@ -37,39 +37,44 @@ const (
 
 // checkAndRunGC runs the Ledger phase on the scheduler loop so watcher
 // validation and outbox draining cannot interleave with preservation or
-// the swap. Team Context reclones run in a tracked background worker.
-func (s *SyncScheduler) checkAndRunGC(ctx context.Context) (teamDone <-chan struct{}) {
+// the swap. Launch Team Context cleanup before the Ledger phase so a stalled
+// Ledger reclone cannot prevent recovery of an interrupted Team Context swap.
+func (s *SyncScheduler) checkAndRunGC(ctx context.Context) <-chan struct{} {
 	// only one GC at a time
 	if !atomic.CompareAndSwapInt32(&s.gcInProgress, 0, 1) {
 		s.logger.Debug("gc: already in progress, skipping check")
 		return nil
 	}
-	defer func() {
-		if teamDone == nil {
+	var active atomic.Int32
+	active.Store(1)
+	finish := func() {
+		if active.Add(-1) == 0 {
 			atomic.StoreInt32(&s.gcInProgress, 0)
 		}
-	}()
+	}
+	defer finish()
 
 	if err := s.workspaceRegistry.LoadFromConfig(); err != nil {
 		s.logger.Warn("gc: failed to load workspace registry", "error", err)
 		return nil
 	}
 
-	s.checkLedgerAndBubbleGC(ctx)
 	teams := s.workspaceRegistry.GetTeamContexts()
-	if len(teams) == 0 || ctx.Err() != nil || !s.addClone() {
-		return nil
+	var teamDone chan struct{}
+	if len(teams) > 0 && ctx.Err() == nil && s.addClone() {
+		active.Add(1)
+		teamDone = make(chan struct{})
+		go func() {
+			defer s.cloneWg.Done()
+			defer close(teamDone)
+			defer finish()
+			taskCtx, span := s.tracer.StartTask(ctx, "daemon:team_context_gc")
+			defer span.End()
+			s.checkTeamContextGC(taskCtx, teams)
+		}()
 	}
-	done := make(chan struct{})
-	go func() {
-		defer s.cloneWg.Done()
-		defer close(done)
-		defer atomic.StoreInt32(&s.gcInProgress, 0)
-		taskCtx, span := s.tracer.StartTask(ctx, "daemon:team_context_gc")
-		defer span.End()
-		s.checkTeamContextGC(taskCtx, teams)
-	}()
-	return done
+	s.checkLedgerAndBubbleGC(ctx)
+	return teamDone
 }
 
 func (s *SyncScheduler) checkTeamContextGC(ctx context.Context, teamContexts []WorkspaceState) {
