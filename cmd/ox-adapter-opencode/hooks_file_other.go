@@ -4,6 +4,6 @@ package main
 
 import "os"
 
-func openPluginForCheck(path string) (*os.File, error) {
-	return os.Open(path)
+func openPluginFile(path string, flag int) (*os.File, error) {
+	return os.OpenFile(path, flag, 0)
 }

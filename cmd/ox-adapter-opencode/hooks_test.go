@@ -4,12 +4,67 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/testguard"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
+
+func TestInstallHooksKeepsReadOnlyPlugin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions")
+	}
+	params := adapterprotocol.HookParams{RepoRoot: t.TempDir(), Scope: "project"}
+	path := resolvePluginPath(params.RepoRoot, params.Scope)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	const custom = "// coworker's plugin"
+	if err := os.WriteFile(path, []byte(custom), 0444); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handleInstallHooks(params); err == nil {
+		t.Error("installer replaced a read-only plugin")
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != custom {
+		t.Fatalf("read-only plugin changed: %q, %v", content, err)
+	}
+}
+
+func TestLinkedOpenCodePluginCanBeUninstalled(t *testing.T) {
+	params := adapterprotocol.HookParams{RepoRoot: t.TempDir(), Scope: "project"}
+	target := filepath.Join(t.TempDir(), "shared-plugin.ts")
+	if err := os.WriteFile(target, []byte(openCodePluginTemplate), 0644); err != nil {
+		t.Fatal(err)
+	}
+	path := resolvePluginPath(params.RepoRoot, params.Scope)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	status, err := handleCheckHooks(params)
+	if err != nil || !status.Installed || !status.HasOwnedHooks {
+		t.Fatalf("linked hook should be installed and removable: %+v, %v", status, err)
+	}
+	if _, err := handleUninstallHooks(params); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("plugin link was left behind: %v", err)
+	}
+	content, err := os.ReadFile(target)
+	if err != nil || string(content) != openCodePluginTemplate {
+		t.Fatalf("symlink target changed: %v", err)
+	}
+}
 
 func TestInstalledOpenCodePluginPrimesOnSessionCreated(t *testing.T) {
 	node, err := exec.LookPath("node")
