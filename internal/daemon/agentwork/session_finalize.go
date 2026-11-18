@@ -2317,7 +2317,12 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 	if recordingID == "" {
 		recordingID = session.ReadHeaderSessionID(filepath.Join(cacheDir, "raw.jsonl"))
 	}
-	if err := session.CheckFinalizedLedgerSessionDestination(destDir, sessionName, recordingID); err != nil {
+	// The empty-session repair can have no ID on legacy downloads. For that
+	// path, verify the cached transcript against the current Ledger manifest
+	// again while staging holds the repository lock.
+	verifiedEmptyDownload := recordingID == "" && payload.emptyTranscript &&
+		isEmptyLedgerTranscript(cacheDir, filepath.Join(cacheDir, "raw.jsonl"), payload.LedgerPath)
+	if err := session.CheckFinalizedLedgerSessionDestination(destDir, sessionName, recordingID); err != nil && !verifiedEmptyDownload {
 		return "", err
 	}
 
