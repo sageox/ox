@@ -100,33 +100,64 @@ func EnsureCheckoutGitignore(repoPath string) error {
 
 // EnsureCheckoutGitignoreCtx is like EnsureCheckoutGitignore but accepts a context.
 func EnsureCheckoutGitignoreCtx(ctx context.Context, repoPath string) error {
-	sageoxDir := filepath.Join(repoPath, ".sageox")
-	if _, err := os.Stat(sageoxDir); os.IsNotExist(err) {
+	repoPath, err := filepath.Abs(repoPath)
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(repoPath)
+	if os.IsNotExist(err) {
 		return nil // no .sageox dir, nothing to protect
 	}
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 
-	gitignorePath := filepath.Join(repoPath, checkoutGitignorePath)
-
-	data, err := os.ReadFile(gitignorePath)
+	sageoxDir, err := root.Lstat(".sageox")
 	if os.IsNotExist(err) {
-		tracked, listErr := gitutil.RunGit(ctx, repoPath, "ls-files", "--", checkoutGitignorePath)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !sageoxDir.IsDir() {
+		return fmt.Errorf("checkout .sageox must be a directory")
+	}
+
+	var data []byte
+	policy, err := root.Lstat(checkoutGitignorePath)
+	if os.IsNotExist(err) {
+		tracked, listErr := gitutil.RunGit(ctx, repoPath, "ls-files", "--stage", "--", checkoutGitignorePath)
 		if listErr != nil {
 			return fmt.Errorf("check tracked checkout gitignore: %w", listErr)
 		}
 		if tracked != "" {
+			fields := strings.Fields(tracked)
+			if len(fields) != 4 || (fields[0] != "100644" && fields[0] != "100755") || fields[2] != "0" {
+				return fmt.Errorf("tracked checkout gitignore must be a regular file at stage zero")
+			}
 			// Sparse checkout can omit a tracked policy. Restore it from the
 			// index so team exclusions survive and no replacement commit lands.
 			if _, restoreErr := gitutil.RunGit(ctx, repoPath, "restore",
 				"--worktree", "--ignore-skip-worktree-bits", "--", checkoutGitignorePath); restoreErr != nil {
 				return fmt.Errorf("restore tracked checkout gitignore: %w", restoreErr)
 			}
-			data, err = os.ReadFile(gitignorePath)
+			policy, err = root.Lstat(checkoutGitignorePath)
 			if err != nil {
-				return fmt.Errorf("read restored checkout gitignore: %w", err)
+				return fmt.Errorf("inspect restored checkout gitignore: %w", err)
 			}
 		}
 	} else if err != nil {
-		return fmt.Errorf("read checkout gitignore: %w", err)
+		return fmt.Errorf("inspect checkout gitignore: %w", err)
+	}
+	if policy != nil {
+		if !policy.Mode().IsRegular() {
+			return fmt.Errorf("checkout gitignore must be a regular file")
+		}
+		data, err = root.ReadFile(checkoutGitignorePath)
+		if err != nil {
+			return fmt.Errorf("read checkout gitignore: %w", err)
+		}
 	}
 	existing := string(data)
 
@@ -161,7 +192,7 @@ func EnsureCheckoutGitignoreCtx(ctx context.Context, repoPath string) error {
 		content += entry + "\n"
 	}
 
-	if err := os.WriteFile(gitignorePath, []byte(content), 0644); err != nil {
+	if err := root.WriteFile(checkoutGitignorePath, []byte(content), 0644); err != nil {
 		return err
 	}
 

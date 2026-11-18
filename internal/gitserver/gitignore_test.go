@@ -100,7 +100,8 @@ func TestEnsureCheckoutGitignore_RestoresTrackedSparsePolicy(t *testing.T) {
 	runGit(t, dir, "sparse-checkout", "set", "--no-cone", "/.sageox/sync.manifest")
 	require.NoFileExists(t, ignorePath)
 
-	require.NoError(t, EnsureCheckoutGitignore(dir))
+	t.Chdir(filepath.Dir(dir))
+	require.NoError(t, EnsureCheckoutGitignore(filepath.Base(dir)))
 
 	after, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
 	require.NoError(t, err)
@@ -108,6 +109,22 @@ func TestEnsureCheckoutGitignore_RestoresTrackedSparsePolicy(t *testing.T) {
 	restored, err := os.ReadFile(ignorePath)
 	require.NoError(t, err)
 	require.Equal(t, policy, string(restored))
+}
+
+func TestEnsureCheckoutGitignore_RejectsNonRegularTrackedPolicy(t *testing.T) {
+	dir := setupGitRepoWithSageox(t)
+	const rel = ".sageox/.gitignore"
+	ignorePath := filepath.Join(dir, rel)
+	if err := os.Symlink("unrelated-policy", ignorePath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	runGit(t, dir, "add", "--", rel)
+	runGit(t, dir, "commit", "-m", "track a non-regular ignore policy", "--", rel)
+	runGit(t, dir, "sparse-checkout", "set", "--no-cone", "/.sageox/sync.manifest")
+
+	require.ErrorContains(t, EnsureCheckoutGitignore(dir), "must be a regular file")
+	_, err := os.Lstat(ignorePath)
+	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestEnsureCheckoutGitignore_PreservesExisting(t *testing.T) {
