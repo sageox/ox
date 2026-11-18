@@ -9,14 +9,17 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/pipeline"
+	"github.com/sageox/ox/internal/sessionid"
 )
 
 func init() {
@@ -393,11 +396,22 @@ func resolveOrphanSessionID(sessionDir string, orphan orphanedSession, draftPres
 	if preservedID == "" {
 		preservedID = draftPreservedID
 	}
-	headerID := ""
-	if orphan.Meta != nil {
-		headerID = orphan.Meta.SessionID
+	return session.ResolveOrMintSessionID(preservedID, orphanUploadIdentity(orphan)), nil
+}
+
+func orphanUploadIdentity(orphan orphanedSession) string {
+	// A prior attempt can adopt a published draft ID or mint one for an
+	// older header. Its cache marker independently proves that identity.
+	if orphan.CachePath != "" {
+		marker, err := os.ReadFile(filepath.Join(orphan.CachePath, sessionUploadRetryPendingFile))
+		if id := strings.TrimSpace(string(marker)); err == nil && sessionid.IsValidSessionID(id) {
+			return id
+		}
 	}
-	return session.ResolveOrMintSessionID(preservedID, headerID), nil
+	if orphan.Meta != nil {
+		return orphan.Meta.SessionID
+	}
+	return ""
 }
 
 // retrySessionUpload copies session files from cache to ledger, uploads to LFS,
@@ -427,26 +441,28 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 	if err := validateRawJSONLHeader(rawSrc); err != nil {
 		return fmt.Errorf("%s validation failed (skipping corrupt session): %w", ledgerFileRaw, err)
 	}
+	if err := session.CheckFinalizedLedgerSessionDestination(sessionDir, orphan.SessionName, orphanUploadIdentity(orphan)); err != nil {
+		return err
+	}
 
 	traceCache, traceMeta := prepareRetryTraces(ledgerPath, orphan)
-
-	// Record retry ownership before mutating the ledger. Once meta.json becomes
-	// final, ordinary orphan discovery skips it to avoid replaying an already
-	// published session. This cache-side marker is what keeps failures from any
-	// later phase (including pointer preparation and push) discoverable on the
-	// next doctor pass. A successful pass prunes the cache and marker together.
-	if err := writeSessionUploadRetryPending(orphan.CachePath); err != nil {
-		return fmt.Errorf("record pending session upload retry: %w", err)
-	}
 
 	// Supersede a draft placeholder if one was published before the agent died,
 	// capturing its ses_ id first — the draft meta.json is a durable carrier of
 	// that id, and for a recording whose raw.jsonl header predates the SessionID
 	// field it is the ONLY carrier. Losing it here mints a fresh id and 404s a
 	// /c/ link already published in a PR body.
-	draftPreservedID, _, err := supersedeDraftForFinalize(ledgerPath, orphan.SessionName)
+	sessionID, err := resolveOrphanSessionID(sessionDir, orphan, "")
 	if err != nil {
 		return fmt.Errorf("classify existing ledger meta for %s: %w", orphan.SessionName, err)
+	}
+	// Keep retry ownership and identity in the authoritative cache before
+	// replacing draft metadata or writing any finalized Ledger content.
+	if err := writeSessionUploadRetryPending(orphan.CachePath, sessionID); err != nil {
+		return fmt.Errorf("record pending session upload retry: %w", err)
+	}
+	if _, _, err := supersedeDraftForFinalize(ledgerPath, orphan.SessionName); err != nil {
+		return fmt.Errorf("supersede draft for %s: %w", orphan.SessionName, err)
 	}
 
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
@@ -475,14 +491,6 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 			slog.Warn("skip secondary artifact in retry", "file", name, "error", err)
 			continue
 		}
-	}
-
-	// durable ID via the shared resolver, resolved before the network round
-	// trip so a corrupt pre-existing meta.json aborts fast rather than after
-	// a wasted LFS upload. See resolveOrphanSessionID doc.
-	sessionID, err := resolveOrphanSessionID(sessionDir, orphan, draftPreservedID)
-	if err != nil {
-		return err
 	}
 
 	// Redaction records need durable metadata before the upload. The later
@@ -731,21 +739,13 @@ func newRawJSONLScanner(r io.Reader) *bufio.Scanner {
 	return scanner
 }
 
-func writeSessionUploadRetryPending(cachePath string) error {
-	markerPath := filepath.Join(cachePath, sessionUploadRetryPendingFile)
-	f, err := os.OpenFile(markerPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+func writeSessionUploadRetryPending(cachePath, sessionID string) error {
+	root, err := os.OpenRoot(cachePath)
 	if err != nil {
 		return err
 	}
-	if _, err := f.WriteString("pending\n"); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
-	}
-	return f.Close()
+	defer root.Close()
+	return fileutil.AtomicWriteBytesInRoot(root, sessionUploadRetryPendingFile, []byte(sessionID+"\n"), 0o600)
 }
 
 // copyFile copies a file from src to dst.

@@ -1575,6 +1575,13 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	}
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
+	recordingID := state.SessionID
+	if recordingID == "" {
+		recordingID = session.ReadHeaderSessionID(result.RawPath)
+	}
+	if err := session.CheckFinalizedLedgerSessionDestination(sessionDir, sessionName, recordingID); err != nil {
+		return err
+	}
 
 	// durable ID precedence via the shared resolver: a preserved meta.json
 	// ID (prior stop attempt, e.g. LFS upload failed and we're retrying)
@@ -1616,7 +1623,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		return nil
 	}
 
-	sessionID := session.ResolveOrMintSessionID(preservedID, state.SessionID)
+	sessionID := session.ResolveOrMintSessionID(preservedID, recordingID)
 	traceCache, traceMeta, traceErr := session.MaterializeTraces(ledgerPath, state.SessionPath, state.Trace)
 	if traceErr != nil {
 		slog.Warn("trace materialization skipped", "error", traceErr)
@@ -1650,7 +1657,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	// that file exists, findOrphanedSessionsInDir skips this session unless
 	// the marker is present, so every failure below must leave it behind.
 	sourceCacheDir := filepath.Dir(result.RawPath)
-	if err := writeSessionUploadRetryPending(sourceCacheDir); err != nil {
+	if err := writeSessionUploadRetryPending(sourceCacheDir, sessionID); err != nil {
 		return fmt.Errorf("record pending session upload: %w", err)
 	}
 

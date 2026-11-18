@@ -2311,6 +2311,16 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 		}
 	}
 
+	// A cache meta read failure is handled by the writer below when finalizing
+	// a draft. It cannot count as proof of an identity here.
+	recordingID, _ := lfs.PreservedSessionID(cacheDir)
+	if recordingID == "" {
+		recordingID = session.ReadHeaderSessionID(filepath.Join(cacheDir, "raw.jsonl"))
+	}
+	if err := session.CheckFinalizedLedgerSessionDestination(destDir, sessionName, recordingID); err != nil {
+		return "", err
+	}
+
 	// Supersede any draft placeholder wholesale before copying (ADR-029).
 	// This loop copies every file from the cache dir over the destination, but
 	// a copy is not a purge: a server-authored summary.json sitting in the

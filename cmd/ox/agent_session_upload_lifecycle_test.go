@@ -27,6 +27,42 @@ type sessionUploadFixture struct {
 	refs        map[string]lfs.FileRef
 }
 
+func TestSessionFinalizersRefuseDifferentFinalizedSession(t *testing.T) {
+	for _, operation := range []string{"stop", "doctor retry"} {
+		t.Run(operation, func(t *testing.T) {
+			f := newSessionUploadFixture(t)
+			dest := filepath.Join(f.ledgerPath, "sessions", f.sessionName)
+			require.NoError(t, os.MkdirAll(dest, 0o755))
+			require.NoError(t, lfs.WriteSessionMetaOnly(dest, &lfs.SessionMeta{
+				Version: "1.0", SessionName: f.sessionName, Title: "prior recording",
+				SessionID: "ses_019d0000-0000-7000-8000-000000000099",
+			}))
+			metaPath := filepath.Join(dest, "meta.json")
+			metaBefore, err := os.ReadFile(metaPath)
+			require.NoError(t, err)
+			rawPath := filepath.Join(dest, ledgerFileRaw)
+			const prior = "prior raw.jsonl"
+			require.NoError(t, os.WriteFile(rawPath, []byte(prior), 0o600))
+			var calls []string
+			effects := scriptedSessionUploadEffects(&calls, f.refs, "upload_lfs")
+			switch operation {
+			case "stop":
+				err = uploadSessionToLedgerWithEffects(f.projectRoot, f.result, f.state, f.ledgerPath, f.sessionName, effects)
+			case "doctor retry":
+				err = retrySessionUploadWithEffects(f.projectRoot, f.ledgerPath, f.orphan(), effects)
+			}
+			rawAfter, readErr := os.ReadFile(rawPath)
+			require.NoError(t, readErr)
+			assert.Equal(t, prior, string(rawAfter), "the finalized recording must survive a same-name upload")
+			metaAfter, readErr := os.ReadFile(metaPath)
+			require.NoError(t, readErr)
+			assert.Equal(t, metaBefore, metaAfter)
+			assert.Empty(t, calls)
+			require.ErrorContains(t, err, "refused to overwrite a Ledger session")
+		})
+	}
+}
+
 func (f sessionUploadFixture) orphan() orphanedSession {
 	return orphanedSession{
 		SessionName: f.sessionName,
@@ -580,6 +616,7 @@ func TestRetrySessionUpload_LFSFailurePreservesManifest(t *testing.T) {
 	meta, err := lfs.ReadSessionMeta(sessionDir)
 	require.NoError(t, err)
 	meta.Files = fixture.refs
+	meta.SessionID = fixture.state.SessionID
 	require.NoError(t, lfs.WriteSessionMetaOnly(sessionDir, meta))
 
 	var calls []string
@@ -676,7 +713,7 @@ func TestRetrySessionUpload_AcceptsLargeValidHeader(t *testing.T) {
 }
 
 func TestWriteSessionUploadRetryPending_RequiresExistingCache(t *testing.T) {
-	err := writeSessionUploadRetryPending(filepath.Join(t.TempDir(), "missing"))
+	err := writeSessionUploadRetryPending(filepath.Join(t.TempDir(), "missing"), "ses_019d0000-0000-7000-8000-000000000007")
 	require.Error(t, err)
 }
 

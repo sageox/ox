@@ -508,6 +508,8 @@ func TestStageSessionInLedger_LeavesFinalizedSessionAlone(t *testing.T) {
 		Files: map[string]lfs.FileRef{"raw.jsonl": {OID: "sha256:abc", Size: 10}},
 	}))
 	require.NoError(t, os.WriteFile(filepath.Join(destDir, "summary.md"), []byte("REAL SUMMARY"), 0644))
+	const priorRaw = "prior raw.jsonl"
+	require.NoError(t, os.WriteFile(filepath.Join(destDir, "raw.jsonl"), []byte(priorRaw), 0644))
 
 	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
 	require.NoError(t, os.MkdirAll(cacheDir, 0755))
@@ -516,7 +518,10 @@ func TestStageSessionInLedger_LeavesFinalizedSessionAlone(t *testing.T) {
 	h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
 	payload := &SessionFinalizePayload{SessionDir: cacheDir, LedgerPath: ledgerPath}
 	_, stageErr := h.stageSessionInLedger(payload)
-	require.NoError(t, stageErr)
+	raw, err := os.ReadFile(filepath.Join(destDir, "raw.jsonl"))
+	require.NoError(t, err)
+	assert.Equal(t, priorRaw, string(raw), "a cache without a matching ID cannot replace finalized content")
+	require.ErrorContains(t, stageErr, "refused to overwrite a Ledger session")
 
 	body, err := os.ReadFile(filepath.Join(destDir, "summary.md"))
 	require.NoError(t, err)

@@ -477,7 +477,7 @@ func publishCachedSession(projectRoot, ledgerPath, sessionName, cacheDir string)
 	// Names have minute precision, so a different session can already be in
 	// the Ledger under this one. Publishing would replace its transcript under
 	// its session ID, and its links would show this session instead.
-	if err := checkRecoveryDestination(filepath.Join(ledgerPath, "sessions", sessionName), sessionName, meta.SessionID); err != nil {
+	if err := session.CheckLedgerSessionDestination(filepath.Join(ledgerPath, "sessions", sessionName), sessionName, meta.SessionID); err != nil {
 		return err
 	}
 	summarize := config.GetAgentSummarizer(projectRoot) != config.AgentSummarizerOff
