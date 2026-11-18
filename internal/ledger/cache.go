@@ -24,8 +24,10 @@ const (
 // if no cache exists (nothing to preserve).
 func PreserveCache(srcRepo, cacheBackupDir string) error {
 	cacheDir := filepath.Join(srcRepo, ".sageox", "cache")
-	if _, err := os.Stat(cacheDir); err != nil {
+	if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
 		return nil // no cache to preserve
+	} else if err != nil {
+		return err
 	}
 	return fileutil.CopyDir(cacheDir, cacheBackupDir)
 }

@@ -289,17 +289,22 @@ func TestGC_UntrackedRestoreFailure_PreservesBackup(t *testing.T) {
 	registry.mu.Unlock()
 
 	result := s.runBlueGreenGC(context.Background(), ws)
-	require.Equal(t, gcSuccess, result, "the reclone itself must still succeed — only the untracked restore partially fails")
-
-	// the colliding file must exist (it's what the remote committed)
-	assert.FileExists(t, filepath.Join(ledgerDir, "sessions", "conflict"))
+	require.Equal(t, gcFailed, result, "a partial restore must never replace the original checkout")
+	for _, name := range []string{"plain.txt", "sessions/conflict/nested.txt"} {
+		assert.FileExists(t, filepath.Join(ledgerDir, name), "the original must retain every untracked file")
+	}
+	assert.NoDirExists(t, ledgerDir+".new")
+	assert.NoDirExists(t, ledgerDir+".old")
 
 	// the untracked backup must SURVIVE — gcRestoreUntracked failed on the
-	// colliding nested file, so untrackedRestored must be false and the
-	// backup dir must not have been deleted.
+	// colliding nested file, so it must not be treated as a successful GC.
 	backupDir := ledgerDir + ".gc-untracked"
 	assert.DirExists(t, backupDir, "backup must be preserved when restore partially fails — this is the actual regression: it used to be deleted unconditionally")
 	assert.FileExists(t, filepath.Join(backupDir, "plain.txt"), "the backup must still contain the file that DID restore successfully")
+	require.Equal(t, gcFailed, s.runBlueGreenGC(context.Background(), ws))
+	content, err := os.ReadFile(filepath.Join(ledgerDir, "sessions", "conflict", "nested.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "nested", string(content), "a subsequent GC must not erase the unrestored content")
 }
 
 // TestGC_RestoreDiff_PartialReject_CleansRejFilesAndReportsPartial proves
@@ -579,6 +584,9 @@ func TestGC_OrphanedSwapArtifacts_RecoveryFailureBlocksNewCycle(t *testing.T) {
 	// return an error rather than silently no-op.
 	require.NoError(t, os.WriteFile(diffFile, []byte("not a valid diff\x00binary garbage"), 0o600))
 	require.NoError(t, os.WriteFile(swapMarker, nil, 0o600))
+	retained := filepath.Join(cloneDir+".old", "only-copy.txt")
+	require.NoError(t, os.MkdirAll(filepath.Dir(retained), 0755))
+	require.NoError(t, os.WriteFile(retained, []byte("pre-swap content"), 0o600))
 
 	ws := WorkspaceState{
 		ID:       "orphan-fail-test",
@@ -594,6 +602,7 @@ func TestGC_OrphanedSwapArtifacts_RecoveryFailureBlocksNewCycle(t *testing.T) {
 
 	assert.FileExists(t, diffFile, "the unrecoverable diff backup must be preserved for manual recovery, not discarded")
 	assert.FileExists(t, swapMarker, "the swap marker must remain set so the next invocation retries recovery instead of skipping it")
+	assert.FileExists(t, retained, "the old clone must survive until legacy restoration succeeds")
 }
 
 // --- E. cross-process swap lock actually protects the swap window ---

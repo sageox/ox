@@ -433,6 +433,12 @@ func InitForEndpoint(endpointURL string, remoteURL string) (*Ledger, error) {
 // to save space. Exported for use by the daemon's GC reclone (fresh clone with
 // sparse checkout).
 func CloneWithSparseCheckout(path, remoteURL string) error {
+	return CloneWithSparseCheckoutContext(context.Background(), path, remoteURL)
+}
+
+// CloneWithSparseCheckoutContext uses ctx for the clone and sparse checkout's
+// lazy blob fetches, so cancellation also terminates their Git subprocesses.
+func CloneWithSparseCheckoutContext(ctx context.Context, path, remoteURL string) error {
 	if remoteURL == "" {
 		return fmt.Errorf("git clone: remote URL is empty")
 	}
@@ -465,6 +471,7 @@ func CloneWithSparseCheckout(path, remoteURL string) error {
 		"-c", "credential.helper=",
 		"-c", "credential.helper=" + helperCmd,
 	}
+	gitArgs = append(gitArgs, gitutil.GitHTTPTimeoutFlags()...)
 	// Disable git's ext:: / file:: transports so a hostile URL can't reach a
 	// shell or the local filesystem even if it passed validation.
 	gitArgs = append(gitArgs, gitutil.HardenedCloneArgs(gitserver.TestAllowFileTransport)...)
@@ -477,7 +484,7 @@ func CloneWithSparseCheckout(path, remoteURL string) error {
 		remoteURL,
 		path,
 	)
-	cloneCmd := exec.Command("git", gitArgs...)
+	cloneCmd := gitutil.NewNetworkCmd(ctx, gitArgs...)
 	if output, err := cloneCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git clone: %w: %s", err, output)
 	}
@@ -490,7 +497,7 @@ func CloneWithSparseCheckout(path, remoteURL string) error {
 	}
 
 	// configure sparse checkout
-	if err := ConfigureSparseCheckout(path); err != nil {
+	if err := configureSparseCheckout(ctx, path); err != nil {
 		return fmt.Errorf("configure sparse checkout: %w", err)
 	}
 
@@ -548,7 +555,7 @@ func ConfigureSparseCheckout(path string) error {
 // configureSparseCheckout is ConfigureSparseCheckout with ctx bounding the
 // git commands that can fetch.
 func configureSparseCheckout(ctx context.Context, path string) error {
-	if err := DisableSymlinks(path); err != nil {
+	if err := disableSymlinks(ctx, path); err != nil {
 		return err
 	}
 
@@ -559,8 +566,7 @@ func configureSparseCheckout(ctx context.Context, path string) error {
 	// This function is called every ~60s by the sync scheduler to refresh
 	// the rolling murmur/github data window — "sparse-checkout set" alone
 	// is sufficient for that.
-	checkCmd := exec.Command("git", "-C", path, "config", "--type=bool", "--get", "core.sparseCheckout")
-	if out, err := checkCmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "true" {
+	if out, err := gitutil.RunGit(ctx, path, "config", "--type=bool", "--get", "core.sparseCheckout"); err != nil || out != "true" {
 		if output, err := gitutil.RunGit(ctx, path, append(gitutil.GitHTTPTimeoutFlags(), "sparse-checkout", "init", "--cone")...); err != nil {
 			return fmt.Errorf("sparse-checkout init: %w: %s", err, output)
 		}
@@ -569,12 +575,14 @@ func configureSparseCheckout(ctx context.Context, path string) error {
 	// base directories always included
 	dirs := sparseCheckoutDirs()
 
-	// protect staged/dirty files: "sparse-checkout set" removes tracked files
-	// outside the cone from the working tree. If the CLI has staged files in a
-	// directory not in our computed set (e.g. data/linear/, data/custom/), those
-	// files would be deleted from disk before the CLI commits+pushes.
-	// Detect such directories and include them in the cone.
-	dirs = append(dirs, dirtyDirsOutsideCone(path, dirs)...)
+	// Keep dirty directories in the cone so sparse-checkout cannot discard
+	// local changes before the CLI publishes them.
+	// Porcelain's leading spaces encode index/worktree status; keep raw output.
+	status, err := gitutil.NewNetworkCmd(ctx, "-C", path, "status", "--porcelain", "-z").Output()
+	if err != nil {
+		return fmt.Errorf("inspect dirty paths before sparse checkout: %w", err)
+	}
+	dirs = append(dirs, parseDirtyDirsFromPorcelain(status, dirs)...)
 
 	// runtime guard: .sageox MUST be in the sparse-checkout set.
 	// without it, git sparse-checkout set deletes .sageox/cache/ (codedb, etc.)
@@ -592,8 +600,7 @@ func configureSparseCheckout(ctx context.Context, path string) error {
 	}
 
 	// configure pull strategy to use rebase (avoids merge commits, cleaner history)
-	configCmd := exec.Command("git", "-C", path, "config", "pull.rebase", "true")
-	if output, err := configCmd.CombinedOutput(); err != nil {
+	if output, err := gitutil.RunGit(ctx, path, "config", "pull.rebase", "true"); err != nil {
 		return fmt.Errorf("config pull.rebase: %w: %s", err, output)
 	}
 
@@ -631,16 +638,23 @@ var sparseRefreshTimeout = 10 * time.Minute
 // stays an uncommitted change. The setting is saved last: a failed run
 // repeats on the next call.
 func DisableSymlinks(path string) error {
+	return disableSymlinks(context.Background(), path)
+}
+
+func disableSymlinks(ctx context.Context, path string) error {
 	// --local: a global or system core.symlinks=false says nothing about links
 	// this clone already checked out, and can be removed later.
-	if out, _ := exec.Command("git", "-C", path, "config", "--local", "--type=bool", "--get", "core.symlinks").Output(); strings.TrimSpace(string(out)) == "false" {
+	if out, _ := gitutil.RunGit(ctx, path, "config", "--local", "--type=bool", "--get", "core.symlinks"); out == "false" {
 		return nil
 	}
-	tracked, err := exec.Command("git", "-C", path, "ls-files", "-s", "-z").Output()
+	tracked, err := gitutil.NewNetworkCmd(ctx, "-C", path, "ls-files", "-s", "-z").Output()
 	if err != nil {
 		return fmt.Errorf("list tracked files: %w", err)
 	}
 	for _, rec := range strings.Split(string(tracked), "\x00") {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		meta, rel, ok := strings.Cut(rec, "\t") // "<mode> <object> <stage>\t<path>"
 		if !ok || !strings.HasPrefix(meta, "120000 ") {
 			continue
@@ -661,7 +675,7 @@ func DisableSymlinks(path string) error {
 			return fmt.Errorf("convert symlink %s: %w", rel, err)
 		}
 	}
-	if output, err := exec.Command("git", "-C", path, "config", "core.symlinks", "false").CombinedOutput(); err != nil {
+	if output, err := gitutil.RunGit(ctx, path, "config", "core.symlinks", "false"); err != nil {
 		return fmt.Errorf("config core.symlinks: %w: %s", err, output)
 	}
 	return nil
@@ -697,19 +711,6 @@ func validateSparseCheckoutDirs(dirs []string) error {
 		}
 	}
 	return fmt.Errorf("BUG: .sageox missing from sparse-checkout dirs; refusing to run git sparse-checkout set")
-}
-
-// dirtyDirsOutsideCone returns top-level directories that contain staged or
-// modified tracked files but are not already in the cone dirs list.
-// This prevents "sparse-checkout set" from deleting files the CLI has staged
-// but not yet committed+pushed.
-func dirtyDirsOutsideCone(repoPath string, coneDirs []string) []string {
-	cmd := exec.Command("git", "-C", repoPath, "status", "--porcelain", "-z")
-	out, err := cmd.Output()
-	if err != nil || len(out) == 0 {
-		return nil
-	}
-	return parseDirtyDirsFromPorcelain(out, coneDirs)
 }
 
 // parseDirtyDirsFromPorcelain extracts top-level directories from NUL-delimited
