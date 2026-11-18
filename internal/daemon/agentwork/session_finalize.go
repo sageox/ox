@@ -1838,8 +1838,11 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	// where detection re-queues it as upload-only. But a ledger-wide blocker will
 	// refuse every later session the same way, so surface it for the manager to
 	// pause the work type instead of repeating the summarize-then-fail cycle.
-	if isLedgerWideBlocker(pushErr) {
+	if isLedgerWideBlocker(pushErr) || errors.Is(pushErr, session.ErrLedgerSessionOverwrite) {
 		return pushErr
+	}
+	if !pushed {
+		return nil
 	}
 
 	h.logger.Info("session recovered via anti-entropy",
@@ -1965,9 +1968,16 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	if err := lfs.MutateSessionMeta(context.Background(), payload.SessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
 		next := current
 		fromLedger := false
-		if next == nil {
-			next = ledgerMetaForDownload(h.rootContext(), payload, headerID)
-			fromLedger = next != nil
+		if next == nil || (next.SessionID == "" && headerID == "") {
+			verified := ledgerMetaForDownload(h.rootContext(), payload, headerID)
+			if next == nil {
+				next = verified
+				fromLedger = verified != nil
+			} else {
+				// A failed attempt already wrote cache metadata. Keep its
+				// retry counters and the verified legacy recording's implicit ID.
+				fromLedger = verified != nil && verified.SessionID == ""
+			}
 		}
 		if next == nil {
 			// no meta.json yet — seed one; there is nothing to preserve.
@@ -2268,27 +2278,33 @@ func ledgerMetaForDownload(ctx context.Context, payload *SessionFinalizePayload,
 	if headerID != "" && headerID == meta.SessionID {
 		return meta
 	}
+	relRaw := filepath.Join(relDir, "raw.jsonl")
+	workingRaw := filepath.Join(payload.LedgerPath, relRaw)
 	ref := meta.Files["raw.jsonl"]
-	if ref.OID == "" {
-		// Hydration also accepts a pointer when older metadata lacks a
-		// manifest. Require the current pointer to match the committed one.
-		relRaw := filepath.Join(relDir, "raw.jsonl")
-		workingRaw := filepath.Join(payload.LedgerPath, relRaw)
-		if !lfs.IsPointerFile(workingRaw) {
-			return nil
-		}
-		ref, err = lfs.ReadPointerFile(workingRaw)
+	if lfs.IsPointerFile(workingRaw) {
+		workingRef, err := lfs.ReadPointerFile(workingRaw)
 		if err != nil {
 			return nil
 		}
-		blob, err := gitutil.ReadBlob(ctx, payload.LedgerPath, "HEAD", filepath.ToSlash(relRaw))
-		if err != nil {
-			return nil
+		if ref.OID != "" {
+			if ref.BareOID() != workingRef.BareOID() || ref.Size != workingRef.Size {
+				return nil
+			}
+		} else {
+			// Hydration also accepts a pointer when older metadata lacks a
+			// manifest. Require the current pointer to match the committed one.
+			blob, err := gitutil.ReadBlob(ctx, payload.LedgerPath, "HEAD", filepath.ToSlash(relRaw))
+			if err != nil {
+				return nil
+			}
+			oid, size, err := lfs.ParsePointer(string(blob))
+			if err != nil || oid != workingRef.OID || size != workingRef.Size {
+				return nil
+			}
+			ref = workingRef
 		}
-		oid, size, err := lfs.ParsePointer(string(blob))
-		if err != nil || oid != ref.OID || size != ref.Size {
-			return nil
-		}
+	} else if !rawMatchesRef(workingRaw, ref) {
+		return nil
 	}
 	if rawMatchesRef(payload.RawPath, ref) {
 		return meta
@@ -2362,6 +2378,7 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 	// Legacy downloads may have no ID. Verify the cached raw recording
 	// against the current Ledger copy while staging holds the lock.
 	var legacyEmptyMeta *lfs.SessionMeta
+	keepLedgerMeta := false
 	if err := session.CheckFinalizedLedgerSessionDestination(destDir, sessionName, recordingID); err != nil {
 		if recordingID != "" {
 			return "", err
@@ -2376,6 +2393,19 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 			meta := ledgerMetaForDownload(h.rootContext(), &source, "")
 			if meta == nil || meta.SessionID != "" {
 				return "", err
+			}
+			if (meta.SummaryStatus == "" || meta.SummaryStatus == sessionsummary.SummaryStatusOK) &&
+				strings.TrimSpace(meta.Title) != "" && len(missingArtifacts(destDir)) == 0 {
+				cached, _ := lfs.ReadSessionMeta(cacheDir)
+				if cached == nil || cached.Title != meta.Title || cached.Summary != meta.Summary ||
+					!repairArtifactsMatch(cacheDir, destDir) {
+					payload.useExistingLedgerCopy = true
+					payload.SessionDir = destDir
+					return cacheDir, nil
+				}
+				// This repair was already staged. Retain any newer metadata
+				// while resuming pointer preparation and publication.
+				keepLedgerMeta = true
 			}
 		} else {
 			if !payload.emptyTranscript && !payload.UploadOnly {
@@ -2436,7 +2466,23 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 		return "", fmt.Errorf("create session copy dir: %w", err)
 	}
 
-	if err := copySessionArtifacts(cacheDir, destDir, false); err != nil {
+	// An upload-only cache can contain artifacts but lack metadata. Persist
+	// the identity before copying so a failed push won't leave the only ID
+	// on the Ledger side. An existing Ledger record supplies its own meta.
+	if payload.UploadOnly {
+		if _, err := os.Lstat(filepath.Join(destDir, "meta.json")); errors.Is(err, fs.ErrNotExist) {
+			if err := lfs.MutateSessionMeta(h.rootContext(), cacheDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+				if current != nil {
+					return nil, nil
+				}
+				return h.synthesizeMeta(cacheDir, sessionName), nil
+			}); err != nil {
+				return "", fmt.Errorf("seed upload retry metadata: %w", err)
+			}
+		}
+	}
+
+	if err := copySessionArtifacts(cacheDir, destDir, keepLedgerMeta); err != nil {
 		return "", err
 	}
 	payload.SessionDir = destDir
@@ -2493,7 +2539,7 @@ func replayEmptyLedgerRepair(ctx context.Context, cacheDir, destDir string, veri
 			// before commit. Resume publication only if the cache and Ledger
 			// still agree on the summary and its artifacts.
 			applied = current.Title == summary.Title && current.Summary == summary.Summary &&
-				emptyRepairArtifactsMatch(cacheDir, destDir)
+				repairArtifactsMatch(cacheDir, destDir)
 			return nil, nil
 		}
 		if current.SummaryStatus == "" && current.Title != "" {
@@ -2517,7 +2563,7 @@ func replayEmptyLedgerRepair(ctx context.Context, cacheDir, destDir string, veri
 	return applied, err
 }
 
-func emptyRepairArtifactsMatch(cacheDir, destDir string) bool {
+func repairArtifactsMatch(cacheDir, destDir string) bool {
 	for _, name := range requiredArtifacts {
 		cached, cacheErr := os.ReadFile(filepath.Join(cacheDir, name))
 		ledger, ledgerErr := os.ReadFile(filepath.Join(destDir, name))

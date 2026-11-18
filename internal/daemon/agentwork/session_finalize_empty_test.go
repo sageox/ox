@@ -249,6 +249,9 @@ func TestProcessResult_SettlesEmptyLedgerDownload(t *testing.T) {
 			})
 			require.NoError(t, err)
 			f.ledgerMeta(t, string(ledgerMeta))
+			ref := lfs.NewFileRef([]byte(emptyRaw))
+			require.NoError(t, os.WriteFile(filepath.Join(ledgerPath, "sessions", name, "raw.jsonl"),
+				[]byte(lfs.FormatPointer(ref.OID, ref.Size)), 0644))
 
 			tel := &fakeTelemetry{}
 			h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))

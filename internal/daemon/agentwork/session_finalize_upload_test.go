@@ -3,6 +3,7 @@ package agentwork
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -454,7 +455,7 @@ func TestProcessResult_RegularFinalizePreservesDifferentLedgerRecording(t *testi
 	require.Len(t, items, 1)
 	item := items[0]
 	require.Equal(t, cachedID, session.ReadHeaderSessionID(filepath.Join(f.cacheDir, "raw.jsonl")))
-	require.NoError(t, handler.ProcessResult(item, &RunResult{Output: "{}"}))
+	require.ErrorIs(t, handler.ProcessResult(item, &RunResult{Output: "{}"}), session.ErrLedgerSessionOverwrite)
 
 	require.Equal(t, before, gitOutput(t, barePath, "rev-parse", branch))
 	got, err := os.ReadFile(filepath.Join(dir, "meta.json"))
@@ -470,6 +471,15 @@ func TestProcessResult_LegacySummaryRepairUsesTrackedRawPointer(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git operations")
 	}
+	for _, state := range []string{"missing summary", "retry after stub", "newer summary", "changed recording"} {
+		t.Run(state, func(t *testing.T) {
+			checkLegacySummaryRepair(t, state)
+		})
+	}
+}
+
+func checkLegacySummaryRepair(t *testing.T, state string) {
+	t.Helper()
 	bare, ledger := setupBareAndCloneLedger(t)
 	const name = "2026-01-15T11-00-testuser-OxLEGACY"
 	const userID = "usr_legacy_owner"
@@ -480,9 +490,27 @@ func TestProcessResult_LegacySummaryRepairUsesTrackedRawPointer(t *testing.T) {
 	}
 	f.write(t, "raw.jsonl", testRawContent)
 	f.write(t, ".needs-summary", "{}")
-	f.ledgerMeta(t, `{"version":"1.0","repo_id":"repo_legacy","session_name":"`+name+`","user_id":"`+userID+`"}`)
+	if state == "retry after stub" {
+		f.write(t, "meta.json", `{"version":"1.0","session_name":"`+name+`","user_id":"`+userID+`","summary_status":"failed_validation","summary_attempts":1}`)
+	}
+	ledgerMeta := fmt.Sprintf(`"version":"1.0","repo_id":"repo_legacy","session_name":%q,"user_id":%q`, name, userID)
+	if state == "newer summary" {
+		ledgerMeta += `,"title":"New summary","summary":"A newer summary from the Ledger.","summary_status":"ok"`
+	}
 	dir := filepath.Join(ledger, "sessions", name)
 	ref := lfs.NewFileRef([]byte(testRawContent))
+	if state == "changed recording" {
+		manifest, err := json.Marshal(map[string]lfs.FileRef{"raw.jsonl": ref})
+		require.NoError(t, err)
+		ledgerMeta += `,"files":` + string(manifest)
+		ref = lfs.NewFileRef([]byte(strings.Replace(testRawContent, "hello", "new message", 1)))
+	}
+	f.ledgerMeta(t, "{"+ledgerMeta+"}")
+	if state == "newer summary" {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "summary.json"), []byte(`{"title":"New summary"}`), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "summary.md"), []byte("# New summary"), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "session.md"), []byte("# New session"), 0644))
+	}
 	pointer := lfs.FormatPointer(ref.OID, ref.Size)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(pointer), 0644))
 	runGitCmd(t, ledger, "add", "--", "sessions")
@@ -497,8 +525,21 @@ func TestProcessResult_LegacySummaryRepairUsesTrackedRawPointer(t *testing.T) {
 	items := detectCacheOnly(t, h, ledger)
 	require.Len(t, items, 1)
 	output := `{"title":"Legacy Session Repair","summary":"Restored the missing summary for a legacy recording.","quality_score":0.8,"score_reason":"fine","outcome":"success","key_actions":["restored the summary"]}`
-	require.NoError(t, h.ProcessResult(items[0], &RunResult{Output: output}))
+	err := h.ProcessResult(items[0], &RunResult{Output: output})
+	if state == "changed recording" {
+		require.ErrorIs(t, err, session.ErrLedgerSessionOverwrite)
+	} else {
+		require.NoError(t, err)
+	}
 
+	if state == "newer summary" || state == "changed recording" {
+		require.Equal(t, before, gitOutput(t, bare, "rev-parse", branch))
+		require.Equal(t, strings.TrimSpace(pointer), gitOutput(t, bare, "show", branch+":sessions/"+name+"/raw.jsonl"))
+		if state == "changed recording" {
+			require.DirExists(t, f.cacheDir)
+		}
+		return
+	}
 	require.NotEqual(t, before, gitOutput(t, bare, "rev-parse", branch))
 	meta, err := lfs.ParseSessionMeta([]byte(gitOutput(t, bare, "show", branch+":sessions/"+name+"/meta.json")))
 	require.NoError(t, err)
