@@ -109,16 +109,19 @@ func writeOpenCodePlugin(rootPath string, plugin openCodePlugin) error {
 	if plugin.linked && plugin.content != legacyOpenCodePlugin {
 		return errors.New("linked OpenCode plugin is missing or is not a generated hook")
 	}
-	rootPath, err := filepath.EvalSymlinks(rootPath)
-	if err != nil {
-		return err
-	}
-	rootPath, err = filepath.Abs(rootPath)
+	rootPath, err := filepath.Abs(rootPath)
 	if err != nil {
 		return err
 	}
 	target := plugin.path
 	if plugin.info != nil {
+		// Resolve both paths when locating an existing inode. For a fresh
+		// install, compute the path relative to the requested root as
+		// provided and let os.OpenRoot resolve that root.
+		rootPath, err = filepath.EvalSymlinks(rootPath)
+		if err != nil {
+			return err
+		}
 		target, err = filepath.EvalSymlinks(target)
 		if err != nil {
 			return err

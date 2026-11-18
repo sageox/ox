@@ -35,6 +35,25 @@ func TestInstallHooksKeepsReadOnlyPlugin(t *testing.T) {
 	}
 }
 
+func TestInstallHooksUnderLinkedProjectRoot(t *testing.T) {
+	project := t.TempDir()
+	link := filepath.Join(t.TempDir(), "project")
+	if err := os.Symlink(project, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	params := adapterprotocol.HookParams{RepoRoot: link, Scope: "project"}
+	if _, err := handleInstallHooks(params); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(resolvePluginPath(project, params.Scope))
+	if err != nil || string(content) != openCodePluginTemplate {
+		t.Fatalf("plugin missing in linked checkout: %v", err)
+	}
+}
+
 func TestLinkedOpenCodePluginCanBeUninstalled(t *testing.T) {
 	params := adapterprotocol.HookParams{RepoRoot: t.TempDir(), Scope: "project"}
 	target := filepath.Join(t.TempDir(), "shared-plugin.ts")
