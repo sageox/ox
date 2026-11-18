@@ -284,3 +284,34 @@ func TestConductorRunScript_DoesNotWriteThroughALink(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, shared, string(data), "the shared settings are untouched")
 }
+
+// TestConductorRunScript_StaysInsideTheRepository: a checkout can carry
+// .conductor as a symbolic link to another project. Failure prevented:
+// `ox init` or `ox doctor --fix` creating or editing that other project's
+// settings.local.toml.
+func TestConductorRunScript_StaysInsideTheRepository(t *testing.T) {
+	repo := conductorRepo(t)
+	other := filepath.Join(t.TempDir(), ".conductor")
+	require.NoError(t, os.MkdirAll(other, 0o755))
+	if err := os.Symlink(other, filepath.Join(repo, ".conductor")); err != nil {
+		t.Skipf("symbolic links are not available here: %v", err)
+	}
+
+	res := checkConductorRunScriptAt(repo, true)
+	assert.True(t, res.warning, "%+v", res)
+	ensureConductorRunScript(repo, true)
+	assert.NoFileExists(t, filepath.Join(other, conductorLocalSettings), "nothing is written outside the repository")
+}
+
+// TestConductorRunScript_ExclusionMustTakeEffect: .git/info/exclude ranks
+// below .gitignore. Failure prevented: a .gitignore rule that re-includes the
+// file leaves it stageable, while ox reports it installed and kept out of git.
+func TestConductorRunScript_ExclusionMustTakeEffect(t *testing.T) {
+	repo := conductorRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("!/.conductor/"+conductorLocalSettings+"\n"), 0o644))
+
+	res := checkConductorRunScriptAt(repo, true)
+	assert.False(t, res.passed, "%+v", res)
+	assert.Contains(t, res.detail, "still not ignored")
+	assert.Empty(t, readConductorLocal(t, repo), "no settings are written while the file would be stageable")
+}

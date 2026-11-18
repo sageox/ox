@@ -195,6 +195,12 @@ const conductorLocalPattern = ".conductor/" + conductorLocalSettings
 // there can lead to the shared, committed settings.toml, and the write
 // follows it.
 func conductorLocalTracked(repoRoot string) bool {
+	// .conductor itself must be this repository's own directory: a link
+	// there (a checkout can carry one) would send the write into whatever
+	// project it points at.
+	if info, err := os.Lstat(filepath.Join(repoRoot, ".conductor")); err == nil && !info.IsDir() {
+		return true
+	}
 	if info, err := os.Lstat(filepath.Join(repoRoot, ".conductor", conductorLocalSettings)); err == nil && !info.Mode().IsRegular() {
 		return true
 	}
@@ -219,9 +225,20 @@ func excludeFromGit(repoRoot, pattern string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	_, err = fmt.Fprintf(f, "\n# ox: machine-local Conductor settings\n/%s\n", pattern)
-	return err
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	// info/exclude ranks below .gitignore: a rule there (`!/.conductor/…`)
+	// can leave the file stageable all the same. Say so rather than report a
+	// file kept out of git that `git add .` would still take.
+	if exec.Command("git", "-C", repoRoot, "check-ignore", "-q", "--", pattern).Run() != nil {
+		return fmt.Errorf("%s is still not ignored by git (a .gitignore rule re-includes it); add it to .gitignore by hand", pattern)
+	}
+	return nil
 }
 
 // ensureConductorRunScript is `ox init`'s step: in a repository Conductor
@@ -283,7 +300,7 @@ func checkConductorRunScriptAt(gitRoot string, fix bool) checkResult {
 			"To see ox's line in Conductor's Run pane, add to "+localPath+":\n"+conductorRunScriptBlock)
 	}
 	if conductorLocalTracked(repoRoot) {
-		return WarningCheck(conductorRunScriptCheck, "not added: "+conductorLocalPattern+" is committed in this repository, or is not a regular file",
+		return WarningCheck(conductorRunScriptCheck, "not added: "+conductorLocalPattern+" is committed in this repository, or it or .conductor is a link",
 			"ox does not edit a tracked file or write through a link. To see ox's line in Conductor's Run pane, add to "+localPath+":\n"+conductorRunScriptBlock)
 	}
 	if !fix {
