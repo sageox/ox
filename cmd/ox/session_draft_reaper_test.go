@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -72,7 +73,7 @@ func agedDraft(t *testing.T, ledgerPath, sessionName string, age time.Duration) 
 	updated := time.Now().Add(-age).UTC()
 	require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
 		Version: "1.0", SessionName: sessionName, SessionID: draftTestSessionID,
-		AgentID: "OxOrphan", CreatedAt: updated,
+		AgentID: "OxOrphan", Username: identity.LocalAttributionUsername(), CreatedAt: updated,
 		Draft: true, TurnCount: 2, UpdatedAt: &updated,
 		Files: map[string]lfs.FileRef{},
 	}))

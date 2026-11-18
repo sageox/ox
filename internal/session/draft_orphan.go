@@ -9,8 +9,39 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 )
+
+// localOwner is the attribution username of the user running this machine. It
+// is local-only (git identity, then $USER), so the reaper never reaches the network.
+func localOwner() string {
+	return identity.LocalAttributionUsername()
+}
+
+// draftTimestampLen is len("2006-01-02T15-04"), the timestamp prefix that
+// GenerateSessionName writes ahead of the username slug.
+const draftTimestampLen = len("2006-01-02T15-04")
+
+// draftOwnedByLocalUser reports whether a draft belongs to the user running this
+// machine. A draft is owned when its meta.username equals the local owner, or
+// when its session name carries the local owner's slug right after the
+// timestamp (<timestamp>-<username>-<sessionID>). The name check covers drafts
+// written without attribution. An unknown local owner owns nothing.
+func draftOwnedByLocalUser(sessionName, metaUsername string) bool {
+	owner := localOwner()
+	if owner == "" {
+		return false
+	}
+	if metaUsername != "" && metaUsername == owner {
+		return true
+	}
+	slug := sanitizeFilename(owner)
+	if slug == "" || len(sessionName) <= draftTimestampLen+1 || sessionName[draftTimestampLen] != '-' {
+		return false
+	}
+	return strings.HasPrefix(sessionName[draftTimestampLen+1:], slug+"-")
+}
 
 // OrphanedDraftAge is how long a committed draft placeholder must go without a
 // refresh before it is considered abandoned and eligible for git-removal from
@@ -98,6 +129,13 @@ func FindOrphanedDrafts(ledgerPath string, cacheDirs []string) ([]string, error)
 		// deleting a placeholder for a session that might be live is worse than
 		// leaving a stale page.
 		if meta.UpdatedAt == nil || time.Since(*meta.UpdatedAt) < OrphanedDraftAge {
+			continue
+		}
+		// Owner-only reaping: only the owning user's machine can see that
+		// owner's cache, so only it can evaluate condition 3. Ownership is the
+		// attribution username or the username slug embedded in the session
+		// name, so drafts written before attribution existed still match.
+		if !draftOwnedByLocalUser(name, meta.Username) {
 			continue
 		}
 		if DraftHasLocalSessionData(cacheDirs, name) {

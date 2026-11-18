@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,7 +33,7 @@ func TestFindOrphanedDrafts_SkipsNonconformingNames(t *testing.T) {
 		require.NoError(t, os.MkdirAll(dir, 0o755))
 		require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
 			Version: "1.0", SessionName: name, SessionID: "ses_orphan_test", AgentID: "OxOrphan",
-			CreatedAt: aged, Draft: true, UpdatedAt: &aged, Files: map[string]lfs.FileRef{},
+			Username: identity.LocalAttributionUsername(), CreatedAt: aged, Draft: true, UpdatedAt: &aged, Files: map[string]lfs.FileRef{},
 		}))
 	}
 
