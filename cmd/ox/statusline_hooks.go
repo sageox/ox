@@ -51,7 +51,14 @@ func recordStatuslineRetrieval(projectRoot, agentID, harnessSessionID string, ac
 	if ref == "" || !statuslineEnabled() {
 		return
 	}
-	if err := oxactivity.RecordInfluence(projectRoot, agentID, harnessSessionID, refType, ref); err != nil {
+	// Bound to the live recording so the bar counts what the session report
+	// counts: a resumed harness session does not carry an old recording's
+	// counts into a new one.
+	recordingID := ""
+	if state, err := session.LoadRecordingStateForAgent(projectRoot, agentID); err == nil && state != nil {
+		recordingID = state.SessionID
+	}
+	if err := oxactivity.RecordInfluenceIn(projectRoot, agentID, harnessSessionID, recordingID, refType, ref); err != nil {
 		slog.Debug("statusline: record influence failed", "agent_id", agentID, "ref_type", refType, "err", err)
 	}
 }
@@ -70,7 +77,7 @@ func recordStatuslineUse(projectRoot string, state *session.RecordingState, refT
 	if !statuslineEnabled() {
 		return
 	}
-	if err := oxactivity.RecordUse(projectRoot, state.AgentID, state.AgentSessionID, refType, ref, aliases...); err != nil {
+	if err := oxactivity.RecordUseIn(projectRoot, state.AgentID, state.AgentSessionID, state.SessionID, refType, ref, aliases...); err != nil {
 		slog.Debug("statusline: record use failed", "agent_id", state.AgentID, "ref_type", refType, "err", err)
 	}
 }

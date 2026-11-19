@@ -48,7 +48,7 @@ func TestHookLabels_InstallAndRefresh(t *testing.T) {
 
 				wantLabels := map[string]string{
 					"SessionStart":     "SageOx: loading context; auto-recording if configured",
-					"PreToolUse":       "SageOx: pre-tool hook (currently inactive)",
+					"PreToolUse":       "SageOx: timing ox calls",
 					"PostToolUse":      "SageOx: capturing activity for session recording",
 					"UserPromptSubmit": "SageOx: recalling context and delivering team updates",
 					"Stop":             "SageOx: saving turns and plans; publishing drafts if configured",

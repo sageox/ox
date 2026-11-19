@@ -16,7 +16,7 @@ import (
 )
 
 // HeldMarkerFile marks a session folder the coworker chose to keep on this
-// machine. A held session is never summarized, uploaded, or deleted by any
+// machine, or one deleted on SageOx while it streamed. A held session is never summarized, uploaded, or deleted by any
 // automatic path — the daemon's finalize scan, the /clear and SessionEnd hooks,
 // ox doctor, session recover, push-summary, or prune. Only an explicit
 // `ox session upload <name>` publishes it, and that removes the marker after
@@ -42,6 +42,11 @@ type HoldReason string
 // session_publishing: manual.
 const HoldManualPublishing HoldReason = "manual_publishing"
 
+// HoldDeletedOnServer: the session was deleted on SageOx while it streamed
+// live (ADR-247), so its live stream was rejected. Holding it keeps raw.jsonl
+// on this machine and every automatic path off the Ledger.
+const HoldDeletedOnServer HoldReason = "deleted_on_server"
+
 // HoldInfo is the content of a .held marker.
 type HoldInfo struct {
 	HeldAt time.Time  `json:"held_at"`
@@ -49,12 +54,23 @@ type HoldInfo struct {
 	// Source names the path that placed the hold (session_stop, hook,
 	// daemon_recovery, doctor, recover), for diagnosis.
 	Source string `json:"source,omitempty"`
+	// SessionID is the ses_ id of the recording the hold was placed for, when
+	// the writer knew it. Folder names have minute precision, so a recording
+	// restarted within the minute shares its folder with the one before it; a
+	// hold naming that earlier recording is not about the new one (C4).
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // WriteHoldMarker holds the session in dir. An existing hold is kept as is, so
 // the first held_at survives later writers. dir must already exist and must not
 // be inside the Ledger's shared sessions/ tree.
 func WriteHoldMarker(dir string, reason HoldReason, source string) error {
+	return WriteHoldMarkerFor(dir, reason, source, "")
+}
+
+// WriteHoldMarkerFor is WriteHoldMarker for the recording sessionID, which the
+// marker records (see HoldInfo.SessionID).
+func WriteHoldMarkerFor(dir string, reason HoldReason, source, sessionID string) error {
 	if inSharedSessionsTree(dir) {
 		return fmt.Errorf("hold session %s: %w", dir, ErrHoldInSharedTree)
 	}
@@ -70,7 +86,7 @@ func WriteHoldMarker(dir string, reason HoldReason, source string) error {
 	} else if !info.IsDir() {
 		return fmt.Errorf("hold session %s: not a directory", dir)
 	}
-	hold := HoldInfo{HeldAt: time.Now().UTC(), Reason: reason, Source: source}
+	hold := HoldInfo{HeldAt: time.Now().UTC(), Reason: reason, Source: source, SessionID: sessionID}
 	if err := fileutil.AtomicWriteJSON(filepath.Join(dir, HeldMarkerFile), hold, 0o644); err != nil {
 		return fmt.Errorf("write hold marker: %w", err)
 	}

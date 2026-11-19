@@ -301,8 +301,12 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 	// case); wrong if they use different ledgers. Resolving the ledger
 	// relative to --repo too is a larger change, deferred for now.
 	ledgerPath, ledgerErr := resolveLedgerPath()
-	ledgerAvailable := ledgerErr == nil
-	if ledgerAvailable {
+	// The path exists before the daemon's first clone lands, because recordings
+	// cache under it, so those are still listed. Only a checkout is reported as
+	// an available Ledger, and only a checkout's sessions count as uploaded.
+	ledgerFound := ledgerErr == nil
+	ledgerAvailable := ledgerFound && isGitRepo(ledgerPath)
+	if ledgerFound {
 		ledgerStore, storeErr := session.NewStore(ledgerPath)
 		if storeErr == nil {
 			ledgerSessions, _ := window.list(ledgerStore, showAll)
@@ -311,7 +315,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 			// Drafts are excluded: a meta.json-only placeholder means the
 			// session is still recording, not that its turn data landed.
 			for _, ls := range ledgerSessions {
-				if ls.Draft {
+				if ls.Draft || !ledgerAvailable {
 					continue
 				}
 				uploadedSessions[sessionMergeKey(ls)] = true

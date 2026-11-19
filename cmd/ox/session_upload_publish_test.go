@@ -249,6 +249,11 @@ func TestFilesNotPublished_ComparesContentNotPresence(t *testing.T) {
 			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "context-trace.jsonl"), trace, 0o644))
 			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "summary.json"), summary, 0o644))
 			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, ".held"), []byte("{}"), 0o644)) // local state, never content
+			// the live stream's files are local state too (C5): staging never
+			// carries them, so they must not keep the cache copy forever
+			for _, live := range []string{"spool.jsonl", "stream-state.json", "close-requested"} {
+				require.NoError(t, os.WriteFile(filepath.Join(cacheDir, live), []byte("{}"), 0o600))
+			}
 
 			ref := lfs.NewFileRef(tc.ledgerTrace)
 			require.NoError(t, lfs.WritePointerFile(filepath.Join(ledgerDir, "context-trace.jsonl"), lfs.AssertUploaded(ref)))

@@ -902,6 +902,10 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	if detectCodex() {
 		integrationChecks = append(integrationChecks, checkCodexHooks(opts.shouldFix(CheckSlugCodexHooks)))
 	}
+	// Conductor has no status bar: ox's line lives in its Run pane.
+	if conductorCheck := checkConductorRunScript(opts.shouldFix(CheckSlugConductorStatusLine)); !conductorCheck.skipped {
+		integrationChecks = append(integrationChecks, conductorCheck)
+	}
 	// Skill target selection is project state, not a consequence of which AI
 	// coworker happens to be detected during this Doctor run.
 	// Capture migration cleanliness BEFORE reconciliation can update the tracked
@@ -972,7 +976,7 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	gitignoreCheck := checks.NewGitignoreCheck(git, nil)
 	gitStatusChecks := []checkResult{
 		checkGitStatus(),
-		checkSageoxFilesTracked(opts.shouldFix(CheckSlugGitignore)),
+		checkSageoxFilesTracked(opts.shouldFix(CheckSlugSageoxFilesTracked)),
 		convertDoctorResult(gitignoreCheck.Run(ctx, opts.shouldFix(CheckSlugGitignore))),
 		checkRootKBGitignoreLine(opts.shouldFix(CheckSlugRootKBGitignore)),
 		checkGitattributes(opts.shouldFix(CheckSlugGitattributes)),

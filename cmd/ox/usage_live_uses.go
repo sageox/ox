@@ -25,7 +25,9 @@ import (
 // This file runs the same deterministic scan (consultscan.ScanUses, same
 // roots, same surfaced set) over the live raw.jsonl and adds what it finds to
 // the brief IN MEMORY. It never writes the trace; finalize re-scans from zero
-// and writes the identical events.
+// and writes the identical events. The Stop hook runs the same scan once per
+// turn (recordTurnUses) so the status line's "used" count is current whether
+// or not anything ever asks for the brief.
 
 // briefUsesCacheSubdir holds the incremental scan cache, one file per AI
 // coworker, under the ledger's local-only .sageox/cache/ (ledger-cache rule).
@@ -146,16 +148,14 @@ func scanLiveUses(roots consultscan.Roots, state *session.RecordingState, surfac
 		return nil, nil, err
 	}
 	if len(entries) > 0 {
-		// ScanUses numbers entries by slice index, the seq frame surfaced
-		// items are in; blank slots for the scanned prefix keep that frame
-		// and match nothing.
-		window := make([]consultscan.Entry, c.NextIndex, c.NextIndex+len(entries))
-		window = append(window, entries...)
+		// Only the new entries are scanned; c.NextIndex keeps them in the
+		// seq frame surfaced items are in. The work is proportional to what
+		// the turn added, not to the recording's length.
 		seen := map[string]bool{}
 		for _, ev := range kept {
 			seen[liveUseItemKey(ev)] = true
 		}
-		for _, ev := range consultscan.ScanUses(window, surfaced, roots) {
+		for _, ev := range consultscan.ScanUsesFrom(entries, c.NextIndex, surfaced, roots) {
 			if k := liveUseItemKey(ev); !seen[k] {
 				seen[k] = true // keep the earliest, as one full scan would
 				fresh = append(fresh, ev)

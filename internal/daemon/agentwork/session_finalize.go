@@ -27,6 +27,7 @@ import (
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/secretguard"
@@ -1239,8 +1240,10 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			)
 
 			// held on this machine: recovered locally, never finalized, and so
-			// is an unpublished session while publishing is manual (GH #1093)
-			if session.IsHeldInLedger(ledgerPath, name) || (manual && h.holdIfUnpublished(sessionDir, ledgerPath, true)) {
+			// is an unpublished session while publishing is manual (GH #1093),
+			// and one deleted on SageOx whose hold marker never got written (C3)
+			if session.IsHeldInLedger(ledgerPath, name) || deletedOnServerAnywhere(sessionDir, ledgerPath) ||
+				(manual && h.holdIfUnpublished(sessionDir, ledgerPath, true)) {
 				continue
 			}
 
@@ -1769,9 +1772,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 				"threshold", h.qualityDiscardThreshold,
 				"reason", summaryResp.ScoreReason,
 			)
-			if err := os.RemoveAll(payload.SessionDir); err != nil {
-				h.logger.Warn("failed to remove low-quality session", "session", sessionName, "err", err)
-			}
+			PruneSessionCache(h.logger, payload.SessionDir)
 			return nil
 		}
 	}
@@ -2507,6 +2508,11 @@ func copySessionArtifacts(source, dest string, keepMeta bool) error {
 		if strings.HasPrefix(entry.Name(), ".") || session.IsRawAppendJournal(entry.Name()) {
 			continue
 		}
+		// Live stream files (ADR-247) are local state too, including the spool,
+		// IDs, offsets, and markers.
+		if livesession.IsLocalFile(entry.Name()) {
+			continue
+		}
 		src := filepath.Join(source, entry.Name())
 		dst := filepath.Join(dest, entry.Name())
 		if err := copySessionFile(src, dst); err != nil {
@@ -2829,7 +2835,7 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 			return false, err
 		}
 		if cacheDir != "" {
-			_ = os.RemoveAll(cacheDir) // treat skip as success so tests can prune cache
+			PruneSessionCache(h.logger, cacheDir) // treat skip as success so tests can prune cache
 		}
 		return true, nil
 	}
@@ -2979,9 +2985,7 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	payload.pushedMeta = h.pushedSessionMeta(ctx, ledgerPath, payload.SessionDir)
 	// prune only after the push: until then the cache is the only full copy
 	if cacheDir != "" {
-		if err := os.RemoveAll(cacheDir); err != nil {
-			h.logger.Debug("prune cache after finalize", "dir", cacheDir, "err", err)
-		}
+		PruneSessionCache(h.logger, cacheDir)
 	}
 	return true, nil
 }
@@ -3620,7 +3624,10 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 		// capture transaction reloads the checkpoint, rechecks inactivity and
 		// validates replay before it can settle a journal under append + state
 		// locks. Never roll back using the pre-transaction state loaded above.
-		finalState, err := session.FinalizeInactiveCursorCapture(context.Background(), state.WorkspacePath, sessionDir, home, reader, time.Now().Add(-staleRecordingThreshold))
+		finalState, finalBatch, err := session.FinalizeInactiveCursorCapture(context.Background(), state.WorkspacePath, sessionDir, home, reader, time.Now().Add(-staleRecordingThreshold))
+		// the final drain's bytes are committed even when finalization must wait
+		// for Cursor's export, and no later drain reads them again (C8)
+		spoolRecovered(logger, sessionDir, state.WorkspacePath, finalBatch)
 		if err != nil {
 			return false, err // pending native writes retain raw and marker
 		}
@@ -4239,7 +4246,29 @@ func holdIfRecordedManual(sessionDir string) error {
 // Ledger copy, which never carries the marker.
 func sessionHeldLocally(p *SessionFinalizePayload) bool {
 	// Clean first: Base of ".../<name>/." is ".", which names no session.
-	return session.IsHeldInLedger(p.LedgerPath, filepath.Base(filepath.Clean(p.SessionDir)))
+	return session.IsHeldInLedger(p.LedgerPath, filepath.Base(filepath.Clean(p.SessionDir))) ||
+		deletedOnServerAnywhere(p.SessionDir, p.LedgerPath)
+}
+
+// deletedOnServerAnywhere reports whether the session in sessionDir was deleted
+// on SageOx while it streamed, by its stream state there or in any cache copy
+// of the same name. The live stream writes a hold marker when it learns of the
+// delete; when that write failed, the stream state is the only record left,
+// and publishing the session anyway would undo someone's delete (C3).
+func deletedOnServerAnywhere(sessionDir, ledgerPath string) bool {
+	if livesession.WasDeletedOnServer(sessionDir) {
+		return true
+	}
+	name := filepath.Base(filepath.Clean(sessionDir))
+	if name == "" || name == "." || ledgerPath == "" {
+		return false
+	}
+	for _, base := range session.HeldSessionDirs(ledgerPath) {
+		if base != "" && livesession.WasDeletedOnServer(filepath.Join(base, name)) {
+			return true
+		}
+	}
+	return false
 }
 
 // manualPublishing reports whether this project publishes sessions manually,
@@ -4277,4 +4306,61 @@ func (h *SessionFinalizeHandler) holdIfUnpublished(sessionDir, ledgerPath string
 // Ledger yet. Every entry point (scan, IPC, prompt, result) asks it.
 func (h *SessionFinalizeHandler) keepLocal(p *SessionFinalizePayload) bool {
 	return sessionHeldLocally(p) || (h.manualPublishing() && h.holdIfUnpublished(p.SessionDir, p.LedgerPath, true))
+}
+
+// PruneSessionCache removes a session's cache folder once its content is safe
+// in the Ledger, or discarded. A live stream (ADR-247) the server has not
+// finished yet keeps its own files there: the daemon's live tick scans only
+// this cache to open, drain and close it, so removing them left the stream
+// open on the server for good. Everything else goes, so no transcript is left
+// for Detect to queue again. It reports whether live files were kept; the
+// folder is then reclaimed with the rest of the cache once the stream ends.
+func PruneSessionCache(logger *slog.Logger, dir string) (keptLive bool) {
+	if dir == "" || dir == "." {
+		return false
+	}
+	if !liveStreamUnfinished(dir) {
+		if err := os.RemoveAll(dir); err != nil {
+			logger.Debug("prune session cache", "dir", dir, "err", err)
+		}
+		return false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		logger.Debug("prune session cache", "dir", dir, "err", err)
+		return true
+	}
+	removed := 0
+	for _, e := range entries {
+		if livesession.IsLocalFile(e.Name()) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			logger.Debug("prune session cache", "dir", dir, "file", e.Name(), "err", err)
+			continue
+		}
+		removed++
+	}
+	logger.Info("session cache pruned, live stream files kept until the stream ends", "session", filepath.Base(dir), "removed", removed)
+	return true
+}
+
+// liveStreamUnfinished reports whether the session's live stream still owes the
+// server an open, a drain or a close. An unreadable stream state counts as
+// unfinished: keeping a few small files beats stranding a stream. A deleted
+// stream is finished here: abort records its server delete in a queue outside
+// the folder.
+func liveStreamUnfinished(dir string) bool {
+	st, err := livesession.ReadState(dir)
+	if errors.Is(err, livesession.ErrNotStreaming) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	switch st.Status {
+	case livesession.StatusPending, livesession.StatusStreaming, livesession.StatusClosing:
+		return true
+	}
+	return false
 }
