@@ -838,8 +838,8 @@ func (s *SyncScheduler) waitClones(timeout time.Duration) {
 	}
 }
 
-// Start runs the scheduler until cancellation, then joins the delayed startup
-// pull before returning. Tracked background clones receive a bounded drain period.
+// Start runs the scheduler until cancellation, then joins the active Team
+// Context cycle. Tracked background clones receive a bounded drain period.
 func (s *SyncScheduler) Start(ctx context.Context) {
 	if s.ctx == nil { // the daemon binds it before the IPC server starts
 		s.ctx = ctx
@@ -888,7 +888,7 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	// team context sync (lower priority, less frequent)
 	var teamContextTicker *time.Ticker
 	var teamContextChan <-chan time.Time
-	var startupTeamSyncDone <-chan struct{}
+	var teamSyncDone <-chan struct{}
 	if s.config.TeamContextSyncInterval > 0 && s.config.ProjectRoot != "" {
 		teamContextTicker = time.NewTicker(s.config.TeamContextSyncInterval)
 		teamContextChan = teamContextTicker.C
@@ -903,15 +903,12 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		// delayed team context sync for regular pulls (not just cloning).
 		// Gated on global-sync ownership — non-owner daemons leave team
 		// contexts to the owning daemon for this endpoint (ox-6zme).
-		startupTeamSyncDone = startDelayedTeamContextSync(ctx, 5*time.Second, func(ctx context.Context) {
+		teamSyncDone = startDelayedTeamContextSync(ctx, 5*time.Second, func(ctx context.Context) {
 			if !s.IsGlobalSyncOwner() {
 				return
 			}
 			s.pullTeamContexts(ctx)
 		})
-		// The startup pull must stop before the scheduler's caller releases
-		// its resources. Cancellation also interrupts the initial delay.
-		defer func(done <-chan struct{}) { <-done }(startupTeamSyncDone)
 	} else {
 		s.logger.Info("sync scheduler started",
 			"read_interval", s.config.SyncIntervalRead,
@@ -1002,6 +999,9 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			if teamSyncDone != nil {
+				<-teamSyncDone
+			}
 			// wait briefly for in-flight background clones to finish,
 			// blocking any further clone spawns from still-running sync goroutines
 			s.waitClones(3 * time.Second)
@@ -1018,26 +1018,29 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			readTicker.Reset(jitteredDuration(s.config.SyncIntervalRead, 0.10))
 
 		case <-teamContextChan:
-			// not traced: high-frequency sync dominates span volume with little diagnostic value
-			//
 			// Global-sync gate (ox-6zme): only the daemon holding the
 			// per-endpoint flock lease runs team-context pulls and KB
 			// ListBubbles. Other daemons consume the on-disk state the
 			// owner keeps fresh — every daemon still resolves its own
 			// per-project KB symlinks from whatever is on disk via the
 			// existing reconciler.
-			if periodicGCDone == nil && s.IsGlobalSyncOwner() {
-				s.pullTeamContexts(ctx)
-				// kb bubbles share the team-context cadence (15s). Per-bubble
-				// FETCH_HEAD dedup inside pullManagedRepo (threshold =
-				// max(SyncInterval/2, MinFetchHeadAge)) gates repo/custom
-				// bubbles down to the slower read cadence automatically — see
-				// kbSyncIntervalFor in sync_bubbles.go.
-				s.syncBubbles(ctx)
+			// Coalesce ticks with the startup pull or a periodic cycle so
+			// slow Team Context remotes never stall Ledger work.
+			if periodicGCDone == nil && teamSyncDone == nil && s.IsGlobalSyncOwner() {
+				teamSyncDone = startDelayedTeamContextSync(ctx, 0, func(ctx context.Context) {
+					s.pullTeamContexts(ctx)
+					// Bubbles share this cadence and deduplicate fetches per repo.
+					if ctx.Err() == nil {
+						s.syncBubbles(ctx)
+					}
+				})
 			}
 			if teamContextTicker != nil {
 				teamContextTicker.Reset(jitteredDuration(s.config.TeamContextSyncInterval, 0.10))
 			}
+
+		case <-teamSyncDone:
+			teamSyncDone = nil
 
 		case <-heartbeatTicker.C:
 			// not traced: lightweight liveness ping, not useful in telemetry
@@ -1051,11 +1054,8 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		case <-startupPullDone:
 			startupPullDone = nil
 
-		case <-startupTeamSyncDone:
-			startupTeamSyncDone = nil
-
 		case <-gcChan:
-			if periodicGCDone == nil && startupPullDone == nil && startupTeamSyncDone == nil {
+			if periodicGCDone == nil && startupPullDone == nil && teamSyncDone == nil {
 				periodicGCDone = s.startPeriodicGC(ctx)
 				if periodicGCDone != nil {
 					// Leave one coalesced watcher event queued until GC releases
@@ -1110,7 +1110,7 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	}
 }
 
-// startDelayedTeamContextSync schedules the initial team pull and reports when
+// startDelayedTeamContextSync schedules a background team cycle and reports when
 // its callback has finished, including when cancellation skips the pull.
 func startDelayedTeamContextSync(ctx context.Context, delay time.Duration, pull func(context.Context)) <-chan struct{} {
 	done := make(chan struct{})
@@ -1737,8 +1737,19 @@ func (s *SyncScheduler) drainMurmurOutbox(ctx context.Context) {
 				continue
 			}
 
-			if err := writeAndCommitMurmur(ctx, payload.TargetDir, payload); err != nil {
-				s.logger.Warn("queued murmur commit failed (will retry)", "path", e.path, "error", err)
+			commit := func() error { return writeAndCommitMurmur(ctx, ws.Path, payload) }
+			var commitErr error
+			if ws.Type == WorkspaceTypeTeamContext {
+				var acquired bool
+				acquired, commitErr = gitutil.TryWithPreCloneLock(ws.Path, commit)
+				if !acquired && commitErr == nil {
+					continue // leave the outbox entry until the checkout is available
+				}
+			} else {
+				commitErr = commit()
+			}
+			if commitErr != nil {
+				s.logger.Warn("queued murmur commit failed (will retry)", "path", e.path, "error", commitErr)
 				continue // leave for next cycle
 			}
 			s.logger.Debug("drained queued murmur", "path", e.path, "rel_path", payload.RelPath)
@@ -3106,13 +3117,15 @@ func (s *SyncScheduler) recordSyncState(ctx context.Context, workspacePath strin
 	lock.Lock()
 	defer lock.Unlock()
 
+	ctx, cancel := s.localSyncCompletionContext(ctx)
+	defer cancel()
+	state := LoadSyncState(workspacePath)
 	sha, err := gitHeadSHA(ctx, workspacePath)
 	if err != nil {
 		s.logger.Debug("failed to get HEAD SHA for sync state", "path", workspacePath, "error", err)
-		sha = ""
+		sha = state.LastSyncCommit
 	}
 
-	state := LoadSyncState(workspacePath)
 	state.RecordSuccess(sha)
 	if err := SaveSyncState(workspacePath, state); err != nil {
 		s.logger.Warn("failed to save sync state", "path", workspacePath, "error", err)

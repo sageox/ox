@@ -56,21 +56,48 @@ func gcBackupPath(path string) string {
 	return filepath.Clean(path) + ".old"
 }
 
-// checkAndRunGC reclones workspaces due for garbage collection.
-func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
+// checkAndRunGC keeps the Ledger phase serialized with watcher validation and
+// outbox draining. The scheduler pauses both until Ledger cleanup completes. Launch Team Context cleanup before the Ledger phase so a stalled
+// Ledger reclone cannot prevent recovery of an interrupted Team Context swap.
+func (s *SyncScheduler) checkAndRunGC(ctx context.Context) <-chan struct{} {
 	// only one GC at a time
 	if !atomic.CompareAndSwapInt32(&s.gcInProgress, 0, 1) {
 		s.logger.Debug("gc: already in progress, skipping check")
-		return
+		return nil
 	}
-	defer atomic.StoreInt32(&s.gcInProgress, 0)
+	var active atomic.Int32
+	active.Store(1)
+	finish := func() {
+		if active.Add(-1) == 0 {
+			atomic.StoreInt32(&s.gcInProgress, 0)
+		}
+	}
+	defer finish()
 
 	if err := s.workspaceRegistry.LoadFromConfig(); err != nil {
 		s.logger.Warn("gc: failed to load workspace registry", "error", err)
-		return
+		return nil
 	}
 
-	teamContexts := s.workspaceRegistry.GetTeamContexts()
+	teams := s.workspaceRegistry.GetTeamContexts()
+	var teamDone chan struct{}
+	if len(teams) > 0 && ctx.Err() == nil && s.addClone() {
+		active.Add(1)
+		teamDone = make(chan struct{})
+		go func() {
+			defer s.cloneWg.Done()
+			defer close(teamDone)
+			defer finish()
+			taskCtx, span := s.tracer.StartTask(ctx, "daemon:team_context_gc")
+			defer span.End()
+			s.checkTeamContextGC(taskCtx, teams)
+		}()
+	}
+	s.checkLedgerAndBubbleGC(ctx)
+	return teamDone
+}
+
+func (s *SyncScheduler) checkTeamContextGC(ctx context.Context, teamContexts []WorkspaceState) {
 	for _, ws := range teamContexts {
 		interruptedSwap := gitutil.IsGitRepo(gcBackupPath(ws.Path))
 		if (!ws.Exists && !interruptedSwap) || ws.CloneURL == "" {
@@ -107,8 +134,11 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 		s.logger.Info("gc: workspace due for reclone", "team", ws.TeamName, "id", ws.ID,
 			"reason", reason, "interval_days", intervalDays, "last_gc", ws.LastGCTime)
 
-		// run GC synchronously (one at a time) then release the flag
+		// Process one reclone at a time within the GC worker.
 		result := s.runBlueGreenGC(ctx, ws)
+		if result == gcSkippedLocked {
+			continue // no reclone started, so try the next due checkout
+		}
 
 		repoName := ws.TeamName
 		if repoName == "" {
@@ -140,7 +170,9 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 
 		break // one GC per check cycle to avoid overloading
 	}
+}
 
+func (s *SyncScheduler) checkLedgerAndBubbleGC(ctx context.Context) {
 	// ledger GC reclone — same blue-green pattern as team contexts
 	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(gcBackupPath(l.Path))) && l.CloneURL != "" {
 		if _, loaded := s.cloneInFlight.Load(l.ID); !loaded {
@@ -613,6 +645,26 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 // sample.
 func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) (result gcResult, recovered bool) {
 	ws.Path = filepath.Clean(ws.Path)
+	if ws.Type != WorkspaceTypeTeamContext {
+		return s.recloneWorkspaceForGC(ctx, ws, captureUnpushedOnDiverge)
+	}
+	// The Git lock lives in the clone being replaced. Use the stable path
+	// lock shared by Team Context pulls and clone setup across the swap.
+	acquired, err := gitutil.TryWithPreCloneLock(ws.Path, func() error {
+		result, recovered = s.recloneWorkspaceForGC(ctx, ws, captureUnpushedOnDiverge)
+		return nil
+	})
+	if err != nil {
+		s.logger.Warn("gc: cannot lock Team Context checkout", "path", ws.Path, "error", err)
+		return gcFailed, false
+	}
+	if !acquired {
+		return gcSkippedLocked, false
+	}
+	return result, recovered
+}
+
+func (s *SyncScheduler) recloneWorkspaceForGC(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) (result gcResult, recovered bool) {
 	newPath := ws.Path + ".new"
 	oldPath := gcBackupPath(ws.Path)
 	diffFile := ws.Path + ".gc-diff"

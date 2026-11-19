@@ -809,7 +809,7 @@ func TestCheckAndRunGC_TeamInterruptedSwapOutranksRecentGC(t *testing.T) {
 			registry.workspaces = map[string]*WorkspaceState{ws.ID: &ws}
 			registry.mu.Unlock()
 
-			scheduler.checkAndRunGC(context.Background())
+			awaitStartupCompletion(t, scheduler.checkAndRunGC(t.Context()))
 
 			data, err := os.ReadFile(cache)
 			require.NoError(t, err)

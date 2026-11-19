@@ -48,6 +48,48 @@ func pullOnce(ctx context.Context, clone string) ManagedRepoPullResult {
 	})
 }
 
+// Fetch and lock waits can leave less time on the cycle than a healthy
+// rebase needs, even with only one commit to replay.
+func TestPullManagedRepo_RebasesShortBacklogPastCycleDeadline(t *testing.T) {
+	clone := behindClone(t)
+	require.NoError(t, os.WriteFile(filepath.Join(clone, "local.md"), []byte("local\n"), 0o644))
+	out, err := runGitOut(t, clone, "add", "local.md")
+	require.NoError(t, err, out)
+	out, err = runGitOut(t, clone, "commit", "-m", "local")
+	require.NoError(t, err, out)
+	agePastFetchHead(t, clone)
+
+	// A real pre-rebase hook marks when Git starts replay. The test only
+	// releases it after the cycle expires, so a passing pull must have
+	// outlived that deadline.
+	gitDir := filepath.Join(clone, ".git")
+	hook := "#!/bin/sh\ntouch .git/test-rebase-started\n" +
+		"while [ ! -e .git/test-rebase-release ]; do sleep 0.05; done\n"
+	require.NoError(t, os.WriteFile(filepath.Join(gitDir, "hooks", "pre-rebase"), []byte(hook), 0o755))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	result := make(chan ManagedRepoPullResult, 1)
+	go func() { result <- pullOnce(ctx, clone) }()
+	release := filepath.Join(gitDir, "test-rebase-release")
+	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0o644) })
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(gitDir, "test-rebase-started"))
+		return err == nil
+	}, 2500*time.Millisecond, 25*time.Millisecond, "git did not reach the rebase hook before the cycle expired")
+	<-ctx.Done()
+	require.NoError(t, os.WriteFile(release, nil, 0o644))
+	select {
+	case res := <-result:
+		require.NoError(t, res.Err)
+		require.True(t, res.PullRan)
+		require.Equal(t, "v2\n", readF(t, clone))
+		require.FileExists(t, filepath.Join(clone, "local.md"))
+	case <-time.After(5 * time.Second):
+		t.Fatal("git did not finish replay after the hook was released")
+	}
+}
+
 // A fresh index.lock that a live git releases moments later must delay the pull,
 // not skip it. Skipping on sight turned every hook commit into a missed sync
 // cycle ("git lock files detected, skipping pull" 7-16 times per 30 minutes).

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/require"
@@ -195,6 +196,34 @@ func TestMurmurOutbox_RetriesAfterGCLockReleases(t *testing.T) {
 		require.JSONEq(t, string(payload.MurmurJSON), gitCmd(t, bare, "show", "refs/heads/main:"+payload.RelPath))
 	}
 	entries, err := ReadOutboxMurmurs(dir)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestDrainMurmurOutbox_RetainsEntryWhileTeamCheckoutIsLocked(t *testing.T) {
+	isolateMurmurOutbox(t)
+	if testing.Short() {
+		t.Skip("short: shells git")
+	}
+	team, before := initGitRepoWithCommit(t)
+	p := makeOutboxMurmur(t, team, "team message", time.Now().UTC())
+	require.NoError(t, WriteOutboxMurmur(team, p))
+	s := newDrainScheduler(t, team)
+	s.workspaceRegistry.workspaces["ledger"].Type = WorkspaceTypeTeamContext
+
+	require.NoError(t, gitutil.WithPreCloneLock(t.Context(), team, func() error {
+		s.drainMurmurOutbox(t.Context())
+		require.Equal(t, before, getGitSHA(t, team))
+		require.NoFileExists(t, filepath.Join(team, p.RelPath))
+		entries, err := ReadOutboxMurmurs(team)
+		require.NoError(t, err)
+		require.Len(t, entries, 1, "a Team Context reclone must leave the queued murmur intact")
+		return nil
+	}))
+
+	s.drainMurmurOutbox(t.Context())
+	require.Contains(t, gitLog(t, team, p.RelPath), "murmur: team message")
+	entries, err := ReadOutboxMurmurs(team)
 	require.NoError(t, err)
 	require.Empty(t, entries)
 }

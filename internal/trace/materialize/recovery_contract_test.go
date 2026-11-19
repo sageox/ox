@@ -69,3 +69,31 @@ func TestMissingUnselectedSpoolProducesEmptyAttachment(t *testing.T) {
 	require.Empty(t, gzipContent(t, cache, SpansFile))
 	require.Empty(t, gzipContent(t, cache, EventsFile))
 }
+
+func TestMissingSelectedEventSpoolPreservesPublishedSidecars(t *testing.T) {
+	spool, cache := setup(t)
+	spans, events := body("previous-span", "spans"), body("previous-event", "events")
+	writeSpool(t, spool, nativeA, "spans", spans)
+	writeSpool(t, spool, nativeA, "events", events)
+	capture := &model.Capture{Boundaries: []model.Boundary{
+		boundary("start", 0, 0), boundary("stop", int64(len(spans)), int64(len(events))),
+	}}
+	_, err := Build(spool, cache, capture)
+	require.NoError(t, err)
+	beforeSpans := gzipContent(t, cache, SpansFile)
+	beforeEvents := gzipContent(t, cache, EventsFile)
+
+	replacement := body("replacement-span", "spans")
+	writeSpool(t, spool, nativeA, "spans", replacement)
+	require.NoError(t, os.Remove(filepath.Join(spool, nativeA, "logs.jsonl")))
+	capture.Boundaries[1] = boundary("stop", int64(len(replacement)), int64(len(events)))
+	_, err = Build(spool, cache, capture)
+	require.ErrorIs(t, err, ErrSelectedSpoolUnavailable)
+	require.Equal(t, beforeSpans, gzipContent(t, cache, SpansFile))
+	require.Equal(t, beforeEvents, gzipContent(t, cache, EventsFile))
+
+	writeSpool(t, spool, nativeA, "events", events)
+	_, err = Build(spool, cache, capture)
+	require.NoError(t, err)
+	require.Contains(t, string(gzipContent(t, cache, SpansFile)), "replacement-span")
+}
