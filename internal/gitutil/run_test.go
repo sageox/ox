@@ -205,3 +205,30 @@ func TestRunGit(t *testing.T) {
 		}
 	})
 }
+
+func TestRunGit_MissingSubcommand(t *testing.T) {
+	_, err := RunGit(t.Context(), "")
+	require.ErrorContains(t, err, "missing subcommand")
+	_, err = RunGitStdout(t.Context(), "")
+	require.ErrorContains(t, err, "missing subcommand")
+}
+
+func TestRunGitStdout(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	require.NoError(t, exec.Command("git", "init", dir).Run())
+
+	out, err := RunGitStdout(t.Context(), dir, "rev-parse", "--is-inside-work-tree")
+	require.NoError(t, err)
+	assert.Equal(t, "true\n", string(out))
+
+	_, err = RunGitStdout(t.Context(), dir, "rev-parse", "--verify", "no-such-ref")
+	require.ErrorContains(t, err, "git rev-parse: fatal")
+
+	// git config --get exits 1 with no stderr for a missing key.
+	_, err = RunGitStdout(t.Context(), dir, "config", "--get", "ox.missing")
+	require.Error(t, err)
+	assert.Equal(t, "git config: exit status 1", err.Error())
+}
