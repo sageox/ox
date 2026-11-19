@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -239,6 +240,33 @@ func TestReadPlanHistoryEntries_EmptyLines(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Len(t, entries, 2)
+}
+
+// Issue #1890: one entry holding a screenshot or long tool output passed the
+// scanner's 1 MiB cap and the whole import failed with "token too long".
+func TestReadPlanHistoryEntries_LineOverOneMiB(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "history.jsonl")
+	big := strings.Repeat("x", 3<<20)
+	content := `{"type":"user","content":"` + big + `"}` + "\n" + `{"type":"assistant","content":"after"}`
+	require.NoError(t, os.WriteFile(filePath, []byte(content), 0o600))
+
+	entries, _, err := readPlanHistoryEntries(filePath)
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	assert.Len(t, entries[0].Content, len(big))
+	assert.Equal(t, "after", entries[1].Content, "an unterminated last line is still read")
+}
+
+// An entry past the saved-session reader's limit fails the import by line
+// rather than saving a session that cannot be read back.
+func TestReadPlanHistoryEntries_LineOverSessionLimit(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "history.jsonl")
+	content := `{"type":"user","content":"ok"}` + "\n" +
+		`{"type":"user","content":"` + strings.Repeat("x", planHistoryMaxLineBytes) + `"}` + "\n"
+	require.NoError(t, os.WriteFile(filePath, []byte(content), 0o600))
+
+	_, _, err := readPlanHistoryEntries(filePath)
+	require.ErrorContains(t, err, "line 2")
 }
 
 func TestReadPlanHistoryEntries_FileNotFound(t *testing.T) {

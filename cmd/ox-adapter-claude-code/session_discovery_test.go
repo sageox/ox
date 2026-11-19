@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -308,5 +309,99 @@ func TestFindSessionFile_SessionInALinkedWorktreeOfTheRepo(t *testing.T) {
 	writeTurns()
 	if got, _, err := findSessionFile(repo, "", "", id); err == nil {
 		t.Fatalf("another repository's worktree inside this one returned %q", got)
+	}
+}
+
+// Issue #1890: a Claude Code worktree beside the main checkout. Its sessions
+// land in the worktree's project bucket and record its cwd, which is outside
+// the main checkout's tree, so stop found nothing and uploaded nothing.
+func TestFindSessionFile_SessionInAWorktreeOutsideTheRepo(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"}, args...)...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	repo := filepath.Join(home, "work", "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".sageox", "config.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git(repo, "init", "-q")
+	git(repo, "add", ".sageox")
+	git(repo, "commit", "-q", "-m", "init")
+	wt := filepath.Join(home, "work", "repo-feature")
+	git(repo, "worktree", "add", "-q", "-b", "feature", wt)
+
+	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	bucket := filepath.Join(home, ".claude", "projects", claudeProjectHash(wt))
+	if err := os.MkdirAll(bucket, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(bucket, id+".jsonl")
+	turns := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, wt)
+	if err := os.WriteFile(path, []byte(turns), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{repo, wt} {
+		got, _, err := findSessionFile(root, "", "", id)
+		if err != nil || got != path {
+			t.Fatalf("from %s: got %q, %v; want %q", root, got, err, path)
+		}
+	}
+
+	// a transcript that exists but is another repository's says why it was
+	// refused, instead of reading as "not found"
+	other := filepath.Join(home, "work", "other")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(other, "init", "-q")
+	turns = fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, other)
+	if err := os.WriteFile(path, []byte(turns), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = findSessionFile(repo, "", "", id)
+	if err == nil || !strings.Contains(err.Error(), "not accepted") || !strings.Contains(err.Error(), path) {
+		t.Fatalf("a refused transcript must be named with the reason, got %v", err)
+	}
+}
+
+// A transcript line holding a screenshot passes 1 MiB; the readers that pick
+// the recording's start and attribute the session must read past it.
+func TestSessionReadersHandleLinesOverOneMiB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	since := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	big := fmt.Sprintf("{\"timestamp\":%q,\"image\":%q}\n", since.Add(-time.Hour).Format(time.RFC3339), strings.Repeat("A", 2<<20))
+	late := fmt.Sprintf("{\"timestamp\":%q,\"text\":\"agent Oxab12\"}\n", since.Add(time.Hour).Format(time.RFC3339))
+	if err := os.WriteFile(path, []byte(big+late), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := findStartOffset(path, since); got != int64(len(big)) {
+		t.Fatalf("start offset = %d, want %d", got, len(big))
+	}
+	if !sessionContainsAgentID(path, "Oxab12") {
+		t.Fatal("agent ID after a large line was not found")
+	}
+	if sessionContainsAgentID(path, "Oxzz99") {
+		t.Fatal("an agent ID absent from the transcript was reported present")
+	}
+	// an unterminated tail is still being written: start no later than it
+	partial := filepath.Join(t.TempDir(), "partial.jsonl")
+	if err := os.WriteFile(partial, []byte(big+strings.TrimSuffix(late, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := findStartOffset(partial, since.Add(2*time.Hour)); got != int64(len(big)) {
+		t.Fatalf("start offset with an unterminated tail = %d, want %d", got, len(big))
 	}
 }
