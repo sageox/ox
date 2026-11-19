@@ -43,6 +43,16 @@ func TestEscapeMDX(t *testing.T) {
 			"Example:\n\n    ```\n    ox <name>\n    ```\n<after>\n",
 			"Example:\n\n    ```\n    ox <name>\n    ```\n\\<after>\n",
 		},
+		{
+			"indented closer ends an MDX fence",
+			"~~~\n<name>\n    ~~~\n<after>\n",
+			"~~~\n<name>\n    ~~~\n\\<after>\n",
+		},
+		{
+			"an MDX fence can end at lower indentation",
+			"    ~~~\n    <name>\n~~~\n<after>\n",
+			"    ~~~\n    <name>\n~~~\n\\<after>\n",
+		},
 		{"autolink is text in MDX", "See <https://sageox.ai> `<x>`\n", "See \\<https://sageox.ai> `<x>`\n"},
 	}
 	for _, tt := range tests {
