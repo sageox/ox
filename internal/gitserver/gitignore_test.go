@@ -28,6 +28,9 @@ func runGit(t *testing.T, dir string, args ...string) {
 // setupGitRepoWithSageox creates a git repo with a committed .sageox/sync.manifest.
 func setupGitRepoWithSageox(t *testing.T) string {
 	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
 	dir := t.TempDir()
 	require.NoError(t, exec.Command("git", "init", "--initial-branch=main", dir).Run())
 	require.NoError(t, exec.Command("git", "-C", dir, "config", "user.name", "test").Run())
@@ -172,6 +175,45 @@ func TestEnsureCheckoutGitignore_RejectsNonRegularTrackedPolicy(t *testing.T) {
 	require.ErrorContains(t, EnsureCheckoutGitignore(dir), "must be a regular file")
 	_, err := os.Lstat(ignorePath)
 	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestEnsureCheckoutGitignore_RejectsInvalidCheckoutShapes(t *testing.T) {
+	t.Run("repo path is a file", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "not-a-dir")
+		require.NoError(t, os.WriteFile(file, nil, 0o644))
+		require.Error(t, EnsureCheckoutGitignore(file))
+	})
+	t.Run(".sageox is a file", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, ".sageox"), nil, 0o644))
+		require.ErrorContains(t, EnsureCheckoutGitignore(dir), "must be a directory")
+	})
+	t.Run("policy is a directory", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, checkoutGitignorePath), 0o755))
+		require.ErrorContains(t, EnsureCheckoutGitignore(dir), "must be a regular file")
+	})
+}
+
+func TestEnsureCheckoutGitignore_ReportsUnreadablePolicy(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires POSIX permission enforcement")
+	}
+	t.Run("policy unreadable", func(t *testing.T) {
+		dir := t.TempDir()
+		policy := filepath.Join(dir, checkoutGitignorePath)
+		require.NoError(t, os.MkdirAll(filepath.Dir(policy), 0o755))
+		require.NoError(t, os.WriteFile(policy, []byte("*\n"), 0o000))
+		require.ErrorContains(t, EnsureCheckoutGitignore(dir), "read checkout gitignore")
+	})
+	t.Run(".sageox unsearchable", func(t *testing.T) {
+		dir := t.TempDir()
+		sageox := filepath.Join(dir, ".sageox")
+		require.NoError(t, os.MkdirAll(sageox, 0o755))
+		require.NoError(t, os.Chmod(sageox, 0o000))
+		t.Cleanup(func() { _ = os.Chmod(sageox, 0o755) })
+		require.ErrorContains(t, EnsureCheckoutGitignore(dir), "inspect checkout gitignore")
+	})
 }
 
 func TestEnsureCheckoutGitignore_PreservesExisting(t *testing.T) {
