@@ -1751,7 +1751,12 @@ func (s *SyncScheduler) reopenWhisperStoreAfterGC() {
 		return
 	}
 
-	dbPath := filepath.Join(paths.WhisperDBDir(repoID, ep), "whisper.db")
+	whisperDir := paths.WhisperDBDir(repoID, ep)
+	if err := paths.CheckNoSymlinksBelow(paths.LedgersDataDir(repoID, ep), whisperDir); err != nil {
+		s.logger.Error("whisper_store_refused", "path", whisperDir, "reason", "symlink_in_ledger_cache", "error", err)
+		return
+	}
+	dbPath := filepath.Join(whisperDir, "whisper.db")
 	if err := registry.ReopenLedgerStore(dbPath); err != nil {
 		s.logger.Error("gc: failed to reopen whisper store after ledger reclone", "error", err)
 	}
