@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -136,11 +137,28 @@ func TestEnsureCheckoutGitignore_CancelsWhileHelperHoldsStderr(t *testing.T) {
 	bin := t.TempDir()
 	started := filepath.Join(bin, "started")
 	t.Setenv("OX_TEST_GIT_STARTED", started)
+	if _, err := exec.LookPath("perl"); err != nil {
+		t.Skip("requires perl to detach the helper's process group")
+	}
+	// The helper leaves Git's process group, so the group kill misses it and
+	// it keeps stderr open. Only WaitDelay can end the wait.
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte(`#!/bin/sh
-sleep 6 >/dev/null &
+perl -e 'setpgrp(0, 0); exec "sleep", "10"' >/dev/null &
+echo $! > "$OX_TEST_GIT_STARTED.pid"
 touch "$OX_TEST_GIT_STARTED"
 wait
 `), 0o755))
+	t.Cleanup(func() {
+		data, err := os.ReadFile(started + ".pid")
+		if err != nil {
+			return
+		}
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+			if p, err := os.FindProcess(pid); err == nil {
+				_ = p.Kill()
+			}
+		}
+	})
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -156,7 +174,7 @@ wait
 	select {
 	case err := <-result:
 		require.Error(t, err)
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("checkout waited for the canceled Git helper")
 	}
 }
