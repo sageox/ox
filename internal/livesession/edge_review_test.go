@@ -3,6 +3,7 @@ package livesession_test
 import (
 	"errors"
 	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/sageox/ox/internal/livesession/livesessiontest"
 	"github.com/sageox/ox/internal/secretguard"
 	"github.com/sageox/ox/internal/sessionid"
+	"github.com/sageox/ox/internal/sessionstream"
 )
 
 // Shrinking a stalled batch must never shrink what is scanned together. Three
@@ -149,6 +151,96 @@ func TestOpenAtABlockingEdgeIsRecordedForThePendingStream(t *testing.T) {
 
 			if st, err := livesession.Open(t.Context(), cfg, dir, p); err != nil || st.Status != livesession.StatusStreaming || !st.EdgeBlockedSince.IsZero() {
 				t.Fatalf("open once the edge cleared: %+v err=%v", st, err)
+			}
+			if n := countLines(logs.String(), "live_session_edge_unblocked"); n != 1 {
+				t.Fatalf("%d edge_unblocked lines, want 1", n)
+			}
+		})
+	}
+}
+
+// A 403 naming an action is api-go's own answer, whatever its reason says:
+// clients branch on the action. stop_and_wipe must reach the delete path
+// (status deleted, publication held), never retry as an edge block.
+func TestA403WithAnActionIsNeverEdgeBlocked(t *testing.T) {
+	tests := []struct {
+		name   string
+		reason string
+		action sessionstream.Action
+		close  bool
+		want   livesession.Status
+	}{
+		{name: "append stop_and_wipe, no reason", action: sessionstream.ActionStopAndWipe, want: livesession.StatusDeleted},
+		{name: "append stop_and_wipe, unavailable", reason: sessionstream.ReasonUnavailable, action: sessionstream.ActionStopAndWipe, want: livesession.StatusDeleted},
+		{name: "close stop_and_wipe, no reason", action: sessionstream.ActionStopAndWipe, close: true, want: livesession.StatusDeleted},
+		{name: "append stop, no reason", action: sessionstream.ActionStop, want: livesession.StatusDisabled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.spool(lines(0, 3))
+			var err error
+			if tt.close {
+				e.mustDrain()
+				e.srv.RefuseNextClose(http.StatusForbidden, tt.reason, tt.action, nil)
+				_, err = livesession.Close(t.Context(), e.cfg, e.dir, "", testBudget)
+			} else {
+				e.srv.RefuseNextAppend(http.StatusForbidden, tt.reason, tt.action)
+				_, err = e.drain()
+			}
+			if errors.Is(err, livesession.ErrEdgeBlocked) {
+				t.Fatalf("a 403 with action %q read as the edge: %v", tt.action, err)
+			}
+			st := e.state()
+			if st.Status != tt.want || !st.EdgeBlockedSince.IsZero() {
+				t.Fatalf("state=%+v, want status %s and no edge streak", st, tt.want)
+			}
+			if tt.want == livesession.StatusDeleted && !livesession.WasDeletedOnServer(e.dir) {
+				t.Fatal("the server-side delete was not recorded")
+			}
+		})
+	}
+}
+
+// A pending stream the edge blocked, then answered by SageOx itself (503 or
+// 401), no longer blames the edge: any answer from SageOx ends the streak,
+// and the stream stays pending for the next attempt.
+func TestOpenClearsAnEdgeStreakWhenSageOxAnswers(t *testing.T) {
+	tests := []struct {
+		name   string
+		answer func(*livesessiontest.Server, bool)
+	}{
+		{name: "503", answer: (*livesessiontest.Server).SetDown},
+		{name: "401", answer: (*livesessiontest.Server).RejectAuth},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := livesessiontest.New(t)
+			cfg := srv.Config(t)
+			logs := &lockedBuffer{}
+			cfg.Logger = slog.New(slog.NewTextHandler(logs, nil))
+			dir := t.TempDir()
+			p := livesession.OpenParams{
+				SessionID: sessionid.GenerateSessionID(), SessionName: "2026-03-04T13-41-person-a-Oxabc1",
+				RepoID: "repo_test", Agent: "claude-code", StartedAt: time.Now(),
+			}
+			if _, err := livesession.Prepare(t.Context(), cfg, dir, p); err != nil {
+				t.Fatal(err)
+			}
+			srv.BlockAtEdge("", 1, "text/html", cloudFrontPage)
+			if _, err := livesession.Open(t.Context(), cfg, dir, p); !errors.Is(err, livesession.ErrEdgeBlocked) {
+				t.Fatalf("open at a blocking edge: %v", err)
+			}
+			tt.answer(srv, true)
+			if _, err := livesession.Open(t.Context(), cfg, dir, p); err == nil || errors.Is(err, livesession.ErrEdgeBlocked) {
+				t.Fatalf("open answered %s by SageOx: %v", tt.name, err)
+			}
+			st, err := livesession.ReadState(dir)
+			if err != nil || st.Status != livesession.StatusPending || !st.EdgeBlockedSince.IsZero() {
+				t.Fatalf("state after SageOx answered: %+v err=%v", st, err)
+			}
+			if notice := livesession.StreamNotice(dir); notice != "" {
+				t.Fatalf("status still blames the edge: %q", notice)
 			}
 			if n := countLines(logs.String(), "live_session_edge_unblocked"); n != 1 {
 				t.Fatalf("%d edge_unblocked lines, want 1", n)

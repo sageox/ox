@@ -40,9 +40,15 @@ const (
 // body) or "foreign_json" (the regional WAF's custom JSON body, which has no
 // reason). api-go answers every 403 with a reason and never a 403 unavailable,
 // and the vendored client marks a body it cannot decode as unavailable/retry,
-// so either shape on a 403 means the request never reached it.
+// so either shape on a 403 means the request never reached it. The action is
+// checked first: clients branch on it, never on the reason, and an answer
+// naming any action but retry is api-go's own (stop_and_wipe must reach the
+// delete path, whatever its reason says).
 func edgeShape(api *sessionstream.APIError) (string, bool) {
 	if api.Status != http.StatusForbidden {
+		return "", false
+	}
+	if api.Body.Action != "" && api.Body.Action != sessionstream.ActionRetry {
 		return "", false
 	}
 	switch api.Body.Reason {

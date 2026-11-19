@@ -129,7 +129,8 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 		return State{}, err
 	}
 	if _, err := c.RegisterKey(ctx, keyLabel()); err != nil {
-		if eerr := openEdgeBlocked(ctx, cfg, dir, st, onDisk, err, "register_key"); eerr != nil {
+		var eerr error
+		if st, eerr = openAnswered(ctx, cfg, dir, st, onDisk, err, "register_key"); eerr != nil {
 			return State{}, eerr
 		}
 		return disableOnKeyConflict(dir, cfg.Endpoint, st, err)
@@ -155,7 +156,8 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 		return abortedWhileOpening(ctx, cfg, st)
 	}
 	if err != nil {
-		if eerr := openEdgeBlocked(ctx, cfg, dir, st, onDisk, err, "open"); eerr != nil {
+		var eerr error
+		if st, eerr = openAnswered(ctx, cfg, dir, st, onDisk, err, "open"); eerr != nil {
 			return State{}, eerr
 		}
 		return openRefused(ctx, cfg, dir, st, err)
@@ -186,28 +188,33 @@ func abortedWhileOpening(ctx context.Context, cfg Config, st State) (State, erro
 	return st, nil
 }
 
-// openEdgeBlocked handles a key registration or open the network edge refused
-// (see edgeShape) as a drain does: logged once per streak without the body, and
-// for a stream already on disk (a pending one included) recorded in its state,
-// so status can say so while it waits to open. A fresh stream has no state to
-// record it in and leaves none. It returns nil for any other failure.
-func openEdgeBlocked(ctx context.Context, cfg Config, dir string, st State, onDisk bool, err error, during string) error {
+// openAnswered tracks the edge streak across a failed key registration or
+// open, as a drain does. An edge 403 (see edgeShape) is logged once per streak
+// without the body and returned as ErrEdgeBlocked; any other answer came from
+// SageOx itself and ends a streak (a 401 or 503 is not the edge's doing). A
+// stream already on disk (a pending one included) records either change, so
+// status tells it right while the stream waits to open; a fresh stream has no
+// state to record it in and leaves none. A transport failure heard from
+// neither, so it changes nothing. It returns the state as recorded.
+func openAnswered(ctx context.Context, cfg Config, dir string, st State, onDisk bool, err error, during string) (State, error) {
 	var api *sessionstream.APIError
 	if !errors.As(err, &api) {
-		return nil
-	}
-	shape, ok := edgeShape(api)
-	if !ok {
-		return nil
+		return st, nil
 	}
 	s := &session{cfg: cfg, dir: dir, st: st}
-	eerr := s.edgeBlocked(ctx, api, shape)
+	shape, edge := edgeShape(api)
+	var eerr error
+	if edge {
+		eerr = fmt.Errorf("%s live session: %w (status %d, %s body)", during, s.edgeBlocked(ctx, api, shape), api.Status, shape)
+	} else if !s.edgeCleared(ctx) {
+		return st, nil
+	}
 	if onDisk {
 		if werr := writeState(dir, s.st); werr != nil {
-			cfg.Logger.WarnContext(ctx, "live_session_state_write_failed", "during", "edge_blocked", "session_id", st.SessionID, "error", werr)
+			cfg.Logger.WarnContext(ctx, "live_session_state_write_failed", "during", "edge_streak", "session_id", st.SessionID, "error", werr)
 		}
 	}
-	return fmt.Errorf("%s live session: %w (status %d, %s body)", during, eerr, api.Status, shape)
+	return s.st, eerr
 }
 
 // openRefused records an open answered "deleted" or "closed" exactly as the
