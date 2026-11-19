@@ -2,12 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -36,7 +39,9 @@ func TestRecover_KeepsAnUndiscoveredClaudeRecordingInsteadOfPublishingItEmpty(t 
 	require.False(t, session.HasSubstantiveEntries(filepath.Join(state.SessionPath, "raw.jsonl")), "precondition: nothing captured")
 
 	err = runAgentSessionRecover(&agentinstance.Instance{AgentID: agentID})
-	require.ErrorContains(t, err, "not yet verified", "an undiscovered source does not prove the session empty")
+	require.ErrorContains(t, err, "nothing was published", "an undiscovered source does not prove the session empty")
+	require.ErrorContains(t, err, "session recover", "the error says how to retry")
+	require.ErrorContains(t, err, "ox session import", "the error names the full-session import")
 
 	kept, loadErr := session.LoadRecordingStateForAgent(projectRoot, agentID)
 	require.NoError(t, loadErr)
@@ -44,4 +49,52 @@ func TestRecover_KeepsAnUndiscoveredClaudeRecordingInsteadOfPublishingItEmpty(t 
 	rawAfter, err := os.ReadFile(filepath.Join(state.SessionPath, "raw.jsonl"))
 	require.NoError(t, err)
 	assert.Equal(t, string(rawBefore), string(rawAfter), "nothing was finalized")
+}
+
+type discoveredClaudeAdapter struct {
+	testClaudeCodeAdapter
+	file string
+}
+
+func (a *discoveredClaudeAdapter) FindSessionFile(_ adapters.SessionLookup) (string, error) {
+	return a.file, nil
+}
+
+// Discovery by session ID does not compare turn times with the recording's
+// start, so recover can accept a transcript whose every turn predates it.
+// Failure prevented: recover cleared the recording and reported success
+// although the start filter left nothing to publish.
+func TestRecover_KeepsADiscoveredClaudeRecordingThatPublishesNothing(t *testing.T) {
+	projectRoot, agentID, sourceFile := setupHandleAfterToolTest(t)
+	t.Chdir(projectRoot)
+	adapters.Unregister("claude-code")
+	adapters.Register(&discoveredClaudeAdapter{file: sourceFile})
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	early := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":\"session\",\"cwd\":%q,\"timestamp\":%q,\"message\":{\"role\":\"user\",\"content\":\"before the recording\"}}\n",
+		projectRoot, state.StartedAt.Add(-time.Hour).Format(time.RFC3339Nano))
+	f, err := os.OpenFile(sourceFile, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString(early)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
+		s.SessionFile = ""
+		s.WatchMode = "hook"
+	}))
+
+	err = runAgentSessionRecover(&agentinstance.Instance{AgentID: agentID})
+	require.ErrorContains(t, err, "nothing was published")
+	require.ErrorContains(t, err, "ox session import", "the error names the full-session import")
+
+	kept, loadErr := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, kept, "the recording stays for a retry or an import")
+}
+
+// A recording's native session ID can come from repository metadata, so the
+// suggested import command must keep it a literal for the shell.
+func TestUndiscoveredSessionNextSteps_QuotesTheSessionID(t *testing.T) {
+	steps := undiscoveredSessionNextSteps(&session.RecordingState{AgentID: "Oxab12", AgentSessionID: "x$(id)"})
+	assert.Contains(t, steps, "--session 'x$(id)' --include-aborted")
 }
