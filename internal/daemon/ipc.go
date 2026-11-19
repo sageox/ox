@@ -190,6 +190,12 @@ type StatusData struct {
 	// ownership applies to. Surfaced so a follower can say "synced by another
 	// daemon at <endpoint>" rather than implying nothing is syncing.
 	GlobalSyncEndpoint string `json:"global_sync_endpoint,omitempty"`
+	// EnvToken is auth.EnvTokenFingerprint(GlobalSyncEndpoint) as of the
+	// daemon's start: a fingerprint of its SAGEOX_TOKEN, "none", or
+	// "malformed". The daemon's git uses that token, so a CLI holding another
+	// one can tell the daemon needs a restart. Empty from a daemon older than
+	// this field.
+	EnvToken string `json:"env_token,omitempty"`
 
 	// team context sync (deprecated: use Workspaces["team-context"] instead)
 	TeamContexts []TeamContextSyncStatus `json:"team_contexts,omitempty"`
