@@ -553,9 +553,8 @@ func (s *SyncScheduler) runTriggerGC(ctx context.Context) *TriggerGCResponse {
 	return resp
 }
 
-// acquireGCLock creates an exclusive filesystem lock for the GC swap window.
+// acquireGCLock creates an exclusive filesystem lock for workspace GC.
 // Returns the lock file handle on success, or an error if the lock is already held.
-// The lock is short-lived (only held during the two-rename atomic swap).
 func acquireGCLock(lockPath string) (*os.File, error) {
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 	if err != nil {

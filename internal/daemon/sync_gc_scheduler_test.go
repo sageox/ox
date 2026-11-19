@@ -35,7 +35,8 @@ func TestPeriodicGC_HeartbeatContinuesDuringRejectedLedgerPush(t *testing.T) {
 	}
 	isolateCredentials(t)
 	bare, local, _ := setupRacingLedger(t)
-	gitInDir(t, local, "commit", "--allow-empty", "-m", "local-only change")
+	out, err := runGitOut(t, local, "commit", "--allow-empty", "-m", "local-only change")
+	require.NoError(t, err, out)
 	localTip, err := runGitOut(t, local, "rev-parse", "HEAD")
 	require.NoError(t, err, localTip)
 	remoteTip, err := runGitOut(t, bare, "rev-parse", "HEAD")

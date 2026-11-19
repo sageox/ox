@@ -155,6 +155,43 @@ func TestDrainMurmurOutbox_CommitsAndRemoves(t *testing.T) {
 	require.Empty(t, entries, "outbox file must be removed after a confirmed commit")
 }
 
+func TestMurmurOutbox_RetriesAfterGCLockReleases(t *testing.T) {
+	isolateMurmurOutbox(t)
+	_, dir, _ := setupRacingLedger(t)
+	before := getGitSHA(t, dir)
+	scheduler := newDrainScheduler(t, dir)
+	service := &daemonServiceImpl{d: &Daemon{scheduler: scheduler, logger: scheduler.logger}}
+	ts := time.Now().UTC()
+	queued := makeOutboxMurmur(t, dir, "queued before GC", ts)
+	live := makeOutboxMurmur(t, dir, "published during GC", ts)
+	require.NoError(t, WriteOutboxMurmur(dir, queued))
+
+	func() {
+		lockPath := dir + ".gc-lock"
+		lock, err := acquireGCLock(lockPath)
+		require.NoError(t, err)
+		defer releaseGCLock(lock, lockPath)
+
+		require.NoError(t, service.commitMurmur(t.Context(), live))
+		scheduler.drainMurmurOutbox(t.Context())
+		require.Equal(t, before, getGitSHA(t, dir), "GC is already preserving this checkout")
+		require.NoFileExists(t, filepath.Join(dir, queued.RelPath))
+		require.NoFileExists(t, filepath.Join(dir, live.RelPath))
+		entries, err := ReadOutboxMurmurs(dir)
+		require.NoError(t, err)
+		require.Len(t, entries, 2, "both murmurs must survive for another drain")
+		require.NoFileExists(t, filepath.Join(MurmurOutboxDir(dir), filepath.Base(live.RelPath)),
+			"the IPC publish must queue outside the checkout being swapped")
+	}()
+
+	scheduler.drainMurmurOutbox(t.Context())
+	require.Contains(t, gitLog(t, dir, queued.RelPath), queued.Content)
+	require.Contains(t, gitLog(t, dir, live.RelPath), live.Content)
+	entries, err := ReadOutboxMurmurs(dir)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
 func TestWriteAndCommitMurmur_RefusesConflictMarkers(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: shells git")

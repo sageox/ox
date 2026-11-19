@@ -888,6 +888,7 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	// team context sync (lower priority, less frequent)
 	var teamContextTicker *time.Ticker
 	var teamContextChan <-chan time.Time
+	var startupTeamSyncDone <-chan struct{}
 	if s.config.TeamContextSyncInterval > 0 && s.config.ProjectRoot != "" {
 		teamContextTicker = time.NewTicker(s.config.TeamContextSyncInterval)
 		teamContextChan = teamContextTicker.C
@@ -902,7 +903,7 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		// delayed team context sync for regular pulls (not just cloning).
 		// Gated on global-sync ownership — non-owner daemons leave team
 		// contexts to the owning daemon for this endpoint (ox-6zme).
-		startupTeamSyncDone := startDelayedTeamContextSync(ctx, 5*time.Second, func(ctx context.Context) {
+		startupTeamSyncDone = startDelayedTeamContextSync(ctx, 5*time.Second, func(ctx context.Context) {
 			if !s.IsGlobalSyncOwner() {
 				return
 			}
@@ -910,7 +911,7 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		})
 		// The startup pull must stop before the scheduler's caller releases
 		// its resources. Cancellation also interrupts the initial delay.
-		defer func() { <-startupTeamSyncDone }()
+		defer func(done <-chan struct{}) { <-done }(startupTeamSyncDone)
 	} else {
 		s.logger.Info("sync scheduler started",
 			"read_interval", s.config.SyncIntervalRead,
@@ -1050,8 +1051,11 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		case <-startupPullDone:
 			startupPullDone = nil
 
+		case <-startupTeamSyncDone:
+			startupTeamSyncDone = nil
+
 		case <-gcChan:
-			if periodicGCDone == nil && startupPullDone == nil {
+			if periodicGCDone == nil && startupPullDone == nil && startupTeamSyncDone == nil {
 				periodicGCDone = s.startPeriodicGC(ctx)
 				if periodicGCDone != nil {
 					// Leave one coalesced watcher event queued until GC releases

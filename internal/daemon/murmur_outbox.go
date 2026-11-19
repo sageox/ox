@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -26,18 +27,25 @@ type outboxEntry struct {
 // cache state keyed by the canonical path. Deliberately do not read or migrate
 // the old .sageox/cache/murmur-outbox queue.
 func MurmurOutboxDir(targetDir string) string {
+	targetDir = murmurOutboxTarget(targetDir)
+	if info, err := os.Lstat(filepath.Join(targetDir, ".git")); err == nil && info.IsDir() {
+		return filepath.Join(targetDir, murmurOutboxGitDir)
+	}
+	return murmurOutboxCacheDir(targetDir)
+}
+
+func murmurOutboxTarget(targetDir string) string {
 	if abs, err := filepath.Abs(targetDir); err == nil {
 		targetDir = abs
 	}
 	// A CLI may address the same registered workspace through a local alias.
 	if real, err := filepath.EvalSymlinks(targetDir); err == nil {
 		targetDir = real
+	} else if parent, err := filepath.EvalSymlinks(filepath.Dir(targetDir)); err == nil {
+		// Keep the cache key stable while GC has temporarily renamed the clone.
+		targetDir = filepath.Join(parent, filepath.Base(targetDir))
 	}
-	targetDir = filepath.Clean(targetDir)
-	if info, err := os.Lstat(filepath.Join(targetDir, ".git")); err == nil && info.IsDir() {
-		return filepath.Join(targetDir, murmurOutboxGitDir)
-	}
-	return murmurOutboxCacheDir(targetDir)
+	return filepath.Clean(targetDir)
 }
 
 // murmurOutboxGitDir is checkout-relative so GC reclones can carry it over.
@@ -53,13 +61,7 @@ func murmurOutboxCacheDir(cleanTarget string) string {
 func murmurOutboxDirs(targetDir string) []string {
 	dir := MurmurOutboxDir(targetDir)
 	dirs := []string{dir}
-	if abs, err := filepath.Abs(targetDir); err == nil {
-		targetDir = abs
-	}
-	if real, err := filepath.EvalSymlinks(targetDir); err == nil {
-		targetDir = real
-	}
-	if cache := murmurOutboxCacheDir(filepath.Clean(targetDir)); cache != dir {
+	if cache := murmurOutboxCacheDir(murmurOutboxTarget(targetDir)); cache != dir {
 		dirs = append(dirs, cache)
 	}
 	return dirs
@@ -69,7 +71,10 @@ func murmurOutboxDirs(targetDir string) []string {
 // daemon-unavailable miss. The file is named after the murmur id (the base of
 // RelPath, e.g. "<id>.json"), so re-queuing the same murmur is idempotent.
 func WriteOutboxMurmur(targetDir string, p MurmurPayload) error {
-	dir := MurmurOutboxDir(targetDir)
+	return writeOutboxMurmur(MurmurOutboxDir(targetDir), p)
+}
+
+func writeOutboxMurmur(dir string, p MurmurPayload) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create murmur outbox dir: %w", err)
 	}
@@ -81,7 +86,7 @@ func WriteOutboxMurmur(targetDir string, p MurmurPayload) error {
 	if name == "" || name == "." || name == string(filepath.Separator) {
 		return fmt.Errorf("invalid murmur rel_path %q", p.RelPath)
 	}
-	return os.WriteFile(filepath.Join(dir, name), data, 0o600)
+	return fileutil.AtomicWriteBytes(filepath.Join(dir, name), data, 0o600)
 }
 
 // ReadOutboxMurmurs returns all queued murmurs for a target. Unreadable or
