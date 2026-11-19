@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -31,25 +29,6 @@ func prepareLive(t *testing.T, dir, sessionID string) {
 	require.NoError(t, err)
 }
 
-// spoolRecorder collects what the watcher hands to the live spooler.
-type spoolRecorder struct {
-	mu      sync.Mutex
-	dirs    []string
-	batches []session.AppendedBatch
-}
-
-func (r *spoolRecorder) spool(dir string, b session.AppendedBatch) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.dirs, r.batches = append(r.dirs, dir), append(r.batches, b)
-}
-
-func (r *spoolRecorder) all() ([]string, []session.AppendedBatch) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]string(nil), r.dirs...), append([]session.AppendedBatch(nil), r.batches...)
-}
-
 func newAppendFixture(t *testing.T, rec session.RecordingState) (dir, rawPath string, rw *session.RawWriter) {
 	t.Helper()
 	dir = t.TempDir()
@@ -65,27 +44,24 @@ func newAppendFixture(t *testing.T, rec session.RecordingState) (dir, rawPath st
 }
 
 // The tail watcher appends through appendBatch. Live streaming needs the exact
-// bytes of each committed batch, handed over only after the append succeeded; a
-// failed append must hand over nothing.
-func TestAppendBatchHandsTheCommittedBytesToTheLiveSpooler(t *testing.T) {
+// bytes of each committed batch, spooled only after the append succeeded; a
+// failed append must spool nothing.
+func TestAppendBatchHandsTheCommittedBytesToTheLiveSpool(t *testing.T) {
 	dir, rawPath, rw := newAppendFixture(t, session.RecordingState{SessionID: watcherLiveSessionID})
 	prepareLive(t, dir, watcherLiveSessionID)
 	m := NewSessionWatcherManager(slog.Default())
-	rec := &spoolRecorder{}
-	m.SetLiveSpooler(rec.spool)
+	drains := wireLiveStreaming(m)
 	aw := &activeWatcher{cachePath: dir, sessionName: "s"}
 
 	require.NoError(t, m.appendBatch(aw, rw, []session.Entry{{Type: session.EntryTypeUser, Content: "hello"}}, 10))
 	all, _ := os.ReadFile(rawPath)
 	header := len(`{"type":"header"}` + "\n")
-	dirs, got := rec.all()
-	require.Len(t, got, 1)
-	assert.Equal(t, string(all[header:]), string(got[0].Bytes))
-	assert.Equal(t, dir, dirs[0])
+	assert.Equal(t, string(all[header:]), spoolOf(t, dir))
+	assert.Equal(t, []string{dir}, drains.all())
 
 	require.Error(t, m.appendBatch(aw, rw, []session.Entry{{Type: session.EntryTypeUser, Content: "again"}}, 5), "cursor goes backwards")
-	_, got = rec.all()
-	assert.Len(t, got, 1, "a failed append reached the live spooler")
+	assert.Equal(t, string(all[header:]), spoolOf(t, dir), "a failed append reached the live spool")
+	assert.Len(t, drains.all(), 1)
 }
 
 // Failure prevented: the watcher handed every committed batch to the live
@@ -114,14 +90,14 @@ func TestAppendBatchKeepsBatchesOutOfStreamsTheyMustNotReach(t *testing.T) {
 			dir, _, rw := newAppendFixture(t, tc.rec)
 			tc.setup(t, dir)
 			m := NewSessionWatcherManager(slog.Default())
-			rec := &spoolRecorder{}
-			m.SetLiveSpooler(rec.spool)
+			drains := wireLiveStreaming(m)
 
 			require.NoError(t, m.appendBatch(&activeWatcher{cachePath: dir, sessionName: "s"}, rw,
 				[]session.Entry{{Type: session.EntryTypeUser, Content: "hello"}}, 10))
 
-			_, got := rec.all()
-			assert.Empty(t, got, "the batch reached a live stream it must not")
+			assert.NotContains(t, spoolOf(t, dir), "hello", "the batch reached a live stream it must not")
+			assert.NoFileExists(t, filepath.Join(dir, "spool-lost"), "a batch the stream must not carry is not a loss")
+			assert.Empty(t, drains.all())
 		})
 	}
 }
@@ -129,7 +105,7 @@ func TestAppendBatchKeepsBatchesOutOfStreamsTheyMustNotReach(t *testing.T) {
 // Failure prevented: Cursor recordings capture through DrainCursorSource, not
 // appendBatch, so their committed turns never reached the live spool and the
 // streamed session held only its header on SageOx (C8).
-func TestCursorWatcherHandsCommittedBytesToTheLiveSpooler(t *testing.T) {
+func TestCursorWatcherHandsCommittedBytesToTheLiveSpool(t *testing.T) {
 	installCursorWatcherAdapter(t)
 	source := `{"role":"user","content":"first"}` + "\n" +
 		`{"role":"assistant","content":"second"}` + "\n" +
@@ -139,21 +115,16 @@ func TestCursorWatcherHandsCommittedBytesToTheLiveSpooler(t *testing.T) {
 	writeRecordingState(t, filepath.Join(f.cachePath, recordingMarker), f.state)
 	prepareLive(t, f.cachePath, watcherLiveSessionID)
 	mgr := newCursorWatcherManager(t, f.homeDir)
-	rec := &spoolRecorder{}
-	mgr.SetLiveSpooler(rec.spool)
+	drains := wireLiveStreaming(mgr)
 	startCursorWatch(t, mgr, f)
 
 	require.Eventually(t, func() bool { return loadCursorWatcherState(t, f).EntryCount == 2 }, time.Second, 10*time.Millisecond)
-	require.Eventually(t, func() bool { _, got := rec.all(); return len(got) > 0 }, time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return len(drains.all()) > 0 }, time.Second, 10*time.Millisecond)
 
 	raw, err := os.ReadFile(filepath.Join(f.cachePath, artifactRaw))
 	require.NoError(t, err)
-	dirs, got := rec.all()
-	var spooled strings.Builder
-	for i, b := range got {
-		assert.Equal(t, f.cachePath, dirs[i])
-		assert.False(t, b.Suspended)
-		spooled.Write(b.Bytes)
+	for _, dir := range drains.all() {
+		assert.Equal(t, f.cachePath, dir)
 	}
-	assert.Equal(t, string(raw), spooled.String(), "every committed Cursor byte, in order")
+	assert.Equal(t, string(raw), spoolOf(t, f.cachePath), "every committed Cursor byte, in order")
 }

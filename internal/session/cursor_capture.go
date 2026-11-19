@@ -188,18 +188,12 @@ func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, home
 		return nil, err
 	}
 	advancing := nextOffset > state.SourceOffset
-	var appendedFrom, appendedTo int64
 	if advancing {
-		start, err := writer.file.Stat()
-		if err != nil {
-			_ = writer.Close()
-			return nil, fmt.Errorf("begin Cursor capture: %w", err)
-		}
-		appendedFrom = start.Size()
 		if err := writer.BeginAppend(state.SourceOffset, nextOffset); err != nil {
 			_ = writer.Close()
 			return nil, fmt.Errorf("begin Cursor capture: %w", err)
 		}
+		writer.openBatch()
 	}
 	// The append lock covers the transaction; do not acquire it recursively.
 	for i := matched; i < len(converted); i++ {
@@ -208,17 +202,13 @@ func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, home
 			return nil, fmt.Errorf("append Cursor capture: %w", err)
 		}
 	}
+	var appended []byte
 	if advancing {
 		if err := writer.SealAppend(); err != nil {
 			_ = writer.Close()
 			return nil, fmt.Errorf("seal Cursor capture: %w", err)
 		}
-		end, err := writer.file.Stat()
-		if err != nil {
-			_ = writer.Close()
-			return nil, fmt.Errorf("seal Cursor capture: %w", err)
-		}
-		appendedTo = end.Size()
+		appended = writer.closeBatch()
 	}
 	if err := writer.CloseAndSync(); err != nil {
 		return nil, fmt.Errorf("sync Cursor capture: %w", err)
@@ -244,28 +234,11 @@ func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, home
 		State: state, Entries: len(converted),
 		Complete: nextOffset == int64(len(before.data)) && cursorSourceReady(state, before.data),
 	}
-	if appendedTo > appendedFrom {
-		// committed and still under the append lock, so the span cannot move;
-		// a failed read costs the live copy this batch, never the capture
-		if batch, err := readRawSpan(rawPath, appendedFrom, appendedTo); err == nil {
-			result.Appended = AppendedBatch{Bytes: batch, Suspended: state.IsSuspended()}
-		}
+	if len(appended) > 0 {
+		// exactly what the writer committed, never read back from raw.jsonl
+		result.Appended = AppendedBatch{Bytes: appended, Suspended: state.IsSuspended(), SessionID: state.SessionID}
 	}
 	return result, nil
-}
-
-// readRawSpan reads raw.jsonl bytes [from, to).
-func readRawSpan(path string, from, to int64) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("read appended batch: %w", err)
-	}
-	defer func() { _ = f.Close() }() // read-only
-	buf := make([]byte, to-from)
-	if _, err := f.ReadAt(buf, from); err != nil {
-		return nil, fmt.Errorf("read appended batch: %w", err)
-	}
-	return buf, nil
 }
 
 // FinalizeCursorCapture drains the current complete native turn, then applies

@@ -159,55 +159,20 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 	liveKickDaemon(state.SessionPath)
 }
 
-// liveSessionSpoolWriter spools what a just-committed AppendRecordingBatch
-// added to raw.jsonl (see liveSessionSpool). Call it only after the append
-// returned nil.
-func liveSessionSpoolWriter(projectRoot string, state *session.RecordingState, w *session.RawWriter) {
-	batch, ok, err := w.LastAppended()
-	if err != nil {
-		slog.Warn("live_session_batch_read_failed", "error", err)
-		return
-	}
-	if ok {
-		liveSessionSpool(projectRoot, state, batch)
-	}
-}
-
-// liveSessionSpool appends one batch just committed to raw.jsonl to this
-// recording's live spool, then asks the daemon to drain. Every capture path
-// calls it, Cursor's included (C8). Silent when the session does not stream.
-// It never feeds a stream that belongs to another recording in a reused folder
-// (C4), nor one whose session is held on this machine (C1): manual publishing
-// means nothing more leaves the machine, so neither the bytes nor a kick go out.
-func liveSessionSpool(projectRoot string, state *session.RecordingState, batch session.AppendedBatch) {
-	if state == nil || state.SessionPath == "" || len(batch.Bytes) == 0 {
-		return
-	}
-	sessionDir := state.SessionPath
-	st, err := livesession.ReadState(sessionDir)
-	if err != nil {
-		return // never prepared: streaming is off for this session
-	}
-	if st.SessionID != state.SessionID {
-		slog.Debug("live_session_spool_skipped", "session_id", state.SessionID, "reason", "other_recording", "stream_session_id", st.SessionID)
-		return
-	}
-	if liveSessionHeld(projectRoot, state) {
-		slog.Debug("live_session_spool_skipped", "session_id", state.SessionID, "reason", "held")
-		return
-	}
+// liveSessionSpool hands a batch just committed to raw.jsonl to the one shared
+// live-spool step (livesession.SpoolCommitted), which applies the ownership
+// (C4) and hold (C1) checks, then asks the daemon to drain. Every CLI capture
+// path calls it: the Claude Code hook, Cursor's hook and stop, and stop's final
+// drain (C8). A non-nil error means the stream could not take the batch; the
+// step has declared it as a gap and logged it.
+func liveSessionSpool(projectRoot string, state *session.RecordingState, batch session.AppendedBatch) error {
 	ctx, cancel := context.WithTimeout(context.Background(), liveLocalBound)
 	defer cancel()
-	res, err := livesession.Spool(ctx, sessionDir, batch.Bytes, livesession.SpoolOptions{Paused: batch.Suspended})
-	if err != nil {
-		if !errors.Is(err, livesession.ErrNotStreaming) {
-			slog.Warn("live_session_spool_failed", "session", filepath.Base(sessionDir), "error", err)
-		}
-		return
+	spooled, err := livesession.SpoolCommitted(ctx, projectRoot, state, batch)
+	if spooled {
+		liveKickDaemon(state.SessionPath)
 	}
-	if res.Appended > 0 {
-		liveKickDaemon(sessionDir)
-	}
+	return err
 }
 
 // liveSessionHeld reports whether a session must not stream any more: it is

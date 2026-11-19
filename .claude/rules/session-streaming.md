@@ -1,16 +1,23 @@
 # Real-Time Session Streaming — Consult the Spec First
 
-Any work touching real-time streaming of coding sessions — `internal/moq/`,
-`internal/daemon/sessionstream/`, the stream envelope, wire/entry seq semantics,
-`revision`/amendments, pause fencing, abort handling, or the coordinates/cloud contract —
-MUST consult **`docs/specs/session-streaming.md`** before designing or changing anything.
-That spec is the design canon; it was adversarially reviewed and is mapped onto the
-sageox-mono conversation model (ADR-057/076/081/087).
+Any work touching real-time streaming of coding sessions — `internal/livesession/`,
+`internal/sessionstream/`, the capture-to-spool hand-off (`session.AppendedBatch`,
+`livesession.SpoolCommitted`), `internal/moq/`, `internal/daemon/sessionstream/`, the stream
+envelope, wire/entry seq semantics, `revision`/amendments, pause fencing, abort handling, or
+the coordinates/cloud contract — MUST consult **`docs/specs/session-streaming.md`** before
+designing or changing anything. That spec is the design canon; it was adversarially reviewed
+and is mapped onto the sageox-mono conversation model (ADR-057/076/081/087). What ships is
+ADR-247 HTTP streaming: its section in the spec says where it departs from the MoQ design.
 
 Non-negotiables it encodes (do not re-derive or contradict them casually):
 
-- **Tail `raw.jsonl`, never tee `RawWriter`.** Streaming must be unable to block or corrupt
-  capture. Git/LFS upload stays the durability + fidelity authority.
+- **Streaming must be unable to block or corrupt capture.** Capture commits its batch to
+  `raw.jsonl` first. Only then are the bytes that batch committed handed to the spool, and a
+  spool failure becomes a declared `spool_write_failed` gap that never touches `raw.jsonl`
+  or the capture cursor. The older wording, "tail `raw.jsonl`, never tee `RawWriter`",
+  predates ADR-247: it was written for the MoQ tailer, which never shipped. ADR-247 HTTP
+  streaming hands off committed bytes instead (spec: "ADR-247 HTTP streaming").
+  Git/LFS upload stays the durability + fidelity authority.
 - **Conversation-native envelope.** `conversation_id` = `cnv_` twin of `ses_` (pure prefix
   swap, bijective — never bind a foreign `cnv_`); legacy `turns.jsonl` shapes are
   server-side projections, never the wire format.

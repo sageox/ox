@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -55,25 +54,31 @@ func (f *catchUpFixture) plantBeside(claims map[string]any) (dir string, marker 
 // whatever the catch-up commits there is handed to the live spool.
 func streamAs(t *testing.T, dir, sessionID string) {
 	t.Helper()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "stream-state.json"), fmt.Appendf(nil, `{"session_id":%q}`, sessionID), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "stream-state.json"), fmt.Appendf(nil, `{"session_id":%q,"status":"pending"}`, sessionID), 0o600))
 }
 
-// spoolLog records every batch the watcher hands the live spool.
+// spoolLog reads back the live spool of every session the watcher asked a
+// drain for: the step asks for one whenever it spooled a batch.
 type spoolLog struct {
-	mu      sync.Mutex
-	batches []string
+	t      *testing.T
+	drains *drainLog
 }
 
-func (s *spoolLog) spool(dir string, b session.AppendedBatch) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.batches = append(s.batches, filepath.Base(dir)+": "+string(b.Bytes))
+// watchSpools streams m's captures (wireLiveStreaming) and logs what they spool.
+func watchSpools(t *testing.T, m *SessionWatcherManager) *spoolLog {
+	return &spoolLog{t: t, drains: wireLiveStreaming(m)}
 }
 
 func (s *spoolLog) all() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return strings.Join(s.batches, "\n")
+	seen := map[string]bool{}
+	var spools []string
+	for _, dir := range s.drains.all() {
+		if !seen[dir] {
+			seen[dir] = true
+			spools = append(spools, filepath.Base(dir)+": "+spoolOf(s.t, dir))
+		}
+	}
+	return strings.Join(spools, "\n")
 }
 
 // A heartbeat is not a hook: every ox command sends one with the agent's ID.
@@ -100,8 +105,7 @@ func TestHookCatchUpNeverReadsAPlantedMarkerReusingALiveAgentID(t *testing.T) {
 			f.settle()
 
 			m := f.watcher(slog.Default()) // the agent's heartbeat
-			var spooled spoolLog
-			m.SetLiveSpooler(spooled.spool)
+			spooled := watchSpools(t, m)
 			for range 2 {
 				m.CatchUpHookRecordings(context.Background(), f.projectRoot)
 			}

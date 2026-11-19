@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/fileutil"
-	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 )
@@ -281,11 +280,8 @@ func (m *SessionWatcherManager) catchUpHookRecording(ctx context.Context, st *se
 			SourceHome: m.homeDir(),
 			// only bytes that sat unread since the stat above are the daemon's
 			Settled: session.SettledSource{Path: source, Size: info.Size()},
-			Spool: func(state *session.RecordingState, batch session.AppendedBatch) {
-				m.forwardLive(&activeWatcher{cachePath: state.SessionPath, projectRoot: state.WorkspacePath, sessionName: filepath.Base(state.SessionPath)}, batch)
-			},
-			SpoolLost: func(state *session.RecordingState, n int64, cause error) {
-				m.declareLiveLoss(ctx, state, n, cause)
+			Spool: func(state *session.RecordingState, batch session.AppendedBatch) error {
+				return m.spoolLive(state.SessionPath, state.WorkspacePath, batch)
 			},
 		})
 		return captureErr
@@ -373,20 +369,6 @@ func (m *SessionWatcherManager) refuseHookCatchUp(ctx context.Context, sessionPa
 	if !warned {
 		m.logger.WarnContext(ctx, "session_capture_catchup_refused", append(ids, "reason", reason)...)
 	}
-}
-
-// declareLiveLoss declares a batch the catch-up committed to raw.jsonl but
-// could not hand to the live stream, under forwardLive's refusals: a batch it
-// would not have spooled is not a loss.
-func (m *SessionWatcherManager) declareLiveLoss(ctx context.Context, state *session.RecordingState, n int64, cause error) {
-	m.mu.Lock()
-	streams := m.liveSpool != nil
-	m.mu.Unlock()
-	if !streams || liveSpoolRefusal(state.SessionPath, state.WorkspacePath) != "" {
-		return
-	}
-	// DeclareLost logs the loss, and any failure to record it, at Error itself
-	_ = livesession.DeclareLost(ctx, state.SessionPath, n, cause)
 }
 
 // hookMarkCurrent reports whether the last catch-up of sessionPath already
