@@ -175,7 +175,7 @@ func (l *LiveSessions) trackSessionDirs(ctx context.Context, seen map[string]liv
 			gone = append(gone, dir)
 		}
 	}
-	reports := make(map[string]liveKnown, len(gone)+len(back))
+	reports := map[string]liveKnown{}
 	for _, dir := range append(gone, back...) {
 		reports[dir] = l.known[dir]
 	}
