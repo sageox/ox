@@ -366,8 +366,13 @@ func TestPullTeamContext_RefusesCommitOutsideItsPublishScope(t *testing.T) {
 			commitLocal(t, clone, "memory/.observations/2026-11-17/valid.jsonl", "observation: recorded")
 			commitLocal(t, clone, tt.path, tt.subject)
 
+			offendingCommit := strings.TrimSpace(gitCmd(t, clone, "rev-parse", "HEAD"))
+			_, err := ValidateTeamPublishPush(t.Context(), clone)
+			require.ErrorIs(t, err, ErrForeignCommitAhead)
+			require.ErrorContains(t, err, offendingCommit)
+
 			s := newPullTestScheduler(t, clone)
-			_, err := s.pullTeamContext(context.Background(), clone)
+			_, err = s.pullTeamContext(t.Context(), clone)
 			require.NoError(t, err)
 			require.Equal(t, before, gitCmd(t, bare, "rev-parse", "main"))
 			require.Equal(t, "3", gitCmd(t, clone, "rev-list", "--count", "@{upstream}..HEAD"))
