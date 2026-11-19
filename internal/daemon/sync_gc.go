@@ -52,6 +52,10 @@ func (s *SyncScheduler) startPeriodicGC(ctx context.Context) <-chan struct{} {
 	return done
 }
 
+func gcBackupPath(path string) string {
+	return filepath.Clean(path) + ".old"
+}
+
 // checkAndRunGC reclones workspaces due for garbage collection.
 func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 	// only one GC at a time
@@ -68,7 +72,7 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 
 	teamContexts := s.workspaceRegistry.GetTeamContexts()
 	for _, ws := range teamContexts {
-		interruptedSwap := gitutil.IsGitRepo(ws.Path + ".old")
+		interruptedSwap := gitutil.IsGitRepo(gcBackupPath(ws.Path))
 		if (!ws.Exists && !interruptedSwap) || ws.CloneURL == "" {
 			continue
 		}
@@ -138,7 +142,7 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 	}
 
 	// ledger GC reclone — same blue-green pattern as team contexts
-	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(l.Path+".old")) && l.CloneURL != "" {
+	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(gcBackupPath(l.Path))) && l.CloneURL != "" {
 		if _, loaded := s.cloneInFlight.Load(l.ID); !loaded {
 			intervalDays := l.GCIntervalDays
 			if intervalDays <= 0 {
@@ -147,7 +151,7 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 			interval := time.Duration(intervalDays) * 24 * time.Hour
 			intervalExceeded := l.LastGCTime.IsZero() || time.Since(l.LastGCTime) >= interval
 			fullClone := !isPartialClone(l.Path)
-			interruptedSwap := gitutil.IsGitRepo(l.Path + ".old")
+			interruptedSwap := gitutil.IsGitRepo(gcBackupPath(l.Path))
 
 			// trigger 3: a genuinely wedged ledger (ahead AND behind for
 			// longer than ledgerSyncWedgeAge) — checkAndRunGC's normal
@@ -433,7 +437,7 @@ func (s *SyncScheduler) runTriggerGC(ctx context.Context) *TriggerGCResponse {
 	resp := &TriggerGCResponse{}
 	teamContexts := s.workspaceRegistry.GetTeamContexts()
 	for _, ws := range teamContexts {
-		if (!ws.Exists && !gitutil.IsGitRepo(ws.Path+".old")) || ws.CloneURL == "" {
+		if (!ws.Exists && !gitutil.IsGitRepo(gcBackupPath(ws.Path))) || ws.CloneURL == "" {
 			continue
 		}
 		if _, loaded := s.cloneInFlight.Load(ws.ID); loaded {
@@ -495,7 +499,7 @@ func (s *SyncScheduler) runTriggerGC(ctx context.Context) *TriggerGCResponse {
 	}
 
 	// ledger GC reclone
-	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(l.Path+".old")) && l.CloneURL != "" {
+	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(gcBackupPath(l.Path))) && l.CloneURL != "" {
 		if _, loaded := s.cloneInFlight.Load(l.ID); !loaded {
 			s.logger.Info("trigger_gc: forced ledger reclone", "id", l.ID)
 			// A forced repair is an explicit recovery request, so preserve
@@ -610,7 +614,7 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) (result gcResult, recovered bool) {
 	ws.Path = filepath.Clean(ws.Path)
 	newPath := ws.Path + ".new"
-	oldPath := ws.Path + ".old"
+	oldPath := gcBackupPath(ws.Path)
 	diffFile := ws.Path + ".gc-diff"
 	untrackedDir := ws.Path + ".gc-untracked"
 	lockPath := ws.Path + ".gc-lock"

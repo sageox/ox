@@ -53,7 +53,8 @@ func makeOutboxMurmur(t *testing.T, targetDir, content string, ts time.Time) Mur
 // prevented: a murmur queued by the CLI is never drained and expires.
 func TestMurmurOutbox_SharedAcrossCacheEnvironments(t *testing.T) {
 	isolateMurmurOutbox(t)
-	target := t.TempDir()
+	target, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	require.NoError(t, os.Mkdir(filepath.Join(target, ".git"), 0o755))
 	p := makeOutboxMurmur(t, target, "queued by cli", time.Now().UTC())
 	require.NoError(t, WriteOutboxMurmur(target, p))
@@ -425,7 +426,8 @@ func TestGCCarriesMurmurOutbox(t *testing.T) {
 
 func TestMurmurOutboxReadsLegacyCacheAfterCloningThroughAlias(t *testing.T) {
 	isolateMurmurOutbox(t)
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	alias := filepath.Join(t.TempDir(), "alias")
 	if err := os.Symlink(root, alias); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
