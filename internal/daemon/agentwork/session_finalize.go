@@ -2419,9 +2419,7 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 			if meta.SessionID != "" && (!payload.UploadOnly || meta.SessionID != legacy.EffectiveSessionID()) {
 				return "", err
 			}
-			if payload.UploadOnly {
-				legacyEmptyMeta = meta
-			}
+			legacyEmptyMeta = meta
 		}
 	}
 	if legacyEmptyMeta != nil {

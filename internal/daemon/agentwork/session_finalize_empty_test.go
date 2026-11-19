@@ -318,6 +318,31 @@ func TestProcessResult_RetriesLegacyEmptyLedgerDownload(t *testing.T) {
 	require.Equal(t, latestMeta, got, "retry must preserve current Ledger metadata")
 }
 
+func TestStageEmptyLedgerRepairPreservesCurrentMetadata(t *testing.T) {
+	const name = "2026-09-24T23-03-riley-OxRiLy"
+	ledgerPath := t.TempDir()
+	f := cacheFixture{name: name, ledgerPath: ledgerPath,
+		cacheDir: filepath.Join(ledgerPath, ".sageox", "cache", "sessions", name)}
+	f.ledgerEntry(t, emptyRaw, false)
+	f.write(t, "raw.jsonl", emptyRaw)
+	f.write(t, "meta.json", `{"version":"1.0","title":"Brief session","summary":"No conversation was recorded in this session.","summary_status":"ok","user_id":"old-owner"}`)
+
+	dest := filepath.Join(ledgerPath, "sessions", name)
+	require.NoError(t, lfs.MutateSessionMeta(t.Context(), dest, func(meta *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+		meta.UserID = "updated-owner"
+		return meta, nil
+	}))
+	h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
+	payload := &SessionFinalizePayload{SessionDir: f.cacheDir, LedgerPath: ledgerPath, emptyTranscript: true}
+	_, err := h.stageSessionInLedger(payload)
+	require.NoError(t, err)
+	got, err := lfs.ReadSessionMeta(dest)
+	require.NoError(t, err)
+	require.Equal(t, "updated-owner", got.UserID)
+	require.Equal(t, "Brief session", got.Title)
+	require.Equal(t, "ok", got.SummaryStatus)
+}
+
 func TestProcessResult_ReplaysPendingEmptyLedgerRepair(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git operations")
