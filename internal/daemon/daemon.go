@@ -1228,11 +1228,6 @@ func (d *Daemon) initComponents() time.Duration {
 
 	d.removeLedgerLocksAtStart()
 
-	// ensure ledger sparse-checkout cone is correct before any sync or indexing.
-	// without this, a corrupt cone from a previous session causes every sync cycle
-	// to wipe .sageox/cache/ via ConfigureSparseCheckout's rolling-window refresh.
-	d.ensureLedgerSparseCheckout(d.ctx)
-
 	// telemetry + friction collectors
 	d.telemetry = NewTelemetryCollector(d.logger)
 	d.startTime = time.Now()
@@ -1591,6 +1586,14 @@ func (d *Daemon) startWorkers() {
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
+		// The Ledger's cone must be right before the first sync: a corrupt cone
+		// from a previous session made every sync cycle wipe .sageox/cache/ via
+		// ConfigureSparseCheckout's rolling-window refresh. It runs here, not in
+		// setup, because it waits on the Ledger (the repo lock for up to 2 min,
+		// git for longer), and setup must never wait on the Ledger: the IPC
+		// server and the live-session drainer start after it, and a session
+		// streams while its Ledger is wedged.
+		d.ensureLedgerSparseCheckout(d.ctx)
 		d.scheduler.Start(d.ctx)
 	}()
 

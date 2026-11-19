@@ -140,8 +140,14 @@ func isRealDir(path string) bool {
 // merging with whatever <to> already holds. A re-clone keeps local state
 // (session recordings among it) this way instead of by copy: a copy taken
 // before a minutes-long clone misses every line written after it. A file both
-// trees hold stays in from and is reported; nothing is deleted. carried is
-// true when from had a cache and all of it moved.
+// trees hold stays in from and is reported, and the carry goes on past it;
+// nothing is deleted. carried is true when from had a cache and all of it
+// moved.
+//
+// Going on matters because <to> is a fresh clone of a repo anyone on the team
+// can push to: one tracked file under .sageox/cache that sorts before
+// sessions/ used to stop the carry there, and every live session stayed in
+// the clone the caller sets aside, unstreamed, with hooks failing to append.
 func CarryCache(from, to string) (carried bool, err error) {
 	src := filepath.Join(from, ".sageox", "cache")
 	if !isRealDir(src) {
@@ -154,10 +160,36 @@ func CarryCache(from, to string) (carried bool, err error) {
 	if err := os.MkdirAll(dstSageox, 0755); err != nil {
 		return false, err
 	}
-	if _, err := mergeByRename(src, filepath.Join(dstSageox, "cache")); err != nil {
+	if err := carryByRename(src, filepath.Join(dstSageox, "cache")); err != nil {
 		return false, fmt.Errorf("carry cache from %s: %w", from, err)
 	}
 	return true, nil
+}
+
+// carryByRename is mergeByRename without the all-or-nothing contract: an
+// entry that cannot move stays in src, every other entry still moves, and the
+// errors are joined. Nothing is deleted except src directories it emptied.
+func carryByRename(src, dst string) error {
+	if _, err := os.Lstat(dst); errors.Is(err, os.ErrNotExist) {
+		return os.Rename(src, dst)
+	}
+	if !isRealDir(dst) || !isRealDir(src) {
+		return fmt.Errorf("%w: both %s and %s exist", ErrPathExists, src, dst)
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, entry := range entries {
+		if err := carryByRename(filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return os.Remove(src)
 }
 
 // rename is one move mergeByRename made, kept so it can be undone.
