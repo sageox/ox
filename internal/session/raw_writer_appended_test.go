@@ -2,6 +2,8 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,15 +53,17 @@ func TestAppendRecordingBatchReturnsExactlyTheCommittedBytes(t *testing.T) {
 // back still yields every committed byte.
 func TestAppendRecordingBatchNeverReadsRawJSONLBack(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		t.Skip("reason: root ignores file permissions, so an unreadable raw.jsonl cannot be simulated")
-	}
 	raw, statePath := writeAppendFixture(t, RecordingState{CommandRedactionVersion: 1})
 	require.NoError(t, os.WriteFile(raw, []byte(`{"type":"header"}`+"\n"), 0600))
 	w, err := NewRawWriter(raw, "")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = w.Close() })
 	require.NoError(t, os.Chmod(raw, 0o200)) // appendable, never readable
 	t.Cleanup(func() { _ = os.Chmod(raw, 0o600) })
+	// root, Windows and some filesystems still read a write-only file: proven, not assumed
+	if _, err := os.ReadFile(raw); !errors.Is(err, fs.ErrPermission) {
+		t.Skipf("reason: raw.jsonl is still readable after chmod 0200 (read error: %v), so an unreadable raw.jsonl cannot be simulated", err)
+	}
 
 	batch, err := w.AppendRecordingBatch(statePath, []Entry{{Type: EntryTypeUser, Content: "committed while unreadable"}}, 10)
 	require.NoError(t, err)

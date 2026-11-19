@@ -31,6 +31,34 @@ import (
 // not take it. It is declared, so the stream's next write or its close carries
 // a spool_write_failed gap of exactly the batch's size.
 func SpoolCommitted(ctx context.Context, projectRoot string, rec *oxsession.RecordingState, batch oxsession.AppendedBatch) (spooled bool, err error) {
+	return handOnCommitted(ctx, projectRoot, rec, batch, nil)
+}
+
+// DeclareCommitted declares a batch committed to raw.jsonl in dir that cannot
+// be spooled because its recording could not be read back after the commit:
+// the marker is gone, unreadable, or another recording's now (cause says
+// which). The cursor is already past the batch, so a quiet return would leave
+// the stream without it and with nothing to say so.
+//
+// It takes SpoolCommitted's checks as far as they hold without the recording:
+// a paused batch is still no loss, only the stream of the recording that
+// committed the batch (batch.SessionID) records it (C4), and a session held on
+// this machine or published manually by its project records nothing (C1). The
+// recording's own recorded mode is unknowable here; a gap carries a byte
+// count, never content. A non-nil error means the batch was declared.
+func DeclareCommitted(ctx context.Context, projectRoot, dir string, batch oxsession.AppendedBatch, cause error) error {
+	if cause == nil {
+		cause = errors.New("recording not reloaded")
+	}
+	committer := &oxsession.RecordingState{SessionID: batch.SessionID, SessionPath: dir}
+	_, err := handOnCommitted(ctx, projectRoot, committer, batch, cause)
+	return err
+}
+
+// handOnCommitted spools batch into rec's stream, or, when unspoolable is set,
+// declares it there instead. Either way it first applies the ownership and
+// hold checks, once, for every capture path.
+func handOnCommitted(ctx context.Context, projectRoot string, rec *oxsession.RecordingState, batch oxsession.AppendedBatch, unspoolable error) (bool, error) {
 	if rec == nil || rec.SessionPath == "" || len(batch.Bytes) == 0 || batch.Suspended {
 		return false, nil
 	}
@@ -48,14 +76,18 @@ func SpoolCommitted(ctx context.Context, projectRoot string, rec *oxsession.Reco
 		log.DebugContext(ctx, "live_session_spool_skipped", "reason", "held")
 		return false, nil
 	}
-	if stateErr != nil {
+	reason := "recording_not_reloaded"
+	if unspoolable == nil && stateErr != nil {
 		// The stream exists but its state cannot be read, so whose it is cannot
 		// be checked and the batch cannot be spooled. Declared, not dropped: a
 		// gap in a stream that turns out to be another recording's overstates a
 		// loss, and a silent drop hides one.
-		err := fmt.Errorf("spool committed batch: %w", stateErr)
+		reason, unspoolable = "stream_state_unreadable", stateErr
+	}
+	if unspoolable != nil {
+		err := fmt.Errorf("spool committed batch: %w", unspoolable)
 		declareErr := DeclareLost(ctx, dir, int64(len(batch.Bytes)), err) // logs the loss itself
-		log.WarnContext(ctx, "live_session_spool_failed", "reason", "stream_state_unreadable", "declared", declareErr == nil, "error", err)
+		log.WarnContext(ctx, "live_session_spool_failed", "reason", reason, "declared", declareErr == nil, "error", err)
 		return false, err
 	}
 	res, err := Spool(ctx, dir, batch.Bytes, SpoolOptions{})

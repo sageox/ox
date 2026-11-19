@@ -71,7 +71,7 @@ func TestCursorControlsRejectReplacedRecording(t *testing.T) {
 	updated := false
 	err = UpdateCursorRecordingControl(context.Background(), f.projectRoot, &stale, f.homeDir, nil, LifecycleActionPause, func(*RecordingState) {
 		updated = true
-	})
+	}, nil)
 	require.ErrorContains(t, err, "identity-conflict")
 	assert.False(t, updated)
 	state := loadCursorCaptureState(t, f)

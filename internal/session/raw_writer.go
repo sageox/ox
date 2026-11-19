@@ -52,6 +52,11 @@ type AppendedBatch struct {
 	// committed. It is read under the same state lock as the append, so a
 	// pause/resume cannot slip between the two.
 	Suspended bool
+	// SessionID is the recording whose cursor the commit moved, read under the
+	// same lock. Marker writers do not take the raw lock, so a path that reads
+	// the marker again after the commit can find another recording there; only
+	// this one's stream may take the batch (C4).
+	SessionID string
 }
 
 // rawFileSink is the encoder's destination for a file-backed RawWriter. While
@@ -586,7 +591,7 @@ func (w *RawWriter) appendRecordingBatch(statePath string, entries []Entry, newO
 		if err := w.SealAppend(); err != nil {
 			return err
 		}
-		batch = AppendedBatch{Bytes: w.closeBatch(), Suspended: state.IsSuspended()}
+		batch = AppendedBatch{Bytes: w.closeBatch(), Suspended: state.IsSuspended(), SessionID: state.SessionID}
 		state.CommandRedactionVersion = 1
 		state.PendingCommandRedactions = w.cmdRedactor.pending
 		state.SourceOffset = newOffset

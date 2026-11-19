@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -101,8 +103,17 @@ func TestHookSpoolsABatchRawJSONLCannotReadBack(t *testing.T) {
 
 	require.NoError(t, os.Chmod(rawPath, 0o200)) // appendable, never readable
 	t.Cleanup(func() { _ = os.Chmod(rawPath, 0o600) })
+	// some filesystems still read a write-only file: proven, not assumed
+	if _, err := os.ReadFile(rawPath); !errors.Is(err, fs.ErrPermission) {
+		t.Skipf("reason: raw.jsonl is still readable after chmod 0200 (read error: %v), so an unreadable raw.jsonl cannot be simulated", err)
+	}
 	f.turn("committed while raw.jsonl is unreadable")
 	require.NoError(t, os.Chmod(rawPath, 0o600))
+	// turn checks only that the hook returned: a stopped or changed recording
+	// returns without capturing, and the comparison below would then pass on
+	// unchanged files
+	require.True(t, bytes.Contains(f.rawBytes(), []byte("committed while raw.jsonl is unreadable")),
+		"precondition: the hook committed the batch to raw.jsonl")
 
 	assert.Equal(t, string(f.rawBytes()), string(f.spoolBytes()), "the spool must be exactly what the capture writer put in raw.jsonl")
 	assert.NoFileExists(t, filepath.Join(f.dir(), "spool-lost"), "a batch that reached the stream is not a loss")

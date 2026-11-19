@@ -74,7 +74,15 @@ func RecordCursorPrompt(ctx context.Context, projectRoot string, expected *Recor
 // in one append/marker transaction. The daemon may keep its lifetime owner lock.
 // Resume waits for the submitted turn to finish: JSONL has no timestamps with
 // which to place an unexported paused row on either side of the resume boundary.
-func UpdateCursorRecordingControl(ctx context.Context, projectRoot string, expected *RecordingState, homeDir string, reader adapters.IncrementalReader, action LifecycleAction, update func(*RecordingState)) error {
+//
+// spool, when non-nil, receives the batch the drain committed, before the
+// lifecycle change and under the same locks, so no other capture can commit
+// and stream a later batch ahead of it. The drain moves the cursor past those
+// bytes even when the control then fails, so no later capture hands them to
+// the live stream (C8). The batch's Suspended flag is the recording's before
+// this control: rows a pause drains were exported unpaused and stream, rows a
+// resume drains were exported paused and never do.
+func UpdateCursorRecordingControl(ctx context.Context, projectRoot string, expected *RecordingState, homeDir string, reader adapters.IncrementalReader, action LifecycleAction, update func(*RecordingState), spool func(AppendedBatch)) error {
 	return withCursorControlState(ctx, projectRoot, expected, func(state *RecordingState) error {
 		capture, err := drainCursorSourceLocked(ctx, projectRoot, state.SessionPath, homeDir, reader, false)
 		if err != nil {
@@ -82,6 +90,9 @@ func UpdateCursorRecordingControl(ctx context.Context, projectRoot string, expec
 				return err
 			}
 		} else {
+			if spool != nil && len(capture.Appended.Bytes) > 0 {
+				spool(capture.Appended)
+			}
 			state = capture.State
 			if action == LifecycleActionResume && !capture.Complete {
 				return ErrCursorFinalDrainPending

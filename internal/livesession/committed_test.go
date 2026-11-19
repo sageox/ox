@@ -17,22 +17,50 @@ func (e *env) recordingOf() *session.RecordingState {
 	return &session.RecordingState{SessionID: e.st.SessionID, SessionPath: e.dir}
 }
 
-// unreadableStreamState makes the stream's state unreadable until restore.
-func unreadableStreamState(t *testing.T, dir string) (restore func()) {
+// replaceWithDirectory puts a directory where the file at path was, until
+// restore puts the file back. Reading or writing a directory as a file fails on
+// every platform and for every user; permission bits do not (Windows ignores
+// them, and so does root).
+func replaceWithDirectory(t *testing.T, path string) (restore func()) {
 	t.Helper()
-	if os.Geteuid() == 0 {
-		t.Skip("reason: root ignores file permissions, so an unreadable stream state cannot be simulated")
-	}
-	path := filepath.Join(dir, "stream-state.json")
-	if err := os.Chmod(path, 0o200); err != nil {
+	aside := path + ".aside"
+	if err := os.Rename(path, aside); err != nil {
 		t.Fatal(err)
 	}
-	restore = func() {
-		if err := os.Chmod(path, 0o600); err != nil {
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		t.Helper()
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(aside, path); err != nil {
 			t.Fatal(err)
 		}
 	}
-	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+}
+
+// unreadableStreamState makes the stream's state unreadable until restore.
+func unreadableStreamState(t *testing.T, dir string) (restore func()) {
+	t.Helper()
+	path := filepath.Join(dir, "stream-state.json")
+	restore = replaceWithDirectory(t, path)
+	if _, err := os.ReadFile(path); err == nil {
+		t.Fatal("precondition: the stream state can still be read")
+	}
+	return restore
+}
+
+// unwritableSpool makes the spool refuse an append until restore.
+func unwritableSpool(t *testing.T, dir string) (restore func()) {
+	t.Helper()
+	path := filepath.Join(dir, "spool.jsonl")
+	restore = replaceWithDirectory(t, path)
+	if f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0); err == nil {
+		_ = f.Close()
+		t.Fatal("precondition: the spool can still be appended to")
+	}
 	return restore
 }
 
@@ -150,15 +178,7 @@ func TestSpoolCommittedDeclaresABatchTheStreamCouldNotTake(t *testing.T) {
 			return unreadableStreamState(t, e.dir)
 		}},
 		{name: "the spool cannot be written", fail: func(t *testing.T, e *env) func() {
-			if os.Geteuid() == 0 {
-				t.Skip("reason: root ignores file permissions, so EACCES cannot be simulated")
-			}
-			spool := filepath.Join(e.dir, "spool.jsonl")
-			if err := os.Chmod(spool, 0o400); err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = os.Chmod(spool, 0o600) })
-			return func() { writableSpool(t, e.dir) }
+			return unwritableSpool(t, e.dir)
 		}},
 	}
 	for _, tt := range tests {

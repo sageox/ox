@@ -851,27 +851,49 @@ func (m *SessionWatcherManager) spoolLive(dir, projectRoot string, batch session
 // (C1). Daemon recovery calls it directly, with no drain to ask for: the live
 // tick finds the spooled bytes within one tick.
 //
+// The recording read now must be the one that committed the batch
+// (batch.SessionID). When it is gone, unreadable, or another recording's, the
+// batch is declared in its committer's stream instead: the cursor is past it,
+// so no later capture hands it on.
+//
 // The background context is deliberate: the batch's cursor has already moved,
 // so a watcher or sweep canceled now must not cost the stream these bytes.
 func spoolCommitted(logger *slog.Logger, dir, projectRoot string, batch session.AppendedBatch) (bool, error) {
 	if len(batch.Bytes) == 0 {
 		return false, nil
 	}
+	ctx := context.Background()
+	rec, err := reloadCommitter(dir, batch.SessionID)
+	if err != nil {
+		logger.Debug("live_session_recording_not_reloaded", "session", filepath.Base(dir), "session_id", batch.SessionID, "bytes", len(batch.Bytes), "error", err)
+		// logs, at Warn and Error, whatever it declares
+		return false, livesession.DeclareCommitted(ctx, projectRoot, dir, batch, err)
+	}
+	return livesession.SpoolCommitted(ctx, projectRoot, rec, batch)
+}
+
+// reloadCommitter reads the recording in dir again and requires it to be
+// sessionID, the one that committed a batch there. Its session_path is set to
+// dir: the batch was committed in dir, so that is the stream it may feed, and a
+// marker's own session_path is anyone's to rewrite.
+func reloadCommitter(dir, sessionID string) (*session.RecordingState, error) {
 	recPath := filepath.Join(dir, recordingMarker)
 	data, err := os.ReadFile(recPath)
 	if err != nil {
-		logger.Debug("live_session_spool_skipped", "session", filepath.Base(dir), "reason", "no_recording", "error", err)
-		return false, nil
+		return nil, fmt.Errorf("reload recording: %w", err)
 	}
 	rec, err := session.ParseRecordingState(recPath, data)
-	if err != nil || rec == nil {
-		logger.Debug("live_session_spool_skipped", "session", filepath.Base(dir), "reason", "no_recording", "error", err)
-		return false, nil
+	if err != nil {
+		return nil, fmt.Errorf("reload recording: %w", err)
 	}
-	// The batch was committed in dir, so that is the stream it may feed. A
-	// marker's own session_path is anyone's to rewrite and is never trusted.
+	if rec == nil {
+		return nil, errors.New("reload recording: empty marker")
+	}
+	if rec.SessionID != sessionID {
+		return nil, fmt.Errorf("reload recording: the folder now holds %s, not %s, which committed the batch", rec.SessionID, sessionID)
+	}
 	rec.SessionPath = dir
-	return livesession.SpoolCommitted(context.Background(), projectRoot, rec, batch)
+	return rec, nil
 }
 
 // resolveAdapter returns the adapter for the given name.

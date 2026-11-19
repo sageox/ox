@@ -236,7 +236,7 @@ func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, home
 	}
 	if len(appended) > 0 {
 		// exactly what the writer committed, never read back from raw.jsonl
-		result.Appended = AppendedBatch{Bytes: appended, Suspended: state.IsSuspended()}
+		result.Appended = AppendedBatch{Bytes: appended, Suspended: state.IsSuspended(), SessionID: state.SessionID}
 	}
 	return result, nil
 }
