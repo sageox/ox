@@ -132,7 +132,7 @@ func (s *session) batchLimit() int {
 // is blocking it, from its open (pending) to its close.
 func StreamNotice(dir string) string {
 	st, err := ReadState(dir)
-	if err != nil || !(st.active() || st.Status == StatusPending) || st.EdgeBlockedSince.IsZero() {
+	if err != nil || (!st.active() && st.Status != StatusPending) || st.EdgeBlockedSince.IsZero() {
 		return ""
 	}
 	return "Live streaming blocked by the network edge since " + st.EdgeBlockedSince.Local().Format("Jan 2 15:04") +
