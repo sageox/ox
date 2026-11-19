@@ -3,12 +3,14 @@
 // carried team context in; it animates once and settles. Failure prevented:
 // a coworker cannot see what SageOx moved into or out of the session, a lane
 // keeps animating (or never settles), the wrong prompt is credited with team
-// context, or terminal sessions get drawings they cannot show.
+// context, or the terminal (which has no Svg) is handed an image instead of
+// the text lane it can show.
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { ANIM_MS } from '../hooks/scene'
-import { arrived, drawn, finishOf, laneWidth, LANE_DEFAULT_PX, LANE_MAX_PX, LANE_MIN_PX, newBinder, settleDelay, startOf, submitted } from '../hooks/flowwire'
+import { TRACK } from '../hooks/textlane'
+import { finishOf, laneWidth, LANE_DEFAULT_PX, LANE_MAX_PX, LANE_MIN_PX, settleDelay, startOf } from '../hooks/flowwire'
 
 const PLUGIN = 'ox-cli-brief-pane'
 const SURFACES = ['desktop', 'vscode'] as const
@@ -24,14 +26,6 @@ const PRIME = [
   '<context-budget hint="who controls each token" sageox="1200" team="3617" total="4817">',
   '</context-budget>',
   '</ox-prime>',
-].join('\n')
-
-const MURMURS = [
-  '<system-reminder>',
-  '<murmur-context>Signals from coworkers delivered by SageOx.</murmur-context>',
-  '<entry id="m1" importance="normal" topic="wip" source="murmur" from="Avery">editing scene.ts</entry>',
-  '<entry id="m2" importance="critical" topic="release" source="murmur" from="Sam">cutting 0.12</entry>',
-  '</system-reminder>',
 ].join('\n')
 
 const SEARCH_OUT = JSON.stringify({ results: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] }) + ' '.repeat(4000)
@@ -193,17 +187,63 @@ describe('the lane under an ox tool row', () => {
     })
   }
 
-  test('terminal: the same ox call draws no lane', async ($, on) => {
-    mockEngine(on)
+  test('terminal: the same ox call draws a text lane, repaints it in place while in flight, then settles', async ($, on) => {
+    const s = mockEngine(on)
+    let blits = 0
+    on('ui.blit', () => {
+      blits++
+      return { value: {} }
+    })
+    s.answers.t1 = { result: { stdout: PRIME, stderr: '', interrupted: false }, text: PRIME }
     await $.tool.call({ tool: 'Bash', command: 'ox agent prime', tool_use_id: 't1' } as never)
-    const ui = await $.ui.mount({
-      plugin: PLUGIN,
-      surface: 'terminal',
-      component: 'ToolUse',
-      requestId: 't1',
-      props: { ...toolRow('Bash', { command: 'ox agent prime' }), tool_use_id: 't1' },
-    } as never)
-    expect(await ui.drawn()).toMatchObject({ type: 'Text' })
+    const ui = await mountTool($, 'terminal', 't1', 'Bash', { command: 'ox agent prime' })
+    // No image on the surface that cannot show one; the engine's row stays.
+    expect(await ui.find({ type: 'Svg' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: 'engine' })).toBeDefined()
+    const track = await ui.find({ type: 'Raster', key: 'ox-flow-track' })
+    expect(track?.props.columns).toBe(TRACK)
+    expect(track?.props.rows).toBe(1)
+    const first = String(track?.props.cells)
+    expect(await ui.find({ type: 'Text', text: 'SAGEOX ' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'loaded team context' })).toBeDefined()
+
+    // In flight the track is repainted by blits, not redraws.
+    await s.clock.advance(400)
+    expect(blits).toBeGreaterThan(0)
+
+    // After the animation the row redraws once on its still frame and the
+    // ticker stops: no more blits however long the session runs.
+    await s.clock.advance(ANIM_MS)
+    const settled = String((await ui.find({ type: 'Raster', key: 'ox-flow-track' }))?.props.cells)
+    expect(settled).not.toBe(first)
+    const after = blits
+    await s.clock.advance(5_000)
+    expect(blits).toBe(after)
+    await ui.unmount()
+  })
+
+  test('terminal: flow still draws the settled track at once and never blits', async ($, on) => {
+    const s = mockEngine(on, { flow: 'still' })
+    let blits = 0
+    on('ui.blit', () => {
+      blits++
+      return { value: {} }
+    })
+    s.answers.t1 = { result: { stdout: PRIME, stderr: '', interrupted: false }, text: PRIME }
+    await $.tool.call({ tool: 'Bash', command: 'ox agent prime', tool_use_id: 't1' } as never)
+    const ui = await mountTool($, 'terminal', 't1', 'Bash', { command: 'ox agent prime' })
+    const first = String((await ui.find({ type: 'Raster', key: 'ox-flow-track' }))?.props.cells)
+    await s.clock.advance(ANIM_MS + 500)
+    expect(blits).toBe(0)
+    expect(String((await ui.find({ type: 'Raster', key: 'ox-flow-track' }))?.props.cells)).toBe(first)
+    await ui.unmount()
+  })
+
+  test('terminal: flow off draws no lane', async ($, on) => {
+    const s = mockEngine(on, { flow: false })
+    s.answers.t1 = { result: { stdout: PRIME, stderr: '', interrupted: false }, text: PRIME }
+    await $.tool.call({ tool: 'Bash', command: 'ox agent prime', tool_use_id: 't1' } as never)
+    const ui = await mountTool($, 'terminal', 't1', 'Bash', { command: 'ox agent prime' })
     expect(await ui.find({ type: 'Box', key: 'ox-flow' })).toBeUndefined()
     await ui.unmount()
   })
@@ -262,82 +302,27 @@ describe('/ox-session-report flow', () => {
   })
 })
 
-describe('the strip under a prompt that carried team context in', () => {
-  for (const surface of SURFACES) {
-    test(`${surface}: SessionStart prime arriving before the first prompt row draws lands under that row`, async ($, on) => {
+
+// Failure prevented: a lane appearing under a prompt when no ox call was
+// made. Hooks send context along with a prompt (the session-start prime,
+// ledger recall), and the engine raises all of it again after a reload; none
+// of that is something the person asked ox to do just then.
+describe('prompts draw no lane', () => {
+  for (const surface of ['desktop', 'terminal'] as const) {
+    test(`${surface}: hook context arriving with a prompt draws nothing under it`, async ($, on) => {
       mockEngine(on)
       await $.prompt.submit({ text: 'what changed?', wait: false } as never)
-      await $.prompt.attachment({ type: 'hook_additional_context', text: PRIME, origin: { kind: 'hook', event: 'SessionStart' } } as never)
-      const ui = await mountPrompt($, surface, 'msg1')
-      const strip = await ui.find({ type: 'Svg' })
-      expect(strip).toBeDefined()
-      expect(String(strip?.props.alt)).toMatch(/^with this prompt: team context/)
-      expect(animates(strip?.props.source as string)).toBe(true)
-      await ui.unmount()
-    })
-
-    test(`${surface}: a UserPromptSubmit murmur block arriving after the row drew lands under it`, async ($, on) => {
-      const s = mockEngine(on)
-      await $.prompt.submit({ text: 'what changed?', wait: false } as never)
-      const ui = await mountPrompt($, surface, 'msg2')
+      const out = await $.prompt.attachment({ type: 'hook_additional_context', text: PRIME, origin: { kind: 'hook', event: 'SessionStart' } } as never)
+      expect(out.text).toBe(PRIME) // the model still reads it, untouched
+      const ui = await mountPrompt($, surface, 'p1')
+      await $.prompt.attachment({ type: 'hook_additional_context', text: `[ox-recall] matches:\n- (local) a\n- (local) b`, origin: { kind: 'hook', event: 'UserPromptSubmit' } } as never)
+      await ui.redraw()
       expect(await ui.find({ type: 'Svg' })).toBeUndefined()
-      await $.prompt.attachment({ type: 'hook_additional_context', text: MURMURS, origin: { kind: 'hook', event: 'UserPromptSubmit' } } as never)
-      const strip = await ui.find({ type: 'Svg' })
-      expect(String(strip?.props.alt)).toBe('with this prompt: 2 murmurs')
-      await s.clock.advance(ANIM_MS + 100)
-      expect(animates(await svgOf(ui))).toBe(false)
+      expect(await ui.find({ type: 'Raster', key: 'ox-flow-track' })).toBeUndefined()
+      expect(await ui.find({ type: 'Text', text: 'SAGEOX ' })).toBeUndefined()
       await ui.unmount()
     })
   }
-
-  test('each prompt keeps its own context; an older row and a non-composer row claim nothing', async ($, on) => {
-    mockEngine(on)
-    await $.prompt.submit({ text: 'one', wait: false } as never)
-    await $.prompt.attachment({ type: 'hook_additional_context', text: PRIME, origin: { kind: 'hook', event: 'SessionStart' } } as never)
-    const one = await mountPrompt($, 'desktop', 'p1')
-    expect(String((await one.find({ type: 'Svg' }))?.props.alt)).toMatch(/team context/)
-
-    await $.prompt.submit({ text: 'two', wait: false } as never)
-    await $.prompt.attachment({ type: 'hook_additional_context', text: MURMURS, origin: { kind: 'hook', event: 'UserPromptSubmit' } } as never)
-    // The old row redraws first: it keeps only its own context.
-    await one.redraw()
-    expect(String((await one.find({ type: 'Svg' }))?.props.alt)).not.toMatch(/murmur/)
-    const note = await mountPrompt($, 'desktop', 'n1', 'task-notification')
-    expect(await note.find({ type: 'Svg' })).toBeUndefined()
-    const two = await mountPrompt($, 'desktop', 'p2')
-    expect(String((await two.find({ type: 'Svg' }))?.props.alt)).toBe('with this prompt: 2 murmurs')
-    for (const ui of [one, note, two]) {
-      await ui.unmount()
-    }
-  })
-
-  test('engine and plugin attachments, local nudges and the terminal draw nothing', async ($, on) => {
-    mockEngine(on)
-    await $.prompt.submit({ text: 'x', wait: false } as never)
-    await $.prompt.attachment({ type: 'todo_reminder', text: PRIME, origin: { kind: 'engine' } } as never)
-    await $.prompt.attachment({ type: 'hook_additional_context', text: '[ox] run ox agent prime', origin: { kind: 'hook', event: 'UserPromptSubmit' } } as never)
-    const ui = await mountPrompt($, 'desktop', 'q1')
-    expect(await ui.find({ type: 'Svg' })).toBeUndefined()
-    await ui.unmount()
-
-    await $.prompt.submit({ text: 'y', wait: false } as never)
-    await $.prompt.attachment({ type: 'hook_additional_context', text: MURMURS, origin: { kind: 'hook', event: 'UserPromptSubmit' } } as never)
-    const term = await $.ui.mount({
-      plugin: PLUGIN,
-      surface: 'terminal',
-      component: 'UserMessage',
-      requestId: 'q2',
-      props: { text: 'y', origin: { kind: 'composer' }, isExpanded: true },
-    } as never)
-    expect(await term.drawn()).toMatchObject({ type: 'Text' })
-    await term.unmount()
-  })
-
-  test('the attachment text the model reads passes through untouched', async ($, on) => {
-    mockEngine(on)
-    const out = await $.prompt.attachment({ type: 'hook_additional_context', text: MURMURS, origin: { kind: 'hook', event: 'UserPromptSubmit' } } as never)
-    expect(out.text).toBe(MURMURS)
-  })
 })
 
 describe('tool groups', () => {
@@ -369,6 +354,89 @@ describe('tool groups', () => {
     expect(s.seen.filter(x => x.component === 'ToolGroup').map(x => x.props.isExpanded)).toEqual([false])
     await ui.unmount()
   })
+
+  // The terminal leaves a group folded, and its ToolUse rows (with their
+  // lanes) are not drawn while it is. Failure prevented: an ox call inside a
+  // folded group shows no lane until the person unfolds it.
+  const oxCall = (id: string, command = 'ox agent prime') => ({ ...call('Bash', { command }), tool_use_id: id })
+  const mountGroup = ($: any, calls: Array<Record<string, unknown>>, isExpanded = false) =>
+    $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'ToolGroup', requestId: 'grp1', props: group(calls, isExpanded), viewport: { columns: 90, rows: 40 } } as never)
+  const runOx = async ($: any, s: ReturnType<typeof mockEngine>, id: string) => {
+    s.answers[id] = { result: { stdout: PRIME, stderr: '', interrupted: false }, text: PRIME }
+    await $.tool.call({ tool: 'Bash', command: 'ox agent prime', tool_use_id: id } as never)
+  }
+
+  test('terminal: a folded group stays folded and draws its ox call lane beneath it, animated then settled', async ($, on) => {
+    const s = mockEngine(on)
+    let blits = 0
+    on('ui.blit', () => {
+      blits++
+      return { value: {} }
+    })
+    await runOx($, s, 'g1')
+    const ui = await mountGroup($, [call('Read', { file_path: '/a' }), oxCall('g1')])
+    expect(s.seen.filter(x => x.component === 'ToolGroup').map(x => x.props.isExpanded)).toEqual([false])
+    expect(await ui.find({ type: 'Text', text: 'engine' })).toBeDefined()
+    const track = await ui.find({ type: 'Raster', key: 'ox-flow-track:g1' })
+    expect(track?.props.columns).toBe(TRACK)
+    expect(await ui.find({ type: 'Text', text: 'loaded team context' })).toBeDefined()
+    const first = String(track?.props.cells)
+
+    await s.clock.advance(400)
+    expect(blits).toBeGreaterThan(0)
+    await s.clock.advance(ANIM_MS)
+    expect(String((await ui.find({ type: 'Raster', key: 'ox-flow-track:g1' }))?.props.cells)).not.toBe(first)
+    const after = blits
+    await s.clock.advance(5_000)
+    expect(blits).toBe(after)
+    await ui.unmount()
+  })
+
+  test('terminal: an expanded group draws no group-level lane; its rows draw their own', async ($, on) => {
+    const s = mockEngine(on)
+    await runOx($, s, 'g2')
+    const ui = await mountGroup($, [oxCall('g2')], true)
+    expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+    expect(await ui.drawn()).toMatchObject({ type: 'Text' })
+    await ui.unmount()
+  })
+
+  test('terminal: a folded group with no ox call event is drawn untouched', async ($, on) => {
+    mockEngine(on)
+    await $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'p1' } as never)
+    const ui = await mountGroup($, [{ ...call('Bash', { command: 'ls' }), tool_use_id: 'p1' }, call('Read', { file_path: '/a' }), oxCall('never-called')])
+    expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+    expect(await ui.drawn()).toMatchObject({ type: 'Text' })
+    await ui.unmount()
+  })
+
+  test('terminal: a folded group with five ox calls draws the newest three lanes and counts the rest', async ($, on) => {
+    const s = mockEngine(on)
+    const ids = ['m1', 'm2', 'm3', 'm4', 'm5']
+    for (const id of ids) {
+      await runOx($, s, id)
+    }
+    const ui = await mountGroup($, ids.map(id => oxCall(id)))
+    const rasters = await ui.findAll({ type: 'Raster' })
+    expect(rasters.map((r: any) => r.key)).toEqual(['ox-flow-track:m3', 'ox-flow-track:m4', 'ox-flow-track:m5'])
+    expect(await ui.find({ type: 'Text', text: '+2 more ox calls' })).toBeDefined()
+    await ui.unmount()
+
+    // One hidden call reads singular.
+    const four = await mountGroup($, ids.slice(1).map(id => oxCall(id)))
+    expect(await four.find({ type: 'Text', text: '+1 more ox call' })).toBeDefined()
+    await four.unmount()
+  })
+
+  test('terminal: flow off draws no lane under a folded group', async ($, on) => {
+    const s = mockEngine(on)
+    await runOx($, s, 'g3')
+    await $.command.run({ command: 'ox-session-report', args: 'flow off', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 }, surface: 'desktop' } as never)
+    const ui = await mountGroup($, [oxCall('g3')])
+    expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+    expect(s.seen.filter(x => x.component === 'ToolGroup').map(x => x.props.isExpanded)).toEqual([false])
+    await ui.unmount()
+  })
 })
 
 describe('flowwire helpers', () => {
@@ -394,44 +462,5 @@ describe('flowwire helpers', () => {
     expect(settleDelay([ev(0), ev(1000)], 1500)).toBe(ANIM_MS - 500 + 50)
   })
 
-  test('the binder: both arrival orders, redraws and repeats', () => {
-    const b = newBinder<string>()
-    submitted(b)
-    // Before the row: pending, claimed by the first composer row drawn.
-    expect(arrived(b, 'A', 'a')).toBeNull()
-    expect(drawn(b, 'other', false)).toEqual([])
-    expect(drawn(b, 'm1', true)).toEqual(['a'])
-    // After the row: straight to it; a repeat of the same text is taken once.
-    expect(arrived(b, 'B', 'b')).toBe('m1')
-    expect(arrived(b, 'B', 'b')).toBeNull()
-    // A redraw claims nothing; the next submit opens a new window.
-    expect(drawn(b, 'm1', true)).toEqual([])
-    submitted(b)
-    expect(arrived(b, 'C', 'c')).toBeNull()
-    expect(drawn(b, 'm1', true)).toEqual([])
-    expect(drawn(b, 'm2', true)).toEqual(['c'])
-    // The same text on a later prompt is that prompt's own.
-    expect(arrived(b, 'B', 'b')).toBe('m2')
-  })
 
-  test('an outbound call counts what it sent, never the acknowledgement', () => {
-    const body = 'x'.repeat(4000)
-    const bash = startOf('Bash', { command: `ox murmur --topic=wip "${body}"` })!
-    expect(finishOf({ text: 'ok' }, bash).tokens).toBeGreaterThan(1000)
-    const mcp = startOf(MCP_PUBLISH, { body })!
-    expect(finishOf({ text: 'ok' }, mcp).tokens).toBeGreaterThan(1000)
-    // An inbound call still counts its result.
-    const query = startOf('Bash', { command: 'ox query "x"' })!
-    expect(query.sent).toBeUndefined()
-    expect(finishOf({ text: 'abcdefgh' }, query).tokens).toBe(2)
-    expect(finishOf({ text: 'ok', isError: true }, bash)).toEqual({ tokens: 0, failed: true })
-    // A payload the call names but does not hold has no size, never the acknowledgement's.
-    const save = startOf('Bash', { command: 'ox plan save --file plan.html' })!
-    expect(save.sent).toBeUndefined()
-    expect(finishOf({ text: 'saved plan pln_1 with a long acknowledgement' }, save)).toEqual({ tokens: 0, unsized: true })
-    // A murmur body the shell expands is not in the command line either.
-    for (const command of ['ox murmur --topic=wip "$MESSAGE"', 'ox murmur "`cat note`"', 'ox murmur --topic=wip < note.txt']) {
-      expect(startOf('Bash', { command })!.sent).toBeUndefined()
-    }
-  })
 })

@@ -561,6 +561,12 @@ func LoadRecordingState(projectRoot string) (*RecordingState, error) {
 // walkRecordingStates decodes every .recording.json under the project's session
 // search paths, deduplicating by canonical file path, and hands each decoded
 // state to visit. Returning false from visit stops the walk immediately.
+func walkRecordingStates(projectRoot string, strict bool, visit func(*RecordingState) bool) error {
+	return walkRecordingMarkers(projectRoot, strict, func(_ string, state *RecordingState) bool { return visit(state) })
+}
+
+// walkRecordingMarkers is walkRecordingStates, also handing visit the folder
+// each marker was found in.
 //
 // strict decides what an unreadable or unparseable marker means, and the two
 // answers are both correct for their caller. A lenient walk is enumerating
@@ -569,7 +575,7 @@ func LoadRecordingState(projectRoot string) (*RecordingState, error) {
 // repository right now", and has to fail closed: a marker it cannot read might
 // belong to a session that is reading these very files, and converging
 // underneath one is the exact failure the question exists to prevent.
-func walkRecordingStates(projectRoot string, strict bool, visit func(*RecordingState) bool) error {
+func walkRecordingMarkers(projectRoot string, strict bool, visit func(dir string, state *RecordingState) bool) error {
 	if projectRoot == "" {
 		return fmt.Errorf("%w: project root", ErrEmptyPath)
 	}
@@ -616,7 +622,7 @@ func walkRecordingStates(projectRoot string, strict bool, visit func(*RecordingS
 			}
 
 			seen[canonicalKey] = struct{}{}
-			if !visit(state) {
+			if !visit(filepath.Join(sessionsDir, entry.Name()), state) {
 				return nil
 			}
 		}
@@ -649,36 +655,54 @@ func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
 // not the agent's active recording: it neither captures nor blocks a new one,
 // so the agent's next recording can start while it waits. Use
 // LoadQuarantinedRecordingsForAgent to find it.
-// If recovery temporarily releases an older recording, the newer recording
-// keeps the agent's active slot.
-// LoadQuarantinedRecordingsForAgent to find it.
-// If recovery temporarily releases an older recording, the newer recording
-// keeps the agent's active slot.
+//
+// A marker in a folder a repository writer controls (the Ledger checkout, the
+// legacy sessions/ folder) can reuse an active agent's ID, and even its
+// recording's folder and session ID. When more than one marker names the agent,
+// the one ox started here (started_recordings.go) is the agent's recording;
+// among those, the newest, so a held recording that recovery is releasing never
+// takes the active slot from the recording that replaced it.
 func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, error) {
 	if agentID == "" {
 		return nil, fmt.Errorf("%w: agent ID", ErrEmptyPath)
 	}
-	states, err := LoadAllRecordingStates(projectRoot)
-	if err != nil {
+	var dirs []string
+	var candidates []*RecordingState
+	if err := walkRecordingMarkers(projectRoot, false, func(dir string, s *RecordingState) bool {
+		if s.AgentID == agentID && !s.SourceRejected {
+			dirs = append(dirs, dir)
+			candidates = append(candidates, s)
+		}
+		return true
+	}); err != nil {
 		return nil, err
 	}
-	var active *RecordingState
-	for _, s := range states {
-		if s.AgentID != agentID || s.SourceRejected {
-			continue
-		}
-		if active == nil || s.StartedAt.After(active.StartedAt) {
-			active = s
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	s := candidates[0]
+	if len(candidates) > 1 {
+		// only read when it can decide something; unreadable, the first stands
+		if known, err := loadStartedRecordings(); err == nil {
+			var newest *RecordingState
+			for i, c := range candidates {
+				if _, ok := startedHere(known, dirs[i], c); ok && (newest == nil || c.StartedAt.After(newest.StartedAt)) {
+					newest = c
+				}
+			}
+			if newest != nil {
+				s = newest
+			}
 		}
 	}
-	if active != nil && active.CacheDir != "" && active.CacheDir != paths.CacheDir() {
+	if s.CacheDir != "" && s.CacheDir != paths.CacheDir() {
 		slog.Debug("recording found in different cache dir",
 			"agent_id", agentID,
-			"recording_cache_dir", active.CacheDir,
+			"recording_cache_dir", s.CacheDir,
 			"current_cache_dir", paths.CacheDir(),
 		)
 	}
-	return active, nil
+	return s, nil
 }
 
 // LoadQuarantinedRecordingsForAgent returns the agent's recordings held back for
@@ -769,7 +793,7 @@ func ClearRecordingStateAt(sessionPath, sessionID string) error {
 		return fmt.Errorf("%w: session path", ErrEmptyPath)
 	}
 	statePath := recordingStatePath(sessionPath)
-	return fileutil.WithFileLock(context.Background(), statePath, func() error {
+	err := fileutil.WithFileLock(context.Background(), statePath, func() error {
 		data, err := os.ReadFile(statePath)
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -788,6 +812,15 @@ func ClearRecordingStateAt(sessionPath, sessionID string) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	// the folder no longer holds sessionID either way; best effort, since a
+	// stale entry names a marker that is gone and so matches nothing
+	if err := forgetStartedRecording(sessionPath, sessionID); err != nil {
+		slog.Debug("could not prune started recording", "session_id", sessionID, "session", filepath.Base(sessionPath), "error", err)
+	}
+	return nil
 }
 
 // AppendProducedPlan records a plan slug on the recording at sessionPath — the
@@ -881,6 +914,9 @@ func ClearRecordingState(projectRoot string) error {
 		lockFiles, _ := filepath.Glob(filepath.Join(state.SessionPath, "*.lock"))
 		for _, lockFile := range lockFiles {
 			_ = os.Remove(lockFile)
+		}
+		if err := forgetStartedRecording(state.SessionPath, state.SessionID); err != nil {
+			slog.Debug("could not prune started recording", "session_id", state.SessionID, "session", filepath.Base(state.SessionPath), "error", err)
 		}
 	}
 
@@ -1234,6 +1270,12 @@ func CleanupOrphanedStubsInDir(cacheSessionsDir string) GhostCleanupResult {
 		if _, statErr := os.Stat(filepath.Join(sessionPath, "meta.json")); statErr == nil || IsHeld(sessionPath) {
 			continue
 		}
+		// a live stream still owed an open, a drain or a close keeps its folder:
+		// the prune after publishing leaves only those files, and the daemon's
+		// live tick finds the stream nowhere else
+		if liveStreamUnfinished(sessionPath) {
+			continue
+		}
 
 		switch ClassifyRawFile(filepath.Join(sessionPath, "raw.jsonl")) {
 		case RawSubstantive, RawPointerStub:
@@ -1279,6 +1321,37 @@ func CleanupOrphanedStubsInDir(cacheSessionsDir string) GhostCleanupResult {
 	}
 
 	return result
+}
+
+// liveStreamUnfinished reports whether dir holds a live stream (ADR-247) that
+// still owes the server an open, a drain or a close. It reads the stream state
+// itself because livesession imports this package; the file names and status
+// values mirror internal/livesession (stream-state.json, delete-requested,
+// pending/streaming/closing). An unreadable state counts as unfinished: keeping
+// a few small files beats stranding a stream. A delete-requested marker means
+// an abort queued the server delete outside the folder, so nothing is owed here.
+func liveStreamUnfinished(dir string) bool {
+	raw, err := os.ReadFile(filepath.Join(dir, "stream-state.json"))
+	if os.IsNotExist(err) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "delete-requested")); err == nil {
+		return false
+	}
+	var st struct {
+		Status string `json:"status"`
+	}
+	if json.Unmarshal(raw, &st) != nil {
+		return true
+	}
+	switch st.Status {
+	case "pending", "streaming", "closing":
+		return true
+	}
+	return false
 }
 
 // cleanupRecordingStatesInDir only removes immediate, scanned children of the
@@ -1331,7 +1404,8 @@ func cleanupRecordingStatesInDir(sessionsDir string, eligible func(*RecordingSta
 			if state, _, err := decodeRecordingState(data); err == nil && eligible(state, sessionDir) {
 				switch classifyRawContent(sessionDir.Open("raw.jsonl")) {
 				case RawMissing, RawHeaderOnly:
-					remove = true
+					// an open live stream still needs this folder to be closed
+					remove = !liveStreamUnfinished(filepath.Join(sessionsDir, entry.Name()))
 				}
 			}
 		}
@@ -1610,7 +1684,15 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 	state.RecordNativeSession(opts.AgentSessionID, opts.AgentSessionSource, state.StartedAt)
 	state.initializeTraceCapture()
 
+	// Recorded before the marker is published, so the daemon never sees this
+	// marker unregistered. A failure costs the recording its daemon catch-up
+	// only (started_recordings.go), never the recording: its hooks capture it.
+	if err := registerStartedRecording(state); err != nil {
+		slog.Warn("session_start_registry_failed", "session_id", state.SessionID, "agent_id", state.AgentID,
+			"session", sessionName, "error", err)
+	}
 	if err := SaveRecordingState(projectRoot, state); err != nil {
+		_ = forgetStartedRecording(state.SessionPath, state.SessionID)
 		return nil, err
 	}
 

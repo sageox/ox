@@ -1,7 +1,6 @@
 // Pure glue between the engine's events and the flow modules: which setting
-// is on, how wide a lane is drawn, how a finished call is read, and which
-// prompt row a hook attachment belongs to. No `$` here, so register.tsx stays
-// readable and every rule is unit-testable.
+// is on, how wide a lane is drawn and how a finished call is read. No `$`
+// here, so register.tsx stays readable and every rule is unit-testable.
 
 import type { FlowEvent } from '../types'
 import { byteTokens, classifyBash, classifyMcp, finishItems, finishTokens, type FlowStart } from './flow'
@@ -158,80 +157,4 @@ export function finishOf(ran: RanLike, start: FlowStart): FinishFields {
     out.interrupted = true
   }
   return out
-}
-
-// --- Which prompt row a hook attachment belongs to ------------------------------
-//
-// `prompt.attachment` carries no message id, and the engine raises it as a
-// request carries it: SessionStart context with the first prompt's first
-// request, UserPromptSubmit context with that prompt's. So the rule is:
-//
-//   a hook attachment belongs to the composer prompt row first drawn after
-//   the latest prompt submit.
-//
-// A submit opens a new window. A composer UserMessage row drawn for the first
-// time inside the window is that prompt's row: attachments that arrived
-// before it (pending) are attached to it when it draws, and attachments that
-// arrive after it go straight to it. Rows drawn before (old rows, redraws)
-// never claim. Before any submit has been seen (a reload mid-turn), the
-// first composer row drawn claims, so nothing is stranded.
-
-export type Binder<T> = {
-  /** Rows (message ids) seen drawn, so a redraw never claims. */
-  seen: Set<string>
-  /** The prompt row of the current window, once drawn. */
-  current: string | null
-  /** Attachments that arrived before the window's row was drawn. */
-  pending: T[]
-  /** Exact attachment texts already taken this window: one raised twice counts once. */
-  taken: Set<string>
-}
-
-export function newBinder<T>(): Binder<T> {
-  return { seen: new Set(), current: null, pending: [], taken: new Set() }
-}
-
-/**
- * submitted: a prompt was submitted; the next composer row drawn is its row.
- * The new window forgets the texts taken, so the same recall on a later
- * prompt draws under that prompt too.
- */
-export function submitted<T>(b: Binder<T>): void {
-  b.current = null
-  b.taken.clear()
-}
-
-/**
- * arrived: a hook attachment arrived, `text` as the model reads it and `item`
- * what it brought. Returns the prompt row it belongs to now, or null when it
- * waits for that row (kept pending) or was taken already.
- */
-export function arrived<T>(b: Binder<T>, text: string, item: T): string | null {
-  if (b.taken.has(text)) {
-    return null
-  }
-  b.taken.add(text)
-  if (b.current !== null) {
-    return b.current
-  }
-  b.pending.push(item)
-  return null
-}
-
-/**
- * drawn: a UserMessage row drew. Returns the pending attachments it claims
- * (empty for a redraw, a non-composer row, or nothing pending).
- */
-export function drawn<T>(b: Binder<T>, id: string, composer: boolean): T[] {
-  if (b.seen.has(id)) {
-    return []
-  }
-  b.seen.add(id)
-  if (!composer || b.current !== null) {
-    return []
-  }
-  b.current = id
-  const claimed = b.pending
-  b.pending = []
-  return claimed
 }

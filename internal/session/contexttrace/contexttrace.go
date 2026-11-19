@@ -155,6 +155,15 @@ type Event struct {
 	TokensBySource map[string]int `json:"tokens_by_source,omitempty"` // prime: tokens per context source
 	Deferred       []string       `json:"deferred,omitempty"`         // prime: sections withheld by the hook cap
 	Failed         bool           `json:"failed,omitempty"`
+	// The flow lane's facts about an ox call (internal/flowlane): how long it
+	// ran, how many items its result counted and what to call them, and, for
+	// a call that sends data out, the size of what was sent when ox could see
+	// it. Counts and sizes only, never content. Zero means not measured;
+	// readers that predate these fields ignore them.
+	DurationMS int64  `json:"duration_ms,omitempty"`
+	Items      int    `json:"items,omitempty"`
+	ItemsNoun  string `json:"items_noun,omitempty"`
+	SentBytes  int    `json:"sent_bytes,omitempty"`
 
 	// used: evidence that surfaced context was actually used, plus display
 	// metadata for the ref. None of these fields carries content — no prompt
