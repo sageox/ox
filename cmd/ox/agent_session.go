@@ -818,7 +818,7 @@ func undiscoveredSessionNextSteps(state *session.RecordingState) string {
 		"  - retry once the cause above is fixed: ox agent %s session recover\n"+
 		"  - or upload the transcript itself: ox agent %s session abort, then ox session import", state.AgentID, state.AgentID)
 	if state.AgentSessionID != "" {
-		steps += fmt.Sprintf(" --session %s --include-aborted", state.AgentSessionID)
+		steps += fmt.Sprintf(" --session %s --include-aborted", shellQuote(state.AgentSessionID))
 	} else {
 		steps += " (pick the session, then add --include-aborted)"
 	}

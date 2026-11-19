@@ -91,3 +91,10 @@ func TestRecover_KeepsADiscoveredClaudeRecordingThatPublishesNothing(t *testing.
 	require.NoError(t, loadErr)
 	require.NotNil(t, kept, "the recording stays for a retry or an import")
 }
+
+// A recording's native session ID can come from repository metadata, so the
+// suggested import command must keep it a literal for the shell.
+func TestUndiscoveredSessionNextSteps_QuotesTheSessionID(t *testing.T) {
+	steps := undiscoveredSessionNextSteps(&session.RecordingState{AgentID: "Oxab12", AgentSessionID: "x$(id)"})
+	assert.Contains(t, steps, "--session 'x$(id)' --include-aborted")
+}
