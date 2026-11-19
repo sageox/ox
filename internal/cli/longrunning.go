@@ -19,7 +19,8 @@ import (
 // Supported values:
 //
 //	"true"        — every invocation of this command is a service
-//	"flag:<name>" — a service only when boolean flag <name> is set
+//	"flag:<name>" — a service only when boolean flag <name> is set;
+//	                several names, comma-separated, mean any of them
 //
 // The flag form exists because `ox daemon start` is two different things
 // depending on one flag: without --foreground it spawns a child and returns in
@@ -48,11 +49,15 @@ func IsLongRunning(cmd *cobra.Command) bool {
 	}
 
 	if flagName, isFlagForm := strings.CutPrefix(val, longRunningFlagPrefix); isFlagForm {
-		if flagName == "" {
-			return false
+		for name := range strings.SplitSeq(flagName, ",") {
+			if name == "" {
+				continue
+			}
+			if set, err := cmd.Flags().GetBool(name); err == nil && set {
+				return true
+			}
 		}
-		set, err := cmd.Flags().GetBool(flagName)
-		return err == nil && set
+		return false
 	}
 
 	return val == "true"

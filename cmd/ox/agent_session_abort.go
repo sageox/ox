@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -94,6 +95,17 @@ func runAgentSessionAbortActive(inst *agentinstance.Instance, cmd *cobra.Command
 	// deleted with a live placeholder still advertising the session.
 	draftDeleted, draftWarning := removeLedgerDraftForAbort(sessionName)
 
+	// real-time streaming: delete the live copy on SageOx while the stream state
+	// that names it exists, and before .recording.json goes (C2). Until the
+	// delete is confirmed or recorded outside this folder, the folder is the
+	// only record of it; and a folder without its recording state is an orphan
+	// the daemon would publish. So a delete that was neither stops the abort here.
+	liveRes, liveErr := liveSessionAbort(projectRoot, state.SessionPath, livesession.AbortBudget)
+	if liveErr != nil {
+		undoAbortRecord()
+		return fmt.Errorf("session not aborted, nothing was removed: %w; run the abort again", liveErr)
+	}
+
 	// clear .recording.json so future session start works. Until it is gone
 	// the recording can still upload at stop, so a failure here takes the
 	// abort record back; after it, the session stays discarded.
@@ -102,7 +114,8 @@ func runAgentSessionAbortActive(inst *agentinstance.Instance, cmd *cobra.Command
 		return fmt.Errorf("failed to clear recording state: %w", err)
 	}
 
-	// remove entire session cache folder (raw.jsonl, plan.md, etc.)
+	// remove entire session cache folder (raw.jsonl, plan.md, the live spool and
+	// stream state, etc.); the live delete above is already safe (C10)
 	// guard against empty path — os.RemoveAll("") would delete cwd
 	if state.SessionPath != "" {
 		if err := os.RemoveAll(state.SessionPath); err != nil {
@@ -116,7 +129,7 @@ func runAgentSessionAbortActive(inst *agentinstance.Instance, cmd *cobra.Command
 	// repair tasks server-side (fire-and-forget)
 	notifySessionAbortedAsync(projectRoot, state.SessionID, state.LifecycleRegistrationState != "deferred")
 
-	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, draftDeleted, joinWarnings(draftWarning, importWarning))
+	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, draftDeleted, joinWarnings(draftWarning, importWarning, liveDeleteRefusedWarning(liveRes)))
 }
 
 // runAgentSessionAbortByName aborts a session by name. Only allows discarding
@@ -242,6 +255,14 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 	// while a placeholder still advertises it.
 	draftDeleted, draftWarning := removeLedgerDraftForAbort(sessionName)
 
+	// delete the live copy on SageOx first, as for an active abort (C2): an
+	// unrecorded delete keeps the folder, the only record of what to delete
+	liveRes, liveErr := liveSessionAbort(projectRoot, sessionPath, livesession.AbortBudget)
+	if liveErr != nil {
+		undoAbortRecord()
+		return fmt.Errorf("session not aborted, nothing was removed: %w; run the abort again", liveErr)
+	}
+
 	// remove .recording.json if present (unconditional — no agent ownership
 	// check). As above, a recording still armed takes the abort record back.
 	if err := os.Remove(recPath); err != nil && !os.IsNotExist(err) {
@@ -249,14 +270,14 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 		return fmt.Errorf("failed to clear recording state: %w", err)
 	}
 
-	// remove entire session folder
+	// remove entire session folder, live files included (C10)
 	if err := os.RemoveAll(sessionPath); err != nil {
 		return fmt.Errorf("failed to remove session data at %s: %w", sessionPath, err)
 	}
 
 	notifySessionAbortedAsync(projectRoot, abortedSessionID, abortedEverRegistered)
 
-	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, draftDeleted, joinWarnings(draftWarning, importWarning))
+	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, draftDeleted, joinWarnings(draftWarning, importWarning, liveDeleteRefusedWarning(liveRes)))
 }
 
 // buildSessionInfo constructs a SessionInfo from a session folder on disk.
@@ -528,9 +549,28 @@ func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, proj
 		return fmt.Errorf("failed to remove finalized session %q from the ledger: %w", sessionName, err)
 	}
 
+	// A pushed session's cache can still hold its live stream until the daemon
+	// closes it (agentwork.PruneSessionCache). A kill deletes that copy on
+	// SageOx too, and keeps a folder whose delete could not be recorded (C2).
+	var liveWarnings []string
+	keepCache := map[string]bool{}
+	cacheCopies := []string{hydrationCache}
+	if contextPath := session.GetContextPath(repoID); contextPath != "" {
+		cacheCopies = append(cacheCopies, filepath.Join(contextPath, "sessions", sessionName))
+	}
+	for _, dir := range cacheCopies {
+		res, err := liveSessionAbort(projectRoot, dir, livesession.AbortBudget)
+		if err != nil {
+			keepCache[dir] = true
+			liveWarnings = append(liveWarnings, fmt.Sprintf("kept %s: %v", dir, err))
+			continue
+		}
+		liveWarnings = append(liveWarnings, liveDeleteRefusedWarning(res))
+	}
+
 	// Remove the local recording cache copy, if one exists. ErrSessionNotFound
 	// is expected and fine — a finalized session may have no local copy left.
-	if contextPath := session.GetContextPath(repoID); contextPath != "" {
+	if contextPath := session.GetContextPath(repoID); contextPath != "" && !keepCache[filepath.Join(contextPath, "sessions", sessionName)] {
 		if store, storeErr := session.NewStore(contextPath); storeErr == nil {
 			if delErr := store.DeleteSession(sessionName); delErr != nil && !errors.Is(delErr, session.ErrSessionNotFound) {
 				slog.Warn("failed to remove local session cache during finalized abort", "session", sessionName, "error", delErr)
@@ -541,13 +581,15 @@ func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, proj
 	// Remove the ledger hydration cache. git rm never touches it — it is
 	// gitignored and lives outside the tracked sessions/ tree — so without this
 	// the hydrated summary/transcript bytes would survive the kill.
-	if err := os.RemoveAll(hydrationCache); err != nil {
+	if keepCache[hydrationCache] {
+		slog.Warn("ledger hydration cache kept: its live copy's delete was not recorded", "session", sessionName)
+	} else if err := os.RemoveAll(hydrationCache); err != nil {
 		slog.Warn("failed to remove ledger hydration cache during finalized abort", "session", sessionName, "error", err)
 	}
 
 	notifySessionAbortedAsync(projectRoot, abortedSessionID, true)
 
-	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, false, importWarning)
+	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, false, joinWarnings(append([]string{importWarning}, liveWarnings...)...))
 }
 
 // confirmAbort checks --force flag or prompts for interactive confirmation.

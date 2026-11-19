@@ -46,6 +46,9 @@ func applyPatch(f *Flags, p *Patch) {
 	if p.GitHubMirrorEnabled != nil {
 		f.GitHubMirrorEnabled = *p.GitHubMirrorEnabled
 	}
+	if p.SessionStreamingEnabled != nil {
+		f.SessionStreamingEnabled = *p.SessionStreamingEnabled
+	}
 	if p.DisableFileDeleteTools != nil {
 		f.DisableFileDeleteTools = *p.DisableFileDeleteTools
 	}

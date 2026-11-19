@@ -348,22 +348,23 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// cross-link identities. Requiring a live agent detection keeps the
 	// fallback limited to the scenario it was designed for.
 	//
-	// markerIsThisSession: identity may be shared across native sessions under
-	// one agent process, but "this session already received a full prime" is a
-	// per-native-session fact. A PID-matched marker only speaks for this call
-	// when the call carries no session ID of its own.
-	markerIsThisSession := existingMarker != nil
-	if !isCursor && existingMarker == nil && agentx.CurrentAgent() != nil {
+	// Only a call with no native session ID of its own may borrow a marker by
+	// PID. A known session ID that has no marker is a new native session, not a
+	// repeat: the Codex desktop app runs every chat under one long-lived
+	// app-server process, so matching by PID would hand chat B chat A's AI
+	// coworker identity and merge their recordings (#1385).
+	pidFallbackAllowed := !isCursor && agentSessionID == "" && agentx.CurrentAgent() != nil
+	if existingMarker == nil && pidFallbackAllowed {
 		if agentPID := proc.FindAgentAncestorPID(); agentPID > 0 {
 			existingMarker = FindSessionMarkerByPID(agentPID)
-			markerIsThisSession = existingMarker != nil && agentSessionID == ""
-			if existingMarker != nil && agentSessionID == "" {
+			if existingMarker != nil {
 				// promote the marker's native session ID so downstream
 				// marker writes reuse the same key
 				agentSessionID = existingMarker.AgentSessionID
 			}
 		}
 	}
+	markerIsThisSession := existingMarker != nil
 	if existingMarker != nil && existingMarker.IsPrimed() && idempotent {
 		// idempotent mode: session already primed, output nothing
 		// this saves ~1k tokens on redundant prime calls. The project's commit
@@ -473,7 +474,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		// reuse that recording's agent ID so prime stays idempotent.
 		// This handles the case where CLAUDE.md's BLOCKING instruction triggers
 		// a second prime call after the SessionStart hook already created a session.
-		if !isCursor {
+		// Like the marker lookup above, it is closed to a call that carries its
+		// own native session ID (#1385).
+		if !isCursor && agentSessionID == "" {
 			if currentPID := proc.FindAgentAncestorPID(); currentPID > 0 {
 				if states, loadErr := session.LoadAllRecordingStates(projectRoot); loadErr == nil {
 					for _, s := range states {

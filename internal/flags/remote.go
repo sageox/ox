@@ -43,6 +43,9 @@ type CLIFeatures struct {
 	// GitHubMirror gates the daemon's GitHub mirror relay (epic ox-zjuv).
 	// Server-evaluated, default off, no env override — same shape as Bulletin.
 	GitHubMirror *bool `json:"github_mirror,omitempty"`
+	// SessionStreaming gates real-time session streaming (ADR-247). Server-
+	// evaluated, default off, no env override.
+	SessionStreaming *bool `json:"session_streaming,omitempty"`
 }
 
 // CLIKillswitches contains server-evaluated kill switch values.
@@ -68,18 +71,19 @@ func RemoteSettingsToPatch(r *CLISettingsResponse) *Patch {
 		return nil
 	}
 	return &Patch{
-		CodeDBEnabled:          r.Features.CodeDB,
-		WhisperEnabled:         r.Features.Whisper,
-		DistillEnabled:         r.Features.Distill,
-		AutoDistill:            r.Features.AutoDistill,
-		TUIEnabled:             r.Features.TUI,
-		AttestEnabled:          r.Features.Attest,
-		TraceEnabled:           r.Features.Trace,
-		BulletinEnabled:        r.Features.Bulletin,
-		GitHubMirrorEnabled:    r.Features.GitHubMirror,
-		DisableFileDeleteTools: boolPtr(r.Killswitches.DisableFileDeleteTools),
-		DisableShellExecTools:  boolPtr(r.Killswitches.DisableShellExecTools),
-		PrimeAppend:            strPtr(r.PrimeAppend),
+		CodeDBEnabled:           r.Features.CodeDB,
+		WhisperEnabled:          r.Features.Whisper,
+		DistillEnabled:          r.Features.Distill,
+		AutoDistill:             r.Features.AutoDistill,
+		TUIEnabled:              r.Features.TUI,
+		AttestEnabled:           r.Features.Attest,
+		TraceEnabled:            r.Features.Trace,
+		BulletinEnabled:         r.Features.Bulletin,
+		GitHubMirrorEnabled:     r.Features.GitHubMirror,
+		SessionStreamingEnabled: r.Features.SessionStreaming,
+		DisableFileDeleteTools:  boolPtr(r.Killswitches.DisableFileDeleteTools),
+		DisableShellExecTools:   boolPtr(r.Killswitches.DisableShellExecTools),
+		PrimeAppend:             strPtr(r.PrimeAppend),
 	}
 }
 
