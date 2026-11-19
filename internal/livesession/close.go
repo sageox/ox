@@ -178,7 +178,7 @@ func (s *session) reportUnsentTail(ctx context.Context, closedThrough int64) {
 // declareLost writes a pending spool-lost count into the spool as its gap
 // line before the close measures the stream (see Spool).
 func (s *session) declareLost() error {
-	if _, pending := readLost(s.dir); !pending {
+	if !readLost(s.dir).pending {
 		return nil
 	}
 	if _, err := appendToSpool(s.dir, s.st.Acked, nil, SpoolOptions{}); err != nil {

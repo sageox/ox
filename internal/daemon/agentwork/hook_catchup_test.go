@@ -114,6 +114,16 @@ func newCatchUpFixture(t *testing.T) *catchUpFixture {
 	return f
 }
 
+// watcher is the daemon's session watcher once the recording's hooks have run:
+// every hook heartbeats with its agent ID, and the daemon arms the catch-up
+// for that agent's recording (NoteHook).
+func (f *catchUpFixture) watcher(logger *slog.Logger) *SessionWatcherManager {
+	f.t.Helper()
+	m := NewSessionWatcherManager(logger)
+	m.NoteHook(context.Background(), f.projectRoot, f.agentID)
+	return m
+}
+
 func (f *catchUpFixture) say(role, text string) {
 	f.t.Helper()
 	f.turns++
@@ -189,7 +199,7 @@ func skipAsRoot(t *testing.T) {
 // from its stdin. The catch-up takes bytes only once they sat unread.
 func TestHookCatchUpLeavesFreshBytesToTheHook(t *testing.T) {
 	f := newCatchUpFixture(t)
-	m := NewSessionWatcherManager(slog.Default())
+	m := f.watcher(slog.Default())
 	f.say("assistant", "just written")
 
 	assert.Equal(t, 0, m.CatchUpHookRecordings(context.Background(), f.projectRoot))
@@ -204,7 +214,7 @@ func TestHookCatchUpLeavesFreshBytesToTheHook(t *testing.T) {
 // lock: it skips the cycle at once and captures on a later one.
 func TestHookCatchUpSkipsACycleWhileTheCaptureLockIsHeld(t *testing.T) {
 	f := newCatchUpFixture(t)
-	m := NewSessionWatcherManager(slog.Default())
+	m := f.watcher(slog.Default())
 	f.say("assistant", "late answer")
 	f.settle()
 
@@ -226,7 +236,7 @@ func TestHookCatchUpSkipsACycleWhileTheCaptureLockIsHeld(t *testing.T) {
 // the adapter again over the same bytes.
 func TestHookCatchUpReadsAnUnchangedTranscriptOnce(t *testing.T) {
 	f := newCatchUpFixture(t)
-	m := NewSessionWatcherManager(slog.Default())
+	m := f.watcher(slog.Default())
 	file, err := os.OpenFile(f.source, os.O_WRONLY|os.O_APPEND, 0o600)
 	require.NoError(t, err)
 	_, err = file.WriteString(`{"type":"file-history-snapshot"}` + "\n")
@@ -253,7 +263,7 @@ func TestHookCatchUpLeavesTailRecordingsToTheirWatcher(t *testing.T) {
 	f.say("assistant", "tailed answer")
 	f.settle()
 
-	assert.Equal(t, 0, NewSessionWatcherManager(slog.Default()).CatchUpHookRecordings(context.Background(), f.projectRoot))
+	assert.Equal(t, 0, f.watcher(slog.Default()).CatchUpHookRecordings(context.Background(), f.projectRoot))
 	assert.NotContains(t, f.raw(), "tailed answer")
 }
 
@@ -274,7 +284,7 @@ func TestHookCatchUpRefusesATranscriptOutsideTheAdapterRoots(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newCatchUpFixture(t)
 			var logs bytes.Buffer
-			m := NewSessionWatcherManager(slog.New(slog.NewTextHandler(&logs, nil)))
+			m := f.watcher(slog.New(slog.NewTextHandler(&logs, nil)))
 			f.say("assistant", "planted answer")
 			b, err := os.ReadFile(f.source)
 			require.NoError(t, err)
@@ -302,7 +312,7 @@ func TestHookCatchUpRefusesATranscriptOutsideTheAdapterRoots(t *testing.T) {
 // and a settled transcript no hook follows is still captured.
 func TestHookCatchUpCommitsOnlyBytesThatSettled(t *testing.T) {
 	f := newCatchUpFixture(t)
-	m := NewSessionWatcherManager(slog.Default())
+	m := f.watcher(slog.Default())
 	f.say("assistant", "settled answer")
 	f.settle()
 	f.adapter.beforeRead = func() {
@@ -327,7 +337,7 @@ func TestHookCatchUpCountsAnUnpersistedCursorAsAFailure(t *testing.T) {
 	skipAsRoot(t)
 	f := newCatchUpFixture(t)
 	var logs bytes.Buffer
-	m := NewSessionWatcherManager(slog.New(slog.NewTextHandler(&logs, nil)))
+	m := f.watcher(slog.New(slog.NewTextHandler(&logs, nil)))
 	f.sayAt("assistant", "said before the recording", f.state.StartedAt.Add(-time.Hour))
 	f.settle()
 	cursor := f.recording().SourceOffset
@@ -350,7 +360,7 @@ func TestHookCatchUpCountsAnUnpersistedCursorAsAFailure(t *testing.T) {
 // good. A zero-byte file has no header either.
 func TestHookCatchUpNeverAppendsToAHeaderlessRawFile(t *testing.T) {
 	f := newCatchUpFixture(t)
-	m := NewSessionWatcherManager(slog.Default())
+	m := f.watcher(slog.Default())
 	require.NoError(t, os.Truncate(f.rawPath(), 0))
 	f.say("assistant", "answer before the header")
 	f.settle()
@@ -365,7 +375,7 @@ func TestHookCatchUpNeverAppendsToAHeaderlessRawFile(t *testing.T) {
 // the transcript did not change.
 func TestHookCatchUpRetriesARecordingWaitingForItsRawFile(t *testing.T) {
 	f := newCatchUpFixture(t)
-	m := NewSessionWatcherManager(slog.Default())
+	m := f.watcher(slog.Default())
 	require.NoError(t, os.Remove(f.rawPath()))
 	f.say("assistant", "answer before raw.jsonl")
 	f.settle()
@@ -427,7 +437,7 @@ func TestHookCaptureAppendsNothingWhenTheHeaderFails(t *testing.T) {
 func TestHookCatchUpDeclaresABatchItCouldNotSpool(t *testing.T) {
 	skipAsRoot(t)
 	f := newCatchUpFixture(t)
-	m := NewSessionWatcherManager(slog.Default())
+	m := f.watcher(slog.Default())
 	var spooled atomic.Int64
 	m.SetLiveSpooler(func(string, session.AppendedBatch) { spooled.Add(1) })
 	_, err := livesession.Prepare(context.Background(), livesession.Config{Endpoint: "https://live.test.sageox.ai", DataDir: t.TempDir()},

@@ -1429,6 +1429,14 @@ func (d *Daemon) initComponents() time.Duration {
 	if d.agentWorker != nil {
 		d.agentWorker.SetSessionWatcher(d.sessionWatcher)
 	}
+	// The hook catch-up acts only on recordings a local hook reported: a
+	// marker planted in the Ledger checkout or legacy sessions/ never gets one.
+	// Every ox hook heartbeats with its agent ID (dispatchPhase).
+	if projectRoot := d.config.ProjectRoot; projectRoot != "" {
+		d.heartbeat.SetAgentHeartbeatCallback(func(agentID string) {
+			d.sessionWatcher.NoteHook(d.ctx, projectRoot, agentID)
+		})
+	}
 
 	// wire cross-component dependencies
 	d.scheduler.SetAuthTokenGetter(d.heartbeat.GetAuthToken)

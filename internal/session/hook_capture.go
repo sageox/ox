@@ -32,7 +32,32 @@ const (
 	// but the batch could not be read back for the live stream, so it was
 	// declared lost there (HookCaptureOptions.SpoolLost).
 	HookStatusSpoolLost = "spool-lost"
+	// HookStatusRawRefused: raw.jsonl is a symlink or another non-regular
+	// file (ErrRawNotRegular), so nothing was recovered, read or written.
+	HookStatusRawRefused = "raw-not-regular"
 )
+
+// ErrRawNotRegular reports a raw.jsonl that is not a regular file. Rollback
+// recovery truncates raw.jsonl and a capture appends to it: through a symlink
+// either one would land on whatever file the link names.
+var ErrRawNotRegular = errors.New("raw.jsonl is not a regular file")
+
+// CheckRawRegular returns ErrRawNotRegular when rawPath exists as anything but
+// a regular file. It uses Lstat, so a symlink is refused whatever it points
+// at. A missing raw.jsonl passes: the hook that starts it writes its header.
+func CheckRawRegular(rawPath string) error {
+	info, err := os.Lstat(rawPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("lstat raw.jsonl: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: mode %s", ErrRawNotRegular, info.Mode().Type())
+	}
+	return nil
+}
 
 // HookCaptureOptions holds what differs between the callers of
 // CaptureHookEntries: a hook, which has the agent's stdin, and the daemon's
@@ -149,10 +174,23 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 		slog.Debug("hook: afterTool session changed since lock acquired, skipping", "agentID", agentID, "lockedPath", expectedSessionPath, "currentPath", state.SessionPath, "lockedSessionID", expectedSessionID, "currentSessionID", state.SessionID)
 		return HookCapture{}, nil
 	}
+	// Checked before anything else touches the recording: a symlinked
+	// raw.jsonl turns the rollback below into a truncate of the file it names.
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	if err := CheckRawRegular(rawPath); err != nil {
+		if !errors.Is(err, ErrRawNotRegular) {
+			return HookCapture{}, err
+		}
+		slog.WarnContext(ctx, "session_capture_raw_refused", "session_id", state.SessionID, "agent_id", agentID,
+			"session", filepath.Base(state.SessionPath), "error", err)
+		return HookCapture{Status: HookStatusRawRefused}, err
+	}
 	if err := CheckNativeSourceBinding(state); err != nil {
 		return HookCapture{}, err
 	}
-	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	// Claude Code's ownership checks below must cover every spelling of the
+	// adapter that resolves to it ("claude" is an accepted alias).
+	claudeCode := adapters.CanonicalAdapterName(state.AdapterName) == "claude-code"
 	if err := RecoverRawAppend(rawPath, state.SourceOffset); err != nil {
 		return HookCapture{}, err
 	}
@@ -293,7 +331,7 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 	}
 
 	var sourceSnapshot os.FileInfo
-	if state.AdapterName == "claude-code" {
+	if claudeCode {
 		var snapshotErr error
 		sourceSnapshot, snapshotErr = claudesource.Snapshot(state.SessionFile)
 		if snapshotErr != nil {
@@ -321,7 +359,7 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 		markStatus("no-new-entries")
 		return result, nil
 	}
-	if state.AdapterName == "claude-code" {
+	if claudeCode {
 		repoRoot := state.WorkspacePath
 		if repoRoot == "" {
 			repoRoot = projectRoot

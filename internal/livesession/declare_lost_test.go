@@ -2,12 +2,10 @@ package livesession_test
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/sageox/ox/internal/livesession"
 )
@@ -46,45 +44,28 @@ func TestDeclareLostOnANonStreamingSessionRecordsNothing(t *testing.T) {
 }
 
 // A loss declared while a write is settling the previous one must keep its gap
-// line. settleLost read the count, then removed it; a loss recorded in between
-// vanished. The hook lands a second DeclareLost in exactly that window. Held
-// off by the lost-count lock, it cannot finish there, so the wait gives up and
-// the loss lands after the settle; unserialized, it lands inside and is wiped.
+// line. The write reads the loss totals, writes the gap line, then stores what
+// it read as declared; the hook lands a second DeclareLost in between. Storing
+// a total re-read after the gap line, or clearing the record, would swallow it.
 func TestALossDeclaredWhileTheLastIsSettlingIsKept(t *testing.T) {
 	e := newEnv(t)
 	e.spool(lines(0, 2))
 	if err := livesession.DeclareLost(t.Context(), e.dir, 100, errors.New("first")); err != nil {
 		t.Fatalf("declare the first loss: %v", err)
 	}
-	done := make(chan error, 1)
+	var second error
 	fired := false
-	livesession.SetSettleLostReadHookForTest(t, func() {
-		if fired {
-			return
-		}
-		fired = true
-		go func() { done <- livesession.DeclareLost(context.Background(), e.dir, 7, errors.New("second")) }()
-		select {
-		case err := <-done:
-			done <- err
-		case <-time.After(300 * time.Millisecond):
+	livesession.SetLostDeclareHookForTest(t, func() {
+		if !fired {
+			fired = true
+			second = livesession.DeclareLost(t.Context(), e.dir, 7, errors.New("second"))
 		}
 	})
-	if _, err := livesession.Spool(t.Context(), e.dir, lines(2, 3), livesession.SpoolOptions{}); err != nil {
-		t.Fatalf("spool that settles the first loss: %v", err)
-	}
-	livesession.SetSettleLostReadHookForTest(t, nil)
-	if err := <-done; err != nil {
-		t.Fatalf("declare the second loss: %v", err)
+	e.spoolDeclaresLoss(lines(2, 3), 100)
+	livesession.SetLostDeclareHookForTest(t, nil)
+	if !fired || second != nil {
+		t.Fatalf("second loss inside the settle window: fired=%v err=%v", fired, second)
 	}
 
-	before := e.spoolBytes()
-	res, err := livesession.Spool(t.Context(), e.dir, lines(3, 4), livesession.SpoolOptions{})
-	if err != nil || res.Gaps != 1 {
-		t.Fatalf("spool after the second loss: %+v %v, want its gap declared", res, err)
-	}
-	gap, _, _ := bytes.Cut(e.spoolBytes()[len(before):], []byte("\n"))
-	if g := decodeGap(t, gap); g.Reason != "spool_write_failed" || g.Bytes != 7 {
-		t.Fatalf("gap = %+v, want spool_write_failed for the 7 bytes declared mid-settle", g)
-	}
+	e.spoolDeclaresLoss(lines(3, 4), 7)
 }

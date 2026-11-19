@@ -97,13 +97,16 @@ func (f *liveFixture) settle() {
 }
 
 // catchUpManager is the daemon's session watcher, spooling committed batches
-// into the live spool as the daemon's live sessions do.
+// into the live spool as the daemon's live sessions do. The fixture's hooks
+// have run, and every hook heartbeats with its agent ID: the daemon arms the
+// catch-up for that agent's recording (NoteHook).
 func (f *liveFixture) catchUpManager() *agentwork.SessionWatcherManager {
 	m := agentwork.NewSessionWatcherManager(slog.Default())
 	m.SetLiveSpooler(func(dir string, b session.AppendedBatch) {
 		_, err := livesession.Spool(context.Background(), dir, b.Bytes, livesession.SpoolOptions{Paused: b.Suspended})
 		assert.NoError(f.t, err)
 	})
+	m.NoteHook(context.Background(), f.projectRoot, f.agentID)
 	return m
 }
 
@@ -282,16 +285,19 @@ func TestCatchUpNeverTouchesAStoppedOrHeldRecording(t *testing.T) {
 			f.say("assistant", "late answer")
 			f.settle()
 			before := string(f.rawBytes())
+			// armed while the recording is still active, as its hooks left it:
+			// a zero below is never a missing hook
+			m := f.catchUpManager()
 			if tc.apply == nil {
 				// the same recording left active is caught up, so a zero below
 				// is the condition's doing, not the fixture's
-				assert.Equal(t, 1, f.catchUp())
+				assert.Equal(t, 1, m.CatchUpHookRecordings(context.Background(), f.projectRoot))
 				assert.Contains(t, string(f.rawBytes()), "late answer")
 				return
 			}
 			tc.apply(t, f)
 
-			assert.Equal(t, 0, f.catchUp())
+			assert.Equal(t, 0, m.CatchUpHookRecordings(context.Background(), f.projectRoot))
 			assert.Equal(t, before, string(f.rawBytes()), "the catch-up added to a finished recording")
 		})
 	}

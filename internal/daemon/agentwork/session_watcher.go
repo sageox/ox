@@ -52,6 +52,9 @@ type SessionWatcherManager struct {
 	// hookMarks remembers, per hook-mode recording, a catch-up that found
 	// nothing to capture (see hookCatchUpMark).
 	hookMarks map[string]hookCatchUpMark
+	// hookTouched holds the recordings a local hook reported since the daemon
+	// started, the only ones the catch-up acts on (see NoteHook).
+	hookTouched map[hookTouch]time.Time
 }
 
 // SetLiveSpooler wires real-time session streaming into the tail watcher.

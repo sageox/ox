@@ -43,7 +43,72 @@ type hookCatchUpMark struct {
 	offset, size int64
 	failed       bool
 	refused      bool
-	at           time.Time
+	// unhooked only records that a skip for want of a local hook was logged.
+	unhooked bool
+	at       time.Time
+}
+
+// hookTouch names a recording a local hook reported: its folder, durable
+// identity and agent, as the marker the hook captures with records them.
+type hookTouch struct {
+	sessionPath, sessionID, agentID string
+}
+
+func touchOf(st *session.RecordingState) hookTouch {
+	return hookTouch{sessionPath: st.SessionPath, sessionID: st.SessionID, agentID: st.AgentID}
+}
+
+// NoteHook arms the catch-up for the recording agentID's hooks capture in
+// projectRoot. The daemon calls it for every agent heartbeat, which every ox
+// hook sends. It resolves the recording the way the hook does
+// (session.LoadRecordingStateForAgent), so what it arms is what that hook
+// writes to anyway.
+//
+// The catch-up acts on nothing else (HookNoted). The markers it sweeps include
+// ones in places a repository writer controls, the Ledger checkout and the
+// legacy sessions/ folder, and a planted marker never gets a local hook. The
+// set lives in memory: after a daemon restart a recording is caught up again
+// once its next hook arrives.
+func (m *SessionWatcherManager) NoteHook(ctx context.Context, projectRoot, agentID string) {
+	if projectRoot == "" || agentID == "" {
+		return
+	}
+	st, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	if err != nil || st == nil || st.SessionPath == "" {
+		return // not recording: nothing to arm
+	}
+	touch := touchOf(st)
+	m.mu.Lock()
+	if m.hookTouched == nil {
+		m.hookTouched = make(map[hookTouch]time.Time)
+	}
+	_, armed := m.hookTouched[touch]
+	m.hookTouched[touch] = time.Now()
+	m.mu.Unlock()
+	if !armed {
+		m.logger.DebugContext(ctx, "session_capture_catchup_armed", "session_id", st.SessionID, "agent_id", agentID, "session", filepath.Base(st.SessionPath))
+	}
+}
+
+// HookNoted reports whether a local hook has reported st since the daemon
+// started (NoteHook).
+func (m *SessionWatcherManager) HookNoted(st *session.RecordingState) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.hookTouched[touchOf(st)]
+	return ok
+}
+
+// pruneHookTouches forgets recordings whose marker is gone. One armed after
+// the sweep listed the markers is kept: its marker may postdate the list.
+func (m *SessionWatcherManager) pruneHookTouches(present map[hookTouch]bool, listedAt time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for touch, at := range m.hookTouched {
+		if !present[touch] && at.Before(listedAt) {
+			delete(m.hookTouched, touch)
+		}
+	}
 }
 
 // RunHookCatchUp catches up the hook-mode recordings of projectRoot's
@@ -70,11 +135,17 @@ func (m *SessionWatcherManager) CatchUpHookRecordings(ctx context.Context, proje
 	if projectRoot == "" {
 		return 0
 	}
+	listedAt := time.Now()
 	states, err := session.LoadAllRecordingStates(projectRoot)
 	if err != nil {
 		m.logger.DebugContext(ctx, "session_capture_catchup_skipped", "reason", "cannot_list_recordings", "error", err)
 		return 0
 	}
+	present := make(map[hookTouch]bool, len(states))
+	for _, st := range states {
+		present[touchOf(st)] = true
+	}
+	m.pruneHookTouches(present, listedAt)
 	active := make(map[string]bool, len(states))
 	caught := 0
 	for _, st := range states {
@@ -97,8 +168,13 @@ func (m *SessionWatcherManager) CatchUpHookRecordings(ctx context.Context, proje
 // without the lock. CaptureHookEntries repeats the hook path's checks
 // (explicit stop, StoppedAt, a changed or quarantined recording) under it.
 // A held recording is skipped outright: held means kept as it is.
+//
+// Only Claude Code, whatever alias names it, is caught up: CaptureHookEntries
+// runs its ownership checks and no other adapter's. Cursor has its own drain
+// (session.DrainCursorSource) with its own source validation.
 func hookCatchUpCandidate(st *session.RecordingState) bool {
 	return st.WatchMode == "hook" && st.StoppedAt == nil && !st.SourceRejected &&
+		adapters.CanonicalAdapterName(st.AdapterName) == "claude-code" &&
 		st.AgentID != "" && st.SessionPath != "" && st.WorkspacePath != "" &&
 		// only a file-backed transcript can be checked for growth with a stat;
 		// an undiscovered one is left to the next hook, which discovers it
@@ -112,11 +188,22 @@ func hookCatchUpCandidate(st *session.RecordingState) bool {
 // whether bytes were captured.
 func (m *SessionWatcherManager) catchUpHookRecording(ctx context.Context, st *session.RecordingState) bool {
 	ids := []any{"session_id", st.SessionID, "agent_id", st.AgentID, "session", filepath.Base(st.SessionPath)}
+	if !m.HookNoted(st) {
+		m.skipUnhookedCatchUp(ctx, st.SessionPath, ids)
+		return false
+	}
 	// The swept markers include the Ledger checkout's and legacy sessions/
 	// folders', which this daemon never wrote: read only a transcript the tail
 	// watcher would accept (startWatchAt).
 	source, err := adapters.SafeSessionFilePath(st.AdapterName, st.SessionFile, m.homeDir())
 	if err != nil {
+		m.refuseHookCatchUp(ctx, st.SessionPath, ids, err)
+		return false
+	}
+	// CaptureHookEntries refuses this too, under the lock. Checked here first,
+	// the refusal is warned once rather than on every sweep.
+	rawPath := filepath.Join(st.SessionPath, "raw.jsonl")
+	if err := session.CheckRawRegular(rawPath); err != nil {
 		m.refuseHookCatchUp(ctx, st.SessionPath, ids, err)
 		return false
 	}
@@ -130,7 +217,7 @@ func (m *SessionWatcherManager) catchUpHookRecording(ctx context.Context, st *se
 	}
 
 	var capture session.HookCapture
-	acquired, err := fileutil.TryWithFileLock(filepath.Join(st.SessionPath, "raw.jsonl"), func() error {
+	acquired, err := fileutil.TryWithFileLock(rawPath, func() error {
 		var captureErr error
 		capture, captureErr = session.CaptureHookEntries(ctx, st.WorkspacePath, st.AgentID, st.SessionPath, st.SessionID, session.HookCaptureOptions{
 			// the lock reloads the recording, and a hook may have rediscovered its
@@ -152,7 +239,7 @@ func (m *SessionWatcherManager) catchUpHookRecording(ctx context.Context, st *se
 	}
 
 	switch {
-	case capture.Status == session.HookStatusSourceRefused:
+	case capture.Status == session.HookStatusSourceRefused || capture.Status == session.HookStatusRawRefused:
 		m.refuseHookCatchUp(ctx, st.SessionPath, ids, err)
 		return false
 	case err != nil || capture.Failed():
@@ -173,8 +260,27 @@ func (m *SessionWatcherManager) catchUpHookRecording(ctx context.Context, st *se
 	return true
 }
 
+// skipUnhookedCatchUp leaves a recording no local hook has reported (NoteHook).
+// Logged once per recording, at Debug: right after a daemon restart every
+// active recording waits for its next hook, which is normal.
+func (m *SessionWatcherManager) skipUnhookedCatchUp(ctx context.Context, sessionPath string, ids []any) {
+	m.mu.Lock()
+	logged := m.hookMarks[sessionPath].unhooked
+	if !logged {
+		if m.hookMarks == nil {
+			m.hookMarks = make(map[string]hookCatchUpMark)
+		}
+		m.hookMarks[sessionPath] = hookCatchUpMark{unhooked: true, at: time.Now()}
+	}
+	m.mu.Unlock()
+	if !logged {
+		m.logger.DebugContext(ctx, "session_capture_catchup_skipped", append(ids, "reason", "no_local_hook")...)
+	}
+}
+
 // refuseHookCatchUp skips a recording whose transcript is outside its
-// adapter's allowed roots, warning once per recording rather than every sweep.
+// adapter's allowed roots, or whose raw.jsonl is not a regular file, warning
+// once per recording rather than every sweep.
 func (m *SessionWatcherManager) refuseHookCatchUp(ctx context.Context, sessionPath string, ids []any, reason error) {
 	m.mu.Lock()
 	warned := m.hookMarks[sessionPath].refused
@@ -210,7 +316,7 @@ func (m *SessionWatcherManager) hookMarkCurrent(sessionPath string, offset, size
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	mark, ok := m.hookMarks[sessionPath]
-	return ok && !mark.refused && mark.offset == offset && mark.size == size &&
+	return ok && !mark.refused && !mark.unhooked && mark.offset == offset && mark.size == size &&
 		(!mark.failed || time.Since(mark.at) < hookCatchUpRetry)
 }
 
