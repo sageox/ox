@@ -132,6 +132,8 @@ func chdirOutsideGit(t *testing.T) {
 func runSkillsChange(t *testing.T, cmd *cobra.Command, args ...string) (string, error) {
 	t.Helper()
 	var buf strings.Builder
+	previousContext := cmd.Context()
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
 	resetSkillsFlags(t, cmd)
@@ -140,6 +142,7 @@ func runSkillsChange(t *testing.T, cmd *cobra.Command, args ...string) (string, 
 		// later test's output into memory nobody reads.
 		cmd.SetOut(nil)
 		cmd.SetErr(nil)
+		cmd.SetContext(previousContext)
 		resetSkillsFlags(t, cmd)
 	})
 

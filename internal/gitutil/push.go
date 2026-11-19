@@ -41,6 +41,10 @@ type PushOpts struct {
 	// and returns success without publishing unrelated pending commits.
 	ValidatePush func(ctx context.Context, repoPath string) (alreadyPublished bool, err error)
 
+	// PreserveCommitHistory keeps per-commit provenance intact on rebase retry
+	// for publishers that authorize each commit by its subject and paths.
+	PreserveCommitHistory bool
+
 	// ReconcileLFS is called when a push fails with "LFS objects are missing".
 	// If set, PushWithRetry calls this instead of failing permanently, then
 	// retries the push once. This allows the caller to wire lfs.ReconcileUnpushedPointers
@@ -530,7 +534,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 				// the next push would lose the same race (#1261). Collapse it
 				// into one snapshot commit: the next rebase replays a single
 				// commit in seconds and the push wins.
-				if ahead > collapseBacklogAbove {
+				if ahead > collapseBacklogAbove && !opts.PreserveCommitHistory {
 					collapseCtx, collapseCancel := context.WithTimeout(ctx, opTimeout)
 					collapseErr := SquashUnpushed(collapseCtx, repoPath, fmt.Sprintf("ledger: collapse %d unpushed commits so the push can win the rebase race", ahead))
 					collapseCancel()
