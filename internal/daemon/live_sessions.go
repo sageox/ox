@@ -405,6 +405,11 @@ func (l *LiveSessions) step(ctx context.Context, dir string, started time.Time) 
 		// cannot change the answer, so no backoff and no line per tick
 		l.clearBackoff(dir)
 		log.DebugContext(ctx, "live_session_step_skipped", "reason", "untrusted_state", "error", err)
+	case errors.Is(err, livesession.ErrEdgeBlocked):
+		// same backoff as any retryable failure; livesession logged the streak
+		// once at Error and logs when it clears, so a line per retry is noise
+		delay := l.fail(dir, res.RetryAfter, started)
+		log.DebugContext(ctx, "live_session_step_failed", "status", string(st.Status), "retry_in_ms", delay.Milliseconds(), "error", err)
 	case err != nil:
 		delay := l.fail(dir, res.RetryAfter, started)
 		log.WarnContext(ctx, "live_session_step_failed", "status", string(st.Status), "retry_in_ms", delay.Milliseconds(), "error", err)

@@ -125,6 +125,19 @@ type State struct {
 	// secret_withheld gap line replaced it. Stop reads it to tell the person,
 	// once, that part of the session was left out of the live view.
 	SecretWithheld bool `json:"secret_withheld,omitempty"`
+
+	// EdgeBlockedSince is when the network edge in front of SageOx (CDN or
+	// WAF) began answering this stream with a 403 that is no live-capture
+	// refusal; zero while it is not. The drain keeps retrying, so nothing is
+	// lost, but nothing streams either; status output reads it to say so.
+	EdgeBlockedSince time.Time `json:"edge_blocked_since,omitzero"`
+
+	// Stalls counts consecutive sends at offset StalledAt that timed out or
+	// were edge-blocked. BatchLimit, when set, caps the next batch below
+	// MaxBatchBytes after stalls split it; a stored append resets all three.
+	StalledAt  int64 `json:"stalled_at,omitempty"`
+	Stalls     int   `json:"stalls,omitempty"`
+	BatchLimit int   `json:"batch_limit,omitempty"`
 }
 
 func (s State) active() bool { return s.Status == StatusStreaming || s.Status == StatusClosing }
