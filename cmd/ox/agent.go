@@ -91,7 +91,7 @@ Use the session:
   ox agent <agent_id> session start        # Start recording
   ox agent <agent_id> session stop         # Stop and save
   ox agent <agent_id> session summarize    # Generate summary
-  ox agent <agent_id> session import       # Import prior session (stdin or --file)
+  ox agent <agent_id> session import       # Add planning history (JSONL, stdin or --file); full sessions: ox session import
   ox agent <agent_id> session capture-prior # Capture prior history (schema-validated)
   ox agent <agent_id> session subagent-complete # Report subagent completion to parent
   ox agent <agent_id> session subagent-list # List subagent sessions

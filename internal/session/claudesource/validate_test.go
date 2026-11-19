@@ -710,6 +710,76 @@ func TestValidateOwnsLinkedWorktreesOfTheSameRepository(t *testing.T) {
 			addWorktree(t, newRepo(t, filepath.Join(outer, "other")), "other", other, false)
 			return root, other
 		}},
+		// Claude Code desktop and `git worktree add ../x` put the worktree
+		// beside the main checkout, not inside it (issue #1890)
+		"own linked worktree outside the main checkout": {owned: true, layout: func(t *testing.T, outer string) (string, string) {
+			root := filepath.Join(outer, "repo")
+			wt := filepath.Join(outer, "repo-wt")
+			addWorktree(t, newRepo(t, root), "repo-wt", wt, false)
+			return root, filepath.Join(wt, "pkg")
+		}},
+		"outside worktree registered with a relative path (git --relative-paths)": {owned: true, layout: func(t *testing.T, outer string) (string, string) {
+			root := filepath.Join(outer, "repo")
+			wt := filepath.Join(outer, "repo-wt")
+			gitDir := addWorktree(t, newRepo(t, root), "repo-wt", wt, true)
+			rel, err := filepath.Rel(gitDir, filepath.Join(wt, ".git"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			write(t, filepath.Join(gitDir, "gitdir"), rel+"\n")
+			return root, wt
+		}},
+		"main checkout when the root is a worktree": {owned: true, layout: func(t *testing.T, outer string) (string, string) {
+			root, _ := worktreeRoot(t, outer)
+			return root, filepath.Join(outer, "main", "pkg")
+		}},
+		"sibling worktree when the root is a worktree": {owned: true, layout: func(t *testing.T, outer string) (string, string) {
+			root, common := worktreeRoot(t, outer)
+			sibling := filepath.Join(outer, "sibling")
+			addWorktree(t, common, "sibling", sibling, false)
+			return root, sibling
+		}},
+		"another repository's worktree outside": {layout: func(t *testing.T, outer string) (string, string) {
+			root := filepath.Join(outer, "repo")
+			newRepo(t, root)
+			wt := filepath.Join(outer, "other-wt")
+			addWorktree(t, newRepo(t, filepath.Join(outer, "other")), "other-wt", wt, false)
+			return root, wt
+		}},
+		"outside worktree git has pruned": {layout: func(t *testing.T, outer string) (string, string) {
+			root := filepath.Join(outer, "repo")
+			wt := filepath.Join(outer, "repo-wt")
+			common := newRepo(t, root)
+			addWorktree(t, common, "repo-wt", wt, false)
+			if err := os.RemoveAll(filepath.Join(common, "worktrees")); err != nil {
+				t.Fatal(err)
+			}
+			return root, wt
+		}},
+		"registered worktree path now holding another checkout": {layout: func(t *testing.T, outer string) (string, string) {
+			root := filepath.Join(outer, "repo")
+			wt := filepath.Join(outer, "repo-wt")
+			common := newRepo(t, root)
+			addWorktree(t, common, "repo-wt", wt, false)
+			if err := os.Remove(filepath.Join(wt, ".git")); err != nil {
+				t.Fatal(err)
+			}
+			newRepo(t, wt)
+			return root, wt
+		}},
+		"unrelated directory outside": {layout: func(t *testing.T, outer string) (string, string) {
+			root := filepath.Join(outer, "repo")
+			newRepo(t, root)
+			return root, filepath.Join(outer, "elsewhere")
+		}},
+		"nested clone inside an outside worktree": {layout: func(t *testing.T, outer string) (string, string) {
+			root := filepath.Join(outer, "repo")
+			wt := filepath.Join(outer, "repo-wt")
+			addWorktree(t, newRepo(t, root), "repo-wt", wt, false)
+			clone := filepath.Join(wt, "third_party", "clone")
+			newRepo(t, clone)
+			return root, clone
+		}},
 		"nested clone": {layout: func(t *testing.T, outer string) (string, string) {
 			root := filepath.Join(outer, "repo")
 			newRepo(t, root)
