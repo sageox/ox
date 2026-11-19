@@ -311,7 +311,7 @@ func TestProcessResult_RetriesLegacyEmptyLedgerDownload(t *testing.T) {
 	req, err := h.BuildPrompt(item)
 	require.NoError(t, err)
 	require.True(t, req.SkipLLM)
-	_, err = h.stageSessionInLedger(item.Payload.(*SessionFinalizePayload))
+	_, err = h.stageSessionInLedger(item.Payload.(*SessionFinalizePayload), nil)
 	require.NoError(t, err)
 	got, err := os.ReadFile(metaPath)
 	require.NoError(t, err)
@@ -320,27 +320,45 @@ func TestProcessResult_RetriesLegacyEmptyLedgerDownload(t *testing.T) {
 
 func TestStageEmptyLedgerRepairPreservesCurrentMetadata(t *testing.T) {
 	const name = "2026-09-24T23-03-riley-OxRiLy"
-	ledgerPath := t.TempDir()
-	f := cacheFixture{name: name, ledgerPath: ledgerPath,
-		cacheDir: filepath.Join(ledgerPath, ".sageox", "cache", "sessions", name)}
-	f.ledgerEntry(t, emptyRaw, false)
-	f.write(t, "raw.jsonl", emptyRaw)
-	f.write(t, "meta.json", `{"version":"1.0","title":"Brief session","summary":"No conversation was recorded in this session.","summary_status":"ok","user_id":"old-owner"}`)
+	for _, tc := range []struct{ name, id string }{
+		{name: "legacy"},
+		{name: "explicit ID", id: "ses_01950000-0000-7000-8000-000000001106"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledgerPath := t.TempDir()
+			f := cacheFixture{name: name, ledgerPath: ledgerPath,
+				cacheDir: filepath.Join(ledgerPath, ".sageox", "cache", "sessions", name)}
+			f.ledgerEntry(t, emptyRaw, false)
+			f.write(t, "raw.jsonl", emptyRaw)
+			const summaryMD = "Brief session"
+			f.write(t, artifactSummaryMD, summaryMD)
+			ref := lfs.NewFileRef([]byte(summaryMD))
+			cached, err := json.Marshal(lfs.SessionMeta{
+				Version: "1.0", Title: "Brief session", Summary: "No conversation was recorded in this session.",
+				SummaryStatus: "ok", UserID: "old-owner", SessionID: tc.id,
+			})
+			require.NoError(t, err)
+			f.write(t, "meta.json", string(cached))
 
-	dest := filepath.Join(ledgerPath, "sessions", name)
-	require.NoError(t, lfs.MutateSessionMeta(t.Context(), dest, func(meta *lfs.SessionMeta) (*lfs.SessionMeta, error) {
-		meta.UserID = "updated-owner"
-		return meta, nil
-	}))
-	h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
-	payload := &SessionFinalizePayload{SessionDir: f.cacheDir, LedgerPath: ledgerPath, emptyTranscript: true}
-	_, err := h.stageSessionInLedger(payload)
-	require.NoError(t, err)
-	got, err := lfs.ReadSessionMeta(dest)
-	require.NoError(t, err)
-	require.Equal(t, "updated-owner", got.UserID)
-	require.Equal(t, "Brief session", got.Title)
-	require.Equal(t, "ok", got.SummaryStatus)
+			dest := filepath.Join(ledgerPath, "sessions", name)
+			require.NoError(t, lfs.MutateSessionMeta(t.Context(), dest, func(meta *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+				meta.SessionID = tc.id
+				meta.UserID = "updated-owner"
+				return meta, nil
+			}))
+			h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
+			payload := &SessionFinalizePayload{SessionDir: f.cacheDir, LedgerPath: ledgerPath, emptyTranscript: true}
+			_, err = h.stageSessionInLedger(payload, map[string]lfs.FileRef{artifactSummaryMD: ref})
+			require.NoError(t, err)
+			got, err := lfs.ReadSessionMeta(dest)
+			require.NoError(t, err)
+			require.Equal(t, "updated-owner", got.UserID)
+			require.Equal(t, tc.id, got.SessionID)
+			require.Equal(t, "Brief session", got.Title)
+			require.Equal(t, "ok", got.SummaryStatus)
+			require.Equal(t, ref, got.Files[artifactSummaryMD])
+		})
+	}
 }
 
 func TestProcessResult_ReplaysPendingEmptyLedgerRepair(t *testing.T) {
@@ -408,7 +426,7 @@ func TestProcessResult_ReplaysPendingEmptyLedgerRepair(t *testing.T) {
 				return &SessionFinalizePayload{SessionDir: f.cacheDir, LedgerPath: ledgerPath, UploadOnly: true}
 			}
 			if state == "interrupted staging" || state == "dirty after staging" {
-				_, err := h.stageSessionInLedger(retry())
+				_, err := h.stageSessionInLedger(retry(), nil)
 				require.NoError(t, err)
 				if state == "dirty after staging" {
 					require.NoError(t, os.WriteFile(filepath.Join(destDir, artifactSummaryMD), []byte(newerMD), 0o644))

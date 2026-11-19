@@ -184,7 +184,7 @@ func TestStageSessionInLedger_CopiesFiles(t *testing.T) {
 		LedgerPath: ledgerPath,
 	}
 
-	if _, err := handler.stageSessionInLedger(payload); err != nil {
+	if _, err := handler.stageSessionInLedger(payload, nil); err != nil {
 		t.Fatalf("stageSessionInLedger failed: %v", err)
 	}
 
@@ -237,7 +237,7 @@ func TestStageSessionInLedger_BacksUpTrackedSession(t *testing.T) {
 			}
 
 			payload := &SessionFinalizePayload{SessionDir: sessionDir, LedgerPath: ledgerPath}
-			cacheDir, err := handler.stageSessionInLedger(payload)
+			cacheDir, err := handler.stageSessionInLedger(payload, nil)
 			if err != nil {
 				t.Fatalf("stageSessionInLedger failed: %v", err)
 			}
