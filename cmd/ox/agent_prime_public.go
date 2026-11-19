@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -42,6 +43,12 @@ var fetchPublicPrime = func(ctx context.Context, projectRoot string) (*api.Publi
 	if !ok {
 		return nil, nil
 	}
+	return fetchPublicPrimeForRepo(ctx, projectRoot, owner, name)
+}
+
+// fetchPublicPrimeForRepo asks SageOx about one named GitHub repo. A seam so
+// tests can drive `ox init`'s team suggestion without a network.
+var fetchPublicPrimeForRepo = func(ctx context.Context, projectRoot, owner, name string) (*api.PublicPrimeResponse, error) {
 	ep := endpoint.GetForProject(projectRoot)
 	client := api.NewRepoClientWithEndpoint(ep).WithTimeout(publicPrimeTimeout)
 	// Signed in: the bundle also links each plan. Signed out, or a token that
@@ -61,7 +68,7 @@ func emitPublicPrime(cmd *cobra.Command, projectRoot string, textMode bool) (han
 	if bundle == nil {
 		return false, nil
 	}
-	return true, writePublicPrime(cmd, bundle, textMode, false)
+	return true, writePublicPrime(cmd, projectRoot, bundle, textMode, false)
 }
 
 // emitPublicPrimeForNonMember is the same fallback for an initialized repo:
@@ -83,7 +90,7 @@ func emitPublicPrimeForNonMember(cmd *cobra.Command, projectRoot string, textMod
 	if _, _, err := reconcileSkillInventoryIfStale(projectRoot); err != nil {
 		return true, fmt.Errorf("cannot prime with an unverified skill inventory: %w", err)
 	}
-	return true, writePublicPrime(cmd, bundle, textMode, true)
+	return true, writePublicPrime(cmd, projectRoot, bundle, textMode, true)
 }
 
 // lookupPublicPrime returns the bundle, or nil on a miss or any failure.
@@ -102,8 +109,8 @@ func lookupPublicPrime(cmd *cobra.Command, projectRoot string) *api.PublicPrimeR
 	return bundle
 }
 
-func writePublicPrime(cmd *cobra.Command, bundle *api.PublicPrimeResponse, textMode, initialized bool) error {
-	block := renderPublicPrime(bundle, time.Local)
+func writePublicPrime(cmd *cobra.Command, projectRoot string, bundle *api.PublicPrimeResponse, textMode, initialized bool) error {
+	block := renderPublicPrimeFor(bundle, time.Local, repotools.IsShallowClone(projectRoot))
 	// Rules are instructions, so they need the repo's own binding to SageOx:
 	// an uninitialized clone is matched to a team only by the server.
 	rules := ""
@@ -246,6 +253,14 @@ func ruleBody(s string) string {
 //
 // Ranking and selection are the server's; this only lays the bundle out.
 func renderPublicPrime(p *api.PublicPrimeResponse, loc *time.Location) string {
+	return renderPublicPrimeFor(p, loc, false)
+}
+
+// renderPublicPrimeFor is renderPublicPrime for a clone that may be shallow.
+// A shallow clone must not be told to run `ox init --team`: its first commit
+// is the shallow boundary, so its salted remote hashes match no registration
+// and init would mint a duplicate repo inside the project's team.
+func renderPublicPrimeFor(p *api.PublicPrimeResponse, loc *time.Location, shallow bool) string {
 	var b strings.Builder
 	project := oneLine(p.Project.Name)
 	fmt.Fprintf(&b, "SageOx primed from %s, public, as of %s\n", project, p.AsOf.In(loc).Format("3:04 PM"))
@@ -267,7 +282,16 @@ func renderPublicPrime(p *api.PublicPrimeResponse, loc *time.Location) string {
 	}
 	switch p.Viewer {
 	case api.PublicPrimeViewerMember:
-		fmt.Fprintf(&b, "You're a member of %s. Run `ox init` here for full priming.\n", project)
+		team := p.MemberTeam()
+		switch {
+		case team != nil && teamIDPattern.MatchString(team.ID) && shallow:
+			fmt.Fprintf(&b, "You're a member of %s. This is a shallow clone, so ox can't match it to the project's repo yet: run `git fetch --unshallow`, then `ox init --team %s` to link it to the project's team.\n", project, team.ID)
+		case team != nil && teamIDPattern.MatchString(team.ID):
+			// The id, not the slug: it never changes, and --team accepts it.
+			fmt.Fprintf(&b, "You're a member of %s. Run `ox init --team %s` here to link this clone to the project's team, so your work here counts as the project's.\n", project, team.ID)
+		default:
+			fmt.Fprintf(&b, "You're a member of %s. Run `ox init` here for full priming.\n", project)
+		}
 	case api.PublicPrimeViewerSignedIn:
 		b.WriteString("Sessions are for members only.\n")
 	default:
@@ -275,6 +299,10 @@ func renderPublicPrime(p *api.PublicPrimeResponse, loc *time.Location) string {
 	}
 	return b.String()
 }
+
+// teamIDPattern guards the team id before it goes into a command an AI
+// coworker may run: a server value, but never pasted unchecked.
+var teamIDPattern = regexp.MustCompile(`^team_[a-z0-9]+$`)
 
 func writePublicPrimeLine(b *strings.Builder, label, text, url string) {
 	text = oneLine(text)

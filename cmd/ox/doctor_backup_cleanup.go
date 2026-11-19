@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -29,7 +30,7 @@ func init() {
 		Name:        "Backup directories",
 		Category:    "Git Repository Health",
 		FixLevel:    FixLevelSuggested,
-		Description: "Detects and cleans up stale .bak.* directories (older than 7 days) left by failed clone operations",
+		Description: "Detects stale .bak.* directories (older than 7 days) left by failed clone operations; removes only those git can fully restore",
 		Run: func(fix bool) checkResult {
 			return checkBackupDirectories(fix)
 		},
@@ -38,12 +39,13 @@ func init() {
 
 // backupDirInfo holds metadata about a discovered backup directory.
 type backupDirInfo struct {
-	path       string
-	timestamp  time.Time
-	size       int64
-	hasGit     bool
-	dirty      bool     // only meaningful when hasGit is true
-	dirtyFiles []string // porcelain output lines when dirty
+	path        string
+	timestamp   time.Time
+	size        int64
+	hasGit      bool
+	dirty       bool     // holds something git cannot restore; --fix never deletes it
+	dirtyFiles  []string // why dirty: porcelain lines, file paths (no .git), unpushed history, or inspection errors
+	sessionDirs []string // .sageox/cache/sessions/<name> folders: Sacred-tier recordings
 }
 
 // checkBackupDirectories detects .bak.* sibling directories created by the daemon
@@ -98,8 +100,11 @@ func checkBackupDirectories(fix bool) checkResult {
 		dateStr := b.timestamp.Format("2006-01-02")
 		bSizeStr := humanSize(b.size)
 		status := "clean"
-		if b.dirty {
-			status = fmt.Sprintf("%d uncommitted change(s)", len(b.dirtyFiles))
+		switch {
+		case len(b.sessionDirs) > 0:
+			status = fmt.Sprintf("%d session recording folder(s), kept by --fix", len(b.sessionDirs))
+		case b.dirty:
+			status = fmt.Sprintf("%d thing(s) its remote cannot restore, kept by --fix", len(b.dirtyFiles))
 		}
 		detailLines = append(detailLines, fmt.Sprintf("  %s  %s  %s  (%s)", name, dateStr, bSizeStr, status))
 	}
@@ -201,70 +206,173 @@ func inspectBackupDir(path string) *backupDirInfo {
 	// calculate directory size
 	info.size = dirSize(path)
 
-	// check if it contains a .git directory
-	gitDir := filepath.Join(path, ".git")
-	if _, err := os.Stat(gitDir); err == nil {
+	// Anything its remote cannot restore pins the backup: uncommitted, untracked
+	// and gitignored files alike, and history no remote holds. .sageox/cache/ is
+	// gitignored, so a clean plain `git status` says nothing about the session
+	// recordings a ledger self-heal moved aside with the clone.
+	var outside []string
+	var scanErr error
+	if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
 		info.hasGit = true
-		// check if the working tree is dirty
-		cmd := exec.Command("git", "-C", path, "status", "--porcelain")
-		output, err := cmd.Output()
-		if err == nil && len(output) > 0 {
-			info.dirty = true
-			lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-			info.dirtyFiles = lines
-		}
+		outside, scanErr = gitUnrestorable(path)
+	} else {
+		// no .git: nothing in this tree can be re-cloned
+		outside, scanErr = backupFiles(path)
 	}
+	if scanErr != nil {
+		// fail closed: the daemon moves corrupt repos aside, so an unreadable
+		// backup is the likeliest one to hold the only copy of something
+		outside = append(outside, "cannot inspect: "+scanErr.Error())
+	}
+
+	sessionDirs, err := sessionCacheDirs(path)
+	if err != nil {
+		outside = append(outside, "cannot inspect sessions: "+err.Error())
+	}
+	info.sessionDirs = sessionDirs
+	info.dirtyFiles = outside
+	info.dirty = len(outside) > 0 || len(sessionDirs) > 0
 
 	return info
 }
 
-// fixBackupDirectories removes clean backup directories and warns about dirty ones.
+// gitUnrestorable lists what a backup repo holds that its remote cannot give
+// back. A clean working tree says nothing about history: the daemon moves a repo
+// aside whole, so commits never pushed and stashes exist only in the backup.
+// Any check that cannot run returns its error, and the caller keeps the backup.
+func gitUnrestorable(path string) ([]string, error) {
+	reasons, err := backupGit(path, "status", "--porcelain", "--ignored", "--untracked-files=normal")
+	if err != nil {
+		return nil, fmt.Errorf("git status: %w", err)
+	}
+	// --branches, not HEAD: an empty repo has no HEAD commit, and a branch ref
+	// is what a rebase or reset leaves the unpushed work on. --tags too: a
+	// commit a reset left reachable only from a local tag is just as unpushed.
+	unpushed, err := backupGit(path, "rev-list", "--branches", "--tags", "--not", "--remotes")
+	if err != nil {
+		return reasons, fmt.Errorf("list commits no remote holds: %w", err)
+	}
+	if len(unpushed) > 0 {
+		reasons = append(reasons, fmt.Sprintf("%d commit(s) on local branches or tags that no remote holds", len(unpushed)))
+	}
+	stashes, err := backupGit(path, "stash", "list")
+	if err != nil {
+		return reasons, fmt.Errorf("list stashes: %w", err)
+	}
+	if len(stashes) > 0 {
+		reasons = append(reasons, fmt.Sprintf("%d stash(es)", len(stashes)))
+	}
+	return reasons, nil
+}
+
+// backupGit runs git in a backup and returns its non-empty output lines.
+// GIT_CEILING_DIRECTORIES stops discovery at the backup: with a corrupt .git, git
+// would otherwise climb into an enclosing repo and report on that repo instead.
+// For status, -unormal overrides a repo-local status.showUntrackedFiles=no that
+// would hide untracked files.
+func backupGit(path string, args ...string) ([]string, error) {
+	cmd := exec.Command("git", append([]string{"-C", path}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+filepath.Dir(path))
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	trimmed := strings.TrimSpace(string(output))
+	if trimmed == "" {
+		return nil, nil
+	}
+	return strings.Split(trimmed, "\n"), nil
+}
+
+// backupFiles lists every non-directory entry under root, relative to root.
+func backupFiles(root string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return fmt.Errorf("relative path: %w", err)
+		}
+		files = append(files, rel)
+		return nil
+	})
+	if err != nil {
+		return files, fmt.Errorf("walk %s: %w", root, err)
+	}
+	return files, nil
+}
+
+// sessionCacheDirs lists <backup>/.sageox/cache/sessions/<name>: session
+// recordings (raw.jsonl, spool, stream state) that may exist nowhere else. Their
+// presence alone pins the backup, whatever git reports about them.
+func sessionCacheDirs(backupPath string) ([]string, error) {
+	dir := filepath.Join(backupPath, ".sageox", "cache", "sessions")
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", dir, err)
+	}
+	dirs := make([]string, 0, len(entries))
+	for _, e := range entries {
+		dirs = append(dirs, filepath.Join(dir, e.Name()))
+	}
+	return dirs, nil
+}
+
+// fixBackupDirectories removes backups whose git history restores every file and
+// keeps the rest. Kept session recordings stay in place rather than being restored
+// automatically: the live ledger cache may already hold a folder of the same name,
+// and which copy wins is a person's call.
 func fixBackupDirectories(backups []backupDirInfo) checkResult {
-	var removed, skipped int
-	var skippedPaths []string
+	var removed int
+	var skippedPaths, sessionDirs []string
 
 	for _, b := range backups {
 		if b.dirty {
-			// has uncommitted changes - do not remove
-			slog.Warn("backup directory has uncommitted changes, skipping removal",
-				"path", b.path, "dirty_files", len(b.dirtyFiles))
-			skipped++
+			slog.Warn("backup directory holds what its remote cannot restore, keeping it",
+				"path", b.path, "not_restorable", len(b.dirtyFiles), "session_dirs", len(b.sessionDirs))
 			skippedPaths = append(skippedPaths, b.path)
+			sessionDirs = append(sessionDirs, b.sessionDirs...)
 			continue
 		}
 
-		// safe to remove: either no .git (not a repo) or clean working tree
+		// safe to remove: empty, or a readable repo with nothing outside its history
 		slog.Info("removing backup directory", "path", b.path, "size", humanSize(b.size))
 		if err := os.RemoveAll(b.path); err != nil {
 			slog.Error("failed to remove backup directory", "path", b.path, "error", err)
-			skipped++
 			skippedPaths = append(skippedPaths, b.path)
 			continue
 		}
 		removed++
 	}
 
-	if skipped > 0 && removed > 0 {
-		detail := fmt.Sprintf("Skipped %d backup(s) with uncommitted changes:\n", skipped)
-		for _, p := range skippedPaths {
-			detail += fmt.Sprintf("  %s\n", p)
-		}
-		detail += "Remove manually or inspect changes first"
-		return WarningCheck("Backup directories",
-			fmt.Sprintf("removed %d, skipped %d", removed, skipped), detail)
+	if len(skippedPaths) == 0 {
+		return PassedCheck("Backup directories", fmt.Sprintf("removed %d backup(s)", removed))
 	}
 
-	if skipped > 0 {
-		detail := fmt.Sprintf("All %d backup(s) have uncommitted changes:\n", skipped)
-		for _, p := range skippedPaths {
-			detail += fmt.Sprintf("  %s\n", p)
-		}
-		detail += "Remove manually or inspect changes first"
-		return WarningCheck("Backup directories",
-			fmt.Sprintf("skipped %d (uncommitted changes)", skipped), detail)
+	var detail strings.Builder
+	fmt.Fprintf(&detail, "Kept %d backup(s); what their remote cannot restore (uncommitted, untracked or gitignored files, unpushed commits, stashes) is never auto-deleted:\n", len(skippedPaths))
+	for _, p := range skippedPaths {
+		fmt.Fprintf(&detail, "  %s\n", p)
 	}
+	if len(sessionDirs) > 0 {
+		fmt.Fprintf(&detail, "Kept %d session recording folder(s); move any you need into the ledger's .sageox/cache/sessions/: %s\n",
+			len(sessionDirs), strings.Join(sessionDirs, ", "))
+	}
+	detail.WriteString("Inspect before removing manually: none of it can be recovered once deleted")
 
-	return PassedCheck("Backup directories", fmt.Sprintf("removed %d backup(s)", removed))
+	msg := fmt.Sprintf("skipped %d (not restorable from git)", len(skippedPaths))
+	if removed > 0 {
+		msg = fmt.Sprintf("removed %d, skipped %d", removed, len(skippedPaths))
+	}
+	return WarningCheck("Backup directories", msg, detail.String())
 }
 
 // dirSize calculates the total size of a directory tree.

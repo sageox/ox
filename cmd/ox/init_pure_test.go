@@ -252,50 +252,40 @@ func TestDetectRepoMarkersForEndpoint_SkipsMalformedJSON(t *testing.T) {
 	assert.Equal(t, []string{"repo_good"}, ids)
 }
 
-func TestUpdateSageoxReadmeWithLinks(t *testing.T) {
+func TestFinalizeGeneratedSageoxReadme(t *testing.T) {
 	t.Run("nil config is no-op", func(t *testing.T) {
-		err := updateSageoxReadmeWithLinks("/nonexistent", nil)
+		err := finalizeGeneratedSageoxReadme("/nonexistent", nil)
 		assert.NoError(t, err)
 	})
 
-	t.Run("skips if links section already exists", func(t *testing.T) {
-		tmpFile := filepath.Join(t.TempDir(), "README.md")
-		content := "# SageOx\n\n## SageOx Links\n\n- existing\n"
-		require.NoError(t, os.WriteFile(tmpFile, []byte(content), 0644))
-
-		cfg := &config.ProjectConfig{RepoID: "repo_new", TeamID: "team_new"}
-		require.NoError(t, updateSageoxReadmeWithLinks(tmpFile, cfg))
-
-		data, _ := os.ReadFile(tmpFile)
-		// should not contain the new repo_id
-		assert.NotContains(t, string(data), "repo_new")
+	cfg := &config.ProjectConfig{RepoID: "repo_new", TeamID: "team_new"}
+	t.Run("missing README returns a read error", func(t *testing.T) {
+		err := finalizeGeneratedSageoxReadme(filepath.Join(t.TempDir(), "README.md"), cfg)
+		require.ErrorIs(t, err, os.ErrNotExist)
 	})
 
-	t.Run("inserts after separator", func(t *testing.T) {
-		tmpFile := filepath.Join(t.TempDir(), "README.md")
-		content := "# SageOx\n\n---\n\n## For AI Coworkers\n"
-		require.NoError(t, os.WriteFile(tmpFile, []byte(content), 0644))
-
-		cfg := &config.ProjectConfig{RepoID: "repo_test123"}
-		require.NoError(t, updateSageoxReadmeWithLinks(tmpFile, cfg))
-
-		data, _ := os.ReadFile(tmpFile)
-		assert.Contains(t, string(data), "## SageOx Links")
-		assert.Contains(t, string(data), "repo_test123")
-	})
-
-	t.Run("appends when no separator", func(t *testing.T) {
-		tmpFile := filepath.Join(t.TempDir(), "README.md")
-		content := "# SageOx\n\nNo separator here.\n"
-		require.NoError(t, os.WriteFile(tmpFile, []byte(content), 0644))
-
-		cfg := &config.ProjectConfig{TeamID: "team_abc"}
-		require.NoError(t, updateSageoxReadmeWithLinks(tmpFile, cfg))
-
-		data, _ := os.ReadFile(tmpFile)
-		assert.Contains(t, string(data), "## SageOx Links")
-		assert.Contains(t, string(data), "team_abc")
-	})
+	canonical := GetSageoxReadmeContent(cfg)
+	withoutLinks := GetSageoxReadmeContent(nil)
+	custom := "# SageOx\n\nMy repository's setup notes.\n"
+	for _, tc := range []struct {
+		name, input, want string
+		cfg               *config.ProjectConfig
+	}{
+		{"fresh template", withoutLinks, canonical, cfg},
+		{"empty-repo seed", initialCommitReadmeContent, canonical, cfg},
+		{"custom README", custom, custom, cfg},
+		{"already canonical", canonical, canonical, cfg},
+		{"no dashboard IDs", withoutLinks, withoutLinks, &config.ProjectConfig{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "README.md")
+			require.NoError(t, os.WriteFile(path, []byte(tc.input), 0644))
+			require.NoError(t, finalizeGeneratedSageoxReadme(path, tc.cfg))
+			data, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, string(data))
+		})
+	}
 }
 
 func TestStringSlicesEqual_TableDriven(t *testing.T) {

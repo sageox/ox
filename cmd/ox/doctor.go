@@ -830,6 +830,11 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	projectChecks = append(projectChecks, checkReadmeFile(opts.shouldFix(CheckSlugReadme)))
 	// repo marker file
 	projectChecks = append(projectChecks, checkRepoMarker())
+	// legacy team_urls in markers (only show when found or just removed)
+	teamURLsCheck := checkMarkerTeamURLs(opts.shouldFix(CheckSlugMarkerTeamURLs))
+	if !teamURLsCheck.skipped && teamURLsCheck.message != "ok" {
+		projectChecks = append(projectChecks, teamURLsCheck)
+	}
 	// multiple endpoints check (only show if multiple endpoints detected)
 	multiEndpointCheck := checkMultipleEndpoints()
 	if multiEndpointCheck.warning {
@@ -896,6 +901,10 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	}
 	if detectCodex() {
 		integrationChecks = append(integrationChecks, checkCodexHooks(opts.shouldFix(CheckSlugCodexHooks)))
+	}
+	// Conductor has no status bar: ox's line lives in its Run pane.
+	if conductorCheck := checkConductorRunScript(opts.shouldFix(CheckSlugConductorStatusLine)); !conductorCheck.skipped {
+		integrationChecks = append(integrationChecks, conductorCheck)
 	}
 	// Skill target selection is project state, not a consequence of which AI
 	// coworker happens to be detected during this Doctor run.
@@ -967,7 +976,7 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	gitignoreCheck := checks.NewGitignoreCheck(git, nil)
 	gitStatusChecks := []checkResult{
 		checkGitStatus(),
-		checkSageoxFilesTracked(opts.shouldFix(CheckSlugGitignore)),
+		checkSageoxFilesTracked(opts.shouldFix(CheckSlugSageoxFilesTracked)),
 		convertDoctorResult(gitignoreCheck.Run(ctx, opts.shouldFix(CheckSlugGitignore))),
 		checkRootKBGitignoreLine(opts.shouldFix(CheckSlugRootKBGitignore)),
 		checkGitattributes(opts.shouldFix(CheckSlugGitattributes)),

@@ -13,9 +13,13 @@ import (
 
 // Clone budgets. Vars (not consts) so tests can shrink them.
 var (
-	// teamContextCloneTimeout bounds the team-context two-phase clone. It is a
-	// partial clone whose blobs arrive on demand, so a fixed budget fits it.
-	teamContextCloneTimeout = 60 * time.Second
+	// teamContextCloneTimeout is only a backstop, like ledgerCloneTimeout. A
+	// team context is a partial clone, but its phase-2 checkout fetches every
+	// blob under the sparse set, tens of thousands of files for a large team.
+	// The fixed 60s it used to have killed that checkout on every attempt and
+	// each retry started over, so the team context never arrived (GH #1846).
+	// A stalled transfer is still aborted by gitHTTPTimeoutFlags.
+	teamContextCloneTimeout = time.Hour
 
 	// ledgerCloneTimeout is only a backstop for a Ledger clone that hangs
 	// somewhere curl's stall check cannot see. A Ledger clone downloads the

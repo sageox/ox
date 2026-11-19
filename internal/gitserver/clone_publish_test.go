@@ -56,9 +56,15 @@ func TestAdoptCacheOnlyTarget_Branches(t *testing.T) {
 		require.NoError(t, os.WriteFile(path, []byte("x"), 0o644))
 	}
 
-	t.Run("clone already ships a cache: the old derived cache is dropped", func(t *testing.T) {
+	// The local cache is no longer only derived data: it holds session
+	// recordings (raw.jsonl, the live spool and stream state). Dropping it
+	// because the clone happened to ship a .sageox/cache deleted them.
+	t.Run("clone already ships a cache: the local cache is merged in, never dropped", func(t *testing.T) {
 		root := t.TempDir()
 		target, tmp := filepath.Join(root, "ledger"), filepath.Join(root, "ledger.tmp-1")
+		raw := filepath.Join("sessions", "2026-11-18T23-15-person-a-OxAbCd", "raw.jsonl")
+		require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(target, ".sageox", "cache", raw)), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(target, ".sageox", "cache", raw), []byte("turn one\n"), 0o600))
 		write(t, filepath.Join(target, ".sageox", "cache", "codedb", "index.db"))
 		write(t, filepath.Join(tmp, ".sageox", "cache", "shipped.txt"))
 		_, err := AdoptCacheOnlyTarget(tmp, target)
@@ -67,8 +73,28 @@ func TestAdoptCacheOnlyTarget_Branches(t *testing.T) {
 		assert.True(t, os.IsNotExist(err), "skeleton removed so the swap can land")
 		_, err = os.Stat(filepath.Join(tmp, ".sageox", "cache", "shipped.txt"))
 		assert.NoError(t, err, "the clone's own cache is untouched")
-		_, err = os.Stat(filepath.Join(tmp, ".sageox", "cache", "codedb"))
-		assert.True(t, os.IsNotExist(err))
+		got, err := os.ReadFile(filepath.Join(tmp, ".sageox", "cache", raw))
+		require.NoError(t, err, "the session recording was dropped")
+		assert.Equal(t, "turn one\n", string(got))
+		_, err = os.Stat(filepath.Join(tmp, ".sageox", "cache", "codedb", "index.db"))
+		assert.NoError(t, err)
+	})
+
+	t.Run("a file both caches hold: adoption refuses, the local copy stays put", func(t *testing.T) {
+		root := t.TempDir()
+		target, tmp := filepath.Join(root, "ledger"), filepath.Join(root, "ledger.tmp-1")
+		local := filepath.Join(target, ".sageox", "cache", "sessions", "s", "raw.jsonl")
+		require.NoError(t, os.MkdirAll(filepath.Dir(local), 0o755))
+		require.NoError(t, os.WriteFile(local, []byte("local"), 0o600))
+		write(t, filepath.Join(target, ".sageox", "cache", "codedb", "index.db"))
+		write(t, filepath.Join(tmp, ".sageox", "cache", "sessions", "s", "raw.jsonl"))
+		_, err := AdoptCacheOnlyTarget(tmp, target)
+		require.Error(t, err)
+		got, err := os.ReadFile(local)
+		require.NoError(t, err, "the local recording moved or vanished")
+		assert.Equal(t, "local", string(got))
+		_, err = os.Stat(filepath.Join(target, ".sageox", "cache", "codedb", "index.db"))
+		assert.NoError(t, err, "everything merged before the conflict is handed back")
 	})
 
 	t.Run("empty .sageox skeleton is removed", func(t *testing.T) {

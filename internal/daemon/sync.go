@@ -1412,12 +1412,13 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		return nil // can't pull from repo that isn't cloned yet
 	}
 
-	// corruption check: move aside for re-clone on next cycle
+	// corruption check: move aside for re-clone on next cycle, keeping the
+	// local cache (session recordings) where its writers expect it
 	if !isValidGitRepo(s.config.LedgerPath) {
 		backupPath := fmt.Sprintf("%s.bak.%d", s.config.LedgerPath, time.Now().Unix())
 		s.logger.Warn("ledger repo corrupt, moving aside for re-clone",
 			"path", s.config.LedgerPath, "backup", backupPath)
-		if err := os.Rename(s.config.LedgerPath, backupPath); err != nil {
+		if err := s.moveAsideKeepingCache(s.config.LedgerPath, backupPath); err != nil {
 			s.logger.Error("failed to move corrupt ledger aside", "error", err)
 			return fmt.Errorf("corrupt ledger at %s but rename failed: %w", s.config.LedgerPath, err)
 		}
@@ -2412,6 +2413,22 @@ func isValidRepoPath(path string) bool {
 	return false
 }
 
+// moveAsideKeepingCache sets a broken checkout aside for a re-clone without
+// taking its .sageox/cache along (gitserver.MoveAsideKeepingCache) and says
+// what it kept, so the log shows the session recordings never left.
+func (s *SyncScheduler) moveAsideKeepingCache(path, backup string) error {
+	kept, err := gitserver.MoveAsideKeepingCache(path, backup)
+	if err != nil {
+		return err
+	}
+	if kept != "" {
+		entries, _ := os.ReadDir(filepath.Join(kept, "sessions"))
+		s.logger.Info("checkout: kept the local cache in place while moving the checkout aside",
+			"path", path, "cache", kept, "session_folders", len(entries), "backup", backup)
+	}
+	return nil
+}
+
 // checkoutComplete reports whether payload's repo is already cloned: it has a
 // .git, and a team context also has the .sageox/ its two-phase clone
 // materializes last.
@@ -2522,7 +2539,7 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 					s.logger.Warn("checkout: .git exists but .sageox missing, treating as incomplete clone",
 						"path", payload.RepoPath)
 					backupPath := fmt.Sprintf("%s.bak.%d", payload.RepoPath, time.Now().Unix())
-					if rErr := os.Rename(payload.RepoPath, backupPath); rErr != nil {
+					if rErr := s.moveAsideKeepingCache(payload.RepoPath, backupPath); rErr != nil {
 						s.logger.Error("checkout: failed to move incomplete clone aside", "error", rErr)
 					}
 				} else {
@@ -2537,11 +2554,13 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 				s.logger.Debug("checkout: target holds only a CodeDB cache, keeping it", "path", payload.RepoPath)
 			} else {
 				// directory exists but not a git repo - self-healing: move aside and clone fresh
-				// this handles corrupt/incomplete clones that need recovery
+				// this handles corrupt/incomplete clones that need recovery. A Ledger
+				// that never cloned still holds session recordings under its cache,
+				// so the cache stays in place and the clone adopts it.
 				backupPath := fmt.Sprintf("%s.bak.%d", payload.RepoPath, time.Now().Unix())
 				s.logger.Warn("checkout: directory exists but not a git repo, moving aside for self-healing",
 					"path", payload.RepoPath, "backup", backupPath)
-				if err := os.Rename(payload.RepoPath, backupPath); err != nil {
+				if err := s.moveAsideKeepingCache(payload.RepoPath, backupPath); err != nil {
 					// if rename fails, log and continue - git clone will fail if there's a real problem
 					s.logger.Error("checkout: failed to move directory aside, will attempt clone anyway",
 						"path", payload.RepoPath, "error", err)
@@ -2591,9 +2610,8 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		// context.DeadlineExceeded) — masking a real clone failure as a
 		// harmless retry-next-cycle.
 		//
-		// The budget depends on what is being cloned: a team context is a
-		// small partial clone, a Ledger is its whole history. See
-		// ledgerCloneTimeout.
+		// Both budgets are long backstops; a stalled transfer is aborted by
+		// curl's stall check instead. See ledgerCloneTimeout.
 		cloneBudget := teamContextCloneTimeout
 		if payload.RepoType != "team-context" {
 			cloneBudget = ledgerCloneTimeout

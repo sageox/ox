@@ -238,7 +238,4 @@ func TestUsagePane_HelpNamesThePluginAndCommands(t *testing.T) {
 	assert.Equal(t, usageCmd, usagePaneCmd.Parent())
 	assert.Equal(t, "report", usageCmd.Name())
 	assert.Equal(t, sessionCmd, usageCmd.Parent())
-	assert.Equal(t, "brief", usageDeprecatedCmd.Name())
-	assert.Equal(t, rootCmd, usageDeprecatedCmd.Parent())
-	assert.Empty(t, usageDeprecatedCmd.Commands(), "the deprecated `ox brief` alias carries no pane, so docs show only `ox session report pane`")
 }

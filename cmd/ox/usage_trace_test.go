@@ -310,10 +310,13 @@ func TestAfterTool_StdoutIdenticalWithTraceOnAndOff(t *testing.T) {
 			assert.True(t, json.Valid([]byte(out)), "page nudge stdout is one JSON document: %q", out)
 		}},
 		{"codex single JSON document", "codex", func(t *testing.T, _ string) *agentx.HookInput {
-			return &agentx.HookInput{ToolName: "exec_command", ToolInput: shellInput(t, "cmd", "ox murmur list"), ToolResponse: jsonString(t, "x")}
+			// An ox call that moves no team data: it is traced, and draws no
+			// flow lane, so the trace must not change a byte. (A call that
+			// does move data shows its lane from the trace; flow_lanes_test.go.)
+			return &agentx.HookInput{ToolName: "exec_command", ToolInput: shellInput(t, "cmd", "ox status"), ToolResponse: jsonString(t, "x")}
 		}, func(t *testing.T, out string) {
 			doc := decodeCodexHookDoc(t, out)
-			assert.Empty(t, doc.SystemMessage, "ox sends Codex no coworker-visible notice")
+			assert.Empty(t, doc.SystemMessage, "a call that moved no team data shows no notice")
 			require.NotNil(t, doc.HookSpecificOutput)
 		}},
 	}

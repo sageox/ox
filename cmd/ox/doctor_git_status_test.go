@@ -178,8 +178,8 @@ func TestCheckSageoxFilesTracked_UntrackedFiles(t *testing.T) {
 	if result.message != "untracked files" {
 		t.Errorf("unexpected message: %s", result.message)
 	}
-	if !strings.Contains(result.detail, "ox init") {
-		t.Error("expected detail to mention ox init")
+	if !strings.Contains(result.detail, "ox doctor --fix-slug sageox-files-tracked") {
+		t.Error("expected detail to mention the targeted repair")
 	}
 }
 

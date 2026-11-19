@@ -651,12 +651,9 @@ func cloneViaDaemon(runCtx context.Context, cloneURL, targetPath, repoType, endp
 			return err
 		}
 		if errors.Is(err, daemon.ErrCheckoutInProgress) {
-			if repoType == "team-context" {
-				// its clone has the same 60s budget in the daemon, so a quiet
-				// window this long means it failed or is about to
-				return fmt.Errorf("team context clone did not finish within %s", doctorCheckoutIdle)
-			}
-			// the daemon keeps cloning after doctor stops waiting
+			// the daemon keeps cloning after doctor stops waiting. A team
+			// context reports no progress while it materializes, so a quiet
+			// window is not a failure for it either (GH #1846).
 			fmt.Println("    Still cloning in the ox daemon; it continues in the background.")
 			return err
 		}
@@ -732,9 +729,10 @@ const alreadyCloningNote = "    Already being cloned by another ox process; it c
 // Budgets for a direct clone, used when the daemon is not running. Vars so
 // tests can shrink them.
 var (
-	// directTeamContextCloneTimeout bounds the team-context two-phase clone,
-	// a partial clone whose blobs arrive on demand, so a fixed budget fits it.
-	directTeamContextCloneTimeout = 60 * time.Second
+	// directTeamContextCloneTimeout is only a backstop, as it is in the
+	// daemon (teamContextCloneTimeout): a large team context's phase-2
+	// checkout outlasts any fixed budget on a slow link (GH #1846).
+	directTeamContextCloneTimeout = time.Hour
 
 	// directLedgerCloneTimeout is only a backstop, as it is in the daemon
 	// (ledgerCloneTimeout in internal/daemon/sync_clone_budget.go). A Ledger

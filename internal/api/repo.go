@@ -704,6 +704,11 @@ func (c *RepoClient) NotifySessionAborted(n SessionAbortedNotification) error {
 type PlanActivityNotification struct {
 	Event  string `json:"event"`            // plan.EventKind value (approved/worked/realized/abandoned/superseded)
 	Status string `json:"status,omitempty"` // plan.PlanStatus, when the event carries one
+	// RepoID is the project's repo_ id, so the server's plan.created and
+	// plan.revised events say which repo the plan belongs to (repos per person
+	// and per team count from it). Sent alone it is a label; the server indexes
+	// a plan only when repo_id and dir both arrive.
+	RepoID string `json:"repo_id,omitempty"`
 }
 
 // NotifyPlanActivity best-effort-reports one appended plan lifecycle event to
