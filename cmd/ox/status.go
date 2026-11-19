@@ -1316,6 +1316,15 @@ func renderDaemonSyncSection(ds *daemon.StatusData, syncHistory []daemon.SyncEve
 		return b.String()
 	}
 
+	if reason, remedy, ok := daemonTokenMismatch(ds); ok && reason != "" {
+		b.WriteString(statusLabelStyle.Render("Token"))
+		b.WriteString(formatValue(reason, "warning"))
+		b.WriteString("\n")
+		b.WriteString(statusLabelStyle.Render(""))
+		b.WriteString(statusMutedStyle.Render(remedy))
+		b.WriteString("\n")
+	}
+
 	// agent worker status
 	b.WriteString(renderAgentWorkerLine())
 

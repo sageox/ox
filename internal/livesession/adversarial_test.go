@@ -566,7 +566,7 @@ func TestAdversarialStaleLiveLockOfAKilledProcessIsReclaimed(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestAdvHelperHoldsLiveLock$")
-	cmd.Env = append(os.Environ(), "ADV_HOLD_LIVE_LOCK="+s.dir)
+	cmd.Env = append(os.Environ(), "ADV_HOLD_LIVE_LOCK="+s.dir) // safe: re-executes this test binary as a helper, which needs the parent test environment
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

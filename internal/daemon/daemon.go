@@ -219,6 +219,7 @@ type Daemon struct {
 	restartRequested bool      // set when version mismatch triggers restart
 	wasSuperseded    bool      // set when exiting because another daemon took over
 	startTime        time.Time // daemon start time for uptime tracking
+	envToken         string    // auth.EnvTokenFingerprint when created, reported as StatusData.EnvToken
 	lastActivity     time.Time // tracks last activity for inactivity timeout
 	pendingWorkSince time.Time // when pending work was first detected during inactivity (zero = no pending work)
 
@@ -256,6 +257,7 @@ func New(config *Config, logger *slog.Logger) *Daemon {
 	return &Daemon{
 		config:       config,
 		logger:       logger,
+		envToken:     auth.EnvTokenFingerprint(endpoint.GetForProject(config.ProjectRoot)),
 		lastActivity: time.Now(), // initialize activity timestamp
 	}
 }
@@ -1828,6 +1830,7 @@ func (s *daemonServiceImpl) Status() *StatusData {
 		ProjectTeamID:      projectTeamID,
 		GlobalSyncOwner:    globalSyncOwner,
 		GlobalSyncEndpoint: globalSyncEndpoint,
+		EnvToken:           s.d.envToken,
 		TeamContexts:       s.d.scheduler.TeamContextStatus(),
 		InactivityTimeout:  s.d.config.InactivityTimeout,
 		TimeSinceActivity:  s.d.timeSinceLastActivity(),
