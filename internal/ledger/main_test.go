@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/testguard"
 )
 
 // TestMain opts the ledger test binary into git's file/local transport. These
@@ -16,5 +17,5 @@ import (
 // suite's isolateCredentials helper.
 func TestMain(m *testing.M) {
 	gitserver.TestAllowFileTransport = true
-	os.Exit(m.Run())
+	os.Exit(testguard.RunWithDataSandbox(m))
 }
