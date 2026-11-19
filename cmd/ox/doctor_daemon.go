@@ -142,22 +142,23 @@ skipHeartbeats:
 // this process's. ok is false when that cannot be told: a daemon older than
 // StatusData.EnvToken, or a malformed SAGEOX_TOKEN here. Otherwise reason is ""
 // when they match, or says how they differ, and remedy says how to fix it.
+// Both fit an 80-column `ox status` row.
 func daemonTokenMismatch(ds *daemon.StatusData) (reason, remedy string, ok bool) {
 	if ds == nil || ds.EnvToken == "" || ds.GlobalSyncEndpoint == "" {
 		return "", "", false
 	}
 	mine := auth.EnvTokenFingerprint(ds.GlobalSyncEndpoint)
 	switch {
-	case mine == "":
+	case mine == "malformed":
 		return "", "", false
 	case mine == ds.EnvToken:
 		return "", "", true
 	case mine == "none":
-		return "daemon started with a SAGEOX_TOKEN this shell lacks", "restart it from the shell that has that token: ox daemon restart", true
+		return "daemon started with a SAGEOX_TOKEN this shell lacks", "run 'ox daemon restart' from the shell that has it", true
 	case ds.EnvToken == "none":
 		return "daemon started without this shell's SAGEOX_TOKEN", "run 'ox daemon restart' from this shell", true
 	default:
-		return "daemon started with a different SAGEOX_TOKEN than this shell's", "run 'ox daemon restart' from this shell", true
+		return "daemon started with another SAGEOX_TOKEN", "run 'ox daemon restart' from this shell", true
 	}
 }
 

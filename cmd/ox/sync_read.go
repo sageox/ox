@@ -164,9 +164,33 @@ func runReadSync(cmd *cobra.Command, args []string) error {
 // use the default data home, as a daemon started without XDG_DATA_HOME does.
 func isProjectLedger(root, path string) bool {
 	if local, err := config.LoadLocalConfig(root); err == nil && local.Ledger != nil && filepath.IsAbs(local.Ledger.Path) {
-		return filepath.Clean(local.Ledger.Path) == filepath.Clean(path)
+		return sameFolder(local.Ledger.Path, path)
 	}
-	return os.Getenv("XDG_DATA_HOME") == ""
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	home, err := os.UserHomeDir()
+	return dataHome == "" || err == nil && sameFolder(dataHome, filepath.Join(home, ".local", "share"))
+}
+
+// sameFolder reports whether a and b name one folder, resolving symlinks in
+// the part of each path that exists: the folders compared need not exist yet.
+func sameFolder(a, b string) bool {
+	return resolveExisting(a) == resolveExisting(b)
+}
+
+func resolveExisting(path string) string {
+	path = filepath.Clean(path)
+	missing := ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			return filepath.Join(resolved, missing)
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return filepath.Join(path, missing)
+		}
+		missing = filepath.Join(filepath.Base(path), missing)
+		path = parent
+	}
 }
 
 func finishReadSync(cmd *cobra.Command, result ledger.ReadSyncResult, jsonOutput bool, code int) error {

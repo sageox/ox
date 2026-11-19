@@ -134,6 +134,7 @@ func TestDaemonStatus_ReportsTheTokenItStartedWith(t *testing.T) {
 	for _, tc := range []struct{ name, token, want string }{
 		{"started without a token", "", "none"},
 		{"started with a token", token, gitserver.BearerTokenFingerprint(token)},
+		{"started with a malformed token", "oxt_test_1ljPfX", "malformed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("SAGEOX_TOKEN", tc.token)

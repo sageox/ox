@@ -119,7 +119,8 @@ func TestReadSyncMissingTokenIgnoresProjectAndHumanContext(t *testing.T) {
 // read-write Ledger; the daemon takes it for the Ledger, and sessions recorded
 // in the project can no longer be pushed.
 func TestReadSyncRefusesTheProjectsLedgerFolder(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	t.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
 	t.Setenv("SAGEOX_TOKEN", "")
 	t.Setenv("OX_XDG_DISABLE", "")
@@ -129,6 +130,8 @@ func TestReadSyncRefusesTheProjectsLedgerFolder(t *testing.T) {
 	require.NoError(t, config.SaveProjectConfig(project, &config.ProjectConfig{RepoID: readSyncTestRepoID}))
 	t.Chdir(project)
 	shared := t.TempDir()
+	sharedLink := filepath.Join(t.TempDir(), "data")
+	symlinkErr := os.Symlink(shared, sharedLink)
 	const unrecorded = "-"
 	for _, tc := range []struct {
 		name string
@@ -137,12 +140,17 @@ func TestReadSyncRefusesTheProjectsLedgerFolder(t *testing.T) {
 		dataHome, recordedIn, repo, want string
 	}{
 		{"nothing recorded, default data home", "", unrecorded, readSyncTestRepoID, "project_ledger"},
+		{"nothing recorded, the default data home named", filepath.Join(home, ".local", "share"), unrecorded, readSyncTestRepoID, "project_ledger"},
 		{"nothing recorded, a separate data home", t.TempDir(), unrecorded, readSyncTestRepoID, "denied"},
 		{"another repo", "", unrecorded, "repo_019ff2f5-2079-7be1-b05e-000000000000", "denied"},
 		{"a data home shared with the project", shared, shared, readSyncTestRepoID, "project_ledger"},
+		{"that data home through a symlink", sharedLink, shared, readSyncTestRepoID, "project_ledger"},
 		{"the project's Ledger in the default data home", t.TempDir(), "", readSyncTestRepoID, "denied"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.dataHome == sharedLink && symlinkErr != nil {
+				t.Skipf("cannot create a symlink here: %v", symlinkErr)
+			}
 			local := &config.LocalConfig{}
 			if tc.recordedIn != unrecorded {
 				t.Setenv("XDG_DATA_HOME", tc.recordedIn)

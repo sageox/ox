@@ -2,7 +2,10 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
@@ -52,7 +55,8 @@ func TestDaemonTokenMismatch(t *testing.T) {
 		{"malformed token in this shell", "none", malformedTeamToken, "", "skipped"},
 		{"same token", team, validTeamToken, "", "passed"},
 		{"daemon without this shell's token", "none", validTeamToken, "daemon started without this shell's SAGEOX_TOKEN", "failed"},
-		{"daemon with another token", team, validPersonalToken, "daemon started with a different SAGEOX_TOKEN than this shell's", "failed"},
+		{"daemon with another token", team, validPersonalToken, "daemon started with another SAGEOX_TOKEN", "failed"},
+		{"daemon with a malformed token", "malformed", validTeamToken, "daemon started with another SAGEOX_TOKEN", "failed"},
 		{"daemon with a token this shell lacks", team, "", "daemon started with a SAGEOX_TOKEN this shell lacks", "warning"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -76,9 +80,14 @@ func TestDaemonTokenMismatch(t *testing.T) {
 			out := renderDaemonSyncSection(ds, nil, &config.LocalConfig{}, false, true)
 			if tc.reason == "" {
 				assert.NotContains(t, out, "SAGEOX_TOKEN", "ox status")
-			} else {
-				assert.Contains(t, out, tc.reason, "ox status")
-				assert.Contains(t, out, remedy, "ox status")
+				return
+			}
+			assert.Contains(t, out, tc.reason, "ox status")
+			assert.Contains(t, out, remedy, "ox status")
+			for _, line := range strings.Split(out, "\n") {
+				if strings.Contains(line, tc.reason) || strings.Contains(line, remedy) {
+					assert.LessOrEqual(t, lipgloss.Width(stripANSI(line)), 80, "ox status row wraps: %q", line)
+				}
 			}
 		})
 	}

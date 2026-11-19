@@ -213,9 +213,9 @@ func EnvTokenIsTeamFamily(ep string) bool {
 
 // EnvTokenFingerprint names the SAGEOX_TOKEN this process holds for ep without
 // revealing it: the token's gitserver.BearerTokenFingerprint, "none" when
-// SAGEOX_TOKEN is unset or bound to another endpoint, or "" when it is
-// malformed. A process keeps the environment it started with, so the daemon
-// reports its own (StatusData.EnvToken) for the CLI to compare with this one.
+// SAGEOX_TOKEN is unset or bound to another endpoint, or "malformed". A process
+// keeps the environment it started with, so the daemon reports its own
+// (StatusData.EnvToken) for the CLI to compare with this one.
 func EnvTokenFingerprint(ep string) string {
 	tok, state := EnvTokenFor(ep)
 	switch state {
@@ -224,7 +224,7 @@ func EnvTokenFingerprint(ep string) string {
 	case EnvTokenAbsent:
 		return "none"
 	}
-	return ""
+	return "malformed"
 }
 
 // ReauthenticationRemedy names the recovery for the selected credential.
