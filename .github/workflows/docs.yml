@@ -50,6 +50,12 @@ jobs:
       - name: Generate docs
         run: go run ./cmd/ox docs --output docs/reference
 
+      - name: Compile generated MDX before publishing
+        working-directory: docs
+        run: |
+          npm ci --ignore-scripts --registry=https://registry.npmjs.org
+          npm run check:mdx
+
       - name: Publish to GitHub Packages
         working-directory: docs
         run: npm publish
