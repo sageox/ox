@@ -339,7 +339,7 @@ func TestStageSessionInLedger_LeavesDotfilesBehind(t *testing.T) {
 	}
 
 	payload := &SessionFinalizePayload{SessionDir: f.cacheDir, LedgerPath: f.ledgerPath}
-	_, err := NewSessionFinalizeHandler(slog.Default()).stageSessionInLedger(payload)
+	_, err := NewSessionFinalizeHandler(slog.Default()).stageSessionInLedger(payload, nil)
 	require.NoError(t, err)
 
 	dest := filepath.Join(f.ledgerPath, "sessions", f.name)
