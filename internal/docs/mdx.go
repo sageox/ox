@@ -10,11 +10,10 @@ import (
 	"github.com/yuin/goldmark/util"
 )
 
-// mdxParser parses Markdown the way MDX does: MDX disables indented code,
-// HTML and autolinks, so those constructs must not hide code spans.
+// mdxParser parses Markdown the way MDX does: MDX disables HTML and
+// autolinks, so those constructs must not hide code spans.
 var mdxParser = parser.NewParser(
-	parser.WithBlockParsers(without(parser.DefaultBlockParsers(),
-		parser.NewCodeBlockParser(), parser.NewHTMLBlockParser())...),
+	parser.WithBlockParsers(without(parser.DefaultBlockParsers(), parser.NewHTMLBlockParser())...),
 	parser.WithInlineParsers(without(parser.DefaultInlineParsers(),
 		parser.NewRawHTMLParser(), parser.NewAutoLinkParser())...),
 	parser.WithParagraphTransformers(parser.DefaultParagraphTransformers()...),
@@ -45,33 +44,12 @@ func escapeMDX(source []byte) []byte {
 		}
 	}
 
-	parsed, origin := dedent(source)
 	code := make([]bool, len(source))
-	markCode := func(segment text.Segment) {
-		for i := segment.Start; i < segment.Stop; i++ {
-			code[origin[i]] = true
-		}
+	origin := make([]int, len(source))
+	for i := range origin {
+		origin[i] = i
 	}
-	doc := mdxParser.Parse(text.NewReader(parsed))
-	_ = ast.Walk(doc, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
-		if !entering {
-			return ast.WalkContinue, nil
-		}
-		switch n := node.(type) {
-		case *ast.FencedCodeBlock:
-			lines := n.Lines()
-			for i := 0; i < lines.Len(); i++ {
-				markCode(lines.At(i))
-			}
-			return ast.WalkSkipChildren, nil
-		case *ast.CodeSpan:
-			for child := n.FirstChild(); child != nil; child = child.NextSibling() {
-				markCode(child.(*ast.Text).Segment)
-			}
-			return ast.WalkSkipChildren, nil
-		}
-		return ast.WalkContinue, nil
-	})
+	markCode(source, origin, code)
 
 	var out bytes.Buffer
 	out.Grow(len(frontmatter) + len(source))
@@ -87,19 +65,47 @@ func escapeMDX(source []byte) []byte {
 	return out.Bytes()
 }
 
-// dedent drops leading spaces and tabs from every line, since MDX reads an
-// indented line as ordinary text. origin maps each kept byte to its source index.
-func dedent(source []byte) (parsed []byte, origin []int) {
-	parsed = make([]byte, 0, len(source))
-	origin = make([]int, 0, len(source))
-	lineStart := true
-	for i, ch := range source {
-		if lineStart && (ch == ' ' || ch == '\t') {
-			continue
+// markCode flags the bytes of src that MDX reads as code; origin maps each
+// byte of src to its index in code.
+func markCode(src []byte, origin []int, code []bool) {
+	mark := func(segment text.Segment) {
+		for i := segment.Start; i < segment.Stop; i++ {
+			code[origin[i]] = true
 		}
-		lineStart = ch == '\n'
-		parsed = append(parsed, ch)
-		origin = append(origin, i)
 	}
-	return parsed, origin
+	doc := mdxParser.Parse(text.NewReader(src))
+	_ = ast.Walk(doc, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch n := node.(type) {
+		case *ast.FencedCodeBlock:
+			lines := n.Lines()
+			for i := 0; i < lines.Len(); i++ {
+				mark(lines.At(i))
+			}
+			return ast.WalkSkipChildren, nil
+		case *ast.CodeBlock:
+			// MDX disables indented code, so these lines are ordinary
+			// Markdown: parse them again without the indentation.
+			var sub []byte
+			var subOrigin []int
+			lines := n.Lines()
+			for i := 0; i < lines.Len(); i++ {
+				line := lines.At(i)
+				for j := line.Start; j < line.Stop; j++ {
+					sub = append(sub, src[j])
+					subOrigin = append(subOrigin, origin[j])
+				}
+			}
+			markCode(sub, subOrigin, code)
+			return ast.WalkSkipChildren, nil
+		case *ast.CodeSpan:
+			for child := n.FirstChild(); child != nil; child = child.NextSibling() {
+				mark(child.(*ast.Text).Segment)
+			}
+			return ast.WalkSkipChildren, nil
+		}
+		return ast.WalkContinue, nil
+	})
 }
