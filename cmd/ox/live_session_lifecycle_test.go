@@ -161,3 +161,24 @@ func TestSessionStartTextReportsAFailedWrite(t *testing.T) {
 	err := printSessionStartText(failingWriter{}, "OxLive1", "claude-code", "", liveSecretWithheldEarlierWarning, time.Now(), false)
 	assert.Error(t, err)
 }
+
+// Failure prevented (PR 1971 review): a recording that publishes manually
+// returned before the superseded-stream cleanup, so switching an AI coworker
+// to manual publishing left its previous automatic stream open.
+func TestLiveManualRecordingStillClosesThePreviousStream(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: a hook-recorded turn against the fake server")
+	}
+	f := newLiveFixture(t, liveOpts{streaming: true})
+	f.turn("a question")
+	f.openAndDrain()
+	next := &session.RecordingState{SessionID: sessionid.GenerateSessionID(), AgentID: f.agentID, AdapterName: "claude-code",
+		SessionPath: filepath.Join(filepath.Dir(f.dir()), "2099-01-01T00-00-person-a-"+f.agentID), StartedAt: time.Now().Add(time.Minute),
+		PublishingMode: config.SessionPublishingManual}
+
+	liveSessionBegin(f.projectRoot, next, nil)
+
+	assert.True(t, f.liveState().CloseRequested, "the AI coworker's previous automatic stream must be closed")
+	_, err := livesession.ReadState(next.SessionPath)
+	assert.ErrorIs(t, err, livesession.ErrNotStreaming, "a manual recording never streams itself")
+}

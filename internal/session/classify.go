@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -360,26 +359,11 @@ func HasUserTurn(rawPath string) bool {
 		return false
 	}
 	defer func() { _ = f.Close() }()
-	return ContainsUserTurn(f)
-}
 
-// ContainsUserTurn is HasUserTurn over raw.jsonl-shaped lines from r, such as
-// a live stream's spool: true once a line of type "user" is read.
-func ContainsUserTurn(r io.Reader) bool {
-	scanner := bufio.NewScanner(r)
+	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var entry struct {
-			Type string `json:"type"`
-		}
-		if json.Unmarshal(line, &entry) != nil {
-			continue
-		}
-		if entry.Type == "user" {
+		if IsUserTurnLine(scanner.Bytes()) {
 			return true
 		}
 	}
@@ -391,6 +375,15 @@ func ContainsUserTurn(r io.Reader) bool {
 		return true
 	}
 	return false
+}
+
+// IsUserTurnLine reports whether one raw.jsonl line is a user turn: an entry
+// of type "user" (see HasUserTurn).
+func IsUserTurnLine(line []byte) bool {
+	var entry struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(line, &entry) == nil && entry.Type == "user"
 }
 
 // HasSubstantiveEntries returns true if a raw.jsonl file holds at least one

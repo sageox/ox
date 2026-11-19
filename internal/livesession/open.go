@@ -1,9 +1,11 @@
 package livesession
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -177,9 +179,11 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 }
 
 // mayHoldPrompt reports whether dir's spool holds a human prompt, or may have:
-// a recorded spool loss could have been the prompt, and an unreadable spool
-// proves nothing. Either way the stream opens, so a loss is never hidden as an
-// empty session.
+// any declared gap (an oversized or unspoolable line, a withheld batch, a torn
+// tail, the cap) or recorded spool loss could have been the prompt, and an
+// unreadable spool proves nothing. Either way the stream opens, so a prompt the
+// spool could not carry is declared on the stream, never hidden as an empty
+// session.
 func mayHoldPrompt(dir string) bool {
 	if lost := readLost(dir); lost.pending || lost.recorded > 0 {
 		return true
@@ -192,7 +196,16 @@ func mayHoldPrompt(dir string) bool {
 		return true
 	}
 	defer func() { _ = f.Close() }() // read-only: nothing to flush
-	return oxsession.ContainsUserTurn(f)
+	r := bufio.NewReader(f)
+	for {
+		line, err := r.ReadBytes('\n')
+		if declaredGapLine.Match(line) || oxsession.IsUserTurnLine(line) {
+			return true
+		}
+		if err != nil {
+			return !errors.Is(err, io.EOF)
+		}
+	}
 }
 
 // abortedWhileOpening queues the delete of a conversation this open may have

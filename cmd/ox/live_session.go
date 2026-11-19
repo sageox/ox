@@ -117,7 +117,13 @@ func fetchLiveSettings(ep string) *flags.CLISettingsResponse {
 // the folder of the recording before it; that recording's stream is retired
 // first (retirePreviousLiveStream) and never reused.
 func liveSessionBegin(projectRoot string, state *session.RecordingState, header []byte) {
-	if state == nil || state.SessionID == "" || state.SessionPath == "" || state.RecordedManualPublishing() {
+	if state == nil || state.SessionID == "" || state.SessionPath == "" {
+		return
+	}
+	// a new recording ends the AI coworker's earlier ones whatever its own
+	// publishing; a manual one just never streams itself
+	closeSupersededLiveStreams(state)
+	if state.RecordedManualPublishing() {
 		return
 	}
 	switch prev, err := livesession.ReadState(state.SessionPath); {
@@ -133,7 +139,6 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 		}
 		slog.Info("live_session_previous_stream_retired", "session_id", state.SessionID, "previous_session_id", prev.SessionID)
 	}
-	closeSupersededLiveStreams(state)
 	repoID := config.GetRepoID(projectRoot)
 	if repoID == "" || !liveStreamingEnabled(projectRoot) {
 		return
@@ -192,7 +197,14 @@ func closeSupersededLiveStreams(state *session.RecordingState) {
 		}
 		log := slog.With("session_id", state.SessionID, "previous_session_id", st.SessionID,
 			"conversation_id", st.ConversationID, "layer_id", st.LayerID, "status", string(st.Status))
-		if err := livesession.RequestClose(dir); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), liveLocalBound)
+		err = livesession.RequestCloseOf(ctx, dir, st.SessionID, liveLocalBound)
+		cancel()
+		switch {
+		case errors.Is(err, livesession.ErrNotStreaming):
+			log.Debug("live_session_superseded_close_skipped", "reason", "folder_reused")
+			continue
+		case err != nil:
 			log.Warn("live_session_superseded_close_failed", "error", err)
 			continue
 		}

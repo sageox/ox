@@ -61,3 +61,12 @@ func SetLostDeclareHookForTest(t testing.TB, f func()) {
 	lostDeclareHook = f
 	t.Cleanup(func() { lostDeclareHook = prev })
 }
+
+// SetSpoolUnlockedHookForTest runs f when Spool's attempt under live.lock has
+// returned and released it. Not safe for parallel tests.
+func SetSpoolUnlockedHookForTest(t testing.TB, f func()) {
+	t.Helper()
+	prev := spoolUnlockedHook
+	spoolUnlockedHook = f
+	t.Cleanup(func() { spoolUnlockedHook = prev })
+}

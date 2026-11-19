@@ -280,16 +280,19 @@ func (s *session) withhold(ctx context.Context) error {
 	w := s.withheld
 	s.withheld = withheldBatch{}
 	if !s.st.SecretWithheld {
+		// owed from now, not from a stop: a stream the daemon closes has no stop
+		// to mark it. Marked before the flag, so the flag never stands without
+		// its mark (a failure here leaves both unset and the next drain retries);
+		// a mark a crash leaves without the flag is harmless, as discovery
+		// needs both
+		if err := OweSecretWithheldNotice(s.dir); err != nil {
+			return err
+		}
 		// before the spool changes: a crash in between must still leave stop a
 		// reason to tell the person, and an extra notice is harmless
 		s.st.SecretWithheld = true
 		if err := s.persist(); err != nil {
 			return err
-		}
-		// owed from now, not from a stop: a stream the daemon closes has no
-		// stop to mark it, and its person is told at their next start or stop
-		if err := OweSecretWithheldNotice(s.dir); err != nil {
-			s.log().WarnContext(ctx, "live_session_withheld_notice_unrecorded", "error", err)
 		}
 	}
 	if err := replaceSpoolRange(ctx, s.dir, s.st.Acked, w.size, w.next); err != nil {

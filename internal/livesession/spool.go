@@ -95,20 +95,34 @@ func Spool(ctx context.Context, dir string, batch []byte, opts SpoolOptions) (Sp
 	if len(batch) == 0 {
 		return res, nil
 	}
+	recorded := false
 	run := func() error {
-		st, err := ReadState(dir)
-		if err != nil {
+		err := func() error {
+			st, err := ReadState(dir)
+			if err != nil {
+				return err
+			}
+			switch st.Status {
+			case StatusPending, StatusStreaming, StatusClosing:
+			default:
+				return ErrNotStreaming
+			}
+			res, err = appendToSpool(dir, st.Acked, batch, opts)
+			return err
+		}()
+		if err == nil || errors.Is(err, ErrNotStreaming) {
 			return err
 		}
-		switch st.Status {
-		case StatusPending, StatusStreaming, StatusClosing:
-		default:
-			return ErrNotStreaming
-		}
-		res, err = appendToSpool(dir, st.Acked, batch, opts)
-		return err
+		// recorded before the lock is released: a close deciding whether the
+		// stream ever held a prompt (endIfPromptless) takes this lock, and a
+		// failed first prompt must already count as one when it looks
+		recorded = true
+		return spoolFailed(ctx, dir, int64(len(batch)), err)
 	}
 	err := withLock(ctx, dir, spoolLockWait, run)
+	if spoolUnlockedHook != nil {
+		spoolUnlockedHook()
+	}
 	var busy *fileutil.ErrLockTimeout
 	if errors.As(err, &busy) {
 		if spoolSwapWaitHook != nil {
@@ -116,11 +130,17 @@ func Spool(ctx context.Context, dir string, batch []byte, opts SpoolOptions) (Sp
 		}
 		err = withSwapLock(ctx, dir, run)
 	}
-	if err != nil && !errors.Is(err, ErrNotStreaming) {
+	if err != nil && !errors.Is(err, ErrNotStreaming) && !recorded {
+		// no lock was taken (an unusable lock directory, a canceled wait), so
+		// nothing ran that could have recorded it
 		return res, spoolFailed(ctx, dir, int64(len(batch)), err)
 	}
 	return res, err
 }
+
+// spoolUnlockedHook, nil in production, runs when Spool's attempt under
+// live.lock has returned and released it.
+var spoolUnlockedHook func()
 
 // withSwapLock holds the spool's swap lock. An append made without live.lock
 // holds it from opening the spool to closing it, and replaceSpoolRange holds it

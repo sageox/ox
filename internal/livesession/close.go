@@ -80,6 +80,26 @@ func RequestClose(dir string) error {
 	return nil
 }
 
+// RequestCloseOf is RequestClose for the stream of the recording sessionID
+// only, as a new recording asks of one it supersedes. The check and the write
+// happen under live.lock, which a recording reusing the folder holds to retire
+// that stream and prepare its own, so a stream started since the caller read
+// the folder is never closed in its place: that returns ErrNotStreaming. A lock
+// still busy after wait (a drain in flight) is returned as is, and the request
+// waits for the AI coworker's next start.
+func RequestCloseOf(ctx context.Context, dir, sessionID string, wait time.Duration) error {
+	return withLock(ctx, dir, wait, func() error {
+		st, err := ReadState(dir)
+		if err != nil {
+			return err
+		}
+		if st.SessionID != sessionID {
+			return ErrNotStreaming
+		}
+		return RequestClose(dir)
+	})
+}
+
 // openPending opens a session that never reached the server so Close can drain
 // and finish it. The close request is persisted first: if the server is down the
 // daemon still knows stop already happened. A session whose spool never held a
