@@ -1,7 +1,9 @@
 package session
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"reflect"
 
@@ -36,5 +38,9 @@ func MaterializeTraces(ledgerPath, sessionDir string, capture *model.Capture) (s
 	}
 	cacheDir := store.CacheSessionPath(sessionName)
 	meta, err := materialize.Build(paths.TraceSpoolDir(), cacheDir, local)
+	if errors.Is(err, materialize.ErrSelectedSpoolUnavailable) {
+		slog.Debug("trace materialization skipped", "error", err)
+		return "", nil, nil
+	}
 	return cacheDir, meta, err
 }
