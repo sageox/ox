@@ -73,6 +73,10 @@ const (
 	StatusDeleted Status = "deleted"
 	// StatusDisabled: streaming is off for this session and will not resume.
 	StatusDisabled Status = "disabled"
+	// StatusEmpty: the recording ended before its spool held a human prompt,
+	// so the stream was never opened and the server never saw it. A prime or
+	// a /clear boundary alone is no session a teammate should see.
+	StatusEmpty Status = "empty"
 )
 
 // ErrNotStreaming means the session has no live stream to act on: never opened,
@@ -197,7 +201,7 @@ func OwedSecretWithheldNotices(sessionsDir, sessionID string) []string {
 // conversation, so that abort has to delete it there.
 func (s State) reachedServer() bool {
 	switch {
-	case s.ConversationID == "" || s.Status == StatusDeleted:
+	case s.ConversationID == "" || s.Status == StatusDeleted || s.Status == StatusEmpty:
 		return false
 	case s.Status == StatusPending:
 		return s.OpenSent

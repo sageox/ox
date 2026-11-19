@@ -60,10 +60,10 @@ func TestLiveRetryAfterCountsFromTheRefusal(t *testing.T) {
 	e := newLiveEnv(t)
 	clk := &testClock{t: e.clock}
 	e.live.now = clk.Now
+	e.spool(lineN(1))
 	if _, err := livesession.Open(t.Context(), e.cfg, e.dir, e.params); err != nil {
 		t.Fatal(err)
 	}
-	e.spool(lineN(1))
 
 	const requestCost = 10 * time.Second
 	const retryAfter = 30 * time.Second

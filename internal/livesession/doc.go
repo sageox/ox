@@ -3,6 +3,11 @@
 // bytes to a local spool (Spool); the daemon and `session stop` push the spool
 // to the server (Drain, Close); `session abort` deletes it everywhere (Abort).
 //
+// Session start only prepares a stream (Prepare, no network). It opens once its
+// spool holds a human prompt (ErrAwaitingPrompt until then), so a prime or a
+// /clear boundary alone never reaches the server; a recording that ends before
+// its first prompt leaves the stream StatusEmpty.
+//
 // Nothing here may break or slow the v1 git push: every network call is bounded
 // by a caller-supplied budget, and every failure degrades to "retry later". One
 // outcome stops it on purpose: when the server says the session was deleted,

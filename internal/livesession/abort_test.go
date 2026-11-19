@@ -141,7 +141,7 @@ func TestAbortRecordsTheDeleteBeforeWaitingForTheSession(t *testing.T) {
 // server holds the conversation. Abort must still delete it there.
 func TestAbortDeletesAPendingSessionWhoseOpenReplyWasLost(t *testing.T) {
 	srv, cfg, dir, p := prepared(t)
-	if _, err := livesession.Spool(t.Context(), dir, lines(0, 2), livesession.SpoolOptions{}); err != nil {
+	if _, err := livesession.Spool(t.Context(), dir, withPrompt(lines(0, 2)), livesession.SpoolOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	srv.DropOpenReply(1)
@@ -176,7 +176,7 @@ func TestIsLocalFileCoversEveryFileTheStreamWrites(t *testing.T) {
 			}
 		}
 	}
-	if _, err := livesession.Spool(t.Context(), dir, lines(0, 2), livesession.SpoolOptions{}); err != nil {
+	if _, err := livesession.Spool(t.Context(), dir, withPrompt(lines(0, 2)), livesession.SpoolOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	snapshot()
@@ -220,6 +220,9 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // open: the open must never be sent, since abort saw nothing to delete.
 func TestAbortWhileTheOpenRegistersItsKeyStopsTheOpen(t *testing.T) {
 	srv, cfg, dir, p := prepared(t)
+	if _, err := livesession.Spool(t.Context(), dir, prompt(), livesession.SpoolOptions{}); err != nil {
+		t.Fatal(err)
+	}
 	srv.Latency(300 * time.Millisecond)
 	opened := make(chan error, 1)
 	go func() { _, err := livesession.Open(t.Context(), cfg, dir, p); opened <- err }()
@@ -243,6 +246,9 @@ func TestAbortWhileTheOpenRegistersItsKeyStopsTheOpen(t *testing.T) {
 // must queue that delete itself, or the copy stays on SageOx.
 func TestAbortThatOutrunsAnInFlightOpenStillDeletesTheConversation(t *testing.T) {
 	srv, cfg, dir, p := prepared(t)
+	if _, err := livesession.Spool(t.Context(), dir, prompt(), livesession.SpoolOptions{}); err != nil {
+		t.Fatal(err)
+	}
 	srv.DelayOpen(300 * time.Millisecond)
 	opened := make(chan error, 1)
 	go func() { _, err := livesession.Open(t.Context(), cfg, dir, p); opened <- err }()

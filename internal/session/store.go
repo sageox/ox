@@ -1069,30 +1069,36 @@ func ResolveOrMintSessionID(preserved, startMinted string) string {
 // the crash-safe-carrier read for paths where .recording.json is already
 // gone (recover, daemon orphan finalize).
 func ReadHeaderSessionID(path string) string {
+	if meta := ReadHeaderMeta(path); meta != nil {
+		return meta.SessionID
+	}
+	return ""
+}
+
+// ReadHeaderMeta returns the metadata of the first-line header of the
+// raw.jsonl at path, or nil for a legacy, foreign or absent header.
+func ReadHeaderMeta(path string) *StoreMeta {
 	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		return nil
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
 	if !scanner.Scan() {
-		return ""
+		return nil
 	}
 	var entry map[string]any
 	if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
-		return ""
+		return nil
 	}
-	var meta *StoreMeta
 	if metadata, ok := entry["metadata"].(map[string]any); ok && entry["type"] == "header" {
-		meta = ParseStoreMeta(metadata)
-	} else if m, ok := entry["_meta"].(map[string]any); ok {
-		meta = ParseStoreMeta(m)
+		return ParseStoreMeta(metadata)
 	}
-	if meta == nil {
-		return ""
+	if m, ok := entry["_meta"].(map[string]any); ok {
+		return ParseStoreMeta(m)
 	}
-	return meta.SessionID
+	return nil
 }
 
 // mergeFooter folds a footer record into the footer accumulated so far. A

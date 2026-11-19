@@ -324,10 +324,13 @@ func handleStart(ctx *HookContext) error {
 		agentID = ctx.Marker.AgentID
 	}
 
-	// on /clear or /compact: stop the current session so it gets finalized,
-	// then prime will start a fresh recording for the new context window
 	if forceReprime && agentID != "" {
-		stopSessionForClear(ctx, agentID)
+		// /clear starts a new session linked to the old one: stop it so it is
+		// finalized and its live stream closed, and prime starts the next. A
+		// /compact continues the same session, recording and live stream alike.
+		if source == clearSource {
+			stopSessionForClear(ctx, agentID)
+		}
 		// the model's context window was wiped but the on-disk task cursor
 		// survives — reset it so pending tasks re-surface in the fresh context.
 		resetTaskCursor(ctx.ProjectRoot, agentID)
@@ -350,7 +353,11 @@ func handleStart(ctx *HookContext) error {
 	return nil
 }
 
-// stopSessionForClear stops the current session recording during /clear or /compact.
+// clearSource is the SessionStart source after /clear, the one context reset
+// that ends the recording; /compact ("compact") continues it.
+const clearSource = "clear"
+
+// stopSessionForClear stops the current session recording during /clear.
 // This finalizes the old session so it gets uploaded, then prime starts a fresh one.
 // Sets StoppedAt, sends fire-and-forget IPC finalization to the daemon, and clears
 // recording state so prime can start a fresh session.

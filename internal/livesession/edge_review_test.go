@@ -130,6 +130,7 @@ func TestOpenAtABlockingEdgeIsRecordedForThePendingStream(t *testing.T) {
 			if _, err := livesession.Prepare(t.Context(), cfg, dir, p); err != nil {
 				t.Fatal(err)
 			}
+			spoolOrFail(t, dir, prompt()) // a stream opens only once it holds a prompt
 			srv.BlockAtEdge(tt.method, 2, "text/html", cloudFrontPage)
 			for i := range 2 {
 				_, err := livesession.Open(t.Context(), cfg, dir, p)
@@ -227,6 +228,7 @@ func TestOpenClearsAnEdgeStreakWhenSageOxAnswers(t *testing.T) {
 			if _, err := livesession.Prepare(t.Context(), cfg, dir, p); err != nil {
 				t.Fatal(err)
 			}
+			spoolOrFail(t, dir, prompt()) // a stream opens only once it holds a prompt
 			srv.BlockAtEdge("", 1, "text/html", cloudFrontPage)
 			if _, err := livesession.Open(t.Context(), cfg, dir, p); !errors.Is(err, livesession.ErrEdgeBlocked) {
 				t.Fatalf("open at a blocking edge: %v", err)

@@ -670,6 +670,9 @@ func TestAdversarialAbortAfterALostOpenReplyDeletesTheServerCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := livesession.Spool(t.Context(), s.dir, prompt(), livesession.SpoolOptions{}); err != nil {
+		t.Fatal(err)
+	}
 	// two: net/http transparently retries an idempotent PUT once on a reused
 	// connection, and that retry is lost too
 	proxy.mu.Lock()

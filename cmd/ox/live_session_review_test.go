@@ -297,6 +297,10 @@ func TestLiveRestartAfterTheOldStreamHeardADeleteKeepsTheNewStream(t *testing.T)
 	require.Equal(t, session.HoldDeletedOnServer, hold.Reason)
 
 	next := f.restartInSameFolder()
+	// the new recording's first prompt, as its capture spools it: a stream
+	// opens only once it holds one
+	_, err = livesession.Spool(context.Background(), f.dir(), []byte(`{"type":"user","content":"second recording"}`+"\n"), livesession.SpoolOptions{})
+	require.NoError(t, err)
 	live := daemon.NewLiveSessions(slog.New(slog.NewTextHandler(testWriter{t}, nil)), filepath.Dir(f.dir()), f.srv.URL)
 	live.Drain(context.Background(), f.dir())
 	live.Wait()

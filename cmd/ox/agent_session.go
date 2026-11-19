@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -328,17 +330,9 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	}
 	// an earlier recording's stream may owe its person the withheld notice;
 	// its mark is cleared only once this start's output is written
-	noticeDirs := earlierLiveSecretWithheld(state.SessionPath, state.SessionID)
+	noticeDirs := writeStartHeaderAndCollectOwedNotices(projectRoot, state, adapterName)
 	if len(noticeDirs) > 0 {
 		notice = strings.TrimSpace(notice + "\n\n" + liveSecretWithheldEarlierWarning)
-	}
-
-	// write raw.jsonl header immediately so incremental hooks can append entries
-	if adapterName != "cursor" {
-		if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
-			slog.Warn("failed to write raw.jsonl header at start", "error", writeErr)
-			// non-fatal: processAgentSession will write header at stop time as fallback
-		}
 	}
 
 	// register-at-start so /c/<session_id> resolves from t=0 (fire-and-forget)
@@ -352,13 +346,13 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	// output format selection (priority: review > text > json default)
 	if cfg.Review || cfg.Text {
-		printSessionStartText(inst.AgentID, adapterName, title, notice, state.StartedAt)
+		if err := printSessionStartText(os.Stdout, inst.AgentID, adapterName, title, notice, state.StartedAt, cfg.Review); err != nil {
+			return fmt.Errorf("write start output: %w", err)
+		}
 		if !cfg.Review {
 			confirmLiveSecretWithheldNotices(noticeDirs)
 			return nil
 		}
-		fmt.Println()
-		fmt.Println("--- Machine Output ---")
 	}
 
 	jsonOut, err := cli.MarshalJSONIndent(output)
@@ -371,6 +365,22 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	}
 	confirmLiveSecretWithheldNotices(noticeDirs)
 	return nil
+}
+
+// writeStartHeaderAndCollectOwedNotices writes a just-started recording's
+// raw.jsonl header, so incremental hooks can append entries (Cursor's is
+// written inside StartRecording), then returns the folders of earlier streams
+// that owe their person the withheld notice. The order matters: a start in a
+// reused folder moves the stream there, owed mark and all, to .live-<id>, and
+// a mark is cleared only where it is now.
+func writeStartHeaderAndCollectOwedNotices(projectRoot string, state *session.RecordingState, adapterName string) []string {
+	if adapterName != "cursor" {
+		if err := writeRawHeader(projectRoot, state); err != nil {
+			slog.Warn("failed to write raw.jsonl header at start", "error", err)
+			// non-fatal: processAgentSession will write header at stop time as fallback
+		}
+	}
+	return earlierLiveSecretWithheld(state.SessionPath, state.SessionID)
 }
 
 // buildSessionStartOutput constructs the JSON output for session start.
@@ -398,19 +408,27 @@ func buildSessionStartOutput(agentID, adapterName, sessionFile, title, notice st
 	return output
 }
 
-// printSessionStartText renders the human-readable text summary for session start.
-func printSessionStartText(agentID, adapterName, title, notice string, startedAt time.Time) {
+// printSessionStartText renders the human-readable text summary for session
+// start to w, followed in review mode by the machine output's heading. It is
+// one write, so its error says whether the notice in it reached the person.
+func printSessionStartText(w io.Writer, agentID, adapterName, title, notice string, startedAt time.Time, review bool) error {
+	var b bytes.Buffer
 	if notice != "" {
-		fmt.Printf("\n  %s\n\n", notice)
+		fmt.Fprintf(&b, "\n  %s\n\n", notice)
 	}
 	if title != "" {
-		cli.PrintSuccess(fmt.Sprintf("%s session recording started: %q", cli.Wordmark(), title))
+		cli.PrintSuccessTo(&b, fmt.Sprintf("%s session recording started: %q", cli.Wordmark(), title))
 	} else {
-		cli.PrintSuccess(cli.Wordmark() + " session recording started")
+		cli.PrintSuccessTo(&b, cli.Wordmark()+" session recording started")
 	}
-	fmt.Printf("  Agent: %s (%s)\n", agentID, adapterName)
-	fmt.Printf("  Started: %s\n", startedAt.Format("15:04:05"))
-	fmt.Printf("  Run %s to end recording\n", cli.StyleCommand.Render("ox agent session stop"))
+	fmt.Fprintf(&b, "  Agent: %s (%s)\n", agentID, adapterName)
+	fmt.Fprintf(&b, "  Started: %s\n", startedAt.Format("15:04:05"))
+	fmt.Fprintf(&b, "  Run %s to end recording\n", cli.StyleCommand.Render("ox agent session stop"))
+	if review {
+		b.WriteString("\n--- Machine Output ---\n")
+	}
+	_, err := w.Write(b.Bytes())
+	return err
 }
 
 // isManualSessionAgent returns true for agent types that require explicit
@@ -745,13 +763,13 @@ func emitSessionStop(projectRoot string, inst *agentinstance.Instance, state *se
 	switch {
 	case cfg.Review:
 		// security audit mode: human summary first, then JSON
-		outputTextSummary(projectRoot, state, duration, processResult)
-		fmt.Println()
-		fmt.Println("--- Machine Output ---")
-		err = outputSessionStopJSON(projectRoot, inst, state, duration, processResult, discoveryErr, timing)
+		err = outputTextSummary(os.Stdout, projectRoot, state, duration, processResult, true)
+		if err == nil {
+			err = outputSessionStopJSON(projectRoot, inst, state, duration, processResult, discoveryErr, timing)
+		}
 	case cfg.Text:
 		// human-readable text output
-		outputTextSummary(projectRoot, state, duration, processResult)
+		err = outputTextSummary(os.Stdout, projectRoot, state, duration, processResult, false)
 	default:
 		err = outputSessionStopJSON(projectRoot, inst, state, duration, processResult, discoveryErr, timing)
 	}
@@ -881,45 +899,48 @@ func recordSessionObservation(projectRoot string, result *agentSessionResult, du
 	}
 }
 
-// outputTextSummary renders the human-readable text summary for session stop.
-func outputTextSummary(projectRoot string, state *session.RecordingState, duration string, processResult *agentSessionResult) {
+// outputTextSummary renders the human-readable text summary for session stop
+// to w, followed in review mode by the machine output's heading. It is one
+// write, so its error says whether the notices in it reached the person.
+func outputTextSummary(w io.Writer, projectRoot string, state *session.RecordingState, duration string, processResult *agentSessionResult, review bool) error {
+	var b bytes.Buffer
 	if state.Title != "" {
-		cli.PrintSuccess(fmt.Sprintf("Recording stopped: %q", state.Title))
+		cli.PrintSuccessTo(&b, fmt.Sprintf("Recording stopped: %q", state.Title))
 	} else {
-		cli.PrintSuccess("Recording stopped")
+		cli.PrintSuccessTo(&b, "Recording stopped")
 	}
 
-	fmt.Printf("  Duration: %s\n", duration)
-	fmt.Printf("  Agent: %s (%s)\n", state.AgentID, state.AdapterName)
+	fmt.Fprintf(&b, "  Duration: %s\n", duration)
+	fmt.Fprintf(&b, "  Agent: %s (%s)\n", state.AgentID, state.AdapterName)
 
 	if processResult != nil {
 		if processResult.Model != "" {
-			fmt.Printf("  Model: %s\n", processResult.Model)
+			fmt.Fprintf(&b, "  Model: %s\n", processResult.Model)
 		}
 		if processResult.Held {
-			fmt.Printf("  %s\n", processResult.UploadWarning)
+			fmt.Fprintf(&b, "  %s\n", processResult.UploadWarning)
 		}
 		if processResult.LiveSecretWithheld && !processResult.DeletedOnServer {
-			fmt.Printf("  %s\n", liveSecretWithheldWarning)
+			fmt.Fprintf(&b, "  %s\n", liveSecretWithheldWarning)
 		}
 		if processResult.EarlierLiveSecretWithheld {
-			fmt.Printf("  %s\n", liveSecretWithheldEarlierWarning)
+			fmt.Fprintf(&b, "  %s\n", liveSecretWithheldEarlierWarning)
 		}
 
 		// show generated files with descriptions
 		if processResult.RawPath != "" || processResult.SummaryMDPath != "" {
-			fmt.Println("\n  Generated files:")
+			b.WriteString("\n  Generated files:\n")
 			if processResult.RawPath != "" {
-				fmt.Printf("    Raw session:     %s\n", processResult.RawPath)
+				fmt.Fprintf(&b, "    Raw session:     %s\n", processResult.RawPath)
 			}
 			if processResult.SummaryMDPath != "" {
-				fmt.Printf("    Summary:         %s\n", processResult.SummaryMDPath)
+				fmt.Fprintf(&b, "    Summary:         %s\n", processResult.SummaryMDPath)
 			}
 			if processResult.SessionMDPath != "" {
-				fmt.Printf("    Full session:    %s\n", processResult.SessionMDPath)
+				fmt.Fprintf(&b, "    Full session:    %s\n", processResult.SessionMDPath)
 			}
 			if processResult.PlanPath != "" {
-				fmt.Printf("    Plan:            %s\n", processResult.PlanPath)
+				fmt.Fprintf(&b, "    Plan:            %s\n", processResult.PlanPath)
 			}
 		}
 
@@ -932,19 +953,24 @@ func outputTextSummary(projectRoot string, state *session.RecordingState, durati
 			if teamLabel == "" {
 				teamLabel = loc.TeamID
 			}
-			fmt.Printf("  %-13s%s / %s\n", "Recorded to", teamLabel, loc.RepoDisplayName)
+			fmt.Fprintf(&b, "  %-13s%s / %s\n", "Recorded to", teamLabel, loc.RepoDisplayName)
 		}
 		if loc.SessionURL != "" {
-			fmt.Printf("  %-13s%s\n", "View at", loc.SessionURL)
+			fmt.Fprintf(&b, "  %-13s%s\n", "View at", loc.SessionURL)
 		}
 
 		if processResult.SecretsRedacted > 0 {
-			fmt.Printf("\n  Redacted: %d secrets\n", processResult.SecretsRedacted)
+			fmt.Fprintf(&b, "\n  Redacted: %d secrets\n", processResult.SecretsRedacted)
 		}
 		if processResult.Summary != "" {
-			fmt.Printf("\n  Summary: %s\n", processResult.Summary)
+			fmt.Fprintf(&b, "\n  Summary: %s\n", processResult.Summary)
 		}
 	}
+	if review {
+		b.WriteString("\n--- Machine Output ---\n")
+	}
+	_, err := w.Write(b.Bytes())
+	return err
 }
 
 // sessionStopLocationInfo carries where a stopped session landed, for
