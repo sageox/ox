@@ -229,6 +229,10 @@ type withheldBatch struct {
 	size  int64  // bytes of the refused batch
 	next  []byte // the batch's gap lines, and the one new gap line
 	bytes int64  // bytes the new gap line stands for
+	// by is the scan that refused it: local_scan, or server (F11). line is the
+	// server's first flagged line, a number only; the whole batch is withheld.
+	by   string
+	line *int
 }
 
 // declaredGapLine is exactly a gap line this package writes into the spool: a
@@ -291,7 +295,11 @@ func (s *session) withhold(ctx context.Context) error {
 		return fmt.Errorf("withhold %d refused bytes at offset %d: %w", w.bytes, s.st.Acked, err)
 	}
 	// ids and sizes only: the refusal's text and the bytes stay out of every log
-	s.log().WarnContext(ctx, "live_session_secret_withheld", "offset", s.st.Acked, "bytes", w.bytes)
+	args := []any{"offset", s.st.Acked, "bytes", w.bytes, "by", w.by}
+	if w.line != nil {
+		args = append(args, "line", *w.line)
+	}
+	s.log().WarnContext(ctx, "live_session_secret_withheld", args...)
 	return nil
 }
 

@@ -11,6 +11,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -149,6 +150,10 @@ type sessionStatusOutput struct {
 	DraftState       string `json:"draft_state,omitempty"`        // disabled | pending | published | stale | failed
 	DraftPublishedAt string `json:"draft_published_at,omitempty"` // RFC3339
 	ConversationURL  string `json:"conversation_url,omitempty"`   // https://<endpoint>/c/<session_id>
+
+	// LiveStreamNotice is the live stream's one status line, such as the
+	// network edge blocking it (livesession.StreamNotice); empty when fine.
+	LiveStreamNotice string `json:"live_stream_notice,omitempty"`
 }
 
 // sessionRecordingEntry represents one active recording in the multi-session output.
@@ -395,6 +400,10 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		alive, status := agentLivenessFor(agentAlive, state.AgentID)
 
 		stalled, stalledReason := sessionStallStatus(state)
+		liveStreamNotice := ""
+		if state.SessionPath != "" {
+			liveStreamNotice = livesession.StreamNotice(state.SessionPath)
+		}
 		lastHookAtStr := ""
 		if state.LastHookAt != nil {
 			lastHookAtStr = state.LastHookAt.Format("2006-01-02T15:04:05Z07:00")
@@ -440,6 +449,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 			// is diagnosable rather than a guess.
 			newDraftStatusContext(projectRoot).applyTo(state, &output.TurnCount, &output.DraftState,
 				&output.DraftPublishedAt, &output.ConversationURL)
+			output.LiveStreamNotice = liveStreamNotice
 			return outputJSON(cmd.OutOrStdout(), output)
 		}
 
@@ -483,6 +493,9 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Branch:   %s\n", state.Branch)
 		}
 		fmt.Println()
+		if liveStreamNotice != "" {
+			fmt.Println(cli.StyleWarning.Render(liveStreamNotice))
+		}
 		if stalled {
 			fmt.Println(cli.StyleWarning.Render("⚠ Recording is stalled: " + stalledReason))
 			fmt.Println(cli.StyleDim.Render("  Run 'ox doctor' to diagnose."))

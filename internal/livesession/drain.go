@@ -212,7 +212,7 @@ func (s *session) pump(ctx context.Context, res *DrainResult) (verdict, error) {
 }
 
 func (s *session) sendBatch(ctx context.Context, f *os.File, h *sessionstream.StreamHash, end int64, res *DrainResult) (verdict, error) {
-	batch, err := readBatch(f, s.st.Acked, end)
+	batch, err := readBatch(f, s.st.Acked, end, s.batchLimit())
 	if err != nil {
 		return vStop, err
 	}
@@ -228,12 +228,13 @@ func (s *session) sendBatch(ctx context.Context, f *os.File, h *sessionstream.St
 		if err != nil {
 			return vStop, fmt.Errorf("withhold refused batch at offset %d: %w", s.st.Acked, err)
 		}
+		w.by = "local_scan"
 		s.withheld = w
 		return vWithhold, nil
 	}
 	resp, err := s.c.AppendRaw(ctx, s.st.ConversationID, s.st.LayerID, s.st.Acked, h.Sum(), batch)
 	if err != nil {
-		return s.onRefusal(ctx, err, f, h, end, res)
+		return s.onRefusal(ctx, err, f, h, batch, end, res)
 	}
 	return s.onStored(ctx, f, h, batch, resp, end, res)
 }
@@ -258,20 +259,48 @@ func (s *session) onStored(ctx context.Context, f *os.File, h *sessionstream.Str
 	}
 	res.Sent += stored - s.st.Acked
 	s.st.Acked = stored
+	s.unstalled()
+	s.edgeCleared(ctx)
 	if err := s.persist(); err != nil {
 		return vStop, err
 	}
 	return vContinue, nil
 }
 
-// onRefusal maps a failed append to what the drain does next (C6).
-func (s *session) onRefusal(ctx context.Context, err error, f *os.File, h *sessionstream.StreamHash, end int64, res *DrainResult) (verdict, error) {
+// onRefusal maps a failed append of batch to what the drain does next (C6).
+func (s *session) onRefusal(ctx context.Context, err error, f *os.File, h *sessionstream.StreamHash, batch []byte, end int64, res *DrainResult) (verdict, error) {
 	var api *sessionstream.APIError
 	if !errors.As(err, &api) {
+		if isTimeout(ctx, err) {
+			s.stalled(ctx, len(batch), "timeout")
+		}
 		return vStop, fmt.Errorf("append at offset %d: %w", s.st.Acked, err)
+	}
+	if shape, ok := edgeShape(api); ok {
+		eerr := s.edgeBlocked(ctx, api, shape)
+		s.stalled(ctx, len(batch), "edge_blocked") // persists EdgeBlockedSince too
+		return vStop, fmt.Errorf("append at offset %d: %w (status %d, %s body)", s.st.Acked, eerr, api.Status, shape)
+	}
+	if s.edgeCleared(ctx) {
+		if err := s.persist(); err != nil {
+			s.log().WarnContext(ctx, "live_session_state_write_failed", "during", "edge_unblocked", "error", err)
+		}
 	}
 	if done, err := s.terminal(ctx, api); done || err != nil {
 		return vStop, err
+	}
+	if api.Body.Reason == reasonSecretRefused {
+		// the server's scan (F11) found what the local one missed: the same
+		// whole-batch withhold as a local refusal (F1, R1), and the stream goes on
+		w, werr := withholdRefused(batch)
+		if werr == nil {
+			w.by, w.line = "server", api.Body.Line
+			s.withheld = w
+			return vWithhold, nil
+		}
+		// a batch of gap lines only: withholding again could loop forever, so
+		// today's stop applies below
+		s.log().WarnContext(ctx, "live_session_secret_refused_gaps_only", "offset", s.st.Acked, "bytes", len(batch))
 	}
 	switch classify(api) {
 	case refusalResync:
@@ -439,14 +468,19 @@ func (s *session) restartLayer(ctx context.Context) error {
 	return s.persist()
 }
 
-// readBatch returns whole lines from [off, end) up to MaxBatchBytes, or nil when
-// no complete line fits. Spooled lines never exceed the cap (Spool gaps them).
-func readBatch(f io.ReaderAt, off, end int64) ([]byte, error) {
+// readBatch returns whole lines from [off, end) up to limit bytes, or nil when
+// no complete line fits in MaxBatchBytes. A first line longer than limit is
+// returned whole: a line is never split. Spooled lines never exceed
+// MaxBatchBytes (Spool gaps them).
+func readBatch(f io.ReaderAt, off, end int64, limit int) ([]byte, error) {
 	buf := make([]byte, min(int64(sessionstream.MaxBatchBytes), end-off))
 	if _, err := f.ReadAt(buf, off); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("read spool: %w", err)
 	}
-	i := bytes.LastIndexByte(buf, '\n')
+	i := bytes.LastIndexByte(buf[:min(len(buf), limit)], '\n')
+	if i < 0 {
+		i = bytes.IndexByte(buf, '\n')
+	}
 	if i < 0 {
 		return nil, nil
 	}

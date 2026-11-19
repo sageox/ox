@@ -197,6 +197,13 @@ func (s *session) onCloseRefusal(ctx context.Context, err error, size int64) (ve
 	if !errors.As(err, &api) {
 		return vStop, fmt.Errorf("close live session: %w", err)
 	}
+	if shape, ok := edgeShape(api); ok {
+		eerr := s.edgeBlocked(ctx, api, shape)
+		if perr := s.persist(); perr != nil {
+			s.log().WarnContext(ctx, "live_session_state_write_failed", "during", "edge_blocked", "error", perr)
+		}
+		return vStop, fmt.Errorf("close live session: %w (status %d, %s body)", eerr, api.Status, shape)
+	}
 	if done, err := s.terminal(ctx, api); done || err != nil {
 		return vStop, err
 	}
