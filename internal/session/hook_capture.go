@@ -89,8 +89,24 @@ type HookCaptureOptions struct {
 	// write. A hook reads the transcript of the agent that ran it.
 	SourceHome string
 	// Settled bounds the capture to the transcript bytes the caller saw
-	// settle. The zero value leaves the read unbounded.
+	// settle. The zero value leaves the read unbounded. A transcript found gone
+	// or shrunk is left for a hook to rediscover (HookStatusUnsettled).
 	Settled SettledSource
+	// Transcript is what the agent named on this hook's stdin; nil for a
+	// caller that is not a hook (the daemon). For a Claude Code recording it
+	// becomes the recording's bound transcript, the only one the daemon's
+	// catch-up reads (bindHookTranscript). Marker fields never bind one: the
+	// marker is anyone's to rewrite, the hook's stdin is Claude Code's own.
+	Transcript *HookTranscript
+}
+
+// HookTranscript is the transcript Claude Code passes every hook on stdin.
+type HookTranscript struct {
+	// Path is stdin's transcript_path; empty when the agent sent none (an
+	// older Claude Code).
+	Path string
+	// SessionID is stdin's session_id, which names the transcript's file.
+	SessionID string
 }
 
 // SettledSource is a transcript as a caller saw it settle. Adapters read to the
@@ -191,6 +207,13 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 	// Claude Code's ownership checks below must cover every spelling of the
 	// adapter that resolves to it ("claude" is an accepted alias).
 	claudeCode := adapters.CanonicalAdapterName(state.AdapterName) == "claude-code"
+	if claudeCode && opts.Transcript != nil {
+		repoRoot := state.WorkspacePath
+		if repoRoot == "" {
+			repoRoot = projectRoot
+		}
+		bindHookTranscript(ctx, state, repoRoot, *opts.Transcript)
+	}
 	if err := RecoverRawAppend(rawPath, state.SourceOffset); err != nil {
 		return HookCapture{}, err
 	}
@@ -271,6 +294,12 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 	// staleness check: if the source file disappeared or shrank (e.g., Claude Code
 	// created a new file after compaction), try to rediscover it
 	if fi, statErr := os.Stat(state.SessionFile); statErr != nil || fi.Size() < state.SourceOffset {
+		if opts.Settled.Path != "" {
+			// the caller stat'd a transcript that has since gone or shrunk;
+			// finding its replacement, and rebinding it, is a hook's job
+			result.Status = HookStatusUnsettled
+			return result, nil
+		}
 		if statErr != nil {
 			slog.Info("hook: session file missing, attempting rediscovery", "file", state.SessionFile)
 		} else {
@@ -494,6 +523,50 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 // rawNeedsHeader reports whether raw.jsonl has no content yet, so its header
 // must be written before the first entry. A zero-byte file counts: a crash can
 // leave one behind.
+// bindHookTranscript binds the transcript Claude Code named on a hook's stdin
+// to state's recording, on every hook: a recording active before the binding
+// existed, one started by hand with its transcript already set, and one whose
+// last bind failed all bind at their next hook. It binds only a transcript
+// inside Claude Code's own root that passes Claude Code's ownership check for
+// this repository and stdin's session. Failures cost the recording its daemon
+// catch-up only, never this capture, so they are logged and the hook goes on.
+func bindHookTranscript(ctx context.Context, state *RecordingState, repoRoot string, t HookTranscript) {
+	ids := []any{"session_id", state.SessionID, "agent_id", state.AgentID, "session", filepath.Base(state.SessionPath)}
+	if t.Path == "" {
+		slog.DebugContext(ctx, "session_source_bind_skipped", append(ids, "reason", "no_transcript_path")...)
+		return
+	}
+	entry, registered, err := lookupStartedRecording(state.SessionPath, state.SessionID)
+	if err != nil || !registered {
+		// not started here (an older ox), or no registry to read: the daemon
+		// never catches this recording up, so there is nothing to bind
+		slog.DebugContext(ctx, "session_source_bind_skipped", append(ids, "reason", "not_registered", "error", err)...)
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		slog.WarnContext(ctx, "session_source_bind_failed", append(ids, "error", err)...)
+		return
+	}
+	source, err := adapters.SafeSessionFilePath("claude-code", t.Path, home)
+	if err != nil {
+		slog.WarnContext(ctx, "session_source_bind_refused", append(ids, "transcript", t.Path, "error", err)...)
+		return
+	}
+	if entry.Source == canonicalPath(source) {
+		return // bound already: every hook after the first ends here
+	}
+	if err := claudesource.Validate(source, repoRoot, t.SessionID); err != nil {
+		slog.WarnContext(ctx, "session_source_bind_refused", append(ids, "transcript", source, "error", err)...)
+		return
+	}
+	if err := bindStartedRecordingSource(state.SessionPath, state.SessionID, source); err != nil {
+		slog.WarnContext(ctx, "session_source_bind_failed", append(ids, "transcript", source, "error", err)...)
+		return
+	}
+	slog.InfoContext(ctx, "session_source_bound", append(ids, "transcript", source, "previous", entry.Source)...)
+}
+
 func rawNeedsHeader(rawPath string) (bool, error) {
 	info, err := os.Stat(rawPath)
 	if errors.Is(err, fs.ErrNotExist) {

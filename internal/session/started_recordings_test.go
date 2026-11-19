@@ -42,7 +42,7 @@ func plantedBeside(live *RecordingState) string {
 func markerIn(t *testing.T, markers []RecordingMarker, dir string) RecordingMarker {
 	t.Helper()
 	for _, mk := range markers {
-		if canonicalSessionDir(mk.Dir) == canonicalSessionDir(dir) {
+		if canonicalPath(mk.Dir) == canonicalPath(dir) {
 			return mk
 		}
 	}
@@ -200,4 +200,33 @@ func TestUnreadableStartedRecordingRegistryFailsClosed(t *testing.T) {
 		AgentID: "OxCorrupt2", AdapterName: "claude-code", Username: "person-a", WatchMode: "hook", WorkspacePath: projectRoot,
 	})
 	require.NoError(t, err)
+}
+
+// The catch-up reads only the transcript a hook's stdin bound. Stdin is Claude
+// Code's own word, so a different transcript replaces the binding; a
+// recording ox did not start is never given one.
+func TestTranscriptBindingFollowsTheHookOnlyForRecordingsStartedHere(t *testing.T) {
+	projectRoot, live := startForProvenance(t, "OxBind")
+	first, second := filepath.Join(t.TempDir(), "first.jsonl"), filepath.Join(t.TempDir(), "second.jsonl")
+	for _, p := range []string{first, second} {
+		require.NoError(t, os.WriteFile(p, nil, 0o600))
+	}
+	source := func() string {
+		t.Helper()
+		markers, err := LoadRecordingMarkers(projectRoot)
+		require.NoError(t, err)
+		return markerIn(t, markers, live.SessionPath).Source
+	}
+	require.Empty(t, source(), "a transcript is bound before any hook named one")
+
+	require.NoError(t, bindStartedRecordingSource(live.SessionPath, live.SessionID, first))
+	assert.Equal(t, canonicalPath(first), source())
+	require.NoError(t, bindStartedRecordingSource(live.SessionPath, live.SessionID, second))
+	assert.Equal(t, canonicalPath(second), source(), "a hook naming another transcript did not move the binding")
+
+	require.NoError(t, bindStartedRecordingSource(live.SessionPath, "ses_not_started_here", first))
+	list, err := readStartedRecordings()
+	require.NoError(t, err)
+	require.Len(t, list, 1, "a recording ox did not start was given an entry")
+	assert.Equal(t, live.SessionID, list[0].SessionID)
 }

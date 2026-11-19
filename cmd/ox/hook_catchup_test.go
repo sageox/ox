@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
@@ -64,7 +66,21 @@ func newCatchUpFixture(t *testing.T) *liveFixture {
 		s.WatchMode = "hook"
 		s.WorkspacePath = f.projectRoot
 	}))
+	// a hook's stdin names the transcript, which binds it as the one the
+	// daemon's catch-up reads for this recording
+	f.hookWithStdin(contained)
 	return f
+}
+
+// hookWithStdin runs the PostToolUse hook with the stdin Claude Code sends,
+// which names the session's transcript.
+func (f *liveFixture) hookWithStdin(transcript string) {
+	f.t.Helper()
+	stdin := fmt.Sprintf(`{"session_id":"session","hook_event_name":"PostToolUse","transcript_path":%q}`, transcript)
+	require.NoError(f.t, handleAfterTool(&HookContext{
+		Phase: phaseAfterTool, ProjectRoot: f.projectRoot, Marker: &SessionMarker{AgentID: f.agentID},
+		Input: agentx.ReadHookInput(strings.NewReader(stdin)),
+	}))
 }
 
 // record is one native transcript line, stamped after the recording started.

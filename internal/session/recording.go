@@ -683,7 +683,7 @@ func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, e
 		// only read when it can decide something; unreadable, the first stands
 		if known, err := loadStartedRecordings(); err == nil {
 			for i, c := range candidates {
-				if startedHere(known, dirs[i], c) {
+				if _, ok := startedHere(known, dirs[i], c); ok {
 					s = c
 					break
 				}

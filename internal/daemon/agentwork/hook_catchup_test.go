@@ -104,13 +104,18 @@ func newCatchUpFixture(t *testing.T) *catchUpFixture {
 	require.NoError(t, os.MkdirAll(filepath.Dir(f.source), 0o700))
 	require.NoError(t, os.WriteFile(f.source, fmt.Appendf(nil, "{\"type\":\"session\",\"sessionId\":\"session\",\"cwd\":%q}\n", projectRoot), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(state.SessionPath, artifactRaw), []byte(`{"type":"header","metadata":{}}`+"\n"), 0o600))
+	f.state = state
 	info, err := os.Stat(f.source)
 	require.NoError(t, err)
 	require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, f.agentID, func(s *session.RecordingState) {
 		s.SessionFile = f.source
 		s.SourceOffset = info.Size() // the hooks have read everything so far
 	}))
-	f.state = state
+	// a hook's stdin names the transcript, which binds it as the one the
+	// daemon's catch-up reads for this recording
+	_, err = f.capture(hookStdin(f.source, "session"))
+	require.NoError(t, err)
+	adapter.reads.Store(0)
 	return f
 }
 

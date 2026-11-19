@@ -790,8 +790,29 @@ func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expected
 			liveSessionDeclareLost(ctx.ProjectRoot, state, n, cause)
 		},
 		MarkStatus: markHookStatus,
+		// the transcript Claude Code names here is the only one the daemon
+		// catches up for this recording
+		Transcript: hookTranscript(ctx.Input),
 	})
 	return err
+}
+
+// hookTranscript is the transcript the agent named on this hook's stdin.
+// agentx.HookInput does not parse transcript_path, so it is read from the raw
+// payload. A hook with no stdin still names none (an empty Path).
+func hookTranscript(in *agentx.HookInput) *session.HookTranscript {
+	t := &session.HookTranscript{}
+	if in == nil {
+		return t
+	}
+	t.SessionID = in.SessionID
+	var stdin struct {
+		TranscriptPath string `json:"transcript_path"`
+	}
+	if json.Unmarshal(in.RawBytes, &stdin) == nil {
+		t.Path = stdin.TranscriptPath
+	}
+	return t
 }
 
 // liveSessionDeclareLost declares n bytes a capture committed to raw.jsonl but
