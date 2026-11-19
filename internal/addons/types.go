@@ -33,6 +33,9 @@ const LockSchemaVersion = 1
 // consequences that fail silently.
 const LockRelativePath = ".sageox/add-ons.lock.json"
 
+// CommitSubjectPrefix identifies add-on transactions in Team Context history.
+const CommitSubjectPrefix = "add-ons: "
+
 // SourceBuiltin is the only provider that exists today: add-ons compiled into
 // the ox binary under extensions/addons/. The Source field is recorded per
 // add-on anyway, because a remote provider is the reason this contract is

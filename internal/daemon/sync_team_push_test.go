@@ -2,14 +2,17 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/secretguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -47,6 +50,28 @@ func TestShouldPushTeamPublishes(t *testing.T) {
 			assert.Equal(t, tt.wantBlocker, blocker)
 		})
 	}
+}
+
+func TestTeamPublishRetriesWithoutCollapsingCommitScopes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: large Git backlog")
+	}
+	clone := filepath.Join(t.TempDir(), "team")
+	require.NoError(t, os.MkdirAll(clone, 0o755))
+	setupGitRepo(t, clone)
+	bare := bareRepoPath(clone)
+	for i := range 101 {
+		name := "skill-" + strconv.Itoa(i)
+		commitLocal(t, clone, "agents/skills/"+name+"/SKILL.md", "add team skill: "+name)
+	}
+	pushFromSeparateClone(t, bare, "remote-doc.md", "coworker's doc")
+	upstream := gitCmd(t, bare, "rev-parse", "HEAD")
+
+	require.NoError(t, gitutil.PushWithRetry(t.Context(), clone, gitutil.PushOpts{
+		ValidatePush:          ValidateTeamPublishPush,
+		PreserveCommitHistory: true,
+	}))
+	require.Equal(t, "101", gitCmd(t, bare, "rev-list", "--count", upstream+"..HEAD"))
 }
 
 // commitLocal writes one file and commits it in the clone with subject.
@@ -126,6 +151,27 @@ func TestPullTeamContext_LeavesAForeignUnpushedCommitAlone(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, before, gitCmd(t, bare, "rev-parse", "main"), "the daemon published a commit that was not ox's")
+}
+
+// A normal Team Context sync must drain supported commits stranded by a
+// failed CLI push, including when skill, add-on and observation writes mix.
+func TestPullTeamContext_PushesMixedTeamWrites(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
+	clone := filepath.Join(t.TempDir(), "team")
+	require.NoError(t, os.MkdirAll(clone, 0o755))
+	setupGitRepo(t, clone)
+	bare := bareRepoPath(clone)
+	commitLocal(t, clone, "agents/skills/deploy/SKILL.md", "add team skill: deploy")
+	commitLocal(t, clone, ".sageox/add-ons.lock.json", "add-ons: install post-cutoff 1.0.0")
+	commitLocal(t, clone, "memory/.observations/2026-11-17/observation.jsonl", "observation: agreed on the release checklist")
+
+	s := newPullTestScheduler(t, clone)
+	_, err := s.pullTeamContext(context.Background(), clone)
+	require.NoError(t, err)
+
+	require.Equal(t, gitCmd(t, clone, "rev-parse", "HEAD"), gitCmd(t, bare, "rev-parse", "main"))
 }
 
 // rejectPushes installs a pre-receive hook on the bare remote that refuses every
@@ -295,21 +341,88 @@ func TestValidateTeamPublishPush_RefusesAPublishSubjectOutsideTheSkillsRoot(t *t
 	before := strings.TrimSpace(gitCmd(t, bare, "rev-parse", "HEAD"))
 	err = gitutil.PushWithRetry(ctx, clone, gitutil.PushOpts{ValidatePush: ValidateTeamPublishPush, MaxRetries: 1})
 	require.ErrorIs(t, err, ErrForeignCommitAhead)
-	require.Contains(t, err.Error(), "docs/onboarding.md")
+	require.Contains(t, err.Error(), gitCmd(t, clone, "rev-parse", "HEAD"))
 	require.Equal(t, before, strings.TrimSpace(gitCmd(t, bare, "rev-parse", "HEAD")), "a disguised commit reached the remote")
 }
 
-func TestFirstPathOutsidePublishRoot(t *testing.T) {
-	t.Parallel()
-	for _, tt := range []struct{ name, out, want string }{
-		{name: "none", out: "", want: ""},
-		{name: "all under the root", out: "agents/skills/a/SKILL.md\x00agents/skills/a/notes.md\x00", want: ""},
-		{name: "one outside", out: "agents/skills/a/SKILL.md\x00agents/rules/team.md\x00", want: "agents/rules/team.md"},
-		{name: "prefix look-alike", out: "agents/skillset/x.md\x00", want: "agents/skillset/x.md"},
+// Even when the branch contains a legitimate add-on and observation, each
+// commit must stay within its own publisher's paths.
+func TestPullTeamContext_RefusesCommitOutsideItsPublishScope(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
+	for _, tt := range []struct{ name, path, subject string }{
+		{name: "skill cannot write a rule", path: "agents/rules/team.md", subject: "add team skill: deploy"},
+		{name: "add-on cannot write arbitrary settings", path: ".sageox/sync.manifest", subject: "add-ons: install post-cutoff 1.0.0"},
+		{name: "observation cannot write a team skill", path: "agents/skills/deploy/SKILL.md", subject: "observation: testing"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, firstPathOutsidePublishRoot(tt.out))
+			clone := filepath.Join(t.TempDir(), "team")
+			require.NoError(t, os.MkdirAll(clone, 0o755))
+			setupGitRepo(t, clone)
+			bare := bareRepoPath(clone)
+			before := gitCmd(t, bare, "rev-parse", "main")
+			commitLocal(t, clone, "agents/rules/real-addon.md", "add-ons: install real-addon 1.0.0")
+			commitLocal(t, clone, "memory/.observations/2026-11-17/valid.jsonl", "observation: recorded")
+			commitLocal(t, clone, tt.path, tt.subject)
+
+			offendingCommit := strings.TrimSpace(gitCmd(t, clone, "rev-parse", "HEAD"))
+			_, err := ValidateTeamPublishPush(t.Context(), clone)
+			require.ErrorIs(t, err, ErrForeignCommitAhead)
+			require.ErrorContains(t, err, offendingCommit)
+
+			s := newPullTestScheduler(t, clone)
+			_, err = s.pullTeamContext(t.Context(), clone)
+			require.NoError(t, err)
+			require.Equal(t, before, gitCmd(t, bare, "rev-parse", "main"))
+			require.Equal(t, "3", gitCmd(t, clone, "rev-list", "--count", "@{upstream}..HEAD"))
+		})
+	}
+}
+
+func TestTeamPublishScopeForeignAllowsNoPath(t *testing.T) {
+	require.False(t, foreignCommit.allowsPath("agents/skills/deploy/SKILL.md"))
+	require.False(t, foreignCommit.allowsPath(TeamObservationDir+"/2026-11-19/a.jsonl"))
+}
+
+// An observation commit must carry checkable content: a credential in its
+// message or a commit with no paths stays local.
+func TestValidateTeamPublishPush_RefusesUnverifiableObservationCommits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
+	for _, tt := range []struct {
+		name    string
+		commit  func(t *testing.T, clone string)
+		refused bool
+	}{
+		{name: "credential in the message", refused: true, commit: func(t *testing.T, clone string) {
+			rel := TeamObservationDir + "/2026-11-19/note.jsonl"
+			require.NoError(t, os.MkdirAll(filepath.Join(clone, filepath.Dir(rel)), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(clone, rel), []byte("{}\n"), 0o644))
+			gitCmd(t, clone, "add", rel)
+			gitCmd(t, clone, "commit", "-m", TeamObservationCommitPrefix+"record team memory", "-m", "AKIA"+"QWERTYUIOPASDFGH")
+		}},
+		{name: "empty commit", commit: func(t *testing.T, clone string) {
+			gitCmd(t, clone, "commit", "--allow-empty", "-m", TeamObservationCommitPrefix+"record team memory")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bare := t.TempDir()
+			gitCmd(t, bare, "init", "--bare", "-q")
+			clone := t.TempDir()
+			gitCmd(t, clone, "clone", "-q", bare, ".")
+			commitLocal(t, clone, "README.md", "init")
+			gitCmd(t, clone, "push", "-q", "-u", "origin", "HEAD")
+			tt.commit(t, clone)
+
+			_, err := ValidateTeamPublishPush(context.Background(), clone)
+			require.Error(t, err)
+			_, refused := errors.AsType[*secretguard.RefusedError](err)
+			require.Equal(t, tt.refused, refused, "%v", err)
+			if !tt.refused {
+				require.ErrorIs(t, err, ErrForeignCommitAhead)
+			}
 		})
 	}
 }

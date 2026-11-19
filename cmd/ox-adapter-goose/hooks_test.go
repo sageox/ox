@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/testguard"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
@@ -84,50 +86,76 @@ func TestInstallHooks_NeverEmitsMatcher(t *testing.T) {
 	}
 }
 
-// TestInstallHooks_ProjectScopeBakesInRepoRoot covers the cwd problem: Goose
-// sends working_dir only on TOOL events, so SessionStart gives ox nothing to
-// locate the repo with and it would walk up from an arbitrary cwd.
-func TestInstallHooks_ProjectScopeBakesInRepoRoot(t *testing.T) {
-	root := t.TempDir()
+func TestInstalledGooseHookRunsInRelocatedCheckout(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "clone A")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := handleInstallHooks(projectParams(root)); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-
-	hf := readHooks(t, filepath.Join(root, ".agents", "plugins", "sageox", "hooks", "hooks.json"))
-	cmd := hf.Hooks["SessionStart"][0].Hooks[0].Command
-
-	if !strings.Contains(cmd, "OX_PROJECT_ROOT=") {
-		t.Errorf("project-scope command must pin OX_PROJECT_ROOT, got: %s", cmd)
+	relocated := filepath.Join(base, "clone B's")
+	if err := os.Rename(root, relocated); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(cmd, root) {
-		t.Errorf("command must name the repo root, got: %s", cmd)
+	pluginRoot := filepath.Join(relocated, ".agents", "plugins", "sageox")
+	hf := readHooks(t, filepath.Join(pluginRoot, "hooks", "hooks.json"))
+	command := hf.Hooks["SessionStart"][0].Hooks[0].Command
+	if err := os.WriteFile(filepath.Join(base, "ox"), []byte("#!/bin/sh\nprintf '%s\\n' \"$OX_PROJECT_ROOT\" \"$AGENT_ENV\" \"$*\"\n"), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(cmd, "AGENT_ENV=goose") {
-		t.Errorf("command must set AGENT_ENV=goose, got: %s", cmd)
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("Goose shell unavailable")
 	}
-}
-
-// TestHookCommand_QuotesPathsWithSpaces — Goose runs commands via `sh -c`, so an
-// unquoted repo path containing a space would split into two arguments and the
-// hook would silently target the wrong directory.
-func TestHookCommand_QuotesPathsWithSpaces(t *testing.T) {
-	cmd := hookCommand("SessionStart", "/Users/me/My Repos/ox", "project")
-	if !strings.Contains(cmd, `'/Users/me/My Repos/ox'`) {
-		t.Errorf("path with a space must be quoted, got: %s", cmd)
-	}
-
-	withQuote := hookCommand("SessionStart", `/tmp/it's`, "project")
-	if !strings.Contains(withQuote, `'\''`) {
-		t.Errorf("embedded single quote must be escaped, got: %s", withQuote)
+	for _, override := range []string{"", "/explicit project"} {
+		cmd := exec.CommandContext(t.Context(), sh, "-c", command)
+		cmd.Dir = base // Goose provides PLUGIN_ROOT even when the shell cwd is elsewhere.
+		cmd.Env = testguard.MinimalEnv([]string{"PATH=" + base + string(os.PathListSeparator) + os.Getenv("PATH"), "PLUGIN_ROOT=" + pluginRoot, "OX_PROJECT_ROOT=" + override})
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("execute generated hook: %v: %s", err, out)
+		}
+		wantRoot := relocated
+		if override != "" {
+			wantRoot = override
+		}
+		if want := wantRoot + "\ngoose\nagent hook SessionStart\n"; string(out) != want {
+			t.Errorf("hook output = %q, want %q", out, want)
+		}
 	}
 }
 
 // TestHookCommand_UserScopeOmitsRepoRoot — user scope has no single repo to pin,
 // so it must fall back to the cwd walk like every other adapter.
 func TestHookCommand_UserScopeOmitsRepoRoot(t *testing.T) {
-	cmd := hookCommand("SessionStart", "/repo", scopeUser)
+	cmd := hookCommand("SessionStart", scopeUser)
 	if strings.Contains(cmd, "OX_PROJECT_ROOT") {
 		t.Errorf("user-scope command must not pin a repo root, got: %s", cmd)
+	}
+}
+
+func TestInstallHooks_ReplacesGeneratedAbsoluteCommand(t *testing.T) {
+	root := t.TempDir()
+	if _, err := handleInstallHooks(projectParams(root)); err != nil {
+		t.Fatal(err)
+	}
+	path := hooksPathFor(t, root)
+	hf := readHooks(t, path)
+	rule := &hf.Hooks["SessionStart"][0]
+	rule.Hooks[0].Command = "if command -v ox >/dev/null 2>&1; then OX_PROJECT_ROOT='/original/location' AGENT_ENV=goose ox agent hook SessionStart 2>&1 || true; fi"
+	custom := hookAction{Type: "command", Command: "printf custom"}
+	rule.Hooks = append(rule.Hooks, custom)
+	if err := writeHooksFile(path, hf); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handleInstallHooks(projectParams(root)); err != nil {
+		t.Fatal(err)
+	}
+	got := readHooks(t, path).Hooks["SessionStart"][0].Hooks
+	if len(got) != 2 || got[0].Command != hookCommand("SessionStart", "project") || got[1] != custom {
+		t.Fatalf("expected one repaired SageOx action and the original custom action, got %#v", got)
 	}
 }
 
@@ -502,5 +530,33 @@ func TestInstallHooks_SessionStartGetsLongerTimeout(t *testing.T) {
 	}
 	if got := hf.Hooks["PostToolUse"][0].Hooks[0].Timeout; got != defaultHookTimeout {
 		t.Errorf("PostToolUse timeout = %d, want %d", got, defaultHookTimeout)
+	}
+}
+
+func TestLegacyProjectHookMatchesOnlyGeneratedCommands(t *testing.T) {
+	const pre = "if command -v ox >/dev/null 2>&1; then OX_PROJECT_ROOT="
+	const post = " AGENT_ENV=goose ox agent hook SessionStart 2>&1 || true; fi"
+	tests := []struct {
+		name, root string
+		want       bool
+	}{
+		{"plain path", `'/repo'`, true},
+		{"space", `'/Users/me/My Repos/ox'`, true},
+		{"escaped quote", `'/tmp/it'\''s'`, true},
+		{"customized body", `'/old'; printf audit; OX_PROJECT_ROOT='/old'`, false},
+		{"unquoted tail", `'/old' extra`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := legacyProjectHook(pre+tt.root+post, "SessionStart"); got != tt.want {
+				t.Errorf("legacyProjectHook(%s) = %v, want %v", tt.root, got, tt.want)
+			}
+		})
+	}
+	if legacyProjectHook(pre+`'/repo'`+post, "Stop") {
+		t.Error("matched a command for a different event")
+	}
+	if legacyProjectHook("if command -v ox >/dev/null 2>&1; then OX_PROJECT_ROOT='", "SessionStart") {
+		t.Error("matched a truncated command")
 	}
 }

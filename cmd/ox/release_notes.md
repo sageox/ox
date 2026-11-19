@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Add-ons and team memory reach the team** — `ox addons` changes and `ox memory put` push to Team Context and report when a change is still local. The daemon retries on the next sync.
 - **`ox session list` no longer reports an uncloned Ledger as available** — the Ledger folder can exist before its first clone lands, and `ledger_available` read it as ready. An AI coworker runner then recorded work that could never upload. It now reports `false` until the Ledger is a checkout.
 - **Each Codex desktop chat gets its own AI coworker** — every chat in the ChatGPT desktop app runs under one Codex process, so a new chat reused the first chat's AI coworker and the two sessions were recorded as one, losing a chat's history. A chat with its own session ID now always gets its own AI coworker.
 - **`ox doctor` no longer rewrites or stages the README by default** — Init writes the same README that doctor expects. README repairs and staging missing SageOx files require an explicit fix; doctor no longer reports unstaged changes as staged.
