@@ -73,7 +73,11 @@ link_into_bin() {
 
 matches_sha256() {
   local actual
-  actual="$(shasum -a 256 < "$1")" || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum < "$1")" || return 1
+  else
+    actual="$(shasum -a 256 < "$1")" || return 1
+  fi
   [[ "${actual%% *}" == "$2" ]]
 }
 
