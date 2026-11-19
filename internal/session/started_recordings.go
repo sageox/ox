@@ -33,7 +33,8 @@ import (
 // The entry also binds the recording's transcript (startedRecording.Source).
 // A marker's session_file is as forgeable as the rest of it, and a Claude Code
 // transcript under the home directory passes every source check, so the
-// catch-up reads only the transcript a local hook found for the recording.
+// catch-up reads only the transcript Claude Code itself named on a hook's
+// stdin for the recording.
 
 const startedRecordingsFileName = "started-recordings.json"
 
@@ -48,9 +49,9 @@ type startedRecording struct {
 	SessionID string    `json:"session_id"`
 	AgentID   string    `json:"agent_id"`
 	StartedAt time.Time `json:"started_at"`
-	// Source is the transcript a local hook found for the recording, resolved
-	// (canonicalPath); empty until its first hook discovers one. Only a hook
-	// sets it (bindStartedRecordingSource), never the daemon.
+	// Source is the transcript Claude Code named on a hook's stdin for the
+	// recording, resolved (canonicalPath); empty until its first hook. Only a
+	// hook sets it (bindHookTranscript), never the daemon or a marker field.
 	Source string `json:"source,omitempty"`
 }
 
@@ -142,13 +143,11 @@ func registerStartedRecording(state *RecordingState) error {
 }
 
 // bindStartedRecordingSource records source as the transcript of the
-// recording sessionID in sessionPath. Only a hook calls it, for a transcript
-// it discovered (CaptureHookEntries, HookCaptureOptions.BindSource). A first
-// discovery binds once: the marker's session_file is not cleared by ox, so a
-// second one means someone emptied it. replace is a hook's rediscovery of a
-// transcript that went away or shrank, which legitimately moves the binding.
-// A recording not in the registry is left out: it is not caught up anyway.
-func bindStartedRecordingSource(sessionPath, sessionID, source string, replace bool) error {
+// recording sessionID in sessionPath. Only a hook calls it, for the transcript
+// Claude Code named on the hook's stdin (bindHookTranscript); that is
+// authoritative, so a different one replaces the binding. A recording not in
+// the registry is left out: it is not caught up anyway.
+func bindStartedRecordingSource(sessionPath, sessionID, source string) error {
 	if sessionPath == "" || sessionID == "" || source == "" {
 		return nil
 	}
@@ -159,7 +158,7 @@ func bindStartedRecordingSource(sessionPath, sessionID, source string, replace b
 			if e.Dir != dir || e.SessionID != sessionID {
 				continue
 			}
-			if e.Source == resolved || (e.Source != "" && !replace) {
+			if e.Source == resolved {
 				return list, false
 			}
 			e.Source = resolved
@@ -167,6 +166,22 @@ func bindStartedRecordingSource(sessionPath, sessionID, source string, replace b
 		}
 		return list, false
 	})
+}
+
+// lookupStartedRecording returns the registry entry of the recording
+// sessionID in sessionPath, read without the lock (see loadStartedRecordings).
+func lookupStartedRecording(sessionPath, sessionID string) (startedRecording, bool, error) {
+	list, err := readStartedRecordings()
+	if err != nil {
+		return startedRecording{}, false, err
+	}
+	dir := canonicalPath(sessionPath)
+	for _, e := range list {
+		if e.Dir == dir && e.SessionID == sessionID {
+			return e, true, nil
+		}
+	}
+	return startedRecording{}, false, nil
 }
 
 // forgetStartedRecording removes the recording sessionID in sessionPath from

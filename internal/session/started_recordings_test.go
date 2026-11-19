@@ -202,12 +202,10 @@ func TestUnreadableStartedRecordingRegistryFailsClosed(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// Failure prevented: the catch-up reads only the transcript a local hook found
-// for the recording. A first discovery binds it once, so a marker emptied and
-// rediscovered against another session cannot move it; only a hook's
-// rediscovery of a replaced transcript does. A recording ox did not start is
-// never given a binding.
-func TestTranscriptBindingIsSetOnceAndMovedOnlyByRediscovery(t *testing.T) {
+// The catch-up reads only the transcript a hook's stdin bound. Stdin is Claude
+// Code's own word, so a different transcript replaces the binding; a
+// recording ox did not start is never given one.
+func TestTranscriptBindingFollowsTheHookOnlyForRecordingsStartedHere(t *testing.T) {
 	projectRoot, live := startForProvenance(t, "OxBind")
 	first, second := filepath.Join(t.TempDir(), "first.jsonl"), filepath.Join(t.TempDir(), "second.jsonl")
 	for _, p := range []string{first, second} {
@@ -219,18 +217,14 @@ func TestTranscriptBindingIsSetOnceAndMovedOnlyByRediscovery(t *testing.T) {
 		require.NoError(t, err)
 		return markerIn(t, markers, live.SessionPath).Source
 	}
-	require.Empty(t, source(), "a transcript is bound before any hook found one")
+	require.Empty(t, source(), "a transcript is bound before any hook named one")
 
-	require.NoError(t, bindStartedRecordingSource(live.SessionPath, live.SessionID, first, false))
+	require.NoError(t, bindStartedRecordingSource(live.SessionPath, live.SessionID, first))
 	assert.Equal(t, canonicalPath(first), source())
+	require.NoError(t, bindStartedRecordingSource(live.SessionPath, live.SessionID, second))
+	assert.Equal(t, canonicalPath(second), source(), "a hook naming another transcript did not move the binding")
 
-	require.NoError(t, bindStartedRecordingSource(live.SessionPath, live.SessionID, second, false))
-	assert.Equal(t, canonicalPath(first), source(), "a second discovery moved the binding")
-
-	require.NoError(t, bindStartedRecordingSource(live.SessionPath, live.SessionID, second, true))
-	assert.Equal(t, canonicalPath(second), source(), "a rediscovery did not move the binding")
-
-	require.NoError(t, bindStartedRecordingSource(live.SessionPath, "ses_not_started_here", first, true))
+	require.NoError(t, bindStartedRecordingSource(live.SessionPath, "ses_not_started_here", first))
 	list, err := readStartedRecordings()
 	require.NoError(t, err)
 	require.Len(t, list, 1, "a recording ox did not start was given an entry")

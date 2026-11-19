@@ -81,12 +81,12 @@ func TestHookCatchUpNeverReadsATranscriptTheMarkerWasRewrittenToName(t *testing.
 	assert.Contains(t, logs.String(), "not the one a local hook found")
 }
 
-// Claude Code can replace a recording's transcript (it shrank or went away),
-// and the hook that rediscovers the replacement moves the binding: the
-// catch-up follows the hook. The catch-up itself never rediscovers: a capture
-// bounded to the transcript it stat'd leaves a replaced one, the marker and
-// the binding to the next hook.
-func TestHookCatchUpFollowsOnlyAHooksRediscovery(t *testing.T) {
+// Claude Code can replace a recording's transcript (it shrank or went away).
+// The next hook's stdin names the replacement and moves the binding, and the
+// catch-up follows it. The catch-up itself never rediscovers: a capture
+// bounded to the transcript it stat'd leaves a replaced one, and the marker,
+// to the next hook.
+func TestHookCatchUpFollowsTheHookToAReplacedTranscript(t *testing.T) {
 	f := newCatchUpFixture(t)
 	m := f.watcher(slog.Default())
 	settledSize := f.recording().SourceOffset
@@ -105,8 +105,8 @@ func TestHookCatchUpFollowsOnlyAHooksRediscovery(t *testing.T) {
 	assert.Equal(t, session.HookStatusUnsettled, capture.Status)
 	assert.Equal(t, f.source, f.recording().SessionFile, "the catch-up's capture rediscovered a transcript")
 
-	// the hook rediscovers the replacement and binds it
-	_, err = f.capture(session.HookCaptureOptions{BindSource: true})
+	// the next hook rediscovers the replacement, and its stdin names it
+	_, err = f.capture(hookStdin(replacement, "session"))
 	require.NoError(t, err)
 	require.Equal(t, replacement, f.recording().SessionFile)
 	f.adapter.found = ""

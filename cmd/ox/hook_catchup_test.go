@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
@@ -30,15 +32,6 @@ type tailingClaudeAdapter struct {
 	// onRead, if set, runs as each read starts: inside the raw.jsonl lock of
 	// the capture (hook or catch-up) that is reading.
 	onRead func()
-	// found is the transcript FindSessionFile discovers, if any.
-	found string
-}
-
-func (a *tailingClaudeAdapter) FindSessionFile(adapters.SessionLookup) (string, error) {
-	if a.found == "" {
-		return "", adapters.ErrSessionNotFound
-	}
-	return a.found, nil
 }
 
 func (a *tailingClaudeAdapter) ReadFromOffset(path string, offset int64) ([]adapters.RawEntry, int64, error) {
@@ -59,8 +52,7 @@ func newCatchUpFixture(t *testing.T) *liveFixture {
 	t.Helper()
 	f := newLiveFixture(t, liveOpts{streaming: true})
 	adapters.Unregister("claude-code") // the fixture's adapter; its cleanup unregisters this one
-	adapter := &tailingClaudeAdapter{}
-	adapters.Register(adapter)
+	adapters.Register(&tailingClaudeAdapter{})
 	// the daemon reads only a transcript inside Claude Code's own session
 	// root, so this one sits where Claude Code writes it
 	contained := filepath.Join(os.Getenv("HOME"), ".claude", "projects", "catch-up", "session.jsonl")
@@ -70,19 +62,25 @@ func newCatchUpFixture(t *testing.T) *liveFixture {
 	require.NoError(t, os.WriteFile(contained, transcript, 0o644))
 	f.sourceFile = contained
 	require.NoError(t, session.UpdateRecordingStateForAgent(f.projectRoot, f.agentID, func(s *session.RecordingState) {
-		s.SessionFile = "" // as prime leaves a Claude Code recording
+		s.SessionFile = contained
 		s.WatchMode = "hook"
 		s.WorkspacePath = f.projectRoot
 	}))
-	// the recording's first hook discovers the transcript, which binds it as
-	// the one transcript the daemon's catch-up reads for this recording
-	adapter.found = contained
-	require.NoError(t, handleAfterTool(&HookContext{Phase: phaseAfterTool, ProjectRoot: f.projectRoot, Marker: &SessionMarker{AgentID: f.agentID}}))
-	adapter.found = ""
-	state, err := session.LoadRecordingStateForAgent(f.projectRoot, f.agentID)
-	require.NoError(t, err)
-	require.Equal(t, contained, state.SessionFile, "the first hook did not discover the transcript")
+	// a hook's stdin names the transcript, which binds it as the one the
+	// daemon's catch-up reads for this recording
+	f.hookWithStdin(contained)
 	return f
+}
+
+// hookWithStdin runs the PostToolUse hook with the stdin Claude Code sends,
+// which names the session's transcript.
+func (f *liveFixture) hookWithStdin(transcript string) {
+	f.t.Helper()
+	stdin := fmt.Sprintf(`{"session_id":"session","hook_event_name":"PostToolUse","transcript_path":%q}`, transcript)
+	require.NoError(f.t, handleAfterTool(&HookContext{
+		Phase: phaseAfterTool, ProjectRoot: f.projectRoot, Marker: &SessionMarker{AgentID: f.agentID},
+		Input: agentx.ReadHookInput(strings.NewReader(stdin)),
+	}))
 }
 
 // record is one native transcript line, stamped after the recording started.
