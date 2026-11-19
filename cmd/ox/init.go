@@ -465,6 +465,12 @@ func runInit() error {
 		}
 		selectedTeamID = resolvedID
 		selectedTeamName = resolvedName
+		// --team is honored as given; a shallow clone is only warned.
+		// To stderr even under --quiet: agents and CI run `ox init -q --team`
+		// in --depth clones, the exact population this warns.
+		if warning := shallowTeamFlagWarning(gitRoot); warning != "" {
+			cli.PrintWarningTo(os.Stderr, warning)
+		}
 		if len(resolveTeamMembership(memberships, initTeamFlag)) == 0 {
 			unresolvedTeamCandidates = usableTeams(memberships)
 		}
@@ -498,7 +504,14 @@ func runInit() error {
 			if existingCfg, cfgErr := config.LoadProjectConfig(gitRoot); cfgErr == nil && existingCfg != nil {
 				currentTeamID = existingCfg.TeamID
 			}
-			selectedTeamID, selectedTeamName, err = selectTeam(reposResp.TeamMembershipsFromRepos(), currentTeamID)
+			// A fresh clone of an open-source project the caller is a member
+			// of: offer that team, so this clone joins the repo the project
+			// already registered instead of minting a new one elsewhere.
+			var suggestedTeamID string
+			if currentTeamID == "" {
+				suggestedTeamID = suggestOpenSourceTeam(context.Background(), gitRoot, reposResp.TeamMembershipsFromRepos())
+			}
+			selectedTeamID, selectedTeamName, err = selectTeamWithSuggestion(reposResp.TeamMembershipsFromRepos(), currentTeamID, suggestedTeamID)
 			if err != nil {
 				return fmt.Errorf("team selection canceled: %w", err)
 			}
@@ -828,6 +841,9 @@ func runInit() error {
 		// user-scope Claude Code plugin, not a repo file: nothing to stage or roll back
 		ensureUsagePane(initQuiet)
 	}
+	// Machine-local Conductor settings, not a repo file: nothing to stage or
+	// roll back.
+	ensureConductorRunScript(gitRoot, initQuiet)
 
 	// Snapshot every scoped ignore file that ALREADY EXISTS, before writing any of
 	// them. trackModifiedFile snapshots eagerly, at call time — so calling it after
@@ -2808,6 +2824,17 @@ func teamSortKey(t api.TeamMembership) string {
 // Returns the selected team ID, team name (may be empty), or error if
 // canceled or if no interactive input was available to choose from.
 func selectTeam(teams []api.TeamMembership, currentTeamID string) (string, string, error) {
+	return selectTeamWithSuggestion(teams, currentTeamID, "")
+}
+
+// selectTeamWithSuggestion is selectTeam with one more default: when the repo
+// has no current team, suggestedTeamID (the open-source project's team, see
+// suggestOpenSourceTeam) is pre-selected and marked. The current team always
+// wins; the person still confirms or picks another row.
+func selectTeamWithSuggestion(teams []api.TeamMembership, currentTeamID, suggestedTeamID string) (string, string, error) {
+	if currentTeamID != "" {
+		suggestedTeamID = ""
+	}
 	if len(teams) == 0 {
 		return "", "", fmt.Errorf("no teams available")
 	}
@@ -2855,6 +2882,10 @@ func selectTeam(teams []api.TeamMembership, currentTeamID string) (string, strin
 			label += "  (current)"
 			defaultIdx = i
 		}
+		if suggestedTeamID != "" && team.ID == suggestedTeamID {
+			label += "  (this project's team)"
+			defaultIdx = i
+		}
 		options[i] = label
 	}
 	options[len(teams)] = "+ Create new team"
@@ -2865,6 +2896,9 @@ func selectTeam(teams []api.TeamMembership, currentTeamID string) (string, strin
 	selected, err := cli.SelectOneRequired("Team:", options, defaultIdx)
 	if err != nil {
 		if errors.Is(err, cli.ErrNoInteractiveInput) {
+			if suggestedTeamID != "" {
+				return "", "", fmt.Errorf("cannot choose a team without interactive input — pass --team %s to link this clone to the project's team, or --team <id> for another (run 'ox team list' to see available teams)", suggestedTeamID)
+			}
 			return "", "", fmt.Errorf("cannot choose a team without interactive input — pass --team <id> (run 'ox team list' to see available teams)")
 		}
 		return "", "", err
@@ -2978,4 +3012,88 @@ func confirmContinueWithoutTeam(currentEP string) error {
 		return fmt.Errorf("team selection canceled")
 	}
 	return nil
+}
+
+// openSourceSuggestPerRemote bounds each remote's lookup (origin, then
+// upstream) on its own deadline, so a slow origin can't spend upstream's
+// budget. Worst case 2.4s before the picker; a miss (most repos) usually
+// answers in one round trip. A var so tests can shorten it.
+var openSourceSuggestPerRemote = 1200 * time.Millisecond
+
+// suggestOpenSourceTeam returns the team of the open-source project this
+// clone belongs to, when SageOx says the caller is a member of it and it is
+// one of teams. "" otherwise: not on SageOx, not a member, offline, an older
+// server. Asks about origin, then upstream (a contributor's fork clone has
+// the project on upstream).
+//
+// A shallow clone gets no suggestion: its salted remote hashes are built on
+// the shallow boundary instead of the real first commit, so the server
+// can't match the project's repo and picking the team would mint a duplicate
+// repo inside it. It gets a hint to unshallow instead.
+func suggestOpenSourceTeam(ctx context.Context, gitRoot string, teams []api.TeamMembership) string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var team *api.PublicPrimeTeam
+	for _, lookup := range []func(string) (string, string, bool){repotools.GitHubOrigin, repotools.GitHubUpstream} {
+		owner, name, ok := lookup(gitRoot)
+		if !ok {
+			continue
+		}
+		remoteCtx, cancel := context.WithTimeout(ctx, openSourceSuggestPerRemote)
+		bundle, err := fetchPublicPrimeForRepo(remoteCtx, gitRoot, owner, name)
+		cancel()
+		if err != nil {
+			// One remote failing (a 503, a timeout on a slow origin) says
+			// nothing about the other: a fork clone's project is on upstream.
+			// No owner/name: this also runs for private repos, and the lookup
+			// itself only ever sends a hash of the name.
+			slog.Debug("open-source team suggestion unavailable", "error", err)
+			continue
+		}
+		// Accept a remote's team only if it is one of mine; otherwise keep
+		// looking, so an origin team I'm not on can't hide upstream's.
+		if candidate := bundle.MemberTeam(); candidate != nil &&
+			slices.ContainsFunc(teams, func(t api.TeamMembership) bool { return t.ID == candidate.ID }) {
+			team = candidate
+			break
+		}
+	}
+	if team == nil {
+		return ""
+	}
+	if repotools.IsShallowClone(gitRoot) {
+		cli.PrintWarning(fmt.Sprintf("You're on this project's team (%s), but this is a shallow clone, so ox can't match it to the project's repo. Run %s first, then re-run %s.",
+			team.ID, cli.StyleCommand.Render("git fetch --unshallow"), cli.StyleCommand.Render("ox init")))
+		return ""
+	}
+	return team.ID
+}
+
+// cloneHasRepoID reports whether this clone already carries a repo id (a
+// .sageox config or repo marker). Init re-sends it, which only avoids a
+// duplicate if the server has seen it: a skipped registration saves one too.
+func cloneHasRepoID(gitRoot string) bool {
+	if cfg, err := config.LoadProjectConfig(gitRoot); err == nil && cfg != nil && cfg.RepoID != "" {
+		return true
+	}
+	markers, _ := detectExistingRepoMarkers(filepath.Join(gitRoot, ".sageox"))
+	return len(markers) > 0
+}
+
+// shallowTeamFlagWarning is the explicit --team path's warning for a shallow
+// clone; "" for a full clone. --team is honored, so it says what this run
+// does: a shallow clone's hashes are salted with the shallow boundary, so a
+// repo the team already registered can't be matched and this run registers
+// the clone as a separate repo.
+func shallowTeamFlagWarning(gitRoot string) string {
+	if !repotools.IsShallowClone(gitRoot) {
+		return ""
+	}
+	// A repo id here may or may not be registered (a skipped registration
+	// still saves the local one), so it softens the claim, never silences it.
+	if cloneHasRepoID(gitRoot) {
+		return "This is a shallow clone, so ox can't match it to a repo the team already registered. If this clone's repo id isn't registered yet, this run registers it as a separate repo. To be sure of joining the team's existing repo, run `git fetch --unshallow` before `ox init`."
+	}
+	return "This is a shallow clone, so ox can't match it to a repo the team already registered: this run registers it as a separate repo. To join the team's existing repo instead, run `git fetch --unshallow` before `ox init`."
 }

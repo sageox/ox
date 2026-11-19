@@ -379,6 +379,17 @@ func init() {
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugConductorStatusLine,
+		Name:        conductorRunScriptCheck,
+		Category:    "Integration",
+		FixLevel:    FixLevelSuggested,
+		Description: "Adds an \"ox\" run script to .conductor/settings.local.toml so ox's status line shows in Conductor's Run pane",
+		Run: func(fix bool) checkResult {
+			return checkConductorRunScript(fix)
+		},
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugStaleLocalHooks,
 		Name:        "Stale local hooks",
 		Category:    "Integration",

@@ -18,9 +18,11 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -403,8 +405,9 @@ func cachePublishBlocker(dir string) error {
 // identical copy of. A file counts as published when the manifest entry for it
 // has the same hash and size (LFS), or the Ledger file has the same bytes
 // (git-stored, like summary.json); a copy the retry broke off partway matches
-// neither. Dotfiles are local state, never content. A directory, an unreadable
-// file, and every file when the manifest cannot be read count as unpublished.
+// neither. Dotfiles and the live stream's files are local state, never
+// content. A directory, an unreadable file, and every file when the manifest
+// cannot be read count as unpublished.
 func filesNotPublished(cacheDir, ledgerSessionDir string) []string {
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
@@ -414,7 +417,7 @@ func filesNotPublished(cacheDir, ledgerSessionDir string) []string {
 	var missing []string
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, ".") {
+		if strings.HasPrefix(name, ".") || livesession.IsLocalFile(name) {
 			continue
 		}
 		if e.IsDir() || metaErr != nil || !sameAsPublished(filepath.Join(cacheDir, name), filepath.Join(ledgerSessionDir, name), meta.Files[name]) {
@@ -502,8 +505,8 @@ func publishCachedSession(projectRoot, ledgerPath, sessionName, cacheDir string)
 		ledgerSessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
 		if missing := filesNotPublished(cacheDir, ledgerSessionDir); len(missing) > 0 {
 			slog.Warn("published session cache copy kept: some files did not reach the ledger", "session", sessionName, "files", missing)
-		} else if err := os.RemoveAll(cacheDir); err != nil {
-			slog.Warn("published session cache copy not removed", "session", sessionName, "dir", cacheDir, "error", err)
+		} else {
+			agentwork.PruneSessionCache(slog.Default(), cacheDir) // an unfinished live stream keeps its files
 		}
 	}
 	for _, dir := range session.HeldSessionDirs(ledgerPath) {

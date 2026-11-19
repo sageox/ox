@@ -350,6 +350,7 @@ var cliRules = []cliRule{
 	{words: []string{"plan", "view"}, label: "pulled plan", kind: KindRetrieval, ref: true},
 	{words: []string{"plan", "show"}, label: "pulled plan", kind: KindRetrieval, ref: true},
 	{words: []string{"plan", "get"}, label: "pulled plan", kind: KindRetrieval, ref: true},
+	{words: []string{"plan", "list"}, label: "listed plans", kind: KindRetrieval},
 	{words: []string{"plan", "enrich"}, label: "enriched plan", kind: KindWrite},
 
 	{words: []string{"query"}, label: "searched team memory", kind: KindRetrieval, query: true},
@@ -361,6 +362,8 @@ var cliRules = []cliRule{
 	{words: []string{"code", "refs"}, label: "searched code index", kind: KindRetrieval},
 	{words: []string{"code", "log"}, label: "searched code index", kind: KindRetrieval},
 	{words: []string{"code", "insights"}, label: "checked code hotspots", kind: KindRetrieval},
+	{words: []string{"code", "prs"}, label: "checked pull requests", kind: KindRetrieval},
+	{words: []string{"code", "activity"}, label: "checked repo activity", kind: KindRetrieval},
 
 	{words: []string{"session", "list"}, label: "read sessions", kind: KindRetrieval},
 	{words: []string{"session", "view"}, label: "read sessions", kind: KindRetrieval},
