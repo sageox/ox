@@ -1,6 +1,7 @@
 package agentwork
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -32,46 +33,47 @@ func TestHookCaptureRefusesARediscoveredTranscriptOutsideTheRoots(t *testing.T) 
 	assert.Equal(t, f.source, f.recording().SessionFile, "the refused transcript was persisted")
 }
 
-// A batch committed but not read back is not an OK capture: the cursor moved,
-// the live stream is told its size, and the batch is never spooled.
-func TestHookCaptureReportsABatchItCouldNotReadBack(t *testing.T) {
+// A batch the live stream could not take is not an OK capture: the cursor
+// moved, so nothing will send those bytes again, and the stream has declared
+// them lost. The capture still hands the stream exactly what it committed,
+// even when raw.jsonl cannot be read back: nothing re-reads it.
+func TestHookCaptureReportsABatchTheStreamCouldNotTake(t *testing.T) {
 	skipAsRoot(t)
 	f := newCatchUpFixture(t)
 	require.NoError(t, session.UpdateRecordingStateForAgent(f.projectRoot, f.agentID, func(s *session.RecordingState) {
 		s.CommandRedactionVersion = 1
 	}))
 	f.say("assistant", "answer the stream lost")
-	before, err := os.Stat(f.rawPath())
+	before, err := os.ReadFile(f.rawPath())
 	require.NoError(t, err)
 	require.NoError(t, os.Chmod(f.rawPath(), 0o200))
 	t.Cleanup(func() { _ = os.Chmod(f.rawPath(), 0o600) })
-	var spooled int
-	var lost []int64
+	var handed []session.AppendedBatch
 	var statuses []string
 
 	capture, err := f.capture(session.HookCaptureOptions{
-		Spool:      func(*session.RecordingState, session.AppendedBatch) { spooled++ },
-		SpoolLost:  func(_ *session.RecordingState, n int64, _ error) { lost = append(lost, n) },
+		Spool: func(_ *session.RecordingState, b session.AppendedBatch) error {
+			handed = append(handed, b)
+			return errors.New("the stream could not take it")
+		},
 		MarkStatus: func(_ *session.RecordingState, status string) { statuses = append(statuses, status) },
 	})
 
 	require.NoError(t, err)
 	require.NoError(t, os.Chmod(f.rawPath(), 0o600))
-	after, err := os.Stat(f.rawPath())
+	after, err := os.ReadFile(f.rawPath())
 	require.NoError(t, err)
 	assert.Equal(t, session.HookStatusSpoolLost, capture.Status)
 	assert.False(t, capture.Failed(), "the batch is committed: the cursor moved")
 	assert.Greater(t, capture.ToOffset, capture.FromOffset)
-	assert.Zero(t, spooled)
-	assert.Equal(t, []int64{after.Size() - before.Size()}, lost)
+	require.Len(t, handed, 1)
+	assert.Equal(t, string(after[len(before):]), string(handed[0].Bytes), "exactly the committed bytes")
 	assert.Equal(t, []string{session.HookStatusSpoolLost}, statuses)
 }
 
-// A batch committed while paused is excluded from the live stream on purpose
-// (Spool skips paused batches). Failing to read it back loses nothing from the
-// stream, so declaring it would write a false spool_write_failed gap.
-func TestHookCaptureDeclaresNoLossForAPausedBatchItCouldNotReadBack(t *testing.T) {
-	skipAsRoot(t)
+// A batch committed while paused is handed on flagged, so the live-spool step
+// leaves it out of the stream on purpose instead of declaring it lost.
+func TestHookCaptureFlagsAPausedBatch(t *testing.T) {
 	f := newCatchUpFixture(t)
 	require.NoError(t, session.UpdateRecordingStateForAgent(f.projectRoot, f.agentID, func(s *session.RecordingState) {
 		s.CommandRedactionVersion = 1
@@ -79,17 +81,18 @@ func TestHookCaptureDeclaresNoLossForAPausedBatchItCouldNotReadBack(t *testing.T
 		s.SuspendedAt = &paused
 	}))
 	f.say("assistant", "said while paused")
-	require.NoError(t, os.Chmod(f.rawPath(), 0o200))
-	t.Cleanup(func() { _ = os.Chmod(f.rawPath(), 0o600) })
-	var lost []int64
+	var handed []session.AppendedBatch
 
 	capture, err := f.capture(session.HookCaptureOptions{
-		Spool:     func(*session.RecordingState, session.AppendedBatch) {},
-		SpoolLost: func(_ *session.RecordingState, n int64, _ error) { lost = append(lost, n) },
+		Spool: func(_ *session.RecordingState, b session.AppendedBatch) error {
+			handed = append(handed, b)
+			return nil
+		},
 	})
 
 	require.NoError(t, err)
 	assert.Greater(t, capture.ToOffset, capture.FromOffset, "precondition: the paused batch was committed")
-	assert.Empty(t, lost, "a paused batch is not part of the stream, so it is not a stream loss")
-	assert.NotEqual(t, session.HookStatusSpoolLost, capture.Status)
+	require.Len(t, handed, 1)
+	assert.True(t, handed[0].Suspended, "a paused batch must be flagged so it is never streamed")
+	assert.Equal(t, session.HookStatusOK, capture.Status)
 }

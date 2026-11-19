@@ -1502,8 +1502,8 @@ func (d *Daemon) initComponents() time.Duration {
 	// starts before its Ledger clone and must still stream.
 	if cacheBase := paths.LedgerSessionCacheBase(config.GetRepoID(d.config.ProjectRoot), projectEndpoint); cacheBase != "" {
 		d.liveSessions = NewLiveSessions(d.logger, filepath.Join(cacheBase, "sessions"), endpoint.NormalizeEndpoint(projectEndpoint))
-		d.sessionWatcher.SetLiveSpooler(func(sessionDir string, batch session.AppendedBatch) {
-			d.liveSessions.Capture(d.ctx, sessionDir, batch)
+		d.sessionWatcher.SetLiveDrainer(func(sessionDir string) {
+			d.liveSessions.Spooled(d.ctx, sessionDir)
 		})
 	}
 

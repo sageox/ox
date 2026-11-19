@@ -14,7 +14,6 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/daemon/agentwork"
-	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/pkg/adapterprotocol"
@@ -112,16 +111,13 @@ func (f *liveFixture) settle() {
 	require.NoError(f.t, os.Chtimes(f.sourceFile, old, old))
 }
 
-// catchUpManager is the daemon's session watcher, spooling committed batches
-// into the live spool as the daemon's live sessions do. The fixture's hooks
+// catchUpManager is the daemon's session watcher, streaming committed batches
+// into the live spool as the daemon does. The fixture's hooks
 // have run, and every hook heartbeats with its agent ID: the daemon arms the
 // catch-up for that agent's recording (NoteHook).
 func (f *liveFixture) catchUpManager() *agentwork.SessionWatcherManager {
 	m := agentwork.NewSessionWatcherManager(slog.Default())
-	m.SetLiveSpooler(func(dir string, b session.AppendedBatch) {
-		_, err := livesession.Spool(context.Background(), dir, b.Bytes, livesession.SpoolOptions{Paused: b.Suspended})
-		assert.NoError(f.t, err)
-	})
+	m.SetLiveDrainer(func(string) {}) // nothing drains here: the test reads the spool
 	m.NoteHook(context.Background(), f.projectRoot, f.agentID)
 	return m
 }

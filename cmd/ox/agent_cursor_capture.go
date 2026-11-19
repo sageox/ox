@@ -341,8 +341,9 @@ func requestCursorCapture(projectRoot, agentID, home string) error {
 		return err
 	})
 	if err == nil && capture != nil {
-		// Cursor's committed bytes reach the live stream like any capture's (C8)
-		liveSessionSpool(projectRoot, state, capture.Appended)
+		// Cursor's committed bytes reach the live stream like any capture's
+		// (C8); the step declares and logs a batch the stream could not take
+		_ = liveSessionSpool(projectRoot, state, capture.Appended)
 	}
 	return err
 }

@@ -267,11 +267,23 @@ func TestLiveConcurrentDrainRequestsForOneSessionAreCoalesced(t *testing.T) {
 	}
 }
 
+// The daemon's capture paths spool through the shared step, then ask for a
+// drain (the wiring daemon.go sets up); a paused batch never reaches the server.
 func TestLiveCaptureFromTheTailWatcherSpoolsAndDrainsButNeverPausedBatches(t *testing.T) {
 	e := newLiveEnv(t)
-	e.live.Capture(t.Context(), e.dir, session.AppendedBatch{Bytes: []byte(lineN(1))})
-	e.live.Capture(t.Context(), e.dir, session.AppendedBatch{Bytes: []byte(`{"type":"msg","content":"PAUSED-SECRET"}` + "\n"), Suspended: true})
-	e.live.Capture(t.Context(), e.dir, session.AppendedBatch{Bytes: []byte(lineN(3))})
+	rec := &session.RecordingState{SessionID: e.params.SessionID, SessionPath: e.dir}
+	capture := func(b session.AppendedBatch) {
+		spooled, err := livesession.SpoolCommitted(t.Context(), "", rec, b)
+		if err != nil {
+			t.Fatalf("spool committed batch: %v", err)
+		}
+		if spooled {
+			e.live.Spooled(t.Context(), e.dir)
+		}
+	}
+	capture(session.AppendedBatch{Bytes: []byte(lineN(1))})
+	capture(session.AppendedBatch{Bytes: []byte(`{"type":"msg","content":"PAUSED-SECRET"}` + "\n"), Suspended: true})
+	capture(session.AppendedBatch{Bytes: []byte(lineN(3))})
 	e.live.Wait()
 
 	got := e.stored()

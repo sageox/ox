@@ -436,51 +436,32 @@ func TestHookCaptureAppendsNothingWhenTheHeaderFails(t *testing.T) {
 	assert.Equal(t, cursor, f.recording().SourceOffset)
 }
 
-// A batch committed to raw.jsonl that cannot be read back never reaches the
-// live stream, and the cursor is past it, so nothing would ever send it. It is
-// declared: the stream carries a gap of its size in its place.
+// A batch the catch-up committed to raw.jsonl that the live stream cannot take
+// never reaches it, and the cursor is past it, so nothing would ever send it.
+// It is declared: the stream carries a gap of its size in its place.
 func TestHookCatchUpDeclaresABatchItCouldNotSpool(t *testing.T) {
 	skipAsRoot(t)
 	f := newCatchUpFixture(t)
 	m := f.watcher(slog.Default())
-	var spooled atomic.Int64
-	m.SetLiveSpooler(func(string, session.AppendedBatch) { spooled.Add(1) })
+	drains := wireLiveStreaming(m)
 	_, err := livesession.Prepare(context.Background(), livesession.Config{Endpoint: "https://live.test.sageox.ai", DataDir: t.TempDir()},
 		f.state.SessionPath, livesession.OpenParams{SessionID: f.state.SessionID, SessionName: filepath.Base(f.state.SessionPath)})
 	require.NoError(t, err)
-	// past the first batch, the append never reads raw.jsonl to restore redaction state
-	require.NoError(t, session.UpdateRecordingStateForAgent(f.projectRoot, f.agentID, func(s *session.RecordingState) {
-		s.CommandRedactionVersion = 1
-	}))
 	f.say("assistant", "answer the stream lost")
 	f.settle()
 	before, err := os.Stat(f.rawPath())
 	require.NoError(t, err)
-	require.NoError(t, os.Chmod(f.rawPath(), 0o200)) // appendable, but the batch cannot be read back
-	t.Cleanup(func() { _ = os.Chmod(f.rawPath(), 0o600) })
+	restore := lockStreamState(t, f.state.SessionPath)
 
 	assert.Equal(t, 1, m.CatchUpHookRecordings(context.Background(), f.projectRoot))
-	require.NoError(t, os.Chmod(f.rawPath(), 0o600))
+	restore()
 	assert.Contains(t, f.raw(), "answer the stream lost", "the batch must stay committed to raw.jsonl")
-	assert.Zero(t, spooled.Load())
+	assert.NotContains(t, spoolOf(t, f.state.SessionPath), "answer the stream lost")
+	assert.Empty(t, drains.all())
 	after, err := os.Stat(f.rawPath())
 	require.NoError(t, err)
 
-	res, err := livesession.Spool(context.Background(), f.state.SessionPath, []byte(`{"type":"msg"}`+"\n"), livesession.SpoolOptions{})
-	require.NoError(t, err)
-	require.Equal(t, 1, res.Gaps, "the next write declared no gap for the lost batch")
-	spool, err := os.ReadFile(filepath.Join(f.state.SessionPath, "spool.jsonl"))
-	require.NoError(t, err)
-	gapLine, _, _ := bytes.Cut(spool, []byte("\n"))
-	dec := json.NewDecoder(bytes.NewReader(gapLine))
-	dec.DisallowUnknownFields()
-	var gap struct {
-		Type   string `json:"type"`
-		Reason string `json:"reason"`
-		Bytes  int64  `json:"bytes"`
-	}
-	require.NoError(t, dec.Decode(&gap))
-	assert.Equal(t, "gap", gap.Type)
-	assert.Equal(t, "spool_write_failed", gap.Reason)
-	assert.Equal(t, after.Size()-before.Size(), gap.Bytes, "the gap must cover exactly the committed batch")
+	g := nextLiveGap(t, f.state.SessionPath)
+	assert.Equal(t, "spool_write_failed", g.Reason)
+	assert.Equal(t, after.Size()-before.Size(), g.Bytes, "the gap must cover exactly the committed batch")
 }

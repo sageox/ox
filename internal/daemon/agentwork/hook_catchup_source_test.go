@@ -68,8 +68,7 @@ func TestHookCatchUpNeverReadsATranscriptTheMarkerWasRewrittenToName(t *testing.
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	m := f.watcher(logger)
-	var spooled spoolLog
-	m.SetLiveSpooler(spooled.spool)
+	spooled := watchSpools(t, m)
 	for range 2 {
 		assert.Equal(t, 0, m.CatchUpHookRecordings(context.Background(), f.projectRoot))
 	}
