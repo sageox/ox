@@ -16,7 +16,7 @@ export type Palette = {
   text: string
   /** Open dotted line, ring, stub, the node that sent. */
   quiet: string
-  /** The word "failed". */
+  /** The word "failed", and a failed lane's stub and nodes. */
   danger: string
 }
 
@@ -76,6 +76,11 @@ export const TOKENS = {
   maxDots: 12,
 
   drawMs: 600,
+  /** A running lane: marchDots dots or rings cross it, evenly spaced, each in marchMs. */
+  marchMs: 1920,
+  marchDots: 3,
+  /** How long a running lane keeps moving: a call whose end never came must not move forever. */
+  marchMaxMs: 10 * 60_000,
   fadeMs: 400,
   dotMs: 1400,
   dotStaggerMs: 90,

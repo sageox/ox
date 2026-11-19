@@ -10,7 +10,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { ANIM_MS } from '../hooks/scene'
 import { TRACK } from '../hooks/textlane'
-import { arrived, drawn, finishOf, laneWidth, LANE_DEFAULT_PX, LANE_MAX_PX, LANE_MIN_PX, newBinder, settleDelay, startOf, submitted } from '../hooks/flowwire'
+import { finishOf, laneWidth, LANE_DEFAULT_PX, LANE_MAX_PX, LANE_MIN_PX, settleDelay, startOf } from '../hooks/flowwire'
 
 const PLUGIN = 'ox-cli-brief-pane'
 const SURFACES = ['desktop', 'vscode'] as const
@@ -26,14 +26,6 @@ const PRIME = [
   '<context-budget hint="who controls each token" sageox="1200" team="3617" total="4817">',
   '</context-budget>',
   '</ox-prime>',
-].join('\n')
-
-const MURMURS = [
-  '<system-reminder>',
-  '<murmur-context>Signals from coworkers delivered by SageOx.</murmur-context>',
-  '<entry id="m1" importance="normal" topic="wip" source="murmur" from="Avery">editing scene.ts</entry>',
-  '<entry id="m2" importance="critical" topic="release" source="murmur" from="Sam">cutting 0.12</entry>',
-  '</system-reminder>',
 ].join('\n')
 
 const SEARCH_OUT = JSON.stringify({ results: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] }) + ' '.repeat(4000)
@@ -310,84 +302,27 @@ describe('/ox-session-report flow', () => {
   })
 })
 
-describe('the strip under a prompt that carried team context in', () => {
-  for (const surface of SURFACES) {
-    test(`${surface}: SessionStart prime arriving before the first prompt row draws lands under that row`, async ($, on) => {
+
+// Failure prevented: a lane appearing under a prompt when no ox call was
+// made. Hooks send context along with a prompt (the session-start prime,
+// ledger recall), and the engine raises all of it again after a reload; none
+// of that is something the person asked ox to do just then.
+describe('prompts draw no lane', () => {
+  for (const surface of ['desktop', 'terminal'] as const) {
+    test(`${surface}: hook context arriving with a prompt draws nothing under it`, async ($, on) => {
       mockEngine(on)
       await $.prompt.submit({ text: 'what changed?', wait: false } as never)
-      await $.prompt.attachment({ type: 'hook_additional_context', text: PRIME, origin: { kind: 'hook', event: 'SessionStart' } } as never)
-      const ui = await mountPrompt($, surface, 'msg1')
-      const strip = await ui.find({ type: 'Svg' })
-      expect(strip).toBeDefined()
-      expect(String(strip?.props.alt)).toMatch(/^with this prompt: team context/)
-      expect(animates(strip?.props.source as string)).toBe(true)
-      await ui.unmount()
-    })
-
-    test(`${surface}: a UserPromptSubmit murmur block arriving after the row drew lands under it`, async ($, on) => {
-      const s = mockEngine(on)
-      await $.prompt.submit({ text: 'what changed?', wait: false } as never)
-      const ui = await mountPrompt($, surface, 'msg2')
+      const out = await $.prompt.attachment({ type: 'hook_additional_context', text: PRIME, origin: { kind: 'hook', event: 'SessionStart' } } as never)
+      expect(out.text).toBe(PRIME) // the model still reads it, untouched
+      const ui = await mountPrompt($, surface, 'p1')
+      await $.prompt.attachment({ type: 'hook_additional_context', text: `[ox-recall] matches:\n- (local) a\n- (local) b`, origin: { kind: 'hook', event: 'UserPromptSubmit' } } as never)
+      await ui.redraw()
       expect(await ui.find({ type: 'Svg' })).toBeUndefined()
-      await $.prompt.attachment({ type: 'hook_additional_context', text: MURMURS, origin: { kind: 'hook', event: 'UserPromptSubmit' } } as never)
-      const strip = await ui.find({ type: 'Svg' })
-      expect(String(strip?.props.alt)).toBe('with this prompt: 2 murmurs')
-      await s.clock.advance(ANIM_MS + 100)
-      expect(animates(await svgOf(ui))).toBe(false)
+      expect(await ui.find({ type: 'Raster', key: 'ox-flow-track' })).toBeUndefined()
+      expect(await ui.find({ type: 'Text', text: 'SAGEOX ' })).toBeUndefined()
       await ui.unmount()
     })
   }
-
-  test('each prompt keeps its own context; an older row and a non-composer row claim nothing', async ($, on) => {
-    mockEngine(on)
-    await $.prompt.submit({ text: 'one', wait: false } as never)
-    await $.prompt.attachment({ type: 'hook_additional_context', text: PRIME, origin: { kind: 'hook', event: 'SessionStart' } } as never)
-    const one = await mountPrompt($, 'desktop', 'p1')
-    expect(String((await one.find({ type: 'Svg' }))?.props.alt)).toMatch(/team context/)
-
-    await $.prompt.submit({ text: 'two', wait: false } as never)
-    await $.prompt.attachment({ type: 'hook_additional_context', text: MURMURS, origin: { kind: 'hook', event: 'UserPromptSubmit' } } as never)
-    // The old row redraws first: it keeps only its own context.
-    await one.redraw()
-    expect(String((await one.find({ type: 'Svg' }))?.props.alt)).not.toMatch(/murmur/)
-    const note = await mountPrompt($, 'desktop', 'n1', 'task-notification')
-    expect(await note.find({ type: 'Svg' })).toBeUndefined()
-    const two = await mountPrompt($, 'desktop', 'p2')
-    expect(String((await two.find({ type: 'Svg' }))?.props.alt)).toBe('with this prompt: 2 murmurs')
-    for (const ui of [one, note, two]) {
-      await ui.unmount()
-    }
-  })
-
-  test('engine and plugin attachments and local nudges draw nothing; the terminal draws the strip as text', async ($, on) => {
-    mockEngine(on)
-    await $.prompt.submit({ text: 'x', wait: false } as never)
-    await $.prompt.attachment({ type: 'todo_reminder', text: PRIME, origin: { kind: 'engine' } } as never)
-    await $.prompt.attachment({ type: 'hook_additional_context', text: '[ox] run ox agent prime', origin: { kind: 'hook', event: 'UserPromptSubmit' } } as never)
-    const ui = await mountPrompt($, 'desktop', 'q1')
-    expect(await ui.find({ type: 'Svg' })).toBeUndefined()
-    await ui.unmount()
-
-    await $.prompt.submit({ text: 'y', wait: false } as never)
-    await $.prompt.attachment({ type: 'hook_additional_context', text: MURMURS, origin: { kind: 'hook', event: 'UserPromptSubmit' } } as never)
-    const term = await $.ui.mount({
-      plugin: PLUGIN,
-      surface: 'terminal',
-      component: 'UserMessage',
-      requestId: 'q2',
-      props: { text: 'y', origin: { kind: 'composer' }, isExpanded: true },
-    } as never)
-    expect(await term.find({ type: 'Svg' })).toBeUndefined()
-    expect(await term.find({ type: 'Raster', key: 'ox-flow-track' })).toBeDefined()
-    expect(await term.find({ type: 'Text', text: '2 murmurs' })).toBeDefined()
-    await term.unmount()
-  })
-
-  test('the attachment text the model reads passes through untouched', async ($, on) => {
-    mockEngine(on)
-    const out = await $.prompt.attachment({ type: 'hook_additional_context', text: MURMURS, origin: { kind: 'hook', event: 'UserPromptSubmit' } } as never)
-    expect(out.text).toBe(MURMURS)
-  })
 })
 
 describe('tool groups', () => {
@@ -527,44 +462,5 @@ describe('flowwire helpers', () => {
     expect(settleDelay([ev(0), ev(1000)], 1500)).toBe(ANIM_MS - 500 + 50)
   })
 
-  test('the binder: both arrival orders, redraws and repeats', () => {
-    const b = newBinder<string>()
-    submitted(b)
-    // Before the row: pending, claimed by the first composer row drawn.
-    expect(arrived(b, 'A', 'a')).toBeNull()
-    expect(drawn(b, 'other', false)).toEqual([])
-    expect(drawn(b, 'm1', true)).toEqual(['a'])
-    // After the row: straight to it; a repeat of the same text is taken once.
-    expect(arrived(b, 'B', 'b')).toBe('m1')
-    expect(arrived(b, 'B', 'b')).toBeNull()
-    // A redraw claims nothing; the next submit opens a new window.
-    expect(drawn(b, 'm1', true)).toEqual([])
-    submitted(b)
-    expect(arrived(b, 'C', 'c')).toBeNull()
-    expect(drawn(b, 'm1', true)).toEqual([])
-    expect(drawn(b, 'm2', true)).toEqual(['c'])
-    // The same text on a later prompt is that prompt's own.
-    expect(arrived(b, 'B', 'b')).toBe('m2')
-  })
 
-  test('an outbound call counts what it sent, never the acknowledgement', () => {
-    const body = 'x'.repeat(4000)
-    const bash = startOf('Bash', { command: `ox murmur --topic=wip "${body}"` })!
-    expect(finishOf({ text: 'ok' }, bash).tokens).toBeGreaterThan(1000)
-    const mcp = startOf(MCP_PUBLISH, { body })!
-    expect(finishOf({ text: 'ok' }, mcp).tokens).toBeGreaterThan(1000)
-    // An inbound call still counts its result.
-    const query = startOf('Bash', { command: 'ox query "x"' })!
-    expect(query.sent).toBeUndefined()
-    expect(finishOf({ text: 'abcdefgh' }, query).tokens).toBe(2)
-    expect(finishOf({ text: 'ok', isError: true }, bash)).toEqual({ tokens: 0, failed: true })
-    // A payload the call names but does not hold has no size, never the acknowledgement's.
-    const save = startOf('Bash', { command: 'ox plan save --file plan.html' })!
-    expect(save.sent).toBeUndefined()
-    expect(finishOf({ text: 'saved plan pln_1 with a long acknowledgement' }, save)).toEqual({ tokens: 0, unsized: true })
-    // A murmur body the shell expands is not in the command line either.
-    for (const command of ['ox murmur --topic=wip "$MESSAGE"', 'ox murmur "`cat note`"', 'ox murmur --topic=wip < note.txt']) {
-      expect(startOf('Bash', { command })!.sent).toBeUndefined()
-    }
-  })
 })

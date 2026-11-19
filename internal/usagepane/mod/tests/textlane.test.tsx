@@ -2,13 +2,14 @@
 // coworker sees no lane, a lane whose direction or amount is wrong, a row that
 // wraps, or a track the engine refuses (a wide or missing glyph).
 //
-// The golden rows are the grammar in design/sageox-flow/SPEC.md, "Terminal lane".
+// The golden rows here are the same strings internal/flowlane asserts in Go:
+// the plugin and `ox statusline --watch` must draw one grammar.
 
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { FlowEvent } from '../types'
-import { ANIM_MS, eventModel, promptModel } from '../hooks/scene'
-import { encodeCells, fitCells, lanePlain, MAX_TEXT_DOTS, NARROW_COLUMNS, RGB_DEFAULT, RGB_QUIET, RGB_STREAM, textLane, TRACK, trackCells, trackString } from '../hooks/textlane'
+import { ANIM_MS, eventModel } from '../hooks/scene'
+import { encodeCells, fitCells, lanePlain, MARCH_MAX_MS, MAX_TEXT_DOTS, NARROW_COLUMNS, RGB_BAD, RGB_DEFAULT, RGB_QUIET, RGB_STREAM, textLane, TRACK, trackCells, trackString } from '../hooks/textlane'
 
 const T0 = 1_760_000_000_000
 
@@ -31,9 +32,10 @@ function ev(over: Partial<FlowEvent> = {}): FlowEvent {
 const settledAt = T0 + 800 + ANIM_MS + 1
 const row = (e: FlowEvent, now: number, columns = 120, still = false) => lanePlain(textLane(eventModel(e), now, { columns, still }))
 
-describe('golden rows', () => {
+describe('golden rows (shared with internal/flowlane)', () => {
   const cases: Array<[string, FlowEvent, number, string]> = [
-    ['running', ev({ endedAt: undefined }), T0 + 100, 'SAGEOX ●┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄○ SESSION  searching team discussions'],
+    // 2.4s into a running call: dots every six cells, on their way in.
+    ['running', ev({ endedAt: undefined }), T0 + 2401, 'SAGEOX ●┄┄•┄┄┄┄┄•┄┄┄┄┄•┄○ SESSION  searching team discussions'],
     ['settled, in, 1k+', ev(), settledAt, 'SAGEOX ●━━━━━━━━━━━━━━━━● SESSION  searched team memory · ~1.2k from 5 discussions · 0.8s'],
     ['settled, in, under 1k', ev({ tokens: 420, items: undefined }), settledAt, 'SAGEOX ●────────────────● SESSION  searched team memory · ~420 · 0.8s'],
     [
@@ -90,13 +92,39 @@ describe('in flight', () => {
     expect(most).toBe(MAX_TEXT_DOTS)
   })
 
-  test('moving only while in flight; still, running and settled rows need no ticker', () => {
+  test('a running lane marches toward the destination: a pull left to right, a push right to left', () => {
+    const track = (e: FlowEvent, t: number, still = false) => trackString(trackCells(eventModel(e), T0 + t, still).cells)
+    const pull = ev({ endedAt: undefined })
+    expect(track(pull, 0)).toBe('●•┄┄┄┄┄•┄┄┄┄┄•┄┄┄○')
+    expect(track(pull, 120)).toBe('●┄•┄┄┄┄┄•┄┄┄┄┄•┄┄○')
+    expect(track(pull, 240)).toBe('●┄┄•┄┄┄┄┄•┄┄┄┄┄•┄○')
+    const push = ev({ direction: 'out', endedAt: undefined })
+    expect(track(push, 0)).toBe('○┄┄┄◦┄┄┄┄┄◦┄┄┄┄┄◦●')
+    expect(track(push, 120)).toBe('○┄┄◦┄┄┄┄┄◦┄┄┄┄┄◦┄●')
+    expect(track(push, 120)).not.toContain('•')
+    // Asked for no motion, or a start too old to believe: the plain dotted line, no ticker.
+    expect(track(pull, 240, true)).toBe('●┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄○')
+    expect(track(pull, MARCH_MAX_MS)).toBe('●┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄○')
+    expect(textLane(eventModel(pull), T0 + MARCH_MAX_MS).moving).toBe(false)
+    expect(textLane(eventModel(pull), T0 + 5, { still: true }).moving).toBe(false)
+  })
+
+  test('a failed lane is drawn in the error colour, ends included; empty and interrupted stay quiet', () => {
+    const tones = (e: FlowEvent) => trackCells(eventModel(e), settledAt).cells.filter((c) => c.ch !== ' ').map((c) => c.tone)
+    expect(tones(ev({ failed: true, tokens: 0 }))).toEqual(['bad', 'bad', 'bad', 'bad'])
+    expect(tones(ev({ tokens: 0, items: undefined }))).toEqual(['quiet', 'quiet', 'quiet', 'quiet'])
+    expect(tones(ev({ interrupted: true, tokens: 0 }))).toEqual(['quiet', 'quiet', 'quiet', 'quiet'])
+    const bytes = Uint8Array.from(atob(encodeCells([{ ch: '●', tone: 'bad' }])), (c) => c.charCodeAt(0))
+    expect(new DataView(bytes.buffer).getUint32(4, true)).toBe(RGB_BAD)
+  })
+
+  test('moving while running or in flight; still, failed and settled rows need no ticker', () => {
     const e = ev()
     const end = e.endedAt as number
     expect(textLane(eventModel(e), end + 100).moving).toBe(true)
     expect(textLane(eventModel(e), end + 100, { still: true }).moving).toBe(false)
     expect(textLane(eventModel(e), end + ANIM_MS).moving).toBe(false)
-    expect(textLane(eventModel(ev({ endedAt: undefined })), T0 + 5).moving).toBe(false)
+    expect(textLane(eventModel(ev({ endedAt: undefined })), T0 + 5).moving).toBe(true)
     expect(textLane(eventModel(ev({ failed: true })), end + 100).moving).toBe(false)
     // Still is the settled frame.
     expect(row(e, end + 100, 120, true)).toBe(row(e, settledAt))
@@ -163,16 +191,5 @@ describe('fitting the row', () => {
     expect(text(34)).toBe('~1.2k from 5 discussions · 0.8s')
     expect(text(10)).toMatch(/…$/)
     expect(text(0)).toBe('')
-  })
-})
-
-describe('the prompt strip', () => {
-  test('several attachments sum into one inbound lane', () => {
-    const evs = [
-      ev({ id: 'att:p#b0#0', label: 'team context', tokens: 15_000, items: undefined, endedAt: T0 }),
-      ev({ id: 'att:p#b0#1', lane: 'murmurs', tokens: 300, items: 3, itemsNoun: 'murmurs', endedAt: T0 }),
-    ]
-    const lane = textLane(promptModel(evs, T0 + ANIM_MS + 1), T0 + ANIM_MS + 1, { columns: 120 })
-    expect(lanePlain(lane)).toBe('SAGEOX ●━━━━━━━━━━━━━━━━● SESSION  team context ~15k · 3 murmurs')
   })
 })
