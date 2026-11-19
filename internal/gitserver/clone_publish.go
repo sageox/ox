@@ -73,6 +73,143 @@ func MoveCloneIntoPlace(tempPath, target string) error {
 	return nil
 }
 
+// MoveAsideKeepingCache moves a broken clone target to backup so a fresh clone
+// can land, but leaves <target>/.sageox/cache where it is. That cache is
+// local state no clone brings back, including session recordings that hooks
+// and the daemon keep writing to by path: renaming the whole target orphaned
+// them in a .bak (live streaming went silent, and doctor deletes old .bak
+// folders). Afterwards target is a cache-only skeleton the next clone adopts
+// (AdoptCacheOnlyTarget). It returns the cache path it kept, or "" when there
+// was no real cache directory and target was renamed whole.
+//
+// Every step is a rename and nothing is deleted, so a failure part-way leaves
+// each entry either in target or in backup; the caller retries next cycle.
+func MoveAsideKeepingCache(target, backup string) (kept string, err error) {
+	sageoxDir := filepath.Join(target, ".sageox")
+	cache := filepath.Join(sageoxDir, "cache")
+	// a symlinked target (a relocation) is renamed as the link it is, never
+	// emptied through it
+	if !isRealDir(target) || !isRealDir(sageoxDir) || !isRealDir(cache) {
+		return "", os.Rename(target, backup)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return "", err
+	}
+	// Mkdir, not MkdirAll: never merge into a backup that already exists
+	if err := os.Mkdir(backup, info.Mode().Perm()); err != nil {
+		return "", err
+	}
+	if err := moveEntriesExcept(target, backup, ".sageox"); err != nil {
+		return "", err
+	}
+	if err := moveEntriesExcept(sageoxDir, filepath.Join(backup, ".sageox"), "cache"); err != nil {
+		return "", err
+	}
+	_ = os.Remove(backup) // only succeeds when nothing but the cache was there
+	return cache, nil
+}
+
+// moveEntriesExcept renames every entry of src except keep into dst, creating
+// dst only when there is something to move.
+func moveEntriesExcept(src, dst, keep string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Name() == keep {
+			continue
+		}
+		if err := os.MkdirAll(dst, 0755); err != nil {
+			return err
+		}
+		if err := os.Rename(filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isRealDir(path string) bool {
+	fi, err := os.Lstat(path)
+	return err == nil && fi.IsDir()
+}
+
+// CarryCache moves <from>/.sageox/cache into <to>/.sageox/cache by rename,
+// merging with whatever <to> already holds. A re-clone keeps local state
+// (session recordings among it) this way instead of by copy: a copy taken
+// before a minutes-long clone misses every line written after it. A file both
+// trees hold stays in from and is reported; nothing is deleted. carried is
+// true when from had a cache and all of it moved.
+func CarryCache(from, to string) (carried bool, err error) {
+	src := filepath.Join(from, ".sageox", "cache")
+	if !isRealDir(src) {
+		return false, nil
+	}
+	dstSageox := filepath.Join(to, ".sageox")
+	if fi, lerr := os.Lstat(dstSageox); lerr == nil && !fi.IsDir() {
+		return false, fmt.Errorf("carry cache: %s is not a directory", dstSageox)
+	}
+	if err := os.MkdirAll(dstSageox, 0755); err != nil {
+		return false, err
+	}
+	if _, err := mergeByRename(src, filepath.Join(dstSageox, "cache")); err != nil {
+		return false, fmt.Errorf("carry cache from %s: %w", from, err)
+	}
+	return true, nil
+}
+
+// rename is one move mergeByRename made, kept so it can be undone.
+type rename struct{ from, to string }
+
+// mergeByRename moves src's contents into dst. An entry dst lacks is renamed
+// across whole; a directory both hold is merged recursively; a file both hold
+// stops the merge with an error and stays in src. Nothing is ever deleted
+// except src directories the merge emptied. It returns the moves made, in
+// order, for undoRenames.
+func mergeByRename(src, dst string) ([]rename, error) {
+	var moved []rename
+	if _, err := os.Lstat(dst); errors.Is(err, os.ErrNotExist) {
+		if err := os.Rename(src, dst); err != nil {
+			return nil, err
+		}
+		return []rename{{from: src, to: dst}}, nil
+	}
+	if !isRealDir(dst) || !isRealDir(src) {
+		return nil, fmt.Errorf("%w: both %s and %s exist", ErrPathExists, src, dst)
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		sub, err := mergeByRename(filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name()))
+		moved = append(moved, sub...)
+		if err != nil {
+			return moved, err
+		}
+	}
+	if err := os.Remove(src); err != nil {
+		return moved, err
+	}
+	return append(moved, rename{from: src, to: ""}), nil
+}
+
+// undoRenames reverses mergeByRename's moves, newest first, recreating the
+// source directories the merge removed.
+func undoRenames(moved []rename) {
+	for i := len(moved) - 1; i >= 0; i-- {
+		m := moved[i]
+		if m.to == "" {
+			_ = os.MkdirAll(m.from, 0755)
+			continue
+		}
+		_ = os.MkdirAll(filepath.Dir(m.from), 0755)
+		_ = os.Rename(m.to, m.from)
+	}
+}
+
 // IsCacheOnlyDir reports whether dir is a local-only skeleton: nothing except
 // .sageox/cache (optionally empty) plus, at most, empty directories (an empty
 // sessions/ folder is what a recording leaves before the first clone). All
@@ -146,6 +283,11 @@ func removeEmptyDirs(dir string) error {
 // A target with any other content, or a cache that is not a real directory,
 // is left alone and the rename fails loudly as before.
 //
+// The cache is never deleted, even when the clone ships a .sageox/cache of its
+// own: it holds session recordings (raw.jsonl, the live spool and stream
+// state), not only derived indexes. Its entries are merged in by rename; a
+// file both sides hold refuses the adoption and everything goes back.
+//
 // The returned restore func (never nil) moves an adopted cache back to target;
 // call it if the rename fails, because the temp clone is then deleted with the
 // cache inside it.
@@ -165,28 +307,15 @@ func AdoptCacheOnlyTarget(tempPath, target string) (restore func(), err error) {
 		if fi, lerr := os.Lstat(tempSageox); lerr == nil && !fi.IsDir() {
 			return restore, fmt.Errorf("clone's .sageox is not a directory")
 		}
+		if err := os.MkdirAll(tempSageox, 0755); err != nil {
+			return restore, err
+		}
 		src := filepath.Join(sageoxDir, "cache")
-		dst := filepath.Join(tempSageox, "cache")
-		if _, lerr := os.Lstat(dst); lerr == nil {
-			// the clone already ships a cache dir; the old one is derived data
-			if err := os.RemoveAll(src); err != nil {
-				return restore, err
-			}
-		} else {
-			if err := os.MkdirAll(tempSageox, 0755); err != nil {
-				return restore, err
-			}
-			if err := os.Rename(src, dst); err != nil {
-				return restore, err
-			}
-			restore = func() {
-				if _, lerr := os.Lstat(src); lerr == nil {
-					return
-				}
-				if os.MkdirAll(sageoxDir, 0755) == nil {
-					_ = os.Rename(dst, src)
-				}
-			}
+		moved, err := mergeByRename(src, filepath.Join(tempSageox, "cache"))
+		restore = func() { undoRenames(moved) }
+		if err != nil {
+			restore()
+			return func() {}, fmt.Errorf("carry the local cache into the clone: %w", err)
 		}
 	}
 	// remove only empty directories; never recurse into unexpected content

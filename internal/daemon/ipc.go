@@ -115,6 +115,7 @@ const (
 	MsgTypeSessionWatchStop  = "session_watch_stop"  // one-way, stop tailing a session
 	MsgTypeSettingsGet       = "settings_get"        // get cached CLI feature flag settings
 	MsgTypeSessionUploaded   = "session_uploaded"    // one-way, session pushed to ledger
+	MsgTypeLiveSessionDrain  = "live_session_drain"  // one-way, drain a session's live spool to the server
 )
 
 // Protocol Design Decision: NDJSON (Newline-Delimited JSON)
@@ -446,6 +447,13 @@ type SessionWatchStartPayload struct {
 	AdapterName string `json:"adapter_name"` // "codex", "claude-code", etc.
 }
 
+// LiveSessionDrainPayload asks the daemon to open and drain one session's live
+// spool (ADR-247). SessionPath must be a direct child of the daemon's own
+// sessions cache; anything else is ignored.
+type LiveSessionDrainPayload struct {
+	SessionPath string `json:"session_path"`
+}
+
 // SessionWatchStopPayload signals the daemon to stop tailing a session.
 type SessionWatchStopPayload struct {
 	SessionName string `json:"session_name"`
@@ -773,6 +781,7 @@ type DaemonService interface {
 	SessionFinalize(payload SessionFinalizeIPCPayload)
 	SessionWatchStart(payload SessionWatchStartPayload)
 	SessionWatchStop(payload SessionWatchStopPayload)
+	LiveSessionDrain(payload LiveSessionDrainPayload)
 
 	// fire-and-forget operations
 	Activity()
@@ -804,6 +813,7 @@ type CallbackService struct {
 	onSessionFinalize   func(payload SessionFinalizeIPCPayload)
 	onSessionWatchStart func(payload SessionWatchStartPayload)
 	onSessionWatchStop  func(payload SessionWatchStopPayload)
+	onLiveSessionDrain  func(payload LiveSessionDrainPayload)
 	onPublishMurmur     func(payload MurmurPayload)
 	onPauseMurmuring    func(agentID string)
 	onResumeMurmuring   func(agentID string)
@@ -1035,6 +1045,15 @@ func (c *CallbackService) SessionWatchStart(payload SessionWatchStartPayload) {
 func (c *CallbackService) SessionWatchStop(payload SessionWatchStopPayload) {
 	c.mu.Lock()
 	fn := c.onSessionWatchStop
+	c.mu.Unlock()
+	if fn != nil {
+		fn(payload)
+	}
+}
+
+func (c *CallbackService) LiveSessionDrain(payload LiveSessionDrainPayload) {
+	c.mu.Lock()
+	fn := c.onLiveSessionDrain
 	c.mu.Unlock()
 	if fn != nil {
 		fn(payload)
@@ -1337,6 +1356,7 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeMurmurResume, handleMurmurResume)
 	router.Register(MsgTypeSessionWatchStart, handleSessionWatchStart)
 	router.Register(MsgTypeSessionWatchStop, handleSessionWatchStop)
+	router.Register(MsgTypeLiveSessionDrain, handleLiveSessionDrain)
 	router.Register(MsgTypeSettingsGet, handleSettingsGet)
 	router.Register(MsgTypeSessionUploaded, handleSessionUploaded)
 
@@ -1440,6 +1460,15 @@ func (s *Server) SetSessionWatchStopHandler(fn func(payload SessionWatchStopPayl
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
 	svc.onSessionWatchStop = fn
+}
+
+// SetLiveSessionDrainHandler sets the handler for live session drain messages.
+// Fire-and-forget: no response is sent.
+func (s *Server) SetLiveSessionDrainHandler(fn func(payload LiveSessionDrainPayload)) {
+	svc := s.mustCallbackService("SetLiveSessionDrainHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onLiveSessionDrain = fn
 }
 
 // SetMurmurHandler sets the handler for murmur write+commit messages.
@@ -2591,6 +2620,19 @@ func (c *Client) SessionWatchStop(payload SessionWatchStopPayload) error {
 	}
 	return c.SendOneWay(Message{
 		Type:    MsgTypeSessionWatchStop,
+		Payload: payloadBytes,
+	})
+}
+
+// LiveSessionDrain sends a fire-and-forget request to drain a session's live
+// spool. Hooks use it right after spooling; it never waits for the daemon.
+func (c *Client) LiveSessionDrain(payload LiveSessionDrainPayload) error {
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal live_session_drain payload: %w", err)
+	}
+	return c.SendOneWay(Message{
+		Type:    MsgTypeLiveSessionDrain,
 		Payload: payloadBytes,
 	})
 }

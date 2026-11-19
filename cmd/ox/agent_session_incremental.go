@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/identity"
+	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/claudesource"
@@ -110,6 +111,12 @@ func writeRawHeaderWithAttribution(projectRoot string, state *session.RecordingS
 		return fmt.Errorf("sync raw.jsonl header: %w", err)
 	}
 
+	// real-time streaming: spool exactly the header bytes just written. Local
+	// only and best-effort; it can never fail the start.
+	if liveHeader, readErr := os.ReadFile(rawPath); readErr == nil {
+		liveSessionBegin(projectRoot, state, liveHeader)
+	}
+
 	return nil
 }
 
@@ -135,7 +142,10 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		if err != nil {
 			return nil, err
 		}
-		latest, err := session.FinalizeCursorCapture(context.Background(), projectRoot, state.SessionPath, home, reader)
+		latest, finalBatch, err := session.FinalizeCursorCapture(context.Background(), projectRoot, state.SessionPath, home, reader)
+		// the final drain's bytes are committed even when finalization must wait
+		// for Cursor's export, and no later drain reads them again (C8)
+		liveSessionSpool(projectRoot, state, finalBatch)
 		if err != nil {
 			return nil, err
 		}
@@ -231,6 +241,7 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 				if closeErr != nil {
 					return nil, closeErr
 				}
+				liveSessionSpoolWriter(projectRoot, state, writer)
 				state.SourceOffset = newOffset
 				state.EntryCount += len(entries)
 
@@ -350,6 +361,12 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	}
 	result.Summary = publishableSummary(localSummary)
 
+	// real-time streaming: the final drain above is spooled, so finish the live
+	// stream now, before the v1 upload below may prune this cache dir. Bounded by
+	// livesession.CloseBudget; a held (manual) session is deleted from the server
+	// instead, since nothing about it may leave the machine (C1).
+	liveFin := liveSessionFinish(projectRoot, state, result.Summary, livesession.CloseBudget)
+
 	ledgerPath, ledgerErr := resolveLedgerPath()
 	if ledgerErr == nil {
 		result.LedgerSessionDir = filepath.Join(ledgerPath, "sessions", sessionName)
@@ -357,14 +374,22 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 
 	// A held session gets its hold before anything the daemon reacts to, and
 	// no summary prompt: push-summary publishes (GH #1093). If the hold cannot
-	// be recorded, the stop fails and the recording state is kept.
+	// be recorded, the stop fails and the recording state is kept. A session
+	// deleted on SageOx while it streamed (the close above may be what learned
+	// it) is held the same way, for its own reason.
 	sessionCacheDir := filepath.Dir(result.RawPath)
+	deletedOnServer := liveDeletedOnServer(state.SessionPath)
 	held := stopHoldsSession(projectRoot, state)
-	if held {
+	switch {
+	case deletedOnServer:
+		if err := holdDeletedOnServer(result, state.SessionPath, "session_stop"); err != nil {
+			return nil, err
+		}
+	case held:
 		if err := holdStoppedSession(result, state, sessionCacheDir, "session_stop"); err != nil {
 			return nil, err
 		}
-	} else {
+	default:
 		result.SummaryPrompt = session.BuildSummaryPrompt(sessionEntries, result.RawPath, result.LedgerSessionDir)
 		_ = session.WriteNeedsSummaryMarker(sessionCacheDir, result.RawPath, result.LedgerSessionDir)
 	}
@@ -395,10 +420,16 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	}
 
 	// ledger upload
-	if held {
-		slog.Info("session held on this machine, skipping upload", "session", sessionName)
+	if deletedOnServer {
+		slog.Info("session deleted on SageOx while streaming, skipping upload", "session", sessionName)
 		result.LedgerSessionDir = ""
-		result.UploadWarning = heldSessionWarning(sessionName)
+		result.UploadWarning = deletedOnServerWarning
+		return result, nil
+	}
+	if held {
+		slog.Info("session held on this machine, skipping upload", "session", sessionName, "live_copy_removed", liveFin.Removed)
+		result.LedgerSessionDir = ""
+		result.UploadWarning = heldLiveWarning(heldSessionWarning(sessionName), liveFin)
 		return result, nil
 	}
 
@@ -413,6 +444,10 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 			return uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
 		}, time.Sleep)
 		result.UploadMs = time.Since(uploadStart).Milliseconds()
+		if errors.Is(uploadErr, errSessionDeletedOnServer) {
+			// the stream heard of a delete after the checks above (C3)
+			return holdRefusedAsDeleted(result, state.SessionPath, sessionCacheDir)
+		}
 		if uploadErr != nil {
 			if errors.Is(uploadErr, api.ErrReadOnly) {
 				fmt.Fprintln(os.Stderr, "\nUpload skipped — you have read-only access to this public repo.")

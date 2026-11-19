@@ -988,6 +988,7 @@ func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expected
 		recordHookStatus("append-failed")
 		return nil // non-fatal
 	}
+	liveSessionSpoolWriter(ctx.ProjectRoot, state, writer)
 
 	now := time.Now().UTC()
 	_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {

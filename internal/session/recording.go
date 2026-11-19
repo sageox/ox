@@ -1225,6 +1225,12 @@ func CleanupOrphanedStubsInDir(cacheSessionsDir string) GhostCleanupResult {
 		if _, statErr := os.Stat(filepath.Join(sessionPath, "meta.json")); statErr == nil || IsHeld(sessionPath) {
 			continue
 		}
+		// a live stream still owed an open, a drain or a close keeps its folder:
+		// the prune after publishing leaves only those files, and the daemon's
+		// live tick finds the stream nowhere else
+		if liveStreamUnfinished(sessionPath) {
+			continue
+		}
 
 		switch ClassifyRawFile(filepath.Join(sessionPath, "raw.jsonl")) {
 		case RawSubstantive, RawPointerStub:
@@ -1270,6 +1276,37 @@ func CleanupOrphanedStubsInDir(cacheSessionsDir string) GhostCleanupResult {
 	}
 
 	return result
+}
+
+// liveStreamUnfinished reports whether dir holds a live stream (ADR-247) that
+// still owes the server an open, a drain or a close. It reads the stream state
+// itself because livesession imports this package; the file names and status
+// values mirror internal/livesession (stream-state.json, delete-requested,
+// pending/streaming/closing). An unreadable state counts as unfinished: keeping
+// a few small files beats stranding a stream. A delete-requested marker means
+// an abort queued the server delete outside the folder, so nothing is owed here.
+func liveStreamUnfinished(dir string) bool {
+	raw, err := os.ReadFile(filepath.Join(dir, "stream-state.json"))
+	if os.IsNotExist(err) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "delete-requested")); err == nil {
+		return false
+	}
+	var st struct {
+		Status string `json:"status"`
+	}
+	if json.Unmarshal(raw, &st) != nil {
+		return true
+	}
+	switch st.Status {
+	case "pending", "streaming", "closing":
+		return true
+	}
+	return false
 }
 
 // cleanupRecordingStatesInDir only removes immediate, scanned children of the
@@ -1322,7 +1359,8 @@ func cleanupRecordingStatesInDir(sessionsDir string, eligible func(*RecordingSta
 			if state, _, err := decodeRecordingState(data); err == nil && eligible(state, sessionDir) {
 				switch classifyRawContent(sessionDir.Open("raw.jsonl")) {
 				case RawMissing, RawHeaderOnly:
-					remove = true
+					// an open live stream still needs this folder to be closed
+					remove = !liveStreamUnfinished(filepath.Join(sessionsDir, entry.Name()))
 				}
 			}
 		}
