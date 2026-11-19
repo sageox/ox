@@ -20,11 +20,11 @@ ledger, including paused, canceled, ghost, and orphan sessions. Active
 recordings are always skipped — stop them with 'ox session stop' first.
 
 Sessions already uploaded to the ledger are never touched. Use
-'ox session remove <name>' to delete those.
+'ox session remove \<name>' to delete those.
 
 Prune covers two local locations:
   - the per-user session store (where new recordings start)
-  - the ledger cache (<ledger>/.sageox/cache/sessions, the staging area
+  - the ledger cache (\<ledger>/.sageox/cache/sessions, the staging area
     before a recording is committed-as-pointer to the ledger)
 
 Examples:

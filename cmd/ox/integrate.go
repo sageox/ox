@@ -699,10 +699,10 @@ func uninstallAllIntegrations(force bool) error {
 	}
 
 	// check OpenCode
-	if hasOpenCodeHooks(false) {
+	if hasExternalAdapterHooksToRemove("opencode", false) {
 		installed = append(installed, "OpenCode (project plugin)")
 	}
-	if hasOpenCodeHooks(true) {
+	if hasExternalAdapterHooksToRemove("opencode", true) {
 		installed = append(installed, "OpenCode (user plugin)")
 	}
 

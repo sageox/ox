@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -247,6 +249,9 @@ func TestProcessResult_SettlesEmptyLedgerDownload(t *testing.T) {
 			})
 			require.NoError(t, err)
 			f.ledgerMeta(t, string(ledgerMeta))
+			ref := lfs.NewFileRef([]byte(emptyRaw))
+			require.NoError(t, os.WriteFile(filepath.Join(ledgerPath, "sessions", name, "raw.jsonl"),
+				[]byte(lfs.FormatPointer(ref.OID, ref.Size)), 0644))
 
 			tel := &fakeTelemetry{}
 			h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
@@ -281,6 +286,199 @@ func TestProcessResult_SettlesEmptyLedgerDownload(t *testing.T) {
 			require.NotNil(t, skipped)
 			assert.Equal(t, "empty_transcript", skipped.props["skip_kind"])
 			assert.Nil(t, tel.lastByName("summarization"), "no LLM ran, so no summarization event")
+		})
+	}
+}
+
+func TestProcessResult_RetriesLegacyEmptyLedgerDownload(t *testing.T) {
+	name := "2026-09-24T23-03-riley-OxRiLy"
+	ledgerPath := t.TempDir()
+	f := cacheFixture{
+		name: name, ledgerPath: ledgerPath,
+		cacheDir: filepath.Join(ledgerPath, ".sageox", "cache", "sessions", name),
+	}
+	f.ledgerEntry(t, emptyRaw, false)
+	f.write(t, "raw.jsonl", emptyRaw)
+	f.write(t, ".needs-summary", "{}")
+	f.write(t, "meta.json", `{"version":"1.0","title":"Older cached title"}`)
+	metaPath := filepath.Join(ledgerPath, "sessions", name, "meta.json")
+	latestMeta, err := os.ReadFile(metaPath)
+	require.NoError(t, err)
+	h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
+	item := &WorkItem{Payload: &SessionFinalizePayload{
+		SessionDir: f.cacheDir, LedgerPath: ledgerPath, UploadOnly: true,
+	}}
+	req, err := h.BuildPrompt(item)
+	require.NoError(t, err)
+	require.True(t, req.SkipLLM)
+	_, err = h.stageSessionInLedger(item.Payload.(*SessionFinalizePayload), nil)
+	require.NoError(t, err)
+	got, err := os.ReadFile(metaPath)
+	require.NoError(t, err)
+	require.Equal(t, latestMeta, got, "retry must preserve current Ledger metadata")
+}
+
+func TestStageEmptyLedgerRepairPreservesCurrentMetadata(t *testing.T) {
+	const name = "2026-09-24T23-03-riley-OxRiLy"
+	for _, tc := range []struct{ name, id string }{
+		{name: "legacy"},
+		{name: "explicit ID", id: "ses_01950000-0000-7000-8000-000000001106"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledgerPath := t.TempDir()
+			f := cacheFixture{name: name, ledgerPath: ledgerPath,
+				cacheDir: filepath.Join(ledgerPath, ".sageox", "cache", "sessions", name)}
+			f.ledgerEntry(t, emptyRaw, false)
+			f.write(t, "raw.jsonl", emptyRaw)
+			const summaryMD = "Brief session"
+			f.write(t, artifactSummaryMD, summaryMD)
+			ref := lfs.NewFileRef([]byte(summaryMD))
+			cached, err := json.Marshal(lfs.SessionMeta{
+				Version: "1.0", Title: "Brief session", Summary: "No conversation was recorded in this session.",
+				SummaryStatus: "ok", UserID: "old-owner", SessionID: tc.id,
+			})
+			require.NoError(t, err)
+			f.write(t, "meta.json", string(cached))
+
+			dest := filepath.Join(ledgerPath, "sessions", name)
+			require.NoError(t, lfs.MutateSessionMeta(t.Context(), dest, func(meta *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+				meta.SessionID = tc.id
+				meta.UserID = "updated-owner"
+				return meta, nil
+			}))
+			h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
+			payload := &SessionFinalizePayload{SessionDir: f.cacheDir, LedgerPath: ledgerPath, emptyTranscript: true}
+			_, err = h.stageSessionInLedger(payload, map[string]lfs.FileRef{artifactSummaryMD: ref})
+			require.NoError(t, err)
+			got, err := lfs.ReadSessionMeta(dest)
+			require.NoError(t, err)
+			require.Equal(t, "updated-owner", got.UserID)
+			require.Equal(t, tc.id, got.SessionID)
+			require.Equal(t, "Brief session", got.Title)
+			require.Equal(t, "ok", got.SummaryStatus)
+			require.Equal(t, ref, got.Files[artifactSummaryMD])
+		})
+	}
+}
+
+func TestProcessResult_ReplaysPendingEmptyLedgerRepair(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	for _, state := range []string{"legacy", "backfilled", "already repaired", "interrupted staging", "dirty after staging", "different recording"} {
+		t.Run(state, func(t *testing.T) {
+			const name = "2026-09-24T23-03-riley-OxRiLy"
+			bare, ledgerPath := setupBareAndCloneLedger(t)
+			branch := gitOutput(t, ledgerPath, "branch", "--show-current")
+			f := cacheFixture{
+				name: name, ledgerPath: ledgerPath,
+				cacheDir: filepath.Join(ledgerPath, ".sageox", "cache", "sessions", name),
+			}
+			destDir := filepath.Join(ledgerPath, "sessions", name)
+			f.ledgerEntry(t, emptyRaw, false)
+			rawRef := lfs.NewFileRef([]byte(emptyRaw))
+			require.NoError(t, os.WriteFile(filepath.Join(destDir, "raw.jsonl"), []byte(lfs.FormatPointer(rawRef.OID, rawRef.Size)), 0o644))
+			cachedStop := time.Date(2026, 9, 24, 23, 14, 0, 0, time.UTC)
+			newerStop := cachedStop.Add(time.Minute)
+			require.NoError(t, lfs.MutateSessionMeta(t.Context(), destDir, func(meta *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+				meta.RepoID = "repo_empty_test"
+				meta.SessionName = name
+				meta.UserID = "usr_updated_while_upload_pending"
+				switch state {
+				case "backfilled", "interrupted staging", "dirty after staging":
+					meta.SessionID = meta.EffectiveSessionID()
+				case "already repaired":
+					meta.SessionID = meta.EffectiveSessionID()
+					meta.Title = "Newer title"
+					meta.Summary = "Newer summary"
+					meta.SummaryStatus = "ok"
+					meta.SummaryAttempts = 0
+					meta.ValidationError = ""
+					meta.StoppedAt = &newerStop
+				case "different recording":
+					meta.SessionID = "ses_01950000-0000-7000-8000-000000001106"
+				}
+				return meta, nil
+			}))
+
+			// The first attempt produced its deterministic summary in the
+			// cache, then failed to upload before it could stage the repair.
+			f.write(t, "raw.jsonl", emptyRaw)
+			f.write(t, "meta.json", `{"version":"1.0","title":"Brief session","summary":"No conversation was recorded in this session.","summary_status":"ok","stopped_at":"2026-09-24T23:14:00Z"}`)
+			const cachedJSON, newerJSON = `{"title":"Brief session"}`, `{"title":"Newer title"}`
+			const cachedMD, newerMD = "cached brief summary", "newer Ledger summary"
+			f.write(t, artifactSummJSON, cachedJSON)
+			f.write(t, artifactSummaryMD, cachedMD)
+			newerRef := lfs.NewFileRef([]byte(newerMD))
+			if state == "already repaired" {
+				require.NoError(t, os.WriteFile(filepath.Join(destDir, artifactSummJSON), []byte(newerJSON), 0o644))
+				require.NoError(t, os.WriteFile(filepath.Join(destDir, artifactSummaryMD), []byte(lfs.FormatPointer(newerRef.OID, newerRef.Size)), 0o644))
+			}
+			runGitCmd(t, ledgerPath, "add", "sessions/"+name)
+			runGitCmd(t, ledgerPath, "commit", "-m", "existing empty recording")
+			runGitCmd(t, ledgerPath, "push")
+			headBefore := gitOutput(t, bare, "rev-parse", branch)
+
+			h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
+			h.skipGit = false
+			enableLocalFinalizeLFS(t, h, ledgerPath)
+			retry := func() *SessionFinalizePayload {
+				return &SessionFinalizePayload{SessionDir: f.cacheDir, LedgerPath: ledgerPath, UploadOnly: true}
+			}
+			if state == "interrupted staging" || state == "dirty after staging" {
+				_, err := h.stageSessionInLedger(retry(), nil)
+				require.NoError(t, err)
+				if state == "dirty after staging" {
+					require.NoError(t, os.WriteFile(filepath.Join(destDir, artifactSummaryMD), []byte(newerMD), 0o644))
+				}
+			}
+			item := &WorkItem{Payload: retry()}
+			req, err := h.BuildPrompt(item)
+			require.NoError(t, err)
+			require.True(t, req.SkipLLM)
+			err = h.ProcessResult(item, &RunResult{})
+			committed := gitOutput(t, bare, "show", branch+":sessions/"+name+"/meta.json")
+			got, readErr := lfs.ParseSessionMeta([]byte(committed))
+			require.NoError(t, readErr)
+			require.Equal(t, "usr_updated_while_upload_pending", got.UserID)
+			if state == "dirty after staging" {
+				require.ErrorContains(t, err, "uncommitted changes in Ledger session")
+				require.Equal(t, "unrecoverable", got.SummaryStatus)
+				require.DirExists(t, f.cacheDir)
+				require.Equal(t, headBefore, gitOutput(t, bare, "rev-parse", branch))
+				return
+			}
+			if state == "different recording" {
+				require.ErrorIs(t, err, session.ErrLedgerSessionOverwrite)
+				require.Equal(t, "unrecoverable", got.SummaryStatus)
+				require.DirExists(t, f.cacheDir)
+				require.Equal(t, headBefore, gitOutput(t, bare, "rev-parse", branch))
+				return
+			}
+			require.NoError(t, err)
+			if state == "backfilled" {
+				legacy := &lfs.SessionMeta{RepoID: got.RepoID, SessionName: name}
+				require.Equal(t, legacy.EffectiveSessionID(), got.SessionID)
+			}
+			if state == "already repaired" {
+				require.Equal(t, "Newer title", got.Title)
+				require.Equal(t, "Newer summary", got.Summary)
+				require.Equal(t, &newerStop, got.StoppedAt)
+				require.Equal(t, headBefore, gitOutput(t, bare, "rev-parse", branch))
+				require.Equal(t, newerJSON, gitOutput(t, bare, "show", branch+":sessions/"+name+"/"+artifactSummJSON))
+				require.Equal(t, strings.TrimSpace(lfs.FormatPointer(newerRef.OID, newerRef.Size)), gitOutput(t, bare, "show", branch+":sessions/"+name+"/"+artifactSummaryMD))
+			} else {
+				require.Equal(t, "Brief session", got.Title)
+				require.Equal(t, "No conversation was recorded in this session.", got.Summary)
+				require.Equal(t, &cachedStop, got.StoppedAt)
+				cachedRef := lfs.NewFileRef([]byte(cachedMD))
+				require.Equal(t, cachedJSON, gitOutput(t, bare, "show", branch+":sessions/"+name+"/"+artifactSummJSON))
+				require.Equal(t, strings.TrimSpace(lfs.FormatPointer(cachedRef.OID, cachedRef.Size)), gitOutput(t, bare, "show", branch+":sessions/"+name+"/"+artifactSummaryMD))
+			}
+			require.Equal(t, "ok", got.SummaryStatus)
+			require.Empty(t, got.ValidationError)
+			require.Zero(t, got.SummaryAttempts)
+			require.NoDirExists(t, f.cacheDir)
 		})
 	}
 }

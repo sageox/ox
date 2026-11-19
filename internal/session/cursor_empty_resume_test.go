@@ -64,7 +64,7 @@ func TestCursorResumeEmptyExportRequiresAcknowledgedBoundary(t *testing.T) {
 					now := time.Now().UTC()
 					state.SuspendedAt = &now
 					state.Lifecycle = append(state.Lifecycle, LifecycleEvent{Action: LifecycleActionPause, At: now, Seq: state.EntryCount})
-				}))
+				}, nil))
 				if tc.prepare != nil {
 					tc.prepare(t, f)
 				}
@@ -77,7 +77,7 @@ func TestCursorResumeEmptyExportRequiresAcknowledgedBoundary(t *testing.T) {
 				if generic {
 					err = UpdateRecordingStateForAgent(f.projectRoot, f.state.AgentID, resume)
 				} else {
-					err = UpdateCursorRecordingControl(ctx, f.projectRoot, f.state, f.homeDir, reader, LifecycleActionResume, resume)
+					err = UpdateCursorRecordingControl(ctx, f.projectRoot, f.state, f.homeDir, reader, LifecycleActionResume, resume, nil)
 				}
 				if tc.controlErr != nil {
 					wantErr := tc.controlErr

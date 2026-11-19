@@ -659,7 +659,9 @@ func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
 // A marker in a folder a repository writer controls (the Ledger checkout, the
 // legacy sessions/ folder) can reuse an active agent's ID, and even its
 // recording's folder and session ID. When more than one marker names the agent,
-// the one ox started here (started_recordings.go) is the agent's recording.
+// the one ox started here (started_recordings.go) is the agent's recording;
+// among those, the newest, so a held recording that recovery is releasing never
+// takes the active slot from the recording that replaced it.
 func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, error) {
 	if agentID == "" {
 		return nil, fmt.Errorf("%w: agent ID", ErrEmptyPath)
@@ -682,11 +684,14 @@ func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, e
 	if len(candidates) > 1 {
 		// only read when it can decide something; unreadable, the first stands
 		if known, err := loadStartedRecordings(); err == nil {
+			var newest *RecordingState
 			for i, c := range candidates {
-				if _, ok := startedHere(known, dirs[i], c); ok {
-					s = c
-					break
+				if _, ok := startedHere(known, dirs[i], c); ok && (newest == nil || c.StartedAt.After(newest.StartedAt)) {
+					newest = c
 				}
+			}
+			if newest != nil {
+				s = newest
 			}
 		}
 	}
@@ -1543,8 +1548,17 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		username = "user"
 	}
 
-	// generate session name
-	sessionName := GenerateSessionName(opts.AgentID, username)
+	recordingID := sessionid.GenerateSessionID()
+	continuedFromSessionID := opts.ContinuedFromSessionID
+	var nameID string
+	if sessionid.IsValidSessionID(continuedFromSessionID) {
+		// A continuation can start in the same minute under the same agent.
+		// Reserve its own cache and Ledger folder before any recording writes.
+		nameID = recordingID
+	} else {
+		continuedFromSessionID = ""
+	}
+	sessionName := generateSessionName(opts.AgentID, username, nameID)
 
 	// determine sessions base path — prefer ledger cache (environment-independent),
 	// fall back to explicit RepoContextPath, then XDG cache.
@@ -1625,15 +1639,10 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		origin = string(agentx.DetectOriginFromOS(explicit))
 	}
 
-	continuedFromSessionID := opts.ContinuedFromSessionID
-	if !sessionid.IsValidSessionID(continuedFromSessionID) {
-		continuedFromSessionID = ""
-	}
-
 	state := &RecordingState{
 		AgentID:                opts.AgentID,
 		AgentSessionID:         opts.AgentSessionID,
-		SessionID:              sessionid.GenerateSessionID(),
+		SessionID:              recordingID,
 		ContinuedFromSessionID: continuedFromSessionID,
 		AdapterName:            canonicalRecordingAdapter(opts.AdapterName),
 		SessionFile:            opts.SessionFile,

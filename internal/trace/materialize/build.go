@@ -27,6 +27,10 @@ const (
 	EventsFile = pipeline.LedgerFileTraceEvents
 )
 
+// ErrSelectedSpoolUnavailable means an optional trace input was removed
+// before it could be opened. No new sidecars were published.
+var ErrSelectedSpoolUnavailable = errors.New("selected trace spool is missing")
+
 // Build never extends the stop boundary to chase late exports. A nil capture
 // means capture was not opted into at recording start and produces no files.
 // Errors are returned for the caller to log without blocking recording upload.
@@ -64,10 +68,12 @@ func Build(spoolDir, cacheDir string, capture *model.Capture) (*model.Metadata, 
 			return nil, errors.New("unsafe trace spool directory")
 		}
 		spool, err = os.OpenRoot(spoolDir)
-		if err != nil {
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return nil, err
 		}
-		defer spool.Close()
+		if spool != nil {
+			defer spool.Close()
+		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
@@ -94,8 +100,18 @@ func Build(spoolDir, cacheDir string, capture *model.Capture) (*model.Metadata, 
 		}
 		writer := gzip.NewWriter(file)
 		writeErr := buildSignal(spool, selected, signal, writer, meta, seen)
-		if err := errors.Join(writeErr, writer.Close(), file.Close()); err != nil {
-			return nil, fmt.Errorf("materialize trace %s: %w", signal, err)
+		if errors.Is(writeErr, ErrSelectedSpoolUnavailable) {
+			// The incomplete gzip stream will be discarded. Close the backing
+			// file and report any filesystem failure to the caller.
+			writeErr = file.Close()
+			if writeErr == nil {
+				writeErr = ErrSelectedSpoolUnavailable
+			}
+		} else {
+			writeErr = errors.Join(writeErr, writer.Close(), file.Close())
+		}
+		if writeErr != nil {
+			return nil, fmt.Errorf("materialize trace %s: %w", signal, writeErr)
 		}
 	}
 	// Publish only after both streams have been fully parsed, scrubbed, compressed,
@@ -205,27 +221,26 @@ func buildSignal(spool *os.Root, selected []selection, signal string, out io.Wri
 			selectedRanges, stopOffset = s.native.EventsBytes, s.stop.Events
 			input = "logs.jsonl"
 		}
-		if spool == nil {
+		var session *os.Root
+		if spool != nil {
+			info, err := spool.Lstat(s.native.ID)
+			if err == nil {
+				if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+					return errors.New("unsafe native trace directory")
+				}
+				session, err = spool.OpenRoot(s.native.ID)
+			}
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+		}
+		if session == nil {
 			if len(selectedRanges) > 0 {
-				return errors.New("selected trace spool is missing")
+				return ErrSelectedSpoolUnavailable
 			}
 			continue
 		}
-		info, err := spool.Lstat(s.native.ID)
-		if errors.Is(err, fs.ErrNotExist) && len(selectedRanges) == 0 {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("unsafe native trace directory")
-		}
-		session, err := spool.OpenRoot(s.native.ID)
-		if err != nil {
-			return err
-		}
-		err = readSignal(session, input, selectedRanges, stopOffset, s.stopKnown, signal, out, meta, seen)
+		err := readSignal(session, input, selectedRanges, stopOffset, s.stopKnown, signal, out, meta, seen)
 		_ = session.Close()
 		if err != nil {
 			return err
@@ -239,7 +254,10 @@ func readSignal(session *os.Root, input string, selected []model.ByteRange, stop
 		return err
 	}
 	file, err := session.Open(input)
-	if errors.Is(err, fs.ErrNotExist) && len(selected) == 0 {
+	if errors.Is(err, fs.ErrNotExist) {
+		if len(selected) > 0 {
+			return ErrSelectedSpoolUnavailable
+		}
 		return nil
 	}
 	if err != nil {

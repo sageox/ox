@@ -26,6 +26,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
@@ -595,58 +596,31 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// re-discover session file if it was empty at start time
 	// (Claude Code session JSONL may not have existed yet when recording started)
+	cacheHasEntries := state.SessionPath != "" && session.HasSubstantiveEntries(filepath.Join(state.SessionPath, "raw.jsonl"))
+	var discoveryErr error
 	if state.SessionFile == "" && state.AdapterName != "" && state.AdapterName != "generic" && state.AdapterName != "cursor" {
-		if adapter, adapterErr := adapters.GetAdapter(state.AdapterName); adapterErr == nil {
-			// use state.WorkspacePath (persisted at start) as the single source of truth
-			// for repoRoot -- never derive from ambient cwd/env at stop time
+		if sf, findErr := discoverNativeSessionFile(projectRoot, state); findErr == nil {
+			state.SessionFile = sf
+		} else {
+			discoveryErr = findErr
 			repoRoot := state.WorkspacePath
 			if repoRoot == "" {
-				repoRoot = projectRoot // fallback for legacy states without WorkspacePath
+				repoRoot = projectRoot
 			}
-			lookup := adapters.SessionLookup{
-				RepoRoot:       repoRoot,
-				AgentID:        state.AgentID,
-				AgentSessionID: state.AgentSessionID,
-				Since:          state.StartedAt.Add(-5 * time.Minute),
-			}
-			if sf, findErr := adapter.FindSessionFile(lookup); findErr == nil {
-				slog.Info("session file discovered at stop time", "file", sf, "adapter", state.AdapterName)
-				state.SessionFile = sf
+			if cacheHasEntries {
+				fmt.Fprintf(os.Stderr, "\nThe %s session file was not found for this repo; saving the turns already captured instead.\n  %v\n", state.AdapterName, findErr)
 			} else {
-				slog.Warn("session file not found at stop time", "agent_id", state.AgentID, "adapter", state.AdapterName, "started_at", state.StartedAt.Format(time.RFC3339), "error", findErr, "repo_root", repoRoot)
-
-				// path variant retries: try alternate path forms that produce different project hashes
-				pathVariants := sessionPathVariants(repoRoot)
-				for _, variant := range pathVariants {
-					retryLookup := adapters.SessionLookup{
-						RepoRoot:       variant,
-						AgentID:        state.AgentID,
-						AgentSessionID: state.AgentSessionID,
-						Since:          state.StartedAt.Add(-5 * time.Minute),
-					}
-					if sf, retryErr := adapter.FindSessionFile(retryLookup); retryErr == nil {
-						slog.Info("session file discovered via path variant", "file", sf, "original_root", repoRoot, "variant", variant)
-						state.SessionFile = sf
-						break
-					}
-				}
-				// Do not scan other project buckets by time/agent ID here: that
-				// bypasses the adapter's native session ID and repo checks.
+				fmt.Fprintf(os.Stderr, "\nThe %s session file was not found for this repo, so nothing from it was uploaded yet.\n  %v\n%s\n", state.AdapterName, findErr, undiscoveredSessionNextSteps(state))
 			}
-
-			// if still not found after all retries, set rich recovery marker
-			if state.SessionFile == "" {
-				fmt.Fprintf(os.Stderr, "\nSession data may still be recoverable. Try:\n  ox agent %s session import --file <path-to-session-jsonl>\n\n", state.AgentID)
-				_ = doctor.SetSessionRecoveryInfo(projectRoot, doctor.SessionRecoveryInfo{
-					AgentID:       state.AgentID,
-					AdapterName:   state.AdapterName,
-					StartedAt:     state.StartedAt,
-					WorkspacePath: repoRoot,
-					FailedAt:      time.Now(),
-					Error:         "session file not found at stop time",
-				})
-				_ = doctor.SetNeedsDoctorAgent(projectRoot)
-			}
+			_ = doctor.SetSessionRecoveryInfo(projectRoot, doctor.SessionRecoveryInfo{
+				AgentID:       state.AgentID,
+				AdapterName:   state.AdapterName,
+				StartedAt:     state.StartedAt,
+				WorkspacePath: repoRoot,
+				FailedAt:      time.Now(),
+				Error:         "session file not found at stop time",
+			})
+			_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		}
 	}
 
@@ -656,7 +630,6 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// would, rather than leave the recording live for 'ox session upload' to
 	// refuse. An empty cache keeps the recording: an undiscovered source does
 	// not prove the session empty, and a later stop can still find it.
-	cacheHasEntries := state.SessionPath != "" && session.HasSubstantiveEntries(filepath.Join(state.SessionPath, "raw.jsonl"))
 	var processResult *agentSessionResult
 	if state.SessionFile != "" || state.AdapterName == "cursor" || cacheHasEntries {
 		processStart := time.Now()
@@ -761,12 +734,12 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		})
 	}
 
-	return emitSessionStop(projectRoot, inst, state, duration, processResult, timing)
+	return emitSessionStop(projectRoot, inst, state, duration, processResult, discoveryErr, timing)
 }
 
 // emitSessionStop writes the stop's output, then clears the owed marks of the
 // withheld notices it gave: only an output actually written has said them.
-func emitSessionStop(projectRoot string, inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult, timing map[string]int64) error {
+func emitSessionStop(projectRoot string, inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult, discoveryErr error, timing map[string]int64) error {
 	var err error
 	// output format selection (priority: review > text > json default)
 	switch {
@@ -775,12 +748,12 @@ func emitSessionStop(projectRoot string, inst *agentinstance.Instance, state *se
 		outputTextSummary(projectRoot, state, duration, processResult)
 		fmt.Println()
 		fmt.Println("--- Machine Output ---")
-		err = outputSessionStopJSON(projectRoot, inst, state, duration, processResult, timing)
+		err = outputSessionStopJSON(projectRoot, inst, state, duration, processResult, discoveryErr, timing)
 	case cfg.Text:
 		// human-readable text output
 		outputTextSummary(projectRoot, state, duration, processResult)
 	default:
-		err = outputSessionStopJSON(projectRoot, inst, state, duration, processResult, timing)
+		err = outputSessionStopJSON(projectRoot, inst, state, duration, processResult, discoveryErr, timing)
 	}
 	if err == nil && processResult != nil {
 		confirmLiveSecretWithheldNotices(processResult.LiveNoticeDirs)
@@ -813,6 +786,64 @@ func sessionPathVariants(repoRoot string) []string {
 	}
 
 	return variants
+}
+
+// discoverNativeSessionFile finds a recording's native session file when none
+// was known at start. The recorded workspace is the source of truth; its other
+// spellings, and the checkout this command runs in (a linked worktree, where
+// Claude Code desktop runs a session whose hooks ran in the main checkout), are
+// retried. Each lookup keeps the adapter's own session ID and ownership checks;
+// other project buckets are never scanned by time or agent ID here. The error
+// is the recorded workspace's, which says why its transcript was not accepted.
+func discoverNativeSessionFile(projectRoot string, state *session.RecordingState) (string, error) {
+	adapter, err := adapters.GetAdapter(state.AdapterName)
+	if err != nil {
+		return "", err
+	}
+	repoRoot := state.WorkspacePath
+	if repoRoot == "" {
+		repoRoot = projectRoot // fallback for legacy states without WorkspacePath
+	}
+	lookup := func(root string) (string, error) {
+		return adapter.FindSessionFile(adapters.SessionLookup{
+			RepoRoot:       root,
+			AgentID:        state.AgentID,
+			AgentSessionID: state.AgentSessionID,
+			Since:          state.StartedAt.Add(-5 * time.Minute),
+		})
+	}
+	sf, findErr := lookup(repoRoot)
+	if findErr == nil {
+		slog.Info("session file discovered", "file", sf, "adapter", state.AdapterName)
+		return sf, nil
+	}
+	slog.Warn("session file not found at stop time", "agent_id", state.AgentID, "adapter", state.AdapterName, "started_at", state.StartedAt.Format(time.RFC3339), "error", findErr, "repo_root", repoRoot)
+	variants := sessionPathVariants(repoRoot)
+	if projectRoot != "" && projectRoot != repoRoot {
+		variants = append(variants, projectRoot)
+	}
+	for _, variant := range variants {
+		if sf, retryErr := lookup(variant); retryErr == nil {
+			slog.Info("session file discovered via path variant", "file", sf, "original_root", repoRoot, "variant", variant)
+			return sf, nil
+		}
+	}
+	return "", findErr
+}
+
+// undiscoveredSessionNextSteps says what to do with a recording whose native
+// session file was not found: the recording and cache stay, so a retry can
+// still publish it once the transcript is accepted.
+func undiscoveredSessionNextSteps(state *session.RecordingState) string {
+	steps := fmt.Sprintf("The recording is kept. Next steps:\n"+
+		"  - retry once the cause above is fixed: ox agent %s session recover\n"+
+		"  - or upload the transcript itself: ox agent %s session abort, then ox session import", state.AgentID, state.AgentID)
+	if state.AgentSessionID != "" {
+		steps += fmt.Sprintf(" --session %s --include-aborted", shellQuote(state.AgentSessionID))
+	} else {
+		steps += " (pick the session, then add --include-aborted)"
+	}
+	return steps
 }
 
 // recordSessionObservation writes a session summary observation to team memory.
@@ -949,7 +980,8 @@ func sessionStopLocation(projectRoot string, state *session.RecordingState) sess
 }
 
 // outputSessionStopJSON renders JSON output for session stop.
-func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult, timing map[string]int64) error {
+// discoveryErr is why the native session file was not found, when it was not.
+func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult, discoveryErr error, timing map[string]int64) error {
 	output := sessionStopOutput{
 		Success:  true,
 		Type:     "session_stop",
@@ -1005,8 +1037,14 @@ func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, sta
 		}
 		addLiveSecretWithheldNotice(&output, processResult)
 	} else {
+		// nothing was saved or uploaded, and the recording is kept for a retry:
+		// report failure so no caller reads this as a saved session
+		output.Success = false
 		output.UploadWarning = "no session file found — session data was not uploaded to ledger"
-		output.Guidance = "Session stopped but no conversation data was found. The session recording may be empty. Run 'ox doctor' to check for recoverable sessions."
+		if discoveryErr != nil {
+			output.UploadWarning += ": " + discoveryErr.Error()
+		}
+		output.Guidance = "Session not saved: no conversation data was found for this recording. " + strings.ReplaceAll(undiscoveredSessionNextSteps(state), "\n", " ")
 	}
 	jsonOut, err := cli.MarshalJSONIndent(output)
 	if err != nil {
@@ -1511,7 +1549,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 			// the header-only raw.jsonl written at session start (plus any footer a
 			// finalize door stamped) is not worth committing.
 			slog.Info("async upload skipped: session has no entries", "session", sessionName)
-		} else if copyErr := copySessionCacheToLedger(result, ledgerPath, sessionName); copyErr != nil {
+		} else if copyErr := copySessionCacheToLedger(result, state, ledgerPath, sessionName); copyErr != nil {
 			slog.Warn("async copy to ledger failed", "error", copyErr)
 			_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			result.UploadWarning = "Session saved locally but async copy failed. Run 'ox doctor' to retry."
@@ -1629,6 +1667,15 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	}
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
+	sourceCacheDir := filepath.Dir(result.RawPath)
+	recordingID := stopRecordingID(result, state)
+	publicationID := session.PendingUploadID(sourceCacheDir)
+	if publicationID == "" {
+		publicationID = recordingID
+	}
+	if err := session.CheckFinalizedLedgerSessionDestination(sessionDir, sessionName, publicationID); err != nil {
+		return err
+	}
 
 	// durable ID precedence via the shared resolver: a preserved meta.json
 	// ID (prior stop attempt, e.g. LFS upload failed and we're retrying)
@@ -1670,7 +1717,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		return nil
 	}
 
-	sessionID := session.ResolveOrMintSessionID(preservedID, state.SessionID)
+	sessionID := session.ResolveOrMintSessionID(preservedID, recordingID)
 	traceCache, traceMeta, traceErr := session.MaterializeTraces(ledgerPath, state.SessionPath, state.Trace)
 	if traceErr != nil {
 		slog.Warn("trace materialization skipped", "error", traceErr)
@@ -1703,8 +1750,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	// Record retry ownership before the ledger gains a final meta.json: once
 	// that file exists, findOrphanedSessionsInDir skips this session unless
 	// the marker is present, so every failure below must leave it behind.
-	sourceCacheDir := filepath.Dir(result.RawPath)
-	if err := writeSessionUploadRetryPending(sourceCacheDir); err != nil {
+	if err := session.WriteUploadRetryPending(sourceCacheDir, sessionID); err != nil {
 		return fmt.Errorf("record pending session upload: %w", err)
 	}
 
@@ -1730,7 +1776,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		if errors.Is(err, api.ErrReadOnly) {
 			// Read-only access is not retryable; a marker would only hand doctor
 			// a retry that fails the same way.
-			_ = os.Remove(filepath.Join(sourceCacheDir, sessionUploadRetryPendingFile))
+			_ = os.Remove(filepath.Join(sourceCacheDir, session.UploadRetryPendingFile))
 			return err // don't wrap, don't set doctor marker
 		}
 		return fmt.Errorf("LFS upload: %w", err)
@@ -1802,7 +1848,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 			slog.Debug("prune session recovery copy", "dir", recoveryCacheDir, "error", err)
 		}
 	}
-	_ = os.Remove(filepath.Join(sourceCacheDir, sessionUploadRetryPendingFile))
+	_ = os.Remove(filepath.Join(sourceCacheDir, session.UploadRetryPendingFile))
 
 	// reverse-link reconciliation: the session is committed, so record its
 	// ses_ id + outcome=stopped in the meta.json of every plan it produced
@@ -1918,9 +1964,24 @@ func reconcileProducedPlansAtStop(projectRoot string, slugs []string, sessionID 
 	}
 }
 
-// copySessionCacheToLedger delegates to pipeline.CopySessionToLedger with the real filesystem.
-func copySessionCacheToLedger(result *agentSessionResult, ledgerPath, sessionName string) error {
-	return pipeline.CopySessionToLedger(pipeline.OSFileSystem{}, result, ledgerPath, sessionName)
+func stopRecordingID(result *agentSessionResult, state *session.RecordingState) string {
+	if state.SessionID != "" {
+		return state.SessionID
+	}
+	return session.ReadHeaderSessionID(result.RawPath)
+}
+
+// Delegated stop can write into the Ledger before the daemon sees the session.
+// Protect that write with the same ownership check and lock as daemon staging.
+func copySessionCacheToLedger(result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string) error {
+	waitForGCSwap(ledgerPath)
+	return gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+		if err := session.CheckFinalizedLedgerSessionDestination(sessionDir, sessionName, stopRecordingID(result, state)); err != nil {
+			return err
+		}
+		return pipeline.CopySessionToLedger(pipeline.OSFileSystem{}, result, ledgerPath, sessionName)
+	})
 }
 
 // signalDaemonSessionFinalize sends a fire-and-forget IPC message to the daemon

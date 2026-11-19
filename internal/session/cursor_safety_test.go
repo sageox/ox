@@ -25,8 +25,8 @@ func TestCursorControlDrainsPausedRowsBeforeResume(t *testing.T) {
 		state.SuspendedAt = nil
 		state.Lifecycle = append(state.Lifecycle, LifecycleEvent{Action: LifecycleActionResume, Seq: state.EntryCount})
 	}
-	require.NoError(t, UpdateCursorRecordingControl(ctx, f.projectRoot, f.state, f.homeDir, nil, LifecycleActionPause, pause))
-	err := UpdateCursorRecordingControl(ctx, f.projectRoot, f.state, f.homeDir, nil, LifecycleActionResume, resume)
+	require.NoError(t, UpdateCursorRecordingControl(ctx, f.projectRoot, f.state, f.homeDir, nil, LifecycleActionPause, pause, nil))
+	err := UpdateCursorRecordingControl(ctx, f.projectRoot, f.state, f.homeDir, nil, LifecycleActionResume, resume, nil)
 	require.ErrorIs(t, err, ErrCursorSourcePending)
 	assert.NotNil(t, loadCursorCaptureState(t, f).SuspendedAt)
 
@@ -34,7 +34,7 @@ func TestCursorControlDrainsPausedRowsBeforeResume(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(f.sourcePath), 0o700))
 	require.NoError(t, os.WriteFile(f.sourcePath, []byte(row), 0o600))
 	reader := &fixedCursorIncrementalReader{next: int64(len(row)), entries: []adapters.RawEntry{{Role: "user", Content: "private paused message"}}}
-	err = UpdateCursorRecordingControl(ctx, f.projectRoot, f.state, f.homeDir, reader, LifecycleActionResume, resume)
+	err = UpdateCursorRecordingControl(ctx, f.projectRoot, f.state, f.homeDir, reader, LifecycleActionResume, resume, nil)
 	require.ErrorIs(t, err, ErrCursorFinalDrainPending)
 	state := loadCursorCaptureState(t, f)
 	assert.NotNil(t, state.SuspendedAt)
@@ -45,7 +45,7 @@ func TestCursorControlDrainsPausedRowsBeforeResume(t *testing.T) {
 	complete := row + `{"type":"turn_ended","status":"success"}` + "\n"
 	require.NoError(t, os.WriteFile(f.sourcePath, []byte(complete), 0o600))
 	reader = &fixedCursorIncrementalReader{next: int64(len(complete))}
-	require.NoError(t, UpdateCursorRecordingControl(ctx, f.projectRoot, f.state, f.homeDir, reader, LifecycleActionResume, resume))
+	require.NoError(t, UpdateCursorRecordingControl(ctx, f.projectRoot, f.state, f.homeDir, reader, LifecycleActionResume, resume, nil))
 	state = loadCursorCaptureState(t, f)
 	assert.Nil(t, state.SuspendedAt)
 	assert.True(t, IsSeqExcluded(0, BuildSegmentRanges(state.Lifecycle)))
@@ -56,7 +56,7 @@ func TestCursorControlDrainsPausedRowsBeforeResume(t *testing.T) {
 		pause(state)
 		now := time.Now()
 		state.StoppedAt = &now
-	})
+	}, nil)
 	require.ErrorIs(t, err, ErrNotRecording)
 	assert.Nil(t, loadCursorCaptureState(t, f).SuspendedAt)
 }

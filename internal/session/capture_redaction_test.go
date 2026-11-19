@@ -27,7 +27,8 @@ func TestCaptureCommandRedactionSurvivesRestartAndCrashReplay(t *testing.T) {
 						return e
 					}
 					defer w.Close()
-					return w.AppendRecordingBatch(statePath, entries, offset)
+					_, err := w.AppendRecordingBatch(statePath, entries, offset)
+					return err
 				}))
 			}
 			appendBatch([]Entry{{Type: EntryTypeTool, CallID: "secret-call", ToolInput: `{"command":["/bin/bash","-lc","aws configure export-credentials"]}`}}, 100)
@@ -76,7 +77,8 @@ func TestCaptureRedactionSurvivesAdapterConversionAndRestart(t *testing.T) {
 	for index, batch := range batches {
 		writer, err := NewRawWriter(raw, "")
 		require.NoError(t, err)
-		require.NoError(t, writer.AppendRecordingBatch(statePath, ConvertRawEntries(batch), int64(index+1)*100))
+		_, err = writer.AppendRecordingBatch(statePath, ConvertRawEntries(batch), int64(index+1)*100)
+		require.NoError(t, err)
 		require.NoError(t, writer.Close())
 	}
 	file, err := os.Open(raw)

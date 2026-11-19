@@ -435,7 +435,7 @@ func (f *liveFixture) printStop(result *agentSessionResult) string {
 	f.t.Helper()
 	var err error
 	out := captureStdoutForPlanCLI(f.t, func() {
-		err = emitSessionStop(f.projectRoot, &agentinstance.Instance{AgentID: f.agentID}, f.state, "1s", result, map[string]int64{})
+		err = emitSessionStop(f.projectRoot, &agentinstance.Instance{AgentID: f.agentID}, f.state, "1s", result, nil, map[string]int64{})
 	})
 	require.NoError(f.t, err)
 	return out

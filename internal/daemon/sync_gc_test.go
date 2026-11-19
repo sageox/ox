@@ -800,7 +800,7 @@ func TestCheckAndRunGC_TeamInterruptedSwapOutranksRecentGC(t *testing.T) {
 				require.NoError(t, exec.Command("git", "-C", clone, "config", "remote.origin.promisor", "true").Run())
 			}
 			lastGC := time.Now()
-			ws := WorkspaceState{ID: "team-recovery", Type: WorkspaceTypeTeamContext, Path: clone,
+			ws := WorkspaceState{ID: "team-recovery", Type: WorkspaceTypeTeamContext, Path: clone + string(filepath.Separator),
 				CloneURL: "file://" + bare, Exists: state != "missing canonical clone", LastGCTime: lastGC}
 			registry := scheduler.WorkspaceRegistry()
 			registry.mu.Lock()
@@ -809,7 +809,7 @@ func TestCheckAndRunGC_TeamInterruptedSwapOutranksRecentGC(t *testing.T) {
 			registry.workspaces = map[string]*WorkspaceState{ws.ID: &ws}
 			registry.mu.Unlock()
 
-			scheduler.checkAndRunGC(context.Background())
+			awaitStartupCompletion(t, scheduler.checkAndRunGC(t.Context()))
 
 			data, err := os.ReadFile(cache)
 			require.NoError(t, err)

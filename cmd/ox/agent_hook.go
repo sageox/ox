@@ -16,7 +16,6 @@ import (
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/fileutil"
-	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/prime"
@@ -783,11 +782,8 @@ func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expected
 		WriteHeader: func(state *session.RecordingState) error {
 			return writeRawHeader(ctx.ProjectRoot, state)
 		},
-		Spool: func(state *session.RecordingState, batch session.AppendedBatch) {
-			liveSessionSpool(ctx.ProjectRoot, state, batch)
-		},
-		SpoolLost: func(state *session.RecordingState, n int64, cause error) {
-			liveSessionDeclareLost(ctx.ProjectRoot, state, n, cause)
+		Spool: func(state *session.RecordingState, batch session.AppendedBatch) error {
+			return liveSessionSpool(ctx.ProjectRoot, state, batch)
 		},
 		MarkStatus: markHookStatus,
 		// the transcript Claude Code names here is the only one the daemon
@@ -813,33 +809,6 @@ func hookTranscript(in *agentx.HookInput) *session.HookTranscript {
 		t.Path = stdin.TranscriptPath
 	}
 	return t
-}
-
-// liveSessionDeclareLost declares n bytes a capture committed to raw.jsonl but
-// could not read back as a live-stream loss, so the stream's next write or its
-// close carries a spool_write_failed gap where they belong: the cursor is past
-// them and nothing will spool them. It declares only into the stream
-// liveSessionSpool would have fed: this recording's (C4), and not a held one (C1).
-func liveSessionDeclareLost(projectRoot string, state *session.RecordingState, n int64, cause error) {
-	if state == nil || state.SessionPath == "" || n <= 0 {
-		return
-	}
-	st, err := livesession.ReadState(state.SessionPath)
-	if err != nil {
-		return // never prepared: streaming is off for this session
-	}
-	if st.SessionID != state.SessionID {
-		slog.Debug("live_session_loss_skipped", "session_id", state.SessionID, "reason", "other_recording", "stream_session_id", st.SessionID)
-		return
-	}
-	if liveSessionHeld(projectRoot, state) {
-		slog.Debug("live_session_loss_skipped", "session_id", state.SessionID, "reason", "held")
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), liveLocalBound)
-	defer cancel()
-	// DeclareLost logs the loss, and any failure to record it, at Error itself
-	_ = livesession.DeclareLost(ctx, state.SessionPath, n, cause)
 }
 
 // markHookStatus records one hook invocation and how its capture ended, so

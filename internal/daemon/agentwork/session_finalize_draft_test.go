@@ -449,7 +449,7 @@ func TestStageSessionInLedger_PurgesDraftAndPreservesSessionID(t *testing.T) {
 	runGitCmd(t, ledgerPath, "commit", "--allow-empty", "-m", "manual work")
 	runGitCmd(t, ledgerPath, "checkout", branch)
 	runGitCmd(t, ledgerPath, "merge", "--no-ff", "--no-commit", "manual-merge")
-	_, stageErr := h.stageSessionInLedger(payload)
+	_, stageErr := h.stageSessionInLedger(payload, nil)
 	require.ErrorContains(t, stageErr, "merge in progress")
 	assert.Equal(t, cacheDir, payload.SessionDir)
 	assert.Empty(t, gitOutput(t, ledgerPath, "diff", "HEAD", "--", "sessions/"+sessionName))
@@ -458,7 +458,7 @@ func TestStageSessionInLedger_PurgesDraftAndPreservesSessionID(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(destDir, "raw.jsonl"))
 	runGitCmd(t, ledgerPath, "merge", "--abort")
 
-	_, stageErr = h.stageSessionInLedger(payload)
+	_, stageErr = h.stageSessionInLedger(payload, nil)
 	require.NoError(t, stageErr)
 
 	assert.Equal(t, destDir, payload.SessionDir, "payload must point at the staged location")
@@ -508,6 +508,8 @@ func TestStageSessionInLedger_LeavesFinalizedSessionAlone(t *testing.T) {
 		Files: map[string]lfs.FileRef{"raw.jsonl": {OID: "sha256:abc", Size: 10}},
 	}))
 	require.NoError(t, os.WriteFile(filepath.Join(destDir, "summary.md"), []byte("REAL SUMMARY"), 0644))
+	const priorRaw = "prior raw.jsonl"
+	require.NoError(t, os.WriteFile(filepath.Join(destDir, "raw.jsonl"), []byte(priorRaw), 0644))
 
 	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
 	require.NoError(t, os.MkdirAll(cacheDir, 0755))
@@ -515,8 +517,11 @@ func TestStageSessionInLedger_LeavesFinalizedSessionAlone(t *testing.T) {
 
 	h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
 	payload := &SessionFinalizePayload{SessionDir: cacheDir, LedgerPath: ledgerPath}
-	_, stageErr := h.stageSessionInLedger(payload)
-	require.NoError(t, stageErr)
+	_, stageErr := h.stageSessionInLedger(payload, nil)
+	raw, err := os.ReadFile(filepath.Join(destDir, "raw.jsonl"))
+	require.NoError(t, err)
+	assert.Equal(t, priorRaw, string(raw), "a cache without a matching ID cannot replace finalized content")
+	require.ErrorContains(t, stageErr, "refused to overwrite a Ledger session")
 
 	body, err := os.ReadFile(filepath.Join(destDir, "summary.md"))
 	require.NoError(t, err)
@@ -547,7 +552,7 @@ func TestStageSessionInLedger_DurablyPreservesDraftIdentity(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "meta.json"), []byte("broken JSON"), 0600))
 			}
 			h := newGitBackedHandler()
-			_, err := h.stageSessionInLedger(&SessionFinalizePayload{SessionDir: cacheDir, LedgerPath: ledgerPath})
+			_, err := h.stageSessionInLedger(&SessionFinalizePayload{SessionDir: cacheDir, LedgerPath: ledgerPath}, nil)
 			if mode == "corrupt metadata" {
 				require.ErrorContains(t, err, "preserve draft session identity")
 				draft, err := lfs.ReadSessionMeta(destDir)

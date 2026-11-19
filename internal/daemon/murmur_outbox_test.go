@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/require"
@@ -53,7 +54,8 @@ func makeOutboxMurmur(t *testing.T, targetDir, content string, ts time.Time) Mur
 // prevented: a murmur queued by the CLI is never drained and expires.
 func TestMurmurOutbox_SharedAcrossCacheEnvironments(t *testing.T) {
 	isolateMurmurOutbox(t)
-	target := t.TempDir()
+	target, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	require.NoError(t, os.Mkdir(filepath.Join(target, ".git"), 0o755))
 	p := makeOutboxMurmur(t, target, "queued by cli", time.Now().UTC())
 	require.NoError(t, WriteOutboxMurmur(target, p))
@@ -153,6 +155,77 @@ func TestDrainMurmurOutbox_CommitsAndRemoves(t *testing.T) {
 	entries, err := ReadOutboxMurmurs(ledgerDir)
 	require.NoError(t, err)
 	require.Empty(t, entries, "outbox file must be removed after a confirmed commit")
+}
+
+func TestMurmurOutbox_RetriesAfterGCLockReleases(t *testing.T) {
+	isolateMurmurOutbox(t)
+	bare, dir, _ := setupRacingLedger(t)
+	before := getGitSHA(t, dir)
+	scheduler := newPullTestScheduler(t, dir)
+	workspace := &WorkspaceState{ID: "ledger", Type: WorkspaceTypeLedger, Path: dir, Exists: true}
+	scheduler.workspaceRegistry.ledger = workspace
+	scheduler.workspaceRegistry.workspaces[workspace.ID] = workspace
+	scheduler.SetWhisperRegistry(NewWhisperRegistry(openTestStore(t), nil))
+	service := &daemonServiceImpl{d: &Daemon{scheduler: scheduler, logger: scheduler.logger}}
+	ts := time.Now().UTC()
+	queued := makeOutboxMurmur(t, dir, "queued before GC", ts)
+	live := makeOutboxMurmur(t, dir, "published during GC", ts)
+	require.NoError(t, WriteOutboxMurmur(dir, queued))
+
+	func() {
+		lockPath := dir + ".gc-lock"
+		lock, err := acquireGCLock(lockPath)
+		require.NoError(t, err)
+		defer releaseGCLock(lock, lockPath)
+
+		require.NoError(t, service.commitMurmur(t.Context(), live))
+		scheduler.drainMurmurOutbox(t.Context())
+		require.Equal(t, before, getGitSHA(t, dir), "GC is already preserving this checkout")
+		require.NoFileExists(t, filepath.Join(dir, queued.RelPath))
+		require.NoFileExists(t, filepath.Join(dir, live.RelPath))
+		entries, err := ReadOutboxMurmurs(dir)
+		require.NoError(t, err)
+		require.Len(t, entries, 2, "both murmurs must survive for another drain")
+		require.NoFileExists(t, filepath.Join(MurmurOutboxDir(dir), filepath.Base(live.RelPath)),
+			"the IPC publish must queue outside the checkout being swapped")
+	}()
+
+	require.Equal(t, before, gitCmd(t, bare, "rev-parse", "refs/heads/main"))
+	require.NoError(t, scheduler.doPull(t.Context(), nil, false, false))
+	for _, payload := range []MurmurPayload{queued, live} {
+		require.JSONEq(t, string(payload.MurmurJSON), gitCmd(t, bare, "show", "refs/heads/main:"+payload.RelPath))
+	}
+	entries, err := ReadOutboxMurmurs(dir)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestDrainMurmurOutbox_RetainsEntryWhileTeamCheckoutIsLocked(t *testing.T) {
+	isolateMurmurOutbox(t)
+	if testing.Short() {
+		t.Skip("short: shells git")
+	}
+	team, before := initGitRepoWithCommit(t)
+	p := makeOutboxMurmur(t, team, "team message", time.Now().UTC())
+	require.NoError(t, WriteOutboxMurmur(team, p))
+	s := newDrainScheduler(t, team)
+	s.workspaceRegistry.workspaces["ledger"].Type = WorkspaceTypeTeamContext
+
+	require.NoError(t, gitutil.WithPreCloneLock(t.Context(), team, func() error {
+		s.drainMurmurOutbox(t.Context())
+		require.Equal(t, before, getGitSHA(t, team))
+		require.NoFileExists(t, filepath.Join(team, p.RelPath))
+		entries, err := ReadOutboxMurmurs(team)
+		require.NoError(t, err)
+		require.Len(t, entries, 1, "a Team Context reclone must leave the queued murmur intact")
+		return nil
+	}))
+
+	s.drainMurmurOutbox(t.Context())
+	require.Contains(t, gitLog(t, team, p.RelPath), "murmur: team message")
+	entries, err := ReadOutboxMurmurs(team)
+	require.NoError(t, err)
+	require.Empty(t, entries)
 }
 
 func TestWriteAndCommitMurmur_RefusesConflictMarkers(t *testing.T) {
@@ -378,4 +451,36 @@ func TestGCCarriesMurmurOutbox(t *testing.T) {
 	entries, err := ReadOutboxMurmurs(newClone)
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
+}
+
+func TestMurmurOutboxReadsLegacyCacheAfterCloningThroughAlias(t *testing.T) {
+	isolateMurmurOutbox(t)
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	target := filepath.Join(alias, "ledger")
+	p := makeOutboxMurmur(t, target, "queued before clone", time.Now().UTC())
+	require.NoError(t, writeOutboxMurmur(murmurOutboxCacheDir(target), p))
+	require.Equal(t, murmurOutboxCacheDir(filepath.Join(root, "ledger")), MurmurOutboxDir(target))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "ledger", ".git"), 0o755))
+
+	entries, err := ReadOutboxMurmurs(target)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, p.RelPath, entries[0].payload.RelPath)
+}
+
+func TestBlueGreenGCSharesLockWithWorkspacePathWithTrailingSeparator(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := dir + ".gc-lock"
+	lock, err := acquireGCLock(lockPath)
+	require.NoError(t, err)
+	defer releaseGCLock(lock, lockPath)
+
+	scheduler := newPullTestScheduler(t, dir)
+	workspace := WorkspaceState{ID: "ledger", Type: WorkspaceTypeLedger, Path: dir + string(filepath.Separator), Exists: true}
+	require.Equal(t, gcSkippedLocked, scheduler.runBlueGreenGC(t.Context(), workspace))
 }

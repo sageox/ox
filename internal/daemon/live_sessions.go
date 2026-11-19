@@ -280,18 +280,10 @@ func (l *LiveSessions) Drain(ctx context.Context, sessionPath string) {
 	l.request(ctx, dir)
 }
 
-// Capture spools a batch the tail watcher just committed and requests a drain.
-func (l *LiveSessions) Capture(ctx context.Context, sessionDir string, batch session.AppendedBatch) {
-	res, err := livesession.Spool(ctx, sessionDir, batch.Bytes, livesession.SpoolOptions{Paused: batch.Suspended})
-	if err != nil {
-		if !errors.Is(err, livesession.ErrNotStreaming) {
-			l.logger.WarnContext(ctx, "live_spool_failed", "session", filepath.Base(sessionDir), "error", err)
-		}
-		return
-	}
-	if res.Appended > 0 {
-		l.request(ctx, canonicalDir(sessionDir))
-	}
+// Spooled requests a drain of a session whose spool one of the daemon's
+// capture paths just added to (livesession.SpoolCommitted).
+func (l *LiveSessions) Spooled(ctx context.Context, sessionDir string) {
+	l.request(ctx, canonicalDir(sessionDir))
 }
 
 // Wait blocks until in-flight drains finish (shutdown and tests).

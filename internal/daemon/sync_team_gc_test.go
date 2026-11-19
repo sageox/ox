@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -63,6 +64,47 @@ func TestBlueGreenGC_Success(t *testing.T) {
 	// verify LastGCTime was updated
 	lastGC := scheduler.WorkspaceRegistry().GetLastGCTime("team_test")
 	assert.False(t, lastGC.IsZero(), "LastGCTime should be set after GC")
+}
+
+func TestBlueGreenGC_TeamCheckoutBusy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	manifest := "version 1\ninclude .sageox/\ninclude SOUL.md\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifest, nil)
+	ws := WorkspaceState{Type: WorkspaceTypeTeamContext, Path: teamDir, CloneURL: "file://" + bareDir}
+	ctx := t.Context()
+	require.NoError(t, gitutil.WithPreCloneLock(ctx, teamDir, func() error {
+		result, _ := scheduler.runBlueGreenGCOpts(ctx, ws, false)
+		require.Equal(t, gcSkippedLocked, result)
+		require.NoDirExists(t, teamDir+".new")
+		return nil
+	}))
+}
+
+func TestCheckTeamContextGC_SkipsBusyCheckoutAndReclonesNext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	manifest := "version 1\ninclude .sageox/\ninclude SOUL.md\n"
+	bareDir, openPath, scheduler := setupClonedTeamContext(t, manifest, nil)
+	busyPath := filepath.Join(t.TempDir(), "busy")
+	_, err := scheduler.twoPhaseClone(t.Context(), "file://"+bareDir, busyPath, nil)
+	require.NoError(t, err)
+
+	busy := WorkspaceState{ID: "busy", Type: WorkspaceTypeTeamContext, Path: busyPath, CloneURL: "file://" + bareDir, Exists: true}
+	open := WorkspaceState{ID: "open", Type: WorkspaceTypeTeamContext, Path: openPath, CloneURL: "file://" + bareDir, Exists: true}
+	registry := scheduler.WorkspaceRegistry()
+	registry.mu.Lock()
+	registry.workspaces[busy.ID] = &busy
+	registry.workspaces[open.ID] = &open
+	registry.mu.Unlock()
+	require.NoError(t, gitutil.WithPreCloneLock(t.Context(), busyPath, func() error {
+		scheduler.checkTeamContextGC(t.Context(), []WorkspaceState{busy, open})
+		require.True(t, registry.GetLastGCTime(busy.ID).IsZero())
+		require.False(t, registry.GetLastGCTime(open.ID).IsZero())
+		return nil
+	}))
 }
 
 func TestBlueGreenGC_PreservesUncommittedTrackedChanges(t *testing.T) {
@@ -590,7 +632,9 @@ func TestBlueGreenGC_SkipsCloneInFlight(t *testing.T) {
 	scheduler.cloneInFlight.Store(ws.ID, true)
 
 	ctx := context.Background()
-	scheduler.checkAndRunGC(ctx)
+	if done := scheduler.checkAndRunGC(ctx); done != nil {
+		awaitStartupCompletion(t, done)
+	}
 
 	// GC should have been skipped — no .new or .old dirs
 	assert.NoDirExists(t, teamDir+".new")

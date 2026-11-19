@@ -37,13 +37,15 @@ func TestPullBudget_ScalesWithAheadAndIsCapped(t *testing.T) {
 func TestPullContext(t *testing.T) {
 	t.Parallel()
 
-	t.Run("small backlog keeps the cycle context so a network hang stays bounded", func(t *testing.T) {
+	t.Run("short backlog gets the base budget if little cycle time remains", func(t *testing.T) {
 		t.Parallel()
-		parent, cancel := context.WithTimeout(context.Background(), time.Minute)
+		parent, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		got, release := PullContext(parent, longBacklogAhead-1, nil)
+		got, release := PullContext(parent, 0, nil)
 		defer release()
-		assert.Equal(t, parent, got)
+		dl, ok := got.Deadline()
+		require.True(t, ok)
+		assert.InDelta(t, pullBaseTimeout.Seconds(), time.Until(dl).Seconds(), 5)
 	})
 
 	t.Run("long backlog outlives the cycle deadline with the scaled budget", func(t *testing.T) {
@@ -93,9 +95,9 @@ func TestPullContext(t *testing.T) {
 
 	t.Run("a parent with more time than the budget is left alone", func(t *testing.T) {
 		t.Parallel()
-		parent, cancel := context.WithTimeout(context.Background(), time.Hour)
+		parent, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
-		got, release := PullContext(parent, 100, nil)
+		got, release := PullContext(parent, 0, nil)
 		defer release()
 		assert.Equal(t, parent, got)
 	})

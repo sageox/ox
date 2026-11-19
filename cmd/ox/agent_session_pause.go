@@ -144,5 +144,10 @@ func updateRecordingControl(projectRoot string, state *session.RecordingState, a
 	if !ok {
 		return fmt.Errorf("adapter-missing: Cursor incremental reader is unavailable")
 	}
-	return session.UpdateCursorRecordingControl(context.Background(), projectRoot, state, home, reader, action, update)
+	return session.UpdateCursorRecordingControl(context.Background(), projectRoot, state, home, reader, action, update,
+		func(batch session.AppendedBatch) {
+			// the control's drain committed these bytes like any capture (C8); the
+			// step declares and logs a batch the stream could not take
+			_ = liveSessionSpool(projectRoot, state, batch)
+		})
 }
