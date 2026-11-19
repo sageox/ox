@@ -11,6 +11,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -160,8 +161,8 @@ func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, i
 		}
 		candidate := filepath.Join(projectDir, agentSessionID+".jsonl")
 		if info, err := os.Lstat(candidate); err == nil && info.Mode().IsRegular() {
-			if claudesource.Validate(candidate, repoRoot, agentSessionID) != nil {
-				return "", 0, fmt.Errorf("session %s has invalid repository metadata", agentSessionID)
+			if err := claudesource.Validate(candidate, repoRoot, agentSessionID); err != nil {
+				return "", 0, fmt.Errorf("session %s at %s has invalid repository metadata: %w", agentSessionID, candidate, err)
 			}
 			return candidate, findStartOffset(candidate, parseSessionSince(since)), nil
 		}
@@ -257,19 +258,29 @@ func findClaudeSessionInOtherBucket(projectsDir, ownBucket, repoRoot, sessionID 
 		return "", err
 	}
 	var match string
+	var rejected []string
 	for _, dir := range dirs {
 		if !dir.IsDir() || dir.Name() == ownBucket {
 			continue
 		}
 		path := filepath.Join(projectsDir, dir.Name(), sessionID+".jsonl")
 		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() || claudesource.Validate(path, repoRoot, sessionID) != nil {
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if err := claudesource.Validate(path, repoRoot, sessionID); err != nil {
+			rejected = append(rejected, fmt.Sprintf("%s: %v", path, err))
 			continue
 		}
 		if match != "" {
 			return "", fmt.Errorf("session %s has multiple valid project buckets", sessionID)
 		}
 		match = path
+	}
+	if match == "" && len(rejected) > 0 {
+		// the transcript exists but is not this repo's: say why, or a stop
+		// reports "not found" and leaves nothing to act on
+		return "", fmt.Errorf("session %s found but not accepted for project %s: %s", sessionID, repoRoot, strings.Join(rejected, "; "))
 	}
 	return match, nil
 }
@@ -281,16 +292,19 @@ func sessionContainsAgentID(path, agentID string) bool {
 	}
 	defer func() { _ = f.Close() }()
 
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-
-	for scanner.Scan() {
-		if strings.Contains(scanner.Text(), agentID) {
+	// no line cap: a transcript line holding a screenshot can pass 1 MiB, and
+	// a scanner would stop there without reading the rest of the session
+	reader := bufio.NewReaderSize(f, 64*1024)
+	needle := []byte(agentID)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if bytes.Contains(line, needle) {
 			return true
 		}
+		if err != nil {
+			return false
+		}
 	}
-	return false
 }
 
 // findStartOffset locates the byte offset where entries after sinceTime begin.
@@ -304,13 +318,16 @@ func findStartOffset(path string, sinceTime time.Time) int64 {
 	}
 	defer func() { _ = f.Close() }()
 
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-
+	// no line cap: stopping at the first line over a scanner's limit would
+	// return that line's offset as the recording's start
+	reader := bufio.NewReaderSize(f, 64*1024)
 	var offset int64
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			// an unterminated tail is still being written: start no later than it
+			return offset
+		}
 		var entry struct {
 			Timestamp string `json:"timestamp"`
 		}
@@ -321,9 +338,8 @@ func findStartOffset(path string, sinceTime time.Time) int64 {
 				}
 			}
 		}
-		offset += int64(len(line)) + 1 // +1 for newline
+		offset += int64(len(line))
 	}
-	return offset
 }
 
 // --- line parsing ---
