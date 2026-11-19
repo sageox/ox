@@ -13,20 +13,20 @@ Search the CodeDB index using a query DSL
 Search the indexed CodeDB for symbols, code, diffs, commits, comments, PRs, and issues.
 
 DSL grammar:
-  type:{code,symbol,diff,commit,comment,pr,issue}   what kind of record to match
-  repo:<name>[@<rev>]    file:<glob>    lang:<id>
-  author:<name>          message:<text>
-  before:<date>          after:<date>                ISO 8601 or relative
-  calls:<name>           calledby:<name>             resolved call graph (ADR-019)
-  returns:<type>         depth:1..10                 transitive call depth
-  confidence:{extracted,inferred,ambiguous}          ADR-019 edge confidence
-  ckind:<kind>           state:<pr_state>
-  select:{repo,file,symbol,symbol.<kind>}
-  count:<N>              case:yes
-  patterntype:{literal,keyword,regexp}
+  type:\{code,symbol,diff,commit,comment,pr,issue}   what kind of record to match
+  repo:\<name>[@\<rev>]    file:\<glob>    lang:\<id>
+  author:\<name>          message:\<text>
+  before:\<date>          after:\<date>                ISO 8601 or relative
+  calls:\<name>           calledby:\<name>             resolved call graph (ADR-019)
+  returns:\<type>         depth:1..10                 transitive call depth
+  confidence:\{extracted,inferred,ambiguous}          ADR-019 edge confidence
+  ckind:\<kind>           state:\<pr_state>
+  select:\{repo,file,symbol,symbol.\<kind>}
+  count:\<N>              case:yes
+  patterntype:\{literal,keyword,regexp}
   OR                                                 boolean across groups
   /pattern/                                          forced regex
-  -<filter>                                          negate any filter
+  -\<filter>                                          negate any filter
 
 Examples:
   # symbol definition (what grep usually misses among text matches)
