@@ -148,9 +148,7 @@ Headless read-only mode runs a bounded ledger refresh without the daemon:
   ox sync --read-only --repo repo_<uuid> --check --json
 
 Read-only mode uses SAGEOX_TOKEN and SAGEOX_ENDPOINT, independent of the
-current project. Inside a project for the same repository it refuses to put
-its checkout in that project's Ledger folder; set XDG_DATA_HOME to a separate
-directory. See docs/specs/ledger-read-sync.md for the reader contract.`
+current project. See docs/specs/ledger-read-sync.md for the reader contract.`
 
 // syncLong assembles `ox sync --help`. The Add-on Catalog paragraph is
 // unconditional: `ox addons` is an ordinary command now, so naming it is

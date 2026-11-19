@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,8 +14,6 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
-	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/spf13/cobra"
@@ -113,13 +110,6 @@ func runReadSync(cmd *cobra.Command, args []string) error {
 		result.ErrorClass = class
 		return finishReadSync(cmd, result, jsonOutput, 2)
 	}
-	// The daemon of a SageOx project for this repo clones the read-write Ledger
-	// into its Ledger folder, and takes any checkout it finds there for it,
-	// including a read-only one that sessions cannot be pushed through.
-	if root := config.FindProjectRoot(); !check && root != "" && config.GetRepoID(root) == repoID && isProjectLedger(root, repoID, path) {
-		result.ErrorClass = "project_ledger"
-		return finishReadSync(cmd, result, jsonOutput, 1)
-	}
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -159,45 +149,6 @@ func runReadSync(cmd *cobra.Command, args []string) error {
 	return finishReadSync(cmd, result, jsonOutput, code)
 }
 
-// isProjectLedger reports whether path is the Ledger folder of the project at
-// root. The daemon and `ox doctor --fix` record that folder in config.local.toml
-// as their own environment selects it. Until one has, the daemon is assumed to
-// use the default data home, as a daemon started without XDG_DATA_HOME does,
-// and the project's endpoint.
-func isProjectLedger(root, repoID, path string) bool {
-	if local, err := config.LoadLocalConfig(root); err == nil && local.Ledger != nil && filepath.IsAbs(local.Ledger.Path) {
-		return sameFolder(local.Ledger.Path, path)
-	}
-	dataHome := os.Getenv("XDG_DATA_HOME")
-	home, err := os.UserHomeDir()
-	if dataHome != "" && (err != nil || !sameFolder(dataHome, filepath.Join(home, ".local", "share"))) {
-		return false
-	}
-	return sameFolder(config.DefaultLedgerPath(repoID, endpoint.GetForProject(root)), path)
-}
-
-// sameFolder reports whether a and b name one folder, resolving symlinks in
-// the part of each path that exists: the folders compared need not exist yet.
-func sameFolder(a, b string) bool {
-	return resolveExisting(a) == resolveExisting(b)
-}
-
-func resolveExisting(path string) string {
-	path = filepath.Clean(path)
-	missing := ""
-	for {
-		if resolved, err := filepath.EvalSymlinks(path); err == nil {
-			return filepath.Join(resolved, missing)
-		}
-		parent := filepath.Dir(path)
-		if parent == path {
-			return filepath.Join(path, missing)
-		}
-		missing = filepath.Join(filepath.Base(path), missing)
-		path = parent
-	}
-}
-
 func finishReadSync(cmd *cobra.Command, result ledger.ReadSyncResult, jsonOutput bool, code int) error {
 	if jsonOutput {
 		if err := cli.PrintJSONTo(cmd.OutOrStdout(), result); err != nil {
@@ -209,10 +160,6 @@ func finishReadSync(cmd *cobra.Command, result ledger.ReadSyncResult, jsonOutput
 		fmt.Fprintf(cmd.ErrOrStderr(), "Ledger read failed: %s\n", result.ErrorClass)
 		if code == 2 {
 			fmt.Fprintln(cmd.ErrOrStderr(), "Use: ox sync --read-only --repo repo_<uuid> [--timeout 30m] [--check] [--json]")
-		}
-		if result.ErrorClass == "project_ledger" {
-			fmt.Fprintf(cmd.ErrOrStderr(), "%s is the Ledger folder of the SageOx project here, which its ox daemon clones and writes.\n", result.Path)
-			fmt.Fprintln(cmd.ErrOrStderr(), "Use ox's normal commands in this project, or set XDG_DATA_HOME to a separate directory for read-only syncs.")
 		}
 	}
 	if code != 0 {
