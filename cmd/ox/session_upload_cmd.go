@@ -24,6 +24,7 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/sessionid"
 	"github.com/spf13/cobra"
 )
 
@@ -253,6 +254,9 @@ func parseSessionDirName(name string) (createdAt time.Time, username, agentID st
 			if lastDash := strings.LastIndex(rest, "-"); lastDash >= 0 {
 				username = rest[:lastDash]
 				agentID = rest[lastDash+1:]
+				if user, recordingID, ok := strings.Cut(username, "--"); ok && sessionid.IsValidSessionID(recordingID) {
+					username = user
+				}
 			} else {
 				agentID = rest
 			}

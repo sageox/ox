@@ -102,7 +102,9 @@ func generateSessionName(sessionID, username, recordingID string) string {
 	}
 
 	if recordingID != "" {
-		return fmt.Sprintf("%s-%s-%s-%s", timestamp, safeUsername, recordingID, safeSessionID)
+		// sanitizeFilename collapses double dashes, reserving this delimiter
+		// for the recording ID while keeping the agent ID at the end.
+		return fmt.Sprintf("%s-%s--%s-%s", timestamp, safeUsername, recordingID, safeSessionID)
 	}
 	return fmt.Sprintf("%s-%s-%s", timestamp, safeUsername, safeSessionID)
 }
