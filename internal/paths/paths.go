@@ -97,11 +97,18 @@ func ConfigDir() string {
 //
 // XDG mode (default): $XDG_DATA_HOME/sageox (default: ~/.local/share/sageox)
 // Legacy mode (OX_XDG_DISABLE=1): ~/.sageox/data
+//
+// Under go test it panics rather than return the real user's data directory
+// (refuseRealDataDirUnderTest); tests sandbox XDG_DATA_HOME.
 func DataDir() string {
+	var dir string
 	if useXDGMode() {
-		return filepath.Join(xdgDataHome(), "sageox")
+		dir = filepath.Join(xdgDataHome(), "sageox")
+	} else {
+		dir = filepath.Join(SageoxDir(), "data")
 	}
-	return filepath.Join(SageoxDir(), "data")
+	refuseRealDataDirUnderTest(dir)
+	return dir
 }
 
 // CacheDir returns the cache directory per XDG Base Directory Specification.
