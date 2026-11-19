@@ -56,7 +56,7 @@ func TestPublishCachedSessionRetriesLegacyRecording(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(rawPath, append(rawHeader, "\n"+entries...), 0644))
 	id := sessionid.GenerateSessionID()
-	require.NoError(t, writeSessionUploadRetryPending(cacheDir, id))
+	require.NoError(t, session.WriteUploadRetryPending(cacheDir, id))
 	dest := filepath.Join(f.ledgerPath, "sessions", name)
 	require.NoError(t, os.MkdirAll(dest, 0755))
 	require.NoError(t, lfs.WriteSessionMeta(dest, lfs.NewSessionMeta(name, "coworker", "OxLegacy", "codex", time.Now()).SessionID(id).Build()))

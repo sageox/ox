@@ -3,25 +3,21 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/endpoint"
-	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/pipeline"
-	"github.com/sageox/ox/internal/sessionid"
 )
 
 func init() {
@@ -44,9 +40,8 @@ type orphanedSession struct {
 }
 
 const (
-	rawJSONLInitialScanBuffer     = 1024 * 1024
-	rawJSONLMaxLineBytes          = 10 * 1024 * 1024
-	sessionUploadRetryPendingFile = ".upload-retry-pending"
+	rawJSONLInitialScanBuffer = 1024 * 1024
+	rawJSONLMaxLineBytes      = 10 * 1024 * 1024
 )
 
 // checkSessionUploadRetry finds sessions in cache that failed to upload and retries them.
@@ -210,7 +205,7 @@ func findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath string) ([]orphanedS
 			recState.SessionPath = sessionDir
 			// A matching pending upload already finalized this carrier before
 			// writing its marker. Appending again would invalidate that binding.
-			if pendingSessionUploadID(sessionDir) == "" {
+			if session.PendingUploadID(sessionDir) == "" {
 				rawPath := filepath.Join(sessionDir, ledgerFileRaw)
 				stoppedAt := session.ResolveStoppedAt(recState.StoppedAt, rawPath, time.Now())
 				// A reclaim-time timestamp cannot identify the trace spool EOF.
@@ -265,7 +260,7 @@ func findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath string) ([]orphanedS
 		ledgerSessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
 		if _, err := os.Stat(filepath.Join(ledgerSessionDir, "meta.json")); err == nil {
 			ledgerMeta, metaErr := lfs.ReadSessionMeta(ledgerSessionDir)
-			_, pendingErr := os.Stat(filepath.Join(sessionDir, sessionUploadRetryPendingFile))
+			_, pendingErr := os.Stat(filepath.Join(sessionDir, session.UploadRetryPendingFile))
 			pendingRetry := pendingErr == nil
 			if metaErr != nil || (!ledgerMeta.IsDraft() && !pendingRetry) {
 				continue
@@ -405,7 +400,7 @@ func resolveOrphanSessionID(sessionDir string, orphan orphanedSession, draftPres
 
 func orphanUploadIdentity(orphan orphanedSession) string {
 	if orphan.CachePath != "" {
-		if id := pendingSessionUploadID(orphan.CachePath); id != "" {
+		if id := session.PendingUploadID(orphan.CachePath); id != "" {
 			return id
 		}
 		if id := session.ReadHeaderSessionID(filepath.Join(orphan.CachePath, ledgerFileRaw)); id != "" {
@@ -467,7 +462,7 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 	}
 	// Keep retry ownership and identity in the authoritative cache before
 	// replacing draft metadata or writing any finalized Ledger content.
-	if err := writeSessionUploadRetryPending(orphan.CachePath, sessionID); err != nil {
+	if err := session.WriteUploadRetryPending(orphan.CachePath, sessionID); err != nil {
 		return fmt.Errorf("record pending session upload retry: %w", err)
 	}
 	if _, _, err := supersedeDraftForFinalize(ledgerPath, orphan.SessionName); err != nil {
@@ -746,56 +741,6 @@ func newRawJSONLScanner(r io.Reader) *bufio.Scanner {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, rawJSONLInitialScanBuffer), rawJSONLMaxLineBytes)
 	return scanner
-}
-
-func writeSessionUploadRetryPending(cachePath, sessionID string) error {
-	root, err := os.OpenRoot(cachePath)
-	if err != nil {
-		return err
-	}
-	defer root.Close()
-	digest, err := sessionUploadRawDigest(root)
-	if err != nil {
-		return err
-	}
-	return fileutil.AtomicWriteBytesInRoot(root, sessionUploadRetryPendingFile, []byte(sessionID+"\n"+digest+"\n"), 0o600)
-}
-
-// A failed attempt can adopt a draft ID or mint one for an older raw header.
-// Bind that publication ID to the exact cache bytes, since a same-minute
-// recording can reuse the cache directory and leave an earlier marker behind.
-func pendingSessionUploadID(cachePath string) string {
-	root, err := os.OpenRoot(cachePath)
-	if err != nil {
-		return ""
-	}
-	defer root.Close()
-	marker, err := root.ReadFile(sessionUploadRetryPendingFile)
-	if err != nil {
-		return ""
-	}
-	id, expected, ok := strings.Cut(strings.TrimSpace(string(marker)), "\n")
-	if !ok || !sessionid.IsValidSessionID(id) {
-		return ""
-	}
-	digest, err := sessionUploadRawDigest(root)
-	if err != nil || digest != expected {
-		return ""
-	}
-	return id
-}
-
-func sessionUploadRawDigest(root *os.Root) (string, error) {
-	raw, err := root.Open(ledgerFileRaw)
-	if err != nil {
-		return "", err
-	}
-	defer raw.Close()
-	hash := sha256.New()
-	if _, err := io.Copy(hash, raw); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 // copyFile copies a file from src to dst.

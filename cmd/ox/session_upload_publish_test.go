@@ -40,7 +40,7 @@ func TestFindPublishableCacheSession(t *testing.T) {
 		}, true, ""},
 		{"earlier publish left a pending retry", func(t *testing.T, cacheDir, ledgerDir string) {
 			writeLedgerMeta(t, ledgerDir, `{"version":"1.0","title":"done"}`)
-			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, sessionUploadRetryPendingFile), []byte("{}"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, session.UploadRetryPendingFile), []byte("{}"), 0o644))
 		}, true, ""},
 		{"already published", func(t *testing.T, _, ledgerDir string) {
 			writeLedgerMeta(t, ledgerDir, `{"version":"1.0","title":"done"}`)

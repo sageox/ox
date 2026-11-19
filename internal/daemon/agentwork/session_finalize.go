@@ -3672,6 +3672,12 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	if err := session.CheckNativeSourceBinding(&state); err != nil {
 		return false, err
 	}
+	// A pending CLI upload with a matching digest has already finalized this
+	// raw capture. Replaying native capture or adding a footer would invalidate
+	// the saved publication ID, which doctor needs to finish the same upload.
+	if session.PendingUploadID(sessionDir) != "" {
+		return session.HasSubstantiveEntries(rawPath), nil
+	}
 	if state.AdapterName == "cursor" {
 		adapter, err := adapters.GetAdapter("cursor")
 		if err != nil {

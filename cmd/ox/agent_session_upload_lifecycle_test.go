@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
@@ -35,7 +37,7 @@ func TestSessionFinalizersRefuseDifferentFinalizedSession(t *testing.T) {
 			require.NoError(t, os.MkdirAll(dest, 0o755))
 			const priorID = "ses_019d0000-0000-7000-8000-000000000099"
 			if operation == "doctor retry after same-minute restart" {
-				require.NoError(t, writeSessionUploadRetryPending(f.state.SessionPath, priorID))
+				require.NoError(t, session.WriteUploadRetryPending(f.state.SessionPath, priorID))
 				require.NoError(t, os.WriteFile(f.result.RawPath, []byte(
 					"{\"type\":\"header\",\"metadata\":{\"session_id\":\""+f.state.SessionID+"\"}}\n"+
 						"{\"type\":\"user\",\"content\":\"replacement\"}\n"), 0o600))
@@ -99,6 +101,60 @@ func TestUploadSessionToLedger_RetriesWithAdoptedDraftID(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			testRetryWithAdoptedDraftID(t, doctor)
+		})
+	}
+}
+
+func TestDoctorRetryAfterDaemonReclaimsInterruptedStop(t *testing.T) {
+	for _, sweep := range []string{"periodic", "agent exit"} {
+		t.Run(sweep, func(t *testing.T) {
+			f := newSessionUploadFixture(t)
+			barePath, ledgerPath := createBareAndClone(t)
+			isolatePushEnv(t, ledgerPath)
+			cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", f.sessionName)
+			require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+			f.state.SessionPath = cacheDir
+			f.result.RawPath = filepath.Join(cacheDir, ledgerFileRaw)
+			f.state.StartedAt = time.Now().Add(-2 * session.StaleRecordingThreshold)
+			stopped := f.state.StartedAt.Add(time.Minute)
+			f.state.StoppedAt = &stopped
+			require.NoError(t, os.WriteFile(f.result.RawPath, f.rawContent, 0o600))
+			require.NoError(t, session.StampRawCarrier(f.result.RawPath, session.CarrierStamp{StoppedAt: stopped}))
+			raw, err := os.ReadFile(f.result.RawPath)
+			require.NoError(t, err)
+			f.refs[ledgerFileRaw] = lfs.NewFileRef(raw)
+			recordingPath := filepath.Join(cacheDir, ".recording.json")
+			stateJSON, err := json.Marshal(f.state)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(recordingPath, stateJSON, 0o600))
+
+			dest := filepath.Join(ledgerPath, "sessions", f.sessionName)
+			require.NoError(t, os.MkdirAll(dest, 0o755))
+			const draftID = "ses_019d0000-0000-7000-8000-000000000099"
+			require.NoError(t, lfs.WriteSessionMetaOnly(dest, &lfs.SessionMeta{
+				Version: "1.0", SessionName: f.sessionName, SessionID: draftID, Draft: true,
+			}))
+			var calls []string
+			fail := scriptedSessionUploadEffects(&calls, f.refs, "upload_lfs")
+			require.ErrorContains(t, uploadSessionToLedgerWithEffects(f.projectRoot, f.result, f.state, ledgerPath, f.sessionName, fail), "LFS upload")
+
+			handler := agentwork.NewSessionFinalizeHandler(slog.Default())
+			if sweep == "periodic" {
+				_, err := handler.Detect(ledgerPath)
+				require.NoError(t, err)
+			} else {
+				handler.DetectOrphanedForAgent(ledgerPath, f.state.AgentID, 0)
+			}
+			require.NoFileExists(t, recordingPath, "the daemon must reclaim the abandoned recording")
+			orphans, err := findOrphanedSessionsInDir(filepath.Dir(cacheDir), ledgerPath)
+			require.NoError(t, err)
+			require.Len(t, orphans, 1)
+			retry := scriptedSessionUploadEffects(&calls, f.refs, "")
+			retry.commitRetry = commitAndPushLedgerWithExtras
+			require.NoError(t, retrySessionUploadWithEffects(f.projectRoot, ledgerPath, orphans[0], retry))
+			meta := remoteMeta(t, barePath, f.sessionName)
+			assert.Equal(t, draftID, meta.SessionID)
+			assert.Equal(t, f.refs[ledgerFileRaw], meta.Files[ledgerFileRaw])
 		})
 	}
 }
@@ -277,7 +333,7 @@ func TestUploadSessionToLedger_PreservesPriorStateAtFallibleBoundaries(t *testin
 			assert.Contains(t, err.Error(), tc.failAt+" failed")
 			assert.Equal(t, tc.wantCalls, calls, "no later phase may run after a failed boundary")
 			assertSessionBytesPreserved(t, fixture)
-			require.FileExists(t, filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile), "every failure after meta.json exists must leave retry ownership")
+			require.FileExists(t, filepath.Join(fixture.state.SessionPath, session.UploadRetryPendingFile), "every failure after meta.json exists must leave retry ownership")
 			orphans, scanErr := findOrphanedSessionsInDir(filepath.Dir(fixture.state.SessionPath), fixture.ledgerPath)
 			require.NoError(t, scanErr)
 			require.Len(t, orphans, 1, "doctor must discover the interrupted upload")
@@ -371,7 +427,7 @@ func TestUploadSessionToLedger_ReadOnlyIsNotHiddenByRecoveryWrapping(t *testing.
 	assert.Equal(t, api.ErrReadOnly, err, "the caller relies on the sentinel for membership guidance")
 	assert.Equal(t, []string{"upload_lfs"}, calls)
 	assertSessionBytesPreserved(t, fixture)
-	assert.NoFileExists(t, filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile), "read-only access is not retryable")
+	assert.NoFileExists(t, filepath.Join(fixture.state.SessionPath, session.UploadRetryPendingFile), "read-only access is not retryable")
 }
 
 func TestSessionUploadOrchestration_FailedUploadThenRetryIsIdempotent(t *testing.T) {
@@ -658,7 +714,7 @@ func TestRetrySessionUpload_PushFailureRemainsIncomplete(t *testing.T) {
 	assert.Equal(t, []string{"upload_lfs", "commit_retry"}, calls)
 	_, statErr := os.Stat(fixture.state.SessionPath)
 	assert.NoError(t, statErr, "failed retry must leave authoritative cache available")
-	require.FileExists(t, filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile))
+	require.FileExists(t, filepath.Join(fixture.state.SessionPath, session.UploadRetryPendingFile))
 
 	// The committed final metadata used to make the next doctor pass skip this
 	// cache directory forever. The pending marker must keep it discoverable.
@@ -789,14 +845,14 @@ func TestRetrySessionUpload_AcceptsLargeValidHeader(t *testing.T) {
 }
 
 func TestWriteSessionUploadRetryPending_RequiresExistingCache(t *testing.T) {
-	err := writeSessionUploadRetryPending(filepath.Join(t.TempDir(), "missing"), "ses_019d0000-0000-7000-8000-000000000007")
+	err := session.WriteUploadRetryPending(filepath.Join(t.TempDir(), "missing"), "ses_019d0000-0000-7000-8000-000000000007")
 	require.Error(t, err)
 }
 
 func TestRetrySessionUpload_PendingMarkerFailureStopsBeforeMutation(t *testing.T) {
 	fixture := newSessionUploadFixture(t)
 	require.NoError(t, os.Mkdir(
-		filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile),
+		filepath.Join(fixture.state.SessionPath, session.UploadRetryPendingFile),
 		0o700,
 	))
 
@@ -823,5 +879,5 @@ func TestRetrySessionUpload_UnsafePointerPathRemainsRetryable(t *testing.T) {
 		scriptedSessionUploadEffects(&calls, fixture.refs, ""),
 	)
 	require.ErrorContains(t, err, "write LFS pointer files")
-	require.FileExists(t, filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile))
+	require.FileExists(t, filepath.Join(fixture.state.SessionPath, session.UploadRetryPendingFile))
 }

@@ -1641,7 +1641,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	sessionDir := filepath.Join(sessionsDir, sessionName)
 	sourceCacheDir := filepath.Dir(result.RawPath)
 	recordingID := stopRecordingID(result, state)
-	publicationID := pendingSessionUploadID(sourceCacheDir)
+	publicationID := session.PendingUploadID(sourceCacheDir)
 	if publicationID == "" {
 		publicationID = recordingID
 	}
@@ -1722,7 +1722,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	// Record retry ownership before the ledger gains a final meta.json: once
 	// that file exists, findOrphanedSessionsInDir skips this session unless
 	// the marker is present, so every failure below must leave it behind.
-	if err := writeSessionUploadRetryPending(sourceCacheDir, sessionID); err != nil {
+	if err := session.WriteUploadRetryPending(sourceCacheDir, sessionID); err != nil {
 		return fmt.Errorf("record pending session upload: %w", err)
 	}
 
@@ -1748,7 +1748,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		if errors.Is(err, api.ErrReadOnly) {
 			// Read-only access is not retryable; a marker would only hand doctor
 			// a retry that fails the same way.
-			_ = os.Remove(filepath.Join(sourceCacheDir, sessionUploadRetryPendingFile))
+			_ = os.Remove(filepath.Join(sourceCacheDir, session.UploadRetryPendingFile))
 			return err // don't wrap, don't set doctor marker
 		}
 		return fmt.Errorf("LFS upload: %w", err)
@@ -1820,7 +1820,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 			slog.Debug("prune session recovery copy", "dir", recoveryCacheDir, "error", err)
 		}
 	}
-	_ = os.Remove(filepath.Join(sourceCacheDir, sessionUploadRetryPendingFile))
+	_ = os.Remove(filepath.Join(sourceCacheDir, session.UploadRetryPendingFile))
 
 	// reverse-link reconciliation: the session is committed, so record its
 	// ses_ id + outcome=stopped in the meta.json of every plan it produced

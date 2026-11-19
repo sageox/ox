@@ -375,7 +375,7 @@ func cacheSessionUnpublished(ledgerPath, name, candidate string) bool {
 	if session.IsHeld(candidate) {
 		return true
 	}
-	if _, err := os.Stat(filepath.Join(candidate, sessionUploadRetryPendingFile)); err == nil {
+	if _, err := os.Stat(filepath.Join(candidate, session.UploadRetryPendingFile)); err == nil {
 		return true
 	}
 	ledgerMeta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", name))
@@ -518,6 +518,6 @@ func publishCachedSession(projectRoot, ledgerPath, sessionName, cacheDir string)
 			slog.Warn("published session still marked held", "session", sessionName, "dir", dir, "error", err)
 		}
 	}
-	_ = os.Remove(filepath.Join(cacheDir, sessionUploadRetryPendingFile))
+	_ = os.Remove(filepath.Join(cacheDir, session.UploadRetryPendingFile))
 	return nil
 }
