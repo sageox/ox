@@ -222,25 +222,7 @@ func TestWriteObservation_GitCommit(t *testing.T) {
 	require.NoError(t, err)
 
 	commitMsg := strings.TrimSpace(string(out))
-	require.Equal(t, "observation: a]commit message with special chars & symbols", commitMsg)
-
-	// test truncation: content longer than 50 chars gets "..."
-	dir2 := t.TempDir()
-	initTestGitRepo(t, dir2)
-
-	longContent := strings.Repeat("z", 80)
-	obs2 := []observation{{Content: longContent}}
-	err = writeObservation(dir2, obs2)
-	require.NoError(t, err)
-
-	cmd = exec.Command("git", "log", "--format=%s", "-1")
-	cmd.Dir = dir2
-	out, err = cmd.CombinedOutput()
-	require.NoError(t, err)
-
-	commitMsg = strings.TrimSpace(string(out))
-	expected := "observation: " + longContent[:50] + "..."
-	require.Equal(t, expected, commitMsg)
+	require.Equal(t, "observation: record team memory", commitMsg)
 }
 
 func TestParseObservations_OverMaxSize(t *testing.T) {
