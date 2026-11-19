@@ -215,6 +215,102 @@ const deletedOnServerWarning = "This session was deleted on SageOx while it was 
 // deletedOnServerGuidance replaces the stop guidance for such a session.
 const deletedOnServerGuidance = "This session was deleted on SageOx while it was recording, so it was not uploaded or shared. Tell the user once, in plain words, using upload_warning. Do not upload or publish it."
 
+// liveSecretWithheldWarning is the one notice a person gets when the live
+// stream left part of their session out because the secret scan refused it.
+// Like the viewer's marker, it never says what matched.
+const liveSecretWithheldWarning = "Part of this session looked like a credential, so it was left out of the live view on SageOx. It is still saved on this machine."
+
+// liveSecretWithheldGuidance asks the agent to pass that notice on.
+const liveSecretWithheldGuidance = "Part of this session was left out of the live view on SageOx because it looked like a credential. Tell the user once, in plain words, using the data_warnings entry. Do not repeat or guess what it was."
+
+// liveSecretWithheldEarlierWarning tells the person about an earlier
+// recording's stream that withheld a secret after its stop could say so: its
+// close was left to the daemon, or a hook stopped it.
+const liveSecretWithheldEarlierWarning = "Part of an earlier session looked like a credential, so it was left out of its live view on SageOx. It is still saved on this machine."
+
+// liveSecretWithheldEarlierGuidance asks the agent to pass that notice on.
+const liveSecretWithheldEarlierGuidance = "Part of an earlier session was left out of its live view on SageOx because it looked like a credential. Tell the user once, in plain words, using the data_warnings entry. Do not repeat or guess what it was."
+
+// collectLiveSecretWithheldNotices fills in, at a stop, the withheld notices
+// the stop can give: this recording's own (settleLiveSecretWithheldNotice),
+// and those owed by earlier recordings' streams in this project. It clears
+// nothing: the folders go in LiveNoticeDirs, and only a stop that printed its
+// output clears their marks (confirmLiveSecretWithheldNotices). Recovery runs
+// this same processing and prints neither, so the notices stay owed.
+func collectLiveSecretWithheldNotices(result *agentSessionResult, state *session.RecordingState) {
+	if state == nil || state.SessionPath == "" {
+		return
+	}
+	earlier := earlierLiveSecretWithheld(state.SessionPath, state.SessionID)
+	result.EarlierLiveSecretWithheld = len(earlier) > 0
+	result.LiveSecretWithheld = settleLiveSecretWithheldNotice(state)
+	result.LiveNoticeDirs = earlier
+	if result.LiveSecretWithheld {
+		result.LiveNoticeDirs = append(result.LiveNoticeDirs, state.SessionPath)
+	}
+}
+
+// settleLiveSecretWithheldNotice reports whether this recording's live stream
+// withheld a batch the publication secret scan refused. A stream that withheld,
+// or one still unfinished (its close left to the daemon, or never requested)
+// that may withhold after the stop returns, is marked as owing the notice
+// until a start or stop has said it. A hook's stop has no one to tell, and a
+// stop can fail after this: either way the next session start or stop in this
+// project says it. A stream left in a reused folder by another recording, or
+// deleted on SageOx, does not count.
+func settleLiveSecretWithheldNotice(state *session.RecordingState) bool {
+	if state == nil || state.SessionPath == "" {
+		return false
+	}
+	st, err := livesession.ReadState(state.SessionPath)
+	if err != nil || st.SessionID != state.SessionID || st.DeletedOnServer || st.Status == livesession.StatusDeleted {
+		return false
+	}
+	ended := st.Status == livesession.StatusClosed || st.Status == livesession.StatusDisabled
+	if !st.SecretWithheld && ended {
+		return false
+	}
+	if err := livesession.OweSecretWithheldNotice(state.SessionPath); err != nil {
+		slog.Warn("live_session_withheld_notice_unrecorded", "session_id", st.SessionID, "error", err)
+	}
+	return st.SecretWithheld
+}
+
+// earlierLiveSecretWithheld returns the folders, beside sessionDir, of earlier
+// recordings' streams that owe their person the withheld notice and have
+// withheld since. The recording sessionID is not earlier: its own stop says it.
+func earlierLiveSecretWithheld(sessionDir, sessionID string) []string {
+	if sessionDir == "" {
+		return nil
+	}
+	return livesession.OwedSecretWithheldNotices(filepath.Dir(sessionDir), sessionID)
+}
+
+// confirmLiveSecretWithheldNotices clears the owed marks of notices a start or
+// stop has just printed. Never call it before the output is written: a mark
+// cleared then is a notice never given. A mark that cannot be cleared is said
+// again next time: twice beats never.
+func confirmLiveSecretWithheldNotices(dirs []string) {
+	for _, dir := range dirs {
+		if err := livesession.ClearSecretWithheldNotice(dir); err != nil {
+			slog.Warn("live_session_withheld_notice_not_cleared", "session", filepath.Base(dir), "error", err)
+		}
+	}
+}
+
+// addLiveSecretWithheldNotice adds the withheld notices to a stop's output. A
+// session deleted on SageOx already says it was not shared at all.
+func addLiveSecretWithheldNotice(output *sessionStopOutput, result *agentSessionResult) {
+	if result.LiveSecretWithheld && !result.DeletedOnServer {
+		output.DataWarnings = append(output.DataWarnings, liveSecretWithheldWarning)
+		output.Guidance += " " + liveSecretWithheldGuidance
+	}
+	if result.EarlierLiveSecretWithheld {
+		output.DataWarnings = append(output.DataWarnings, liveSecretWithheldEarlierWarning)
+		output.Guidance += " " + liveSecretWithheldEarlierGuidance
+	}
+}
+
 // liveDeletedOnServer reports whether the server deleted this session while it
 // streamed: the live stream was rejected, and the v1 copy must stay off the
 // Ledger too.
@@ -372,11 +468,6 @@ func heldLiveWarning(base string, fin liveFinish) string {
 	return base
 }
 
-// liveLockFileName is livesession's per-session lock (livesession.withLock
-// takes fileutil's advisory lock keyed by <session dir>/live.lock). Holding it
-// means no drain, open or close is mid-way through the session's live files.
-const liveLockFileName = "live.lock"
-
 // liveCloseRequestFileName is livesession's close-request marker; ReadState
 // reports it as State.CloseRequested.
 const liveCloseRequestFileName = "close-requested"
@@ -386,14 +477,18 @@ const liveCloseRequestFileName = "close-requested"
 // removed. One that still owes the server an open, a drain or a close moves,
 // with its close requested, to its own folder beside this one: the daemon's
 // tick scans every folder there and finishes it, so none of its bytes are lost
-// and none reach the new recording's stream. prevSessionID is the stream's
+// and none reach the new recording's stream. An ended stream that still owes
+// its person the withheld notice moves the same way, so the notice survives
+// for the next start or stop to say (an automatic start says none). prevSessionID is the stream's
 // owner as first read; a different owner by the time the lock is held is an
 // error, never a guess. A hold placed for that recording is released too (see
 // releasePreviousHold).
 func retirePreviousLiveStream(projectRoot, dir, prevSessionID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), liveLocalBound)
 	defer cancel()
-	return fileutil.WithFileLockTimeout(ctx, filepath.Join(dir, liveLockFileName), liveLocalBound, func() error {
+	// livesession's own per-session lock: holding it means no drain, open or
+	// close is mid-way through the session's live files
+	return fileutil.WithFileLockTimeout(ctx, livesession.LockTarget(dir), liveLocalBound, func() error {
 		st, err := livesession.ReadState(dir)
 		if errors.Is(err, livesession.ErrNotStreaming) {
 			return nil
@@ -408,8 +503,9 @@ func retirePreviousLiveStream(projectRoot, dir, prevSessionID string) error {
 		if err != nil {
 			return err
 		}
-		switch st.Status {
-		case livesession.StatusPending, livesession.StatusStreaming, livesession.StatusClosing:
+		switch {
+		case st.Status == livesession.StatusPending, st.Status == livesession.StatusStreaming, st.Status == livesession.StatusClosing,
+			owesWithheldNotice(dir, st):
 			if err := moveLiveStream(ctx, liveConfig(projectRoot), dir, st, names); err != nil {
 				return err
 			}
@@ -422,6 +518,15 @@ func retirePreviousLiveStream(projectRoot, dir, prevSessionID string) error {
 		}
 		return releasePreviousHold(ctx, dir, prevSessionID)
 	})
+}
+
+// owesWithheldNotice reports whether the stream in dir withheld a secret and
+// its person has not been told yet.
+func owesWithheldNotice(dir string, st livesession.State) bool {
+	if !st.SecretWithheld || st.DeletedOnServer || st.Status == livesession.StatusDeleted {
+		return false
+	}
+	return livesession.OwesSecretWithheldNotice(dir)
 }
 
 // releasePreviousHold removes a hold placed for the recording prevSessionID,

@@ -545,7 +545,7 @@ func TestAdvHelperHoldsLiveLock(t *testing.T) {
 	if dir == "" {
 		t.Skip("reason: helper process for TestAdversarialStaleLiveLock, runs only when re-executed by it")
 	}
-	_ = fileutil.WithFileLockTimeout(context.Background(), filepath.Join(dir, "live.lock"), 5*time.Second, func() error {
+	_ = fileutil.WithFileLockTimeout(context.Background(), livesession.LockTarget(dir), 5*time.Second, func() error {
 		fmt.Println("locked")
 		time.Sleep(time.Hour) // hold until killed
 		return nil
@@ -602,7 +602,7 @@ func advHoldLock(t *testing.T, dir string) (release func()) {
 	t.Helper()
 	held, done := make(chan struct{}), make(chan struct{})
 	go func() {
-		_ = fileutil.WithFileLockTimeout(context.Background(), filepath.Join(dir, "live.lock"), 5*time.Second, func() error {
+		_ = fileutil.WithFileLockTimeout(context.Background(), livesession.LockTarget(dir), 5*time.Second, func() error {
 			close(held)
 			<-done
 			return nil

@@ -36,6 +36,11 @@ const (
 	// already declared. The next spool write, or the close, declares the rest,
 	// so the loss shows in the stream instead of vanishing.
 	spoolLostDeclaredFileName = "spool-lost-declared"
+	// noticeOwedFileName marks a stream whose person may still be owed the
+	// notice that it withheld a secret (OweSecretWithheldNotice). Like
+	// close-requested it is a file of its own, written without live.lock: a
+	// drain persisting stream-state.json would overwrite a flag kept in it.
+	noticeOwedFileName = "withheld-notice-owed"
 )
 
 // IsLocalFile reports whether name is one of the live-stream files this package
@@ -45,7 +50,7 @@ const (
 func IsLocalFile(name string) bool {
 	switch name {
 	case spoolFileName, stateFileName, lockFileName, closeRequestFileName, deleteRequestFileName,
-		spoolLostFileName, spoolLostDeclaredFileName:
+		spoolLostFileName, spoolLostDeclaredFileName, noticeOwedFileName:
 		return true
 	}
 	return false
@@ -107,12 +112,73 @@ type State struct {
 	DeletedOnServer bool `json:"deleted_on_server,omitempty"`
 
 	// DisabledReason says why the stream was disabled: the server's refusal
-	// reason, or secretRefusedReason when publication rules withheld its bytes.
-	// A key conflict leaves it empty (Open returns ErrKeyConflict instead).
+	// reason. A key conflict leaves it empty (Open returns ErrKeyConflict
+	// instead). A secret never disables a stream (see withhold); streams an
+	// older ox disabled for one keep "secret_refused".
 	DisabledReason string `json:"disabled_reason,omitempty"`
+
+	// SecretWithheld is set once the publication scan refused a batch and a
+	// secret_withheld gap line replaced it. Stop reads it to tell the person,
+	// once, that part of the session was left out of the live view.
+	SecretWithheld bool `json:"secret_withheld,omitempty"`
 }
 
 func (s State) active() bool { return s.Status == StatusStreaming || s.Status == StatusClosing }
+
+// OweSecretWithheldNotice records that the person behind the stream in dir may
+// be owed the notice that it withheld a secret: a stop sets it whenever the
+// stream has withheld or still could, and only a start or stop that has said
+// the notice clears it (ClearSecretWithheldNotice).
+func OweSecretWithheldNotice(dir string) error {
+	if err := os.WriteFile(filepath.Join(dir, noticeOwedFileName), nil, 0o600); err != nil {
+		return fmt.Errorf("record owed withheld notice: %w", err)
+	}
+	return nil
+}
+
+// OwesSecretWithheldNotice reports whether dir's stream is marked as owing its
+// person the withheld notice.
+func OwesSecretWithheldNotice(dir string) bool {
+	_, err := os.Lstat(filepath.Join(dir, noticeOwedFileName))
+	return err == nil
+}
+
+// ClearSecretWithheldNotice removes dir's owed mark. Call it only once the
+// notice was said: a mark removed before that is a notice never given.
+func ClearSecretWithheldNotice(dir string) error {
+	if err := removeIfExists(filepath.Join(dir, noticeOwedFileName)); err != nil {
+		return fmt.Errorf("clear owed withheld notice: %w", err)
+	}
+	return nil
+}
+
+// OwedSecretWithheldNotices returns the session folders under sessionsDir (a
+// moved stream's .live-<id> folder included) whose stream owes its person the
+// withheld notice and has withheld a secret by now. A stream of the recording
+// sessionID is left out: its own stop says it. Nothing is removed here, so a
+// start or stop that fails, a path that prints nothing, or a stream caught
+// between moves (no state yet) keeps its notice owed.
+func OwedSecretWithheldNotices(sessionsDir, sessionID string) []string {
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		return nil
+	}
+	var owed []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(sessionsDir, e.Name())
+		if !OwesSecretWithheldNotice(dir) {
+			continue
+		}
+		st, err := ReadState(dir)
+		if err == nil && st.SecretWithheld && st.SessionID != sessionID && st.Status != StatusDeleted {
+			owed = append(owed, dir)
+		}
+	}
+	return owed
+}
 
 // reachedServer reports whether the server may hold this session's
 // conversation, so that abort has to delete it there.

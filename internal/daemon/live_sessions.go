@@ -43,6 +43,13 @@ const (
 	// plus a drain, each bounded by liveDrainBudget (a close is shorter). An
 	// attempt older than that plus a tick is wedged where no budget reaches.
 	liveStepStuckAfter = 2*liveDrainBudget + liveTickInterval
+	// liveRulesRefreshInterval paces the background fetch of the current
+	// gitleaks catalog the live publication scan adds to the bundled one
+	// (livesession.RefreshSecretRules). Drains never wait on it. Fifteen minutes
+	// keeps a new upstream detector at most that far behind while staying well
+	// clear of GitHub's raw-content rate limits and a whole-catalog recompile
+	// per fetch.
+	liveRulesRefreshInterval = 15 * time.Minute
 )
 
 // LiveSessions opens, drains and closes session spools in the background.
@@ -58,6 +65,11 @@ type LiveSessions struct {
 	// config builds the livesession config for an endpoint; tests point it at a fake server.
 	config func(endpoint string) livesession.Config
 	now    func() time.Time
+	// refreshRules fetches the current secret rules and persists them for every
+	// publishing process; tests replace it.
+	refreshRules func(context.Context) error
+	// rulesFailing: the last rules refresh failed. Owned by the refresh loop.
+	rulesFailing bool
 
 	mu      sync.Mutex
 	running map[string]*liveAttempt // a drain goroutine owns this session dir
@@ -94,17 +106,29 @@ type liveBackoff struct {
 
 // NewLiveSessions creates the manager for sessions under sessionsDir.
 func NewLiveSessions(logger *slog.Logger, sessionsDir, endpoint string) *LiveSessions {
-	return &LiveSessions{
+	l := &LiveSessions{
 		logger: logger, sessionsDir: sessionsDir, endpoint: endpoint,
 		config:  func(ep string) livesession.Config { return livesession.Config{Endpoint: ep, Logger: logger} },
 		now:     time.Now,
 		running: map[string]*liveAttempt{}, rerun: map[string]bool{}, backoff: map[string]liveBackoff{},
 		known: map[string]liveKnown{},
 	}
+	// persisted in the data dir the drains read, so the CLI's stop-time close
+	// scans with the same rules as this daemon
+	l.refreshRules = func(ctx context.Context) error {
+		return livesession.RefreshSecretRules(ctx, l.config(l.endpoint).DataDir)
+	}
+	return l
 }
 
-// Run sweeps until ctx ends.
+// Run sweeps until ctx ends. The secret rules refresh runs beside the sweep,
+// never in front of it: a fetch that hangs must not hold a single drain.
 func (l *LiveSessions) Run(ctx context.Context) {
+	rulesDone := make(chan struct{})
+	go func() {
+		defer close(rulesDone)
+		l.refreshRulesEvery(ctx, liveRulesRefreshInterval)
+	}()
 	t := time.NewTicker(liveTickInterval)
 	defer t.Stop()
 	for {
@@ -112,9 +136,46 @@ func (l *LiveSessions) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			l.wg.Wait()
+			<-rulesDone
 			return
 		case <-t.C:
 		}
+	}
+}
+
+// refreshRulesEvery refreshes the secret rules now and then every interval
+// until ctx ends.
+func (l *LiveSessions) refreshRulesEvery(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		l.refreshRulesOnce(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// refreshRulesOnce runs one refresh. A failure keeps the last good catalog
+// (drains scan with it, or with the bundled catalog alone before any refresh
+// succeeded on this machine), so it is logged once per failure streak rather
+// than every interval, and the recovery once.
+func (l *LiveSessions) refreshRulesOnce(ctx context.Context) {
+	err := l.refreshRules(ctx)
+	switch {
+	case ctx.Err() != nil:
+		// shutting down: a canceled fetch is no failure
+	case err != nil && !l.rulesFailing:
+		l.rulesFailing = true
+		l.logger.WarnContext(ctx, "live_secret_rules_refresh_failed",
+			"impact", "live streams scan with the last good rules, or the bundled catalog alone", "error", err)
+	case err == nil && l.rulesFailing:
+		l.rulesFailing = false
+		l.logger.InfoContext(ctx, "live_secret_rules_refresh_recovered")
+	case err == nil:
+		l.logger.DebugContext(ctx, "live_secret_rules_refreshed")
 	}
 }
 
