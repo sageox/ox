@@ -68,7 +68,7 @@ func TestSyncBubbles_Scheduler_RegisteredOnTeamContextTicker(t *testing.T) {
 		return &fakeKBLister{bubbles: []api.KB{}} // no rows — fast no-op
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan struct{})
@@ -77,14 +77,18 @@ func TestSyncBubbles_Scheduler_RegisteredOnTeamContextTicker(t *testing.T) {
 		close(done)
 	}()
 
+	// Periodic cycles coalesce with the delayed (5s) startup team pull, so
+	// the first ticker-driven syncBubbles lands just after it.
+	assert.Eventually(t, func() bool { return listerCalls.Load() > 0 },
+		10*time.Second, 20*time.Millisecond,
+		"syncBubbles must be invoked by the team-context ticker during Start()")
+	cancel()
+
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("scheduler did not stop after context cancellation")
 	}
-
-	assert.Greater(t, listerCalls.Load(), int32(0),
-		"syncBubbles must be invoked by the team-context ticker during Start()")
 }
 
 // TestSyncBubbles_Scheduler_NoTickerWhenIntervalZero verifies that when
