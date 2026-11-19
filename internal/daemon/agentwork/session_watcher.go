@@ -834,21 +834,39 @@ func (m *SessionWatcherManager) forwardLive(aw *activeWatcher, batch session.App
 	if spool == nil {
 		return
 	}
-	if reason := liveSpoolRefusal(aw); reason != "" {
+	if reason := liveSpoolRefusal(aw.cachePath, aw.projectRoot); reason != "" {
 		m.logger.Debug("live spool skipped", "session", aw.sessionName, "reason", reason)
 		return
 	}
 	spool(aw.cachePath, batch)
 }
 
-// liveSpoolRefusal names why aw's committed bytes must not reach its live
-// stream, or returns "" when they may.
-func liveSpoolRefusal(aw *activeWatcher) string {
-	st, err := livesession.ReadState(aw.cachePath)
+// spoolRecovered hands the batch daemon recovery's final Cursor drain committed
+// to raw.jsonl to the session's live spool, under forwardLive's refusals (C8).
+// Recovery has no watcher and so no spooler to kick a drain; the live tick
+// finds the spooled bytes within one tick.
+func spoolRecovered(logger *slog.Logger, sessionDir, projectRoot string, batch session.AppendedBatch) {
+	if len(batch.Bytes) == 0 {
+		return
+	}
+	if reason := liveSpoolRefusal(sessionDir, projectRoot); reason != "" {
+		logger.Debug("live spool skipped", "session", filepath.Base(sessionDir), "reason", reason, "during", "recovery")
+		return
+	}
+	_, err := livesession.Spool(context.Background(), sessionDir, batch.Bytes, livesession.SpoolOptions{Paused: batch.Suspended})
+	if err != nil && !errors.Is(err, livesession.ErrNotStreaming) {
+		logger.Warn("live_spool_failed", "session", filepath.Base(sessionDir), "during", "recovery", "bytes", len(batch.Bytes), "error", err)
+	}
+}
+
+// liveSpoolRefusal names why the committed bytes of the recording in cachePath
+// must not reach its live stream, or returns "" when they may.
+func liveSpoolRefusal(cachePath, projectRoot string) string {
+	st, err := livesession.ReadState(cachePath)
 	if err != nil {
 		return "not_streaming"
 	}
-	recPath := filepath.Join(aw.cachePath, recordingMarker)
+	recPath := filepath.Join(cachePath, recordingMarker)
 	data, err := os.ReadFile(recPath)
 	if err != nil {
 		return "no_recording"
@@ -860,8 +878,8 @@ func liveSpoolRefusal(aw *activeWatcher) string {
 	if st.SessionID != rec.SessionID {
 		return "other_recording"
 	}
-	if session.IsHeld(aw.cachePath) || rec.RecordedManualPublishing() ||
-		(aw.projectRoot != "" && config.GetSessionPublishing(aw.projectRoot) == config.SessionPublishingManual) {
+	if session.IsHeld(cachePath) || rec.RecordedManualPublishing() ||
+		(projectRoot != "" && config.GetSessionPublishing(projectRoot) == config.SessionPublishingManual) {
 		return "held"
 	}
 	return ""

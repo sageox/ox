@@ -76,12 +76,17 @@ func loadSession(cfg Config, dir string) (*session, error) {
 	return &session{cfg: cfg, dir: dir, st: st}, nil
 }
 
-// connect builds the signed client for an active stream.
+// connect builds the signed client for an active stream, on the configured
+// endpoint and only for a conversation minted here (authorize). Every append
+// and close goes through it.
 func (s *session) connect(ctx context.Context) error {
 	if !s.st.active() {
 		return nil
 	}
-	c, err := s.cfg.newClient(ctx, s.st.Endpoint)
+	if err := authorize(ctx, s.cfg, s.dir, s.st); err != nil {
+		return err
+	}
+	c, err := s.cfg.newClient(ctx, s.cfg.Endpoint)
 	if err != nil {
 		return fmt.Errorf("live client: %w", err)
 	}

@@ -85,6 +85,10 @@ func openPending(ctx context.Context, cfg Config, dir string) error {
 	if err != nil || st.Status != StatusPending {
 		return nil // loadSession reports a missing state; other statuses need no open
 	}
+	// before the write below: a forged state is refused untouched
+	if err := authorize(ctx, cfg, dir, st); err != nil {
+		return err
+	}
 	if !st.CloseRequested {
 		st.CloseRequested = true
 		if err := writeState(dir, st); err != nil {

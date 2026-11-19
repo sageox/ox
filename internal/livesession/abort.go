@@ -53,7 +53,9 @@ type AbortResult struct {
 	Queued bool
 	// Refused: the delete cannot succeed from here (Reason says why). It is
 	// kept in the queue as refused and not retried; tell the person to delete
-	// the session on SageOx.
+	// the session on SageOx. A stream state this machine did not mint, or one
+	// naming another endpoint (endpoint_mismatch, unknown_conversation), is
+	// refused before anything is sent or queued (see authorize).
 	Refused bool
 	Reason  string
 }
@@ -108,6 +110,16 @@ func Abort(ctx context.Context, cfg Config, dir string, budget time.Duration) (A
 	log := cfg.Logger.With("session_id", st.SessionID, "conversation_id", st.ConversationID)
 	var res AbortResult
 	if st.reachedServer() {
+		if err := authorize(ctx, cfg, dir, st); errors.Is(err, ErrUntrustedState) {
+			// Nothing this machine minted is named here: no delete is sent or
+			// queued, and the state file (possibly a Ledger forgery) is left
+			// as it is. The marker stays, so the session reads as deleted and
+			// no tick acts on it again. A real session whose id went missing
+			// is the person's to delete on SageOx, which Refused tells them.
+			return AbortResult{Refused: true, Reason: untrustedReason(st, cfg)}, nil
+		} else if err != nil {
+			return AbortResult{}, takeBackDeleteRequest(ctx, cfg, dir, ours, err)
+		}
 		if res, err = abortOnServer(ctx, cfg, st); err != nil {
 			return res, takeBackDeleteRequest(ctx, cfg, dir, ours, err)
 		}
@@ -155,15 +167,16 @@ func remaining(ctx context.Context, floor time.Duration) time.Duration {
 	return floor
 }
 
-// abortOnServer records the delete, then sends it once within ctx.
+// abortOnServer records the delete, then sends it once within ctx. st has
+// passed authorize: it names cfg's endpoint and a conversation minted here.
 func abortOnServer(ctx context.Context, cfg Config, st State) (AbortResult, error) {
 	log := cfg.Logger.With("session_id", st.SessionID, "conversation_id", st.ConversationID)
-	p := PendingDelete{Endpoint: st.Endpoint, ConversationID: st.ConversationID, EnqueuedAt: time.Now().UTC()}
+	p := PendingDelete{Endpoint: cfg.Endpoint, ConversationID: st.ConversationID, EnqueuedAt: time.Now().UTC()}
 	queueErr := enqueueDelete(ctx, cfg, p)
 	if queueErr != nil {
 		log.ErrorContext(ctx, "live_session_abort_queue_failed", "error", queueErr)
 	}
-	status, reason, sendErr := deleteOnServer(ctx, cfg, p.Endpoint, p.ConversationID)
+	status, reason, sendErr := deleteOnServer(ctx, cfg, p.ConversationID)
 	// the budget may be spent; settling the queue is local and must still happen
 	qctx := context.WithoutCancel(ctx)
 	switch status {
@@ -193,12 +206,13 @@ func abortOnServer(ctx context.Context, cfg Config, st State) (AbortResult, erro
 	return AbortResult{Queued: true}, nil
 }
 
-// deleteOnServer sends the signed DELETE. Only a confirmed deletion or a
-// confirmed absence (2xx, 404, 410) is deleteDone. A delete that can never
-// succeed from here (403, stop or fix, no signing key) is deleteRefused with
-// its reason; anything else, unknown answers included, is deleteRetry.
-func deleteOnServer(ctx context.Context, cfg Config, ep, cnv string) (deleteStatus, string, error) {
-	c, err := cfg.newClient(ctx, ep)
+// deleteOnServer sends the signed DELETE to cfg's own endpoint. Only a
+// confirmed deletion or a confirmed absence (2xx, 404, 410) is deleteDone. A
+// delete that can never succeed from here (403, stop or fix, no signing key)
+// is deleteRefused with its reason; anything else, unknown answers included,
+// is deleteRetry.
+func deleteOnServer(ctx context.Context, cfg Config, cnv string) (deleteStatus, string, error) {
+	c, err := cfg.newClient(ctx, cfg.Endpoint)
 	if errors.Is(err, ErrNoKey) {
 		return deleteRefused, noKeyReason, err
 	}
@@ -220,11 +234,15 @@ func deleteOnServer(ctx context.Context, cfg Config, ep, cnv string) (deleteStat
 	return deleteRetry, "", fmt.Errorf("delete live session: %w", api)
 }
 
-// RetryPendingDeletes retries every queued delete not already refused, each
-// bounded by AbortBudget. It drops the ones the server confirmed, marks the
-// ones it refused for good (they stay visible to RefusedDeletes and are not
-// retried), and returns how many were confirmed. The daemon calls it on its
-// tick until the queue holds no retryable entry.
+// RetryPendingDeletes retries every queued delete for cfg's endpoint not
+// already refused, each bounded by AbortBudget. It drops the ones the server
+// confirmed, marks the ones it refused for good (they stay visible to
+// RefusedDeletes and are not retried), and returns how many were confirmed.
+// The daemon calls it on its tick until the queue holds no retryable entry.
+//
+// The queue is shared by every project on this machine, so an entry for
+// another endpoint is left for the daemon configured with that endpoint: a
+// request goes only to the caller's own endpoint, never to one a file names.
 func RetryPendingDeletes(ctx context.Context, cfg Config) (int, error) {
 	cfg, err := cfg.withDefaults()
 	if err != nil {
@@ -237,11 +255,11 @@ func RetryPendingDeletes(ctx context.Context, cfg Config) (int, error) {
 	var confirmed, refused []PendingDelete
 	var errs []error
 	for _, p := range pending {
-		if p.Refused {
+		if p.Refused || !sameEndpoint(p.Endpoint, cfg.Endpoint) {
 			continue
 		}
 		actx, cancel := context.WithTimeout(ctx, AbortBudget)
-		status, reason, err := deleteOnServer(actx, cfg, p.Endpoint, p.ConversationID)
+		status, reason, err := deleteOnServer(actx, cfg, p.ConversationID)
 		cancel()
 		switch status {
 		case deleteDone:

@@ -22,7 +22,7 @@ func streamLive(t *testing.T, f cacheFixture) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(f.cacheDir, 0o755))
 	ctx := context.Background()
-	_, err := livesession.Prepare(ctx, livesession.Config{Endpoint: "https://live.test.sageox.ai"}, f.cacheDir,
+	_, err := livesession.Prepare(ctx, livesession.Config{Endpoint: "https://live.test.sageox.ai", DataDir: t.TempDir()}, f.cacheDir,
 		livesession.OpenParams{SessionID: liveTestSessionID, SessionName: f.name})
 	require.NoError(t, err)
 	_, err = livesession.Spool(ctx, f.cacheDir, []byte(`{"type":"header"}`+"\n"+`{"type":"user","content":"hi"}`+"\n"), livesession.SpoolOptions{})

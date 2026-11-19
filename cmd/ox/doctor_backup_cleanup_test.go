@@ -369,6 +369,20 @@ func TestCheckBackupDirectories_FixKeepsDataOutsideGit(t *testing.T) {
 			wantKept: true,
 		},
 		{
+			// rev-list --branches never walks tags: a commit only a local tag
+			// reaches looked pushed, and doctor deleted its only copy
+			name: "clean git tree with a commit only a local tag reaches",
+			setup: func(t *testing.T, bakPath string) {
+				backupTestCommitted(t, bakPath)
+				backupTestGit(t, bakPath, "update-ref", "refs/remotes/origin/main", "HEAD")
+				backupTestWrite(t, filepath.Join(bakPath, "notes.md"), "tagged edit")
+				backupTestGit(t, bakPath, "commit", "-q", "-am", "tagged")
+				backupTestGit(t, bakPath, "tag", "-a", "-m", "keep", "only-here")
+				backupTestGit(t, bakPath, "reset", "-q", "--hard", "origin/main")
+			},
+			wantKept: true,
+		},
+		{
 			name: "clean git tree with a stash",
 			setup: func(t *testing.T, bakPath string) {
 				backupTestCommitted(t, bakPath)

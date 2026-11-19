@@ -284,9 +284,12 @@ func FinalizeCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDi
 // append and marker locks. A hook may refresh activity while the daemon waits
 // for raw ownership, so its earlier liveness observation cannot authorize the
 // rewrite. Persisted or explicit stops remain eligible regardless of activity.
-func FinalizeInactiveCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDir string, reader adapters.IncrementalReader, inactiveBefore time.Time) (*RecordingState, error) {
-	state, _, err := finalizeCursorCapture(ctx, projectRoot, sessionPath, homeDir, reader, inactiveBefore)
-	return state, err
+//
+// The returned batch is the final drain's, for the live stream, exactly as
+// FinalizeCursorCapture returns it: committed even alongside
+// ErrCursorFinalDrainPending, and never read by a later drain again.
+func FinalizeInactiveCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDir string, reader adapters.IncrementalReader, inactiveBefore time.Time) (*RecordingState, AppendedBatch, error) {
+	return finalizeCursorCapture(ctx, projectRoot, sessionPath, homeDir, reader, inactiveBefore)
 }
 
 func finalizeCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDir string, reader adapters.IncrementalReader, inactiveBefore time.Time) (*RecordingState, AppendedBatch, error) {

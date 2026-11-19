@@ -51,7 +51,9 @@ type LiveSessions struct {
 	// sessionsDir is the only parent IPC-named session paths may live under; the
 	// tick scans it too.
 	sessionsDir string
-	// endpoint is the project endpoint, used for the pending-deletes queue.
+	// endpoint is the project endpoint. Every signed request goes to it and to
+	// nothing else: a stream-state.json sits in the Ledger checkout, so the
+	// endpoint one names is never trusted (see livesession.authorize).
 	endpoint string
 	// config builds the livesession config for an endpoint; tests point it at a fake server.
 	config func(endpoint string) livesession.Config
@@ -340,6 +342,11 @@ func (l *LiveSessions) step(ctx context.Context, dir string, started time.Time) 
 	case errors.Is(err, livesession.ErrKeyConflict):
 		log.WarnContext(ctx, "live_session_disabled", "reason", "key_conflict", "action", "run ox login to enroll a new signing key")
 		l.clearBackoff(dir)
+	case errors.Is(err, livesession.ErrUntrustedState):
+		// livesession logged it once at Error; nothing was sent, and a retry
+		// cannot change the answer, so no backoff and no line per tick
+		l.clearBackoff(dir)
+		log.DebugContext(ctx, "live_session_step_skipped", "reason", "untrusted_state", "error", err)
 	case err != nil:
 		delay := l.fail(dir, res.RetryAfter, started)
 		log.WarnContext(ctx, "live_session_step_failed", "status", string(st.Status), "retry_in_ms", delay.Milliseconds(), "error", err)
@@ -360,7 +367,7 @@ func (l *LiveSessions) step(ctx context.Context, dir string, started time.Time) 
 // publishes it, and the copy already on SageOx is deleted with the signed abort
 // (queued if SageOx is unreachable). raw.jsonl stays on this machine.
 func (l *LiveSessions) stopHeld(ctx context.Context, dir string, st livesession.State, started time.Time, log *slog.Logger) {
-	res, err := livesession.Abort(ctx, l.config(st.Endpoint), dir, livesession.AbortBudget)
+	res, err := livesession.Abort(ctx, l.config(l.endpoint), dir, livesession.AbortBudget)
 	if err != nil {
 		delay := l.fail(dir, 0, started)
 		log.WarnContext(ctx, "live_session_held_stop_failed", "status", string(st.Status), "retry_in_ms", delay.Milliseconds(), "error", err)
@@ -373,7 +380,7 @@ func (l *LiveSessions) stopHeld(ctx context.Context, dir string, st livesession.
 
 // attempt runs one open-and-drain, or a close once stop asked for one.
 func (l *LiveSessions) attempt(ctx context.Context, dir string, st livesession.State) (livesession.DrainResult, error) {
-	cfg := l.config(st.Endpoint)
+	cfg := l.config(l.endpoint)
 	if st.Status == livesession.StatusClosing || st.CloseRequested {
 		return livesession.Close(ctx, cfg, dir, "", livesession.CloseBudget)
 	}

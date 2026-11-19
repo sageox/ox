@@ -246,13 +246,14 @@ func gitUnrestorable(path string) ([]string, error) {
 		return nil, fmt.Errorf("git status: %w", err)
 	}
 	// --branches, not HEAD: an empty repo has no HEAD commit, and a branch ref
-	// is what a rebase or reset leaves the unpushed work on
-	unpushed, err := backupGit(path, "rev-list", "--branches", "--not", "--remotes")
+	// is what a rebase or reset leaves the unpushed work on. --tags too: a
+	// commit a reset left reachable only from a local tag is just as unpushed.
+	unpushed, err := backupGit(path, "rev-list", "--branches", "--tags", "--not", "--remotes")
 	if err != nil {
 		return reasons, fmt.Errorf("list commits no remote holds: %w", err)
 	}
 	if len(unpushed) > 0 {
-		reasons = append(reasons, fmt.Sprintf("%d commit(s) on local branches that no remote holds", len(unpushed)))
+		reasons = append(reasons, fmt.Sprintf("%d commit(s) on local branches or tags that no remote holds", len(unpushed)))
 	}
 	stashes, err := backupGit(path, "stash", "list")
 	if err != nil {

@@ -80,6 +80,11 @@ func Prepare(ctx context.Context, cfg Config, dir string, p OpenParams) (State, 
 			Endpoint: cfg.Endpoint, Status: StatusPending,
 			SessionID: p.SessionID, SessionName: p.SessionName, RepoID: p.RepoID, Agent: p.Agent, StartedAt: p.StartedAt,
 		}
+		// registered first, bound to this folder: a stream state whose id is
+		// not bound to its folder is refused everywhere (see authorize)
+		if err := recordMinted(ctx, cfg, cnv, dir); err != nil {
+			return err
+		}
 		return writeState(dir, st)
 	}
 	err = withLock(ctx, dir, spoolLockWait, run)
@@ -103,7 +108,15 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 			Endpoint: cfg.Endpoint, Status: StatusStreaming,
 			SessionID: p.SessionID, SessionName: p.SessionName, RepoID: p.RepoID, Agent: p.Agent, StartedAt: p.StartedAt,
 		}
+		if err := recordMinted(ctx, cfg, cnv, dir); err != nil {
+			return State{}, err
+		}
 	default:
+		return State{}, err
+	}
+	// A state read from disk may be a forgery pulled with the Ledger: nothing,
+	// not even the key registration, is sent for one ox did not mint here.
+	if err := authorize(ctx, cfg, dir, st); err != nil {
 		return State{}, err
 	}
 	key, err := LoadOrCreateKey(ctx, cfg, cfg.Endpoint)
@@ -131,7 +144,9 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 		st.Status = StatusDeleted
 		return st, nil
 	}
-	_, err = c.Open(ctx, cnv, openRequest(st))
+	// st's id, the one authorize checked; cnv (from the caller's ses_ id) is the
+	// same for every stream ox prepared
+	_, err = c.Open(ctx, st.ConversationID, openRequest(st))
 	if deleteRequested(dir) {
 		return abortedWhileOpening(ctx, cfg, st)
 	}
@@ -153,7 +168,7 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 // open does, see nothing to delete, and take that as done.
 func abortedWhileOpening(ctx context.Context, cfg Config, st State) (State, error) {
 	st.Status = StatusDeleted
-	p := PendingDelete{Endpoint: st.Endpoint, ConversationID: st.ConversationID, EnqueuedAt: time.Now().UTC()}
+	p := PendingDelete{Endpoint: cfg.Endpoint, ConversationID: st.ConversationID, EnqueuedAt: time.Now().UTC()}
 	if err := enqueueDelete(context.WithoutCancel(ctx), cfg, p); err != nil {
 		return st, fmt.Errorf("queue delete of a session aborted while it opened: %w", err)
 	}

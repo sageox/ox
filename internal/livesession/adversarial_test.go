@@ -691,8 +691,10 @@ func TestAdversarialAbortAfterALostOpenReplyDeletesTheServerCopy(t *testing.T) {
 }
 
 // The session folder is moved aside (the Ledger clone self-heal does this)
-// while a drain is in flight. The drain must not report done, and the folder
-// at its new path resumes from its acknowledged offset and converges.
+// while a drain is in flight. The drain must not report done. At its new path
+// nothing is sent: a stream is trusted only in the folder its conversation is
+// bound to, and a copy elsewhere is exactly what a Ledger forgery looks like.
+// Moved back, it resumes from its acknowledged offset and converges.
 func TestAdversarialSessionFolderMovedMidDrain(t *testing.T) {
 	s := advOpen(t, nil)
 	st := s.mustOpen()
@@ -733,7 +735,16 @@ func TestAdversarialSessionFolderMovedMidDrain(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(s.dir, "stream-state.json")); err == nil {
 		t.Fatal("the drain recreated stream state at the old path: a ghost session")
 	}
-	s.dir = moved
+	sent := len(s.srv.Calls())
+	if _, err := livesession.Drain(t.Context(), s.cfg, moved, 2*time.Second); !errors.Is(err, livesession.ErrUntrustedState) {
+		t.Fatalf("drain at the folder's new path: %v, want ErrUntrustedState", err)
+	}
+	if n := len(s.srv.Calls()) - sent; n != 0 {
+		t.Fatalf("a stream outside its bound folder sent %d request(s)", n)
+	}
+	if err := os.Rename(moved, s.dir); err != nil {
+		t.Fatal(err)
+	}
 	s.drainUntilDone()
 	if !bytes.Equal(s.srv.Stored(t, st.ConversationID, s.state().LayerID), s.spool()) {
 		t.Fatal("the moved session did not converge")

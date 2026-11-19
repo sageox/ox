@@ -127,7 +127,7 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 	case prev.SessionID == state.SessionID:
 		return // this recording's own stream: already prepared, disabled or ended
 	default:
-		if err := retirePreviousLiveStream(state.SessionPath, prev.SessionID); err != nil {
+		if err := retirePreviousLiveStream(projectRoot, state.SessionPath, prev.SessionID); err != nil {
 			slog.Warn("live_session_not_started", "session_id", state.SessionID, "reason", "previous_stream_kept", "previous_session_id", prev.SessionID, "error", err)
 			return
 		}
@@ -425,7 +425,7 @@ const liveCloseRequestFileName = "close-requested"
 // owner as first read; a different owner by the time the lock is held is an
 // error, never a guess. A hold placed for that recording is released too (see
 // releasePreviousHold).
-func retirePreviousLiveStream(dir, prevSessionID string) error {
+func retirePreviousLiveStream(projectRoot, dir, prevSessionID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), liveLocalBound)
 	defer cancel()
 	return fileutil.WithFileLockTimeout(ctx, filepath.Join(dir, liveLockFileName), liveLocalBound, func() error {
@@ -445,7 +445,7 @@ func retirePreviousLiveStream(dir, prevSessionID string) error {
 		}
 		switch st.Status {
 		case livesession.StatusPending, livesession.StatusStreaming, livesession.StatusClosing:
-			if err := moveLiveStream(ctx, dir, st, names); err != nil {
+			if err := moveLiveStream(ctx, liveConfig(projectRoot), dir, st, names); err != nil {
 				return err
 			}
 		default:
@@ -510,7 +510,12 @@ func liveFileNames(dir string) ([]string, error) {
 // dir and requests its close there: the recording it belongs to has ended. The
 // close request goes in first, so the daemon never finds the moved stream
 // without it. The dot keeps the folder out of listings that skip dotfiles.
-func moveLiveStream(ctx context.Context, dir string, st livesession.State, names []string) error {
+//
+// A stream is trusted only in the folder its conversation is bound to, so the
+// renames run inside livesession.MoveStream, which moves that binding with
+// them. If the binding cannot move, nothing does: the stream stays in dir,
+// still trusted there, and this start does not stream.
+func moveLiveStream(ctx context.Context, cfg livesession.Config, dir string, st livesession.State, names []string) error {
 	sessionID := st.SessionID
 	if !sessionid.IsValidSessionID(sessionID) {
 		// it names a folder: never let a damaged state file pick the path
@@ -526,16 +531,20 @@ func moveLiveStream(ctx context.Context, dir string, st livesession.State, names
 	if err := fileutil.AtomicWriteBytes(filepath.Join(dest, liveCloseRequestFileName), nil, 0o600); err != nil {
 		return fmt.Errorf("request the previous live stream's close: %w", err)
 	}
-	for i, name := range names {
-		if err := os.Rename(filepath.Join(dir, name), filepath.Join(dest, name)); err != nil {
-			// cut short, the stream is split across two folders: the daemon may
-			// find a stream state with no spool, or a spool with no state. The
-			// next start in this folder tries again; this line says where it stands.
-			slog.ErrorContext(ctx, "live_session_retire_move_failed", "session_id", sessionID, "conversation_id", st.ConversationID,
-				"layer_id", st.LayerID, "status", string(st.Status), "file", name, "moved", i, "files", len(names),
-				"from", dir, "to", dest, "error", err)
-			return fmt.Errorf("move previous live file %s: %w", name, err)
+	// names lists the stream state last, as MoveStream requires: a move cut
+	// short leaves the state, and so the binding, in dir
+	return livesession.MoveStream(ctx, cfg, st, dir, dest, func() error {
+		for i, name := range names {
+			if err := os.Rename(filepath.Join(dir, name), filepath.Join(dest, name)); err != nil {
+				// cut short, the stream is split across two folders: the daemon may
+				// find a stream state with no spool, or a spool with no state. The
+				// next start in this folder tries again; this line says where it stands.
+				slog.ErrorContext(ctx, "live_session_retire_move_failed", "session_id", sessionID, "conversation_id", st.ConversationID,
+					"layer_id", st.LayerID, "status", string(st.Status), "file", name, "moved", i, "files", len(names),
+					"from", dir, "to", dest, "error", err)
+				return fmt.Errorf("move previous live file %s: %w", name, err)
+			}
 		}
-	}
-	return nil
+		return nil
+	})
 }

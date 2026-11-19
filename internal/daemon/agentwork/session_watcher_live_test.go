@@ -26,7 +26,7 @@ const (
 // prepareLive gives dir a pending live stream for sessionID, as session start does.
 func prepareLive(t *testing.T, dir, sessionID string) {
 	t.Helper()
-	_, err := livesession.Prepare(context.Background(), livesession.Config{Endpoint: "https://live.test.sageox.ai"}, dir,
+	_, err := livesession.Prepare(context.Background(), livesession.Config{Endpoint: "https://live.test.sageox.ai", DataDir: t.TempDir()}, dir,
 		livesession.OpenParams{SessionID: sessionID, SessionName: filepath.Base(dir)})
 	require.NoError(t, err)
 }

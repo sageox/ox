@@ -3391,7 +3391,10 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 		// capture transaction reloads the checkpoint, rechecks inactivity and
 		// validates replay before it can settle a journal under append + state
 		// locks. Never roll back using the pre-transaction state loaded above.
-		finalState, err := session.FinalizeInactiveCursorCapture(context.Background(), state.WorkspacePath, sessionDir, home, reader, time.Now().Add(-staleRecordingThreshold))
+		finalState, finalBatch, err := session.FinalizeInactiveCursorCapture(context.Background(), state.WorkspacePath, sessionDir, home, reader, time.Now().Add(-staleRecordingThreshold))
+		// the final drain's bytes are committed even when finalization must wait
+		// for Cursor's export, and no later drain reads them again (C8)
+		spoolRecovered(logger, sessionDir, state.WorkspacePath, finalBatch)
 		if err != nil {
 			return false, err // pending native writes retain raw and marker
 		}
