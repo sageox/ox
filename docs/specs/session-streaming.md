@@ -27,7 +27,7 @@ flowchart LR
 | Guarantee | How it holds |
 |---|---|
 | Raw capture commits before the streaming hand-off | The hand-off runs only after the batch committed; nothing it does can undo or delay that commit. |
-| Lock-held hand-off is bounded | A Cursor pause/resume hands off its drain while holding the raw-append and recording-state locks, so later captures can wait for it, at most the spool's 200 ms lock wait and 1 s budget. |
+| Lock-held spool wait is bounded | A Cursor pause/resume hands off its drain while holding the raw-append and recording-state locks, so later captures can wait for it. The spool waits at most 200 ms for its own lock. The 1 s deadline does not bound the state read or the append, which take no context. |
 | A spool failure never touches capture | It is recorded in `spool-lost` and declared as a `spool_write_failed` gap by the next write or the close. |
 | Exactly the committed bytes | `RawWriter` keeps an in-memory copy of what the batch appended (`AppendedBatch`); nothing reads `raw.jsonl` back. |
 | Paused batches never stream | `Suspended` is read under the batch's own lock; a paused batch is skipped, never declared as a loss. |
