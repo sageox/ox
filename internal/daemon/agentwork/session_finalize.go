@@ -92,6 +92,10 @@ type SessionFinalizePayload struct {
 	// Ordinary session files remain subject to the normal upload/commit checks.
 	omitTraces bool
 
+	// useExistingLedgerCopy lets a stale empty-session retry push an existing
+	// Ledger commit without staging files or pointers from the retry cache.
+	useExistingLedgerCopy bool
+
 	// llmPaused is set by BuildPrompt when the claude quota pause is active, so
 	// ProcessResult leaves the session untouched for a later scan.
 	llmPaused bool
@@ -1839,8 +1843,11 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	// where detection re-queues it as upload-only. But a ledger-wide blocker will
 	// refuse every later session the same way, so surface it for the manager to
 	// pause the work type instead of repeating the summarize-then-fail cycle.
-	if isLedgerWideBlocker(pushErr) {
+	if isLedgerWideBlocker(pushErr) || errors.Is(pushErr, session.ErrLedgerSessionOverwrite) {
 		return pushErr
+	}
+	if !pushed {
+		return nil
 	}
 
 	h.logger.Info("session recovered via anti-entropy",
@@ -1966,9 +1973,16 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	if err := lfs.MutateSessionMeta(context.Background(), payload.SessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
 		next := current
 		fromLedger := false
-		if next == nil {
-			next = ledgerMetaForDownload(payload)
-			fromLedger = next != nil
+		if next == nil || (next.SessionID == "" && headerID == "") {
+			verified := ledgerMetaForDownload(h.rootContext(), payload, headerID)
+			if next == nil {
+				next = verified
+				fromLedger = verified != nil
+			} else {
+				// A failed attempt already wrote cache metadata. Keep its
+				// retry counters and the verified legacy recording's implicit ID.
+				fromLedger = verified != nil && verified.SessionID == ""
+			}
 		}
 		if next == nil {
 			// no meta.json yet — seed one; there is nothing to preserve.
@@ -2214,21 +2228,31 @@ func emptyTranscriptSummary() *session.SummarizeResponse {
 //     local copy can never settle a session that has a conversation;
 //   - the classifier #1082 uses finds no conversation in it.
 func isEmptyLedgerTranscript(sessionDir, rawPath, ledgerPath string) bool {
+	return emptyLedgerTranscriptMeta(sessionDir, rawPath, ledgerPath) != nil
+}
+
+func emptyLedgerTranscriptMeta(sessionDir, rawPath, ledgerPath string) *lfs.SessionMeta {
 	if ledgerPath == "" || !isInLedgerCacheDir(sessionDir, ledgerPath) {
-		return false
+		return nil
 	}
 	if !session.HasNeedsSummaryMarker(sessionDir) {
 		own, err := lfs.ReadSessionMeta(sessionDir)
 		if err != nil || own == nil || own.SummaryStatus != sessionsummary.SummaryStatusOK {
-			return false
+			return nil
 		}
 	}
 	ledgerMeta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", filepath.Base(sessionDir)))
 	if err != nil || ledgerMeta == nil || ledgerMeta.IsDraft() {
-		return false
+		return nil
 	}
-	ref, ok := ledgerMeta.Files["raw.jsonl"]
-	if !ok || ref.OID == "" {
+	if !rawMatchesRef(rawPath, ledgerMeta.Files["raw.jsonl"]) || session.ClassifyRawFile(rawPath) != session.RawHeaderOnly {
+		return nil
+	}
+	return ledgerMeta
+}
+
+func rawMatchesRef(rawPath string, ref lfs.FileRef) bool {
+	if ref.OID == "" {
 		return false
 	}
 	info, err := os.Stat(rawPath)
@@ -2236,10 +2260,7 @@ func isEmptyLedgerTranscript(sessionDir, rawPath, ledgerPath string) bool {
 		return false
 	}
 	data, err := os.ReadFile(rawPath)
-	if err != nil || lfs.NewFileRef(data).BareOID() != ref.BareOID() {
-		return false
-	}
-	return session.ClassifyRawFile(rawPath) == session.RawHeaderOnly
+	return err == nil && lfs.NewFileRef(data).BareOID() == ref.BareOID()
 }
 
 // ledgerMetaForDownload returns the Ledger's meta.json when the folder being
@@ -2248,15 +2269,48 @@ func isEmptyLedgerTranscript(sessionDir, rawPath, ledgerPath string) bool {
 // folder over sessions/<name>/, so a blank start would erase every field this
 // path does not own (repo_id, user_id, model, linkage). Drafts are left to the
 // draft purge in stageSessionInLedger.
-func ledgerMetaForDownload(payload *SessionFinalizePayload) *lfs.SessionMeta {
+func ledgerMetaForDownload(ctx context.Context, payload *SessionFinalizePayload, headerID string) *lfs.SessionMeta {
 	if payload.LedgerPath == "" || !isInLedgerCacheDir(payload.SessionDir, payload.LedgerPath) {
 		return nil
 	}
-	meta, err := lfs.ReadSessionMeta(filepath.Join(payload.LedgerPath, "sessions", filepath.Base(payload.SessionDir)))
+	relDir := filepath.Join("sessions", filepath.Base(payload.SessionDir))
+	meta, err := lfs.ReadSessionMeta(filepath.Join(payload.LedgerPath, relDir))
 	if err != nil || meta == nil || meta.IsDraft() {
 		return nil
 	}
-	return meta
+	// A same-name recording can also arrive here without cache metadata.
+	// Establish its identity before copying any fields from the Ledger.
+	if headerID != "" && headerID == meta.SessionID {
+		return meta
+	}
+	relRaw := filepath.Join(relDir, "raw.jsonl")
+	workingRaw := filepath.Join(payload.LedgerPath, relRaw)
+	ref := meta.Files["raw.jsonl"]
+	if ref.OID == "" {
+		// Older metadata can lack a manifest. Verify against the committed
+		// pointer even when an interrupted copy has restored full local bytes.
+		blob, err := gitutil.ReadBlob(ctx, payload.LedgerPath, "HEAD", filepath.ToSlash(relRaw))
+		if err != nil {
+			return nil
+		}
+		oid, size, err := lfs.ParsePointer(string(blob))
+		if err != nil {
+			return nil
+		}
+		ref = lfs.FileRef{OID: oid, Size: size}
+	}
+	if lfs.IsPointerFile(workingRaw) {
+		workingRef, err := lfs.ReadPointerFile(workingRaw)
+		if err != nil || ref.BareOID() != workingRef.BareOID() || ref.Size != workingRef.Size {
+			return nil
+		}
+	} else if !rawMatchesRef(workingRaw, ref) {
+		return nil
+	}
+	if rawMatchesRef(payload.RawPath, ref) {
+		return meta
+	}
+	return nil
 }
 
 // preserveDraftIdentity copies the ses_ id of a draft placeholder in the ledger
@@ -2293,7 +2347,7 @@ func (h *SessionFinalizeHandler) preserveDraftIdentity(payload *SessionFinalizeP
 // stageSessionInLedger prepares a ledger copy and returns the cache to retain
 // until push succeeds. Sessions already in the ledger are backed up to the same
 // cache before their content can be replaced with pointers.
-func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePayload) (string, error) {
+func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePayload, uploaded map[string]lfs.FileRef) (string, error) {
 	fromCache := isInLedgerCacheDir(payload.SessionDir, payload.LedgerPath)
 	if !fromCache && !isGitTrackedLedgerSession(payload.SessionDir, payload.LedgerPath) {
 		return "", nil
@@ -2313,6 +2367,78 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 	if !h.skipGit {
 		if err := gitutil.IsSafeForGitOps(payload.LedgerPath); err != nil {
 			return "", err
+		}
+	}
+
+	// A cache meta read failure is handled by the writer below when finalizing
+	// a draft. It cannot count as proof of an identity here.
+	recordingID, _ := lfs.PreservedSessionID(cacheDir)
+	if recordingID == "" {
+		recordingID = session.ReadHeaderSessionID(filepath.Join(cacheDir, "raw.jsonl"))
+	}
+	destErr := session.CheckFinalizedLedgerSessionDestination(destDir, sessionName, recordingID)
+	if destErr != nil && recordingID != "" {
+		return "", destErr
+	}
+	rawPath := filepath.Join(cacheDir, "raw.jsonl")
+	// Even a matching ID identifies only the recording. The Ledger's copy
+	// may have changed since the worker wrote the empty summary to the cache.
+	if payload.emptyTranscript || payload.UploadOnly {
+		meta := emptyLedgerTranscriptMeta(cacheDir, rawPath, payload.LedgerPath)
+		if meta != nil {
+			legacy := *meta
+			legacy.SessionID = ""
+			// Doctor can persist the same ID that all readers already derived.
+			// Any other explicit ID still requires an exact match.
+			if destErr != nil && meta.SessionID != "" &&
+				(!payload.UploadOnly || meta.SessionID != legacy.EffectiveSessionID()) {
+				return "", destErr
+			}
+			// Upload-only already installs its references in finishStaged.
+			if payload.UploadOnly {
+				uploaded = nil
+			}
+			applied, err := h.replayEmptyLedgerRepair(cacheDir, destDir, meta, uploaded)
+			if err != nil {
+				return "", fmt.Errorf("replay empty session repair: %w", err)
+			}
+			payload.useExistingLedgerCopy = !applied
+			payload.SessionDir = destDir
+			return cacheDir, nil
+		}
+		if payload.emptyTranscript {
+			return "", fmt.Errorf("%w: empty Ledger session %q changed before repair", session.ErrLedgerSessionOverwrite, sessionName)
+		}
+	}
+
+	keepLedgerMeta := false
+	if destErr != nil {
+		if session.ClassifyRawFile(rawPath) == session.RawSubstantive {
+			// The normal summary repair may come from an older Ledger
+			// entry with no explicit ID. Verify the recording under the
+			// repository lock before staging it back over that entry.
+			source := *payload
+			source.RawPath = rawPath
+			meta := ledgerMetaForDownload(h.rootContext(), &source, "")
+			if meta == nil || meta.SessionID != "" {
+				return "", destErr
+			}
+			if (meta.SummaryStatus == "" || meta.SummaryStatus == sessionsummary.SummaryStatusOK) &&
+				strings.TrimSpace(meta.Title) != "" && len(missingArtifacts(destDir)) == 0 {
+				cached, _ := lfs.ReadSessionMeta(cacheDir)
+				if cached != nil && cached.Title == meta.Title && cached.Summary == meta.Summary &&
+					repairArtifactsMatch(cacheDir, destDir) {
+					// This repair was already staged. Retain any newer metadata
+					// while resuming pointer preparation and publication.
+					keepLedgerMeta = true
+				} else if cached == nil || !canResumeLegacyRepair(h.rootContext(), payload.LedgerPath, cacheDir, destDir) {
+					payload.useExistingLedgerCopy = true
+					payload.SessionDir = destDir
+					return cacheDir, nil
+				}
+			}
+		} else {
+			return "", destErr
 		}
 	}
 
@@ -2345,13 +2471,47 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 		return "", fmt.Errorf("create session copy dir: %w", err)
 	}
 
-	entries, err := os.ReadDir(payload.SessionDir)
-	if err != nil {
-		return "", fmt.Errorf("read session dir: %w", err)
+	// An upload-only cache can contain artifacts but lack metadata. When the
+	// raw header carries no ID either, persist the minted identity before
+	// copying so a failed push won't leave the only ID on the Ledger side.
+	// Seeding a header-identified cache would leave a title-less meta that
+	// re-queues the retry for summarization. An existing Ledger record
+	// supplies its own meta.
+	if payload.UploadOnly && recordingID == "" {
+		_, destErr := os.Lstat(filepath.Join(destDir, "meta.json"))
+		_, cacheErr := os.Lstat(filepath.Join(cacheDir, "meta.json"))
+		if errors.Is(destErr, fs.ErrNotExist) && errors.Is(cacheErr, fs.ErrNotExist) {
+			if err := lfs.MutateSessionMeta(h.rootContext(), cacheDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+				if current != nil {
+					return nil, nil
+				}
+				return h.synthesizeMeta(cacheDir, sessionName), nil
+			}); err != nil {
+				return "", fmt.Errorf("seed upload retry metadata: %w", err)
+			}
+		}
 	}
 
+	if err := copySessionArtifacts(cacheDir, destDir, keepLedgerMeta); err != nil {
+		return "", err
+	}
+	payload.SessionDir = destDir
+	return cacheDir, nil
+}
+
+func copySessionArtifacts(source, dest string, keepMeta bool) error {
+	entries, err := os.ReadDir(source)
+	if err != nil {
+		return fmt.Errorf("read session dir: %w", err)
+	}
+
+	hasMeta := false
 	for _, entry := range entries {
 		if entry.IsDir() || pipeline.IsTraceFile(entry.Name()) {
+			continue
+		}
+		if entry.Name() == "meta.json" {
+			hasMeta = true
 			continue
 		}
 		// Machine-local capture state never enters the shared Ledger. Every
@@ -2361,21 +2521,144 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 		if strings.HasPrefix(entry.Name(), ".") || session.IsRawAppendJournal(entry.Name()) {
 			continue
 		}
-		// The live stream's files (ADR-247) are local state too: the spool is a
-		// second full transcript, and the rest are ids, offsets and markers.
+		// Live stream files (ADR-247) are local state too, including the spool,
+		// IDs, offsets, and markers.
 		if livesession.IsLocalFile(entry.Name()) {
 			continue
 		}
-		src := filepath.Join(payload.SessionDir, entry.Name())
-		dst := filepath.Join(destDir, entry.Name())
+		src := filepath.Join(source, entry.Name())
+		dst := filepath.Join(dest, entry.Name())
 		if err := copySessionFile(src, dst); err != nil {
-			return "", fmt.Errorf("copy %s: %w", entry.Name(), err)
+			return fmt.Errorf("copy %s: %w", entry.Name(), err)
 		}
 	}
+	// SummaryStatus becomes authoritative only after copying its artifacts.
+	// A retry can then distinguish an incomplete copy from a complete summary.
+	if hasMeta && !keepMeta {
+		if err := copySessionFile(filepath.Join(source, "meta.json"), filepath.Join(dest, "meta.json")); err != nil {
+			return fmt.Errorf("copy meta.json: %w", err)
+		}
+	}
+	return nil
+}
 
-	// update payload to point at the staged location
-	payload.SessionDir = destDir
-	return cacheDir, nil
+// Replay a deterministic repair if the first upload failed before staging it.
+// Keep the current Ledger files and metadata when a newer repair completed.
+func (h *SessionFinalizeHandler) replayEmptyLedgerRepair(cacheDir, destDir string, verified *lfs.SessionMeta, uploaded map[string]lfs.FileRef) (bool, error) {
+	cached, _ := lfs.ReadSessionMeta(cacheDir)
+	summary := emptyTranscriptSummary()
+	if cached == nil || cached.SummaryStatus != summary.SummaryStatus ||
+		cached.Title != summary.Title || cached.Summary != summary.Summary {
+		return false, nil
+	}
+	applied := false
+	err := lfs.MutateSessionMeta(h.rootContext(), destDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+		if current == nil || current.IsDraft() ||
+			current.EffectiveSessionID() != verified.EffectiveSessionID() ||
+			current.Files["raw.jsonl"] != verified.Files["raw.jsonl"] {
+			return nil, session.ErrLedgerSessionOverwrite
+		}
+		if current.SummaryStatus == summary.SummaryStatus {
+			// A previous attempt may have staged this exact repair and failed
+			// before commit. Resume publication only if the cache and Ledger
+			// still agree on the summary and its artifacts.
+			applied = current.Title == summary.Title && current.Summary == summary.Summary &&
+				repairArtifactsMatch(cacheDir, destDir)
+			return nil, nil
+		}
+		if current.SummaryStatus == "" && current.Title != "" {
+			return nil, nil
+		}
+		if err := copySessionArtifacts(cacheDir, destDir, true); err != nil {
+			return nil, err
+		}
+		current.Title = summary.Title
+		current.Summary = summary.Summary
+		current.SummaryStatus = summary.SummaryStatus
+		current.ValidationError = ""
+		current.SummaryAttempts = 0
+		current.EntryCount = 0
+		if current.StoppedAt == nil {
+			current.StoppedAt = cached.StoppedAt
+		}
+		if len(uploaded) > 0 {
+			current.Files = h.mergeFileRefs(current.Files, uploaded, filepath.Base(destDir))
+			if cached.Trace != nil {
+				current.Trace = cached.Trace
+			}
+		}
+		applied = true
+		return current, nil
+	})
+	return applied, err
+}
+
+// A failed copy can fill the last missing artifact before replacing meta.json.
+// Resume only when HEAD still has an incomplete summary, the metadata is
+// untouched, and every artifact in the checkout is from HEAD or this repair.
+func canResumeLegacyRepair(ctx context.Context, ledgerPath, cacheDir, destDir string) bool {
+	relDir := filepath.ToSlash(filepath.Join("sessions", filepath.Base(destDir)))
+	files, err := gitutil.RunGit(ctx, ledgerPath, "ls-tree", "--name-only", "-z", "HEAD", "--", relDir+"/")
+	if err != nil {
+		return false
+	}
+	tracked := strings.Split(files, "\x00")
+	committedMeta, err := gitutil.ReadBlob(ctx, ledgerPath, "HEAD", relDir+"/meta.json")
+	if err != nil {
+		return false
+	}
+	currentMeta, err := os.ReadFile(filepath.Join(destDir, "meta.json"))
+	if err != nil || !bytes.Equal(committedMeta, currentMeta) {
+		return false
+	}
+
+	incomplete := false
+	for _, name := range requiredArtifacts {
+		relPath := relDir + "/" + name
+		current, err := os.ReadFile(filepath.Join(destDir, name))
+		if err != nil {
+			return false
+		}
+		if slices.Contains(tracked, relPath) {
+			committed, err := gitutil.ReadBlob(ctx, ledgerPath, "HEAD", relPath)
+			if err != nil {
+				return false
+			}
+			if bytes.Equal(current, committed) {
+				continue
+			}
+		} else {
+			incomplete = true
+		}
+		cached, err := os.ReadFile(filepath.Join(cacheDir, name))
+		if err != nil || !repairArtifactMatches(cached, current) {
+			return false
+		}
+	}
+	return incomplete
+}
+
+func repairArtifactsMatch(cacheDir, destDir string) bool {
+	for _, name := range requiredArtifacts {
+		cached, cacheErr := os.ReadFile(filepath.Join(cacheDir, name))
+		ledger, ledgerErr := os.ReadFile(filepath.Join(destDir, name))
+		if errors.Is(cacheErr, fs.ErrNotExist) && errors.Is(ledgerErr, fs.ErrNotExist) {
+			continue
+		}
+		if cacheErr != nil || ledgerErr != nil || !repairArtifactMatches(cached, ledger) {
+			return false
+		}
+	}
+	return true
+}
+
+func repairArtifactMatches(cached, ledger []byte) bool {
+	if bytes.Equal(cached, ledger) {
+		return true
+	}
+	oid, size, err := lfs.ParsePointer(string(ledger))
+	cachedRef := lfs.NewFileRef(cached)
+	return err == nil && size == cachedRef.Size && strings.TrimPrefix(oid, "sha256:") == cachedRef.BareOID()
 }
 
 // logStaleRecoveryDeferred warns the first time a session's stale-recording
@@ -2609,8 +2892,8 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	sessionName := filepath.Base(payload.SessionDir)
 
 	if h.skipGit {
-		cacheDir, err := h.stageSessionInLedger(payload)
-		if err == nil && finishStaged != nil {
+		cacheDir, err := h.stageSessionInLedger(payload, fileRefs)
+		if err == nil && finishStaged != nil && !payload.useExistingLedgerCopy {
 			err = finishStaged()
 		}
 		if err != nil {
@@ -2654,7 +2937,7 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
 			return err
 		}
-		if cacheDir, err = h.stageSessionInLedger(payload); err != nil {
+		if cacheDir, err = h.stageSessionInLedger(payload, fileRefs); err != nil {
 			return fmt.Errorf("stage session in ledger: %w", err)
 		}
 		// stageSessionInLedger leaves a session outside the ledger (an XDG cache
@@ -2663,6 +2946,17 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		// content into stubs that Detect and doctor both skip.
 		if !isGitTrackedLedgerSession(payload.SessionDir, ledgerPath) {
 			outsideLedger = true
+			return nil
+		}
+		if payload.useExistingLedgerCopy {
+			path := filepath.ToSlash(filepath.Join("sessions", sessionName))
+			status, err := gitutil.RunGit(ctx, ledgerPath, "status", "--porcelain=v1", "--untracked-files=all", "--", path)
+			if err != nil {
+				return fmt.Errorf("check existing Ledger session status: %w", err)
+			}
+			if status != "" {
+				return fmt.Errorf("uncommitted changes in Ledger session: %s", sessionName)
+			}
 			return nil
 		}
 		relDir, err := filepath.Rel(ledgerPath, payload.SessionDir)
@@ -3377,6 +3671,12 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	// exactly as it is, and settling would roll back or rewrite raw.jsonl.
 	if err := session.CheckNativeSourceBinding(&state); err != nil {
 		return false, err
+	}
+	// A pending CLI upload with a matching digest has already finalized this
+	// raw capture. Replaying native capture or adding a footer would invalidate
+	// the saved publication ID, which doctor needs to finish the same upload.
+	if session.PendingUploadID(sessionDir) != "" {
+		return session.HasSubstantiveEntries(rawPath), nil
 	}
 	if state.AdapterName == "cursor" {
 		adapter, err := adapters.GetAdapter("cursor")

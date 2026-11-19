@@ -26,6 +26,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
@@ -1520,7 +1521,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 			// the header-only raw.jsonl written at session start (plus any footer a
 			// finalize door stamped) is not worth committing.
 			slog.Info("async upload skipped: session has no entries", "session", sessionName)
-		} else if copyErr := copySessionCacheToLedger(result, ledgerPath, sessionName); copyErr != nil {
+		} else if copyErr := copySessionCacheToLedger(result, state, ledgerPath, sessionName); copyErr != nil {
 			slog.Warn("async copy to ledger failed", "error", copyErr)
 			_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			result.UploadWarning = "Session saved locally but async copy failed. Run 'ox doctor' to retry."
@@ -1638,6 +1639,15 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	}
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
+	sourceCacheDir := filepath.Dir(result.RawPath)
+	recordingID := stopRecordingID(result, state)
+	publicationID := session.PendingUploadID(sourceCacheDir)
+	if publicationID == "" {
+		publicationID = recordingID
+	}
+	if err := session.CheckFinalizedLedgerSessionDestination(sessionDir, sessionName, publicationID); err != nil {
+		return err
+	}
 
 	// durable ID precedence via the shared resolver: a preserved meta.json
 	// ID (prior stop attempt, e.g. LFS upload failed and we're retrying)
@@ -1679,7 +1689,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		return nil
 	}
 
-	sessionID := session.ResolveOrMintSessionID(preservedID, state.SessionID)
+	sessionID := session.ResolveOrMintSessionID(preservedID, recordingID)
 	traceCache, traceMeta, traceErr := session.MaterializeTraces(ledgerPath, state.SessionPath, state.Trace)
 	if traceErr != nil {
 		slog.Warn("trace materialization skipped", "error", traceErr)
@@ -1712,8 +1722,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	// Record retry ownership before the ledger gains a final meta.json: once
 	// that file exists, findOrphanedSessionsInDir skips this session unless
 	// the marker is present, so every failure below must leave it behind.
-	sourceCacheDir := filepath.Dir(result.RawPath)
-	if err := writeSessionUploadRetryPending(sourceCacheDir); err != nil {
+	if err := session.WriteUploadRetryPending(sourceCacheDir, sessionID); err != nil {
 		return fmt.Errorf("record pending session upload: %w", err)
 	}
 
@@ -1739,7 +1748,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		if errors.Is(err, api.ErrReadOnly) {
 			// Read-only access is not retryable; a marker would only hand doctor
 			// a retry that fails the same way.
-			_ = os.Remove(filepath.Join(sourceCacheDir, sessionUploadRetryPendingFile))
+			_ = os.Remove(filepath.Join(sourceCacheDir, session.UploadRetryPendingFile))
 			return err // don't wrap, don't set doctor marker
 		}
 		return fmt.Errorf("LFS upload: %w", err)
@@ -1811,7 +1820,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 			slog.Debug("prune session recovery copy", "dir", recoveryCacheDir, "error", err)
 		}
 	}
-	_ = os.Remove(filepath.Join(sourceCacheDir, sessionUploadRetryPendingFile))
+	_ = os.Remove(filepath.Join(sourceCacheDir, session.UploadRetryPendingFile))
 
 	// reverse-link reconciliation: the session is committed, so record its
 	// ses_ id + outcome=stopped in the meta.json of every plan it produced
@@ -1927,9 +1936,24 @@ func reconcileProducedPlansAtStop(projectRoot string, slugs []string, sessionID 
 	}
 }
 
-// copySessionCacheToLedger delegates to pipeline.CopySessionToLedger with the real filesystem.
-func copySessionCacheToLedger(result *agentSessionResult, ledgerPath, sessionName string) error {
-	return pipeline.CopySessionToLedger(pipeline.OSFileSystem{}, result, ledgerPath, sessionName)
+func stopRecordingID(result *agentSessionResult, state *session.RecordingState) string {
+	if state.SessionID != "" {
+		return state.SessionID
+	}
+	return session.ReadHeaderSessionID(result.RawPath)
+}
+
+// Delegated stop can write into the Ledger before the daemon sees the session.
+// Protect that write with the same ownership check and lock as daemon staging.
+func copySessionCacheToLedger(result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string) error {
+	waitForGCSwap(ledgerPath)
+	return gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+		if err := session.CheckFinalizedLedgerSessionDestination(sessionDir, sessionName, stopRecordingID(result, state)); err != nil {
+			return err
+		}
+		return pipeline.CopySessionToLedger(pipeline.OSFileSystem{}, result, ledgerPath, sessionName)
+	})
 }
 
 // signalDaemonSessionFinalize sends a fire-and-forget IPC message to the daemon

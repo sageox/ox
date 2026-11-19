@@ -42,6 +42,13 @@ func TestParseSessionDirName(t *testing.T) {
 			wantAgent: "OxAbCd",
 		},
 		{
+			name:      "continued recording",
+			input:     "2026-01-06T14-32-some-long-user-name--ses_019f6f6a-d182-7f4e-a54d-8dcb44567c8d-OxAbCd",
+			wantTime:  time.Date(2026, 1, 6, 14, 32, 0, 0, time.UTC),
+			wantUser:  "some-long-user-name",
+			wantAgent: "OxAbCd",
+		},
+		{
 			name:      "no recognizable timestamp",
 			input:     "random-session-name-OxTest",
 			wantTime:  time.Time{},

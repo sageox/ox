@@ -116,7 +116,7 @@ func TestSessionUpload_ExternalCacheSurvivesMissingLFSAndRetry(t *testing.T) {
 			assert.NoDirExists(t, recoveryDir, "only the extra recovery copy is pruned after publication")
 			require.FileExists(t, fixture.result.RawPath, "stop must retain the original; doctor's caller owns its pruning")
 			if mode == "stop" {
-				assert.NoFileExists(t, filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile))
+				assert.NoFileExists(t, filepath.Join(fixture.state.SessionPath, session.UploadRetryPendingFile))
 			}
 		})
 	}
@@ -144,13 +144,13 @@ func TestSessionStop_RecoveryCacheFailureRemainsRetryable(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, orphans, 1, "a failed recovery copy must remain discoverable despite finalized ledger metadata")
 	assert.Equal(t, fixture.state.SessionPath, orphans[0].CachePath)
-	require.FileExists(t, filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile))
+	require.FileExists(t, filepath.Join(fixture.state.SessionPath, session.UploadRetryPendingFile))
 
 	require.NoError(t, os.Remove(blockedRawPath))
 	require.NoError(t, publish())
 	assertSessionBytesPreserved(t, fixture)
 	assert.NoDirExists(t, recoveryDir)
-	assert.NoFileExists(t, filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile))
+	assert.NoFileExists(t, filepath.Join(fixture.state.SessionPath, session.UploadRetryPendingFile))
 }
 
 // Canonical caches, including symlink aliases, are the original recording and
@@ -185,7 +185,7 @@ func TestSessionStop_RetainsOriginalCanonicalCache(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, fixture.rawContent, content)
 			assert.Equal(t, filepath.Join(source, ledgerFileRaw), fixture.result.RawPath)
-			assert.NoFileExists(t, filepath.Join(source, sessionUploadRetryPendingFile))
+			assert.NoFileExists(t, filepath.Join(source, session.UploadRetryPendingFile))
 		})
 	}
 }
