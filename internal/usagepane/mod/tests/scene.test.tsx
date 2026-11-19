@@ -8,7 +8,6 @@ import {
   formatDuration,
   fitSource,
   laneSvg,
-  promptSvg,
   strokeWeight,
   SVG_SOURCE_CAP,
 } from '../hooks/scene'
@@ -89,11 +88,52 @@ describe('a pure function of (event, now)', () => {
     expect(svg).toContain('class="flow"')
   })
 
-  test('nothing ever loops', () => {
+  test('only a running lane repeats, and never without end: a finished one plays once', () => {
     for (const now of [T0 + 100, T0 + 900, T0 + 2000]) {
-      expect(laneSvg(ev({ endedAt: undefined }), now)).not.toContain('indefinite')
-      expect(laneSvg(ev({ tokens: 9000 }), now)).not.toContain('indefinite')
+      expect(laneSvg(ev({ endedAt: undefined }), now)).toContain('repeatCount="')
+      expect(laneSvg(ev({ tokens: 9000 }), now)).not.toContain('repeatCount')
+      expect(laneSvg(ev({ failed: true, tokens: 0 }), now)).not.toContain('repeatCount')
     }
+    for (const now of [T0, T0 + 100, T0 + 5 * 60_000, T0 + 10 * 60_000 - 1]) {
+      expect(laneSvg(ev({ endedAt: undefined }), now)).not.toContain('indefinite')
+    }
+  })
+
+  // Failure prevented: a call whose end never arrives (a stall, a lost finish
+  // event) leaves dots moving in the app for good: nothing redraws an open row.
+  test('the march runs out by itself ten minutes after the call started', () => {
+    const repeats = (now: number) => [...laneSvg(ev({ endedAt: undefined }), now).matchAll(/repeatCount="(\d+)"/g)].map((m) => Number(m[1]))
+    // 600s of 1.92s crossings from the start; fewer the later the row is drawn.
+    expect(repeats(T0)).toEqual([313, 313, 313, 313, 313, 313])
+    expect(repeats(T0 + 5 * 60_000).every((n) => n === 157)).toBe(true)
+    expect(repeats(T0 + 10 * 60_000 - 1000).every((n) => n === 1)).toBe(true)
+    expect(repeats(T0 + 10 * 60_000)).toEqual([])
+    // No freeze: when the count runs out the dots return to their base, invisible.
+    const svg = laneSvg(ev({ endedAt: undefined }), T0)
+    expect(svg).not.toMatch(/repeatCount="\d+"[^>]*fill="freeze"/)
+    expect(svg).toMatch(/<circle class="dot-in" cx="[\d.]+" cy="12" r="2.5" opacity="0">/)
+  })
+
+  // Failure prevented: a call in progress looks idle in the app, or a push is
+  // drawn moving the same way as a pull (the terminal lane marches too).
+  test('a running lane marches toward the destination: a pull left to right, a push right to left', () => {
+    const cx = (svg: string) => [...svg.matchAll(/attributeName="cx" values="([\d.]+);([\d.]+)"[^>]*repeatCount="\d+"/g)].map((m) => [Number(m[1]), Number(m[2])])
+    const pull = laneSvg(ev({ endedAt: undefined }), T0 + 500)
+    expect(cx(pull).length).toBe(3)
+    expect(cx(pull).every(([a, b]) => a < b)).toBe(true)
+    expect(pull).toContain('<circle class="dot-in"')
+    expect(pull).not.toContain('class="dot-out"')
+    const push = laneSvg(ev({ direction: 'out', endedAt: undefined }), T0 + 500)
+    expect(cx(push).length).toBe(3)
+    expect(cx(push).every(([a, b]) => a > b)).toBe(true)
+    expect(push).toContain('<circle class="dot-out"')
+    expect(push).not.toContain('class="dot-in"')
+    // A redraw carries on where the last frame was: begins move back with time.
+    expect(pull).toContain('begin="-0.5s"')
+    expect(laneSvg(ev({ endedAt: undefined }), T0 + 700)).toContain('begin="-0.7s"')
+    // Asked for no motion, or a start too old to believe: the dotted line alone.
+    expect(laneSvg(ev({ endedAt: undefined }), T0 + 500, { reducedMotion: true })).not.toContain('<animate')
+    expect(laneSvg(ev({ endedAt: undefined }), T0 + 10 * 60_000)).not.toContain('repeatCount')
   })
 
   test('static values are end states: dots wait at the destination, invisible', () => {
@@ -104,19 +144,17 @@ describe('a pure function of (event, now)', () => {
 
   test('same input, same string', () => {
     expect(laneSvg(ev(), T0 + 1000)).toBe(laneSvg(ev(), T0 + 1000))
-    const evs = [ev({ id: 'a' }), ev({ id: 'b', lane: 'murmurs', items: 3, itemsNoun: 'murmurs' })]
-    expect(promptSvg(evs, T0 + 1000)).toBe(promptSvg(evs, T0 + 1000))
   })
 })
 
 describe('states', () => {
-  test('running: dotted lane, a ring, the step, no dots', () => {
+  test('running: dotted lane, a ring, the step, three marching dots and no solid lane', () => {
     const svg = laneSvg(ev({ endedAt: undefined }), T0 + 1200)
     expect(svg).toContain('class="open"')
     expect(svg).toContain('stroke-dasharray:1.5 4')
     expect(svg).toContain('class="ring"')
     expect(svg).toContain('searching team discussions')
-    expect(dots(svg)).toBe(0)
+    expect(dots(svg)).toBe(3)
     expect(svg).not.toContain('class="flow"')
   })
 
@@ -136,12 +174,19 @@ describe('states', () => {
     expect(svg).toContain('<tspan class="bad">failed</tspan>')
     expect(svg).toContain('.bad{fill:#9f4838}')
     expect(svg).not.toContain('class="flow"')
+    // The stub and both nodes are in the danger colour too, not the quiet one.
+    expect(svg).toContain('.nb{fill:#9f4838}')
+    expect(svg).toContain('<stop offset="0" class="b0"/><stop offset="1" class="b1"/>')
+    expect((svg.match(/<circle class="nb"/g) ?? []).length).toBe(2)
+    expect(svg).not.toContain('<circle class="nq"')
   })
 
   test('interrupted and zero tokens: a stub, no danger', () => {
     const interrupted = laneSvg(ev({ interrupted: true, tokens: 0 }), T0 + 60_000)
     expect(interrupted).toContain('<rect')
     expect(interrupted).not.toContain('class="bad"')
+    expect(interrupted).not.toContain('class="nb"')
+    expect(interrupted).not.toContain('class="b0"')
     const zero = laneSvg(ev({ tokens: 0, items: undefined }), T0 + 60_000)
     expect(zero).toContain('nothing came back')
     expect(zero).toContain('<rect')
@@ -164,18 +209,6 @@ describe('states', () => {
     expect(svg).toContain('0.8s')
   })
 
-  test('prompt strip sums its sources', () => {
-    const svg = promptSvg(
-      [
-        ev({ id: 'a', label: 'loaded team context', tokens: 14_820, items: undefined }),
-        ev({ id: 'b', lane: 'murmurs', tokens: 310, items: 3, itemsNoun: 'murmurs' }),
-        ev({ id: 'c', lane: 'ledger', tokens: 520, items: 1, itemsNoun: 'ledger match' }),
-      ],
-      T0 + 60_000,
-    )
-    expect(svg).toContain('team context <tspan class="n">~15k</tspan> · 3 murmurs · 1 ledger match')
-    expect(svg).toContain('stroke-width="3"')
-  })
 })
 
 describe('safe as a plain <img>', () => {
@@ -183,7 +216,6 @@ describe('safe as a plain <img>', () => {
     laneSvg(ev(), T0 + 900),
     laneSvg(ev({ endedAt: undefined }), T0 + 100),
     laneSvg(ev({ failed: true, label: '<script>alert(1)</script> onload="x"' }), T0 + 900),
-    promptSvg([ev({ id: 'a' }), ev({ id: 'b' })], T0 + 900),
   ]
 
   test('no script, no handlers, no images, no external refs', () => {
@@ -205,10 +237,8 @@ describe('safe as a plain <img>', () => {
     }
   })
 
-  test('a 12-dot lane and a 3-source strip are well under the cap', () => {
+  test('a 12-dot lane is well under the cap', () => {
     expect(bytes(laneSvg(ev({ tokens: 14_820 }), T0 + 800))).toBeLessThan(SVG_SOURCE_CAP / 10)
-    const evs = [ev({ id: 'a', tokens: 14_820 }), ev({ id: 'b', tokens: 310 }), ev({ id: 'c', tokens: 520 })]
-    expect(bytes(promptSvg(evs, T0 + 800))).toBeLessThan(SVG_SOURCE_CAP / 10)
   })
 
   test('a huge label stays bounded', () => {
@@ -266,17 +296,6 @@ describe('the non-visual channel', () => {
     expect(formatDuration(59_600)).toBe('1m 0s')
     expect(formatDuration(72_000)).toBe('1m 12s')
     expect(formatDuration(119_600)).toBe('2m 0s')
-  })
-
-  test('a prompt strip sums its sources in words', () => {
-    expect(
-      caption([
-        ev({ id: 'a', tokens: 14_820, items: undefined }),
-        ev({ id: 'b', lane: 'murmurs', tokens: 310, items: 3, itemsNoun: 'murmurs' }),
-        ev({ id: 'c', lane: 'ledger', tokens: 520, items: 1, itemsNoun: 'ledger match' }),
-      ]),
-    ).toBe('with this prompt: team context ~15k tokens, 3 murmurs, 1 ledger match; ~16k tokens in all')
-    expect(caption([])).toBe('nothing from SageOx with this prompt')
   })
 
   test('text is escaped', () => {

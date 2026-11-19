@@ -71,7 +71,7 @@ func postPlanActivityBestEffort(gitRoot, planDir string, kind plan.EventKind) {
 	client := api.NewRepoClientWithEndpoint(ep).
 		WithAuthToken(token.AccessToken).
 		WithTimeout(planActivityTimeout)
-	n := api.PlanActivityNotification{Event: string(kind), Status: string(folded.Status)}
+	n := api.PlanActivityNotification{Event: string(kind), Status: string(folded.Status), RepoID: cfg.RepoID}
 	if err := client.NotifyPlanActivity(cfg.TeamID, folded.PlanID, n); err != nil {
 		slog.Debug("plan activity notify failed", "error", err, "plan_id", folded.PlanID, "kind", kind)
 	}

@@ -974,6 +974,9 @@ func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, sta
 		if processResult.Held {
 			output.Guidance = heldSessionGuidance
 		}
+		if processResult.DeletedOnServer {
+			output.Guidance = deletedOnServerGuidance
+		}
 	} else {
 		output.UploadWarning = "no session file found — session data was not uploaded to ledger"
 		output.Guidance = "Session stopped but no conversation data was found. The session recording may be empty. Run 'ox doctor' to check for recoverable sessions."
@@ -1328,9 +1331,16 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 
 	// A held session gets its hold before anything the daemon reacts to, and
 	// no summary prompt: push-summary publishes (GH #1093). If the hold cannot
-	// be recorded, the stop fails and the recording state is kept.
-	held := stopHoldsSession(projectRoot, state)
-	if held {
+	// be recorded, the stop fails and the recording state is kept. A session
+	// deleted on SageOx while it streamed is held the same way, for its own reason.
+	deletedOnServer := liveDeletedOnServer(state.SessionPath)
+	held := deletedOnServer || stopHoldsSession(projectRoot, state)
+	switch {
+	case deletedOnServer:
+		if err := holdDeletedOnServer(result, state.SessionPath, "session_stop"); err != nil {
+			return nil, err
+		}
+	case held:
 		if err := holdStoppedSession(result, state, filepath.Dir(result.RawPath), "session_stop"); err != nil {
 			return nil, err
 		}
@@ -1388,10 +1398,18 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	}
 
 	if held {
-		slog.Info("session held on this machine, skipping upload", "session", sessionName)
+		slog.Info("session held on this machine, skipping upload", "session", sessionName, "deleted_on_server", deletedOnServer)
 		result.LedgerSessionDir = ""
 		result.UploadWarning = heldSessionWarning(sessionName)
+		if deletedOnServer {
+			result.UploadWarning = deletedOnServerWarning
+		}
 		return result, nil
+	}
+	// the publication boundary (C3): both upload modes below publish, the async
+	// one through the daemon, so a delete heard since the check above stops here
+	if errors.Is(refuseDeletedOnServer(state.SessionPath), errSessionDeletedOnServer) {
+		return holdRefusedAsDeleted(result, state.SessionPath, filepath.Dir(result.RawPath))
 	}
 
 	// LFS upload pipeline: upload content files to LFS blob storage,
@@ -1494,6 +1512,9 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 			return uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
 		}, time.Sleep)
 		result.UploadMs = time.Since(uploadStart).Milliseconds()
+		if errors.Is(uploadErr, errSessionDeletedOnServer) {
+			return holdRefusedAsDeleted(result, state.SessionPath, filepath.Dir(result.RawPath))
+		}
 		if uploadErr != nil {
 			if errors.Is(uploadErr, api.ErrReadOnly) {
 				fmt.Fprintln(os.Stderr, "\nUpload skipped — you have read-only access to this public repo.")
@@ -1571,6 +1592,11 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 
 func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string, effects sessionUploadEffects) error {
 	if err := session.CheckNativeSourceBinding(state); err != nil {
+		return err
+	}
+	// the publication boundary (C3): read now, before the first Ledger write,
+	// never from a value the stop read before generating artifacts
+	if err := refuseDeletedOnServer(state.SessionPath); err != nil {
 		return err
 	}
 	sessionsDir := filepath.Join(ledgerPath, "sessions")

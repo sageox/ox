@@ -265,6 +265,23 @@ coworker session — "● ox  3 discussions · 1 plan · 1 murmur" — with a re
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
+		Key:         "flow_lanes",
+		Label:       "Flow lanes",
+		Description: "Show what each ox call moved between SageOx and your session, as a one-line lane.",
+		LongDescription: `Controls ox's flow lanes outside the Claude Code plugin.
+
+A lane is one line per ox call that moved team data:
+"SAGEOX ●━━━━━━━━━━━━━━━━● SESSION  searched team memory · ~1.2k from 5 discussions · 0.8s".
+When enabled, Codex shows each lane under the ox call that made it, and
+` + "`ox statusline --watch`" + ` draws them live under the status line. Turning
+the status line off also turns these off. In Claude Code the lanes under each
+ox call are set with /ox-session-report flow on|off|still.`,
+		Category:    "Display",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
 		Key:         "session_report_pane",
 		Label:       "Session report pane",
 		Description: "Show the /ox-session-report pane in Claude Code (installs the ox-cli-brief-pane plugin)",
@@ -886,6 +903,12 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.UserVal = boolToOnOff(*userCfg.StatuslineEnabled)
 		}
 
+	case "flow_lanes":
+		// only an explicit value counts as a user layer (see statusline)
+		if userCfg != nil && userCfg.FlowLanesEnabled != nil {
+			cv.UserVal = boolToOnOff(*userCfg.FlowLanesEnabled)
+		}
+
 	case "session_report_pane", "brief_pane":
 		// only an explicit value counts as a user layer (see statusline);
 		// brief_pane is session_report_pane's deprecated name, and an old
@@ -1208,6 +1231,10 @@ func setUserConfig(key, value string) error {
 	case "statusline":
 		enabled := value == "on"
 		cfg.StatuslineEnabled = &enabled
+
+	case "flow_lanes":
+		enabled := value == "on"
+		cfg.FlowLanesEnabled = &enabled
 
 	case "session_report_pane", "brief_pane":
 		// both names write session_report_pane_enabled and drop the old key,
@@ -1549,6 +1576,9 @@ func unsetUserConfig(key string) error {
 
 	case "statusline":
 		cfg.StatuslineEnabled = nil
+
+	case "flow_lanes":
+		cfg.FlowLanesEnabled = nil
 
 	case "session_report_pane", "brief_pane":
 		cfg.SessionReportPaneEnabled = nil
