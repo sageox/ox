@@ -26,3 +26,13 @@ func resetRulesCache() {
 	defer rulesCache.mu.Unlock()
 	rulesCache.delta, rulesCache.fetched = nil, time.Time{}
 }
+
+// SetLostDeclareHookForTest runs f inside a spool write, after it read the
+// loss totals and wrote its gap line, before it stores them as declared. Not
+// safe for parallel tests.
+func SetLostDeclareHookForTest(t testing.TB, f func()) {
+	t.Helper()
+	prev := lostDeclareHook
+	lostDeclareHook = f
+	t.Cleanup(func() { lostDeclareHook = prev })
+}

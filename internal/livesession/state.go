@@ -27,10 +27,15 @@ const (
 	// closes it. Like close-requested it is written without live.lock, because a
 	// drain or open may hold the lock far longer than abort can wait.
 	deleteRequestFileName = "delete-requested"
-	// spoolLostFileName counts committed bytes Spool could not write (EACCES,
-	// ENOSPC, a read-only volume). The next spool write, or the close, turns it
-	// into a gap line, so the loss shows in the stream instead of vanishing.
+	// spoolLostFileName logs committed bytes Spool could not write (EACCES,
+	// ENOSPC, a read-only volume, a lock or state failure), one line per loss.
+	// It is append-only and never removed: recording a loss takes no lock and
+	// no context, so it cannot fail for the reason the spool write just did.
 	spoolLostFileName = "spool-lost"
+	// spoolLostDeclaredFileName holds how many of spool-lost's bytes gap lines
+	// already declared. The next spool write, or the close, declares the rest,
+	// so the loss shows in the stream instead of vanishing.
+	spoolLostDeclaredFileName = "spool-lost-declared"
 )
 
 // IsLocalFile reports whether name is one of the live-stream files this package
@@ -39,7 +44,8 @@ const (
 // session folder into the Ledger must skip them.
 func IsLocalFile(name string) bool {
 	switch name {
-	case spoolFileName, stateFileName, lockFileName, closeRequestFileName, deleteRequestFileName, spoolLostFileName:
+	case spoolFileName, stateFileName, lockFileName, closeRequestFileName, deleteRequestFileName,
+		spoolLostFileName, spoolLostDeclaredFileName:
 		return true
 	}
 	return false

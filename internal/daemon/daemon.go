@@ -1429,6 +1429,16 @@ func (d *Daemon) initComponents() time.Duration {
 	if d.agentWorker != nil {
 		d.agentWorker.SetSessionWatcher(d.sessionWatcher)
 	}
+	// An agent heartbeat (every ox hook sends one, as do other ox commands)
+	// arms the hook catch-up for that agent's recording. A heartbeat proves
+	// nothing about a marker, so NoteHook arms only a recording ox started on
+	// this machine (session.LoadRecordingMarkers): a marker planted in the
+	// Ledger checkout or legacy sessions/ under a live agent's ID is refused.
+	if projectRoot := d.config.ProjectRoot; projectRoot != "" {
+		d.heartbeat.SetAgentHeartbeatCallback(func(agentID string) {
+			d.sessionWatcher.NoteHook(d.ctx, projectRoot, agentID)
+		})
+	}
 
 	// wire cross-component dependencies
 	d.scheduler.SetAuthTokenGetter(d.heartbeat.GetAuthToken)
@@ -1622,6 +1632,17 @@ func (d *Daemon) startWorkers() {
 		go func() {
 			defer d.wg.Done()
 			d.liveSessions.Run(d.ctx)
+		}()
+	}
+
+	// Hook-mode recordings read the transcript only when a hook fires. This
+	// sweep captures what the agent wrote after its last one (Claude Code can
+	// fire Stop before its final answer is on disk).
+	if d.sessionWatcher != nil && d.config.ProjectRoot != "" {
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			d.sessionWatcher.RunHookCatchUp(d.ctx, d.config.ProjectRoot)
 		}()
 	}
 

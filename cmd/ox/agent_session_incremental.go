@@ -20,6 +20,7 @@ import (
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/claudesource"
 	"github.com/sageox/ox/internal/version"
+	"github.com/sageox/ox/pkg/adapterruntime"
 )
 
 // writeRawHeader writes the metadata header line to raw.jsonl so that
@@ -120,6 +121,27 @@ func writeRawHeaderWithAttribution(projectRoot string, state *session.RecordingS
 	return nil
 }
 
+// finalRecordWait bounds how long a final drain waits for Claude Code to
+// finish writing the transcript's last record. Claude Code can fire Stop
+// before its final answer is fully on disk, and a final drain is the last
+// read: TailJSONL leaves an unterminated record unread, so it would be lost.
+// A record flushes in milliseconds, so 2 s is generous for a live writer while
+// keeping stop prompt when the agent died mid-write and it never completes.
+const finalRecordWait = 2 * time.Second
+
+// awaitFinalTranscriptRecord gives a final drain of sourceFile up to
+// finalRecordWait for its last record to complete. It does not wait for
+// records the agent has not started: no read can see those.
+func awaitFinalTranscriptRecord(agentID, sourceFile string) {
+	if sourceFile == "" {
+		return
+	}
+	start := time.Now()
+	if !adapterruntime.WaitForCompleteRecord(context.Background(), sourceFile, finalRecordWait) {
+		slog.Warn("final drain: transcript still ends mid-record; that record is left unread", "agent_id", agentID, "source", sourceFile, "waited_ms", time.Since(start).Milliseconds())
+	}
+}
+
 // finalizeIncrementalSession completes a session that was incrementally recorded
 // by hooks. Does a final drain from the source file, then generates events,
 // and summary artifacts from the already-written raw.jsonl.
@@ -164,6 +186,10 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		// diagnostic: log source file state for debugging truncation issues
 		if fi, statErr := os.Stat(state.SessionFile); statErr == nil {
 			slog.Info("finalize: final drain", "source", state.SessionFile, "file_size", fi.Size(), "read_offset", readOffset, "start_offset", state.StartOffset)
+		}
+
+		if state.AdapterName == "claude-code" {
+			awaitFinalTranscriptRecord(state.AgentID, state.SessionFile)
 		}
 
 		var sourceSnapshot os.FileInfo
