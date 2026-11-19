@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/spf13/cobra"
@@ -110,6 +111,14 @@ func runReadSync(cmd *cobra.Command, args []string) error {
 		result.ErrorClass = class
 		return finishReadSync(cmd, result, jsonOutput, 2)
 	}
+	// Inside a SageOx project for this repo, path is that project's Ledger
+	// folder unless XDG_DATA_HOME sends this command elsewhere: the daemon
+	// clones the read-write Ledger there, and takes any checkout it finds there
+	// for it, including a read-only one that sessions cannot be pushed through.
+	if !check && os.Getenv("XDG_DATA_HOME") == "" && config.GetRepoID(config.FindProjectRoot()) == repoID {
+		result.ErrorClass = "project_ledger"
+		return finishReadSync(cmd, result, jsonOutput, 1)
+	}
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -160,6 +169,10 @@ func finishReadSync(cmd *cobra.Command, result ledger.ReadSyncResult, jsonOutput
 		fmt.Fprintf(cmd.ErrOrStderr(), "Ledger read failed: %s\n", result.ErrorClass)
 		if code == 2 {
 			fmt.Fprintln(cmd.ErrOrStderr(), "Use: ox sync --read-only --repo repo_<uuid> [--timeout 30m] [--check] [--json]")
+		}
+		if result.ErrorClass == "project_ledger" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "%s is the Ledger folder of the SageOx project here, which its ox daemon clones and writes.\n", result.Path)
+			fmt.Fprintln(cmd.ErrOrStderr(), "Use ox's normal commands in this project, or set XDG_DATA_HOME to a separate directory for read-only syncs.")
 		}
 	}
 	if code != 0 {

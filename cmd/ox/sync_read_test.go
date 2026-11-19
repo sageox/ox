@@ -114,6 +114,35 @@ func TestReadSyncMissingTokenIgnoresProjectAndHumanContext(t *testing.T) {
 	require.Empty(t, stderr)
 }
 
+// Failure prevented: a read-only sync run inside a SageOx project puts a
+// read-only checkout in the folder where that project's daemon keeps the
+// read-write Ledger; the daemon takes it for the Ledger, and sessions recorded
+// in the project can no longer be pushed.
+func TestReadSyncRefusesTheProjectsLedgerFolder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
+	t.Setenv("SAGEOX_TOKEN", "")
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv(config.EnvProjectRoot, "")
+	project := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(project, ".sageox"), 0o755))
+	require.NoError(t, config.SaveProjectConfig(project, &config.ProjectConfig{RepoID: readSyncTestRepoID}))
+	t.Chdir(project)
+	for _, tc := range []struct{ name, dataHome, repo, want string }{
+		{"this project's repo", "", readSyncTestRepoID, "project_ledger"},
+		{"a separate data home", t.TempDir(), readSyncTestRepoID, "denied"},
+		{"another repo", "", "repo_019ff2f5-2079-7be1-b05e-000000000000", "denied"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_DATA_HOME", tc.dataHome)
+			result, stderr, err := runReadSyncInProc(t, "--read-only", "--repo", tc.repo, "--json")
+			require.Equal(t, 1, exitCodeOf(t, err))
+			require.Equal(t, tc.want, result.ErrorClass)
+			require.Empty(t, stderr)
+		})
+	}
+}
+
 // Failure prevented: malformed endpoints disclose embedded passwords, while a
 // relative data home or legacy path override silently defeats caller isolation.
 func TestReadSyncRejectsUnsafeEndpointAndDataHome(t *testing.T) {
@@ -396,6 +425,7 @@ func TestReadSyncOutputContract(t *testing.T) {
 		{"ready", 0, "", "Ledger ready: /selected/ledger (HEAD abc123)\n", ""},
 		{"denied", 1, "denied", "", "Ledger read failed: denied\n"},
 		{"usage", 2, "invalid_arguments", "", "Ledger read failed: invalid_arguments\nUse: ox sync --read-only --repo repo_<uuid> [--timeout 30m] [--check] [--json]\n"},
+		{"project ledger", 1, "project_ledger", "", "Ledger read failed: project_ledger\n/selected/ledger is the Ledger folder of the SageOx project here, which its ox daemon clones and writes.\nUse ox's normal commands in this project, or set XDG_DATA_HOME to a separate directory for read-only syncs.\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
