@@ -325,10 +325,10 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		}
 		return fmt.Errorf("failed to start recording: %w", err)
 	}
-	// an earlier recording's stream may have withheld a secret after its stop
-	// could say so. Before the header write: in a reused folder that
-	// write removes an ended stream's files, its owed notice with them.
-	if takeEarlierLiveSecretWithheld(state.SessionPath) {
+	// an earlier recording's stream may owe its person the withheld notice;
+	// its mark is cleared only once this start's output is written
+	noticeDirs := earlierLiveSecretWithheld(state.SessionPath, state.SessionID)
+	if len(noticeDirs) > 0 {
 		notice = strings.TrimSpace(notice + "\n\n" + liveSecretWithheldEarlierWarning)
 	}
 
@@ -353,6 +353,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	if cfg.Review || cfg.Text {
 		printSessionStartText(inst.AgentID, adapterName, title, notice, state.StartedAt)
 		if !cfg.Review {
+			confirmLiveSecretWithheldNotices(noticeDirs)
 			return nil
 		}
 		fmt.Println()
@@ -364,7 +365,11 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		return fmt.Errorf("format start JSON: %w", err)
 	}
 	trackContextBytes(int64(len(jsonOut)))
-	return cli.WriteJSONBytes(os.Stdout, jsonOut)
+	if err := cli.WriteJSONBytes(os.Stdout, jsonOut); err != nil {
+		return err
+	}
+	confirmLiveSecretWithheldNotices(noticeDirs)
+	return nil
 }
 
 // buildSessionStartOutput constructs the JSON output for session start.
@@ -756,23 +761,31 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		})
 	}
 
+	return emitSessionStop(projectRoot, inst, state, duration, processResult, timing)
+}
+
+// emitSessionStop writes the stop's output, then clears the owed marks of the
+// withheld notices it gave: only an output actually written has said them.
+func emitSessionStop(projectRoot string, inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult, timing map[string]int64) error {
+	var err error
 	// output format selection (priority: review > text > json default)
-	if cfg.Review {
+	switch {
+	case cfg.Review:
 		// security audit mode: human summary first, then JSON
 		outputTextSummary(projectRoot, state, duration, processResult)
 		fmt.Println()
 		fmt.Println("--- Machine Output ---")
-		return outputSessionStopJSON(projectRoot, inst, state, duration, processResult, timing)
-	}
-
-	if cfg.Text {
+		err = outputSessionStopJSON(projectRoot, inst, state, duration, processResult, timing)
+	case cfg.Text:
 		// human-readable text output
 		outputTextSummary(projectRoot, state, duration, processResult)
-		return nil
+	default:
+		err = outputSessionStopJSON(projectRoot, inst, state, duration, processResult, timing)
 	}
-
-	// default: JSON output
-	return outputSessionStopJSON(projectRoot, inst, state, duration, processResult, timing)
+	if err == nil && processResult != nil {
+		confirmLiveSecretWithheldNotices(processResult.LiveNoticeDirs)
+	}
+	return err
 }
 
 // sessionPathVariants returns alternate path forms that may produce different
@@ -1348,7 +1361,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// be recorded, the stop fails and the recording state is kept. A session
 	// deleted on SageOx while it streamed is held the same way, for its own reason.
 	deletedOnServer := liveDeletedOnServer(state.SessionPath)
-	result.LiveSecretWithheld, result.EarlierLiveSecretWithheld = liveSecretWithheldNotices(state)
+	collectLiveSecretWithheldNotices(result, state)
 	held := deletedOnServer || stopHoldsSession(projectRoot, state)
 	switch {
 	case deletedOnServer:

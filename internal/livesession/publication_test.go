@@ -394,3 +394,58 @@ func TestCloseWithholdsASummaryTheScanRefuses(t *testing.T) {
 		t.Fatalf("closed=%v with a %d-byte summary, want it withheld", ok, len(got.Summary))
 	}
 }
+
+// A process whose refresh could not be kept on disk scans with what it
+// fetched, but only until another process keeps a newer catalog. Failure
+// prevented: the in-memory rules shadowed the file forever, so a detector the
+// other process kept never reached this one's scan until it restarted.
+func TestRulesKeptByAnotherProcessReplaceOnesThatCouldNotBeKept(t *testing.T) {
+	e := newEnv(t)
+	path := livesession.RulesPathForTest(e.cfg)
+	// portable failure injection: a directory where the catalog file goes
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	livesession.SetCurrentCatalogForTest(t, func(context.Context) ([]byte, error) { return splitCatalog, nil })
+	if err := livesession.RefreshSecretRules(t.Context(), e.cfg.DataDir); err == nil {
+		t.Fatal("test setup: the refresh kept its catalog where a directory stands")
+	}
+	if livesession.CheckPublicationForTest(e.cfg, joined(splitA, splitB)) == nil {
+		t.Fatal("this process must still scan with the rules it fetched")
+	}
+	// another process (a daemon for another repository) keeps a newer catalog
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, futureCatalog, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := lines(0, 2)
+	e.spool(before)
+	e.mustDrain()
+	e.spool(futureLine)
+	e.mustDrain()
+
+	server := e.stored(e.state())
+	assertSameBytes(t, "server copy", server, joined(before, withheldGapFor(futureLine)))
+	assertNotContains(t, "server copy", server, "future_synthetic")
+}
+
+// A loss declared in the same batch as a refused line stays declared. Failure
+// prevented: the spool_write_failed gap went into the secret_withheld gap, and
+// since the loss was settled locally nothing ever declared it again.
+func TestAWithholdKeepsTheLossesItsBatchDeclares(t *testing.T) {
+	e := newEnv(t)
+	before := lines(0, 2)
+	e.spool(before)
+	e.mustDrain()
+	if err := livesession.DeclareLost(t.Context(), e.dir, 4096, errors.New("disk full")); err != nil {
+		t.Fatal(err)
+	}
+	clean := lines(2, 3)
+	e.spool(joined(secretLine, clean)) // written after the loss's gap line
+	e.mustDrain()
+
+	lost := []byte(`{"type":"gap","reason":"spool_write_failed","bytes":4096}` + "\n")
+	assertSameBytes(t, "server copy", e.stored(e.state()), joined(before, lost, withheldGapFor(joined(secretLine, clean))))
+}

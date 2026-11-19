@@ -90,9 +90,9 @@ func finalizeOrHoldOnHookStop(ctx *HookContext, state *session.RecordingState, p
 		return nil
 	}
 	liveSessionFinish(ctx.ProjectRoot, state, "", liveEndCloseBudget)
-	// a hook has no one to tell about a withheld secret: the next session
-	// start or stop in this project says it
-	settleLiveSecretWithheldNotice(state, false)
+	// a hook has no one to tell about a withheld secret: the stream stays
+	// marked, and the next session start or stop in this project says it
+	settleLiveSecretWithheldNotice(state)
 	if held, err := holdIfDeletedOnServer(state.SessionPath, "hook_"+phase); held || err != nil {
 		// deleted on SageOx while it streamed: no finalize request, which would
 		// summarize and upload it. Silent: a hook has no one to tell.

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -121,4 +123,46 @@ func TestCloseGapsARefusedBatchAndStillCloses(t *testing.T) {
 		t.Fatal("the server never received the close")
 	}
 	assertWithheldOnce(t, logs.String(), len(refused)-1)
+}
+
+// An owed withheld notice is only ever cleared by the caller that said it.
+// Failure prevented: a scan that found the mark but no stream state (a stream
+// caught between moveLiveStream's renames) removed the mark, and the notice
+// was never given.
+func TestAnOwedNoticeOutlivesAStreamCaughtMidMove(t *testing.T) {
+	e := newEnv(t)
+	sessions := filepath.Dir(e.dir)
+	moving := filepath.Join(sessions, ".live-ses_moving")
+	if err := os.Mkdir(moving, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := livesession.OweSecretWithheldNotice(moving); err != nil {
+		t.Fatal(err)
+	}
+	if got := livesession.OwedSecretWithheldNotices(sessions, ""); len(got) != 0 {
+		t.Fatalf("a folder with no stream state yet owes %d notices, want none", len(got))
+	}
+	if !livesession.OwesSecretWithheldNotice(moving) {
+		t.Fatal("the scan removed the mark of a stream caught mid-move")
+	}
+	raw, err := os.ReadFile(filepath.Join(e.dir, "stream-state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = bytes.Replace(raw, []byte("{"), []byte(`{"secret_withheld":true,`), 1)
+	if err := os.WriteFile(filepath.Join(moving, "stream-state.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := livesession.OwedSecretWithheldNotices(sessions, ""); len(got) != 1 || got[0] != moving {
+		t.Fatalf("owed notices = %v once the move finished, want the moved stream", got)
+	}
+	if got := livesession.OwedSecretWithheldNotices(sessions, e.st.SessionID); len(got) != 0 {
+		t.Fatal("the recording's own stream counted as an earlier one")
+	}
+	if err := livesession.ClearSecretWithheldNotice(moving); err != nil {
+		t.Fatal(err)
+	}
+	if got := livesession.OwedSecretWithheldNotices(sessions, ""); len(got) != 0 {
+		t.Fatal("a notice said and cleared is still owed")
+	}
 }

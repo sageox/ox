@@ -57,9 +57,13 @@ var currentCatalog = secretguard.LatestCatalog
 type rulesSnapshot struct {
 	path string
 	// file is the catalog file the delta came from. Nil when this process
-	// refreshed but could not persist: its delta is then newer than the file.
-	file  os.FileInfo
-	delta *secretguard.RuleSet // nil: the bundled catalog alone
+	// refreshed but could not persist: its delta is then newer than the file
+	// as it stood then (unsaved), until the file changes.
+	file os.FileInfo
+	// unsaved is the file as it stood when this process could not persist its
+	// refresh; nil when there was none. Only for a snapshot with no file.
+	unsaved os.FileInfo
+	delta   *secretguard.RuleSet // nil: the bundled catalog alone
 }
 
 // loadedRules caches the last snapshot, so the catalog is compiled again only
@@ -92,11 +96,14 @@ func RefreshSecretRules(ctx context.Context, dataDir string) error {
 	}
 	path := rulesPath(dataDir)
 	file, err := saveCatalog(ctx, path, catalog)
-	// this process scans with what it fetched even if no other process can
-	loadedRules.Store(&rulesSnapshot{path: path, file: file, delta: delta})
 	if err != nil {
+		// this process scans with what it fetched even if no other process
+		// can, until another process keeps a catalog of its own
+		unsaved, _ := os.Stat(path)
+		loadedRules.Store(&rulesSnapshot{path: path, unsaved: unsaved, delta: delta})
 		return fmt.Errorf("refresh secret rules: keep them for other processes: %w", err)
 	}
+	loadedRules.Store(&rulesSnapshot{path: path, file: file, delta: delta})
 	return nil
 }
 
@@ -135,10 +142,15 @@ func saveCatalog(ctx context.Context, path string, catalog []byte) (os.FileInfo,
 func loadRules(ctx context.Context, dataDir string, log *slog.Logger) *secretguard.RuleSet {
 	path := rulesPath(dataDir)
 	snap := loadedRules.Load()
-	if snap != nil && snap.path == path && snap.file == nil {
-		return snap.delta
+	if snap != nil && snap.path != path {
+		snap = nil
 	}
 	info, err := os.Stat(path)
+	if snap != nil && snap.file == nil && (err != nil || snap.unsaved != nil && sameVersion(snap.unsaved, info)) {
+		// this process refreshed but could not keep it, and no other process
+		// has kept a catalog since: what it fetched is the newest there is
+		return snap.delta
+	}
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -146,7 +158,7 @@ func loadRules(ctx context.Context, dataDir string, log *slog.Logger) *secretgua
 		log.WarnContext(ctx, "live_secret_rules_unreadable", "impact", "this scan uses the bundled catalog alone", "error", err)
 		return nil
 	}
-	if snap != nil && snap.path == path && sameVersion(snap.file, info) {
+	if snap != nil && snap.file != nil && sameVersion(snap.file, info) {
 		return snap.delta
 	}
 	delta, err := readCatalogDelta(path)
@@ -204,56 +216,60 @@ func (s *session) checkPublication(ctx context.Context, content []byte) error {
 	return checkPublication(s.rules, content)
 }
 
-// secretWithheldPrefix opens every gap line withholdRefused writes. The viewer
-// keys its "Withheld by SageOx" marker off the reason and the byte count, so
-// the line says nothing about what matched.
-const secretWithheldPrefix = `{"type":"gap","reason":"secret_withheld",`
-
 // secretWithheldGap stands for n withheld bytes, the newline it keeps not
-// counted, as the spool's oversized_line and invalid_line gaps count.
+// counted, as the spool's oversized_line and invalid_line gaps count. The
+// viewer keys its "Withheld by SageOx" marker off the reason and the byte
+// count, so the line says nothing about what matched.
 func secretWithheldGap(n int) []byte {
-	return fmt.Appendf(nil, secretWithheldPrefix+`"bytes":%d}`+"\n", n)
+	return fmt.Appendf(nil, `{"type":"gap","reason":"secret_withheld","bytes":%d}`+"\n", n)
 }
 
 // withheldBatch is a batch the publication scan refused and what replaces it.
 type withheldBatch struct {
 	size  int64  // bytes of the refused batch
-	next  []byte // its leading earlier gap lines, then the one new gap line
+	next  []byte // the batch's gap lines, and the one new gap line
 	bytes int64  // bytes the new gap line stands for
 }
 
-// withheldGapLine is exactly a gap line withholdRefused wrote. Nothing looser
-// may match: a captured line dressed as a gap could otherwise carry content
-// past the scan.
-var withheldGapLine = regexp.MustCompile(`^\{"type":"gap","reason":"secret_withheld","bytes":[0-9]+\}\n$`)
+// declaredGapLine is exactly a gap line this package writes into the spool: a
+// reason and at most a byte count, nothing else. Nothing looser may match: a
+// captured line dressed as a gap could otherwise carry content past the scan.
+var declaredGapLine = regexp.MustCompile(`^\{"type":"gap","reason":"(?:secret_withheld|spool_write_failed|torn_tail|oversized_line|invalid_line|spool_full)"(?:,"bytes":[0-9]+)?\}\n$`)
 
 // withholdRefused replaces a refused batch with one secret_withheld gap line
-// standing for all of its content (F1). Withholding only the lines refused
-// on their own lost the context a match spans: a Helm extraEnv name and its
-// value on separate lines, a match split across lines, or a gap line longer
-// than the line it replaced pushing a line into the next batch, which nothing
-// then scans with the rest. A later scan of what is left cannot recover deleted
-// context, so nothing in a refused batch streams.
+// standing for all of its content (F1). Withholding only the lines refused on
+// their own lost the context a match spans: a Helm extraEnv name and its value
+// on separate lines, a match split across lines, or a gap line longer than the
+// line it replaced pushing a line into the next batch, which nothing then scans
+// with the rest. A later scan of what is left cannot recover deleted context,
+// so no content in a refused batch streams.
 //
-// The one exception leads the batch: gap lines an earlier withhold wrote that
-// the server has not taken yet. They hold no content and declare their own
-// sizes, so they stay as they are rather than being counted into this gap.
+// Gap lines the batch already holds stay, in order: they carry no content, and
+// each declares a loss (an earlier withhold, a spool write that failed, a torn
+// tail) that is settled locally and would never be declared again. The new gap
+// line takes the place of the batch's first content line.
 func withholdRefused(batch []byte) (withheldBatch, error) {
-	lead := 0
+	var next, content []byte
+	at := -1 // where in next the new gap line goes
 	for line := range bytes.Lines(batch) {
-		if !withheldGapLine.Match(line) {
-			break
+		if declaredGapLine.Match(line) {
+			next = append(next, line...)
+			continue
 		}
-		lead += len(line)
+		if at < 0 {
+			at = len(next)
+		}
+		content = append(content, line...)
 	}
-	content := batch[lead:]
-	if len(content) == 0 {
-		// replacing gap lines with another one could go on forever
-		return withheldBatch{}, errors.New("the secret scan refused secret_withheld gap lines")
+	if at < 0 {
+		// only gap lines: replacing them with another one could go on forever
+		return withheldBatch{}, errors.New("the secret scan refused a batch of gap lines")
 	}
 	n := len(bytes.TrimSuffix(content, []byte("\n")))
-	next := append(bytes.Clone(batch[:lead]), secretWithheldGap(n)...)
-	return withheldBatch{size: int64(len(batch)), next: next, bytes: int64(n)}, nil
+	gap := secretWithheldGap(n)
+	out := make([]byte, 0, len(next)+len(gap))
+	out = append(append(append(out, next[:at]...), gap...), next[at:]...)
+	return withheldBatch{size: int64(len(batch)), next: out, bytes: int64(n)}, nil
 }
 
 // withhold writes s.withheld into the spool and the stream goes on (F1). The

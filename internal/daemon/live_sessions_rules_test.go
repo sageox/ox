@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -87,7 +88,11 @@ func TestLiveRulesRefreshKeepsTheRulesForTheCLI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the refreshed rules were not kept in the data dir the drains read: %v", err)
 	}
-	if info.Size() == 0 || info.Mode().Perm() != 0o600 {
-		t.Fatalf("kept rules: %d bytes, mode %v; want a private, non-empty catalog", info.Size(), info.Mode().Perm())
+	if info.Size() == 0 {
+		t.Fatal("kept rules: an empty file, want the catalog")
+	}
+	// Windows reports a mode from the read-only attribute alone, never 0600
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("kept rules: mode %v, want 0600", info.Mode().Perm())
 	}
 }

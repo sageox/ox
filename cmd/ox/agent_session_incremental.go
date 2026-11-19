@@ -313,7 +313,7 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		// no close runs below, yet a refused batch may already have set the
 		// flag (a first batch that is not a JSON line keeps no entry), and the
 		// stream may still withhold one: settle the notice here too
-		result.LiveSecretWithheld, result.EarlierLiveSecretWithheld = liveSecretWithheldNotices(state)
+		collectLiveSecretWithheldNotices(result, state)
 		return result, nil
 	}
 
@@ -410,7 +410,7 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	sessionCacheDir := filepath.Dir(result.RawPath)
 	deletedOnServer := liveDeletedOnServer(state.SessionPath)
 	// after the close above, which may be what withheld a batch
-	result.LiveSecretWithheld, result.EarlierLiveSecretWithheld = liveSecretWithheldNotices(state)
+	collectLiveSecretWithheldNotices(result, state)
 	held := stopHoldsSession(projectRoot, state)
 	switch {
 	case deletedOnServer:
