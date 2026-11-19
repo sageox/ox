@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,6 +16,23 @@ import (
 
 // HookStatusOK is the status of a capture that appended entries to raw.jsonl.
 const HookStatusOK = "ok"
+
+const (
+	// HookStatusNotReady: raw.jsonl has no header yet and the caller has no
+	// WriteHeader to start it with, so nothing was read. The next hook starts
+	// it; the transcript is not idle.
+	HookStatusNotReady = "raw-not-ready"
+	// HookStatusUnsettled: the transcript changed after the caller saw it
+	// settle (HookCaptureOptions.Settled), so nothing was committed.
+	HookStatusUnsettled = "source-unsettled"
+	// HookStatusSourceRefused: the transcript is outside its adapter's allowed
+	// roots (HookCaptureOptions.SourceHome), so nothing was read.
+	HookStatusSourceRefused = "source-not-allowed"
+	// HookStatusSpoolLost: the entries reached raw.jsonl and the cursor moved,
+	// but the batch could not be read back for the live stream, so it was
+	// declared lost there (HookCaptureOptions.SpoolLost).
+	HookStatusSpoolLost = "spool-lost"
+)
 
 // HookCaptureOptions holds what differs between the callers of
 // CaptureHookEntries: a hook, which has the agent's stdin, and the daemon's
@@ -29,10 +48,35 @@ type HookCaptureOptions struct {
 	// Spool hands a batch just committed to raw.jsonl to the live stream. It
 	// runs only after the append succeeded.
 	Spool func(state *RecordingState, batch AppendedBatch)
+	// SpoolLost declares a batch that was committed to raw.jsonl but never
+	// reached Spool, because it could not be read back, as a live-stream loss.
+	// The cursor is already past its bytes, so no later capture sends them.
+	// Set it alongside Spool.
+	SpoolLost func(state *RecordingState, bytes int64, cause error)
 	// MarkStatus records how the capture ended on the recording, inside the
 	// state update the capture makes anyway. nil records nothing: the counters
 	// `ox session status` shows describe hooks, not the daemon's reads.
 	MarkStatus func(state *RecordingState, status string)
+	// SourceHome, when set, confines the capture to a transcript under its
+	// adapter's allowed roots in this home directory, symlinks resolved
+	// (adapters.SafeSessionFilePath), as the tail watcher is confined. The
+	// daemon sets it: the recordings it sweeps include markers it did not
+	// write. A hook reads the transcript of the agent that ran it.
+	SourceHome string
+	// Settled bounds the capture to the transcript bytes the caller saw
+	// settle. The zero value leaves the read unbounded.
+	Settled SettledSource
+}
+
+// SettledSource is a transcript as a caller saw it settle. Adapters read to the
+// end of the file, so the bound is enforced after the read: a read that ended
+// past Size, or of a transcript other than Path, commits nothing
+// (HookStatusUnsettled) and is left whole for the next capture.
+type SettledSource struct {
+	// Path is the transcript the caller stat'd, resolved as SourceHome resolves it.
+	Path string
+	// Size is the transcript's size then.
+	Size int64
 }
 
 // HookCapture is what one CaptureHookEntries call did.
@@ -52,7 +96,8 @@ type HookCapture struct {
 // it read. The cursor did not move, so the same bytes are read again later.
 func (c HookCapture) Failed() bool {
 	switch c.Status {
-	case "", HookStatusOK, "no-new-entries", "no-entries-after-filter":
+	case "", HookStatusOK, "no-new-entries", "no-entries-after-filter",
+		HookStatusNotReady, HookStatusUnsettled, HookStatusSpoolLost:
 		return false
 	}
 	return true
@@ -107,8 +152,21 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 	if err := CheckNativeSourceBinding(state); err != nil {
 		return HookCapture{}, err
 	}
-	if err := RecoverRawAppend(filepath.Join(state.SessionPath, "raw.jsonl"), state.SourceOffset); err != nil {
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	if err := RecoverRawAppend(rawPath, state.SourceOffset); err != nil {
 		return HookCapture{}, err
+	}
+	// Only a caller with WriteHeader can start a headerless raw.jsonl. Without
+	// one, read nothing: the adapter run would be wasted, and an empty pass
+	// would look like an idle transcript.
+	if opts.WriteHeader == nil {
+		needHeader, err := rawNeedsHeader(rawPath)
+		if err != nil {
+			return HookCapture{}, err
+		}
+		if needHeader {
+			return HookCapture{Status: HookStatusNotReady}, nil
+		}
 	}
 
 	// Track every invocation + its terminal reason so `ox session status` can
@@ -163,6 +221,14 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 		})
 		slog.Debug("hook: discovered session file", "file", sf)
 	}
+	if opts.SourceHome != "" {
+		safe, err := adapters.SafeSessionFilePath(state.AdapterName, state.SessionFile, opts.SourceHome)
+		if err != nil {
+			result.Status = HookStatusSourceRefused
+			return result, fmt.Errorf("transcript %q: %w", state.SessionFile, err)
+		}
+		state.SessionFile = safe
+	}
 
 	// staleness check: if the source file disappeared or shrank (e.g., Claude Code
 	// created a new file after compaction), try to rediscover it
@@ -182,6 +248,15 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 			AgentSessionID: state.AgentSessionID,
 			Since:          state.StartedAt.Add(-5 * time.Minute),
 		})
+		if findErr == nil && sf != "" && opts.SourceHome != "" {
+			// checked before it replaces the source, so a refused path is never persisted
+			safe, err := adapters.SafeSessionFilePath(state.AdapterName, sf, opts.SourceHome)
+			if err != nil {
+				result.Status = HookStatusSourceRefused
+				return result, fmt.Errorf("rediscovered transcript %q: %w", sf, err)
+			}
+			sf = safe
+		}
 		if findErr == nil && sf != "" && sf != state.SessionFile {
 			slog.Info("hook: rediscovered session file", "old", state.SessionFile, "new", sf)
 			state.SessionFile = sf
@@ -190,12 +265,16 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 			}
 			// both offsets belong to the old file: a StartOffset left behind would
 			// make every read skip the first bytes of the new transcript, and
-			// every ownership check start mid-record
-			_ = UpdateRecordingStateForAgent(projectRoot, agentID, func(s *RecordingState) {
+			// every ownership check start mid-record. Unpersisted, the append
+			// below would commit the new file's cursor against the old file.
+			if err := UpdateRecordingStateForAgent(projectRoot, agentID, func(s *RecordingState) {
 				s.SessionFile = sf
 				s.SourceOffset = 0 // reset offset for new file
 				s.StartOffset = 0
-			})
+			}); err != nil {
+				result.Status = "checkpoint-failed"
+				return result, fmt.Errorf("persist rediscovered transcript: %w", err)
+			}
 			state.SourceOffset = 0
 			state.StartOffset = 0
 		}
@@ -207,6 +286,11 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 		readOffset = state.StartOffset
 	}
 	result.FromOffset, result.ToOffset = readOffset, readOffset
+	settled := opts.Settled.Path != ""
+	if settled && opts.Settled.Path != state.SessionFile {
+		result.Status = HookStatusUnsettled
+		return result, nil
+	}
 
 	var sourceSnapshot os.FileInfo
 	if state.AdapterName == "claude-code" {
@@ -222,6 +306,13 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 		slog.Info("hook: incremental read failed", "agentID", agentID, "adapter", state.AdapterName, "file", state.SessionFile, "offset", readOffset, "error", readErr)
 		markStatus("read-error")
 		return result, nil // non-fatal, will catch up at stop
+	}
+	if settled && newOffset > opts.Settled.Size {
+		// The read took bytes written after the caller's settle check: a tool
+		// record whose PostToolUse hook has not run would be committed without
+		// that hook's error. Commit none of it; the next capture sees it settle.
+		result.Status = HookStatusUnsettled
+		return result, nil
 	}
 	if err := CheckNativeSourceBinding(state); err != nil {
 		return result, err
@@ -264,26 +355,35 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 	}
 
 	if len(entries) == 0 {
-		// update offset even if no entries passed filter
-		_ = UpdateRecordingStateForAgent(projectRoot, agentID, func(s *RecordingState) {
+		// update offset even if no entries passed filter; the bytes count as
+		// consumed only once that checkpoint is durable
+		if err := UpdateRecordingStateForAgent(projectRoot, agentID, func(s *RecordingState) {
 			s.SourceOffset = newOffset
 			if opts.MarkStatus != nil {
 				opts.MarkStatus(s, "no-entries-after-filter")
 			}
-		})
+		}); err != nil {
+			result.Status = "checkpoint-failed"
+			return result, fmt.Errorf("persist cursor past filtered entries: %w", err)
+		}
 		result.Status, result.ToOffset = "no-entries-after-filter", newOffset
 		return result, nil
 	}
 
-	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
-
-	// ensure raw.jsonl header exists before appending entries
-	if _, statErr := os.Stat(rawPath); os.IsNotExist(statErr) {
-		if opts.WriteHeader == nil {
-			return HookCapture{}, nil
+	// The header carries the session's identity and must be raw.jsonl's first
+	// line: an entry appended ahead of it leaves the file headerless for good.
+	needHeader, err := rawNeedsHeader(rawPath)
+	if err != nil {
+		return result, err
+	}
+	if needHeader {
+		if opts.WriteHeader == nil { // checked before the read; kept so a nil writer is never called
+			result.Status = HookStatusNotReady
+			return result, nil
 		}
-		if headerErr := opts.WriteHeader(state); headerErr != nil {
-			slog.Debug("hook: failed to write raw.jsonl header", "error", headerErr)
+		if err := opts.WriteHeader(state); err != nil {
+			markStatus("header-write-failed")
+			return result, fmt.Errorf("write raw.jsonl header: %w", err)
 		}
 	}
 
@@ -322,16 +422,41 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 		return result, nil // non-fatal
 	}
 	result.ToOffset, result.Entries = newOffset, len(sessionEntries)
+	status := HookStatusOK
 	if opts.Spool != nil {
 		// spool exactly what the append just committed; reading it back is safe
 		// after Close because raw.jsonl is append-only (see LastAppended)
-		if batch, ok, err := writer.LastAppended(); err != nil {
-			slog.Warn("live_session_batch_read_failed", "error", err)
-		} else if ok {
+		batch, ok, err := writer.LastAppended()
+		switch {
+		case err != nil:
+			// committed, but the live stream will never see it: the cursor is
+			// past these bytes. Declared, the stream shows a gap in their place.
+			status = HookStatusSpoolLost
+			lost := writer.lastTo - writer.lastFrom // the span LastAppended failed to read
+			slog.ErrorContext(ctx, "live_session_batch_read_failed", "session_id", state.SessionID, "agent_id", agentID,
+				"session", filepath.Base(state.SessionPath), "bytes", lost, "declared", opts.SpoolLost != nil, "error", err)
+			if opts.SpoolLost != nil {
+				opts.SpoolLost(state, lost, err)
+			}
+		case ok:
 			opts.Spool(state, batch)
 		}
 	}
 
-	markStatus(HookStatusOK)
+	markStatus(status)
 	return result, nil
+}
+
+// rawNeedsHeader reports whether raw.jsonl has no content yet, so its header
+// must be written before the first entry. A zero-byte file counts: a crash can
+// leave one behind.
+func rawNeedsHeader(rawPath string) (bool, error) {
+	info, err := os.Stat(rawPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("stat raw.jsonl: %w", err)
+	}
+	return info.Size() == 0, nil
 }

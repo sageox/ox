@@ -3,11 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,9 +25,17 @@ import (
 // as the real Claude Code adapter does: an unterminated last record stays
 // unread and the cursor stops before it. testClaudeCodeAdapter jumps its
 // cursor to EOF, which would hide the failures these tests are about.
-type tailingClaudeAdapter struct{ testClaudeCodeAdapter }
+type tailingClaudeAdapter struct {
+	testClaudeCodeAdapter
+	// onRead, if set, runs as each read starts: inside the raw.jsonl lock of
+	// the capture (hook or catch-up) that is reading.
+	onRead func()
+}
 
 func (a *tailingClaudeAdapter) ReadFromOffset(path string, offset int64) ([]adapters.RawEntry, int64, error) {
+	if a.onRead != nil {
+		a.onRead()
+	}
 	var entries []adapters.RawEntry
 	_, next, err := adapterruntime.TailJSONL(path, offset, func(line []byte) ([]adapterprotocol.RawEntry, error) {
 		entries = append(entries, a.parseLine(line)...)
@@ -44,7 +51,16 @@ func newCatchUpFixture(t *testing.T) *liveFixture {
 	f := newLiveFixture(t, liveOpts{streaming: true})
 	adapters.Unregister("claude-code") // the fixture's adapter; its cleanup unregisters this one
 	adapters.Register(&tailingClaudeAdapter{})
+	// the daemon reads only a transcript inside Claude Code's own session
+	// root, so this one sits where Claude Code writes it
+	contained := filepath.Join(os.Getenv("HOME"), ".claude", "projects", "catch-up", "session.jsonl")
+	transcript, err := os.ReadFile(f.sourceFile)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(contained), 0o755))
+	require.NoError(t, os.WriteFile(contained, transcript, 0o644))
+	f.sourceFile = contained
 	require.NoError(t, session.UpdateRecordingStateForAgent(f.projectRoot, f.agentID, func(s *session.RecordingState) {
+		s.SessionFile = contained
 		s.WatchMode = "hook"
 		s.WorkspacePath = f.projectRoot
 	}))
@@ -149,51 +165,85 @@ func TestCatchUpCapturesTheAnswerWrittenAfterTheLastStopHook(t *testing.T) {
 	assert.Equal(t, raw, string(f.rawBytes()))
 }
 
-// A hook and the daemon's catch-up capturing one transcript at the same time
-// must leave every line in raw.jsonl, and in the live spool, exactly once.
-func TestHookAndCatchUpRacingCaptureEveryLineOnce(t *testing.T) {
-	f := newCatchUpFixture(t)
-	m := f.catchUpManager()
-	hook := &HookContext{Phase: phaseAfterTool, ProjectRoot: f.projectRoot, Marker: &SessionMarker{AgentID: f.agentID}}
-
-	const lines = 60
-	ctx, cancel := context.WithCancel(context.Background())
-	var caughtUp atomic.Int64
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		for ctx.Err() == nil {
-			assert.NoError(t, handleAfterTool(hook))
-			time.Sleep(time.Millisecond)
+// duringFirstRead runs fn as the first transcript read starts: inside the
+// raw.jsonl lock of whichever capture reads first. Every later read goes
+// straight on, even one fn itself is waiting for (sync.Once would block it).
+func (f *liveFixture) duringFirstRead(fn func()) {
+	f.t.Helper()
+	a, err := adapters.GetAdapter("claude-code")
+	require.NoError(f.t, err)
+	tailing, ok := a.(*tailingClaudeAdapter)
+	require.True(f.t, ok, "duringFirstRead needs newCatchUpFixture's adapter")
+	var fired atomic.Bool
+	tailing.onRead = func() {
+		if fired.CompareAndSwap(false, true) {
+			fn()
 		}
-	}()
-	go func() {
-		defer wg.Done()
-		for ctx.Err() == nil {
-			caughtUp.Add(int64(m.CatchUpHookRecordings(ctx, f.projectRoot)))
-			time.Sleep(500 * time.Microsecond)
-		}
-	}()
-	for i := range lines {
-		role := "user"
-		if i%2 == 1 {
-			role = "assistant"
-		}
-		f.say(role, fmt.Sprintf("line-%03d", i))
-		f.settle() // settled at once, so the catch-up competes for every write
-		time.Sleep(3 * time.Millisecond)
 	}
-	cancel()
-	wg.Wait()
-	require.NoError(t, handleAfterTool(hook)) // whatever neither took yet
+}
 
+// capturedOnce asserts every text is in raw.jsonl exactly once, and that the
+// live spool holds exactly what raw.jsonl holds.
+func (f *liveFixture) capturedOnce(texts ...string) {
+	f.t.Helper()
 	raw := string(f.rawBytes())
-	for i := range lines {
-		assert.Equal(t, 1, strings.Count(raw, fmt.Sprintf("line-%03d", i)), "line-%03d must be in raw.jsonl exactly once", i)
+	for _, text := range texts {
+		assert.Equal(f.t, 1, strings.Count(raw, text), "%q must be in raw.jsonl exactly once", text)
 	}
-	assert.Equal(t, raw, string(f.spoolBytes()), "the live spool must hold exactly what raw.jsonl holds")
-	assert.Positive(t, caughtUp.Load(), "the catch-up never won a capture, so the race was not exercised")
+	assert.Equal(f.t, raw, string(f.spoolBytes()), "the live spool must hold exactly what raw.jsonl holds")
+}
+
+// A hook and the daemon's catch-up capturing one transcript contend for its
+// raw.jsonl lock. Whichever takes it first, every line must reach raw.jsonl,
+// and the live spool, exactly once. Each order is forced from inside the
+// first capture's read, while it holds the lock, so scheduling decides
+// nothing.
+func TestHookAndCatchUpRacingCaptureEveryLineOnce(t *testing.T) {
+	t.Run("hook holds the lock, the catch-up arrives", func(t *testing.T) {
+		f := newCatchUpFixture(t)
+		m := f.catchUpManager()
+		f.say("user", "a question")
+		f.say("assistant", "an answer")
+		f.settle() // the catch-up would take these, but for the hook's lock
+
+		caughtWhileHeld := -1
+		f.duringFirstRead(func() {
+			caught := make(chan int, 1)
+			go func() { caught <- m.CatchUpHookRecordings(context.Background(), f.projectRoot) }()
+			select {
+			case caughtWhileHeld = <-caught:
+			case <-time.After(10 * time.Second):
+				t.Error("the catch-up waited on the hook's lock; it must skip a recording a hook is capturing")
+			}
+		})
+		require.NoError(t, handleAfterTool(&HookContext{Phase: phaseAfterTool, ProjectRoot: f.projectRoot, Marker: &SessionMarker{AgentID: f.agentID}}))
+
+		assert.Zero(t, caughtWhileHeld, "the catch-up must leave a recording to the hook holding its lock")
+		assert.Zero(t, m.CatchUpHookRecordings(context.Background(), f.projectRoot), "the hook captured everything")
+		f.capturedOnce("a question", "an answer")
+	})
+
+	t.Run("catch-up holds the lock, the hook arrives", func(t *testing.T) {
+		f := newCatchUpFixture(t)
+		m := f.catchUpManager()
+		f.say("user", "a question")
+		f.say("assistant", "an answer")
+		f.settle()
+
+		hookStarted := false
+		hookDone := make(chan error, 1)
+		f.duringFirstRead(func() {
+			hookStarted = true // on this goroutine: the catch-up below runs on it
+			go func() {
+				hookDone <- handleAfterTool(&HookContext{Phase: phaseAfterTool, ProjectRoot: f.projectRoot, Marker: &SessionMarker{AgentID: f.agentID}})
+			}()
+		})
+		assert.Equal(t, 1, m.CatchUpHookRecordings(context.Background(), f.projectRoot), "the catch-up took the lock first, so it captures")
+		require.True(t, hookStarted, "the catch-up never read the transcript, so the hook never contended")
+		require.NoError(t, <-hookDone)
+
+		f.capturedOnce("a question", "an answer")
+	})
 }
 
 // A recording that is stopping, stopped, held, gone or quarantined is finished
@@ -251,6 +301,9 @@ func TestCatchUpNeverTouchesAStoppedOrHeldRecording(t *testing.T) {
 // final record reads only up to the record before it, and the stop's drain is
 // the last read, so the record is lost. It must wait briefly for the record.
 func TestStopsFinalDrainWaitsForTheRecordBeingWritten(t *testing.T) {
+	if testing.Short() {
+		t.Skip("the writer finishes its record 300 ms into the stop's wait")
+	}
 	f := newCatchUpFixture(t)
 	f.say("user", "last question")
 	f.stopHook()
@@ -272,6 +325,9 @@ func TestStopsFinalDrainWaitsForTheRecordBeingWritten(t *testing.T) {
 // The wait is bounded: a record that never completes (the agent died
 // mid-write) must not hold the stop open.
 func TestStopsFinalDrainGivesUpOnARecordThatNeverCompletes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits out the stop's full final-record wait (finalRecordWait)")
+	}
 	f := newCatchUpFixture(t)
 	f.say("user", "last question")
 	f.stopHook()

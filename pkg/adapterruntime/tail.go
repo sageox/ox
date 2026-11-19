@@ -161,11 +161,17 @@ const recordWaitPoll = 25 * time.Millisecond
 // for good. A file that cannot be read has nothing to wait for; the read that
 // follows reports why.
 func WaitForCompleteRecord(ctx context.Context, path string, timeout time.Duration) bool {
+	return waitForCompleteRecord(ctx, timeout, func() bool { return endsOnRecordBoundary(path) })
+}
+
+// waitForCompleteRecord is WaitForCompleteRecord with its probe passed in, so
+// a test can act between one probe and the next.
+func waitForCompleteRecord(ctx context.Context, timeout time.Duration, complete func() bool) bool {
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(recordWaitPoll)
 	defer ticker.Stop()
 	for {
-		if endsOnRecordBoundary(path) {
+		if complete() {
 			return true
 		}
 		if !time.Now().Before(deadline) {

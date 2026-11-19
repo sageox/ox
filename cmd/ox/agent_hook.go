@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/prime"
@@ -475,14 +476,29 @@ func handleEnd(ctx *HookContext) error {
 	// a held stop saves the manual choice with StoppedAt (see stopSessionForClear)
 	held := stopHoldsSession(ctx.ProjectRoot, state)
 	now := time.Now()
-	if updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+	// The drain waited for the agent's last record, and the agent's recording
+	// can change meanwhile: a restarted agent replaces a StopIncomplete one
+	// (StartRecording mints a new SessionID, maybe in this same folder), and
+	// the drain can quarantine it. Stop, finalize and clear only the recording
+	// loaded above, and only while it is still the agent's active one.
+	quarantined := false
+	updateErr := session.UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(s *session.RecordingState) {
+		if s.SourceRejected {
+			quarantined = true // kept as it stands for ownership review
+			return
+		}
 		s.RecordTraceBoundary("stop", now)
 		s.StoppedAt = &now
 		if held {
 			s.PublishingMode = config.SessionPublishingManual
 		}
 		state = s
-	}); updateErr != nil {
+	})
+	switch {
+	case quarantined, errors.Is(updateErr, session.ErrRecordingChanged), errors.Is(updateErr, os.ErrNotExist):
+		slog.Info("hook: end left the recording untouched, it changed during the final drain", "agent_id", agentID, "session_id", state.SessionID, "session", filepath.Base(state.SessionPath), "quarantined", quarantined, "error", updateErr)
+		return nil
+	case updateErr != nil:
 		slog.Debug("hook: end could not set StoppedAt", "agent_id", agentID, "error", updateErr)
 	}
 
@@ -499,13 +515,19 @@ func handleEnd(ctx *HookContext) error {
 		return fmt.Errorf("session end: %w", holdErr)
 	}
 
-	if clearErr := session.ClearRecordingStateForAgent(ctx.ProjectRoot, agentID); clearErr != nil {
+	// by identity: an agent lookup can find a recording that replaced this one
+	if clearErr := session.ClearRecordingStateAt(state.SessionPath, state.SessionID); clearErr != nil {
 		slog.Debug("hook: end could not remove recording state", "agent_id", agentID, "error", clearErr)
 	}
 
 	slog.Info("hook: finalized session on agent end", "agent_id", agentID)
 	return nil
 }
+
+// awaitFinalRecordAtEnd is the wait drainTranscriptAtEnd makes for the agent's
+// last record. A variable so tests can change the recording during it, as a
+// restarting agent can.
+var awaitFinalRecordAtEnd = awaitFinalTranscriptRecord
 
 // drainTranscriptAtEnd copies what the agent wrote since the last hook into
 // raw.jsonl before the recording goes to the daemon. A session killed mid-turn gets
@@ -517,7 +539,7 @@ func drainTranscriptAtEnd(ctx *HookContext, agentID string, state *session.Recor
 	// This is the last read of the transcript (the daemon finalizes from
 	// raw.jsonl alone). Wait outside the lock, so hooks are not held up.
 	if state.AdapterName == "claude-code" {
-		awaitFinalTranscriptRecord(agentID, state.SessionFile)
+		awaitFinalRecordAtEnd(agentID, state.SessionFile)
 	}
 	err := fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
 		return captureHookEntries(ctx, agentID, state.SessionPath, state.SessionID)
@@ -764,9 +786,39 @@ func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expected
 		Spool: func(state *session.RecordingState, batch session.AppendedBatch) {
 			liveSessionSpool(ctx.ProjectRoot, state, batch)
 		},
+		SpoolLost: func(state *session.RecordingState, n int64, cause error) {
+			liveSessionDeclareLost(ctx.ProjectRoot, state, n, cause)
+		},
 		MarkStatus: markHookStatus,
 	})
 	return err
+}
+
+// liveSessionDeclareLost declares n bytes a capture committed to raw.jsonl but
+// could not read back as a live-stream loss, so the stream's next write or its
+// close carries a spool_write_failed gap where they belong: the cursor is past
+// them and nothing will spool them. It declares only into the stream
+// liveSessionSpool would have fed: this recording's (C4), and not a held one (C1).
+func liveSessionDeclareLost(projectRoot string, state *session.RecordingState, n int64, cause error) {
+	if state == nil || state.SessionPath == "" || n <= 0 {
+		return
+	}
+	st, err := livesession.ReadState(state.SessionPath)
+	if err != nil {
+		return // never prepared: streaming is off for this session
+	}
+	if st.SessionID != state.SessionID {
+		slog.Debug("live_session_loss_skipped", "session_id", state.SessionID, "reason", "other_recording", "stream_session_id", st.SessionID)
+		return
+	}
+	if liveSessionHeld(projectRoot, state) {
+		slog.Debug("live_session_loss_skipped", "session_id", state.SessionID, "reason", "held")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), liveLocalBound)
+	defer cancel()
+	// DeclareLost logs the loss, and any failure to record it, at Error itself
+	_ = livesession.DeclareLost(ctx, state.SessionPath, n, cause)
 }
 
 // markHookStatus records one hook invocation and how its capture ended, so

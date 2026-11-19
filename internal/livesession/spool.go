@@ -108,20 +108,52 @@ func Spool(ctx context.Context, dir string, batch []byte, opts SpoolOptions) (Sp
 	return res, err
 }
 
+// DeclareLost records n bytes committed to raw.jsonl that never reached Spool
+// (the capture could not read its batch back) exactly as Spool records a batch
+// it could not write: logged at Error, and declared as a spool_write_failed gap
+// line by the next write or the close. It returns ErrNotStreaming, recording
+// nothing, when the session has no stream to declare them in.
+func DeclareLost(ctx context.Context, dir string, n int64, cause error) error {
+	if n <= 0 {
+		return nil
+	}
+	st, err := ReadState(dir)
+	if errors.Is(err, ErrNotStreaming) {
+		return err
+	}
+	// a state that cannot be read may still be streaming: record, as Spool does
+	if err == nil {
+		switch st.Status {
+		case StatusPending, StatusStreaming, StatusClosing:
+		default:
+			return ErrNotStreaming
+		}
+	}
+	return declareLoss(ctx, dir, n, cause)
+}
+
 // spoolFailed records a batch the spool could not take so the stream declares
 // it later, and logs the loss at Error: once the hook returns, nothing else
 // would ever send these bytes.
 func spoolFailed(ctx context.Context, dir string, n int64, cause error) error {
+	if err := declareLoss(ctx, dir, n, cause); err != nil {
+		return fmt.Errorf("spool %d bytes: %w (the loss could not be recorded: %w)", n, cause, err)
+	}
+	return fmt.Errorf("spool %d bytes (recorded as a gap for the next write): %w", n, cause)
+}
+
+// declareLoss adds n to the spool-lost count and logs the loss at Error.
+func declareLoss(ctx context.Context, dir string, n int64, cause error) error {
 	log := slog.Default().With("session", filepath.Base(dir))
 	if st, err := readState(dir); err == nil {
 		log = log.With("session_id", st.SessionID, "conversation_id", st.ConversationID, "layer_id", st.LayerID)
 	}
 	if err := recordLost(dir, n); err != nil {
 		log.ErrorContext(ctx, "live_session_spool_lost", "bytes", n, "recorded", false, "error", cause, "record_error", err)
-		return fmt.Errorf("spool %d bytes: %w (the loss could not be recorded: %w)", n, cause, err)
+		return err
 	}
 	log.ErrorContext(ctx, "live_session_spool_lost", "bytes", n, "recorded", true, "error", cause)
-	return fmt.Errorf("spool %d bytes (recorded as a gap for the next write): %w", n, cause)
+	return nil
 }
 
 // recordLost adds n to the spool-lost count.

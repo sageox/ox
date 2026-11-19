@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 )
 
 // hookCatchUpInterval is how often the daemon looks for transcript bytes no
@@ -36,9 +38,11 @@ const hookCatchUpRetry = 30 * time.Second
 // writes records its adapter turns into no entries, and the cursor stays short
 // of them until a real entry follows, so "the transcript is past the cursor"
 // can stay true while idle. An unchanged cursor and size are not read again.
+// A refused mark only records that the refusal was already logged.
 type hookCatchUpMark struct {
 	offset, size int64
 	failed       bool
+	refused      bool
 	at           time.Time
 }
 
@@ -107,7 +111,16 @@ func hookCatchUpCandidate(st *session.RecordingState) bool {
 // if it has settled and no hook is capturing it right now, and reports
 // whether bytes were captured.
 func (m *SessionWatcherManager) catchUpHookRecording(ctx context.Context, st *session.RecordingState) bool {
-	info, err := os.Stat(st.SessionFile)
+	ids := []any{"session_id", st.SessionID, "agent_id", st.AgentID, "session", filepath.Base(st.SessionPath)}
+	// The swept markers include the Ledger checkout's and legacy sessions/
+	// folders', which this daemon never wrote: read only a transcript the tail
+	// watcher would accept (startWatchAt).
+	source, err := adapters.SafeSessionFilePath(st.AdapterName, st.SessionFile, m.homeDir())
+	if err != nil {
+		m.refuseHookCatchUp(ctx, st.SessionPath, ids, err)
+		return false
+	}
+	info, err := os.Stat(source)
 	if err != nil {
 		return false // gone or replaced: the hook path rediscovers it
 	}
@@ -120,8 +133,16 @@ func (m *SessionWatcherManager) catchUpHookRecording(ctx context.Context, st *se
 	acquired, err := fileutil.TryWithFileLock(filepath.Join(st.SessionPath, "raw.jsonl"), func() error {
 		var captureErr error
 		capture, captureErr = session.CaptureHookEntries(ctx, st.WorkspacePath, st.AgentID, st.SessionPath, st.SessionID, session.HookCaptureOptions{
+			// the lock reloads the recording, and a hook may have rediscovered its
+			// transcript since: confine whatever the capture ends up reading
+			SourceHome: m.homeDir(),
+			// only bytes that sat unread since the stat above are the daemon's
+			Settled: session.SettledSource{Path: source, Size: info.Size()},
 			Spool: func(state *session.RecordingState, batch session.AppendedBatch) {
 				m.forwardLive(&activeWatcher{cachePath: state.SessionPath, projectRoot: state.WorkspacePath, sessionName: filepath.Base(state.SessionPath)}, batch)
+			},
+			SpoolLost: func(state *session.RecordingState, n int64, cause error) {
+				m.declareLiveLoss(ctx, state, n, cause)
 			},
 		})
 		return captureErr
@@ -130,13 +151,20 @@ func (m *SessionWatcherManager) catchUpHookRecording(ctx context.Context, st *se
 		return false // a hook or the stop holds it; never wait on either
 	}
 
-	ids := []any{"session_id", st.SessionID, "agent_id", st.AgentID, "session", filepath.Base(st.SessionPath)}
-	if err != nil || capture.Failed() {
+	switch {
+	case capture.Status == session.HookStatusSourceRefused:
+		m.refuseHookCatchUp(ctx, st.SessionPath, ids, err)
+		return false
+	case err != nil || capture.Failed():
 		m.markHook(st.SessionPath, hookCatchUpMark{offset: offset, size: info.Size(), failed: true, at: time.Now()})
 		m.logger.WarnContext(ctx, "session_capture_catchup_failed", append(ids, "status", capture.Status, "offset", offset, "error", err)...)
 		return false
-	}
-	if capture.ToOffset <= capture.FromOffset {
+	case capture.Status == session.HookStatusNotReady || capture.Status == session.HookStatusUnsettled:
+		// not idle: raw.jsonl waits for a hook to write its header, or the
+		// transcript moved after the stat. Unmarked, the next sweep looks again.
+		m.logger.DebugContext(ctx, "session_capture_catchup_deferred", append(ids, "status", capture.Status)...)
+		return false
+	case capture.ToOffset <= capture.FromOffset:
 		m.markHook(st.SessionPath, hookCatchUpMark{offset: offset, size: info.Size(), at: time.Now()})
 		return false
 	}
@@ -145,13 +173,44 @@ func (m *SessionWatcherManager) catchUpHookRecording(ctx context.Context, st *se
 	return true
 }
 
+// refuseHookCatchUp skips a recording whose transcript is outside its
+// adapter's allowed roots, warning once per recording rather than every sweep.
+func (m *SessionWatcherManager) refuseHookCatchUp(ctx context.Context, sessionPath string, ids []any, reason error) {
+	m.mu.Lock()
+	warned := m.hookMarks[sessionPath].refused
+	if !warned {
+		if m.hookMarks == nil {
+			m.hookMarks = make(map[string]hookCatchUpMark)
+		}
+		m.hookMarks[sessionPath] = hookCatchUpMark{refused: true, at: time.Now()}
+	}
+	m.mu.Unlock()
+	if !warned {
+		m.logger.WarnContext(ctx, "session_capture_catchup_refused", append(ids, "reason", reason)...)
+	}
+}
+
+// declareLiveLoss declares a batch the catch-up committed to raw.jsonl but
+// could not hand to the live stream, under forwardLive's refusals: a batch it
+// would not have spooled is not a loss.
+func (m *SessionWatcherManager) declareLiveLoss(ctx context.Context, state *session.RecordingState, n int64, cause error) {
+	m.mu.Lock()
+	streams := m.liveSpool != nil
+	m.mu.Unlock()
+	if !streams || liveSpoolRefusal(state.SessionPath, state.WorkspacePath) != "" {
+		return
+	}
+	// DeclareLost logs the loss, and any failure to record it, at Error itself
+	_ = livesession.DeclareLost(ctx, state.SessionPath, n, cause)
+}
+
 // hookMarkCurrent reports whether the last catch-up of sessionPath already
 // found nothing at this cursor and size (a failure only until it may retry).
 func (m *SessionWatcherManager) hookMarkCurrent(sessionPath string, offset, size int64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	mark, ok := m.hookMarks[sessionPath]
-	return ok && mark.offset == offset && mark.size == size &&
+	return ok && !mark.refused && mark.offset == offset && mark.size == size &&
 		(!mark.failed || time.Since(mark.at) < hookCatchUpRetry)
 }
 
