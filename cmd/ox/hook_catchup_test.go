@@ -30,6 +30,15 @@ type tailingClaudeAdapter struct {
 	// onRead, if set, runs as each read starts: inside the raw.jsonl lock of
 	// the capture (hook or catch-up) that is reading.
 	onRead func()
+	// found is the transcript FindSessionFile discovers, if any.
+	found string
+}
+
+func (a *tailingClaudeAdapter) FindSessionFile(adapters.SessionLookup) (string, error) {
+	if a.found == "" {
+		return "", adapters.ErrSessionNotFound
+	}
+	return a.found, nil
 }
 
 func (a *tailingClaudeAdapter) ReadFromOffset(path string, offset int64) ([]adapters.RawEntry, int64, error) {
@@ -50,7 +59,8 @@ func newCatchUpFixture(t *testing.T) *liveFixture {
 	t.Helper()
 	f := newLiveFixture(t, liveOpts{streaming: true})
 	adapters.Unregister("claude-code") // the fixture's adapter; its cleanup unregisters this one
-	adapters.Register(&tailingClaudeAdapter{})
+	adapter := &tailingClaudeAdapter{}
+	adapters.Register(adapter)
 	// the daemon reads only a transcript inside Claude Code's own session
 	// root, so this one sits where Claude Code writes it
 	contained := filepath.Join(os.Getenv("HOME"), ".claude", "projects", "catch-up", "session.jsonl")
@@ -60,10 +70,18 @@ func newCatchUpFixture(t *testing.T) *liveFixture {
 	require.NoError(t, os.WriteFile(contained, transcript, 0o644))
 	f.sourceFile = contained
 	require.NoError(t, session.UpdateRecordingStateForAgent(f.projectRoot, f.agentID, func(s *session.RecordingState) {
-		s.SessionFile = contained
+		s.SessionFile = "" // as prime leaves a Claude Code recording
 		s.WatchMode = "hook"
 		s.WorkspacePath = f.projectRoot
 	}))
+	// the recording's first hook discovers the transcript, which binds it as
+	// the one transcript the daemon's catch-up reads for this recording
+	adapter.found = contained
+	require.NoError(t, handleAfterTool(&HookContext{Phase: phaseAfterTool, ProjectRoot: f.projectRoot, Marker: &SessionMarker{AgentID: f.agentID}}))
+	adapter.found = ""
+	state, err := session.LoadRecordingStateForAgent(f.projectRoot, f.agentID)
+	require.NoError(t, err)
+	require.Equal(t, contained, state.SessionFile, "the first hook did not discover the transcript")
 	return f
 }
 

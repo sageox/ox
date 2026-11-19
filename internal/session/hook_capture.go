@@ -89,8 +89,15 @@ type HookCaptureOptions struct {
 	// write. A hook reads the transcript of the agent that ran it.
 	SourceHome string
 	// Settled bounds the capture to the transcript bytes the caller saw
-	// settle. The zero value leaves the read unbounded.
+	// settle. The zero value leaves the read unbounded. A transcript found gone
+	// or shrunk is left for a hook to rediscover (HookStatusUnsettled).
 	Settled SettledSource
+	// BindSource records a transcript this capture discovers, or rediscovers in
+	// place of one that went away, as the recording's in the started-recordings
+	// registry: the only transcript the daemon's catch-up will read. Only a hook
+	// sets it. It runs as the agent and found the file by the agent's own
+	// session; the daemon's sweep starts from markers anyone may have written.
+	BindSource bool
 }
 
 // SettledSource is a transcript as a caller saw it settle. Adapters read to the
@@ -258,6 +265,9 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 			s.SessionFile = sf
 		})
 		slog.Debug("hook: discovered session file", "file", sf)
+		if opts.BindSource {
+			bindHookSource(ctx, state, sf, false)
+		}
 	}
 	if opts.SourceHome != "" {
 		safe, err := adapters.SafeSessionFilePath(state.AdapterName, state.SessionFile, opts.SourceHome)
@@ -271,6 +281,12 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 	// staleness check: if the source file disappeared or shrank (e.g., Claude Code
 	// created a new file after compaction), try to rediscover it
 	if fi, statErr := os.Stat(state.SessionFile); statErr != nil || fi.Size() < state.SourceOffset {
+		if opts.Settled.Path != "" {
+			// the caller stat'd a transcript that has since gone or shrunk;
+			// finding its replacement, and rebinding it, is a hook's job
+			result.Status = HookStatusUnsettled
+			return result, nil
+		}
 		if statErr != nil {
 			slog.Info("hook: session file missing, attempting rediscovery", "file", state.SessionFile)
 		} else {
@@ -315,6 +331,9 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 			}
 			state.SourceOffset = 0
 			state.StartOffset = 0
+			if opts.BindSource {
+				bindHookSource(ctx, state, sf, true)
+			}
 		}
 	}
 
@@ -494,6 +513,16 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 // rawNeedsHeader reports whether raw.jsonl has no content yet, so its header
 // must be written before the first entry. A zero-byte file counts: a crash can
 // leave one behind.
+// bindHookSource binds the transcript a hook found to state's recording
+// (bindStartedRecordingSource). A failure costs the recording its daemon
+// catch-up only, never the capture, so it is logged and the hook goes on.
+func bindHookSource(ctx context.Context, state *RecordingState, source string, replace bool) {
+	if err := bindStartedRecordingSource(state.SessionPath, state.SessionID, source, replace); err != nil {
+		slog.WarnContext(ctx, "session_source_bind_failed", "session_id", state.SessionID, "agent_id", state.AgentID,
+			"session", filepath.Base(state.SessionPath), "error", err)
+	}
+}
+
 func rawNeedsHeader(rawPath string) (bool, error) {
 	info, err := os.Stat(rawPath)
 	if errors.Is(err, fs.ErrNotExist) {

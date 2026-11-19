@@ -29,6 +29,11 @@ import (
 // A marker counts as started here only when it sits in the folder recorded
 // for it, names that folder, and carries the recorded session and agent IDs
 // (LoadRecordingMarkers). Recordings started by an older ox are not in it.
+//
+// The entry also binds the recording's transcript (startedRecording.Source).
+// A marker's session_file is as forgeable as the rest of it, and a Claude Code
+// transcript under the home directory passes every source check, so the
+// catch-up reads only the transcript a local hook found for the recording.
 
 const startedRecordingsFileName = "started-recordings.json"
 
@@ -38,11 +43,15 @@ const startedRecordingsLockWait = 5 * time.Second
 
 // startedRecording is one registry entry.
 type startedRecording struct {
-	// Dir is the session folder, resolved (canonicalSessionDir).
+	// Dir is the session folder, resolved (canonicalPath).
 	Dir       string    `json:"dir"`
 	SessionID string    `json:"session_id"`
 	AgentID   string    `json:"agent_id"`
 	StartedAt time.Time `json:"started_at"`
+	// Source is the transcript a local hook found for the recording, resolved
+	// (canonicalPath); empty until its first hook discovers one. Only a hook
+	// sets it (bindStartedRecordingSource), never the daemon.
+	Source string `json:"source,omitempty"`
 }
 
 type startedKey struct{ dir, sessionID, agentID string }
@@ -51,10 +60,10 @@ func startedRecordingsPath() string {
 	return filepath.Join(paths.DataDir(), startedRecordingsFileName)
 }
 
-// canonicalSessionDir is the one spelling a session folder has in the
-// registry, however a caller spelled it (macOS /var is /private/var). A folder
-// already gone falls back to Clean.
-func canonicalSessionDir(p string) string {
+// canonicalPath is the one spelling a session folder or transcript has in
+// the registry, however a caller spelled it (macOS /var is /private/var). A
+// path already gone falls back to Clean.
+func canonicalPath(p string) string {
 	if r, err := filepath.EvalSymlinks(p); err == nil {
 		return r
 	}
@@ -63,14 +72,14 @@ func canonicalSessionDir(p string) string {
 
 // loadStartedRecordings reads the registry without its lock: every write
 // replaces the file atomically, so a read sees one whole version.
-func loadStartedRecordings() (map[startedKey]bool, error) {
+func loadStartedRecordings() (map[startedKey]startedRecording, error) {
 	list, err := readStartedRecordings()
 	if err != nil {
 		return nil, err
 	}
-	known := make(map[startedKey]bool, len(list))
+	known := make(map[startedKey]startedRecording, len(list))
 	for _, e := range list {
-		known[startedKey{e.Dir, e.SessionID, e.AgentID}] = true
+		known[startedKey{e.Dir, e.SessionID, e.AgentID}] = e
 	}
 	return known, nil
 }
@@ -118,7 +127,7 @@ func updateStartedRecordings(fn func([]startedRecording) ([]startedRecording, bo
 // orphan sweeps remove folders without clearing their recordings.
 func registerStartedRecording(state *RecordingState) error {
 	entry := startedRecording{
-		Dir: canonicalSessionDir(state.SessionPath), SessionID: state.SessionID, AgentID: state.AgentID, StartedAt: state.StartedAt,
+		Dir: canonicalPath(state.SessionPath), SessionID: state.SessionID, AgentID: state.AgentID, StartedAt: state.StartedAt,
 	}
 	return updateStartedRecordings(func(list []startedRecording) ([]startedRecording, bool) {
 		list = slices.DeleteFunc(list, func(e startedRecording) bool {
@@ -132,13 +141,41 @@ func registerStartedRecording(state *RecordingState) error {
 	})
 }
 
+// bindStartedRecordingSource records source as the transcript of the
+// recording sessionID in sessionPath. Only a hook calls it, for a transcript
+// it discovered (CaptureHookEntries, HookCaptureOptions.BindSource). A first
+// discovery binds once: the marker's session_file is not cleared by ox, so a
+// second one means someone emptied it. replace is a hook's rediscovery of a
+// transcript that went away or shrank, which legitimately moves the binding.
+// A recording not in the registry is left out: it is not caught up anyway.
+func bindStartedRecordingSource(sessionPath, sessionID, source string, replace bool) error {
+	if sessionPath == "" || sessionID == "" || source == "" {
+		return nil
+	}
+	dir, resolved := canonicalPath(sessionPath), canonicalPath(source)
+	return updateStartedRecordings(func(list []startedRecording) ([]startedRecording, bool) {
+		for i := range list {
+			e := &list[i]
+			if e.Dir != dir || e.SessionID != sessionID {
+				continue
+			}
+			if e.Source == resolved || (e.Source != "" && !replace) {
+				return list, false
+			}
+			e.Source = resolved
+			return list, true
+		}
+		return list, false
+	})
+}
+
 // forgetStartedRecording removes the recording sessionID in sessionPath from
 // the registry, once it is finalized or cleared.
 func forgetStartedRecording(sessionPath, sessionID string) error {
 	if sessionPath == "" || sessionID == "" {
 		return nil
 	}
-	dir := canonicalSessionDir(sessionPath)
+	dir := canonicalPath(sessionPath)
 	return updateStartedRecordings(func(list []startedRecording) ([]startedRecording, bool) {
 		n := len(list)
 		list = slices.DeleteFunc(list, func(e startedRecording) bool { return e.Dir == dir && e.SessionID == sessionID })
@@ -146,16 +183,20 @@ func forgetStartedRecording(sessionPath, sessionID string) error {
 	})
 }
 
-// startedHere reports whether st, read from the marker in folder dir, is a
-// recording local ox started in that folder.
-func startedHere(known map[startedKey]bool, dir string, st *RecordingState) bool {
+// startedHere returns the registry entry of st, read from the marker in
+// folder dir, when it is a recording local ox started in that folder.
+func startedHere(known map[startedKey]startedRecording, dir string, st *RecordingState) (startedRecording, bool) {
 	if st.SessionID == "" || st.SessionPath == "" {
-		return false
+		return startedRecording{}, false
 	}
-	resolved := canonicalSessionDir(dir)
+	resolved := canonicalPath(dir)
 	// a forged marker can name a real recording's folder and IDs; only the
 	// folder it is actually in says where it came from
-	return canonicalSessionDir(st.SessionPath) == resolved && known[startedKey{resolved, st.SessionID, st.AgentID}]
+	if canonicalPath(st.SessionPath) != resolved {
+		return startedRecording{}, false
+	}
+	e, ok := known[startedKey{resolved, st.SessionID, st.AgentID}]
+	return e, ok
 }
 
 // RecordingMarker is one recording marker under a project's session folders.
@@ -166,6 +207,10 @@ type RecordingMarker struct {
 	State *RecordingState
 	// Started is true when ox on this machine started this recording in Dir.
 	Started bool
+	// Source is the transcript a local hook found for a Started recording,
+	// resolved; empty when none has been found yet. The marker's own
+	// SessionFile is only what its content claims.
+	Source string
 }
 
 // LoadRecordingMarkers returns the markers LoadAllRecordingStates would, each
@@ -179,7 +224,8 @@ func LoadRecordingMarkers(projectRoot string) ([]RecordingMarker, error) {
 	}
 	var markers []RecordingMarker
 	if err := walkRecordingMarkers(projectRoot, false, func(dir string, st *RecordingState) bool {
-		markers = append(markers, RecordingMarker{Dir: dir, State: st, Started: startedHere(known, dir, st)})
+		e, started := startedHere(known, dir, st)
+		markers = append(markers, RecordingMarker{Dir: dir, State: st, Started: started, Source: e.Source})
 		return true
 	}); err != nil {
 		return nil, err

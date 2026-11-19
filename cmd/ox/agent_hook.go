@@ -790,6 +790,8 @@ func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expected
 			liveSessionDeclareLost(ctx.ProjectRoot, state, n, cause)
 		},
 		MarkStatus: markHookStatus,
+		// the transcript a hook finds is the only one the daemon catches up
+		BindSource: true,
 	})
 	return err
 }
