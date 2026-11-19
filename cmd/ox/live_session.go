@@ -304,7 +304,7 @@ func holdRefusedAsDeleted(result *agentSessionResult, sessionDir, cacheDir strin
 	if err := session.ClearNeedsSummaryMarker(cacheDir); err != nil {
 		slog.Warn("session deleted on SageOx: summary marker not cleared", "session", filepath.Base(cacheDir), "error", err)
 	}
-	_ = os.Remove(filepath.Join(cacheDir, sessionUploadRetryPendingFile))
+	_ = os.Remove(filepath.Join(cacheDir, session.UploadRetryPendingFile))
 	result.LedgerSessionDir = ""
 	result.UploadWarning = deletedOnServerWarning
 	slog.Info("session deleted on SageOx while streaming, upload refused", "session", filepath.Base(cacheDir))

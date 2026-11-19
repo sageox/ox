@@ -6,11 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
@@ -493,63 +491,6 @@ func unreadableCachedSessionError(projectRoot string, state *session.RecordingSt
 		readErr, state.AgentID, state.AgentID)
 }
 
-// errRecoveryRefused marks a recovery stopped before it touched anything because
-// the Ledger entry it would write over cannot be proven to belong to this
-// recording.
-var errRecoveryRefused = errors.New("recovery refused to overwrite a Ledger session")
-
-// checkRecoveryDestination decides, before recovery mutates anything, whether
-// the Ledger directory for sessionName may receive this recording.
-// recoveredID is the ID the recording carries: its state, else its raw header.
-//
-// Recovery keeps the cache directory's name as the Ledger key, and two sessions
-// started in one minute can share it. A finalized session is the Ledger's record,
-// so recovery may rewrite it only when both IDs are present and equal (a retry
-// of an interrupted recovery). Every other finalized destination is refused.
-// Tradeoff: an interrupted legacy retry is now refused rather than guessed;
-// doctor surfaces it.
-//
-// Allowed: no meta.json yet, and a draft placeholder (it carries the ID the
-// finished session keeps) unless it names a different session.
-func checkRecoveryDestination(ledgerSessionDir, sessionName, recoveredID string) error {
-	// the name is the last element of a path in the recording state and becomes
-	// a Ledger path that a draft purge RemoveAlls: "", "." and ".." would
-	// address the Ledger or its sessions directory, not one session. (Unlike
-	// validateDraftSessionName this allows ".." inside a name: a username can
-	// carry it, and such a recovery must stay allowed.)
-	if sessionName == "" || sessionName == "." || sessionName == ".." || strings.ContainsAny(sessionName, `/\`) {
-		return fmt.Errorf("%w: cache directory name %q is not a single session name", errRecoveryRefused, sessionName)
-	}
-
-	existing, err := lfs.ReadSessionMeta(ledgerSessionDir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		// meta.json arrives from teammates by git, and its parse errors can echo
-		// its text back (a files key), so sanitize before it reaches a terminal
-		return fmt.Errorf("%w: session %q has unreadable existing metadata: %s", errRecoveryRefused, sessionName, cli.SanitizeTerminalText(err.Error()))
-	}
-
-	destinationID := existing.SessionID
-	if existing.IsDraft() {
-		if destinationID != "" && recoveredID != "" && destinationID != recoveredID {
-			return fmt.Errorf("%w: draft %q belongs to session ID %q, not the recovered session ID %q", errRecoveryRefused, sessionName, destinationID, recoveredID)
-		}
-		return nil
-	}
-
-	switch {
-	case destinationID == "":
-		return fmt.Errorf("%w: finalized session %q has legacy metadata without a session ID", errRecoveryRefused, sessionName)
-	case recoveredID == "":
-		return fmt.Errorf("%w: finalized session %q has session ID %q but the recording carries no session ID", errRecoveryRefused, sessionName, destinationID)
-	case destinationID != recoveredID:
-		return fmt.Errorf("%w: finalized session %q has session ID %q, not the recovered session ID %q", errRecoveryRefused, sessionName, destinationID, recoveredID)
-	}
-	return nil
-}
-
 // publishCachedRecording uploads the cached raw.jsonl and clears the recording.
 // The caller holds the capture lock with the journal settled, and keeps holding
 // it until this returns: the bytes read here are the bytes published, and the
@@ -587,7 +528,7 @@ func publishCachedRecording(inst *agentinstance.Instance, projectRoot string, st
 
 	if ledgerErr == nil {
 		ledgerSessionDir = filepath.Join(ledgerPath, "sessions", sessionName)
-		if err := checkRecoveryDestination(ledgerSessionDir, sessionName, startMinted); err != nil {
+		if err := session.CheckLedgerSessionDestination(ledgerSessionDir, sessionName, startMinted); err != nil {
 			_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			return nil, err
 		}

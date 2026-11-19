@@ -2198,9 +2198,9 @@ func (s *daemonServiceImpl) Friction(payload FrictionPayload) {
 //
 //	YYYY-MM-DDTHH-MM-<user-or-agent-slug>
 //
-// We accept underscores and hyphens in the trailing slug, and bound the length
-// so an attacker cannot DoS by allocating a multi-megabyte filename.
-var sessionNameRe = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[A-Za-z0-9_-]{1,64}$`)
+// Continued recordings add a two-character delimiter and a 40-character
+// recording ID to the trailing slug, which previously had a 64-byte limit.
+var sessionNameRe = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[A-Za-z0-9_-]{1,106}$`)
 
 // validateSessionName rejects any IPC-supplied SessionName that could escape
 // the sessions/ subtree or otherwise break the documented session-folder
