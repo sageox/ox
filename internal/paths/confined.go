@@ -23,7 +23,10 @@ var ErrSymlinkInCache = errors.New("cache path passes through a symlink")
 // not have run yet, so readers must not rely on it alone.
 //
 // root itself may be a symlink (a teammate's relocated checkout). A component
-// that does not exist yet passes: MkdirAll creates it as a real directory.
+// that does not exist yet passes: MkdirAll creates it as a real directory. So
+// does one this process may not search or read: git records no directory
+// permissions, so a checkout cannot plant that, and the open that follows
+// reports it.
 func CheckNoSymlinksBelow(root, target string) error {
 	rel, err := filepath.Rel(root, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
@@ -36,17 +39,20 @@ func CheckNoSymlinksBelow(root, target string) error {
 		}
 		p = filepath.Join(p, part)
 		info, err := os.Lstat(p)
-		if errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
 		if !info.IsDir() { // a symlink is not a directory to Lstat
-			return fmt.Errorf("%w: %s", ErrSymlinkInCache, p)
+			return fmt.Errorf("%w: %s is not a real directory", ErrSymlinkInCache, p)
 		}
 	}
 	return filepath.WalkDir(target, func(path string, d fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrPermission) {
+			return nil // as above; a directory it cannot read is skipped
+		}
 		if err != nil {
 			return err
 		}
