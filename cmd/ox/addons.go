@@ -21,7 +21,7 @@ import (
 //	ox addons chooses and updates what the team owns.
 //	ox sync   distributes everything the team owns.
 //
-// Every verb here writes the Team Context checkout and stops. Delivery into a
+// Mutating verbs write and push the Team Context checkout. Delivery into a
 // product repository is convergence's job, through the same pipeline
 // hand-authored team content already travels — which is why installing an
 // add-on needs no repository-side step and offers none.
@@ -142,8 +142,7 @@ func init() {
 // make one, so "which Team Context" is the only location question this command
 // asks. Failing here with the reason is the point — an add-on verb that
 // silently picked some other path would write the wrong team's selection.
-func teamContextForAddons() (string, error) {
-	gitRoot := findGitRoot()
+func teamContextForAddons(gitRoot string) (string, error) {
 	if gitRoot == "" {
 		return "", fmt.Errorf("not inside a git repository, so ox cannot tell which team's add-ons you mean")
 	}
@@ -180,7 +179,7 @@ func runAddonsList(cmd *cobra.Command, _ []string) error {
 	// installed column simply stays empty, and the JSON says so by omission
 	// rather than by claiming nothing is installed.
 	var lock addons.Lock
-	if teamPath, tcErr := teamContextForAddons(); tcErr == nil {
+	if teamPath, tcErr := teamContextForAddons(findGitRoot()); tcErr == nil {
 		if lock, err = addons.LoadLock(teamPath); err != nil {
 			return fmt.Errorf("read your team's add-on selection: %w", err)
 		}
@@ -337,13 +336,14 @@ func runAddonsRemove(cmd *cobra.Command, args []string) error {
 }
 
 // runAddonOp is the one place the three mutating verbs share: resolve the Team
-// Context, run the transaction, then render. Keeping the error translation here
+// Context, run the transaction, push, then render. Keeping the error translation here
 // rather than in each verb is what stops the three from drifting into three
 // different vocabularies for the same failure.
 func runAddonOp(cmd *cobra.Command, name string, op func(teamPath string) (addons.Result, error)) error {
 	asJSON, _ := cmd.Flags().GetBool("json")
 
-	teamPath, err := teamContextForAddons()
+	gitRoot := findGitRoot()
+	teamPath, err := teamContextForAddons(gitRoot)
 	if err != nil {
 		return err
 	}
@@ -366,13 +366,19 @@ func runAddonOp(cmd *cobra.Command, name string, op func(teamPath string) (addon
 		return opErr
 	}
 
+	push := pushTeamPublish(gitRoot, teamPath)
 	if asJSON {
-		return encodeSkillsJSON(cmd.OutOrStdout(), result)
+		return encodeSkillsJSON(cmd.OutOrStdout(), struct {
+			addons.Result
+			Pushed          bool   `json:"pushed"`
+			NotPushedReason string `json:"not_pushed_reason,omitempty"`
+			Guidance        string `json:"guidance"`
+		}{Result: result, Pushed: push.pushed, NotPushedReason: push.reason, Guidance: teamWritePushGuidance(teamPath, push)})
 	}
-	return renderAddonResult(cmd.OutOrStdout(), teamPath, result)
+	return renderAddonResult(cmd.OutOrStdout(), teamPath, result, push)
 }
 
-func renderAddonResult(out io.Writer, teamPath string, r addons.Result) error {
+func renderAddonResult(out io.Writer, teamPath string, r addons.Result, push teamPublishPush) error {
 	ok := cli.StyleSuccess.Render("✓")
 	switch r.Op {
 	case addons.OpRemove:
@@ -396,12 +402,8 @@ func renderAddonResult(out io.Writer, teamPath string, r addons.Result) error {
 		fmt.Fprintf(out, "  Recover with: git -C %s log -p -- <path>\n", teamPath)
 	}
 
-	if r.Op != addons.OpRemove {
-		// Two short lines, not one long one: the original single sentence ran
-		// past 80 columns with two backticked commands in it, so a plain
-		// terminal wrapped it wherever it landed — including mid-command,
-		// which reads exactly like truncated output.
-		fmt.Fprintln(out, "Distribution is automatic — run `ox sync` if you need it now.")
+	fmt.Fprintln(out, teamWritePushGuidance(teamPath, push))
+	if push.pushed && r.Op != addons.OpRemove {
 		fmt.Fprintln(out, "Verify with `ox skills status`.")
 	}
 	return nil
