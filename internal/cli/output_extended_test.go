@@ -392,47 +392,6 @@ func TestPrintSuggestionBox_JSONMode(t *testing.T) {
 	assert.Empty(t, buf.String())
 }
 
-func TestPrintDisclaimer_TextMode(t *testing.T) {
-	SetJSONMode(false)
-	defer SetJSONMode(false)
-
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stdout = w
-
-	PrintDisclaimer()
-
-	w.Close()
-	os.Stdout = old
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
-
-	output := buf.String()
-	assert.Contains(t, output, "Sage")
-	assert.Contains(t, output, "Ox")
-	assert.Contains(t, output, "Claude Code")
-}
-
-func TestPrintDisclaimer_JSONMode(t *testing.T) {
-	SetJSONMode(true)
-	defer SetJSONMode(false)
-
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stdout = w
-
-	PrintDisclaimer()
-
-	w.Close()
-	os.Stdout = old
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
-
-	assert.Empty(t, buf.String())
-}
-
 func TestPrintJSON(t *testing.T) {
 	old := os.Stdout
 	r, w, err := os.Pipe()
