@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -8,13 +9,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/livesession/livesessiontest"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/sessionid"
 	"github.com/stretchr/testify/require"
 )
@@ -30,19 +34,44 @@ const wedgeLedgerName = "ledger-wedged"
 
 // sandboxLiveHome points every per-user directory at a temp dir: nothing these
 // tests run may read or write the real ~/.local/share/sageox.
-func sandboxLiveHome(t *testing.T) {
+func sandboxLiveHome(t *testing.T) (home string) {
 	t.Helper()
-	home := t.TempDir()
+	home = t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	for name, dir := range map[string]string{"XDG_CONFIG_HOME": "config", "XDG_DATA_HOME": "data", "XDG_CACHE_HOME": "cache", "XDG_STATE_HOME": "state"} {
 		t.Setenv(name, filepath.Join(home, dir))
 	}
-	t.Setenv("OX_USER_CONFIG", filepath.Join(home, "user-config.yaml"))
+	userConfig := filepath.Join(home, "user-config.yaml")
+	t.Setenv("OX_USER_CONFIG", userConfig)
+	// no AI coworker CLI probe at setup: it execs claude, codex and gemini,
+	// which is not what these tests time, and must not reach a real login
+	require.NoError(t, os.WriteFile(userConfig, []byte("agent_worker:\n  agent: none\n"), 0o600))
 	t.Setenv("DO_NOT_TRACK", "1")
 	t.Setenv("SAGEOX_TELEMETRY", "false")
+	t.Setenv(endpoint.EnvVar, "")
+	t.Setenv("SAGEOX_TOKEN", "")
 	isolateCredentialsWithDir(t)
+	return home
+}
+
+// syncBuffer is a log sink safe for the daemon's concurrent writers.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // wedgedGit is a git shim placed first on PATH.
@@ -145,9 +174,16 @@ func holdRepoLock(t *testing.T, ledgerDir string) (release func()) {
 // origin, whose path carries wedgeLedgerName.
 func newWedgeLedgerRepo(t *testing.T) (bare, ledgerDir string) {
 	t.Helper()
+	ledgerDir = filepath.Join(t.TempDir(), wedgeLedgerName)
+	return newLedgerRepoAt(t, ledgerDir), ledgerDir
+}
+
+// newLedgerRepoAt is newWedgeLedgerRepo at a path the caller picks.
+func newLedgerRepoAt(t *testing.T, ledgerDir string) (bare string) {
+	t.Helper()
 	root := t.TempDir()
 	bare = filepath.Join(root, "origin.git")
-	ledgerDir = filepath.Join(root, wedgeLedgerName)
+	require.NoError(t, os.MkdirAll(filepath.Dir(ledgerDir), 0o755))
 	mustGitIn(t, root, "init", "--bare", "--initial-branch=main", bare)
 	mustGitIn(t, root, "clone", "--quiet", bare, ledgerDir)
 	mustGitIn(t, ledgerDir, "symbolic-ref", "HEAD", "refs/heads/main")
@@ -156,7 +192,7 @@ func newWedgeLedgerRepo(t *testing.T) (bare, ledgerDir string) {
 	mustGitIn(t, ledgerDir, "add", "sessions/index.md")
 	mustGitIn(t, ledgerDir, "commit", "-q", "-m", "base")
 	mustGitIn(t, ledgerDir, "push", "-q", "-u", "origin", "main")
-	return bare, ledgerDir
+	return bare
 }
 
 func mustGitIn(t *testing.T, dir string, args ...string) {
@@ -387,10 +423,19 @@ func TestLiveStreamWedge_GCRecloneWhenTheLedgerTracksACacheFile(t *testing.T) {
 	var want strings.Builder
 	e.turn(&want, 1)
 
+	gitBefore, err := os.Stat(filepath.Join(clone, ".git"))
+	require.NoError(t, err)
 	ws := WorkspaceState{ID: "ledger", Type: WorkspaceTypeLedger, Path: clone, CloneURL: "file://" + bare, Exists: true}
-	scheduler.runBlueGreenGC(context.Background(), ws)
-
-	require.DirExists(t, e.dir, "the live session was left behind in the set-aside clone")
+	require.Equal(t, gcSuccess, scheduler.runBlueGreenGC(context.Background(), ws))
+	gitAfter, err := os.Stat(filepath.Join(clone, ".git"))
+	require.NoError(t, err)
+	require.False(t, os.SameFile(gitBefore, gitAfter), "GC never published a replacement clone, so the carry was not exercised")
+	old := gcBackupPath(clone)
+	require.FileExists(t, filepath.Join(old, ".sageox", "cache", "codedb", "planted.txt"),
+		"the conflicting file stays in the retained old clone: nothing is deleted")
+	require.NoDirExists(t, filepath.Join(old, ".sageox", "cache", "sessions", filepath.Base(e.dir)),
+		"the live session was left behind in the set-aside clone")
+	require.DirExists(t, e.dir)
 	e.turn(&want, 2)
 	requireDelivered(t, e, want.String())
 }
@@ -427,14 +472,42 @@ func TestLiveStreamWedge_LedgerNotClonedYetThenClonedUnderneath(t *testing.T) {
 // drainer starts. Far under ADR-247 D6's 60 s from write to visible.
 const startupBudget = 5 * time.Second
 
+// runWithin runs fn and fails the test if it takes longer than budget. On a
+// timeout it releases the wedge first, so fn can return and the test can end.
+func runWithin(t *testing.T, budget time.Duration, release func(), what string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(budget):
+		release()
+		<-done
+		t.Fatalf("%s waited more than %s on the wedged Ledger", what, budget)
+	}
+}
+
+// startupProject is a project whose config names repoID.
+func startupProject(t *testing.T, repoID string) string {
+	t.Helper()
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".sageox", "config.json"), []byte(`{"config_version":"2","repo_id":"`+repoID+`"}`), 0o644))
+	return root
+}
+
 // Mode a at daemon start: a daemon restarted (upgrade, inactivity exit, crash)
-// while the Ledger is wedged must still start draining spools. Setup used to
-// refresh the Ledger's sparse checkout synchronously, before the drainer was
-// even built: up to 2 minutes behind a held repo lock, and with no bound at
-// all when git hangs.
+// while the Ledger is wedged must still stream. Setup used to refresh the
+// Ledger's sparse checkout synchronously, before the drainer was even built:
+// up to 2 minutes behind a held repo lock, with no bound at all when git
+// hangs. This runs the real setup and the real workers with the Ledger still
+// wedged and requires a spooled turn to reach SageOx before the wedge clears.
 func TestLiveStreamWedge_DaemonSetupDoesNotWaitOnTheLedger(t *testing.T) {
 	if testing.Short() {
-		t.Skip("short: real git Ledger and daemon setup")
+		t.Skip("short: real git Ledger and daemon workers")
 	}
 	for _, tc := range []struct {
 		name  string
@@ -444,36 +517,134 @@ func TestLiveStreamWedge_DaemonSetupDoesNotWaitOnTheLedger(t *testing.T) {
 		{"git hangs in the Ledger", func(t *testing.T, _ string) func() { return installWedgedGit(t, "hang").Release }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sandboxLiveHome(t)
+			home := sandboxLiveHome(t)
 			_, ledgerDir := newWedgeLedgerRepo(t)
-			root := t.TempDir()
-			require.NoError(t, os.MkdirAll(filepath.Join(root, ".sageox"), 0o755))
-			require.NoError(t, os.WriteFile(filepath.Join(root, ".sageox", "config.json"), []byte(`{"config_version":"2","repo_id":"repo_wedge_startup"}`), 0o644))
 			release := tc.wedge(t, ledgerDir)
 
 			cfg := DefaultConfig()
+			cfg.ProjectRoot = startupProject(t, "repo_wedge_startup")
+			cfg.LedgerPath = ledgerDir
+			cfg.VersionCheckInterval, cfg.GitHubSyncInterval = 0, 0
+			d := New(cfg, discardLogger())
+			d.ctx, d.cancel = context.WithCancel(context.Background())
+			started := false
+			// registered after every Setenv, so it runs first: no daemon
+			// goroutine may outlive the sandboxed environment
+			t.Cleanup(func() {
+				d.cancel()
+				release()
+				done := make(chan struct{})
+				go func() { d.wg.Wait(); close(done) }()
+				select {
+				case <-done:
+				case <-time.After(60 * time.Second):
+					t.Error("daemon workers outlived the test")
+				}
+				if started {
+					d.telemetry.Stop()
+					d.friction.Stop()
+				}
+				if d.whisperRegistry != nil {
+					_ = d.whisperRegistry.Close()
+				}
+				d.releaseGlobalSyncLease()
+			})
+
+			runWithin(t, startupBudget, release, "daemon setup", func() { d.initComponents() })
+			require.NotNil(t, d.liveSessions, "no live-session drainer was built")
+
+			srv := livesessiontest.New(t)
+			lcfg := srv.Config(t)
+			d.liveSessions.endpoint = srv.URL
+			d.liveSessions.config = func(ep string) livesession.Config { c := lcfg; c.Endpoint = ep; return c }
+			dir := filepath.Join(d.liveSessions.sessionsDir, "2026-11-19T09-20-person-a-OxWdg2")
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			_, err := livesession.Prepare(t.Context(), lcfg, dir, livesession.OpenParams{
+				SessionID: sessionid.GenerateSessionID(), SessionName: filepath.Base(dir), RepoID: "repo_wedge_startup", Agent: "claude-code", StartedAt: time.Now(),
+			})
+			require.NoError(t, err)
+			_, err = livesession.Spool(t.Context(), dir, []byte(lineN(1)), livesession.SpoolOptions{})
+			require.NoError(t, err)
+
+			// Workers that call out or outlive their context stay off: the
+			// settings and GitHub fetches sleep, then use whatever HOME is then;
+			// the code index runs untracked. Live sessions need none of them.
+			d.config.ProjectRoot = ""
+			d.codedb, d.agentWorker = nil, nil
+			d.scheduler.settingsFetcher, d.scheduler.githubSync = nil, nil
+			d.service = &daemonServiceImpl{d}
+			d.server = NewServerWithService(d.logger, d.service)
+			for _, p := range []string{d.liveSessions.sessionsDir, SocketPath(), paths.DataDir(), paths.ConfigDir()} {
+				require.Truef(t, strings.HasPrefix(p, home) || strings.HasPrefix(p, os.Getenv("XDG_RUNTIME_DIR")), "%s is outside the sandbox", p)
+			}
+
+			started = true
+			runWithin(t, startupBudget, release, "starting the daemon workers", d.startWorkers)
+			require.Eventually(t, func() bool {
+				st, err := livesession.ReadState(dir)
+				return err == nil && st.Acked == int64(len(lineN(1)))
+			}, 10*time.Second, 20*time.Millisecond, "the turn never reached SageOx while the Ledger was wedged")
+			st, err := livesession.ReadState(dir)
+			require.NoError(t, err)
+			require.Equal(t, lineN(1), string(srv.Stored(t, st.ConversationID, st.LayerID)))
+			require.NoFileExists(t, filepath.Join(ledgerDir, ".git", "info", "sparse-checkout"),
+				"precondition: the wedge held, so the sparse refresh had not run")
+		})
+	}
+}
+
+// Thread from review: setup must not open the Ledger's whisper database
+// through a tracked symlink, whether or not git can neutralize the link in
+// time. The Ledger is a repo anyone on the team can push to.
+func TestLiveStreamWedge_SetupRefusesASymlinkedWhisperCache(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git Ledger and daemon setup")
+	}
+	for _, tc := range []struct {
+		name string
+		hang bool
+	}{
+		{"git neutralizes the link", false},
+		{"git hangs in the Ledger", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := sandboxLiveHome(t)
+			const repoID = "repo_" + wedgeLedgerName + "_whisper"
+			root := startupProject(t, repoID)
+			ledgerDir := paths.LedgersDataDir(repoID, endpoint.GetForProject(root))
+			require.True(t, strings.HasPrefix(ledgerDir, home), "the Ledger must be in the sandbox: %s", ledgerDir)
+			newLedgerRepoAt(t, ledgerDir)
+			outside := t.TempDir()
+			link := filepath.Join(ledgerDir, ".sageox", "cache", "whisper")
+			require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+			require.NoError(t, os.Symlink(outside, link))
+			mustGitIn(t, ledgerDir, "add", "-f", ".sageox/cache/whisper")
+			mustGitIn(t, ledgerDir, "commit", "-q", "-m", "plant a cache symlink")
+			release := func() {}
+			if tc.hang {
+				release = installWedgedGit(t, "hang").Release
+			}
+
+			logs := &syncBuffer{}
+			cfg := DefaultConfig()
 			cfg.ProjectRoot = root
 			cfg.LedgerPath = ledgerDir
-			d := New(cfg, discardLogger())
+			d := New(cfg, slog.New(slog.NewTextHandler(logs, nil)))
 			d.ctx, d.cancel = context.WithCancel(context.Background())
 			t.Cleanup(func() {
 				d.cancel()
+				if d.whisperRegistry != nil {
+					_ = d.whisperRegistry.Close()
+				}
 				d.releaseGlobalSyncLease()
 			})
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				d.initComponents()
-			}()
-			select {
-			case <-done:
-				release()
-			case <-time.After(startupBudget):
-				release()
-				<-done
-				t.Fatalf("daemon setup waited more than %s on the wedged Ledger; the live-session drainer could not start", startupBudget)
-			}
-			require.NotNil(t, d.liveSessions, "no live-session drainer was built")
+			runWithin(t, startupBudget, release, "daemon setup", func() { d.initComponents() })
+
+			opened, err := os.ReadDir(outside)
+			require.NoError(t, err)
+			require.Empty(t, opened, "setup opened the whisper database through a tracked symlink, outside the Ledger")
+			require.Nil(t, d.whisperRegistry)
+			require.Contains(t, logs.String(), "level=ERROR msg=whisper_store_refused")
 		})
 	}
 }

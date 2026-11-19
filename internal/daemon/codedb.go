@@ -195,7 +195,16 @@ func (m *CodeDBManager) resolveSharedDataDir() string {
 
 	ctx, err := config.LoadProjectContext(projectRoot)
 	if err == nil {
-		if dir := paths.CodeDBSharedDir(ctx.RepoID(), ctx.Endpoint()); dir != "" {
+		dir := paths.CodeDBSharedDir(ctx.RepoID(), ctx.Endpoint())
+		if dir != "" {
+			if err := paths.CheckNoSymlinksBelow(paths.LedgersDataDir(ctx.RepoID(), ctx.Endpoint()), dir); err != nil {
+				// a tracked Ledger symlink would aim the index anywhere on disk;
+				// the per-worktree index below lives in the coworker's own repo
+				m.logger.Error("codedb_shared_dir_refused", "path", dir, "reason", "symlink_in_ledger_cache", "error", err)
+				dir = ""
+			}
+		}
+		if dir != "" {
 			// clean up legacy root-level codedb/ if it exists
 			legacyDir := paths.LedgersDataDir(ctx.RepoID(), ctx.Endpoint())
 			if legacyDir != "" {
