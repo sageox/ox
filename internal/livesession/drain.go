@@ -211,29 +211,37 @@ func (s *session) pump(ctx context.Context, res *DrainResult) (verdict, error) {
 	return vStop, nil
 }
 
+// sendBatch scans the window a full-size batch would carry, then sends as much
+// of it as the batch cap allows. The scan never shrinks with the cap: a secret
+// whose parts span lines (a Helm extraEnv name and its value) is refused only
+// when the parts are scanned together, so sending a stalled window in smaller
+// pieces must not split what one scan sees. Each piece rescans its whole
+// window; that costs CPU only while a link is stalling.
 func (s *session) sendBatch(ctx context.Context, f *os.File, h *sessionstream.StreamHash, end int64, res *DrainResult) (verdict, error) {
-	batch, err := readBatch(f, s.st.Acked, end)
+	window, err := readBatch(f, s.st.Acked, end)
 	if err != nil {
 		return vStop, err
 	}
-	if len(batch) == 0 {
+	if len(window) == 0 {
 		return vStop, nil
 	}
-	if err := s.checkPublication(ctx, batch); err != nil {
+	if err := s.checkPublication(ctx, window); err != nil {
 		var refused *secretguard.RefusedError
 		if !errors.As(err, &refused) {
 			return vStop, err
 		}
-		w, err := withholdRefused(batch)
+		w, err := withholdRefused(window)
 		if err != nil {
 			return vStop, fmt.Errorf("withhold refused batch at offset %d: %w", s.st.Acked, err)
 		}
+		w.by = "local_scan"
 		s.withheld = w
 		return vWithhold, nil
 	}
+	batch := capLines(window, s.batchLimit())
 	resp, err := s.c.AppendRaw(ctx, s.st.ConversationID, s.st.LayerID, s.st.Acked, h.Sum(), batch)
 	if err != nil {
-		return s.onRefusal(ctx, err, f, h, end, res)
+		return s.onRefusal(ctx, err, f, h, window, len(batch), end, res)
 	}
 	return s.onStored(ctx, f, h, batch, resp, end, res)
 }
@@ -258,20 +266,51 @@ func (s *session) onStored(ctx context.Context, f *os.File, h *sessionstream.Str
 	}
 	res.Sent += stored - s.st.Acked
 	s.st.Acked = stored
+	s.unstalled()
+	s.edgeCleared(ctx)
 	if err := s.persist(); err != nil {
 		return vStop, err
 	}
 	return vContinue, nil
 }
 
-// onRefusal maps a failed append to what the drain does next (C6).
-func (s *session) onRefusal(ctx context.Context, err error, f *os.File, h *sessionstream.StreamHash, end int64, res *DrainResult) (verdict, error) {
+// onRefusal maps a failed append of the first sent bytes of window to what the
+// drain does next (C6).
+func (s *session) onRefusal(ctx context.Context, err error, f *os.File, h *sessionstream.StreamHash, window []byte, sent int, end int64, res *DrainResult) (verdict, error) {
 	var api *sessionstream.APIError
 	if !errors.As(err, &api) {
+		if isTimeout(ctx, err) {
+			s.stalled(ctx, sent, "timeout")
+		}
 		return vStop, fmt.Errorf("append at offset %d: %w", s.st.Acked, err)
+	}
+	if shape, ok := edgeShape(api); ok {
+		eerr := s.edgeBlocked(ctx, api, shape)
+		s.stalled(ctx, sent, "edge_blocked") // persists EdgeBlockedSince too
+		return vStop, fmt.Errorf("append at offset %d: %w (status %d, %s body)", s.st.Acked, eerr, api.Status, shape)
+	}
+	if s.edgeCleared(ctx) {
+		if err := s.persist(); err != nil {
+			s.log().WarnContext(ctx, "live_session_state_write_failed", "during", "edge_unblocked", "error", err)
+		}
 	}
 	if done, err := s.terminal(ctx, api); done || err != nil {
 		return vStop, err
+	}
+	if api.Body.Reason == reasonSecretRefused {
+		// the server's scan (F11) found what the local one missed: the same
+		// withhold as a local refusal (F1, R1), and the stream goes on. The
+		// whole scan window goes, not just the piece sent: a match's other
+		// parts may lie in the rest of it
+		w, werr := withholdRefused(window)
+		if werr == nil {
+			w.by, w.line = "server", api.Body.Line
+			s.withheld = w
+			return vWithhold, nil
+		}
+		// a batch of gap lines only: withholding again could loop forever, so
+		// today's stop applies below
+		s.log().WarnContext(ctx, "live_session_secret_refused_gaps_only", "offset", s.st.Acked, "bytes", len(window))
 	}
 	switch classify(api) {
 	case refusalResync:
@@ -451,6 +490,20 @@ func readBatch(f io.ReaderAt, off, end int64) ([]byte, error) {
 		return nil, nil
 	}
 	return buf[:i+1], nil
+}
+
+// capLines is the longest prefix of whole lines in b (which ends in a newline)
+// within limit bytes, or b's first line when that alone is longer: a line is
+// never split.
+func capLines(b []byte, limit int) []byte {
+	if len(b) <= limit {
+		return b
+	}
+	i := bytes.LastIndexByte(b[:limit], '\n')
+	if i < 0 {
+		i = bytes.IndexByte(b, '\n')
+	}
+	return b[:i+1]
 }
 
 // spoolEnd is the end of the last whole line; a torn tail is not part of the stream.

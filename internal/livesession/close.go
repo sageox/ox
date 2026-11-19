@@ -126,6 +126,7 @@ func (s *session) finish(ctx context.Context, summary string, res *DrainResult) 
 		})
 		if err == nil {
 			s.log().InfoContext(ctx, "live_session_closed", "stored_through", size)
+			s.edgeCleared(ctx) // setStatus persists it
 			s.setStatus(ctx, StatusClosed)
 			s.reportUnsentTail(ctx, size)
 			return nil
@@ -196,6 +197,20 @@ func (s *session) onCloseRefusal(ctx context.Context, err error, size int64) (ve
 	var api *sessionstream.APIError
 	if !errors.As(err, &api) {
 		return vStop, fmt.Errorf("close live session: %w", err)
+	}
+	if shape, ok := edgeShape(api); ok {
+		eerr := s.edgeBlocked(ctx, api, shape)
+		if perr := s.persist(); perr != nil {
+			s.log().WarnContext(ctx, "live_session_state_write_failed", "during", "edge_blocked", "error", perr)
+		}
+		return vStop, fmt.Errorf("close live session: %w (status %d, %s body)", eerr, api.Status, shape)
+	}
+	// SageOx itself answered: a fully acked stream sends no append, so only
+	// a close reply can end an edge streak that began on a close
+	if s.edgeCleared(ctx) {
+		if perr := s.persist(); perr != nil {
+			s.log().WarnContext(ctx, "live_session_state_write_failed", "during", "edge_unblocked", "error", perr)
+		}
 	}
 	if done, err := s.terminal(ctx, api); done || err != nil {
 		return vStop, err

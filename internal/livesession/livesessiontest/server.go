@@ -88,6 +88,11 @@ type Server struct {
 	hang             bool
 	latency          time.Duration
 	openDelay        time.Duration
+	edgeMethod       string
+	edgeBlocks       int
+	edgeType         string
+	edgeBody         string
+	hangAppendsOver  int
 
 	inflight, maxInflight int
 }
@@ -152,9 +157,18 @@ func (s *Server) route(h func(r *http.Request, body []byte, call *Call) reply) h
 		call := Call{Method: r.Method, Path: r.URL.Path, Offset: -1, BodyLen: len(body)}
 		s.enter()
 		defer s.leave()
-		if s.knob(func() bool { return s.hang }) {
+		if s.knob(func() bool { return s.hang || s.hangsAppend(r, body) }) {
 			<-r.Context().Done()
 			s.record(call)
+			return
+		}
+		if typ, edge, ok := s.takeEdgeBlock(r); ok {
+			// the edge answers before api-go sees anything: no auth, no JSON refusal
+			call.Status = http.StatusForbidden
+			s.record(call)
+			w.Header().Set("Content-Type", typ)
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, edge)
 			return
 		}
 		if d := s.latencyValue(); d > 0 {
