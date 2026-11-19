@@ -2332,11 +2332,18 @@ func (s *daemonServiceImpl) commitMurmur(ctx context.Context, payload MurmurPayl
 		return fmt.Errorf("rel_path validation failed: %w", err)
 	}
 	if err := writeAndCommitMurmur(ctx, payload.TargetDir, payload); err != nil {
+		if errors.Is(err, errMurmurWorkspaceBusy) {
+			// IPC already acknowledged the publish. Use the existing cache
+			// fallback so a concurrent checkout swap cannot discard the entry.
+			return writeOutboxMurmur(murmurOutboxCacheDir(murmurOutboxTarget(payload.TargetDir)), payload)
+		}
 		return err
 	}
 	s.d.logger.Debug("murmur written and committed", "rel_path", payload.RelPath)
 	return nil
 }
+
+var errMurmurWorkspaceBusy = errors.New("murmur workspace is locked for GC or another murmur commit")
 
 // writeAndCommitMurmur writes the murmur file to disk (the daemon owns all I/O)
 // and commits it, scoped to the murmur's own path. The caller MUST have already
@@ -2350,6 +2357,19 @@ func writeAndCommitMurmur(ctx context.Context, targetDir string, payload MurmurP
 	if _, err := decodeMurmurPayload(payload); err != nil {
 		return err
 	}
+
+	// Exclude GC from before it captures local state until it finishes the
+	// swap and restore. Use the same lock so a check cannot race a new GC.
+	lockPath := filepath.Clean(targetDir) + ".gc-lock"
+	lock, err := acquireGCLock(lockPath)
+	if errors.Is(err, os.ErrExist) {
+		return errMurmurWorkspaceBusy
+	}
+	if err != nil {
+		return err
+	}
+	defer releaseGCLock(lock, lockPath)
+
 	summary := payload.Content
 	if len(summary) > 50 {
 		summary = summary[:50] + "..."

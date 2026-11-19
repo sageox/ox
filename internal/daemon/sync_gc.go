@@ -35,9 +35,29 @@ const (
 	gcFailed                        // reclone attempted but failed (clone, validation, or swap error)
 )
 
-// checkAndRunGC runs the Ledger phase on the scheduler loop so watcher
-// validation and outbox draining cannot interleave with preservation or
-// the swap. Launch Team Context cleanup before the Ledger phase so a stalled
+// startPeriodicGC keeps reclone I/O off the scheduler loop. Track it for the
+// same bounded shutdown drain as manually triggered GC.
+func (s *SyncScheduler) startPeriodicGC(ctx context.Context) <-chan struct{} {
+	if atomic.LoadInt32(&s.gcInProgress) != 0 || !s.addClone() {
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		defer s.cloneWg.Done()
+		defer close(done)
+		taskCtx, span := s.tracer.StartTask(ctx, "daemon:gc_check")
+		defer span.End()
+		s.checkAndRunGC(taskCtx)
+	}()
+	return done
+}
+
+func gcBackupPath(path string) string {
+	return filepath.Clean(path) + ".old"
+}
+
+// checkAndRunGC keeps the Ledger phase serialized with watcher validation and
+// outbox draining. The scheduler pauses both until Ledger cleanup completes. Launch Team Context cleanup before the Ledger phase so a stalled
 // Ledger reclone cannot prevent recovery of an interrupted Team Context swap.
 func (s *SyncScheduler) checkAndRunGC(ctx context.Context) <-chan struct{} {
 	// only one GC at a time
@@ -79,7 +99,7 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) <-chan struct{} {
 
 func (s *SyncScheduler) checkTeamContextGC(ctx context.Context, teamContexts []WorkspaceState) {
 	for _, ws := range teamContexts {
-		interruptedSwap := gitutil.IsGitRepo(ws.Path + ".old")
+		interruptedSwap := gitutil.IsGitRepo(gcBackupPath(ws.Path))
 		if (!ws.Exists && !interruptedSwap) || ws.CloneURL == "" {
 			continue
 		}
@@ -154,7 +174,7 @@ func (s *SyncScheduler) checkTeamContextGC(ctx context.Context, teamContexts []W
 
 func (s *SyncScheduler) checkLedgerAndBubbleGC(ctx context.Context) {
 	// ledger GC reclone — same blue-green pattern as team contexts
-	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(l.Path+".old")) && l.CloneURL != "" {
+	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(gcBackupPath(l.Path))) && l.CloneURL != "" {
 		if _, loaded := s.cloneInFlight.Load(l.ID); !loaded {
 			intervalDays := l.GCIntervalDays
 			if intervalDays <= 0 {
@@ -163,7 +183,7 @@ func (s *SyncScheduler) checkLedgerAndBubbleGC(ctx context.Context) {
 			interval := time.Duration(intervalDays) * 24 * time.Hour
 			intervalExceeded := l.LastGCTime.IsZero() || time.Since(l.LastGCTime) >= interval
 			fullClone := !isPartialClone(l.Path)
-			interruptedSwap := gitutil.IsGitRepo(l.Path + ".old")
+			interruptedSwap := gitutil.IsGitRepo(gcBackupPath(l.Path))
 
 			// trigger 3: a genuinely wedged ledger (ahead AND behind for
 			// longer than ledgerSyncWedgeAge) — checkAndRunGC's normal
@@ -449,7 +469,7 @@ func (s *SyncScheduler) runTriggerGC(ctx context.Context) *TriggerGCResponse {
 	resp := &TriggerGCResponse{}
 	teamContexts := s.workspaceRegistry.GetTeamContexts()
 	for _, ws := range teamContexts {
-		if (!ws.Exists && !gitutil.IsGitRepo(ws.Path+".old")) || ws.CloneURL == "" {
+		if (!ws.Exists && !gitutil.IsGitRepo(gcBackupPath(ws.Path))) || ws.CloneURL == "" {
 			continue
 		}
 		if _, loaded := s.cloneInFlight.Load(ws.ID); loaded {
@@ -511,7 +531,7 @@ func (s *SyncScheduler) runTriggerGC(ctx context.Context) *TriggerGCResponse {
 	}
 
 	// ledger GC reclone
-	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(l.Path+".old")) && l.CloneURL != "" {
+	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(gcBackupPath(l.Path))) && l.CloneURL != "" {
 		if _, loaded := s.cloneInFlight.Load(l.ID); !loaded {
 			s.logger.Info("trigger_gc: forced ledger reclone", "id", l.ID)
 			// A forced repair is an explicit recovery request, so preserve
@@ -569,9 +589,8 @@ func (s *SyncScheduler) runTriggerGC(ctx context.Context) *TriggerGCResponse {
 	return resp
 }
 
-// acquireGCLock creates an exclusive filesystem lock for the GC swap window.
+// acquireGCLock creates an exclusive filesystem lock for workspace GC.
 // Returns the lock file handle on success, or an error if the lock is already held.
-// The lock is short-lived (only held during the two-rename atomic swap).
 func acquireGCLock(lockPath string) (*os.File, error) {
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 	if err != nil {
@@ -625,6 +644,7 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 // value specifically, not on gcSuccess or on their own pre-call wedge
 // sample.
 func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) (result gcResult, recovered bool) {
+	ws.Path = filepath.Clean(ws.Path)
 	if ws.Type != WorkspaceTypeTeamContext {
 		return s.recloneWorkspaceForGC(ctx, ws, captureUnpushedOnDiverge)
 	}
@@ -646,7 +666,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 
 func (s *SyncScheduler) recloneWorkspaceForGC(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) (result gcResult, recovered bool) {
 	newPath := ws.Path + ".new"
-	oldPath := ws.Path + ".old"
+	oldPath := gcBackupPath(ws.Path)
 	diffFile := ws.Path + ".gc-diff"
 	untrackedDir := ws.Path + ".gc-untracked"
 	lockPath := ws.Path + ".gc-lock"
