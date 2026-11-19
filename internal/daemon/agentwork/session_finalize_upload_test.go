@@ -573,9 +573,10 @@ func checkLegacySummaryRepair(t *testing.T, state string) {
 	} else {
 		err = h.ProcessResult(items[0], &RunResult{Output: output})
 	}
-	if state == "changed recording" {
+	switch state {
+	case "changed recording":
 		require.ErrorIs(t, err, session.ErrLedgerSessionOverwrite)
-	} else if state == "interrupted copy with local edits" {
+	case "interrupted copy with local edits":
 		require.ErrorContains(t, err, "uncommitted changes in Ledger session")
 		require.Equal(t, before, gitOutput(t, bare, "rev-parse", branch))
 		summary, readErr := os.ReadFile(filepath.Join(dir, "summary.md"))
@@ -583,7 +584,7 @@ func checkLegacySummaryRepair(t *testing.T, state string) {
 		require.Equal(t, "# Local edits", string(summary))
 		require.DirExists(t, f.cacheDir)
 		return
-	} else {
+	default:
 		require.NoError(t, err)
 	}
 
