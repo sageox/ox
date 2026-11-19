@@ -26,7 +26,7 @@ func cursorReviewTurn(label string) string {
 func finalizeCursorHostRecording(t *testing.T, f *cursorHostFixture, state *session.RecordingState) error {
 	t.Helper()
 	return fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
-		_, err := session.FinalizeCursorCapture(context.Background(), f.root, state.SessionPath, f.home, f.reader)
+		_, _, err := session.FinalizeCursorCapture(context.Background(), f.root, state.SessionPath, f.home, f.reader)
 		return err
 	})
 }

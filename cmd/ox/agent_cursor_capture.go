@@ -334,8 +334,15 @@ func requestCursorCapture(projectRoot, agentID, home string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	return fileutil.WithFileLockTimeout(ctx, filepath.Join(state.SessionPath, "raw.jsonl"), 50*time.Millisecond, func() error {
-		_, err := session.DrainCursorSource(ctx, projectRoot, state.SessionPath, home, reader, state.CursorFinalDrainPending)
+	var capture *session.CursorCaptureResult
+	err = fileutil.WithFileLockTimeout(ctx, filepath.Join(state.SessionPath, "raw.jsonl"), 50*time.Millisecond, func() error {
+		var err error
+		capture, err = session.DrainCursorSource(ctx, projectRoot, state.SessionPath, home, reader, state.CursorFinalDrainPending)
 		return err
 	})
+	if err == nil && capture != nil {
+		// Cursor's committed bytes reach the live stream like any capture's (C8)
+		liveSessionSpool(projectRoot, state, capture.Appended)
+	}
+	return err
 }

@@ -17,7 +17,7 @@ func finalizeCursorFixture(t *testing.T, f *cursorCaptureFixture, reader adapter
 	var state *RecordingState
 	err := fileutil.WithFileLock(context.Background(), f.rawPath, func() error {
 		var err error
-		state, err = FinalizeCursorCapture(context.Background(), f.projectRoot, f.sessionPath, f.homeDir, reader)
+		state, _, err = FinalizeCursorCapture(context.Background(), f.projectRoot, f.sessionPath, f.homeDir, reader)
 		return err
 	})
 	return state, err

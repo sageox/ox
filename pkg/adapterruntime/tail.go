@@ -2,10 +2,12 @@ package adapterruntime
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
@@ -142,6 +144,60 @@ func endsRecordBoundary(f *os.File, offset int64) bool {
 		return false // past EOF, or unreadable — either way, do not trust it
 	}
 	return b[0] == '\n'
+}
+
+// recordWaitPoll is how often WaitForCompleteRecord looks again. An agent
+// flushes a record in milliseconds; 25 ms keeps the wait short without
+// spinning on stat.
+const recordWaitPoll = 25 * time.Millisecond
+
+// WaitForCompleteRecord waits until the file at path ends on a record
+// boundary (empty, or its last byte a newline), at most timeout, and reports
+// false only when it still ends mid-record at the deadline.
+//
+// TailJSONL leaves an unterminated last record unread, which is right for a
+// read that will run again and wrong for the last one: a final drain that
+// lands while the agent is still writing its last record loses that record
+// for good. A file that cannot be read has nothing to wait for; the read that
+// follows reports why.
+func WaitForCompleteRecord(ctx context.Context, path string, timeout time.Duration) bool {
+	return waitForCompleteRecord(ctx, timeout, func() bool { return endsOnRecordBoundary(path) })
+}
+
+// waitForCompleteRecord is WaitForCompleteRecord with its probe passed in, so
+// a test can act between one probe and the next.
+func waitForCompleteRecord(ctx context.Context, timeout time.Duration, complete func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(recordWaitPoll)
+	defer ticker.Stop()
+	for {
+		if complete() {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
+}
+
+// endsOnRecordBoundary reports whether path ends on a record boundary, or
+// cannot be read (and so has no partial record to wait for).
+func endsOnRecordBoundary(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil || info.Size() == 0 {
+		return true
+	}
+	return endsRecordBoundary(f, info.Size())
 }
 
 // readLine returns one newline-terminated record.

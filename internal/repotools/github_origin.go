@@ -1,6 +1,9 @@
 package repotools
 
-import "strings"
+import (
+	"os/exec"
+	"strings"
+)
 
 // GitHubOrigin returns the owner and name of the GitHub repo the "origin"
 // remote of gitRoot points at, lowercased (normalizeGitURL lowercases, and
@@ -10,6 +13,20 @@ import "strings"
 // offline-safe: reads local git config only
 func GitHubOrigin(gitRoot string) (owner, name string, ok bool) {
 	return parseGitHubRepo(getOriginURL(gitRoot))
+}
+
+// IsShallowClone reports whether gitRoot is a shallow clone. Its first commit
+// is then the shallow boundary, not the repo's root, so its salted remote
+// hashes match no other clone of the same project.
+func IsShallowClone(gitRoot string) bool {
+	out, err := exec.Command("git", "-C", gitRoot, "rev-parse", "--is-shallow-repository").Output()
+	return err == nil && strings.TrimSpace(string(out)) == "true"
+}
+
+// GitHubUpstream is GitHubOrigin for the "upstream" remote: a contributor who
+// clones their fork has the project there, not on origin.
+func GitHubUpstream(gitRoot string) (owner, name string, ok bool) {
+	return parseGitHubRepo(getRemoteURL(gitRoot, "upstream"))
 }
 
 // parseGitHubRepo splits a normalized remote ("github.com/owner/name") into

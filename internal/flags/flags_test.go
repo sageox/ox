@@ -667,3 +667,50 @@ func TestEnvProviderHasNoOpinionOnGitHubMirror(t *testing.T) {
 		t.Error("FEATURE_GITHUB_MIRROR=true overrode a server-side false")
 	}
 }
+
+// TestSessionStreamingFlagResolvesFromRemotePayload decodes the four shapes the
+// server can send for features.session_streaming.
+//
+// Failure prevented: a null or absent key decoded as an opinionated false, or a
+// true never reaching Flags, so an enrolled team never streams; or a rolling
+// upgrade turns live capture on for a team the server never enrolled.
+func TestSessionStreamingFlagResolvesFromRemotePayload(t *testing.T) {
+	tests := []struct {
+		name        string
+		features    string
+		wantOpinion *bool
+		wantEnabled bool
+	}{
+		{name: "null", features: `{"session_streaming":null}`},
+		{name: "absent key", features: `{}`},
+		{name: "false", features: `{"session_streaming":false}`, wantOpinion: bp(false)},
+		{name: "true", features: `{"session_streaming":true}`, wantOpinion: bp(true), wantEnabled: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := `{"features":` + tt.features + `,"killswitches":{},"fetched_at":"` + time.Now().UTC().Format(time.RFC3339) + `"}`
+			var resp flags.CLISettingsResponse
+			if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+				t.Fatalf("unmarshal %s: %v", raw, err)
+			}
+			patch := flags.RemoteSettingsToPatch(&resp)
+			if (tt.wantOpinion == nil) != (patch.SessionStreamingEnabled == nil) ||
+				(tt.wantOpinion != nil && *patch.SessionStreamingEnabled != *tt.wantOpinion) {
+				t.Errorf("patch opinion = %v, want %v", patch.SessionStreamingEnabled, tt.wantOpinion)
+			}
+			f := flags.Resolve(context.Background(), flags.DaemonProvider{CachedSettings: &resp})
+			if f.SessionStreamingEnabled != tt.wantEnabled {
+				t.Errorf("SessionStreamingEnabled = %v, want %v", f.SessionStreamingEnabled, tt.wantEnabled)
+			}
+		})
+	}
+}
+
+// TestSessionStreamingFlagHasNoEnvOverride: FEATURE_SESSION_STREAMING must not
+// turn on content upload; only the server rollout can.
+func TestSessionStreamingFlagHasNoEnvOverride(t *testing.T) {
+	t.Setenv("FEATURE_SESSION_STREAMING", "true")
+	if f := flags.Resolve(context.Background(), flags.EnvProvider{}); f.SessionStreamingEnabled {
+		t.Fatal("env var enabled session streaming")
+	}
+}
