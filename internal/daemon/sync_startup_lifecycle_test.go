@@ -260,13 +260,68 @@ func TestSyncScheduler_WatcherPullContinuesDuringPeriodicTeamSync(t *testing.T) 
 	require.EqualValues(t, 2, calls.Load())
 	cancel()
 	awaitStartupCompletion(t, pullCanceled)
-	select {
-	case <-done:
-		t.Fatal("Start returned while a periodic team pull still held scheduler resources")
-	default:
-	}
 	releaseOnce.Do(func() { close(releasePull) })
 	awaitStartupCompletion(t, done)
+}
+
+// The periodic cycle runs off the scheduler loop, so Start must join it on
+// shutdown just like the startup pull. Virtual time makes the join observable.
+func TestSyncScheduler_StartJoinsCanceledPeriodicTeamSync(t *testing.T) {
+	t.Setenv("OX_GIT_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "git-credentials.json"))
+	scheduler, _, _ := newTeamBudgetScheduler(t, 1)
+	scheduler.config.SyncIntervalRead = time.Hour
+	scheduler.config.TeamContextSyncInterval = time.Minute
+	scheduler.config.VersionCheckInterval = 0
+	scheduler.config.GCCheckInterval = 0
+	scheduler.config.CodeDBCheckInterval = 0
+	scheduler.config.LedgerCheckInterval = 0
+	scheduler.config.GitHubSyncInterval = 0
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		started, canceled, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		var calls atomic.Int32
+		overrideTeamBudgets(t, time.Hour, time.Hour, func(ctx context.Context, _ string) (teamPullOutcome, error) {
+			if calls.Add(1) == 2 {
+				close(started)
+				<-ctx.Done()
+				close(canceled)
+				<-release
+			}
+			return teamPullOutcome{}, ctx.Err()
+		})
+		scheduler.triggerChan = make(chan struct{}, 1)
+		t.Cleanup(func() {
+			cancel()
+			releaseOnce.Do(func() { close(release) })
+			synctest.Wait()
+		})
+		go func() {
+			scheduler.Start(ctx)
+			close(done)
+		}()
+		select {
+		case <-started:
+		case <-time.After(10 * time.Minute):
+			t.Fatal("scheduler never ran its periodic team sync")
+		}
+		cancel()
+		<-canceled
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("Start returned while its periodic team sync was still running")
+		default:
+		}
+		releaseOnce.Do(func() { close(release) })
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("Start did not return after its periodic team sync completed")
+		}
+	})
 }
 
 func TestSyncScheduler_WatcherPullContinuesDuringTeamGC(t *testing.T) {
