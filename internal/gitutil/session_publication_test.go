@@ -87,6 +87,18 @@ func TestPushWithRetryCannotOmitSessionSecretGuard(t *testing.T) {
 	}
 }
 
+func TestPushWithRetryKeepsRefusedObservationHistoryLocal(t *testing.T) {
+	useFreshFixtureRules(t)
+	team, bare := initBareRemoteRepo(t)
+	remoteBefore := gitInRepo(t, bare, "rev-parse", "HEAD")
+	rel := TeamObservationDir + "/2026-11-17/observation.jsonl"
+	require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(team, rel)), 0700))
+	addCommit(t, team, rel, `{"headline":"`+syntheticAWSKey+`"}`, "observation: record team memory")
+	addCommit(t, team, rel, `{"headline":"ordinary notes"}`, "observation: redact team memory")
+	require.Error(t, PushWithRetry(t.Context(), team, PushOpts{}))
+	require.Equal(t, remoteBefore, gitInRepo(t, bare, "rev-parse", "HEAD"))
+}
+
 func TestPushWithRetryCurrentRulesUnavailableKeepsSessionLocal(t *testing.T) {
 	useFreshFixtureRules(t)
 	ledger, bare := initBareRemoteRepo(t)

@@ -40,6 +40,9 @@ type PublicPrimeResponse struct {
 	Plans    []PublicPrimePlan   `json:"plans"`
 	Activity []PublicPrimeWindow `json:"activity"`
 	Murmurs  []PublicPrimeMurmur `json:"murmurs"`
+	// Rules are the Team Rules a maintainer marked `visibility: public`.
+	// Absent from servers that predate them.
+	Rules []PublicPrimeRule `json:"rules,omitempty"`
 	// Team is the project's SageOx team, sent only when Viewer is "member".
 	// Nil from older servers and for everyone else.
 	Team *PublicPrimeTeam `json:"team,omitempty"`
@@ -59,6 +62,14 @@ func (p *PublicPrimeResponse) MemberTeam() *PublicPrimeTeam {
 		return nil
 	}
 	return p.Team
+}
+
+// PublicPrimeRule is one public Team Rule: its name, the paths it is scoped
+// to (empty means the whole repo) and its markdown body, front matter removed.
+type PublicPrimeRule struct {
+	Name    string   `json:"name"`
+	Globs   []string `json:"globs,omitempty"`
+	Content string   `json:"content"`
 }
 
 // PublicPrimeProject names the project and its public SageOx page.

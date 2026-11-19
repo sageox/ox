@@ -93,13 +93,12 @@ func TestPullManagedRepo_TimeoutDuringRebaseLeavesCleanRepo(t *testing.T) {
 	installSlowRebasePull(t, local)
 
 	s := newTestScheduler(t.TempDir())
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-	result := s.pullManagedRepo(ctx, ManagedRepoPullOpts{
+	result := s.pullManagedRepo(t.Context(), ManagedRepoPullOpts{
 		RepoPath:     local,
 		RepoName:     "ledger",
 		ResolveRules: []manifest.ResolveRule{{Mode: manifest.ResolveModeAuto, Path: "data/"}},
 		Logger:       discardLogger(),
+		pullTimeout:  4 * time.Second,
 	})
 
 	require.Error(t, result.Err)

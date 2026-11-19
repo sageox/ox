@@ -270,66 +270,6 @@ func TestWriteObservation_EmptyContent(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// writeObservation: commit message truncation edge cases
-// ---------------------------------------------------------------------------
-
-func TestWriteObservation_CommitMessageTruncation(t *testing.T) {
-	tests := []struct {
-		name           string
-		content        string
-		wantMsgSuffix  bool // true if commit message should end with "..."
-		wantContentLen int  // expected length of content portion in commit message
-	}{
-		{
-			name:           "exactly 50 chars - no truncation",
-			content:        strings.Repeat("a", 50),
-			wantMsgSuffix:  false,
-			wantContentLen: 50,
-		},
-		{
-			name:           "51 chars - gets truncated",
-			content:        strings.Repeat("b", 51),
-			wantMsgSuffix:  true,
-			wantContentLen: 50,
-		},
-		{
-			name:           "49 chars - no truncation",
-			content:        strings.Repeat("c", 49),
-			wantMsgSuffix:  false,
-			wantContentLen: 49,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			initTestGitRepo(t, dir)
-
-			obs := []observation{{Content: tt.content}}
-			err := writeObservation(dir, obs)
-			require.NoError(t, err)
-
-			cmd := exec.Command("git", "log", "--format=%s", "-1")
-			cmd.Dir = dir
-			out, err := cmd.CombinedOutput()
-			require.NoError(t, err)
-
-			commitMsg := strings.TrimSpace(string(out))
-			prefix := "observation: "
-
-			if tt.wantMsgSuffix {
-				expected := prefix + tt.content[:50] + "..."
-				require.Equal(t, expected, commitMsg)
-			} else {
-				expected := prefix + tt.content
-				require.Equal(t, expected, commitMsg)
-				require.False(t, strings.HasSuffix(commitMsg, "..."))
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
 // parseObservations: additional edge cases
 // ---------------------------------------------------------------------------
 

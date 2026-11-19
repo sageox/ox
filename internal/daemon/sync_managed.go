@@ -68,6 +68,10 @@ type ManagedRepoPullOpts struct {
 	// Purely informational — pull --rebase handles it either way.
 	DetectDivergence bool
 
+	// pullTimeout overrides the pull subprocess budget in the timeout recovery
+	// test, which exercises a deliberately stalled process.
+	pullTimeout time.Duration
+
 	// ResolveRules maps path prefixes to conflict resolution modes.
 	// Empty means no auto-resolve — conflicts become errors.
 	// Most specific prefix wins: `resolve none data/proprietary/` overrides
@@ -261,6 +265,12 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 	// incident (COE: docs/coes/2026-09-02-daemon-git-sync-race-and-lfs-divergence.md).
 	var result ManagedRepoPullResult
 	var conflictErr error
+	var cancelPostPull context.CancelFunc
+	defer func() {
+		if cancelPostPull != nil {
+			cancelPostPull()
+		}
+	}()
 	// pullRan records whether fetchAndPullLocked actually executed, which the
 	// two ResolveAutostashConflicts call sites below cannot be told apart from
 	// conflictErr alone. It decides whether an unconfirmed conflictErr may
@@ -329,6 +339,7 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 		result = s.fetchAndPullLocked(ctx, opts, path, repoName, logger)
 		pullRan = true
 		result.AutoResolved = result.AutoResolved || recovered
+		ctx, cancelPostPull = s.localSyncCompletionContext(ctx)
 		// Git can return zero after a successful rebase whose autostash failed
 		// to apply. Check the index even after success, including auto-resolution.
 		if !gitutil.IsRebaseInProgress(path) {
@@ -351,6 +362,26 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 	// branch — the field must describe this cycle, not survive by luck.
 	result.PullRan = pullRan
 	return result
+}
+
+// A pull may finish after the cycle deadline. Give local reconciliation its
+// own bounded time, while still honoring explicit cancellation and shutdown.
+func (s *SyncScheduler) localSyncCompletionContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return ctx, func() {}
+	}
+	localCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	if s.ctx == nil {
+		return localCtx, cancel
+	}
+	stop := context.AfterFunc(s.ctx, cancel)
+	if s.ctx.Err() != nil {
+		cancel()
+	}
+	return localCtx, func() {
+		stop()
+		cancel()
+	}
 }
 
 // foreignLockWait bounds how long a pull waits for a git lock file that is not
@@ -959,7 +990,13 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 		pullArgs = append(pullArgs, gitutil.RenameDetectionFlags(ctx)...)
 		pullArgs = append(pullArgs, "pull", "--rebase", "--autostash", "--quiet")
 		ahead = gitutil.CommitsAhead(ctx, path)
+		budget := gitutil.PullBudget(ahead)
 		pullCtx, pullCancel := gitutil.PullContext(ctx, ahead, s.ctx)
+		if opts.pullTimeout > 0 {
+			pullCancel()
+			budget = opts.pullTimeout
+			pullCtx, pullCancel = context.WithTimeout(ctx, budget)
+		}
 		pullCmd := gitutil.NewNetworkCmd(pullCtx, pullArgs...)
 		pullOutput, pullErr = pullCmd.CombinedOutput()
 		pullTimedOut := gitutil.PullTimedOut(pullCtx, pullErr)
@@ -977,7 +1014,7 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 			// repo is never wedged going into the next cycle
 			if found, abortErr := gitutil.RecoverPullTimeoutInRebase(ctx, path, repoName, ahead, logger); found {
 				result := ManagedRepoPullResult{FetchHeadTime: fetchHeadTime, Diverged: diverged}
-				result.Err = fmt.Errorf("pull timed out after %s with %d commits ahead: %w", gitutil.PullBudget(ahead), ahead, pullErr)
+				result.Err = fmt.Errorf("pull timed out after %s with %d commits ahead: %w", budget, ahead, pullErr)
 				if abortErr != nil {
 					result.Issue = &DaemonIssue{
 						Type:            IssueTypeRebaseStuck,
