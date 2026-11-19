@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/secretguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -369,6 +371,53 @@ func TestPullTeamContext_RefusesCommitOutsideItsPublishScope(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, before, gitCmd(t, bare, "rev-parse", "main"))
 			require.Equal(t, "3", gitCmd(t, clone, "rev-list", "--count", "@{upstream}..HEAD"))
+		})
+	}
+}
+
+func TestTeamPublishScopeForeignAllowsNoPath(t *testing.T) {
+	require.False(t, foreignCommit.allowsPath("agents/skills/deploy/SKILL.md"))
+	require.False(t, foreignCommit.allowsPath(TeamObservationDir+"/2026-11-19/a.jsonl"))
+}
+
+// An observation commit must carry checkable content: a credential in its
+// message or a commit with no paths stays local.
+func TestValidateTeamPublishPush_RefusesUnverifiableObservationCommits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
+	for _, tt := range []struct {
+		name    string
+		commit  func(t *testing.T, clone string)
+		refused bool
+	}{
+		{name: "credential in the message", refused: true, commit: func(t *testing.T, clone string) {
+			rel := TeamObservationDir + "/2026-11-19/note.jsonl"
+			require.NoError(t, os.MkdirAll(filepath.Join(clone, filepath.Dir(rel)), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(clone, rel), []byte("{}\n"), 0o644))
+			gitCmd(t, clone, "add", rel)
+			gitCmd(t, clone, "commit", "-m", TeamObservationCommitPrefix+"record team memory", "-m", "AKIA"+"QWERTYUIOPASDFGH")
+		}},
+		{name: "empty commit", commit: func(t *testing.T, clone string) {
+			gitCmd(t, clone, "commit", "--allow-empty", "-m", TeamObservationCommitPrefix+"record team memory")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bare := t.TempDir()
+			gitCmd(t, bare, "init", "--bare", "-q")
+			clone := t.TempDir()
+			gitCmd(t, clone, "clone", "-q", bare, ".")
+			commitLocal(t, clone, "README.md", "init")
+			gitCmd(t, clone, "push", "-q", "-u", "origin", "HEAD")
+			tt.commit(t, clone)
+
+			_, err := ValidateTeamPublishPush(context.Background(), clone)
+			require.Error(t, err)
+			_, refused := errors.AsType[*secretguard.RefusedError](err)
+			require.Equal(t, tt.refused, refused, "%v", err)
+			if !tt.refused {
+				require.ErrorIs(t, err, ErrForeignCommitAhead)
+			}
 		})
 	}
 }

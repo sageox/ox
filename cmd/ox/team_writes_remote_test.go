@@ -89,3 +89,48 @@ func TestAddonsInstallReportsLocalCommitWhenRemoteUnavailable(t *testing.T) {
 	require.Contains(t, out, "not pushed")
 	require.Contains(t, out, "ox sync")
 }
+
+// A credential in an observation commit message must keep the commit local and
+// tell the writer to redact, never promise a retry that would push it.
+func TestPushTeamPublishAsksForRedactionWhenObservationMessageHasSecret(t *testing.T) {
+	withTeamPublishDaemon(t, true)
+	repo, team, bare, branch := stageTeamPublishRepoWithRemote(t)
+	rel := "memory/.observations/2026-11-19/note.jsonl"
+	require.NoError(t, os.MkdirAll(filepath.Join(team, filepath.Dir(rel)), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(team, rel), []byte(`{"headline":"ordinary"}`+"\n"), 0o644))
+	gitOutput(t, team, "add", "--sparse", rel)
+	gitOutput(t, team, "commit", "-q", "-m", "observation: record team memory", "-m", "AKIA"+"QWERTYUIOPASDFGH")
+	before := gitOutput(t, bare, "rev-parse", branch)
+
+	got := pushTeamPublish(repo, team)
+
+	require.False(t, got.pushed)
+	require.True(t, got.requiresRedaction, "reason: %s", got.reason)
+	require.False(t, got.retried)
+	require.Equal(t, before, gitOutput(t, bare, "rev-parse", branch), "a refused observation reached the remote")
+	require.Contains(t, teamWritePushGuidance(team, got), "Clean the sensitive content")
+}
+
+func TestTeamWritePushGuidance(t *testing.T) {
+	team := "/tmp/team context"
+	tests := []struct {
+		name   string
+		result teamPublishPush
+		want   string
+	}{
+		{name: "pushed", result: teamPublishPush{pushed: true}, want: "Pushed to the Team Context remote."},
+		{name: "needs redaction", result: teamPublishPush{reason: "refused", requiresRedaction: true},
+			want: "Committed locally. Clean the sensitive content from the unpushed history before retrying. refused"},
+		{name: "daemon retries", result: teamPublishPush{reason: "offline", retried: true},
+			want: "Committed locally, not pushed: offline. Run `ox sync` to retry now."},
+		{name: "human must push", result: teamPublishPush{reason: "foreign commit"},
+			want: "Committed locally, not pushed: foreign commit. After resolving this, run `git -C " + shellQuote(team) + " push`."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, teamWritePushGuidance(team, tt.result))
+		})
+	}
+	got := teamPublishGuidance([]string{"deploy"}, skillsChangeOutput{NotPushedReason: "refused", requiresRedaction: true})
+	require.Equal(t, "deploy committed locally. Clean the sensitive content from the unpushed history before retrying. refused", got)
+}
