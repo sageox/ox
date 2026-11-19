@@ -56,13 +56,21 @@ func murmurOutboxCacheDir(cleanTarget string) string {
 	return filepath.Join(paths.DaemonCacheDir(), "murmur-outbox", fmt.Sprintf("%x", sum))
 }
 
-// murmurOutboxDirs lists every queue a target may hold: murmurs queued before
-// the checkout was cloned sit in the cache fallback, so it is drained too.
+// murmurOutboxDirs includes cache queues written before cloning. Older
+// versions keyed that queue by the absolute alias if the checkout was absent.
 func murmurOutboxDirs(targetDir string) []string {
 	dir := MurmurOutboxDir(targetDir)
 	dirs := []string{dir}
-	if cache := murmurOutboxCacheDir(murmurOutboxTarget(targetDir)); cache != dir {
+	cache := murmurOutboxCacheDir(murmurOutboxTarget(targetDir))
+	if cache != dir {
 		dirs = append(dirs, cache)
+	}
+	legacyTarget, err := filepath.Abs(targetDir)
+	if err != nil {
+		legacyTarget = filepath.Clean(targetDir)
+	}
+	if legacy := murmurOutboxCacheDir(legacyTarget); legacy != cache {
+		dirs = append(dirs, legacy)
 	}
 	return dirs
 }

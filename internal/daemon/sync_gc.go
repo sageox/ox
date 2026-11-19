@@ -608,6 +608,7 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 // value specifically, not on gcSuccess or on their own pre-call wedge
 // sample.
 func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) (result gcResult, recovered bool) {
+	ws.Path = filepath.Clean(ws.Path)
 	newPath := ws.Path + ".new"
 	oldPath := ws.Path + ".old"
 	diffFile := ws.Path + ".gc-diff"

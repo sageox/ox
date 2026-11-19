@@ -422,3 +422,34 @@ func TestGCCarriesMurmurOutbox(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 }
+
+func TestMurmurOutboxReadsLegacyCacheAfterCloningThroughAlias(t *testing.T) {
+	isolateMurmurOutbox(t)
+	root := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	target := filepath.Join(alias, "ledger")
+	p := makeOutboxMurmur(t, target, "queued before clone", time.Now().UTC())
+	require.NoError(t, writeOutboxMurmur(murmurOutboxCacheDir(target), p))
+	require.Equal(t, murmurOutboxCacheDir(filepath.Join(root, "ledger")), MurmurOutboxDir(target))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "ledger", ".git"), 0o755))
+
+	entries, err := ReadOutboxMurmurs(target)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, p.RelPath, entries[0].payload.RelPath)
+}
+
+func TestBlueGreenGCSharesLockWithWorkspacePathWithTrailingSeparator(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := dir + ".gc-lock"
+	lock, err := acquireGCLock(lockPath)
+	require.NoError(t, err)
+	defer releaseGCLock(lock, lockPath)
+
+	scheduler := newPullTestScheduler(t, dir)
+	workspace := WorkspaceState{ID: "ledger", Type: WorkspaceTypeLedger, Path: dir + string(filepath.Separator), Exists: true}
+	require.Equal(t, gcSkippedLocked, scheduler.runBlueGreenGC(t.Context(), workspace))
+}
