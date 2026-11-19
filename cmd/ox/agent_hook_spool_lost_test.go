@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/sageox/ox/internal/sessionstream"
@@ -38,6 +39,9 @@ func decodeLiveGap(t *testing.T, line []byte) liveGapLine {
 func TestHookDeclaresABatchItCouldNotReadBackAsALiveGap(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("reason: root ignores file permissions, so the read-back failure cannot be simulated")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("reason: os.Chmod cannot remove read access on Windows, so the read-back failure cannot be simulated")
 	}
 	f := newLiveFixture(t, liveOpts{streaming: true})
 	f.turn("spooled")

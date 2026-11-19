@@ -26,3 +26,12 @@ func resetRulesCache() {
 	defer rulesCache.mu.Unlock()
 	rulesCache.delta, rulesCache.fetched = nil, time.Time{}
 }
+
+// SetSettleLostReadHookForTest runs f inside settleLost, after it reads the
+// spool-lost count and before it replaces it. Not safe for parallel tests.
+func SetSettleLostReadHookForTest(t testing.TB, f func()) {
+	t.Helper()
+	prev := settleLostReadHook
+	settleLostReadHook = f
+	t.Cleanup(func() { settleLostReadHook = prev })
+}

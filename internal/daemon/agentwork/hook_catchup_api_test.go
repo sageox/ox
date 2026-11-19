@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
@@ -64,4 +65,31 @@ func TestHookCaptureReportsABatchItCouldNotReadBack(t *testing.T) {
 	assert.Zero(t, spooled)
 	assert.Equal(t, []int64{after.Size() - before.Size()}, lost)
 	assert.Equal(t, []string{session.HookStatusSpoolLost}, statuses)
+}
+
+// A batch committed while paused is excluded from the live stream on purpose
+// (Spool skips paused batches). Failing to read it back loses nothing from the
+// stream, so declaring it would write a false spool_write_failed gap.
+func TestHookCaptureDeclaresNoLossForAPausedBatchItCouldNotReadBack(t *testing.T) {
+	skipAsRoot(t)
+	f := newCatchUpFixture(t)
+	require.NoError(t, session.UpdateRecordingStateForAgent(f.projectRoot, f.agentID, func(s *session.RecordingState) {
+		s.CommandRedactionVersion = 1
+		paused := time.Now()
+		s.SuspendedAt = &paused
+	}))
+	f.say("assistant", "said while paused")
+	require.NoError(t, os.Chmod(f.rawPath(), 0o200))
+	t.Cleanup(func() { _ = os.Chmod(f.rawPath(), 0o600) })
+	var lost []int64
+
+	capture, err := f.capture(session.HookCaptureOptions{
+		Spool:     func(*session.RecordingState, session.AppendedBatch) {},
+		SpoolLost: func(_ *session.RecordingState, n int64, _ error) { lost = append(lost, n) },
+	})
+
+	require.NoError(t, err)
+	assert.Greater(t, capture.ToOffset, capture.FromOffset, "precondition: the paused batch was committed")
+	assert.Empty(t, lost, "a paused batch is not part of the stream, so it is not a stream loss")
+	assert.NotEqual(t, session.HookStatusSpoolLost, capture.Status)
 }

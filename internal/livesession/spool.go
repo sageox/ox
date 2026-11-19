@@ -148,7 +148,7 @@ func declareLoss(ctx context.Context, dir string, n int64, cause error) error {
 	if st, err := readState(dir); err == nil {
 		log = log.With("session_id", st.SessionID, "conversation_id", st.ConversationID, "layer_id", st.LayerID)
 	}
-	if err := recordLost(dir, n); err != nil {
+	if err := recordLost(ctx, dir, n); err != nil {
 		log.ErrorContext(ctx, "live_session_spool_lost", "bytes", n, "recorded", false, "error", cause, "record_error", err)
 		return err
 	}
@@ -156,10 +156,31 @@ func declareLoss(ctx context.Context, dir string, n int64, cause error) error {
 	return nil
 }
 
+// lostLockWait bounds the wait on the spool-lost counter's lock. Its critical
+// sections are one small file read and write, so a long wait means a stuck
+// holder; failing then is logged as an unrecorded loss rather than hanging a hook.
+const lostLockWait = 5 * time.Second
+
+// settleLostReadHook, nil in production, lets a test act between settleLost
+// reading the count and replacing it: the window the lost-count lock closes.
+var settleLostReadHook func()
+
+// withLostLock serializes every read-modify-write of the spool-lost count.
+// recordLost and settleLost each read the count and write a new one; without
+// one lock a loss recorded between settleLost's read and its removal vanished
+// with no gap line. It is its own lock, not live.lock, so recording a loss
+// never waits behind a drain (Spool may run unlocked; see Spool).
+func withLostLock(ctx context.Context, dir string, fn func() error) error {
+	return fileutil.WithFileLockTimeout(ctx, filepath.Join(dir, spoolLostFileName), lostLockWait, fn)
+}
+
 // recordLost adds n to the spool-lost count.
-func recordLost(dir string, n int64) error {
-	prev, _ := readLost(dir)
-	if err := writeLost(dir, prev+n); err != nil {
+func recordLost(ctx context.Context, dir string, n int64) error {
+	err := withLostLock(ctx, dir, func() error {
+		prev, _ := readLost(dir)
+		return writeLost(dir, prev+n)
+	})
+	if err != nil {
 		return fmt.Errorf("record lost spool bytes: %w", err)
 	}
 	return nil
@@ -187,15 +208,20 @@ func readLost(dir string) (int64, bool) {
 // meanwhile (an unlocked Spool failing alongside this one) keeps the
 // difference for the next write. A count left behind is declared again, which
 // overstates the loss but never hides one.
-func settleLost(dir string, declared int64) error {
-	now, pending := readLost(dir)
-	switch {
-	case !pending:
-		return nil
-	case now > declared:
-		return writeLost(dir, now-declared)
-	}
-	return removeIfExists(filepath.Join(dir, spoolLostFileName))
+func settleLost(ctx context.Context, dir string, declared int64) error {
+	return withLostLock(ctx, dir, func() error {
+		now, pending := readLost(dir)
+		if settleLostReadHook != nil {
+			settleLostReadHook()
+		}
+		switch {
+		case !pending:
+			return nil
+		case now > declared:
+			return writeLost(dir, now-declared)
+		}
+		return removeIfExists(filepath.Join(dir, spoolLostFileName))
+	})
 }
 
 func appendToSpool(dir string, acked int64, batch []byte, opts SpoolOptions) (SpoolResult, error) {
@@ -230,7 +256,7 @@ func appendToSpool(dir string, acked int64, batch []byte, opts SpoolOptions) (Sp
 		return SpoolResult{}, fmt.Errorf("append spool: %w", err)
 	}
 	if hasLost {
-		if err := settleLost(dir, lost); err != nil {
+		if err := settleLost(context.Background(), dir, lost); err != nil {
 			// not a spool failure: the batch and its gap line are written
 			slog.Warn("live_session_spool_lost_settle_failed", "session", filepath.Base(dir), "bytes", lost, "error", err)
 		}

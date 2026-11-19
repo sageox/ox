@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -178,6 +179,9 @@ func skipAsRoot(t *testing.T) {
 	t.Helper()
 	if os.Geteuid() == 0 {
 		t.Skip("reason: root ignores file permissions, so the I/O failure cannot be simulated")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("reason: os.Chmod cannot remove read or write access on Windows, so the I/O failure cannot be simulated")
 	}
 }
 

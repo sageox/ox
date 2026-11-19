@@ -428,6 +428,12 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 		// after Close because raw.jsonl is append-only (see LastAppended)
 		batch, ok, err := writer.LastAppended()
 		switch {
+		case err != nil && writer.lastSuspended:
+			// committed while paused: the live stream deliberately excludes these
+			// bytes (Spool skips paused batches), so failing to read them back
+			// loses nothing from it. Declaring them would report a false gap.
+			slog.WarnContext(ctx, "live_session_batch_read_failed", "session_id", state.SessionID, "agent_id", agentID,
+				"session", filepath.Base(state.SessionPath), "bytes", writer.lastTo-writer.lastFrom, "paused", true, "declared", false, "error", err)
 		case err != nil:
 			// committed, but the live stream will never see it: the cursor is
 			// past these bytes. Declared, the stream shows a gap in their place.
