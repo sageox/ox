@@ -88,6 +88,7 @@ type Server struct {
 	hang             bool
 	latency          time.Duration
 	openDelay        time.Duration
+	edgeMethod       string
 	edgeBlocks       int
 	edgeType         string
 	edgeBody         string
@@ -161,7 +162,7 @@ func (s *Server) route(h func(r *http.Request, body []byte, call *Call) reply) h
 			s.record(call)
 			return
 		}
-		if typ, edge, ok := s.takeEdgeBlock(); ok {
+		if typ, edge, ok := s.takeEdgeBlock(r); ok {
 			// the edge answers before api-go sees anything: no auth, no JSON refusal
 			call.Status = http.StatusForbidden
 			s.record(call)

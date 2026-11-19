@@ -135,18 +135,19 @@ func (s *Server) SetDown(on bool) { s.set(func() { s.down = on }) }
 // Hang makes requests block until the client gives up (a stalled network).
 func (s *Server) Hang(on bool) { s.set(func() { s.hang = on }) }
 
-// BlockAtEdge answers the next n requests as the network edge in front of
-// api-go would: 403 with this content type and body, which is no
-// live-capture refusal (CloudFront's HTML page, the WAF's custom JSON).
-func (s *Server) BlockAtEdge(n int, contentType, body string) {
-	s.set(func() { s.edgeBlocks, s.edgeType, s.edgeBody = n, contentType, body })
+// BlockAtEdge answers the next n requests with this method ("" for any) as
+// the network edge in front of api-go would: 403 with this content type and
+// body, which is no live-capture refusal (CloudFront's HTML page, the WAF's
+// custom JSON).
+func (s *Server) BlockAtEdge(method string, n int, contentType, body string) {
+	s.set(func() { s.edgeMethod, s.edgeBlocks, s.edgeType, s.edgeBody = method, n, contentType, body })
 }
 
-// takeEdgeBlock spends one BlockAtEdge answer, if any are left.
-func (s *Server) takeEdgeBlock() (contentType, body string, ok bool) {
+// takeEdgeBlock spends one BlockAtEdge answer for r, if any are left.
+func (s *Server) takeEdgeBlock(r *http.Request) (contentType, body string, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.edgeBlocks <= 0 {
+	if s.edgeBlocks <= 0 || (s.edgeMethod != "" && s.edgeMethod != r.Method) {
 		return "", "", false
 	}
 	s.edgeBlocks--

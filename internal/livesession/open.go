@@ -96,6 +96,7 @@ const openLockWait = 5 * time.Second
 
 func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) (State, error) {
 	st, err := ReadState(dir)
+	onDisk := err == nil
 	pending := err == nil && st.Status == StatusPending
 	switch {
 	case pending: // promote: same layer, spool kept
@@ -128,6 +129,9 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 		return State{}, err
 	}
 	if _, err := c.RegisterKey(ctx, keyLabel()); err != nil {
+		if eerr := openEdgeBlocked(ctx, cfg, dir, st, onDisk, err, "register_key"); eerr != nil {
+			return State{}, eerr
+		}
 		return disableOnKeyConflict(dir, cfg.Endpoint, st, err)
 	}
 	if pending && !st.OpenSent {
@@ -151,11 +155,17 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 		return abortedWhileOpening(ctx, cfg, st)
 	}
 	if err != nil {
+		if eerr := openEdgeBlocked(ctx, cfg, dir, st, onDisk, err, "open"); eerr != nil {
+			return State{}, eerr
+		}
 		return openRefused(ctx, cfg, dir, st, err)
 	}
 	if pending {
 		st.Status = StatusStreaming
 	}
+	s := &session{cfg: cfg, dir: dir, st: st}
+	s.edgeCleared(ctx)
+	st = s.st
 	if err := writeState(dir, st); err != nil {
 		return State{}, err
 	}
@@ -174,6 +184,30 @@ func abortedWhileOpening(ctx context.Context, cfg Config, st State) (State, erro
 	}
 	cfg.Logger.InfoContext(ctx, "live_session_open_aborted", "session_id", st.SessionID, "conversation_id", st.ConversationID)
 	return st, nil
+}
+
+// openEdgeBlocked handles a key registration or open the network edge refused
+// (see edgeShape) as a drain does: logged once per streak without the body, and
+// for a stream already on disk (a pending one included) recorded in its state,
+// so status can say so while it waits to open. A fresh stream has no state to
+// record it in and leaves none. It returns nil for any other failure.
+func openEdgeBlocked(ctx context.Context, cfg Config, dir string, st State, onDisk bool, err error, during string) error {
+	var api *sessionstream.APIError
+	if !errors.As(err, &api) {
+		return nil
+	}
+	shape, ok := edgeShape(api)
+	if !ok {
+		return nil
+	}
+	s := &session{cfg: cfg, dir: dir, st: st}
+	eerr := s.edgeBlocked(ctx, api, shape)
+	if onDisk {
+		if werr := writeState(dir, s.st); werr != nil {
+			cfg.Logger.WarnContext(ctx, "live_session_state_write_failed", "during", "edge_blocked", "session_id", st.SessionID, "error", werr)
+		}
+	}
+	return fmt.Errorf("%s live session: %w (status %d, %s body)", during, eerr, api.Status, shape)
 }
 
 // openRefused records an open answered "deleted" or "closed" exactly as the

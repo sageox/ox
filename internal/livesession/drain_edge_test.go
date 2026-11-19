@@ -44,7 +44,7 @@ func TestDrainEdgeBlockedRetriesLogsOnceAndClears(t *testing.T) {
 			e := newEnv(t)
 			logs := e.captureLogs()
 			e.spool(lines(0, 3))
-			e.srv.BlockAtEdge(2, tt.contentType, tt.body)
+			e.srv.BlockAtEdge("", 2, tt.contentType, tt.body)
 
 			var since time.Time
 			for i := range 2 {
@@ -128,7 +128,7 @@ func TestDrainHalvesABatchThatKeepsStalling(t *testing.T) {
 		cause string
 	}{
 		{name: "timeout", cause: "timeout", stall: func(e *env) { e.srv.HangAppendsOver(hangOver) }},
-		{name: "edge blocked", cause: "edge_blocked", stall: func(e *env) { e.srv.BlockAtEdge(3, "text/html", cloudFrontPage) }},
+		{name: "edge blocked", cause: "edge_blocked", stall: func(e *env) { e.srv.BlockAtEdge("", 3, "text/html", cloudFrontPage) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

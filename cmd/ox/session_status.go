@@ -192,6 +192,18 @@ type sessionRecordingEntry struct {
 	DraftState       string `json:"draft_state,omitempty"`
 	DraftPublishedAt string `json:"draft_published_at,omitempty"`
 	ConversationURL  string `json:"conversation_url,omitempty"`
+
+	// LiveStreamNotice: as in sessionStatusOutput, per recording, so another
+	// recording starting never hides one whose stream the network edge blocks.
+	LiveStreamNotice string `json:"live_stream_notice,omitempty"`
+}
+
+// liveStreamNoticeFor is the recording's live-stream status line, or "".
+func liveStreamNoticeFor(s *session.RecordingState) string {
+	if s.SessionPath == "" {
+		return ""
+	}
+	return livesession.StreamNotice(s.SessionPath)
 }
 
 // buildSessionRecordingEntry maps a RecordingState into the multi-session
@@ -229,6 +241,7 @@ func buildSessionRecordingEntry(s *session.RecordingState, alive *bool, status s
 		entry.InheritedFromSession = s.InheritedFromSession
 	}
 	draftCtx.applyTo(s, &entry.TurnCount, &entry.DraftState, &entry.DraftPublishedAt, &entry.ConversationURL)
+	entry.LiveStreamNotice = liveStreamNoticeFor(s)
 	return entry
 }
 
@@ -400,10 +413,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		alive, status := agentLivenessFor(agentAlive, state.AgentID)
 
 		stalled, stalledReason := sessionStallStatus(state)
-		liveStreamNotice := ""
-		if state.SessionPath != "" {
-			liveStreamNotice = livesession.StreamNotice(state.SessionPath)
-		}
+		liveStreamNotice := liveStreamNoticeFor(state)
 		lastHookAtStr := ""
 		if state.LastHookAt != nil {
 			lastHookAtStr = state.LastHookAt.Format("2006-01-02T15:04:05Z07:00")
@@ -552,6 +562,9 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		}
 		if state.Branch != "" {
 			fmt.Printf("    Branch:  %s\n", state.Branch)
+		}
+		if notice := liveStreamNoticeFor(state); notice != "" {
+			fmt.Printf("    %s\n", cli.StyleWarning.Render(notice))
 		}
 	}
 
