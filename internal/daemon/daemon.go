@@ -1625,6 +1625,17 @@ func (d *Daemon) startWorkers() {
 		}()
 	}
 
+	// Hook-mode recordings read the transcript only when a hook fires. This
+	// sweep captures what the agent wrote after its last one (Claude Code can
+	// fire Stop before its final answer is on disk).
+	if d.sessionWatcher != nil && d.config.ProjectRoot != "" {
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			d.sessionWatcher.RunHookCatchUp(d.ctx, d.config.ProjectRoot)
+		}()
+	}
+
 	if d.codedb != nil {
 		go d.codedb.CheckFreshness(d.ctx)
 	}

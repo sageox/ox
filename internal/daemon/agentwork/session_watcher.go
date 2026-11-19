@@ -49,6 +49,9 @@ type SessionWatcherManager struct {
 	// liveSpool, when set, receives every batch committed to raw.jsonl so the
 	// daemon can stream it (ADR-247). It runs after the append succeeded.
 	liveSpool func(sessionDir string, batch session.AppendedBatch)
+	// hookMarks remembers, per hook-mode recording, a catch-up that found
+	// nothing to capture (see hookCatchUpMark).
+	hookMarks map[string]hookCatchUpMark
 }
 
 // SetLiveSpooler wires real-time session streaming into the tail watcher.
