@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -411,4 +412,211 @@ type testWriter struct{ t *testing.T }
 func (w testWriter) Write(p []byte) (int, error) {
 	w.t.Log(strings.TrimRight(string(p), "\n"))
 	return len(p), nil
+}
+
+// markStreamWithheld records what the drain records when it replaces a refused
+// batch with its gap line.
+func markStreamWithheld(t *testing.T, dir string) {
+	t.Helper()
+	path := filepath.Join(dir, "stream-state.json")
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var st map[string]any
+	require.NoError(t, json.Unmarshal(raw, &st))
+	st["secret_withheld"] = true
+	raw, err = json.Marshal(st)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, raw, 0o600))
+}
+
+// printStop writes the stop's output for result the way the stop command
+// does (JSON by default) and returns it.
+func (f *liveFixture) printStop(result *agentSessionResult) string {
+	f.t.Helper()
+	var err error
+	out := captureStdoutForPlanCLI(f.t, func() {
+		err = emitSessionStop(f.projectRoot, &agentinstance.Instance{AgentID: f.agentID}, f.state, "1s", result, nil, map[string]int64{})
+	})
+	require.NoError(f.t, err)
+	return out
+}
+
+// owedLater is what the next recording's start or stop in this project would
+// say about earlier streams.
+func (f *liveFixture) owedLater() []string {
+	return earlierLiveSecretWithheld(f.dir(), "ses_next")
+}
+
+// A batch the publication secret scan withheld from the live stream is told to
+// the person once, at stop, without saying what matched (F1, F10). It is no
+// upload failure: upload_warning stays for the Ledger push.
+func TestLiveStopTellsThePersonOnceThatTheStreamWithheldASecret(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: a full hook-recorded stop against the fake server")
+	}
+	f := newLiveFixture(t, liveOpts{streaming: true})
+	f.turn("before the secret")
+	f.openAndDrain()
+	markStreamWithheld(t, f.dir())
+
+	result := f.stopResult()
+
+	require.True(t, result.LiveSecretWithheld, "stop must learn the stream withheld a batch")
+	assert.False(t, result.EarlierLiveSecretWithheld)
+	assert.NotContains(t, result.UploadWarning, "credential", "a withheld live batch is not an upload failure")
+	output := sessionStopOutput{Guidance: sessionStopGuidance}
+	addLiveSecretWithheldNotice(&output, result)
+	assert.Equal(t, []string{liveSecretWithheldWarning}, output.DataWarnings, "said once")
+	assert.Contains(t, output.Guidance, liveSecretWithheldGuidance)
+	assert.NotEmpty(t, f.owedLater(), "owed until the stop's output is written")
+	assert.Equal(t, 1, strings.Count(f.printStop(result), liveSecretWithheldWarning))
+	assert.Empty(t, f.owedLater(), "said at this stop, so owed to no later one")
+}
+
+// A recording whose raw.jsonl keeps no entry returns from stop early. The
+// stream may still have withheld a batch. Failure prevented: the early return
+// skipped the read, and neither stop output said so.
+func TestLiveStopOfARecordingWithNoEntriesStillTellsTheWithheldNotice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: a full hook-recorded stop against the fake server")
+	}
+	f := newLiveFixture(t, liveOpts{streaming: true})
+	markStreamWithheld(t, f.dir())
+
+	result := f.stopResult()
+
+	require.Zero(t, result.EntryCount, "precondition: the early return for a recording with no entries")
+	assert.True(t, result.LiveSecretWithheld, "the persisted flag must be read before the early return")
+}
+
+// A stop whose close is left to the daemon cannot know whether the stream will
+// withhold anything: the scan runs when the daemon drains it. Failure
+// prevented: the stop sampled the flag before the daemon withheld a batch, and
+// nothing told the person afterwards. The notice stays owed until a later
+// start or stop prints it. Recovery and a stop that fails run the same
+// processing but print nothing, so processing alone must not use it up.
+func TestLiveStopWhoseCloseIsDeferredTellsTheWithheldNoticeLater(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: a stop whose close fails against a down fake server, then the daemon close")
+	}
+	f := newLiveFixture(t, liveOpts{streaming: true})
+	f.turn("before the outage")
+	f.openAndDrain()
+	f.srv.SetDown(true)
+	f.turn("deploy future_synthetic")
+
+	result := f.stopResult()
+
+	require.Equal(t, livesession.StatusClosing, f.liveState().Status, "precondition: the close was left to the daemon")
+	assert.False(t, result.LiveSecretWithheld, "nothing was withheld by the time stop returned")
+	assert.Empty(t, f.owedLater(), "not withheld yet: nothing to say")
+
+	// the daemon refreshes a detector for that credential, then finishes the close
+	catalog := []byte("[[rules]]\nid='future-format'\nregex='future_[a-z]+'\n")
+	require.NoError(t, os.WriteFile(livesession.SecretRulesPath(paths.DataDir()), catalog, 0o600))
+	f.srv.SetDown(false)
+	res, err := livesession.Close(context.Background(), liveConfig(f.projectRoot), f.dir(), "", 5*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, livesession.StatusClosed, res.Status)
+	require.True(t, f.liveState().SecretWithheld, "precondition: the daemon's close withheld the batch")
+
+	next := &session.RecordingState{SessionID: "ses_next", SessionPath: filepath.Join(filepath.Dir(f.dir()), "next-recording")}
+	for range 2 { // a recovery, then a stop that fails: processing with no output
+		var processed agentSessionResult
+		collectLiveSecretWithheldNotices(&processed, next)
+		require.True(t, processed.EarlierLiveSecretWithheld, "the next start or stop in this project must say it")
+	}
+	var said agentSessionResult
+	collectLiveSecretWithheldNotices(&said, next)
+	assert.False(t, said.LiveSecretWithheld)
+	output := sessionStopOutput{Guidance: sessionStopGuidance}
+	addLiveSecretWithheldNotice(&output, &said)
+	assert.Equal(t, []string{liveSecretWithheldEarlierWarning}, output.DataWarnings)
+	assert.Contains(t, output.Guidance, liveSecretWithheldEarlierGuidance)
+	assert.Equal(t, 1, strings.Count(f.printStop(&said), liveSecretWithheldEarlierWarning))
+	assert.Empty(t, f.owedLater(), "said once")
+}
+
+// A retried stop of a recording whose stream already owes the notice says it
+// once, as this recording's own. Failure prevented: the scan for earlier
+// recordings counted the current one too, and stop printed both warnings.
+func TestLiveStopNeverCountsItsOwnStreamAsAnEarlierOne(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: a full hook-recorded stop against the fake server")
+	}
+	f := newLiveFixture(t, liveOpts{streaming: true})
+	f.turn("before the secret")
+	f.openAndDrain()
+	markStreamWithheld(t, f.dir())
+	require.NoError(t, livesession.OweSecretWithheldNotice(f.dir())) // a first stop that failed after marking it
+
+	result := f.stopResult()
+
+	assert.True(t, result.LiveSecretWithheld)
+	assert.False(t, result.EarlierLiveSecretWithheld, "this recording is not an earlier one")
+	out := f.printStop(result)
+	assert.Equal(t, 1, strings.Count(out, liveSecretWithheldWarning))
+	assert.NotContains(t, out, liveSecretWithheldEarlierWarning)
+}
+
+// A /clear or SessionEnd hook stops a recording with no one to tell, so a
+// stream that withheld a batch owes its notice to the next start or stop.
+func TestLiveHookStopOwesTheWithheldNoticeToTheNextStartOrStop(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: a full hook-recorded stop against the fake server")
+	}
+	f := newLiveFixture(t, liveOpts{streaming: true})
+	f.turn("before the secret")
+	f.openAndDrain()
+	markStreamWithheld(t, f.dir())
+	orig := sendHookFinalizeIPC
+	sendHookFinalizeIPC = func(daemon.SessionFinalizeIPCPayload) error { return nil }
+	t.Cleanup(func() { sendHookFinalizeIPC = orig })
+
+	require.NoError(t, finalizeOrHoldOnHookStop(&HookContext{ProjectRoot: f.projectRoot}, f.state, "end"))
+
+	assert.Equal(t, []string{f.dir()}, f.owedLater(), "the next session start or stop must say it")
+}
+
+// A recording that starts in the folder an ended stream left (an automatic
+// start after /clear lands in the same minute) retires that stream. Failure
+// prevented: retiring removed an ended stream's files, its owed withheld
+// notice with them, before any start or stop had said it.
+func TestLiveRetiringAnEndedStreamKeepsItsOwedNotice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: a full hook-recorded stop against the fake server")
+	}
+	f := newLiveFixture(t, liveOpts{streaming: true})
+	f.turn("before the secret")
+	f.openAndDrain()
+	markStreamWithheld(t, f.dir())
+	orig := sendHookFinalizeIPC
+	sendHookFinalizeIPC = func(daemon.SessionFinalizeIPCPayload) error { return nil }
+	t.Cleanup(func() { sendHookFinalizeIPC = orig })
+	require.NoError(t, finalizeOrHoldOnHookStop(&HookContext{ProjectRoot: f.projectRoot}, f.state, "clear"))
+	require.Equal(t, livesession.StatusClosed, f.liveState().Status, "precondition: the hook's close ended the stream")
+
+	require.NoError(t, retirePreviousLiveStream(f.projectRoot, f.dir(), f.state.SessionID))
+
+	assert.NoFileExists(t, filepath.Join(f.dir(), "stream-state.json"), "the folder is free for the new recording")
+	owed := f.owedLater()
+	require.Len(t, owed, 1, "the owed notice must survive the retire")
+	assert.Equal(t, ".live-"+f.state.SessionID, filepath.Base(owed[0]))
+}
+
+func TestLiveSecretWithheldNoticeOnlyForAStreamThatWithheld(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result agentSessionResult
+	}{
+		{"nothing withheld", agentSessionResult{}},
+		{"deleted on SageOx says not shared at all", agentSessionResult{LiveSecretWithheld: true, DeletedOnServer: true, Held: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output := sessionStopOutput{Guidance: sessionStopGuidance}
+			addLiveSecretWithheldNotice(&output, &tc.result)
+			assert.Empty(t, output.DataWarnings)
+			assert.Equal(t, sessionStopGuidance, output.Guidance)
+		})
+	}
 }

@@ -76,6 +76,18 @@ type Result struct {
 	PRLinkMisses     []string // server-reported repair tasks: linked PRs missing the SageOx-Session trailer, pre-formatted for the agent
 	UploadMs         int64    // time spent on LFS upload + git push (ms)
 
+	// LiveSecretWithheld: the live stream left out a part of the session the
+	// publication secret scan refused (a secret_withheld gap). Stop says so once.
+	LiveSecretWithheld bool
+	// EarlierLiveSecretWithheld: an earlier recording's live stream in this
+	// project withheld a part and its person was not told yet (its close was
+	// left to the daemon, a hook stopped it, or its stop failed).
+	EarlierLiveSecretWithheld bool
+	// LiveNoticeDirs are the session folders whose owed withheld notices this
+	// stop gives. Their marks are cleared only once the stop's output is
+	// written, so a stop that fails or prints nothing leaves them owed.
+	LiveNoticeDirs []string
+
 	// Adapter-detected terminal-stop metadata, populated by the daemon's
 	// terminal-error handler when finalizing a session that the adapter
 	// declared dead (rate limit / quota / agent error). All fields are

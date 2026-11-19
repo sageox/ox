@@ -245,7 +245,7 @@ func TestASpoolLossIsDeclaredWhenTheLockDirectoryIsUnusable(t *testing.T) {
 func TestASpoolLossIsDeclaredWhenItsOperationWasCanceled(t *testing.T) {
 	e := newEnv(t)
 	e.spool(lines(0, 2))
-	releaseSpool := holdLock(t, filepath.Join(e.dir, "live.lock")) // so the canceled spool fails
+	releaseSpool := holdLock(t, livesession.LockTarget(e.dir))     // so the canceled spool fails
 	releaseLost := holdLock(t, filepath.Join(e.dir, "spool-lost")) // the previous loss-count lock
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
