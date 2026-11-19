@@ -225,7 +225,7 @@ func TestSessionRecoverFromCacheGuardsExistingLedgerSession(t *testing.T) {
 			afterDestination := snapshotDestination(t, filepath.Join(f.ledgerPath, "sessions"))
 
 			if tt.wantRefused {
-				require.ErrorIs(t, recoverErr, errRecoveryRefused)
+				require.ErrorIs(t, recoverErr, session.ErrLedgerSessionOverwrite)
 				assert.Empty(t, out, "a refused recovery must not emit success JSON")
 				assert.Equal(t, beforeDestination, afterDestination, "recovery must not touch the existing Ledger session")
 				assert.Equal(t, beforeHead, runGit(t, f.ledgerPath, "rev-parse", "HEAD"), "recovery must not commit")
@@ -280,7 +280,7 @@ func TestSessionRecoverFromCacheRefusesNonPlainSessionName(t *testing.T) {
 		recoverErr = runAgentSessionRecover(&agentinstance.Instance{AgentID: "OxTrav"})
 	})
 
-	require.ErrorIs(t, recoverErr, errRecoveryRefused)
+	require.ErrorIs(t, recoverErr, session.ErrLedgerSessionOverwrite)
 	assert.Empty(t, out)
 	assert.Equal(t, beforeHead, runGit(t, f.ledgerPath, "rev-parse", "HEAD"))
 	assert.NoFileExists(t, filepath.Join(f.ledgerPath, ledgerFileRaw), "nothing may be written at the Ledger root")
@@ -308,7 +308,7 @@ func TestSessionRecoverFromCacheRefusalSanitizesUntrustedMetadata(t *testing.T) 
 		recoverErr = runAgentSessionRecover(&agentinstance.Instance{AgentID: "OxRcvr"})
 	})
 
-	require.ErrorIs(t, recoverErr, errRecoveryRefused)
+	require.ErrorIs(t, recoverErr, session.ErrLedgerSessionOverwrite)
 	assert.NotContains(t, recoverErr.Error(), "\x1b", "the refusal must not carry a raw escape byte")
 	assert.Contains(t, recoverErr.Error(), "pwned", "the sanitized message should still name the offending key")
 	assert.Empty(t, out)
@@ -337,9 +337,9 @@ func TestCheckRecoveryDestinationSessionName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := checkRecoveryDestination(filepath.Join(t.TempDir(), "sessions", "absent"), tt.sessionName, collisionRecoveredID)
+			err := session.CheckLedgerSessionDestination(filepath.Join(t.TempDir(), "sessions", "absent"), tt.sessionName, collisionRecoveredID)
 			if tt.wantRefused {
-				require.ErrorIs(t, err, errRecoveryRefused)
+				require.ErrorIs(t, err, session.ErrLedgerSessionOverwrite)
 				return
 			}
 			require.NoError(t, err)
