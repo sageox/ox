@@ -200,14 +200,9 @@ func TestIsolationProbesFailClosed(t *testing.T) {
 if [ "$1" = "features" ]; then exit 2; fi`, "cannot list Codex features"},
 		{"a Codex whose feature list overflows", "codex", `if [ "$2" = "--help" ]; then echo "` + fullHelp + `"; exit; fi
 if [ "$1" = "features" ]; then ` + big + `; exit; fi`, "output exceeds limit"},
-		{"a Codex that never lists its features", "codex", `if [ "$2" = "--help" ]; then echo "` + fullHelp + `"; exit; fi
-if [ "$1" = "features" ]; then exec sleep 5; fi`, "did not answer within"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			prior := codexProbeTimeout
-			codexProbeTimeout = 300 * time.Millisecond
-			t.Cleanup(func() { codexProbeTimeout = prior })
 			prompted := filepath.Join(t.TempDir(), "prompted")
 			script := fakeCLI(t, tt.cli, tt.body+"\ntouch \""+prompted+"\"\n")
 			// A probe that failed proves nothing about the CLI, so the daemon's
@@ -226,6 +221,26 @@ if [ "$1" = "features" ]; then exec sleep 5; fi`, "did not answer within"},
 				assert.NoFileExists(t, prompted, "no prompt-bearing run after a failed probe")
 			}
 		})
+	}
+}
+
+func TestIsolationProbeTimeoutFailsClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits for subprocess probe timeout")
+	}
+	prior := codexProbeTimeout
+	codexProbeTimeout = 2 * time.Second
+	t.Cleanup(func() { codexProbeTimeout = prior })
+	const fullHelp = "--sandbox --ephemeral --color --config --ignore-user-config --ignore-rules --skip-git-repo-check --disable"
+	prompted := filepath.Join(t.TempDir(), "prompted")
+	script := fakeCLI(t, "codex", `if [ "$2" = "--help" ]; then echo "`+fullHelp+`"; exit; fi
+if [ "$1" = "features" ]; then exec sleep 30; fi
+touch "`+prompted+`"`)
+	r := &CodexRunner{binaryPath: script, logger: slog.Default()}
+	for _, req := range []RunRequest{{Prompt: "p", Isolated: true}, {Prompt: "p", IsolateIfSupported: true}} {
+		_, err := r.Run(t.Context(), req)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.NoFileExists(t, prompted, "no prompt-bearing run after a failed probe")
 	}
 }
 
