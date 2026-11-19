@@ -175,7 +175,7 @@ func TestUpload_NeverPublishesOverADifferentSession(t *testing.T) {
 
 	err = sessionUploadCmd.RunE(sessionUploadCmd, []string{name})
 
-	require.ErrorIs(t, err, errRecoveryRefused)
+	require.ErrorIs(t, err, session.ErrLedgerSessionOverwrite)
 	assert.Equal(t, remoteBefore, runGit(t, f.barePath, "rev-parse", "HEAD"), "the published session is untouched on the remote")
 	rawAfter, err := os.ReadFile(filepath.Join(ledgerDir, ledgerFileRaw))
 	require.NoError(t, err)
