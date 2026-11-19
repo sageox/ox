@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -127,6 +129,9 @@ func (h *startupPullGateHandler) Handle(ctx context.Context, record slog.Record)
 // real startup callback before its git work and prove Start cannot return until
 // that callback is released, without guessing when another goroutine will run.
 func TestSyncScheduler_StartJoinsCanceledStartupTeamSync(t *testing.T) {
+	// Keep the startup credential lookup off the host keyring. Its DBus
+	// reader is real I/O and would keep the synctest clock from advancing.
+	t.Setenv("OX_GIT_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "git-credentials.json"))
 	scheduler, _, _ := newTeamBudgetScheduler(t, 1)
 	scheduler.config.SyncIntervalRead = time.Hour
 	scheduler.config.TeamContextSyncInterval = time.Hour
@@ -187,4 +192,270 @@ func TestSyncScheduler_StartJoinsCanceledStartupTeamSync(t *testing.T) {
 			t.Fatal("Start did not return after its startup team sync completed")
 		}
 	})
+}
+
+func TestSyncScheduler_WatcherPullContinuesDuringPeriodicTeamSync(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits for periodic Team Context sync")
+	}
+	t.Setenv("OX_GIT_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "git-credentials.json"))
+	scheduler, _, _ := newTeamBudgetScheduler(t, 1)
+	_, ledger, writer := setupRacingLedger(t)
+	scheduler.config.LedgerPath = ledger
+	scheduler.config.SyncIntervalRead = time.Hour
+	scheduler.config.TeamContextSyncInterval = 6 * time.Second
+	scheduler.config.VersionCheckInterval = 0
+	scheduler.config.GCCheckInterval = 0
+	scheduler.config.CodeDBCheckInterval = 0
+	scheduler.config.LedgerCheckInterval = 0
+	scheduler.config.GitHubSyncInterval = 0
+	t.Setenv("OX_KB_DISABLE", "1")
+	advanceRemote(t, writer, 0)
+
+	var calls atomic.Int32
+	pullStarted, pullCanceled, releasePull := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	overrideTeamBudgets(t, time.Minute, time.Minute, func(ctx context.Context, _ string) (teamPullOutcome, error) {
+		if calls.Add(1) == 2 {
+			close(pullStarted)
+			<-ctx.Done()
+			close(pullCanceled)
+			<-releasePull
+		}
+		return teamPullOutcome{}, ctx.Err()
+	})
+
+	// Wait for the startup pull to finish before triggering the watcher.
+	// The watcher must advance the Ledger while the team pull is blocked.
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() {
+		cancel()
+		releaseOnce.Do(func() { close(releasePull) })
+		awaitStartupCompletion(t, done)
+	})
+	go func() {
+		scheduler.Start(ctx)
+		close(done)
+	}()
+	select {
+	case <-pullStarted:
+	case <-time.After(12 * time.Second):
+		t.Fatal("periodic team pull did not start after the startup pull")
+	}
+	fetchHead := filepath.Join(ledger, ".git", "FETCH_HEAD")
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(fetchHead)
+		scheduler.mu.Lock()
+		defer scheduler.mu.Unlock()
+		return err == nil && !scheduler.pullInProgress
+	}, 2*time.Second, 10*time.Millisecond, "initial ledger fetch must finish")
+	advanceRemote(t, writer, 1)
+	require.NoError(t, os.Remove(fetchHead), "allow the watcher pull to fetch immediately")
+	scheduler.TriggerSync()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(ledger, "c001.txt"))
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond, "a slow Team Context pull blocked the Ledger watcher sync")
+	require.EqualValues(t, 2, calls.Load())
+	cancel()
+	awaitStartupCompletion(t, pullCanceled)
+	releaseOnce.Do(func() { close(releasePull) })
+	awaitStartupCompletion(t, done)
+}
+
+// The periodic cycle runs off the scheduler loop, so Start must join it on
+// shutdown just like the startup pull. Virtual time makes the join observable.
+func TestSyncScheduler_StartJoinsCanceledPeriodicTeamSync(t *testing.T) {
+	t.Setenv("OX_GIT_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "git-credentials.json"))
+	scheduler, _, _ := newTeamBudgetScheduler(t, 1)
+	scheduler.config.SyncIntervalRead = time.Hour
+	scheduler.config.TeamContextSyncInterval = time.Minute
+	scheduler.config.VersionCheckInterval = 0
+	scheduler.config.GCCheckInterval = 0
+	scheduler.config.CodeDBCheckInterval = 0
+	scheduler.config.LedgerCheckInterval = 0
+	scheduler.config.GitHubSyncInterval = 0
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		started, canceled, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		var calls atomic.Int32
+		overrideTeamBudgets(t, time.Hour, time.Hour, func(ctx context.Context, _ string) (teamPullOutcome, error) {
+			if calls.Add(1) == 2 {
+				close(started)
+				<-ctx.Done()
+				close(canceled)
+				<-release
+			}
+			return teamPullOutcome{}, ctx.Err()
+		})
+		scheduler.triggerChan = make(chan struct{}, 1)
+		t.Cleanup(func() {
+			cancel()
+			releaseOnce.Do(func() { close(release) })
+			synctest.Wait()
+		})
+		go func() {
+			scheduler.Start(ctx)
+			close(done)
+		}()
+		select {
+		case <-started:
+		case <-time.After(10 * time.Minute):
+			t.Fatal("scheduler never ran its periodic team sync")
+		}
+		cancel()
+		<-canceled
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("Start returned while its periodic team sync was still running")
+		default:
+		}
+		releaseOnce.Do(func() { close(release) })
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("Start did not return after its periodic team sync completed")
+		}
+	})
+}
+
+func TestSyncScheduler_WatcherPullContinuesDuringTeamGC(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits for a Team Context reclone")
+	}
+	const manifest = "version 1\ninclude .sageox/\ninclude SOUL.md\n"
+	bare, teamPath, scheduler := setupClonedTeamContext(t, manifest, nil)
+	_, ledger, writer := setupRacingLedger(t)
+	advanceRemote(t, writer, 0)
+	scheduler.config.LedgerPath = ledger
+	scheduler.config.SyncIntervalRead = time.Hour
+	scheduler.config.TeamContextSyncInterval = 0
+	scheduler.config.VersionCheckInterval = 0
+	scheduler.config.GCCheckInterval = 100 * time.Millisecond
+	scheduler.config.CodeDBCheckInterval = 0
+	scheduler.config.LedgerCheckInterval = 0
+	scheduler.config.GitHubSyncInterval = 0
+	t.Setenv("OX_KB_DISABLE", "1")
+
+	registry := scheduler.WorkspaceRegistry()
+	registry.mu.Lock()
+	registry.workspaces["team_gc"] = &WorkspaceState{
+		ID: "team_gc", Type: WorkspaceTypeTeamContext, Path: teamPath, CloneURL: "file://" + bare, Exists: true,
+	}
+	primeConfigCacheLocked(registry)
+	registry.mu.Unlock()
+
+	swapStarted, releaseSwap := make(chan struct{}), make(chan struct{})
+	var swapOnce sync.Once
+	scheduler.gcSwapWindowTestHook = func() {
+		swapOnce.Do(func() { close(swapStarted) })
+		<-releaseSwap
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		close(releaseSwap)
+		awaitStartupCompletion(t, done)
+	})
+	go func() {
+		defer close(done)
+		scheduler.Start(ctx)
+	}()
+	select {
+	case <-swapStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("periodic Team Context GC did not reach the checkout swap")
+	}
+	fetchHead := filepath.Join(ledger, ".git", "FETCH_HEAD")
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(fetchHead)
+		scheduler.mu.Lock()
+		defer scheduler.mu.Unlock()
+		return err == nil && !scheduler.pullInProgress
+	}, 3*time.Second, 10*time.Millisecond, "initial Ledger fetch must finish")
+	advanceRemote(t, writer, 1)
+	require.NoError(t, os.Remove(fetchHead))
+	scheduler.TriggerSync()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(ledger, "c001.txt"))
+		return err == nil
+	}, 3*time.Second, 10*time.Millisecond, "Team Context GC blocked the Ledger watcher sync")
+}
+
+func TestSyncScheduler_WatcherWaitsForLedgerGC(t *testing.T) {
+	const manifest = "version 1\ninclude .sageox/\ninclude SOUL.md\n"
+	teamRemote, teamPath, scheduler := setupClonedTeamContext(t, manifest, nil)
+	require.NoError(t, os.Rename(teamPath, teamPath+".old"))
+	bare, ledger, writer := setupRacingLedger(t)
+	require.NoError(t, os.Mkdir(filepath.Join(writer, "sessions"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(writer, "sessions", ".gitkeep"), nil, 0o644))
+	advanceRemote(t, writer, 0)
+	scheduler.config.LedgerPath = ledger
+	scheduler.config.SyncIntervalRead = time.Hour
+	scheduler.config.TeamContextSyncInterval = 0
+	scheduler.config.VersionCheckInterval = 0
+	scheduler.config.GCCheckInterval = 100 * time.Millisecond
+	scheduler.config.CodeDBCheckInterval = 0
+	scheduler.config.LedgerCheckInterval = 0
+	scheduler.config.GitHubSyncInterval = 0
+	t.Setenv("OX_KB_DISABLE", "1")
+
+	registry := scheduler.WorkspaceRegistry()
+	registry.mu.Lock()
+	registry.ledger = &WorkspaceState{
+		ID: "ledger", Type: WorkspaceTypeLedger, Path: ledger, CloneURL: "file://" + bare, Exists: true,
+	}
+	registry.workspaces["ledger"] = registry.ledger
+	registry.workspaces["team_gc"] = &WorkspaceState{
+		ID: "team_gc", Type: WorkspaceTypeTeamContext, Path: teamPath, CloneURL: "file://" + teamRemote, Exists: true,
+	}
+	primeConfigCacheLocked(registry)
+	registry.mu.Unlock()
+
+	releaseSwap := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseSwap) }) }
+	scheduler.gcSwapWindowTestHook = func() {
+		<-releaseSwap
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		release()
+		awaitStartupCompletion(t, done)
+	})
+	go func() {
+		defer close(done)
+		scheduler.Start(ctx)
+	}()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(ledger + ".gc-swap-lock")
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond, "periodic Ledger GC did not reach the swap")
+
+	// The interrupted Team Context checkout must be restored while the
+	// Ledger swap is still blocked.
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(teamPath, "SOUL.md"))
+		return err == nil
+	}, 3*time.Second, 10*time.Millisecond, "Ledger GC blocked interrupted Team Context recovery")
+
+	advanceRemote(t, writer, 1)
+	scheduler.TriggerSync()
+	require.Never(t, func() bool {
+		return len(scheduler.triggerChan) == 0
+	}, 250*time.Millisecond, 5*time.Millisecond, "watcher sync entered the Ledger during its swap")
+
+	release()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(ledger, "c001.txt"))
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond, "queued watcher sync must run after the swap")
 }

@@ -10,10 +10,6 @@ import (
 	"time"
 )
 
-// gitWaitDelay bounds how long Wait lingers after cancellation for the process
-// group to exit and its output pipes to drain before Go force-kills the leader.
-const gitWaitDelay = 2 * time.Second
-
 // gitKillGrace is how long a SIGTERMed group gets to clean up (git removes its
 // own lock files on SIGTERM) before SIGKILL.
 const gitKillGrace = time.Second
@@ -27,7 +23,6 @@ const gitKillGrace = time.Second
 // fail with exit 128.
 func setProcessGroupKill(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = gitWaitDelay
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return os.ErrProcessDone
