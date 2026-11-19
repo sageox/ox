@@ -17,4 +17,16 @@
 //	live.lock          advisory lock taken by whoever appends to or drains the spool
 //	close-requested    stop asked for the close; kept until the stream ends, so
 //	                   a close that could not take live.lock is never lost
+//	delete-requested   abort recorded (or completed) the server-side delete;
+//	                   while it exists the session reads as deleted
+//	spool-lost         bytes of batches Spool could not write, until the next
+//	                   write or the close declares them as a gap line
+//
+// None of them may be copied into the Ledger (IsLocalFile). Abort's
+// pending-deletes queue lives outside the session folder, in the data dir, so
+// removing the folder never loses a delete.
+//
+// Every batch and close summary passes the publication secret scan before it
+// leaves the machine (checkPublication), exactly as Ledger and LFS
+// publication scan session content.
 package livesession

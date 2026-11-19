@@ -34,8 +34,9 @@ type OpenParams struct {
 // writes the stream state (status streaming). Calling it again for an already
 // open session re-registers and re-opens on the same layer (both idempotent),
 // keeping the acknowledged offset. A key conflict writes status disabled and returns
-// ErrKeyConflict; any other failure writes nothing, so the session simply does
-// not stream.
+// ErrKeyConflict; an open answered "deleted" or "closed" records that final
+// status; any other failure leaves the state as it was (a fresh session then
+// has none and simply does not stream).
 func Open(ctx context.Context, cfg Config, dir string, p OpenParams) (State, error) {
 	cfg, err := cfg.withDefaults()
 	if err != nil {
@@ -90,9 +91,9 @@ const openLockWait = 5 * time.Second
 
 func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) (State, error) {
 	st, err := ReadState(dir)
+	pending := err == nil && st.Status == StatusPending
 	switch {
-	case err == nil && st.Status == StatusPending: // promote: same layer, spool kept
-		st.Status = StatusStreaming
+	case pending: // promote: same layer, spool kept
 	case err == nil && !st.active():
 		return st, nil // deleted, closed or disabled stay that way
 	case err == nil: // resume on the same layer, keeping acked
@@ -116,14 +117,67 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 	if _, err := c.RegisterKey(ctx, keyLabel()); err != nil {
 		return disableOnKeyConflict(dir, cfg.Endpoint, st, err)
 	}
-	if _, err := c.Open(ctx, cnv, openRequest(st)); err != nil {
-		return State{}, fmt.Errorf("open live session: %w", err)
+	if pending && !st.OpenSent {
+		// the server may create the conversation even if its reply is lost;
+		// abort deletes only what it knows may exist (C2)
+		st.OpenSent = true
+		if err := writeState(dir, st); err != nil {
+			return State{}, err
+		}
+	}
+	// Abort writes delete-requested before it reads OpenSent; this checks it
+	// after OpenSent is on disk, so one of the two always sees the other.
+	if deleteRequested(dir) {
+		st.Status = StatusDeleted
+		return st, nil
+	}
+	_, err = c.Open(ctx, cnv, openRequest(st))
+	if deleteRequested(dir) {
+		return abortedWhileOpening(ctx, cfg, st)
+	}
+	if err != nil {
+		return openRefused(ctx, cfg, dir, st, err)
+	}
+	if pending {
+		st.Status = StatusStreaming
 	}
 	if err := writeState(dir, st); err != nil {
 		return State{}, err
 	}
 	cfg.Logger.InfoContext(ctx, "live_session_open", "session_id", st.SessionID, "conversation_id", st.ConversationID, "layer_id", st.LayerID, "acked", st.Acked)
 	return st, nil
+}
+
+// abortedWhileOpening queues the delete of a conversation this open may have
+// created after abort began. Abort's own delete can reach the server before the
+// open does, see nothing to delete, and take that as done.
+func abortedWhileOpening(ctx context.Context, cfg Config, st State) (State, error) {
+	st.Status = StatusDeleted
+	p := PendingDelete{Endpoint: st.Endpoint, ConversationID: st.ConversationID, EnqueuedAt: time.Now().UTC()}
+	if err := enqueueDelete(context.WithoutCancel(ctx), cfg, p); err != nil {
+		return st, fmt.Errorf("queue delete of a session aborted while it opened: %w", err)
+	}
+	cfg.Logger.InfoContext(ctx, "live_session_open_aborted", "session_id", st.SessionID, "conversation_id", st.ConversationID)
+	return st, nil
+}
+
+// openRefused records an open answered "deleted" or "closed" exactly as the
+// same answer to an append is recorded, so a session someone deleted while its
+// open reply was lost is held, not published. Any other failure leaves the
+// state as it was for a later attempt.
+func openRefused(ctx context.Context, cfg Config, dir string, st State, err error) (State, error) {
+	var api *sessionstream.APIError
+	if errors.As(err, &api) {
+		s := &session{cfg: cfg, dir: dir, st: st}
+		done, terr := s.terminal(ctx, api)
+		if terr != nil {
+			return State{}, terr
+		}
+		if done {
+			return s.st, nil
+		}
+	}
+	return State{}, fmt.Errorf("open live session: %w", err)
 }
 
 // disableOnKeyConflict records a disabled session for a 409 on key registration.

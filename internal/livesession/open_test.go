@@ -9,6 +9,7 @@ import (
 
 	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/livesession/livesessiontest"
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/sessionid"
 )
 
@@ -77,5 +78,36 @@ func TestOpenFailureLeavesNoLiveState(t *testing.T) {
 	}
 	if _, err := livesession.ReadState(dir); !errors.Is(err, livesession.ErrNotStreaming) {
 		t.Fatalf("failed open left state behind: %v", err)
+	}
+}
+
+// An open whose reply was lost leaves the session pending. If someone then
+// deletes it on SageOx, the next open (stop's, or the daemon's) is answered
+// 410: that must hold the session like the same answer to an append, never
+// return a plain error that stop logs before publishing to the Ledger.
+func TestOpenAnsweredDeletedHoldsTheSession(t *testing.T) {
+	srv, cfg, dir, p := prepared(t)
+	if _, err := livesession.Spool(t.Context(), dir, lines(0, 2), livesession.SpoolOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	srv.DropOpenReply(1)
+	if _, err := livesession.Open(t.Context(), cfg, dir, p); err == nil {
+		t.Fatal("open succeeded though its reply was lost")
+	}
+	st, _ := livesession.ReadState(dir)
+	srv.DeleteSession(st.ConversationID)
+
+	res, err := livesession.Close(t.Context(), cfg, dir, "", testBudget) // session stop
+	if err != nil || !res.Done || res.Status != livesession.StatusDeleted {
+		t.Fatalf("stop after a delete: %+v %v, want the stream settled as deleted", res, err)
+	}
+	if !livesession.WasDeletedOnServer(dir) {
+		t.Fatal("the stream state does not record the server-side delete")
+	}
+	if hold, err := session.ReadHoldMarker(dir); err != nil || hold.Reason != session.HoldDeletedOnServer {
+		t.Fatalf("hold = %+v %v, want %q", hold, err, session.HoldDeletedOnServer)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "spool.jsonl")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("spool kept after the delete: %v", err)
 	}
 }

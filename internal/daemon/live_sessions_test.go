@@ -187,7 +187,7 @@ func TestLiveBackoffSpacesRetriesAndCaps(t *testing.T) {
 		e.live.Tick(t.Context())
 		e.live.Wait()
 		e.live.mu.Lock()
-		delay = e.live.backoff[e.dir].delay
+		delay = e.live.backoff[canonicalDir(e.dir)].delay
 		e.live.mu.Unlock()
 	}
 	if delay != liveBackoffCap {
@@ -226,12 +226,14 @@ func TestLiveDeliversAfterALongOutageWithinTheVisibilityBudget(t *testing.T) {
 			for {
 				e.live.Tick(t.Context())
 				e.live.Wait()
-				if st := e.state(); st.Status == livesession.StatusStreaming && st.Acked > 0 {
-					break
-				}
+				// bound every tick, including the one that delivers: checked after
+				// success, a delivery that came too late still passed
 				if waited := e.clock.Sub(back); waited > reconnectNoticeBudget {
 					t.Fatalf("after a %s outage the backlog was still undelivered %s after the server came back (budget %s)",
 						outage, waited, reconnectNoticeBudget)
+				}
+				if st := e.state(); st.Status == livesession.StatusStreaming && st.Acked > 0 {
+					break
 				}
 				e.clock = e.clock.Add(liveTickInterval)
 			}

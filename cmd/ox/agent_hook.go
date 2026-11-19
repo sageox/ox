@@ -462,10 +462,6 @@ func handleEnd(ctx *HookContext) error {
 	// the stop above drains on its own; the daemon reads only raw.jsonl
 	drainTranscriptAtEnd(ctx, agentID, state)
 
-	// real-time streaming: finish the live stream within a short bound; a stream
-	// left closing is finished by the daemon's tick
-	liveSessionClose(ctx.ProjectRoot, state.SessionPath, "", liveEndCloseBudget)
-
 	// a held stop saves the manual choice with StoppedAt (see stopSessionForClear)
 	held := stopHoldsSession(ctx.ProjectRoot, state)
 	now := time.Now()
@@ -967,7 +963,7 @@ func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expected
 		recordHookStatus("append-failed")
 		return nil // non-fatal
 	}
-	liveSessionSpool(state.SessionPath, writer)
+	liveSessionSpoolWriter(ctx.ProjectRoot, state, writer)
 
 	now := time.Now().UTC()
 	_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {

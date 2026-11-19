@@ -19,6 +19,12 @@ func (s *Server) latencyValue() time.Duration {
 	return s.latency
 }
 
+func (s *Server) openDelayValue() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.openDelay
+}
+
 func (s *Server) enter() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -51,6 +57,64 @@ func (s *Server) ForceResync(storedThrough int64) { s.set(func() { s.forceResync
 // RefuseOpen answers the next n open (PUT) requests 503, after the key registered.
 func (s *Server) RefuseOpen(n int) { s.set(func() { s.refuseOpen = n }) }
 
+// DropOpenReply opens the next n sessions, then closes the connection without
+// a reply: the conversation exists, the client believes the open failed.
+func (s *Server) DropOpenReply(n int) { s.set(func() { s.dropOpenReply = n }) }
+
+// RefuseDelete answers every delete 403 forbidden (action stop) until cleared.
+func (s *Server) RefuseDelete(on bool) { s.set(func() { s.refuseDelete = on }) }
+
+// RefuseNextAppend answers the next append with this refusal, whatever it is;
+// an empty action models a body this client cannot classify.
+func (s *Server) RefuseNextAppend(status int, reason string, action sessionstream.Action) {
+	s.set(func() { x := refusal(status, reason, action, nil); s.appendRefusal = &x })
+}
+
+// RefuseNextClose answers the next close with this refusal, whatever it is.
+// stored is the refusal's stored_through; nil leaves it out.
+func (s *Server) RefuseNextClose(status int, reason string, action sessionstream.Action, stored *int64) {
+	s.set(func() { x := refusal(status, reason, action, stored); s.closeRefusal = &x })
+}
+
+// LoseStoredBytes erases every stored object of cnv and rewinds its layers to
+// empty, as a storage restore from before the session would: the server now
+// stands behind every ack it gave. Later appends and closes answer what api-go
+// answers for an empty layer (close: resync from 0).
+func (s *Server) LoseStoredBytes(cnv string) {
+	s.set(func() {
+		c := s.convs[cnv]
+		if c == nil {
+			return
+		}
+		for id, l := range c.layers {
+			if prefix, err := sessionstream.BytesPrefix(TeamID, cnv, id); err == nil {
+				s.Store.DeletePrefix(prefix)
+			}
+			l.cur = sessionstream.NewCursor()
+		}
+	})
+}
+
+// LoseProgressRow rewinds cnv's layer rows to empty while every stored object
+// survives (a Postgres restore or reset; ADR-247 keeps the row rebuildable).
+// The next append past the row or close claiming more rebuilds the cursor
+// from the objects, as api-go does, so the client sees nothing but latency.
+func (s *Server) LoseProgressRow(cnv string) {
+	s.set(func() {
+		if c := s.convs[cnv]; c != nil {
+			for _, l := range c.layers {
+				l.cur = sessionstream.NewCursor()
+			}
+		}
+	})
+}
+
+// DeferRecovery makes every cursor rebuild unable to prove anything (the
+// per-layer budget is spent, or the listing failed) until cleared. Requests
+// that need one answer 503 unavailable, action retry, with retry_after_ms:
+// the client must back off and keep its ack, never resend from behind it.
+func (s *Server) DeferRecovery(on bool) { s.set(func() { s.deferRecovery = on }) }
+
 // RateLimit answers the next n appends 429 with retry_after_ms.
 func (s *Server) RateLimit(n int, retryAfterMS int64) {
 	s.set(func() { s.rateLimit, s.rateLimitMS = n, retryAfterMS })
@@ -68,6 +132,10 @@ func (s *Server) SetDown(on bool) { s.set(func() { s.down = on }) }
 
 // Hang makes requests block until the client gives up (a stalled network).
 func (s *Server) Hang(on bool) { s.set(func() { s.hang = on }) }
+
+// DelayOpen delays only open (PUT) requests, so a request sent after an open
+// can reach the server before it.
+func (s *Server) DelayOpen(d time.Duration) { s.set(func() { s.openDelay = d }) }
 
 // Latency delays every request, so concurrent callers overlap in time.
 func (s *Server) Latency(d time.Duration) { s.set(func() { s.latency = d }) }

@@ -326,6 +326,9 @@ func TestLiveStepNeverEndsSilently(t *testing.T) {
 // budget, and nothing remembered that stop had happened. The daemon kept the
 // stream open forever.
 func TestLiveCloseThatLostTheLockStillHappens(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits out a 1.5 s server response so a drain holds the session")
+	}
 	e := newLiveEnv(t)
 	for i := range 4 {
 		e.spool(lineN(i))

@@ -22,7 +22,28 @@ const (
 	// longer than stop can wait, and a drain persisting stream-state.json would
 	// overwrite a request written into it.
 	closeRequestFileName = "close-requested"
+	// deleteRequestFileName marks that abort let the session go. While it
+	// exists the session reads as deleted, so nothing spools, drains, opens or
+	// closes it. Like close-requested it is written without live.lock, because a
+	// drain or open may hold the lock far longer than abort can wait.
+	deleteRequestFileName = "delete-requested"
+	// spoolLostFileName counts committed bytes Spool could not write (EACCES,
+	// ENOSPC, a read-only volume). The next spool write, or the close, turns it
+	// into a gap line, so the loss shows in the stream instead of vanishing.
+	spoolLostFileName = "spool-lost"
 )
+
+// IsLocalFile reports whether name is one of the live-stream files this package
+// keeps in a session folder. They are machine-local state (the spool duplicates
+// raw.jsonl; the rest are ids, offsets and markers), so anything that copies a
+// session folder into the Ledger must skip them.
+func IsLocalFile(name string) bool {
+	switch name {
+	case spoolFileName, stateFileName, lockFileName, closeRequestFileName, deleteRequestFileName, spoolLostFileName:
+		return true
+	}
+	return false
+}
 
 // Status is where a session's live stream stands.
 type Status string
@@ -43,8 +64,8 @@ const (
 	StatusDisabled Status = "disabled"
 )
 
-// ErrNotStreaming means the session has no live stream to act on (never opened,
-// or it is closing, closed, deleted or disabled). Hooks ignore it.
+// ErrNotStreaming means the session has no live stream to act on: never opened,
+// or ended (closed, deleted or disabled). Hooks ignore it.
 var ErrNotStreaming = errors.New("session is not streaming")
 
 // State is stream-state.json. The open parameters are kept so a restart on a
@@ -63,6 +84,11 @@ type State struct {
 	Agent       string    `json:"agent,omitempty"`
 	StartedAt   time.Time `json:"started_at,omitzero"`
 
+	// OpenSent is recorded before a pending session's first open request
+	// leaves this machine. The server may then hold the conversation even
+	// though the reply never arrived, so abort must delete it.
+	OpenSent bool `json:"open_sent,omitempty"`
+
 	// CloseRequested is set when stop asked for the close but could not finish
 	// it: the server was unreachable, or a drain held the session longer than
 	// stop could wait. The daemon opens (if pending), drains and closes it.
@@ -73,15 +99,34 @@ type State struct {
 	// session was deleted (410 / stop_and_wipe). A local abort leaves it false:
 	// only a server-side delete must keep the v1 copy off the Ledger.
 	DeletedOnServer bool `json:"deleted_on_server,omitempty"`
+
+	// DisabledReason says why the stream was disabled: the server's refusal
+	// reason, or secretRefusedReason when publication rules withheld its bytes.
+	// A key conflict leaves it empty (Open returns ErrKeyConflict instead).
+	DisabledReason string `json:"disabled_reason,omitempty"`
 }
 
 func (s State) active() bool { return s.Status == StatusStreaming || s.Status == StatusClosing }
 
+// reachedServer reports whether the server may hold this session's
+// conversation, so that abort has to delete it there.
+func (s State) reachedServer() bool {
+	switch {
+	case s.ConversationID == "" || s.Status == StatusDeleted:
+		return false
+	case s.Status == StatusPending:
+		return s.OpenSent
+	}
+	return true
+}
+
 // WasDeletedOnServer reports whether the session in dir was deleted on the
 // server while it streamed. An unreadable or missing state reports false.
+// Publication guards check it alongside the hold marker: the stream state is
+// written even when the marker could not be.
 func WasDeletedOnServer(dir string) bool {
 	st, err := ReadState(dir)
-	return err == nil && st.Status == StatusDeleted && st.DeletedOnServer
+	return err == nil && st.DeletedOnServer
 }
 
 // ConversationID derives the server's cnv_ id from an ox ses_ id (same UUID).
@@ -94,7 +139,19 @@ func ConversationID(sessionID string) (string, error) {
 }
 
 // ReadState loads stream-state.json; it returns ErrNotStreaming when none exists.
+// While the delete-requested marker exists the status reads as deleted, so no
+// path streams, opens or closes a session that abort already let go.
 func ReadState(dir string) (State, error) {
+	st, err := readState(dir)
+	if err == nil && deleteRequested(dir) {
+		st.Status = StatusDeleted
+	}
+	return st, err
+}
+
+// readState is ReadState without the delete-requested overlay, which would hide
+// what reached the server from abort itself.
+func readState(dir string) (State, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, stateFileName))
 	if errors.Is(err, fs.ErrNotExist) {
 		return State{}, ErrNotStreaming
@@ -111,6 +168,11 @@ func ReadState(dir string) (State, error) {
 		st.CloseRequested = err == nil
 	}
 	return st, nil
+}
+
+func deleteRequested(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, deleteRequestFileName))
+	return err == nil
 }
 
 func writeState(dir string, st State) error {

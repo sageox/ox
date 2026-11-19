@@ -50,7 +50,7 @@ func Close(ctx context.Context, cfg Config, dir, summary string, budget time.Dur
 			err = s.finish(ctx, summary, &res)
 		}
 		res.Acked, res.Status = s.st.Acked, s.st.Status
-		res.Done = !s.st.active()
+		res.Done = err == nil && !s.st.active()
 		if res.Done {
 			if rerr := removeIfExists(filepath.Join(dir, closeRequestFileName)); rerr != nil {
 				s.log().WarnContext(ctx, "live_session_close_request_remove_failed", "error", rerr)
@@ -101,7 +101,11 @@ func (s *session) finish(ctx context.Context, summary string, res *DrainResult) 
 	if len(summary) > sessionstream.MaxSummaryBytes {
 		summary = "" // too large for the server; it generates one when missing
 	}
-	for attempt := 0; ; attempt++ {
+	if err := s.declareLost(); err != nil {
+		return err // stay closing: without the gap line the close would claim a complete stream
+	}
+	checked := false
+	for restarts := 0; ; {
 		if err := s.drain(ctx, res); err != nil || !s.st.active() {
 			return err
 		}
@@ -109,51 +113,139 @@ func (s *session) finish(ctx context.Context, summary string, res *DrainResult) 
 		if err != nil || s.st.Acked != size {
 			return err // not fully acked: stay closing, never close across a gap
 		}
+		if !checked {
+			summary, checked = s.publishableSummary(ctx, summary), true
+		}
 		err = s.c.Close(ctx, s.st.ConversationID, sessionstream.CloseRequest{
 			LayerID: s.st.LayerID, StoredThrough: size, StreamSHA256: sum, Summary: summary,
 		})
 		if err == nil {
 			s.log().InfoContext(ctx, "live_session_closed", "stored_through", size)
 			s.setStatus(ctx, StatusClosed)
+			s.reportUnsentTail(ctx, size)
 			return nil
 		}
-		v, err := s.onCloseRefusal(ctx, err)
+		var api *sessionstream.APIError
+		if errors.As(err, &api) && api.Body.RetryAfterMS != nil {
+			// api-go defers a close whose end it cannot prove yet (recovery
+			// budget spent, storage blip); the daemon backs off this long (C9)
+			res.RetryAfter = time.Duration(*api.Body.RetryAfterMS) * time.Millisecond
+		}
+		v, err := s.onCloseRefusal(ctx, err, size)
 		if err != nil || v == vStop {
 			return err
 		}
-		if attempt >= maxRestarts {
-			return errors.New("live close refused after restarting")
+		if v != vNewLayer {
+			continue // resync: the next drain resends from the server's stored_through
 		}
-		if v == vNewLayer {
-			if err := s.restartLayer(ctx); err != nil {
-				return err
-			}
+		if restarts++; restarts > maxRestarts {
+			return errors.New("live close refused after restarting on a new layer")
+		}
+		if err := s.restartLayer(ctx); err != nil {
+			return err
 		}
 	}
 }
 
+// reportUnsentTail re-measures the spool after the server accepted a close of
+// closedThrough bytes. A hook that found live.lock busy spools without it (see
+// Spool), so a batch can land while the close request is on the wire. The
+// server answers session_closed to anything sent after a close, so those bytes
+// can never reach the stream; raw.jsonl keeps them. They are reported at Error
+// rather than left to vanish from the stream unremarked. Only an append in the
+// instant between this measure and the status write above can still slip past.
+func (s *session) reportUnsentTail(ctx context.Context, closedThrough int64) {
+	f, err := os.Open(s.spoolPath())
+	if err != nil {
+		return // no spool: nothing was appended after the close measured it
+	}
+	defer func() { _ = f.Close() }() // read-only: nothing to flush
+	end, err := spoolEnd(f)
+	if err != nil {
+		s.log().WarnContext(ctx, "live_session_close_remeasure_failed", "closed_through", closedThrough, "error", err)
+		return
+	}
+	if end > closedThrough {
+		s.log().ErrorContext(ctx, "live_session_closed_without_tail",
+			"closed_through", closedThrough, "spool_end", end, "unsent_bytes", end-closedThrough)
+	}
+}
+
+// declareLost writes a pending spool-lost count into the spool as its gap
+// line before the close measures the stream (see Spool).
+func (s *session) declareLost() error {
+	if _, pending := readLost(s.dir); !pending {
+		return nil
+	}
+	if _, err := appendToSpool(s.dir, s.st.Acked, nil, SpoolOptions{}); err != nil {
+		return fmt.Errorf("declare lost spool bytes before close: %w", err)
+	}
+	return nil
+}
+
 // onCloseRefusal: a refusal that says the stream differs sends us back to drain
-// (resync) or onto a new layer; anything transient is returned for a later retry.
-func (s *session) onCloseRefusal(ctx context.Context, err error) (verdict, error) {
+// from the server's stored_through (resync) or onto a new layer; anything
+// transient or unknown is returned for a later retry (C7). size is the stream
+// length the refused close claimed.
+func (s *session) onCloseRefusal(ctx context.Context, err error, size int64) (verdict, error) {
 	var api *sessionstream.APIError
 	if !errors.As(err, &api) {
 		return vStop, fmt.Errorf("close live session: %w", err)
 	}
-	if s.terminal(ctx, api) {
-		return vStop, nil
+	if done, err := s.terminal(ctx, api); done || err != nil {
+		return vStop, err
 	}
-	if retryable(api) {
+	switch classify(api) {
+	case refusalResync:
+		return s.closeResync(ctx, api, size)
+	case refusalNewLayer:
+		return vNewLayer, nil
+	case refusalStop:
+		s.disable(ctx, api.Body.Reason, "action", string(api.Body.Action), "status", api.Status, "during", "close")
+		return vStop, fmt.Errorf("close live session refused, streaming disabled: %w", api)
+	default:
 		return vStop, fmt.Errorf("close live session: %w", api)
 	}
-	switch api.Body.Action {
-	case sessionstream.ActionResync:
-		return vContinue, nil
-	case sessionstream.ActionNewLayer:
-		return vNewLayer, nil
-	default:
-		s.setStatus(ctx, StatusDisabled)
-		return vStop, fmt.Errorf("close live session refused, streaming disabled: %w", api)
+}
+
+// closeResync handles a close refused with resync: the server's row stands at
+// stored_through and does not match the close. Retrying the close alone can
+// never change that (each daemon tick would be refused again), so acked moves
+// back to stored_through and the next drain resends from there, under the
+// drain's resync cap. ox never frees spool bytes, so any whole-line offset
+// short of size can be resent, however far behind its acks the server fell.
+// At or past size, or inside a line, the server holds a stream this spool did
+// not write (equal lengths refused means the hashes differ): a new layer.
+func (s *session) closeResync(ctx context.Context, api *sessionstream.APIError, size int64) (verdict, error) {
+	if api.Body.StoredThrough == nil {
+		return vStop, fmt.Errorf("close resync without stored_through: %w", api)
 	}
+	if s.resyncs++; s.resyncs > maxResyncs {
+		return vStop, fmt.Errorf("close resync loop at offset %d: %w", s.st.Acked, api)
+	}
+	stored := *api.Body.StoredThrough
+	if stored >= 0 && stored < s.st.Acked {
+		// the server once answered 200 through acked and now holds less: it
+		// lost acknowledged bytes. The resend below still repairs the stream
+		// (ox never frees spool bytes), but a server that loses acks must show.
+		s.log().ErrorContext(ctx, "live_session_server_behind_ack", "acked", s.st.Acked, "stored_through", stored, "closed_through", size)
+	}
+	if stored < 0 || stored >= size || !s.spoolLineBoundary(stored) {
+		s.log().WarnContext(ctx, "live_session_close_diverged", "stored_through", stored, "closed_through", size)
+		return vNewLayer, nil
+	}
+	s.log().WarnContext(ctx, "live_session_close_resync", "stored_through", stored, "acked", s.st.Acked, "closed_through", size)
+	s.st.Acked = stored
+	return vContinue, s.persist()
+}
+
+func (s *session) spoolLineBoundary(off int64) bool {
+	f, err := os.Open(s.spoolPath())
+	if err != nil {
+		return off == 0
+	}
+	defer func() { _ = f.Close() }() // read-only: nothing to flush
+	return atLineBoundary(f, off)
 }
 
 // spoolSum is the length and stream hash of the whole spool (whole lines).

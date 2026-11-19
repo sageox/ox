@@ -1406,6 +1406,11 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		}
 		return result, nil
 	}
+	// the publication boundary (C3): both upload modes below publish, the async
+	// one through the daemon, so a delete heard since the check above stops here
+	if errors.Is(refuseDeletedOnServer(state.SessionPath), errSessionDeletedOnServer) {
+		return holdRefusedAsDeleted(result, state.SessionPath, filepath.Dir(result.RawPath))
+	}
 
 	// LFS upload pipeline: upload content files to LFS blob storage,
 	// write meta.json to ledger, commit and push.
@@ -1507,6 +1512,9 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 			return uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
 		}, time.Sleep)
 		result.UploadMs = time.Since(uploadStart).Milliseconds()
+		if errors.Is(uploadErr, errSessionDeletedOnServer) {
+			return holdRefusedAsDeleted(result, state.SessionPath, filepath.Dir(result.RawPath))
+		}
 		if uploadErr != nil {
 			if errors.Is(uploadErr, api.ErrReadOnly) {
 				fmt.Fprintln(os.Stderr, "\nUpload skipped — you have read-only access to this public repo.")
@@ -1584,6 +1592,11 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 
 func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string, effects sessionUploadEffects) error {
 	if err := session.CheckNativeSourceBinding(state); err != nil {
+		return err
+	}
+	// the publication boundary (C3): read now, before the first Ledger write,
+	// never from a value the stop read before generating artifacts
+	if err := refuseDeletedOnServer(state.SessionPath); err != nil {
 		return err
 	}
 	sessionsDir := filepath.Join(ledgerPath, "sessions")

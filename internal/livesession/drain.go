@@ -36,9 +36,10 @@ type DrainResult struct {
 	Status Status
 	// Done: for Drain, nothing is left to send or the stream reached a final
 	// status; for Close, the stream reached a final status (closed, deleted or
-	// disabled).
+	// disabled). Never set together with an error.
 	Done bool
-	// RetryAfter is the server's requested backoff after a rate limit; zero otherwise.
+	// RetryAfter is the server's requested backoff after a refusal that asked
+	// for a retry (rate limit, unproven stored end); zero otherwise.
 	RetryAfter time.Duration
 }
 
@@ -121,7 +122,7 @@ func Drain(ctx context.Context, cfg Config, dir string, budget time.Duration) (D
 			err = s.drain(ctx, &res)
 		}
 		res.Acked, res.Status = s.st.Acked, s.st.Status
-		res.Done = !s.st.active() || s.caughtUp()
+		res.Done = err == nil && (!s.st.active() || s.caughtUp())
 		return err
 	})
 	return res, err
@@ -193,6 +194,9 @@ func (s *session) sendBatch(ctx context.Context, f *os.File, h *sessionstream.St
 	if len(batch) == 0 {
 		return vStop, nil
 	}
+	if err := checkPublication(ctx, batch); err != nil {
+		return s.onWithheld(ctx, err)
+	}
 	resp, err := s.c.AppendRaw(ctx, s.st.ConversationID, s.st.LayerID, s.st.Acked, h.Sum(), batch)
 	if err != nil {
 		return s.onRefusal(ctx, err, f, h, end, res)
@@ -232,65 +236,125 @@ func (s *session) onRefusal(ctx context.Context, err error, f *os.File, h *sessi
 	if !errors.As(err, &api) {
 		return vStop, fmt.Errorf("append at offset %d: %w", s.st.Acked, err)
 	}
-	if s.terminal(ctx, api) {
-		return vStop, nil
+	if done, err := s.terminal(ctx, api); done || err != nil {
+		return vStop, err
 	}
-	if retryable(api) {
+	switch classify(api) {
+	case refusalResync:
+		return s.resync(ctx, f, h, end, api)
+	case refusalNewLayer:
+		return vNewLayer, nil
+	case refusalStop:
+		s.disable(ctx, api.Body.Reason, "action", string(api.Body.Action), "status", api.Status)
+		return vStop, nil
+	default: // retry, reauth, 429, 5xx, or an answer this client does not know yet
 		if ms := api.Body.RetryAfterMS; ms != nil {
 			res.RetryAfter = time.Duration(*ms) * time.Millisecond
 		}
 		return vStop, fmt.Errorf("append at offset %d: %w", s.st.Acked, api)
 	}
-	switch api.Body.Action {
-	case sessionstream.ActionResync:
-		return s.resync(ctx, f, h, end, api)
-	case sessionstream.ActionNewLayer:
-		return vNewLayer, nil
-	default: // stop, fix or an action we do not know: do not loop on it
-		s.log().WarnContext(ctx, "live_session_disabled", "reason", api.Body.Reason, "action", string(api.Body.Action), "status", api.Status)
-		s.setStatus(ctx, StatusDisabled)
-		return vStop, nil
-	}
 }
 
-// retryable: rate limits, server trouble and expired logins heal with time.
-func retryable(api *sessionstream.APIError) bool {
-	switch api.Body.Action {
-	case sessionstream.ActionRetry, sessionstream.ActionReauth:
-		return true
+// refusal is what a refused request means for the stream.
+type refusal int
+
+const (
+	// refusalRetry: transient, or not an answer this client knows. The bytes
+	// stay spooled and the caller backs off (C7): a new server answer must
+	// never switch off capture on clients that predate it.
+	refusalRetry refusal = iota
+	refusalResync
+	refusalNewLayer
+	// refusalStop: the server refused for good (action stop or fix).
+	refusalStop
+	// refusalDeleted: 410 / stop_and_wipe.
+	refusalDeleted
+	// refusalClosed: the server already finalized the session.
+	refusalClosed
+)
+
+// classify lists the answers known to settle a request; everything else is
+// refusalRetry.
+func classify(api *sessionstream.APIError) refusal {
+	switch {
+	case api.Body.Action == sessionstream.ActionStopAndWipe || api.Status == http.StatusGone:
+		return refusalDeleted
+	case api.Body.Reason == sessionstream.ReasonSessionClosed:
+		return refusalClosed
+	case api.Body.Action == sessionstream.ActionRetry, api.Body.Action == sessionstream.ActionReauth,
+		api.Status == http.StatusTooManyRequests, api.Status >= 500:
+		return refusalRetry
 	}
-	return api.Status == http.StatusTooManyRequests || api.Status >= 500
+	switch api.Body.Action {
+	case sessionstream.ActionResync:
+		return refusalResync
+	case sessionstream.ActionNewLayer:
+		return refusalNewLayer
+	case sessionstream.ActionStop, sessionstream.ActionFix:
+		return refusalStop
+	}
+	return refusalRetry
+}
+
+func (s *session) disable(ctx context.Context, reason string, args ...any) {
+	s.log().WarnContext(ctx, "live_session_disabled", append([]any{"reason", reason}, args...)...)
+	s.st.DisabledReason = reason
+	s.setStatus(ctx, StatusDisabled)
 }
 
 // terminal handles the answers that end a stream for good: session_closed and
-// stop_and_wipe (410). A server-side delete holds the session on this machine,
-// then wipes the spool: raw.jsonl stays (it is the person's own copy), but no
-// automatic path may publish it to the Ledger after someone deleted it on
-// SageOx.
-func (s *session) terminal(ctx context.Context, api *sessionstream.APIError) bool {
-	switch {
-	case api.Body.Reason == sessionstream.ReasonSessionClosed:
+// stop_and_wipe (410). It reports whether the stream ended; the error is set
+// only when a server-side delete could not be recorded anywhere (see
+// deletedByServer), and then the caller must retry.
+func (s *session) terminal(ctx context.Context, api *sessionstream.APIError) (bool, error) {
+	switch classify(api) {
+	case refusalClosed:
 		s.log().InfoContext(ctx, "live_session_closed_by_server")
 		s.setStatus(ctx, StatusClosed)
-		return true
-	case api.Body.Action == sessionstream.ActionStopAndWipe || api.Status == http.StatusGone:
-		s.log().InfoContext(ctx, "live_session_deleted_by_server")
-		s.holdOnThisMachine(ctx)
-		s.st.DeletedOnServer = true
-		s.wipe(ctx)
-		return true
+		return true, nil
+	case refusalDeleted:
+		return true, s.deletedByServer(ctx)
 	}
-	return false
+	return false, nil
 }
 
-// holdOnThisMachine writes the hold marker before anything else, because it is
-// what every automatic publisher checks (session stop, the hooks, the daemon's
-// finalize and recovery, doctor) and it outlives the stream state. A failure is
-// logged only: session stop writes the hold again from DeletedOnServer.
-func (s *session) holdOnThisMachine(ctx context.Context) {
-	if err := oxsession.WriteHoldMarker(s.dir, oxsession.HoldDeletedOnServer, "live_stream"); err != nil {
-		s.log().WarnContext(ctx, "live_session_hold_failed", "error", err)
+// deletedByServer holds a session someone deleted on SageOx, then wipes the
+// spool: raw.jsonl stays (it is the person's own copy), but no automatic path
+// may publish it to the Ledger. The session is held in memory at once, so this
+// call sends nothing more. Two records outlive it, and every publisher checks
+// both: the hold marker and DeletedOnServer in the stream state (C3). One is
+// enough. With neither written nothing durable knows of the delete, so the
+// spool and the on-disk status are left as they were and an error is returned:
+// the next attempt hears the 410 again and records it then.
+//
+// A 410 that answers this machine's own abort (delete-requested) is no
+// server-side delete, so it only wipes.
+func (s *session) deletedByServer(ctx context.Context) error {
+	if deleteRequested(s.dir) {
+		s.wipe(ctx)
+		return nil
 	}
+	s.log().InfoContext(ctx, "live_session_deleted_by_server")
+	s.st.Status, s.st.DeletedOnServer = StatusDeleted, true
+	// the hold names this stream's recording: the folder may pass to a new
+	// recording restarted within the minute, and it must not be held by this one
+	holdErr := oxsession.WriteHoldMarkerFor(s.dir, oxsession.HoldDeletedOnServer, "live_stream", s.st.SessionID)
+	stateErr := s.persist()
+	if holdErr != nil && stateErr != nil {
+		err := errors.Join(holdErr, stateErr)
+		s.log().ErrorContext(ctx, "live_session_delete_unrecorded", "error", err)
+		return fmt.Errorf("record server-side delete: %w", err)
+	}
+	if holdErr != nil {
+		s.log().WarnContext(ctx, "live_session_hold_failed", "deleted_on_server_recorded", true, "error", holdErr)
+	}
+	if stateErr != nil {
+		s.log().WarnContext(ctx, "live_session_state_write_failed", "status", string(StatusDeleted), "hold_recorded", true, "error", stateErr)
+	}
+	if err := removeIfExists(s.spoolPath()); err != nil {
+		s.log().WarnContext(ctx, "live_session_spool_remove_failed", "error", err)
+	}
+	return nil
 }
 
 func (s *session) wipe(ctx context.Context) {
@@ -329,8 +393,10 @@ func (s *session) restartLayer(ctx context.Context) error {
 	next.Acked = 0
 	if _, err := s.c.Open(ctx, next.ConversationID, openRequest(next)); err != nil {
 		var api *sessionstream.APIError
-		if errors.As(err, &api) && s.terminal(ctx, api) {
-			return nil
+		if errors.As(err, &api) {
+			if done, terr := s.terminal(ctx, api); done || terr != nil {
+				return terr
+			}
 		}
 		return fmt.Errorf("open replacement live layer: %w", err)
 	}

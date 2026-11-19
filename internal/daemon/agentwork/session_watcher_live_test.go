@@ -1,53 +1,159 @@
 package agentwork
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+const (
+	watcherLiveSessionID = "ses_01934f3e-6b2a-7c3d-8e4f-5a6b7c8d9e01"
+	otherLiveSessionID   = "ses_01934f3e-6b2a-7c3d-8e4f-5a6b7c8d9e02"
+)
+
+// prepareLive gives dir a pending live stream for sessionID, as session start does.
+func prepareLive(t *testing.T, dir, sessionID string) {
+	t.Helper()
+	_, err := livesession.Prepare(context.Background(), livesession.Config{Endpoint: "https://live.test.sageox.ai"}, dir,
+		livesession.OpenParams{SessionID: sessionID, SessionName: filepath.Base(dir)})
+	require.NoError(t, err)
+}
+
+// spoolRecorder collects what the watcher hands to the live spooler.
+type spoolRecorder struct {
+	mu      sync.Mutex
+	dirs    []string
+	batches []session.AppendedBatch
+}
+
+func (r *spoolRecorder) spool(dir string, b session.AppendedBatch) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dirs, r.batches = append(r.dirs, dir), append(r.batches, b)
+}
+
+func (r *spoolRecorder) all() ([]string, []session.AppendedBatch) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.dirs...), append([]session.AppendedBatch(nil), r.batches...)
+}
+
+func newAppendFixture(t *testing.T, rec session.RecordingState) (dir, rawPath string, rw *session.RawWriter) {
+	t.Helper()
+	dir = t.TempDir()
+	rec.CommandRedactionVersion = 1
+	data, _ := json.Marshal(rec)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, recordingMarker), data, 0o600))
+	rawPath = filepath.Join(dir, "raw.jsonl")
+	require.NoError(t, os.WriteFile(rawPath, []byte(`{"type":"header"}`+"\n"), 0o600))
+	rw, err := session.NewRawWriter(rawPath, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rw.Close() })
+	return dir, rawPath, rw
+}
 
 // The tail watcher appends through appendBatch. Live streaming needs the exact
 // bytes of each committed batch, handed over only after the append succeeded; a
 // failed append must hand over nothing.
 func TestAppendBatchHandsTheCommittedBytesToTheLiveSpooler(t *testing.T) {
-	dir := t.TempDir()
-	statePath := filepath.Join(dir, recordingMarker)
-	data, _ := json.Marshal(session.RecordingState{CommandRedactionVersion: 1})
-	if err := os.WriteFile(statePath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	rawPath := filepath.Join(dir, "raw.jsonl")
-	if err := os.WriteFile(rawPath, []byte(`{"type":"header"}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	dir, rawPath, rw := newAppendFixture(t, session.RecordingState{SessionID: watcherLiveSessionID})
+	prepareLive(t, dir, watcherLiveSessionID)
 	m := NewSessionWatcherManager(slog.Default())
-	var got []session.AppendedBatch
-	var gotDir []string
-	m.SetLiveSpooler(func(d string, b session.AppendedBatch) { gotDir, got = append(gotDir, d), append(got, b) })
-	rw, err := session.NewRawWriter(rawPath, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rw.Close()
+	rec := &spoolRecorder{}
+	m.SetLiveSpooler(rec.spool)
 	aw := &activeWatcher{cachePath: dir, sessionName: "s"}
 
-	if err := m.appendBatch(aw, rw, []session.Entry{{Type: session.EntryTypeUser, Content: "hello"}}, 10); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, m.appendBatch(aw, rw, []session.Entry{{Type: session.EntryTypeUser, Content: "hello"}}, 10))
 	all, _ := os.ReadFile(rawPath)
 	header := len(`{"type":"header"}` + "\n")
-	if len(got) != 1 || string(got[0].Bytes) != string(all[header:]) || gotDir[0] != dir {
-		t.Fatalf("spooler got %+v (dirs %v), want the %q batch in %s", got, gotDir, all[header:], dir)
-	}
+	dirs, got := rec.all()
+	require.Len(t, got, 1)
+	assert.Equal(t, string(all[header:]), string(got[0].Bytes))
+	assert.Equal(t, dir, dirs[0])
 
-	if err := m.appendBatch(aw, rw, []session.Entry{{Type: session.EntryTypeUser, Content: "again"}}, 5); err == nil { // cursor goes backwards
-		t.Fatal("expected the append to fail")
+	require.Error(t, m.appendBatch(aw, rw, []session.Entry{{Type: session.EntryTypeUser, Content: "again"}}, 5), "cursor goes backwards")
+	_, got = rec.all()
+	assert.Len(t, got, 1, "a failed append reached the live spooler")
+}
+
+// Failure prevented: the watcher handed every committed batch to the live
+// spool without asking whose stream it was or whether the session may be
+// shared. A recording that reused a folder (names have minute precision) fed
+// the previous recording's stream (C4), and a session switched to manual
+// publishing kept streaming (C1).
+func TestAppendBatchKeepsBatchesOutOfStreamsTheyMustNotReach(t *testing.T) {
+	cases := []struct {
+		name  string
+		rec   session.RecordingState
+		setup func(t *testing.T, dir string)
+	}{
+		{"stream belongs to the previous recording in this folder", session.RecordingState{SessionID: watcherLiveSessionID},
+			func(t *testing.T, dir string) { prepareLive(t, dir, otherLiveSessionID) }},
+		{"session held on this machine", session.RecordingState{SessionID: watcherLiveSessionID},
+			func(t *testing.T, dir string) {
+				prepareLive(t, dir, watcherLiveSessionID)
+				require.NoError(t, session.WriteHoldMarker(dir, session.HoldManualPublishing, "test"))
+			}},
+		{"recording switched to manual publishing", session.RecordingState{SessionID: watcherLiveSessionID, PublishingMode: config.SessionPublishingManual},
+			func(t *testing.T, dir string) { prepareLive(t, dir, watcherLiveSessionID) }},
 	}
-	if len(got) != 1 {
-		t.Fatalf("a failed append reached the live spooler: %d batches", len(got))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, _, rw := newAppendFixture(t, tc.rec)
+			tc.setup(t, dir)
+			m := NewSessionWatcherManager(slog.Default())
+			rec := &spoolRecorder{}
+			m.SetLiveSpooler(rec.spool)
+
+			require.NoError(t, m.appendBatch(&activeWatcher{cachePath: dir, sessionName: "s"}, rw,
+				[]session.Entry{{Type: session.EntryTypeUser, Content: "hello"}}, 10))
+
+			_, got := rec.all()
+			assert.Empty(t, got, "the batch reached a live stream it must not")
+		})
 	}
+}
+
+// Failure prevented: Cursor recordings capture through DrainCursorSource, not
+// appendBatch, so their committed turns never reached the live spool and the
+// streamed session held only its header on SageOx (C8).
+func TestCursorWatcherHandsCommittedBytesToTheLiveSpooler(t *testing.T) {
+	installCursorWatcherAdapter(t)
+	source := `{"role":"user","content":"first"}` + "\n" +
+		`{"role":"assistant","content":"second"}` + "\n" +
+		`{"type":"turn_ended","status":"success"}` + "\n"
+	f := newCursorWatcherFixture(t, source, false, false)
+	f.state.SessionID = watcherLiveSessionID
+	writeRecordingState(t, filepath.Join(f.cachePath, recordingMarker), f.state)
+	prepareLive(t, f.cachePath, watcherLiveSessionID)
+	mgr := newCursorWatcherManager(t, f.homeDir)
+	rec := &spoolRecorder{}
+	mgr.SetLiveSpooler(rec.spool)
+	startCursorWatch(t, mgr, f)
+
+	require.Eventually(t, func() bool { return loadCursorWatcherState(t, f).EntryCount == 2 }, time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { _, got := rec.all(); return len(got) > 0 }, time.Second, 10*time.Millisecond)
+
+	raw, err := os.ReadFile(filepath.Join(f.cachePath, artifactRaw))
+	require.NoError(t, err)
+	dirs, got := rec.all()
+	var spooled strings.Builder
+	for i, b := range got {
+		assert.Equal(t, f.cachePath, dirs[i])
+		assert.False(t, b.Suspended)
+		spooled.Write(b.Bytes)
+	}
+	assert.Equal(t, string(raw), spooled.String(), "every committed Cursor byte, in order")
 }

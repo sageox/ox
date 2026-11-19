@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 	"unicode/utf8"
 
@@ -51,10 +54,23 @@ type SpoolResult struct {
 
 // Spool appends one committed raw.jsonl batch (exactly the bytes the capture
 // writer added, header line included for the first batch) to the session spool.
-// It returns ErrNotStreaming when the session is not streaming.
+// It returns ErrNotStreaming when the session has no stream left to feed: never
+// prepared, or closed, deleted or disabled.
+//
+// A closing session still takes batches. Stop requested the close, but a batch
+// can commit after that: a capture already in flight when stop fired (it spools
+// after releasing raw.jsonl's lock, which stop then takes), or a stop that failed
+// after its close and kept the recording going. Refusing it lost the bytes with
+// no gap line while the close went on to claim a complete stream. Close drains
+// the whole spool before it closes, and re-measures it afterwards (see finish).
 //
 // Oversized lines, lines that are not one JSON object, and lines past the
 // unacknowledged-bytes cap become declared gap lines, never silent loss.
+//
+// A batch the spool cannot take (EACCES, ENOSPC, a read-only volume, a lock or
+// state failure) is a loss too: its size is recorded in spool-lost, logged at
+// Error, and the next write or the close declares it as a spool_write_failed
+// gap line. The error is still returned.
 //
 // A hook must not wait behind a long drain: if live.lock stays busy for
 // spoolLockWait the append proceeds unlocked. That is safe because the spool is
@@ -73,7 +89,9 @@ func Spool(ctx context.Context, dir string, batch []byte, opts SpoolOptions) (Sp
 		if err != nil {
 			return err
 		}
-		if st.Status != StatusStreaming && st.Status != StatusPending {
+		switch st.Status {
+		case StatusPending, StatusStreaming, StatusClosing:
+		default:
 			return ErrNotStreaming
 		}
 		res, err = appendToSpool(dir, st.Acked, batch, opts)
@@ -82,9 +100,70 @@ func Spool(ctx context.Context, dir string, batch []byte, opts SpoolOptions) (Sp
 	err := withLock(ctx, dir, spoolLockWait, run)
 	var busy *fileutil.ErrLockTimeout
 	if errors.As(err, &busy) {
-		return res, run()
+		err = run()
+	}
+	if err != nil && !errors.Is(err, ErrNotStreaming) {
+		return res, spoolFailed(ctx, dir, int64(len(batch)), err)
 	}
 	return res, err
+}
+
+// spoolFailed records a batch the spool could not take so the stream declares
+// it later, and logs the loss at Error: once the hook returns, nothing else
+// would ever send these bytes.
+func spoolFailed(ctx context.Context, dir string, n int64, cause error) error {
+	log := slog.Default().With("session", filepath.Base(dir))
+	if st, err := readState(dir); err == nil {
+		log = log.With("session_id", st.SessionID, "conversation_id", st.ConversationID, "layer_id", st.LayerID)
+	}
+	if err := recordLost(dir, n); err != nil {
+		log.ErrorContext(ctx, "live_session_spool_lost", "bytes", n, "recorded", false, "error", cause, "record_error", err)
+		return fmt.Errorf("spool %d bytes: %w (the loss could not be recorded: %w)", n, cause, err)
+	}
+	log.ErrorContext(ctx, "live_session_spool_lost", "bytes", n, "recorded", true, "error", cause)
+	return fmt.Errorf("spool %d bytes (recorded as a gap for the next write): %w", n, cause)
+}
+
+// recordLost adds n to the spool-lost count.
+func recordLost(dir string, n int64) error {
+	prev, _ := readLost(dir)
+	if err := writeLost(dir, prev+n); err != nil {
+		return fmt.Errorf("record lost spool bytes: %w", err)
+	}
+	return nil
+}
+
+func writeLost(dir string, n int64) error {
+	return fileutil.AtomicWriteBytes(filepath.Join(dir, spoolLostFileName), []byte(strconv.FormatInt(n, 10)), 0o600)
+}
+
+// readLost returns the recorded lost-byte count and whether a loss awaits its
+// gap line. A count that cannot be read still means something was lost.
+func readLost(dir string) (int64, bool) {
+	raw, err := os.ReadFile(filepath.Join(dir, spoolLostFileName))
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, false
+	}
+	n, perr := strconv.ParseInt(string(bytes.TrimSpace(raw)), 10, 64)
+	if err != nil || perr != nil || n < 0 {
+		return 0, true
+	}
+	return n, true
+}
+
+// settleLost clears the count a gap line just declared. A count that grew
+// meanwhile (an unlocked Spool failing alongside this one) keeps the
+// difference for the next write. A count left behind is declared again, which
+// overstates the loss but never hides one.
+func settleLost(dir string, declared int64) error {
+	now, pending := readLost(dir)
+	switch {
+	case !pending:
+		return nil
+	case now > declared:
+		return writeLost(dir, now-declared)
+	}
+	return removeIfExists(filepath.Join(dir, spoolLostFileName))
 }
 
 func appendToSpool(dir string, acked int64, batch []byte, opts SpoolOptions) (SpoolResult, error) {
@@ -102,10 +181,14 @@ func appendToSpool(dir string, acked int64, batch []byte, opts SpoolOptions) (Sp
 	if err != nil {
 		return SpoolResult{}, err
 	}
+	lost, hasLost := readLost(dir)
 	b := lineBuilder{acked: acked, cap: capBytes, size: size}
-	b.dropping = healed == 0 && endsWith(f, size, gapSpoolFull)
+	b.dropping = healed == 0 && !hasLost && endsWith(f, size, gapSpoolFull)
 	if healed > 0 {
 		b.gap(fmt.Sprintf(`{"type":"gap","reason":"torn_tail","bytes":%d}`, healed))
+	}
+	if hasLost {
+		b.gap(fmt.Sprintf(`{"type":"gap","reason":"spool_write_failed","bytes":%d}`, lost))
 	}
 	b.addBatch(batch)
 	if len(b.out) == 0 {
@@ -113,6 +196,12 @@ func appendToSpool(dir string, acked int64, batch []byte, opts SpoolOptions) (Sp
 	}
 	if _, err := f.Write(b.out); err != nil {
 		return SpoolResult{}, fmt.Errorf("append spool: %w", err)
+	}
+	if hasLost {
+		if err := settleLost(dir, lost); err != nil {
+			// not a spool failure: the batch and its gap line are written
+			slog.Warn("live_session_spool_lost_settle_failed", "session", filepath.Base(dir), "bytes", lost, "error", err)
+		}
 	}
 	return SpoolResult{Appended: int64(len(b.out)), Gaps: b.gaps}, nil
 }

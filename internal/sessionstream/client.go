@@ -49,8 +49,14 @@ func (c *Client) httpClient() *http.Client {
 	return &http.Client{Timeout: 10 * time.Second}
 }
 
+// ErrMalformedResponse means a 2xx carried no decodable body where the contract
+// promises one. A proxy or load balancer can send one; it proves nothing about
+// what the server stored, so callers treat it like a lost reply and resend.
+var ErrMalformedResponse = errors.New("live capture: malformed success response")
+
 // Do sends one request, signed when the client has a key, and decodes a JSON
-// response into out (nil to discard). Non-2xx returns *APIError.
+// response into out (nil to discard). Non-2xx returns *APIError; a 2xx that
+// out cannot be decoded from returns ErrMalformedResponse.
 func (c *Client) Do(ctx context.Context, method, requestURI string, body []byte, contentType string, extra http.Header, out any) error {
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.BaseURL, "/")+requestURI, bytes.NewReader(body))
 	if err != nil {
@@ -74,7 +80,7 @@ func (c *Client) Do(ctx context.Context, method, requestURI string, body []byte,
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // a close error cannot change what was read
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return err
@@ -86,10 +92,16 @@ func (c *Client) Do(ctx context.Context, method, requestURI string, body []byte,
 		}
 		return apiErr
 	}
-	if out == nil || len(raw) == 0 {
+	if out == nil {
 		return nil
 	}
-	return json.Unmarshal(raw, out)
+	if len(raw) == 0 {
+		return fmt.Errorf("%w: %d with an empty body", ErrMalformedResponse, resp.StatusCode)
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("%w: %d: %w", ErrMalformedResponse, resp.StatusCode, err)
+	}
+	return nil
 }
 
 func (c *Client) doJSON(ctx context.Context, method, uri string, in, out any) error {
@@ -148,10 +160,21 @@ func (c *Client) State(ctx context.Context, cnv string) (SessionState, error) {
 // The stream can never be continued; start a new layer.
 var ErrStreamDiverged = errors.New("server stream diverged from local bytes")
 
+// ErrResyncLimit means one Flush was answered resync more than maxResyncs
+// times. The bytes stay held; the caller backs off and flushes again later.
+var ErrResyncLimit = errors.New("too many resync answers in one flush")
+
+// maxResyncs matches the ox drain's cap. An honest server needs one resync to
+// point the client at its stored end; a server or proxy that keeps answering
+// resync must not pin the client in a hot loop.
+const maxResyncs = 16
+
 // Streamer is the reference drain: it holds every unacknowledged byte, sends
 // from the acknowledged offset, and frees bytes only after a 200 whose stream
-// hash matches its own. The acknowledged offset and hash are all it must
-// persist across restarts; the bytes themselves live in the caller's spool.
+// hash matches its own. A resync is never proof: it only says the server holds
+// bytes past the acknowledged offset, which the next 200 must then prove. The
+// acknowledged offset and hash are all it must persist across restarts; the
+// bytes themselves live in the caller's spool.
 type Streamer struct {
 	Client       *Client
 	Conversation string
@@ -170,10 +193,10 @@ func NewStreamer(c *Client, cnv, layer string) *Streamer {
 // Write queues bytes (whole NDJSON lines) for sending. It never blocks on I/O.
 func (s *Streamer) Write(p []byte) { s.pending = append(s.pending, p...) }
 
-// Acked is the offset every byte before which the server has stored.
+// Acked is the offset through which a 200 has proven the server stores our bytes.
 func (s *Streamer) Acked() int64 { return s.acked }
 
-// Pending is how many queued bytes the server has not acknowledged.
+// Pending is how many queued bytes no 200 has proven yet.
 func (s *Streamer) Pending() int { return len(s.pending) }
 
 // StreamSHA256 is the hash of every acknowledged byte.
@@ -181,26 +204,37 @@ func (s *Streamer) StreamSHA256() string { return s.hash.Sum() }
 
 // Flush sends every complete pending line in batches until none remain or a
 // refusal stops it. A trailing partial line stays queued until it is finished.
+// It returns nil only once a 200 has proven every complete line it held.
 func (s *Streamer) Flush(ctx context.Context) error {
-	for {
+	// probe is set once a resync says the server holds bytes past acked. Those
+	// bytes are unproven, so the next request resends only the first held line
+	// from acked: the server checks it against the object stored there (one
+	// read, so never too_large) and answers 200 with its whole stored end and
+	// that end's stream hash, which ack checks against our own bytes. Sending
+	// from the resync offset instead would leave nothing to send, and so no
+	// 200 to prove anything, whenever the server claims every held line.
+	probe := false
+	for resyncs := 0; ; {
 		n := batchLen(s.pending)
 		if n == 0 {
 			return nil
+		}
+		if probe {
+			n = bytes.IndexByte(s.pending, '\n') + 1
 		}
 		resp, err := s.Client.AppendRaw(ctx, s.Conversation, s.Layer, s.acked, s.hash.Sum(), s.pending[:n])
 		var apiErr *APIError
 		switch {
 		case err == nil:
-			if err := s.ack(resp.StoredThrough, resp.PrefixSHA256); err != nil {
+			if err := s.ack(resp); err != nil {
 				return err
 			}
+			probe = false
 		case errors.As(err, &apiErr) && apiErr.Body.Action == ActionResync && apiErr.Body.StoredThrough != nil:
-			// Resync only forward over bytes we hold; the hash check in the next
-			// append proves the server's bytes are ours.
-			if *apiErr.Body.StoredThrough < s.acked {
-				return fmt.Errorf("%w: server stored_through %d is behind acknowledged %d", ErrStreamDiverged, *apiErr.Body.StoredThrough, s.acked)
+			if resyncs++; resyncs > maxResyncs {
+				return fmt.Errorf("%w at offset %d: %w", ErrResyncLimit, s.acked, err)
 			}
-			if err := s.ack(*apiErr.Body.StoredThrough, ""); err != nil {
+			if probe, err = s.resyncNeedsProbe(*apiErr.Body.StoredThrough); err != nil {
 				return err
 			}
 		default:
@@ -209,18 +243,36 @@ func (s *Streamer) Flush(ctx context.Context) error {
 	}
 }
 
-// ack frees bytes up to stored after checking the server's stream hash.
-func (s *Streamer) ack(stored int64, serverPrefix string) error {
+// resyncNeedsProbe reports whether a resync to stored needs a probe: true when
+// the server claims held bytes past acked. It frees nothing.
+func (s *Streamer) resyncNeedsProbe(stored int64) (bool, error) {
+	if stored < s.acked {
+		return false, fmt.Errorf("%w: server stored_through %d is behind acknowledged %d", ErrStreamDiverged, stored, s.acked)
+	}
+	if held := s.acked + int64(len(s.pending)); stored > held {
+		return false, fmt.Errorf("%w: server stored_through %d is past every held byte (%d)", ErrStreamDiverged, stored, held)
+	}
+	return stored > s.acked, nil
+}
+
+// ack frees bytes up to a 200's stored_through, and only when its stream hash
+// proves the server's bytes are ours. A 200 that does not move past acked
+// acknowledges nothing; accepting it would resend the same batch forever.
+func (s *Streamer) ack(resp AppendResponse) error {
+	stored := resp.StoredThrough
+	if resp.PrefixSHA256 == "" {
+		return fmt.Errorf("%w: 200 at stored_through %d carries no stream hash", ErrMalformedResponse, stored)
+	}
 	n := stored - s.acked
-	if n < 0 || n > int64(len(s.pending)) {
-		return fmt.Errorf("%w: stored_through %d outside held range [%d, %d]", ErrStreamDiverged, stored, s.acked, s.acked+int64(len(s.pending)))
+	if n <= 0 || n > int64(len(s.pending)) {
+		return fmt.Errorf("%w: stored_through %d outside held range (%d, %d]", ErrStreamDiverged, stored, s.acked, s.acked+int64(len(s.pending)))
 	}
 	next, err := s.hash.Clone()
 	if err != nil {
 		return err
 	}
 	next.Write(s.pending[:n])
-	if serverPrefix != "" && next.Sum() != serverPrefix {
+	if next.Sum() != resp.PrefixSHA256 {
 		return fmt.Errorf("%w: hash at %d differs", ErrStreamDiverged, stored)
 	}
 	s.hash, s.acked, s.pending = next, stored, s.pending[n:]

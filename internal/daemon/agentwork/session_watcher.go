@@ -11,7 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/claudesource"
@@ -666,7 +668,10 @@ func (m *SessionWatcherManager) pollCursorSession(ctx context.Context, aw *activ
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	for {
-		_, err := session.DrainCursorSource(ctx, aw.projectRoot, aw.cachePath, m.homeDir(), reader, false)
+		capture, err := session.DrainCursorSource(ctx, aw.projectRoot, aw.cachePath, m.homeDir(), reader, false)
+		if err == nil && capture != nil {
+			m.forwardLive(aw, capture.Appended)
+		}
 		if errors.Is(err, session.ErrNotRecording) || errors.Is(err, context.Canceled) {
 			return nil
 		}
@@ -806,17 +811,60 @@ func (m *SessionWatcherManager) appendBatch(aw *activeWatcher, rw *session.RawWr
 	if err := rw.AppendRecordingBatch(filepath.Join(aw.cachePath, recordingMarker), entries, newOffset); err != nil {
 		return err
 	}
+	if batch, ok, err := rw.LastAppended(); err != nil {
+		m.logger.Warn("live spool: could not read the appended batch", "session", aw.sessionName, "error", err)
+	} else if ok {
+		m.forwardLive(aw, batch)
+	}
+	return nil
+}
+
+// forwardLive hands a batch just committed to raw.jsonl to the live spooler.
+// Every capture path calls it (C8): the tail watcher's appendBatch and Cursor's
+// own transaction. It never feeds a stream the batch must not reach: one that
+// belongs to an earlier recording in a reused folder (C4), or a session held
+// on this machine (C1).
+func (m *SessionWatcherManager) forwardLive(aw *activeWatcher, batch session.AppendedBatch) {
+	if len(batch.Bytes) == 0 {
+		return
+	}
 	m.mu.Lock()
 	spool := m.liveSpool
 	m.mu.Unlock()
-	if spool != nil {
-		if batch, ok, err := rw.LastAppended(); err != nil {
-			m.logger.Warn("live spool: could not read the appended batch", "session", aw.sessionName, "error", err)
-		} else if ok {
-			spool(aw.cachePath, batch)
-		}
+	if spool == nil {
+		return
 	}
-	return nil
+	if reason := liveSpoolRefusal(aw); reason != "" {
+		m.logger.Debug("live spool skipped", "session", aw.sessionName, "reason", reason)
+		return
+	}
+	spool(aw.cachePath, batch)
+}
+
+// liveSpoolRefusal names why aw's committed bytes must not reach its live
+// stream, or returns "" when they may.
+func liveSpoolRefusal(aw *activeWatcher) string {
+	st, err := livesession.ReadState(aw.cachePath)
+	if err != nil {
+		return "not_streaming"
+	}
+	recPath := filepath.Join(aw.cachePath, recordingMarker)
+	data, err := os.ReadFile(recPath)
+	if err != nil {
+		return "no_recording"
+	}
+	rec, err := session.ParseRecordingState(recPath, data)
+	if err != nil || rec == nil {
+		return "no_recording"
+	}
+	if st.SessionID != rec.SessionID {
+		return "other_recording"
+	}
+	if session.IsHeld(aw.cachePath) || rec.RecordedManualPublishing() ||
+		(aw.projectRoot != "" && config.GetSessionPublishing(aw.projectRoot) == config.SessionPublishingManual) {
+		return "held"
+	}
+	return ""
 }
 
 // resolveAdapter returns the adapter for the given name.

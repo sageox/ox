@@ -1,6 +1,7 @@
 package livesession_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -54,9 +55,6 @@ func TestCloseWithServerDownLeavesClosingWithinBudgetAndLaterFinishes(t *testing
 	}
 	if st := e.state(); st.Status != livesession.StatusClosing {
 		t.Fatalf("persisted status = %s, want closing", st.Status)
-	}
-	if _, err := livesession.Spool(t.Context(), e.dir, lines(50, 51), livesession.SpoolOptions{}); !errors.Is(err, livesession.ErrNotStreaming) {
-		t.Fatalf("a closing session accepted more spool: %v", err)
 	}
 
 	e.srv.Hang(false) // the daemon's later tick
@@ -113,9 +111,24 @@ func TestAbortOnlineDeletesOnServerWithoutQueueing(t *testing.T) {
 	if err != nil || !res.Deleted || res.Queued || !e.srv.IsDeleted(e.st.ConversationID) {
 		t.Fatalf("abort online: %+v %v", res, err)
 	}
-	if _, err := os.Stat(filepath.Join(e.cfg.DataDir, "live-pending-deletes.json")); !os.IsNotExist(err) {
-		t.Fatalf("a confirmed delete was queued anyway: %v", err)
+	// the request is recorded before it is sent (C2), then dropped once confirmed
+	if q := pendingDeletes(t, e.cfg); len(q) != 0 {
+		t.Fatalf("a confirmed delete stayed queued: %+v", q)
 	}
+}
+
+// pendingDeletes reads the abort queue; a missing file is an empty queue.
+func pendingDeletes(t *testing.T, cfg livesession.Config) []livesession.PendingDelete {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(cfg.DataDir, "live-pending-deletes.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	var q []livesession.PendingDelete
+	if err != nil || json.Unmarshal(raw, &q) != nil {
+		t.Fatalf("read pending deletes: %v %s", err, raw)
+	}
+	return q
 }
 
 func TestAbortWithoutLiveStateDoesNothing(t *testing.T) {
@@ -131,6 +144,9 @@ func TestAbortWithoutLiveStateDoesNothing(t *testing.T) {
 // and nothing remembered that stop had happened, so the stream stayed open on
 // the server for good. The request must survive the lost lock.
 func TestCloseThatCannotTakeTheSessionStillRecordsTheRequest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("holds a drain open for 1.5s")
+	}
 	e := newEnv(t)
 	e.spool(lines(0, 4))
 	e.srv.Latency(1500 * time.Millisecond)
@@ -173,6 +189,9 @@ func TestCloseThatCannotTakeTheSessionStillRecordsTheRequest(t *testing.T) {
 // and never answers must not hold a drain past its budget, or the session's
 // one drain slot would be gone for good.
 func TestDrainAgainstALinkThatNeverAnswersStaysWithinBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits out a hung request (~1s)")
+	}
 	e := newEnv(t)
 	e.spool(lines(0, 2))
 	e.srv.Hang(true)
@@ -187,5 +206,27 @@ func TestDrainAgainstALinkThatNeverAnswersStaysWithinBudget(t *testing.T) {
 	e.srv.Hang(false)
 	if res := e.mustDrain(); !res.Done {
 		t.Fatalf("drain after the link answered again: %+v", res)
+	}
+}
+
+// TestCloseThatCannotGetALoginStillRecordsTheRequest: stop's close failed on
+// the login (a token refresh that did not answer within the end-hook budget)
+// before it ever took the session. The stream must still be remembered as
+// asked to close, or the daemon only drains it and never closes it.
+func TestCloseThatCannotGetALoginStillRecordsTheRequest(t *testing.T) {
+	e := newEnv(t)
+	e.spool(lines(0, 3))
+	noLogin := e.cfg
+	noLogin.Token = func(context.Context, string) (string, error) { return "", errors.New("token refresh failed") }
+
+	if res, err := livesession.Close(t.Context(), noLogin, e.dir, "", testBudget); err == nil || res.Done {
+		t.Fatalf("close without a login: %+v %v, want a deferred close", res, err)
+	}
+	if st := e.state(); !st.CloseRequested || st.Status != livesession.StatusStreaming {
+		t.Fatalf("after the failed close: status=%s close_requested=%v, want the request kept for the daemon", st.Status, st.CloseRequested)
+	}
+	res, err := livesession.Close(t.Context(), e.cfg, e.dir, "", testBudget) // the daemon, logged in again
+	if err != nil || res.Status != livesession.StatusClosed {
+		t.Fatalf("daemon close: %+v %v", res, err)
 	}
 }

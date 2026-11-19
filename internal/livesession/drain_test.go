@@ -238,3 +238,80 @@ func TestDrainConcurrentCallsAreSerializedByLock(t *testing.T) {
 		t.Fatal("server bytes differ from the spool after concurrent drains")
 	}
 }
+
+// Only answers known to settle a stream may stop it (C7). An answer this
+// client cannot classify (a new action, or a body without one) keeps the bytes
+// and retries like a 5xx; it must never switch off capture.
+func TestDrainRefusalsOnlyStopTheStreamWhenKnownToBeFinal(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		reason string
+		action sessionstream.Action
+		retry  bool
+	}{
+		{name: "unknown action retries", status: 409, reason: "new_reason", action: "rewind", retry: true},
+		{name: "body without action retries", status: 400, reason: "", action: "", retry: true},
+		{name: "explicit stop disables", status: 403, reason: sessionstream.ReasonForbidden, action: sessionstream.ActionStop},
+		{name: "fix disables", status: 400, reason: sessionstream.ReasonInvalidRequest, action: sessionstream.ActionFix},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.spool(lines(0, 3))
+			e.srv.RefuseNextAppend(tt.status, tt.reason, tt.action)
+
+			res, err := e.drain()
+			st := e.state()
+			if !tt.retry {
+				if err != nil || st.Status != livesession.StatusDisabled || st.DisabledReason != tt.reason {
+					t.Fatalf("res=%+v err=%v state=%+v, want disabled for %q", res, err, st, tt.reason)
+				}
+				return
+			}
+			if err == nil || res.Done || st.Status != livesession.StatusStreaming || st.Acked != 0 {
+				t.Fatalf("res=%+v err=%v state=%+v, want a retryable error with the stream intact", res, err, st)
+			}
+			if res := e.mustDrain(); !res.Done || !bytes.Equal(e.stored(e.state()), e.spoolBytes()) {
+				t.Fatalf("retry after an unclassified refusal: %+v", res)
+			}
+		})
+	}
+}
+
+// A server-side delete must never be forgotten (C3). When neither the hold
+// marker nor the stream state can be written, nothing durable knows of the
+// delete: the drain must fail, leaving the session to hear the 410 again, not
+// report a final status that only ever existed in memory.
+func TestDrainServerDeleteThatCannotBeRecordedIsHeardAgain(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only session folder")
+	}
+	e := newEnv(t)
+	e.spool(lines(0, 3))
+	e.srv.DeleteSession(e.st.ConversationID)
+	if err := os.Chmod(e.dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(e.dir, 0o700) })
+
+	if res, err := e.drain(); err == nil || res.Done {
+		t.Fatalf("res=%+v err=%v: an unrecorded delete was reported settled", res, err)
+	}
+	if livesession.WasDeletedOnServer(e.dir) {
+		t.Fatal("test setup: the delete was recorded despite the read-only folder")
+	}
+
+	if err := os.Chmod(e.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if res := e.mustDrain(); res.Status != livesession.StatusDeleted {
+		t.Fatalf("the next drain: %+v, want the delete heard and recorded", res)
+	}
+	if !livesession.WasDeletedOnServer(e.dir) {
+		t.Fatal("the stream state does not record the server-side delete")
+	}
+	if _, err := session.ReadHoldMarker(e.dir); err != nil {
+		t.Fatalf("no hold after the delete was heard again: %v", err)
+	}
+}

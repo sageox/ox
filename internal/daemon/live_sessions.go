@@ -61,7 +61,16 @@ type LiveSessions struct {
 	running map[string]*liveAttempt // a drain goroutine owns this session dir
 	rerun   map[string]bool         // another request arrived while it ran
 	backoff map[string]liveBackoff
-	wg      sync.WaitGroup
+	// known is every session the tick last saw streaming, so one whose folder
+	// disappears is reported instead of silently dropping out of the scan
+	known map[string]liveKnown
+	wg    sync.WaitGroup
+}
+
+// liveKnown is a streaming session as the tick last saw it.
+type liveKnown struct {
+	st      livesession.State
+	missing bool // its folder is gone and that was reported
 }
 
 // liveAttempt is the step a drain goroutine is running for one session.
@@ -72,8 +81,13 @@ type liveAttempt struct {
 }
 
 type liveBackoff struct {
+	// next is our own pacing, measured from the start of the failed attempt;
+	// liveBackoffSlack applies to it.
 	next  time.Time
 	delay time.Duration
+	// notBefore is a wait the server asked for (Retry-After), measured from
+	// when its refusal arrived. No slack: retrying early only draws more 429s.
+	notBefore time.Time
 }
 
 // NewLiveSessions creates the manager for sessions under sessionsDir.
@@ -83,6 +97,7 @@ func NewLiveSessions(logger *slog.Logger, sessionsDir, endpoint string) *LiveSes
 		config:  func(ep string) livesession.Config { return livesession.Config{Endpoint: ep, Logger: logger} },
 		now:     time.Now,
 		running: map[string]*liveAttempt{}, rerun: map[string]bool{}, backoff: map[string]liveBackoff{},
+		known: map[string]liveKnown{},
 	}
 }
 
@@ -104,18 +119,21 @@ func (l *LiveSessions) Run(ctx context.Context) {
 // Tick handles every session dir with an active stream state, then retries queued
 // abort deletes.
 func (l *LiveSessions) Tick(ctx context.Context) {
+	seen := map[string]livesession.State{}
 	entries, err := os.ReadDir(l.sessionsDir)
 	if err == nil {
 		for _, e := range entries {
 			if !e.IsDir() {
 				continue
 			}
-			dir := filepath.Join(l.sessionsDir, e.Name())
+			dir := canonicalDir(filepath.Join(l.sessionsDir, e.Name()))
 			if st, err := livesession.ReadState(dir); err == nil && liveActive(st) {
+				seen[dir] = st
 				l.request(ctx, dir)
 			}
 		}
 	}
+	l.trackSessionDirs(ctx, seen)
 	if l.endpoint == "" {
 		return
 	}
@@ -123,6 +141,60 @@ func (l *LiveSessions) Tick(ctx context.Context) {
 		l.logger.WarnContext(ctx, "live_pending_deletes_retry_failed", "confirmed", n, "error", err)
 	} else if n > 0 {
 		l.logger.InfoContext(ctx, "live_pending_deletes_confirmed", "confirmed", n)
+	}
+}
+
+// trackSessionDirs reports, once, a streaming session whose folder vanished,
+// and logs when it comes back (the next tick then streams it again). Without
+// it a session simply dropped out of the scan: the Ledger clone self-heal once
+// moved the whole half-made Ledger aside, sessions and all, and the daemon
+// went quiet with turns still unsent. A whole sessions folder disappearing is
+// never legitimate, so that is an ERROR; a single folder can be an abort or a
+// prune racing the tick, so that is a WARN.
+func (l *LiveSessions) trackSessionDirs(ctx context.Context, seen map[string]livesession.State) {
+	_, dirErr := os.Stat(l.sessionsDir)
+	var gone, back []string
+	l.mu.Lock()
+	for dir, st := range seen {
+		if k, ok := l.known[dir]; ok && k.missing {
+			back = append(back, dir)
+		}
+		l.known[dir] = liveKnown{st: st}
+	}
+	for dir, k := range l.known {
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		if _, err := os.Lstat(dir); err == nil {
+			delete(l.known, dir) // still there and no longer active: closed, deleted or disabled
+			continue
+		}
+		if !k.missing {
+			k.missing = true
+			l.known[dir] = k
+			gone = append(gone, dir)
+		}
+	}
+	reports := make(map[string]liveKnown, len(gone)+len(back))
+	for _, dir := range append(gone, back...) {
+		reports[dir] = l.known[dir]
+	}
+	l.mu.Unlock()
+
+	for _, dir := range gone {
+		st := reports[dir].st
+		args := []any{"path", dir, "sessions_dir", l.sessionsDir, "sessions_dir_missing", dirErr != nil,
+			"session_id", st.SessionID, "conversation_id", st.ConversationID, "layer_id", st.LayerID,
+			"status", string(st.Status), "acked", st.Acked}
+		if dirErr != nil {
+			l.logger.ErrorContext(ctx, "live_session_dir_missing", args...)
+		} else {
+			l.logger.WarnContext(ctx, "live_session_dir_missing", args...)
+		}
+	}
+	for _, dir := range back {
+		st := reports[dir].st
+		l.logger.InfoContext(ctx, "live_session_dir_back", "path", dir, "session_id", st.SessionID, "conversation_id", st.ConversationID)
 	}
 }
 
@@ -155,7 +227,7 @@ func (l *LiveSessions) Capture(ctx context.Context, sessionDir string, batch ses
 		return
 	}
 	if res.Appended > 0 {
-		l.request(ctx, sessionDir)
+		l.request(ctx, canonicalDir(sessionDir))
 	}
 }
 
@@ -163,17 +235,24 @@ func (l *LiveSessions) Capture(ctx context.Context, sessionDir string, batch ses
 func (l *LiveSessions) Wait() { l.wg.Wait() }
 
 func (l *LiveSessions) trusted(path string) (string, bool) {
-	clean := func(p string) string {
-		if r, err := filepath.EvalSymlinks(p); err == nil {
-			return r
-		}
-		return filepath.Clean(p)
-	}
-	dir := clean(path)
-	if l.sessionsDir == "" || filepath.Dir(dir) != clean(l.sessionsDir) {
+	dir := canonicalDir(path)
+	if l.sessionsDir == "" || filepath.Dir(dir) != canonicalDir(l.sessionsDir) {
 		return "", false
 	}
 	return dir, true
+}
+
+// canonicalDir is the one key a session folder has in the running, rerun,
+// backoff and known maps, however a caller spelled its path. The tick scans
+// sessionsDir as configured while a hook kick is resolved through symlinks;
+// keyed by spelling, a symlink anywhere in the cache path made them two
+// sessions, so kicks skipped the tick's backoff and both could drain at once.
+// A path that cannot be resolved (a folder already gone) falls back to Clean.
+func canonicalDir(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return filepath.Clean(p)
 }
 
 // request runs a drain for dir unless one is running (it then reruns once) or
@@ -193,7 +272,7 @@ func (l *LiveSessions) request(ctx context.Context, dir string) {
 		}
 		return
 	}
-	if b, ok := l.backoff[dir]; ok && now.Add(liveBackoffSlack).Before(b.next) {
+	if b, ok := l.backoff[dir]; ok && (now.Add(liveBackoffSlack).Before(b.next) || now.Before(b.notBefore)) {
 		l.mu.Unlock()
 		return
 	}
@@ -252,6 +331,10 @@ func (l *LiveSessions) step(ctx context.Context, dir string, started time.Time) 
 		return
 	}
 	log := l.logger.With("session_id", st.SessionID, "conversation_id", st.ConversationID, "layer_id", st.LayerID)
+	if session.IsHeld(dir) {
+		l.stopHeld(ctx, dir, st, started, log)
+		return
+	}
 	res, err := l.attempt(ctx, dir, st)
 	switch {
 	case errors.Is(err, livesession.ErrKeyConflict):
@@ -269,6 +352,23 @@ func (l *LiveSessions) step(ctx context.Context, dir string, started time.Time) 
 		l.clearBackoff(dir)
 		log.InfoContext(ctx, "live_session_step_partial", "status_before", string(st.Status), "status", string(res.Status), "acked", res.Acked)
 	}
+}
+
+// stopHeld ends the live stream of a session that was held after it started
+// streaming (stopped with session_publishing: manual, or handed off by /clear).
+// Held means "not shared until I upload": nothing more is appended, no close
+// publishes it, and the copy already on SageOx is deleted with the signed abort
+// (queued if SageOx is unreachable). raw.jsonl stays on this machine.
+func (l *LiveSessions) stopHeld(ctx context.Context, dir string, st livesession.State, started time.Time, log *slog.Logger) {
+	res, err := livesession.Abort(ctx, l.config(st.Endpoint), dir, livesession.AbortBudget)
+	if err != nil {
+		delay := l.fail(dir, 0, started)
+		log.WarnContext(ctx, "live_session_held_stop_failed", "status", string(st.Status), "retry_in_ms", delay.Milliseconds(), "error", err)
+		return
+	}
+	l.clearBackoff(dir)
+	log.InfoContext(ctx, "live_session_held_stopped", "status_before", string(st.Status),
+		"deleted", res.Deleted, "queued", res.Queued, "refused", res.Refused, "reason", res.Reason)
 }
 
 // attempt runs one open-and-drain, or a close once stop asked for one.
@@ -292,19 +392,26 @@ func (l *LiveSessions) attempt(ctx context.Context, dir string, st livesession.S
 	return livesession.Drain(ctx, cfg, dir, liveDrainBudget)
 }
 
+// fail records a failed attempt and returns how long until the next one may
+// run. Our own backoff counts from when the attempt started; a server's
+// Retry-After counts from its refusal, which arrived no later than now.
 func (l *LiveSessions) fail(dir string, retryAfter time.Duration, started time.Time) time.Duration {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	now := l.now()
 	b := l.backoff[dir]
 	if b.delay == 0 {
 		b.delay = liveBackoffBase
 	} else {
 		b.delay = min(b.delay*2, liveBackoffCap)
 	}
-	delay := max(b.delay, retryAfter)
-	b.next = started.Add(delay)
+	b.next = started.Add(b.delay)
+	b.notBefore = time.Time{}
+	if retryAfter > 0 {
+		b.notBefore = now.Add(retryAfter)
+	}
 	l.backoff[dir] = b
-	return delay
+	return max(b.next.Sub(now), b.notBefore.Sub(now), 0)
 }
 
 func (l *LiveSessions) clearBackoff(dir string) {

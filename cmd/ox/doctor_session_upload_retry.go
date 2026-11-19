@@ -13,6 +13,7 @@ import (
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
@@ -79,10 +80,9 @@ func checkSessionUploadRetry() checkResult {
 			slog.Warn("session upload retry failed", "session", orphan.SessionName, "error", err)
 			failed++
 		} else {
-			// all files copied and committed to ledger — prune local cache
-			if err := os.RemoveAll(orphan.CachePath); err != nil {
-				slog.Debug("prune session cache after retry", "dir", orphan.CachePath, "error", err)
-			}
+			// all files copied and committed to ledger — prune local cache; an
+			// unfinished live stream keeps its files for the daemon to close
+			agentwork.PruneSessionCache(slog.Default(), orphan.CachePath)
 			succeeded++
 		}
 	}
@@ -414,6 +414,11 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 	if orphan.EntryCount == 0 {
 		slog.Info("skipping retry upload: zero entries", "session", orphan.SessionName)
 		return nil
+	}
+	// the publication boundary (C3): a session deleted on SageOx while it
+	// streamed is never published, by doctor or by 'ox session upload'
+	if err := refuseDeletedOnServer(orphan.CachePath); err != nil {
+		return err
 	}
 
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
