@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -208,16 +207,20 @@ func mayHoldPrompt(dir string) bool {
 		return true
 	}
 	defer func() { _ = f.Close() }() // read-only: nothing to flush
-	r := bufio.NewReader(f)
-	for {
-		line, err := r.ReadBytes('\n')
+	// Bounded per line: this runs before authorize, on a spool in a checkout a
+	// Ledger contributor can write to, so a planted newline-free spool must not
+	// make the probe allocate it whole. The spool never holds a line longer
+	// than one batch (longer ones become an oversized_line gap), so a longer
+	// line proves nothing: say "may hold" and let authorize decide.
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), sessionstream.MaxBatchBytes+1)
+	for sc.Scan() {
+		line := append(append([]byte(nil), sc.Bytes()...), '\n')
 		if declaredGapLine.Match(line) || oxsession.IsUserTurnLine(line) {
 			return true
 		}
-		if err != nil {
-			return !errors.Is(err, io.EOF)
-		}
 	}
+	return sc.Err() != nil
 }
 
 // abortedWhileOpening queues the delete of a conversation this open may have
