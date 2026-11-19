@@ -2463,11 +2463,16 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 		return "", fmt.Errorf("create session copy dir: %w", err)
 	}
 
-	// An upload-only cache can contain artifacts but lack metadata. Persist
-	// the identity before copying so a failed push won't leave the only ID
-	// on the Ledger side. An existing Ledger record supplies its own meta.
-	if payload.UploadOnly {
-		if _, err := os.Lstat(filepath.Join(destDir, "meta.json")); errors.Is(err, fs.ErrNotExist) {
+	// An upload-only cache can contain artifacts but lack metadata. When the
+	// raw header carries no ID either, persist the minted identity before
+	// copying so a failed push won't leave the only ID on the Ledger side.
+	// Seeding a header-identified cache would leave a title-less meta that
+	// re-queues the retry for summarization. An existing Ledger record
+	// supplies its own meta.
+	if payload.UploadOnly && recordingID == "" {
+		_, destErr := os.Lstat(filepath.Join(destDir, "meta.json"))
+		_, cacheErr := os.Lstat(filepath.Join(cacheDir, "meta.json"))
+		if errors.Is(destErr, fs.ErrNotExist) && errors.Is(cacheErr, fs.ErrNotExist) {
 			if err := lfs.MutateSessionMeta(h.rootContext(), cacheDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
 				if current != nil {
 					return nil, nil
