@@ -79,6 +79,10 @@ type Result struct {
 	// LiveSecretWithheld: the live stream left out a part of the session the
 	// publication secret scan refused (a secret_withheld gap). Stop says so once.
 	LiveSecretWithheld bool
+	// EarlierLiveSecretWithheld: an earlier recording's live stream in this
+	// project withheld a part after its own stop could say so (its close was
+	// left to the daemon, or a hook stopped it). Said once, by the next start or stop.
+	EarlierLiveSecretWithheld bool
 
 	// Adapter-detected terminal-stop metadata, populated by the daemon's
 	// terminal-error handler when finalizing a session that the adapter

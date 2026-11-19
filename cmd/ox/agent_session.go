@@ -325,6 +325,13 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		}
 		return fmt.Errorf("failed to start recording: %w", err)
 	}
+	// an earlier recording's stream may have withheld a secret after its stop
+	// could say so. Before the header write: in a reused folder that
+	// write removes an ended stream's files, its owed notice with them.
+	if takeEarlierLiveSecretWithheld(state.SessionPath) {
+		notice = strings.TrimSpace(notice + "\n\n" + liveSecretWithheldEarlierWarning)
+	}
+
 	// write raw.jsonl header immediately so incremental hooks can append entries
 	if adapterName != "cursor" {
 		if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
@@ -851,6 +858,9 @@ func outputTextSummary(projectRoot string, state *session.RecordingState, durati
 		if processResult.LiveSecretWithheld && !processResult.DeletedOnServer {
 			fmt.Printf("  %s\n", liveSecretWithheldWarning)
 		}
+		if processResult.EarlierLiveSecretWithheld {
+			fmt.Printf("  %s\n", liveSecretWithheldEarlierWarning)
+		}
 
 		// show generated files with descriptions
 		if processResult.RawPath != "" || processResult.SummaryMDPath != "" {
@@ -1338,7 +1348,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// be recorded, the stop fails and the recording state is kept. A session
 	// deleted on SageOx while it streamed is held the same way, for its own reason.
 	deletedOnServer := liveDeletedOnServer(state.SessionPath)
-	result.LiveSecretWithheld = liveSecretWithheld(state)
+	result.LiveSecretWithheld, result.EarlierLiveSecretWithheld = liveSecretWithheldNotices(state)
 	held := deletedOnServer || stopHoldsSession(projectRoot, state)
 	switch {
 	case deletedOnServer:

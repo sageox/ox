@@ -36,6 +36,11 @@ const (
 	// already declared. The next spool write, or the close, declares the rest,
 	// so the loss shows in the stream instead of vanishing.
 	spoolLostDeclaredFileName = "spool-lost-declared"
+	// noticeOwedFileName marks a stream whose person may still be owed the
+	// notice that it withheld a secret (OweSecretWithheldNotice). Like
+	// close-requested it is a file of its own, written without live.lock: a
+	// drain persisting stream-state.json would overwrite a flag kept in it.
+	noticeOwedFileName = "withheld-notice-owed"
 )
 
 // IsLocalFile reports whether name is one of the live-stream files this package
@@ -45,7 +50,7 @@ const (
 func IsLocalFile(name string) bool {
 	switch name {
 	case spoolFileName, stateFileName, lockFileName, closeRequestFileName, deleteRequestFileName,
-		spoolLostFileName, spoolLostDeclaredFileName:
+		spoolLostFileName, spoolLostDeclaredFileName, noticeOwedFileName:
 		return true
 	}
 	return false
@@ -119,6 +124,55 @@ type State struct {
 }
 
 func (s State) active() bool { return s.Status == StatusStreaming || s.Status == StatusClosing }
+
+// OweSecretWithheldNotice records that the person behind the stream in dir has
+// not been told it withheld a secret, and may need to be: their recording
+// stopped while the stream could still withhold (its close left to the
+// daemon), or a hook stopped it with no one to tell. TakeSecretWithheldNotices
+// says it once the stream has withheld.
+func OweSecretWithheldNotice(dir string) error {
+	if err := os.WriteFile(filepath.Join(dir, noticeOwedFileName), nil, 0o600); err != nil {
+		return fmt.Errorf("record owed withheld notice: %w", err)
+	}
+	return nil
+}
+
+// TakeSecretWithheldNotices returns how many streams in the session folders
+// under sessionsDir (a moved stream's .live-<id> folder included) owe their
+// person the withheld notice and have withheld a secret by now. The caller
+// says it, and they owe it no longer. A stream that ended without withholding,
+// or was deleted, owes nothing any more; one that may still withhold keeps its
+// mark. A mark that cannot be removed is said again next time: twice beats never.
+func TakeSecretWithheldNotices(sessionsDir string) int {
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(sessionsDir, e.Name())
+		mark := filepath.Join(dir, noticeOwedFileName)
+		if _, err := os.Lstat(mark); err != nil {
+			continue
+		}
+		st, err := ReadState(dir)
+		switch {
+		case errors.Is(err, ErrNotStreaming), err == nil && st.Status == StatusDeleted:
+			// nothing left to tell: the stream is gone, or so is its server copy
+		case err == nil && st.SecretWithheld:
+			n++
+		case err == nil && (st.Status == StatusClosed || st.Status == StatusDisabled):
+			// ended without withholding anything
+		default:
+			continue // may still withhold, or unreadable for now
+		}
+		_ = os.Remove(mark)
+	}
+	return n
+}
 
 // reachedServer reports whether the server may hold this session's
 // conversation, so that abort has to delete it there.

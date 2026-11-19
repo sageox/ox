@@ -98,7 +98,7 @@ func TestAbortRecordsTheDeleteBeforeWaitingForTheSession(t *testing.T) {
 
 	held, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 	go func() {
-		done <- fileutil.WithFileLock(t.Context(), filepath.Join(e.dir, "live.lock"), func() error {
+		done <- fileutil.WithFileLock(t.Context(), livesession.LockTarget(e.dir), func() error {
 			close(held)
 			<-release
 			return nil

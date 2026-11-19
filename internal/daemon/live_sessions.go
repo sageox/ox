@@ -65,7 +65,8 @@ type LiveSessions struct {
 	// config builds the livesession config for an endpoint; tests point it at a fake server.
 	config func(endpoint string) livesession.Config
 	now    func() time.Time
-	// refreshRules fetches the secret rules' upstream delta; tests replace it.
+	// refreshRules fetches the current secret rules and persists them for every
+	// publishing process; tests replace it.
 	refreshRules func(context.Context) error
 	// rulesFailing: the last rules refresh failed. Owned by the refresh loop.
 	rulesFailing bool
@@ -105,14 +106,19 @@ type liveBackoff struct {
 
 // NewLiveSessions creates the manager for sessions under sessionsDir.
 func NewLiveSessions(logger *slog.Logger, sessionsDir, endpoint string) *LiveSessions {
-	return &LiveSessions{
+	l := &LiveSessions{
 		logger: logger, sessionsDir: sessionsDir, endpoint: endpoint,
-		config:       func(ep string) livesession.Config { return livesession.Config{Endpoint: ep, Logger: logger} },
-		now:          time.Now,
-		refreshRules: livesession.RefreshSecretRules,
-		running:      map[string]*liveAttempt{}, rerun: map[string]bool{}, backoff: map[string]liveBackoff{},
+		config:  func(ep string) livesession.Config { return livesession.Config{Endpoint: ep, Logger: logger} },
+		now:     time.Now,
+		running: map[string]*liveAttempt{}, rerun: map[string]bool{}, backoff: map[string]liveBackoff{},
 		known: map[string]liveKnown{},
 	}
+	// persisted in the data dir the drains read, so the CLI's stop-time close
+	// scans with the same rules as this daemon
+	l.refreshRules = func(ctx context.Context) error {
+		return livesession.RefreshSecretRules(ctx, l.config(l.endpoint).DataDir)
+	}
+	return l
 }
 
 // Run sweeps until ctx ends. The secret rules refresh runs beside the sweep,
@@ -152,10 +158,10 @@ func (l *LiveSessions) refreshRulesEvery(ctx context.Context, interval time.Dura
 	}
 }
 
-// refreshRulesOnce runs one refresh. A failure keeps the last good delta
+// refreshRulesOnce runs one refresh. A failure keeps the last good catalog
 // (drains scan with it, or with the bundled catalog alone before any refresh
-// succeeded), so it is logged once per failure streak rather than every
-// interval, and the recovery once.
+// succeeded on this machine), so it is logged once per failure streak rather
+// than every interval, and the recovery once.
 func (l *LiveSessions) refreshRulesOnce(ctx context.Context) {
 	err := l.refreshRules(ctx)
 	switch {

@@ -258,25 +258,75 @@ const liveSecretWithheldWarning = "Part of this session looked like a credential
 // liveSecretWithheldGuidance asks the agent to pass that notice on.
 const liveSecretWithheldGuidance = "Part of this session was left out of the live view on SageOx because it looked like a credential. Tell the user once, in plain words, using the data_warnings entry. Do not repeat or guess what it was."
 
-// liveSecretWithheld reports whether this recording's live stream withheld a
-// batch the publication secret scan refused. A stream left in a reused folder
-// by another recording does not count.
-func liveSecretWithheld(state *session.RecordingState) bool {
+// liveSecretWithheldEarlierWarning tells the person about an earlier
+// recording's stream that withheld a secret after its stop could say so: its
+// close was left to the daemon, or a hook stopped it.
+const liveSecretWithheldEarlierWarning = "Part of an earlier session looked like a credential, so it was left out of its live view on SageOx. It is still saved on this machine."
+
+// liveSecretWithheldEarlierGuidance asks the agent to pass that notice on.
+const liveSecretWithheldEarlierGuidance = "Part of an earlier session was left out of its live view on SageOx because it looked like a credential. Tell the user once, in plain words, using the data_warnings entry. Do not repeat or guess what it was."
+
+// liveSecretWithheldNotices settles, at a stop, the withheld notices the stop
+// can give: this recording's own (see settleLiveSecretWithheldNotice),
+// and earlier ones owed in this project (takeEarlierLiveSecretWithheld).
+func liveSecretWithheldNotices(state *session.RecordingState) (this, earlier bool) {
+	if state == nil {
+		return false, false
+	}
+	earlier = takeEarlierLiveSecretWithheld(state.SessionPath)
+	return settleLiveSecretWithheldNotice(state, true), earlier
+}
+
+// settleLiveSecretWithheldNotice reports whether this recording's live stream
+// withheld a batch the publication secret scan refused, for a stop to tell the
+// person now. A stream that ended has nothing left to withhold, so that answer
+// is final. One still unfinished (its close left to the daemon, or never
+// requested) may withhold after the stop returns, and a hook's stop (canTell
+// false) has no one to tell, so then the stream owes the notice and the next
+// session start or stop in this project says it. A stream left in a reused
+// folder by another recording, or deleted on SageOx, does not count.
+func settleLiveSecretWithheldNotice(state *session.RecordingState, canTell bool) bool {
 	if state == nil || state.SessionPath == "" {
 		return false
 	}
 	st, err := livesession.ReadState(state.SessionPath)
-	return err == nil && st.SessionID == state.SessionID && st.SecretWithheld
+	if err != nil || st.SessionID != state.SessionID || st.DeletedOnServer || st.Status == livesession.StatusDeleted {
+		return false
+	}
+	if st.SecretWithheld && canTell {
+		return true
+	}
+	ended := st.Status == livesession.StatusClosed || st.Status == livesession.StatusDisabled
+	if !st.SecretWithheld && ended {
+		return false
+	}
+	if err := livesession.OweSecretWithheldNotice(state.SessionPath); err != nil {
+		slog.Warn("live_session_withheld_notice_unrecorded", "session_id", st.SessionID, "error", err)
+	}
+	return false
 }
 
-// addLiveSecretWithheldNotice adds the withheld notice to a stop's output.
-// A session deleted on SageOx already says it was not shared at all.
-func addLiveSecretWithheldNotice(output *sessionStopOutput, result *agentSessionResult) {
-	if !result.LiveSecretWithheld || result.DeletedOnServer {
-		return
+// takeEarlierLiveSecretWithheld reports whether an earlier recording's stream
+// in the session folders beside sessionDir owed its person the withheld notice
+// and has withheld since. Each is said once.
+func takeEarlierLiveSecretWithheld(sessionDir string) bool {
+	if sessionDir == "" {
+		return false
 	}
-	output.DataWarnings = append(output.DataWarnings, liveSecretWithheldWarning)
-	output.Guidance += " " + liveSecretWithheldGuidance
+	return livesession.TakeSecretWithheldNotices(filepath.Dir(sessionDir)) > 0
+}
+
+// addLiveSecretWithheldNotice adds the withheld notices to a stop's output. A
+// session deleted on SageOx already says it was not shared at all.
+func addLiveSecretWithheldNotice(output *sessionStopOutput, result *agentSessionResult) {
+	if result.LiveSecretWithheld && !result.DeletedOnServer {
+		output.DataWarnings = append(output.DataWarnings, liveSecretWithheldWarning)
+		output.Guidance += " " + liveSecretWithheldGuidance
+	}
+	if result.EarlierLiveSecretWithheld {
+		output.DataWarnings = append(output.DataWarnings, liveSecretWithheldEarlierWarning)
+		output.Guidance += " " + liveSecretWithheldEarlierGuidance
+	}
 }
 
 // liveDeletedOnServer reports whether the server deleted this session while it
@@ -436,11 +486,6 @@ func heldLiveWarning(base string, fin liveFinish) string {
 	return base
 }
 
-// liveLockFileName is livesession's per-session lock (livesession.withLock
-// takes fileutil's advisory lock keyed by <session dir>/live.lock). Holding it
-// means no drain, open or close is mid-way through the session's live files.
-const liveLockFileName = "live.lock"
-
 // liveCloseRequestFileName is livesession's close-request marker; ReadState
 // reports it as State.CloseRequested.
 const liveCloseRequestFileName = "close-requested"
@@ -457,7 +502,9 @@ const liveCloseRequestFileName = "close-requested"
 func retirePreviousLiveStream(projectRoot, dir, prevSessionID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), liveLocalBound)
 	defer cancel()
-	return fileutil.WithFileLockTimeout(ctx, filepath.Join(dir, liveLockFileName), liveLocalBound, func() error {
+	// livesession's own per-session lock: holding it means no drain, open or
+	// close is mid-way through the session's live files
+	return fileutil.WithFileLockTimeout(ctx, livesession.LockTarget(dir), liveLocalBound, func() error {
 		st, err := livesession.ReadState(dir)
 		if errors.Is(err, livesession.ErrNotStreaming) {
 			return nil

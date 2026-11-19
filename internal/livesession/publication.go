@@ -5,8 +5,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
 	"sync/atomic"
 
+	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/secretguard"
 )
 
@@ -17,54 +25,183 @@ import (
 // catalog, so it cannot stand in for this check.
 //
 // Unlike Ledger publication, a stream never waits on the network for the
-// current rules (F2). It scans with the bundled catalog plus the delta from the
-// last upstream fetch that succeeded, which the daemon refreshes in the
-// background (RefreshSecretRules). A stream publishes on every tool call;
-// waiting on raw.githubusercontent.com there meant a network that blocks it
-// streamed nothing, and an upstream outage stalled every live session at once.
+// current rules (F2). The daemon refreshes them in the background
+// (RefreshSecretRules) and keeps the last catalog it validated in the ox data
+// dir; every publishing process, the daemon's drains and the CLI's stop-time
+// close alike, scans with the delta of that file (loadRules). A stream
+// publishes on every tool call; waiting on raw.githubusercontent.com there
+// meant a network that blocks it streamed nothing, and an upstream outage
+// stalled every live session at once. The accepted cost: until a refresh has
+// succeeded once on this machine, the scan is the bundled catalog alone. The
+// server's own scan of every append is the second layer.
 
 // scanName is the content name handed to the guard. Path-only rules match it,
 // so it is a name no sensitive-file rule names: the one Ledger publication uses.
 const scanName = "sessions/content"
 
-// currentRules loads the current upstream catalog; tests replace it.
-var currentRules = secretguard.LatestRules
+// rulesFileName is the last upstream catalog a refresh validated, in the ox
+// data dir beside the minted-conversation registry. It is the whole catalog,
+// not the delta: a compiled rule set has no file form, and the delta depends
+// on the bundled catalog of the binary that loads it.
+const rulesFileName = "live-secret-rules.toml"
 
-// lastDelta holds the rules the current upstream catalog adds to the bundled
-// one, from the last refresh that succeeded. Nil until one has, and in any
-// process that never refreshes (a CLI stop): the bundled catalog alone then.
-var lastDelta atomic.Pointer[secretguard.RuleSet]
+// maxRulesFileBytes matches the bound secretguard puts on a fetched catalog: a
+// larger file is not one a refresh wrote.
+const maxRulesFileBytes = 4 << 20
 
-// RefreshSecretRules fetches the current upstream catalog and keeps what it
-// adds to the bundled one for every later publication check in this process.
-// A failure keeps the last good delta. It waits on the network, so only a
-// background loop may call it, never a drain.
-func RefreshSecretRules(ctx context.Context) error {
-	rules, err := currentRules(ctx)
+// currentCatalog fetches and validates the current upstream catalog; tests
+// replace it.
+var currentCatalog = secretguard.LatestCatalog
+
+// rulesSnapshot is the delta compiled from one version of the persisted catalog.
+type rulesSnapshot struct {
+	path string
+	// file is the catalog file the delta came from. Nil when this process
+	// refreshed but could not persist: its delta is then newer than the file.
+	file  os.FileInfo
+	delta *secretguard.RuleSet // nil: the bundled catalog alone
+}
+
+// loadedRules caches the last snapshot, so the catalog is compiled again only
+// when the file changed, not on every drain.
+var loadedRules atomic.Pointer[rulesSnapshot]
+
+func rulesPath(dataDir string) string { return SecretRulesPath(dataDir) }
+
+// SecretRulesPath is the file holding the last upstream secret catalog a
+// refresh validated, in dataDir (empty: the ox data dir).
+func SecretRulesPath(dataDir string) string {
+	if dataDir == "" {
+		dataDir = paths.DataDir()
+	}
+	return filepath.Join(dataDir, rulesFileName)
+}
+
+// RefreshSecretRules fetches the current upstream catalog and keeps it in
+// dataDir (empty: the ox data dir) for every later publication check on this
+// machine, in this process and others. A failure keeps the last good catalog.
+// It waits on the network, so only a background loop may call it, never a drain.
+func RefreshSecretRules(ctx context.Context, dataDir string) error {
+	catalog, err := currentCatalog(ctx)
 	if err != nil {
 		return fmt.Errorf("refresh secret rules: %w", err)
 	}
-	if rules == nil || rules.RuleCount() == 0 {
-		// a delta of an empty catalog refuses everything as "missing catalog";
-		// keeping it would stall every drain behind an error no retry can fix
-		return errors.New("refresh secret rules: current catalog has no rules")
+	delta, err := catalogDelta(catalog)
+	if err != nil {
+		return fmt.Errorf("refresh secret rules: %w", err)
 	}
-	lastDelta.Store(rules.Delta(secretguard.Bundled()))
+	path := rulesPath(dataDir)
+	file, err := saveCatalog(ctx, path, catalog)
+	// this process scans with what it fetched even if no other process can
+	loadedRules.Store(&rulesSnapshot{path: path, file: file, delta: delta})
+	if err != nil {
+		return fmt.Errorf("refresh secret rules: keep them for other processes: %w", err)
+	}
 	return nil
 }
 
-// checkPublication refuses content that publication would refuse. It does no
-// I/O. A *secretguard.RefusedError means these bytes are refused every time.
-func checkPublication(content []byte) error {
+// catalogDelta compiles a validated catalog into what it adds to the bundled one.
+func catalogDelta(catalog []byte) (*secretguard.RuleSet, error) {
+	rules, err := secretguard.NewRules(catalog)
+	if err != nil {
+		return nil, err
+	}
+	return rules.Delta(secretguard.Bundled()), nil
+}
+
+// saveCatalog writes catalog to path atomically, under the file's lock: one
+// daemon runs per repository, and they share the data dir.
+func saveCatalog(ctx context.Context, path string, catalog []byte) (os.FileInfo, error) {
+	if err := fileutil.EnsurePrivateDir(filepath.Dir(path)); err != nil {
+		return nil, err
+	}
+	var info os.FileInfo
+	err := fileutil.WithFileLockTimeout(ctx, path, pendingLockWait, func() error {
+		if err := fileutil.AtomicWriteBytes(path, catalog, 0o600); err != nil {
+			return err
+		}
+		var err error
+		info, err = os.Stat(path)
+		return err
+	})
+	return info, err
+}
+
+// loadRules returns the delta of the persisted catalog for a publication
+// check. It never touches the network. No file means no refresh has succeeded
+// on this machine yet; a file that cannot be read or compiled is logged once
+// per version, and the scan is the bundled catalog alone until the next
+// refresh replaces it.
+func loadRules(ctx context.Context, dataDir string, log *slog.Logger) *secretguard.RuleSet {
+	path := rulesPath(dataDir)
+	snap := loadedRules.Load()
+	if snap != nil && snap.path == path && snap.file == nil {
+		return snap.delta
+	}
+	info, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		log.WarnContext(ctx, "live_secret_rules_unreadable", "impact", "this scan uses the bundled catalog alone", "error", err)
+		return nil
+	}
+	if snap != nil && snap.path == path && sameVersion(snap.file, info) {
+		return snap.delta
+	}
+	delta, err := readCatalogDelta(path)
+	if err != nil {
+		log.WarnContext(ctx, "live_secret_rules_unreadable", "impact", "live streams scan with the bundled catalog alone until the next refresh", "error", err)
+	}
+	loadedRules.Store(&rulesSnapshot{path: path, file: info, delta: delta})
+	return delta
+}
+
+// sameVersion reports whether two stats name one version of a file. A refresh
+// renames a new file into place, so the inode alone tells versions apart; size
+// and time guard filesystems that reuse inodes.
+func sameVersion(a, b os.FileInfo) bool {
+	return os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
+}
+
+func readCatalogDelta(path string) (*secretguard.RuleSet, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }() // read-only: nothing to flush
+	catalog, err := io.ReadAll(io.LimitReader(f, maxRulesFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(catalog) > maxRulesFileBytes {
+		return nil, fmt.Errorf("%s is over %d bytes", rulesFileName, maxRulesFileBytes)
+	}
+	return catalogDelta(catalog)
+}
+
+// checkPublication refuses content that publication would refuse: the bundled
+// catalog, then delta. It does no I/O. A *secretguard.RefusedError means these
+// bytes are refused every time under these rules.
+func checkPublication(delta *secretguard.RuleSet, content []byte) error {
 	if err := secretguard.ValidateContent(scanName, content); err != nil {
 		return fmt.Errorf("live upload refused: %w", err)
 	}
-	if delta := lastDelta.Load(); delta != nil {
+	if delta != nil {
 		if err := delta.ValidateContent(scanName, content); err != nil {
 			return fmt.Errorf("live upload refused by current rules: %w", err)
 		}
 	}
 	return nil
+}
+
+// checkPublication scans content with the rules persisted when this call
+// first needed them; one Drain or Close scans every batch with the same rules.
+func (s *session) checkPublication(ctx context.Context, content []byte) error {
+	if !s.rulesLoaded {
+		s.rules, s.rulesLoaded = loadRules(ctx, s.cfg.DataDir, s.log()), true
+	}
+	return checkPublication(s.rules, content)
 }
 
 // secretWithheldPrefix opens every gap line withholdRefused writes. The viewer
@@ -81,43 +218,48 @@ func secretWithheldGap(n int) []byte {
 // withheldBatch is a batch the publication scan refused and what replaces it.
 type withheldBatch struct {
 	size  int64  // bytes of the refused batch
-	next  []byte // the batch with its refused lines replaced by gap lines
-	lines int    // gap lines in next
-	bytes int64  // bytes those gap lines stand for
+	next  []byte // its leading earlier gap lines, then the one new gap line
+	bytes int64  // bytes the new gap line stands for
 }
 
-// withholdRefused replaces every line of a refused batch that the scan refuses
-// on its own with a secret_withheld gap line; the other lines still stream.
-// A match that spans lines refuses no line on its own, so then the whole batch
-// becomes one gap. The drain scans the result again before sending any of it,
-// so lines refused only together with others are withheld on that pass.
+// withheldGapLine is exactly a gap line withholdRefused wrote. Nothing looser
+// may match: a captured line dressed as a gap could otherwise carry content
+// past the scan.
+var withheldGapLine = regexp.MustCompile(`^\{"type":"gap","reason":"secret_withheld","bytes":[0-9]+\}\n$`)
+
+// withholdRefused replaces a refused batch with one secret_withheld gap line
+// standing for all of its content (F1). Withholding only the lines refused
+// on their own lost the context a match spans: a Helm extraEnv name and its
+// value on separate lines, a match split across lines, or a gap line longer
+// than the line it replaced pushing a line into the next batch, which nothing
+// then scans with the rest. A later scan of what is left cannot recover deleted
+// context, so nothing in a refused batch streams.
+//
+// The one exception leads the batch: gap lines an earlier withhold wrote that
+// the server has not taken yet. They hold no content and declare their own
+// sizes, so they stay as they are rather than being counted into this gap.
 func withholdRefused(batch []byte) (withheldBatch, error) {
-	w := withheldBatch{size: int64(len(batch))}
+	lead := 0
 	for line := range bytes.Lines(batch) {
-		if checkPublication(line) == nil {
-			w.next = append(w.next, line...)
-			continue
+		if !withheldGapLine.Match(line) {
+			break
 		}
-		if bytes.HasPrefix(line, []byte(secretWithheldPrefix)) {
-			// replacing a gap line with another one could go on forever
-			return w, errors.New("the secret scan refused a secret_withheld gap line")
-		}
-		n := len(bytes.TrimSuffix(line, []byte("\n")))
-		w.next = append(w.next, secretWithheldGap(n)...)
-		w.lines++
-		w.bytes += int64(n)
+		lead += len(line)
 	}
-	if w.lines == 0 {
-		n := len(bytes.TrimSuffix(batch, []byte("\n")))
-		w.next, w.lines, w.bytes = secretWithheldGap(n), 1, int64(n)
+	content := batch[lead:]
+	if len(content) == 0 {
+		// replacing gap lines with another one could go on forever
+		return withheldBatch{}, errors.New("the secret scan refused secret_withheld gap lines")
 	}
-	return w, nil
+	n := len(bytes.TrimSuffix(content, []byte("\n")))
+	next := append(bytes.Clone(batch[:lead]), secretWithheldGap(n)...)
+	return withheldBatch{size: int64(len(batch)), next: next, bytes: int64(n)}, nil
 }
 
 // withhold writes s.withheld into the spool and the stream goes on (F1). The
 // same bytes are refused every time, and the stream cannot skip them while they
-// sit in the spool, so the spool itself changes: gap lines stream in their
-// place and declare their size. raw.jsonl keeps them on this machine.
+// sit in the spool, so the spool itself changes: a gap line streams in their
+// place and declares their size. raw.jsonl keeps them on this machine.
 func (s *session) withhold(ctx context.Context) error {
 	w := s.withheld
 	s.withheld = withheldBatch{}
@@ -133,7 +275,7 @@ func (s *session) withhold(ctx context.Context) error {
 		return fmt.Errorf("withhold %d refused bytes at offset %d: %w", w.bytes, s.st.Acked, err)
 	}
 	// ids and sizes only: the refusal's text and the bytes stay out of every log
-	s.log().WarnContext(ctx, "live_session_secret_withheld", "offset", s.st.Acked, "lines", w.lines, "bytes", w.bytes)
+	s.log().WarnContext(ctx, "live_session_secret_withheld", "offset", s.st.Acked, "bytes", w.bytes)
 	return nil
 }
 
@@ -144,7 +286,7 @@ func (s *session) publishableSummary(ctx context.Context, summary string) string
 	if summary == "" {
 		return ""
 	}
-	if err := checkPublication([]byte(summary)); err != nil {
+	if err := s.checkPublication(ctx, []byte(summary)); err != nil {
 		s.log().WarnContext(ctx, "live_session_summary_withheld", "error", err)
 		return ""
 	}

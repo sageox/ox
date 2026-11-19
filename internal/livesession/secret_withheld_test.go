@@ -18,18 +18,44 @@ func (e *env) captureLogs() *lockedBuffer {
 	return logs
 }
 
-// withheldGapFor is the gap line that replaces one refused line. It counts the
-// line's bytes without its newline, which the gap line keeps.
-func withheldGapFor(line []byte) []byte {
-	return fmt.Appendf(nil, `{"type":"gap","reason":"secret_withheld","bytes":%d}`+"\n", len(bytes.TrimSuffix(line, []byte("\n"))))
+// withheldGapFor is the gap line that replaces a refused batch. It counts the
+// batch's bytes without its final newline, which the gap line keeps.
+func withheldGapFor(batch []byte) []byte {
+	return fmt.Appendf(nil, `{"type":"gap","reason":"secret_withheld","bytes":%d}`+"\n", len(bytes.TrimSuffix(batch, []byte("\n"))))
 }
 
 func joined(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
 
+// assertSameBytes compares spool or server content. These bytes may hold the
+// synthetic credentials under test, so a failure reports lengths and the first
+// differing offset, never the content.
+func assertSameBytes(t *testing.T, what string, got, want []byte) {
+	t.Helper()
+	if bytes.Equal(got, want) {
+		return
+	}
+	at := 0
+	for at < len(got) && at < len(want) && got[at] == want[at] {
+		at++
+	}
+	t.Fatalf("%s: %d bytes, want %d; first difference at offset %d", what, len(got), len(want), at)
+}
+
+// assertNotContains fails when content holds needle, naming only where.
+func assertNotContains(t *testing.T, what string, content []byte, needle string) {
+	t.Helper()
+	if i := bytes.Index(content, []byte(needle)); i >= 0 {
+		t.Fatalf("%s holds a withheld fixture at offset %d", what, i)
+	}
+}
+
 // assertWithheldOnce checks the one Warn line a withheld batch logs: its byte
-// count, and never the secret itself.
+// count, and never the secret itself. Failures report counts and levels only.
 func assertWithheldOnce(t *testing.T, logs string, n int) {
 	t.Helper()
+	if strings.Contains(logs, syntheticAWSKey) {
+		t.Fatal("the withheld secret reached the log")
+	}
 	var events []string
 	for line := range strings.Lines(logs) {
 		if strings.Contains(line, "msg=live_session_secret_withheld") {
@@ -37,21 +63,18 @@ func assertWithheldOnce(t *testing.T, logs string, n int) {
 		}
 	}
 	if len(events) != 1 {
-		t.Fatalf("logged %d live_session_secret_withheld lines, want 1:\n%s", len(events), logs)
+		t.Fatalf("logged %d live_session_secret_withheld lines, want 1", len(events))
 	}
 	if !strings.Contains(events[0], "level=WARN") || !strings.Contains(events[0], fmt.Sprintf("bytes=%d", n)) {
 		t.Fatalf("withheld line = %q, want a Warn carrying bytes=%d", events[0], n)
 	}
-	if strings.Contains(logs, syntheticAWSKey) {
-		t.Fatal("the withheld secret reached the log")
-	}
 }
 
-// A batch the publication scan refuses must not end the stream (F1): its
-// refused line is replaced in the spool by a secret_withheld gap line declaring
-// its size, and the next clean batch still streams. Failure prevented: one pasted key
-// froze a teammate's live view on "Live" for the rest of the session, with no
-// close and no word to the person who pasted it.
+// A batch the publication scan refuses must not end the stream (F1): it is
+// replaced in the spool by a secret_withheld gap line declaring its size, and
+// the next clean batch still streams. Failure prevented: one pasted key froze
+// a teammate's live view on "Live" for the rest of the session, with no close
+// and no word to the person who pasted it.
 func TestDrainReplacesARefusedBatchWithAGapAndKeepsStreaming(t *testing.T) {
 	if secretguard.ValidateContent("sessions/content", secretLine) == nil {
 		t.Fatal("test setup: the bundled scan accepts the fixture")
@@ -71,20 +94,16 @@ func TestDrainReplacesARefusedBatchWithAGapAndKeepsStreaming(t *testing.T) {
 	want := joined(before, withheldGapFor(secretLine), after)
 	st := e.state()
 	if st.Status != livesession.StatusStreaming || st.Acked != int64(len(want)) {
-		t.Fatalf("state = %+v, want streaming and acked through %d", st, len(want))
+		t.Fatalf("status %s acked %d, want streaming and acked through %d", st.Status, st.Acked, len(want))
 	}
-	if got := e.spoolBytes(); !bytes.Equal(got, want) {
-		t.Fatalf("spool =\n%s\nwant the refused batch replaced by its gap line:\n%s", got, want)
-	}
-	if got := e.stored(st); !bytes.Equal(got, want) {
-		t.Fatalf("server holds\n%s\nwant\n%s", got, want)
-	}
+	assertSameBytes(t, "spool", e.spoolBytes(), want)
+	assertSameBytes(t, "server copy", e.stored(st), want)
 	assertWithheldOnce(t, logs.String(), len(secretLine)-1)
 }
 
-// The close drains too: a refused line there is gapped the same way, the
-// clean lines in its batch still stream, and the stream still closes, so the
-// page reads Finished instead of Live forever.
+// The close drains too: a refused batch there becomes one gap the same way,
+// clean lines that shared its batch included, and the stream still closes, so
+// the page reads Finished instead of Live forever.
 func TestCloseGapsARefusedBatchAndStillCloses(t *testing.T) {
 	e := newEnv(t)
 	logs := e.captureLogs()
@@ -96,12 +115,10 @@ func TestCloseGapsARefusedBatchAndStillCloses(t *testing.T) {
 	if err != nil || res.Status != livesession.StatusClosed {
 		t.Fatalf("close: %+v %v, want closed", res, err)
 	}
-	want := joined(before, withheldGapFor(secretLine))
-	if got := e.stored(e.state()); !bytes.Equal(got, want) {
-		t.Fatalf("server holds\n%s\nwant\n%s", got, want)
-	}
+	refused := joined(before, secretLine)
+	assertSameBytes(t, "server copy", e.stored(e.state()), withheldGapFor(refused))
 	if _, ok := e.srv.ClosedWith(e.st.ConversationID); !ok {
 		t.Fatal("the server never received the close")
 	}
-	assertWithheldOnce(t, logs.String(), len(secretLine)-1)
+	assertWithheldOnce(t, logs.String(), len(refused)-1)
 }

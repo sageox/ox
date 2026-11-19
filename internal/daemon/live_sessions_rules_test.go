@@ -3,8 +3,11 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/sageox/ox/internal/livesession"
 )
 
 // The secret rules refresh runs beside the sweep (F2). Failure prevented: a
@@ -70,5 +73,21 @@ func TestLiveRulesRefreshFailureIsLoggedOncePerStreak(t *testing.T) {
 		if rec["level"] != "WARN" {
 			t.Fatalf("refresh failure logged at %v, want WARN", rec["level"])
 		}
+	}
+}
+
+// The daemon keeps the rules it fetched where every publishing process reads
+// them. Failure prevented: the CLI's stop-time close runs in a process
+// that never refreshes, so it scanned with the bundled catalog alone.
+func TestLiveRulesRefreshKeepsTheRulesForTheCLI(t *testing.T) {
+	e := newLiveEnv(t)
+	e.live.refreshRulesOnce(t.Context()) // the production refresh, served the offline catalog
+
+	info, err := os.Stat(livesession.SecretRulesPath(e.cfg.DataDir))
+	if err != nil {
+		t.Fatalf("the refreshed rules were not kept in the data dir the drains read: %v", err)
+	}
+	if info.Size() == 0 || info.Mode().Perm() != 0o600 {
+		t.Fatalf("kept rules: %d bytes, mode %v; want a private, non-empty catalog", info.Size(), info.Mode().Perm())
 	}
 }

@@ -1,14 +1,12 @@
 package livesession_test
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/livesession"
-	"github.com/sageox/ox/internal/secretguard"
 )
 
 // drainNormalTime bounds a drain of a few KB against the in-process fake
@@ -21,7 +19,7 @@ const drainNormalTime = 3 * time.Second
 // prevented: a network that blocks raw.githubusercontent.com streamed nothing,
 // silently, because every drain needed a fresh upstream catalog first.
 func TestDrainSendsWhileTheRulesFetchFails(t *testing.T) {
-	livesession.SetCurrentRulesForTest(t, func(context.Context) (*secretguard.RuleSet, error) {
+	livesession.SetCurrentCatalogForTest(t, func(context.Context) ([]byte, error) {
 		return nil, errors.New("catalog unavailable")
 	})
 	e := newEnv(t)
@@ -30,16 +28,14 @@ func TestDrainSendsWhileTheRulesFetchFails(t *testing.T) {
 	if res, err := e.drain(); err != nil || !res.Done {
 		t.Fatalf("drain with the rules fetch failing: %+v %v, want it sent", res, err)
 	}
-	if !bytes.Equal(e.stored(e.state()), e.spoolBytes()) {
-		t.Fatal("the spool did not reach the server")
-	}
+	assertSameBytes(t, "server copy", e.stored(e.state()), e.spoolBytes())
 }
 
 // A fetch that never answers (a hung proxy, a stalled TLS handshake) must not
 // hold the drain either.
 func TestDrainSendsWhileTheRulesFetchNeverAnswers(t *testing.T) {
 	release := make(chan struct{})
-	livesession.SetCurrentRulesForTest(t, func(context.Context) (*secretguard.RuleSet, error) {
+	livesession.SetCurrentCatalogForTest(t, func(context.Context) ([]byte, error) {
 		<-release // ignores ctx on purpose: blocked for as long as the test runs
 		return nil, errors.New("released at test end")
 	})
@@ -64,15 +60,13 @@ func TestDrainSendsWhileTheRulesFetchNeverAnswers(t *testing.T) {
 	case <-time.After(drainNormalTime):
 		t.Fatalf("drain still waiting on the rules fetch after %s", drainNormalTime)
 	}
-	if !bytes.Equal(e.stored(e.state()), e.spoolBytes()) {
-		t.Fatal("the spool did not reach the server")
-	}
+	assertSameBytes(t, "server copy", e.stored(e.state()), e.spoolBytes())
 }
 
 // The close summary is scanned the same way: a clean summary goes with the
 // close even while the rules fetch fails.
 func TestCloseSendsACleanSummaryWhileTheRulesFetchFails(t *testing.T) {
-	livesession.SetCurrentRulesForTest(t, func(context.Context) (*secretguard.RuleSet, error) {
+	livesession.SetCurrentCatalogForTest(t, func(context.Context) ([]byte, error) {
 		return nil, errors.New("catalog unavailable")
 	})
 	e := newEnv(t)

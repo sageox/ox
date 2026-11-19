@@ -52,7 +52,7 @@ const (
 	vStop
 	vNewLayer
 	// vWithhold: the publication scan refused the batch at acked; the drain
-	// replaces its refused lines in the spool with gap lines (withhold).
+	// replaces it in the spool with one gap line (withhold).
 	vWithhold
 )
 
@@ -65,6 +65,9 @@ type session struct {
 	resyncs int
 	// withheld is the refused batch at acked and its replacement (vWithhold).
 	withheld withheldBatch
+	// rules is the persisted secret-rules delta, loaded on the first scan.
+	rules       *secretguard.RuleSet
+	rulesLoaded bool
 }
 
 func (s *session) spoolPath() string { return filepath.Join(s.dir, spoolFileName) }
@@ -216,7 +219,7 @@ func (s *session) sendBatch(ctx context.Context, f *os.File, h *sessionstream.St
 	if len(batch) == 0 {
 		return vStop, nil
 	}
-	if err := checkPublication(batch); err != nil {
+	if err := s.checkPublication(ctx, batch); err != nil {
 		var refused *secretguard.RefusedError
 		if !errors.As(err, &refused) {
 			return vStop, err
