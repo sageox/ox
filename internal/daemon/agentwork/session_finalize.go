@@ -2422,15 +2422,16 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 			if (meta.SummaryStatus == "" || meta.SummaryStatus == sessionsummary.SummaryStatusOK) &&
 				strings.TrimSpace(meta.Title) != "" && len(missingArtifacts(destDir)) == 0 {
 				cached, _ := lfs.ReadSessionMeta(cacheDir)
-				if cached == nil || cached.Title != meta.Title || cached.Summary != meta.Summary ||
-					!repairArtifactsMatch(cacheDir, destDir) {
+				if cached != nil && cached.Title == meta.Title && cached.Summary == meta.Summary &&
+					repairArtifactsMatch(cacheDir, destDir) {
+					// This repair was already staged. Retain any newer metadata
+					// while resuming pointer preparation and publication.
+					keepLedgerMeta = true
+				} else if cached == nil || !canResumeLegacyRepair(h.rootContext(), payload.LedgerPath, cacheDir, destDir) {
 					payload.useExistingLedgerCopy = true
 					payload.SessionDir = destDir
 					return cacheDir, nil
 				}
-				// This repair was already staged. Retain any newer metadata
-				// while resuming pointer preparation and publication.
-				keepLedgerMeta = true
 			}
 		} else {
 			return "", destErr
@@ -2588,6 +2589,51 @@ func (h *SessionFinalizeHandler) replayEmptyLedgerRepair(cacheDir, destDir strin
 	return applied, err
 }
 
+// A failed copy can fill the last missing artifact before replacing meta.json.
+// Resume only when HEAD still has an incomplete summary, the metadata is
+// untouched, and every artifact in the checkout is from HEAD or this repair.
+func canResumeLegacyRepair(ctx context.Context, ledgerPath, cacheDir, destDir string) bool {
+	relDir := filepath.ToSlash(filepath.Join("sessions", filepath.Base(destDir)))
+	files, err := gitutil.RunGit(ctx, ledgerPath, "ls-tree", "--name-only", "-z", "HEAD", "--", relDir+"/")
+	if err != nil {
+		return false
+	}
+	tracked := strings.Split(files, "\x00")
+	committedMeta, err := gitutil.ReadBlob(ctx, ledgerPath, "HEAD", relDir+"/meta.json")
+	if err != nil {
+		return false
+	}
+	currentMeta, err := os.ReadFile(filepath.Join(destDir, "meta.json"))
+	if err != nil || !bytes.Equal(committedMeta, currentMeta) {
+		return false
+	}
+
+	incomplete := false
+	for _, name := range requiredArtifacts {
+		relPath := relDir + "/" + name
+		current, err := os.ReadFile(filepath.Join(destDir, name))
+		if err != nil {
+			return false
+		}
+		if slices.Contains(tracked, relPath) {
+			committed, err := gitutil.ReadBlob(ctx, ledgerPath, "HEAD", relPath)
+			if err != nil {
+				return false
+			}
+			if bytes.Equal(current, committed) {
+				continue
+			}
+		} else {
+			incomplete = true
+		}
+		cached, err := os.ReadFile(filepath.Join(cacheDir, name))
+		if err != nil || !repairArtifactMatches(cached, current) {
+			return false
+		}
+	}
+	return incomplete
+}
+
 func repairArtifactsMatch(cacheDir, destDir string) bool {
 	for _, name := range requiredArtifacts {
 		cached, cacheErr := os.ReadFile(filepath.Join(cacheDir, name))
@@ -2595,19 +2641,20 @@ func repairArtifactsMatch(cacheDir, destDir string) bool {
 		if errors.Is(cacheErr, fs.ErrNotExist) && errors.Is(ledgerErr, fs.ErrNotExist) {
 			continue
 		}
-		if cacheErr != nil || ledgerErr != nil {
-			return false
-		}
-		if bytes.Equal(cached, ledger) {
-			continue
-		}
-		oid, size, err := lfs.ParsePointer(string(ledger))
-		cachedRef := lfs.NewFileRef(cached)
-		if err != nil || size != cachedRef.Size || strings.TrimPrefix(oid, "sha256:") != cachedRef.BareOID() {
+		if cacheErr != nil || ledgerErr != nil || !repairArtifactMatches(cached, ledger) {
 			return false
 		}
 	}
 	return true
+}
+
+func repairArtifactMatches(cached, ledger []byte) bool {
+	if bytes.Equal(cached, ledger) {
+		return true
+	}
+	oid, size, err := lfs.ParsePointer(string(ledger))
+	cachedRef := lfs.NewFileRef(cached)
+	return err == nil && size == cachedRef.Size && strings.TrimPrefix(oid, "sha256:") == cachedRef.BareOID()
 }
 
 // logStaleRecoveryDeferred warns the first time a session's stale-recording
