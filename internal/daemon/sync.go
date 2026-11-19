@@ -1530,7 +1530,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		}
 
 		// remote-unchanged or recently-fetched: update sync timestamps
-		if result.SkipReason == "remote unchanged" || result.SkipReason == "recently fetched" {
+		if result.SkipReason == skipReasonRemoteUnchanged || result.SkipReason == skipReasonRecentlyFetched {
 			s.workspaceRegistry.ClearSyncFailures("ledger")
 			if s.issues != nil {
 				// ClearSyncFailures just ended the backoff this issue reports.
@@ -1543,6 +1543,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 				s.logger.Warn("failed to update ledger config last sync", "error", err)
 			}
 			s.recordSyncState(ctx, s.config.LedgerPath)
+			s.syncLedgerMurmurs(ctx)
 		}
 
 		if progress != nil {
@@ -1653,23 +1654,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		}
 	}
 
-	// write+commit any murmurs the CLI queued while the daemon was down, so they
-	// are relayed and pushed in this same cycle
-	s.drainMurmurOutbox(ctx)
-
-	// relay murmurs from ledger after pull
-	if s.murmurRelay != nil {
-		if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" {
-			s.murmurRelay.RelayFromPath(l.Path, "ledger")
-		}
-	}
-
-	// push any unpushed murmur commits (batched by sync cycle)
-	if s.whisperRegistry != nil {
-		if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
-			s.pushMurmurCommits(ctx, l.Path)
-		}
-	}
+	s.syncLedgerMurmurs(ctx)
 
 	// retract orphaned draft placeholders (crashed sessions), then push any
 	// unpushed session-draft commits (both batched by sync cycle). Retraction
@@ -1688,10 +1673,26 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	return nil
 }
 
-// drainMurmurOutbox writes and commits any murmurs the CLI queued locally while
-// the daemon was unavailable. It runs at the top of each ledger sync so a drained
-// murmur is relayed and pushed in the same cycle. Entries older than the murmur
-// window are dropped rather than resurfaced. Best-effort: a commit failure leaves
+// syncLedgerMurmurs runs after a successful pull or when the checkout is
+// already current. Local murmurs can be queued while GC holds the checkout,
+// and publishing them does not require a new remote commit.
+func (s *SyncScheduler) syncLedgerMurmurs(ctx context.Context) {
+	s.drainMurmurOutbox(ctx)
+
+	l := s.workspaceRegistry.GetLedger()
+	if l == nil || l.Path == "" {
+		return
+	}
+	if s.murmurRelay != nil {
+		s.murmurRelay.RelayFromPath(l.Path, "ledger")
+	}
+	if s.whisperRegistry != nil && l.Exists {
+		s.pushMurmurCommits(ctx, l.Path)
+	}
+}
+
+// drainMurmurOutbox writes and commits queued murmurs. Entries older than the
+// murmur window are dropped rather than resurfaced. A commit failure leaves
 // the queued file in place for the next cycle.
 //
 // Each workspace in the registry is its own allow-list entry, so the registry

@@ -157,9 +157,13 @@ func TestDrainMurmurOutbox_CommitsAndRemoves(t *testing.T) {
 
 func TestMurmurOutbox_RetriesAfterGCLockReleases(t *testing.T) {
 	isolateMurmurOutbox(t)
-	_, dir, _ := setupRacingLedger(t)
+	bare, dir, _ := setupRacingLedger(t)
 	before := getGitSHA(t, dir)
-	scheduler := newDrainScheduler(t, dir)
+	scheduler := newPullTestScheduler(t, dir)
+	workspace := &WorkspaceState{ID: "ledger", Type: WorkspaceTypeLedger, Path: dir, Exists: true}
+	scheduler.workspaceRegistry.ledger = workspace
+	scheduler.workspaceRegistry.workspaces[workspace.ID] = workspace
+	scheduler.SetWhisperRegistry(NewWhisperRegistry(openTestStore(t), nil))
 	service := &daemonServiceImpl{d: &Daemon{scheduler: scheduler, logger: scheduler.logger}}
 	ts := time.Now().UTC()
 	queued := makeOutboxMurmur(t, dir, "queued before GC", ts)
@@ -184,9 +188,11 @@ func TestMurmurOutbox_RetriesAfterGCLockReleases(t *testing.T) {
 			"the IPC publish must queue outside the checkout being swapped")
 	}()
 
-	scheduler.drainMurmurOutbox(t.Context())
-	require.Contains(t, gitLog(t, dir, queued.RelPath), queued.Content)
-	require.Contains(t, gitLog(t, dir, live.RelPath), live.Content)
+	require.Equal(t, before, gitCmd(t, bare, "rev-parse", "refs/heads/main"))
+	require.NoError(t, scheduler.doPull(t.Context(), nil, false, false))
+	for _, payload := range []MurmurPayload{queued, live} {
+		require.JSONEq(t, string(payload.MurmurJSON), gitCmd(t, bare, "show", "refs/heads/main:"+payload.RelPath))
+	}
 	entries, err := ReadOutboxMurmurs(dir)
 	require.NoError(t, err)
 	require.Empty(t, entries)
