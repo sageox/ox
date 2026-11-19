@@ -23,11 +23,11 @@ func mdxBlockParsers() []util.PrioritizedValue {
 	fenced := parser.NewFencedCodeBlockParser()
 	blocks := without(parser.DefaultBlockParsers(), parser.NewHTMLBlockParser(), parser.NewCodeBlockParser())
 	for i, block := range blocks {
-		switch block.Value {
-		case fenced:
+		switch reflect.TypeOf(block.Value) {
+		case reflect.TypeOf(fenced):
 			blocks[i].Value = mdxFenceParser{indentedBlockParser{fenced}}
-		case parser.NewParagraphParser():
-			blocks[i].Value = indentedBlockParser{parser.NewParagraphParser()}
+		case reflect.TypeOf(parser.NewParagraphParser()), reflect.TypeOf(parser.NewATXHeadingParser()):
+			blocks[i].Value = indentedBlockParser{block.Value.(parser.BlockParser)}
 		}
 	}
 	return blocks
@@ -41,6 +41,20 @@ type indentedBlockParser struct{ parser.BlockParser }
 
 func (indentedBlockParser) CanAcceptIndentedLine() bool { return true }
 
+func (p indentedBlockParser) Open(parent ast.Node, reader text.Reader, ctx parser.Context) (ast.Node, parser.State) {
+	if ctx.BlockOffset() < 0 {
+		// Goldmark assumes an indent at least as wide as the byte length
+		// of the line means it is blank. Leading tabs can break that assumption.
+		line, _ := reader.PeekLine()
+		if !util.IsBlank(line) {
+			width, offset := util.IndentWidth(line, reader.LineOffset())
+			ctx.SetBlockIndent(width)
+			ctx.SetBlockOffset(offset)
+		}
+	}
+	return p.BlockParser.Open(parent, reader, ctx)
+}
+
 type mdxFence struct {
 	marker byte
 	length int
@@ -49,7 +63,7 @@ type mdxFence struct {
 var mdxFenceKey = parser.NewContextKey()
 
 func (p mdxFenceParser) Open(parent ast.Node, reader text.Reader, ctx parser.Context) (ast.Node, parser.State) {
-	node, state := p.BlockParser.Open(parent, reader, ctx)
+	node, state := p.indentedBlockParser.Open(parent, reader, ctx)
 	if node != nil {
 		line, _ := reader.PeekLine()
 		start := ctx.BlockOffset()
