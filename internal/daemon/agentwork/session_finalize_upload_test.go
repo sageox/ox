@@ -471,7 +471,7 @@ func TestProcessResult_LegacySummaryRepairUsesTrackedRawPointer(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git operations")
 	}
-	for _, state := range []string{"missing summary", "retry after stub", "interrupted copy", "interrupted copy after missing artifact", "newer summary", "changed recording"} {
+	for _, state := range []string{"missing summary", "retry after stub", "interrupted copy", "interrupted copy after missing artifact", "interrupted copy with local edits", "newer summary", "changed recording"} {
 		t.Run(state, func(t *testing.T) {
 			checkLegacySummaryRepair(t, state)
 		})
@@ -502,7 +502,7 @@ func checkLegacySummaryRepair(t *testing.T, state string) {
 	case "interrupted copy":
 		existingTitle = "Previous stub"
 		ledgerMeta += `,"title":"Previous stub","summary_status":"failed_validation"`
-	case "interrupted copy after missing artifact":
+	case "interrupted copy after missing artifact", "interrupted copy with local edits":
 		existingTitle = "Previous summary"
 		ledgerMeta += `,"title":"Previous summary","summary_status":"ok"`
 	}
@@ -518,7 +518,7 @@ func checkLegacySummaryRepair(t *testing.T, state string) {
 	if existingTitle != "" {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "summary.json"), fmt.Appendf(nil, `{"title":%q}`, existingTitle), 0644))
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "summary.md"), []byte("# "+existingTitle), 0644))
-		if state != "interrupted copy after missing artifact" {
+		if state != "interrupted copy after missing artifact" && state != "interrupted copy with local edits" {
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "session.md"), []byte("# Previous session"), 0644))
 		}
 	}
@@ -538,7 +538,7 @@ func checkLegacySummaryRepair(t *testing.T, state string) {
 	output := `{"title":"Legacy Session Repair","summary":"Restored the missing summary for a legacy recording.","quality_score":0.8,"score_reason":"fine","outcome":"success","key_actions":["restored the summary"]}`
 	var err error
 	var resumedSummaryPointer string
-	if state == "interrupted copy" || state == "interrupted copy after missing artifact" {
+	if strings.HasPrefix(state, "interrupted copy") {
 		// Force the atomic replacement of summary.md to fail after staging
 		// started, then restore the old file before anti-entropy retries.
 		artifact := filepath.Join(dir, "summary.md")
@@ -558,6 +558,11 @@ func checkLegacySummaryRepair(t *testing.T, state string) {
 		resumedSummaryPointer = strings.TrimSpace(lfs.FormatPointer(ref.OID, ref.Size))
 		require.NoError(t, os.Remove(artifact))
 		require.NoError(t, os.WriteFile(artifact, original, 0644))
+		if state == "interrupted copy with local edits" {
+			// An unrelated edit after the interrupted copy cannot be
+			// attributed to this repair, even though HEAD is incomplete.
+			require.NoError(t, os.WriteFile(artifact, []byte("# Local edits"), 0644))
+		}
 
 		items = detectCacheOnly(t, h, ledger)
 		require.Len(t, items, 1)
@@ -570,6 +575,14 @@ func checkLegacySummaryRepair(t *testing.T, state string) {
 	}
 	if state == "changed recording" {
 		require.ErrorIs(t, err, session.ErrLedgerSessionOverwrite)
+	} else if state == "interrupted copy with local edits" {
+		require.ErrorContains(t, err, "uncommitted changes in Ledger session")
+		require.Equal(t, before, gitOutput(t, bare, "rev-parse", branch))
+		summary, readErr := os.ReadFile(filepath.Join(dir, "summary.md"))
+		require.NoError(t, readErr)
+		require.Equal(t, "# Local edits", string(summary))
+		require.DirExists(t, f.cacheDir)
+		return
 	} else {
 		require.NoError(t, err)
 	}

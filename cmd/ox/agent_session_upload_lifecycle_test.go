@@ -72,6 +72,25 @@ func TestSessionFinalizersRefuseDifferentFinalizedSession(t *testing.T) {
 	}
 }
 
+func TestDelegatedSessionStopUsesRecordedHeaderID(t *testing.T) {
+	f := newSessionUploadFixture(t)
+	id := f.state.SessionID
+	f.state.SessionID = ""
+	raw := []byte("{\"type\":\"header\",\"metadata\":{\"session_id\":\"" + id + "\"}}\n" +
+		"{\"type\":\"user\",\"content\":\"recorded entry\"}\n")
+	require.NoError(t, os.WriteFile(f.result.RawPath, raw, 0o600))
+	dest := filepath.Join(f.ledgerPath, "sessions", f.sessionName)
+	require.NoError(t, os.MkdirAll(dest, 0o755))
+	require.NoError(t, lfs.WriteSessionMetaOnly(dest, &lfs.SessionMeta{
+		SessionID: id, SessionName: f.sessionName, Title: "Previously uploaded",
+	}))
+
+	require.NoError(t, copySessionCacheToLedger(f.result, f.state, f.ledgerPath, f.sessionName))
+	published, err := os.ReadFile(filepath.Join(dest, ledgerFileRaw))
+	require.NoError(t, err)
+	require.Equal(t, raw, published)
+}
+
 func TestUploadSessionToLedger_RetriesWithAdoptedDraftID(t *testing.T) {
 	for _, doctor := range []bool{false, true} {
 		name := "foreground"
