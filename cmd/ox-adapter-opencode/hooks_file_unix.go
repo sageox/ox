@@ -3,6 +3,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"syscall"
 
@@ -29,5 +31,11 @@ func preservePluginOwner(file *os.File, existing os.FileInfo) error {
 	if want.Uid == have.Uid && want.Gid == have.Gid {
 		return nil
 	}
-	return file.Chown(int(want.Uid), int(want.Gid))
+	if err := file.Chown(int(want.Uid), int(want.Gid)); err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			return fmt.Errorf("OpenCode plugin is owned by uid %d gid %d; rerun as that user to repair it: %w", want.Uid, want.Gid, err)
+		}
+		return err
+	}
+	return nil
 }

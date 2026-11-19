@@ -532,3 +532,31 @@ func TestInstallHooks_SessionStartGetsLongerTimeout(t *testing.T) {
 		t.Errorf("PostToolUse timeout = %d, want %d", got, defaultHookTimeout)
 	}
 }
+
+func TestLegacyProjectHookMatchesOnlyGeneratedCommands(t *testing.T) {
+	const pre = "if command -v ox >/dev/null 2>&1; then OX_PROJECT_ROOT="
+	const post = " AGENT_ENV=goose ox agent hook SessionStart 2>&1 || true; fi"
+	tests := []struct {
+		name, root string
+		want       bool
+	}{
+		{"plain path", `'/repo'`, true},
+		{"space", `'/Users/me/My Repos/ox'`, true},
+		{"escaped quote", `'/tmp/it'\''s'`, true},
+		{"customized body", `'/old'; printf audit; OX_PROJECT_ROOT='/old'`, false},
+		{"unquoted tail", `'/old' extra`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := legacyProjectHook(pre+tt.root+post, "SessionStart"); got != tt.want {
+				t.Errorf("legacyProjectHook(%s) = %v, want %v", tt.root, got, tt.want)
+			}
+		})
+	}
+	if legacyProjectHook(pre+`'/repo'`+post, "Stop") {
+		t.Error("matched a command for a different event")
+	}
+	if legacyProjectHook("if command -v ox >/dev/null 2>&1; then OX_PROJECT_ROOT='", "SessionStart") {
+		t.Error("matched a truncated command")
+	}
+}

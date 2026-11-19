@@ -72,11 +72,8 @@ func readOpenCodePlugin(path string) (openCodePlugin, error) {
 	}
 	defer f.Close()
 	opened, err := f.Stat()
-	if err != nil {
-		return plugin, err
-	}
-	if !os.SameFile(info, opened) || !opened.Mode().IsRegular() {
-		return plugin, fmt.Errorf("OpenCode plugin changed while being checked: %s", path)
+	if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() {
+		return plugin, errors.Join(fmt.Errorf("OpenCode plugin changed while being checked: %s", path), err)
 	}
 	data, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
@@ -164,11 +161,8 @@ func writeOpenCodePlugin(rootPath string, plugin openCodePlugin) error {
 		return err
 	}
 	opened, err := f.Stat()
-	if err := errors.Join(err, f.Close()); err != nil {
-		return err
-	}
-	if !os.SameFile(plugin.info, opened) {
-		return fmt.Errorf("OpenCode plugin changed while being checked: %s", plugin.path)
+	if err = errors.Join(err, f.Close()); err != nil || !os.SameFile(plugin.info, opened) {
+		return errors.Join(fmt.Errorf("OpenCode plugin changed while being checked: %s", plugin.path), err)
 	}
 	return replaceOpenCodePlugin(parent, name, opened)
 }
@@ -184,16 +178,8 @@ func replaceOpenCodePlugin(parent *os.Root, name string, existing os.FileInfo) e
 	if err := preservePluginOwner(tmp, existing); err != nil {
 		return err
 	}
-	if _, err := tmp.WriteString(openCodePluginTemplate); err != nil {
-		return err
-	}
-	if err := tmp.Chmod(existing.Mode().Perm()); err != nil {
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
+	_, err = tmp.WriteString(openCodePluginTemplate)
+	if err = errors.Join(err, tmp.Chmod(existing.Mode().Perm()), tmp.Sync(), tmp.Close()); err != nil {
 		return err
 	}
 	current, err := parent.Lstat(name)

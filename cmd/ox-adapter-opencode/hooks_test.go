@@ -13,6 +13,27 @@ import (
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
+// legacyPluginFixture is the plugin written by ox releases before the shell
+// tag fix, kept verbatim so template changes cannot hide a missed migration.
+const legacyPluginFixture = `import type { Plugin } from "@opencode-ai/plugin"
+
+// SageOx plugin for OpenCode
+// runs 'ox agent prime' on session start to load team context
+export const OxPrimePlugin: Plugin = async ({ $, directory }) => {
+  return {
+    event: async ({ event }) => {
+      if (event.type === "session.created") {
+        try {
+          await ` + "`ox agent prime`" + `.cwd(directory).quiet()
+        } catch {
+          // ox not installed or failed - continue silently
+        }
+      }
+    }
+  }
+}
+`
+
 func TestInstallHooksKeepsReadOnlyPlugin(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix file permissions")
@@ -233,10 +254,7 @@ func checkLegacyPluginRepair(t *testing.T, crlf bool) {
 	t.Helper()
 	params := adapterprotocol.HookParams{RepoRoot: t.TempDir(), Scope: "project"}
 	path := resolvePluginPath(params.RepoRoot, params.Scope)
-	legacy := strings.Replace(openCodePluginTemplate, "await $", "await ", 1)
-	if legacy == openCodePluginTemplate {
-		t.Fatal("fixture must contain the legacy invocation")
-	}
+	legacy := legacyPluginFixture
 	if crlf {
 		legacy = strings.ReplaceAll(legacy, "\n", "\r\n")
 	}
@@ -277,5 +295,82 @@ func checkLegacyPluginRepair(t *testing.T, crlf bool) {
 	status, err = handleCheckHooks(params)
 	if err != nil || !status.Installed {
 		t.Fatalf("replacement should be installed: %+v, %v", status, err)
+	}
+}
+
+func writePluginAt(t *testing.T, path, content string, mode os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckHooksDoesNotReadOversizedPlugin(t *testing.T) {
+	params := adapterprotocol.HookParams{RepoRoot: t.TempDir(), Scope: "project"}
+	writePluginAt(t, resolvePluginPath(params.RepoRoot, params.Scope), strings.Repeat("// custom\n", 1000), 0644)
+	status, err := handleCheckHooks(params)
+	if err != nil || !status.Installed || !status.HasOwnedHooks {
+		t.Fatalf("oversized custom plugin should be reported as present: %+v, %v", status, err)
+	}
+}
+
+func TestInstallHooksRejectsLinkToForeignPlugin(t *testing.T) {
+	params := adapterprotocol.HookParams{RepoRoot: t.TempDir(), Scope: "project"}
+	target := filepath.Join(params.RepoRoot, "mine.ts")
+	const custom = "// coworker's plugin\n"
+	writePluginAt(t, target, custom, 0644)
+	path := resolvePluginPath(params.RepoRoot, params.Scope)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if _, err := handleInstallHooks(params); err == nil || !strings.Contains(err.Error(), "not a generated hook") {
+		t.Fatalf("expected linked foreign plugin to be refused, got %v", err)
+	}
+	if content, err := os.ReadFile(target); err != nil || string(content) != custom {
+		t.Fatalf("linked foreign plugin changed: %q, %v", content, err)
+	}
+}
+
+func TestInstallHooksReportsMissingProjectRoot(t *testing.T) {
+	params := adapterprotocol.HookParams{RepoRoot: filepath.Join(t.TempDir(), "missing"), Scope: "project"}
+	if _, err := handleInstallHooks(params); err == nil {
+		t.Fatal("install succeeded for a project root that does not exist")
+	}
+}
+
+func TestInstallHooksUserScopeWritesUnderHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	result, err := handleInstallHooks(adapterprotocol.HookParams{Scope: "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, openCodeUserPath, openCodePluginFileName)
+	if len(result.FilesWritten) != 1 || result.FilesWritten[0] != want {
+		t.Fatalf("FilesWritten = %v, want %s", result.FilesWritten, want)
+	}
+	if content, err := os.ReadFile(want); err != nil || string(content) != openCodePluginTemplate {
+		t.Fatalf("user plugin not written: %v", err)
+	}
+}
+
+func TestInstallHooksWithoutRepoRootUsesWorkingDirectory(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	if _, err := handleInstallHooks(adapterprotocol.HookParams{Scope: "project"}); err != nil {
+		t.Fatal(err)
+	}
+	if content, err := os.ReadFile(resolvePluginPath(cwd, "project")); err != nil || string(content) != openCodePluginTemplate {
+		t.Fatalf("plugin not written under the working directory: %v", err)
 	}
 }

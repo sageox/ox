@@ -109,10 +109,17 @@ fi`, event)
 	)
 }
 
-// legacyProjectHook matches the wrapper emitted by prior ox releases.
+// legacyProjectHook matches the wrapper emitted by prior ox releases: exactly
+// one shell-quoted root and nothing else, so customized commands are left alone.
 func legacyProjectHook(command, event string) bool {
-	return strings.HasPrefix(command, "if command -v ox >/dev/null 2>&1; then OX_PROJECT_ROOT='") &&
-		strings.HasSuffix(command, "' AGENT_ENV=goose ox agent hook "+event+" 2>&1 || true; fi")
+	const prefix = "if command -v ox >/dev/null 2>&1; then OX_PROJECT_ROOT='"
+	suffix := "' AGENT_ENV=goose ox agent hook " + event + " 2>&1 || true; fi"
+	if len(command) < len(prefix)+len(suffix) ||
+		!strings.HasPrefix(command, prefix) || !strings.HasSuffix(command, suffix) {
+		return false
+	}
+	quoted := command[len(prefix) : len(command)-len(suffix)]
+	return !strings.Contains(strings.ReplaceAll(quoted, `'\''`, ""), "'")
 }
 
 // --- paths ---
