@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/spf13/cobra"
@@ -115,7 +116,7 @@ func runReadSync(cmd *cobra.Command, args []string) error {
 	// The daemon of a SageOx project for this repo clones the read-write Ledger
 	// into its Ledger folder, and takes any checkout it finds there for it,
 	// including a read-only one that sessions cannot be pushed through.
-	if root := config.FindProjectRoot(); !check && root != "" && config.GetRepoID(root) == repoID && isProjectLedger(root, path) {
+	if root := config.FindProjectRoot(); !check && root != "" && config.GetRepoID(root) == repoID && isProjectLedger(root, repoID, path) {
 		result.ErrorClass = "project_ledger"
 		return finishReadSync(cmd, result, jsonOutput, 1)
 	}
@@ -161,14 +162,18 @@ func runReadSync(cmd *cobra.Command, args []string) error {
 // isProjectLedger reports whether path is the Ledger folder of the project at
 // root. The daemon and `ox doctor --fix` record that folder in config.local.toml
 // as their own environment selects it. Until one has, the daemon is assumed to
-// use the default data home, as a daemon started without XDG_DATA_HOME does.
-func isProjectLedger(root, path string) bool {
+// use the default data home, as a daemon started without XDG_DATA_HOME does,
+// and the project's endpoint.
+func isProjectLedger(root, repoID, path string) bool {
 	if local, err := config.LoadLocalConfig(root); err == nil && local.Ledger != nil && filepath.IsAbs(local.Ledger.Path) {
 		return sameFolder(local.Ledger.Path, path)
 	}
 	dataHome := os.Getenv("XDG_DATA_HOME")
 	home, err := os.UserHomeDir()
-	return dataHome == "" || err == nil && sameFolder(dataHome, filepath.Join(home, ".local", "share"))
+	if dataHome != "" && (err != nil || !sameFolder(dataHome, filepath.Join(home, ".local", "share"))) {
+		return false
+	}
+	return sameFolder(config.DefaultLedgerPath(repoID, endpoint.GetForProject(root)), path)
 }
 
 // sameFolder reports whether a and b name one folder, resolving symlinks in

@@ -127,7 +127,10 @@ func TestReadSyncRefusesTheProjectsLedgerFolder(t *testing.T) {
 	t.Setenv(config.EnvProjectRoot, "")
 	project := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(project, ".sageox"), 0o755))
-	require.NoError(t, config.SaveProjectConfig(project, &config.ProjectConfig{RepoID: readSyncTestRepoID}))
+	// The project's endpoint counts only in the "project on another endpoint"
+	// row; the others select https://sageox.ai through SAGEOX_ENDPOINT, which
+	// wins over the project's.
+	require.NoError(t, config.SaveProjectConfig(project, &config.ProjectConfig{RepoID: readSyncTestRepoID, Endpoint: "https://test.sageox.ai"}))
 	t.Chdir(project)
 	shared := t.TempDir()
 	sharedLink := filepath.Join(t.TempDir(), "data")
@@ -138,18 +141,25 @@ func TestReadSyncRefusesTheProjectsLedgerFolder(t *testing.T) {
 		// recordedIn is the data home the project recorded its Ledger
 		// folder under ("" is the default one), or unrecorded.
 		dataHome, recordedIn, repo, want string
+		// projectEndpoint unsets SAGEOX_ENDPOINT, so the project's own
+		// endpoint (test) differs from the one read from (the default).
+		projectEndpoint bool
 	}{
-		{"nothing recorded, default data home", "", unrecorded, readSyncTestRepoID, "project_ledger"},
-		{"nothing recorded, the default data home named", filepath.Join(home, ".local", "share"), unrecorded, readSyncTestRepoID, "project_ledger"},
-		{"nothing recorded, a separate data home", t.TempDir(), unrecorded, readSyncTestRepoID, "denied"},
-		{"another repo", "", unrecorded, "repo_019ff2f5-2079-7be1-b05e-000000000000", "denied"},
-		{"a data home shared with the project", shared, shared, readSyncTestRepoID, "project_ledger"},
-		{"that data home through a symlink", sharedLink, shared, readSyncTestRepoID, "project_ledger"},
-		{"the project's Ledger in the default data home", t.TempDir(), "", readSyncTestRepoID, "denied"},
+		{"nothing recorded, default data home", "", unrecorded, readSyncTestRepoID, "project_ledger", false},
+		{"nothing recorded, the default data home named", filepath.Join(home, ".local", "share"), unrecorded, readSyncTestRepoID, "project_ledger", false},
+		{"nothing recorded, a separate data home", t.TempDir(), unrecorded, readSyncTestRepoID, "denied", false},
+		{"another repo", "", unrecorded, "repo_019ff2f5-2079-7be1-b05e-000000000000", "denied", false},
+		{"a data home shared with the project", shared, shared, readSyncTestRepoID, "project_ledger", false},
+		{"that data home through a symlink", sharedLink, shared, readSyncTestRepoID, "project_ledger", false},
+		{"the project's Ledger in the default data home", t.TempDir(), "", readSyncTestRepoID, "denied", false},
+		{"nothing recorded, project on another endpoint", "", unrecorded, readSyncTestRepoID, "denied", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.dataHome == sharedLink && symlinkErr != nil {
 				t.Skipf("cannot create a symlink here: %v", symlinkErr)
+			}
+			if tc.projectEndpoint {
+				t.Setenv("SAGEOX_ENDPOINT", "")
 			}
 			local := &config.LocalConfig{}
 			if tc.recordedIn != unrecorded {
