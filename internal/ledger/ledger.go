@@ -548,7 +548,7 @@ func ConfigureSparseCheckout(path string) error {
 // configureSparseCheckout is ConfigureSparseCheckout with ctx bounding the
 // git commands that can fetch.
 func configureSparseCheckout(ctx context.Context, path string) error {
-	if err := DisableSymlinks(path); err != nil {
+	if err := DisableSymlinksContext(ctx, path); err != nil {
 		return err
 	}
 
@@ -631,12 +631,18 @@ var sparseRefreshTimeout = 10 * time.Minute
 // stays an uncommitted change. The setting is saved last: a failed run
 // repeats on the next call.
 func DisableSymlinks(path string) error {
+	return DisableSymlinksContext(context.Background(), path)
+}
+
+// DisableSymlinksContext is DisableSymlinks with ctx bounding its git calls,
+// for callers that must not wait on a hung git in the Ledger (daemon setup).
+func DisableSymlinksContext(ctx context.Context, path string) error {
 	// --local: a global or system core.symlinks=false says nothing about links
 	// this clone already checked out, and can be removed later.
-	if out, _ := exec.Command("git", "-C", path, "config", "--local", "--type=bool", "--get", "core.symlinks").Output(); strings.TrimSpace(string(out)) == "false" {
+	if out, _ := exec.CommandContext(ctx, "git", "-C", path, "config", "--local", "--type=bool", "--get", "core.symlinks").Output(); strings.TrimSpace(string(out)) == "false" {
 		return nil
 	}
-	tracked, err := exec.Command("git", "-C", path, "ls-files", "-s", "-z").Output()
+	tracked, err := exec.CommandContext(ctx, "git", "-C", path, "ls-files", "-s", "-z").Output()
 	if err != nil {
 		return fmt.Errorf("list tracked files: %w", err)
 	}
@@ -661,7 +667,7 @@ func DisableSymlinks(path string) error {
 			return fmt.Errorf("convert symlink %s: %w", rel, err)
 		}
 	}
-	if output, err := exec.Command("git", "-C", path, "config", "core.symlinks", "false").CombinedOutput(); err != nil {
+	if output, err := exec.CommandContext(ctx, "git", "-C", path, "config", "core.symlinks", "false").CombinedOutput(); err != nil {
 		return fmt.Errorf("config core.symlinks: %w: %s", err, output)
 	}
 	return nil

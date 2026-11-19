@@ -1204,6 +1204,27 @@ func (d *Daemon) ensureLedgerSparseCheckout(ctx context.Context) {
 	d.logger.Info("ledger sparse-checkout verified at startup")
 }
 
+// ledgerSymlinkStartupBound caps the symlink neutralization in setup. It runs
+// git, and setup must never wait long on the Ledger: the IPC server and the
+// live-session drainer start after it. A run cut short is safe: cache readers
+// refuse a symlinked path anyway (paths.CheckNoSymlinksBelow), and the
+// sync's sparse refresh runs DisableSymlinks again.
+const ledgerSymlinkStartupBound = 2 * time.Second
+
+// neutralizeLedgerSymlinks turns tracked Ledger symlinks into plain files
+// before anything in setup opens a .sageox/cache path. It takes no repo lock:
+// it never writes the index, only the links and .git/config.
+func (d *Daemon) neutralizeLedgerSymlinks() {
+	if !pathIsGitRepo(d.config.LedgerPath) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(d.ctx, ledgerSymlinkStartupBound)
+	defer cancel()
+	if err := ledger.DisableSymlinksContext(ctx, d.config.LedgerPath); err != nil {
+		d.logger.Warn("ledger_symlinks_not_neutralized_at_startup", "path", d.config.LedgerPath, "bound_ms", ledgerSymlinkStartupBound.Milliseconds(), "error", err)
+	}
+}
+
 // removeLedgerLocksAtStart cleans up git lock files that crashed processes left
 // in the Ledger, before sync starts.
 func (d *Daemon) removeLedgerLocksAtStart() {
@@ -1227,11 +1248,7 @@ func (d *Daemon) initComponents() time.Duration {
 	projectEndpoint := endpoint.GetForProject(d.config.ProjectRoot)
 
 	d.removeLedgerLocksAtStart()
-
-	// ensure ledger sparse-checkout cone is correct before any sync or indexing.
-	// without this, a corrupt cone from a previous session causes every sync cycle
-	// to wipe .sageox/cache/ via ConfigureSparseCheckout's rolling-window refresh.
-	d.ensureLedgerSparseCheckout(d.ctx)
+	d.neutralizeLedgerSymlinks()
 
 	// telemetry + friction collectors
 	d.telemetry = NewTelemetryCollector(d.logger)
@@ -1287,9 +1304,12 @@ func (d *Daemon) initComponents() time.Duration {
 	// whisper store for persistent agent signal delivery
 	repoID := config.GetRepoID(d.config.ProjectRoot)
 	if repoID != "" && projectEndpoint != "" {
-		whisperDBPath := filepath.Join(paths.WhisperDBDir(repoID, projectEndpoint), "whisper.db")
-		ledgerWhisperStore, err := whisperstore.Open(whisperDBPath)
-		if err != nil {
+		whisperDir := paths.WhisperDBDir(repoID, projectEndpoint)
+		whisperDBPath := filepath.Join(whisperDir, "whisper.db")
+		if err := paths.CheckNoSymlinksBelow(paths.LedgersDataDir(repoID, projectEndpoint), whisperDir); err != nil {
+			// a tracked Ledger symlink would aim the database anywhere on disk
+			d.logger.Error("whisper_store_refused", "path", whisperDir, "reason", "symlink_in_ledger_cache", "error", err)
+		} else if ledgerWhisperStore, err := whisperstore.Open(whisperDBPath); err != nil {
 			d.logger.Warn("failed to open whisper store", "error", err)
 		} else {
 			d.whisperRegistry = NewWhisperRegistry(ledgerWhisperStore, d.logger)
@@ -1591,6 +1611,19 @@ func (d *Daemon) startWorkers() {
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
+		// The Ledger's cone must be right before the first sync: a corrupt cone
+		// from a previous session made every sync cycle wipe .sageox/cache/ via
+		// ConfigureSparseCheckout's rolling-window refresh. It runs here, not in
+		// setup, because it waits on the Ledger (the repo lock for up to 2 min,
+		// git for longer), and setup must never wait on the Ledger: the IPC
+		// server and the live-session drainer start after it, and a session
+		// streams while its Ledger is wedged.
+		d.ensureLedgerSparseCheckout(d.ctx)
+		if d.ctx.Err() != nil {
+			// stopped while the refresh waited on the Ledger: Start would
+			// still spawn sync work that outlives the daemon's wait group
+			return
+		}
 		d.scheduler.Start(d.ctx)
 	}()
 
