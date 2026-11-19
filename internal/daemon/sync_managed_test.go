@@ -611,3 +611,60 @@ exec "$OX_TEST_REAL_GIT" "$@"
 		})
 	}
 }
+
+func TestLocalSyncCompletionContext(t *testing.T) {
+	t.Parallel()
+
+	expired := func(t *testing.T) context.Context {
+		t.Helper()
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		t.Cleanup(cancel)
+		return ctx
+	}
+
+	t.Run("a live cycle context is returned unchanged", func(t *testing.T) {
+		t.Parallel()
+		s := &SyncScheduler{ctx: context.Background()}
+		parent, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		got, release := s.localSyncCompletionContext(parent)
+		defer release()
+		assert.Equal(t, parent, got)
+	})
+
+	t.Run("an expired cycle gets a fresh bounded context", func(t *testing.T) {
+		t.Parallel()
+		s := &SyncScheduler{ctx: context.Background()}
+		got, release := s.localSyncCompletionContext(expired(t))
+		defer release()
+		require.NoError(t, got.Err())
+		dl, ok := got.Deadline()
+		require.True(t, ok)
+		assert.InDelta(t, (10 * time.Second).Seconds(), time.Until(dl).Seconds(), 2)
+	})
+
+	t.Run("daemon shutdown cancels the completion context", func(t *testing.T) {
+		t.Parallel()
+		shutdown, stop := context.WithCancel(context.Background())
+		s := &SyncScheduler{ctx: shutdown}
+		got, release := s.localSyncCompletionContext(expired(t))
+		defer release()
+		require.NoError(t, got.Err())
+		stop()
+		select {
+		case <-got.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("completion context outlived daemon shutdown")
+		}
+	})
+
+	t.Run("an already stopped daemon gets a cancelled context", func(t *testing.T) {
+		t.Parallel()
+		shutdown, stop := context.WithCancel(context.Background())
+		stop()
+		s := &SyncScheduler{ctx: shutdown}
+		got, release := s.localSyncCompletionContext(expired(t))
+		defer release()
+		assert.ErrorIs(t, got.Err(), context.Canceled)
+	})
+}
