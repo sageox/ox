@@ -25,7 +25,9 @@ func CheckAgentUsability(agent string) AgentUsability {
 	case "claude":
 		return checkClaudeUsability()
 	case "codex":
-		return checkCodexUsability()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return checkCodexUsability(ctx)
 	case "gemini":
 		return checkGeminiUsability()
 	default:
@@ -126,7 +128,7 @@ func claudeAuthStatus(claudePath string) (loggedIn, known bool) {
 
 // checkCodexUsability checks if codex CLI is installed and has valid auth.
 // Runs `codex login status` which is designed to be fast.
-func checkCodexUsability() AgentUsability {
+func checkCodexUsability(ctx context.Context) AgentUsability {
 	result := AgentUsability{}
 
 	codexPath, err := exec.LookPath("codex")
@@ -141,10 +143,6 @@ func checkCodexUsability() AgentUsability {
 		result.AuthDetail = "API key"
 		return result
 	}
-
-	// run `codex login status` with a short timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
 
 	cmd := exec.CommandContext(ctx, codexPath, "login", "status")
 	// Current Codex prints successful login status to stderr; older builds
