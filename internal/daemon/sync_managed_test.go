@@ -658,7 +658,7 @@ func TestLocalSyncCompletionContext(t *testing.T) {
 		}
 	})
 
-	t.Run("an already stopped daemon gets a cancelled context", func(t *testing.T) {
+	t.Run("an already stopped daemon gets a canceled context", func(t *testing.T) {
 		t.Parallel()
 		shutdown, stop := context.WithCancel(context.Background())
 		stop()
