@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -501,13 +502,18 @@ func TestPullManagedRepo_AutostashConflicts(t *testing.T) {
 		preexisting bool
 		localTitle  string
 		wantError   bool
+		delayedPull bool
 	}{
-		{"new agreeing conflict", false, "Recovered", false},
-		{"existing agreeing conflict", true, "Recovered", false},
-		{"new differing conflict", false, "Local title", true},
-		{"existing differing conflict", true, "Local title", true},
+		{"new agreeing conflict", false, "Recovered", false, false},
+		{"existing agreeing conflict", true, "Recovered", false, false},
+		{"new differing conflict", false, "Local title", true, false},
+		{"existing differing conflict", true, "Local title", true, false},
+		{"agreeing conflict after cycle deadline", false, "Recovered", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.delayedPull && runtime.GOOS == "windows" {
+				t.Skip("requires a shell Git wrapper")
+			}
 			isolateCredentials(t)
 			bare, writer := initBareRepo(t, "autostash")
 			const rel = "sessions/test/meta.json"
@@ -535,7 +541,40 @@ func TestPullManagedRepo_AutostashConflicts(t *testing.T) {
 			}
 			s := newTestScheduler(t.TempDir())
 			opts := ManagedRepoPullOpts{RepoPath: local, RepoName: "ledger", ResolveRules: ledger.DefaultResolveRules, Logger: discardLogger()}
-			result := s.pullManagedRepo(context.Background(), opts)
+			ctx := t.Context()
+			var path string
+			if tc.delayedPull {
+				path = os.Getenv("PATH")
+				realGit, err := exec.LookPath("git")
+				require.NoError(t, err)
+				t.Setenv("OX_TEST_REAL_GIT", realGit)
+				bin := t.TempDir()
+				require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte(`#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = pull ]; then
+    "$OX_TEST_REAL_GIT" "$@" || exit $?
+    sleep 3
+    exit 0
+  fi
+done
+exec "$OX_TEST_REAL_GIT" "$@"
+`), 0o755))
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+path)
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 2*time.Second)
+				defer cancel()
+			}
+			result := s.pullManagedRepo(ctx, opts)
+			if tc.delayedPull {
+				require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+				require.NoError(t, result.Err)
+				require.True(t, result.PullRan)
+				s.recordSyncState(ctx, local)
+				head, err := gitHeadSHA(t.Context(), local)
+				require.NoError(t, err)
+				require.Equal(t, head, LoadSyncState(local).LastSyncCommit)
+				t.Setenv("PATH", path)
+			}
 			assert.False(t, gitutil.IsRebaseInProgress(local))
 			conflicts, err := runGitOut(t, local, "ls-files", "--unmerged")
 			require.NoError(t, err)
@@ -571,4 +610,61 @@ func TestPullManagedRepo_AutostashConflicts(t *testing.T) {
 			assert.Equal(t, "keep me", string(unrelated))
 		})
 	}
+}
+
+func TestLocalSyncCompletionContext(t *testing.T) {
+	t.Parallel()
+
+	expired := func(t *testing.T) context.Context {
+		t.Helper()
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		t.Cleanup(cancel)
+		return ctx
+	}
+
+	t.Run("a live cycle context is returned unchanged", func(t *testing.T) {
+		t.Parallel()
+		s := &SyncScheduler{ctx: context.Background()}
+		parent, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		got, release := s.localSyncCompletionContext(parent)
+		defer release()
+		assert.Equal(t, parent, got)
+	})
+
+	t.Run("an expired cycle gets a fresh bounded context", func(t *testing.T) {
+		t.Parallel()
+		s := &SyncScheduler{ctx: context.Background()}
+		got, release := s.localSyncCompletionContext(expired(t))
+		defer release()
+		require.NoError(t, got.Err())
+		dl, ok := got.Deadline()
+		require.True(t, ok)
+		assert.InDelta(t, (10 * time.Second).Seconds(), time.Until(dl).Seconds(), 2)
+	})
+
+	t.Run("daemon shutdown cancels the completion context", func(t *testing.T) {
+		t.Parallel()
+		shutdown, stop := context.WithCancel(context.Background())
+		s := &SyncScheduler{ctx: shutdown}
+		got, release := s.localSyncCompletionContext(expired(t))
+		defer release()
+		require.NoError(t, got.Err())
+		stop()
+		select {
+		case <-got.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("completion context outlived daemon shutdown")
+		}
+	})
+
+	t.Run("an already stopped daemon gets a canceled context", func(t *testing.T) {
+		t.Parallel()
+		shutdown, stop := context.WithCancel(context.Background())
+		stop()
+		s := &SyncScheduler{ctx: shutdown}
+		got, release := s.localSyncCompletionContext(expired(t))
+		defer release()
+		assert.ErrorIs(t, got.Err(), context.Canceled)
+	})
 }
