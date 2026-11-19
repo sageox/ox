@@ -201,10 +201,9 @@ directory up to the repo root, so context primes even before hooks are installed
 
 ## Known Limitations
 
-- **Goose**: has **no compaction event**, so team context primed at session start
-  is lost when Goose compacts. ox cannot work around this. Goose also sends
-  `working_dir` only on *tool* events, so the project-scope hook command pins
-  `OX_PROJECT_ROOT` to the absolute repo root rather than relying on the cwd walk.
+- **Goose**: has **no compaction event**, so Team Context primed at session start
+  is lost when Goose compacts. The project hook discovers the active checkout
+  from Goose's `PLUGIN_ROOT` and honors an explicit `OX_PROJECT_ROOT`.
 - **Gemini, Droid**: no `SessionStart` hook, so priming depends on the instruction
   file marker rather than firing automatically.
 - **Codex**: sessions auto-finalize through `SessionEnd`, which Codex fires when a
