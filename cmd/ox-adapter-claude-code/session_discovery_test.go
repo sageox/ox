@@ -393,4 +393,15 @@ func TestSessionReadersHandleLinesOverOneMiB(t *testing.T) {
 	if !sessionContainsAgentID(path, "Oxab12") {
 		t.Fatal("agent ID after a large line was not found")
 	}
+	if sessionContainsAgentID(path, "Oxzz99") {
+		t.Fatal("an agent ID absent from the transcript was reported present")
+	}
+	// an unterminated tail is still being written: start no later than it
+	partial := filepath.Join(t.TempDir(), "partial.jsonl")
+	if err := os.WriteFile(partial, []byte(big+strings.TrimSuffix(late, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := findStartOffset(partial, since.Add(2*time.Hour)); got != int64(len(big)) {
+		t.Fatalf("start offset with an unterminated tail = %d, want %d", got, len(big))
+	}
 }

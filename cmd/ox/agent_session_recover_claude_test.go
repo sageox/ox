@@ -98,3 +98,22 @@ func TestUndiscoveredSessionNextSteps_QuotesTheSessionID(t *testing.T) {
 	steps := undiscoveredSessionNextSteps(&session.RecordingState{AgentID: "Oxab12", AgentSessionID: "x$(id)"})
 	assert.Contains(t, steps, "--session 'x$(id)' --include-aborted")
 }
+
+// TestSessionStopJSON_ReportsWhyNothingWasSaved: a stop that found no session
+// data says it failed and carries the discovery error and the import steps.
+func TestSessionStopJSON_ReportsWhyNothingWasSaved(t *testing.T) {
+	state := &session.RecordingState{AgentID: "Oxab12", AgentSessionID: "sess-1"}
+	out := captureStdoutForPlanCLI(t, func() {
+		require.NoError(t, outputSessionStopJSON(t.TempDir(), &agentinstance.Instance{AgentID: "Oxab12"}, state, "1s", nil, fmt.Errorf("no transcript under /repo"), map[string]int64{}))
+	})
+	var got struct {
+		Success       bool   `json:"success"`
+		UploadWarning string `json:"upload_warning"`
+		Guidance      string `json:"guidance"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	assert.False(t, got.Success)
+	assert.Contains(t, got.UploadWarning, ": no transcript under /repo")
+	assert.Contains(t, got.Guidance, "Session not saved")
+	assert.Contains(t, got.Guidance, "--session 'sess-1'")
+}

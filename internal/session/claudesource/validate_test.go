@@ -772,6 +772,24 @@ func TestValidateOwnsLinkedWorktreesOfTheSameRepository(t *testing.T) {
 			newRepo(t, root)
 			return root, filepath.Join(outer, "elsewhere")
 		}},
+		"stray registry entries beside an outside worktree": {owned: true, layout: func(t *testing.T, outer string) (string, string) {
+			root := filepath.Join(outer, "repo")
+			wt := filepath.Join(outer, "repo-wt")
+			common := newRepo(t, root)
+			addWorktree(t, common, "repo-wt", wt, false)
+			write(t, filepath.Join(common, "worktrees", "no-gitdir", "HEAD"), "ref: refs/heads/x\n")
+			write(t, filepath.Join(common, "worktrees", "empty-gitdir", "gitdir"), "\n")
+			return root, wt
+		}},
+		"registered outside worktree that lost its .git file": {layout: func(t *testing.T, outer string) (string, string) {
+			root := filepath.Join(outer, "repo")
+			wt := filepath.Join(outer, "repo-wt")
+			addWorktree(t, newRepo(t, root), "repo-wt", wt, false)
+			if err := os.Remove(filepath.Join(wt, ".git")); err != nil {
+				t.Fatal(err)
+			}
+			return root, wt
+		}},
 		"nested clone inside an outside worktree": {layout: func(t *testing.T, outer string) (string, string) {
 			root := filepath.Join(outer, "repo")
 			wt := filepath.Join(outer, "repo-wt")
@@ -850,4 +868,65 @@ func TestValidateOwnsLinkedWorktreesOfTheSameRepository(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCheckoutContainingRegistryEdges: a registered worktree deleted from disk
+// still counts, and a registry or checkout that cannot be read is an error, not
+// a silent "no checkout".
+func TestCheckoutContainingRegistryEdges(t *testing.T) {
+	write := func(t *testing.T, path, data string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setup := func(t *testing.T) (outer, root, common string) {
+		t.Helper()
+		outer, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		root = filepath.Join(outer, "repo")
+		common = filepath.Join(root, ".git")
+		write(t, filepath.Join(common, "HEAD"), "ref: refs/heads/main\n")
+		return outer, root, common
+	}
+
+	t.Run("deleted worktree still registered", func(t *testing.T) {
+		outer, root, common := setup(t)
+		wt := filepath.Join(outer, "gone-wt")
+		write(t, filepath.Join(common, "worktrees", "gone-wt", "gitdir"), filepath.Join(wt, ".git")+"\n")
+		got, err := checkoutContaining(root, filepath.Join(wt, "pkg"))
+		if err != nil || got != wt {
+			t.Fatalf("checkoutContaining = %q, %v; want %q", got, err, wt)
+		}
+	})
+	t.Run("unreadable worktrees registry", func(t *testing.T) {
+		outer, root, common := setup(t)
+		write(t, filepath.Join(common, "worktrees"), "not a directory")
+		if _, err := checkoutContaining(root, filepath.Join(outer, "elsewhere")); err == nil {
+			t.Fatal("a registry that cannot be listed must be an error")
+		}
+	})
+	t.Run("unreadable gitdir entry", func(t *testing.T) {
+		outer, root, common := setup(t)
+		if err := os.MkdirAll(filepath.Join(common, "worktrees", "wt", "gitdir"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := checkoutContaining(root, filepath.Join(outer, "elsewhere")); err == nil {
+			t.Fatal("a gitdir entry that cannot be read must be an error")
+		}
+	})
+	t.Run("registered worktree path is now a file", func(t *testing.T) {
+		outer, root, common := setup(t)
+		wt := filepath.Join(outer, "wt-file")
+		write(t, wt, "a file now stands here")
+		write(t, filepath.Join(common, "worktrees", "wt-file", "gitdir"), filepath.Join(wt, ".git")+"\n")
+		if _, err := checkoutContaining(root, filepath.Join(wt, "pkg")); err == nil {
+			t.Fatal("a checkout whose .git cannot be inspected must be an error")
+		}
+	})
 }
