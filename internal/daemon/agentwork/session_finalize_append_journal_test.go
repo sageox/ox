@@ -138,6 +138,47 @@ func TestAbandonedRecordingDetect_SettlesAppendJournal(t *testing.T) {
 	}
 }
 
+func TestRecoverRawFromSessionFile_RespectsPendingUploadOwnership(t *testing.T) {
+	for _, replaced := range []bool{false, true} {
+		name := "pending upload"
+		if replaced {
+			name = "replacement recording"
+		}
+		t.Run(name, func(t *testing.T) {
+			sessionDir := t.TempDir()
+			rawPath := filepath.Join(sessionDir, artifactRaw)
+			recPath := filepath.Join(sessionDir, recordingMarker)
+			stoppedAt := time.Now().UTC().Add(-time.Minute)
+			writeRecordingState(t, recPath, session.RecordingState{StoppedAt: &stoppedAt})
+			require.NoError(t, os.WriteFile(rawPath, []byte(journalAcked), 0o600))
+			require.NoError(t, session.StampRawCarrier(rawPath, session.CarrierStamp{StoppedAt: stoppedAt}))
+			finalized, err := os.ReadFile(rawPath)
+			require.NoError(t, err)
+			const id = "ses_019d0000-0000-7000-8000-000000000007"
+			require.NoError(t, session.WriteUploadRetryPending(sessionDir, id))
+			if replaced {
+				// A new recording can reuse the directory while the old upload
+				// marker is still present.
+				require.NoError(t, os.WriteFile(rawPath, []byte(journalAcked+journalBatch), 0o600))
+			}
+
+			hasRaw, err := recoverRawFromSessionFile(slog.Default(), recPath, sessionDir, rawPath)
+			require.NoError(t, err)
+			require.True(t, hasRaw)
+			raw, err := os.ReadFile(rawPath)
+			require.NoError(t, err)
+			if replaced {
+				assert.Contains(t, string(raw), journalBatch)
+				assert.Contains(t, string(raw), stoppedAt.Format(time.RFC3339Nano), "the replacement still gets its stop footer")
+				assert.Empty(t, session.PendingUploadID(sessionDir))
+			} else {
+				assert.Equal(t, finalized, raw, "the pending upload keeps its exact bytes")
+				assert.Equal(t, id, session.PendingUploadID(sessionDir))
+			}
+		})
+	}
+}
+
 func TestStageSessionInLedger_LeavesAppendJournalBehind(t *testing.T) {
 	ledgerPath := initTestGitRepo(t)
 	sessionName := "2026-09-29T10-00-user-OxJRNL"
