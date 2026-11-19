@@ -128,12 +128,27 @@ func TestReadSyncRefusesTheProjectsLedgerFolder(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(project, ".sageox"), 0o755))
 	require.NoError(t, config.SaveProjectConfig(project, &config.ProjectConfig{RepoID: readSyncTestRepoID}))
 	t.Chdir(project)
-	for _, tc := range []struct{ name, dataHome, repo, want string }{
-		{"this project's repo", "", readSyncTestRepoID, "project_ledger"},
-		{"a separate data home", t.TempDir(), readSyncTestRepoID, "denied"},
-		{"another repo", "", "repo_019ff2f5-2079-7be1-b05e-000000000000", "denied"},
+	shared := t.TempDir()
+	const unrecorded = "-"
+	for _, tc := range []struct {
+		name string
+		// recordedIn is the data home the project recorded its Ledger
+		// folder under ("" is the default one), or unrecorded.
+		dataHome, recordedIn, repo, want string
+	}{
+		{"nothing recorded, default data home", "", unrecorded, readSyncTestRepoID, "project_ledger"},
+		{"nothing recorded, a separate data home", t.TempDir(), unrecorded, readSyncTestRepoID, "denied"},
+		{"another repo", "", unrecorded, "repo_019ff2f5-2079-7be1-b05e-000000000000", "denied"},
+		{"a data home shared with the project", shared, shared, readSyncTestRepoID, "project_ledger"},
+		{"the project's Ledger in the default data home", t.TempDir(), "", readSyncTestRepoID, "denied"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			local := &config.LocalConfig{}
+			if tc.recordedIn != unrecorded {
+				t.Setenv("XDG_DATA_HOME", tc.recordedIn)
+				local.Ledger = &config.LedgerConfig{Path: config.DefaultLedgerPath(readSyncTestRepoID, "https://sageox.ai")}
+			}
+			require.NoError(t, config.SaveLocalConfig(project, local))
 			t.Setenv("XDG_DATA_HOME", tc.dataHome)
 			result, stderr, err := runReadSyncInProc(t, "--read-only", "--repo", tc.repo, "--json")
 			require.Equal(t, 1, exitCodeOf(t, err))

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -111,11 +112,10 @@ func runReadSync(cmd *cobra.Command, args []string) error {
 		result.ErrorClass = class
 		return finishReadSync(cmd, result, jsonOutput, 2)
 	}
-	// Inside a SageOx project for this repo, path is that project's Ledger
-	// folder unless XDG_DATA_HOME sends this command elsewhere: the daemon
-	// clones the read-write Ledger there, and takes any checkout it finds there
-	// for it, including a read-only one that sessions cannot be pushed through.
-	if !check && os.Getenv("XDG_DATA_HOME") == "" && config.GetRepoID(config.FindProjectRoot()) == repoID {
+	// The daemon of a SageOx project for this repo clones the read-write Ledger
+	// into its Ledger folder, and takes any checkout it finds there for it,
+	// including a read-only one that sessions cannot be pushed through.
+	if root := config.FindProjectRoot(); !check && root != "" && config.GetRepoID(root) == repoID && isProjectLedger(root, path) {
 		result.ErrorClass = "project_ledger"
 		return finishReadSync(cmd, result, jsonOutput, 1)
 	}
@@ -156,6 +156,17 @@ func runReadSync(cmd *cobra.Command, args []string) error {
 		code = 1
 	}
 	return finishReadSync(cmd, result, jsonOutput, code)
+}
+
+// isProjectLedger reports whether path is the Ledger folder of the project at
+// root. The daemon and `ox doctor --fix` record that folder in config.local.toml
+// as their own environment selects it. Until one has, the daemon is assumed to
+// use the default data home, as a daemon started without XDG_DATA_HOME does.
+func isProjectLedger(root, path string) bool {
+	if local, err := config.LoadLocalConfig(root); err == nil && local.Ledger != nil && filepath.IsAbs(local.Ledger.Path) {
+		return filepath.Clean(local.Ledger.Path) == filepath.Clean(path)
+	}
+	return os.Getenv("XDG_DATA_HOME") == ""
 }
 
 func finishReadSync(cmd *cobra.Command, result ledger.ReadSyncResult, jsonOutput bool, code int) error {
