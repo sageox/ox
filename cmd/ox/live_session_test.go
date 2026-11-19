@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -411,4 +412,49 @@ type testWriter struct{ t *testing.T }
 func (w testWriter) Write(p []byte) (int, error) {
 	w.t.Log(strings.TrimRight(string(p), "\n"))
 	return len(p), nil
+}
+
+// A batch the publication secret scan withheld from the live stream is told to
+// the person once, at stop, without saying what matched (F1, F10). It is no
+// upload failure: upload_warning stays for the Ledger push.
+func TestLiveStopTellsThePersonOnceThatTheStreamWithheldASecret(t *testing.T) {
+	f := newLiveFixture(t, liveOpts{streaming: true})
+	f.turn("before the secret")
+	f.openAndDrain()
+	// what the drain records when it replaces a refused batch with its gap line
+	path := filepath.Join(f.dir(), "stream-state.json")
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var st map[string]any
+	require.NoError(t, json.Unmarshal(raw, &st))
+	st["secret_withheld"] = true
+	raw, err = json.Marshal(st)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, raw, 0o600))
+
+	result := f.stopResult()
+
+	require.True(t, result.LiveSecretWithheld, "stop must learn the stream withheld a batch")
+	assert.NotContains(t, result.UploadWarning, "credential", "a withheld live batch is not an upload failure")
+	output := sessionStopOutput{Guidance: sessionStopGuidance}
+	addLiveSecretWithheldNotice(&output, result)
+	assert.Equal(t, []string{liveSecretWithheldWarning}, output.DataWarnings, "said once")
+	assert.Contains(t, output.Guidance, liveSecretWithheldGuidance)
+}
+
+func TestLiveSecretWithheldNoticeOnlyForAStreamThatWithheld(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result agentSessionResult
+	}{
+		{"nothing withheld", agentSessionResult{}},
+		{"deleted on SageOx says not shared at all", agentSessionResult{LiveSecretWithheld: true, DeletedOnServer: true, Held: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output := sessionStopOutput{Guidance: sessionStopGuidance}
+			addLiveSecretWithheldNotice(&output, &tc.result)
+			assert.Empty(t, output.DataWarnings)
+			assert.Equal(t, sessionStopGuidance, output.Guidance)
+		})
+	}
 }

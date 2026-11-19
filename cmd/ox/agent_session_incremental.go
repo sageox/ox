@@ -405,6 +405,7 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	// it) is held the same way, for its own reason.
 	sessionCacheDir := filepath.Dir(result.RawPath)
 	deletedOnServer := liveDeletedOnServer(state.SessionPath)
+	result.LiveSecretWithheld = liveSecretWithheld(state)
 	held := stopHoldsSession(projectRoot, state)
 	switch {
 	case deletedOnServer:

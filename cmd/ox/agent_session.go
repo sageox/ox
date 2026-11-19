@@ -848,6 +848,9 @@ func outputTextSummary(projectRoot string, state *session.RecordingState, durati
 		if processResult.Held {
 			fmt.Printf("  %s\n", processResult.UploadWarning)
 		}
+		if processResult.LiveSecretWithheld && !processResult.DeletedOnServer {
+			fmt.Printf("  %s\n", liveSecretWithheldWarning)
+		}
 
 		// show generated files with descriptions
 		if processResult.RawPath != "" || processResult.SummaryMDPath != "" {
@@ -977,6 +980,7 @@ func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, sta
 		if processResult.DeletedOnServer {
 			output.Guidance = deletedOnServerGuidance
 		}
+		addLiveSecretWithheldNotice(&output, processResult)
 	} else {
 		output.UploadWarning = "no session file found — session data was not uploaded to ledger"
 		output.Guidance = "Session stopped but no conversation data was found. The session recording may be empty. Run 'ox doctor' to check for recoverable sessions."
@@ -1334,6 +1338,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// be recorded, the stop fails and the recording state is kept. A session
 	// deleted on SageOx while it streamed is held the same way, for its own reason.
 	deletedOnServer := liveDeletedOnServer(state.SessionPath)
+	result.LiveSecretWithheld = liveSecretWithheld(state)
 	held := deletedOnServer || stopHoldsSession(projectRoot, state)
 	switch {
 	case deletedOnServer:

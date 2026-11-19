@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sageox/ox/internal/secretguard"
 	// aliased: this package's own session type would shadow it
 	oxsession "github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/sessionstream"
@@ -50,6 +51,9 @@ const (
 	vContinue verdict = iota
 	vStop
 	vNewLayer
+	// vWithhold: the publication scan refused the batch at acked; the drain
+	// replaces its refused lines in the spool with gap lines (withhold).
+	vWithhold
 )
 
 // session is one locked view of a session dir during a call.
@@ -59,6 +63,8 @@ type session struct {
 	st      State
 	c       *sessionstream.Client
 	resyncs int
+	// withheld is the refused batch at acked and its replacement (vWithhold).
+	withheld withheldBatch
 }
 
 func (s *session) spoolPath() string { return filepath.Join(s.dir, spoolFileName) }
@@ -147,16 +153,27 @@ func (s *session) caughtUp() bool {
 }
 
 func (s *session) drain(ctx context.Context, res *DrainResult) error {
-	for restarts := 0; ; restarts++ {
+	for restarts := 0; ; {
 		v, err := s.pump(ctx, res)
-		if err != nil || v != vNewLayer {
+		if err != nil {
 			return err
 		}
-		if restarts >= maxRestarts {
-			return errors.New("live stream refused after restarting on a new layer")
-		}
-		if err := s.restartLayer(ctx); err != nil {
-			return err
+		switch v {
+		case vWithhold:
+			// pump has closed the spool; the next pump reads the rewritten one
+			if err := s.withhold(ctx); err != nil {
+				return err
+			}
+		case vNewLayer:
+			if restarts >= maxRestarts {
+				return errors.New("live stream refused after restarting on a new layer")
+			}
+			restarts++
+			if err := s.restartLayer(ctx); err != nil {
+				return err
+			}
+		default:
+			return nil
 		}
 	}
 }
@@ -199,8 +216,17 @@ func (s *session) sendBatch(ctx context.Context, f *os.File, h *sessionstream.St
 	if len(batch) == 0 {
 		return vStop, nil
 	}
-	if err := checkPublication(ctx, batch); err != nil {
-		return s.onWithheld(ctx, err)
+	if err := checkPublication(batch); err != nil {
+		var refused *secretguard.RefusedError
+		if !errors.As(err, &refused) {
+			return vStop, err
+		}
+		w, err := withholdRefused(batch)
+		if err != nil {
+			return vStop, fmt.Errorf("withhold refused batch at offset %d: %w", s.st.Acked, err)
+		}
+		s.withheld = w
+		return vWithhold, nil
 	}
 	resp, err := s.c.AppendRaw(ctx, s.st.ConversationID, s.st.LayerID, s.st.Acked, h.Sum(), batch)
 	if err != nil {

@@ -12,7 +12,8 @@
 // Per-session files (all 0600, in the session directory):
 //
 //	spool.jsonl          the spool: append-only, whole JSONL lines; byte-identical
-//	                     to the server's copy once drained
+//	                     to the server's copy once drained. The one rewrite: an
+//	                     unsent batch the secret scan refused becomes a gap line
 //	stream-state.json    stream state: ids, endpoint, acked offset, status
 //	live.lock            advisory lock taken by whoever appends to or drains the spool
 //	close-requested      stop asked for the close; kept until the stream ends, so
@@ -29,6 +30,8 @@
 // removing the folder never loses a delete.
 //
 // Every batch and close summary passes the publication secret scan before it
-// leaves the machine (checkPublication), exactly as Ledger and LFS
-// publication scan session content.
+// leaves the machine (checkPublication), as Ledger and LFS publication scan
+// session content, but without waiting on the network for the current rules
+// (RefreshSecretRules). A refused batch is replaced in the spool by a
+// secret_withheld gap line and the stream goes on (withhold).
 package livesession

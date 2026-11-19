@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/secretguard"
+	"github.com/sageox/ox/internal/sessionstream"
 )
 
 // syntheticAWSKey is the fixture the publication guard tests use; split so the
@@ -19,98 +21,164 @@ var secretLine = []byte(`{"type":"msg","content":"` + syntheticAWSKey + `"}` + "
 // futureLine holds a credential only the current upstream catalog knows.
 var futureLine = []byte(`{"type":"msg","content":"future_synthetic"}` + "\n")
 
-func futureRules(t *testing.T) func(context.Context) (*secretguard.RuleSet, error) {
+func futureRules(t *testing.T) *secretguard.RuleSet {
 	t.Helper()
 	rules, err := secretguard.NewRules([]byte("[[rules]]\nid='future-format'\nregex='future_[a-z]+'\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return func(context.Context) (*secretguard.RuleSet, error) { return rules, nil }
+	return rules
 }
 
-// withheld asserts the drain stopped at the clean prefix: the server holds
-// exactly what was acked before, the stream is disabled for the refusal, and
-// the refused bytes are still in the local spool (withheld, not lost).
-func (e *env) withheld(cleanAcked int64, refused []byte) {
-	e.t.Helper()
-	st := e.state()
-	if st.Status != livesession.StatusDisabled || st.DisabledReason != "secret_refused" || st.Acked != cleanAcked {
-		e.t.Fatalf("state = %+v, want disabled (secret_refused) at offset %d", st, cleanAcked)
-	}
-	if got := e.stored(st); !bytes.Equal(got, e.spoolBytes()[:cleanAcked]) {
-		e.t.Fatalf("server holds %d bytes, want only the %d-byte clean prefix", len(got), cleanAcked)
-	}
-	if !bytes.Contains(e.spoolBytes(), refused) {
-		e.t.Fatal("the refused bytes left the local spool")
-	}
-}
-
-// Live uploads are a publication: a credential the bundled scan finds must
-// never leave the machine, whatever capture-time redaction let through.
-func TestDrainWithholdsBytesTheBundledScanRefuses(t *testing.T) {
-	if secretguard.ValidateContent("sessions/content", secretLine) == nil {
-		t.Fatal("test setup: the bundled scan accepts the fixture")
-	}
-	e := newEnv(t)
-	e.spool(lines(0, 2))
-	clean := e.mustDrain().Acked
-	e.spool(secretLine)
-	e.spool(lines(2, 3))
-
-	if res, err := e.drain(); err != nil || !res.Done {
-		t.Fatalf("drain: %+v %v, want a settled refusal", res, err)
-	}
-	e.withheld(clean, secretLine)
-}
-
-// Publication scans with the current upstream rules too; so must the stream.
-func TestDrainWithholdsBytesOnlyTheCurrentRulesRefuse(t *testing.T) {
-	livesession.SetCurrentRulesForTest(t, futureRules(t))
-	if secretguard.ValidateContent("sessions/content", futureLine) != nil {
-		t.Fatal("test setup: the bundled scan already refuses the fixture")
-	}
-	e := newEnv(t)
-	e.spool(lines(0, 2))
-	clean := e.mustDrain().Acked
-	e.spool(futureLine)
-
-	if _, err := e.drain(); err != nil {
-		t.Fatalf("drain: %v", err)
-	}
-	e.withheld(clean, futureLine)
-}
-
-// Publication fails closed when the current rules cannot be loaded: the bytes
-// wait in the spool and go once the rules are back.
-func TestDrainWaitsWhileTheCurrentRulesAreUnavailable(t *testing.T) {
-	down := true
+// The stream scans with the delta of the last refresh that succeeded (F2): a
+// refresh that fails afterwards keeps it, so a credential only the current
+// upstream catalog knows is still withheld, and the person is told at stop.
+func TestDrainScansWithTheLastGoodDeltaAfterARefreshFails(t *testing.T) {
+	rules, down := futureRules(t), false
 	livesession.SetCurrentRulesForTest(t, func(context.Context) (*secretguard.RuleSet, error) {
 		if down {
 			return nil, errors.New("catalog unavailable")
 		}
-		return secretguard.Bundled(), nil
+		return rules, nil
 	})
+	if secretguard.ValidateContent("sessions/content", futureLine) != nil {
+		t.Fatal("test setup: the bundled scan already refuses the fixture")
+	}
+	if err := livesession.RefreshSecretRules(t.Context()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	down = true
+	if err := livesession.RefreshSecretRules(t.Context()); err == nil {
+		t.Fatal("a failed fetch reported a successful refresh")
+	}
 	e := newEnv(t)
-	e.spool(lines(0, 3))
-
-	if res, err := e.drain(); err == nil || res.Done {
-		t.Fatalf("drain without current rules: %+v %v, want a retryable error", res, err)
-	}
-	if n := e.srv.CallsTo("POST", "/lines"); n != 0 {
-		t.Fatalf("%d appends sent before the scan could run", n)
-	}
-	if st := e.state(); st.Status != livesession.StatusStreaming || st.Acked != 0 {
-		t.Fatalf("state = %+v, want the stream intact for a retry", st)
-	}
-	down = false
+	before := lines(0, 2)
+	e.spool(before)
 	e.mustDrain()
-	if !bytes.Equal(e.stored(e.state()), e.spoolBytes()) {
-		t.Fatal("the spool did not go once the rules were back")
+	if e.state().SecretWithheld {
+		t.Fatal("a clean stream is marked as having withheld a secret")
+	}
+	e.spool(futureLine)
+	e.mustDrain()
+
+	st := e.state()
+	if got, want := e.stored(st), joined(before, withheldGapFor(futureLine)); !bytes.Equal(got, want) {
+		t.Fatalf("server holds\n%s\nwant\n%s", got, want)
+	}
+	if !st.SecretWithheld {
+		t.Fatal("stop has nothing to tell the person: SecretWithheld unset")
+	}
+}
+
+// batchesOf splits lines the way the drain reads them: whole lines, up to
+// sessionstream.MaxBatchBytes per batch.
+func batchesOf(lines [][]byte) [][]byte {
+	var out [][]byte
+	var cur []byte
+	for _, l := range lines {
+		if len(cur)+len(l) > sessionstream.MaxBatchBytes {
+			out, cur = append(out, cur), nil
+		}
+		cur = append(cur, l...)
+	}
+	return append(out, cur)
+}
+
+// Only the refused lines are withheld: the clean lines around them, in the
+// same batch or the next, still stream, and each refused line gets its own gap
+// with its own size. Withholding whole batches hid up to 256 KiB of a
+// teammate's work for one pasted key.
+func TestOnlyTheRefusedLinesBecomeGaps(t *testing.T) {
+	all := [][]byte{lines(0, 1), secretLine}
+	for i := 1; i < 300; i++ {
+		all = append(all, lines(i, i+1))
+	}
+	all = append(all, secretLine)
+	for i := 300; i < 310; i++ {
+		all = append(all, lines(i, i+1))
+	}
+	if b := batchesOf(all); len(b) != 2 || !bytes.Contains(b[0], secretLine) || !bytes.Contains(b[1], secretLine) {
+		t.Fatalf("test setup: want two batches with a secret in each, got %d", len(b))
+	}
+	e := newEnv(t)
+	e.spool(bytes.Join(all, nil))
+	e.mustDrain()
+
+	want := bytes.ReplaceAll(bytes.Join(all, nil), secretLine, withheldGapFor(secretLine))
+	if got := e.stored(e.state()); !bytes.Equal(got, want) {
+		t.Fatalf("server holds %d bytes, want %d: every clean line, and a gap for each refused one", len(got), len(want))
+	}
+}
+
+// A match that spans lines refuses no line on its own. Then the whole batch is
+// withheld as one gap: bytes the scan refused never go out piecemeal.
+func TestARefusalAcrossLinesWithholdsTheWholeBatch(t *testing.T) {
+	rules, err := secretguard.NewRules([]byte("[[rules]]\nid='split-format'\nregex='''split_a[\\s\\S]{1,80}split_b'''\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	livesession.SetCurrentRulesForTest(t, func(context.Context) (*secretguard.RuleSet, error) { return rules, nil })
+	if err := livesession.RefreshSecretRules(t.Context()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	half1 := []byte(`{"type":"msg","content":"split_a"}` + "\n")
+	half2 := []byte(`{"type":"msg","content":"split_b"}` + "\n")
+	if livesession.CheckPublicationForTest(half1) != nil || livesession.CheckPublicationForTest(half2) != nil ||
+		livesession.CheckPublicationForTest(joined(half1, half2)) == nil {
+		t.Fatal("test setup: want the rule to refuse the two halves only together")
+	}
+	refused := joined(lines(0, 1), half1, half2, lines(1, 2))
+	e := newEnv(t)
+	e.spool(refused)
+	e.mustDrain()
+	after := lines(2, 3)
+	e.spool(after)
+	e.mustDrain()
+
+	want := joined(withheldGapFor(refused), after)
+	if got := e.stored(e.state()); !bytes.Equal(got, want) {
+		t.Fatalf("server holds\n%s\nwant\n%s", got, want)
+	}
+}
+
+// A hook that finds live.lock busy appends without it. A drain replacing a
+// withheld batch renames a new spool into place meanwhile; an append that went
+// to the old file then would be lost with no gap line. The swap lock makes the
+// append wait for the rename and land in the new spool.
+func TestAnAppendDuringAWithholdLandsInTheNewSpool(t *testing.T) {
+	e := newEnv(t)
+	before, late := lines(0, 2), lines(2, 3)
+	e.spool(before)
+	e.mustDrain()
+	e.spool(secretLine)
+
+	appended := make(chan error, 1)
+	livesession.SetSpoolRewriteHookForTest(t, func() {
+		go func() {
+			_, err := livesession.Spool(context.Background(), e.dir, late, livesession.SpoolOptions{})
+			appended <- err
+		}()
+		// long enough for the append to give up on live.lock (the drain holds
+		// it) and reach the swap lock, well inside the swap lock's own wait
+		time.Sleep(500 * time.Millisecond)
+	})
+	e.mustDrain()
+	if err := <-appended; err != nil {
+		t.Fatalf("append during the withhold: %v", err)
+	}
+	e.mustDrain()
+
+	want := joined(before, withheldGapFor(secretLine), late)
+	if got := e.spoolBytes(); !bytes.Equal(got, want) {
+		t.Fatalf("spool =\n%s\nwant the late append after the gap:\n%s", got, want)
+	}
+	if got := e.stored(e.state()); !bytes.Equal(got, want) {
+		t.Fatalf("server holds\n%s\nwant\n%s", got, want)
 	}
 }
 
 // The close summary leaves the machine too. A summary the scan refuses is
-// withheld; the server then writes its own.
+// dropped, and the session closes without one.
 func TestCloseWithholdsASummaryTheScanRefuses(t *testing.T) {
 	e := newEnv(t)
 	e.spool(lines(0, 2))
@@ -120,23 +188,5 @@ func TestCloseWithholdsASummaryTheScanRefuses(t *testing.T) {
 	}
 	if got, ok := e.srv.ClosedWith(e.st.ConversationID); !ok || got.Summary != "" {
 		t.Fatalf("close summary = %q (closed=%v), want it withheld", got.Summary, ok)
-	}
-}
-
-// Without the current rules the summary cannot be proven clean, but every
-// stream byte already was: the close goes without the summary, not never.
-func TestCloseWithoutCurrentRulesWithholdsOnlyTheSummary(t *testing.T) {
-	e := newEnv(t)
-	e.spool(lines(0, 2))
-	e.mustDrain()
-	livesession.SetCurrentRulesForTest(t, func(context.Context) (*secretguard.RuleSet, error) {
-		return nil, errors.New("catalog unavailable")
-	})
-	res, err := livesession.Close(t.Context(), e.cfg, e.dir, "a clean summary", testBudget)
-	if err != nil || res.Status != livesession.StatusClosed {
-		t.Fatalf("close: %+v %v", res, err)
-	}
-	if got, _ := e.srv.ClosedWith(e.st.ConversationID); got.Summary != "" {
-		t.Fatalf("summary %q sent without the current rules", got.Summary)
 	}
 }

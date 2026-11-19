@@ -107,9 +107,15 @@ type State struct {
 	DeletedOnServer bool `json:"deleted_on_server,omitempty"`
 
 	// DisabledReason says why the stream was disabled: the server's refusal
-	// reason, or secretRefusedReason when publication rules withheld its bytes.
-	// A key conflict leaves it empty (Open returns ErrKeyConflict instead).
+	// reason. A key conflict leaves it empty (Open returns ErrKeyConflict
+	// instead). A secret never disables a stream (see withhold); streams an
+	// older ox disabled for one keep "secret_refused".
 	DisabledReason string `json:"disabled_reason,omitempty"`
+
+	// SecretWithheld is set once the publication scan refused a batch and a
+	// secret_withheld gap line replaced it. Stop reads it to tell the person,
+	// once, that part of the session was left out of the live view.
+	SecretWithheld bool `json:"secret_withheld,omitempty"`
 }
 
 func (s State) active() bool { return s.Status == StatusStreaming || s.Status == StatusClosing }

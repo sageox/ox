@@ -3,28 +3,35 @@ package livesession
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/sageox/ox/internal/secretguard"
 )
 
 // SetCurrentRulesForTest replaces the current-rules source for one test and
-// empties the cache on both sides. Tests that call it must not run in parallel.
+// forgets the last good delta on both sides. Tests that call it must not run
+// in parallel.
 func SetCurrentRulesForTest(t testing.TB, f func(context.Context) (*secretguard.RuleSet, error)) {
 	t.Helper()
 	prev := currentRules
-	resetRulesCache()
+	lastDelta.Store(nil)
 	currentRules = f
 	t.Cleanup(func() {
 		currentRules = prev
-		resetRulesCache()
+		lastDelta.Store(nil)
 	})
 }
 
-func resetRulesCache() {
-	rulesCache.mu.Lock()
-	defer rulesCache.mu.Unlock()
-	rulesCache.delta, rulesCache.fetched = nil, time.Time{}
+// CheckPublicationForTest is the scan every batch passes before it is sent.
+func CheckPublicationForTest(content []byte) error { return checkPublication(content) }
+
+// SetSpoolRewriteHookForTest runs f while a drain replacing a withheld batch
+// holds the spool's swap lock, after it read the old spool and before it
+// renames the new one. Not safe for parallel tests.
+func SetSpoolRewriteHookForTest(t testing.TB, f func()) {
+	t.Helper()
+	prev := spoolRewriteHook
+	spoolRewriteHook = f
+	t.Cleanup(func() { spoolRewriteHook = prev })
 }
 
 // SetLostDeclareHookForTest runs f inside a spool write, after it read the

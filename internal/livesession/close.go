@@ -20,7 +20,8 @@ const CloseBudget = 15 * time.Second
 // sha256. summary is the cheap local summary, or empty. If the server cannot be
 // reached in time the status stays closing and a later Close (the daemon's tick)
 // finishes the job; the summary is not persisted, so a retry sends none and the
-// server writes its own. Close never blocks longer than budget.
+// session has no summary (nothing on the server writes one). Close never
+// blocks longer than budget.
 func Close(ctx context.Context, cfg Config, dir, summary string, budget time.Duration) (DrainResult, error) {
 	cfg, err := cfg.withDefaults()
 	if err != nil {
@@ -103,7 +104,7 @@ func openPending(ctx context.Context, cfg Config, dir string) error {
 
 func (s *session) finish(ctx context.Context, summary string, res *DrainResult) error {
 	if len(summary) > sessionstream.MaxSummaryBytes {
-		summary = "" // too large for the server; it generates one when missing
+		summary = "" // too large for the server; the session closes without one
 	}
 	if err := s.declareLost(); err != nil {
 		return err // stay closing: without the gap line the close would claim a complete stream

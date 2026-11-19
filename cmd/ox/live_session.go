@@ -250,6 +250,35 @@ const deletedOnServerWarning = "This session was deleted on SageOx while it was 
 // deletedOnServerGuidance replaces the stop guidance for such a session.
 const deletedOnServerGuidance = "This session was deleted on SageOx while it was recording, so it was not uploaded or shared. Tell the user once, in plain words, using upload_warning. Do not upload or publish it."
 
+// liveSecretWithheldWarning is the one notice a person gets when the live
+// stream left part of their session out because the secret scan refused it.
+// Like the viewer's marker, it never says what matched.
+const liveSecretWithheldWarning = "Part of this session looked like a credential, so it was left out of the live view on SageOx. It is still saved on this machine."
+
+// liveSecretWithheldGuidance asks the agent to pass that notice on.
+const liveSecretWithheldGuidance = "Part of this session was left out of the live view on SageOx because it looked like a credential. Tell the user once, in plain words, using the data_warnings entry. Do not repeat or guess what it was."
+
+// liveSecretWithheld reports whether this recording's live stream withheld a
+// batch the publication secret scan refused. A stream left in a reused folder
+// by another recording does not count.
+func liveSecretWithheld(state *session.RecordingState) bool {
+	if state == nil || state.SessionPath == "" {
+		return false
+	}
+	st, err := livesession.ReadState(state.SessionPath)
+	return err == nil && st.SessionID == state.SessionID && st.SecretWithheld
+}
+
+// addLiveSecretWithheldNotice adds the withheld notice to a stop's output.
+// A session deleted on SageOx already says it was not shared at all.
+func addLiveSecretWithheldNotice(output *sessionStopOutput, result *agentSessionResult) {
+	if !result.LiveSecretWithheld || result.DeletedOnServer {
+		return
+	}
+	output.DataWarnings = append(output.DataWarnings, liveSecretWithheldWarning)
+	output.Guidance += " " + liveSecretWithheldGuidance
+}
+
 // liveDeletedOnServer reports whether the server deleted this session while it
 // streamed: the live stream was rejected, and the v1 copy must stay off the
 // Ledger too.
