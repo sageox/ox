@@ -50,6 +50,7 @@ import (
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
@@ -457,11 +458,10 @@ func clearNeedsSummaryMarkerForSession(sessionName string) {
 		slog.Debug("clear needs-summary marker", "error", err, "session", sessionName)
 	}
 
-	// prune cache now that push-summary is complete
+	// prune cache now that push-summary is complete; an unfinished live stream
+	// keeps its files for the daemon to close
 	if cacheSessionDir != "" && cacheSessionDir != "." {
-		if err := os.RemoveAll(cacheSessionDir); err != nil {
-			slog.Debug("prune session cache after push-summary", "dir", cacheSessionDir, "error", err)
-		}
+		agentwork.PruneSessionCache(slog.Default(), cacheSessionDir)
 	}
 }
 

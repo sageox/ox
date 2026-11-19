@@ -354,8 +354,9 @@ func statusMessageForEvent(event string) string {
 	case "SessionStart":
 		return "SageOx: loading context; auto-recording if configured"
 	case "PreToolUse":
-		// phaseBeforeTool is deliberately absent from activePhaseBehavior.
-		return "SageOx: pre-tool hook (currently inactive)"
+		// The pre-tool phase only notes the start of an ox call that moves
+		// team data, for the flow lane; every other tool call is a no-op.
+		return "SageOx: timing ox calls"
 	case "PostToolUse":
 		return "SageOx: capturing activity for session recording"
 	case "UserPromptSubmit":

@@ -89,7 +89,7 @@ func init() {
 		Slug:        CheckSlugReadme,
 		Name:        ".sageox/README.md",
 		Category:    "Project Structure",
-		FixLevel:    FixLevelAuto,
+		FixLevel:    FixLevelSuggested,
 		Description: "Checks if .sageox/README.md exists and is up to date",
 		Run:         checkReadmeFile,
 	})
@@ -115,6 +115,15 @@ func init() {
 	// ============================================================
 	// Git Status checks
 	// ============================================================
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugSageoxFilesTracked,
+		Name:        ".sageox/ files staged",
+		Category:    "Git Status",
+		FixLevel:    FixLevelSuggested,
+		Description: "Checks that SageOx configuration files are tracked",
+		Run:         checkSageoxFilesTracked,
+	})
 
 	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugGitignore,
@@ -366,6 +375,17 @@ func init() {
 		Description: "Ensures .claude/settings.json runs the ox status line, leaving a custom statusLine in place",
 		Run: func(fix bool) checkResult {
 			return checkClaudeStatusLine(fix)
+		},
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugConductorStatusLine,
+		Name:        conductorRunScriptCheck,
+		Category:    "Integration",
+		FixLevel:    FixLevelSuggested,
+		Description: "Adds an \"ox\" run script to .conductor/settings.local.toml so ox's status line shows in Conductor's Run pane",
+		Run: func(fix bool) checkResult {
+			return checkConductorRunScript(fix)
 		},
 	})
 

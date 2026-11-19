@@ -71,6 +71,7 @@ type Result struct {
 	LedgerSessionDir string   // full path to session dir in ledger (empty if upload failed)
 	UploadWarning    string   // non-empty when ledger upload failed (explains recovery)
 	Held             bool     // held on this machine (session_publishing: manual): never summarized, uploaded, or deleted automatically
+	DeletedOnServer  bool     // held because it was deleted on SageOx while it streamed live (implies Held)
 	DataWarnings     []string // data quality warnings from validation (reported to agent)
 	PRLinkMisses     []string // server-reported repair tasks: linked PRs missing the SageOx-Session trailer, pre-formatted for the agent
 	UploadMs         int64    // time spent on LFS upload + git push (ms)

@@ -722,6 +722,11 @@ func (s *SyncScheduler) recloneWorkspaceForGC(ctx context.Context, ws WorkspaceS
 			if err := os.WriteFile(swapMarker, nil, 0o600); err != nil {
 				return err
 			}
+			// .old holds the live cache when the swap finished but the carry did
+			// not; it is newer than the preserved copy, so it goes first.
+			if err := s.gcCarryCache(oldPath, ws.Path); err != nil {
+				return err
+			}
 			carryErr = gcCarryPlanRetries(oldPath, ws.Path)
 			return nil
 		}()
@@ -760,7 +765,11 @@ func (s *SyncScheduler) recloneWorkspaceForGC(ctx context.Context, ws WorkspaceS
 		// crash between the swap and phase 1.5 would otherwise discard the
 		// backup — taking sync-state.json with it, which is the file a
 		// non-owner daemon reads to learn when a team context last synced.
-		if _, statErr := os.Stat(cacheBackupDir); statErr == nil {
+		if _, statErr := os.Stat(cacheBackupDir); statErr == nil && cacheHoldsFiles(ws.Path) {
+			// the carry already put the live cache in place; the copy taken
+			// before the clone is older and would overwrite newer lines
+			_ = os.RemoveAll(cacheBackupDir)
+		} else if statErr == nil {
 			if applyErr := gcRestoreCache(cacheBackupDir, ws.Path); applyErr != nil {
 				s.logger.Error("gc: failed to restore orphaned cache backup, preserving for manual recovery",
 					"path", ws.Path, "cache_backup", cacheBackupDir, "error", applyErr)
@@ -993,6 +1002,14 @@ func (s *SyncScheduler) recloneWorkspaceForGC(ctx context.Context, ws WorkspaceS
 	}
 
 	if _, err := os.Stat(oldPath); err == nil {
+		if cacheHoldsFiles(oldPath) {
+			if isLedger {
+				s.ledgerMu.Unlock()
+			}
+			s.logger.Error("gc: retained old clone still holds local cache files, refusing to remove it",
+				"path", oldPath, "cache", filepath.Join(oldPath, ".sageox", "cache"))
+			return gcFailed, false
+		}
 		if err := os.RemoveAll(oldPath); err != nil {
 			if isLedger {
 				s.ledgerMu.Unlock()
@@ -1024,6 +1041,14 @@ func (s *SyncScheduler) recloneWorkspaceForGC(ctx context.Context, ws WorkspaceS
 		return gcFailed, false
 	}
 
+	// Carry the live cache across by rename, still inside the swap window.
+	// The copy preserved before the clone is only a crash backstop: a hook
+	// appends to raw.jsonl and the live spool by path the whole time the clone
+	// runs, and the old clone is removed below, so restoring that copy lost
+	// every line written in between.
+	cacheCarryErr := s.gcCarryCache(oldPath, ws.Path)
+	cacheCarried := cacheCarryErr == nil && !cacheHoldsFiles(oldPath)
+
 	if isLedger {
 		s.ledgerMu.Unlock()
 	}
@@ -1046,10 +1071,15 @@ func (s *SyncScheduler) recloneWorkspaceForGC(ctx context.Context, ws WorkspaceS
 	// Carry .git/ retries, including those written during cloning. Keep .old
 	// until every entry is copied; an entry may hold the only record (#1356).
 	carryErr = gcCarryPlanRetries(oldPath, ws.Path)
-	if carryErr != nil {
+	switch {
+	case carryErr != nil:
 		s.logger.Error("gc: failed to carry plan retries, retaining old clone", "path", oldPath, "error", carryErr)
-	} else if err := os.RemoveAll(oldPath); err != nil {
-		s.logger.Warn("gc: failed to remove old clone", "path", oldPath, "error", err)
+	case cacheCarryErr != nil || cacheHoldsFiles(oldPath):
+		// logged in phase 1.5; .old holds the only copy of what did not move
+	default:
+		if err := os.RemoveAll(oldPath); err != nil {
+			s.logger.Warn("gc: failed to remove old clone", "path", oldPath, "error", err)
+		}
 	}
 
 	// The risky window for a concurrent CLI write (see the comment where
@@ -1061,7 +1091,15 @@ func (s *SyncScheduler) recloneWorkspaceForGC(ctx context.Context, ws WorkspaceS
 	}
 
 	// --- phase 1.5: restore cache ---
-	if hasCache {
+	switch {
+	case !hasCache:
+	case cacheCarried:
+		// the live cache is in place and newer than the copy
+		_ = os.RemoveAll(cacheBackupDir)
+	case cacheCarryErr != nil:
+		s.logger.Error("gc: could not carry the whole cache into the new clone, old clone and backup retained",
+			"path", ws.Path, "old", oldPath, "backup", cacheBackupDir, "error", cacheCarryErr)
+	default:
 		if err := gcRestoreCache(cacheBackupDir, ws.Path); err != nil {
 			// keep backup so manual recovery is possible
 			s.logger.Error("gc: failed to restore cache, backup retained",
@@ -1146,6 +1184,42 @@ func (s *SyncScheduler) recloneWorkspaceForGC(ctx context.Context, ws WorkspaceS
 
 	s.logger.Info("gc: reclone complete", "workspace", wsLabel, "path", ws.Path)
 	return gcSuccess, divergeCaptured
+}
+
+// gcCarryCache moves the old clone's .sageox/cache into the new one by rename
+// (gitserver.CarryCache) and logs what moved, so a reclone never leaves session
+// recordings behind in a tree it is about to delete.
+func (s *SyncScheduler) gcCarryCache(oldPath, newPath string) error {
+	carried, err := gitserver.CarryCache(oldPath, newPath)
+	if err != nil {
+		return err
+	}
+	if carried {
+		entries, _ := os.ReadDir(filepath.Join(newPath, ".sageox", "cache", "sessions"))
+		s.logger.Info("gc: carried the local cache into the new clone", "path", newPath, "session_folders", len(entries))
+	}
+	return nil
+}
+
+// cacheHoldsFiles reports whether repo's .sageox/cache contains anything but
+// directories. An unreadable tree counts as holding files: it is never safe to
+// delete what could not be checked.
+func cacheHoldsFiles(repo string) bool {
+	found := false
+	err := filepath.WalkDir(filepath.Join(repo, ".sageox", "cache"), func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	return found || err != nil
 }
 
 // Link retries without overwriting destination entries. Retire each source
@@ -1535,6 +1609,12 @@ func (s *SyncScheduler) gcRestoreUntracked(repoPath, untrackedDir string) error 
 
 		relPath, err := filepath.Rel(untrackedDir, path)
 		if err != nil {
+			return nil
+		}
+		// The cache was carried across by rename and is newer than this copy,
+		// taken before the clone; a Ledger whose .gitignore misses .sageox/cache
+		// lists it as untracked, and copying it back truncated raw.jsonl.
+		if strings.HasPrefix(filepath.ToSlash(relPath), ".sageox/cache/") {
 			return nil
 		}
 

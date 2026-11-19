@@ -250,7 +250,7 @@ func createFreshSageoxStructure(t *testing.T, gitRoot string) {
 	require.NoError(t, config.SaveProjectConfig(gitRoot, cfg))
 
 	// README.md
-	readmeContent := GetSageoxReadmeContent(nil)
+	readmeContent := GetSageoxReadmeContent(cfg)
 	require.NoError(t, os.WriteFile(
 		filepath.Join(sageoxDir, "README.md"),
 		[]byte(readmeContent),

@@ -546,10 +546,14 @@ func TestGC_PlanRetriesRetainedWhenCarryIsRefused(t *testing.T) {
 			require.NoError(t, err)
 			_, err = s.gcCaptureUntracked(context.Background(), cloneDir+".old", cloneDir+".gc-untracked")
 			require.NoError(t, err)
-			require.NoError(t, gcPreserveCache(cloneDir+".old", cloneDir+".gc-cache"))
+			// The cache is carried by rename right after the swap, so the crash
+			// point that leaves it unrestored is one where the carry never ran:
+			// the live cache is still in .old and only the pre-clone copy exists.
+			require.NoError(t, gcPreserveCache(cloneDir, cloneDir+".gc-cache"))
 			require.NoError(t, exec.Command("git", "-C", cloneDir, "checkout", "--", "README.md").Run())
 			require.NoError(t, os.RemoveAll(filepath.Join(cloneDir, "data/plans/unsaved.txt")))
-			require.NoError(t, os.RemoveAll(filepath.Join(cloneDir, ".sageox/cache")))
+			require.NoError(t, os.MkdirAll(filepath.Join(cloneDir+".old", ".sageox"), 0755))
+			require.NoError(t, os.Rename(filepath.Join(cloneDir, ".sageox/cache"), filepath.Join(cloneDir+".old", ".sageox/cache")))
 			require.NoError(t, os.WriteFile(cloneDir+".gc-swap-done", nil, 0600))
 
 			// The CLI acknowledged the copied push retry before the restart.
