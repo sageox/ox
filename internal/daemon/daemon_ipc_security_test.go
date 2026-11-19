@@ -171,6 +171,7 @@ func TestValidateSessionName_RejectsTraversal(t *testing.T) {
 		{"happy: canonical timestamped slug", "2026-03-28T10-09-ryan-OxAbcd", false},
 		{"happy: agent slug variant", "2026-03-28T10-09-agent_z42", false},
 		{"happy: hyphens in slug tail", "2026-03-28T10-09-some-multi-word-slug", false},
+		{"happy: continued recording with long username", "2026-03-28T10-09-" + strings.Repeat("u", 57) + "--ses_019f6f6a-d182-7f4e-a54d-8dcb44567c8d-OxAbCd", false},
 
 		{"reject: empty", "", true},
 		{"reject: parent traversal", "../../etc", true},

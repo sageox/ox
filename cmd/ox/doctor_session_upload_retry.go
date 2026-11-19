@@ -3,21 +3,25 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/pipeline"
+	"github.com/sageox/ox/internal/sessionid"
 )
 
 func init() {
@@ -204,18 +208,21 @@ func findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath string) ([]orphanedS
 			}
 
 			recState.SessionPath = sessionDir
-			stoppedAt := session.ResolveStoppedAt(recState.StoppedAt, filepath.Join(sessionDir, ledgerFileRaw), time.Now())
-			// Reclaim can happen hours after the recording died. A stop timestamp
-			// cannot identify its spool EOF: another recording may already share
-			// the native session. Preserve only boundaries captured while live;
-			// a missing durable stop makes trace materialization fail closed.
-			if err := session.StampRawCarrier(filepath.Join(sessionDir, ledgerFileRaw), session.CarrierStamp{
-				NativeSessions: recState.NativeSessions,
-				StoppedAt:      stoppedAt,
-				TraceCapture:   recState.Trace,
-			}); err != nil && recState.Trace != nil {
-				slog.Warn("trace recovery carrier not persisted", "session", sessionName, "error", err)
-				continue
+			// A matching pending upload already finalized this carrier before
+			// writing its marker. Appending again would invalidate that binding.
+			if pendingSessionUploadID(sessionDir) == "" {
+				rawPath := filepath.Join(sessionDir, ledgerFileRaw)
+				stoppedAt := session.ResolveStoppedAt(recState.StoppedAt, rawPath, time.Now())
+				// A reclaim-time timestamp cannot identify the trace spool EOF.
+				// Preserve only trace boundaries captured while the source was live.
+				if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
+					NativeSessions: recState.NativeSessions,
+					StoppedAt:      stoppedAt,
+					TraceCapture:   recState.Trace,
+				}); err != nil && recState.Trace != nil {
+					slog.Warn("trace recovery carrier not persisted", "session", sessionName, "error", err)
+					continue
+				}
 			}
 			// A manual-mode recording is held before its marker goes: this scan
 			// runs on every `ox doctor` and would otherwise upload it below.
@@ -393,11 +400,22 @@ func resolveOrphanSessionID(sessionDir string, orphan orphanedSession, draftPres
 	if preservedID == "" {
 		preservedID = draftPreservedID
 	}
-	headerID := ""
-	if orphan.Meta != nil {
-		headerID = orphan.Meta.SessionID
+	return session.ResolveOrMintSessionID(preservedID, orphanUploadIdentity(orphan)), nil
+}
+
+func orphanUploadIdentity(orphan orphanedSession) string {
+	if orphan.CachePath != "" {
+		if id := pendingSessionUploadID(orphan.CachePath); id != "" {
+			return id
+		}
+		if id := session.ReadHeaderSessionID(filepath.Join(orphan.CachePath, ledgerFileRaw)); id != "" {
+			return id
+		}
 	}
-	return session.ResolveOrMintSessionID(preservedID, headerID), nil
+	if orphan.Meta != nil {
+		return orphan.Meta.SessionID
+	}
+	return ""
 }
 
 // retrySessionUpload copies session files from cache to ledger, uploads to LFS,
@@ -432,26 +450,28 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 	if err := validateRawJSONLHeader(rawSrc); err != nil {
 		return fmt.Errorf("%s validation failed (skipping corrupt session): %w", ledgerFileRaw, err)
 	}
+	if err := session.CheckFinalizedLedgerSessionDestination(sessionDir, orphan.SessionName, orphanUploadIdentity(orphan)); err != nil {
+		return err
+	}
 
 	traceCache, traceMeta := prepareRetryTraces(ledgerPath, orphan)
-
-	// Record retry ownership before mutating the ledger. Once meta.json becomes
-	// final, ordinary orphan discovery skips it to avoid replaying an already
-	// published session. This cache-side marker is what keeps failures from any
-	// later phase (including pointer preparation and push) discoverable on the
-	// next doctor pass. A successful pass prunes the cache and marker together.
-	if err := writeSessionUploadRetryPending(orphan.CachePath); err != nil {
-		return fmt.Errorf("record pending session upload retry: %w", err)
-	}
 
 	// Supersede a draft placeholder if one was published before the agent died,
 	// capturing its ses_ id first — the draft meta.json is a durable carrier of
 	// that id, and for a recording whose raw.jsonl header predates the SessionID
 	// field it is the ONLY carrier. Losing it here mints a fresh id and 404s a
 	// /c/ link already published in a PR body.
-	draftPreservedID, _, err := supersedeDraftForFinalize(ledgerPath, orphan.SessionName)
+	sessionID, err := resolveOrphanSessionID(sessionDir, orphan, "")
 	if err != nil {
 		return fmt.Errorf("classify existing ledger meta for %s: %w", orphan.SessionName, err)
+	}
+	// Keep retry ownership and identity in the authoritative cache before
+	// replacing draft metadata or writing any finalized Ledger content.
+	if err := writeSessionUploadRetryPending(orphan.CachePath, sessionID); err != nil {
+		return fmt.Errorf("record pending session upload retry: %w", err)
+	}
+	if _, _, err := supersedeDraftForFinalize(ledgerPath, orphan.SessionName); err != nil {
+		return fmt.Errorf("supersede draft for %s: %w", orphan.SessionName, err)
 	}
 
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
@@ -480,14 +500,6 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 			slog.Warn("skip secondary artifact in retry", "file", name, "error", err)
 			continue
 		}
-	}
-
-	// durable ID via the shared resolver, resolved before the network round
-	// trip so a corrupt pre-existing meta.json aborts fast rather than after
-	// a wasted LFS upload. See resolveOrphanSessionID doc.
-	sessionID, err := resolveOrphanSessionID(sessionDir, orphan, draftPreservedID)
-	if err != nil {
-		return err
 	}
 
 	// Redaction records need durable metadata before the upload. The later
@@ -736,21 +748,54 @@ func newRawJSONLScanner(r io.Reader) *bufio.Scanner {
 	return scanner
 }
 
-func writeSessionUploadRetryPending(cachePath string) error {
-	markerPath := filepath.Join(cachePath, sessionUploadRetryPendingFile)
-	f, err := os.OpenFile(markerPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+func writeSessionUploadRetryPending(cachePath, sessionID string) error {
+	root, err := os.OpenRoot(cachePath)
 	if err != nil {
 		return err
 	}
-	if _, err := f.WriteString("pending\n"); err != nil {
-		_ = f.Close()
+	defer root.Close()
+	digest, err := sessionUploadRawDigest(root)
+	if err != nil {
 		return err
 	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
+	return fileutil.AtomicWriteBytesInRoot(root, sessionUploadRetryPendingFile, []byte(sessionID+"\n"+digest+"\n"), 0o600)
+}
+
+// A failed attempt can adopt a draft ID or mint one for an older raw header.
+// Bind that publication ID to the exact cache bytes, since a same-minute
+// recording can reuse the cache directory and leave an earlier marker behind.
+func pendingSessionUploadID(cachePath string) string {
+	root, err := os.OpenRoot(cachePath)
+	if err != nil {
+		return ""
 	}
-	return f.Close()
+	defer root.Close()
+	marker, err := root.ReadFile(sessionUploadRetryPendingFile)
+	if err != nil {
+		return ""
+	}
+	id, expected, ok := strings.Cut(strings.TrimSpace(string(marker)), "\n")
+	if !ok || !sessionid.IsValidSessionID(id) {
+		return ""
+	}
+	digest, err := sessionUploadRawDigest(root)
+	if err != nil || digest != expected {
+		return ""
+	}
+	return id
+}
+
+func sessionUploadRawDigest(root *os.Root) (string, error) {
+	raw, err := root.Open(ledgerFileRaw)
+	if err != nil {
+		return "", err
+	}
+	defer raw.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, raw); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 // copyFile copies a file from src to dst.

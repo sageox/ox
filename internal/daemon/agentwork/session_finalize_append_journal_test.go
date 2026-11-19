@@ -146,7 +146,7 @@ func TestStageSessionInLedger_LeavesAppendJournalBehind(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "summary.md"), []byte("summary"), 0o644))
 
 	payload := &SessionFinalizePayload{SessionDir: cacheDir, LedgerPath: ledgerPath}
-	_, err := NewSessionFinalizeHandler(slog.Default()).stageSessionInLedger(payload)
+	_, err := NewSessionFinalizeHandler(slog.Default()).stageSessionInLedger(payload, nil)
 	require.NoError(t, err)
 
 	dest := filepath.Join(ledgerPath, "sessions", sessionName)

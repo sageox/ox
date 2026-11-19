@@ -24,6 +24,7 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/sessionid"
 	"github.com/spf13/cobra"
 )
 
@@ -253,6 +254,9 @@ func parseSessionDirName(name string) (createdAt time.Time, username, agentID st
 			if lastDash := strings.LastIndex(rest, "-"); lastDash >= 0 {
 				username = rest[:lastDash]
 				agentID = rest[lastDash+1:]
+				if user, recordingID, ok := strings.Cut(username, "--"); ok && sessionid.IsValidSessionID(recordingID) {
+					username = user
+				}
 			} else {
 				agentID = rest
 			}
@@ -477,10 +481,11 @@ func publishCachedSession(projectRoot, ledgerPath, sessionName, cacheDir string)
 	if entryCount == 0 {
 		return fmt.Errorf("session %s holds no conversation entries — nothing to publish", sessionName)
 	}
+	orphan := orphanedSession{SessionName: sessionName, CachePath: cacheDir, Meta: meta, EntryCount: entryCount}
 	// Names have minute precision, so a different session can already be in
 	// the Ledger under this one. Publishing would replace its transcript under
 	// its session ID, and its links would show this session instead.
-	if err := checkRecoveryDestination(filepath.Join(ledgerPath, "sessions", sessionName), sessionName, meta.SessionID); err != nil {
+	if err := session.CheckLedgerSessionDestination(filepath.Join(ledgerPath, "sessions", sessionName), sessionName, orphanUploadIdentity(orphan)); err != nil {
 		return err
 	}
 	summarize := config.GetAgentSummarizer(projectRoot) != config.AgentSummarizerOff
@@ -492,7 +497,6 @@ func publishCachedSession(projectRoot, ledgerPath, sessionName, cacheDir string)
 
 	effects := productionSessionUploadEffects()
 	effects.uploadLFS = publishSessionLFS // the explicit publish releases the hold
-	orphan := orphanedSession{SessionName: sessionName, CachePath: cacheDir, Meta: meta, EntryCount: entryCount}
 	if err := retrySessionUploadWithEffects(projectRoot, ledgerPath, orphan, effects); err != nil {
 		return err
 	}
