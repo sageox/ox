@@ -22,7 +22,7 @@ func TestLiveRulesRefreshThatHangsNeverHoldsADrain(t *testing.T) {
 		<-ctx.Done() // hangs until shutdown
 		return ctx.Err()
 	}
-	e.spool(`{"type":"msg","n":1}` + "\n")
+	e.spool(lineN(1))
 
 	ctx, cancel := context.WithCancel(t.Context())
 	stopped := make(chan struct{})
@@ -41,7 +41,7 @@ func TestLiveRulesRefreshThatHangsNeverHoldsADrain(t *testing.T) {
 	<-refreshing
 
 	deadline := time.Now().Add(3 * time.Second)
-	for e.stored() != `{"type":"msg","n":1}`+"\n" {
+	for e.stored() != lineN(1) {
 		if time.Now().After(deadline) {
 			t.Fatal("the spool was not drained while the rules refresh hung")
 		}

@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
+	oxsession "github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/sessionstream"
 )
 
@@ -17,6 +20,12 @@ import (
 // the key file is never deleted. Tell the user: run ox login to enroll a new
 // signing key.
 var ErrKeyConflict = errors.New("login already has a different signing key: run ox login to enroll a new signing key")
+
+// ErrAwaitingPrompt means a prepared stream was not opened because its spool
+// holds no human prompt yet: the header a session start spools never opens
+// one. Nothing was sent. The capture that spools the first prompt asks for
+// the drain that opens it; a stop before that ends it as StatusEmpty.
+var ErrAwaitingPrompt = errors.New("live stream not opened: no human prompt captured yet")
 
 // OpenParams names the session being streamed.
 type OpenParams struct {
@@ -98,6 +107,10 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 	st, err := ReadState(dir)
 	pending := err == nil && st.Status == StatusPending
 	switch {
+	case pending && !st.OpenSent && !mayHoldPrompt(dir):
+		// local only: an open already sent may have created the conversation,
+		// so only a stream the server has never heard of waits
+		return st, ErrAwaitingPrompt
 	case pending: // promote: same layer, spool kept
 	case err == nil && !st.active():
 		return st, nil // deleted, closed or disabled stay that way
@@ -161,6 +174,25 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 	}
 	cfg.Logger.InfoContext(ctx, "live_session_open", "session_id", st.SessionID, "conversation_id", st.ConversationID, "layer_id", st.LayerID, "acked", st.Acked)
 	return st, nil
+}
+
+// mayHoldPrompt reports whether dir's spool holds a human prompt, or may have:
+// a recorded spool loss could have been the prompt, and an unreadable spool
+// proves nothing. Either way the stream opens, so a loss is never hidden as an
+// empty session.
+func mayHoldPrompt(dir string) bool {
+	if lost := readLost(dir); lost.pending || lost.recorded > 0 {
+		return true
+	}
+	f, err := os.Open(filepath.Join(dir, spoolFileName))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	defer func() { _ = f.Close() }() // read-only: nothing to flush
+	return oxsession.ContainsUserTurn(f)
 }
 
 // abortedWhileOpening queues the delete of a conversation this open may have

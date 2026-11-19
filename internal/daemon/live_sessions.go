@@ -395,6 +395,11 @@ func (l *LiveSessions) step(ctx context.Context, dir string, started time.Time) 
 	case errors.Is(err, livesession.ErrKeyConflict):
 		log.WarnContext(ctx, "live_session_disabled", "reason", "key_conflict", "action", "run ox login to enroll a new signing key")
 		l.clearBackoff(dir)
+	case errors.Is(err, livesession.ErrAwaitingPrompt):
+		// expected until the first prompt: its spool kicks a drain that opens
+		// the stream, so no backoff, and nothing above Debug per tick
+		l.clearBackoff(dir)
+		log.DebugContext(ctx, "live_session_step_skipped", "reason", "awaiting_first_prompt")
 	case errors.Is(err, livesession.ErrUntrustedState):
 		// livesession logged it once at Error; nothing was sent, and a retry
 		// cannot change the answer, so no backoff and no line per tick

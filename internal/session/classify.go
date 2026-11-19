@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -359,8 +360,13 @@ func HasUserTurn(rawPath string) bool {
 		return false
 	}
 	defer func() { _ = f.Close() }()
+	return ContainsUserTurn(f)
+}
 
-	scanner := bufio.NewScanner(f)
+// ContainsUserTurn is HasUserTurn over raw.jsonl-shaped lines from r, such as
+// a live stream's spool: true once a line of type "user" is read.
+func ContainsUserTurn(r io.Reader) bool {
+	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()

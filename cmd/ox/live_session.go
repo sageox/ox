@@ -133,6 +133,7 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 		}
 		slog.Info("live_session_previous_stream_retired", "session_id", state.SessionID, "previous_session_id", prev.SessionID)
 	}
+	closeSupersededLiveStreams(state)
 	repoID := config.GetRepoID(projectRoot)
 	if repoID == "" || !liveStreamingEnabled(projectRoot) {
 		return
@@ -157,6 +158,47 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 	}
 	log.Info("live_session_prepared")
 	liveKickDaemon(state.SessionPath)
+}
+
+// closeSupersededLiveStreams requests the close of every stream an earlier
+// recording by the same AI coworker instance left open in this project. A new
+// recording means that one ended, whatever stopped it or failed to: left open,
+// it read as a live session on SageOx for good. It is the normal close with no
+// summary, finished by the daemon, since a start never waits on the network.
+// A stream in this recording's own folder is retirePreviousLiveStream's, and
+// one started after this recording is never touched.
+func closeSupersededLiveStreams(state *session.RecordingState) {
+	if state.AgentID == "" {
+		return
+	}
+	sessionsDir := filepath.Dir(state.SessionPath)
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		dir := filepath.Join(sessionsDir, e.Name())
+		if !e.IsDir() || dir == state.SessionPath {
+			continue
+		}
+		st, err := livesession.ReadState(dir)
+		if err != nil || st.CloseRequested || st.SessionID == state.SessionID || st.StartedAt.After(state.StartedAt) ||
+			(st.Status != livesession.StatusPending && st.Status != livesession.StatusStreaming) {
+			continue
+		}
+		// the raw.jsonl header names the AI coworker instance that recorded it
+		if meta := session.ReadHeaderMeta(filepath.Join(dir, "raw.jsonl")); meta == nil || meta.AgentID != state.AgentID {
+			continue
+		}
+		log := slog.With("session_id", state.SessionID, "previous_session_id", st.SessionID,
+			"conversation_id", st.ConversationID, "layer_id", st.LayerID, "status", string(st.Status))
+		if err := livesession.RequestClose(dir); err != nil {
+			log.Warn("live_session_superseded_close_failed", "error", err)
+			continue
+		}
+		log.Info("live_session_superseded_close_requested")
+		liveKickDaemon(dir)
+	}
 }
 
 // liveSessionSpool hands a batch just committed to raw.jsonl to the one shared
@@ -266,7 +308,7 @@ func settleLiveSecretWithheldNotice(state *session.RecordingState) bool {
 	if err != nil || st.SessionID != state.SessionID || st.DeletedOnServer || st.Status == livesession.StatusDeleted {
 		return false
 	}
-	ended := st.Status == livesession.StatusClosed || st.Status == livesession.StatusDisabled
+	ended := st.Status == livesession.StatusClosed || st.Status == livesession.StatusDisabled || st.Status == livesession.StatusEmpty
 	if !st.SecretWithheld && ended {
 		return false
 	}

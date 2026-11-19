@@ -87,7 +87,7 @@ func TestOpenFailureLeavesNoLiveState(t *testing.T) {
 // return a plain error that stop logs before publishing to the Ledger.
 func TestOpenAnsweredDeletedHoldsTheSession(t *testing.T) {
 	srv, cfg, dir, p := prepared(t)
-	if _, err := livesession.Spool(t.Context(), dir, lines(0, 2), livesession.SpoolOptions{}); err != nil {
+	if _, err := livesession.Spool(t.Context(), dir, withPrompt(lines(0, 2)), livesession.SpoolOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	srv.DropOpenReply(1)

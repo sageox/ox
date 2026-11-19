@@ -286,6 +286,11 @@ func (s *session) withhold(ctx context.Context) error {
 		if err := s.persist(); err != nil {
 			return err
 		}
+		// owed from now, not from a stop: a stream the daemon closes has no
+		// stop to mark it, and its person is told at their next start or stop
+		if err := OweSecretWithheldNotice(s.dir); err != nil {
+			s.log().WarnContext(ctx, "live_session_withheld_notice_unrecorded", "error", err)
+		}
 	}
 	if err := replaceSpoolRange(ctx, s.dir, s.st.Acked, w.size, w.next); err != nil {
 		return fmt.Errorf("withhold %d refused bytes at offset %d: %w", w.bytes, s.st.Acked, err)
