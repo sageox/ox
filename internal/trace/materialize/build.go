@@ -100,12 +100,18 @@ func Build(spoolDir, cacheDir string, capture *model.Capture) (*model.Metadata, 
 		}
 		writer := gzip.NewWriter(file)
 		writeErr := buildSignal(spool, selected, signal, writer, meta, seen)
-		closeErr := errors.Join(writer.Close(), file.Close())
-		if errors.Is(writeErr, ErrSelectedSpoolUnavailable) && closeErr != nil {
-			writeErr = nil // report the failed write, even when the input was also missing
+		if errors.Is(writeErr, ErrSelectedSpoolUnavailable) {
+			// The incomplete gzip stream will be discarded. Close the backing
+			// file and report any filesystem failure to the caller.
+			writeErr = file.Close()
+			if writeErr == nil {
+				writeErr = ErrSelectedSpoolUnavailable
+			}
+		} else {
+			writeErr = errors.Join(writeErr, writer.Close(), file.Close())
 		}
-		if err := errors.Join(writeErr, closeErr); err != nil {
-			return nil, fmt.Errorf("materialize trace %s: %w", signal, err)
+		if writeErr != nil {
+			return nil, fmt.Errorf("materialize trace %s: %w", signal, writeErr)
 		}
 	}
 	// Publish only after both streams have been fully parsed, scrubbed, compressed,
@@ -215,36 +221,26 @@ func buildSignal(spool *os.Root, selected []selection, signal string, out io.Wri
 			selectedRanges, stopOffset = s.native.EventsBytes, s.stop.Events
 			input = "logs.jsonl"
 		}
-		if spool == nil {
+		var session *os.Root
+		if spool != nil {
+			info, err := spool.Lstat(s.native.ID)
+			if err == nil {
+				if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+					return errors.New("unsafe native trace directory")
+				}
+				session, err = spool.OpenRoot(s.native.ID)
+			}
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+		}
+		if session == nil {
 			if len(selectedRanges) > 0 {
 				return ErrSelectedSpoolUnavailable
 			}
 			continue
 		}
-		info, err := spool.Lstat(s.native.ID)
-		if errors.Is(err, fs.ErrNotExist) {
-			if len(selectedRanges) > 0 {
-				return ErrSelectedSpoolUnavailable
-			}
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("unsafe native trace directory")
-		}
-		session, err := spool.OpenRoot(s.native.ID)
-		if errors.Is(err, fs.ErrNotExist) {
-			if len(selectedRanges) > 0 {
-				return ErrSelectedSpoolUnavailable
-			}
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		err = readSignal(session, input, selectedRanges, stopOffset, s.stopKnown, signal, out, meta, seen)
+		err := readSignal(session, input, selectedRanges, stopOffset, s.stopKnown, signal, out, meta, seen)
 		_ = session.Close()
 		if err != nil {
 			return err
