@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/facts"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/spf13/cobra"
@@ -31,8 +32,8 @@ var memoryPutCmd = &cobra.Command{
 	Short: "Record an observation into team memory",
 	Long: `Record an observation into the team context memory pipeline.
 
-Observations are committed to the team context on this machine;
-` + "`ox memory distill`" + ` sends them to SageOx.
+Observations are committed and pushed to the Team Context;
+` + "`ox memory distill`" + ` sends them to SageOx for distillation.
 Each observation must have a "content" field.
 
 Input formats:
@@ -111,14 +112,15 @@ func runMemoryPut(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// redaction is caller-side: the agent redacts content before calling ox memory put,
-	// using guidance from REDACT.md files (same pattern as session summary prompts).
+	// Callers redact content using REDACT.md guidance. Publication also checks
+	// the committed bytes before pushing.
 
 	if err := writeObservation(tc.Path, observations); err != nil {
 		return err
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Recorded %d observation(s)\n", len(observations))
+	fmt.Fprintln(cmd.OutOrStdout(), teamWritePushGuidance(tc.Path, pushTeamPublish(projectRoot, tc.Path)))
 	return nil
 }
 
@@ -153,13 +155,9 @@ func writeObservation(teamContextPath string, observations []observation) error 
 		}
 	}
 
-	summary := observations[0].Content
-	if len(summary) > 50 {
-		summary = summary[:50] + "..."
-	}
-	commitMsg := fmt.Sprintf("observation: %s", summary)
+	const commitMsg = daemon.TeamObservationCommitPrefix + "record team memory"
 	relPath := filepath.Join("memory", observationDirName, dateDir, filename)
-	pending := "memory/" + observationDirName
+	pending := daemon.TeamObservationDir
 
 	if err := writeObservationFile(teamContextPath, filePath, header, factSlice); err != nil {
 		return fmt.Errorf("write observation file: %w", err)

@@ -154,3 +154,30 @@ func TestDetectOrphanedForAgent_WarnsOncePerSession(t *testing.T) {
 			"a busy writer defers every pass; only the first announces it")
 	})
 }
+
+// An exited coworker with only a recording header has no turns to recover.
+// The daemon should clear the stale marker without alarming the operator.
+func TestDetectOrphanedForAgent_HeaderOnlyIsQuiet(t *testing.T) {
+	buf := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	handler := NewSessionFinalizeHandler(logger)
+	ledgerPath := t.TempDir()
+	agentID := "OxEMPT"
+	dir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", "orphan-"+agentID)
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	rawPath := filepath.Join(dir, artifactRaw)
+	const header = "{\"type\":\"header\",\"metadata\":{}}\n"
+	require.NoError(t, os.WriteFile(rawPath, []byte(header), 0o600))
+	marker := filepath.Join(dir, recordingMarker)
+	writeRecordingState(t, marker, session.RecordingState{
+		AgentID: agentID, SessionPath: dir, StartedAt: time.Now().Add(-time.Hour),
+	})
+
+	require.Empty(t, handler.DetectOrphanedForAgent(ledgerPath, agentID, 0))
+	require.NoFileExists(t, marker)
+	require.Zero(t, countLogLines(buf, "WARN", "orphaned recording unrecoverable for agent"))
+	require.Equal(t, 1, countLogLines(buf, "DEBUG", "reason=header_only"))
+	raw, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	require.Equal(t, header, string(raw))
+}

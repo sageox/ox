@@ -1,11 +1,15 @@
 package gitserver
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,6 +29,9 @@ func runGit(t *testing.T, dir string, args ...string) {
 // setupGitRepoWithSageox creates a git repo with a committed .sageox/sync.manifest.
 func setupGitRepoWithSageox(t *testing.T) string {
 	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
 	dir := t.TempDir()
 	require.NoError(t, exec.Command("git", "init", "--initial-branch=main", dir).Run())
 	require.NoError(t, exec.Command("git", "-C", dir, "config", "user.name", "test").Run())
@@ -82,6 +89,149 @@ func TestEnsureCheckoutGitignore_Idempotent(t *testing.T) {
 		assert.Equal(t, 1, count,
 			"entry %q should appear exactly once, found %d", entry, count)
 	}
+}
+
+// A sparse Team Context mirror can lose the worktree copy while HEAD still
+// owns the policy. Rebuilding it from defaults loses team rules and leaves a
+// housekeeping commit ahead of the remote.
+func TestEnsureCheckoutGitignore_RestoresTrackedSparsePolicy(t *testing.T) {
+	dir := setupGitRepoWithSageox(t)
+	const rel = ".sageox/.gitignore"
+	ignorePath := filepath.Join(dir, rel)
+	policy := strings.Join(append([]string{"# team policy", "!team-custom.json"}, checkoutRequiredEntries...), "\n") + "\n"
+	require.NoError(t, os.WriteFile(ignorePath, []byte(policy), 0o644))
+	runGit(t, dir, "add", "--", rel)
+	runGit(t, dir, "commit", "-m", "track the team's ignore policy", "--", rel)
+	before, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	require.NoError(t, err)
+	runGit(t, dir, "sparse-checkout", "set", "--no-cone", "/.sageox/sync.manifest")
+	require.NoFileExists(t, ignorePath)
+
+	t.Chdir(filepath.Dir(dir))
+	t.Setenv("GIT_TRACE", "1")
+	require.NoError(t, EnsureCheckoutGitignore(filepath.Base(dir)))
+
+	after, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	require.NoError(t, err)
+	require.Equal(t, string(before), string(after), "a lost worktree file must not create a new commit")
+	restored, err := os.ReadFile(ignorePath)
+	require.NoError(t, err)
+	require.Equal(t, policy, string(restored))
+}
+
+func TestEnsureCheckoutGitignore_ReportsCorruptIndex(t *testing.T) {
+	dir := setupGitRepoWithSageox(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git", "index"), []byte("invalid git index\n"), 0o644))
+
+	err := EnsureCheckoutGitignore(dir)
+	require.ErrorContains(t, err, "check tracked checkout gitignore")
+	require.ErrorContains(t, err, "index file")
+	require.NoFileExists(t, filepath.Join(dir, checkoutGitignorePath))
+}
+
+func TestEnsureCheckoutGitignore_CancelsWhileHelperHoldsStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a shell Git wrapper")
+	}
+	dir := setupGitRepoWithSageox(t)
+	bin := t.TempDir()
+	started := filepath.Join(bin, "started")
+	t.Setenv("OX_TEST_GIT_STARTED", started)
+	if _, err := exec.LookPath("perl"); err != nil {
+		t.Skip("requires perl to detach the helper's process group")
+	}
+	// The helper leaves Git's process group, so the group kill misses it and
+	// it keeps stderr open. Only WaitDelay can end the wait.
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte(`#!/bin/sh
+perl -e 'setpgrp(0, 0); exec "sleep", "10"' >/dev/null &
+echo $! > "$OX_TEST_GIT_STARTED.pid"
+touch "$OX_TEST_GIT_STARTED"
+wait
+`), 0o755))
+	t.Cleanup(func() {
+		data, err := os.ReadFile(started + ".pid")
+		if err != nil {
+			return
+		}
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+			if p, err := os.FindProcess(pid); err == nil {
+				_ = p.Kill()
+			}
+		}
+	})
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- EnsureCheckoutGitignoreCtx(ctx, dir) }()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(started)
+		return err == nil
+	}, 3*time.Second, 10*time.Millisecond, "Git wrapper never started its helper")
+	cancel()
+
+	select {
+	case err := <-result:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("checkout waited for the canceled Git helper")
+	}
+}
+
+func TestEnsureCheckoutGitignore_RejectsNonRegularTrackedPolicy(t *testing.T) {
+	dir := setupGitRepoWithSageox(t)
+	const rel = ".sageox/.gitignore"
+	ignorePath := filepath.Join(dir, rel)
+	if err := os.Symlink("unrelated-policy", ignorePath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	runGit(t, dir, "add", "--", rel)
+	runGit(t, dir, "commit", "-m", "track a non-regular ignore policy", "--", rel)
+	runGit(t, dir, "sparse-checkout", "set", "--no-cone", "/.sageox/sync.manifest")
+
+	require.ErrorContains(t, EnsureCheckoutGitignore(dir), "must be a regular file")
+	_, err := os.Lstat(ignorePath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestEnsureCheckoutGitignore_RejectsInvalidCheckoutShapes(t *testing.T) {
+	t.Run("repo path is a file", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "not-a-dir")
+		require.NoError(t, os.WriteFile(file, nil, 0o644))
+		require.Error(t, EnsureCheckoutGitignore(file))
+	})
+	t.Run(".sageox is a file", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, ".sageox"), nil, 0o644))
+		require.ErrorContains(t, EnsureCheckoutGitignore(dir), "must be a directory")
+	})
+	t.Run("policy is a directory", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, checkoutGitignorePath), 0o755))
+		require.ErrorContains(t, EnsureCheckoutGitignore(dir), "must be a regular file")
+	})
+}
+
+func TestEnsureCheckoutGitignore_ReportsUnreadablePolicy(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires POSIX permission enforcement")
+	}
+	t.Run("policy unreadable", func(t *testing.T) {
+		dir := t.TempDir()
+		policy := filepath.Join(dir, checkoutGitignorePath)
+		require.NoError(t, os.MkdirAll(filepath.Dir(policy), 0o755))
+		require.NoError(t, os.WriteFile(policy, []byte("*\n"), 0o000))
+		require.ErrorContains(t, EnsureCheckoutGitignore(dir), "read checkout gitignore")
+	})
+	t.Run(".sageox unsearchable", func(t *testing.T) {
+		dir := t.TempDir()
+		sageox := filepath.Join(dir, ".sageox")
+		require.NoError(t, os.MkdirAll(sageox, 0o755))
+		require.NoError(t, os.Chmod(sageox, 0o000))
+		t.Cleanup(func() { _ = os.Chmod(sageox, 0o755) })
+		require.ErrorContains(t, EnsureCheckoutGitignore(dir), "inspect checkout gitignore")
+	})
 }
 
 func TestEnsureCheckoutGitignore_PreservesExisting(t *testing.T) {

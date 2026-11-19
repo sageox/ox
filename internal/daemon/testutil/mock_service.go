@@ -45,6 +45,7 @@ type MockService struct {
 	SessionFinalizeFunc   func(payload daemon.SessionFinalizeIPCPayload)
 	SessionWatchStartFunc func(payload daemon.SessionWatchStartPayload)
 	SessionWatchStopFunc  func(payload daemon.SessionWatchStopPayload)
+	LiveSessionDrainFunc  func(payload daemon.LiveSessionDrainPayload)
 
 	// settings
 	SettingsGetFunc func() *flags.CLISettingsResponse
@@ -214,6 +215,12 @@ func (m *MockService) SessionFinalize(payload daemon.SessionFinalizeIPCPayload) 
 func (m *MockService) SessionWatchStart(payload daemon.SessionWatchStartPayload) {
 	if m.SessionWatchStartFunc != nil {
 		m.SessionWatchStartFunc(payload)
+	}
+}
+
+func (m *MockService) LiveSessionDrain(payload daemon.LiveSessionDrainPayload) {
+	if m.LiveSessionDrainFunc != nil {
+		m.LiveSessionDrainFunc(payload)
 	}
 }
 

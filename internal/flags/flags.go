@@ -44,6 +44,10 @@ type Flags struct {
 	// default off, and deliberately without a FEATURE_* env override, so
 	// nothing local can turn on a relay that publishes to the team's board.
 	GitHubMirrorEnabled bool
+	// SessionStreamingEnabled gates real-time session streaming (ADR-247, shadow
+	// phase). Server-evaluated rollout, default off, no FEATURE_* env override:
+	// nothing local can start sending live session content to the cloud.
+	SessionStreamingEnabled bool
 
 	// Kill switches — default false (not activated).
 	// Any source setting these true disables the capability.
@@ -70,6 +74,8 @@ type Patch struct {
 	BulletinEnabled *bool
 	// GitHubMirrorEnabled has no EnvProvider mapping by design.
 	GitHubMirrorEnabled *bool
+	// SessionStreamingEnabled has no EnvProvider mapping by design.
+	SessionStreamingEnabled *bool
 
 	DisableFileDeleteTools *bool
 	DisableShellExecTools  *bool
@@ -119,6 +125,8 @@ func Defaults() Flags {
 		BulletinEnabled: false, // server-enrolled pilot; no env override by design
 
 		GitHubMirrorEnabled: false, // server-evaluated rollout; no env override by design
+
+		SessionStreamingEnabled: false, // server-evaluated rollout; no env override by design
 	}
 }
 

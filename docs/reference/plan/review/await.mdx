@@ -15,7 +15,7 @@ Block until human reviewers submit review feedback, then emit the open items as 
 This is the agent side of the review loop. Instead of parking the authoring agent in
 a serve loop (where it cannot act), the agent runs:
 
-    ox plan review await <slug>
+    ox plan review await \<slug>
 
 which blocks until there is open, unaddressed feedback from ANY reviewer (multi-user),
 prints it as JSON on stdout, and exits. The agent then addresses each item, runs

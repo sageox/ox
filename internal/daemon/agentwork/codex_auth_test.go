@@ -3,9 +3,11 @@
 package agentwork
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -29,16 +31,34 @@ func TestCodexAuthenticationStreamsAndExitStatus(t *testing.T) {
 		{"failed_exit", "printf 'Logged in using ChatGPT\\n'; exit 1", false},
 		{"not_logged_in", "printf 'Not logged in\\n' >&2", false},
 		{"unrecognized_status", "printf 'unrecognized status\\n'", false},
-		{"timeout", "sleep 5; printf 'Logged in using ChatGPT\\n'", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "codex"), []byte("#!/bin/sh\n"+tc.script+"\n"), 0700))
 			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			t.Setenv("OPENAI_API_KEY", "")
-			got := checkCodexUsability()
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			got := checkCodexUsability(ctx)
 			require.True(t, got.Installed)
 			require.Equal(t, tc.authenticated, got.Authenticated)
+			require.NotEqual(t, "authentication check timed out", got.AuthDetail)
 		})
 	}
+}
+
+func TestCodexAuthenticationTimeoutIsNotAuthenticated(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits for subprocess probe timeout")
+	}
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "codex"), []byte("#!/bin/sh\nprintf 'Logged in using ChatGPT\\n'\nexec sleep 30\n"), 0700))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OPENAI_API_KEY", "")
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	got := checkCodexUsability(ctx)
+	require.True(t, got.Installed)
+	require.False(t, got.Authenticated)
+	require.Equal(t, "authentication check timed out", got.AuthDetail)
 }

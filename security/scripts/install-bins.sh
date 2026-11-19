@@ -12,7 +12,7 @@
 #   - Symlinks into ./bin/ are always re-created (cheap, fixes drift if you
 #     hand-edited or rm'd them).
 #
-# Floating-on-latest, no root, no Homebrew, no PATH pollution.
+# Most tools float on latest. No root, no Homebrew, no PATH pollution.
 # Used by: `make sec-install`, the GH Action, the pre-commit fast tier when a tool is missing.
 #
 # WHY "LATEST" AND NOT PINNED (May 2026):
@@ -71,16 +71,30 @@ link_into_bin() {
   ln -sfn "$CACHE_ROOT/$tool" "$BIN/$tool"
 }
 
-# Helper: download + extract + install single binary from a release tarball.
-# Args: name url ext binary-name-in-archive
-# Installs into $CACHE_ROOT, then symlinks into $BIN.
+matches_sha256() {
+  local actual
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum < "$1")" || return 1
+  else
+    actual="$(shasum -a 256 < "$1")" || return 1
+  fi
+  [[ "${actual%% *}" == "$2" ]]
+}
+
+# Download, optionally verify, extract, then install and symlink one binary.
+# Args: name url ext binary-name-in-archive [expected-sha256]
 fetch_tarball() {
-  local name="$1" url="$2" ext="$3" inner="$4"
+  local name="$1" url="$2" ext="$3" inner="$4" sha256="${5:-}"
   local tmp; tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' RETURN
   echo "→ $name $url"
   local dl="$tmp/download.$ext"
   curl -fsSL "$url" -o "$dl"
+  if [[ -n "$sha256" ]] && ! matches_sha256 "$dl" "$sha256"; then
+    rm -rf "$tmp"
+    echo "error: SHA-256 mismatch for $name from $url" >&2
+    return 1
+  fi
   case "$ext" in
     tar.gz|tgz) tar -xzf "$dl" -C "$tmp" ;;
     zip) unzip -q "$dl" -d "$tmp" ;;
@@ -95,22 +109,33 @@ fetch_tarball() {
 # OpenGrep — platform-aware asset name. Hardcoding `manylinux_x86` here used to
 # break every Mac dev's first `make sec-install`.
 # ---------------------------------------------------------------------------
-if have_cached opengrep; then
+# OpenGrep 2.0 renamed its Linux assets. Pin the compatible release and verify
+# cached and freshly downloaded bytes against its published asset digests.
+OPENGREP_VERSION="1.33.1"
+case "${OS}-${ARCH}" in
+  linux-amd64)
+    OPENGREP_ASSET="opengrep_manylinux_x86"
+    OPENGREP_SHA256="46e8133cc490f9f50518061590ce2f6be5a08afaeda034471c0ceda4b3899808"
+    ;;
+  linux-arm64)
+    OPENGREP_ASSET="opengrep_manylinux_aarch64"
+    OPENGREP_SHA256="d1433f63a90b8bc0b6ad4b498a13b372b856ce9a754a43484ba4920fe2d76dcf"
+    ;;
+  darwin-amd64)
+    OPENGREP_ASSET="opengrep_osx_x86"
+    OPENGREP_SHA256="c3bd18e0d898d44e28419d95dad57c8928bb46ab32889a0ee1f72a87ad9627af"
+    ;;
+  darwin-arm64)
+    OPENGREP_ASSET="opengrep_osx_arm64"
+    OPENGREP_SHA256="a17c1881bb40e3214266a7a291cf4f2ae3bc56c1715628b5712d2ec816bc3e2d"
+    ;;
+esac
+if have_cached opengrep && matches_sha256 "$CACHE_ROOT/opengrep" "$OPENGREP_SHA256"; then
   echo "✓ opengrep cached"; link_into_bin opengrep
 else
-  # Pinned: v2.0.0 renamed the Linux assets (manylinux_* -> linux_*), so
-  # releases/latest broke every install. Bump deliberately.
-  OPENGREP_VERSION="v1.33.1"
-  case "${OS}-${ARCH}" in
-    linux-amd64)  OPENGREP_ASSET="opengrep_manylinux_x86" ;;
-    linux-arm64)  OPENGREP_ASSET="opengrep_manylinux_aarch64" ;;
-    darwin-amd64) OPENGREP_ASSET="opengrep_osx_x86" ;;
-    darwin-arm64) OPENGREP_ASSET="opengrep_osx_arm64" ;;
-    *) echo "unsupported opengrep platform: ${OS}-${ARCH}" >&2; exit 1 ;;
-  esac
   fetch_tarball "opengrep" \
-    "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/${OPENGREP_ASSET}" \
-    "bin" "opengrep"
+    "https://github.com/opengrep/opengrep/releases/download/v${OPENGREP_VERSION}/${OPENGREP_ASSET}" \
+    "bin" "opengrep" "$OPENGREP_SHA256"
 fi
 
 # ---------------------------------------------------------------------------

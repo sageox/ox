@@ -194,10 +194,10 @@ func uploadSessionBeforeHostEnds(sessionName string, daemonOutlivesHost bool, up
 }
 
 // retryableSessionUploadError reports whether another attempt could succeed.
-// Read-only access and revoked or expired credentials fail the same way every
-// time.
+// Read-only access, revoked or expired credentials, and a session deleted on
+// SageOx fail the same way every time.
 func retryableSessionUploadError(err error) bool {
-	return !errors.Is(err, api.ErrReadOnly) && !pipeline.IsAuthRelatedError(err.Error())
+	return !errors.Is(err, api.ErrReadOnly) && !errors.Is(err, errSessionDeletedOnServer) && !pipeline.IsAuthRelatedError(err.Error())
 }
 
 func removeTemp(f *os.File) {

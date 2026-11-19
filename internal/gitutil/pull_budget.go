@@ -20,8 +20,8 @@ const (
 	pullPerCommit   = time.Second
 	pullMaxTimeout  = 15 * time.Minute
 
-	// longBacklogAhead is the unpushed-commit count at which the scaled budget
-	// (base + 30s) is worth detaching from the cycle deadline for.
+	// Push retries honor their per-operation timeout for short backlogs.
+	// Longer replays need the scaled budget.
 	longBacklogAhead = 30
 )
 
@@ -50,16 +50,14 @@ func CommitsAhead(ctx context.Context, repoPath string) int {
 	return n
 }
 
-// PullContext returns the context for `git pull --rebase`. For a small backlog
-// it is the cycle context unchanged. For a long one it is detached from the
-// cycle's DEADLINE (but not its cancellation) and given PullBudget(ahead), so a
-// legitimately long rebase is not killed mid-replay every cycle.
+// PullContext gives replay its own PullBudget(ahead) when the cycle's remaining
+// deadline cannot cover it. Explicit cancellation still stops the pull.
 //
 // shutdown is an optional long-lived context (the daemon's) that cancels the
 // pull even after the cycle context has already expired, which parent alone
 // cannot report. Pass nil when there is none.
 func PullContext(parent context.Context, ahead int, shutdown context.Context) (context.Context, context.CancelFunc) {
-	if ahead < longBacklogAhead {
+	if parent.Err() != nil {
 		return parent, func() {}
 	}
 	budget := PullBudget(ahead)
