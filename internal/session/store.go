@@ -78,10 +78,14 @@ func (s *Store) BasePath() string {
 	return s.basePath
 }
 
-// GenerateSessionName creates a unique session folder name.
+// GenerateSessionName creates a minute-granular session folder name.
 // Format: YYYY-MM-DDTHH-MM-<username>-<sessionID>
 // Example: 2026-01-06T14-32-ryan-Ox7f3a
 func GenerateSessionName(sessionID, username string) string {
+	return generateSessionName(sessionID, username, "")
+}
+
+func generateSessionName(sessionID, username, recordingID string) string {
 	now := time.Now().UTC()
 	timestamp := now.Format("2006-01-02T15-04")
 
@@ -97,6 +101,9 @@ func GenerateSessionName(sessionID, username string) string {
 		safeSessionID = "unknown"
 	}
 
+	if recordingID != "" {
+		return fmt.Sprintf("%s-%s-%s-%s", timestamp, safeUsername, recordingID, safeSessionID)
+	}
 	return fmt.Sprintf("%s-%s-%s", timestamp, safeUsername, safeSessionID)
 }
 
