@@ -25,3 +25,6 @@ config.local.toml
 kb/
 ledger
 teams/
+
+# SageOx required entries
+.session-recovery.json

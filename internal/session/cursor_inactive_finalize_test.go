@@ -48,14 +48,16 @@ func TestFinalizeInactiveCursorCaptureKeepsActiveRecordingOpen(t *testing.T) {
 			}
 			reader := &fixedCursorIncrementalReader{next: int64(len(body)), entries: []adapters.RawEntry{{Role: "user", Content: "capture me when stopped"}}}
 			var finalState *RecordingState
+			var batch AppendedBatch
 			err := fileutil.WithFileLock(context.Background(), f.rawPath, func() error {
 				var err error
-				finalState, err = FinalizeInactiveCursorCapture(context.Background(), f.projectRoot, f.sessionPath, f.homeDir, reader, cutoff)
+				finalState, batch, err = FinalizeInactiveCursorCapture(context.Background(), f.projectRoot, f.sessionPath, f.homeDir, reader, cutoff)
 				return err
 			})
 			if tc.wantActive {
 				require.ErrorIs(t, err, ErrCursorRecordingActive)
 				assert.Nil(t, finalState)
+				assert.Empty(t, batch.Bytes, "an active recording commits nothing for the live stream")
 				assert.Zero(t, reader.calls, "active recovery must not mutate capture or settle a journal")
 				assert.NoFileExists(t, f.rawPath)
 				assert.FileExists(t, recordingStatePath(f.sessionPath))
@@ -67,6 +69,9 @@ func TestFinalizeInactiveCursorCaptureKeepsActiveRecordingOpen(t *testing.T) {
 			raw, err := os.ReadFile(f.rawPath)
 			require.NoError(t, err)
 			assert.Contains(t, string(raw), `"cursor_finalized":true`)
+			// the final drain's batch goes to the live stream, as at a stop (C8)
+			assert.Contains(t, string(batch.Bytes), "capture me when stopped")
+			assert.NotContains(t, string(batch.Bytes), "cursor_finalized")
 		})
 	}
 }

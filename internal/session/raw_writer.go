@@ -35,6 +35,42 @@ type RawWriter struct {
 	cmdRedactor *CommandRedactor
 	redactor    *Redactor
 	closed      bool
+
+	// span of the last committed AppendRecordingBatch; see LastAppended.
+	lastFrom, lastTo int64
+	lastSuspended    bool
+	hasLast          bool
+}
+
+// AppendedBatch is exactly what one committed AppendRecordingBatch added to
+// raw.jsonl: the real file bytes (already redacted), not a re-encoding.
+type AppendedBatch struct {
+	Bytes []byte
+	// Suspended reports whether the recording was paused when the batch was
+	// committed. It is read under the same state lock as the append, so a
+	// pause/resume cannot slip between the two.
+	Suspended bool
+}
+
+// LastAppended returns the bytes the last successful AppendRecordingBatch added,
+// or ok=false when none did. The span is bounded by sizes taken under the append
+// lock, so a carrier footer stamped afterwards is never included; the file is
+// append-only and a committed cursor keeps the batch, so reading after the lock
+// is released is safe.
+func (w *RawWriter) LastAppended() (batch AppendedBatch, ok bool, err error) {
+	if w == nil || w.file == nil || !w.hasLast {
+		return AppendedBatch{}, false, nil
+	}
+	f, err := os.Open(w.file.Name())
+	if err != nil {
+		return AppendedBatch{}, false, fmt.Errorf("read appended batch: %w", err)
+	}
+	defer f.Close()
+	buf := make([]byte, w.lastTo-w.lastFrom)
+	if _, err := f.ReadAt(buf, w.lastFrom); err != nil {
+		return AppendedBatch{}, false, fmt.Errorf("read appended batch: %w", err)
+	}
+	return AppendedBatch{Bytes: buf, Suspended: w.lastSuspended}, true, nil
 }
 
 // NewRawWriter opens path for appending and returns a writer whose
@@ -514,9 +550,14 @@ func (w *RawWriter) AppendRecordingBatch(statePath string, entries []Entry, newO
 }
 
 func (w *RawWriter) appendRecordingBatch(statePath string, entries []Entry, newOffset int64) error {
+	w.hasLast = false
 	err := MutateRecordingStateFile(statePath, func(state *RecordingState) error {
 		if newOffset <= state.SourceOffset {
 			return fmt.Errorf("capture cursor did not advance")
+		}
+		before, err := w.file.Stat()
+		if err != nil {
+			return err
 		}
 		if err := w.RestoreCaptureRedaction(state, w.file.Name()); err != nil {
 			return err
@@ -532,6 +573,11 @@ func (w *RawWriter) appendRecordingBatch(statePath string, entries []Entry, newO
 		if err := w.SealAppend(); err != nil {
 			return err
 		}
+		after, err := w.file.Stat()
+		if err != nil {
+			return err
+		}
+		w.lastFrom, w.lastTo, w.lastSuspended, w.hasLast = before.Size(), after.Size(), state.IsSuspended(), true
 		state.CommandRedactionVersion = 1
 		state.PendingCommandRedactions = w.cmdRedactor.pending
 		state.SourceOffset = newOffset
@@ -539,6 +585,7 @@ func (w *RawWriter) appendRecordingBatch(statePath string, entries []Entry, newO
 		return nil
 	})
 	if err != nil {
+		w.hasLast = false
 		return err
 	}
 	return w.FinishAppend()

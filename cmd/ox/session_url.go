@@ -61,6 +61,11 @@ func sessionLinkOutputs(projectRoot string, projCfg *config.ProjectConfig, state
 		// permanently dead link.
 		return "", ""
 	}
+	if liveDeletedOnServer(state.SessionPath) {
+		// deleted on SageOx while it streamed: its page is gone for good, and the
+		// session is never published, so the link would be dead the same way
+		return "", ""
+	}
 	sessionURL = buildConversationURL(projCfg, state.SessionID)
 	if sessionURL == "" {
 		sessionURL = buildSessionURL(projCfg, session.GetSessionName(state.SessionPath))
