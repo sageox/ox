@@ -1429,9 +1429,11 @@ func (d *Daemon) initComponents() time.Duration {
 	if d.agentWorker != nil {
 		d.agentWorker.SetSessionWatcher(d.sessionWatcher)
 	}
-	// The hook catch-up acts only on recordings a local hook reported: a
-	// marker planted in the Ledger checkout or legacy sessions/ never gets one.
-	// Every ox hook heartbeats with its agent ID (dispatchPhase).
+	// An agent heartbeat (every ox hook sends one, as do other ox commands)
+	// arms the hook catch-up for that agent's recording. A heartbeat proves
+	// nothing about a marker, so NoteHook arms only a recording ox started on
+	// this machine (session.LoadRecordingMarkers): a marker planted in the
+	// Ledger checkout or legacy sessions/ under a live agent's ID is refused.
 	if projectRoot := d.config.ProjectRoot; projectRoot != "" {
 		d.heartbeat.SetAgentHeartbeatCallback(func(agentID string) {
 			d.sessionWatcher.NoteHook(d.ctx, projectRoot, agentID)

@@ -52,41 +52,67 @@ type hookCatchUpMark struct {
 // identity and agent, as the marker the hook captures with records them.
 type hookTouch struct {
 	sessionPath, sessionID, agentID string
+	// refused keys the one warning logged for a marker ox did not start here
+	// (refuseUnstarted), not an armed recording. Its sessionPath is the folder
+	// the marker was found in: a forged marker can claim a real one's.
+	refused bool
 }
 
 func touchOf(st *session.RecordingState) hookTouch {
 	return hookTouch{sessionPath: st.SessionPath, sessionID: st.SessionID, agentID: st.AgentID}
 }
 
-// NoteHook arms the catch-up for the recording agentID's hooks capture in
-// projectRoot. The daemon calls it for every agent heartbeat, which every ox
-// hook sends. It resolves the recording the way the hook does
-// (session.LoadRecordingStateForAgent), so what it arms is what that hook
-// writes to anyway.
+func refusedTouchOf(mk session.RecordingMarker) hookTouch {
+	return hookTouch{sessionPath: mk.Dir, sessionID: mk.State.SessionID, agentID: mk.State.AgentID, refused: true}
+}
+
+// NoteHook arms the catch-up for agentID's recording in projectRoot. The
+// daemon calls it for every agent heartbeat, which every ox hook sends, and
+// so does any other ox command: a heartbeat says the agent is alive, not that
+// a hook ran.
 //
-// The catch-up acts on nothing else (HookNoted). The markers it sweeps include
-// ones in places a repository writer controls, the Ledger checkout and the
-// legacy sessions/ folder, and a planted marker never gets a local hook. The
-// set lives in memory: after a daemon restart a recording is caught up again
-// once its next hook arrives.
+// What makes a recording safe to catch up is where it came from. Markers
+// live in places a repository writer controls (the Ledger checkout, the
+// legacy sessions/ folder), and one can reuse an active agent's ID. Only a
+// recording ox started on this machine, in the folder it was started in, is
+// armed (session.LoadRecordingMarkers). Any other marker naming agentID is
+// left alone with one warning (refuseUnstarted), and so is every recording an
+// older ox started.
+//
+// The catch-up acts on armed recordings only (HookNoted). The set lives in
+// memory: after a daemon restart a recording is caught up again once its next
+// heartbeat arrives.
 func (m *SessionWatcherManager) NoteHook(ctx context.Context, projectRoot, agentID string) {
 	if projectRoot == "" || agentID == "" {
 		return
 	}
-	st, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
-	if err != nil || st == nil || st.SessionPath == "" {
-		return // not recording: nothing to arm
+	markers, err := session.LoadRecordingMarkers(projectRoot)
+	if err != nil {
+		m.logger.DebugContext(ctx, "session_capture_catchup_skipped", "reason", "cannot_list_recordings", "agent_id", agentID, "error", err)
+		return
 	}
-	touch := touchOf(st)
-	m.mu.Lock()
-	if m.hookTouched == nil {
-		m.hookTouched = make(map[hookTouch]time.Time)
-	}
-	_, armed := m.hookTouched[touch]
-	m.hookTouched[touch] = time.Now()
-	m.mu.Unlock()
-	if !armed {
-		m.logger.DebugContext(ctx, "session_capture_catchup_armed", "session_id", st.SessionID, "agent_id", agentID, "session", filepath.Base(st.SessionPath))
+	for _, mk := range markers {
+		st := mk.State
+		if st.AgentID != agentID || st.SourceRejected || st.SessionPath == "" {
+			continue
+		}
+		if !mk.Started {
+			if hookCatchUpCandidate(st) {
+				m.refuseUnstarted(ctx, mk)
+			}
+			continue
+		}
+		touch := touchOf(st)
+		m.mu.Lock()
+		if m.hookTouched == nil {
+			m.hookTouched = make(map[hookTouch]time.Time)
+		}
+		_, armed := m.hookTouched[touch]
+		m.hookTouched[touch] = time.Now()
+		m.mu.Unlock()
+		if !armed {
+			m.logger.DebugContext(ctx, "session_capture_catchup_armed", "session_id", st.SessionID, "agent_id", agentID, "session", filepath.Base(st.SessionPath))
+		}
 	}
 }
 
@@ -99,8 +125,9 @@ func (m *SessionWatcherManager) HookNoted(st *session.RecordingState) bool {
 	return ok
 }
 
-// pruneHookTouches forgets recordings whose marker is gone. One armed after
-// the sweep listed the markers is kept: its marker may postdate the list.
+// pruneHookTouches forgets recordings, and refusals, whose marker is gone. One
+// noted after the sweep listed the markers is kept: its marker may postdate
+// the list.
 func (m *SessionWatcherManager) pruneHookTouches(present map[hookTouch]bool, listedAt time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -136,23 +163,34 @@ func (m *SessionWatcherManager) CatchUpHookRecordings(ctx context.Context, proje
 		return 0
 	}
 	listedAt := time.Now()
-	states, err := session.LoadAllRecordingStates(projectRoot)
+	markers, err := session.LoadRecordingMarkers(projectRoot)
 	if err != nil {
 		m.logger.DebugContext(ctx, "session_capture_catchup_skipped", "reason", "cannot_list_recordings", "error", err)
 		return 0
 	}
-	present := make(map[hookTouch]bool, len(states))
-	for _, st := range states {
-		present[touchOf(st)] = true
+	present := make(map[hookTouch]bool, len(markers))
+	for _, mk := range markers {
+		if mk.Started {
+			present[touchOf(mk.State)] = true
+		} else {
+			present[refusedTouchOf(mk)] = true
+		}
 	}
 	m.pruneHookTouches(present, listedAt)
-	active := make(map[string]bool, len(states))
+	active := make(map[string]bool, len(markers))
 	caught := 0
-	for _, st := range states {
+	for _, mk := range markers {
 		if ctx.Err() != nil {
 			break
 		}
+		st := mk.State
 		if !hookCatchUpCandidate(st) {
+			continue
+		}
+		if !mk.Started {
+			// checked before anything is read or locked: the marker, its
+			// session_path included, is whoever wrote it
+			m.refuseUnstarted(ctx, mk)
 			continue
 		}
 		active[st.SessionPath] = true
@@ -275,6 +313,24 @@ func (m *SessionWatcherManager) skipUnhookedCatchUp(ctx context.Context, session
 	m.mu.Unlock()
 	if !logged {
 		m.logger.DebugContext(ctx, "session_capture_catchup_skipped", append(ids, "reason", "no_local_hook")...)
+	}
+}
+
+// refuseUnstarted leaves a marker ox did not start in the folder it is in:
+// planted, or a recording an older ox started. It warns once per marker, not
+// every sweep or heartbeat. Nothing of it is read, locked or written.
+func (m *SessionWatcherManager) refuseUnstarted(ctx context.Context, mk session.RecordingMarker) {
+	touch := refusedTouchOf(mk)
+	m.mu.Lock()
+	if m.hookTouched == nil {
+		m.hookTouched = make(map[hookTouch]time.Time)
+	}
+	_, warned := m.hookTouched[touch]
+	m.hookTouched[touch] = time.Now()
+	m.mu.Unlock()
+	if !warned {
+		m.logger.WarnContext(ctx, "session_capture_catchup_refused", "reason", "not_started_here",
+			"session_id", mk.State.SessionID, "agent_id", mk.State.AgentID, "marker_dir", mk.Dir)
 	}
 }
 

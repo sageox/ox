@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -217,6 +218,9 @@ func (e *env) spoolDeclaresLoss(next []byte, want int64) {
 // still a loss, and recording it must not need that same directory: the next
 // write declares it.
 func TestASpoolLossIsDeclaredWhenTheLockDirectoryIsUnusable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("reason: os.TempDir ignores TMPDIR on Windows, so the lock directory cannot be made unusable this way")
+	}
 	e := newEnv(t)
 	e.spool(lines(0, 2))
 	notADir := filepath.Join(t.TempDir(), "not-a-dir")

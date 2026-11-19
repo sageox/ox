@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"time"
 	"unicode/utf8"
@@ -166,7 +167,10 @@ func declareLoss(ctx context.Context, dir string, n int64, cause error) error {
 // line starts with a newline so it never fuses with a count the previous
 // version wrote without one.
 func recordLost(dir string, n int64) error {
-	f, err := os.OpenFile(filepath.Join(dir, spoolLostFileName), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	path := filepath.Join(dir, spoolLostFileName)
+	_, statErr := os.Stat(path)
+	created := errors.Is(statErr, fs.ErrNotExist)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return fmt.Errorf("record lost spool bytes: %w", err)
 	}
@@ -175,7 +179,27 @@ func recordLost(dir string, n int64) error {
 	if err := errors.Join(werr, serr, f.Close()); err != nil {
 		return fmt.Errorf("record lost spool bytes: %w", err)
 	}
+	// A file fsync does not persist a new directory entry on every filesystem;
+	// without this a crash could drop the whole record and with it the gap.
+	if created {
+		if err := syncDirEntry(dir); err != nil {
+			return fmt.Errorf("record lost spool bytes: persist new %s: %w", spoolLostFileName, err)
+		}
+	}
 	return nil
+}
+
+// syncDirEntry fsyncs dir so a file just created in it survives a crash.
+// Windows cannot fsync a directory, and NTFS journals the entry itself.
+func syncDirEntry(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	return errors.Join(d.Sync(), d.Close())
 }
 
 // lostTotals is what spool-lost and spool-lost-declared say, read together.

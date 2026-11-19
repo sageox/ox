@@ -561,6 +561,12 @@ func LoadRecordingState(projectRoot string) (*RecordingState, error) {
 // walkRecordingStates decodes every .recording.json under the project's session
 // search paths, deduplicating by canonical file path, and hands each decoded
 // state to visit. Returning false from visit stops the walk immediately.
+func walkRecordingStates(projectRoot string, strict bool, visit func(*RecordingState) bool) error {
+	return walkRecordingMarkers(projectRoot, strict, func(_ string, state *RecordingState) bool { return visit(state) })
+}
+
+// walkRecordingMarkers is walkRecordingStates, also handing visit the folder
+// each marker was found in.
 //
 // strict decides what an unreadable or unparseable marker means, and the two
 // answers are both correct for their caller. A lenient walk is enumerating
@@ -569,7 +575,7 @@ func LoadRecordingState(projectRoot string) (*RecordingState, error) {
 // repository right now", and has to fail closed: a marker it cannot read might
 // belong to a session that is reading these very files, and converging
 // underneath one is the exact failure the question exists to prevent.
-func walkRecordingStates(projectRoot string, strict bool, visit func(*RecordingState) bool) error {
+func walkRecordingMarkers(projectRoot string, strict bool, visit func(dir string, state *RecordingState) bool) error {
 	if projectRoot == "" {
 		return fmt.Errorf("%w: project root", ErrEmptyPath)
 	}
@@ -616,7 +622,7 @@ func walkRecordingStates(projectRoot string, strict bool, visit func(*RecordingS
 			}
 
 			seen[canonicalKey] = struct{}{}
-			if !visit(state) {
+			if !visit(filepath.Join(sessionsDir, entry.Name()), state) {
 				return nil
 			}
 		}
@@ -649,27 +655,49 @@ func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
 // not the agent's active recording: it neither captures nor blocks a new one,
 // so the agent's next recording can start while it waits. Use
 // LoadQuarantinedRecordingsForAgent to find it.
+//
+// A marker in a folder a repository writer controls (the Ledger checkout, the
+// legacy sessions/ folder) can reuse an active agent's ID, and even its
+// recording's folder and session ID. When more than one marker names the agent,
+// the one ox started here (started_recordings.go) is the agent's recording.
 func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, error) {
 	if agentID == "" {
 		return nil, fmt.Errorf("%w: agent ID", ErrEmptyPath)
 	}
-	states, err := LoadAllRecordingStates(projectRoot)
-	if err != nil {
+	var dirs []string
+	var candidates []*RecordingState
+	if err := walkRecordingMarkers(projectRoot, false, func(dir string, s *RecordingState) bool {
+		if s.AgentID == agentID && !s.SourceRejected {
+			dirs = append(dirs, dir)
+			candidates = append(candidates, s)
+		}
+		return true
+	}); err != nil {
 		return nil, err
 	}
-	for _, s := range states {
-		if s.AgentID == agentID && !s.SourceRejected {
-			if s.CacheDir != "" && s.CacheDir != paths.CacheDir() {
-				slog.Debug("recording found in different cache dir",
-					"agent_id", agentID,
-					"recording_cache_dir", s.CacheDir,
-					"current_cache_dir", paths.CacheDir(),
-				)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	s := candidates[0]
+	if len(candidates) > 1 {
+		// only read when it can decide something; unreadable, the first stands
+		if known, err := loadStartedRecordings(); err == nil {
+			for i, c := range candidates {
+				if startedHere(known, dirs[i], c) {
+					s = c
+					break
+				}
 			}
-			return s, nil
 		}
 	}
-	return nil, nil
+	if s.CacheDir != "" && s.CacheDir != paths.CacheDir() {
+		slog.Debug("recording found in different cache dir",
+			"agent_id", agentID,
+			"recording_cache_dir", s.CacheDir,
+			"current_cache_dir", paths.CacheDir(),
+		)
+	}
+	return s, nil
 }
 
 // LoadQuarantinedRecordingsForAgent returns the agent's recordings held back for
@@ -760,7 +788,7 @@ func ClearRecordingStateAt(sessionPath, sessionID string) error {
 		return fmt.Errorf("%w: session path", ErrEmptyPath)
 	}
 	statePath := recordingStatePath(sessionPath)
-	return fileutil.WithFileLock(context.Background(), statePath, func() error {
+	err := fileutil.WithFileLock(context.Background(), statePath, func() error {
 		data, err := os.ReadFile(statePath)
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -779,6 +807,15 @@ func ClearRecordingStateAt(sessionPath, sessionID string) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	// the folder no longer holds sessionID either way; best effort, since a
+	// stale entry names a marker that is gone and so matches nothing
+	if err := forgetStartedRecording(sessionPath, sessionID); err != nil {
+		slog.Debug("could not prune started recording", "session_id", sessionID, "session", filepath.Base(sessionPath), "error", err)
+	}
+	return nil
 }
 
 // AppendProducedPlan records a plan slug on the recording at sessionPath — the
@@ -872,6 +909,9 @@ func ClearRecordingState(projectRoot string) error {
 		lockFiles, _ := filepath.Glob(filepath.Join(state.SessionPath, "*.lock"))
 		for _, lockFile := range lockFiles {
 			_ = os.Remove(lockFile)
+		}
+		if err := forgetStartedRecording(state.SessionPath, state.SessionID); err != nil {
+			slog.Debug("could not prune started recording", "session_id", state.SessionID, "session", filepath.Base(state.SessionPath), "error", err)
 		}
 	}
 
@@ -1639,7 +1679,15 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 	state.RecordNativeSession(opts.AgentSessionID, opts.AgentSessionSource, state.StartedAt)
 	state.initializeTraceCapture()
 
+	// Recorded before the marker is published, so the daemon never sees this
+	// marker unregistered. A failure costs the recording its daemon catch-up
+	// only (started_recordings.go), never the recording: its hooks capture it.
+	if err := registerStartedRecording(state); err != nil {
+		slog.Warn("session_start_registry_failed", "session_id", state.SessionID, "agent_id", state.AgentID,
+			"session", sessionName, "error", err)
+	}
 	if err := SaveRecordingState(projectRoot, state); err != nil {
+		_ = forgetStartedRecording(state.SessionPath, state.SessionID)
 		return nil, err
 	}
 
