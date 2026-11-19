@@ -12,7 +12,7 @@
 #   - Symlinks into ./bin/ are always re-created (cheap, fixes drift if you
 #     hand-edited or rm'd them).
 #
-# Floating-on-latest, no root, no Homebrew, no PATH pollution.
+# Most tools float on latest. No root, no Homebrew, no PATH pollution.
 # Used by: `make sec-install`, the GH Action, the pre-commit fast tier when a tool is missing.
 #
 # WHY "LATEST" AND NOT PINNED (May 2026):
@@ -95,7 +95,10 @@ fetch_tarball() {
 # OpenGrep — platform-aware asset name. Hardcoding `manylinux_x86` here used to
 # break every Mac dev's first `make sec-install`.
 # ---------------------------------------------------------------------------
-if have_cached opengrep; then
+# OpenGrep 2.0 renamed its Linux assets. Pin the compatible release and
+# invalidate earlier cache entries that were installed from releases/latest.
+OPENGREP_VERSION="1.33.1"
+if have_cached opengrep && [[ "$("$CACHE_ROOT/opengrep" --version 2>/dev/null)" == "$OPENGREP_VERSION" ]]; then
   echo "✓ opengrep cached"; link_into_bin opengrep
 else
   case "${OS}-${ARCH}" in
@@ -106,7 +109,7 @@ else
     *) echo "unsupported opengrep platform: ${OS}-${ARCH}" >&2; exit 1 ;;
   esac
   fetch_tarball "opengrep" \
-    "https://github.com/opengrep/opengrep/releases/latest/download/${OPENGREP_ASSET}" \
+    "https://github.com/opengrep/opengrep/releases/download/v${OPENGREP_VERSION}/${OPENGREP_ASSET}" \
     "bin" "opengrep"
 fi
 
