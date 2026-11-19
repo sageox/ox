@@ -35,22 +35,49 @@ const (
 	gcFailed                        // reclone attempted but failed (clone, validation, or swap error)
 )
 
-// checkAndRunGC iterates team context workspaces and triggers blue-green reclone
-// for any that are past their gc_interval_days cadence.
-func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
+// checkAndRunGC runs the Ledger phase on the scheduler loop so watcher
+// validation and outbox draining cannot interleave with preservation or
+// the swap. Launch Team Context cleanup before the Ledger phase so a stalled
+// Ledger reclone cannot prevent recovery of an interrupted Team Context swap.
+func (s *SyncScheduler) checkAndRunGC(ctx context.Context) <-chan struct{} {
 	// only one GC at a time
 	if !atomic.CompareAndSwapInt32(&s.gcInProgress, 0, 1) {
 		s.logger.Debug("gc: already in progress, skipping check")
-		return
+		return nil
 	}
+	var active atomic.Int32
+	active.Store(1)
+	finish := func() {
+		if active.Add(-1) == 0 {
+			atomic.StoreInt32(&s.gcInProgress, 0)
+		}
+	}
+	defer finish()
 
 	if err := s.workspaceRegistry.LoadFromConfig(); err != nil {
 		s.logger.Warn("gc: failed to load workspace registry", "error", err)
-		atomic.StoreInt32(&s.gcInProgress, 0)
-		return
+		return nil
 	}
 
-	teamContexts := s.workspaceRegistry.GetTeamContexts()
+	teams := s.workspaceRegistry.GetTeamContexts()
+	var teamDone chan struct{}
+	if len(teams) > 0 && ctx.Err() == nil && s.addClone() {
+		active.Add(1)
+		teamDone = make(chan struct{})
+		go func() {
+			defer s.cloneWg.Done()
+			defer close(teamDone)
+			defer finish()
+			taskCtx, span := s.tracer.StartTask(ctx, "daemon:team_context_gc")
+			defer span.End()
+			s.checkTeamContextGC(taskCtx, teams)
+		}()
+	}
+	s.checkLedgerAndBubbleGC(ctx)
+	return teamDone
+}
+
+func (s *SyncScheduler) checkTeamContextGC(ctx context.Context, teamContexts []WorkspaceState) {
 	for _, ws := range teamContexts {
 		interruptedSwap := gitutil.IsGitRepo(ws.Path + ".old")
 		if (!ws.Exists && !interruptedSwap) || ws.CloneURL == "" {
@@ -87,8 +114,11 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 		s.logger.Info("gc: workspace due for reclone", "team", ws.TeamName, "id", ws.ID,
 			"reason", reason, "interval_days", intervalDays, "last_gc", ws.LastGCTime)
 
-		// run GC synchronously (one at a time) then release the flag
+		// Process one reclone at a time within the GC worker.
 		result := s.runBlueGreenGC(ctx, ws)
+		if result == gcSkippedLocked {
+			continue // no reclone started, so try the next due checkout
+		}
 
 		repoName := ws.TeamName
 		if repoName == "" {
@@ -120,7 +150,9 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 
 		break // one GC per check cycle to avoid overloading
 	}
+}
 
+func (s *SyncScheduler) checkLedgerAndBubbleGC(ctx context.Context) {
 	// ledger GC reclone — same blue-green pattern as team contexts
 	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(l.Path+".old")) && l.CloneURL != "" {
 		if _, loaded := s.cloneInFlight.Load(l.ID); !loaded {
@@ -239,8 +271,6 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 
 	// knowledge-bubble GC — independent of ledger / team-context GC.
 	s.TriggerKBGC(ctx)
-
-	atomic.StoreInt32(&s.gcInProgress, 0)
 }
 
 // ledgerSyncWedgeAge is how long a ledger must be simultaneously ahead
@@ -595,6 +625,26 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 // value specifically, not on gcSuccess or on their own pre-call wedge
 // sample.
 func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) (result gcResult, recovered bool) {
+	if ws.Type != WorkspaceTypeTeamContext {
+		return s.recloneWorkspaceForGC(ctx, ws, captureUnpushedOnDiverge)
+	}
+	// The Git lock lives in the clone being replaced. Use the stable path
+	// lock shared by Team Context pulls and clone setup across the swap.
+	acquired, err := gitutil.TryWithPreCloneLock(ws.Path, func() error {
+		result, recovered = s.recloneWorkspaceForGC(ctx, ws, captureUnpushedOnDiverge)
+		return nil
+	})
+	if err != nil {
+		s.logger.Warn("gc: cannot lock Team Context checkout", "path", ws.Path, "error", err)
+		return gcFailed, false
+	}
+	if !acquired {
+		return gcSkippedLocked, false
+	}
+	return result, recovered
+}
+
+func (s *SyncScheduler) recloneWorkspaceForGC(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) (result gcResult, recovered bool) {
 	newPath := ws.Path + ".new"
 	oldPath := ws.Path + ".old"
 	diffFile := ws.Path + ".gc-diff"
