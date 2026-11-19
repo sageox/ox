@@ -162,6 +162,9 @@ func recoverAgentSession(inst *agentinstance.Instance, releaseQuarantine bool) e
 	return recoverRecording(inst, projectRoot, state)
 }
 
+// errNothingRecovered means a just-discovered transcript held no turns to publish.
+var errNothingRecovered = errors.New("no turns to recover")
+
 // recoverRecording recovers one recording, named by its state rather than
 // looked up by agent.
 func recoverRecording(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
@@ -218,6 +221,9 @@ func recoverRecording(inst *agentinstance.Instance, projectRoot string, state *s
 		_, err := os.Stat(state.SessionFile)
 		if err == nil {
 			slog.Info("adapter session file found, using normal stop flow")
+			if discovered {
+				return recoverDiscoveredViaNormalStop(inst, projectRoot, state)
+			}
 			return recoverViaNormalStop(inst, projectRoot, state)
 		}
 		if discovered {
@@ -251,6 +257,17 @@ func recoverRecording(inst *agentinstance.Instance, projectRoot string, state *s
 
 // recoverViaNormalStop uses the adapter's normal finalization and session stop flow.
 func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
+	return recoverViaNormalStopFlow(inst, projectRoot, state, false)
+}
+
+// recoverDiscoveredViaNormalStop is recoverViaNormalStop for a transcript found
+// only now. Discovery by session ID does not compare turn times with the
+// recording's start, so a transcript that yields no turns keeps the recording.
+func recoverDiscoveredViaNormalStop(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
+	return recoverViaNormalStopFlow(inst, projectRoot, state, true)
+}
+
+func recoverViaNormalStopFlow(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState, requireEntries bool) error {
 	// process session through the normal pipeline. Hold the raw.jsonl writer's
 	// file lock so this never races a hook or watcher still appending a batch
 	// under the same lock -- the recording may not actually be dead.
@@ -270,6 +287,9 @@ func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, stat
 		if result, processErr = processAgentSession(projectRoot, latest); processErr != nil {
 			return processErr
 		}
+		if requireEntries && result.EntryCount == 0 {
+			return errNothingRecovered
+		}
 		// Clear before releasing the lock, and clear THIS recording. A hook
 		// queued on the lock re-reads the state once it gets in; if the state
 		// were still there it would append a batch that nothing will ever
@@ -279,6 +299,10 @@ func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, stat
 		}
 		return nil
 	})
+	if errors.Is(err, errNothingRecovered) {
+		return fmt.Errorf("claude session file %s has no turns since the recording started; nothing was published.\n%s",
+			state.SessionFile, undiscoveredSessionNextSteps(state))
+	}
 	if err != nil {
 		if errors.Is(err, claudesource.ErrUntrustedSource) {
 			if markErr := session.SetSourceRejectedAt(state.SessionPath, state.SessionID, true); markErr != nil {
