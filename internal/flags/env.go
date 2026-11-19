@@ -57,6 +57,7 @@ func allNil(p *Patch) bool {
 		p.TraceEnabled == nil &&
 		p.BulletinEnabled == nil &&
 		p.GitHubMirrorEnabled == nil &&
+		p.SessionStreamingEnabled == nil &&
 		p.DisableFileDeleteTools == nil &&
 		p.DisableShellExecTools == nil &&
 		p.PrimeAppend == nil

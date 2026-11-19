@@ -45,6 +45,14 @@ func recordOxToolCall(projectRoot, agentID string, input *agentx.HookInput) {
 	}
 	refType := invokedRefType(act)
 	recordStatuslineRetrieval(projectRoot, agentID, input.SessionID, act, refType)
+	// A pre-tool hook may have noted this call's start (recordFlowStart).
+	// Taken here, before any return, so a start never outlives its call.
+	flow, moves := oxactivity.FlowOf(act.Command)
+	var elapsed time.Duration
+	timed := false
+	if moves {
+		elapsed, timed = takeFlowStart(projectRoot, agentID, act.Command, hookToolCallID(input), time.Now())
+	}
 
 	// prime records its own richer event (recordPrimeInvocation) — a second,
 	// smaller one from the hook would double-count its context.
@@ -68,6 +76,9 @@ func recordOxToolCall(projectRoot, agentID string, input *agentx.HookInput) {
 	}
 	if act.Kind == oxactivity.KindRetrieval {
 		ev.Query = act.Query
+	}
+	if moves {
+		addFlowFacts(&ev, flow, input, out, elapsed, timed)
 	}
 	hits := surfacedToolHits(act.Command, input)
 	if singleItemCommands[act.Command] {

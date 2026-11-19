@@ -14,7 +14,7 @@ chosen for this lane (REFS.md, "Chosen for this lane") · `[C]` craft default.
   - node (the end that received): sage-800 `#3d643b` / sage-500 `#7aaa77`
   - text (digest, end labels): silt-600 `#4a4d42` / silt-300 `#b7b6a3`
   - quiet (open line, ring, stub, the end that sent): silt-500 `#6b6d60` / silt-400 `#8c8e7e`
-  - danger (the word "failed" only): error-600 `#9f4838` / error-400 `#d77e6c`
+  - danger (the word "failed", and a failed lane's stub and both nodes): error-600 `#9f4838` / error-400 `#d77e6c`
   - Contrast: graphics ≥ 3:1, text ≥ 4.5:1 against dust-100 and white (light) and crater-800 and
     a `#262624` grey host (dark), rules 5 and 18 `[DS]`. Enforced by the `contrast` test in
     `tests/scene.test.tsx`. The faint end of the stub is below 3:1 by design; the stub's meaning
@@ -48,27 +48,28 @@ end labels. `[B]`
 - Failed: `failed` (danger) ` while searching team discussions · 1.2s` `[H]` `[DS]` rule 3.
 - Interrupted: `interrupted while searching team discussions · 3.4s`, no danger `[B]`.
 - Zero tokens: `searched code · nothing came back · 0.3s` (out: `nothing sent`) `[B]`.
-- Prompt strip: `team context ~15k · 3 murmurs · 1 ledger match`, no duration (nobody waits on
-  it) `[H]` group-line pattern.
+- No prompt strip. Context a hook injects with a prompt (the session-start prime, murmurs,
+  ledger recall) draws nothing: only an ox call gets a lane. A lane under a prompt nobody made
+  an ox call for read as noise, and the engine raises every earlier attachment again after a
+  plugin reload or a resume, so old context kept appearing under new prompts.
 - Too long: the label shrinks with `…`; if even that does not fit, the label goes (the host row
   above names the call) and numbers stay; only then is the tail cut. `[C]` long-and-many.
 - Alt and caption, the same sentence `[DS]` rule 18:
   `searched team: ~1.2k tokens from 5 discussions, 0.8s` ·
   `posted murmur: ~64 tokens sent to murmurs, 0.4s` ·
   `failed while searching team discussions after 1.2s; nothing came back` ·
-  `searching team discussions, still running` ·
-  `with this prompt: team context ~15k tokens, 3 murmurs, 1 ledger match; ~16k tokens in all`.
+  `searching team discussions, still running`.
 
 ## States
 
 | State | Lane | Nodes | Digest |
 |---|---|---|---|
-| running | dotted 1.5 quiet, origin → ring at destination `[B]` | origin quiet | step `[DS]` r19 |
+| running | dotted 1.5 quiet, origin → ring at destination; dots (in) or rings (out) march along it `[B]` | origin quiet | step `[DS]` r19 |
 | in flight (< ANIM_MS after end) | open line fades out, solid line draws in, dots travel `[B]` | destination filled node colour | done digest |
 | settled | solid stream line, weight by tokens `[B]` `[DS]` | destination filled | done digest |
-| failed / interrupted / zero | stub off the origin `[B]` | both quiet | words, danger only on "failed" |
+| failed | stub off the origin, danger `[B]` | both danger | words, "failed" in danger |
+| interrupted / zero | stub off the origin `[B]` | both quiet | words |
 | out | same marks, travel right → left as hollow rings `[DS]` r3 | SageOx end fills | "posted murmur" |
-| prompt strip | one inbound lane summing every attachment | as above | parts joined by ` · ` |
 | reduced motion (caller flag) | settled frame, no animation elements `[DS]` r2 | | |
 | narrow / long label / dark | see Anatomy, Content, Tokens | | |
 
@@ -86,8 +87,16 @@ no attachment events (`promptSvg([])` draws a stub and "nothing came back").
   opacity `0;.9;.8;0` at `0;.12;.88;1` `[B]`; stagger 90ms `[B]` (so 12 dots read as a trickle on
   a 170-unit lane). Longer than the 500ms tier because it carries information: data arriving.
 - Converge, never radiate: dots end inside the receiving node and vanish there. `[B]`
-- Every animation plays once, `fill="freeze"`; nothing loops. `[DS]` rule 2.
-- `ANIM_MS = 2400` ≥ 1400 + 11 × 90. After it, the SVG holds no `<animate>` at all. `[B]`
+- Every animation of a finished call plays once, `fill="freeze"`. `[DS]` rule 2.
+- The one loop: while a call runs, 3 dots (in) or rings (out) cross from the origin to the ring,
+  evenly spaced, each in 1920ms (the terminal lane's speed), repeating. A coworker
+  asked to see which way a call in progress is moving data, and the step text cannot show that. It
+  is an exception to `[DS]` rule 2, bounded by the call: the finish redraws the row without it.
+  Nothing redraws an open row, so the bound for a call whose end never comes is in the SVG
+  itself: `repeatCount` is the crossings left until 10 minutes after the start, never
+  `indefinite`, and with no `fill="freeze"` the dots then return to invisible. Each `begin` is set back by the time already
+  run, so a redraw does not restart the march. `[B]`
+- `ANIM_MS = 2400` ≥ 1400 + 11 × 90. After it, a finished lane's SVG holds no `<animate>` at all. `[B]`
 - Redraw continuity: every `begin` is `(stagger − (now − endedAt))`, negative once under way;
   dots whose run already finished are omitted. Verified in the harness by Play, which re-creates
   the image every 500ms (`shots/v2/film/film.png`: dots advance monotonically across redraws). `[B]`
@@ -104,15 +113,105 @@ it stops CSS animations only: **SMIL inside an `<img>` still runs under reduced 
    frame with no animation elements. The mod passes it for `/ox-session-report flow still` and
    for rows drawn off screen. The mod does not read the OS reduced-motion setting, so that
    setting alone does not stop the dots.
-2. Without `still`, a reduced-motion viewer sees one 1.4s pass of dots per new call, never
-   repeated on redraw or scroll. That is the residual exposure; it is bounded and one-shot.
-   `/ox-session-report flow still` removes it; `flow off` removes the lanes.
+2. Without `still`, a reduced-motion viewer sees dots marching while a call runs, then one 1.4s
+   pass of dots as it lands, never repeated on redraw or scroll. That is the residual exposure; it
+   is bounded by the call. `/ox-session-report flow still` removes it; `flow off` removes the lanes.
+
+## Terminal lane
+
+A terminal has no `Svg`, and Codex has no plugin surface at all, so the lane is also drawn as one
+row of text cells. Two implementations draw this one grammar and assert the same golden rows:
+`internal/usagepane/mod/hooks/textlane.ts` (the plugin, under each ox call in Claude Code's
+terminal transcript) and `internal/flowlane` (Go: `ox statusline --watch`, the notice under each ox call
+in Codex, and Conductor's turn-end notice).
+
+```
+running   SAGEOX ●┄┄•┄┄┄┄┄•┄┄┄┄┄•┄○ SESSION  searching team discussions
+pushing   SAGEOX ○┄┄◦┄┄┄┄┄◦┄┄┄┄┄◦┄● SESSION  posting murmur
+flight    SAGEOX ●━━━━━━•━•━•━━━━━● SESSION  searched team memory · ~3k from 5 discussions · 0.8s
+settled   SAGEOX ●━━━━━━━━━━━━━━━━● SESSION  searched team memory · ~1.2k from 5 discussions · 0.8s
+out       SAGEOX ●━━━━━◦━◦━━━━━━━━● SESSION  saved plan · ~2k in 1 plan · 1.6s
+nothing   SAGEOX ●╶─              ● SESSION  failed while searching team discussions · 1.2s
+```
+
+- Track: 18 cells on every row, both end nodes included, so stacked rows read as small
+  multiples `[DS]`. SageOx is always the left end; `out` reverses the cells. `[B]`
+- Marks, one cell each (width-1 BMP, as the plugin's `Raster` requires): node `●`, open ring `○`,
+  open line `┄`, settled line `─` under 1k tokens and `━` from 1k (two weights; text has no third),
+  stub `╶─`, dot in `•`, ring out `◦`. Filled against hollow is the direction's second channel
+  `[DS]` rule 3.
+- Flight, over the same `ANIM_MS = 2400`: the line draws in from the origin over 600ms; dots leave
+  180ms apart (two cells at their speed, so they never touch) and cross in 1400ms. At most 5 dots:
+  `min(5, ceil(tokens / 1000))`, since 12 would fill a 16-cell lane. `[C]`
+- Running: dots march along the dotted line from the origin toward the destination for as long as
+  the call runs, one every 6 cells, one cell per 120ms: `•` left to right for a pull, `◦` right to
+  left for a push. This is the one loop in the lane, the same one the SVG draws (see Motion): a
+  coworker asked to see which way a call in progress is moving data. It stops when the call ends, and after 10 minutes for a call whose end was never
+  seen. `still` draws the plain dotted line.
+- Failed, interrupted and empty lanes never move. The landing plays once.
+- Digest: the SVG's wording (`laneDigest`), fitted in cells: the label shrinks with `…`, then goes,
+  and the numbers stay. Go leaves the duration off when the harness measured none (a harness with
+  no pre-tool hook), and says `size unknown` for an outbound CLI call whose payload ox cannot see.
+- Under 60 columns the `SAGEOX` / `SESSION` end labels go. `[B]`
+- Colour: the plugin's `Raster` takes RGB, not theme keys, and cannot ask whether the terminal is
+  light or dark, so it uses one mid sage `#5f9a5b` for what flowed and one mid grey `#8a8a8a` for
+  the rest, and one mid red `#d0503c` for a failed lane's stub and nodes (each ≥ 3:1 on white and
+  on `#1e1e1e`); its labels and digest are theme text (`dimColor`, `error` for "failed"). Go uses
+  the status line's ANSI-256 green and dim, and for a failed lane the red of its `● rec` dot
+  (ANSI 196). An interrupted or empty lane stays grey: it is not a failure. With no colour the
+  glyphs alone carry every state. `[DS]` rules 5 and 18.
+- Motion in the plugin is a repaint of the track in place (`$.ui.blit`, one shared 50ms ticker that
+  runs only while a lane is running or in flight), never a transcript redraw; one redraw at `ANIM_MS` leaves
+  the row on its still frame. `ox statusline --watch` redraws its pane at 80ms while a lane moves.
+- Still: `/ox-session-report flow still` (plugin) and the Codex and Conductor notices (always)
+  draw the settled frame.
+
+## Terminal lane
+
+A terminal has no `Svg`, so there the plugin draws the lane as one row of text cells
+(`internal/usagepane/mod/hooks/textlane.ts`), under each ox call.
+
+```
+running   SAGEOX ●┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄○ SESSION  searching team discussions
+flight    SAGEOX ●━━━━━━•━•━•━━━━━● SESSION  searched team memory · ~3k from 5 discussions · 0.8s
+settled   SAGEOX ●━━━━━━━━━━━━━━━━● SESSION  searched team memory · ~1.2k from 5 discussions · 0.8s
+out       SAGEOX ●━━━━━◦━◦━━━━━━━━● SESSION  saved plan · ~2k in 1 plan · 1.6s
+nothing   SAGEOX ●╶─              ● SESSION  failed while searching team discussions · 1.2s
+```
+
+- Track: 18 cells on every row, both end nodes included, so stacked rows read as small
+  multiples `[DS]`. SageOx is always the left end; `out` reverses the cells. `[B]`
+- Marks, one cell each (width-1 BMP, as the plugin's `Raster` requires): node `●`, open ring `○`,
+  open line `┄`, settled line `─` under 1k tokens and `━` from 1k (two weights; text has no third),
+  stub `╶─`, dot in `•`, ring out `◦`. Filled against hollow is the direction's second channel
+  `[DS]` rule 3.
+- Flight, over the same `ANIM_MS = 2400`: the line draws in from the origin over 600ms; dots leave
+  180ms apart (two cells at their speed, so they never touch) and cross in 1400ms. At most 5 dots:
+  `min(5, ceil(tokens / 1000))`, since 12 would fill a 16-cell lane. `[C]`
+- Running, failed, interrupted and empty lanes never move. Everything plays once.
+- Digest: the SVG's wording (`laneDigest`), fitted in cells: the label shrinks with `…`, then goes,
+  and the numbers stay.
+- Under 60 columns the `SAGEOX` / `SESSION` end labels go. `[B]`
+- Colour: `Raster` takes RGB, not theme keys, and cannot ask whether the terminal is light or
+  dark, so the track uses one mid sage `#5f9a5b` for what flowed and one mid grey `#8a8a8a` for
+  the rest (each ≥ 3:1 on white and on `#1e1e1e`); the labels and digest are theme text
+  (`dimColor`, `error` for "failed"). With no colour the glyphs alone carry every state. `[DS]`
+  rules 5 and 18.
+- Motion is a repaint of the track in place (`$.ui.blit`, one shared 50ms ticker that runs only
+  while a lane is in flight), never a transcript redraw; one redraw at `ANIM_MS` leaves the row
+  on its still frame.
+- Still: `/ox-session-report flow still` draws the settled frame.
+- Folded tool groups stay folded in the terminal. The desktop app, VS Code and mobile unfold a
+  group holding an ox call so its lane shows; a terminal group would unfold into every call's
+  command and output, so it stays one line and the lanes of its ox calls draw directly beneath
+  it: the newest 3, each with its own track, and above them one dim line counting the rest
+  (`+2 more ox calls`). An expanded group draws nothing of its own; each row draws its lane.
 
 ## Size guard
 
 `SVG_SOURCE_CAP = 131072` bytes. `fitSource` renders level 0 (everything), then level 1 (at most
 3 dots, no end labels, no digest on a flowed lane), then level 2 (no animation, no text). A
-12-dot lane is ~4.5 KB and a 3-source prompt strip ~2.5 KB; truncation keeps text bounded, so that
+12-dot lane is ~4.5 KB; truncation keeps text bounded, so that
 guard is a backstop. `[B]`
 
 ## Choices worth recording
@@ -127,8 +226,8 @@ guard is a backstop. `[B]`
   the ring, so hollow is enough. `[B]`
 - **Destination node colour.** The receiving node fills with the node colour once something
   landed, the sending node stays quiet: the settled lane keeps its direction without motion. `[DS]` r3
-- **Live pulse not used.** A breathing SageOx node while a call is open would need a loop and
-  restarts on every redraw; the step text names the work instead. `[DS]` r2, r19
+- **Live pulse not used.** A breathing SageOx node while a call is open says nothing about
+  direction; the marching dots do, and the step text names the work. `[DS]` r2, r19
 
 ## Harness checks
 

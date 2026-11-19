@@ -35,6 +35,10 @@ type CursorCaptureResult struct {
 	State    *RecordingState
 	Entries  int
 	Complete bool
+	// Appended is exactly what this transaction committed to raw.jsonl (empty
+	// when nothing was), for the live stream (ADR-247). Suspended reflects the
+	// recording under the same marker lock, so pause boundaries hold.
+	Appended AppendedBatch
 }
 
 // ValidateCursorRecordingSource applies the exact conversation/worktree rule
@@ -184,7 +188,14 @@ func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, home
 		return nil, err
 	}
 	advancing := nextOffset > state.SourceOffset
+	var appendedFrom, appendedTo int64
 	if advancing {
+		start, err := writer.file.Stat()
+		if err != nil {
+			_ = writer.Close()
+			return nil, fmt.Errorf("begin Cursor capture: %w", err)
+		}
+		appendedFrom = start.Size()
 		if err := writer.BeginAppend(state.SourceOffset, nextOffset); err != nil {
 			_ = writer.Close()
 			return nil, fmt.Errorf("begin Cursor capture: %w", err)
@@ -202,6 +213,12 @@ func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, home
 			_ = writer.Close()
 			return nil, fmt.Errorf("seal Cursor capture: %w", err)
 		}
+		end, err := writer.file.Stat()
+		if err != nil {
+			_ = writer.Close()
+			return nil, fmt.Errorf("seal Cursor capture: %w", err)
+		}
+		appendedTo = end.Size()
 	}
 	if err := writer.CloseAndSync(); err != nil {
 		return nil, fmt.Errorf("sync Cursor capture: %w", err)
@@ -223,17 +240,43 @@ func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, home
 			return nil, fmt.Errorf("finish Cursor capture: %w", err)
 		}
 	}
-	return &CursorCaptureResult{
+	result := &CursorCaptureResult{
 		State: state, Entries: len(converted),
 		Complete: nextOffset == int64(len(before.data)) && cursorSourceReady(state, before.data),
-	}, nil
+	}
+	if appendedTo > appendedFrom {
+		// committed and still under the append lock, so the span cannot move;
+		// a failed read costs the live copy this batch, never the capture
+		if batch, err := readRawSpan(rawPath, appendedFrom, appendedTo); err == nil {
+			result.Appended = AppendedBatch{Bytes: batch, Suspended: state.IsSuspended()}
+		}
+	}
+	return result, nil
+}
+
+// readRawSpan reads raw.jsonl bytes [from, to).
+func readRawSpan(path string, from, to int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("read appended batch: %w", err)
+	}
+	defer func() { _ = f.Close() }() // read-only
+	buf := make([]byte, to-from)
+	if _, err := f.ReadAt(buf, from); err != nil {
+		return nil, fmt.Errorf("read appended batch: %w", err)
+	}
+	return buf, nil
 }
 
 // FinalizeCursorCapture drains the current complete native turn, then applies
 // pause ranges in an atomic RawWriter rewrite. The caller holds raw ownership.
 // The finalized flag travels in that same raw-file replacement, so a crash
 // cannot make a retry apply the mask twice or replay the source into masked raw.
-func FinalizeCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDir string, reader adapters.IncrementalReader) (*RecordingState, error) {
+//
+// The returned batch is what the final drain appended before that rewrite, for
+// the live stream. It can be non-empty alongside ErrCursorFinalDrainPending:
+// those bytes are committed, and no later drain reads them again.
+func FinalizeCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDir string, reader adapters.IncrementalReader) (*RecordingState, AppendedBatch, error) {
 	return finalizeCursorCapture(ctx, projectRoot, sessionPath, homeDir, reader, time.Time{})
 }
 
@@ -241,12 +284,17 @@ func FinalizeCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDi
 // append and marker locks. A hook may refresh activity while the daemon waits
 // for raw ownership, so its earlier liveness observation cannot authorize the
 // rewrite. Persisted or explicit stops remain eligible regardless of activity.
-func FinalizeInactiveCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDir string, reader adapters.IncrementalReader, inactiveBefore time.Time) (*RecordingState, error) {
+//
+// The returned batch is the final drain's, for the live stream, exactly as
+// FinalizeCursorCapture returns it: committed even alongside
+// ErrCursorFinalDrainPending, and never read by a later drain again.
+func FinalizeInactiveCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDir string, reader adapters.IncrementalReader, inactiveBefore time.Time) (*RecordingState, AppendedBatch, error) {
 	return finalizeCursorCapture(ctx, projectRoot, sessionPath, homeDir, reader, inactiveBefore)
 }
 
-func finalizeCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDir string, reader adapters.IncrementalReader, inactiveBefore time.Time) (*RecordingState, error) {
+func finalizeCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDir string, reader adapters.IncrementalReader, inactiveBefore time.Time) (*RecordingState, AppendedBatch, error) {
 	var state *RecordingState
+	var appended AppendedBatch
 	err := withRawAppendLock(filepath.Join(sessionPath, "raw.jsonl"), func() error {
 		return WithRecordingStateLock(ctx, sessionPath, func() error {
 			rawPath := filepath.Join(sessionPath, "raw.jsonl")
@@ -298,6 +346,7 @@ func finalizeCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDi
 				return err
 			}
 			state = capture.State
+			appended = capture.Appended
 			if !capture.Complete {
 				return ErrCursorFinalDrainPending
 			}
@@ -368,7 +417,7 @@ func finalizeCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDi
 			return syncCursorRecordingDirectory(state)
 		})
 	})
-	return state, err
+	return state, appended, err
 }
 
 func cursorCaptureHeader(rawPath string) (map[string]any, bool, error) {
