@@ -26,6 +26,8 @@ func mdxBlockParsers() []util.PrioritizedValue {
 		switch reflect.TypeOf(block.Value) {
 		case reflect.TypeOf(fenced):
 			blocks[i].Value = mdxFenceParser{indentedBlockParser{fenced}}
+		case reflect.TypeOf(parser.NewThematicBreakParser()), reflect.TypeOf(parser.NewSetextHeadingParser()):
+			blocks[i].Value = mdxDedentBlockParser{block.Value.(parser.BlockParser)}
 		case reflect.TypeOf(parser.NewParagraphParser()), reflect.TypeOf(parser.NewATXHeadingParser()):
 			blocks[i].Value = indentedBlockParser{block.Value.(parser.BlockParser)}
 		}
@@ -36,6 +38,29 @@ func mdxBlockParsers() []util.PrioritizedValue {
 // mdxFenceParser retains Goldmark's list, quote, and fence rules with
 // MDX's relaxed indentation for the opening and closing markers.
 type mdxFenceParser struct{ indentedBlockParser }
+
+type mdxDedentBlockParser struct{ parser.BlockParser }
+
+func (mdxDedentBlockParser) CanAcceptIndentedLine() bool { return true }
+
+func (p mdxDedentBlockParser) Open(parent ast.Node, reader text.Reader, ctx parser.Context) (ast.Node, parser.State) {
+	line, _ := reader.PeekLine()
+	_, start := util.IndentWidth(line, reader.LineOffset())
+	if start == 0 {
+		return p.BlockParser.Open(parent, reader, ctx)
+	}
+	// These parsers also check indentation internally. Present the marker
+	// first and restore the line if it is ordinary prose.
+	lineNo, segment := reader.Position()
+	reader.Advance(start)
+	node, state := p.BlockParser.Open(parent, reader, ctx)
+	if node == nil {
+		reader.SetPosition(lineNo, segment)
+	} else {
+		ctx.SetBlockOffset(start)
+	}
+	return node, state
+}
 
 type indentedBlockParser struct{ parser.BlockParser }
 

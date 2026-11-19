@@ -56,6 +56,9 @@ func TestEscapeMDX(t *testing.T) {
 		{"autolink is text in MDX", "See <https://sageox.ai> `<x>`\n", "See \\<https://sageox.ai> `<x>`\n"},
 		{"tabs before a fence", "\t\t~~~\n\t\t<name>\n\t\t~~~\n<after>\n", "\t\t~~~\n\t\t<name>\n\t\t~~~\n\\<after>\n"},
 		{"indented heading ends before the next paragraph", "    # `example\n<name>`\n", "    # `example\n\\<name>`\n"},
+		{"indented thematic break separates paragraphs", "`example\n    ***\n<name>`\n", "`example\n    ***\n\\<name>`\n"},
+		{"indented underline ends the heading", "`example\n    ===\n<name>`\n", "`example\n    ===\n\\<name>`\n"},
+		{"indented emphasis marker can be code", "`example\n    *** word\n<name>`\n", "`example\n    *** word\n<name>`\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
