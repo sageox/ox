@@ -51,6 +51,8 @@ func newLiveEnv(t *testing.T) *liveEnv {
 	e.live = NewLiveSessions(logger, e.sessionsDir, srv.URL)
 	e.live.config = func(ep string) livesession.Config { c := e.cfg; c.Endpoint = ep; return c }
 	e.live.now = func() time.Time { return e.clock }
+	// never the real model: tests that want a summary set their own
+	e.live.summarize = func(context.Context, string, livesession.State) string { return "" }
 	e.params = livesession.OpenParams{SessionID: sessionid.GenerateSessionID(), SessionName: filepath.Base(e.dir), RepoID: "repo_test", Agent: "claude-code", StartedAt: time.Now()}
 	if _, err := livesession.Prepare(t.Context(), e.cfg, e.dir, e.params); err != nil {
 		t.Fatal(err)
@@ -337,5 +339,38 @@ func TestLiveTickRetriesQueuedAbortDeletes(t *testing.T) {
 	e.live.Tick(t.Context())
 	if !e.srv.IsDeleted(st.ConversationID) {
 		t.Fatal("the tick did not retry the queued delete")
+	}
+}
+
+// Failure prevented: the SessionEnd hook only requests the close, so the
+// daemon's close went out with an empty summary and every session that ended
+// with the agent finished without one.
+func TestLiveDaemonCloseCarriesTheSummary(t *testing.T) {
+	e := newLiveEnv(t)
+	e.spool(lineN(1))
+	e.live.Tick(t.Context())
+	e.live.Wait()
+	st := e.state()
+	if st.Status != livesession.StatusStreaming {
+		t.Fatalf("precondition: status %s, want streaming", st.Status)
+	}
+	var asked livesession.State
+	e.live.summarize = func(_ context.Context, dir string, s livesession.State) string {
+		asked = s
+		return "# Done\n\nthe daemon wrote this"
+	}
+	if err := livesession.RequestClose(e.dir); err != nil { // what the SessionEnd hook does
+		t.Fatal(err)
+	}
+
+	e.live.request(t.Context(), canonicalDir(e.dir))
+	e.live.Wait()
+
+	closed, ok := e.srv.ClosedWith(st.ConversationID)
+	if !ok || closed.Summary != "# Done\n\nthe daemon wrote this" {
+		t.Fatalf("server saw close %+v (closed=%v), want the summary", closed, ok)
+	}
+	if asked.ConversationID != st.ConversationID {
+		t.Fatalf("summarizer asked about %+v", asked)
 	}
 }

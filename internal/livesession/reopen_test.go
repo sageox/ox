@@ -16,6 +16,10 @@ import (
 	"github.com/sageox/ox/internal/sessionstream"
 )
 
+// A close here is an automatic end (the agent exited, a daemon finished the
+// close). A manual stop marks the stream first (MarkManualStop) and is never
+// reopened; see the manual stop cases below.
+
 // stoppedSession streams a session in <sessions>/first, spools content and
 // closes it the way a manual stop does.
 type stoppedSession struct {
@@ -66,7 +70,7 @@ func (s *stoppedSession) source(t *testing.T, continuedFrom string) *livesession
 	return src
 }
 
-func TestReopenAfterStopReusesConversationAndRestatesFromZero(t *testing.T) {
+func TestReopenAfterAnAutomaticEndReusesConversationAndRestatesFromZero(t *testing.T) {
 	s := newStopped(t)
 	s.stop(t)
 
@@ -161,6 +165,14 @@ func TestReopenNeverOfferedAfterWithdrawal(t *testing.T) {
 			if _, err := livesession.Abort(t.Context(), s.cfg, s.dir, testBudget); err != nil {
 				t.Fatal(err)
 			}
+			return s.st.SessionID
+		}},
+		{"manual stop", func(t *testing.T, s *stoppedSession) string {
+			// `ox session stop` marks the stream before it closes it
+			if err := livesession.MarkManualStop(s.dir); err != nil {
+				t.Fatal(err)
+			}
+			s.stop(t)
 			return s.st.SessionID
 		}},
 		{"another recording", func(t *testing.T, s *stoppedSession) string {
@@ -362,5 +374,41 @@ func TestReopenStashIsNotOfferedForADeletedOrUnknownRecording(t *testing.T) {
 	}
 	if src := s.source(t, sessionid.GenerateSessionID()); src != nil {
 		t.Fatalf("stash offered to another recording: %+v", src)
+	}
+}
+
+func TestManualStopIsFinalEvenForAResumedConversation(t *testing.T) {
+	s := newStopped(t)
+	s.stop(t) // the agent exited: stashed, resumable
+	dir2 := filepath.Join(s.sessions, "second")
+	if err := os.Mkdir(dir2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	second := sessionid.GenerateSessionID()
+	src := s.source(t, s.st.SessionID)
+	if src == nil {
+		t.Fatal("precondition: an automatic end must be resumable")
+	}
+	if _, err := livesession.PrepareReopen(t.Context(), s.cfg, dir2, livesession.OpenParams{SessionID: second}, src); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := livesession.Spool(t.Context(), dir2, withPrompt(lines(10, 11)), livesession.SpoolOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	// the person stops the resumed session themselves
+	if err := livesession.MarkManualStop(dir2); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := livesession.Close(t.Context(), s.cfg, dir2, "", testBudget); err != nil || !res.Done {
+		t.Fatalf("close: %+v %v", res, err)
+	}
+	if err := os.RemoveAll(dir2); err != nil { // cache pruning
+		t.Fatal(err)
+	}
+	if again := s.source(t, second); again != nil {
+		t.Fatalf("a manually stopped conversation was offered for reopen: %+v", again.State)
+	}
+	if again := s.source(t, s.st.SessionID); again != nil {
+		t.Fatalf("the earlier recording's stash still offers the conversation: %+v", again.State)
 	}
 }

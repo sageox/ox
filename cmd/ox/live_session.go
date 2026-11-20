@@ -328,15 +328,6 @@ func liveSessionClose(projectRoot, sessionDir, summary string, budget time.Durat
 		log.Warn("live_session_close_deferred", "status", string(res.Status))
 	default:
 		log.Info("live_session_close_done", "status", string(res.Status), "acked", res.Acked)
-		// the push-summary that follows prunes this folder, state and spool
-		// included; the next prompt in this session resumes from the stash
-		if res.Status == livesession.StatusClosed {
-			ctx, cancel := context.WithTimeout(context.Background(), liveLocalBound)
-			defer cancel()
-			if err := livesession.StashReopen(ctx, liveConfig(projectRoot), sessionDir); err != nil {
-				log.Warn("live_session_reopen_stash_failed", "error", err)
-			}
-		}
 	}
 }
 
@@ -595,6 +586,46 @@ func liveSessionFinish(projectRoot string, state *session.RecordingState, summar
 	return liveFinish{Removed: res.Deleted || res.Queued || res.Refused, Abort: res}
 }
 
+// liveSessionFinishAtHook ends this recording's live stream when a hook (the
+// SessionEnd or /clear hook) ends the recording. A held session is deleted on
+// the server, as liveSessionFinish does. Any other stream is only asked to
+// close: the daemon finishes it, because the close carries the session summary
+// and a hook has no time for the model that writes it (the agent is exiting).
+// The daemon is kicked at once, so the close follows the end by seconds.
+func liveSessionFinishAtHook(projectRoot string, state *session.RecordingState, budget time.Duration) liveFinish {
+	if state == nil || state.SessionPath == "" {
+		return liveFinish{}
+	}
+	st, err := livesession.ReadState(state.SessionPath)
+	if err != nil || st.SessionID != state.SessionID || st.DeletedOnServer {
+		return liveFinish{}
+	}
+	if liveSessionHeld(projectRoot, state) {
+		return liveSessionFinish(projectRoot, state, nil, budget)
+	}
+	// The close used to run here, and it is what hears that the session was
+	// deleted on SageOx (a caught-up stream makes no other request). Publication
+	// reads that verdict (C3), so an idempotent open of the same layer stands in
+	// for it: a 410 records the delete and holds the session before anything
+	// reaches the daemon's finalize.
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	_, err = livesession.Open(ctx, liveConfig(projectRoot), state.SessionPath, livesession.OpenParams{SessionID: state.SessionID})
+	cancel()
+	if err != nil && !errors.Is(err, livesession.ErrAwaitingPrompt) {
+		slog.Debug("live_session_end_probe_failed", "session_id", state.SessionID, "error", err)
+	}
+	if livesession.WasDeletedOnServer(state.SessionPath) {
+		return liveFinish{}
+	}
+	if err := livesession.RequestClose(state.SessionPath); err != nil {
+		slog.Warn("live_session_close_request_failed", "session_id", state.SessionID, "error", err)
+		return liveFinish{}
+	}
+	slog.Info("live_session_close_requested", "session_id", state.SessionID, "conversation_id", st.ConversationID, "status", string(st.Status))
+	liveKickDaemon(state.SessionPath)
+	return liveFinish{}
+}
+
 // heldLiveWarning is the stop message for a held session whose live copy the
 // stop deleted on SageOx: said once, at the stop that did it.
 func heldLiveWarning(base string, fin liveFinish) string {
@@ -756,4 +787,22 @@ func moveLiveStream(ctx context.Context, cfg livesession.Config, dir string, st 
 		}
 		return nil
 	})
+}
+
+// markManualLiveStop records, before the stop closes the stream, that the
+// person stopped this recording themselves (`/ox-session-stop`). Marked first
+// and unconditionally: a stop that fails half way still must not leave a
+// session that a later prompt resumes.
+func markManualLiveStop(agentID string) {
+	projectRoot, err := findProjectRoot()
+	if err != nil {
+		return
+	}
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	if err != nil || state == nil || state.SessionPath == "" {
+		return
+	}
+	if err := livesession.MarkManualStop(state.SessionPath); err != nil {
+		slog.Warn("live_session_manual_stop_unrecorded", "session_id", state.SessionID, "error", err)
+	}
 }

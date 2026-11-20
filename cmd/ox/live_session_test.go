@@ -173,6 +173,16 @@ func (f *liveFixture) openAndDrain() livesession.State {
 	return f.liveState()
 }
 
+// daemonClose is what the daemon's tick does once a hook has requested the
+// close: finish it, with a summary.
+func (f *liveFixture) daemonClose(summary string) {
+	f.t.Helper()
+	require.True(f.t, f.liveState().CloseRequested, "precondition: the hook requested the close")
+	res, err := livesession.Close(context.Background(), liveConfig(f.projectRoot), f.dir(), summary, 5*time.Second)
+	require.NoError(f.t, err)
+	require.True(f.t, res.Done)
+}
+
 func (f *liveFixture) abort() {
 	f.t.Helper()
 	setForceFlag(f.t, true)
@@ -595,7 +605,8 @@ func TestLiveRetiringAnEndedStreamKeepsItsOwedNotice(t *testing.T) {
 	sendHookFinalizeIPC = func(daemon.SessionFinalizeIPCPayload) error { return nil }
 	t.Cleanup(func() { sendHookFinalizeIPC = orig })
 	require.NoError(t, finalizeOrHoldOnHookStop(&HookContext{ProjectRoot: f.projectRoot}, f.state, "clear"))
-	require.Equal(t, livesession.StatusClosed, f.liveState().Status, "precondition: the hook's close ended the stream")
+	f.daemonClose("")
+	require.Equal(t, livesession.StatusClosed, f.liveState().Status, "precondition: the daemon finished the close the hook requested")
 
 	require.NoError(t, retirePreviousLiveStream(f.projectRoot, f.dir(), f.state.SessionID))
 
@@ -652,7 +663,8 @@ func TestLiveSameFolderResumeFollowsAMovedStream(t *testing.T) {
 	sendHookFinalizeIPC = func(daemon.SessionFinalizeIPCPayload) error { return nil }
 	t.Cleanup(func() { sendHookFinalizeIPC = orig })
 	require.NoError(t, finalizeOrHoldOnHookStop(&HookContext{ProjectRoot: f.projectRoot}, f.state, "clear"))
-	require.Equal(t, livesession.StatusClosed, f.liveState().Status, "precondition: the hook's close ended the stream")
+	f.daemonClose("")
+	require.Equal(t, livesession.StatusClosed, f.liveState().Status, "precondition: the daemon finished the close the hook requested")
 
 	// a restart within the minute: same folder, new recording id
 	next := &session.RecordingState{SessionID: sessionid.GenerateSessionID(), SessionPath: f.dir(), ContinuedFromSessionID: f.state.SessionID}

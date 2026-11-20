@@ -92,8 +92,10 @@ func TestLiveClearFinishesTheLiveStream(t *testing.T) {
 
 		stopSessionForClear(&HookContext{Phase: phaseStart, AgentType: "claude-code", ProjectRoot: f.projectRoot, Marker: &SessionMarker{AgentID: f.agentID}}, f.agentID)
 
+		assert.True(t, f.liveState().CloseRequested, "/clear ends the recording, so its stream is asked to close")
+		f.daemonClose("")
 		_, closed := f.srv.ClosedWith(st.ConversationID)
-		assert.True(t, closed, "/clear ends the recording, so its stream is closed")
+		assert.True(t, closed, "and the daemon's close reaches the server")
 		assert.Equal(t, 1, *sent, "and the recording still goes to the daemon")
 	})
 }

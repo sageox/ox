@@ -54,6 +54,11 @@ func StashReopen(ctx context.Context, cfg Config, dir string) error {
 	if err != nil {
 		return nil // no stream state: nothing to keep
 	}
+	if st.ManualStop {
+		// a stash an earlier recording of this conversation left says the
+		// conversation may resume; the person has now ended it for good
+		return removeStash(cfg, st.ConversationID)
+	}
 	if ok, err := reopenable(ctx, cfg, dir, st); !ok || err != nil {
 		return err
 	}
@@ -73,6 +78,16 @@ func StashReopen(ctx context.Context, cfg Config, dir string) error {
 		return fmt.Errorf("stash reopen state: %w", err)
 	}
 	sweepStash(cfg)
+	return nil
+}
+
+func removeStash(cfg Config, cnv string) error {
+	meta, spool := stashPaths(cfg, cnv)
+	for _, p := range []string{meta, spool} {
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("remove reopen stash: %w", err)
+		}
+	}
 	return nil
 }
 

@@ -81,15 +81,16 @@ func heldSessionWarning(sessionName string) string {
 // it (GH #1093). Call it before the recording state is cleared, and keep the
 // state when it returns an error: the hold could not be recorded.
 //
-// The recording's live stream ends here too (C1), bounded by
-// liveEndCloseBudget: a held session's live copy is deleted, any other stream
-// is closed. The close goes first because it may be what hears the session was
-// deleted on SageOx: a caught-up stream makes no other request that would.
+// The recording's live stream ends here too (C1): a held session's live copy is
+// deleted (bounded by liveEndCloseBudget), any other stream is asked to close
+// and the daemon closes it with the session summary. The daemon's close is what
+// may hear the session was deleted on SageOx, and publication reads that
+// verdict when it publishes (C3), not here.
 func finalizeOrHoldOnHookStop(ctx *HookContext, state *session.RecordingState, phase string) error {
 	if state.SessionPath == "" {
 		return nil
 	}
-	liveSessionFinish(ctx.ProjectRoot, state, nil, liveEndCloseBudget)
+	liveSessionFinishAtHook(ctx.ProjectRoot, state, liveEndCloseBudget)
 	// a hook has no one to tell about a withheld secret: the stream stays
 	// marked, and the next session start or stop in this project says it
 	settleLiveSecretWithheldNotice(state)

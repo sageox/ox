@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/livesession"
+	"github.com/sageox/ox/internal/livesummary"
 	"github.com/sageox/ox/internal/session"
 )
 
@@ -42,7 +43,9 @@ const (
 	// liveStepStuckAfter: the longest a step can legitimately run is an open
 	// plus a drain, each bounded by liveDrainBudget (a close is shorter). An
 	// attempt older than that plus a tick is wedged where no budget reaches.
-	liveStepStuckAfter = 2*liveDrainBudget + liveTickInterval
+	// A close adds the bounded summary wait (livesession.SummaryBudget) before
+	// its own budget, so it counts too.
+	liveStepStuckAfter = 2*liveDrainBudget + liveTickInterval + livesession.SummaryBudget
 	// liveRulesRefreshInterval paces the background fetch of the current
 	// gitleaks catalog the live publication scan adds to the bundled one
 	// (livesession.RefreshSecretRules). Drains never wait on it. Fifteen minutes
@@ -68,6 +71,10 @@ type LiveSessions struct {
 	// refreshRules fetches the current secret rules and persists them for every
 	// publishing process; tests replace it.
 	refreshRules func(context.Context) error
+	// summarize writes the summary a close carries (see livesummary); tests
+	// replace it. It is bounded by livesession.SummaryBudget and returns ""
+	// when there is none.
+	summarize func(ctx context.Context, dir string, st livesession.State) string
 	// rulesFailing: the last rules refresh failed. Owned by the refresh loop.
 	rulesFailing bool
 
@@ -112,6 +119,9 @@ func NewLiveSessions(logger *slog.Logger, sessionsDir, endpoint string) *LiveSes
 		now:     time.Now,
 		running: map[string]*liveAttempt{}, rerun: map[string]bool{}, backoff: map[string]liveBackoff{},
 		known: map[string]liveKnown{},
+	}
+	l.summarize = func(ctx context.Context, dir string, st livesession.State) string {
+		return livesummary.ForStream(ctx, logger, dir, st)
 	}
 	// persisted in the data dir the drains read, so the CLI's stop-time close
 	// scans with the same rules as this daemon
@@ -445,7 +455,13 @@ func (l *LiveSessions) stopHeld(ctx context.Context, dir string, st livesession.
 func (l *LiveSessions) attempt(ctx context.Context, dir string, st livesession.State) (livesession.DrainResult, error) {
 	cfg := l.config(l.endpoint)
 	if st.Status == livesession.StatusClosing || st.CloseRequested {
-		return livesession.Close(ctx, cfg, dir, "", livesession.CloseBudget)
+		// every close carries a summary: a SessionEnd hook only requests the
+		// close (it has no time for the model), so this is where it is written
+		summary := ""
+		if l.summarize != nil {
+			summary = l.summarize(ctx, dir, st)
+		}
+		return livesession.Close(ctx, cfg, dir, summary, livesession.CloseBudget)
 	}
 	if st.Status == livesession.StatusPending {
 		// bounded like a drain: a token refresh inside open is otherwise held only

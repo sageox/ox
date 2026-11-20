@@ -27,6 +27,12 @@ const (
 	// closes it. Like close-requested it is written without live.lock, because a
 	// drain or open may hold the lock far longer than abort can wait.
 	deleteRequestFileName = "delete-requested"
+	// manualStopFileName marks that the person ended this session with `ox
+	// session stop`. A manual stop is final: the session is never reopened,
+	// whatever prompts next in the same agent conversation. Like close-requested
+	// it is written without live.lock, before the stop's close, because a drain
+	// may hold the lock longer than stop can wait.
+	manualStopFileName = "manual-stop"
 	// spoolLostFileName logs committed bytes Spool could not write (EACCES,
 	// ENOSPC, a read-only volume, a lock or state failure), one line per loss.
 	// It is append-only and never removed: recording a loss takes no lock and
@@ -49,7 +55,7 @@ const (
 // session folder into the Ledger must skip them.
 func IsLocalFile(name string) bool {
 	switch name {
-	case spoolFileName, stateFileName, lockFileName, closeRequestFileName, deleteRequestFileName,
+	case spoolFileName, stateFileName, lockFileName, closeRequestFileName, manualStopFileName, deleteRequestFileName,
 		spoolLostFileName, spoolLostDeclaredFileName, noticeOwedFileName, mediaAttemptsFile:
 		return true
 	}
@@ -119,6 +125,10 @@ type State struct {
 	// refused reopen can stream the recording as a conversation of its own.
 	OwnSessionName string    `json:"own_session_name,omitempty"`
 	OwnStartedAt   time.Time `json:"own_started_at,omitzero"`
+
+	// ManualStop is set (from the manual-stop file) when the person stopped the
+	// session with `ox session stop`. Sticky: once persisted it stays.
+	ManualStop bool `json:"manual_stop,omitempty"`
 
 	// OpenSent is recorded before a pending session's first open request
 	// leaves this machine. The server may then hold the conversation even
@@ -277,7 +287,27 @@ func readState(dir string) (State, error) {
 		_, err := os.Stat(filepath.Join(dir, closeRequestFileName))
 		st.CloseRequested = err == nil
 	}
+	if !st.ManualStop {
+		_, err := os.Stat(filepath.Join(dir, manualStopFileName))
+		st.ManualStop = err == nil
+	}
 	return st, nil
+}
+
+// MarkManualStop records, with no network call and no lock, that the person
+// stopped the session in dir themselves, so it is never reopened (see
+// manualStopFileName). It is a no-op for a folder with no live stream.
+func MarkManualStop(dir string) error {
+	if _, err := readState(dir); err != nil {
+		if errors.Is(err, ErrNotStreaming) {
+			return nil
+		}
+		return err
+	}
+	if err := fileutil.AtomicWriteBytes(filepath.Join(dir, manualStopFileName), nil, 0o600); err != nil {
+		return fmt.Errorf("record manual stop: %w", err)
+	}
+	return nil
 }
 
 func deleteRequested(dir string) bool {

@@ -56,6 +56,13 @@ func Close(ctx context.Context, cfg Config, dir, summary string, budget time.Dur
 			if rerr := removeIfExists(filepath.Join(dir, closeRequestFileName)); rerr != nil {
 				s.log().WarnContext(ctx, "live_session_close_request_remove_failed", "error", rerr)
 			}
+			if s.st.Status == StatusClosed {
+				// whoever finished the close (stop, hook or daemon), cache
+				// cleanup must not take away the resume of this conversation
+				if serr := StashReopen(ctx, cfg, dir); serr != nil {
+					s.log().WarnContext(ctx, "live_session_reopen_stash_failed", "error", serr)
+				}
+			}
 		}
 		return err
 	})

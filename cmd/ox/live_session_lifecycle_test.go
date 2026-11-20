@@ -93,8 +93,10 @@ func TestLiveCompactContinuesTheSessionAndClearEndsIt(t *testing.T) {
 
 	start("clear")
 
+	assert.True(t, f.liveState().CloseRequested, "/clear ends the session, so its stream is asked to close")
+	f.daemonClose("")
 	_, closed = f.srv.ClosedWith(st.ConversationID)
-	assert.True(t, closed, "/clear ends the session, so its stream is closed")
+	assert.True(t, closed, "and the daemon's close reaches the server")
 }
 
 // Failure prevented: the start collected the owed notices before its header

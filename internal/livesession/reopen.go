@@ -98,6 +98,10 @@ func reopenable(ctx context.Context, cfg Config, dir string, st State) (bool, er
 	case !stopped:
 		log.DebugContext(ctx, "live_session_reopen_skipped", "reason", "not_stopped")
 		return false, nil
+	case st.ManualStop:
+		// the person ended it: a manual stop is final
+		log.InfoContext(ctx, "live_session_reopen_skipped", "reason", "manual_stop")
+		return false, nil
 	case st.DeletedOnServer || st.ConversationID == "":
 		log.InfoContext(ctx, "live_session_reopen_skipped", "reason", "deleted")
 		return false, nil
