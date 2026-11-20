@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/proc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -225,13 +226,20 @@ func TestPauseMarkerHoldsTheProcessWhenClearRemovesTheStateFirst(t *testing.T) {
 
 // What a pause may record of a recording's process: only one that still is it.
 func TestPersonProcessOfNamesOnlyTheRecordedProcess(t *testing.T) {
-	self := os.Getpid()
-	live := ProcessAnchorOf(self)
-	require.NotZero(t, live.Start, "harness: this platform reports start times")
-
 	assert.Equal(t, PauseAnchor{}, PersonProcessOf(nil))
 	assert.Equal(t, PauseAnchor{}, PersonProcessOf(&RecordingState{}), "no process recorded")
 	assert.Equal(t, PauseAnchor{}, PersonProcessOf(&RecordingState{ParentPID: deadPID}))
+}
+
+// Start-time checks need a platform that reports process start times; where it
+// doesn't (Windows, FreeBSD), PersonProcessOf keeps a PID-only anchor and reuse
+// cannot be detected, so there is nothing to assert.
+func TestPersonProcessOfRejectsAReusedProcessAndKeepsTheRecordedStart(t *testing.T) {
+	self := os.Getpid()
+	if _, ok := proc.StartTime(self); !ok {
+		t.Skip("this platform reports no process start times, so PID reuse cannot be detected")
+	}
+	live := ProcessAnchorOf(self)
 	assert.Equal(t, PauseAnchor{}, PersonProcessOf(&RecordingState{ParentPID: self, ParentStartTime: 1}), "reused PID")
 	assert.Equal(t, live, PersonProcessOf(&RecordingState{ParentPID: self}), "start time sampled when none was recorded")
 	assert.Equal(t, live, PersonProcessOf(&RecordingState{ParentPID: self, ParentStartTime: live.Start}), "recorded start time kept")
