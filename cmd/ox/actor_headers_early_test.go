@@ -80,37 +80,3 @@ func TestFeedbackEarlyPreludePreservesRequestActor(t *testing.T) {
 	assert.Nil(t, cliCtx, "feedback must not bootstrap the telemetry context")
 	assert.Nil(t, cfg, "feedback must not initialize the ordinary command config")
 }
-
-// Failure prevented: headless ledger discovery skips telemetry startup and sends requests without an actor.
-func TestHeadlessReadEarlyPreludePreservesRequestActor(t *testing.T) {
-	earlyActorTestRoot(t)
-	var requests atomic.Int32
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		assert.Equal(t, http.MethodGet, r.Method)
-		assert.Equal(t, "/api/v1/cli/repos/"+readSyncTestRepoID, r.URL.Path)
-		assert.Equal(t, "agent", r.Header.Get(useragent.HeaderActor))
-		assert.Equal(t, "codex", r.Header.Get(useragent.HeaderAgentType))
-		// Stop after discovery so the shipped request path runs without a Git
-		// clone or a request to another endpoint.
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	t.Cleanup(server.Close)
-	t.Setenv("SAGEOX_ENDPOINT", server.URL)
-	t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	t.Setenv("OX_XDG_DISABLE", "")
-	previousTransport := http.DefaultTransport
-	http.DefaultTransport = server.Client().Transport
-	t.Cleanup(func() { http.DefaultTransport = previousTransport })
-
-	result, _, err := runReadSyncInProc(t, "--read-only", "--repo", readSyncTestRepoID, "--timeout", "5s", "--json")
-	require.Error(t, err, "the local server deliberately rejects ledger discovery")
-	assert.Equal(t, "unavailable", result.ErrorClass)
-	require.True(t, preRunReached)
-	require.Nil(t, cliCtx, "headless reads must not bootstrap the telemetry context")
-	require.Nil(t, cfg, "headless reads must not load local command preferences")
-
-	require.Equal(t, int32(1), requests.Load(), "discovery must actually reach the local endpoint")
-	assert.Nil(t, cliCtx)
-}

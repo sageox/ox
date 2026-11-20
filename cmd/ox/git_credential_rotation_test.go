@@ -113,11 +113,11 @@ func TestLFSCLICancellationDuringBearerRotation(t *testing.T) {
 			t.Cleanup(func() { close(release); srv.Close() })
 			setupAuthRenderEnv(t, srv.URL, validTeamToken)
 			root := createInitializedProjectWithConfig(t, nil)
-			hostedTestGit(t, root, "init")
+			hermeticGit(t, root, "init")
 			t.Chdir(root)
 			ledger := filepath.Join(root, "ledger")
-			hostedTestGit(t, root, "init", ledger)
-			hostedTestGit(t, ledger, "remote", "add", "origin", srv.URL+"/ledger.git")
+			hermeticGit(t, root, "init", ledger)
+			hermeticGit(t, ledger, "remote", "add", "origin", srv.URL+"/ledger.git")
 			require.NoError(t, config.SaveLocalConfig(root, &config.LocalConfig{Ledger: &config.LedgerConfig{Path: ledger}}))
 			dir := filepath.Join(ledger, "sessions", "fixture")
 			raw := writeTestPointerFile(t, dir, "raw.jsonl", oid, int64(len(payload)))
@@ -212,9 +212,9 @@ func TestFetchNeverSendsGitPATToAForeignOrigin(t *testing.T) {
 	root := createInitializedProjectWithConfig(t, nil)
 	t.Chdir(root)
 	clone := filepath.Join(root, "third-party")
-	hostedTestGit(t, root, "init", clone)
+	hermeticGit(t, root, "init", clone)
 	// Hosts are compared by name, not port, so the foreign origin needs its own name.
-	hostedTestGit(t, clone, "remote", "add", "origin", strings.Replace(foreign.URL, "127.0.0.1", "localhost", 1)+"/attacker/repo.git")
+	hermeticGit(t, clone, "remote", "add", "origin", strings.Replace(foreign.URL, "127.0.0.1", "localhost", 1)+"/attacker/repo.git")
 	stub := writeTestPointerFile(t, filepath.Join(clone, "assets"), "model.bin", validFetchOID, 3)
 
 	cmd := &cobra.Command{}
@@ -239,7 +239,7 @@ func TestStatusRepairsRejectedPATs(t *testing.T) {
 				t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 				t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 				initBareRemote(t, filepath.Join(root, "ledger.git"))
-				backend := &cgi.Handler{Path: filepath.Join(hostedTestGit(t, root, "--exec-path"), "git-http-backend"), Env: []string{"GIT_PROJECT_ROOT=" + root, "GIT_HTTP_EXPORT_ALL=1"}}
+				backend := &cgi.Handler{Path: filepath.Join(hermeticGit(t, root, "--exec-path"), "git-http-backend"), Env: []string{"GIT_PROJECT_ROOT=" + root, "GIT_HTTP_EXPORT_ALL=1"}}
 				var refreshes, oldProbes, freshProbes atomic.Int32
 				var srv *httptest.Server
 				srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

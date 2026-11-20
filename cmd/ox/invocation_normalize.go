@@ -80,7 +80,7 @@ var destructiveVerbs = map[string]bool{
 // flag-as-verb) and returns the argv to run, announcing any correction. It runs
 // before cobra so a correctable invocation costs one attempt, not a failure.
 func normalizeInvocation(args []string) []string {
-	if len(args) == 0 || headlessLedgerReadRequested(args) {
+	if len(args) == 0 {
 		return args
 	}
 	plan := planCorrection(args, nil)

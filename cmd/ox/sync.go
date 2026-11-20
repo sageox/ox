@@ -141,14 +141,7 @@ to ensure consistent sync behavior and proper locking.
 Examples:
   ox sync              # sync Ledger + Team Context, then converge this repo
   ox sync --team acme  # sync specific team context
-  ox sync --all-teams  # sync all team contexts
-
-Headless read-only mode runs a bounded ledger refresh without the daemon:
-  ox sync --read-only --repo repo_<uuid> --timeout 30m --json
-  ox sync --read-only --repo repo_<uuid> --check --json
-
-Read-only mode uses SAGEOX_TOKEN and SAGEOX_ENDPOINT, independent of the
-current project. See docs/specs/ledger-read-sync.md for the reader contract.`
+  ox sync --all-teams  # sync all team contexts`
 
 // syncLong assembles `ox sync --help`. The Add-on Catalog paragraph is
 // unconditional: `ox addons` is an ordinary command now, so naming it is
@@ -161,14 +154,6 @@ func init() {
 	syncCmd.Flags().String("team", "", "sync a specific team context by ID")
 	syncCmd.Flags().Bool("all-teams", false, "sync all configured team contexts")
 	syncCmd.Flags().String("remove-team", "", "remove a team context (clears config and optionally deletes repo)")
-	syncCmd.Flags().Bool("read-only", false, "refresh one ledger using the selected team token, without the daemon")
-	syncCmd.Flags().String("repo", "", "repository ID for --read-only (repo_<uuid>)")
-	// The default has to cover a cold clone of a real ledger — tens of thousands
-	// of LFS objects through internal/ledger's bounded-concurrency hydration —
-	// not the seconds a warm refresh takes. A consumer scheduling background
-	// refreshes sets its own; docs/specs/ledger-read-sync.md carries the contract.
-	syncCmd.Flags().Duration("timeout", 30*time.Minute, "maximum duration of a read-only operation, including lock wait and hydration")
-	syncCmd.Flags().Bool("check", false, "check local read-only readiness without contacting the server")
 
 	// add to root command
 	rootCmd.AddCommand(syncCmd)
@@ -232,11 +217,6 @@ func convergenceDetail(status string) string {
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
-	readOnly, _ := cmd.Flags().GetBool("read-only")
-	if readOnly || cmd.Flags().Changed("repo") || cmd.Flags().Changed("timeout") || cmd.Flags().Changed("check") {
-		return runReadSync(cmd, args)
-	}
-
 	teamID, _ := cmd.Flags().GetString("team")
 	allTeams, _ := cmd.Flags().GetBool("all-teams")
 	jsonOutput, _ := cmd.Flags().GetBool("json")

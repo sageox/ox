@@ -22,23 +22,6 @@ import (
 // precedence over any token stored on disk.
 const EnvVarToken = "SAGEOX_TOKEN"
 
-var ErrReadTokenUnavailable = gitserver.ErrReadTokenUnavailable
-
-// CurrentReadToken never consults a disk login or GitLab credential store.
-// Re-read it for every operation so a reused client observes token rotation.
-// Callers supply the selected canonical origin; normalizing a requested sibling
-// host here would broaden the authority allowed to receive this credential.
-func CurrentReadToken(endpointURL string) (string, error) {
-	if strings.TrimSuffix(endpointURL, "/") != strings.TrimSuffix(EnvTokenEndpoint(), "/") {
-		return "", ErrReadTokenUnavailable
-	}
-	tok, state := EnvTokenFor(endpointURL)
-	if state != EnvTokenValid || tok == nil || !strings.HasPrefix(tok.AccessToken, TeamTokenPrefix) || strings.ContainsAny(tok.AccessToken, "\r\n") {
-		return "", ErrReadTokenUnavailable
-	}
-	return tok.AccessToken, nil
-}
-
 // envTokenTTL is the synthetic rolling expiry stamped on env-sourced tokens.
 // Env tokens have no refresh credential — the server returning 401 is the source
 // of truth for invalidation. A 24h rolling TTL keeps IsExpired() honest without

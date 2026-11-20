@@ -144,7 +144,7 @@ func TestIsPreCloneLockBusy(t *testing.T) {
 // pre-clone lock contends with the blocking one on the same path, and only
 // that path.
 // Failure prevented: a caller trying the lock (the daemon's Checkout, doctor's
-// direct clone) and one waiting on it (the Ledger HEAD repair, a read sync)
+// direct clone) and one waiting on it (the Ledger HEAD repair)
 // key on different files, and two clones write into the same Ledger path.
 func TestTryWithPreCloneLock_SharesTheBlockingLock(t *testing.T) {
 	target, other := t.TempDir()+"/ledger", t.TempDir()+"/other"

@@ -49,28 +49,12 @@ var rootCmd = &cobra.Command{
 	Long:  `Shared team context between your AI and human coworkers. Sessions, ledgers, and team knowledge that make agentic engineering multiplayer.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		preRunReached = true
-		if !cli.IsLongRunning(cmd) && (isFeedbackCommand(cmd) || isHeadlessLedgerRead(cmd)) {
+		if !cli.IsLongRunning(cmd) && isFeedbackCommand(cmd) {
 			actor, agentType := cli.DetectActor(nil)
 			useragent.SetActor(actor, agentType)
 		}
 		if isFeedbackCommand(cmd) {
 			return applyConfigFlag(cmd, args)
-		}
-		if isHeadlessLedgerRead(cmd) {
-			// Hosted reads never consult local preferences. Sync rejects this
-			// flag in RunE using its own receipt; the other protocols refuse it here.
-			if cmd.Flags().Changed("config") {
-				switch cmd.Name() {
-				case "glance", "list":
-					return hostedReadFailed(cmd, "invalid_arguments", 2)
-				case "git-credential-helper":
-					return &commandExitError{ExitCode: 2, Message: "config is not supported for hosted reads"}
-				}
-			}
-			// Hosted reads build no cfg, so the parsed flag is the resolved value.
-			jsonOutput, _ := cmd.Flags().GetBool("json")
-			publishJSONFlag(cmd, jsonOutput)
-			return nil
 		}
 		if err := applyConfigFlag(cmd, args); err != nil {
 			return err
@@ -135,10 +119,6 @@ var rootCmd = &cobra.Command{
 		if isFeedbackCommand(cmd) {
 			return nil
 		}
-		if isHeadlessLedgerRead(cmd) {
-			return nil
-		}
-
 		// drain any in-flight heartbeat goroutines before the process exits.
 		// critical for short-lived hook subprocesses that would otherwise kill
 		// the goroutines before the IPC send completes.

@@ -227,7 +227,7 @@ func executeWithFrictionRecovery(ctx context.Context, args []string, attempt int
 	// Resolve cached/env feature flags before Cobra parses the command. This is
 	// required for default-off commands: help and command lookup both happen
 	// before PersistentPreRunE.
-	if !headlessLedgerReadRequested(args) && !localMCP {
+	if !localMCP {
 		initFeatureFlags(rootCmd)
 		syncFeatureGatedCommands(rootCmd)
 	}
@@ -269,7 +269,7 @@ func executeWithFrictionRecovery(ctx context.Context, args []string, attempt int
 	if unknownCommand {
 		err = fmt.Errorf("%w\n\nRun '%s --help' for usage", err, cmd.CommandPath())
 	}
-	if err != nil && !headlessLedgerReadRequested(args) && !localMCP {
+	if err != nil && !localMCP {
 		switch {
 		case !preRunReached:
 			// Cobra rejected the invocation before ox built its context. Give
@@ -309,15 +309,6 @@ func executeWithFrictionRecovery(ctx context.Context, args []string, attempt int
 		printError(err)
 		return 1
 	}
-	if headlessLedgerReadRequested(args) {
-		// Cobra flag parsing can fail before RunE. Keep even that path out
-		// of friction recovery, which sends daemon events and can retry.
-		if cmd, _, _ := rootCmd.Find(args); cmd == gitCredentialHelperCmd {
-			return 2 // Git helpers must keep their protocol output silent.
-		}
-		return writeReadSyncUsageError(rootCmd, args)
-	}
-
 	// try friction recovery
 	if frictionEngine == nil {
 		printError(err)

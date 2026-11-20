@@ -13,10 +13,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -33,62 +31,6 @@ type Client struct {
 	httpClient         *http.Client
 	authHeader         string // "Basic <base64(username:token)>"
 	credentialEndpoint string // refresh the Git PAT for this endpoint on rotation or 401
-	// Read clients resolve the selected credential for every request, never cache it.
-	readEndpoint string
-	readRepoID   string
-	readURL      string
-}
-
-// NewReadClient creates a download-only client for an authorized SageOx ledger.
-// readURL must be the canonical URL returned by discovery for this repository.
-func NewReadClient(endpointURL, repoID, readURL string) (*Client, error) {
-	if err := gitserver.ValidateReadURL(endpointURL, repoID, readURL); err != nil {
-		return nil, err
-	}
-	if _, err := auth.CurrentReadToken(endpointURL); err != nil {
-		return nil, err
-	}
-	c := NewClient(readURL, "", "")
-	c.authHeader = ""
-	c.readEndpoint, c.readRepoID, c.readURL = endpointURL, repoID, readURL
-	c.httpClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	return c, nil
-}
-
-// HTTPError exposes status without reflecting response bodies or signed URLs.
-// RetryAfter is the wait the response's Retry-After header asked for, zero
-// when it names none that parses.
-type HTTPError struct {
-	StatusCode int
-	RetryAfter time.Duration
-}
-
-func (e *HTTPError) Error() string {
-	return fmt.Sprintf("LFS request returned HTTP %d", e.StatusCode)
-}
-
-func newHTTPError(resp *http.Response) *HTTPError {
-	return &HTTPError{StatusCode: resp.StatusCode, RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())}
-}
-
-// parseRetryAfter reads a Retry-After value in either form RFC 9110 allows,
-// delay-seconds or an HTTP-date. A missing or malformed value and a date
-// already past are zero. A delay too long for a Duration saturates rather than
-// overflowing: how much of it to honor is the caller's decision.
-func parseRetryAfter(value string, now time.Time) time.Duration {
-	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil || errors.Is(err, strconv.ErrRange) {
-		const longest = math.MaxInt64 / time.Second // whole seconds a Duration can hold
-		if seconds > uint64(longest) {
-			return longest * time.Second
-		}
-		return time.Duration(seconds) * time.Second
-	}
-	if date, err := http.ParseTime(value); err == nil && date.After(now) {
-		return date.Sub(now)
-	}
-	return 0
 }
 
 // ErrBatchResponseUnusable reports a batch response the server delivered in
@@ -179,9 +121,6 @@ type Action struct {
 	// TrustedHost is the host:port of the batch URL the action came from.
 	// Lowercased so comparisons are case-insensitive.
 	TrustedHost string `json:"-"`
-
-	readClient *Client // non-nil only for actions from a selected read-only client
-	readOID    string
 }
 
 // ObjectError is returned when the server cannot process an object.
@@ -212,9 +151,6 @@ func (c *Client) BatchDownloadContext(ctx context.Context, objects []BatchObject
 
 // doBatch sends a batch request and returns the response.
 func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchObject) (*BatchResponse, error) {
-	if c.readURL != "" && operation != "download" {
-		return nil, fmt.Errorf("read-only LFS client cannot upload")
-	}
 	// Fail closed before sending Authorization. The batch URL is built
 	// from the git remote URL in NewClient; if someone misconfigures or
 	// MITM-rewrites the remote to plaintext http://example.com, this
@@ -264,16 +200,6 @@ func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchO
 		}
 		req.SetBasicAuth(username, creds.Token)
 	}
-	if c.readURL != "" {
-		if err := gitserver.ValidateReadRequestURL(c.readEndpoint, c.readRepoID, c.readURL, req.URL.String()); err != nil {
-			return nil, err
-		}
-		token, err := auth.CurrentReadToken(c.readEndpoint)
-		if err != nil {
-			return nil, err
-		}
-		req.SetBasicAuth("ox", token)
-	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -297,23 +223,10 @@ func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchO
 		}
 	}
 	defer resp.Body.Close()
-	if c.readURL != "" && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
-		return nil, newHTTPError(resp)
-	}
 
-	// Read-route batch metadata is bounded independently of the request deadline,
-	// including chunked bodies. Read one extra byte to detect overflow before decoding.
-	const maxBatchResponseBytes = 1 << 20
-	var body io.Reader = resp.Body
-	if c.readURL != "" {
-		body = io.LimitReader(body, maxBatchResponseBytes+1)
-	}
-	respBody, err := io.ReadAll(body)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read batch response: %w", err)
-	}
-	if c.readURL != "" && len(respBody) > maxBatchResponseBytes {
-		return nil, fmt.Errorf("%w: LFS batch response exceeds %d bytes", ErrBatchResponseUnusable, maxBatchResponseBytes)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -340,25 +253,12 @@ func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchO
 		a.TrustedHost = host
 	}
 	for i := range batchResp.Objects {
-		if c.readURL != "" && batchResp.Objects[i].Error != nil {
-			batchResp.Objects[i].Error.Message = http.StatusText(batchResp.Objects[i].Error.Code)
-		}
 		if batchResp.Objects[i].Actions == nil {
 			continue
 		}
 		stamp(batchResp.Objects[i].Actions.Upload)
 		stamp(batchResp.Objects[i].Actions.Download)
 		stamp(batchResp.Objects[i].Actions.Verify)
-		if c.readURL != "" {
-			actions := batchResp.Objects[i].Actions
-			actions.Upload, actions.Verify = nil, nil
-			if actions.Download != nil {
-				actions.Download.readClient = c
-				actions.Download.readOID = batchResp.Objects[i].OID
-				// Upstream credentials never belong on the client download request.
-				actions.Download.Header = nil
-			}
-		}
 	}
 
 	return &batchResp, nil

@@ -599,8 +599,7 @@ var (
 //
 // Local, not persistent: a dispatched invocation (`ox agent <id> query …`)
 // resolves to agentCmd itself, so a local flag is enough, while a persistent
-// one would leak into real subcommands. `ox agent list` inheriting --repo, for
-// one, would look like a hosted ledger read to isHeadlessLedgerRead.
+// one would leak into real subcommands.
 func registerHiddenAgentFlag(name, usage string) {
 	agentCmd.Flags().String(name, "", usage)
 	_ = agentCmd.Flags().MarkHidden(name)

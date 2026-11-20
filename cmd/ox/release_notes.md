@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **`ox init` and `ox doctor` no longer say other coding agents are untested** — both ended with a line that SageOx "is designed initially for Claude Code" and that other agents were not yet tested, which contradicted the docs. The line is gone; `ox login` dropped it earlier.
+- **`ox sync --read-only` is gone** — it let a process holding only a team token read one Ledger without the daemon, from before team tokens could get Git credentials. AI coworkers on a team token now run the daemon like everyone else, so `ox sync --read-only`, `ox session list --repo repo_<uuid>`, `ox glance --repo` and the read flags of the hidden `ox git-credential-helper` are removed. `ox session list --repo <path>` still lists another checkout's sessions.
 - **`ox brief` is gone; use `ox session report`** — the alias kept for one release after the rename is removed. `ox session report` takes the same flags, and the `brief_pane` setting still works as the old name of `session_report_pane`.
 
 ### Fixed

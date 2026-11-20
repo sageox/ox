@@ -127,7 +127,7 @@ func setupDoctorProject(t *testing.T, svc *testutil.MockService, ledgerURL strin
 	setupAuthRenderEnv(t, serveLedgerAPI(t, repoID, ledgerURL), validTeamToken)
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	root := createInitializedProjectWithConfig(t, &config.ProjectConfig{RepoID: repoID})
-	hostedTestGit(t, root, "init")
+	hermeticGit(t, root, "init")
 	t.Chdir(root)
 	return root
 }
