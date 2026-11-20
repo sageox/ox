@@ -50,10 +50,6 @@ type MockService struct {
 	// settings
 	SettingsGetFunc func() *flags.CLISettingsResponse
 
-	// teammate notes
-	TeammateCommentsTakeFunc    func(payload daemon.TeammateCommentsTakePayload) (daemon.TeammateCommentsTakeResponse, error)
-	TeammateCommentsConfirmFunc func(payload daemon.TeammateCommentsConfirmPayload) error
-
 	// fire-and-forget operations
 	ActivityFunc        func()
 	HeartbeatFunc       func(callerID string, payload json.RawMessage)
@@ -228,17 +224,15 @@ func (m *MockService) LiveSessionDrain(payload daemon.LiveSessionDrainPayload) {
 	}
 }
 
-func (m *MockService) TeammateCommentsTake(payload daemon.TeammateCommentsTakePayload) (daemon.TeammateCommentsTakeResponse, error) {
-	if m.TeammateCommentsTakeFunc != nil {
-		return m.TeammateCommentsTakeFunc(payload)
-	}
+// TeammateCommentsTake satisfies the Service interface; no test drives teammate
+// notes through this mock, so it holds no knob (the daemon's own tests use the
+// real inbox).
+func (m *MockService) TeammateCommentsTake(daemon.TeammateCommentsTakePayload) (daemon.TeammateCommentsTakeResponse, error) {
 	return daemon.TeammateCommentsTakeResponse{}, nil
 }
 
-func (m *MockService) TeammateCommentsConfirm(payload daemon.TeammateCommentsConfirmPayload) error {
-	if m.TeammateCommentsConfirmFunc != nil {
-		return m.TeammateCommentsConfirmFunc(payload)
-	}
+// TeammateCommentsConfirm satisfies the Service interface (see TeammateCommentsTake).
+func (m *MockService) TeammateCommentsConfirm(daemon.TeammateCommentsConfirmPayload) error {
 	return nil
 }
 

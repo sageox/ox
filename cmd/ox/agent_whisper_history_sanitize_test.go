@@ -35,7 +35,12 @@ func TestWhisperHistoryPrintsHostileNoteTextSafely(t *testing.T) {
 		Topic: "teammate-comment", Content: "hello\x1b[2J\x1b[H\x1b]0;owned\x07 world", Importance: whisperstore.ImportanceNormal,
 		CreatedAt: time.Now(), AgentID: "OxHook1",
 	}
-	data, err := json.Marshal(daemon.WhisperHistoryResponse{Entries: []whisperstore.WhisperEntry{hostile}})
+	delivered := hostile
+	delivered.ID, delivered.CreatedAt = "tcm_0", time.Now().Add(-time.Hour)
+	delivered.Content = "seen\x1b[2Jbefore"
+	data, err := json.Marshal(daemon.WhisperHistoryResponse{
+		Entries: []whisperstore.WhisperEntry{hostile, delivered}, HasCursor: true, Cursor: time.Now().Add(-time.Minute),
+	})
 	require.NoError(t, err)
 	go func() {
 		for {
@@ -57,5 +62,6 @@ func TestWhisperHistoryPrintsHostileNoteTextSafely(t *testing.T) {
 	require.NoError(t, runAgentWhisperHistory(&out, &agentinstance.Instance{AgentID: "OxHook1"}))
 	assert.NotContains(t, out.String(), "\x1b", "an escape sequence reached the terminal")
 	assert.NotContains(t, out.String(), "\x07")
+	assert.Contains(t, out.String(), "seenbefore", "a delivered note is sanitized too")
 	assert.True(t, strings.Contains(out.String(), "hello") && strings.Contains(out.String(), "world"), "the readable text must survive: %q", out.String())
 }
