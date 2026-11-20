@@ -167,7 +167,7 @@ func TestStartSessionRecordingCursor_UsesSavedBoundaryAndKeepsNativeIdentity(t *
 		WorkspacePath: f.projectRoot, SourcePath: source, Offset: int64(len("old\n")),
 		SourcePrefixSHA256: hash, GenerationID: "generation-a",
 	}
-	status := startSessionRecording(f.projectRoot, "OxCur3", "cursor", "", "", cursorConversationID, boundary)
+	status := startSessionRecording(f.projectRoot, "OxCur3", "cursor", inheritedParent{}, "", cursorConversationID, boundary)
 	require.NotNil(t, status)
 	state, err := session.LoadRecordingStateForAgent(f.projectRoot, "OxCur3")
 	require.NoError(t, err)
@@ -185,7 +185,7 @@ func TestStartSessionRecordingCursor_UsesSavedBoundaryAndKeepsNativeIdentity(t *
 	other.SourcePath = filepath.Join(t.TempDir(), "other.jsonl")
 	require.NoError(t, os.WriteFile(other.SourcePath, []byte("other\n"), 0o600))
 	other.Offset = 0
-	require.Nil(t, startSessionRecording(f.projectRoot, "OxCur3", "cursor", "", "", "123e4567-e89b-12d3-a456-426614174001", &other))
+	require.Nil(t, startSessionRecording(f.projectRoot, "OxCur3", "cursor", inheritedParent{}, "", "123e4567-e89b-12d3-a456-426614174001", &other))
 	reloaded, err := session.LoadRecordingStateForAgent(f.projectRoot, "OxCur3")
 	require.NoError(t, err)
 	assert.Equal(t, cursorConversationID, reloaded.AgentSessionID, "a second chat cannot rebind an existing Cursor recording")
@@ -197,7 +197,7 @@ func TestStartSessionRecordingCursor_UsesSavedBoundaryAndKeepsNativeIdentity(t *
 		WorkspacePath: f.projectRoot, SourcePath: pendingPath,
 		SourcePending: true, KnownZero: true, GenerationID: "generation-pending", SourcePrefixSHA256: cursorEmptyPrefixSHA256,
 	}
-	require.NotNil(t, startSessionRecording(f.projectRoot, "OxCur4", "cursor", "", "", "123e4567-e89b-12d3-a456-426614174002", pending))
+	require.NotNil(t, startSessionRecording(f.projectRoot, "OxCur4", "cursor", inheritedParent{}, "", "123e4567-e89b-12d3-a456-426614174002", pending))
 	pendingState, err := session.LoadRecordingStateForAgent(f.projectRoot, "OxCur4")
 	require.NoError(t, err)
 	require.NotNil(t, pendingState)

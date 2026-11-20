@@ -56,6 +56,8 @@ type conversation struct {
 	layers    map[string]*layerState
 	deleted   bool
 	closed    *Closed
+	// opened is the newest accepted open request, as decoded from the wire.
+	opened sessionstream.OpenSessionRequest
 }
 
 // Server is the fake api-go. Create it with New.
@@ -282,6 +284,7 @@ func (s *Server) open(r *http.Request, body []byte, _ *Call) reply {
 	if rep := s.liveGuard(c); rep != nil {
 		return *rep
 	}
+	c.opened = req
 	l := c.layers[req.LayerID]
 	if l == nil {
 		l = &layerState{cur: sessionstream.NewCursor()}

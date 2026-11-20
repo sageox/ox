@@ -507,10 +507,14 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// Covers: (a) prime called from CLAUDE.md BLOCKING instruction after /clear
 	// (CLAUDE_ENV_FILE persists the var), (b) prime subprocess called from hook
 	// with the env var passed explicitly by runPrimeForHook.
+	// An agent launched from a recorded session's shell inherits the same
+	// variable, so it is not reused when it names another agent process.
 	if agentID == "" && !isCursor {
 		if states, loadErr := session.LoadAllRecordingStates(projectRoot); loadErr == nil {
 			envID := os.Getenv("SAGEOX_AGENT_ID")
-			agentID = resolveAgentIDFromStates(states, envID)
+			if !launchedByAnotherAgent(states, envID, agentSessionID, agentProcessPID()) {
+				agentID = resolveAgentIDFromStates(states, envID)
+			}
 		}
 	}
 
@@ -553,14 +557,8 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// Only trust the env value if it maps to a currently-alive recording — a stale
 	// SAGEOX_AGENT_ID from a previous, unrelated session would otherwise cross-link
 	// this session as a child of a dead parent (#528).
-	parentAgentID := ""
-	if existing := os.Getenv("SAGEOX_AGENT_ID"); existing != "" && existing != agentID {
-		if states, err := session.LoadAllRecordingStates(projectRoot); err == nil {
-			if hasAliveRecordingForID(states, existing) {
-				parentAgentID = existing
-			}
-		}
-	}
+	parent := inheritedParentOf(projectRoot, agentID)
+	parentAgentID := parent.AgentID
 
 	// Reconcile before exposing session context. Approval-only changes must retire
 	// revoked executable content, and unreadable policy must not be ignored. This
@@ -588,7 +586,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	if existingMarker != nil {
 		cursorBoundary = existingMarker.CursorSourceBoundary
 	}
-	sessionStat := startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, cursorBoundary)
+	sessionStat := startSessionRecording(projectRoot, agentID, agentType, parent, continuedFromSessionID, agentSessionID, cursorBoundary)
 	recordNativeSessionForRecording(projectRoot, agentID, agentSessionID, hookSource)
 	recordingSessionID := recordingSessionIDForMarker(projectRoot, agentID, continuedFromSessionID)
 	timing["session_start"] = time.Since(phaseStart).Milliseconds()
@@ -1266,6 +1264,93 @@ func resolveAgentIDFromStates(states []*session.RecordingState, envID string) st
 	return ""
 }
 
+// launchedByAnotherAgent reports whether an inherited SAGEOX_AGENT_ID names a
+// different, still-recording agent process: this agent was launched from that
+// one's shell, so it is that session's child, not the same AI coworker. It is
+// false whenever the processes cannot be told apart (no native session id of
+// its own, or a PID unknown on either side), which keeps the /clear and
+// repeat-prime reuse that the variable exists for.
+func launchedByAnotherAgent(states []*session.RecordingState, envID, agentSessionID string, agentPID int) bool {
+	if envID == "" || agentSessionID == "" || agentPID <= 0 {
+		return false
+	}
+	for _, s := range states {
+		if s.AgentID == envID && s.IsAgentAlive() {
+			return s.ParentPID > 0 && s.ParentPID != agentPID
+		}
+	}
+	return false
+}
+
+// inheritedParent is what an agent inherits from the agent whose shell
+// launched it (SAGEOX_AGENT_ID), read in one look at the recording states.
+type inheritedParent struct {
+	// AgentID, SessionID and SessionPath name the parent's recording as it was
+	// when the parent was chosen. Recording startup uses them as captured and
+	// never reloads them: by then the parent may have ended, or /clear may have
+	// replaced its recording.
+	AgentID     string
+	SessionID   string
+	SessionPath string
+	// PausedLauncher is set when the launching agent records nothing because a
+	// pause reached it from its own launcher (an inherited pause whose agent
+	// process still runs), so the pause reaches this agent too.
+	PausedLauncher string
+	// PauseAnchor is what a pause reaching this agent lasts for, as the
+	// launcher passes it on (session.LaunchedPauseAnchor).
+	PauseAnchor session.PauseAnchor
+}
+
+// inheritedParentOf is what agentID inherits from the agent whose shell
+// launched its process: that agent's recording, when SAGEOX_AGENT_ID names
+// another agent that is still recording, or a pause it still holds. A stale
+// value from an unrelated, ended session names nothing (#528).
+func inheritedParentOf(projectRoot, agentID string) inheritedParent {
+	launcher := os.Getenv("SAGEOX_AGENT_ID")
+	if launcher == "" || launcher == agentID {
+		return inheritedParent{}
+	}
+	if states, err := session.LoadAllRecordingStates(projectRoot); err == nil {
+		for _, s := range states {
+			if s.AgentID == launcher && s.IsAgentAlive() {
+				return inheritedParent{AgentID: launcher, SessionID: s.SessionID, SessionPath: s.SessionPath,
+					PauseAnchor: session.LaunchedPauseAnchor(projectRoot, launcher, s.ParentPID)}
+			}
+		}
+	}
+	// No recording: the launcher may be a paused agent's skipped child, whose
+	// pause holds while the root recording a person paused still is (or, for a
+	// marker naming no root, while a process up the chain runs). This
+	// process's own PID is never its anchor.
+	if session.InheritedPauseHeld(projectRoot, launcher, agentProcessPID()) {
+		return inheritedParent{PausedLauncher: launcher, PauseAnchor: session.LaunchedPauseAnchor(projectRoot, launcher, 0)}
+	}
+	return inheritedParent{}
+}
+
+// parentRecordingPaused reports whether the parent's recording is paused: its
+// pause marker, or an in-flight pause that has no marker yet (defensive).
+func parentRecordingPaused(projectRoot, parentAgentID string) bool {
+	if _, _, paused := session.PeekExplicitPause(projectRoot, parentAgentID); paused {
+		return true
+	}
+	parentState, _ := session.LoadRecordingStateForAgent(projectRoot, parentAgentID)
+	return parentState != nil && parentState.SuspendedAt != nil
+}
+
+// agentProcessPID is the long-lived coding-agent process this ox runs under.
+// Hooks run inside a transient shell, so os.Getppid() names a shell that dies
+// right after the hook; the hook passes the agent's PID in OX_PARENT_PID, and a
+// direct invocation walks the process tree itself.
+func agentProcessPID() int {
+	if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
+		if parsed, err := strconv.Atoi(envPID); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return proc.FindAgentAncestorPID()
+}
+
 // hasAliveRecordingForID reports whether agentID corresponds to a currently-alive
 // recording in states. Used by callers that need to distinguish a real, live
 // agent reference from a stale SAGEOX_AGENT_ID left over in the environment.
@@ -1449,14 +1534,14 @@ func recordingSessionIDForMarker(projectRoot, agentID, prior string) string {
 	return ""
 }
 
-func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
+func startSessionRecording(projectRoot, agentID, agentType string, parent inheritedParent, continuedFromSessionID, agentSessionID string, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
 	if canonicalAgentType(agentType) != "cursor" {
-		return startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, nil, cursorBoundaries...)
+		return startSessionRecordingUnlocked(projectRoot, agentID, agentType, parent, continuedFromSessionID, agentSessionID, nil, cursorBoundaries...)
 	}
 	if agentSessionID == "" {
-		return startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, nil, cursorBoundaries...)
+		return startSessionRecordingUnlocked(projectRoot, agentID, agentType, parent, continuedFromSessionID, agentSessionID, nil, cursorBoundaries...)
 	}
-	return startCursorSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, nil, cursorBoundaries...)
+	return startCursorSessionRecording(projectRoot, agentID, agentType, parent, continuedFromSessionID, agentSessionID, nil, cursorBoundaries...)
 }
 
 type cursorRecordingStartup struct {
@@ -1473,7 +1558,7 @@ type cursorRecordingStartup struct {
 	publicationErr       error
 }
 
-func startCursorSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string, writeHeader func(string, *session.RecordingState) error, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
+func startCursorSessionRecording(projectRoot, agentID, agentType string, parent inheritedParent, continuedFromSessionID, agentSessionID string, writeHeader func(string, *session.RecordingState) error, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
 	// These best-effort metadata lookups can run Git commands. Resolve them
 	// before taking prompt admission's lock; only local publication belongs in
 	// that transaction. Header injection is per-call for publication tests.
@@ -1510,7 +1595,7 @@ func startCursorSessionRecording(projectRoot, agentID, agentType, parentAgentID,
 				marker.CursorSourceBoundary = &boundary
 			}
 			marker.AgentID = agentID
-			status = startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, startup, marker.CursorSourceBoundary)
+			status = startSessionRecordingUnlocked(projectRoot, agentID, agentType, parent, continuedFromSessionID, agentSessionID, startup, marker.CursorSourceBoundary)
 			publicationPossible = (status != nil && status.Recording) || startup.publicationErr != nil
 			if publicationPossible && marker.CursorSourceBoundary != nil {
 				return associateCursorStartupRecording(projectRoot, agentID, agentSessionID, startup, marker)
@@ -1587,7 +1672,7 @@ func recordBeforeLedgerClone() bool {
 	return runtime.Caps().HostEndsWithAgent && !daemon.IsDaemonDisabled()
 }
 
-func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string, cursorStartup *cursorRecordingStartup, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
+func startSessionRecordingUnlocked(projectRoot, agentID, agentType string, parent inheritedParent, continuedFromSessionID, agentSessionID string, cursorStartup *cursorRecordingStartup, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
 	var cursorBoundary *CursorSourceBoundary
 	if len(cursorBoundaries) > 0 {
 		cursorBoundary = cursorBoundaries[0]
@@ -1639,27 +1724,39 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 	}
 
 	// ADR-020: subagent inheritance. When this prime call is for a subagent
-	// (parentAgentID set) and the parent's recording is currently suspended,
+	// (parent.AgentID set) and the parent's recording is currently suspended,
 	// the subagent skips recording entirely. Subagents are atomic units of
 	// work spawned within the parent's context window; if the parent has
 	// paused, the user's intent is "no recording" for this scope.
-	if parentAgentID != "" {
-		if _, _, parentPaused := session.PeekExplicitPause(projectRoot, parentAgentID); parentPaused {
-			return &sessionStatus{
-				Recording:        false,
-				Mode:             resolved.Mode,
-				Source:           string(resolved.Source),
-				UserNotification: "[ox] Parent session suspended. Recording skipped for this subagent.",
+	if parent.PausedLauncher != "" || (parent.AgentID != "" && parentRecordingPaused(projectRoot, parent.AgentID)) {
+		// The skip must outlive this prime: the child's id is now in its env
+		// file, so a later re-prime finds no parent and would otherwise record
+		// unsuspended. Its own pause marker makes that recording start paused,
+		// and carries the chain's anchors, so an agent it launches in turn is
+		// paused too while the root's pause holds (inheritedParentOf). The process anchor is
+		// the nearest known up the chain, else this agent's own; Cursor names
+		// none, since its GUI process is shared by every conversation.
+		anchor := parent.PauseAnchor
+		if anchor.PID <= 0 && agentType != "cursor" {
+			own := session.ProcessAnchorOf(agentProcessPID())
+			anchor.PID, anchor.Start = own.PID, own.Start
+		}
+		if anchor.PID <= 0 && anchor.RootAgentID == "" {
+			// no anchor known: anchor on the launcher's recording as the root
+			anchor.RootAgentID = parent.AgentID
+			if anchor.RootAgentID == "" {
+				anchor.RootAgentID = parent.PausedLauncher
 			}
 		}
-		// also honor an in-flight pause without marker (defensive)
-		if parentState, _ := session.LoadRecordingStateForAgent(projectRoot, parentAgentID); parentState != nil && parentState.SuspendedAt != nil {
-			return &sessionStatus{
-				Recording:        false,
-				Mode:             resolved.Mode,
-				Source:           string(resolved.Source),
-				UserNotification: "[ox] Parent session suspended. Recording skipped for this subagent.",
-			}
+		if err := session.MarkInheritedPause(projectRoot, agentID, anchor); err != nil {
+			slog.Warn("paused parent: failed to keep the child paused", "agent_id", agentID,
+				"parent_agent_id", parent.AgentID, "paused_launcher", parent.PausedLauncher, "error", err)
+		}
+		return &sessionStatus{
+			Recording:        false,
+			Mode:             resolved.Mode,
+			Source:           string(resolved.Source),
+			UserNotification: "[ox] Parent session suspended. Recording skipped for this subagent.",
 		}
 	}
 
@@ -1731,19 +1828,10 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 	timestamp := time.Now().Format("2006-01-02-150405")
 	outputFile := filepath.Join(projectRoot, ".sageox", "sessions", fmt.Sprintf("%s-%s.md", timestamp, agentID))
 
-	// Determine the long-lived agent PID for liveness detection.
-	// Hooks run inside a transient bash shell, so os.Getppid() returns the shell
-	// PID which dies immediately after the hook. OX_PARENT_PID is set by the hook
-	// to proc.FindAgentAncestorPID(), which walks the tree to find the agent process.
-	// If OX_PARENT_PID is missing (direct invocation), walk the tree ourselves.
+	// The long-lived agent PID, for liveness detection.
 	parentPID := 0
 	if agentType != "cursor" {
-		parentPID = proc.FindAgentAncestorPID()
-		if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
-			if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
-				parentPID = parsed
-			}
-		}
+		parentPID = agentProcessPID()
 	}
 	// A transient Cursor hook shell is not the native conversation owner.
 
@@ -1800,12 +1888,10 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 	}
 
 	// propagate parent agent info so the recording state knows this is a subagent
-	if parentAgentID != "" {
-		opts.ParentAgentID = parentAgentID
-		if parentState, _ := session.LoadRecordingStateForAgent(projectRoot, parentAgentID); parentState != nil {
-			opts.ParentSessionPath = parentState.SessionPath
-		}
-	}
+	// as captured when the parent was chosen, never reloaded here
+	opts.ParentAgentID = parent.AgentID
+	opts.ParentSessionPath = parent.SessionPath
+	opts.ParentSessionID = parent.SessionID
 
 	// ADR-020: per-agent pause stickiness. If a .session_paused.<agentID> marker
 	// exists for this agent (from a prior /clear or pause), the new session

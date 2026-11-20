@@ -38,6 +38,21 @@ type OpenParams struct {
 	// Agent names the coding agent, such as "claude-code".
 	Agent     string
 	StartedAt time.Time
+	// ParentSessionID is the ses_ id of the session whose shell launched this
+	// one's agent; ContinuedFromSessionID the earlier recording this one
+	// continues. Both optional: empty sends neither.
+	ParentSessionID        string
+	ContinuedFromSessionID string
+}
+
+// newState is the stream state of a session this machine has not streamed yet.
+func newState(cfg Config, cnv string, status Status, p OpenParams) State {
+	return State{
+		ConversationID: cnv, LayerID: "clyr_" + uuid.Must(uuid.NewV7()).String(),
+		Endpoint: cfg.Endpoint, Status: status,
+		SessionID: p.SessionID, SessionName: p.SessionName, RepoID: p.RepoID, Agent: p.Agent, StartedAt: p.StartedAt,
+		ParentSessionID: p.ParentSessionID, ContinuedFromSessionID: p.ContinuedFromSessionID,
+	}
 }
 
 // Open registers the endpoint's signing key, opens the stream on a new layer and
@@ -85,11 +100,7 @@ func Prepare(ctx context.Context, cfg Config, dir string, p OpenParams) (State, 
 		} else if !errors.Is(err, ErrNotStreaming) {
 			return err
 		}
-		st = State{
-			ConversationID: cnv, LayerID: "clyr_" + uuid.Must(uuid.NewV7()).String(),
-			Endpoint: cfg.Endpoint, Status: StatusPending,
-			SessionID: p.SessionID, SessionName: p.SessionName, RepoID: p.RepoID, Agent: p.Agent, StartedAt: p.StartedAt,
-		}
+		st = newState(cfg, cnv, StatusPending, p)
 		// registered first, bound to this folder: a stream state whose id is
 		// not bound to its folder is refused everywhere (see authorize)
 		if err := recordMinted(ctx, cfg, cnv, dir); err != nil {
@@ -118,11 +129,7 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 		return st, nil // deleted, closed or disabled stay that way
 	case err == nil: // resume on the same layer, keeping acked
 	case errors.Is(err, ErrNotStreaming):
-		st = State{
-			ConversationID: cnv, LayerID: "clyr_" + uuid.Must(uuid.NewV7()).String(),
-			Endpoint: cfg.Endpoint, Status: StatusStreaming,
-			SessionID: p.SessionID, SessionName: p.SessionName, RepoID: p.RepoID, Agent: p.Agent, StartedAt: p.StartedAt,
-		}
+		st = newState(cfg, cnv, StatusStreaming, p)
 		if err := recordMinted(ctx, cfg, cnv, dir); err != nil {
 			return State{}, err
 		}
@@ -303,6 +310,7 @@ func openRequest(st State) sessionstream.OpenSessionRequest {
 	return sessionstream.OpenSessionRequest{
 		LayerID: st.LayerID, RepoID: st.RepoID, SessionID: st.SessionID,
 		SessionName: st.SessionName, Agent: st.Agent, StartedAt: st.StartedAt,
+		ParentSessionID: st.ParentSessionID, ContinuedFromSessionID: st.ContinuedFromSessionID,
 	}
 }
 

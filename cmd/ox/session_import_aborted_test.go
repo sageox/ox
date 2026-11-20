@@ -581,12 +581,12 @@ func TestPrime_DoesNotAutoRecordAnAbortedConversation(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(defaultLedger, ".git"), 0o755))
 	oxConfigSetRepo(t, "session_recording", "auto")
 
-	first := startSessionRecording(f.projectRoot, "OxPrm1", "claude-code", "", "", e2eClaudeA)
+	first := startSessionRecording(f.projectRoot, "OxPrm1", "claude-code", inheritedParent{}, "", e2eClaudeA)
 	require.NotNil(t, first)
 	require.True(t, first.Recording, "control: prime records a new conversation")
 	abortAs(t, "OxPrm1")
 
-	resumed := startSessionRecording(f.projectRoot, "OxPrm1", "claude-code", "", "", e2eClaudeA)
+	resumed := startSessionRecording(f.projectRoot, "OxPrm1", "claude-code", inheritedParent{}, "", e2eClaudeA)
 	require.NotNil(t, resumed)
 	assert.False(t, resumed.Recording, "a resumed aborted conversation must not be recorded again")
 	assert.Contains(t, resumed.UserNotification, "you aborted ox's recording of this conversation on ")
@@ -595,17 +595,17 @@ func TestPrime_DoesNotAutoRecordAnAbortedConversation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, state, "no recording may start")
 
-	other := startSessionRecording(f.projectRoot, "OxPrm2", "claude-code", "", "", e2eClaudeB)
+	other := startSessionRecording(f.projectRoot, "OxPrm2", "claude-code", inheritedParent{}, "", e2eClaudeB)
 	require.NotNil(t, other)
 	assert.True(t, other.Recording, "another conversation still records")
 
 	require.NoError(t, os.WriteFile(abortedSessionsPath(f.ledgerPath), []byte("{"), 0o600))
-	blocked := startSessionRecording(f.projectRoot, "OxPrm3", "claude-code", "", "", e2eClaudeC)
+	blocked := startSessionRecording(f.projectRoot, "OxPrm3", "claude-code", inheritedParent{}, "", e2eClaudeC)
 	require.NotNil(t, blocked)
 	assert.False(t, blocked.Recording, "an unreadable record fails closed")
 	assert.Contains(t, blocked.UserNotification, "ox doctor")
 	require.True(t, checkAbortRecord(true).passed)
-	repaired := startSessionRecording(f.projectRoot, "OxPrm3", "claude-code", "", "", e2eClaudeC)
+	repaired := startSessionRecording(f.projectRoot, "OxPrm3", "claude-code", inheritedParent{}, "", e2eClaudeC)
 	require.NotNil(t, repaired)
 	assert.True(t, repaired.Recording, "after the repair, an unrelated conversation records again")
 }

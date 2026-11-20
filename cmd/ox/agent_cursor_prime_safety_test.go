@@ -35,11 +35,11 @@ func cursorPendingPrimeBoundary(f *cursorHostFixture) *CursorSourceBoundary {
 
 func TestCursorPrimeAutoStartNeedsIdentityAndBoundary(t *testing.T) {
 	f := cursorAutoRecordingFixture(t)
-	missingIdentity := startSessionRecording(f.root, "Oxprime", "cursor", "", "", "")
+	missingIdentity := startSessionRecording(f.root, "Oxprime", "cursor", inheritedParent{}, "", "")
 	require.NotNil(t, missingIdentity)
 	require.False(t, missingIdentity.Recording)
 	require.Contains(t, missingIdentity.UserNotification, "native conversation identity")
-	missingBoundary := startSessionRecording(f.root, "Oxprime", "cursor", "", "", cursorConversationID)
+	missingBoundary := startSessionRecording(f.root, "Oxprime", "cursor", inheritedParent{}, "", cursorConversationID)
 	require.NotNil(t, missingBoundary)
 	require.False(t, missingBoundary.Recording)
 	require.Contains(t, missingBoundary.UserNotification, "waiting for the next prompt")
@@ -58,7 +58,7 @@ func TestCursorPrimeBindsOnlyAvailableSourceForPendingRecording(t *testing.T) {
 			if available {
 				f.write(t, cursorHostUser)
 			}
-			status := startSessionRecording(f.root, original.AgentID, "cursor", "", "", cursorConversationID, boundary)
+			status := startSessionRecording(f.root, original.AgentID, "cursor", inheritedParent{}, "", cursorConversationID, boundary)
 			require.NotNil(t, status)
 			require.True(t, status.Recording)
 			state, err := session.LoadRecordingStateForAgent(f.root, original.AgentID)
@@ -82,7 +82,7 @@ func TestCursorPrimeInheritedPauseIsDurableBeforeCapture(t *testing.T) {
 			if fromClear {
 				t.Setenv(envClearNotice, `{"session_name":"prior-paused-session","was_suspended":true}`)
 			}
-			status := startSessionRecording(f.root, "Oxprime", "cursor", "", "", cursorConversationID, cursorPendingPrimeBoundary(f))
+			status := startSessionRecording(f.root, "Oxprime", "cursor", inheritedParent{}, "", cursorConversationID, cursorPendingPrimeBoundary(f))
 			require.NotNil(t, status)
 			require.True(t, status.AutoStarted)
 			state, err := session.LoadRecordingStateForAgent(f.root, "Oxprime")
@@ -127,7 +127,7 @@ func TestCursorPrimeRejectsUnsafeOrChangedStartupBoundary(t *testing.T) {
 				require.NoError(t, os.MkdirAll(lock, 0o700))
 				t.Cleanup(func() { _ = os.Remove(lock) })
 			}
-			require.Nil(t, startSessionRecording(f.root, "Oxprime", "cursor", "", "", cursorConversationID, boundary))
+			require.Nil(t, startSessionRecording(f.root, "Oxprime", "cursor", inheritedParent{}, "", cursorConversationID, boundary))
 			state, err := session.LoadRecordingStateForAgent(f.root, "Oxprime")
 			require.NoError(t, err)
 			require.Nil(t, state, "a refused startup must not publish a recording marker")

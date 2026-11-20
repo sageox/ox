@@ -226,7 +226,7 @@ func TestPrimeCodexRecording_ReprimeDiscoversDelayedSource(t *testing.T) {
 			})
 
 			const agentID, nativeID = "OxCodexLate", "codex-test-session"
-			firstStatus := startSessionRecording(f.projectRoot, agentID, "codex", "", "", "")
+			firstStatus := startSessionRecording(f.projectRoot, agentID, "codex", inheritedParent{}, "", "")
 			require.NotNil(t, firstStatus)
 			require.True(t, firstStatus.Recording)
 			first, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
@@ -246,7 +246,7 @@ func TestPrimeCodexRecording_ReprimeDiscoversDelayedSource(t *testing.T) {
 			}
 
 			// Learn the native ID while its file is still unavailable. Keep it for daemon discovery.
-			require.NotNil(t, startSessionRecording(f.projectRoot, agentID, "codex", "", "", nativeID))
+			require.NotNil(t, startSessionRecording(f.projectRoot, agentID, "codex", inheritedParent{}, "", nativeID))
 			waiting, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
 			require.NoError(t, err)
 			require.NotNil(t, waiting)
@@ -255,7 +255,7 @@ func TestPrimeCodexRecording_ReprimeDiscoversDelayedSource(t *testing.T) {
 			} else {
 				assert.Equal(t, nativeID, waiting.AgentSessionID)
 				// A subsequent environment without a native ID must not erase the saved one.
-				require.NotNil(t, startSessionRecording(f.projectRoot, agentID, "codex", "", "", ""))
+				require.NotNil(t, startSessionRecording(f.projectRoot, agentID, "codex", inheritedParent{}, "", ""))
 				waiting, err = session.LoadRecordingStateForAgent(f.projectRoot, agentID)
 				require.NoError(t, err)
 				require.NotNil(t, waiting)
@@ -272,7 +272,7 @@ func TestPrimeCodexRecording_ReprimeDiscoversDelayedSource(t *testing.T) {
 			sibling := filepath.Join(filepath.Dir(source), "newer-sibling.jsonl")
 			require.NoError(t, os.WriteFile(sibling, []byte(strings.ReplaceAll(string(data), nativeID, "sibling-session")), 0o600))
 
-			foundStatus := startSessionRecording(f.projectRoot, agentID, "codex", "", "", nativeID)
+			foundStatus := startSessionRecording(f.projectRoot, agentID, "codex", inheritedParent{}, "", nativeID)
 			require.NotNil(t, foundStatus)
 			assert.Equal(t, source, foundStatus.File)
 			if readOnlyState {
@@ -281,7 +281,7 @@ func TestPrimeCodexRecording_ReprimeDiscoversDelayedSource(t *testing.T) {
 				require.NotNil(t, pending)
 				assert.Empty(t, pending.SessionFile, "discovery must preserve a recording when its source path cannot yet be saved")
 				require.NoError(t, os.Chmod(first.SessionPath, sessionDirInfo.Mode().Perm()))
-				require.NotNil(t, startSessionRecording(f.projectRoot, agentID, "codex", "", "", nativeID))
+				require.NotNil(t, startSessionRecording(f.projectRoot, agentID, "codex", inheritedParent{}, "", nativeID))
 			}
 			found, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
 			require.NoError(t, err)
