@@ -65,19 +65,44 @@ func recordStatuslineRetrieval(projectRoot, agentID, harnessSessionID string, ac
 
 // recordStatuslineUse counts one surfaced item the AI coworker used — reported
 // with `ox agent <id> context used` or cited in a commit message — on the
-// status line of the recording's harness session. Only a live recording names
-// that session, so a nil state or one without AgentSessionID records nothing.
+// status line of the harness session the AI coworker runs in.
+//
+// The harness session comes from the live recording when there is one, and
+// the counts are bound to that recording. A recording not yet bound to a
+// harness session (no AgentSessionID) records nothing: recordTurnUses relies
+// on that to defer its scan. With no live recording (state == nil) the
+// harness session comes from agentID's primed session marker, and the write
+// names no recording: counts that have never belonged to a recording are
+// adopted by the first one that starts, while counts left by an earlier
+// recording, and anything added to them since, start over with the next one
+// (State.BindRecording). No marker, or an agent ID primed in more than one
+// harness session, records nothing. An empty harness session never records,
+// so nothing is written agent-wide.
+//
 // aliases are the item's other names (contextuse.SurfacedRef.Aliases, such as
 // a plan's slug beside its pln_ id), so a use and a fetch under different
 // names count as one item.
-func recordStatuslineUse(projectRoot string, state *session.RecordingState, refType, ref string, aliases ...string) {
-	if projectRoot == "" || state == nil || state.AgentID == "" || state.AgentSessionID == "" || ref == "" {
+func recordStatuslineUse(projectRoot, agentID string, state *session.RecordingState, refType, ref string, aliases ...string) {
+	if projectRoot == "" || ref == "" {
 		return
 	}
-	if !statuslineEnabled() {
+	if state != nil {
+		if state.AgentID == "" || state.AgentSessionID == "" || !statuslineEnabled() {
+			return
+		}
+		if err := oxactivity.RecordUseIn(projectRoot, state.AgentID, state.AgentSessionID, state.SessionID, refType, ref, aliases...); err != nil {
+			slog.Debug("statusline: record use failed", "agent_id", state.AgentID, "ref_type", refType, "err", err)
+		}
 		return
 	}
-	if err := oxactivity.RecordUseIn(projectRoot, state.AgentID, state.AgentSessionID, state.SessionID, refType, ref, aliases...); err != nil {
-		slog.Debug("statusline: record use failed", "agent_id", state.AgentID, "ref_type", refType, "err", err)
+	if agentID == "" {
+		return
+	}
+	marker := FindUnambiguousSessionMarkerByAgentID(agentID)
+	if marker == nil || marker.AgentSessionID == "" || !statuslineEnabled() {
+		return
+	}
+	if err := oxactivity.RecordUse(projectRoot, agentID, marker.AgentSessionID, refType, ref, aliases...); err != nil {
+		slog.Debug("statusline: record use failed", "agent_id", agentID, "ref_type", refType, "err", err)
 	}
 }

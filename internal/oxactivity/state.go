@@ -152,8 +152,9 @@ const TeamContextRef = "agent team-ctx"
 // "team-context" ref becomes TeamContextRef, and a ref holding a
 // conversation, recording or discussion ID (a bare cnv_/rec_ id, a sageox://
 // citation, or a /c/ link to one) becomes its canonical cnv_ id (see
-// contextuse.CanonicalRef), so rec_<u> and cnv_<u> count once. Anything else
-// is returned trimmed.
+// contextuse.CanonicalRef), so rec_<u> and cnv_<u> count once. A "plan" ref
+// is the exception: it keeps its own name even when that name holds a
+// conversation id. Anything else is returned trimmed.
 func NormalizeRef(refType, ref string) string {
 	refType = strings.TrimSpace(refType)
 	ref = strings.TrimSpace(ref)
@@ -163,8 +164,12 @@ func NormalizeRef(refType, ref string) string {
 	if refType == "team-context" {
 		return TeamContextRef
 	}
-	if id := contextuse.FindConversationID(ref); id != "" {
-		return id
+	// A plan is counted under its own name: one that merely holds a
+	// conversation id is still that plan, not the discussion.
+	if refType != "plan" {
+		if id := contextuse.FindConversationID(ref); id != "" {
+			return id
+		}
 	}
 	return contextuse.CanonicalRef(refType, ref)
 }
