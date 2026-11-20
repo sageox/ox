@@ -87,7 +87,7 @@ func WithEnabled(enabled bool) ClientOption {
 }
 
 // WithProjectRoot sets the project root for disk-based event queueing.
-// Events are persisted to .sageox/cache/telemetry.jsonl and POSTed lazily.
+// Events are persisted to the per-user telemetry cache and POSTed lazily.
 // Also loads repo_id from project config for event context.
 func WithProjectRoot(projectRoot string) ClientOption {
 	return func(c *Client) {
