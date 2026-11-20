@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,8 +13,12 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/spf13/cobra"
 )
+
+// traced counts liveViewTrace calls in the current test.
+var traced int
 
 const testRepo = "repo_0190aaaa"
 const testSesID = "ses_0190a1b2c3d47e5f8a9b0c1d2e3f4a5b"
@@ -126,13 +131,18 @@ func newLiveViewCmd(t *testing.T, srv *httptest.Server, args ...string) (*cobra.
 
 	origClient, origWait := liveViewNewClient, liveViewWait
 	waits := 0
-	liveViewNewClient = func(context.Context, liveViewRef) (*api.RepoClient, error) {
-		return api.NewRepoClientWithEndpoint(srv.URL).WithAuthToken("tok").WithTimeout(5 * time.Second), nil
+	liveViewNewClient = func(context.Context, liveViewRef) (liveViewFetcher, string, error) {
+		return api.NewRepoClientWithEndpoint(srv.URL).WithAuthToken("tok").WithTimeout(5 * time.Second), "https://sageox.ai", nil
 	}
 	liveViewWait = func(context.Context, time.Duration) error { waits++; return nil }
 	origProj := liveViewProject
-	liveViewProject = func() (string, string) { return testRepo, "https://sageox.ai" }
-	t.Cleanup(func() { liveViewNewClient, liveViewWait, liveViewProject = origClient, origWait, origProj })
+	liveViewProject = func() (string, string) { return testRepo, "/proj" }
+	origTrace := liveViewTrace
+	liveViewTrace = func(string, *api.AgentView, string, string) { traced++ }
+	traced = 0
+	t.Cleanup(func() {
+		liveViewNewClient, liveViewWait, liveViewProject, liveViewTrace = origClient, origWait, origProj, origTrace
+	})
 	return cmd, out, &waits
 }
 
@@ -306,7 +316,7 @@ func TestLiveView_ContextRepoSentAndOmitted(t *testing.T) {
 		srv := httptest.NewServer(f.handler())
 		cmd, _, _ := newLiveViewCmd(t, srv, "--follow")
 		repo := tc.repo
-		liveViewProject = func() (string, string) { return repo, "https://sageox.ai" }
+		liveViewProject = func() (string, string) { return repo, "/proj" }
 		if err := runLiveSessionView(cmd, liveViewRef{ID: testSesID}); err != nil {
 			t.Fatal(err)
 		}
@@ -391,8 +401,8 @@ func TestLiveView_RateLimitRetriesOnce(t *testing.T) {
 }
 
 func TestLiveView_FollowSurvivesPersistentRateLimit(t *testing.T) {
-	// two 429s (initial + retry) in a follow, then the session finishes
-	f := &fakeAgentView{throttle: 2, responses: []map[string]any{liveResp("finished", false, "", "Status: FINISHED at t. 1 turns.\nbody\n")}}
+	// every attempt of the first poll is a 429, then the session finishes
+	f := &fakeAgentView{throttle: maxFetchAttempts, responses: []map[string]any{liveResp("finished", false, "", "Status: FINISHED at t. 1 turns.\nbody\n")}}
 	srv := httptest.NewServer(f.handler())
 	defer srv.Close()
 	cmd, out, _ := newLiveViewCmd(t, srv, "--follow")
@@ -404,13 +414,13 @@ func TestLiveView_FollowSurvivesPersistentRateLimit(t *testing.T) {
 	}
 }
 
-func TestLiveView_RateLimitWithoutFollowReportsAfterRetry(t *testing.T) {
-	f := &fakeAgentView{throttle: 5, responses: []map[string]any{liveResp("live", true, "", "x")}}
+func TestLiveView_RateLimitWithoutFollowReportsAfterRetries(t *testing.T) {
+	f := &fakeAgentView{throttle: 9, responses: []map[string]any{liveResp("live", true, "", "x")}}
 	srv := httptest.NewServer(f.handler())
 	defer srv.Close()
 	cmd, _, _ := newLiveViewCmd(t, srv)
 	err := runLiveSessionView(cmd, liveViewRef{ID: testSesID})
-	if err == nil || !strings.Contains(err.Error(), "rate limited") || len(f.queries) != 2 {
+	if err == nil || !strings.Contains(err.Error(), "rate limited") || len(f.queries) != maxFetchAttempts {
 		t.Fatalf("err=%v requests=%d", err, len(f.queries))
 	}
 }
@@ -442,4 +452,288 @@ func TestLiveView_MissingOrNullTeamMatchIsWithheld(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestLiveView_WithheldNeverCopiesMarkdown(t *testing.T) {
+	for _, tm := range []any{false, nil, "absent"} {
+		resp := liveResp("finished", false, "", "Status: FINISHED — PRIVATE-TITLE\nPRIVATE-BODY\n")
+		switch tm {
+		case "absent":
+			delete(resp, "team_match")
+		default:
+			resp["team_match"] = tm
+		}
+		for _, args := range [][]string{nil, {"--follow"}} {
+			srv := httptest.NewServer((&fakeAgentView{responses: []map[string]any{resp}}).handler())
+			cmd, out, _ := newLiveViewCmd(t, srv, args...)
+			if err := runLiveSessionView(cmd, liveViewRef{ID: testSesID}); err != nil {
+				t.Fatal(err)
+			}
+			srv.Close()
+			if got := out.String(); strings.Contains(got, "PRIVATE") || !strings.Contains(got, "Status: FINISHED.") {
+				t.Errorf("team_match=%v %v:\n%s", tm, args, got)
+			}
+			if traced != 0 {
+				t.Errorf("link-only output must not be traced")
+			}
+		}
+	}
+}
+
+func TestLiveView_LinkUsesRequestEndpoint(t *testing.T) {
+	srv := httptest.NewServer((&fakeAgentView{responses: []map[string]any{withheldResp("finished", false)}}).handler())
+	defer srv.Close()
+	for _, mode := range []string{"text", "json"} {
+		var args []string
+		if mode == "json" {
+			args = []string{"--json"}
+		}
+		cmd, out, _ := newLiveViewCmd(t, srv, args...)
+		liveViewNewClient = func(context.Context, liveViewRef) (liveViewFetcher, string, error) {
+			return api.NewRepoClientWithEndpoint(srv.URL).WithAuthToken("tok"), "https://test.sageox.ai", nil
+		}
+		if err := runLiveSessionView(cmd, liveViewRef{ID: testSesID, Host: "test.sageox.ai"}); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), "https://test.sageox.ai/c/"+testSesID) || strings.Contains(out.String(), "https://sageox.ai/c/") {
+			t.Errorf("%s link not on the request endpoint:\n%s", mode, out.String())
+		}
+	}
+}
+
+func TestLiveView_ContentIsTracedOnce(t *testing.T) {
+	f := &fakeAgentView{responses: []map[string]any{
+		liveResp("live", true, "c1", "Status: LIVE. a\n"),
+		liveResp("finished", false, "c2", "Status: FINISHED at t. 1 turns.\n"),
+	}}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	cmd, _, _ := newLiveViewCmd(t, srv, "--follow")
+	if err := runLiveSessionView(cmd, liveViewRef{ID: testSesID}); err != nil {
+		t.Fatal(err)
+	}
+	if traced != 1 {
+		t.Fatalf("traced = %d, want 1", traced)
+	}
+}
+
+func TestLiveView_FollowPagesTruncatedFinishedSession(t *testing.T) {
+	p1 := liveResp("finished", false, "p2", "Status: FINISHED at t. 3 turns.\n## Turn 1\none\n")
+	p1["truncated"] = true
+	p2 := liveResp("finished", false, "p3", "Status: FINISHED at t. 3 turns.\n## Turn 2\ntwo\n")
+	p2["truncated"] = true
+	p3 := liveResp("finished", false, "", "Status: FINISHED at t. 3 turns.\n## Turn 3\nthree\n")
+	f := &fakeAgentView{responses: []map[string]any{p1, p2, p3}}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	cmd, out, waits := newLiveViewCmd(t, srv, "--follow")
+	if err := runLiveSessionView(cmd, liveViewRef{ID: testSesID}); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{"one", "two", "three"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+	if len(f.queries) != 3 || *waits != 0 || !strings.Contains(f.queries[1], "since=p2") || !strings.Contains(f.queries[2], "since=p3") {
+		t.Fatalf("queries=%v waits=%d", f.queries, *waits)
+	}
+}
+
+func TestLiveView_RejectsLocalOnlyFlags(t *testing.T) {
+	for _, flag := range []string{"metadata", "context", "input", "limit", "latest", "text"} {
+		cmd := &cobra.Command{Use: "view"}
+		cmd.Flags().Bool("metadata", false, "")
+		cmd.Flags().Bool("context", false, "")
+		cmd.Flags().String("input", "", "")
+		cmd.Flags().Int("limit", 0, "")
+		cmd.Flags().Bool("latest", false, "")
+		cmd.Flags().Bool("text", false, "")
+		arg := "true"
+		if flag == "input" {
+			arg = "x.jsonl"
+		} else if flag == "limit" {
+			arg = "5"
+		}
+		if err := cmd.Flags().Set(flag, arg); err != nil {
+			t.Fatal(err)
+		}
+		err := runLiveSessionView(cmd, liveViewRef{ID: testSesID})
+		if err == nil || !strings.Contains(err.Error(), "--"+flag) || !strings.Contains(err.Error(), "local sessions only") {
+			t.Errorf("--%s: err = %v", flag, err)
+		}
+	}
+}
+
+func TestFetchWithRetry_Policy(t *testing.T) {
+	tests := []struct {
+		name         string
+		statuses     []int // per attempt; 200 ends the sequence
+		wantRequests int
+		wantErr      bool
+	}{
+		{"401 settled", []int{401}, 1, true},
+		{"403 settled", []int{403}, 1, true},
+		{"404 settled", []int{404}, 1, true},
+		{"410 settled", []int{410}, 1, true},
+		{"400 settled", []int{400}, 1, true},
+		{"500 then ok", []int{500, 200}, 2, false},
+		{"502 502 ok", []int{502, 502, 200}, 3, false},
+		{"always 500 is bounded", []int{500, 500, 500, 500, 500}, maxFetchAttempts, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				st := tt.statuses[min(n, len(tt.statuses)-1)]
+				n++
+				if st != 200 {
+					w.WriteHeader(st)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(liveResp("live", true, "", "x"))
+			}))
+			defer srv.Close()
+			cmd, _, _ := newLiveViewCmd(t, srv)
+			_ = cmd
+			client := api.NewRepoClientWithEndpoint(srv.URL).WithAuthToken("tok")
+			_, err := fetchWithRetry(context.Background(), client, testSesID, api.SessionAgentViewOptions{})
+			if (err != nil) != tt.wantErr || n != tt.wantRequests {
+				t.Fatalf("err=%v requests=%d, want err=%v requests=%d", err, n, tt.wantErr, tt.wantRequests)
+			}
+		})
+	}
+}
+
+func TestRefreshingFetcher_RefreshesAndRetriesAfter401(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("Authorization"))
+		if r.Header.Get("Authorization") != "Bearer fresh" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(liveResp("live", true, "", "x"))
+	}))
+	defer srv.Close()
+	origE, origF, origB := liveViewEnsureToken, liveViewForceRefresh, liveViewBaseURL
+	t.Cleanup(func() { liveViewEnsureToken, liveViewForceRefresh, liveViewBaseURL = origE, origF, origB })
+	liveViewEnsureToken = func(context.Context, string) (string, error) { return "stale", nil }
+	refreshes := 0
+	liveViewForceRefresh = func(context.Context, string) (string, error) { refreshes++; return "fresh", nil }
+	liveViewBaseURL = func(string) string { return srv.URL }
+
+	f := &refreshingFetcher{ep: "https://sageox.ai"}
+	if _, err := f.GetSessionAgentView(context.Background(), testSesID, api.SessionAgentViewOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if refreshes != 1 || len(seen) != 2 || seen[0] != "Bearer stale" || seen[1] != "Bearer fresh" {
+		t.Fatalf("refreshes=%d seen=%v", refreshes, seen)
+	}
+
+	// a failed refresh stays an auth error (one retry at most)
+	liveViewForceRefresh = func(context.Context, string) (string, error) { return "", errors.New("nope") }
+	if _, err := f.GetSessionAgentView(context.Background(), testSesID, api.SessionAgentViewOptions{}); !errors.Is(err, api.ErrUnauthorized) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestNewLiveViewClient_BareIDUsesEndpointOverride(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("SAGEOX_ENDPOINT", "https://test.sageox.ai")
+	orig := liveViewEnsureToken
+	t.Cleanup(func() { liveViewEnsureToken = orig })
+	liveViewEnsureToken = func(context.Context, string) (string, error) { return "tok", nil }
+	_, ep, err := newLiveViewClient(context.Background(), liveViewRef{ID: testSesID})
+	if err != nil || !strings.HasPrefix(ep, "https://test.sageox.ai") {
+		t.Fatalf("ep=%q err=%v", ep, err)
+	}
+}
+
+func TestLiveStoredEndpoint_FindsExpiredLogin(t *testing.T) {
+	dir := t.TempDir()
+	for _, k := range []string{"HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"} {
+		t.Setenv(k, dir)
+	}
+	t.Setenv("SAGEOX_TOKEN", "")
+	expired := &auth.StoredToken{AccessToken: "old", RefreshToken: "r", ExpiresAt: time.Now().Add(-time.Hour)}
+	if err := auth.SaveTokenForEndpoint("https://test.sageox.ai", expired); err != nil {
+		t.Skipf("cannot seed auth store hermetically: %v", err)
+	}
+	if got := liveStoredEndpoint("test.sageox.ai"); !strings.Contains(got, "test.sageox.ai") {
+		t.Fatalf("expired-but-refreshable login not found: %q", got)
+	}
+	if got := liveStoredEndpoint("other.sageox.ai"); got != "" {
+		t.Fatalf("unexpected match %q", got)
+	}
+}
+
+func TestLiveConversationShow_FormatsAndEnvelope(t *testing.T) {
+	good := liveResp("finished", false, "", "Status: FINISHED at t. 1 turns.\nbody\n")
+	good["title"] = "T"
+	newCmd := func(srv *httptest.Server) (*cobra.Command, *bytes.Buffer) {
+		cmd, out, _ := newLiveViewCmd(t, srv)
+		return cmd, out
+	}
+	t.Run("json envelope", func(t *testing.T) {
+		srv := httptest.NewServer((&fakeAgentView{responses: []map[string]any{good}}).handler())
+		defer srv.Close()
+		cmd, out := newCmd(srv)
+		if err := runLiveConversationShow(cmd, liveViewRef{ID: testSesID}, "json"); err != nil {
+			t.Fatal(err)
+		}
+		var env struct {
+			Success bool `json:"success"`
+			Data    struct {
+				SessionID string `json:"session_id"`
+				Markdown  string `json:"markdown"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &env); err != nil || !env.Success || env.Data.SessionID != testSesID || !strings.Contains(env.Data.Markdown, "body") {
+			t.Fatalf("err=%v env=%+v\n%s", err, env, out.String())
+		}
+		if traced != 1 {
+			t.Errorf("traced = %d", traced)
+		}
+	})
+	t.Run("text", func(t *testing.T) {
+		srv := httptest.NewServer((&fakeAgentView{responses: []map[string]any{good}}).handler())
+		defer srv.Close()
+		cmd, out := newCmd(srv)
+		if err := runLiveConversationShow(cmd, liveViewRef{ID: testSesID}, "text"); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(out.String(), "Status: FINISHED") {
+			t.Fatalf("out = %q", out.String())
+		}
+	})
+	t.Run("api failure is an error envelope", func(t *testing.T) {
+		srv := httptest.NewServer((&fakeAgentView{status: http.StatusNotFound}).handler())
+		defer srv.Close()
+		cmd, out := newCmd(srv)
+		if err := runLiveConversationShow(cmd, liveViewRef{ID: testSesID}, "json"); err == nil {
+			t.Fatal("want a non-nil exit error")
+		}
+		var env struct {
+			Success bool `json:"success"`
+			Error   struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &env); err != nil || env.Success || env.Error.Code == "" {
+			t.Fatalf("err=%v env=%+v\n%s", err, env, out.String())
+		}
+	})
+	t.Run("withheld is link-only json", func(t *testing.T) {
+		srv := httptest.NewServer((&fakeAgentView{responses: []map[string]any{withheldResp("live", true)}}).handler())
+		defer srv.Close()
+		cmd, out := newCmd(srv)
+		if err := runLiveConversationShow(cmd, liveViewRef{ID: testSesID}, "json"); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out.String(), "SECRET-TITLE") || strings.Contains(out.String(), "markdown") || traced != 0 {
+			t.Fatalf("leak or trace:\n%s", out.String())
+		}
+	})
 }

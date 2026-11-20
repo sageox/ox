@@ -46,7 +46,7 @@ func runConversationShow(cmd *cobra.Command, args []string) error {
 	// a live coding session is not a recording: hand ses_ ids and /c/ses_ links
 	// to the server-rendered session view
 	if ref, ok := parseLiveViewRef(args[0]); ok && strings.HasPrefix(ref.ID, "ses_") {
-		return runLiveSessionView(cmd, ref)
+		return runLiveConversationShow(cmd, ref, format)
 	}
 
 	reader, openErr := openConversationReader()

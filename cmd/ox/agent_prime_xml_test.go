@@ -1806,10 +1806,10 @@ func TestConsultFirst_SessionRouting(t *testing.T) {
 		all.WriteString(r.Cue + " " + r.Command + "\n")
 	}
 	got := all.String()
-	if strings.Contains(got, "and session history") {
+	if strings.Contains(got, "and session history") || strings.Contains(got, "<ses_…>") {
 		t.Error("consult routes still claim ox query covers session history")
 	}
-	for _, want := range []string{"`ox query` does not search coding sessions yet", "…/c/ses_…", "`ox session view <link>`"} {
+	for _, want := range []string{"does not search coding sessions", "…/c/ses_…", "`ox session view <link or ses_id>`", "`ox session view <name>`"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("consult routes missing %q", want)
 		}

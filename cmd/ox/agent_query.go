@@ -136,12 +136,12 @@ Flags:
   --json         Emit machine-readable JSON only (no decoration)
 
 Sources:
-  team      Search team discussions and docs (default; coding sessions are not searched yet)
+  team      Search team discussions and docs (default; does not search coding sessions)
   code      Search local code index only (queries)
-  local     Search locally-cached ledger only (zero network calls)
+  local     Search locally-cached ledger only, including coding sessions (zero network calls)
   all       Search both team context and local code index
 
-Searches across team discussions and docs. Coding sessions are not searched yet; use "ox session list".
+Searches across team discussions and docs. Team sources do not search coding sessions; the local source does. Use "ox session list" for recency.
 For code search, use: ox code search "<pattern>" or --source=code
 For pre-prompt hooks needing instant local context, use: --local
 

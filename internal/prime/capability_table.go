@@ -96,11 +96,11 @@ func OxCapabilities() []Capability {
 			ConsultRoutes: []ConsultRoute{
 				{
 					Cue:     `Recency / "I just did X"`,
-					Command: "`ox session list --limit 20 --json` (chronological; the summary is in the list, not in view). A specific recent session is the likeliest source. `ox query` does not search coding sessions yet, so never rely on it for session history. Read one with `ox session view <ses_…>`; it opens with a Status: line saying whether the session is still live.",
+					Command: "`ox session list --limit 20 --json` (chronological; the summary is in the list, not in view). Read one: `ox session view <name>`. Team `ox query` does not search coding sessions.",
 				},
 				{
 					Cue:     `Conceptual / "did we decide or discuss X?"`,
-					Command: "`ox query \"<question>\"` (semantic; default `--source=team` covers discussions and docs, not coding sessions). Add `--source=all` to include code.",
+					Command: "`ox query \"<question>\"` (semantic; default `--source=team`: discussions and docs). Add `--source=all` to include code.",
 				},
 				{
 					Cue:     `Who/when in a recorded conversation`,
@@ -115,8 +115,8 @@ func OxCapabilities() []Capability {
 					Command: "`ox decision enrich --topic \"<subject>\"` (new) / `--file <dr.md>` (edit) — related DRs, numbering, ref verification.",
 				},
 				{
-					Cue:     `A pasted sageox.ai session link (…/c/ses_…)`,
-					Command: "`ox session view <link>` — never web-fetch it (sign-in wall). Requires `ox login` and team membership. Add `--follow` to watch a live session until it finishes.",
+					Cue:     `A pasted session link (…/c/ses_…)`,
+					Command: "`ox session view <link or ses_id>` — never web-fetch it. First line says if live.",
 				},
 				{
 					Cue:     `A pasted sageox.ai recording link (…/c/rec_…, …/recordings/rec_…)`,

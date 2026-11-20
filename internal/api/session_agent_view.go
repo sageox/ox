@@ -42,6 +42,17 @@ type SessionAgentViewOptions struct {
 	ContextRepo string
 }
 
+// ErrInvalidSessionID: the id failed the client-side path check; never retried.
+var ErrInvalidSessionID = errors.New("invalid session id")
+
+// RejectedError is a settled 4xx the server will answer the same way again
+// (400, 410 and other client errors except 408, 425 and 429). Not retried.
+type RejectedError struct{ Status int }
+
+func (e *RejectedError) Error() string {
+	return fmt.Sprintf("session view rejected: HTTP %d", e.Status)
+}
+
 // RateLimitedError is a 429; RetryAfter is the parsed Retry-After (0 if absent).
 type RateLimitedError struct{ RetryAfter time.Duration }
 
@@ -88,7 +99,7 @@ func (c *RepoClient) GetSessionAgentView(ctx context.Context, id string, opts Se
 	// The id lands in the request path; callers validate its grammar, this is
 	// the backstop against separators a proxy could rewrite into another route.
 	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, "/\\?#%") {
-		return nil, fmt.Errorf("invalid session id")
+		return nil, ErrInvalidSessionID
 	}
 
 	q := url.Values{}
@@ -163,6 +174,9 @@ func (c *RepoClient) GetSessionAgentView(ctx context.Context, id string, opts Se
 		return nil, &RateLimitedError{RetryAfter: parseRetryAfter(resp.Header)}
 	case resp.StatusCode >= 500:
 		return nil, fmt.Errorf("session view unavailable: server returned %d", resp.StatusCode)
+	case resp.StatusCode >= 400 && resp.StatusCode < 500 &&
+		resp.StatusCode != http.StatusRequestTimeout && resp.StatusCode != http.StatusTooEarly:
+		return nil, &RejectedError{Status: resp.StatusCode}
 	default:
 		return nil, fmt.Errorf("session view failed: HTTP %d", resp.StatusCode)
 	}
