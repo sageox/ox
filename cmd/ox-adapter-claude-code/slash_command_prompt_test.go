@@ -40,6 +40,12 @@ func TestClassifyTextContentSlashCommands(t *testing.T) {
 			wantClass: userContentSystem,
 		},
 		{
+			name:      "prose quoting command tags keeps the person's words",
+			text:      "Why does this logged command fail?\n<command-name>/review</command-name><command-args>the auth change</command-args>\nExplain it, do not run a review.",
+			wantText:  "Why does this logged command fail?\n\nExplain it, do not run a review.",
+			wantClass: userContentUser,
+		},
+		{
 			name:      "typed prompt is unchanged",
 			text:      "explain the retry logic",
 			wantText:  "explain the retry logic",

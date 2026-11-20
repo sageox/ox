@@ -626,6 +626,15 @@ func classifyTextContent(text string) (string, userContentClass) {
 // <command-args> is non-empty, the shape the server and web viewer count as a
 // prompt (sageox-monorepo packages/sessionturns isRealPrompt).
 func slashCommandPrompt(text string) (string, bool) {
+	// Only a message that IS a command envelope: one that quotes command tags
+	// inside a question ("why did <command-name>... fail?") keeps its own text
+	// through the normal path, so the person's words are never replaced.
+	rest := reStripCommandName.ReplaceAllString(text, "")
+	rest = reStripCommandMessage.ReplaceAllString(rest, "")
+	rest = reStripCommandArgs.ReplaceAllString(rest, "")
+	if strings.TrimSpace(rest) != "" {
+		return "", false
+	}
 	name := reCommandName.FindStringSubmatch(text)
 	args := reCommandArgs.FindStringSubmatch(text)
 	if name == nil || args == nil || name[1] == "" || args[1] == "" {
