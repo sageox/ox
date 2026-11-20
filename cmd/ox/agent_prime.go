@@ -507,10 +507,14 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// Covers: (a) prime called from CLAUDE.md BLOCKING instruction after /clear
 	// (CLAUDE_ENV_FILE persists the var), (b) prime subprocess called from hook
 	// with the env var passed explicitly by runPrimeForHook.
+	// An agent launched from a recorded session's shell inherits the same
+	// variable, so it is not reused when it names another agent process.
 	if agentID == "" && !isCursor {
 		if states, loadErr := session.LoadAllRecordingStates(projectRoot); loadErr == nil {
 			envID := os.Getenv("SAGEOX_AGENT_ID")
-			agentID = resolveAgentIDFromStates(states, envID)
+			if !launchedByAnotherAgent(states, envID, agentSessionID, agentProcessPID()) {
+				agentID = resolveAgentIDFromStates(states, envID)
+			}
 		}
 	}
 
@@ -553,14 +557,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// Only trust the env value if it maps to a currently-alive recording — a stale
 	// SAGEOX_AGENT_ID from a previous, unrelated session would otherwise cross-link
 	// this session as a child of a dead parent (#528).
-	parentAgentID := ""
-	if existing := os.Getenv("SAGEOX_AGENT_ID"); existing != "" && existing != agentID {
-		if states, err := session.LoadAllRecordingStates(projectRoot); err == nil {
-			if hasAliveRecordingForID(states, existing) {
-				parentAgentID = existing
-			}
-		}
-	}
+	parentAgentID := inheritedParentAgentID(projectRoot, agentID)
 
 	// Reconcile before exposing session context. Approval-only changes must retire
 	// revoked executable content, and unreadable policy must not be ignored. This
@@ -1266,6 +1263,53 @@ func resolveAgentIDFromStates(states []*session.RecordingState, envID string) st
 	return ""
 }
 
+// launchedByAnotherAgent reports whether an inherited SAGEOX_AGENT_ID names a
+// different, still-recording agent process: this agent was launched from that
+// one's shell, so it is that session's child, not the same AI coworker. It is
+// false whenever the processes cannot be told apart (no native session id of
+// its own, or a PID unknown on either side), which keeps the /clear and
+// repeat-prime reuse that the variable exists for.
+func launchedByAnotherAgent(states []*session.RecordingState, envID, agentSessionID string, agentPID int) bool {
+	if envID == "" || agentSessionID == "" || agentPID <= 0 {
+		return false
+	}
+	for _, s := range states {
+		if s.AgentID == envID && s.IsAgentAlive() {
+			return s.ParentPID > 0 && s.ParentPID != agentPID
+		}
+	}
+	return false
+}
+
+// inheritedParentAgentID is the agent whose shell launched agentID's process:
+// SAGEOX_AGENT_ID inherited from it, when it names another agent that is still
+// recording. A stale value from an unrelated, ended session names no parent
+// (#528). Empty when there is none.
+func inheritedParentAgentID(projectRoot, agentID string) string {
+	existing := os.Getenv("SAGEOX_AGENT_ID")
+	if existing == "" || existing == agentID {
+		return ""
+	}
+	states, err := session.LoadAllRecordingStates(projectRoot)
+	if err != nil || !hasAliveRecordingForID(states, existing) {
+		return ""
+	}
+	return existing
+}
+
+// agentProcessPID is the long-lived coding-agent process this ox runs under.
+// Hooks run inside a transient shell, so os.Getppid() names a shell that dies
+// right after the hook; the hook passes the agent's PID in OX_PARENT_PID, and a
+// direct invocation walks the process tree itself.
+func agentProcessPID() int {
+	if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
+		if parsed, err := strconv.Atoi(envPID); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return proc.FindAgentAncestorPID()
+}
+
 // hasAliveRecordingForID reports whether agentID corresponds to a currently-alive
 // recording in states. Used by callers that need to distinguish a real, live
 // agent reference from a stale SAGEOX_AGENT_ID left over in the environment.
@@ -1731,19 +1775,10 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 	timestamp := time.Now().Format("2006-01-02-150405")
 	outputFile := filepath.Join(projectRoot, ".sageox", "sessions", fmt.Sprintf("%s-%s.md", timestamp, agentID))
 
-	// Determine the long-lived agent PID for liveness detection.
-	// Hooks run inside a transient bash shell, so os.Getppid() returns the shell
-	// PID which dies immediately after the hook. OX_PARENT_PID is set by the hook
-	// to proc.FindAgentAncestorPID(), which walks the tree to find the agent process.
-	// If OX_PARENT_PID is missing (direct invocation), walk the tree ourselves.
+	// The long-lived agent PID, for liveness detection.
 	parentPID := 0
 	if agentType != "cursor" {
-		parentPID = proc.FindAgentAncestorPID()
-		if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
-			if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
-				parentPID = parsed
-			}
-		}
+		parentPID = agentProcessPID()
 	}
 	// A transient Cursor hook shell is not the native conversation owner.
 
