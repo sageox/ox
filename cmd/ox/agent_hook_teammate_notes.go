@@ -42,14 +42,24 @@ const (
 	teammateTakeTimeout = 100 * time.Millisecond
 )
 
-// teammateTakeFn is the daemon call that takes an agent's waiting notes; tests
-// replace it.
-var teammateTakeFn = func(agentID, conversationID string, deliveredAtSeq int64) ([]whisperstore.WhisperEntry, error) {
+// teammateConfirmTimeout is longer than the take's: a confirm that is lost
+// leaves the lease to expire, and the notes then show a second time.
+const teammateConfirmTimeout = 500 * time.Millisecond
+
+// teammateTakeFn is the daemon call that LEASES an agent's waiting notes and
+// returns them with the lease id; tests replace it.
+var teammateTakeFn = func(agentID, conversationID string, deliveredAtSeq int64) ([]whisperstore.WhisperEntry, string, error) {
 	resp, err := daemon.NewClientForCurrentRepoWithTimeout(teammateTakeTimeout).TeammateCommentsTake(agentID, conversationID, deliveredAtSeq)
 	if err != nil || resp == nil {
-		return nil, err
+		return nil, "", err
 	}
-	return resp.Entries, nil
+	return resp.Entries, resp.LeaseID, nil
+}
+
+// teammateConfirmFn tells the daemon which leased notes the hook wrote, which is
+// what consumes them and logs their delivery acks; tests replace it.
+var teammateConfirmFn = func(agentID, leaseID string, commentIDs []string) error {
+	return daemon.NewClientForCurrentRepoWithTimeout(teammateConfirmTimeout).TeammateCommentsConfirm(agentID, leaseID, commentIDs)
 }
 
 // emitTeammateNotes writes the waiting notes as the hook's one JSON document and
@@ -61,7 +71,7 @@ func emitTeammateNotes(w io.Writer, projectRoot, agentID string) bool {
 	if !ok {
 		return false
 	}
-	taken, err := teammateTakeFn(agentID, conversationID, seq)
+	taken, leaseID, err := teammateTakeFn(agentID, conversationID, seq)
 	if err != nil {
 		slog.Debug("hook: teammate notes take failed", "agent_id", agentID, "error", err)
 		return false
@@ -77,7 +87,8 @@ func emitTeammateNotes(w io.Writer, projectRoot, agentID string) bool {
 			slog.Debug("hook: teammate note dropped, other conversation", "comment_id", e.ID)
 		}
 	}
-	text := formatTeammateNotes(entries)
+	shown := teammateShownEntries(entries)
+	text := formatTeammateNotes(shown)
 	if text == "" {
 		return false
 	}
@@ -88,7 +99,15 @@ func emitTeammateNotes(w io.Writer, projectRoot, agentID string) bool {
 		slog.Debug("hook: teammate notes emit failed", "error", err)
 		return false
 	}
-	slog.Info("hook: teammate notes delivered", "agent_id", agentID, "count", min(len(entries), teammateNotesPerCall), "delivered_at_seq", seq)
+	// the envelope is written: only now may the notes be consumed and acked
+	ids := make([]string, len(shown))
+	for i, e := range shown {
+		ids[i] = e.ID
+	}
+	if err := teammateConfirmFn(agentID, leaseID, ids); err != nil {
+		slog.Warn("hook: teammate notes confirm failed; the lease will expire", "agent_id", agentID, "error", err)
+	}
+	slog.Info("hook: teammate notes delivered", "agent_id", agentID, "count", len(shown), "delivered_at_seq", seq)
 	return true
 }
 
@@ -114,16 +133,26 @@ func liveStreamingSeq(projectRoot, agentID string) (seq int64, conversationID st
 // is only safe for notes that went through the sanitizers below.
 func formatTeammateNotes(entries []whisperstore.WhisperEntry) string {
 	var blocks []string
+	for _, e := range teammateShownEntries(entries) {
+		blocks = append(blocks, formatTeammateNote(e))
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
+// teammateShownEntries is the notes a call shows: teammate notes only, at most
+// teammateNotesPerCall, in order. The confirm names exactly these.
+func teammateShownEntries(entries []whisperstore.WhisperEntry) []whisperstore.WhisperEntry {
+	var out []whisperstore.WhisperEntry
 	for _, e := range entries {
 		if e.Source != whisperstore.SourceTeammateComment {
 			continue
 		}
-		if len(blocks) == teammateNotesPerCall {
+		if len(out) == teammateNotesPerCall {
 			break
 		}
-		blocks = append(blocks, formatTeammateNote(e))
+		out = append(out, e)
 	}
-	return strings.Join(blocks, "\n\n")
+	return out
 }
 
 func formatTeammateNote(e whisperstore.WhisperEntry) string {

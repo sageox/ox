@@ -194,9 +194,14 @@ func (l *LiveSessions) Tick(ctx context.Context) {
 				continue
 			}
 			dir := canonicalDir(filepath.Join(l.sessionsDir, e.Name()))
-			if st, err := livesession.ReadState(dir); err == nil && liveActive(st) {
+			st, err := livesession.ReadState(dir)
+			switch {
+			case err != nil:
+			case liveActive(st):
 				seen[dir] = st
 				l.request(ctx, dir)
+			case st.Status == livesession.StatusClosed:
+				l.flushOwedAcks(ctx, dir)
 			}
 		}
 	}
@@ -208,6 +213,18 @@ func (l *LiveSessions) Tick(ctx context.Context) {
 		l.logger.WarnContext(ctx, "live_pending_deletes_retry_failed", "confirmed", n, "error", err)
 	} else if n > 0 {
 		l.logger.InfoContext(ctx, "live_pending_deletes_confirmed", "confirmed", n)
+	}
+}
+
+// flushOwedAcks retries the delivery receipts a closed stream still owes (the
+// sweep skips closed streams, so without this a receipt that failed around the
+// close would never reach the server). Bounded to a day by livesession.
+func (l *LiveSessions) flushOwedAcks(ctx context.Context, dir string) {
+	if l.endpoint == "" || !livesession.TeammateAcksOwed(dir) {
+		return
+	}
+	if err := livesession.FlushTeammateAcks(ctx, l.config(l.endpoint), dir, liveDrainBudget, l.now()); err != nil {
+		l.logger.DebugContext(ctx, "live_teammate_acks_flush_failed", "session", filepath.Base(dir), "error", err)
 	}
 }
 

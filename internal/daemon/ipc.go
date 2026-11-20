@@ -118,8 +118,11 @@ const (
 	MsgTypeLiveSessionDrain  = "live_session_drain"  // one-way, drain a session's live spool to the server
 )
 
-// MsgTypeTeammateCommentsTake takes (once) the teammate notes waiting for an agent.
+// MsgTypeTeammateCommentsTake leases the teammate notes waiting for an agent.
 const MsgTypeTeammateCommentsTake = "teammate_comments_take"
+
+// MsgTypeTeammateCommentsConfirm commits a lease: the hook showed the notes.
+const MsgTypeTeammateCommentsConfirm = "teammate_comments_confirm"
 
 // Protocol Design Decision: NDJSON (Newline-Delimited JSON)
 //
@@ -791,7 +794,8 @@ type DaemonService interface {
 	SessionWatchStart(payload SessionWatchStartPayload)
 	SessionWatchStop(payload SessionWatchStopPayload)
 	LiveSessionDrain(payload LiveSessionDrainPayload)
-	TeammateCommentsTake(payload TeammateCommentsTakePayload) ([]whisperstore.WhisperEntry, error)
+	TeammateCommentsTake(payload TeammateCommentsTakePayload) (TeammateCommentsTakeResponse, error)
+	TeammateCommentsConfirm(payload TeammateCommentsConfirmPayload) error
 
 	// fire-and-forget operations
 	Activity()
@@ -841,7 +845,8 @@ type CallbackService struct {
 	onWhisperHistory    func(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error)
 	onSettingsGet       func() *flags.CLISettingsResponse
 
-	onTeammateCommentsTake func(payload TeammateCommentsTakePayload) ([]whisperstore.WhisperEntry, error)
+	onTeammateCommentsTake    func(payload TeammateCommentsTakePayload) (TeammateCommentsTakeResponse, error)
+	onTeammateCommentsConfirm func(payload TeammateCommentsConfirmPayload) error
 }
 
 func (c *CallbackService) Sync() error {
@@ -1072,14 +1077,24 @@ func (c *CallbackService) LiveSessionDrain(payload LiveSessionDrainPayload) {
 	}
 }
 
-func (c *CallbackService) TeammateCommentsTake(payload TeammateCommentsTakePayload) ([]whisperstore.WhisperEntry, error) {
+func (c *CallbackService) TeammateCommentsTake(payload TeammateCommentsTakePayload) (TeammateCommentsTakeResponse, error) {
 	c.mu.Lock()
 	fn := c.onTeammateCommentsTake
 	c.mu.Unlock()
 	if fn != nil {
 		return fn(payload)
 	}
-	return nil, nil
+	return TeammateCommentsTakeResponse{}, nil
+}
+
+func (c *CallbackService) TeammateCommentsConfirm(payload TeammateCommentsConfirmPayload) error {
+	c.mu.Lock()
+	fn := c.onTeammateCommentsConfirm
+	c.mu.Unlock()
+	if fn != nil {
+		return fn(payload)
+	}
+	return nil
 }
 
 func (c *CallbackService) Activity() {
@@ -1380,6 +1395,7 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeSessionWatchStop, handleSessionWatchStop)
 	router.Register(MsgTypeLiveSessionDrain, handleLiveSessionDrain)
 	router.Register(MsgTypeTeammateCommentsTake, handleTeammateCommentsTake)
+	router.Register(MsgTypeTeammateCommentsConfirm, handleTeammateCommentsConfirm)
 	router.Register(MsgTypeSettingsGet, handleSettingsGet)
 	router.Register(MsgTypeSessionUploaded, handleSessionUploaded)
 
@@ -1496,11 +1512,19 @@ func (s *Server) SetLiveSessionDrainHandler(fn func(payload LiveSessionDrainPayl
 
 // SetTeammateCommentsTakeHandler sets the handler that takes an agent's
 // waiting teammate notes (once) and logs their delivery acks.
-func (s *Server) SetTeammateCommentsTakeHandler(fn func(payload TeammateCommentsTakePayload) ([]whisperstore.WhisperEntry, error)) {
+func (s *Server) SetTeammateCommentsTakeHandler(fn func(payload TeammateCommentsTakePayload) (TeammateCommentsTakeResponse, error)) {
 	svc := s.mustCallbackService("SetTeammateCommentsTakeHandler")
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
 	svc.onTeammateCommentsTake = fn
+}
+
+// SetTeammateCommentsConfirmHandler sets the handler that commits a lease.
+func (s *Server) SetTeammateCommentsConfirmHandler(fn func(payload TeammateCommentsConfirmPayload) error) {
+	svc := s.mustCallbackService("SetTeammateCommentsConfirmHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onTeammateCommentsConfirm = fn
 }
 
 // SetMurmurHandler sets the handler for murmur write+commit messages.
@@ -2669,10 +2693,10 @@ func (c *Client) LiveSessionDrain(payload LiveSessionDrainPayload) error {
 	})
 }
 
-// TeammateCommentsTake takes the teammate notes waiting for agentID. They are
-// returned once: the daemon deletes them and logs a delivery ack at
-// deliveredAtSeq (the recording's entry count after the hook captured the tool
-// call). Callers fail open: a slow or absent daemon means no notes this call.
+// TeammateCommentsTake LEASES the teammate notes waiting for agentID: it returns
+// them with a lease id and changes nothing else. The caller shows them and then
+// calls TeammateCommentsConfirm; an unconfirmed lease expires and the notes are
+// pending again. Callers fail open: a slow or absent daemon means no notes this call.
 func (c *Client) TeammateCommentsTake(agentID, conversationID string, deliveredAtSeq int64) (*TeammateCommentsTakeResponse, error) {
 	payload, err := json.Marshal(TeammateCommentsTakePayload{AgentID: agentID, ConversationID: conversationID, DeliveredAtSeq: deliveredAtSeq})
 	if err != nil {
@@ -2690,6 +2714,23 @@ func (c *Client) TeammateCommentsTake(agentID, conversationID string, deliveredA
 		return nil, fmt.Errorf("unmarshal teammate comments: %w", err)
 	}
 	return &result, nil
+}
+
+// TeammateCommentsConfirm commits a lease after the hook wrote the notes it
+// names: only now are their delivery acks logged and the notes deleted.
+func (c *Client) TeammateCommentsConfirm(agentID, leaseID string, commentIDs []string) error {
+	payload, err := json.Marshal(TeammateCommentsConfirmPayload{AgentID: agentID, LeaseID: leaseID, CommentIDs: commentIDs})
+	if err != nil {
+		return fmt.Errorf("marshal teammate_comments_confirm payload: %w", err)
+	}
+	resp, err := c.sendMessage(Message{Type: MsgTypeTeammateCommentsConfirm, Payload: payload})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return errors.New(resp.Error)
+	}
+	return nil
 }
 
 // Murmur sends a murmur write+commit request to the daemon (fire-and-forget).

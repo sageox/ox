@@ -1,16 +1,36 @@
 package daemon
 
 import (
+	"context"
+	"database/sql"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/sessionstream"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
+
+// take is lease then confirm of everything leased: what one hook does when it
+// shows every note. Tests of the two phases call lease and confirm themselves.
+func (b *teammateCommentInbox) take(ctx context.Context, p TeammateCommentsTakePayload) ([]whisperstore.WhisperEntry, error) {
+	resp, err := b.lease(ctx, p)
+	if err != nil || resp.LeaseID == "" {
+		return nil, err
+	}
+	ids := make([]string, len(resp.Entries))
+	for i, e := range resp.Entries {
+		ids[i] = e.ID
+	}
+	if err := b.confirm(ctx, TeammateCommentsConfirmPayload{AgentID: p.AgentID, LeaseID: resp.LeaseID, CommentIDs: ids}); err != nil {
+		return nil, err
+	}
+	return resp.Entries, nil
+}
 
 func newCommentEnv(t *testing.T, recipient string) (*liveEnv, *teammateCommentInbox, *whisperstore.Store) {
 	t.Helper()
@@ -249,21 +269,31 @@ func TestTeammateCommentTakeRefusesAnUnusableSeq(t *testing.T) {
 // taken entries; a daemon with no handler answers an empty list, never an error.
 func TestTeammateCommentsTakeIPCHandlerRoundTrip(t *testing.T) {
 	s := NewServer(slog.Default())
-	res := handleTeammateCommentsTake(s, Message{Type: MsgTypeTeammateCommentsTake, Payload: []byte(`{"agent_id":"agent-a","delivered_at_seq":6}`)}, nil)
+	take := []byte(`{"agent_id":"agent-a","conversation_id":"cnv_x","delivered_at_seq":6}`)
+	res := handleTeammateCommentsTake(s, Message{Type: MsgTypeTeammateCommentsTake, Payload: take}, nil)
 	if res.Response == nil || !res.Response.Success || string(res.Response.Data) != `{"entries":[]}` {
 		t.Fatalf("unwired handler = %+v", res.Response)
 	}
 	var got TeammateCommentsTakePayload
-	s.SetTeammateCommentsTakeHandler(func(p TeammateCommentsTakePayload) ([]whisperstore.WhisperEntry, error) {
+	var confirmed TeammateCommentsConfirmPayload
+	s.SetTeammateCommentsTakeHandler(func(p TeammateCommentsTakePayload) (TeammateCommentsTakeResponse, error) {
 		got = p
-		return []whisperstore.WhisperEntry{{ID: "tcm_1", Source: whisperstore.SourceTeammateComment}}, nil
+		return TeammateCommentsTakeResponse{LeaseID: "L1", Entries: []whisperstore.WhisperEntry{{ID: "tcm_1", Source: whisperstore.SourceTeammateComment}}}, nil
 	})
-	res = handleTeammateCommentsTake(s, Message{Type: MsgTypeTeammateCommentsTake, Payload: []byte(`{"agent_id":"agent-a","delivered_at_seq":6}`)}, nil)
-	if got.AgentID != "agent-a" || got.DeliveredAtSeq != 6 || res.Response == nil || !res.Response.Success {
+	s.SetTeammateCommentsConfirmHandler(func(p TeammateCommentsConfirmPayload) error { confirmed = p; return nil })
+	res = handleTeammateCommentsTake(s, Message{Type: MsgTypeTeammateCommentsTake, Payload: take}, nil)
+	if got.AgentID != "agent-a" || got.DeliveredAtSeq != 6 || res.Response == nil || !res.Response.Success || !strings.Contains(string(res.Response.Data), `"lease_id":"L1"`) {
 		t.Fatalf("payload seen = %+v, response = %+v", got, res.Response)
+	}
+	res = handleTeammateCommentsConfirm(s, Message{Type: MsgTypeTeammateCommentsConfirm, Payload: []byte(`{"agent_id":"agent-a","lease_id":"L1","comment_ids":["tcm_1"]}`)}, nil)
+	if !res.Response.Success || confirmed.LeaseID != "L1" || len(confirmed.CommentIDs) != 1 {
+		t.Fatalf("confirm = %+v, %+v", confirmed, res.Response)
 	}
 	if bad := handleTeammateCommentsTake(s, Message{Payload: []byte(`{`)}, nil); bad.Response == nil || bad.Response.Success {
 		t.Fatal("a malformed payload must be refused")
+	}
+	if bad := handleTeammateCommentsConfirm(s, Message{Payload: []byte(`{`)}, nil); bad.Response == nil || bad.Response.Success {
+		t.Fatal("a malformed confirm must be refused")
 	}
 }
 
@@ -320,5 +350,184 @@ func TestTeammateCommentLookupErrorKeepsThePendingNote(t *testing.T) {
 	}
 	if got, _ := box.take(t.Context(), TeammateCommentsTakePayload{AgentID: "agent-a", ConversationID: e.conv(), DeliveredAtSeq: 4}); len(got) != 1 {
 		t.Fatalf("take = %v", got)
+	}
+}
+
+func (e *liveEnv) payload(seq int64) TeammateCommentsTakePayload {
+	return TeammateCommentsTakePayload{AgentID: "agent-a", ConversationID: e.conv(), DeliveredAtSeq: seq}
+}
+
+// ackLogExists reports whether an ack was logged: the log may exist empty (the
+// lease-time writability probe creates it) without holding any ack.
+func ackLogExists(dir string) bool {
+	b, err := os.ReadFile(filepath.Join(dir, "teammate-comment-acks"))
+	return err == nil && len(b) > 0
+}
+
+// Failure prevented (N1): a hook read timeout consumed the note and marked it
+// delivered although nothing was shown. A lease alone acks and deletes nothing;
+// when it expires unconfirmed, the note is offered again.
+func TestTeammateCommentLeaseWithoutConfirmLosesNothing(t *testing.T) {
+	e, box, store := newCommentEnv(t, "agent-a")
+	clock := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	box.now = func() time.Time { return clock }
+	e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
+	e.drainOnce()
+
+	first, err := box.lease(t.Context(), e.payload(5))
+	if err != nil || len(first.Entries) != 1 || first.LeaseID == "" {
+		t.Fatalf("lease = %+v, %v", first, err)
+	}
+	// the hook gave up after its read timeout: no confirm ever arrives
+	if ackLogExists(e.dir) {
+		t.Fatal("a lease logged an ack before the hook showed anything")
+	}
+	if ids := stillPending(t, store, "agent-a"); len(ids) != 1 {
+		t.Fatalf("pending = %v; a lease must not delete", ids)
+	}
+	clock = clock.Add(teammateLeaseTTL + time.Second)
+	again, err := box.lease(t.Context(), e.payload(6))
+	if err != nil || len(again.Entries) != 1 || again.LeaseID == first.LeaseID {
+		t.Fatalf("after expiry lease = %+v, %v; want the note offered again", again, err)
+	}
+	if err := box.confirm(t.Context(), TeammateCommentsConfirmPayload{AgentID: "agent-a", LeaseID: again.LeaseID, CommentIDs: []string{"tcm_1"}}); err != nil {
+		t.Fatal(err)
+	}
+	e.live.Wait()
+	if seq, ok := e.srv.DeliveredAtSeq("tcm_1"); !ok || seq != 6 {
+		t.Fatalf("delivered_at_seq = %d, %v; want 6, the seq of the lease that was confirmed", seq, ok)
+	}
+}
+
+// Failure prevented: two hooks racing (parallel tool calls) each showing a note.
+func TestTeammateCommentTwoHooksRacingShowANoteOnce(t *testing.T) {
+	e, box, _ := newCommentEnv(t, "agent-a")
+	e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
+	e.drainOnce()
+	a, _ := box.lease(t.Context(), e.payload(5))
+	b, _ := box.lease(t.Context(), e.payload(5))
+	if len(a.Entries) != 1 || len(b.Entries) != 0 {
+		t.Fatalf("hook A got %d notes, hook B got %d; the note must go to one", len(a.Entries), len(b.Entries))
+	}
+}
+
+// A confirm after the lease expired: still counts when nobody else leased the
+// notes since (the hook did show them), and is refused when a second hook did,
+// so the notes are acked once, by the lease that holds them.
+func TestTeammateCommentConfirmAfterExpiry(t *testing.T) {
+	t.Run("unclaimed notes are still consumed", func(t *testing.T) {
+		e, box, store := newCommentEnv(t, "agent-a")
+		clock := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+		box.now = func() time.Time { return clock }
+		e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
+		e.drainOnce()
+		l, _ := box.lease(t.Context(), e.payload(5))
+		clock = clock.Add(2 * teammateLeaseTTL)
+		if err := box.confirm(t.Context(), TeammateCommentsConfirmPayload{AgentID: "agent-a", LeaseID: l.LeaseID, CommentIDs: []string{"tcm_1"}}); err != nil {
+			t.Fatal(err)
+		}
+		if ids := stillPending(t, store, "agent-a"); len(ids) != 0 {
+			t.Fatalf("pending = %v; a late confirm of shown notes must consume them", ids)
+		}
+	})
+	t.Run("notes leased again are acked by the second lease only", func(t *testing.T) {
+		e, box, _ := newCommentEnv(t, "agent-a")
+		clock := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+		box.now = func() time.Time { return clock }
+		e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
+		e.drainOnce()
+		first, _ := box.lease(t.Context(), e.payload(5))
+		clock = clock.Add(2 * teammateLeaseTTL)
+		second, _ := box.lease(t.Context(), e.payload(9))
+		if len(second.Entries) != 1 {
+			t.Fatalf("second lease = %+v", second)
+		}
+		if err := box.confirm(t.Context(), TeammateCommentsConfirmPayload{AgentID: "agent-a", LeaseID: first.LeaseID, CommentIDs: []string{"tcm_1"}}); err == nil {
+			t.Fatal("a lease that expired and was superseded was confirmed")
+		}
+		if ackLogExists(e.dir) {
+			t.Fatal("the stale confirm logged an ack")
+		}
+		if err := box.confirm(t.Context(), TeammateCommentsConfirmPayload{AgentID: "agent-a", LeaseID: second.LeaseID, CommentIDs: []string{"tcm_1"}}); err != nil {
+			t.Fatal(err)
+		}
+		e.live.Wait()
+		if seq, ok := e.srv.DeliveredAtSeq("tcm_1"); !ok || seq != 9 {
+			t.Fatalf("delivered_at_seq = %d, %v; want 9", seq, ok)
+		}
+	})
+	t.Run("an unknown or foreign lease is refused", func(t *testing.T) {
+		e, box, _ := newCommentEnv(t, "agent-a")
+		e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
+		e.drainOnce()
+		l, _ := box.lease(t.Context(), e.payload(5))
+		if box.confirm(t.Context(), TeammateCommentsConfirmPayload{AgentID: "agent-a", LeaseID: "nope"}) == nil ||
+			box.confirm(t.Context(), TeammateCommentsConfirmPayload{AgentID: "agent-b", LeaseID: l.LeaseID, CommentIDs: []string{"tcm_1"}}) == nil {
+			t.Fatal("a bad lease id or another agent confirmed")
+		}
+	})
+}
+
+// Failure prevented (N1): a failed delete after the acks were logged, leaving a
+// sendable ack for a note the hook never got. Delete first; no ack on failure.
+func TestTeammateCommentFailedDeleteSendsNoAck(t *testing.T) {
+	e, box, store := newCommentEnv(t, "agent-a")
+	e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
+	e.drainOnce()
+	l, _ := box.lease(t.Context(), e.payload(5))
+
+	other, err := sql.Open("sqlite", store.DBPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if _, err := other.Exec(`CREATE TRIGGER no_delete BEFORE DELETE ON whispers BEGIN SELECT RAISE(ABORT, 'delete refused'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := box.confirm(t.Context(), TeammateCommentsConfirmPayload{AgentID: "agent-a", LeaseID: l.LeaseID, CommentIDs: []string{"tcm_1"}}); err == nil {
+		t.Fatal("confirm reported success although the delete failed")
+	}
+	e.live.Wait()
+	if ackLogExists(e.dir) {
+		t.Fatal("an ack was logged for a note whose delete failed")
+	}
+	e.drainOnce()
+	if _, ok := e.srv.DeliveredAtSeq("tcm_1"); ok {
+		t.Fatal("the server was told a note was delivered when it stayed pending")
+	}
+	if _, err := other.Exec(`DROP TRIGGER no_delete`); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := box.take(t.Context(), e.payload(6)); len(got) != 1 {
+		t.Fatalf("the note could not reach a later hook: %v", got)
+	}
+}
+
+// N4: a machine that switched notes off drops every note unshown and unacked.
+func TestTeammateCommentsOffDropsNotesUnshownAndUnacked(t *testing.T) {
+	e, box, store := newCommentEnv(t, "agent-a")
+	e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
+	e.drainOnce() // received while on
+	box.enabled = func() bool { return false }
+	e.spool(lineN(3))
+	e.clock = e.clock.Add(time.Minute)
+	e.drainOnce() // the server still lists it
+	if ids := stillPending(t, store, "agent-a"); len(ids) != 0 {
+		t.Fatalf("pending = %v; an off switch must drop held notes", ids)
+	}
+	got, err := box.lease(t.Context(), e.payload(5))
+	if err != nil || len(got.Entries) != 0 {
+		t.Fatalf("lease = %+v, %v while off", got, err)
+	}
+	e.live.Wait()
+	if ackLogExists(e.dir) {
+		t.Fatal("a dropped note was acked")
+	}
+	box.enabled = nil // back on: the server's copy is stored and shown again
+	e.spool(lineN(4))
+	e.clock = e.clock.Add(time.Minute)
+	e.drainOnce()
+	if got, _ := box.take(t.Context(), e.payload(6)); len(got) != 1 {
+		t.Fatalf("take after switching back on = %v", got)
 	}
 }

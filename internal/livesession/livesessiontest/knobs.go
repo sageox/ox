@@ -329,7 +329,7 @@ func (s *Server) AckRequests() []sessionstream.AckTeammateCommentsRequest {
 
 // RefuseNextAck answers the next ack with this refusal.
 func (s *Server) RefuseNextAck(status int, reason string, action sessionstream.Action) {
-	s.set(func() { x := refusal(status, reason, action, nil); s.ackRefusal = &x })
+	s.RefuseAcks(1, status, reason, action)
 }
 
 // IgnoreNextAcks answers the next n acks 200 without recording them, as a lost
@@ -350,3 +350,17 @@ func (s *Server) FailTeammateLookup(on bool) { s.set(func() { s.listFails = on }
 
 // RefuseOpensAsNameTaken answers every open 409 session_name_taken (action stop).
 func (s *Server) RefuseOpensAsNameTaken(on bool) { s.set(func() { s.nameTaken = on }) }
+
+// RefuseAcks answers the next n acks with this refusal and records nothing: a
+// 503 (action retry) is a transient outage, a 400 (action fix) a permanent one.
+func (s *Server) RefuseAcks(n int, status int, reason string, action sessionstream.Action) {
+	s.set(func() { x := refusal(status, reason, action, nil); s.ackRefusal, s.ackRefusals = &x, n })
+}
+
+// DropAcksBeforeRecording closes the connection on the next n acks before the
+// server records them: the caller sees a network error, the server nothing.
+func (s *Server) DropAcksBeforeRecording(n int) { s.set(func() { s.ackDropBefore = n }) }
+
+// DropAcksAfterRecording records the next n acks, then closes the connection
+// without an answer: the caller must treat the ack as unsent and send it again.
+func (s *Server) DropAcksAfterRecording(n int) { s.set(func() { s.ackDropAfter = n }) }

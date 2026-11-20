@@ -1,10 +1,13 @@
 package livesession_test
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -199,5 +202,104 @@ func TestDrainReportsAListOnlyWhenTheServerSaidItLooked(t *testing.T) {
 	e.spool(withPrompt(lines(0, 3)))
 	if res := e.mustDrain(); res.TeammateCommentsListed || len(res.TeammateComments) != 0 {
 		t.Fatalf("an unlisted answer was reported as a list: %+v", res)
+	}
+}
+
+// Failure prevented (N2): a resend obligation lived only in memory, so a 503 on
+// the resend was never retried by a drain with no new spool bytes.
+func TestTeammateCommentResendRefusedWith503IsRetriedWithNoNewSpoolBytes(t *testing.T) {
+	e := newEnv(t)
+	e.srv.QueueTeammateComment(comment("tcm_1", "once"))
+	e.spool(withPrompt(lines(0, 3)))
+	e.mustDrain()
+	if err := livesession.RecordTeammateCommentAck(e.dir, "tcm_1", 5); err != nil {
+		t.Fatal(err)
+	}
+	e.srv.IgnoreNextAcks(1)
+	e.mustDrain() // "sent", settled, never recorded by the server
+
+	e.spool(lines(3, 6))
+	e.srv.RefuseAcks(1, http.StatusServiceUnavailable, sessionstream.ReasonUnavailable, sessionstream.ActionRetry)
+	e.mustDrain() // the append lists tcm_1 again; the resend meets a 503
+	if _, ok := e.srv.DeliveredAtSeq("tcm_1"); ok {
+		t.Fatal("setup: the refused resend was recorded")
+	}
+	e.mustDrain() // nothing new was spooled
+	if seq, ok := e.srv.DeliveredAtSeq("tcm_1"); !ok || seq != 5 {
+		t.Fatalf("delivered_at_seq = %d, %v; the resend must be retried with the first seq", seq, ok)
+	}
+}
+
+// Failure prevented (N2): a receipt owed when the owner stops the session never
+// sent, because the sweep skips closed streams and Close sent none.
+func TestCloseSendsTheAcksStillOwed(t *testing.T) {
+	e := newEnv(t)
+	e.spool(withPrompt(lines(0, 3)))
+	e.mustDrain()
+	if err := livesession.RecordTeammateCommentAck(e.dir, "tcm_1", 5); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := livesession.Close(t.Context(), e.cfg, e.dir, "", testBudget); err != nil || !res.Done {
+		t.Fatalf("close = %+v, %v", res, err)
+	}
+	if seq, ok := e.srv.DeliveredAtSeq("tcm_1"); !ok || seq != 5 {
+		t.Fatalf("delivered_at_seq = %d, %v; Close must flush the owed ack", seq, ok)
+	}
+}
+
+// After a close that could not deliver the ack, the daemon's flush keeps trying
+// until the server answers.
+func TestFlushAfterCloseDeliversAnAckTheCloseCouldNot(t *testing.T) {
+	e := newEnv(t)
+	e.spool(withPrompt(lines(0, 3)))
+	e.mustDrain()
+	if err := livesession.RecordTeammateCommentAck(e.dir, "tcm_1", 5); err != nil {
+		t.Fatal(err)
+	}
+	e.srv.RefuseAcks(1, http.StatusServiceUnavailable, sessionstream.ReasonUnavailable, sessionstream.ActionRetry)
+	if res, err := livesession.Close(t.Context(), e.cfg, e.dir, "", testBudget); err != nil || !res.Done {
+		t.Fatalf("close = %+v, %v", res, err)
+	}
+	if !livesession.TeammateAcksOwed(e.dir) {
+		t.Fatal("setup: the refused ack is no longer owed")
+	}
+	if err := livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if seq, ok := e.srv.DeliveredAtSeq("tcm_1"); !ok || seq != 5 || livesession.TeammateAcksOwed(e.dir) {
+		t.Fatalf("flush delivered %d, %v; owed=%v", seq, ok, livesession.TeammateAcksOwed(e.dir))
+	}
+}
+
+// The retry is bounded: after a day of failures the obligation is given up once,
+// with one log line, and the session leaves the sweep.
+func TestFlushGivesUpAfterADayAndLogsOnce(t *testing.T) {
+	e := newEnv(t)
+	var logs bytes.Buffer
+	e.cfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	e.spool(withPrompt(lines(0, 3)))
+	e.mustDrain()
+	if err := livesession.RecordTeammateCommentAck(e.dir, "tcm_1", 5); err != nil {
+		t.Fatal(err)
+	}
+	e.srv.RefuseAcks(100, http.StatusServiceUnavailable, sessionstream.ReasonUnavailable, sessionstream.ActionRetry)
+	if _, err := livesession.Close(t.Context(), e.cfg, e.dir, "", testBudget); err != nil {
+		t.Fatal(err)
+	}
+	soon := time.Now().Add(time.Hour)
+	if err := livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, soon); err != nil || !livesession.TeammateAcksOwed(e.dir) {
+		t.Fatalf("an hour of failures gave up (owed=%v, err=%v)", livesession.TeammateAcksOwed(e.dir), err)
+	}
+	late := time.Now().Add(25 * time.Hour)
+	for range 3 {
+		if err := livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, late); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if livesession.TeammateAcksOwed(e.dir) {
+		t.Fatal("still owed after 24 hours")
+	}
+	if n := strings.Count(logs.String(), "live_teammate_acks_given_up"); n != 1 {
+		t.Fatalf("give-up logged %d times, want once", n)
 	}
 }

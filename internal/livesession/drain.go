@@ -66,7 +66,10 @@ func (r *DrainResult) setTeammateComments(s *session, in []sessionstream.Teammat
 	r.TeammateComments = nil
 	for _, c := range in {
 		if a, ok := shown[c.ID]; ok {
-			s.resendAcks = append(s.resendAcks, a)
+			// persisted: the obligation outlives this call and this process
+			if err := addTeammateResend(s.dir, a.ID); err != nil {
+				s.log().Warn("live_teammate_resend_not_recorded", "comment_id", a.ID, "error", err)
+			}
 			continue
 		}
 		if c.ID == "" || slices.ContainsFunc(r.TeammateComments, func(h sessionstream.TeammateComment) bool { return h.ID == c.ID }) {
@@ -100,8 +103,6 @@ type session struct {
 	// rules is the persisted secret-rules delta, loaded on the first scan.
 	rules       *secretguard.RuleSet
 	rulesLoaded bool
-	// resendAcks are acks of notes the server listed again this call (F5).
-	resendAcks []sessionstream.TeammateCommentAck
 }
 
 func (s *session) spoolPath() string { return filepath.Join(s.dir, spoolFileName) }

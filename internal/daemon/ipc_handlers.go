@@ -232,14 +232,25 @@ func handleTeammateCommentsTake(s *Server, msg Message, _ net.Conn) HandlerResul
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		return HandlerResult{Response: &Response{Success: false, Error: fmt.Sprintf("invalid payload: %v", err)}}
 	}
-	entries, err := s.service.TeammateCommentsTake(payload)
+	out, err := s.service.TeammateCommentsTake(payload)
 	if err != nil {
 		return HandlerResult{Response: &Response{Success: false, Error: fmt.Sprintf("take teammate comments: %v", err)}}
 	}
-	if entries == nil {
-		entries = []whisperstore.WhisperEntry{}
+	if out.Entries == nil {
+		out.Entries = []whisperstore.WhisperEntry{}
 	}
-	return HandlerResult{Response: marshalResponse(TeammateCommentsTakeResponse{Entries: entries})}
+	return HandlerResult{Response: marshalResponse(out)}
+}
+
+func handleTeammateCommentsConfirm(s *Server, msg Message, _ net.Conn) HandlerResult {
+	var payload TeammateCommentsConfirmPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		return HandlerResult{Response: &Response{Success: false, Error: fmt.Sprintf("invalid payload: %v", err)}}
+	}
+	if err := s.service.TeammateCommentsConfirm(payload); err != nil {
+		return HandlerResult{Response: &Response{Success: false, Error: fmt.Sprintf("confirm teammate comments: %v", err)}}
+	}
+	return HandlerResult{Response: &Response{Success: true}}
 }
 
 func handleGetErrors(s *Server, _ Message, _ net.Conn) HandlerResult {

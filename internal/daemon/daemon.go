@@ -1539,7 +1539,8 @@ func (d *Daemon) initComponents() time.Duration {
 				}
 				return ids
 			}),
-			now: time.Now,
+			now:     time.Now,
+			enabled: config.TeammateNotesEnabled,
 		}
 		d.liveSessions.onTeammateComments = d.teammateComments.receive
 		d.sessionWatcher.SetLiveDrainer(func(sessionDir string) {
@@ -2222,11 +2223,18 @@ func (s *daemonServiceImpl) LiveSessionDrain(payload LiveSessionDrainPayload) {
 	s.d.liveSessions.Drain(s.d.ctx, payload.SessionPath)
 }
 
-func (s *daemonServiceImpl) TeammateCommentsTake(payload TeammateCommentsTakePayload) ([]whisperstore.WhisperEntry, error) {
+func (s *daemonServiceImpl) TeammateCommentsTake(payload TeammateCommentsTakePayload) (TeammateCommentsTakeResponse, error) {
 	if s.d.teammateComments == nil {
-		return nil, nil
+		return TeammateCommentsTakeResponse{}, nil
 	}
-	return s.d.teammateComments.take(s.d.ctx, payload)
+	return s.d.teammateComments.lease(s.d.ctx, payload)
+}
+
+func (s *daemonServiceImpl) TeammateCommentsConfirm(payload TeammateCommentsConfirmPayload) error {
+	if s.d.teammateComments == nil {
+		return nil
+	}
+	return s.d.teammateComments.confirm(s.d.ctx, payload)
 }
 
 func (s *daemonServiceImpl) Activity() {
