@@ -166,11 +166,17 @@ func (w *GitPollWatcher) poll(ctx context.Context, baseline bool) {
 //
 // Run via exec (not gitutil.RunGit) because RunGit trims whitespace, mixes
 // stderr, and sanitizes output — all of which corrupt NUL-delimited -z data.
+// gitStatusArgs is the poll's command line. --no-optional-locks keeps a plain
+// `git status` from taking .git/index.lock to refresh the index's stat cache:
+// polled every 2s, that lock made the developer's own `git add`/`git commit`
+// in the same worktree fail with "index.lock: File exists".
+var gitStatusArgs = []string{"--no-optional-locks", "status", "--porcelain", "-z", "-uall"}
+
 func (w *GitPollWatcher) gitStatus(ctx context.Context) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, gitStatusTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain", "-z", "-uall")
+	cmd := exec.CommandContext(ctx, "git", gitStatusArgs...)
 	cmd.Dir = w.projectRoot
 	out, err := cmd.Output()
 	if err != nil {
