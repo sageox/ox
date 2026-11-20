@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitserver"
 )
 
 // Note: these tests use t.Setenv which is incompatible with t.Parallel
@@ -446,6 +447,24 @@ func TestTokenFromEnv_LeadingCorruptionNotSilentlyAccepted(t *testing.T) {
 }
 
 // --- env token state classification ---
+
+// Failure prevented: the daemon and the CLI fingerprint SAGEOX_TOKEN by
+// different rules, so `ox doctor` reports a token mismatch that is not there,
+// or misses one.
+func TestEnvTokenFingerprint(t *testing.T) {
+	t.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
+	for _, tc := range []struct{ name, token, ep, want string }{
+		{"valid", "oxt_test_1ljPfr", "https://sageox.ai", gitserver.BearerTokenFingerprint("oxt_test_1ljPfr")},
+		{"unset", "", "https://sageox.ai", "none"},
+		{"bound to another endpoint", "oxt_test_1ljPfr", "https://test.sageox.ai", "none"},
+		{"malformed", "oxt_test_1ljPfX", "https://sageox.ai", "malformed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SAGEOX_TOKEN", tc.token)
+			assert.Equal(t, tc.want, EnvTokenFingerprint(tc.ep))
+		})
+	}
+}
 
 // TestEnvTokenFor_ReportsMalformedDistinctlyFromAbsent — Failure prevented:
 // callers cannot tell "no env token" from "the operator named a credential we

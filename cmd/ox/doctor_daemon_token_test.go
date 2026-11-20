@@ -92,3 +92,19 @@ func TestDaemonTokenMismatch(t *testing.T) {
 		})
 	}
 }
+
+// Failure prevented: the daemon token check exists but `ox doctor` never runs
+// it, because checkDaemonHealth does not list it.
+func TestCheckDaemonHealth_IncludesTheTokenCheck(t *testing.T) {
+	t.Setenv("OX_XDG_DISABLE", "")                     // legacy mode would ignore XDG_RUNTIME_DIR
+	runtimeDir, err := os.MkdirTemp("/tmp", "ox-tok-") // short: macOS caps a socket path at 104 bytes
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Chdir(t.TempDir())
+	var names []string
+	for _, result := range checkDaemonHealth(doctorOptions{}) {
+		names = append(names, result.name)
+	}
+	assert.Contains(t, names, daemonTokenCheckName)
+}
