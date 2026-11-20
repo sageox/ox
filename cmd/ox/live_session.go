@@ -150,7 +150,7 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 	ctx, cancel := context.WithTimeout(context.Background(), liveLocalBound)
 	defer cancel()
 	log := slog.With("session_id", state.SessionID)
-	parent, continuedFrom := liveSessionLinks(projectRoot, state)
+	parent, continuedFrom := liveSessionLinks(state)
 	if _, err := livesession.Prepare(ctx, liveConfig(projectRoot), state.SessionPath, livesession.OpenParams{
 		SessionID: state.SessionID, SessionName: session.GetSessionName(state.SessionPath),
 		RepoID: repoID, Agent: agent, StartedAt: state.StartedAt,
@@ -168,21 +168,19 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 }
 
 // liveSessionLinks are the links a recording's stream opens with: the ses_ id
-// of the recording whose shell launched this agent (read now, at start, while
-// that recording is still alive) and of the earlier recording this one
-// continues. An id that is not a ses_ id, or that names this recording itself,
-// is left out rather than sent.
-func liveSessionLinks(projectRoot string, state *session.RecordingState) (parent, continuedFrom string) {
-	if state.ParentAgentID != "" {
-		ps, err := session.LoadRecordingStateForAgent(projectRoot, state.ParentAgentID)
-		if err == nil && ps != nil && ps.SessionID != state.SessionID && sessionid.IsValidSessionID(ps.SessionID) {
-			parent = ps.SessionID
-		}
+// of the recording whose shell launched this agent, as captured when that
+// parent was chosen, and of the earlier recording this one continues. An id
+// that is not a ses_ id, or that names this recording itself, is left out.
+func liveSessionLinks(state *session.RecordingState) (parent, continuedFrom string) {
+	return ownSessionLink(state, state.ParentSessionID), ownSessionLink(state, state.ContinuedFromSessionID)
+}
+
+// ownSessionLink is id when it is a ses_ id naming another recording, else "".
+func ownSessionLink(state *session.RecordingState, id string) string {
+	if id == state.SessionID || !sessionid.IsValidSessionID(id) {
+		return ""
 	}
-	if c := state.ContinuedFromSessionID; c != state.SessionID && sessionid.IsValidSessionID(c) {
-		continuedFrom = c
-	}
-	return parent, continuedFrom
+	return id
 }
 
 // closeSupersededLiveStreams requests the close of every stream an earlier

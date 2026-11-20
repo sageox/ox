@@ -14,43 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Failure prevented: a coding agent launched from a recorded session's shell
-// (`claude -p`, `codex exec`) inherits that session's SAGEOX_AGENT_ID. Its
-// prime took the inherited id as its own, the same reuse a /clear in one agent
-// process relies on, so the child never became a session of its own and no
-// parent link could ever be sent.
-func TestRunAgentPrime_AgentLaunchedFromARecordedSessionRecordsItsParent(t *testing.T) {
-	env := initializedE2E(t)
-	isolateAgentDetection(t)
-	isolateSessionMarkerDir(t)
-	t.Setenv("SAGEOX_DAEMON", "false")
-	t.Setenv("OX_SESSION_RECORDING", "auto")
-	ledgerPath, err := ledger.DefaultPath()
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(filepath.Join(ledgerPath, ".git"), 0o700))
-	parentSession, childSession := uniqueSessionID(t, "parent"), uniqueSessionID(t, "child")
-
-	// two live agent processes: the parent's, then the child it launched
-	t.Setenv("OX_PARENT_PID", strconv.Itoa(os.Getppid()))
-	primeWithHook(t, parentSession, "startup")
-	parentAgent, _ := nativeSessionAgentID(t, parentSession)
-	parentState, err := session.LoadRecordingStateForAgent(env.Root, parentAgent)
-	require.NoError(t, err)
-	require.NotNil(t, parentState, "harness: the parent prime must start a recording")
-
-	t.Setenv("SAGEOX_AGENT_ID", parentAgent)
-	t.Setenv("OX_PARENT_PID", strconv.Itoa(os.Getpid()))
-	primeWithHook(t, childSession, "startup")
-
-	childAgent, _ := nativeSessionAgentID(t, childSession)
-	require.NotEqual(t, parentAgent, childAgent, "the launched agent took over its parent's AI coworker identity")
-	childState, err := session.LoadRecordingStateForAgent(env.Root, childAgent)
-	require.NoError(t, err)
-	require.NotNil(t, childState, "the launched agent must record a session of its own")
-	assert.Equal(t, parentAgent, childState.ParentAgentID)
-	assert.NotEqual(t, parentState.SessionID, childState.SessionID)
-}
-
 // The decision prime makes about an inherited SAGEOX_AGENT_ID. Only a new
 // native session in a different live agent process is a launched child; every
 // case that cannot tell the processes apart keeps reusing the identity, which
@@ -87,12 +50,10 @@ func TestLaunchedByAnotherAgent(t *testing.T) {
 // so a child recording it started had no link to send.
 func TestHookRecordingStartRecordsTheInheritedParent(t *testing.T) {
 	projectRoot, repoID := setupTestProject(t)
-	t.Setenv("SAGEOX_DAEMON", "false")
-	t.Setenv("OX_SESSION_RECORDING", "auto")
-	ledgerPath, err := ledger.DefaultPath()
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(filepath.Join(ledgerPath, ".git"), 0o700))
+	enableRecordingWithoutLedgerClone(t)
 	createActiveRecordingWithPID(t, projectRoot, repoID, "OxParent", os.Getppid())
+	parentID := sessionid.GenerateSessionID()
+	require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, "OxParent", func(s *session.RecordingState) { s.SessionID = parentID }))
 	t.Setenv("SAGEOX_AGENT_ID", "OxParent")
 	t.Setenv("OX_PARENT_PID", strconv.Itoa(os.Getpid()))
 
@@ -105,33 +66,71 @@ func TestHookRecordingStartRecordsTheInheritedParent(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, child, "harness: the hook must start the child's recording")
 	assert.Equal(t, "OxParent", child.ParentAgentID)
+	assert.Equal(t, parentID, child.ParentSessionID, "the parent's session id must be captured when the parent is chosen")
 }
 
-// The ids a recording's stream opens with. Failure prevented: a child stream
-// opened with no parent id, or with something that is not a ses_ id.
+// enableRecordingWithoutLedgerClone turns auto-recording on, with a Ledger
+// directory that counts as cloned, so a recording starts with no network.
+func enableRecordingWithoutLedgerClone(t *testing.T) {
+	t.Helper()
+	t.Setenv("SAGEOX_DAEMON", "false")
+	t.Setenv("OX_SESSION_RECORDING", "auto")
+	ledgerPath, err := ledger.DefaultPath()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(ledgerPath, ".git"), 0o700))
+}
+
+// Failure prevented: a child launched while its parent was paused skipped
+// recording once, but its id was already in its env file, so the next prime
+// found no parent and started an unsuspended recording, eligible for sharing,
+// without the parent ever being resumed.
+func TestChildOfAPausedParentStaysPausedWhenPrimedAgain(t *testing.T) {
+	projectRoot, repoID := setupTestProject(t)
+	enableRecordingWithoutLedgerClone(t)
+	createActiveRecordingWithPID(t, projectRoot, repoID, "OxParent", os.Getppid())
+	require.NoError(t, session.MarkExplicitPause(projectRoot, "OxParent", 1))
+
+	first := startSessionRecording(projectRoot, "OxChild", "claude-code", "OxParent", "", "child-session")
+	require.NotNil(t, first)
+	require.False(t, first.Recording, "harness: a paused parent's child skips recording")
+
+	// the re-prime: the child's own id is in the environment now, so no parent
+	again := startSessionRecording(projectRoot, "OxChild", "claude-code", "", "", "child-session")
+	require.NotNil(t, again)
+	require.True(t, again.Recording, "harness: the re-prime starts the child's recording")
+	child, err := session.LoadRecordingStateForAgent(projectRoot, "OxChild")
+	require.NoError(t, err)
+	require.NotNil(t, child)
+	assert.True(t, child.IsSuspended(), "a re-primed child of a paused parent recorded unsuspended")
+}
+
+// The ids a recording's stream opens with. Failure prevented: the parent was
+// looked up again when the stream was prepared, after it had ended or /clear
+// had replaced its recording, so the child sent no parent or the wrong one.
 func TestLiveSessionLinks(t *testing.T) {
 	projectRoot, repoID := setupTestProject(t)
-	parentID, earlierID, ownID := sessionid.GenerateSessionID(), sessionid.GenerateSessionID(), sessionid.GenerateSessionID()
+	parentID, replacedID, earlierID, ownID := sessionid.GenerateSessionID(), sessionid.GenerateSessionID(), sessionid.GenerateSessionID(), sessionid.GenerateSessionID()
+	// the parent agent's recording after a /clear: a new ses_ id
 	require.NoError(t, session.SaveRecordingState(projectRoot, &session.RecordingState{
-		AgentID: "OxParent", SessionID: parentID, AdapterName: "claude-code", StartedAt: time.Now(), ParentPID: os.Getpid(),
+		AgentID: "OxParent", SessionID: replacedID, AdapterName: "claude-code", StartedAt: time.Now(), ParentPID: os.Getpid(),
 		SessionPath: filepath.Join(session.GetContextPath(repoID), "sessions", "2026-04-01T10-00-user-OxParent"),
 	}))
+	child := func(parentAgent, parentSession, continued string) *session.RecordingState {
+		return &session.RecordingState{AgentID: "OxChild", SessionID: ownID, WorkspacePath: projectRoot,
+			ParentAgentID: parentAgent, ParentSessionID: parentSession, ContinuedFromSessionID: continued}
+	}
 
-	t.Run("a child names its parent's recording and the one it continues", func(t *testing.T) {
-		parent, continued := liveSessionLinks(projectRoot, &session.RecordingState{
-			AgentID: "OxChild", SessionID: ownID, ParentAgentID: "OxParent", ContinuedFromSessionID: earlierID,
-		})
-		assert.Equal(t, parentID, parent)
+	t.Run("a child sends the parent session captured when it was chosen", func(t *testing.T) {
+		parent, continued := liveSessionLinks(child("OxParent", parentID, earlierID))
+		assert.Equal(t, parentID, parent, "the parent's replacement recording was sent instead")
 		assert.Equal(t, earlierID, continued)
 	})
-	t.Run("a parent with no live recording names nothing", func(t *testing.T) {
-		parent, _ := liveSessionLinks(projectRoot, &session.RecordingState{AgentID: "OxChild", SessionID: ownID, ParentAgentID: "OxEnded"})
-		assert.Empty(t, parent)
+	t.Run("a parent that has since ended is still named", func(t *testing.T) {
+		parent, _ := liveSessionLinks(child("OxEnded", parentID, ""))
+		assert.Equal(t, parentID, parent)
 	})
 	t.Run("ids that are not ses_ ids, or name the recording itself, are left out", func(t *testing.T) {
-		parent, continued := liveSessionLinks(projectRoot, &session.RecordingState{
-			AgentID: "OxParent", SessionID: parentID, ParentAgentID: "OxParent", ContinuedFromSessionID: "2026-03-04T13-41-person-a-Oxabc1",
-		})
+		parent, continued := liveSessionLinks(child("OxParent", ownID, "2026-03-04T13-41-person-a-Oxabc1"))
 		assert.Empty(t, parent, "a recording is never its own parent")
 		assert.Empty(t, continued)
 	})

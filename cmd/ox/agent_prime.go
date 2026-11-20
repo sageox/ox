@@ -1297,6 +1297,16 @@ func inheritedParentAgentID(projectRoot, agentID string) string {
 	return existing
 }
 
+// parentRecordingPaused reports whether the parent's recording is paused: its
+// pause marker, or an in-flight pause that has no marker yet (defensive).
+func parentRecordingPaused(projectRoot, parentAgentID string) bool {
+	if _, _, paused := session.PeekExplicitPause(projectRoot, parentAgentID); paused {
+		return true
+	}
+	parentState, _ := session.LoadRecordingStateForAgent(projectRoot, parentAgentID)
+	return parentState != nil && parentState.SuspendedAt != nil
+}
+
 // agentProcessPID is the long-lived coding-agent process this ox runs under.
 // Hooks run inside a transient shell, so os.Getppid() names a shell that dies
 // right after the hook; the hook passes the agent's PID in OX_PARENT_PID, and a
@@ -1687,23 +1697,18 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 	// the subagent skips recording entirely. Subagents are atomic units of
 	// work spawned within the parent's context window; if the parent has
 	// paused, the user's intent is "no recording" for this scope.
-	if parentAgentID != "" {
-		if _, _, parentPaused := session.PeekExplicitPause(projectRoot, parentAgentID); parentPaused {
-			return &sessionStatus{
-				Recording:        false,
-				Mode:             resolved.Mode,
-				Source:           string(resolved.Source),
-				UserNotification: "[ox] Parent session suspended. Recording skipped for this subagent.",
-			}
+	if parentAgentID != "" && parentRecordingPaused(projectRoot, parentAgentID) {
+		// The skip must outlive this prime: the child's id is now in its env
+		// file, so a later re-prime finds no parent and would otherwise record
+		// unsuspended. Its own pause marker makes that recording start paused.
+		if err := session.MarkExplicitPause(projectRoot, agentID, 0); err != nil {
+			slog.Warn("paused parent: failed to keep the child paused", "agent_id", agentID, "parent_agent_id", parentAgentID, "error", err)
 		}
-		// also honor an in-flight pause without marker (defensive)
-		if parentState, _ := session.LoadRecordingStateForAgent(projectRoot, parentAgentID); parentState != nil && parentState.SuspendedAt != nil {
-			return &sessionStatus{
-				Recording:        false,
-				Mode:             resolved.Mode,
-				Source:           string(resolved.Source),
-				UserNotification: "[ox] Parent session suspended. Recording skipped for this subagent.",
-			}
+		return &sessionStatus{
+			Recording:        false,
+			Mode:             resolved.Mode,
+			Source:           string(resolved.Source),
+			UserNotification: "[ox] Parent session suspended. Recording skipped for this subagent.",
 		}
 	}
 
@@ -1839,6 +1844,7 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 		opts.ParentAgentID = parentAgentID
 		if parentState, _ := session.LoadRecordingStateForAgent(projectRoot, parentAgentID); parentState != nil {
 			opts.ParentSessionPath = parentState.SessionPath
+			opts.ParentSessionID = parentState.SessionID
 		}
 	}
 
