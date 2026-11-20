@@ -95,6 +95,15 @@ type Server struct {
 	edgeType         string
 	edgeBody         string
 	hangAppendsOver  int
+	// teammate comments, in the order the owner queued them; delivered holds the
+	// first-wins delivered_at_seq per comment id.
+	comments   []sessionstream.TeammateComment
+	delivered  map[string]int64
+	ackRefusal *reply
+	ackIgnored int
+	listFails  bool
+	nameTaken  bool
+	ackBodies  []sessionstream.AckTeammateCommentsRequest
 
 	inflight, maxInflight int
 }
@@ -103,9 +112,10 @@ type Server struct {
 func New(t testing.TB) *Server {
 	t.Helper()
 	s := &Server{
-		Store: sessionstream.NewMemoryStore(),
-		keys:  map[string]ed25519.PublicKey{},
-		convs: map[string]*conversation{},
+		Store:     sessionstream.NewMemoryStore(),
+		keys:      map[string]ed25519.PublicKey{},
+		convs:     map[string]*conversation{},
+		delivered: map[string]int64{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+sessionstream.PathKeys, s.route(s.registerKey))
@@ -113,6 +123,7 @@ func New(t testing.TB) *Server {
 	mux.HandleFunc("DELETE "+sessionstream.PathSessions+"/{cnv}", s.route(s.remove))
 	mux.HandleFunc("POST "+sessionstream.PathSessions+"/{cnv}/close", s.route(s.closeSession))
 	mux.HandleFunc("POST "+sessionstream.PathSessions+"/{cnv}/layers/{layer}/lines", s.route(s.appendLines))
+	mux.HandleFunc("POST "+sessionstream.PathSessions+"/{cnv}/teammate-comments/acks", s.route(s.ackTeammateComments))
 	s.Server = httptest.NewServer(mux)
 	t.Cleanup(s.Close)
 	return s
@@ -270,6 +281,9 @@ func (s *Server) open(r *http.Request, body []byte, _ *Call) reply {
 		s.refuseOpen--
 		return refusal(http.StatusServiceUnavailable, sessionstream.ReasonUnavailable, sessionstream.ActionRetry, nil)
 	}
+	if s.nameTaken {
+		return refusal(http.StatusConflict, sessionstream.ReasonSessionNameTaken, sessionstream.ActionStop, nil)
+	}
 	cnv := r.PathValue("cnv")
 	var req sessionstream.OpenSessionRequest
 	if json.Unmarshal(body, &req) != nil || !sessionstream.ValidConversationID(cnv) || !sessionstream.ValidLayerID(req.LayerID) ||
@@ -359,7 +373,52 @@ func (s *Server) appendLines(r *http.Request, body []byte, call *Call) reply {
 		s.dropAfterWrite--
 		return reply{drop: true} // stored, but the client never hears the 200
 	}
-	return reply{status: http.StatusOK, body: sessionstream.AppendResponse{StoredThrough: next.StoredThrough, PrefixSHA256: next.PrefixSHA256}}
+	return reply{status: http.StatusOK, body: sessionstream.AppendResponse{
+		StoredThrough: next.StoredThrough, PrefixSHA256: next.PrefixSHA256, TeammateComments: s.undelivered(),
+		TeammateCommentsListed: !s.listFails,
+	}}
+}
+
+// undelivered is what api-go puts in an append answer: queued comments with no
+// recorded ack, oldest first, at most MaxTeammateCommentsPerAppend. mu held.
+func (s *Server) undelivered() []sessionstream.TeammateComment {
+	if s.listFails {
+		return nil
+	}
+	var out []sessionstream.TeammateComment
+	for _, c := range s.comments {
+		if _, done := s.delivered[c.ID]; done || len(out) == sessionstream.MaxTeammateCommentsPerAppend {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// ackTeammateComments records the first ack per comment id, as api-go does.
+func (s *Server) ackTeammateComments(r *http.Request, body []byte, _ *Call) reply {
+	var req sessionstream.AckTeammateCommentsRequest
+	if json.Unmarshal(body, &req) != nil || len(req.Acks) == 0 || len(req.Acks) > sessionstream.MaxTeammateCommentAcks {
+		return refusal(http.StatusBadRequest, sessionstream.ReasonInvalidRequest, sessionstream.ActionFix, nil)
+	}
+	if s.ackRefusal != nil {
+		x := *s.ackRefusal
+		s.ackRefusal = nil
+		return x
+	}
+	s.ackBodies = append(s.ackBodies, req)
+	if s.ackIgnored > 0 { // answered 200, recorded nothing: a lost write
+		s.ackIgnored--
+		return reply{status: http.StatusOK, body: sessionstream.AckTeammateCommentsResponse{}}
+	}
+	recorded := 0
+	for _, a := range req.Acks {
+		if _, done := s.delivered[a.ID]; !done && a.DeliveredAtSeq >= 1 {
+			s.delivered[a.ID] = a.DeliveredAtSeq
+			recorded++
+		}
+	}
+	return reply{status: http.StatusOK, body: sessionstream.AckTeammateCommentsResponse{Recorded: recorded}}
 }
 
 // appendKnobs applies the one-shot refusals before the append runs. mu held.

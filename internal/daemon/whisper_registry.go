@@ -297,6 +297,69 @@ func (r *WhisperRegistry) MarkRelayed(murmurID, scope string) error {
 	return store.MarkRelayed(murmurID, scope)
 }
 
+// teammateCommentRelayScope is the relayed-table scope that remembers a
+// teammate comment was stored. The server re-sends every undelivered comment on
+// each append, so without it a comment taken (and so deleted) before its ack
+// lands would come back as a second note.
+const teammateCommentRelayScope = "teammate-comment"
+
+// AddTeammateComment stores a note for one agent unless that comment id was
+// stored before. It reports whether the note was stored. Notes live in the
+// ledger store beside the other whispers; with no ledger store nothing is kept
+// (the server re-sends it on the next append).
+func (r *WhisperRegistry) AddTeammateComment(entry whisperstore.WhisperEntry) (bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.ledgerStore == nil {
+		return false, nil
+	}
+	seen, err := r.ledgerStore.IsRelayed(entry.ID, teammateCommentRelayScope)
+	if err != nil {
+		return false, fmt.Errorf("check teammate comment %s: %w", entry.ID, err)
+	}
+	if seen {
+		return false, nil
+	}
+	if err := r.ledgerStore.Add(entry); err != nil {
+		return false, err
+	}
+	if err := r.ledgerStore.MarkRelayed(entry.ID, teammateCommentRelayScope); err != nil {
+		return true, fmt.Errorf("mark teammate comment %s relayed: %w", entry.ID, err)
+	}
+	return true, nil
+}
+
+// PeekTeammateComments returns up to limit of agentID's notes without removing them.
+func (r *WhisperRegistry) PeekTeammateComments(agentID string, limit int) ([]whisperstore.WhisperEntry, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.ledgerStore == nil {
+		return nil, nil
+	}
+	return r.ledgerStore.PeekTeammateComments(agentID, limit)
+}
+
+// DeleteTeammateComments removes the named notes.
+func (r *WhisperRegistry) DeleteTeammateComments(ids ...string) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.ledgerStore == nil {
+		return nil
+	}
+	return r.ledgerStore.DeleteTeammateComments(ids...)
+}
+
+// RetainTeammateComments makes keep the whole pending set of a conversation;
+// with no ids it purges the conversation's notes.
+func (r *WhisperRegistry) RetainTeammateComments(conversationID string, keep []string) (int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.ledgerStore == nil {
+		return 0, nil
+	}
+	return r.ledgerStore.RetainTeammateComments(conversationID, keep)
+}
+
 // RemoveCursor removes an agent's cursor from all stores.
 //
 // Holds the registry read lock through the entire iteration so the idle-close

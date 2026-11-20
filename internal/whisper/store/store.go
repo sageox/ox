@@ -67,6 +67,14 @@ const (
 	// GetWhispersPage route delivery by agent_id for this source only.
 	// Everything else stays broadcast (see #538).
 	SourceRecordingReminder = "recording-reminder"
+
+	// SourceTeammateComment marks a note a teammate watching a live session
+	// sent to one agent (entry agent_id = the recipient). It is untrusted text
+	// that must reach the model only through the labeled, quoted hook path, so
+	// GetWhispers never returns it to anyone, its recipient included: the
+	// broadcast formatter has no label and no delivery receipt.
+	// TakeTeammateComments is its only consumer.
+	SourceTeammateComment = "teammate-comment"
 )
 
 // WhisperEntry is a single whisper destined for agent delivery.
@@ -379,8 +387,9 @@ func (s *Store) GetWhispers(agentID string, attention Attention, topics []string
 		agent_id, principal_id, principal_type, team_id, metadata
 		FROM whispers
 		WHERE created_at > ?
-		  AND (source != ? OR agent_id = ?)`
-	args := []any{cursor.UTC().Format(time.RFC3339Nano), SourceRecordingReminder, agentID}
+		  AND (source != ? OR agent_id = ?)
+		  AND source != ?`
+	args := []any{cursor.UTC().Format(time.RFC3339Nano), SourceRecordingReminder, agentID, SourceTeammateComment}
 
 	// attention filter
 	allowedImportance := importanceForAttention(attention)
@@ -589,6 +598,9 @@ func (s *Store) GetWhispersPage(agentID string, before time.Time, limit int) ([]
 	// a new personalized source constant, extend both clauses.
 	conditions = append(conditions, `(source != ? OR agent_id = ?)`)
 	args = append(args, SourceRecordingReminder, agentID)
+	// Teammate comments are addressed to one agent the same way.
+	conditions = append(conditions, `(source != ? OR agent_id = ?)`)
+	args = append(args, SourceTeammateComment, agentID)
 	if !before.IsZero() {
 		conditions = append(conditions, `created_at < ?`)
 		args = append(args, before.UTC().Format(time.RFC3339Nano))
@@ -655,6 +667,117 @@ func (s *Store) GetWhispersPage(agentID string, before time.Time, limit int) ([]
 		entries = []WhisperEntry{}
 	}
 	return entries, hasMore, nil
+}
+
+// PeekTeammateComments returns up to limit of agentID's teammate comments,
+// oldest first, without removing them. An empty agentID matches nothing: a note
+// is only ever addressed to a named agent.
+func (s *Store) PeekTeammateComments(agentID string, limit int) ([]WhisperEntry, error) {
+	if agentID == "" || limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Load().Query(`SELECT id, scope, type, source, topic, content, importance, created_at,
+		agent_id, principal_id, principal_type, team_id, metadata
+		FROM whispers WHERE source = ? AND agent_id = ?
+		ORDER BY created_at, id LIMIT ?`, SourceTeammateComment, agentID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query teammate comments: %w", err)
+	}
+	defer rows.Close()
+	var entries []WhisperEntry
+	for rows.Next() {
+		var e WhisperEntry
+		var createdStr, typ, imp string
+		var entryAgentID, principalID, principalType, teamID, metadataJSON sql.NullString
+		if err := rows.Scan(&e.ID, &e.Scope, &typ, &e.Source, &e.Topic, &e.Content, &imp, &createdStr,
+			&entryAgentID, &principalID, &principalType, &teamID, &metadataJSON); err != nil {
+			return nil, fmt.Errorf("scan teammate comment: %w", err)
+		}
+		e.Type, e.Importance = WhisperType(typ), Importance(imp)
+		e.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdStr)
+		e.AgentID, e.PrincipalID, e.PrincipalType, e.TeamID = entryAgentID.String, principalID.String, principalType.String, teamID.String
+		if metadataJSON.Valid && metadataJSON.String != "" {
+			var m map[string]string
+			if json.Unmarshal([]byte(metadataJSON.String), &m) == nil {
+				e.Metadata = m
+			}
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate teammate comments: %w", err)
+	}
+	return entries, nil
+}
+
+// DeleteTeammateComments removes the named teammate comments (only that source).
+func (s *Store) DeleteTeammateComments(ids ...string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	tx, err := s.db.Load().Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+	for _, id := range ids {
+		if _, err := tx.Exec(`DELETE FROM whispers WHERE id = ? AND source = ?`, id, SourceTeammateComment); err != nil {
+			return fmt.Errorf("delete teammate comment %s: %w", id, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// TakeTeammateComments is Peek then Delete: a note is shown at most once.
+// Callers that must not consume a note before it can be acked use Peek and
+// Delete themselves.
+func (s *Store) TakeTeammateComments(agentID string, limit int) ([]WhisperEntry, error) {
+	entries, err := s.PeekTeammateComments(agentID, limit)
+	if err != nil || len(entries) == 0 {
+		return nil, err
+	}
+	ids := make([]string, len(entries))
+	for i, e := range entries {
+		ids[i] = e.ID
+	}
+	if err := s.DeleteTeammateComments(ids...); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+// RetainTeammateComments makes keep the whole pending set for one conversation:
+// every teammate comment recorded against conversationID whose id is not in keep
+// is deleted, and so is its "already stored" mark, so a note the server lists
+// again later (the owner opted back in) is stored and shown. It reports how
+// many were removed. An empty conversationID removes nothing.
+func (s *Store) RetainTeammateComments(conversationID string, keep []string) (int64, error) {
+	if conversationID == "" {
+		return 0, nil
+	}
+	where := `source = ? AND json_extract(metadata, '$.conversation_id') = ?`
+	args := []any{SourceTeammateComment, conversationID}
+	if len(keep) > 0 {
+		where += ` AND id NOT IN (` + strings.TrimSuffix(strings.Repeat("?,", len(keep)), ",") + `)`
+		for _, id := range keep {
+			args = append(args, id)
+		}
+	}
+	tx, err := s.db.Load().Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+	// the relayed marks first: they are found through the rows being deleted
+	if _, err := tx.Exec(`DELETE FROM relayed_murmurs WHERE scope = ? AND murmur_id IN (SELECT id FROM whispers WHERE `+where+`)`, append([]any{SourceTeammateComment}, args...)...); err != nil { //nolint:gosec // G202 - "?" placeholders only
+		return 0, fmt.Errorf("clear teammate comment marks: %w", err)
+	}
+	res, err := tx.Exec(`DELETE FROM whispers WHERE `+where, args...) //nolint:gosec // G202 - "?" placeholders only
+	if err != nil {
+		return 0, fmt.Errorf("retain teammate comments: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, tx.Commit()
 }
 
 // GetCursor returns the last-seen cursor for an agent (zero time if unknown).
