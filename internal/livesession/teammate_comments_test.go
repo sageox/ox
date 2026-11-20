@@ -484,3 +484,43 @@ func TestReceiptLogsLiveUnderTheDataDirNotTheSessionFolder(t *testing.T) {
 		t.Fatal("a path-shaped conversation id was accepted")
 	}
 }
+
+// Failure prevented: the receipts of the conversation seen before the lock sent
+// to the conversation found under it.
+func TestFlushReadsReceiptsOfTheStreamTheLockAuthorized(t *testing.T) {
+	e := closedEnvWithAck(t) // tcm_1 owed under the original conversation
+	origState, err := os.ReadFile(filepath.Join(e.dir, "stream-state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a second conversation, minted for the same folder and closed
+	if err := os.Remove(filepath.Join(e.dir, "stream-state.json")); err != nil {
+		t.Fatal(err)
+	}
+	params := livesession.OpenParams{SessionID: sessionid.GenerateSessionID(), SessionName: "2026-03-04T13-41-person-a-Oxabc1", RepoID: "repo_test", Agent: "claude-code", StartedAt: time.Now()}
+	if _, err := livesession.Prepare(t.Context(), e.cfg, e.dir, params); err != nil {
+		t.Fatal(err)
+	}
+	e.spool(withPrompt(lines(0, 3)))
+	if _, err := livesession.Open(t.Context(), e.cfg, e.dir, params); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := livesession.Close(t.Context(), e.cfg, e.dir, "", testBudget); err != nil || !res.Done {
+		t.Fatalf("close = %+v, %v", res, err)
+	}
+	newState, _ := os.ReadFile(filepath.Join(e.dir, "stream-state.json"))
+	before := len(e.srv.AckRequests())
+	// the preflight sees the original stream; the state is swapped to the other
+	// authorized one before the lock
+	if err := os.WriteFile(filepath.Join(e.dir, "stream-state.json"), origState, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	livesession.SetFlushPreflightHookForTest(t, func() {
+		_ = os.WriteFile(filepath.Join(e.dir, "stream-state.json"), newState, 0o600)
+	})
+	e.srv.RefuseAcks(0, 0, "", "")
+	_, _ = livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, time.Now())
+	if n := len(e.srv.AckRequests()) - before; n != 0 {
+		t.Fatalf("%d ack requests: the old conversation's receipts were sent to another conversation", n)
+	}
+}
