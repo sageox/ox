@@ -1325,6 +1325,11 @@ func inheritedParentOf(projectRoot, agentID string) inheritedParent {
 	if session.InheritedPauseHeld(projectRoot, launcher, agentProcessPID()) {
 		return inheritedParent{PausedLauncher: launcher, PauseAnchor: session.LaunchedPauseAnchor(projectRoot, launcher, 0)}
 	}
+	// A person-paused launcher whose recording /clear has just removed still
+	// runs: it is a live paused root, so this agent is paused too.
+	if root, ok := session.PausedRootAnchor(projectRoot, launcher); ok {
+		return inheritedParent{PausedLauncher: launcher, PauseAnchor: session.LaunchedPauseAnchor(projectRoot, launcher, root.PID)}
+	}
 	return inheritedParent{}
 }
 

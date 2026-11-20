@@ -118,3 +118,38 @@ func TestLaunchedPauseAnchorPassesTheRootDownTheChain(t *testing.T) {
 
 	assert.Equal(t, PauseAnchor{}, ProcessAnchorOf(0), "no process names no anchor")
 }
+
+// A person's pause names the paused agent's process, so a child launched while
+// that agent's recording state is briefly gone (/clear) still finds the root
+// paused. Failure prevented: the direct child of a paused root recording in
+// the /clear gap; and an old marker, or a root that has exited, still holding.
+func TestPausedRootAnchorHoldsOnlyWhileThePausedProcessRuns(t *testing.T) {
+	self := os.Getpid()
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, projectRoot string)
+		want  bool
+	}{
+		{"a person paused a running agent", func(t *testing.T, root string) { pausedRoot(t, root, "OxRoot", self) }, true},
+		{"the paused agent has exited", func(t *testing.T, root string) { pausedRoot(t, root, "OxRoot", deadPID) }, false},
+		{"a marker from before processes were recorded", func(t *testing.T, root string) {
+			require.NoError(t, writePauseMarker(root, "OxRoot", pauseMarkerPayload{Seq: 1, Person: true}))
+		}, false},
+		{"an inherited marker is not a person's pause", func(t *testing.T, root string) {
+			own := ProcessAnchorOf(self)
+			require.NoError(t, writePauseMarker(root, "OxRoot", pauseMarkerPayload{Seq: 1, PID: own.PID, PIDStart: own.Start}))
+		}, false},
+		{"nothing is paused", func(t *testing.T, root string) {}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			projectRoot := newPauseMarkerProject(t)
+			tc.setup(t, projectRoot)
+			anchor, held := PausedRootAnchor(projectRoot, "OxRoot")
+			assert.Equal(t, tc.want, held)
+			if held {
+				assert.Equal(t, self, anchor.PID)
+			}
+		})
+	}
+}
