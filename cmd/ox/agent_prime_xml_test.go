@@ -1796,3 +1796,22 @@ func TestEscapeXMLComment(t *testing.T) {
 		}
 	}
 }
+
+// TestConsultFirst_SessionRouting pins the agent-view routing: query must not
+// be offered for session history, and a pasted /c/ses_ link goes to
+// `ox session view`, never a web fetch.
+func TestConsultFirst_SessionRouting(t *testing.T) {
+	var all strings.Builder
+	for _, r := range consultRoutes() {
+		all.WriteString(r.Cue + " " + r.Command + "\n")
+	}
+	got := all.String()
+	if strings.Contains(got, "and session history") {
+		t.Error("consult routes still claim ox query covers session history")
+	}
+	for _, want := range []string{"`ox query` does not search coding sessions yet", "…/c/ses_…", "`ox session view <link>`"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("consult routes missing %q", want)
+		}
+	}
+}

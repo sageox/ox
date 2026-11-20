@@ -14,10 +14,10 @@ import (
 var queryCmd = &cobra.Command{
 	Use:   "query",
 	Short: "Search team knowledge",
-	Long: `Search across team discussions, docs, session history, and local code.
+	Long: `Search across team discussions, docs, and local code. Coding sessions are not searched yet; use "ox session list".
 
 Sources:
-  team      Search team discussions, docs, and session history (default)
+  team      Search team discussions and docs (default; coding sessions are not searched yet)
   code      Search local code index only (queries)
   local     Search locally-cached ledger ONLY (zero network, fast hook path)
   all       Search both team context and local code index
