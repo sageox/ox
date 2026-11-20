@@ -350,7 +350,9 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 			if err := ValidateSessionPublication(attemptCtx, repoPath); err != nil {
 				return err
 			}
-			outStr, err = RunGit(attemptCtx, repoPath, "push", "--quiet")
+			// a file, not a pipe: the push must not die with a pusher that is
+			// killed mid-push (sageox/ox#1936)
+			outStr, err = RunGitFileOutput(attemptCtx, repoPath, "push", "--quiet")
 			return nil
 		})
 		if validationErr != nil {
