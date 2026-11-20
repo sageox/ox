@@ -2,9 +2,11 @@ package oxactivity
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func bashInput(cmd string) json.RawMessage {
@@ -211,6 +213,91 @@ func TestClassify_MCPTools(t *testing.T) {
 			}
 			assert.True(t, ok)
 			assert.Equal(t, tt.want, got.Label)
+		})
+	}
+}
+
+// TestClassify_MCPRef names the one item a SageOx MCP read pulled, from the
+// tool's input, and nothing else. Failure prevented: a plan or discussion read
+// through MCP never counting on the status line (no Ref), a newer server's
+// extra input field breaking the count, or an untrusted id carrying escapes,
+// spaces or path separators into the per-session state key.
+func TestClassify_MCPRef(t *testing.T) {
+	t.Parallel()
+	const (
+		pln = "pln_019ffe10-0000-7000-8000-000000000021"
+		cnv = "cnv_019ffe10-0000-7000-8000-000000000011"
+		rec = "rec_019ffe10-0000-7000-8000-000000000011"
+	)
+	hostile := []struct{ name, value string }{
+		{"control chars", "pln_a\u001b[2Jb"},
+		{"spaces", "my plan"},
+		{"path traversal", "../../etc/passwd"},
+		{"embedded id after a path", "../" + cnv},
+		{"slash", "a/b"},
+		{"too long", strings.Repeat("a", 129)},
+		{"empty string", ""},
+	}
+	type tc struct {
+		name  string
+		tool  string
+		input string
+		want  string
+	}
+	tests := []tc{}
+	for _, tool := range []struct{ name, field, id, want string }{
+		{"mcp__claude_ai_sageox__GetPlan", "plan_id", pln, pln},
+		{"mcp__sageox__GetPlan", "plan_id", "2026-10-01-auth.v2", "2026-10-01-auth.v2"},
+		{"mcp__sageox__Conversation", "conversation_id", cnv, cnv},
+		{"mcp__claude_ai_sageox__Conversation", "conversation_id", rec, cnv},
+		// a digest lists many discussions: it never names one, whatever it is sent
+		{"mcp__claude_ai_sageox__ConversationDigest", "conversation_id", cnv, ""},
+		{"mcp__claude_ai_sageox__ConversationTranscript", "conversation_id", cnv, cnv},
+		{"mcp__sageox__ConversationTopics", "conversation_id", cnv, cnv}, // the Conversation* prefix branch
+	} {
+		tests = append(tests,
+			tc{tool.name + "/id present", tool.name, `{"` + tool.field + `":"` + tool.id + `"}`, tool.want},
+			tc{tool.name + "/unknown field alongside", tool.name, `{"` + tool.field + `":"` + tool.id + `","format":"full","extra":{"a":[1]}}`, tool.want},
+			tc{tool.name + "/field absent", tool.name, `{"other_id":"` + tool.id + `"}`, ""},
+			tc{tool.name + "/wrong JSON type", tool.name, `{"` + tool.field + `":42}`, ""},
+			tc{tool.name + "/null field", tool.name, `{"` + tool.field + `":null}`, ""},
+			tc{tool.name + "/empty object", tool.name, `{}`, ""},
+			tc{tool.name + "/empty input", tool.name, ``, ""},
+			tc{tool.name + "/invalid JSON", tool.name, `{"` + tool.field + `":`, ""},
+			tc{tool.name + "/not an object", tool.name, `["` + tool.id + `"]`, ""},
+		)
+		for _, h := range hostile {
+			// encoded, so a control character arrives as valid JSON and it is the
+			// id check that turns it away, not the JSON parser
+			input, err := json.Marshal(map[string]string{tool.field: h.value})
+			require.NoError(t, err)
+			tests = append(tests, tc{tool.name + "/hostile " + h.name, tool.name, string(input), ""})
+		}
+	}
+	// the other field name, or another tool, never yields a Ref
+	tests = append(tests,
+		tc{"GetPlan ignores conversation_id", "mcp__sageox__GetPlan", `{"conversation_id":"` + cnv + `"}`, ""},
+		tc{"Conversation ignores plan_id", "mcp__sageox__Conversation", `{"plan_id":"` + pln + `"}`, ""},
+		tc{"GetPlan unaffected by an unrelated wrong-typed field", "mcp__sageox__GetPlan", `{"plan_id":"` + pln + `","conversation_id":7}`, pln},
+		tc{"Search has no Ref", "mcp__sageox__Search", `{"query":"` + pln + `"}`, ""},
+		tc{"SavePlan has no Ref", "mcp__sageox__SavePlan", `{"plan_id":"` + pln + `"}`, ""},
+		tc{"ListMurmurs has no Ref", "mcp__sageox__ListMurmurs", `{"conversation_id":"` + cnv + `"}`, ""},
+		tc{"unknown tool has no Ref", "mcp__sageox__ListBubbles", `{"plan_id":"` + pln + `"}`, ""},
+	)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := Classify(tt.tool, json.RawMessage(tt.input))
+			require.True(t, ok)
+			assert.Equal(t, tt.want, got.Ref)
+			assert.Empty(t, got.Query, "MCP search text is never inspected")
+
+			// the input never changes the rest of the classification
+			bare, ok := Classify(tt.tool, nil)
+			require.True(t, ok)
+			assert.Empty(t, bare.Ref)
+			bare.Ref = got.Ref
+			assert.Equal(t, bare, got)
 		})
 	}
 }
