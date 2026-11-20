@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
@@ -132,8 +133,66 @@ skipHeartbeats:
 	// add daemon version check (this one has fix capability)
 	versionCheck := checkDaemonVersion(opts.shouldFix(CheckSlugDaemonVersion))
 	results = append(results, versionCheck)
+	results = append(results, checkDaemonToken())
 
 	return results
+}
+
+// daemonTokenMismatch compares the SAGEOX_TOKEN the daemon started with to
+// this process's. ok is false when that cannot be told: a daemon older than
+// StatusData.EnvToken, or a malformed SAGEOX_TOKEN here. Otherwise reason is ""
+// when they match, or says how they differ, and remedy says how to fix it.
+// Both fit an 80-column `ox status` row.
+func daemonTokenMismatch(ds *daemon.StatusData) (reason, remedy string, ok bool) {
+	if ds == nil || ds.EnvToken == "" || ds.GlobalSyncEndpoint == "" {
+		return "", "", false
+	}
+	mine := auth.EnvTokenFingerprint(ds.GlobalSyncEndpoint)
+	switch {
+	case mine == "malformed":
+		return "", "", false
+	case mine == ds.EnvToken:
+		return "", "", true
+	case mine == "none":
+		return "daemon started with a SAGEOX_TOKEN this shell lacks", "run 'ox daemon restart' from the shell that has it", true
+	case ds.EnvToken == "none":
+		return "daemon started without this shell's SAGEOX_TOKEN", "run 'ox daemon restart' from this shell", true
+	default:
+		return "daemon started with another SAGEOX_TOKEN", "run 'ox daemon restart' from this shell", true
+	}
+}
+
+// checkDaemonToken flags a daemon whose SAGEOX_TOKEN is not this shell's. A
+// process keeps the environment it started with, and the daemon's git gets its
+// Ledger credentials from that token, so a daemon started before the token was
+// set or changed clones and syncs without it.
+func checkDaemonToken() checkResult {
+	if !daemon.IsRunning() {
+		return SkippedCheck(daemonTokenCheckName, "daemon not running", "")
+	}
+	status, err := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond).Status()
+	if err != nil {
+		return SkippedCheck(daemonTokenCheckName, "status check failed", err.Error())
+	}
+	return daemonTokenResult(status)
+}
+
+const daemonTokenCheckName = "daemon token"
+
+// daemonTokenResult grades daemonTokenMismatch. It fails when this shell has a
+// token the daemon lacks, and only warns the other way round: that daemon may
+// serve another process that needs its token.
+func daemonTokenResult(status *daemon.StatusData) checkResult {
+	reason, remedy, ok := daemonTokenMismatch(status)
+	switch {
+	case !ok:
+		return SkippedCheck(daemonTokenCheckName, "cannot compare SAGEOX_TOKEN with the daemon's", "")
+	case reason == "":
+		return PassedCheck(daemonTokenCheckName, "same SAGEOX_TOKEN as this shell")
+	case auth.EnvTokenFingerprint(status.GlobalSyncEndpoint) == "none":
+		return WarningCheck(daemonTokenCheckName, reason, remedy)
+	}
+	return FailedCheck(daemonTokenCheckName, reason, remedy)
 }
 
 // checkRepoIsGit verifies a repo path exists and is a valid git repository.
