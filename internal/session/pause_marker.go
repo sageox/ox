@@ -43,26 +43,49 @@ func MarkExplicitPause(projectRoot, agentID string, seq int) error {
 	return writePauseMarker(projectRoot, agentID, pauseMarkerPayload{Seq: seq, At: time.Now().UTC()})
 }
 
-// MarkInheritedPause writes agentID's pause marker for a pause it inherited
-// from the paused agent that launched it, naming its own agent process (pid).
-// An agent this one launches in turn finds the marker through the
-// SAGEOX_AGENT_ID it inherits, and is paused too while pid still runs
-// (InheritedPauseHolder): a pause reaches every agent down the launch chain.
-func MarkInheritedPause(projectRoot, agentID string, pid int) error {
-	start, _ := proc.StartTime(pid)
-	return writePauseMarker(projectRoot, agentID, pauseMarkerPayload{At: time.Now().UTC(), PID: pid, PIDStart: start})
+// PauseHolder names the agent process an inherited pause lasts for.
+type PauseHolder struct {
+	PID int
+	// Start is proc.StartTime(PID); 0 when unknown, which leaves liveness on
+	// the PID alone.
+	Start int64
 }
 
-// InheritedPauseHolder returns the agent process holding agentID's inherited
-// pause, when that process still runs. A pause a person asked for names no
-// process, and a marker whose process has exited or whose PID now names
-// another process holds nothing: both return found=false.
-func InheritedPauseHolder(projectRoot, agentID string) (pid int, found bool) {
+// PauseHolderOf is pid as a PauseHolder, with its start time when the
+// platform can tell it (Linux and macOS).
+func PauseHolderOf(pid int) PauseHolder {
+	start, _ := proc.StartTime(pid)
+	return PauseHolder{PID: pid, Start: start}
+}
+
+// Live reports whether the holder still runs, and is the same process.
+func (h PauseHolder) Live() bool {
+	return h.PID > 0 && proc.IsAlive(h.PID) && !proc.IsReused(h.PID, h.Start)
+}
+
+// MarkInheritedPause writes agentID's pause marker for a pause it inherited
+// from the paused agent that launched it, naming the process the pause lasts
+// for: the agent's own process, or for one that cannot name its own (Cursor's
+// GUI process is shared by every conversation) the process holding the pause
+// it inherited. An agent this one launches in turn finds the marker through
+// the SAGEOX_AGENT_ID it inherits, and is paused too while the holder runs
+// (InheritedPauseHolder): a pause reaches every agent down the launch chain.
+func MarkInheritedPause(projectRoot, agentID string, holder PauseHolder) error {
+	return writePauseMarker(projectRoot, agentID, pauseMarkerPayload{At: time.Now().UTC(), PID: holder.PID, PIDStart: holder.Start})
+}
+
+// InheritedPauseHolder returns the process holding agentID's inherited pause,
+// when that process still runs. A pause a person asked for names no process,
+// and a marker whose process has exited or whose PID now names another
+// process holds nothing: both return found=false, so an ended launcher's
+// marker never blocks a later agent.
+func InheritedPauseHolder(projectRoot, agentID string) (PauseHolder, bool) {
 	p, ok := readPauseMarker(projectRoot, agentID)
-	if !ok || p.PID <= 0 || !proc.IsAlive(p.PID) || proc.IsReused(p.PID, p.PIDStart) {
-		return 0, false
+	holder := PauseHolder{PID: p.PID, Start: p.PIDStart}
+	if !ok || !holder.Live() {
+		return PauseHolder{}, false
 	}
-	return p.PID, true
+	return holder, true
 }
 
 // readPauseMarker reads agentID's pause marker; an unparsable one reads as found
