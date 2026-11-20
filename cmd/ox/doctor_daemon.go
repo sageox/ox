@@ -170,9 +170,10 @@ func checkDaemonToken() checkResult {
 	if !daemon.IsRunning() {
 		return SkippedCheck(daemonTokenCheckName, "daemon not running", "")
 	}
-	// A failed status call leaves nothing to compare, and the daemon version
-	// check in the same doctor run reports the failure itself.
-	status, _ := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond).Status()
+	status, err := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond).Status()
+	if err != nil {
+		return SkippedCheck(daemonTokenCheckName, "status check failed", err.Error())
+	}
 	return daemonTokenResult(status)
 }
 
