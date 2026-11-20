@@ -343,15 +343,6 @@ func PrintSuggestionBox(title, message, fix string) {
 	fmt.Fprintln(os.Stderr, SuggestionBox(title, message, fix))
 }
 
-// PrintDisclaimer prints the Claude Code compatibility disclaimer in brand gold.
-func PrintDisclaimer() {
-	if jsonMode {
-		return
-	}
-	fmt.Println()
-	fmt.Println(Wordmark() + StyleSecondary.Render(" is designed initially for Claude Code. Using with other coding agents and claws is not yet being tested."))
-}
-
 // ErrHeadless is returned by OpenInBrowser when the environment has no graphical
 // display (SSH session, no DISPLAY). Callers should handle this to provide
 // context-appropriate guidance (e.g., upload to view online, or copy the file).

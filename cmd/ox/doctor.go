@@ -400,8 +400,6 @@ read summary.has_failed for the result and the process exit code for scripting.`
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("doctor", tips.RandomChance, cfg.Quiet, !userCfg.AreTipsEnabled(), cfg.JSON)
 
-		cli.PrintDisclaimer()
-
 		// trailing PAT expiry warning — single-line stderr, suppressed in
 		// ephemeral mode and when stderr isn't a TTY. Doctor is the right
 		// surface: users run it when something feels off, and a near-expired
