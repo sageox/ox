@@ -13,6 +13,7 @@ import (
 
 	projectconfig "github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon/agentwork"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
@@ -121,6 +122,30 @@ func TestDaemon_DeadAgentQuiescesCaptureBeforeFinalizing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, strings.Count(string(data), "Remember the initial Codex request."))
 	assert.Equal(t, 1, strings.Count(string(data), "Preserve the final Codex response."))
+}
+
+// Failure prevented: a daemon started before the coworker's SAGEOX_TOKEN was set
+// cannot say so, and `ox status` and `ox doctor` treat it as current.
+func TestDaemonStatus_ReportsTheTokenItStartedWith(t *testing.T) {
+	t.Setenv("SAGEOX_ENDPOINT", "https://status.test.invalid")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	const token = "oxt_test_1ljPfr"
+	for _, tc := range []struct{ name, token, want string }{
+		{"started without a token", "", "none"},
+		{"started with a token", token, gitserver.BearerTokenFingerprint(token)},
+		{"started with a malformed token", "oxt_test_1ljPfX", "malformed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SAGEOX_TOKEN", tc.token)
+			cfg := DefaultConfig()
+			cfg.ProjectRoot = t.TempDir()
+			d := New(cfg, nil)
+			d.scheduler = NewSyncScheduler(cfg, d.logger)
+			d.scheduler.SetGlobalSyncLease("", nil)
+			assert.Equal(t, tc.want, (&daemonServiceImpl{d: d}).Status().EnvToken)
+		})
+	}
 }
 
 // A follower must observe successful syncs by the shared owner without rewriting
