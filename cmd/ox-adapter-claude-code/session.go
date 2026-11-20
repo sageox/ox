@@ -36,6 +36,8 @@ var (
 	reStripCommandName             = regexp.MustCompile(`(?s)<command-name>.*?</command-name>`)
 	reStripCommandMessage          = regexp.MustCompile(`(?s)<command-message>.*?</command-message>`)
 	reStripCommandArgs             = regexp.MustCompile(`(?s)<command-args>.*?</command-args>`)
+	reCommandName                  = regexp.MustCompile(`(?s)<command-name>\s*(.*?)\s*</command-name>`)
+	reCommandArgs                  = regexp.MustCompile(`(?s)<command-args>\s*(.*?)\s*</command-args>`)
 	reStripTaskNotification        = regexp.MustCompile(`(?s)<task-notification>.*?</task-notification>`)
 )
 
@@ -578,6 +580,16 @@ func classifyTextContent(text string) (string, userContentClass) {
 		return "", userContentSkip
 	}
 
+	// A slash command that carries its own request ("/review the auth change")
+	// is a person asking for work, so it is their prompt, written as typed.
+	// Stripping its tags left nothing, so a session driven only by skills never
+	// counted as prompted and never went live. A bare command ("/clear",
+	// "/compact") stays system: it asks for nothing, and counting it would open
+	// a live stream for a session that may never get a prompt.
+	if prompt, ok := slashCommandPrompt(text); ok {
+		return prompt, userContentUser
+	}
+
 	if strings.Contains(text, "<!-- ox-hash:") {
 		return text, userContentSystem
 	}
@@ -608,6 +620,31 @@ func classifyTextContent(text string) (string, userContentClass) {
 	}
 
 	return cleanedTrimmed, userContentUser
+}
+
+// slashCommandPrompt returns "/name args" for a slash-command message whose
+// <command-args> is non-empty, the shape the server and web viewer count as a
+// prompt (sageox-monorepo packages/sessionturns isRealPrompt).
+func slashCommandPrompt(text string) (string, bool) {
+	// Only a message that IS a command envelope: one that quotes command tags
+	// inside a question ("why did <command-name>... fail?") keeps its own text
+	// through the normal path, so the person's words are never replaced.
+	rest := reStripCommandName.ReplaceAllString(text, "")
+	rest = reStripCommandMessage.ReplaceAllString(rest, "")
+	rest = reStripCommandArgs.ReplaceAllString(rest, "")
+	if strings.TrimSpace(rest) != "" {
+		return "", false
+	}
+	name := reCommandName.FindStringSubmatch(text)
+	args := reCommandArgs.FindStringSubmatch(text)
+	if name == nil || args == nil || name[1] == "" || args[1] == "" {
+		return "", false
+	}
+	cmd := name[1]
+	if !strings.HasPrefix(cmd, "/") {
+		cmd = "/" + cmd
+	}
+	return cmd + " " + args[1], true
 }
 
 func stripSystemTags(text string) string {
