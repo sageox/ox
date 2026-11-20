@@ -360,6 +360,16 @@ func (r *WhisperRegistry) ShownTeammateCommentsForConversation(conversationID st
 	return r.ledgerStore.ShownTeammateCommentsForConversation(conversationID, limit)
 }
 
+// AllShownTeammateComments returns shown notes whose receipt is owed.
+func (r *WhisperRegistry) AllShownTeammateComments(limit int) ([]whisperstore.WhisperEntry, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.ledgerStore == nil {
+		return nil, nil
+	}
+	return r.ledgerStore.AllShownTeammateComments(limit)
+}
+
 // MarkTeammateCommentsShown records that the hook wrote these notes.
 func (r *WhisperRegistry) MarkTeammateCommentsShown(seq int64, ids ...string) error {
 	r.mu.RLock()

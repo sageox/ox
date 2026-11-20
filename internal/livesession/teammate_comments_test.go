@@ -47,7 +47,7 @@ func TestTeammateCommentAckSentOnceWithPostCaptureSeq(t *testing.T) {
 	e := newEnv(t)
 	e.spoolAndPrompt()
 	e.mustDrain()
-	if err := livesession.RecordTeammateCommentAck(e.dir, "tcm_1", 42); err != nil {
+	if err := livesession.RecordTeammateCommentAck(e.rdir(t), "tcm_1", 42); err != nil {
 		t.Fatal(err)
 	}
 	e.mustDrain()
@@ -69,7 +69,7 @@ func TestTeammateCommentAckSurvivesRetryableRefusalAndNeverFailsDrain(t *testing
 	e := newEnv(t)
 	e.spoolAndPrompt()
 	e.mustDrain()
-	if err := livesession.RecordTeammateCommentAck(e.dir, "tcm_1", 7); err != nil {
+	if err := livesession.RecordTeammateCommentAck(e.rdir(t), "tcm_1", 7); err != nil {
 		t.Fatal(err)
 	}
 	e.srv.RefuseNextAck(http.StatusServiceUnavailable, sessionstream.ReasonUnavailable, sessionstream.ActionRetry)
@@ -89,7 +89,7 @@ func TestTeammateCommentAckPermanentRefusalIsDroppedNotRetriedForever(t *testing
 	e := newEnv(t)
 	e.spoolAndPrompt()
 	e.mustDrain()
-	if err := livesession.RecordTeammateCommentAck(e.dir, "tcm_bad", 7); err != nil {
+	if err := livesession.RecordTeammateCommentAck(e.rdir(t), "tcm_bad", 7); err != nil {
 		t.Fatal(err)
 	}
 	e.srv.RefuseNextAck(http.StatusBadRequest, sessionstream.ReasonInvalidRequest, sessionstream.ActionFix)
@@ -106,7 +106,7 @@ func TestTeammateCommentAcksBatchedAtWireCap(t *testing.T) {
 	e.mustDrain()
 	total := sessionstream.MaxTeammateCommentAcks + 3
 	for i := range total {
-		if err := livesession.RecordTeammateCommentAck(e.dir, "tcm_"+string(rune('a'+i)), int64(i+1)); err != nil {
+		if err := livesession.RecordTeammateCommentAck(e.rdir(t), "tcm_"+string(rune('a'+i)), int64(i+1)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -147,7 +147,7 @@ func TestTeammateCommentLostAckIsResentWhenTheServerListsTheNoteAgain(t *testing
 	if len(first.TeammateComments) != 1 {
 		t.Fatalf("setup: first drain returned %v", first.TeammateComments)
 	}
-	if err := livesession.RecordTeammateCommentAck(e.dir, "tcm_1", 5); err != nil {
+	if err := livesession.RecordTeammateCommentAck(e.rdir(t), "tcm_1", 5); err != nil {
 		t.Fatal(err)
 	}
 	e.srv.IgnoreNextAcks(1)
@@ -213,7 +213,7 @@ func TestTeammateCommentResendRefusedWith503IsRetriedWithNoNewSpoolBytes(t *test
 	e.srv.QueueTeammateComment(comment("tcm_1", "once"))
 	e.spool(withPrompt(lines(0, 3)))
 	e.mustDrain()
-	if err := livesession.RecordTeammateCommentAck(e.dir, "tcm_1", 5); err != nil {
+	if err := livesession.RecordTeammateCommentAck(e.rdir(t), "tcm_1", 5); err != nil {
 		t.Fatal(err)
 	}
 	e.srv.IgnoreNextAcks(1)
@@ -237,7 +237,7 @@ func TestCloseSendsTheAcksStillOwed(t *testing.T) {
 	e := newEnv(t)
 	e.spool(withPrompt(lines(0, 3)))
 	e.mustDrain()
-	if err := livesession.RecordTeammateCommentAck(e.dir, "tcm_1", 5); err != nil {
+	if err := livesession.RecordTeammateCommentAck(e.rdir(t), "tcm_1", 5); err != nil {
 		t.Fatal(err)
 	}
 	if res, err := livesession.Close(t.Context(), e.cfg, e.dir, "", testBudget); err != nil || !res.Done {
@@ -254,7 +254,7 @@ func TestFlushAfterCloseDeliversAnAckTheCloseCouldNot(t *testing.T) {
 	e := newEnv(t)
 	e.spool(withPrompt(lines(0, 3)))
 	e.mustDrain()
-	if err := livesession.RecordTeammateCommentAck(e.dir, "tcm_1", 5); err != nil {
+	if err := livesession.RecordTeammateCommentAck(e.rdir(t), "tcm_1", 5); err != nil {
 		t.Fatal(err)
 	}
 	e.srv.RefuseAcks(1, http.StatusServiceUnavailable, sessionstream.ReasonUnavailable, sessionstream.ActionRetry)
@@ -280,7 +280,7 @@ func TestFlushGivesUpAfterADayAndLogsOnce(t *testing.T) {
 	e.cfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
 	e.spool(withPrompt(lines(0, 3)))
 	e.mustDrain()
-	if err := livesession.RecordTeammateCommentAck(e.dir, "tcm_1", 5); err != nil {
+	if err := livesession.RecordTeammateCommentAck(e.rdir(t), "tcm_1", 5); err != nil {
 		t.Fatal(err)
 	}
 	e.srv.RefuseAcks(100, http.StatusServiceUnavailable, sessionstream.ReasonUnavailable, sessionstream.ActionRetry)
@@ -319,7 +319,7 @@ func closedEnvWithAck(t *testing.T) *env {
 	e := newEnv(t)
 	e.spool(withPrompt(lines(0, 3)))
 	e.mustDrain()
-	if err := livesession.RecordTeammateCommentAck(e.dir, "tcm_1", 5); err != nil {
+	if err := livesession.RecordTeammateCommentAck(e.rdir(t), "tcm_1", 5); err != nil {
 		t.Fatal(err)
 	}
 	e.srv.RefuseAcks(100, http.StatusServiceUnavailable, sessionstream.ReasonUnavailable, sessionstream.ActionRetry)
@@ -338,15 +338,15 @@ func TestFlushRetryPeriodStartsWhenTheResendBegins(t *testing.T) {
 	e.mustDrain()
 	old := time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339Nano)
 	logged := `{"id":"tcm_1","delivered_at_seq":5,"at":"` + old + `"}` + "\n"
-	if err := os.WriteFile(filepath.Join(e.dir, "teammate-comment-acks"), []byte(logged), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(e.rdir(t), "teammate-comment-acks"), []byte(logged), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(e.dir, "teammate-comment-acks-sent"), []byte("tcm_1\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(e.rdir(t), "teammate-comment-acks-sent"), []byte("tcm_1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// the server lists it again now: a new obligation begins now
 	resend := "tcm_1\t" + strconv.FormatInt(time.Now().Unix(), 10) + "\n"
-	if err := os.WriteFile(filepath.Join(e.dir, "teammate-comment-resends"), []byte(resend), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(e.rdir(t), "teammate-comment-resends"), []byte(resend), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	e.srv.RefuseAcks(100, http.StatusServiceUnavailable, sessionstream.ReasonUnavailable, sessionstream.ActionRetry)
@@ -373,12 +373,22 @@ func TestFlushRetryPeriodStartsWhenTheResendBegins(t *testing.T) {
 func TestFlushAuthorizesBeforeReadingAndBoundsTheLog(t *testing.T) {
 	e := closedEnvWithAck(t)
 	huge := bytes.Repeat([]byte(`{"id":"x","delivered_at_seq":1}`+"\n"), 20000)
-	if err := os.WriteFile(filepath.Join(e.dir, "teammate-comment-resends"), huge, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(e.rdir(t), "teammate-comment-resends"), huge, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	stranger := e.cfg
 	stranger.DataDir = t.TempDir() // this machine never minted the stream
+	strangerReceipts, err := livesession.ReceiptsDir(stranger, e.state().ConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(strangerReceipts, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(strangerReceipts, "teammate-comment-resends"), huge, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := livesession.FlushTeammateAcks(t.Context(), stranger, e.dir, testBudget, time.Now()); !errors.Is(err, livesession.ErrUntrustedState) {
 		t.Fatalf("unminted stream: err = %v; want ErrUntrustedState before any log is read", err)
 	}
@@ -393,11 +403,84 @@ func TestFlushAuthorizesBeforeReadingAndBoundsTheLog(t *testing.T) {
 // Failure prevented (CIb-): an unreadable receipt log reading as "nothing owed".
 func TestAnUnreadableReceiptLogIsAnErrorNotAnEmptyQueue(t *testing.T) {
 	e := closedEnvWithAck(t)
-	if err := os.Mkdir(filepath.Join(e.dir, "teammate-comment-resends"), 0o700); err != nil {
+	if err := os.Mkdir(filepath.Join(e.rdir(t), "teammate-comment-resends"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	owed, err := livesession.TeammateAcksOwed(t.Context(), e.cfg, e.dir)
 	if err == nil || owed {
 		t.Fatalf("owed = %v, err = %v; an unreadable log must be reported", owed, err)
+	}
+}
+
+// rdir is the conversation's machine-local receipt folder, created.
+func (e *env) rdir(t *testing.T) string {
+	t.Helper()
+	dir, err := livesession.ReceiptsDir(e.cfg, e.state().ConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// Failure prevented (T1): receipt logs inside the pulled Ledger checkout. Anyone
+// who can write the Ledger could plant a log naming a pending note, which would
+// suppress the note and make the owner's client sign a "delivered" receipt for
+// something the agent never saw. Receipt state lives under the data dir; files
+// found in the session folder are ignored.
+func TestReceiptFilesPlantedInTheCheckoutNeitherSuppressANoteNorForgeAnAck(t *testing.T) {
+	e := newEnv(t)
+	e.srv.QueueTeammateComment(comment("tcm_1", "never shown"))
+	planted := `{"id":"tcm_1","delivered_at_seq":1}` + "\n"
+	for _, name := range []string{"teammate-comment-acks", "teammate-comment-resends"} {
+		if err := os.WriteFile(filepath.Join(e.dir, name), []byte(planted), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(e.dir, "teammate-comment-acks-sent"), []byte("tcm_other\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.spool(withPrompt(lines(0, 3)))
+	res := e.mustDrain()
+	e.mustDrain()
+	if len(res.TeammateComments) != 1 || res.TeammateComments[0].ID != "tcm_1" {
+		t.Fatalf("comments = %v; a planted receipt must not suppress the note", res.TeammateComments)
+	}
+	if reqs := e.srv.AckRequests(); len(reqs) != 0 {
+		t.Fatalf("ack requests = %+v; a planted receipt produced a signed ack for a note nobody was shown", reqs)
+	}
+	if _, ok := e.srv.DeliveredAtSeq("tcm_1"); ok {
+		t.Fatal("the server recorded a delivery that was forged in the checkout")
+	}
+	// and the same planting after the stream closed
+	if _, err := livesession.Close(t.Context(), e.cfg, e.dir, "", testBudget); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if reqs := e.srv.AckRequests(); len(reqs) != 0 {
+		t.Fatalf("a closed-session flush sent %+v from a planted log", reqs)
+	}
+}
+
+// The receipt state really is outside the folder.
+func TestReceiptLogsLiveUnderTheDataDirNotTheSessionFolder(t *testing.T) {
+	e := newEnv(t)
+	if err := livesession.RecordTeammateCommentAck(e.rdir(t), "tcm_1", 5); err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(e.rdir(t), e.dir) {
+		t.Fatalf("receipts dir %s is inside the session folder %s", e.rdir(t), e.dir)
+	}
+	for _, name := range []string{"teammate-comment-acks", "teammate-comment-acks-sent", "teammate-comment-resends"} {
+		if _, err := os.Stat(filepath.Join(e.dir, name)); err == nil {
+			t.Fatalf("%s was written inside the session folder", name)
+		}
+	}
+	if _, err := livesession.ReceiptsDir(e.cfg, "../../etc"); err == nil {
+		t.Fatal("a path-shaped conversation id was accepted")
 	}
 }

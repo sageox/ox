@@ -61,7 +61,11 @@ type DrainResult struct {
 // returned: the server lists it because its ack never landed, so the ack goes
 // out again.
 func (r *DrainResult) setTeammateComments(s *session, in []sessionstream.TeammateComment) {
-	shown, err := shownTeammateAcks(s.dir)
+	rdir, err := s.receipts()
+	var shown map[string]sessionstream.TeammateCommentAck
+	if err == nil {
+		shown, err = shownTeammateAcks(rdir)
+	}
 	if err != nil {
 		// an unreadable or oversized log cannot say what was shown; the daemon's
 		// stored-once mark still stops a second display
@@ -72,7 +76,7 @@ func (r *DrainResult) setTeammateComments(s *session, in []sessionstream.Teammat
 	for _, c := range in {
 		if a, ok := shown[c.ID]; ok {
 			// persisted: the obligation outlives this call and this process
-			if err := addTeammateResend(s.dir, a.ID, time.Now()); err != nil {
+			if err := addTeammateResend(rdir, a.ID, time.Now()); err != nil {
 				s.log().Warn("live_teammate_resend_not_recorded", "comment_id", a.ID, "error", err)
 			}
 			continue

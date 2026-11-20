@@ -1543,6 +1543,7 @@ func (d *Daemon) initComponents() time.Duration {
 			enabled: config.TeammateNotesEnabled,
 		}
 		d.liveSessions.onTeammateComments = d.teammateComments.receive
+		d.liveSessions.drainShown = d.teammateComments.drainAllShown
 		d.sessionWatcher.SetLiveDrainer(func(sessionDir string) {
 			d.liveSessions.Spooled(d.ctx, sessionDir)
 		})

@@ -73,6 +73,7 @@ const teammateLeaseForget = 10 * time.Minute
 // is confirmed.
 type noteLease struct {
 	agentID string
+	conv    string
 	seq     int64
 	expires time.Time
 	ids     []string
@@ -234,7 +235,7 @@ func (b *teammateCommentInbox) lease(ctx context.Context, p TeammateCommentsTake
 	if err != nil {
 		return TeammateCommentsTakeResponse{}, fmt.Errorf("take teammate comments: %w", err)
 	}
-	l := &noteLease{agentID: p.AgentID, seq: p.DeliveredAtSeq, expires: b.now().Add(teammateLeaseTTL), dirs: map[string]string{}}
+	l := &noteLease{agentID: p.AgentID, conv: p.ConversationID, seq: p.DeliveredAtSeq, expires: b.now().Add(teammateLeaseTTL), dirs: map[string]string{}}
 	var shown []whisperstore.WhisperEntry
 	var foreign []string
 	for _, e := range waiting {
@@ -257,7 +258,7 @@ func (b *teammateCommentInbox) lease(ctx context.Context, p TeammateCommentsTake
 			b.logger.WarnContext(ctx, "teammate_comment_ack_untrusted_dir", "comment_id", e.ID)
 			continue
 		}
-		if err := livesession.CheckTeammateAckLog(dir); err != nil {
+		if err := b.checkReceiptLog(live, p.ConversationID); err != nil {
 			b.logger.WarnContext(ctx, "teammate_comment_ack_log_unwritable", "comment_id", e.ID, "error", err)
 			continue
 		}
@@ -323,25 +324,30 @@ func (b *teammateCommentInbox) confirm(ctx context.Context, p TeammateCommentsCo
 		return fmt.Errorf("mark teammate comments shown: %w", err)
 	}
 	delete(b.leases, p.LeaseID)
-	b.logReceipts(ctx, reg, live, l.seq, l.dirs, settle)
+	b.logReceipts(ctx, reg, live, l.conv, l.seq, l.dirs, settle)
 	return nil
 }
 
 // logReceipts logs the receipt of each shown note in its folder, then deletes
 // the notes whose receipt was recorded. mu held.
-func (b *teammateCommentInbox) logReceipts(ctx context.Context, reg *WhisperRegistry, live *LiveSessions, seq int64, dirs map[string]string, ids []string) {
+func (b *teammateCommentInbox) logReceipts(ctx context.Context, reg *WhisperRegistry, live *LiveSessions, conv string, seq int64, dirs map[string]string, ids []string) {
 	var done []string
 	kicked := map[string]bool{}
+	rdir, err := b.receiptsDir(live, conv)
+	if err != nil {
+		b.logger.WarnContext(ctx, "teammate_comment_ack_log_failed", "conversation_id", conv, "error", err)
+		return
+	}
 	for _, id := range ids {
 		dir := dirs[id]
-		if err := livesession.RecordTeammateCommentAck(dir, id, seq); err != nil {
+		if err := livesession.RecordTeammateCommentAck(rdir, id, seq); err != nil {
 			// the note stays shown: it is never offered again, and retryShown
 			// logs the receipt when the folder is writable again
 			b.logger.WarnContext(ctx, "teammate_comment_ack_log_failed", "comment_id", id, "error", err)
 			continue
 		}
 		done = append(done, id)
-		if !kicked[dir] && live != nil {
+		if dir != "" && !kicked[dir] && live != nil {
 			kicked[dir] = true
 			live.request(ctx, dir)
 		}
@@ -353,27 +359,65 @@ func (b *teammateCommentInbox) logReceipts(ctx context.Context, reg *WhisperRegi
 }
 
 // retryShown logs the receipts of notes that were shown but whose receipt could
-// not be logged then, and deletes them once it is. mu held.
+// not be logged then, and deletes them once it is. The receipt log is
+// machine-local (keyed by conversation), so a note whose session folder is no
+// longer trusted or present still gets its receipt; the folder is only used to
+// kick a drain. mu held.
 func (b *teammateCommentInbox) retryShown(ctx context.Context, reg *WhisperRegistry, live *LiveSessions, peek func() ([]whisperstore.WhisperEntry, error)) {
 	shown, err := peek()
-	if err != nil || len(shown) == 0 {
-		if err != nil {
-			b.logger.WarnContext(ctx, "teammate_comment_shown_peek_failed", "error", err)
-		}
+	if err != nil {
+		b.logger.WarnContext(ctx, "teammate_comment_shown_peek_failed", "error", err)
 		return
 	}
 	for _, e := range shown {
 		seq, perr := strconv.ParseInt(e.Metadata["shown_seq"], 10, 64)
-		dir, ok := "", false
-		if live != nil {
-			dir, ok = live.trusted(e.Metadata[tcMetaSessionDir])
-		}
-		if perr != nil || seq < 1 || !ok {
+		conv := e.Metadata[tcMetaConversationID]
+		if perr != nil || seq < 1 || conv == "" {
 			b.logger.WarnContext(ctx, "teammate_comment_shown_unrecoverable", "comment_id", e.ID)
 			continue
 		}
-		b.logReceipts(ctx, reg, live, seq, map[string]string{e.ID: dir}, []string{e.ID})
+		dir := ""
+		if live != nil {
+			dir, _ = live.trusted(e.Metadata[tcMetaSessionDir])
+		}
+		b.logReceipts(ctx, reg, live, conv, seq, map[string]string{e.ID: dir}, []string{e.ID})
 	}
+}
+
+// teammateShownDrainLimit bounds one drain of owed receipts. One query of this
+// size, not a loop of 20-row pages: a head of rows that cannot be recovered must
+// not strand the receipts behind it.
+const teammateShownDrainLimit = 1000
+
+// drainAllShown logs every owed receipt (up to teammateShownDrainLimit), for the
+// sweep that also flushes closed sessions: a stream that closed with receipts
+// still owed is otherwise retried by nothing, since no hook or listing follows.
+func (b *teammateCommentInbox) drainAllShown(ctx context.Context) {
+	reg, live := b.registry(), b.live()
+	if reg == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.retryShown(ctx, reg, live, func() ([]whisperstore.WhisperEntry, error) {
+		return reg.AllShownTeammateComments(teammateShownDrainLimit)
+	})
+}
+
+// receiptsDir is the conversation's machine-local receipt folder.
+func (b *teammateCommentInbox) receiptsDir(live *LiveSessions, conv string) (string, error) {
+	if live == nil {
+		return "", errors.New("no live sessions: nowhere to keep receipts")
+	}
+	return live.receiptsDir(conv)
+}
+
+func (b *teammateCommentInbox) checkReceiptLog(live *LiveSessions, conv string) error {
+	rdir, err := b.receiptsDir(live, conv)
+	if err != nil {
+		return err
+	}
+	return livesession.CheckTeammateAckLog(rdir)
 }
 
 // purgeSession drops every note held for the stream a stopped recording wrote,
@@ -397,7 +441,7 @@ func (b *teammateCommentInbox) purgeSession(ctx context.Context, sessionName str
 	// a receipt still owed is logged before the stream's folder stops being
 	// swept; only then are the rest of its notes dropped
 	b.retryShown(ctx, reg, live, func() ([]whisperstore.WhisperEntry, error) {
-		return reg.ShownTeammateCommentsForConversation(st.ConversationID, teammateCommentPeekLimit)
+		return reg.ShownTeammateCommentsForConversation(st.ConversationID, teammateShownDrainLimit)
 	})
 	n, err := reg.RetainTeammateComments(st.ConversationID, nil)
 	if err != nil {

@@ -90,15 +90,42 @@ type ackLogLine struct {
 	At             time.Time `json:"at,omitzero"`
 }
 
-// RecordTeammateCommentAck appends one delivery to the session's ack log. It is
-// one O_APPEND write of a short line, so concurrent writers never interleave,
-// and it takes no lock for the same reason recordLost does not.
+// receiptsSubdir is where receipt state lives under the data dir.
+const receiptsSubdir = "teammate-receipts"
+
+// ReceiptsDir is the machine-local folder holding one conversation's receipt
+// logs (delivered acks, settled ids, resend list). It is keyed by conversation
+// id under the user's data dir, never inside the session folder: that folder is
+// part of a pulled Ledger checkout, so anyone who can write the Ledger could
+// plant a receipt log there and forge "delivered" for a note the agent never
+// saw. Logs found in the checkout are ignored. The id is validated: it names a
+// path.
+func ReceiptsDir(cfg Config, conversationID string) (string, error) {
+	cfg, err := cfg.withDefaults()
+	if err != nil {
+		return "", err
+	}
+	if !sessionstream.ValidConversationID(conversationID) {
+		return "", fmt.Errorf("receipts: %q is not a conversation id", conversationID)
+	}
+	return filepath.Join(cfg.DataDir, receiptsSubdir, conversationID), nil
+}
+
+func (s *session) receipts() (string, error) { return ReceiptsDir(s.cfg, s.st.ConversationID) }
+
+// RecordTeammateCommentAck appends one delivery to the conversation's ack log
+// in dir (a ReceiptsDir). It is one O_APPEND write of a short line, so
+// concurrent writers never interleave, and it takes no lock for the same reason
+// recordLost does not.
 func RecordTeammateCommentAck(dir, commentID string, deliveredAtSeq int64) error {
 	if commentID == "" || deliveredAtSeq < 1 {
 		return fmt.Errorf("record teammate comment ack: need an id and a seq of at least 1")
 	}
 	line, err := json.Marshal(ackLogLine{ID: commentID, DeliveredAtSeq: deliveredAtSeq, At: time.Now().UTC()})
 	if err != nil {
+		return fmt.Errorf("record teammate comment ack: %w", err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("record teammate comment ack: %w", err)
 	}
 	f, err := os.OpenFile(filepath.Join(dir, teammateAcksFileName), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
@@ -238,6 +265,9 @@ func shownTeammateAcks(dir string) (map[string]sessionstream.TeammateCommentAck,
 }
 
 func markTeammateAcksSent(dir string, acks []sessionstream.TeammateCommentAck) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
 	f, err := os.OpenFile(filepath.Join(dir, teammateAcksSentFileName), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
@@ -257,6 +287,9 @@ func addTeammateResend(dir, id string, now time.Time) error {
 	}
 	if _, ok := have[id]; ok {
 		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
 	}
 	f, err := os.OpenFile(filepath.Join(dir, teammateResendsFileName), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
@@ -315,7 +348,12 @@ func (s *session) sendTeammateAcks(ctx context.Context) {
 	if s.c == nil {
 		return
 	}
-	obligations, err := ackObligations(s.dir)
+	rdir, err := s.receipts()
+	if err != nil {
+		s.log().WarnContext(ctx, "live_teammate_acks_unreadable", "error", err)
+		return
+	}
+	obligations, err := ackObligations(rdir)
 	if err != nil {
 		s.log().WarnContext(ctx, "live_teammate_acks_unreadable", "error", err)
 		return
@@ -344,11 +382,16 @@ func (s *session) sendAcks(ctx context.Context, owed []sessionstream.TeammateCom
 }
 
 func (s *session) settleTeammateAcks(ctx context.Context, batch []sessionstream.TeammateCommentAck) {
-	if err := markTeammateAcksSent(s.dir, batch); err != nil {
+	rdir, err := s.receipts()
+	if err != nil {
 		s.log().WarnContext(ctx, "live_teammate_acks_mark_failed", "error", err)
 		return
 	}
-	if err := clearTeammateResends(s.dir, batch); err != nil {
+	if err := markTeammateAcksSent(rdir, batch); err != nil {
+		s.log().WarnContext(ctx, "live_teammate_acks_mark_failed", "error", err)
+		return
+	}
+	if err := clearTeammateResends(rdir, batch); err != nil {
 		s.log().WarnContext(ctx, "live_teammate_resend_clear_failed", "error", err)
 	}
 }
@@ -384,11 +427,15 @@ func TeammateAcksOwed(ctx context.Context, cfg Config, dir string) (bool, error)
 	if err != nil {
 		return false, err
 	}
-	_, ok, err := closedStream(ctx, cfg, dir)
+	s, ok, err := closedStream(ctx, cfg, dir)
 	if err != nil || !ok {
 		return false, err
 	}
-	owed, err := ackObligations(dir)
+	rdir, err := s.receipts()
+	if err != nil {
+		return false, err
+	}
+	owed, err := ackObligations(rdir)
 	return len(owed) > 0, err
 }
 
@@ -404,9 +451,14 @@ func FlushTeammateAcks(ctx context.Context, cfg Config, dir string, budget time.
 	if err != nil {
 		return false, err
 	}
-	// a stat, not a parse: nothing untrusted is read for a folder that never
-	// logged a receipt
-	if !hasReceiptLog(dir) {
+	// a stat of machine-local state, not a parse: nothing is read for a
+	// conversation that never logged a receipt
+	st, serr := ReadState(dir)
+	if serr != nil || st.Status != StatusClosed {
+		return false, nil
+	}
+	rdir, rerr := ReceiptsDir(cfg, st.ConversationID)
+	if rerr != nil || !hasReceiptLog(rdir) {
 		return false, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, budget)
@@ -416,7 +468,7 @@ func FlushTeammateAcks(ctx context.Context, cfg Config, dir string, budget time.
 		if err != nil || !ok {
 			return err
 		}
-		obligations, err := ackObligations(dir)
+		obligations, err := ackObligations(rdir)
 		if err != nil {
 			return err
 		}
@@ -460,6 +512,9 @@ func hasReceiptLog(dir string) bool {
 // opening the ack log for appending (creating it) without writing. The daemon
 // leases a note only when its ack can be written on confirm.
 func CheckTeammateAckLog(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("teammate comment ack log: %w", err)
+	}
 	f, err := os.OpenFile(filepath.Join(dir, teammateAcksFileName), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return fmt.Errorf("teammate comment ack log: %w", err)

@@ -187,7 +187,7 @@ func TestTeammateCommentStaysPendingWhenItsAckCannotBeWritten(t *testing.T) {
 	e, box, store := newCommentEnv(t, "agent-a")
 	e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
 	e.drainOnce()
-	if err := os.Mkdir(filepath.Join(e.dir, "teammate-comment-acks"), 0o700); err != nil { // the log path is unusable
+	if err := os.Mkdir(filepath.Join(e.rdir(), "teammate-comment-acks"), 0o700); err != nil { // the log path is unusable
 		t.Fatal(err)
 	}
 	got, err := box.take(t.Context(), TeammateCommentsTakePayload{AgentID: "agent-a", ConversationID: e.conv(), DeliveredAtSeq: 4})
@@ -197,7 +197,7 @@ func TestTeammateCommentStaysPendingWhenItsAckCannotBeWritten(t *testing.T) {
 	if ids := stillPending(t, store, "agent-a"); len(ids) != 1 || ids[0] != "tcm_1" {
 		t.Fatalf("pending = %v, want tcm_1 kept", ids)
 	}
-	if err := os.Remove(filepath.Join(e.dir, "teammate-comment-acks")); err != nil {
+	if err := os.Remove(filepath.Join(e.rdir(), "teammate-comment-acks")); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := box.take(t.Context(), TeammateCommentsTakePayload{AgentID: "agent-a", ConversationID: e.conv(), DeliveredAtSeq: 5}); len(got) != 1 {
@@ -215,7 +215,7 @@ func TestTeammateCommentOfAnotherConversationIsDroppedNeverAcked(t *testing.T) {
 		t.Fatalf("take = %v, %v", got, err)
 	}
 	e.live.Wait()
-	if _, err := os.Stat(filepath.Join(e.dir, "teammate-comment-acks")); err == nil {
+	if _, err := os.Stat(filepath.Join(e.rdir(), "teammate-comment-acks")); err == nil {
 		t.Fatal("this session logged an ack for another conversation's note")
 	}
 	if ids := stillPending(t, store, "agent-a"); len(ids) != 0 {
@@ -362,8 +362,8 @@ func (e *liveEnv) payload(seq int64) TeammateCommentsTakePayload {
 
 // ackLogExists reports whether an ack was logged: the log may exist empty (the
 // lease-time writability probe creates it) without holding any ack.
-func ackLogExists(dir string) bool {
-	b, err := os.ReadFile(filepath.Join(dir, "teammate-comment-acks"))
+func ackLogExists(e *liveEnv) bool {
+	b, err := os.ReadFile(filepath.Join(e.rdir(), "teammate-comment-acks"))
 	return err == nil && len(b) > 0
 }
 
@@ -382,7 +382,7 @@ func TestTeammateCommentLeaseWithoutConfirmLosesNothing(t *testing.T) {
 		t.Fatalf("lease = %+v, %v", first, err)
 	}
 	// the hook gave up after its read timeout: no confirm ever arrives
-	if ackLogExists(e.dir) {
+	if ackLogExists(e) {
 		t.Fatal("a lease logged an ack before the hook showed anything")
 	}
 	if ids := stillPending(t, store, "agent-a"); len(ids) != 1 {
@@ -448,7 +448,7 @@ func TestTeammateCommentConfirmAfterExpiry(t *testing.T) {
 		if err := box.confirm(t.Context(), TeammateCommentsConfirmPayload{AgentID: "agent-a", LeaseID: first.LeaseID, CommentIDs: []string{"tcm_1"}}); err == nil {
 			t.Fatal("a lease that expired and was superseded was confirmed")
 		}
-		if ackLogExists(e.dir) {
+		if ackLogExists(e) {
 			t.Fatal("the stale confirm logged an ack")
 		}
 		if err := box.confirm(t.Context(), TeammateCommentsConfirmPayload{AgentID: "agent-a", LeaseID: second.LeaseID, CommentIDs: []string{"tcm_1"}}); err != nil {
@@ -503,7 +503,7 @@ func TestTeammateCommentFailedMarkSendsNoAck(t *testing.T) {
 		t.Fatal("confirm reported success although the note could not be marked shown")
 	}
 	e.live.Wait()
-	if ackLogExists(e.dir) {
+	if ackLogExists(e) {
 		t.Fatal("an ack was logged for a note that was not marked shown")
 	}
 	unblock()
@@ -551,7 +551,7 @@ func TestTeammateCommentReceiptSurvivesAnUnwritableLogAndTheClose(t *testing.T) 
 	e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
 	e.drainOnce()
 	l, _ := box.lease(t.Context(), e.payload(5))
-	log := filepath.Join(e.dir, "teammate-comment-acks")
+	log := filepath.Join(e.rdir(), "teammate-comment-acks")
 	if err := os.Remove(log); err != nil { // the probe created it empty
 		t.Fatal(err)
 	}
@@ -621,7 +621,7 @@ func TestTeammateCommentsOffDropsNotesUnshownAndUnacked(t *testing.T) {
 		t.Fatalf("lease = %+v, %v while off", got, err)
 	}
 	e.live.Wait()
-	if ackLogExists(e.dir) {
+	if ackLogExists(e) {
 		t.Fatal("a dropped note was acked")
 	}
 	box.enabled = nil // back on: the server's copy is stored and shown again
@@ -703,5 +703,82 @@ func TestTickFlushBudgetIsSharedAcrossSessions(t *testing.T) {
 	e.live.Tick(t.Context())
 	if calls != 1 {
 		t.Fatalf("%d flushes ran; the first exhausted the tick's budget, so the rest must wait for the next tick", calls)
+	}
+}
+
+// rdir is the conversation's machine-local receipt folder (never inside the
+// session folder), created.
+func (e *liveEnv) rdir() string {
+	dir, err := livesession.ReceiptsDir(e.cfg, e.conv())
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		e.t.Fatal(err)
+	}
+	return dir
+}
+
+func addShownRows(t *testing.T, e *liveEnv, store *whisperstore.Store, n int) []string {
+	t.Helper()
+	var ids []string
+	for i := range n {
+		id := fmt.Sprintf("tcm_s%02d", i)
+		addPending(t, store, id, "agent-a", map[string]string{"session_dir": e.dir, "conversation_id": e.conv()})
+		ids = append(ids, id)
+	}
+	if err := store.MarkTeammateCommentsShown(7, ids...); err != nil {
+		t.Fatal(err)
+	}
+	return ids
+}
+
+func loggedReceiptIDs(t *testing.T, e *liveEnv) map[string]bool {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(e.rdir(), "teammate-comment-acks"))
+	if err != nil {
+		return map[string]bool{}
+	}
+	out := map[string]bool{}
+	for _, l := range strings.Split(string(b), "\n") {
+		var a sessionstream.TeammateCommentAck
+		if json.Unmarshal([]byte(l), &a) == nil && a.ID != "" {
+			out[a.ID] = true
+		}
+	}
+	return out
+}
+
+// Failure prevented (T2): purge retried one page of 20 owed receipts, and the
+// rest stayed owed for good once the stream stopped.
+func TestPurgeDrainsEveryOwedReceiptNotJustTheFirstPage(t *testing.T) {
+	e, box, store := newCommentEnv(t, "agent-a")
+	ids := addShownRows(t, e, store, 45)
+	box.purgeSession(t.Context(), filepath.Base(e.dir))
+	got := loggedReceiptIDs(t, e)
+	for _, id := range ids {
+		if !got[id] {
+			t.Fatalf("the receipt of %s past the first page was never logged (%d of %d)", id, len(got), len(ids))
+		}
+	}
+	if rows, _ := store.AllShownTeammateComments(100); len(rows) != 0 {
+		t.Fatalf("%d shown rows are still owed", len(rows))
+	}
+}
+
+// And with no stop signal at all, the closed-session sweep drains them.
+func TestTickDrainsOwedReceiptsOfAClosedSessionBeyondTheFirstPage(t *testing.T) {
+	e, box, store := newCommentEnv(t, "agent-a")
+	e.live.drainShown = box.drainAllShown
+	e.live.flushAcks = func(context.Context, livesession.Config, string, time.Duration, time.Time) (bool, error) {
+		return false, nil
+	}
+	ids := addShownRows(t, e, store, 45)
+	e.live.flushOwedAcks(t.Context(), nil)
+	got := loggedReceiptIDs(t, e)
+	for _, id := range ids {
+		if !got[id] {
+			t.Fatalf("the sweep left the receipt of %s owed (%d of %d logged)", id, len(got), len(ids))
+		}
 	}
 }

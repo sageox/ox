@@ -739,6 +739,15 @@ func (s *Store) queryTeammateComments(where string, args []any, limit int) ([]Wh
 	return entries, nil
 }
 
+// AllShownTeammateComments returns up to limit notes already shown whose receipt
+// is still owed, whatever agent or conversation, oldest first.
+func (s *Store) AllShownTeammateComments(limit int) ([]WhisperEntry, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	return s.queryTeammateComments(`source = ? AND json_extract(metadata, '$.state') = 'shown'`, []any{SourceTeammateComment}, limit)
+}
+
 // MarkTeammateCommentsShown moves notes from pending to "shown, receipt owed":
 // the hook wrote them, so they must never be offered again, but the row stays
 // (with the seq they were shown at) until the receipt is durably recorded and
