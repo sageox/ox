@@ -1801,17 +1801,28 @@ func TestEscapeXMLComment(t *testing.T) {
 // be offered for session history, and a pasted /c/ses_ link goes to
 // `ox session view`, never a web fetch.
 func TestConsultFirst_SessionRouting(t *testing.T) {
-	var all strings.Builder
+	byCue := map[string]string{}
 	for _, r := range consultRoutes() {
-		all.WriteString(r.Cue + " " + r.Command + "\n")
+		byCue[r.Cue] = r.Command
+		if strings.Contains(r.Command, "and session history") {
+			t.Errorf("route %q still claims ox query covers session history", r.Cue)
+		}
 	}
-	got := all.String()
-	if strings.Contains(got, "and session history") || strings.Contains(got, "<ses_…>") {
-		t.Error("consult routes still claim ox query covers session history")
+	// each cue must carry its own command, so swapped routes fail
+	want := []struct{ cue, command string }{
+		{`Recency / "I just did X"`, "`ox session view <name>`"},
+		{`Recency / "I just did X"`, "does not search coding sessions"},
+		{`A pasted session link (…/c/ses_…)`, "`ox session view <link or ses_id>`"},
+		{`A pasted session link (…/c/ses_…)`, "never web-fetch"},
 	}
-	for _, want := range []string{"does not search coding sessions", "…/c/ses_…", "`ox session view <link or ses_id>`", "`ox session view <name>`"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("consult routes missing %q", want)
+	for _, w := range want {
+		cmd, ok := byCue[w.cue]
+		if !ok {
+			t.Errorf("no consult route for cue %q", w.cue)
+			continue
+		}
+		if !strings.Contains(cmd, w.command) {
+			t.Errorf("route %q: command %q missing %q", w.cue, cmd, w.command)
 		}
 	}
 }

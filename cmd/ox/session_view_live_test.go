@@ -5,8 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -551,9 +555,10 @@ func TestLiveView_RejectsLocalOnlyFlags(t *testing.T) {
 		cmd.Flags().Bool("latest", false, "")
 		cmd.Flags().Bool("text", false, "")
 		arg := "true"
-		if flag == "input" {
+		switch flag {
+		case "input":
 			arg = "x.jsonl"
-		} else if flag == "limit" {
+		case "limit":
 			arg = "5"
 		}
 		if err := cmd.Flags().Set(flag, arg); err != nil {
@@ -736,4 +741,105 @@ func TestLiveConversationShow_FormatsAndEnvelope(t *testing.T) {
 			t.Fatalf("leak or trace:\n%s", out.String())
 		}
 	})
+}
+
+func TestLiveView_FollowPollsDoNotConsumePagingAllowance(t *testing.T) {
+	var resps []map[string]any
+	for i := 0; i < maxFollowPages+5; i++ {
+		resps = append(resps, liveResp("live", true, fmt.Sprintf("c%d", i), "Status: LIVE. x\n"))
+	}
+	p1 := liveResp("finished", false, "last1", "Status: FINISHED at t. 9 turns.\nfinal-one\n")
+	p1["truncated"] = true
+	p2 := liveResp("finished", false, "", "Status: FINISHED at t. 9 turns.\nfinal-two\n")
+	resps = append(resps, p1, p2)
+	f := &fakeAgentView{responses: resps}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	cmd, out, _ := newLiveViewCmd(t, srv, "--follow")
+	if err := runLiveSessionView(cmd, liveViewRef{ID: testSesID}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "final-one") || !strings.Contains(out.String(), "final-two") {
+		t.Fatalf("remaining pages not drained after many polls:\n%s", out.String())
+	}
+}
+
+func TestLiveSessionHit_NoTitleAndKeepsAliases(t *testing.T) {
+	view := &api.AgentView{SessionID: testSesID, ConversationID: "cnv_0190a1b2c3d47e5f8a9b0c1d2e3f4a5b", Title: "AKIAIOSFODNN7EXAMPLE secret title"}
+	hit := liveSessionHit(view, "cnv_0190a1b2c3d47e5f8a9b0c1d2e3f4a5b", "https://sageox.ai")
+	if hit.Title != "" {
+		t.Fatalf("title must not reach the trace: %q", hit.Title)
+	}
+	if hit.Ref != testSesID || hit.RefType != "session" || !slices.Contains(hit.Aliases, "cnv_0190a1b2c3d47e5f8a9b0c1d2e3f4a5b") {
+		t.Fatalf("hit = %+v", hit.SurfacedRef)
+	}
+}
+
+func TestLiveConversationShow_EnvelopeMetadata(t *testing.T) {
+	resp := liveResp("live", true, "c9", "Status: LIVE. x\n\n## Turn 1\nhello\n")
+	resp["truncated"] = true
+	srv := httptest.NewServer((&fakeAgentView{responses: []map[string]any{resp}}).handler())
+	defer srv.Close()
+	cmd, out, _ := newLiveViewCmd(t, srv)
+	if err := runLiveConversationShow(cmd, liveViewRef{ID: testSesID}, "json"); err != nil {
+		t.Fatal(err)
+	}
+	var env struct {
+		TokenEstimate int    `json:"token_estimate"`
+		Guidance      string `json:"guidance"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.TokenEstimate <= 0 || !strings.Contains(env.Guidance, "--since c9") {
+		t.Fatalf("env = %+v", env)
+	}
+}
+
+func TestLiveConversationShow_GuidanceIsSanitized(t *testing.T) {
+	r := withheldResp("live", true)
+	r["notice"] = "open it\x1b]8;;https://evil.example\x07link\x1b]8;;\x07"
+	srv := httptest.NewServer((&fakeAgentView{responses: []map[string]any{r}}).handler())
+	defer srv.Close()
+	cmd, out, _ := newLiveViewCmd(t, srv)
+	if err := runLiveConversationShow(cmd, liveViewRef{ID: testSesID}, "text"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(out.String(), "\x1b\x07") || strings.Contains(out.String(), "evil.example") {
+		t.Fatalf("escapes survived: %q", out.String())
+	}
+}
+
+func TestSettledLiveError_RequestTimeoutIsRetryable(t *testing.T) {
+	if settledLiveError(fmt.Errorf("session view request: %w", context.DeadlineExceeded)) {
+		t.Fatal("a per-request timeout must be retried")
+	}
+	// but an expired command context stops the retry loop
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	calls := 0
+	_, err := fetchWithRetry(ctx, fakeFetcher(func() (*api.AgentView, error) { calls++; return nil, context.DeadlineExceeded }), testSesID, api.SessionAgentViewOptions{})
+	if err == nil || calls != 1 {
+		t.Fatalf("err=%v calls=%d", err, calls)
+	}
+}
+
+type fakeFetcher func() (*api.AgentView, error)
+
+func (f fakeFetcher) GetSessionAgentView(context.Context, string, api.SessionAgentViewOptions) (*api.AgentView, error) {
+	return f()
+}
+
+func TestLiveProjectRoot_RequiresSageoxDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if got := liveProjectRoot(); got != "" {
+		t.Fatalf("no .sageox: root = %q", got)
+	}
+	if err := os.Mkdir(filepath.Join(dir, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := liveProjectRoot(); got == "" {
+		t.Fatal("project not detected")
+	}
 }

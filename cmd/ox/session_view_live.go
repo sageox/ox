@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/session/contexttrace"
 	"github.com/sageox/ox/internal/session/contextuse"
+	"github.com/sageox/ox/internal/tokens"
 	"github.com/sageox/ox/internal/weblink"
 	"github.com/spf13/cobra"
 )
@@ -121,8 +123,8 @@ var (
 // script it. The server, not the client, decides whether this repo may see the
 // session: .sageox/config.json is committed and can be stale or crafted.
 var liveViewProject = func() (repoID, projectRoot string) {
-	root, err := findProjectRoot()
-	if err != nil {
+	root := liveProjectRoot()
+	if root == "" {
 		return "", ""
 	}
 	cfg, err := config.LoadProjectConfig(root)
@@ -130,6 +132,20 @@ var liveViewProject = func() (repoID, projectRoot string) {
 		return "", root
 	}
 	return cfg.RepoID, root
+}
+
+// liveProjectRoot is the ox project root, or "" outside a project.
+// findProjectRoot falls back to the cwd (no error) when no .sageox exists, so
+// the directory is checked here.
+func liveProjectRoot() string {
+	root, err := findProjectRoot()
+	if err != nil || root == "" {
+		return ""
+	}
+	if info, err := os.Stat(filepath.Join(root, ".sageox")); err != nil || !info.IsDir() {
+		return ""
+	}
+	return root
 }
 
 // linkOnlyView is what is shown when the server withheld the content: status,
@@ -194,7 +210,7 @@ func newLiveViewClient(ctx context.Context, ref liveViewRef) (liveViewFetcher, s
 		if ep == "" {
 			return nil, "", fmt.Errorf("you are not logged in to %s; run `ox login` and retry", ref.Host)
 		}
-	} else if root, err := findProjectRoot(); err == nil {
+	} else if root := liveProjectRoot(); root != "" {
 		ep = endpoint.GetForProject(root)
 	} else {
 		ep = endpoint.Get()
@@ -310,7 +326,7 @@ const maxFollowPages = 200
 
 // streamLiveView prints one view, then with --follow keeps polling while the
 // session is live, printing only new text, and stops when it leaves live (after
-// paging out any truncated remainder) or the context is cancelled (Ctrl-C is a
+// paging out any truncated remainder) or the context is canceled (Ctrl-C is a
 // clean exit).
 func streamLiveView(ctx context.Context, w io.Writer, client liveViewFetcher, opts liveViewOptions) error {
 	since := opts.Since
@@ -318,7 +334,8 @@ func streamLiveView(ctx context.Context, w io.Writer, client liveViewFetcher, op
 	traced := false
 	contextRepo, projectRoot := liveViewProject()
 	lastStatus := ""
-	for page := 0; ; page++ {
+	drained := 0 // consecutive pages fetched back to back; reset on every poll wait
+	for {
 		wasFirst := first
 		view, err := fetchWithRetry(ctx, client, opts.Ref.ID, api.SessionAgentViewOptions{Since: since, Budget: opts.Budget, Layer: opts.Layer, ContextRepo: contextRepo})
 		if err != nil {
@@ -377,11 +394,13 @@ func streamLiveView(ctx context.Context, w io.Writer, client liveViewFetcher, op
 		}
 		// a truncated page has more turns waiting at next_since: page on
 		// immediately, whether or not the session is still live
-		more := view.Truncated && view.NextSince != "" && view.NextSince != since && page < maxFollowPages
+		more := view.Truncated && view.NextSince != "" && view.NextSince != since && drained < maxFollowPages
 		if more {
+			drained++
 			since = view.NextSince
 			continue
 		}
+		drained = 0
 		if !isLive {
 			if !opts.JSON && !wasFirst {
 				// the closing status line tells the follower why we stopped
@@ -408,6 +427,16 @@ func traceLiveSessionRead(projectRoot string, view *api.AgentView, id, ep string
 	if agentID == "" || projectRoot == "" {
 		return
 	}
+	traceProvidedHits(projectRoot, agentID, contexttrace.SourceOnDemand, contexttrace.MechanismRetrieval,
+		[]providedHit{liveSessionHit(view, id, ep)})
+}
+
+// liveSessionHit is the trace entry for a live read: a reference only. The
+// session title is deliberately left out because the trace writer does not
+// redact, so a title could carry a credential into context-trace.jsonl. The
+// cnv_ id (and whatever id the caller typed) is kept as an alias so `context
+// used` can match it.
+func liveSessionHit(view *api.AgentView, id, ep string) providedHit {
 	ref := view.SessionID
 	if ref == "" {
 		ref = id
@@ -416,8 +445,7 @@ func traceLiveSessionRead(projectRoot string, view *api.AgentView, id, ep string
 	if p := weblink.IDTypePrefix(ref); p != "" {
 		url = weblink.ArtifactURL(ep, ref, "/c/", p)
 	}
-	traceProvidedHits(projectRoot, agentID, contexttrace.SourceOnDemand, contexttrace.MechanismRetrieval,
-		[]providedHit{{SurfacedRef: contextuse.SurfacedRef{Ref: ref, RefType: "session", Title: view.Title, URL: url}}})
+	return providedHit{SurfacedRef: contextuse.SurfacedRef{Ref: ref, RefType: "session", URL: url, Aliases: hitAliases(ref, id, view.ConversationID)}}
 }
 
 func leadingLine(s string) string {
@@ -482,7 +510,9 @@ const maxFetchAttempts = 3
 
 // settledLiveError reports failures that will not change on retry: auth
 // rejection, not found / no access (403, 404), other settled 4xx (400, 410),
-// version rejection, a malformed id and cancellation. Everything else
+// version rejection and a malformed id. Command cancellation is checked on the
+// context itself in fetchWithRetry: a single request's timeout also matches
+// context.DeadlineExceeded and must stay retryable. Everything else
 // (transport errors, 5xx, rate limits, anything unclassified) is retried.
 func settledLiveError(err error) bool {
 	var rejected *api.RejectedError
@@ -490,8 +520,6 @@ func settledLiveError(err error) bool {
 		errors.Is(err, api.ErrSessionNotFound) ||
 		errors.Is(err, api.ErrVersionUnsupported) ||
 		errors.Is(err, api.ErrInvalidSessionID) ||
-		errors.Is(err, context.Canceled) ||
-		errors.Is(err, context.DeadlineExceeded) ||
 		errors.As(err, &rejected)
 }
 
@@ -511,7 +539,7 @@ func fetchWithRetry(ctx context.Context, client liveViewFetcher, id string, o ap
 			return view, nil
 		}
 		lastErr = err
-		if settledLiveError(err) || attempt == maxFetchAttempts-1 {
+		if ctx.Err() != nil || settledLiveError(err) || attempt == maxFetchAttempts-1 {
 			break
 		}
 		wait := retryBackoffBase << attempt
@@ -579,7 +607,7 @@ func runLiveConversationShow(cmd *cobra.Command, ref liveViewRef, format string)
 
 	if withheld(view) {
 		lo := linkOnly(view, ref.ID, ep)
-		env := &read.Envelope{Success: true, Data: &lo, Guidance: lo.Notice}
+		env := liveSuccessEnvelope(&lo, safeLiveText(lo.Notice))
 		return finishConversationEnvelope(w, format, env, func(out io.Writer, e *read.Envelope) {
 			fmt.Fprintln(out, safeLiveText(linkOnlyText(lo)))
 		})
@@ -587,8 +615,34 @@ func runLiveConversationShow(cmd *cobra.Command, ref liveViewRef, format string)
 	liveViewTrace(projectRoot, view, ref.ID, ep)
 	data := &liveShowData{SessionID: view.SessionID, ConversationID: view.ConversationID, Title: view.Title, Status: view.Status, Live: view.Live,
 		TurnCount: view.TurnCount, NextSince: view.NextSince, Truncated: view.Truncated, Layers: view.Layers, Markdown: view.Markdown}
-	env := &read.Envelope{Success: true, Data: data}
+	env := liveSuccessEnvelope(data, liveShowGuidance(view, ref.ID))
 	return finishConversationEnvelope(w, format, env, func(out io.Writer, e *read.Envelope) {
 		fmt.Fprintln(out, safeLiveText(strings.TrimRight(view.Markdown, "\n")))
 	})
+}
+
+// liveSuccessEnvelope fills what read.Reader's success builder fills: the
+// token estimate measured on the marshaled payload (what an agent spends) and
+// the guidance. Guidance is sanitized because it is printed as-is.
+func liveSuccessEnvelope(data any, guidance string) *read.Envelope {
+	env := &read.Envelope{Success: true, Data: data, Guidance: safeLiveText(guidance)}
+	if payload, err := json.Marshal(data); err == nil {
+		env.TokenEstimate = tokens.EstimateTokens(string(payload))
+	}
+	return env
+}
+
+// liveShowGuidance names the next step for a content read.
+func liveShowGuidance(view *api.AgentView, id string) string {
+	sid := view.SessionID
+	if sid == "" {
+		sid = id
+	}
+	switch {
+	case view.Truncated && view.NextSince != "":
+		return fmt.Sprintf("Output was truncated to the budget; read the rest with `ox session view %s --since %s`, or raise --budget.", sid, view.NextSince)
+	case view.Live && view.NextSince != "":
+		return fmt.Sprintf("Session is still live; read new turns with `ox session view %s --since %s`, or follow with --follow.", sid, view.NextSince)
+	}
+	return "Read one layer in full with `ox session view " + sid + " --layer <clyr_id>`."
 }
