@@ -287,6 +287,12 @@ func openRefused(ctx context.Context, cfg Config, dir string, st State, err erro
 		if done {
 			return s.st, nil
 		}
+		if api.Body.Reason == sessionstream.ReasonSessionNameTaken {
+			// another person owns this session name in this repo; no retry can
+			// change that, so the stream ends here instead of looping every tick
+			s.disable(ctx, api.Body.Reason, "action", string(api.Body.Action), "status", api.Status)
+			return s.st, nil
+		}
 	}
 	return State{}, fmt.Errorf("open live session: %w", err)
 }

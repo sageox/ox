@@ -144,6 +144,14 @@ func (c *Client) Close(ctx context.Context, cnv string, in CloseRequest) error {
 	return c.doJSON(ctx, http.MethodPost, ClosePath(cnv), in, nil)
 }
 
+// AckTeammateComments records which stream entry each teammate comment reached
+// the agent at. Idempotent on the server: a repeat records zero and succeeds.
+func (c *Client) AckTeammateComments(ctx context.Context, cnv string, in AckTeammateCommentsRequest) (AckTeammateCommentsResponse, error) {
+	var out AckTeammateCommentsResponse
+	err := c.doJSON(ctx, http.MethodPost, TeammateCommentAcksPath(cnv), in, &out)
+	return out, err
+}
+
 // Delete aborts a session everywhere.
 func (c *Client) Delete(ctx context.Context, cnv string) error {
 	return c.doJSON(ctx, http.MethodDelete, SessionPath(cnv), nil, nil)

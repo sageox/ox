@@ -328,6 +328,11 @@ type UserConfig struct {
 	// "off". See internal/config/session_draft.go and ADR-029.
 	SessionDraft string `yaml:"session_draft,omitempty"`
 
+	// SessionTeammateNotes controls whether notes from a teammate watching a
+	// live session reach this machine's agent: "on" (default) or "off". See
+	// internal/config/teammate_notes.go.
+	SessionTeammateNotes string `yaml:"session_teammate_notes,omitempty"`
+
 	// SessionPublishing controls what happens to a recording when the
 	// session stops: "auto" (default) uploads it to the ledger; "manual"
 	// saves it locally only, so the user must run 'ox session upload'
