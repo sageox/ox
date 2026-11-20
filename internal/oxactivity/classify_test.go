@@ -267,7 +267,11 @@ func TestClassify_MCPRef(t *testing.T) {
 			tc{tool.name + "/not an object", tool.name, `["` + tool.id + `"]`, ""},
 		)
 		for _, h := range hostile {
-			tests = append(tests, tc{tool.name + "/hostile " + h.name, tool.name, `{"` + tool.field + `":"` + h.value + `"}`, ""})
+			// encoded, so a control character arrives as valid JSON and it is the
+			// id check that turns it away, not the JSON parser
+			input, err := json.Marshal(map[string]string{tool.field: h.value})
+			require.NoError(t, err)
+			tests = append(tests, tc{tool.name + "/hostile " + h.name, tool.name, string(input), ""})
 		}
 	}
 	// the other field name, or another tool, never yields a Ref
