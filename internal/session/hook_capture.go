@@ -29,8 +29,8 @@ const (
 	// roots (HookCaptureOptions.SourceHome), so nothing was read.
 	HookStatusSourceRefused = "source-not-allowed"
 	// HookStatusSpoolLost: the entries reached raw.jsonl and the cursor moved,
-	// but the batch could not be read back for the live stream, so it was
-	// declared lost there (HookCaptureOptions.SpoolLost).
+	// but the live stream could not take the batch, so it was declared lost
+	// there (HookCaptureOptions.Spool returned an error).
 	HookStatusSpoolLost = "spool-lost"
 	// HookStatusRawRefused: raw.jsonl is a symlink or another non-regular
 	// file (ErrRawNotRegular), so nothing was recovered, read or written.
@@ -71,13 +71,10 @@ type HookCaptureOptions struct {
 	// first would leave raw.jsonl without its header for good.
 	WriteHeader func(state *RecordingState) error
 	// Spool hands a batch just committed to raw.jsonl to the live stream. It
-	// runs only after the append succeeded.
-	Spool func(state *RecordingState, batch AppendedBatch)
-	// SpoolLost declares a batch that was committed to raw.jsonl but never
-	// reached Spool, because it could not be read back, as a live-stream loss.
-	// The cursor is already past its bytes, so no later capture sends them.
-	// Set it alongside Spool.
-	SpoolLost func(state *RecordingState, bytes int64, cause error)
+	// runs only after the append succeeded. An error means the stream could
+	// not take the batch and declared it lost: the cursor is already past its
+	// bytes, so no later capture sends them (HookStatusSpoolLost).
+	Spool func(state *RecordingState, batch AppendedBatch) error
 	// MarkStatus records how the capture ended on the recording, inside the
 	// state update the capture makes anyway. nil records nothing: the counters
 	// `ox session status` shows describe hooks, not the daemon's reads.
@@ -478,7 +475,7 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 	if writeErr != nil {
 		return result, writeErr
 	}
-	appendErr := writer.AppendRecordingBatch(filepath.Join(state.SessionPath, ".recording.json"), sessionEntries, newOffset)
+	batch, appendErr := writer.AppendRecordingBatch(filepath.Join(state.SessionPath, ".recording.json"), sessionEntries, newOffset)
 	closeErr := writer.Close()
 	if appendErr == nil {
 		appendErr = closeErr
@@ -490,30 +487,8 @@ func CaptureHookEntries(ctx context.Context, projectRoot, agentID, expectedSessi
 	}
 	result.ToOffset, result.Entries = newOffset, len(sessionEntries)
 	status := HookStatusOK
-	if opts.Spool != nil {
-		// spool exactly what the append just committed; reading it back is safe
-		// after Close because raw.jsonl is append-only (see LastAppended)
-		batch, ok, err := writer.LastAppended()
-		switch {
-		case err != nil && writer.lastSuspended:
-			// committed while paused: the live stream deliberately excludes these
-			// bytes (Spool skips paused batches), so failing to read them back
-			// loses nothing from it. Declaring them would report a false gap.
-			slog.WarnContext(ctx, "live_session_batch_read_failed", "session_id", state.SessionID, "agent_id", agentID,
-				"session", filepath.Base(state.SessionPath), "bytes", writer.lastTo-writer.lastFrom, "paused", true, "declared", false, "error", err)
-		case err != nil:
-			// committed, but the live stream will never see it: the cursor is
-			// past these bytes. Declared, the stream shows a gap in their place.
-			status = HookStatusSpoolLost
-			lost := writer.lastTo - writer.lastFrom // the span LastAppended failed to read
-			slog.ErrorContext(ctx, "live_session_batch_read_failed", "session_id", state.SessionID, "agent_id", agentID,
-				"session", filepath.Base(state.SessionPath), "bytes", lost, "declared", opts.SpoolLost != nil, "error", err)
-			if opts.SpoolLost != nil {
-				opts.SpoolLost(state, lost, err)
-			}
-		case ok:
-			opts.Spool(state, batch)
-		}
+	if opts.Spool != nil && opts.Spool(state, batch) != nil {
+		status = HookStatusSpoolLost
 	}
 
 	markStatus(status)

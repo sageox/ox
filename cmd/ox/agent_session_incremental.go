@@ -166,8 +166,9 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		}
 		latest, finalBatch, err := session.FinalizeCursorCapture(context.Background(), projectRoot, state.SessionPath, home, reader)
 		// the final drain's bytes are committed even when finalization must wait
-		// for Cursor's export, and no later drain reads them again (C8)
-		liveSessionSpool(projectRoot, state, finalBatch)
+		// for Cursor's export, and no later drain reads them again (C8); the
+		// step declares and logs a batch the stream could not take
+		_ = liveSessionSpool(projectRoot, state, finalBatch)
 		if err != nil {
 			return nil, err
 		}
@@ -259,7 +260,7 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 				if err != nil {
 					return nil, err
 				}
-				appendErr := writer.AppendRecordingBatch(filepath.Join(state.SessionPath, ".recording.json"), drainEntries, newOffset)
+				batch, appendErr := writer.AppendRecordingBatch(filepath.Join(state.SessionPath, ".recording.json"), drainEntries, newOffset)
 				closeErr := writer.Close()
 				if appendErr != nil {
 					return nil, appendErr
@@ -267,7 +268,8 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 				if closeErr != nil {
 					return nil, closeErr
 				}
-				liveSessionSpoolWriter(projectRoot, state, writer)
+				// the step declares and logs a batch the stream could not take
+				_ = liveSessionSpool(projectRoot, state, batch)
 				state.SourceOffset = newOffset
 				state.EntryCount += len(entries)
 
@@ -310,6 +312,10 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	result.EntryCount = len(storedSession.Entries)
 
 	if result.EntryCount == 0 {
+		// no close runs below, yet a refused batch may already have set the
+		// flag (a first batch that is not a JSON line keeps no entry), and the
+		// stream may still withhold one: settle the notice here too
+		collectLiveSecretWithheldNotices(result, state)
 		return result, nil
 	}
 
@@ -405,6 +411,8 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	// it) is held the same way, for its own reason.
 	sessionCacheDir := filepath.Dir(result.RawPath)
 	deletedOnServer := liveDeletedOnServer(state.SessionPath)
+	// after the close above, which may be what withheld a batch
+	collectLiveSecretWithheldNotices(result, state)
 	held := stopHoldsSession(projectRoot, state)
 	switch {
 	case deletedOnServer:

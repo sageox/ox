@@ -16,7 +16,6 @@ import (
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/fileutil"
-	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/prime"
@@ -325,10 +324,13 @@ func handleStart(ctx *HookContext) error {
 		agentID = ctx.Marker.AgentID
 	}
 
-	// on /clear or /compact: stop the current session so it gets finalized,
-	// then prime will start a fresh recording for the new context window
 	if forceReprime && agentID != "" {
-		stopSessionForClear(ctx, agentID)
+		// /clear starts a new session linked to the old one: stop it so it is
+		// finalized and its live stream closed, and prime starts the next. A
+		// /compact continues the same session, recording and live stream alike.
+		if source == clearSource {
+			stopSessionForClear(ctx, agentID)
+		}
 		// the model's context window was wiped but the on-disk task cursor
 		// survives — reset it so pending tasks re-surface in the fresh context.
 		resetTaskCursor(ctx.ProjectRoot, agentID)
@@ -351,7 +353,11 @@ func handleStart(ctx *HookContext) error {
 	return nil
 }
 
-// stopSessionForClear stops the current session recording during /clear or /compact.
+// clearSource is the SessionStart source after /clear, the one context reset
+// that ends the recording; /compact ("compact") continues it.
+const clearSource = "clear"
+
+// stopSessionForClear stops the current session recording during /clear.
 // This finalizes the old session so it gets uploaded, then prime starts a fresh one.
 // Sets StoppedAt, sends fire-and-forget IPC finalization to the daemon, and clears
 // recording state so prime can start a fresh session.
@@ -783,11 +789,8 @@ func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expected
 		WriteHeader: func(state *session.RecordingState) error {
 			return writeRawHeader(ctx.ProjectRoot, state)
 		},
-		Spool: func(state *session.RecordingState, batch session.AppendedBatch) {
-			liveSessionSpool(ctx.ProjectRoot, state, batch)
-		},
-		SpoolLost: func(state *session.RecordingState, n int64, cause error) {
-			liveSessionDeclareLost(ctx.ProjectRoot, state, n, cause)
+		Spool: func(state *session.RecordingState, batch session.AppendedBatch) error {
+			return liveSessionSpool(ctx.ProjectRoot, state, batch)
 		},
 		MarkStatus: markHookStatus,
 		// the transcript Claude Code names here is the only one the daemon
@@ -813,33 +816,6 @@ func hookTranscript(in *agentx.HookInput) *session.HookTranscript {
 		t.Path = stdin.TranscriptPath
 	}
 	return t
-}
-
-// liveSessionDeclareLost declares n bytes a capture committed to raw.jsonl but
-// could not read back as a live-stream loss, so the stream's next write or its
-// close carries a spool_write_failed gap where they belong: the cursor is past
-// them and nothing will spool them. It declares only into the stream
-// liveSessionSpool would have fed: this recording's (C4), and not a held one (C1).
-func liveSessionDeclareLost(projectRoot string, state *session.RecordingState, n int64, cause error) {
-	if state == nil || state.SessionPath == "" || n <= 0 {
-		return
-	}
-	st, err := livesession.ReadState(state.SessionPath)
-	if err != nil {
-		return // never prepared: streaming is off for this session
-	}
-	if st.SessionID != state.SessionID {
-		slog.Debug("live_session_loss_skipped", "session_id", state.SessionID, "reason", "other_recording", "stream_session_id", st.SessionID)
-		return
-	}
-	if liveSessionHeld(projectRoot, state) {
-		slog.Debug("live_session_loss_skipped", "session_id", state.SessionID, "reason", "held")
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), liveLocalBound)
-	defer cancel()
-	// DeclareLost logs the loss, and any failure to record it, at Error itself
-	_ = livesession.DeclareLost(ctx, state.SessionPath, n, cause)
 }
 
 // markHookStatus records one hook invocation and how its capture ended, so

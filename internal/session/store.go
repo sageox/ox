@@ -78,10 +78,14 @@ func (s *Store) BasePath() string {
 	return s.basePath
 }
 
-// GenerateSessionName creates a unique session folder name.
+// GenerateSessionName creates a minute-granular session folder name.
 // Format: YYYY-MM-DDTHH-MM-<username>-<sessionID>
 // Example: 2026-01-06T14-32-ryan-Ox7f3a
 func GenerateSessionName(sessionID, username string) string {
+	return generateSessionName(sessionID, username, "")
+}
+
+func generateSessionName(sessionID, username, recordingID string) string {
 	now := time.Now().UTC()
 	timestamp := now.Format("2006-01-02T15-04")
 
@@ -97,6 +101,11 @@ func GenerateSessionName(sessionID, username string) string {
 		safeSessionID = "unknown"
 	}
 
+	if recordingID != "" {
+		// sanitizeFilename collapses double dashes, reserving this delimiter
+		// for the recording ID while keeping the agent ID at the end.
+		return fmt.Sprintf("%s-%s--%s-%s", timestamp, safeUsername, recordingID, safeSessionID)
+	}
 	return fmt.Sprintf("%s-%s-%s", timestamp, safeUsername, safeSessionID)
 }
 
@@ -1060,30 +1069,36 @@ func ResolveOrMintSessionID(preserved, startMinted string) string {
 // the crash-safe-carrier read for paths where .recording.json is already
 // gone (recover, daemon orphan finalize).
 func ReadHeaderSessionID(path string) string {
+	if meta := ReadHeaderMeta(path); meta != nil {
+		return meta.SessionID
+	}
+	return ""
+}
+
+// ReadHeaderMeta returns the metadata of the first-line header of the
+// raw.jsonl at path, or nil for a legacy, foreign or absent header.
+func ReadHeaderMeta(path string) *StoreMeta {
 	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		return nil
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
 	if !scanner.Scan() {
-		return ""
+		return nil
 	}
 	var entry map[string]any
 	if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
-		return ""
+		return nil
 	}
-	var meta *StoreMeta
 	if metadata, ok := entry["metadata"].(map[string]any); ok && entry["type"] == "header" {
-		meta = ParseStoreMeta(metadata)
-	} else if m, ok := entry["_meta"].(map[string]any); ok {
-		meta = ParseStoreMeta(m)
+		return ParseStoreMeta(metadata)
 	}
-	if meta == nil {
-		return ""
+	if m, ok := entry["_meta"].(map[string]any); ok {
+		return ParseStoreMeta(m)
 	}
-	return meta.SessionID
+	return nil
 }
 
 // mergeFooter folds a footer record into the footer accumulated so far. A

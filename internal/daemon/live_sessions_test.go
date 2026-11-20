@@ -87,7 +87,36 @@ func (e *liveEnv) spooled() string {
 	return string(b)
 }
 
-func lineN(n int) string { return fmt.Sprintf(`{"type":"msg","n":%d}`+"\n", n) }
+// lineN is a captured human prompt line: a pending stream opens only once its
+// spool holds one (livesession.ErrAwaitingPrompt).
+func lineN(n int) string { return fmt.Sprintf(`{"type":"user","n":%d}`+"\n", n) }
+
+// Failure prevented: a session start's header alone opened a server stream
+// on the first tick; and once it waits for a prompt, that wait must not back
+// off, or the prompt's drain would sit out a backoff window.
+func TestLiveTickOpensNothingUntilTheFirstPrompt(t *testing.T) {
+	e := newLiveEnv(t)
+	e.spool(`{"type":"header","metadata":{"agent_id":"Oxabc1"}}` + "\n")
+
+	e.live.Tick(t.Context())
+	e.live.Wait()
+	if n := len(e.srv.Calls()); n != 0 || e.state().Status != livesession.StatusPending {
+		t.Fatalf("a header-only session: %d server calls, status %s; want none and pending", n, e.state().Status)
+	}
+	e.live.mu.Lock()
+	_, backingOff := e.live.backoff[canonicalDir(e.dir)]
+	e.live.mu.Unlock()
+	if backingOff {
+		t.Fatal("waiting for the first prompt put the session in backoff")
+	}
+
+	e.spool(lineN(1))
+	e.live.Drain(t.Context(), e.dir) // the kick the prompt's capture sends
+	e.live.Wait()
+	if st := e.state(); st.Status != livesession.StatusStreaming || e.stored() == "" {
+		t.Fatalf("after the first prompt: status %s, server holds %q; want streaming and stored", st.Status, e.stored())
+	}
+}
 
 func TestLiveIPCDrainOpensAPendingSessionAndDrainsIt(t *testing.T) {
 	e := newLiveEnv(t)
@@ -267,11 +296,23 @@ func TestLiveConcurrentDrainRequestsForOneSessionAreCoalesced(t *testing.T) {
 	}
 }
 
+// The daemon's capture paths spool through the shared step, then ask for a
+// drain (the wiring daemon.go sets up); a paused batch never reaches the server.
 func TestLiveCaptureFromTheTailWatcherSpoolsAndDrainsButNeverPausedBatches(t *testing.T) {
 	e := newLiveEnv(t)
-	e.live.Capture(t.Context(), e.dir, session.AppendedBatch{Bytes: []byte(lineN(1))})
-	e.live.Capture(t.Context(), e.dir, session.AppendedBatch{Bytes: []byte(`{"type":"msg","content":"PAUSED-SECRET"}` + "\n"), Suspended: true})
-	e.live.Capture(t.Context(), e.dir, session.AppendedBatch{Bytes: []byte(lineN(3))})
+	rec := &session.RecordingState{SessionID: e.params.SessionID, SessionPath: e.dir}
+	capture := func(b session.AppendedBatch) {
+		spooled, err := livesession.SpoolCommitted(t.Context(), "", rec, b)
+		if err != nil {
+			t.Fatalf("spool committed batch: %v", err)
+		}
+		if spooled {
+			e.live.Spooled(t.Context(), e.dir)
+		}
+	}
+	capture(session.AppendedBatch{Bytes: []byte(lineN(1))})
+	capture(session.AppendedBatch{Bytes: []byte(`{"type":"msg","content":"PAUSED-SECRET"}` + "\n"), Suspended: true})
+	capture(session.AppendedBatch{Bytes: []byte(lineN(3))})
 	e.live.Wait()
 
 	got := e.stored()

@@ -98,7 +98,16 @@ func (c Config) clientWithKey(ctx context.Context, endpoint string, key ed25519.
 // lock file itself lives where fileutil keeps advisory locks (OS tmpdir, keyed
 // by this path) so it never lands in a git-tracked session folder.
 func withLock(ctx context.Context, dir string, wait time.Duration, fn func() error) error {
-	return fileutil.WithFileLockTimeout(ctx, filepath.Join(dir, lockFileName), wait, fn)
+	return fileutil.WithFileLockTimeout(ctx, LockTarget(dir), wait, fn)
+}
+
+// LockTarget is the path live.lock is keyed by for the session folder dir. The
+// key is a hash of the path's spelling, so it uses the folder's resolved path
+// (canonicalDir): a hook naming the folder through a symlinked cache and the
+// daemon naming it directly must exclude each other, or a capture appends
+// while a drain rewrites the spool and the entry is lost with no gap line.
+func LockTarget(dir string) string {
+	return filepath.Join(canonicalDir(dir), lockFileName)
 }
 
 func removeIfExists(path string) error {

@@ -17,10 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`ox init` and `ox doctor` no longer say other coding agents are untested** — both ended with a line that SageOx "is designed initially for Claude Code" and that other agents were not yet tested, which contradicted the docs. The line is gone; `ox login` dropped it earlier.
 - **`ox brief` is gone; use `ox session report`** — the alias kept for one release after the rename is removed. `ox session report` takes the same flags, and the `brief_pane` setting still works as the old name of `session_report_pane`.
 
 ### Fixed
 
+- **`ox status` and `ox doctor` catch a daemon without your `SAGEOX_TOKEN`** — a running daemon keeps the environment it started with, so one started before `SAGEOX_TOKEN` was set or changed (an AI coworker's first turns can come before its token) cloned and synced the Ledger without it: git asked for a username for git.sageox.ai while `ox status` showed the token as valid. Both now name the mismatch and say to run `ox daemon restart` from the shell that has the token. A daemon holding a token your shell lacks only gets a warning.
+- **Sessions in a Git worktree beside the repo are saved** — a Claude Code session run in a worktree outside the main checkout is now found and uploaded at stop. When nothing is found, `session stop` reports failure, says why, and gives the exact `recover` or `ox session import` command instead of claiming success; `session recover` does the same.
+- **Long sessions import** — `ox agent <id> session import` reads entries up to 10 MiB; one over 1 MiB (a screenshot, long tool output) no longer fails the import, and one too large to save names its line. Its help and output now say it adds planning history, and point to `ox session import` for the full conversation.
 - **Add-ons and team memory reach the team** — `ox addons` changes and `ox memory put` push to Team Context and report when a change is still local. The daemon retries on the next sync.
 - **`ox session list` no longer reports an uncloned Ledger as available** — the Ledger folder can exist before its first clone lands, and `ledger_available` read it as ready. An AI coworker runner then recorded work that could never upload. It now reports `false` until the Ledger is a checkout.
 - **Each Codex desktop chat gets its own AI coworker** — every chat in the ChatGPT desktop app runs under one Codex process, so a new chat reused the first chat's AI coworker and the two sessions were recorded as one, losing a chat's history. A chat with its own session ID now always gets its own AI coworker.

@@ -30,6 +30,12 @@ const DefaultSpoolCap int64 = 64 << 20
 // every hook: an unlocked append is safe, a hook that stalls a tool call is not.
 const spoolLockWait = 200 * time.Millisecond
 
+// spoolSwapWait bounds a wait for the spool's swap lock (withSwapLock). Its
+// holders do local file work only: an unlocked append, or a drain replacing a
+// withheld batch. A hook's whole local budget is a second (liveLocalBound in
+// cmd/ox), so waiting longer would only stall it; a timeout is a declared loss.
+const spoolSwapWait = time.Second
+
 // tailScanChunk is how far back one step looks for the last newline.
 const tailScanChunk = 4096
 
@@ -75,9 +81,12 @@ type SpoolResult struct {
 // gap line. The error is still returned.
 //
 // A hook must not wait behind a long drain: if live.lock stays busy for
-// spoolLockWait the append proceeds unlocked. That is safe because the spool is
-// append-only, one write call per batch, and a drain only reads up to the end it
-// measured; the lock only orders the cap and torn-tail bookkeeping.
+// spoolLockWait the append proceeds without it. That is safe because the spool
+// is append-only, one write call per batch, and a drain only reads up to the end
+// it measured; the lock only orders the cap and torn-tail bookkeeping. The one
+// exception, a drain replacing a withheld batch, cuts and rewrites the spool's
+// unsent tail, so an append without live.lock holds the swap lock instead
+// (withSwapLock).
 func Spool(ctx context.Context, dir string, batch []byte, opts SpoolOptions) (SpoolResult, error) {
 	var res SpoolResult
 	if opts.Paused {
@@ -86,28 +95,143 @@ func Spool(ctx context.Context, dir string, batch []byte, opts SpoolOptions) (Sp
 	if len(batch) == 0 {
 		return res, nil
 	}
+	recorded := false
 	run := func() error {
-		st, err := ReadState(dir)
-		if err != nil {
+		err := func() error {
+			st, err := ReadState(dir)
+			if err != nil {
+				return err
+			}
+			switch st.Status {
+			case StatusPending, StatusStreaming, StatusClosing:
+			default:
+				return ErrNotStreaming
+			}
+			res, err = appendToSpool(dir, st.Acked, batch, opts)
+			return err
+		}()
+		if err == nil || errors.Is(err, ErrNotStreaming) {
 			return err
 		}
-		switch st.Status {
-		case StatusPending, StatusStreaming, StatusClosing:
-		default:
-			return ErrNotStreaming
-		}
-		res, err = appendToSpool(dir, st.Acked, batch, opts)
-		return err
+		// recorded before the lock is released: a close deciding whether the
+		// stream ever held a prompt (endIfPromptless) takes this lock, and a
+		// failed first prompt must already count as one when it looks
+		recorded = true
+		return spoolFailed(ctx, dir, int64(len(batch)), err)
 	}
 	err := withLock(ctx, dir, spoolLockWait, run)
+	if spoolUnlockedHook != nil {
+		spoolUnlockedHook()
+	}
 	var busy *fileutil.ErrLockTimeout
 	if errors.As(err, &busy) {
-		err = run()
+		if spoolSwapWaitHook != nil {
+			spoolSwapWaitHook()
+		}
+		err = withSwapLock(ctx, dir, run)
 	}
-	if err != nil && !errors.Is(err, ErrNotStreaming) {
+	if err != nil && !errors.Is(err, ErrNotStreaming) && !recorded {
+		// no lock was taken (an unusable lock directory, a canceled wait), so
+		// nothing ran that could have recorded it
 		return res, spoolFailed(ctx, dir, int64(len(batch)), err)
 	}
 	return res, err
+}
+
+// spoolUnlockedHook, nil in production, runs when Spool's attempt under
+// live.lock has returned and released it.
+var spoolUnlockedHook func()
+
+// withSwapLock holds the spool's swap lock. An append made without live.lock
+// holds it from opening the spool to closing it, and replaceSpoolRange holds it
+// (with live.lock) while it cuts and rewrites the spool's unsent tail. Without
+// it, an append landing between the cut and the rewrite would be overwritten:
+// lost, with no gap line. Like live.lock it is keyed by the session folder's
+// resolved path (canonicalDir), so a hook naming the folder through a symlink
+// and the daemon naming it directly take the same lock.
+func withSwapLock(ctx context.Context, dir string, fn func() error) error {
+	return fileutil.WithFileLockTimeout(ctx, filepath.Join(canonicalDir(dir), spoolFileName), spoolSwapWait, fn)
+}
+
+// spoolSwapWaitHook, nil in production, runs when an append that found
+// live.lock busy is about to wait for the swap lock.
+var spoolSwapWaitHook func()
+
+// spoolRewriteHook, nil in production, lets a test act while replaceSpoolRange
+// holds the swap lock, after it cut the spool and before it writes the new
+// tail. An error it returns stands for that write failing.
+var spoolRewriteHook func() error
+
+// replaceSpoolRange replaces spool bytes [off, off+n) with line. The range is
+// the unacknowledged batch at acked, so only the spool's tail from off is
+// rewritten: cut there, then line and the rest of the tail written back.
+// History the server already holds is never copied, so a withhold costs at
+// most the unsent bytes (DefaultSpoolCap), however long the session ran.
+//
+// The caller holds live.lock; this also takes the swap lock, so no append made
+// without live.lock writes between the cut and the rewrite. A crash in that
+// window would drop the unsent tail with no gap line, so its size is recorded
+// in spool-lost before the cut and settled only once the new tail is synced. A
+// crash then leaves a spool_write_failed gap for the next write to declare
+// (overstated if the rewrite had finished), never a silent loss.
+func replaceSpoolRange(ctx context.Context, dir string, off, n int64, line []byte) error {
+	return withSwapLock(ctx, dir, func() error {
+		f, err := os.OpenFile(filepath.Join(dir, spoolFileName), os.O_RDWR, 0)
+		if err != nil {
+			return fmt.Errorf("open spool: %w", err)
+		}
+		defer func() { _ = f.Close() }() // synced below before anything relies on it
+		tail, size, err := replacedTail(f, off, n, line)
+		if err != nil {
+			return err
+		}
+		declared, settle := readDeclared(dir)
+		if err := recordLost(dir, size-off); err != nil {
+			return err // nothing changed yet; the next drain withholds again
+		}
+		if err := f.Truncate(off); err != nil {
+			return fmt.Errorf("cut spool at %d: %w", off, err)
+		}
+		if spoolRewriteHook != nil {
+			if err := spoolRewriteHook(); err != nil {
+				return err
+			}
+		}
+		if _, err := f.WriteAt(tail, off); err != nil {
+			return fmt.Errorf("rewrite spool tail: %w", err)
+		}
+		if err := f.Sync(); err != nil {
+			return fmt.Errorf("sync spool: %w", err)
+		}
+		if settle {
+			// nothing else settles while both locks are held, so declared + the
+			// tail is exactly what spool-lost now records past older losses
+			if err := settleLost(dir, declared+size-off); err != nil {
+				// the spool is whole; the next write declares a gap for nothing lost
+				slog.WarnContext(ctx, "live_session_spool_lost_settle_failed", "session", filepath.Base(dir), "bytes", size-off, "error", err)
+			}
+		}
+		return nil
+	})
+}
+
+// replacedTail reads the spool from off with bytes [off, off+n) replaced by
+// line, into one buffer of the new tail's size. It returns the spool's size too.
+func replacedTail(f *os.File, off, n int64, line []byte) ([]byte, int64, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return nil, 0, fmt.Errorf("stat spool: %w", err)
+	}
+	size := info.Size()
+	if off < 0 || n <= 0 || off+n > size {
+		return nil, 0, fmt.Errorf("replace spool bytes [%d, %d): the spool holds %d", off, off+n, size)
+	}
+	tail := make([]byte, int64(len(line))+size-off-n)
+	copy(tail, line)
+	if _, err := f.ReadAt(tail[len(line):], off+n); err != nil {
+		return nil, 0, fmt.Errorf("read spool: %w", err)
+	}
+	return tail, size, nil
 }
 
 // DeclareLost records n bytes committed to raw.jsonl that never reached Spool

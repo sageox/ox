@@ -706,7 +706,7 @@ func TestAppendRecordingBatchRejectsNonAdvancingCursor(t *testing.T) {
 	stateBefore, err := os.ReadFile(statePath)
 	require.NoError(t, err)
 
-	err = w.AppendRecordingBatch(statePath, []Entry{{Type: EntryTypeUser, Content: "x"}}, 50)
+	_, err = w.AppendRecordingBatch(statePath, []Entry{{Type: EntryTypeUser, Content: "x"}}, 50)
 	require.ErrorContains(t, err, "did not advance")
 
 	rawAfter, err := os.ReadFile(raw)

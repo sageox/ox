@@ -1192,8 +1192,6 @@ func runInit() error {
 		// show contextual tip
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("init", tips.AlwaysShow, initQuiet, !userCfg.AreTipsEnabled(), false)
-
-		cli.PrintDisclaimer()
 	}
 
 	return nil

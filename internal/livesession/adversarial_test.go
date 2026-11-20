@@ -545,7 +545,7 @@ func TestAdvHelperHoldsLiveLock(t *testing.T) {
 	if dir == "" {
 		t.Skip("reason: helper process for TestAdversarialStaleLiveLock, runs only when re-executed by it")
 	}
-	_ = fileutil.WithFileLockTimeout(context.Background(), filepath.Join(dir, "live.lock"), 5*time.Second, func() error {
+	_ = fileutil.WithFileLockTimeout(context.Background(), livesession.LockTarget(dir), 5*time.Second, func() error {
 		fmt.Println("locked")
 		time.Sleep(time.Hour) // hold until killed
 		return nil
@@ -566,7 +566,7 @@ func TestAdversarialStaleLiveLockOfAKilledProcessIsReclaimed(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestAdvHelperHoldsLiveLock$")
-	cmd.Env = append(os.Environ(), "ADV_HOLD_LIVE_LOCK="+s.dir) // safe: re-execs this test binary as a lock-holding helper
+	cmd.Env = append(os.Environ(), "ADV_HOLD_LIVE_LOCK="+s.dir) // safe: re-executes this test binary as a helper, which needs the parent test environment
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -602,7 +602,7 @@ func advHoldLock(t *testing.T, dir string) (release func()) {
 	t.Helper()
 	held, done := make(chan struct{}), make(chan struct{})
 	go func() {
-		_ = fileutil.WithFileLockTimeout(context.Background(), filepath.Join(dir, "live.lock"), 5*time.Second, func() error {
+		_ = fileutil.WithFileLockTimeout(context.Background(), livesession.LockTarget(dir), 5*time.Second, func() error {
 			close(held)
 			<-done
 			return nil
@@ -668,6 +668,9 @@ func TestAdversarialAbortAfterALostOpenReplyDeletesTheServerCopy(t *testing.T) {
 	s := advOpen(t, func(fake *livesessiontest.Server) string { proxy = advProxy(t, fake); return proxy.srv.URL })
 	st, err := livesession.Prepare(t.Context(), s.cfg, s.dir, s.p)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := livesession.Spool(t.Context(), s.dir, prompt(), livesession.SpoolOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	// two: net/http transparently retries an idempotent PUT once on a reused

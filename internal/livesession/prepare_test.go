@@ -39,7 +39,7 @@ func TestPrepareAcceptsSpoolWithoutTouchingTheNetwork(t *testing.T) {
 
 func TestOpenPromotesPendingKeepingSpoolAndLayer(t *testing.T) {
 	srv, cfg, dir, p := prepared(t)
-	want := lines(0, 4)
+	want := withPrompt(lines(0, 4))
 	if _, err := livesession.Spool(t.Context(), dir, want, livesession.SpoolOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestPrepareIsIdempotent(t *testing.T) {
 
 func TestClosePendingOpensThenClosesAndOfflineKeepsTheCloseRequest(t *testing.T) {
 	srv, cfg, dir, _ := prepared(t)
-	if _, err := livesession.Spool(t.Context(), dir, lines(0, 2), livesession.SpoolOptions{}); err != nil {
+	if _, err := livesession.Spool(t.Context(), dir, withPrompt(lines(0, 2)), livesession.SpoolOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	srv.SetDown(true)

@@ -36,41 +36,52 @@ type RawWriter struct {
 	redactor    *Redactor
 	closed      bool
 
-	// span of the last committed AppendRecordingBatch; see LastAppended.
-	lastFrom, lastTo int64
-	lastSuspended    bool
-	hasLast          bool
+	// batching is set while a capture batch is open (openBatch); batch then
+	// holds every byte the encoder has written to the file since.
+	batching bool
+	batch    []byte
 }
 
-// AppendedBatch is exactly what one committed AppendRecordingBatch added to
-// raw.jsonl: the real file bytes (already redacted), not a re-encoding.
+// AppendedBatch is exactly what one committed capture batch added to
+// raw.jsonl: the bytes the writer put in the file (already redacted), kept as
+// they were written. Nothing re-reads raw.jsonl to produce it, so a batch whose
+// cursor has moved can never fail to be handed on.
 type AppendedBatch struct {
 	Bytes []byte
 	// Suspended reports whether the recording was paused when the batch was
 	// committed. It is read under the same state lock as the append, so a
 	// pause/resume cannot slip between the two.
 	Suspended bool
+	// SessionID is the recording whose cursor the commit moved, read under the
+	// same lock. Marker writers do not take the raw lock, so a path that reads
+	// the marker again after the commit can find another recording there; only
+	// this one's stream may take the batch (C4).
+	SessionID string
 }
 
-// LastAppended returns the bytes the last successful AppendRecordingBatch added,
-// or ok=false when none did. The span is bounded by sizes taken under the append
-// lock, so a carrier footer stamped afterwards is never included; the file is
-// append-only and a committed cursor keeps the batch, so reading after the lock
-// is released is safe.
-func (w *RawWriter) LastAppended() (batch AppendedBatch, ok bool, err error) {
-	if w == nil || w.file == nil || !w.hasLast {
-		return AppendedBatch{}, false, nil
+// rawFileSink is the encoder's destination for a file-backed RawWriter. While
+// a batch is open it keeps a copy of exactly what reached the file, so the
+// batch returns its committed bytes instead of reading raw.jsonl back: a read
+// that could fail after the cursor already moved past them.
+type rawFileSink struct{ w *RawWriter }
+
+func (s rawFileSink) Write(p []byte) (int, error) {
+	n, err := s.w.file.Write(p)
+	if s.w.batching {
+		s.w.batch = append(s.w.batch, p[:n]...)
 	}
-	f, err := os.Open(w.file.Name())
-	if err != nil {
-		return AppendedBatch{}, false, fmt.Errorf("read appended batch: %w", err)
-	}
-	defer f.Close()
-	buf := make([]byte, w.lastTo-w.lastFrom)
-	if _, err := f.ReadAt(buf, w.lastFrom); err != nil {
-		return AppendedBatch{}, false, fmt.Errorf("read appended batch: %w", err)
-	}
-	return AppendedBatch{Bytes: buf, Suspended: w.lastSuspended}, true, nil
+	return n, err
+}
+
+// openBatch starts keeping what the writer appends. The caller holds the
+// append lock, so nothing else lands in raw.jsonl until closeBatch.
+func (w *RawWriter) openBatch() { w.batch, w.batching = nil, true }
+
+// closeBatch stops keeping appended bytes and returns those since openBatch.
+func (w *RawWriter) closeBatch() []byte {
+	batch := w.batch
+	w.batch, w.batching = nil, false
+	return batch
 }
 
 // NewRawWriter opens path for appending and returns a writer whose
@@ -337,7 +348,7 @@ func newRawFileWriter(path, projectRoot string, flags int) (*RawWriter, error) {
 		return nil, err
 	}
 	w.file = f
-	w.encoder = json.NewEncoder(f)
+	w.encoder = json.NewEncoder(rawFileSink{w})
 	return w, nil
 }
 
@@ -545,19 +556,24 @@ func recoverRawAppend(path string, persistedOffset int64) error {
 // between the sizes the journal records and the size recovery later checks.
 // Entries go through writeEntry: the lock is not re-entrant, and it is
 // already held. Lock order everywhere is raw capture -> append -> state.
-func (w *RawWriter) AppendRecordingBatch(statePath string, entries []Entry, newOffset int64) error {
-	return w.withAppendLock(func() error { return w.appendRecordingBatch(statePath, entries, newOffset) })
+//
+// It returns exactly the bytes the batch committed, for the live stream. A
+// footer stamped later is never among them: the stamp waits for the lock.
+func (w *RawWriter) AppendRecordingBatch(statePath string, entries []Entry, newOffset int64) (AppendedBatch, error) {
+	var batch AppendedBatch
+	err := w.withAppendLock(func() error {
+		var err error
+		batch, err = w.appendRecordingBatch(statePath, entries, newOffset)
+		return err
+	})
+	return batch, err
 }
 
-func (w *RawWriter) appendRecordingBatch(statePath string, entries []Entry, newOffset int64) error {
-	w.hasLast = false
+func (w *RawWriter) appendRecordingBatch(statePath string, entries []Entry, newOffset int64) (AppendedBatch, error) {
+	var batch AppendedBatch
 	err := MutateRecordingStateFile(statePath, func(state *RecordingState) error {
 		if newOffset <= state.SourceOffset {
 			return fmt.Errorf("capture cursor did not advance")
-		}
-		before, err := w.file.Stat()
-		if err != nil {
-			return err
 		}
 		if err := w.RestoreCaptureRedaction(state, w.file.Name()); err != nil {
 			return err
@@ -565,6 +581,8 @@ func (w *RawWriter) appendRecordingBatch(statePath string, entries []Entry, newO
 		if err := w.BeginAppend(state.SourceOffset, newOffset); err != nil {
 			return err
 		}
+		w.openBatch()
+		defer w.closeBatch() // a failed batch hands nothing on
 		for i := range entries {
 			if err := w.writeEntry(&entries[i]); err != nil {
 				return err
@@ -573,11 +591,7 @@ func (w *RawWriter) appendRecordingBatch(statePath string, entries []Entry, newO
 		if err := w.SealAppend(); err != nil {
 			return err
 		}
-		after, err := w.file.Stat()
-		if err != nil {
-			return err
-		}
-		w.lastFrom, w.lastTo, w.lastSuspended, w.hasLast = before.Size(), after.Size(), state.IsSuspended(), true
+		batch = AppendedBatch{Bytes: w.closeBatch(), Suspended: state.IsSuspended(), SessionID: state.SessionID}
 		state.CommandRedactionVersion = 1
 		state.PendingCommandRedactions = w.cmdRedactor.pending
 		state.SourceOffset = newOffset
@@ -585,10 +599,12 @@ func (w *RawWriter) appendRecordingBatch(statePath string, entries []Entry, newO
 		return nil
 	})
 	if err != nil {
-		w.hasLast = false
-		return err
+		return AppendedBatch{}, err
 	}
-	return w.FinishAppend()
+	if err := w.FinishAppend(); err != nil {
+		return AppendedBatch{}, err
+	}
+	return batch, nil
 }
 
 // withRawAppendLock serializes individual appends with checkpoint rollback.

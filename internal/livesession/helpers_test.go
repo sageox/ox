@@ -49,6 +49,14 @@ func lines(from, to int) []byte {
 	return b.Bytes()
 }
 
+// prompt is one human prompt line. A prepared stream opens only once its
+// spool holds one (ErrAwaitingPrompt), so a test that opens a pending stream
+// spools it first.
+func prompt() []byte { return []byte(`{"type":"user","content":"a question"}` + "\n") }
+
+// withPrompt is batch led by a human prompt line.
+func withPrompt(batch []byte) []byte { return append(prompt(), batch...) }
+
 func (e *env) spool(batch []byte) {
 	e.t.Helper()
 	if _, err := livesession.Spool(e.t.Context(), e.dir, batch, livesession.SpoolOptions{}); err != nil {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/sessionid"
@@ -32,6 +34,42 @@ type waitFixture struct {
 	projectRoot string
 	ledgerPath  string
 	barePath    string
+}
+
+func TestPublishCachedSessionRetriesLegacyRecording(t *testing.T) {
+	f := newWaitFixture(t)
+	const name = "2026-09-18T17-23-coworker-OxLegacy"
+	cacheDir := f.leftover(t, name, "OxLegacy", time.Now())
+	rawPath := filepath.Join(cacheDir, "raw.jsonl")
+	stored, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	header, entries, ok := strings.Cut(string(stored), "\n")
+	require.True(t, ok)
+	var row map[string]json.RawMessage
+	var metadata map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(header), &row))
+	require.NoError(t, json.Unmarshal(row["metadata"], &metadata))
+	delete(metadata, "session_id")
+	row["metadata"], err = json.Marshal(metadata)
+	require.NoError(t, err)
+	rawHeader, err := json.Marshal(row)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(rawPath, append(rawHeader, "\n"+entries...), 0644))
+	id := sessionid.GenerateSessionID()
+	require.NoError(t, session.WriteUploadRetryPending(cacheDir, id))
+	dest := filepath.Join(f.ledgerPath, "sessions", name)
+	require.NoError(t, os.MkdirAll(dest, 0755))
+	require.NoError(t, lfs.WriteSessionMeta(dest, lfs.NewSessionMeta(name, "coworker", "OxLegacy", "codex", time.Now()).SessionID(id).Build()))
+
+	require.NoError(t, publishCachedSession(f.projectRoot, f.ledgerPath, name, cacheDir))
+	meta, err := lfs.ReadSessionMeta(dest)
+	require.NoError(t, err)
+	require.Equal(t, id, meta.SessionID)
+	branch, err := exec.Command("git", "-C", f.ledgerPath, "branch", "--show-current").Output()
+	require.NoError(t, err)
+	published, err := exec.Command("git", "-C", f.barePath, "show", strings.TrimSpace(string(branch))+":sessions/"+name+"/meta.json").Output()
+	require.NoError(t, err)
+	require.Contains(t, string(published), id)
 }
 
 func newWaitFixture(t *testing.T) *waitFixture {

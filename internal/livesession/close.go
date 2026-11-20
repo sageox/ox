@@ -20,7 +20,8 @@ const CloseBudget = 15 * time.Second
 // sha256. summary is the cheap local summary, or empty. If the server cannot be
 // reached in time the status stays closing and a later Close (the daemon's tick)
 // finishes the job; the summary is not persisted, so a retry sends none and the
-// server writes its own. Close never blocks longer than budget.
+// session has no summary (nothing on the server writes one). Close never
+// blocks longer than budget.
 func Close(ctx context.Context, cfg Config, dir, summary string, budget time.Duration) (DrainResult, error) {
 	cfg, err := cfg.withDefaults()
 	if err != nil {
@@ -28,7 +29,7 @@ func Close(ctx context.Context, cfg Config, dir, summary string, budget time.Dur
 	}
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	if err := requestClose(dir); err != nil {
+	if err := RequestClose(dir); err != nil {
 		cfg.Logger.WarnContext(ctx, "live_session_close_request_failed", "session", filepath.Base(dir), "error", err)
 	}
 	var res DrainResult
@@ -61,12 +62,14 @@ func Close(ctx context.Context, cfg Config, dir, summary string, budget time.Dur
 	return res, err
 }
 
-// requestClose durably records that stop asked for the close before Close
-// waits for the session. It takes no lock: a daemon drain can hold live.lock
-// longer than stop's budget, and a close lost to that wait left the stream
-// open on the server for good, since the daemon only finishes closes it knows
-// about. The next locked Close, this one or the daemon's, acts on it.
-func requestClose(dir string) error {
+// RequestClose durably records that the stream in dir must close, with no
+// network call: Close does it before it waits for the session, and a new
+// recording does it for a stream it supersedes. It takes no lock: a daemon
+// drain can hold live.lock longer than stop's budget, and a close lost to that
+// wait left the stream open on the server for good, since the daemon only
+// finishes closes it knows about. The next locked Close, the caller's or the
+// daemon's, acts on it.
+func RequestClose(dir string) error {
 	st, err := ReadState(dir)
 	if err != nil || st.CloseRequested || (st.Status != StatusPending && st.Status != StatusStreaming) {
 		return nil // loadSession reports a missing state; nothing else needs the marker
@@ -77,9 +80,31 @@ func requestClose(dir string) error {
 	return nil
 }
 
+// RequestCloseOf is RequestClose for the stream of the recording sessionID
+// only, as a new recording asks of one it supersedes. The check and the write
+// happen under live.lock, which a recording reusing the folder holds to retire
+// that stream and prepare its own, so a stream started since the caller read
+// the folder is never closed in its place: that returns ErrNotStreaming. A lock
+// still busy after wait (a drain in flight) is returned as is, and the request
+// waits for the AI coworker's next start.
+func RequestCloseOf(ctx context.Context, dir, sessionID string, wait time.Duration) error {
+	return withLock(ctx, dir, wait, func() error {
+		st, err := ReadState(dir)
+		if err != nil {
+			return err
+		}
+		if st.SessionID != sessionID {
+			return ErrNotStreaming
+		}
+		return RequestClose(dir)
+	})
+}
+
 // openPending opens a session that never reached the server so Close can drain
 // and finish it. The close request is persisted first: if the server is down the
-// daemon still knows stop already happened.
+// daemon still knows stop already happened. A session whose spool never held a
+// human prompt ends here as StatusEmpty instead, with nothing sent: the server
+// never hears of it.
 func openPending(ctx context.Context, cfg Config, dir string) error {
 	st, err := ReadState(dir)
 	if err != nil || st.Status != StatusPending {
@@ -88,6 +113,16 @@ func openPending(ctx context.Context, cfg Config, dir string) error {
 	// before the write below: a forged state is refused untouched
 	if err := authorize(ctx, cfg, dir, st); err != nil {
 		return err
+	}
+	if !st.OpenSent {
+		empty, err := endIfPromptless(ctx, dir, st)
+		if err != nil {
+			return err
+		}
+		if empty {
+			cfg.Logger.InfoContext(ctx, "live_session_ended_before_first_prompt", "session_id", st.SessionID, "conversation_id", st.ConversationID, "layer_id", st.LayerID)
+			return nil
+		}
 	}
 	if !st.CloseRequested {
 		st.CloseRequested = true
@@ -101,9 +136,30 @@ func openPending(ctx context.Context, cfg Config, dir string) error {
 	return err
 }
 
+// endIfPromptless marks the pending stream st in dir StatusEmpty when its
+// spool holds no human prompt. The caller holds live.lock, and the swap lock
+// held here is what an append that found live.lock busy takes to read the
+// status and write, so a prompt is either seen here or refused afterwards
+// (ErrNotStreaming; raw.jsonl keeps it): never spooled into an ended stream.
+func endIfPromptless(ctx context.Context, dir string, st State) (bool, error) {
+	empty := false
+	err := withSwapLock(ctx, dir, func() error {
+		if mayHoldPrompt(dir) {
+			return nil
+		}
+		st.Status, st.CloseRequested = StatusEmpty, false
+		if err := writeState(dir, st); err != nil {
+			return err
+		}
+		empty = true
+		return nil
+	})
+	return empty, err
+}
+
 func (s *session) finish(ctx context.Context, summary string, res *DrainResult) error {
 	if len(summary) > sessionstream.MaxSummaryBytes {
-		summary = "" // too large for the server; it generates one when missing
+		summary = "" // too large for the server; the session closes without one
 	}
 	if err := s.declareLost(); err != nil {
 		return err // stay closing: without the gap line the close would claim a complete stream
@@ -125,6 +181,7 @@ func (s *session) finish(ctx context.Context, summary string, res *DrainResult) 
 		})
 		if err == nil {
 			s.log().InfoContext(ctx, "live_session_closed", "stored_through", size)
+			s.edgeCleared(ctx) // setStatus persists it
 			s.setStatus(ctx, StatusClosed)
 			s.reportUnsentTail(ctx, size)
 			return nil
@@ -195,6 +252,20 @@ func (s *session) onCloseRefusal(ctx context.Context, err error, size int64) (ve
 	var api *sessionstream.APIError
 	if !errors.As(err, &api) {
 		return vStop, fmt.Errorf("close live session: %w", err)
+	}
+	if shape, ok := edgeShape(api); ok {
+		eerr := s.edgeBlocked(ctx, api, shape)
+		if perr := s.persist(); perr != nil {
+			s.log().WarnContext(ctx, "live_session_state_write_failed", "during", "edge_blocked", "error", perr)
+		}
+		return vStop, fmt.Errorf("close live session: %w (status %d, %s body)", eerr, api.Status, shape)
+	}
+	// SageOx itself answered: a fully acked stream sends no append, so only
+	// a close reply can end an edge streak that began on a close
+	if s.edgeCleared(ctx) {
+		if perr := s.persist(); perr != nil {
+			s.log().WarnContext(ctx, "live_session_state_write_failed", "during", "edge_unblocked", "error", perr)
+		}
 	}
 	if done, err := s.terminal(ctx, api); done || err != nil {
 		return vStop, err

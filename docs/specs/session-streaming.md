@@ -6,6 +6,40 @@
 daemon fit, simplicity), then remapped onto the current conversation model
 (mono ADR-057/076/081/087, `packages/conversation`, `packages/chat`).
 
+## ADR-247 HTTP streaming (what ships)
+
+ox ships ADR-247 HTTP streaming (`internal/livesession`; wire contract in
+`internal/sessionstream`). The MoQ design in the rest of this spec predates it and never
+shipped. Capture stays isolated by order: `raw.jsonl` commits first, then the stream gets a
+copy.
+
+```mermaid
+flowchart LR
+    CAP["Capture path: hook, catch-up, watcher, stop, Cursor drains and controls"] --> RW["RawWriter batch: redacted and journaled"]
+    RW -->|"1. commit, cursor saved"| RJ["raw.jsonl"]
+    RW -->|"2. the bytes that batch wrote"| SC["livesession.SpoolCommitted"]
+    SC -->|"spooled"| SP["spool.jsonl"]
+    SC -->|"failed"| GAP["spool-lost: declared gap"]
+    SP --> DR["Daemon or stop drain: signed HTTP batches"]
+    DR --> API["api-go, then S3"]
+```
+
+| Guarantee | How it holds |
+|---|---|
+| Raw capture commits before the streaming hand-off | The hand-off runs only after the batch committed; nothing it does can undo or delay that commit. |
+| Lock-held spool wait is bounded | A Cursor pause/resume hands off its drain while holding the raw-append and recording-state locks, so later captures can wait for it. The spool waits at most 200 ms for its own lock. The 1 s deadline does not bound the state read or the append, which take no context. |
+| A spool failure never touches capture | It is recorded in `spool-lost` and declared as a `spool_write_failed` gap by the next write or the close. |
+| Exactly the committed bytes | `RawWriter` keeps an in-memory copy of what the batch appended (`AppendedBatch`); nothing reads `raw.jsonl` back. |
+| Paused batches never stream | `Suspended` is read under the batch's own lock; a paused batch is skipped, never declared as a loss. |
+| Only its own stream | The batch names the recording that committed it. Another recording's stream never takes it (C4); a held or manual session streams nothing (C1). |
+| Streaming off | The copy is made for every batch; a session with no `stream-state.json` drops it at once. |
+
+**The "tail, never tee" rule predates ADR-247.** It protected capture from a MoQ tailer.
+ADR-247 keeps that protection by ordering instead of tailing.
+
+A tail reads a committed batch back from `raw.jsonl` after the cursor moved. Whenever that
+read failed, the batch was lost with no gap.
+
 ## Purpose
 
 Stream each active coding session's redacted conversation to the cloud live, in parallel with
@@ -50,6 +84,8 @@ account-level feature check is the authoritative enable.
   `:`-joined composites.
 
 ## Data flow
+
+MoQ design, never shipped; ADR-247 hands off committed bytes instead (see above).
 
 ```mermaid
 flowchart LR

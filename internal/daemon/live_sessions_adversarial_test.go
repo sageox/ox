@@ -119,11 +119,17 @@ func newAdvDaemonAt(t *testing.T, sessionsDir string) *advDaemon {
 	return d
 }
 
+// spool adds turns from..from+n. Turn 0 is the human prompt every session
+// opens with: a stream opens only once its spool holds one.
 func (d *advDaemon) spool(from, n int) {
 	d.t.Helper()
 	var b bytes.Buffer
 	for i := from; i < from+n; i++ {
-		fmt.Fprintf(&b, `{"type":"assistant","seq":%d,"text":"line %d ✓"}`+"\n", i, i)
+		typ := "assistant"
+		if i == 0 {
+			typ = "user"
+		}
+		fmt.Fprintf(&b, `{"type":%q,"seq":%d,"text":"line %d ✓"}`+"\n", typ, i, i)
 	}
 	if _, err := livesession.Spool(d.t.Context(), d.dir, b.Bytes(), livesession.SpoolOptions{}); err != nil {
 		d.t.Fatal(err)

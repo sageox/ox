@@ -46,7 +46,7 @@ func TestStageSessionInLedger_LeavesLiveStreamFilesBehind(t *testing.T) {
 	require.FileExists(t, filepath.Join(f.cacheDir, "stream-state.json"))
 
 	payload := &SessionFinalizePayload{SessionDir: f.cacheDir, LedgerPath: f.ledgerPath}
-	_, err := NewSessionFinalizeHandler(slog.Default()).stageSessionInLedger(payload)
+	_, err := NewSessionFinalizeHandler(slog.Default()).stageSessionInLedger(payload, nil)
 	require.NoError(t, err)
 
 	dest := filepath.Join(f.ledgerPath, "sessions", f.name)

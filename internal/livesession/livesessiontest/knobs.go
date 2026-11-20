@@ -1,6 +1,8 @@
 package livesessiontest
 
 import (
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,6 +134,36 @@ func (s *Server) SetDown(on bool) { s.set(func() { s.down = on }) }
 
 // Hang makes requests block until the client gives up (a stalled network).
 func (s *Server) Hang(on bool) { s.set(func() { s.hang = on }) }
+
+// BlockAtEdge answers the next n requests with this method ("" for any) as
+// the network edge in front of api-go would: 403 with this content type and
+// body, which is no live-capture refusal (CloudFront's HTML page, the WAF's
+// custom JSON).
+func (s *Server) BlockAtEdge(method string, n int, contentType, body string) {
+	s.set(func() { s.edgeMethod, s.edgeBlocks, s.edgeType, s.edgeBody = method, n, contentType, body })
+}
+
+// takeEdgeBlock spends one BlockAtEdge answer for r, if any are left.
+func (s *Server) takeEdgeBlock(r *http.Request) (contentType, body string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.edgeBlocks <= 0 || (s.edgeMethod != "" && s.edgeMethod != r.Method) {
+		return "", "", false
+	}
+	s.edgeBlocks--
+	return s.edgeType, s.edgeBody, true
+}
+
+// HangAppendsOver makes appends whose body is over n bytes block until the
+// client gives up, as a link too slow to carry a large batch inside one
+// request timeout; smaller appends go through. 0 clears it.
+func (s *Server) HangAppendsOver(n int) { s.set(func() { s.hangAppendsOver = n }) }
+
+// hangsAppend reports whether the HangAppendsOver knob holds this request. mu held.
+func (s *Server) hangsAppend(r *http.Request, body []byte) bool {
+	return s.hangAppendsOver > 0 && r.Method == http.MethodPost &&
+		strings.HasSuffix(r.URL.Path, "/lines") && len(body) > s.hangAppendsOver
+}
 
 // DelayOpen delays only open (PUT) requests, so a request sent after an open
 // can reach the server before it.
