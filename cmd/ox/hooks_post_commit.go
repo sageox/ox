@@ -153,7 +153,7 @@ func recordCommitCitations(projectRoot string, state *session.RecordingState, sh
 	}
 	slog.Debug("hooks post-commit: recorded commit citations", "commit", short, "refs", len(fresh))
 	for i, ev := range fresh {
-		recordStatuslineUse(projectRoot, state, ev.RefType, ev.Ref, freshAliases[i]...)
+		recordStatuslineUse(projectRoot, state.AgentID, state, ev.RefType, ev.Ref, freshAliases[i]...)
 	}
 }
 
