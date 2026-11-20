@@ -508,18 +508,33 @@ func TestFlushReadsReceiptsOfTheStreamTheLockAuthorized(t *testing.T) {
 	if res, err := livesession.Close(t.Context(), e.cfg, e.dir, "", testBudget); err != nil || !res.Done {
 		t.Fatalf("close = %+v, %v", res, err)
 	}
-	newState, _ := os.ReadFile(filepath.Join(e.dir, "stream-state.json"))
+	newState, err := os.ReadFile(filepath.Join(e.dir, "stream-state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	before := len(e.srv.AckRequests())
 	// the preflight sees the original stream; the state is swapped to the other
 	// authorized one before the lock
 	if err := os.WriteFile(filepath.Join(e.dir, "stream-state.json"), origState, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	swapped := false
 	livesession.SetFlushPreflightHookForTest(t, func() {
-		_ = os.WriteFile(filepath.Join(e.dir, "stream-state.json"), newState, 0o600)
+		if err := os.WriteFile(filepath.Join(e.dir, "stream-state.json"), newState, 0o600); err != nil {
+			t.Errorf("swap the stream state: %v", err)
+			return
+		}
+		swapped = true
 	})
 	e.srv.RefuseAcks(0, 0, "", "")
-	_, _ = livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, time.Now())
+	// a failed flush sends nothing too, so an error must not pass for the
+	// successful swap this test is about
+	if _, err := livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, time.Now()); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if !swapped {
+		t.Fatal("the preflight hook never ran, so no swap was tested")
+	}
 	if n := len(e.srv.AckRequests()) - before; n != 0 {
 		t.Fatalf("%d ack requests: the old conversation's receipts were sent to another conversation", n)
 	}
