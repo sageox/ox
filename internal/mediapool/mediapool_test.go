@@ -67,3 +67,20 @@ func TestPutSweepsOldFilesOnly(t *testing.T) {
 		t.Fatalf("fresh file swept: %v", err)
 	}
 }
+
+// Pasting the same image again repairs a corrupt cached copy; it does not just
+// refresh the corrupt file's age.
+func TestPutRepairsCorruptExistingObject(t *testing.T) {
+	dir := t.TempDir()
+	data := []byte("real")
+	_ = Put(dir, sum(data), data)
+	if err := os.WriteFile(filepath.Join(dir, dirName, sum(data)), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Put(dir, sum(data), data); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Read(dir, sum(data)); err != nil || string(got) != "real" {
+		t.Fatalf("read after repair = %q, %v", got, err)
+	}
+}

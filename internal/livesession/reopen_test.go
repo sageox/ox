@@ -2,6 +2,7 @@ package livesession_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"os"
@@ -138,7 +139,13 @@ func TestReopenNeverOfferedAfterWithdrawal(t *testing.T) {
 		name  string
 		setup func(t *testing.T, s *stoppedSession) string // returns the id to continue from
 	}{
-		{"still streaming", func(t *testing.T, s *stoppedSession) string { return s.st.SessionID }},
+		{"still streaming", func(t *testing.T, s *stoppedSession) string {
+			st, err := livesession.Open(t.Context(), s.cfg, s.dir, livesession.OpenParams{SessionID: s.st.SessionID})
+			if err != nil || st.Status != livesession.StatusStreaming {
+				t.Fatalf("setup: open %+v %v, want streaming", st, err)
+			}
+			return s.st.SessionID
+		}},
 		{"hold marker", func(t *testing.T, s *stoppedSession) string {
 			s.stop(t)
 			if err := session.WriteHoldMarker(s.dir, session.HoldManualPublishing, "test"); err != nil {
@@ -265,6 +272,10 @@ func TestRefusedReopenStreamsAsANewConversation(t *testing.T) {
 			}
 			newID := sessionid.GenerateSessionID()
 			if _, err := livesession.PrepareReopen(t.Context(), s.cfg, dir2, livesession.OpenParams{SessionID: newID, SessionName: "second-name", RepoID: "repo_test", Agent: "claude-code"}, s.source(t, s.st.SessionID)); err != nil {
+				t.Fatal(err)
+			}
+			// cache pruning removes raw.jsonl but keeps an unfinished stream's live files
+			if err := os.Remove(filepath.Join(dir2, "raw.jsonl")); err != nil {
 				t.Fatal(err)
 			}
 			fresh := withPrompt(lines(10, 12))
@@ -410,5 +421,177 @@ func TestManualStopIsFinalEvenForAResumedConversation(t *testing.T) {
 	}
 	if again := s.source(t, s.st.SessionID); again != nil {
 		t.Fatalf("the earlier recording's stash still offers the conversation: %+v", again.State)
+	}
+}
+
+func TestRefusedReopenStashDoesNotShadowTheReplacement(t *testing.T) {
+	s := newStopped(t)
+	s.stop(t) // the agent exited: stashed
+	dir2 := filepath.Join(s.sessions, "second")
+	if err := os.Mkdir(dir2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	header := []byte(`{"type":"header","metadata":{"session_id":"second"}}` + "\n")
+	if err := os.WriteFile(filepath.Join(dir2, "raw.jsonl"), header, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second := sessionid.GenerateSessionID()
+	if _, err := livesession.PrepareReopen(t.Context(), s.cfg, dir2, livesession.OpenParams{SessionID: second, Agent: "claude-code", RepoID: "repo_test"}, s.source(t, s.st.SessionID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := livesession.Spool(t.Context(), dir2, withPrompt(lines(10, 11)), livesession.SpoolOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.srv.RefuseNextReopen(http.StatusForbidden, sessionstream.ReasonForbidden, sessionstream.ActionStop)
+	if _, err := livesession.Open(t.Context(), s.cfg, dir2, livesession.OpenParams{SessionID: second}); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if res, err := livesession.Close(t.Context(), s.cfg, dir2, "", testBudget); err != nil || !res.Done {
+		t.Fatalf("close: %+v %v", res, err)
+	}
+	if err := os.RemoveAll(dir2); err != nil {
+		t.Fatal(err)
+	}
+	wantCnv, _ := livesession.ConversationID(second)
+	if left, _ := filepath.Glob(filepath.Join(s.cfg.DataDir, "live-reopen", s.st.ConversationID+".*")); len(left) != 0 {
+		t.Fatalf("the refused conversation's stash is still on disk: %v", left)
+	}
+	src := s.source(t, second)
+	if src == nil || src.State.ConversationID != wantCnv {
+		t.Fatalf("resume of the replacement recording = %+v, want its own conversation %s, not the refused one", src, wantCnv)
+	}
+}
+
+func TestRefusedReopenWithAReauthAnswerKeepsTheConversationAndSeed(t *testing.T) {
+	s := newStopped(t)
+	s.stop(t)
+	dir2 := filepath.Join(s.sessions, "second")
+	if err := os.Mkdir(dir2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	second := sessionid.GenerateSessionID()
+	if _, err := livesession.PrepareReopen(t.Context(), s.cfg, dir2, livesession.OpenParams{SessionID: second}, s.source(t, s.st.SessionID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := livesession.Spool(t.Context(), dir2, withPrompt(lines(10, 11)), livesession.SpoolOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.srv.RefuseNextReopen(http.StatusUnauthorized, sessionstream.ReasonUnauthenticated, sessionstream.ActionReauth)
+	if _, err := livesession.Open(t.Context(), s.cfg, dir2, livesession.OpenParams{SessionID: second}); err == nil {
+		t.Fatal("open succeeded through a 401")
+	}
+	st, err := livesession.ReadState(dir2)
+	if err != nil || !st.Reopen || st.ConversationID != s.st.ConversationID || st.SeedBytes == 0 {
+		t.Fatalf("state after a 401 = %+v %v, want the reopen intact", st, err)
+	}
+	spool, _ := os.ReadFile(filepath.Join(dir2, "spool.jsonl"))
+	if !bytes.HasPrefix(spool, s.content) {
+		t.Fatal("a 401 stripped the seed from the spool")
+	}
+}
+
+func TestFailedPrepareReopenLeavesTheStoppedStreamDiscoverable(t *testing.T) {
+	s := newStopped(t)
+	s.stop(t)
+	src := s.source(t, s.st.SessionID)
+	if src == nil {
+		t.Fatal("precondition: source")
+	}
+	dir2 := filepath.Join(s.sessions, "second")
+	if err := os.Mkdir(dir2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	restore := livesession.SetPrepareReopenStateHook(func() error { return os.ErrPermission })
+	_, err := livesession.PrepareReopen(t.Context(), s.cfg, dir2, livesession.OpenParams{SessionID: sessionid.GenerateSessionID()}, src)
+	restore()
+	if err == nil {
+		t.Fatal("prepare succeeded though its state write failed")
+	}
+	if again := s.source(t, s.st.SessionID); again == nil {
+		t.Fatal("the stopped stream was lost to a failed prepare: its binding did not go back")
+	}
+}
+
+func TestFindReopenSourceStopsWhenItsBudgetIsGone(t *testing.T) {
+	s := newStopped(t)
+	s.stop(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	// a recording nothing continues: only the folder loop could notice the budget
+	if src, err := livesession.FindReopenSource(ctx, s.cfg, s.sessions, sessionid.GenerateSessionID()); err == nil || src != nil {
+		t.Fatalf("lookup under a canceled context = %v, %v, want its error", src, err)
+	}
+}
+
+// A discard promises no copy of the transcript stays behind: the reopen stash
+// is one, and it outlives the cache folder.
+func TestDiscardingASessionRemovesItsReopenStash(t *testing.T) {
+	tests := []struct {
+		name    string
+		discard func(t *testing.T, s *stoppedSession, dir2 string)
+	}{
+		{"abort", func(t *testing.T, s *stoppedSession, dir2 string) {
+			if _, err := livesession.Abort(t.Context(), s.cfg, dir2, testBudget); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"deleted on server (410 / stop_and_wipe)", func(t *testing.T, s *stoppedSession, dir2 string) {
+			if _, err := livesession.Spool(t.Context(), dir2, withPrompt(lines(10, 11)), livesession.SpoolOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			cur, _ := livesession.ReadState(dir2)
+			if _, err := livesession.Open(t.Context(), s.cfg, dir2, livesession.OpenParams{SessionID: cur.SessionID}); err != nil {
+				t.Fatal(err)
+			}
+			s.srv.DeleteSession(s.st.ConversationID)
+			if _, err := livesession.Spool(t.Context(), dir2, lines(20, 21), livesession.SpoolOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = livesession.Drain(t.Context(), s.cfg, dir2, testBudget)
+		}},
+		{"finalized discard by id", func(t *testing.T, s *stoppedSession, dir2 string) {
+			st, _ := livesession.ReadState(dir2)
+			if err := livesession.DropReopenStash(s.cfg, st.SessionID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newStopped(t)
+			s.stop(t) // stashed
+			dir2 := filepath.Join(s.sessions, "second")
+			if err := os.Mkdir(dir2, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			second := sessionid.GenerateSessionID()
+			if _, err := livesession.PrepareReopen(t.Context(), s.cfg, dir2, livesession.OpenParams{SessionID: second}, s.source(t, s.st.SessionID)); err != nil {
+				t.Fatal(err)
+			}
+			tt.discard(t, s, dir2)
+			if err := os.RemoveAll(dir2); err != nil { // the caller removes the folder
+				t.Fatal(err)
+			}
+			if src := s.source(t, second); src != nil {
+				t.Fatalf("a discarded session still offers a reopen copy: %+v", src.State)
+			}
+			if src := s.source(t, s.st.SessionID); src != nil {
+				t.Fatalf("a discarded conversation's earlier stash still offers it: %+v", src.State)
+			}
+			if left, _ := filepath.Glob(filepath.Join(s.cfg.DataDir, "live-reopen", "*")); len(left) != 0 {
+				t.Fatalf("stash files left behind: %v", left)
+			}
+		})
+	}
+}
+
+func TestCloseOfNeverClosesAnotherRecordingsStream(t *testing.T) {
+	s := newStopped(t)
+	res, err := livesession.CloseOf(t.Context(), s.cfg, s.dir, sessionid.GenerateSessionID(), "someone else's summary", testBudget)
+	if !errors.Is(err, livesession.ErrOtherRecording) || res.Done {
+		t.Fatalf("close of another recording's stream: %+v %v", res, err)
+	}
+	if st, _ := livesession.ReadState(s.dir); st.CloseRequested || st.Status == livesession.StatusClosed {
+		t.Fatalf("the folder's own stream was asked to close: %+v", st)
 	}
 }

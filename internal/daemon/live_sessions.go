@@ -461,6 +461,12 @@ func (l *LiveSessions) attempt(ctx context.Context, dir string, st livesession.S
 		if l.summarize != nil {
 			summary = l.summarize(ctx, dir, st)
 		}
+		// the summary takes up to a minute: a hold placed meanwhile wins, so
+		// nothing is sent and the next step deletes the live copy (stopHeld)
+		if session.IsHeld(dir) {
+			l.logger.InfoContext(ctx, "live_session_summary_dropped", "session", filepath.Base(dir), "reason", "held_during_summary")
+			return livesession.DrainResult{}, nil
+		}
 		return livesession.Close(ctx, cfg, dir, summary, livesession.CloseBudget)
 	}
 	if st.Status == livesession.StatusPending {

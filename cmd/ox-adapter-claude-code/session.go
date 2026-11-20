@@ -140,16 +140,30 @@ func readSessionFile(path string) ([]adapterprotocol.RawEntry, *adapterprotocol.
 func readFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
 	// Keep a trailing partial record unconsumed; otherwise a concurrent Claude
 	// write can make validation pass while this reader silently drops the turn.
-	return adapterruntime.TailJSONLBudget(path, offset, maxReadBytes, parseLine)
+	// Every complete record is read: a stop or recovery makes one read and
+	// finalizes from it, so a read that stopped early would lose the tail of the
+	// session. The response is bounded by capping image bytes instead.
+	var imageBytes int64
+	return adapterruntime.TailJSONL(path, offset, func(line []byte) ([]adapterprotocol.RawEntry, error) {
+		entries, err := parseLine(line)
+		for i := range entries {
+			if m := entries[i].Media; m != nil && len(m.Data) > 0 {
+				if imageBytes += int64(len(m.Data)); imageBytes > maxImageBytesPerRead {
+					m.Data, m.Skipped = nil, adapterprotocol.MediaSkippedReadLimit
+				}
+			}
+		}
+		return entries, err
+	})
 }
 
-// maxReadBytes bounds the transcript one read consumes. Pasted images ride the
-// response as bytes, about the size of their base64 in the transcript, and the
-// daemon cancels an adapter whose one-shot output passes 64 MiB: nine 6 MiB
-// screenshots, each under the per-line cap, would fail every read and block
-// text capture behind them. 24 MiB leaves room for the JSON framing and the
-// text entries; the cursor moves on by what was read.
-const maxReadBytes = 24 << 20
+// maxImageBytesPerRead bounds the image bytes one read carries. The daemon
+// cancels an adapter whose one-shot output passes 64 MiB, and bytes ride the
+// response base64-encoded (a third larger): nine 6 MiB screenshots, each line
+// under the per-line cap, would fail every read and block text capture behind
+// them. Images past the cap become declared gaps; text is never cut. The live
+// watcher reads every couple of seconds, so a burst this large is rare.
+const maxImageBytesPerRead = 24 << 20
 
 func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, int64, error) {
 	if resolved, err := filepath.EvalSymlinks(repoRoot); err == nil {

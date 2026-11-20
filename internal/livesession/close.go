@@ -23,17 +23,38 @@ const CloseBudget = 15 * time.Second
 // session has no summary (nothing on the server writes one). Close never
 // blocks longer than budget.
 func Close(ctx context.Context, cfg Config, dir, summary string, budget time.Duration) (DrainResult, error) {
+	return CloseOf(ctx, cfg, dir, "", summary, budget)
+}
+
+// ErrOtherRecording means the folder's stream now belongs to another recording
+// than the one closing it (a new recording started in the same minute reused
+// the folder): nothing was closed and no summary was sent.
+var ErrOtherRecording = errors.New("the folder's live stream belongs to another recording")
+
+// CloseOf is Close for the stream of the recording sessionID. The check runs
+// under live.lock, after the possibly long summary was written without it, so a
+// recording that took over the folder meanwhile is never closed with another
+// recording's summary. An empty sessionID closes whatever stream the folder
+// holds (the daemon's tick, which names no recording).
+func CloseOf(ctx context.Context, cfg Config, dir, sessionID, summary string, budget time.Duration) (DrainResult, error) {
 	cfg, err := cfg.withDefaults()
 	if err != nil {
 		return DrainResult{}, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
+	// not the request marker of a stream that is no longer this recording's
+	if other(dir, sessionID) {
+		return DrainResult{}, ErrOtherRecording
+	}
 	if err := RequestClose(dir); err != nil {
 		cfg.Logger.WarnContext(ctx, "live_session_close_request_failed", "session", filepath.Base(dir), "error", err)
 	}
 	var res DrainResult
 	err = withLock(ctx, dir, budget, func() error {
+		if other(dir, sessionID) { // again under the lock: the check above can lose a race
+			return ErrOtherRecording
+		}
 		if err := openPending(ctx, cfg, dir); err != nil {
 			return err
 		}
@@ -67,6 +88,16 @@ func Close(ctx context.Context, cfg Config, dir, summary string, budget time.Dur
 		return err
 	})
 	return res, err
+}
+
+// other reports whether dir's stream belongs to a recording other than
+// sessionID (never, for an empty sessionID or a folder with no stream).
+func other(dir, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	st, err := ReadState(dir)
+	return err == nil && st.SessionID != sessionID
 }
 
 // RequestClose durably records that the stream in dir must close, with no

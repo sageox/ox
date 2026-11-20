@@ -103,9 +103,11 @@ func TestParseLineToolResultWithImageIsNotAPrompt(t *testing.T) {
 	}
 }
 
-// Nine 6 MiB screenshots (each line under the per-line cap) would make one read
-// exceed the 64 MiB output limit; reads are chunked and the cursor walks on.
-func TestReadFromOffsetChunksImageHeavyTranscripts(t *testing.T) {
+// Nine 4 MiB screenshots in one read would exceed the 64 MiB output limit. The
+// read bounds image bytes, never the transcript: a stop or recovery makes one
+// read and finalizes from it, so every record and every text turn must arrive
+// and the cursor must reach the end.
+func TestReadFromOffsetBoundsImageBytesButReadsEveryRecord(t *testing.T) {
 	img := make([]byte, 4<<20)
 	var file []byte
 	for i := 0; i < 9; i++ {
@@ -113,30 +115,36 @@ func TestReadFromOffsetChunksImageHeavyTranscripts(t *testing.T) {
 		file = append(file, userLine(t, textBlock("shot"), imageBlock("image/png", img))...)
 		file = append(file, '\n')
 	}
+	file = append(file, userLine(t, textBlock("the last turn"))...)
+	file = append(file, '\n')
 	path := filepath.Join(t.TempDir(), "s.jsonl")
 	if err := os.WriteFile(path, file, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var offset int64
-	reads, media := 0, 0
-	for offset < int64(len(file)) {
-		entries, next, err := readFromOffset(path, offset)
-		if err != nil || next <= offset {
-			t.Fatalf("read at %d: next=%d err=%v", offset, next, err)
-		}
-		if next-offset > maxReadBytes+8<<20 {
-			t.Fatalf("one read consumed %d bytes", next-offset)
-		}
-		for _, e := range entries {
-			if e.Role == adapterprotocol.RoleMedia {
-				media++
-			}
-		}
-		offset = next
-		reads++
+	entries, next, err := readFromOffset(path, 0)
+	if err != nil || next != int64(len(file)) {
+		t.Fatalf("next=%d want %d err=%v: the read must reach the last record", next, len(file), err)
 	}
-	if reads < 2 || media != 9 {
-		t.Fatalf("reads=%d media=%d, want chunked reads and every image", reads, media)
+	var texts, carried, limited, carriedBytes int
+	for _, e := range entries {
+		switch {
+		case e.Role == adapterprotocol.RoleUser:
+			texts++
+		case e.Media != nil && len(e.Media.Data) > 0:
+			carried++
+			carriedBytes += len(e.Media.Data)
+		case e.Media != nil && e.Media.Skipped == adapterprotocol.MediaSkippedReadLimit:
+			limited++
+		}
+	}
+	if texts != 10 {
+		t.Fatalf("text turns = %d, want 10: a read must never drop the tail", texts)
+	}
+	if carried+limited != 9 || limited == 0 || carriedBytes > maxImageBytesPerRead {
+		t.Fatalf("carried=%d (%d bytes) limited=%d, want every image carried or declared, bytes bounded", carried, carriedBytes, limited)
+	}
+	if out, _ := json.Marshal(entries); len(out) > 64<<20 {
+		t.Fatalf("response is %d bytes, over the one-shot output limit", len(out))
 	}
 }
 

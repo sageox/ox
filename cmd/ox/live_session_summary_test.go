@@ -46,7 +46,7 @@ func TestLiveConversationEntriesCoverTheRestatedSession(t *testing.T) {
 	got := liveConversationEntries(second, ownLines)
 	var text strings.Builder
 	for _, e := range got {
-		text.WriteString(fmt.Sprint(e["content"]))
+		fmt.Fprint(&text, e["content"])
 	}
 	require.Contains(t, text.String(), "implement authentication", "the summary must cover the earlier recording")
 	require.Contains(t, text.String(), "fix a typo")

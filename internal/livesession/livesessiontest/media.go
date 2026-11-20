@@ -24,6 +24,7 @@ type mediaState struct {
 	refuseMIME  string            // declare answers 413 with this reason when set (too large)
 	puts        int
 	failStatus  int // every storage PUT answers this status when set
+	redirectTo  string
 }
 
 func (m *mediaState) key(cnv, sha string) string { return cnv + "/" + sha }
@@ -105,28 +106,44 @@ func (s *Server) completeMedia(r *http.Request, _ []byte, _ *Call) reply {
 // putMedia is the storage side: no login, no signature, as a presigned URL.
 func (s *Server) putMedia(w http.ResponseWriter, r *http.Request) {
 	data, _ := io.ReadAll(r.Body)
-	s.record(Call{Method: r.Method, Path: r.URL.Path, Offset: -1, Status: http.StatusOK, BodyLen: len(data)})
 	cnv, sha := r.PathValue("cnv"), r.PathValue("sha")
+	status, location := s.storePut(r, cnv, sha, data)
+	// recorded after media.mu is released, with the status actually sent
+	s.record(Call{Method: r.Method, Path: r.URL.Path, Offset: -1, Status: status, BodyLen: len(data)})
+	if location != "" {
+		w.Header().Set("Location", location)
+	}
+	w.WriteHeader(status)
+}
+
+// storePut decides the storage answer and, for an accepted upload, keeps it.
+func (s *Server) storePut(r *http.Request, cnv, sha string, data []byte) (status int, location string) {
 	s.media.mu.Lock()
 	defer s.media.mu.Unlock()
 	s.media.puts++
-	if s.media.failStatus != 0 {
-		w.WriteHeader(s.media.failStatus)
-		return
-	}
-	if s.media.failUploads > 0 {
+	switch {
+	case s.media.redirectTo != "":
+		return http.StatusTemporaryRedirect, s.media.redirectTo
+	case s.media.failStatus != 0:
+		return s.media.failStatus, ""
+	case s.media.failUploads > 0:
 		s.media.failUploads--
-		w.WriteHeader(http.StatusServiceUnavailable)
-		return
+		return http.StatusServiceUnavailable, ""
 	}
 	sum := sha256.Sum256(data)
 	if r.Header.Get("x-test-checksum-sha256") != sha || hex.EncodeToString(sum[:]) != sha || r.Header.Get("Authorization") != "" {
-		w.WriteHeader(http.StatusForbidden)
-		return
+		return http.StatusForbidden, ""
 	}
 	s.media.stored[s.media.key(cnv, sha)] = data
 	s.media.mime[s.media.key(cnv, sha)] = r.Header.Get("Content-Type")
-	w.WriteHeader(http.StatusOK)
+	return http.StatusOK, ""
+}
+
+// RedirectMediaUploads makes every storage PUT answer 307 to location.
+func (s *Server) RedirectMediaUploads(location string) {
+	s.media.mu.Lock()
+	defer s.media.mu.Unlock()
+	s.media.redirectTo = location
 }
 
 // FailMediaUploadsWith makes every storage PUT answer status (a persistent

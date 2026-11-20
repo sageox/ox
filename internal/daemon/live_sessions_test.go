@@ -374,3 +374,29 @@ func TestLiveDaemonCloseCarriesTheSummary(t *testing.T) {
 		t.Fatalf("summarizer asked about %+v", asked)
 	}
 }
+
+// Failure prevented: a hold placed while the summary was written still had the
+// summary sent by the close that followed.
+func TestLiveDaemonCloseDropsTheSummaryOfASessionHeldMeanwhile(t *testing.T) {
+	e := newLiveEnv(t)
+	e.spool(lineN(1))
+	e.live.Tick(t.Context())
+	e.live.Wait()
+	st := e.state()
+	e.live.summarize = func(context.Context, string, livesession.State) string {
+		if err := session.WriteHoldMarker(e.dir, session.HoldManualPublishing, "test"); err != nil {
+			t.Error(err)
+		}
+		return "SUMMARY-FOR-A-HELD-SESSION"
+	}
+	if err := livesession.RequestClose(e.dir); err != nil {
+		t.Fatal(err)
+	}
+
+	e.live.request(t.Context(), canonicalDir(e.dir))
+	e.live.Wait()
+
+	if closed, ok := e.srv.ClosedWith(st.ConversationID); ok {
+		t.Fatalf("a session held during its summary was closed: %+v", closed)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/fileutil"
@@ -98,6 +99,11 @@ func stashedReopenSource(ctx context.Context, cfg Config, continuedFrom string) 
 	if err != nil {
 		return nil, nil // no stash yet
 	}
+	// Several stashes can name the recording (a refused reopen leaves its
+	// conversation's stash tagged with the replacement's id until it is
+	// removed); the newest one is the conversation the person last worked in.
+	var best *stashedStream
+	var bestTime time.Time
 	for _, e := range entries {
 		if filepath.Ext(e.Name()) != ".json" {
 			continue
@@ -107,18 +113,27 @@ func stashedReopenSource(ctx context.Context, cfg Config, continuedFrom string) 
 		if err != nil || json.Unmarshal(raw, &s) != nil || s.State.SessionID != continuedFrom {
 			continue
 		}
-		if ok, err := reopenable(ctx, cfg, s.Dir, s.State); !ok || err != nil {
-			return nil, err
-		}
-		_, spoolPath := stashPaths(cfg, s.State.ConversationID)
-		spool, err := os.ReadFile(spoolPath)
+		info, err := e.Info()
 		if err != nil {
-			cfg.Logger.WarnContext(ctx, "live_session_reopen_skipped", "session_id", s.State.SessionID, "reason", "stash_spool_unreadable", "error", err)
-			return nil, nil
+			continue
 		}
-		return &ReopenSource{Dir: s.Dir, State: s.State, Spool: spool}, nil
+		if best == nil || info.ModTime().After(bestTime) {
+			best, bestTime = &s, info.ModTime()
+		}
 	}
-	return nil, nil
+	if best == nil {
+		return nil, nil
+	}
+	if ok, err := reopenable(ctx, cfg, best.Dir, best.State); !ok || err != nil {
+		return nil, err
+	}
+	_, spoolPath := stashPaths(cfg, best.State.ConversationID)
+	spool, err := os.ReadFile(spoolPath)
+	if err != nil {
+		cfg.Logger.WarnContext(ctx, "live_session_reopen_skipped", "session_id", best.State.SessionID, "reason", "stash_spool_unreadable", "error", err)
+		return nil, nil
+	}
+	return &ReopenSource{Dir: best.Dir, State: best.State, Spool: spool}, nil
 }
 
 // retargetStash points cnv's stash, if any, at the recording that now streams
@@ -144,17 +159,84 @@ func retargetStash(ctx context.Context, cfg Config, cnv, sessionID, dir string) 
 	}
 }
 
-// sweepStash removes stashes untouched for reopenRetention.
+// sweepStash removes stashes untouched for reopenRetention. A stash is a pair
+// (metadata and spool) with one activity time, the metadata's: a resume that
+// retargets it refreshes that time, and the spool is removed with it, never
+// before. A spool whose metadata is gone is an orphan and goes by its own age.
 func sweepStash(cfg Config) {
 	entries, err := os.ReadDir(stashDir(cfg))
 	if err != nil {
 		return
 	}
+	fresh := map[string]bool{} // cnv -> metadata is within retention
 	for _, e := range entries {
-		info, err := e.Info()
-		if err != nil || time.Since(info.ModTime()) < reopenRetention {
+		if filepath.Ext(e.Name()) != ".json" {
 			continue
 		}
-		_ = os.Remove(filepath.Join(stashDir(cfg), e.Name())) // best effort: retried by the next stash
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) < reopenRetention {
+			fresh[strings.TrimSuffix(e.Name(), ".json")] = true
+		}
 	}
+	for _, e := range entries {
+		name := e.Name()
+		base := strings.TrimSuffix(strings.TrimSuffix(name, ".json"), ".spool")
+		if fresh[base] {
+			continue
+		}
+		if filepath.Ext(name) == ".spool" {
+			if _, hasMeta := metaExists(cfg, base); hasMeta {
+				// metadata past retention: both go
+			} else if info, err := e.Info(); err != nil || time.Since(info.ModTime()) < reopenRetention {
+				continue
+			}
+		}
+		_ = os.Remove(filepath.Join(stashDir(cfg), name)) // best effort: retried by the next stash
+	}
+}
+
+func metaExists(cfg Config, cnv string) (string, bool) {
+	meta, _ := stashPaths(cfg, cnv)
+	_, err := os.Stat(meta)
+	return meta, err == nil
+}
+
+// DropReopenStash removes every stash that belongs to the discarded sessions
+// sessionIDs (ses_ ids): one tagged with the recording, or whose conversation
+// is the recording's twin. A discard promises no copy of the transcript stays
+// behind, and the stash is one, so every discard path calls this even when the
+// session's cache folder is already pruned.
+func DropReopenStash(cfg Config, sessionIDs ...string) error {
+	cfg, err := cfg.withDefaults()
+	if err != nil {
+		return err
+	}
+	want := map[string]bool{}
+	for _, id := range sessionIDs {
+		if id == "" {
+			continue
+		}
+		want[id] = true
+		if cnv, err := ConversationID(id); err == nil {
+			want[cnv] = true
+		}
+	}
+	entries, err := os.ReadDir(stashDir(cfg))
+	if err != nil {
+		return nil
+	}
+	var errs []error
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		var s stashedStream
+		raw, err := os.ReadFile(filepath.Join(stashDir(cfg), e.Name()))
+		if err != nil || json.Unmarshal(raw, &s) != nil {
+			continue
+		}
+		if want[s.State.SessionID] || want[s.State.ConversationID] {
+			errs = append(errs, removeStash(cfg, s.State.ConversationID))
+		}
+	}
+	return errors.Join(errs...)
 }

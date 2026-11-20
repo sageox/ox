@@ -170,3 +170,24 @@ func TestLiveStopCommandMarksOnlyAPersonsStop(t *testing.T) {
 		})
 	}
 }
+
+// Failure prevented: the hold was read before the (up to a minute long) summary
+// and never again, so a session held meanwhile still had its summary sent.
+func TestLiveHoldPlacedDuringTheSummaryWinsOverTheClose(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: a full hook-recorded stop against the fake server")
+	}
+	f := newLiveFixture(t, liveOpts{streaming: true})
+	f.turn("first task")
+	st := f.openAndDrain()
+
+	fin := liveSessionFinish(f.projectRoot, f.state, func() string {
+		require.NoError(t, session.WriteHoldMarker(f.dir(), session.HoldManualPublishing, "test"))
+		return "SUMMARY-FOR-A-HELD-SESSION"
+	}, 5*time.Second)
+
+	_, closed := f.srv.ClosedWith(st.ConversationID)
+	assert.False(t, closed, "a held session must not be closed with a summary")
+	assert.True(t, f.srv.IsDeleted(st.ConversationID), "the held path deletes the live copy")
+	assert.True(t, fin.Removed)
+}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -63,6 +64,9 @@ func FindReopenSource(ctx context.Context, cfg Config, sessionsDir, continuedFro
 		return nil, nil // no sessions folder: nothing to continue
 	}
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err // the caller's lookup budget; it then streams a new conversation
+		}
 		dir := filepath.Join(sessionsDir, e.Name())
 		if !e.IsDir() {
 			continue
@@ -141,6 +145,10 @@ func readWholeSpool(dir string) ([]byte, error) {
 	return buf, nil
 }
 
+// prepareReopenStateHook, nil in production, stands in for the stream state
+// write of PrepareReopen so a test can fail it.
+var prepareReopenStateHook func() error
+
 // PrepareReopen is Prepare for a recording that continues src's conversation:
 // a pending state on src's conversation id with Reopen set, the conversation's
 // binding moved to dir, and src's spool copied in as the start of the new one.
@@ -175,19 +183,33 @@ func PrepareReopen(ctx context.Context, cfg Config, dir string, p OpenParams, sr
 		st = newState(cfg, src.State.ConversationID, StatusPending, p)
 		st.Reopen = true
 		st.OwnSessionName, st.OwnStartedAt = ownName, ownStart
+		st.OwnHeader = string(ownHeaderLine(dir))
 		st.SeedBytes = int64(len(src.Spool))
+		// no stream state exists yet, so any spool here is a leftover of an
+		// interrupted prepare: replaced, never appended to, or the restated
+		// lines would appear twice. Written before the binding moves, so a
+		// failure here leaves the stopped stream exactly as it was.
+		if err := fileutil.AtomicWriteBytes(filepath.Join(dir, spoolFileName), src.Spool, 0o600); err != nil {
+			return fmt.Errorf("seed spool from the stopped stream: %w", err)
+		}
 		// bound before any state names the id: a stream whose id is not bound
 		// to its folder is refused everywhere (see authorize)
 		if err := rebindMinted(ctx, cfg, st.ConversationID, src.Dir, dir); err != nil {
 			return err
 		}
-		// no stream state exists yet, so any spool here is a leftover of an
-		// interrupted prepare: replaced, never appended to, or the restated
-		// lines would appear twice
-		if err := fileutil.AtomicWriteBytes(filepath.Join(dir, spoolFileName), src.Spool, 0o600); err != nil {
-			return fmt.Errorf("seed spool from the stopped stream: %w", err)
+		stateErr := writeState(dir, st)
+		if prepareReopenStateHook != nil {
+			stateErr = prepareReopenStateHook()
 		}
-		return writeState(dir, st)
+		if err := stateErr; err != nil {
+			// the binding goes back, so the stopped stream stays authorized and
+			// the next start can retry the same reopen
+			if rerr := bindMinted(ctx, cfg, st.ConversationID, canonicalDir(dir), canonicalDir(src.Dir)); rerr != nil {
+				cfg.Logger.ErrorContext(ctx, "live_session_reopen_rebind_restore_failed", "conversation_id", st.ConversationID, "error", rerr)
+			}
+			return err
+		}
+		return nil
 	}
 	err = withLock(ctx, dir, spoolLockWait, run)
 	if err == nil {
@@ -207,8 +229,13 @@ func rebindMinted(ctx context.Context, cfg Config, cnv, from, to string) error {
 	if err != nil {
 		return fmt.Errorf("rebind live conversation: session folder %s: %w", to, err)
 	}
-	src, dst := canonicalDir(from), canonicalDir(to)
-	err = withMinted(ctx, cfg, func(list []mintedConversation) ([]mintedConversation, bool, error) {
+	return bindMinted(ctx, cfg, cnv, canonicalDir(from), canonicalDir(to))
+}
+
+// bindMinted moves cnv's binding from src to dst (both already resolved), only
+// when it names src or already names dst.
+func bindMinted(ctx context.Context, cfg Config, cnv, src, dst string) error {
+	err := withMinted(ctx, cfg, func(list []mintedConversation) ([]mintedConversation, bool, error) {
 		i := mintedIndex(list, cfg.Endpoint, cnv)
 		switch {
 		case i < 0:
@@ -246,7 +273,12 @@ func sessionTwin(cnv string) (string, bool) {
 // the reopen asked for is left exactly as it was; nothing is deleted.
 func fallBackFromRefusedReopen(ctx context.Context, cfg Config, dir string, st State, openErr error) (State, bool, error) {
 	var api *sessionstream.APIError
-	if !errors.As(openErr, &api) || api.Status < 400 || api.Status >= 500 || api.Status == 429 {
+	// 401 (reauth), 408 and 429 say the credential or the moment was wrong,
+	// not that the server refused the reopen: the open is retried as it stands,
+	// and the seed and the conversation are never touched.
+	if !errors.As(openErr, &api) || api.Status < 400 || api.Status >= 500 ||
+		api.Status == http.StatusUnauthorized || api.Status == http.StatusRequestTimeout || api.Status == http.StatusTooManyRequests ||
+		api.Body.Action == sessionstream.ActionReauth {
 		return st, false, nil
 	}
 	if _, edge := edgeShape(api); edge {
@@ -262,8 +294,14 @@ func fallBackFromRefusedReopen(ctx context.Context, cfg Config, dir string, st S
 	if err := recordMinted(ctx, cfg, cnv, dir); err != nil {
 		return st, false, err
 	}
-	if err := dropSeed(ctx, dir, st.SeedBytes); err != nil {
+	if err := dropSeed(ctx, dir, st.SeedBytes, []byte(st.OwnHeader)); err != nil {
 		return st, false, err
+	}
+	// the refused conversation can no longer be resumed from here, and its
+	// stash (tagged with this recording's id) must not shadow the new
+	// conversation's own stash when this recording closes
+	if err := removeStash(cfg, st.ConversationID); err != nil {
+		cfg.Logger.WarnContext(ctx, "live_session_reopen_stash_remove_failed", "conversation_id", st.ConversationID, "error", err)
 	}
 	st.ConversationID, st.LayerID = cnv, "clyr_"+uuid.Must(uuid.NewV7()).String()
 	st.Reopen, st.SeedBytes, st.Acked = false, 0, 0
@@ -275,7 +313,7 @@ func fallBackFromRefusedReopen(ctx context.Context, cfg Config, dir string, st S
 	if !st.OwnStartedAt.IsZero() {
 		st.StartedAt = st.OwnStartedAt
 	}
-	st.OwnSessionName, st.OwnStartedAt = "", time.Time{}
+	st.OwnSessionName, st.OwnStartedAt, st.OwnHeader = "", time.Time{}, ""
 	if err := writeState(dir, st); err != nil {
 		return st, false, err
 	}
@@ -283,18 +321,19 @@ func fallBackFromRefusedReopen(ctx context.Context, cfg Config, dir string, st S
 }
 
 // dropSeed rewrites dir's spool without its first seed bytes (the stopped
-// session's lines) and with this recording's own header line from raw.jsonl in
-// their place, since the seed's header named the other recording. It holds the
-// swap lock, which every append made without live.lock also holds.
-func dropSeed(ctx context.Context, dir string, seed int64) error {
+// session's lines) and with this recording's own header line in their place,
+// since the seed's header named the other recording. header comes from the
+// stream state (State.OwnHeader), not raw.jsonl, which cache pruning may have
+// removed. It holds the swap lock, which every append made without live.lock
+// also holds.
+func dropSeed(ctx context.Context, dir string, seed int64, header []byte) error {
+	if len(header) == 0 {
+		return errors.New("drop seeded spool: the recording's header line was not kept")
+	}
 	return withSwapLock(ctx, dir, func() error {
 		spool, err := os.ReadFile(filepath.Join(dir, spoolFileName))
 		if err != nil {
 			return fmt.Errorf("read spool: %w", err)
-		}
-		header := ownHeaderLine(dir)
-		if len(header) == 0 {
-			return errors.New("drop seeded spool: raw.jsonl has no readable header line")
 		}
 		// A fallback interrupted after this write but before its state was
 		// saved comes back here with the old seed length. The spool then

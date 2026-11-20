@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/mediapool"
@@ -36,10 +38,16 @@ const (
 	// letting one bad image hold every text turn behind it in the spool.
 	maxMediaPutFailures = 5
 	// maxMediaPutWindow caps the same thing in time, for a link that drains
-	// rarely: past it the image is a gap whatever the count. Transport errors
-	// (offline) never count toward either bound: text waits out an outage, and
-	// so does the image.
+	// rarely: once the failing attempts add up to it the image is a gap whatever
+	// the count. Transport errors (offline) never count toward either bound:
+	// text waits out an outage, and so does the image.
 	maxMediaPutWindow = 10 * time.Minute
+	// maxMediaPutGap is the most one failure adds to that sum. The time between
+	// two failures can hold an outage, a closed laptop or no drain at all, none
+	// of it storage refusing the image; capping each step keeps that time from
+	// ending a retry (a lone 4xx after hours offline must not read as ten
+	// minutes of failures). Drains run seconds apart, well under this cap.
+	maxMediaPutGap = 3 * time.Minute
 
 	mediaAttemptsFile = "media-attempts.json"
 )
@@ -47,8 +55,10 @@ const (
 // mediaAttempt is one image's failed storage PUTs, kept across drains in the
 // session dir (local only; never uploaded).
 type mediaAttempt struct {
-	Failures int       `json:"failures"`
-	First    time.Time `json:"first"`
+	Failures int `json:"failures"`
+	// Active is the capped time between failing attempts (maxMediaPutGap).
+	Active time.Duration `json:"active"`
+	Last   time.Time     `json:"last"`
 }
 
 func (s *session) loadAttempts() map[string]mediaAttempt {
@@ -96,8 +106,19 @@ func oweMediaNotice(dataDir string) {
 	if err != nil {
 		return // exists (owed or given), or unwritable: the next image tries again
 	}
-	_, _ = f.WriteString("owed\n")
-	_ = f.Close()
+	werr := writeNoticeMarker(f, "owed\n")
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		// an empty marker would block every later attempt (O_EXCL) and TakeMediaNotice
+		// rejects it: remove what this call created so a later upload retries
+		_ = os.Remove(filepath.Join(dataDir, mediaNoticeFile))
+	}
+}
+
+// writeNoticeMarker is a variable so a test can fail the write.
+var writeNoticeMarker = func(f *os.File, text string) error {
+	_, err := f.WriteString(text)
+	return err
 }
 
 // TakeMediaNotice reports whether the screenshot notice is owed, and marks it
@@ -180,7 +201,7 @@ func (s *session) uploadMedia(ctx context.Context, m mediaLine) (string, error) 
 		return "media_too_large", nil
 	}
 	attempts := s.loadAttempts()
-	if a := attempts[m.SHA256]; a.Failures >= maxMediaPutFailures || (a.Failures > 0 && time.Since(a.First) >= maxMediaPutWindow) {
+	if a := attempts[m.SHA256]; a.Failures >= maxMediaPutFailures || a.Active >= maxMediaPutWindow {
 		return "media_upload_failed", nil
 	}
 	cnv := s.st.ConversationID
@@ -206,9 +227,10 @@ func (s *session) uploadMedia(ctx context.Context, m mediaLine) (string, error) 
 			var status *putStatusError
 			if errors.As(err, &status) {
 				a := attempts[m.SHA256]
-				if a.Failures == 0 {
-					a.First = time.Now()
+				if a.Failures > 0 {
+					a.Active += min(time.Since(a.Last), maxMediaPutGap)
 				}
+				a.Last = time.Now()
 				a.Failures++
 				attempts[m.SHA256] = a
 				s.saveAttempts(attempts)
@@ -265,8 +287,8 @@ func (s *session) putMedia(ctx context.Context, decl sessionstream.MediaResponse
 	if decl.UploadURL == "" {
 		return errors.New("server returned no upload url")
 	}
-	if u, err := url.Parse(decl.UploadURL); err != nil || (u.Scheme != "https" && u.Scheme != "http") {
-		return errors.New("server returned an unusable upload url")
+	if err := checkUploadURL(decl.UploadURL); err != nil {
+		return err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, decl.UploadURL, bytes.NewReader(data))
 	if err != nil {
@@ -275,10 +297,17 @@ func (s *session) putMedia(ctx context.Context, decl sessionstream.MediaResponse
 	req.ContentLength = int64(len(data))
 	req.Header.Set("Content-Type", mime)
 	for k, v := range decl.UploadHeaders {
+		if forbiddenUploadHeader(k) {
+			continue
+		}
 		req.Header.Set(k, v)
 	}
 	hc := *s.cfg.HTTP
 	hc.Timeout = 0
+	// A redirect would replay the image and the signed headers wherever the
+	// storage answer points; a presigned PUT never needs one, so a 3xx is a
+	// failed upload like any other status.
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := hc.Do(req)
 	if err != nil {
 		// a *url.Error embeds the URL; keep it out of the error chain and logs
@@ -294,6 +323,37 @@ func (s *session) putMedia(ctx context.Context, decl sessionstream.MediaResponse
 		return &putStatusError{status: resp.StatusCode}
 	}
 	return nil
+}
+
+// checkUploadURL admits only what a presigned storage URL is: https with a host
+// and no embedded credentials. Plain http is for a loopback endpoint (local
+// dev and tests), never a remote host, where the image and its signed headers
+// would cross the network in the clear. The host is the one the declare answer
+// names and the PUT is never redirected from it.
+func checkUploadURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" || u.User != nil {
+		return errors.New("server returned an unusable upload url")
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if ip := net.ParseIP(u.Hostname()); u.Hostname() == "localhost" || (ip != nil && ip.IsLoopback()) {
+			return nil
+		}
+	}
+	return errors.New("server returned an upload url that is not https")
+}
+
+// forbiddenUploadHeader reports headers the server's declare answer may not set
+// on the storage PUT: ox's own credentials never go to storage.
+func forbiddenUploadHeader(name string) bool {
+	switch strings.ToLower(name) {
+	case "authorization", "cookie", "proxy-authorization", strings.ToLower(sessionstream.HeaderSignature):
+		return true
+	}
+	return false
 }
 
 func mustJSON(v any) []byte {

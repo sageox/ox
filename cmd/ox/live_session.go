@@ -314,14 +314,18 @@ func liveKickDaemon(sessionDir string) {
 // liveSessionClose runs the stop-time open -> drain -> close within budget. A
 // session that is not streaming is a no-op. If the close cannot finish the
 // stream stays closing (or pending with the close remembered) for the daemon.
-func liveSessionClose(projectRoot, sessionDir, summary string, budget time.Duration) {
+func liveSessionClose(projectRoot, sessionDir, sessionID, summary string, budget time.Duration) {
 	st, err := livesession.ReadState(sessionDir)
 	if err != nil || (st.Status != livesession.StatusPending && st.Status != livesession.StatusStreaming && st.Status != livesession.StatusClosing) {
 		return
 	}
-	res, err := livesession.Close(context.Background(), liveConfig(projectRoot), sessionDir, summary, budget)
+	res, err := livesession.CloseOf(context.Background(), liveConfig(projectRoot), sessionDir, sessionID, summary, budget)
 	log := slog.With("session_id", st.SessionID, "conversation_id", st.ConversationID, "layer_id", st.LayerID)
 	switch {
+	case errors.Is(err, livesession.ErrOtherRecording):
+		// a recording that started in the same minute took the folder while the
+		// summary was written: its stream is its own, and gets no summary of ours
+		log.Info("live_session_close_skipped", "reason", "folder_reused", "closing_session_id", sessionID)
 	case err != nil:
 		log.Warn("live_session_close_deferred", "status", string(res.Status), "error", err)
 	case !res.Done:
@@ -573,8 +577,16 @@ func liveSessionFinish(projectRoot string, state *session.RecordingState, summar
 		if summarize != nil && (st.Status == livesession.StatusPending || st.Status == livesession.StatusStreaming || st.Status == livesession.StatusClosing) {
 			summary = summarize()
 		}
-		liveSessionClose(projectRoot, state.SessionPath, summary, budget)
-		return liveFinish{}
+		// The summary takes up to a minute. A hold placed meanwhile wins: no
+		// summary is sent, and the held path below deletes the live copy.
+		if !liveSessionHeld(projectRoot, state) {
+			liveSessionClose(projectRoot, state.SessionPath, state.SessionID, summary, budget)
+			return liveFinish{}
+		}
+		slog.Info("live_session_summary_dropped", "session_id", state.SessionID, "reason", "held_during_summary")
+		if st, err = livesession.ReadState(state.SessionPath); err != nil {
+			return liveFinish{}
+		}
 	}
 	if st.Status == livesession.StatusDeleted {
 		return liveFinish{} // already let go

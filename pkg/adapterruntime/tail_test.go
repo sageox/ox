@@ -443,23 +443,3 @@ func TestReadFromOffsetJSONL_ReturnsTheProtocolShape(t *testing.T) {
 		t.Errorf("NewOffset %d, want %d", res.NewOffset, info.Size())
 	}
 }
-
-func TestTailJSONLBudgetStopsBeforeTheRecordThatWouldExceedIt(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "t.jsonl")
-	rec := `{"n":"` + strings.Repeat("x", 90) + `"}` + "\n" // 99 bytes
-	if err := os.WriteFile(path, []byte(strings.Repeat(rec, 5)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	parse := func(line []byte) ([]adapterprotocol.RawEntry, error) {
-		return []adapterprotocol.RawEntry{{Role: "user", Content: "r"}}, nil
-	}
-	got, next, err := TailJSONLBudget(path, 0, 250, parse)
-	if err != nil || len(got) != 2 || next != 198 {
-		t.Fatalf("got %d entries next=%d err=%v, want 2 entries at 198", len(got), next, err)
-	}
-	// a record larger than the budget is still read alone, so the cursor moves
-	got, next, err = TailJSONLBudget(path, 198, 10, parse)
-	if err != nil || len(got) != 1 || next != 297 {
-		t.Fatalf("got %d entries next=%d err=%v, want 1 entry at 297", len(got), next, err)
-	}
-}

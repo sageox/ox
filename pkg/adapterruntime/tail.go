@@ -63,21 +63,6 @@ func (s TailStats) AllLinesFailedToParse() bool {
 
 // TailJSONLWithStats is TailJSONL plus the read counts.
 func TailJSONLWithStats(path string, offset int64, parse LineParser) ([]adapterprotocol.RawEntry, int64, TailStats, error) {
-	return tailJSONL(path, offset, 0, parse)
-}
-
-// TailJSONLBudget is TailJSONL that stops before the record that would take the
-// read past maxBytes of transcript, and returns the offset to resume from. At
-// least one record is always read, so an oversized turn cannot wedge the
-// cursor. A reader whose entries are much larger than their records' text (an
-// adapter carrying pasted images) uses it to keep one response under the
-// protocol's output limit; the caller's next read picks up the rest.
-func TailJSONLBudget(path string, offset, maxBytes int64, parse LineParser) ([]adapterprotocol.RawEntry, int64, error) {
-	entries, newOffset, _, err := tailJSONL(path, offset, maxBytes, parse)
-	return entries, newOffset, err
-}
-
-func tailJSONL(path string, offset, maxBytes int64, parse LineParser) ([]adapterprotocol.RawEntry, int64, TailStats, error) {
 	var stats TailStats
 	if parse == nil {
 		return nil, offset, stats, errors.New("TailJSONL requires a line parser")
@@ -131,9 +116,6 @@ func tailJSONL(path string, offset, maxBytes int64, parse LineParser) ([]adapter
 			continue
 		}
 
-		if maxBytes > 0 && stats.LinesRead > 0 && consumed-offset+int64(n) > maxBytes {
-			break // the next read starts at this record
-		}
 		consumed += int64(n)
 		stats.LinesRead++
 

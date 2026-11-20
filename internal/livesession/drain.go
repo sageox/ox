@@ -429,6 +429,10 @@ func (s *session) deletedByServer(ctx context.Context) error {
 		return nil
 	}
 	s.log().InfoContext(ctx, "live_session_deleted_by_server")
+	// deleted or wiped on SageOx: no reopen copy of it may outlive that
+	if err := removeStash(s.cfg, s.st.ConversationID); err != nil {
+		s.log().WarnContext(ctx, "live_session_reopen_stash_remove_failed", "error", err)
+	}
 	s.st.Status, s.st.DeletedOnServer = StatusDeleted, true
 	// the hold names this stream's recording: the folder may pass to a new
 	// recording restarted within the minute, and it must not be held by this one

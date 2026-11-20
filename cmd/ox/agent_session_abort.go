@@ -523,6 +523,7 @@ func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, proj
 	// page can flip to discarded and `ox session import` never offers the
 	// session again — the meta.json that carries them is about to be git-rm'd.
 	abortedSessionID := ""
+	stashID := "" // the id the reopen copy is tagged with, when meta.json could not name it
 	importWarning := ""
 	var undoAbortRecord func()
 	if meta, metaErr := lfs.ReadSessionMeta(ledgerSessionDir); metaErr == nil {
@@ -534,9 +535,16 @@ func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, proj
 		sessionID, natives := localIdentityOfSession(sessionPath,
 			filepath.Join(session.GetContextPath(repoID), "sessions", sessionName), hydrationCache)
 		importWarning, undoAbortRecord = rememberAbort(projectRoot, sessionName, sessionID, natives)
+		stashID = sessionID
 		if sessionID == "" && len(natives) == 0 {
 			importWarning = "could not read the session's meta.json, so the abort was not recorded for 'ox session import', which may offer this session again"
 		}
+	}
+
+	// A discard leaves no reopen copy of the transcript behind, even when the
+	// session's cache folder was pruned and only the stash remains.
+	if err := livesession.DropReopenStash(liveConfig(projectRoot), abortedSessionID, stashID); err != nil {
+		slog.Warn("failed to remove the reopen copy of a discarded session", "session", sessionName, "error", err)
 	}
 
 	// Remove the git-tracked ledger directory: git rm -r + commit + push. A

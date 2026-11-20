@@ -67,11 +67,13 @@ func Put(dataDir, digest string, data []byte) error {
 		return fmt.Errorf("stage media: %w", err)
 	}
 	final := filepath.Join(d, digest)
-	if _, err := os.Stat(final); err == nil {
+	if _, err := Read(dataDir, digest); err == nil {
 		now := time.Now()
 		_ = os.Chtimes(final, now, now) // age only; a failure just risks an earlier sweep
 		return nil
 	}
+	// absent, or present but corrupt: the supplied bytes (digest-checked above)
+	// replace it atomically below, so pasting the same image again repairs it
 	tmp, err := os.CreateTemp(d, ".stage-*")
 	if err != nil {
 		return fmt.Errorf("stage media: %w", err)

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -283,5 +284,64 @@ func TestMediaNoticeIsOwedOnceAfterFirstScreenshotStreams(t *testing.T) {
 	e.mustDrain()
 	if livesession.TakeMediaNotice(e.cfg.DataDir) {
 		t.Fatalf("notice owed a second time")
+	}
+}
+
+// The storage answer's real status is what the fake records, so a test can see
+// the injected failure.
+func TestFakeStorageRecordsTheStatusItSent(t *testing.T) {
+	e := newEnv(t)
+	e.spool(withPrompt(e.stage(pngBytes("k"), "image/png", 0)))
+	e.srv.FailMediaUploadsWith(http.StatusForbidden)
+	_, _ = e.drain()
+	for _, c := range e.srv.Calls() {
+		if c.Method == http.MethodPut && strings.HasPrefix(c.Path, "/storage/") {
+			if c.Status != http.StatusForbidden {
+				t.Fatalf("recorded status = %d, want 403", c.Status)
+			}
+			return
+		}
+	}
+	t.Fatalf("no storage PUT recorded")
+}
+
+// A 3xx from storage is never followed: the image and its signed headers go
+// only where the declare answer named.
+func TestStorageRedirectIsNotFollowed(t *testing.T) {
+	var hits int
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++ }))
+	t.Cleanup(elsewhere.Close)
+
+	e := newEnv(t)
+	e.spool(withPrompt(e.stage(pngBytes("l"), "image/png", 0)))
+	e.srv.RedirectMediaUploads(elsewhere.URL + "/steal")
+	if _, err := e.drain(); err == nil {
+		t.Fatalf("drain succeeded through a redirect")
+	}
+	if hits != 0 {
+		t.Fatalf("redirect target received %d requests", hits)
+	}
+}
+
+// One 4xx after a long quiet stretch (an outage, a closed laptop) is not ten
+// minutes of failures: the image still gets its remaining attempts.
+func TestIdleTimeBetweenFailuresDoesNotEndTheRetries(t *testing.T) {
+	e := newEnv(t)
+	img := pngBytes("m")
+	e.spool(withPrompt(e.stage(img, "image/png", 0)))
+	old := time.Now().Add(-6 * time.Hour)
+	history := map[string]map[string]any{digest(img): {"failures": 1, "active": 0, "last": old}}
+	b, _ := json.Marshal(history)
+	if err := os.WriteFile(filepath.Join(e.dir, "media-attempts.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.srv.FailMediaUploadsWith(http.StatusForbidden)
+	if _, err := e.drain(); err == nil {
+		t.Fatalf("drain succeeded")
+	}
+	e.srv.FailMediaUploadsWith(0)
+	e.mustDrain()
+	if got := strings.Join(lineTypes(t, e.stored(e.state())), ","); got != "user,media" {
+		t.Fatalf("stream = %s: idle hours turned a lone 4xx into a gap", got)
 	}
 }

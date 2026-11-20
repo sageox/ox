@@ -123,8 +123,11 @@ type State struct {
 	// OwnSessionName and OwnStartedAt are this recording's own identity, kept
 	// while SessionName and StartedAt name the reopened conversation, so a
 	// refused reopen can stream the recording as a conversation of its own.
-	OwnSessionName string    `json:"own_session_name,omitempty"`
-	OwnStartedAt   time.Time `json:"own_started_at,omitzero"`
+	OwnSessionName string `json:"own_session_name,omitempty"`
+	// OwnHeader is this recording's raw.jsonl header line, kept so a refused
+	// reopen can finish its fallback after cache pruning removed raw.jsonl.
+	OwnHeader    string    `json:"own_header,omitempty"`
+	OwnStartedAt time.Time `json:"own_started_at,omitzero"`
 
 	// ManualStop is set (from the manual-stop file) when the person stopped the
 	// session with `ox session stop`. Sticky: once persisted it stays.

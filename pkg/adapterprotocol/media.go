@@ -11,6 +11,9 @@ const (
 	MediaSkippedTooLarge        = "too_large"
 	MediaSkippedUnsupportedType = "unsupported_type"
 	MediaSkippedMalformed       = "malformed"
+	// MediaSkippedReadLimit: one read already carried the most image bytes a
+	// response may hold.
+	MediaSkippedReadLimit = "read_limit"
 )
 
 // MediaRef is an image pasted into a user turn.
