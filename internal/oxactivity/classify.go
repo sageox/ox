@@ -56,12 +56,14 @@ type Activity struct {
 	Kind Kind
 	// Query is the search subject of `ox query` and `ox code search`: the
 	// first positional argument, capped at MaxQueryLen. Empty for every other
-	// call, including MCP tools (their arguments are not inspected).
+	// call, including MCP tools (their search text is not inspected).
 	Query string
 	// Ref is the item a read pulled — the plan slug of `ox plan view <slug>`,
-	// the conversation ID of `ox conversation show <id>` — so a counter can
-	// tell one item read twice from two items. It is only ever an ID or slug
-	// (see itemRef), never free text, and empty for every other call.
+	// the conversation ID of `ox conversation show <id>`, the plan_id of the
+	// GetPlan MCP tool, the conversation_id of the Conversation* MCP tools —
+	// so a counter can tell one item read twice from two items. It is only
+	// ever an ID or slug (see itemRef, mcpRef), never free text, and empty for
+	// every other call.
 	Ref string
 }
 
@@ -87,10 +89,12 @@ var shellToolNames = map[string]bool{
 // Classify maps a harness tool call to the activity a coworker should see.
 // It reports false for anything that is not ox doing visible work: non-ox
 // shell commands, ox plumbing (heartbeats, hook dispatch), non-SageOx MCP
-// tools, and input it cannot parse.
+// tools, and input it cannot parse. A SageOx MCP tool is classified by its
+// name alone; its input is read only for the Ref of a single-item read, so an
+// unparseable MCP input still classifies, just without a Ref.
 func Classify(toolName string, toolInput json.RawMessage) (Activity, bool) {
 	if isSageoxMCPTool(toolName) {
-		return classifyMCP(toolName)
+		return classifyMCP(toolName, toolInput)
 	}
 	if !shellToolNames[toolName] {
 		return Activity{}, false
@@ -605,7 +609,10 @@ func isSageoxMCPTool(name string) bool {
 	return strings.Contains(strings.ToLower(rest[:idx]), "sageox")
 }
 
-func classifyMCP(name string) (Activity, bool) {
+// classifyMCP classifies a SageOx MCP tool call by its tool name. input is
+// consulted only for the Ref of a single-item read (see mcpRef); it never
+// changes Label, Command or Kind.
+func classifyMCP(name string, input json.RawMessage) (Activity, bool) {
 	tool := name[strings.LastIndex(name, "__")+2:]
 	if tool == "" {
 		return Activity{}, false
@@ -616,12 +623,51 @@ func classifyMCP(name string) (Activity, bool) {
 	}
 	command := "mcp " + t
 	if known, ok := mcpTools[tool]; ok {
-		return Activity{Label: known.label, Command: command, Kind: known.kind}, true
+		return Activity{Label: known.label, Command: command, Kind: known.kind, Ref: mcpRef(tool, input)}, true
 	}
 	if strings.HasPrefix(tool, "Conversation") {
-		return Activity{Label: "read discussion", Command: command, Kind: KindRetrieval}, true
+		return Activity{Label: "read discussion", Command: command, Kind: KindRetrieval, Ref: mcpRef(tool, input)}, true
 	}
 	return Activity{Label: "used SageOx " + t, Command: command, Kind: KindOther}, true
+}
+
+// mcpRef is the Ref of a single-item SageOx MCP read: the plan_id of GetPlan,
+// the conversation_id of Conversation, ConversationTranscript and any other
+// Conversation* tool except ConversationDigest, which lists many discussions
+// and so names no single item. Decoding is
+// tolerant: unknown fields are ignored, and only the one named field is
+// decoded, so another field's type cannot affect it. The value is untrusted,
+// so it must look like a bare ID or slug (slugRe) as a whole — anything with
+// spaces, control characters or path separators yields "" — and is then
+// normalized by itemRef (rec_<u> → cnv_<u>). Every other tool, and missing,
+// unparseable or non-string input, yields "".
+func mcpRef(tool string, input json.RawMessage) string {
+	var key string
+	switch {
+	case tool == "GetPlan":
+		key = "plan_id"
+	case tool == "ConversationDigest":
+		return ""
+	case strings.HasPrefix(tool, "Conversation"):
+		key = "conversation_id"
+	default:
+		return ""
+	}
+	if len(input) == 0 {
+		return ""
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(input, &fields); err != nil {
+		return ""
+	}
+	var v string
+	if err := json.Unmarshal(fields[key], &v); err != nil {
+		return ""
+	}
+	if !slugRe.MatchString(v) {
+		return ""
+	}
+	return itemRef(v)
 }
 
 // cleanText makes untrusted text safe for a single terminal line: control
