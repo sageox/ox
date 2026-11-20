@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -14,9 +15,7 @@ func TestMainView_ViewportClampingKeepsCursorVisible(t *testing.T) {
 	require.NoError(t, err)
 	require.Greater(t, len(m.displayOrder), 15, "need realistic number of settings")
 
-	m.height = 24
-	m.width = 80
-
+	heights := []int{12, 20, 24, 35}
 	testCursors := []struct {
 		name         string
 		cursor       int
@@ -28,33 +27,46 @@ func TestMainView_ViewportClampingKeepsCursorVisible(t *testing.T) {
 		{"bottom of list", len(m.displayOrder) - 1, true, false},
 	}
 
-	for _, tc := range testCursors {
-		t.Run(tc.name, func(t *testing.T) {
-			m.cursor = tc.cursor
-			view := m.mainView(80)
-			lines := strings.Split(view, "\n")
+	for _, h := range heights {
+		for _, tc := range testCursors {
+			t.Run(fmt.Sprintf("height=%d/%s", h, tc.name), func(t *testing.T) {
+				m.height = h
+				m.width = 80
+				m.cursor = tc.cursor
 
-			// Clamped height must not exceed terminal height
-			assert.LessOrEqual(t, len(lines), 24, "mainView lines should not exceed m.height")
+				view := m.mainView(80)
+				lines := strings.Split(view, "\n")
 
-			// Cursor must be visible in the output lines
-			hasCursor := false
-			for _, line := range lines {
-				if strings.Contains(line, "> ") {
-					hasCursor = true
-					break
+				// Clamped height must not exceed terminal height
+				assert.LessOrEqual(t, len(lines), h, "mainView lines should not exceed m.height")
+
+				// Selected row (cursor + active setting key) must be visible in the output
+				selectedKey := m.items[m.displayOrder[tc.cursor]].setting.Key
+				hasSelectedRow := false
+				for _, line := range lines {
+					if strings.Contains(line, "> ") && strings.Contains(line, selectedKey) {
+						hasSelectedRow = true
+						break
+					}
 				}
-			}
-			assert.True(t, hasCursor, "active cursor '> ' must be visible within viewport")
+				assert.True(t, hasSelectedRow, "selected row '> %s' must be visible within viewport", selectedKey)
 
-			// Check scroll indicators
-			if tc.wantUpMore {
-				assert.Contains(t, view, "↑ more", "expected scroll up indicator")
-			}
-			if tc.wantDownMore {
-				assert.Contains(t, view, "↓ more", "expected scroll down indicator")
-			}
-		})
+				// Help bar must remain visible even at compact heights
+				assert.Contains(t, view, "q quit", "help bar must remain visible")
+
+				// Check scroll indicators when list exceeds available rows
+				allLines, _ := m.allSettingsLines()
+				maxRows, _ := m.maxSettingsListRows(80-4, m.buildDetailPanel(80-4))
+				if maxRows > 0 && len(allLines) > maxRows {
+					if tc.wantUpMore {
+						assert.Contains(t, view, "↑ more", "expected scroll up indicator")
+					}
+					if tc.wantDownMore {
+						assert.Contains(t, view, "↓ more", "expected scroll down indicator")
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -95,6 +107,52 @@ func TestEditView_TelemetryRadioOptionsNearTop(t *testing.T) {
 	require.GreaterOrEqual(t, radioLineIdx, 0, "radio button must be present in editView")
 	assert.LessOrEqual(t, radioLineIdx, 12, "radio button must appear within the first 12 rows, found at row %d", radioLineIdx)
 
+	// Extended LongDescription should be truncated with "..." to fit 24 rows
+	assert.Contains(t, view, "...", "expected truncated LongDescription marker in editView")
+
 	// Save and cancel hints must be visible
 	assert.Contains(t, view, "enter save", "key hints must be visible in editView")
+}
+
+func TestEditView_MultiScopeSettingsRadioOptionsNearTop(t *testing.T) {
+	dir := setupIsolatedUserConfig(t)
+	m, err := newConfigModel(dir)
+	require.NoError(t, err)
+
+	tested := 0
+	for pos, itemIdx := range m.displayOrder {
+		setting := m.items[itemIdx].setting
+		if len(setting.Levels) <= 1 || len(setting.ValidValues) == 0 {
+			continue
+		}
+		tested++
+
+		t.Run(setting.Key, func(t *testing.T) {
+			m.cursor = pos
+			m.editing = true
+			m.editLevel = setting.Levels[0]
+			m.editCursor = 0
+			m.height = 24
+			m.width = 80
+
+			view := m.editView(80)
+			lines := strings.Split(view, "\n")
+
+			assert.LessOrEqual(t, len(lines), 24, "editView lines should fit within 24 rows")
+			assert.Contains(t, view, "Scope:", "scope selector must be visible")
+
+			radioLineIdx := -1
+			for i, line := range lines {
+				if strings.Contains(line, "●") || strings.Contains(line, "○") {
+					radioLineIdx = i
+					break
+				}
+			}
+			require.GreaterOrEqual(t, radioLineIdx, 0, "radio button must be present in editView")
+			assert.LessOrEqual(t, radioLineIdx, 12, "radio button must appear within the first 12 rows, found at row %d", radioLineIdx)
+			assert.Contains(t, view, "tab scope", "scope switch hint must be visible")
+			assert.Contains(t, view, "enter save", "save hint must be visible")
+		})
+	}
+	require.Greater(t, tested, 0, "expected at least one multi-scope setting with radio options")
 }

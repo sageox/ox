@@ -391,17 +391,25 @@ func (m configModel) mainView(width int) string {
 	}
 
 	// Calculate available vertical rows for the settings list
-	maxListRows := m.maxSettingsListRows(innerWidth, detailPanel)
+	maxListRows, showDetail := m.maxSettingsListRows(innerWidth, detailPanel)
 
 	// Build settings list section (windowed if maxListRows > 0)
 	settingsList := m.buildSettingsListWithLimit(maxListRows)
 
-	content := fmt.Sprintf("%s\n%s\n%s\n\n%s",
-		settingsList,
-		divider,
-		detailPanel,
-		helpStyle.Render(help),
-	)
+	var content string
+	if showDetail {
+		content = fmt.Sprintf("%s\n%s\n%s\n\n%s",
+			settingsList,
+			divider,
+			detailPanel,
+			helpStyle.Render(help),
+		)
+	} else {
+		content = fmt.Sprintf("%s\n\n%s",
+			settingsList,
+			helpStyle.Render(help),
+		)
+	}
 
 	// Wrap in frame
 	frame := frameStyle.Width(width - 2).Render(content)
@@ -424,25 +432,30 @@ func (m configModel) mainView(width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m configModel) maxSettingsListRows(innerWidth int, detailPanel string) int {
+func (m configModel) maxSettingsListRows(innerWidth int, detailPanel string) (maxRows int, showDetail bool) {
 	if m.height <= 0 {
-		return 0
+		return 0, true
 	}
 	detailHeight := lipgloss.Height(lipgloss.NewStyle().Width(innerWidth).Render(detailPanel))
 	// Frame borders (2) + divider (1) + blank before help (1) + help (1) + layout padding (2) + detail panel
 	nonListRows := 2 + 1 + 1 + 1 + 2 + detailHeight
-	maxRows := m.height - nonListRows
-	if maxRows < 4 {
-		return 4
+	if avail := m.height - nonListRows; avail >= 4 {
+		return avail, true
 	}
-	return maxRows
+	// Not enough vertical space for both the detail panel and a usable list:
+	// omit the detail panel and divider, keeping frame borders (2) + blank (1) + help (1).
+	avail := m.height - 4
+	if avail < 1 {
+		avail = 1
+	}
+	return avail, false
 }
 
 func (m configModel) buildSettingsList(width int) string {
 	maxRows := 0
 	if m.height > 0 {
 		detailPanel := m.buildDetailPanel(width)
-		maxRows = m.maxSettingsListRows(width, detailPanel)
+		maxRows, _ = m.maxSettingsListRows(width, detailPanel)
 	}
 	return m.buildSettingsListWithLimit(maxRows)
 }
@@ -818,7 +831,7 @@ func (m configModel) editView(width int) string {
 	if item.setting.LongDescription != "" {
 		desc := m.wrapText(item.setting.LongDescription, innerWidth-2)
 		if m.height > 0 {
-			usedLines := len(strings.Split(b.String(), "\n"))
+			usedLines := lipgloss.Height(lipgloss.NewStyle().Width(innerWidth).Render(b.String()))
 			avail := m.height - (usedLines + 4)
 			if avail > 0 {
 				descLines := strings.Split(desc, "\n")
