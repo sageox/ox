@@ -49,6 +49,9 @@ func Close(ctx context.Context, cfg Config, dir, summary string, budget time.Dur
 		}
 		if s.st.active() {
 			err = s.finish(ctx, summary, &res)
+			// best effort and independent of how the close went: a receipt owed
+			// must not wait for a sweep that skips closed streams
+			s.sendTeammateAcks(ctx)
 		}
 		res.Acked, res.Status = s.st.Acked, s.st.Status
 		res.Done = err == nil && !s.st.active()

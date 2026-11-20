@@ -1274,7 +1274,7 @@ func runAgentWhisperHistory(w io.Writer, inst *agentinstance.Instance) error {
 			fmt.Fprintf(w, "  [%s] %s (%s) — %s\n",
 				e.Importance, e.Topic, e.Source, e.CreatedAt.Local().Format("Jan 2 15:04:05"))
 			if e.Content != "" {
-				fmt.Fprintf(w, "    %s\n", truncateString(e.Content, 120))
+				fmt.Fprintf(w, "    %s\n", truncateString(cli.SanitizeTerminalText(e.Content), 120))
 			}
 		}
 		fmt.Fprintln(w)
@@ -1286,7 +1286,7 @@ func runAgentWhisperHistory(w io.Writer, inst *agentinstance.Instance) error {
 			fmt.Fprintf(w, "  [%s] %s (%s) — %s\n",
 				e.Importance, e.Topic, e.Source, e.CreatedAt.Local().Format("Jan 2 15:04:05"))
 			if e.Content != "" {
-				fmt.Fprintf(w, "    %s\n", truncateString(e.Content, 120))
+				fmt.Fprintf(w, "    %s\n", truncateString(cli.SanitizeTerminalText(e.Content), 120))
 			}
 		}
 	}

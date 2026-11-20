@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -42,6 +43,49 @@ type DrainResult struct {
 	// RetryAfter is the server's requested backoff after a refusal that asked
 	// for a retry (rate limit, unproven stored end); zero otherwise.
 	RetryAfter time.Duration
+	// TeammateCommentsListed: an append answer carried teammate_comments_listed,
+	// so TeammateComments (empty or not) is the server's complete pending list
+	// for this conversation. False: the server did not say; keep what is held.
+	TeammateCommentsListed bool
+	// TeammateComments are the notes teammates sent to the agent that the
+	// server listed in the latest append of this drain: untrusted text, minus any
+	// already shown. The server re-sends every undelivered one on each append,
+	// so a caller that cannot place them loses nothing.
+	TeammateComments []sessionstream.TeammateComment
+}
+
+// setTeammateComments records the latest append answer as the server's whole
+// pending list: it REPLACES what an earlier append of this drain returned, so a
+// note the owner opted out of, the author deleted, or another delivery settled
+// drops out. One already shown (its delivery is in the ack log) is never
+// returned: the server lists it because its ack never landed, so the ack goes
+// out again.
+func (r *DrainResult) setTeammateComments(s *session, in []sessionstream.TeammateComment) {
+	rdir, err := s.receipts()
+	var shown map[string]sessionstream.TeammateCommentAck
+	if err == nil {
+		shown, err = shownTeammateAcks(rdir)
+	}
+	if err != nil {
+		// an unreadable or oversized log cannot say what was shown; the daemon's
+		// stored-once mark still stops a second display
+		s.log().Warn("live_teammate_acks_unreadable", "error", err)
+	}
+	r.TeammateCommentsListed = true
+	r.TeammateComments = nil
+	for _, c := range in {
+		if a, ok := shown[c.ID]; ok {
+			// persisted: the obligation outlives this call and this process
+			if err := addTeammateResend(rdir, a.ID, time.Now()); err != nil {
+				s.log().Warn("live_teammate_resend_not_recorded", "comment_id", a.ID, "error", err)
+			}
+			continue
+		}
+		if c.ID == "" || slices.ContainsFunc(r.TeammateComments, func(h sessionstream.TeammateComment) bool { return h.ID == c.ID }) {
+			continue
+		}
+		r.TeammateComments = append(r.TeammateComments, c)
+	}
 }
 
 // verdict is what one append or close answer means for the loop above it.
@@ -134,6 +178,8 @@ func Drain(ctx context.Context, cfg Config, dir string, budget time.Duration) (D
 		}
 		if s.st.active() {
 			err = s.drain(ctx, &res)
+			// best effort and after the bytes: an ack never blocks or fails the drain
+			s.sendTeammateAcks(ctx)
 		}
 		res.Acked, res.Status = s.st.Acked, s.st.Status
 		res.Done = err == nil && (!s.st.active() || s.caughtUp())
@@ -248,6 +294,9 @@ func (s *session) sendBatch(ctx context.Context, f *os.File, h *sessionstream.St
 
 // onStored frees bytes only when the server's stream hash matches ours.
 func (s *session) onStored(ctx context.Context, f *os.File, h *sessionstream.StreamHash, batch []byte, resp sessionstream.AppendResponse, end int64, res *DrainResult) (verdict, error) {
+	if resp.TeammateCommentsListed { // an unlisted answer says nothing: keep what is held
+		res.setTeammateComments(s, resp.TeammateComments)
+	}
 	stored := resp.StoredThrough
 	if stored <= s.st.Acked || stored > end {
 		return vNewLayer, nil
