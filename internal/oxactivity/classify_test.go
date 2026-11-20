@@ -276,6 +276,7 @@ func TestClassify_MCPRef(t *testing.T) {
 	}
 	// the other field name, or another tool, never yields a Ref
 	tests = append(tests,
+		tc{"GetPlan keeps a plan name that holds a conversation id", "mcp__sageox__GetPlan", `{"plan_id":"alpha.` + cnv + `"}`, "alpha." + cnv},
 		tc{"GetPlan ignores conversation_id", "mcp__sageox__GetPlan", `{"conversation_id":"` + cnv + `"}`, ""},
 		tc{"Conversation ignores plan_id", "mcp__sageox__Conversation", `{"plan_id":"` + pln + `"}`, ""},
 		tc{"GetPlan unaffected by an unrelated wrong-typed field", "mcp__sageox__GetPlan", `{"plan_id":"` + pln + `","conversation_id":7}`, pln},

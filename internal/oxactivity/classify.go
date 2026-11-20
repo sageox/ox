@@ -62,7 +62,7 @@ type Activity struct {
 	// the conversation ID of `ox conversation show <id>`, the plan_id of the
 	// GetPlan MCP tool, the conversation_id of the Conversation* MCP tools —
 	// so a counter can tell one item read twice from two items. It is only
-	// ever an ID or slug (see itemRef, mcpRef), never free text, and empty for
+	// ever an ID or slug (see itemRef, planRef, mcpRef), never free text, and empty for
 	// every other call.
 	Ref string
 }
@@ -448,7 +448,12 @@ func classifyWords(words, args []string) (Activity, bool) {
 				act.Query = querySubject(args, rule.words)
 			}
 			if rule.ref {
-				act.Ref = itemRef(querySubject(args, rule.words))
+				arg := querySubject(args, rule.words)
+				if rule.words[0] == "plan" {
+					act.Ref = planRef(arg)
+				} else {
+					act.Ref = itemRef(arg)
+				}
 			}
 			return act, true
 		}
@@ -530,6 +535,17 @@ func itemRef(arg string) string {
 	if id := contextuse.FindConversationID(arg); id != "" {
 		return id
 	}
+	if slugRe.MatchString(arg) {
+		return arg
+	}
+	return ""
+}
+
+// planRef turns a plan-read argument into the plan's own name: the argument
+// when it looks like a slug or ID, else "". Unlike itemRef it never pulls a
+// conversation ID out of the name, so two plans whose names hold the same
+// cnv_ id stay two plans.
+func planRef(arg string) string {
 	if slugRe.MatchString(arg) {
 		return arg
 	}
@@ -638,9 +654,10 @@ func classifyMCP(name string, input json.RawMessage) (Activity, bool) {
 // tolerant: unknown fields are ignored, and only the one named field is
 // decoded, so another field's type cannot affect it. The value is untrusted,
 // so it must look like a bare ID or slug (slugRe) as a whole — anything with
-// spaces, control characters or path separators yields "" — and is then
-// normalized by itemRef (rec_<u> → cnv_<u>). Every other tool, and missing,
-// unparseable or non-string input, yields "".
+// spaces, control characters or path separators yields "". A conversation id
+// is then normalized by itemRef (rec_<u> → cnv_<u>); a plan id is kept as it
+// is (planRef). Every other tool, and missing, unparseable or non-string
+// input, yields "".
 func mcpRef(tool string, input json.RawMessage) string {
 	var key string
 	switch {
@@ -666,6 +683,9 @@ func mcpRef(tool string, input json.RawMessage) string {
 	}
 	if !slugRe.MatchString(v) {
 		return ""
+	}
+	if tool == "GetPlan" {
+		return planRef(v)
 	}
 	return itemRef(v)
 }
