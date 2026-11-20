@@ -2698,10 +2698,8 @@ func (c *Client) LiveSessionDrain(payload LiveSessionDrainPayload) error {
 // calls TeammateCommentsConfirm; an unconfirmed lease expires and the notes are
 // pending again. Callers fail open: a slow or absent daemon means no notes this call.
 func (c *Client) TeammateCommentsTake(agentID, conversationID string, deliveredAtSeq int64) (*TeammateCommentsTakeResponse, error) {
-	payload, err := json.Marshal(TeammateCommentsTakePayload{AgentID: agentID, ConversationID: conversationID, DeliveredAtSeq: deliveredAtSeq})
-	if err != nil {
-		return nil, fmt.Errorf("marshal teammate_comments_take payload: %w", err)
-	}
+	// plain strings and ints: Marshal cannot fail, as with the other client calls
+	payload, _ := json.Marshal(TeammateCommentsTakePayload{AgentID: agentID, ConversationID: conversationID, DeliveredAtSeq: deliveredAtSeq})
 	resp, err := c.sendMessage(Message{Type: MsgTypeTeammateCommentsTake, Payload: payload})
 	if err != nil {
 		return nil, err
@@ -2719,10 +2717,8 @@ func (c *Client) TeammateCommentsTake(agentID, conversationID string, deliveredA
 // TeammateCommentsConfirm commits a lease after the hook wrote the notes it
 // names: only now are their delivery acks logged and the notes deleted.
 func (c *Client) TeammateCommentsConfirm(agentID, leaseID string, commentIDs []string) error {
-	payload, err := json.Marshal(TeammateCommentsConfirmPayload{AgentID: agentID, LeaseID: leaseID, CommentIDs: commentIDs})
-	if err != nil {
-		return fmt.Errorf("marshal teammate_comments_confirm payload: %w", err)
-	}
+	// plain strings and ints: Marshal cannot fail, as with the other client calls
+	payload, _ := json.Marshal(TeammateCommentsConfirmPayload{AgentID: agentID, LeaseID: leaseID, CommentIDs: commentIDs})
 	resp, err := c.sendMessage(Message{Type: MsgTypeTeammateCommentsConfirm, Payload: payload})
 	if err != nil {
 		return err

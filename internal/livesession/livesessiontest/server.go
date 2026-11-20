@@ -575,8 +575,6 @@ func (s *Server) recoveredCursor(ctx context.Context, cnv, layer string, row ses
 	case err != nil:
 		x := unavailable("storage is temporarily unavailable")
 		return sessionstream.Cursor{}, &x
-	case cur.StoredThrough <= row.StoredThrough:
-		return row, nil
 	}
 	return cur, nil
 }
