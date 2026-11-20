@@ -61,7 +61,7 @@ func TestCursorQueuedPromptsBeforeStartupKeepEveryGenerationAndFirstBoundary(t *
 				path, err := ledger.DefaultPath()
 				require.NoError(t, err)
 				require.NoError(t, os.Remove(filepath.Join(path, ".git")))
-				status := startSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID, &stale)
+				status := startSessionRecording(f.root, "Oxqueued", "cursor", inheritedParent{}, "", cursorConversationID, &stale)
 				require.NotNil(t, status)
 				require.False(t, status.Recording)
 				require.NoError(t, os.MkdirAll(filepath.Join(path, ".git"), 0o700))
@@ -72,7 +72,7 @@ func TestCursorQueuedPromptsBeforeStartupKeepEveryGenerationAndFirstBoundary(t *
 			for _, generation := range []string{"g2", "g3", "g2"} {
 				prepareCursorStartupPrompt(t, f, generation)
 			}
-			status := startSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID, &stale)
+			status := startSessionRecording(f.root, "Oxqueued", "cursor", inheritedParent{}, "", cursorConversationID, &stale)
 			require.NotNil(t, status)
 			require.True(t, status.Recording)
 			state, err := session.LoadRecordingStateForAgent(f.root, "Oxqueued")
@@ -84,7 +84,7 @@ func TestCursorQueuedPromptsBeforeStartupKeepEveryGenerationAndFirstBoundary(t *
 			assert.Equal(t, 4, state.CursorExpectedTurns, "one prior turn plus three distinct submissions")
 			require.ErrorIs(t, finalizeCursorHostRecording(t, f, state), session.ErrCursorFinalDrainPending)
 			// Repeated startup and prompt delivery cannot count the same turn twice.
-			again := startSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID, &stale)
+			again := startSessionRecording(f.root, "Oxqueued", "cursor", inheritedParent{}, "", cursorConversationID, &stale)
 			require.NotNil(t, again)
 			prepareCursorStartupPrompt(t, f, "g3")
 			f.write(t, old+first+second)
@@ -117,7 +117,7 @@ func TestCursorPromptDuringPublicationWaitsThenJoinsRecording(t *testing.T) {
 	var status *sessionStatus
 	go func() {
 		defer close(started)
-		status = startCursorSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID,
+		status = startCursorSessionRecording(f.root, "Oxqueued", "cursor", inheritedParent{}, "", cursorConversationID,
 			func(root string, state *session.RecordingState) error {
 				close(gate.entered)
 				<-gate.release
@@ -181,7 +181,7 @@ func TestCursorSlowMetadataDoesNotBlockPromptAdmission(t *testing.T) {
 	var status *sessionStatus
 	go func() {
 		defer close(started)
-		status = startSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID, &stale)
+		status = startSessionRecording(f.root, "Oxqueued", "cursor", inheritedParent{}, "", cursorConversationID, &stale)
 	}()
 	t.Cleanup(func() { release(); <-started })
 	slowMetadata := false
@@ -230,7 +230,7 @@ func TestCursorCompletedRecordingRefreshesConsumedBoundary(t *testing.T) {
 			old, first, next := cursorReviewTurn("OLD"), cursorReviewTurn("FIRST"), cursorReviewTurn("NEXT")
 			f.write(t, old)
 			initial := prepareCursorStartupPrompt(t, f, "g1")
-			status := startSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID, initial.CursorSourceBoundary)
+			status := startSessionRecording(f.root, "Oxqueued", "cursor", inheritedParent{}, "", cursorConversationID, initial.CursorSourceBoundary)
 			require.NotNil(t, status)
 			require.True(t, status.Recording)
 			state, err := session.LoadRecordingStateForAgent(f.root, "Oxqueued")
@@ -245,7 +245,7 @@ func TestCursorCompletedRecordingRefreshesConsumedBoundary(t *testing.T) {
 			require.Equal(t, int64(len(old+first)), marker.CursorSourceBoundary.Offset)
 			require.Empty(t, marker.CursorSourceBoundary.RecordingSessionID)
 			require.NotContains(t, marker.CursorSourceBoundary.PromptGenerations, "g1")
-			status = startSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID, marker.CursorSourceBoundary)
+			status = startSessionRecording(f.root, "Oxqueued", "cursor", inheritedParent{}, "", cursorConversationID, marker.CursorSourceBoundary)
 			require.NotNil(t, status)
 			require.True(t, status.Recording)
 			resumed, err := session.LoadRecordingStateForAgent(f.root, "Oxqueued")
@@ -272,7 +272,7 @@ func TestCursorStartupAssociationSaveFailureBlocksAutomaticRestart(t *testing.T)
 			path := markerPath(cursorConversationID)
 			original, err := os.ReadFile(path)
 			require.NoError(t, err)
-			status := startCursorSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID,
+			status := startCursorSessionRecording(f.root, "Oxqueued", "cursor", inheritedParent{}, "", cursorConversationID,
 				func(root string, state *session.RecordingState) error {
 					if err := os.Remove(path); err != nil {
 						return err
@@ -291,7 +291,7 @@ func TestCursorStartupAssociationSaveFailureBlocksAutomaticRestart(t *testing.T)
 			require.NoError(t, os.WriteFile(path, original, 0o600))
 			switch retry {
 			case "startup":
-				status = startSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID, initial.CursorSourceBoundary)
+				status = startSessionRecording(f.root, "Oxqueued", "cursor", inheritedParent{}, "", cursorConversationID, initial.CursorSourceBoundary)
 				require.Nil(t, status, "automatic retry must preserve the recovery guard")
 			case "active prompt":
 				prepareCursorStartupPrompt(t, f, "g1")
@@ -313,7 +313,7 @@ func TestCursorStartupAssociationSaveFailureBlocksAutomaticRestart(t *testing.T)
 			marker = prepareCursorStartupPrompt(t, f, "g2")
 			require.Equal(t, int64(len(old+first)), marker.CursorSourceBoundary.Offset)
 			require.Equal(t, []string{"g2"}, marker.CursorSourceBoundary.PromptGenerations)
-			require.Nil(t, startSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID, marker.CursorSourceBoundary))
+			require.Nil(t, startSessionRecording(f.root, "Oxqueued", "cursor", inheritedParent{}, "", cursorConversationID, marker.CursorSourceBoundary))
 			after, err := session.LoadRecordingStateForAgent(f.root, "Oxqueued")
 			require.NoError(t, err)
 			require.Nil(t, after, "next prompt must not create a recording that replays the completed turn")
@@ -346,7 +346,7 @@ func TestCursorSessionStartGenerationKeepsQueuedPromptBoundary(t *testing.T) {
 	stale := *marker.CursorSourceBoundary
 	f.write(t, old+first)
 	prepareCursorStartupPrompt(t, f, "g2")
-	status := startSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID, &stale)
+	status := startSessionRecording(f.root, "Oxqueued", "cursor", inheritedParent{}, "", cursorConversationID, &stale)
 	require.NotNil(t, status)
 	require.True(t, status.Recording)
 	state, err := session.LoadRecordingStateForAgent(f.root, "Oxqueued")

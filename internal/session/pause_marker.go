@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/sageox/ox/internal/proc"
 )
 
 // pause_marker.go implements the persistent breadcrumb for an active pause.
@@ -27,12 +29,64 @@ const explicitPauseMarker = ".session_paused"
 type pauseMarkerPayload struct {
 	Seq int       `json:"seq"`
 	At  time.Time `json:"at"`
+	// PID and PIDStart name the agent process holding a pause it inherited
+	// from the agent that launched it (MarkInheritedPause); zero for a pause
+	// a person asked for.
+	PID      int   `json:"pid,omitempty"`
+	PIDStart int64 `json:"pid_start,omitempty"`
 }
 
 // MarkExplicitPause writes a per-agent breadcrumb indicating the user
 // explicitly paused recording. Survives /clear so new post-/clear sessions
 // can inherit the paused state.
 func MarkExplicitPause(projectRoot, agentID string, seq int) error {
+	return writePauseMarker(projectRoot, agentID, pauseMarkerPayload{Seq: seq, At: time.Now().UTC()})
+}
+
+// MarkInheritedPause writes agentID's pause marker for a pause it inherited
+// from the paused agent that launched it, naming its own agent process (pid).
+// An agent this one launches in turn finds the marker through the
+// SAGEOX_AGENT_ID it inherits, and is paused too while pid still runs
+// (InheritedPauseHolder): a pause reaches every agent down the launch chain.
+func MarkInheritedPause(projectRoot, agentID string, pid int) error {
+	start, _ := proc.StartTime(pid)
+	return writePauseMarker(projectRoot, agentID, pauseMarkerPayload{At: time.Now().UTC(), PID: pid, PIDStart: start})
+}
+
+// InheritedPauseHolder returns the agent process holding agentID's inherited
+// pause, when that process still runs. A pause a person asked for names no
+// process, and a marker whose process has exited or whose PID now names
+// another process holds nothing: both return found=false.
+func InheritedPauseHolder(projectRoot, agentID string) (pid int, found bool) {
+	p, ok := readPauseMarker(projectRoot, agentID)
+	if !ok || p.PID <= 0 || !proc.IsAlive(p.PID) || proc.IsReused(p.PID, p.PIDStart) {
+		return 0, false
+	}
+	return p.PID, true
+}
+
+// readPauseMarker reads agentID's pause marker; an unparsable one reads as found
+// with a zero payload, as PeekExplicitPause treats a legacy marker.
+func readPauseMarker(projectRoot, agentID string) (pauseMarkerPayload, bool) {
+	if projectRoot == "" || agentID == "" {
+		return pauseMarkerPayload{}, false
+	}
+	name := explicitPauseMarker + "." + agentID
+	for _, dir := range sessionsSearchPaths(projectRoot) {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		var p pauseMarkerPayload
+		if err := json.Unmarshal(data, &p); err != nil {
+			return pauseMarkerPayload{}, true
+		}
+		return p, true
+	}
+	return pauseMarkerPayload{}, false
+}
+
+func writePauseMarker(projectRoot, agentID string, payload pauseMarkerPayload) error {
 	if projectRoot == "" {
 		return fmt.Errorf("%w: project root", ErrEmptyPath)
 	}
@@ -48,7 +102,6 @@ func MarkExplicitPause(projectRoot, agentID string, seq int) error {
 		return fmt.Errorf("create sessions dir for pause marker: %w", err)
 	}
 
-	payload := pauseMarkerPayload{Seq: seq, At: time.Now().UTC()}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal pause marker payload: %w", err)
@@ -69,24 +122,9 @@ func MarkExplicitPause(projectRoot, agentID string, seq int) error {
 // detection. Use ConsumeExplicitPause when transitioning out of suspended
 // state.
 func PeekExplicitPause(projectRoot, agentID string) (seq int, at time.Time, found bool) {
-	if projectRoot == "" || agentID == "" {
-		return 0, time.Time{}, false
-	}
-	name := explicitPauseMarker + "." + agentID
-	for _, dir := range sessionsSearchPaths(projectRoot) {
-		path := filepath.Join(dir, name)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var p pauseMarkerPayload
-		if err := json.Unmarshal(data, &p); err != nil {
-			// legacy marker (or unwritable JSON) — treat as found with seq=0
-			return 0, time.Time{}, true
-		}
-		return p.Seq, p.At, true
-	}
-	return 0, time.Time{}, false
+	// a legacy marker (or unwritable JSON) reads as found with seq=0
+	p, found := readPauseMarker(projectRoot, agentID)
+	return p.Seq, p.At, found
 }
 
 // ConsumeExplicitPause removes the pause marker and returns whether it

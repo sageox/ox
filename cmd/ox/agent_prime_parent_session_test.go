@@ -90,12 +90,12 @@ func TestChildOfAPausedParentStaysPausedWhenPrimedAgain(t *testing.T) {
 	createActiveRecordingWithPID(t, projectRoot, repoID, "OxParent", os.Getppid())
 	require.NoError(t, session.MarkExplicitPause(projectRoot, "OxParent", 1))
 
-	first := startSessionRecording(projectRoot, "OxChild", "claude-code", "OxParent", "", "child-session")
+	first := startSessionRecording(projectRoot, "OxChild", "claude-code", inheritedParent{AgentID: "OxParent"}, "", "child-session")
 	require.NotNil(t, first)
 	require.False(t, first.Recording, "harness: a paused parent's child skips recording")
 
 	// the re-prime: the child's own id is in the environment now, so no parent
-	again := startSessionRecording(projectRoot, "OxChild", "claude-code", "", "", "child-session")
+	again := startSessionRecording(projectRoot, "OxChild", "claude-code", inheritedParent{}, "", "child-session")
 	require.NotNil(t, again)
 	require.True(t, again.Recording, "harness: the re-prime starts the child's recording")
 	child, err := session.LoadRecordingStateForAgent(projectRoot, "OxChild")
@@ -134,4 +134,81 @@ func TestLiveSessionLinks(t *testing.T) {
 		assert.Empty(t, parent, "a recording is never its own parent")
 		assert.Empty(t, continued)
 	})
+}
+
+// Failure prevented: recording startup read the parent's recording again
+// after the parent was chosen, so a parent that /clear replaced in between gave
+// the child the replacement's session id.
+func TestChildKeepsTheParentSessionChosenWhenTheParentIsReplaced(t *testing.T) {
+	projectRoot, repoID := setupTestProject(t)
+	enableRecordingWithoutLedgerClone(t)
+	createActiveRecordingWithPID(t, projectRoot, repoID, "OxParent", os.Getppid())
+	chosenID, replacementID := sessionid.GenerateSessionID(), sessionid.GenerateSessionID()
+	require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, "OxParent", func(s *session.RecordingState) { s.SessionID = chosenID }))
+	t.Setenv("SAGEOX_AGENT_ID", "OxParent")
+	t.Setenv("OX_PARENT_PID", strconv.Itoa(os.Getpid()))
+
+	parent := inheritedParentOf(projectRoot, "OxChild")
+	require.Equal(t, chosenID, parent.SessionID, "harness: the parent is chosen with its session id")
+	// /clear replaces the parent's recording before the child's recording starts
+	require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, "OxParent", func(s *session.RecordingState) { s.SessionID = replacementID }))
+	status := startSessionRecording(projectRoot, "OxChild", "claude-code", parent, "", "child-session")
+
+	require.NotNil(t, status)
+	require.True(t, status.Recording, "harness: the child records")
+	child, err := session.LoadRecordingStateForAgent(projectRoot, "OxChild")
+	require.NoError(t, err)
+	require.NotNil(t, child)
+	assert.Equal(t, chosenID, child.ParentSessionID, "the child named the parent's replacement recording")
+}
+
+// Failure prevented: a paused parent's skipped child kept its pause in a
+// marker but had no recording, so an agent that child launched in turn found
+// no parent, got a fresh id and recorded unsuspended, eligible for sharing.
+func TestAPauseReachesEveryAgentDownTheLaunchChain(t *testing.T) {
+	projectRoot, repoID := setupTestProject(t)
+	enableRecordingWithoutLedgerClone(t)
+	createActiveRecordingWithPID(t, projectRoot, repoID, "OxParent", os.Getppid())
+	require.NoError(t, session.MarkExplicitPause(projectRoot, "OxParent", 1))
+
+	// the child, launched from the paused parent, runs as this process
+	t.Setenv("SAGEOX_AGENT_ID", "OxParent")
+	t.Setenv("OX_PARENT_PID", strconv.Itoa(os.Getpid()))
+	child := startSessionRecording(projectRoot, "OxChild", "claude-code", inheritedParentOf(projectRoot, "OxChild"), "", "child-session")
+	require.NotNil(t, child)
+	require.False(t, child.Recording, "harness: a paused parent's child skips recording")
+
+	// the grandchild, launched from the child's shell, is another agent process
+	t.Setenv("SAGEOX_AGENT_ID", "OxChild")
+	t.Setenv("OX_PARENT_PID", strconv.Itoa(os.Getppid()))
+	grandchild := startSessionRecording(projectRoot, "OxGrandchild", "claude-code", inheritedParentOf(projectRoot, "OxGrandchild"), "", "grandchild-session")
+
+	require.NotNil(t, grandchild)
+	assert.False(t, grandchild.Recording, "the grandchild of a paused parent recorded")
+	state, err := session.LoadRecordingStateForAgent(projectRoot, "OxGrandchild")
+	require.NoError(t, err)
+	assert.Nil(t, state)
+	pid, held := session.InheritedPauseHolder(projectRoot, "OxGrandchild")
+	assert.True(t, held, "the grandchild must hold the pause for agents it launches")
+	assert.Equal(t, os.Getppid(), pid)
+}
+
+// Failure prevented: the over-correction. A pause left by a skipped child
+// whose agent process has exited must not pause an unrelated later agent that
+// inherited the same stale SAGEOX_AGENT_ID.
+func TestAnEndedLaunchersPauseReachesNobody(t *testing.T) {
+	projectRoot, _ := setupTestProject(t)
+	enableRecordingWithoutLedgerClone(t)
+	require.NoError(t, session.MarkInheritedPause(projectRoot, "OxEnded", 999999999))
+	t.Setenv("SAGEOX_AGENT_ID", "OxEnded")
+	t.Setenv("OX_PARENT_PID", strconv.Itoa(os.Getpid()))
+
+	status := startSessionRecording(projectRoot, "OxLater", "claude-code", inheritedParentOf(projectRoot, "OxLater"), "", "later-session")
+
+	require.NotNil(t, status)
+	require.True(t, status.Recording, "a dead launcher's pause stopped an unrelated agent from recording")
+	later, err := session.LoadRecordingStateForAgent(projectRoot, "OxLater")
+	require.NoError(t, err)
+	require.NotNil(t, later)
+	assert.False(t, later.IsSuspended())
 }
