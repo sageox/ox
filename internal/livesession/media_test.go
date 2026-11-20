@@ -6,10 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/mediapool"
 	oxsession "github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/sessionstream"
@@ -216,5 +219,69 @@ func TestPersistentStorage4xxEndsInGapAndTextKeepsFlowing(t *testing.T) {
 	e.mustDrain()
 	if got := strings.Join(lineTypes(t, e.stored(e.state())), ","); got != "user,gap:media_upload_failed,user,user" {
 		t.Fatalf("stream = %s", got)
+	}
+}
+
+// A replayed layer restates images the server already holds, long after the
+// local pool swept their bytes: they are completed, not turned into gaps.
+func TestReplayedMediaNeedsNoLocalBytesWhenServerHasThem(t *testing.T) {
+	e := newEnv(t)
+	img := pngBytes("g")
+	line := e.stage(img, "image/png", 0)
+	e.spool(withPrompt(line))
+	e.mustDrain()
+	if err := os.RemoveAll(filepath.Join(e.cfg.DataDir, "live-media")); err != nil {
+		t.Fatal(err)
+	}
+	e.spool(append(textLine("again"), line...))
+	e.mustDrain()
+	if got := strings.Join(lineTypes(t, e.stored(e.state())), ","); got != "user,media,user,media" {
+		t.Fatalf("stream = %s", got)
+	}
+}
+
+// Retry history is machine-local state like the rest of the stream's files:
+// Ledger staging skips it and cache pruning keeps it with the stream.
+func TestMediaRetryHistoryIsLocalFile(t *testing.T) {
+	e := newEnv(t)
+	e.spool(withPrompt(e.stage(pngBytes("h"), "image/png", 0)))
+	e.srv.FailMediaUploadsWith(http.StatusForbidden)
+	if _, err := e.drain(); err == nil {
+		t.Fatalf("drain succeeded")
+	}
+	entries, err := os.ReadDir(e.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range entries {
+		if f.Name() == "media-attempts.json" {
+			found = true
+		}
+		if strings.HasPrefix(f.Name(), "media-") && !livesession.IsLocalFile(f.Name()) {
+			t.Fatalf("%s is written by the stream but not a local file", f.Name())
+		}
+	}
+	if !found {
+		t.Fatalf("failed upload left no retry history to classify")
+	}
+}
+
+// Images upload unscanned (ADR-247, v2), so the person is told once per
+// machine, after the first screenshot streamed.
+func TestMediaNoticeIsOwedOnceAfterFirstScreenshotStreams(t *testing.T) {
+	e := newEnv(t)
+	if livesession.TakeMediaNotice(e.cfg.DataDir) {
+		t.Fatalf("notice owed before any screenshot streamed")
+	}
+	e.spool(withPrompt(e.stage(pngBytes("i"), "image/png", 0)))
+	e.mustDrain()
+	if !livesession.TakeMediaNotice(e.cfg.DataDir) {
+		t.Fatalf("notice not owed after the first screenshot streamed")
+	}
+	e.spool(e.stage(pngBytes("j"), "image/png", 0))
+	e.mustDrain()
+	if livesession.TakeMediaNotice(e.cfg.DataDir) {
+		t.Fatalf("notice owed a second time")
 	}
 }

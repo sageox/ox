@@ -314,3 +314,53 @@ func TestReopenTransportFailureStillRetries(t *testing.T) {
 		t.Fatalf("retry lost reopen: %+v", opened)
 	}
 }
+
+func TestReopenSurvivesCachePruning(t *testing.T) {
+	s := newStopped(t)
+	s.stop(t)
+	if err := livesession.StashReopen(t.Context(), s.cfg, s.dir); err != nil {
+		t.Fatalf("stash: %v", err)
+	}
+	// what PruneSessionCache does to a closed stream after push-summary
+	if err := os.RemoveAll(s.dir); err != nil {
+		t.Fatal(err)
+	}
+	src := s.source(t, s.st.SessionID)
+	if src == nil || src.State.ConversationID != s.st.ConversationID || !bytes.Equal(src.Spool, s.content) {
+		t.Fatalf("pruned stream not offered for reopen from the stash: %+v", src)
+	}
+
+	// the resumed recording ends before any prompt and its folder is pruned too:
+	// the next prompt still resumes the original conversation
+	dir2 := filepath.Join(s.sessions, "second")
+	if err := os.Mkdir(dir2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	second := sessionid.GenerateSessionID()
+	if _, err := livesession.PrepareReopen(t.Context(), s.cfg, dir2, livesession.OpenParams{SessionID: second}, src); err != nil {
+		t.Fatalf("prepare reopen from the stash: %v", err)
+	}
+	if res, err := livesession.Close(t.Context(), s.cfg, dir2, "", testBudget); err != nil || res.Status != livesession.StatusEmpty {
+		t.Fatalf("close: %+v %v", res, err)
+	}
+	if err := os.RemoveAll(dir2); err != nil {
+		t.Fatal(err)
+	}
+	if again := s.source(t, second); again == nil || again.State.ConversationID != s.st.ConversationID {
+		t.Fatalf("second resume lost the conversation: %+v", again)
+	}
+}
+
+func TestReopenStashIsNotOfferedForADeletedOrUnknownRecording(t *testing.T) {
+	s := newStopped(t)
+	s.stop(t)
+	if err := livesession.StashReopen(t.Context(), s.cfg, s.dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(s.dir); err != nil {
+		t.Fatal(err)
+	}
+	if src := s.source(t, sessionid.GenerateSessionID()); src != nil {
+		t.Fatalf("stash offered to another recording: %+v", src)
+	}
+}

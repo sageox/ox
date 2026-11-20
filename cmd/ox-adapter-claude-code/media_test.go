@@ -5,9 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
@@ -66,13 +70,85 @@ func TestParseLineKeepsPastedImageAfterItsTurnText(t *testing.T) {
 	}
 }
 
-func TestParseLineImageOnlyTurnStillYieldsMedia(t *testing.T) {
+// An image-only turn is still the person's prompt: the live stream opens on a
+// user line, and a media line alone does not count as one.
+func TestParseLineImageOnlyTurnIsAUserPromptThenMedia(t *testing.T) {
 	entries, err := parseLine(userLine(t, imageBlock("image/jpeg", []byte("jpeg-bytes"))))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Role != adapterprotocol.RoleMedia {
+	if len(entries) != 2 || entries[0].Role != adapterprotocol.RoleUser || entries[0].Content != imageOnlyPrompt || entries[1].Role != adapterprotocol.RoleMedia {
 		t.Fatalf("entries = %+v", entries)
+	}
+	var raws []adapters.RawEntry
+	for _, e := range entries {
+		raws = append(raws, adapters.RawEntry{Role: e.Role, Content: e.Content, Media: e.Media})
+	}
+	line, err := json.Marshal(session.ConvertRawEntries(raws)[0])
+	if err != nil || !session.IsUserTurnLine(line) {
+		t.Fatalf("image-only prompt is not a user turn line: %s %v", line, err)
+	}
+}
+
+// A user message that carries a tool result plus an image is not a prompt.
+func TestParseLineToolResultWithImageIsNotAPrompt(t *testing.T) {
+	entries, err := parseLine(userLine(t, map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}, imageBlock("image/png", []byte("x"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Role == adapterprotocol.RoleUser {
+			t.Fatalf("synthesized a prompt for a tool result: %+v", entries)
+		}
+	}
+}
+
+// Nine 6 MiB screenshots (each line under the per-line cap) would make one read
+// exceed the 64 MiB output limit; reads are chunked and the cursor walks on.
+func TestReadFromOffsetChunksImageHeavyTranscripts(t *testing.T) {
+	img := make([]byte, 4<<20)
+	var file []byte
+	for i := 0; i < 9; i++ {
+		img[0] = byte(i) // distinct digests
+		file = append(file, userLine(t, textBlock("shot"), imageBlock("image/png", img))...)
+		file = append(file, '\n')
+	}
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	if err := os.WriteFile(path, file, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var offset int64
+	reads, media := 0, 0
+	for offset < int64(len(file)) {
+		entries, next, err := readFromOffset(path, offset)
+		if err != nil || next <= offset {
+			t.Fatalf("read at %d: next=%d err=%v", offset, next, err)
+		}
+		if next-offset > maxReadBytes+8<<20 {
+			t.Fatalf("one read consumed %d bytes", next-offset)
+		}
+		for _, e := range entries {
+			if e.Role == adapterprotocol.RoleMedia {
+				media++
+			}
+		}
+		offset = next
+		reads++
+	}
+	if reads < 2 || media != 9 {
+		t.Fatalf("reads=%d media=%d, want chunked reads and every image", reads, media)
+	}
+}
+
+func TestReadSessionFileKeepsImagesOutOfWholeFileReads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	line := append(userLine(t, textBlock("hi"), imageBlock("image/png", []byte("x"))), '\n')
+	if err := os.WriteFile(path, line, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, _, err := readSessionFile(path)
+	if err != nil || len(entries) != 1 || entries[0].Role != adapterprotocol.RoleUser {
+		t.Fatalf("entries = %+v, %v", entries, err)
 	}
 }
 

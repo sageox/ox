@@ -1062,6 +1062,7 @@ func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, sta
 			output.Guidance = deletedOnServerGuidance
 		}
 		addLiveSecretWithheldNotice(&output, processResult)
+		addLiveMediaNotice(&output)
 	} else {
 		// nothing was saved or uploaded, and the recording is kept for a retry:
 		// report failure so no caller reads this as a saved session

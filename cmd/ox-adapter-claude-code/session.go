@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -119,6 +120,9 @@ func readSessionFile(path string) ([]adapterprotocol.RawEntry, *adapterprotocol.
 		if err != nil {
 			return nil, err
 		}
+		// a whole-file read cannot be chunked, and its consumers (import,
+		// finalize) do not stream, so images stay out of it
+		parsed = slices.DeleteFunc(parsed, func(e adapterprotocol.RawEntry) bool { return e.Role == adapterprotocol.RoleMedia })
 		var raw claudeCodeEntry
 		if json.Unmarshal(line, &raw) == nil {
 			if raw.Version != "" && meta.AgentVersion == "" {
@@ -136,8 +140,16 @@ func readSessionFile(path string) ([]adapterprotocol.RawEntry, *adapterprotocol.
 func readFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
 	// Keep a trailing partial record unconsumed; otherwise a concurrent Claude
 	// write can make validation pass while this reader silently drops the turn.
-	return adapterruntime.TailJSONL(path, offset, parseLine)
+	return adapterruntime.TailJSONLBudget(path, offset, maxReadBytes, parseLine)
 }
+
+// maxReadBytes bounds the transcript one read consumes. Pasted images ride the
+// response as bytes, about the size of their base64 in the transcript, and the
+// daemon cancels an adapter whose one-shot output passes 64 MiB: nine 6 MiB
+// screenshots, each under the per-line cap, would fail every read and block
+// text capture behind them. 24 MiB leaves room for the JSON framing and the
+// text entries; the cursor moves on by what was read.
+const maxReadBytes = 24 << 20
 
 func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, int64, error) {
 	if resolved, err := filepath.EvalSymlinks(repoRoot); err == nil {
@@ -393,6 +405,12 @@ func parseUserEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, error) {
 	var entries []adapterprotocol.RawEntry
 
 	content, class := classifyUserContent(raw)
+	images := extractImages(raw, ts)
+	if class == userContentSkip && len(images) > 0 && !hasToolResultBlock(raw) {
+		// a screenshot with no words is still the person speaking: the live
+		// stream opens on a user turn, and a media line alone is not one
+		class, content = userContentUser, imageOnlyPrompt
+	}
 	switch class {
 	case userContentSkip:
 		// still extract tool_result blocks below
@@ -403,7 +421,7 @@ func parseUserEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, error) {
 	}
 
 	// pasted screenshots follow the turn's text, so a viewer places them at it
-	entries = append(entries, extractImages(raw, ts)...)
+	entries = append(entries, images...)
 
 	// extract tool_result blocks from user content arrays
 	entries = append(entries, extractToolResults(raw, ts)...)
@@ -413,6 +431,19 @@ func parseUserEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, error) {
 	}
 	return entries, nil
 }
+
+func hasToolResultBlock(raw *claudeCodeEntry) bool {
+	content, _ := raw.Message.Content.([]interface{})
+	for _, item := range content {
+		if block, ok := item.(map[string]interface{}); ok && block["type"] == "tool_result" {
+			return true
+		}
+	}
+	return false
+}
+
+// imageOnlyPrompt stands in for the text of a turn that is only a pasted image.
+const imageOnlyPrompt = "[pasted image]"
 
 // extractImages returns one media entry per base64 image block in a user
 // message: a screenshot pasted into the prompt. Bytes are carried once, to the

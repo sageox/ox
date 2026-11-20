@@ -50,7 +50,7 @@ const (
 func IsLocalFile(name string) bool {
 	switch name {
 	case spoolFileName, stateFileName, lockFileName, closeRequestFileName, deleteRequestFileName,
-		spoolLostFileName, spoolLostDeclaredFileName, noticeOwedFileName:
+		spoolLostFileName, spoolLostDeclaredFileName, noticeOwedFileName, mediaAttemptsFile:
 		return true
 	}
 	return false

@@ -73,35 +73,45 @@ func FindReopenSource(ctx context.Context, cfg Config, sessionsDir, continuedFro
 		}
 		return reopenSourceIn(ctx, cfg, dir, st)
 	}
-	return nil, nil
+	return stashedReopenSource(ctx, cfg, continuedFrom)
 }
 
 func reopenSourceIn(ctx context.Context, cfg Config, dir string, st State) (*ReopenSource, error) {
+	ok, err := reopenable(ctx, cfg, dir, st)
+	if !ok || err != nil {
+		return nil, err
+	}
+	spool, err := readWholeSpool(dir)
+	if err != nil {
+		cfg.Logger.WarnContext(ctx, "live_session_reopen_skipped", "session_id", st.SessionID, "reason", "spool_unreadable", "error", err)
+		return nil, nil
+	}
+	return &ReopenSource{Dir: dir, State: st, Spool: spool}, nil
+}
+
+// reopenable applies the reopen conditions to a stopped stream's state; dir is
+// the folder its conversation is bound to.
+func reopenable(ctx context.Context, cfg Config, dir string, st State) (bool, error) {
 	log := cfg.Logger.With("session_id", st.SessionID, "conversation_id", st.ConversationID, "status", string(st.Status))
 	stopped := st.Status == StatusClosed || (st.Status == StatusEmpty && st.Reopen)
 	switch {
 	case !stopped:
 		log.DebugContext(ctx, "live_session_reopen_skipped", "reason", "not_stopped")
-		return nil, nil
+		return false, nil
 	case st.DeletedOnServer || st.ConversationID == "":
 		log.InfoContext(ctx, "live_session_reopen_skipped", "reason", "deleted")
-		return nil, nil
+		return false, nil
 	case oxsession.IsHeld(dir):
 		log.InfoContext(ctx, "live_session_reopen_skipped", "reason", "held")
-		return nil, nil
+		return false, nil
 	}
 	if err := authorize(ctx, cfg, dir, st); err != nil {
 		if errors.Is(err, ErrUntrustedState) {
-			return nil, nil // authorize logged it
+			return false, nil // authorize logged it
 		}
-		return nil, err
+		return false, err
 	}
-	spool, err := readWholeSpool(dir)
-	if err != nil {
-		log.WarnContext(ctx, "live_session_reopen_skipped", "reason", "spool_unreadable", "error", err)
-		return nil, nil
-	}
-	return &ReopenSource{Dir: dir, State: st, Spool: spool}, nil
+	return true, nil
 }
 
 // readWholeSpool reads dir's spool up to its last whole line. A spool past the
@@ -176,6 +186,9 @@ func PrepareReopen(ctx context.Context, cfg Config, dir string, p OpenParams, sr
 		return writeState(dir, st)
 	}
 	err = withLock(ctx, dir, spoolLockWait, run)
+	if err == nil {
+		retargetStash(ctx, cfg, st.ConversationID, st.SessionID, dir)
+	}
 	return st, err
 }
 
@@ -275,10 +288,22 @@ func dropSeed(ctx context.Context, dir string, seed int64) error {
 		if err != nil {
 			return fmt.Errorf("read spool: %w", err)
 		}
+		header := ownHeaderLine(dir)
+		if len(header) == 0 {
+			return errors.New("drop seeded spool: raw.jsonl has no readable header line")
+		}
+		// A fallback interrupted after this write but before its state was
+		// saved comes back here with the old seed length. The spool then
+		// already starts with this recording's own header, which the seed's
+		// first line (another recording's header) never equals: cutting again
+		// would remove this recording's own lines.
+		if bytes.HasPrefix(spool, header) {
+			return nil
+		}
 		if seed < 0 || seed > int64(len(spool)) {
 			return fmt.Errorf("seed of %d bytes is past the %d-byte spool", seed, len(spool))
 		}
-		out := append(ownHeaderLine(dir), spool[seed:]...)
+		out := append(append([]byte(nil), header...), spool[seed:]...)
 		if err := fileutil.AtomicWriteBytes(filepath.Join(dir, spoolFileName), out, 0o600); err != nil {
 			return fmt.Errorf("drop seeded spool: %w", err)
 		}

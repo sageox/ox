@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/mediapool"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/sessionstream"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
@@ -73,6 +74,45 @@ func (s *session) saveAttempts(a map[string]mediaAttempt) {
 type putStatusError struct{ status int }
 
 func (e *putStatusError) Error() string { return fmt.Sprintf("upload status %d", e.status) }
+
+// MediaNotice is the one-time warning a person gets the first time a pasted
+// screenshot streams from this machine. The text stream is secret-scanned
+// before it leaves; image bytes cannot be, so they upload as pasted (ADR-247,
+// v2), and the person is told once so they can keep a credential out of frame.
+const MediaNotice = "Screenshots pasted into this session are shared to its live view on SageOx as they are. Unlike text, images are not scanned for credentials, so keep secrets out of what you paste."
+
+const mediaNoticeFile = "live-media-notice"
+
+// oweMediaNotice records, once per machine, that the notice is owed. It never
+// overwrites: a notice already given stays given.
+func oweMediaNotice(dataDir string) {
+	if dataDir == "" {
+		dataDir = paths.DataDir()
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(dataDir, mediaNoticeFile), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return // exists (owed or given), or unwritable: the next image tries again
+	}
+	_, _ = f.WriteString("owed\n")
+	_ = f.Close()
+}
+
+// TakeMediaNotice reports whether the screenshot notice is owed, and marks it
+// given so no later call returns true. dataDir empty means the ox data dir.
+func TakeMediaNotice(dataDir string) bool {
+	if dataDir == "" {
+		dataDir = paths.DataDir()
+	}
+	path := filepath.Join(dataDir, mediaNoticeFile)
+	b, err := os.ReadFile(path)
+	if err != nil || string(b) != "owed\n" {
+		return false
+	}
+	return os.WriteFile(path, []byte("given\n"), 0o600) == nil
+}
 
 // mediaLine is the part of a spooled media line the uploader reads.
 type mediaLine struct {
@@ -143,17 +183,6 @@ func (s *session) uploadMedia(ctx context.Context, m mediaLine) (string, error) 
 	if a := attempts[m.SHA256]; a.Failures >= maxMediaPutFailures || (a.Failures > 0 && time.Since(a.First) >= maxMediaPutWindow) {
 		return "media_upload_failed", nil
 	}
-	data, err := mediapool.Read(s.cfg.DataDir, m.SHA256)
-	switch {
-	case errors.Is(err, mediapool.ErrMissing), errors.Is(err, mediapool.ErrCorrupt):
-		return "media_unavailable", nil
-	case err != nil:
-		return "", err
-	}
-	if int64(len(data)) != m.Size {
-		return "media_invalid", nil
-	}
-
 	cnv := s.st.ConversationID
 	var decl sessionstream.MediaResponse
 	req := sessionstream.MediaRequest{SHA256: m.SHA256, Size: m.Size, MIME: m.MIME}
@@ -161,6 +190,18 @@ func (s *session) uploadMedia(ctx context.Context, m mediaLine) (string, error) 
 		return s.mediaRefused(ctx, "declare", err)
 	}
 	if !decl.AlreadyStored {
+		// local bytes are needed only to upload: a replayed layer restates
+		// images the server already holds long after the pool swept them
+		data, err := mediapool.Read(s.cfg.DataDir, m.SHA256)
+		switch {
+		case errors.Is(err, mediapool.ErrMissing), errors.Is(err, mediapool.ErrCorrupt):
+			return "media_unavailable", nil
+		case err != nil:
+			return "", err
+		}
+		if int64(len(data)) != m.Size {
+			return "media_invalid", nil
+		}
 		if err := s.putMedia(ctx, decl, m.MIME, data); err != nil {
 			var status *putStatusError
 			if errors.As(err, &status) {
@@ -188,6 +229,7 @@ func (s *session) uploadMedia(ctx context.Context, m mediaLine) (string, error) 
 		s.mediaStored = map[string]bool{}
 	}
 	s.mediaStored[m.SHA256] = true
+	oweMediaNotice(s.cfg.DataDir)
 	s.log().InfoContext(ctx, "live_session_media_stored", "sha256", m.SHA256, "size", m.Size, "already_stored", decl.AlreadyStored)
 	return "", nil
 }

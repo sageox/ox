@@ -141,6 +141,7 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 			return
 		}
 		slog.Info("live_session_previous_stream_retired", "session_id", state.SessionID, "previous_session_id", prev.SessionID)
+		reopenSrc = reopenSourceAfterRetire(projectRoot, state, reopenSrc)
 	}
 	repoID := config.GetRepoID(projectRoot)
 	if repoID == "" || !liveStreamingEnabled(projectRoot) {
@@ -197,6 +198,23 @@ func liveReopenSource(projectRoot string, state *session.RecordingState) *livese
 	if err != nil {
 		slog.Warn("live_session_reopen_lookup_failed", "session_id", state.SessionID, "continued_from", state.ContinuedFromSessionID, "error", err)
 		return nil
+	}
+	return src
+}
+
+// reopenSourceAfterRetire follows a reopen source through the retirement of a
+// stream in the recording's own folder. Retiring moves a stream that still owes
+// its person the withheld-secret notice to a folder of its own, taking the
+// conversation's registry binding with it, so the source captured before the
+// move names a folder the binding has left. The moved stream is found again
+// and used instead. A stream retiring removed outright leaves the binding where
+// it was, and the source captured earlier still stands.
+func reopenSourceAfterRetire(projectRoot string, state *session.RecordingState, src *livesession.ReopenSource) *livesession.ReopenSource {
+	if src == nil || src.Dir != state.SessionPath {
+		return src
+	}
+	if moved := liveReopenSource(projectRoot, state); moved != nil && moved.Dir != state.SessionPath {
+		return moved
 	}
 	return src
 }
@@ -310,6 +328,15 @@ func liveSessionClose(projectRoot, sessionDir, summary string, budget time.Durat
 		log.Warn("live_session_close_deferred", "status", string(res.Status))
 	default:
 		log.Info("live_session_close_done", "status", string(res.Status), "acked", res.Acked)
+		// the push-summary that follows prunes this folder, state and spool
+		// included; the next prompt in this session resumes from the stash
+		if res.Status == livesession.StatusClosed {
+			ctx, cancel := context.WithTimeout(context.Background(), liveLocalBound)
+			defer cancel()
+			if err := livesession.StashReopen(ctx, liveConfig(projectRoot), sessionDir); err != nil {
+				log.Warn("live_session_reopen_stash_failed", "error", err)
+			}
+		}
 	}
 }
 

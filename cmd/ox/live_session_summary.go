@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/daemon/agentwork"
@@ -22,6 +23,7 @@ import (
 // session, a failure or a timeout, so the close never waits on it for long and
 // never fails because of it.
 func liveCloseSummary(state *session.RecordingState, raw []map[string]any) string {
+	raw = liveConversationEntries(state.SessionPath, raw)
 	agent := adapters.CanonicalAdapterName(state.AdapterName)
 	runner := liveSummaryRunner(agent)
 	log := slog.With("session_id", state.SessionID, "agent", agent)
@@ -79,7 +81,9 @@ func summarizeForLive(ctx context.Context, runner agentwork.Runner, agent string
 	}
 	resp, err := sessionsummary.ParseAndValidate(res.Output, len(entries))
 	if err != nil {
-		return "", fmt.Errorf("validate summary: %w", err)
+		// the validator's error quotes the rejected title, summary or outcome,
+		// which are transcript content and must not reach any log
+		return "", errors.New("summary validation failed")
 	}
 	if sessionsummary.IsSkipCategory(resp) {
 		return "", livesession.ErrSummarySkipped // the model judged it not worth sharing
@@ -111,4 +115,22 @@ func liveSummaryMarkdown(resp *sessionsummary.SummarizeResponse) string {
 		b.WriteString("## Key actions\n\n" + strings.Join(actions, "\n") + "\n")
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// liveConversationEntries is what the live close summarizes. A stream resumed
+// after a stop restates the whole conversation (earlier recordings first), so
+// its summary must cover all of it, while raw holds only this recording's
+// lines. The spool carries exactly what the stream carries: redacted, with
+// paused content already left out. Any other stream, or a spool that cannot be
+// read, summarizes raw as before.
+func liveConversationEntries(dir string, raw []map[string]any) []map[string]any {
+	st, err := livesession.ReadState(dir)
+	if err != nil || st.SeedBytes == 0 {
+		return raw
+	}
+	stored, err := session.ReadSessionFromPath(filepath.Join(dir, "spool.jsonl"))
+	if err != nil || len(stored.Entries) < len(raw) {
+		return raw
+	}
+	return stored.Entries
 }
