@@ -160,6 +160,10 @@ func TestClassify_Ref(t *testing.T) {
 		{"ox agent OxA1b2 plan view my-plan", "my-plan"},
 		{"ox plan show 2026-10-01-auth.v2", "2026-10-01-auth.v2"},
 		{"ox plan view", ""},
+		// a plan keeps its own name even when that name holds a conversation id
+		{"ox plan view alpha." + cnv, "alpha." + cnv},
+		{"ox plan show beta." + cnv, "beta." + cnv},
+		{`ox plan view "not a slug"`, ""},
 		{"ox conversation show " + cnv, cnv},
 		{"ox conversation topics " + cnv, cnv},
 		{"ox conversation topic " + cnv + " tp_1", cnv},
