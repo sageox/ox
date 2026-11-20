@@ -32,6 +32,7 @@ const (
 	tcMetaAnchorSeq      = "anchor_seq"
 	tcMetaSessionDir     = "session_dir"
 	tcMetaConversationID = "conversation_id"
+	tcMetaFromOwner      = "from_owner"
 )
 
 // TeammateCommentsTakePayload asks for the notes waiting for one agent.
@@ -88,7 +89,8 @@ type teammateCommentInbox struct {
 	// recipientFor names the agent recording the session in dir; "" when none.
 	recipientFor func(dir string) string
 	now          func() time.Time
-	// enabled is the machine-local switch (session.teammate_notes); nil means on.
+	// enabled is this repo's switch (session.teammate_notes, the same one the
+	// opens carry); nil means on.
 	enabled func() bool
 	// leases are the takes awaiting confirmation, by lease id.
 	leases map[string]*noteLease
@@ -117,9 +119,11 @@ func (b *teammateCommentInbox) receive(ctx context.Context, dir string, st lives
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.isEnabled() {
-		// this machine opted out: drop every note unshown and unacked, say so once
+		// this machine opted out: drop every note unshown and unacked, say so
+		// once. Debug, not info: the open already told the server, so a note
+		// here is one admitted before that, or an older server's.
 		if _, logged := b.offLogged.LoadOrStore(st.ConversationID, true); !logged {
-			b.logger.InfoContext(ctx, "teammate_notes_off_dropping", "conversation_id", st.ConversationID, "setting", "session.teammate_notes", "env", "OX_TEAMMATE_NOTES")
+			b.logger.DebugContext(ctx, "teammate_notes_off_dropping", "conversation_id", st.ConversationID, "count", len(comments), "setting", "session.teammate_notes", "env", "OX_TEAMMATE_NOTES")
 		}
 		if _, err := reg.RetainTeammateComments(st.ConversationID, nil); err != nil {
 			b.logger.WarnContext(ctx, "teammate_comment_replace_failed", "conversation_id", st.ConversationID, "error", err)
@@ -153,6 +157,11 @@ func (b *teammateCommentInbox) receive(ctx context.Context, dir string, st lives
 		}
 		if c.AnchorSeq != nil {
 			meta[tcMetaAnchorSeq] = strconv.FormatInt(*c.AnchorSeq, 10)
+		}
+		if c.FromOwner {
+			// exactly "true": the hook labels a note as the user's own only on
+			// this value, and absent means a teammate's
+			meta[tcMetaFromOwner] = "true"
 		}
 		stored, err := reg.AddTeammateComment(whisperstore.WhisperEntry{
 			ID: c.ID, Scope: "ledger", Type: whisperstore.WhisperTrigger,

@@ -65,7 +65,11 @@ type LiveSessions struct {
 	endpoint string
 	// config builds the livesession config for an endpoint; tests point it at a fake server.
 	config func(endpoint string) livesession.Config
-	now    func() time.Time
+	// acceptsNotes is this repo's session.teammate_notes switch, carried by
+	// every open this daemon sends; nil means notes are accepted. Set by the
+	// daemon, which also hands it to the teammate-note inbox.
+	acceptsNotes func() bool
+	now          func() time.Time
 	// refreshRules fetches the current secret rules and persists them for every
 	// publishing process; tests replace it.
 	refreshRules func(context.Context) error
@@ -121,10 +125,13 @@ type liveBackoff struct {
 func NewLiveSessions(logger *slog.Logger, sessionsDir, endpoint string) *LiveSessions {
 	l := &LiveSessions{
 		logger: logger, sessionsDir: sessionsDir, endpoint: endpoint,
-		config:  func(ep string) livesession.Config { return livesession.Config{Endpoint: ep, Logger: logger} },
 		now:     time.Now,
 		running: map[string]*liveAttempt{}, rerun: map[string]bool{}, backoff: map[string]liveBackoff{},
 		known: map[string]liveKnown{},
+	}
+	// reads l.acceptsNotes per call: the daemon sets it after construction
+	l.config = func(ep string) livesession.Config {
+		return livesession.Config{Endpoint: ep, Logger: logger, AcceptsNotes: l.acceptsNotes}
 	}
 	// persisted in the data dir the drains read, so the CLI's stop-time close
 	// scans with the same rules as this daemon

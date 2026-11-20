@@ -165,7 +165,8 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 	}
 	// st's id, the one authorize checked; cnv (from the caller's ses_ id) is the
 	// same for every stream ox prepared
-	_, err = c.Open(ctx, st.ConversationID, openRequest(st))
+	req := openRequest(cfg, st)
+	_, err = c.Open(ctx, st.ConversationID, req)
 	if deleteRequested(dir) {
 		return abortedWhileOpening(ctx, cfg, st)
 	}
@@ -185,7 +186,7 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 	if err := writeState(dir, st); err != nil {
 		return State{}, err
 	}
-	cfg.Logger.InfoContext(ctx, "live_session_open", "session_id", st.SessionID, "conversation_id", st.ConversationID, "layer_id", st.LayerID, "acked", st.Acked)
+	cfg.Logger.InfoContext(ctx, "live_session_open", "session_id", st.SessionID, "conversation_id", st.ConversationID, "layer_id", st.LayerID, "acked", st.Acked, "accepts_notes", req.AcceptsNotes == nil)
 	return st, nil
 }
 
@@ -305,11 +306,19 @@ func disableOnKeyConflict(dir, ep string, st State, err error) (State, error) {
 	return st, ErrKeyConflict
 }
 
-func openRequest(st State) sessionstream.OpenSessionRequest {
-	return sessionstream.OpenSessionRequest{
+// openRequest is the open body for st. accepts_notes is sent only to say no:
+// absent means yes, so a machine that takes notes sends what every older
+// client sent.
+func openRequest(cfg Config, st State) sessionstream.OpenSessionRequest {
+	req := sessionstream.OpenSessionRequest{
 		LayerID: st.LayerID, RepoID: st.RepoID, SessionID: st.SessionID,
 		SessionName: st.SessionName, Agent: st.Agent, StartedAt: st.StartedAt,
 	}
+	if !cfg.acceptsNotes() {
+		refused := false
+		req.AcceptsNotes = &refused
+	}
+	return req
 }
 
 func keyLabel() string {

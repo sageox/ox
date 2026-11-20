@@ -484,22 +484,26 @@ Rate-limited to 60 invocations/hour, 4 concurrent.`,
 	},
 	{
 		Key:         "session.teammate_notes",
-		Label:       "Teammate notes",
+		Label:       "Live session notes",
 		Category:    "Sessions",
-		Description: "Let a teammate watching your live session send your AI coworker a note.",
-		LongDescription: `Controls whether notes from a teammate watching your live session reach
-your AI coworker at its next step.
+		Description: "Let notes sent from the SageOx web app reach your AI coworker during a live session.",
+		LongDescription: `Controls whether notes sent from the SageOx web app reach your AI coworker
+at its next step while you stream a session live: your own notes, and a
+teammate's when you let teammates send them.
 
-  on  - Deliver notes the session owner enabled on SageOx (default). Each note
-        is labeled as coming from a teammate, not from you.
-  off - Drop every note on this machine, unshown and unacknowledged.
+  on  - Deliver notes (default). Yours are labeled as coming from you; a
+        teammate's are labeled as a teammate's suggestion.
+  off - SageOx is told this session takes no notes, so the web app offers
+        no way to send one, and any that still arrive are dropped unshown.
 
-The session owner's switch on SageOx is the first layer of consent; this is
-the second, on your machine. The environment variable OX_TEAMMATE_NOTES=off
-overrides this setting.`,
+Set it for every repo (user level) or for one repo with --repo. Off at any
+level wins, unlike other settings: a repo set to off stays off whatever your
+user setting says, and a repo set to on cannot undo your user-level off.
+OX_TEAMMATE_NOTES=off turns notes off too. SageOx learns of a change when
+the next session starts streaming; notes already sent are dropped at once.`,
 		ValidValues: config.ValidTeammateNotesModes,
 		Default:     config.TeammateNotesOn,
-		Levels:      []ConfigLevel{ConfigLevelUser},
+		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
 	},
 	{
 		Key:         "recording_reminder",
@@ -981,14 +985,16 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 		}
 
 	case "session.teammate_notes":
-		// OX_TEAMMATE_NOTES beats the stored setting at runtime
-		// (config.TeammateNotesEnabled): display must agree, or 'ox config get'
-		// shows "on" while notes are being dropped.
+		// every layer is shown; the effective value is set below from
+		// config.ResolveTeammateNotes, where off at any layer wins
 		if envMode := os.Getenv(config.EnvTeammateNotes); envMode != "" {
 			cv.EnvVal = config.NormalizeTeammateNotes(envMode)
 		}
 		if userCfg != nil && userCfg.SessionTeammateNotes != "" {
 			cv.UserVal = config.NormalizeTeammateNotes(userCfg.SessionTeammateNotes)
+		}
+		if repoCfg != nil && repoCfg.SessionTeammateNotes != "" {
+			cv.RepoVal = config.NormalizeTeammateNotes(repoCfg.SessionTeammateNotes)
 		}
 
 	case "attribution.commit":
@@ -1100,7 +1106,8 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 
 	// determine effective value and source (Env > User > Repo > Team > Default).
 	// EnvVal is only ever populated for session_publishing, session_recording
-	// and session.teammate_notes (see their cases above) — every other setting falls through untouched.
+	// and session.teammate_notes (see their cases above) — every other setting
+	// falls through untouched. session.teammate_notes is then re-resolved below.
 	if cv.EnvVal != "" {
 		cv.Value = cv.EnvVal
 		cv.Source = ConfigLevelEnv
@@ -1116,6 +1123,24 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 	} else {
 		cv.Value = cv.Default
 		cv.Source = ConfigLevelDefault
+	}
+
+	if key == "session.teammate_notes" {
+		// a consent switch: off at any layer wins over the order above. Read
+		// from the runtime resolver itself, so 'ox config get' can never show
+		// "on" while notes are being refused.
+		r := config.ResolveTeammateNotes(projectRoot)
+		cv.Value = r.Mode
+		switch r.Source {
+		case config.TeammateNotesSourceEnv:
+			cv.Source = ConfigLevelEnv
+		case config.TeammateNotesSourceUser:
+			cv.Source = ConfigLevelUser
+		case config.TeammateNotesSourceRepo:
+			cv.Source = ConfigLevelRepo
+		default:
+			cv.Source = ConfigLevelDefault
+		}
 	}
 
 	return cv, nil
@@ -1433,6 +1458,12 @@ func setRepoConfig(key, value, projectRoot string) error {
 
 	case "murmur_receive":
 		cfg.MurmurReceive = value
+
+	case "session.teammate_notes":
+		if !config.IsValidTeammateNotes(value) {
+			return fmt.Errorf("session.teammate_notes must be one of: on, off")
+		}
+		cfg.SessionTeammateNotes = value
 
 	case "recording_reminder":
 		cfg.RecordingReminder = value
@@ -1775,6 +1806,9 @@ func unsetRepoConfig(key, projectRoot string) error {
 
 	case "murmur_receive":
 		cfg.MurmurReceive = ""
+
+	case "session.teammate_notes":
+		cfg.SessionTeammateNotes = ""
 
 	case "recording_reminder":
 		cfg.RecordingReminder = ""

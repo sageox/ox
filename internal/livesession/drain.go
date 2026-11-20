@@ -513,7 +513,8 @@ func (s *session) restartLayer(ctx context.Context) error {
 	next := s.st
 	next.LayerID = "clyr_" + uuid.Must(uuid.NewV7()).String()
 	next.Acked = 0
-	if _, err := s.c.Open(ctx, next.ConversationID, openRequest(next)); err != nil {
+	req := openRequest(s.cfg, next)
+	if _, err := s.c.Open(ctx, next.ConversationID, req); err != nil {
 		var api *sessionstream.APIError
 		if errors.As(err, &api) {
 			if done, terr := s.terminal(ctx, api); done || terr != nil {
@@ -522,7 +523,7 @@ func (s *session) restartLayer(ctx context.Context) error {
 		}
 		return fmt.Errorf("open replacement live layer: %w", err)
 	}
-	s.log().InfoContext(ctx, "live_session_new_layer", "new_layer_id", next.LayerID)
+	s.log().InfoContext(ctx, "live_session_new_layer", "new_layer_id", next.LayerID, "accepts_notes", req.AcceptsNotes == nil)
 	s.st = next
 	return s.persist()
 }

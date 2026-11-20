@@ -158,6 +158,11 @@ type OpenSessionRequest struct {
 	// Agent names the coding agent, such as "claude-code".
 	Agent     string    `json:"agent"`
 	StartedAt time.Time `json:"started_at"`
+	// AcceptsNotes is false when this machine turned teammate notes off
+	// (ox config session.teammate_notes). Absent means true, as for every
+	// client older than the field, so ox sends it only when false. The server
+	// then refuses every note to the layer and the web offers no note box.
+	AcceptsNotes *bool `json:"accepts_notes,omitempty"`
 }
 
 // SessionStatus is a streamed session's lifecycle as readers see it.
@@ -202,14 +207,18 @@ const MaxTeammateCommentsPerAppend = 5
 // MaxTeammateCommentAcks caps AckTeammateCommentsRequest.Acks.
 const MaxTeammateCommentAcks = 20
 
-// TeammateComment is a note a teammate watching a live session sent to its
-// agent. It is untrusted text from someone who is not the agent's user.
+// TeammateComment is a note someone watching a live session sent to its agent:
+// a teammate, or the session's owner (FromOwner). Either way the body is
+// untrusted text.
 type TeammateComment struct {
 	ID         string    `json:"id"`
 	AuthorName string    `json:"author_name"`
 	Body       string    `json:"body"`
 	AnchorSeq  *int64    `json:"anchor_seq,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
+	// FromOwner is true when the session's owner wrote the note from the web:
+	// the agent's own user, not a teammate.
+	FromOwner bool `json:"from_owner,omitempty"`
 }
 
 type TeammateCommentAck struct {
