@@ -95,13 +95,15 @@ type Server struct {
 	hangAppendsOver  int
 	// teammate comments, in the order the owner queued them; delivered holds the
 	// first-wins delivered_at_seq per comment id.
-	comments   []sessionstream.TeammateComment
-	delivered  map[string]int64
-	ackRefusal *reply
-	ackIgnored int
-	listFails  bool
-	nameTaken  bool
-	ackBodies  []sessionstream.AckTeammateCommentsRequest
+	comments                    []sessionstream.TeammateComment
+	delivered                   map[string]int64
+	ackRefusal                  *reply
+	ackRefusals                 int
+	ackDropBefore, ackDropAfter int
+	ackIgnored                  int
+	listFails                   bool
+	nameTaken                   bool
+	ackBodies                   []sessionstream.AckTeammateCommentsRequest
 
 	inflight, maxInflight int
 }
@@ -398,9 +400,15 @@ func (s *Server) ackTeammateComments(r *http.Request, body []byte, _ *Call) repl
 	if json.Unmarshal(body, &req) != nil || len(req.Acks) == 0 || len(req.Acks) > sessionstream.MaxTeammateCommentAcks {
 		return refusal(http.StatusBadRequest, sessionstream.ReasonInvalidRequest, sessionstream.ActionFix, nil)
 	}
-	if s.ackRefusal != nil {
+	if s.ackDropBefore > 0 { // the connection dies before the server acts
+		s.ackDropBefore--
+		return reply{drop: true}
+	}
+	if s.ackRefusal != nil && s.ackRefusals > 0 {
 		x := *s.ackRefusal
-		s.ackRefusal = nil
+		if s.ackRefusals--; s.ackRefusals == 0 {
+			s.ackRefusal = nil
+		}
 		return x
 	}
 	s.ackBodies = append(s.ackBodies, req)
@@ -414,6 +422,10 @@ func (s *Server) ackTeammateComments(r *http.Request, body []byte, _ *Call) repl
 			s.delivered[a.ID] = a.DeliveredAtSeq
 			recorded++
 		}
+	}
+	if s.ackDropAfter > 0 { // recorded, but the caller never hears
+		s.ackDropAfter--
+		return reply{drop: true}
 	}
 	return reply{status: http.StatusOK, body: sessionstream.AckTeammateCommentsResponse{Recorded: recorded}}
 }

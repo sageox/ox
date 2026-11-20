@@ -34,6 +34,8 @@
 //	                     ({"id","delivered_at_seq"}); append-only, sent to the
 //	                     server during a drain
 //	teammate-comment-acks-sent  ids of those acks the server settled; each is sent once
+//	teammate-comment-resends    ids of shown notes the server listed again; their ack is
+//	                     owed again until a 2xx or a permanent refusal
 //	withheld-notice-owed the person may still be owed the notice that the stream
 //	                     withheld a secret; the next session start or stop says it
 //

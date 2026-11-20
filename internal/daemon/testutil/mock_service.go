@@ -51,7 +51,8 @@ type MockService struct {
 	SettingsGetFunc func() *flags.CLISettingsResponse
 
 	// teammate notes
-	TeammateCommentsTakeFunc func(payload daemon.TeammateCommentsTakePayload) ([]whisperstore.WhisperEntry, error)
+	TeammateCommentsTakeFunc    func(payload daemon.TeammateCommentsTakePayload) (daemon.TeammateCommentsTakeResponse, error)
+	TeammateCommentsConfirmFunc func(payload daemon.TeammateCommentsConfirmPayload) error
 
 	// fire-and-forget operations
 	ActivityFunc        func()
@@ -227,11 +228,18 @@ func (m *MockService) LiveSessionDrain(payload daemon.LiveSessionDrainPayload) {
 	}
 }
 
-func (m *MockService) TeammateCommentsTake(payload daemon.TeammateCommentsTakePayload) ([]whisperstore.WhisperEntry, error) {
+func (m *MockService) TeammateCommentsTake(payload daemon.TeammateCommentsTakePayload) (daemon.TeammateCommentsTakeResponse, error) {
 	if m.TeammateCommentsTakeFunc != nil {
 		return m.TeammateCommentsTakeFunc(payload)
 	}
-	return nil, nil
+	return daemon.TeammateCommentsTakeResponse{}, nil
+}
+
+func (m *MockService) TeammateCommentsConfirm(payload daemon.TeammateCommentsConfirmPayload) error {
+	if m.TeammateCommentsConfirmFunc != nil {
+		return m.TeammateCommentsConfirmFunc(payload)
+	}
+	return nil
 }
 
 func (m *MockService) SessionWatchStop(payload daemon.SessionWatchStopPayload) {

@@ -797,7 +797,7 @@ func handleAfterTool(ctx *HookContext) error {
 // Claude Code's PostToolUse only. Stop's stdout cannot carry the envelope, and
 // Codex's notes stay pending (see emitCodexAfterTool).
 func teammateNotesApply(ctx *HookContext) bool {
-	return ctx.AgentType == "claude-code" && ctx.Phase != phaseStop && ctx.Input != nil
+	return ctx.AgentType == "claude-code" && ctx.Phase != phaseStop && ctx.Input != nil && config.TeammateNotesEnabled()
 }
 
 // captureHookEntries drains new entries under the raw.jsonl lock acquired by

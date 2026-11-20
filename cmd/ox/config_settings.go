@@ -483,6 +483,25 @@ Rate-limited to 60 invocations/hour, 4 concurrent.`,
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
+		Key:         "session.teammate_notes",
+		Label:       "Teammate notes",
+		Category:    "Sessions",
+		Description: "Let a teammate watching your live session send your agent a note.",
+		LongDescription: `Controls whether notes from a teammate watching your live session reach
+your agent at its next step.
+
+  on  - Deliver notes the session owner enabled on SageOx (default). Each note
+        is labeled as coming from a teammate, not from you.
+  off - Drop every note on this machine, unshown and unacknowledged.
+
+The session owner's switch on SageOx is the first layer of consent; this is
+the second, on your machine. The environment variable OX_TEAMMATE_NOTES=off
+overrides this setting.`,
+		ValidValues: config.ValidTeammateNotesModes,
+		Default:     config.TeammateNotesOn,
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
 		Key:         "recording_reminder",
 		Label:       "Recording reminders",
 		Description: "Periodically remind AI coworkers that the session is being recorded.",
@@ -961,6 +980,11 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.UserVal = config.NormalizeSessionDraft(userCfg.SessionDraft)
 		}
 
+	case "session.teammate_notes":
+		if userCfg != nil && userCfg.SessionTeammateNotes != "" {
+			cv.UserVal = config.NormalizeTeammateNotes(userCfg.SessionTeammateNotes)
+		}
+
 	case "attribution.commit":
 		if userCfg != nil && userCfg.Attribution != nil && userCfg.Attribution.IsCommitSet() {
 			if v := userCfg.Attribution.GetCommit(); v == "" {
@@ -1296,6 +1320,12 @@ func setUserConfig(key, value string) error {
 		}
 		cfg.SessionDraft = value
 
+	case "session.teammate_notes":
+		if !config.IsValidTeammateNotes(value) {
+			return fmt.Errorf("session.teammate_notes must be one of: on, off")
+		}
+		cfg.SessionTeammateNotes = value
+
 	case "attribution.commit":
 		if cfg.Attribution == nil {
 			cfg.Attribution = &config.Attribution{}
@@ -1623,6 +1653,9 @@ func unsetUserConfig(key string) error {
 
 	case "session.draft":
 		cfg.SessionDraft = ""
+
+	case "session.teammate_notes":
+		cfg.SessionTeammateNotes = ""
 
 	case "attribution.commit":
 		if cfg.Attribution != nil {
