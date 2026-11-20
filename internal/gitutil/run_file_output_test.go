@@ -57,18 +57,18 @@ func TestRunWithFileOutput_OutlivesItsParent(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("a shell script stands in for git")
 	}
-	if testing.Short() {
-		t.Skip("short: the command runs for a second after its parent dies")
-	}
 	dir := t.TempDir()
-	started, done := filepath.Join(dir, "started"), filepath.Join(dir, "done")
+	started, release, done := filepath.Join(dir, "started"), filepath.Join(dir, "release"), filepath.Join(dir, "done")
 	parent := exec.Command(os.Args[0], "-test.run=^TestHelperRunWithFileOutputParent$")
 	parent.Env = append(os.Environ(), "OX_TEST_FILE_OUTPUT_DIR="+dir) // safe: the helper runs only a shell script, never ox or git
 	require.NoError(t, parent.Start())
+	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0o600) })
 
 	require.Eventually(t, func() bool { _, err := os.Stat(started); return err == nil }, 10*time.Second, 10*time.Millisecond)
 	require.NoError(t, parent.Process.Kill())
 	_ = parent.Wait()
+	// the command writes again only once its parent is gone
+	require.NoError(t, os.WriteFile(release, nil, 0o600))
 
 	require.Eventually(t, func() bool { _, err := os.Stat(done); return err == nil }, 10*time.Second, 20*time.Millisecond,
 		"the command must finish after the process reading its output died")
@@ -81,6 +81,6 @@ func TestHelperRunWithFileOutputParent(t *testing.T) {
 		t.Skip("helper process for TestRunWithFileOutput_OutlivesItsParent")
 	}
 	_, _ = runWithFileOutput(exec.Command("/bin/sh", "-c",
-		`echo authenticated; touch "$1"; sleep 1; echo sending pack; touch "$2"`,
-		"sh", filepath.Join(dir, "started"), filepath.Join(dir, "done")))
+		`echo authenticated; touch "$1"; i=0; while [ ! -e "$2" ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done; echo sending pack; touch "$3"`,
+		"sh", filepath.Join(dir, "started"), filepath.Join(dir, "release"), filepath.Join(dir, "done")))
 }

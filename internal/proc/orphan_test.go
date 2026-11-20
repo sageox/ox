@@ -74,6 +74,7 @@ func TestStartOrphaned_RecordsHowTheCommandEnded(t *testing.T) {
 		want   int
 	}{
 		{"success", "exit 0", 0},
+		{"a command with no Args, as exec.Cmd allows", "", 0},
 		{"failure", "exit 3", 3},
 		{"killed", "kill -9 $$", 128 + 9},
 	} {
@@ -82,7 +83,13 @@ func TestStartOrphaned_RecordsHowTheCommandEnded(t *testing.T) {
 			_, done, err := OrphanedExitStatus(status)
 			require.NoError(t, err)
 			require.False(t, done, "no status file: still running")
-			require.NoError(t, StartOrphaned(exec.Command("/bin/sh", "-c", tc.script), status))
+			cmd := exec.Command("/bin/sh", "-c", tc.script)
+			if tc.script == "" {
+				truePath, err := exec.LookPath("true")
+				require.NoError(t, err)
+				cmd = &exec.Cmd{Path: truePath}
+			}
+			require.NoError(t, StartOrphaned(cmd, status))
 			assert.Equal(t, tc.want, waitOrphaned(t, status))
 		})
 	}

@@ -12,7 +12,11 @@ const orphanScript = `status=$1; shift
 ( "$@"; echo $? > "$status.tmp" && mv "$status.tmp" "$status" ) &`
 
 func startOrphaned(cmd *exec.Cmd, statusPath string) error {
-	args := append([]string{"-c", orphanScript, "sh", statusPath, cmd.Path}, cmd.Args[1:]...)
+	args := []string{"-c", orphanScript, "sh", statusPath, cmd.Path}
+	// exec.Cmd allows empty Args (it then runs Path alone)
+	if len(cmd.Args) > 1 {
+		args = append(args, cmd.Args[1:]...)
+	}
 	sh := exec.Command("/bin/sh", args...)
 	sh.Dir, sh.Env = cmd.Dir, cmd.Env
 	sh.Stdin, sh.Stdout, sh.Stderr = cmd.Stdin, cmd.Stdout, cmd.Stderr
