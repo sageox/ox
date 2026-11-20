@@ -227,6 +227,32 @@ func handleLiveSessionDrain(s *Server, msg Message, _ net.Conn) HandlerResult {
 	return HandlerResult{SkipDefault: true}
 }
 
+func handleTeammateCommentsTake(s *Server, msg Message, _ net.Conn) HandlerResult {
+	var payload TeammateCommentsTakePayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		return HandlerResult{Response: &Response{Success: false, Error: fmt.Sprintf("invalid payload: %v", err)}}
+	}
+	out, err := s.service.TeammateCommentsTake(payload)
+	if err != nil {
+		return HandlerResult{Response: &Response{Success: false, Error: fmt.Sprintf("take teammate comments: %v", err)}}
+	}
+	if out.Entries == nil {
+		out.Entries = []whisperstore.WhisperEntry{}
+	}
+	return HandlerResult{Response: marshalResponse(out)}
+}
+
+func handleTeammateCommentsConfirm(s *Server, msg Message, _ net.Conn) HandlerResult {
+	var payload TeammateCommentsConfirmPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		return HandlerResult{Response: &Response{Success: false, Error: fmt.Sprintf("invalid payload: %v", err)}}
+	}
+	if err := s.service.TeammateCommentsConfirm(payload); err != nil {
+		return HandlerResult{Response: &Response{Success: false, Error: fmt.Sprintf("confirm teammate comments: %v", err)}}
+	}
+	return HandlerResult{Response: &Response{Success: true}}
+}
+
 func handleGetErrors(s *Server, _ Message, _ net.Conn) HandlerResult {
 	errs := s.service.GetErrors()
 	if errs != nil {

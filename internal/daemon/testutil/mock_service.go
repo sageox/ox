@@ -50,6 +50,10 @@ type MockService struct {
 	// settings
 	SettingsGetFunc func() *flags.CLISettingsResponse
 
+	// teammate notes
+	TeammateCommentsTakeFunc    func(payload daemon.TeammateCommentsTakePayload) (daemon.TeammateCommentsTakeResponse, error)
+	TeammateCommentsConfirmFunc func(payload daemon.TeammateCommentsConfirmPayload) error
+
 	// fire-and-forget operations
 	ActivityFunc        func()
 	HeartbeatFunc       func(callerID string, payload json.RawMessage)
@@ -222,6 +226,20 @@ func (m *MockService) LiveSessionDrain(payload daemon.LiveSessionDrainPayload) {
 	if m.LiveSessionDrainFunc != nil {
 		m.LiveSessionDrainFunc(payload)
 	}
+}
+
+func (m *MockService) TeammateCommentsTake(payload daemon.TeammateCommentsTakePayload) (daemon.TeammateCommentsTakeResponse, error) {
+	if m.TeammateCommentsTakeFunc != nil {
+		return m.TeammateCommentsTakeFunc(payload)
+	}
+	return daemon.TeammateCommentsTakeResponse{}, nil
+}
+
+func (m *MockService) TeammateCommentsConfirm(payload daemon.TeammateCommentsConfirmPayload) error {
+	if m.TeammateCommentsConfirmFunc != nil {
+		return m.TeammateCommentsConfirmFunc(payload)
+	}
+	return nil
 }
 
 func (m *MockService) SessionWatchStop(payload daemon.SessionWatchStopPayload) {
